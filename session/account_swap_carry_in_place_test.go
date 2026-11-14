@@ -109,7 +109,7 @@ func TestJudgeClaudeRecordedPutsACopyFailureBeforeANewerConversation(t *testing.
 			transcript := filepath.Join(bound, carryTestID+".jsonl")
 			for _, newerCounts := range []bool{true, false} {
 				require.Equal(t, carryTranscriptCopiesReason,
-					claudeCarryStaleness(configDir, projects, workDir, transcript, carryTestID, newerCounts),
+					claudeCarryStaleness(configDir, projects, workDir, transcript, carryTestID, func() bool { return newerCounts }),
 					"newer conversations counted: %v", newerCounts)
 			}
 		})

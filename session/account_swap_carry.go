@@ -383,7 +383,8 @@ const staleCarryReason = "the conversation af recorded is no longer the newest o
 func (c *conversationCarry) staleReason(program, workDir string, outgoing AgentConversationData) string {
 	switch c.agent {
 	case tmux.ProgramClaude:
-		return claudeCarryStaleness(c.srcHome, c.claudeProjects, c.claudeLaunchDir, c.transcript, c.id, c.newerCounts(c.claudeLaunchDir))
+		return claudeCarryStaleness(c.srcHome, c.claudeProjects, c.claudeLaunchDir, c.transcript, c.id,
+			func() bool { return c.newerCounts(c.claudeLaunchDir) })
 	case tmux.ProgramCodex:
 		return c.staleCodexReason(program, workDir, outgoing)
 	}

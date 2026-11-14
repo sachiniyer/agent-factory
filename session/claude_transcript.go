@@ -154,8 +154,8 @@ func claudeProjectName(path string) string {
 // not absent. complete is false exactly then: the list holds only the recorded
 // spelling, and a directory Claude may file under is missing from it. A caller
 // that needs every copy of a conversation (the account-swap carry) refuses an
-// incomplete list; one whose safe answer is the recorded spelling's uses
-// claudeProjectCandidates.
+// incomplete list, and ownership reads one as unknown (either side); one whose
+// safe answer is the recorded spelling's uses claudeProjectCandidates.
 func claudeProjectSpellings(dir string) (projects []string, complete bool) {
 	projects = []string{filepath.Join("projects", claudeProjectName(dir))}
 	resolved, err := fsprobe.EvalSymlinks(dir)
@@ -168,8 +168,7 @@ func claudeProjectSpellings(dir string) (projects []string, complete bool) {
 // claudeProjectCandidates is claudeProjectSpellings for a caller whose answer
 // on an incomplete list is the recorded spelling's alone: the restore and
 // re-launch judge (judgeRecordedClaude, which looks in every project before it
-// would start on an id), the ownership check's launch side, the limit-reset
-// and status-sweep reads (ClaudeRunTranscriptDirs, where finding nothing
+// would start on an id), the limit-reset and status-sweep reads (ClaudeRunTranscriptDirs, where finding nothing
 // leaves the pane's answer standing), and the filed-here check, which no
 // Claude launch consults (PinRecordedConversationForLaunch judges a Claude id
 // by judgeRecordedClaude).

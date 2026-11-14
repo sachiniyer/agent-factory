@@ -140,19 +140,22 @@ func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bou
 // newerCounts says whether a newer conversation in launchDir is evidence that
 // the session moved on (conversationCarry.newerCounts, #7227): where it is
 // not, a newer or unattributable conversation refuses nothing, and only the
-// verdicts about the id itself (missing, copies, unlisted) do.
-func claudeCarryStaleness(configDir string, projects []string, launchDir, transcript, id string, newerCounts bool) string {
+// verdicts about the id itself (missing, copies, unlisted) do. It is asked
+// only for a verdict that reads it, as recordedClaudeLaunchFor asks its
+// evidence: answering it resolves the worktree, so a check with nothing newer
+// to judge does not spend a bound on it (#7278 review R2).
+func claudeCarryStaleness(configDir string, projects []string, launchDir, transcript, id string, newerCounts func() bool) string {
 	switch judgeClaudeRecorded(configDir, projects, launchDir, id, filepath.Dir(transcript)) {
 	case claudeRecordedUnlisted, claudeRecordedFiledUnlisted:
 		return carryTranscriptsUnlistedReason
 	case claudeRecordedUncorrelated:
-		if newerCounts {
+		if newerCounts() {
 			return carryUncorrelatedReason
 		}
 	case claudeRecordedMissing:
 		return carryTranscriptMissingReason
 	case claudeRecordedStale:
-		if newerCounts {
+		if newerCounts() {
 			return staleCarryReason
 		}
 	case claudeRecordedCopies:

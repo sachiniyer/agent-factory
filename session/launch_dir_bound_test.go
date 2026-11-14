@@ -3,14 +3,17 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
@@ -72,34 +75,36 @@ func failLaunchDirResolution(t *testing.T, root string) func() {
 }
 
 // The ownership check's launch side resolves the launch dir. A resolution that
-// does not answer within the bound decides exactly as one that failed: the
-// launch dir's recorded spelling decides alone. That never needs the mount.
+// fails with an answer (an unreadable ancestor) leaves the launch dir's
+// spelling to decide, as it always has. One that does not answer within the
+// bound is a look that did not happen: ownership is unknown, never another
+// directory's, which a carry would read as leave to carry the recorded
+// conversation (#7278 review R1). It never needs the mount.
 func TestClaudeTranscriptOwnershipDoesNotStallOnAWedgedLaunchDir(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// recorded is the directory the transcript records, relative to the
 		// layout's base; it is never under the wedged spelling.
 		recorded string
-		// resolved is the answer when the launch dir resolves; recordedOnly
-		// when only its recorded spelling can decide.
-		resolved, recordedOnly claudeOwnership
+		// resolved is the answer when the launch dir resolves; failed when its
+		// resolution fails with an answer, and only its spelling can decide.
+		resolved, failed claudeOwnership
 	}{
 		{
-			name:         "the transcript records the launch dir's resolved spelling",
-			recorded:     filepath.Join("real", "repo"),
-			resolved:     claudeOwnedHere,
-			recordedOnly: claudeOwnedHere,
+			name:     "the transcript records the launch dir's resolved spelling",
+			recorded: filepath.Join("real", "repo"),
+			resolved: claudeOwnedHere,
+			failed:   claudeOwnedHere,
 		},
 		{
 			// link.repo and link/repo file under one project name, and both
 			// reach real/repo: only the resolution proves they are one
-			// directory. Without it the recorded spelling reads the collision
-			// as another directory's, which only ever leaves the recorded
-			// conversation the newest.
-			name:         "a spelling that collides with the launch dir's and resolves to it",
-			recorded:     "link.repo",
-			resolved:     claudeOwnedHere,
-			recordedOnly: claudeOwnedElsewhere,
+			// directory. Without it the spelling reads the collision as
+			// another directory's.
+			name:     "a spelling that collides with the launch dir's and resolves to it",
+			recorded: "link.repo",
+			resolved: claudeOwnedHere,
+			failed:   claudeOwnedElsewhere,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -120,12 +125,12 @@ func TestClaudeTranscriptOwnershipDoesNotStallOnAWedgedLaunchDir(t *testing.T) {
 
 			require.Equal(t, tc.resolved, claudeTranscriptOwnership(transcript, launchDir), "precondition: the answer with the launch dir resolved")
 			restore := failLaunchDirResolution(t, link)
-			require.Equal(t, tc.recordedOnly, claudeTranscriptOwnership(transcript, launchDir), "precondition: the answer when the launch dir cannot be resolved")
+			require.Equal(t, tc.failed, claudeTranscriptOwnership(transcript, launchDir), "a resolution that failed with an answer leaves the spelling to decide")
 			restore()
 
 			wedgeLaunchDirResolution(t, link)
 			got := withinBound(t, func() claudeOwnership { return claudeTranscriptOwnership(transcript, launchDir) })
-			require.Equal(t, tc.recordedOnly, got, "a resolution that did not answer decides as one that failed")
+			require.Equal(t, claudeOwnershipUnknown, got, "a resolution that did not answer is unknown ownership")
 		})
 	}
 }
@@ -304,4 +309,71 @@ func TestClaudeCarryRefusesANewerConversationWhenAttributionCannotLook(t *testin
 		t.Fatalf("a look that did not happen carried %s past a newer conversation", carry.transcript)
 	}
 	require.Equal(t, staleCarryReason, inst.accountSwapLaunch.carryFallback, "the swap states why it starts fresh")
+}
+
+// Independent review of #7278, R1: a single lookup of the worktree on its
+// mount that does not answer (an NFS reply lost until retransmit), with every
+// later lookup answering. Whichever lookup it is, the carry must refuse what a
+// resolved answer refuses, and never carry: a launch-side resolution that did
+// not answer is unknown ownership, never another directory's conversation,
+// which would leave the recorded one the newest and carry it. The review
+// reproduced the carry with the second and the fifth lookup lost; this loses
+// each lookup the check-ahead makes, in turn.
+func TestClaudeCarryRefusesWhenOneLookupOfTheWorktreeDoesNotAnswer(t *testing.T) {
+	// setup is a carry the resolved answer refuses: a newer conversation of
+	// this worktree, filed beside the recorded one.
+	setup := func(t *testing.T) (*Instance, string) {
+		t.Helper()
+		home := carryAmbientProviderHomes(t)
+		inst, recorded, _ := symlinkedClaudeCarryInstance(t)
+		recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
+		source := filepath.Join(home, ".claude")
+		cwd := inst.GetWorktreePath()
+		past := time.Now().Add(-time.Hour)
+		setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), claudeRecordLine(t, cwd)), past)
+		setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, newerConversationID+".jsonl"), claudeRecordLine(t, cwd)), past.Add(time.Minute))
+		require.Equal(t, carryRefusalCode(staleCarryReason), inst.AccountSwapCarryRefusal(),
+			"precondition: with every lookup answering, the newer conversation refuses the carry")
+		return inst, cwd
+	}
+	// refusals are the answers a carry may give here: the resolved one, or
+	// "could not confirm".
+	refusals := []string{handoff.CarryStale, handoff.CarryUnverified}
+
+	var counted atomic.Int32
+	inst, cwd := setup(t)
+	restore := fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+		if path == cwd {
+			counted.Add(1)
+		}
+		return filepath.EvalSymlinks(path)
+	})
+	require.NotEmpty(t, inst.AccountSwapCarryRefusal())
+	restore()
+	lookups := counted.Load()
+	require.GreaterOrEqual(t, lookups, int32(5), "precondition: the check-ahead looks the worktree up at least as often as the review's case")
+
+	for stuck := int32(1); stuck <= lookups; stuck++ {
+		t.Run(fmt.Sprintf("lookup %d of %d does not answer", stuck, lookups), func(t *testing.T) {
+			inst, cwd := setup(t)
+			wait := launchDirWedge(t, cwd)
+			var seen atomic.Int32
+			t.Cleanup(fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+				if path == cwd && seen.Add(1) == stuck {
+					wait(path)
+				}
+				return filepath.EvalSymlinks(path)
+			}))
+
+			refusal := withinBound(t, inst.AccountSwapCarryRefusal)
+			require.GreaterOrEqual(t, seen.Load(), stuck, "precondition: the check-ahead reached the lookup that does not answer")
+			require.Contains(t, refusals, refusal, "the check-ahead refuses what a resolved answer refuses")
+			require.NoError(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }))
+			if carry := inst.accountSwapLaunch.carry; carry != nil {
+				t.Fatalf("a look that did not happen carried %s past a newer conversation", carry.transcript)
+			}
+			require.Contains(t, refusals, carryRefusalCode(inst.accountSwapLaunch.carryFallback),
+				"the swap states why it starts fresh: %q", inst.accountSwapLaunch.carryFallback)
+		})
+	}
 }

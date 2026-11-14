@@ -212,34 +212,34 @@ const (
 // was relocated from, the worktree's path before a move. Both sides are
 // compared resolved, the way the Codex checks compare a rollout's cwd, and
 // both resolutions are bounded: the recorded side inside the transcript read's
-// flight, the launch side by claudeLaunchDirForCompare (#7272).
+// flight, the launch side by fsprobe (#7272). The launch dir may sit on a mount
+// that no longer answers (NFS, FUSE, a dead sshfs), and a launch side that did
+// not resolve within the bound is a look that did not happen: ownership is
+// unknown, never another directory's. "Another directory's" would leave the
+// recorded conversation the newest, which a carry reads as leave to carry it.
 func claudeTranscriptOwnership(transcript claudeTranscript, launchDir string) claudeOwnership {
 	recorded, ok := claudeTranscriptRecordedDir(filepath.Join(transcript.dir, transcript.name))
 	if !ok {
 		return claudeOwnershipUnknown
 	}
-	if recorded.resolved == claudeLaunchDirForCompare(launchDir) {
+	launch, err := fsprobe.ResolveForCompare(launchDir)
+	if err != nil {
+		return claudeOwnershipUnknown
+	}
+	if recorded.resolved == launch {
 		return claudeOwnedHere
 	}
-	for _, project := range claudeProjectCandidates(launchDir) {
+	// The project names the launch dir files under are a launch-side
+	// resolution too: an incomplete list could miss the name that makes a
+	// colliding transcript another directory's.
+	projects, complete := claudeProjectSpellings(launchDir)
+	if !complete {
+		return claudeOwnershipUnknown
+	}
+	for _, project := range projects {
 		if recorded.names[filepath.Base(project)] {
 			return claudeOwnedElsewhere
 		}
 	}
 	return claudeOwnedHere
-}
-
-// claudeLaunchDirForCompare is launchDir resolved for comparison with the
-// directory a transcript records. The launch dir may sit on a mount that no
-// longer answers (NFS, FUSE, a dead sshfs), so the resolution is bounded
-// (fsprobe, #7272). One that does not answer within the bound is a look that
-// did not happen, which says nothing about whether the two are one directory:
-// the launch dir's recorded spelling decides alone, cleaned, exactly as
-// ResolveForCompare answers when no ancestor resolves.
-func claudeLaunchDirForCompare(launchDir string) string {
-	resolved, err := fsprobe.ResolveForCompare(launchDir)
-	if err != nil {
-		return filepath.Clean(launchDir)
-	}
-	return resolved
 }

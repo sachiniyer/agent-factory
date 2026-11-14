@@ -196,7 +196,7 @@ func TestJudgeClaudeRecordedLooksForTheIDBesideAnUnlistableSpelling(t *testing.T
 	for _, newerCounts := range []bool{true, false} {
 		// About the id itself, so it refuses wherever the session runs (#7227).
 		require.Equal(t, carryTranscriptsUnlistedReason,
-			claudeCarryStaleness(configDir, projects, link, filepath.Join(projects[0], carryTestID+".jsonl"), carryTestID, newerCounts),
+			claudeCarryStaleness(configDir, projects, link, filepath.Join(projects[0], carryTestID+".jsonl"), carryTestID, func() bool { return newerCounts }),
 			"the swap still cannot confirm the carried copy is current")
 	}
 }
