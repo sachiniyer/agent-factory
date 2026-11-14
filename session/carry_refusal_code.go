@@ -24,6 +24,7 @@ const (
 	carryNoAmbientClaudeReason         = "af could not resolve the ambient Claude config directory"
 	carryNoAmbientCodexReason          = "af could not resolve the ambient Codex home"
 	carryNoClaudeDirReason             = "af could not resolve the directory Claude files this conversation under"
+	carrySpellingsUnresolvedReason     = "af could not resolve every spelling of the worktree's path in time, so it cannot tell which copy of the conversation Claude is appending to"
 	carryTranscriptMissingReason       = "its transcript is missing from the previous account's home"
 	carryRolloutMissingReason          = "its rollout is missing from the previous account's home"
 	carryTranscriptEmptyReason         = "its transcript is empty in the previous account's home"
@@ -94,6 +95,7 @@ var carryRefusalCodeOf = map[string]string{
 	carryNoAmbientClaudeReason:         handoff.CarryUnresolved,
 	carryNoAmbientCodexReason:          handoff.CarryUnresolved,
 	carryNoClaudeDirReason:             handoff.CarryUnresolved,
+	carrySpellingsUnresolvedReason:     handoff.CarryUnverified,
 	carryTranscriptMissingReason:       handoff.CarryMissing,
 	carryRolloutMissingReason:          handoff.CarryMissing,
 	carryTranscriptEmptyReason:         handoff.CarryMissing,

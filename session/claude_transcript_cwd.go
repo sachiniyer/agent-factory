@@ -70,6 +70,9 @@ func readClaudeTranscriptDir(file *os.File) (string, error) {
 type claudeRecordedDir struct {
 	resolved string
 	names    map[string]bool
+	// unresolved: the kernel's spelling of the directory did not resolve
+	// within its bound, so names may lack the one it files under.
+	unresolved bool
 }
 
 // claudeRecordedDirFacts resolves dir for claudeTranscriptOwnership. It
@@ -78,15 +81,18 @@ type claudeRecordedDir struct {
 // read's bounded flight. A test seam.
 var claudeRecordedDirFacts = func(dir string) claudeRecordedDir {
 	names := map[string]bool{}
-	for _, project := range claudeProjectCandidates(dir) {
+	projects, complete := claudeProjectSpellings(dir)
+	for _, project := range projects {
 		names[filepath.Base(project)] = true
 	}
-	return claudeRecordedDir{resolved: pathutil.ResolveForCompare(dir), names: names}
+	return claudeRecordedDir{resolved: pathutil.ResolveForCompare(dir), names: names, unresolved: !complete}
 }
 
 // claudeTranscriptRecordedDir reads the directory the transcript at path
 // records and resolves it, both inside fsprobe's per-path bound (Codex review
-// of #7221): a read or a lookup that does not answer leaves ok false.
+// of #7221): a read or a lookup that does not answer leaves ok false, and so
+// does a spelling of the directory that did not resolve within its own bound,
+// since the names it files under are then incomplete (Codex review of #7268).
 func claudeTranscriptRecordedDir(path string) (claudeRecordedDir, bool) {
 	facts := claudeRecordedDirFacts // in the caller, as fsprobe's seams
 	got, err := fsprobe.ReadFileWith(path, func(file *os.File) (any, error) {
@@ -97,7 +103,7 @@ func claudeTranscriptRecordedDir(path string) (claudeRecordedDir, bool) {
 		return facts(dir), nil
 	})
 	recorded, ok := got.(claudeRecordedDir)
-	return recorded, err == nil && ok
+	return recorded, err == nil && ok && !recorded.unresolved
 }
 
 // claudeTranscriptHeadCwd is the cwd of the first record within the head

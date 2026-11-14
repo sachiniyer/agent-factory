@@ -34,7 +34,14 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 	if err != nil || !launch.WorkingDirKnown() {
 		return carryNoClaudeDirReason
 	}
-	c.claudeProjects = claudeProjectCandidates(launch.WorkingDir)
+	projects, complete := claudeProjectSpellings(launch.WorkingDir)
+	if !complete {
+		// A spelling af could not resolve may hold the copy Claude is
+		// appending to: carrying the one the recorded spelling holds could
+		// drop the latest turns (Codex review of #7268).
+		return carrySpellingsUnresolvedReason
+	}
+	c.claudeProjects = projects
 	c.claudeLaunchDir = launch.WorkingDir
 	var refused string
 	var src, dst []claudeCopy
