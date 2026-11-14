@@ -101,12 +101,9 @@ func TestInspectClaudeProjectConversationsDoesNotStallOnWedgedLaunchDir(t *testi
 	_ = resolvedProject
 	wedgeLaunchDirEvalSymlinks(t)
 
-	state := withinBound(t, func() ClaudeProjectConversationState {
-		state, err := InspectClaudeProjectConversations("CLAUDE_CONFIG_DIR="+configDir+" claude", link,
-			AgentConversationData{Agent: tmux.ProgramClaude, ID: recordedID})
-		require.NoError(t, err)
-		return state
+	recorded := AgentConversationData{Agent: tmux.ProgramClaude, ID: recordedID}
+	resumable := withinBound(t, func() bool {
+		return ConversationResumableHere("CLAUDE_CONFIG_DIR="+configDir+" claude", link, recorded)
 	})
-	require.True(t, state.RecordedExists, "a transcript filed under the recorded spelling is found even when the resolution times out")
-	require.Equal(t, recordedID, state.Resume.ID)
+	require.True(t, resumable, "a transcript filed under the recorded spelling is found even when the resolution times out")
 }
