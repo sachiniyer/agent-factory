@@ -31,12 +31,13 @@ var errClaudeFolderTrustUnreadable = errors.New(
 	"its rows do not read as the dialog af knows (a pane too narrow for them wraps them; widen the pane or answer the dialog in the session)")
 
 // errClaudeFolderTrustQuestionOffScreen is why af refuses a folder-trust
-// dialog whose options and footer it can see but whose question it cannot. It
+// dialog whose footer, and perhaps options, it can see but whose question it
+// cannot. It
 // says what af saw, not why (#7284 review, R4): a pane too short scrolls the
 // question off, but a quote with no composer painted below it yet reads the
 // same way.
 var errClaudeFolderTrustQuestionOffScreen = errors.New(
-	"the question is not on screen, only the options and footer, so af cannot tell the dialog from a quote of it (if the pane is too short for the dialog, make it taller; or answer the dialog in the session)")
+	"the question is not on screen, so af cannot tell the dialog from a quote of it (if the pane is too short for the dialog, make it taller; or answer the dialog in the session)")
 
 // claudeFolderTrustUnreadableWhy says what af saw of a dialog
 // claudeFolderTrustDialogOf reads as unreadable.
@@ -131,7 +132,7 @@ func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 	}
 	first, last, ok := claudeFolderTrustQuestionRows(rows)
 	if !ok {
-		if claudeFolderTrustHeadless(lines, rows) {
+		if claudeFolderTrustHeadless(lines, rows) || claudeFolderTrustFooterOnly(lines, rows) {
 			return claudeFolderTrustUnreadable
 		}
 		return claudeFolderTrustNone
@@ -420,13 +421,14 @@ func claudeFolderTrustLabelRead(rows []claudeTrustRow, options, question, footer
 }
 
 // claudeComposerRule reports whether line is a rule of the kind Claude Code
-// draws above and below its composer: horizontal strokes and nothing else
-// (testdata/claude_2_1_322_composer_after_mcp_decline.ansi). A box's corners
-// and tees ("╭──╮", "├──┤", "╰──╯") are a framed dialog's edges, not the
-// composer's (#7284 review, R5).
+// draws above and below its composer: "─" and nothing else, as measured
+// (testdata/claude_2_1_322_composer_after_mcp_decline.ansi; #7285, the #7284
+// review's N2). A box's corners and tees ("╭──╮", "├──┤", "╰──╯") are a framed
+// dialog's edges, not the composer's (#7284 review, R5), and heavier or double
+// strokes are no rule the composer is known to draw.
 func claudeComposerRule(line string) bool {
 	line = strings.TrimSpace(line)
-	return line != "" && strings.Trim(line, "─━═┄┈") == ""
+	return line != "" && strings.Trim(line, "─") == ""
 }
 
 // claudeFolderTrustOwnRun reports whether every row of the unbroken run holding
@@ -522,6 +524,64 @@ func claudeFolderTrustHeadless(lines []string, rows []claudeTrustRow) bool {
 	}
 	for j := from - 1; j >= 0; j-- {
 		if rows[j].selected || claudeTrustFrameRule(lines[j]) || claudeTrustIsFooter(rows[j].label) {
+			return false
+		}
+	}
+	return true
+}
+
+// claudeFolderTrustFooterOnly reports a pane too short to show any of the
+// dialog's option rows whole (#7285): its last content is the dialog's footer,
+// whole or wrapped and no ❯ row, and above it is nothing but blank rows and, at
+// most, one block that is the tail of the wrapped affirmative label ("folder",
+// "trust this" / "folder"). A working agent's composer takes the bottom three
+// rows or more, so a quote cannot leave this on screen.
+func claudeFolderTrustFooterOnly(lines []string, rows []claudeTrustRow) bool {
+	end := len(lines) - 1
+	for end >= 0 && strings.TrimSpace(lines[end]) == "" {
+		end--
+	}
+	if end < 0 || rows[end].blank {
+		return false
+	}
+	footer := end
+	for footer > 0 && !rows[footer-1].blank {
+		footer--
+	}
+	for i := footer; i <= end; i++ {
+		if rows[i].selected {
+			return false
+		}
+	}
+	if !claudeTrustIsFooter(rows[footer].label) {
+		return false
+	}
+	if _, ok := claudeFolderTrustFooterRead(rows, footer); !ok {
+		return false
+	}
+	i := footer - 1
+	for i >= 0 && strings.TrimSpace(lines[i]) == "" {
+		i--
+	}
+	if i < 0 {
+		return true
+	}
+	tail := i
+	for i >= 0 && strings.TrimSpace(lines[i]) != "" {
+		if rows[i].selected || rows[i].blank {
+			return false
+		}
+		i--
+	}
+	labels := make([]string, 0, tail-i)
+	for j := i + 1; j <= tail; j++ {
+		labels = append(labels, rows[j].label)
+	}
+	if !strings.HasSuffix(claudeTrustAffirmativeLabel, " "+strings.Join(labels, " ")) {
+		return false
+	}
+	for ; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
 			return false
 		}
 	}

@@ -107,6 +107,14 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"the question scrolled off the top", "  your own code, a well-known open source project.\n\n  Claude Code'll be able to read files here.\n\n" + options + footer, claudeFolderTrustUnreadable},
 		{"the question scrolled off, the box closed above the footer", "│ your own code. │\n│ │\n│ ❯ 1. No, exit │\n│   2. Yes, I trust this folder │\n│ │\n╰──────────╯\n   Enter to confirm · Esc to exit\n", claudeFolderTrustUnreadable},
 		{"only the options and the footer on screen", options + footer, claudeFolderTrustUnreadable},
+		// Unreadable too: a pane too short to show any option row whole, so
+		// that only the footer is left, whole or wrapped, with at most blank
+		// rows and the tail of the wrapped affirmative above it (#7285).
+		{"only the footer on screen", "  Enter to confirm · Esc to cancel\n", claudeFolderTrustUnreadable},
+		{"only blank rows and the footer on screen", "\n\n  Enter to confirm · Esc to cancel\n\n", claudeFolderTrustUnreadable},
+		{"only the wrapped footer on screen", "  Enter to confirm ·\n  Esc to cancel\n", claudeFolderTrustUnreadable},
+		{"the affirmative's tail and the wrapped footer", "    folder\n\n  Enter to confirm ·\n  Esc to cancel\n", claudeFolderTrustUnreadable},
+		{"a longer tail of the affirmative and the footer", "    trust this\n    folder\n\n  Enter to confirm · Esc to cancel\n", claudeFolderTrustUnreadable},
 
 		// None: the agent's composer below the dialog's text — its ❯ prompt
 		// row, or the boxed composer's "> " row under its rule — or no dialog
@@ -126,6 +134,11 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		// #7280, item C: a ❯ row between two rules is the composer, even as the
 		// last row painted.
 		{"a quote ending in the composer between its rules", question + options + footer + "────────\n❯ \n────────\n", claudeFolderTrustNone},
+		// The composer's rules are "─" alone, as the measured composer draws
+		// them (#7285, the #7284 review's N2): a ❯ between heavier or double
+		// rules is not the composer, so it holds.
+		{"a ❯ row between double rules", question + options + footer + "════════\n❯ \n════════\n", claudeFolderTrustPartial},
+		{"a ❯ row between heavy rules", question + options + footer + "━━━━━━━━\n❯ \n━━━━━━━━\n", claudeFolderTrustPartial},
 		// #7280, item D: a ❯ row is never the footer, so the rule above it is
 		// no closing frame, and the row between rules is the composer.
 		{"a ❯ draft reading like the footer, between rules", question + options + "\n────────\n❯ Enter to confirm · Esc to cancel\n────────\n", claudeFolderTrustNone},
@@ -136,6 +149,10 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"the question scrolled off, a ❯ above the options", "❯ hello\n  your own code.\n\n" + options + footer, claudeFolderTrustNone},
 		{"the question scrolled off, a rule above the options", "────────\n  your own code.\n\n" + options + footer, claudeFolderTrustNone},
 		{"options and a footer without the affirmative", "  some text\n\n❯ No, exit\n  No, and don't ask again\n" + footer, claudeFolderTrustNone},
+		{"only the footer, under a quote's last row", "  That is the dialog.\n" + footer, claudeFolderTrustNone},
+		{"only the footer, under a rule", "────────\n" + footer, claudeFolderTrustNone},
+		{"only the footer, under a ❯ row", "❯ draft\n" + footer, claudeFolderTrustNone},
+		{"only the footer, under a label that is not the affirmative's tail", "    exit\n" + footer, claudeFolderTrustNone},
 		{"the question in a composer draft", "────\n❯ Is this a project you created or one you trust?\n  Yes, I trust this folder\n────\n", claudeFolderTrustNone},
 		{"the legacy dialog", "Do you trust the files in this folder?\n❯ Yes  No\n", claudeFolderTrustNone},
 	} {

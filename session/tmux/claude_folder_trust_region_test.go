@@ -410,11 +410,30 @@ func TestCheckAndHandleTrustPrompt_FolderTrustAtEveryPaneWidthIsAnsweredOrHeld(t
 // in landscape with its keyboard up is about 11 rows (#7280). The dialog still
 // owns the pane: its own option block and footer are the last content, which a
 // quote never has, since its composer is below. So it holds, and its refusal
-// is logged once; a pane tall enough to show the question is answered.
+// is logged once; a pane tall enough to show the question is answered. Down to
+// a single row, where only the footer is left (#7285).
 func TestCheckAndHandleTrustPrompt_FolderTrustInAShortPaneIsAnsweredOrHeld(t *testing.T) {
 	requireFolderTrustAnsweredOrHeld(t, func(yield func(width, height int) bool) {
 		for _, width := range []int{80, 120} {
-			for height := 5; height <= 24; height++ {
+			for height := 1; height <= 24; height++ {
+				if !yield(width, height) {
+					return
+				}
+			}
+		}
+	})
+}
+
+// A pane too short to show any option row whole (#7285): what is left is the
+// dialog's footer, wrapped at these widths, and above it at most blank rows and
+// the tail of the wrapped affirmative label ("folder"). A working agent's
+// composer takes the bottom three rows or more, so a quote cannot leave this.
+// It holds, and its refusal is logged once. (One row at these widths shows only
+// the footer's own tail, "Esc to cancel", which this does not claim.)
+func TestCheckAndHandleTrustPrompt_FolderTrustWithOnlyItsFooterOnScreenHolds(t *testing.T) {
+	requireFolderTrustAnsweredOrHeld(t, func(yield func(width, height int) bool) {
+		for width := 24; width <= 35; width++ {
+			for height := 2; height <= 4; height++ {
 				if !yield(width, height) {
 					return
 				}
