@@ -86,9 +86,25 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 		hook(recordedPath)
 	}
 	launchDir := LaunchCaptureWorkingDir(program, workDir)
+	// noEvidence is the guard's answer when nothing newer can be attributed to
+	// the session: resume the recorded thread, after the second look at a
+	// rollout that may have moved between forms.
+	noEvidence := func() (resumeDecline, bool) {
+		if _, err := os.Lstat(recordedPath); err != nil {
+			return resumeDecline{}, true
+		}
+		return resumeDecline{}, false
+	}
 	var repair operatorRepairWindow
 	if conv.CaptureKind == ConversationCaptureOperator {
-		if decline := operatorRepairProvenance(recordedPath, launchDir); decline.reason != "" {
+		switch decline := operatorRepairProvenance(recordedPath, launchDir); {
+		case decline.reason == operatorRepairUnresolvedReason:
+			// A provenance lookup that did not answer is no answer about the
+			// repair: the attribution timeout's answer, which resumes the
+			// recorded thread and retires nothing. Only an answered provenance
+			// declines (#7287 review R5).
+			return noEvidence()
+		case decline.reason != "":
 			return decline, false
 		}
 		repair = operatorRepairWindowOf(conv, time.Now())
@@ -101,10 +117,7 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 	// about the id itself, judged above and here, where the rollout af chose
 	// may have gone since the walk: that still takes the second look.
 	if !i.newerConversationIsEvidence(launchDir) {
-		if _, err := os.Lstat(recordedPath); err != nil {
-			return resumeDecline{}, true
-		}
-		return resumeDecline{}, false
+		return noEvidence()
 	}
 	switch checkCodexRecordedStaleness(recordedPath, files, boundedLaunchDir(launchDir), repair) {
 	case codexRolloutStale:

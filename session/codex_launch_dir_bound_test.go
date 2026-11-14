@@ -40,9 +40,10 @@ func codexBoundRolloutName(id string) string {
 	return "rollout-2026-11-12T10-17-35-" + id + ".jsonl"
 }
 
-// codexRestoreGuardLayout is a Codex session in workDir, with its recorded
-// rollout and, unless newerCwd is "", a newer rollout recording newerCwd.
-func codexRestoreGuardLayout(t *testing.T, workDir, recordedCwd, newerCwd string) *Instance {
+// codexRestoreGuardLayout is a Codex session in workDir whose record is of
+// kind, with its recorded rollout and, unless newerCwd is "", a newer rollout
+// recording newerCwd.
+func codexRestoreGuardLayout(t *testing.T, kind string, workDir, recordedCwd, newerCwd string) *Instance {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
@@ -56,7 +57,7 @@ func codexRestoreGuardLayout(t *testing.T, workDir, recordedCwd, newerCwd string
 	inst := &Instance{
 		Title: "t", Program: tmux.ProgramCodex, gitWorktree: gw,
 		Tabs: []*Tab{{Conversation: AgentConversationData{
-			Agent: tmux.ProgramCodex, ID: codexBoundRecordedID, CapturedAt: time.Now(), CaptureKind: ConversationCaptureCodexRollout,
+			Agent: tmux.ProgramCodex, ID: codexBoundRecordedID, CapturedAt: time.Now(), CaptureKind: kind,
 		}}},
 	}
 	inst.Path = gw.GetRepoPath()
@@ -89,6 +90,9 @@ func stallLookupUnder(t *testing.T, root string, k int32) *atomic.Int32 {
 // answered declines (#7287 review R1). The review's two cases are the
 // unsymlinked worktree whose guard lookup latches the key the rollout's cwd
 // shares (lookup 3), and a newer rollout from a sibling directory (lookup 4).
+// An operator's repair adds its provenance's two lookups, the repaired
+// rollout's cwd and the launch dir, first: one not answering is no answer
+// about the repair either, and resumes it (#7287 review R5).
 func TestCodexRestoreGuardResumesWhenAnyLookupDoesNotAnswer(t *testing.T) {
 	type layout func(t *testing.T) (inst *Instance, base string)
 	plain := func(t *testing.T) (string, string) {
@@ -116,23 +120,31 @@ func TestCodexRestoreGuardResumesWhenAnyLookupDoesNotAnswer(t *testing.T) {
 	}{
 		{"unsymlinked, newer rollout in this worktree", func(t *testing.T) (*Instance, string) {
 			base, wt := plain(t)
-			return codexRestoreGuardLayout(t, wt, wt, wt), base
+			return codexRestoreGuardLayout(t, ConversationCaptureCodexRollout, wt, wt, wt), base
 		}, true},
 		{"unsymlinked, newer rollout from a sibling dir", func(t *testing.T) (*Instance, string) {
 			base, wt := plain(t)
-			return codexRestoreGuardLayout(t, wt, wt, sibling(t, base)), base
+			return codexRestoreGuardLayout(t, ConversationCaptureCodexRollout, wt, wt, sibling(t, base)), base
 		}, false},
 		{"symlinked, newer rollout in this worktree (kernel spelling)", func(t *testing.T) (*Instance, string) {
 			base, wt, real := linked(t)
-			return codexRestoreGuardLayout(t, wt, real, real), base
+			return codexRestoreGuardLayout(t, ConversationCaptureCodexRollout, wt, real, real), base
 		}, true},
 		{"symlinked, newer rollout from a sibling dir", func(t *testing.T) (*Instance, string) {
 			base, wt, real := linked(t)
-			return codexRestoreGuardLayout(t, wt, real, sibling(t, base)), base
+			return codexRestoreGuardLayout(t, ConversationCaptureCodexRollout, wt, real, sibling(t, base)), base
 		}, false},
 		{"nothing newer", func(t *testing.T) (*Instance, string) {
 			base, wt := plain(t)
-			return codexRestoreGuardLayout(t, wt, wt, ""), base
+			return codexRestoreGuardLayout(t, ConversationCaptureCodexRollout, wt, wt, ""), base
+		}, false},
+		{"operator's repair, unsymlinked, nothing newer", func(t *testing.T) (*Instance, string) {
+			base, wt := plain(t)
+			return codexRestoreGuardLayout(t, ConversationCaptureOperator, wt, wt, ""), base
+		}, false},
+		{"operator's repair, symlinked, nothing newer", func(t *testing.T) (*Instance, string) {
+			base, wt, real := linked(t)
+			return codexRestoreGuardLayout(t, ConversationCaptureOperator, wt, real, ""), base
 		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
