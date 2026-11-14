@@ -20,8 +20,9 @@ import (
 // names (handoff.Snapshot.CarriedBoundary): the watermark, or else a
 // quarantine marker for a carry whose watermark never landed. A zero
 // watermark is a record — that carry copied nothing. Only a file af holds no
-// record of at all keeps the whole-destination cover, as does one whose
-// records cannot be read: over-quarantine is the safe direction.
+// record of at all keeps the whole-destination cover, as does one under its
+// home's untrackable quarantine flag (#7277) or one whose records cannot be
+// read: over-quarantine is the safe direction.
 func (c *conversationCarry) recordedBoundary(kept int64) int64 {
 	path := c.carriedTranscriptPath()
 	if c.dstRoot.base == "" || path == "" {
