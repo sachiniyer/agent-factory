@@ -3,7 +3,7 @@ package fsprobe
 import "os"
 
 // openPath is the test seam under ReadFileWith's bounded flight.
-var openPath = os.Open
+var openPath = newSeam(os.Open)
 
 var readFileFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 
@@ -21,7 +21,7 @@ var readFileFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 // closes the file when read returns, which for an abandoned flight is after
 // the caller has gone.
 func ReadFileWith(path string, read func(*os.File) (any, error)) (any, error) {
-	open := openPath // in the caller, as ReadDir's
+	open := openPath.load() // in the caller, as ReadDir's
 	return runBounded(path, readFileFlights, "file read",
 		"the filesystem did not answer the read",
 		func() (any, error) {

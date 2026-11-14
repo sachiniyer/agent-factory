@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -203,8 +204,16 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	worktreeMissing := i.worktreeMissing
 	i.mu.RUnlock()
 	provedPresent := false
+	// Both looks at workDir below are bounded (fsprobe, #7272): the worktree may
+	// sit on a mount that no longer answers (NFS, FUSE, a dead sshfs), and an
+	// unbounded stat would hold this respawn, and the restore poll or account
+	// swap behind it, forever. One that does not answer within the bound is a
+	// look that did not happen, never "absent": it is neither ENOENT nor a
+	// directory, so it refuses this attempt with the ErrProbeTimedOut +
+	// context.DeadlineExceeded pair the lost-restore loop retries as a bounded
+	// environmental wait, before any teardown or rebuild.
 	if worktreeMissing {
-		if _, err := os.Lstat(workDir); err == nil {
+		if _, err := fsprobe.Lstat(workDir); err == nil {
 			if gw == nil {
 				return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir,
 					Err: fmt.Errorf("the session's worktree was recorded as deleted outside af, and the directory now at this path is unverified")}
@@ -222,7 +231,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 		}
 	}
-	if fi, err := os.Stat(workDir); err != nil || !fi.IsDir() {
+	if fi, err := fsprobe.Stat(workDir); err != nil || !fi.IsDir() {
 		if err == nil {
 			// A non-directory squats on the worktree path — a file, device,
 			// socket, anything af did not create. Rebuild cannot repair it

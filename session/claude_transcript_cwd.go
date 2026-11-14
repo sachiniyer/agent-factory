@@ -210,16 +210,33 @@ const (
 // Everything else is this worktree's: a subdirectory the agent cd'd into (a
 // message records the session's current cwd), a directory the conversation
 // was relocated from, the worktree's path before a move. Both sides are
-// compared resolved, the way the Codex checks compare a rollout's cwd.
+// compared resolved, the way the Codex checks compare a rollout's cwd, and
+// both resolutions are bounded: the recorded side inside the transcript read's
+// flight, the launch side by fsprobe (#7272). The launch dir may sit on a mount
+// that no longer answers (NFS, FUSE, a dead sshfs), and a launch side that did
+// not resolve within the bound is a look that did not happen: ownership is
+// unknown, never another directory's. "Another directory's" would leave the
+// recorded conversation the newest, which a carry reads as leave to carry it.
 func claudeTranscriptOwnership(transcript claudeTranscript, launchDir string) claudeOwnership {
 	recorded, ok := claudeTranscriptRecordedDir(filepath.Join(transcript.dir, transcript.name))
 	if !ok {
 		return claudeOwnershipUnknown
 	}
-	if recorded.resolved == pathutil.ResolveForCompare(launchDir) {
+	launch, err := fsprobe.ResolveForCompare(launchDir)
+	if err != nil {
+		return claudeOwnershipUnknown
+	}
+	if recorded.resolved == launch {
 		return claudeOwnedHere
 	}
-	for _, project := range claudeProjectCandidates(launchDir) {
+	// The project names the launch dir files under are a launch-side
+	// resolution too: an incomplete list could miss the name that makes a
+	// colliding transcript another directory's.
+	projects, complete := claudeProjectSpellings(launchDir)
+	if !complete {
+		return claudeOwnershipUnknown
+	}
+	for _, project := range projects {
 		if recorded.names[filepath.Base(project)] {
 			return claudeOwnedElsewhere
 		}

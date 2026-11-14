@@ -18,18 +18,14 @@ import (
 // whose stat blocks in an uninterruptible D state, so an integration test
 // can prove a caller's stat is bounded by fsprobe rather than hanging.
 func SetStatPathForTest(f func(string) (os.FileInfo, error)) func() {
-	old := statPath
-	statPath = f
-	return func() { statPath = old }
+	return statPath.replace(f)
 }
 
 // SetProbeTimeoutForTest overrides the per-flight bound. Callers must
 // restore the original via the returned function. Useful for keeping an
 // integration test that exercises a wedged flight fast.
 func SetProbeTimeoutForTest(d time.Duration) func() {
-	old := probeTimeout
-	probeTimeout = d
-	return func() { probeTimeout = old }
+	return probeTimeout.replace(d)
 }
 
 // SetReadDirForTest overrides the directory read ReadDir and ReadDirInfo run
@@ -37,26 +33,28 @@ func SetProbeTimeoutForTest(d time.Duration) func() {
 // store on a wedged mount (#7212). Callers must restore the original via the
 // returned function.
 func SetReadDirForTest(f func(string) ([]os.DirEntry, error)) func() {
-	old := readDirPath
-	readDirPath = f
-	return func() { readDirPath = old }
+	return readDirPath.replace(f)
 }
 
 // SetEvalSymlinksForTest overrides the symlink resolution EvalSymlinks runs
-// inside its bounded flight, so a test can stand in for a launch directory on
-// a wedged mount (#7212). Callers must restore the original via the returned
+// inside its bounded flight, and that ResolveForCompare's ancestor walk runs
+// inside its own, so a test can stand in for a launch directory on a wedged
+// mount (#7212, #7272). Callers must restore the original via the returned
 // function.
 func SetEvalSymlinksForTest(f func(string) (string, error)) func() {
-	old := evalSymlinksPath
-	evalSymlinksPath = f
-	return func() { evalSymlinksPath = old }
+	return evalSymlinksPath.replace(f)
+}
+
+// SetLstatForTest overrides the metadata lookup Lstat runs inside its bounded
+// flight, so a test can stand in for a worktree on a wedged mount (#7272).
+// Callers must restore the original via the returned function.
+func SetLstatForTest(f func(string) (os.FileInfo, error)) func() {
+	return lstatPath.replace(f)
 }
 
 // SetOpenForTest overrides the open ReadFileWith runs inside its bounded
 // flight, so a test can stand in for a file on a wedged mount (#7221 review
 // R4). Callers must restore the original via the returned function.
 func SetOpenForTest(f func(string) (*os.File, error)) func() {
-	old := openPath
-	openPath = f
-	return func() { openPath = old }
+	return openPath.replace(f)
 }

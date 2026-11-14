@@ -44,7 +44,7 @@ const writeSpaceProbeSize = 1 << 20
 // 1 MiB write+sync in milliseconds; a flight still running at the bound is
 // the wedge the bound exists to catch. The value mirrors the relocation
 // identity probe's deadline — the same "the mount did not answer" class.
-var probeTimeout = 2 * time.Second
+var probeTimeout = newBound(2 * time.Second)
 
 // ErrProbeTimedOut identifies the bounded flight's non-answer: the probe's
 // syscall — the write probe's write/sync/close, or the stat probe's
@@ -67,7 +67,7 @@ var ErrProbeTimedOut = errors.New("filesystem probe did not answer inside its bo
 // blocks, so a write that only looked cheap could pass while git's real
 // write got the ENOSPC the classifier never saw. The file is removed before
 // returning either way.
-var writeSpaceProbe = func(dir string) error {
+var writeSpaceProbe = newSeam(func(dir string) error {
 	f, err := openProbeFile(dir)
 	if err != nil {
 		return err
@@ -112,7 +112,7 @@ var writeSpaceProbe = func(dir string) error {
 	// structural error and let it spend give-up budget during an
 	// environmental outage (#5295 review).
 	return errors.Join(werr, serr, cerr)
-}
+})
 
 // openProbeFile returns a write-capable probe file that can never be staged:
 // an O_TMPFILE anonymous inode where the platform offers one (Linux — tmpfs,
@@ -157,7 +157,7 @@ func openProbeFile(dir string) (*os.File, error) {
 // statPath is the test seam under Stat's bounded flight — the metadata
 // syscall that decides whether an existing socket-root or destination dir
 // gets probed itself rather than the parent that hosts its name.
-var statPath = os.Stat
+var statPath = newSeam(os.Stat)
 
 // Write runs the space probe for dir inside a per-dir bounded flight: a
 // filesystem that stops completing writes (a degraded mount) must surface as
@@ -168,9 +168,10 @@ var statPath = os.Stat
 // the bound reports the filesystem's own verdict, which on a full or wedged
 // mount is the real errno.
 func Write(dir string) error {
+	probe := writeSpaceProbe.load() // in the caller, as Stat's
 	_, err := runBounded(dir, writeFlights, "space probe",
 		"the filesystem did not complete the write",
-		func() (any, error) { return nil, writeSpaceProbe(dir) })
+		func() (any, error) { return nil, probe(dir) })
 	return err
 }
 
@@ -219,7 +220,7 @@ func FullUnprivileged(dir string) (bool, error) {
 // bounded environmental class rather than charging the structural budget
 // (#5295 review).
 func Stat(dir string) (os.FileInfo, error) {
-	stat := statPath // in the caller: a stuck flight never reads the seam
+	stat := statPath.load() // in the caller: a stuck flight never reads the seam
 	res, err := runBounded(dir, statFlights, "stat probe",
 		"the filesystem did not answer the stat",
 		func() (any, error) { return stat(dir) })
@@ -275,7 +276,8 @@ func runBounded(dir string, flights *flightRegistry, what, detail string,
 
 func waitForFlight(dir string, flights *flightRegistry, what, detail string,
 	flight *probeFlight) (any, error) {
-	timer := time.NewTimer(probeTimeout)
+	timeout := probeTimeout.load()
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-flight.done:
@@ -287,7 +289,7 @@ func waitForFlight(dir string, flights *flightRegistry, what, detail string,
 			flights.Unlock()
 			return nil, fmt.Errorf(
 				"%s of %s did not answer within %s — %s: %w: %w",
-				what, dir, probeTimeout, detail, ErrProbeTimedOut, context.DeadlineExceeded,
+				what, dir, timeout, detail, ErrProbeTimedOut, context.DeadlineExceeded,
 			)
 		}
 		flights.Unlock()

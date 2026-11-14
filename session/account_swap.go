@@ -373,8 +373,8 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		workDir:    workDir,
 		fallback:   carryFailure,
 		// A newer conversation refuses the carry only where af owns the
-		// directory, as on the restore path (#7227).
-		newerIsEvidence: i.newerConversationIsEvidence,
+		// directory, as on the restore path (#7227), or cannot tell (#7272).
+		newerIsEvidence: i.newerConversationCountsAgainstCarry,
 	})
 	var launchProgram string
 	var conversation AgentConversationData

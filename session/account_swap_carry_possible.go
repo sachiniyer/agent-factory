@@ -90,7 +90,7 @@ func (i *Instance) carryAheadReason(target string, sourceOnly bool) string {
 		sourceOnly: sourceOnly,
 		stores:     carryAheadStores,
 		// The live swap's own judgement of a newer conversation (#7227).
-		newerIsEvidence: i.newerConversationIsEvidence,
+		newerIsEvidence: i.newerConversationCountsAgainstCarry,
 	})
 	return carryAheadRefusal(carry, reason, program)
 }
