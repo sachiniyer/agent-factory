@@ -42,17 +42,36 @@ type tmuxClientlessChannel struct {
 // it; Read sees the abort latch and discards the whole read, so the byte can
 // never be confused with successful raw PTY output. Successful teardown never
 // injects a control byte.
+//
+// Drain and abort are SEPARATE latches (#7302). Close is always an abort, even
+// after a draining stop: it latches abort and writes its wake byte, through the
+// keeper while it is open and otherwise through a fresh nonblocking writer on
+// the FIFO's path, because the drain has already closed the keeper. When one
+// latch served both, the drain spent it, the abort that followed was a no-op,
+// and a read whose EOF never came stayed parked for good: a writer that outlived
+// pipe-pane, or the macOS read that stayed in read(2) after the last writer
+// closed (#4319, #7302). The broker gives the drain a grace to reach EOF before
+// it aborts (ptyBroker.joinCapture), so a healthy teardown still loses no tail.
 type captureReader struct {
-	f          *os.File
-	keepalive  *os.File
-	dir        string
-	abort      atomic.Bool
-	eof        atomic.Bool
-	stopOnce   sync.Once
-	cleanOnce  sync.Once
-	keeperOnce sync.Once
-	err        error
-	keeperErr  error
+	f         *os.File
+	keepalive *os.File
+	// fifo is the FIFO's path: the route an abort's wake takes once a drain has
+	// closed the keeper. Empty for a reader with no path, which then has no wake
+	// left after a drain.
+	fifo      string
+	dir       string
+	abort     atomic.Bool
+	eof       atomic.Bool
+	drainOnce sync.Once
+	abortOnce sync.Once
+	cleanOnce sync.Once
+	drainErr  error
+	abortErr  error
+	// keeperMu orders the keeper's single close against a wake writing through
+	// it, so a wake never writes to a closed (and possibly reused) descriptor.
+	keeperMu     sync.Mutex
+	keeperClosed bool
+	keeperErr    error
 }
 
 func (r *captureReader) Read(p []byte) (int, error) {
@@ -91,25 +110,55 @@ func (r *captureReader) Close() error {
 // writer, drain=true lets Read consume through the kernel EOF. Otherwise the
 // keeper's failure-only byte prevents an unknown external writer from wedging
 // teardown; Read discards it because abort is already latched.
+//
+// Each mode has its own latch, so a drain never consumes the abort: an abort
+// that follows a drain still runs its wake (#7302).
 func (r *captureReader) stop(drain bool) error {
-	r.stopOnce.Do(func() {
-		if !drain {
-			r.abort.Store(true)
-			if r.keepalive != nil {
-				_, _ = r.keepalive.Write([]byte{0})
-			}
-		}
-		r.err = r.closeKeeper()
+	if drain {
+		r.drainOnce.Do(func() { r.drainErr = r.closeKeeper() })
+		return r.drainErr
+	}
+	r.abortOnce.Do(func() {
+		r.abort.Store(true)
+		r.wake()
+		r.abortErr = r.closeKeeper()
 	})
-	return r.err
+	return r.abortErr
+}
+
+// wake puts one byte where a parked Read will see it; abort is latched first, so
+// Read discards it. It goes through the keeper while the keeper is open. After a
+// drain has closed the keeper it goes through a fresh nonblocking writer on the
+// FIFO's path. That open fails harmlessly when there is nothing left to wake:
+// ENXIO once the read end is closed, ENOENT once finish removed the directory.
+// A full FIFO refuses the byte, and then the read has data to return anyway.
+func (r *captureReader) wake() {
+	r.keeperMu.Lock()
+	defer r.keeperMu.Unlock()
+	if !r.keeperClosed && r.keepalive != nil {
+		_, _ = r.keepalive.Write([]byte{0})
+		return
+	}
+	if r.fifo == "" {
+		return
+	}
+	w, err := os.OpenFile(r.fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return
+	}
+	_, _ = w.Write([]byte{0})
+	_ = w.Close()
 }
 
 func (r *captureReader) closeKeeper() error {
-	r.keeperOnce.Do(func() {
+	r.keeperMu.Lock()
+	defer r.keeperMu.Unlock()
+	if !r.keeperClosed {
+		r.keeperClosed = true
 		if r.keepalive != nil {
 			r.keeperErr = r.keepalive.Close()
 		}
-	})
+	}
 	return r.keeperErr
 }
 
@@ -180,7 +229,7 @@ func (c *tmuxClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
-	rc := &captureReader{f: f, keepalive: keepalive, dir: dir}
+	rc := &captureReader{f: f, keepalive: keepalive, fifo: fifo, dir: dir}
 	c.rc = rc
 	return rc, nil
 }
