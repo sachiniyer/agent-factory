@@ -150,23 +150,35 @@ func claudeProjectName(path string) string {
 // config dir, that Claude may file a conversation launched in dir under: the
 // path as recorded and, where it differs, as the kernel reports it, since a
 // symlinked worktree parent yields a different project name. The resolution is
-// bounded (fsprobe, #7212): on a wedged mount (NFS, FUSE, a dead sshfs) it
-// does not answer within the bound, and then the kernel's spelling is unknown,
-// not absent. complete is false exactly then: the list holds only the recorded
-// spelling, and a directory Claude may file under is missing from it. A caller
+// bounded (fsprobe, #7212). complete means every spelling Claude may have
+// filed under is listed. A launch dir that is gone still has one: while it
+// existed Claude filed under the kernel's spelling of it, which is its
+// deepest existing ancestor's resolution with the missing remainder rejoined,
+// as ResolveForCompare computes it (#7290). A lookup that did not answer
+// within the bound (a wedged NFS, FUSE or sshfs mount), or that failed for any
+// reason but absence, leaves the kernel's spelling unknown: complete is false
+// then, the list holds only the recorded spelling, and a directory Claude may
+// file under is missing from it. A caller
 // that needs every copy of a conversation (the account-swap carry) refuses an
 // incomplete list, and ownership reads one as unknown (either side); one whose
 // safe answer is the recorded spelling's uses claudeProjectCandidates.
 func claudeProjectSpellings(dir string) (projects []string, complete bool) {
 	projects = []string{filepath.Join("projects", claudeProjectName(dir))}
 	resolved, err := fsprobe.EvalSymlinks(dir)
-	if err == nil && resolved != dir {
-		projects = append(projects, filepath.Join("projects", claudeProjectName(resolved)))
+	if pathutil.IsAbsent(err) {
+		// Gone, not unknown: the spelling Claude filed it under is its
+		// deepest existing ancestor's (#7290).
+		resolved, err = fsprobe.ResolveForCompare(dir)
 	}
-	// Only absence is an answer: a lookup that failed for any other reason
-	// (EIO, ESTALE, EACCES…) leaves the kernel's spelling as unknown as one
-	// that timed out (#7286).
-	return projects, err == nil || pathutil.IsAbsent(err)
+	if err != nil {
+		// A lookup that did not answer, or failed for any reason but absence
+		// (EIO, ESTALE, EACCES…), leaves the kernel's spelling unknown (#7286).
+		return projects, false
+	}
+	if name := claudeProjectName(resolved); name != claudeProjectName(dir) {
+		projects = append(projects, filepath.Join("projects", name))
+	}
+	return projects, true
 }
 
 // claudeProjectCandidates is claudeProjectSpellings for a caller whose answer

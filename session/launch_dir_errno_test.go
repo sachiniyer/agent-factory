@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
@@ -155,5 +156,65 @@ func TestClaudeRestoreNeverAbandonsOnAnIncompleteListing(t *testing.T) {
 				require.False(t, got.decline.retiresRecord(inst.AgentConversation()), "nothing is retired")
 			})
 		}
+	}
+}
+
+// #7290 item 2, the review's TestRev7289AbsentLaunchDirDropsTheKernelSpelling.
+// The layout is item 2's, where the restore resumes the newest copy of the
+// recorded id, filed under the resolved spelling. Then the launch dir goes
+// away. A spelling list that dropped the kernel's spelling for a missing leaf,
+// yet read complete, listed only the older copy beside the newer conversation,
+// and the restore abandoned the id and retired the record. A gone launch dir
+// still lists the spelling Claude filed it under, its deepest existing
+// ancestor's, so the restore still resumes.
+func TestClaudeRestoreResumesWhenTheLaunchDirIsGone(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	workDir, recordedProject, resolvedProject := claudeRestoreWorktree(t)
+	resolvedDir, err := filepath.EvalSymlinks(workDir)
+	require.NoError(t, err)
+	now := time.Now()
+	line := claudeRecordLine(t, resolvedDir)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(recordedProject, carryTestID+".jsonl"), line), now.Add(-2*time.Hour))
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(recordedProject, newerConversationID+".jsonl"), line), now.Add(-time.Hour))
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(resolvedProject, carryTestID+".jsonl"), line+line), now.Add(-30*time.Minute))
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+	require.Equal(t, recordedClaudeResume, inst.judgeRecordedClaude("claude", workDir, carryTestID), "precondition: the newest copy is current")
+
+	require.NoError(t, os.Remove(resolvedDir))
+	projects, complete := claudeProjectSpellings(workDir)
+	require.True(t, complete, "a launch dir that is gone is an answer")
+	require.Equal(t, []string{recordedProject, resolvedProject}, projects, "and still lists the spelling Claude filed it under")
+	program, ok, decline := prepareExactResumeConversation(inst, "claude")
+	require.True(t, ok, "the restore resumes the recorded id: %+v", decline)
+	require.Equal(t, "claude --resume "+carryTestID, program)
+	require.False(t, decline.retiresRecord(inst.AgentConversation()), "nothing is retired")
+}
+
+// #7290 item 1. The carry refuses when it cannot look up every spelling of the
+// worktree's path, whether a lookup stalled or failed. Its reason says that,
+// and never claims a timeout that did not happen: here the lookup fails at
+// once, as an unreadable ancestor or an erroring soft mount makes it.
+func TestClaudeCarrySpellingsRefusalNamesNoTimeoutThatDidNotHappen(t *testing.T) {
+	home := carryAmbientProviderHomes(t)
+	inst, recorded, _ := symlinkedClaudeCarryInstance(t)
+	recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
+	cwd := inst.GetWorktreePath()
+	writeCarryFile(t, filepath.Join(home, ".claude"), filepath.Join(recorded, carryTestID+".jsonl"), claudeRecordLine(t, cwd))
+	require.Empty(t, inst.AccountSwapCarryRefusal(), "precondition: the transcript carries")
+
+	link := filepath.Dir(cwd)
+	t.Cleanup(fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+		if path == cwd || path == link {
+			return "", &fs.PathError{Op: "lstat", Path: path, Err: syscall.EIO}
+		}
+		return filepath.EvalSymlinks(path)
+	}))
+	require.Equal(t, carryRefusalCode(carrySpellingsUnresolvedReason), inst.AccountSwapCarryRefusal())
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	require.Nil(t, inst.accountSwapLaunch.carry)
+	require.Equal(t, carrySpellingsUnresolvedReason, inst.accountSwapLaunch.carryFallback)
+	for _, claim := range []string{"in time", "timed out", "did not answer"} {
+		require.NotContains(t, inst.accountSwapLaunch.carryFallback, claim, "nothing timed out")
 	}
 }
