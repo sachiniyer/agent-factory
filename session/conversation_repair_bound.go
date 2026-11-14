@@ -323,8 +323,10 @@ func operatorRepairProvenance(rolloutPath, launchDir string) resumeDecline {
 }
 
 // operatorRepairUnresolvedReason is operatorRepairProvenance's refusal when a
-// directory it compares did not resolve within the bound.
-const operatorRepairUnresolvedReason = "af could not resolve the operator-recorded conversation's directory and this session's in time to confirm it is this session's own"
+// directory it compares could not be looked up: the lookup did not answer
+// within its bound, or failed (EIO, a dangling symlink…). It names no timeout,
+// since most failures are not one (#7297 review R1).
+const operatorRepairUnresolvedReason = "af could not look up the operator-recorded conversation's directory and this session's, so it cannot confirm it is this session's own"
 
 // codexRolloutStoredAt is the instant a rollout entered the store: the
 // session_meta LINE's own timestamp. Codex's recorder dates a new thread when

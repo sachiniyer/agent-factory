@@ -5,11 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -82,6 +83,17 @@ type ConversationCaptureSnapshot struct {
 	// window, and every check against this snapshot must surface that failure
 	// instead of guessing.
 	codexBeforeErr error
+	// scopeErr is set when the working directory the snapshot binds discovery
+	// to did not resolve: the lookup did not answer within its bound, or
+	// failed (#7292). Correlating against it would be a guess, so while it
+	// stands the snapshot decides nothing: the diff scan and the held query
+	// report the channel unavailable, and a receipt pool is unscoped. Each
+	// decision retries the resolution of scopeDir first (rescoped), so a
+	// transient non-answer does not outlive the mount's recovery (#7298
+	// review).
+	scopeErr error
+	// scopeDir is the launch dir as given, kept while scopeErr stands.
+	scopeDir string
 	// receiptState carries the scan memoization across the separate
 	// WaitForPromptReceipt calls that share one snapshot — the config agent's
 	// initial, escalation, and five-minute windows are three different calls
@@ -244,15 +256,21 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptRollout(path string) bool
 // unprovable launch directory) covers the whole store and is stat-only: it
 // never reads transcript contents to decide membership.
 func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
+	*s = s.rescoped()
 	files, err := codexRolloutFiles(s.codexHome)
 	if err != nil {
 		return
 	}
+	// A working directory that did not resolve scopes nothing (#7292).
+	unscoped = unscoped || s.scopeErr != nil
 	for path := range files {
 		if !unscoped && s.workingDir != "" {
-			if cwd, ok := codexRolloutWorkingDir(path); ok &&
-				pathutil.ResolveForCompare(cwd) != s.workingDir {
-				continue
+			// Bounded (#7292); a cwd that does not resolve is unclassifiable,
+			// which is unknown, not foreign, and stays in the pool.
+			if cwd, ok := codexRolloutWorkingDir(path); ok {
+				if resolved, err := fsprobe.ResolveForCompare(cwd); err == nil && resolved != s.workingDir {
+					continue
+				}
 			}
 		}
 		if info, err := os.Stat(path); err == nil {
@@ -332,9 +350,7 @@ func BeginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) C
 }
 
 func beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) ConversationCaptureSnapshot {
-	if workingDir != "" {
-		workingDir = pathutil.ResolveForCompare(workingDir)
-	}
+	workingDir, scopeErr := resolveCaptureWorkingDir(workingDir)
 	startedAt := time.Now()
 	// The baseline is bounded to the same capture window the diff scan uses:
 	// a rollout directory provably older than the snapshot can hold nothing
@@ -347,6 +363,8 @@ func beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) C
 		workingDir:     workingDir,
 		codexBefore:    before,
 		codexBeforeErr: beforeErr,
+		scopeErr:       scopeErr,
+		scopeDir:       scopeDirFor(workingDir, scopeErr),
 		receiptState:   newCodexReceiptState(),
 	}
 }
@@ -562,6 +580,7 @@ func captureCarriedCodexConversation(snap ConversationCaptureSnapshot) (AgentCon
 }
 
 func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConversationData, bool, error) {
+	snap = snap.rescoped()
 	observed, err := newCodexRolloutFiles(snap)
 	if err != nil {
 		// A store that cannot be enumerated is retried inside the caller's
@@ -633,6 +652,9 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
 	if snap.scopeOnly {
 		return nil, nil
 	}
+	if snap.scopeErr != nil {
+		return nil, captureChannelUnavailable(snap.scopeErr)
+	}
 	if snap.codexBeforeErr != nil {
 		return nil, captureChannelUnavailable(fmt.Errorf("the snapshot's scan of the Codex rollout store failed: %w", snap.codexBeforeErr))
 	}
@@ -677,6 +699,7 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
 // session_meta is not yet classifiable: it could be the awaited one mid-write,
 // so neither absence nor ambiguity may be concluded yet.
 func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (received, undecided bool, err error) {
+	snap = snap.rescoped()
 	state := snap.receiptState
 	if state == nil {
 		state = newCodexReceiptState()
@@ -732,4 +755,58 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 		// (#5471 review).
 		return false, uncorrelated > 0, nil
 	}
+}
+
+// resolveCaptureWorkingDir resolves the working directory a capture binds
+// discovery to, bounded (fsprobe, #7292): it is the session's launch dir,
+// which may sit on a mount that no longer answers. scopeErr is the lookup
+// that did not answer or failed, with workingDir then only cleaned; "" stays
+// "", an unbound capture.
+func resolveCaptureWorkingDir(workingDir string) (resolved string, scopeErr error) {
+	if workingDir == "" {
+		return "", nil
+	}
+	resolved, err := fsprobe.ResolveForCompare(workingDir)
+	if err != nil {
+		return filepath.Clean(workingDir), fmt.Errorf("af could not resolve the launch directory %s to bind conversation capture to: %w", workingDir, err)
+	}
+	return resolved, nil
+}
+
+// scopeDirFor is the launch dir a snapshot keeps to retry its resolution: the
+// cleaned dir while scopeErr stands, else "".
+func scopeDirFor(workingDir string, scopeErr error) string {
+	if scopeErr == nil {
+		return ""
+	}
+	return workingDir
+}
+
+// rescoped is s with its working directory resolved again when the last
+// resolution did not answer or failed (#7298 review): the daemon keeps one
+// snapshot for a runtime's life, and a recorded row's follow never retakes
+// it, so a transient non-answer must not decide nothing forever. A retry
+// while the stuck lookup is still blocked is refused at once by its latch;
+// one that answers clears the error.
+func (s ConversationCaptureSnapshot) rescoped() ConversationCaptureSnapshot {
+	if s.scopeErr == nil {
+		return s
+	}
+	resolved, err := resolveCaptureWorkingDir(s.scopeDir)
+	if err != nil {
+		s.scopeErr = err
+		return s
+	}
+	s.workingDir, s.scopeErr, s.scopeDir = resolved, nil, ""
+	return s
+}
+
+// ScopeErr is why the working directory this snapshot binds discovery to did
+// not resolve, or nil (#7292). While it stands the snapshot decides nothing;
+// a swap that armed it refuses before anything is torn down.
+func (s *ConversationCaptureSnapshot) ScopeErr() error {
+	if s == nil {
+		return nil
+	}
+	return s.scopeErr
 }

@@ -171,6 +171,19 @@ func worktreeStalledError(title, workDir string, err error) error {
 			"check that its mount (NFS, FUSE, sshfs) is responding, then retry the swap: %w", workDir, err)}
 }
 
+// worktreeLookupError is the swap paths' answer to a lookup of the worktree
+// that did not answer or failed (#7292): the actionable
+// WorktreeUnavailableError, raised before anything is torn down. A timeout
+// reads as worktreeStalledError does.
+func worktreeLookupError(title, workDir string, err error) error {
+	if stalled := worktreeStalledError(title, workDir, err); stalled != nil {
+		return stalled
+	}
+	return &WorktreeUnavailableError{Title: title, WorktreePath: workDir, Err: fmt.Errorf(
+		"a lookup on the filesystem holding %s failed, so af left the running agent alone; "+
+			"check that it is readable and its mount (NFS, FUSE, sshfs) is healthy, then retry the swap: %w", workDir, err)}
+}
+
 // swapPreflightCause is why a swap's replacement failed its launch preflight in
 // workDir: the worktree that did not answer (worktreeStalledError), raised
 // before anything is torn down, or preflight's own explanation of the program

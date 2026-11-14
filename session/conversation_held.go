@@ -53,6 +53,7 @@ func HeldAgentConversation(agent string, snap ConversationCaptureSnapshot) (Agen
 }
 
 func (s ConversationCaptureSnapshot) heldCodexConversation() (AgentConversationData, error) {
+	s = s.rescoped()
 	if strings.TrimSpace(s.codexHome) == "" || s.runtime == nil || s.runtime.answerHeld == nil {
 		return AgentConversationData{}, nil
 	}
@@ -66,6 +67,11 @@ func (s ConversationCaptureSnapshot) heldCodexConversation() (AgentConversationD
 // judgeHeldCodexRollouts picks the conversation out of a runtime's held path
 // set and names the file it came from.
 func (s ConversationCaptureSnapshot) judgeHeldCodexRollouts(held map[string]struct{}) (AgentConversationData, string, error) {
+	if s.scopeErr != nil {
+		// A working directory that did not resolve correlates nothing: the
+		// answer is undecided, never another directory's (#7292).
+		return AgentConversationData{}, "", fmt.Errorf("%w: %w", errCodexCaptureUndecided, s.scopeErr)
+	}
 	sessions := filepath.Join(s.codexHome, "sessions")
 	root := pathutil.ResolveForCompare(sessions) + string(filepath.Separator)
 	rootID, rootIDOK := fileIdentityOf(sessions)

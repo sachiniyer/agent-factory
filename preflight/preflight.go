@@ -166,7 +166,7 @@ func checkCommand(command, workingDir string) (*ProgramCheck, error) {
 	// read as a look that did not happen.
 	info, statErr := fsprobe.Stat(launch.WorkingDir)
 	if statErr != nil {
-		return check, fmt.Errorf("launch directory %q cannot be used: %w", launch.WorkingDir, statErr)
+		return check, &launchDirError{dir: launch.WorkingDir, err: statErr}
 	}
 	if !info.IsDir() {
 		return check, fmt.Errorf("launch directory %q is not a directory", launch.WorkingDir)
@@ -391,7 +391,13 @@ func ProgramError(agent, command string, cause error) error {
 		remediation = "fix the command in config"
 	}
 
+	var launchDir *launchDirError
 	switch {
+	case errors.As(cause, &launchDir) && errors.Is(cause, fsprobe.ErrProbeTimedOut):
+		// The launch directory did not answer: nothing is wrong with the
+		// program, and the fix is the mount (#7292).
+		return fmt.Errorf("the launch directory %s did not answer, so %s was not checked (resolved command: %q); check that its mount (NFS, FUSE, sshfs) is responding, then retry. Details: %v",
+			launchDir.dir, subject, command, cause)
 	case isNotExecutable(cause):
 		return fmt.Errorf("%s was found but is not executable (resolved command: %q). Make it executable (chmod +x), choose another agent, or %s. Details: %v",
 			subject, command, remediation, cause)
@@ -407,6 +413,19 @@ func ProgramError(agent, command string, cause error) error {
 			subject, command, remediation, cause)
 	}
 }
+
+// launchDirError is a launch directory the preflight could not use: its stat
+// failed, or did not answer within its bound.
+type launchDirError struct {
+	dir string
+	err error
+}
+
+func (e *launchDirError) Error() string {
+	return fmt.Sprintf("launch directory %q cannot be used: %v", e.dir, e.err)
+}
+
+func (e *launchDirError) Unwrap() error { return e.err }
 
 // isNotExecutable reports whether cause is a present-but-unrunnable binary — a
 // permission problem that chmod, not a reinstall, fixes.

@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -689,13 +688,16 @@ func (i *Instance) SessionCodexCaptureScope() ConversationCaptureSnapshot {
 	if !ok {
 		return ConversationCaptureSnapshot{}
 	}
-	if workingDir != "" {
-		workingDir = pathutil.ResolveForCompare(workingDir)
-	}
+	// Bounded (#7292): the poll's follow check and set-conversation's held
+	// observation arm this scope, and a launch dir that does not resolve
+	// leaves it deciding nothing.
+	workingDir, scopeErr := resolveCaptureWorkingDir(workingDir)
 	return ConversationCaptureSnapshot{
 		startedAt:    time.Now(),
 		codexHome:    home,
 		workingDir:   workingDir,
+		scopeErr:     scopeErr,
+		scopeDir:     scopeDirFor(workingDir, scopeErr),
 		receiptState: newCodexReceiptState(),
 		scopeOnly:    true,
 	}
