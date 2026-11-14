@@ -108,7 +108,10 @@ func TestLstat_DoesNotFollowALink(t *testing.T) {
 // filesystem returns the kernel's resolved path, so callers learn the second
 // project spelling a symlinked parent yields.
 func TestEvalSymlinks_ReportsTheAnswer(t *testing.T) {
-	dir := t.TempDir()
+	// Canonical, so "already canonical" holds wherever the temp root is itself
+	// a symlink: macOS's TMPDIR is under /var, which resolves to /private/var.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	target := filepath.Join(dir, "target")
 	require.NoError(t, os.Mkdir(target, 0o755))
 	link := filepath.Join(dir, "link")
