@@ -154,7 +154,13 @@ func claudeProjectName(path string) string {
 // filed under is listed. A launch dir that is gone still has one: while it
 // existed Claude filed under the kernel's spelling of it, which is its
 // deepest existing ancestor's resolution with the missing remainder rejoined,
-// as ResolveForCompare computes it (#7290). A lookup that did not answer
+// as ResolveForCompare computes it (#7290). That rejoin is an answer only when
+// every component it fell back past is proven absent: a symlink in the
+// missing remainder whose target is gone is still there, the kernel spelled
+// the path through its target, and the listing reads incomplete (#7295). One
+// case cannot be seen: a symlink removed outright leaves nothing to show, so
+// the rejoin past it lists the lexical spelling as though it were the kernel's.
+// A lookup that did not answer
 // within the bound (a wedged NFS, FUSE or sshfs mount), or that failed for any
 // reason but absence, leaves the kernel's spelling unknown: complete is false
 // then, the list holds only the recorded spelling, and a directory Claude may
