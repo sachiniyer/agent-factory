@@ -7,11 +7,12 @@ import (
 	"github.com/sachiniyer/agent-factory/handoff"
 )
 
-// The refusals a carry can give before its copy, named so that each one's
-// carry refusal code (handoff.Carry*) is defined beside its prose. The prose
-// is what the pane, the API's carry_failure and af's log say. The code is all
-// the handoff engine's carry-refused event carries, because the prose can embed
-// a path or an account name (#7156 review P3-2).
+// The refusals a carry can give, before its copy or during it, named so that
+// each one's carry refusal code (handoff.Carry*) is defined beside its prose.
+// The prose is what the pane, the API's carry_failure and af's log say. The
+// code is all the handoff engine's carry-refused event carries, because the
+// prose can embed a path or an account name (#7156 review P3-2). An empty
+// source codes as a missing one: evidence-wise they are the same (#7270).
 const (
 	carryNoLaunchCommandReason         = "af has no record of the command this session launched, so it cannot locate its conversation"
 	carryNothingAppliesReason          = "af found no conversation carry that applies to this session"
@@ -95,6 +96,8 @@ var carryRefusalCodeOf = map[string]string{
 	carryNoClaudeDirReason:             handoff.CarryUnresolved,
 	carryTranscriptMissingReason:       handoff.CarryMissing,
 	carryRolloutMissingReason:          handoff.CarryMissing,
+	carryTranscriptEmptyReason:         handoff.CarryMissing,
+	carryRolloutEmptyReason:            handoff.CarryMissing,
 	carryStoreUnlistedReason:           handoff.CarryUnverified,
 	carrySourceStoreUnlistedReason:     handoff.CarryUnverified,
 	carryTranscriptsUnlistedReason:     handoff.CarryUnverified,

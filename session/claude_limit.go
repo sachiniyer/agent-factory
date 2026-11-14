@@ -250,10 +250,14 @@ func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string, convI
 			// A failed watermark load reads as "everything is carried
 			// poison": the file may still hold the source account's
 			// refusal, so no byte in it can prove a reset.
+			// A carried conversation af holds no record for falls back to
+			// the whole file; a recorded zero is a record — that carry
+			// copied nothing, so every byte is this account's (#7270).
 			watermark := int64(math.MaxInt64)
 			if snapErr == nil {
-				watermark = prefixes[filepath.Clean(path)]
-				if watermark == 0 && carriedName != "" && filepath.Base(path) == carriedName {
+				var recorded bool
+				watermark, recorded = prefixes[filepath.Clean(path)]
+				if !recorded && carriedName != "" && filepath.Base(path) == carriedName {
 					watermark = math.MaxInt64
 				}
 			}

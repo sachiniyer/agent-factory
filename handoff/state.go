@@ -51,7 +51,10 @@ type State struct {
 	// begins below the watermark; records the target's own runtime appended
 	// past it count normally. Keyed per file rather than per account because
 	// an account-wide carried_at would blind genuine readings from other
-	// sessions (design R3).
+	// sessions (design R3). An entry of 0 is a record too: a carry af
+	// committed there copied no bytes. Only an absent entry means af never
+	// recorded a carry for the file (Snapshot.CarriedBoundary, #7270); a
+	// binary that predates the distinction reads a 0 exactly as absent.
 	CarriedPrefixes map[string]int64 `json:"carried_prefix_len,omitempty"`
 	// Halted records a mover halt (on_failure = "halt"). Presence means
 	// engine-originated moves are stopped; ordinary wait-for-reset resume is
@@ -186,7 +189,9 @@ func (s *Store) mutate(fn func(*State) error) error {
 // record boundary — the reader never parses a half-line. The watermark only
 // ever grows: a re-carry that verifies a shorter covered prefix must not
 // shrink the quarantine onto bytes an earlier, longer copy put there —
-// records in that span are still the source account's (#6802 review).
+// records in that span are still the source account's (#6802 review). n may
+// be 0: a carry that copied nothing still records that it ran, so a later
+// re-run can tell "carried zero bytes" from "never recorded" (#7270).
 func (s *Store) RecordCarriedPrefix(path string, n int64) error {
 	if path == "" || n < 0 {
 		return fmt.Errorf("carried prefix needs a path and a non-negative length, got %q / %d", path, n)

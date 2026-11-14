@@ -20,7 +20,8 @@ const (
 	// CarryUnverified: af could not read what it needs to confirm the carry —
 	// a provider store, a listing, or a header.
 	CarryUnverified = "unverified"
-	// CarryMissing: the conversation's file is missing from its home.
+	// CarryMissing: the conversation's file is missing from its home, or is
+	// empty there.
 	CarryMissing = "missing"
 	// CarryDuplicated: more than one file records the conversation.
 	CarryDuplicated = "duplicated"
