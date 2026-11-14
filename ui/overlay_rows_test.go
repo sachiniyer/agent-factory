@@ -88,28 +88,42 @@ func TestHooksPaneRowLinesFollowTheDrawnRows(t *testing.T) {
 	assert.False(t, h.SelectRow(0), "the cursor does not move under an open edit field")
 }
 
-// TestHooksPaneRowLinesSkipRowsTheOverflowHides: a list taller than the pane is
-// cut, and the "↓ more" cue takes the last body row — the report must not name
-// a hook on a line that draws the cue or a different hook.
-func TestHooksPaneRowLinesSkipRowsTheOverflowHides(t *testing.T) {
-	var cmds []string
-	for i := 0; i < 8; i++ {
-		cmds = append(cmds, fmt.Sprintf("hook-command-%d", i))
+// TestHooksPaneRowLinesFollowTheWindow: a list taller than the pane windows to
+// keep the selected row visible, and the row report is cut from that same
+// window — exactly as the task pane does. The window slides over the command
+// rows so the selected row (and, when adding, the input row) stays on screen
+// instead of being dropped below the fold by a selection-blind clip.
+func TestHooksPaneRowLinesFollowTheWindow(t *testing.T) {
+	cmds := make([]string, 8)
+	for i := range cmds {
+		cmds[i] = fmt.Sprintf("hook-command-%d", i)
 	}
 	h := NewHooksPane()
 	h.SetSize(60, 8)
 	h.SetCommands(cmds)
 	h.SetFocus(true)
 
-	lines := drawnLines(h.String())
-	rows := h.RowLines()
-	require.Len(t, rows, len(lines))
-	require.Len(t, lines, 8, "precondition: the pane is cut to its height")
-	lineWith(t, lines, "↓ more")
-	assertCueLinesAreChrome(t, lines, rows)
-	for k, r := range rows {
-		if r >= 0 {
-			assert.Contains(t, lines[k], cmds[r], "line %d names hook %d but draws %q", k, r, lines[k])
+	for sel := range cmds {
+		require.True(t, h.SelectRow(sel))
+		require.Equal(t, sel, h.SelectedRow())
+		lines := drawnLines(h.String())
+		rows := h.RowLines()
+		require.Len(t, rows, len(lines), "selection %d: one entry per drawn line", sel)
+		require.LessOrEqual(t, len(lines), 8, "precondition: the list is windowed to the pane")
+		// The selected row is the one the cursor is on, so it must be drawn.
+		assert.Equal(t, sel, rows[lineWith(t, lines, "▸ ")],
+			"selection %d: the cursor's line must name the selected row", sel)
+		assert.Contains(t, lines[lineWith(t, lines, "▸ ")], cmds[sel],
+			"selection %d: the selected row's command must be on the cursor's line", sel)
+		assert.Equal(t, -1, rows[0], "the title names no row")
+		assert.Equal(t, -1, rows[len(rows)-1], "the hint names no row")
+		assertCueLinesAreChrome(t, lines, rows)
+		// A row outside the window is not drawn, so it must not be named.
+		for k, r := range rows {
+			if r < 0 {
+				continue
+			}
+			assert.Contains(t, lines[k], cmds[r], "selection %d: line %d names hook %d but draws %q", sel, k, r, lines[k])
 		}
 	}
 }

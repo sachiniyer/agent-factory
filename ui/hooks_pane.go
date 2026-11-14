@@ -229,6 +229,11 @@ func (h *HooksPane) render() (string, []int) {
 		b.WriteString("\n")
 	}
 
+	// commandStartLine is the count of header chrome (title, description and
+	// any readOnly message) above the command rows — the pinned header height
+	// for the window below. Capturing it here, before the rows are written, lets
+	// the window name absolute source line indices the same way tagLine does.
+	commandStartLine := strings.Count(b.String(), "\n")
 	var sourceRows []int
 	for i, cmd := range h.commands {
 		sourceRows = tagLine(sourceRows, strings.Count(b.String(), "\n"), i)
@@ -265,7 +270,23 @@ func (h *HooksPane) render() (string, []int) {
 		b.WriteString(hintStyle.Render("enter edit hooks"))
 	}
 
+	// Window the list around whatever the user is acting on, the way
+	// fitTaskListPlan does for the task list, instead of the selection-blind
+	// top-anchored clip that used to drop the selected row — and the add/edit
+	// input row drawn after the command rows — below the fold. The anchor is
+	// the selected command's line, or the add field's line when adding (the
+	// edit field reuses the selected row's line); keeping it visible keeps both
+	// the cursor and any in-progress text on screen. The footer is the blank
+	// line plus the hint, pinned so the keys never scroll out of view.
 	lines := strings.Split(b.String(), "\n")
-	plan := fitBlockPlan(len(lines), h.height, 1)
+	const footer = 2
+	header := commandStartLine
+	anchorStart := commandStartLine
+	if h.adding {
+		anchorStart += len(h.commands)
+	} else if len(h.commands) > 0 {
+		anchorStart += h.selectedIdx
+	}
+	plan := fitWindowedPlan(len(lines), h.height, header, footer, anchorStart, anchorStart+1)
 	return renderFitPlan(lines, plan, h.width), planRows(plan, sourceRows)
 }

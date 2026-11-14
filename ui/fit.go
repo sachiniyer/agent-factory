@@ -70,6 +70,42 @@ func fitBlockPlan(n, height, pinnedFooter int) []int {
 	return append(plan, linesThrough(n-pinnedFooter, n)...)
 }
 
+// fitWindowedPlan windows a block of n source lines so the pinned header
+// (lines [0, header)), the anchor span [anchorStart, anchorEnd) and the pinned
+// footer (lines [n-footer, n)) stay visible when the block overflows height. It
+// is the selection-aware counterpart to fitBlockPlan's top-anchored clip: the
+// anchor — the selected row, or the add/edit input row — is what a clicking or
+// typing user must see, so a window slides over the body to keep it on screen
+// rather than dropping it below the fold. If even the windowed body cannot fit
+// (a viewport shorter than header+footer+one anchor row), fitBlockPlan
+// supplies the "↓ more" cue, so the cue and the row geometry a click zone needs
+// still come from one plan. The text and the row report are both cut from the
+// returned plan, so a zone cannot land on a line the frame did not draw
+// (#7175).
+//
+// anchorStart and anchorEnd must name body lines — at least header, and below
+// n-footer — as a selected row or input field always is. The returned plan
+// names, for each drawn line, the source line shown there or moreLine.
+func fitWindowedPlan(n, height, header, footer, anchorStart, anchorEnd int) []int {
+	budget := height - header - footer
+	if height <= 0 || n <= height || budget <= 0 {
+		return fitBlockPlan(n, height, footer)
+	}
+	start := max(header, anchorEnd-budget)
+	start = min(start, anchorStart)
+	end := min(start+budget, n-footer)
+	body := linesThrough(0, header)
+	body = append(body, linesThrough(start, end)...)
+	body = append(body, linesThrough(n-footer, n)...)
+	plan := fitBlockPlan(len(body), height, footer)
+	for i, k := range plan {
+		if k != moreLine {
+			plan[i] = body[k]
+		}
+	}
+	return plan
+}
+
 // linesThrough is the source line indices [from, to).
 func linesThrough(from, to int) []int {
 	plan := make([]int, 0, max(0, to-from))

@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"fmt"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/muesli/termenv"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -188,4 +190,78 @@ func TestHooksPaneUnchangedEditsStayClean(t *testing.T) {
 		assert.False(t, h.IsDirty(),
 			"an edit restored to the committed value has nothing to persist (#6790)")
 	})
+}
+
+// overflowHooks makes `n` "hook-command-NN" commands — enough to overflow a
+// 60%-height overlay at SetSize(60, 12) (20 content lines for n=15), reproducing
+// the small-terminal fold the selection-blind clip used to drop the selected
+// row and the add/edit input past.
+func overflowHooks(n int) []string {
+	cmds := make([]string, n)
+	for i := range cmds {
+		cmds[i] = fmt.Sprintf("hook-command-%02d", i)
+	}
+	return cmds
+}
+
+// TestHooksPaneKeepsEditInputVisibleOnOverflow pins the most consequential half
+// of the bug: pressing enter on a below-fold row and typing renders the edit
+// field — caret and all — instead of swallowing keystrokes into an invisible
+// buffer.
+func TestHooksPaneKeepsEditInputVisibleOnOverflow(t *testing.T) {
+	forceProfile(t, termenv.TrueColor)
+	h := NewHooksPane()
+	h.SetSize(60, 12)
+	h.SetCommands(overflowHooks(15))
+	h.SetFocus(true)
+
+	require.True(t, h.SelectRow(14))
+	require.True(t, h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}))
+	require.True(t, h.editing)
+	require.Equal(t, "hook-command-14", h.editBuffer)
+
+	// Clear the seeded buffer and type something the old clip would have hidden.
+	require.True(t, h.HandleKeyPress(ctrlU))
+	require.Empty(t, h.editBuffer)
+	typeRunes(func(m tea.KeyMsg) { h.HandleKeyPress(m) }, "ZZedit")
+	require.Equal(t, "ZZedit", h.editBuffer)
+
+	out := h.String()
+	lines := drawnLines(out)
+	require.LessOrEqual(t, len(lines), 12)
+	require.Contains(t, out, InputCaret(), "the edit caret must be drawn, not dropped below the fold")
+	editLine := lineWith(t, lines, "ZZedit")
+	assert.Contains(t, lines[editLine], "▸ ", "the edit field carries the cursor marker")
+	assert.Contains(t, out, "enter save · esc cancel", "the edit-mode hint stays pinned")
+}
+
+// TestHooksPaneKeepsAddInputVisibleOnOverflow pins the add-field half: pressing
+// n after navigating down and typing renders the add field rather than
+// committing blind text on Enter.
+func TestHooksPaneKeepsAddInputVisibleOnOverflow(t *testing.T) {
+	forceProfile(t, termenv.TrueColor)
+	h := NewHooksPane()
+	h.SetSize(60, 12)
+	h.SetCommands(overflowHooks(15))
+	h.SetFocus(true)
+
+	require.True(t, h.SelectRow(14))
+	require.True(t, h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")}))
+	require.True(t, h.adding)
+	typeRunes(func(m tea.KeyMsg) { h.HandleKeyPress(m) }, "ZZadd")
+	require.Equal(t, "ZZadd", h.editBuffer)
+
+	out := h.String()
+	lines := drawnLines(out)
+	require.LessOrEqual(t, len(lines), 12)
+	require.Contains(t, out, InputCaret(), "the add caret must be drawn, not dropped below the fold")
+	addLine := lineWith(t, lines, "ZZadd")
+	assert.Contains(t, lines[addLine], "▸ ", "the add field carries the cursor marker")
+	assert.Contains(t, out, "enter save · esc cancel", "the add-mode hint stays pinned")
+
+	// The typed text is what gets committed, not a visible-only artifact: the
+	// window reveals it before Enter, so a user can see and fix it.
+	require.True(t, h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}))
+	require.False(t, h.adding)
+	require.Equal(t, "ZZadd", h.GetCommands()[len(h.GetCommands())-1])
 }
