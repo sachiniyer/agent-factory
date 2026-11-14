@@ -102,6 +102,8 @@ func TestClaudeCarryRefusesATargetThatHoldsAnotherCopy(t *testing.T) {
 		writeCarryFile(t, target, filepath.Join(resolved, carryTestID+".jsonl"), "{\"stale\":true}\n")
 
 		require.Empty(t, inst.AccountSwapCarryRefusal(), "the check-ahead names no target, so it cannot see this")
+		require.Equal(t, handoff.CarryDuplicated, inst.AccountSwapCarryRefusalTo("work"),
+			"the answer against the target sees it, so require_carry can refuse before the move (#7273)")
 		require.NoError(t, inst.ValidateAccountSwap("work"))
 		require.Nil(t, inst.accountSwapLaunch.carry)
 		want := fmt.Sprintf(carryTargetOtherCopyFormat, filepath.Join(target, resolved, carryTestID+".jsonl"))

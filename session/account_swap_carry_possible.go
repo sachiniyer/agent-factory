@@ -84,3 +84,9 @@ func carryAheadRefusal(carry *conversationCarry, reason, program string) string 
 	}
 	return ""
 }
+
+// AccountSwapCarryRefusalTo is a scaffold with the pre-#7273 answer: the
+// check-ahead names no target, so it cannot see the target's home.
+func (i *Instance) AccountSwapCarryRefusalTo(target string) string {
+	return i.AccountSwapCarryRefusal()
+}

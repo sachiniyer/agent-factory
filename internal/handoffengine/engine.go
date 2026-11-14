@@ -64,8 +64,10 @@ type SessionInput struct {
 	// the engine asks it only when it can change a verdict — see carryRefusal
 	// — and nil reads as handoff.CarryUnconfirmed (#7152).
 	CarryCheck func() string
-	HomeDir    string // the runtime-bound account home (codex), "" elsewhere
-	Program    string // the recorded launch command (RuntimeProgram); the
+	// CarryCheckTo is a scaffold the next commit wires up (#7273).
+	CarryCheckTo func(target string) string
+	HomeDir      string // the runtime-bound account home (codex), "" elsewhere
+	Program      string // the recorded launch command (RuntimeProgram); the
 	// drift compare asks whether its words could change the sandbox mode or
 	// profile — anything beyond af's own injected args answers "yes" (#6902)
 	LimitAccount   string    // parked-on account, from instance limit facts
