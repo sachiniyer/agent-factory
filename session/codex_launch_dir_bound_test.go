@@ -359,6 +359,11 @@ func TestSwapAgentDoesNotStallOnAWedgedWorktree(t *testing.T) {
 // before it stops any pane. On a wedged mount that fails the swap within the
 // bound, with the same actionable error (#7287 review R2).
 func TestManualAccountSwapDoesNotStallOnAWedgedWorktree(t *testing.T) {
+	// The proof preflights the replacement's executable, which need not be
+	// installed where the test runs.
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, tmux.ProgramClaude), []byte("#!/bin/sh\n"), 0o755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	carryAmbientProviderHomes(t)
 	inst, _ := carrySwapInstance(t, tmux.ProgramClaude)
 	require.NoError(t, inst.CheckManualAccountSwap("work", "", false), "precondition: the manual swap's proof passes")
