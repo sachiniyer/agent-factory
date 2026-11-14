@@ -62,6 +62,7 @@ const (
 //	body rows     plain text: no ❯, no frame rule, no footer
 //	option block  one unbroken run of rows holding the "Yes, I trust this
 //	              folder" row, begun by the first option row below the body
+//	closing frame optional, a frame rule directly above the footer
 //	footer        "Enter to confirm…", then only blank rows and frame chrome
 //
 // and no ❯ row above the question: a launch modal owns the pane from the top,
@@ -78,12 +79,16 @@ const (
 // only the terminal's wraps, not those. The question sits mid-sentence, so it
 // wraps well before the options or the footer do.
 //
-// Anything else is no dialog — in particular the dialog's text with something
-// it never paints below it: the agent's composer (framed by rules, led by ❯),
-// more output, a draft. A working agent paints its composer below its output,
-// so a dialog it quotes — a diff or a grep of this file, a review — reads as
-// no dialog, and the create delivers its prompt to the agent. #3587 held such a
-// pane instead, refusing the quote until the create failed.
+// A region that breaks that grammar is no dialog only when the working agent's
+// composer is painted below the dialog's option rows (claudeFolderTrustBroken).
+// A working agent always paints its composer below its output, so a dialog it
+// quotes — a diff or a grep of this file, a review — reads as no dialog, and
+// the create delivers its prompt to the agent. #3587 held such a pane instead,
+// refusing the quote until the create failed. Any other row the dialog does not
+// paint is not evidence of a working agent, because the live dialog can show
+// one: Claude Code's footer element reads "Press Ctrl-C again to exit" for a
+// moment after one Ctrl-C (#7275 review). So such a region is partial, and
+// holds without a key.
 func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
@@ -111,53 +116,54 @@ func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 		afterFooter
 	)
 	phase, options, footer := inBody, -1, -1
+	broken := func(at int) claudeFolderTrustVerdict {
+		return claudeFolderTrustBroken(lines, rows, at, lastPainted)
+	}
 	for i := last + 1; i < len(rows); i++ {
 		row, rule := rows[i], claudeTrustFrameRule(lines[i])
 		switch phase {
 		case inBody:
 			switch {
 			case rule || claudeTrustIsFooter(row.label):
-				return claudeFolderTrustNone
+				return broken(i)
 			case row.blank:
 			case claudeFolderTrustOptionStarts(rows, i, i == lastPainted):
 				phase, options = inOptions, i
 			case row.selected:
-				// A ❯ row that is none of this dialog's options is a composer.
-				return claudeFolderTrustNone
+				// A ❯ row that is none of this dialog's options: a composer.
+				return broken(i)
 			}
-		case inOptions:
+		case inOptions, afterOptions:
 			switch {
+			case rule && i+1 < len(rows) && claudeTrustIsFooter(rows[i+1].label):
+				// The dialog's closing frame, directly above its footer.
+				phase = afterOptions
 			case rule:
-				// The dialog paints no rule between its options and its
-				// footer; a composer does.
-				return claudeFolderTrustNone
+				return broken(i)
 			case row.blank:
 				phase = afterOptions
 			case claudeTrustIsFooter(row.label):
 				phase, footer = inFooter, i
-			}
-		case afterOptions:
-			switch {
-			case rule:
-				return claudeFolderTrustNone
-			case row.blank:
-			case claudeTrustIsFooter(row.label):
-				phase, footer = inFooter, i
+			case phase == inOptions:
+				// Another option row.
 			case i == lastPainted && strings.HasPrefix(claudeTrustAffordancePrefix, row.label):
 				// The footer, cut short mid-paint.
 				return claudeFolderTrustPartial
 			default:
-				return claudeFolderTrustNone
+				return broken(i)
 			}
 		case inFooter:
-			// Content straight below the footer row is the rest of a footer the
-			// pane wrapped; claudeFolderTrustFooterRead checks it.
-			if row.blank {
+			switch {
+			case row.blank:
 				phase = afterFooter
+			case row.selected:
+				return broken(i)
 			}
+			// Other content straight below the footer row is the rest of a
+			// footer the pane wrapped, if claudeFolderTrustFooterRead reads it so.
 		case afterFooter:
 			if !row.blank && !rule {
-				return claudeFolderTrustNone
+				return broken(i)
 			}
 		}
 	}
@@ -172,12 +178,57 @@ func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 	}
 	whole, ok := claudeFolderTrustFooterRead(rows, footer)
 	if !ok {
-		return claudeFolderTrustNone
+		// The rows straight below the footer are not a wrap of it.
+		return broken(footer + 1)
 	}
 	if wrapped || !label || !whole {
 		return claudeFolderTrustUnreadable
 	}
 	return claudeFolderTrustComplete
+}
+
+// claudeFolderTrustBroken decides a region that breaks the dialog's grammar at
+// row from (#7275 review, R1). It is no dialog only when a row from there down
+// is the working agent's composer and no row of the dialog's options is painted
+// below it: the composer of a working agent is the last thing in its pane, so
+// it is what shows that the dialog's text above is output being quoted. Any
+// other row the grammar does not know — a swapped footer, a notice, a tip, a
+// stray line — or a frame rule on its own, which is the dialog's own chrome
+// too, is no evidence that an agent is working. The region holds as partial.
+func claudeFolderTrustBroken(lines []string, rows []claudeTrustRow, from, lastPainted int) claudeFolderTrustVerdict {
+	composer, option := -1, -1
+	for i := from; i < len(rows); i++ {
+		switch {
+		case claudeFolderTrustComposerRow(lines, rows, i, i == lastPainted):
+			composer = i
+		case rows[i].selected || claudeFolderTrustOptionLabel(rows[i].label):
+			option = i
+		}
+	}
+	if composer >= 0 && composer > option {
+		return claudeFolderTrustNone
+	}
+	return claudeFolderTrustPartial
+}
+
+// claudeFolderTrustComposerRow reports whether row i is the working agent's
+// prompt row rather than anything the dialog paints:
+//
+//   - a ❯ row that is none of the dialog's options. The dialog paints one ❯,
+//     on an option; Claude Code leads its composer prompt with the same glyph,
+//     between two rules (testdata/claude_2_1_322_composer_after_mcp_decline.ansi),
+//     and a permission prompt in the composer's place carries one on its own
+//     picker.
+//   - a "> " row straight below a frame rule: the boxed composer older builds
+//     draw ("╭───╮" over "│ > … │").
+//
+// A frame rule alone is not one: the dialog's closing frame is a rule too.
+func claudeFolderTrustComposerRow(lines []string, rows []claudeTrustRow, i int, lastPainted bool) bool {
+	if rows[i].selected {
+		return !claudeFolderTrustOptionStarts(rows, i, lastPainted)
+	}
+	label := rows[i].label
+	return i > 0 && claudeTrustFrameRule(lines[i-1]) && (label == ">" || strings.HasPrefix(label, "> "))
 }
 
 // claudeFolderTrustQuestionRows finds the rows the question is painted on, the

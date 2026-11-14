@@ -91,7 +91,10 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		// while Claude Code paints it, and when af cannot read it as rows —
 		// a pane narrow enough that Claude Code wraps its question. Before,
 		// either one matched no clause, the pane read clear, and the create
-		// typed its prompt into the modal.
+		// typed its prompt into the modal. It also holds while it shows a row
+		// it does not paint, such as a footer swapped by one Ctrl-C, unless the
+		// agent's composer below it shows the dialog is only quoted (#7275
+		// review).
 		switch claudeFolderTrustDialogOf(screen) {
 		case claudeFolderTrustPartial:
 			return true
