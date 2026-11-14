@@ -697,6 +697,7 @@ func (i *Instance) SessionCodexCaptureScope() ConversationCaptureSnapshot {
 		codexHome:    home,
 		workingDir:   workingDir,
 		scopeErr:     scopeErr,
+		scopeDir:     scopeDirFor(workingDir, scopeErr),
 		receiptState: newCodexReceiptState(),
 		scopeOnly:    true,
 	}

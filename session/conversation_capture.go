@@ -85,10 +85,15 @@ type ConversationCaptureSnapshot struct {
 	codexBeforeErr error
 	// scopeErr is set when the working directory the snapshot binds discovery
 	// to did not resolve: the lookup did not answer within its bound, or
-	// failed (#7292). Correlating against it would be a guess, so a snapshot
-	// armed on it decides nothing: the diff scan and the held query report the
-	// channel unavailable, and a receipt pool is unscoped.
+	// failed (#7292). Correlating against it would be a guess, so while it
+	// stands the snapshot decides nothing: the diff scan and the held query
+	// report the channel unavailable, and a receipt pool is unscoped. Each
+	// decision retries the resolution of scopeDir first (rescoped), so a
+	// transient non-answer does not outlive the mount's recovery (#7298
+	// review).
 	scopeErr error
+	// scopeDir is the launch dir as given, kept while scopeErr stands.
+	scopeDir string
 	// receiptState carries the scan memoization across the separate
 	// WaitForPromptReceipt calls that share one snapshot — the config agent's
 	// initial, escalation, and five-minute windows are three different calls
@@ -251,6 +256,7 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptRollout(path string) bool
 // unprovable launch directory) covers the whole store and is stat-only: it
 // never reads transcript contents to decide membership.
 func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
+	*s = s.rescoped()
 	files, err := codexRolloutFiles(s.codexHome)
 	if err != nil {
 		return
@@ -358,6 +364,7 @@ func beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) C
 		codexBefore:    before,
 		codexBeforeErr: beforeErr,
 		scopeErr:       scopeErr,
+		scopeDir:       scopeDirFor(workingDir, scopeErr),
 		receiptState:   newCodexReceiptState(),
 	}
 }
@@ -573,6 +580,7 @@ func captureCarriedCodexConversation(snap ConversationCaptureSnapshot) (AgentCon
 }
 
 func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConversationData, bool, error) {
+	snap = snap.rescoped()
 	observed, err := newCodexRolloutFiles(snap)
 	if err != nil {
 		// A store that cannot be enumerated is retried inside the caller's
@@ -691,6 +699,7 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
 // session_meta is not yet classifiable: it could be the awaited one mid-write,
 // so neither absence nor ambiguity may be concluded yet.
 func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (received, undecided bool, err error) {
+	snap = snap.rescoped()
 	state := snap.receiptState
 	if state == nil {
 		state = newCodexReceiptState()
@@ -764,9 +773,37 @@ func resolveCaptureWorkingDir(workingDir string) (resolved string, scopeErr erro
 	return resolved, nil
 }
 
+// scopeDirFor is the launch dir a snapshot keeps to retry its resolution: the
+// cleaned dir while scopeErr stands, else "".
+func scopeDirFor(workingDir string, scopeErr error) string {
+	if scopeErr == nil {
+		return ""
+	}
+	return workingDir
+}
+
+// rescoped is s with its working directory resolved again when the last
+// resolution did not answer or failed (#7298 review): the daemon keeps one
+// snapshot for a runtime's life, and a recorded row's follow never retakes
+// it, so a transient non-answer must not decide nothing forever. A retry
+// while the stuck lookup is still blocked is refused at once by its latch;
+// one that answers clears the error.
+func (s ConversationCaptureSnapshot) rescoped() ConversationCaptureSnapshot {
+	if s.scopeErr == nil {
+		return s
+	}
+	resolved, err := resolveCaptureWorkingDir(s.scopeDir)
+	if err != nil {
+		s.scopeErr = err
+		return s
+	}
+	s.workingDir, s.scopeErr, s.scopeDir = resolved, nil, ""
+	return s
+}
+
 // ScopeErr is why the working directory this snapshot binds discovery to did
-// not resolve, or nil (#7292). A snapshot with one decides nothing; a swap
-// that armed it refuses before anything is torn down.
+// not resolve, or nil (#7292). While it stands the snapshot decides nothing;
+// a swap that armed it refuses before anything is torn down.
 func (s *ConversationCaptureSnapshot) ScopeErr() error {
 	if s == nil {
 		return nil

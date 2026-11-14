@@ -50,7 +50,10 @@ func captureChannelUnavailable(err error) error {
 // CodexScope names the Codex store and working directory this snapshot binds
 // discovery to.
 func (s *ConversationCaptureSnapshot) CodexScope() (home, workingDir string) {
-	return s.codexHome, s.workingDir
+	// The resolved scope once it resolves (#7298 review), so a retake that
+	// binds the same directory reads as the same scope.
+	r := s.rescoped()
+	return r.codexHome, r.workingDir
 }
 
 // CarriesConversation reports whether this snapshot confirms a conversation an

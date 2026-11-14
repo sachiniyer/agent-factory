@@ -269,3 +269,46 @@ func TestCodexStalenessOnADanglingLaunchDir(t *testing.T) {
 	require.True(t, got.unverified, "the repair is unverified, never another directory's: %+v", got)
 	require.NotContains(t, got.reason, "another directory")
 }
+
+// Codex review of #7298 (P2): a scope armed during a transient non-answer must
+// not keep deciding nothing once the mount answers. The daemon's capture loop
+// keeps one snapshot for the runtime's life, and a recorded row's follow never
+// retakes it. So each decision retries the bounded resolution of the original
+// launch dir, and the held answer names the conversation again once it
+// resolves.
+func TestSessionCodexCaptureScopeRecoversOnceTheLaunchDirAnswers(t *testing.T) {
+	setConversationConfig(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	link, launchDir, kernel := symlinkedCodexLaunchDir(t)
+	own := writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-11-11T13-50-27-"+heldTestOwnID+".jsonl", kernel)
+	inst := setConversationInstance(t, launchDir)
+	held := heldTestInstance(t, own)
+
+	release := make(chan struct{})
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(restoreTimeout)
+	restoreSeam := fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+		if path == link || strings.HasPrefix(path, link+string(filepath.Separator)) {
+			<-release
+		}
+		return filepath.EvalSymlinks(path)
+	})
+	scope := withinBound(t, inst.SessionCodexCaptureScope)
+	require.Error(t, scope.ScopeErr(), "precondition: armed while the launch dir did not answer")
+	_, err := HeldAgentConversation(tmux.ProgramCodex, held.BindConversationCaptureRuntime(scope))
+	require.True(t, errors.Is(err, errCodexCaptureUndecided), "undecided while it does not answer: %v", err)
+
+	// The mount answers again: the stuck lookup returns and its latch clears.
+	close(release)
+	restoreSeam()
+	var conv AgentConversationData
+	require.Eventually(t, func() bool {
+		conv, err = HeldAgentConversation(tmux.ProgramCodex, held.BindConversationCaptureRuntime(scope))
+		return err == nil
+	}, 5*time.Second, 20*time.Millisecond, "the same scope answers once the launch dir resolves: %v", err)
+	require.Equal(t, heldTestOwnID, conv.ID, "and names the session's conversation")
+	home, dir := scope.CodexScope()
+	require.Equal(t, codexHome, home)
+	require.Equal(t, kernel, dir, "the scope it reports is the resolved one, so a retake's scope matches")
+}

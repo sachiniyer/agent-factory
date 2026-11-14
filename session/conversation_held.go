@@ -53,6 +53,7 @@ func HeldAgentConversation(agent string, snap ConversationCaptureSnapshot) (Agen
 }
 
 func (s ConversationCaptureSnapshot) heldCodexConversation() (AgentConversationData, error) {
+	s = s.rescoped()
 	if strings.TrimSpace(s.codexHome) == "" || s.runtime == nil || s.runtime.answerHeld == nil {
 		return AgentConversationData{}, nil
 	}
