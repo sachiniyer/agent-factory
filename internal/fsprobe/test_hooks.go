@@ -43,13 +43,23 @@ func SetReadDirForTest(f func(string) ([]os.DirEntry, error)) func() {
 }
 
 // SetEvalSymlinksForTest overrides the symlink resolution EvalSymlinks runs
-// inside its bounded flight, so a test can stand in for a launch directory on
-// a wedged mount (#7212). Callers must restore the original via the returned
+// inside its bounded flight, and that ResolveForCompare's ancestor walk runs
+// inside its own, so a test can stand in for a launch directory on a wedged
+// mount (#7212, #7272). Callers must restore the original via the returned
 // function.
 func SetEvalSymlinksForTest(f func(string) (string, error)) func() {
 	old := evalSymlinksPath
 	evalSymlinksPath = f
 	return func() { evalSymlinksPath = old }
+}
+
+// SetLstatForTest overrides the metadata lookup Lstat runs inside its bounded
+// flight, so a test can stand in for a worktree on a wedged mount (#7272).
+// Callers must restore the original via the returned function.
+func SetLstatForTest(f func(string) (os.FileInfo, error)) func() {
+	old := lstatPath
+	lstatPath = f
+	return func() { lstatPath = old }
 }
 
 // SetOpenForTest overrides the open ReadFileWith runs inside its bounded

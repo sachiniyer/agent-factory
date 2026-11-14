@@ -210,13 +210,15 @@ const (
 // Everything else is this worktree's: a subdirectory the agent cd'd into (a
 // message records the session's current cwd), a directory the conversation
 // was relocated from, the worktree's path before a move. Both sides are
-// compared resolved, the way the Codex checks compare a rollout's cwd.
+// compared resolved, the way the Codex checks compare a rollout's cwd, and
+// both resolutions are bounded: the recorded side inside the transcript read's
+// flight, the launch side by claudeLaunchDirForCompare (#7272).
 func claudeTranscriptOwnership(transcript claudeTranscript, launchDir string) claudeOwnership {
 	recorded, ok := claudeTranscriptRecordedDir(filepath.Join(transcript.dir, transcript.name))
 	if !ok {
 		return claudeOwnershipUnknown
 	}
-	if recorded.resolved == pathutil.ResolveForCompare(launchDir) {
+	if recorded.resolved == claudeLaunchDirForCompare(launchDir) {
 		return claudeOwnedHere
 	}
 	for _, project := range claudeProjectCandidates(launchDir) {
@@ -225,4 +227,19 @@ func claudeTranscriptOwnership(transcript claudeTranscript, launchDir string) cl
 		}
 	}
 	return claudeOwnedHere
+}
+
+// claudeLaunchDirForCompare is launchDir resolved for comparison with the
+// directory a transcript records. The launch dir may sit on a mount that no
+// longer answers (NFS, FUSE, a dead sshfs), so the resolution is bounded
+// (fsprobe, #7272). One that does not answer within the bound is a look that
+// did not happen, which says nothing about whether the two are one directory:
+// the launch dir's recorded spelling decides alone, cleaned, exactly as
+// ResolveForCompare answers when no ancestor resolves.
+func claudeLaunchDirForCompare(launchDir string) string {
+	resolved, err := fsprobe.ResolveForCompare(launchDir)
+	if err != nil {
+		return filepath.Clean(launchDir)
+	}
+	return resolved
 }

@@ -16,11 +16,24 @@ import "path/filepath"
 // spellings of the same path compare unequal. When that comparison is a probe
 // ("is this still registered?"), the failure to resolve becomes a confident
 // WRONG ANSWER rather than an error — so canonicalize both sides through here.
+//
+// The walk is unbounded: on a mount that never answers (NFS, FUSE, a dead
+// sshfs) the first EvalSymlinks never returns. A caller on a poll or restore
+// path uses fsprobe.ResolveForCompare, which runs this same walk inside one
+// bounded flight (#7272).
 func ResolveForCompare(path string) string {
+	return ResolveForCompareWith(path, filepath.EvalSymlinks)
+}
+
+// ResolveForCompareWith is ResolveForCompare with eval in place of
+// filepath.EvalSymlinks, for a caller that runs the walk somewhere eval can be
+// substituted (fsprobe's bounded flight and its test seam). The walk and its
+// missing-leaf semantics are ResolveForCompare's exactly.
+func ResolveForCompareWith(path string, eval func(string) (string, error)) string {
 	path = filepath.Clean(path)
 	suffix := ""
 	for {
-		resolved, err := filepath.EvalSymlinks(path)
+		resolved, err := eval(path)
 		if err == nil {
 			return filepath.Join(resolved, suffix)
 		}

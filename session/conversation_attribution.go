@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 // newerConversationIsEvidence reports whether a conversation newer than this
@@ -24,6 +24,12 @@ import (
 // files beside whatever else runs there, and one whose directory af cannot
 // prove is attributed nothing. Without that evidence a guard resumes the
 // recorded conversation and retires nothing.
+//
+// Each resolution is bounded (fsprobe, #7272): the worktree and the launch dir
+// may sit on a mount that no longer answers, on the restore, respawn,
+// account-swap and load paths that ask. A resolution that does not answer
+// within the bound is a directory af cannot prove, so it is attributed
+// nothing.
 func (i *Instance) newerConversationIsEvidence(launchDir string) bool {
 	i.mu.RLock()
 	gw, inPlace, title := i.gitWorktree, i.inPlace, i.Title
@@ -35,12 +41,18 @@ func (i *Instance) newerConversationIsEvidence(launchDir string) bool {
 	if worktree == "" || strings.TrimSpace(launchDir) == "" {
 		return false
 	}
-	own := pathutil.ResolveForCompare(filepath.Clean(worktree))
-	// A worktree at the repository's own path is the user's checkout, whatever
-	// the record's flags say.
-	if own == pathutil.ResolveForCompare(filepath.Clean(repo)) {
+	own, err := fsprobe.ResolveForCompare(worktree)
+	if err != nil {
 		return false
 	}
-	dir := pathutil.ResolveForCompare(filepath.Clean(launchDir))
+	// A worktree at the repository's own path is the user's checkout, whatever
+	// the record's flags say.
+	if checkout, err := fsprobe.ResolveForCompare(repo); err != nil || own == checkout {
+		return false
+	}
+	dir, err := fsprobe.ResolveForCompare(launchDir)
+	if err != nil {
+		return false
+	}
 	return dir == own || strings.HasPrefix(dir, own+string(filepath.Separator))
 }
