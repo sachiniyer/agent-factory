@@ -56,6 +56,13 @@ type claudeFolderTrustPane struct {
 	// it, so the parser is exercised against bordered rows and not just the
 	// bare lines the issue's poller printed.
 	boxed bool
+	// styled renders the question and option labels with per-word SGR styling,
+	// the measured Claude Code render that breaks the byte-contiguity of
+	// multi-word phrases (see testdata/claude_2_1_322_mcp_server_dialog.ansi).
+	// The gate's raw strings.Contains clauses missed such a dialog before the
+	// ANSI-stripping fix; this exercises both the gate and the parser against
+	// the same per-word spans.
+	styled bool
 	// staleFrames makes the N captures that FOLLOW a movement key return the
 	// pre-movement frame, modelling the terminal repaint race between
 	// `send-keys` returning and the redraw actually landing.
@@ -94,7 +101,11 @@ func (p *claudeFolderTrustPane) render() string {
 		b.WriteString("╭" + strings.Repeat("─", 50) + "╮\n")
 	}
 	write("Quick safety check:")
-	write("Is this a project you created or one you trust?")
+	question := "Is this a project you created or one you trust?"
+	if p.styled {
+		question = styleWordsPerWord(question)
+	}
+	write(question)
 	write("")
 	for idx, option := range p.options {
 		row := "  "
@@ -104,7 +115,11 @@ func (p *claudeFolderTrustPane) render() string {
 		if p.ordinals {
 			row += fmt.Sprintf("%d. ", idx+1)
 		}
-		write(row + option)
+		label := option
+		if p.styled {
+			label = styleWordsPerWord(label)
+		}
+		write(row + label)
 	}
 	write("")
 	write("Enter to confirm · Esc to cancel")
@@ -112,6 +127,19 @@ func (p *claudeFolderTrustPane) render() string {
 		b.WriteString("╰" + strings.Repeat("─", 50) + "╯\n")
 	}
 	return b.String()
+}
+
+// styleWordsPerWord wraps each space-separated word of s in its own SGR span,
+// the per-word styling Claude Code applies to some dialog rows. The escapes
+// break the byte-contiguity of any multi-word phrase, so a raw
+// strings.Contains on the styled text never matches — exactly the input the
+// gate's two raw clauses failed on before the ANSI-stripping fix.
+func styleWordsPerWord(s string) string {
+	parts := strings.Split(s, " ")
+	for i, w := range parts {
+		parts[i] = "\x1b[1m\x1b[38;5;220m" + w + "\x1b[0m"
+	}
+	return strings.Join(parts, " ")
 }
 
 // capture answers a capture-pane, honoring any pending repaint lag.
