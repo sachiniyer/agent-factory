@@ -116,8 +116,11 @@ func (hs *headlessServer) SwapAgent(req agentSwapRequest, resp *agentSwapRespons
 }
 
 // launchAdopted starts the agent in the worktree this server adopted (#5571 W8.6),
-// resuming the recorded conversation. Nothing is created and no hook runs.
-func (hs *headlessServer) launchAdopted(req agentLifecycleRequest, resp *agentOKResponse) error {
+// resuming the recorded conversation. Nothing is created and no hook runs. It is
+// a package-level seam — like restoreSurvivingTabs below — so the Codex capture
+// wiring around it in launchWorkspace can be exercised without the local runtime
+// a real adopted launch respawns through.
+var launchAdopted = func(hs *headlessServer, req agentLifecycleRequest, resp *agentOKResponse) error {
 	if err := hs.inst.LaunchAdopted(req.Conversation); err != nil {
 		return err
 	}
@@ -201,11 +204,39 @@ func (hs *headlessServer) launchWorkspace(req agentLifecycleRequest, resp *agent
 			return err
 		}
 	}
-	if hs.adopted && !req.FirstTimeSetup && hs.inst != nil {
-		return hs.launchAdopted(req, resp)
-	}
-	var codexSnap session.ConversationCaptureSnapshot
 	codex := tmux.DetectAgentFromCommand(hs.program) == tmux.ProgramCodex
+	var codexSnap session.ConversationCaptureSnapshot
+	if codex && hs.inst != nil {
+		// Before the spawn, so the capture can tell the new rollout from old ones.
+		// Correlated against the directory the launch command actually runs the
+		// agent in (an `env -C DIR codex` moves it off the worktree), not the
+		// worktree; unscoped when that is not provable (#5861). The adopted and
+		// ordinary launch paths share this arm: both can start a fresh Codex
+		// conversation (an adopt whose recorded id this host's store refuses, or a
+		// first-time setup the store would not resume), and both must let the
+		// capture name the rollout that fresh conversation mints (#5947).
+		codexSnap = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(
+			codexHomeFor(hs.program, hs.inst.GetWorktreePath()),
+			session.LaunchCaptureWorkingDir(hs.program, hs.inst.GetWorktreePath()))
+	}
+	if hs.adopted && !req.FirstTimeSetup && hs.inst != nil {
+		// A restore-adopt can refuse the recorded conversation — this host's
+		// provider store does not hold it (for an account-scoped Codex sandbox the
+		// archive deleted and the restore recreated CODEX_HOME empty), so the
+		// respawn knowingly starts a fresh conversation. Mirror the ordinary launch
+		// path: the snapshot above the spawn arms the capture, and when the launch
+		// did not come up on the recorded id the capture names the new rollout so
+		// the daemon and the row learn it. Without this the row keeps an abandoned
+		// id and every later relaunch starts fresh again, silently losing the
+		// session's context each time (#5947).
+		if err := launchAdopted(hs, req, resp); err != nil {
+			return err
+		}
+		if codex && resp.Conversation == nil {
+			hs.captureCodexConversation(codexSnap)
+		}
+		return nil
+	}
 	if hs.inst != nil && req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {
 		// A resume flag for a transcript this host does not hold makes the agent
 		// exit on launch, so a fresh workspace starts a new conversation instead.
@@ -215,15 +246,6 @@ func (hs *headlessServer) launchWorkspace(req agentLifecycleRequest, resp *agent
 			log.InfoLog.Printf("agent-server: conversation %s is not in this host's %s store; starting a new conversation",
 				req.Conversation.ID, req.Conversation.Agent)
 		}
-	}
-	if codex && hs.inst != nil {
-		// Before the spawn, so the capture can tell the new rollout from old ones.
-		// Correlated against the directory the launch command actually runs the
-		// agent in (an `env -C DIR codex` moves it off the worktree), not the
-		// worktree; unscoped when that is not provable (#5861).
-		codexSnap = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(
-			codexHomeFor(hs.program, hs.inst.GetWorktreePath()),
-			session.LaunchCaptureWorkingDir(hs.program, hs.inst.GetWorktreePath()))
 	}
 	if err := hs.as.Launch(req.FirstTimeSetup); err != nil {
 		return err
