@@ -156,13 +156,13 @@ func (i *Instance) CheckManualAccountSwap(name, agent string, crossAgent bool) e
 }
 
 func (i *Instance) validateAccountSwap(name, agent string, crossAgent, manual, recordLaunch bool) error {
-	return i.validateAccountSwapPlan(name, agent, crossAgent, manual, recordLaunch, "")
+	return i.validateAccountSwapPlan(name, agent, crossAgent, manual, recordLaunch, "", false)
 }
 
 // validateAccountSwapPlan is validateAccountSwap with a carry failure this
 // attempt already hit: a non-empty carryFailure plans a fresh conversation
 // whose notice repeats it.
-func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manual, recordLaunch bool, carryFailure string) error {
+func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manual, recordLaunch bool, carryFailure string, requireCarry bool) error {
 	backend := i.currentBackend()
 	i.mu.RLock()
 	current := i.Account
@@ -383,6 +383,9 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		if launchProgram, conversation, ok = carry.launch(resolvedProgram); !ok {
 			carry, carryFallback = nil, carryUnresumableReason
 		}
+	}
+	if err := requiredCarryRefusal(requireCarry, pending != nil && pending.To == name, carry, carryFallback); err != nil {
+		return refuse(err)
 	}
 	// reminted reports that a committed replacement's recorded conversation id
 	// was replaced by a fresh one, which the record takes below.

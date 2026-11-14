@@ -568,8 +568,9 @@ func TestAccountHandoffInputsPersistedClaimUsesWorktreeRepoPath(t *testing.T) {
 
 // require_carry's full answer reaches the engine for every materialized
 // session (#7152): the input carries the session's own AccountSwapCarryRefusal,
-// and its answer against a target (#7273), to be asked after m.mu is released. A session with no recorded conversation
-// cannot carry, and both answers say why with a code (#7156 review P3-2).
+// and its answer against a target (#7273), to be asked after m.mu is released.
+// A session with no recorded conversation cannot carry, and both answers say
+// why with a code (#7156 review P3-2).
 func TestAccountHandoffInputsCarryTheLiveCarryAnswer(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	require.NoError(t, config.SaveConfig(config.DefaultConfig()))

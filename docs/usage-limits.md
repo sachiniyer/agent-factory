@@ -664,6 +664,25 @@ mode = "shadow"
   `config.toml` runtime settings (`model`, `model_reasoning_effort`,
   `approval_policy`, `sandbox_mode`) differ from the session's home is
   reported `config-drift` and skipped; one af cannot verify is skipped too.
+- **`require_carry = true` refuses a move that would start fresh.** Each
+  tick the engine asks whether the session's conversation would carry. It
+  asks in two steps, and the row tells you which step refused:
+  - **The session's own side refused.** Examples: no recorded conversation,
+    a transcript missing from the current account, or a newer conversation
+    in the worktree. The session is deferred with an `ignored` row whose
+    `reason_code` is `carry-refused`. `params.carry` holds the refusal
+    code, such as `missing`, `stale` or `forked`. `to` is empty, because no
+    target was at fault.
+  - **The chosen target account's home refused.** Examples: it already holds
+    a different copy of the conversation, or holds a thread/revert rollout
+    of it. That account is skipped, as a drifted one is: the row's
+    `skipped` param lists it as `<account>=carry:<code>`, and the next
+    candidate is asked on the same tick. If every candidate refuses, the
+    no-account (or idle no-target) row lists each one.
+  - **af cannot ask about the target at all.** The session is deferred with
+    a `carry-refused` row whose `to` names that target.
+
+  Rows carry only the code, never a path or the refusal's prose.
 - **A composer draft blocks every move**, and a pane whose composer cannot be
   located counts as draft-present — a move must never eat half-typed input.
 - **Pinned sessions stay pinned** unless `include_pinned = true`; an automatic

@@ -162,11 +162,13 @@ func TestAccountSwapCarryRefusalToSharesTheTargetSnapshot(t *testing.T) {
 		"past the TTL the target is walked again and fails closed")
 }
 
-// The plan against the target refuses everything the copy would refuse there:
-// for every state of the target's copy of the conversation file, when the plan
-// carries, the copy that follows — nothing changing in between — carries too,
-// so require_carry, which asks the plan, never lets through a move whose copy
-// starts fresh (#7273). Both use one decision (judgeCarryFile).
+// The plan against the target refuses exactly what the copy would refuse
+// there: for every state of the target's copy of the conversation file, when
+// the plan carries, the copy that follows — nothing changing in between —
+// carries too, so require_carry, which asks the plan, never lets through a
+// move whose copy starts fresh (#7273); and when the plan refuses, the copy
+// refuses with the same code, so the plan never refuses a carry the copy
+// would make (#7282). Both use one decision (judgeCarryFile).
 func TestTargetCarryPlanRefusesWhatTheCopyRefuses(t *testing.T) {
 	type state struct{ name, source, target string }
 	for _, agent := range []string{tmux.ProgramCodex, tmux.ProgramClaude} {
@@ -214,7 +216,16 @@ func TestTargetCarryPlanRefusesWhatTheCopyRefuses(t *testing.T) {
 					require.NotNil(t, inst.accountSwapLaunch.carry,
 						"the plan carried, so the copy must too, but it refused: %q", inst.accountSwapLaunch.carryFallback)
 				} else {
-					t.Logf("the plan refused: %q", fallback)
+					// The copy's own decision on the same files, as a new carry.
+					home := os.Getenv("AGENT_FACTORY_HOME")
+					srcRoot, err := accountCarryRoot(home, agent, "old", source)
+					require.NoError(t, err)
+					dstRoot, err := accountCarryRoot(home, agent, "work", target)
+					require.NoError(t, err)
+					_, copyErr := carryConversationFileOutcome(srcRoot, dstRoot, rel, true)
+					require.Error(t, copyErr, "the plan refused (%q), so the copy must too", fallback)
+					require.Equal(t, carryRefusalCode(fallback), carryRefusalCode(carryFailureReason(copyErr)),
+						"the plan's refusal %q and the copy's %q must agree", fallback, carryFailureReason(copyErr))
 				}
 			})
 		}

@@ -10,19 +10,22 @@ import (
 	"time"
 )
 
-// The handoff engine asks require_carry's check-ahead answer
-// (AccountSwapCarryRefusal) on every 45 s tick, for every triggered session,
-// for as long as a wall lasts. On a shared Codex home of tens of thousands of
-// rollouts one answer was a full walk of the store plus an lstat of every
-// rollout — about half a second, per session, per tick, under the handoff
-// mover's lock (#7156 review P2-1).
+// The handoff engine asks require_carry's answers on every 45 s tick, for
+// every triggered session, for as long as a wall lasts: the target-blind
+// check-ahead (AccountSwapCarryRefusal), and for a move the answer against the
+// chosen target, then each next choice while targets refuse
+// (AccountSwapCarryRefusalTo, #7273, #7282). On a shared Codex home of tens of
+// thousands of rollouts one answer was a full walk of the store plus an lstat
+// of every rollout — about half a second, per session, per tick, under the
+// handoff mover's lock (#7156 review P2-1).
 //
-// So the answer reads a snapshot of the source store instead. One walk records
-// everything the source-side checks read: each rollout's path and mtime, and
-// each thread's compressed and thread/revert forms. Every session on that home
-// then shares the snapshot for carryAheadStoreTTL, so the walks are one per
-// home per TTL, however many sessions ask. The live swap never reads a
-// snapshot: its plan and its copy-time re-check walk the store as before.
+// So the answers read store snapshots instead: the source home's, and each
+// target home an answer names. One walk records everything the checks read:
+// each rollout's path and mtime, and each thread's compressed and
+// thread/revert forms. Every answer about that home then shares the snapshot
+// for carryAheadStoreTTL, so the walks are one per home per TTL, however many
+// sessions ask. The live swap never reads a snapshot: its plan and its
+// copy-time re-check walk the stores as before.
 //
 // The price is a staleness bounded by the TTL. A newer thread, a backtrack or
 // a compression made since the snapshot is seen up to carryAheadStoreTTL late,
@@ -32,9 +35,9 @@ import (
 // before the session's conversation was recorded is never used for it, so a
 // rollout recorded since does not read as missing.
 
-// carryAheadStoreTTL is how long a source store snapshot answers
-// require_carry's check-ahead: several engine ticks, so a standing wall costs
-// one walk per home every few minutes rather than one per session every tick.
+// carryAheadStoreTTL is how long a store snapshot, a source's or a target's,
+// answers require_carry: several engine ticks, so a standing wall costs one
+// walk per home every few minutes rather than one per session every tick.
 const carryAheadStoreTTL = 5 * time.Minute
 
 // codexStoreSnapshot is one walk of a Codex home's sessions store.
@@ -137,9 +140,9 @@ func (s *codexStoreSnapshot) holdsRevertSince(codexHome, id string, floor time.T
 }
 
 // codexStoreCache shares store snapshots between require_carry's answers: the
-// source home's, and the target's when an answer names one. It holds its lock across a walk: the engine asks one
-// session at a time, and a second asker for the same home must wait for that
-// walk rather than start its own.
+// source home's, and the target's when an answer names one. It holds its lock
+// across a walk: the engine asks one session at a time, and a second asker for
+// the same home must wait for that walk rather than start its own.
 type codexStoreCache struct {
 	mu     sync.Mutex
 	ttl    time.Duration

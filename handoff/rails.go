@@ -600,7 +600,10 @@ func (s *RailsStore) ClearMoves(sessionKey string) (int, error) {
 
 // SetRefusedUntil durably records that the session refused every candidate
 // and is to be left alone until the given instant. The live-mover slice is
-// the writer; an unexpired entry defers the session's next proposal.
+// the writer; an unexpired entry defers the session's next proposal. It has
+// no production caller yet, so refused_backoff costs nothing today — but the
+// #7273 answer priced a false plan-time carry refusal at one backoff, which
+// holds only once the live mover records one here.
 func (s *RailsStore) SetRefusedUntil(sessionKey string, until time.Time) error {
 	if sessionKey == "" || until.IsZero() {
 		return fmt.Errorf("refusal backoff needs a session key and an until timestamp, got %q / %v",

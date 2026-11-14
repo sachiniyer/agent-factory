@@ -350,17 +350,19 @@ func TestCommittedCarryRerunReadsTheAccountQuarantineFlag(t *testing.T) {
 			rails: func(rerunFixture) string { return "{not json" },
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newRerunFixture(t, tmux.ProgramCodex)
-			writeCarryFile(t, f.dstDir, f.rel, landed)
-			if tc.watermark {
-				require.NoError(t, handoff.NewStore(filepath.Join(f.afHome, "instances", handoff.StateFileName)).
-					RecordCarriedPrefix(f.dstPath(), 12))
-			}
-			f.writeRails(t, tc.rails(f))
+		for _, agent := range []string{tmux.ProgramCodex, tmux.ProgramClaude} {
+			t.Run(agent+" "+tc.name, func(t *testing.T) {
+				f := newRerunFixture(t, agent)
+				writeCarryFile(t, f.dstDir, f.rel, landed)
+				if tc.watermark {
+					require.NoError(t, handoff.NewStore(filepath.Join(f.afHome, "instances", handoff.StateFileName)).
+						RecordCarriedPrefix(f.dstPath(), 12))
+				}
+				f.writeRails(t, tc.rails(f))
 
-			require.NoError(t, f.carry(true).copy())
-			require.Equal(t, tc.want, f.watermarks(t)[f.dstPath()])
-		})
+				require.NoError(t, f.carry(true).copy())
+				require.Equal(t, tc.want, f.watermarks(t)[f.dstPath()])
+			})
+		}
 	}
 }

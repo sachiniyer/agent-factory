@@ -162,7 +162,7 @@ func TestCarriedBoundaryUnderAnUntrackableFlagIsUnrecorded(t *testing.T) {
 			flags: map[string]AccountQuarantine{"/af/accounts/codex/work": {At: marked}}},
 		{name: "another home's untrackable flag", want: 12, wantRecorded: true,
 			flags: map[string]AccountQuarantine{"/af/accounts/codex/other": {At: marked}}},
-		{name: "a home whose name extends its home's", want: 12, wantRecorded: true,
+		{name: "a flag on a home whose name is a prefix of its home's", want: 12, wantRecorded: true,
 			flags: map[string]AccountQuarantine{"/af/accounts/codex/wor": {At: marked}}},
 		{name: "its home's flag naming another file", want: 12, wantRecorded: true,
 			flags: map[string]AccountQuarantine{"/af/accounts/codex/work": {

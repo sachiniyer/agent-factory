@@ -120,6 +120,10 @@ type SessionFacts struct {
 	// (CarryMissing, CarryStale, …); "" is the in-memory precondition's own
 	// refusal, CarryUnrecorded.
 	CarryRefusal string
+	// CarryRefusalTo names the target account whose carry check gave
+	// CarryRefusal, so the carry-refused row says which home it is about;
+	// "" for a refusal on the session's own side (#7282).
+	CarryRefusalTo string
 	// Reading is the newest usage reading on the session's OWN identity home
 	// — the account's store for a named session, the ambient home under
 	// default_login = "move". StatusNone for agents with no usage record.
@@ -146,6 +150,13 @@ type AccountFacts struct {
 	RecentMoveCredits int
 	// Reading is the newest usage reading in the account's own store.
 	Reading ReadingFacts
+	// CarryRefusal is the carry refusal code (Carry*) the live carry plan
+	// gives against this account's home under require_carry, once the
+	// session's source side has confirmed; "" when it was not asked or would
+	// carry. It is a state of that one home, which retrying cannot clear, so
+	// it makes the candidate ineligible — skipped as "carry:<code>", like a
+	// drifted one — rather than deferring the session (#7282).
+	CarryRefusal string
 }
 
 // RailsFacts carries the durable rails the state file owns.
@@ -435,7 +446,7 @@ func Decide(f Facts) Decision {
 	}
 	if cfg.RequireCarry && !s.CarryPossible {
 		block(KindDefer, reasonCarryRefused,
-			Event{Kind: EventIgnored, Reason: reasonCarryRefused,
+			Event{Kind: EventIgnored, Reason: reasonCarryRefused, To: s.CarryRefusalTo,
 				Params: map[string]string{"carry": carryRefusalParam(s.CarryRefusal)}})
 	}
 	if blockedReason != "" {
@@ -546,6 +557,8 @@ func classifyCandidate(f Facts, a AccountFacts) (skip, drift string) {
 		return "walled", ""
 	case readingStaleHigh(a.Reading, float64(cfg.WallPercent), f.Now, f.ResetGrace):
 		return "stale-high", ""
+	case a.CarryRefusal != "":
+		return "carry:" + carryRefusalParam(a.CarryRefusal), ""
 	}
 	return "", ""
 }
