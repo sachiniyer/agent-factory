@@ -51,12 +51,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		m.clampSelectionTab()
 		m.menu.SetInstance(selected)
 		m.maybeAutoOpenInitialPane(selected)
-		previewTab := m.store.ActiveTab()
-		previewTabSpecific := previewTab != 0
-		if sel.IsTab {
-			previewTab = sel.TabIndex
-			previewTabSpecific = true
-		}
+		previewTab, previewTabSpecific := m.selectionPaneTab(sel)
 		previewCmd = m.updatePanePreview(selected, previewTab, previewTabSpecific, attachedNow)
 		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
 	} else {
@@ -88,6 +83,20 @@ func (m *home) selectionChanged() tea.Cmd {
 	}
 
 	return tea.Batch(previewCmd, m.panesRefresh(attachedNow))
+}
+
+// selectionPaneTab is the tab of the cursor's instance that the workspace is
+// asked to show, and whether that tab is specific. A tab row names its own tab.
+// An instance row names the active tab, and counts as specific only when that
+// is not the first tab, so a pane already on any tab of the instance shows it.
+// selectionChanged and the launch restore (showRestoredCursorInWorkspace) both
+// read the target here, so the two cannot disagree about it (#7293).
+func (m *home) selectionPaneTab(sel ui.SidebarItem) (tab int, tabSpecific bool) {
+	if sel.IsTab {
+		return sel.TabIndex, true
+	}
+	tab = m.store.ActiveTab()
+	return tab, tab != 0
 }
 
 // clampSelectionTab bounds the selection's active tab index against the

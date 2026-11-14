@@ -58,6 +58,16 @@ func samePaneBinding(a, b paneBinding) bool {
 	return a.instance == b.instance && a.tab == b.tab
 }
 
+// bindingShowsTarget reports whether a pane bound to binding already shows the
+// cursor's target, so no preview is needed: the exact tab when the target is
+// tab-specific, otherwise any tab of the same instance (selectionPaneTab).
+func bindingShowsTarget(binding, target paneBinding, tabSpecific bool) bool {
+	if tabSpecific {
+		return samePaneBinding(binding, target)
+	}
+	return binding.instance == target.instance
+}
+
 func paneBindingIdentityOf(binding paneBinding) paneBindingIdentity {
 	identity := paneBindingIdentity{instance: binding.instance, tab: binding.tab}
 	if binding.instance == nil {
@@ -127,8 +137,7 @@ func (m *home) updatePanePreview(selected *session.Instance, targetTab int, tabS
 	// The preview target must match the selected/action tab. An instance row
 	// whose active tab is Terminal still names the full (instance, tab)
 	// target, so preview and commit cannot diverge (#1415, #1289 class).
-	if (!tabSpecific && original.instance == target.instance) ||
-		(tabSpecific && samePaneBinding(original, target)) {
+	if bindingShowsTarget(original, target, tabSpecific) {
 		m.cancelPanePreview(false)
 		return nil
 	}

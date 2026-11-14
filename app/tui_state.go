@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
@@ -54,6 +55,10 @@ func (m *home) applyTUIViewState(state config.TUIRepoViewState) int {
 	// keyboard nav stuck (#1559). Reconcile now, before the relayout, so launch
 	// selects the live session whose pane is actually shown.
 	m.reconcileRestoredSelectionWithWorkspace()
+	// Then the other direction: the workspace must show the session under the
+	// restored cursor (#7293). This runs before the relayout below, which is
+	// where a project switch applies the restored focus.
+	m.showRestoredCursorInWorkspace()
 	// The relayout below runs at term (0,0) → fallback → visiblePanes=nil, so
 	// capture the restored panes as the baseline the first real relayout uses to
 	// surface an auto-hide status for a pane the terminal can't fit (#1535).
@@ -169,6 +174,63 @@ func (m *home) reconcileRestoredSelectionWithWorkspace() {
 	m.store.SetActiveTab(tab)
 	m.menu.SetInstance(inst)
 	m.sidebar.SelectTabRow(inst.Title, tab)
+}
+
+// showRestoredCursorInWorkspace makes the restored workspace show the session
+// under the restored tree cursor (#7293). The cursor is what the user chose
+// last, so the display follows it, never the other way round.
+//
+// Live navigation keeps the two together. The cursor's tab either has a pane of
+// its own, which landing on it brings forward, or the last-focused pane
+// previews it. A restore brings back the panes, the cursor and the focus as
+// separate records, and two of their combinations come back split:
+//
+//   - The cursor's tab has its own pane, but the fitting kept the panes focused
+//     more recently and hid it. A background tick never brings a hidden pane
+//     forward, so nothing showed the cursor's session until a keypress.
+//   - The cursor's tab has no pane, and the saved focus is a pane bound
+//     elsewhere. Esc or Tab over a preview leaves exactly that. The preview
+//     tick then painted the cursor's session over the FOCUSED pane, and the
+//     first Tab to reach the tree dismissed it as the user's own choice and
+//     suppressed it. The pane was left on its own binding beside `— cursor:`.
+//
+// The first is fixed by bringing the cursor's pane forward. The second restores
+// focus to the tree, where the cursor is, and keeps the saved pane as the one
+// the preview paints over. The cursor itself is never moved here. Its fallbacks
+// (archived or vanished selection, #1559) ran in restoreTUISelection and
+// reconcileRestoredSelectionWithWorkspace, which leave a coherent pair.
+func (m *home) showRestoredCursorInWorkspace() {
+	sel := m.sidebar.GetSelection()
+	if sel.Kind != ui.SectionInstances || sel.IsHeader {
+		return
+	}
+	inst := m.sidebar.GetSelectedInstance()
+	if inst == nil || inst.ShownArchived() {
+		return
+	}
+	tab, tabSpecific := m.selectionPaneTab(sel)
+	if own := m.store.FindOpenPane(inst, tab); own != nil {
+		// The restored focus pane needs no stamp: the quit saved it as the most
+		// recently focused, and focusing it stamps it again.
+		if own != m.restoredFocusPane() {
+			m.store.TouchOpenPane(own)
+		}
+		return
+	}
+	focus := m.pendingTUIViewFocus
+	if focus == nil || focus.Region != tuiFocusRegionPane {
+		return
+	}
+	pane := m.openPaneByKey(focus.PaneKey)
+	if pane == nil {
+		return // applyPendingTUIViewFocus already falls back to the tree
+	}
+	if bindingShowsTarget(paneBinding{instance: pane.Instance(), tab: pane.Tab()},
+		paneBinding{instance: inst, tab: tab}, tabSpecific) {
+		return
+	}
+	m.pendingTUIViewFocus = &config.TUIStateFocus{Region: layout.RegionTree}
+	m.lastFocusedPaneID = pane.ID()
 }
 
 // restoredFocusPane resolves the open pane the persisted focus (loaded into
