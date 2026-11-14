@@ -346,21 +346,25 @@ func TestCheckAndHandleTrustPrompt_FolderTrustProperPrefixHolds(t *testing.T) {
 	}
 }
 
-// The dialog's text with something that is not the dialog painted below it is
-// an observed dialog-free pane: the agent is showing the dialog in its own
-// transcript — a diff, a grep of this repo, a review — above its composer. The
-// check reports no dialog, so the create delivers the prompt to the agent, and
-// it sends no trust-handler key. #3587 held such a pane instead (refusing to
-// answer, 20 times over, until the create failed); the legacy, MCP and 2.1.322
-// clauses already report it clear. The composer below is the measured one
+// The dialog's text with the agent's composer painted below it is an observed
+// dialog-free pane: the agent is showing the dialog in its own transcript — a
+// diff, a grep of this repo, a review — above its composer, or above a
+// permission prompt, which takes the composer's place. The check reports no
+// dialog, so the create delivers the prompt to the agent, and it sends no
+// trust-handler key. #3587 held such a pane instead (refusing to answer, 20
+// times over, until the create failed); the legacy, MCP and 2.1.322 clauses
+// already report it clear. The composer below is the measured one
 // (testdata/claude_2_1_322_composer_after_mcp_decline.ansi).
 func TestCheckAndHandleTrustPrompt_FolderTrustQuotedAboveTheComposerIsNoDialog(t *testing.T) {
 	composer := readTrustFixture(t, mcpServerComposerFixture)
 	for _, width := range []int{46, 80, 120} {
-		frame := renderSyntheticClaudeFolderTrust(width, []string{claudeTrustNoLabel, claudeTrustYesLabel}, 0, "")
+		frame := strings.TrimRight(renderSyntheticClaudeFolderTrust(width, []string{claudeTrustNoLabel, claudeTrustYesLabel}, 0, "").text, "\n")
 		for name, content := range map[string]string{
-			"the agent's composer below": strings.TrimRight(frame.text, "\n") + "\n" + composer,
-			"more output below":          strings.TrimRight(frame.text, "\n") + "\n\n  That is the dialog af answers at startup.\n",
+			"the agent's composer below": frame + "\n" + composer,
+			"the boxed composer below": frame + "\n\n╭────────────────────────────────────╮\n" +
+				"│ > Type your message here           │\n╰────────────────────────────────────╯\n  ? for shortcuts\n",
+			"a permission prompt below":                       frame + "\n" + syntheticPermissionPrompt,
+			"a coloured grep of this repo above the composer": syntheticColouredGrep + composer,
 		} {
 			t.Run(fmt.Sprintf("%d columns, %s", width, name), func(t *testing.T) {
 				handled, cmds := pollStaticPane(t, content, 4)
@@ -369,6 +373,115 @@ func TestCheckAndHandleTrustPrompt_FolderTrustQuotedAboveTheComposerIsNoDialog(t
 			})
 		}
 	}
+}
+
+// syntheticPermissionPrompt is Claude Code's tool-permission prompt, which a
+// working agent paints in its composer's place. Synthetic: its ❯ is the mark
+// of a working agent the folder-trust verdict needs.
+const syntheticPermissionPrompt = "\x1b[38;5;174m" + "────────────────────────────────────────" + "\n" +
+	"\x1b[39m Bash command\n\n   rg -n \"trust this folder\" session/tmux\n\n" +
+	" Do you want to proceed?\n" +
+	" \x1b[38;5;153m❯\x1b[39m \x1b[38;5;153m1.\x1b[39m \x1b[38;5;153mYes\n" +
+	"\x1b[39m   2. Yes, and don't ask again for rg commands in /home/dev/af-trees/wt\n" +
+	"   3. No, and tell Claude what to do differently (esc)\n"
+
+// syntheticColouredGrep is `rg --color=always` over this package, quoting the
+// dialog's strings with each match highlighted (synthetic, in rg's escapes).
+const syntheticColouredGrep = "\x1b[35msession/tmux/claude_folder_trust.go\x1b[0m:\x1b[32m12\x1b[0m:const claudeFolderTrustQuestion = \"" +
+	"\x1b[1m\x1b[31mIs this a project you created or one you trust\x1b[0m\"\n" +
+	"\x1b[35msession/tmux/claude_trust.go\x1b[0m:\x1b[32m17\x1b[0m:const claudeTrustAffirmativeLabel = \"\x1b[1m\x1b[31mYes, I trust this folder\x1b[0m\"\n" +
+	"\x1b[35msession/tmux/claude_folder_trust.go\x1b[0m:\x1b[32m21\x1b[0m:const claudeFolderTrustFooter = \"\x1b[1m\x1b[31mEnter to confirm · Esc to cancel\x1b[0m\"\n"
+
+// A row the dialog does not paint, in or below its footer slot, is not by
+// itself a working agent: the live dialog can show one (#7275 review, R1).
+// Claude Code's footer element reads "Press Ctrl-C again to exit" for a moment
+// after one Ctrl-C from an attached client. A notice, a tip, a status row or a
+// stray stderr line can land there too, and a resize can leave a fragment.
+// Each one holds without a key; only the composer below reads as no dialog.
+// Before the review's fix every one read clear, and the create typed its prompt
+// into the live modal.
+func TestCheckAndHandleTrustPrompt_FolderTrustWithAnUnknownRowInItsFooterSlotHolds(t *testing.T) {
+	for _, width := range []int{46, 80} {
+		frame := renderSyntheticClaudeFolderTrust(width, []string{claudeTrustNoLabel, claudeTrustYesLabel}, 0, "")
+		lines := strings.Split(frame.text, "\n")
+		through := func(row int) string { return strings.Join(lines[:row], "\n") + "\n" }
+		dialog := strings.TrimRight(frame.text, "\n") + "\n"
+		for name, content := range map[string]string{
+			"the Ctrl-C footer swap": through(frame.footerRow) +
+				"  \x1b[3m\x1b[38;5;246mPress\x1b[0m \x1b[3m\x1b[38;5;246mCtrl-C\x1b[0m \x1b[3m\x1b[38;5;246magain\x1b[0m \x1b[3m\x1b[38;5;246mto\x1b[0m \x1b[3m\x1b[38;5;246mexit\n",
+			"a tip row after a blank below the footer": dialog + "\n  ※ Tip: run /terminal-setup to enable Shift+Enter\n",
+			"a tip row after a blank above the footer": through(frame.footerRow) + "  ※ Tip: press Esc twice to rewind\n\n" +
+				strings.Join(lines[frame.footerRow:], "\n"),
+			"a notice straight below the footer": dialog + "  Update available: run claude update\n",
+			"a right-aligned status row":         dialog + "\n" + strings.Repeat(" ", width-20) + "◐ medium · /effort\n",
+			"a stray stderr line":                dialog + "(node:4242) Warning: an unhandled stderr line\n",
+			"a leftover footer fragment":         dialog + "  cancel\n",
+			"more output below":                  dialog + "\n  That is the dialog af answers at startup.\n",
+		} {
+			t.Run(fmt.Sprintf("%d columns, %s", width, name), func(t *testing.T) {
+				handled, cmds := pollStaticPane(t, content, 4)
+				require.True(t, handled, "a row the dialog does not paint is not the agent's composer; the dialog is still in the way:\n%s", content)
+				require.Empty(t, sentKeystrokes(cmds), "nothing may be sent to a dialog af cannot read; got %v", cmds)
+			})
+		}
+	}
+}
+
+// The motivating frame, as a sequence: the dialog is up, a Ctrl-C from an
+// attached client swaps its footer for about 0.8 s, and the footer comes back.
+// Every poll holds, no key reaches the swapped frame, and once the footer is
+// back af answers by label.
+func TestCheckAndHandleTrustPrompt_FolderTrustHoldsThroughTheCtrlCFooterSwap(t *testing.T) {
+	advance := setClaudeTrustClock(t)
+	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
+	session, keys := claudeTrustSession(t, pane)
+
+	require.True(t, session.CheckAndHandleTrustPrompt(), "the dialog is in the way")
+	pane.mu.Lock()
+	pane.footer = "Press Ctrl-C again to exit"
+	pane.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		advance(time.Second)
+		require.True(t, session.CheckAndHandleTrustPrompt(), "poll %d: the swapped footer is still the live dialog", i+1)
+	}
+	require.Empty(t, *keys, "no key may reach the dialog while its footer is swapped")
+
+	pane.mu.Lock()
+	pane.footer = ""
+	pane.mu.Unlock()
+	for i := 0; i < 6 && len(pane.committedLabels()) == 0; i++ {
+		advance(time.Second)
+		require.True(t, session.CheckAndHandleTrustPrompt())
+	}
+	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels(), "keystrokes were %v", *keys)
+	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(*keys))
+}
+
+// A frame rule inside the region (#7275 review, R2). The dialog's own closing
+// frame, directly above its footer, is the dialog: the boxed layout of the
+// repo's legacy fixtures, with the footer under the box, is answered by label.
+// A rule anywhere else holds, since a rule alone does not show a working agent.
+func TestCheckAndHandleTrustPrompt_FolderTrustFrameRules(t *testing.T) {
+	t.Run("a closing frame directly above the footer is answered", func(t *testing.T) {
+		pane := &claudeFolderTrustPane{
+			options:          []string{claudeTrustNoLabel, claudeTrustYesLabel},
+			boxed:            true,
+			footerBelowFrame: true,
+			ordinals:         true,
+		}
+		require.Contains(t, pane.render(), "╯\n   Enter to confirm", "precondition: the box closes above the footer")
+		keys := driveClaudeTrustPane(t, pane, 6)
+		require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels(), "keystrokes were %v", keys)
+		require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(keys))
+	})
+	t.Run("a separator between the body and the options holds", func(t *testing.T) {
+		content := "Quick safety check:\nIs this a project you created or one you trust?\n" +
+			"────────────────────────────────────────\n" +
+			"❯ No, exit\n  Yes, I trust this folder\n\nEnter to confirm · Esc to cancel\n"
+		handled, cmds := pollStaticPane(t, content, 4)
+		require.True(t, handled, "a frame rule is not the agent's composer; the dialog is still in the way")
+		require.Empty(t, sentKeystrokes(cmds))
+	})
 }
 
 // capture-pane -e keeps OSC 8 hyperlinks, terminated by ST or BEL (#7271 R3).

@@ -73,6 +73,13 @@ type claudeFolderTrustPane struct {
 	// an OSC 8 hyperlink terminated by this sequence (ST or BEL), in the width
 	// layout only.
 	link string
+	// footerBelowFrame, with boxed, closes the box above the footer and paints
+	// the footer under it, indented three: the layout of the repo's legacy
+	// fixtures, whose dialog component sets marginLeft 3 on its footer.
+	footerBelowFrame bool
+	// footer replaces the footer row's text: Claude Code's footer element shows
+	// "Press Ctrl-C again to exit" for a moment after one Ctrl-C (#7275 review).
+	footer string
 	// staleFrames makes the N captures that FOLLOW a movement key return the
 	// pre-movement frame, modelling the terminal repaint race between
 	// `send-keys` returning and the redraw actually landing.
@@ -140,7 +147,16 @@ func (p *claudeFolderTrustPane) render() string {
 		write(cursor + ordinal + option)
 	}
 	write("")
-	write("Enter to confirm · Esc to cancel")
+	footer := "Enter to confirm · Esc to cancel"
+	if p.footer != "" {
+		footer = p.footer
+	}
+	if p.boxed && p.footerBelowFrame {
+		b.WriteString("╰" + strings.Repeat("─", 50) + "╯\n")
+		b.WriteString("   " + footer + "\n")
+		return b.String()
+	}
+	write(footer)
 	if p.boxed {
 		b.WriteString("╰" + strings.Repeat("─", 50) + "╯\n")
 	}
@@ -803,17 +819,21 @@ func pollStaticPane(t *testing.T, content string, polls int) (handled bool, cmds
 // #7271 changed what such a pane REPORTS, not what it sends. #3587 held it
 // (true): af refused to answer the quote on every poll, so a create, or a
 // root-agent heal resuming a transcript that shows this file, failed after its
-// 20 attempts. The dialog's text with something that is not the dialog painted
-// below it — a composer, more output, a draft — is an observed dialog-free
-// pane, the rule the legacy, MCP and 2.1.322 clauses already keep, so it now
-// reports false, and the create delivers its prompt to the agent. It still
-// sends no trust-handler key.
+// 20 attempts. The dialog's text with the agent's composer painted below it is
+// an observed dialog-free pane, so it now reports false, and the create
+// delivers its prompt to the agent. Only the composer shows that (#7275 review,
+// R1): any other row below the dialog, such as prose, may be painted by the
+// live dialog itself, so that pane still holds. Neither sends a trust-handler
+// key.
 func TestCheckAndHandleTrustPrompt_QuotedClaudeFolderTrustDialogInjectsNothing(t *testing.T) {
 	dialog := "Quick safety check: Is this a project you created or one you trust?\n\n" +
 		"❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\n" +
 		"Enter to confirm · Esc to cancel\n"
 
-	for _, tt := range []struct{ name, content string }{
+	for _, tt := range []struct {
+		name, content string
+		inTheWay      bool
+	}{
 		{
 			// The agent is showing the dialog inside its own transcript, with
 			// its composer painted below — the shape every live pane has.
@@ -822,8 +842,13 @@ func TestCheckAndHandleTrustPrompt_QuotedClaudeFolderTrustDialogInjectsNothing(t
 				"│ > Type your message here           │\n╰────────────────────────────────────╯\n? for shortcuts\n",
 		},
 		{
-			name:    "quoted with trailing prose",
-			content: dialog + "\nThat is the dialog af answers at startup.\n",
+			// No composer below, so nothing shows a working agent: prose under
+			// the footer is a row the dialog does not paint, and a live dialog
+			// can show one too (the #7275 review's Ctrl-C footer swap). It
+			// holds, still without a key (#7275 review, R1).
+			name:     "quoted with trailing prose",
+			content:  dialog + "\nThat is the dialog af answers at startup.\n",
+			inTheWay: true,
 		},
 		{
 			name: "the label mentioned in a sentence next to the composer cursor",
@@ -833,8 +858,8 @@ func TestCheckAndHandleTrustPrompt_QuotedClaudeFolderTrustDialogInjectsNothing(t
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			handled, cmds := pollStaticPane(t, tt.content, 4)
-			require.False(t, handled,
-				"the dialog's text with the agent painted below it is an observed dialog-free pane (#7271)")
+			require.Equal(t, tt.inTheWay, handled,
+				"only the agent's composer below the dialog's text shows an observed dialog-free pane (#7271, #7275 review)")
 			require.Empty(t, sentKeystrokes(cmds),
 				"no key may be injected into a pane that only quotes the dialog; got %v", cmds)
 		})
