@@ -405,10 +405,12 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 				// CarryCheck is the full answer, which reads the provider's
 				// store: a method value, so the engine calls it after m.mu
 				// is released, and only when require_carry can change a
-				// verdict (#7152).
+				// verdict (#7152). CarryCheckTo is that answer against the
+				// target a move chose (#7273).
 				CarryPossible:  carryPossible,
 				CarryRefusal:   carryRefusal,
 				CarryCheck:     inst.AccountSwapCarryRefusal,
+				CarryCheckTo:   inst.AccountSwapCarryRefusalTo,
 				LimitAccount:   limitAccountFor(inst),
 				WallObservedAt: wallObservedAtFor(inst),
 				Captured:       obs.captured,

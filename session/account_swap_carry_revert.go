@@ -82,7 +82,7 @@ func (c *conversationCarry) codexRevertReason() string {
 	case c.committed:
 		return ""
 	}
-	held, err = codexHoldsRevertRollout(c.dstHome, c.id, floor)
+	held, err = c.targetHoldsRevert(floor)
 	switch {
 	case err != nil:
 		return codexRevertCarryUnlistedReason

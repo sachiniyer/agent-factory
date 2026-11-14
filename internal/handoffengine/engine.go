@@ -64,7 +64,12 @@ type SessionInput struct {
 	// the engine asks it only when it can change a verdict — see carryRefusal
 	// — and nil reads as handoff.CarryUnconfirmed (#7152).
 	CarryCheck func() string
-	// CarryCheckTo is a scaffold the next commit wires up (#7273).
+	// CarryCheckTo is the full answer against one target account: CarryCheck's
+	// checks plus every check the live carry makes on that account's home
+	// (session.AccountSwapCarryRefusalTo). The engine asks it for the account
+	// Decide chose, only once CarryCheck has confirmed the source side, and a
+	// refusal defers the move like any carry-refused verdict rather than
+	// trying the next candidate (#7273). Nil reads as handoff.CarryUnconfirmed.
 	CarryCheckTo func(target string) string
 	HomeDir      string // the runtime-bound account home (codex), "" elsewhere
 	Program      string // the recorded launch command (RuntimeProgram); the
@@ -577,7 +582,11 @@ func ResolveRecipient(spec string, inputs []SessionInput) (recipient SessionInpu
 // would fall back to a fresh start (#7152), or "". The full answer reads the
 // provider's store, so it is asked only when it can change the verdict: the
 // policy requires a carry, the precondition holds, and the session has a real
-// trigger — the only verdicts whose blockers Decide evaluates.
+// trigger — the only verdicts whose blockers Decide evaluates. A move has
+// chosen its target, so it is asked against that target too, once the source
+// side has confirmed: a refusal only the target's home shows is a fresh start
+// as surely as a source one (#7273). The chosen target is the only one asked —
+// a refusal defers the move, and no other candidate's store is read.
 func carryRefusal(in SessionInput, facts handoff.Facts, decision handoff.Decision) string {
 	if !facts.Config.RequireCarry || !facts.Session.CarryPossible || !decision.Kind.Triggered() {
 		return ""
@@ -585,7 +594,13 @@ func carryRefusal(in SessionInput, facts handoff.Facts, decision handoff.Decisio
 	if in.CarryCheck == nil {
 		return handoff.CarryUnconfirmed
 	}
-	return in.CarryCheck()
+	if code := in.CarryCheck(); code != "" || decision.Kind != handoff.KindMove {
+		return code
+	}
+	if in.CarryCheckTo == nil || decision.To == "" {
+		return handoff.CarryUnconfirmed
+	}
+	return in.CarryCheckTo(decision.To)
 }
 
 // factsFor assembles one session's Facts from the snapshot fields — the only
