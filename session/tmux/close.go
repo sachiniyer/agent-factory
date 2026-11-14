@@ -228,7 +228,7 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 			switch {
 			case !ok:
 				gone = false
-				errs = append(errs, fmt.Errorf("%w: has-session probe after kill-session failed (%v)", ErrTmuxTimeout, err))
+				errs = append(errs, fmt.Errorf("%w: has-session probe after kill-session failed (%w)", ErrTmuxTimeout, err))
 				leaked = nil
 			case exists:
 				gone = false
