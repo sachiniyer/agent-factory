@@ -120,6 +120,26 @@ func (t *TmuxSession) sendRawKeysChunkSize() int {
 	return max(1, (sendRawKeysArgvBudget-fixed)/3)
 }
 
+// PartialInputError reports that a chunked SendRawKeys applied `Applied` bytes
+// of the input before a send-keys chunk failed with `Err`. The applied prefix
+// is real and in-order: each successful chunk's bytes are already in the pane,
+// so a caller that retries the whole frame would duplicate them. Carrying the
+// count lets the daemon's PTY broker tell the client exactly how much to retain
+// for re-send (a MsgInputNack with this `Applied`), so a drained byte the daemon
+// never applied reaches the pane on reconnect rather than being silently
+// discarded (#6848). It unwraps to the underlying chunk error so existing
+// errors.Is/As classification (ErrTmuxTimeout, ErrSessionGone) is preserved.
+type PartialInputError struct {
+	Applied int
+	Err     error
+}
+
+func (e *PartialInputError) Error() string {
+	return fmt.Sprintf("send-keys applied %d bytes before failing: %v", e.Applied, e.Err)
+}
+
+func (e *PartialInputError) Unwrap() error { return e.Err }
+
 // SendRawKeys writes verbatim input bytes to the pane using `send-keys -H`
 // (hex-encoded), so arbitrary control bytes (arrow keys, Ctrl sequences) land
 // exactly as typed — the interactive multi-writer input path. Empty input is a
@@ -138,10 +158,14 @@ func (t *TmuxSession) sendRawKeysChunkSize() int {
 // A chunked send is NOT atomic, and deliberately fails loudly rather than
 // partially: on a chunk error it stops and propagates, so the caller sees a
 // failed send instead of a success that delivered a truncated paste (the silent
-// prompt-corruption class of #1982/#2099). Concurrent writers were already
-// interleaved at frame granularity — the broker's input path takes no lock and
-// the TUI path has always sent many small frames — so this adds no ordering
-// guarantee that callers previously had.
+// prompt-corruption class of #1982/#2099). The failure is returned as a
+// *PartialInputError carrying how many bytes the pane already received, so the
+// daemon's PTY broker can pass that accounting to the client (a MsgInputNack)
+// and the client re-sends only the unapplied tail instead of the whole frame —
+// closing the gap a post-write daemon-side failure otherwise left as silent
+// loss. Concurrent writers were already interleaved at frame granularity — the
+// broker's input path takes no lock and the TUI path has always sent many small
+// frames — so this adds no ordering guarantee that callers previously had.
 //
 // Each chunk is bounded by tmuxCommandTimeout (#1787). This runs on the WS reader
 // goroutine, which holds no broker lock, so a stall here is milder than the
@@ -152,11 +176,13 @@ func (t *TmuxSession) sendRawKeysChunkSize() int {
 // goroutine.
 func (t *TmuxSession) SendRawKeys(b []byte) error {
 	chunk := t.sendRawKeysChunkSize()
+	applied := 0
 	for len(b) > 0 {
 		n := min(len(b), chunk)
 		if err := t.sendRawKeysChunk(b[:n]); err != nil {
-			return err
+			return &PartialInputError{Applied: applied, Err: err}
 		}
+		applied += n
 		b = b[n:]
 	}
 	return nil

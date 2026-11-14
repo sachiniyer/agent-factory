@@ -19,6 +19,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The daemon's WebSocket PTY stream broker (#1592 Phase 2 PR5) — the data plane
@@ -344,6 +345,24 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 	defer cancel()
 	defer func() { _ = sub.Close() }()
 
+	// writeMu serializes EVERY server→client write on this socket. coder/websocket
+	// permits only one concurrent writer, so the input-ack frame readPTYClient emits
+	// from the reader goroutine would race writePTYStream's PTY_OUT/repaint/resize
+	// frames from the writer goroutine (#6848 review: serialize acknowledgements
+	// with the outbound stream writer — the same pattern apiclient/attach.go and
+	// session/agentserver_remote_channel.go use). The keepalive pinger predates
+	// this PR and stays on its own (pre-existing) concurrency; it is the one writer
+	// not routed here.
+	writeMu := &sync.Mutex{}
+	// helloDone is closed once writePTYStream has emitted the start-seq hello
+	// (the stream's mandatory first server→client frame). readPTYClient waits
+	// on it before writing any MsgInputAck, so a reconnect that sends queued
+	// INPUT the instant the socket opens cannot let the reader-goroutine ack
+	// preempt the hello on the wire — which would make the TUI consume the ack
+	// as firstInbound and treat the hello as a mid-stream cursor jump (#6848
+	// review: send the hello before allowing acknowledgement writes).
+	helloDone := make(chan struct{})
+
 	inputDelivery := &ptyInputDelivery{}
 	reader := &ptyReaderAvailability{}
 	readerDone := make(chan error, 1)
@@ -351,13 +370,13 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		err := readPTYClient(ctx, binding, conn, inputDelivery, reader)
+		err := readPTYClient(ctx, binding, conn, inputDelivery, reader, writeMu, helloDone)
 		readerDone <- err
 		cancel()
 	}()
 	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn, keepalive, reader) }()
 
-	writePTYStream(ctx, sub, conn)
+	writePTYStream(ctx, sub, conn, writeMu, helloDone)
 
 	closeStatus := websocket.StatusNormalClosure
 	closeReason := ""
@@ -377,6 +396,24 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 	}
 	if readerErr != nil {
 		log.WarningLog.Printf("PTY input delivery failed; closing web stream so the client can reconnect: %v", readerErr)
+		// Tell the client how many bytes of the failing frame the pane actually
+		// received before this error, so its input queue re-sends only the
+		// unapplied tail (and every later unconfirmed frame) on reconnect
+		// instead of silently dropping the already-trimmed bytes (#6848). The
+		// daemon's chunked send-keys is the one place that knows — extract it
+		// from the tmux PartialInputError; an unknown/relayed failure (no
+		// accounting) yields 0, meaning "re-send the whole frame", which is a
+		// bounded duplicate rather than silent loss.
+		applied := 0
+		var pie *sessiontmux.PartialInputError
+		if errors.As(readerErr, &pie) {
+			applied = pie.Applied
+		}
+		writeMu.Lock()
+		nctx, ncancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+		_ = agentproto.WriteControl(nctx, conn, agentproto.NewInputNackMessage(applied))
+		ncancel()
+		writeMu.Unlock()
 		closeStatus = websocket.StatusInternalError
 		closeReason = "PTY input delivery failed"
 	}
@@ -388,7 +425,7 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 // writePTYStream is the single writer goroutine: it multiplexes the subscriber's
 // output bytes and resize echoes onto the one connection. Keeping it single means
 // no concurrent data writes race on the socket.
-func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *websocket.Conn) {
+func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *websocket.Conn, writeMu *sync.Mutex, helloDone chan struct{}) {
 	// Emit the start-seq hello as the VERY FIRST frame, before any PTY_OUT/repaint,
 	// so a browser client — which cannot read the X-Af-Stream-Seq handshake header
 	// off a WS upgrade (#1592 Phase 5 PR1, §4.3) — learns its absolute cursor in-band
@@ -400,9 +437,22 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 	// Keep outbound operation deadlines independent from stream cancellation.
 	// coder/websocket closes the transport when a context passed to an active
 	// write is cancelled; that would race the explicit close frame below.
+	//
+	// Acquire writeMu BEFORE starting the write deadline, not after: a slow
+	// input-ack write from the reader goroutine can hold the mutex for most of
+	// wsWriteTimeout, and a deadline started before locking would expire while
+	// waiting, handing WriteFrame an already-expired context that disconnects a
+	// healthy client (#6848 review: start outbound frame deadlines after
+	// acquiring writeMu — same ordering the ack/nack paths use).
+	writeMu.Lock()
 	hctx, hcancel := context.WithTimeout(context.Background(), wsWriteTimeout)
 	err := agentproto.WriteFrame(hctx, conn, agentproto.HelloFrame(uint64(sub.Seq())))
 	hcancel()
+	writeMu.Unlock()
+	// The hello has been emitted (or the write failed and the stream is over
+	// either way): release the reader's acks. Closing here, before the err
+	// check, guarantees readPTYClient never blocks past the writer's exit.
+	close(helloDone)
 	if err != nil {
 		return // wedged/dead client before the first byte: drop it (session untouched)
 	}
@@ -437,12 +487,15 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 				if errors.Is(err, session.ErrTabClosed) {
 					exit = agentproto.NewTabClosedMessage()
 				}
+				writeMu.Lock()
 				ectx, ecancel := context.WithTimeout(context.Background(), wsWriteTimeout)
 				_ = agentproto.WriteControl(ectx, conn, exit)
 				ecancel()
+				writeMu.Unlock()
 			}
 			return
 		}
+		writeMu.Lock()
 		wctx, wcancel := context.WithTimeout(context.Background(), wsWriteTimeout)
 		switch ev.Kind {
 		case session.PTYData:
@@ -483,6 +536,7 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 			err = agentproto.WriteControl(wctx, conn, agentproto.NewResizeMessage(ev.Rows, ev.Cols))
 		}
 		wcancel()
+		writeMu.Unlock()
 		if err != nil {
 			return // wedged/dead client: drop it (the session is untouched)
 		}
@@ -498,7 +552,17 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 // only goroutine that reads, so a pong that arrives meanwhile waits unread.
 // reader records each such stretch so the keepalive does not blame the peer
 // for it (#7105).
-func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn, inputDelivery *ptyInputDelivery, reader *ptyReaderAvailability) error {
+//
+// A successfully applied INPUT is confirmed to the client with a MsgInputAck so
+// the client trims ONLY the confirmed frame from its input queue instead of
+// trimming on WS-write success — which proved only that the frame reached this
+// socket, not that the daemon delivered it to the pane. A failed INPUT is
+// reported with a MsgInputNack (issued by servePTYStream during teardown)
+// carrying how many bytes the pane received before the failure, so the client
+// re-sends the unapplied tail rather than the whole backlog. Together they
+// preserve the queue's "a drained byte must never be silently discarded"
+// invariant across a post-write daemon-side failure (#6848).
+func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn, inputDelivery *ptyInputDelivery, reader *ptyReaderAvailability, writeMu *sync.Mutex, helloDone chan struct{}) error {
 	for {
 		msg, err := agentproto.ReadMessage(ctx, conn)
 		if err != nil {
@@ -515,14 +579,40 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 				inputResult := inputDelivery.begin()
 				reader.away()
 				err := binding.input(msg.Frame.Data)
-				reader.back()
 				if err != nil {
 					err = fmt.Errorf("apply PTY input: %w", err)
-				}
-				inputResult <- err
-				if err != nil {
+					inputResult <- err
+					reader.back()
 					return err
 				}
+				inputResult <- nil
+				// The frame reached the pane. Tell the client it may trim this
+				// frame. Acks are FIFO (this reader applies one frame at a time, in
+				// arrival order) so the client pairs each ack with its oldest
+				// unconfirmed frame. The write is best-effort: a client that has
+				// already dropped will be torn down by the next read, and a lost
+				// ack leaves the client to re-send the frame on reconnect — a
+				// bounded duplicate, not silent loss.
+				//
+				// Wait for the start-seq hello to be emitted before any ack: the
+				// hello is the stream's mandatory first server→client frame, and a
+				// reconnect that sends queued INPUT the instant the socket opens
+				// could otherwise let this ack reach the wire first (#6848 review:
+				// send the hello before allowing acknowledgement writes). The wait
+				// is a no-op once the hello is done; ctx covers a teardown that
+				// overtakes it.
+				select {
+				case <-helloDone:
+				case <-ctx.Done():
+					reader.back()
+					continue
+				}
+				writeMu.Lock()
+				actx, acancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+				_ = agentproto.WriteControl(actx, conn, agentproto.NewInputAckMessage())
+				acancel()
+				writeMu.Unlock()
+				reader.back()
 			case agentproto.OpResize:
 				reader.away()
 				_ = binding.resize(msg.Frame.Rows, msg.Frame.Cols)

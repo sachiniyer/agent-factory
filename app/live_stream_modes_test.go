@@ -108,3 +108,33 @@ func TestAPIStreamMalformedModesCannotReusePriorSnapshot(t *testing.T) {
 		t.Fatalf("event = %+v, malformed replacement must fail closed", ev)
 	}
 }
+
+// TestAPIStreamDecodesInputAckAndNack pins the app→termpane translation of the
+// two delivery-accounting control frames (#6848): a MsgInputAck maps to a
+// termpane.EventInputAck (trim the oldest unconfirmed frame), and a
+// MsgInputNack maps to a termpane.EventInputNack carrying the applied byte
+// count (trim the applied prefix, retain the tail).
+func TestAPIStreamDecodesInputAckAndNack(t *testing.T) {
+	stream := testAPIStream(t, func(ctx context.Context, conn *websocket.Conn) error {
+		if err := agentproto.WriteControl(ctx, conn, agentproto.NewInputAckMessage()); err != nil {
+			return err
+		}
+		return agentproto.WriteControl(ctx, conn, agentproto.NewInputNackMessage(4096))
+	})
+
+	ev, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatalf("Recv ack: %v", err)
+	}
+	if ev.Kind != termpane.EventInputAck {
+		t.Fatalf("ack event = %+v, want EventInputAck", ev)
+	}
+
+	ev, err = stream.Recv(context.Background())
+	if err != nil {
+		t.Fatalf("Recv nack: %v", err)
+	}
+	if ev.Kind != termpane.EventInputNack || ev.Applied != 4096 {
+		t.Fatalf("nack event = %+v, want EventInputNack Applied=4096", ev)
+	}
+}
