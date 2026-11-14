@@ -453,7 +453,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	if manual && workDir != "" {
 		if _, err := preflight.CheckCommandAt(launchProgram, workDir); err != nil {
 			return fmt.Errorf("handoff target %s failed launch preflight: %w", agent,
-				preflight.ProgramError(agent, resolvedProgram, err))
+				swapPreflightCause(i.Title, workDir, agent, resolvedProgram, err))
 		}
 	}
 	proof := accountLaunchProof(resolvedProgram, launchProgram, resolution.trustBase, paneGeneratedArgs, paneTrustedExecutable)
@@ -509,7 +509,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		if manual && workDir != "" {
 			if _, err := preflight.CheckCommandAt(replacementProgram, workDir); err != nil {
 				return fmt.Errorf("cannot switch session %q to account %q because tab %q failed launch preflight: %w", i.Title, name, tab.Name,
-					preflight.ProgramError(replacementProgram, replacementProgram, err))
+					swapPreflightCause(i.Title, workDir, replacementProgram, replacementProgram, err))
 			}
 		}
 		if args := tmux.ConversationSelectorArgs(replacementProgram); len(args) > 0 {

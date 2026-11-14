@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"github.com/sachiniyer/agent-factory/preflight"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -154,4 +156,28 @@ func cleanupRespawnedAccountTabs(setupErr error, sessions []*tmux.TmuxSession) e
 		}
 	}
 	return setupErr
+}
+
+// worktreeStalledError is the agent-swap and account-swap paths' answer to a
+// look at the worktree that did not answer within its bound (fsprobe, #7279):
+// a WorktreeUnavailableError that says what to do, raised before anything is
+// torn down. nil when err is not that non-answer.
+func worktreeStalledError(title, workDir string, err error) error {
+	if !errors.Is(err, fsprobe.ErrProbeTimedOut) {
+		return nil
+	}
+	return &WorktreeUnavailableError{Title: title, WorktreePath: workDir, Err: fmt.Errorf(
+		"the filesystem holding %s did not answer, so af left the running agent alone; "+
+			"check that its mount (NFS, FUSE, sshfs) is responding, then retry the swap: %w", workDir, err)}
+}
+
+// swapPreflightCause is why a swap's replacement failed its launch preflight in
+// workDir: the worktree that did not answer (worktreeStalledError), raised
+// before anything is torn down, or preflight's own explanation of the program
+// (preflight.ProgramError) for any other failure.
+func swapPreflightCause(title, workDir, agent, command string, err error) error {
+	if stalled := worktreeStalledError(title, workDir, err); stalled != nil {
+		return stalled
+	}
+	return preflight.ProgramError(agent, command, err)
 }

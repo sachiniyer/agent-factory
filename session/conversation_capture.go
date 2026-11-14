@@ -569,7 +569,7 @@ func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConver
 		// error it is rather than as absence.
 		return AgentConversationData{}, true, err
 	}
-	candidates, uncorrelated, unreadable := classifyCodexRolloutFiles(observed, snap.workingDir)
+	candidates, uncorrelated, _, unreadable := classifyCodexRolloutFiles(observed, snap.workingDir)
 	if uncorrelated > 0 {
 		// Codex can create each file before its first JSONL record is visible.
 		// Retry unknowns instead of treating an incomplete session_meta as either

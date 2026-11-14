@@ -11,7 +11,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
-	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -420,23 +419,20 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 		}
 		repair = operatorRepairWindowOf(outgoing, time.Now())
 	}
-	resolvedLaunch, err := fsprobe.ResolveForCompare(launchDir)
-	if err != nil {
-		// A launch dir af could not resolve within the bound correlates no
-		// newer rollout, so it cannot confirm the carried one is still the
-		// newest: never a carry of a rollout that may be stale (#7279).
-		return carryUncorrelatedReason
-	}
-	switch judgeCodexRecordedStaleness(recordedPath, rollouts, resolvedLaunch, repair) {
+	// The launch dir is resolved only once a newer rollout exists (#7287
+	// review R3): a carry with nothing newer has nothing to correlate.
+	switch judgeCodexRecordedStaleness(recordedPath, rollouts, boundedLaunchDir(launchDir), repair) {
 	case codexRolloutRecordedGone:
 		return carryRolloutMissingReason
 	case codexRolloutStale:
 		if c.newerCounts(launchDir) {
 			return staleCarryReason
 		}
-	case codexRolloutUncorrelated:
-		// A newer rollout af cannot classify is a look that failed only where
-		// a newer thread would count.
+	case codexRolloutUncorrelated, codexRolloutUnresolved:
+		// A newer rollout af cannot classify, or one whose correlation needed
+		// a lookup that did not answer within its bound, is a look that failed
+		// only where a newer thread would count; there it refuses, and never
+		// carries a rollout that may be stale (#7279).
 		if c.newerCounts(launchDir) {
 			return carryUncorrelatedReason
 		}

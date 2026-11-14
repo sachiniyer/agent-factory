@@ -621,9 +621,8 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 		// against a live session the user is looking at; a missing worktree means
 		// something is wrong that a swap should not paper over by recreating an
 		// empty tree and dispatching a fresh agent into it.
-		if errors.Is(err, fsprobe.ErrProbeTimedOut) {
-			err = fmt.Errorf("the filesystem holding %s did not answer, so af left the running agent alone; "+
-				"check that its mount (NFS, FUSE, sshfs) is responding, then retry the swap: %w", workDir, err)
+		if stalled := worktreeStalledError(i.Title, workDir, err); stalled != nil {
+			return stalled
 		}
 		return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 	}
