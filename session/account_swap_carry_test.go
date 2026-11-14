@@ -688,6 +688,83 @@ func TestConversationCarryWatermarksOnlyTheSourcePrefix(t *testing.T) {
 		"the verified prefix is the source's; the destination's tail is its own")
 }
 
+// A present-but-empty source transcript verifies nothing about a non-empty
+// stale destination: the prefix comparison it buys covers zero bytes and
+// trivially "matches", so without the carryFileAt guard the stale copy would
+// be resumed as the whole conversation with covered == 0 and the carried-
+// prefix quarantine (#6802) silently suppressed. The guard mirrors the
+// missing-source branch — a new carry refuses, and a committed re-run keeps
+// the landed copy but covers every byte as the source account's unverifiable
+// provenance so the watermark (not a quarantine marker) holds.
+func TestConversationCarryEmptySourceVerifiesNothing(t *testing.T) {
+	rel := "sessions/2026/11/10/rollout-x.jsonl"
+	stale := "claim one\nclaim two\nrecorded while the previous account was live\n"
+
+	t.Run("a new carry refuses the stale destination", func(t *testing.T) {
+		afHome := t.TempDir()
+		srcHome := t.TempDir()
+		dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+		require.NoError(t, os.MkdirAll(dstDir, 0o700))
+		dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+		require.NoError(t, err)
+		writeCarryFile(t, srcHome, rel, "")
+		dstPath := writeCarryFile(t, dstDir, rel, stale)
+
+		carry := &conversationCarry{
+			agent: tmux.ProgramCodex, id: "x",
+			srcHome: srcHome, dstHome: dstDir,
+			srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+			transcript: rel,
+		}
+		err = carry.copy()
+		require.Error(t, err)
+		require.Equal(t, "its transcript is empty in the previous account's home", carryFailureReason(err))
+		require.Equal(t, stale, readCarryFile(t, dstPath),
+			"the refused carry must not destroy the destination's existing copy")
+		prefixes, perr := handoff.NewStore(filepath.Join(afHome, "instances", handoff.StateFileName)).CarriedPrefixes()
+		require.NoError(t, perr)
+		require.Empty(t, prefixes, "no carried-prefix watermark is recorded for a refused carry")
+		rails, rerr := handoff.NewRailsStore(
+			filepath.Join(afHome, "instances", handoff.RailsFileName),
+			filepath.Join(afHome, "instances", handoff.StateFileName)).Load()
+		require.NoError(t, rerr)
+		require.Empty(t, rails.UnrecordedCarries, "a refused carry commits nothing, so nothing is quarantined")
+	})
+
+	t.Run("a committed re-run keeps the stale copy and covers every byte", func(t *testing.T) {
+		afHome := t.TempDir()
+		srcHome := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(afHome, "instances"), 0o700))
+		dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+		require.NoError(t, os.MkdirAll(dstDir, 0o700))
+		dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+		require.NoError(t, err)
+		dstPath := writeCarryFile(t, dstDir, rel, stale)
+		writeCarryFile(t, srcHome, rel, "")
+
+		carry := &conversationCarry{
+			agent: tmux.ProgramCodex, id: "x",
+			srcHome: srcHome, dstHome: dstDir,
+			srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+			transcript: rel, committed: true,
+		}
+		require.NoError(t, carry.copy(),
+			"a committed re-run keeps the landed copy rather than refuse the empty source")
+		require.Equal(t, stale, readCarryFile(t, dstPath),
+			"the stale copy is kept as the conversation to resume")
+		prefixes, perr := handoff.NewStore(filepath.Join(afHome, "instances", handoff.StateFileName)).CarriedPrefixes()
+		require.NoError(t, perr)
+		require.Equal(t, int64(len(stale)), prefixes[dstPath],
+			"every unverifiable byte is the source account's provenance — the watermark covers the whole file")
+		rails, rerr := handoff.NewRailsStore(
+			filepath.Join(afHome, "instances", handoff.RailsFileName),
+			filepath.Join(afHome, "instances", handoff.StateFileName)).Load()
+		require.NoError(t, rerr)
+		require.NotContains(t, rails.UnrecordedCarries, dstPath,
+			"a real watermark covering the whole span needs no quarantine marker")
+	})
+}
+
 // When the quarantine list is already at its cap, the failed carry cannot
 // get a marker — and the cap NEVER evicts one to make room (#6852 review):
 // a dropped marker would re-trust a file whose poison span is still on

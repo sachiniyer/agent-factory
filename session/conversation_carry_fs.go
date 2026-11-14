@@ -448,6 +448,26 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) (carr
 			return carryFileOutcome{}, carryFailure("the new account already holds a different copy of this conversation", nil)
 		}
 		if dstInfo.Size() >= srcSize {
+			if srcSize == 0 && dstInfo.Size() > 0 {
+				// The source transcript exists but is empty, so the prefix
+				// match above compared zero bytes and authenticated nothing
+				// about the non-empty stale destination it just "matched".
+				// Kept wholesale with covered == 0 it would bypass the
+				// carried-prefix quarantine (#6802): the destination resumed
+				// unverified, its records counted as the target account's
+				// usage evidence, and even an unrelated conversation's
+				// records would slip past the divergence refusal, which
+				// cannot fire when the comparison is vacuous. An empty source
+				// is evidence-wise identical to a missing one, so mirror that
+				// branch: a committed re-run keeps the landed copy but covers
+				// every byte as the source account's unverifiable provenance,
+				// and a new carry refuses rather than resume a stale copy as
+				// the whole conversation.
+				if !requireSource {
+					return carryFileOutcome{covered: dstInfo.Size()}, nil
+				}
+				return carryFileOutcome{}, carryFailure("its transcript is empty in the previous account's home", nil)
+			}
 			// A replacement that already resumed here appended to this copy.
 			// Overwriting it with the shorter source would truncate that work.
 			// It is kept, so it must stay appendable: the resumed provider
