@@ -204,6 +204,70 @@ func TestCarryConversationFileMissingSource(t *testing.T) {
 	})
 }
 
+// A present-but-empty source transcript verifies nothing about a destination
+// it does not own: the prefix match it buys covers zero bytes and trivially
+// "matches", so without a guard the same stale-destination-resumed-as-the-
+// whole-conversation outcome the missing-source branch refuses would slip
+// through with covered == 0, bypassing the carried-prefix quarantine (#6802).
+// These mirror TestCarryConversationFileMissingSource for the empty-source
+// half of the test matrix.
+func TestCarryConversationFileEmptySource(t *testing.T) {
+	t.Run("a new carry refuses a non-empty stale destination", func(t *testing.T) {
+		src, dst := carryHomes(t)
+		writeCarryFile(t, src, carryTestRel, "")
+		stale := "stale prefix the previous account never verified\n"
+		dstPath := writeCarryFile(t, dst, carryTestRel, stale)
+		err := carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true)
+		require.Error(t, err)
+		require.Equal(t, "its transcript is empty in the previous account's home", carryFailureReason(err),
+			"a present-but-empty source verifies nothing; a stale destination copy must not be resumed as though it were the whole conversation")
+		require.Equal(t, stale, readCarryFile(t, dstPath),
+			"the refused carry must not destroy the destination's existing copy")
+	})
+	t.Run("an empty source refuses even an unrelated conversation's records", func(t *testing.T) {
+		src, dst := carryHomes(t)
+		writeCarryFile(t, src, carryTestRel, "")
+		foreign := "a completely different conversation's records\n"
+		dstPath := writeCarryFile(t, dst, carryTestRel, foreign)
+		err := carryConversationFile(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true)
+		require.Error(t, err)
+		require.Equal(t, "its transcript is empty in the previous account's home", carryFailureReason(err),
+			"the divergence refusal cannot fire on a vacuous zero-byte prefix; the empty source refuses instead")
+		require.Equal(t, foreign, readCarryFile(t, dstPath))
+	})
+	t.Run("a committed re-run keeps the stale copy but covers every byte", func(t *testing.T) {
+		src, dst := carryHomes(t)
+		writeCarryFile(t, src, carryTestRel, "")
+		stale := "carried while the previous account was live\n"
+		dstPath := writeCarryFile(t, dst, carryTestRel, stale)
+		outcome, err := carryConversationFileOutcome(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, false)
+		require.NoError(t, err)
+		require.False(t, outcome.installed, "the committed re-run keeps the landed copy rather than rewriting it")
+		require.Equal(t, int64(len(stale)), outcome.covered,
+			"every unverifiable byte is covered as the source account's provenance so the carried-prefix quarantine holds")
+		require.Equal(t, stale, readCarryFile(t, dstPath), "the stale copy is kept for the resume")
+	})
+	t.Run("an empty source and an empty destination is a harmless no-op", func(t *testing.T) {
+		src, dst := carryHomes(t)
+		writeCarryFile(t, src, carryTestRel, "")
+		writeCarryFile(t, dst, carryTestRel, "")
+		outcome, err := carryConversationFileOutcome(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true)
+		require.NoError(t, err)
+		require.False(t, outcome.installed, "an empty destination is kept, not rewritten")
+		require.Equal(t, int64(0), outcome.covered, "no claims are present to quarantine")
+		require.Empty(t, readCarryFile(t, filepath.Join(dst, carryTestRel)))
+	})
+	t.Run("an empty source with no destination installs an empty file", func(t *testing.T) {
+		src, dst := carryHomes(t)
+		writeCarryFile(t, src, carryTestRel, "")
+		outcome, err := carryConversationFileOutcome(ambientCarryRoot(src), plainCarryRoot(dst), carryTestRel, true)
+		require.NoError(t, err)
+		require.True(t, outcome.installed, "the empty file is installed from the source")
+		require.Equal(t, int64(0), outcome.covered, "no claims are present to quarantine")
+		require.Empty(t, readCarryFile(t, filepath.Join(dst, carryTestRel)))
+	})
+}
+
 func TestCarryConversationFileSameStoreIsANoOp(t *testing.T) {
 	home := t.TempDir()
 	path := writeCarryFile(t, home, carryTestRel, "turn one\n")
