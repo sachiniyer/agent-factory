@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // #7272 (continuation of #7268): the Claude poll, restore, respawn and
@@ -273,4 +274,34 @@ func TestRecoverOfAMissingWorktreeDoesNotStallOnAWedgedPath(t *testing.T) {
 	requireBoundedWorktreeRefusal(t, inst, &newSessions)
 	missing, _ := inst.WorktreeMissing()
 	require.True(t, missing, "the record still says the worktree is missing")
+}
+
+// The account-swap carry asks the attribution rule too, and its safe answer is
+// the opposite of the restore's. A directory af could not resolve counts
+// against the carry, so a newer conversation refuses it rather than af carry a
+// conversation the user may have moved on from (a /clear). Here the repository
+// sits on the wedged mount, so af cannot tell whether the worktree is the
+// user's own checkout.
+func TestClaudeCarryRefusesANewerConversationWhenAttributionCannotLook(t *testing.T) {
+	home := carryAmbientProviderHomes(t)
+	inst, recorded, _ := symlinkedClaudeCarryInstance(t)
+	recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
+	source := filepath.Join(home, ".claude")
+	cwd := inst.GetWorktreePath()
+	past := time.Now().Add(-time.Hour)
+	setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), claudeRecordLine(t, cwd)), past)
+	setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, newerConversationID+".jsonl"), claudeRecordLine(t, cwd)), past.Add(time.Minute))
+	require.Equal(t, carryRefusalCode(staleCarryReason), inst.AccountSwapCarryRefusal(),
+		"precondition: with every directory answering, the newer conversation refuses the carry")
+
+	wedgeLaunchDirResolution(t, inst.Path)
+	require.False(t, withinBound(t, func() bool { return inst.newerConversationIsEvidence(cwd) }),
+		"the restore's answer: a directory af cannot prove is attributed nothing, so it resumes")
+	require.Equal(t, carryRefusalCode(staleCarryReason), withinBound(t, inst.AccountSwapCarryRefusal),
+		"the carry's answer: require_carry's check-ahead defers the move")
+	require.NoError(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }))
+	if carry := inst.accountSwapLaunch.carry; carry != nil {
+		t.Fatalf("a look that did not happen carried %s past a newer conversation", carry.transcript)
+	}
+	require.Equal(t, staleCarryReason, inst.accountSwapLaunch.carryFallback, "the swap states why it starts fresh")
 }

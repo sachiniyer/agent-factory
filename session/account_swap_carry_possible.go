@@ -63,7 +63,7 @@ func (i *Instance) accountSwapCarryRefusalReason() string {
 		sourceOnly: true,
 		stores:     carryAheadStores,
 		// The live swap's own judgement of a newer conversation (#7227).
-		newerIsEvidence: i.newerConversationIsEvidence,
+		newerIsEvidence: i.newerConversationCountsAgainstCarry,
 	})
 	return carryAheadRefusal(carry, reason, program)
 }

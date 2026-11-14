@@ -63,9 +63,10 @@ type conversationCarry struct {
 	// source checks read it instead of walking the store. The live swap never
 	// sets it, and the plan clears it before it returns.
 	srcStore *codexStoreSnapshot
-	// newerIsEvidence is the session's newerConversationIsEvidence: whether a
-	// newer conversation in a launch directory shows the session moved on from
-	// the carried one. Nil counts every newer conversation.
+	// newerIsEvidence is the session's newerConversationCountsAgainstCarry:
+	// whether a newer conversation in a launch directory shows the session
+	// moved on from the carried one, counting a directory af could not resolve
+	// (#7272). Nil counts every newer conversation.
 	newerIsEvidence func(launchDir string) bool
 }
 
@@ -178,8 +179,8 @@ type accountSwapCarryRequest struct {
 	// snapshot of the source store instead of walking it (#7156 review
 	// P2-1). Only the check-ahead sets it; the live swap walks the store.
 	stores *codexStoreCache
-	// newerIsEvidence is the session's newerConversationIsEvidence. Both the
-	// live swap and the check-ahead pass it, so they judge a newer
+	// newerIsEvidence is the session's newerConversationCountsAgainstCarry.
+	// Both the live swap and the check-ahead pass it, so they judge a newer
 	// conversation alike (#7227).
 	newerIsEvidence func(launchDir string) bool
 }
