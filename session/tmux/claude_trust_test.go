@@ -399,7 +399,7 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 		options: []string{claudeTrustYesLabel, claudeTrustNoLabel}, selected: 1})
 
 	t.Run("No first: the affirmative row is below the cursor", func(t *testing.T) {
-		dialog, err := parseClaudeFolderTrustDialog(noFirst)
+		dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(noFirst))
 		require.NoError(t, err)
 		require.Equal(t, claudeTrustNoLabel, dialog.selectedLabel())
 		require.False(t, dialog.onAffirmative())
@@ -407,14 +407,14 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 	})
 
 	t.Run("Yes first, preselected: nothing to move", func(t *testing.T) {
-		dialog, err := parseClaudeFolderTrustDialog(yesFirst)
+		dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(yesFirst))
 		require.NoError(t, err)
 		require.Equal(t, claudeTrustYesLabel, dialog.selectedLabel())
 		require.True(t, dialog.onAffirmative())
 	})
 
 	t.Run("Yes first, cursor below it", func(t *testing.T) {
-		dialog, err := parseClaudeFolderTrustDialog(yesFirstOnNo)
+		dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(yesFirstOnNo))
 		require.NoError(t, err)
 		require.False(t, dialog.onAffirmative())
 		require.Equal(t, "Up", dialog.keyTowardAffirmative())
@@ -426,7 +426,7 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 			{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, boxed: true},
 			{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, boxed: true, ordinals: true},
 		} {
-			dialog, err := parseClaudeFolderTrustDialog(dialogFixture(pane))
+			dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(dialogFixture(pane)))
 			require.NoError(t, err)
 			require.Equal(t, claudeTrustNoLabel, dialog.selectedLabel())
 			require.Equal(t, "Down", dialog.keyTowardAffirmative())
@@ -436,7 +436,7 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 	t.Run("ANSI colour does not hide the rows", func(t *testing.T) {
 		coloured := strings.ReplaceAll(noFirst, "❯", "\x1b[1m❯\x1b[0m")
 		coloured = strings.ReplaceAll(coloured, claudeTrustYesLabel, "\x1b[32m"+claudeTrustYesLabel+"\x1b[0m")
-		dialog, err := parseClaudeFolderTrustDialog(coloured)
+		dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(coloured))
 		require.NoError(t, err)
 		require.Equal(t, "Down", dialog.keyTowardAffirmative())
 	})
@@ -509,7 +509,7 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 	}
 	for _, tt := range refusals {
 		t.Run("refuses: "+tt.name, func(t *testing.T) {
-			_, err := parseClaudeFolderTrustDialog(tt.content)
+			_, err := parseClaudeFolderTrustDialog(visibleTextOf(tt.content))
 			require.Error(t, err, "af must refuse a dialog it cannot read, not guess at it")
 			require.Contains(t, err.Error(), tt.reason)
 		})

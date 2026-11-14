@@ -90,7 +90,7 @@ func TestClaudeLegacyTrustDialogOf(t *testing.T) {
 		{"two selected option rows", q + "\n❯ 1. Yes\n❯ 2. No", claudeLegacyTrustNone},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, claudeLegacyTrustDialogOf(tt.content))
+			require.Equal(t, tt.want, claudeLegacyTrustDialogOf(visibleTextOf(tt.content)))
 		})
 	}
 }

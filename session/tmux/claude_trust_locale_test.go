@@ -98,7 +98,7 @@ func TestClaudeTrustCursorSurvivesRealCaptureUnderNonUTF8Locale(t *testing.T) {
 				"the %q selection cursor did not survive `capture-pane -p -e -J` under LANG=%s:\n%s",
 				claudeTrustSelectionGlyph, locale, content)
 
-			dialog, err := parseClaudeFolderTrustDialog(content)
+			dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(content))
 			require.NoError(t, err,
 				"af could not locate the cursor in a REAL capture under LANG=%s:\n%s", locale, content)
 			require.Equal(t, "No, exit", dialog.selectedLabel(),

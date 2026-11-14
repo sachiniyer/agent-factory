@@ -35,7 +35,10 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	// claude branch (#1116 defect class).
 	switch DetectAgentFromCommand(t.programCmd()) {
 	case ProgramClaude:
-		if claudeTrustPromptPresent(content) {
+		// Every Claude clause reads this one capture as visible text: stripped
+		// once, here, of every escape capture-pane -e emits (#7271).
+		screen := visibleTextOf(content)
+		if claudeTrustPromptPresent(screen) {
 			// NOT a bare Enter. Claude Code 2.1.257 made "No, exit" the
 			// preselected option of the folder-trust dialog, so the Enter this
 			// branch used to send chose to QUIT the agent (#3579).
@@ -43,7 +46,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			// affirmative row by label, and confirms only what it has seen
 			// selected — the same look-then-act contract the codex branch below
 			// already keeps.
-			return t.answerClaudeTrustPrompt(content)
+			return t.answerClaudeTrustPrompt(screen)
 		}
 		// The MCP trust modal is NOT atomic: Claude Code paints the question and
 		// options before it paints the "Enter to confirm" footer, so a capture
@@ -60,7 +63,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		// and must not map to the same return value. The MCP question appearing
 		// on screen is enough to hold; the folder-trust handler already has
 		// settling logic for the same reason.
-		if claudeMCPDialogPartiallyRendered(content) {
+		if claudeMCPDialogPartiallyRendered(screen) {
 			return true
 		}
 		// The 2.1.322 MCP-server dialog is painted top-down too. A frame that is
@@ -70,18 +73,30 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		// rows: hold, say why once, and send nothing.
 		// The multi-server picker (#7166) holds the same way while painting,
 		// and when it is plainly on screen but af cannot read it.
-		switch claudeMCPServersPickerOf(content) {
+		switch claudeMCPServersPickerOf(screen) {
 		case claudeMCPServersPartial:
 			return true
 		case claudeMCPServersUnreadable:
 			t.refuseClaudeMCPServers("its rows do not read as the picker af knows (a pane too narrow, or a server name too long, wraps them)")
 			return true
 		}
-		switch claudeMCPServerDialogOf(content).verdict {
+		switch claudeMCPServerDialogOf(screen).verdict {
 		case claudeMCPServerPartial:
 			return true
 		case claudeMCPServerUnreadable:
 			t.refuseClaudeMCPServer("its rows do not read as the dialog af knows (a pane too narrow for them wraps them)")
+			return true
+		}
+		// The reworded folder-trust dialog holds the same two ways (#7271):
+		// while Claude Code paints it, and when af cannot read it as rows —
+		// a pane narrow enough that Claude Code wraps its question. Before,
+		// either one matched no clause, the pane read clear, and the create
+		// typed its prompt into the modal.
+		switch claudeFolderTrustDialogOf(screen) {
+		case claudeFolderTrustPartial:
+			return true
+		case claudeFolderTrustUnreadable:
+			t.refuseTrustPicker(claudeFolderTrustPicker, errClaudeFolderTrustUnreadable)
 			return true
 		}
 		// The legacy folder-trust dialog is not atomic either: Claude Code
@@ -89,7 +104,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		// time. claudeLegacyTrustDialogOf reports a frame that is a proper
 		// prefix of the dialog — or a complete one whose cursor is not on Yes —
 		// as partial: hold without a key, never report the pane clear.
-		if claudeLegacyTrustDialogOf(content) == claudeLegacyTrustPartial {
+		if claudeLegacyTrustDialogOf(screen) == claudeLegacyTrustPartial {
 			return true
 		}
 		// A pane with no dialog on it retires the refusal notice, so a later
@@ -154,6 +169,11 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	return false
 }
 
+// ansiCSISequence matches one CSI escape sequence, which is how a capture
+// carries SGR styling. The Claude clauses strip a whole capture once instead,
+// with terminalEscapeSequence (visibleTextOf), which removes OSC 8 links too.
+var ansiCSISequence = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+
 // handleDocTrustPrompt answers the aider-style documentation-link prompt
 // (DocTrustPromptPresent) with D+Enter, reporting whether it was in the way.
 func (t *TmuxSession) handleDocTrustPrompt(content string) bool {
@@ -213,8 +233,6 @@ func IsCodexComposerLine(line string) bool {
 // The match is anchored on the question, both option labels and the affordance.
 // CheckAndHandleTrustPrompt also runs on live-session polls, so a prose mention
 // of one phrase must never inject Enter into a working agent.
-var ansiCSISequence = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-
 func CodexTrustPromptPresent(content string) bool {
 	content = ansiCSISequence.ReplaceAllString(strings.ReplaceAll(content, "\r\n", "\n"), "")
 	question, selectedYes, noOption, affordance, last := -1, -1, -1, -1, -1
@@ -344,93 +362,63 @@ func sgrSetsReverse(params string, current bool) bool {
 
 // claudeTrustPromptPresent reports whether the captured pane content is showing
 // one of Claude Code's launch-time gates that af answers: the folder-trust
-// prompt (either wording) or an MCP-server prompt (either wording). Being
-// present is not consent to a key: answerClaudeTrustPrompt navigates by label,
-// confirms only what it has read, and refuses — holding without a key — a
-// dialog whose selection is not one af may confirm.
+// prompt (either wording) or an MCP-server prompt (any wording). Being present
+// is not consent to a key: answerClaudeTrustPrompt navigates by label, confirms
+// only what it has read, and refuses — holding without a key — a dialog whose
+// selection is not one af may confirm.
 //
 // This runs on the daemon's CONTINUOUS Snapshot poll (session/agentserver_local.go
 // CheckAndHandleTrustPrompt), and CapturePaneContent is visible-only
-// (capture-pane -p, no -S), so `content` is whatever is on screen right now —
-// including ordinary agent output. A bare substring match on natural-language
-// prompt text would therefore risk firing a spurious Enter on unrelated output.
+// (capture-pane -p, no -S), so the screen is whatever is on it right now —
+// including ordinary agent output, and af's own source quoting every one of
+// these dialogs. A phrase match would therefore risk typing into a working
+// agent, so every clause decides from the same property instead: the dialog's
+// anchor opens the pane's trailing region, and every row from it to the bottom
+// of the pane is one the dialog paints. A working agent paints its composer
+// beneath its output, so a quoted dialog has something after it and a live one
+// does not — the rule CodexTrustPromptPresent keeps as `affordance == last`.
 //
-// Claude Code reworded the folder-trust gate from the interrogative
-// "Do you trust the files in this folder?" to a "Quick safety check: Is this a
-// project you created or one you trust? ... ❯ 1. Yes, I trust this folder /
-// Enter to confirm · Esc to cancel" dialog. af's dismissal missed the new
-// wording, so brand-new sessions hung at the prompt and rendered a blank pane.
+// Each clause reads screen, the capture stripped once of every escape
+// capture-pane -e emits (visibleTextOf). Claude Code styles its dialogs word by
+// word and links words with OSC 8, so a clause reading the raw bytes misses a
+// fully painted dialog, and task.DismissTrustPrompt then types the user's prompt
+// into the live modal (#3579 class, #7265, #7271).
 //
-// We match the reworded prompt ANCHORED: the natural-language question must
-// co-occur with a dialog-chrome marker only the real modal renders ("Yes, I
-// trust this folder" or the "Enter to confirm" affordance), so a stray mention
-// of the phrase in scrollback or agent output never triggers a dismissal. The
-// old wording ("Do you trust the files in this folder?") is decided by
-// claudeLegacyTrustDialogOf: the question must be a whole row that opens the
-// pane's trailing region, and every row below it must be one the legacy dialog
-// paints, in its order. The phrase alone is the same hazard the MCP branch's
-// footer-is-last rule refuses — af's own source contains the legacy phrase
-// verbatim, so a visible rendering of this file's contents (a diff, a review
-// reply, pasted release notes) carries it too.
-//
-// The older MCP prompt ("New MCP server found. Do you trust this new MCP server? ❯
-// 1. Yes ... Enter to confirm") is anchored on its unique question "do you
-// trust this new mcp server" AND the modal's "Enter to confirm" footer being
-// the last non-blank content in the pane. The phrase alone cannot tell a live
-// modal from output that merely quotes it — af's own source contains the
-// phrase verbatim — so the footer-is-last rule (the same discipline
-// claudeTrustPickerStructure applies to the folder-trust branch,
-// claude_trust.go:307-310, and CodexTrustPromptPresent applies as its
-// `affordance == last` rule) refuses a quoted phrase whose agent composer or
-// further output is painted below it. Requiring the footer at the END is
-// strictly stronger than requiring it anywhere in the content: a working
-// agent paints its composer beneath its output, so a quoted dialog has
-// something after it and a live one does not.
-func claudeTrustPromptPresent(content string) bool {
-	// Strip ANSI SGR sequences before matching. CapturePaneContent runs with
-	// -e (escapes preserved), and Claude Code renders some dialogs with per-
-	// word SGR styling that breaks the byte-contiguity of multi-word phrases,
-	// so a raw strings.Contains on the capture misses a fully rendered styled
-	// dialog. Every sibling matcher this gate composes with
-	// (claudeFolderTrustDialogPresent, claudeMCPTrustFooterIsLast,
-	// parseClaudeFolderTrustDialog) strips the same way via ansiCSISequence;
-	// the gate's two raw clauses must too, or task.DismissTrustPrompt reads a
-	// styled dialog as dialog-free and types the user's prompt into the live
-	// modal (#3579 class).
-	plain := ansiCSISequence.ReplaceAllString(content, "")
-	lower := strings.ToLower(plain)
+// The clauses report only a COMPLETE dialog. A dialog still being painted, or
+// one af cannot read as rows, is not reported here; CheckAndHandleTrustPrompt
+// holds on those with each parser's partial and unreadable verdicts, because
+// "af could not confirm a dialog" and "there is no dialog" must not map to the
+// same answer.
+func claudeTrustPromptPresent(screen visibleText) bool {
+	// Claude Code's reworded folder-trust dialog ("Quick safety check: Is this
+	// a project you created or one you trust? … ❯ Yes, I trust this folder /
+	// No, exit … Enter to confirm · Esc to cancel"), read from the trailing
+	// region (claudeFolderTrustDialogOf, #7271).
+	reworded := claudeFolderTrustDialogOf(screen) == claudeFolderTrustComplete
 
-	// Reworded folder-trust dialog — the question co-occurs with the
-	// dialog-only option label. Both strings are specific to this modal.
-	reworded := strings.Contains(plain, "Is this a project you created or one you trust") &&
-		strings.Contains(plain, "Yes, I trust this folder")
-
-	// MCP trust dialog — anchored on its unique question (case-insensitive)
-	// AND the modal's footer being the last content on screen, so a quoted
-	// mention of the phrase with the composer painted below it does not fire.
-	// The question half is matched against ANSI-stripped content (plain); the
-	// footer half (claudeMCPTrustFooterIsLast) already strips per row.
-	mcpDialog := strings.Contains(lower, "do you trust this new mcp server") &&
-		claudeMCPTrustFooterIsLast(content)
+	// The older MCP prompt ("New MCP server found. Do you trust this new MCP
+	// server? ❯ 1. Yes … Enter to confirm"): its question, preamble and Yes/No
+	// options in the blocks above a footer that is the last content
+	// (claudeMCPTrustFooterIsLast), which already requires the question. One
+	// predicate per clause: a second, separate match of the question was a half
+	// that could drift from the first, and that pair once had (#7271).
+	mcpDialog := claudeMCPTrustFooterIsLast(screen)
 
 	// Claude Code 2.1.322's MCP-server dialog ("New MCP server found in this
 	// project: <name>" … "Continue without using this MCP server"), which kept
 	// none of the older wording's anchors (#7163). Complete means the whole
 	// dialog with its footer last (claudeMCPServerDialogOf) — whichever row
 	// owns the cursor, because a dialog af will refuse is still in the way.
-	mcpServer := claudeMCPServerDialogOf(content).verdict == claudeMCPServerComplete
+	mcpServer := claudeMCPServerDialogOf(screen).verdict == claudeMCPServerComplete
 
 	// The multi-server picker Claude Code shows for two or more servers
 	// (#7166): its header opens the trailing region and its footer is last.
-	mcpServers := claudeMCPServersPickerOf(content) == claudeMCPServersComplete
+	mcpServers := claudeMCPServersPickerOf(screen) == claudeMCPServersComplete
 
 	// Legacy folder-trust dialog — the question as a whole row, opening a
 	// trailing region that holds only rows the dialog paints, complete, with
-	// the cursor on Yes (claudeLegacyTrustDialogOf). af's own source contains
-	// the question verbatim, so the phrase alone must never fire —
-	// "a prose mention of one phrase must never inject Enter into a working
-	// agent."
-	legacy := claudeLegacyTrustDialogOf(content) == claudeLegacyTrustAnswerable
+	// the cursor on Yes (claudeLegacyTrustDialogOf).
+	legacy := claudeLegacyTrustDialogOf(screen) == claudeLegacyTrustAnswerable
 
 	return reworded || mcpDialog || mcpServer || mcpServers || legacy
 }

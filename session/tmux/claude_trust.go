@@ -202,8 +202,8 @@ const claudeMCPDialogQuestion = "do you trust this new mcp server"
 // complete. The caller must not proceed to deliver the user's prompt; it must
 // retry until the dialog either completes (claudeTrustPromptPresent) or the
 // preamble is no longer in the expected position.
-func claudeMCPDialogPartiallyRendered(content string) bool {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+func claudeMCPDialogPartiallyRendered(screen visibleText) bool {
+	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
 	for i, line := range lines {
 		rows[i] = claudeTrustRowOf(line)
@@ -298,8 +298,11 @@ func claudeMCPDialogPartiallyRendered(content string) bool {
 	return false
 }
 
+// claudeTrustRowOf reduces one row of a visibleText to what the Claude parsers
+// read. The row is already free of escapes: the capture was stripped once,
+// whole, before any clause saw it.
 func claudeTrustRowOf(line string) claudeTrustRow {
-	line = strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(line, "\r"), ""))
+	line = strings.TrimSpace(line)
 	// Strip the side borders so a bordered row and a bare row reduce to the
 	// same label, then treat a row that was ONLY frame as blank.
 	line = strings.TrimSpace(strings.Trim(line, claudeTrustBoxDrawing))
@@ -366,8 +369,8 @@ func (d claudeFolderTrustDialog) selectedLabel() string {
 // they keep the historical Enter tap. Claude Code 2.1.322's MCP-server dialog
 // never reaches this check: answerClaudeTrustPrompt routes it to
 // declineClaudeMCPServer first.
-func claudeFolderTrustDialogPresent(content string) bool {
-	return strings.Contains(ansiCSISequence.ReplaceAllString(content, ""), claudeTrustAffirmativeLabel)
+func claudeFolderTrustDialogPresent(screen visibleText) bool {
+	return strings.Contains(string(screen), claudeTrustAffirmativeLabel)
 }
 
 // claudeMCPOptionLabels are the fixed option labels the MCP trust picker
@@ -408,14 +411,14 @@ var claudeMCPOptionLabels = []string{"yes", "no"}
 // picker's option rows do not exactly match "yes" / "no" after ordinal stripping,
 // so the predicate stays false and no Enter is sent.
 //
-// Rows are parsed with claudeTrustRowOf so box-drawing chrome and ANSI styling
-// are stripped before the affordance is matched, letting a framed and an
-// unframed modal reduce to the same footer.
-func claudeMCPTrustFooterIsLast(content string) bool {
+// Rows are parsed with claudeTrustRowOf so box-drawing chrome is stripped
+// before the affordance is matched, letting a framed and an unframed modal
+// reduce to the same footer; ANSI styling is already gone from screen.
+func claudeMCPTrustFooterIsLast(screen visibleText) bool {
 	affordance := strings.ToLower(claudeTrustAffordancePrefix)
 	question := claudeMCPDialogQuestion
 
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
 	for i, line := range lines {
 		rows[i] = claudeTrustRowOf(line)
@@ -547,8 +550,8 @@ func claudeMCPTrustFooterIsLast(content string) bool {
 // somewhere else on screen. Anything less is reported as an error: af refuses to
 // answer a dialog it cannot read, which costs a retry, where guessing costs the
 // agent (#3579).
-func parseClaudeFolderTrustDialog(content string) (claudeFolderTrustDialog, error) {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+func parseClaudeFolderTrustDialog(screen visibleText) (claudeFolderTrustDialog, error) {
+	lines := screen.lines()
 	rows := make([]claudeTrustRow, 0, len(lines))
 	for _, line := range lines {
 		rows = append(rows, claudeTrustRowOf(line))
@@ -654,19 +657,19 @@ func claudeTrustNextContentRow(rows []claudeTrustRow, from int) int {
 // dialog was positively identified, so every outcome — accepted, unproven, or
 // refused — leaves the caller owing another check before it may type into the
 // pane (#3302).
-func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
-	if claudeMCPServersPickerOf(content) == claudeMCPServersComplete {
+func (t *TmuxSession) answerClaudeTrustPrompt(screen visibleText) bool {
+	if claudeMCPServersPickerOf(screen) == claudeMCPServersComplete {
 		// The multi-server MCP picker. Its preselection enables every server,
 		// so af does not accept it: it rejects all with Esc (#7166).
 		return t.rejectClaudeMCPServers()
 	}
-	if dialog := claudeMCPServerDialogOf(content); dialog.verdict == claudeMCPServerComplete {
+	if dialog := claudeMCPServerDialogOf(screen); dialog.verdict == claudeMCPServerComplete {
 		// Claude Code 2.1.322's MCP-server dialog. It does render rows af can
 		// read by label, so af confirms its preselection only after checking
 		// that the preselection IS the decline row (#7163).
 		return t.declineClaudeMCPServer(dialog)
 	}
-	if !claudeFolderTrustDialogPresent(content) {
+	if !claudeFolderTrustDialogPresent(screen) {
 		// The older MCP-server trust prompt, or the legacy folder-trust
 		// wording. Neither renders a row af can locate by label and neither is
 		// what regressed in 2.1.257, so both keep the historical Enter tap on
@@ -682,7 +685,7 @@ func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
 		t.noteDialogKeystroke(claudeLaunchGateDialogName, "", "Enter")
 		return true
 	}
-	return t.selectClaudeFolderTrust(content)
+	return t.selectClaudeFolderTrust(screen)
 }
 
 // trustPicker is a launch-time folder-trust picker af answers BY LABEL: it moves
@@ -704,21 +707,29 @@ type trustPicker struct {
 	read func(content string) (claudeFolderTrustDialog, error)
 }
 
-// claudeFolderTrustPicker is Claude Code's folder-trust dialog.
+// claudeFolderTrustPicker is Claude Code's folder-trust dialog. Each read is
+// of one capture, stripped once; a capture that is already visible text strips
+// to itself.
 var claudeFolderTrustPicker = trustPicker{
 	name:        claudeFolderTrustDialogName,
 	affirmative: claudeTrustAffirmativeLabel,
 	read: func(content string) (claudeFolderTrustDialog, error) {
-		if !claudeTrustPromptPresent(content) || !claudeFolderTrustDialogPresent(content) {
-			return claudeFolderTrustDialog{}, errors.New("the folder-trust dialog is no longer on screen")
+		screen := visibleTextOf(content)
+		switch claudeFolderTrustDialogOf(screen) {
+		case claudeFolderTrustComplete:
+			return parseClaudeFolderTrustDialog(screen)
+		case claudeFolderTrustUnreadable:
+			return claudeFolderTrustDialog{}, errClaudeFolderTrustUnreadable
+		case claudeFolderTrustPartial:
+			return claudeFolderTrustDialog{}, errors.New("the folder-trust dialog is not fully painted")
 		}
-		return parseClaudeFolderTrustDialog(content)
+		return claudeFolderTrustDialog{}, errors.New("the folder-trust dialog is no longer on screen")
 	},
 }
 
 // selectClaudeFolderTrust answers Claude Code's folder-trust dialog.
-func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
-	return t.selectTrustPickerOption(claudeFolderTrustPicker, content)
+func (t *TmuxSession) selectClaudeFolderTrust(screen visibleText) bool {
+	return t.selectTrustPickerOption(claudeFolderTrustPicker, string(screen))
 }
 
 // selectTrustPickerOption moves the cursor onto the picker's affirmative row and

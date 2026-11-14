@@ -136,11 +136,11 @@ func claudeMCPServerCheckboxStart(label string) (string, bool) {
 // output, so the picker quoted in a transcript has something painted after its
 // footer and never matches (#4254, #4735). A proper prefix of the grammar is
 // partial.
-func claudeMCPServersPickerOf(content string) claudeMCPServersVerdict {
-	if v := claudeMCPServersGrammarOf(content); v != claudeMCPServersNone {
+func claudeMCPServersPickerOf(screen visibleText) claudeMCPServersVerdict {
+	if v := claudeMCPServersGrammarOf(screen); v != claudeMCPServersNone {
 		return v
 	}
-	if claudeMCPServersUnreadableOf(content) {
+	if claudeMCPServersUnreadableOf(screen) {
 		return claudeMCPServersUnreadable
 	}
 	return claudeMCPServersNone
@@ -148,8 +148,8 @@ func claudeMCPServersPickerOf(content string) claudeMCPServersVerdict {
 
 // claudeMCPServersGrammarOf is the strict grammar claudeMCPServersPickerOf
 // documents; it never returns claudeMCPServersUnreadable.
-func claudeMCPServersGrammarOf(content string) claudeMCPServersVerdict {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+func claudeMCPServersGrammarOf(screen visibleText) claudeMCPServersVerdict {
+	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
 	header := -1
 	var cursorRows []int
@@ -252,8 +252,8 @@ func claudeMCPServersGrammarOf(content string) claudeMCPServersVerdict {
 //
 // A working session has its composer at the bottom, so it can never meet the
 // footer condition, and holding cannot wedge one.
-func claudeMCPServersUnreadableOf(content string) bool {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+func claudeMCPServersUnreadableOf(screen visibleText) bool {
+	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
 	var cursorRows []int
 	last := -1
@@ -262,7 +262,7 @@ func claudeMCPServersUnreadableOf(content string) bool {
 		if rows[i].selected {
 			cursorRows = append(cursorRows, i)
 		}
-		if strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(line, "\r"), "")) != "" {
+		if strings.TrimSpace(line) != "" {
 			last = i
 		}
 	}
@@ -317,7 +317,7 @@ func (t *TmuxSession) rejectClaudeMCPServers() bool {
 	// Look again before the one key: the frame af decided on must still be the
 	// complete picker (#7170 review, P3-1), as declineClaudeMCPServer re-reads
 	// before its Enter.
-	if content, err := t.CapturePaneContent(); err != nil || claudeMCPServersPickerOf(content) != claudeMCPServersComplete {
+	if content, err := t.CapturePaneContent(); err != nil || claudeMCPServersPickerOf(visibleTextOf(content)) != claudeMCPServersComplete {
 		log.InfoLog.Printf("session %q: the %s picker was not on screen when af re-read the pane before its Esc (read error: %v); sending nothing",
 			t.sanitizedName, claudeMCPServersDialogName, err)
 		return true
@@ -342,7 +342,7 @@ func (t *TmuxSession) rejectClaudeMCPServers() bool {
 		switch {
 		case err != nil:
 			readErr = err
-		case claudeMCPServersPickerOf(content) == claudeMCPServersNone:
+		case claudeMCPServersPickerOf(visibleTextOf(content)) == claudeMCPServersNone:
 			log.InfoLog.Printf("session %q: rejected every server on the %s picker with Esc; %s",
 				t.sanitizedName, claudeMCPServersDialogName, claudeMCPServersRemedy)
 			return true

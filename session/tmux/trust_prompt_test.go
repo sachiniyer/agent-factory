@@ -104,7 +104,7 @@ Here is a summary of what I changed in the repo...`
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := claudeTrustPromptPresent(tt.content); got != tt.want {
+			if got := claudeTrustPromptPresent(visibleTextOf(tt.content)); got != tt.want {
 				t.Errorf("claudeTrustPromptPresent() = %v, want %v", got, tt.want)
 			}
 		})
