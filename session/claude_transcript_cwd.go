@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 const (
@@ -85,7 +84,10 @@ var claudeRecordedDirFacts = func(dir string) claudeRecordedDir {
 	for _, project := range projects {
 		names[filepath.Base(project)] = true
 	}
-	return claudeRecordedDir{resolved: pathutil.ResolveForCompare(dir), names: names, unresolved: !complete}
+	// Bounded and checked like the launch side (#7286): a lookup that failed
+	// for any reason but absence is a resolution that did not happen.
+	resolved, err := fsprobe.ResolveForCompare(dir)
+	return claudeRecordedDir{resolved: resolved, names: names, unresolved: !complete || err != nil}
 }
 
 // claudeTranscriptRecordedDir reads the directory the transcript at path
@@ -196,7 +198,10 @@ type claudeOwnership int
 const (
 	claudeOwnedElsewhere claudeOwnership = iota
 	claudeOwnedHere
-	// claudeOwnershipUnknown: no record af can read names a directory.
+	// claudeOwnershipUnknown: af could not look. No record it can read names a
+	// directory; or a resolution either side needed, of the directory the
+	// transcript records or of the launch dir, did not answer, or its
+	// spellings came back incomplete (#7278 review R1, #7286).
 	claudeOwnershipUnknown
 )
 

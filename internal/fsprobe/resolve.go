@@ -1,6 +1,7 @@
 package fsprobe
 
 import (
+	"fmt"
 	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -20,14 +21,23 @@ var resolveForCompareFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 // spend a bound per ancestor. A walk that does not finish within the bound is
 // the ErrProbeTimedOut + context.DeadlineExceeded non-answer every probe here
 // gives, and a retry while the stuck walk is still blocked is refused the same
-// way. That is "could not look", never a resolution: the caller chooses its own
+// way. A walk that answered but fell back past a lookup that failed for any
+// reason other than absence (pathutil.ResolveForCompareWith: EIO, ESTALE,
+// EACCES…) is no resolution either, and returns that error (#7286). Either way
+// it is "could not look", never a resolution: the caller chooses its own
 // fallback, and the resolved string is empty.
 func ResolveForCompare(path string) (string, error) {
 	path = filepath.Clean(path)
 	resolve := evalSymlinksPath.load() // in the caller, as ReadDir's
 	res, err := runBounded(path, resolveForCompareFlights, "path resolution",
 		"the filesystem did not answer the symlink resolution",
-		func() (any, error) { return pathutil.ResolveForCompareWith(path, resolve), nil })
+		func() (any, error) {
+			resolved, err := pathutil.ResolveForCompareWith(path, resolve)
+			if err != nil {
+				return nil, fmt.Errorf("resolving %s: a lookup failed, so the walk past it is a guess: %w", path, err)
+			}
+			return resolved, nil
+		})
 	resolved, _ := res.(string)
 	return resolved, err
 }

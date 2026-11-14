@@ -17,8 +17,7 @@ import (
 // inode table) must NOT produce a full verdict: not-proven is not full.
 func TestFull_InodeExhaustionIsFull(t *testing.T) {
 	dir := t.TempDir()
-	old := statfsFn
-	defer func() { statfsFn = old }()
+	defer statfsFn.replace(syscall.Statfs)()
 
 	for _, tc := range []struct {
 		name     string
@@ -33,10 +32,10 @@ func TestFull_InodeExhaustionIsFull(t *testing.T) {
 		{"ext4 reserve window is not full for root", syscall.Statfs_t{Type: 0xef53, Bsize: 4096, Blocks: 100, Bfree: 64, Bavail: 0, Files: 200, Ffree: 50}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			statfsFn = func(_ string, st *syscall.Statfs_t) error {
+			statfsFn.replace(func(_ string, st *syscall.Statfs_t) error {
 				*st = tc.statfs
 				return nil
-			}
+			})
 			full, err := Full(dir)
 			require.NoError(t, err)
 			require.Equal(t, tc.wantFull, full,
@@ -54,13 +53,12 @@ func TestFull_InodeExhaustionIsFull(t *testing.T) {
 // must give opposite verdicts for the two consumers.
 func TestFullUnprivileged_UsesBavail(t *testing.T) {
 	dir := t.TempDir()
-	old := statfsFn
-	defer func() { statfsFn = old }()
+	defer statfsFn.replace(syscall.Statfs)()
 
-	statfsFn = func(_ string, st *syscall.Statfs_t) error {
+	statfsFn.replace(func(_ string, st *syscall.Statfs_t) error {
 		*st = syscall.Statfs_t{Bsize: 4096, Blocks: 100, Bfree: 64, Bavail: 0, Files: 200, Ffree: 50}
 		return nil
-	}
+	})
 
 	full, err := FullUnprivileged(dir)
 	require.NoError(t, err)
@@ -72,10 +70,10 @@ func TestFullUnprivileged_UsesBavail(t *testing.T) {
 	require.False(t, full,
 		"privileged consumer can allocate the reserved blocks: Bfree>0 must report not-full")
 
-	statfsFn = func(_ string, st *syscall.Statfs_t) error {
+	statfsFn.replace(func(_ string, st *syscall.Statfs_t) error {
 		*st = syscall.Statfs_t{Bsize: 4096, Blocks: 100, Bfree: 0, Bavail: 0, Files: 200, Ffree: 50}
 		return nil
-	}
+	})
 	full, err = FullUnprivileged(dir)
 	require.NoError(t, err)
 	require.True(t, full, "Bavail==0 and Bfree==0 is full for either consumer")

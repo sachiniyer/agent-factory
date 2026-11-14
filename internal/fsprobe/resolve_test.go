@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -100,4 +101,24 @@ func TestResolveForCompare_BoundsTheWholeWalk(t *testing.T) {
 	_, err := ResolveForCompare(path)
 	require.True(t, errors.Is(err, ErrProbeTimedOut),
 		"each lookup answers within the bound, but the walk does not: %v", err)
+}
+
+// #7286: a walk that answered within the bound but fell back past a lookup
+// that failed for any reason other than absence is no resolution: it returns
+// the failure, typed, and no path, as a walk that timed out returns nothing.
+func TestResolveForCompare_AFailedLookupIsNoResolution(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "repo")
+	restore := SetEvalSymlinksForTest(func(p string) (string, error) {
+		if p == path {
+			return "", &os.PathError{Op: "lstat", Path: p, Err: syscall.EIO}
+		}
+		return filepath.EvalSymlinks(p)
+	})
+	defer restore()
+
+	resolved, err := ResolveForCompare(path)
+	require.Empty(t, resolved, "a walk past a failed lookup resolves nothing")
+	require.True(t, errors.Is(err, syscall.EIO), "the failure reaches the caller: %v", err)
+	require.False(t, errors.Is(err, ErrProbeTimedOut), "it answered: it is not a timeout")
 }

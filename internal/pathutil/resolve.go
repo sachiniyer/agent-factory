@@ -1,6 +1,11 @@
 package pathutil
 
-import "path/filepath"
+import (
+	"errors"
+	"io/fs"
+	"path/filepath"
+	"syscall"
+)
 
 // ResolveForCompare resolves symlinks in a path that may not exist, for
 // path-identity comparisons: the deepest existing ancestor is resolved with
@@ -22,26 +27,46 @@ import "path/filepath"
 // path uses fsprobe.ResolveForCompare, which runs this same walk inside one
 // bounded flight (#7272).
 func ResolveForCompare(path string) string {
-	return ResolveForCompareWith(path, filepath.EvalSymlinks)
+	resolved, _ := ResolveForCompareWith(path, filepath.EvalSymlinks)
+	return resolved
 }
 
 // ResolveForCompareWith is ResolveForCompare with eval in place of
 // filepath.EvalSymlinks, for a caller that runs the walk somewhere eval can be
 // substituted (fsprobe's bounded flight and its test seam). The walk and its
-// missing-leaf semantics are ResolveForCompare's exactly.
-func ResolveForCompareWith(path string, eval func(string) (string, error)) string {
+// missing-leaf semantics are ResolveForCompare's exactly, and so is the
+// returned path.
+//
+// err says whether that path is an answer. The walk falls back past a
+// component whose lookup failed, which is right only when the failure says the
+// component is absent (IsAbsent): that is the missing leaf the walk exists
+// for. Any other failure (EIO, ESTALE, ENOTCONN from a soft NFS mount or a
+// reconnecting sshfs, EACCES, a symlink loop) is a lookup that did not happen,
+// and the fallback past it is a guess. err is the first such failure, nil when
+// there was none (#7286).
+func ResolveForCompareWith(path string, eval func(string) (string, error)) (resolved string, err error) {
 	path = filepath.Clean(path)
 	suffix := ""
 	for {
-		resolved, err := eval(path)
-		if err == nil {
-			return filepath.Join(resolved, suffix)
+		resolved, evalErr := eval(path)
+		if evalErr == nil {
+			return filepath.Join(resolved, suffix), err
+		}
+		if err == nil && !IsAbsent(evalErr) {
+			err = evalErr
 		}
 		parent := filepath.Dir(path)
 		if parent == path {
-			return filepath.Join(path, suffix)
+			return filepath.Join(path, suffix), err
 		}
 		suffix = filepath.Join(filepath.Base(path), suffix)
 		path = parent
 	}
+}
+
+// IsAbsent reports whether err says a path component does not exist: ENOENT,
+// or ENOTDIR for a component that is not a directory. It is the one failure
+// a resolution can fall back past and still be an answer.
+func IsAbsent(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }

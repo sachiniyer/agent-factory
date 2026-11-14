@@ -6,7 +6,8 @@ import "syscall"
 
 // statfsFn is the test seam under Full — the metadata syscall that answers a
 // filesystem's free-block count without needing write access to the path.
-var statfsFn = syscall.Statfs
+// Atomic and loaded in the caller, like every seam a flight runs (seam).
+var statfsFn = newSeam(syscall.Statfs)
 
 // fsFull runs statfs and reports whether the filesystem hosting dir is full —
 // the fullness verdict a write probe cannot produce on a path the process
@@ -37,9 +38,9 @@ var statfsFn = syscall.Statfs
 // fstype must not invent a full verdict.
 const btrfsFSType = 0x9123683e
 
-func fsFull(dir string, unprivileged bool) (bool, error) {
+func fsFull(statfs func(string, *syscall.Statfs_t) error, dir string, unprivileged bool) (bool, error) {
 	var st syscall.Statfs_t
-	if err := statfsFn(dir, &st); err != nil {
+	if err := statfs(dir, &st); err != nil {
 		return false, err
 	}
 	freeBlocks := st.Bfree

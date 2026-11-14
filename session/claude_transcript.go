@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -162,16 +163,18 @@ func claudeProjectSpellings(dir string) (projects []string, complete bool) {
 	if err == nil && resolved != dir {
 		projects = append(projects, filepath.Join("projects", claudeProjectName(resolved)))
 	}
-	return projects, !errors.Is(err, fsprobe.ErrProbeTimedOut)
+	// Only absence is an answer: a lookup that failed for any other reason
+	// (EIO, ESTALE, EACCES…) leaves the kernel's spelling as unknown as one
+	// that timed out (#7286).
+	return projects, err == nil || pathutil.IsAbsent(err)
 }
 
 // claudeProjectCandidates is claudeProjectSpellings for a caller whose answer
-// on an incomplete list is the recorded spelling's alone: the restore and
-// re-launch judge (judgeRecordedClaude, which looks in every project before it
-// would start on an id), the limit-reset and status-sweep reads (ClaudeRunTranscriptDirs, where finding nothing
-// leaves the pane's answer standing), and the filed-here check, which no
-// Claude launch consults (PinRecordedConversationForLaunch judges a Claude id
-// by judgeRecordedClaude).
+// on an incomplete list is the recorded spelling's alone: the limit-reset and
+// status-sweep reads (ClaudeRunTranscriptDirs, where finding nothing leaves the
+// pane's answer standing), and the filed-here check, which no Claude launch
+// consults (PinRecordedConversationForLaunch judges a Claude id by
+// judgeRecordedClaude, which reads completeness itself).
 func claudeProjectCandidates(dir string) []string {
 	projects, _ := claudeProjectSpellings(dir)
 	return projects
