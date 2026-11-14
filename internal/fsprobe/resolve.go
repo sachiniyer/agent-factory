@@ -24,7 +24,7 @@ var resolveForCompareFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 // fallback, and the resolved string is empty.
 func ResolveForCompare(path string) (string, error) {
 	path = filepath.Clean(path)
-	resolve := evalSymlinksPath // in the caller, as ReadDir's
+	resolve := evalSymlinksPath.load() // in the caller, as ReadDir's
 	res, err := runBounded(path, resolveForCompareFlights, "path resolution",
 		"the filesystem did not answer the symlink resolution",
 		func() (any, error) { return pathutil.ResolveForCompareWith(path, resolve), nil })

@@ -9,9 +9,9 @@ import (
 // readDirPath and lstatPath are the test seams under ReadDir's, ReadDirInfo's
 // and Lstat's bounded flights.
 var (
-	readDirPath      = os.ReadDir
-	lstatPath        = os.Lstat
-	evalSymlinksPath = filepath.EvalSymlinks
+	readDirPath      = newSeam(os.ReadDir)
+	lstatPath        = newSeam(os.Lstat)
+	evalSymlinksPath = newSeam(filepath.EvalSymlinks)
 )
 
 var (
@@ -33,7 +33,7 @@ var (
 func ReadDir(dir string) ([]os.DirEntry, error) {
 	// The seam is read here, in the caller: a flight that outlives its bound
 	// must never read a package variable a later caller may rewrite.
-	read := readDirPath
+	read := readDirPath.load()
 	res, err := runBounded(dir, readDirFlights, "directory listing",
 		"the filesystem did not answer the listing",
 		func() (any, error) { return read(dir) })
@@ -47,7 +47,7 @@ func ReadDir(dir string) ([]os.DirEntry, error) {
 // a caller can read every entry's mode and modification time without touching
 // the filesystem again.
 func ReadDirInfo(dir string) ([]os.DirEntry, error) {
-	read := readDirPath // in the caller, as ReadDir's
+	read := readDirPath.load() // in the caller, as ReadDir's
 	res, err := runBounded(dir, readDirInfoFlights, "directory listing",
 		"the filesystem did not answer the listing",
 		func() (any, error) {
@@ -67,7 +67,7 @@ func ReadDirInfo(dir string) ([]os.DirEntry, error) {
 // flight shape: a walk rooted at path learns whether the root itself is a
 // link, as filepath.WalkDir does, without an unbounded lookup.
 func Lstat(path string) (os.FileInfo, error) {
-	lstat := lstatPath // in the caller, as ReadDir's
+	lstat := lstatPath.load() // in the caller, as ReadDir's
 	res, err := runBounded(path, lstatFlights, "lstat probe",
 		"the filesystem did not answer the lstat",
 		func() (any, error) { return lstat(path) })
@@ -86,7 +86,7 @@ func Lstat(path string) (os.FileInfo, error) {
 // the recorded spelling only, mirroring how a timed-out listing degrades to
 // "could not look".
 func EvalSymlinks(path string) (string, error) {
-	resolve := evalSymlinksPath // in the caller, as ReadDir's
+	resolve := evalSymlinksPath.load() // in the caller, as ReadDir's
 	res, err := runBounded(path, evalSymlinksFlights, "symlink resolution",
 		"the filesystem did not answer the symlink resolution",
 		func() (any, error) { return resolve(path) })

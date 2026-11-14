@@ -20,7 +20,7 @@ import (
 // `git add -A` to stage at any instant (#5295 review).
 func TestWriteSpaceProbe_RealWrite(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeSpaceProbe(dir); err != nil {
+	if err := writeSpaceProbe.load()(dir); err != nil {
 		t.Fatalf("real probe on a writable dir failed: %v", err)
 	}
 	if matches, _ := filepath.Glob(filepath.Join(dir, ".af-add-probe-*")); len(matches) != 0 {
@@ -37,7 +37,7 @@ func TestWriteSpaceProbe_NamedFallback(t *testing.T) {
 	defer func() { openAnonymousProbeFile = old }()
 
 	dir := t.TempDir()
-	if err := writeSpaceProbe(dir); err != nil {
+	if err := writeSpaceProbe.load()(dir); err != nil {
 		t.Fatalf("named-fallback probe on a writable dir failed: %v", err)
 	}
 	if matches, _ := filepath.Glob(filepath.Join(dir, ".af-add-probe-*")); len(matches) != 0 {
@@ -53,13 +53,11 @@ func TestWriteSpaceProbe_NamedFallback(t *testing.T) {
 func TestWrite_BoundsAWedgedProbe(t *testing.T) {
 	release := make(chan struct{})
 	dir := t.TempDir()
-	old := writeSpaceProbe
-	writeSpaceProbe = func(string) error {
+	restoreProbe := writeSpaceProbe.replace(func(string) error {
 		<-release
 		return nil
-	}
-	oldTimeout := probeTimeout
-	probeTimeout = 50 * time.Millisecond
+	})
+	restoreTimeout := probeTimeout.replace(50 * time.Millisecond)
 	defer func() {
 		close(release)
 		// The spawned worker reads the package-level seams when the
@@ -72,8 +70,8 @@ func TestWrite_BoundsAWedgedProbe(t *testing.T) {
 			defer writeFlights.Unlock()
 			return writeFlights.byDir[dir] == nil
 		}, 5*time.Second, time.Millisecond)
-		writeSpaceProbe = old
-		probeTimeout = oldTimeout
+		restoreProbe()
+		restoreTimeout()
 	}()
 
 	err := Write(dir)
@@ -97,12 +95,10 @@ func TestWrite_BoundsAWedgedProbe(t *testing.T) {
 // share a single worker rather than racing two writers.
 func TestWrite_ConcurrentProbesJoinOneFlight(t *testing.T) {
 	gate := make(chan struct{})
-	old := writeSpaceProbe
-	writeSpaceProbe = func(string) error {
+	defer writeSpaceProbe.replace(func(string) error {
 		<-gate
 		return nil
-	}
-	defer func() { writeSpaceProbe = old }()
+	})()
 
 	dir := t.TempDir()
 	done := make(chan error, 2)
@@ -135,13 +131,11 @@ func TestStat_ReportsTheAnswer(t *testing.T) {
 func TestStat_BoundsAWedgedStat(t *testing.T) {
 	release := make(chan struct{})
 	dir := t.TempDir()
-	old := statPath
-	statPath = func(string) (os.FileInfo, error) {
+	restoreStat := statPath.replace(func(string) (os.FileInfo, error) {
 		<-release
 		return nil, nil
-	}
-	oldTimeout := probeTimeout
-	probeTimeout = 50 * time.Millisecond
+	})
+	restoreTimeout := probeTimeout.replace(50 * time.Millisecond)
 	defer func() {
 		close(release)
 		require.Eventually(t, func() bool {
@@ -149,8 +143,8 @@ func TestStat_BoundsAWedgedStat(t *testing.T) {
 			defer statFlights.Unlock()
 			return statFlights.byDir[dir] == nil
 		}, 5*time.Second, time.Millisecond)
-		statPath = old
-		probeTimeout = oldTimeout
+		restoreStat()
+		restoreTimeout()
 	}()
 
 	info, err := Stat(dir)
