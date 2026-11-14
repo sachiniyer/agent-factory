@@ -3,6 +3,7 @@ package pathutil
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"syscall"
 )
@@ -27,24 +28,37 @@ import (
 // path uses fsprobe.ResolveForCompare, which runs this same walk inside one
 // bounded flight (#7272).
 func ResolveForCompare(path string) string {
-	resolved, _ := ResolveForCompareWith(path, filepath.EvalSymlinks)
+	resolved, _ := ResolveForCompareWith(path, filepath.EvalSymlinks, os.Lstat)
 	return resolved
 }
 
-// ResolveForCompareWith is ResolveForCompare with eval in place of
-// filepath.EvalSymlinks, for a caller that runs the walk somewhere eval can be
-// substituted (fsprobe's bounded flight and its test seam). The walk and its
-// missing-leaf semantics are ResolveForCompare's exactly, and so is the
-// returned path.
+// ErrUnresolvedComponent is ResolveForCompareWith's report of a component
+// whose resolution said "absent" while the component itself is still there,
+// which is what a dangling symlink does.
+var ErrUnresolvedComponent = errors.New("the path component exists but does not resolve (a dangling symlink?)")
+
+// ResolveForCompareWith is ResolveForCompare with eval and lstat in place of
+// filepath.EvalSymlinks and os.Lstat, for a caller that runs the walk
+// somewhere they can be substituted (fsprobe's bounded flight and its test
+// seams). The walk and its missing-leaf semantics are ResolveForCompare's
+// exactly, and so is the returned path.
 //
 // err says whether that path is an answer. The walk falls back past a
-// component whose lookup failed, which is right only when the failure says the
-// component is absent (IsAbsent): that is the missing leaf the walk exists
-// for. Any other failure (EIO, ESTALE, ENOTCONN from a soft NFS mount or a
-// reconnecting sshfs, EACCES, a symlink loop) is a lookup that did not happen,
-// and the fallback past it is a guess. err is the first such failure, nil when
-// there was none (#7286).
-func ResolveForCompareWith(path string, eval func(string) (string, error)) (resolved string, err error) {
+// component and rejoins it lexically, which is right only when the component is
+// proven absent: its resolution failed with absence (IsAbsent), and lstat
+// agrees it is not there. That is the missing leaf the walk exists for.
+//   - Any other failure (EIO, ESTALE, ENOTCONN from a soft NFS mount or a
+//     reconnecting sshfs, EACCES, a symlink loop) is a lookup that did not
+//     happen, and the fallback past it is a guess (#7286).
+//   - So is a component lstat still sees after its resolution said absent: a
+//     dangling symlink, whose target the kernel's spelling went through, not
+//     its lexical name (ErrUnresolvedComponent, #7295).
+//
+// err is the first such failure, nil when there was none. One case no walk can
+// see: a symlink removed outright leaves nothing to lstat, so the lexical
+// rejoin past it is reported as an answer although the kernel spelled the path
+// through the link's target.
+func ResolveForCompareWith(path string, eval func(string) (string, error), lstat func(string) (os.FileInfo, error)) (resolved string, err error) {
 	path = filepath.Clean(path)
 	suffix := ""
 	for {
@@ -52,8 +66,8 @@ func ResolveForCompareWith(path string, eval func(string) (string, error)) (reso
 		if evalErr == nil {
 			return filepath.Join(resolved, suffix), err
 		}
-		if err == nil && !IsAbsent(evalErr) {
-			err = evalErr
+		if err == nil {
+			err = unprovenAbsence(path, evalErr, lstat)
 		}
 		parent := filepath.Dir(path)
 		if parent == path {
@@ -62,6 +76,24 @@ func ResolveForCompareWith(path string, eval func(string) (string, error)) (reso
 		suffix = filepath.Join(filepath.Base(path), suffix)
 		path = parent
 	}
+}
+
+// unprovenAbsence is why falling back past path, whose resolution failed with
+// evalErr, is a guess: evalErr itself when it is not absence, the component's
+// own lstat failure when that is not absence, ErrUnresolvedComponent when lstat
+// still sees it; nil when the component is proven absent.
+func unprovenAbsence(path string, evalErr error, lstat func(string) (os.FileInfo, error)) error {
+	if !IsAbsent(evalErr) {
+		return evalErr
+	}
+	_, lerr := lstat(path)
+	switch {
+	case lerr == nil:
+		return &os.PathError{Op: "resolve", Path: path, Err: ErrUnresolvedComponent}
+	case !IsAbsent(lerr):
+		return lerr
+	}
+	return nil
 }
 
 // IsAbsent reports whether err says a path component does not exist: ENOENT,
