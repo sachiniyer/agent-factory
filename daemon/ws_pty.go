@@ -401,11 +401,11 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 		if errors.As(readerErr, &pie) {
 			applied = pie.Applied
 		}
-		nctx, ncancel := context.WithTimeout(context.Background(), wsWriteTimeout)
 		writeMu.Lock()
+		nctx, ncancel := context.WithTimeout(context.Background(), wsWriteTimeout)
 		_ = agentproto.WriteControl(nctx, conn, agentproto.NewInputNackMessage(applied))
-		writeMu.Unlock()
 		ncancel()
+		writeMu.Unlock()
 		closeStatus = websocket.StatusInternalError
 		closeReason = "PTY input delivery failed"
 	}
@@ -560,10 +560,10 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 				inputResult := inputDelivery.begin()
 				reader.away()
 				err := binding.input(msg.Frame.Data)
-				reader.back()
 				if err != nil {
 					err = fmt.Errorf("apply PTY input: %w", err)
 					inputResult <- err
+					reader.back()
 					return err
 				}
 				inputResult <- nil
@@ -574,11 +574,12 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 				// already dropped will be torn down by the next read, and a lost
 				// ack leaves the client to re-send the frame on reconnect — a
 				// bounded duplicate, not silent loss.
-				actx, acancel := context.WithTimeout(context.Background(), wsWriteTimeout)
 				writeMu.Lock()
+				actx, acancel := context.WithTimeout(context.Background(), wsWriteTimeout)
 				_ = agentproto.WriteControl(actx, conn, agentproto.NewInputAckMessage())
-				writeMu.Unlock()
 				acancel()
+				writeMu.Unlock()
+				reader.back()
 			case agentproto.OpResize:
 				reader.away()
 				_ = binding.resize(msg.Frame.Rows, msg.Frame.Cols)
