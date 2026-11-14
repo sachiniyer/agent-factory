@@ -334,6 +334,32 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		require.False(t, ok, "a sibling transcript can never prove the own conversation's wall")
 	})
 
+	t.Run("a carried conversation whose carry recorded zero bytes is the account's own", func(t *testing.T) {
+		// The whole-file fallback above is for a carry af kept no record
+		// of. A carry that recorded copying zero bytes is a record (#7270):
+		// every byte past it was appended in this account, so the
+		// account's own refusal supplies the reset.
+		carriedID := "28e1b947-ba23-4588-988b-3c688b6f241c"
+		inst, workDir := claudeLimitInstance(t, "new")
+		afHome := testguard.CanonicalTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", afHome)
+		configDir := filepath.Join(afHome, "accounts", "claude", "new")
+		require.NoError(t, os.MkdirAll(configDir, 0o700))
+		inst.Tabs = []*Tab{{
+			Name: agentTabName, Kind: TabKindAgent,
+			Conversation: AgentConversationData{
+				Agent: "claude", ID: carriedID, CaptureKind: ConversationCaptureCarried,
+			},
+		}}
+		path := writeClaudeTranscript(t, configDir, workDir, carriedID,
+			claudeLimitRecord(t, recorded, futureUnix))
+		store := handoff.NewStore(filepath.Join(afHome, "instances", handoff.StateFileName))
+		require.NoError(t, store.RecordCarriedPrefix(path, 0))
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.True(t, ok, "a recorded zero-byte carry leaves nothing of the source account's in the file")
+		require.True(t, resetAt.Equal(future), "resetAt = %v, want %v", resetAt, future)
+	})
+
 	t.Run("a quarantined account home supplies nothing", func(t *testing.T) {
 		// #6975 review: an unrecorded carry that overflows the 256-entry
 		// quarantine flags the ACCOUNT (handoff.Rails.QuarantinedAccounts),

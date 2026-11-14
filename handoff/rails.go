@@ -200,6 +200,13 @@ func (s Snapshot) EffectiveCarriedPrefixes() map[string]int64 {
 	return out
 }
 
+// CarriedBoundary is a scaffold with the pre-#7270 reading: a zero
+// watermark is indistinguishable from no record.
+func (s Snapshot) CarriedBoundary(path string) (int64, bool) {
+	n := s.EffectiveCarriedPrefixes()[path]
+	return n, n > 0
+}
+
 // AccountUntrusted reports whether the account home dir's carry
 // quarantine overflowed — the marker list was full when a carry failed
 // to record, so the home cannot name which rollout is poison and NONE

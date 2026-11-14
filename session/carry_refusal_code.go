@@ -25,6 +25,8 @@ const (
 	carryNoClaudeDirReason             = "af could not resolve the directory Claude files this conversation under"
 	carryTranscriptMissingReason       = "its transcript is missing from the previous account's home"
 	carryRolloutMissingReason          = "its rollout is missing from the previous account's home"
+	carryTranscriptEmptyReason         = "its transcript is empty in the previous account's home"
+	carryRolloutEmptyReason            = "its rollout is empty in the previous account's home"
 	carryStoreUnlistedReason           = "af could not enumerate the Codex rollout store"
 	carrySourceStoreUnlistedReason     = "af could not enumerate the previous account's rollout store"
 	carryTranscriptsUnlistedReason     = "af could not list the conversations in this worktree to confirm the recorded one is current"
