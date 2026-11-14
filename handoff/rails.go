@@ -200,6 +200,37 @@ func (s Snapshot) EffectiveCarriedPrefixes() map[string]int64 {
 	return out
 }
 
+// CarriedBoundary is what af durably recorded about the carried file at
+// path: how many of its leading bytes are the source account's, and whether
+// af holds any record of a carry there at all. The boundary is the widest
+// span any record names: the watermark, an unrecorded-carry marker, or the
+// account overflow flag that names this file. A marker or flag without a
+// boundary covers the whole file, as EffectiveCarriedPrefixes reads it.
+//
+// An explicit zero watermark IS a record: a carry af committed copied no
+// bytes there, so everything in the file is the target's own. Only a path
+// with no entry anywhere is unrecorded — a carry by a binary that kept no
+// watermark, or none at all — and a committed re-run that cannot verify the
+// file covers it whole only then (#7270).
+func (s Snapshot) CarriedBoundary(path string) (int64, bool) {
+	n, recorded := s.State.CarriedPrefixes[path]
+	widen := func(covered int64) {
+		if covered <= 0 {
+			covered = math.MaxInt64
+		}
+		n, recorded = max(n, covered), true
+	}
+	if marker, ok := s.Rails.UnrecordedCarries[path]; ok {
+		widen(marker.Covered)
+	}
+	for _, q := range s.Rails.QuarantinedAccounts {
+		if q.Path == path {
+			widen(q.Covered)
+		}
+	}
+	return n, recorded
+}
+
 // AccountUntrusted reports whether the account home dir's carry
 // quarantine overflowed — the marker list was full when a carry failed
 // to record, so the home cannot name which rollout is poison and NONE
@@ -255,7 +286,9 @@ func loadSnapshot(loadState func() (State, error), loadRails func() (Rails, erro
 	}
 	snap = Snapshot{State: s2, Rails: r2}
 	for path, n := range s1.CarriedPrefixes {
-		if n > snap.State.CarriedPrefixes[path] {
+		// Presence counts as well as size: a zero watermark is a record
+		// (CarriedBoundary), so either cut's entry stands.
+		if existing, ok := snap.State.CarriedPrefixes[path]; !ok || n > existing {
 			if snap.State.CarriedPrefixes == nil {
 				snap.State.CarriedPrefixes = map[string]int64{}
 			}

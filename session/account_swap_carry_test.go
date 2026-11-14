@@ -718,7 +718,7 @@ func TestConversationCarryEmptySourceVerifiesNothing(t *testing.T) {
 		}
 		err = carry.copy()
 		require.Error(t, err)
-		require.Equal(t, "its transcript is empty in the previous account's home", carryFailureReason(err))
+		require.Equal(t, carryRolloutEmptyReason, carryFailureReason(err), "a Codex refusal names the rollout")
 		require.Equal(t, stale, readCarryFile(t, dstPath),
 			"the refused carry must not destroy the destination's existing copy")
 		prefixes, perr := handoff.NewStore(filepath.Join(afHome, "instances", handoff.StateFileName)).CarriedPrefixes()

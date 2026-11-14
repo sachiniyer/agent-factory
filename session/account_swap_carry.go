@@ -512,7 +512,10 @@ func (c *conversationCarry) copy() error {
 	}
 	outcome, err := carryConversationFileOutcome(c.srcRoot, c.dstRoot, c.transcript, !c.committed)
 	if err != nil {
-		return err
+		return c.inAgentTerms(err)
+	}
+	if outcome.unverified {
+		outcome.covered = c.recordedBoundary(outcome.covered)
 	}
 	if err := c.commitCarriedPrefix(outcome); err != nil {
 		if qerr := c.quarantineUnrecorded(err, outcome.covered); qerr != nil && outcome.installed {
@@ -552,12 +555,22 @@ func (c *conversationCarry) copy() error {
 // quarantines the rollout through the rails file's unrecorded-carries
 // marker instead, so the file's claims stay untrusted for usage proof
 // while the conversation still carries.
+//
+// A carry that covered zero bytes records 0 as well: that is how a later
+// re-run that cannot verify the file tells "af carried nothing here" from
+// "af never recorded a carry here" (#7270). The zero record is bookkeeping,
+// not a guard — no source byte needs keeping out of the target's evidence —
+// so one that cannot land never fails the carry; a later re-run then just
+// covers the whole file, the over-quarantine direction.
 func (c *conversationCarry) commitCarriedPrefix(outcome carryFileOutcome) error {
-	if !carriesUsageClaims(c.agent) || outcome.covered == 0 {
+	if !carriesUsageClaims(c.agent) {
 		return nil
 	}
 	path := c.carriedTranscriptPath()
 	if c.dstRoot.base == "" || path == "" {
+		if outcome.covered == 0 {
+			return nil
+		}
 		return carryFailure("the carried-prefix watermark has no AF home to land in", nil)
 	}
 	// The store lives under the AF home the carry itself resolved, not a
@@ -566,6 +579,11 @@ func (c *conversationCarry) commitCarriedPrefix(outcome carryFileOutcome) error 
 	instances := filepath.Join(c.dstRoot.base, "instances")
 	store := handoff.NewStore(filepath.Join(instances, handoff.StateFileName))
 	if err := store.RecordCarriedPrefix(path, outcome.covered); err != nil {
+		if outcome.covered == 0 {
+			log.WarningLog.Printf("account swap carried %s conversation %s without recording that it copied no bytes of %s (%v) — a re-run that cannot verify the file will count all of it as the previous account's",
+				c.agent, c.id, path, err)
+			return nil
+		}
 		return carryFailure("the carried-prefix watermark could not be recorded", err)
 	}
 	// A real watermark retires the unrecorded-carry quarantine for this
