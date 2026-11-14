@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -311,4 +312,91 @@ func TestSessionCodexCaptureScopeRecoversOnceTheLaunchDirAnswers(t *testing.T) {
 	home, dir := scope.CodexScope()
 	require.Equal(t, codexHome, home)
 	require.Equal(t, kernel, dir, "the scope it reports is the resolved one, so a retake's scope matches")
+}
+
+// #7299, from the independent review of #7298. A receipt pool tracked while
+// the scope did not resolve is the whole store, other directories' rollouts
+// included, since it could scope nothing. Once the scope resolves, the pool
+// is judged against it: a recovered snapshot's pool, and its verdict, equal a
+// never-wedged one's. Here a sibling Codex in another directory records the
+// same briefing, which a never-wedged pool never sees.
+func TestReceiptPoolTrackedUnscopedIsScopedOnceTheScopeRecovers(t *testing.T) {
+	const prompt = "config briefing 7299"
+	for _, symlinked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("symlinked=%v", symlinked), func(t *testing.T) {
+			home := t.TempDir()
+			var wedgeRoot, launchDir, kernel string
+			if symlinked {
+				wedgeRoot, launchDir, kernel = symlinkedCodexLaunchDir(t)
+			} else {
+				launchDir = filepath.Join(testguard.CanonicalTempDir(t), "wt")
+				require.NoError(t, os.MkdirAll(launchDir, 0o755))
+				wedgeRoot, kernel = launchDir, launchDir
+			}
+			other := filepath.Join(filepath.Dir(kernel), "other")
+			require.NoError(t, os.MkdirAll(other, 0o755))
+			foreign := writeCodexRolloutFileWithCwd(t, home, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", other)
+
+			never := BeginConversationCaptureAtCodexHomeAndWorkingDir(home, launchDir)
+			never.TrackCodexReceiptPool(false)
+			require.Empty(t, never.receiptPaths, "precondition: a scoped pool holds no other directory's rollout")
+
+			release := make(chan struct{})
+			restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+			t.Cleanup(restoreTimeout)
+			restoreSeam := fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+				if path == wedgeRoot || strings.HasPrefix(path, wedgeRoot+string(filepath.Separator)) {
+					<-release
+				}
+				return filepath.EvalSymlinks(path)
+			})
+			wedged := withinBound(t, func() ConversationCaptureSnapshot {
+				s := BeginConversationCaptureAtCodexHomeAndWorkingDir(home, launchDir)
+				s.TrackCodexReceiptPool(false)
+				return s
+			})
+			require.Error(t, wedged.ScopeErr(), "precondition: armed and pooled while the launch dir did not answer")
+
+			appendCodexRolloutEvent(t, foreign, map[string]any{
+				"type":    "event_msg",
+				"payload": map[string]any{"type": "user_message", "message": prompt},
+			})
+			require.Error(t, withinBound(t, func() error {
+				return WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, wedged, prompt, 0)
+			}), "while it does not answer the receipt decides nothing")
+
+			close(release)
+			restoreSeam()
+			require.Eventually(t, func() bool {
+				_, err := fsprobe.ResolveForCompare(launchDir)
+				return err == nil
+			}, 5*time.Second, 20*time.Millisecond, "the mount answers again")
+			window := 2*codexReceiptQuietStatInterval + time.Second
+			neverErr := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, never, prompt, window)
+			recoveredErr := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, wedged, prompt, window)
+			require.True(t, errors.Is(neverErr, ErrPromptReceiptNotObserved), "never wedged: the sibling's briefing is not this launch's: %v", neverErr)
+			require.True(t, errors.Is(recoveredErr, ErrPromptReceiptNotObserved),
+				"recovered: the same verdict, never a confirmation from another directory's rollout: %v", recoveredErr)
+		})
+	}
+}
+
+// #7299's nit. set-conversation's refusal for a launch dir that is a dangling
+// symlink (#7295) names what af saw, a link to something gone, rather than
+// leading with a mount that is not responding.
+func TestSetConversationNamesADanglingLaunchDir(t *testing.T) {
+	setConversationConfig(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	launchDir, kernel, dangle := danglingCodexLaunchDir(t)
+	writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-35-"+setConversationID+".jsonl", kernel)
+	inst := setConversationInstance(t, launchDir)
+	_, err := ValidateSettableConversation(inst, setConversationID)
+	require.NoError(t, err, "precondition: the repair is the session's")
+
+	dangle()
+	_, err = ValidateSettableConversation(inst, setConversationID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "a symlink in it points at something that is gone", "the lead names what af saw")
+	require.NotContains(t, err.Error(), "is responding", "not a mount that did not answer")
 }

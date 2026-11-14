@@ -94,6 +94,11 @@ type ConversationCaptureSnapshot struct {
 	scopeErr error
 	// scopeDir is the launch dir as given, kept while scopeErr stands.
 	scopeDir string
+	// poolScopePending marks a receipt pool tracked while scopeErr stood: it
+	// could scope nothing, so it holds the whole store. When the scope first
+	// resolves, rescoped filters it to the members a scoped pool would hold,
+	// keeping their offsets (#7299).
+	poolScopePending bool
 	// receiptState carries the scan memoization across the separate
 	// WaitForPromptReceipt calls that share one snapshot — the config agent's
 	// initial, escalation, and five-minute windows are three different calls
@@ -261,17 +266,14 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
 	if err != nil {
 		return
 	}
-	// A working directory that did not resolve scopes nothing (#7292).
-	unscoped = unscoped || s.scopeErr != nil
+	// A working directory that did not resolve scopes nothing (#7292), until
+	// it resolves: then the pool is scoped after all (#7299).
+	if !unscoped && s.scopeErr != nil {
+		unscoped, s.poolScopePending = true, true
+	}
 	for path := range files {
-		if !unscoped && s.workingDir != "" {
-			// Bounded (#7292); a cwd that does not resolve is unclassifiable,
-			// which is unknown, not foreign, and stays in the pool.
-			if cwd, ok := codexRolloutWorkingDir(path); ok {
-				if resolved, err := fsprobe.ResolveForCompare(cwd); err == nil && resolved != s.workingDir {
-					continue
-				}
-			}
+		if !unscoped && s.workingDir != "" && !receiptPoolMember(path, s.workingDir) {
+			continue
 		}
 		if info, err := os.Stat(path); err == nil {
 			s.receiptPaths = append(s.receiptPaths, trackedReceiptPath{
@@ -447,6 +449,9 @@ func WaitForPromptReceipt(
 	}
 	deadline := time.Now().Add(timeout)
 	for {
+		// Kept across polls: a scope that resolves scopes its pool once, not
+		// on every poll (#7299).
+		snap = snap.rescoped()
 		received, undecided, err := codexPromptReceiptOnce(snap, prompt)
 		if err != nil {
 			return err
@@ -798,7 +803,32 @@ func (s ConversationCaptureSnapshot) rescoped() ConversationCaptureSnapshot {
 		return s
 	}
 	s.workingDir, s.scopeErr, s.scopeDir = resolved, nil, ""
+	if s.poolScopePending {
+		// Judge the pool against the scope that now stands, as a pool
+		// tracked under it would have been (#7299). A new slice: the
+		// caller's copy shares the old one's backing array.
+		kept := make([]trackedReceiptPath, 0, len(s.receiptPaths))
+		for _, tracked := range s.receiptPaths {
+			if !tracked.unpinned || resolved == "" || receiptPoolMember(tracked.path, resolved) {
+				kept = append(kept, tracked)
+			}
+		}
+		s.receiptPaths, s.poolScopePending = kept, false
+	}
 	return s
+}
+
+// receiptPoolMember reports whether the rollout at path belongs in a receipt
+// pool scoped to workingDir: its cwd resolves there, or it cannot be
+// classified. Unclassifiable is unknown, not foreign. The cwd's resolution is
+// bounded (#7292), and one that does not answer or fails is unclassifiable.
+func receiptPoolMember(path, workingDir string) bool {
+	cwd, ok := codexRolloutWorkingDir(path)
+	if !ok {
+		return true
+	}
+	resolved, err := fsprobe.ResolveForCompare(cwd)
+	return err != nil || resolved == workingDir
 }
 
 // ScopeErr is why the working directory this snapshot binds discovery to did
