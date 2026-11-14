@@ -1,12 +1,14 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -90,7 +92,7 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 	resolvedLaunch, err := fsprobe.ResolveForCompare(launchDir)
 	if err != nil {
 		return AgentConversationData{}, fmt.Errorf(
-			"af could not resolve session %q's launch directory %s, so a rollout cannot be proven to belong to it; check that its mount (NFS, FUSE, sshfs) is responding, then retry: %w", i.Title, launchDir, err)
+			"af could not resolve session %q's launch directory %s, so a rollout cannot be proven to belong to it; %s, then retry: %w", i.Title, launchDir, unresolvedDirRemedy(err), err)
 	}
 	launchDir = resolvedLaunch
 	files, err := codexRolloutFiles(home)
@@ -130,8 +132,8 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 	switch resolvedCwd, err := fsprobe.ResolveForCompare(cwd); {
 	case err != nil:
 		return AgentConversationData{}, fmt.Errorf(
-			"af could not resolve %s, the directory rollout %s was launched in, so it cannot be proven to belong to session %q; check that its mount (NFS, FUSE, sshfs) is responding, then retry: %w",
-			cwd, id, i.Title, err)
+			"af could not resolve %s, the directory rollout %s was launched in, so it cannot be proven to belong to session %q; %s, then retry: %w",
+			cwd, id, i.Title, unresolvedDirRemedy(err), err)
 	case resolvedCwd != launchDir:
 		return AgentConversationData{}, fmt.Errorf(
 			"rollout %s launched in %s, not in session %q's working directory %s — it belongs to a different session",
@@ -143,4 +145,17 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 		CapturedAt:  time.Now(),
 		CaptureKind: ConversationCaptureOperator,
 	}, nil
+}
+
+// unresolvedDirRemedy is what to do about a directory whose resolution err
+// reports, naming what af saw (#7299): a symlink that points at something
+// gone, a lookup that did not answer, or one that failed.
+func unresolvedDirRemedy(err error) string {
+	switch {
+	case errors.Is(err, pathutil.ErrUnresolvedComponent):
+		return "a symlink in it points at something that is gone: fix or remove the link"
+	case errors.Is(err, fsprobe.ErrProbeTimedOut):
+		return "its filesystem did not answer: check that its mount (NFS, FUSE, sshfs) is responding"
+	}
+	return "a lookup in it failed: check that it is readable and its mount (NFS, FUSE, sshfs) is healthy"
 }
