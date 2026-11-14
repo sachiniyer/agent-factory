@@ -105,6 +105,10 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"the question above the composer's rule", question + composer, claudeFolderTrustNone},
 		{"a composer above and below the dialog", composer + question + options + footer + composer, claudeFolderTrustNone},
 		{"an empty ❯ row below the options is still the composer", question + options + "\n❯\n" + footer, claudeFolderTrustNone},
+		// A picker of the agent's own whose ❯ row reads as a prefix of an
+		// option ("Yes") is still a working agent: its run holds rows the
+		// dialog never paints (#7280, item B's scope).
+		{"quoted above a picker whose ❯ row reads as a prefix", question + options + footer + "\n❯ Yes\n  Yes, and don't ask again\n", claudeFolderTrustNone},
 		// #7280, item C: a ❯ row between two rules is the composer, even as the
 		// last row painted.
 		{"a quote ending in the composer between its rules", question + options + footer + "────────\n❯ \n────────\n", claudeFolderTrustNone},

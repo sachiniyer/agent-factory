@@ -130,10 +130,10 @@ func renderSyntheticClaudeFolderTrust(width int, options []string, selected int,
 		}
 		lines = append(lines, line)
 	}
-	// styled opens every word with open and closes all but the last with
-	// close: tmux re-emits that last close at the start of the next painted
-	// row (carry), exactly as the measured captures show.
-	styled := func(words []string, open, close string) string {
+	// emitStyled paints prefix and then words, each opened with open and all
+	// but the last closed with close: tmux re-emits that last close at the
+	// start of the NEXT painted row (carry), as the measured captures show.
+	emitStyled := func(prefix string, words []string, open, close string) {
 		out := make([]string, len(words))
 		for i, word := range words {
 			out[i] = open + word
@@ -141,8 +141,8 @@ func renderSyntheticClaudeFolderTrust(width int, options []string, selected int,
 				out[i] += close
 			}
 		}
+		emit(prefix + strings.Join(out, " "))
 		carry = close
-		return strings.Join(out, " ")
 	}
 	linked := func(words []string, target string) []string {
 		out := append([]string(nil), words...)
@@ -162,7 +162,7 @@ func renderSyntheticClaudeFolderTrust(width int, options []string, selected int,
 	emit("\x1b[38;5;220m" + strings.Repeat("─", width))
 	carry = "\x1b[39m"
 	for _, row := range syntheticWrap(syntheticFolderTrustTitle, width-4) {
-		emit("  " + styled(row, "\x1b[1m\x1b[38;5;220m", "\x1b[0m"))
+		emitStyled("  ", row, "\x1b[1m\x1b[38;5;220m", "\x1b[0m")
 	}
 	emit("")
 	for _, row := range syntheticWrap(syntheticFolderTrustPath, width-4) {
@@ -196,9 +196,9 @@ func renderSyntheticClaudeFolderTrust(width int, options []string, selected int,
 				emit("    " + strings.Join(row, " "))
 			case r == 0:
 				frame.cursorRow = len(lines)
-				emit("  \x1b[38;5;153m❯\x1b[39m " + styled(row, "\x1b[38;5;153m", "\x1b[39m"))
+				emitStyled("  \x1b[38;5;153m❯\x1b[39m ", row, "\x1b[38;5;153m", "\x1b[39m")
 			default:
-				emit("    " + styled(row, "\x1b[38;5;153m", "\x1b[39m"))
+				emitStyled("    ", row, "\x1b[38;5;153m", "\x1b[39m")
 			}
 		}
 	}
@@ -207,7 +207,7 @@ func renderSyntheticClaudeFolderTrust(width int, options []string, selected int,
 	frame.readable = frame.readable && len(footer) == 1
 	frame.footerRow = len(lines)
 	for _, row := range footer {
-		emit("  " + styled(row, "\x1b[3m\x1b[38;5;246m", "\x1b[0m"))
+		emitStyled("  ", row, "\x1b[3m\x1b[38;5;246m", "\x1b[0m")
 	}
 	frame.contentRows = len(lines)
 	// The measured captures end in the pane's blank rows, with no reset.

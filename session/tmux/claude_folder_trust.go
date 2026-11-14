@@ -28,7 +28,7 @@ const claudeFolderTrustMinLabelStart = len("Yes, I")
 // errClaudeFolderTrustUnreadable is why af refuses a folder-trust dialog it can
 // see but cannot read as rows.
 var errClaudeFolderTrustUnreadable = errors.New(
-	"its rows do not read as the dialog af knows (a pane too narrow for them wraps them; widen the pane or answer the dialog in the session)")
+	"its rows do not read as the dialog af knows (a pane too narrow wraps them, or one too short scrolls its question off; resize the pane or answer the dialog in the session)")
 
 // claudeFolderTrustVerdict is what one capture says about the dialog.
 type claudeFolderTrustVerdict int
@@ -40,7 +40,8 @@ const (
 	// still painting it. Hold: send nothing, and do not report the pane clear.
 	claudeFolderTrustPartial
 	// claudeFolderTrustUnreadable: the whole dialog, with a row af reads by
-	// wrapped onto two. Hold without a key, and say why once.
+	// wrapped onto two, or with its question scrolled off the top of a pane
+	// too short for it. Hold without a key, and say why once.
 	claudeFolderTrustUnreadable
 	// claudeFolderTrustComplete: the whole dialog, every row af reads by on a
 	// row of its own. parseClaudeFolderTrustDialog decides whether af can aim
@@ -65,8 +66,9 @@ const (
 //	closing frame optional, a frame rule directly above the footer
 //	footer        "Enter to confirm…", then only blank rows and frame chrome
 //
-// and no ❯ row above the question: a launch modal owns the pane from the top,
-// and a composer anywhere above it paints one.
+// A ❯ row above the question is no part of that: a launch modal owns the pane
+// from the top. But it is no composer BELOW the dialog either, so it does not
+// show a working agent; the region holds, and is never answered (#7280).
 //
 // Partial is a proper prefix of that. Claude Code paints top-down, so a capture
 // can hold the question and body with no options yet, some options, or all of
@@ -77,7 +79,10 @@ const (
 // rows in a pane too narrow for them — a phone client's resize is enough
 // (ResizeWindow applies the last client's size) — and `capture-pane -J` joins
 // only the terminal's wraps, not those. The question sits mid-sentence, so it
-// wraps well before the options or the footer do.
+// wraps well before the options or the footer do. A pane too short for the
+// dialog scrolls its question off the top instead; the dialog's own option
+// block and footer are still the last content, which only the live dialog
+// paints (claudeFolderTrustHeadless, #7280).
 //
 // A region that breaks that grammar is no dialog only when the working agent's
 // composer is painted below the dialog's option rows (claudeFolderTrustBroken).
@@ -103,10 +108,28 @@ func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 		}
 	}
 	first, last, ok := claudeFolderTrustQuestionRows(rows)
-	if !ok || (firstCursor >= 0 && firstCursor < first) {
+	if !ok {
+		if claudeFolderTrustHeadless(lines, rows) {
+			return claudeFolderTrustUnreadable
+		}
 		return claudeFolderTrustNone
 	}
+	verdict := claudeFolderTrustRegionOf(lines, rows, first, last, lastPainted)
+	if firstCursor >= 0 && firstCursor < first && verdict != claudeFolderTrustNone {
+		// A ❯ above the question: no composer below, so hold, never answer.
+		return claudeFolderTrustPartial
+	}
+	return verdict
+}
+
+// claudeFolderTrustRegionOf reads the region the question opens, from rows
+// first to last, through the grammar claudeFolderTrustDialogOf documents.
+func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, last, lastPainted int) claudeFolderTrustVerdict {
 	wrapped := first != last
+	footerRow := func(i int) bool {
+		// A ❯ row is never the footer: it is a draft that reads like one.
+		return i < len(rows) && !rows[i].selected && claudeTrustIsFooter(rows[i].label)
+	}
 
 	const (
 		inBody = iota
@@ -124,7 +147,7 @@ func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 		switch phase {
 		case inBody:
 			switch {
-			case rule || claudeTrustIsFooter(row.label):
+			case rule || footerRow(i):
 				return broken(i)
 			case row.blank:
 			case claudeFolderTrustOptionStarts(rows, i, i == lastPainted):
@@ -135,14 +158,14 @@ func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 			}
 		case inOptions, afterOptions:
 			switch {
-			case rule && i+1 < len(rows) && claudeTrustIsFooter(rows[i+1].label):
+			case rule && footerRow(i+1):
 				// The dialog's closing frame, directly above its footer.
 				phase = afterOptions
 			case rule:
 				return broken(i)
 			case row.blank:
 				phase = afterOptions
-			case claudeTrustIsFooter(row.label):
+			case footerRow(i):
 				phase, footer = inFooter, i
 			case phase == inOptions:
 				// Another option row.
@@ -173,6 +196,12 @@ func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 
 	label, ok := claudeFolderTrustLabelRead(rows, options, last, footer)
 	if !ok {
+		if claudeFolderTrustOwnOptions(rows, options, last, footer) {
+			// The dialog's own option rows without its full affirmative row:
+			// a repaint after af's Down caught half done, the affirmative row
+			// erased or its ❯ row half written (#7280).
+			return claudeFolderTrustPartial
+		}
 		// A footer under options, but not this dialog's options.
 		return claudeFolderTrustNone
 	}
@@ -222,9 +251,22 @@ func claudeFolderTrustBroken(lines []string, rows []claudeTrustRow, from, lastPa
 //   - a "> " row straight below a frame rule: the boxed composer older builds
 //     draw ("╭───╮" over "│ > … │").
 //
+// A ❯ row holding one of the dialog's own labels, or cut short of one, in a run
+// of nothing but such rows is never one. A ❯ row between two rules always is.
 // A frame rule alone is not one: the dialog's closing frame is a rule too.
 func claudeFolderTrustComposerRow(lines []string, rows []claudeTrustRow, i int, lastPainted bool) bool {
 	if rows[i].selected {
+		switch {
+		case claudeFolderTrustOwnRun(rows, i):
+			// One of the dialog's own labels, or a row cut short of one, in a
+			// run of nothing else: the dialog's, whatever is around it
+			// (#7280). The empty ❯ is not one.
+			return false
+		case i > 0 && i+1 < len(lines) && claudeTrustFrameRule(lines[i-1]) && claudeTrustFrameRule(lines[i+1]):
+			// Between two rules, the way the composer frames its prompt, even
+			// as the last row painted (#7280).
+			return true
+		}
 		return !claudeFolderTrustOptionStarts(rows, i, lastPainted)
 	}
 	label := rows[i].label
@@ -343,6 +385,105 @@ func claudeFolderTrustLabelRead(rows []claudeTrustRow, options, question, footer
 		labels = append(labels, rows[i].label)
 	}
 	return false, strings.Contains(strings.Join(labels, " "), claudeTrustAffirmativeLabel)
+}
+
+// claudeFolderTrustOwnRun reports whether every row of the unbroken run holding
+// row i carries one of the dialog's own option labels or a non-empty prefix of
+// one: the shape a repaint caught mid-row leaves of the dialog's options, such
+// as "❯ No, ex" (#7280). A picker of the agent's own is not one, even when its
+// ❯ row reads as a prefix: a permission prompt's "❯ 1. Yes" shares its run with
+// rows the dialog never paints ("2. Yes, and don't ask again …").
+func claudeFolderTrustOwnRun(rows []claudeTrustRow, i int) bool {
+	from, to := claudeTrustRunBounds(rows, i)
+	for j := from; j <= to; j++ {
+		label := rows[j].label
+		if label == "" ||
+			!(strings.HasPrefix(claudeTrustAffirmativeLabel, label) || strings.HasPrefix(claudeFolderTrustExitLabel, label)) {
+			return false
+		}
+	}
+	return true
+}
+
+// claudeFolderTrustOwnOptions reports whether the option block, read the way
+// claudeFolderTrustLabelRead reads it, holds one of the dialog's own rows: its
+// exit row, or the affirmative row whole or cut to at least
+// claudeFolderTrustMinLabelStart bytes.
+func claudeFolderTrustOwnOptions(rows []claudeTrustRow, options, question, footer int) bool {
+	from, to := claudeTrustRunBounds(rows, options)
+	from, to = max(from, question+1), min(to, footer-1)
+	for i := from; i <= to; i++ {
+		if claudeFolderTrustOptionLabel(rows[i].label) {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeFolderTrustHeadless reports a dialog whose question has scrolled off
+// the top of a pane too short for it (#7280). With no question on screen there
+// is no region to read, so it is anchored where claudeMCPServerUnreadableOf is,
+// on what only the live dialog paints at the bottom of the pane:
+//
+//   - the last painted line, a frame rule counted as painted, is the footer
+//     (or the last row of the dialog's footer wrapped), and no ❯ row;
+//   - above it, after blank rows and frame chrome, an unbroken run of option
+//     rows holding the affirmative row, whole or as the first row a narrow
+//     pane leaves of it;
+//   - from that run to the top of the pane, nothing the dialog does not paint
+//     there: no ❯ row, no frame rule, no footer. The dialog's top rule scrolled
+//     off with its question.
+//
+// A quote can never meet it: a working agent paints its composer below.
+func claudeFolderTrustHeadless(lines []string, rows []claudeTrustRow) bool {
+	end := len(lines) - 1
+	for end >= 0 && strings.TrimSpace(lines[end]) == "" {
+		end--
+	}
+	if end < 0 || rows[end].blank {
+		return false
+	}
+	footer := end
+	for footer > 0 && !rows[footer-1].blank {
+		footer--
+	}
+	for i := footer; i <= end; i++ {
+		if rows[i].selected {
+			return false
+		}
+	}
+	if !claudeTrustIsFooter(rows[footer].label) {
+		return false
+	}
+	if _, ok := claudeFolderTrustFooterRead(rows, footer); !ok {
+		return false
+	}
+	// Blank rows and frame chrome between the options and the footer: the
+	// closing frame of a boxed dialog, or a rule this reading cannot place. A
+	// rule here only ever makes a pane hold.
+	i := footer - 1
+	for i >= 0 && rows[i].blank {
+		i--
+	}
+	if i < 0 {
+		return false
+	}
+	from, _ := claudeTrustRunBounds(rows, i)
+	affirmative := false
+	for j := from; j <= i; j++ {
+		label := rows[j].label
+		affirmative = affirmative || label == claudeTrustAffirmativeLabel ||
+			(len(label) >= claudeFolderTrustMinLabelStart && strings.HasPrefix(claudeTrustAffirmativeLabel, label))
+	}
+	if !affirmative {
+		return false
+	}
+	for j := from - 1; j >= 0; j-- {
+		if rows[j].selected || claudeTrustFrameRule(lines[j]) || claudeTrustIsFooter(rows[j].label) {
+			return false
+		}
+	}
+	return true
 }
 
 // claudeFolderTrustFooterRead reads the footer: whole when it is one row, and

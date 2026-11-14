@@ -27,14 +27,16 @@ type visibleText string
 // spaces), so the only escapes in a capture are cell attributes — SGR, a CSI,
 // matched with ansiCSISequence's grammar — and hyperlinks — OSC 8, terminated
 // by ST (ESC \) or by BEL. An OSC never spans a newline here, so a stray ESC ]
-// cannot swallow the rows below it.
-var terminalEscapeSequence = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)`)
+// cannot swallow the rows below it. tmux also shifts into the line-drawing set
+// around ACS cells with SO and SI (measured on tmux 3.4 by the #7275 review);
+// those shifts are not visible text either (#7280).
+var terminalEscapeSequence = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)|[\x0e\x0f]`)
 
 // visibleTextOf strips one capture. It is idempotent: text that is already
 // visible comes back unchanged, without a regexp pass.
 func visibleTextOf(capture string) visibleText {
 	capture = strings.ReplaceAll(capture, "\r\n", "\n")
-	if strings.IndexByte(capture, '\x1b') < 0 {
+	if !strings.ContainsAny(capture, "\x1b\x0e\x0f") {
 		return visibleText(capture)
 	}
 	return visibleText(terminalEscapeSequence.ReplaceAllString(capture, ""))
