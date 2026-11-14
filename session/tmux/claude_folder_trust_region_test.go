@@ -319,7 +319,21 @@ func TestCheckAndHandleTrustPrompt_FolderTrustOddFrames(t *testing.T) {
 		{"a composer above and below the dialog", composer + "  ? for shortcuts\n" + dialog + composer + "  ? for shortcuts\n", false},
 		// Item B: a ❯ row cut short of an option label is the dialog's.
 		{"a ❯ row cut short of an option label", through(frame.footerRow) + "  ❯ No, ex\n\n" + from(frame.footerRow), true},
-		{"an empty ❯ row is still the composer", through(frame.footerRow) + "  ❯\n\n" + from(frame.footerRow), false},
+		// #7284 review, R2: an empty ❯ row above the dialog's own footer is not
+		// the composer below the dialog, so it holds.
+		{"an empty ❯ row above the footer holds", through(frame.footerRow) + "  ❯\n\n" + from(frame.footerRow), true},
+		{"an empty ❯ row below the footer is still the composer", dialog + "\n  ❯\n\n  ⏵⏵ auto mode on (shift+tab to cycle)\n", false},
+		// #7284 review, R1: a ❯ row carrying the footer's text is no option
+		// row, so af sends no key toward the affirmative. Before, it sent Down
+		// (or Up, for the mirror).
+		{"a ❯ footer-text row above the affirmative", through(frame.cursorRow) + "  \x1b[38;5;153m❯\x1b[39m Enter to confirm · Esc to cancel\n    Yes, I trust this folder\n" + from(frame.cursorRow+2), true},
+		{"a ❯ footer-text row below the affirmative", through(frame.cursorRow) + "    Yes, I trust this folder\n  \x1b[38;5;153m❯\x1b[39m Enter to confirm · Esc to cancel\n" + from(frame.cursorRow+2), true},
+		// #7284 review, R2: a ❯ row between the option block and the dialog's
+		// own footer is no composer below the dialog.
+		{"a ❯ footer-text row above the dialog's own footer", through(frame.footerRow) + "❯ Enter to confirm · Esc to cancel\n" + from(frame.footerRow), true},
+		// #7284 review, R5: C's rules are the composer's plain ones, not a
+		// box's corners and tees.
+		{"a ❯ row between a box's tee and its corner", "╭──────────────────────────────────────────────────╮\n│ Quick safety check:                              │\n│ Is this a project you created or one you trust?  │\n│                                                  │\n│ ❯ 1. No, exit                                    │\n│   2. Yes, I trust this folder                    │\n├──────────────────────────────────────────────────┤\n│ ❯                                                │\n╰──────────────────────────────────────────────────╯\n", true},
 		// Item C: a ❯ between two rules is the composer, last row or not.
 		{"a quote ending in the composer between its rules", dialog + composer, false},
 		// Item D: a ❯ row is no footer, so the rule above it is no closing frame.
@@ -329,6 +343,48 @@ func TestCheckAndHandleTrustPrompt_FolderTrustOddFrames(t *testing.T) {
 			handled, cmds := pollStaticPane(t, tt.content, 4)
 			require.Equal(t, tt.inTheWay, handled, "\n%s", syntheticTerminalEscape.ReplaceAllString(tt.content, ""))
 			require.Empty(t, sentKeystrokes(cmds), "no key may be sent; got %v", cmds)
+		})
+	}
+}
+
+// The refusal says what af saw (#7284 review, R4). A dialog whose question is
+// off screen is refused for that, not for a pane assumed too short: a quote
+// with no composer painted below it yet reads the same way. A wrapped dialog is
+// still refused for its wrapping.
+func TestCheckAndHandleTrustPrompt_FolderTrustRefusalSaysWhatAfSaw(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		pane    *claudeFolderTrustPane
+		content string
+		says    string
+	}{
+		{name: "the question scrolled off a short pane", pane: &claudeFolderTrustPane{
+			options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, width: 80, height: 8}, says: "question is not on screen"},
+		{name: "a quote with no composer below it yet", content: "⏺ The folder-trust dialog reads:\n\n  ❯ No, exit\n    Yes, I trust this folder\n\n  Enter to confirm · Esc to cancel\n",
+			says: "question is not on screen"},
+		{name: "the question wrapped by a narrow pane", pane: &claudeFolderTrustPane{
+			options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, width: 46}, says: "too narrow"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			advance := setClaudeTrustClock(t)
+			_, _, errLog := captureTrustPromptLogs(t)
+			var handled bool
+			var sent []string
+			if tt.pane != nil {
+				session, keys := claudeTrustSession(t, tt.pane)
+				for i := 0; i < 3; i++ {
+					advance(time.Second)
+					handled = session.CheckAndHandleTrustPrompt()
+				}
+				sent = *keys
+			} else {
+				var cmds []string
+				handled, cmds = pollStaticPane(t, tt.content, 3)
+				sent = sentKeystrokes(cmds)
+			}
+			require.True(t, handled, "the dialog is in the way")
+			require.Empty(t, sent)
+			require.Contains(t, errLog.String(), tt.says, "the refusal must say what af saw:\n%s", errLog.String())
 		})
 	}
 }

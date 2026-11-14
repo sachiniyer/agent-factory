@@ -61,6 +61,21 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"a ❯ row cut short of an option label below the options", question + options + "\n❯ No, ex\n" + footer, claudeFolderTrustPartial},
 		// A ❯ draft that reads like the footer is no footer (#7280, item D).
 		{"a ❯ draft reading like the footer, straight under the options", question + options + "❯ Enter to confirm · Esc to cancel\n", claudeFolderTrustPartial},
+		// ...and no option row either: a row that reads as the footer breaks
+		// the grammar in the body or the option block, as on master (#7284
+		// review, R1). Before, its run's affirmative made it an option, and af
+		// sent Down or Up toward the affirmative.
+		{"a ❯ footer-text row above the affirmative", question + "❯ Enter to confirm · Esc to cancel\n    Yes, I trust this folder\n" + footer, claudeFolderTrustPartial},
+		{"a ❯ footer-text row below the affirmative", question + "    Yes, I trust this folder\n  ❯ Enter to confirm · Esc to cancel\n" + footer, claudeFolderTrustPartial},
+		// Composer evidence counts only with no row the dialog paints — an
+		// option row or its footer — below it (#7284 review, R2).
+		{"a ❯ footer-text row between the options and the dialog's own footer", question + "    No, exit\n  ❯ Yes, I trust this folder\n\n❯ Enter to confirm · Esc to cancel\n  Enter to confirm · Esc to cancel\n", claudeFolderTrustPartial},
+		{"an empty ❯ row between the options and the footer", question + options + "\n❯\n" + footer, claudeFolderTrustPartial},
+		{"another dialog's options under the question, with the footer below", question + "❯ Use this MCP server\n  Continue without using this MCP server\n" + footer, claudeFolderTrustPartial},
+		// C's two rules are the composer's own, plain horizontal rules: a box's
+		// corners and tees are the dialog's (#7284 review, R5).
+		{"a ❯ row between a box's tee and its corner", "╭──────────╮\n│ Is this a project you created or one you trust? │\n│ │\n│ ❯ 1. No, exit │\n│   2. Yes, I trust this folder │\n├──────────┤\n│ ❯ │\n╰──────────╯\n", claudeFolderTrustPartial},
+		{"a ❯ row in a box under the question", question + "╭──────────╮\n│ ❯ │\n╰──────────╯\n", claudeFolderTrustPartial},
 
 		// Partial too: a row the dialog does not paint, in or below its footer
 		// slot, with no composer below to show a working agent. The live
@@ -104,7 +119,6 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"the question above a composer draft", question + "❯ I will select \"Yes, I trust this folder\" for you\n", claudeFolderTrustNone},
 		{"the question above the composer's rule", question + composer, claudeFolderTrustNone},
 		{"a composer above and below the dialog", composer + question + options + footer + composer, claudeFolderTrustNone},
-		{"an empty ❯ row below the options is still the composer", question + options + "\n❯\n" + footer, claudeFolderTrustNone},
 		// A picker of the agent's own whose ❯ row reads as a prefix of an
 		// option ("Yes") is still a working agent: its run holds rows the
 		// dialog never paints (#7280, item B's scope).
@@ -123,7 +137,6 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"the question scrolled off, a rule above the options", "────────\n  your own code.\n\n" + options + footer, claudeFolderTrustNone},
 		{"options and a footer without the affirmative", "  some text\n\n❯ No, exit\n  No, and don't ask again\n" + footer, claudeFolderTrustNone},
 		{"the question in a composer draft", "────\n❯ Is this a project you created or one you trust?\n  Yes, I trust this folder\n────\n", claudeFolderTrustNone},
-		{"another dialog's options under the question", question + "❯ Use this MCP server\n  Continue without using this MCP server\n" + footer, claudeFolderTrustNone},
 		{"the legacy dialog", "Do you trust the files in this folder?\n❯ Yes  No\n", claudeFolderTrustNone},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
