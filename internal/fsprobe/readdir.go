@@ -3,19 +3,22 @@ package fsprobe
 import (
 	"io/fs"
 	"os"
+	"path/filepath"
 )
 
 // readDirPath and lstatPath are the test seams under ReadDir's, ReadDirInfo's
 // and Lstat's bounded flights.
 var (
-	readDirPath = os.ReadDir
-	lstatPath   = os.Lstat
+	readDirPath      = os.ReadDir
+	lstatPath        = os.Lstat
+	evalSymlinksPath = filepath.EvalSymlinks
 )
 
 var (
-	readDirFlights     = &flightRegistry{byDir: map[string]*probeFlight{}}
-	readDirInfoFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
-	lstatFlights       = &flightRegistry{byDir: map[string]*probeFlight{}}
+	readDirFlights      = &flightRegistry{byDir: map[string]*probeFlight{}}
+	readDirInfoFlights  = &flightRegistry{byDir: map[string]*probeFlight{}}
+	lstatFlights        = &flightRegistry{byDir: map[string]*probeFlight{}}
+	evalSymlinksFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 )
 
 // ReadDir lists dir inside the same per-dir bounded flight shape as Stat. A
@@ -70,6 +73,25 @@ func Lstat(path string) (os.FileInfo, error) {
 		func() (any, error) { return lstat(path) })
 	info, _ := res.(os.FileInfo)
 	return info, err
+}
+
+// EvalSymlinks resolves path's symbolic links inside the same per-path bounded
+// flight shape as ReadDir and Lstat. A caller launching a conversation that
+// resolves alternate project spellings (a symlinked worktree parent) cannot
+// afford an unbounded per-component lstat walk: on a wedged mount (NFS, FUSE,
+// a dead sshfs) the walk never returns, and neither would the poll, the
+// restore, or the status sweep that reaches it (#7212). A resolution that
+// does not answer within the bound is the ErrProbeTimedOut + context.
+// DeadlineExceeded non-answer every probe here gives; the caller falls back to
+// the recorded spelling only, mirroring how a timed-out listing degrades to
+// "could not look".
+func EvalSymlinks(path string) (string, error) {
+	resolve := evalSymlinksPath // in the caller, as ReadDir's
+	res, err := runBounded(path, evalSymlinksFlights, "symlink resolution",
+		"the filesystem did not answer the symlink resolution",
+		func() (any, error) { return resolve(path) })
+	resolved, _ := res.(string)
+	return resolved, err
 }
 
 // resolvedDirEntry is a directory entry whose Info was read inside a flight.

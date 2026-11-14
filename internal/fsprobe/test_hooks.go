@@ -42,6 +42,16 @@ func SetReadDirForTest(f func(string) ([]os.DirEntry, error)) func() {
 	return func() { readDirPath = old }
 }
 
+// SetEvalSymlinksForTest overrides the symlink resolution EvalSymlinks runs
+// inside its bounded flight, so a test can stand in for a launch directory on
+// a wedged mount (#7212). Callers must restore the original via the returned
+// function.
+func SetEvalSymlinksForTest(f func(string) (string, error)) func() {
+	old := evalSymlinksPath
+	evalSymlinksPath = f
+	return func() { evalSymlinksPath = old }
+}
+
 // SetOpenForTest overrides the open ReadFileWith runs inside its bounded
 // flight, so a test can stand in for a file on a wedged mount (#7221 review
 // R4). Callers must restore the original via the returned function.

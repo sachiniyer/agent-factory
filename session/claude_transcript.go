@@ -148,10 +148,14 @@ func claudeProjectName(path string) string {
 // claudeProjectCandidates names the project directories, relative to a Claude
 // config dir, that Claude may file a conversation launched in dir under: the
 // path as recorded and, where it differs, as the kernel reports it, since a
-// symlinked worktree parent yields a different project name.
+// symlinked worktree parent yields a different project name. The resolution is
+// bounded (fsprobe, #7212): a launch dir on a wedged mount (NFS, FUSE, a dead
+// sshfs) cannot have its spelling resolved within the bound, so the resolved
+// candidate is dropped and only the recorded spelling is returned — a look
+// that did not happen says nothing about the kernel's spelling.
 func claudeProjectCandidates(dir string) []string {
 	out := []string{filepath.Join("projects", claudeProjectName(dir))}
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != dir {
+	if resolved, err := fsprobe.EvalSymlinks(dir); err == nil && resolved != dir {
 		out = append(out, filepath.Join("projects", claudeProjectName(resolved)))
 	}
 	return out
