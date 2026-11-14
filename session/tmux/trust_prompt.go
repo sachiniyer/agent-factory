@@ -387,16 +387,29 @@ func sgrSetsReverse(params string, current bool) bool {
 // agent paints its composer beneath its output, so a quoted dialog has
 // something after it and a live one does not.
 func claudeTrustPromptPresent(content string) bool {
-	lower := strings.ToLower(content)
+	// Strip ANSI SGR sequences before matching. CapturePaneContent runs with
+	// -e (escapes preserved), and Claude Code renders some dialogs with per-
+	// word SGR styling that breaks the byte-contiguity of multi-word phrases,
+	// so a raw strings.Contains on the capture misses a fully rendered styled
+	// dialog. Every sibling matcher this gate composes with
+	// (claudeFolderTrustDialogPresent, claudeMCPTrustFooterIsLast,
+	// parseClaudeFolderTrustDialog) strips the same way via ansiCSISequence;
+	// the gate's two raw clauses must too, or task.DismissTrustPrompt reads a
+	// styled dialog as dialog-free and types the user's prompt into the live
+	// modal (#3579 class).
+	plain := ansiCSISequence.ReplaceAllString(content, "")
+	lower := strings.ToLower(plain)
 
 	// Reworded folder-trust dialog — the question co-occurs with the
 	// dialog-only option label. Both strings are specific to this modal.
-	reworded := strings.Contains(content, "Is this a project you created or one you trust") &&
-		strings.Contains(content, "Yes, I trust this folder")
+	reworded := strings.Contains(plain, "Is this a project you created or one you trust") &&
+		strings.Contains(plain, "Yes, I trust this folder")
 
 	// MCP trust dialog — anchored on its unique question (case-insensitive)
 	// AND the modal's footer being the last content on screen, so a quoted
 	// mention of the phrase with the composer painted below it does not fire.
+	// The question half is matched against ANSI-stripped content (plain); the
+	// footer half (claudeMCPTrustFooterIsLast) already strips per row.
 	mcpDialog := strings.Contains(lower, "do you trust this new mcp server") &&
 		claudeMCPTrustFooterIsLast(content)
 
