@@ -145,20 +145,37 @@ func claudeProjectName(path string) string {
 	return name[:200] + "-" + strconv.FormatInt(absHash, 36)
 }
 
-// claudeProjectCandidates names the project directories, relative to a Claude
+// claudeProjectSpellings names the project directories, relative to a Claude
 // config dir, that Claude may file a conversation launched in dir under: the
 // path as recorded and, where it differs, as the kernel reports it, since a
 // symlinked worktree parent yields a different project name. The resolution is
-// bounded (fsprobe, #7212): a launch dir on a wedged mount (NFS, FUSE, a dead
-// sshfs) cannot have its spelling resolved within the bound, so the resolved
-// candidate is dropped and only the recorded spelling is returned — a look
-// that did not happen says nothing about the kernel's spelling.
-func claudeProjectCandidates(dir string) []string {
-	out := []string{filepath.Join("projects", claudeProjectName(dir))}
-	if resolved, err := fsprobe.EvalSymlinks(dir); err == nil && resolved != dir {
-		out = append(out, filepath.Join("projects", claudeProjectName(resolved)))
+// bounded (fsprobe, #7212): on a wedged mount (NFS, FUSE, a dead sshfs) it
+// does not answer within the bound, and then the kernel's spelling is unknown,
+// not absent. complete is false exactly then: the list holds only the recorded
+// spelling, and a directory Claude may file under is missing from it. A caller
+// that needs every copy of a conversation (the account-swap carry) refuses an
+// incomplete list; one whose safe answer is the recorded spelling's uses
+// claudeProjectCandidates.
+func claudeProjectSpellings(dir string) (projects []string, complete bool) {
+	projects = []string{filepath.Join("projects", claudeProjectName(dir))}
+	resolved, err := fsprobe.EvalSymlinks(dir)
+	if err == nil && resolved != dir {
+		projects = append(projects, filepath.Join("projects", claudeProjectName(resolved)))
 	}
-	return out
+	return projects, !errors.Is(err, fsprobe.ErrProbeTimedOut)
+}
+
+// claudeProjectCandidates is claudeProjectSpellings for a caller whose answer
+// on an incomplete list is the recorded spelling's alone: the restore and
+// re-launch judge (judgeRecordedClaude, which looks in every project before it
+// would start on an id), the ownership check's launch side, the limit-reset
+// and status-sweep reads (ClaudeRunTranscriptDirs, where finding nothing
+// leaves the pane's answer standing), and the filed-here check, which no
+// Claude launch consults (PinRecordedConversationForLaunch judges a Claude id
+// by judgeRecordedClaude).
+func claudeProjectCandidates(dir string) []string {
+	projects, _ := claudeProjectSpellings(dir)
+	return projects
 }
 
 // claudeWorktreeTranscripts lists the direct conversation files of every

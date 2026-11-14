@@ -107,3 +107,79 @@ func TestInspectClaudeProjectConversationsDoesNotStallOnWedgedLaunchDir(t *testi
 	})
 	require.True(t, resumable, "a transcript filed under the recorded spelling is found even when the resolution times out")
 }
+
+// Codex P1 on #7268: a resolution that did not answer is an incomplete search
+// for the conversation's copies, never a complete one. Claude went on
+// appending under the resolved spelling after an older copy was left under
+// the recorded one; an account swap that searched only the recorded spelling
+// would carry the older copy and lose the latest turns. The plan refuses
+// instead: the stated fresh start, or a move require_carry defers.
+func TestClaudeCarryRefusesWhenTheLaunchDirSpellingDoesNotResolve(t *testing.T) {
+	home := carryAmbientProviderHomes(t)
+	inst, recorded, resolved := symlinkedClaudeCarryInstance(t)
+	recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
+	source := filepath.Join(home, ".claude")
+	cwd := inst.GetWorktreePath()
+	past := time.Now().Add(-time.Hour)
+	setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), claudeRecordLine(t, cwd)), past)
+	// The copy Claude is appending to: every byte of the older one, then the
+	// latest turns.
+	setModTime(t, writeCarryFile(t, source, filepath.Join(resolved, carryTestID+".jsonl"),
+		claudeRecordLine(t, cwd)+claudeRecordLine(t, cwd)), past.Add(time.Minute))
+	require.Empty(t, inst.AccountSwapCarryRefusal(), "precondition: with the spelling resolved, the newer copy carries")
+	wedgeLaunchDirEvalSymlinks(t)
+
+	refusal := withinBound(t, inst.AccountSwapCarryRefusal)
+	require.Equal(t, carryRefusalCode(carrySpellingsUnresolvedReason), refusal,
+		"require_carry's check-ahead defers the move on an incomplete search")
+	require.NoError(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }))
+	if carry := inst.accountSwapLaunch.carry; carry != nil {
+		t.Fatalf("an incomplete search carried %s, which may be missing the latest turns", carry.transcript)
+	}
+	require.Equal(t, carrySpellingsUnresolvedReason, inst.accountSwapLaunch.carryFallback,
+		"the swap states why it starts fresh")
+}
+
+// The spelling list says whether it is complete: a resolution that answers, or
+// fails with an answer (nothing at the path), is a complete search; one that
+// did not answer within the bound is not.
+func TestClaudeProjectSpellingsReportAnIncompleteSearch(t *testing.T) {
+	real := filepath.Join(testguard.CanonicalTempDir(t), "real-spellings")
+	require.NoError(t, os.MkdirAll(real, 0o700))
+	link := filepath.Join(testguard.CanonicalTempDir(t), "link-spellings")
+	require.NoError(t, os.Symlink(real, link))
+
+	projects, complete := claudeProjectSpellings(link)
+	require.True(t, complete)
+	require.Len(t, projects, 2)
+	projects, complete = claudeProjectSpellings(filepath.Join(real, "gone"))
+	require.True(t, complete, "a path with nothing there has no other spelling: the search is complete")
+	require.Len(t, projects, 1)
+
+	wedgeLaunchDirEvalSymlinks(t)
+	projects, complete = claudeProjectSpellings(link)
+	require.False(t, complete, "a resolution that did not answer is an incomplete search")
+	require.Equal(t, []string{filepath.Join("projects", claudeProjectName(link))}, projects)
+}
+
+// The ownership check's recorded side resolves the spellings of the directory
+// a transcript records. When they do not resolve within the bound, the names it
+// files under are incomplete, and ownership is unknown: never someone else's
+// conversation for want of a name, nor this worktree's for want of one.
+func TestClaudeTranscriptOwnershipIsUnknownWhenTheRecordedSpellingDoesNotResolve(t *testing.T) {
+	recordedDir := filepath.Join(testguard.CanonicalTempDir(t), "recorded")
+	require.NoError(t, os.MkdirAll(recordedDir, 0o700))
+	path := filepath.Join(t.TempDir(), carryTestID+".jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(claudeRecordLine(t, recordedDir)), 0o600))
+	transcript := claudeTranscript{dir: filepath.Dir(path), name: filepath.Base(path)}
+	require.Equal(t, claudeOwnedHere, claudeTranscriptOwnership(transcript, recordedDir), "precondition")
+
+	wedgeLaunchDirEvalSymlinks(t)
+	facts := withinBound(t, func() claudeRecordedDir { return claudeRecordedDirFacts(recordedDir) })
+	require.True(t, facts.unresolved, "a spelling that did not resolve is reported")
+
+	prev := claudeRecordedDirFacts
+	claudeRecordedDirFacts = func(string) claudeRecordedDir { return facts }
+	t.Cleanup(func() { claudeRecordedDirFacts = prev })
+	require.Equal(t, claudeOwnershipUnknown, claudeTranscriptOwnership(transcript, recordedDir))
+}
