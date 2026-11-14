@@ -3,10 +3,11 @@ package session
 import (
 	"iter"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 // staleRecordedCodexDecline answers whether the recorded Codex conversation
@@ -106,7 +107,7 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 		}
 		return resumeDecline{}, false
 	}
-	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(launchDir), repair) {
+	switch checkCodexRecordedStaleness(recordedPath, files, codexLaunchDirForCompare(launchDir), repair) {
 	case codexRolloutStale:
 		return declineResume(staleCarryReason), false
 	case codexRolloutUncorrelated:
@@ -185,4 +186,18 @@ func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string,
 		return codexRolloutUncorrelated
 	}
 	return codexRolloutCurrent
+}
+
+// codexLaunchDirForCompare is launchDir resolved for correlating rollouts'
+// cwds on the restore guard. The launch dir may sit on a mount that no longer
+// answers (NFS, FUSE, a dead sshfs), so the resolution is bounded (fsprobe,
+// #7279). One that does not answer within the bound is as though it had
+// failed: the launch dir as spelled, cleaned, which is what ResolveForCompare
+// returns when no ancestor resolves.
+func codexLaunchDirForCompare(launchDir string) string {
+	resolved, err := fsprobe.ResolveForCompare(launchDir)
+	if err != nil {
+		return filepath.Clean(launchDir)
+	}
+	return resolved
 }

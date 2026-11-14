@@ -11,7 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -420,7 +420,14 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 		}
 		repair = operatorRepairWindowOf(outgoing, time.Now())
 	}
-	switch judgeCodexRecordedStaleness(recordedPath, rollouts, pathutil.ResolveForCompare(launchDir), repair) {
+	resolvedLaunch, err := fsprobe.ResolveForCompare(launchDir)
+	if err != nil {
+		// A launch dir af could not resolve within the bound correlates no
+		// newer rollout, so it cannot confirm the carried one is still the
+		// newest: never a carry of a rollout that may be stale (#7279).
+		return carryUncorrelatedReason
+	}
+	switch judgeCodexRecordedStaleness(recordedPath, rollouts, resolvedLaunch, repair) {
 	case codexRolloutRecordedGone:
 		return carryRolloutMissingReason
 	case codexRolloutStale:

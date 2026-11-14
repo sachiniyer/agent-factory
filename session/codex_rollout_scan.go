@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 var codexRolloutFileRE = regexp.MustCompile(`(?i)^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
@@ -208,8 +208,24 @@ func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []str
 		case subagent:
 			// Provably a sub-agent thread: never this session's own
 			// top-level conversation, whatever the correlation.
-		case workingDir == "" || pathutil.ResolveForCompare(cwd) == workingDir:
+		case workingDir == "":
 			matches = append(matches, path)
+		default:
+			// The cwd a rollout records is usually the launch dir, which may
+			// sit on a mount that no longer answers: the resolution is bounded
+			// (fsprobe, #7279), and one that did not answer is a channel af
+			// could not look through, never a rollout from another directory.
+			resolved, err := fsprobe.ResolveForCompare(cwd)
+			switch {
+			case err != nil:
+				uncorrelated++
+				unreadableCount++
+				if unreadable == nil {
+					unreadable = err
+				}
+			case resolved == workingDir:
+				matches = append(matches, path)
+			}
 		}
 	}
 	if unreadableCount < uncorrelated {
