@@ -120,6 +120,8 @@ type SessionFacts struct {
 	// (CarryMissing, CarryStale, …); "" is the in-memory precondition's own
 	// refusal, CarryUnrecorded.
 	CarryRefusal string
+	// CarryRefusalTo is a scaffold the next commit wires up (#7282).
+	CarryRefusalTo string
 	// Reading is the newest usage reading on the session's OWN identity home
 	// — the account's store for a named session, the ambient home under
 	// default_login = "move". StatusNone for agents with no usage record.
@@ -146,6 +148,8 @@ type AccountFacts struct {
 	RecentMoveCredits int
 	// Reading is the newest usage reading in the account's own store.
 	Reading ReadingFacts
+	// CarryRefusal is a scaffold the next commit wires up (#7282).
+	CarryRefusal string
 }
 
 // RailsFacts carries the durable rails the state file owns.
