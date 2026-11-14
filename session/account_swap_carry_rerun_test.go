@@ -311,3 +311,56 @@ func TestClaudeCarryOfAnEmptiedTranscriptStartsAStatedFreshConversation(t *testi
 	require.NoError(t, err)
 	require.NotContains(t, prefixes, targetPath, "a refused carry records no watermark")
 }
+
+// writeRails replaces the fixture's rails file with raw.
+func (f rerunFixture) writeRails(t *testing.T, raw string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(f.afHome, "instances", handoff.RailsFileName), []byte(raw), 0o600))
+}
+
+// The account-level quarantine flag is a record of the re-run's boundary
+// too (#7277). Named for this file, its span is the boundary. Demoted to name
+// no file — a second home-wide overflow — it says af cannot tell which of
+// the home's files took unrecorded source bytes, so no record of this one is
+// complete and the re-run covers it whole (probe F). And rails af cannot read
+// give a whole-file cover too (probe G).
+func TestCommittedCarryRerunReadsTheAccountQuarantineFlag(t *testing.T) {
+	const landed = "carried twelve\nthirty-two more carried bytes, then own\n"
+	for _, tc := range []struct {
+		name      string
+		watermark bool
+		rails     func(f rerunFixture) string
+		want      int64
+	}{
+		{
+			name: "a flag naming this file", want: 30,
+			rails: func(f rerunFixture) string {
+				return `{"schema_version":1,"quarantined_accounts":{"` + f.dstDir +
+					`":{"at":"2026-11-13T09:00:00Z","path":"` + f.dstPath() + `","covered":30}}}`
+			},
+		},
+		{
+			name: "a demoted flag over a recorded watermark", watermark: true, want: int64(len(landed)),
+			rails: func(f rerunFixture) string {
+				return `{"schema_version":1,"quarantined_accounts":{"` + f.dstDir + `":{"at":"2026-11-13T09:00:00Z"}}}`
+			},
+		},
+		{
+			name: "rails af cannot read", watermark: true, want: int64(len(landed)),
+			rails: func(rerunFixture) string { return "{not json" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRerunFixture(t, tmux.ProgramCodex)
+			writeCarryFile(t, f.dstDir, f.rel, landed)
+			if tc.watermark {
+				require.NoError(t, handoff.NewStore(filepath.Join(f.afHome, "instances", handoff.StateFileName)).
+					RecordCarriedPrefix(f.dstPath(), 12))
+			}
+			f.writeRails(t, tc.rails(f))
+
+			require.NoError(t, f.carry(true).copy())
+			require.Equal(t, tc.want, f.watermarks(t)[f.dstPath()])
+		})
+	}
+}

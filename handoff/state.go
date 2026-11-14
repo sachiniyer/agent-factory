@@ -54,7 +54,11 @@ type State struct {
 	// sessions (design R3). An entry of 0 is a record too: a carry af
 	// committed there copied no bytes. Only an absent entry means af never
 	// recorded a carry for the file (Snapshot.CarriedBoundary, #7270); a
-	// binary that predates the distinction reads a 0 exactly as absent.
+	// binary that predates the distinction reads a 0 exactly as absent. A
+	// record, zero or not, is complete only while every binary that writes
+	// the path records its carries: one older than v1.0.345 (Codex, #6802)
+	// or v1.0.349 (Claude, #6975) carries without a watermark, so a
+	// downgrade past those can leave a record that understates (#7277).
 	CarriedPrefixes map[string]int64 `json:"carried_prefix_len,omitempty"`
 	// Halted records a mover halt (on_failure = "halt"). Presence means
 	// engine-originated moves are stopped; ordinary wait-for-reset resume is
