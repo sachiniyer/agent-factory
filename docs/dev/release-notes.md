@@ -8,6 +8,32 @@ Read [Release process](release-process.md) first for channels and versioning.
 Use the [release testing plan](release-testing-plan.md) for validation, then
 consult the relevant notes below when preparing the announcement.
 
+## Account-swap carries record a zero-byte carry, and a re-run keeps that record (#7274)
+
+- **What changed.** When a same-agent account swap carries a conversation
+  and copies zero bytes, af now records that in
+  `instances/auto-handoff-state.json` as an explicit `0` under
+  `carried_prefix_len`. Before, it recorded nothing. A re-run of a committed
+  carry whose previous account has lost the conversation now keeps the
+  boundary af recorded for the file. It used to count the whole file,
+  including the new account's own records, as the previous account's.
+- **Older binaries read the new file unchanged.** The schema is the same,
+  and a binary from before this change reads a `0` exactly as a missing
+  entry: it keeps its whole-file reading, which errs toward distrusting
+  more. Nothing needs migrating.
+- **Downgrade limit.** A recorded boundary, zero or not, can be trusted only
+  while every binary that writes to that file records its carries. Two
+  versions are the floor:
+  - **Claude:** af releases before v1.0.349 (#6975) carry Claude
+    conversations without recording a boundary.
+  - **Codex:** releases before v1.0.345 (#6802) do the same for Codex.
+
+  If you downgrade past those versions and swap the same conversation in
+  again, the record no longer covers what that carry copied. Upgrading back
+  can then count the previous account's usage-limit records as the new
+  account's. Nonzero records already had this exposure. Avoid swapping
+  accounts while you run such an old binary.
+
 ## `af doctor --json`: unproven and foreign marked processes moved row keys
 
 - Some `af doctor` process findings moved to more honest check names
