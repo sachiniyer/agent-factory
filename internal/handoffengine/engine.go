@@ -11,6 +11,7 @@ package handoffengine
 import (
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -67,9 +68,9 @@ type SessionInput struct {
 	// CarryCheckTo is the full answer against one target account: CarryCheck's
 	// checks plus every check the live carry makes on that account's home
 	// (session.AccountSwapCarryRefusalTo). The engine asks it for the account
-	// Decide chose, only once CarryCheck has confirmed the source side, and a
-	// refusal defers the move like any carry-refused verdict rather than
-	// trying the next candidate (#7273). Nil reads as handoff.CarryUnconfirmed.
+	// Decide chose, only once CarryCheck has confirmed the source side; a
+	// refusal skips that candidate and the next choice is asked (requireCarry,
+	// #7282). Nil reads as handoff.CarryUnconfirmed.
 	CarryCheckTo func(target string) string
 	HomeDir      string // the runtime-bound account home (codex), "" elsewhere
 	Program      string // the recorded launch command (RuntimeProgram); the
@@ -378,11 +379,7 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 			}
 			facts = e.factsFor(g, ns, occupancy, snap, now, readUsage)
 		}
-		decision := handoff.Decide(facts)
-		if refusal := carryRefusal(g.in, facts, decision); refusal != "" {
-			facts.Session.CarryPossible, facts.Session.CarryRefusal = false, refusal
-			decision = handoff.Decide(facts)
-		}
+		decision := requireCarry(g.in, facts, handoff.Decide(facts))
 		events := pending.Filter(g.in.Key, decision.Events, now, Reannounce)
 		for _, ev := range events {
 			row := handoff.EventRow{
@@ -577,30 +574,59 @@ func ResolveRecipient(spec string, inputs []SessionInput) (recipient SessionInpu
 	return resolveRecipient(spec, inputs)
 }
 
-// carryRefusal is the carry refusal code with which require_carry must refuse
-// a verdict the in-memory precondition let through, because the live carry
-// would fall back to a fresh start (#7152), or "". The full answer reads the
-// provider's store, so it is asked only when it can change the verdict: the
-// policy requires a carry, the precondition holds, and the session has a real
-// trigger — the only verdicts whose blockers Decide evaluates. A move has
-// chosen its target, so it is asked against that target too, once the source
-// side has confirmed: a refusal only the target's home shows is a fresh start
-// as surely as a source one (#7273). The chosen target is the only one asked —
-// a refusal defers the move, and no other candidate's store is read.
-func carryRefusal(in SessionInput, facts handoff.Facts, decision handoff.Decision) string {
+// requireCarry applies require_carry to the verdict Decide reached on facts.
+// The full answers read the provider's stores, so each is asked only when it
+// can change the verdict (#7152).
+//
+// The source side first: when the policy requires a carry, the in-memory
+// precondition holds and the session has a real trigger — the only verdicts
+// whose blockers Decide evaluates — a source-side refusal defers the session.
+// Asking again cannot help until the session's own conversation changes.
+//
+// Then, for a move only, the target Decide chose. Asked after the target-blind
+// answer confirmed the same snapshot of the source, a refusal here is caused
+// by that one target's home: a copy of the conversation filed there under
+// another rollout or spelling, a revert rollout of it, a copy that diverges.
+// Retrying that home cannot clear it, so the candidate is skipped — named on
+// the row as "carry:<code>", like a drifted one — and Decide's next choice is
+// asked, on this tick only, until one carries or none is left (#7282). A
+// candidate is asked at most once a tick, and its store is read from the
+// shared snapshot (carryAheadStores). A feeder with no answer against a
+// target defers instead, naming the target: it is no state of that home.
+func requireCarry(in SessionInput, facts handoff.Facts, decision handoff.Decision) handoff.Decision {
 	if !facts.Config.RequireCarry || !facts.Session.CarryPossible || !decision.Kind.Triggered() {
-		return ""
+		return decision
+	}
+	refuse := func(code, target string) handoff.Decision {
+		facts.Session.CarryPossible, facts.Session.CarryRefusal, facts.Session.CarryRefusalTo = false, code, target
+		return handoff.Decide(facts)
 	}
 	if in.CarryCheck == nil {
-		return handoff.CarryUnconfirmed
+		return refuse(handoff.CarryUnconfirmed, "")
 	}
-	if code := in.CarryCheck(); code != "" || decision.Kind != handoff.KindMove {
-		return code
+	if code := in.CarryCheck(); code != "" {
+		return refuse(code, "")
+	}
+	if decision.Kind != handoff.KindMove {
+		return decision
 	}
 	if in.CarryCheckTo == nil || decision.To == "" {
-		return handoff.CarryUnconfirmed
+		return refuse(handoff.CarryUnconfirmed, decision.To)
 	}
-	return in.CarryCheckTo(decision.To)
+	facts.Accounts = append([]handoff.AccountFacts(nil), facts.Accounts...)
+	for asked := 0; decision.Kind == handoff.KindMove && asked < len(facts.Accounts); asked++ {
+		code := in.CarryCheckTo(decision.To)
+		if code == "" {
+			return decision
+		}
+		i := slices.IndexFunc(facts.Accounts, func(a handoff.AccountFacts) bool { return a.Name == decision.To })
+		if i < 0 {
+			return refuse(code, decision.To)
+		}
+		facts.Accounts[i].CarryRefusal = code
+		decision = handoff.Decide(facts)
+	}
+	return decision
 }
 
 // factsFor assembles one session's Facts from the snapshot fields — the only
