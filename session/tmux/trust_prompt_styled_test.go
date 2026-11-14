@@ -11,16 +11,19 @@ import (
 // claudeTrustPromptPresent is the gate task.DismissTrustPrompt consults: a
 // false there is the permission to type the user's prompt into the pane. The
 // gate's reworded folder-trust clause and MCP question half were matched with
-// raw strings.Contains/strings.ToLower against capture-pane -e -e output, so a
+// raw strings.Contains/strings.ToLower against capture-pane -e output, so a
 // dialog Claude Code paints with per-word SGR styling (the measured render in
 // testdata/claude_2_1_322_mcp_server_dialog.ansi) broke the byte-contiguity of
 // every multi-word phrase and the gate reported the pane dialog-free. The
 // prompt was then typed into the live modal and Enter landed on Claude Code's
 // preselected row — the exact #3579 catastrophe the file exists to prevent.
 //
-// The fix strips ANSI before matching, the way every sibling does. These tests
-// feed the gate (and the end-to-end CheckAndHandleTrustPrompt path) the per-word
-// styled renders the suite never had.
+// The fix strips ANSI before matching, the way every sibling does; since #7271
+// the gate's clauses all read one visible text, stripped once per capture
+// (visibleTextOf). These tests feed the gate (and the end-to-end
+// CheckAndHandleTrustPrompt path) per-word styled renders the suite never had.
+// Every folder-trust render here is SYNTHETIC, modelled on the measured 2.1.322
+// MCP-server capture: no capture of the folder-trust dialog exists in testdata.
 
 // styleMCPQuestionPerWord wraps each word of the MCP question in its own SGR
 // span, mirroring the per-word styling measured in the 2.1.322 captures. The
@@ -158,7 +161,7 @@ func TestClaudeTrustPromptPresent_StyledRenderingIsDetected(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := claudeTrustPromptPresent(tt.content)
+			got := claudeTrustPromptPresent(visibleTextOf(tt.content))
 			require.Equal(t, tt.want, got,
 				"claudeTrustPromptPresent must see through per-word SGR styling the way its siblings do")
 		})
@@ -171,14 +174,14 @@ func TestClaudeTrustPromptPresent_StyledRenderingIsDetected(t *testing.T) {
 // input. Before the fix the gate was the lone hold-out.
 func TestClaudeTrustPromptPresent_StyledGateAgreesWithSiblings(t *testing.T) {
 	styledFolder := styledRewordedFolderTrustDialog()
-	require.True(t, claudeTrustPromptPresent(styledFolder),
+	require.True(t, claudeTrustPromptPresent(visibleTextOf(styledFolder)),
 		"the gate must agree with its siblings")
-	require.True(t, claudeFolderTrustDialogPresent(styledFolder),
+	require.True(t, claudeFolderTrustDialogPresent(visibleTextOf(styledFolder)),
 		"claudeFolderTrustDialogPresent already strips ANSI and detects this")
 
 	styledMCP := styledMCPDialog()
-	require.True(t, claudeTrustPromptPresent(styledMCP))
-	require.True(t, claudeMCPTrustFooterIsLast(styledMCP),
+	require.True(t, claudeTrustPromptPresent(visibleTextOf(styledMCP)))
+	require.True(t, claudeMCPTrustFooterIsLast(visibleTextOf(styledMCP)),
 		"claudeMCPTrustFooterIsLast already strips ANSI and detects this")
 }
 
@@ -208,8 +211,9 @@ func TestCheckAndHandleTrustPrompt_StyledMCPDialogQuotedInjectsNothing(t *testin
 // TestCheckAndHandleTrustPrompt_StyledFolderTrustDialogCommitsAffirmative is
 // the end-to-end proof for the folder-trust clause: a per-word styled live
 // picker must be detected, navigated by label, and the affirmative option
-// confirmed — never the prompt typed into the modal. The pane renders the
-// measured per-word SGR styling on the question and both option labels.
+// confirmed — never the prompt typed into the modal. The synthetic pane styles
+// the question and the selected row word by word, the way the measured 2.1.322
+// capture styles its header and its ❯ row, so the style follows the cursor.
 func TestCheckAndHandleTrustPrompt_StyledFolderTrustDialogCommitsAffirmative(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -258,7 +262,7 @@ func TestCheckAndHandleTrustPrompt_StyledFolderTrustDialogCommitsAffirmative(t *
 	}
 }
 
-// TestCheckAndHandleTrustPrompt_StaleGateWouldHaveMissedStyledDialog is the
+// TestCheckAndHandleTrustPrompt_GateHoldsStyledFolderTrustDialogNotClear is the
 // watch-the-bug-fail assertion: with the raw (un-fixed) clauses the same styled
 // pane reproduces the report's fail-open — the gate reports false and
 // CheckAndHandleTrustPrompt returns false with zero keystrokes, meaning the
@@ -289,33 +293,35 @@ func TestCheckAndHandleTrustPrompt_GateHoldsStyledFolderTrustDialogNotClear(t *t
 
 // TestCheckAndHandleTrustPrompt_StyledFolderTrustDialogQuotedInjectsNothing
 // is the end-to-end negative for the folder-trust clause: a styled dialog
-// quoted with the composer below must still be refused — stripping ANSI must
-// not widen the gate to fire on quoted output that has content painted after
-// the footer.
+// quoted with the composer below sends no key, and — since #7271 reads the
+// dialog from the trailing region — reports the pane dialog-free, as the
+// unstyled QuotedClaudeFolderTrustDialogInjectsNothing does. Stripping ANSI
+// must not widen the gate to fire on quoted output that has content painted
+// after the footer.
 func TestCheckAndHandleTrustPrompt_StyledFolderTrustDialogQuotedInjectsNothing(t *testing.T) {
 	dialog := styledRewordedFolderTrustDialog()
 	quoted := dialog + "\n╭────────────────────────────────────╮\n" +
 		"│ > Type your message here           │\n" +
 		"╰────────────────────────────────────╯\n? for shortcuts\n"
 	handled, cmds := pollStaticPane(t, quoted, 4)
-	require.True(t, handled,
-		"af has not OBSERVED a dialog-free pane, so it may not report one (#3302)")
+	require.False(t, handled,
+		"the styled dialog's text with the composer painted below it is an observed dialog-free pane (#7271)")
 	require.Empty(t, sentKeystrokes(cmds),
 		"no key may be injected into a pane that only quotes the styled dialog; got %v", cmds)
 }
 
-// TestCheckAndHandleTrustPrompt_RealMCPDialogFromMeasuredFixture feeds the actual
-// captured 2.1.322 MCP-server dialog fixture (the per-word styled .ansi file)
-// through the gate, confirming the ANSI-stripping fix detects the real measured
-// render rather than a synthetic approximation.
+// TestCheckAndHandleTrustPrompt_RealMCPDialogFromMeasuredFixtureDetected feeds
+// the measured 2.1.322 MCP-server capture (the per-word styled .ansi file)
+// through the gate. Its clause stripped per row before #7265 too, so this pins
+// the gate on measured bytes rather than reproducing that fix's bug.
 func TestCheckAndHandleTrustPrompt_RealMCPDialogFromMeasuredFixtureDetected(t *testing.T) {
 	content := readTrustFixture(t, mcpServerDialogFixture)
 	// The 2.1.322 dialog is the newer MCP-server wording (no "do you trust
 	// this new mcp server" question). It is detected by the mcpServer clause,
-	// not the older mcpDialog clause; both run after the fix's stripped plain.
+	// not the older mcpDialog clause; both read the same visible text.
 	// The gate must report present on the real captured styled bytes.
-	require.True(t, claudeTrustPromptPresent(content),
+	require.True(t, claudeTrustPromptPresent(visibleTextOf(content)),
 		"the real measured styled MCP-server capture must be detected by the gate")
-	require.True(t, claudeFolderTrustDialogPresent(content) || claudeMCPServerDialogOf(content).verdict == claudeMCPServerComplete,
+	require.True(t, claudeFolderTrustDialogPresent(visibleTextOf(content)) || claudeMCPServerDialogOf(visibleTextOf(content)).verdict == claudeMCPServerComplete,
 		"a sibling already detects the measured capture")
 }

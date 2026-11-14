@@ -66,8 +66,8 @@ const (
 // The hidden-cursor oracle the codex branch uses is not available here (Claude
 // Code hides the cursor in its composer too; see claudeTrustAffordancePrefix),
 // so the grammar carries the whole weight.
-func claudeLegacyTrustDialogOf(content string) claudeLegacyTrustVerdict {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+func claudeLegacyTrustDialogOf(screen visibleText) claudeLegacyTrustVerdict {
+	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
 	question := -1
 	for i, line := range lines {
@@ -240,10 +240,14 @@ func claudeTrustIsFooter(label string) bool {
 // claudeTrustFrameRule reports whether line is a horizontal frame edge — a box's
 // top or bottom border, or the rules Claude Code draws around its composer —
 // rather than a blank row or a side-bordered row. claudeTrustRowOf reduces
-// both to blank, so this reads the raw line: box-drawing only, with at least one
-// horizontal stroke.
+// both to blank, so this reads the line itself: box-drawing only, with at least
+// one horizontal stroke. The Claude parsers hand it rows of a visibleText;
+// Gemini's hands it raw capture rows, so it strips SGR from those.
 func claudeTrustFrameRule(line string) bool {
-	line = strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(line, "\r"), ""))
+	if strings.IndexByte(line, '\x1b') >= 0 {
+		line = ansiCSISequence.ReplaceAllString(line, "")
+	}
+	line = strings.TrimSpace(line)
 	if line == "" || strings.Trim(line, claudeTrustBoxDrawing) != "" {
 		return false
 	}

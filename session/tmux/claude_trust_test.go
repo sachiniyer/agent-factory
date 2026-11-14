@@ -56,13 +56,30 @@ type claudeFolderTrustPane struct {
 	// it, so the parser is exercised against bordered rows and not just the
 	// bare lines the issue's poller printed.
 	boxed bool
-	// styled renders the question and option labels with per-word SGR styling,
-	// the measured Claude Code render that breaks the byte-contiguity of
-	// multi-word phrases (see testdata/claude_2_1_322_mcp_server_dialog.ansi).
-	// The gate's raw strings.Contains clauses missed such a dialog before the
-	// ANSI-stripping fix; this exercises both the gate and the parser against
-	// the same per-word spans.
+	// styled renders the question and the SELECTED row with per-word SGR
+	// styling and leaves every other option plain. That is the shape the
+	// measured 2.1.322 dialog has (testdata/claude_2_1_322_mcp_server_dialog.ansi
+	// styles its header and its ❯ row word by word, and nothing else), so the
+	// style follows the cursor: the frame right after af's own Down moves the
+	// spans onto the row af is about to confirm. The spans break the
+	// byte-contiguity of multi-word phrases, so this exercises the gate and the
+	// parser against them. The model itself is synthetic.
 	styled bool
+	// width, when non-zero, renders the dialog in the synthetic 2.1.322-styled
+	// layout at that pane width instead (renderSyntheticClaudeFolderTrust),
+	// wrapping its rows the way Claude Code's renderer does in a narrow pane.
+	width int
+	// link wraps one word of the question and one of the affirmative label in
+	// an OSC 8 hyperlink terminated by this sequence (ST or BEL), in the width
+	// layout only.
+	link string
+	// footerBelowFrame, with boxed, closes the box above the footer and paints
+	// the footer under it, indented three: the layout of the repo's legacy
+	// fixtures, whose dialog component sets marginLeft 3 on its footer.
+	footerBelowFrame bool
+	// footer replaces the footer row's text: Claude Code's footer element shows
+	// "Press Ctrl-C again to exit" for a moment after one Ctrl-C (#7275 review).
+	footer string
 	// staleFrames makes the N captures that FOLLOW a movement key return the
 	// pre-movement frame, modelling the terminal repaint race between
 	// `send-keys` returning and the redraw actually landing.
@@ -89,6 +106,9 @@ func (p *claudeFolderTrustPane) freeze(frozen bool) {
 }
 
 func (p *claudeFolderTrustPane) render() string {
+	if p.width > 0 {
+		return renderSyntheticClaudeFolderTrust(p.width, p.options, p.selected, p.link).text
+	}
 	var b strings.Builder
 	write := func(line string) {
 		if p.boxed {
@@ -108,21 +128,35 @@ func (p *claudeFolderTrustPane) render() string {
 	write(question)
 	write("")
 	for idx, option := range p.options {
-		row := "  "
-		if idx == p.selected {
-			row = "❯ "
-		}
+		cursor, ordinal := "  ", ""
 		if p.ordinals {
-			row += fmt.Sprintf("%d. ", idx+1)
+			ordinal = fmt.Sprintf("%d. ", idx+1)
 		}
-		label := option
+		if idx != p.selected {
+			write(cursor + ordinal + option)
+			continue
+		}
+		cursor = "❯ "
 		if p.styled {
-			label = styleWordsPerWord(label)
+			// The measured selected row: the glyph and every word in their
+			// own foreground span, as testdata/claude_2_1_322_mcp_server_dialog.ansi
+			// paints "❯ Continue without using this MCP server".
+			write(styleSelectedPerWord(strings.TrimSpace(cursor + ordinal + option)))
+			continue
 		}
-		write(row + label)
+		write(cursor + ordinal + option)
 	}
 	write("")
-	write("Enter to confirm · Esc to cancel")
+	footer := "Enter to confirm · Esc to cancel"
+	if p.footer != "" {
+		footer = p.footer
+	}
+	if p.boxed && p.footerBelowFrame {
+		b.WriteString("╰" + strings.Repeat("─", 50) + "╯\n")
+		b.WriteString("   " + footer + "\n")
+		return b.String()
+	}
+	write(footer)
 	if p.boxed {
 		b.WriteString("╰" + strings.Repeat("─", 50) + "╯\n")
 	}
@@ -138,6 +172,16 @@ func styleWordsPerWord(s string) string {
 	parts := strings.Split(s, " ")
 	for i, w := range parts {
 		parts[i] = "\x1b[1m\x1b[38;5;220m" + w + "\x1b[0m"
+	}
+	return strings.Join(parts, " ")
+}
+
+// styleSelectedPerWord wraps each word of s in the foreground span the
+// measured 2.1.322 dialog gives its selected row.
+func styleSelectedPerWord(s string) string {
+	parts := strings.Split(s, " ")
+	for i, w := range parts {
+		parts[i] = "\x1b[38;5;153m" + w + "\x1b[39m"
 	}
 	return strings.Join(parts, " ")
 }
@@ -371,7 +415,7 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 		options: []string{claudeTrustYesLabel, claudeTrustNoLabel}, selected: 1})
 
 	t.Run("No first: the affirmative row is below the cursor", func(t *testing.T) {
-		dialog, err := parseClaudeFolderTrustDialog(noFirst)
+		dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(noFirst))
 		require.NoError(t, err)
 		require.Equal(t, claudeTrustNoLabel, dialog.selectedLabel())
 		require.False(t, dialog.onAffirmative())
@@ -379,14 +423,14 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 	})
 
 	t.Run("Yes first, preselected: nothing to move", func(t *testing.T) {
-		dialog, err := parseClaudeFolderTrustDialog(yesFirst)
+		dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(yesFirst))
 		require.NoError(t, err)
 		require.Equal(t, claudeTrustYesLabel, dialog.selectedLabel())
 		require.True(t, dialog.onAffirmative())
 	})
 
 	t.Run("Yes first, cursor below it", func(t *testing.T) {
-		dialog, err := parseClaudeFolderTrustDialog(yesFirstOnNo)
+		dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(yesFirstOnNo))
 		require.NoError(t, err)
 		require.False(t, dialog.onAffirmative())
 		require.Equal(t, "Up", dialog.keyTowardAffirmative())
@@ -398,7 +442,7 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 			{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, boxed: true},
 			{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, boxed: true, ordinals: true},
 		} {
-			dialog, err := parseClaudeFolderTrustDialog(dialogFixture(pane))
+			dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(dialogFixture(pane)))
 			require.NoError(t, err)
 			require.Equal(t, claudeTrustNoLabel, dialog.selectedLabel())
 			require.Equal(t, "Down", dialog.keyTowardAffirmative())
@@ -408,7 +452,7 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 	t.Run("ANSI colour does not hide the rows", func(t *testing.T) {
 		coloured := strings.ReplaceAll(noFirst, "❯", "\x1b[1m❯\x1b[0m")
 		coloured = strings.ReplaceAll(coloured, claudeTrustYesLabel, "\x1b[32m"+claudeTrustYesLabel+"\x1b[0m")
-		dialog, err := parseClaudeFolderTrustDialog(coloured)
+		dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(coloured))
 		require.NoError(t, err)
 		require.Equal(t, "Down", dialog.keyTowardAffirmative())
 	})
@@ -481,7 +525,7 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 	}
 	for _, tt := range refusals {
 		t.Run("refuses: "+tt.name, func(t *testing.T) {
-			_, err := parseClaudeFolderTrustDialog(tt.content)
+			_, err := parseClaudeFolderTrustDialog(visibleTextOf(tt.content))
 			require.Error(t, err, "af must refuse a dialog it cannot read, not guess at it")
 			require.Contains(t, err.Error(), tt.reason)
 		})
@@ -771,12 +815,25 @@ func pollStaticPane(t *testing.T, content string, polls int) (handled bool, cmds
 // cannot be taken back. Output that quotes the dialog — including this repo's
 // own source and issue text, which is how #1952 and #2638 happened — must
 // inject nothing, however long it stays on screen.
+//
+// #7271 changed what such a pane REPORTS, not what it sends. #3587 held it
+// (true): af refused to answer the quote on every poll, so a create, or a
+// root-agent heal resuming a transcript that shows this file, failed after its
+// 20 attempts. The dialog's text with the agent's composer painted below it is
+// an observed dialog-free pane, so it now reports false, and the create
+// delivers its prompt to the agent. Only the composer shows that (#7275 review,
+// R1): any other row below the dialog, such as prose, may be painted by the
+// live dialog itself, so that pane still holds. Neither sends a trust-handler
+// key.
 func TestCheckAndHandleTrustPrompt_QuotedClaudeFolderTrustDialogInjectsNothing(t *testing.T) {
 	dialog := "Quick safety check: Is this a project you created or one you trust?\n\n" +
 		"❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\n" +
 		"Enter to confirm · Esc to cancel\n"
 
-	for _, tt := range []struct{ name, content string }{
+	for _, tt := range []struct {
+		name, content string
+		inTheWay      bool
+	}{
 		{
 			// The agent is showing the dialog inside its own transcript, with
 			// its composer painted below — the shape every live pane has.
@@ -785,8 +842,13 @@ func TestCheckAndHandleTrustPrompt_QuotedClaudeFolderTrustDialogInjectsNothing(t
 				"│ > Type your message here           │\n╰────────────────────────────────────╯\n? for shortcuts\n",
 		},
 		{
-			name:    "quoted with trailing prose",
-			content: dialog + "\nThat is the dialog af answers at startup.\n",
+			// No composer below, so nothing shows a working agent: prose under
+			// the footer is a row the dialog does not paint, and a live dialog
+			// can show one too (the #7275 review's Ctrl-C footer swap). It
+			// holds, still without a key (#7275 review, R1).
+			name:     "quoted with trailing prose",
+			content:  dialog + "\nThat is the dialog af answers at startup.\n",
+			inTheWay: true,
 		},
 		{
 			name: "the label mentioned in a sentence next to the composer cursor",
@@ -796,7 +858,8 @@ func TestCheckAndHandleTrustPrompt_QuotedClaudeFolderTrustDialogInjectsNothing(t
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			handled, cmds := pollStaticPane(t, tt.content, 4)
-			require.True(t, handled, "af has not OBSERVED a dialog-free pane, so it may not report one (#3302)")
+			require.Equal(t, tt.inTheWay, handled,
+				"only the agent's composer below the dialog's text shows an observed dialog-free pane (#7271, #7275 review)")
 			require.Empty(t, sentKeystrokes(cmds),
 				"no key may be injected into a pane that only quotes the dialog; got %v", cmds)
 		})

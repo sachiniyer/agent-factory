@@ -132,8 +132,8 @@ const claudeMCPServerMinOptionPrefix = len("Use this")
 // the same ❯ rule. A dialog that breaks the grammar while still plainly owning
 // the pane is unreadable (claudeMCPServerUnreadableOf). Anything else is not
 // the dialog.
-func claudeMCPServerDialogOf(content string) claudeMCPServerDialog {
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+func claudeMCPServerDialogOf(screen visibleText) claudeMCPServerDialog {
+	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
 	preamble := -1
 	var cursorRows []int
@@ -189,7 +189,7 @@ func claudeMCPServerDialogOf(content string) claudeMCPServerDialog {
 func claudeMCPServerUnreadableOf(lines []string, rows []claudeTrustRow, cursorRows []int) bool {
 	last := -1
 	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(lines[i], "\r"), "")) != "" {
+		if strings.TrimSpace(lines[i]) != "" {
 			last = i
 			break
 		}
@@ -332,7 +332,7 @@ func (t *TmuxSession) declineClaudeMCPServer(dialog claudeMCPServerDialog) bool 
 			t.sanitizedName, claudeMCPServerDialogName, claudeMCPServerDeclineLabel, err)
 		return true
 	}
-	confirmed := claudeMCPServerDialogOf(content)
+	confirmed := claudeMCPServerDialogOf(visibleTextOf(content))
 	if confirmed.verdict != claudeMCPServerComplete || confirmed.selected != claudeMCPServerDeclineLabel {
 		log.InfoLog.Printf("session %q: the %s dialog changed before af confirmed it (now %q selected); not confirming this frame",
 			t.sanitizedName, claudeMCPServerDialogName, confirmed.selected)
