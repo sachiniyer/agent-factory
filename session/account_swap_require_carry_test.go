@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -66,4 +67,72 @@ func TestValidateAccountSwapRequiringCarryRefusesWithoutAConversation(t *testing
 	require.ErrorAs(t, err, &required)
 	require.Equal(t, handoff.CarryUnrecorded, required.Code())
 	require.Nil(t, inst.accountSwapLaunch)
+}
+
+// A committed swap is exempt from require_carry's plan-time refusal: its
+// conversation was decided at the identity checkpoint, after the outgoing
+// runtime had stopped, so refusing it now would strand a swap already under
+// way. Committed means a pending record for this very account — whether it
+// recorded a fresh start (CarryFallback) or a carried id whose plan now falls
+// back. A pending record for another account commits nothing here, so the
+// refusal stands (#7283 review R1).
+func TestValidateAccountSwapRequiringCarryExemptsOnlyTheCommittedSwap(t *testing.T) {
+	notRequired := func(t *testing.T, err error) {
+		t.Helper()
+		var required *CarryRequiredError
+		require.False(t, errors.As(err, &required), "a committed swap was refused: %v", err)
+		require.NoError(t, err)
+	}
+	fellBack := func(t *testing.T, inst *Instance) {
+		t.Helper()
+		require.NotNil(t, inst.accountSwapLaunch)
+		require.Nil(t, inst.accountSwapLaunch.carry, "fixture: the committed plan must fall back, or the exemption is untested")
+		require.NotEmpty(t, inst.accountSwapLaunch.carryFallback)
+	}
+	t.Run("committed to a fresh start", func(t *testing.T) {
+		inst, _ := requireCarryInstance(t)
+		inst.pendingAccountSwap = &AccountSwapData{From: "old", To: "work",
+			CarryFallback: carryTargetHoldsOtherRolloutReason}
+		notRequired(t, inst.ValidateAccountSwapRequiringCarry("work"))
+		fellBack(t, inst)
+	})
+	t.Run("committed to a carry whose plan now falls back", func(t *testing.T) {
+		carryAmbientProviderHomes(t)
+		inst, _ := carrySwapInstance(t, tmux.ProgramCodex)
+		registerAccount(t, tmux.ProgramCodex, "old")
+		inst.Account, inst.accountAutoSelected = "old", true
+		recordOutgoingConversation(t, inst, tmux.ProgramCodex, carryTestID)
+		// No rollout of the carried thread in either home: the committed
+		// carry's plan falls back to a missing rollout.
+		inst.pendingAccountSwap = &AccountSwapData{From: "old", To: "work",
+			CarriedConversationID: carryTestID, CarrySourceAccount: "old"}
+		notRequired(t, inst.ValidateAccountSwapRequiringCarry("work"))
+		fellBack(t, inst)
+	})
+	t.Run("pending for another account", func(t *testing.T) {
+		inst, target := requireCarryInstance(t)
+		writeCarryFile(t, target, codexRolloutRelDay(carryTestID, time.Date(2026, 9, 17, 0, 0, 0, 0, time.Local)),
+			codexRollout(inst.GetWorktreePath()))
+		inst.pendingAccountSwap = &AccountSwapData{From: "old", To: "elsewhere",
+			CarryFallback: carryTargetHoldsOtherRolloutReason}
+		err := inst.ValidateAccountSwapRequiringCarry("work")
+		var required *CarryRequiredError
+		require.ErrorAs(t, err, &required, "a record for another account commits nothing to this one")
+		require.Equal(t, handoff.CarryDuplicated, required.Code())
+	})
+}
+
+// A plan that carries nothing and names no reason — no carry applies at all —
+// is a refusal too, and its code is never empty: an empty code would read as
+// "carries" to anything that asks it (#7283 review R1).
+func TestRequiredCarryRefusalOfAPlanThatCarriesNothing(t *testing.T) {
+	err := requiredCarryRefusal(true, false, nil, "")
+	var required *CarryRequiredError
+	require.ErrorAs(t, err, &required)
+	require.NotEmpty(t, required.Reason)
+	require.NotEmpty(t, required.Code())
+	require.Equal(t, handoff.CarryUnconfirmed, required.Code())
+
+	require.NoError(t, requiredCarryRefusal(false, false, nil, ""), "without require_carry nothing is refused")
+	require.NoError(t, requiredCarryRefusal(true, true, nil, ""), "a committed swap is exempt")
 }
