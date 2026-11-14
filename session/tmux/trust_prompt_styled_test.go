@@ -289,17 +289,19 @@ func TestCheckAndHandleTrustPrompt_GateHoldsStyledFolderTrustDialogNotClear(t *t
 
 // TestCheckAndHandleTrustPrompt_StyledFolderTrustDialogQuotedInjectsNothing
 // is the end-to-end negative for the folder-trust clause: a styled dialog
-// quoted with the composer below must still be refused — stripping ANSI must
-// not widen the gate to fire on quoted output that has content painted after
-// the footer.
+// quoted with the composer below sends no key, and — since #7271 reads the
+// dialog from the trailing region — reports the pane dialog-free, as the
+// unstyled QuotedClaudeFolderTrustDialogInjectsNothing does. Stripping ANSI
+// must not widen the gate to fire on quoted output that has content painted
+// after the footer.
 func TestCheckAndHandleTrustPrompt_StyledFolderTrustDialogQuotedInjectsNothing(t *testing.T) {
 	dialog := styledRewordedFolderTrustDialog()
 	quoted := dialog + "\n╭────────────────────────────────────╮\n" +
 		"│ > Type your message here           │\n" +
 		"╰────────────────────────────────────╯\n? for shortcuts\n"
 	handled, cmds := pollStaticPane(t, quoted, 4)
-	require.True(t, handled,
-		"af has not OBSERVED a dialog-free pane, so it may not report one (#3302)")
+	require.False(t, handled,
+		"the styled dialog's text with the composer painted below it is an observed dialog-free pane (#7271)")
 	require.Empty(t, sentKeystrokes(cmds),
 		"no key may be injected into a pane that only quotes the styled dialog; got %v", cmds)
 }
