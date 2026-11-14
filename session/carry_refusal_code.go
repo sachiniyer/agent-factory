@@ -28,6 +28,7 @@ const (
 	carryRolloutMissingReason          = "its rollout is missing from the previous account's home"
 	carryTranscriptEmptyReason         = "its transcript is empty in the previous account's home"
 	carryRolloutEmptyReason            = "its rollout is empty in the previous account's home"
+	carryTargetDivergesReason          = "the new account already holds a different copy of this conversation"
 	carryStoreUnlistedReason           = "af could not enumerate the Codex rollout store"
 	carrySourceStoreUnlistedReason     = "af could not enumerate the previous account's rollout store"
 	carryTranscriptsUnlistedReason     = "af could not list the conversations in this worktree to confirm the recorded one is current"
@@ -108,6 +109,7 @@ var carryRefusalCodeOf = map[string]string{
 	carryOtherFormsUnlistedReason:      handoff.CarryUnverified,
 	carryOtherFormsReason:              handoff.CarryCompressed,
 	carryTargetHoldsOtherRolloutReason: handoff.CarryDuplicated,
+	carryTargetDivergesReason:          handoff.CarryDuplicated,
 	carryForkUnreadableReason:          handoff.CarryUnverified,
 	codexForkCarryReason:               handoff.CarryForked,
 	codexRevertCarrySourceReason:       handoff.CarryBacktracked,

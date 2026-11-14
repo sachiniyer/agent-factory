@@ -266,8 +266,8 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 	// Checks on the target come after every check on the source, so the live
 	// swap and the source-only check-ahead give the same answer for the same
 	// source state (#7220 review R4).
-	if !req.sourceOnly && !carry.committed && carry.agent == tmux.ProgramClaude {
-		if reason := carry.claudeTargetReason(); reason != "" {
+	if !req.sourceOnly && !carry.committed {
+		if reason := carry.targetReason(); reason != "" {
 			return nil, reason
 		}
 	}
