@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 var codexRolloutFileRE = regexp.MustCompile(`(?i)^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
@@ -174,7 +174,7 @@ func CodexRolloutPathByID(codexHome, id string) string {
 // unclassifiable file stays a candidate — except for provable sub-agents,
 // which no correlation rule can excuse.
 func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string, int) {
-	matches, uncorrelated, _ := classifyCodexRolloutFiles(paths, workingDir)
+	matches, uncorrelated, _, _ := classifyCodexRolloutFiles(paths, workingDir)
 	return matches, uncorrelated
 }
 
@@ -182,10 +182,12 @@ func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string
 // reports why af could not read the uncorrelated files' headers, when it could
 // read none of them: an unreadable header is a channel af could not look
 // through, while a readable one that does not parse is an answer (#7140). A
-// window holding both is an answer, so it reports nil (#7160).
-func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []string, uncorrelated int, unreadable error) {
+// window holding both is an answer, so it reports nil (#7160). unresolved
+// counts the uncorrelated files whose cwd did not resolve within its bound, a
+// lookup that did not happen rather than a header still being written.
+func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []string, uncorrelated, unresolved int, unreadable error) {
 	if workingDir != "" && !filepath.IsAbs(workingDir) {
-		return nil, len(paths), nil
+		return nil, len(paths), 0, nil
 	}
 	unreadableCount := 0
 	for _, path := range paths {
@@ -208,14 +210,31 @@ func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []str
 		case subagent:
 			// Provably a sub-agent thread: never this session's own
 			// top-level conversation, whatever the correlation.
-		case workingDir == "" || pathutil.ResolveForCompare(cwd) == workingDir:
+		case workingDir == "":
 			matches = append(matches, path)
+		default:
+			// The cwd a rollout records is usually the launch dir, which may
+			// sit on a mount that no longer answers: the resolution is bounded
+			// (fsprobe, #7279), and one that did not answer is a channel af
+			// could not look through, never a rollout from another directory.
+			resolved, err := fsprobe.ResolveForCompare(cwd)
+			switch {
+			case err != nil:
+				uncorrelated++
+				unresolved++
+				unreadableCount++
+				if unreadable == nil {
+					unreadable = err
+				}
+			case resolved == workingDir:
+				matches = append(matches, path)
+			}
 		}
 	}
 	if unreadableCount < uncorrelated {
 		unreadable = nil
 	}
-	return matches, uncorrelated, unreadable
+	return matches, uncorrelated, unresolved, unreadable
 }
 
 func codexRolloutWorkingDir(path string) (string, bool) {

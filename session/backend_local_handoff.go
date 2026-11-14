@@ -47,7 +47,7 @@ func prepareAgentSwapFrom(i *Instance, target, resolved string) (AgentSwapPlan, 
 	}
 	if _, err := preflight.CheckCommandAt(program, workDir); err != nil {
 		return AgentSwapPlan{}, fmt.Errorf("handoff target %s failed launch preflight: %w", target,
-			preflight.ProgramError(target, resolved, err))
+			swapPreflightCause(i.Title, workDir, target, resolved, err))
 	}
 	var capture ConversationCaptureSnapshot
 	if tmux.DetectAgentFromCommand(program) == tmux.ProgramCodex {

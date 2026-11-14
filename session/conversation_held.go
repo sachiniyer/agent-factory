@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -90,8 +91,20 @@ func (s ConversationCaptureSnapshot) judgeHeldCodexRollouts(held map[string]stru
 			unclassified++
 		case subagent:
 			// A sub-agent's thread, held by the same process (#6766).
-		case s.workingDir == "" || pathutil.ResolveForCompare(cwd) == s.workingDir:
+		case s.workingDir == "":
 			matches = append(matches, path)
+		default:
+			// The cwd a rollout records is usually the launch dir, which may
+			// sit on a mount that no longer answers. The resolution is bounded
+			// (fsprobe, #7279), and one that did not answer leaves the rollout
+			// unclassified, never another directory's (#7287 review R4).
+			resolved, err := fsprobe.ResolveForCompare(cwd)
+			switch {
+			case err != nil:
+				unclassified++
+			case resolved == s.workingDir:
+				matches = append(matches, path)
+			}
 		}
 	}
 	switch {

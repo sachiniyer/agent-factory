@@ -3,10 +3,10 @@ package session
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -613,11 +613,17 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	if workDir == "" {
 		return fmt.Errorf("swap agent: session %q has no worktree path", i.Title)
 	}
-	if _, err := os.Stat(workDir); err != nil {
+	// Bounded (fsprobe, #7279): a worktree on a mount that no longer answers
+	// (NFS, FUSE, a dead sshfs) must fail the swap, before anything is torn
+	// down, rather than hold it forever.
+	if _, err := fsprobe.Stat(workDir); err != nil {
 		// Do NOT rebuild here the way respawn does. A handoff is only ever issued
 		// against a live session the user is looking at; a missing worktree means
 		// something is wrong that a swap should not paper over by recreating an
 		// empty tree and dispatching a fresh agent into it.
+		if stalled := worktreeStalledError(i.Title, workDir, err); stalled != nil {
+			return stalled
+		}
 		return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 	}
 

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 // The bound on an operator repair's standing (#7122). `af sessions
@@ -304,11 +304,27 @@ func operatorRepairProvenance(rolloutPath, launchDir string) resumeDecline {
 		return declineResumeUnverified("af could not read the operator-recorded conversation's session metadata to confirm it is this session's own")
 	case subagent:
 		return declineResume("the operator-recorded conversation is a Codex sub-agent thread, not this session's own conversation")
-	case pathutil.ResolveForCompare(cwd) != pathutil.ResolveForCompare(launchDir):
+	}
+	// Both directories are resolved bounded (fsprobe, #7279): either may sit on
+	// a mount that no longer answers, and a resolution that did not answer is
+	// a look that did not happen, never "another directory".
+	recorded, err := fsprobe.ResolveForCompare(cwd)
+	if err != nil {
+		return declineResumeUnverified(operatorRepairUnresolvedReason)
+	}
+	own, err := fsprobe.ResolveForCompare(launchDir)
+	if err != nil {
+		return declineResumeUnverified(operatorRepairUnresolvedReason)
+	}
+	if recorded != own {
 		return declineResume("the operator-recorded conversation was started in another directory, not in this session's")
 	}
 	return resumeDecline{}
 }
+
+// operatorRepairUnresolvedReason is operatorRepairProvenance's refusal when a
+// directory it compares did not resolve within the bound.
+const operatorRepairUnresolvedReason = "af could not resolve the operator-recorded conversation's directory and this session's in time to confirm it is this session's own"
 
 // codexRolloutStoredAt is the instant a rollout entered the store: the
 // session_meta LINE's own timestamp. Codex's recorder dates a new thread when

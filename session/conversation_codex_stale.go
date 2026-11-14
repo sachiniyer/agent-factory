@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 // staleRecordedCodexDecline answers whether the recorded Codex conversation
@@ -86,9 +86,25 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 		hook(recordedPath)
 	}
 	launchDir := LaunchCaptureWorkingDir(program, workDir)
+	// noEvidence is the guard's answer when nothing newer can be attributed to
+	// the session: resume the recorded thread, after the second look at a
+	// rollout that may have moved between forms.
+	noEvidence := func() (resumeDecline, bool) {
+		if _, err := os.Lstat(recordedPath); err != nil {
+			return resumeDecline{}, true
+		}
+		return resumeDecline{}, false
+	}
 	var repair operatorRepairWindow
 	if conv.CaptureKind == ConversationCaptureOperator {
-		if decline := operatorRepairProvenance(recordedPath, launchDir); decline.reason != "" {
+		switch decline := operatorRepairProvenance(recordedPath, launchDir); {
+		case decline.reason == operatorRepairUnresolvedReason:
+			// A provenance lookup that did not answer is no answer about the
+			// repair: the attribution timeout's answer, which resumes the
+			// recorded thread and retires nothing. Only an answered provenance
+			// declines (#7287 review R5).
+			return noEvidence()
+		case decline.reason != "":
 			return decline, false
 		}
 		repair = operatorRepairWindowOf(conv, time.Now())
@@ -101,22 +117,35 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 	// about the id itself, judged above and here, where the rollout af chose
 	// may have gone since the walk: that still takes the second look.
 	if !i.newerConversationIsEvidence(launchDir) {
-		if _, err := os.Lstat(recordedPath); err != nil {
-			return resumeDecline{}, true
-		}
-		return resumeDecline{}, false
+		return noEvidence()
 	}
-	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(launchDir), repair) {
+	switch checkCodexRecordedStaleness(recordedPath, files, boundedLaunchDir(launchDir), repair) {
 	case codexRolloutStale:
 		return declineResume(staleCarryReason), false
 	case codexRolloutUncorrelated:
 		// A newer rollout whose header af cannot classify yet — Codex may be
 		// mid-write — is a look that failed, not evidence about the id.
 		return declineResumeUnverified("af could not confirm the recorded conversation is still the newest one in this worktree"), false
+	case codexRolloutUnresolved:
+		// A lookup that did not answer within its bound, the launch dir's or a
+		// newer rollout's cwd, attributes nothing: the no-evidence resume the
+		// attribution rule's own timeout gives above. Only a look that
+		// answered declines (#7287 review R1).
+		return resumeDecline{}, false
 	case codexRolloutRecordedGone:
 		return resumeDecline{}, true
 	}
 	return resumeDecline{}, false
+}
+
+// boundedLaunchDir resolves launchDir for correlating rollouts' cwds, bounded
+// (fsprobe, #7279), when a staleness check first needs it. ok is false when
+// the resolution did not answer within the bound.
+func boundedLaunchDir(launchDir string) func() (string, bool) {
+	return func() (string, bool) {
+		resolved, err := fsprobe.ResolveForCompare(launchDir)
+		return resolved, err == nil
+	}
 }
 
 // codexStalenessVerdict is the outcome of comparing a recorded rollout against
@@ -128,21 +157,28 @@ const (
 	codexRolloutStale
 	codexRolloutUncorrelated
 	codexRolloutRecordedGone
+	// codexRolloutUnresolved: a lookup a newer rollout's correlation needed,
+	// the launch dir's or the rollout's own cwd, did not answer within its
+	// bound. Nothing newer was attributed either way.
+	codexRolloutUnresolved
 )
 
 // checkCodexRecordedStaleness is the mechanical half shared by the restore
 // guard and the carry staleness check: stat the recorded rollout, keep the
-// enumerated files strictly newer than it, and correlate those to launchDir —
-// an empty launchDir leaves every newer top-level file a candidate, which the
-// callers' fail-closed reading treats correctly. files is the store listing
-// the caller already took, so a check never walks the store twice.
+// enumerated files strictly newer than it, and correlate those to the launch
+// dir resolveLaunch names — an empty one leaves every newer top-level file a
+// candidate, which the callers' fail-closed reading treats correctly. The
+// launch dir is resolved only once a newer file exists, so a check with
+// nothing newer never waits on its mount (#7287 review R3). files is the
+// store listing the caller already took, so a check never walks the store
+// twice.
 //
 // repair is an operator repair's window (operatorRepairWindowOf): a newer
 // file it disregards is a thread the operator chose over and is dropped; any
 // other, including one af cannot date, stays a candidate exactly as it would
 // for any record. The zero window drops nothing.
-func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{}, launchDir string, repair operatorRepairWindow) codexStalenessVerdict {
-	return judgeCodexRecordedStaleness(recordedPath, lstatRolloutModTimes(files), launchDir, repair)
+func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{}, resolveLaunch func() (string, bool), repair operatorRepairWindow) codexStalenessVerdict {
+	return judgeCodexRecordedStaleness(recordedPath, lstatRolloutModTimes(files), resolveLaunch, repair)
 }
 
 // lstatRolloutModTimes yields each of files with its mtime now, skipping one
@@ -160,7 +196,7 @@ func lstatRolloutModTimes(files map[string]struct{}) iter.Seq2[string, time.Time
 // judgeCodexRecordedStaleness is checkCodexRecordedStaleness over rollouts
 // whose mtimes are already known — a snapshot of the store (#7156 review
 // P2-1). The recorded rollout itself is always stat'd now.
-func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string, time.Time], launchDir string, repair operatorRepairWindow) codexStalenessVerdict {
+func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string, time.Time], resolveLaunch func() (string, bool), repair operatorRepairWindow) codexStalenessVerdict {
 	recorded, err := os.Lstat(recordedPath)
 	if err != nil {
 		return codexRolloutRecordedGone
@@ -177,12 +213,19 @@ func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string,
 	if len(newer) == 0 {
 		return codexRolloutCurrent
 	}
-	matches, uncorrelated := codexRolloutFilesForWorkingDir(newer, launchDir)
-	if len(matches) > 0 {
-		return codexRolloutStale
+	launchDir, ok := resolveLaunch()
+	if !ok {
+		return codexRolloutUnresolved
 	}
-	if uncorrelated > 0 {
+	matches, uncorrelated, unresolved, _ := classifyCodexRolloutFiles(newer, launchDir)
+	switch {
+	case len(matches) > 0:
+		return codexRolloutStale
+	case uncorrelated > unresolved:
+		// A header af could not classify: Codex may still be writing it.
 		return codexRolloutUncorrelated
+	case unresolved > 0:
+		return codexRolloutUnresolved
 	}
 	return codexRolloutCurrent
 }

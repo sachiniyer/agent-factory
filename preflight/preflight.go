@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/envcommand"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -158,7 +159,12 @@ func checkCommand(command, workingDir string) (*ProgramCheck, error) {
 	if err != nil {
 		return check, err
 	}
-	info, statErr := os.Stat(launch.WorkingDir)
+	// Bounded (fsprobe, #7287 review R2): the launch dir is a session's
+	// worktree on the agent-swap and manual account-swap paths, which may sit
+	// on a mount that no longer answers. A stat that does not answer returns
+	// the ErrProbeTimedOut + context.DeadlineExceeded pair, which callers
+	// read as a look that did not happen.
+	info, statErr := fsprobe.Stat(launch.WorkingDir)
 	if statErr != nil {
 		return check, fmt.Errorf("launch directory %q cannot be used: %w", launch.WorkingDir, statErr)
 	}
