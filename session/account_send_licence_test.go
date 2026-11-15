@@ -346,9 +346,10 @@ func TestRestoredSandboxWorkspaceCanBeReadBackButNotSentTo(t *testing.T) {
 	require.Error(t, err, "a send has no destination to be licensed for")
 }
 
-// Two spellings of one destination compare equal, in both directions, so a
-// spelling-only edit to an entry does not refuse the sessions already on that
-// machine (#7347). An edit that can move the machine still refuses.
+// The spellings af can prove are one destination compare equal, in both
+// directions: letter case, port 22 written out, and a user that is the login
+// ssh would use anyway (#7347). Everything else refuses, including a trailing
+// dot, whose meaning depends on the resolver.
 func TestAccountSendLicenceTreatsEqualSpellingsOfOneMachineAsEqual(t *testing.T) {
 	acct := writeAccount(t, "claude", testSecretA)
 	login := sshLoginUser(config.SSHConfig{})
@@ -367,11 +368,13 @@ func TestAccountSendLicenceTreatsEqualSpellingsOfOneMachineAsEqual(t *testing.T)
 		recorded, entry config.HostConfig
 		same            bool
 	}{
-		"a relative name became absolute":                                 {config.HostConfig{Host: "box1.example", User: "dev"}, config.HostConfig{Host: "box1.example.", User: "dev"}, true},
-		"an absolute name became relative":                                {config.HostConfig{Host: "box1.example.", User: "dev"}, config.HostConfig{Host: "box1.example", User: "dev"}, true},
+		// A trailing dot is always significant: whether the two spellings name one
+		// machine depends on the resolver's ndots and search list.
+		"a relative name became absolute":                                 {config.HostConfig{Host: "box1.example", User: "dev"}, config.HostConfig{Host: "box1.example.", User: "dev"}, false},
+		"an absolute name became relative":                                {config.HostConfig{Host: "box1.example.", User: "dev"}, config.HostConfig{Host: "box1.example", User: "dev"}, false},
 		"the user line was removed, and it was the login ssh uses anyway": {config.HostConfig{Host: "box1.example", User: login}, config.HostConfig{Host: "box1.example"}, true},
 		"the login ssh uses anyway was written out":                       {config.HostConfig{Host: "box1.example"}, config.HostConfig{Host: "box1.example", User: login}, true},
-		"every spelling at once":                                          {config.HostConfig{Host: "box1.example"}, config.HostConfig{Host: "BOX1.Example.", User: login, Port: 22}, true},
+		"every spelling at once":                                          {config.HostConfig{Host: "box1.example"}, config.HostConfig{Host: "BOX1.Example", User: login, Port: 22}, true},
 
 		"the user line was removed, and it was another login": {config.HostConfig{Host: "box1.example", User: "not-" + login}, config.HostConfig{Host: "box1.example"}, false},
 		"another user was written in":                         {config.HostConfig{Host: "box1.example"}, config.HostConfig{Host: "box1.example", User: "not-" + login}, false},
@@ -417,15 +420,15 @@ func TestPreReapRefusalNamesTheWorkThatKillDestroys(t *testing.T) {
 	assert.Contains(t, msg, "copy or push any unpushed work off the host first")
 }
 
-// The trailing-dot rule is for a name with an interior dot only. A recorded
-// IPv6 literal with a stray dot is not the literal without it either.
-func TestAccountSyncTargetKeepsSingleLabelNamesAndLiteralsExactly(t *testing.T) {
+// A trailing dot is never normalised away, for any kind of host; only letter
+// case is.
+func TestAccountSyncTargetKeepsATrailingDot(t *testing.T) {
 	target := func(host string) accountSyncTarget {
 		return accountSyncTargetOf(config.SSHConfig{Host: host, User: "dev"})
 	}
-	assert.Equal(t, target("box1.example"), target("box1.example."), "a dotted name is tried as absolute first, so these are one name")
-	assert.Equal(t, target("box1.example"), target("BOX1.Example."))
+	assert.Equal(t, target("box1.example"), target("BOX1.Example"), "case is not a different destination")
 	for _, pair := range [][2]string{
+		{"box1.example", "box1.example."},
 		{"box1", "box1."},
 		{"192.0.2.10", "192.0.2.10."},
 		{"2001:db8::1", "2001:db8::1."},
