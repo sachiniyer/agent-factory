@@ -152,16 +152,30 @@ func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*syn
 //
 // The budget, summed from the bounds this PR put in place:
 //
-//	per tab   10s panePID + 10s list-panes + 10s kill-session + 10s has-session
-//	          + 3s pane-exit wait                                          =  43s
-//	× the session's OWN tab count            (9 tabs, the old cap: 387s)
+//	per tab   10s panePID + 10s list-panes + 10s kill-session
+//	          + 43s strict has-session probe (below, rounded up)
+//	          + 3s pane-exit wait                                          =  76s
+//	× the session's OWN tab count            (9 tabs, the old cap: 684s)
 //	Cleanup   5 bounded git commands × 60s (remove, list, prune,
 //	          branch -D, prune)                                            = 300s
 //	vscode    2 × (5s SIGTERM grace + 5s SIGKILL grace)                    =  20s
 //	flocks    tombstone write 10s + record delete 10s                      =  20s
 //	                                                                        ------
 //	fixed terms                                                             = 340s
-//	worst-case LEGITIMATE teardown                              340s + 43s × tabs
+//	worst-case LEGITIMATE teardown                              340s + 76s × tabs
+//
+// The probe term is Close's post-kill existence probe, and it is not one command
+// (#7321). tmux.probeSessionStrict asks has-session and, on an exit 1 it cannot
+// classify from the diagnostic, corroborates with a session listing; a socket
+// that answers ENOENT adds a 0.5s watch for a server reclaiming it to each of
+// those two reads. If the socket reappeared, it waits 25ms and asks once more:
+//
+//	one pass  10s has-session + 0.5s socket watch
+//	          + 10s ls + 0.5s socket watch                                 =  21s
+//	probe     2 passes + 25ms between them                           = 42.025s
+//
+// The table used to count a single 10s has-session here, which was the lossy
+// probe Close ran before #7319.
 //
 // The per-tab term used to be multiplied by a constant, because tabs were capped
 // at 9 (#930). #3023 removed that cap — the keyboard should not decide how many
@@ -171,8 +185,9 @@ func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*syn
 // which is exactly the cry-wolf failure the paragraph above rejects.
 //
 // 45s — the old value — fired on any wedged-tmux teardown with two or more tabs,
-// all of it bounded and correct. 15 minutes clears the sum with headroom, and that
-// is the right shape for what this actually watches: every KNOWN wait is now
+// all of it bounded and correct. 15 minutes cleared the 9-tab sum with headroom
+// when the per-tab term was 43s, and the floor below still holds it there; past
+// five tabs the computed budget now exceeds it. That is the right shape for what this actually watches: every KNOWN wait is now
 // bounded, so the watchdog exists for the unknown-unknowns. Exceeding every bound
 // we know of is precisely the wedge worth dumping stacks for. Firing late costs
 // only a later log; firing early costs the signal itself.
@@ -180,7 +195,7 @@ func (m *Manager) lockSessionOperationWithin(key, operation, title string) (*syn
 // If any bound above grows, these must grow with them.
 const (
 	// killWatchdogPerTab is the summed per-tab bound from the table above.
-	killWatchdogPerTab = 43 * time.Second
+	killWatchdogPerTab = 76 * time.Second
 	// killWatchdogFixed is every term that does not scale with the roster.
 	killWatchdogFixed = 340 * time.Second
 	// killWatchdogCountAttempts and killWatchdogCountRetryDelay bound how long the
@@ -193,12 +208,13 @@ const (
 
 // killWatchdogFloor is the shortest this watchdog will ever wait, and it is the
 // value the constant used to hold. Keeping it as a floor means no session that was
-// under the old 9-tab cap changes behaviour at all. A var so tests can shorten it.
+// under the old 9-tab cap ever waits less than it used to. A var so tests can
+// shorten it.
 var killWatchdogFloor = 15 * time.Minute
 
 // killWatchdogDelayFor bounds a legitimate teardown of a session with this many
-// tabs, plus the same ~25% headroom the old flat 15 minutes gave the 9-tab sum
-// (727s → 900s). Firing late costs a later log; firing early costs the signal.
+// tabs, plus the same ~25% headroom the old flat 15 minutes gave the 9-tab sum it
+// was sized for (727s → 900s, at the 43s per-tab term of the time). Firing late costs a later log; firing early costs the signal.
 func killWatchdogDelayFor(tabs int) time.Duration {
 	if tabs < 1 {
 		tabs = 1 // a session always has its agent tab, even if the roster is unread

@@ -72,7 +72,7 @@ func TestKillWatchdogTabCount_SurvivesAGhostInstance(t *testing.T) {
 		// A post-#953 record stores the agent's tmux name in BOTH data.TmuxName and
 		// data.Tabs[0].TmuxName. ghostTmuxNames deduplicates them, so the budget must
 		// not count the agent twice — nine real sessions budgeted as ten postpones
-		// the wedge diagnostics by ~54s.
+		// the wedge diagnostics by ~95s.
 		data.TmuxName = "af_x"
 		require.Equal(t, 3, killWatchdogTabCount(nil, data),
 			"the agent's name appears twice in the record but is ONE tmux session")
@@ -90,7 +90,7 @@ func TestKillWatchdogDelayFor_FloorsAtTheOldValueAndGrowsBeyondIt(t *testing.T) 
 	require.Equal(t, killWatchdogFloor, killWatchdogDelayFor(0))
 	// GreaterOrEqual, not Equal: the property that matters is that no session which
 	// was legal under the old cap gets a SHORTER watchdog than before. Nine tabs
-	// compute to 908s, which clears the 900s floor on its own — asserting equality
+	// compute to 1280s, which clears the 900s floor on its own — asserting equality
 	// pinned an arithmetic coincidence rather than the guarantee, and it failed.
 	require.GreaterOrEqual(t, killWatchdogDelayFor(9), killWatchdogFloor,
 		"a session legal under the old cap must never wait less than it used to")

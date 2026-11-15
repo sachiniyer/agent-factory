@@ -332,6 +332,18 @@ func TestClose_HasSessionProbeFastFailure_ReportsUnknown(t *testing.T) {
 // tree of a session whose teardown officially never took effect (#4731). The
 // strict probe routes the fast failure to the !ok arm, which nil's `leaked`, so
 // the reaper never touches the survivor.
+//
+// Two properties of the fixture are load-bearing (#7321):
+//
+//   - The child's exit is observed through a WAIT. A killed child nobody has
+//     waited on is a zombie, and a zombie still answers signal 0, so a signal-0
+//     liveness check passes against the very reap it is there to catch.
+//   - The child leads its OWN kernel session. This test binary is named
+//     tmux.test, so its direct children pass the capture's "child of a tmux
+//     server" check, and the capture then adds every member of the root's
+//     kernel session. Without Setsid that session is the one `go test` runs in,
+//     and a regression has the reaper TERM/KILL the test runner and the shell
+//     that launched it instead of failing this assertion.
 func TestClose_HasSessionProbeFastFailure_DoesNotReapCapturedPaneProcess(t *testing.T) {
 	shrinkReapWaits(t)
 
@@ -340,12 +352,16 @@ func TestClose_HasSessionProbeFastFailure_DoesNotReapCapturedPaneProcess(t *test
 	// pre-teardown capture puts it in `leaked`; kill-session and the post-kill
 	// has-session probe both fail fast with EAGAIN, so the session is untouched.
 	child := exec.Command("sleep", "300")
+	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := child.Start(); err != nil {
 		t.Fatalf("start live pane stand-in: %v", err)
 	}
+	// The only wait on the child, so its result is the one place an exit shows up.
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
 	t.Cleanup(func() {
 		_ = child.Process.Kill()
-		_, _ = child.Process.Wait()
+		<-exited
 	})
 
 	probeErr := &fs.PathError{Op: "fork/exec", Path: "/usr/bin/tmux", Err: syscall.EAGAIN}
@@ -373,6 +389,25 @@ func TestClose_HasSessionProbeFastFailure_DoesNotReapCapturedPaneProcess(t *test
 			return []byte(""), nil
 		},
 	}
+
+	// Not vacuous: the capture Close is about to run must actually admit the
+	// child. If it did not, `leaked` would be empty and no reaper could ever
+	// start, whatever the probe arm did with it.
+	captured, err := CaptureSessionProcessTrees(cmdExec, "af_fast_probe_reap")
+	if err != nil {
+		t.Fatalf("the pre-teardown capture must succeed for this fixture: %v", err)
+	}
+	admitted := false
+	for _, p := range captured {
+		if p.PID == child.Process.Pid {
+			admitted = true
+		}
+	}
+	if !admitted {
+		t.Fatalf("the pre-teardown capture did not admit the stand-in pane process %d (captured %v): "+
+			"the reap assertion below would pass without testing anything", child.Process.Pid, captured)
+	}
+
 	session := newTmuxSession("af_fast_probe_reap", "sh", NewMockPtyFactory(t), cmdExec)
 	state, err := session.Close()
 	if state != PaneStateUnknown {
@@ -382,13 +417,19 @@ func TestClose_HasSessionProbeFastFailure_DoesNotReapCapturedPaneProcess(t *test
 		t.Fatalf("error = nil, want the kill failure surfaced")
 	}
 
-	// The async on-request reaper (Close is the interactive path) gets at most
-	// reapGraceWait + reapTermWait + a final tick to finish; wait past it.
-	time.Sleep(3 * reapGraceWait)
-	if err := child.Process.Signal(syscall.Signal(0)); err != nil {
-		t.Fatalf("the live captured pane process was reaped by a teardown that never took effect: a "+
-			"close that could not tell whether the session was gone must not signal its captured pane "+
-			"tree (#4731): %v", err)
+	// The async on-request reaper (Close is the interactive path) TERMs the
+	// captured tree after reapGraceWait and is finished within reapGraceWait +
+	// reapTermWait + one final second. `sleep` dies on the TERM, so a reap shows
+	// up as the wait returning inside that window; outliving it is the pass.
+	window := reapTestSlack*(reapGraceWait+reapTermWait) + time.Second
+	select {
+	case waitErr := <-exited:
+		// Hand the result back so the cleanup's receive does not block.
+		exited <- waitErr
+		t.Fatalf("the live captured pane process was reaped by a teardown that never took effect "+
+			"(wait returned: %v): a close that could not tell whether the session was gone must not "+
+			"signal its captured pane tree (#4731)", waitErr)
+	case <-time.After(window):
 	}
 }
 
