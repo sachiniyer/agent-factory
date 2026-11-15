@@ -175,3 +175,36 @@ func TestCheckAndHandleTrustPrompt_FullMCPCModalStillFiresEnterBesideScrolledHol
 	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
 		"the full modal keeps the historical Enter tap; the scrolled-off hold must not widen past it")
 }
+
+// TestClaudeMCPTrustPaintingOf pins the mid-paint predicate directly (#7330):
+// rows that spell the modal's words from the first, in order, down to the last
+// content in the pane.
+func TestClaudeMCPTrustPaintingOf(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"the first row of a wrapped preamble", "New MCP server", true},
+		{"cut inside the wrapped question", "New MCP server found.\nDo you trust this new MCP", true},
+		{"both options, no footer", "New MCP server\nfound. Do you\ntrust this new MCP\nserver?\n❯ 1. Yes\n  2. No", true},
+		{"the footer's first row", "New MCP server\nfound. Do you\ntrust this new MCP\nserver?\n❯ 1. Yes\n  2. No\nEnter to", true},
+		{"the whole modal, wrapped", "New MCP server\nfound. Do you\ntrust this new MCP\nserver?\n❯ 1. Yes\n  2. No\nEnter to\nconfirm", true},
+		{"the cursor on an ordinal a narrow pane left alone", "New MCP\nserver\nfound.\nDo you\ntrust\nthis\nnew MCP\nserver?\n❯ 1.", true},
+		{"output above", "Welcome\n\nNew MCP server\nfound. Do you", true},
+		{"upper case", "NEW MCP SERVER\nFOUND. DO YOU", true},
+
+		{"a blank pane", "\n\n", false},
+		{"words after the footer", "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes\n  2. No\nEnter to confirm · Esc", false},
+		{"a ❯ row before the options", "❯ New MCP server\n  found. Do you", false},
+		{"a bare ❯ after the question", "New MCP server\nfound. Do you\ntrust this new MCP\nserver?\n❯ ", false},
+		{"an ordinal before the options", "New MCP server\n1.", false},
+		{"a word out of order", "New MCP server\nfound. Do they", false},
+		{"not from the first word", "server found. Do you", false},
+		{"other rows below", "New MCP server\nfound. Do you\n? for shortcuts", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, claudeMCPTrustPaintingOf(visibleTextOf(tt.content)), "\n%s", tt.content)
+		})
+	}
+}

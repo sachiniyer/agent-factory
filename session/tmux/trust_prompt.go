@@ -119,6 +119,12 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			t.refuseClaudeMCPTrustTail(tail)
 			return true
 		}
+		// The same modal while Claude Code is still painting it, on a pane
+		// narrow enough to wrap its preamble or question (#7330). Asked last
+		// too: it only turns a clear pane into a hold.
+		if claudeMCPTrustPaintingOf(screen) {
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//

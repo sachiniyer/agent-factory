@@ -106,6 +106,13 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		// content (#7280, item 2).
 		{"the question scrolled off the top", "  your own code, a well-known open source project.\n\n  Claude Code'll be able to read files here.\n\n" + options + footer, claudeFolderTrustUnreadable},
 		{"the question scrolled off, the box closed above the footer", "│ your own code. │\n│ │\n│ ❯ 1. No, exit │\n│   2. Yes, I trust this folder │\n│ │\n╰──────────╯\n   Enter to confirm · Esc to exit\n", claudeFolderTrustUnreadable},
+		// #7330: a pane too short to show the affirmative row. The footer
+		// under nothing but the dialog's own option rows is the dialog, as
+		// far as the pane shows, with one option row as with two.
+		{"only the exit row above the footer", "❯ 2. No, exit\n" + footer, claudeFolderTrustUnreadable},
+		{"only the exit row above the footer, no cursor", "  No, exit\n" + footer, claudeFolderTrustUnreadable},
+		{"the exit row above the footer, under other text", "  some text\n\n  No, exit\n" + footer, claudeFolderTrustNone},
+		{"the exit row above the footer, the composer below", "  No, exit\n" + footer + composer, claudeFolderTrustNone},
 		{"only the options and the footer on screen", options + footer, claudeFolderTrustUnreadable},
 		// Unreadable too: a pane too short to show any option row whole, so
 		// that only the footer is left, whole or wrapped, with at most blank
