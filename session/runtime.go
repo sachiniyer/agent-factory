@@ -170,6 +170,19 @@ type ProvisionSpec struct {
 	// never from a repository's own config. Empty with a non-empty Account means
 	// the target is not licensed and the provision refuses rather than send.
 	AccountSyncHost string
+	// AccountHost is the listed host name Account was licensed for, by the ONE
+	// licence read its caller made (accountCarriedHost, #7304). The caller also
+	// puts it in Host, so the ssh runtime looks that host up by name instead of
+	// choosing one from default_host and the repo's [ssh] section a second time;
+	// and the runtime refuses, before anything is synced or created, unless the
+	// host it resolved is this one (sshAccountHostError). Without it the licence
+	// and the provision are two reads of a config that can change between them:
+	// both can say "listed" while naming different machines, and the credentials
+	// then go to one host while the durable row records another.
+	//
+	// Required with a non-empty Account on the ssh kind; empty otherwise (docker
+	// carries an account by mount and has no host).
+	AccountHost string
 	// AgentConfigFiles is the operator's sandbox_agent_config selection (#5571
 	// W7.7), as "<agent>:<file>" entries, copied from the global config by the ssh
 	// runtime. It is placed only where AccountSyncHost licenses a sync.

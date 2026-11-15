@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // One --account create resolves its target host and its licence exactly once
@@ -89,7 +91,140 @@ func TestRecordedHostIsTheHostProvisionWasGiven(t *testing.T) {
 	assert.Equal(t, "box1", inst.Host, "the row pins the licensed host")
 	assert.Equal(t, inst.Host, f.spec.Host,
 		"Provision is handed the host the row records, not an empty pick it would re-resolve from a config that has since changed")
+	assert.Equal(t, inst.Host, f.spec.AccountHost,
+		"and is told to hold itself to that host")
 	assert.Equal(t, f.accountDir, f.spec.Account.Dir, "under the account the row records")
+}
+
+// An explicit --host pick is threaded the same way: the pick, the licensed host
+// and the recorded host are one name.
+func TestExplicitHostPickIsTheLicensedHostProvisionIsHeldTo(t *testing.T) {
+	hosts := twoListedHosts(t.TempDir())
+	f := newListedFixture(t, hosts)
+	saveDefaultHost(t, hosts, "box2")
+
+	*f.spec = ProvisionSpec{}
+	inst, err := f.create(t, InstanceOptions{Account: "work", Host: "box1"})
+	require.NoError(t, err)
+	assert.Equal(t, "box1", inst.Host)
+	assert.Equal(t, "box1", f.spec.Host)
+	assert.Equal(t, "box1", f.spec.AccountHost)
+}
+
+// The licensed host can be gone by the time Provision runs. The create fails,
+// naming the host the account was licensed for, rather than falling through to
+// another target.
+func TestAccountCreateFailsWhenTheLicensedHostIsRemovedBeforeProvision(t *testing.T) {
+	hosts := twoListedHosts(t.TempDir())
+	f := newListedFixture(t, hosts)
+	saveDefaultHost(t, hosts, "box1")
+	writeInRepoConfig(t, f.repo, map[string]any{"backend": "ssh"})
+	t.Cleanup(SetRuntimeForTest(BackendSSH, func() Runtime { return sshRuntime{} }))
+	onlyBox2 := map[string]config.HostConfig{"box2": hosts["box2"]}
+	flipDefaultHostBeforeProvision(t, onlyBox2, "box2")
+
+	_, err := f.create(t, InstanceOptions{Account: "work"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `licensed for host "box1"`)
+	assert.Contains(t, err.Error(), "retry the create")
+	assert.NotContains(t, err.Error(), "box2-key", "the runtime never got as far as preparing to reach box2")
+}
+
+// The runtime holds itself to the licensed host even when its caller did not
+// thread the pick: whatever it resolves must be the host the account was
+// licensed for. Each refusal lands before the identity-file check, which is the
+// first thing Provision does with a chosen host — so nothing has been contacted,
+// synced or created.
+func TestSSHProvisionRefusesAnAccountOnAnyHostButTheLicensedOne(t *testing.T) {
+	hosts := twoListedHosts(t.TempDir())
+	f := newListedFixture(t, hosts)
+	saveDefaultHost(t, hosts, "box2")
+	spec := func(host, licensed string) ProvisionSpec {
+		return ProvisionSpec{
+			RepoRoot: f.repo, Title: "t", Program: tmux.ProgramClaude, Host: host, AccountHost: licensed,
+			CloneURL: "https://example.invalid/fixture.git",
+			Account:  sessionenv.Account{Agent: tmux.ProgramClaude, Name: "work", Dir: f.accountDir},
+		}
+	}
+	refused := func(t *testing.T, s ProvisionSpec) string {
+		t.Helper()
+		_, err := sshRuntime{}.Provision(s)
+		require.Error(t, err)
+		msg := err.Error()
+		assert.Contains(t, msg, `"work"`, "names the account")
+		assert.Contains(t, msg, "retry the create", "says what to do")
+		assert.Contains(t, msg, "No credentials were sent and no workspace was created")
+		assert.NotContains(t, msg, "-key", "refused before the chosen host's settings were used")
+		return msg
+	}
+
+	t.Run("another listed host", func(t *testing.T) {
+		// An empty pick re-resolved through default_host, now box2.
+		msg := refused(t, spec("", "box1"))
+		assert.Contains(t, msg, `licensed for host "box1"`)
+		assert.Contains(t, msg, `resolved host "box2"`, "names both hosts")
+	})
+	t.Run("an explicit pick of another listed host", func(t *testing.T) {
+		msg := refused(t, spec("box2", "box1"))
+		assert.Contains(t, msg, `licensed for host "box1"`)
+		assert.Contains(t, msg, `resolved host "box2"`)
+	})
+	t.Run("the repository's own ssh target", func(t *testing.T) {
+		writeInRepoConfig(t, f.repo, map[string]any{"backend": "ssh", "ssh": map[string]any{"host": "repo-chosen.example"}})
+		t.Cleanup(func() { writeInRepoConfig(t, f.repo, map[string]any{"backend": "ssh"}) })
+		msg := refused(t, spec("", "box1"))
+		assert.Contains(t, msg, `licensed for host "box1"`)
+		assert.Contains(t, msg, "the repository's own [ssh] target")
+	})
+	t.Run("no licensed host at all", func(t *testing.T) {
+		msg := refused(t, spec("box1", ""))
+		assert.Contains(t, msg, "without the host it was licensed for")
+	})
+
+	// Control: the licensed host itself passes the check and reaches the
+	// identity-file refusal, which is past it.
+	_, err := sshRuntime{}.Provision(spec("box1", "box1"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "box1-key")
+	assert.NotContains(t, err.Error(), "licensed for")
+
+	// And a spec with no account is never held to anything.
+	_, err = sshRuntime{}.Provision(ProvisionSpec{
+		RepoRoot: f.repo, Title: "t", Program: tmux.ProgramClaude,
+		CloneURL: "https://example.invalid/fixture.git",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "box2-key", "an accountless provision follows default_host")
+}
+
+// The factory hands a LOCAL create's host pick through untouched and names no
+// licensed host: the in-target shim resolves the account, and nothing here
+// places it.
+func TestFactoryLeavesALocalCreatesHostPickAlone(t *testing.T) {
+	f := newListedFixture(t, oneListedHost)
+	spec := &ProvisionSpec{}
+	t.Cleanup(SetRuntimeForTest(BackendLocal, func() Runtime { return capturingRuntime{got: spec} }))
+	_, err := defaultBackendFactoryForKind(InstanceOptions{
+		Title: "local-acct", Path: f.repo, Program: tmux.ProgramClaude, Account: "work",
+	}, f.repo, BackendLocal)
+	require.NoError(t, err)
+	assert.Empty(t, spec.Host)
+	assert.Empty(t, spec.AccountHost)
+	assert.Empty(t, spec.Account.Dir)
+}
+
+// An ssh account that reaches the factory carried but with no licensed host
+// cannot have come from the gate; the factory refuses rather than let the
+// runtime pick a host for it.
+func TestFactoryRefusesACarriedSSHAccountWithNoLicensedHost(t *testing.T) {
+	f := newListedFixture(t, oneListedHost)
+	*f.spec = ProvisionSpec{}
+	_, err := defaultBackendFactoryForKind(InstanceOptions{
+		Title: "no-host", Path: f.repo, Program: tmux.ProgramClaude, Account: "work", AccountCarried: true,
+	}, f.repo, BackendSSH)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "named no host")
+	assert.Empty(t, f.spec.Account.Dir, "the runtime was never called")
 }
 
 // A create WITHOUT --account is unchanged: an empty pick stays empty all the way

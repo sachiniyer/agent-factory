@@ -114,6 +114,48 @@ func SetSSHSelfBinaryForTest(path string) func() {
 	return func() { sshSelfBinary = prev }
 }
 
+// sshAccountHostError refuses an account-bearing provision whose resolved host
+// is not the host the account was licensed for (ProvisionSpec.AccountHost). It
+// takes chooseListedHost's own answer — the name, the entry, the error — so it
+// judges the host this provision is about to use, not a third reading of it.
+//
+// The licence is read once, by the caller, and names a host. This runtime reads
+// the config again to get that host's connection settings, and the config can
+// have changed in between: default_host can point at another listed host, the
+// licensed host can have been removed, or the repository can have gained an
+// [ssh] section. "Is the target listed?" cannot see the first of those — both
+// hosts are listed — so the question asked here is "is it the SAME host?".
+// Anything else is refused with both names and nothing done, rather than
+// syncing an account to a machine the durable row does not record.
+//
+// An adoption is exempt: it reaches the host through the transport the archived
+// row recorded, whatever the host list says now, and its account is licensed by
+// the row's own durable AccountSyncHost.
+func sshAccountHostError(spec ProvisionSpec, hostName string, listed *config.HostConfig, chooseErr error) error {
+	if spec.Account.Dir == "" || spec.Adopt != nil {
+		return nil
+	}
+	licensed := spec.AccountHost
+	const untouched = "No credentials were sent and no workspace was created"
+	if licensed == "" {
+		return fmt.Errorf("backend=ssh: account %q reached provisioning without the host it was licensed for, so af cannot tell where its credentials may go. %s; retry the create",
+			spec.Account.Name, untouched)
+	}
+	if chooseErr != nil {
+		return fmt.Errorf("backend=ssh: account %q was licensed for host %q, but that host cannot be used any more: %w. The config changed while the session was being created. %s; fix the host list and retry the create",
+			spec.Account.Name, licensed, chooseErr, untouched)
+	}
+	if listed != nil && hostName == licensed {
+		return nil
+	}
+	resolved := "the repository's own [ssh] target, which is not in the global host list"
+	if listed != nil {
+		resolved = fmt.Sprintf("host %q", hostName)
+	}
+	return fmt.Errorf("backend=ssh: account %q was licensed for host %q, but provisioning resolved %s. The config changed while the session was being created. %s; retry the create",
+		spec.Account.Name, licensed, resolved, untouched)
+}
+
 // sshRuntime provisions a real remote-machine sandbox (#1592 Phase 4 PR5).
 // Declared in runtime.go's registry; its Provision is here (the runtime.go stub is
 // replaced by this).
@@ -127,6 +169,12 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// A listed host (W6.3) replaces the repo's [ssh] section as the source of the
 	// connection settings; resolved BEFORE any remote state exists.
 	hostName, listed, err := chooseListedHost(spec.Host, cfg)
+	// An account goes to the host it was licensed for, or nowhere (#7304) —
+	// checked here, before the host is contacted, so a refusal has synced no
+	// credential and made no workspace.
+	if aerr := sshAccountHostError(spec, hostName, listed, err); aerr != nil {
+		return ProvisionResult{}, aerr
+	}
 	if err != nil {
 		// An adoption reaches the host through the transport the row recorded, so a
 		// host list that has since changed does not decide where it goes (and

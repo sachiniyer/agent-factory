@@ -88,6 +88,21 @@ type InstanceOptions struct {
 	// listed host). Test factories injected through SetBackendFactoryForTest /
 	// SetProvisionResultFactoryForTest receive it but may ignore it.
 	AccountCarried bool
+	// AccountHost is the listed host name that same ONE read resolved, threaded
+	// with AccountCarried so the provision lands on the host the licence was read
+	// for (#7304). The factory hands it to the runtime as both the host to
+	// provision on and the host to hold itself to (ProvisionSpec.AccountHost), and
+	// NewInstance records it — so the gate, the sync, the provision and the row
+	// name one host. Carrying only the boolean left the HOST to be chosen again by
+	// the ssh runtime: a default_host that moved from one listed host to another
+	// in between kept the licence true while the credentials and the workspace
+	// went to the second host and the row recorded the first.
+	//
+	// Set only by NewInstance. Non-empty exactly when the account is carried by a
+	// listed host (ssh); empty for docker (a mount, no host), for a local create
+	// and for a create that names no account, whose host pick reaches the runtime
+	// as made.
+	AccountHost string
 	// ProgramResolved marks Program as the final command selected by an outer
 	// runtime. It is internal to the sandbox agent-server handoff; ordinary
 	// callers pass an agent enum and leave this false.
@@ -295,6 +310,19 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 				return ProvisionResult{}, aerr
 			}
 			spec.Account = account
+			// The HOST is part of the licence, not just the yes/no (#7304): hand
+			// the runtime the host the gate resolved, as an explicit pick, so it
+			// provisions there rather than choosing again from a config that may
+			// have changed since. An ssh account with no licensed host cannot
+			// have come from the gate; refuse it for the same reason as above.
+			if kind == BackendSSH {
+				if opts.AccountHost == "" {
+					return ProvisionResult{}, fmt.Errorf(
+						"account %q cannot be provisioned on the %s backend: the listed-host licence named no host to send it to",
+						opts.Account, kind)
+				}
+			}
+			pinAccountHost(&spec, kind, opts.AccountHost)
 		}
 	}
 	cred := mintForProvision(&spec, kind, opts.SandboxCredentials)
@@ -738,6 +766,9 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	// for a local create AccountCarried stays false and the factory leaves
 	// spec.Account zero, the same as before.
 	opts.AccountCarried = accountLicenceCarried
+	// And the HOST that decision was made for, so the provision lands on it
+	// rather than on whatever the runtime would resolve from the config now.
+	opts.AccountHost = accountLicenceHost
 
 	// Give the factory the id the instance will carry so anything it derives
 	// per-session during provisioning — the setup hook's staging dir names

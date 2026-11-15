@@ -57,8 +57,11 @@ func accountCarried(kind BackendKind, repoRoot, pick string) (bool, error) {
 // change lands between two independent reads of the global and in-repo config.
 //
 // The host name is empty for a kind that carries by some other means (docker's
-// mount), for a kind that does not carry (local, sandbox, hook, or ssh on an
-// unlisted target), and for an explicit --host pick the record stores verbatim.
+// mount) and for a kind that does not carry (local, sandbox, hook, or ssh on an
+// unlisted target). For ssh on a listed host it is always that host's name,
+// whether it was picked with --host or reached through default_host: the same
+// name is handed to the provision (ProvisionSpec.AccountHost), which refuses to
+// land anywhere else (#7304).
 // A non-nil error means the licence could not be determined because the repo's
 // project config could not be resolved (#7078) — the same condition
 // accountCarried surfaces, so the gate can distinguish "undeterminable" from
@@ -68,6 +71,20 @@ func accountCarriedHost(kind BackendKind, repoRoot, pick string) (host string, c
 		return "", true, nil
 	}
 	return listedAccountHost(kind, repoRoot, pick)
+}
+
+// pinAccountHost holds an account-bearing ssh provision to the host its account
+// was licensed for (#7304): the runtime is handed that host as an explicit pick,
+// so it looks the host up by name instead of choosing one again, and as
+// AccountHost, which it refuses to deviate from (sshAccountHostError). Create and
+// re-provision both call it with the host their ONE licence read resolved — for a
+// re-provision that is the row's pinned host, or, for a row that recorded none,
+// the host that read resolved. Other kinds have no host to pin.
+func pinAccountHost(spec *ProvisionSpec, kind BackendKind, licensedHost string) {
+	if kind != BackendSSH {
+		return
+	}
+	spec.Host, spec.AccountHost = licensedHost, licensedHost
 }
 
 // listedHostAccountReason is WHY an account is not sent to an unlisted target, stated
