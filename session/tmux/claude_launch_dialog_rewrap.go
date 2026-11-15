@@ -302,6 +302,14 @@ const claudeLegacyTrustPaintedMin = len("Doyou")
 // other, or a plain rule, is a composer, and the question is output being
 // quoted. A question on one row is left to claudeLegacyTrustDialogOf, which
 // reads it whole.
+//
+// Rows that are the later rows of a composer's draft are the composer's, not
+// the dialog's (claudeMCPTrustDraftRow, #7350).
+//
+// "Do you" alone holds, two common words though they are: on a narrow pane
+// they are the whole of the question's first row, and af does not know the
+// width Claude Code wraps this dialog at. It is narrower than the pane by a
+// margin no capture of this dialog records (#7351 review).
 func claudeLaunchDialogPainting(pane claudeLaunchDialogPane) (claudeLaunchDialogMatch, bool) {
 	question := claudeLegacyTrustQuestionSquashed
 	match := claudeLaunchDialogMatch{kind: claudeLaunchDialogLegacy}
@@ -315,6 +323,11 @@ func claudeLaunchDialogPainting(pane claudeLaunchDialogPane) (claudeLaunchDialog
 			// The question is still being painted.
 			if len(text) >= claudeLegacyTrustPaintedMin && strings.HasPrefix(question, text) &&
 				!claudeLaunchDialogAnySelected(pane, first, len(pane.starts)) {
+				if claudeMCPTrustDraftRow(pane.lines, pane.rows, pane.index[first], pane.index[len(pane.index)-1]) {
+					// The later rows of a composer's draft: the composer
+					// explains them (#7344, #7350).
+					continue
+				}
 				match.saw = "the start of its question, with nothing painted below it yet"
 				if strings.HasPrefix(claudeMCPTrustQuestionSquashed, text) {
 					match.kind = claudeLaunchDialogEither
@@ -335,7 +348,8 @@ func claudeLaunchDialogPainting(pane claudeLaunchDialogPane) (claudeLaunchDialog
 			// The question ends inside a row, or sits on one row.
 			continue
 		}
-		if claudeLaunchDialogComposerBelow(pane, below) {
+		if claudeLaunchDialogComposerBelow(pane, below) ||
+			claudeMCPTrustDraftRow(pane.lines, pane.rows, pane.index[first], pane.index[len(pane.index)-1]) {
 			continue
 		}
 		match.saw = "its question wrapped onto several rows"
