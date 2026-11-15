@@ -35,15 +35,16 @@ drive_registry_hooks_read_only() {
     af_send Escape
     af_send e
 
-    # The overlay must open: its title renders.
+    # The overlay must open: its title renders. Wait for that frame rather than
+    # capturing straight after the keys — on a loaded testbox the capture can
+    # still hold the frame from before they were processed (#7324).
     local screen
-    screen="$(af_capture)"
-    if ! printf '%s\n' "$screen" | grep -q 'Post-worktree hooks'; then
-        _af_fail "registry mode: hooks overlay did not open (no 'Post-worktree hooks' title):"
-        printf '%s\n' "$screen" >&2
+    if ! af_wait_for 'Post-worktree hooks'; then
+        _af_fail "registry mode: hooks overlay did not open (no 'Post-worktree hooks' title)"
         rm -rf "$nonrepo"
         return 1
     fi
+    screen="$(af_capture)"
 
     # The read-only reason must render and the editable-pane invitation must NOT.
     if ! printf '%s\n' "$screen" | grep -q 'Hooks belong to a project'; then
@@ -75,7 +76,10 @@ drive_registry_hooks_read_only() {
 
     # Pressing `n` must NOT open an add field (the pane is read-only). Capture
     # after the key and assert no `enter save` footer appears (the add form's
-    # footer) and the reason is still shown.
+    # footer) and the reason is still shown. This one asserts an ABSENCE on a
+    # frame the key must not change, so there is no frame to wait for: a short
+    # settle is all that can be done, and a late capture can only miss a
+    # regression, never report a false one.
     af_send n
     sleep 0.5
     screen="$(af_capture)"
@@ -95,8 +99,13 @@ drive_registry_hooks_read_only() {
 
     # Esc closes the overlay; NO 'failed to save hooks' / 'repo root is required'
     # error must appear (the whole failed-save cycle is what this fix prevents).
+    # Wait for the frame with the overlay gone before reading it (#7324).
     af_send Escape
-    sleep 0.5
+    if ! af_wait_gone 'Post-worktree hooks'; then
+        _af_fail "registry mode: Esc did not close the hooks overlay"
+        rm -rf "$nonrepo"
+        return 1
+    fi
     screen="$(af_capture)"
     if printf '%s\n' "$screen" | grep -qiE 'failed to save hooks|repo root is required to save in-repo config'; then
         _af_fail "registry mode: closing the read-only hooks overlay surfaced a save error:"
@@ -105,12 +114,6 @@ drive_registry_hooks_read_only() {
         return 1
     fi
     _af_log "assert OK: closing the read-only hooks overlay raised no save error"
-    if printf '%s\n' "$screen" | grep -q 'Post-worktree hooks'; then
-        _af_fail "registry mode: Esc did not close the hooks overlay:"
-        printf '%s\n' "$screen" >&2
-        rm -rf "$nonrepo"
-        return 1
-    fi
 
     rm -rf "$nonrepo"
     echo "PASS: registry-mode hooks overlay is read-only (no unsaveable edits, no failed-save cycle)"
