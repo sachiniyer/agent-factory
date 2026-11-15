@@ -132,7 +132,8 @@ func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 	}
 	first, last, ok := claudeFolderTrustQuestionRows(rows)
 	if !ok {
-		if claudeFolderTrustHeadless(lines, rows) || claudeFolderTrustFooterOnly(lines, rows) {
+		if claudeFolderTrustHeadless(lines, rows) || claudeFolderTrustFooterOnly(lines, rows) ||
+			claudeFolderTrustTail(lines, rows) {
 			return claudeFolderTrustUnreadable
 		}
 		return claudeFolderTrustNone
@@ -518,7 +519,9 @@ func claudeFolderTrustHeadless(lines []string, rows []claudeTrustRow) bool {
 	affirmative, own := false, true
 	for j := from; j <= i; j++ {
 		label := rows[j].label
-		affirmative = affirmative || label == claudeTrustAffirmativeLabel ||
+		// The legacy dialog's affirmative row counts as the reworded one's
+		// does (#7338): its option block over its footer is the same frame.
+		affirmative = affirmative || label == claudeTrustAffirmativeLabel || label == claudeLegacyTrustProceedLabel ||
 			(len(label) >= claudeFolderTrustMinLabelStart && strings.HasPrefix(claudeTrustAffirmativeLabel, label))
 		own = own && claudeFolderTrustOptionLabel(label)
 	}
