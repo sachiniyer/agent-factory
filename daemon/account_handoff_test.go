@@ -641,29 +641,27 @@ func stashReportReadyRecipient(t *testing.T, manager *Manager, repoID, repoPath 
 	return inst, rec
 }
 
-// #6818 follow-up: a digest send the runtime explicitly reports as not
-// delivered — nil transport error, a non-PromptDelivered status — must NOT
-// retire the recipient's backlog. Only a proven delivery (PromptDelivered)
-// concludes one, the convention handoffDeliveryResultError and
-// swap_notice_confirm.go keep; the pre-fix code returned reportSent for every
-// nil-error send, so the worker's flush permanently deleted rows the runtime
-// said did not land (PromptNotDelivered, sent-unverified, could-not-confirm
-// alike). Each non-delivered verdict now reports reportHeld so the existing
-// backoff/warn-once machinery retains the backlog for the next flush.
-func TestDeliverHandoffReportHoldsOnNonDeliveredStatus(t *testing.T) {
+// #7309 and the #7318 review: deliverHandoffReport's outcome for each
+// nil-error status that is not a proven delivery. The pre-#7309 code returned
+// reportSent for all of them, so the flush deleted rows the runtime said did
+// not land. Only not-delivered proves that, and only it holds; the ambiguous
+// two report reportUnconfirmed, which retires the rows without a second
+// submission (TestHandoffReportFlushNeverResubmitsAnAmbiguousDigest counts
+// the sends).
+func TestDeliverHandoffReportOutcomeByNonDeliveredStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status session.PromptDeliveryStatus
+		want   reportSendOutcome
 	}{
-		{"not-delivered", session.PromptNotDelivered},
-		{"sent-unverified", session.PromptSentUnverified},
-		{"could-not-confirm", session.PromptCouldNotConfirm},
+		{"not-delivered", session.PromptNotDelivered, reportHeld},
+		{"sent-unverified", session.PromptSentUnverified, reportUnconfirmed},
+		{"could-not-confirm", session.PromptCouldNotConfirm, reportUnconfirmed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			manager, inst, rec := reportReadyRecipientHands(t, tc.status)
 			got := manager.deliverHandoffReport("observer", inst.ID, "[af handoff] kind=wall")
-			require.Equal(t, reportHeld, got,
-				"non-delivered status %s must hold the backlog — only PromptDelivered retires it", tc.status)
+			require.Equal(t, tc.want, got, "status %s", tc.status)
 			require.Len(t, rec.snapshot(), 1,
 				"the digest send must still have been attempted past the guard")
 		})
