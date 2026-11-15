@@ -759,6 +759,129 @@ func TestDecideIdleMoves(t *testing.T) {
 	})
 }
 
+// TestDecideIdleComfortRequiresCompleteReading pins the contract that an
+// idle-hot proactive move lands only on a target whose reading is provably
+// comfortable — every window under prefer_below_percent. An
+// observed-but-incomplete reading (a silent slot) cannot prove comfort: the
+// silent window may already be at/above the wall, so it must not count as a
+// comfortable target (mirrors readingBelowAllFresh; #6815 review).
+func TestDecideIdleComfortRequiresCompleteReading(t *testing.T) {
+	idleFacts := func() Facts {
+		f := wallConfirmedFacts()
+		f.Session.Parked = false
+		f.Session.WallBanner = false
+		f.Session.LimitAccount = ""
+		f.Session.WallObservedAt = time.Time{}
+		f.Session.Reading = observedReading(96, future()) // ≥ move_idle 95
+		return f
+	}
+
+	t.Run("partial readings below prefer are not comfortable", func(t *testing.T) {
+		// Every non-current account carries a primary-only reading at 10%
+		// (Complete=false); the silent secondary slot may be at/above the
+		// wall, so none can prove comfort.
+		f := idleFacts()
+		for i := range f.Accounts {
+			if f.Accounts[i].Name != "work" {
+				f.Accounts[i].Reading = partialReading(10, future())
+			}
+		}
+		d := Decide(f)
+		wantDecision(t, d, KindDefer, reasonIdleNoComfortable)
+		wantEvent(t, d, EventIgnored, reasonIdleNoComfortable)
+		wantNoEvent(t, d, EventMove)
+	})
+
+	t.Run("complete readings below prefer remain comfortable", func(t *testing.T) {
+		// backup (40%) and spare (30%) are complete and below prefer 85;
+		// the proactive move fires as before the guard.
+		f := idleFacts()
+		d := Decide(f)
+		wantDecision(t, d, KindMove, reasonTriggerIdle)
+		wantEvent(t, d, EventMove, reasonTriggerIdle)
+	})
+
+	t.Run("complete comfortable candidate beats an incomplete lower-percent one", func(t *testing.T) {
+		// backup is incomplete at a "better" 10%; spare is complete at 20%.
+		// The comfort gate must admit only spare — the unverifiable 10%
+		// over the silent slot cannot outrank a provably-comfortable target.
+		f := idleFacts()
+		f.Accounts[1].Reading = partialReading(10, future())  // backup, incomplete
+		f.Accounts[2].Reading = observedReading(20, future()) // spare, complete
+		d := Decide(f)
+		wantDecision(t, d, KindMove, reasonTriggerIdle)
+		if d.To != "spare" {
+			t.Fatalf("move target = %q, want the complete candidate spare", d.To)
+		}
+		wantEvent(t, d, EventMove, reasonTriggerIdle)
+	})
+}
+
+// TestDecideEmptiestDemotesIncompleteReadings pins the orderCandidates fix:
+// under target_order = "emptiest" an observed-but-incomplete reading cannot
+// land in the top (below-prefer) tier — its reported windows cannot speak
+// for the silent slot — so it ranks with no-usable-reading accounts, below
+// every complete below-prefer candidate. Both the idle-hot comfort gate and
+// the walled-session ordering rely on this.
+func TestDecideEmptiestDemotesIncompleteReadings(t *testing.T) {
+	emt := func() Facts {
+		f := wallConfirmedFacts()
+		f.Config.TargetOrder = config.AccountHandoffTargetOrderEmptiest
+		f.Accounts = []AccountFacts{
+			{Name: "work", Registered: true, Reading: observedReading(99, future())},
+			{Name: "backup", Registered: true, Reading: partialReading(10, future())}, // incomplete
+			{Name: "spare", Registered: true, Reading: observedReading(20, future())}, // complete
+		}
+		return f
+	}
+
+	t.Run("idle-hot moves to the complete candidate, not the lower-percent partial", func(t *testing.T) {
+		f := emt()
+		f.Session.Parked = false
+		f.Session.WallBanner = false
+		f.Session.LimitAccount = ""
+		f.Session.WallObservedAt = time.Time{}
+		f.Session.Reading = observedReading(96, future())
+		d := Decide(f)
+		wantDecision(t, d, KindMove, reasonTriggerIdle)
+		if d.To != "spare" {
+			t.Fatalf("idle-hot must move to the complete candidate spare, got %q", d.To)
+		}
+		wantEvent(t, d, EventMove, reasonTriggerIdle)
+	})
+
+	t.Run("walled session under emptiest ranks the complete candidate first", func(t *testing.T) {
+		// The comfort gate does not run for a walled session, so ordering
+		// alone decides. The complete 20% candidate (tier 0) must outrank
+		// the incomplete "10%" candidate, which is demoted out of tier 0.
+		d := Decide(emt())
+		wantDecision(t, d, KindMove, reasonTriggerWall)
+		if d.To != "spare" {
+			t.Fatalf("walled session under emptiest must pick the complete candidate spare, got %q", d.To)
+		}
+	})
+
+	t.Run("walled session still moves when only incomplete candidates exist", func(t *testing.T) {
+		// Demotion must not block movement: with no complete reading the
+		// walled session still moves to an eligible incomplete candidate.
+		f := wallConfirmedFacts()
+		f.Config.TargetOrder = config.AccountHandoffTargetOrderEmptiest
+		f.Accounts = []AccountFacts{
+			{Name: "work", Registered: true, Reading: observedReading(99, future())},
+			{Name: "backup", Registered: true, Reading: partialReading(20, future())},
+			{Name: "spare", Registered: true, Reading: partialReading(20, future())},
+		}
+		d := Decide(f)
+		wantDecision(t, d, KindMove, reasonTriggerWall)
+		// Both incomplete at 20% → demoted to the same tier; reported
+		// percents tie → occupancy ties → listed-order (index) breaks it,
+		// so backup (listed first) wins.
+		if d.To != "backup" {
+			t.Fatalf("walled session must still move to an eligible incomplete candidate: got %q", d.To)
+		}
+	})
+}
+
 func TestDecideCandidateFiltering(t *testing.T) {
 	tests := []struct {
 		name       string
