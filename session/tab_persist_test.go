@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,58 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// tmuxAbsentExitErr returns a genuine *exec.ExitError whose Stderr is tmux's
+// exact "can't find session: <name>" absence diagnostic — the shape the close
+// post-kill probe's strict existence check (probeSessionStrict, via
+// missingTmuxSession / tmuxProvedSessionAbsent) recognizes as positively
+// confirmed absence, rather than the generic success a plain OutputFunc stub
+// would report. The base ExitError is built once (it carries only the
+// process-shape: exit code 1) and cloned per call so concurrent tests never race
+// on the Stderr field.
+//
+// sh is resolved to an ABSOLUTE path at package initialization (before any test
+// rewrites PATH via t.Setenv), so the fixture keeps working in tests that replace
+// PATH: exec.Command skips LookPath for an absolute path.
+var baseTmuxAbsentExitErr = func() *exec.ExitError {
+	var e *exec.ExitError
+	if err := exec.Command(shForSessionTests, "-c", "exit 1").Run(); err != nil {
+		_ = errors.As(err, &e)
+	}
+	if e == nil {
+		// Should not happen on a Posix test host; keep a syntactic fallback so a
+		// missing sh degrades to Unknown rather than panicking on a nil
+		// ProcessState.
+		e = &exec.ExitError{}
+	}
+	return e
+}()
+
+var shForSessionTests = func() string {
+	if p, err := exec.LookPath("sh"); err == nil {
+		return p
+	}
+	return "/bin/sh"
+}()
+
+// tmuxAbsentExitErr returns the absence *exec.ExitError for the named session.
+func tmuxAbsentExitErr(name string) *exec.ExitError {
+	cp := *baseTmuxAbsentExitErr
+	cp.Stderr = []byte("can't find session: " + name)
+	return &cp
+}
+
+// hasSessionTargetName reads the session name a has-session command targeted.
+// probeSessionStrict/has-session uses the bare-name `has-session -t=<name>` form,
+// so the `-t=<name>` arg carries the name verbatim.
+func hasSessionTargetName(args []string) string {
+	for _, a := range args {
+		if name, ok := strings.CutPrefix(a, "-t="); ok {
+			return name
+		}
+	}
+	return ""
+}
 
 // persistPtyFactory is a tmux.PtyFactory returning a real temp file as the PTY,
 // so the attach path in Restore can open and close it without crashing. Like
@@ -106,6 +159,20 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 				if answer, ok := pane.answer(cmd); ok {
 					return []byte(answer), nil
 				}
+			}
+			// has-session is probed through the Output seam by the close
+			// post-kill probe's strict existence check (probeSessionStrict), so
+			// a dead session must answer with tmux's real absence diagnostic
+			// (a genuine *exec.ExitError carrying "can't find session: <name>")
+			// rather than the generic success stub below — otherwise the strict
+			// probe reads a dead session as still alive and the idempotent #967
+			// teardown refuses. A live session answers success (exit 0).
+			if strings.Contains(cmd.String(), "has-session") {
+				n := nameOf(cmd)
+				if existing[n] {
+					return nil, nil
+				}
+				return nil, tmuxAbsentExitErr(n)
 			}
 			// list-panes is asked for `#{pane_pid}` and its answer is PARSED, so a
 			// generic "content" stub is not a neutral default — it reads as a pane

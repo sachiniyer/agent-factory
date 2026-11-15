@@ -119,15 +119,32 @@ func (r *closeRun) output(args ...string) ([]byte, error) {
 	return out, err
 }
 
-// probe asks whether the session still exists. A timed-out probe marks the run
-// unknown via the shared probe helper and reports ok=false, so "could not ask" is
-// never read as "not there".
-func (r *closeRun) probe() (exists bool, ok bool) {
-	exists, known := probeSession(r.t.cmdExec, r.t.sanitizedName)
+// probe asks whether the session still exists, routed through the STRICT
+// existence semantics every other absence-acting caller already uses
+// (probeSessionStrict, and tmuxProvedSessionAbsent underneath it). A timed-out
+// probe marks the run unknown and reports ok=false — and so does a probe that
+// FAILED FAST with an error that is not positive evidence of absence (fork/exec
+// EAGAIN, socket-unlink, ...). Only a positively CONFIRMED absence — tmux's own
+// "can't find session: <name>" diagnostic, a definitive no-server answer, or an
+// unclassified exit 1 corroborated by an authoritative session listing — reports
+// (false, true, nil) and lets gone stay true.
+//
+// The package invariant (server_presence.go): "absence is still proved by a read
+// that happened, never inferred from one that failed." The lossy probeSession this
+// replaced collapsed every fast non-timeout failure into (false, true), so a probe
+// read that FAILED FAST was read as a confirmed absence — leaving gone at its
+// initialized true and firing revokeLaunchCapabilities on a still-alive session,
+// while swallowing the kill error and returning (PaneStateKnown, nil): a clean
+// false success (#4731). The strict probe returns (false, false, err) for those
+// failures, so they take the !ok -> PaneStateUnknown refusal branch exactly like
+// the timed-out probe does, mirroring the pairing CleanupSessions already pins
+// (TestCleanupSessionsKillFailureReprobeFailureIsUnknown).
+func (r *closeRun) probe() (exists bool, ok bool, probeErr error) {
+	exists, known, probeErr := probeSessionStrict(r.t.cmdExec, r.t.sanitizedName)
 	if !known {
 		r.unknown = true
 	}
-	return exists, known
+	return exists, known, probeErr
 }
 
 func (r *closeRun) state() PaneState {
@@ -220,15 +237,32 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 			leaked = nil
 		default:
 			// kill-session ANSWERED with a failure, fast. Ask what actually happened —
-			// but the probe is bounded too, so it has three answers, not two. A
-			// timed-out probe marks the run unknown inside r.probe, so the caller
-			// learns the fate is unknown instead of receiving an ordinary kill error
-			// and deleting the workspace on it.
-			exists, ok := r.probe()
+			// but the strict probe is bounded and three-valued, so a probe that did not
+			// answer (timed out) AND a probe that failed fast with an error that is not
+			// positive evidence of absence (fork/exec EAGAIN, socket-unlink, ...) both
+			// report ok=false and mark the run unknown inside r.probe. A close that
+			// could not tell, or that left the session live, keeps it (#4731): only a
+			// positively confirmed absence ((false, true)) leaves gone at its
+			// initialized true and reaches the idempotent-success / revocation branch.
+			exists, ok, probeErr := r.probe()
 			switch {
 			case !ok:
 				gone = false
-				errs = append(errs, fmt.Errorf("%w: has-session probe after kill-session failed (%w)", ErrTmuxTimeout, err))
+				// The post-kill probe could not establish the session is gone, so the
+				// session's fate is UNKNOWN: the kill error must stay surfaced and no
+				// post-kill cleanup (revocation, reaping) may run against a session that
+				// may still be live. The strict probe's error already carries
+				// ErrTmuxTimeout when the probe actually timed out, so callers that gate
+				// on the sentinel (start.go, the lost-restore classifier) keep
+				// classifying the timeout (#1917). A fast failure is named for what it
+				// is — rather than laundered into a timeout — with the kill error intact.
+				if errors.Is(probeErr, ErrTmuxTimeout) {
+					errs = append(errs, fmt.Errorf("%w: has-session probe after kill-session failed (%w)",
+						ErrTmuxTimeout, err))
+				} else {
+					errs = append(errs, fmt.Errorf("has-session probe after kill-session failed (%w): %w",
+						err, probeErr))
+				}
 				leaked = nil
 			case exists:
 				gone = false

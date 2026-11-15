@@ -63,6 +63,19 @@ func deadAwareExec(alive map[string]bool) cmd_test.MockCmdExec {
 			return nil
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			// The close post-kill probe runs has-session through the Output seam
+			// (probeSessionStrict), so a dead session must answer with tmux's real
+			// absence diagnostic — a genuine *exec.ExitError carrying "can't find
+			// session: <name>" — rather than the generic success stub, or the
+			// strict probe reads the stale session as still alive and the
+			// idempotent #967 close refuses.
+			if strings.Contains(c.String(), "has-session") {
+				n := nameOf(c)
+				if existing[n] {
+					return nil, nil
+				}
+				return nil, tmuxAbsentExitErr(n)
+			}
 			return []byte("content"), nil
 		},
 	}

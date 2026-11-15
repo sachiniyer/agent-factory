@@ -214,3 +214,190 @@ func TestClose_HasSessionProbeTimeout_PreservesKillSessionErrno(t *testing.T) {
 		})
 	}
 }
+
+// fastProbeFailureExec models the conjunction no TestClose* coverage ever staged:
+// kill-session fails FAST, AND the post-kill has-session probe fails FAST with an
+// error that is NOT positive evidence of absence. Both are the real *fs.PathError
+// os.StartProcess surfaces from a refused clone under pids.max / RLIMIT_NPROC —
+// the #7269 class — so the tmux server and session are untouched and alive. The
+// lossy probe this path used to run collapsed that probe failure into "answered:
+// absent" (probeSessionContext: "any other error ... conflated with absence"),
+// so no switch arm touched gone, and Close returned (PaneStateKnown, nil) while
+// firing revokeLaunchCapabilities on a still-alive session (#4731). The strict
+// probe returns (false, false, err) for a fast failure, routing it to the !ok
+// arm exactly like the timed-out probe.
+//
+// countLets tests assert both fast failures actually happened (kill-session
+// invocations and has-session probe invocations).
+func fastProbeFailureExec(errno syscall.Errno, killCalls, probeCalls *int) cmd_test.MockCmdExec {
+	probeErr := &fs.PathError{Op: "fork/exec", Path: "/usr/bin/tmux", Err: errno}
+	return cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			s := strings.Join(c.Args, " ")
+			switch {
+			case strings.Contains(s, "kill-session"):
+				if killCalls != nil {
+					*killCalls++
+				}
+				return probeErr
+			case strings.Contains(s, "has-session"):
+				if probeCalls != nil {
+					*probeCalls++
+				}
+				return probeErr
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			// probeSessionStrict runs the post-kill has-session through the Output
+			// seam (outputTmuxBoundedWith), so the FAST non-absence failure must
+			// surface here — not as the plain error the lossy Run probe swallowed.
+			if strings.Contains(strings.Join(c.Args, " "), "has-session") {
+				if probeCalls != nil {
+					*probeCalls++
+				}
+				return nil, probeErr
+			}
+			return []byte(""), nil
+		},
+	}
+}
+
+// TestClose_HasSessionProbeFastFailure_ReportsUnknown is the core regression for
+// the bug: when kill-session fails fast and the post-kill has-session probe ALSO
+// fails fast with a non-absence error, the lossy probe collapsed that probe
+// failure into "answered: absent", so gone kept its initialized true: Close
+// swallowed the kill error entirely and returned (PaneStateKnown, nil) — a clean
+// false success — and revocation fired on a still-alive session.
+//
+// Sibling to TestClose_HasSessionProbeTimeout_PreservesKillSessionErrno above: the
+// SAME branch, but the probe FAILS FAST instead of wedging past the bound. With
+// the strict probe the fast failure takes the !ok -> PaneStateUnknown refusal
+// branch (error surfaced with the kill error intact, no revocation), the #4731
+// keep-rule ("a close that could not tell keeps it").
+func TestClose_HasSessionProbeFastFailure_ReportsUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		errno syscall.Errno
+	}{
+		{"EAGAIN", syscall.EAGAIN},
+		{"ENOMEM", syscall.ENOMEM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var killCalls, probeCalls int
+			exec := fastProbeFailureExec(tc.errno, &killCalls, &probeCalls)
+			session := NewTmuxSessionFromSanitizedNameWithDeps(
+				"af_fast_probe_fail", "claude", NewMockPtyFactory(t), exec)
+
+			state, err := session.Close()
+
+			requireEqual(t, int(1), killCalls,
+				"Close must still attempt the kill-session")
+			requireEqual(t, int(1), probeCalls,
+				"the post-kill has-session probe must run exactly once (via the strict Output seam)")
+			if state != PaneStateUnknown {
+				t.Fatalf("state = %v, want PaneStateUnknown: a fast probe failure that is not positive "+
+					"evidence of absence must not let Close report the fate as established — tmux never "+
+					"answered that the session is gone (#4731)", state)
+			}
+			if err == nil {
+				t.Fatalf("error = nil, want a non-nil error surfacing the kill failure: pre-fix the lossy " +
+					"probe swallowed the kill error and returned (PaneStateKnown, nil) for a session that " +
+					"was never proved gone")
+			}
+			if !errors.Is(err, tc.errno) {
+				t.Errorf("error = %v, want errors.Is(err, %v) = true: the kill-session fork/exec errno must "+
+					"stay reachable through the wrap (the lost-restore classifier reads it via errors.Is)",
+					err, tc.errno)
+			}
+			if errors.Is(err, ErrTmuxTimeout) {
+				t.Errorf("error = %v, the strict probe's fast failure must NOT be wrapped as ErrTmuxTimeout: "+
+					"only a probe that actually timed out carries that sentinel (#1917); a fast failure is "+
+					"named for what it is", err)
+			}
+			if !strings.Contains(err.Error(), "has-session probe after kill-session failed") {
+				t.Errorf("error = %v, want the branch's diagnostic to name the has-session probe after the "+
+					"kill-session failure", err)
+			}
+		})
+	}
+}
+
+// TestClose_HasSessionProbeFastFailure_DoesNotReapCapturedPaneProcess pins the
+// destructive reuse of the bug's false success: in the fork/exec EAGAIN class the
+// pre-teardown capture SUCCEEDS (the capture is a tmux client command that
+// fork/exec'd before the pressure window), so the captured pane tree of the
+// still-alive session lands in `leaked`. Pre-fix, no arm matched (false, true) so
+// `leaked` was never nil'ed and the on-request reaper signalled the live captured
+// tree of a session whose teardown officially never took effect (#4731). The
+// strict probe routes the fast failure to the !ok arm, which nil's `leaked`, so
+// the reaper never touches the survivor.
+func TestClose_HasSessionProbeFastFailure_DoesNotReapCapturedPaneProcess(t *testing.T) {
+	shrinkReapWaits(t)
+
+	// A live child of this test stands in for the captured pane root of an agent
+	// whose tmux session is still running. list-panes reports it so the
+	// pre-teardown capture puts it in `leaked`; kill-session and the post-kill
+	// has-session probe both fail fast with EAGAIN, so the session is untouched.
+	child := exec.Command("sleep", "300")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start live pane stand-in: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_, _ = child.Process.Wait()
+	})
+
+	probeErr := &fs.PathError{Op: "fork/exec", Path: "/usr/bin/tmux", Err: syscall.EAGAIN}
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			s := strings.Join(c.Args, " ")
+			if strings.Contains(s, "kill-session") {
+				return probeErr
+			}
+			if strings.Contains(s, "has-session") {
+				return probeErr
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			s := strings.Join(c.Args, " ")
+			switch {
+			case strings.Contains(s, "has-session"):
+				return nil, probeErr
+			case strings.Contains(s, "list-panes"):
+				// The pre-teardown capture succeeds and names the live child, so
+				// `leaked` is non-empty going into the kill/probe branch.
+				return []byte(fmt.Sprintf("%d\n", child.Process.Pid)), nil
+			}
+			return []byte(""), nil
+		},
+	}
+	session := newTmuxSession("af_fast_probe_reap", "sh", NewMockPtyFactory(t), cmdExec)
+	state, err := session.Close()
+	if state != PaneStateUnknown {
+		t.Fatalf("state = %v, want PaneStateUnknown for a teardown whose probe could not answer", state)
+	}
+	if err == nil {
+		t.Fatalf("error = nil, want the kill failure surfaced")
+	}
+
+	// The async on-request reaper (Close is the interactive path) gets at most
+	// reapGraceWait + reapTermWait + a final tick to finish; wait past it.
+	time.Sleep(3 * reapGraceWait)
+	if err := child.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("the live captured pane process was reaped by a teardown that never took effect: a "+
+			"close that could not tell whether the session was gone must not signal its captured pane "+
+			"tree (#4731): %v", err)
+	}
+}
+
+// requireEqual is a testify-free equality assertion for the int comparisons in
+// these tests; close_unknown_test.go deliberately stays on the bare t.Fatal style
+// of its siblings rather than pulling in testify.
+func requireEqual(t *testing.T, want, got int, msg string) {
+	t.Helper()
+	if want != got {
+		t.Fatalf("%s: got %d, want %d", msg, got, want)
+	}
+}
