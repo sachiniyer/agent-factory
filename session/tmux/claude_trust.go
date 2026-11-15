@@ -203,6 +203,16 @@ const claudeMCPDialogQuestion = "do you trust this new mcp server"
 // retry until the dialog either completes (claudeTrustPromptPresent) or the
 // preamble is no longer in the expected position.
 func claudeMCPDialogPartiallyRendered(screen visibleText) bool {
+	// A pane too short for the old MCP modal can leave only its option rows
+	// and "Enter to confirm" footer on screen, the preamble and question
+	// scrolled off the top (#3579 class). The block+preamble logic below
+	// bails on the missing preamble, so that frame bypasses it; check it
+	// first and fail closed — hold without a key, the way the folder-trust
+	// twin does (claudeFolderTrustFooterOnly / claudeFolderTrustHeadless,
+	// #7280/#7285). See claudeMCPDialogScrolledOff.
+	if claudeMCPDialogScrolledOff(screen) {
+		return true
+	}
 	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
 	for i, line := range lines {
