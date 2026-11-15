@@ -131,6 +131,15 @@ func (m *home) saveContentPaneState() error {
 		// say so once, and carry on: nothing is lost that could have been kept.
 		hp.Discard()
 		m.pendingPaneNotice = errRemoteHooksSave().Error() + " — the unsaved hook edit was discarded"
+	} else if hp.IsDirty() && m.repoRoot == "" {
+		// Registry mode (#2477): no active project, so SaveInRepoPostWorktreeCommands
+		// would hard-fail with "repo root is required to save in-repo config" on
+		// every attempt — the cycle the read-only gate at showHooksOverlay exists to
+		// prevent. This is the safety net for a pane that got dirty anyway (a stale
+		// state, or a path the open gate did not cover): mirror the remote branch —
+		// discard the unsaveable edit, say so once, and do not trap quit (#5860).
+		hp.Discard()
+		m.pendingPaneNotice = registryHooksReadOnlyReason() + " — the unsaved hook edit was discarded"
 	} else if hp.IsDirty() {
 		// Hook edits are written to the in-repo .agent-factory/config.json —
 		// the canonical location for post_worktree_commands since #800. The
