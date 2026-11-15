@@ -212,10 +212,13 @@ export interface SessionData {
   agent_config_skipped?: string[];
   /** Why a session's non-blocking daemon-side setup did not fully run: a
    *  setup_commands hook failure (#6667), or post_worktree_commands that did
-   *  not run because the project config could not be read in time (#7079).
-   *  Carries the entry, its exit status or timeout, and the retained output
-   *  log. Surfaces render it under the "af setup hook failed:" prefix; absent
-   *  means the hook ran clean (or the session has none). */
+   *  not run because the project config could not be resolved (a read that
+   *  timed out (#7079) or a config the repo answered as invalid (#7084)), or
+   *  because the durable run list for the post-worktree hooks could not be
+   *  persisted before starting. Carries the entry, its exit status or timeout,
+   *  and the retained output log. Surfaces render it under the "af setup hook
+   *  failed:" prefix; absent means the hook ran clean (or the session has
+   *  none). */
   setup_hook_failed?: string;
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */

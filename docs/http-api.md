@@ -599,12 +599,14 @@ skipped:` prefix.
 **`setup_hook_failed`** (string, omitted when empty) — an opaque note on why
 a session's non-blocking daemon-side setup did not fully run: a
 `setup_commands` hook failure, or `post_worktree_commands` that did not run
-because the project config could not be read in time (#7079). For the
-`setup_commands` case, the note is produced once the setup pipeline is
-running: when the staging root is unusable, when a staging directory cannot
-be created, when a Docker payload transfer or worktree-overlay step fails,
-or when an entry fails, times out, cannot start, or cannot open its output
-log. (An in-repo `setup_commands` document that
+because the project config could not be resolved (a read that timed out
+(#7079) or a config the repo answered as invalid (#7084)), or because the
+durable run list for the post-worktree hooks could not be persisted before
+starting. For the `setup_commands` case, the note is produced once the setup
+pipeline is running: when the staging root is unusable, when a staging
+directory cannot be created, when a Docker payload transfer or
+worktree-overlay step fails, or when an entry fails, times out, cannot
+start, or cannot open its output log. (An in-repo `setup_commands` document
 cannot be loaded is logged rather than reported here — the session proceeds
 without running its setup and the field stays empty.) The pre-entry and
 transfer forms carry a plain reason string. An entry failure always carries
