@@ -629,13 +629,19 @@ func TestTunnelSpawnsReverseForwardSlot(t *testing.T) {
 // stopTunnelReapMuHeld is the shape every other teardown path takes: take reapMu,
 // call stopTunnel, release. It mirrors the per-provisioner body of
 // StopAllSandboxTunnels for a non-reaping provisioner.
+//
+// The unlock is deferred because the regression these tests exist to catch is a
+// panic INSIDE stopTunnel ("close of closed channel"). The caller recovers it,
+// but an unlock that never ran leaves reapMu held, every other helper goroutine
+// blocks on it, and the test reports a suite timeout instead of the regression
+// (#7325).
 func stopTunnelReapMuHeld(p *sandboxProvisioner) {
 	if p.reaping.Load() {
 		return
 	}
 	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
 	p.stopTunnel()
-	p.reapMu.Unlock()
 }
 
 // newAdoptionProvisioner builds an adopting provisioner with a live, registered
