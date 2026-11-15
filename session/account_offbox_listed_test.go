@@ -156,6 +156,7 @@ func TestReprovisionCarriesThePersistedAccountOnlyOnAListedHost(t *testing.T) {
 	require.NoError(t, build("box1").reprovisionRemote())
 	assert.Equal(t, f.accountDir, f.spec.Account.Dir, "the persisted account is resolved again on a listed host")
 	assert.Equal(t, "box1", f.spec.Host)
+	assert.Equal(t, "box1", f.spec.AccountHost, "and the runtime is held to the host the licence was read for")
 
 	*f.spec = ProvisionSpec{}
 	err := build("").reprovisionRemote()
