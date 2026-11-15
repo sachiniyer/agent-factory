@@ -104,7 +104,13 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 		if m.alive.Load() {
 			return nil, nil
 		}
-		return nil, errors.New("can't find session")
+		// tmux's determinate absence answer: a real *exec.ExitError whose Stderr
+		// carries the exact "can't find session: <name>" diagnostic — the shape
+		// probeSessionStrict (via missingTmuxSession / tmuxProvedSessionAbsent)
+		// recognizes as positively confirmed absence. The close post-kill probe
+		// now runs the strict path, so a plain error here would be read as an
+		// unconfirmed failure (PaneStateUnknown) rather than a confirmed death.
+		return nil, cantFindSessionExitError(nameFromHasSessionArgs(c.Args))
 	case strings.Contains(args, "kill-session"):
 		m.killCalls.Add(1)
 		if m.killFails.Load() {

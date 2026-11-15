@@ -332,7 +332,15 @@ func TestLocalBackendKillBestEffort_TmuxFails(t *testing.T) {
 			}
 			return errors.New("kill failed")
 		},
-		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			// The close post-kill probe runs has-session through the Output seam
+			// (probeSessionStrict); tmux's real absence answer is an *exec.ExitError
+			// carrying "can't find session: <name>", which is the only shape the
+			// strict probe accepts as positively confirmed absence — so the #967
+			// idempotent no-op still resolves to "gone" and deletion may proceed.
+			if strings.Contains(c.String(), "has-session") {
+				return nil, tmuxAbsentExitErr(hasSessionTargetName(c.Args))
+			}
 			return nil, nil
 		},
 	}
@@ -486,7 +494,14 @@ func TestLocalBackendKillBestEffort_BothFail(t *testing.T) {
 			}
 			return errors.New("kill failed")
 		},
-		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			// The close post-kill probe runs has-session through the Output seam
+			// (probeSessionStrict); the dead session answers with tmux's real
+			// absence diagnostic so the #967 idempotent no-op resolves to "gone"
+			// — see TestLocalBackendKillBestEffort_TmuxFails for the full rationale.
+			if strings.Contains(c.String(), "has-session") {
+				return nil, tmuxAbsentExitErr(hasSessionTargetName(c.Args))
+			}
 			return nil, nil
 		},
 	}

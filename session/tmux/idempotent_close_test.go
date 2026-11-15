@@ -16,12 +16,64 @@ import (
 // the mock returns it so the test mirrors the real failure shape.
 var errExit1 = errors.New("exit status 1")
 
+// cantFindSessionExitError builds a genuine *exec.ExitError whose Stderr is
+// tmux's exact "can't find session: <name>" absence diagnostic — the shape
+// missingTmuxSession (and thus probeSessionStrict / tmuxProvedSessionAbsent)
+// recognizes as positively confirmed absence, never a generic failure. Built by
+// running a shell snippet because an *exec.ExitError's Stderr can only be
+// populated by the os/exec runner; the name is a sanitized tmux name
+// (letters/digits/_/-), so it threads through sh as an argument without
+// quoting concerns. The close-branch tests use this so the post-kill strict
+// probe sees the same authoritative absence a real tmux server answers with,
+// rather than the plain error the lossy probe used to conflate with absence.
+//
+// The shell is resolved to an ABSOLUTE path at package initialization (before
+// any test rewrites PATH via t.Setenv), so the fixture keeps working in tests
+// that replace PATH with a temp dir of fake agent binaries
+// (forceAgentOnSearchPath): exec.Command skips LookPath for an absolute path, so
+// the rewritten PATH cannot hide sh from it.
+func cantFindSessionExitError(name string) error {
+	_, err := exec.Command(shForTestFixtures, "-c", `printf '%s\n' "$1" >&2; exit "$2"`,
+		"sh", "can't find session: "+name, "1").Output()
+	return err
+}
+
+// shForTestFixtures is the absolute path to sh, resolved once at package
+// initialization (before TestMain or any test mutates PATH). See
+// cantFindSessionExitError for why the absolute path matters.
+var shForTestFixtures = func() string {
+	if p, err := exec.LookPath("sh"); err == nil {
+		return p
+	}
+	return "/bin/sh"
+}()
+
+// nameFromHasSessionArgs reads the session name a has-session command targeted.
+// has-session uses `has-session -t=<name>` (an exact bare-name target, never the
+// `=name:` pane form), so the `-t=<name>` arg carries the name verbatim.
+func nameFromHasSessionArgs(args []string) string {
+	for _, a := range args {
+		if name, ok := strings.CutPrefix(a, "-t="); ok {
+			return name
+		}
+	}
+	return ""
+}
+
 // killSessionProbeExec mocks the two commands Close issues on its teardown path:
 // `tmux kill-session` (which fails when the session is already gone) and the
 // `tmux has-session` probe that decides whether the failure was real. `present`
 // controls what has-session reports — i.e. whether the session survived the
 // kill. killCalls counts kill-session invocations so tests can assert the kill
 // was actually attempted.
+//
+// The post-kill probe now runs the strict path through probeSessionStrict
+// (outputTmuxBoundedWith -> OutputFunc), so has-session's absence answer is
+// routed through OutputFunc as a real *exec.ExitError carrying tmux's exact
+// "can't find session: <name>" diagnostic — the only shape the strict probe
+// accepts as positively confirmed absence. The lossy callers that still run
+// has-session through RunFunc (sessionExists / ProbeSession) keep treating any
+// non-nil error as absence, so RunFunc returns the plain exit-1 error for them.
 func killSessionProbeExec(present bool, killCalls *int) cmd_test.MockCmdExec {
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
@@ -42,6 +94,12 @@ func killSessionProbeExec(present bool, killCalls *int) cmd_test.MockCmdExec {
 			return nil
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "has-session") {
+				if present {
+					return []byte(""), nil
+				}
+				return nil, cantFindSessionExitError(nameFromHasSessionArgs(c.Args))
+			}
 			return []byte(""), nil
 		},
 	}

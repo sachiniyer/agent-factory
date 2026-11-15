@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -126,6 +127,48 @@ func TestPerPaneLaunchCapabilityDoesNotOutliveItsSession(t *testing.T) {
 		_, perPane := launchCapabilities(name)
 		require.Equal(t, 1, perPane,
 			"a session tmux says is still alive still needs the capability its new windows claim")
+		revokeLaunchCapabilities(name)
+	})
+
+	// Below is the regression for the destructive half of the bug: a close that
+	// COULD NOT TELL — kill-session failed fast, the post-kill has-session probe
+	// also failed fast with a non-absence error (fork/exec EAGAIN under
+	// RLIMIT_NPROC / pids.max) — must keep the launch capability too, because the
+	// session was never proved gone (#4731). The lossy probe collapsed the fast
+	// probe failure into "answered: absent", so gone stayed true and Close fired
+	// revokeLaunchCapabilities on a still-alive session while reporting nil — the
+	// exact opposite of the "leaves the session alive" rule pinned in the subtest
+	// above. The strict probe routes the fast failure to the !ok -> Unknown
+	// refusal branch, so gone is false and the capability is kept.
+	t.Run("Close that could not tell keeps the capability", func(t *testing.T) {
+		name := "af_cap_close_probe_failed_fast"
+		var kills, probes int
+		s := accountSessionForCapabilityTest(t, name,
+			fastProbeFailureExec(syscall.EAGAIN, &kills, &probes), NewMockPtyFactory(t))
+		_, _, _, _, _, err := s.prepareLaunchEnvironment("")
+		require.NoError(t, err)
+		preTotal, perPane := launchCapabilities(name)
+		require.Equal(t, 1, perPane, "the per-pane capability must be minted before Close")
+
+		state, err := s.Close()
+		require.Equal(t, PaneStateUnknown, state,
+			"a fast probe failure that is not positive evidence of absence must not let Close report the "+
+				"session's fate as established — tmux never answered that it is gone (#4731)")
+		require.Error(t, err, "the kill-session failure must be surfaced, not swallowed into a false success")
+		require.ErrorIs(t, err, syscall.EAGAIN,
+			"the kill error's errno must stay reachable so the lost-restore classifier resolves it as "+
+				"environmental")
+		require.NotErrorIs(t, err, ErrTmuxTimeout,
+			"a fast probe failure is not a timeout and must not be mislabeled as one")
+
+		total, perPane := launchCapabilities(name)
+		require.Equal(t, 1, perPane,
+			"a session whose teardown could not be confirmed must keep the per-pane launch capability its "+
+				"new windows claim — revoking it leaves every respawn dying with the shim's fatal exit 127 "+
+				"until a later daemon restore re-establishes it (#4731)")
+		require.Equal(t, preTotal, total,
+			"a Close that could not tell whether the session was gone must revoke NOTHING: gone must be "+
+				"false, so revokeLaunchCapabilities must not fire on a still-alive session (#4731)")
 		revokeLaunchCapabilities(name)
 	})
 }
