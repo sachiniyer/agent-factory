@@ -16,7 +16,7 @@ func TestAccountBoundAgentServerLaunchScopesTheAmbientEnvironment(t *testing.T) 
 	acct := writeAccount(t, "claude", testSecretA)
 	t.Run("sandbox on a listed host", func(t *testing.T) {
 		w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "claude",
-			spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+			spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 		cmd, err := w.agentServerCommand()
 		require.NoError(t, err)
 		assert.Contains(t, cmd, sessionenv.AgentServerAccountExecMarker)

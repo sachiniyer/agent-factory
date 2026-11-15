@@ -385,7 +385,7 @@ func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCl
 		p.launchScript, p.adoptPending = data.SSH.LaunchScript, data.SSH.AdoptPending
 		p.restoreCallbackIdentity(data.SSH.CallbackRef, data.SSH.CallbackReverse)
 		p.launchAttempted = data.SSH.LaunchUnconfirmed
-		p.restoreAccountWorkspace(account, data.SSH.HostName)
+		p.restoreAccountWorkspace(account, data.SSH.HostName, accountSyncTargetOf(legacyCfg))
 		// The accept-new store is prepared inside each ATTEMPT, never here: this
 		// function composes a closure while persisted instances are being loaded,
 		// and a transiently unwritable AF home must not be captured as a permanently
@@ -427,7 +427,10 @@ func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCl
 		}
 		p.restoreCallbackIdentity(data.Sandbox.CallbackRef, data.Sandbox.CallbackReverse)
 		p.launchAttempted = data.Sandbox.LaunchUnconfirmed
-		p.restoreAccountWorkspace(account, data.Sandbox.AccountSyncHost)
+		// A sandbox command names no listed entry's machine, so there is no target
+		// a send could be checked against: the workspace can be read back and
+		// removed, and nothing more is sent to it.
+		p.restoreAccountWorkspace(account, data.Sandbox.AccountSyncHost, accountSyncTarget{})
 		teardown := p.reap
 		return &sandboxBackend{
 			provisioner: p,

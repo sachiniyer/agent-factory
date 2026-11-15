@@ -128,7 +128,8 @@ func TestAdoptionSendsNoAccountToARecordedHostThatIsNoLongerTheLicensedOne(t *te
 	assert.Contains(t, msg, `host "box1"`, "names the host the workspace is on")
 	assert.Contains(t, msg, "no longer in the global host list", "says why")
 	assert.Contains(t, msg, "[hosts.box1]", "says what to re-add")
-	assert.Contains(t, msg, "clear the session's account", "or how to restore without the account")
+	assert.Contains(t, msg, "af sessions kill", "and the only other way out af actually offers")
+	assert.NotContains(t, msg, "clear the session's account", "af has no such action (#7342)")
 	assert.NotContains(t, msg, "already retired", "an adoption reaps nothing")
 }
 

@@ -204,7 +204,7 @@ func sshAdoptedAccountHostError(spec ProvisionSpec, cfg *config.ResolvedConfig, 
 		return nil
 	}
 	const untouched = "No credentials were sent, and the preserved workspace was left as it is"
-	const withoutAccount = "clear the session's account to restore it on the host's own credentials"
+	wayOut := adoptedAccountWayOut(spec, true)
 	refusal := fmt.Sprintf("backend=ssh: account %q is not sent to this session's preserved workspace", spec.Account.Name)
 	_, recordedListed := cfg.Hosts[recorded]
 	switch {
@@ -212,14 +212,14 @@ func sshAdoptedAccountHostError(spec ProvisionSpec, cfg *config.ResolvedConfig, 
 		return fmt.Errorf("%s: the restore reached provisioning without the host the account was licensed for. %s. %s",
 			refusal, accountInvariantBug, untouched)
 	case recorded == "":
-		return fmt.Errorf("%s: the session did not record which listed host the workspace is on, so af cannot tell that it is host %q, the one the account is licensed for. %s. To restore the session, %s",
-			refusal, licensed, untouched, withoutAccount)
+		return fmt.Errorf("%s: the session did not record which listed host the workspace is on, so af cannot tell that it is host %q, the one the account is licensed for. %s%s",
+			refusal, licensed, untouched, adoptedAccountWayOut(spec, false))
 	case !recordedListed:
-		return fmt.Errorf("%s: the workspace is on host %q, which is no longer in the global host list, and credentials are only ever sent to a listed host. %s. Re-add the host under [hosts.%s] in the global config, or %s",
-			refusal, recorded, untouched, recorded, withoutAccount)
+		return fmt.Errorf("%s: the workspace is on host %q, which is no longer in the global host list, and credentials are only ever sent to a listed host. %s. Re-add the host under [hosts.%s] in the global config and restore the session again%s",
+			refusal, recorded, untouched, recorded, wayOut)
 	case recorded != licensed:
-		return fmt.Errorf("%s: the workspace is on host %q, but the account is now licensed for host %q. %s. Make host %q the one this session resolves to again (for a session that records no host of its own, that is default_host), or %s",
-			refusal, recorded, licensed, untouched, recorded, withoutAccount)
+		return fmt.Errorf("%s: the workspace is on host %q, but the account is now licensed for host %q. %s. Make host %q the one this session resolves to again (for a session that records no host of its own, that is default_host) and restore the session again%s",
+			refusal, recorded, licensed, untouched, recorded, wayOut)
 	}
 	why := fmt.Sprintf("provisioning resolved host %q instead", hostName)
 	if chooseErr != nil {
@@ -227,8 +227,28 @@ func sshAdoptedAccountHostError(spec ProvisionSpec, cfg *config.ResolvedConfig, 
 	} else if listed == nil {
 		why = "provisioning resolved the repository's own [ssh] target instead"
 	}
-	return fmt.Errorf("%s: the workspace is on host %q, which cannot be used for it: %s. %s. Correct that, or %s",
-		refusal, recorded, why, untouched, withoutAccount)
+	return fmt.Errorf("%s: the workspace is on host %q, which cannot be used for it: %s. %s. Correct that and restore the session again%s",
+		refusal, recorded, why, untouched, wayOut)
+}
+
+// adoptedAccountWayOut is the tail of a refused adoption: the one thing left to
+// do when the host list cannot be put back. af has no action that restores a
+// session without its account, so the text does not offer one (#7342); it says
+// so, and names the action that does exist. Empty for a fresh provision, whose
+// caller adds its own remedy.
+//
+// afterRemedy says whether the refusal already named something the operator can
+// put right; without one, this is the only way out and is worded as such.
+func adoptedAccountWayOut(spec ProvisionSpec, afterRemedy bool) string {
+	if spec.Adopt == nil {
+		return ""
+	}
+	lead := "so the only way out is"
+	if afterRemedy {
+		lead = "so if that is not possible the only other way out is"
+	}
+	return fmt.Sprintf(". af cannot restore a session without its account, %s `af sessions kill %s`, which removes the session; copy or push any unpushed work off the host first",
+		lead, shellQuote(spec.Title))
 }
 
 // sshProvisionHost resolves the host this provision uses and decides whether it
@@ -268,6 +288,25 @@ func sshProvisionHost(spec *ProvisionSpec, cfg *config.ResolvedConfig) (string, 
 	if listed != nil && (spec.Account.Dir == "" || hostName == spec.AccountHost) {
 		spec.AccountSyncHost = hostName
 		spec.AgentConfigFiles = append([]string(nil), cfg.SandboxAgentConfig...)
+		// Where the transport this provision sends over logs in, for the check
+		// every send makes (accountSendLicence, #7342). A fresh provision composes
+		// its command from this very entry. An adoption rides the recorded
+		// command, so its target is the recorded one — which is what makes a
+		// re-addressed entry visible: the name still matches, the machine does not.
+		spec.AccountSyncTarget = accountSyncTargetOf(sshConfigForHost(*listed))
+		if spec.Adopt != nil {
+			spec.AccountSyncTarget = accountSyncTarget{}
+			if t := spec.Adopt.Transport; t != nil && t.SSH != nil {
+				spec.AccountSyncTarget = accountSyncTargetOf(t.SSH.Config)
+			}
+		}
+		// Asked here as well as at each send, so a provision that cannot send
+		// its account stops before it runs anything on the host.
+		if spec.Account.Dir != "" {
+			if lerr := accountSendLicence(*spec); lerr != nil {
+				return "", nil, fmt.Errorf("backend=ssh: %w%s", lerr, adoptedAccountWayOut(*spec, true))
+			}
+		}
 	}
 	return hostName, listed, nil
 }

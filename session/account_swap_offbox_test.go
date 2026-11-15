@@ -131,7 +131,7 @@ func newSwapFixture(t *testing.T) *swapFixture {
 		return localShell{}.Run(d, script, stdin, combined)
 	}
 	acct := sessionenv.Account{Agent: tmux.ProgramClaude, Name: "work", Dir: f.accountDir}
-	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", Program: tmux.ProgramClaude}}
+	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target, Program: tmux.ProgramClaude}}
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
 	calls = nil

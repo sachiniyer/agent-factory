@@ -77,7 +77,7 @@ func TestCodexAgentConfigSurvivesFreshSwap(t *testing.T) {
 	p.runCommandFn = localShell{}.Run
 	acct := sessionenv.Account{Agent: tmux.ProgramCodex, Name: "work", Dir: workDir}
 	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{
-		Account: acct, AccountSyncHost: "box1", Program: tmux.ProgramCodex,
+		Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target, Program: tmux.ProgramCodex,
 		// Provision records the operator's selection on the spec; the swap
 		// stages it from there, never by re-reading the global config.
 		AgentConfigFiles: []string{"codex:config.toml"},
@@ -140,7 +140,7 @@ func TestCodexFreshSwapKeepsAnEmptyProvisionSelection(t *testing.T) {
 	// Provision ran while the global selection was empty: no files on the spec
 	// and restored=false — indistinguishable from a restored workspace before
 	// the restored flag existed, which is the conflation being tested here.
-	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", Program: tmux.ProgramCodex}}
+	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target, Program: tmux.ProgramCodex}}
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
 
@@ -197,14 +197,14 @@ func TestCodexAgentConfigSurvivesSwapOnAReattachedSession(t *testing.T) {
 	p := &sandboxProvisioner{sessionDir: dir}
 	p.runCommandFn = localShell{}.Run
 	acct := sessionenv.Account{Agent: tmux.ProgramCodex, Name: "work", Dir: workDir}
-	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", Program: tmux.ProgramCodex}}
+	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target, Program: tmux.ProgramCodex}}
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
 
 	// Simulate the daemon restart: rebuild the provisioner from the persisted
 	// cleanup handle + the row's account, exactly as restoreAccountWorkspace does.
 	data := &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
-		Config: config.SSHConfig{Host: "box1.example"}, SessionDir: dir, HostName: "box1",
+		Config: config.SSHConfig{Host: "box1.example", User: "dev"}, SessionDir: dir, HostName: "box1",
 	}}
 	backend, _, err := restoreRuntimeCleanupWithAccount("codexswap", "ssh", data,
 		restoredAccount{Name: "work", Agent: tmux.ProgramCodex, Program: tmux.ProgramCodex})

@@ -27,7 +27,8 @@ func (p *sandboxProvisioner) accountSyncHost() string {
 // teardown's credential removal apply to it again.
 //
 // It is rebuilt from the row alone — the account's name and agent, the listed
-// host that licensed it, the session directory — and touches no credential: the
+// host that licensed it, where the recorded transport logs in, the session
+// directory — and touches no credential: the
 // account is looked up in the local registry, nothing is read from or sent to the
 // host. It carries NO sync-in baseline (syncedVersion stays nil), so a write-back
 // from this process can never replace the registry's copy: every file the host
@@ -38,7 +39,7 @@ func (p *sandboxProvisioner) accountSyncHost() string {
 // Without a recorded account or host, or when the account no longer resolves in
 // the registry, nothing is rebuilt and the session behaves as it did before: no
 // off-box handoff.
-func (p *sandboxProvisioner) restoreAccountWorkspace(account restoredAccount, host string) {
+func (p *sandboxProvisioner) restoreAccountWorkspace(account restoredAccount, host string, target accountSyncTarget) {
 	if account.Name == "" || account.Agent == "" || host == "" || p.sessionDir == "" {
 		return
 	}
@@ -50,5 +51,9 @@ func (p *sandboxProvisioner) restoreAccountWorkspace(account restoredAccount, ho
 	p.spec.Account = acct
 	p.spec.Program = account.Program
 	p.spec.AccountSyncHost = host
+	// Where the rebuilt transport logs in, from the same record it was composed
+	// from. Every later SEND checks it against the host list as it is then
+	// (accountSendLicence, #7342); the read-back and removal do not.
+	p.spec.AccountSyncTarget = target
 	p.account = &sandboxWorkspace{shell: p, spec: p.spec, SessionDir: p.sessionDir, restored: true}
 }

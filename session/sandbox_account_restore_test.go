@@ -101,7 +101,7 @@ func TestAccountWorkspaceIsNotRestoredWithoutItsEvidence(t *testing.T) {
 	f := newSwapFixture(t)
 	restore := func(host string, acct restoredAccount) *sandboxProvisioner {
 		data := &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
-			Config: config.SSHConfig{Host: "box1.example"}, SessionDir: f.dir, HostName: host,
+			Config: config.SSHConfig{Host: "box1.example", User: "dev"}, SessionDir: f.dir, HostName: host,
 		}}
 		backend, _, err := restoreRuntimeCleanupWithAccount("s", "ssh", data, acct)
 		require.NoError(t, err)

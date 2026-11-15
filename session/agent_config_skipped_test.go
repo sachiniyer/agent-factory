@@ -324,7 +324,7 @@ func TestAgentConfigSkippedIsEmptyWhenHomeUnresolvableButNothingApplies(t *testi
 	assert.Empty(t, skipped, "an unlisted target receives no skip list")
 
 	noAccount := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s",
-		spec: ProvisionSpec{AccountSyncHost: "box1", AgentConfigFiles: []string{"claude:settings.json"}}}
+		spec: ProvisionSpec{AccountSyncHost: "box1", AccountSyncTarget: box1Target, AgentConfigFiles: []string{"claude:settings.json"}}}
 	skipped, err = noAccount.syncAgentConfigIn(time.Second)
 	require.NoError(t, err)
 	assert.Empty(t, skipped, "without an account scope the home is never consulted")

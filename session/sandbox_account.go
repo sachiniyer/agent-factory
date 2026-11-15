@@ -85,7 +85,11 @@ func (w *sandboxWorkspace) accountEnv() (name, value string, ok bool) {
 }
 
 // accountSyncApplies reports whether this provision carries an account, and
-// refuses — before anything is sent — when it has no licence to.
+// refuses when it holds no recorded licence. On its own it licenses only the
+// READ-BACK (and the removal that follows it): credentials already on a host
+// must stay readable and removable after the operator takes that host out of
+// the list. A SEND asks accountSendApplies, which adds the live check that the
+// licensed entry still names the machine the transport reaches (#7342).
 func (w *sandboxWorkspace) accountSyncApplies() (bool, error) {
 	if w.spec.Account.Dir == "" {
 		return false, nil
@@ -104,7 +108,7 @@ func (w *sandboxWorkspace) accountSyncApplies() (bool, error) {
 // syncAccountIn copies the account's credential files into the session-scoped
 // directory. A no-op without an account; an error without a licence.
 func (w *sandboxWorkspace) syncAccountIn(timeout time.Duration) error {
-	apply, err := w.accountSyncApplies()
+	apply, err := w.accountSendApplies()
 	if err != nil || !apply {
 		return err
 	}
