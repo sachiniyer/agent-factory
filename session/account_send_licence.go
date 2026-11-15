@@ -32,8 +32,11 @@ import (
 // taken out of the list, so it stays licensed by the recorded name alone
 // (accountSyncApplies).
 
-// accountSyncTarget is where an ssh transport logs in: the machine, the port,
-// and the remote user whose home receives the account scope. It is what "the
+// accountSyncTarget is where an ssh transport logs in: the machine as the host
+// list spells it, the port, and the remote user whose home receives the account
+// scope. It is the entry's TEXT, normalised — not a resolved address — so
+// re-pointing DNS behind an unchanged entry is not something this can see
+// (docs/backends.md says so). It is what "the
 // machine a send reaches" means here. An identity file, a host-key posture or a
 // known_hosts path is not part of it: changing one changes how af proves the
 // machine, not which machine it is.
@@ -70,8 +73,21 @@ func accountSyncTargetOf(cfg config.SSHConfig) accountSyncTarget {
 	if port == 0 {
 		port = sshDefaultPort
 	}
-	// Host names compare case-insensitively; user names do not.
-	return accountSyncTarget{Host: strings.ToLower(host), Port: port, User: strings.TrimSpace(cfg.User)}
+	// Two spellings of one destination must compare equal, or a spelling-only
+	// edit to an entry would refuse every session already on that machine
+	// (#7347):
+	//   - host names compare case-insensitively, and an absolute name
+	//     ("box1.example.") is the same name as its relative spelling;
+	//   - the user is the one ssh actually logs in as, so an unset user equals
+	//     the daemon's own login written out (sshLoginUser, which is also what
+	//     the composed command pins).
+	// A name and a literal address are NOT made equal: which address a name
+	// means is exactly what can change, so that edit stays a refusal.
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" {
+		return accountSyncTarget{}
+	}
+	return accountSyncTarget{Host: host, Port: port, User: sshLoginUser(cfg)}
 }
 
 // accountSendLicence reports why spec's account may not be sent over spec's

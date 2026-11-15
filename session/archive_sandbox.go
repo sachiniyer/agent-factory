@@ -389,7 +389,7 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 			// the row still reports this one. Refused BEFORE anything is reaped, so the
 			// old runtime stays recoverable.
 			return fmt.Errorf("cannot re-provision session %q: it runs under account %q, but its target %s is not a host in the global host list, so the account cannot be synced; "+
-				"re-add the host under [hosts.<name>] (it is recorded as %q) and try again. af does not restore a session under another identity or without its account, so the only other way out is `af sessions kill %s`, which removes the session",
+				"re-add the host under [hosts.<name>] (it is recorded as %q) and try again. af does not restore a session under another identity or without its account, so the only other way out is `af sessions kill %s`, which removes the session; copy or push any unpushed work off the host first",
 				i.Title, accountName, string(kind), i.Host, shellQuote(i.Title))
 		}
 		account, accountErr := selectAccountInNamespace(scopedAgent, accountName)
