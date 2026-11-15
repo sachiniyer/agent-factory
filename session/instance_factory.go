@@ -334,7 +334,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		if cred.Granted() && opts.SandboxCredentials != nil {
 			opts.SandboxCredentials.Revoke()
 		}
-		return res, withAccountHostRemedy(err, createAccountHostRemedy)
+		return res, withAccountHostContext(err, createAccountHostContext)
 	}
 	// res.Branch is whatever the runtime reports it ran on: a hook launch_cmd is
 	// never handed the daemon's name, so recording it here would display (and

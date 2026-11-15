@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -187,8 +188,14 @@ func TestSSHProvisionRefusesAnAccountOnAnyHostButTheLicensedOne(t *testing.T) {
 		assert.Contains(t, msg, "without the host it was licensed for")
 		assert.Contains(t, msg, "bug in af", "a caller defect is reported as one")
 		_, err := sshRuntime{}.Provision(spec("box1", ""))
-		assert.Equal(t, err, withAccountHostRemedy(err, createAccountHostRemedy),
-			"and gets no remedy from either caller: a retry would repeat it")
+		assert.Equal(t, err, withAccountHostContext(err, createAccountHostContext),
+			"and gets no remedy from the create path: a retry would repeat it")
+		// After a restore's reap the FACT still belongs on it; only the remedy is
+		// withheld (#7336).
+		restored := withAccountHostContext(err, restoreAccountHostContext).Error()
+		assert.Contains(t, restored, "previous sandbox was already retired")
+		assert.NotContains(t, restored, "try again")
+		assert.Contains(t, restored, "bug in af")
 	})
 
 	// Control: the licensed host itself passes the check and reaches the
@@ -337,78 +344,123 @@ func TestRestoreRefusalAfterTheReapSaysTheSandboxWasRetired(t *testing.T) {
 }
 
 // An adopting provision reaches its host through the transport the archived row
-// recorded, so the licensed-host refusal does not apply to it — a host list that
-// changed must not stop a reattach. What still applies is the rule: it sends the
-// account under the licensed name, or it sends nothing (#7327).
+// recorded. It sends the account only when that transport's own host is the
+// licensed host; otherwise it is refused before anything runs, and sends nothing
+// (#7327, #7336). The fake-transport tests in
+// account_offbox_adopt_transport_test.go drive the same rule end to end.
 func TestAdoptionSendsTheAccountUnderTheLicensedNameOrNotAtAll(t *testing.T) {
 	hosts := twoListedHosts(t.TempDir())
 	f := newListedFixture(t, hosts)
-	adopting := func(host, licensed string) ProvisionSpec {
+	// adopting builds an adoption whose pick is host, whose account is licensed
+	// for licensed, and whose recorded transport reaches recorded.
+	adopting := func(host, licensed, recorded string) ProvisionSpec {
 		return ProvisionSpec{
 			RepoRoot: f.repo, Title: "t", Program: tmux.ProgramClaude, Host: host, AccountHost: licensed,
 			Account: sessionenv.Account{Agent: tmux.ProgramClaude, Name: "work", Dir: f.accountDir},
-			Adopt:   &AdoptSpec{SessionDir: "/home/dev/.af-sessions/x", Branch: "root/s"},
+			Adopt: &AdoptSpec{SessionDir: "/home/dev/.af-sessions/x", Branch: "root/s",
+				Transport: &RecordedTransport{SSHCmd: "ssh recorded", SSH: &SSHRuntimeCleanupData{HostName: recorded}}},
 		}
 	}
-	sends := func(spec ProvisionSpec) (bool, error) {
-		return (&sandboxWorkspace{spec: spec}).accountSyncApplies()
+	refused := func(t *testing.T, spec ProvisionSpec) string {
+		t.Helper()
+		_, _, err := sshProvisionHost(&spec, mustResolve(t, f.repo))
+		require.Error(t, err)
+		assert.Empty(t, spec.AccountSyncHost, "no licence is granted")
+		assert.Empty(t, spec.AgentConfigFiles)
+		ok, serr := (&sandboxWorkspace{spec: spec}).accountSyncApplies()
+		assert.False(t, ok)
+		require.Error(t, serr, "and the sync itself would still refuse")
+		msg := err.Error()
+		assert.Contains(t, msg, `account "work" is not sent`)
+		assert.Contains(t, msg, "No credentials were sent, and the preserved workspace was left as it is")
+		assert.Contains(t, msg, "clear the session's account", "names the way to restore without the account")
+		assert.NotContains(t, msg, "already retired", "an adoption reaps nothing")
+		assert.NotContains(t, msg, "-key")
+		var he *accountHostError
+		assert.False(t, errors.As(err, &he), "so it must not be the error type a re-provision reports as post-reap")
+		return msg
 	}
 
-	t.Run("the licensed host is still listed", func(t *testing.T) {
-		spec := adopting("box1", "box1")
+	t.Run("the recorded host is the licensed host and is still listed", func(t *testing.T) {
+		spec := adopting("box1", "box1", "box1")
 		name, listed, err := sshProvisionHost(&spec, mustResolve(t, f.repo))
 		require.NoError(t, err)
 		require.NotNil(t, listed)
 		assert.Equal(t, "box1", name)
-		assert.Equal(t, "box1", spec.AccountSyncHost, "the sync is licensed under the licensed name")
-		ok, err := sends(spec)
+		assert.Equal(t, "box1", spec.AccountSyncHost, "the sync is licensed under the name of the machine it reaches")
+		ok, err := (&sandboxWorkspace{spec: spec}).accountSyncApplies()
 		require.NoError(t, err)
 		assert.True(t, ok, "so the account is sent")
 	})
 
-	t.Run("another listed host resolves instead", func(t *testing.T) {
-		spec := adopting("box2", "box1")
-		_, _, err := sshProvisionHost(&spec, mustResolve(t, f.repo))
-		require.NoError(t, err, "an adoption is not refused: its transport is the recorded one")
-		assert.Empty(t, spec.AccountSyncHost, "but a host other than the licensed one earns no licence")
-		assert.Empty(t, spec.AgentConfigFiles)
-		ok, err := sends(spec)
-		assert.False(t, ok)
-		require.Error(t, err, "so nothing is sent")
+	t.Run("the licence names another listed host than the transport reaches", func(t *testing.T) {
+		msg := refused(t, adopting("box2", "box2", "box1"))
+		assert.Contains(t, msg, `host "box1"`)
+		assert.Contains(t, msg, `host "box2"`)
+		assert.Contains(t, msg, "default_host")
 	})
 
-	t.Run("the licensed host was removed from the list", func(t *testing.T) {
-		saveDefaultHost(t, map[string]config.HostConfig{"box2": hosts["box2"]}, "")
-		spec := adopting("box1", "box1")
-		name, listed, err := sshProvisionHost(&spec, mustResolve(t, f.repo))
-		require.NoError(t, err, "the changed host list does not stop the adoption")
-		assert.Nil(t, listed)
-		assert.Empty(t, name)
-		assert.Empty(t, spec.AccountSyncHost)
-		ok, err := sends(spec)
-		assert.False(t, ok)
-		require.Error(t, err, "and nothing is sent")
+	t.Run("the pick resolves another host than the licence", func(t *testing.T) {
+		msg := refused(t, adopting("box2", "box1", "box1"))
+		assert.Contains(t, msg, `provisioning resolved host "box2" instead`)
+	})
 
-		// The real runtime agrees: it gets past the host check and stops at the
-		// first thing an adoption needs, the recorded transport.
-		_, err = sshRuntime{}.Provision(adopting("box1", "box1"))
+	t.Run("the transport recorded no listed host", func(t *testing.T) {
+		msg := refused(t, adopting("box1", "box1", ""))
+		assert.Contains(t, msg, "did not record which listed host")
+		noTransport := adopting("box1", "box1", "")
+		noTransport.Adopt.Transport = nil
+		refused(t, noTransport)
+	})
+
+	t.Run("no licensed host at all", func(t *testing.T) {
+		// A caller defect: reported as one, with no remedy to repeat it.
+		spec := adopting("box1", "", "box1")
+		_, _, err := sshProvisionHost(&spec, mustResolve(t, f.repo))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "recorded no transport")
-		assert.NotContains(t, err.Error(), "licensed for")
+		assert.Contains(t, err.Error(), "bug in af")
+		assert.NotContains(t, err.Error(), "clear the session's account")
+		assert.Empty(t, spec.AccountSyncHost)
+	})
 
-		// Control: the same spec without Adopt is a fresh provision, and is refused.
-		fresh := adopting("box1", "box1")
+	t.Run("the recorded host was removed from the list", func(t *testing.T) {
+		saveDefaultHost(t, map[string]config.HostConfig{"box2": hosts["box2"]}, "")
+		t.Cleanup(func() { saveDefaultHost(t, hosts, "") })
+		msg := refused(t, adopting("box1", "box1", "box1"))
+		assert.Contains(t, msg, `host "box1", which is no longer in the global host list`)
+		assert.Contains(t, msg, "[hosts.box1]")
+
+		// The real runtime refuses the same way, before it looks for a transport.
+		_, err := sshRuntime{}.Provision(adopting("box1", "box1", "box1"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no longer in the global host list")
+
+		// Control: the same spec without Adopt is a fresh provision, refused by
+		// the fresh-provision check and its wording.
+		fresh := adopting("box1", "box1", "box1")
 		fresh.Adopt = nil
 		_, _, err = sshProvisionHost(&fresh, mustResolve(t, f.repo))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `licensed for host "box1"`)
 	})
 
-	// An accountless adoption keeps its licence for agent config on any listed host.
+	// An accountless adoption is never judged: a host list that changed does not
+	// stop it, and it keeps its licence for agent config on a listed host.
+	saveDefaultHost(t, map[string]config.HostConfig{"box2": hosts["box2"]}, "")
+	gone := adopting("box1", "", "box1")
+	gone.Account = sessionenv.Account{}
+	name, listed, err := sshProvisionHost(&gone, mustResolve(t, f.repo))
+	require.NoError(t, err, "the changed host list does not stop an accountless adoption")
+	assert.Nil(t, listed)
+	assert.Empty(t, name)
+	_, err = sshRuntime{}.Provision(func() ProvisionSpec { g := gone; g.Adopt = &AdoptSpec{SessionDir: "/x", Branch: "b"}; return g }())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded no transport", "the real runtime gets past the host step")
+
 	saveDefaultHost(t, hosts, "")
-	spec := adopting("box2", "")
+	spec := adopting("box2", "", "box1")
 	spec.Account = sessionenv.Account{}
-	_, _, err := sshProvisionHost(&spec, mustResolve(t, f.repo))
+	_, _, err = sshProvisionHost(&spec, mustResolve(t, f.repo))
 	require.NoError(t, err)
 	assert.Equal(t, "box2", spec.AccountSyncHost)
 }

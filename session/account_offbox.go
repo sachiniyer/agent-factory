@@ -104,30 +104,52 @@ const accountInvariantBug = "This is a bug in af, not something a retry or a con
 type accountHostError struct {
 	msg   string
 	cause error
-	// bug marks a refusal no user action fixes; it gets no remedy.
+	// bug marks a refusal no user action fixes; it gets the caller's fact but
+	// no remedy.
 	bug bool
 }
 
 func (e *accountHostError) Error() string { return e.msg }
 func (e *accountHostError) Unwrap() error { return e.cause }
 
-// The remedies for the two operations that provision an account on ssh. Each is
+// accountHostContext is what the caller of a refused provision knows and the
+// runtime does not: a fact about the operation, and what to do next.
+type accountHostContext struct {
+	// fact is true whenever the refusal reaches this caller, bug or not.
+	fact string
+	// remedy is withheld from a bug refusal: no user action fixes one.
+	remedy string
+}
+
+// The contexts for the two operations that provision an account on ssh. Each is
 // true on every path that emits it: a create has made nothing, and a
-// re-provision emits it only for a fresh (non-adopting) replacement, which runs
-// after the previous sandbox was retired.
-const (
-	createAccountHostRemedy  = "Retry the create"
-	restoreAccountHostRemedy = "The session's previous sandbox was already retired, so there is no running sandbox to fall back to; check the host list and try again"
+// re-provision sees an accountHostError only from a fresh (non-adopting)
+// replacement, which runs after the previous sandbox was retired. An adoption's
+// refusal (sshAdoptedAccountHostError) is not an accountHostError, so it never
+// gets the retired-sandbox sentence, which would be false for it.
+var (
+	createAccountHostContext  = accountHostContext{remedy: "Retry the create"}
+	restoreAccountHostContext = accountHostContext{
+		fact:   "The session's previous sandbox was already retired, so there is no running sandbox to fall back to",
+		remedy: "Check the host list and try again",
+	}
 )
 
-// withAccountHostRemedy appends remedy to an accountHostError the user can act
-// on, and returns every other error — and a bug refusal — unchanged.
-func withAccountHostRemedy(err error, remedy string) error {
+// withAccountHostContext appends the caller's fact, and then its remedy, to an
+// accountHostError. A bug refusal gets the fact and no remedy (#7336). Every
+// other error is returned unchanged.
+func withAccountHostContext(err error, c accountHostContext) error {
 	var he *accountHostError
-	if !errors.As(err, &he) || he.bug {
+	if !errors.As(err, &he) {
 		return err
 	}
-	return fmt.Errorf("%w. %s", err, remedy)
+	if c.fact != "" {
+		err = fmt.Errorf("%w. %s", err, c.fact)
+	}
+	if c.remedy != "" && !he.bug {
+		err = fmt.Errorf("%w. %s", err, c.remedy)
+	}
+	return err
 }
 
 // listedHostAccountReason is WHY an account is not sent to an unlisted target, stated
