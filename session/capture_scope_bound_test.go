@@ -345,23 +345,41 @@ func TestReceiptPoolTrackedUnscopedIsScopedOnceTheScopeRecovers(t *testing.T) {
 			never.TrackCodexReceiptPool(false)
 			require.Empty(t, never.receiptPaths, "precondition: a scoped pool holds no other directory's rollout")
 
+			// Wedge the launch dir. Its first resolution runs under a shrunken
+			// bound so the phase stays fast, and it stays stuck until the mount
+			// answers, so every later resolution of it is refused at once. The
+			// production bound comes back before the snapshot is taken: only the
+			// lookup this test wedges runs under the shrunken bound. The store
+			// listings the recovered verdict needs, the snapshot's before-image
+			// and its pool scan, run under the production one (#7337). One of
+			// them is slow here, past the shrunken bound, as on a loaded runner.
 			release := make(chan struct{})
-			restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
-			t.Cleanup(restoreTimeout)
 			restoreSeam := fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
 				if path == wedgeRoot || strings.HasPrefix(path, wedgeRoot+string(filepath.Separator)) {
 					<-release
 				}
 				return filepath.EvalSymlinks(path)
 			})
-			yearDir := filepath.Dir(filepath.Dir(filepath.Dir(foreign)))
-			restoreSlow := slowFirstListing(t, yearDir)
+			t.Cleanup(restoreSeam)
+			restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+			_, err := fsprobe.ResolveForCompare(launchDir)
+			restoreTimeout()
+			require.True(t, errors.Is(err, fsprobe.ErrProbeTimedOut), "precondition: the launch dir does not answer: %v", err)
+
+			restoreSlow := slowFirstListing(t, filepath.Dir(filepath.Dir(filepath.Dir(foreign))))
 			wedged := withinBound(t, func() ConversationCaptureSnapshot {
 				s := BeginConversationCaptureAtCodexHomeAndWorkingDir(home, launchDir)
 				s.TrackCodexReceiptPool(false)
 				return s
 			})
-			require.Error(t, wedged.ScopeErr(), "precondition: armed and pooled while the launch dir did not answer")
+			require.True(t, errors.Is(wedged.ScopeErr(), fsprobe.ErrProbeTimedOut),
+				"precondition: armed and pooled while the launch dir did not answer: %v", wedged.ScopeErr())
+			require.NoError(t, wedged.CodexBaselineErr(), "precondition: the store answered the snapshot's before-image")
+			var pooled []string
+			for _, tracked := range wedged.receiptPaths {
+				pooled = append(pooled, tracked.path)
+			}
+			require.Contains(t, pooled, foreign, "precondition: the unscoped pool holds the whole store, the sibling's rollout included")
 
 			appendCodexRolloutEvent(t, foreign, map[string]any{
 				"type":    "event_msg",
@@ -371,22 +389,15 @@ func TestReceiptPoolTrackedUnscopedIsScopedOnceTheScopeRecovers(t *testing.T) {
 				return WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, wedged, prompt, 0)
 			}), "while it does not answer the receipt decides nothing")
 
-			// The mount answers again, so the rest of the test measures recovery:
-			// its lookups run under the production bound, not the one the wedge
-			// phase shrank (#7337). A rollout-store scan on a loaded runner can
-			// take longer than 50ms, and reads as a scan that did not answer.
+			// The mount answers again: the stuck lookup returns and its latch
+			// clears.
 			close(release)
 			restoreSeam()
 			restoreSlow()
-			restoreTimeout()
 			require.Eventually(t, func() bool {
 				_, err := fsprobe.ResolveForCompare(launchDir)
 				return err == nil
 			}, 5*time.Second, 20*time.Millisecond, "the mount answers again")
-			require.Eventually(t, func() bool {
-				_, err := fsprobe.ReadDir(yearDir)
-				return err == nil
-			}, 5*time.Second, 20*time.Millisecond, "the slow listing has answered")
 			window := 2*codexReceiptQuietStatInterval + time.Second
 			neverErr := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, never, prompt, window)
 			recoveredErr := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, wedged, prompt, window)
