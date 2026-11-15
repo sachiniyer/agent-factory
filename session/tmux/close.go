@@ -366,8 +366,11 @@ var paneExitWait = 3 * time.Second
 // paneExitWait bounds ONLY the root fallback poll below, NOT the whole call —
 // a distinction #1917 was misread on. The tmux commands are what a wedged server
 // stalls, and each carries its own tmuxCommandTimeout: display-message (panePID),
-// then Close's list-panes, kill-session, and at most one has-session probe. The
-// captured-tree reaper adds at most reapGraceWait + reapTermWait + one final second.
+// then Close's list-panes, kill-session, and at most one strict existence probe.
+// That probe is not one command: probeSessionStrict runs has-session and may
+// corroborate with a session listing, each with a 0.5s socket watch on ENOENT,
+// and repeats the pair once if the socket reappeared — about 42s at worst, the
+// figure daemon's killWatchdogPerTab budgets for (#7321). The captured-tree reaper adds at most reapGraceWait + reapTermWait + one final second.
 // So the real worst case remains finite —
 // which is the property daemon.KillSession needs, since it holds a per-session
 // kills-in-flight guard across this call with no deadline of its own.
