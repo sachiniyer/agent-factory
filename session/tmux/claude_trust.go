@@ -278,11 +278,11 @@ func claudeMCPDialogPartiallyRendered(screen visibleText) bool {
 	// "New MCP server found" in earlier output and has the composer cursor as
 	// its last non-blank row would otherwise be classified as partial indefinitely.
 	lastLabel := strings.ToLower(rows[lastIdx].label)
-	if strings.Contains(lastLabel, claudeMCPDialogPreamble) {
-		return true // preamble is still the last thing painted
-	}
-	if strings.Contains(lastLabel, claudeMCPDialogQuestion) {
-		return true // question on its own row is still the last thing painted
+	if strings.Contains(lastLabel, claudeMCPDialogPreamble) || strings.Contains(lastLabel, claudeMCPDialogQuestion) {
+		// The preamble, or the question on its own row, is still the last
+		// thing painted — unless it is the later rows of a composer's draft,
+		// which the composer explains (#7341).
+		return !claudeMCPTrustDraftRow(lines, rows, lastIdx, lastIdx)
 	}
 	if strings.HasPrefix(lastLabel, strings.ToLower(claudeTrustAffordancePrefix)) {
 		// The footer is there but claudeMCPTrustFooterIsLast returned false,

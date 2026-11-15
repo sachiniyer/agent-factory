@@ -3,6 +3,7 @@ package tmux
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -208,8 +209,10 @@ var (
 // Rows are read as claudeTrustRowOf reads them, so frame chrome and blank rows
 // are skipped and an option row's cursor and ordinal are not words. A ❯ row is
 // the modal's only on an option: one anywhere earlier is a composer holding
-// the words as a draft, and no modal. It holds without a key and says nothing:
-// the frame lasts as long as one paint.
+// the words as a draft, and no modal; so are the later rows of a composer's
+// draft (claudeMCPTrustDraftRow). One word alone holds only in the modal's own
+// case. It holds without a key and says nothing: the frame lasts as long as
+// one paint.
 func claudeMCPTrustPaintingOf(screen visibleText) bool {
 	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
@@ -224,16 +227,99 @@ func claudeMCPTrustPaintingOf(screen visibleText) bool {
 		if rows[start].blank || !strings.HasPrefix(strings.ToLower(rows[start].label), claudeMCPTrustModalWords[0]) {
 			continue
 		}
-		if claudeMCPTrustPaintedFrom(rows, start, last) {
-			return true
+		words := claudeMCPTrustPaintedFrom(rows, start, last)
+		switch {
+		case words == 0:
+			continue
+		case words == 1 && !strings.HasPrefix(rows[start].label, claudeMCPTrustFirstWord):
+			// One word, and not in the modal's own case: "new" on a status
+			// line is a branch name, not the modal's first row (#7341).
+			continue
+		case words <= claudeMCPTrustOptionWordsAt && claudeMCPTrustDraftRow(lines, rows, start, last):
+			// The words are the later rows of a composer's draft (#7341).
+			continue
 		}
+		return true
 	}
 	return false
 }
 
-// claudeMCPTrustPaintedFrom reports whether rows start to last spell the
-// modal's words from the first, in order.
-func claudeMCPTrustPaintedFrom(rows []claudeTrustRow, start, last int) bool {
+// claudeMCPTrustFirstWord is the modal's first word as the modal paints it.
+const claudeMCPTrustFirstWord = "New"
+
+// claudeMCPTrustDraftRow reports whether rows start to last are the later rows
+// of a working agent's composer draft, and nothing else: last is the row
+// straight above the composer's closing rule, and every row from it up to the
+// composer's prompt row is a continuation row of that draft, with start among
+// them. It reads the two composers Claude Code draws:
+//
+//	────────────────          ╭────────────────╮
+//	❯ Explain this:           │ > Explain this: │
+//	  New MCP server          │   New MCP server │
+//	────────────────          ╰────────────────╯
+//
+// A composer excuses only the rows it explains, so the shape is the whole of
+// it and each part is the composer's own, never the modal's (#7334 round 2):
+//
+//   - the prompt row sits straight under the composer's opening rule and holds
+//     text that is not an option label or a bare ordinal, so the modal's cursor
+//     row, at any wrap, never opens a composer;
+//   - a continuation row is indented under the prompt's text, or carries the
+//     box's side borders; it is no ❯ row and no rule, so the modal's rows and
+//     frame edges are never a draft's;
+//   - the closing rule is the composer's own kind and is the very next line.
+//
+// Rows below the closing rule, and rows above the prompt, are not explained by
+// it: a modal there still holds.
+func claudeMCPTrustDraftRow(lines []string, rows []claudeTrustRow, start, last int) bool {
+	if last+1 >= len(lines) || !claudeTrustFrameRule(lines[last+1]) {
+		return false
+	}
+	boxed := !claudeComposerRule(lines[last+1])
+	bordered := func(line string) bool {
+		line = strings.TrimSpace(line)
+		first, _ := utf8.DecodeRuneInString(line)
+		lastRune, _ := utf8.DecodeLastRuneInString(line)
+		return strings.ContainsRune(claudeTrustBoxSides, first) && strings.ContainsRune(claudeTrustBoxSides, lastRune)
+	}
+	i := last
+	for ; i >= 0; i-- {
+		if rows[i].blank || claudeTrustFrameRule(lines[i]) {
+			return false
+		}
+		if boxed != bordered(lines[i]) {
+			return false
+		}
+		label := rows[i].label
+		if boxed && (label == ">" || strings.HasPrefix(label, "> ")) {
+			label = strings.TrimSpace(strings.TrimPrefix(label, ">"))
+		} else if boxed || !rows[i].selected {
+			// A continuation row: indented under the prompt's text when the
+			// composer is ruled.
+			if rows[i].selected || (!boxed && !strings.HasPrefix(lines[i], "  ")) {
+				return false
+			}
+			continue
+		}
+		// The prompt row.
+		if i >= start || i == 0 || label == "" || claudeMCPTrustOptionLabel(label) || claudeMCPTrustOrdinalWord(label) {
+			return false
+		}
+		if boxed {
+			return claudeTrustFrameRule(lines[i-1]) && !claudeComposerRule(lines[i-1])
+		}
+		return claudeComposerRule(lines[i-1])
+	}
+	return false
+}
+
+// claudeTrustBoxSides are the vertical strokes of claudeTrustBoxDrawing: the
+// side borders a boxed row carries.
+const claudeTrustBoxSides = "│┃║▏▕"
+
+// claudeMCPTrustPaintedFrom reports how many of the modal's words rows start to
+// last spell, from the first and in order; 0 when they spell anything else.
+func claudeMCPTrustPaintedFrom(rows []claudeTrustRow, start, last int) int {
 	at := 0
 	for i := start; i <= last; i++ {
 		if rows[i].blank {
@@ -250,20 +336,20 @@ func claudeMCPTrustPaintedFrom(rows []claudeTrustRow, start, last int) bool {
 			// The cursor sits on an option row, or on the ordinal a narrow
 			// pane left of one. A bare ❯ is a composer.
 			if at < claudeMCPTrustOptionWordsAt || at >= claudeMCPTrustFooterWordsAt || (len(words) == 0 && !ordinal) {
-				return false
+				return 0
 			}
 		}
 		if ordinal && (at < claudeMCPTrustOptionWordsAt || at >= claudeMCPTrustFooterWordsAt) {
-			return false
+			return 0
 		}
 		for _, word := range words {
 			if at >= len(claudeMCPTrustModalWords) || word != claudeMCPTrustModalWords[at] {
-				return false
+				return 0
 			}
 			at++
 		}
 	}
-	return at > 0
+	return at
 }
 
 // claudeMCPTrustOrdinalWord reports whether word is a picker ordinal with no
