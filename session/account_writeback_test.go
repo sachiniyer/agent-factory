@@ -332,6 +332,52 @@ func TestWriteBackKeepsTheBareMessageWhenStderrIsEmpty(t *testing.T) {
 		"no empty-detail artifact when the failure carried no stderr")
 }
 
+// A timed-out read-back is the case where the diagnostic matters most: a stalled
+// remote tar, or an ssh auth prompt, writes its reason to stderr and then stays
+// alive until the deadline. The timeout branch used to replace the error with one
+// that wrapped only ctx.Err(), so the stderr RunLimited had captured was dropped
+// and the operator saw a bare timeout (#7323). The error must carry the stderr
+// AND stay classifiable as a timeout.
+func TestRunLimitedKeepsCapturedStderrOnTimeout(t *testing.T) {
+	p := &sandboxProvisioner{sshCmd: "sh -c"} // runs the script locally, same composition as ssh
+	start := time.Now()
+	out, err := p.RunLimited(time.Second, "echo AF-RUNLIMITED-TIMEOUT-MARKER-7323 >&2; sleep 60", 1<<20)
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 30*time.Second, "the deadline ended the command, not the sleep")
+	assert.Empty(t, out, "the marker is on stderr; nothing reaches stdout")
+	require.ErrorIs(t, err, context.DeadlineExceeded, "a timeout stays classifiable as a timeout")
+	assert.Contains(t, err.Error(), "timed out after", "the timeout framing is preserved")
+	assert.Equal(t, "AF-RUNLIMITED-TIMEOUT-MARKER-7323", accountReadBackStderr(err),
+		"the bounded stderr must travel with the timeout, not be captured and dropped")
+
+	// A timeout with nothing on stderr carries none: no spurious attachment.
+	_, err = p.RunLimited(time.Second, "sleep 60", 1<<20)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Empty(t, accountReadBackStderr(err), "a timeout with no stderr attaches nothing")
+}
+
+// And it reaches the message the operator's warning log renders, with the same
+// framing a failed read-back gets.
+func TestWriteBackSurfacesStderrFromATimedOutReadBack(t *testing.T) {
+	acct := writeAccount(t, "claude", "v0")
+	// The marker is assembled by the command, so it exists only in what the
+	// command WROTE. The timeout message quotes sshCmd; a marker spelled out in
+	// sshCmd would be in the error whether or not the stderr was kept.
+	p := &sandboxProvisioner{sshCmd: "sh -c 'printf AF-READBACK-%s-7323 TIMEOUT-MARKER >&2; sleep 60'"}
+	w := &sandboxWorkspace{shell: p, SessionDir: "/s",
+		spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+		syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))}}
+	_, err := w.writeBackAccount(time.Second)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "the read-back timed out, and still says so")
+	assert.Contains(t, err.Error(), "AF-READBACK-TIMEOUT-MARKER-7323")
+	assert.Contains(t, err.Error(), "reading account", "the read-back framing is preserved")
+
+	// A timed-out read-back never reaches the archive parser, so the registry is untouched.
+	got, _ := os.ReadFile(filepath.Join(acct.Dir, ".credentials.json"))
+	assert.Equal(t, "v0", string(got))
+}
+
 // Reaching the bound through the shell interface is the same refusal.
 type overLimitShell struct{}
 
