@@ -49,6 +49,8 @@ func TestAdoptionSendsNoAccountToAHostEntryThatWasReAddressed(t *testing.T) {
 			assert.NotErrorIs(t, err, errStopAtLaunch, "the provision must not run past the account sync")
 			assert.Empty(t, accountSyncs(scripts),
 				"the account was synced over the recorded transport to dev@box1.example, but [hosts.box1] now names other-machine.example")
+			assert.Empty(t, scripts,
+				"a refused adoption runs nothing on the host: it is refused before its first command, not at the sync (#7347)")
 		})
 	}
 }
@@ -342,4 +344,97 @@ func TestRestoredSandboxWorkspaceCanBeReadBackButNotSentTo(t *testing.T) {
 	ok, err = w.accountSendApplies()
 	assert.False(t, ok)
 	require.Error(t, err, "a send has no destination to be licensed for")
+}
+
+// The spellings af can prove are one destination compare equal, in both
+// directions: letter case, port 22 written out, and a user that is the login
+// ssh would use anyway (#7347). Everything else refuses, including a trailing
+// dot, whose meaning depends on the resolver.
+func TestAccountSendLicenceTreatsEqualSpellingsOfOneMachineAsEqual(t *testing.T) {
+	acct := writeAccount(t, "claude", testSecretA)
+	login := sshLoginUser(config.SSHConfig{})
+	require.NotEmpty(t, login, "premise: the daemon's own login is known")
+	// send syncs from a workspace whose transport was composed from recorded,
+	// against a host list whose box1 is now entry.
+	send := func(t *testing.T, recorded, entry config.HostConfig) (*recordingShell, error) {
+		t.Helper()
+		saveBox1(t, entry)
+		sh := &recordingShell{}
+		w := workspaceOn(t, acct, "box1")
+		w.shell, w.spec.AccountSyncTarget = sh, accountSyncTargetOf(sshConfigForHost(recorded))
+		return sh, w.syncAccountIn(time.Second)
+	}
+	for name, tc := range map[string]struct {
+		recorded, entry config.HostConfig
+		same            bool
+	}{
+		// A trailing dot is always significant: whether the two spellings name one
+		// machine depends on the resolver's ndots and search list.
+		"a relative name became absolute":                                 {config.HostConfig{Host: "box1.example", User: "dev"}, config.HostConfig{Host: "box1.example.", User: "dev"}, false},
+		"an absolute name became relative":                                {config.HostConfig{Host: "box1.example.", User: "dev"}, config.HostConfig{Host: "box1.example", User: "dev"}, false},
+		"the user line was removed, and it was the login ssh uses anyway": {config.HostConfig{Host: "box1.example", User: login}, config.HostConfig{Host: "box1.example"}, true},
+		"the login ssh uses anyway was written out":                       {config.HostConfig{Host: "box1.example"}, config.HostConfig{Host: "box1.example", User: login}, true},
+		"every spelling at once":                                          {config.HostConfig{Host: "box1.example"}, config.HostConfig{Host: "BOX1.Example", User: login, Port: 22}, true},
+
+		"the user line was removed, and it was another login": {config.HostConfig{Host: "box1.example", User: "not-" + login}, config.HostConfig{Host: "box1.example"}, false},
+		"another user was written in":                         {config.HostConfig{Host: "box1.example"}, config.HostConfig{Host: "box1.example", User: "not-" + login}, false},
+		"the name became a literal address":                   {config.HostConfig{Host: "box1.example", User: "dev"}, config.HostConfig{Host: "192.0.2.10", User: "dev"}, false},
+		"a literal address became a name":                     {config.HostConfig{Host: "192.0.2.10", User: "dev"}, config.HostConfig{Host: "box1.example", User: "dev"}, false},
+		// A single-label name goes through the resolver's search list; its dotted
+		// form is absolute and skips it. They are two lookups, so not one name.
+		"a single-label name gained a trailing dot": {config.HostConfig{Host: "box1", User: "dev"}, config.HostConfig{Host: "box1.", User: "dev"}, false},
+		"a single-label name lost its trailing dot": {config.HostConfig{Host: "box1.", User: "dev"}, config.HostConfig{Host: "box1", User: "dev"}, false},
+		// An address literal keeps its text exactly.
+		"an address literal gained a trailing dot": {config.HostConfig{Host: "192.0.2.10", User: "dev"}, config.HostConfig{Host: "192.0.2.10.", User: "dev"}, false},
+		"an address literal lost its trailing dot": {config.HostConfig{Host: "192.0.2.10.", User: "dev"}, config.HostConfig{Host: "192.0.2.10", User: "dev"}, false},
+		"re-addressed, in an absolute spelling":    {config.HostConfig{Host: "box1.example", User: "dev"}, config.HostConfig{Host: "other-machine.example.", User: "dev"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sh, err := send(t, tc.recorded, tc.entry)
+			if tc.same {
+				require.NoError(t, err, "the machine did not move")
+				assert.Len(t, sh.scripts, 1, "so the account is synced")
+				return
+			}
+			require.Error(t, err, "these are not the same destination")
+			assert.Empty(t, sh.scripts, "nothing reaches the transport")
+			assert.Empty(t, sh.stdin)
+		})
+	}
+}
+
+// Every refusal that names `af sessions kill` also names the work it destroys.
+// The pre-reap refusal is the one where that matters most: the old sandbox is
+// still there, and the kill is what would remove it.
+func TestPreReapRefusalNamesTheWorkThatKillDestroys(t *testing.T) {
+	f := newListedFixture(t, oneListedHost)
+	reaped := false
+	row := accountRow(f, "box1", func() error { reaped = true; return nil })
+	saveDefaultHost(t, nil, "") // box1 has left the host list
+
+	err := row.reprovisionRemote()
+	require.Error(t, err)
+	assert.False(t, reaped, "premise: refused before the reap")
+	msg := err.Error()
+	require.Contains(t, msg, "af sessions kill")
+	assert.Contains(t, msg, "copy or push any unpushed work off the host first")
+}
+
+// A trailing dot is never normalised away, for any kind of host; only letter
+// case is.
+func TestAccountSyncTargetKeepsATrailingDot(t *testing.T) {
+	target := func(host string) accountSyncTarget {
+		return accountSyncTargetOf(config.SSHConfig{Host: host, User: "dev"})
+	}
+	assert.Equal(t, target("box1.example"), target("BOX1.Example"), "case is not a different destination")
+	for _, pair := range [][2]string{
+		{"box1.example", "box1.example."},
+		{"box1", "box1."},
+		{"192.0.2.10", "192.0.2.10."},
+		{"2001:db8::1", "2001:db8::1."},
+		{"box1.example", "box1.example.."},
+		{"box1", "box1.example"},
+	} {
+		assert.NotEqual(t, target(pair[0]), target(pair[1]), "%q and %q are not one destination", pair[0], pair[1])
+	}
 }

@@ -983,6 +983,21 @@ config, so the host's own login is neither read nor replaced.
 - **Only to a listed host.** The licence to send credentials is the host-list
   entry, which only the operator writes. A target a repository named (its `[ssh]`
   section) or a free-form `sandbox.ssh` command is refused before anything is sent.
+- **The licence is checked at every send, against the entry as it is then.** Before
+  credentials are sent (at create, at restore, and at an account handoff or limit
+  failover) af compares where the session's connection logs in with what
+  `[hosts.<name>]` says now: its `host`, `port` and `user`. If the entry was removed
+  or now names another machine, port or user, nothing is sent and the refusal names
+  the edit that restores it. Three spellings compare equal: letter case in the
+  host name, port 22 written out, and a `user` that is the login ssh would use
+  anyway. A trailing dot on any name is a different spelling and refuses
+  (`box1.example.` is not `box1.example`), because whether the two name one
+  machine depends on the resolver's settings, which af does not control. Changing `identity_file`, `host_key_verification` or
+  `workspace_root` does not refuse. Reading credentials back and removing them at
+  teardown still works after an entry is removed, so they can always be taken off a
+  host. The comparison is on the entry's text, not on a resolved address: if DNS
+  re-points a name while its entry stays unchanged, af does not detect it, and a
+  running session keeps using the address it was provisioned on.
 - **Refreshes are written back — as a versioned compare-and-swap from a bounded
   stream.** af remembers the version (a content digest) of each credential file it
   synced into the session. A file the agent did not change is never written back, and

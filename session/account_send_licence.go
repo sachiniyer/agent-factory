@@ -32,8 +32,11 @@ import (
 // taken out of the list, so it stays licensed by the recorded name alone
 // (accountSyncApplies).
 
-// accountSyncTarget is where an ssh transport logs in: the machine, the port,
-// and the remote user whose home receives the account scope. It is what "the
+// accountSyncTarget is where an ssh transport logs in: the machine as the host
+// list spells it, the port, and the remote user whose home receives the account
+// scope. It is the entry's TEXT, normalised — not a resolved address — so
+// re-pointing DNS behind an unchanged entry is not something this can see
+// (docs/backends.md says so). It is what "the
 // machine a send reaches" means here. An identity file, a host-key posture or a
 // known_hosts path is not part of it: changing one changes how af proves the
 // machine, not which machine it is.
@@ -70,8 +73,21 @@ func accountSyncTargetOf(cfg config.SSHConfig) accountSyncTarget {
 	if port == 0 {
 		port = sshDefaultPort
 	}
-	// Host names compare case-insensitively; user names do not.
-	return accountSyncTarget{Host: strings.ToLower(host), Port: port, User: strings.TrimSpace(cfg.User)}
+	// Two spellings of one destination must compare equal, or a spelling-only
+	// edit to an entry would refuse every session already on that machine
+	// (#7347):
+	//   - host names compare case-insensitively;
+	//   - the user is the one ssh actually logs in as, so an unset user equals
+	//     the daemon's own login written out (sshLoginUser, which is also what
+	//     the composed command pins).
+	// Nothing else is made equal. A TRAILING DOT is always significant: whether
+	// "box1.example." and "box1.example" are one machine depends on the
+	// resolver's ndots and search list, which af does not control (with ndots
+	// of 2 or more the relative spelling is search-expanded), and this decides
+	// where credentials go. So that edit refuses, like a name against a literal
+	// address, and the refusal names the edit to revert.
+	host = strings.ToLower(host)
+	return accountSyncTarget{Host: host, Port: port, User: sshLoginUser(cfg)}
 }
 
 // accountSendLicence reports why spec's account may not be sent over spec's
