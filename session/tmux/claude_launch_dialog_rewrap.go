@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -139,7 +140,7 @@ func (p claudeLaunchDialogPane) rowStart(at int) (content int, ok bool) {
 
 // claudeLaunchDialogRewrapOf reports a folder-trust dialog the pane ends with a
 // part of, as wrapped at any width.
-func claudeLaunchDialogRewrapOf(screen visibleText) (claudeLaunchDialogMatch, bool) {
+func claudeLaunchDialogRewrapOf(screen visibleText, paneWidth claudePaneWidth) (claudeLaunchDialogMatch, bool) {
 	pane := claudeLaunchDialogPaneOf(screen)
 	if len(pane.starts) == 0 {
 		return claudeLaunchDialogMatch{}, false
@@ -147,7 +148,23 @@ func claudeLaunchDialogRewrapOf(screen visibleText) (claudeLaunchDialogMatch, bo
 	if match, ok := claudeLaunchDialogTail(pane); ok {
 		return match, true
 	}
-	return claudeLaunchDialogPainting(pane)
+	return claudeLaunchDialogPainting(pane, paneWidth)
+}
+
+// claudePaneWidth reads the pane's width from tmux, bounded like every other
+// read on this path. A failed or implausible read is not a width.
+func (t *TmuxSession) claudePaneWidth() (int, bool) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", ExactTarget(t.sanitizedName), "#{pane_width}")
+	if err != nil {
+		return 0, false
+	}
+	var width int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &width); err != nil || width <= 0 {
+		return 0, false
+	}
+	return width, true
 }
 
 // claudeLaunchDialogTail reports a pane whose content ends with a folder-trust
@@ -287,8 +304,61 @@ func claudeLaunchDialogLabelTail(text string) bool {
 
 // claudeLegacyTrustPaintedMin is the least of the legacy question af reads as
 // that dialog being painted: "Do you", its first row on the narrowest pane
-// that shows two words.
-const claudeLegacyTrustPaintedMin = len("Doyou")
+// that shows two words. claudeLegacyTrustPaintedAlone is the least it reads
+// that way on the words alone, "Do you trust": text a trust question begins
+// with and little else does. Anything shorter is two common words, and holds
+// only where the pane's width broke it (#7350).
+const (
+	claudeLegacyTrustPaintedMin   = len("Doyou")
+	claudeLegacyTrustPaintedAlone = len("Doyoutrust")
+)
+
+// claudeLaunchDialogWrapsAt reports whether content rows first to the last
+// could be the legacy question broken by a pane width columns wide. A renderer
+// breaks a row only when the next word does not fit. So a row of the question
+// that stops with room left for the next word is not a wrap at that width:
+// "Do you" as the last row of an 80-column pane is the end of a sentence, and
+// "Do you" on a 6-column pane is the question's first row.
+//
+// The width is the pane's own, read from tmux. Rows already on the pane are
+// no evidence of it: after a resize, rows painted at the old width are still
+// there, wider than anything the new width paints.
+func claudeLaunchDialogWrapsAt(pane claudeLaunchDialogPane, first, width int) bool {
+	at := 0 // offset into the question, spaces included
+	question := claudeLegacyTrustQuestion
+	for content := first; content < len(pane.starts); content++ {
+		for range claudeLaunchDialogRowText(pane, content) {
+			for at < len(question) && question[at] == ' ' {
+				at++
+			}
+			at++
+		}
+		if at >= len(question) {
+			return true
+		}
+		// What the renderer would have put next on this row: the rest of a
+		// word it cut, or a space and the next word.
+		rest := question[at:]
+		need := 0
+		if rest[0] == ' ' {
+			rest, need = strings.TrimLeft(rest, " "), 1
+		}
+		if cut := strings.IndexByte(rest, ' '); cut >= 0 {
+			rest = rest[:cut]
+		}
+		need += len(rest)
+		painted := utf8.RuneCountInString(strings.TrimRightFunc(pane.lines[pane.index[content]], unicode.IsSpace))
+		if painted+need <= width {
+			return false
+		}
+	}
+	return true
+}
+
+// claudePaneWidth is how the matcher asks for the pane's width, and only when
+// it needs it. ok is false when the width could not be read; the matcher then
+// holds, because an unread width is not evidence of a wide pane.
+type claudePaneWidth func() (width int, ok bool)
 
 // claudeLaunchDialogPainting reports the legacy folder-trust dialog while
 // Claude Code is still painting it, on a pane too narrow for its question to
@@ -302,7 +372,11 @@ const claudeLegacyTrustPaintedMin = len("Doyou")
 // other, or a plain rule, is a composer, and the question is output being
 // quoted. A question on one row is left to claudeLegacyTrustDialogOf, which
 // reads it whole.
-func claudeLaunchDialogPainting(pane claudeLaunchDialogPane) (claudeLaunchDialogMatch, bool) {
+//
+// Rows that are the later rows of a composer's draft are the composer's, not
+// the dialog's (claudeMCPTrustDraftRow). And fewer words than "Do you trust"
+// hold only where the pane's width broke them (claudeLaunchDialogWrapsAt).
+func claudeLaunchDialogPainting(pane claudeLaunchDialogPane, paneWidth claudePaneWidth) (claudeLaunchDialogMatch, bool) {
 	question := claudeLegacyTrustQuestionSquashed
 	match := claudeLaunchDialogMatch{kind: claudeLaunchDialogLegacy}
 	for first := len(pane.starts) - 1; first >= 0; first-- {
@@ -315,6 +389,18 @@ func claudeLaunchDialogPainting(pane claudeLaunchDialogPane) (claudeLaunchDialog
 			// The question is still being painted.
 			if len(text) >= claudeLegacyTrustPaintedMin && strings.HasPrefix(question, text) &&
 				!claudeLaunchDialogAnySelected(pane, first, len(pane.starts)) {
+				if len(text) < claudeLegacyTrustPaintedAlone {
+					// Two common words: the question only where this pane's
+					// width broke them.
+					if width, ok := paneWidth(); ok && !claudeLaunchDialogWrapsAt(pane, first, width) {
+						continue
+					}
+				}
+				if claudeMCPTrustDraftRow(pane.lines, pane.rows, pane.index[first], pane.index[len(pane.index)-1]) {
+					// The later rows of a composer's draft: the composer
+					// explains them (#7344, #7350).
+					continue
+				}
 				match.saw = "the start of its question, with nothing painted below it yet"
 				if strings.HasPrefix(claudeMCPTrustQuestionSquashed, text) {
 					match.kind = claudeLaunchDialogEither
@@ -335,7 +421,8 @@ func claudeLaunchDialogPainting(pane claudeLaunchDialogPane) (claudeLaunchDialog
 			// The question ends inside a row, or sits on one row.
 			continue
 		}
-		if claudeLaunchDialogComposerBelow(pane, below) {
+		if claudeLaunchDialogComposerBelow(pane, below) ||
+			claudeMCPTrustDraftRow(pane.lines, pane.rows, pane.index[first], pane.index[len(pane.index)-1]) {
 			continue
 		}
 		match.saw = "its question wrapped onto several rows"

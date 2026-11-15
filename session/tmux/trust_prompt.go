@@ -129,7 +129,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		// part of, read with its whitespace removed so that no wrap point
 		// matters (#7346). Asked last of all: it only turns a clear pane into a
 		// hold.
-		if match, held := claudeLaunchDialogRewrapOf(screen); held {
+		if match, held := claudeLaunchDialogRewrapOf(screen, t.claudePaneWidth); held {
 			t.refuseClaudeLaunchDialog(match)
 			return true
 		}
