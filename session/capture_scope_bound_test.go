@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -344,21 +345,41 @@ func TestReceiptPoolTrackedUnscopedIsScopedOnceTheScopeRecovers(t *testing.T) {
 			never.TrackCodexReceiptPool(false)
 			require.Empty(t, never.receiptPaths, "precondition: a scoped pool holds no other directory's rollout")
 
+			// Wedge the launch dir. Its first resolution runs under a shrunken
+			// bound so the phase stays fast, and it stays stuck until the mount
+			// answers, so every later resolution of it is refused at once. The
+			// production bound comes back before the snapshot is taken: only the
+			// lookup this test wedges runs under the shrunken bound. The store
+			// listings the recovered verdict needs, the snapshot's before-image
+			// and its pool scan, run under the production one (#7337). One of
+			// them is slow here, past the shrunken bound, as on a loaded runner.
 			release := make(chan struct{})
-			restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
-			t.Cleanup(restoreTimeout)
 			restoreSeam := fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
 				if path == wedgeRoot || strings.HasPrefix(path, wedgeRoot+string(filepath.Separator)) {
 					<-release
 				}
 				return filepath.EvalSymlinks(path)
 			})
+			t.Cleanup(restoreSeam)
+			restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+			_, err := fsprobe.ResolveForCompare(launchDir)
+			restoreTimeout()
+			require.True(t, errors.Is(err, fsprobe.ErrProbeTimedOut), "precondition: the launch dir does not answer: %v", err)
+
+			restoreSlow := slowFirstListing(t, filepath.Dir(filepath.Dir(filepath.Dir(foreign))))
 			wedged := withinBound(t, func() ConversationCaptureSnapshot {
 				s := BeginConversationCaptureAtCodexHomeAndWorkingDir(home, launchDir)
 				s.TrackCodexReceiptPool(false)
 				return s
 			})
-			require.Error(t, wedged.ScopeErr(), "precondition: armed and pooled while the launch dir did not answer")
+			require.True(t, errors.Is(wedged.ScopeErr(), fsprobe.ErrProbeTimedOut),
+				"precondition: armed and pooled while the launch dir did not answer: %v", wedged.ScopeErr())
+			require.NoError(t, wedged.CodexBaselineErr(), "precondition: the store answered the snapshot's before-image")
+			var pooled []string
+			for _, tracked := range wedged.receiptPaths {
+				pooled = append(pooled, tracked.path)
+			}
+			require.Contains(t, pooled, foreign, "precondition: the unscoped pool holds the whole store, the sibling's rollout included")
 
 			appendCodexRolloutEvent(t, foreign, map[string]any{
 				"type":    "event_msg",
@@ -368,13 +389,11 @@ func TestReceiptPoolTrackedUnscopedIsScopedOnceTheScopeRecovers(t *testing.T) {
 				return WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, wedged, prompt, 0)
 			}), "while it does not answer the receipt decides nothing")
 
-			// The mount answers again, so the rest of the test measures recovery:
-			// its lookups run under the production bound, not the one the wedge
-			// phase shrank (#7337). A rollout-store scan on a loaded runner can
-			// take longer than 50ms, and reads as a scan that did not answer.
+			// The mount answers again: the stuck lookup returns and its latch
+			// clears.
 			close(release)
 			restoreSeam()
-			restoreTimeout()
+			restoreSlow()
 			require.Eventually(t, func() bool {
 				_, err := fsprobe.ResolveForCompare(launchDir)
 				return err == nil
@@ -407,4 +426,20 @@ func TestSetConversationNamesADanglingLaunchDir(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "a symlink in it points at something that is gone", "the lead names what af saw")
 	require.NotContains(t, err.Error(), "is responding", "not a mount that did not answer")
+}
+
+// slowFirstListing makes the first listing of dir take past the wedge phase's
+// shrunken bound, and well within the production one, as an ordinary listing
+// on a loaded runner can (#7337). Every other listing answers at once.
+func slowFirstListing(t *testing.T, dir string) (restore func()) {
+	t.Helper()
+	var slowed atomic.Bool
+	restore = fsprobe.SetReadDirForTest(func(d string) ([]os.DirEntry, error) {
+		if d == dir && slowed.CompareAndSwap(false, true) {
+			time.Sleep(200 * time.Millisecond)
+		}
+		return os.ReadDir(d)
+	})
+	t.Cleanup(restore)
+	return restore
 }
