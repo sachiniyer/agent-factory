@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -353,6 +354,8 @@ func TestReceiptPoolTrackedUnscopedIsScopedOnceTheScopeRecovers(t *testing.T) {
 				}
 				return filepath.EvalSymlinks(path)
 			})
+			yearDir := filepath.Dir(filepath.Dir(filepath.Dir(foreign)))
+			restoreSlow := slowFirstListing(t, yearDir)
 			wedged := withinBound(t, func() ConversationCaptureSnapshot {
 				s := BeginConversationCaptureAtCodexHomeAndWorkingDir(home, launchDir)
 				s.TrackCodexReceiptPool(false)
@@ -374,11 +377,16 @@ func TestReceiptPoolTrackedUnscopedIsScopedOnceTheScopeRecovers(t *testing.T) {
 			// take longer than 50ms, and reads as a scan that did not answer.
 			close(release)
 			restoreSeam()
+			restoreSlow()
 			restoreTimeout()
 			require.Eventually(t, func() bool {
 				_, err := fsprobe.ResolveForCompare(launchDir)
 				return err == nil
 			}, 5*time.Second, 20*time.Millisecond, "the mount answers again")
+			require.Eventually(t, func() bool {
+				_, err := fsprobe.ReadDir(yearDir)
+				return err == nil
+			}, 5*time.Second, 20*time.Millisecond, "the slow listing has answered")
 			window := 2*codexReceiptQuietStatInterval + time.Second
 			neverErr := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, never, prompt, window)
 			recoveredErr := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, wedged, prompt, window)
@@ -407,4 +415,20 @@ func TestSetConversationNamesADanglingLaunchDir(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "a symlink in it points at something that is gone", "the lead names what af saw")
 	require.NotContains(t, err.Error(), "is responding", "not a mount that did not answer")
+}
+
+// slowFirstListing makes the first listing of dir take past the wedge phase's
+// shrunken bound, and well within the production one, as an ordinary listing
+// on a loaded runner can (#7337). Every other listing answers at once.
+func slowFirstListing(t *testing.T, dir string) (restore func()) {
+	t.Helper()
+	var slowed atomic.Bool
+	restore = fsprobe.SetReadDirForTest(func(d string) ([]os.DirEntry, error) {
+		if d == dir && slowed.CompareAndSwap(false, true) {
+			time.Sleep(200 * time.Millisecond)
+		}
+		return os.ReadDir(d)
+	})
+	t.Cleanup(restore)
+	return restore
 }
