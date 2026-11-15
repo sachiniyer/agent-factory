@@ -988,9 +988,13 @@ config, so the host's own login is neither read nor replaced.
   failover) af compares where the session's connection logs in with what
   `[hosts.<name>]` says now: its `host`, `port` and `user`. If the entry was removed
   or now names another machine, port or user, nothing is sent and the refusal names
-  the edit that restores it. Spelling does not matter: letter case, a trailing dot
-  on the name, port 22 written out, and a `user` that is the login ssh would use
-  anyway all compare equal. Changing `identity_file`, `host_key_verification` or
+  the edit that restores it. Spelling does not matter: letter case, port 22 written
+  out, and a `user` that is the login ssh would use anyway all compare equal. So
+  does a trailing dot on a name that already contains a dot: such a name is tried
+  as absolute first, so `box1.example.` and `box1.example` count as one name. A
+  single-label name and its dotted form (`box1` and `box1.`) do not, because the
+  first is expanded through the resolver's search list and the second is not; nor
+  does an address written with a trailing dot. Changing `identity_file`, `host_key_verification` or
   `workspace_root` does not refuse. Reading credentials back and removing them at
   teardown still works after an entry is removed, so they can always be taken off a
   host. The comparison is on the entry's text, not on a resolved address: if DNS

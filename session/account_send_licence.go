@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -76,18 +77,34 @@ func accountSyncTargetOf(cfg config.SSHConfig) accountSyncTarget {
 	// Two spellings of one destination must compare equal, or a spelling-only
 	// edit to an entry would refuse every session already on that machine
 	// (#7347):
-	//   - host names compare case-insensitively, and an absolute name
-	//     ("box1.example.") is the same name as its relative spelling;
+	//   - host names compare case-insensitively, and an absolute name WITH AN
+	//     INTERIOR DOT ("box1.example.") is the same name as its relative
+	//     spelling (sameNameWithoutTrailingDot says why only those);
 	//   - the user is the one ssh actually logs in as, so an unset user equals
 	//     the daemon's own login written out (sshLoginUser, which is also what
 	//     the composed command pins).
 	// A name and a literal address are NOT made equal: which address a name
 	// means is exactly what can change, so that edit stays a refusal.
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	if host == "" {
-		return accountSyncTarget{}
-	}
+	host = sameNameWithoutTrailingDot(strings.ToLower(host))
 	return accountSyncTarget{Host: host, Port: port, User: sshLoginUser(cfg)}
+}
+
+// sameNameWithoutTrailingDot drops a trailing dot from host only when the
+// dotless spelling is the same lookup: a name with an interior dot.
+//
+// Under default resolver settings (ndots 1) a name that already contains a dot
+// is tried as absolute first, so "box1.example" and "box1.example." are one
+// name. A SINGLE-LABEL name is not: "box1" is expanded through the resolver's
+// search list, while "box1." is absolute and skips it, so the two can be
+// different machines and an edit between them must stay a refusal (#7348
+// review). An address literal is not a name at all, so it keeps its text
+// exactly — "192.0.2.10." is not made equal to "192.0.2.10".
+func sameNameWithoutTrailingDot(host string) string {
+	base, dotted := strings.CutSuffix(host, ".")
+	if !dotted || !strings.Contains(base, ".") || strings.Contains(base, ":") || net.ParseIP(base) != nil {
+		return host
+	}
+	return base
 }
 
 // accountSendLicence reports why spec's account may not be sent over spec's

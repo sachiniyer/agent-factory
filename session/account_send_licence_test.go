@@ -377,7 +377,14 @@ func TestAccountSendLicenceTreatsEqualSpellingsOfOneMachineAsEqual(t *testing.T)
 		"another user was written in":                         {config.HostConfig{Host: "box1.example"}, config.HostConfig{Host: "box1.example", User: "not-" + login}, false},
 		"the name became a literal address":                   {config.HostConfig{Host: "box1.example", User: "dev"}, config.HostConfig{Host: "192.0.2.10", User: "dev"}, false},
 		"a literal address became a name":                     {config.HostConfig{Host: "192.0.2.10", User: "dev"}, config.HostConfig{Host: "box1.example", User: "dev"}, false},
-		"re-addressed, in an absolute spelling":               {config.HostConfig{Host: "box1.example", User: "dev"}, config.HostConfig{Host: "other-machine.example.", User: "dev"}, false},
+		// A single-label name goes through the resolver's search list; its dotted
+		// form is absolute and skips it. They are two lookups, so not one name.
+		"a single-label name gained a trailing dot": {config.HostConfig{Host: "box1", User: "dev"}, config.HostConfig{Host: "box1.", User: "dev"}, false},
+		"a single-label name lost its trailing dot": {config.HostConfig{Host: "box1.", User: "dev"}, config.HostConfig{Host: "box1", User: "dev"}, false},
+		// An address literal keeps its text exactly.
+		"an address literal gained a trailing dot": {config.HostConfig{Host: "192.0.2.10", User: "dev"}, config.HostConfig{Host: "192.0.2.10.", User: "dev"}, false},
+		"an address literal lost its trailing dot": {config.HostConfig{Host: "192.0.2.10.", User: "dev"}, config.HostConfig{Host: "192.0.2.10", User: "dev"}, false},
+		"re-addressed, in an absolute spelling":    {config.HostConfig{Host: "box1.example", User: "dev"}, config.HostConfig{Host: "other-machine.example.", User: "dev"}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			sh, err := send(t, tc.recorded, tc.entry)
@@ -386,10 +393,9 @@ func TestAccountSendLicenceTreatsEqualSpellingsOfOneMachineAsEqual(t *testing.T)
 				assert.Len(t, sh.scripts, 1, "so the account is synced")
 				return
 			}
-			require.Error(t, err)
+			require.Error(t, err, "these are not the same destination")
 			assert.Empty(t, sh.scripts, "nothing reaches the transport")
 			assert.Empty(t, sh.stdin)
-			assert.Contains(t, err.Error(), "[hosts.box1] now names")
 		})
 	}
 }
@@ -409,4 +415,23 @@ func TestPreReapRefusalNamesTheWorkThatKillDestroys(t *testing.T) {
 	msg := err.Error()
 	require.Contains(t, msg, "af sessions kill")
 	assert.Contains(t, msg, "copy or push any unpushed work off the host first")
+}
+
+// The trailing-dot rule is for a name with an interior dot only. A recorded
+// IPv6 literal with a stray dot is not the literal without it either.
+func TestAccountSyncTargetKeepsSingleLabelNamesAndLiteralsExactly(t *testing.T) {
+	target := func(host string) accountSyncTarget {
+		return accountSyncTargetOf(config.SSHConfig{Host: host, User: "dev"})
+	}
+	assert.Equal(t, target("box1.example"), target("box1.example."), "a dotted name is tried as absolute first, so these are one name")
+	assert.Equal(t, target("box1.example"), target("BOX1.Example."))
+	for _, pair := range [][2]string{
+		{"box1", "box1."},
+		{"192.0.2.10", "192.0.2.10."},
+		{"2001:db8::1", "2001:db8::1."},
+		{"box1.example", "box1.example.."},
+		{"box1", "box1.example"},
+	} {
+		assert.NotEqual(t, target(pair[0]), target(pair[1]), "%q and %q are not one destination", pair[0], pair[1])
+	}
 }
