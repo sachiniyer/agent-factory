@@ -1395,17 +1395,25 @@ func TestCheckAndHandleTrustPrompt_PartiallyRenderedMCPDialogWithBlankAboveOptio
 	}
 }
 
-// An agent that prints the exact MCP question above an unrelated yes/no picker
-// — but WITHOUT the MCP preamble ("New MCP server found") — must not fire
-// Enter. The separator bridge in claudeMCPTrustFooterIsLast requires the
-// preamble to appear in the preceding block alongside the question; a question-
-// only preceding block does not satisfy it.
+// The exact MCP question printed above a yes/no picker — but WITHOUT the MCP
+// preamble ("New MCP server found") — with the "Enter to confirm" footer last
+// is the one shape af cannot disambiguate. It is pixel-identical to the old MCP
+// modal with its preamble scrolled off the top of a too-short pane (Claude can
+// render the preamble and question on separate rows, so the preamble can scroll
+// alone). A bare Enter accepts the preselected "1. Yes" of either reading, so
+// the two want opposite keys, and af cannot tell them apart. Failing closed —
+// reporting the pane not clear and injecting no key — costs the create's trust
+// budget, which fails loudly and is recoverable; failing open auto-trusts an MCP
+// server that can execute code, the exact #3579-class failure this gate exists
+// to prevent. This is the deliberate flip the folder-trust twin made for the same
+// trade (claudeFolderTrustFooterOnly, a32e070c), carried to the last launch-gate
+// branch that still failed open.
 //
-// This is the thread 2 finding (claude_trust.go:470): the separator bridge
-// extended the search to the preceding block but only required the question
-// there, leaving an attacker-controlled path via the exact question string above
-// any yes/no picker with a blank row between them.
-func TestCheckAndHandleTrustPrompt_QuestionOnlyAboveYesNoPickerInjectsNothing(t *testing.T) {
+// claudeMCPTrustFooterIsLast requires the preamble, so a question-only frame
+// still injects nothing; the hold comes from claudeMCPDialogScrolledOff, which
+// fires on footer-last + the two rows above being exactly yes/no + the preamble
+// absent.
+func TestCheckAndHandleTrustPrompt_QuestionOnlyAboveYesNoPickerHolds(t *testing.T) {
 	for _, tt := range []struct{ name, content string }{
 		{
 			// Question (without preamble) in preceding block, then blank, then
@@ -1428,11 +1436,12 @@ func TestCheckAndHandleTrustPrompt_QuestionOnlyAboveYesNoPickerInjectsNothing(t 
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			handled, cmds := pollStaticPane(t, tt.content, 4)
-			require.False(t, handled,
-				"a question without the MCP preamble above a yes/no picker is not a trust prompt; "+
-					"af must not report one in the way")
+			require.True(t, handled,
+				"a question without the MCP preamble above a yes/no picker with the footer last "+
+					"reads the same as the live modal with its preamble scrolled off; af must hold, "+
+					"not risk auto-trusting the preselected Yes")
 			require.Empty(t, sentKeystrokes(cmds),
-				"no key may be injected into an unrelated picker; got %v", cmds)
+				"no key may be injected into an ambiguous yes/no footer-last frame; got %v", cmds)
 		})
 	}
 }
