@@ -10,6 +10,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -609,6 +610,14 @@ func TestAccountHandoffInputsCarryTheLiveCarryAnswer(t *testing.T) {
 func reportReadyRecipientHands(t *testing.T, verdict session.PromptDeliveryStatus) (*Manager, *session.Instance, *promptRecorder) {
 	t.Helper()
 	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, rec := stashReportReadyRecipient(t, manager, repoID, repoPath, verdict)
+	return manager, inst, rec
+}
+
+// stashReportReadyRecipient is reportReadyRecipientHands' recipient half, for
+// a test that builds its own Manager.
+func stashReportReadyRecipient(t *testing.T, manager *Manager, repoID, repoPath string, verdict session.PromptDeliveryStatus) (*session.Instance, *promptRecorder) {
+	t.Helper()
 	rec := &promptRecorder{}
 	backend := verdictRecordingBackend{
 		recordingBackend: recordingBackend{readyFakeBackend{session.NewFakeBackend()}, rec},
@@ -629,7 +638,7 @@ func reportReadyRecipientHands(t *testing.T, verdict session.PromptDeliveryStatu
 	manager.mu.Lock()
 	manager.instances[daemonInstanceKey(repoID, "observer")] = inst
 	manager.mu.Unlock()
-	return manager, inst, rec
+	return inst, rec
 }
 
 // #6818 follow-up: a digest send the runtime explicitly reports as not
@@ -671,4 +680,83 @@ func TestDeliverHandoffReportSentOnPromptDelivered(t *testing.T) {
 		"a proven delivery must retire the backlog as reportSent")
 	require.Len(t, rec.snapshot(), 1,
 		"the digest send must have been attempted")
+}
+
+// #7309 / #7318 review: what the flush worker does with each delivery status,
+// across several flush ticks, counted in sends.
+//
+//   - delivered retires the rows after one send;
+//   - not-delivered is proof the digest did not arrive, so its rows stay and
+//     every later flush past the backoff sends them again (#7309);
+//   - sent-unverified and could-not-confirm are ambiguous — the first copy may
+//     already have landed, which is exactly why session/tmux/submit.go reports
+//     sent-unverified instead of not-delivered. Their rows retire, the worker
+//     warns once naming the recipient and the status, and the digest is never
+//     submitted a second time however many flushes follow.
+func TestHandoffReportFlushNeverResubmitsAnAmbiguousDigest(t *testing.T) {
+	const cycles = 3
+	for _, tc := range []struct {
+		name      string
+		status    session.PromptDeliveryStatus
+		wantSends int
+		retired   bool
+		ambiguous bool
+	}{
+		{"delivered", session.PromptDelivered, 1, true, false},
+		{"not-delivered", session.PromptNotDelivered, cycles, false, false},
+		{"sent-unverified", session.PromptSentUnverified, 1, true, true},
+		{"could-not-confirm", session.PromptCouldNotConfirm, 1, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			repoPath := setupControlRepo(t)
+			repo, err := config.RepoFromPath(repoPath)
+			require.NoError(t, err)
+			cfg := config.DefaultConfig()
+			cfg.AccountHandoff.Mode = config.AccountHandoffModeShadow
+			cfg.AccountHandoff.ReportTo = "observer"
+			manager, warnings := newManagerCapturingWarnings(t, cfg)
+			inst, rec := stashReportReadyRecipient(t, manager, repo.ID, repoPath, tc.status)
+
+			now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+			oldNow := nowFunc
+			nowFunc = func() time.Time { return now }
+			t.Cleanup(func() { nowFunc = oldNow })
+
+			// The recipient doubles as the emitter: its project resolves to
+			// shadow mode with this report_to, so its row stays live.
+			pending := map[string]*reportPending{}
+			manager.queueReportJob(pending, handoffReportJob{
+				spec: "observer", key: inst.ID,
+				rows: []handoff.EventRow{{SessionKey: inst.ID}},
+			})
+			require.Len(t, manager.liveReportRows(pending[inst.ID]), 1,
+				"fixture: the queued row must survive the live-emitter filter, or no flush sends anything")
+
+			for i := 0; i < cycles; i++ {
+				manager.flushHandoffReports(pending)
+				// Step past the longest held backoff so a held backlog is
+				// always due again on the next flush.
+				now = now.Add(reportHeldBackoffMax + time.Second)
+			}
+
+			require.Len(t, rec.snapshot(), tc.wantSends,
+				"status %s: digest submitted %d time(s) over %d flushes", tc.status, len(rec.snapshot()), cycles)
+			if tc.retired {
+				require.Empty(t, pending, "status %s must retire the recipient's rows", tc.status)
+			} else {
+				require.Len(t, pending[inst.ID].rows, 1,
+					"status %s is proof of non-arrival — the rows must stay for the next flush", tc.status)
+			}
+			unconfirmed := strings.Count(warnings.String(), "not resending it")
+			if !tc.ambiguous {
+				require.Zero(t, unconfirmed, "status %s is not ambiguous: %s", tc.status, warnings.String())
+				return
+			}
+			require.Equal(t, 1, unconfirmed,
+				"an ambiguous digest is retired with exactly one warning: %s", warnings.String())
+			require.Contains(t, warnings.String(), `"observer"`, "the warning names the recipient")
+			require.Contains(t, warnings.String(), string(tc.status), "the warning names the status")
+		})
+	}
 }

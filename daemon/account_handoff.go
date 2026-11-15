@@ -649,28 +649,35 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 			case job := <-manager.handoffReportCh:
 				manager.queueReportJob(pending, job)
 			case <-flush.C:
-				for key, entry := range pending {
-					rows := manager.liveReportRows(entry)
-					if len(rows) == 0 {
-						manager.clearReportsHeldIf(pending, entry)
-						delete(pending, key)
-						continue
-					}
-					if nowFunc().Before(entry.nextAttempt) {
-						continue // held backoff — no resolve+restore yet
-					}
-					switch manager.deliverHandoffReport(entry.spec, key, handoff.ReportDigest(rows)) {
-					case reportHeld:
-						entry.rows = rows
-						manager.noteReportHeld(key, entry)
-					default:
-						manager.clearReportsHeldIf(pending, entry)
-						delete(pending, key)
-					}
-				}
+				manager.flushHandoffReports(pending)
 			}
 		}
 	}()
+}
+
+// flushHandoffReports is one flush tick: every recipient whose backoff has
+// elapsed gets one delivery attempt. Only reportHeld keeps the rows for a
+// later tick; every other outcome retires them.
+func (m *Manager) flushHandoffReports(pending map[string]*reportPending) {
+	for key, entry := range pending {
+		rows := m.liveReportRows(entry)
+		if len(rows) == 0 {
+			m.clearReportsHeldIf(pending, entry)
+			delete(pending, key)
+			continue
+		}
+		if nowFunc().Before(entry.nextAttempt) {
+			continue // held backoff — no resolve+restore yet
+		}
+		switch m.deliverHandoffReport(entry.spec, key, handoff.ReportDigest(rows)) {
+		case reportHeld:
+			entry.rows = rows
+			m.noteReportHeld(key, entry)
+		default:
+			m.clearReportsHeldIf(pending, entry)
+			delete(pending, key)
+		}
+	}
 }
 
 // queueReportJob adds a tick's rows to the recipient's digest backlog.
