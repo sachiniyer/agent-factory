@@ -174,7 +174,17 @@ func (p *sandboxProvisioner) provisionFailure(err error) error {
 // agent-server it launched and the account it synced — without removing anything
 // the archive preserved.
 func (p *sandboxProvisioner) abandonAdoption(cause error) error {
+	// stopTunnel is lock-free: its safety contract is that every caller holds
+	// reapMu (documented on stoppedChanLocked and honored by StopAllSandboxTunnels,
+	// reap and stopRemoteTransport). The supervisor goroutine and a daemon-exit
+	// StopAllSandboxTunnels race this path — the tunnel came up before the
+	// adoption's readiness gate failed, so the supervisor is live — so the same
+	// lock is taken here. It is released before the remote-pid kill and the
+	// account teardown below, which run their own bounded ssh steps and must not
+	// park the supervisor or a daemon-exit stop behind them.
+	p.reapMu.Lock()
 	p.stopTunnel()
+	p.reapMu.Unlock()
 	var cleanup []error
 	if p.remotePID != "" && positivePID(p.remotePID) {
 		kill := remotePIDIdentityKillScript(p.remotePID, p.sessionDir+"/"+sshAfBinaryName, p.tokenRef)

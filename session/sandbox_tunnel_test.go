@@ -2,10 +2,12 @@ package session
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -612,4 +614,172 @@ func TestTunnelSpawnsReverseForwardSlot(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:40000:127.0.0.1:40001", child.cmd.Args[4])
 	assert.Equal(t, "127.0.0.1:9000:127.0.0.1:7070", child.cmd.Args[5])
 	assert.Equal(t, "0:127.0.0.1:8080", child.cmd.Args[6])
+}
+
+// --- adopt/restore failure cleanup locking (W8.6 follow-up) ---
+//
+// abandonAdoption is an adopting provision's best-effort cleanup, and its first
+// act is stopTunnel. stopTunnel is lock-free and relies on every caller holding
+// reapMu (documented on stoppedChanLocked, honored by StopAllSandboxTunnels, reap
+// and stopRemoteTransport). abandonAdoption originally omitted the lock, racing
+// the supervisor goroutine and the reapMu-held tear-down paths: a data race on
+// p.stopped/p.stoppedCh/p.tunnel that escalates to "close of closed channel" and
+// a leaked tunnel. These tests pin the locking contract.
+
+// stopTunnelReapMuHeld is the shape every other teardown path takes: take reapMu,
+// call stopTunnel, release. It mirrors the per-provisioner body of
+// StopAllSandboxTunnels for a non-reaping provisioner.
+func stopTunnelReapMuHeld(p *sandboxProvisioner) {
+	if p.reaping.Load() {
+		return
+	}
+	p.reapMu.Lock()
+	p.stopTunnel()
+	p.reapMu.Unlock()
+}
+
+// newAdoptionProvisioner builds an adopting provisioner with a live, registered
+// tunnel child but no remote kill to run: remotePID is empty and nothing was
+// launched, so abandonAdoption reduces to stopTunnel + return. That isolates the
+// stopTunnel race from the remote-pid kill and account teardown, which run their
+// own bounded ssh steps and are not the bug.
+func newAdoptionProvisioner(t *testing.T) *sandboxProvisioner {
+	t.Helper()
+	forceTunnelLifelineExe(t, "")
+	p := &sandboxProvisioner{
+		sshCmd:     tunnelTestSleep,
+		sessionDir: t.TempDir(),
+		spec:       ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/preserved", Branch: "af/feature"}, Title: "t"},
+	}
+	p.forward = "127.0.0.1:40000:127.0.0.1:40001"
+	registerSandboxTunnel(p)
+	child, err := p.provisionTunnelChild()
+	require.NoError(t, err)
+	require.NotNil(t, child)
+	require.False(t, p.stopped, "a fresh provisioner's latch is unset, the race window the lock closes")
+	return p
+}
+
+// TestAbandonAdoptionLocksReapMuAroundStopTunnel is the panic/race
+// reproduction: many concurrent abandonAdoption (unlocked before the fix) and
+// reapMu-held stopTunnel callers released on one barrier against a fresh, live,
+// registered provisioner each iteration. Before the fix two callers both pass
+// `if !p.stopped` and both close stoppedCh → "close of closed channel"; under
+// -race the read/write on p.stopped/p.tunnel is reported. After the fix the lock
+// serializes them and the iteration is panic-free.
+func TestAbandonAdoptionLocksReapMuAroundStopTunnel(t *testing.T) {
+	const iters = 300
+	const perSide = 4
+	var panics atomic.Int32
+	for i := 0; i < iters; i++ {
+		p := newAdoptionProvisioner(t)
+		var wg sync.WaitGroup
+		var barrier sync.WaitGroup
+		barrier.Add(1)
+		wg.Add(perSide * 2)
+		for g := 0; g < perSide; g++ {
+			go func() {
+				defer wg.Done()
+				barrier.Wait()
+				defer func() {
+					if r := recover(); r != nil {
+						panics.Add(1)
+						t.Errorf("abandonAdoption panicked: %v", r)
+					}
+				}()
+				_ = p.abandonAdoption(errors.New("adopt failed"))
+			}()
+			go func() {
+				defer wg.Done()
+				barrier.Wait()
+				defer func() {
+					if r := recover(); r != nil {
+						panics.Add(1)
+						t.Errorf("reapMu-held stopTunnel panicked: %v", r)
+					}
+				}()
+				stopTunnelReapMuHeld(p)
+			}()
+		}
+		barrier.Done()
+		wg.Wait()
+		// Every caller's stopTunnel ran; the registry dropped the provisioner
+		// and the tunnel child is gone. Re-checking is safe — stopTunnel is
+		// idempotent under reapMu.
+		p.reapMu.Lock()
+		assert.True(t, p.stopped, "iteration %d: the latch must be set", i)
+		assert.Nil(t, p.tunnel, "iteration %d: the published generation must be cleared", i)
+		p.reapMu.Unlock()
+		_, registered := liveSandboxTunnels.Load(p)
+		assert.False(t, registered, "iteration %d: the provisioner must be unregistered", i)
+	}
+	if panics.Load() > 0 {
+		t.Fatalf("%d panic(s) across %d iterations — abandonAdoption raced stopTunnel without reapMu", panics.Load(), iters)
+	}
+}
+
+// TestAbandonAdoptionReleasesReapMuBeforeRemoteKill pins guarantee (9): the
+// lock is taken ONLY around stopTunnel and released before the remote-pid kill
+// and account teardown that follow, which run their own bounded ssh steps. A
+// naive "hold reapMu across the whole function" fix would park the supervisor and
+// a daemon-exit StopAllSandboxTunnels behind the identity kill's ssh timeout.
+// The runCommandFn seam blocks until a side goroutine confirms reapMu is free
+// (TryLock succeeds) mid-kill, then unblocks it.
+func TestAbandonAdoptionReleasesReapMuBeforeRemoteKill(t *testing.T) {
+	forceTunnelLifelineExe(t, "")
+	p := &sandboxProvisioner{
+		sshCmd:          tunnelTestSleep,
+		sessionDir:      t.TempDir(),
+		remotePID:       "777", // positivePID is true, so the kill branch runs
+		launchAttempted: true,
+		spec:            ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/preserved", Branch: "af/feature"}, Title: "t"},
+	}
+	p.forward = "127.0.0.1:40001:127.0.0.1:40002"
+	registerSandboxTunnel(p)
+	_, err := p.provisionTunnelChild()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		p.reapMu.Lock()
+		p.stopTunnel()
+		p.reapMu.Unlock()
+	})
+
+	enteredRun := make(chan struct{})
+	gotLock := make(chan struct{})
+	releaseRun := make(chan struct{})
+	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
+		close(enteredRun)
+		// The identity kill is in flight; reapMu must be free here. TryLock
+		// returns false if it is held — the failure we are guarding against.
+		if !p.reapMu.TryLock() {
+			close(gotLock) // signal the mismatch either way
+			return []byte("reapMu held across the remote kill"), errors.New("reapMu held across the remote kill")
+		}
+		p.reapMu.Unlock()
+		close(gotLock)
+		<-releaseRun
+		return nil, nil
+	}
+
+	abandonErr := make(chan error, 1)
+	go func() { abandonErr <- p.abandonAdoption(errors.New("adopt failed")) }()
+
+	select {
+	case <-enteredRun:
+	case <-time.After(5 * time.Second):
+		t.Fatal("abandonAdoption never reached the remote-pid kill")
+	}
+	select {
+	case <-gotLock:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the runCommandFn did not observe reapMu free during the kill — abandonAdoption held it")
+	}
+	close(releaseRun)
+	select {
+	case err := <-abandonErr:
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "reapMu held", "the kill must not have found reapMu held")
+	case <-time.After(5 * time.Second):
+		t.Fatal("abandonAdoption did not return")
+	}
 }
