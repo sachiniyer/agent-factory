@@ -862,7 +862,7 @@ blocked on:
 
 Handing off is **reversible**. Each agent's conversation history is stored per
 directory, so the outgoing agent's thread is still in the worktree — hand back
-to it once its limit resets and it picks up its own conversation. A scope drop
+to it once its limit resets, starting fresh with a brief. A scope drop
 is one-way, so name the dropped account again with `--account` on the way back —
 without it the returned agent runs ambient. Returning to the account re-pins
 its credentials, but the return is still a cross-agent handoff, so the
