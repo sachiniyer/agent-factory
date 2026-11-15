@@ -131,14 +131,11 @@ func SetSSHSelfBinaryForTest(path string) func() {
 // The refusal says what this runtime knows: which hosts, and that nothing was
 // sent or made. It does not know whether it was called for a create or a
 // restore, so it names no remedy; the caller, which does know, adds one
-// (withAccountHostRemedy).
+// (withAccountHostContext).
 //
-// An adoption is exempt from the REFUSAL, not from the rule. It reaches the host
-// through the transport the archived row recorded, whatever the host list says
-// now, so a host list that changed must not stop it. What the rule still decides
-// for it is whether the account is sent: sshProvisionHost grants the sync
-// licence only for the licensed host, so an adoption sends the account under
-// that name or sends nothing.
+// An adoption is judged by sshAdoptedAccountHostError instead: the host it
+// reaches is the one its recorded transport names, not the one this runtime
+// resolves, so that is the host its licence has to be compared with.
 func sshAccountHostError(spec ProvisionSpec, hostName string, listed *config.HostConfig, chooseErr error) error {
 	if spec.Account.Dir == "" || spec.Adopt != nil {
 		return nil
@@ -170,6 +167,70 @@ func sshAccountHostError(spec ProvisionSpec, hostName string, listed *config.Hos
 		spec.Account.Name, licensed, resolved, inferred, untouched)}
 }
 
+// sshAdoptedAccountHostError refuses an account-bearing ADOPTION unless the
+// machine its credentials would reach is the licensed host (#7336).
+//
+// An adoption does not connect to the host this runtime resolves. It rides the
+// transport the archived row recorded, whatever the host list says now — that is
+// what lets it reach a preserved workspace at all. So comparing the resolved
+// host with the licence, as a fresh provision does, compares two values the
+// caller set equal and says nothing about where the bytes go: a row with no host
+// of its own, preserved on box1, resolves through default_host to box2 once box1
+// is removed, is licensed for box2, and would sync its account over the recorded
+// command to box1 — a host the operator took out of the list.
+//
+// The licence therefore has to name the recorded transport's own host: the
+// listed name the session was placed under (SSHRuntimeCleanupData.HostName,
+// recorded since before accounts could be synced). The account is sent only when
+// that name is the licensed host and is still a usable entry in the host list.
+// Anything else is refused here, before a single command runs on the host, with
+// the reason and the two ways out. It is a restore by construction, so unlike
+// sshAccountHostError it names its own remedy; and it reaps nothing, so it is
+// deliberately not an accountHostError, which a re-provision reports as coming
+// after the previous sandbox was retired.
+//
+// An accountless adoption is not judged at all: a host list that changed must
+// not stop a reattach that sends no credentials.
+func sshAdoptedAccountHostError(spec ProvisionSpec, cfg *config.ResolvedConfig, hostName string, listed *config.HostConfig, chooseErr error) error {
+	if spec.Account.Dir == "" || spec.Adopt == nil {
+		return nil
+	}
+	recorded := ""
+	if t := spec.Adopt.Transport; t != nil && t.SSH != nil {
+		recorded = strings.TrimSpace(t.SSH.HostName)
+	}
+	licensed := spec.AccountHost
+	if chooseErr == nil && listed != nil && hostName == licensed && recorded == licensed {
+		return nil
+	}
+	const untouched = "No credentials were sent, and the preserved workspace was left as it is"
+	const withoutAccount = "clear the session's account to restore it on the host's own credentials"
+	refusal := fmt.Sprintf("backend=ssh: account %q is not sent to this session's preserved workspace", spec.Account.Name)
+	_, recordedListed := cfg.Hosts[recorded]
+	switch {
+	case licensed == "":
+		return fmt.Errorf("%s: the restore reached provisioning without the host the account was licensed for. %s. %s",
+			refusal, accountInvariantBug, untouched)
+	case recorded == "":
+		return fmt.Errorf("%s: the session did not record which listed host the workspace is on, so af cannot tell that it is host %q, the one the account is licensed for. %s. To restore the session, %s",
+			refusal, licensed, untouched, withoutAccount)
+	case !recordedListed:
+		return fmt.Errorf("%s: the workspace is on host %q, which is no longer in the global host list, and credentials are only ever sent to a listed host. %s. Re-add the host under [hosts.%s] in the global config, or %s",
+			refusal, recorded, untouched, recorded, withoutAccount)
+	case recorded != licensed:
+		return fmt.Errorf("%s: the workspace is on host %q, but the account is now licensed for host %q. %s. Make host %q the one this session resolves to again (for a session that records no host of its own, that is default_host), or %s",
+			refusal, recorded, licensed, untouched, recorded, withoutAccount)
+	}
+	why := fmt.Sprintf("provisioning resolved host %q instead", hostName)
+	if chooseErr != nil {
+		why = strings.TrimPrefix(chooseErr.Error(), "backend=ssh: ")
+	} else if listed == nil {
+		why = "provisioning resolved the repository's own [ssh] target instead"
+	}
+	return fmt.Errorf("%s: the workspace is on host %q, which cannot be used for it: %s. %s. Correct that, or %s",
+		refusal, recorded, why, untouched, withoutAccount)
+}
+
 // sshProvisionHost resolves the host this provision uses and decides whether it
 // may send an account there. It returns the listed host's name and entry (nil
 // for the repo's own [ssh] settings), and sets spec.AccountSyncHost and
@@ -184,10 +245,15 @@ func sshProvisionHost(spec *ProvisionSpec, cfg *config.ResolvedConfig) (string, 
 	if aerr := sshAccountHostError(*spec, hostName, listed, err); aerr != nil {
 		return "", nil, aerr
 	}
+	// And an adoption's account goes to the machine its recorded transport
+	// reaches only if that machine is the licensed host (#7336).
+	if aerr := sshAdoptedAccountHostError(*spec, cfg, hostName, listed, err); aerr != nil {
+		return "", nil, aerr
+	}
 	if err != nil {
 		// An adoption reaches the host through the transport the row recorded, so a
-		// host list that has since changed does not decide where it goes (and
-		// without a listed entry no account is synced).
+		// host list that has since changed does not decide where it goes. Only an
+		// accountless adoption gets here: one with an account was refused above.
 		if spec.Adopt == nil {
 			return "", nil, err
 		}
@@ -196,9 +262,9 @@ func sshProvisionHost(spec *ProvisionSpec, cfg *config.ResolvedConfig) (string, 
 	// The licence to send an account's credentials (W7.3): a host-list entry and
 	// nothing else. A repository-chosen [ssh] target never earns it — and, with an
 	// account, neither does a listed host other than the one the account was
-	// licensed for. A fresh provision was refused above in that case; an adoption
-	// was not, so this is where it is held to "under the licensed name, or
-	// nothing": without the licence accountSyncApplies refuses to send (#7327).
+	// licensed for. Both checks above have already refused that case, for a fresh
+	// provision and for an adoption; the condition is repeated here so the grant
+	// itself never depends on a refusal elsewhere staying in place (#7327).
 	if listed != nil && (spec.Account.Dir == "" || hostName == spec.AccountHost) {
 		spec.AccountSyncHost = hostName
 		spec.AgentConfigFiles = append([]string(nil), cfg.SandboxAgentConfig...)
