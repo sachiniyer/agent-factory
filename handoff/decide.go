@@ -627,25 +627,32 @@ func orderCandidates(eligible []scoredAccount, cfg config.AccountHandoffConfig) 
 	prefer := float64(cfg.PreferBelowPercent)
 	tier := func(c scoredAccount) int {
 		credited := c.facts.RecentMoveCredits > 0
-		// Only a complete observed reading can place an account in the
-		// below-prefer tier: an observed-but-incomplete snapshot is silent
-		// about a slot that may already be at/above the wall, so its
-		// reported windows cannot prove comfort (mirrors readingBelowAllFresh
-		// and the idle-hot comfort gate).
-		if c.facts.Reading.Status == ReadingObserved && c.facts.Reading.Complete {
-			switch {
-			case credited:
-				return 2 // below every unused observed candidate
-			default:
-				if w, ok := worstWindow(c.facts.Reading); ok && w.UsedPercent < prefer {
+		r := c.facts.Reading
+		if r.Status == ReadingObserved {
+			w, reported := worstWindow(r)
+			atOrAbovePrefer := reported && w.UsedPercent >= prefer
+			// Completeness gates the below-prefer tier and nothing else. An
+			// observed-but-incomplete snapshot is silent about a slot that may
+			// already be at/above the wall, so its reported windows cannot
+			// prove comfort (mirrors readingBelowAllFresh and the idle-hot
+			// comfort gate). They CAN prove the opposite: a reported window
+			// already at or above prefer puts the account outside the
+			// preferred tier whatever the silent slot holds, so that reading
+			// keeps its observed tier and stays ahead of no reading (#7322).
+			if r.Complete || atOrAbovePrefer {
+				switch {
+				case credited:
+					return 2 // below every unused observed candidate
+				case r.Complete && reported && !atOrAbovePrefer:
 					return 0
+				default:
+					return 1
 				}
-				return 1
 			}
 		}
-		// No usable (or incomplete — silent about a slot) reading: eligible
-		// (as today) but after every account whose reading can be shown
-		// complete.
+		// No reading, or an incomplete one whose reported windows are all
+		// below prefer (silent about a slot, so no proof of comfort):
+		// eligible (as today) but after every account whose reading places it.
 		if credited {
 			return 4
 		}

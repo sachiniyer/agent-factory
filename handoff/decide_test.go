@@ -1124,3 +1124,73 @@ func TestDecideWallEventNamesTheWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestOrderCandidatesIncompleteReadingAbovePreferKeepsItsObservedTier pins
+// #7322. Completeness gates admission to the below-prefer tier only: a partial
+// snapshot is silent about a slot, so it cannot prove comfort. It does not
+// need to be complete to prove the opposite. A reported window already at or
+// above prefer_below_percent places the account outside the preferred tier
+// whatever the silent slot holds, so that reading keeps the observed tier
+// (credited or not) and ranks ahead of an account with no reading at all.
+func TestOrderCandidatesIncompleteReadingAbovePreferKeepsItsObservedTier(t *testing.T) {
+	cfg := shadowCfg()
+	cfg.TargetOrder = config.AccountHandoffTargetOrderEmptiest
+	order := func(accounts ...AccountFacts) []string {
+		eligible := make([]scoredAccount, len(accounts))
+		for i, a := range accounts {
+			eligible[i] = scoredAccount{facts: a, index: i}
+		}
+		return orderCandidates(eligible, cfg)
+	}
+	want := func(t *testing.T, got []string, names ...string) {
+		t.Helper()
+		if strings.Join(got, ",") != strings.Join(names, ",") {
+			t.Fatalf("order = %v, want %v", got, names)
+		}
+	}
+	noReading := ReadingFacts{Status: ReadingNone}
+
+	t.Run("a partial reading above prefer ranks ahead of no reading", func(t *testing.T) {
+		// Listed order favours the account with no reading, so only the tier
+		// can put the partial 90% first.
+		want(t, order(
+			AccountFacts{Name: "blind", Registered: true, Reading: noReading},
+			AccountFacts{Name: "partial", Registered: true, Reading: partialReading(90, future())},
+		), "partial", "blind")
+	})
+
+	t.Run("occupancy cannot pick no reading over usable evidence", func(t *testing.T) {
+		want(t, order(
+			AccountFacts{Name: "blind", Registered: true, Reading: noReading},
+			AccountFacts{Name: "partial", Registered: true, Reading: partialReading(90, future()), Occupancy: 3},
+		), "partial", "blind")
+	})
+
+	t.Run("a credited partial reading above prefer keeps the credited observed tier", func(t *testing.T) {
+		// Below every uncredited observed candidate, ahead of every candidate
+		// with no reading: where a credited complete reading sits.
+		want(t, order(
+			AccountFacts{Name: "blind", Registered: true, Reading: noReading},
+			AccountFacts{Name: "partial", Registered: true, Reading: partialReading(90, future()), RecentMoveCredits: 1},
+			AccountFacts{Name: "complete", Registered: true, Reading: observedReading(90, future())},
+		), "complete", "partial", "blind")
+	})
+
+	t.Run("a partial reading at exactly prefer is not below it", func(t *testing.T) {
+		want(t, order(
+			AccountFacts{Name: "blind", Registered: true, Reading: noReading},
+			AccountFacts{Name: "partial", Registered: true, Reading: partialReading(float64(cfg.PreferBelowPercent), future())},
+		), "partial", "blind")
+	})
+
+	t.Run("a partial reading below prefer still gets no below-prefer tier", func(t *testing.T) {
+		// #7314's fix, pinned: the partial 10% proves no comfort, so it ranks
+		// with the no-reading accounts — behind a complete reading below
+		// prefer (tier 0) and behind a complete reading above it (tier 1).
+		want(t, order(
+			AccountFacts{Name: "partial", Registered: true, Reading: partialReading(10, future())},
+			AccountFacts{Name: "hot", Registered: true, Reading: observedReading(90, future())},
+			AccountFacts{Name: "calm", Registered: true, Reading: observedReading(20, future())},
+		), "calm", "hot", "partial")
+	})
+}
