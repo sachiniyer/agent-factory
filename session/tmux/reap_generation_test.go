@@ -152,9 +152,10 @@ func TestVanishedSessionSweepRefusesDescendantThatChangesGenerationLate(t *testi
 }
 
 // sweepDescendantThatChangesGeneration runs the changed-generation fixture.
-// envDir, when set, is put first on the fixture's PATH (see slowEnvDir).
+// envDir, when set, is put first on the fixture's PATH (see slowEnvDir). It is
+// deliberately not a t.Helper: a failure should name its own assertion line,
+// which is what #4217's census keys a sighting on.
 func sweepDescendantThatChangesGeneration(t *testing.T, envDir string) {
-	t.Helper()
 	shrinkReapWaits(t)
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Skip("exact detached-child fixture requires setsid")
