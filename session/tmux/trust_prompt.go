@@ -99,7 +99,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		case claudeFolderTrustPartial:
 			return true
 		case claudeFolderTrustUnreadable:
-			t.refuseTrustPicker(claudeFolderTrustPicker, claudeFolderTrustUnreadableWhy(screen))
+			t.refuseTrustPicker(claudeFolderTrustUnreadablePicker(screen))
 			return true
 		}
 		// The legacy folder-trust dialog is not atomic either: Claude Code
@@ -123,6 +123,14 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		// narrow enough to wrap its preamble or question (#7330). Asked last
 		// too: it only turns a clear pane into a hold.
 		if claudeMCPTrustPaintingOf(screen) {
+			return true
+		}
+		// A folder-trust dialog, reworded or legacy, that the pane ends with a
+		// part of, read with its whitespace removed so that no wrap point
+		// matters (#7346). Asked last of all: it only turns a clear pane into a
+		// hold.
+		if match, held := claudeLaunchDialogRewrapOf(screen); held {
+			t.refuseClaudeLaunchDialog(match)
 			return true
 		}
 		// A pane with no dialog on it retires the refusal notice, so a later
