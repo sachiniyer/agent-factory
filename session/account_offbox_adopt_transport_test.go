@@ -98,7 +98,8 @@ func adoptingRestore(t *testing.T, f listedFixture, rowHost string) (scripts []s
 		SessionDir: dir, Branch: "root/s",
 		Transport: &RecordedTransport{
 			SSHCmd: "ssh -F none dev@box1.example",
-			SSH:    &SSHRuntimeCleanupData{HostName: "box1", SessionDir: dir},
+			// What the recorded command dials, as the cleanup record keeps it.
+			SSH: &SSHRuntimeCleanupData{HostName: "box1", SessionDir: dir, Config: config.SSHConfig{Host: "box1.example", User: "dev"}},
 		},
 	})
 	return scripts, licence, err
