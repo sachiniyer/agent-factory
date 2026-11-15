@@ -16,6 +16,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -137,6 +138,24 @@ func TestTrustedBlindVanishedSessionSweepStillRejectsForeignHome(t *testing.T) {
 // different generation marker. Silently treating that process as a replacement
 // would lose the last proof that it came from the vanished pane tree.
 func TestVanishedSessionSweepRefusesDescendantThatChangesGeneration(t *testing.T) {
+	sweepDescendantThatChangesGeneration(t, "")
+}
+
+// TestVanishedSessionSweepRefusesDescendantThatChangesGenerationLate is the same
+// sweep with the child's re-mark held back a full second after its fork — five
+// times reapGraceWait — instead of left to the scheduler. A fixture that
+// releases the sweep before the child carries its new generation hands the pass
+// a cohort member to reap, and this turns that from a once-a-day CI loss into a
+// deterministic one (#3766).
+func TestVanishedSessionSweepRefusesDescendantThatChangesGenerationLate(t *testing.T) {
+	sweepDescendantThatChangesGeneration(t, slowEnvDir(t, time.Second))
+}
+
+// sweepDescendantThatChangesGeneration runs the changed-generation fixture.
+// envDir, when set, is put first on the fixture's PATH (see slowEnvDir). It is
+// deliberately not a t.Helper: a failure should name its own assertion line,
+// which is what #4217's census keys a sighting on.
+func sweepDescendantThatChangesGeneration(t *testing.T, envDir string) {
 	shrinkReapWaits(t)
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Skip("exact detached-child fixture requires setsid")
@@ -152,32 +171,40 @@ func TestVanishedSessionSweepRefusesDescendantThatChangesGeneration(t *testing.T
 	// shares no session id, and the moment the parent exits it reparents to init
 	// and no refresh can attribute it again.
 	//
-	// What #3439 did NOT close is the other half — the child being BORN too late
-	// for any pass to see it. The fixture used to write the trigger 50ms into a
-	// 200ms grace, leaving `sh` ~150ms to wake from its poll and get through two
-	// fork/execs, and that is a race against reapGraceWait, not a precondition:
-	// on a loaded arm64 runner the child arrived after the last pass, nothing
-	// mismatched, the sweep returned nil, and the assertion below read that as
-	// "no refusal" — master red at b690a205 with session/tmux untouched (#3766).
+	// What #3439 did NOT close is the child being BORN too late for any pass to
+	// see it: a trigger written 50ms into a 200ms grace raced reapGraceWait, and on
+	// a loaded runner the child arrived after the last pass (#3766). So the fork is
+	// HELD against, not timed against. graceObservationBarrier stops the sweep at
+	// the top of a pass, before it takes its snapshot; the fixture forks the child
+	// and only then releases the pass that has to see it.
 	//
-	// So the fork is now HELD against, not timed against. graceObservationBarrier
-	// stops the sweep at the top of a pass, before it takes its snapshot; the
-	// fixture forks the child, proves the process table shows it as a descendant
-	// of the still-live parent, and only then releases the pass that has to see
-	// it. No wall clock enters the verdict.
+	// What that did NOT close is the child being born but not yet RE-MARKED.
+	// `$!` names the fork, and until the fork has exec'd env and env has exec'd
+	// setsid, the child's environment is still the parent's copy — carrying the
+	// cohort's own generation. Released there, a pass that reads it sees a cohort
+	// member, reaps it, and returns nil, which the assertion below reads as "no
+	// refusal" with no defect behind it (#3766, reopened). requireReMarkedDescendant
+	// is the release condition: the child carries the changed marker, as a live
+	// descendant of the live parent, before the pass looks. No wall clock enters
+	// the verdict.
 	//
 	// Nothing here depends on the parent exiting: it carries the cohort's own
 	// generation marker, so the sweep classifies it as a marked escapee and
 	// signals it, and t.Cleanup collects whatever is left. `exec` so the shell
 	// BECOMES that process — a trailing `sleep 300` as a child would outlive the
 	// Kill below.
+	const changedGeneration = "changed"
 	script := fmt.Sprintf("%s; "+
-		"env %s=changed setsid sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
+		"env %s=%s setsid sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
 		testguard.BoundedGateWait(trigger, 10*time.Millisecond, 5*time.Minute),
-		EnvMarkerGeneration, recordPIDShell("$!", pidFile))
+		EnvMarkerGeneration, changedGeneration, recordPIDShell("$!", pidFile))
+	path := os.Getenv("PATH")
+	if envDir != "" {
+		path = envDir + string(os.PathListSeparator) + path
+	}
 	parentCmd := exec.Command("sh", "-c", script)
 	parentCmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
+		"PATH=" + path,
 		EnvMarkerSession + "=" + name,
 		EnvMarkerHome + "=" + home,
 		EnvMarkerGeneration + "=vanished",
@@ -203,7 +230,7 @@ func TestVanishedSessionSweepRefusesDescendantThatChangesGeneration(t *testing.T
 		waitForPIDFile(t, pidFile)
 		child = processFromPIDFile(t, pidFile)
 		t.Cleanup(func() { _ = proctree.Signal(child, syscall.SIGKILL) })
-		requireObservableDescendant(t, parent, child)
+		requireReMarkedDescendant(t, parent, child, changedGeneration)
 	})
 
 	err = <-sweepDone
@@ -211,6 +238,22 @@ func TestVanishedSessionSweepRefusesDescendantThatChangesGeneration(t *testing.T
 		"a generation mismatch on captured ancestry must remain a refusal")
 	require.True(t, proctree.AliveSame(child),
 		"an ambiguously re-marked descendant must not be signalled")
+}
+
+// slowEnvDir returns a directory holding an `env` that waits delay before
+// exec'ing the real one. First on the fixture's PATH, it is exec'd exactly where
+// env would be, still carrying the generation the fork inherited, so the child
+// re-marks itself delay after its fork rather than whenever the scheduler gets
+// to it — the window a loaded runner opened by accident, held open on purpose.
+func slowEnvDir(t *testing.T, delay time.Duration) string {
+	t.Helper()
+	realEnv, err := exec.LookPath("env")
+	require.NoError(t, err)
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\nsleep %s\nexec %s \"$@\"\n",
+		strconv.FormatFloat(delay.Seconds(), 'f', -1, 64), shellquote.Quote(realEnv))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "env"), []byte(script), 0o755))
+	return dir
 }
 
 // graceBarrier holds a vanished-session sweep at its bounded grace observation
@@ -299,13 +342,20 @@ func (b *graceBarrier) releaseObservation() {
 	b.freed.Do(func() { close(b.release) })
 }
 
-// requireObservableDescendant proves the precondition a generation refusal is
-// about: the child is alive and is a ppid-descendant of a LIVE parent, so
-// refreshCapturedAncestry's next pass reaches it through that parent's TreeOf.
-// It is also the guard on the fixture itself — a setsid(1) that decided to fork
-// would leave the recorded pid dead, and this says so instead of letting the
-// sweep return an unexplained nil.
-func requireObservableDescendant(t *testing.T, parent, child proctree.Process) {
+// requireReMarkedDescendant proves the precondition a generation refusal is
+// about, all of it in one observation: the child is still the process recorded,
+// it is a ppid-descendant of a LIVE parent — so refreshCapturedAncestry's next
+// pass reaches it through that parent's TreeOf — and its OWN environment
+// carries generation.
+//
+// Descent alone is not that precondition: it holds the instant fork returns,
+// while the child's environment is still the parent's (#3766). Comm reaching
+// sleep is what says the exec chain is over, so nothing can change the marker
+// again before the pass reads it. It is also the guard on the fixture itself —
+// a setsid(1) that decided to fork would leave the recorded pid exiting rather
+// than becoming sleep, and this says so instead of letting the sweep return an
+// unexplained nil.
+func requireReMarkedDescendant(t *testing.T, parent, child proctree.Process, generation string) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		snap, err := proctree.Snapshot()
@@ -317,13 +367,23 @@ func requireObservableDescendant(t *testing.T, parent, child proctree.Process) {
 			return false
 		}
 		for _, descendant := range proctree.TreeOf(snap, parent.PID) {
-			if descendant.PID == child.PID && descendant.StartID == child.StartID {
-				return true
+			if descendant.PID != child.PID || descendant.StartID != child.StartID {
+				continue
 			}
+			if descendant.Comm != "sleep" {
+				return false
+			}
+			environ, envErr := proctree.Environ(child.PID)
+			if envErr != nil {
+				return false
+			}
+			marker, ok := processEnvValue(environ, EnvMarkerGeneration)
+			return ok && marker == generation
 		}
 		return false
 	}, 5*time.Second, 20*time.Millisecond,
-		"child %d never became a descendant of live parent %d", child.PID, parent.PID)
+		"child %d never became a live descendant of parent %d carrying %s=%s",
+		child.PID, parent.PID, EnvMarkerGeneration, generation)
 }
 
 // requireMarkedPaneProcess proves a replacement session is visible to the marker
