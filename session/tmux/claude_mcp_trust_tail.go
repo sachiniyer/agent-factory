@@ -3,6 +3,7 @@ package tmux
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -208,8 +209,10 @@ var (
 // Rows are read as claudeTrustRowOf reads them, so frame chrome and blank rows
 // are skipped and an option row's cursor and ordinal are not words. A ❯ row is
 // the modal's only on an option: one anywhere earlier is a composer holding
-// the words as a draft, and no modal. It holds without a key and says nothing:
-// the frame lasts as long as one paint.
+// the words as a draft, and no modal; so are the later rows of a composer's
+// draft (claudeMCPTrustDraftRow), and one word on the row straight under a
+// drawn composer (claudeMCPTrustUnderComposer). It holds without a key and
+// says nothing: the frame lasts as long as one paint.
 func claudeMCPTrustPaintingOf(screen visibleText) bool {
 	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
@@ -224,16 +227,141 @@ func claudeMCPTrustPaintingOf(screen visibleText) bool {
 		if rows[start].blank || !strings.HasPrefix(strings.ToLower(rows[start].label), claudeMCPTrustModalWords[0]) {
 			continue
 		}
-		if claudeMCPTrustPaintedFrom(rows, start, last) {
-			return true
+		words := claudeMCPTrustPaintedFrom(rows, start, last)
+		switch {
+		case words == 0:
+			continue
+		case words == 1 && start == last && claudeMCPTrustUnderComposer(lines, rows, last):
+			// One word on the row straight under a drawn composer is the
+			// agent's status row, such as a branch named "new" (#7341).
+			continue
+		case words <= claudeMCPTrustOptionWordsAt && claudeMCPTrustDraftRow(lines, rows, start, last):
+			// The words are the later rows of a composer's draft (#7341).
+			continue
 		}
+		return true
 	}
 	return false
 }
 
-// claudeMCPTrustPaintedFrom reports whether rows start to last spell the
-// modal's words from the first, in order.
-func claudeMCPTrustPaintedFrom(rows []claudeTrustRow, start, last int) bool {
+// claudeMCPTrustDraftRow reports whether rows start to last are the later rows
+// of a working agent's composer draft, and nothing else: last is the row
+// straight above the composer's closing rule, and every row from it up to the
+// composer's prompt row is a continuation row of that draft, with start among
+// them. It reads the two composers Claude Code draws:
+//
+//	────────────────          ╭────────────────╮
+//	❯ Explain this:           │ > Explain this: │
+//	  New MCP server          │   New MCP server │
+//	────────────────          ╰────────────────╯
+//
+// A composer excuses only the rows it explains, so the shape is the whole of
+// it and each part is the composer's own, never the modal's (#7334 round 2):
+//
+//   - the prompt row sits straight under the composer's opening rule and holds
+//     text that is not an option label or a bare ordinal, so the modal's cursor
+//     row, at any wrap, never opens a composer;
+//   - a continuation row is indented under the prompt's text, or carries the
+//     box's side borders; it is no ❯ row and no rule, so the modal's rows and
+//     frame edges are never a draft's;
+//   - the closing rule is the composer's own kind and is the very next line.
+//
+// Rows below the closing rule, and rows above the prompt, are not explained by
+// it: a modal there still holds.
+func claudeMCPTrustDraftRow(lines []string, rows []claudeTrustRow, start, last int) bool {
+	prompt, text, ok := claudeMCPTrustComposerClosedAt(lines, rows, last+1)
+	if !ok || !text || prompt >= start {
+		return false
+	}
+	// A bare ordinal is the start of an option row a narrow pane wrapped: the
+	// rows have reached the modal's options, and a draft's do not.
+	for i := start; i <= last; i++ {
+		if claudeMCPTrustOrdinalWord(rows[i].label) {
+			return false
+		}
+	}
+	return true
+}
+
+// claudeMCPTrustUnderComposer reports whether row is the agent's status row:
+// the row straight under a drawn composer block of exactly three lines, the
+// opening rule, the prompt row and the closing rule. One word of the modal
+// there is chrome such as a branch named "new", not the modal being painted.
+//
+// Nothing else places a row under a composer. A rule with no prompt row above
+// it is a rule; the modal's own option rows above a rule are not a prompt; and
+// a composer holding a multi-line draft is not read here, because rows between
+// a prompt and a rule can be the modal's.
+//
+// One spelling is never excused: "New", exactly as the modal paints its first
+// row. On a pane 6 columns wide that row is the whole of the modal's first
+// paint, and under a composer an earlier agent left on the pane it is this
+// very frame.
+func claudeMCPTrustUnderComposer(lines []string, rows []claudeTrustRow, row int) bool {
+	if rows[row].label == claudeMCPTrustFirstRowAtSixColumns {
+		return false
+	}
+	prompt, _, ok := claudeMCPTrustComposerClosedAt(lines, rows, row-1)
+	return ok && prompt == row-2
+}
+
+// claudeMCPTrustFirstRowAtSixColumns is the modal's first row on the narrowest
+// pane that still shows a word of it whole.
+const claudeMCPTrustFirstRowAtSixColumns = "New"
+
+// claudeMCPTrustComposerClosedAt reads a drawn composer block upward from its
+// closing rule, the line at closing: continuation rows, then the prompt row
+// straight under the opening rule. It returns the prompt row and whether that
+// row holds text. The prompt's text is read as the gate reads any row, with
+// its ordinal off, so "❯ 1. Yes", "❯ 1." and "│ > 1. Yes │" are the modal's
+// cursor row and open nothing (#7344 review).
+func claudeMCPTrustComposerClosedAt(lines []string, rows []claudeTrustRow, closing int) (prompt int, text, ok bool) {
+	if closing < 2 || closing >= len(lines) || !claudeTrustFrameRule(lines[closing]) {
+		return 0, false, false
+	}
+	boxed := !claudeComposerRule(lines[closing])
+	bordered := func(line string) bool {
+		line = strings.TrimSpace(line)
+		first, _ := utf8.DecodeRuneInString(line)
+		lastRune, _ := utf8.DecodeLastRuneInString(line)
+		return strings.ContainsRune(claudeTrustBoxSides, first) && strings.ContainsRune(claudeTrustBoxSides, lastRune)
+	}
+	for i := closing - 1; i >= 1; i-- {
+		if rows[i].blank || claudeTrustFrameRule(lines[i]) || boxed != bordered(lines[i]) {
+			return 0, false, false
+		}
+		label := rows[i].label
+		switch {
+		case boxed && (label == ">" || strings.HasPrefix(label, "> ")):
+			label = strings.TrimSpace(strings.TrimPrefix(label, ">"))
+		case boxed || !rows[i].selected:
+			// A continuation row: indented under the prompt's text when the
+			// composer is ruled.
+			if rows[i].selected || (!boxed && !strings.HasPrefix(lines[i], "  ")) {
+				return 0, false, false
+			}
+			continue
+		}
+		// The prompt row.
+		label = strings.TrimSpace(trimClaudeTrustOrdinal(label))
+		if claudeMCPTrustOptionLabel(label) || claudeMCPTrustOrdinalWord(label) {
+			return 0, false, false
+		}
+		if boxed {
+			return i, label != "", claudeTrustFrameRule(lines[i-1]) && !claudeComposerRule(lines[i-1])
+		}
+		return i, label != "", claudeComposerRule(lines[i-1])
+	}
+	return 0, false, false
+}
+
+// claudeTrustBoxSides are the vertical strokes of claudeTrustBoxDrawing: the
+// side borders a boxed row carries.
+const claudeTrustBoxSides = "│┃║▏▕"
+
+// claudeMCPTrustPaintedFrom reports how many of the modal's words rows start to
+// last spell, from the first and in order; 0 when they spell anything else.
+func claudeMCPTrustPaintedFrom(rows []claudeTrustRow, start, last int) int {
 	at := 0
 	for i := start; i <= last; i++ {
 		if rows[i].blank {
@@ -250,20 +378,20 @@ func claudeMCPTrustPaintedFrom(rows []claudeTrustRow, start, last int) bool {
 			// The cursor sits on an option row, or on the ordinal a narrow
 			// pane left of one. A bare ❯ is a composer.
 			if at < claudeMCPTrustOptionWordsAt || at >= claudeMCPTrustFooterWordsAt || (len(words) == 0 && !ordinal) {
-				return false
+				return 0
 			}
 		}
 		if ordinal && (at < claudeMCPTrustOptionWordsAt || at >= claudeMCPTrustFooterWordsAt) {
-			return false
+			return 0
 		}
 		for _, word := range words {
 			if at >= len(claudeMCPTrustModalWords) || word != claudeMCPTrustModalWords[at] {
-				return false
+				return 0
 			}
 			at++
 		}
 	}
-	return at > 0
+	return at
 }
 
 // claudeMCPTrustOrdinalWord reports whether word is a picker ordinal with no
