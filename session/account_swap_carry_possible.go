@@ -15,8 +15,9 @@ import (
 // runs here too: a recorded conversation of the provider's own, a source home
 // af can resolve, a transcript there it can locate (a single plain rollout,
 // not compressed, not continued by a thread/revert rollout), a recorded
-// conversation still the newest in its worktree, and a launch command that can
-// resume a named conversation (#7152).
+// conversation still the newest wherever a newer one counts (a worktree af
+// owns, or a directory whose ownership af could not resolve in time), and a
+// launch command that can resume a named conversation (#7152).
 //
 // What only a target can answer — its home, a rollout of the thread it
 // already holds — is AccountSwapCarryRefusalTo's, which the engine asks once

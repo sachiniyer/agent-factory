@@ -366,16 +366,17 @@ const staleCarryReason = "the conversation af recorded is no longer the newest o
 	"(a new one was started, for example with /clear or /new, or an older one was resumed)"
 
 // staleReason refuses a carry whose recorded conversation is no longer the
-// newest in this worktree. The recorded id is written at launch and at
-// delivery capture, and a Codex pane that moves to a new thread is
-// re-recorded by its follow loop (#7120); so a /clear in Claude, or a Codex
-// move the follow did not observe (a frozen loop, or one the daemon never
-// saw), leaves it naming a conversation the user abandoned, and resuming
-// that and saying "continue" is worse than a stated fresh start. Newer is by
-// modification
-// time, strictly: the live runtime appends to the conversation it is in. A
-// Claude worktree's conversations are every one filed under any spelling of
-// its path locateClaude searched (claudeCarryStaleness).
+// newest in a worktree af owns, or in a directory whose ownership af could not
+// resolve in time (newerConversationCountsAgainstCarry). The recorded id is
+// written at launch and at delivery capture, and a Codex pane that moves to a
+// new thread is re-recorded by its follow loop (#7120); so a /clear in
+// Claude, or a Codex move the follow did not observe (a frozen loop, or one
+// the daemon never saw), leaves it naming a conversation the user abandoned,
+// and resuming that and saying "continue" is worse than a stated fresh start.
+// Newer is by modification time, strictly: the live runtime appends to the
+// conversation it is in. A Claude worktree's conversations are every one
+// filed under any spelling of its path locateClaude searched
+// (claudeCarryStaleness).
 // outgoing is the record being carried; only a Codex operator repair is
 // judged differently, and the kind buys a Claude record nothing — no repair
 // ever writes one.
