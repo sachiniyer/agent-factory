@@ -177,3 +177,106 @@ func (t *TmuxSession) refuseClaudeMCPTrustTail(tail claudeMCPTrustTail) {
 			"af will not press Enter on a preselection it cannot read, because that could trust an MCP server; answer it in the session",
 		claudeLaunchGateDialogName, t.sanitizedName, tail.footer, tail.option, below)
 }
+
+// claudeMCPTrustModalWords is the old MCP trust modal, top to bottom, as the
+// words a pane of any width paints in this order: the preamble, the question,
+// the two option labels and the footer. Claude Code's renderer breaks a row
+// only at its spaces, so a pane too narrow for a row changes which words share
+// a row and never the words or their order.
+var claudeMCPTrustModalWords = strings.Fields(
+	claudeMCPDialogPreamble + ". " + claudeMCPDialogQuestion + "? " +
+		strings.Join(claudeMCPOptionLabels, " ") + " " + strings.ToLower(claudeTrustAffordancePrefix))
+
+// claudeMCPTrustOptionWordsAt is where the option labels begin in
+// claudeMCPTrustModalWords, and claudeMCPTrustFooterWordsAt where they end.
+var (
+	claudeMCPTrustOptionWordsAt = len(strings.Fields(claudeMCPDialogPreamble + ". " + claudeMCPDialogQuestion + "?"))
+	claudeMCPTrustFooterWordsAt = claudeMCPTrustOptionWordsAt + len(claudeMCPOptionLabels)
+)
+
+// claudeMCPTrustPaintingOf reports the old MCP trust modal caught while Claude
+// Code is still painting it, at any pane width (#7330): from some row down to
+// the last content in the pane, the rows spell the modal's words from its
+// first, in order, and stop short of the end or at it.
+//
+// claudeMCPDialogPartiallyRendered holds the same moment only while the
+// preamble sits whole on one row. Under 21 columns the preamble wraps, and
+// under 33 a question on its own row does, so a capture taken between two rows
+// of that paint read clear: the create typed its prompt, and its Enter landed
+// on the preselected Yes once the modal finished painting.
+//
+// Rows are read as claudeTrustRowOf reads them, so frame chrome and blank rows
+// are skipped and an option row's cursor and ordinal are not words. A ❯ row is
+// the modal's only on an option: one anywhere earlier is a composer holding
+// the words as a draft, and no modal. It holds without a key and says nothing:
+// the frame lasts as long as one paint.
+func claudeMCPTrustPaintingOf(screen visibleText) bool {
+	lines := screen.lines()
+	rows := make([]claudeTrustRow, len(lines))
+	last := -1
+	for i, line := range lines {
+		rows[i] = claudeTrustRowOf(line)
+		if !rows[i].blank {
+			last = i
+		}
+	}
+	for start := last; start >= 0; start-- {
+		if rows[start].blank || !strings.HasPrefix(strings.ToLower(rows[start].label), claudeMCPTrustModalWords[0]) {
+			continue
+		}
+		if claudeMCPTrustPaintedFrom(rows, start, last) {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeMCPTrustPaintedFrom reports whether rows start to last spell the
+// modal's words from the first, in order.
+func claudeMCPTrustPaintedFrom(rows []claudeTrustRow, start, last int) bool {
+	at := 0
+	for i := start; i <= last; i++ {
+		if rows[i].blank {
+			continue
+		}
+		words := strings.Fields(strings.ToLower(rows[i].label))
+		ordinal := false
+		if n := len(words); n > 0 && claudeMCPTrustOrdinalWord(words[n-1]) {
+			// "❯ 1." on a row of its own: a pane under 8 columns wrapped the
+			// label off its ordinal.
+			words, ordinal = words[:n-1], true
+		}
+		if rows[i].selected {
+			// The cursor sits on an option row, or on the ordinal a narrow
+			// pane left of one. A bare ❯ is a composer.
+			if at < claudeMCPTrustOptionWordsAt || at >= claudeMCPTrustFooterWordsAt || (len(words) == 0 && !ordinal) {
+				return false
+			}
+		}
+		if ordinal && (at < claudeMCPTrustOptionWordsAt || at >= claudeMCPTrustFooterWordsAt) {
+			return false
+		}
+		for _, word := range words {
+			if at >= len(claudeMCPTrustModalWords) || word != claudeMCPTrustModalWords[at] {
+				return false
+			}
+			at++
+		}
+	}
+	return at > 0
+}
+
+// claudeMCPTrustOrdinalWord reports whether word is a picker ordinal with no
+// label after it: "1.", "2.".
+func claudeMCPTrustOrdinalWord(word string) bool {
+	digits, ok := strings.CutSuffix(word, ".")
+	if !ok || digits == "" || len(digits) > 3 {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}

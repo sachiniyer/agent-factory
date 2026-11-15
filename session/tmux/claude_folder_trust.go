@@ -473,7 +473,9 @@ func claudeFolderTrustOwnOptions(rows []claudeTrustRow, options, question, foote
 //     (or the last row of the dialog's footer wrapped), and no ❯ row;
 //   - above it, after blank rows and frame chrome, an unbroken run of option
 //     rows holding the affirmative row, whole or as the first row a narrow
-//     pane leaves of it;
+//     pane leaves of it; or, on a pane too short to show that row, a run of
+//     nothing but the dialog's own option rows that is the first content the
+//     pane shows (#7330);
 //   - from that run to the top of the pane, nothing the dialog does not paint
 //     there: no ❯ row, no frame rule, no footer. The dialog's top rule scrolled
 //     off with its question.
@@ -513,14 +515,27 @@ func claudeFolderTrustHeadless(lines []string, rows []claudeTrustRow) bool {
 		return false
 	}
 	from, _ := claudeTrustRunBounds(rows, i)
-	affirmative := false
+	affirmative, own := false, true
 	for j := from; j <= i; j++ {
 		label := rows[j].label
 		affirmative = affirmative || label == claudeTrustAffirmativeLabel ||
 			(len(label) >= claudeFolderTrustMinLabelStart && strings.HasPrefix(claudeTrustAffirmativeLabel, label))
+		own = own && claudeFolderTrustOptionLabel(label)
 	}
 	if !affirmative {
-		return false
+		// A pane too short to show the affirmative row (#7330): the run is
+		// the first content the pane shows and every row of it is one of the
+		// dialog's own options, so as far as the pane shows this is the
+		// dialog. "❯ 2. No, exit" over the footer is the frame.
+		if !own {
+			return false
+		}
+		for j := from - 1; j >= 0; j-- {
+			if strings.TrimSpace(lines[j]) != "" {
+				return false
+			}
+		}
+		return true
 	}
 	for j := from - 1; j >= 0; j-- {
 		if rows[j].selected || claudeTrustFrameRule(lines[j]) || claudeTrustIsFooter(rows[j].label) {
