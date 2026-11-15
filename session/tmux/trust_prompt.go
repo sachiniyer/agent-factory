@@ -110,6 +110,15 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeLegacyTrustDialogOf(screen) == claudeLegacyTrustPartial {
 			return true
 		}
+		// The old single-server MCP modal, in a shape no clause above reads:
+		// its footer under one of its own option rows, and no composer below.
+		// A pane too short scrolls its question off, one too narrow wraps it,
+		// and either way Enter would land on its preselected Yes (#7306). Asked
+		// last, so it turns a clear pane into a hold and changes nothing else.
+		if tail, held := claudeMCPTrustTailOf(screen); held {
+			t.refuseClaudeMCPTrustTail(tail)
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//
