@@ -597,3 +597,78 @@ func TestAccountHandoffInputsCarryTheLiveCarryAnswer(t *testing.T) {
 	}
 	require.True(t, found)
 }
+
+// reportReadyRecipientHands stashes a started, ready recipient whose
+// reportComposerProvableEmpty guard passes (an empty, provable composer) behind
+// a verdictRecordingBackend that reports the runtime's delivery verdict. It is
+// the shared scaffold for the delivery-status regression tests below: the spec
+// "observer" resolves uniquely to the recipient's stable id, the guard's
+// preview reads the readyFakeBackend's "ready\n❯" frame as a provable-empty
+// composer, and the send reaches the backend so the verdict the runtime
+// reports is what deliverHandoffReport sees.
+func reportReadyRecipientHands(t *testing.T, verdict session.PromptDeliveryStatus) (*Manager, *session.Instance, *promptRecorder) {
+	t.Helper()
+	manager, repoID, repoPath := newStatusTestManager(t)
+	rec := &promptRecorder{}
+	backend := verdictRecordingBackend{
+		recordingBackend: recordingBackend{readyFakeBackend{session.NewFakeBackend()}, rec},
+		verdict:          verdict,
+	}
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "observer", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetBackend(backend)
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	inst.AddTabWithIDForTest("agent-tab", "agent", session.TabKindAgent)
+	// Seed the disk row WITH the generated stable id so accountHandoffInputs'
+	// persisted-title-claim walk dedupes the live row by key (liveKeys[id])
+	// and the bare spec stays unambiguous — otherwise the id-less disk row
+	// would re-enter as a second "observer" claim and ResolveRecipient would
+	// drop the digest as ambiguous.
+	seedDiskInstanceWithID(t, repoID, inst.ID, "observer", repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "observer")] = inst
+	manager.mu.Unlock()
+	return manager, inst, rec
+}
+
+// #6818 follow-up: a digest send the runtime explicitly reports as not
+// delivered — nil transport error, a non-PromptDelivered status — must NOT
+// retire the recipient's backlog. Only a proven delivery (PromptDelivered)
+// concludes one, the convention handoffDeliveryResultError and
+// swap_notice_confirm.go keep; the pre-fix code returned reportSent for every
+// nil-error send, so the worker's flush permanently deleted rows the runtime
+// said did not land (PromptNotDelivered, sent-unverified, could-not-confirm
+// alike). Each non-delivered verdict now reports reportHeld so the existing
+// backoff/warn-once machinery retains the backlog for the next flush.
+func TestDeliverHandoffReportHoldsOnNonDeliveredStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.PromptDeliveryStatus
+	}{
+		{"not-delivered", session.PromptNotDelivered},
+		{"sent-unverified", session.PromptSentUnverified},
+		{"could-not-confirm", session.PromptCouldNotConfirm},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, inst, rec := reportReadyRecipientHands(t, tc.status)
+			got := manager.deliverHandoffReport("observer", inst.ID, "[af handoff] kind=wall")
+			require.Equal(t, reportHeld, got,
+				"non-delivered status %s must hold the backlog — only PromptDelivered retires it", tc.status)
+			require.Len(t, rec.snapshot(), 1,
+				"the digest send must still have been attempted past the guard")
+		})
+	}
+}
+
+// Control for the fix: a proven delivery (PromptDelivered) still retires the
+// backlog as reportSent. The happy path must not regress into holding a digest
+// the runtime confirmed landed.
+func TestDeliverHandoffReportSentOnPromptDelivered(t *testing.T) {
+	manager, inst, rec := reportReadyRecipientHands(t, session.PromptDelivered)
+	got := manager.deliverHandoffReport("observer", inst.ID, "[af handoff] kind=wall")
+	require.Equal(t, reportSent, got,
+		"a proven delivery must retire the backlog as reportSent")
+	require.Len(t, rec.snapshot(), 1,
+		"the digest send must have been attempted")
+}

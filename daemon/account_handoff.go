@@ -891,8 +891,17 @@ func (m *Manager) deliverHandoffReport(spec, key, text string) reportSendOutcome
 		m.warn().Printf("account-handoff report to %q: %v", target.Title, err)
 		return reportDropped
 	}
+	// Only a proven delivery retires the rows. A nil transport error means the
+	// submission call returned, not that the digest landed — the same
+	// convention handoffDeliveryResultError and swap_notice_confirm.go keep:
+	// PromptNotDelivered, PromptSentUnverified, and PromptCouldNotConfirm all
+	// leave the delivery obligation standing. Returning reportHeld here keeps
+	// the recipient's backlog through the existing backoff/warn-once machinery
+	// so the next flush retries rather than silently deleting rows the runtime
+	// said did not arrive (#6818 follow-up).
 	if status != session.PromptDelivered {
 		m.warn().Printf("account-handoff report to %q: delivery status %s", target.Title, status)
+		return reportHeld
 	}
 	return reportSent
 }
