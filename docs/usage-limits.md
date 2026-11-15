@@ -564,13 +564,14 @@ tried to carry the conversation and why it could not, when:
   than the carried one or that the carried one does not extend (af's log names
   the file; move it aside before the next swap);
 - the conversation af recorded is no longer the newest one in this worktree,
-  because a new one was started with a Claude `/clear`, or with a Codex `/new`
-  af didn't see (af follows a Codex session to a thread it starts with `/new`,
-  so the swap carries that new thread). This applies only in a
-  worktree af created for the session: in your own checkout (`--here`, an
-  adopted worktree, the root agent) your own agent files conversations there
-  too, so a newer one says nothing about the session and af carries the
-  recorded one, as a restore resumes it. For a worktree reached
+  because a new one was started with a Claude `/clear`, or the session moved
+  to a thread af didn't see, whether a new one from a Codex `/new` or an older
+  one it resumed (af follows a Codex session to a thread it starts with `/new`
+  or resumes with `/resume`, so the swap carries the thread it followed). This
+  applies only in a worktree af created for the session: in your own checkout
+  (`--here`, an adopted worktree, the root agent) your own agent files
+  conversations there too, so a newer one says nothing about the session and
+  af carries the recorded one, as a restore resumes it. For a worktree reached
   through a symlink, Claude can file conversations under the path as given or
   as resolved, so af checks both. When both hold a copy of the conversation,
   af carries the one that holds every turn of the other, and refuses when the
