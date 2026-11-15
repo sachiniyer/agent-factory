@@ -301,8 +301,8 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		if !opts.AccountCarried {
 			if kind.ProvisionsOffBox() {
 				return ProvisionResult{}, fmt.Errorf(
-					"account %q cannot be provisioned on the %s backend: the listed-host licence did not carry it",
-					opts.Account, kind)
+					"account %q cannot be provisioned on the %s backend: it reached the backend factory without a listed-host licence. %s",
+					opts.Account, kind, accountInvariantBug)
 			}
 		} else {
 			account, aerr := resolveAccountForProvision(absPath, opts.Program, opts.Account)
@@ -318,8 +318,8 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 			if kind == BackendSSH {
 				if opts.AccountHost == "" {
 					return ProvisionResult{}, fmt.Errorf(
-						"account %q cannot be provisioned on the %s backend: the listed-host licence named no host to send it to",
-						opts.Account, kind)
+						"account %q cannot be provisioned on the %s backend: its listed-host licence named no host to send it to. %s",
+						opts.Account, kind, accountInvariantBug)
 				}
 			}
 			pinAccountHost(&spec, kind, opts.AccountHost)
@@ -334,7 +334,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		if cred.Granted() && opts.SandboxCredentials != nil {
 			opts.SandboxCredentials.Revoke()
 		}
-		return res, err
+		return res, withAccountHostRemedy(err, createAccountHostRemedy)
 	}
 	// res.Branch is whatever the runtime reports it ran on: a hook launch_cmd is
 	// never handed the daemon's name, so recording it here would display (and

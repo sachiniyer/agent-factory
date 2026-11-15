@@ -1,6 +1,10 @@
 package session
 
-import "strings"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // Off-box accounts on listed hosts (#5571 W7.4).
 //
@@ -85,6 +89,45 @@ func pinAccountHost(spec *ProvisionSpec, kind BackendKind, licensedHost string) 
 		return
 	}
 	spec.Host, spec.AccountHost = licensedHost, licensedHost
+}
+
+// accountInvariantBug is the tail of a refusal that only a defect in af can
+// produce: an account that reached provisioning without the licence, or the
+// licensed host, that NewInstance and reprovisionRemoteOpts always thread. No
+// retry and no config edit changes that, so the text says so instead of naming a
+// remedy that would repeat the failure.
+const accountInvariantBug = "This is a bug in af, not something a retry or a config change fixes; please report it"
+
+// accountHostError is the ssh runtime's refusal to send an account anywhere but
+// the host it was licensed for (sshAccountHostError). It is a type so the caller
+// that knows which operation was refused can add the remedy for that operation.
+type accountHostError struct {
+	msg   string
+	cause error
+	// bug marks a refusal no user action fixes; it gets no remedy.
+	bug bool
+}
+
+func (e *accountHostError) Error() string { return e.msg }
+func (e *accountHostError) Unwrap() error { return e.cause }
+
+// The remedies for the two operations that provision an account on ssh. Each is
+// true on every path that emits it: a create has made nothing, and a
+// re-provision emits it only for a fresh (non-adopting) replacement, which runs
+// after the previous sandbox was retired.
+const (
+	createAccountHostRemedy  = "Retry the create"
+	restoreAccountHostRemedy = "The session's previous sandbox was already retired, so there is no running sandbox to fall back to; check the host list and try again"
+)
+
+// withAccountHostRemedy appends remedy to an accountHostError the user can act
+// on, and returns every other error — and a bug refusal — unchanged.
+func withAccountHostRemedy(err error, remedy string) error {
+	var he *accountHostError
+	if !errors.As(err, &he) || he.bug {
+		return err
+	}
+	return fmt.Errorf("%w. %s", err, remedy)
 }
 
 // listedHostAccountReason is WHY an account is not sent to an unlisted target, stated

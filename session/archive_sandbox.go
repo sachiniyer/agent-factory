@@ -483,7 +483,7 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 			// and a kill or the orphan sweep can reach the survivor.
 			i.retainProvisionResultCleanup(res)
 		}
-		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, err)
+		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, withAccountHostRemedy(err, restoreAccountHostRemedy))
 	}
 	// A runtime-set reason (the mid-provision loss detected before the env
 	// commit, PR #5577 review) is more precise than the mint's — keep it.
