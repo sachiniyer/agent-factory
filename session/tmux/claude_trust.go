@@ -203,16 +203,6 @@ const claudeMCPDialogQuestion = "do you trust this new mcp server"
 // retry until the dialog either completes (claudeTrustPromptPresent) or the
 // preamble is no longer in the expected position.
 func claudeMCPDialogPartiallyRendered(screen visibleText) bool {
-	// A pane too short for the old MCP modal can leave only its option rows
-	// and "Enter to confirm" footer on screen, the preamble and question
-	// scrolled off the top (#3579 class). The block+preamble logic below
-	// bails on the missing preamble, so that frame bypasses it; check it
-	// first and fail closed — hold without a key, the way the folder-trust
-	// twin does (claudeFolderTrustFooterOnly / claudeFolderTrustHeadless,
-	// #7280/#7285). See claudeMCPDialogScrolledOff.
-	if claudeMCPDialogScrolledOff(screen) {
-		return true
-	}
 	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
 	for i, line := range lines {
@@ -295,9 +285,10 @@ func claudeMCPDialogPartiallyRendered(screen visibleText) bool {
 		return true // question on its own row is still the last thing painted
 	}
 	if strings.HasPrefix(lastLabel, strings.ToLower(claudeTrustAffordancePrefix)) {
-		// The footer is there but claudeMCPTrustFooterIsLast returned false
-		// (option-label validation failed), which means the block isn't a
-		// valid MCP dialog. Do not treat this as partial render.
+		// The footer is there but claudeMCPTrustFooterIsLast returned false,
+		// so this is not the modal mid-paint. Whether it is the modal in a
+		// shape af cannot read whole is claudeMCPTrustTailOf's question,
+		// which CheckAndHandleTrustPrompt asks before it reports a pane clear.
 		return false
 	}
 	for _, opt := range claudeMCPOptionLabels {

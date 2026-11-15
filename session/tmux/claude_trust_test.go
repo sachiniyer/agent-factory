@@ -1117,11 +1117,6 @@ func TestCheckAndHandleTrustPrompt_QuotedMCPTrustDialogInjectsNothing(t *testing
 				"? for shortcuts\n",
 		},
 		{
-			// The phrase in agent prose with trailing content below it.
-			name:    "quoted with trailing prose",
-			content: mcpModal + "\nThat is the MCP trust dialog af answers.\n",
-		},
-		{
 			// The phrase appears verbatim with no modal chrome at all — the shape
 			// of a code review or explanation that mentions the dialog.
 			name: "phrase in agent prose without chrome",
@@ -1410,9 +1405,9 @@ func TestCheckAndHandleTrustPrompt_PartiallyRenderedMCPDialogWithBlankAboveOptio
 // branch that still failed open.
 //
 // claudeMCPTrustFooterIsLast requires the preamble, so a question-only frame
-// still injects nothing; the hold comes from claudeMCPDialogScrolledOff, which
-// fires on footer-last + the two rows above being exactly yes/no + the preamble
-// absent.
+// still injects nothing; the hold comes from claudeMCPTrustTailOf, which fires
+// on the footer under one of the modal's own option rows with no composer
+// below.
 func TestCheckAndHandleTrustPrompt_QuestionOnlyAboveYesNoPickerHolds(t *testing.T) {
 	for _, tt := range []struct{ name, content string }{
 		{

@@ -23,74 +23,98 @@ import (
 // on the missing preamble too. A false return is the create path's permission to
 // type the user's prompt and press Enter — on the modal's preselected "1. Yes" —
 // silently auto-trusting an MCP server that can execute code. The fix,
-// claudeMCPDialogScrolledOff, mirrors the folder-trust twin
+// claudeMCPTrustTailOf, mirrors the folder-trust twin
 // (claudeFolderTrustFooterOnly, a32e070c): fail closed — hold without a key.
+// #7306 widened it to the rest of the modal's unreadable shapes; their
+// end-to-end tests are in claude_mcp_trust_tail_test.go.
 
 // mcpScrolledOffOptionsFooter is the canonical scrolled-off frame: the two
 // option rows and the footer, nothing else, exactly as a too-short pane leaves
 // the old MCP modal once its preamble and question have scrolled into scrollback.
 const mcpScrolledOffOptionsFooter = "❯ 1. Yes\n  2. No\nEnter to confirm"
 
-// TestClaudeMCPDialogScrolledOff pins the predicate directly. The hold must fire
-// on every shape a too-short pane leaves of the modal (contiguous, blank before
-// the footer, banner rows above, banner + blank) and the two ambiguous
-// "question without preamble above a yes/no picker" shapes that read the same
-// way; it must NOT fire on a frame the full modal, a quote, or an unrelated
-// picker owns.
-func TestClaudeMCPDialogScrolledOff(t *testing.T) {
+// TestClaudeMCPTrustTailOf pins the predicate directly: what it holds on, what
+// it reports seeing, and what it leaves alone. It is asked only after every
+// clause that answers a dialog has declined the frame, so the whole modal never
+// reaches it through CheckAndHandleTrustPrompt.
+func TestClaudeMCPTrustTailOf(t *testing.T) {
 	question := "Do you trust this new MCP server?"
 	prefix := "New MCP server found. " + question
+	held := func(option, footer string, below int) *claudeMCPTrustTail {
+		return &claudeMCPTrustTail{option: option, footer: footer, below: below}
+	}
+	const footer = "Enter to confirm"
 	tests := []struct {
 		name    string
 		content string
-		want    bool
+		want    *claudeMCPTrustTail // nil: not held
 	}{
-		// The scrolled-off shapes af must hold on.
-		{"options and footer only, contiguous", mcpScrolledOffOptionsFooter, true},
-		{"options and footer, blank before footer", "❯ 1. Yes\n  2. No\n\nEnter to confirm", true},
-		{"banner rows above, options and footer last", "Welcome to Claude Code\n\n❯ 1. Yes\n  2. No\nEnter to confirm", true},
-		{"banner and blank before footer", "Welcome to Claude Code\n\n❯ 1. Yes\n  2. No\n\nEnter to confirm", true},
-		{"question without preamble above, blank separator (ambiguous)", question + "\n\n❯ 1. Yes\n  2. No\nEnter to confirm", true},
-		{"question without preamble above, no blank separator (ambiguous)", question + "\n❯ 1. Yes\n  2. No\nEnter to confirm", true},
-		{"lowercase options and footer", "❯ 1. yes\n  2. no\nenter to confirm", true},
-		{"No preselected (cursor on the second row)", "  1. Yes\n❯ 2. No\nEnter to confirm", true},
+		// The modal's footer under one of its own option rows.
+		{"options and footer only, contiguous", mcpScrolledOffOptionsFooter, held("No", footer, 0)},
+		{"options and footer, blank before footer", "❯ 1. Yes\n  2. No\n\nEnter to confirm", held("No", footer, 0)},
+		{"banner rows above, options and footer last", "Welcome to Claude Code\n\n❯ 1. Yes\n  2. No\nEnter to confirm", held("No", footer, 0)},
+		{"question without preamble above", question + "\n\n❯ 1. Yes\n  2. No\nEnter to confirm", held("No", footer, 0)},
+		{"lowercase options and footer", "❯ 1. yes\n  2. no\nenter to confirm", held("no", "enter to confirm", 0)},
+		{"No preselected", "  1. Yes\n❯ 2. No\nEnter to confirm", held("No", footer, 0)},
+		{"one option row, No", "  2. No\nEnter to confirm", held("No", footer, 0)},
+		{"one option row, Yes", "❯ 1. Yes\nEnter to confirm", held("Yes", footer, 0)},
+		// The preamble on screen is evidence for the dialog, never against it.
+		{"the whole modal", prefix + "\n❯ 1. Yes\n  2. No\nEnter to confirm", held("No", footer, 0)},
+		{"the question wrapped", "New MCP server found. Do you trust this new MCP\nserver?\n❯ 1. Yes\n  2. No\nEnter to confirm", held("No", footer, 0)},
+		{"preamble mid-scrollback, options and footer last", "Earlier: new mcp server found in the logs.\n\n❯ 1. Yes\n  2. No\nEnter to confirm", held("No", footer, 0)},
+		// A footer that is not one row, and rows below it.
+		{"a longer footer", "❯ 1. Yes\n  2. No\nEnter to confirm · Esc to cancel", held("No", "Enter to confirm · Esc to cancel", 0)},
+		{"the footer wrapped onto two rows", "❯ 1. Yes\n  2. No\nEnter to\nconfirm", held("No", footer, 0)},
+		{"the footer wrapped onto three rows", "  2. No\nEnter\nto\nconfirm", held("No", footer, 0)},
+		{"the footer wrapped across the closing frame", "│   2. No  │\n│ Enter to │\n╰──────────╯\n  confirm", held("No", footer, 0)},
+		{"a longer footer wrapped", "❯ 1. Yes\n  2. No\nEnter to confirm · Esc\nto cancel", held("No", "Enter to confirm · Esc", 1)},
+		{"a hint row below the footer", "❯ 1. Yes\n  2. No\nEnter to confirm\n\n? for shortcuts", held("No", footer, 1)},
+		{"prose below the footer and no composer", "  2. No\nEnter to confirm\nThat is the dialog.\nIt asks once.", held("No", footer, 2)},
+		{"a second footer below the first", "  2. No\nEnter to confirm\nEnter to confirm", held("No", footer, 1)},
+		// A pane too short for an option row: the footer is its first content.
+		{"only the footer", "Enter to confirm", held("", footer, 0)},
+		{"only the footer, wrapped", "Enter to\nconfirm", held("", footer, 0)},
+		{"only the footer, under the closing frame", "╰────────────────╯\n  Enter to confirm", held("", footer, 0)},
 
-		// Frames the predicate must leave alone.
-		{"full modal with preamble (fires Enter via claudeMCPTrustFooterIsLast)", prefix + "\n❯ 1. Yes\n  2. No\nEnter to confirm", false},
-		{"full modal with preamble and blank before footer", prefix + "\n❯ 1. Yes\n  2. No\n\nEnter to confirm", false},
-		{"full modal with blank above and below options", prefix + "\n\n❯ 1. Yes\n  2. No\n\nEnter to confirm", false},
-		{"preamble mid-scrollback, options and footer last", "Earlier: new mcp server found in the logs.\n\n❯ 1. Yes\n  2. No\nEnter to confirm", false},
-		{"quote with the composer painted below", mcpScrolledOffOptionsFooter + "\n\n╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n? for shortcuts\n", false},
-		{"unrelated picker whose options do not match yes/no", prefix + "\n❯ Resume previous conversation\n  Start new conversation\nEnter to confirm", false},
-		{"suffix-matching options are not exact yes/no", prefix + "\n❯ Always yes\n  Definitely no\nEnter to confirm", false},
-		{"no footer (still painting)", "❯ 1. Yes\n  2. No\n", false},
-		{"footer only, no options", "Enter to confirm", false},
-		{"one option then footer (incomplete)", "❯ 1. Yes\nEnter to confirm", false},
-		{"MCP phrase in agent prose, no picker", "I see the New MCP server found prompt. Do you trust this new MCP server?", false},
-		{"generic confirm affordance, not the modal footer", "I added a new MCP server entry.\nPress Enter to confirm the change.", false},
+		// A composer below the footer: the modal's rows are quoted output.
+		{"quote with the boxed composer below", mcpScrolledOffOptionsFooter + "\n\n╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n? for shortcuts\n", nil},
+		{"quote with the ruled composer below", mcpScrolledOffOptionsFooter + "\n\n────────\n❯ \n────────\n", nil},
+		{"wrapped footer with the ruled composer below", "  2. No\nEnter to\nconfirm\n────────\n❯ draft\n────────\n", nil},
+		// Rows that are not the modal's.
+		{"unrelated picker whose options do not match yes/no", prefix + "\n❯ Resume previous conversation\n  Start new conversation\nEnter to confirm", nil},
+		{"suffix-matching options are not exact yes/no", prefix + "\n❯ Always yes\n  Definitely no\nEnter to confirm", nil},
+		{"no footer (still painting)", "❯ 1. Yes\n  2. No\n", nil},
+		{"the footer's first words and nothing after", "  2. No\nEnter to", nil},
+		{"the footer's first word, then another row", "  2. No\nEnter\nthe room", nil},
+		{"a blank pane", "\n\n", nil},
+		{"MCP phrase in agent prose, no picker", "I see the New MCP server found prompt. Do you trust this new MCP server?", nil},
+		{"generic confirm affordance, not the modal footer", "I added a new MCP server entry.\nPress Enter to confirm the change.", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := claudeMCPDialogScrolledOff(visibleTextOf(tt.content))
-			require.Equal(t, tt.want, got, "claudeMCPDialogScrolledOff must hold only on the ambiguous scrolled-off shape")
+			got, ok := claudeMCPTrustTailOf(visibleTextOf(tt.content))
+			if tt.want == nil {
+				require.False(t, ok, "not the modal's tail, got %+v:\n%s", got, tt.content)
+				return
+			}
+			require.True(t, ok, "the modal's tail must hold:\n%s", tt.content)
+			require.Equal(t, *tt.want, got, "\n%s", tt.content)
 		})
 	}
 }
 
-// TestClaudeMCPDialogScrolledOff_StyledHolds pins that the hold sees through
-// per-word SGR styling, the way every ANSI-stripping sibling already does: a
-// too-short pane renders the option rows and footer with the same per-word SGR
-// the full modal's question carries, and claudeMCPDialogScrolledOff reads the
-// visibleText (stripped once by visibleTextOf) the same way.
-func TestClaudeMCPDialogScrolledOff_StyledHolds(t *testing.T) {
+// TestClaudeMCPTrustTailOf_StyledHolds pins that the hold sees through per-word
+// SGR styling: the predicate reads the visibleText, stripped once by
+// visibleTextOf, as every sibling does.
+func TestClaudeMCPTrustTailOf_StyledHolds(t *testing.T) {
 	styled := styleWordsPerWord("❯ 1. Yes\n  2. No\nEnter to confirm")
-	require.True(t, claudeMCPDialogScrolledOff(visibleTextOf(styled)),
-		"a styled scrolled-off frame must hold the same as a plain one")
+	_, ok := claudeMCPTrustTailOf(visibleTextOf(styled))
+	require.True(t, ok, "a styled scrolled-off frame must hold the same as a plain one")
 }
 
 // TestCheckAndHandleTrustPrompt_ScrolledOffMCPModalHolds is the end-to-end
 // regression: every scrolled-off shape af's daemon poll can capture must block
-// (return true) and receive no keystroke. Before claudeMCPDialogScrolledOff each
+// (return true) and receive no keystroke. Before claudeMCPTrustTailOf each
 // of these read as dialog-free and the create path typed the prompt and pressed
 // Enter on the preselected "1. Yes".
 func TestCheckAndHandleTrustPrompt_ScrolledOffMCPModalHolds(t *testing.T) {
@@ -143,7 +167,7 @@ func TestCheckAndHandleTrustPrompt_ScrolledOffMCPModalReportsInWayEveryPoll(t *t
 // is the control: the hold must not widen to swallow the full modal. A pane
 // showing the complete old MCP modal — preamble, question, options and footer
 // in place — still fires the historical Enter tap, because
-// claudeMCPTrustFooterIsLast claims it before claudeMCPDialogScrolledOff runs.
+// claudeMCPTrustFooterIsLast claims it before claudeMCPTrustTailOf is asked.
 func TestCheckAndHandleTrustPrompt_FullMCPCModalStillFiresEnterBesideScrolledHold(t *testing.T) {
 	full := "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes\n  2. No\nEnter to confirm"
 	handled, cmds := runTrustPromptCheck(t, ProgramClaude, full)
