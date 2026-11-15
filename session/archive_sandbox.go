@@ -375,7 +375,7 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 	// enum's (#4430 review round 4), and restore cannot drift onto ambient
 	// credentials. Only an account-bearing session asks the licence question.
 	if strings.TrimSpace(accountName) != "" {
-		carried, carryErr := accountCarried(kind, i.Path, i.Host)
+		licensedHost, carried, carryErr := accountCarriedHost(kind, i.Path, i.Host)
 		if carryErr != nil {
 			// The licence is undeterminable: the config the drift check above read
 			// has become unreadable since.
@@ -397,6 +397,7 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
 		}
 		spec.Account = account
+		pinAccountHost(&spec, kind, licensedHost)
 		// The agent command is proven against the account BEFORE anything is
 		// reaped, like the persisted-account checks around it: a program override
 		// that changed since the session was created must leave the recoverable

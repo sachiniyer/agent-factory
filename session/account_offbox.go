@@ -43,11 +43,48 @@ func listedAccountHost(kind BackendKind, repoRoot, pick string) (string, bool, e
 // W7.3). A non-nil error means the answer could not be determined because the
 // repo's project config could not be resolved (#7078).
 func accountCarried(kind BackendKind, repoRoot, pick string) (bool, error) {
+	_, carried, err := accountCarriedHost(kind, repoRoot, pick)
+	return carried, err
+}
+
+// accountCarriedHost reports whether a session of this kind placed by pick can
+// carry its account, AND the listed host name the create resolves to when it is
+// carried via a listed host (the name recordedAccountHost pins onto the row for a
+// default_host pick). It is the SINGLE read of the listed-host licence a create
+// makes: NewInstance resolves it once and threads the answer into the admission
+// gate, the backend factory and recordedAccountHost, so the three cannot
+// disagree about whether an account may be carried after a concurrent config
+// change lands between two independent reads of the global and in-repo config.
+//
+// The host name is empty for a kind that carries by some other means (docker's
+// mount) and for a kind that does not carry (local, sandbox, hook, or ssh on an
+// unlisted target). For ssh on a listed host it is always that host's name,
+// whether it was picked with --host or reached through default_host: the same
+// name is handed to the provision (ProvisionSpec.AccountHost), which refuses to
+// land anywhere else (#7304).
+// A non-nil error means the licence could not be determined because the repo's
+// project config could not be resolved (#7078) — the same condition
+// accountCarried surfaces, so the gate can distinguish "undeterminable" from
+// "determined: no" and surface the true cause.
+func accountCarriedHost(kind BackendKind, repoRoot, pick string) (host string, carried bool, err error) {
 	if kind.CarriesAccount() {
-		return true, nil
+		return "", true, nil
 	}
-	_, ok, err := listedAccountHost(kind, repoRoot, pick)
-	return ok, err
+	return listedAccountHost(kind, repoRoot, pick)
+}
+
+// pinAccountHost holds an account-bearing ssh provision to the host its account
+// was licensed for (#7304): the runtime is handed that host as an explicit pick,
+// so it looks the host up by name instead of choosing one again, and as
+// AccountHost, which it refuses to deviate from (sshAccountHostError). Create and
+// re-provision both call it with the host their ONE licence read resolved — for a
+// re-provision that is the row's pinned host, or, for a row that recorded none,
+// the host that read resolved. Other kinds have no host to pin.
+func pinAccountHost(spec *ProvisionSpec, kind BackendKind, licensedHost string) {
+	if kind != BackendSSH {
+		return
+	}
+	spec.Host, spec.AccountHost = licensedHost, licensedHost
 }
 
 // listedHostAccountReason is WHY an account is not sent to an unlisted target, stated
@@ -66,20 +103,24 @@ func listedHostAccountRemedy() string {
 		"or omit --account to run on the host's own credentials"
 }
 
-// recordedAccountHost is the host name the session row records. It is the pick as
-// made — except for an account-scoped session on a listed host reached through
-// default_host, whose empty pick would otherwise be re-resolved on every restore
-// and could resolve elsewhere (a repository that later gains its own [ssh] section
-// would silently move the session, and its credentials, to a different target).
-// Pinning the RESOLVED name makes "this session's account goes to this host"
-// a recorded fact rather than a re-derivation.
-func recordedAccountHost(opts InstanceOptions, kind BackendKind, repoRoot string) string {
+// recordedAccountHost is the host name the session row records. It is the pick
+// as made — except for an account-scoped session on a listed host reached
+// through default_host, whose empty pick would otherwise be re-resolved on
+// every restore and could resolve elsewhere (a repository that later gains its
+// own [ssh] section would silently move the session, and its credentials, to a
+// different target). Pinning the RESOLVED name makes "this session's account
+// goes to this host" a recorded fact rather than a re-derivation.
+//
+// The resolved name is threaded in from NewInstance, which resolved the
+// listed-host licence ONCE for the admission gate and the backend factory
+// (accountCarriedHost). Re-deriving it here would be a THIRD independent read
+// of the same licence, so a concurrent config change landing between the gate
+// and the record could pin a host the gate never admitted — recording a scoped
+// session on a listed host while nothing was provisioned under the account.
+// Reusing the single answer is what keeps the record consistent with the gate.
+func recordedAccountHost(opts InstanceOptions, resolvedListedHost string) string {
 	if opts.Host != "" || strings.TrimSpace(opts.Account) == "" {
 		return opts.Host
 	}
-	name, ok, err := listedAccountHost(kind, repoRoot, "")
-	if err != nil || !ok {
-		return ""
-	}
-	return name
+	return resolvedListedHost
 }

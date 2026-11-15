@@ -249,7 +249,7 @@ func TestUnprovenAgentCommandIsRefusedBeforeAnySync(t *testing.T) {
 			require.NoError(t, config.SaveConfig(cfg))
 
 			spec := ProvisionSpec{
-				RepoRoot: f.repo, Title: "t", Program: tmux.ProgramClaude, Host: "box1",
+				RepoRoot: f.repo, Title: "t", Program: tmux.ProgramClaude, Host: "box1", AccountHost: "box1",
 				CloneURL: "https://example.invalid/fixture.git",
 				Account:  sessionenv.Account{Agent: tmux.ProgramClaude, Name: "work", Dir: f.accountDir},
 			}
@@ -258,6 +258,7 @@ func TestUnprovenAgentCommandIsRefusedBeforeAnySync(t *testing.T) {
 			assert.Contains(t, err.Error(), "backend=ssh")
 			assert.Contains(t, err.Error(), `"work"`, "the actionable message names the account, as the local path does")
 			assert.NotContains(t, err.Error(), "dial", "the host must not have been contacted")
+			assert.NotContains(t, err.Error(), "licensed for", "refused for the program, not by the licensed-host check that runs before it")
 		})
 	}
 

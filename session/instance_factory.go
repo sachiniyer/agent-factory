@@ -71,6 +71,38 @@ type InstanceOptions struct {
 	// refusal is the same refusal; only the remedy differs, so only the remedy is
 	// carried.
 	AccountSource string
+	// AccountCarried is the listed-host licence decision NewInstance's admission
+	// gate resolved ONCE for this create's account, threaded into the backend
+	// factory so it reuses the SAME answer instead of re-reading the licence from
+	// disk. A second independent read could disagree with the gate's after a
+	// concurrent config change, silently dropping the account from the provision
+	// (spec.Account zero) while the Instance row still recorded it — running the
+	// session on the target's ambient credentials under an account label, the
+	// silent wrong-identity outcome the account boundary exists to prevent.
+	//
+	// Set only by NewInstance: false (the zero value) for a create that names no
+	// account, an off-box kind whose target the licence did not carry (the gate
+	// refused or dropped it before the factory ran), or a local create (the
+	// account is resolved by the in-target shim, not placed by the factory); true
+	// for an off-box kind the licence carried (docker by mount, or ssh on a
+	// listed host). Test factories injected through SetBackendFactoryForTest /
+	// SetProvisionResultFactoryForTest receive it but may ignore it.
+	AccountCarried bool
+	// AccountHost is the listed host name that same ONE read resolved, threaded
+	// with AccountCarried so the provision lands on the host the licence was read
+	// for (#7304). The factory hands it to the runtime as both the host to
+	// provision on and the host to hold itself to (ProvisionSpec.AccountHost), and
+	// NewInstance records it — so the gate, the sync, the provision and the row
+	// name one host. Carrying only the boolean left the HOST to be chosen again by
+	// the ssh runtime: a default_host that moved from one listed host to another
+	// in between kept the licence true while the credentials and the workspace
+	// went to the second host and the row recorded the first.
+	//
+	// Set only by NewInstance. Non-empty exactly when the account is carried by a
+	// listed host (ssh); empty for docker (a mount, no host), for a local create
+	// and for a create that names no account, whose host pick reaches the runtime
+	// as made.
+	AccountHost string
 	// ProgramResolved marks Program as the final command selected by an outer
 	// runtime. It is internal to the sandbox agent-server handoff; ordinary
 	// callers pass an agent enum and leave this false.
@@ -249,17 +281,48 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// accountless create under an unresolvable config must reach the runtime,
 	// whose own answer (the backend's config failure) is the one to report, not
 	// an account error about an account nobody asked for.
+	//
+	// The licence itself was resolved ONCE by NewInstance's admission gate
+	// (accountCarriedHost) and threaded in through opts.AccountCarried; the
+	// factory MUST NOT re-derive it here. A second independent read of the same
+	// licence could disagree with the gate's after a concurrent config change,
+	// and the factory's old branch left spec.Account zero in the "not carried"
+	// case with no error — so the gate admitted the account while the factory
+	// silently dropped it, provisioning on ambient credentials while the
+	// Instance row recorded the account. The gate now refuses or drops an
+	// uncarried account BEFORE the factory runs, so an account that reaches the
+	// factory is carried; reaching here for an off-box kind with an account the
+	// licence did not carry means the gate's threaded decision was not honoured,
+	// and failing closed (mirroring reprovisionRemote's "under account X or not
+	// at all") keeps the session off ambient credentials rather than silently
+	// mislabelling it. A local create leaves AccountCarried false: its shim
+	// resolves the account in the target process, so the factory places nothing.
 	if strings.TrimSpace(opts.Account) != "" {
-		carried, carryErr := accountCarried(kind, absPath, opts.Host)
-		if carryErr != nil {
-			return ProvisionResult{}, fmt.Errorf("cannot resolve account %q for provisioning: %w", opts.Account, carryErr)
-		}
-		if carried {
+		if !opts.AccountCarried {
+			if kind.ProvisionsOffBox() {
+				return ProvisionResult{}, fmt.Errorf(
+					"account %q cannot be provisioned on the %s backend: the listed-host licence did not carry it",
+					opts.Account, kind)
+			}
+		} else {
 			account, aerr := resolveAccountForProvision(absPath, opts.Program, opts.Account)
 			if aerr != nil {
 				return ProvisionResult{}, aerr
 			}
 			spec.Account = account
+			// The HOST is part of the licence, not just the yes/no (#7304): hand
+			// the runtime the host the gate resolved, as an explicit pick, so it
+			// provisions there rather than choosing again from a config that may
+			// have changed since. An ssh account with no licensed host cannot
+			// have come from the gate; refuse it for the same reason as above.
+			if kind == BackendSSH {
+				if opts.AccountHost == "" {
+					return ProvisionResult{}, fmt.Errorf(
+						"account %q cannot be provisioned on the %s backend: the listed-host licence named no host to send it to",
+						opts.Account, kind)
+				}
+			}
+			pinAccountHost(&spec, kind, opts.AccountHost)
 		}
 	}
 	cred := mintForProvision(&spec, kind, opts.SandboxCredentials)
@@ -628,12 +691,30 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	// "read the repo config", not local; checking the request field let the most
 	// common ssh/sandbox/hook path provision on ambient credentials while the
 	// instance recorded the requested account (#3082, #3103).
+	//
+	// Resolve the listed-host licence ONCE for a create that names an account,
+	// so the admission gate, the backend factory and recordedAccountHost share
+	// the same answer instead of each re-reading the global and in-repo config
+	// from disk. A concurrent config change landing between two independent
+	// reads made the gate admit an account the factory silently dropped
+	// (spec.Account left zero while the Instance row recorded the account),
+	// running the session on the target's ambient credentials under an account
+	// label — the silent wrong-identity outcome the account boundary exists to
+	// prevent. Threading the single answer closes that window at its root: the
+	// factory resolves the account only when the gate's read carried it, and
+	// recordedAccountHost pins the host the gate resolved.
+	accountLicenceHost := ""
+	accountLicenceCarried := false
+	accountLicenceErr := error(nil)
+	if resolveBackendErr == nil && strings.TrimSpace(opts.Account) != "" {
+		accountLicenceHost, accountLicenceCarried, accountLicenceErr = accountCarriedHost(kind, absPath, opts.Host)
+	}
+
 	accountBackendErr := error(nil)
 	if resolveBackendErr == nil {
 		accountBackendErr = refuseOffBoxAccountForKind(opts, kind)
 		if accountBackendErr != nil {
-			carried, carryErr := accountCarried(kind, absPath, opts.Host)
-			if carryErr != nil {
+			if accountLicenceErr != nil {
 				// The project config could not be resolved, so the listed-host
 				// licence could not be determined. Surface the resolve error
 				// instead of the static unlisted-host remedy — the same treatment
@@ -644,8 +725,8 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 				// correct and masking the real cause: the config could not be read.
 				accountBackendErr = accountRefusalWithSource(opts, fmt.Errorf(
 					"account %q cannot be used with the %s backend: the listed-host licence could not be checked because the project config could not be resolved: %w",
-					opts.Account, kind, carryErr))
-			} else if carried {
+					opts.Account, kind, accountLicenceErr))
+			} else if accountLicenceCarried {
 				// An account on a LISTED host is carried by W7.3's synced scope
 				// (#5571 W7.4); the refusal below stands for every other off-box
 				// target.
@@ -677,6 +758,17 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	if resolveBackendErr != nil {
 		return nil, resolveBackendErr
 	}
+
+	// Thread the gate's single licence decision into the factory so it reuses the
+	// SAME answer instead of re-reading the licence from disk. Set only when the
+	// account survived the gate (an explicit account the gate dropped set
+	// opts.Account to "", so the factory's account block is skipped either way);
+	// for a local create AccountCarried stays false and the factory leaves
+	// spec.Account zero, the same as before.
+	opts.AccountCarried = accountLicenceCarried
+	// And the HOST that decision was made for, so the provision lands on it
+	// rather than on whatever the runtime would resolve from the config now.
+	opts.AccountHost = accountLicenceHost
 
 	// Give the factory the id the instance will carry so anything it derives
 	// per-session during provisioning — the setup hook's staging dir names
@@ -779,7 +871,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		repoIdentityPath:      opts.RepoIdentityPath,
 		Program:               opts.Program,
 		Account:               opts.Account,
-		Host:                  recordedAccountHost(opts, kind, absPath),
+		Host:                  recordedAccountHost(opts, accountLicenceHost),
 		accountAgent:          accountAgent,
 		Height:                0,
 		Width:                 0,
