@@ -71,6 +71,15 @@ func (p *sandboxProvisioner) RunLimited(timeout time.Duration, script string, li
 	// so the same straggler. One still holding a pipe past WaitDelay is SIGKILLed,
 	// and only such a one, as runCommand's capture does (#7108, #7121, #7241).
 	err := execgroup.Run(cmd)
+	// RunLimited sets cmd.Stderr itself (the boundedBuffer), which disables
+	// execgroup's own attachment of captured stderr to an *exec.ExitError (that
+	// happens only when cmd.Stderr is unset). Attach the bounded bytes here, the
+	// same way execgroup.Output and tmux's probe_liveness do, so the ssh/remote
+	// diagnostics the host printed travel with the failure instead of being
+	// captured and then dropped on every return path.
+	if ee, ok := err.(*exec.ExitError); ok && stderr.Len() > 0 {
+		ee.Stderr = stderr.Bytes()
+	}
 	if out.exceeded {
 		return nil, ErrOutputOverLimit
 	}

@@ -258,6 +258,80 @@ func TestRunLimitedKillsAnEndlessStreamAtTheBound(t *testing.T) {
 	assert.Equal(t, "hello", string(ok))
 }
 
+// RunLimited captures the command's stderr into a bounded buffer, but cmd.Stderr
+// is set, which disables execgroup's own attachment of that capture to an
+// *exec.ExitError. A failed read-back must therefore attach the bounded stderr
+// itself, the same way execgroup.Output and tmux's probe_liveness do; otherwise
+// the ssh/remote diagnostics ("Permission denied", "Connection refused", a tar
+// error) are captured and then dropped on every return path, leaving only a bare
+// "exit status N".
+func TestRunLimitedAttachesCapturedStderrToExitError(t *testing.T) {
+	p := &sandboxProvisioner{sshCmd: "sh -c"} // runs the script locally, same composition as ssh
+	out, err := p.RunLimited(30*time.Second, "echo AF-RUNLIMITED-MARKER-9f3c >&2; exit 3", 1<<20)
+	require.Error(t, err)
+	assert.Empty(t, out, "the marker is on stderr; nothing reaches stdout")
+
+	var ee *exec.ExitError
+	require.True(t, errors.As(err, &ee), "RunLimited returns the *exec.ExitError: %v", err)
+	assert.Equal(t, 3, ee.ExitCode())
+	require.NotNil(t, ee.Stderr, "the bounded stderr must be attached, not captured and dropped")
+	assert.Contains(t, string(ee.Stderr), "AF-RUNLIMITED-MARKER-9f3c",
+		"the ssh/remote diagnostics must travel with the *exec.ExitError")
+
+	// A failure with nothing on stderr leaves Stderr unset: no spurious attachment.
+	_, err = p.RunLimited(30*time.Second, "exit 3", 1<<20)
+	require.Error(t, err)
+	require.True(t, errors.As(err, &ee))
+	assert.Equal(t, 3, ee.ExitCode())
+	assert.Empty(t, ee.Stderr, "a failure with no stderr attaches nothing")
+}
+
+// The operator's only signal for a failed read-back is a warning log that renders
+// the error with %v, and %v on an *exec.ExitError renders only "exit status N". So
+// the captured stderr must also reach the error's own message — the same way
+// syncAccountIn and reap embed captured output — not only the Stderr field.
+func TestWriteBackSurfacesStderrFromAFailedReadBack(t *testing.T) {
+	acct := writeAccount(t, "claude", "v0")
+	// sshCmd fails the read-back with a marker on stderr, the way a real ssh
+	// failure ("Permission denied", "Connection refused") or a remote tar error
+	// would. buildRunCommand runs it through the real composition, so the marker
+	// genuinely flows into RunLimited's boundedBuffer.
+	p := &sandboxProvisioner{sshCmd: "sh -c 'echo AF-READBACK-MARKER-9f3c >&2; exit 3'"}
+	w := &sandboxWorkspace{shell: p, SessionDir: "/s",
+		spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+		syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))}}
+	_, err := w.writeBackAccount(time.Second)
+	require.Error(t, err)
+
+	// The marker is the operator's diagnosis; it must be in the logged message.
+	assert.Contains(t, err.Error(), "AF-READBACK-MARKER-9f3c")
+	assert.Contains(t, err.Error(), "reading account", "the read-back framing is preserved")
+
+	// And on the *exec.ExitError for errors.As consumers.
+	var ee *exec.ExitError
+	require.True(t, errors.As(err, &ee))
+	assert.Contains(t, string(ee.Stderr), "AF-READBACK-MARKER-9f3c")
+
+	// A failed read-back never reaches the archive parser, so the registry is untouched.
+	got, _ := os.ReadFile(filepath.Join(acct.Dir, ".credentials.json"))
+	assert.Equal(t, "v0", string(got))
+}
+
+// A read-back that fails with no stderr keeps the bare message form — no empty
+// ": :" artifact is introduced by the detail embedding.
+func TestWriteBackKeepsTheBareMessageWhenStderrIsEmpty(t *testing.T) {
+	acct := writeAccount(t, "claude", "v0")
+	p := &sandboxProvisioner{sshCmd: "sh -c 'exit 3'"}
+	w := &sandboxWorkspace{shell: p, SessionDir: "/s",
+		spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+		syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))}}
+	_, err := w.writeBackAccount(time.Second)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `reading account "work-claude" back from the host failed: exit status 3`)
+	assert.NotContains(t, err.Error(), "failed: :",
+		"no empty-detail artifact when the failure carried no stderr")
+}
+
 // Reaching the bound through the shell interface is the same refusal.
 type overLimitShell struct{}
 

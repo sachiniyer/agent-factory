@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -211,6 +212,24 @@ func (w *sandboxWorkspace) writeBackAccount(timeout time.Duration) (accountWrite
 	return w.writeBackAccountFrom(w.AccountDir(), timeout)
 }
 
+// accountReadBackStderr returns the stderr a failed read-back command captured
+// on its *exec.ExitError, collapsed to one line, or "" when the failure carries
+// none. RunLimited attaches the bounded ssh/remote stderr it captured to the
+// *exec.ExitError it returns, and the unbounded shell path's execgroup.Output
+// does the same, so the operator's warning log can carry what the host actually
+// said ("Permission denied", "Connection refused", a tar error) instead of only
+// "exit status N" — %v on an *exec.ExitError renders only the bare status. The
+// full bytes stay on Stderr for errors.As; this is the one-line form the
+// "reading account … back from the host failed" message embeds, the same way
+// syncAccountIn and reap embed captured output.
+func accountReadBackStderr(err error) string {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return ""
+	}
+	return strings.TrimSpace(strings.Join(strings.Fields(string(ee.Stderr)), " "))
+}
+
 // writeBackAccountFrom is writeBackAccount for a scope directory other than the
 // live one: the account handoff reads the OUTGOING account from the directory it
 // was rotated to, with the same allowlist, bound, validation and CAS.
@@ -247,6 +266,9 @@ func (w *sandboxWorkspace) writeBackAccountFrom(dir string, timeout time.Duratio
 	if err != nil {
 		if errors.Is(err, ErrOutputOverLimit) {
 			return res, fmt.Errorf("account %q write-back refused: the host sent more than the %d-byte bound: %w", w.spec.Account.Name, limit, err)
+		}
+		if detail := accountReadBackStderr(err); detail != "" {
+			return res, fmt.Errorf("reading account %q back from the host failed: %s: %w", w.spec.Account.Name, detail, err)
 		}
 		return res, fmt.Errorf("reading account %q back from the host failed: %w", w.spec.Account.Name, err)
 	}
