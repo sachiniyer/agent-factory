@@ -301,8 +301,11 @@ func TestSessionCodexCaptureScopeRecoversOnceTheLaunchDirAnswers(t *testing.T) {
 	require.True(t, errors.Is(err, errCodexCaptureUndecided), "undecided while it does not answer: %v", err)
 
 	// The mount answers again: the stuck lookup returns and its latch clears.
+	// What follows measures recovery, so it runs under the production bound,
+	// not the one the wedge phase shrank (#7337).
 	close(release)
 	restoreSeam()
+	restoreTimeout()
 	var conv AgentConversationData
 	require.Eventually(t, func() bool {
 		conv, err = HeldAgentConversation(tmux.ProgramCodex, held.BindConversationCaptureRuntime(scope))
@@ -365,8 +368,13 @@ func TestReceiptPoolTrackedUnscopedIsScopedOnceTheScopeRecovers(t *testing.T) {
 				return WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, wedged, prompt, 0)
 			}), "while it does not answer the receipt decides nothing")
 
+			// The mount answers again, so the rest of the test measures recovery:
+			// its lookups run under the production bound, not the one the wedge
+			// phase shrank (#7337). A rollout-store scan on a loaded runner can
+			// take longer than 50ms, and reads as a scan that did not answer.
 			close(release)
 			restoreSeam()
+			restoreTimeout()
 			require.Eventually(t, func() bool {
 				_, err := fsprobe.ResolveForCompare(launchDir)
 				return err == nil
