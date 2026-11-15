@@ -212,9 +212,10 @@ func (w *sandboxWorkspace) writeBackAccount(timeout time.Duration) (accountWrite
 	return w.writeBackAccountFrom(w.AccountDir(), timeout)
 }
 
-// accountReadBackStderr returns the stderr a failed read-back command captured
-// on its *exec.ExitError, collapsed to one line, or "" when the failure carries
-// none. RunLimited attaches the bounded ssh/remote stderr it captured to the
+// accountReadBackStderr returns the stderr a failed read-back command captured,
+// collapsed to one line, or "" when the failure carries none. It travels on the
+// *exec.ExitError for a command that exited, and on RunLimited's
+// capturedStderrError for one that timed out (#7323). RunLimited attaches the bounded ssh/remote stderr it captured to the
 // *exec.ExitError it returns, and the unbounded shell path's execgroup.Output
 // does the same, so the operator's warning log can carry what the host actually
 // said ("Permission denied", "Connection refused", a tar error) instead of only
@@ -223,11 +224,16 @@ func (w *sandboxWorkspace) writeBackAccount(timeout time.Duration) (accountWrite
 // "reading account … back from the host failed" message embeds, the same way
 // syncAccountIn and reap embed captured output.
 func accountReadBackStderr(err error) string {
+	var captured []byte
+	var timedOut *capturedStderrError
 	var ee *exec.ExitError
-	if !errors.As(err, &ee) {
-		return ""
+	switch {
+	case errors.As(err, &timedOut):
+		captured = timedOut.stderr
+	case errors.As(err, &ee):
+		captured = ee.Stderr
 	}
-	return strings.TrimSpace(strings.Join(strings.Fields(string(ee.Stderr)), " "))
+	return strings.Join(strings.Fields(string(captured)), " ")
 }
 
 // writeBackAccountFrom is writeBackAccount for a scope directory other than the

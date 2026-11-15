@@ -87,10 +87,31 @@ func (p *sandboxProvisioner) RunLimited(timeout time.Duration, script string, li
 		err = nil
 	}
 	if err != nil && canceled() {
-		return out.buf.Bytes(), fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, ctx.Err())
+		// The timeout replaces the command's own error, and with it the
+		// *exec.ExitError the stderr was attached to above. Carry the bytes on the
+		// replacement: a command that wrote its reason and then stalled until the
+		// deadline (a remote tar, an ssh auth prompt) is the failure whose
+		// diagnostic matters most (#7323).
+		timedOut := fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, ctx.Err())
+		if stderr.Len() > 0 {
+			return out.buf.Bytes(), &capturedStderrError{err: timedOut, stderr: stderr.Bytes()}
+		}
+		return out.buf.Bytes(), timedOut
 	}
 	return out.buf.Bytes(), err
 }
+
+// capturedStderrError carries the bounded stderr of a command whose failure is
+// not an *exec.ExitError — RunLimited's timeout. It adds nothing to the message
+// and unwraps to the error it carries, so errors.Is(err, context.DeadlineExceeded)
+// holds exactly as it did; accountReadBackStderr reads the bytes back.
+type capturedStderrError struct {
+	err    error
+	stderr []byte
+}
+
+func (e *capturedStderrError) Error() string { return e.err.Error() }
+func (e *capturedStderrError) Unwrap() error { return e.err }
 
 // boundedBuffer keeps the first max bytes written and discards the rest, so a
 // chatty stderr cannot grow the daemon either.
