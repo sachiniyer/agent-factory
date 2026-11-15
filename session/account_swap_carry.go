@@ -366,7 +366,7 @@ const staleCarryReason = "the conversation af recorded is no longer the newest o
 	"(a new one was started, for example with /clear or /new, or an older one was resumed)"
 
 // staleReason refuses a carry whose recorded conversation is no longer the
-// newest in this worktree. The recorded id is written at launch and at
+// newest in a worktree af owns. The recorded id is written at launch and at
 // delivery capture, and a Codex pane that moves to a new thread is
 // re-recorded by its follow loop (#7120); so a /clear in Claude, or a Codex
 // move the follow did not observe (a frozen loop, or one the daemon never

@@ -669,7 +669,7 @@ mode = "shadow"
   asks in two steps, and the row tells you which step refused:
   - **The session's own side refused.** Examples: no recorded conversation,
     a transcript missing from the current account, or a newer conversation
-    in the worktree. The session is deferred with an `ignored` row whose
+    in a worktree af owns. The session is deferred with an `ignored` row whose
     `reason_code` is `carry-refused`. `params.carry` holds the refusal
     code, such as `missing`, `stale` or `forked`. `to` is empty, because no
     target was at fault.
