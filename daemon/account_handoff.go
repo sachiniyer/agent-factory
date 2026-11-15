@@ -586,14 +586,19 @@ var reportFlushInterval = time.Minute
 const reportPendingCap = 512
 
 // reportSendOutcome tells the worker what one send attempt did:
-// delivered/dropped retire the rows; held keeps them for the next flush —
-// a held delivery waits rather than retrying (#6818 review).
+// delivered/dropped/unconfirmed retire the rows; held keeps them for the
+// next flush — a held delivery waits rather than retrying (#6818 review).
+// Held is reserved for attempts that provably put no digest in front of the
+// recipient: a guard veto before the send, or a not-delivered verdict after
+// it (#7309). Unconfirmed is the ambiguous send — submitted, arrival unknown
+// — and must never be held, because the flush would submit it again.
 type reportSendOutcome int
 
 const (
 	reportSent reportSendOutcome = iota
 	reportHeld
 	reportDropped
+	reportUnconfirmed
 )
 
 // reportPending is one recipient's digest backlog plus the spec that
@@ -649,28 +654,36 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 			case job := <-manager.handoffReportCh:
 				manager.queueReportJob(pending, job)
 			case <-flush.C:
-				for key, entry := range pending {
-					rows := manager.liveReportRows(entry)
-					if len(rows) == 0 {
-						manager.clearReportsHeldIf(pending, entry)
-						delete(pending, key)
-						continue
-					}
-					if nowFunc().Before(entry.nextAttempt) {
-						continue // held backoff — no resolve+restore yet
-					}
-					switch manager.deliverHandoffReport(entry.spec, key, handoff.ReportDigest(rows)) {
-					case reportHeld:
-						entry.rows = rows
-						manager.noteReportHeld(key, entry)
-					default:
-						manager.clearReportsHeldIf(pending, entry)
-						delete(pending, key)
-					}
-				}
+				manager.flushHandoffReports(pending)
 			}
 		}
 	}()
+}
+
+// flushHandoffReports is one flush tick: every recipient whose backoff has
+// elapsed gets one delivery attempt. Only reportHeld keeps the rows for a
+// later tick; every other outcome — reportUnconfirmed included, so an
+// ambiguous digest is never submitted twice — retires them.
+func (m *Manager) flushHandoffReports(pending map[string]*reportPending) {
+	for key, entry := range pending {
+		rows := m.liveReportRows(entry)
+		if len(rows) == 0 {
+			m.clearReportsHeldIf(pending, entry)
+			delete(pending, key)
+			continue
+		}
+		if nowFunc().Before(entry.nextAttempt) {
+			continue // held backoff — no resolve+restore yet
+		}
+		switch m.deliverHandoffReport(entry.spec, key, handoff.ReportDigest(rows)) {
+		case reportHeld:
+			entry.rows = rows
+			m.noteReportHeld(key, entry)
+		default:
+			m.clearReportsHeldIf(pending, entry)
+			delete(pending, key)
+		}
+	}
 }
 
 // queueReportJob adds a tick's rows to the recipient's digest backlog.
@@ -704,7 +717,7 @@ func (m *Manager) noteReportHeld(key string, entry *reportPending) {
 		return
 	}
 	entry.warned = true
-	m.warn().Printf("account-handoff: report delivery to %s held %s — recipient composer never proves empty",
+	m.warn().Printf("account-handoff: report delivery to %s held %s — recipient composer never proves empty, or its digest keeps not arriving",
 		key, now.Sub(entry.heldSince).Round(time.Minute))
 	if store, err := handoff.DefaultRailsStore(); err == nil {
 		if werr := store.NoteReportsHeld(entry.heldSince); werr != nil {
@@ -827,7 +840,8 @@ func (m *Manager) enqueueHandoffReport(spec, key string, rows []handoff.EventRow
 // recipient instead of answering its picker — and the send-confirmation
 // record. A vanished or re-resolved-away recipient drops; a held one
 // reports reportHeld so the worker waits for detach instead of retrying
-// into a different session.
+// into a different session. After the send, only a not-delivered verdict
+// holds; an ambiguous one reports reportUnconfirmed and is never resent.
 func (m *Manager) deliverHandoffReport(spec, key, text string) reportSendOutcome {
 	// The spec must still resolve uniquely to THIS recipient at send time
 	// (#6818 review): a same-titled session created while the digest sat
@@ -891,10 +905,30 @@ func (m *Manager) deliverHandoffReport(spec, key, text string) reportSendOutcome
 		m.warn().Printf("account-handoff report to %q: %v", target.Title, err)
 		return reportDropped
 	}
-	if status != session.PromptDelivered {
-		m.warn().Printf("account-handoff report to %q: delivery status %s", target.Title, status)
+	// A nil error means the submission call returned, not that the digest
+	// landed; the status says which of three things happened.
+	switch status {
+	case session.PromptDelivered:
+		return reportSent
+	case session.PromptNotDelivered:
+		// Proof the digest did not arrive, so sending it again cannot
+		// duplicate it: keep the rows for the next flush (#7309).
+		m.warn().Printf("account-handoff report to %q (recipient %s): delivery status %s — the digest did not arrive; holding its rows for the next flush",
+			target.Title, key, status)
+		return reportHeld
+	default:
+		// sent-unverified, could-not-confirm, or a status this code does not
+		// know: the digest was submitted and may already have landed.
+		// session/tmux/submit.go reports sent-unverified rather than
+		// not-delivered precisely so no caller redelivers, so this must not
+		// reach the held path — its flush would submit a second copy (#7318
+		// review). sendPromptGuarded has already spent the one re-verification
+		// that cannot resubmit (promoteUnverifiedSend), so what is left is to
+		// retire the rows and say so, once, for the user to check.
+		m.warn().Printf("account-handoff report to %q (recipient %s): delivery status %s — the digest was submitted but its arrival could not be confirmed; not resending it, check that session for the digest",
+			target.Title, key, status)
+		return reportUnconfirmed
 	}
-	return reportSent
 }
 
 // errReportHeld marks a guard veto that means "wait", not "drop" — the
