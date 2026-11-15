@@ -159,7 +159,12 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"only the footer, under a quote's last row", "  That is the dialog.\n" + footer, claudeFolderTrustNone},
 		{"only the footer, under a rule", "────────\n" + footer, claudeFolderTrustNone},
 		{"only the footer, under a ❯ row", "❯ draft\n" + footer, claudeFolderTrustNone},
-		{"only the footer, under a label that is not the affirmative's tail", "    exit\n" + footer, claudeFolderTrustNone},
+		// #7338: "exit" is the tail of the dialog's own exit row, which a
+		// pane narrow enough wraps. It read as no dialog before.
+		{"only the footer, under the tail of the exit row", "    exit\n" + footer, claudeFolderTrustUnreadable},
+		{"only the footer, under a word that is no label's tail", "    quit\n" + footer, claudeFolderTrustNone},
+		{"the legacy option block over its footer", "❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to exit\n", claudeFolderTrustUnreadable},
+		{"the options and the footer wrapped under 16 columns", "❯ 2. No, exit\n\nEnter to\nconfirm · Esc\nto cancel\n", claudeFolderTrustUnreadable},
 		{"the question in a composer draft", "────\n❯ Is this a project you created or one you trust?\n  Yes, I trust this folder\n────\n", claudeFolderTrustNone},
 		{"the legacy dialog", "Do you trust the files in this folder?\n❯ Yes  No\n", claudeFolderTrustNone},
 	} {
