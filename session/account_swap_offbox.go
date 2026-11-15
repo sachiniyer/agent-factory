@@ -229,6 +229,15 @@ func (w *sandboxWorkspace) PrevAccountDir() string { return w.AccountDir() + acc
 // An existing staging directory is replaced, so a failed earlier attempt leaves
 // nothing behind to be mistaken for this one.
 func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessionenv.Account) (map[string]string, []string, error) {
+	// A send, so it is licensed here, at the send — not only at the admission
+	// that ran before the agent-server was asked whether it can swap (#7342).
+	check := *w
+	check.spec.Account = acct
+	if apply, err := check.accountSendApplies(); err != nil {
+		return nil, nil, err
+	} else if !apply {
+		return nil, nil, fmt.Errorf("account %q cannot be staged: this session carries no synced account", acct.Name)
+	}
 	archive, versions, err := buildAccountArchive(acct.Dir, accountCredentialRel[acct.Agent], accountScopeSeed(acct.Agent))
 	if err != nil {
 		return nil, nil, err
@@ -338,7 +347,7 @@ func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*
 	}
 	check := *w
 	check.spec.Account = next
-	if _, err := check.accountSyncApplies(); err != nil {
+	if _, err := check.accountSendApplies(); err != nil {
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
 	}
 	// The same command proof the provision ran, with the incoming account: an

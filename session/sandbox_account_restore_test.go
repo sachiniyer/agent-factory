@@ -25,7 +25,7 @@ import (
 func restartedFrom(t *testing.T, f *swapFixture, hostName string) *Instance {
 	t.Helper()
 	data := &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
-		Config: config.SSHConfig{Host: "box1.example"}, SessionDir: f.dir, HostName: hostName,
+		Config: config.SSHConfig{Host: "box1.example", User: "dev"}, SessionDir: f.dir, HostName: hostName,
 	}}
 	backend, _, err := restoreRuntimeCleanupWithAccount("swap", "ssh", data, restoredAccount{Name: "work", Agent: tmux.ProgramClaude, Program: tmux.ProgramClaude})
 	require.NoError(t, err)
@@ -101,7 +101,7 @@ func TestAccountWorkspaceIsNotRestoredWithoutItsEvidence(t *testing.T) {
 	f := newSwapFixture(t)
 	restore := func(host string, acct restoredAccount) *sandboxProvisioner {
 		data := &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
-			Config: config.SSHConfig{Host: "box1.example"}, SessionDir: f.dir, HostName: host,
+			Config: config.SSHConfig{Host: "box1.example", User: "dev"}, SessionDir: f.dir, HostName: host,
 		}}
 		backend, _, err := restoreRuntimeCleanupWithAccount("s", "ssh", data, acct)
 		require.NoError(t, err)

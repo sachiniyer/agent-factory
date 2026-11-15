@@ -140,6 +140,12 @@ func (w *sandboxWorkspace) syncAgentConfigInto(timeout time.Duration, scopeDir s
 	if sent == 0 {
 		return skipped, nil
 	}
+	// The operator's config rides the account's licence, so it is held to the
+	// same check at the send: the listed entry must still name this machine
+	// (#7342).
+	if err := accountSendLicence(w.spec); err != nil {
+		return nil, fmt.Errorf("the operator's %s config is not placed on the host: %w", agent, err)
+	}
 	dir := shellQuote(scopeDir)
 	script := "umask 077 && mkdir -p " + dir + " && tar -xf - -C " + dir
 	if out, err := w.shell.Run(timeout, script, bytes.NewReader(buf.Bytes()), true); err != nil {

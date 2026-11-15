@@ -81,7 +81,7 @@ func TestAgentConfigNeedsAListedHostAndAnAccountScope(t *testing.T) {
 	assert.Empty(t, sh.stdin)
 
 	noAccount := &sandboxWorkspace{shell: sh, SessionDir: "/s",
-		spec: ProvisionSpec{AccountSyncHost: "box1", AgentConfigFiles: []string{"claude:settings.json"}}}
+		spec: ProvisionSpec{AccountSyncHost: "box1", AccountSyncTarget: box1Target, AgentConfigFiles: []string{"claude:settings.json"}}}
 	_, err = noAccount.syncAgentConfigIn(time.Second)
 	require.NoError(t, err)
 	assert.Empty(t, sh.scripts, "without an account scope there is nowhere to put it")

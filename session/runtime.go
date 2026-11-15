@@ -170,6 +170,14 @@ type ProvisionSpec struct {
 	// never from a repository's own config. Empty with a non-empty Account means
 	// the target is not licensed and the provision refuses rather than send.
 	AccountSyncHost string
+	// AccountSyncTarget is where the transport this provision sends over logs in
+	// (machine, port, remote user). It is recorded beside AccountSyncHost by
+	// whatever bound the transport — a fresh provision from the host entry it
+	// composed its command from, an adoption or a reattach from the recorded
+	// cleanup identity — so that every later send can check that the licensed
+	// entry still names this machine (accountSendLicence, #7342). Zero means
+	// unknown, which licenses no send.
+	AccountSyncTarget accountSyncTarget
 	// AccountHost is the listed host name Account was licensed for, by the ONE
 	// licence read its caller made (accountCarriedHost, #7304). The caller also
 	// puts it in Host, so the ssh runtime looks that host up by name instead of

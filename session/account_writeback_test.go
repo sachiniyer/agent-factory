@@ -193,7 +193,7 @@ func TestWriteBackRefusesAnOversizedOrTruncatedArchive(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &sandboxWorkspace{shell: fixedOutputShell{out: tc.out}, SessionDir: "/s",
-				spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+				spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target},
 				syncedVersion: map[string]string{}}
 			for _, rel := range rels {
 				b, _ := os.ReadFile(filepath.Join(acct.Dir, filepath.FromSlash(rel)))
@@ -298,7 +298,7 @@ func TestWriteBackSurfacesStderrFromAFailedReadBack(t *testing.T) {
 	// genuinely flows into RunLimited's boundedBuffer.
 	p := &sandboxProvisioner{sshCmd: "sh -c 'echo AF-READBACK-MARKER-9f3c >&2; exit 3'"}
 	w := &sandboxWorkspace{shell: p, SessionDir: "/s",
-		spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+		spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target},
 		syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))}}
 	_, err := w.writeBackAccount(time.Second)
 	require.Error(t, err)
@@ -323,7 +323,7 @@ func TestWriteBackKeepsTheBareMessageWhenStderrIsEmpty(t *testing.T) {
 	acct := writeAccount(t, "claude", "v0")
 	p := &sandboxProvisioner{sshCmd: "sh -c 'exit 3'"}
 	w := &sandboxWorkspace{shell: p, SessionDir: "/s",
-		spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+		spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target},
 		syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))}}
 	_, err := w.writeBackAccount(time.Second)
 	require.Error(t, err)
@@ -365,7 +365,7 @@ func TestWriteBackSurfacesStderrFromATimedOutReadBack(t *testing.T) {
 	// sshCmd would be in the error whether or not the stderr was kept.
 	p := &sandboxProvisioner{sshCmd: "sh -c 'printf AF-READBACK-%s-7323 TIMEOUT-MARKER >&2; sleep 60'"}
 	w := &sandboxWorkspace{shell: p, SessionDir: "/s",
-		spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+		spec:          ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target},
 		syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))}}
 	_, err := w.writeBackAccount(time.Second)
 	require.Error(t, err)
@@ -390,7 +390,7 @@ func (overLimitShell) RunLimited(time.Duration, string, int64) ([]byte, error) {
 
 func TestWriteBackUsesTheBoundedStreamWhenTheShellOffersIt(t *testing.T) {
 	acct := writeAccount(t, "claude", "v0")
-	w := &sandboxWorkspace{shell: overLimitShell{}, SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1"}}
+	w := &sandboxWorkspace{shell: overLimitShell{}, SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 	_, err := w.writeBackAccount(time.Second)
 	require.ErrorIs(t, err, ErrOutputOverLimit)
 	_ = context.Background()
@@ -448,7 +448,7 @@ func TestReadAccountArchiveRefusesEveryHostileNameWhole(t *testing.T) {
 func TestHostileArchiveWritesNothingAnywhere(t *testing.T) {
 	outside := t.TempDir()
 	acct := writeAccount(t, "claude", "v0")
-	w := &sandboxWorkspace{SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+	w := &sandboxWorkspace{SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target},
 		syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))}}
 	for _, name := range []string{"../" + filepath.Base(outside) + "/pwned", outside + "/pwned"} {
 		w.shell = fixedOutputShell{out: hostileArchive(t,
@@ -496,7 +496,7 @@ func TestWriteBackRefusesCorruptedContentWhateverTheTransportSaid(t *testing.T) 
 	} {
 		t.Run(name, func(t *testing.T) {
 			acct := writeAccount(t, "claude", "v0")
-			w := &sandboxWorkspace{SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+			w := &sandboxWorkspace{SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target},
 				syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))},
 				shell:         fixedOutputShell{out: archiveOf(t, map[string][]byte{".credentials.json": content}, []string{".credentials.json"})}}
 			_, err := w.writeBackAccount(time.Second)
@@ -510,7 +510,7 @@ func TestWriteBackRefusesCorruptedContentWhateverTheTransportSaid(t *testing.T) 
 func TestWriteBackRefusesDuplicateAndUnterminatedArchives(t *testing.T) {
 	acct := writeAccount(t, "claude", "v0")
 	mk := func(out []byte) *sandboxWorkspace {
-		return &sandboxWorkspace{SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1"},
+		return &sandboxWorkspace{SessionDir: "/s", spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target},
 			syncedVersion: map[string]string{".credentials.json": accountVersion([]byte("v0"))}, shell: fixedOutputShell{out: out}}
 	}
 	one := map[string][]byte{".credentials.json": []byte("fresh")}

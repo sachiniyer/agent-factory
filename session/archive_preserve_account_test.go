@@ -28,7 +28,7 @@ func preservedSessionWithAccount(t *testing.T, run func(time.Duration, string, i
 		}
 	}
 	p.runCommandFn = run
-	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1"}}
+	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
 

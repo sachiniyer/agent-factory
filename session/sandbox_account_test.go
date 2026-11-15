@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
@@ -22,6 +23,7 @@ const testSecretA = "refresh-token-AAAA"
 
 func writeAccount(t *testing.T, agent, secret string) sessionenv.Account {
 	t.Helper()
+	listBox1(t)
 	dir := t.TempDir()
 	rel := accountCredentialRel[agent][0]
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, filepath.Dir(rel)), 0o700))
@@ -38,8 +40,29 @@ func workspaceOn(t *testing.T, acct sessionenv.Account, host string) *sandboxWor
 	return &sandboxWorkspace{
 		shell:      localShell{},
 		SessionDir: t.TempDir(),
-		spec:       ProvisionSpec{Account: acct, AccountSyncHost: host},
+		spec:       ProvisionSpec{Account: acct, AccountSyncHost: host, AccountSyncTarget: box1Target},
 	}
+}
+
+// box1Target is where a transport composed from oneListedHost's box1 logs in:
+// what a workspace licensed as "box1" must dial for a send to be allowed (#7342).
+var box1Target = accountSyncTargetOf(sshConfigForHost(oneListedHost["box1"]))
+
+// listBox1 makes sure the global host list names box1, as oneListedHost has it,
+// so a workspace built by hand with AccountSyncHost "box1" and box1Target holds
+// a licence that is good at the send. A test that already listed box1 keeps its
+// AF home; any other gets a fresh one.
+func listBox1(t *testing.T) {
+	t.Helper()
+	if cfg, err := config.LoadConfig(); err == nil {
+		if _, ok := cfg.Hosts["box1"]; ok {
+			return
+		}
+	}
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.Hosts = oneListedHost
+	require.NoError(t, config.SaveConfig(cfg))
 }
 
 func TestAccountSyncOnlyToAListedHost(t *testing.T) {
@@ -148,7 +171,7 @@ func TestAccountWriteBackRefusesAHostileArchive(t *testing.T) {
 			}
 			require.NoError(t, tw.Close())
 			w := &sandboxWorkspace{shell: fixedOutputShell{out: buf.Bytes()}, SessionDir: "/s",
-				spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1"}}
+				spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 			_, err := w.pullAccountBack(time.Second)
 			require.Error(t, err)
 			got, _ := os.ReadFile(filepath.Join(acct.Dir, ".credentials.json"))
@@ -168,7 +191,7 @@ func (f fixedOutputShell) Run(time.Duration, string, io.Reader, bool) ([]byte, e
 func TestAccountEnvPointsTheAgentAtTheScopedDir(t *testing.T) {
 	acct := writeAccount(t, "claude", testSecretA)
 	w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "claude",
-		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 	name, value, ok := w.accountEnv()
 	require.True(t, ok)
 	assert.Equal(t, "CLAUDE_CONFIG_DIR", name)
@@ -195,7 +218,7 @@ func TestRemoteLaunchIsolatesTheAccountFromTheHostsOwnIdentity(t *testing.T) {
 	acct := writeAccount(t, "claude", testSecretA)
 	sh := &recordingShell{}
 	w := &sandboxWorkspace{shell: sh, SessionDir: t.TempDir(), tokenRef: "ref", agentServerToken: "tok", program: "claude",
-		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 	require.NoError(t, w.writeRuntimeIdentity(time.Second))
 	envFile := filepath.Join(t.TempDir(), "af-identity.env")
 	require.NoError(t, os.WriteFile(envFile, []byte(sh.stdin[1]), 0o600))
@@ -221,7 +244,7 @@ func TestRemoteLaunchIsolatesTheAccountFromTheHostsOwnIdentity(t *testing.T) {
 func TestRemoteLaunchFailsClosedWithoutTheSessionScope(t *testing.T) {
 	acct := writeAccount(t, "claude", testSecretA)
 	w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: t.TempDir(), program: "claude",
-		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 	guard := w.accountLaunchGuard()
 	require.NotEmpty(t, guard)
 	run := func(env ...string) error {
@@ -261,7 +284,7 @@ func TestAgentServerLaunchScriptCarriesTheGuardBetweenIdentityAndStart(t *testin
 	acct := writeAccount(t, "claude", testSecretA)
 	sh := &recordingShell{}
 	w := &sandboxWorkspace{shell: sh, SessionDir: "/s", program: "claude",
-		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 	_ = w.startAgentServer(time.Second)
 	require.NotEmpty(t, sh.scripts)
 	script := sh.scripts[len(sh.scripts)-1]
@@ -284,7 +307,7 @@ func TestAgentServerLaunchScriptCarriesTheGuardBetweenIdentityAndStart(t *testin
 func TestGeminiIdentityPinsSurviveTheLaunchFilters(t *testing.T) {
 	acct := writeAccount(t, "gemini", "gemini-cred")
 	w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "gemini",
-		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 	// What the launch shell exports after sourcing the identity file.
 	env := []string{"PATH=/usr/bin", "GOOGLE_APPLICATION_CREDENTIALS=", "GOOGLE_GENAI_USE_VERTEXAI=",
 		"GOOGLE_GENAI_USE_GCA=", "GEMINI_API_KEY=", "GOOGLE_API_KEY=", "GEMINI_CLI_HOME=" + w.AccountDir()}
@@ -387,7 +410,7 @@ func TestAccountScopeMarkerReachesTheAgentServerOnly(t *testing.T) {
 	acct := writeAccount(t, "claude", testSecretA)
 	sh := &recordingShell{}
 	w := &sandboxWorkspace{shell: sh, SessionDir: t.TempDir(), tokenRef: "ref", agentServerToken: "tok", program: "claude",
-		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 	require.NoError(t, w.writeRuntimeIdentity(time.Second))
 	assert.Contains(t, sh.stdin[1], AccountScopeAgentEnv+"='claude'", "the identity file marks the launch account-scoped")
 
@@ -411,7 +434,7 @@ func TestRemoteLaunchNeutralizesHostCloudAuthSelectors(t *testing.T) {
 	acct := writeAccount(t, "claude", testSecretA)
 	sh := &recordingShell{}
 	w := &sandboxWorkspace{shell: sh, SessionDir: t.TempDir(), tokenRef: "ref", agentServerToken: "tok", program: "claude",
-		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1"}}
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 	require.NoError(t, w.writeRuntimeIdentity(time.Second))
 	envFile := filepath.Join(t.TempDir(), "af-identity.env")
 	require.NoError(t, os.WriteFile(envFile, []byte(sh.stdin[1]), 0o600))

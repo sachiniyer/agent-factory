@@ -358,7 +358,8 @@ func TestAdoptionSendsTheAccountUnderTheLicensedNameOrNotAtAll(t *testing.T) {
 			RepoRoot: f.repo, Title: "t", Program: tmux.ProgramClaude, Host: host, AccountHost: licensed,
 			Account: sessionenv.Account{Agent: tmux.ProgramClaude, Name: "work", Dir: f.accountDir},
 			Adopt: &AdoptSpec{SessionDir: "/home/dev/.af-sessions/x", Branch: "root/s",
-				Transport: &RecordedTransport{SSHCmd: "ssh recorded", SSH: &SSHRuntimeCleanupData{HostName: recorded}}},
+				Transport: &RecordedTransport{SSHCmd: "ssh recorded", SSH: &SSHRuntimeCleanupData{
+					HostName: recorded, Config: config.SSHConfig{Host: "box1.example", User: "dev"}}}},
 		}
 	}
 	refused := func(t *testing.T, spec ProvisionSpec) string {
@@ -373,7 +374,8 @@ func TestAdoptionSendsTheAccountUnderTheLicensedNameOrNotAtAll(t *testing.T) {
 		msg := err.Error()
 		assert.Contains(t, msg, `account "work" is not sent`)
 		assert.Contains(t, msg, "No credentials were sent, and the preserved workspace was left as it is")
-		assert.Contains(t, msg, "clear the session's account", "names the way to restore without the account")
+		assert.Contains(t, msg, "af sessions kill", "names the one other way out af offers")
+		assert.NotContains(t, msg, "clear the session's account", "af has no such action (#7342)")
 		assert.NotContains(t, msg, "already retired", "an adoption reaps nothing")
 		assert.NotContains(t, msg, "-key")
 		var he *accountHostError
@@ -419,7 +421,7 @@ func TestAdoptionSendsTheAccountUnderTheLicensedNameOrNotAtAll(t *testing.T) {
 		_, _, err := sshProvisionHost(&spec, mustResolve(t, f.repo))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "bug in af")
-		assert.NotContains(t, err.Error(), "clear the session's account")
+		assert.NotContains(t, err.Error(), "af sessions kill")
 		assert.Empty(t, spec.AccountSyncHost)
 	})
 
