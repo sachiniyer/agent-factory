@@ -469,9 +469,21 @@ var hooksReseedTimeout = 10 * time.Second
 // hooks pane is focused when this is shown, so neither the Projects-section
 // nor Enter variant applies; switchProjectPickHint(false, false) names the
 // default/tree key.
+//
+// That key has to work from the overlay this is shown on (#7324): the focused
+// pane consumes every key but Esc and quit, so handleStateHooks passes the
+// project-switch key through while this reason is the one on screen.
 func registryHooksReadOnlyReason() string {
 	return "Hooks belong to a project — " + switchProjectPickHint(false, false) +
 		", then reopen this editor."
+}
+
+// registryModeHooksReadOnly reports whether the hooks overlay shows the
+// registry-mode reason: a local target with no active project. One predicate
+// for the open gate and the key pass-through, so the reason and the key it
+// names cannot come apart.
+func (m *home) registryModeHooksReadOnly() bool {
+	return m.repoRoot == "" && !isRemoteTarget()
 }
 
 func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
@@ -486,7 +498,7 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 	// root is required to save in-repo config", trapping the user in a
 	// dirty-pane/failed-save loop. isRemoteTarget already set its own reason
 	// at startup, so this branch is local-target-only.
-	if m.repoRoot == "" && !isRemoteTarget() {
+	if m.registryModeHooksReadOnly() {
 		m.hooksPane.SetReadOnly(registryHooksReadOnlyReason())
 	}
 	m.hooksPane.SetFocus(true)
@@ -659,15 +671,23 @@ func (m *home) handleStateHooks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleQuit()
 	}
 
+	// The registry-mode reason tells the user to press the project-switch key,
+	// and the pane below would swallow it: a read-only pane consumes every key
+	// but Esc and quit. Every key the reason names has to work from the screen
+	// it is shown on, so that one key closes the overlay — exactly as Esc does —
+	// and opens the picker it advertises (#7324). Registry mode only: an
+	// editable overlay shows no such reason and keeps its keys.
+	if m.registryModeHooksReadOnly() && key.Matches(msg, keys.GlobalKeyBindings[keys.KeySwitchProject]) {
+		m.hooksPane.SetFocus(false)
+		closeCmd := m.closeHooksOverlay()
+		mod, pickerCmd := m.showProjectPickerOverlay()
+		return mod, tea.Batch(closeCmd, pickerCmd)
+	}
+
 	consumed := m.hooksPane.HandleKeyPress(msg)
 	if !m.hooksPane.HasFocus() {
-		// The pane released focus (Esc): close the overlay and save. A failed
-		// save keeps the pane dirty (#1001) and surfaces the error.
-		m.state = stateDefault
-		if err := m.saveContentPaneState(); err != nil {
-			return m, m.handleError(err)
-		}
-		return m, nil
+		// The pane released focus (Esc): close the overlay and save.
+		return m, m.closeHooksOverlay()
 	}
 	if !consumed {
 		if msg.String() == "ctrl+c" || key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit]) {
@@ -675,4 +695,14 @@ func (m *home) handleStateHooks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// closeHooksOverlay hands the keyboard back and saves the pane. A failed save
+// keeps the pane dirty (#1001) and surfaces the error.
+func (m *home) closeHooksOverlay() tea.Cmd {
+	m.state = stateDefault
+	if err := m.saveContentPaneState(); err != nil {
+		return m.handleError(err)
+	}
+	return nil
 }

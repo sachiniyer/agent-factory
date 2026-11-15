@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -8,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 
 	"github.com/stretchr/testify/assert"
@@ -120,6 +122,81 @@ func TestRegistryHooksReadOnlyReasonNamesProjectSwitchKey(t *testing.T) {
 	t.Cleanup(func() { keys.GlobalKeyBindings[keys.KeySwitchProject] = orig })
 	require.Contains(t, registryHooksReadOnlyReason(), "press p",
 		"a rebound project-switch key must be named; hardcoding ctrl+p would be a dead key")
+}
+
+// openRegistryHooksOverlay opens the hooks overlay on a registry-mode home, with
+// the project picker's cross-repo snapshot answered from memory so a test that
+// goes on to open the picker never dials a daemon.
+func openRegistryHooksOverlay(t *testing.T) *home {
+	t.Helper()
+	h := registryModeHooksHome(t)
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+	resizeHome(h, 120, 45)
+	_, _ = h.showHooksOverlay()
+	require.Equal(t, stateHooks, h.state, "precondition: the hooks overlay owns the keyboard")
+	return h
+}
+
+// TestRegistryHooksReasonSwitchKeyWorksFromTheOverlay pins #7324: every key the
+// read-only reason names works from the screen the reason is shown on. The
+// reason tells the user to press the project-switch key, and while stateHooks
+// owns the keyboard the focused pane consumes every key but Esc and quit — so
+// the advertised key did nothing. It now closes the read-only overlay and opens
+// the project picker, through the real key dispatch.
+func TestRegistryHooksReasonSwitchKeyWorksFromTheOverlay(t *testing.T) {
+	h := openRegistryHooksOverlay(t)
+	require.Contains(t, registryHooksReadOnlyReason(), "press ctrl+p",
+		"precondition: this is the key the reason on screen names")
+
+	_, _ = h.dispatchKeyAction(tea.KeyMsg{Type: tea.KeyCtrlP})
+
+	require.Equal(t, stateSwitchProject, h.state,
+		"the key the reason names must open the project picker from the hooks overlay")
+	require.NotNil(t, h.projectPickerOverlay, "the project picker is open")
+	assert.False(t, h.hooksPane.HasFocus(), "the hooks overlay released the keyboard")
+	assert.False(t, h.hooksPane.IsDirty(), "a read-only pane closes with nothing to save")
+}
+
+// A rebound project-switch key is the one the reason names, so it is the one
+// that must pass through — not a hardcoded ctrl+p.
+func TestRegistryHooksReasonReboundSwitchKeyWorksFromTheOverlay(t *testing.T) {
+	orig := keys.GlobalKeyBindings[keys.KeySwitchProject]
+	keys.GlobalKeyBindings[keys.KeySwitchProject] = key.NewBinding(
+		key.WithKeys("p"),
+		key.WithHelp("p", "switch project"),
+	)
+	t.Cleanup(func() { keys.GlobalKeyBindings[keys.KeySwitchProject] = orig })
+	h := openRegistryHooksOverlay(t)
+	require.Contains(t, registryHooksReadOnlyReason(), "press p")
+
+	// The stale default is not the advertised key any more: still swallowed.
+	_, _ = h.dispatchKeyAction(tea.KeyMsg{Type: tea.KeyCtrlP})
+	require.Equal(t, stateHooks, h.state, "a key the reason does not name stays with the overlay")
+
+	_, _ = h.dispatchKeyAction(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	require.Equal(t, stateSwitchProject, h.state,
+		"the rebound key the reason names must open the project picker from the hooks overlay")
+}
+
+// The pass-through belongs to the registry-mode reason only. With an active
+// project the overlay is an editor and shows no such reason, so the switch key
+// stays with the pane exactly as before.
+func TestHooksOverlayWithAProjectKeepsTheSwitchKey(t *testing.T) {
+	h := activeProjectHome(t)
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+	resizeHome(h, 120, 45)
+	require.NotEmpty(t, h.repoRoot, "precondition: an active project")
+	_, _ = h.showHooksOverlay()
+	require.Equal(t, stateHooks, h.state)
+
+	_, _ = h.dispatchKeyAction(tea.KeyMsg{Type: tea.KeyCtrlP})
+
+	require.Equal(t, stateHooks, h.state, "an editable hooks overlay keeps the keyboard")
+	assert.Nil(t, h.projectPickerOverlay, "no picker opens over an editable hooks overlay")
 }
 
 // TestShowHooksOverlayRemoteRegistryModeKeepsRemoteReason pins the
