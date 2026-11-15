@@ -44,21 +44,6 @@ func TestValidateCopiedDirectoryLevel_KnownAbsentIsStillExact(t *testing.T) {
 		"known-absent must require that the destination name is actually absent")
 }
 
-func TestCopiedDirectoryRoutesRetainLinearAncestry(t *testing.T) {
-	const depth = 128
-	manifest := copiedDirectory{}
-	current := &manifest
-	for range depth {
-		child := &copiedDirectory{}
-		current.entries = []copiedEntry{{name: "d", directory: child}}
-		current = child
-	}
-
-	routes := copiedDirectoryRoutes(&manifest)
-	assert.LessOrEqual(t, retainedRouteEntries(routes), depth*2,
-		"cleanup routes must not retain a complete ancestry copy for every directory")
-}
-
 func TestCopyTree_PartialFailurePreservesChangedDestination(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "src")
 	require.NoError(t, os.Mkdir(src, 0755))

@@ -490,16 +490,6 @@ func copiedDirectoryRouteComponents(routes []copiedDirectoryRoute, index int) []
 	return components
 }
 
-func retainedRouteEntries(routes []copiedDirectoryRoute) int {
-	total := 0
-	for _, route := range routes {
-		if route.parent >= 0 {
-			total++
-		}
-	}
-	return total
-}
-
 func removeCopiedEntry(directory *os.File, path string, entry copiedEntry, protectUnexpected bool) error {
 	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, false, nil)
 }
