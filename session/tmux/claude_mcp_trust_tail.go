@@ -35,8 +35,7 @@ type claudeMCPTrustTail struct {
 //   - the content row straight above it, past blank rows and frame chrome, is
 //     exactly one of the modal's option labels, "Yes" or "No", once
 //     claudeTrustRowOf has taken off the cursor and the ordinal;
-//   - no row below the footer is a composer's prompt row, and no composer
-//     is drawn whole anywhere on the pane (claudeMCPTrustDrawnComposer).
+//   - no row below the footer is a composer's prompt row.
 //
 // Nothing else on screen is asked. What is above the option row does not
 // matter: a pane two rows tall shows one option row, a taller one shows both,
@@ -58,11 +57,6 @@ func claudeMCPTrustTailOf(screen visibleText) (claudeMCPTrustTail, bool) {
 	rows := make([]claudeTrustRow, len(lines))
 	for i, line := range lines {
 		rows[i] = claudeTrustRowOf(line)
-	}
-	// A composer drawn whole: every row from its prompt down is its draft or
-	// the chrome under it, and what is above it is quoted output.
-	if claudeMCPTrustDrawnComposer(lines, rows) {
-		return claudeMCPTrustTail{}, false
 	}
 	// The lowest composer prompt row. A footer above it is quoted output.
 	composer := -1
@@ -163,46 +157,6 @@ func claudeMCPTrustComposerRow(lines []string, rows []claudeTrustRow, i int) boo
 	return i > 0 && claudeTrustFrameRule(lines[i-1]) && (label == ">" || strings.HasPrefix(label, "> "))
 }
 
-// claudeMCPTrustDrawnComposer reports whether the pane shows a working agent's
-// composer drawn whole: a prompt row straight under the composer's opening
-// rule, and its closing rule below with nothing but the draft's rows between.
-// That is the ruled composer ("────" / "❯ …" / "────") or the boxed one older
-// builds draw ("╭──╮" / "│ > … │" / "╰──╯").
-//
-// A pane that shows one is not showing this modal as its live content. Rows
-// from the prompt row to the closing rule are the user's draft, whatever they
-// spell, and rows under the closing rule are chrome the agent paints there,
-// such as a status line (#7334 review, R1 and R2). The modal draws no ❯ row
-// under a plain rule except, at most, its own option row, so a ❯ row whose
-// label is exactly Yes or No is not read as a prompt.
-func claudeMCPTrustDrawnComposer(lines []string, rows []claudeTrustRow) bool {
-	for i := 1; i < len(rows); i++ {
-		// closes is the rule that ends this composer: the ruled one ends as it
-		// began, with a plain rule, and the boxed one with its bottom edge.
-		var closes func(string) bool
-		switch {
-		case rows[i].selected && claudeComposerRule(lines[i-1]) && !claudeMCPTrustOptionLabel(rows[i].label):
-			closes = claudeComposerRule
-		case !rows[i].selected && claudeTrustFrameRule(lines[i-1]) && !claudeComposerRule(lines[i-1]) &&
-			strings.TrimSpace(lines[i]) != strings.TrimSpace(strings.Trim(strings.TrimSpace(lines[i]), claudeTrustBoxDrawing)) &&
-			(rows[i].label == ">" || strings.HasPrefix(rows[i].label, "> ")):
-			// The boxed prompt row carries the box's side borders.
-			closes = func(line string) bool { return claudeTrustFrameRule(line) && !claudeComposerRule(line) }
-		default:
-			continue
-		}
-		for j := i + 1; j < len(lines) && strings.TrimSpace(lines[j]) != ""; j++ {
-			if closes(lines[j]) {
-				return true
-			}
-			if claudeTrustFrameRule(lines[j]) {
-				break
-			}
-		}
-	}
-	return false
-}
-
 // refuseClaudeMCPTrustTail reports, once per dialog rather than once per poll,
 // that af is holding on an old MCP trust modal it cannot read whole, and what
 // it saw. The hold surfaces as the create's trust-prompt budget expiring;
@@ -254,11 +208,8 @@ var (
 // Rows are read as claudeTrustRowOf reads them, so frame chrome and blank rows
 // are skipped and an option row's cursor and ordinal are not words. A ❯ row is
 // the modal's only on an option: one anywhere earlier is a composer holding
-// the words as a draft, and no modal. And a pane with a composer drawn on it
-// is not painting this modal at all: the rows under the composer's prompt are
-// its draft, and the rows under the composer are chrome such as a status line
-// (claudeMCPTrustDrawnComposer). It holds without a key and says nothing: the
-// frame lasts as long as one paint.
+// the words as a draft, and no modal. It holds without a key and says nothing:
+// the frame lasts as long as one paint.
 func claudeMCPTrustPaintingOf(screen visibleText) bool {
 	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
@@ -268,9 +219,6 @@ func claudeMCPTrustPaintingOf(screen visibleText) bool {
 		if !rows[i].blank {
 			last = i
 		}
-	}
-	if claudeMCPTrustDrawnComposer(lines, rows) {
-		return false
 	}
 	for start := last; start >= 0; start-- {
 		if rows[start].blank || !strings.HasPrefix(strings.ToLower(rows[start].label), claudeMCPTrustModalWords[0]) {

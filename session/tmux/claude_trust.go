@@ -208,11 +208,6 @@ func claudeMCPDialogPartiallyRendered(screen visibleText) bool {
 	for i, line := range lines {
 		rows[i] = claudeTrustRowOf(line)
 	}
-	// A composer drawn whole: the rows under its prompt are its draft and the
-	// rows under it are chrome, never this modal being painted (#7334 review).
-	if claudeMCPTrustDrawnComposer(lines, rows) {
-		return false
-	}
 
 	// Find the last non-blank row.
 	lastIdx := -1
