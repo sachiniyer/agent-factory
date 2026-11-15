@@ -501,7 +501,11 @@ func Decide(f Facts) Decision {
 		}
 		for _, name := range ordered {
 			a := byName[name]
-			if a.Reading.Status != ReadingObserved {
+			// A below-wall claim covers every window the identity is subject
+			// to; an observed-but-incomplete reading is silent about a
+			// slot that may already be at/above the wall, so only a
+			// complete reading can prove comfort (mirrors readingBelowAllFresh).
+			if a.Reading.Status != ReadingObserved || !a.Reading.Complete {
 				continue
 			}
 			if w, ok := worstWindow(a.Reading); ok && w.UsedPercent < float64(cfg.PreferBelowPercent) {
@@ -623,7 +627,12 @@ func orderCandidates(eligible []scoredAccount, cfg config.AccountHandoffConfig) 
 	prefer := float64(cfg.PreferBelowPercent)
 	tier := func(c scoredAccount) int {
 		credited := c.facts.RecentMoveCredits > 0
-		if c.facts.Reading.Status == ReadingObserved {
+		// Only a complete observed reading can place an account in the
+		// below-prefer tier: an observed-but-incomplete snapshot is silent
+		// about a slot that may already be at/above the wall, so its
+		// reported windows cannot prove comfort (mirrors readingBelowAllFresh
+		// and the idle-hot comfort gate).
+		if c.facts.Reading.Status == ReadingObserved && c.facts.Reading.Complete {
 			switch {
 			case credited:
 				return 2 // below every unused observed candidate
@@ -634,8 +643,9 @@ func orderCandidates(eligible []scoredAccount, cfg config.AccountHandoffConfig) 
 				return 1
 			}
 		}
-		// No usable reading: eligible (as today) but after every account
-		// whose reading can be shown.
+		// No usable (or incomplete — silent about a slot) reading: eligible
+		// (as today) but after every account whose reading can be shown
+		// complete.
 		if credited {
 			return 4
 		}
