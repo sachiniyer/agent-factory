@@ -668,8 +668,10 @@ mode = "shadow"
   tick the engine asks whether the session's conversation would carry. It
   asks in two steps, and the row tells you which step refused:
   - **The session's own side refused.** Examples: no recorded conversation,
-    a transcript missing from the current account, or a newer conversation
-    in a worktree af owns. The session is deferred with an `ignored` row whose
+    a transcript missing from the current account, a newer conversation in a
+    worktree af owns, or a newer conversation in a directory af could not
+    resolve within the bound (an unavailable or slow mount), which counts
+    the same way. The session is deferred with an `ignored` row whose
     `reason_code` is `carry-refused`. `params.carry` holds the refusal
     code, such as `missing`, `stale` or `forked`. `to` is empty, because no
     target was at fault.
