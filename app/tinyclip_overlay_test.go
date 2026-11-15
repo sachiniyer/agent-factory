@@ -66,7 +66,13 @@ func TestTinyClipSearchOverlayFitsAtSmallSizes(t *testing.T) {
 }
 
 func TestTinyClipHooksOverlayFits(t *testing.T) {
-	h := newTestHome(t)
+	// The hooks overlay's add form (the "enter save · esc cancel" footer this
+	// pins) only opens when the pane is editable — i.e. with an active project.
+	// newTestHome leaves repoRoot empty (registry mode), where the overlay is
+	// read-only and `n` is inert, so use an active project to exercise the
+	// tiny-clip fit of the add form the test is about.
+	h := activeProjectHome(t)
+	require.NotEmpty(t, h.repoRoot, "precondition: an active project so the hooks editor is editable")
 	resizeHome(h, 40, 10)
 
 	_, _ = h.showHooksOverlay()

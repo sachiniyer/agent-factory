@@ -804,6 +804,11 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		m.hooksPane.SetCommands(nil)
 		m.hooksPane.SetReadOnly(remoteHooksReadOnlyReason())
 	} else if resolved, err := resolveSwitchProjectConfig(repo); err == nil {
+		// A local project has an on-this-machine checkout, so the hooks pane is
+		// editable again — clear any read-only reason registry mode (or, via the
+		// remote branch above, a prior remote target) left on it. SetReadOnly("")
+		// is a no-op when the pane is already editable, and does not discard.
+		m.hooksPane.SetReadOnly("")
 		m.programUnknown = false
 		// A project that sets no default_program already arrives here as the
 		// global default: ResolveConfig seeds DefaultProgram from the global
@@ -821,6 +826,10 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		m.store.SetHookCount(len(resolved.PostWorktreeCommands))
 		m.hooksPane.SetCommands(resolved.PostWorktreeCommands)
 	} else {
+		// Same: the incoming local project's checkout is on this machine even
+		// though its config could not be read, so the pane is editable (an add
+		// would save to the new m.repoRoot). Clear the registry/remote reason.
+		m.hooksPane.SetReadOnly("")
 		log.WarningLog.Printf("switch project: failed to resolve config for %s: %v", repo.Root, err)
 		// Clear the hooks pane so the OUTGOING project's hooks cannot leak into
 		// the new project. m.repoRoot already points at the new project, so a save

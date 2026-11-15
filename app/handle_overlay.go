@@ -455,9 +455,39 @@ var hooksReseedTimeout = 10 * time.Second
 // save successfully and overwrite newer on-disk hooks without ever surfacing
 // the read failure. Refusing to open until a fresh snapshot is obtained is the
 // same "do not edit onto a broken read" contract showConfigEditor applies.
+// registryHooksReadOnlyReason is the reason the hooks pane shows in registry
+// mode (#2477: launched outside a git repo, no active project). The hooks
+// editor's save target is the active project's in-repo config, and registry
+// mode has none, so any edit would enter the permanent failed-save cycle
+// ("repo root is required to save in-repo config"). Mirroring the remote-mode
+// treatment (remoteHooksReadOnlyReason), the pane is made read-only at open
+// time rather than inviting edits nothing can persist.
+//
+// The reason names the action that unblocks the user — picking a project —
+// through the same key-naming helper the create refusal uses, so a rebound
+// ctrl+p is named correctly instead of being hardcoded as a dead key. The
+// hooks pane is focused when this is shown, so neither the Projects-section
+// nor Enter variant applies; switchProjectPickHint(false, false) names the
+// default/tree key.
+func registryHooksReadOnlyReason() string {
+	return "Hooks belong to a project — " + switchProjectPickHint(false, false) +
+		", then reopen this editor."
+}
+
 func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 	if err := m.reseedHooksFromDisk(); err != nil {
 		return m, m.handleError(err)
+	}
+	// Registry mode (local target, no active project) has no save target, so
+	// make the pane read-only up front — the same treatment remote-mode gets
+	// (remoteHooksReadOnlyReason at startup). Without this the overlay opened
+	// editable, invited edits ("Press Enter to focus, then n to add."), and
+	// every save failed at SaveInRepoPostWorktreeCommands("", ...) with "repo
+	// root is required to save in-repo config", trapping the user in a
+	// dirty-pane/failed-save loop. isRemoteTarget already set its own reason
+	// at startup, so this branch is local-target-only.
+	if m.repoRoot == "" && !isRemoteTarget() {
+		m.hooksPane.SetReadOnly(registryHooksReadOnlyReason())
 	}
 	m.hooksPane.SetFocus(true)
 	m.layoutPaneOverlays()
