@@ -81,6 +81,12 @@ type home struct {
 	// Git still vouches for. Kept apart from projectPathResolutions because a
 	// generic path resolution is not evidence about a durable registration.
 	registeredProjectIdentities map[string]registeredProjectIdentity
+	// projectPathProbes and registeredProjectProbes hold the poll's probes that
+	// have not returned, one per question, so a path on a stalled mount holds one
+	// git and one thread rather than one per 750ms poll (#7397 review R3). Set on
+	// the loop at first use; the probes' own goroutines unpublish themselves.
+	projectPathProbes       *projectProbeFlights[projectPathProbeResult]
+	registeredProjectProbes *projectProbeFlights[registeredProjectProbeResult]
 
 	// adoptedSnapshotOps separates daemon-adopted in-flight ops from local
 	// optimistic ones, which the reconcile guards must treat oppositely (#3005).

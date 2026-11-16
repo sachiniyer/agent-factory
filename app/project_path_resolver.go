@@ -3,11 +3,12 @@ package app
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
 
 const (
@@ -23,6 +24,74 @@ const (
 	registeredProjectProveTimeout = 250 * time.Millisecond
 	projectPathResolutionTTL      = time.Second
 )
+
+// projectPathRepoProbe is the Git probe resolveProjectPaths opens for one path,
+// and registeredProjectIdentityProbe the proof resolveRegisteredProjectIdentities
+// runs for one registration. They are package vars so a test can stand in for a
+// probe that never returns, the way git does when its FUSE request is already in
+// userspace and the kill cannot reach it (#7397 review R3). Each poll reads them
+// once, on the loop, before it starts any probe.
+var (
+	projectPathRepoProbe           = config.RepoFromPathContext
+	registeredProjectIdentityProbe = config.ResolveRegisteredProjectRepoID
+)
+
+// projectProbeFlights holds the poll's probes that have not returned yet, at
+// most one per question (#7397 review R3).
+//
+// Every probe is killed when the poll that opened it returns, but a stall BELOW
+// Git outlives that kill: a FUSE request already in userspace leaves git
+// unkillable, and its Cmd.Wait never returns. Starting a fresh probe for the
+// same path on every 750 ms poll would then add a git process and a pinned OS
+// thread per stalled path per poll, until the process exhausts its threads (Go's
+// limit is 10,000 — about 20 minutes at ten stalled roots). So a poll that finds
+// a path's earlier probe still running JOINS it, the way fsprobe joins a flight:
+// it waits for that probe's answer inside its own gather window and opens no new
+// one. A probe that has returned is gone from here, so the next poll asks afresh.
+type projectProbeFlights[R any] struct {
+	mu      sync.Mutex
+	running map[string]*projectProbeFlight[R]
+}
+
+type projectProbeFlight[R any] struct {
+	done   chan struct{}
+	result R
+}
+
+// join returns the flight still running for key, or starts probe as a new one.
+func (f *projectProbeFlights[R]) join(key string, probe func() R) *projectProbeFlight[R] {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if flight := f.running[key]; flight != nil {
+		return flight
+	}
+	if f.running == nil {
+		f.running = make(map[string]*projectProbeFlight[R])
+	}
+	flight := &projectProbeFlight[R]{done: make(chan struct{})}
+	f.running[key] = flight
+	go func() {
+		flight.result = probe()
+		f.mu.Lock()
+		if f.running[key] == flight {
+			delete(f.running, key)
+		}
+		f.mu.Unlock()
+		close(flight.done)
+	}()
+	return flight
+}
+
+// forwardProbeResult hands flight's answer to one poll's gather, or gives up
+// when that gather ends. results is buffered for every flight the poll waits
+// on, so the send never blocks and this never outlives the poll.
+func forwardProbeResult[R any](gather context.Context, flight *projectProbeFlight[R], results chan<- R) {
+	select {
+	case <-flight.done:
+		results <- flight.result
+	case <-gather.Done():
+	}
+}
 
 type projectPathResolution struct {
 	id         string
@@ -138,7 +207,9 @@ type projectPathProbeBudget struct {
 // list is neither queued behind it nor handed whatever it left.
 // Successful answers are cached briefly to avoid probing on every 750ms sidebar
 // poll, then revalidated so a present path replaced by another checkout cannot
-// retain its former repository identity forever.
+// retain its former repository identity forever. A path whose earlier probe has
+// not returned is not probed again: the poll joins that probe for its window
+// (projectProbeFlights), so a stalled path holds one probe, not one per poll.
 //
 // The second return is the ledger of budgets opened, one entry per uncached
 // path, in the order they were opened. Production ignores it; it exists so the
@@ -189,47 +260,19 @@ func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolu
 			cancel()
 		}
 	}()
-	results := make(chan projectPathProbeResult, len(uncached))
+	probe := projectPathRepoProbe
+	if m.projectPathProbes == nil {
+		m.projectPathProbes = &projectProbeFlights[projectPathProbeResult]{}
+	}
+	flights := make([]*projectProbeFlight[projectPathProbeResult], 0, len(uncached))
 	for _, path := range uncached {
 		ctx, cancel := context.WithTimeout(context.Background(), projectPathScanTimeout)
 		cancels = append(cancels, cancel)
 		budgetIndex[path] = len(budgets)
 		budgets = append(budgets, projectPathProbeBudget{path: path, window: projectPathScanTimeout})
-		go func(ctx context.Context, path string) {
-			repo, err := config.RepoFromPathContext(ctx, path)
-			if err != nil {
-				// A DETERMINATE verdict is what a caller may act on, and
-				// "the probe failed" is not one (#3530 review ids 3918120760,
-				// 3919195017). Two outcomes qualify: git answered that the
-				// path is not inside a repository, or the path is provably
-				// gone. Everything else — a killed probe, dubious ownership,
-				// an unreadable .git, a permission error — leaves a repository
-				// that may well be there, and the daemon will apply a
-				// path-keyed opt-in to whatever IS there.
-				answered := errors.Is(err, config.ErrNotGitRepository)
-				if !answered {
-					if _, statErr := os.Stat(path); statErr != nil && config.PathDeterminatelyAbsent(statErr) {
-						answered = true
-					}
-				}
-				results <- projectPathProbeResult{
-					path:       path,
-					answered:   answered,
-					resolved:   false,
-					resolution: projectPathResolution{},
-					outcome:    classifyProbeOutcome(err),
-				}
-				return
-			}
-			results <- projectPathProbeResult{
-				path: path,
-				resolution: projectPathResolution{
-					id: repo.ID, root: repo.WorkspacePath(), resolvedAt: time.Now(),
-				},
-				resolved: true,
-				outcome:  probeOutcomeResolved,
-			}
-		}(ctx, path)
+		flights = append(flights, m.projectPathProbes.join(path, func() projectPathProbeResult {
+			return probeProjectPath(ctx, probe, path)
+		}))
 	}
 	// The gather's deadline bounds a different thing from the budgets above, and
 	// hands out no opportunity that a path could be competing for: every probe
@@ -240,6 +283,10 @@ func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolu
 	// still inside its own budget is never cut short by it.
 	gather, cancelGather := context.WithTimeout(context.Background(), projectPathScanTimeout)
 	defer cancelGather()
+	results := make(chan projectPathProbeResult, len(flights))
+	for _, flight := range flights {
+		go forwardProbeResult(gather, flight, results)
+	}
 	if m.projectPathResolutions == nil {
 		m.projectPathResolutions = make(map[string]projectPathResolution)
 	}
@@ -268,6 +315,46 @@ func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolu
 		}
 	}
 	return resolvedPaths, budgets
+}
+
+// probeProjectPath runs one path's Git probe and reads how it ended.
+func probeProjectPath(ctx context.Context, probe func(context.Context, string) (*config.RepoContext, error), path string) projectPathProbeResult {
+	repo, err := probe(ctx, path)
+	if err != nil {
+		// A DETERMINATE verdict is what a caller may act on, and "the probe
+		// failed" is not one (#3530 review ids 3918120760, 3919195017). Two
+		// outcomes qualify: git answered that the path is not inside a
+		// repository, or the path is provably gone. Everything else — a killed
+		// probe, dubious ownership, an unreadable .git, a permission error —
+		// leaves a repository that may well be there, and the daemon will apply
+		// a path-keyed opt-in to whatever IS there.
+		//
+		// The absence check is the bounded stat (#7397 review R3): a probe
+		// killed because its mount stopped answering would otherwise block here
+		// in an unbounded stat of that same mount. A stat that does not answer
+		// is not absence, so it leaves the verdict open.
+		answered := errors.Is(err, config.ErrNotGitRepository)
+		if !answered {
+			if _, statErr := fsprobe.Stat(path); statErr != nil && config.PathDeterminatelyAbsent(statErr) {
+				answered = true
+			}
+		}
+		return projectPathProbeResult{
+			path:       path,
+			answered:   answered,
+			resolved:   false,
+			resolution: projectPathResolution{},
+			outcome:    classifyProbeOutcome(err),
+		}
+	}
+	return projectPathProbeResult{
+		path: path,
+		resolution: projectPathResolution{
+			id: repo.ID, root: repo.WorkspacePath(), resolvedAt: time.Now(),
+		},
+		resolved: true,
+		outcome:  probeOutcomeResolved,
+	}
 }
 
 // registeredProjectIdentity is a registry entry's PROVEN repository identity —
@@ -305,7 +392,8 @@ type registeredProjectProbeResult struct {
 // visible under its own hash instead of vanishing or borrowing an ancestor's.
 // Each registration is given a proving budget of its OWN and they run together,
 // exactly as resolveProjectPaths does: one unreachable registration must not
-// spend an opportunity that belongs to another.
+// spend an opportunity that belongs to another. And exactly as there, a proof
+// that has not returned is joined rather than started again (#7397 review R3).
 func (m *home) resolveRegisteredProjectIdentities(projects []config.Project) map[string]string {
 	now := time.Now()
 	proven := make(map[string]string, len(projects))
@@ -337,20 +425,33 @@ func (m *home) resolveRegisteredProjectIdentities(projects []config.Project) map
 			cancel()
 		}
 	}()
-	results := make(chan registeredProjectProbeResult, len(uncached))
+	probe := registeredProjectIdentityProbe
+	if m.registeredProjectProbes == nil {
+		m.registeredProjectProbes = &projectProbeFlights[registeredProjectProbeResult]{}
+	}
+	flights := make([]*projectProbeFlight[registeredProjectProbeResult], 0, len(uncached))
 	for _, project := range uncached {
 		ctx, cancel := context.WithTimeout(context.Background(), registeredProjectProveTimeout)
 		cancels = append(cancels, cancel)
-		go func(ctx context.Context, project config.Project) {
-			id, ok := config.ResolveRegisteredProjectRepoID(ctx, project)
-			results <- registeredProjectProbeResult{root: project.Root, id: id, resolved: ok}
-		}(ctx, project)
+		// A proof answers a question about the RECORD at this root, not about
+		// the path alone, so a different registration at the same root (one
+		// deleted and another registered while the first proof was stuck) asks
+		// its own question rather than joining an answer about another record.
+		key := project.ID + "\x00" + project.Root + "\x00" + project.CheckoutID + "\x00" + project.RepoID
+		flights = append(flights, m.registeredProjectProbes.join(key, func() registeredProjectProbeResult {
+			id, ok := probe(ctx, project)
+			return registeredProjectProbeResult{root: project.Root, id: id, resolved: ok}
+		}))
 	}
 	// The backstop for the gather, not a budget any registration competes for —
 	// see resolveProjectPaths for why the loop cannot wait on the probes' own
 	// deadlines, and why this one is started after them.
 	gather, cancelGather := context.WithTimeout(context.Background(), registeredProjectProveTimeout)
 	defer cancelGather()
+	results := make(chan registeredProjectProbeResult, len(flights))
+	for _, flight := range flights {
+		go forwardProbeResult(gather, flight, results)
+	}
 	if m.registeredProjectIdentities == nil {
 		m.registeredProjectIdentities = make(map[string]registeredProjectIdentity)
 	}

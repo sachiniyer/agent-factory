@@ -93,24 +93,97 @@ func ListProjectsDetailed() ([]Project, []ProjectRecordFailure, []string, bool, 
 	return projects, failures, strays, true, nil
 }
 
+// ListProjectsAlongside is ListProjects with a caller's own per-root probe run
+// in the SAME concurrent phase as each root's existence stat (#7397 review R1).
+// alongside[i] is probe's answer for projects[i].Root.
+//
+// It exists for a caller that must look at every registered root anyway — the
+// TUI's spelling canonicalization on the bubbletea event loop. Stat first and
+// probe after, and a registry of roots on one stalled mount holds that caller
+// for one bound in each phase; run together, it holds for one bound in total,
+// whatever the number of projects or stalled roots. probe must bound itself:
+// this waits for every answer. Each root still gets its own stat bound and its
+// own probe bound — nothing here shares one deadline across roots, which would
+// refuse a slow but healthy root that answers inside its own (#7389 review R1).
+// The read is strict, exactly as ListProjects is.
+func ListProjectsAlongside[T any](probe func(root string) T) ([]Project, []T, error) {
+	dir, err := projectRegistryDir()
+	if err != nil {
+		return nil, nil, err
+	}
+	records, err := loadProjectRecords(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	alongside := make([]T, len(records))
+	projects := projectsFromRecordsAlongside(records, func(i int) {
+		alongside[i] = probe(records[i].Root)
+	})
+	return projects, alongside, nil
+}
+
+// ProjectBinding is what one registry record binds: its id, its root, and the
+// identity recorded for it. It has no PathExists on purpose — it is read
+// without looking at the root, so it cannot say whether the root is there.
+type ProjectBinding struct {
+	ID         string
+	CheckoutID string
+	Root       string
+	RepoID     string
+}
+
+// ProjectBindingByID reads the binding the registry holds for id now, or
+// ok=false when no record has that id. It reads the registry and nothing else:
+// no root is statted, id's own included (#7397 review R1). A caller that only
+// needs where a project is bound — the TUI following a rebind on the event loop
+// — must not wait on a stat of every other registered root to learn it, and on
+// a stalled mount each of those stats waits out its whole bound.
+//
+// The read is strict, as ListProjects is: a registry with any record it cannot
+// vouch for fails the lookup instead of answering from a partial view.
+func ProjectBindingByID(id string) (ProjectBinding, bool, error) {
+	dir, err := projectRegistryDir()
+	if err != nil {
+		return ProjectBinding{}, false, err
+	}
+	records, err := loadProjectRecords(dir)
+	if err != nil {
+		return ProjectBinding{}, false, err
+	}
+	for _, record := range records {
+		if record.ID == id {
+			return ProjectBinding{
+				ID: record.ID, CheckoutID: record.CheckoutID, Root: record.Root, RepoID: record.RepoID,
+			}, true, nil
+		}
+	}
+	return ProjectBinding{}, false, nil
+}
+
 // projectsFromRecords builds Project values for every record, running the
-// per-root existence stat CONCURRENTLY so the registry read's latency is
-// bounded by one fsprobe flight deadline rather than N. ListProjects is the
-// read buildProjectListFromCounted performs synchronously on the bubbletea
-// event loop; when several registered roots sit on the same stalled
-// NFS/FUSE/sshfs mount, a sequential per-record projectPathExists would start
-// a separate fsprobe flight for each and consume the full bound per root
-// before the later resolve work even begins — ten affected projects park
-// input, repaint and Ctrl+C for ~20 s. Running the stats concurrently makes
-// the registry read's worst case one bounded flight (the per-dir flight
-// registry already joins duplicate roots onto a single worker), independent of
-// project count. A non-answer for any root is not determinate absence, so its
-// row keeps PathExists=true exactly as a sequential read would report.
+// per-root existence stats CONCURRENTLY so a registry read holds its caller for
+// one fsprobe flight bound in total rather than one per stalled root.
+// ListProjects is the read buildProjectListFromCounted performs synchronously
+// on the bubbletea event loop; when several registered roots sit on the same
+// stalled NFS/FUSE/sshfs mount, statting them in turn would spend each one's
+// whole bound before the next began — ten such projects park input, repaint
+// and Ctrl+C for ~20 s. Each root still gets its own bound (the per-path flight
+// registry joins duplicate roots onto one worker), so a slow root that answers
+// inside its bound is read exactly as before. A non-answer for any root is not
+// determinate absence, so its row keeps PathExists=true exactly as a sequential
+// read would report.
 //
 // loadProjectColor stays sequential: it reads a sidecar inside the registry
 // directory (a local path this process owns), not the recorded root, so it is
 // not on a wedged user mount and need not join the bounded flights.
 func projectsFromRecords(records []projectRecord) []Project {
+	return projectsFromRecordsAlongside(records, nil)
+}
+
+// projectsFromRecordsAlongside is projectsFromRecords with alongside(i), when
+// non-nil, started for every record in the same phase as the stats — on its own
+// goroutine, so a root whose stat and probe both stall costs one bound, not two.
+func projectsFromRecordsAlongside(records []projectRecord, alongside func(i int)) []Project {
 	exists := make([]bool, len(records))
 	var wg sync.WaitGroup
 	for i := range records {
@@ -119,6 +192,13 @@ func projectsFromRecords(records []projectRecord) []Project {
 			defer wg.Done()
 			exists[i] = projectPathExists(records[i].Root)
 		}(i)
+		if alongside != nil {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				alongside(i)
+			}(i)
+		}
 	}
 	wg.Wait()
 	projects := make([]Project, 0, len(records))

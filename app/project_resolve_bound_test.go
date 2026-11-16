@@ -109,11 +109,13 @@ func TestResolveForCompareOrClean_AnswersACanonicalResolve(t *testing.T) {
 }
 
 // TestSamePath_BoundsAWedgedComparison pins the rebind reply handler's
-// comparison: samePath runs in the projectReboundMsg Update handler, so a wedged
-// lookup on either side must degrade within the bound instead of parking the
-// loop. Two spellings of the SAME wedged path still compare equal: each side
-// falls back to its cleaned spelling, and Clean compares to Clean.
+// comparison: the follow compares roots in the projectReboundMsg Update handler,
+// against spellings startResolvingForCompare resolved, so a wedged lookup on
+// either side must degrade within the bound instead of parking the loop. Two
+// spellings of the SAME wedged path still compare equal: each side falls back to
+// its cleaned spelling, and Clean compares to Clean.
 func TestSamePath_BoundsAWedgedComparison(t *testing.T) {
+	samePath := func(a, b string) bool { return startResolvingForCompare([]string{a, b})().same(a, b) }
 	base := t.TempDir()
 	real := filepath.Join(base, "real")
 	require.NoError(t, os.Mkdir(real, 0o755))

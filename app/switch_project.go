@@ -145,13 +145,30 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		projects, degraded := m.buildRemoteProjectList(data)
 		return projects, degraded, nil
 	}
+	// Every path this derivation compares by its canonical spelling — each
+	// registry root and each root_agents key — is resolved in ONE concurrent
+	// phase with the registry's own root stats (#7397 review R1). On a stalled
+	// mount each resolve and each stat waits out its own bound; taken one after
+	// another, ten such projects parked Update (key input, repaint, Ctrl+C) for
+	// tens of seconds on every poll. Taken together, the registry read and its
+	// resolve pass hold the loop for one bound in total. The root_agents keys
+	// are known before the registry is read, so they start first and overlap
+	// it; the registry roots resolve inside it.
+	var rootAgentKeys []string
+	if m.appConfig != nil {
+		for path := range m.appConfig.RootAgents {
+			rootAgentKeys = append(rootAgentKeys, config.ExpandTilde(path))
+		}
+	}
+	rootAgentSpellings := startResolvingForCompare(rootAgentKeys)
 	registryDegraded := false
-	registeredProjects, err := config.ListProjects()
+	registeredProjects, registeredSpellings, err := config.ListProjectsAlongside(resolveForCompareOrClean)
 	if err != nil {
 		registryDegraded = true
 		log.WarningLog.Printf("failed to read the project registry for the switcher: %v", err)
-		registeredProjects = nil
+		registeredProjects, registeredSpellings = nil, nil
 	}
+	canonicalRootAgentKey := rootAgentSpellings()
 	paths := make([]string, 0, len(data)+len(registeredProjects)+1)
 	for _, d := range data {
 		if !session.IsArchivedData(d) && d.Worktree.RepoPath != "" {
@@ -264,7 +281,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 	// recordedIdentities remembers which identity each registry row lent to a
 	// path, so the root_agents union below can ask rather than re-hash.
 	recordedIdentities := make(map[string]string, len(registeredProjects))
-	for _, project := range registeredProjects {
+	for i, project := range registeredProjects {
 		if project.Root == "" {
 			continue
 		}
@@ -301,11 +318,12 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		// path registration resolved (#2110's rule — macOS `/var` ->
 		// `/private/var` makes the two unequal every time).
 		//
-		// Routed through the BOUNDED resolve (fsprobe.ResolveForCompare) so a
-		// project root on a stalled mount (NFS/FUSE/dead sshfs) degrades to the
-		// cleaned spelling instead of hanging the event loop this derivation
+		// The spelling was resolved inside the registry read's phase above,
+		// through the BOUNDED resolve (fsprobe.ResolveForCompare), so a project
+		// root on a stalled mount (NFS/FUSE/dead sshfs) has already degraded to
+		// its cleaned spelling instead of hanging the event loop this derivation
 		// runs on — the sidebar poll re-enters it every 750 ms (#7272).
-		recordedIdentities[resolveForCompareOrClean(project.Root)] = resolved.id
+		recordedIdentities[registeredSpellings[i]] = resolved.id
 		registryRecordByRow[resolved.id] = project
 		ensure(resolved, rootPriority)
 	}
@@ -339,7 +357,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 			// occupant behind a stale row and sends delete-project an
 			// inconsistent id/path pair.
 			if resolved.answeredNotARepo && expanded != m.repoRoot {
-				if recorded, ok := recordedIdentities[resolveForCompareOrClean(expanded)]; ok && recorded != "" {
+				if recorded, ok := recordedIdentities[canonicalRootAgentKey[expanded]]; ok && recorded != "" {
 					resolved.id = recorded
 					// Identity and root SPELLING are separate decisions, the
 					// same split an unproven registry row makes above (#3530
