@@ -501,7 +501,7 @@ func (p *TabPane) fillHostHistoryLocked(
 	// gesture disappear into a phantom blank line. Keep AF chrome out of this
 	// value too; TabbedWindow renders the scroll cue in its header, outside the
 	// child's history coordinate system.
-	content := capturePaneHistoryRows(snapshot.Content)
+	content := carrySGRAcrossRows(capturePaneHistoryRows(snapshot.Content))
 	if history.CompleteFill(token, &p.viewport, content) {
 		p.renderRevision++
 	}
@@ -588,7 +588,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	if len(snapshot.Content) == 0 && !instance.Started() {
 		p.setFallbackState(namingFallback)
 	} else {
-		p.publishContent(tabContentState{fallback: false, text: snapshot.Content})
+		p.publishContent(tabContentState{fallback: false, text: carrySGRAcrossRows(snapshot.Content)})
 	}
 	return nil
 }
@@ -733,7 +733,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		return fmt.Errorf("tab pane: failed to capture terminal content: %w", err)
 	}
 	p.setScrollOwnerLocked(snapshot.Owner)
-	p.publishContent(tabContentState{fallback: false, text: snapshot.Content})
+	p.publishContent(tabContentState{fallback: false, text: carrySGRAcrossRows(snapshot.Content)})
 	return nil
 }
 
