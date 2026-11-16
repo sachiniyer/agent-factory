@@ -68,7 +68,10 @@ const (
 
 	// watcherStopGrace bounds how long a stop request waits after SIGTERM
 	// before escalating to a process-group SIGKILL. Mirrors
-	// sigtermFallbackGrace on the daemon-shutdown path.
+	// sigtermFallbackGrace on the daemon-shutdown path. It is also how long
+	// run()'s lifecycle graces wait for the daemon's stop, so it is pinned to
+	// at least the bound-scope stop timeout plus slack (watcher_shutdown.go,
+	// #7404).
 	watcherStopGrace = 5 * time.Second
 
 	// watcherTailMaxLines/watcherTailMaxBytes bound the per-run buffer of
@@ -452,6 +455,20 @@ func (w *taskWatcher) run() {
 		}
 
 		if runErr == nil {
+			// An exit 0 can be the daemon's stop too. A script that handles the
+			// scope's SIGTERM gracefully (`trap 'exit 0' TERM`, or a Python or
+			// Node handler) exits 0 before the latch arrives. "stopped" is
+			// durable, so it waits the same grace and is not recorded when a
+			// stop arrives. The grace returns the moment one does, so it never
+			// holds Stop (#7404).
+			switch w.awaitDaemonStop(graceCleanExit) {
+			case daemonStopArrived:
+				log.InfoLog.Printf("watch task %s: watch command exited cleanly as the daemon began stopping; not recording it as stopped", w.taskID)
+				return
+			case watcherStopArrived:
+				log.InfoLog.Printf("watch task %s: watch command exited cleanly as this task was stopped or reloaded; not recording it as stopped", w.taskID)
+				return
+			}
 			// The condition, stated so an operator can act on it: this stop
 			// holds until something names THIS task (#3837).
 			log.InfoLog.Printf("watch task %s: watch command exited cleanly; stopped until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts", w.taskID, w.taskID)
@@ -469,14 +486,22 @@ func (w *taskWatcher) run() {
 		switch {
 		case exitedFromSignal(runErr, syscall.SIGTERM):
 			graced = true
-			if w.daemonStopArrives(w.sup.stopGrace) {
+			switch w.awaitDaemonStop(graceSigterm) {
+			case daemonStopArrived:
+				log.InfoLog.Printf("watch task %s: watch command was terminated as the daemon began stopping; not a failure", w.taskID)
+				return
+			case watcherStopArrived:
 				log.InfoLog.Printf("watch task %s: watch command terminated during stop/reload; not a failure", w.taskID)
 				return
 			}
 		case scopeRefusedForDaemonStop(tail):
 			graced = true
-			if w.daemonStopArrives(w.sup.stopGrace) {
+			switch w.awaitDaemonStop(graceScopeRefused) {
+			case daemonStopArrived:
 				log.InfoLog.Printf("watch task %s: systemd refused the watch command's scope because the daemon's unit is stopping; not a failure", w.taskID)
+				return
+			case watcherStopArrived:
+				log.InfoLog.Printf("watch task %s: systemd refused the watch command's scope as this task was stopped or reloaded; not a failure", w.taskID)
 				return
 			}
 		}
@@ -492,9 +517,15 @@ func (w *taskWatcher) run() {
 			// The trip is durable, so it must never be the daemon's stop: an
 			// exit the daemon cannot attribute yet (a script that traps TERM
 			// and exits 1) gets the same grace before it can give up.
-			if !graced && w.daemonStopArrives(w.sup.stopGrace) {
-				log.InfoLog.Printf("watch task %s: watch command failed (%v) as the daemon began stopping; not giving up", w.taskID, runErr)
-				return
+			if !graced {
+				switch w.awaitDaemonStop(graceBreaker) {
+				case daemonStopArrived:
+					log.InfoLog.Printf("watch task %s: watch command failed (%v) as the daemon began stopping; not giving up", w.taskID, runErr)
+					return
+				case watcherStopArrived:
+					log.InfoLog.Printf("watch task %s: watch command failed (%v) as this task was stopped or reloaded; not giving up", w.taskID, runErr)
+					return
+				}
 			}
 			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts%s", w.taskID, len(failures), w.sup.crashWindow, runErr, w.taskID, tail.logSuffix())
 			w.persistTerminalStatus(giveUpSummary(runErr, tail, len(failures), w.sup.crashWindow))

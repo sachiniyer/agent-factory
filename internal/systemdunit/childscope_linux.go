@@ -16,6 +16,9 @@ import (
 // correctness barrier does not depend on that gap: BindsTo+After puts stopping
 // the old scope and restarting its owner in one ordered transaction. The bound
 // keeps a TERM-ignoring child from delaying recovery for systemd's default 90s.
+//
+// It is BoundChildStopTimeoutDuration spelled for systemd, and a test pins the
+// two together: the daemon's watch supervisor relies on the Duration (#7404).
 const BoundChildStopTimeout = "4s"
 
 const systemdRunNoExpandFlag = "--expand-environment=no"
