@@ -94,6 +94,52 @@ func TestRealChurnStillAnswersAttentionForNoIndicatorAgents(t *testing.T) {
 	}
 }
 
+// The #7444 gap #7434's protection opened: a reflow moves liveness Ready →
+// Running while the request stands, and the agent's REAL output arriving while
+// liveness is already Running is a Running → Running "transition" — no liveness
+// edge, so the request is never evaluated and stays displayed through a real
+// work turn. Genuine churn must answer through the explicit work-evidence path
+// even when there is no transition to carry it.
+func TestGenuineChurnAfterReflowAnswersAttentionWhileRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		program string
+	}{
+		{"codex", "codex"},
+		{"aider", "aider"},
+		{"a custom program", "my-custom-agent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, repoID, repoPath := newStatusTestManager(t)
+			inst := registerStartedAgent(t, manager, repoID, repoPath, "asker", tc.program)
+
+			var pending []func()
+			prev := runAttentionClear
+			runAttentionClear = func(clear func()) { pending = append(pending, clear) }
+			t.Cleanup(func() { runAttentionClear = prev })
+
+			inst.SetStatusForTest(session.Ready)
+			_, err := inst.SetAttention("pick A or B", time.Unix(100, 0))
+			require.NoError(t, err)
+
+			_, epoch := inst.InFlightOpAndEpoch()
+			manager.settleChurnedLiveness(inst, true, "the pane repainted at the viewer's new width", epoch, true)
+			require.Equal(t, session.LiveRunning, inst.GetLiveness())
+			require.True(t, inst.HasAttention(),
+				"premise: the reflow kept the request while liveness moved to Running (#7434)")
+
+			// Real output with no idle poll in between — the Running → Running
+			// tick that used to be a dead end for the request.
+			_, epoch = inst.InFlightOpAndEpoch()
+			manager.settleChurnedLiveness(inst, true, "real agent output", epoch, false)
+			require.Len(t, pending, 1,
+				"genuine output must answer a qualifying request whatever the current liveness (#7444)")
+			pending[0]()
+			require.False(t, inst.HasAttention())
+		})
+	}
+}
+
 // An agent WITH a working indicator changes nothing: the reflow mark does not
 // touch its path — a non-working frame still survives by the composer rule,
 // and a frame carrying the in-turn indicator still answers it, resize or not.
