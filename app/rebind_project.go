@@ -11,7 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
 
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -311,11 +311,32 @@ func (m *home) followActiveRebind(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	return m.switchToProjectRoot(root, repoID, checkoutID)
 }
 
+// resolveForCompareOrClean is the bounded, event-loop-safe spelling
+// canonicalizer for path-identity comparisons: pathutil.ResolveForCompare
+// inside one fsprobe flight (#7272), falling back to the cleaned path on a
+// non-answer so a wedged mount degrades the comparison to Clean-vs-Clean
+// instead of hanging the loop forever.
+//
+// An on-loop caller (buildProjectListFromCounted, the rebind reply) must
+// never invoke pathutil.ResolveForCompare directly: its ancestor walk is
+// unbounded, and on a stalled NFS/FUSE/sshfs mount the first EvalSymlinks
+// never returns — parking Update, key input, repaint and the Ctrl+C hard
+// exit until the process is SIGKILLed. The flight bound is 2 s in
+// production (overridable in tests), so the worst case per path is a
+// bounded, joinable wait, and a timed-out retry is refused the same way.
+func resolveForCompareOrClean(path string) string {
+	cleaned := filepath.Clean(path)
+	resolved, err := fsprobe.ResolveForCompare(cleaned)
+	if err != nil {
+		return cleaned
+	}
+	return resolved
+}
+
 // samePath compares two roots under the #2110 spelling rule; an empty side
 // never matches.
 func samePath(a, b string) bool {
-	return a != "" && b != "" &&
-		pathutil.ResolveForCompare(filepath.Clean(a)) == pathutil.ResolveForCompare(filepath.Clean(b))
+	return a != "" && b != "" && resolveForCompareOrClean(a) == resolveForCompareOrClean(b)
 }
 
 // registeredProjectRoot returns the root and recorded identity the registry

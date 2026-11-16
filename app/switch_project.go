@@ -12,7 +12,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/projectclone"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -301,7 +300,12 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		// human, through whatever symlink they had, while a record stores the
 		// path registration resolved (#2110's rule — macOS `/var` ->
 		// `/private/var` makes the two unequal every time).
-		recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(project.Root))] = resolved.id
+		//
+		// Routed through the BOUNDED resolve (fsprobe.ResolveForCompare) so a
+		// project root on a stalled mount (NFS/FUSE/dead sshfs) degrades to the
+		// cleaned spelling instead of hanging the event loop this derivation
+		// runs on — the sidebar poll re-enters it every 750 ms (#7272).
+		recordedIdentities[resolveForCompareOrClean(project.Root)] = resolved.id
 		registryRecordByRow[resolved.id] = project
 		ensure(resolved, rootPriority)
 	}
@@ -335,7 +339,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 			// occupant behind a stale row and sends delete-project an
 			// inconsistent id/path pair.
 			if resolved.answeredNotARepo && expanded != m.repoRoot {
-				if recorded, ok := recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(expanded))]; ok && recorded != "" {
+				if recorded, ok := recordedIdentities[resolveForCompareOrClean(expanded)]; ok && recorded != "" {
 					resolved.id = recorded
 					// Identity and root SPELLING are separate decisions, the
 					// same split an unproven registry row makes above (#3530

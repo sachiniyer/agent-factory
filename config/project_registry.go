@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -611,8 +612,17 @@ func projectFromRecord(record projectRecord) Project {
 // It also moves the two registration guards that consult this in the safe
 // direction: an ambiguous re-registration is REFUSED rather than allowed to
 // proceed on the strength of a stat nobody could perform.
+//
+// The stat runs inside fsprobe.Stat's bounded flight: ListProjects is the
+// registry read the TUI's project-union derivation (buildProjectListFromCounted)
+// performs synchronously on the bubbletea event loop, and an unbounded
+// os.Stat on a stalled NFS/FUSE/sshfs mount would park Update — key input,
+// repaint and the Ctrl+C hard exit with it — until the process is killed. A
+// wedged stat surfaces the bounded non-answer, which is not determinate
+// absence, so it fails closed to "present" exactly as an unreadable-but-there
+// root already does (#7272).
 func projectPathExists(path string) bool {
-	info, err := os.Stat(path)
+	info, err := fsprobe.Stat(path)
 	if err != nil {
 		return !determinatelyAbsent(err)
 	}
