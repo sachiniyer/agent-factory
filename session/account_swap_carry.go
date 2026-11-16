@@ -425,6 +425,12 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 	switch judgeCodexRecordedStaleness(recordedPath, rollouts, boundedLaunchDir(launchDir), repair) {
 	case codexRolloutRecordedGone:
 		return carryRolloutMissingReason
+	case codexRolloutRecordedUnresolved:
+		// Its answered form, gone, refuses whatever a newer thread would
+		// mean, so its non-answer refuses too. The copy reads that file next,
+		// unbounded, after the outgoing agent stops: refusing here keeps a
+		// swap on a dead mount failing before teardown (#7384 review R1).
+		return carryRolloutUnlookedReason
 	case codexRolloutStale:
 		if c.newerCounts(launchDir) {
 			return staleCarryReason

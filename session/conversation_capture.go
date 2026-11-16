@@ -99,6 +99,11 @@ type ConversationCaptureSnapshot struct {
 	// resolves, rescoped filters it to the members a scoped pool would hold,
 	// keeping their offsets (#7299).
 	poolScopePending bool
+	// poolUntracked marks a receipt pool with a member af could not track:
+	// its stat did not answer within its bound, so it has no boundary (#7378).
+	// That member could hold the receipt too, so no check of this wait may
+	// confirm the receipt from the members it did track (#7384 review R2).
+	poolUntracked bool
 	// receiptState carries the scan memoization across the separate
 	// WaitForPromptReceipt calls that share one snapshot — the config agent's
 	// initial, escalation, and five-minute windows are three different calls
@@ -279,13 +284,15 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
 			continue
 		}
 		// Bounded (fsprobe, #7378): a member whose stat does not answer has
-		// no honest boundary, so it is left out, as one whose stat fails is.
-		// So is the rest of the pool, which is on the same mount and whose
-		// stats would each wait out a bound of their own; an unpinned
-		// receipt's absence stays indeterminate either way.
+		// no honest boundary, so it cannot be tracked. Unlike one whose stat
+		// fails, it may still hold the receipt, so the pool is marked
+		// untracked and no check of this wait confirms a lone match. The
+		// rest of the pool is still tracked, so two matches among them stay
+		// ambiguous (#7384 review R2).
 		info, err := fsprobe.Stat(path)
 		if errors.Is(err, fsprobe.ErrProbeTimedOut) {
-			return
+			s.poolUntracked = true
+			continue
 		}
 		if err == nil {
 			s.receiptPaths = append(s.receiptPaths, trackedReceiptPath{
@@ -473,7 +480,7 @@ func WaitForPromptReceipt(
 		}
 		if timeout <= 0 || !time.Now().Before(deadline) {
 			if undecided {
-				return fmt.Errorf("%w within %s: a new Codex rollout's session metadata never became classifiable", ErrPromptReceiptUndecidable, timeout)
+				return fmt.Errorf("%w within %s: a Codex rollout that could hold it never became classifiable, or af's read of one did not answer", ErrPromptReceiptUndecidable, timeout)
 			}
 			return fmt.Errorf("%w in Codex rollout within %s", ErrPromptReceiptNotObserved, timeout)
 		}
@@ -788,14 +795,15 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 	switch {
 	case matched > 1:
 		return false, false, fmt.Errorf("%w: %d Codex rollout files recorded the briefing", ErrPromptReceiptAmbiguous, matched)
-	case matched == 1 && uncorrelated == 0:
+	case matched == 1 && uncorrelated == 0 && !snap.poolUntracked:
 		return true, false, nil
 	default:
 		// Zero matches is absence; a lone match while an unclassifiable
 		// rollout could still settle into a second match is not yet a
 		// unique attribution — keep waiting rather than confirm early
-		// (#5471 review).
-		return false, uncorrelated > 0, nil
+		// (#5471 review). So is one while a pool member af could not track
+		// may hold a second (#7384 review R2).
+		return false, uncorrelated > 0 || snap.poolUntracked, nil
 	}
 }
 

@@ -136,12 +136,14 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 		// A newer rollout whose header af cannot classify yet — Codex may be
 		// mid-write — is a look that failed, not evidence about the id.
 		return declineResumeUnverified("af could not confirm the recorded conversation is still the newest one in this worktree"), false
-	case codexRolloutUnresolved:
+	case codexRolloutUnresolved, codexRolloutRecordedUnresolved:
 		// A lookup that did not answer within its bound — the launch dir's, a
 		// newer rollout's cwd, or a header read a newer rollout needed —
 		// attributes nothing: the no-evidence resume the attribution rule's
 		// own timeout gives above. Only a look that answered declines (#7287
-		// review R1, #7370 review R2, R3).
+		// review R1, #7370 review R2, R3). So does an lstat of the recorded
+		// rollout that did not answer, or failed: only a proven absence is
+		// gone (#7378).
 		return resumeDecline{}, false
 	case codexRolloutRecordedGone:
 		return resumeDecline{}, true
@@ -172,6 +174,12 @@ const (
 	// the launch dir's, the rollout's own cwd, or its header read — did not
 	// answer within its bound. Nothing newer was attributed either way.
 	codexRolloutUnresolved
+	// codexRolloutRecordedUnresolved: an lstat of the recorded rollout itself
+	// did not answer, or failed (#7378). It is apart from
+	// codexRolloutUnresolved because its answered form, gone, refuses a carry
+	// whether or not a newer thread would count, so its non-answer must too
+	// (#7384 review R1).
+	codexRolloutRecordedUnresolved
 )
 
 // checkCodexRecordedStaleness is the mechanical half shared by the restore
@@ -243,7 +251,7 @@ func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string,
 	case pathutil.IsAbsent(err):
 		return codexRolloutRecordedGone
 	case err != nil:
-		return codexRolloutUnresolved
+		return codexRolloutRecordedUnresolved
 	}
 	var newer []string
 	// undated counts the newer files af could not judge: a header the
@@ -251,16 +259,21 @@ func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string,
 	// undatedUnresolved counts those whose lookup did not happen: a header read
 	// that did not answer, or an lstat that did not answer or failed.
 	undated, undatedUnresolved := 0, 0
+	// recordedUnread is the walk's own lstat of the recorded rollout not
+	// answering, or failing: a lookup of the recorded rollout itself, which
+	// outranks every other verdict (#7384 review R1).
+	recordedUnread := false
 	for path, rollout := range rollouts {
-		if rollout.unread != nil {
-			// It may be newer: a lookup that did not happen (#7378). That
-			// holds for the recorded rollout's own entry too, since a walk
-			// that stopped there did not see the rest.
+		switch {
+		case rollout.unread != nil && path == recordedPath:
+			recordedUnread = true
+			continue
+		case rollout.unread != nil:
+			// It may be newer: a lookup that did not happen (#7378).
 			undated++
 			undatedUnresolved++
 			continue
-		}
-		if path == recordedPath {
+		case path == recordedPath:
 			continue
 		}
 		modTime := rollout.at
@@ -277,6 +290,9 @@ func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string,
 		case !disregarded:
 			newer = append(newer, path)
 		}
+	}
+	if recordedUnread {
+		return codexRolloutRecordedUnresolved
 	}
 	uncorrelated, unresolved := undated, undatedUnresolved
 	if len(newer) > 0 {
