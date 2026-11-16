@@ -70,6 +70,11 @@ type snapshotFetchedMsg struct {
 	// the completeness witness the retained set is written from (#6986).
 	allReposSkipped []daemon.SkippedRepo
 	allReposErr     error
+	// registry is the project registry and the spelling of every path the
+	// Projects union compares, read on the same off-loop poll (#7397): a root on
+	// a stalled mount then delays this poll, never Update. Nil in remote mode,
+	// where the union reads the target's cached registry instead.
+	registry *projectRegistryView
 }
 
 // -- Ticker commands --
@@ -110,7 +115,25 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	remoteSeq := m.remote.seq // the task-mutation count this poll starts from
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
+	registryGen := m.registryViewGen
+	rootAgentKeys := m.rootAgentKeys()
+	spellings := m.spellingCache()
 	return func() tea.Msg {
+		// The registry read runs beside the daemon fetches rather than after
+		// them, so a slow mount stretches this poll by its own wait, not by the
+		// sum. It revalidates every spelling it covers, off the loop, which is
+		// what keeps the cache the loop's reads lean on current.
+		var registry *projectRegistryView
+		registryRead := make(chan struct{})
+		go func() {
+			defer close(registryRead)
+			if isRemoteTarget() {
+				return
+			}
+			registry = readProjectRegistryView(rootAgentKeys, nil, spellings, true)
+			registry.gen = registryGen
+			spellings.retain(registry.spellings)
+		}()
 		// context.Background, not the switch path's bounded ctx, preserves the
 		// off-loop poll's semantics: this runs on a tea.Cmd goroutine, never on
 		// the event loop, so an unbounded read cannot park the UI. A wedged
@@ -153,11 +176,13 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// Read here (not in the handler) to keep the daemon RPC off the event
 		// loop; its error is carried separately so a hiccup keeps the last rows.
 		allReposData, allReposSkipped, allReposErr := allRepos(context.Background())
+		<-registryRead
 		return snapshotFetchedMsg{
 			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
 			skippedRepos: resp.SkippedRepos,
 			tasks:        tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
 			allRepos: allReposData, allReposSkipped: allReposSkipped, allReposErr: allReposErr,
+			registry: registry,
 		}
 	}
 }

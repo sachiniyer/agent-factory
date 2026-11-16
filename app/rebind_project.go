@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -11,7 +10,6 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 
 	"github.com/sachiniyer/agent-factory/ui/overlay"
@@ -124,7 +122,15 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 		m.refreshSidebarProjects()
 		return m, m.handleError(fmt.Errorf("Rebind of %s · outcome unknown · check the project list", msg.name))
 	}
-	m.refreshSidebarProjects()
+	// The refresh resolves every root the follow compares in the same phase as
+	// its registry read, so the reply holds Update for one bound in total even
+	// when the root the rebind moved AWAY from — no longer in the registry — is
+	// the one on a dead mount (#7397 review R1). The binding the notice names
+	// and the follow targets is then read from the view that refresh installed:
+	// the registry state the Projects section now shows, so a newer rebind by
+	// another client is never displayed while an older one is followed.
+	m.refreshSidebarProjectsResolving(rebindFollowPaths(msg, m.repoRoot))
+	follow := m.renderedRebindFollow(msg)
 	if owned {
 		m.closeProjectPicker()
 	}
@@ -138,12 +144,12 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 		// client may have rebound the project again since this request committed.
 		// A record that is gone (or unreadable) gets a root-free message.
 		text := fmt.Sprintf("Rebound project '%s'", msg.name)
-		if root, _, _, ok := registeredProjectRoot(msg.projectID); ok {
-			text = fmt.Sprintf("Rebound project '%s' to %s", msg.name, root)
+		if follow.bound {
+			text = fmt.Sprintf("Rebound project '%s' to %s", msg.name, follow.root)
 		}
 		notice = m.showTransientMessage(text)
 	}
-	model, followCmd := m.followActiveRebind(msg)
+	model, followCmd := m.followActiveRebind(msg, follow)
 	return model, tea.Batch(notice, followCmd)
 }
 
@@ -271,23 +277,21 @@ func rebindOutcomeUnknown(err error) bool {
 // followActiveRebind moves the TUI's scope after a CONFIRMED rebind of the
 // project it is scoped to. It follows the registry, never the reply's echo:
 // another client may have rebound or deleted the project since this request
-// committed, and the Projects section just re-read that newer state. A record
+// committed, and the Projects section just re-read that newer state — follow
+// is built from that very read. A record
 // that is gone, a registry that cannot be read, or a record still naming the
 // root it recorded (a no-op rebind, or one another client moved back) leaves
 // the scope where it is. Unknown outcomes never reach it.
-func (m *home) followActiveRebind(msg projectReboundMsg) (tea.Model, tea.Cmd) {
-	if !m.rebindMovedActiveProject(msg) {
+func (m *home) followActiveRebind(msg projectReboundMsg, follow rebindFollow) (tea.Model, tea.Cmd) {
+	if !follow.bound || !m.rebindMovedActiveProject(msg, follow.spellings) {
 		return m, nil
 	}
-	root, repoID, checkoutID, ok := registeredProjectRoot(msg.projectID)
+	root, repoID, checkoutID := follow.root, follow.repoID, follow.checkoutID
 	// "Did the record move" compares registry to registry: the recorded root
 	// when the rebind was sent against the one now. The row's display root can
 	// come from another source, and an unmoved record would then look moved.
-	recorded := msg.oldRegistryRoot
-	if recorded == "" {
-		recorded = msg.oldRoot
-	}
-	if !ok || samePath(root, recorded) || samePath(root, m.repoRoot) {
+	recorded := rebindRecordedRoot(msg)
+	if follow.spellings.same(root, recorded) || follow.spellings.same(root, m.repoRoot) {
 		return m, nil
 	}
 	// The follow-up probes the root the registry binds NOW, passing the SAME
@@ -298,8 +302,8 @@ func (m *home) followActiveRebind(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	// may even have rebound this record since this request committed — so
 	// between the commit and this probe the checkout at the followed root may
 	// have drifted: de-gitted into an enclosing repo, or replaced by a different
-	// clone (#7109). The record's RepoID/CheckoutID (from the same ListProjects
-	// read above, so root and identity stay consistent even if another client
+	// clone (#7109). The record's RepoID/CheckoutID (from the same binding read
+	// as the root, so root and identity stay consistent even if another client
 	// moved the record between the reply and the follow) arm the local branch's
 	// repo-id and checkout-marker guards, so a root that no longer holds the
 	// registered checkout is refused rather than silently re-scoping sessions,
@@ -311,40 +315,55 @@ func (m *home) followActiveRebind(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	return m.switchToProjectRoot(root, repoID, checkoutID)
 }
 
-// samePath compares two roots under the #2110 spelling rule; an empty side
-// never matches.
-func samePath(a, b string) bool {
-	return a != "" && b != "" &&
-		pathutil.ResolveForCompare(filepath.Clean(a)) == pathutil.ResolveForCompare(filepath.Clean(b))
+// rebindFollow is where the registry the Projects section renders binds a
+// rebound project, and the spellings of every root the follow compares, all
+// from the one read the reply's refresh made.
+type rebindFollow struct {
+	root, repoID, checkoutID string
+	bound                    bool
+	spellings                pathSpellings
 }
 
-// registeredProjectRoot returns the root and recorded identity the registry
-// binds project id to now, or ok=false when no readable record has that id. The
-// returned RepoID and CheckoutID are the record's own fields — the same ones
-// the daemon's delete-project cross-check and the local selection guard compare
-// a probe against — so a caller switching to this root arms those guards with
-// the identity the registry actually holds, never one re-derived from the path
-// (#7109/#7116): the registered checkout at that root may have drifted between
-// the root being written and a probe reading it.
-func registeredProjectRoot(id string) (root, repoID, checkoutID string, ok bool) {
-	projects, err := config.ListProjects()
-	if err != nil {
-		return "", "", "", false
+// renderedRebindFollow builds the follow from the view the reply's refresh just
+// installed, so it targets exactly the binding on screen. In remote mode the
+// section renders the target's cached registry, which nothing re-reads between
+// the rebind and its reply — it would name the root the project just left — so
+// there is no binding to name or follow there, as there was none before: the
+// local registry holds no record of the target's projects. The next poll shows
+// where the project landed.
+func (m *home) renderedRebindFollow(msg projectReboundMsg) rebindFollow {
+	if isRemoteTarget() || m.registryView == nil {
+		return rebindFollow{}
 	}
-	for _, p := range projects {
-		if p.ID == id {
-			return p.Root, p.RepoID, p.CheckoutID, true
-		}
+	record, ok := m.registryView.binding(msg.projectID)
+	return rebindFollow{
+		root: record.Root, repoID: record.RepoID, checkoutID: record.CheckoutID,
+		bound: ok, spellings: m.registryView.spellings,
 	}
-	return "", "", "", false
+}
+
+// rebindFollowPaths is every root followActiveRebind compares that the
+// registry read does not already cover: the root the rebind was sent against,
+// the row's, and the active one. The root bound now is a registry root.
+func rebindFollowPaths(msg projectReboundMsg, activeRoot string) []string {
+	return []string{rebindRecordedRoot(msg), msg.oldRoot, activeRoot}
+}
+
+// rebindRecordedRoot is the registry root the rebind was sent against, or the
+// row's root when the row carried none.
+func rebindRecordedRoot(msg projectReboundMsg) string {
+	if msg.oldRegistryRoot != "" {
+		return msg.oldRegistryRoot
+	}
+	return msg.oldRoot
 }
 
 // rebindMovedActiveProject reports whether a rebind moved the project the TUI
 // is scoped to: the row's aggregation identity is the active repoID, or its
 // root is the active root.
-func (m *home) rebindMovedActiveProject(msg projectReboundMsg) bool {
+func (m *home) rebindMovedActiveProject(msg projectReboundMsg, spellings pathSpellings) bool {
 	if msg.oldRepoID != "" && msg.oldRepoID == m.repoID {
 		return true
 	}
-	return samePath(msg.oldRoot, m.repoRoot)
+	return spellings.same(msg.oldRoot, m.repoRoot)
 }
