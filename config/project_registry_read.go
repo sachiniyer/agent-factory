@@ -122,44 +122,6 @@ func ListProjectsAlongside[T any](probe func(root string) T) ([]Project, []T, er
 	return projects, alongside, nil
 }
 
-// ProjectBinding is what one registry record binds: its id, its root, and the
-// identity recorded for it. It has no PathExists on purpose — it is read
-// without looking at the root, so it cannot say whether the root is there.
-type ProjectBinding struct {
-	ID         string
-	CheckoutID string
-	Root       string
-	RepoID     string
-}
-
-// ProjectBindingByID reads the binding the registry holds for id now, or
-// ok=false when no record has that id. It reads the registry and nothing else:
-// no root is statted, id's own included (#7397 review R1). A caller that only
-// needs where a project is bound — the TUI following a rebind on the event loop
-// — must not wait on a stat of every other registered root to learn it, and on
-// a stalled mount each of those stats waits out its whole bound.
-//
-// The read is strict, as ListProjects is: a registry with any record it cannot
-// vouch for fails the lookup instead of answering from a partial view.
-func ProjectBindingByID(id string) (ProjectBinding, bool, error) {
-	dir, err := projectRegistryDir()
-	if err != nil {
-		return ProjectBinding{}, false, err
-	}
-	records, err := loadProjectRecords(dir)
-	if err != nil {
-		return ProjectBinding{}, false, err
-	}
-	for _, record := range records {
-		if record.ID == id {
-			return ProjectBinding{
-				ID: record.ID, CheckoutID: record.CheckoutID, Root: record.Root, RepoID: record.RepoID,
-			}, true, nil
-		}
-	}
-	return ProjectBinding{}, false, nil
-}
-
 // projectsFromRecords builds Project values for every record, running the
 // per-root existence stats CONCURRENTLY so a registry read holds its caller for
 // one fsprobe flight bound in total rather than one per stalled root.

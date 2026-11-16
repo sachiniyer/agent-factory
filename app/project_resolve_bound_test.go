@@ -53,6 +53,13 @@ func wedgeResolutionForTest(t *testing.T, root string) {
 	}))
 }
 
+// resolveForCompareOrClean is resolveForCompare's spelling alone: the cleaned
+// path on a non-answer.
+func resolveForCompareOrClean(path string) string {
+	spelling, _ := resolveForCompare(path)
+	return spelling
+}
+
 // TestResolveForCompareOrClean_BoundsAWedgedWalk is the regression: the on-loop
 // identity-lookup helper must route the canonicalizing walk through the bounded
 // fsprobe flight so a stalled mount degrades instead of hanging the event loop.
@@ -110,12 +117,14 @@ func TestResolveForCompareOrClean_AnswersACanonicalResolve(t *testing.T) {
 
 // TestSamePath_BoundsAWedgedComparison pins the rebind reply handler's
 // comparison: the follow compares roots in the projectReboundMsg Update handler,
-// against spellings startResolvingForCompare resolved, so a wedged lookup on
+// against spellings startResolvingSpellings resolved, so a wedged lookup on
 // either side must degrade within the bound instead of parking the loop. Two
 // spellings of the SAME wedged path still compare equal: each side falls back to
 // its cleaned spelling, and Clean compares to Clean.
 func TestSamePath_BoundsAWedgedComparison(t *testing.T) {
-	samePath := func(a, b string) bool { return startResolvingForCompare([]string{a, b})().same(a, b) }
+	samePath := func(a, b string) bool {
+		return startResolvingSpellings([]string{a, b}, &projectSpellingCache{}, true)().same(a, b)
+	}
 	base := t.TempDir()
 	real := filepath.Join(base, "real")
 	require.NoError(t, os.Mkdir(real, 0o755))

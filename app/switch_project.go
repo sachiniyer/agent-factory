@@ -76,6 +76,13 @@ var projectSnapshotFetchTimeout = 3 * time.Second
 // there is deliberately no variant that drops it (#7180: the one that did was
 // how the section lost the gate).
 func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, error) {
+	return m.buildProjectListWithSnapshotStatusResolving(nil)
+}
+
+// buildProjectListWithSnapshotStatusResolving is buildProjectListWithSnapshotStatus
+// with extra paths resolved in the same phase as its registry read, for a caller
+// that compares them right after (the rebind reply's follow).
+func (m *home) buildProjectListWithSnapshotStatusResolving(extra []string) ([]overlay.Project, bool, error) {
 	// This runs on the bubbletea event loop (Ctrl+P, launch, project switch,
 	// add/delete/rebind completion), and the local daemon transport bounds only
 	// the dial, so a daemon that accepts the connection and never answers would
@@ -98,7 +105,7 @@ func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, er
 		// the last set — over-cautious beats claiming a partial list is whole.
 		m.applySkippedRepos(skipped)
 	}
-	projects, registryDegraded := m.buildProjectListFrom(data)
+	projects, registryDegraded, _ := m.buildProjectListFromCountedResolving(data, extra)
 	return projects, registryDegraded, err
 }
 
@@ -129,6 +136,26 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 // one stalled path did not spend a healthy one's opportunity has to see the
 // round the poll actually opened, not one it assembled for itself.
 func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overlay.Project, bool, []projectPathProbeBudget) {
+	return m.buildProjectListFromCountedResolving(data, nil)
+}
+
+// buildProjectListFromCountedResolving reads the registry ON the loop — with
+// extra resolved in the same phase — and derives the list from that read. It is
+// the read a refresh the user's own action triggers makes; the poll derives from
+// the view it read off the loop instead (refreshSidebarProjectsFromPoll).
+func (m *home) buildProjectListFromCountedResolving(data []session.InstanceData, extra []string) ([]overlay.Project, bool, []projectPathProbeBudget) {
+	if isRemoteTarget() {
+		projects, degraded := m.buildRemoteProjectList(data)
+		return projects, degraded, nil
+	}
+	return m.buildProjectListFromView(data, m.readRegistryViewOnLoop(extra))
+}
+
+// buildProjectListFromView derives the project list from the session snapshot
+// and one registry view: the registry's records, and the canonical spelling of
+// every root and root_agents key, all read before anything here runs. It reads
+// neither the registry nor any root's spelling itself (#7397 review R1).
+func (m *home) buildProjectListFromView(data []session.InstanceData, view *projectRegistryView) ([]overlay.Project, bool, []projectPathProbeBudget) {
 	type projectAggregate struct {
 		root         string
 		rootPriority int
@@ -137,38 +164,17 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 	}
 	projectsByID := map[string]*projectAggregate{}
 
-	// Read the durable registry before resolving any paths so every uncached
-	// candidate can start its bounded Git probe together. A single stalled path
-	// must not consume the entire opportunity of an inactive worktree that comes
-	// later in the snapshot or registry.
-	if isRemoteTarget() {
-		projects, degraded := m.buildRemoteProjectList(data)
-		return projects, degraded, nil
-	}
-	// Every path this derivation compares by its canonical spelling — each
-	// registry root and each root_agents key — is resolved in ONE concurrent
-	// phase with the registry's own root stats (#7397 review R1). On a stalled
-	// mount each resolve and each stat waits out its own bound; taken one after
-	// another, ten such projects parked Update (key input, repaint, Ctrl+C) for
-	// tens of seconds on every poll. Taken together, the registry read and its
-	// resolve pass hold the loop for one bound in total. The root_agents keys
-	// are known before the registry is read, so they start first and overlap
-	// it; the registry roots resolve inside it.
-	var rootAgentKeys []string
-	if m.appConfig != nil {
-		for path := range m.appConfig.RootAgents {
-			rootAgentKeys = append(rootAgentKeys, config.ExpandTilde(path))
-		}
-	}
-	rootAgentSpellings := startResolvingForCompare(rootAgentKeys)
+	// The durable registry was read before resolving any paths, so every
+	// uncached candidate can start its bounded Git probe together. A single
+	// stalled path must not consume the entire opportunity of an inactive
+	// worktree that comes later in the snapshot or registry.
 	registryDegraded := false
-	registeredProjects, registeredSpellings, err := config.ListProjectsAlongside(resolveForCompareOrClean)
-	if err != nil {
+	registeredProjects := view.projects
+	if view.err != nil {
 		registryDegraded = true
-		log.WarningLog.Printf("failed to read the project registry for the switcher: %v", err)
-		registeredProjects, registeredSpellings = nil, nil
+		log.WarningLog.Printf("failed to read the project registry for the switcher: %v", view.err)
+		registeredProjects = nil
 	}
-	canonicalRootAgentKey := rootAgentSpellings()
 	paths := make([]string, 0, len(data)+len(registeredProjects)+1)
 	for _, d := range data {
 		if !session.IsArchivedData(d) && d.Worktree.RepoPath != "" {
@@ -281,7 +287,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 	// recordedIdentities remembers which identity each registry row lent to a
 	// path, so the root_agents union below can ask rather than re-hash.
 	recordedIdentities := make(map[string]string, len(registeredProjects))
-	for i, project := range registeredProjects {
+	for _, project := range registeredProjects {
 		if project.Root == "" {
 			continue
 		}
@@ -318,12 +324,12 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		// path registration resolved (#2110's rule — macOS `/var` ->
 		// `/private/var` makes the two unequal every time).
 		//
-		// The spelling was resolved inside the registry read's phase above,
-		// through the BOUNDED resolve (fsprobe.ResolveForCompare), so a project
-		// root on a stalled mount (NFS/FUSE/dead sshfs) has already degraded to
-		// its cleaned spelling instead of hanging the event loop this derivation
-		// runs on — the sidebar poll re-enters it every 750 ms (#7272).
-		recordedIdentities[registeredSpellings[i]] = resolved.id
+		// The spelling was resolved with the registry read, through the BOUNDED
+		// resolve (fsprobe.ResolveForCompare), so a project root on a stalled
+		// mount (NFS/FUSE/dead sshfs) has already degraded to its cleaned
+		// spelling instead of hanging the event loop this derivation runs on
+		// (#7272).
+		recordedIdentities[view.spellings.canonical(project.Root)] = resolved.id
 		registryRecordByRow[resolved.id] = project
 		ensure(resolved, rootPriority)
 	}
@@ -357,7 +363,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 			// occupant behind a stale row and sends delete-project an
 			// inconsistent id/path pair.
 			if resolved.answeredNotARepo && expanded != m.repoRoot {
-				if recorded, ok := recordedIdentities[canonicalRootAgentKey[expanded]]; ok && recorded != "" {
+				if recorded, ok := recordedIdentities[view.spellings.canonical(expanded)]; ok && recorded != "" {
 					resolved.id = recorded
 					// Identity and root SPELLING are separate decisions, the
 					// same split an unproven registry row makes above (#3530
@@ -472,7 +478,13 @@ func registryBackedRows(rows []overlay.Project) []overlay.Project {
 // replace them with zeros nobody counted. The merge keeps the last-known rows,
 // and the section is marked degraded so `D` does not consent on them either.
 func (m *home) refreshSidebarProjects() {
-	projects, registryDegraded, snapshotErr := m.buildProjectListWithSnapshotStatus()
+	m.refreshSidebarProjectsResolving(nil)
+}
+
+// refreshSidebarProjectsResolving is refreshSidebarProjects with extra paths
+// resolved in the same phase as its registry read (the rebind reply's follow).
+func (m *home) refreshSidebarProjectsResolving(extra []string) {
+	projects, registryDegraded, snapshotErr := m.buildProjectListWithSnapshotStatusResolving(extra)
 	if snapshotErr != nil {
 		m.applySidebarProjects(projects, registryDegraded, snapshotErr)
 		return
@@ -502,11 +514,26 @@ func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded b
 // completeness verdict from one snapshot — and on error the last set stands,
 // never cleared by a hiccup. Returns whether the visible rows changed.
 func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error) bool {
+	return m.refreshSidebarProjectsFromPoll(data, skipped, fetchErr, nil)
+}
+
+// refreshSidebarProjectsFromPoll is refreshSidebarProjectsFromSnapshot for the
+// poll, whose registry view was read off the loop with its snapshot
+// (fetchSnapshotCmd): the rows are built from that view while it is current, so
+// the poll touches neither the registry nor any root's spelling on the loop
+// (#7397). A nil view — a message built without one — reads on the loop.
+func (m *home) refreshSidebarProjectsFromPoll(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error, polled *projectRegistryView) bool {
 	changed := false
 	if fetchErr == nil {
 		changed = m.applySkippedRepos(skipped)
 	}
-	projects, registryDegraded := m.buildProjectListFrom(data)
+	var projects []overlay.Project
+	var registryDegraded bool
+	if isRemoteTarget() {
+		projects, registryDegraded = m.buildRemoteProjectList(data)
+	} else {
+		projects, registryDegraded, _ = m.buildProjectListFromView(data, m.registryViewForPoll(polled))
+	}
 	return m.applySidebarProjects(projects, registryDegraded, fetchErr) || changed
 }
 

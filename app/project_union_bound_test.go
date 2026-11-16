@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -44,15 +46,18 @@ func onStalledMount(roots []string, path string) bool {
 // mountForUnionTest stands in for the mount roots sit on, through fsprobe's
 // stat, symlink-resolution and lstat seams, under bound. With delay < 0 it is
 // dark: every lookup on it blocks until the test ends. Otherwise each lookup
-// answers truthfully after delay. The cleanup releases the mount and lets every
-// released flight unpublish before the seams come back.
-func mountForUnionTest(t *testing.T, roots []string, bound, delay time.Duration) {
+// answers truthfully after delay. It returns the count of lookups the mount was
+// asked for. The cleanup releases the mount and lets every released flight
+// unpublish before the seams come back.
+func mountForUnionTest(t *testing.T, roots []string, bound, delay time.Duration) *atomic.Int64 {
 	t.Helper()
 	release := make(chan struct{})
+	var lookups atomic.Int64
 	wait := func(path string) {
 		if !onStalledMount(roots, path) {
 			return
 		}
+		lookups.Add(1)
 		if delay < 0 {
 			<-release
 			return
@@ -80,6 +85,7 @@ func mountForUnionTest(t *testing.T, roots []string, bound, delay time.Duration)
 		restoreStat()
 		restoreBound()
 	})
+	return &lookups
 }
 
 // onLoopWithin runs step — Update work — on its own goroutine and returns how
@@ -100,9 +106,24 @@ func onLoopWithin(t *testing.T, loop *sync.WaitGroup, limit time.Duration, what 
 	case elapsed := <-done:
 		return elapsed
 	case <-time.After(limit):
-		t.Fatalf("%s held Update past %s: the stalled roots were waited on one after another, not in one phase", what, limit)
+		t.Fatalf("%s did not return within %s", what, limit)
 		return 0
 	}
+}
+
+// registeredProjectRoot is a test's own read of where the registry binds id
+// now, and the identity recorded for it.
+func registeredProjectRoot(id string) (root, repoID, checkoutID string, ok bool) {
+	projects, err := config.ListProjects()
+	if err != nil {
+		return "", "", "", false
+	}
+	for _, p := range projects {
+		if p.ID == id {
+			return p.Root, p.RepoID, p.CheckoutID, true
+		}
+	}
+	return "", "", "", false
 }
 
 // registerUnionRoots registers n fresh checkouts and returns their records.
@@ -331,8 +352,13 @@ func TestProjectPoll_HoldsOneProbePerStalledPathAcrossPolls(t *testing.T) {
 		projectPathRepoProbe, registeredProjectIdentityProbe = pathProbe, proofProbe
 	})
 
+	var laterPolls time.Duration
 	for poll := 1; poll <= 10; poll++ {
+		start := time.Now()
 		rows, _, _ := h.buildProjectListFromCounted(nil)
+		if poll > 1 {
+			laterPolls += time.Since(start)
+		}
 		requireRegistryRowsKept(t, rows, registered, nil)
 		pathsRunning, mostPaths := paths.inFlight()
 		proofsRunning, mostProofs := proofs.inFlight()
@@ -344,4 +370,168 @@ func TestProjectPoll_HoldsOneProbePerStalledPathAcrossPolls(t *testing.T) {
 		require.Equal(t, len(stalled), pathsRunning, "poll %d: one path probe per stalled root, no more", poll)
 		require.Equal(t, len(stalled), proofsRunning, "poll %d: one proof per stalled root, no more", poll)
 	}
+	// And a probe still running from an earlier poll is unanswered at once, not
+	// waited on: the stalled roots cost poll one its gather windows (150 ms for
+	// the paths, 250 ms for the proofs), and the nine polls after it fewer than
+	// four polls' worth between them — waiting each time would cost nine.
+	t.Logf("polls 2-10 held the loop for %s in total", laterPolls)
+	assert.Less(t, laterPolls, 4*(projectPathScanTimeout+registeredProjectProveTimeout),
+		"a poll waited on probes that earlier polls had already given up on")
+}
+
+// TestSnapshotPoll_ReadsTheRegistryOffTheLoop: the 750 ms poll reads the
+// registry, and resolves every root and root_agents key, inside the fetch it
+// already runs off the loop. Applying the poll then looks up no path on the
+// stalled mount at all: the mount delays the poll, never Update.
+func TestSnapshotPoll_ReadsTheRegistryOffTheLoop(t *testing.T) {
+	h := newUnionHome(t)
+	registered := registerUnionRoots(t, 10)
+	stalled := projectRoots(registered)
+	for _, name := range []string{"agents-a", "agents-b"} {
+		key := filepath.Join(t.TempDir(), name)
+		require.NoError(t, os.Mkdir(key, 0o755))
+		h.appConfig.RootAgents[key] = config.RootAgentConfig{}
+		stalled = append(stalled, key)
+	}
+
+	var loop sync.WaitGroup
+	t.Cleanup(loop.Wait)
+	lookups := mountForUnionTest(t, stalled, unionBound, -1)
+
+	// bubbletea runs the poll's Cmd on a goroutine of its own; so does this.
+	var msg tea.Msg
+	offLoop := onLoopWithin(t, &loop, 2*unionBound, "the poll's off-loop fetch", func() {
+		msg = h.fetchSnapshotCmd()()
+	})
+	before := lookups.Load()
+	require.Positive(t, before, "premise: the poll's fetch looked the stalled paths up")
+	applied := onLoopWithin(t, &loop, unionBound/2, "applying the poll in Update", func() {
+		h.Update(msg)
+	})
+	t.Logf("the fetch took %s off the loop; applying it held Update for %s", offLoop, applied)
+	assert.Equal(t, before, lookups.Load(), "applying a poll looks up no path on the stalled mount")
+	requireRegistryRowsKept(t, h.sidebarProjects, registered, nil)
+}
+
+// TestSnapshotPoll_DoesNotApplyARegistryViewOlderThanTheLoops: a poll whose
+// registry read began before a refresh on the loop — an add completing — must
+// not replace that refresh's rows with its older read, which would hide the
+// project the add just showed until the next poll.
+func TestSnapshotPoll_DoesNotApplyARegistryViewOlderThanTheLoops(t *testing.T) {
+	h := newUnionHome(t)
+	first := registerUnionRoots(t, 1)
+	stale := readProjectRegistryView(h.rootAgentKeys(), nil, h.spellingCache(), true)
+	stale.gen = h.registryViewGen // the poll's read began here
+
+	added := registerUnionRoots(t, 1)
+	h.refreshSidebarProjects() // the add's completion refreshes on the loop
+	both := append(append([]config.Project{}, first...), added...)
+	requireRegistryRowsKept(t, h.sidebarProjects, both, nil)
+
+	h.refreshSidebarProjectsFromPoll(nil, nil, nil, stale)
+	requireRegistryRowsKept(t, h.sidebarProjects, both, nil)
+	assert.NotSame(t, stale, h.registryView, "the older poll read is not installed over the loop's")
+
+	current := readProjectRegistryView(h.rootAgentKeys(), nil, h.spellingCache(), true)
+	current.gen = h.registryViewGen
+	h.refreshSidebarProjectsFromPoll(nil, nil, nil, current)
+	assert.Same(t, current, h.registryView, "a poll read that nothing superseded is the one installed")
+	requireRegistryRowsKept(t, h.sidebarProjects, both, nil)
+}
+
+// TestProjectUnion_DoesNotReprobeASlowRootAgentKeyOnTheLoop: a root_agents key
+// on a mount that answers, but slowly — inside the bound, past the probe
+// window. The loop resolves it the first time it sees it; after that its reads
+// take the cached spelling and never wait on that mount again.
+func TestProjectUnion_DoesNotReprobeASlowRootAgentKeyOnTheLoop(t *testing.T) {
+	h := newUnionHome(t)
+	key := filepath.Join(t.TempDir(), "agents")
+	require.NoError(t, os.Mkdir(key, 0o755))
+	h.appConfig.RootAgents[key] = config.RootAgentConfig{}
+
+	var loop sync.WaitGroup
+	t.Cleanup(loop.Wait)
+	lookups := mountForUnionTest(t, []string{key}, unionBound, unionBound*6/10)
+
+	onLoopWithin(t, &loop, 2*unionBound, "the loop's first read", func() {
+		h.buildProjectListFromCounted(nil)
+	})
+	learned := lookups.Load()
+	require.Positive(t, learned, "premise: the first read resolved the key")
+	for read := 2; read <= 4; read++ {
+		elapsed := onLoopWithin(t, &loop, unionBound/2, "a later read on the loop", func() {
+			h.buildProjectListFromCounted(nil)
+		})
+		t.Logf("read %d held Update for %s", read, elapsed)
+	}
+	assert.Equal(t, learned, lookups.Load(), "the slow key was looked up again on the loop")
+}
+
+// TestProjectUnion_PollRevalidatesACachedSpelling: the cache the loop reads
+// from follows a changed symlink within a poll, because the poll resolves every
+// path it covers again, off the loop.
+func TestProjectUnion_PollRevalidatesACachedSpelling(t *testing.T) {
+	h := newUnionHome(t)
+	base := t.TempDir()
+	dirA, dirB := filepath.Join(base, "a"), filepath.Join(base, "b")
+	require.NoError(t, os.Mkdir(dirA, 0o755))
+	require.NoError(t, os.Mkdir(dirB, 0o755))
+	key := filepath.Join(base, "agents")
+	require.NoError(t, os.Symlink(dirA, key))
+	h.appConfig.RootAgents[key] = config.RootAgentConfig{}
+	canonical := func(dir string) string {
+		resolved, err := filepath.EvalSymlinks(dir)
+		require.NoError(t, err)
+		return resolved
+	}
+
+	h.buildProjectListFromCounted(nil)
+	require.Equal(t, canonical(dirA), h.registryView.spellings[key], "premise: the loop learned the key's spelling")
+
+	require.NoError(t, os.Remove(key))
+	require.NoError(t, os.Symlink(dirB, key))
+	h.buildProjectListFromCounted(nil)
+	assert.Equal(t, canonical(dirA), h.registryView.spellings[key],
+		"between polls, the loop reads the spelling it learned rather than resolving again")
+
+	h.Update(h.fetchSnapshotCmd()())
+	assert.Equal(t, canonical(dirB), h.registryView.spellings[key], "the poll resolved the key again")
+	h.buildProjectListFromCounted(nil)
+	assert.Equal(t, canonical(dirB), h.registryView.spellings[key], "and the loop's next read has the new spelling")
+}
+
+// TestRebindFollow_FollowsTheBindingTheSidebarShows: another client rebinds the
+// active project again after this rebind's reply arrives and before the reply's
+// refresh reads the registry. The Projects section shows that newer binding, so
+// the follow must target it too — never a binding read before the refresh.
+func TestRebindFollow_FollowsTheBindingTheSidebarShows(t *testing.T) {
+	h, id := activeRebindHome(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+	stubRebindThrough(t, nil)
+	echo, newer := initTestGitRepo(t), initTestGitRepo(t)
+	reply := submitPickerRebind(t, h, echo)()
+
+	// The reply's refresh fetches the session snapshot before it reads the
+	// registry; the other client's rebind lands in between.
+	var once sync.Once
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		once.Do(func() {
+			_, err := config.RebindProject(id, newer)
+			require.NoError(t, err)
+		})
+		return nil, nil
+	}))
+
+	h.Update(reply)
+	settleProjectSwitch(t, h)
+	shown := ""
+	for _, row := range h.sidebarProjects {
+		if row.RegistryID == id {
+			shown = row.RegistryRoot
+		}
+	}
+	newerRoot, _, _, ok := registeredProjectRoot(id)
+	require.True(t, ok)
+	require.Equal(t, newerRoot, shown, "premise: the Projects section shows the newer binding")
+	assert.Equal(t, newer, h.repoRoot, "the follow targets the binding the Projects section shows")
 }

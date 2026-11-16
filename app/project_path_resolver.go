@@ -45,9 +45,12 @@ var (
 // same path on every 750 ms poll would then add a git process and a pinned OS
 // thread per stalled path per poll, until the process exhausts its threads (Go's
 // limit is 10,000 — about 20 minutes at ten stalled roots). So a poll that finds
-// a path's earlier probe still running JOINS it, the way fsprobe joins a flight:
-// it waits for that probe's answer inside its own gather window and opens no new
-// one. A probe that has returned is gone from here, so the next poll asks afresh.
+// a path's earlier probe still running opens no new one, and does not wait on
+// it either: that probe already outlived the window of the poll that opened it,
+// so it is unanswered now — the latch fsprobe applies to a flight that missed
+// its deadline. A stalled path therefore costs the loop its gather window once,
+// not on every poll. A probe that has returned is gone from here, so the next
+// poll asks afresh.
 type projectProbeFlights[R any] struct {
 	mu      sync.Mutex
 	running map[string]*projectProbeFlight[R]
@@ -58,12 +61,13 @@ type projectProbeFlight[R any] struct {
 	result R
 }
 
-// join returns the flight still running for key, or starts probe as a new one.
-func (f *projectProbeFlights[R]) join(key string, probe func() R) *projectProbeFlight[R] {
+// start starts probe as key's flight, or returns nil when key's earlier probe
+// has not returned yet.
+func (f *projectProbeFlights[R]) start(key string, probe func() R) *projectProbeFlight[R] {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if flight := f.running[key]; flight != nil {
-		return flight
+	if f.running[key] != nil {
+		return nil
 	}
 	if f.running == nil {
 		f.running = make(map[string]*projectProbeFlight[R])
@@ -208,8 +212,8 @@ type projectPathProbeBudget struct {
 // Successful answers are cached briefly to avoid probing on every 750ms sidebar
 // poll, then revalidated so a present path replaced by another checkout cannot
 // retain its former repository identity forever. A path whose earlier probe has
-// not returned is not probed again: the poll joins that probe for its window
-// (projectProbeFlights), so a stalled path holds one probe, not one per poll.
+// not returned is not probed again, and is unanswered this poll at once
+// (projectProbeFlights): a stalled path holds one probe, not one per poll.
 //
 // The second return is the ledger of budgets opened, one entry per uncached
 // path, in the order they were opened. Production ignores it; it exists so the
@@ -269,10 +273,15 @@ func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolu
 		ctx, cancel := context.WithTimeout(context.Background(), projectPathScanTimeout)
 		cancels = append(cancels, cancel)
 		budgetIndex[path] = len(budgets)
+		// The budget is recorded either way: a path whose earlier probe is still
+		// running is granted this poll's window and spends none of it, which
+		// the ledger reads as unanswered — exactly what it is.
 		budgets = append(budgets, projectPathProbeBudget{path: path, window: projectPathScanTimeout})
-		flights = append(flights, m.projectPathProbes.join(path, func() projectPathProbeResult {
+		if flight := m.projectPathProbes.start(path, func() projectPathProbeResult {
 			return probeProjectPath(ctx, probe, path)
-		}))
+		}); flight != nil {
+			flights = append(flights, flight)
+		}
 	}
 	// The gather's deadline bounds a different thing from the budgets above, and
 	// hands out no opportunity that a path could be competing for: every probe
@@ -290,7 +299,7 @@ func (m *home) resolveProjectPaths(paths []string) (map[string]projectPathResolu
 	if m.projectPathResolutions == nil {
 		m.projectPathResolutions = make(map[string]projectPathResolution)
 	}
-	for range uncached {
+	for range flights {
 		select {
 		case result := <-results:
 			if index, ok := budgetIndex[result.path]; ok {
@@ -393,7 +402,8 @@ type registeredProjectProbeResult struct {
 // Each registration is given a proving budget of its OWN and they run together,
 // exactly as resolveProjectPaths does: one unreachable registration must not
 // spend an opportunity that belongs to another. And exactly as there, a proof
-// that has not returned is joined rather than started again (#7397 review R3).
+// that has not returned is not started again, and leaves its registration
+// unproven this poll (#7397 review R3).
 func (m *home) resolveRegisteredProjectIdentities(projects []config.Project) map[string]string {
 	now := time.Now()
 	proven := make(map[string]string, len(projects))
@@ -438,10 +448,12 @@ func (m *home) resolveRegisteredProjectIdentities(projects []config.Project) map
 		// deleted and another registered while the first proof was stuck) asks
 		// its own question rather than joining an answer about another record.
 		key := project.ID + "\x00" + project.Root + "\x00" + project.CheckoutID + "\x00" + project.RepoID
-		flights = append(flights, m.registeredProjectProbes.join(key, func() registeredProjectProbeResult {
+		if flight := m.registeredProjectProbes.start(key, func() registeredProjectProbeResult {
 			id, ok := probe(ctx, project)
 			return registeredProjectProbeResult{root: project.Root, id: id, resolved: ok}
-		}))
+		}); flight != nil {
+			flights = append(flights, flight)
+		}
 	}
 	// The backstop for the gather, not a budget any registration competes for —
 	// see resolveProjectPaths for why the loop cannot wait on the probes' own
@@ -455,7 +467,7 @@ func (m *home) resolveRegisteredProjectIdentities(projects []config.Project) map
 	if m.registeredProjectIdentities == nil {
 		m.registeredProjectIdentities = make(map[string]registeredProjectIdentity)
 	}
-	for range uncached {
+	for range flights {
 		select {
 		case result := <-results:
 			if result.resolved {

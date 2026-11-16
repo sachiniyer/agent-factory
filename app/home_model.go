@@ -87,6 +87,14 @@ type home struct {
 	// the loop at first use; the probes' own goroutines unpublish themselves.
 	projectPathProbes       *projectProbeFlights[projectPathProbeResult]
 	registeredProjectProbes *projectProbeFlights[registeredProjectProbeResult]
+	// registryView is the registry read the Projects section last rendered from,
+	// and registryViewGen counts the reads made on the loop: a poll's off-loop
+	// view is applied only while no such read has superseded it (#7397).
+	// projectSpellings caches each compared path's canonical spelling between
+	// reads, so a read on the loop resolves only paths it has never seen.
+	registryView     *projectRegistryView
+	registryViewGen  uint64
+	projectSpellings *projectSpellingCache
 
 	// adoptedSnapshotOps separates daemon-adopted in-flight ops from local
 	// optimistic ones, which the reconcile guards must treat oppositely (#3005).
