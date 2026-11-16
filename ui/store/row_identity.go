@@ -21,16 +21,17 @@ import "github.com/sachiniyer/agent-factory/session"
 // form is open. Views derive their row lists from SameRow, so a change bumps the
 // version like any other mutation they key on.
 func (p *Projection) SetNaming(inst *session.Instance) {
-	if p.naming == inst {
+	if p.naming.Swap(inst) == inst {
 		return
 	}
-	p.naming = inst
 	p.bump()
 }
 
-// Naming returns the row the create form is naming, or nil.
+// Naming returns the row the create form is naming, or nil. Unlike the rest of
+// the projection it is safe to call off the event loop: the capture goroutine
+// asks it which copy the form row's preview shows (#7407).
 func (p *Projection) Naming() *session.Instance {
-	return p.naming
+	return p.naming.Load()
 }
 
 // SameRow reports whether a and b are the same rail row for selection. That is
@@ -44,7 +45,7 @@ func (p *Projection) SameRow(a, b *session.Instance) bool {
 	if a == b {
 		return true
 	}
-	if a == p.naming || b == p.naming {
+	if naming := p.naming.Load(); a == naming || b == naming {
 		return false
 	}
 	return a.Title == b.Title
