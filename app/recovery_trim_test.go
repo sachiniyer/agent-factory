@@ -29,6 +29,7 @@ func TestRecoveryTrimSpaceWhitespacePromptNoCheck(t *testing.T) {
 
 	// Simulate a create that fails after the user typed only whitespace.
 	_, _ = h.Update(instanceStartedMsg{
+		repoID:    h.repoID,
 		instance:  inst,
 		draft:     &req,
 		rawPrompt: "   ", // whitespace-only — trimmed to "" on submit
@@ -77,6 +78,7 @@ func TestRecoveryTrimSpaceRealPromptShowsCheck(t *testing.T) {
 	// A prompt with surrounding whitespace but visible content: trims to a
 	// non-empty value, so the "✓" variant is correct.
 	_, _ = h.Update(instanceStartedMsg{
+		repoID:    h.repoID,
 		instance:  inst,
 		draft:     &req,
 		rawPrompt: " Keep my prompt\n",

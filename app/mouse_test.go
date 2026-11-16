@@ -1003,7 +1003,7 @@ func TestMouse_RecoveryOverlayFalseDoubleFromAsyncCreate(t *testing.T) {
 	// selection is beta, not alpha), so restoreFailedCreate is not taken and
 	// m.state stays stateDefault — the state-keyed gate cannot see this
 	// excursion; showRecovery must clear the tracker itself (the fix).
-	_, _ = h.Update(instanceStartedMsg{instance: alpha, err: errors.New("daemon refused the create")})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: alpha, err: errors.New("daemon refused the create")})
 	require.NotNil(t, h.recovery, "the create error raises the recovery overlay")
 	require.Equal(t, stateDefault, h.state, "recovery does not change m.state")
 	assert.Empty(t, h.lastClickZone,

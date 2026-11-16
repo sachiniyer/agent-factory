@@ -165,3 +165,36 @@ func (m *home) handleKeyWhileSwitchingProject(msg tea.KeyMsg) (tea.Model, tea.Cm
 	}
 	return m, nil
 }
+
+// handleCreateInOtherProject applies the reply of a create made in a project the
+// TUI has since switched away from (#7381). Nothing of it touches the store: the
+// store holds the current project's rows, so the title-based remove and replace
+// the create handler uses would act on another project's session, and an added
+// row would show a session of one project in another's sidebar. The daemon owns
+// the session either way, and that project's snapshot shows it on the way back.
+// A failed create's draft is kept for its own project's next create, and every
+// message names the project.
+func (m *home) handleCreateInOtherProject(msg instanceStartedMsg) (tea.Model, tea.Cmd) {
+	project := filepath.Base(msg.repoRoot)
+	if msg.err != nil {
+		title := msg.instance.Title
+		if mutationMayHaveLanded(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("creating session %q in %s", title, project), project+"'s session list", msg.err))
+		}
+		detail := "Your input is retained. " + msg.err.Error()
+		if msg.draft != nil {
+			m.failedCreate = &msg
+			detail += " The next create in " + project + " reopens the failed draft."
+		}
+		return m, m.handleError(elsewhereFailure("Cannot create session", title, project, detail))
+	}
+	started := msg.instance
+	if msg.started != nil {
+		started = msg.started
+	}
+	if err := accountSkewRefusal(msg.account, started); err != nil {
+		return m, m.handleError(err)
+	}
+	return m, m.showTransientMessage(fmt.Sprintf("Session %q started in %s", started.Title, project))
+}

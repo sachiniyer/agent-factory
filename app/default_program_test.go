@@ -595,7 +595,7 @@ func TestFailedCreateRestoreKeepsAnImplicitProgramImplicit(t *testing.T) {
 	// resolve — which is the only thing the restore can faithfully re-arm. With
 	// the user still watching, the refusal re-arms the form inline.
 	req := sessionStartRequest{Title: "demo", RepoPath: h.repoRoot, Program: ""}
-	_, _ = h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
 	require.Equal(t, stateNew, h.state, "the draft re-armed the form")
 	require.False(t, h.pendingProgramChosen,
 		"a draft that went out implicit must restore implicit")
@@ -769,7 +769,7 @@ func TestFailedCreateRestoreRefetchesTheDefaultAccount(t *testing.T) {
 	// The failed submit went out implicit on BOTH fields: the account the form
 	// displayed was the daemon's preselect, never a user choice.
 	req := sessionStartRequest{Title: "demo", RepoPath: h.repoRoot, Program: "", Account: ""}
-	_, cmd := h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
+	_, cmd := h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
 	require.Equal(t, stateNew, h.state, "the draft re-armed the form")
 	require.False(t, h.pendingAccountChosen)
 	require.Empty(t, h.pendingAccount,
@@ -813,7 +813,7 @@ func TestFailedCreateRestoreFreshensAChosenAmbientAccount(t *testing.T) {
 	// The failed submit carried an explicit ambient choice: Account="" on the
 	// wire, AccountChosen=true beside it.
 	req := sessionStartRequest{Title: "demo", RepoPath: h.repoRoot, Program: "", Account: "", AccountChosen: true}
-	_, cmd := h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
+	_, cmd := h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
 	require.Equal(t, stateNew, h.state, "the draft re-armed the form")
 	require.False(t, h.pendingAccountChosen,
 		"an empty account pins nothing — the wire sends \"\" either way, so restore treats it as implicit")
@@ -858,7 +858,7 @@ func TestFailedCreateRestoreUnpinsAnAccountPinnedProgram(t *testing.T) {
 	// The failed submit: account "work" chosen, the program on the wire only
 	// because the pairing pinned it — ProgramChosen stays false.
 	req := sessionStartRequest{Title: "demo", RepoPath: h.repoRoot, Program: "claude", Account: "work", AccountChosen: true}
-	_, _ = h.Update(instanceStartedMsg{instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, draft: &req, err: errors.New("The daemon refused this create.")})
 	require.Equal(t, stateNew, h.state)
 	require.True(t, h.pendingAccountChosen)
 	require.False(t, h.pendingProgramChosen,

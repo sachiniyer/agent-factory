@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,11 +15,17 @@ import (
 type recoveryNotice struct{ condition, detail, action string }
 
 func (m *home) showRecovery(condition, detail, action string, err error) tea.Cmd {
+	return m.showSessionRecovery("", condition, detail, action, err)
+}
+
+// showSessionRecovery is showRecovery for a failed action on the session titled
+// title. A failure for the project the user is leaving raises no modal: it
+// would hold the screen while keys are held for the switch, then sit over the
+// next project once it commits (#7379). The bar says it instead, naming the
+// session and its project, because the notice can outlast the switch (#7381).
+func (m *home) showSessionRecovery(title, condition, detail, action string, err error) tea.Cmd {
 	if m.leavingProject() {
-		// A failure for the project the user is leaving raises no modal: it
-		// would hold the screen while keys are held for the switch, then sit
-		// over the next project once it commits (#7379). The bar says it.
-		return m.handleError(fmt.Errorf("%s — %s", condition, detail))
+		return m.handleError(elsewhereFailure(condition, title, filepath.Base(m.repoRoot), detail))
 	}
 	m.recovery = &recoveryNotice{condition, detail, action}
 	// The recovery overlay is a stateless modal — it never changes m.state — so
@@ -31,6 +38,16 @@ func (m *home) showRecovery(condition, detail, action string, err error) tea.Cmd
 	m.lastClickZone = ""
 	m.lastClickAt = time.Time{}
 	return m.handleError(err)
+}
+
+// elsewhereFailure is the bar's report of an action that failed in a project the
+// user is not looking at: the recovery screen's condition and detail, plus the
+// session and project the screen would have been showing over.
+func elsewhereFailure(condition, title, project, detail string) error {
+	if title == "" {
+		return fmt.Errorf("%s in %s — %s", condition, project, detail)
+	}
+	return fmt.Errorf("%s %q in %s — %s", condition, title, project, detail)
 }
 
 // restoreFailedCreate reopens the captured draft, never a newer form. A user

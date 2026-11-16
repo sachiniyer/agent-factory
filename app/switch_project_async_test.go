@@ -403,7 +403,7 @@ func TestSwitchProjectFailedCreateMeanwhileOpensNothingForTheOutgoingProject(t *
 	inst, req := outgoingCreate(t, h, "repoA-create")
 
 	cmd := startSwitch(t, h, repoB, nil)
-	h.Update(instanceStartedMsg{instance: inst, draft: req, rawPrompt: "p", err: neverSent()})
+	h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, draft: req, rawPrompt: "p", err: neverSent()})
 
 	assert.Equal(t, stateDefault, h.state, "no form opens for the project being left")
 	assert.Nil(t, h.namingInstance, "the failed draft is not restored while the switch loads")
@@ -438,7 +438,7 @@ func TestSwitchProjectStartedCreateMeanwhileOpensNoStartHelp(t *testing.T) {
 	inst, _ := outgoingCreate(t, h, "repoA-create")
 
 	cmd := startSwitch(t, h, repoB, nil)
-	h.Update(instanceStartedMsg{instance: inst})
+	h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst})
 
 	assert.Equal(t, stateDefault, h.state, "no start-help modal for a session in the project being left")
 	assert.Nil(t, h.textOverlay)

@@ -295,7 +295,7 @@ func TestInstanceStarted_Success_UserStillWatching(t *testing.T) {
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	_, _ = h.Update(instanceStartedMsg{instance: inst, err: nil})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, err: nil})
 
 	assert.Equal(t, session.Running, inst.GetStatus(), "status must flip to Running")
 	assert.Equal(t, stateHelp, h.state, "user on the new instance should see the attach-help modal")
@@ -315,7 +315,7 @@ func TestInstanceStarted_Success_UserMovedToAnotherInstance(t *testing.T) {
 	// User navigated to `other` while `creating` was still starting.
 	h.sidebar.SetSelectedInstance(1)
 
-	_, _ = h.Update(instanceStartedMsg{instance: creating, err: nil})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: creating, err: nil})
 
 	assert.Equal(t, session.Running, creating.GetStatus(), "status must flip to Running")
 	assert.Equal(t, stateDefault, h.state, "user state must not flip to stateHelp")
@@ -339,7 +339,7 @@ func TestInstanceStarted_Success_UserCreatingAnotherInstance(t *testing.T) {
 	h.namingInstance = second
 	h.state = stateNew
 
-	_, _ = h.Update(instanceStartedMsg{instance: first, err: nil})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: first, err: nil})
 
 	assert.Equal(t, session.Running, first.GetStatus(), "first instance should flip to Running")
 	assert.Equal(t, stateNew, h.state, "naming state must be preserved")
@@ -361,7 +361,7 @@ func TestInstanceStarted_Failure_RemovesByTitleNotBySelection(t *testing.T) {
 	// User moved to `innocent` while `failing` was still starting.
 	h.sidebar.SetSelectedInstance(1)
 
-	_, _ = h.Update(instanceStartedMsg{instance: failing, err: errors.New("boom")})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: failing, err: errors.New("boom")})
 
 	titles := collectTitles(h.store.GetInstances())
 	assert.NotContains(t, titles, "failing", "failed instance must be removed")
@@ -378,7 +378,7 @@ func TestInstanceStarted_Failure_OnFailedInstance(t *testing.T) {
 	h.store.AddInstance(failing)
 	h.sidebar.SetSelectedInstance(0)
 
-	_, _ = h.Update(instanceStartedMsg{instance: failing, err: errors.New("boom")})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: failing, err: errors.New("boom")})
 
 	assert.Empty(t, h.store.GetInstances(), "failed instance must be removed")
 	assert.Nil(t, h.sidebar.GetSelectedInstance(), "no instance should remain selected")
@@ -429,7 +429,7 @@ func TestInstanceStartedRegistersRepoAfterStart(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 	require.Equal(t, 0, h.store.NumRepos())
 
-	_, _ = h.Update(instanceStartedMsg{instance: inst, err: nil})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, err: nil})
 
 	assert.Equal(t, 1, h.store.NumRepos())
 }
@@ -454,7 +454,7 @@ func TestInstanceStarted_TimeoutError_SurfacesPaneSnippet(t *testing.T) {
 	h.errBox.SetSize(500, 1)
 
 	daemonErr := errors.New("failed to start instance: timed out waiting for program to start (1m0s)\nlast pane content:\n  Loading config...\n  Connecting to MCP server...")
-	_, _ = h.Update(instanceStartedMsg{instance: failing, err: daemonErr})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: failing, err: daemonErr})
 
 	rendered := h.errBox.String()
 	assert.Contains(t, rendered, "timed out waiting for program to start")
@@ -474,7 +474,7 @@ func TestInstanceStarted_TimeoutError_EmptyContentOmitsHeader(t *testing.T) {
 	h.errBox.SetSize(500, 1)
 
 	daemonErr := errors.New("failed to start instance: timed out waiting for program to start (1m0s)")
-	_, _ = h.Update(instanceStartedMsg{instance: failing, err: daemonErr})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: failing, err: daemonErr})
 
 	rendered := h.errBox.String()
 	assert.Contains(t, rendered, "timed out waiting for program to start")
@@ -505,7 +505,7 @@ func TestInstanceStarted_ReplacesSwappedSameTitleRow(t *testing.T) {
 	started := newLoadingInstance(t, "scripts")
 	started.SetStartedForTest(true)
 
-	_, _ = h.Update(instanceStartedMsg{instance: placeholder, started: started})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: placeholder, started: started})
 
 	instances := h.store.GetInstances()
 	require.Len(t, instances, 1, "one logical session must occupy exactly one sidebar row (#808)")

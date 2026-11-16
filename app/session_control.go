@@ -647,13 +647,27 @@ var renameTabThroughDaemon = func(request daemon.RenameTabRequest) (string, erro
 // failure the switch aborts on, leaving the current project intact (#1788). A ctx with no deadline (the off-loop poll,
 // which passes context.Background) preserves the unbounded read the background
 // poll has always relied on.
+//
+// A daemon that answered "starting" is warming, not silent, even when ctx expires
+// before the admission retry sees it answer: a slow ensure can use up most of the
+// deadline, and the retry it cuts short ends in ctx's error, not the daemon's
+// reply. Classify by the reply (#7381) — return the daemon's last "starting"
+// answer, so the switch keeps waiting out the warm-up instead of reporting "no
+// answer from the daemon".
 func snapshotThroughDaemon(ctx context.Context, repoID string) (daemon.SnapshotResponse, error) {
 	var resp daemon.SnapshotResponse
+	var warming error
 	err := withDaemonHTTPCtx(ctx, func(c *apiclient.Client) error {
 		var e error
 		resp, e = c.SnapshotWithAlarmsCtx(ctx, daemon.SnapshotRequest{RepoID: repoID})
+		if daemon.IsDaemonStartingErr(e) {
+			warming = e
+		}
 		return e
 	})
+	if err != nil && warming != nil && ctx.Err() != nil {
+		return resp, warming
+	}
 	return resp, err
 }
 

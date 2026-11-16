@@ -370,7 +370,7 @@ func TestTUIRefreshDoesNotSwapLoadingPlaceholder(t *testing.T) {
 	started, err := session.FromInstanceData(*rec)
 	require.NoError(t, err)
 
-	_, _ = h.Update(instanceStartedMsg{instance: placeholder, started: started})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: placeholder, started: started})
 
 	var matches []*session.Instance
 	for _, inst := range h.store.GetInstances() {
