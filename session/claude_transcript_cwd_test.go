@@ -116,6 +116,13 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 		{name: "a /clear whose first record is a pasted image", cwd: "oversize first", verdict: claudeRecordedStale},
 		{name: "a conversation that records the worktree's path before a move", cwd: "before a move", verdict: claudeRecordedStale},
 		{name: "a colliding directory's conversation", cwd: "foreign", verdict: claudeRecordedCurrent},
+		// A foreign conversation cd'd into its own subdirectory records the
+		// subdirectory, which has no project name matching the launch dir's:
+		// the ancestor spellings of an own-subdirectory's path would name
+		// the launch dir's colliding project too, so the launch dir's
+		// ancestral position distinguishes the worktree's own subdirectory
+		// from a colliding directory's (#7208, #7221).
+		{name: "a colliding directory's conversation that cd'd into its own subdirectory", cwd: "foreign subdirectory", verdict: claudeRecordedCurrent},
 		{name: "a colliding directory's conversation relocated there", cwd: "relocated away", verdict: claudeRecordedCurrent},
 		{name: "a conversation that names no directory", cwd: "", verdict: claudeRecordedUncorrelated},
 	} {
@@ -125,6 +132,7 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 			worktree := inst.GetWorktreePath()
 			foreign := filepath.Join(real, "a-b")
 			require.NoError(t, os.MkdirAll(foreign, 0o755))
+			require.NoError(t, os.MkdirAll(filepath.Join(foreign, "web"), 0o755))
 			require.Equal(t, resolved, claudeProjectCandidates(foreign)[0], "premise: a-b files under a.b's resolved project name")
 			recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
 			source := filepath.Join(home, ".claude")
@@ -137,11 +145,12 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 				"relocated in": claudeRecordLine(t, t.TempDir()) + relocation(worktree),
 				"relocated in long ago": claudeRecordLine(t, foreign) + relocation(worktree) +
 					strings.Repeat(claudeRecordLine(t, worktree), 2000),
-				"oversize first": `{"type":"user","message":{"content":"` + strings.Repeat("x", claudeTranscriptRecordLimit) + `"}}` + "\n" + claudeRecordLine(t, worktree),
-				"before a move":  claudeRecordLine(t, filepath.Join(t.TempDir(), "old-place")),
-				"foreign":        claudeRecordLine(t, foreign),
-				"relocated away": claudeRecordLine(t, worktree) + relocation(foreign),
-				"":               `{"type":"summary","summary":"s"}` + "\n",
+				"oversize first":       `{"type":"user","message":{"content":"` + strings.Repeat("x", claudeTranscriptRecordLimit) + `"}}` + "\n" + claudeRecordLine(t, worktree),
+				"before a move":        claudeRecordLine(t, filepath.Join(t.TempDir(), "old-place")),
+				"foreign":              claudeRecordLine(t, foreign),
+				"foreign subdirectory": claudeRecordLine(t, filepath.Join(foreign, "web")),
+				"relocated away":       claudeRecordLine(t, worktree) + relocation(foreign),
+				"":                     `{"type":"summary","summary":"s"}` + "\n",
 			}[tc.cwd]
 			setModTime(t, writeCarryFile(t, source, filepath.Join(resolved, otherID+".jsonl"), content), past.Add(time.Minute))
 

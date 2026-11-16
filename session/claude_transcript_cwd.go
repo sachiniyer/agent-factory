@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 )
@@ -78,16 +79,43 @@ type claudeRecordedDir struct {
 // follows symlinks on whatever filesystem dir names, which may be a mount the
 // agent cd'd onto that no longer answers, so it runs inside the transcript
 // read's bounded flight. A test seam.
+//
+// names is the project-name set of dir AND every ancestor of dir. Claude files
+// a conversation under the project directory of the directory it was launched
+// in, while each record names the session's current cwd, which a persisted /cd
+// moves (#7221). A project name collides (a.b and a-b both sanitize to a-b),
+// so a project directory shared by two launch directories holds the other
+// directory's conversations, and a foreign conversation that cd'd into its own
+// subdirectory records that subdirectory as its cwd — not the foreign launch
+// directory the transcript files under. The recorded directory's own
+// spellings alone see the subdirectory, not the colliding launch dir, so the
+// ancestor spellings are walked too. Each spelling is produced through the
+// same bounded claudeProjectSpellings/fsprobe path the recorded dir's are
+// (#7272): one that did not answer leaves names incomplete.
 var claudeRecordedDirFacts = func(dir string) claudeRecordedDir {
 	names := map[string]bool{}
-	projects, complete := claudeProjectSpellings(dir)
-	for _, project := range projects {
-		names[filepath.Base(project)] = true
+	unresolved := false
+	for walk := dir; ; walk = filepath.Dir(walk) {
+		projects, complete := claudeProjectSpellings(walk)
+		if !complete {
+			unresolved = true
+		}
+		for _, project := range projects {
+			names[filepath.Base(project)] = true
+		}
+		// filepath.Dir("/") == "/": stop after the root so a degenerate
+		// path cannot spin the walk.
+		if parent := filepath.Dir(walk); parent == walk {
+			break
+		}
 	}
 	// Bounded and checked like the launch side (#7286): a lookup that failed
 	// for any reason but absence is a resolution that did not happen.
 	resolved, err := fsprobe.ResolveForCompare(dir)
-	return claudeRecordedDir{resolved: resolved, names: names, unresolved: !complete || err != nil}
+	if err != nil {
+		unresolved = true
+	}
+	return claudeRecordedDir{resolved: resolved, names: names, unresolved: unresolved}
 }
 
 // claudeTranscriptRecordedDir reads the directory the transcript at path
@@ -213,15 +241,16 @@ const (
 // is someone else's only when the directory it records resolves to a
 // DIFFERENT directory that files under one of the same project names.
 // Everything else is this worktree's: a subdirectory the agent cd'd into (a
-// message records the session's current cwd), a directory the conversation
-// was relocated from, the worktree's path before a move. Both sides are
-// compared resolved, the way the Codex checks compare a rollout's cwd, and
-// both resolutions are bounded: the recorded side inside the transcript read's
-// flight, the launch side by fsprobe (#7272). The launch dir may sit on a mount
-// that no longer answers (NFS, FUSE, a dead sshfs), and a launch side that did
-// not resolve within the bound is a look that did not happen: ownership is
-// unknown, never another directory's. "Another directory's" would leave the
-// recorded conversation the newest, which a carry reads as leave to carry it.
+// message records the session's current cwd, and the launch dir is an
+// ancestor of the recorded dir), a directory the conversation was relocated
+// from, the worktree's path before a move. Both sides are compared resolved,
+// the way the Codex checks compare a rollout's cwd, and both resolutions are
+// bounded: the recorded side inside the transcript read's flight, the launch
+// side by fsprobe (#7272). The launch dir may sit on a mount that no longer
+// answers (NFS, FUSE, a dead sshfs), and a launch side that did not resolve
+// within the bound is a look that did not happen: ownership is unknown, never
+// another directory's. "Another directory's" would leave the recorded
+// conversation the newest, which a carry reads as leave to carry it.
 func claudeTranscriptOwnership(transcript claudeTranscript, launchDir string) claudeOwnership {
 	recorded, ok := claudeTranscriptRecordedDir(filepath.Join(transcript.dir, transcript.name))
 	if !ok {
@@ -232,6 +261,20 @@ func claudeTranscriptOwnership(transcript claudeTranscript, launchDir string) cl
 		return claudeOwnershipUnknown
 	}
 	if recorded.resolved == launch {
+		return claudeOwnedHere
+	}
+	// A conversation cd'd into this worktree's own subdirectory records the
+	// subdirectory as its cwd (#7221 R1): every record after a persisted /cd
+	// names the session's current directory, and the transcript stays in the
+	// launch dir's project directory. The launch dir then resolves to a proper
+	// ancestor of the recorded dir. A foreign conversation cd'd into a
+	// directory whose project name collides with this worktree's records the
+	// foreign subdirectory, which does not resolve under this launch dir, so
+	// the ancestor check distinguishes the two cases that the project-name
+	// set could not: the ancestor spellings include the colliding name in
+	// both, but only the worktree's own subdirectory resolves under the launch
+	// dir.
+	if strings.HasPrefix(recorded.resolved, launch+string(filepath.Separator)) {
 		return claudeOwnedHere
 	}
 	// The project names the launch dir files under are a launch-side
