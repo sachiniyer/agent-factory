@@ -50,7 +50,7 @@ func (m *home) restoreIfResting(selected *session.Instance) (tea.Cmd, bool) {
 // snapshot healed or changed the row while the dialog was up.
 func (m *home) confirmReprovisioningRestore(selected *session.Instance) tea.Cmd {
 	title := selected.Title
-	target := captureSessionActionTarget(selected, m.repoID)
+	target := m.captureProjectActionTarget(selected)
 	message := fmt.Sprintf("Restore sandbox session %q?\n\nReconnects if live. A dead agent's sandbox is pushed first.\nAn absent sandbox is restored from its last pushed state — never-pushed changes are lost.\nRestore refuses when reachability is uncertain.", title)
 	return m.confirmAction(message, func() tea.Msg {
 		inst := m.resolveSessionActionTarget(target)

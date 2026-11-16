@@ -184,7 +184,7 @@ func (m *home) handleCreateInOtherProject(msg instanceStartedMsg) (tea.Model, te
 		}
 		detail := "Your input is retained. " + msg.err.Error()
 		if msg.draft != nil {
-			m.failedCreate = &msg
+			m.keepFailedCreate(&msg)
 			detail += " The next create in " + project + " reopens the failed draft."
 		}
 		return m, m.handleError(elsewhereFailure("Cannot create session", title, project, detail))

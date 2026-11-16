@@ -410,7 +410,7 @@ func TestSwitchProjectFailedCreateMeanwhileOpensNothingForTheOutgoingProject(t *
 	assert.Nil(t, h.recovery, "no modal while the switch loads: keys are held, so nothing could dismiss it")
 	assert.Contains(t, bar(h), "Loading "+filepath.Base(repoB.Root)+"…", "the switch still leads the bar")
 	assert.Contains(t, bar(h), "Cannot create session", "the failure is still reported")
-	require.NotNil(t, h.failedCreate, "the draft is kept for the outgoing project's next create")
+	require.NotNil(t, h.failedCreates[h.repoID], "the draft is kept for the outgoing project's next create")
 
 	h.Update(cmd())
 	require.Equal(t, repoB.ID, h.repoID, "the switch commits")

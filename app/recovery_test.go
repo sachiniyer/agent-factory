@@ -202,7 +202,7 @@ func TestRecoveryRetainsFailedCreateWhileAnotherFormIsOpen(t *testing.T) {
 	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: failed, draft: &req, rawPrompt: "old draft", err: errors.New("rejected")})
 	require.Same(t, newer, h.namingInstance)
 	require.Equal(t, "new draft", h.pendingPrompt)
-	require.NotNil(t, h.failedCreate)
+	require.NotNil(t, h.failedCreates[h.repoID])
 }
 
 // The same unavailable condition must survive launch, not just a later poll.

@@ -50,7 +50,7 @@ func TestInstanceStarted_UncertainCreateDoesNotReArmDraft(t *testing.T) {
 
 	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, draft: &req, rawPrompt: "p", err: replyLost()})
 
-	require.Nil(t, h.failedCreate, "an uncertain create must not be kept as a draft for the next create to reopen")
+	require.Nil(t, h.failedCreates[h.repoID], "an uncertain create must not be kept as a draft for the next create to reopen")
 	require.Nil(t, h.namingInstance, "the naming form must not reopen")
 	require.Equal(t, stateDefault, h.state)
 	require.Nil(t, h.recovery, "no 'return to the form' recovery for a create that may exist")
@@ -72,7 +72,7 @@ func TestInstanceStarted_NeverSentCreateStillReArmsDraft(t *testing.T) {
 
 	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, draft: &req, rawPrompt: "p", err: neverSent()})
 
-	// restoreFailedCreate consumes failedCreate as it re-arms the form, so the
+	// restoreFailedCreate consumes the kept draft as it re-arms the form, so the
 	// form itself is the evidence.
 	require.Same(t, inst, h.namingInstance, "a create the daemon never saw is safe to retry from the form")
 	require.Equal(t, stateNew, h.state)

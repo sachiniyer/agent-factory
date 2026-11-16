@@ -26,16 +26,8 @@ func (m *home) showRecovery(condition, detail, action string, err error) tea.Cmd
 // and the project the action ran in — never the one on screen, which may be a
 // later project still loading or already committed.
 func (m *home) showSessionRecovery(title, repoID, repoRoot, condition, detail, action string, err error) tea.Cmd {
-	if m.leavingProject() || repoID != m.repoID {
-		root := repoRoot
-		if repoID == m.repoID {
-			root = m.repoRoot
-		}
-		project := "another project"
-		if root != "" {
-			project = filepath.Base(root)
-		}
-		return m.handleError(elsewhereFailure(condition, title, project, detail))
+	if m.actionElsewhere(repoID) {
+		return m.handleError(elsewhereFailure(condition, title, m.actionProject(repoID, repoRoot), detail))
 	}
 	m.recovery = &recoveryNotice{condition, detail, action}
 	// The recovery overlay is a stateless modal — it never changes m.state — so
@@ -50,6 +42,38 @@ func (m *home) showSessionRecovery(title, repoID, repoRoot, condition, detail, a
 	return m.handleError(err)
 }
 
+// actionElsewhere reports whether an action that ran in project repoID is about
+// a project other than the one on screen: one the user is leaving (#7379) or has
+// left (#7381). Its reports then name that project, and none opens a modal.
+func (m *home) actionElsewhere(repoID string) bool {
+	return m.leavingProject() || repoID != m.repoID
+}
+
+// actionProject names the project an action ran in: the one on screen when it
+// is that project, else the root the action captured when it began.
+func (m *home) actionProject(repoID, repoRoot string) string {
+	root := repoRoot
+	if repoID == m.repoID {
+		root = m.repoRoot
+	}
+	if root == "" {
+		return "another project"
+	}
+	return filepath.Base(root)
+}
+
+// outcomeScope words an outcome-unknown report (mutationOutcomeError) about an
+// action that ran in project repoID: the action, and where to check before
+// trying again. For an action elsewhere that is the project's session list,
+// never "the sidebar" — the sidebar on screen is another project's (#7386).
+func (m *home) outcomeScope(action, repoID, repoRoot string) (string, string) {
+	if !m.actionElsewhere(repoID) {
+		return action, "the sidebar"
+	}
+	project := m.actionProject(repoID, repoRoot)
+	return action + " in " + project, project + "'s session list"
+}
+
 // elsewhereFailure is the bar's report of an action that failed in a project the
 // user is not looking at: the recovery screen's condition and detail, plus the
 // session and project the screen would have been showing over.
@@ -60,6 +84,15 @@ func elsewhereFailure(condition, title, project, detail string) error {
 	return fmt.Errorf("%s %q in %s — %s", condition, title, project, detail)
 }
 
+// keepFailedCreate keeps a failed create's draft for the next create in the
+// project it was made in, replacing only that project's earlier one (#7386).
+func (m *home) keepFailedCreate(msg *instanceStartedMsg) {
+	if m.failedCreates == nil {
+		m.failedCreates = map[string]*instanceStartedMsg{}
+	}
+	m.failedCreates[msg.repoID] = msg
+}
+
 // restoreFailedCreate reopens the captured draft, never a newer form. A user
 // who navigated away can recover it with the next create action in its project.
 // The returned cmd re-fetches the account the daemon would apply to an implicit
@@ -67,7 +100,7 @@ func elsewhereFailure(condition, title, project, detail string) error {
 // preselect (#4889 review) — so a restored form must not claim "no account" for
 // a retry that will run as the configured default.
 func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
-	failed := m.failedCreate
+	failed := m.failedCreates[m.repoID]
 	// Never while a project switch is pending: the draft is for the project the
 	// user is leaving, and stays kept for its next create (#7379).
 	if failed == nil || failed.draft == nil || failed.draft.RepoPath != m.repoRoot || m.namingInstance != nil || m.leavingProject() {
@@ -121,7 +154,7 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 			m.menu.SetNamingAccount(m.pendingAccount != "")
 			m.state = stateNew
 			m.menu.SetState(ui.StateNewInstance)
-			m.failedCreate = nil
+			delete(m.failedCreates, m.repoID)
 			return true, tea.Batch(
 				m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram)),
 				m.fetchRemoteDefaultProgram(instance))
@@ -145,7 +178,7 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	m.menu.SetNamingAccount(m.pendingAccount != "")
 	m.state = stateNew
 	m.menu.SetState(ui.StateNewInstance)
-	m.failedCreate = nil
+	delete(m.failedCreates, m.repoID)
 	if m.pendingAccountChosen {
 		return true, nil
 	}
