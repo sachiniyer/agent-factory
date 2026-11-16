@@ -24,6 +24,11 @@ import (
 //     or with the whole question and the rows it paints below it, is that
 //     dialog being painted (claudeLaunchDialogPainting).
 //
+// Claude Code 2.1.322's single-server MCP dialog is read the same two ways
+// (#7364): its option block over its footer (claudeLaunchDialogTail, with its
+// own labels), and its preamble opening the rows it paints, whole, framed or
+// still being painted (claudeLaunchDialogMCPServerFromPreamble).
+//
 // It is asked last, after every clause that answers or holds, so it only turns
 // a clear pane into a hold. It sends no key.
 
@@ -38,6 +43,9 @@ const (
 	// folder-trust question and the old MCP modal's question share ("Do you
 	// trust th…"), so af cannot say which of the two is being painted.
 	claudeLaunchDialogEither
+	// claudeLaunchDialogMCPServer: Claude Code 2.1.322's single-server MCP
+	// dialog (claudeMCPServerDialogOf).
+	claudeLaunchDialogMCPServer
 )
 
 // claudeLaunchDialogMatch is what the re-wrap matcher saw: which dialog, and
@@ -53,6 +61,8 @@ func (m claudeLaunchDialogMatch) name() string {
 		return claudeLegacyFolderTrustDialogName
 	case claudeLaunchDialogEither:
 		return claudeLaunchGateDialogName
+	case claudeLaunchDialogMCPServer:
+		return claudeMCPServerDialogName
 	}
 	return claudeFolderTrustDialogName
 }
@@ -64,6 +74,9 @@ func (m claudeLaunchDialogMatch) aim() string {
 		return fmt.Sprintf("%q", claudeLegacyTrustProceedLabel)
 	case claudeLaunchDialogEither:
 		return "an option it has not seen painted"
+	case claudeLaunchDialogMCPServer:
+		// The only row af ever confirms on this dialog (declineClaudeMCPServer).
+		return fmt.Sprintf("%q", claudeMCPServerDeclineLabel)
 	}
 	return fmt.Sprintf("%q", claudeTrustAffirmativeLabel)
 }
@@ -99,6 +112,51 @@ var (
 	// MCP server?". Its first words are the legacy question's too.
 	claudeMCPTrustQuestionSquashed = "Doyoutrustthisnew" + "MCPserver?"
 )
+
+// claudeLaunchDialogOptions is one dialog's option labels and footers,
+// squashed, as claudeLaunchDialogTail reads them up from the footer.
+type claudeLaunchDialogOptions struct {
+	labels  []string
+	footers []string
+	// read names the dialog that the labels read show, given which of them were
+	// read (indices into labels) and which footer closed them. It also says
+	// whether they are enough of the dialog's option block for rows above them
+	// to be the dialog's body.
+	read func(read []int, footer int) (kind claudeLaunchDialogKind, block bool)
+}
+
+// claudeLaunchDialogOptionSets are the dialogs claudeLaunchDialogTail reads, in
+// order. The folder-trust dialogs come first, read exactly as before the MCP
+// dialog joined them (#7364), so a pane they hold is held the same way.
+var claudeLaunchDialogOptionSets = []claudeLaunchDialogOptions{
+	{labels: claudeLaunchDialogLabels, footers: claudeLaunchDialogFooters, read: claudeFolderTrustOptionsRead},
+	{labels: claudeMCPServerLabelsSquashed, footers: []string{claudeMCPServerFooterSquashed}, read: claudeMCPServerOptionsRead},
+}
+
+// claudeFolderTrustOptionsRead: the block counts once it holds an affirmative
+// label, and "Yes, proceed" or the legacy footer alone names the legacy dialog.
+func claudeFolderTrustOptionsRead(read []int, footer int) (claudeLaunchDialogKind, bool) {
+	var affirmative, proceed bool
+	for _, i := range read {
+		affirmative = affirmative || i == 0 || i == 1
+		proceed = proceed || i == 1
+	}
+	if proceed || (footer == 1 && !affirmative) {
+		return claudeLaunchDialogLegacy, affirmative
+	}
+	return claudeLaunchDialogReworded, affirmative
+}
+
+// claudeMCPServerOptionsRead: the block counts only whole, with every one of
+// the dialog's options. A pane that shows a row above the block shows all of
+// the block, and the dialog always paints all three.
+func claudeMCPServerOptionsRead(read []int, _ int) (claudeLaunchDialogKind, bool) {
+	seen := map[int]bool{}
+	for _, i := range read {
+		seen[i] = true
+	}
+	return claudeLaunchDialogMCPServer, len(seen) == len(claudeMCPServerLabelsSquashed)
+}
 
 // claudeLaunchDialogPane is a pane's content rows as the matcher reads them:
 // each row's text squashed, in order, with where each row begins in the whole.
@@ -137,45 +195,53 @@ func (p claudeLaunchDialogPane) rowStart(at int) (content int, ok bool) {
 	return 0, false
 }
 
-// claudeLaunchDialogRewrapOf reports a folder-trust dialog the pane ends with a
-// part of, as wrapped at any width.
+// claudeLaunchDialogRewrapOf reports a launch dialog the pane ends with a part
+// of, as wrapped at any width: a folder-trust dialog, or the 2.1.322 MCP
+// server dialog.
 func claudeLaunchDialogRewrapOf(screen visibleText) (claudeLaunchDialogMatch, bool) {
 	pane := claudeLaunchDialogPaneOf(screen)
 	if len(pane.starts) == 0 {
 		return claudeLaunchDialogMatch{}, false
 	}
-	if match, ok := claudeLaunchDialogTail(pane); ok {
+	for _, options := range claudeLaunchDialogOptionSets {
+		if match, ok := claudeLaunchDialogTail(pane, options); ok {
+			return match, true
+		}
+	}
+	if match, ok := claudeLaunchDialogPainting(pane); ok {
 		return match, true
 	}
-	return claudeLaunchDialogPainting(pane)
+	return claudeLaunchDialogMCPServerFromPreamble(pane)
 }
 
-// claudeLaunchDialogTail reports a pane whose content ends with a folder-trust
+// claudeLaunchDialogTail reports a pane whose content ends with a launch
 // dialog's option block and its whole footer. Reading up from the footer, the
 // text is whole option labels, each with or without its ordinal. What is above
 // them decides the rest:
 //
 //   - nothing: the pane shows only the dialog's bottom;
 //   - the tail of one more label, cut by the top of the pane: the same;
-//   - other rows, with the block beginning on a row of its own and holding the
-//     dialog's affirmative label: the dialog's body, as far as the pane shows.
-//     None of those rows may be a ❯ row, a rule or a footer, which is what
+//   - other rows, with the block beginning on a row of its own and being enough
+//     of the dialog's options (claudeLaunchDialogOptions.read): the folder
+//     dialog's affirmative label, or every option of the MCP server dialog.
+//     Those rows are the dialog's body, as far as the pane shows. None of them
+//     may be a ❯ row, a rule or a footer, which is what
 //     claudeFolderTrustHeadless asks of them: a launch dialog owns the pane
 //     above its options.
 //
 // A ❯ row must begin an option. No row may be a plain rule, which is what a
 // composer draws. And the footer must be the last content, so a composer or
 // any other row below the dialog keeps the pane clear.
-func claudeLaunchDialogTail(pane claudeLaunchDialogPane) (claudeLaunchDialogMatch, bool) {
+func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDialogOptions) (claudeLaunchDialogMatch, bool) {
 	for _, line := range pane.lines {
 		if claudeComposerRule(line) {
 			return claudeLaunchDialogMatch{}, false
 		}
 	}
-	end, legacyFooter := -1, false
-	for i, footer := range claudeLaunchDialogFooters {
+	end, footerIndex := -1, -1
+	for i, footer := range options.footers {
 		if strings.HasSuffix(pane.text, footer) {
-			end, legacyFooter = len(pane.text)-len(footer), i == 1
+			end, footerIndex = len(pane.text)-len(footer), i
 		}
 	}
 	if end <= 0 {
@@ -190,11 +256,10 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane) (claudeLaunchDialogMatc
 
 	at := end
 	begins := map[int]bool{} // offsets where an option, or its ordinal, begins
-	labels := 0
-	var affirmative, proceed bool
+	var read []int
 	for at > 0 {
 		matched := false
-		for i, label := range claudeLaunchDialogLabels {
+		for i, label := range options.labels {
 			if !strings.HasSuffix(pane.text[:at], label) {
 				continue
 			}
@@ -206,9 +271,7 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane) (claudeLaunchDialogMatc
 				at -= n
 				begins[at] = true
 			}
-			affirmative = affirmative || i == 0 || i == 1
-			proceed = proceed || i == 1
-			labels++
+			read = append(read, i)
 			matched = true
 			break
 		}
@@ -216,6 +279,8 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane) (claudeLaunchDialogMatc
 			break
 		}
 	}
+	labels := len(read)
+	kind, block := options.read(read, footerIndex)
 	for content := 0; content < footerRow; content++ {
 		if pane.rows[pane.index[content]].selected && !begins[pane.starts[content]] && pane.starts[content] >= at {
 			return claudeLaunchDialogMatch{}, false
@@ -227,18 +292,15 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane) (claudeLaunchDialogMatc
 		}
 	}
 
-	match := claudeLaunchDialogMatch{kind: claudeLaunchDialogReworded}
-	if proceed || (legacyFooter && !affirmative) {
-		match.kind = claudeLaunchDialogLegacy
-	}
+	match := claudeLaunchDialogMatch{kind: kind}
 	switch {
 	case at == 0 && labels > 0:
 		match.saw = "only its option rows and its footer"
 		return match, true
-	case at > 0 && claudeLaunchDialogLabelTail(pane.text[:at]):
+	case at > 0 && claudeLaunchDialogLabelTail(pane.text[:at], options.labels):
 		match.saw = "only the end of its option rows and its footer"
 		return match, true
-	case at > 0 && labels > 0 && affirmative:
+	case at > 0 && labels > 0 && block:
 		block, ok := pane.rowStart(at)
 		if !ok {
 			return claudeLaunchDialogMatch{}, false
@@ -287,8 +349,8 @@ func claudeLaunchDialogOrdinalBefore(pane claudeLaunchDialogPane, at int) int {
 
 // claudeLaunchDialogLabelTail reports whether text is the end of one option
 // label and not the whole of it: what the top of a pane leaves of a row it cut.
-func claudeLaunchDialogLabelTail(text string) bool {
-	for _, label := range claudeLaunchDialogLabels {
+func claudeLaunchDialogLabelTail(text string, labels []string) bool {
+	for _, label := range labels {
 		if len(text) < len(label) && strings.HasSuffix(label, text) {
 			return true
 		}
