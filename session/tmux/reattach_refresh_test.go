@@ -156,8 +156,8 @@ func TestReattachRunsAccountRefreshOnAnsweredNonFresh(t *testing.T) {
 		"the refresh must issue set-option default-command on an answered, non-fresh reattach")
 	require.Equal(t, int32(1), m.windowSizeCalls.Load(),
 		"an answered, non-fresh reattach re-pins window-size manual for sessions that predate it (#7434)")
-	require.Equal(t, "set-option -q -t =af_reattach-refresh window-size manual", m.windowSizeArgs.Load().(string),
-		"the pin writes the session option on the exact =name target, never a found session or a pane spec")
+	require.Equal(t, "set-option -w -q -t =af_reattach-refresh: window-size manual", m.windowSizeArgs.Load().(string),
+		"the pin writes the WINDOW option on the exact =name: window target — a session-scoped =name sets nothing (#7437 review)")
 }
 
 // TestReattachAnsweredNonFreshRefreshFailureWrapsError verifies the error

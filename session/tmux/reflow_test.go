@@ -22,6 +22,10 @@ type reflowProbeTmux struct {
 	probe   string // overrides size for display-message when set (a malformed answer)
 	pane    string // capture-pane's answer
 	resizes int    // resize-window calls applied
+	// onResizeApply runs inside the resize-window apply itself — after the
+	// size has changed but before the call returns — so a test can take the
+	// capture a poll would land mid-apply.
+	onResizeApply func()
 }
 
 func (m *reflowProbeTmux) exec() cmd_test.MockCmdExec {
@@ -45,6 +49,9 @@ func (m *reflowProbeTmux) exec() cmd_test.MockCmdExec {
 					}
 				}
 				m.size = x + "x" + y
+				if m.onResizeApply != nil {
+					m.onResizeApply()
+				}
 			}
 			return nil
 		},
@@ -202,4 +209,39 @@ func TestResizeStampIsEpochOrdered(t *testing.T) {
 	tm.pane = "frame three — the resize's reflow"
 	_, _, _, _, _, reflow = session.HasUpdatedObserved(nil)
 	require.True(t, reflow)
+}
+
+// TestResizeStampPrecedesTheApply is the #7437-review straddle: the status
+// poll shares no lock with ResizeWindow, so a capture that lands while the
+// server is mid-apply sees the rewrapped grid BEFORE the call returns. Only a
+// stamp issued before resize-window runs classifies that frame as the
+// viewer's repaint — a post-apply-only stamp leaves it reading as the agent's
+// churn, which answers a live attention request with no work behind it.
+func TestResizeStampPrecedesTheApply(t *testing.T) {
+	tm := &reflowProbeTmux{size: "80x24", pane: "steady frame"}
+	session := newReflowSession(t, tm)
+	session.HasUpdatedObserved(nil)
+
+	// The capture the poll takes while resize-window is still in flight: the
+	// server has already applied the size (the mock's size moved above) and
+	// the pane already shows the rewrap, but the apply has not returned —
+	// the post-apply stamp has not run yet either.
+	var midApplyUpdated, midApplyReflow bool
+	tm.onResizeApply = func() {
+		tm.pane = "the in-flight apply's rewrap"
+		_, _, _, _, _, midApplyReflow = session.HasUpdatedObserved(nil)
+		midApplyUpdated = true
+	}
+	require.NoError(t, session.ResizeWindow(120, 40))
+	require.True(t, midApplyUpdated, "the mid-apply capture ran")
+	require.True(t, midApplyReflow,
+		"a capture that can see the resized grid must also see the stamp — the pre-apply stamp classifies the rewrap")
+
+	// The post-apply stamp still rebased the grace: a changed capture now is
+	// inside it, and one past it is the agent's work again.
+	ageReflowStamp(t, session)
+	tm.pane = "real agent output"
+	updated, _, _, _, _, reflow := session.HasUpdatedObserved(nil)
+	require.True(t, updated)
+	require.False(t, reflow, "the grace aged out — real work answers")
 }

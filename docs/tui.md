@@ -70,10 +70,12 @@ There are two ways in, split deliberately:
   way.
 
 Each pane is a real tmux session named `af_<session>`, so `tmux attach -t
-af_<name>` works too. af pins `window-size manual` on its sessions, so
-attaching with tmux shows the pane at its current size instead of resizing it
-to your terminal — the same shape it already has once any af viewer has
-attached. Use `tmux resize-window` if you want the pane at a different size.
+af_<name>` works too. af pins `window-size manual` on its session and tab
+panes, so attaching with tmux shows the pane at its current size instead of
+resizing it to your terminal — the same shape it already has once any af
+viewer has attached. Use `tmux resize-window` if you want the pane at a
+different size. (Account login panes and the config agent are the exception:
+they still size to the attaching client, the way tmux does by default.)
 
 ## Accounts
 

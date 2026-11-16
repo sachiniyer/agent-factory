@@ -397,6 +397,13 @@ func (s *Supervisor) Start(ctx context.Context, req Request) (Session, error) {
 	// operator who named one of those variables themselves keeps their value.
 	pane.SetAccountLoginForAgent(req.Agent, req.Name)
 
+	// A login pane is operated through a real `tmux attach` — its window must
+	// keep sizing to the attaching client's terminal, or the flow renders
+	// inside the pin's stored size instead (#7437 review). The window-size
+	// manual pin protects agent/session panes whose churn answers attention
+	// requests; this pane has none.
+	pane.SkipWindowSizePin()
+
 	// The account directory is the working directory: it is a real, durable,
 	// 0700 directory af created, outside any temp dir (codex refuses to create
 	// helper binaries under /tmp), and it is the directory the flow is about.

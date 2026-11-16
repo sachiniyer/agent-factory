@@ -110,18 +110,34 @@ func (t *TmuxSession) deferDeliveryBaseline() {
 	}
 }
 
-// noteAppliedResize stamps the status monitor that a daemon-driven
-// resize-window apply just changed the pane's dimensions — ResizeWindow calls
-// it only when the probe says the apply moved the pane, so a same-size resize
-// (every web subscribe and refit resends one) never advances the epoch or
-// opens the grace (#7434). The stamp is what lets the status poll tell a
-// reflowed capture apart from the agent's output. A nil monitor means nothing
-// is polling: no one to classify for.
-func (t *TmuxSession) noteAppliedResize() {
+// noteResize stamps the status monitor that a daemon-driven size-changing
+// resize is about to apply — ResizeWindow calls it only when the probe says
+// the apply will move the pane, so a same-size resize (every web subscribe
+// and refit resends one) never advances the epoch or opens the grace (#7434).
+// It runs BEFORE resize-window so a capture landing mid-apply already reads
+// the stamp: the poll shares no lock with the apply, so a post-apply-only
+// stamp lets the rewrapped grid read as unmarked churn (#7437 review). The
+// stamp is what lets the status poll tell a reflowed capture apart from the
+// agent's output. A nil monitor means nothing is polling: no one to classify
+// for.
+func (t *TmuxSession) noteResize() {
 	t.monitorMu.Lock()
 	defer t.monitorMu.Unlock()
 	if t.monitor != nil {
 		t.monitor.resizeEpoch++
+		t.monitor.lastAppliedResizeAt = time.Now()
+	}
+}
+
+// noteResizeApplied rebases the grace at the apply's end so the repaint tail
+// it bounds is the one after the resize, not the round trip that applied it.
+// The epoch does NOT move again: the pre-apply stamp already drew the
+// boundary, and a mid-apply capture that consumed it would leave a second
+// mismatch mis-filing the next real output as repaint.
+func (t *TmuxSession) noteResizeApplied() {
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	if t.monitor != nil {
 		t.monitor.lastAppliedResizeAt = time.Now()
 	}
 }

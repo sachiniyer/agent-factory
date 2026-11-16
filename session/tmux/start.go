@@ -194,21 +194,27 @@ func (t *TmuxSession) start(workDir string) error {
 	if defaultCommand != "" {
 		args = append(args, ";", "set-option", "-t", ExactTarget(t.sanitizedName), "default-command", defaultCommand)
 	}
-	// Pin window-size manual atomically with the spawn so a plain
-	// `tmux attach` — the one resize path the daemon cannot see — never
-	// resizes the pane to a client's terminal: the reflow would read as churn
-	// and answer a live attention request with no work behind it (#7434).
-	// Every af-driven resize still applies (resize-window works on a manual
-	// window, and flips the option to manual on its own anyway), so this only
-	// changes what an external client does to an unviewed session — the shape
-	// every pane already has the moment an af viewer attaches once. -q keeps
-	// the queue clean on tmux < 3.2, which predates the option.
-	args = append(args, ";", "set-option", "-q", "-t", ExactSessionTarget(t.sanitizedName), "window-size", "manual")
 	t.programMu.RLock()
 	remainOnExit := t.remainOnExit
 	account := t.account
 	accountAgent := t.accountAgent
+	skipWindowSizePin := t.skipWindowSizePin
 	t.programMu.RUnlock()
+	if !skipWindowSizePin {
+		// Pin window-size manual atomically with the spawn so a plain
+		// `tmux attach` — the one resize path the daemon cannot see — never
+		// resizes the pane to a client's terminal: the reflow would read as
+		// churn and answer a live attention request with no work behind it
+		// (#7434). Every af-driven resize still applies (resize-window works
+		// on a manual window, and flips the option to manual on its own
+		// anyway), so this only changes what an external client does to an
+		// unviewed session — the shape every pane already has the moment an
+		// af viewer attaches once. window-size is a WINDOW option, so -w and
+		// the window target (=name:) are what land it; a session-scoped -t
+		// =name silently sets nothing (#7437 review). -q covers only the
+		// option being unknown before tmux 2.9, which predates the option.
+		args = append(args, ";", "set-option", "-w", "-q", "-t", ExactTarget(t.sanitizedName), "window-size", "manual")
+	}
 	if remainOnExit {
 		// Atomic with new-session so even a command that exits instantly is
 		// held as a dead pane rather than racing the option (#4479). The pane's
@@ -741,16 +747,23 @@ func (t *TmuxSession) reattach(opts reattachOptions) error {
 	// A session created before the window-size pin existed still answers
 	// `latest`: a user's own `tmux attach` would resize its window — the one
 	// reflow path no af call can mark (#7434). Re-pin it here, once per live
-	// rebind, on the exact-name target this monitor owns (never a session
-	// found by listing). Best-effort and quiet: a wedged server is the only
-	// failure mode and the monitor still binds below, and -q makes the write
-	// a no-op on tmux < 3.2 where the option does not exist. Skipped for
-	// confirmedFresh — Start's new-session queue already wrote it in the same
-	// call — and for an unanswered probe, where a second command would pay
-	// the same deadline for the same non-answer.
-	if answered && !confirmedFresh {
+	// rebind, on the exact-name window target this monitor owns (never a
+	// session found by listing): window-size is a WINDOW option, so -w and
+	// =name: are what land it — a session-scoped -t =name sets nothing while
+	// -q swallows the miss (#7437 review). Best-effort and quiet: a wedged
+	// server is the only failure mode and the monitor still binds below, and
+	// -q makes the write a no-op on tmux < 2.9 where the option does not
+	// exist. Skipped for confirmedFresh — Start's new-session queue already
+	// wrote it in the same call — for an unanswered probe, where a second
+	// command would pay the same deadline for the same non-answer, and for
+	// panes that keep tmux's attach-sizes behaviour (SkipWindowSizePin:
+	// account login panes, the config agent).
+	t.programMu.RLock()
+	skipWindowSizePin := t.skipWindowSizePin
+	t.programMu.RUnlock()
+	if answered && !confirmedFresh && !skipWindowSizePin {
 		ctx, cancel := tmuxTimeoutContext()
-		if err := t.runTmuxBounded(ctx, "set-option", "-q", "-t", ExactSessionTarget(t.sanitizedName), "window-size", "manual"); err != nil {
+		if err := t.runTmuxBounded(ctx, "set-option", "-w", "-q", "-t", ExactTarget(t.sanitizedName), "window-size", "manual"); err != nil {
 			log.WarningLog.Printf("could not pin window-size manual on %s: %v", t.sanitizedName, err)
 		}
 		cancel()

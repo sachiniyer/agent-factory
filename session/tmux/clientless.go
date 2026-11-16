@@ -195,8 +195,8 @@ func (t *TmuxSession) sendRawKeysChunk(b []byte) error {
 // A size-changing apply reflows the pane, which the status poll reads as churn
 // — and for an agent with no working indicator, churn is the only work
 // evidence the daemon has, so a viewer's repaint can falsely answer an
-// attention request (#7434). When the apply DID move the pane, the monitor is
-// stamped (noteAppliedResize) so the poll can classify the reflowed capture it
+// attention request (#7434). When the apply WILL move the pane, the monitor is
+// stamped (noteResize) so the poll can classify the reflowed capture it
 // produces. The stamp is conditioned on the pane size actually changing:
 // every web subscribe and refit resends the CURRENT size with force=true,
 // which reflows nothing — and a stamp there would open reflowGrace and mask
@@ -205,6 +205,17 @@ func (t *TmuxSession) sendRawKeysChunk(b []byte) error {
 // ever being answered. The pane's pre-apply dimensions come from one
 // display-message probe; an unparseable answer stamps anyway, the direction
 // that errs toward preserving the request.
+//
+// The stamp lands BEFORE resize-window runs, not only after: the poll shares
+// no lock with this call, so a capture that lands while the server is
+// mid-apply sees the rewrapped grid already — only a stamp already in place
+// classifies that frame as the viewer's repaint rather than the agent's work
+// (#7437 review). The post-apply stamp still lands, rebasing reflowGrace at
+// the apply's end so the repaint tail it covers is the one after the resize,
+// not the wait for it. A failed apply therefore leaves one stray stamp: a few
+// seconds of grace that misfiles real output as repaint — the same
+// conservative direction as the unparseable probe, against a request falsely
+// answered.
 //
 // Bounded by tmuxCommandTimeout (#1787), for the same whole-channel invariant as
 // SendRawKeys — one deadline covers the probe and the apply together. The
@@ -220,6 +231,14 @@ func (t *TmuxSession) ResizeWindow(cols, rows int) error {
 	// that answered nothing cannot prove the apply was a no-op.
 	prev, _ := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", target,
 		"#{pane_width}x#{pane_height}")
+	var prevCols, prevRows int
+	resizeChangesSize := false
+	if n, _ := fmt.Sscanf(strings.TrimSpace(string(prev)), "%dx%d", &prevCols, &prevRows); n != 2 || prevCols != cols || prevRows != rows {
+		resizeChangesSize = true
+		// A capture taken while the apply below is in flight already reads the
+		// rewrapped grid; stamp first so it cannot read as unmarked churn.
+		t.noteResize()
+	}
 	if err := t.runTmuxBounded(ctx, "resize-window", "-t", target,
 		"-x", fmt.Sprintf("%d", cols), "-y", fmt.Sprintf("%d", rows)); err != nil {
 		if ctx.Err() != nil {
@@ -232,9 +251,10 @@ func (t *TmuxSession) ResizeWindow(cols, rows int) error {
 		// the caller can log it rather than silently mis-sizing the pane.
 		return fmt.Errorf("error resizing window: %w", err)
 	}
-	var prevCols, prevRows int
-	if n, _ := fmt.Sscanf(strings.TrimSpace(string(prev)), "%dx%d", &prevCols, &prevRows); n != 2 || prevCols != cols || prevRows != rows {
-		t.noteAppliedResize()
+	if resizeChangesSize {
+		// Rebase the grace at the apply's end so it bounds the repaint tail
+		// that follows the resize, not the round trip that applied it.
+		t.noteResizeApplied()
 	}
 	return nil
 }

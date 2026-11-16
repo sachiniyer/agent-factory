@@ -166,7 +166,7 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 	require.NoError(t, session.Start(workdir))
 	require.NotEmpty(t, ptyFactory.cmds)
 	require.Equal(t,
-		fmt.Sprintf("tmux new-session -d -s af_marked -c %s -e AF_SESSION=af_marked -e AF_SESSION_GEN=generation-1 -e AF_HOME=%s -e AF_TESTGUARD_RUN=test-run-1 %s ; set-option -q -t =af_marked window-size manual",
+		fmt.Sprintf("tmux new-session -d -s af_marked -c %s -e AF_SESSION=af_marked -e AF_SESSION_GEN=generation-1 -e AF_HOME=%s -e AF_TESTGUARD_RUN=test-run-1 %s ; set-option -w -q -t =af_marked: window-size manual",
 			workdir, home, wrappedProgramForTest(t, "/test/af", "claude")),
 		strings.Join(ptyFactory.cmds[0].Args, " "))
 }
