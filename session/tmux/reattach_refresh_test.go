@@ -23,6 +23,14 @@ type reattachRefreshTmux struct {
 	nameGen        atomic.Value // "$id pid created" for the generation probe
 	setEnvCalls    atomic.Int32
 	setOptionCalls atomic.Int32
+	// windowSizeCalls counts set-option window-size writes alone — the
+	// reattach-time pin (#7434) is a separate writer from the account
+	// refresh's default-command, so the refresh-gating tests below must not
+	// count it.
+	windowSizeCalls atomic.Int32
+	// windowSizeArgs keeps the last window-size argv so a test can pin the
+	// exact =name target the pin is required to write.
+	windowSizeArgs atomic.Value
 	setEnvFails    atomic.Bool
 }
 
@@ -43,6 +51,13 @@ func (m *reattachRefreshTmux) run(c *exec.Cmd) ([]byte, error) {
 		return nil, nil
 	case strings.Contains(args, "set-option"):
 		m.setOptionCalls.Add(1)
+		if strings.Contains(args, "window-size") {
+			m.windowSizeCalls.Add(1)
+			m.windowSizeArgs.Store(strings.Join(c.Args[1:], " "))
+			// The pin is deliberately best-effort and -q: it never feeds the
+			// refresh's error contract, so the setEnvFails knob does not apply.
+			return nil, nil
+		}
 		if m.setEnvFails.Load() {
 			return nil, errors.New("set-option refused")
 		}
@@ -98,6 +113,8 @@ func TestReattachSkipsAccountRefreshOnConfirmedFresh(t *testing.T) {
 		"the refresh must not issue set-environment on a confirmedFresh reattach — Start's queue already wrote them")
 	require.Zero(t, m.setOptionCalls.Load(),
 		"the refresh must not issue set-option default-command on a confirmedFresh reattach")
+	require.Zero(t, m.windowSizeCalls.Load(),
+		"the window-size pin must not rewrite either — Start's new-session queue already wrote it in the same call")
 }
 
 // TestReattachSkipsAccountRefreshOnUnansweredProbe is the wedged-probe finding:
@@ -115,6 +132,8 @@ func TestReattachSkipsAccountRefreshOnUnansweredProbe(t *testing.T) {
 		"the refresh must not issue set-environment when the probe went unanswered — a wedged server already spent one timeout")
 	require.Zero(t, m.setOptionCalls.Load(),
 		"the refresh must not issue set-option when the probe went unanswered")
+	require.Zero(t, m.windowSizeCalls.Load(),
+		"the window-size pin must not spend a second bounded command on a wedged server either")
 }
 
 // TestReattachRunsAccountRefreshOnAnsweredNonFresh is the legitimate-heal
@@ -135,6 +154,10 @@ func TestReattachRunsAccountRefreshOnAnsweredNonFresh(t *testing.T) {
 		"the refresh must issue set-environment on an answered, non-fresh reattach — this is the heal path")
 	require.Positive(t, m.setOptionCalls.Load(),
 		"the refresh must issue set-option default-command on an answered, non-fresh reattach")
+	require.Equal(t, int32(1), m.windowSizeCalls.Load(),
+		"an answered, non-fresh reattach re-pins window-size manual for sessions that predate it (#7434)")
+	require.Equal(t, "set-option -q -t =af_reattach-refresh window-size manual", m.windowSizeArgs.Load().(string),
+		"the pin writes the session option on the exact =name target, never a found session or a pane spec")
 }
 
 // TestReattachAnsweredNonFreshRefreshFailureWrapsError verifies the error
@@ -194,5 +217,11 @@ func TestReattachInertSkipsAccountRefresh(t *testing.T) {
 
 	require.NoError(t, session.ReattachInert())
 	require.Zero(t, m.setEnvCalls.Load(), "an inert reattach must not refresh the account environment")
-	require.Zero(t, m.setOptionCalls.Load(), "nor rewrite default-command")
+	// The window-size pin (#7434) DOES run on an answered, non-fresh bind —
+	// it is best-effort, never errors the path, and is the only permitted
+	// set-option here; default-command still must not be rewritten.
+	require.Equal(t, m.setOptionCalls.Load(), m.windowSizeCalls.Load(),
+		"the only set-option an inert reattach may issue is the window-size manual pin")
+	require.Equal(t, int32(1), m.windowSizeCalls.Load(),
+		"an answered, non-fresh reattach pins window-size manual")
 }

@@ -194,6 +194,16 @@ func (t *TmuxSession) start(workDir string) error {
 	if defaultCommand != "" {
 		args = append(args, ";", "set-option", "-t", ExactTarget(t.sanitizedName), "default-command", defaultCommand)
 	}
+	// Pin window-size manual atomically with the spawn so a plain
+	// `tmux attach` — the one resize path the daemon cannot see — never
+	// resizes the pane to a client's terminal: the reflow would read as churn
+	// and answer a live attention request with no work behind it (#7434).
+	// Every af-driven resize still applies (resize-window works on a manual
+	// window, and flips the option to manual on its own anyway), so this only
+	// changes what an external client does to an unviewed session — the shape
+	// every pane already has the moment an af viewer attaches once. -q keeps
+	// the queue clean on tmux < 3.2, which predates the option.
+	args = append(args, ";", "set-option", "-q", "-t", ExactSessionTarget(t.sanitizedName), "window-size", "manual")
 	t.programMu.RLock()
 	remainOnExit := t.remainOnExit
 	account := t.account
@@ -727,6 +737,23 @@ func (t *TmuxSession) reattach(opts reattachOptions) error {
 		if err := t.refreshRestoredAccountEnvironment(); err != nil {
 			return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 		}
+	}
+	// A session created before the window-size pin existed still answers
+	// `latest`: a user's own `tmux attach` would resize its window — the one
+	// reflow path no af call can mark (#7434). Re-pin it here, once per live
+	// rebind, on the exact-name target this monitor owns (never a session
+	// found by listing). Best-effort and quiet: a wedged server is the only
+	// failure mode and the monitor still binds below, and -q makes the write
+	// a no-op on tmux < 3.2 where the option does not exist. Skipped for
+	// confirmedFresh — Start's new-session queue already wrote it in the same
+	// call — and for an unanswered probe, where a second command would pay
+	// the same deadline for the same non-answer.
+	if answered && !confirmedFresh {
+		ctx, cancel := tmuxTimeoutContext()
+		if err := t.runTmuxBounded(ctx, "set-option", "-q", "-t", ExactSessionTarget(t.sanitizedName), "window-size", "manual"); err != nil {
+			log.WarningLog.Printf("could not pin window-size manual on %s: %v", t.sanitizedName, err)
+		}
+		cancel()
 	}
 	// Teardown attribution follows the GENERATION, not the monitor slot: a
 	// resolved id matching the outgoing monitor's generation shares its mark

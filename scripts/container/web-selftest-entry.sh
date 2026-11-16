@@ -202,6 +202,15 @@ printf '❯ '
 # stray byte in the middle of the spec's blink sample loses the request before the spec
 # dismisses it. This agent turns tty echo off and then does nothing at all.
 case "\$PWD" in
+    *probe-quiet-view*)
+        stty -echo 2>/dev/null
+        # One line wider than any viewer grid (#7434): it rewraps on EVERY
+        # resize, so the spec can rely on a viewer refit producing real capture
+        # churn — at 390px this wraps into several rows, at 1280px it does not.
+        # \$(...) must reach the fake agent unexpanded: this heredoc is unquoted.
+        printf 'AF_VIEW_WRAP_%s\n' "\$(head -c 200 /dev/zero | tr '\0' 'x')"
+        exec sleep 86400
+        ;;
     *probe-quiet*)
         stty -echo 2>/dev/null
         exec sleep 86400

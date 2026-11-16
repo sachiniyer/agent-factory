@@ -69,6 +69,12 @@ There are two ways in, split deliberately:
   The tmux detach key returns you to the sidebar. The agent keeps running either
   way.
 
+Each pane is a real tmux session named `af_<session>`, so `tmux attach -t
+af_<name>` works too. af pins `window-size manual` on its sessions, so
+attaching with tmux shows the pane at its current size instead of resizing it
+to your terminal — the same shape it already has once any af viewer has
+attached. Use `tmux resize-window` if you want the pane at a different size.
+
 ## Accounts
 
 On the new-session naming form (`n`), press `ctrl+o` to choose an account for

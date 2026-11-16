@@ -18,8 +18,9 @@ import { test, expect, type APIRequestContext, type Page } from "@playwright/tes
 // attach at different widths: the first attach sizes the pane, and the next test's
 // attach at another width reflows the pane's content in tmux, which the daemon reads
 // as pane activity and clears the request (measured: the 390px test after the 1280px
-// one lost its request within a second, 7 of 8 repeats). A session no test has
-// attached to has never been resized.
+// one lost its request within a second, 7 of 8 repeats). #7434 classifies that
+// reflow as viewing's repaint, but the create/kill title race below still makes a
+// shared session unsafe — a session no test has attached to has never been resized.
 
 export const READY_MARKER = process.env.AF_WEB_READY_MARKER ?? "AF_SELFTEST_READY";
 

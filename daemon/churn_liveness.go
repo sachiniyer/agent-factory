@@ -11,7 +11,12 @@ import (
 // evidence of NOT working, and churn alone must not override it (#6055). Such a
 // frame settles like an idle pane — Ready, the waiting-for-you dot — instead of
 // a Running that never ends. captured guards against settling off an empty read.
-func (m *Manager) settleChurnedLiveness(instance *session.Instance, captured bool, content string, epoch uint64) {
+// reflow marks churn attributed to a viewer resize rather than the agent's
+// output (#7434): for an agent with no working indicator, churn is the only
+// work evidence, so an unattributed resize's repaint would otherwise answer a
+// live attention request the user never saw. The liveness still moves to
+// Running — only the work evidence is withheld.
+func (m *Manager) settleChurnedLiveness(instance *session.Instance, captured bool, content string, epoch uint64, reflow bool) {
 	if captured && task.AgentStoppedContent(content, instance.ResolvedAgent()) {
 		m.resolveIdleLiveness(instance, content, epoch)
 		return
@@ -19,6 +24,10 @@ func (m *Manager) settleChurnedLiveness(instance *session.Instance, captured boo
 	agent := instance.ResolvedAgent()
 	running := session.ObserveLiveness(session.LiveRunning).AtEpoch(epoch)
 	if !task.PublishesWorkingContent(agent) {
+		if reflow {
+			_ = instance.Transition(running.ChurnOnly())
+			return
+		}
 		_ = instance.Transition(running)
 		return
 	}

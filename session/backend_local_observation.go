@@ -20,15 +20,16 @@ func (b *LocalBackend) HasUpdatedWithBaseline(i *Instance) (updated bool, hasPro
 // all collapse to the all-false observation, which bookkeeping that measures
 // observed silence must not count. Only this backend can make the
 // distinction, so localAgentServer consults it before falling back to the
-// narrower contracts.
-func (b *LocalBackend) HasUpdatedObserved(i *Instance) (updated bool, hasPrompt bool, content string, baseline bool, captured bool) {
+// narrower contracts. The last return marks a changed capture that is only a
+// daemon-driven resize's reflow — churn, not the agent's work (#7434).
+func (b *LocalBackend) HasUpdatedObserved(i *Instance) (updated bool, hasPrompt bool, content string, baseline bool, captured bool, reflow bool) {
 	i.mu.RLock()
 	s := i.started
 	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 
 	if !s || ts == nil {
-		return false, false, "", false, false
+		return false, false, "", false, false, false
 	}
 	return ts.HasUpdatedObserved(i.teardownExpected)
 }

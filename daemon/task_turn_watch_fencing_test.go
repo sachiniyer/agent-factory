@@ -126,8 +126,8 @@ type flakyCaptureBackend struct {
 	captured bool
 }
 
-func (b *flakyCaptureBackend) HasUpdatedObserved(*session.Instance) (bool, bool, string, bool, bool) {
-	return false, false, "", false, b.captured
+func (b *flakyCaptureBackend) HasUpdatedObserved(*session.Instance) (bool, bool, string, bool, bool, bool) {
+	return false, false, "", false, b.captured, false
 }
 
 // The paused backstop probe must drop an unanswered capture whole: settling

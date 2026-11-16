@@ -269,6 +269,15 @@ type Observation struct {
 	// narrower contract already asserts the observation ran — and a remote
 	// observation resolves the wire field's compat default before here.
 	Captured bool
+	// Reflow marks an Updated observation whose change is attributed to a
+	// daemon-driven viewer resize — the pane reflowed or repainted under a
+	// size-changing resize-window apply (#7434). It is churn, not the agent's
+	// work, so it must never answer an attention request. Every other
+	// consumer of the observation still reads it as updated. Backends that
+	// cannot attribute a resize report false — a remote observation of a
+	// sandbox that predates the wire field included, which keeps the legacy
+	// (answer-on-churn) behavior there.
+	Reflow bool
 }
 
 // PTYSubscription is one subscriber's read side of a session's PTY stream

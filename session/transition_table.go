@@ -95,9 +95,11 @@ type TransitionEvent struct {
 // no in-turn indicator from the agent. A repainted composer (a typed draft) churns
 // the pane too, so such an observation moves the liveness but is not the agent
 // starting work, and it must not count as the user's answer to an attention
-// request. Use it only for an agent whose indicator the daemon can read
-// (task.PublishesWorkingContent); the evidence is reported separately through
-// AttentionAnsweredByWork.
+// request. It is used for an agent whose indicator the daemon can read
+// (task.PublishesWorkingContent; the evidence is reported separately through
+// AttentionAnsweredByWork) and for churn the probe attributed to a viewer
+// resize (#7434) — the second case carries no separate evidence at all, the
+// repaint simply never answers.
 func (ev TransitionEvent) ChurnOnly() TransitionEvent {
 	ev.churnOnly = true
 	return ev

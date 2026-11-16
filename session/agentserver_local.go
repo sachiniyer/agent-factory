@@ -164,9 +164,10 @@ type baselineUpdateBackend interface {
 // captureAwareUpdateBackend additionally reports whether its probe actually
 // captured the pane. Only the tmux implementation can distinguish "unchanged
 // or empty" from "capture-pane failed"; every other backend's narrower
-// contract already asserts the observation ran (#5221 review).
+// contract already asserts the observation ran (#5221 review). It also marks
+// a changed capture that is only a viewer resize's reflow (#7434).
 type captureAwareUpdateBackend interface {
-	HasUpdatedObserved(*Instance) (updated bool, hasPrompt bool, content string, baseline bool, captured bool)
+	HasUpdatedObserved(*Instance) (updated bool, hasPrompt bool, content string, baseline bool, captured bool, reflow bool)
 }
 
 func (s *localAgentServer) Provision(firstTimeSetup bool) error {
@@ -199,9 +200,10 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 	// reports the narrower contract, which already asserts its observation
 	// ran. Only the tmux path can prove a probe returned nothing.
 	captured := true
+	var reflow bool
 	switch aware := b.(type) {
 	case captureAwareUpdateBackend:
-		updated, hasPrompt, content, baseline, captured = aware.HasUpdatedObserved(s.inst)
+		updated, hasPrompt, content, baseline, captured, reflow = aware.HasUpdatedObserved(s.inst)
 	case baselineUpdateBackend:
 		updated, hasPrompt, content, baseline = aware.HasUpdatedWithBaseline(s.inst)
 	default:
@@ -214,6 +216,7 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 		Content:     content,
 		ModelChange: b.AgentModelChange(s.inst),
 		Captured:    captured,
+		Reflow:      reflow,
 	}, nil
 }
 
