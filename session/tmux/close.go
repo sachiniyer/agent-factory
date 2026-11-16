@@ -191,12 +191,14 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
-	// (#1104). The reaper's own-chain evidence is captured with it, at the same
-	// pre-kill shape: a CLI dying on the kill reparents a daemon the pane
-	// spawned out from under the server, and protection decided from the
-	// post-kill tree is decided from the wrong tree (Codex on #7433).
-	leaked, captureErr := CaptureSessionProcessTrees(t.cmdExec, t.sanitizedName)
-	protected := reapProtectedChain()
+	// (#1104). Protection is computed from the SAME snapshot the capture used,
+	// at the same pre-kill point: a CLI dying on the kill reparents a daemon
+	// the pane spawned out from under the server, and protection decided from
+	// a later table is decided from the wrong one (Codex on #7433, #7435
+	// item 3).
+	captured, captureErr := captureSessionProcessTrees(t.cmdExec, t.sanitizedName, "")
+	leaked := captured.Procs
+	protected := reapProtectedSet(captured.Snapshot, leaked)
 
 	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
 	// itself: an unbounded kill-session against a wedged server blocks

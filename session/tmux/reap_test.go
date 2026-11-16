@@ -23,6 +23,15 @@ import (
 	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
+// selfProtectedSet is the explicit never-signal set a fixture passes when it
+// drives reapSessionProcesses directly: this process, named so the test does
+// not rely on an implicit at-entry snapshot that — under a tmux ancestor —
+// would exempt every child of the test binary and defeat the fixture (#7435
+// item 4).
+func selfProtectedSet() protectedSet {
+	return protectedSet{os.Getpid(): protectReasonSelf}
+}
+
 // shrinkReapWaits lowers the grace periods so reap tests finish in
 // milliseconds instead of seconds.
 func shrinkReapWaits(t *testing.T) {
@@ -111,7 +120,7 @@ func TestReapLogsSessionNameLiterally(t *testing.T) {
 	// reap_severity_test.go — including its own #1211 assertion, so neither
 	// severity can drift into splicing the name into the format string.
 	const name = "af_fmt%d%s%n_evil"
-	reapSessionProcesses(reapEscaped, name, []proctree.Process{proc}, time.Millisecond, 300*time.Millisecond, nil)
+	reapSessionProcesses(reapEscaped, name, []proctree.Process{proc}, time.Millisecond, 300*time.Millisecond, selfProtectedSet())
 
 	out := buf.String()
 	require.Contains(t, out, "tmux "+name+":",
@@ -1175,7 +1184,7 @@ func TestCleanupSessionsReportsProcessesThatSurvivedSIGKILL(t *testing.T) {
 	survivor := spawnLiveProcess(t)
 	realReap := reapOnRequestProcesses
 	reapOnRequestProcesses = func(reason reapReason, sanitizedName string, procs []proctree.Process,
-		grace, termWait time.Duration, protected map[int]bool,
+		grace, termWait time.Duration, protected protectedSet,
 	) []proctree.Process {
 		realReap(reason, sanitizedName, procs, grace, termWait, protected)
 		return []proctree.Process{survivor}

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -102,7 +101,8 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 // for a session that is live on the recorded one and arm a kill off the
 // fall-through.
 func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
-	return captureSessionProcessTrees(cmdExec, sanitizedName, "")
+	captured, err := captureSessionProcessTrees(cmdExec, sanitizedName, "")
+	return captured.Procs, err
 }
 
 // CaptureSessionProcessTreesOnSocket is CaptureSessionProcessTrees pinned to a
@@ -112,17 +112,21 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 // pane capture that follows must read the SAME server or a live session reads
 // as vanished. An empty socket is the ambient form.
 func CaptureSessionProcessTreesOnSocket(cmdExec cmd.Executor, sanitizedName, socket string) ([]proctree.Process, error) {
-	return captureSessionProcessTrees(cmdExec, sanitizedName, socket)
+	captured, err := captureSessionProcessTrees(cmdExec, sanitizedName, socket)
+	return captured.Procs, err
 }
 
-func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket string) ([]proctree.Process, error) {
+// captureSessionProcessTrees is the capture-internal form: it returns the
+// whole paneCapture so a caller about to kill can compute protection from the
+// SAME snapshot the process list came from (#7435 item 3).
+func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket string) (paneCapture, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
 		socketTmuxArgs(socket, "list-panes", "-s", "-t", ExactTarget(sanitizedName), "-F", paneRowFormat)...)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
+			return paneCapture{}, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
 		}
 		// tmux ANSWERED that the session is not there. Marked with a sentinel
 		// rather than returned as a plain failure, because whether it is a
@@ -146,29 +150,44 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket stri
 		// caller that pinned its own list-panes corroborates against that server
 		// rather than re-resolving one from its ambient environment.
 		if tmuxProvedSessionAbsent(cmdExec, err, sanitizedName, socket) {
-			return nil, fmt.Errorf("%w: %v", ErrSessionVanishedBeforeCapture, err)
+			return paneCapture{}, fmt.Errorf("%w: %v", ErrSessionVanishedBeforeCapture, err)
 		}
-		return nil, fmt.Errorf("cannot list panes before teardown: %w", err)
+		return paneCapture{}, fmt.Errorf("cannot list panes before teardown: %w", err)
 	}
 	return paneRowsToProcesses(string(out), sanitizedName)
+}
+
+// paneCapture is the verified pre-kill process evidence for one tmux session:
+// the process list itself, the single process-table snapshot it was captured
+// from, and the proven pane roots' kernel session ids. Killing callers compute
+// protection from Snapshot so the kill cannot move a reaper out from under a
+// stale tree (#7435 item 3), and a vanished-session cohort proves membership
+// against PaneSIDs rather than trusting a marker alone (#7435 item 5).
+type paneCapture struct {
+	Procs    []proctree.Process
+	Snapshot map[int]proctree.Process
+	PaneSIDs map[int]bool
 }
 
 // paneRowsToProcesses turns list-panes rows (paneRowFormat, one per whitespace-
 // separated field) into the captured process trees of those panes. Split out of
 // CaptureSessionProcessTrees so a caller that verified the incarnation the rows
 // came from (the pinned reap, #6258) shares the exact same parsing.
-func paneRowsToProcesses(rows, sanitizedName string) ([]proctree.Process, error) {
+func paneRowsToProcesses(rows, sanitizedName string) (paneCapture, error) {
 	snap, err := proctree.Snapshot()
 	if err != nil {
-		return nil, fmt.Errorf("cannot snapshot pane process trees before teardown: %w", err)
+		return paneCapture{}, fmt.Errorf("cannot snapshot pane process trees before teardown: %w", err)
 	}
 	seen := make(map[int]bool)
-	var procs []proctree.Process
+	captured := paneCapture{
+		Snapshot: snap,
+		PaneSIDs: make(map[int]bool),
+	}
 	var captureErrs []error
 	add := func(p proctree.Process) {
 		if !seen[p.PID] {
 			seen[p.PID] = true
-			procs = append(procs, p)
+			captured.Procs = append(captured.Procs, p)
 		}
 	}
 	for _, field := range strings.Fields(rows) {
@@ -214,6 +233,7 @@ func paneRowsToProcesses(rows, sanitizedName string) ([]proctree.Process, error)
 			captureErrs = append(captureErrs, fmt.Errorf("pane process %d is not a verified child of a tmux server", panePID))
 			continue
 		}
+		captured.PaneSIDs[root.SID] = true
 		for _, p := range proctree.TreeOf(snap, panePID) {
 			add(p)
 		}
@@ -224,7 +244,32 @@ func paneRowsToProcesses(rows, sanitizedName string) ([]proctree.Process, error)
 			add(p)
 		}
 	}
-	return procs, errors.Join(captureErrs...)
+	return captured, errors.Join(captureErrs...)
+}
+
+// cohortMembership is the kernel-session proof a vanished-session cohort can
+// still demand after the tmux record is gone (#7435 item 5). PaneSIDs holds
+// the kernel session ids the capture's verified pane roots led; Recorded
+// holds (pid → StartID) pairs a caller recorded when the pane was spawned
+// (#5066). A marker-matched process is a cohort member only when its SID is
+// one the panes led or its (pid, StartID) is recorded — inherited markers
+// alone never prove membership. With NO evidence at all the gate is off: a
+// blind sweep captured nothing to place against, so it keeps rendering its
+// refusals exactly as before.
+type cohortMembership struct {
+	PaneSIDs map[int]bool
+	Recorded map[int]uint64
+}
+
+func (m cohortMembership) admits(p proctree.Process) bool {
+	if len(m.PaneSIDs) == 0 && len(m.Recorded) == 0 {
+		return true
+	}
+	if m.PaneSIDs[p.SID] {
+		return true
+	}
+	startID, recorded := m.Recorded[p.PID]
+	return recorded && startID == p.StartID
 }
 
 // markedOrphanProcesses filters a previously captured pane process tree down to
@@ -244,7 +289,7 @@ func paneRowsToProcesses(rows, sanitizedName string) ([]proctree.Process, error)
 // predecessor to place anyone against — still refuses, but as ONE message rather
 // than a line per pid: there the pid/generation pairing is the operator's whole
 // decision procedure, and blindGenerationRefusal is what carries it (#3706).
-func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string, generations orphanGenerationSet) ([]proctree.Process, error) {
+func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string, generations orphanGenerationSet, membership cohortMembership) ([]proctree.Process, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -257,7 +302,6 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		return nil, fmt.Errorf("cannot determine reset process ownership while checking vanished tmux session %s", sanitizedName)
 	}
 	selfChain := selfAndAncestorProcesses(snap)
-	cleanHome := filepath.Clean(ownHome)
 	var owned []proctree.Process
 	var inspectErrs []error
 	var unplaceable []markedGeneration
@@ -319,7 +363,17 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				process.PID, sanitizedName, EnvMarkerHome))
 			continue
 		}
-		if filepath.Clean(processHome) != cleanHome {
+		if classifyHomeDir(processHome, ownHome) != homeSame {
+			continue
+		}
+		// Environment is proof of CARRYING the session's launch markers, never
+		// of MEMBERSHIP: a daemon or helper that setsid'd out of the pane keeps
+		// inherited markers while joining a session this sweep has no claim on
+		// (#7435 item 5 — tmux's global environment can expose them to unrelated
+		// later panes too, #6846). Membership requires kernel-session evidence:
+		// the process's SID is one the proven pane roots led, or the pid matches
+		// a (pid, StartID) pair recorded when the pane was spawned.
+		if !membership.admits(process) {
 			continue
 		}
 		processGeneration, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
@@ -653,80 +707,6 @@ func selfAndAncestorProcesses(snap map[int]proctree.Process) map[int]bool {
 	return ancestors
 }
 
-// reapProtectedChain is the pid set a captured-tree reap must never signal,
-// whatever the caller: this process and its ancestors unconditionally, and a
-// descendant only when the descendant's own parent walk meets this process
-// strictly below a tmux process — descendant → reaper → tmux (#7433 R2).
-// Captured-tree membership is proven by descent, and descent is not
-// ownership — a daemon EnsureDaemon forked from a CLI running inside an
-// orphaned pane lands in that pane's tree with everything it has already
-// spawned, and the pane itself is its ancestor. proctree.Signal spares only
-// the reaper's own pid; without this set the reap waited on the caller for
-// seconds and then signalled its CLI and its children (a new daemon's ssh
-// tunnels, a foreign home's daemon started from the same pane).
-//
-// The server-above-self requirement is what keeps the exemption narrow. A
-// pane process's own walk always reaches the session's tmux server first —
-// even when the server sits UNDER the reaper, reparented to a subreaper or
-// spawned by it — so a captured pane process is never exempted here, and a
-// reaper whose own ancestry holds no tmux process exempts no descendant at
-// all. The set is computed once from one snapshot: only the processes
-// captured BEFORE the kill can ever be signalled, and no process can
-// re-parent into the caller's subtree, so a chain established at reap entry
-// cannot go stale. When the table cannot be read the chain beyond the caller
-// is unprovable and only the caller itself is excluded.
-func reapProtectedChain() map[int]bool {
-	self := os.Getpid()
-	protected := map[int]bool{self: true}
-	snap, err := proctree.Snapshot()
-	if err != nil {
-		log.WarningLog.Printf("cannot snapshot the process table to exclude the caller's own chain from signalling: %v", err)
-		return protected
-	}
-	for pid := range selfAndAncestorProcesses(snap) {
-		protected[pid] = true
-	}
-	for _, p := range proctree.TreeOf(snap, self) {
-		if p.PID != self && reachesSelfThenTmux(snap, p.PID, self) {
-			protected[p.PID] = true
-		}
-	}
-	return protected
-}
-
-// reachesSelfThenTmux walks pid's parent chain and reports whether it meets
-// the reaper strictly below a tmux process — both appear, in that order. The
-// reaper's own children inside the killed session's tree (the R2 tunnels:
-// processes a daemon spawned from inside the pane now being reaped) meet the
-// reaper first and the server above it. A pane process meets the server
-// first — including a pane under a server reparented beneath the reaper —
-// and a descendant under a reaper with no tmux ancestor meets no server at
-// all; both stay eligible. Only a POSITIVELY identified tmux process ends
-// the walk: an ancestor whose identity cannot be read is passed, because an
-// unproven link is not the server and must not exempt the descendant —
-// platforms where identity reads fail for non-child processes would then
-// spare every child of the reaper (macOS CI, where the same tests that run
-// under the linux subreaper showed this).
-func reachesSelfThenTmux(snap map[int]proctree.Process, pid, self int) bool {
-	seenSelf := false
-	for range 128 {
-		if pid <= 0 {
-			return false
-		}
-		if pid == self {
-			seenSelf = true
-		} else if proctree.TmuxIdentityOf(pid) == proctree.Tmux {
-			return seenSelf
-		}
-		p, ok := snap[pid]
-		if !ok {
-			return false
-		}
-		pid = p.PPID
-	}
-	return false
-}
-
 // reapReason says WHY a captured process tree is being reaped. It is the
 // caller's answer and never proctree's: KillEscalating is handed a list and
 // cannot know whether those processes escaped anything (#2765).
@@ -770,13 +750,14 @@ var (
 // paths that must stay snappy call it in a goroutine. Every signal is logged
 // per-process, at the severity the reason and the outcome agree on.
 //
-// protected is the reaper's own-chain exemption — see reapProtectedChain. A
-// caller that kills before reaping must capture it BEFORE the kill, alongside
-// the pane-tree capture: a pane shell or CLI dying on the kill reparents the
-// reaper out of the tree, and a chain reconstructed afterwards is the wrong
-// one (Codex on #7433). nil computes it at reap entry — correct only for a
+// protected is the reap's never-signal set — see reapProtectedSet. A caller
+// that kills before reaping must compute it BEFORE the kill, from the same
+// snapshot the pane-tree capture used: a pane shell or CLI dying on the kill
+// reparents the reaper out of the tree, and protection decided from a later
+// table is decided from the wrong one (Codex on #7433, #7435 item 3). nil
+// computes it at reap entry from a fresh snapshot — correct only for a
 // caller with no preceding kill.
-func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration, protected map[int]bool) []proctree.Process {
+func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration, protected protectedSet) []proctree.Process {
 	// A tracked teardown requester stays IN the candidate set — the reaper's
 	// per-signal recheck spares it only while the registry still reports it
 	// tracked, so a reprieve that ends mid-reap lets the next tier reap it
@@ -792,18 +773,21 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 				"excluding it from signalling (#5182)", p.PID, p.Comm)
 		}
 	}
-	// #7433 R2: the reaper's own chain is likewise exempt for EVERY caller —
-	// self and ancestors unconditionally, a descendant only when its parent
-	// walk meets the reaper strictly below a tmux process. Descent is not
-	// membership: a daemon EnsureDaemon forked out of the pane being reaped
-	// lands in that pane's tree, and captured procs include it, the CLI above
-	// it, and its children. proctree.Signal spares only os.Getpid; without
-	// this set the reap waited seconds on the caller, then signalled its CLI
-	// and its children. The server-above-self requirement keeps it narrow:
-	// a pane process under a server reparented beneath the reaper still
-	// meets the server first and is reaped.
+	// #7433 R2 / #7435: the reaper's own chain and any positively-identified
+	// agent-factory daemon subtree are exempt for EVERY caller. Descent is
+	// not ownership: a daemon EnsureDaemon forked out of the pane being
+	// reaped lands in that pane's captured tree, along with the CLI above it
+	// and its children. proctree.Signal spares only os.Getpid; without this
+	// set the reap waited seconds on the caller, then signalled its CLI, its
+	// children, and the foreign daemon they belonged to. The tmux-server
+	// boundary keeps it narrow: a pane process under a server reparented
+	// beneath the reaper still meets the server first and is reaped.
 	if protected == nil {
-		protected = reapProtectedChain()
+		snap, err := proctree.Snapshot()
+		if err != nil {
+			log.WarningLog.Printf("cannot snapshot the process table to compute the reaper's protected set at reap entry: %v", err)
+		}
+		protected = reapProtectedSet(snap, procs)
 	}
 	exemptedProtected := make(map[int]bool)
 	// And it can be registered AFTER the capture — a teardown still in its
@@ -811,11 +795,11 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 	// handler (Codex on #5186). The exempt predicate is re-run before every
 	// signal tier so a late-tracked requester is still spared.
 	return proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
-		if protected[p.PID] {
+		if exclusion, excluded := protected[p.PID]; excluded {
 			if !exemptedProtected[p.PID] {
 				exemptedProtected[p.PID] = true
-				log.InfoLog.Printf("process pid %d (%s) is the %s reaper's own process, ancestor, or descendant; "+
-					"excluding it from signalling (#7433)", p.PID, p.Comm, reason.clause)
+				log.InfoLog.Printf("process pid %d (%s) is %s; "+
+					"excluding it from signalling (#7435)", p.PID, p.Comm, exclusion)
 			}
 			return true
 		}

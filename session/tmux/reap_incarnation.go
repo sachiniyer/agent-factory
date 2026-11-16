@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/cmd"
-	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -153,7 +152,7 @@ type BareSessionProof struct {
 //
 //   - AF_SESSION == the name (the same proof an incarnation's marker loop
 //     applies);
-//   - AF_HOME == this home — sameDir: exact literal equality, or both paths
+//   - AF_HOME == this home — classifyHomeDir: exact literal equality, or both paths
 //     stat to the same file. A path that only Cleans to the home must NOT be
 //     accepted: filepath.Clean resolves ".." lexically, but the filesystem
 //     resolves it against a real directory, so a foreign home whose path
@@ -204,8 +203,10 @@ func ReapProvenBareSession(cmdExec cmd.Executor, program string, proof BareSessi
 			return refusal
 		case !present:
 			return fmt.Sprintf("session %q carries no %s, so its owning home cannot be proven (pre-marker build or tmux <3.2)", proof.SessionName, EnvMarkerHome)
-		case !sameDir(got, proof.Home):
+		case classifyHomeDir(got, proof.Home) == homeForeign:
 			return fmt.Sprintf("session %q belongs to a different agent-factory home (%s)", proof.SessionName, got)
+		case classifyHomeDir(got, proof.Home) != homeSame:
+			return fmt.Sprintf("session %q carries a home marker (%s) whose ownership cannot be proven", proof.SessionName, got)
 		}
 		if _, present, refusal := read(EnvMarkerGeneration); refusal != "" {
 			return refusal
@@ -221,13 +222,27 @@ func ReapProvenBareSession(cmdExec cmd.Executor, program string, proof BareSessi
 	})
 }
 
-// sameDir reports whether a and b provably name the same directory: true for
-// an exact literal match, or when both stat and os.SameFile finds them the
-// same file. Anything else — a path that does not exist, a path that cannot be
-// stat'd, different files — is unproven, and unproven is never "same" on a
-// kill path (#7433 review): filepath.Clean is NOT a substitute, because ".." in
-// a marker resolves lexically while the filesystem resolves it against a real
-// directory, so a path that only Cleans to the home can be a different home.
+// homeMatch is what comparing a carried home marker against this daemon's
+// home could prove: the same directory, a different one, or — the third
+// answer — nothing at all. homeUnproven is deliberately the zero value so an
+// answer never filled in can never pass for same or foreign (#7435).
+type homeMatch int
+
+const (
+	homeUnproven homeMatch = iota
+	homeForeign
+	homeSame
+)
+
+// classifyHomeDir classifies the directory a names against the home b:
+// homeSame for an exact literal match or when both stat and os.SameFile finds
+// them the same file; homeForeign for two paths that both stat to different
+// files; homeUnproven for everything else — a relative marker, a path that
+// does not exist, a path that cannot be stat'd. Unproven is never "same" on a
+// kill path (#7433 review): filepath.Clean is NOT a substitute, because ".."
+// in a marker resolves lexically while the filesystem resolves it against a
+// real directory, so a path that only Cleans to the home can be a different
+// home.
 //
 // Both sides must be absolute BEFORE either comparison runs (#7433 Codex):
 // a relative path is anchored to the resolving process's working directory —
@@ -235,22 +250,25 @@ func ReapProvenBareSession(cmdExec cmd.Executor, program string, proof BareSessi
 // different directories with AF_HOME=.af carry markers that match literally
 // while naming different installs, and the marker's own cwd is unrecoverable.
 // doctor/tmux_sessions.go classifies the same shape as unproven ownership.
-func sameDir(a, b string) bool {
+func classifyHomeDir(a, b string) homeMatch {
 	if !filepath.IsAbs(a) || !filepath.IsAbs(b) {
-		return false
+		return homeUnproven
 	}
 	if a == b {
-		return true
+		return homeSame
 	}
 	ai, err := os.Stat(a)
 	if err != nil {
-		return false
+		return homeUnproven
 	}
 	bi, err := os.Stat(b)
 	if err != nil {
-		return false
+		return homeUnproven
 	}
-	return os.SameFile(ai, bi)
+	if os.SameFile(ai, bi) {
+		return homeSame
+	}
+	return homeForeign
 }
 
 // Seams for tests: the pane-row parse needs a real tmux server's process tree, and
@@ -322,12 +340,13 @@ func (t *TmuxSession) killVerifiedIncarnation(gen *tmuxGeneration) IncarnationRe
 
 	// Capture the pane process trees BEFORE the kill (afterwards survivors are
 	// reparented and the ancestry is gone), from the verified incarnation only.
-	// The reaper's own-chain evidence is captured with it, at the same pre-kill
-	// shape: a pane shell or CLI dying on the kill reparents a daemon spawned
-	// inside this pane out from under the server, and protection decided from
-	// the post-kill tree is decided from the wrong tree (Codex on #7433).
-	leaked, captureNote := t.captureVerifiedTrees(r, gen)
-	protected := reapProtectedChain()
+	// Protection is computed from the SAME snapshot the capture used, at the
+	// same pre-kill point: a pane shell or CLI dying on the kill reparents a
+	// daemon spawned inside this pane out from under the server, and protection
+	// decided from a later table is decided from the wrong one (Codex on #7433,
+	// #7435 item 3).
+	captured, captureNote := t.captureVerifiedTrees(r, gen)
+	protected := reapProtectedSet(captured.Snapshot, captured.Procs)
 
 	out, err := r.output(guardedKillArgs(gen)...)
 	if err != nil {
@@ -352,10 +371,10 @@ func (t *TmuxSession) killVerifiedIncarnation(gen *tmuxGeneration) IncarnationRe
 	if captureNote != "" {
 		log.WarningLog.Printf("tmux session %s: stopped; %s", name, captureNote)
 	}
-	if len(leaked) > 0 {
+	if len(captured.Procs) > 0 {
 		// Synchronous: the boot reconcile that calls this is not latency-sensitive,
 		// and a caller told "stopped" should find the pane's processes stopped too.
-		incarnationReapProcesses(reapOnRequest, name, leaked, reapGraceWait, reapTermWait, protected)
+		incarnationReapProcesses(reapOnRequest, name, captured.Procs, reapGraceWait, reapTermWait, protected)
 	}
 	return IncarnationReap{Stopped: true}
 }
@@ -364,25 +383,27 @@ func (t *TmuxSession) killVerifiedIncarnation(gen *tmuxGeneration) IncarnationRe
 // only rows the server itself stamped with the verified pid and creation stamp.
 // A listing it cannot verify, or any failure, yields no processes and a note: the
 // kill that follows is independently guarded, and nothing unverified is reaped.
-func (t *TmuxSession) captureVerifiedTrees(r *closeRun, gen *tmuxGeneration) ([]proctree.Process, string) {
+// The whole paneCapture is returned so the caller computes protection from the
+// same snapshot the process list came from (#7435 item 3).
+func (t *TmuxSession) captureVerifiedTrees(r *closeRun, gen *tmuxGeneration) (paneCapture, string) {
 	out, err := r.output("list-panes", "-s", "-t", gen.sessionID, "-F", guardedPaneListingFormat())
 	if err != nil {
-		return nil, fmt.Sprintf("its panes could not be listed (%v), so no processes will be reaped", err)
+		return paneCapture{}, fmt.Sprintf("its panes could not be listed (%v), so no processes will be reaped", err)
 	}
 	prefix := gen.sessionID + paneFieldSeparator + gen.serverPID + paneFieldSeparator + gen.created + paneFieldSeparator
 	var rows []string
 	for _, field := range strings.Fields(string(out)) {
 		row, ok := strings.CutPrefix(field, prefix)
 		if !ok {
-			return nil, "a pane row was not stamped with the verified server pid and creation stamp, so no processes will be reaped"
+			return paneCapture{}, "a pane row was not stamped with the verified server pid and creation stamp, so no processes will be reaped"
 		}
 		rows = append(rows, row)
 	}
-	procs, err := incarnationPaneProcesses(strings.Join(rows, " "), t.sanitizedName)
+	captured, err := incarnationPaneProcesses(strings.Join(rows, " "), t.sanitizedName)
 	if err != nil {
-		return procs, fmt.Sprintf("the pane process capture was incomplete (%v)", err)
+		return captured, fmt.Sprintf("the pane process capture was incomplete (%v)", err)
 	}
-	return procs, ""
+	return captured, ""
 }
 
 // confirmIncarnation re-reads the incarnation's identity by its id and demands the

@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,13 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
+
+// The -daemon flag is registered so a re-exec'd helper can carry a FORGED
+// agent-factory daemon argv — `af --daemon -test.run=...` — without tripping
+// the binary's own flag parser. proctree.ArgvIsAFDaemon reads only argv, so
+// the helper is positively identified as a daemon by the kill path exactly the
+// way a real one is (#7435).
+var _ = flag.Bool("daemon", false, "test-only: lets a re-exec'd helper carry daemon-shaped argv")
 
 // #7433 R2 — reapSessionProcesses must never signal the calling process's own
 // chain — itself, its ancestors, or a descendant that meets the reaper below a
@@ -260,6 +268,253 @@ func TestReapSessionProcessesReapsAPaneWhoseServerIsADescendantOfTheReaper(t *te
 	require.NoError(t, err, "the server itself is not a captured process: nothing signals it")
 }
 
+// #7435 item 1 — descent is not ownership, and membership is not
+// signalability. Inside one captured pane tree sit three shapes the reap must
+// treat differently:
+//
+//   - a setsid'd agent-factory DAEMON and the child it already spawned:
+//     captured by descent, but positively identified (af binary + --daemon
+//     argv, the shared classifier) and excluded as a daemon subtree — not
+//     because the reaper is in their chain (it is not; the test binary itself
+//     reaps, from outside the pane entirely);
+//   - a detached, setsid'd non-daemon child: captured by descent and REAPED —
+//     this is what TreeOf exists for, and what SID-only membership would leak
+//     (#1093/#1104);
+//   - a pane member reparented to init while the pane is still up: captured by
+//     its kernel SID and reaped.
+const (
+	reapDaemonSubtreeTestName = "TestReapSessionProcessesSparesAFDaemonSubtreeButReapsItsDetachedPeers"
+	subtreePidFileEnv         = "AF_TEST_SUBTREE_PIDFILE"
+	subtreeAfPidFileEnv       = "AF_TEST_SUBTREE_AFPID"
+	subtreeRepIDEnv           = "AF_TEST_SUBTREE_REPID"
+)
+
+func TestReapSessionProcessesSparesAFDaemonSubtreeButReapsItsDetachedPeers(t *testing.T) {
+	if role := os.Getenv(reapChainRoleEnv); role != "" {
+		runDaemonSubtreeHelper(t, role)
+		return
+	}
+	testguard.IsolateTmux(t)
+
+	dir := t.TempDir()
+	sock := testguard.SocketPath(t, "subtree.sock")
+	pidFile := filepath.Join(dir, "pids")
+	afpidFile := filepath.Join(dir, "afpids")
+	repFile := filepath.Join(dir, "repid")
+
+	// The pane runs WITHOUT exec, so its own shell stays a distinct chain node
+	// between the server and the cli role: pane -> cli -> the spawned subtrees.
+	script := "#!/bin/sh\n" +
+		reapChainRoleEnv + "=dchaincli " +
+		reapChainSockEnv + "=" + sock + " " +
+		subtreePidFileEnv + "=" + pidFile + " " +
+		subtreeAfPidFileEnv + "=" + afpidFile + " " +
+		subtreeRepIDEnv + "=" + repFile + " " +
+		"'" + os.Args[0] + "' '-test.run=^" + reapDaemonSubtreeTestName + "$'\n"
+	paneScript := filepath.Join(dir, "pane.sh")
+	require.NoError(t, os.WriteFile(paneScript, []byte(script), 0o755))
+
+	out, err := exec.Command("tmux", "-S", sock,
+		"new-session", "-d", "-s", "dchain", "sh", paneScript).CombinedOutput()
+	require.NoError(t, err, "start the isolated server and daemonchain session: %s", out)
+	t.Cleanup(func() {
+		killReapChain(sock, pidFile)
+		killReapChain(sock, afpidFile)
+		killReapChain(sock, repFile)
+	})
+
+	out, err = exec.Command("tmux", "-S", sock,
+		"new-session", "-d", "-s", "subother", "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "spawn the unrelated session's pane: %s", out)
+
+	// The session proves itself a bare pane this home owns: name, absolute
+	// home, generation — and no AF_INSTANCE_ID.
+	for _, kv := range [][2]string{
+		{EnvMarkerSession, "dchain"},
+		{EnvMarkerHome, dir},
+		{EnvMarkerGeneration, "1"},
+	} {
+		out, err := exec.Command("tmux", "-S", sock, "set-environment", "-t", "dchain",
+			kv[0], kv[1]).CombinedOutput()
+		require.NoError(t, err, "stamp %s: %s", kv[0], out)
+	}
+
+	// Wait for every spawned role to write its pid, then resolve the chain
+	// identities. The afdaemon's argv is asserted daemon-shaped up front, or
+	// the fixture does not test the exclusion it claims to.
+	var pids map[string]string
+	require.Eventually(t, func() bool {
+		for _, f := range []string{pidFile, afpidFile, repFile} {
+			if _, err := os.Stat(f); err != nil {
+				return false
+			}
+		}
+		pids = readReapChainPids(pidFile)
+		for _, f := range []string{afpidFile, repFile} {
+			for line, v := range readReapChainPids(f) {
+				pids[line] = v
+			}
+		}
+		_, hasAFD := pids["afdaemon"]
+		_, hasDet := pids["detached"]
+		_, hasChild := pids["afchild"]
+		_, hasRep := pids["reparented"]
+		return hasAFD && hasDet && hasChild && hasRep
+	}, 15*time.Second, 50*time.Millisecond, "the cli role never reported its spawned pids")
+
+	afPID := atoiReapChainPid(t, pids["afdaemon"])
+	require.True(t, proctree.ArgvIsAFDaemon(proctree.Argv(afPID)),
+		"the forged helper must positively classify as an agent-factory daemon or the fixture tests nothing")
+
+	var paneP, cliP, repP, otherP proctree.Process
+	var afP, childP, detP proctree.Process
+	require.Eventually(t, func() bool {
+		var err error
+		if afP, err = proctree.Lookup(afPID); err != nil {
+			return false
+		}
+		snap, err := proctree.Snapshot()
+		if err != nil {
+			return false
+		}
+		cliP, ok := snap[afP.PPID]
+		if !ok {
+			return false
+		}
+		paneP, ok = snap[cliP.PPID]
+		if !ok {
+			return false
+		}
+		if childP, err = proctree.Lookup(atoiReapChainPid(t, pids["afchild"])); err != nil {
+			return false
+		}
+		if detP, err = proctree.Lookup(atoiReapChainPid(t, pids["detached"])); err != nil {
+			return false
+		}
+		repP, err = proctree.Lookup(atoiReapChainPid(t, pids["reparented"]))
+		if err != nil || repP.PPID != 1 {
+			// Still the dying sh's child: the reparented shape is only real
+			// once the kernel hands it to init (no reaper in this chain marks
+			// itself a subreaper).
+			return false
+		}
+		lout, err := exec.Command("tmux", "-S", sock, "list-panes", "-t", "subother", "-F", "#{pane_pid}").Output()
+		if err != nil {
+			return false
+		}
+		opid, err := strconv.Atoi(strings.TrimSpace(string(lout)))
+		if err != nil {
+			return false
+		}
+		otherP, err = proctree.Lookup(opid)
+		return err == nil
+	}, 10*time.Second, 50*time.Millisecond, "the pane -> cli -> subtree chain never became visible")
+
+	reap := ReapProvenBareSession(socketExecutor{socket: sock}, "", BareSessionProof{
+		SessionName: "dchain",
+		Home:        dir,
+	})
+	require.True(t, reap.Stopped, "the guarded kill path refused: %s", reap.Why)
+
+	// Everything that is NOT a daemon subtree dies: the pane and cli with the
+	// session kill, the detached child to the reap's own signals (it left the
+	// pane session, so only descent plus signalling could reach it), the
+	// reparented survivor to the session kill's SIGHUP or the reap.
+	for role, p := range map[string]proctree.Process{
+		"pane": paneP, "cli": cliP, "detached": detP, "reparented": repP,
+	} {
+		p := p
+		require.Eventually(t, func() bool {
+			return !proctree.AliveSame(p)
+		}, 10*time.Second, 50*time.Millisecond,
+			"the %s (pid %d) must be reaped — descent and SID membership capture it, and nothing protects it", role, p.PID)
+	}
+	// The af daemon and its child survive as a positively-identified daemon
+	// subtree; the unrelated session's pane was never captured.
+	for role, p := range map[string]proctree.Process{
+		"afdaemon": afP, "afchild": childP, "other": otherP,
+	} {
+		require.True(t, proctree.AliveSame(p),
+			"the %s (pid %d) must still be alive — an af-daemon subtree, or another session entirely", role, p.PID)
+	}
+}
+
+// runDaemonSubtreeHelper plays one node of the daemonchain fixture:
+// dchaincli spawns the three subtree shapes, afdaemon spawns its child. Every
+// role stays alive until the driver's cleanup kills the chain.
+func runDaemonSubtreeHelper(t *testing.T, role string) {
+	switch role {
+	case "dchaincli":
+		af := reexecDaemonSubtree(t, "afdaemon")
+		af.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		require.NoError(t, af.Start())
+		det := exec.Command("sleep", "300")
+		det.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		require.NoError(t, det.Start())
+		rep := exec.Command("sh", "-c",
+			`sleep 300 & echo "reparented=$!" > "$AF_TEST_SUBTREE_REPID"; exec sleep 0.05`)
+		require.NoError(t, rep.Start())
+		writeReapChainPids(t, os.Getenv(subtreePidFileEnv), map[string]int{
+			"afdaemon": af.Process.Pid, "detached": det.Process.Pid,
+		})
+	case "afdaemon":
+		child := exec.Command("sleep", "300")
+		require.NoError(t, child.Start())
+		writeReapChainPids(t, os.Getenv(subtreeAfPidFileEnv), map[string]int{
+			"afchild": child.Process.Pid,
+		})
+	default:
+		return
+	}
+	time.Sleep(5 * time.Minute)
+}
+
+// reexecDaemonSubtree re-executes the test binary under the daemonchain
+// fixture's own -test.run regex. The afdaemon role additionally forges its
+// argv to `af --daemon -test.run=...`: argv is all the classifier reads, so
+// the helper is a positively-identified agent-factory daemon to the kill path
+// while remaining this test's dispatch.
+func reexecDaemonSubtree(t *testing.T, role string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^"+reapDaemonSubtreeTestName+"$")
+	cmd.Env = append(os.Environ(), reapChainRoleEnv+"="+role)
+	if role == "afdaemon" {
+		cmd.Args = []string{"af", "--daemon", "-test.run=^" + reapDaemonSubtreeTestName + "$"}
+	}
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	return cmd
+}
+
+func writeReapChainPids(t *testing.T, path string, pids map[string]int) {
+	t.Helper()
+	var b strings.Builder
+	for k, pid := range pids {
+		fmt.Fprintf(&b, "%s=%d\n", k, pid)
+	}
+	require.NoError(t, os.WriteFile(path, []byte(b.String()), 0o600))
+}
+
+func readReapChainPids(path string) map[string]string {
+	out := map[string]string{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func atoiReapChainPid(t *testing.T, s string) int {
+	t.Helper()
+	pid, err := strconv.Atoi(s)
+	require.NoError(t, err, "a pid file carried a non-numeric pid %q", s)
+	return pid
+}
+
 // runReapChainServerDescendant is the srvreaper role: spawn a foreground tmux
 // server as its own child, put a session on it, and reap that pane.
 func runReapChainServerDescendant(t *testing.T) {
@@ -291,7 +546,7 @@ func runReapChainServerDescendant(t *testing.T) {
 
 	serverP, err := proctree.Lookup(server.Process.Pid)
 	require.NoError(t, err)
-	reapSessionProcesses(reapOnRequest, "af_test_srvreap", []proctree.Process{paneP}, 100*time.Millisecond, 100*time.Millisecond, nil)
+	reapSessionProcesses(reapOnRequest, "af_test_srvreap", []proctree.Process{paneP}, 100*time.Millisecond, 100*time.Millisecond, selfProtectedSet())
 	fmt.Fprintf(os.Stderr, "srvreaper %d: reap returned\n", os.Getpid())
 
 	status := "ok"

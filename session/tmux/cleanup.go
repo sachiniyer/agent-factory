@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -376,9 +375,12 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// home's sweep.
 	preMarkerProcesses := make(map[string][]proctree.Process, len(prefixed))
 	preMarkerCaptureErrs := make(map[string]error, len(prefixed))
+	preMarkerPaneSIDs := make(map[string]map[int]bool, len(prefixed))
 	preMarkerGenerations := make(map[string]orphanGenerationSet, len(prefixed))
 	for _, match := range prefixed {
-		preMarkerProcesses[match], preMarkerCaptureErrs[match] = CaptureSessionProcessTrees(cmdExec, match)
+		preMarkerCapture, captureErr := captureSessionProcessTrees(cmdExec, match, "")
+		preMarkerProcesses[match], preMarkerCaptureErrs[match] = preMarkerCapture.Procs, captureErr
+		preMarkerPaneSIDs[match] = preMarkerCapture.PaneSIDs
 		// Retain the generation while the captured pane tree is still alive.
 		// Waiting until a vanished-session recovery begins may be too late to
 		// read its immutable environment, especially when a helper starts after
@@ -419,7 +421,8 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			exists, known, probeErr := probeSessionStrict(cmdExec, match)
 			if known && !exists {
 				if reapErr := reapVanishedSessionProcessCohort(match, ownHome, preMarkerProcesses[match],
-					preMarkerCaptureErrs[match], preMarkerGenerations[match], false); reapErr != nil {
+					preMarkerCaptureErrs[match], preMarkerGenerations[match],
+					cohortMembership{PaneSIDs: preMarkerPaneSIDs[match]}, false); reapErr != nil {
 					return fmt.Errorf("tmux session %s vanished during ownership lookup, but its process cleanup is incomplete: %w",
 						match, reapErr)
 				}
@@ -436,8 +439,13 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		case !ok:
 			log.InfoLog.Printf("leaving tmux session %s: no AF_HOME ownership marker (pre-marker build or tmux <3.2); kill manually with: %s", match,
 				shellsuggest.Command("tmux", "kill-session", "-t", ExactSessionTarget(match)))
-		case filepath.Clean(home) != filepath.Clean(ownHome):
+		case classifyHomeDir(home, ownHome) == homeForeign:
 			log.InfoLog.Printf("leaving tmux session %s: owned by another agent-factory home (%s)", match, home)
+		case classifyHomeDir(home, ownHome) != homeSame:
+			// Unproven is not "foreign": a relative or unstat-able marker could
+			// not be compared, so the session is left alone for a different
+			// reason and the log must say so (#7435).
+			log.InfoLog.Printf("leaving tmux session %s: home marker (%s) ownership cannot be proven", match, home)
 		default:
 			matches = append(matches, match)
 		}
@@ -450,17 +458,20 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// run only after every complete session has been killed, so a still-live pane
 	// cannot launch new work during another session's bounded orphan sweep.
 	leakedBySession := make(map[string][]proctree.Process, len(matches))
+	protectedBySession := make(map[string]protectedSet, len(matches))
 	killed := make([]string, 0, len(matches))
 	recoveries := make([]vanishedSessionRecovery, 0, len(matches))
 	var incompleteCaptures error
 	var killErr error
-	// The reaper's own-chain evidence precedes the first kill-session: a pane
-	// process dying on a kill reparents a reaper the pane spawned, and
-	// protection decided afterwards is decided from the wrong tree
-	// (Codex on #7433).
-	protected := reapProtectedChain()
 	for _, match := range matches {
-		leaked, captureErr := CaptureSessionProcessTrees(cmdExec, match)
+		captured, captureErr := captureSessionProcessTrees(cmdExec, match, "")
+		leaked := captured.Procs
+		// Each match's protection comes from ITS OWN capture's snapshot, taken
+		// before that match's kill: a pane process dying on a kill reparents a
+		// reaper the pane spawned, and protection decided from a later table —
+		// or from an earlier match's — is decided from the wrong tree
+		// (Codex on #7433, #7435 item 3).
+		protected := reapProtectedSet(captured.Snapshot, leaked)
 		if captureErr != nil {
 			vanished := errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
 			var probeErr error
@@ -479,6 +490,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 				match:              match,
 				verifiedProcesses:  leaked,
 				markerCandidates:   preMarkerProcesses[match],
+				markerPaneSIDs:     preMarkerPaneSIDs[match],
 				markerCaptureError: preMarkerCaptureErrs[match],
 				captureError:       captureErr,
 				generations:        preMarkerGenerations[match],
@@ -524,6 +536,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			}
 		}
 		leakedBySession[match] = leaked
+		protectedBySession[match] = protected
 		killed = append(killed, match)
 	}
 
@@ -538,7 +551,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			continue
 		}
 		wg.Add(1)
-		go func(match string, leaked []proctree.Process) {
+		go func(match string, leaked []proctree.Process, protected protectedSet) {
 			defer wg.Done()
 			// These sessions were just killed BY this sweep, on request: their
 			// processes are being destroyed with them, not caught escaping (#2765).
@@ -554,7 +567,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 				reapGraceWait, reapTermWait, protected); len(remaining) > 0 {
 				processSweepErrs <- survivingProcessesError(match, remaining)
 			}
-		}(match, leaked)
+		}(match, leaked, protectedBySession[match])
 	}
 	for _, recovery := range recoveries {
 		wg.Add(1)
@@ -609,6 +622,7 @@ type vanishedSessionRecovery struct {
 	match              string
 	verifiedProcesses  []proctree.Process
 	markerCandidates   []proctree.Process
+	markerPaneSIDs     map[int]bool
 	markerCaptureError error
 	captureError       error
 	generations        orphanGenerationSet
@@ -626,7 +640,8 @@ func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome s
 	// false: this is the background CleanupSessions sweep, which holds no
 	// exclusive claim on any one session's lifecycle — see reapVanishedSessionProcesses.
 	return reapVanishedSessionProcessCohort(recovery.match, ownHome, candidates,
-		recovery.markerCaptureError, recovery.generations, false)
+		recovery.markerCaptureError, recovery.generations,
+		cohortMembership{PaneSIDs: recovery.markerPaneSIDs}, false)
 }
 
 // reapVanishedSessionProcesses answers "did anything this session spawned
@@ -641,12 +656,17 @@ func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome s
 // (this package's own background CleanupSessions sweep included) passes
 // false and keeps the strict #3309 refusal: see reapVanishedSessionProcessCohort.
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error, trustLiveGeneration bool) error {
+	// An empty membership: this entry's callers hand in candidates they
+	// captured themselves but hold no pane-SID evidence to place them
+	// against, so the SID gate stays off — the daemon-subtree exclusion in
+	// the reap's own protected set still keeps a positively-identified
+	// daemon's descendants out of the signal set (#7435).
 	return reapVanishedSessionProcessCohort(match, ownHome, candidates, captureErr,
-		orphanGenerations(candidates, match), trustLiveGeneration)
+		orphanGenerations(candidates, match), cohortMembership{}, trustLiveGeneration)
 }
 
 func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctree.Process, captureErr error,
-	generations orphanGenerationSet, trustLiveGeneration bool,
+	generations orphanGenerationSet, membership cohortMembership, trustLiveGeneration bool,
 ) error {
 	var sweepErr error
 	if captureErr != nil {
@@ -680,7 +700,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 	// pids and the read that tells a leftover from a replacement (#3706).
 	if generations.empty() {
 		blindCandidates, refreshErr := refreshOrphanCandidates(candidates, match, nil)
-		_, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations)
+		_, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations, membership)
 		return errors.Join(sweepErr, refreshErr, inspectErr)
 	}
 	initialCandidates, initialErr := refreshOrphanCandidates(candidates, match, &generations)
@@ -698,14 +718,15 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		observed, observeErr := observeOrphanAncestryObserved(refreshed, match, reapGraceWait)
 		refreshed, afterErr := refreshOrphanCandidates(observed, match, &generations)
 		sweepErr = errors.Join(sweepErr, beforeErr, observeErr, afterErr)
-		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations)
+		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations, membership)
 		sweepErr = errors.Join(sweepErr, inspectErr)
 		// The tmux session is GONE and these processes are still alive carrying its
 		// ownership markers: they outlived the pane tree that was supposed to
 		// contain them. This is the real leak, and the one worth a WARNING (#2765).
-		// nil protected: no kill precedes this reap — its targets are marked
-		// processes whose session is already gone — so the own-chain set is
-		// computed at reap entry, where the tree is still intact.
+		// nil protected: no capture-and-kill preceded this reap — the session is
+		// already gone — so the protected set is computed at reap entry, where it
+		// still positively excludes the reaper's chain and any af-daemon subtree
+		// in the signalled set (#7435).
 		remaining := reapSessionProcesses(reapEscaped, match, marked, 0, reapTermWait, nil)
 		if len(remaining) > 0 {
 			sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s are still alive after bounded teardown",
@@ -714,7 +735,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		candidates = refreshed
 	}
 	finalCandidates, refreshErr := refreshOrphanCandidates(candidates, match, &generations)
-	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations)
+	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations, membership)
 	sweepErr = errors.Join(sweepErr, refreshErr, inspectErr)
 	if len(left) > 0 {
 		sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s appeared or remained after the orphan sweep",

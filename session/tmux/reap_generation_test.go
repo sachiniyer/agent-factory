@@ -48,7 +48,7 @@ func TestVanishedSessionSweepDoesNotReapSameNameReplacement(t *testing.T) {
 
 	barrier, sweepDone := startSweepAtGraceBarrier(t, name, func() error {
 		return reapVanishedSessionProcessCohort(name, home, []proctree.Process{old}, nil,
-			fixtureCohort(vanishedGeneration), false)
+			fixtureCohort(vanishedGeneration), cohortMembership{}, false)
 	})
 	barrier.holdFirstObservation(t, func() {
 		created, createErr := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", t.TempDir(),
@@ -239,7 +239,7 @@ func sweepDescendantThatChangesGeneration(t *testing.T, envDir string) {
 
 	barrier, sweepDone := startSweepAtGraceBarrier(t, name, func() error {
 		return reapVanishedSessionProcessCohort(name, home, []proctree.Process{parent}, nil,
-			fixtureCohort(vanishedGeneration), false)
+			fixtureCohort(vanishedGeneration), cohortMembership{}, false)
 	})
 	var child proctree.Process
 	barrier.holdFirstObservation(t, func() {

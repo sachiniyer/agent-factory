@@ -302,12 +302,14 @@ func (t *TmuxSession) start(workDir string) error {
 		// session. ExistsOrUnknown is safe here: the only action gated on true is a
 		// bounded best-effort kill-session, never a false liveness claim.
 		if t.ExistsOrUnknown() {
-			leaked := SessionProcessTrees(t.cmdExec, t.sanitizedName)
-			// Captured with the tree, at the same pre-kill shape: a pane process
-			// dying on the cleanup kill reparents a reaper the pane spawned, and
-			// protection decided afterwards is decided from the wrong tree
-			// (Codex on #7433).
-			protected := reapProtectedChain()
+			captured, _ := captureSessionProcessTrees(t.cmdExec, t.sanitizedName, "")
+			leaked := captured.Procs
+			// Protection is decided from the SAME snapshot the capture used —
+			// even a partial one is better than a second, later table: a pane
+			// process dying on the cleanup kill reparents a reaper the pane
+			// spawned, and protection decided afterwards is decided from the
+			// wrong tree (Codex on #7433, #7435 item 3).
+			protected := reapProtectedSet(captured.Snapshot, leaked)
 			// Bound the cleanup kill-session (#2028): on bare exec.Command it could
 			// hang forever on a wedged tmux server, and Start is on the daemon's
 			// create/launch path, so an unbounded stall here wedges that handler. Route
