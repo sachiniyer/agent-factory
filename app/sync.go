@@ -110,7 +110,13 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
 	return func() tea.Msg {
-		resp, err := fetch(repoID)
+		// context.Background, not the switch path's bounded ctx, preserves the
+		// off-loop poll's semantics: this runs on a tea.Cmd goroutine, never on
+		// the event loop, so an unbounded read cannot park the UI. A wedged
+		// daemon delays this one poll's reconcile, not the user — the next tick
+		// is armed only after this returns, so the bound is a separate concern
+		// from the on-loop hang #6045 fixes.
+		resp, err := fetch(context.Background(), repoID)
 		// Re-read the ACTIVE repo's tasks on the same poll so an out-of-band task
 		// change live-projects into the TUI (#1168). Scoped to the captured
 		// repoRoot, not cwd, so a poll after an in-place project switch (#1461)
@@ -165,6 +171,26 @@ var coldStartWarmupPoll = 250 * time.Millisecond
 // minutes-long remote-hook restore (#829) without hanging the launch forever if
 // the daemon is wedged reporting "starting".
 var coldStartWarmupWait = 2 * time.Minute
+
+// switchSnapshotFetchTimeout bounds a single cold-start / project-switch snapshot
+// read. fetchColdStartSnapshot runs on the bubbletea event loop for switchProject
+// (the Ctrl+P picker selection, a Projects-section row activation, and add-project
+// submit all reach it synchronously from a KeyMsg handler), and the LOCAL
+// unix-socket transport bounds only the dial — the http.Client sets no Timeout and
+// the daemon's http.Server sets only ReadHeaderTimeout — so once the daemon
+// accepts the connection a wedged handler would park Update (key input, repaint
+// and the Ctrl+C hard exit) forever (#6045). The deadline rides the transport read
+// via snapshotThroughDaemon → SnapshotWithAlarmsCtx, and its expiry surfaces as an
+// ordinary fetch failure: switchProject aborts and leaves the current project
+// intact (#1788), and cold start logs the outage while the background poll retries.
+//
+// It is PER-ATTEMPT, not the whole operation: a warming daemon answers
+// IsDaemonStartingErr promptly (it never holds the read), so each bounded attempt
+// returns fast and fetchColdStartSnapshot's existing retry loop keeps re-entering
+// while that error is the outcome, with coldStartWarmupWait's 2-minute ceiling
+// finally behaving as the whole-operation deadline. A var so the regression test
+// shrinks it.
+var switchSnapshotFetchTimeout = 10 * time.Second
 
 // coldStartFromSnapshot populates the projection store from the daemon's authoritative
 // Snapshot at startup, replacing the legacy instances.json disk read (#960 PR 6:
@@ -292,11 +318,24 @@ func buildSnapshotInstances(data []session.InstanceData, workers int) []*session
 // post-#782 the daemon is always-on, so there is no degraded standalone path.
 // The repoID is passed explicitly rather than read from m.repoID so switchProject
 // can fetch the INCOMING project's snapshot before it re-scopes the model (#1788).
+//
+// Each attempt is bounded by switchSnapshotFetchTimeout. The bound is the one
+// fix the on-loop switch path was missing: a daemon that accepts the connection
+// and never answers (a wedged handler, blocked under restore) would otherwise
+// park the read on the local unix-socket transport that bounds only the dial, and
+// with it the whole event loop (#6045). The deadline rides the transport read,
+// and its expiry lands in the same hard-error branch as any other failed fetch —
+// never as IsDaemonStartingErr — so the switch aborts and the current project
+// survives intact. The warming case is unaffected: a warming daemon returns
+// IsDaemonStartingErr promptly, well inside the bound, so the retry loop still
+// re-enters up to the coldStartWarmupWait ceiling.
 func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	deadline := time.Now().Add(coldStartWarmupWait)
 	announced := false
 	for {
-		resp, err := m.snapshotFetcher(repoID)
+		ctx, cancel := context.WithTimeout(context.Background(), switchSnapshotFetchTimeout)
+		resp, err := m.snapshotFetcher(ctx, repoID)
+		cancel()
 		if err == nil {
 			return resp.Instances, resp.SkippedRepos, nil
 		}

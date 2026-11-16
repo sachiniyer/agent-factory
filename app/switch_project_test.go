@@ -33,7 +33,7 @@ func TestSelectProjectRowSwitchesProject(t *testing.T) {
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
 		return newSnapshotTestInstance(t, d.Title), nil
 	}))
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	resizeHome(h, 100, 30)
@@ -540,7 +540,7 @@ func TestSwitchProjectRescopesSidebar(t *testing.T) {
 
 	// The per-repo fetcher returns repo B's sessions only for repo B's id. Any
 	// bleed of repo A into the post-switch sidebar would show up as a stale row.
-	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, repoID string) (daemon.SnapshotResponse, error) {
 		if repoID == repoB.ID {
 			return daemon.SnapshotResponse{Instances: []session.InstanceData{
 				{Title: "repoB-session", CreatedAt: time.Now()},
@@ -582,7 +582,7 @@ func TestSwitchProjectDropsStaleSnapshot(t *testing.T) {
 
 	repoBRoot := t.TempDir()
 	repoB := &config.RepoContext{Root: repoBRoot, ID: config.RepoIDFromRoot(repoBRoot)}
-	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, repoID string) (daemon.SnapshotResponse, error) {
 		if repoID == repoB.ID {
 			return daemon.SnapshotResponse{Instances: []session.InstanceData{
 				{Title: "repoB-session", CreatedAt: time.Now()},
@@ -611,7 +611,7 @@ func TestBackgroundRefreshFollowsActiveProject(t *testing.T) {
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
 		return newSnapshotTestInstance(t, d.Title), nil
 	}))
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
@@ -660,7 +660,7 @@ func TestSwitchProjectWithArchivedSection(t *testing.T) {
 
 	repoBRoot := t.TempDir()
 	repoB := &config.RepoContext{Root: repoBRoot, ID: config.RepoIDFromRoot(repoBRoot)}
-	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, repoID string) (daemon.SnapshotResponse, error) {
 		if repoID == repoB.ID {
 			return daemon.SnapshotResponse{Instances: []session.InstanceData{
 				{Title: "repoB-live", CreatedAt: time.Now()},
@@ -719,7 +719,7 @@ func TestSwitchProjectFailedSnapshotLeavesProjectIntact(t *testing.T) {
 	repoB := &config.RepoContext{Root: repoBRoot, ID: config.RepoIDFromRoot(repoBRoot)}
 
 	// Repo B's snapshot is unavailable; repo A's would still succeed.
-	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, repoID string) (daemon.SnapshotResponse, error) {
 		if repoID == repoB.ID {
 			return daemon.SnapshotResponse{}, errors.New("daemon unavailable")
 		}
@@ -752,7 +752,7 @@ func TestSwitchProjectFailedSnapshotLeavesProjectIntact(t *testing.T) {
 // previous project's hooks into the new project's in-repo config.
 func TestSwitchProjectClearsHooksWhenConfigResolveFails(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
@@ -800,7 +800,7 @@ func writeInRepoConfig(t *testing.T, root, body string) {
 // silently runs the new project's tasks under the previous project's agent.
 func TestSwitchProjectResetsProgramWhenConfigResolveFails(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
@@ -842,7 +842,7 @@ func TestSwitchProjectResetsProgramWhenConfigResolveFails(t *testing.T) {
 // default.
 func TestSwitchProjectAppliesProjectProgramWhenConfigResolves(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	h.program = "codex"
@@ -871,7 +871,7 @@ func TestSwitchProjectAppliesProjectProgramWhenConfigResolves(t *testing.T) {
 // leak shape as #2138 one branch over.
 func TestSwitchProjectUsesGlobalDefaultWhenProjectSetsNoProgram(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	globalDefault := h.appConfig.DefaultProgram
@@ -904,7 +904,7 @@ func TestSwitchProjectUsesGlobalDefaultWhenProjectSetsNoProgram(t *testing.T) {
 // default program, not the previous project's.
 func TestTaskCreateAfterFailedResolveUsesGlobalProgram(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	h.program = "codex"
@@ -1041,7 +1041,7 @@ func TestHandleAddProjectRegistersAndSwitches(t *testing.T) {
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
 		return newSnapshotTestInstance(t, d.Title), nil
 	}))
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	h.projectPickerOverlay = overlay.NewProjectPickerOverlay(nil, h.repoRoot)

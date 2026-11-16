@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,7 +22,7 @@ import (
 // notice exists to kill. Both messages must surface.
 func TestHandleTaskCreate_CrossRepoReloadFailureStillNamesTheBinding(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 

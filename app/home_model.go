@@ -93,7 +93,15 @@ type home struct {
 	// returns the full daemon.SnapshotResponse so the session list and the
 	// delivery-failure alarms (#1238) arrive from one authoritative RPC — the
 	// alarm is a field on the snapshot, not a side channel.
-	snapshotFetcher func(repoID string) (daemon.SnapshotResponse, error)
+	//
+	// The ctx bounds the read on the event loop: switchProject calls
+	// fetchColdStartSnapshot synchronously from a KeyMsg handler, and the LOCAL
+	// unix-socket transport bounds only the dial, so without a deadline a daemon
+	// that accepts the connection and never answers would park Update forever
+	// (#6045). fetchColdStartSnapshot threads switchSnapshotFetchTimeout through
+	// here; the off-loop poll passes context.Background, preserving its
+	// unbounded read.
+	snapshotFetcher func(ctx context.Context, repoID string) (daemon.SnapshotResponse, error)
 	// snapshotBuildWorkers caps how many snapshot records materializeSnapshot
 	// restores at once; 0 means the default (#6423). A per-model field so tests
 	// that mint instances inside a fake builder (and rely on their creation order)

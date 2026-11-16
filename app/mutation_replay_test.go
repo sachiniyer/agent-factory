@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
@@ -55,12 +56,19 @@ func serveDaemonHTTP(t *testing.T, sockPath string, handle func(w http.ResponseW
 
 // pointDaemonHTTPAt replaces only the ensure+dial step, so the production
 // wrappers and retry policy run unchanged against a socket the test owns. Not
-// parallel-safe: it swaps a package var.
+// parallel-safe: it swaps package vars. It stubs both daemonHTTPClient (the
+// ctx-free path mutations and the no-ctx reads use) and daemonHTTPClientCtx
+// (the ctx-bounded path snapshotThroughDaemon routes through), so a read moved
+// onto the bounded seam still reaches the test socket without EnsureDaemon.
 func pointDaemonHTTPAt(t *testing.T, sockPath string) {
 	t.Helper()
-	prev := daemonHTTPClient
-	t.Cleanup(func() { daemonHTTPClient = prev })
-	daemonHTTPClient = func() (*apiclient.Client, error) { return apiclient.NewWithSocket(sockPath), nil }
+	target := func() (*apiclient.Client, error) { return apiclient.NewWithSocket(sockPath), nil }
+	prevClient := daemonHTTPClient
+	t.Cleanup(func() { daemonHTTPClient = prevClient })
+	daemonHTTPClient = target
+	prevClientCtx := daemonHTTPClientCtx
+	t.Cleanup(func() { daemonHTTPClientCtx = prevClientCtx })
+	daemonHTTPClientCtx = func(context.Context) (*apiclient.Client, error) { return target() }
 }
 
 // tuiMutations is every TUI seam that changes daemon state through the HTTP
@@ -242,7 +250,7 @@ func TestReadReplyLost_StillRetried(t *testing.T) {
 	})
 	pointDaemonHTTPAt(t, sock)
 
-	if _, err := snapshotThroughDaemon("repo"); err != nil {
+	if _, err := snapshotThroughDaemon(context.Background(), "repo"); err != nil {
 		t.Fatalf("a read must be retried after a lost reply, got %v", err)
 	}
 	if got := counter.get("/v1/Snapshot"); got != 2 {

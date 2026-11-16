@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -35,7 +36,7 @@ func projectPickerMouseHome(t *testing.T) (h *home, repoARoot, repoBRoot string)
 	// switchProject cold-starts the incoming project's snapshot off the event
 	// loop through home.snapshotFetcher; a real daemon is never available in the
 	// app suite, so return an empty success so the switch completes.
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	resizeHome(h, 140, 40)

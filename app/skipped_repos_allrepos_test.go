@@ -35,7 +35,7 @@ func allReposReplyStub(t *testing.T, skipped []daemon.SkippedRepo, err error) {
 func TestSkippedRepoAllReposCarrier(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(220, 1)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil // the active repo is healthy
 	}
 	allReposReplyStub(t, []daemon.SkippedRepo{{
@@ -61,7 +61,7 @@ func TestSkippedRepoScopedMergePreservesUnscopedSet(t *testing.T) {
 	allReposReplyStub(t, []daemon.SkippedRepo{{
 		RepoID: "corrupted-elsewhere", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON,
 	}}, nil)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	_, _ = h.Update(h.fetchSnapshotCmd()())
@@ -89,7 +89,7 @@ func TestSkippedRepoScopedMergePreservesUnscopedSet(t *testing.T) {
 func TestSkippedRepoAllReposClear(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(400, 1)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	allReposReplyStub(t, []daemon.SkippedRepo{{
@@ -153,7 +153,7 @@ func TestSkippedRepoLabelPrefersProjectRoot(t *testing.T) {
 	allReposReplyStub(t, []daemon.SkippedRepo{{
 		RepoID: "corrupted-elsewhere", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON,
 	}}, nil)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	_, _ = h.Update(h.fetchSnapshotCmd()())

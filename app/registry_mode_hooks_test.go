@@ -292,7 +292,7 @@ func TestHandleQuit_RegistryModeStrayDirtyHookEditDoesNotTrapQuit(t *testing.T) 
 // with an active project selected.
 func TestSwitchProjectFromRegistryModeMakesHooksEditableAgain(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	// Start in registry mode with the pane read-only, as showHooksOverlay would
@@ -321,7 +321,7 @@ func TestSwitchProjectFromRegistryModeMakesHooksEditableAgain(t *testing.T) {
 // reason.
 func TestSwitchProjectFromRegistryModeMakesHooksEditableWhenConfigResolveFails(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	// Start in registry mode with the pane read-only.

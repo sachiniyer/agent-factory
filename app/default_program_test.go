@@ -142,7 +142,9 @@ func TestSwitchProjectMakesTheDefaultProgramFollowConfig(t *testing.T) {
 	clearDaemonTarget(t)
 
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) { return daemon.SnapshotResponse{}, nil }
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
 	h.programChoice = newProgramChoice(tmux.ProgramGemini, "", h.appConfig)
 
 	root := initTestGitRepo(t)
