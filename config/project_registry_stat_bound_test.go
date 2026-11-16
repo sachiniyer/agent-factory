@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,9 +31,16 @@ import (
 // fast, and lets every other path answer normally. The cleanup releases the
 // blocked goroutines and lets every still-wedged flight finish before the seam
 // is restored, so no later test joins a flight still parked on this seam.
-func wedgeStatForTest(t *testing.T, root string) {
+//
+// It returns an entered counter that records how many times the seam was
+// invoked for a path at or under root. A regression that bypasses fsprobe.Stat
+// (e.g. reverting projectPathExists to a direct os.Stat) would hit the
+// responsive tempdir root and return immediately, never touching the seam, so
+// entered() stays 0 — that is the regression this counter exists to catch.
+func wedgeStatForTest(t *testing.T, root string) (entered func() int) {
 	t.Helper()
 	release := make(chan struct{})
+	var calls atomic.Int32
 	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
 	t.Cleanup(func() {
 		close(release)
@@ -41,11 +49,13 @@ func wedgeStatForTest(t *testing.T, root string) {
 	})
 	t.Cleanup(fsprobe.SetStatPathForTest(func(path string) (os.FileInfo, error) {
 		if path == root || (root != "" && len(path) > len(root) && path[len(root)] == filepath.Separator && path[:len(root)] == root) {
+			calls.Add(1)
 			<-release
 			return nil, os.ErrNotExist
 		}
 		return os.Stat(path)
 	}))
+	return func() int { return int(calls.Load()) }
 }
 
 // TestProjectPathExists_BoundsAWedgedStat pins the regression: a wedged stat
@@ -63,7 +73,7 @@ func TestProjectPathExists_BoundsAWedgedStat(t *testing.T) {
 	require.False(t, projectPathExists(filepath.Join(root, "gone")),
 		"premise: a determinately-absent path is the one honest false")
 
-	wedgeStatForTest(t, root)
+	entered := wedgeStatForTest(t, root)
 
 	start := time.Now()
 	got := projectPathExists(root)
@@ -71,6 +81,8 @@ func TestProjectPathExists_BoundsAWedgedStat(t *testing.T) {
 		"a wedged stat must not park the event loop the registry read runs on")
 	assert.True(t, got,
 		"a wedged stat is evidence of nothing: the root stays present rather than vanishing behind a stat nobody could perform")
+	require.Greater(t, entered(), 0,
+		"projectPathExists must route the stat through fsprobe.Stat; a direct os.Stat regression would read the responsive tempdir and never touch the seam")
 }
 
 // TestListProjects_BoundsAWedgedRootStat is the end-to-end smoke for the
@@ -95,7 +107,7 @@ func TestListProjects_BoundsAWedgedRootStat(t *testing.T) {
 	require.True(t, projects[0].PathExists, "premise: the registered root is present on a healthy mount")
 	require.Equal(t, registered.ID, projects[0].ID)
 
-	wedgeStatForTest(t, registered.Root)
+	entered := wedgeStatForTest(t, registered.Root)
 
 	type result struct {
 		projects []Project
@@ -114,6 +126,8 @@ func TestListProjects_BoundsAWedgedRootStat(t *testing.T) {
 		assert.True(t, r.projects[0].PathExists,
 			"a wedged stat fails closed to present, so the project does not vanish from the switcher union")
 		assert.Equal(t, registered.ID, r.projects[0].ID)
+		require.Greater(t, entered(), 0,
+			"ListProjects must route the per-root stat through fsprobe.Stat; a direct os.Stat regression would read the responsive tempdir and never touch the seam")
 	case <-time.After(5 * time.Second):
 		t.Fatal("ListProjects did not return: a registered project on a wedged mount parked the registry read on the event loop")
 	}
@@ -142,8 +156,12 @@ func TestListProjects_BoundsAcrossManyWedgedRoots(t *testing.T) {
 	// Wedge the stat for every registered root at once: a single seam blocks
 	// any of them, the way several roots on the same stalled mount never
 	// answer. Per-flight bound is 80 ms, so a sequential read would take
-	// ~480 ms while a concurrent read takes ~80 ms.
+	// ~480 ms while a concurrent read takes ~80 ms. The entered counter
+	// records seam invocations so a regression to a direct os.Stat (which
+	// would read the responsive tempdir roots and never touch the seam) is
+	// caught here too.
 	release := make(chan struct{})
+	var seamCalls atomic.Int32
 	restoreTimeout := fsprobe.SetProbeTimeoutForTest(80 * time.Millisecond)
 	t.Cleanup(func() {
 		close(release)
@@ -153,6 +171,7 @@ func TestListProjects_BoundsAcrossManyWedgedRoots(t *testing.T) {
 	t.Cleanup(fsprobe.SetStatPathForTest(func(path string) (os.FileInfo, error) {
 		for _, root := range roots {
 			if path == root || (len(path) > len(root) && path[len(root)] == filepath.Separator && path[:len(root)] == root) {
+				seamCalls.Add(1)
 				<-release
 				return nil, os.ErrNotExist
 			}
@@ -182,6 +201,8 @@ func TestListProjects_BoundsAcrossManyWedgedRoots(t *testing.T) {
 		}
 		require.Less(t, r.elapsed, 250*time.Millisecond,
 			"distinct wedged roots were stat sequentially and parked the registry read on the event loop (took %s)", r.elapsed)
+		require.Greater(t, int(seamCalls.Load()), 0,
+			"ListProjects must route the per-root stat through fsprobe.Stat; a direct os.Stat regression would read the responsive tempdir roots and never touch the seam")
 	case <-time.After(2 * time.Second):
 		t.Fatal("ListProjects did not return: distinct wedged roots parked the registry read on the event loop")
 	}
