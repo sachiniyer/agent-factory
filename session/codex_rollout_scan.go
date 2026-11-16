@@ -353,7 +353,14 @@ func codexRolloutHasPrompt(path, prompt string, fromOffset int64) (bool, error) 
 	return false, nil
 }
 
-func openCodexRollout(path string) (*os.File, error) {
+// openCodexRollout opens a Codex rollout for a bounded read. It is a var so a
+// test can stand in for a wedged mount's open (#7279): the follow/capture loop
+// reads a held rollout's header synchronously on every rearm, so the open and
+// the fstat/IsRegular checks below run inside fsprobe's per-path bound when
+// readCodexRolloutFirstLine routes through ReadFileWithOpen. O_NOFOLLOW rejects
+// a symlink planted at the leaf, and O_NONBLOCK keeps a FIFO planted there
+// from hanging it; both are no-ops on the regular file a real rollout is.
+var openCodexRollout = func(path string) (*os.File, error) {
 	file, err := os.OpenFile(
 		path,
 		os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,
@@ -385,30 +392,37 @@ const codexSessionMetaReadCap = 8 << 20
 
 var errCodexSessionMetaOverBound = fmt.Errorf("first record exceeds %d-byte bound", codexSessionMetaReadCap)
 
+// readCodexRolloutFirstLine reads the first line of the rollout at path — its
+// session_meta record — inside fsprobe's per-path bound (#7279). The header
+// read runs on the follow/capture loop's every rearm and on the
+// set-conversation RPC handler, both of which a wedged CODEX_HOME must not hang:
+// the open and the read run in one bounded flight, and one that does not answer
+// is the ErrProbeTimedOut + context.DeadlineExceeded non-answer, which every
+// caller reads as an unclassifiable (not absent) header.
 func readCodexRolloutFirstLine(path string) ([]byte, error) {
-	file, err := openCodexRollout(path)
+	got, err := fsprobe.ReadFileWithOpen(path, openCodexRollout, func(file *os.File) (any, error) {
+		reader := bufio.NewReader(file)
+		var line []byte
+		for {
+			fragment, rerr := reader.ReadSlice('\n')
+			line = append(line, fragment...)
+			if len(line) > codexSessionMetaReadCap {
+				return nil, fmt.Errorf("read Codex rollout %s: %w", path, errCodexSessionMetaOverBound)
+			}
+			switch {
+			case rerr == nil, errors.Is(rerr, io.EOF):
+				return bytes.TrimSuffix(line, []byte{'\n'}), nil
+			case errors.Is(rerr, bufio.ErrBufferFull):
+				continue
+			default:
+				return nil, fmt.Errorf("read Codex rollout %s: %w", path, rerr)
+			}
+		}
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
-
-	reader := bufio.NewReader(file)
-	var line []byte
-	for {
-		fragment, err := reader.ReadSlice('\n')
-		line = append(line, fragment...)
-		if len(line) > codexSessionMetaReadCap {
-			return nil, fmt.Errorf("read Codex rollout %s: %w", path, errCodexSessionMetaOverBound)
-		}
-		switch {
-		case err == nil, errors.Is(err, io.EOF):
-			return bytes.TrimSuffix(line, []byte{'\n'}), nil
-		case errors.Is(err, bufio.ErrBufferFull):
-			continue
-		default:
-			return nil, fmt.Errorf("read Codex rollout %s: %w", path, err)
-		}
-	}
+	return got.([]byte), nil
 }
 
 func jsonValueContainsPrompt(value any, prompt string) bool {

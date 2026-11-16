@@ -22,6 +22,23 @@ var readFileFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 // the caller has gone.
 func ReadFileWith(path string, read func(*os.File) (any, error)) (any, error) {
 	open := openPath.load() // in the caller, as ReadDir's
+	return readFileWith(path, open, read)
+}
+
+// ReadFileWithOpen is ReadFileWith with a caller-provided open, for a reader
+// whose open needs flags os.Open does not carry: a Codex rollout is opened with
+// O_NOFOLLOW so a symlink planted at its path is not followed, and O_NONBLOCK
+// so a FIFO planted there cannot hang it. The open runs inside the same bounded
+// flight as the read, so a wedged mount's open cannot hold the caller the way
+// its read cannot (#7279), and a retry while the stuck open/read is still
+// blocked is refused the same way. open must not keep the file: the flight
+// closes it when read returns, which for an abandoned flight is after the
+// caller has gone.
+func ReadFileWithOpen(path string, open func(string) (*os.File, error), read func(*os.File) (any, error)) (any, error) {
+	return readFileWith(path, open, read)
+}
+
+func readFileWith(path string, open func(string) (*os.File, error), read func(*os.File) (any, error)) (any, error) {
 	return runBounded(path, readFileFlights, "file read",
 		"the filesystem did not answer the read",
 		func() (any, error) {
