@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/log"
@@ -39,6 +40,21 @@ const (
 	carryTreeMaxDepth   = 8
 	carryTreeMaxEntries = 10000
 )
+
+// carryLookupStandIn is a test's stand-in for a wedged mount under the carry's
+// descriptor walk, nil in production (#7383). Called with each path before the
+// syscall that reaches it (op is "open", "openat", "fstatat", "lstat",
+// "fstat" or "read"), it can block as that syscall would on a mount that
+// stopped answering. Atomic, so a walk that outlives its bound never reads a
+// later test's stand-in (#7278 review).
+var carryLookupStandIn atomic.Pointer[func(op, path string)]
+
+// carryLookup runs the stand-in, if any, before op on path.
+func carryLookup(op, path string) {
+	if standIn := carryLookupStandIn.Load(); standIn != nil {
+		(*standIn)(op, path)
+	}
+}
 
 // carryError pairs a clause the replacement's notice can quote with the
 // underlying cause, which only the daemon log needs.
@@ -195,6 +211,7 @@ func openCarryRoot(path string, follow bool) (*os.File, error) {
 		flags |= unix.O_NOFOLLOW
 	}
 	var fd int
+	carryLookup("open", path)
 	err := retryEINTR(func() (err error) {
 		fd, err = unix.Open(path, flags, 0)
 		return err
@@ -202,6 +219,7 @@ func openCarryRoot(path string, follow bool) (*os.File, error) {
 	if err != nil {
 		pathErr := &os.PathError{Op: "open", Path: path, Err: err}
 		if !follow && !errors.Is(err, unix.ENOENT) {
+			carryLookup("lstat", path)
 			if info, statErr := os.Lstat(path); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
 				return nil, &carrySymlinkError{path: path, err: pathErr}
 			}
@@ -214,6 +232,7 @@ func openCarryRoot(path string, follow bool) (*os.File, error) {
 func openCarryAt(dir *os.File, name string, flags int, mode uint32) (*os.File, error) {
 	path := filepath.Join(dir.Name(), name)
 	var fd int
+	carryLookup("openat", path)
 	err := retryEINTR(func() (err error) {
 		fd, err = unix.Openat(int(dir.Fd()), name, flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 		return err
@@ -221,6 +240,7 @@ func openCarryAt(dir *os.File, name string, flags int, mode uint32) (*os.File, e
 	if err != nil {
 		pathErr := &os.PathError{Op: "openat", Path: path, Err: err}
 		if !errors.Is(err, unix.ENOENT) && flags&unix.O_CREAT == 0 {
+			carryLookup("fstatat", path)
 			var st unix.Stat_t
 			if unix.Fstatat(int(dir.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW) == nil &&
 				st.Mode&unix.S_IFMT == unix.S_IFLNK {
@@ -273,6 +293,7 @@ func openCarryFileAt(dir *os.File, name string) (*os.File, os.FileInfo, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	carryLookup("fstat", file.Name())
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
@@ -671,6 +692,7 @@ func carryPrefixMatches(a, b *os.File, n int64) (bool, error) {
 }
 
 func readFullAt(file *os.File, buf []byte, offset int64) error {
+	carryLookup("read", file.Name())
 	n, err := file.ReadAt(buf, offset)
 	if n == len(buf) {
 		return nil

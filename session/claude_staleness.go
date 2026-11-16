@@ -365,16 +365,20 @@ func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationD
 // claudeTranscriptExtends reports whether the transcript longer begins with
 // every byte of shorter. One af cannot read extends nothing.
 func claudeTranscriptExtends(longer, shorter claudeTranscript) bool {
-	long, err := os.Open(filepath.Join(longer.dir, longer.name))
+	longPath, shortPath := filepath.Join(longer.dir, longer.name), filepath.Join(shorter.dir, shorter.name)
+	carryLookup("open", longPath)
+	long, err := os.Open(longPath)
 	if err != nil {
 		return false
 	}
 	defer long.Close()
-	short, err := os.Open(filepath.Join(shorter.dir, shorter.name))
+	carryLookup("open", shortPath)
+	short, err := os.Open(shortPath)
 	if err != nil {
 		return false
 	}
 	defer short.Close()
+	carryLookup("fstat", longPath)
 	longInfo, err := long.Stat()
 	if err != nil {
 		return false
