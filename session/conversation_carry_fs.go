@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/log"
@@ -39,6 +40,46 @@ const (
 	carryTreeMaxDepth   = 8
 	carryTreeMaxEntries = 10000
 )
+
+// carryLookupStandIn is a test's stand-in for a wedged mount under the carry's
+// descriptor walk, nil in production (#7383). It is called with each path
+// before the syscall that reaches it (op is "open", "openat", "fstatat",
+// "lstat", "fstat" or "read"), and can block as that syscall would on a mount
+// that stopped answering. A paced walk loads it once, when the walk begins
+// (pacedCarryWalk), so a walk that outlives its test only ever calls the
+// stand-in it began with. The copy's unpaced walk loads it at each syscall.
+var carryLookupStandIn atomic.Pointer[func(op, path string)]
+
+// carryPace marks each syscall a descriptor walk makes, just before it makes
+// it (#7383). A walk the carry's plan runs is paced: step restarts the walk's
+// bound (fsprobe.Paced), so the bound is per syscall and never per judgement,
+// and a large copy whose every read answers is judged in full whatever its
+// size. The zero value paces nothing; the copy, which runs after the outgoing
+// agent stops and is not bounded, walks with it.
+type carryPace struct {
+	step    func()
+	standIn *func(op, path string)
+	loaded  bool
+}
+
+// pacedCarryWalk is the pace of a walk that reports each syscall to step.
+func pacedCarryWalk(step func()) carryPace {
+	return carryPace{step: step, standIn: carryLookupStandIn.Load(), loaded: true}
+}
+
+// at marks op on path, before the syscall.
+func (p carryPace) at(op, path string) {
+	if p.step != nil {
+		p.step()
+	}
+	standIn := p.standIn
+	if !p.loaded {
+		standIn = carryLookupStandIn.Load()
+	}
+	if standIn != nil {
+		(*standIn)(op, path)
+	}
+}
 
 // carryError pairs a clause the replacement's notice can quote with the
 // underlying cause, which only the daemon log needs.
@@ -177,24 +218,25 @@ func (r carryRoot) dir() string {
 // openCarryAnchor opens the provider home r names. The zero root names no
 // home: a committed carry whose source account is gone reads as a missing
 // source.
-func openCarryAnchor(r carryRoot) (*os.File, error) {
+func openCarryAnchor(p carryPace, r carryRoot) (*os.File, error) {
 	if r.base == "" {
 		return nil, &os.PathError{Op: "open", Path: "", Err: fs.ErrNotExist}
 	}
-	base, err := openCarryRoot(r.base, r.follow)
+	base, err := openCarryRoot(p, r.base, r.follow)
 	if err != nil || len(r.components) == 0 {
 		return base, err
 	}
 	defer base.Close()
-	return openCarryDirChain(base, r.components, false)
+	return openCarryDirChain(p, base, r.components, false)
 }
 
-func openCarryRoot(path string, follow bool) (*os.File, error) {
+func openCarryRoot(p carryPace, path string, follow bool) (*os.File, error) {
 	flags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
 	if !follow {
 		flags |= unix.O_NOFOLLOW
 	}
 	var fd int
+	p.at("open", path)
 	err := retryEINTR(func() (err error) {
 		fd, err = unix.Open(path, flags, 0)
 		return err
@@ -202,6 +244,7 @@ func openCarryRoot(path string, follow bool) (*os.File, error) {
 	if err != nil {
 		pathErr := &os.PathError{Op: "open", Path: path, Err: err}
 		if !follow && !errors.Is(err, unix.ENOENT) {
+			p.at("lstat", path)
 			if info, statErr := os.Lstat(path); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
 				return nil, &carrySymlinkError{path: path, err: pathErr}
 			}
@@ -211,9 +254,10 @@ func openCarryRoot(path string, follow bool) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil
 }
 
-func openCarryAt(dir *os.File, name string, flags int, mode uint32) (*os.File, error) {
+func openCarryAt(p carryPace, dir *os.File, name string, flags int, mode uint32) (*os.File, error) {
 	path := filepath.Join(dir.Name(), name)
 	var fd int
+	p.at("openat", path)
 	err := retryEINTR(func() (err error) {
 		fd, err = unix.Openat(int(dir.Fd()), name, flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, mode)
 		return err
@@ -221,6 +265,7 @@ func openCarryAt(dir *os.File, name string, flags int, mode uint32) (*os.File, e
 	if err != nil {
 		pathErr := &os.PathError{Op: "openat", Path: path, Err: err}
 		if !errors.Is(err, unix.ENOENT) && flags&unix.O_CREAT == 0 {
+			p.at("fstatat", path)
 			var st unix.Stat_t
 			if unix.Fstatat(int(dir.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW) == nil &&
 				st.Mode&unix.S_IFMT == unix.S_IFLNK {
@@ -234,26 +279,26 @@ func openCarryAt(dir *os.File, name string, flags int, mode uint32) (*os.File, e
 
 // openCarryDirAt opens the directory name beneath dir without following a
 // symlink. With create, a missing directory is made owner-only first.
-func openCarryDirAt(dir *os.File, name string, create bool) (*os.File, error) {
-	opened, err := openCarryAt(dir, name, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+func openCarryDirAt(p carryPace, dir *os.File, name string, create bool) (*os.File, error) {
+	opened, err := openCarryAt(p, dir, name, unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err == nil || !create || !errors.Is(err, fs.ErrNotExist) {
 		return opened, err
 	}
 	if err := unix.Mkdirat(int(dir.Fd()), name, carryDirMode); err != nil && !errors.Is(err, unix.EEXIST) {
 		return nil, &os.PathError{Op: "mkdirat", Path: filepath.Join(dir.Name(), name), Err: err}
 	}
-	return openCarryAt(dir, name, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	return openCarryAt(p, dir, name, unix.O_RDONLY|unix.O_DIRECTORY, 0)
 }
 
 // openCarryDirChain descends components beneath root. The returned directory
 // is always a fresh descriptor the caller must close; root stays open.
-func openCarryDirChain(root *os.File, components []string, create bool) (*os.File, error) {
+func openCarryDirChain(p carryPace, root *os.File, components []string, create bool) (*os.File, error) {
 	if len(components) == 0 {
 		return nil, errors.New("carry path has no directory beneath the account home")
 	}
 	current := root
 	for _, name := range components {
-		next, err := openCarryDirAt(current, name, create)
+		next, err := openCarryDirAt(p, current, name, create)
 		if current != root {
 			_ = current.Close()
 		}
@@ -268,11 +313,12 @@ func openCarryDirChain(root *os.File, components []string, create bool) (*os.Fil
 // openCarryFileAt opens a regular file beneath dir for reading. O_NONBLOCK
 // keeps a FIFO planted at the path from hanging the swap; it has no effect on a
 // regular file.
-func openCarryFileAt(dir *os.File, name string) (*os.File, os.FileInfo, error) {
-	file, err := openCarryAt(dir, name, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+func openCarryFileAt(p carryPace, dir *os.File, name string) (*os.File, os.FileInfo, error) {
+	file, err := openCarryAt(p, dir, name, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, nil, err
 	}
+	p.at("fstat", file.Name())
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
@@ -287,36 +333,36 @@ func openCarryFileAt(dir *os.File, name string) (*os.File, os.FileInfo, error) {
 
 // openCarryArtifact opens rel beneath home: a regular file reached without
 // following a symlink below home's anchor. The caller closes the file.
-func openCarryArtifact(home carryRoot, rel string) (*os.File, os.FileInfo, error) {
+func openCarryArtifact(p carryPace, home carryRoot, rel string) (*os.File, os.FileInfo, error) {
 	dirs, name, err := splitCarryPath(rel, true)
 	if err != nil {
 		return nil, nil, err
 	}
-	root, err := openCarryAnchor(home)
+	root, err := openCarryAnchor(p, home)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer root.Close()
-	dir, err := openCarryDirChain(root, dirs, false)
+	dir, err := openCarryDirChain(p, root, dirs, false)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer dir.Close()
-	return openCarryFileAt(dir, name)
+	return openCarryFileAt(p, dir, name)
 }
 
 // probeCarryDir returns the error, if any, from opening the directory rel
 // beneath home; a missing directory is not an error.
-func probeCarryDir(home carryRoot, rel string) error {
+func probeCarryDir(p carryPace, home carryRoot, rel string) error {
 	parts, _, err := splitCarryPath(rel, false)
 	if err != nil {
 		return err
 	}
-	root, err := openCarryAnchor(home)
+	root, err := openCarryAnchor(p, home)
 	if err == nil {
 		defer root.Close()
 		var dir *os.File
-		if dir, err = openCarryDirChain(root, parts, false); err == nil {
+		if dir, err = openCarryDirChain(p, root, parts, false); err == nil {
 			return dir.Close()
 		}
 	}
@@ -403,22 +449,22 @@ func carryConversationFileOutcome(srcHome, dstHome carryRoot, rel string, requir
 	if err != nil {
 		return carryFileOutcome{}, carryFailure("af refused an unsafe conversation path", err)
 	}
-	dstRoot, err := openCarryAnchor(dstHome)
+	dstRoot, err := openCarryAnchor(carryPace{}, dstHome)
 	if err != nil {
 		return carryFileOutcome{}, carryFailureAt("the new account's home could not be opened safely", err)
 	}
 	defer dstRoot.Close()
-	dstDir, err := openCarryDirChain(dstRoot, dirs, true)
+	dstDir, err := openCarryDirChain(carryPace{}, dstRoot, dirs, true)
 	if err != nil {
 		return carryFileOutcome{}, carryFailureAt("the new account's conversation directory is not a plain directory", err)
 	}
 	defer dstDir.Close()
 
 	var srcDir *os.File
-	srcRoot, err := openCarryAnchor(srcHome)
+	srcRoot, err := openCarryAnchor(carryPace{}, srcHome)
 	if err == nil {
 		defer srcRoot.Close()
-		srcDir, err = openCarryDirChain(srcRoot, dirs, false)
+		srcDir, err = openCarryDirChain(carryPace{}, srcRoot, dirs, false)
 	}
 	switch {
 	case err == nil:
@@ -441,7 +487,7 @@ func carryFileAt(srcDir, dstDir *os.File, name string, role carryFileRole) (carr
 	var srcInfo os.FileInfo
 	if srcDir != nil {
 		var err error
-		src, srcInfo, err = openCarryFileAt(srcDir, name)
+		src, srcInfo, err = openCarryFileAt(carryPace{}, srcDir, name)
 		switch {
 		case err == nil:
 			defer src.Close()
@@ -451,7 +497,7 @@ func carryFileAt(srcDir, dstDir *os.File, name string, role carryFileRole) (carr
 			return carryFileOutcome{}, carryFailureAt("the conversation could not be read safely from the previous account", err)
 		}
 	}
-	dst, dstInfo, err := openCarryFileAt(dstDir, name)
+	dst, dstInfo, err := openCarryFileAt(carryPace{}, dstDir, name)
 	switch {
 	case err == nil:
 		defer dst.Close()
@@ -461,7 +507,7 @@ func carryFileAt(srcDir, dstDir *os.File, name string, role carryFileRole) (carr
 		return carryFileOutcome{}, carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)
 	}
 
-	verdict, err := judgeCarryFile(src, srcInfo, dst, dstInfo, role)
+	verdict, err := judgeCarryFile(carryPace{}, src, srcInfo, dst, dstInfo, role)
 	if err != nil {
 		return carryFileOutcome{}, err
 	}
@@ -511,7 +557,7 @@ const (
 // new carry's plan asks it too, against the target's copy before the outgoing
 // runtime stops, so the plan refuses what the copy would — the property
 // require_carry needs to refuse a move rather than start it fresh (#7273).
-func judgeCarryFile(src *os.File, srcInfo os.FileInfo, dst *os.File, dstInfo os.FileInfo, role carryFileRole) (carryVerdict, error) {
+func judgeCarryFile(p carryPace, src *os.File, srcInfo os.FileInfo, dst *os.File, dstInfo os.FileInfo, role carryFileRole) (carryVerdict, error) {
 	if src == nil {
 		if dst != nil && role == carryCommittedTranscript {
 			// A committed re-run whose source account is gone: the landed
@@ -543,7 +589,7 @@ func judgeCarryFile(src *os.File, srcInfo os.FileInfo, dst *os.File, dstInfo os.
 		}
 		return carryInstallSource, carryFailure(carryTranscriptEmptyReason, nil)
 	}
-	same, err := carryPrefixMatches(src, dst, min(srcSize, dstSize))
+	same, err := carryPrefixMatches(p, src, dst, min(srcSize, dstSize))
 	if err != nil {
 		return carryInstallSource, carryFailure("comparing it with the new account's copy failed", err)
 	}
@@ -588,12 +634,12 @@ func openCarryOutcomeDir(dstHome carryRoot, rel string) (*os.File, string, error
 	if err != nil {
 		return nil, "", err
 	}
-	dstRoot, err := openCarryAnchor(dstHome)
+	dstRoot, err := openCarryAnchor(carryPace{}, dstHome)
 	if err != nil {
 		return nil, "", err
 	}
 	defer dstRoot.Close()
-	dstDir, err := openCarryDirChain(dstRoot, dirs, false)
+	dstDir, err := openCarryDirChain(carryPace{}, dstRoot, dirs, false)
 	if err != nil {
 		return nil, "", err
 	}
@@ -650,16 +696,16 @@ func restoreCarryDisplacement(dstHome carryRoot, rel string, outcome carryFileOu
 }
 
 // carryPrefixMatches reports whether the first n bytes of a and b are equal.
-func carryPrefixMatches(a, b *os.File, n int64) (bool, error) {
+func carryPrefixMatches(p carryPace, a, b *os.File, n int64) (bool, error) {
 	const chunk = 64 << 10
 	left := make([]byte, chunk)
 	right := make([]byte, chunk)
 	for offset := int64(0); offset < n; {
 		size := min(int64(chunk), n-offset)
-		if err := readFullAt(a, left[:size], offset); err != nil {
+		if err := readFullAt(p, a, left[:size], offset); err != nil {
 			return false, err
 		}
-		if err := readFullAt(b, right[:size], offset); err != nil {
+		if err := readFullAt(p, b, right[:size], offset); err != nil {
 			return false, err
 		}
 		if !bytes.Equal(left[:size], right[:size]) {
@@ -670,7 +716,8 @@ func carryPrefixMatches(a, b *os.File, n int64) (bool, error) {
 	return true, nil
 }
 
-func readFullAt(file *os.File, buf []byte, offset int64) error {
+func readFullAt(p carryPace, file *os.File, buf []byte, offset int64) error {
+	p.at("read", file.Name())
 	n, err := file.ReadAt(buf, offset)
 	if n == len(buf) {
 		return nil
@@ -699,7 +746,7 @@ func replaceCarryFile(dir *os.File, name string, src *os.File, size int64, prese
 		return "", carryFailure("copying it into the new account failed", err)
 	}
 	tmpName := ".af-carry-" + hex.EncodeToString(nonce[:]) + ".tmp"
-	tmp, err := openCarryAt(dir, tmpName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, carryFileMode)
+	tmp, err := openCarryAt(carryPace{}, dir, tmpName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, carryFileMode)
 	if err != nil {
 		return "", carryFailure("copying it into the new account failed", err)
 	}
@@ -776,7 +823,7 @@ func carryConversationTree(srcHome, dstHome carryRoot, rel string) error {
 	if err != nil {
 		return err
 	}
-	srcRoot, err := openCarryAnchor(srcHome)
+	srcRoot, err := openCarryAnchor(carryPace{}, srcHome)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -784,7 +831,7 @@ func carryConversationTree(srcHome, dstHome carryRoot, rel string) error {
 		return err
 	}
 	defer srcRoot.Close()
-	srcDir, err := openCarryDirChain(srcRoot, parts, false)
+	srcDir, err := openCarryDirChain(carryPace{}, srcRoot, parts, false)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -792,12 +839,12 @@ func carryConversationTree(srcHome, dstHome carryRoot, rel string) error {
 		return err
 	}
 	defer srcDir.Close()
-	dstRoot, err := openCarryAnchor(dstHome)
+	dstRoot, err := openCarryAnchor(carryPace{}, dstHome)
 	if err != nil {
 		return err
 	}
 	defer dstRoot.Close()
-	dstDir, err := openCarryDirChain(dstRoot, parts, true)
+	dstDir, err := openCarryDirChain(carryPace{}, dstRoot, parts, true)
 	if err != nil {
 		return err
 	}
@@ -840,12 +887,12 @@ func copyCarryTree(src, dst *os.File, depth int, budget *int) error {
 }
 
 func copyCarrySubtree(src, dst *os.File, name string, depth int, budget *int) error {
-	srcChild, err := openCarryDirAt(src, name, false)
+	srcChild, err := openCarryDirAt(carryPace{}, src, name, false)
 	if err != nil {
 		return err
 	}
 	defer srcChild.Close()
-	dstChild, err := openCarryDirAt(dst, name, true)
+	dstChild, err := openCarryDirAt(carryPace{}, dst, name, true)
 	if err != nil {
 		return err
 	}

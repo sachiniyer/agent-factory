@@ -28,6 +28,7 @@ const (
 	carryTranscriptMissingReason       = "its transcript is missing from the previous account's home"
 	carryRolloutMissingReason          = "its rollout is missing from the previous account's home"
 	carryRolloutUnlookedReason         = "af could not look up its rollout in the previous account's home"
+	carryUnlookedReason                = "af could not look up the conversation's files in the account homes it carries between"
 	carryTranscriptEmptyReason         = "its transcript is empty in the previous account's home"
 	carryRolloutEmptyReason            = "its rollout is empty in the previous account's home"
 	carryTargetDivergesReason          = "the new account already holds a different copy of this conversation"
@@ -101,6 +102,7 @@ var carryRefusalCodeOf = map[string]string{
 	carryTranscriptMissingReason:       handoff.CarryMissing,
 	carryRolloutMissingReason:          handoff.CarryMissing,
 	carryRolloutUnlookedReason:         handoff.CarryUnverified,
+	carryUnlookedReason:                handoff.CarryUnverified,
 	carryTranscriptEmptyReason:         handoff.CarryMissing,
 	carryRolloutEmptyReason:            handoff.CarryMissing,
 	carryStoreUnlistedReason:           handoff.CarryUnverified,

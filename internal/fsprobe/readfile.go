@@ -59,9 +59,7 @@ var readFileQuestionFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 // flight is stuck; a caller asking another question of the path gets its own
 // flight. A flight's answer of a type other than T is an error, never a panic.
 func ReadFileWithOpen[T any](question, path string, open func(string) (*os.File, error), read func(*os.File) (T, error)) (T, error) {
-	var zero T
-	got, err := runBoundedKeyed(question+"\x00"+path, path, readFileQuestionFlights, question,
-		"the filesystem did not answer the read",
+	return boundedAs[T](readFileQuestionFlights, question, path, "the filesystem did not answer the read",
 		func() (any, error) {
 			file, err := open(path)
 			if err != nil {
@@ -70,12 +68,19 @@ func ReadFileWithOpen[T any](question, path string, open func(string) (*os.File,
 			defer file.Close()
 			return read(file)
 		})
+}
+
+// boundedAs runs run in a flight of flights keyed by question and key, and
+// type-checks its answer.
+func boundedAs[T any](flights *flightRegistry, question, key, detail string, run func() (any, error)) (T, error) {
+	var zero T
+	got, err := runBoundedKeyed(question+"\x00"+key, key, flights, question, detail, run)
 	if err != nil {
 		return zero, err
 	}
 	answer, ok := got.(T)
 	if !ok {
-		return zero, fmt.Errorf("%s of %s answered with %T, not %T", question, path, got, zero)
+		return zero, fmt.Errorf("%s of %s answered with %T, not %T", question, key, got, zero)
 	}
 	return answer, nil
 }
