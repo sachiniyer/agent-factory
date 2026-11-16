@@ -7,6 +7,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 // Codex files a thread under more than the one name codexRolloutFileRE reads
@@ -112,22 +115,28 @@ func codexRolloutCompressed(path string) bool {
 // rollout back out as plain when it is resumed, and publishes the plain file
 // before it removes the compressed one, so a thread caught between the two
 // walks is found, not missing (#7134 review F-3).
-func recordedCodexRolloutInAnotherForm(codexHome, id string) (string, resumeDecline) {
+func recordedCodexRolloutInAnotherForm(codexHome, id string) (path string, decline resumeDecline, unlooked bool) {
 	plain, forms, err := codexRolloutForms(codexHome, id)
 	switch {
 	case err != nil:
-		return "", declineResumeUnverified("af could not verify the recorded conversation against the Codex home this session uses")
+		return "", declineResumeUnverified("af could not verify the recorded conversation against the Codex home this session uses"), false
 	case len(plain) == 1:
-		return plain[0], resumeDecline{}
+		return plain[0], resumeDecline{}, false
 	case len(plain) > 1:
-		return "", declineResume(codexRolloutDuplicatedReason)
+		return "", declineResume(codexRolloutDuplicatedReason), false
 	}
 	var newest string
 	var newestAt time.Time
 	threadRollouts := 0
 	for _, path := range forms {
-		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() {
+		// Bounded (fsprobe, #7378). A form gone since the walk is skipped. One
+		// whose lstat did not answer, or failed, is no "no such form", which
+		// could decline the thread as missing: af cannot judge the thread.
+		info, err := fsprobe.Lstat(path)
+		switch {
+		case err != nil && !pathutil.IsAbsent(err):
+			return "", resumeDecline{}, true
+		case err != nil || !info.Mode().IsRegular():
 			continue
 		}
 		if m := codexRolloutFormRE.FindStringSubmatch(filepath.Base(path)); len(m) == 4 && m[2] == "" {
@@ -139,11 +148,11 @@ func recordedCodexRolloutInAnotherForm(codexHome, id string) (string, resumeDecl
 	}
 	switch {
 	case threadRollouts > 1:
-		return "", declineResume(codexRolloutDuplicatedReason)
+		return "", declineResume(codexRolloutDuplicatedReason), false
 	case newest == "":
-		return "", declineResume(codexRolloutMissingReason)
+		return "", declineResume(codexRolloutMissingReason), false
 	}
-	return newest, resumeDecline{}
+	return newest, resumeDecline{}, false
 }
 
 // codexCarryOtherFormsReason is why a carry does not take a thread Codex holds

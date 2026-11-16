@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
@@ -298,13 +299,46 @@ func codexRolloutIsSubagentSource(source json.RawMessage) bool {
 	return isSub
 }
 
-func codexRolloutHasPrompt(path, prompt string, fromOffset int64) (bool, error) {
-	file, err := openCodexRollout(path)
-	if err != nil {
-		return false, err
-	}
-	defer file.Close()
+// codexReceiptScanCap bounds the bytes one receipt scan reads past its
+// boundary. The briefing is the first turn the launch submits, so it lies just
+// past the boundary, after at most the session_meta record (itself capped at
+// codexSessionMetaReadCap) and the context items Codex records before the
+// first turn. A transcript that grows without limit must not make one poll
+// read without limit.
+const codexReceiptScanCap = 4 * codexSessionMetaReadCap
 
+// codexReceiptScanCapOverride is a test's lower cap, 0 in production. Atomic,
+// and loaded once in the caller, so an abandoned scan never reads a later
+// test's value.
+var codexReceiptScanCapOverride atomic.Int64
+
+func codexReceiptScanLimit() int64 {
+	if limit := codexReceiptScanCapOverride.Load(); limit > 0 {
+		return limit
+	}
+	return codexReceiptScanCap
+}
+
+// codexRolloutHasPrompt reports whether the rollout at path records prompt as
+// a user turn after fromOffset. The open, the seek and the read run in one
+// fsprobe flight (#7378): the receipt scan runs on every poll of a receipt
+// wait, which a wedged CODEX_HOME must not hang. A scan that does not answer
+// is the ErrProbeTimedOut + context.DeadlineExceeded non-answer.
+func codexRolloutHasPrompt(path, prompt string, fromOffset int64) (bool, error) {
+	// The flight's question names everything the read depends on, so only a
+	// scan for the same prompt from the same boundary joins it.
+	digest := fnv.New64a()
+	_, _ = digest.Write([]byte(prompt))
+	question := fmt.Sprintf("Codex rollout receipt scan (from byte %d, prompt %016x)", fromOffset, digest.Sum64())
+	limit := codexReceiptScanLimit()
+	return fsprobe.ReadFileWithOpen(question, path, codexRolloutBoundedOpen(), func(file *os.File) (bool, error) {
+		return scanCodexRolloutForPrompt(file, path, prompt, fromOffset, limit)
+	})
+}
+
+// scanCodexRolloutForPrompt is codexRolloutHasPrompt's read, on the opened
+// rollout.
+func scanCodexRolloutForPrompt(file *os.File, path, prompt string, fromOffset, limit int64) (bool, error) {
 	// Only turns appended after the boundary can be this launch's receipt: a
 	// tracked `codex resume` rollout can already hold the identical briefing
 	// from an earlier run (#5471 review). Events are appended as whole JSONL
@@ -316,7 +350,7 @@ func codexRolloutHasPrompt(path, prompt string, fromOffset int64) (bool, error) 
 	if _, err := file.Seek(fromOffset, io.SeekStart); err != nil {
 		return false, fmt.Errorf("seek Codex rollout %s: %w", path, err)
 	}
-	data, err := io.ReadAll(file)
+	data, err := io.ReadAll(io.LimitReader(file, limit))
 	if err != nil {
 		return false, fmt.Errorf("read Codex rollout %s: %w", path, err)
 	}
@@ -359,13 +393,15 @@ func codexRolloutHasPrompt(path, prompt string, fromOffset int64) (bool, error) 
 }
 
 // codexRolloutOpenStandIn is a test's stand-in for the open behind every
-// rollout header read (#7279), nil in production. It is atomic, and loaded
+// bounded rollout read, the header read (#7279) and the receipt scan (#7378);
+// nil in production. It is atomic, and loaded
 // once in the caller: a read that outlives its bound by design can still be
 // running when its test puts the real open back (#7278 review).
 var codexRolloutOpenStandIn atomic.Pointer[func(string) (*os.File, error)]
 
-// codexRolloutHeaderOpen is the open a header read runs inside its bound.
-func codexRolloutHeaderOpen() func(string) (*os.File, error) {
+// codexRolloutBoundedOpen is the open a bounded rollout read runs inside its
+// bound.
+func codexRolloutBoundedOpen() func(string) (*os.File, error) {
 	if open := codexRolloutOpenStandIn.Load(); open != nil {
 		return *open
 	}
@@ -419,7 +455,7 @@ const codexRolloutHeaderQuestion = "Codex rollout header read"
 // and one that does not answer is the ErrProbeTimedOut +
 // context.DeadlineExceeded non-answer (codexHeaderReadUnanswered).
 func readCodexRolloutFirstLine(path string) ([]byte, error) {
-	return fsprobe.ReadFileWithOpen(codexRolloutHeaderQuestion, path, codexRolloutHeaderOpen(), func(file *os.File) ([]byte, error) {
+	return fsprobe.ReadFileWithOpen(codexRolloutHeaderQuestion, path, codexRolloutBoundedOpen(), func(file *os.File) ([]byte, error) {
 		reader := bufio.NewReader(file)
 		var line []byte
 		for {

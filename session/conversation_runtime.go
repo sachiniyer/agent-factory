@@ -4,14 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
@@ -130,7 +130,10 @@ type codexRolloutVerdict struct {
 // the capture's ambiguity for the life of the generation. heldFor — the
 // expensive descriptor enumeration — runs only while unjudged or
 // re-judgeable candidates exist; its error makes the unjudged remainder
-// inconclusive ("could not look" must never arrive as "nobody holds it").
+// inconclusive ("could not look" must never arrive as "nobody holds it"). So
+// does a candidate whose containment a lookup could not settle (#7378): it
+// gets no verdict, so it is asked again next time rather than cached as
+// another process's thread.
 func judgeCodexRollouts(heldFor func() (map[string]struct{}, error), verdicts map[string]codexRolloutVerdict, mu *sync.Mutex, candidates []string) (attributed []string, inconclusive bool) {
 	now := time.Now()
 	mu.Lock()
@@ -155,17 +158,30 @@ func judgeCodexRollouts(heldFor func() (map[string]struct{}, error), verdicts ma
 	if err != nil {
 		return attributed, true
 	}
+	// The lookups run before the lock: each is bounded, but a bound is still
+	// a wait no other judgement should share.
 	set := newCodexHeldSet(held)
+	type judged struct {
+		ours, known bool
+	}
+	answers := make([]judged, len(pending))
+	for idx, path := range pending {
+		answers[idx].ours, answers[idx].known = set.contains(path)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	for _, path := range pending {
-		ours := set.contains(path)
-		verdicts[path] = codexRolloutVerdict{ours: ours, judgedAt: now}
-		if ours {
+	for idx, path := range pending {
+		answer := answers[idx]
+		if !answer.known {
+			inconclusive = true
+			continue
+		}
+		verdicts[path] = codexRolloutVerdict{ours: answer.ours, judgedAt: now}
+		if answer.ours {
 			attributed = append(attributed, path)
 		}
 	}
-	return attributed, false
+	return attributed, inconclusive
 }
 
 // fileID is a (device, inode) pair: the identity a file has regardless of
@@ -174,29 +190,25 @@ type fileID struct {
 	dev, ino uint64
 }
 
-// fileIdentityOf stats path into its kernel identity. Stat follows symlinks,
-// so an aliased path and the resolved path yield the same id.
-func fileIdentityOf(path string) (fileID, bool) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return fileID{}, false
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fileID{}, false
-	}
-	return fileID{dev: uint64(st.Dev), ino: uint64(st.Ino)}, true
-}
-
 // codexHeldSet answers "does the runtime hold this path" under every alias
 // shape: a store reached through a symlinked CODEX_HOME yields candidates
 // under the alias while kernel descriptor answers carry the resolved path —
 // and on darwin even EvalSymlinks output and vnode paths can differ in form
 // (/var vs /private/var). Identity comparison bypasses path spelling
 // entirely (#6847 review).
+//
+// Every lookup is bounded (fsprobe, #7378): the runtime's files and the store
+// may sit on a mount that stopped answering, and attribution is re-asked on
+// every poll. Only held rollouts are looked up. A held path is the kernel's
+// spelling of the file, so its name is the file's own, and only a held path
+// named like a rollout can be a candidate under another spelling.
 type codexHeldSet struct {
 	byPath map[string]struct{}
 	byID   map[fileID]struct{}
+	// unlooked is set when a held rollout's resolution or identity did not
+	// answer or failed. A candidate nothing proves held may be that rollout
+	// under another spelling, so it is not provably another process's.
+	unlooked bool
 }
 
 func newCodexHeldSet(raw map[string]struct{}) *codexHeldSet {
@@ -206,30 +218,54 @@ func newCodexHeldSet(raw map[string]struct{}) *codexHeldSet {
 	}
 	for path := range raw {
 		s.byPath[path] = struct{}{}
-		if resolved, err := filepath.EvalSymlinks(path); err == nil {
-			s.byPath[resolved] = struct{}{}
+		if codexConversationIDFromPath(path) == "" {
+			continue
 		}
-		if id, ok := fileIdentityOf(path); ok {
+		resolved, err := fsprobe.EvalSymlinks(path)
+		switch {
+		case err == nil:
+			s.byPath[resolved] = struct{}{}
+		case !pathutil.IsAbsent(err):
+			s.unlooked = true
+		}
+		id, err := fileIdentityOfBounded(path)
+		switch {
+		case err == nil:
 			s.byID[id] = struct{}{}
+		case !pathutil.IsAbsent(err):
+			s.unlooked = true
 		}
 	}
 	return s
 }
 
-func (s *codexHeldSet) contains(path string) bool {
+// contains reports whether the runtime holds path, and whether af could tell:
+// known is false when nothing proves path held and a lookup that could have
+// did not answer or failed.
+func (s *codexHeldSet) contains(path string) (held, known bool) {
 	if _, ok := s.byPath[path]; ok {
-		return true
+		return true, true
 	}
-	if id, ok := fileIdentityOf(path); ok {
+	known = !s.unlooked
+	id, err := fileIdentityOfBounded(path)
+	switch {
+	case err == nil:
 		if _, ok := s.byID[id]; ok {
-			return true
+			return true, true
 		}
+	case !pathutil.IsAbsent(err):
+		known = false
 	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		_, ok := s.byPath[resolved]
-		return ok
+	resolved, err := fsprobe.EvalSymlinks(path)
+	switch {
+	case err == nil:
+		if _, ok := s.byPath[resolved]; ok {
+			return true, true
+		}
+	case !pathutil.IsAbsent(err):
+		known = false
 	}
-	return false
+	return false, known
 }
 
 // BindConversationCaptureRuntime attaches this instance's live runtime — the

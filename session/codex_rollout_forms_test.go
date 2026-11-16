@@ -307,7 +307,7 @@ func TestAThreadCodexMovesBetweenFormsWhileAfLooksIsNotMissing(t *testing.T) {
 	t.Run("a plain rollout that appeared after the store walk is found", func(t *testing.T) {
 		codexHome, workDir := setup(t)
 		plain := writeStoredCodexRollout(t, codexHome, formsThreadID, workDir, cold, cold, cold)
-		path, decline := recordedCodexRolloutInAnotherForm(codexHome, formsThreadID)
+		path, decline, _ := recordedCodexRolloutInAnotherForm(codexHome, formsThreadID)
 		require.Empty(t, decline.reason, "read as %v (retire=%v)", decline, decline.retiresRecord(codexCaptureRecord(formsThreadID)))
 		require.Equal(t, plain, path)
 	})

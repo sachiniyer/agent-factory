@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,6 +212,36 @@ func TestCodexPromptReceiptWaitsWhenAReceiptReadDoesNotAnswer(t *testing.T) {
 		require.False(t, got.received)
 		require.True(t, got.undecided, "the receipt is undecided")
 	})
+}
+
+// setCodexReceiptScanCapForTest lowers the receipt scan's bound until restore.
+func setCodexReceiptScanCapForTest(limit int64) (restore func()) {
+	prev := codexReceiptScanCapOverride.Swap(limit)
+	return func() { codexReceiptScanCapOverride.Store(prev) }
+}
+
+// The receipt scan reads the rollout from its boundary, never the whole file:
+// the briefing is the first turn after the boundary, so a scan bounded past it
+// still finds it, and a transcript that grows without limit cannot make one
+// poll read without limit.
+func TestCodexPromptReceiptScanIsBounded(t *testing.T) {
+	const prompt = "the af briefing"
+	restore := setCodexReceiptScanCapForTest(256)
+	t.Cleanup(restore)
+	snap, _ := codexReceiptLayout(t, prompt)
+	got := receiptOnceWithinBound(t, snap, prompt)
+	require.NoError(t, got.err)
+	require.True(t, got.received, "the briefing just past the boundary is within the bound")
+
+	snap, tracked := codexReceiptLayout(t, "unrelated turn "+strings.Repeat("x", 300))
+	f, err := os.OpenFile(tracked, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString(`{"type":"event_msg","payload":{"type":"user_message","message":"` + prompt + `"}}` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	got = receiptOnceWithinBound(t, snap, prompt)
+	require.NoError(t, got.err)
+	require.False(t, got.received, "a turn past the bound is not read")
 }
 
 // Site 4, receipt tracking. A rollout is tracked at its size when tracking

@@ -1,12 +1,13 @@
 package session
 
 import (
+	"errors"
 	"iter"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 // staleRecordedCodexDecline answers whether the recorded Codex conversation
@@ -76,8 +77,14 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 	if recordedPath == "" {
 		// Not missing while Codex still resumes it compressed or from a
 		// thread/revert rollout (#7130).
-		path, decline := recordedCodexRolloutInAnotherForm(home, conv.ID)
-		if decline.reason != "" {
+		path, decline, unlooked := recordedCodexRolloutInAnotherForm(home, conv.ID)
+		switch {
+		case unlooked:
+			// The thread is listed in another form, but a lookup of one did
+			// not answer, or failed, so af cannot date it: nothing can be
+			// attributed against it, which is the no-evidence resume (#7378).
+			return resumeDecline{}, false
+		case decline.reason != "":
 			return decline, false
 		}
 		recordedPath = path
@@ -89,8 +96,11 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 	// noEvidence is the guard's answer when nothing newer can be attributed to
 	// the session: resume the recorded thread, after the second look at a
 	// rollout that may have moved between forms.
+	// The lstat is bounded (fsprobe, #7378), and only a proven absence is
+	// "gone": one that did not answer, or failed, cannot say the rollout
+	// moved, so it is not looked for again and declined as missing.
 	noEvidence := func() (resumeDecline, bool) {
-		if _, err := os.Lstat(recordedPath); err != nil {
+		if _, err := fsprobe.Lstat(recordedPath); pathutil.IsAbsent(err) {
 			return resumeDecline{}, true
 		}
 		return resumeDecline{}, false
@@ -190,12 +200,32 @@ func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{},
 	return judgeCodexRecordedStaleness(recordedPath, lstatRolloutModTimes(files), resolveLaunch, repair)
 }
 
-// lstatRolloutModTimes yields each of files with its mtime now, skipping one
-// that cannot be stat'd.
-func lstatRolloutModTimes(files map[string]struct{}) iter.Seq2[string, time.Time] {
-	return func(yield func(string, time.Time) bool) {
+// rolloutModTime is a listed rollout's mtime, or the lookup error that left it
+// unread.
+type rolloutModTime struct {
+	at     time.Time
+	unread error
+}
+
+// lstatRolloutModTimes yields each of files with its mtime now. Each lstat is
+// bounded (fsprobe, #7378). A rollout gone since the listing is skipped. One
+// whose lstat failed, or did not answer within its bound, is yielded with that
+// error, since it may be newer. The first that did not answer ends the walk:
+// the rest are on the same mount, and each would wait out a bound of its own.
+func lstatRolloutModTimes(files map[string]struct{}) iter.Seq2[string, rolloutModTime] {
+	return func(yield func(string, rolloutModTime) bool) {
 		for path := range files {
-			if info, err := os.Lstat(path); err == nil && !yield(path, info.ModTime()) {
+			info, err := fsprobe.Lstat(path)
+			var modTime rolloutModTime
+			switch {
+			case err == nil:
+				modTime.at = info.ModTime()
+			case pathutil.IsAbsent(err):
+				continue
+			default:
+				modTime.unread = err
+			}
+			if !yield(path, modTime) || errors.Is(err, fsprobe.ErrProbeTimedOut) {
 				return
 			}
 		}
@@ -204,18 +234,35 @@ func lstatRolloutModTimes(files map[string]struct{}) iter.Seq2[string, time.Time
 
 // judgeCodexRecordedStaleness is checkCodexRecordedStaleness over rollouts
 // whose mtimes are already known — a snapshot of the store (#7156 review
-// P2-1). The recorded rollout itself is always stat'd now.
-func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string, time.Time], resolveLaunch func() (string, bool), repair operatorRepairWindow) codexStalenessVerdict {
-	recorded, err := os.Lstat(recordedPath)
-	if err != nil {
+// P2-1). The recorded rollout itself is always stat'd now, bounded (fsprobe,
+// #7378): only a proven absence is gone, and one that did not answer, or
+// failed, leaves it undatable, so nothing newer is attributed either way.
+func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string, rolloutModTime], resolveLaunch func() (string, bool), repair operatorRepairWindow) codexStalenessVerdict {
+	recorded, err := fsprobe.Lstat(recordedPath)
+	switch {
+	case pathutil.IsAbsent(err):
 		return codexRolloutRecordedGone
+	case err != nil:
+		return codexRolloutUnresolved
 	}
 	var newer []string
-	// undated counts the newer files whose header the repair's window could
-	// not read, and undatedUnresolved those of them whose read did not answer.
+	// undated counts the newer files af could not judge: a header the
+	// repair's window could not read, or an mtime af could not read at all.
+	// undatedUnresolved counts those whose lookup did not happen: a header read
+	// that did not answer, or an lstat that did not answer or failed.
 	undated, undatedUnresolved := 0, 0
-	for path, modTime := range rollouts {
-		if path == recordedPath || !modTime.After(recorded.ModTime()) {
+	for path, rollout := range rollouts {
+		if path == recordedPath {
+			continue
+		}
+		if rollout.unread != nil {
+			// It may be newer: a lookup that did not happen (#7378).
+			undated++
+			undatedUnresolved++
+			continue
+		}
+		modTime := rollout.at
+		if !modTime.After(recorded.ModTime()) {
 			continue
 		}
 		disregarded, unread := repair.disregards(path, modTime)

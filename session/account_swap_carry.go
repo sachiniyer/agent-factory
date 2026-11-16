@@ -395,7 +395,7 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 	// Only rollouts written after the recorded one can be a newer thread, so
 	// only those have their session metadata read: a shared home can hold
 	// thousands of rollouts for other worktrees.
-	var rollouts iter.Seq2[string, time.Time]
+	var rollouts iter.Seq2[string, rolloutModTime]
 	switch {
 	case c.srcStore != nil:
 		rollouts = c.srcStore.rollouts()
