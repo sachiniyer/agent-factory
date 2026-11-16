@@ -125,10 +125,10 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeMCPTrustPaintingOf(screen) {
 			return true
 		}
-		// A folder-trust dialog, reworded or legacy, that the pane ends with a
-		// part of, read with its whitespace removed so that no wrap point
-		// matters (#7346). Asked last of all: it only turns a clear pane into a
-		// hold.
+		// A folder-trust dialog, reworded or legacy, or the 2.1.322 MCP server
+		// dialog (#7364), that the pane ends with a part of, read with its
+		// whitespace removed so that no wrap point matters (#7346). Asked last
+		// of all: it only turns a clear pane into a hold.
 		if match, held := claudeLaunchDialogRewrapOf(screen); held {
 			t.refuseClaudeLaunchDialog(match)
 			return true
