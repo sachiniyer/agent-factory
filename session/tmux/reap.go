@@ -654,23 +654,30 @@ func selfAndAncestorProcesses(snap map[int]proctree.Process) map[int]bool {
 }
 
 // reapProtectedChain is the pid set a captured-tree reap must never signal,
-// whatever the caller: this process, its ancestors, and its descendants
-// (#7433 R2). Captured-tree membership is proven by descent, and descent is
-// not ownership — a daemon EnsureDaemon forked from a CLI running inside an
+// whatever the caller: this process and its ancestors unconditionally, and a
+// descendant only when the descendant's own parent walk meets this process
+// strictly below a tmux process — descendant → reaper → tmux (#7433 R2).
+// Captured-tree membership is proven by descent, and descent is not
+// ownership — a daemon EnsureDaemon forked from a CLI running inside an
 // orphaned pane lands in that pane's tree with everything it has already
 // spawned, and the pane itself is its ancestor. proctree.Signal spares only
 // the reaper's own pid; without this set the reap waited on the caller for
 // seconds and then signalled its CLI and its children (a new daemon's ssh
 // tunnels, a foreign home's daemon started from the same pane).
 //
-// The set is computed once from one snapshot: only the processes captured
-// BEFORE the kill can ever be signalled, and no process can re-parent into
-// the caller's subtree, so a chain established at reap entry cannot go stale.
-// When the table cannot be read the chain beyond the caller is unprovable and
-// only the caller itself is excluded — the per-signal identity checks apply
-// unchanged to everything else.
+// The server-above-self requirement is what keeps the exemption narrow. A
+// pane process's own walk always reaches the session's tmux server first —
+// even when the server sits UNDER the reaper, reparented to a subreaper or
+// spawned by it — so a captured pane process is never exempted here, and a
+// reaper whose own ancestry holds no tmux process exempts no descendant at
+// all. The set is computed once from one snapshot: only the processes
+// captured BEFORE the kill can ever be signalled, and no process can
+// re-parent into the caller's subtree, so a chain established at reap entry
+// cannot go stale. When the table cannot be read the chain beyond the caller
+// is unprovable and only the caller itself is excluded.
 func reapProtectedChain() map[int]bool {
-	protected := map[int]bool{os.Getpid(): true}
+	self := os.Getpid()
+	protected := map[int]bool{self: true}
 	snap, err := proctree.Snapshot()
 	if err != nil {
 		log.WarningLog.Printf("cannot snapshot the process table to exclude the caller's own chain from signalling: %v", err)
@@ -679,10 +686,42 @@ func reapProtectedChain() map[int]bool {
 	for pid := range selfAndAncestorProcesses(snap) {
 		protected[pid] = true
 	}
-	for _, p := range proctree.TreeOf(snap, os.Getpid()) {
-		protected[p.PID] = true
+	for _, p := range proctree.TreeOf(snap, self) {
+		if p.PID != self && reachesSelfThenTmux(snap, p.PID, self) {
+			protected[p.PID] = true
+		}
 	}
 	return protected
+}
+
+// reachesSelfThenTmux walks pid's parent chain and reports whether it meets
+// the reaper strictly below a tmux process — both appear, in that order. The
+// reaper's own children inside the killed session's tree (the R2 tunnels:
+// processes a daemon spawned from inside the pane now being reaped) meet the
+// reaper first and the server above it. A pane process meets the server
+// first — including a pane under a server reparented beneath the reaper —
+// and a descendant under a reaper with no tmux ancestor meets no server at
+// all; both stay eligible. An unreadable identity is not a stop: a process
+// that cannot be told apart from the server is never the link a descendant's
+// own-ness is proven through (#7238's direction).
+func reachesSelfThenTmux(snap map[int]proctree.Process, pid, self int) bool {
+	seenSelf := false
+	for range 128 {
+		if pid <= 0 {
+			return false
+		}
+		if pid == self {
+			seenSelf = true
+		} else if proctree.TmuxIdentityOf(pid) != proctree.NotTmux {
+			return seenSelf
+		}
+		p, ok := snap[pid]
+		if !ok {
+			return false
+		}
+		pid = p.PPID
+	}
+	return false
 }
 
 // reapReason says WHY a captured process tree is being reaped. It is the
@@ -743,12 +782,16 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 				"excluding it from signalling (#5182)", p.PID, p.Comm)
 		}
 	}
-	// #7433 R2: the reaper's own chain — self, ancestors, descendants — is
-	// likewise exempt for EVERY caller. Descent is not membership: a daemon
-	// EnsureDaemon forked out of the pane being reaped lands in that pane's
-	// tree, and captured procs include it, the CLI above it, and its children.
-	// proctree.Signal spares only os.Getpid; without this set the reap waited
-	// seconds on the caller, then signalled its CLI and its children.
+	// #7433 R2: the reaper's own chain is likewise exempt for EVERY caller —
+	// self and ancestors unconditionally, a descendant only when its parent
+	// walk meets the reaper strictly below a tmux process. Descent is not
+	// membership: a daemon EnsureDaemon forked out of the pane being reaped
+	// lands in that pane's tree, and captured procs include it, the CLI above
+	// it, and its children. proctree.Signal spares only os.Getpid; without
+	// this set the reap waited seconds on the caller, then signalled its CLI
+	// and its children. The server-above-self requirement keeps it narrow:
+	// a pane process under a server reparented beneath the reaper still
+	// meets the server first and is reaped.
 	protected := reapProtectedChain()
 	exemptedProtected := make(map[int]bool)
 	// And it can be registered AFTER the capture — a teardown still in its
