@@ -279,6 +279,44 @@ func TestCheckAndHandleTrustPrompt_FramedRewordedDialogTopScrolledOffHolds(t *te
 	}
 }
 
+// A boxed composer whose opening rule has scrolled off the top of the pane —
+// leaving its ">" prompt row and its closing rule directly above a quoted/stale
+// folder-trust option block — must still read CLEAR. The full-box form (opening
+// rule visible) is covered by "the boxed composer above the options"; the #7376
+// fix's welding check rejects only when the prompt is welded on its other side
+// too, so this ordinary top-cropped form — opening rule gone, so i-2 is not a
+// frame rule — would slip past it and hold, reclassifying a stale/quoted option
+// block under a live composer as a live dialog. The composer's closing edge
+// (╰…╯) is a bottom-cornered frame; a bare transcript ">" row sits above the
+// framed dialog's own top border (╭…╮), never above a ╰…╯ closing rule, so the
+// closing-edge shape still rejects without reclassifying the transcript row the
+// fix targets (#7399 review).
+func TestCheckAndHandleTrustPrompt_TopCroppedBoxedComposerAboveOptionsStaysClear(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			"the top-cropped boxed composer above the options",
+			"│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, I trust this folder\n2. No, exit\n\nEnter to confirm · Esc to cancel",
+		},
+		{
+			"the top-cropped boxed composer above the legacy options",
+			"│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, proceed\n2. No, exit\n\nEnter to confirm · Esc to exit",
+		},
+		// The full-box form (opening rule visible) keeps clearing: the
+		// welding check rejects it, pinning that the closing-edge guard
+		// did not weaken the full-box guard.
+		{
+			"the full boxed composer above the options",
+			"╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, I trust this folder\n2. No, exit\n\nEnter to confirm · Esc to cancel",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled, "%s held; a boxed composer above a quoted/stale option block must stay clear (#7399):\n%s", tt.name, tt.content)
+			require.Empty(t, sentKeystrokes(cmds), "%s sends no key:\n%s", tt.name, tt.content)
+		})
+	}
+}
+
 // A working agent below the rows, or rows that are not the dialog's, and the
 // pane stays clear, as before.
 func TestCheckAndHandleTrustPrompt_FolderTrustDialogTextThatIsNoDialogStaysClear(t *testing.T) {
