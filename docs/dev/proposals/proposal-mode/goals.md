@@ -26,8 +26,8 @@ reading markdown.
    "make a proposal for X" or "work on the X proposal". After that request, the
    agent knows what to do. The `af proposal` command output tells it the rules.
 4. **Edits go both ways.** The user edits the files directly. The agent learns
-   about those edits by push (af sends them when the user stops typing and the
-   agent is idle) and by pull (the agent asks for them).
+   about those edits by pull: the rules tell it to run `af proposal changes`
+   before it edits.
 5. **Fast to read and edit.** The web UI has a Docs tab that opens immediately
    beside the agent. It shows rendered markdown that you can edit in place, in
    the same way as Obsidian's live preview.
@@ -59,7 +59,9 @@ Agents and users use a small set of callouts in the documents:
    templates, and the agent instructions. This step works with any editor.
 2. **Docs tab.** The web editor, daemon file routes, live reload, and a
    three-way merge.
-3. **Push.** Auto-send after 10 s without edits while the agent is idle, the
-   Hold chip, callout styles, and the open-question count.
+3. **Push (removed).** Auto-send after 10 s without edits while the agent is
+   idle, the Hold chip, callout styles, and the open-question count. The callout
+   styles and question count shipped; the send itself was later removed
+   (#7442) — the agent pulls the user's edits with `af proposal changes`.
 
 See `technical.md`, `api.md`, `ui.md` and `future.md`.

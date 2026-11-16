@@ -20,26 +20,7 @@ export interface ProposalInfo {
   templates: string[];
   /** The `> [!question]` callouts in all docs of the proposal. */
   open_questions: number;
-  /** The push status of the tab's session; null when it is not attached to this proposal. */
-  push: PushStatus | null;
 }
-
-export type PushMode = "auto" | "manual";
-export type PushState = "idle" | "countdown" | "waiting_agent" | "held" | "sent";
-
-/** A session's push status: the `push` of GetProposal, a push route reply, or a
- *  `proposal.push` event. */
-export interface PushStatus {
-  sessionId: string;
-  slug: string;
-  mode: PushMode;
-  state: PushState;
-  /** Milliseconds to the push when the daemon built this status; null when none is due.
-   *  Count from the moment the status arrives: the daemon clock is not the browser's. */
-  dueInMs: number | null;
-  unsent: number;
-}
-
 export interface DocText {
   text: string;
   commit: string;
@@ -178,52 +159,7 @@ export function parseProposalInfo(d: unknown): ProposalInfo {
     }),
     templates: Array.isArray(d.templates) ? d.templates.filter((t): t is string => typeof t === "string") : [],
     open_questions: typeof d.open_questions === "number" ? d.open_questions : 0,
-    push: parsePushStatus(d.push),
   };
-}
-
-const PUSH_STATES: readonly string[] = ["idle", "countdown", "waiting_agent", "held", "sent"];
-
-/** Reads a push status. Returns null for a value that is not one. */
-export function parsePushStatus(d: unknown): PushStatus | null {
-  if (!isRecord(d) || typeof d.state !== "string" || !PUSH_STATES.includes(d.state)) {
-    return null;
-  }
-  const due = typeof d.due_in_ms === "number" && Number.isFinite(d.due_in_ms) ? Math.max(0, d.due_in_ms) : null;
-  return {
-    sessionId: str(d.session_id),
-    slug: str(d.slug),
-    mode: d.mode === "manual" ? "manual" : "auto",
-    state: d.state as PushState,
-    dueInMs: due,
-    unsent: typeof d.unsent === "number" && d.unsent > 0 ? d.unsent : 0,
-  };
-}
-
-function pushReply(d: unknown): PushStatus {
-  const status = parsePushStatus(d);
-  if (!status) {
-    throw new ApiError(500, "the daemon sent a push status without a state");
-  }
-  return status;
-}
-
-/** Reads a `proposal.push` event. Returns null for any other event. */
-export function parseProposalPush(ev: unknown): PushStatus | null {
-  if (!isRecord(ev) || ev.type !== "proposal.push") {
-    return null;
-  }
-  const status = parsePushStatus(ev.data);
-  return status && status.sessionId !== "" && status.slug !== "" ? status : null;
-}
-
-export async function holdPush(sessionId: string, token: string): Promise<PushStatus> {
-  return pushReply(await af<unknown>("HoldProposalPush", { session_id: sessionId }, token));
-}
-
-/** Send now: sends at once when the agent is Ready, else on its next Ready tick. */
-export async function sendChanges(sessionId: string, token: string): Promise<PushStatus> {
-  return pushReply(await af<unknown>("SendProposalChanges", { session_id: sessionId }, token));
 }
 
 export function parseDocText(d: unknown): DocText {

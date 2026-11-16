@@ -218,8 +218,8 @@ export class DocSync {
   }
 
   /** Saves what is unsaved and resolves "saved" once it has landed, or "blocked"
-   *  when it cannot (an open conflict, conflict markers, a failed save). Send now
-   *  waits on this, so it never goes out ahead of a newer edit. */
+   *  when it cannot (an open conflict, conflict markers, a failed save). A caller
+   *  that must not act ahead of a newer edit waits on this. */
   whenSaved(): Promise<"saved" | "blocked"> {
     this.pumpSaved();
     const now = this.savedVerdict();

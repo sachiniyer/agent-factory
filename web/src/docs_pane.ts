@@ -1,4 +1,4 @@
-// The Docs tab (proposal mode): a doc strip, a header with the push chip, the
+// The Docs tab (proposal mode): a doc strip, a header with the
 // save status and the open-question count, a conflict banner, and the editor. This
 // module is the entry of the lazy bundle dist/lazy/docs-editor.js (see build.mjs);
 // docs_tab.ts in the main bundle loads it the first time a Docs tab opens. What
@@ -15,7 +15,6 @@ import {
   questionCountLabel,
   statusText,
 } from "./docs_model.js";
-import { PushChip, type PushView } from "./docs_push.js";
 import { DRAFT_HEARTBEAT_MS, DraftStorage, type KV, localStorageKV, windowId } from "./docs_draft_store.js";
 import { DocSync, type SyncStatus } from "./docs_sync.js";
 import { DocTabs } from "./docs_tabs.js";
@@ -27,14 +26,11 @@ import {
   DOC_NAME_PATTERN,
   getDoc,
   getProposal,
-  holdPush,
   type ProposalChange,
   type ProposalDocRef,
   type ProposalInfo,
   putDoc,
-  type PushStatus,
   removeDoc,
-  sendChanges,
 } from "./proposal_api.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
 import { ClosingTabs } from "./docs_closing.js";
@@ -102,8 +98,6 @@ export interface DocsPaneOptions {
   token: string;
   /** Registers for proposal.changed events; returns the unsubscribe. */
   subscribe(fn: (change: ProposalChange) => void): () => void;
-  /** Registers for proposal.push events; returns the unsubscribe. */
-  subscribePush(fn: (status: PushStatus) => void): () => void;
   /** Registers for event-stream reconnects; returns the unsubscribe. */
   subscribeResync(fn: () => void): () => void;
 }
@@ -135,12 +129,6 @@ export class DocsPane {
   private readonly body: HTMLElement;
   private readonly editorHost: HTMLElement;
   private readonly notice: HTMLElement;
-  private readonly push: HTMLElement;
-  private readonly chipText: HTMLElement;
-  private readonly chipSep: HTMLElement;
-  private readonly chipAction: HTMLButtonElement;
-  private readonly chip: PushChip;
-
   private info: ProposalInfo | null = null;
   private ordered: ProposalDocRef[] = [];
   private current: ProposalDocRef | null = null;
@@ -169,7 +157,6 @@ export class DocsPane {
   /** Orders the replies to the doc-list requests: an older list is never used after a newer one. */
   private readonly roster = new RosterOrder();
   private readonly unsubscribe: () => void;
-  private readonly unsubscribePush: () => void;
   private readonly unsubscribeResync: () => void;
   private readonly onPageHide = (): void => {
     for (const s of this.syncs.values()) s.saveBeforeLeaving();
@@ -251,19 +238,7 @@ export class DocsPane {
     this.status = h("span", { class: "af-docs-status", role: "status" }, icon("loader-circle"), this.statusText);
     this.questions = h("button", { type: "button", class: "af-ghost af-docs-questions", hidden: true });
     this.questions.addEventListener("click", () => void this.goToNextQuestion());
-    this.chipText = h("span", { class: "af-docs-chip-text" });
-    this.chipSep = h("span", { class: "af-docs-sep", ariaHidden: "true", hidden: true }, " · ");
-    this.chipAction = h("button", { type: "button", class: "af-ghost af-docs-chip-action", hidden: true });
-    this.chipAction.addEventListener("click", () => this.runChipAction());
-    const chip = h("span", { class: "af-docs-chip" }, this.chipText, this.chipSep, this.chipAction);
-    this.push = h("div", { class: "af-docs-slot af-docs-push", hidden: true }, chip);
-    this.chip = new PushChip({
-      now: () => performance.now(),
-      setTimer: (fn, ms) => window.setTimeout(fn, ms),
-      clearTimer: (handle) => window.clearTimeout(handle as number),
-      render: (view) => this.renderPush(view),
-    });
-    const tools = h("div", { class: "af-docs-tools" }, this.push, this.status, this.questions);
+    const tools = h("div", { class: "af-docs-tools" }, this.status, this.questions);
     const head = h("div", { class: "af-docs-head" }, stripWrap, tools);
     this.banner = h("div", { class: "af-docs-banner", role: "alert", hidden: true });
     this.editorHost = h("div", { class: "af-docs-editor" });
@@ -273,10 +248,6 @@ export class DocsPane {
     this.root.dataset.proposal = opts.slug;
     host.replaceChildren(this.root);
     this.unsubscribe = opts.subscribe((change) => this.handleChange(change));
-    this.unsubscribePush = opts.subscribePush((status) => {
-      if (this.disposed || status.sessionId !== opts.sessionId || status.slug !== opts.slug) return;
-      this.applyPush(status);
-    });
     this.unsubscribeResync = opts.subscribeResync(() => this.resync());
     document.addEventListener("mousedown", this.onDocMouseDown, true);
     window.addEventListener("pagehide", this.onPageHide);
@@ -287,9 +258,7 @@ export class DocsPane {
   dispose(): void {
     this.disposed = true;
     this.unsubscribe();
-    this.unsubscribePush();
     this.unsubscribeResync();
-    this.chip.dispose();
     document.removeEventListener("mousedown", this.onDocMouseDown, true);
     window.removeEventListener("pagehide", this.onPageHide);
     this.cancelLongPress();
@@ -431,8 +400,7 @@ export class DocsPane {
 
   private async loadProposal(): Promise<void> {
     const gen = ++this.generation;
-    const seq = this.chip.version;
-    let info: ProposalInfo;
+        let info: ProposalInfo;
     const ticket = this.roster.begin();
     try {
       info = await getProposal(this.opts.sessionId, this.opts.slug, this.opts.token);
@@ -443,7 +411,7 @@ export class DocsPane {
       return;
     }
     if (this.disposed || gen !== this.generation) return;
-    if (this.roster.accept(ticket)) this.applyInfo(info, seq);
+    if (this.roster.accept(ticket)) this.applyInfo(info);
     this.findStoredGone();
     const remembered = lastDoc.get(this.memoryKey());
     const first = this.ordered.find((d) => d.name === remembered) ?? this.ordered[0] ?? null;
@@ -476,9 +444,7 @@ export class DocsPane {
     this.renderStrip();
   }
 
-  /** `pushSeq` is the chip's version when the GetProposal request went out. */
-  private applyInfo(info: ProposalInfo, pushSeq: number): void {
-    this.chip.applyReply(info.push, pushSeq);
+  private applyInfo(info: ProposalInfo): void {
     this.info = info;
     this.ordered = orderDocs(info.docs);
     if (this.current) {
@@ -656,14 +622,13 @@ export class DocsPane {
   private async createDoc(name: string, errorEl?: HTMLElement): Promise<void> {
     try {
       await addDoc(this.opts.sessionId, this.opts.slug, name, this.opts.token);
-      const seq = this.chip.version;
-      const ticket = this.roster.begin();
+            const ticket = this.roster.begin();
       const info = await getProposal(this.opts.sessionId, this.opts.slug, this.opts.token);
       if (this.disposed) return;
       this.closeMenu();
       // (An older list that arrived after this one has been dropped by the roster; and this
       // one is dropped if a later request's list already was used.)
-      if (this.roster.accept(ticket)) this.applyInfo(info, seq);
+      if (this.roster.accept(ticket)) this.applyInfo(info);
       const doc = this.ordered.find((d) => d.name === name);
       if (doc) await this.openDoc(doc);
     } catch (e) {
@@ -818,15 +783,14 @@ export class DocsPane {
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = null;
-      const seq = this.chip.version;
-      const ticket = this.roster.begin();
+            const ticket = this.roster.begin();
       void getProposal(this.opts.sessionId, this.opts.slug, this.opts.token).then((info) => {
         if (this.disposed) return;
         // A list older than one already used can lack a doc added since: a doc missing from
         // it is not evidence of a delete.
         if (!this.roster.accept(ticket)) return;
         const known = new Set(this.ordered.map((d) => d.name));
-        this.applyInfo(info, seq);
+        this.applyInfo(info);
         for (const doc of this.ordered) {
           if (!known.has(doc.name)) void this.refreshText(doc);
         }
@@ -852,69 +816,9 @@ export class DocsPane {
     }, REFRESH_DEBOUNCE_MS);
   }
 
-  private applyPush(status: PushStatus | null): void {
-    this.chip.apply(status);
-  }
 
-  private renderPush(view: PushView | null): void {
-    this.push.hidden = view === null;
-    if (!view) return;
-    this.push.dataset.state = view.state;
-    this.chipText.textContent = view.text;
-    this.chipText.title = view.text;
-    this.chipText.hidden = view.text === "";
-    this.chipAction.hidden = view.action === null;
-    this.chipAction.disabled = !view.actionEnabled;
-    this.chipSep.hidden = view.text === "" || view.action === null;
-    if (view.action === "hold") {
-      this.chipAction.textContent = "Hold";
-      this.chipAction.title = "Hold the send until your next edit";
-    } else if (view.action === "send") {
-      this.chipAction.textContent = "Send now";
-      this.chipAction.title = view.unsent > 0
-        ? `Send ${view.unsent === 1 ? "1 edit" : `${view.unsent} edits`} to the agent`
-        : "No edits to send";
-    }
-  }
 
-  private runChipAction(): void {
-    const status = this.chip.current;
-    if (!status) return;
-    if (status.state === "countdown" && status.mode === "auto") {
-      this.runPush("hold", () => holdPush(this.opts.sessionId, this.opts.token));
-    } else {
-      this.runPush("send", async () => {
-        // The daemon builds the prompt from committed edits, so every open doc is
-        // flushed and its save awaited first: Send now never goes out ahead of a
-        // newer edit.
-        const verdicts = await Promise.all([...this.syncs.values()].map((s) => s.whenSaved()));
-        if (verdicts.includes("blocked")) {
-          throw new Error("some edits are not saved yet; resolve them first");
-        }
-        return sendChanges(this.opts.sessionId, this.opts.token);
-      });
-    }
-  }
 
-  private runPush(what: string, call: () => Promise<PushStatus>): void {
-    this.chip.setBusy(true);
-    const sentAt = this.chip.version;
-    call().then(
-      (status) => {
-        if (this.disposed) return;
-        this.chip.setBusy(false);
-        // A status that arrived while the request was out (the agent became ready and
-        // delivered) is newer than this reply: the reply is dropped, and a fetch settles
-        // the chip on what the daemon says now.
-        if (!this.chip.applyReply(status, sentAt)) this.scheduleListRefresh();
-      },
-      (e: unknown) => {
-        if (this.disposed) return;
-        this.chip.setBusy(false);
-        this.chip.setError(`Could not ${what} · ${errorText(e)}`);
-      },
-    );
-  }
 
   private questionCounts(): Map<string, number> {
     const counts = new Map<string, number>();

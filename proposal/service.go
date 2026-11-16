@@ -45,11 +45,9 @@ type Host interface {
 	CloseDocsTabs(sessionID, slug string) (string, error)
 	// Publish sends a proposal.changed event.
 	Publish(Change)
-	// SendPrompt delivers a push prompt to the session through the same path
+	// SendPrompt delivers a prompt to the session through the same path
 	// as af sessions send-prompt.
 	SendPrompt(sessionID, prompt string) (Delivery, error)
-	// PublishPush sends a proposal.push event.
-	PublishPush(PushStatus)
 }
 
 // Change is the payload of a proposal.changed event. Commit is nil for an
@@ -130,8 +128,6 @@ type Service struct {
 	mu      sync.Mutex
 	watch   watchState
 	lastSet map[string]map[string][]string
-	// push maps session id → push state.
-	push map[string]*pushEntry
 	// briefs maps session id → briefing send state (the durable debt lives on
 	// the session's briefing marker; this is only the in-flight send's guard).
 	briefs map[string]*briefEntry
@@ -144,7 +140,7 @@ type Service struct {
 // NewService returns a service that uses host.
 func NewService(host Host) *Service {
 	return &Service{
-		host: host, watch: newWatchState(), push: map[string]*pushEntry{}, briefs: map[string]*briefEntry{},
+		host: host, watch: newWatchState(), briefs: map[string]*briefEntry{},
 		now: time.Now, spawn: func(f func()) { go f() },
 	}
 }
@@ -392,8 +388,8 @@ func (s *Service) attach(r *resolved, slug string, deliverRules bool) (*Summary,
 		return nil, err
 	}
 	if deliverRules {
-		// The attachment and the briefing debt commit together, so the push
-		// machinery can never see an attach whose contract is not yet owed.
+		// The attachment and the briefing debt commit together, so the
+		// briefing machinery can never see an attach whose contract is not yet owed.
 		err = r.store.AttachOwing(slug, r.session.ID)
 	} else {
 		err = r.store.Attach(slug, r.session.ID)
@@ -465,7 +461,6 @@ func (s *Service) Changes(sessionID string) (*Changes, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer s.markUnsentStale("", "", r.session.ID)
 	before, err := r.store.Head()
 	if err != nil {
 		return nil, err
@@ -504,7 +499,6 @@ func (s *Service) Checkpoint(sessionID string) (*Checkpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer s.markUnsentStale("", "", r.session.ID)
 	before, err := r.store.Head()
 	if err != nil {
 		return nil, err
@@ -688,7 +682,6 @@ func (s *Service) SaveFenced(t Target, slug, doc, text, base, writer string, seq
 	switch {
 	case res.saved:
 		s.committed(r, slug, file, res.Commit, AuthorHuman)
-		s.noteHumanSave(r, slug)
 	case res.snapshotted:
 		s.committed(r, slug, file, res.Commit, AuthorExternal)
 	default:

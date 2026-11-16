@@ -321,10 +321,11 @@ var sensitiveJSONKeys = map[string]bool{
 	// repo location, in an af-authored sentence. The typed path rebuilds it
 	// from af's own forms or collapses it whole; this path blanks it.
 	"missing_reason": true,
-	// push_mode is a docs tab's push mode (#5459). The typed path keeps only
-	// "auto"/"manual"; a hand-edited value cannot carry user text into a shared
-	// report, so this path blanks it wholesale — on a shape it could not parse
-	// it cannot distinguish the two enum words from a hand-edited string.
+	// push_mode is a retired docs tab wire key (proposal push, #7442) that
+	// legacy or hand-edited records may still carry. A value af did not write
+	// cannot carry user text into a shared report, so this path blanks it
+	// wholesale — on a shape it could not parse it cannot distinguish the two
+	// enum words from a hand-edited string.
 	"push_mode": true,
 }
 

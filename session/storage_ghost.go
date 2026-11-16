@@ -56,6 +56,12 @@ var knownInstanceDataFields = func() knownFields {
 	for _, field := range []string{"tabs", "pending_tabs"} {
 		if nested, ok := out[field]; ok && nested != nil {
 			nested["kind_name"] = nil
+			// push_mode is a removed wire key (proposal push, #7442) that
+			// older records may still carry. encoding/json ignores it on
+			// read; registering it here keeps a transient ghost that carries
+			// it on the reap path rather than mistaking a retired field of
+			// this schema for a newer binary's additive marker.
+			nested["push_mode"] = nil
 		}
 	}
 	return out

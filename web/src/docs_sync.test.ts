@@ -498,7 +498,7 @@ test("a dropped save's doubt ends after the drop window when nothing landed", as
   giveUp!.fn();
   await tick();
   await tick();
-  assert.equal(verdict, "saved", "Send now is not held for good by a connection blip");
+  assert.equal(verdict, "saved", "whenSaved is not held for good by a connection blip");
 });
 
 test("a pumped whenSaved does not turn a failing save into a loop of save and read", async () => {
@@ -537,7 +537,7 @@ test("every save names its writer and counts its saves upward", async () => {
   assert.ok(fences[0]!.writer.length >= 8);
 });
 
-test("whenSaved settles when its doc is abandoned mid-save, so Send now does not hang", async () => {
+test("whenSaved settles when its doc is abandoned mid-save, so its waiters do not hang", async () => {
   const h = await started();
   h.type("v2");
   await h.fire();

@@ -23,7 +23,6 @@ type fakeHost struct {
 	prompts  []string
 	delivery Delivery
 	sendErr  error
-	pushes   []PushStatus
 	onSend   func()
 }
 
@@ -36,12 +35,6 @@ func (h *fakeHost) SendPrompt(sessionID, prompt string) (Delivery, error) {
 	defer h.mu.Unlock()
 	h.prompts = append(h.prompts, prompt)
 	return h.delivery, h.sendErr
-}
-
-func (h *fakeHost) PublishPush(st PushStatus) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.pushes = append(h.pushes, st)
 }
 
 func newFakeHost() *fakeHost {

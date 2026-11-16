@@ -268,7 +268,7 @@ func (i *Instance) ReconcileTabsFromData(target []TabData) (bool, error) {
 		}
 		// URL rides along for a web tab (a vscode tab has none by design — its target
 		// is resolved at proxy time), or the pane would have nothing to iframe.
-		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, Proposal: td.Proposal, PushMode: td.PushMode, Exit: tabExitFromData(td.Exit),
+		tab := &Tab{ID: id, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL, Proposal: td.Proposal, Exit: tabExitFromData(td.Exit),
 			accountScope: td.AccountScope, tmux: ts}
 		// Adopt under the write lock, re-checking BOTH the already-present dedupe (a
 		// concurrent reconcile/AddTab may have added this tab while we reconnected
@@ -400,14 +400,14 @@ func (i *Instance) reconcileProjectedTabs(target []TabData) bool {
 		// An id-less legacy row stays id-less: the daemon resolves it through its
 		// name/ordinal fallback, and refuses an id it never issued.
 		fresh := &Tab{ID: td.ID, Name: td.Name, Kind: kind, Command: td.Command, URL: td.URL,
-			Proposal: td.Proposal, PushMode: td.PushMode, Exit: exit, gen: td.Gen, accountScope: td.AccountScope}
+			Proposal: td.Proposal, Exit: exit, gen: td.Gen, accountScope: td.AccountScope}
 		if cur == nil {
 			changed = true
 			next = append(next, fresh)
 			continue
 		}
 		if cur.Name == td.Name && cur.Kind == kind && cur.URL == td.URL && cur.Command == td.Command &&
-			cur.Proposal == td.Proposal && cur.PushMode == td.PushMode &&
+			cur.Proposal == td.Proposal &&
 			cur.accountScope == td.AccountScope && tabExitEqual(cur.Exit, exit) {
 			// Unchanged: keep the pointer, readers may hold it (copy-on-write).
 			if idx >= len(i.Tabs) || i.Tabs[idx] != cur {
@@ -419,7 +419,7 @@ func (i *Instance) reconcileProjectedTabs(target []TabData) bool {
 		changed = true
 		cp := *cur
 		cp.Name, cp.Kind, cp.Command, cp.URL = td.Name, kind, td.Command, td.URL
-		cp.Proposal, cp.PushMode, cp.Exit, cp.accountScope = td.Proposal, td.PushMode, exit, td.AccountScope
+		cp.Proposal, cp.Exit, cp.accountScope = td.Proposal, exit, td.AccountScope
 		next = append(next, &cp)
 	}
 	if !changed {
