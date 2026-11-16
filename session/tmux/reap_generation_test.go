@@ -47,7 +47,8 @@ func TestVanishedSessionSweepDoesNotReapSameNameReplacement(t *testing.T) {
 	require.True(t, proctree.AliveSame(old), "original marked helper must outlive its tmux session")
 
 	barrier, sweepDone := startSweepAtGraceBarrier(t, name, func() error {
-		return reapVanishedSessionProcesses(name, home, []proctree.Process{old}, nil, false)
+		return reapVanishedSessionProcessCohort(name, home, []proctree.Process{old}, nil,
+			fixtureCohort(vanishedGeneration), false)
 	})
 	barrier.holdFirstObservation(t, func() {
 		created, createErr := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", t.TempDir(),
@@ -188,12 +189,27 @@ func sweepDescendantThatChangesGeneration(t *testing.T, envDir string) {
 	// descendant of the live parent, before the pass looks. No wall clock enters
 	// the verdict.
 	//
+	// And what that did NOT close is the sweep never reaching the observation at
+	// all. reapVanishedSessionProcesses derives the generation cohort by reading
+	// each captured process's environment at sweep entry; a single transient
+	// /proc read failure there empties the cohort, and the blind early return
+	// exits before any pass exists — the fixture then burned the full bound on
+	// `reached` while the sweep's own verdict was already delivered (#3766,
+	// reopened). So the cohort is supplied, not re-derived: the fixture knows
+	// what it launched, and the sweep is given it the same way
+	// recoverVanishedSessionProcesses is given the pre-marker capture's
+	// generations. holdFirstObservation also watches the verdict channel, so a
+	// no-observation return that still happens fails on the sweep's answer.
+	//
 	// Nothing here depends on the parent exiting: it carries the cohort's own
 	// generation marker, so the sweep classifies it as a marked escapee and
 	// signals it, and t.Cleanup collects whatever is left. `exec` so the shell
 	// BECOMES that process — a trailing `sleep 300` as a child would outlive the
 	// Kill below.
-	const changedGeneration = "changed"
+	const (
+		changedGeneration  = "changed"
+		vanishedGeneration = "vanished"
+	)
 	script := fmt.Sprintf("%s; "+
 		"env %s=%s setsid sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
 		testguard.BoundedGateWait(trigger, 10*time.Millisecond, 5*time.Minute),
@@ -207,7 +223,7 @@ func sweepDescendantThatChangesGeneration(t *testing.T, envDir string) {
 		"PATH=" + path,
 		EnvMarkerSession + "=" + name,
 		EnvMarkerHome + "=" + home,
-		EnvMarkerGeneration + "=vanished",
+		EnvMarkerGeneration + "=" + vanishedGeneration,
 	}
 	parentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	require.NoError(t, parentCmd.Start())
@@ -222,7 +238,8 @@ func sweepDescendantThatChangesGeneration(t *testing.T, envDir string) {
 	require.True(t, ok, "parent %d not in process snapshot", parentCmd.Process.Pid)
 
 	barrier, sweepDone := startSweepAtGraceBarrier(t, name, func() error {
-		return reapVanishedSessionProcesses(name, home, []proctree.Process{parent}, nil, false)
+		return reapVanishedSessionProcessCohort(name, home, []proctree.Process{parent}, nil,
+			fixtureCohort(vanishedGeneration), false)
 	})
 	var child proctree.Process
 	barrier.holdFirstObservation(t, func() {
@@ -256,6 +273,24 @@ func slowEnvDir(t *testing.T, delay time.Duration) string {
 	return dir
 }
 
+// fixtureCohort builds the generation cohort a fixture sweep gets. Supplying
+// it keeps "the cohort exists" out of the set of things the test can lose on:
+// reapVanishedSessionProcesses re-derives it by reading each captured process's
+// environment at sweep entry, and one transient /proc read failure there
+// empties the cohort — the blind early return then exits before any observation
+// pass exists, which is what left holdFirstObservation parked on `reached` for
+// a mute 10s timeout on master (#3766). The fixture already knows what it
+// launched, so it says so — the same shape recoverVanishedSessionProcesses
+// uses, where the cohort comes from the pre-marker capture rather than a fresh
+// read. An orphanGenerationSet with no legacy and the named generations.
+func fixtureCohort(generations ...string) orphanGenerationSet {
+	cohort := orphanGenerationSet{values: make(map[string]bool, len(generations))}
+	for _, generation := range generations {
+		cohort.values[generation] = true
+	}
+	return cohort
+}
+
 // graceBarrier holds a vanished-session sweep at its bounded grace observation
 // so a fixture can BUILD the state its assertion is about, instead of racing
 // reapGraceWait to build it (#3766). See graceObservationBarrier in reap.go for
@@ -269,6 +304,7 @@ type graceBarrier struct {
 	reached  chan struct{}
 	release  chan struct{}
 	returned chan struct{}
+	verdict  <-chan error
 	arrived  sync.Once
 	freed    sync.Once
 }
@@ -291,10 +327,12 @@ const graceBarrierBound = 10 * time.Second
 func startSweepAtGraceBarrier(t *testing.T, match string, sweep func() error) (*graceBarrier, <-chan error) {
 	t.Helper()
 	require.Nil(t, graceObservationBarrier, "a grace observation barrier is already installed")
+	verdict := make(chan error, 1)
 	barrier := &graceBarrier{
 		reached:  make(chan struct{}),
 		release:  make(chan struct{}),
 		returned: make(chan struct{}),
+		verdict:  verdict,
 	}
 	graceObservationBarrier = func(observed string) {
 		if observed != match {
@@ -306,7 +344,6 @@ func startSweepAtGraceBarrier(t *testing.T, match string, sweep func() error) (*
 		case <-time.After(graceBarrierBound):
 		}
 	}
-	verdict := make(chan error, 1)
 	go func() {
 		defer close(barrier.returned)
 		verdict <- sweep()
@@ -327,10 +364,22 @@ func startSweepAtGraceBarrier(t *testing.T, match string, sweep func() error) (*
 // to observe what build left behind. The pass that follows always happens,
 // however long build took — that is the guarantee documented at
 // graceObservationBarrier.
+//
+// A sweep that RETURNS before reaching an observation — today the only such
+// path is the empty-cohort blind return of reapVanishedSessionProcessCohort —
+// has already delivered its verdict, and that verdict is the report. Waiting
+// the bound on `reached` alone cannot tell "already returned" from "still
+// coming": it produced a mute 10s timeout on master while the sweep's own
+// answer — a blind refusal naming the fixture's parent — sat on the verdict
+// channel (#3766). A sweep still working when the bound trips is a different
+// finding, and the timeout message stays for exactly that case.
 func (b *graceBarrier) holdFirstObservation(t *testing.T, build func()) {
 	t.Helper()
 	select {
 	case <-b.reached:
+	case err := <-b.verdict:
+		require.FailNowf(t, "the sweep returned before reaching its bounded grace observation",
+			"sweep verdict: %v", err)
 	case <-time.After(graceBarrierBound):
 		require.FailNow(t, "the sweep never reached its bounded grace observation")
 	}
