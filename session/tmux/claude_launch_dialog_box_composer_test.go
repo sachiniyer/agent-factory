@@ -101,7 +101,14 @@ func TestCheckAndHandleTrustPrompt_LiveDialogUnderAStaleComposerBoxHolds(t *test
 	framed := "╭───────────╮\n│ Security  │\n│ guide     │\n│           │\n│ ❯ 1. Yes, I │\n│ trust this │\n│ folder    │\n│   2. No,  │\n│ exit      │\n╰───────────╯\nEnter to\nconfirm · Esc\nto cancel"
 	for _, prompt := range []string{"> /exit", "! ls", "# note"} {
 		stale := "╭──────────────────────╮\n│ " + prompt + strings.Repeat(" ", 21-len(prompt)) + "│\n╰──────────────────────╯\n"
-		cases := map[string]string{"its frame's top edge below the composer": stale + framed}
+		// The stale composer's closing edge can be gone too, overwritten by
+		// the relaunch, so the dialog's own top edge follows the composer's
+		// prompt row directly (#7412 review).
+		unclosed := strings.SplitAfterN(stale, "\n", 3)
+		cases := map[string]string{
+			"its frame's top edge below the composer":                    stale + framed,
+			"its frame's top edge below a composer with no closing edge": unclosed[0] + unclosed[1] + framed,
+		}
 		for width := 3; width <= 24; width++ {
 			cases[fmt.Sprintf("its question below the composer at %d columns", width)] = staleComposerOverDialog(prompt, width)
 		}

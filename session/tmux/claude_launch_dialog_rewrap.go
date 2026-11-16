@@ -380,15 +380,23 @@ func claudeTrustBoxComposerAt(lines []string, rows []claudeTrustRow, top int) bo
 	return false
 }
 
-// claudeTrustBoxClose returns the line that closes the box whose top edge is
-// line top: the next frame rule below it, or len(lines) when none does.
+// claudeTrustBoxClose returns the last line of the box whose top edge is line
+// top. That is its bottom edge, when the next frame rule below it is one.
+// When the next frame rule is anything else, such as another box's top edge
+// or a plain rule, the box's own close is not on screen, and its rows end on
+// the line above that rule, which belongs to whatever is painted below the box
+// (#7412 review). With no frame rule below, it is the last line.
 func claudeTrustBoxClose(lines []string, top int) int {
 	for i := top + 1; i < len(lines); i++ {
-		if claudeTrustFrameRule(lines[i]) {
+		if !claudeTrustFrameRule(lines[i]) {
+			continue
+		}
+		if first, _ := utf8.DecodeRuneInString(strings.TrimSpace(lines[i])); strings.ContainsRune(claudeTrustBoxBottomCorners, first) {
 			return i
 		}
+		return i - 1
 	}
-	return len(lines)
+	return len(lines) - 1
 }
 
 // claudeTrustBoxBottomCorners close a box: a frame rule that starts with one
