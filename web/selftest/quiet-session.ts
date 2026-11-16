@@ -1,18 +1,26 @@
 import { execFileSync } from "node:child_process";
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
 
-// A session whose agent can never produce pane output (#6465, #4217). The shared
-// probe-a/probe-b sessions run `cat`, which echoes whatever the browser terminal
-// sends back while a pane attaches; that output is a Running edge, and a Running
-// edge after the agent went idle is exactly what clears an attention request
-// (session/attention.go). Under load it cleared the request between the spec
-// raising it and the spec interacting with it, so the Dismiss click found nothing
-// to click. Every spec that raises an attention request and then interacts with it
-// uses one of these, so nothing but the spec's own action can clear it.
+// A session whose agent cannot produce pane output outside the spec's own
+// actions (#6465, #4217, #7432). The shared probe-a/probe-b sessions run `cat`,
+// which echoes whatever the browser terminal sends back while a pane attaches;
+// that output is a Running edge, and a Running edge after the agent went idle
+// is exactly what clears an attention request (session/attention.go). Under
+// load it cleared the request between the spec raising it and the spec
+// interacting with it, so the Dismiss click found nothing to click. Every spec
+// that raises an attention request and then interacts with it uses one of
+// these, so nothing but the spec's own action can clear it.
 //
-// The name must contain "probe-quiet": the fake agent in web-selftest-entry.sh keys
-// off the session's directory and turns echo off and sleeps for those. Give each
-// spec file its own name -- sessions are created in beforeAll and killed in afterAll.
+// Two fixture families, keyed by the session name (the fake agent in
+// web-selftest-entry.sh branches on the session's directory):
+//   *probe-quiet* — stty -echo + sleep: nothing can ever churn the pane, for
+//     specs that raise a request and then interact with it (dismiss, inspect).
+//   *probe-echo*  — stty -echo + a `read` loop echoing newline-terminated lines:
+//     the browser's escape replies are buffered by `read` and can never churn
+//     the pane, but a line the spec submits (typed Enter, send-prompt) still
+//     echoes — for the specs whose own pane activity must answer the request.
+// Give each spec file its own name -- sessions are created in beforeAll and
+// killed in afterAll.
 //
 // perTest: a fresh session for every test (beforeEach/afterEach). Needed when tests
 // attach at different widths: the first attach sizes the pane, and the next test's
@@ -24,9 +32,7 @@ import { test, expect, type APIRequestContext, type Page } from "@playwright/tes
 
 export const READY_MARKER = process.env.AF_WEB_READY_MARKER ?? "AF_SELFTEST_READY";
 
-export function quietSession(name: string, opts: { perTest?: boolean } = {}) {
-  if (!name.includes("probe-quiet")) throw new Error(`quiet session ${name} must contain "probe-quiet"`);
-
+export function dedicatedSession(name: string, opts: { perTest?: boolean } = {}) {
   const create = () => {
     const afBin = process.env.AF_BIN;
     const mockRepo = process.env.AF_MOCK_REPO;
@@ -102,12 +108,23 @@ export function quietSession(name: string, opts: { perTest?: boolean } = {}) {
       expect(session?.id, `seeded session ${name}`).toBeTruthy();
       return session!.id;
     },
-    // Attached and showing the agent's one and only output. The quiet agent emits
-    // nothing further, so this is a real condition, not a settle wait.
+    // Attached and showing the agent's startup output. The marker prints once at
+    // exec and these agents emit nothing outside a submitted line, so this is a
+    // real condition, not a settle wait.
     async open(page: Page, id: string) {
       await page.goto(`/#/session/${encodeURIComponent(id)}`);
       await expect(page.locator(".af-term-title")).toHaveText(name);
       await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
     },
   };
+}
+
+export function quietSession(name: string, opts: { perTest?: boolean } = {}) {
+  if (!name.includes("probe-quiet")) throw new Error(`quiet session ${name} must contain "probe-quiet"`);
+  return dedicatedSession(name, opts);
+}
+
+export function echoSession(name: string, opts: { perTest?: boolean } = {}) {
+  if (!name.includes("probe-echo")) throw new Error(`echo session ${name} must contain "probe-echo"`);
+  return dedicatedSession(name, opts);
 }
