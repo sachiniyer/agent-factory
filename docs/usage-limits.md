@@ -577,6 +577,10 @@ tried to carry the conversation and why it could not, when:
   af carries the one that holds every turn of the other, and refuses when the
   two copies diverge (af's log names both files; move aside the one whose
   turns you don't want to keep before the next swap);
+- the recorded Codex thread was backtracked in Codex (Esc-Esc) and now
+  continues in a thread/revert rollout af does not carry, in either
+  account, so the new account starts fresh rather than resume the turns
+  the user backtracked away from;
 - a replacement already launched on the carried conversation stopped before it
   was confirmed working.
 
