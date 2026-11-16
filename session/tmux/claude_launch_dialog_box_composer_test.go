@@ -479,3 +479,77 @@ func TestCheckAndHandleTrustPrompt_BoxEndingInAPromptRowWithItsTopOnScreenHolds(
 		}
 	})
 }
+
+// An edge between a composer box and the options that carries no corner, a
+// tee, a junction or a rule in a style other than the composer's ─, neither
+// opens nor closes a box. It is an edge inside the dialog's frame or the
+// dialog's own rule, so the composer decides nothing over it and the dialog
+// holds (Codex review on #7412). The same composer straight over the dialog's
+// bordered options, with no edge between, stays clear.
+func TestCheckAndHandleTrustPrompt_DialogEdgeBetweenAComposerBoxAndTheOptionsHolds(t *testing.T) {
+	// Codex's frame: a stale bash-mode box over a tee-edged dialog.
+	codex := boxedComposer("! ls") + "├──────────────────────┤\n│ ❯ 1. Yes, I trust    │\n│ this folder          │\n│   2. No, exit        │\n╰──────────────────────╯\nEnter to confirm · Esc to cancel"
+	t.Run("Codex's tee under a bash-mode box", func(t *testing.T) {
+		handled, cmds := pollStaticPane(t, codex, 4)
+		require.True(t, handled, "a dialog's own edge under a composer box is still in the way:\n%s", codex)
+		require.Empty(t, sentKeystrokes(cmds))
+	})
+	edges := []struct{ name, edge, side, bottom string }{
+		{"a tee", "├" + strings.Repeat("─", 22) + "┤", "│", "╰" + strings.Repeat("─", 22) + "╯"},
+		{"a double tee", "╠" + strings.Repeat("═", 22) + "╣", "║", "╚" + strings.Repeat("═", 22) + "╝"},
+		{"a heavy rule", strings.Repeat("━", 24), "", ""},
+		{"a double rule", strings.Repeat("═", 24), "", ""},
+		{"a dashed rule", strings.Repeat("┄", 24), "", ""},
+		{"a dotted rule", strings.Repeat("┈", 24), "", ""},
+		{"a junction row", strings.Repeat("─", 11) + "┬" + strings.Repeat("─", 12), "", ""},
+	}
+	composers := map[string]string{
+		"a bash-mode box":            boxedComposer("! ls"),
+		"a memory-mode box":          boxedComposer("# note"),
+		"a bash-mode box after NBSP": boxedComposer("! ls"),
+		"a prompt-mode box":          boxedComposer("> x"),
+		"a padded prompt-mode box":   "╭──────────────────────╮\n│                      │\n│ > npm test           │\n│                      │\n╰──────────────────────╯\n",
+	}
+	framed := func(side, bottom string, options []string, footerInside bool) []string {
+		var rows []string
+		for _, row := range indentedRows(20, options[:len(options)-2]...) {
+			rows = append(rows, side+" "+row+strings.Repeat(" ", max(0, 20-len([]rune(row))))+" "+side)
+		}
+		footer := options[len(options)-1]
+		if footerInside {
+			for _, row := range append([]string{""}, wrapAtSpaces(footer, 20)...) {
+				rows = append(rows, side+" "+row+strings.Repeat(" ", max(0, 20-len([]rune(row))))+" "+side)
+			}
+			return append(rows, bottom)
+		}
+		return append(append(rows, bottom), wrapAtSpaces(footer, 24)...)
+	}
+	for name, composer := range composers {
+		for _, edge := range edges {
+			t.Run(fmt.Sprintf("%s over %s", name, edge.name), func(t *testing.T) {
+				for _, dialog := range dialogHeads {
+					var bodies [][]string
+					if edge.side == "" {
+						bodies = [][]string{indentedRows(24, dialog.options...)}
+					} else {
+						bodies = [][]string{framed(edge.side, edge.bottom, dialog.options, true), framed(edge.side, edge.bottom, dialog.options, false)}
+					}
+					for _, body := range bodies {
+						for _, gap := range []string{"", "\n"} {
+							content := composer + gap + edge.edge + "\n" + strings.Join(body, "\n")
+							handled, cmds := pollStaticPane(t, content, 4)
+							require.True(t, handled, "a dialog's own edge under a composer box is still in the way:\n%s", content)
+							require.Empty(t, sentKeystrokes(cmds))
+						}
+					}
+				}
+			})
+		}
+	}
+	bare := strings.Replace(codex, "├──────────────────────┤\n", "", 1)
+	t.Run("the bash-mode box straight over the bordered options", func(t *testing.T) {
+		handled, cmds := pollStaticPane(t, bare, 4)
+		require.False(t, handled, "a composer straight over quoted options is no dialog:\n%s", bare)
+		require.Empty(t, sentKeystrokes(cmds))
+	})
+}

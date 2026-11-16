@@ -436,6 +436,10 @@ func claudeTrustBoxPromptLabel(label string) bool {
 // is a box's bottom edge.
 const claudeTrustBoxBottomCorners = "╰└╚┗"
 
+// claudeTrustBoxCorners are every corner a box edge can carry. An edge with
+// none on it, a tee, a junction or a rule, neither opens nor closes a box.
+const claudeTrustBoxCorners = claudeTrustBoxTopCorners + "╮┐╗┓" + claudeTrustBoxBottomCorners + "╯┘╝┛"
+
 // claudeLaunchDialogOwnRowsBetween reports whether the lines strictly between
 // from, a composer's prompt row, and to, where the options begin, may hold one
 // of the dialog's own first rows (#7388). Every line below the prompt is read,
@@ -445,6 +449,10 @@ const claudeTrustBoxBottomCorners = "╰└╚┗"
 // (#7412 review, R3), so any of these is one of the dialog's own first rows:
 //
 //   - the top edge of a box that is still open at the options;
+//   - an edge with no corner on it: a tee, a junction, or a rule in a style
+//     other than the composer's ─. It neither opens nor closes a box, so it is
+//     an edge inside the dialog's frame or the dialog's own rule (Codex review
+//     on #7412);
 //   - the dialog's own top rule: a plain rule bounding no prompt row between
 //     the composer and the options;
 //   - a row af cannot place: any row with text on it. The rows af can place
@@ -462,7 +470,8 @@ func claudeLaunchDialogOwnRowsBetween(pane claudeLaunchDialogPane, from, to int)
 				return true
 			}
 		case claudeTrustFrameRule(line):
-			if claudeTrustBoxOpensAt(strings.TrimSpace(line)) && claudeTrustBoxOpenUntil(pane.lines, i, to) {
+			edge := strings.TrimSpace(line)
+			if claudeTrustBoxOpensAt(edge) && claudeTrustBoxOpenUntil(pane.lines, i, to) || !strings.ContainsAny(edge, claudeTrustBoxCorners) {
 				return true
 			}
 		case claudeLaunchDialogUnplacedRow(pane, i):
