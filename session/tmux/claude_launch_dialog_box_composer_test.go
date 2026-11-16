@@ -164,11 +164,11 @@ func TestCheckAndHandleTrustPrompt_LiveDialogUnderARuledComposerAfterANonBreakin
 	}
 }
 
-// A composer decides only over rows af can place as quoted: none, the bare
-// options, or the end of one of the dialog's own first rows it hides. A row af
-// cannot read between it and the options may be the dialog's question, in
-// wording af does not know, so the dialog holds (#7412 review, R3). So it does
-// when that wording is in the composer box's own rows below its prompt.
+// A composer decides only over rows af can place as quoted: none, or the bare
+// options. A row af cannot read between it and the options may be the dialog's
+// question, in wording af does not know, so the dialog holds (#7412 review,
+// R3). So it does when that wording is in the composer box's own rows below its
+// prompt.
 func TestCheckAndHandleTrustPrompt_DialogInWordingAfCannotReadUnderAComposerBoxHolds(t *testing.T) {
 	body := []string{"Opening a workspace:", "", "/home/u/proj", "", "Before you start: do you want Claude to", "work in this folder?", "", "Security guide", "", "❯ 1. Yes, I trust this folder", "  2. No, exit"}
 	framedBy := func(top string) string {
@@ -203,6 +203,86 @@ func TestCheckAndHandleTrustPrompt_DialogInWordingAfCannotReadUnderAComposerBoxH
 			handled, cmds := pollStaticPane(t, around, 4)
 			require.True(t, handled, "a dialog af cannot read in a composer box is still in the way:\n%s", around)
 			require.Empty(t, sentKeystrokes(cmds))
+		})
+	}
+}
+
+// A row that reads as the end of a question af knows is no evidence that a
+// composer hides its start. Under a stale composer, a dialog in wording af
+// does not know, headed by such a row, holds (#7412 review, R5).
+func TestCheckAndHandleTrustPrompt_DialogHeadedLikeTheEndOfAKnownQuestionUnderAComposerHolds(t *testing.T) {
+	// The review's frame: a new-wording MCP dialog under a stale bash-mode box.
+	review := "╭──────────────────────────────────╮\n│ ! ls                             │\n╰──────────────────────────────────╯\n\nMCP server found in this project:\n\n  Use this MCP server\n  Use this and all future MCP\n  servers in this project\n❯ Continue without using this MCP\nserver\n\nEnter to confirm · Esc to cancel"
+	t.Run("the review's MCP heading under a bash-mode box", func(t *testing.T) {
+		handled, cmds := pollStaticPane(t, review, 4)
+		require.True(t, handled, "a dialog headed like the end of a known question is still in the way:\n%s", review)
+		require.Empty(t, sentKeystrokes(cmds))
+	})
+	options := map[string]string{
+		"folder": quotedFolderOptions,
+		"legacy": "❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to exit",
+		"MCP":    "  Use this MCP server\n  Use this and all future MCP servers in this project\n❯ Continue without using this MCP server\n\nEnter to confirm · Esc to cancel",
+	}
+	composers := []string{
+		boxedComposer("! ls"),
+		boxedComposer("# note"),
+		boxedComposer("!\u00a0ls"),
+		"╭──────────────────────╮\n│                      │\n│ > npm test           │\n│                      │\n╰──────────────────────╯\n",
+	}
+	for _, heading := range []string{"MCP server found in this project:", "in this folder?", "workspace:", "one you trust", "project:", "?"} {
+		for name, opts := range options {
+			t.Run(fmt.Sprintf("%q over the %s options", heading, name), func(t *testing.T) {
+				for _, composer := range composers {
+					content := composer + "\n" + heading + "\n\n" + opts
+					handled, cmds := pollStaticPane(t, content, 4)
+					require.True(t, handled, "a dialog headed like the end of a known question is still in the way:\n%s", content)
+					require.Empty(t, sentKeystrokes(cmds))
+				}
+			})
+		}
+	}
+}
+
+// A top-cropped composer, its prompt row straight above its box's own bottom
+// edge and its top edge off screen, explains only its own rows too (#7412
+// review, R4). Over bare options it is the agent's composer above quoted
+// output, and stays clear (#7399). Over a live dialog, framed or not, it is a
+// stale frame above a relaunched Claude, and the dialog holds at every width.
+func TestCheckAndHandleTrustPrompt_LiveDialogUnderATopCroppedComposerHolds(t *testing.T) {
+	const question = "Quick safety check: Is this a project you created or one you trust? (Like your own code, …)."
+	dialogs := []struct {
+		name string
+		rows func(width int) []string
+	}{
+		{"a framed dialog, footer inside", func(w int) []string { return framedRewordedDialogRows(w, "inside") }},
+		{"a framed dialog, footer outside", func(w int) []string { return framedRewordedDialogRows(w, "outside") }},
+		{"a framed dialog after a blank row", func(w int) []string { return append([]string{""}, framedRewordedDialogRows(w, "inside")...) }},
+		{"an unframed dialog", func(w int) []string {
+			return append(append(wrapAtSpaces(question, w), ""), rewordedTrustBodyAndOptionRows(w)...)
+		}},
+	}
+	for _, prompt := range []string{"> /exit", ">", "> x"} {
+		cropped := func(width int) string {
+			box := max(width, 24)
+			return "│ " + prompt + strings.Repeat(" ", box-4-len(prompt)) + " │\n╰" + strings.Repeat("─", box-2) + "╯\n"
+		}
+		for _, dialog := range dialogs {
+			t.Run(fmt.Sprintf("prompt %q, %s", prompt, dialog.name), func(t *testing.T) {
+				for width := 8; width <= 40; width++ {
+					content := cropped(width) + strings.Join(dialog.rows(width), "\n")
+					handled, cmds := pollStaticPane(t, content, 4)
+					require.True(t, handled, "%d columns: a live dialog under a top-cropped composer is in the way:\n%s", width, content)
+					require.Empty(t, sentKeystrokes(cmds))
+				}
+			})
+		}
+		t.Run(fmt.Sprintf("prompt %q, bare options", prompt), func(t *testing.T) {
+			for width := 8; width <= 40; width++ {
+				content := cropped(width) + quotedFolderOptions
+				handled, cmds := pollStaticPane(t, content, 4)
+				require.False(t, handled, "%d columns: a top-cropped composer above quoted options is no dialog:\n%s", width, content)
+				require.Empty(t, sentKeystrokes(cmds))
+			}
 		})
 	}
 }

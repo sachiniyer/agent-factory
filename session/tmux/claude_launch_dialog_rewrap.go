@@ -350,8 +350,11 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 			// top, so its prompt row sits straight above the composer's closing
 			// edge — a bottom-cornered frame (╰…╯ closes; ╭…╮ opens). A bare
 			// transcript ">" row sits above the framed dialog's own top border
-			// (╭…╮), never above a ╰…╯ closing rule (#7399 review).
-			if claudeLaunchDialogPromptRow(pane, i-1) && claudeTrustFrameClosingRule(pane.lines[i]) {
+			// (╭…╮), never above a ╰…╯ closing rule (#7399 review). It explains
+			// only its own rows too, under the same #7388 anchor as the box
+			// test (#7412 review, R4).
+			if claudeLaunchDialogPromptRow(pane, i-1) && claudeTrustFrameClosingRule(pane.lines[i]) &&
+				!claudeLaunchDialogOwnRowsBetween(pane, i-1, pane.index[block]) {
 				return claudeLaunchDialogMatch{}, false
 			}
 		}
@@ -426,25 +429,6 @@ func claudeTrustBoxPromptLabel(label string) bool {
 // is a box's bottom edge.
 const claudeTrustBoxBottomCorners = "╰└╚┗"
 
-// claudeFolderTrustTitle is the reworded folder-trust dialog's first row, as
-// the region tests' synthetic model paints it (renderSyntheticClaudeFolderTrust).
-// No capture of this dialog exists in testdata. af never answers by it: it only
-// marks the dialog's own rows on screen (#7412 review, R3).
-const claudeFolderTrustTitle = "Accessing workspace:"
-
-// claudeLaunchDialogOwnQuestions are the launch dialogs' own first rows that
-// af knows the words of, squashed: the reworded folder dialog's title and
-// question, the legacy question, and the MCP dialogs' preambles.
-var claudeLaunchDialogOwnQuestions = []string{
-	claudeSquash(claudeFolderTrustTitle),
-	claudeSquash(claudeFolderTrustQuestion),
-	claudeLegacyTrustQuestionSquashed,
-	claudeMCPServerPreambleSquashed,
-	claudeMCPTrustPreambleSquashed,
-	claudeMCPTrustQuestionSquashed,
-	"newMCPserversfoundinthisproject",
-}
-
 // claudeLaunchDialogOwnRowsBetween reports whether the lines strictly between
 // from, a composer's prompt row, and to, where the options begin, may hold one
 // of the dialog's own first rows (#7388). Every line below the prompt is read,
@@ -456,12 +440,13 @@ var claudeLaunchDialogOwnQuestions = []string{
 //   - the top edge of a box that is still open at the options;
 //   - the dialog's own top rule: a plain rule bounding no prompt row between
 //     the composer and the options;
-//   - a row af cannot place. The rows af can place are none at all, the bare
-//     options, or the end of one of the dialog's own first rows whose start the
-//     composer hides (claudeLaunchDialogOwnQuestions), which is quoted output.
-//     A whole first row, or any other row, may be the dialog's question.
+//   - a row af cannot place: any row with text on it. The rows af can place
+//     are none at all and the bare options, so a blank row, a bordered blank
+//     row or a lone wrapped ❯. Any other row may be the dialog's question in
+//     wording af does not know, a title such as "Accessing workspace:" among
+//     them. A row that reads as the end of a question af knows is no evidence
+//     that the composer hides its start, so it counts too (#7412 review, R5).
 func claudeLaunchDialogOwnRowsBetween(pane claudeLaunchDialogPane, from, to int) bool {
-	var text strings.Builder
 	for i := from + 1; i < to; i++ {
 		line := pane.lines[i]
 		switch {
@@ -473,18 +458,7 @@ func claudeLaunchDialogOwnRowsBetween(pane claudeLaunchDialogPane, from, to int)
 			if claudeTrustBoxOpensAt(strings.TrimSpace(line)) && claudeTrustBoxOpenUntil(pane.lines, i, to) {
 				return true
 			}
-		case !pane.rows[i].blank:
-			text.WriteString(claudeSquash(pane.rows[i].label))
-		}
-	}
-	return text.Len() > 0 && !claudeLaunchDialogOwnRowTail(text.String())
-}
-
-// claudeLaunchDialogOwnRowTail reports whether text is the end of one of the
-// dialog's own first rows, and not the whole of it.
-func claudeLaunchDialogOwnRowTail(text string) bool {
-	for _, own := range claudeLaunchDialogOwnQuestions {
-		if len(text) < len(own) && strings.HasSuffix(own, text) {
+		case !pane.rows[i].blank && claudeSquash(pane.rows[i].label) != "":
 			return true
 		}
 	}
