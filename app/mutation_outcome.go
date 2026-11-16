@@ -1,9 +1,11 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/daemon"
 )
 
 // mutationMayHaveLanded reports whether a failed TUI mutation may nonetheless
@@ -17,7 +19,21 @@ import (
 // the snapshot and task polls, or an explicit re-read — show what happened.
 // withDaemonHTTPMutation never re-sends such a mutation, so this is the only
 // place its outcome is decided.
+//
+// An ensure-phase admission deadline (daemon.ErrAdmissionDeadline) is NOT
+// uncertain: daemonHTTPClient's EnsureDaemonUntil call failed before fn — the
+// closure that sends the mutation — was ever invoked, so no request byte left
+// the process and the daemon provably did not act. IsMutationOutcomeUncertain
+// counts a bare context.DeadlineExceeded as uncertain (the caller gave up
+// waiting on a request that may be on the wire), and the admission deadline
+// error wraps context.DeadlineExceeded for the daemon-internal handoff guard,
+// so without this exclusion every never-sent kill/archive/restore would
+// misreport as "could not be confirmed — the daemon may have done it" for a
+// request that was never dispatched.
 func mutationMayHaveLanded(err error) bool {
+	if errors.Is(err, daemon.ErrAdmissionDeadline) {
+		return false
+	}
 	return apiclient.IsMutationOutcomeUncertain(err)
 }
 

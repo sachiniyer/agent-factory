@@ -322,6 +322,22 @@ var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.KillSession(ctx, request)
 	})
+	// The ensure phase (daemonHTTPClient → daemon.EnsureDaemonUntil) fails BEFORE
+	// KillSession is ever sent: its admission-deadline error wraps both
+	// daemon.ErrAdmissionDeadline and context.DeadlineExceeded. Recognize it
+	// FIRST — the request was never dispatched, so there is no in-flight
+	// teardown to "still finish in the background", no 60s bound in force, and
+	// the daemon did not "take the request and go quiet". The handler routes
+	// this to "the session is retained" (showSessionRecovery) rather than the
+	// errDaemonUnresponsive restart offer, which is built on the post-send
+	// timeout premise and would invite restarting a daemon that may merely be
+	// blocked (and drop live sessions doing so). Preserving the underlying error
+	// in the chain via %w (the rewrap below drops it) is also what lets
+	// mutationOutcomeUnknown recognize a never-sent kill as NOT uncertain — a
+	// request that never left the process is definitive, not unknown.
+	if errors.Is(err, daemon.ErrAdmissionDeadline) {
+		return fmt.Errorf("the daemon was not reachable for the kill request — no teardown was started: %w", err)
+	}
 	// A deadline here means the daemon took the request and went quiet, so this
 	// client genuinely does not know whether the teardown happened — say exactly
 	// that instead of implying the kill failed. The row reverts to its real
