@@ -335,13 +335,15 @@ func TestSwitchProjectDeadlineToastIsActionable(t *testing.T) {
 func TestSnapshotThroughDaemonIsBoundedByItsCtx(t *testing.T) {
 	sock := testguard.SocketPath(t, "daemon-http.sock")
 	unwedge := make(chan struct{})
+	var unwedgeOnce sync.Once
+	release := func() { unwedgeOnce.Do(func() { close(unwedge) }) }
 	counter := serveDaemonHTTP(t, sock, func(_ http.ResponseWriter, r *http.Request, _ int) {
 		select {
 		case <-unwedge:
 		case <-r.Context().Done():
 		}
 	})
-	t.Cleanup(func() { close(unwedge) })
+	t.Cleanup(release)
 	pointDaemonHTTPAt(t, sock)
 
 	const bound = 200 * time.Millisecond
@@ -363,6 +365,12 @@ func TestSnapshotThroughDaemonIsBoundedByItsCtx(t *testing.T) {
 		assert.ErrorIs(t, r.err, context.DeadlineExceeded, "the read ends at its ctx's deadline")
 		assert.GreaterOrEqual(t, r.elapsed, bound/2, "the request reached the wedged handler and waited for the deadline")
 	case <-time.After(5 * time.Second):
+		// Let the stuck call finish before pointDaemonHTTPAt's cleanup swaps
+		// back the seam it is still reading.
+		t.Cleanup(func() {
+			release()
+			<-done
+		})
 		t.Fatalf("snapshotThroughDaemon outlived its %s deadline against a daemon that never answers", bound)
 	}
 	assert.GreaterOrEqual(t, counter.get("/v1/Snapshot"), 1, "the request must reach the daemon socket")
