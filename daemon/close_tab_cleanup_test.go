@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The daemon-side disk contract for #2669's review follow-up. The session
@@ -261,11 +262,24 @@ func TestCreateTab_AvoidsTmuxNameRetainedByUnconfirmedClose(t *testing.T) {
 //
 // The seeded handle names a tmux session that does not exist, which Close treats
 // as a confirmed absence (#967 idempotent teardown). That keeps the test's only
-// real tmux contact to a kill and a probe against a name nothing owns.
+// real tmux contact to a kill and a probe against a name nothing owns — but only
+// a private socket makes that contact determinate. On the package's shared
+// ambient server the probe's answer depends on state the test does not own: a
+// server mid-exit answers every command with an unclassifiable `server exited
+// unexpectedly`, and the socket-absent claim check reads a uid-wide process
+// table that foreign tmux processes (any client on darwin, a client caught
+// mid-exec before its retitle on Linux) can keep permanently ambiguous — so the
+// strict probe could not always prove the absence it was asked about (#7449).
 func TestSweepStartupTabCleanup_RetiresConfirmedHandlesOnDisk(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed; the startup sweep drives a real teardown")
 	}
+	// A private TMUX_TMPDIR makes every tmux read answer ENOENT, and pinning
+	// the same-uid server table empty makes that ENOENT deterministically
+	// unclaimed: probeSessionStrict then proves absence in the same pass, with
+	// no dependence on a shared server's liveness or foreign tmux processes.
+	testguard.IsolateTmux(t)
+	t.Cleanup(sessiontmux.PinServerProbeForTest())
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
