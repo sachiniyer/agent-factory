@@ -299,3 +299,17 @@ func TestClaudeTranscriptOwnershipBoundsTheRecordedDirectorysLookup(t *testing.T
 		t.Fatal("a lookup on a wedged mount must not stall ownership")
 	}
 }
+
+// A conversation launched at the filesystem root contains every directory it
+// can cd into, so a transcript in the root's project directory is that
+// launch's own, wherever it records: the root's spelling ("-") turns up in
+// every ancestor walk, and a root launch must not read that as a collision
+// (Codex review of #7375).
+func TestClaudeTranscriptOwnershipOfARootLaunchIsHere(t *testing.T) {
+	recorded := filepath.Join(testguard.CanonicalTempDir(t), "a-b", "web")
+	require.NoError(t, os.MkdirAll(recorded, 0o755))
+	path := filepath.Join(t.TempDir(), newerConversationID+".jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(claudeRecordLine(t, recorded)), 0o600))
+	require.Equal(t, claudeOwnedHere, claudeTranscriptOwnership(
+		claudeTranscript{dir: filepath.Dir(path), name: filepath.Base(path)}, string(filepath.Separator)))
+}

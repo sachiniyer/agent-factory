@@ -183,3 +183,53 @@ func TestClaudeTranscriptOwnershipIsUnknownWhenTheRecordedSpellingDoesNotResolve
 	t.Cleanup(func() { claudeRecordedDirFacts = prev })
 	require.Equal(t, claudeOwnershipUnknown, claudeTranscriptOwnership(transcript, recordedDir))
 }
+
+// The recorded side resolves every lexical ancestor of the directory a
+// transcript records (#7367, #7375 review R1), each inside the transcript
+// read's flight. An ancestor whose resolution fails or does not answer within
+// the bound is a look that did not happen: ownership is unknown, never another
+// directory's, even when the directory itself resolved and the ancestor's
+// spelling would name the colliding project.
+func TestClaudeTranscriptOwnershipIsUnknownWhenAnAncestorDoesNotResolve(t *testing.T) {
+	real := filepath.Join(testguard.CanonicalTempDir(t), "real")
+	launchDir := filepath.Join(real, "a.b")
+	foreign := filepath.Join(real, "a-b")
+	require.NoError(t, os.MkdirAll(launchDir, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(foreign, "web"), 0o755))
+	path := filepath.Join(t.TempDir(), newerConversationID+".jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(claudeRecordLine(t, filepath.Join(foreign, "web"))), 0o600))
+	transcript := claudeTranscript{dir: filepath.Dir(path), name: filepath.Base(path)}
+	require.Equal(t, claudeOwnedElsewhere, claudeTranscriptOwnership(transcript, launchDir),
+		"precondition: a colliding directory's subdirectory, every ancestor resolved")
+
+	// Only the ancestor fails: the recorded directory and the launch dir
+	// still resolve.
+	restore := fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+		if path == foreign {
+			return "", os.ErrPermission
+		}
+		return filepath.EvalSymlinks(path)
+	})
+	require.Equal(t, claudeOwnershipUnknown, claudeTranscriptOwnership(transcript, launchDir),
+		"an ancestor whose lookup failed is a look that did not happen")
+	restore()
+
+	release := make(chan struct{})
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	restore = fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+		if path == foreign {
+			<-release
+		}
+		return filepath.EvalSymlinks(path)
+	})
+	t.Cleanup(func() {
+		close(release)
+		// Let the flight still blocked in the seam finish before the real
+		// resolver and the bound come back.
+		time.Sleep(50 * time.Millisecond)
+		restore()
+		restoreTimeout()
+	})
+	got := withinBound(t, func() claudeOwnership { return claudeTranscriptOwnership(transcript, launchDir) })
+	require.Equal(t, claudeOwnershipUnknown, got, "an ancestor that did not answer within the bound is unknown ownership")
+}
