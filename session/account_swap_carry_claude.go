@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -44,13 +46,19 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 	c.claudeProjects = projects
 	c.claudeLaunchDir = launch.WorkingDir
 	var refused string
+	// unlooked is a copy whose lookup did not answer, or failed: it may be
+	// the one Claude is appending to, so no other copy can be bound (#7383).
+	unlooked := false
 	var src, dst []claudeCopy
 	note := func(root carryRoot, project string, into *[]claudeCopy) {
 		found, err := statClaudeCopy(root, project, c.id)
-		if found != nil {
+		switch {
+		case found != nil:
 			*into = append(*into, *found)
-		} else if path := carrySymlinkPath(err); path != "" && refused == "" {
-			refused = symlinkCarryReason(path)
+		case carryLookupUnlooked(err):
+			unlooked = true
+		case carrySymlinkPath(err) != "" && refused == "":
+			refused = symlinkCarryReason(carrySymlinkPath(err))
 		}
 	}
 	for _, project := range c.claudeProjects {
@@ -58,6 +66,9 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 		if c.committed {
 			note(c.dstRoot, project, &dst)
 		}
+	}
+	if unlooked {
+		return carryUnlookedReason
 	}
 	root, copies := c.srcRoot, src
 	if len(dst) > 0 {
@@ -79,14 +90,18 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 }
 
 // statClaudeCopy reports the copy of conversation id under project in root,
-// reached the way openCarryArtifact opens it, or nil and why not.
+// reached the way openCarryArtifact opens it, or nil and why not. The lookup
+// runs in a bounded flight (#7383).
 func statClaudeCopy(root carryRoot, project, id string) (*claudeCopy, error) {
-	file, info, err := openCarryArtifact(root, filepath.Join(project, id+".jsonl"))
-	if err != nil {
-		return nil, err
-	}
-	_ = file.Close()
-	return &claudeCopy{project: project, size: info.Size(), modTime: info.ModTime()}, nil
+	rel := filepath.Join(project, id+".jsonl")
+	return fsprobe.Bounded("Claude transcript copy lookup", root.key()+"\x00"+rel, func() (*claudeCopy, error) {
+		file, info, err := openCarryArtifact(root, rel)
+		if err != nil {
+			return nil, err
+		}
+		_ = file.Close()
+		return &claudeCopy{project: project, size: info.Size(), modTime: info.ModTime()}, nil
+	})
 }
 
 // liveClaudeCopy picks, from copies of conversation id in root, the project
@@ -110,7 +125,15 @@ func liveClaudeCopy(root carryRoot, id string, copies []claudeCopy) (string, str
 	for _, candidate := range ordered {
 		holdsAll := true
 		for _, other := range ordered {
-			if other.project != candidate.project && !claudeCopyExtends(root, rel(candidate.project), root, rel(other.project)) {
+			if other.project == candidate.project {
+				continue
+			}
+			extends, err := claudeCopyExtends(root, rel(candidate.project), root, rel(other.project))
+			if err != nil {
+				// Neither "extends" nor "diverges": af could not compare them.
+				return "", carryUnlookedReason
+			}
+			if !extends {
 				holdsAll = false
 				break
 			}
@@ -125,27 +148,45 @@ func liveClaudeCopy(root carryRoot, id string, copies []claudeCopy) (string, str
 
 // claudeCopyExtends reports whether the file at longer, beneath longRoot,
 // begins with every byte of the file at shorter, beneath shortRoot: the
-// longer one is the shorter one with turns appended. A file af cannot read
-// extends nothing; one file under two names extends itself.
-func claudeCopyExtends(longRoot carryRoot, longer string, shortRoot carryRoot, shorter string) bool {
-	long, longInfo, err := openCarryArtifact(longRoot, longer)
-	if err != nil {
-		return false
+// longer one is the shorter one with turns appended. A file that is not there,
+// or is not a plain file, extends nothing; one file under two names extends
+// itself. The comparison runs in a bounded flight (#7383), and err is a lookup
+// in it that did not answer, or failed: then af could not tell.
+func claudeCopyExtends(longRoot carryRoot, longer string, shortRoot carryRoot, shorter string) (bool, error) {
+	return fsprobe.Bounded("Claude transcript copy comparison",
+		longRoot.key()+"\x00"+longer+"\x00"+shortRoot.key()+"\x00"+shorter,
+		func() (bool, error) {
+			long, longInfo, err := openCarryArtifact(longRoot, longer)
+			if err != nil {
+				return false, unlookedOnly(err)
+			}
+			defer long.Close()
+			short, shortInfo, err := openCarryArtifact(shortRoot, shorter)
+			if err != nil {
+				return false, unlookedOnly(err)
+			}
+			defer short.Close()
+			if os.SameFile(longInfo, shortInfo) {
+				return true, nil
+			}
+			if longInfo.Size() < shortInfo.Size() {
+				return false, nil
+			}
+			same, err := carryPrefixMatches(long, short, shortInfo.Size())
+			if err != nil {
+				return false, unlookedOnly(err)
+			}
+			return same, nil
+		})
+}
+
+// unlookedOnly is err when it is a look that did not happen
+// (carryLookupUnlooked), and nil for an answer such as absence.
+func unlookedOnly(err error) error {
+	if carryLookupUnlooked(err) {
+		return err
 	}
-	defer long.Close()
-	short, shortInfo, err := openCarryArtifact(shortRoot, shorter)
-	if err != nil {
-		return false
-	}
-	defer short.Close()
-	if os.SameFile(longInfo, shortInfo) {
-		return true
-	}
-	if longInfo.Size() < shortInfo.Size() {
-		return false
-	}
-	same, err := carryPrefixMatches(long, short, shortInfo.Size())
-	return err == nil && same
+	return nil
 }
 
 // claudeTargetReason refuses a carry whose new account already holds the
@@ -155,25 +196,55 @@ func claudeCopyExtends(longRoot carryRoot, longer string, shortRoot carryRoot, s
 // not extend. An older copy the carried one extends is the state the source
 // plan accepts as an older copy Claude has moved past, so it is left in place
 // (#7220 review R3); af deletes nothing from an account's home.
+//
+// The lookups run in a bounded flight; one that does not answer is af could
+// not check the new account's home (#7383).
 func (c *conversationCarry) claudeTargetReason() string {
-	carried, carriedInfo, err := openCarryArtifact(c.srcRoot, c.transcript)
+	in := claudeTargetLookup{srcRoot: c.srcRoot, dstRoot: c.dstRoot, dstHome: c.dstHome, transcript: c.transcript,
+		id: c.id, projects: append([]string(nil), c.claudeProjects...)}
+	reason, err := fsprobe.Bounded("Claude target copy lookup",
+		in.srcRoot.key()+"\x00"+in.dstRoot.key()+"\x00"+in.transcript+"\x00"+strings.Join(in.projects, "\x00"),
+		func() (string, error) { return judgeClaudeTarget(in), nil })
+	if err != nil {
+		return carryTargetUncheckedReason
+	}
+	return reason
+}
+
+// claudeTargetLookup is what claudeTargetReason judges, copied out of the
+// carry: an abandoned flight must not read state the plan goes on changing.
+type claudeTargetLookup struct {
+	srcRoot, dstRoot    carryRoot
+	dstHome, transcript string
+	id                  string
+	projects            []string
+}
+
+func judgeClaudeTarget(in claudeTargetLookup) string {
+	carried, carriedInfo, err := openCarryArtifact(in.srcRoot, in.transcript)
 	if err != nil {
 		return carryTargetUncheckedReason
 	}
 	_ = carried.Close()
-	for _, project := range c.claudeProjects {
-		rel := filepath.Join(project, c.id+".jsonl")
-		if rel == c.transcript {
+	for _, project := range in.projects {
+		rel := filepath.Join(project, in.id+".jsonl")
+		if rel == in.transcript {
 			continue
 		}
-		other, otherInfo, err := openCarryArtifact(c.dstRoot, rel)
+		other, otherInfo, err := openCarryArtifact(in.dstRoot, rel)
 		switch {
 		case err == nil:
 			_ = other.Close()
-			if otherInfo.ModTime().Before(carriedInfo.ModTime()) && claudeCopyExtends(c.srcRoot, c.transcript, c.dstRoot, rel) {
-				continue
+			if otherInfo.ModTime().Before(carriedInfo.ModTime()) {
+				extends, err := claudeCopyExtends(in.srcRoot, in.transcript, in.dstRoot, rel)
+				if err != nil {
+					return carryTargetUncheckedReason
+				}
+				if extends {
+					continue
+				}
 			}
-			return fmt.Sprintf(carryTargetOtherCopyFormat, filepath.Join(c.dstHome, rel))
+			return fmt.Sprintf(carryTargetOtherCopyFormat, filepath.Join(in.dstHome, rel))
 		case errors.Is(err, fs.ErrNotExist):
 		case carrySymlinkPath(err) != "":
 			return symlinkCarryReason(carrySymlinkPath(err))

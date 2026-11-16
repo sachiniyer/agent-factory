@@ -34,6 +34,11 @@ const (
 	// could list files the recorded conversation, so it exists; whether it is
 	// still the newest is unknown (#7221 review R5).
 	claudeRecordedFiledUnlisted
+	// claudeRecordedUnlooked: a newer copy of the recorded conversation under
+	// another spelling could not be compared with the bound one, a read that
+	// did not answer or failed (#7383), so whether the bound copy still holds
+	// every byte of it is unknown.
+	claudeRecordedUnlooked
 	// claudeRecordedVerdicts counts the verdicts above. A new verdict goes
 	// before it, and TestEveryClaudeRecordedVerdictMapsToALaunch requires
 	// recordedClaudeLaunchFor to map it.
@@ -88,7 +93,7 @@ func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bou
 	if recorded == nil {
 		return claudeRecordedMissing
 	}
-	copies, stale, uncorrelated := false, false, false
+	copies, stale, uncorrelated, unlooked := false, false, false, false
 	for _, other := range transcripts {
 		if !other.modTime.After(recorded.modTime) {
 			continue
@@ -96,7 +101,10 @@ func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bou
 		if other.dir != recorded.dir && strings.EqualFold(other.id, recorded.id) {
 			// A newer copy the judged one still holds every byte of brings no
 			// turn it lacks; only one that adds or diverges does.
-			if !claudeTranscriptExtends(*recorded, other) {
+			switch extends, err := claudeTranscriptExtends(*recorded, other); {
+			case err != nil:
+				unlooked = true
+			case !extends:
 				copies = true
 			}
 			continue
@@ -123,6 +131,9 @@ func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bou
 	switch {
 	case copies:
 		return claudeRecordedCopies
+	case unlooked:
+		// Like copies, a fact about the id itself that af could not settle.
+		return claudeRecordedUnlooked
 	case stale:
 		return claudeRecordedStale
 	case uncorrelated:
@@ -160,6 +171,9 @@ func claudeCarryStaleness(configDir string, projects []string, launchDir, transc
 		}
 	case claudeRecordedCopies:
 		return carryTranscriptCopiesReason
+	case claudeRecordedUnlooked:
+		// About the id itself, so whatever a newer conversation would mean.
+		return carryUnlookedReason
 	}
 	return ""
 }
@@ -238,7 +252,7 @@ func recordedClaudeLaunchFor(verdict claudeRecordedVerdict, evidence func() bool
 		return recordedClaudeBlind, true
 	case claudeRecordedMissing:
 		return recordedClaudeStartOn, true
-	case claudeRecordedCurrent, claudeRecordedCopies:
+	case claudeRecordedCurrent, claudeRecordedCopies, claudeRecordedUnlooked:
 		return recordedClaudeResume, true
 	case claudeRecordedUncorrelated, claudeRecordedFiledUnlisted:
 		// The id is filed, and nothing shows the session moved on from it: a
@@ -363,33 +377,44 @@ func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationD
 }
 
 // claudeTranscriptExtends reports whether the transcript longer begins with
-// every byte of shorter. One af cannot read extends nothing.
-func claudeTranscriptExtends(longer, shorter claudeTranscript) bool {
+// every byte of shorter. One that is not there extends nothing. The
+// comparison runs in a bounded flight (#7383), and err is a lookup in it that
+// did not answer, or failed: then af could not tell.
+func claudeTranscriptExtends(longer, shorter claudeTranscript) (bool, error) {
 	longPath, shortPath := filepath.Join(longer.dir, longer.name), filepath.Join(shorter.dir, shorter.name)
-	carryLookup("open", longPath)
-	long, err := os.Open(longPath)
-	if err != nil {
-		return false
-	}
-	defer long.Close()
-	carryLookup("open", shortPath)
-	short, err := os.Open(shortPath)
-	if err != nil {
-		return false
-	}
-	defer short.Close()
-	carryLookup("fstat", longPath)
-	longInfo, err := long.Stat()
-	if err != nil {
-		return false
-	}
-	shortInfo, err := short.Stat()
-	if err != nil || longInfo.Size() < shortInfo.Size() {
-		return false
-	}
-	if os.SameFile(longInfo, shortInfo) {
-		return true
-	}
-	same, err := carryPrefixMatches(long, short, shortInfo.Size())
-	return err == nil && same
+	return fsprobe.Bounded("Claude transcript comparison", longPath+"\x00"+shortPath, func() (bool, error) {
+		carryLookup("open", longPath)
+		long, err := os.Open(longPath)
+		if err != nil {
+			return false, unlookedOnly(err)
+		}
+		defer long.Close()
+		carryLookup("open", shortPath)
+		short, err := os.Open(shortPath)
+		if err != nil {
+			return false, unlookedOnly(err)
+		}
+		defer short.Close()
+		carryLookup("fstat", longPath)
+		longInfo, err := long.Stat()
+		if err != nil {
+			return false, err
+		}
+		carryLookup("fstat", shortPath)
+		shortInfo, err := short.Stat()
+		if err != nil {
+			return false, err
+		}
+		if longInfo.Size() < shortInfo.Size() {
+			return false, nil
+		}
+		if os.SameFile(longInfo, shortInfo) {
+			return true, nil
+		}
+		same, err := carryPrefixMatches(long, short, shortInfo.Size())
+		if err != nil {
+			return false, unlookedOnly(err)
+		}
+		return same, nil
+	})
 }

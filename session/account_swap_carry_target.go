@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -32,29 +33,55 @@ func (c *conversationCarry) targetReason() string {
 // The source is still live, so the copy judges again at stop time: only what
 // the source writes in between — bytes that turn an extending target copy
 // into a diverging one, say — is left for the copy to find.
+//
+// The judgement opens and reads both accounts' homes, so it runs in a bounded
+// flight: one that does not answer, or a lookup in it that fails, refuses as
+// unverified (#7383).
 func (c *conversationCarry) targetCopyReason() string {
-	src, srcInfo, err := openCarryArtifact(c.srcRoot, c.transcript)
+	srcRoot, dstRoot, rel := c.srcRoot, c.dstRoot, c.transcript
+	judged, err := fsprobe.Bounded("carry target-copy judgement", srcRoot.key()+"\x00"+dstRoot.key()+"\x00"+rel,
+		func() (targetCopyJudgement, error) { return judgeTargetCopy(srcRoot, dstRoot, rel), nil })
+	switch {
+	case err != nil:
+		return carryUnlookedReason
+	case judged.refusal == nil:
+		return ""
+	case carryLookupUnlooked(judged.refusal):
+		return carryUnlookedReason
+	}
+	return c.copyRefusal(judged.refusal)
+}
+
+// targetCopyJudgement is judgeTargetCopy's answer: the copy's refusal, or nil.
+type targetCopyJudgement struct {
+	refusal error
+}
+
+// judgeTargetCopy is the copy's decision on rel in srcRoot and dstRoot, made
+// from the two open files without writing anything.
+func judgeTargetCopy(srcRoot, dstRoot carryRoot, rel string) targetCopyJudgement {
+	src, srcInfo, err := openCarryArtifact(srcRoot, rel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		src = nil
 	case err != nil:
-		return c.copyRefusal(carryFailureAt("the conversation could not be read safely from the previous account", err))
+		return targetCopyJudgement{carryFailureAt("the conversation could not be read safely from the previous account", err)}
 	default:
 		defer src.Close()
 	}
-	dst, dstInfo, err := openCarryArtifact(c.dstRoot, c.transcript)
+	dst, dstInfo, err := openCarryArtifact(dstRoot, rel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		dst = nil
 	case err != nil:
-		return c.copyRefusal(carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err))
+		return targetCopyJudgement{carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)}
 	default:
 		defer dst.Close()
 	}
 	if _, err := judgeCarryFile(src, srcInfo, dst, dstInfo, carryNewTranscript); err != nil {
-		return c.copyRefusal(err)
+		return targetCopyJudgement{err}
 	}
-	return ""
+	return targetCopyJudgement{}
 }
 
 // copyRefusal is the clause a copy refusal err gives, in the agent's terms.

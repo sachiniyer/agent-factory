@@ -59,9 +59,7 @@ var readFileQuestionFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 // flight is stuck; a caller asking another question of the path gets its own
 // flight. A flight's answer of a type other than T is an error, never a panic.
 func ReadFileWithOpen[T any](question, path string, open func(string) (*os.File, error), read func(*os.File) (T, error)) (T, error) {
-	var zero T
-	got, err := runBoundedKeyed(question+"\x00"+path, path, readFileQuestionFlights, question,
-		"the filesystem did not answer the read",
+	return boundedAs[T](readFileQuestionFlights, question, path, "the filesystem did not answer the read",
 		func() (any, error) {
 			file, err := open(path)
 			if err != nil {
@@ -70,12 +68,43 @@ func ReadFileWithOpen[T any](question, path string, open func(string) (*os.File,
 			defer file.Close()
 			return read(file)
 		})
+}
+
+// boundedFlights is Bounded's registry, keyed by question and key.
+var boundedFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+
+// Bounded runs judge inside one bounded flight, for a read-only judgement that
+// reaches the filesystem through file descriptors rather than through one
+// path: an openat chain from an anchored root, then fstat and reads on what it
+// opened (#7383). fsprobe's path probes cannot reach those syscalls, so the
+// whole judgement is the flight. A judgement that does not answer within the
+// bound is the ErrProbeTimedOut + context.DeadlineExceeded non-answer every
+// probe here gives, and a retry while the stuck one is still running is
+// refused the same way.
+//
+// question names what judge decides, and key what it decides it about, such
+// as the paths it reads; the error messages name both. Every caller passing
+// the same question and key must judge the same way: only a caller asking the
+// same question of the same key joins a flight. judge must close everything it
+// opens before it returns, since an abandoned flight returns after its caller
+// has gone, and must not touch state a caller may change once it has returned.
+// An answer of a type other than T is an error, never a panic.
+func Bounded[T any](question, key string, judge func() (T, error)) (T, error) {
+	return boundedAs[T](boundedFlights, question, key, "the filesystem did not answer",
+		func() (any, error) { return judge() })
+}
+
+// boundedAs runs run in a flight of flights keyed by question and key, and
+// type-checks its answer.
+func boundedAs[T any](flights *flightRegistry, question, key, detail string, run func() (any, error)) (T, error) {
+	var zero T
+	got, err := runBoundedKeyed(question+"\x00"+key, key, flights, question, detail, run)
 	if err != nil {
 		return zero, err
 	}
 	answer, ok := got.(T)
 	if !ok {
-		return zero, fmt.Errorf("%s of %s answered with %T, not %T", question, path, got, zero)
+		return zero, fmt.Errorf("%s of %s answered with %T, not %T", question, key, got, zero)
 	}
 	return answer, nil
 }

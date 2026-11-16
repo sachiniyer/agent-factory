@@ -334,9 +334,14 @@ func (c *conversationCarry) locateCodex() string {
 	case source == "" && (existing == "" || !c.committed):
 		// The sessions tree is walked without following links, so a symlinked
 		// store reads as empty: name the link rather than a missing rollout.
+		// A probe that did not answer, or failed, is no "missing" (#7383).
 		for _, root := range []carryRoot{c.srcRoot, c.dstRoot} {
-			if path := carrySymlinkPath(probeCarryDir(root, "sessions")); path != "" {
+			err := boundedProbeCarryDir(root, "sessions")
+			if path := carrySymlinkPath(err); path != "" {
 				return symlinkCarryReason(path)
+			}
+			if carryLookupUnlooked(err) {
+				return carryUnlookedReason
 			}
 		}
 		if reason := c.codexOtherFormsReason(); reason != "" {
