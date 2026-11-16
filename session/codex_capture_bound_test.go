@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -515,4 +516,165 @@ func TestCodexPromptReceiptPollStopsAtTheFirstScanThatDoesNotAnswer(t *testing.T
 	require.False(t, got.received)
 	require.True(t, got.undecided, "a scan that did not answer leaves the receipt undecided")
 	require.EqualValues(t, 1, stalled.Load(), "the poll stops at the first scan that does not answer")
+}
+
+// releasableLookupStall installs a seam stand-in, through install, that blocks
+// every lookup match accepts until release, and bounds af's probes at 50ms.
+// release lets the stuck flights return and waits for them to unpublish, so
+// every later lookup answers.
+func releasableLookupStall(t *testing.T, install func(wait func(string)) (restore func()), match func(string) bool) (release func()) {
+	t.Helper()
+	gate := make(chan struct{})
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	restoreSeam := install(func(p string) {
+		if match(p) {
+			<-gate
+		}
+	})
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			close(gate)
+			time.Sleep(50 * time.Millisecond)
+			restoreSeam()
+			restoreTimeout()
+		})
+	}
+	t.Cleanup(release)
+	return release
+}
+
+func statSeam(wait func(string)) func() {
+	return fsprobe.SetStatPathForTest(func(p string) (os.FileInfo, error) {
+		wait(p)
+		return os.Stat(p)
+	})
+}
+
+func readDirSeam(wait func(string)) func() {
+	return fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
+		wait(dir)
+		return os.ReadDir(dir)
+	})
+}
+
+// receiptRaceLayout is #5471's two config agents in one AF home: a resumed
+// rollout A the launch pins or pools, and a concurrent Codex's new rollout C
+// in the same launch dir. Both record the same deterministic briefing, so with
+// every lookup answering the receipt is ambiguous.
+type receiptRaceLayout struct {
+	codexHome, workDir, a string
+}
+
+const receiptRacePrompt = "the af briefing"
+
+func newReceiptRaceLayout(t *testing.T) receiptRaceLayout {
+	t.Helper()
+	l := receiptRaceLayout{codexHome: t.TempDir(), workDir: t.TempDir()}
+	l.a = writeCodexRolloutFileWithCwd(t, l.codexHome, "rollout-2026-11-11T13-50-27-"+heldTestOwnID+".jsonl", l.workDir)
+	return l
+}
+
+func (l receiptRaceLayout) snapshot() ConversationCaptureSnapshot {
+	return beginConversationCaptureAtCodexHomeAndWorkingDir(l.codexHome, l.workDir)
+}
+
+// briefBoth appends the briefing to A, and mints C with it.
+func (l receiptRaceLayout) briefBoth(t *testing.T) {
+	t.Helper()
+	c := writeCodexRolloutFileWithCwd(t, l.codexHome, "rollout-2026-11-11T13-50-28-"+heldTestSiblingID+".jsonl", l.workDir)
+	for _, path := range []string{l.a, c} {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		require.NoError(t, err)
+		_, err = f.WriteString(`{"type":"event_msg","payload":{"type":"user_message","message":"` + receiptRacePrompt + `"}}` + "\n")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+	}
+}
+
+// requireReceiptNeverConfirms asserts that no check of the wait reads the
+// receipt as received from C alone.
+func requireReceiptNeverConfirms(t *testing.T, snap ConversationCaptureSnapshot) {
+	t.Helper()
+	for check := 0; check < 2; check++ {
+		got := receiptOnceWithinBound(t, snap, receiptRacePrompt)
+		require.NoError(t, got.err)
+		require.False(t, got.received, "check %d: a lone match is no receipt while a rollout af could not track may hold another", check)
+		require.True(t, got.undecided, "check %d: the receipt is undecided", check)
+	}
+}
+
+// #7384 review R5 (rc/G). `codex resume <id>` pins A, but A's tracking stat
+// does not answer, so A has no boundary and is not tracked. A concurrent C
+// recording the same briefing must not confirm the receipt alone: the wait is
+// marked as one that could not look at a rollout the launch could append to.
+func TestCodexPromptReceiptNeverConfirmsWhenThePinnedTargetsStatDoesNotAnswer(t *testing.T) {
+	t.Run("every lookup answers", func(t *testing.T) {
+		l := newReceiptRaceLayout(t)
+		snap := l.snapshot()
+		require.True(t, snap.TrackCodexReceiptRollout(l.a))
+		l.briefBoth(t)
+		require.ErrorIs(t, receiptOnceWithinBound(t, snap, receiptRacePrompt).err, ErrPromptReceiptAmbiguous)
+	})
+	t.Run("the pinned target's stat does not answer", func(t *testing.T) {
+		l := newReceiptRaceLayout(t)
+		snap := l.snapshot()
+		release := releasableLookupStall(t, statSeam, pathIs(l.a))
+		require.False(t, withinBound(t, func() bool { return snap.TrackCodexReceiptRollout(l.a) }), "a target af could not stat has no boundary")
+		release()
+		l.briefBoth(t)
+		requireReceiptNeverConfirms(t, snap)
+	})
+}
+
+// #7384 review R5. An unscoped pool lists the whole store to find every
+// rollout the resume could append to. A listing that does not answer tracks
+// nothing, and must not leave a concurrent C to confirm the receipt alone.
+func TestCodexPromptReceiptNeverConfirmsWhenThePoolsListingDoesNotAnswer(t *testing.T) {
+	t.Run("every lookup answers", func(t *testing.T) {
+		l := newReceiptRaceLayout(t)
+		snap := l.snapshot()
+		snap.TrackCodexReceiptPool(true)
+		l.briefBoth(t)
+		require.ErrorIs(t, receiptOnceWithinBound(t, snap, receiptRacePrompt).err, ErrPromptReceiptAmbiguous)
+	})
+	t.Run("the store listing does not answer", func(t *testing.T) {
+		l := newReceiptRaceLayout(t)
+		snap := l.snapshot()
+		sessions := filepath.Join(l.codexHome, "sessions")
+		release := releasableLookupStall(t, readDirSeam, func(dir string) bool {
+			return dir == sessions || strings.HasPrefix(dir, sessions+string(filepath.Separator))
+		})
+		withinBound(t, func() bool { snap.TrackCodexReceiptPool(true); return true })
+		release()
+		require.Empty(t, snap.receiptPaths, "precondition: a listing that did not answer tracks nothing")
+		l.briefBoth(t)
+		requireReceiptNeverConfirms(t, snap)
+	})
+}
+
+// #7384 review R5. The config agent pins an explicit `codex resume <id>` by
+// listing the store for id's rollout (TrackCodexReceiptTarget). A listing that
+// does not answer is not "no such rollout", which would leave the wait
+// positive-only and let a concurrent C confirm the receipt alone.
+func TestCodexPromptReceiptNeverConfirmsWhenThePinnedTargetsListingDoesNotAnswer(t *testing.T) {
+	t.Run("every lookup answers", func(t *testing.T) {
+		l := newReceiptRaceLayout(t)
+		snap := l.snapshot()
+		require.True(t, snap.TrackCodexReceiptTarget(heldTestOwnID), "precondition: the id pins A")
+		l.briefBoth(t)
+		require.ErrorIs(t, receiptOnceWithinBound(t, snap, receiptRacePrompt).err, ErrPromptReceiptAmbiguous)
+	})
+	t.Run("the store listing does not answer", func(t *testing.T) {
+		l := newReceiptRaceLayout(t)
+		snap := l.snapshot()
+		sessions := filepath.Join(l.codexHome, "sessions")
+		release := releasableLookupStall(t, readDirSeam, func(dir string) bool {
+			return dir == sessions || strings.HasPrefix(dir, sessions+string(filepath.Separator))
+		})
+		require.False(t, withinBound(t, func() bool { return snap.TrackCodexReceiptTarget(heldTestOwnID) }), "an id af could not look up is not pinned")
+		release()
+		l.briefBoth(t)
+		requireReceiptNeverConfirms(t, snap)
+	})
 }

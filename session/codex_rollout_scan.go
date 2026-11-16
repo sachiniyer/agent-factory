@@ -148,20 +148,28 @@ func codexHomeDir() string {
 // then unpinned, so a missing receipt can never be disproven and verdicts
 // must stay indeterminate rather than claiming never-arrived (#5471 review).
 func CodexRolloutPathByID(codexHome, id string) string {
+	path, _ := codexRolloutPathByID(codexHome, id)
+	return path
+}
+
+// codexRolloutPathByID is CodexRolloutPathByID that also returns the listing's
+// error, so a store af could not list (it did not answer, or failed) is told
+// apart from one that answered with no rollout for id, or several.
+func codexRolloutPathByID(codexHome, id string) (string, error) {
 	files, err := codexRolloutFiles(codexHome)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	var path string
 	for file := range files {
 		if strings.EqualFold(codexConversationIDFromPath(file), id) {
 			if path != "" {
-				return ""
+				return "", nil
 			}
 			path = file
 		}
 	}
-	return path
+	return path, nil
 }
 
 // codexRolloutFilesForWorkingDir selects the rollouts that can be the

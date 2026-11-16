@@ -418,9 +418,10 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 				promptReceipt.TrackCodexReceiptPool(true)
 			case id != "":
 				// An explicit SESSION_ID pins the rollout deterministically;
-				// a resolved and bounded path keeps the hard verdict.
-				if path := session.CodexRolloutPathByID(codexHome, id); path != "" &&
-					promptReceipt.TrackCodexReceiptRollout(path) {
+				// a resolved and bounded path keeps the hard verdict. A
+				// lookup that did not answer marks the wait instead, so no
+				// other rollout can confirm the receipt (#7384 review R5).
+				if promptReceipt.TrackCodexReceiptTarget(id) {
 					resumePositiveOnly = false
 				}
 			default:
