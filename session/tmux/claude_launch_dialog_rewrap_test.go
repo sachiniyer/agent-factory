@@ -62,6 +62,10 @@ func TestCheckAndHandleTrustPrompt_FolderTrustDialogAtAnyWrapHolds(t *testing.T)
 		{"the first words the legacy and the MCP question share", "Do you\ntrust", claudeLaunchGateDialogName},
 		{"legacy mid-paint, the wrapped question and a body row", "Do you trust the\nfiles in this\nfolder?\n\n/home/u/proj", legacyTrustDialogName},
 		{"legacy mid-paint, one option row painted", "Do you trust the\nfiles in this\nfolder?\n\n/home/u/proj\n\n❯ 1. Yes, proceed", legacyTrustDialogName},
+		// #7380 item 1: a plain rule above the dialog's first row that bounds
+		// no prompt row is the dialog's own top rule.
+		{"a plain rule above the dialog's first row", "────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit", legacyTrustDialogName},
+		{"the reworded dialog under its own rule at 12 columns, cursor on No", "────────────\n  Security\n  guide\n\n    1. Yes,\n    I trust\n    this\n    folder\n  ❯ 2. No,\n    exit\n\n  Enter to\n  confirm\n  · Esc to\n  cancel", claudeFolderTrustDialogName},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, _, errLog := captureTrustPromptLogs(t)
@@ -239,7 +243,13 @@ func TestCheckAndHandleTrustPrompt_FolderTrustDialogTextThatIsNoDialogStaysClear
 		{"the boxed composer above the legacy options", "╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, proceed\n2. No, exit\n\nEnter to confirm · Esc to exit"},
 		{"a hint row below the footer", legacy + "\n? for shortcuts"},
 		{"a ❯ row above the options", "❯ fix it\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
-		{"a plain rule above the options", "────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
+		// A plain rule above the options is the dialog's own top rule unless
+		// it bounds a prompt row; from the options down it is a composer's
+		// (#7380).
+		{"a plain rule below the options", "Security guide\n\n❯ 1. Yes, proceed\n  2. No, exit\n────────────\n\nEnter to confirm · Esc to\nexit"},
+		{"a plain rule bounding a prompt row above the options", "────────────\n> fix it\n────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
+		{"a plain rule bounding a bash-mode prompt row above the options", "────────────\n! ls\n────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
+		{"a plain rule bounding a memory-mode prompt row above the options", "────────────\n# keep it short\n────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
 		{"the footer's words closing a sentence", "Claude Code may read files\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nThen press Enter to confirm · Esc to\nexit"},
 		{"body rows over the exit row alone", "Claude Code may read files\nin this folder.\n\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
 		{"the wrapped legacy question quoted above the composer", "Do you trust the\nfiles in this\nfolder?\n\nThat is what it asks." + ruledComposerBelow},
