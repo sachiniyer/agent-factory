@@ -63,7 +63,7 @@ func TestShutdownCancelsInFlightHostProbesBeforeJoining(t *testing.T) {
 	httpClosed, controlClosed := false, false
 	drained := make(chan struct{})
 	go func() {
-		drainDaemon(manager, nil, func() error {
+		drainDaemon(manager, nil, nil, func() error {
 			// The control drain waits for dispatched handlers: with the probe
 			// uncancelled this is where the 30s went.
 			<-rpcDone
@@ -122,7 +122,7 @@ func TestHostRefreshIsNotJoinedByTheDrainWaitgroup(t *testing.T) {
 	httpClosed, controlClosed := false, false
 	drained := make(chan struct{})
 	go func() {
-		drainDaemon(manager, nil, func() error { return nil }, &httpClosed, &controlClosed, stopCh, &workers)
+		drainDaemon(manager, nil, nil, func() error { return nil }, &httpClosed, &controlClosed, stopCh, &workers)
 		close(drained)
 	}()
 	select {

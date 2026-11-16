@@ -120,7 +120,9 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.stopped {
+	// The latch counts as well as Stop: a watcher armed after it would only
+	// stand down on its first loop check (#7392).
+	if s.stopped || s.shuttingDown() {
 		return fmt.Errorf("watch task supervisor is shutting down")
 	}
 
