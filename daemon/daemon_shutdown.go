@@ -39,8 +39,9 @@ var drainJoinBudget = defaultDrainJoinBudget
 // Sizing: the worst stop is the whole budget, plus one floor for every step
 // after the first, plus the save's reserve. That is 3.5s + 3×100ms + 1s =
 // 4.8s, inside the stopper's 5s grace (stopDaemonGrace), and the pins below
-// fail the build if it outgrows it. The teardown's floor and the exit reserve
-// take the last 200ms (daemon_teardown.go, #7416). A handler still running at the deadline is
+// fail the build if it outgrows it. The save is held to that 4.8s (saveBy,
+// #7439), and the teardown's floor and the exit reserve take the last 200ms
+// (daemon_teardown.go, #7416). A handler still running at the deadline is
 // abandoned, and the save is skipped exactly as for a timed-out join: that
 // handler passed admission, so it can still commit, and it may hold m.mu, an
 // archive settlement or a repo flock that the save would wait on.
@@ -118,8 +119,8 @@ func drainDeadline(m *Manager) time.Time {
 // hold a stop until the stopper's SIGKILL. joined is false when any step was
 // abandoned, and the caller then skips the final save (#5846, #7393).
 //
-// httpClosed and controlClosed are set via the supplied pointers so the
-// deferred fallback drain in runDaemon can skip a redundant one.
+// controlClosed is set via the supplied pointer so the deferred fallback drain
+// in runDaemon can skip a redundant one.
 //
 // watchers is latched first, before anything here can block: its watch loops
 // stop restarting and stop counting exits from this instant, not from the
@@ -130,7 +131,6 @@ func drainDaemon(
 	watchers *watcherSupervisor,
 	closeHTTP func() error,
 	closeControl func() error,
-	httpClosed *bool,
 	controlClosed *bool,
 	stopCh chan struct{},
 	wg *sync.WaitGroup,
@@ -140,7 +140,7 @@ func drainDaemon(
 	// what is left is abandoned, named in the log, and costs the final save —
 	// never the whole stop.
 	deadline := drainDeadline(m)
-	handlersJoined := drainPlanes(m, watchers, closeHTTP, closeControl, httpClosed, controlClosed, deadline)
+	handlersJoined := drainPlanes(m, watchers, closeHTTP, closeControl, controlClosed, deadline)
 
 	// Stop and join daemon-owned writers too. The lifecycle gate drainPlanes
 	// closed also refuses any scheduler/watcher delivery that reaches the closed
@@ -164,6 +164,7 @@ func drainDaemon(
 	if !joined {
 		log.WarningLog.Printf("shutdown join exceeded %s; skipping the final save so a wedged goroutine cannot hold exit past the SIGKILL grace, and writing nothing: %s (#5846)",
 			joinBudget, m.skippedOnJoinTimeout())
+		m.lifecycle.stopClock().abandon("the background join")
 	}
 	return joined && handlersJoined
 }
@@ -187,7 +188,6 @@ func drainPlanes(
 	watchers *watcherSupervisor,
 	closeHTTP func() error,
 	closeControl func() error,
-	httpClosed *bool,
 	controlClosed *bool,
 	deadline time.Time,
 ) (handlersJoined bool) {
@@ -207,6 +207,7 @@ func drainPlanes(
 		var err error
 		if !joinWithin(drainRemaining(deadline), func() { err = run() }) {
 			handlersJoined = false
+			m.lifecycle.stopClock().abandon(what)
 			log.WarningLog.Printf("shutdown: %s did not finish within the %s drain budget; abandoning it and skipping the final save, "+
 				"since an abandoned handler can still commit — still running: %s (#7393)",
 				what, drainBudget, m.lifecycle.inFlight().describe(time.Now()))
@@ -215,9 +216,6 @@ func drainPlanes(
 		if err != nil {
 			log.WarningLog.Printf("failed to %s: %v", what, err)
 		}
-	}
-	if closeHTTP != nil {
-		*httpClosed = true
 	}
 	*controlClosed = true
 	var closeWebListeners func() error
@@ -259,13 +257,51 @@ func drainPlanes(
 // SaveRepoInstances to config.AtomicWriteFile (temp file, fsync, rename). The
 // file is therefore the old version or the new one, never torn.
 // config.TestEveryConfigWriterGoesThroughAtomicWriteFile pins that path.
+//
+// The save itself is bounded too (#7439). It runs until saveDeadline, the
+// pinned point after the drain's worst case plus the save's reserve, whatever
+// it is waiting on: an archive that never settles, a contended repo flock, a
+// slow disk. A save still running then is abandoned, named, and entered in the
+// stop's ledger, so the teardown still starts on time and the process exits
+// holding the home. The same atomic rename means an abandoned save, like a
+// SIGKILLed one, leaves each repo's file old or new: FlushOwedSettlements'
+// retries go through persistInstanceData, and the save through
+// SaveRepoInstances, both to config.AtomicWriteFile.
 func checkpointAfterDrain(m *Manager, joined bool) {
 	if !joined {
 		return
 	}
-	if err := m.SaveInstancesForShutdown(); err != nil {
+	// Read the seam here, on the main flow: an abandoned save's goroutine must
+	// not race a test restoring it.
+	save := finalSave
+	var err error
+	if !joinWithin(max(time.Until(saveDeadline(m)), drainStepFloor), func() { err = save(m) }) {
+		m.lifecycle.stopClock().abandon("the final save")
+		log.WarningLog.Printf("shutdown: the final save did not finish by %s after the stop began; abandoning it, so the "+
+			"teardown still starts on time. Each repo's instances.json is its old or its new version, never torn (#7439)",
+			saveBy().Round(time.Millisecond))
+		return
+	}
+	if err != nil {
 		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
 	}
+}
+
+// finalSave is the daemon's terminal checkpoint. A seam so a test can hold it.
+var finalSave = func(m *Manager) error { return m.SaveInstancesForShutdown() }
+
+// saveBy is how long after the stop began the final save must be done: the
+// drain's worst case (its whole budget, then a floor for each later step) plus
+// the save's reserve. It is the point the pins in this file and in
+// daemon_teardown.go place the save's end at, so the teardown's floor and the
+// exit reserve still fit inside the stopper's grace after it.
+func saveBy() time.Duration {
+	return drainBudget + drainPlaneSteps*drainStepFloor + drainSaveReserve
+}
+
+// saveDeadline is when m's final save must be done (#7439).
+func saveDeadline(m *Manager) time.Time {
+	return m.lifecycle.stopClock().began().Add(saveBy())
 }
 
 // skippedOnJoinTimeout names what a timed-out join leaves undurable, for the log.

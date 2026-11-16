@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,6 +31,10 @@ var restoreManagerForStartup = func(m *Manager) error { return m.restoreInstance
 var (
 	testHookDaemonBeforeHomeLockRelease = func() {}
 	testHookDaemonAfterHomeLockRelease  = func() {}
+	// testHookDaemonBeforeHomeLatchRelease fires just before the home latch is
+	// released, so a test can prove a stop that abandoned something exited
+	// before it (#7439). A no-op in production.
+	testHookDaemonBeforeHomeLatchRelease = func() {}
 )
 
 // RunDaemon runs the daemon process: it serves the local control plane,
@@ -65,7 +70,10 @@ func RunDaemonForUpgrade(cfg *config.Config, transactionID string) error {
 // The public daemon entrypoint deliberately supplies no transaction: only the
 // durable transaction layer may eventually select the unexported non-empty
 // path, so this stage cannot put an ordinary daemon into probation.
-func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
+//
+// retErr is named so a stop that abandoned something can exit with the status
+// this return would have given the process (holdHomeIfAbandoned, #7439).
+func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	log.InfoLog.Printf("starting daemon")
 
 	// #2212 R1: on an ordinary daemon start (not the transaction's own probation
@@ -180,7 +188,10 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// after the restore below. Released on the way out so an in-process daemon
 	// (the tests in this package) leaves no refusal behind for the next one.
 	releaseHomeLatch := latchDaemonHomePresent()
-	defer releaseHomeLatch()
+	defer func() {
+		testHookDaemonBeforeHomeLatchRelease()
+		releaseHomeLatch()
+	}()
 
 	// A home the scaffold marked as a throwaway sandbox (#6844) carries its
 	// own lifetime contract: this daemon enforces the deadline and the
@@ -191,21 +202,34 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// lock defers, it runs before them on unwind, so the teardown still
 	// holds the home lock: no successor can win the home and spawn into it
 	// mid-teardown.
+	//
+	// endThrowaway runs that teardown once. A stop that abandoned something
+	// exits holding the home before this defer is reached, so it calls
+	// endThrowaway itself first (#7439): only this daemon and a later MARKED
+	// start reap an expired sandbox's processes and private tmux servers, and a
+	// throwaway home's daemon may never start again. The teardown reads the
+	// marker and the recorded pids and signals processes; it writes nothing in
+	// the home, so a concurrent abandoned writer there cannot disturb it.
 	throwawayExpired := false
 	throwawayExpireCh := make(chan struct{})
 	var throwawayHome string
+	endThrowaway := func() {}
 	if homeDir, homeErr := config.GetConfigDir(); homeErr == nil {
 		throwawayHome = homeDir
 		if marker, marked := loadThrowawayMarker(homeDir); marked {
 			registerThrowawaySandbox(homeDir)
 			recordThrowawayDaemon(homeDir)
 			stopWatch := armThrowawayWatchdog(marker, throwawayExpireCh)
-			defer func() {
-				stopWatch()
-				if throwawayExpired {
-					teardownThrowawaySandbox(homeDir, marker)
-				}
-			}()
+			var endOnce sync.Once
+			endThrowaway = func() {
+				endOnce.Do(func() {
+					stopWatch()
+					if throwawayExpired {
+						throwawayTeardownFn(homeDir, marker)
+					}
+				})
+			}
+			defer endThrowaway()
 		}
 	}
 
@@ -331,8 +355,25 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// restore select below (SIGTERM and the Shutdown RPC) leave RunDaemon
 	// without ever reaching the post-restore section, and each step below can
 	// already have something to stop by then.
+	//
+	// After the teardown, a stop that abandoned anything — a teardown step
+	// here, a drain step, the background join or the final save before it, or
+	// a restore a warm-up exit left running — ends the process while it still
+	// holds the home's flock and latch (#7439). The defers registered before
+	// this one (the throwaway teardown, the latch and the flock releases, the
+	// daemon.pid removal) are exactly what that exit skips, so nothing
+	// abandoned can touch the home after its release.
 	teardown := &daemonTeardown{}
-	defer func() { teardown.run(stop.began().Add(stopTeardownBy)) }()
+	var restoreRunning atomic.Bool
+	defer func() {
+		for _, what := range teardown.run(stop.began().Add(stopTeardownBy)) {
+			stop.abandon("teardown: " + what)
+		}
+		if restoreRunning.Load() {
+			stop.abandon("the instance restore")
+		}
+		holdHomeIfAbandoned(stop, endThrowaway, retErr)
+	}()
 	// Every daemon-spawned VS Code editor. Without this a shutdown would strand
 	// a code-server per session, still holding its loopback port and now
 	// reachable by nothing — the leak class this feature must not introduce. (A
@@ -409,12 +450,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// a released upgrade candidate may already be running watchers armed by RPC
 	// (#7392). It runs before the teardown (LIFO).
 	var closeHTTP func() error
-	httpClosed, controlClosed := false, false
+	controlClosed := false
 	defer func() {
 		if controlClosed {
 			return
 		}
-		drainPlanes(manager, watchers, closeHTTP, closeControl, &httpClosed, &controlClosed, drainDeadline(manager))
+		drainPlanes(manager, watchers, closeHTTP, closeControl, &controlClosed, drainDeadline(manager))
 	}()
 
 	// Stand the startup watcher down BEFORE the HTTP listener starts serving:
@@ -466,9 +507,14 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// Capture the seam on the main flow: reading the package var inside the
 	// goroutine would race with tests restoring it after RunDaemon returns.
 	restore := restoreManagerForStartup
+	// restoreRunning lets the stop see a restore a warm-up exit leaves behind:
+	// it is never joined, so it is abandoned, and the stop exits holding the
+	// home rather than let it write there after the release (#7439).
+	restoreRunning.Store(true)
 	go func() {
 		var restoreErr error
 		startupStep("restore instances", func() { restoreErr = restore(manager) })
+		restoreRunning.Store(false)
 		restoreDone <- restoreErr
 	}()
 	// The startup watcher was retired once the control-socket cleanup was
@@ -651,7 +697,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		throwawayExpired = true
 	}
 
-	joined := drainDaemon(manager, watchers, closeHTTP, closeControl, &httpClosed, &controlClosed, stopCh, wg)
+	joined := drainDaemon(manager, watchers, closeHTTP, closeControl, &controlClosed, stopCh, wg)
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under

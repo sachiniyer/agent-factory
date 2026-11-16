@@ -23,6 +23,11 @@ import (
 // holds the stop until the test releases it, far past this.
 const stopWithin = 4 * time.Second
 
+// boundMargin is what a stop may run past the bound a test configured: the
+// Shutdown's round trip, scheduling, and the exit itself. On CI's macOS
+// runners the stops below measured about 0.1s over their bounds (#7439).
+const boundMargin = 500 * time.Millisecond
+
 // stubContainerSweep keeps the real startup sweeps cheap and side-effect free,
 // as TestRunDaemonStopsSandboxTunnelsOnExit does.
 func stubContainerSweep(t *testing.T) {
@@ -99,7 +104,7 @@ func TestRunDaemonTeardownEndsAtTheStopDeadline(t *testing.T) {
 	default:
 		t.Fatal("the teardown never ran the tunnel stop")
 	}
-	require.Less(t, took, 3*time.Second, "the stop must end near its teardown deadline")
+	require.Less(t, took, time.Second+boundMargin, "the stop must end at its 1s teardown deadline")
 	got := warn.String()
 	require.Contains(t, got, "the teardown did not finish by the stop deadline", "the log must say the stop gave up on a step")
 	require.Contains(t, got, "sandbox tunnels", "the log must name the step the stop gave up on")
@@ -256,7 +261,8 @@ func TestRunDaemonWarmupExitsDrainBothPlanesUnderTheBound(t *testing.T) {
 				return strings.Contains(manager.lifecycle.inFlight().describe(time.Now()), addTaskCall)
 			})
 
-			requestShutdown(t, runExited)
+			took := requestShutdown(t, runExited)
+			require.Less(t, took, 300*time.Millisecond+boundMargin, "the warm-up exit must end at its 300ms drain bound")
 			got := warn.String()
 			require.Contains(t, got, "drain daemon control server did not finish within the 300ms drain budget",
 				"the warm-up exit must drain the control plane under the bound")

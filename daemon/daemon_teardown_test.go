@@ -80,6 +80,8 @@ func TestStopBudgetsShipThePinnedValues(t *testing.T) {
 	require.Equal(t, sigtermFallbackGrace-exitReserve, defaultStopTeardownBy)
 	worst := defaultDrainBudget + drainPlaneSteps*drainStepFloor + drainSaveReserve + teardownFloor + exitReserve
 	require.LessOrEqual(t, worst, sigtermFallbackGrace, "the drain, the save, the teardown's floor and the exit reserve outgrow the stopper's grace")
+	// The save is held to the point that worst case gives it (#7439).
+	require.Equal(t, defaultDrainBudget+drainPlaneSteps*drainStepFloor+drainSaveReserve, saveBy())
 }
 
 // TestStopClockStartsWhenTheStopIsRequested: the stop's deadline is measured

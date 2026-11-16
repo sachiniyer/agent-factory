@@ -60,7 +60,7 @@ func TestShutdownCancelsInFlightHostProbesBeforeJoining(t *testing.T) {
 	// ... and the shutdown path that must still reach the checkpoint quickly.
 	stopCh := make(chan struct{})
 	var workers sync.WaitGroup
-	httpClosed, controlClosed := false, false
+	controlClosed := false
 	drained := make(chan struct{})
 	go func() {
 		drainDaemon(manager, nil, nil, func() error {
@@ -68,7 +68,7 @@ func TestShutdownCancelsInFlightHostProbesBeforeJoining(t *testing.T) {
 			// uncancelled this is where the 30s went.
 			<-rpcDone
 			return nil
-		}, &httpClosed, &controlClosed, stopCh, &workers)
+		}, &controlClosed, stopCh, &workers)
 		close(drained)
 	}()
 	select {
@@ -119,10 +119,10 @@ func TestHostRefreshIsNotJoinedByTheDrainWaitgroup(t *testing.T) {
 	}
 
 	var workers sync.WaitGroup
-	httpClosed, controlClosed := false, false
+	controlClosed := false
 	drained := make(chan struct{})
 	go func() {
-		drainDaemon(manager, nil, nil, func() error { return nil }, &httpClosed, &controlClosed, stopCh, &workers)
+		drainDaemon(manager, nil, nil, func() error { return nil }, &controlClosed, stopCh, &workers)
 		close(drained)
 	}()
 	select {

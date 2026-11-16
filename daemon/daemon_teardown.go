@@ -57,9 +57,37 @@ var stopTeardownBy = defaultStopTeardownBy
 // signal's receipt, the Shutdown RPC's acceptance, or, for a stop the daemon
 // decides itself, the first time anything asks. Later stamps are ignored, so
 // the deadline never moves later.
+//
+// It also keeps the stop's ledger (#7439): everything the stop gave up on that
+// may still be running — a drain step, the background join, the final save, a
+// teardown step, the instance restore. A stop whose ledger is not empty ends
+// the process while it still holds the home (holdHomeIfAbandoned).
 type stopClock struct {
 	once sync.Once
 	at   time.Time
+
+	mu        sync.Mutex
+	abandoned []string
+}
+
+// abandon enters what in the stop's ledger. nil-safe.
+func (c *stopClock) abandon(what string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.abandoned = append(c.abandoned, what)
+}
+
+// abandonments returns the ledger, in the order it was written. nil-safe.
+func (c *stopClock) abandonments() []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.abandoned...)
 }
 
 // begin stamps the stop now, unless it was already stamped. nil-safe.
@@ -78,6 +106,46 @@ func (c *stopClock) began() time.Time {
 	}
 	c.begin()
 	return c.at
+}
+
+// exitHoldingHome ends the process at once, with the exit status runDaemon's
+// err would have given it, while it still holds the AF home's flock and latch
+// (#7439). The kernel releases the flock only when nothing of the process is
+// left, so nothing the stop abandoned can write to or act on the home after a
+// successor may own it, or re-create it after it was deleted. What it skips —
+// the latch release and removeDaemonPIDFile — is what a SIGKILL at this
+// moment would skip: the latch dies with the process, and a daemon.pid naming
+// an exited process is the case the stale-PID paths own (#5188).
+//
+// A seam: the package's TestMain installs a recorder, so an in-process daemon
+// in a test never ends the test binary. abandoned is for that recorder;
+// production has already logged it.
+var exitHoldingHome = func(abandoned []string, err error) {
+	code := 0
+	if err != nil {
+		log.ErrorLog.Printf("daemon exiting: %v", err)
+		code = 1
+	}
+	log.Close()
+	os.Exit(code)
+}
+
+// holdHomeIfAbandoned ends the process through exitHoldingHome when the stop
+// abandoned anything, after one log line naming all of it. beforeExit runs
+// first: the expired throwaway's teardown, which nothing else would run once
+// this home's daemon never starts again (#7439). A stop that abandoned nothing
+// returns and unwinds as usual, releasing the latch and the flock and removing
+// daemon.pid.
+func holdHomeIfAbandoned(stop *stopClock, beforeExit func(), err error) {
+	abandoned := stop.abandonments()
+	if len(abandoned) == 0 {
+		return
+	}
+	log.WarningLog.Printf("shutdown: this stop abandoned %s; exiting while the daemon still holds its AF home's lock and latch, "+
+		"so nothing it abandoned can touch the home after their release. daemon.pid stays behind naming this exited process, "+
+		"as after a SIGKILL (#7439)", strings.Join(abandoned, "; "))
+	beforeExit()
+	exitHoldingHome(abandoned, err)
 }
 
 // relayStopSignals stamps stop as each signal arrives on raw, then hands the
