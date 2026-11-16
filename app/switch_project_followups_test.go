@@ -112,6 +112,9 @@ func TestSwitchProjectCreateReplyAfterTheCommitTouchesOnlyItsProject(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, repoB, _ := asyncSwitchHome(t)
+			// The submit's preflight resolves the project's config, so A is a
+			// real checkout here.
+			h.repoRoot = initTestGitRepo(t)
 			repoAID, repoARoot := h.repoID, h.repoRoot
 			const title = "shared-title"
 			h.snapshotFetcher = func(_ context.Context, repoID string) (daemon.SnapshotResponse, error) {
