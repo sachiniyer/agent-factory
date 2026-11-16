@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -426,8 +427,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleRemoteDefault(msg) })
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
-		// starting. Don't yank their selection or pop a modal onto them.
-		userStillWatching := m.state == stateDefault && m.sidebar.GetSelectedInstance() == msg.instance
+		// starting. Don't yank their selection or pop a modal onto them. A
+		// pending project switch is the user leaving this project, whatever is
+		// still selected (#7379).
+		userStillWatching := !m.leavingProject() && m.state == stateDefault && m.sidebar.GetSelectedInstance() == msg.instance
 
 		if msg.err != nil {
 			// Remove the *specific* instance that failed, by title. The old
@@ -470,7 +473,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			detail := "Your input is retained. " + msg.err.Error()
 			action := "Press any key to return to the form."
 			if !userStillWatching {
-				detail += " The next create in this project reopens the failed draft."
+				where := "this project"
+				if m.leavingProject() {
+					// This lands on the bar beside "Loading <other>…", and can
+					// outlast the switch: name the project it belongs to.
+					where = filepath.Base(m.repoRoot)
+				}
+				detail += " The next create in " + where + " reopens the failed draft."
 				action = "Press any key to continue."
 			}
 			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged(), restoreCmd)

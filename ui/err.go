@@ -40,6 +40,12 @@ type ErrBox struct {
 	// (SetStanding("")): it paints only while no notice is on the bar, never
 	// lands in retained, and is not reachable through `E details`.
 	standing string
+	// pinned is a condition the bar shows on EVERY frame until its source
+	// retracts it (SetPinned("")), ahead of whatever notice or standing line
+	// shares the bar. It is for a state the user must be able to see whatever
+	// else is said, such as a project switch that holds their keys (#7379):
+	// unlike standing, a notice never hides it.
+	pinned string
 }
 
 var errStyle = lipgloss.NewStyle().Foreground(activeTheme.Dead)
@@ -69,6 +75,13 @@ func (e *ErrBox) SetHint(err error) { e.err = err }
 // stays true (the daemon's web listener is unbound, #6386) rather than for
 // the outcome of an action.
 func (e *ErrBox) SetStanding(text string) { e.standing = sanitizeError(text) }
+
+// SetPinned shows text on the bar on every frame, before any notice or standing
+// line, until it is set to "". The rest of the bar shares what width is left.
+func (e *ErrBox) SetPinned(text string) { e.pinned = sanitizeError(text) }
+
+// pinnedSep joins the pinned text to the rest of the bar.
+const pinnedSep = " · "
 
 func (e *ErrBox) set(err error, failure bool) {
 	e.err = err
@@ -133,28 +146,45 @@ func (e *ErrBox) String() string {
 	if e.width <= 0 || e.height <= 0 {
 		return ""
 	}
+	// The pinned text comes first and is never squeezed out: what follows it
+	// gets the width that is left, and is dropped when too little is.
+	var pinned string
+	width := e.width
+	if e.pinned != "" {
+		pinned = truncateStatusText(e.pinned, e.width)
+		width -= layout.Cells(pinned + pinnedSep)
+	}
 	var err string
-	switch {
-	case e.err != nil:
-		err = e.statusLine()
-	case e.standing != "":
-		err = e.standingLine()
+	if width > 3 || pinned == "" {
+		switch {
+		case e.err != nil:
+			err = e.statusLine(width)
+		case e.standing != "":
+			err = e.standingLine(width)
+		}
 	}
 	style := theme.Styles().Body
 	if e.retainedIsFailure {
 		style = theme.Styles().Error
 	}
-	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, style.Render(err))
+	line := style.Render(err)
+	switch {
+	case pinned != "" && err != "":
+		line = theme.Styles().Body.Render(pinned+pinnedSep) + line
+	case pinned != "":
+		line = theme.Styles().Body.Render(pinned)
+	}
+	return lipgloss.Place(e.width, e.height, lipgloss.Center, lipgloss.Center, line)
 }
 
-func (e *ErrBox) standingLine() string {
-	if layout.Cells(e.standing) <= e.width {
+func (e *ErrBox) standingLine(width int) string {
+	if layout.Cells(e.standing) <= width {
 		return e.standing
 	}
-	return truncateStatusText(e.standing, e.width)
+	return truncateStatusText(e.standing, width)
 }
 
-func (e *ErrBox) statusLine() string {
+func (e *ErrBox) statusLine(width int) string {
 	line := strings.Join(strings.Split(e.FullError(), "\n"), " · ")
 	// Measure on the contract measure the status bar's ClampToRect enforces,
 	// not on runewidth: the two under-count what tmux advances on the ordinary
@@ -163,7 +193,7 @@ func (e *ErrBox) statusLine() string {
 	// than the bar to the clamp, which then silently right-cuts it — taking the
 	// trailing content and the `E details` hint itself with no ellipsis.
 	// layout.Cells is "the ONE width answer for the TUI" (see layout/cells.go).
-	if layout.Cells(line) <= e.width {
+	if layout.Cells(line) <= width {
 		return line
 	}
 	hint := e.detailsHint
@@ -173,11 +203,11 @@ func (e *ErrBox) statusLine() string {
 	if hint != "" && !e.hideDetailsHint {
 		const sep = "  "
 		hintWidth := layout.Cells(sep + hint)
-		if prefixWidth := e.width - hintWidth; prefixWidth > 3 {
+		if prefixWidth := width - hintWidth; prefixWidth > 3 {
 			return truncateStatusText(line, prefixWidth) + sep + hint
 		}
 	}
-	return truncateStatusText(line, e.width)
+	return truncateStatusText(line, width)
 }
 
 func sanitizeError(raw string) string {

@@ -317,7 +317,9 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 		// so a remote timeout cannot be recognized as uncertain there and must
 		// be routed here (#4824).
 		if errors.Is(msg.err, errDaemonUnresponsive) {
-			if !isRemoteTarget() {
+			// The offer is a modal, so not while the user is leaving this
+			// project (#7379); the outcome-unknown notice below says it instead.
+			if !isRemoteTarget() && !m.leavingProject() {
 				return m, m.offerDaemonRestart(msg.target.title)
 			}
 			return m, m.handleError(mutationOutcomeError(

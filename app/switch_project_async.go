@@ -29,6 +29,10 @@ import (
 //     and every other key and mouse event is dropped. The current project is
 //     still on screen, but the user has already asked to leave it, so a key
 //     meant for the incoming project must not act on the outgoing one.
+//  5. Background work for the outgoing project that finishes meanwhile treats
+//     the user as having left it (leavingProject): it opens no modal, restores
+//     no draft and enters no pane, so the switch commits from the state it
+//     started in (#7379). Its outcome goes on the bar instead.
 
 // projectSwitchCancelHint is what the loading line says Esc does.
 const projectSwitchCancelHint = "esc to cancel"
@@ -70,9 +74,17 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	ctx, cancel := context.WithCancel(parent)
 	m.projectSwitchGen++
 	m.projectSwitch = &pendingProjectSwitch{gen: m.projectSwitchGen, repo: repo, ctx: ctx, cancel: cancel}
-	m.applyStandingNotice()
+	m.errBox.SetPinned(m.projectSwitchLoadingLine())
 	return m, projectSwitchFetchCmd(ctx, m.projectSwitchGen, repo, m.snapshotFetcher)
 }
+
+// leavingProject reports whether the user has asked to leave the project on
+// screen: a switch is pending. Background work for that project — a create,
+// kill or archive finishing — must then treat the user as gone: it raises no
+// modal, restores no draft and activates no pane, because the switch would
+// otherwise commit with that project's modal or form over the next one
+// (#7379). It reports its outcome on the bar.
+func (m *home) leavingProject() bool { return m.projectSwitch != nil }
 
 // projectSwitchFetchCmd fetches repo's snapshot off the event loop and replies
 // with the switch's generation. fetch is captured by the caller on the event
@@ -126,11 +138,13 @@ func (m *home) cancelProjectSwitch() {
 	}
 	m.projectSwitch.cancel()
 	m.projectSwitch = nil
-	m.applyStandingNotice()
+	m.errBox.SetPinned("")
 }
 
-// projectSwitchLoadingLine is the bar's standing line while a switch is
-// pending, or "" when none is.
+// projectSwitchLoadingLine is the bar's pinned line while a switch is pending,
+// or "" when none is. It is pinned rather than standing so a notice never hides
+// it: while it is up, keys are held, and the bar is the only thing saying why
+// (#7379).
 func (m *home) projectSwitchLoadingLine() string {
 	if m.projectSwitch == nil {
 		return ""

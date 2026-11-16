@@ -117,11 +117,6 @@ func (m *home) skippedReposGuardRefusal() error {
 // it separately — each keeps its own state and this is the only writer.
 func (m *home) applyStandingNotice() {
 	var parts []string
-	// A pending project switch leads: it is what the user just asked for, and
-	// the only one of these that Esc acts on (#7377).
-	if s := m.projectSwitchLoadingLine(); s != "" {
-		parts = append(parts, s)
-	}
 	if s := m.skippedReposStanding(); s != "" {
 		parts = append(parts, s)
 	}

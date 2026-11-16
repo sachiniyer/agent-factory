@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -374,4 +375,138 @@ func TestSnapshotThroughDaemonIsBoundedByItsCtx(t *testing.T) {
 		t.Fatalf("snapshotThroughDaemon outlived its %s deadline against a daemon that never answers", bound)
 	}
 	assert.GreaterOrEqual(t, counter.get("/v1/Snapshot"), 1, "the request must reach the daemon socket")
+}
+
+// outgoingCreate is a create in flight in the project on screen, its Loading
+// row selected — what n, a name and Enter leave behind.
+func outgoingCreate(t *testing.T, h *home, title string) (*session.Instance, *sessionStartRequest) {
+	t.Helper()
+	inst := newLoadingInstance(t, title)
+	inst.Path = h.repoRoot
+	h.store.AddInstance(inst)
+	h.sidebar.SelectInstance(inst)
+	return inst, &sessionStartRequest{Title: title, RepoPath: h.repoRoot, Program: "claude", Prompt: "p"}
+}
+
+// TestSwitchProjectFailedCreateMeanwhileOpensNothingForTheOutgoingProject pins
+// #7379 R1: a switch commits only from the state it started in. A create in the
+// project being left that fails while the next one loads raises no recovery
+// screen and restores no form: the user has left that project. The failure is
+// still reported, and its draft is kept for that project's next create — so
+// no form for it is open once the switch commits, and its session never shows
+// in the next project's sidebar.
+func TestSwitchProjectFailedCreateMeanwhileOpensNothingForTheOutgoingProject(t *testing.T) {
+	h, repoB, _ := asyncSwitchHome(t)
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
+		return snapshotWith("repoB-session"), nil
+	}
+	inst, req := outgoingCreate(t, h, "repoA-create")
+
+	cmd := startSwitch(t, h, repoB, nil)
+	h.Update(instanceStartedMsg{instance: inst, draft: req, rawPrompt: "p", err: neverSent()})
+
+	assert.Equal(t, stateDefault, h.state, "no form opens for the project being left")
+	assert.Nil(t, h.namingInstance, "the failed draft is not restored while the switch loads")
+	assert.Nil(t, h.recovery, "no modal while the switch loads: keys are held, so nothing could dismiss it")
+	assert.Contains(t, bar(h), "Loading "+filepath.Base(repoB.Root)+"…", "the switch still leads the bar")
+	assert.Contains(t, bar(h), "Cannot create session", "the failure is still reported")
+	require.NotNil(t, h.failedCreate, "the draft is kept for the outgoing project's next create")
+
+	h.Update(cmd())
+	require.Equal(t, repoB.ID, h.repoID, "the switch commits")
+	assert.Equal(t, stateDefault, h.state, "no form for the outgoing project is open after the commit")
+	assert.Nil(t, h.namingInstance)
+	assert.Nil(t, h.recovery)
+	assert.Nil(t, findSidebarInstance(h, "repoA-create"), "the outgoing project's session never appears in the next one's sidebar")
+	require.NotNil(t, findSidebarInstance(h, "repoB-session"))
+
+	// A create in B opens a fresh form: the kept draft is the outgoing project's.
+	h.startNewInstance()
+	require.NotNil(t, h.namingInstance)
+	assert.NotSame(t, inst, h.namingInstance, "the outgoing project's draft must not reopen in the next project")
+	assert.Equal(t, repoB.Root, h.namingInstance.Path)
+}
+
+// TestSwitchProjectStartedCreateMeanwhileOpensNoStartHelp: the same property for
+// a create that succeeds while the next project loads — no start-help modal and
+// no pane for a session in the project being left.
+func TestSwitchProjectStartedCreateMeanwhileOpensNoStartHelp(t *testing.T) {
+	h, repoB, _ := asyncSwitchHome(t)
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
+		return snapshotWith("repoB-session"), nil
+	}
+	inst, _ := outgoingCreate(t, h, "repoA-create")
+
+	cmd := startSwitch(t, h, repoB, nil)
+	h.Update(instanceStartedMsg{instance: inst})
+
+	assert.Equal(t, stateDefault, h.state, "no start-help modal for a session in the project being left")
+	assert.Nil(t, h.textOverlay)
+	assert.Zero(t, h.store.NumOpenPanes(), "no pane opens for it either")
+
+	h.Update(cmd())
+	require.Equal(t, repoB.ID, h.repoID)
+	assert.Equal(t, stateDefault, h.state, "nothing from the outgoing project is over the next one")
+	assert.Nil(t, h.textOverlay)
+	assert.Nil(t, findSidebarInstance(h, "repoA-create"))
+}
+
+// TestSwitchProjectFailedKillMeanwhileOpensNoModal: a kill in the project being
+// left that fails while the next one loads raises neither the recovery screen
+// nor the daemon-restart offer; the bar reports it.
+func TestSwitchProjectFailedKillMeanwhileOpensNoModal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"refused", errors.New("The daemon refused this kill."), "Cannot kill session"},
+		{"daemon unresponsive", errDaemonUnresponsive, "could not be confirmed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, repoB, _ := asyncSwitchHome(t)
+			h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
+				return snapshotWith("repoB-session"), nil
+			}
+			inst := findSidebarInstance(h, "repoA-session")
+			require.NotNil(t, inst)
+			target := captureSessionActionTarget(inst, h.repoID)
+
+			cmd := startSwitch(t, h, repoB, nil)
+			h.Update(instanceKilledMsg{target: target, err: tc.err})
+
+			assert.Equal(t, stateDefault, h.state, "no confirmation opens for the project being left")
+			assert.Nil(t, h.recovery, "no recovery screen opens for the project being left")
+			assert.Contains(t, bar(h), tc.want, "the failure is still reported")
+
+			h.Update(cmd())
+			require.Equal(t, repoB.ID, h.repoID)
+			assert.Equal(t, stateDefault, h.state)
+			assert.Nil(t, h.recovery)
+		})
+	}
+}
+
+// TestSwitchProjectLoadingLineSurvivesANotice pins #7379 R2: while a switch is
+// pending the bar always says so — keys are held, and it is the only thing that
+// says why — even while a transient notice is up, such as the rebind
+// follow-up's toast raised in the same Update that starts the switch.
+func TestSwitchProjectLoadingLineSurvivesANotice(t *testing.T) {
+	h, repoB, _ := asyncSwitchHome(t)
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
+		return snapshotWith("repoB-session"), nil
+	}
+
+	cmd := startSwitch(t, h, repoB, nil)
+	h.showTransientMessage("Rebound project-a to /new/root")
+	got := bar(h)
+	assert.Contains(t, got, "Loading "+filepath.Base(repoB.Root)+"… · "+projectSwitchCancelHintForTest,
+		"the loading line must not yield to a notice")
+	assert.Contains(t, got, "Rebound project-a", "the notice still shows beside it")
+
+	h.handleError(errors.New("an unrelated failure"))
+	assert.Contains(t, bar(h), "Loading "+filepath.Base(repoB.Root)+"…", "nor to a failure")
+
+	h.Update(cmd())
+	assert.NotContains(t, bar(h), "Loading", "the loading line goes once the switch lands")
 }
