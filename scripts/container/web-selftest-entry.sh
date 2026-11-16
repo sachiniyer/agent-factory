@@ -207,6 +207,20 @@ case "\$PWD" in
         exec sleep 86400
         ;;
 esac
+# A session that echoes SUBMITTED LINES only (attention.spec.ts, #7432): like
+# probe-quiet it turns tty echo off, but instead of sleeping it loops \`read\`,
+# echoing back each newline-terminated line. The browser terminal's attach
+# replies are escape sequences with no newline, so \`read\` buffers them instead
+# of letting them surface as pane activity — where \`cat\` echoes every byte back
+# and a stray reply lands as a Running edge that can answer a live attention
+# request the spec did not mean to answer. The spec's own submitted line or
+# send-prompt still echoes, producing the Running edge an answer needs.
+case "\$PWD" in
+    *probe-echo*)
+        stty -echo 2>/dev/null
+        while IFS= read -r line; do printf '%s\n' "\$line"; done
+        ;;
+esac
 exec cat
 EOF
 chmod +x "$HOME_DIR/fake-agent.sh"
