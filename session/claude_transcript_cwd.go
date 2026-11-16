@@ -94,11 +94,15 @@ type claudeRecordedDir struct {
 // (#7272): one that did not answer leaves names incomplete.
 var claudeRecordedDirFacts = func(dir string) claudeRecordedDir {
 	names := map[string]bool{}
-	unresolved := false
 	for walk := dir; ; walk = filepath.Dir(walk) {
 		projects, complete := claudeProjectSpellings(walk)
 		if !complete {
-			unresolved = true
+			// Ownership is already unknown: stop probing ancestors (and
+			// skip the recorded-dir resolution below) so a wedged deep
+			// path cannot keep blocked fsprobe goroutines alive after the
+			// enclosing ReadFileWith flight has returned and the result is
+			// discarded (Codex review of #7375).
+			return claudeRecordedDir{unresolved: true}
 		}
 		for _, project := range projects {
 			names[filepath.Base(project)] = true
@@ -112,10 +116,7 @@ var claudeRecordedDirFacts = func(dir string) claudeRecordedDir {
 	// Bounded and checked like the launch side (#7286): a lookup that failed
 	// for any reason but absence is a resolution that did not happen.
 	resolved, err := fsprobe.ResolveForCompare(dir)
-	if err != nil {
-		unresolved = true
-	}
-	return claudeRecordedDir{resolved: resolved, names: names, unresolved: unresolved}
+	return claudeRecordedDir{resolved: resolved, names: names, unresolved: err != nil}
 }
 
 // claudeTranscriptRecordedDir reads the directory the transcript at path
@@ -274,7 +275,13 @@ func claudeTranscriptOwnership(transcript claudeTranscript, launchDir string) cl
 	// set could not: the ancestor spellings include the colliding name in
 	// both, but only the worktree's own subdirectory resolves under the launch
 	// dir.
-	if strings.HasPrefix(recorded.resolved, launch+string(filepath.Separator)) {
+	// launch is the filesystem root when it is the separator alone: every
+	// absolute recorded path is under it, and launch+sep would double the
+	// separator and fail the prefix check, so a conversation launched at /
+	// and later cd'd elsewhere would fall through and be misclassified
+	// (Codex review of #7375).
+	if launch == string(filepath.Separator) ||
+		strings.HasPrefix(recorded.resolved, launch+string(filepath.Separator)) {
 		return claudeOwnedHere
 	}
 	// The project names the launch dir files under are a launch-side
