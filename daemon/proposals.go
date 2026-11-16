@@ -184,15 +184,6 @@ func (s *controlServer) GetProposal(req GetProposalRequest, resp *GetProposalRes
 	if err != nil {
 		return err
 	}
-	if req.SessionID != "" {
-		t, err := s.manager.pushTarget(req.SessionID)
-		if err != nil {
-			return err
-		}
-		if out.Push, err = s.manager.proposalService().PushStatusFor(t, req.Slug); err != nil {
-			return err
-		}
-	}
 	*resp = *out
 	return nil
 }
@@ -315,4 +306,50 @@ func (s *controlServer) CheckpointProposal(req CheckpointProposalRequest, resp *
 	}
 	*resp = *out
 	return nil
+}
+
+// SendPrompt delivers a rules-contract prompt to the session's pane through
+// the same path af sessions send-prompt uses.
+func (h proposalHost) SendPrompt(sessionID, prompt string) (proposal.Delivery, error) {
+	status, err := h.m.SendPromptWithStatus(SendPromptRequest{ID: sessionID, Prompt: prompt})
+	switch {
+	case err != nil && isNotAttemptedErr(err):
+		return proposal.DeliveryFailed, err
+	case err != nil:
+		return proposal.DeliveryUnconfirmed, err
+	case status == session.PromptDelivered:
+		return proposal.DeliveryConfirmed, nil
+	case status == session.PromptNotDelivered:
+		return proposal.DeliveryFailed, fmt.Errorf("the agent did not take the prompt; %s", notDeliveredMarker)
+	}
+	return proposal.DeliveryUnconfirmed, nil
+}
+
+// deliverOwedProposalBriefs sends every loaded session the rules contract its
+// attachment still owes. The poll loop calls it after ScanProposals.
+func (m *Manager) deliverOwedProposalBriefs() {
+	type entry struct {
+		repoID   string
+		instance *session.Instance
+	}
+	m.mu.Lock()
+	var instances []entry
+	for key, instance := range m.instances {
+		if instance.ID == "" {
+			continue
+		}
+		rid, _ := splitDaemonInstanceKey(key)
+		instances = append(instances, entry{rid, instance})
+	}
+	m.mu.Unlock()
+	targets := make([]proposal.BriefTarget, 0, len(instances))
+	for _, e := range instances {
+		targets = append(targets, proposal.BriefTarget{
+			RepoID:    e.repoID,
+			SessionID: e.instance.ID,
+			Ready:     e.instance.GetLiveness() == session.LiveReady,
+			Attached:  m.isPollPaused(e.repoID, e.instance.Title, e.instance.ID),
+		})
+	}
+	m.proposalService().BriefTick(targets)
 }

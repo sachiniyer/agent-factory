@@ -7,7 +7,7 @@ import "github.com/sachiniyer/agent-factory/session/tmux"
 // shares (#5571 W4.3), so the snapshot projection and the wire roster cannot
 // drift. Caller holds i.mu.
 func (i *Instance) tabDataLocked(tab *Tab) TabData {
-	td := TabData{ID: tab.ID, Gen: tab.gen, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL, Proposal: tab.Proposal, PushMode: tab.PushMode}
+	td := TabData{ID: tab.ID, Gen: tab.gen, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL, Proposal: tab.Proposal}
 	if tab.tmux != nil {
 		td.TmuxName = tab.tmux.SanitizedName()
 	}
@@ -87,7 +87,6 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Command:                       td.Command,
 				URL:                           td.URL,
 				Proposal:                      td.Proposal,
-				PushMode:                      td.PushMode,
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
 				Exit:                          tabExitFromData(td.Exit),

@@ -167,10 +167,11 @@ func TestRedactInstancesFallbackRedactsWorktreeMissingReason(t *testing.T) {
 	}
 }
 
-// TestRedactInstancesFallbackRedactsPushMode is the #5459 fallback guard for a
-// docs tab's push_mode. The typed path keeps only "auto"/"manual"; the fallback
-// blanks it wholesale — on a shape it could not parse it cannot distinguish the
-// two enum words from a hand-edited string.
+// TestRedactInstancesFallbackRedactsPushMode is the fallback guard for a docs
+// tab's push_mode — a retired wire key (proposal push, #7442) that legacy or
+// hand-edited records may still carry. The fallback blanks it wholesale — on a
+// shape it could not parse it cannot distinguish the two enum words from a
+// hand-edited string.
 func TestRedactInstancesFallbackRedactsPushMode(t *testing.T) {
 	r := &redactor{}
 	raw := json.RawMessage(`[{
@@ -186,8 +187,7 @@ func TestRedactInstancesFallbackRedactsPushMode(t *testing.T) {
 		t.Errorf("fallback path leaked a hand-edited push_mode:\n%s", out)
 	}
 	// "auto" is also blanked on the fallback path: this path cannot distinguish
-	// the enum word from a hand-edited value, so it blanks both. The typed path
-	// is where the enum survives; the fallback is the broader net by design.
+	// the enum word from a hand-edited value, so it blanks both.
 	if strings.Contains(out, `"push_mode": "auto"`) {
 		t.Errorf("fallback path kept an enum push_mode — on a shape it could not parse, the value is blanked:\n%s", out)
 	}

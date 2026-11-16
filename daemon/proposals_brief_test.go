@@ -11,8 +11,8 @@ import (
 )
 
 // deliver_rules is the web's opt-in: the daemon owes the agent the proposal
-// contract as a prompt, once per attach, delivered through the same guarded
-// send path a proposal push uses (#6755). A request without it — every older
+// contract as a prompt, once per attach, delivered through the guarded prompt
+// send path (#6755). A request without it — every older
 // client, the CLI included — must see no paste at all.
 
 // briefedManager seeds one instance whose prompt delivery observes status.
@@ -82,7 +82,7 @@ func TestProposalRoutes_DeliverRulesHoldsForAPaneInUse(t *testing.T) {
 		"the contract must not paste over the user's in-progress input")
 
 	manager.ResumeStatusPollFor(repoID, inst.Title, inst.ID, "tui")
-	manager.pushProposals()
+	manager.deliverOwedProposalBriefs()
 	require.Eventually(t, func() bool {
 		return !lastPromptAttempt(t, manager, inst.ID).IsZero()
 	}, 5*time.Second, 10*time.Millisecond,

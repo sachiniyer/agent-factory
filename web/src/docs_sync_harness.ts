@@ -327,7 +327,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         if (self && self.currentStatus === "gone") fail("saved-while-gone", `${doc}: a deleted doc's sync sent a save`);
         if (process.env.AF_STASHLOG || (process.env.AF_KVLOG && text.includes(process.env.AF_KVLOG))) console.log("SAVE", isGhost ? "ghost" : "A", doc, JSON.stringify(text), base, "final=" + final);
         // I18: a save that keeps failing is retried with a delay, not in a loop at one instant.
-        // (A flush is the user asking to save now: the pane's Send now. It is the user's loop, not the engine's.)
+        // (A flush is the user asking to save now. It is the user's loop, not the engine's.)
         const burst = saveBurst.get(`${doc}${owner}`);
         if (flushing) saveBurst.delete(`${doc}${owner}`);
         else if (burst && burst.at === now) burst.n++;
@@ -407,7 +407,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     if (s.whenSaved) {
       const rawWhenSaved = s.whenSaved.bind(s);
       s.whenSaved = () => {
-        flushing = true; // Send now asks for a save right away, too
+        flushing = true; // whenSaved asks for a save right away, too
         try {
           return rawWhenSaved();
         } finally {
@@ -781,9 +781,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
   }
 
-  /** Manual mode's "Send now": it must not go out while a newer edit is unsaved.
-   *  The pane flushes every doc and sends only when all have landed. */
-  function sendNow(): void {
+  /** A flush-all: nothing may act while a newer edit is unsaved.
+   *  The pane flushes every doc and proceeds only when all have landed. */
+  function flushAllDocs(): void {
     const want = new Map<string, string[]>(
       names.map((n) => [n, [...typed.get(n)!.values()]]),
     );
@@ -795,7 +795,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
         if (excused.has(tok)) continue;
         // A later keystroke on the same line supersedes it: that one is not owed.
         if (![...typed.get(doc)!.values()].includes(tok)) continue;
-        if (!d.everHad(tok)) fail("send-now-sent-unsaved-edit", `${doc}: ${tok} was typed before Send now but is not in the daemon (daemon ${JSON.stringify(d.text)}, pane ${JSON.stringify(syncs.get(doc)?.text)}, status ${syncs.get(doc)?.currentStatus}, verdict-path ${syncs.get(doc)?.whenSaved ? "whenSaved" : "none"})`);
+        if (!d.everHad(tok)) fail("flush-acted-on-unsaved-edit", `${doc}: ${tok} was typed before the flush but is not in the daemon (daemon ${JSON.stringify(d.text)}, pane ${JSON.stringify(syncs.get(doc)?.text)}, status ${syncs.get(doc)?.currentStatus}, verdict-path ${syncs.get(doc)?.whenSaved ? "whenSaved" : "none"})`);
       }
     };
     for (const [doc, sync] of live) {
@@ -1002,7 +1002,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     await tick();
     const doubted = typed.get(attached)!.get(line);
     userUndo(line);
-    // I10: Send now waits on whenSaved(). It must not say "saved" while the daemon still
+    // I10: a flush-all waits on whenSaved(). It must not say "saved" while the daemon still
     // holds the save whose reply was lost, whatever the buffer shows: the pane would send
     // that text to the agent.
     const undone = syncs.get(attached);
@@ -1554,7 +1554,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     } else if (r < 0.845 && (o.faults ?? 0) > 0) {
       await pageClose();
     } else if (r < 0.855) {
-      sendNow();
+      flushAllDocs();
     } else if (r < 0.87 && (o.faults ?? 0) > 0) {
       userUndo();
     } else if (r < 0.875 && (o.faults ?? 0) > 0) {

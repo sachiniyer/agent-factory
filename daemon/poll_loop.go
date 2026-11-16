@@ -125,9 +125,10 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// of each watched doc; it commits nothing.
 			manager.ScanProposals()
 
-			// Send proposal edits to idle agents (proposal push). A delivery runs
-			// on its own goroutine, so it never holds this loop.
-			manager.pushProposals()
+			// Deliver owed proposal rules contracts to sessions whose panes
+			// can take them. A delivery runs on its own goroutine, so it never
+			// holds this loop.
+			manager.deliverOwedProposalBriefs()
 
 			// Handle stop before ticker.
 			select {

@@ -15,24 +15,53 @@ import (
 // clears it and a re-attach is a fresh briefing, matching `af proposal
 // attach` printing the rules on every call.
 //
-// Delivery rides the same guarded send path a proposal push uses: the inline
-// attempt happens only when the session's pane can take input (ready, not
-// paused by a client hold, agent alive), and an owed contract that could not
-// go out immediately waits for the first PushTick where it can — ahead of any
-// pending edit push, so the rules always reach the agent before its first
-// "the user edited" prompt. A failed send keeps the debt and backs off
-// PushQuiet; an unconfirmed send settles, because a paste that may have
-// landed must never turn into a second copy.
+// Delivery happens on a guarded send path: the inline attempt runs only when
+// the session's pane can take input (ready, not paused by a client hold,
+// agent alive), and an owed contract that could not go out immediately is
+// retried by the daemon's poll tick (BriefTick). A failed send keeps the debt
+// and backs off briefRetryQuiet; an unconfirmed send settles, because a paste
+// that may have landed must never turn into a second copy.
+
+// Delivery is what the daemon learned when it sent a prompt.
+type Delivery int
+
+const (
+	// DeliveryConfirmed means the agent's pane shows the prompt submitted.
+	DeliveryConfirmed Delivery = iota
+	// DeliveryUnconfirmed means the prompt may have landed, but af could not
+	// see it land.
+	DeliveryUnconfirmed
+	// DeliveryFailed means the prompt provably did not reach the agent.
+	DeliveryFailed
+)
+
+const (
+	// briefRetryQuiet is how long a failed contract send waits before the
+	// next tick may retry it.
+	briefRetryQuiet = 10 * time.Second
+	// briefUnconfirmedWindow is how long after an unconfirmed send a further
+	// prompt to the same pane is held: a paste that may still sit
+	// unsubmitted must not have another spliced into it.
+	briefUnconfirmedWindow = 60 * time.Second
+)
+
+// BriefTarget is what the daemon knows about one session on a poll tick.
+type BriefTarget struct {
+	RepoID    string
+	SessionID string
+	// Ready means the session's liveness is Ready.
+	Ready bool
+	// Attached means a TUI is attached full-screen to the session.
+	Attached bool
+}
 
 // briefEntry is the in-memory half of a session's briefing: the durable
 // marker says a contract is owed, this says whether a send is in flight,
 // when a failed one may try again, when an unconfirmed one came back, and
-// what the marker read last. unconfirmedAt seeds the push entry's own
-// delivery guard, which exists on the push side — a briefing sent before
-// the session had any edits predates its push entry entirely. The marker
-// cache keeps an idle tick from launching a git subprocess per attached
-// session; attach, detach, and every send attempt invalidate it. Losing the
-// entry (a restart) is safe — the next tick reads the marker once.
+// what the marker read last. The marker cache keeps an idle tick from
+// launching a git subprocess per attached session; attach, detach, and every
+// send attempt invalidate it. Losing the entry (a restart) is safe — the
+// next tick reads the marker once.
 type briefEntry struct {
 	sending       bool
 	notBefore     time.Time
@@ -47,7 +76,7 @@ type briefEntry struct {
 // unconfirmed delivery opened at at — the window in which a further prompt
 // could splice into the still-unsubmitted paste.
 func withinUnconfirmed(at, now time.Time) bool {
-	return !at.IsZero() && now.Sub(at) < PushUnconfirmedTimeout
+	return !at.IsZero() && now.Sub(at) < briefUnconfirmedWindow
 }
 
 func (s *Service) briefEntryLocked(sessionID string) *briefEntry {
@@ -85,27 +114,19 @@ func (s *Service) invalidateBrief(sessionID string) {
 }
 
 // briefGuarded reports whether the session's pane is inside an unconfirmed
-// delivery's quiet window — whether the send that opened it was a contract
-// or an edit push, and whichever proposal it was for. A further contract
-// waits for the window to expire, the same way a further edit push does.
+// contract delivery's quiet window. A further contract waits for the window
+// to expire.
 func (s *Service) briefGuarded(sessionID string) bool {
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if be := s.briefs[sessionID]; be != nil && withinUnconfirmed(be.unconfirmedAt, now) {
-		return true
-	}
-	if e := s.push[sessionID]; e != nil && withinUnconfirmed(e.unconfirmedAt, now) {
-		return true
-	}
-	return false
+	return s.briefs[sessionID] != nil && withinUnconfirmed(s.briefs[sessionID].unconfirmedAt, now)
 }
 
 // brief reports what a deliver_rules request did with the contract on info.
 // The attach armed the durable debt in its own commit, so this only reads the
-// marker back. It runs on the request's goroutine: the send is a pane write
-// like a push route's, so a slow paste does not outlive the reply it belongs
-// to.
+// marker back. It runs on the request's goroutine: the send is a pane write,
+// so a slow paste does not outlive the reply it belongs to.
 func (s *Service) brief(r *resolved, slug string, info *Summary) {
 	got, state, err := r.store.Brief(r.session.ID)
 	switch {
@@ -135,7 +156,7 @@ func (s *Service) brief(r *resolved, slug string, info *Summary) {
 	case !s.claimBrief(r.session.ID):
 		info.RulesDelivery, info.RulesError = "held", "the contract is already being delivered"
 	default:
-		delivery, err := s.sendBrief(r.session.ID, false)
+		delivery, err := s.sendBrief(r.session.ID)
 		switch {
 		case delivery == DeliveryConfirmed:
 			info.RulesDelivery = "delivered"
@@ -163,10 +184,8 @@ func briefSendError(err error) string {
 // repeat attach's done state, a detach's cleared ref — sends nothing and
 // reports confirmed, so a late-running send never revives a settled debt.
 // The pane's state is rechecked here, at the send boundary, because a client
-// hold or a busy spell can start after the caller picked this session;
-// forced shares a user-requested send's override of the pane hold (Send now
-// pushes past a TUI attach the same way).
-func (s *Service) runBrief(sessionID string, forced bool) (Delivery, error) {
+// hold or a busy spell can start after the caller picked this session.
+func (s *Service) runBrief(sessionID string) (Delivery, error) {
 	r, err := s.sessionTarget(sessionID)
 	if err != nil {
 		return DeliveryFailed, err
@@ -181,14 +200,14 @@ func (s *Service) runBrief(sessionID string, forced bool) (Delivery, error) {
 	switch {
 	case r.session.NoAgent:
 		return DeliveryFailed, errors.New("the session has no live agent")
-	case r.session.Paused && !forced:
+	case r.session.Paused:
 		return DeliveryFailed, errors.New("a client holds the session's pane")
 	case !r.session.Ready:
 		return DeliveryFailed, errors.New("the agent is busy")
 	}
 	if s.briefGuarded(sessionID) {
-		// The window can open between the claim and now — an edit push that
-		// started before the debt existed can finish unconfirmed mid-flight.
+		// The window can open between the claim and now — a contract send that
+		// started earlier can finish unconfirmed mid-flight.
 		return DeliveryFailed, errors.New("an earlier prompt to this pane is still unconfirmed")
 	}
 	delivery, sendErr := s.host.SendPrompt(r.session.ID, Rules(slug, r.store.SlugPath(slug)))
@@ -204,10 +223,10 @@ func (s *Service) runBrief(sessionID string, forced bool) (Delivery, error) {
 }
 
 // sendBrief releases the in-flight slot after runBrief and backs a failed
-// send off PushQuiet, so the next tick retries instead of hammering a pane
-// that just refused input.
-func (s *Service) sendBrief(sessionID string, forced bool) (Delivery, error) {
-	delivery, sendErr := s.runBrief(sessionID, forced)
+// send off briefRetryQuiet, so the next tick retries instead of hammering a
+// pane that just refused input.
+func (s *Service) sendBrief(sessionID string) (Delivery, error) {
+	delivery, sendErr := s.runBrief(sessionID)
 	now := s.now()
 	s.mu.Lock()
 	if e := s.briefs[sessionID]; e != nil {
@@ -216,19 +235,12 @@ func (s *Service) sendBrief(sessionID string, forced bool) (Delivery, error) {
 		// either way the cached marker is stale.
 		e.markerSet = false
 		if sendErr != nil || delivery == DeliveryFailed {
-			e.notBefore = now.Add(PushQuiet)
+			e.notBefore = now.Add(briefRetryQuiet)
 		}
-	}
-	if delivery == DeliveryUnconfirmed {
-		// The contract may still be sitting unsubmitted in the pane, so edit
-		// prompts queue behind the same quiet window an unconfirmed push gets:
-		// the next paste must not splice into it. The brief entry keeps the
-		// timestamp for push entries created later — a contract sent before
-		// the session had edits predates them.
-		if e := s.briefs[sessionID]; e != nil {
-			e.unconfirmedAt = now
-		}
-		if e := s.push[sessionID]; e != nil {
+		if delivery == DeliveryUnconfirmed {
+			// The contract may still be sitting unsubmitted in the pane, so a
+			// further prompt queues behind the same quiet window an
+			// unconfirmed paste gets: the next paste must not splice into it.
 			e.unconfirmedAt = now
 		}
 	}
@@ -237,7 +249,7 @@ func (s *Service) sendBrief(sessionID string, forced bool) (Delivery, error) {
 }
 
 // briefOwedLocked reports whether sessionID's briefing marker still owes the
-// contract for slug — the debt that has to go out before any edit push may.
+// contract for slug — the debt a deliver_rules attach armed.
 // It runs per attached session on every poll tick under s.mu, so the marker
 // read — a git subprocess, two when the marker is missing — is cached on the
 // brief entry and re-read only after an attach, detach, or send invalidated
@@ -259,4 +271,51 @@ func (s *Service) briefOwedLocked(store *Store, sessionID, slug string) bool {
 		be.markerSet, be.markerSlug, be.markerState = true, got, state
 	}
 	return be.markerSlug == slug && be.markerState == BriefOwed
+}
+
+// BriefTick runs one round of owed-contract delivery for the sessions the
+// daemon reports. The poll loop calls it after ScanProposals on every tick.
+// Each claimed send runs on its own goroutine so a slow pane write never
+// holds the loop; entries for sessions that drop off the target list are
+// pruned unless a send is in flight or an unconfirmed window is still open —
+// a reappearing session must not splice the next paste into a live one.
+func (s *Service) BriefTick(targets []BriefTarget) {
+	now := s.now()
+	var sends []string
+	s.mu.Lock()
+	live := map[string]bool{}
+	for _, t := range targets {
+		if t.SessionID == "" {
+			continue
+		}
+		store, err := Open(t.RepoID)
+		if err != nil || !store.initialized() {
+			continue
+		}
+		slug := s.attachmentsLocked(store, t.RepoID)[t.SessionID]
+		if slug == "" {
+			continue
+		}
+		live[t.SessionID] = true
+		if !s.briefOwedLocked(store, t.SessionID, slug) {
+			continue
+		}
+		be := s.briefEntryLocked(t.SessionID)
+		if t.Ready && !t.Attached && !be.sending && !now.Before(be.notBefore) &&
+			!withinUnconfirmed(be.unconfirmedAt, now) {
+			be.sending = true
+			sends = append(sends, t.SessionID)
+		}
+	}
+	for id, e := range s.briefs {
+		// A live unconfirmed window must survive a session dropping off the
+		// target list, or a reappearing session could splice the next paste.
+		if !live[id] && !e.sending && !withinUnconfirmed(e.unconfirmedAt, now) {
+			delete(s.briefs, id)
+		}
+	}
+	s.mu.Unlock()
+	for _, id := range sends {
+		s.spawn(func() { _, _ = s.sendBrief(id) })
+	}
 }

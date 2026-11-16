@@ -484,9 +484,12 @@ func TestCreateRemovesFolderOnFailure(t *testing.T) {
 	}
 }
 
-func TestRulesExplainPushedEdits(t *testing.T) {
+func TestRulesExplainEditsArriveByPull(t *testing.T) {
 	r := Rules("p", "/x/p")
-	if !strings.Contains(r, `arrive as a prompt that starts with "Proposal p:"`) || !strings.Contains(r, `you do not need to run "af proposal changes" first`) {
-		t.Fatalf("rule 2 must explain pushed edits:\n%s", r)
+	if !strings.Contains(r, `run "af proposal changes"`) {
+		t.Fatalf("rule 2 must tell the agent to pull the user's edits:\n%s", r)
+	}
+	if strings.Contains(r, "arrive as a prompt") || strings.Contains(r, "Proposal p:") {
+		t.Fatalf("the rules must not promise the user's edits arrive as a prompt:\n%s", r)
 	}
 }

@@ -48,7 +48,7 @@ doc, with author and time, and restore an old version as a new commit.
 
 Select text in the Docs tab, then choose **Ask agent** or **Expand**. This
 sends a prompt that quotes the selection and names the doc. It uses the same
-send path as push.
+prompt send path the rules briefing uses.
 
 ## Cross-references
 

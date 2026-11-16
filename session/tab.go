@@ -282,9 +282,6 @@ type Tab struct {
 	URL string
 	// Proposal is the slug a TabKindDocs tab edits. Empty for every other kind.
 	Proposal string
-	// PushMode is a TabKindDocs tab's proposal push mode, "auto" or "manual".
-	// Empty means auto.
-	PushMode string
 	// Conversation is the provider-specific id that resumes this tab's agent
 	// conversation exactly. Empty means recovery falls back to the provider's
 	// existing latest-session behavior.
@@ -744,7 +741,7 @@ func (i *Instance) appendPendingMetadataTabsLocked() {
 			// no id and must be addressable by a stable one from this load forward.
 			id = newTabID()
 		}
-		i.Tabs = append(i.Tabs, &Tab{ID: id, Name: td.Name, Kind: tabKindForData(td.Kind), URL: td.URL, Proposal: td.Proposal, PushMode: td.PushMode})
+		i.Tabs = append(i.Tabs, &Tab{ID: id, Name: td.Name, Kind: tabKindForData(td.Kind), URL: td.URL, Proposal: td.Proposal})
 		i.touchLocked()
 	}
 }

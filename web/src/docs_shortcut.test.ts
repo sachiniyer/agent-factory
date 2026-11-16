@@ -101,13 +101,12 @@ test("Docs shortcuts show only in the phone session header", () => {
 test("the Docs header stays on one row at split width and wraps only at phone width", () => {
   assert.match(rules(".af-docs-head").join(""), /flex-wrap:\s*nowrap/);
   assert.match(phoneRules(".af-docs-head"), /flex-wrap:\s*wrap/);
-  assert.doesNotMatch(rules(".af-docs-push").join(""), /flex-wrap:\s*wrap/);
-  for (const sel of [".af-docs-tools", ".af-docs-push", ".af-docs-chip"]) {
+  for (const sel of [".af-docs-tools"]) {
     const body = rules(sel).join("");
     assert.match(body, /flex:\s*0 1 auto/, `${sel} must shrink`);
     assert.match(body, /min-width:\s*0/, `${sel} must pass the shrink to its text`);
   }
-  for (const sel of [".af-docs-chip-text", ".af-docs-status"]) {
+  for (const sel of [".af-docs-status"]) {
     const body = rules(sel).join("");
     assert.match(body, /min-width:\s*0/, `${sel} must shrink below its text`);
     assert.match(body, /text-overflow:\s*ellipsis/, `${sel} must ellipsize`);

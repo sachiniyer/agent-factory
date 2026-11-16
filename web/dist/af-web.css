@@ -3999,47 +3999,13 @@ textarea[class] {
   gap: var(--af-space-2);
   margin-left: auto;
 }
-.af-docs-slot:empty {
-  display: none;
-}
-.af-docs-push {
-  display: flex;
-  align-items: center;
-  flex: 0 1 auto;
-  gap: var(--af-space-1) var(--af-space-2);
-  min-width: 0;
-}
-.af-docs-push[hidden],
-.af-docs-chip-text[hidden],
-.af-docs-chip-action[hidden],
-.af-docs-push .af-docs-sep[hidden] {
-  display: none;
-}
-.af-docs-chip {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 1 auto;
-  gap: var(--af-space-1);
-  min-width: 0;
-  white-space: nowrap;
-}
-.af-docs-chip-text,
 .af-docs-status {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.af-docs-chip-text {
-  font-variant-numeric: tabular-nums;
-}
-.af-docs-chip-action,
-.af-docs-push .af-docs-sep,
 .af-docs-questions {
   flex: none;
-}
-.af-docs-chip-action:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 .af-docs-status {
   display: inline-flex;

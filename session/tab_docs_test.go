@@ -75,33 +75,40 @@ func TestDocsTabKindProperties(t *testing.T) {
 	assert.Equal(t, "My notes", TabLabel(&Tab{Name: "My notes", Kind: TabKindDocs}))
 }
 
-func TestDocsTab_PushModePersists(t *testing.T) {
+// TestDocsTab_LegacyPushModeLoads covers the fixture an older af left behind:
+// tab data persisted while proposal push existed carries a push_mode wire
+// key (#7442 removed the field). Loading must ignore it — the docs tab comes
+// back with its proposal intact and the re-persisted row drops the key.
+func TestDocsTab_LegacyPushModeLoads(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 
-	inst := startedMockInstance(t, "af_docs_push_mode")
+	inst := startedMockInstance(t, "af_docs_legacy_push_mode")
 	_, err := inst.AddDocsTab("auth-rework", "")
 	require.NoError(t, err)
 	_, err = inst.AddDocsTab("other", "")
 	require.NoError(t, err)
-	before := inst.GetTabs()[1]
 
-	assert.Equal(t, 1, inst.SetDocsTabsPushMode("auth-rework", "manual"))
-	assert.Equal(t, 0, inst.SetDocsTabsPushMode("missing", "manual"))
-	assert.Equal(t, "", before.PushMode, "the mode is set copy-on-write")
-
+	// Re-stamp the serialized rows the way an older binary wrote them.
 	data := inst.ToInstanceData()
-	raw, err := json.Marshal(data.Tabs[1])
-	require.NoError(t, err)
-	var wire map[string]any
-	require.NoError(t, json.Unmarshal(raw, &wire))
-	assert.Equal(t, "manual", wire["push_mode"])
-	assert.NotContains(t, string(mustJSON(t, data.Tabs[2])), "push_mode", "an unset mode is omitted")
+	for i := range data.Tabs {
+		var wire map[string]any
+		require.NoError(t, json.Unmarshal(mustJSON(t, data.Tabs[i]), &wire))
+		wire["push_mode"] = "manual"
+		require.NoError(t, json.Unmarshal(mustJSON(t, wire), &data.Tabs[i]))
+	}
 
 	restored := &Instance{}
 	restoreLocalTabs(restored, data)
-	assert.Equal(t, "manual", restored.Tabs[1].PushMode, "the mode must survive a restart")
-	assert.Equal(t, "", restored.Tabs[2].PushMode)
+	require.GreaterOrEqual(t, len(restored.Tabs), 3)
+	assert.Equal(t, TabKindDocs, restored.Tabs[1].Kind)
+	assert.Equal(t, "auth-rework", restored.Tabs[1].Proposal, "a retired wire key must not break the load")
+
+	for _, tab := range restored.ToInstanceData().Tabs {
+		var wire map[string]any
+		require.NoError(t, json.Unmarshal(mustJSON(t, tab), &wire))
+		assert.NotContains(t, wire, "push_mode", "the retired key is not written back")
+	}
 }
 
 func mustJSON(t *testing.T, v any) []byte {

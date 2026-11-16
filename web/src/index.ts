@@ -165,8 +165,8 @@ import {
 import { createLatestWriter } from "./project_color_writes.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
 import { type AccountsResponse, type DaemonHealth, type HostEntry, type SessionData, type SkippedRepo, TabKind, type TaskData, type WireEvent } from "./types.js";
-import { publishProposalChange, publishProposalPush, publishProposalResync } from "./docs_tab.js";
-import { attachProposal, detachProposal, listProposals, parseProposalChange, parseProposalPush, startProposal, type ProposalSummary } from "./proposal_api.js";
+import { publishProposalChange, publishProposalResync } from "./docs_tab.js";
+import { attachProposal, detachProposal, listProposals, parseProposalChange, startProposal, type ProposalSummary } from "./proposal_api.js";
 import { proposalModal } from "./proposal_modal.js";
 import { trackViewportInsets } from "./viewport-insets.js";
 
@@ -3923,11 +3923,6 @@ function onEvent(ev: WireEvent): void {
   if (ev.type === "proposal.changed") {
     const change = parseProposalChange(ev);
     if (change) publishProposalChange(change);
-    return;
-  }
-  if (ev.type === "proposal.push") {
-    const status = parseProposalPush(ev);
-    if (status) publishProposalPush(status);
     return;
   }
   // Task deltas (#1592 Phase 5 PR8) don't touch the session list; the daemon owns

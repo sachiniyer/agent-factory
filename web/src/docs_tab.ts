@@ -1,11 +1,10 @@
 // The main bundle's side of the Docs tab: it loads the lazy Docs bundle
 // (docs_pane.ts and CodeMirror, built into dist/lazy/ by build.mjs) the first
-// time a Docs tab opens, and relays proposal.changed and proposal.push events to
-// open tabs. Keep
+// time a Docs tab opens, and relays proposal.changed events to open tabs. Keep
 // this module small: everything else about the tab lives in the lazy bundle.
 
 import { errorText } from "./api.js";
-import type { ProposalChange, PushStatus } from "./proposal_api.js";
+import type { ProposalChange } from "./proposal_api.js";
 
 type DocsModule = typeof import("./docs_pane.js");
 
@@ -36,13 +35,6 @@ function subscribe(fn: (change: ProposalChange) => void): () => void {
   return () => listeners.delete(fn);
 }
 
-const pushListeners = new Set<(status: PushStatus) => void>();
-
-/** Hands a proposal.push event to every open Docs tab. */
-export function publishProposalPush(status: PushStatus): void {
-  for (const fn of pushListeners) fn(status);
-}
-
 const resyncListeners = new Set<() => void>();
 
 /** Tells every open Docs tab the event stream reconnected, so it refreshes what
@@ -54,11 +46,6 @@ export function publishProposalResync(): void {
 function subscribeResync(fn: () => void): () => void {
   resyncListeners.add(fn);
   return () => resyncListeners.delete(fn);
-}
-
-function subscribePush(fn: (status: PushStatus) => void): () => void {
-  pushListeners.add(fn);
-  return () => pushListeners.delete(fn);
 }
 
 export interface DocsTabOptions {
@@ -95,7 +82,7 @@ export function mountDocsTab(host: HTMLElement, opts: DocsTabOptions): () => voi
     notice("Loading editor…", false);
     loadDocsModule().then(
       (mod) => {
-        if (!disposed) pane = new mod.DocsPane(host, { ...opts, subscribe, subscribePush, subscribeResync });
+        if (!disposed) pane = new mod.DocsPane(host, { ...opts, subscribe, subscribeResync });
       },
       (e: unknown) => {
         if (!disposed) notice(`Could not load the editor: ${errorText(e)}`, true);
