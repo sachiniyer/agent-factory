@@ -126,6 +126,102 @@ func TestCheckAndHandleTrustPrompt_RewordedDialogBodyAndOptionsNeverClear(t *tes
 	}
 }
 
+// framedRewordedDialogRows renders the whole reworded folder-trust dialog
+// painted inside a box that some Claude Code builds draw (claude 2.1.258 does
+// not, but the framed form "must parse identically" — claudeTrustBoxDrawing).
+// variant "inside" paints the footer within the box, above its bottom border;
+// variant "outside" paints the box closed directly above an outside footer.
+// The top border is the line that the old case-3 scan rejected, reading the
+// fully painted dialog clear at several narrow widths.
+func framedRewordedDialogRows(width int, variant string) []string {
+	content := width - 4
+	if content < 1 {
+		content = 1
+	}
+	frame := func(row string) string {
+		for len([]rune(row)) < content {
+			row += " "
+		}
+		return "│ " + row + " │"
+	}
+	top := "╭" + strings.Repeat("─", width-2) + "╮"
+	bottom := "╰" + strings.Repeat("─", width-2) + "╯"
+	logical := []string{
+		"Quick safety check: Is this a project you created or one you trust? (Like your own code, …).",
+		"",
+		"Security guide",
+		"",
+		"❯ 1. Yes, I trust this folder",
+		"2. No, exit",
+	}
+	var rows []string
+	rows = append(rows, top)
+	for _, l := range logical {
+		if l == "" {
+			rows = append(rows, frame(""))
+			continue
+		}
+		for _, piece := range wrapAtSpaces(l, content) {
+			rows = append(rows, frame(piece))
+		}
+	}
+	switch variant {
+	case "inside":
+		for _, piece := range wrapAtSpaces(rewordedTrustFooter, content) {
+			rows = append(rows, frame(piece))
+		}
+		rows = append(rows, bottom)
+	case "outside":
+		rows = append(rows, bottom)
+		for _, piece := range wrapAtSpaces(rewordedTrustFooter, width) {
+			rows = append(rows, piece)
+		}
+	}
+	return rows
+}
+
+// A fully painted FRAMED reworded dialog holds at every width, the way its
+// unframed form does (TestCheckAndHandleTrustPrompt_RewordedDialogBodyAndOptionsNeverClear).
+// The case-3 scan in claudeLaunchDialogTail reused claudeTrustFrameRule, which
+// matches the dialog's own top border ╭───╮, so at several narrow widths the
+// matcher rejected the dialog's own frame and the pane read clear — letting the
+// create path type the user's prompt into the live modal. With the fix, a frame
+// rule above the options only rejects when it bounds a boxed composer (a row
+// reading ">" or "> "), not the dialog's own top border.
+func TestCheckAndHandleTrustPrompt_FramedRewordedDialogHoldsAtAnyWidth(t *testing.T) {
+	_, _, errLog := captureTrustPromptLogs(t)
+	for width := 8; width <= 60; width++ {
+		for _, variant := range []string{"inside", "outside"} {
+			rows := framedRewordedDialogRows(width, variant)
+			content := strings.Join(rows, "\n")
+			name := fmt.Sprintf("%d columns, %s the box", width, variant)
+			handled, cmds := pollStaticPane(t, content, 4)
+			require.True(t, handled, "%s read clear; a fully painted framed dialog holds (#7349 top-border regression):\n%s", name, content)
+			require.Empty(t, sentKeystrokes(cmds), "%s sends no key:\n%s", name, content)
+		}
+	}
+	require.Contains(t, errLog.String(), "refusing to answer the "+claudeFolderTrustDialogName+" dialog",
+		"the hold is reported as the reworded folder-trust dialog; got:\n%s", errLog.String())
+}
+
+// A framed dialog whose body has scrolled off the top — so only the top border
+// is NOT visible — already held before the fix. This pins that the fix does not
+// regress the headless case: removing the top border must leave the pane held
+// (the case-3 scan finds no frame rule above the options at all), and adding it
+// back must hold too now.
+func TestCheckAndHandleTrustPrompt_FramedRewordedDialogTopScrolledOffHolds(t *testing.T) {
+	for width := 8; width <= 30; width++ {
+		rows := framedRewordedDialogRows(width, "inside")
+		// Drop the top border line: the question is scrolled off, the body
+		// (Security guide) still shows above the options.
+		scrolled := rows[1:]
+		content := strings.Join(scrolled, "\n")
+		handled, cmds := pollStaticPane(t, content, 4)
+		require.True(t, handled, "%d columns, top border scrolled off still holds:\n%s", width, content)
+		require.Empty(t, sentKeystrokes(cmds), "%d columns, top scrolled sends no key:\n%s", width, content)
+	}
+}
+
 // A working agent below the rows, or rows that are not the dialog's, and the
 // pane stays clear, as before.
 func TestCheckAndHandleTrustPrompt_FolderTrustDialogTextThatIsNoDialogStaysClear(t *testing.T) {
@@ -133,6 +229,14 @@ func TestCheckAndHandleTrustPrompt_FolderTrustDialogTextThatIsNoDialogStaysClear
 	for _, tt := range []struct{ name, content string }{
 		{"the ruled composer below", legacy + ruledComposerBelow},
 		{"the boxed composer below", legacy + boxedComposerBelow},
+		// A boxed composer painted ABOVE the dialog's option rows and footer
+		// (a quoted dialog with the agent's live composer above it) must stay
+		// clear: the case-3 scan rejects the composer's box edge because the
+		// row next to it reads "> ", not because every frame rule rejects.
+		// This is the false-hold a plain-rule-only scan would produce, so it
+		// pins that the fix did not weaken the boxed-composer guard.
+		{"the boxed composer above the options", "╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, I trust this folder\n2. No, exit\n\nEnter to confirm · Esc to cancel"},
+		{"the boxed composer above the legacy options", "╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, proceed\n2. No, exit\n\nEnter to confirm · Esc to exit"},
 		{"a hint row below the footer", legacy + "\n? for shortcuts"},
 		{"a ❯ row above the options", "❯ fix it\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
 		{"a plain rule above the options", "────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},

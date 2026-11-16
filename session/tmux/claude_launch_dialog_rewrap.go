@@ -250,7 +250,18 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane) (claudeLaunchDialogMatc
 			}
 		}
 		for i := 0; i < pane.index[block]; i++ {
-			if claudeTrustFrameRule(pane.lines[i]) {
+			if !claudeTrustFrameRule(pane.lines[i]) {
+				continue
+			}
+			// Box corners and tees are a framed dialog's own edges (#7284
+			// review R5), not the composer's, so a frame rule above the
+			// options is the dialog's top border and must NOT reject: the
+			// framed form must parse identically to the unframed one
+			// (claudeTrustBoxDrawing). The one frame that grounds a
+			// rejection here is a boxed COMPOSER's, recognised the same way
+			// claudeLaunchDialogComposerBelow recognises it: a frame-rule
+			// line adjacent to a row reading ">" or "> ".
+			if claudeLaunchDialogPromptRow(pane, i+1) || claudeLaunchDialogPromptRow(pane, i-1) {
 				return claudeLaunchDialogMatch{}, false
 			}
 		}
@@ -393,7 +404,7 @@ func claudeLaunchDialogComposerBelow(pane claudeLaunchDialogPane, from int) bool
 		i := pane.index[content]
 		row := pane.rows[i]
 		if !row.selected {
-			if i > 0 && claudeTrustFrameRule(pane.lines[i-1]) && (row.label == ">" || strings.HasPrefix(row.label, "> ")) {
+			if i > 0 && claudeTrustFrameRule(pane.lines[i-1]) && claudeLaunchDialogPromptRow(pane, i) {
 				return true
 			}
 			continue
@@ -408,6 +419,17 @@ func claudeLaunchDialogComposerBelow(pane claudeLaunchDialogPane, from int) bool
 		}
 	}
 	return false
+}
+
+// claudeLaunchDialogPromptRow reports whether pane line i is a boxed composer's
+// prompt row: the ">" or "> " row Claude Code paints inside its framed composer.
+// claudeTrustRowOf reduces "│ > … │" to "> …", and a selected option row is
+// never the composer's prompt. Used to tell a boxed composer's frame edge from
+// a framed dialog's own top border (#7284 review R5): the composer's edge is
+// adjacent to such a row; the dialog's is adjacent to its question.
+func claudeLaunchDialogPromptRow(pane claudeLaunchDialogPane, i int) bool {
+	return i >= 0 && i < len(pane.lines) && !pane.rows[i].selected &&
+		(pane.rows[i].label == ">" || strings.HasPrefix(pane.rows[i].label, "> "))
 }
 
 // refuseClaudeLaunchDialog reports, once per dialog rather than once per poll,
