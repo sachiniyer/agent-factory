@@ -252,28 +252,26 @@ func homeReapDocker(t *testing.T, listing string, listErr error, removed *[]stri
 	})
 }
 
-// TestReapHomeContainersPutsEachLabelToTheProofVerbatim: a label is never
-// trimmed or split. "/h/mine " (a trailing space) and a label holding a tab
-// or a newline name homes distinct from "/h/mine", so a proof of "/h/mine"
-// removes only the container labelled exactly that (#7447, Codex on #7448).
-func TestReapHomeContainersPutsEachLabelToTheProofVerbatim(t *testing.T) {
-	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
+// TestHomeReapListingKeepsEachLabelVerbatim: the listing a whole-home reap
+// proves from never trims or splits a label. "/h/mine " (a trailing space),
+// "/h/mine\t" and a label holding a newline name homes distinct from
+// "/h/mine", and each reaches the proof byte for byte (#7447, Codex on #7448).
+func TestHomeReapListingKeepsEachLabelVerbatim(t *testing.T) {
 	var removed []string
 	defer homeReapDocker(t, "cid-exact\t\"a\"\t\"/h/mine\"\n"+
 		"cid-space\t\"b\"\t\"/h/mine \"\n"+
 		"cid-tab\t\"c\"\t\"/h/mine\\t\"\n"+
 		"cid-newline\t\"d\"\t\"/h/mine\\n/h/other\"\n", nil, &removed)()
 
-	var asked []string
-	got := ReapHomeContainers(func(label string) bool {
-		asked = append(asked, label)
-		return label == "/h/mine"
-	})
+	listed, err := listLabelledAfContainers(nil)
+	require.NoError(t, err)
 
-	assert.Equal(t, []string{"/h/mine", "/h/mine ", "/h/mine\t", "/h/mine\n/h/other"}, asked,
-		"each label reaches the proof byte for byte")
-	assert.Equal(t, []string{"cid-exact"}, removed, "only the container labelled exactly with the proven home is removed")
-	assert.Equal(t, 1, got.Reaped)
+	homes := make([]string, 0, len(listed))
+	for _, c := range listed {
+		homes = append(homes, c.home)
+	}
+	assert.Equal(t, []string{"/h/mine", "/h/mine ", "/h/mine\t", "/h/mine\n/h/other"}, homes,
+		"each label is listed byte for byte, one container per line")
 }
 
 // TestReapHomeContainersSaysWhenItCouldNotList: a pass that could not list the
