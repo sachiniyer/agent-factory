@@ -35,6 +35,10 @@ import (
 //     exponential backoff
 //   - ≥5 non-zero exits within 10 minutes = crash loop (status "errored",
 //     restarts stop)
+//   - the daemon's own stop is never a failure: once it begins, no watch
+//     command is restarted, and an exit it caused — systemd stopping the
+//     watch's bound scope, or refusing one while the daemon's unit has a stop
+//     job queued — is not counted (#7392, watcher_shutdown.go)
 //   - both stops are DURABLE: only a gesture naming this task re-arms it —
 //     `af tasks restart <id>`, an enable/disable or watch_cmd/project_path/name
 //     edit of this task, a full reload, or a daemon start. A write to some
@@ -121,6 +125,12 @@ type watcherSupervisor struct {
 	// scheduler's does: before arming has run, an empty watcher map means "not
 	// observed yet", never "this watch task is not armed" (#3623).
 	armed bool
+	// shutdownCh closes when the daemon begins stopping (beginShutdown, the
+	// first step of drainDaemon) — long before Stop, which is the last (#7392).
+	// From then on no watch command is restarted and no exit is a failure.
+	shutdownMu    sync.Mutex
+	shutdownCh    chan struct{}
+	shutdownBegun bool
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// deliver observes events without spawning sessions, setStatus observes
@@ -206,8 +216,10 @@ func newWatcherSupervisorWithEventsPerMinute(eventsPerMinute int) *watcherSuperv
 }
 
 // Stop terminates every watcher: SIGTERM to each process group, group SIGKILL
-// after the grace. Blocks until all watcher goroutines have returned.
+// after the grace. Blocks until all watcher goroutines have returned. It implies
+// beginShutdown, which a daemon stop has normally latched long before.
 func (s *watcherSupervisor) Stop() {
+	s.beginShutdown()
 	s.mu.Lock()
 	s.stopped = true
 	stale := make([]*taskWatcher, 0, len(s.watchers))
@@ -421,15 +433,18 @@ func (w *taskWatcher) run() {
 
 	backoff := w.sup.baseBackoff
 	var failures []time.Time
+	stopping := w.sup.daemonStopping()
 
 	for {
-		if w.stopRequested() {
+		// A stopping daemon restarts nothing (#7392): the latch is set at the
+		// start of shutdown, long before Stop closes stopCh.
+		if w.stopRequested() || w.sup.shuttingDown() {
 			return
 		}
 
 		started := time.Now()
 		tail, runErr := w.runOnce()
-		if w.stopRequested() {
+		if w.stopRequested() || w.sup.shuttingDown() {
 			if runErr != nil {
 				log.InfoLog.Printf("watch task %s: watch command terminated during stop/reload (%v); not a failure", w.taskID, runErr)
 			}
@@ -444,18 +459,25 @@ func (w *taskWatcher) run() {
 			return
 		}
 
-		// A SIGTERM-shaped death is often daemon shutdown or a unit restart
-		// reaching the child before the stop request reaches this loop — unit
-		// managers signal the whole control group, not just the daemon. Give
-		// the stop channel a grace before treating it as a script failure, so
-		// shutdown doesn't log spurious failed/restarting warnings or count
-		// toward the crash-loop breaker.
-		if exitedFromSignal(runErr, syscall.SIGTERM) {
-			select {
-			case <-w.stopCh:
+		// Two exits are the daemon's own stop arriving just before the latch
+		// does (#7392, watcher_shutdown.go): systemd's SIGTERM to the watch's
+		// bound scope, which stopping the daemon's unit sends first, and a
+		// scope systemd refused because that unit has a stop job installed.
+		// Each gets a grace to see the stop arrive before it is counted, so a
+		// stop logs no failed/restarting warning and spends no budget.
+		graced := false
+		switch {
+		case exitedFromSignal(runErr, syscall.SIGTERM):
+			graced = true
+			if w.daemonStopArrives(w.sup.stopGrace) {
 				log.InfoLog.Printf("watch task %s: watch command terminated during stop/reload; not a failure", w.taskID)
 				return
-			case <-time.After(w.sup.stopGrace):
+			}
+		case scopeRefusedForDaemonStop(tail):
+			graced = true
+			if w.daemonStopArrives(w.sup.stopGrace) {
+				log.InfoLog.Printf("watch task %s: systemd refused the watch command's scope because the daemon's unit is stopping; not a failure", w.taskID)
+				return
 			}
 		}
 
@@ -467,6 +489,13 @@ func (w *taskWatcher) run() {
 		}
 		failures = failures[cut:]
 		if len(failures) >= w.sup.crashMaxExits {
+			// The trip is durable, so it must never be the daemon's stop: an
+			// exit the daemon cannot attribute yet (a script that traps TERM
+			// and exits 1) gets the same grace before it can give up.
+			if !graced && w.daemonStopArrives(w.sup.stopGrace) {
+				log.InfoLog.Printf("watch task %s: watch command failed (%v) as the daemon began stopping; not giving up", w.taskID, runErr)
+				return
+			}
 			log.ErrorLog.Printf("watch task %s: %d failures within %s (last: %v); giving up until this task is restarted (af tasks restart %s), re-enabled, or the daemon restarts%s", w.taskID, len(failures), w.sup.crashWindow, runErr, w.taskID, tail.logSuffix())
 			w.persistTerminalStatus(giveUpSummary(runErr, tail, len(failures), w.sup.crashWindow))
 			return
@@ -483,6 +512,9 @@ func (w *taskWatcher) run() {
 		log.WarningLog.Printf("watch task %s: watch command failed (%v); restarting in %s%s", w.taskID, runErr, wait, tail.logSuffix())
 		select {
 		case <-w.stopCh:
+			return
+		case <-stopping:
+			log.InfoLog.Printf("watch task %s: not restarting the watch command: the daemon is stopping", w.taskID)
 			return
 		case <-time.After(wait):
 		}

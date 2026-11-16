@@ -51,8 +51,14 @@ func joinWithin(d time.Duration, join func()) bool {
 //
 // httpClosed and controlClosed are set via the supplied pointers so the
 // deferred fallback-closers in runDaemon can skip a redundant close.
+//
+// watchers is latched first, before anything here can block: its watch loops
+// stop restarting and stop counting exits from this instant, not from the
+// deferred watchers.Stop that runs only after this drain and the final save
+// (#7392). nil is allowed.
 func drainDaemon(
 	m *Manager,
+	watchers *watcherSupervisor,
 	closeHTTP func() error,
 	closeControl func() error,
 	httpClosed *bool,
@@ -70,6 +76,12 @@ func drainDaemon(
 	// Advisory work (host probes) is abandoned before anything else: it must not be
 	// able to hold the drain, or the final checkpoint below, past the stopper's
 	// SIGKILL (#5839).
+	//
+	// The watchers stand down first of all. Stopping the daemon's unit also
+	// stops every watch's bound scope, and a drain that hangs past that would
+	// otherwise keep restarting watch commands into systemd's refusals and
+	// spend their crash-loop budget on its own stop (#7392).
+	watchers.beginShutdown()
 	m.advisory.Cancel()
 	m.lifecycle.markQuiescing()
 	if closeHTTP != nil {

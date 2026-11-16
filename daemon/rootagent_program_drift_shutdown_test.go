@@ -51,7 +51,7 @@ func TestShutdownAbandonsBlockedRootProgramInspection(t *testing.T) {
 	httpClosed, controlClosed := false, false
 	drained := make(chan struct{})
 	go func() {
-		drainDaemon(manager, nil, func() error { return nil }, &httpClosed, &controlClosed, stopCh, &workers)
+		drainDaemon(manager, nil, nil, func() error { return nil }, &httpClosed, &controlClosed, stopCh, &workers)
 		close(drained)
 	}()
 

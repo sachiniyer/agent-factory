@@ -430,6 +430,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 			}
 		}()
 	}
+	// The warm-up exits (a signal or Shutdown during restore or probation)
+	// return without drainDaemon, so latch the watchers here, ahead of the HTTP
+	// close above (LIFO), which joins handlers and can block: a released
+	// upgrade candidate may already be running watchers armed by RPC (#7392).
+	// On the graceful path drainDaemon has latched them long before this runs.
+	defer watchers.beginShutdown()
 
 	// Run the restore concurrently so a shutdown or signal during warm-up exits
 	// promptly instead of waiting for the restore to finish. The
@@ -643,7 +649,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		throwawayExpired = true
 	}
 
-	joined := drainDaemon(manager, closeHTTP, closeControl, &httpClosed, &controlClosed, stopCh, wg)
+	joined := drainDaemon(manager, watchers, closeHTTP, closeControl, &httpClosed, &controlClosed, stopCh, wg)
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under
