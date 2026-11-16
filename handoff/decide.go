@@ -661,13 +661,15 @@ func orderCandidates(eligible []scoredAccount, cfg config.AccountHandoffConfig) 
 	// maxReported is the highest worst-window percent reported by any
 	// eligible observed candidate. A windowless ReadingObserved snapshot
 	// ("no windows is evidence of absence of data, not a zero reading",
-	// per quota/rate_limits.go) is keyed to this value so it never wins
-	// the UsedPercent tiebreak as 0%: it ranks with the worst reported
-	// candidate — never above it — and otherwise falls through to
-	// occupancy/listed order. Keying every candidate once (rather than
-	// skipping the percent comparison pairwise when either side is
-	// windowless) keeps the comparator transitive: there is one consistent
-	// per-candidate key, not a per-pair choice (#7371 review, #7322/#7314).
+	// per quota/rate_limits.go) and a ReadingNone candidate are both keyed
+	// to this value so neither wins the UsedPercent tiebreak as 0%: each
+	// ranks with the worst reported candidate — never above it — and
+	// otherwise falls through to occupancy/listed order. Applying one
+	// per-candidate key to every same-tier candidate (rather than only
+	// running the percent comparison when both sides are ReadingObserved)
+	// keeps the comparator transitive: a no-reading candidate no longer
+	// forms a cycle with reported/windowless ones via listed order
+	// (#7371 review, #7322/#7314).
 	maxReported := 0.0
 	for _, c := range eligible {
 		if c.facts.Reading.Status != ReadingObserved {
@@ -679,7 +681,7 @@ func orderCandidates(eligible []scoredAccount, cfg config.AccountHandoffConfig) 
 	}
 	percentKey := func(c scoredAccount) float64 {
 		if c.facts.Reading.Status != ReadingObserved {
-			return 0
+			return maxReported
 		}
 		if w, ok := worstWindow(c.facts.Reading); ok {
 			return w.UsedPercent
@@ -691,10 +693,8 @@ func orderCandidates(eligible []scoredAccount, cfg config.AccountHandoffConfig) 
 		if ta, tb := tier(a), tier(b); ta != tb {
 			return ta < tb
 		}
-		if a.facts.Reading.Status == ReadingObserved && b.facts.Reading.Status == ReadingObserved {
-			if pa, pb := percentKey(a), percentKey(b); pa != pb {
-				return pa < pb
-			}
+		if pa, pb := percentKey(a), percentKey(b); pa != pb {
+			return pa < pb
 		}
 		oa := a.facts.Occupancy + a.facts.RecentMoveCredits
 		ob := b.facts.Occupancy + b.facts.RecentMoveCredits

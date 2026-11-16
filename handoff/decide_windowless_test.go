@@ -138,14 +138,11 @@ func TestOrderCandidatesWindowlessObservedDoesNotWinAsZeroPercent(t *testing.T) 
 	})
 
 	t.Run("a windowless Observed reading orders the same as a no-reading account", func(t *testing.T) {
-		// The percent branch only fires when BOTH sides are ReadingObserved,
-		// so a windowless Observed vs a ReadingNone candidate already fell
-		// through to occupancy/listed order before the fix. After the fix a
-		// windowless Observed reading is keyed to the batch's highest
-		// reported percent, so versus a no-reading account (still outside
-		// the percent branch) it still falls through to occupancy/listed
-		// order — no phantom 0% comparison either way. Pin both listings
-		// to confirm there is no regression and the two shapes are peers.
+		// With neither a reported window in the batch, maxReported is 0,
+		// so a windowless Observed reading and a ReadingNone candidate
+		// both key to 0 and fall through to occupancy/listed order — no
+		// phantom 0% comparison either way. Pin both listings to
+		// confirm there is no regression and the two shapes are peers.
 		noReading := ReadingFacts{Status: ReadingNone}
 		want(t, order(
 			blind("blind"),
@@ -155,6 +152,27 @@ func TestOrderCandidatesWindowlessObservedDoesNotWinAsZeroPercent(t *testing.T) 
 			AccountFacts{Name: "none", Registered: true, Reading: noReading},
 			blind("blind"),
 		), "none", "blind")
+	})
+
+	t.Run("a no-reading candidate does not form a transitivity cycle with reported and windowless ones", func(t *testing.T) {
+		// The comparator applies one per-candidate percentKey to every
+		// same-tier candidate rather than only when both sides are
+		// ReadingObserved. Without that, a no-reading candidate skipped
+		// the percent branch, so reported/windowless pairs used percent
+		// while pairs involving no-reading used listed order — a cycle:
+		// 50% < windowless < none < 10% by listed order, but 10% < 50%
+		// by percent, so sort.SliceStable could leave 50% first. After
+		// the fix no-reading is keyed to maxReported (50%), tying the
+		// worst reported candidate, so percent decides: 10% < 50% =
+		// windowless = none, then listed order. Decide picks 10%.
+		noReading := ReadingFacts{Status: ReadingNone}
+		got := order(
+			AccountFacts{Name: "fifty", Registered: true, Reading: partialReading(50, future())},
+			blind("blind"),
+			AccountFacts{Name: "none", Registered: true, Reading: noReading},
+			AccountFacts{Name: "ten", Registered: true, Reading: partialReading(10, future())},
+		)
+		want(t, got, "ten", "fifty", "blind", "none")
 	})
 }
 
