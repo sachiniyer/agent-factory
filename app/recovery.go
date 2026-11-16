@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,11 +15,27 @@ import (
 type recoveryNotice struct{ condition, detail, action string }
 
 func (m *home) showRecovery(condition, detail, action string, err error) tea.Cmd {
-	if m.leavingProject() {
-		// A failure for the project the user is leaving raises no modal: it
-		// would hold the screen while keys are held for the switch, then sit
-		// over the next project once it commits (#7379). The bar says it.
-		return m.handleError(fmt.Errorf("%s — %s", condition, detail))
+	return m.showSessionRecovery("", m.repoID, m.repoRoot, condition, detail, action, err)
+}
+
+// showSessionRecovery is showRecovery for a failed action on the session titled
+// title, which ran in the project repoID (rooted at repoRoot when it began). A
+// failure for a project the user is leaving (#7379) or has left (#7381) raises
+// no modal: it would hold the screen while keys are held for a switch, or sit
+// over a project it is not about. The bar says it instead, naming the session
+// and the project the action ran in — never the one on screen, which may be a
+// later project still loading or already committed.
+func (m *home) showSessionRecovery(title, repoID, repoRoot, condition, detail, action string, err error) tea.Cmd {
+	if m.leavingProject() || repoID != m.repoID {
+		root := repoRoot
+		if repoID == m.repoID {
+			root = m.repoRoot
+		}
+		project := "another project"
+		if root != "" {
+			project = filepath.Base(root)
+		}
+		return m.handleError(elsewhereFailure(condition, title, project, detail))
 	}
 	m.recovery = &recoveryNotice{condition, detail, action}
 	// The recovery overlay is a stateless modal — it never changes m.state — so
@@ -31,6 +48,16 @@ func (m *home) showRecovery(condition, detail, action string, err error) tea.Cmd
 	m.lastClickZone = ""
 	m.lastClickAt = time.Time{}
 	return m.handleError(err)
+}
+
+// elsewhereFailure is the bar's report of an action that failed in a project the
+// user is not looking at: the recovery screen's condition and detail, plus the
+// session and project the screen would have been showing over.
+func elsewhereFailure(condition, title, project, detail string) error {
+	if title == "" {
+		return fmt.Errorf("%s in %s — %s", condition, project, detail)
+	}
+	return fmt.Errorf("%s %q in %s — %s", condition, title, project, detail)
 }
 
 // restoreFailedCreate reopens the captured draft, never a newer form. A user

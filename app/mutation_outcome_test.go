@@ -48,7 +48,7 @@ func TestInstanceStarted_UncertainCreateDoesNotReArmDraft(t *testing.T) {
 	h.sidebar.SelectInstance(inst)
 	req := sessionStartRequest{Title: inst.Title, RepoPath: h.repoRoot, Program: "claude", Prompt: "p"}
 
-	_, _ = h.Update(instanceStartedMsg{instance: inst, draft: &req, rawPrompt: "p", err: replyLost()})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, draft: &req, rawPrompt: "p", err: replyLost()})
 
 	require.Nil(t, h.failedCreate, "an uncertain create must not be kept as a draft for the next create to reopen")
 	require.Nil(t, h.namingInstance, "the naming form must not reopen")
@@ -70,7 +70,7 @@ func TestInstanceStarted_NeverSentCreateStillReArmsDraft(t *testing.T) {
 	h.sidebar.SelectInstance(inst)
 	req := sessionStartRequest{Title: inst.Title, RepoPath: h.repoRoot, Program: "claude", Prompt: "p"}
 
-	_, _ = h.Update(instanceStartedMsg{instance: inst, draft: &req, rawPrompt: "p", err: neverSent()})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, draft: &req, rawPrompt: "p", err: neverSent()})
 
 	// restoreFailedCreate consumes failedCreate as it re-arms the form, so the
 	// form itself is the evidence.

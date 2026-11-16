@@ -191,6 +191,7 @@ func TestRestoredDraftKeepsSelectionBesideTheSessionItCollidesWith(t *testing.T)
 
 	req := sessionStartRequest{Title: "delta", RepoPath: h.repoRoot}
 	_, _ = h.Update(instanceStartedMsg{
+		repoID:   h.repoID,
 		instance: placeholder, draft: &req,
 		err: errors.New(`a session titled "delta" already exists`),
 	})

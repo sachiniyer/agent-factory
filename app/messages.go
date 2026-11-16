@@ -141,6 +141,12 @@ type runOnEventLoopMsg struct {
 }
 
 type instanceStartedMsg struct {
+	// repoID and repoRoot name the project the create was submitted in, read on
+	// the event loop at submit. Its reply is applied to that project only: one
+	// that lands after the TUI switched elsewhere never touches the store, which
+	// by then holds another project's rows (#7381).
+	repoID    string
+	repoRoot  string
 	draft     *sessionStartRequest
 	rawPrompt string
 	instance  *session.Instance

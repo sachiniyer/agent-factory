@@ -283,6 +283,8 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// would race a sibling parallel test's swap (the #960 PR 4 snapshot-race
 		// class). Reading it here pins the value for this cmd.
 		start := startSessionThroughDaemon
+		// The project this create belongs to, read here for the same reason.
+		repoID, repoRoot := m.repoID, m.repoRoot
 		startCmd := func() tea.Msg {
 			req := sessionStartRequest{
 				Title:    instance.Title,
@@ -312,6 +314,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			started, err := start(instance, req)
 			return instanceStartedMsg{
+				repoID: repoID, repoRoot: repoRoot,
 				draft: &req, rawPrompt: rawPrompt,
 				instance: instance,
 				started:  started,

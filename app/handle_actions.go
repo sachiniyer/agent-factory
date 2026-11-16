@@ -184,7 +184,7 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	// while the modal is open, so every later phase resolves this target instead
 	// of whichever current row happens to carry the display title (#2358).
 	selectedTitle := selected.Title
-	target := captureSessionActionTarget(selected, m.repoID)
+	target := m.captureProjectActionTarget(selected)
 
 	// Runs synchronously in the confirmation overlay's OnConfirm, on the
 	// event loop — keep it fast. Raising the optimistic OpKilling op here (not in
@@ -334,7 +334,7 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 			return m, m.handleError(mutationOutcomeError(
 				fmt.Sprintf("killing session '%s'", msg.target.title), "the sidebar", msg.err))
 		}
-		return m, m.showRecovery("Cannot kill session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to kill session '%s': %w", msg.target.title, msg.err))
+		return m, m.showSessionRecovery(msg.target.title, msg.target.repoID, msg.target.repoRoot, "Cannot kill session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to kill session '%s': %w", msg.target.title, msg.err))
 	}
 
 	// A refresh may already have removed the row, or replaced it with a new
@@ -369,7 +369,7 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	title := selected.Title
-	target := captureSessionActionTarget(selected, m.repoID)
+	target := m.captureProjectActionTarget(selected)
 
 	// A resting (Archived/Lost/Dead) row has no live worktree/tmux to tear down;
 	// `a` does nothing. Restore is on its own key now (`r`).
@@ -519,7 +519,7 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 			return m, m.handleError(mutationOutcomeError(
 				fmt.Sprintf("archiving session '%s'", msg.target.title), "the sidebar", msg.err))
 		}
-		return m, m.showRecovery("Cannot archive session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to archive session '%s': %w", msg.target.title, msg.err))
+		return m, m.showSessionRecovery(msg.target.title, msg.target.repoID, msg.target.repoRoot, "Cannot archive session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to archive session '%s': %w", msg.target.title, msg.err))
 	}
 	if inst != nil {
 		// SetArchived is an unconditional projection-mirror: it copies the

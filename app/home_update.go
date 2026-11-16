@@ -426,6 +426,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleRemoteDefault(msg) })
 	case instanceStartedMsg:
+		// A create that answers after the TUI switched away from its project is
+		// applied to that project, not this one (#7381).
+		if msg.repoID != m.repoID {
+			return m.handleCreateInOtherProject(msg)
+		}
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them. A
 		// pending project switch is the user leaving this project, whatever is
@@ -482,7 +487,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				detail += " The next create in " + where + " reopens the failed draft."
 				action = "Press any key to continue."
 			}
-			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged(), restoreCmd)
+			return m, tea.Batch(m.showSessionRecovery(msg.instance.Title, msg.repoID, msg.repoRoot, "Cannot create session", detail, action, msg.err), m.selectionChanged(), restoreCmd)
 		}
 
 		started := msg.instance

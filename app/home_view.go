@@ -12,6 +12,23 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
+// fullScreenRecovery renders a recovery screen over the whole frame, status bar
+// included. While a project switch is pending its loading line keeps the bottom
+// row: keys are held, and nothing else on screen would say why or that Esc
+// cancels (#7381).
+func (m *home) fullScreenRecovery(condition, detail, action string) string {
+	frame := layout.Rect{W: m.termWidth, H: m.termHeight}
+	loading := m.projectSwitchLoadingLine()
+	if loading == "" || frame.H < 2 {
+		return ui.RecoveryScreen(frame, condition, detail, action, true)
+	}
+	frame.H--
+	line := ui.NewErrBox()
+	line.SetSize(frame.W, 1)
+	line.SetPinned(loading)
+	return layout.JoinVertical(ui.RecoveryScreen(frame, condition, detail, action, true), line.String())
+}
+
 func (m *home) handleError(err error) tea.Cmd {
 	log.ErrorLog.Printf("%v", err)
 	if err == nil {
@@ -175,13 +192,12 @@ func (m *home) View() string {
 	}
 
 	if m.recovery != nil {
-		return ui.RecoveryScreen(layout.Rect{W: m.termWidth, H: m.termHeight}, m.recovery.condition, m.recovery.detail, m.recovery.action, true)
+		return m.fullScreenRecovery(m.recovery.condition, m.recovery.detail, m.recovery.action)
 	}
 
 	if m.snapshotUnavailable && m.state == stateDefault {
-		return ui.RecoveryScreen(layout.Rect{W: m.termWidth, H: m.termHeight},
-			"Cannot reach the daemon", "Previous sessions are retained · retrying automatically.",
-			"Check the daemon connection.", true)
+		return m.fullScreenRecovery("Cannot reach the daemon", "Previous sessions are retained · retrying automatically.",
+			"Check the daemon connection.")
 	}
 
 	// The left rail stacks the tree over the bottom-aligned automations

@@ -20,6 +20,10 @@ type sessionActionTarget struct {
 	title     string
 	repoID    string
 	createdAt time.Time
+	// repoRoot is the project's root when the action began, for display only —
+	// it is not part of the identity. A failure that lands after the TUI left
+	// that project names it from here (#7381); empty where no report needs it.
+	repoRoot string
 }
 
 func captureSessionActionTarget(inst *session.Instance, repoID string) sessionActionTarget {
@@ -27,6 +31,15 @@ func captureSessionActionTarget(inst *session.Instance, repoID string) sessionAc
 		id: inst.ID, title: inst.Title, repoID: repoID,
 		createdAt: inst.CreatedAt,
 	}
+}
+
+// captureProjectActionTarget is captureSessionActionTarget for an action whose
+// failure may be reported after the TUI left the project: it also records the
+// project's root, so that report can name it.
+func (m *home) captureProjectActionTarget(inst *session.Instance) sessionActionTarget {
+	target := captureSessionActionTarget(inst, m.repoID)
+	target.repoRoot = m.repoRoot
+	return target
 }
 
 func (target sessionActionTarget) isZero() bool {

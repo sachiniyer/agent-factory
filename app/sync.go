@@ -347,7 +347,8 @@ func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, []
 // reply.
 //
 // Each attempt is bounded by switchSnapshotFetchTimeout, and an attempt that
-// hits it returns a daemonNoAnswerError rather than the transport's text. ctx
+// hits it returns a daemonNoAnswerError rather than the transport's text —
+// unless the daemon answered "starting", which is warming, not silence. ctx
 // ends the whole wait: a cancelled ctx returns ctx.Err() promptly, between
 // attempts or during one. It blocks for as long as the daemon warms, so it
 // must never run on the bubbletea event loop (#7377): cold start calls it
@@ -377,10 +378,14 @@ func fetchSnapshotWaitingOutWarmup(
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
-		if timedOut {
+		// Classify by the daemon's reply before the clock (#7381): an attempt
+		// whose daemon answered "starting" is warming, even if its deadline
+		// fired too.
+		warming := daemon.IsDaemonStartingErr(err)
+		if timedOut && !warming {
 			return nil, nil, &daemonNoAnswerError{within: switchSnapshotFetchTimeout, err: err}
 		}
-		if !daemon.IsDaemonStartingErr(err) {
+		if !warming {
 			return nil, nil, err
 		}
 		if !announced && onWarming != nil {

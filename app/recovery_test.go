@@ -95,7 +95,7 @@ func TestRecoveryDriverScenes(t *testing.T) {
 					h.store.AddInstance(inst)
 					h.sidebar.SelectInstance(inst)
 					req := sessionStartRequest{Title: inst.Title, RepoPath: h.repoRoot, Program: "claude", Prompt: "Keep my prompt", Backend: "local", Account: "work", ProgramChosen: true, AccountChosen: true}
-					_, _ = h.Update(instanceStartedMsg{instance: inst, draft: &req, rawPrompt: " Keep my prompt\n", err: errors.New("The daemon refused this create.")})
+					_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: inst, draft: &req, rawPrompt: " Keep my prompt\n", err: errors.New("The daemon refused this create.")})
 					require.Same(t, inst, h.namingInstance)
 					require.Equal(t, " Keep my prompt\n", h.pendingPrompt)
 					require.Equal(t, "work", h.pendingAccount)
@@ -199,7 +199,7 @@ func TestRecoveryRetainsFailedCreateWhileAnotherFormIsOpen(t *testing.T) {
 	h.state = stateNew
 	h.pendingPrompt = "new draft"
 	req := sessionStartRequest{Title: failed.Title, RepoPath: h.repoRoot, Program: "claude"}
-	_, _ = h.Update(instanceStartedMsg{instance: failed, draft: &req, rawPrompt: "old draft", err: errors.New("rejected")})
+	_, _ = h.Update(instanceStartedMsg{repoID: h.repoID, instance: failed, draft: &req, rawPrompt: "old draft", err: errors.New("rejected")})
 	require.Same(t, newer, h.namingInstance)
 	require.Equal(t, "new draft", h.pendingPrompt)
 	require.NotNil(t, h.failedCreate)
