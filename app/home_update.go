@@ -363,19 +363,28 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// instead of waiting out paneCaptureMinInterval (#1088 — the
 		// single-pane path was unthrottled and repainted instantly).
 		m.lastPaneCapture = make(map[int]time.Time)
-		cmd := m.selectionChanged()
+		cmd, dispatchedCapture := m.selectionChangedCmds()
 		detachTraceMark("repaintAfterDetachMsg-handler-exit")
-		// The watchdog armed in attachOverlayCallback is ended when the
-		// post-detach paint completes (panesRefreshedMsg). That msg is only
-		// emitted by refreshPanesCmd, which selectionChanged dispatches only
-		// for visible open panes. With no pane to refresh — an empty
-		// workspace, or every pane pruned while the user was attached — no
-		// panesRefreshedMsg ever arrives, and the watchdog would fire a
-		// spurious goroutine dump after slowDetachThreshold even though there
-		// was nothing to paint. Cancel it here: a nil cmd, or a cmd carrying
-		// only non-capture work, means the detach already
-		// completed everything it was going to paint (#683 class).
-		if cmd == nil || len(m.visiblePanes) == 0 {
+		// The watchdog armed in attachOverlayCallback is normally ended when
+		// the post-detach paint completes (panesRefreshedMsg). That msg is
+		// only emitted by refreshPaneBindingCmd, which selectionChanged
+		// dispatches only for visible open panes NOT rendered through a live
+		// termpane attachment. With no pane to refresh — an empty workspace,
+		// every pane pruned while the user was attached (#683), or every
+		// visible pane live-skipped because the queued post-detach
+		// previewTickMsg's syncLiveTermPane re-bound a live attachment to
+		// each of them (#1089) — no panesRefreshedMsg ever arrives, and the
+		// watchdog would fire a spurious goroutine dump after
+		// slowDetachThreshold even though there was nothing to capture.
+		// Cancel it here: a nil cmd, no visible panes, OR a panesRefresh
+		// that dispatched no capture work means the detach already completed
+		// everything it was going to paint. The last clause covers the case
+		// the prior guard missed — a non-nil cmd whose only payload is a
+		// non-capture notice timer from updatePanePreview's already-open-tab
+		// branch (consumePaneAutoHideStatus); tea.Batch collapses that down
+		// to the timer itself so the old cmd==nil / len==0 checks did not
+		// fire and the watchdog stayed armed to dump at 2s (#4020).
+		if cmd == nil || len(m.visiblePanes) == 0 || !dispatchedCapture {
 			endDetachWatchdog()
 		}
 		return m, cmd
@@ -777,14 +786,16 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			if m.panePreviewTxn != nil {
 				m.suppressActivePanePreview()
 				m.cancelPanePreview(true)
-				return m, m.panesRefresh(m.attached.Load())
+				refresh, _ := m.panesRefresh(m.attached.Load())
+				return m, refresh
 			}
 			return m, m.selectionChanged()
 		}
 		if m.panePreviewTxn != nil {
 			m.suppressActivePanePreview()
 			m.cancelPanePreview(true)
-			return m, m.panesRefresh(m.attached.Load())
+			refresh, _ := m.panesRefresh(m.attached.Load())
+			return m, refresh
 		}
 	}
 

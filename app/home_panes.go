@@ -24,6 +24,23 @@ import (
 // reads it. Synchronous fields touched here (selection binding, menu state)
 // stay on the event loop.
 func (m *home) selectionChanged() tea.Cmd {
+	cmd, _ := m.selectionChangedCmds()
+	return cmd
+}
+
+// selectionChangedCmds is the body of selectionChanged, returning the batched
+// cmd (preview/notice + pane refresh) and whether panesRefresh actually
+// dispatched any capture work — false when called while attached, when every
+// visible pane is rendered through a live termpane attachment, or when the
+// per-pane throttle swallowed every pane. The bool is what the post-detach
+// repaint handler (repaintAfterDetachMsg) needs to honor the watchdog-disarm
+// contract its comment has always stated ("a cmd carrying only non-capture
+// work"): a non-nil batch whose only real work is a non-capture notice timer —
+// the all-live-panes case, where panesRefresh skipped every pane (#1089 live
+// termpane skip) and dispatched nothing — must STILL end the slow-detach
+// watchdog, because no panesRefreshedMsg will ever arrive to do it (#683,
+// #4020). selectionChanged drops the bool; no other caller needs it.
+func (m *home) selectionChangedCmds() (tea.Cmd, bool) {
 	defer m.syncScrollHint()
 	selectionStart := time.Now()
 	detachTraceMark("selectionChanged-entry")
@@ -82,7 +99,8 @@ func (m *home) selectionChanged() tea.Cmd {
 		}
 	}
 
-	return tea.Batch(previewCmd, m.panesRefresh(attachedNow))
+	refresh, dispatchedCapture := m.panesRefresh(attachedNow)
+	return tea.Batch(previewCmd, refresh), dispatchedCapture
 }
 
 // selectionPaneTab is the tab of the cursor's instance that the workspace is
@@ -152,9 +170,16 @@ func (m *home) maybeAutoOpenInitialPane(selected *session.Instance) {
 const paneCaptureMinInterval = 100 * time.Millisecond
 
 // panesRefresh keeps the open-pane list coherent and returns the visible
-// panes' throttled capture cmds (nil when there is nothing to do). Runs on
-// the event loop (#1088, generalizing the PR-5 paneBRefresh).
-func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
+// panes' throttled capture cmds (nil when there is nothing to do) and whether
+// it actually dispatched any capture work — false when called while attached,
+// when every visible pane is rendered through a live termpane attachment
+// (#1089's HasLive skip), or when the per-pane throttle swallowed every
+// pane. A false return with visible, open panes means no panesRefreshedMsg
+// will ever arrive: the post-detach watchdog disarm relies on this, because
+// panesRefreshedMsg is the only other thing that ends the armed watchdog
+// (#683 class, #4020). Runs on the event loop (#1088, generalizing the PR-5
+// paneBRefresh).
+func (m *home) panesRefresh(attachedNow bool) (tea.Cmd, bool) {
 	// Prune panes whose instance left the projection (killed here, or
 	// removed by an external kill the snapshot reconcile mirrored) rather
 	// than keep rendering a dead session's last capture.
@@ -165,7 +190,7 @@ func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
 	// behind the user's detach key. Auto-hidden panes don't capture either —
 	// they are invisible.
 	if attachedNow {
-		return nil
+		return nil, false
 	}
 	var cmds []tea.Cmd
 	for _, p := range m.visiblePanes {
@@ -212,7 +237,7 @@ func (m *home) panesRefresh(attachedNow bool) tea.Cmd {
 		binding, seq := m.renderBindingForPane(p)
 		cmds = append(cmds, refreshPaneBindingCmd(w, binding.instance, binding.tab, seq))
 	}
-	return tea.Batch(cmds...)
+	return tea.Batch(cmds...), len(cmds) > 0
 }
 
 // focusedContentPane resolves which content pane scroll/attach keys act on:

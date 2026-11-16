@@ -326,7 +326,8 @@ func TestPanePreviewRetargetHonorsCaptureThrottle(t *testing.T) {
 	h.updatePanePreview(beta, 0, false, false)
 	assert.Equal(t, recent, h.lastPaneCapture[paneA.ID()],
 		"arrowing to a new preview must not bypass the per-pane capture cadence")
-	assert.Nil(t, h.panesRefresh(false),
+	cmd, _ := h.panesRefresh(false)
+	assert.Nil(t, cmd,
 		"a selection inside the 100ms window must reuse the next scheduled refresh")
 }
 
@@ -1265,8 +1266,10 @@ func TestPane_CaptureThrottled(t *testing.T) {
 	require.Equal(t, 1, h.lastLayout.PaneCount())
 
 	h.lastPaneCapture = make(map[int]time.Time)
-	require.NotNil(t, h.panesRefresh(false), "an aged throttle admits the capture")
-	assert.Nil(t, h.panesRefresh(false),
+	captureCmd, _ := h.panesRefresh(false)
+	require.NotNil(t, captureCmd, "an aged throttle admits the capture")
+	throttledCmd, _ := h.panesRefresh(false)
+	assert.Nil(t, throttledCmd,
 		"a second dispatch inside paneCaptureMinInterval must be swallowed")
 }
 
