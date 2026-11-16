@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,5 +116,73 @@ func TestListProjects_BoundsAWedgedRootStat(t *testing.T) {
 		assert.Equal(t, registered.ID, r.projects[0].ID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("ListProjects did not return: a registered project on a wedged mount parked the registry read on the event loop")
+	}
+}
+
+// TestListProjects_BoundsAcrossManyWedgedRoots pins the registry-read
+// concurrency bound: when several DISTINCT registered roots are each on a
+// stalled mount, the per-root stats run concurrently so the whole read is
+// bounded by one fsprobe flight deadline rather than N× it. A sequential
+// implementation would consume the full bound per root — six wedged roots at
+// an 80 ms bound would take ~480 ms — so completing well inside that proves
+// the stats overlapped. Each wedged root fails closed to "present" exactly as
+// a single wedged root does.
+func TestListProjects_BoundsAcrossManyWedgedRoots(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+
+	const wedged = 6
+	roots := make([]string, wedged)
+	for i := 0; i < wedged; i++ {
+		roots[i] = initProjectRegistryRepo(t, filepath.Join(base, "checkout", fmt.Sprintf("r%d", i)))
+		_, err := RegisterProject(roots[i])
+		require.NoError(t, err)
+	}
+
+	// Wedge the stat for every registered root at once: a single seam blocks
+	// any of them, the way several roots on the same stalled mount never
+	// answer. Per-flight bound is 80 ms, so a sequential read would take
+	// ~480 ms while a concurrent read takes ~80 ms.
+	release := make(chan struct{})
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(80 * time.Millisecond)
+	t.Cleanup(func() {
+		close(release)
+		time.Sleep(80 * time.Millisecond)
+		restoreTimeout()
+	})
+	t.Cleanup(fsprobe.SetStatPathForTest(func(path string) (os.FileInfo, error) {
+		for _, root := range roots {
+			if path == root || (len(path) > len(root) && path[len(root)] == filepath.Separator && path[:len(root)] == root) {
+				<-release
+				return nil, os.ErrNotExist
+			}
+		}
+		return os.Stat(path)
+	}))
+
+	type result struct {
+		projects []Project
+		err      error
+		elapsed  time.Duration
+	}
+	done := make(chan result, 1)
+	go func() {
+		start := time.Now()
+		ps, err := ListProjects()
+		done <- result{projects: ps, err: err, elapsed: time.Since(start)}
+	}()
+
+	select {
+	case r := <-done:
+		require.NoError(t, r.err, "the registry enumerates fine; only the per-root stats are wedged")
+		require.Len(t, r.projects, wedged, "every wedged-root project keeps its row")
+		for _, p := range r.projects {
+			assert.True(t, p.PathExists,
+				"a wedged stat fails closed to present, so the project does not vanish from the switcher union")
+		}
+		require.Less(t, r.elapsed, 250*time.Millisecond,
+			"distinct wedged roots were stat sequentially and parked the registry read on the event loop (took %s)", r.elapsed)
+	case <-time.After(2 * time.Second):
+		t.Fatal("ListProjects did not return: distinct wedged roots parked the registry read on the event loop")
 	}
 }

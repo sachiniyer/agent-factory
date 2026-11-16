@@ -578,13 +578,22 @@ func newOpaqueID(prefix string) (string, error) {
 }
 
 func projectFromRecord(record projectRecord) Project {
+	return projectFromRecordWithExists(record, projectPathExists(record.Root))
+}
+
+// projectFromRecordWithExists is projectFromRecord with the root-existence
+// verdict supplied by the caller, so a registry read that has already bounded
+// the per-root stats concurrently (projectsFromRecords) can reuse the same
+// record→Project mapping without re-statting. Single-record callers keep
+// projectFromRecord, which stats through the bounded flight itself.
+func projectFromRecordWithExists(record projectRecord, exists bool) Project {
 	return Project{
 		ID:           record.ID,
 		CheckoutID:   record.CheckoutID,
 		Root:         record.Root,
 		RelativeRoot: record.RelativeRoot,
 		RepoID:       record.RepoID,
-		PathExists:   projectPathExists(record.Root),
+		PathExists:   exists,
 		Color:        loadProjectColor(record.ID),
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/sachiniyer/agent-factory/internal/hostlayout"
 )
@@ -31,13 +32,7 @@ func ListProjects() ([]Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	projects := make([]Project, 0, len(records))
-	for _, record := range records {
-		p := projectFromRecord(record)
-		hostlayout.Default.Note(p.Root)
-		projects = append(projects, p)
-	}
-	return projects, nil
+	return projectsFromRecords(records), nil
 }
 
 // projectRegistryDirPresent follows the registry path so a dangling symlink is
@@ -85,12 +80,7 @@ func ListProjectsDetailed() ([]Project, []ProjectRecordFailure, []string, bool, 
 	if err != nil {
 		return nil, nil, nil, true, err
 	}
-	projects := make([]Project, 0, len(records))
-	for _, record := range records {
-		p := projectFromRecord(record)
-		hostlayout.Default.Note(p.Root)
-		projects = append(projects, p)
-	}
+	projects := projectsFromRecords(records)
 	if len(projects) == 0 && len(failures) == 0 && len(strays) == 0 {
 		present, err = projectRegistryDirPresent(dir)
 		if err != nil {
@@ -101,6 +91,43 @@ func ListProjectsDetailed() ([]Project, []ProjectRecordFailure, []string, bool, 
 		}
 	}
 	return projects, failures, strays, true, nil
+}
+
+// projectsFromRecords builds Project values for every record, running the
+// per-root existence stat CONCURRENTLY so the registry read's latency is
+// bounded by one fsprobe flight deadline rather than N. ListProjects is the
+// read buildProjectListFromCounted performs synchronously on the bubbletea
+// event loop; when several registered roots sit on the same stalled
+// NFS/FUSE/sshfs mount, a sequential per-record projectPathExists would start
+// a separate fsprobe flight for each and consume the full bound per root
+// before the later resolve work even begins — ten affected projects park
+// input, repaint and Ctrl+C for ~20 s. Running the stats concurrently makes
+// the registry read's worst case one bounded flight (the per-dir flight
+// registry already joins duplicate roots onto a single worker), independent of
+// project count. A non-answer for any root is not determinate absence, so its
+// row keeps PathExists=true exactly as a sequential read would report.
+//
+// loadProjectColor stays sequential: it reads a sidecar inside the registry
+// directory (a local path this process owns), not the recorded root, so it is
+// not on a wedged user mount and need not join the bounded flights.
+func projectsFromRecords(records []projectRecord) []Project {
+	exists := make([]bool, len(records))
+	var wg sync.WaitGroup
+	for i := range records {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			exists[i] = projectPathExists(records[i].Root)
+		}(i)
+	}
+	wg.Wait()
+	projects := make([]Project, 0, len(records))
+	for i, record := range records {
+		p := projectFromRecordWithExists(record, exists[i])
+		hostlayout.Default.Note(p.Root)
+		projects = append(projects, p)
+	}
+	return projects
 }
 
 // ProjectRecordFailure names one registry entry that could not be used: its
