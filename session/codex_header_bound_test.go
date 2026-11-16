@@ -27,12 +27,14 @@ import (
 // header answers.
 
 // standInCodexRolloutOpen replaces the open behind every rollout header read
-// with stand, which is handed the real open, until the test ends.
+// with stand, which is handed the open it replaces, until the test ends.
 func standInCodexRolloutOpen(t *testing.T, stand func(open func(string) (*os.File, error), path string) (*os.File, error)) {
 	t.Helper()
-	real := openCodexRollout
-	openCodexRollout = func(path string) (*os.File, error) { return stand(real, path) }
-	t.Cleanup(func() { openCodexRollout = real })
+	prev := codexRolloutOpenStandIn.Load()
+	open := codexRolloutHeaderOpen()
+	standIn := func(path string) (*os.File, error) { return stand(open, path) }
+	codexRolloutOpenStandIn.Store(&standIn)
+	t.Cleanup(func() { codexRolloutOpenStandIn.Store(prev) })
 }
 
 // stallCodexRolloutOpens makes every open of a rollout for which match is true
@@ -264,4 +266,31 @@ func TestCodexCarryRefusesWhenTheRepairsHeaderReadDoesNotAnswer(t *testing.T) {
 
 	stallCodexRolloutOpens(t, rolloutNamed(filepath.Base(recorded)))
 	require.NotEmpty(t, withinBound(t, inst.AccountSwapCarryRefusal), "a repair af could not read is not carried")
+}
+
+// set-conversation reads the rollout's header to validate the repair. A read
+// that does not answer refuses the repair, and the refusal names the mount, as
+// a directory that did not resolve does, not a header "missing or incomplete"
+// (#7370 review R6).
+func TestValidateSettableConversationNamesTheMountWhenTheHeaderReadDoesNotAnswer(t *testing.T) {
+	setConversationConfig(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	workDir := t.TempDir()
+	name := "rollout-2026-07-06T10-17-35-" + setConversationID + ".jsonl"
+	writeCodexRolloutFileWithCwd(t, codexHome, name, workDir)
+	inst := setConversationInstance(t, workDir)
+	_, err := ValidateSettableConversation(inst, setConversationID)
+	require.NoError(t, err, "precondition: the repair validates")
+
+	stallCodexRolloutOpens(t, rolloutNamed(name))
+	err = withinBound(t, func() error {
+		_, err := ValidateSettableConversation(inst, setConversationID)
+		return err
+	})
+	require.Error(t, err)
+	require.True(t, errors.Is(err, fsprobe.ErrProbeTimedOut), "the refusal carries the bounded read's non-answer: %v", err)
+	require.Contains(t, err.Error(), "its filesystem did not answer")
+	require.Contains(t, err.Error(), "then retry")
+	require.NotContains(t, err.Error(), "missing or incomplete")
 }

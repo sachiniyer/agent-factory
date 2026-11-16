@@ -316,17 +316,20 @@ func TestCodexRolloutStoredAt(t *testing.T) {
 	}
 
 	t.Run("the line's UTC stamp, not the earlier construction stamp", func(t *testing.T) {
-		got, ok := codexRolloutStoredAt(write(t, meta("2026-11-11T21:50:10.432Z", "2026-11-11T21:40:00.000Z")))
+		got, ok, err := codexRolloutStoredAt(write(t, meta("2026-11-11T21:50:10.432Z", "2026-11-11T21:40:00.000Z")))
+		require.NoError(t, err)
 		require.True(t, ok)
 		require.True(t, got.Equal(stored), "got %s", got.UTC())
 	})
 	t.Run("an offset stamp is the same instant", func(t *testing.T) {
-		got, ok := codexRolloutStoredAt(write(t, meta("2026-11-11T13:50:10.432-08:00", "")))
+		got, ok, err := codexRolloutStoredAt(write(t, meta("2026-11-11T13:50:10.432-08:00", "")))
+		require.NoError(t, err)
 		require.True(t, ok)
 		require.True(t, got.Equal(stored))
 	})
 	t.Run("a payload stamped after its line is never under-dated", func(t *testing.T) {
-		got, ok := codexRolloutStoredAt(write(t, meta("2026-11-11T21:40:00.000Z", "2026-11-11T21:50:10.432Z")))
+		got, ok, err := codexRolloutStoredAt(write(t, meta("2026-11-11T21:40:00.000Z", "2026-11-11T21:50:10.432Z")))
+		require.NoError(t, err)
 		require.True(t, ok)
 		require.True(t, got.Equal(stored))
 	})
@@ -337,16 +340,21 @@ func TestCodexRolloutStoredAt(t *testing.T) {
 		"a header that is not session_meta": `{"type":"event_msg","timestamp":"2026-11-11T21:50:10.432Z"}`,
 	} {
 		t.Run(name+" cannot date it", func(t *testing.T) {
-			_, ok := codexRolloutStoredAt(write(t, line))
+			_, ok, err := codexRolloutStoredAt(write(t, line))
+			require.NoError(t, err, "the header answered")
 			require.False(t, ok)
 		})
 	}
 	t.Run("a rollout stored in the repair's own millisecond is not disregarded", func(t *testing.T) {
 		path := write(t, meta("2026-11-11T21:50:10.432Z", ""))
 		window := operatorRepairWindow{at: stored.Add(500 * time.Microsecond)}
-		require.False(t, window.disregards(path, stored))
+		disregarded, unread := window.disregards(path, stored)
+		require.NoError(t, unread)
+		require.False(t, disregarded)
 		window.at = stored.Add(time.Millisecond)
-		require.True(t, window.disregards(path, stored))
+		disregarded, unread = window.disregards(path, stored)
+		require.NoError(t, unread)
+		require.True(t, disregarded)
 	})
 }
 

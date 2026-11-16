@@ -293,7 +293,8 @@ func TestOperatorRepairWindowVerdicts(t *testing.T) {
 		{"unstamped replaced", "X stored after", between, false},
 	}
 	for _, c := range cases {
-		got := windows[c.window].disregards(paths[c.path], c.modified)
+		got, unread := windows[c.window].disregards(paths[c.path], c.modified)
+		require.NoError(t, unread)
 		require.Equal(t, c.want, got, "%s window, %s, modified %s after the repair", c.window, c.path, c.modified.Sub(at))
 	}
 }

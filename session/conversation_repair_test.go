@@ -184,10 +184,10 @@ func TestUnderDirectoryIdentityMatchesByInode(t *testing.T) {
 	id, ok := fileIdentityOf(sessions)
 	require.True(t, ok)
 
-	require.True(t, underDirectoryIdentity(rollout, id))
+	require.Equal(t, storeInside, underDirectoryIdentity(rollout, id))
 	elsewhere := filepath.Join(t.TempDir(), "rollout.jsonl")
 	require.NoError(t, os.WriteFile(elsewhere, []byte("{}\n"), 0o644))
-	require.False(t, underDirectoryIdentity(elsewhere, id))
+	require.Equal(t, storeOutside, underDirectoryIdentity(elsewhere, id))
 }
 
 // TestExactResumeStillRefusesAnOperatorRepairWhoseRolloutIsGone: the repair's

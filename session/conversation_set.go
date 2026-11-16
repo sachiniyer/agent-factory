@@ -120,8 +120,13 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 		return AgentConversationData{}, fmt.Errorf(
 			"no rollout named %s exists in the session's Codex store at %s — check the id with 'codex resume' there", id, home)
 	}
-	cwd, subagent, ok := codexRolloutSessionMeta(rolloutPath)
+	cwd, subagent, ok, readErr := codexRolloutHeader(rolloutPath)
 	switch {
+	case !ok && codexHeaderReadUnanswered(readErr):
+		// Not a header that is missing or incomplete: af could not look at it
+		// (#7370 review R6).
+		return AgentConversationData{}, fmt.Errorf(
+			"the rollout for %s cannot be read or classified: %s, then retry: %w", id, unresolvedDirRemedy(readErr), readErr)
 	case !ok:
 		return AgentConversationData{}, fmt.Errorf(
 			"the rollout for %s cannot be read or classified (its first session_meta record is missing or incomplete)", id)

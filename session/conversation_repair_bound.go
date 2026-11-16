@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -263,21 +264,29 @@ func launchReplacementInstant(spawnedAt, now time.Time) time.Time {
 // The written-since test needs only the name and the mtime the caller already
 // has, so it runs before the header read it makes unnecessary (#7129 N-5): in
 // a shared home every other worktree's active thread fails it.
-func (w operatorRepairWindow) disregards(path string, modified time.Time) bool {
+//
+// unread is the header read's error when the window needed the read and it did
+// not happen: it failed, or did not answer within its bound. Whether the
+// operator overrode that thread is then unknown, and the caller must not
+// decide it either way (#7370 review R2).
+func (w operatorRepairWindow) disregards(path string, modified time.Time) (disregarded bool, unread error) {
 	if w.at.IsZero() {
-		return false
+		return false, nil
 	}
 	held := w.heldID != "" && codexConversationIDFromPath(path) == w.heldID
 	switch {
 	case !w.replacedAt.IsZero() && modified.After(w.replacedAt):
-		return false
+		return false, nil
 	case held && w.observed:
-		return true
+		return true, nil
 	case w.stamped && !held && modified.After(w.at):
-		return false
+		return false, nil
 	}
-	stored, ok := codexRolloutStoredAt(path)
-	return ok && !stored.Add(codexRolloutStampPrecision).After(w.at)
+	stored, ok, err := codexRolloutStoredAt(path)
+	if err != nil {
+		return false, err
+	}
+	return ok && !stored.Add(codexRolloutStampPrecision).After(w.at), nil
 }
 
 // operatorRepairProvenance re-checks, when a repair is about to be resumed or
@@ -298,8 +307,12 @@ func operatorRepairProvenance(rolloutPath, launchDir string) resumeDecline {
 		return declineResumeUnverified("the operator-recorded conversation's rollout is stored compressed, and af cannot read a compressed rollout to confirm it is this session's own; " +
 			"to resume it, decompress it in place (zstd -d --rm " + strconv.Quote(rolloutPath) + ") and run af sessions set-conversation again")
 	}
-	cwd, subagent, ok := codexRolloutSessionMeta(rolloutPath)
+	cwd, subagent, ok, readErr := codexRolloutHeader(rolloutPath)
 	switch {
+	case !ok && codexHeaderReadUnanswered(readErr):
+		// A header read that did not answer is a look that did not happen,
+		// like a directory lookup that did not (#7370 review R3).
+		return declineResumeUnverified(operatorRepairHeaderUnansweredReason)
 	case !ok:
 		return declineResumeUnverified("af could not read the operator-recorded conversation's session metadata to confirm it is this session's own")
 	case subagent:
@@ -328,6 +341,19 @@ func operatorRepairProvenance(rolloutPath, launchDir string) resumeDecline {
 // since most failures are not one (#7297 review R1).
 const operatorRepairUnresolvedReason = "af could not look up the operator-recorded conversation's directory and this session's, so it cannot confirm it is this session's own"
 
+// operatorRepairHeaderUnansweredReason is operatorRepairProvenance's refusal
+// when the repaired rollout's header read did not answer within its bound.
+const operatorRepairHeaderUnansweredReason = "the filesystem holding the operator-recorded conversation's rollout did not answer when af read its session metadata, so af cannot confirm it is this session's own"
+
+// provenanceUnanswered reports whether d is operatorRepairProvenance's refusal
+// for a lookup that did not happen: a directory lookup that did not answer or
+// failed, or a header read that did not answer. It is no answer about the
+// repair, so the restore resumes it and the carry refuses (#7287 review R5,
+// #7370 review R3). Every other provenance refusal answered.
+func (d resumeDecline) provenanceUnanswered() bool {
+	return d.reason == operatorRepairUnresolvedReason || d.reason == operatorRepairHeaderUnansweredReason
+}
+
 // codexRolloutStoredAt is the instant a rollout entered the store: the
 // session_meta LINE's own timestamp. Codex's recorder dates a new thread when
 // it constructs it — that reading names the file and day directory and is the
@@ -345,12 +371,18 @@ const operatorRepairUnresolvedReason = "af could not look up the operator-record
 // designator, so a stamp without one is refused rather than read as UTC. The
 // filename and day directory carry the construction reading in the
 // recorder's LOCAL time with no offset and are never read. A rollout with no
-// datable line is reported undatable, which the caller reads as "may have
-// appeared after the repair".
-func codexRolloutStoredAt(path string) (time.Time, bool) {
+// datable line is reported undatable (ok false, err nil), which the caller
+// reads as "may have appeared after the repair". A header af could not read at
+// all — the read failed, or did not answer within its bound — is no answer
+// about the date, and is reported as err.
+func codexRolloutStoredAt(path string) (stored time.Time, ok bool, err error) {
 	line, err := readCodexRolloutFirstLine(path)
-	if err != nil {
-		return time.Time{}, false
+	switch {
+	case errors.Is(err, errCodexSessionMetaOverBound):
+		// Read, just too large to judge: answered, and undatable.
+		return time.Time{}, false, nil
+	case err != nil:
+		return time.Time{}, false, err
 	}
 	var header struct {
 		Type      string `json:"type"`
@@ -360,14 +392,14 @@ func codexRolloutStoredAt(path string) (time.Time, bool) {
 		} `json:"payload"`
 	}
 	if json.Unmarshal(line, &header) != nil || header.Type != "session_meta" {
-		return time.Time{}, false
+		return time.Time{}, false, nil
 	}
-	stored, err := time.Parse(time.RFC3339Nano, header.Timestamp)
-	if err != nil {
-		return time.Time{}, false
+	stored, perr := time.Parse(time.RFC3339Nano, header.Timestamp)
+	if perr != nil {
+		return time.Time{}, false, nil
 	}
-	if constructed, err := time.Parse(time.RFC3339Nano, header.Payload.Timestamp); err == nil && constructed.After(stored) {
+	if constructed, perr := time.Parse(time.RFC3339Nano, header.Payload.Timestamp); perr == nil && constructed.After(stored) {
 		stored = constructed
 	}
-	return stored, true
+	return stored, true, nil
 }
