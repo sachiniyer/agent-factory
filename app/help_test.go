@@ -330,6 +330,31 @@ func TestInstanceAttachHelpShowsProceedCancelAndDetach(t *testing.T) {
 	}
 }
 
+// TestFirstRunInteractiveHelpNamesItsDismissKeys pins #7408: the interactive
+// pane's first-run overlay is a modal, so like its "Session created" sibling it
+// must print the keys that close it, visibly at 80x24, and those keys must do
+// what the row says.
+func TestFirstRunInteractiveHelpNamesItsDismissKeys(t *testing.T) {
+	const hint = "enter continue · esc close"
+	require.Contains(t, xansi.Strip(helpStart(newStartedInstance(t, "local")).toContent()), hint,
+		"precondition: the sibling overlay's wording")
+	require.Contains(t, xansi.Strip(helpTypeInteractive{}.toContent()), hint)
+
+	for _, k := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyEsc}} {
+		t.Run(k.String(), func(t *testing.T) {
+			h := newTestHome(t)
+			resizeHome(h, 80, 24)
+			_, _ = h.showHelpScreen(helpTypeInteractive{}, nil)
+			require.Equal(t, stateHelp, h.state)
+			require.Contains(t, xansi.Strip(h.textOverlay.Render()), hint,
+				"the dismiss hint must be on screen at 80x24, not below a scroll marker")
+
+			_, _ = h.handleHelpState(k)
+			require.Equal(t, stateDefault, h.state, "%s must close the overlay its hint names it in", k)
+		})
+	}
+}
+
 // TestAttachedScrollHelpIsAgentSpecific pins #2195's central honesty rule:
 // Claude and Codex do not share attached scroll controls, and an unknown child
 // gets no guessed hint. Codex PageUp works only after Ctrl-T opens transcript;
