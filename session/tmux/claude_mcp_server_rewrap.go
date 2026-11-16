@@ -135,10 +135,12 @@ func claudeMCPServerPaintedFrom(pane claudeLaunchDialogPane, first int) (string,
 		return claudeMCPServerOneCursor(pane, first, cursorRows, "all of it, in rows a narrow pane wrapped or a frame surrounds")
 	case strings.HasPrefix(claudeMCPServerFooterSquashed, rest):
 		return claudeMCPServerOneCursor(pane, first, cursorRows, "its options, with its footer still being painted")
-	case claudeMCPServerLabelPrefix(rest, seen) || claudeMCPTrustOrdinalWord(rest):
-		// One more option, painted as far as its first rows, or its ordinal.
-		content, _ := pane.rowStart(at)
-		cursorRows[content] = true
+	}
+	if rows, ok := claudeMCPServerPartialOption(pane, at, seen); ok {
+		// One more option, painted as far as its ordinal or its first rows.
+		for _, content := range rows {
+			cursorRows[content] = true
+		}
 		return claudeMCPServerOneCursor(pane, first, cursorRows, "its options, still being painted")
 	}
 	// Anything else below the options is not this dialog's.
@@ -165,7 +167,11 @@ func claudeMCPServerOneCursor(pane claudeLaunchDialogPane, first int, cursorRows
 // the dialog's options: its text from there starts with a whole label, its
 // ordinal, or is the start of a label the paint stopped inside.
 func claudeMCPServerOptionAt(pane claudeLaunchDialogPane, content int) bool {
-	if content+1 < len(pane.starts) && claudeMCPTrustOrdinalWord(claudeLaunchDialogRowText(pane, content)) {
+	if claudeMCPTrustOrdinalWord(claudeLaunchDialogRowText(pane, content)) {
+		if content+1 == len(pane.starts) {
+			// The paint stopped after an option's ordinal.
+			return true
+		}
 		content++
 	}
 	text := pane.text[pane.starts[content]:]
@@ -191,6 +197,24 @@ func claudeMCPServerWholeLabelAt(pane claudeLaunchDialogPane, content int, seen 
 		}
 	}
 	return -1
+}
+
+// claudeMCPServerPartialOption reports whether the text from offset at, which
+// begins a row, is one more option with the paint stopped inside it: its
+// ordinal alone, or the start of a label not yet seen, after its ordinal or
+// not. rows are the content rows a ❯ may sit on.
+func claudeMCPServerPartialOption(pane claudeLaunchDialogPane, at int, seen map[int]bool) ([]int, bool) {
+	content, ok := pane.rowStart(at)
+	if !ok {
+		return nil, false
+	}
+	if !claudeMCPTrustOrdinalWord(claudeLaunchDialogRowText(pane, content)) {
+		return []int{content}, claudeMCPServerLabelPrefix(pane.text[at:], seen)
+	}
+	if content+1 == len(pane.starts) {
+		return []int{content}, true
+	}
+	return []int{content, content + 1}, claudeMCPServerLabelPrefix(pane.text[pane.starts[content+1]:], seen)
 }
 
 // claudeMCPServerLabelPrefix reports whether text is the start of an option

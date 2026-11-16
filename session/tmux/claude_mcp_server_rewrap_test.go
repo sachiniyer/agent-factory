@@ -27,6 +27,14 @@ const (
 // spaces and wrapped at width-5, and the footer like the body. selected is the
 // option the cursor is on.
 func mcpServerDialogRows(width, selected int) []string {
+	return mcpServerDialogRowsWith(width, selected, false)
+}
+
+// mcpServerDialogRowsWith is mcpServerDialogRows, with each option behind its
+// ordinal ("1. Use this MCP server") when ordinals is set, the way the other
+// launch dialogs number theirs. 2.1.322 paints none, but a narrow pane leaves
+// an ordinal on a row of its own, which the matcher must read as an option.
+func mcpServerDialogRowsWith(width, selected int, ordinals bool) []string {
 	body, options := max(1, width-4), max(1, width-5)
 	rows := []string{"", strings.Repeat("─", width)}
 	indented := func(pieces []string) {
@@ -39,6 +47,9 @@ func mcpServerDialogRows(width, selected int) []string {
 	indented(wrapAtSpaces(mcpServerBody, body))
 	rows = append(rows, "")
 	for i, option := range mcpServerOptions {
+		if ordinals {
+			option = fmt.Sprintf("%d. %s", i+1, option)
+		}
 		for j, piece := range wrapAtSpaces(option, options) {
 			if i == selected && j == 0 {
 				rows = append(rows, "  "+claudeTrustSelectionGlyph+" "+piece)
@@ -159,6 +170,21 @@ func TestCheckAndHandleTrustPrompt_MCPServerDialogScrolledOrMidPaintHolds(t *tes
 			// dialog from its preamble's first row.
 			for painted := 3; painted < len(rows); painted++ {
 				requireMCPServerDialogHeld(t, fmt.Sprintf("%d columns, cursor on row %d, %d rows painted", width, selected, painted),
+					rows[:painted])
+			}
+		}
+	}
+}
+
+// Numbered options on a pane narrow enough to leave an ordinal on a row of its
+// own ("❯ 3." over "Continue"): every row of the paint still holds, including
+// the frames that stop just after an ordinal.
+func TestCheckAndHandleTrustPrompt_MCPServerDialogWithOrdinalsMidPaintHolds(t *testing.T) {
+	for width := 6; width <= 15; width++ {
+		for selected := range mcpServerOptions {
+			rows := mcpServerDialogRowsWith(width, selected, true)
+			for painted := 3; painted < len(rows); painted++ {
+				requireMCPServerDialogHeld(t, fmt.Sprintf("numbered, %d columns, cursor on row %d, %d rows painted", width, selected, painted),
 					rows[:painted])
 			}
 		}
