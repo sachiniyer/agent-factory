@@ -132,7 +132,7 @@ func runReapChainDaemon(t *testing.T) {
 		require.NoError(t, err, "stamp %s: %s", kv[0], out)
 	}
 
-	var paneP, cliP, selfP, otherP proctree.Process
+	var paneP, cliP, selfP, childP, otherP proctree.Process
 	require.Eventually(t, func() bool {
 		snap, err := proctree.Snapshot()
 		if err != nil {
@@ -151,6 +151,13 @@ func runReapChainDaemon(t *testing.T) {
 			return false
 		}
 		selfP = me
+		// The child's identity is captured pre-kill: a mutation that lets the
+		// reap signal it leaves it gone afterwards, and a Lookup then would
+		// fail the helper before the verdict file is written.
+		var cerr error
+		if childP, cerr = proctree.Lookup(child.Process.Pid); cerr != nil {
+			return false
+		}
 		lout, err := exec.Command("tmux", "-S", sock, "list-panes", "-t", "other", "-F", "#{pane_pid}").Output()
 		if err != nil {
 			return false
@@ -169,9 +176,6 @@ func runReapChainDaemon(t *testing.T) {
 		Home:        home,
 	})
 	fmt.Fprintf(os.Stderr, "chain-daemon %d: kill path returned stopped=%v why=%q\n", self, reap.Stopped, reap.Why)
-
-	childP, err := proctree.Lookup(child.Process.Pid)
-	require.NoError(t, err)
 
 	// pane and cli die with the session kill — that is the ordering this test
 	// exists to cover — but SIGHUP may still be in flight when the kill path
