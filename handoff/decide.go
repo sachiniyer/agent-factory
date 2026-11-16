@@ -664,9 +664,15 @@ func orderCandidates(eligible []scoredAccount, cfg config.AccountHandoffConfig) 
 			return ta < tb
 		}
 		if a.facts.Reading.Status == ReadingObserved && b.facts.Reading.Status == ReadingObserved {
-			wa, _ := worstWindow(a.facts.Reading)
-			wb, _ := worstWindow(b.facts.Reading)
-			if wa.UsedPercent != wb.UsedPercent {
+			wa, waOK := worstWindow(a.facts.Reading)
+			wb, wbOK := worstWindow(b.facts.Reading)
+			// "No windows" is evidence of absence of data, not a zero
+			// reading: a windowless Observed snapshot must not win the
+			// UsedPercent tiebreak as if it reported 0% used. Only apply the
+			// percent tiebreak when BOTH sides report a window — otherwise
+			// fall through to occupancy/listed order (mirrors the `reported`
+			// guard in tier() and readingBelowAllFresh, #7322/#7314).
+			if waOK && wbOK && wa.UsedPercent != wb.UsedPercent {
 				return wa.UsedPercent < wb.UsedPercent
 			}
 		}
