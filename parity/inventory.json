@@ -2521,7 +2521,7 @@
       "PreviewRequest": {
         "cli": {
           "rows": {
-            "ok": "Rows is a TUI-only rendering option (#7406): the TUI draws the capture, and a capture that joins soft-wrapped rows glued an exact-width readline row onto the output printed below it. `af sessions preview`, every detector (readiness, trust, limit, delivery observation) and remote/sandbox previews keep the joined capture by design, since their text is searched and joined logical lines keep a match from breaking at a wrap. Nothing is missing from the CLI; changing its output would be a separate contract decision."
+            "ok": "Rows is a TUI-only rendering option (#7406): the TUI draws the capture, and a capture that joins soft-wrapped rows glued an exact-width readline row onto the output printed below it. `af sessions preview` and every detector (readiness, trust, limit, delivery observation) keep the joined capture because their text is searched, and joined logical lines keep a match from breaking at a wrap; changing the CLI's output would be a separate contract decision. Remote and sandbox previews also stay joined, but for a different reason: they are not searched, and the TUI draws them, yet #7406's option 1 left the agent-server wire unchanged, so the fusion still shows in the TUI for hook and sandbox sessions. Carrying rows over that wire is option 2 on #7406, a follow-up if wanted. Nothing is missing from the CLI."
           }
         },
         "tui": {

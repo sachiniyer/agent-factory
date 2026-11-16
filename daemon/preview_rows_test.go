@@ -16,7 +16,7 @@ import (
 // glued an exact-width readline row onto the output below it. A request with
 // Rows set must reach the local server's rows capture on every shape the TUI
 // asks for (visible and full history, agent and process tab); a request without
-// it, which is what `af sessions preview` sends, keeps the joined capture.
+// it, which is what `af sessions preview` sends, keeps every capture joined.
 func TestPreview_RowsRequestCapturesRowsAsDrawn(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
@@ -82,8 +82,13 @@ func TestPreview_RowsRequestCapturesRowsAsDrawn(t *testing.T) {
 			}
 
 			req.Rows = false
-			if joined, _ := joinedCaptures(req); joined == 0 {
-				t.Errorf("tab %d full=%v: a preview without Rows must keep the joined capture `af sessions preview` prints", tab, full)
+			joined, total = joinedCaptures(req)
+			if total == 0 {
+				t.Fatalf("tab %d full=%v: premise: the default preview captured nothing", tab, full)
+			}
+			if joined != total {
+				t.Errorf("tab %d full=%v: a preview without Rows ran %d unjoined capture(s) of %d; every capture `af sessions preview` prints must stay joined",
+					tab, full, total-joined, total)
 			}
 		}
 	}

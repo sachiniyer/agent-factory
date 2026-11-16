@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -115,7 +116,18 @@ func TestPreviewRowsNeverJoinsWrappedRows(t *testing.T) {
 				rows, ok := inst.AgentServer().(RowsPreviewer)
 				require.True(t, ok, "the local agent server must offer the rows preview")
 
-				for _, tabID := range []string{agentID, process.ID} {
+				// requireAllJoined: every capture a default or detector-facing path
+				// runs must join wrapped rows, byte for byte what it did before.
+				requireAllJoined := func(path string, preview func() error) {
+					t.Helper()
+					rec.reset()
+					require.NoError(t, preview(), path)
+					joined, total := rec.joined()
+					require.Positive(t, total, "%s: precondition: the preview captured the pane", path)
+					require.Equal(t, total, joined, "%s: every capture keeps joining wrapped rows", path)
+				}
+
+				for idx, tabID := range []string{agentID, process.ID} {
 					rec.reset()
 					snapshot, err := rows.PreviewRowsByID(tabID, full)
 					require.NoError(t, err)
@@ -124,12 +136,24 @@ func TestPreviewRowsNeverJoinsWrappedRows(t *testing.T) {
 					require.Positive(t, total, "precondition: the preview captured the pane")
 					require.Zero(t, joined, "a renderer's capture must keep soft-wrapped rows as drawn")
 
-					rec.reset()
-					_, err = inst.AgentServer().PreviewByID(tabID, full)
-					require.NoError(t, err)
-					joined, _ = rec.joined()
-					require.Positive(t, joined, "the default preview keeps joining wrapped rows")
+					requireAllJoined("PreviewByID", func() error {
+						_, err := inst.AgentServer().PreviewByID(tabID, full)
+						return err
+					})
+					// The ordinal preview serves the headless agent-server (sandbox
+					// previews) and the task runner's fallback.
+					requireAllJoined("ordinal Preview", func() error {
+						_, err := inst.AgentServer().Preview(idx, full)
+						return err
+					})
 				}
+				// The readiness wait's capture.
+				requireAllJoined("PreviewContext", func() error {
+					_, err := inst.AgentServer().(interface {
+						PreviewContext(context.Context, int, bool) (string, error)
+					}).PreviewContext(context.Background(), 0, full)
+					return err
+				})
 			})
 		}
 	}
