@@ -435,11 +435,18 @@ func orphanGenerations(candidates []proctree.Process, sanitizedName string) orph
 	generations := orphanGenerationSet{values: make(map[string]bool)}
 	for _, process := range candidates {
 		same, err := proctree.SameIdentity(process)
-		if err != nil || !same {
+		if err != nil {
+			log.WarningLog.Printf("tmux session %s: cannot determine whether captured pid %d is still the same process while establishing the generation cohort: %v",
+				sanitizedName, process.PID, err)
+			continue
+		}
+		if !same {
 			continue
 		}
 		environ, err := proctree.Environ(process.PID)
 		if err != nil {
+			log.WarningLog.Printf("tmux session %s: cannot read the environment of captured live pid %d while establishing the generation cohort: %v",
+				sanitizedName, process.PID, err)
 			continue
 		}
 		if session, ok := processEnvValue(environ, EnvMarkerSession); !ok || session != sanitizedName {
