@@ -66,6 +66,33 @@ func spinScript() string {
 	return `echo $$; ` + testguard.BoundedSpin(100*time.Millisecond, 5*time.Minute)
 }
 
+// onWatchGrace installs fn as the lifecycle-grace hook for one task's watcher.
+// Call it BEFORE newTestSupervisor: cleanups run last in, first out, so the
+// restore then runs only after the supervisor's Stop has joined every watcher
+// goroutine that reads the hook.
+func onWatchGrace(t *testing.T, taskID string, fn func(grace lifecycleGrace)) {
+	t.Helper()
+	prev := watchGraceEntered
+	watchGraceEntered = func(id string, grace lifecycleGrace) {
+		if id == taskID {
+			fn(grace)
+		}
+	}
+	t.Cleanup(func() { watchGraceEntered = prev })
+}
+
+// latchInGrace latches the daemon's stop from inside the named grace, so the
+// stop lands in exactly the branch under test (#7404). sup is read when the
+// grace is entered, after the test has built the supervisor.
+func latchInGrace(t *testing.T, taskID string, want lifecycleGrace, sup func() *watcherSupervisor) {
+	t.Helper()
+	onWatchGrace(t, taskID, func(grace lifecycleGrace) {
+		if grace == want {
+			sup().beginShutdown()
+		}
+	})
+}
+
 // requireStoodDown asserts the watcher returned without restarting, logging a
 // failure, tripping the breaker, or persisting any status.
 func requireStoodDown(t *testing.T, s *watcherSupervisor, rec *watchRecorder, warn, errBuf *logCapture, wantEvents int) {
@@ -121,34 +148,41 @@ func TestDrainStandsWatchersDownBeforeItCanHang(t *testing.T) {
 // TestWatcherSigtermJustBeforeTheDaemonsStopIsNotAFailure covers systemd's
 // ordering: the bound scope is stopped first, so the watch command dies of
 // SIGTERM a beat before the daemon is signalled — and the daemon's drain may
-// then never reach Stop. The SIGTERM grace must end on the shutdown latch.
+// then never reach Stop. The SIGTERM grace must end on the shutdown latch. The
+// latch lands inside that grace (watchGraceEntered), so the branch under test
+// is the one that sees it, and its own log line says so (#7404).
 func TestWatcherSigtermJustBeforeTheDaemonsStopIsNotAFailure(t *testing.T) {
 	warn, errBuf := captureWatcherLogs(t)
+	info := captureInfo(t)
+	var s *watcherSupervisor
+	latchInGrace(t, "d7392002", graceSigterm, func() *watcherSupervisor { return s })
 	s, rec := newTestSupervisor(t, staticTasks(watchTask("d7392002", spinScript(), t.TempDir())))
-	s.stopGrace = 2 * time.Second
+	s.stopGrace = watcherStopGrace
 	pid := spinningWatch(t, s, rec, "d7392002")
 
 	require.NoError(t, syscall.Kill(pid, syscall.SIGTERM), "SIGTERM the watch command as systemd's scope stop does")
-	time.Sleep(50 * time.Millisecond)
-	s.beginShutdown() // the daemon's own SIGTERM; Stop never follows
 	requireStoodDown(t, s, rec, warn, errBuf, 1)
+	require.Contains(t, info.String(), "watch task d7392002: watch command was terminated as the daemon began stopping; not a failure")
 }
 
 // TestWatcherScopeRefusedForTheDaemonsStopIsNotAFailure is 11-15's failures
 // 2–5: a restart while the daemon's unit has a stop job is refused by systemd,
 // and that refusal is the daemon's stop, not the script's failure. It is not
-// counted, and the stopping daemon does not try again.
+// counted, and the stopping daemon does not try again. The latch lands inside
+// the refusal grace, never before the run has exited (#7404).
 func TestWatcherScopeRefusedForTheDaemonsStopIsNotAFailure(t *testing.T) {
 	warn, errBuf := captureWatcherLogs(t)
+	info := captureInfo(t)
 	countFile := filepath.Join(t.TempDir(), "runs")
+	var s *watcherSupervisor
+	latchInGrace(t, "d7392003", graceScopeRefused, func() *watcherSupervisor { return s })
 	s, rec := newTestSupervisor(t, staticTasks(watchTask("d7392003", refusedRunScript(countFile), t.TempDir())))
-	s.stopGrace = 2 * time.Second
+	s.stopGrace = watcherStopGrace
 	require.NoError(t, s.Reload())
-	waitUntil(t, 5*time.Second, "the first refused run", func() bool { return countRuns(t, countFile) == 1 })
 
-	s.beginShutdown() // systemd signals the daemon once the bound scopes are down
 	requireStoodDown(t, s, rec, warn, errBuf, 0)
 	require.Equal(t, 1, countRuns(t, countFile), "the stopping daemon retried a refused watch command")
+	require.Contains(t, info.String(), "watch task d7392003: systemd refused the watch command's scope because the daemon's unit is stopping; not a failure")
 }
 
 // TestWatcherScopeRefusalWithoutADaemonStopStillGivesUp is the classifier's
@@ -193,19 +227,74 @@ func TestWatcherStoppingDaemonDoesNotRestartAFailedCommand(t *testing.T) {
 // TestWatcherBreakerDoesNotTripAsTheDaemonStops: an exit the daemon cannot yet
 // attribute to its stop (a script that traps TERM and exits 1) may still be
 // counted, but it must not be what trips the breaker — the trip is durable, and
-// it would outlive a stop that caused it.
+// it would outlive a stop that caused it. The latch lands inside the backstop's
+// grace, at the fifth failure (#7404).
 func TestWatcherBreakerDoesNotTripAsTheDaemonStops(t *testing.T) {
 	errBuf := captureErrors(t)
+	info := captureInfo(t)
 	countFile := filepath.Join(t.TempDir(), "runs")
+	var s *watcherSupervisor
+	latchInGrace(t, "d7392006", graceBreaker, func() *watcherSupervisor { return s })
 	s, rec := newTestSupervisor(t, staticTasks(watchTask("d7392006", countingFailScript(countFile, 1), t.TempDir())))
-	s.stopGrace = 2 * time.Second
+	s.stopGrace = watcherStopGrace
 	require.NoError(t, s.Reload())
-	waitUntil(t, 10*time.Second, "the fifth run", func() bool { return countRuns(t, countFile) == s.crashMaxExits })
 
-	s.beginShutdown()
-	waitUntil(t, 4*time.Second, "the watcher to stand down", func() bool { return len(s.watchingTaskIDs()) == 0 })
+	waitUntil(t, 10*time.Second, "the watcher to stand down at its fifth failure", func() bool { return len(s.watchingTaskIDs()) == 0 })
+	require.Equal(t, s.crashMaxExits, countRuns(t, countFile))
 	require.NotContains(t, errBuf.String(), "giving up", "the breaker tripped as the daemon stopped")
 	require.Empty(t, rec.statusesSnapshot(), "a give-up was persisted as the daemon stopped")
+	require.Contains(t, info.String(), "watch task d7392006: watch command failed (exit status 1) as the daemon began stopping; not giving up")
+}
+
+// TestWatcherCleanExitAsTheDaemonStopsRecordsNothingAndReturnsAtOnce: a script
+// that handles the scope's SIGTERM by exiting 0 must not leave a durable
+// "stopped" behind, and its grace must end the instant the daemon's stop
+// arrives, so a watcher in it never holds Stop for the 5s grace (#7404).
+func TestWatcherCleanExitAsTheDaemonStopsRecordsNothingAndReturnsAtOnce(t *testing.T) {
+	info := captureInfo(t)
+	countFile := filepath.Join(t.TempDir(), "runs")
+	entered := make(chan struct{}, 1)
+	onWatchGrace(t, "d7392009", func(grace lifecycleGrace) {
+		if grace == graceCleanExit {
+			entered <- struct{}{}
+		}
+	})
+	s, rec := newTestSupervisor(t, staticTasks(watchTask("d7392009", countingFailScript(countFile, 0), t.TempDir())))
+	s.stopGrace = watcherStopGrace // the production grace: the stop must not wait it out
+	require.NoError(t, s.Reload())
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the clean exit never entered its grace")
+	}
+
+	start := time.Now()
+	s.beginShutdown()
+	waitUntil(t, 2*time.Second, "the watcher to return", func() bool { return len(s.watchingTaskIDs()) == 0 })
+	require.Less(t, time.Since(start), 500*time.Millisecond, "the clean-exit grace waited out its timer instead of ending on the daemon's stop")
+	require.Empty(t, rec.statusesSnapshot(), "a stop-caused exit 0 was recorded as stopped")
+	require.Contains(t, info.String(), "watch task d7392009: watch command exited cleanly as the daemon began stopping; not recording it as stopped")
+}
+
+// TestAwaitDaemonStopSaysWhichStopArrived: the grace reports a reload or
+// disable of the task apart from the daemon's own stop, so the log names the
+// one that happened (#7404's nit).
+func TestAwaitDaemonStopSaysWhichStopArrived(t *testing.T) {
+	newWatcher := func(grace time.Duration) *taskWatcher {
+		s := &watcherSupervisor{stopGrace: grace}
+		return &taskWatcher{taskID: "d7392010", sup: s, stopCh: make(chan struct{})}
+	}
+
+	w := newWatcher(time.Minute)
+	close(w.stopCh)
+	require.Equal(t, watcherStopArrived, w.awaitDaemonStop(graceBreaker))
+
+	w = newWatcher(time.Minute)
+	w.sup.beginShutdown()
+	require.Equal(t, daemonStopArrived, w.awaitDaemonStop(graceBreaker))
+
+	w = newWatcher(20 * time.Millisecond)
+	require.Equal(t, noStopArrived, w.awaitDaemonStop(graceBreaker))
 }
 
 // TestWatcherSupervisorReadsAsStoppingOnceShutdownBegins: from the latch, the
