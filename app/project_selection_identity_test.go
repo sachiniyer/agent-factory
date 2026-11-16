@@ -114,6 +114,7 @@ func TestProjectsSectionEnterRefusesReplacementCheckoutAtSameRoot(t *testing.T) 
 	require.Equal(t, rec.RepoID, proj.RepoID, "fixture: the row carries the registration's repo id")
 
 	_, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	settleProjectSwitch(t, h)
 	require.True(t, consumed)
 	assert.Equal(t, beforeRepoID, h.repoID, "Enter on a replaced checkout must not re-scope the rail onto the replacement")
 	assert.Equal(t, beforeRoot, h.repoRoot)
@@ -144,6 +145,7 @@ func TestProjectPickerRefusesReplacementCheckoutAtSameRoot(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, root, highlighted.Root, "fixture: the cursor rests on the replaced row")
 	_, _ = h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEnter})
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, beforeRepoID, h.repoID, "the picker must not switch onto a replaced checkout")
 	assert.Equal(t, beforeRoot, h.repoRoot)
@@ -168,6 +170,7 @@ func TestProjectsSectionEnterSwitchesRegisteredCheckout(t *testing.T) {
 	moveProjectsCursorTo(t, h, func(p ui.SidebarProject) bool { return p.Root == rec.Root })
 
 	_, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	settleProjectSwitch(t, h)
 	require.True(t, consumed)
 	assert.Equal(t, rec.RepoID, h.repoID, "a registered checkout that is still in place switches")
 	assert.Equal(t, rec.Root, h.repoRoot)
@@ -216,6 +219,7 @@ func TestProjectsSectionClickSelectsTheClickedRowOfTwoSharingARoot(t *testing.T)
 
 	// The stale row first: selected as itself and refused, so nothing switches.
 	_ = combineCmds(press(h, points[1].X, points[1].Y), release(h, points[1].X, points[1].Y))
+	settleProjectSwitch(t, h)
 	sel, ok := h.projects.SelectedProject()
 	require.True(t, ok)
 	assert.Equal(t, staleID, sel.RepoID, "a click on the stale row selects the stale row")
@@ -225,6 +229,7 @@ func TestProjectsSectionClickSelectsTheClickedRowOfTwoSharingARoot(t *testing.T)
 	// The healthy row second: it must switch, carrying its own identity rather
 	// than the first row at the same root.
 	_ = combineCmds(press(h, points[2].X, points[2].Y), release(h, points[2].X, points[2].Y))
+	settleProjectSwitch(t, h)
 	assert.Equal(t, liveID, h.repoID, "a click on the healthy row switches to it, whatever its sibling recorded")
 	assert.Equal(t, root, h.repoRoot)
 }

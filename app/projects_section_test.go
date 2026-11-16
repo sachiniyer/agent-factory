@@ -105,6 +105,7 @@ func TestProjectsSection_FocusedSelectSwitches(t *testing.T) {
 
 	// Enter switches to it.
 	_, _, consumed = h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	settleProjectSwitch(t, h)
 	require.True(t, consumed)
 	assert.Equal(t, config.RepoIDFromRoot(repoBRoot), h.repoID, "Enter switches to the cursor's project")
 	assert.Equal(t, repoBRoot, h.repoRoot)
@@ -154,6 +155,7 @@ func TestProjectsSection_CursorSurvivesRefreshReorder(t *testing.T) {
 
 	// Enter switches to B — not the project that slid into B's former index.
 	_, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	settleProjectSwitch(t, h)
 	require.True(t, consumed)
 	assert.Equal(t, config.RepoIDFromRoot(repoBRoot), h.repoID, "Enter still switches to B after the reorder")
 	assert.Equal(t, repoBRoot, h.repoRoot)

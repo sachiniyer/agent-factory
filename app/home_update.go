@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -199,7 +200,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(fmt.Errorf("failed to trigger task %q: %w", msg.title, msg.err))
 		}
 		return m, m.showTransientMessage(fmt.Sprintf("triggered %s", msg.title))
+	case projectSwitchFetchedMsg:
+		return m.handleProjectSwitchFetched(msg)
 	case tea.MouseMsg:
+		if m.projectSwitch != nil {
+			// A switch is loading: a click must not act on the project the user
+			// is leaving (#7377).
+			return m, nil
+		}
 		dismissed, endInput := m.beginUserInput()
 		defer endInput()
 		if dismissed {
@@ -214,6 +222,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fully sufficient.
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
+		if m.projectSwitch != nil {
+			// A switch is loading: Esc cancels it, and no other key may act on
+			// the project the user is leaving (#7377).
+			return m.handleKeyWhileSwitchingProject(msg)
+		}
 		// A burst of keys from one terminal read is handled key by key (#7015).
 		if burst := m.splitNavKeyBurst(msg); burst != nil {
 			return m.handleKeyBurst(msg, burst)
@@ -414,8 +427,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleRemoteDefault(msg) })
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
-		// starting. Don't yank their selection or pop a modal onto them.
-		userStillWatching := m.state == stateDefault && m.sidebar.GetSelectedInstance() == msg.instance
+		// starting. Don't yank their selection or pop a modal onto them. A
+		// pending project switch is the user leaving this project, whatever is
+		// still selected (#7379).
+		userStillWatching := !m.leavingProject() && m.state == stateDefault && m.sidebar.GetSelectedInstance() == msg.instance
 
 		if msg.err != nil {
 			// Remove the *specific* instance that failed, by title. The old
@@ -458,7 +473,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			detail := "Your input is retained. " + msg.err.Error()
 			action := "Press any key to return to the form."
 			if !userStillWatching {
-				detail += " The next create in this project reopens the failed draft."
+				where := "this project"
+				if m.leavingProject() {
+					// This lands on the bar beside "Loading <other>…", and can
+					// outlast the switch: name the project it belongs to.
+					where = filepath.Base(m.repoRoot)
+				}
+				detail += " The next create in " + where + " reopens the failed draft."
 				action = "Press any key to continue."
 			}
 			return m, tea.Batch(m.showRecovery("Cannot create session", detail, action, msg.err), m.selectionChanged(), restoreCmd)

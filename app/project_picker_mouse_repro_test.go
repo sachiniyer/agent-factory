@@ -91,6 +91,7 @@ func TestProjectPickerMouseClickSelectsProject(t *testing.T) {
 	// The cursor starts on repo A (the active project, preselected). Click the
 	// repo B row — index 1 in the picker.
 	clickZone(t, h, zones.OverlaySelectRow(1))
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, stateDefault, h.state, "a project-row click must close the picker")
 	assert.Nil(t, h.projectPickerOverlay, "the click must dismiss the picker overlay")
@@ -165,6 +166,7 @@ func TestProjectPickerEnterSwitchesProject(t *testing.T) {
 	// real keyboard handler.
 	_, _ = h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyDown})
 	_, cmd := h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEnter})
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, stateDefault, h.state, "Enter must close the picker")
 	assert.Nil(t, h.projectPickerOverlay, "Enter must dismiss the picker overlay")

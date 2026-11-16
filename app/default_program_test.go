@@ -148,7 +148,7 @@ func TestSwitchProjectMakesTheDefaultProgramFollowConfig(t *testing.T) {
 	h.programChoice = newProgramChoice(tmux.ProgramGemini, "", h.appConfig)
 
 	root := initTestGitRepo(t)
-	h.switchProject(&config.RepoContext{Root: root, ID: config.RepoIDFromRoot(root)})
+	switchProjectNow(t, h, &config.RepoContext{Root: root, ID: config.RepoIDFromRoot(root)})
 	require.True(t, h.programFollowsConfig)
 
 	writeInRepoConfig(t, root, "default_program = \"codex\"\n")

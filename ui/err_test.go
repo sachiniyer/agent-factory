@@ -243,7 +243,7 @@ func TestErrBoxJoinsMultiLineErrorsWithSeparator(t *testing.T) {
 	e.SetSize(120, 3)
 	e.SetError(errors.New("push failed\nremote rejected the branch"))
 
-	line := e.statusLine()
+	line := e.statusLine(e.width)
 	if !strings.Contains(line, "push failed · remote rejected the branch") {
 		t.Errorf("want the two lines joined by ' · ', got %q", line)
 	}
@@ -407,7 +407,7 @@ func TestErrBoxStatusLineFitsContractMeasure(t *testing.T) {
 			e := NewErrBox()
 			e.SetSize(width, 1)
 			e.SetError(errors.New(notice))
-			line := e.statusLine()
+			line := e.statusLine(e.width)
 			if got := layout.CellsUpperBound(line); got > width {
 				t.Errorf("statusLine returned a row the contract measure says is %d "+
 					"cells, over the %d-cell bar: %q", got, width, line)
@@ -434,7 +434,7 @@ func TestErrBoxStatusLineKeepsHintIntactOnHeartVS16(t *testing.T) {
 	e.SetSize(15, 1)
 	e.SetError(errors.New(strings.Repeat(heart, 16)))
 
-	line := e.statusLine()
+	line := e.statusLine(e.width)
 
 	// The measure the status bar's clamp uses must agree the row fits.
 	if got := layout.CellsUpperBound(line); got > 15 {
@@ -465,7 +465,7 @@ func TestErrBoxStatusLineMarksSilentCutWithEllipsis(t *testing.T) {
 	e.SetSize(40, 1)
 	e.SetError(errors.New(strings.Repeat(heart, 30) + "xxxxx"))
 
-	line := e.statusLine()
+	line := e.statusLine(e.width)
 	if got := layout.CellsUpperBound(line); got > 40 {
 		t.Fatalf("statusLine emitted a row the contract measure says is %d cells, "+
 			"over the 40-cell bar: %q", got, line)
@@ -501,7 +501,7 @@ func TestErrBoxExpandsTabsForWidthBudget(t *testing.T) {
 	e.SetSize(9, 1)
 	e.SetError(errors.New("col1\tcol2"))
 
-	line := e.statusLine()
+	line := e.statusLine(e.width)
 	if got := layout.CellsUpperBound(line); got > 9 {
 		t.Fatalf("statusLine emitted a row the contract measure says is %d cells, "+
 			"over the 9-cell bar: %q", got, line)
@@ -664,5 +664,55 @@ func TestErrBoxStandingConditionPersistsAndYieldsToNotices(t *testing.T) {
 	e.SetStanding("")
 	if got := strings.TrimSpace(stripANSI(e.String())); got != "" {
 		t.Fatalf("retracted standing text must leave the bar empty, got %q", got)
+	}
+}
+
+// TestErrBoxPinnedTextShowsOnEveryFrame pins #7379 R2: a pinned condition is on
+// the bar whatever else shares it — alone, ahead of a transient notice or a
+// failure, and ahead of a standing line — and the rest of the bar never
+// pushes it out, at any width.
+func TestErrBoxPinnedTextShowsOnEveryFrame(t *testing.T) {
+	const pinned = "Loading project-b… · esc to cancel"
+	e := NewErrBox()
+	e.SetSize(100, 1)
+	e.SetPinned(pinned)
+	if got := stripANSI(e.String()); !strings.Contains(got, pinned) {
+		t.Fatalf("pinned text missing from an otherwise empty bar: %q", got)
+	}
+
+	e.SetStanding("web UI not served: 127.0.0.1:8443 is not bound")
+	if got := stripANSI(e.String()); !strings.Contains(got, pinned+" · web UI not served") {
+		t.Fatalf("pinned text must lead the standing line: %q", got)
+	}
+
+	e.SetNotice(errors.New("Rebound project-a to /new/root"))
+	if got := stripANSI(e.String()); !strings.Contains(got, pinned+" · Rebound project-a") {
+		t.Fatalf("pinned text must lead a transient notice, not yield to it: %q", got)
+	}
+	e.SetError(errors.New("failed to kill session 'x': " + strings.Repeat("long cause ", 20)))
+	got := stripANSI(e.String())
+	if !strings.Contains(got, pinned+" · failed to kill") {
+		t.Fatalf("pinned text must lead a failure: %q", got)
+	}
+	if w := layout.Cells(strings.TrimRight(got, " ")); w > 100 {
+		t.Fatalf("a long notice beside the pinned text overflowed the bar: %d cells", w)
+	}
+
+	for _, width := range []int{1, 5, 20, len(pinned), len(pinned) + 4, 60} {
+		e.SetSize(width, 1)
+		for _, line := range strings.Split(e.String(), "\n") {
+			if w := layout.Cells(stripANSI(line)); w > width {
+				t.Fatalf("width %d: rendered %d cells: %q", width, w, stripANSI(line))
+			}
+		}
+		if width >= 20 && !strings.Contains(stripANSI(e.String()), "Loading") {
+			t.Fatalf("width %d: the pinned text was pushed off the bar: %q", width, stripANSI(e.String()))
+		}
+	}
+
+	e.SetSize(100, 1)
+	e.SetPinned("")
+	if got := stripANSI(e.String()); strings.Contains(got, "Loading") || !strings.Contains(got, "failed to kill") {
+		t.Fatalf("a retracted pinned text must leave the bar as before: %q", got)
 	}
 }

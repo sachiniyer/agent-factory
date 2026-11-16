@@ -115,7 +115,9 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 	// the session size. Interactive mode under an overlay is incoherent anyway: the
 	// overlay owns the keyboard. Every legitimate path arrives at stateDefault (the
 	// help dismiss sets it before firing the deferred cmd), so nothing is lost.
-	if m.state != stateDefault {
+	// Nor while a project switch is pending: the pane belongs to the project the
+	// user is leaving (#7379).
+	if m.state != stateDefault || m.leavingProject() {
 		return nil
 	}
 	// The session may have changed state while the help overlay was up

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -13,6 +14,12 @@ import (
 type recoveryNotice struct{ condition, detail, action string }
 
 func (m *home) showRecovery(condition, detail, action string, err error) tea.Cmd {
+	if m.leavingProject() {
+		// A failure for the project the user is leaving raises no modal: it
+		// would hold the screen while keys are held for the switch, then sit
+		// over the next project once it commits (#7379). The bar says it.
+		return m.handleError(fmt.Errorf("%s — %s", condition, detail))
+	}
 	m.recovery = &recoveryNotice{condition, detail, action}
 	// The recovery overlay is a stateless modal — it never changes m.state — so
 	// the state-keyed clearStaleClickTrackerAfter gate in Update cannot see this
@@ -34,7 +41,9 @@ func (m *home) showRecovery(condition, detail, action string, err error) tea.Cmd
 // a retry that will run as the configured default.
 func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	failed := m.failedCreate
-	if failed == nil || failed.draft == nil || failed.draft.RepoPath != m.repoRoot || m.namingInstance != nil {
+	// Never while a project switch is pending: the draft is for the project the
+	// user is leaving, and stays kept for its next create (#7379).
+	if failed == nil || failed.draft == nil || failed.draft.RepoPath != m.repoRoot || m.namingInstance != nil || m.leavingProject() {
 		return false, nil
 	}
 	req := failed.draft

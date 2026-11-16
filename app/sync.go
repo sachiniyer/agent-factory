@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -173,24 +174,39 @@ var coldStartWarmupPoll = 250 * time.Millisecond
 var coldStartWarmupWait = 2 * time.Minute
 
 // switchSnapshotFetchTimeout bounds a single cold-start / project-switch snapshot
-// read. fetchColdStartSnapshot runs on the bubbletea event loop for switchProject
-// (the Ctrl+P picker selection, a Projects-section row activation, and add-project
-// submit all reach it synchronously from a KeyMsg handler), and the LOCAL
-// unix-socket transport bounds only the dial — the http.Client sets no Timeout and
-// the daemon's http.Server sets only ReadHeaderTimeout — so once the daemon
-// accepts the connection a wedged handler would park Update (key input, repaint
-// and the Ctrl+C hard exit) forever (#6045). The deadline rides the transport read
-// via snapshotThroughDaemon → SnapshotWithAlarmsCtx, and its expiry surfaces as an
-// ordinary fetch failure: switchProject aborts and leaves the current project
-// intact (#1788), and cold start logs the outage while the background poll retries.
+// read. The LOCAL unix-socket transport bounds only the dial — the http.Client
+// sets no Timeout and the daemon's http.Server sets only ReadHeaderTimeout — so
+// once the daemon accepts the connection a wedged handler would hold the read
+// forever (#6045). The deadline rides the transport read via
+// snapshotThroughDaemon → SnapshotWithAlarmsCtx, and its expiry surfaces as a
+// daemonNoAnswerError: the switch reports it and leaves the current project
+// intact (#1788), and cold start logs the outage while the background poll
+// retries. The switch fetch runs in a tea.Cmd (#7377), so the bound no longer
+// caps how long Update can freeze; it caps how long a "Loading <project>…" waits
+// on a daemon that never answers before saying so.
 //
 // It is PER-ATTEMPT, not the whole operation: a warming daemon answers
 // IsDaemonStartingErr promptly (it never holds the read), so each bounded attempt
-// returns fast and fetchColdStartSnapshot's existing retry loop keeps re-entering
-// while that error is the outcome, with coldStartWarmupWait's 2-minute ceiling
-// finally behaving as the whole-operation deadline. A var so the regression test
-// shrinks it.
+// returns fast and fetchSnapshotWaitingOutWarmup keeps re-entering while that
+// error is the outcome, with coldStartWarmupWait's 2-minute ceiling as the
+// whole-operation deadline. A var so the regression test shrinks it.
 var switchSnapshotFetchTimeout = 10 * time.Second
+
+// daemonNoAnswerError is a snapshot attempt that hit switchSnapshotFetchTimeout:
+// the daemon accepted the request and never answered. Error() is what the user
+// reads — the wait and nothing else, mirroring the project list's "no answer
+// from the daemon within 3s" — while the transport error it wraps stays
+// reachable for the log (#7377).
+type daemonNoAnswerError struct {
+	within time.Duration
+	err    error
+}
+
+func (e *daemonNoAnswerError) Error() string {
+	return fmt.Sprintf("no answer from the daemon within %s", e.within)
+}
+
+func (e *daemonNoAnswerError) Unwrap() error { return e.err }
 
 // coldStartFromSnapshot populates the projection store from the daemon's authoritative
 // Snapshot at startup, replacing the legacy instances.json disk read (#960 PR 6:
@@ -309,49 +325,76 @@ func buildSnapshotInstances(data []session.InstanceData, workers int) []*session
 	return out
 }
 
-// fetchColdStartSnapshot fetches the cold-start snapshot, tolerating a warming
-// daemon (#829) exactly like create/kill: callDaemon already waits out one
-// warm-up window internally, and this retries the whole fetch while the daemon
-// reports the typed "starting" error so a minutes-long restore yields the real
-// session list rather than an empty sidebar that looks like a fresh install
-// (#766/#868). On a hard error the daemon is unavailable and the launch aborts —
-// post-#782 the daemon is always-on, so there is no degraded standalone path.
-// The repoID is passed explicitly rather than read from m.repoID so switchProject
-// can fetch the INCOMING project's snapshot before it re-scopes the model (#1788).
-//
-// Each attempt is bounded by switchSnapshotFetchTimeout. The bound is the one
-// fix the on-loop switch path was missing: a daemon that accepts the connection
-// and never answers (a wedged handler, blocked under restore) would otherwise
-// park the read on the local unix-socket transport that bounds only the dial, and
-// with it the whole event loop (#6045). The deadline rides the transport read,
-// and its expiry lands in the same hard-error branch as any other failed fetch —
-// never as IsDaemonStartingErr — so the switch aborts and the current project
-// survives intact. The warming case is unaffected: a warming daemon returns
-// IsDaemonStartingErr promptly, well inside the bound, so the retry loop still
-// re-enters up to the coldStartWarmupWait ceiling.
+// fetchColdStartSnapshot fetches the launch snapshot before the TUI starts. It
+// tolerates a warming daemon (#829) exactly like create/kill — see
+// fetchSnapshotWaitingOutWarmup — and tells the user on stdout that it is
+// waiting, matching newHome's other pre-TUI startup messages. On a hard error
+// the daemon is unavailable and the launch aborts — post-#782 the daemon is
+// always-on, so there is no degraded standalone path. A project switch never
+// comes here: it runs the same wait in a tea.Cmd, where nothing may write to
+// stdout over the alt-screen (#7377).
 func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+	return fetchSnapshotWaitingOutWarmup(context.Background(), m.snapshotFetcher, repoID, func() {
+		fmt.Println("Restoring sessions… (daemon warming up)")
+	})
+}
+
+// fetchSnapshotWaitingOutWarmup fetches repoID's snapshot through fetch,
+// retrying while the daemon reports the typed "starting" error so a
+// minutes-long restore yields the real session list rather than an empty
+// sidebar that looks like a fresh install (#766/#868), up to
+// coldStartWarmupWait. onWarming, when set, runs once on the first warming
+// reply.
+//
+// Each attempt is bounded by switchSnapshotFetchTimeout, and an attempt that
+// hits it returns a daemonNoAnswerError rather than the transport's text. ctx
+// ends the whole wait: a cancelled ctx returns ctx.Err() promptly, between
+// attempts or during one. It blocks for as long as the daemon warms, so it
+// must never run on the bubbletea event loop (#7377): cold start calls it
+// before the TUI starts, and switchProject from a tea.Cmd.
+//
+// The repoID is passed explicitly rather than read from a home so switchProject
+// can fetch the INCOMING project's snapshot while the outgoing one is still
+// fully intact (#1788).
+func fetchSnapshotWaitingOutWarmup(
+	ctx context.Context,
+	fetch func(context.Context, string) (daemon.SnapshotResponse, error),
+	repoID string,
+	onWarming func(),
+) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	deadline := time.Now().Add(coldStartWarmupWait)
 	announced := false
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), switchSnapshotFetchTimeout)
-		resp, err := m.snapshotFetcher(ctx, repoID)
+		attempt, cancel := context.WithTimeout(ctx, switchSnapshotFetchTimeout)
+		resp, err := fetch(attempt, repoID)
+		// Read before cancel: cancel would turn an unexpired attempt's Err into
+		// Canceled, but leaves an expired one's DeadlineExceeded in place.
+		timedOut := errors.Is(attempt.Err(), context.DeadlineExceeded)
 		cancel()
 		if err == nil {
 			return resp.Instances, resp.SkippedRepos, nil
 		}
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		if timedOut {
+			return nil, nil, &daemonNoAnswerError{within: switchSnapshotFetchTimeout, err: err}
+		}
 		if !daemon.IsDaemonStartingErr(err) {
 			return nil, nil, err
 		}
-		if !announced {
-			// Pre-TUI stdout, matching newHome's other startup messages: tell the
-			// user we are waiting on the daemon rather than showing an empty list.
-			fmt.Println("Restoring sessions… (daemon warming up)")
-			announced = true
+		if !announced && onWarming != nil {
+			onWarming()
 		}
+		announced = true
 		if time.Now().After(deadline) {
 			return nil, nil, fmt.Errorf("daemon is still restoring sessions after %s; try again in a moment", coldStartWarmupWait)
 		}
-		time.Sleep(coldStartWarmupPoll)
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(coldStartWarmupPoll):
+		}
 	}
 }
 

@@ -73,6 +73,7 @@ func TestRebindFollowRefusesForeignRepoAtDriftedTarget(t *testing.T) {
 	})
 
 	h.Update(submitPickerRebind(t, h, nested)())
+	settleProjectSwitch(t, h)
 
 	// The follow-up refused the drifted target: the rail stays on the active
 	// project and the foreign enclosing repo's identity is not adopted — the
@@ -109,6 +110,7 @@ func TestRebindFollowFollowsHealthyTargetAfterGuardArming(t *testing.T) {
 	stubRebindThrough(t, nil)
 
 	h.Update(submitPickerRebind(t, h, nested)())
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, nested, h.repoRoot,
 		"a healthy target is still followed to its checkout")

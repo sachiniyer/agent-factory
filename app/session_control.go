@@ -640,13 +640,11 @@ var renameTabThroughDaemon = func(request daemon.RenameTabRequest) (string, erro
 // like allReposSnapshotFetcher does. The LOCAL unix-socket transport bounds only
 // the dial, and the http.Client sets no Timeout, so once the daemon accepts the
 // connection a wedged handler (blocked acquiring a session's op lock, deadlocked
-// under restore) would park the read forever. switchProject runs this fetch
-// synchronously on the bubbletea event loop, so an unbounded read would park
-// Update — key input, repaint and the Ctrl+C hard exit with it — until the
-// process is killed (#6045, the same hazard the sibling picker fetch is bounded
-// for). The deadline rides the transport read via SnapshotWithAlarmsCtx, and its
-// expiry surfaces as a normal fetch failure the switch aborts on, leaving the
-// current project intact (#1788). A ctx with no deadline (the off-loop poll,
+// under restore) would park the read forever (#6045). A project switch runs this
+// fetch in a tea.Cmd (#7377), so an unbounded read would leave its "Loading…"
+// up until the daemon answered, which may be never. The deadline rides the
+// transport read via SnapshotWithAlarmsCtx, and its expiry surfaces as a fetch
+// failure the switch aborts on, leaving the current project intact (#1788). A ctx with no deadline (the off-loop poll,
 // which passes context.Background) preserves the unbounded read the background
 // poll has always relied on.
 func snapshotThroughDaemon(ctx context.Context, repoID string) (daemon.SnapshotResponse, error) {
