@@ -1,6 +1,8 @@
 package tmux
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -179,6 +181,53 @@ func TestReapProvenBareSessionRequiresEveryProofField(t *testing.T) {
 			require.True(t, srv.has(bareName))
 		})
 	}
+}
+
+// #7433 review: the home compare is file identity, not lexical. A marker path
+// that only filepath.Clean's to the proof's home resolves ".." lexically,
+// while the filesystem resolves it against a REAL directory — so a path can
+// Clean to this home and still be a different one. The fixture builds exactly
+// the review's layout: x/y is a symlink to ../p/q, so x/y/../af resolves to
+// p/af, a different directory with its own home lock — yet Cleans to x/af.
+// The session must be left alone.
+func TestReapProvenBareSessionRefusesAHomeAliasThatCleansToTheHome(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "x", "af")
+	foreign := filepath.Join(base, "p", "af")
+	require.NoError(t, os.MkdirAll(home, 0o755))
+	require.NoError(t, os.MkdirAll(foreign, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "p", "q"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join("..", "p", "q"), filepath.Join(base, "x", "y")))
+
+	env := bareEnv()
+	// filepath.Join would Clean the ".." away; concatenate so the marker
+	// carries it literally, as a stamped environment value would.
+	env[EnvMarkerHome] = filepath.Join(base, "x", "y") + string(os.PathSeparator) + filepath.Join("..", "af")
+	srv := newBareServer(t, env)
+	rec := stubIncarnationProcesses(t, srv)
+	got := ReapProvenBareSession(srv.executor(), "", BareSessionProof{SessionName: bareName, Home: home})
+
+	require.False(t, got.Stopped)
+	require.NotEmpty(t, got.Why)
+	require.Empty(t, srv.kills(), "a home that is only lexically this home is a different home")
+	require.Zero(t, rec.reapCallCount)
+	require.True(t, srv.has(bareName))
+}
+
+// The complement: a marker that differs literally but stats to the SAME
+// directory is this home — the compare is os.SameFile after stat, not string
+// equality alone.
+func TestReapProvenBareSessionAcceptsAHomeAliasToTheSameDir(t *testing.T) {
+	home := t.TempDir()
+	env := bareEnv()
+	env[EnvMarkerHome] = home + string(os.PathSeparator) + "."
+	srv := newBareServer(t, env)
+	rec := stubIncarnationProcesses(t, srv)
+	got := ReapProvenBareSession(srv.executor(), "", BareSessionProof{SessionName: bareName, Home: home})
+
+	require.True(t, got.Stopped, "why: %s", got.Why)
+	require.Equal(t, []string{"kill-session -t $9"}, srv.kills())
+	require.Equal(t, 1, rec.reapCallCount)
 }
 
 // A session that does not answer under the listed name leaves nothing to

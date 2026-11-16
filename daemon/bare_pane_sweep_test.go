@@ -54,21 +54,25 @@ func newBareSweepManager(t *testing.T) *Manager {
 }
 
 // M1: every name shaped like a bare pane this daemon could have spawned —
-// a config agent and both login formats — reaches the reap with this home's
-// proof, and only those names do.
+// a config agent and the hex login format — reaches the reap with this home's
+// proof, and only those names do. The legacy raw-name login form is a
+// non-candidate now (#7433 R1): its shape cannot be told apart from an
+// instance tab's <name>__<tab> suffix, so it is never even asked for markers.
 func TestSweepOrphanBarePanesReapsOrphanedBarePanes(t *testing.T) {
 	m := newBareSweepManager(t)
 	spy := stubBareSweep(t, []string{
 		"af_af-config-3",
 		"af_af-loginx-codex-776f726b",
-		"af_af-login-claude-work",
-		// Not candidates: wrong shapes, other namespaces, a user's session.
+		// Not candidates: wrong shapes, other namespaces, a user's session,
+		// the dropped legacy login form, and any name carrying the instance-tab
+		// separator — a tab carries the bare-pane marker set (#7433 R1).
 		"af_af-config-x", "af_af-config-", "af_af-loginx-codex-", "af_af-loginx-codex-zz!",
 		"af_af-login-codex", "af_af-login-", "af_af-loginxx-a-b", "af_repo_a1b2c3_mine", "af_", "bash",
+		"af_af-login-claude-work", "af_af-login-me-notes__shell", "af_af-loginx-a__terminal-2",
 	})
 	m.sweepOrphanBarePanes()
 
-	want := []string{"af_af-config-3", "af_af-loginx-codex-776f726b", "af_af-login-claude-work"}
+	want := []string{"af_af-config-3", "af_af-loginx-codex-776f726b"}
 	var got []string
 	home, err := config.GetConfigDir()
 	require.NoError(t, err)
@@ -77,6 +81,24 @@ func TestSweepOrphanBarePanesReapsOrphanedBarePanes(t *testing.T) {
 		require.Equal(t, home, proof.Home)
 	}
 	require.Equal(t, want, got, "exactly the bare-pane-shaped names must reach the reap, in listing order")
+}
+
+// While any repo's instances.json did not load, the set of names the restored
+// rows claim is incomplete in exactly the way a name match cannot cover — an
+// instance tab carries the bare-pane marker set — so the sweep lists nothing
+// and reaps nothing, the same deferral the sandbox-dir sweep runs (#7433 R1).
+func TestSweepOrphanBarePanesSkipsWhenRepoSkipped(t *testing.T) {
+	m := &Manager{skippedRepos: []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonCorruptedInstancesJSON}}}
+	listed := false
+	prev := barePaneListSessions
+	barePaneListSessions = func(cmd.Executor) ([]string, error) {
+		listed = true
+		return nil, nil
+	}
+	t.Cleanup(func() { barePaneListSessions = prev })
+	m.sweepOrphanBarePanes()
+
+	require.False(t, listed, "an incomplete owned-names set means no candidate may even be listed")
 }
 
 // M3 (config agents): a name this daemon's own config-agent supervisor tracks
@@ -111,16 +133,16 @@ func TestSweepOrphanBarePanesSkipsInstanceRowClaims(t *testing.T) {
 	// A user session titled like a login pane produces the same tmux name. The
 	// restored row claims it through the unscoped title derivation, so the
 	// sweep may not even ask for its markers.
-	m.instances["repo1"] = &session.Instance{Title: "af-login-codex-work"}
+	m.instances["repo1"] = &session.Instance{Title: "af-loginx-codex-776f726b"}
 	// A row whose tmux fields name the session outright.
 	m.instances["repo2"] = &session.Instance{Title: "other"}
 	// repo2 has no tmux fields and a non-matching title, so it claims nothing;
 	// the direct claimReason test below covers TmuxName/Tabs-bearing rows.
-	spy := stubBareSweep(t, []string{"af_af-login-codex-work", "af_af-loginx-codex-776f726b"})
+	spy := stubBareSweep(t, []string{"af_af-loginx-codex-776f726b", "af_af-config-4"})
 	m.sweepOrphanBarePanes()
 
 	require.Len(t, spy.reaped, 1)
-	require.Equal(t, "af_af-loginx-codex-776f726b", spy.reaped[0].SessionName)
+	require.Equal(t, "af_af-config-4", spy.reaped[0].SessionName)
 
 	// The row forms taskFireRowOwnsTmuxName covers — direct and tab-carried.
 	for _, rows := range [][]session.InstanceData{
@@ -177,7 +199,6 @@ func TestBarePaneCandidateName(t *testing.T) {
 	candidates := []string{
 		"af_af-config-1", "af_af-config-42",
 		"af_af-loginx-codex-776f726b", "af_af-loginx-claude-a1", "af_af-loginx-a-00",
-		"af_af-login-codex-work", "af_af-login-a-b-c", "af_af-login-x-y_1",
 	}
 	for _, name := range candidates {
 		require.True(t, barePaneCandidateName(name), "%q is a bare-pane shape", name)
@@ -186,7 +207,14 @@ func TestBarePaneCandidateName(t *testing.T) {
 		// Malformed bare shapes.
 		"af_af-config-", "af_af-config-x", "af_af-config-1a",
 		"af_af-loginx-", "af_af-loginx-codex", "af_af-loginx-codex-", "af_af-loginx-codex-zz!",
+		// The dropped legacy login shape (#7433 R1): a raw account name cannot
+		// be told apart from a <name>__<tab> suffix, so none of these is ever a
+		// candidate, including every well-formed legacy name.
 		"af_af-login-", "af_af-login-codex",
+		"af_af-login-codex-work", "af_af-login-a-b-c", "af_af-login-x-y_1",
+		// The instance-tab separator: a tab carries the bare-pane marker set,
+		// so a "__" name can only be a tab, never a bare pane (#7433 R1).
+		"af_af-login-me-notes__shell", "af_af-loginx-a__terminal-2", "af_af-loginx-codex-a__b",
 		// Other namespaces: instance sessions, user sessions, non-af names.
 		"af_af-loginxx-a-b", "af_af-loginx", "af_af-login",
 		"af_repo_a1b2c3_mine", "af_mysession", "af_", "bash", "tmux",

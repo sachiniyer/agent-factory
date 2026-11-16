@@ -2,7 +2,7 @@ package tmux
 
 import (
 	"fmt"
-	"path/filepath"
+	"os"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -152,9 +152,12 @@ type BareSessionProof struct {
 //
 //   - AF_SESSION == the name (the same proof an incarnation's marker loop
 //     applies);
-//   - AF_HOME == this home — the CleanupSessions comparison, filepath.Clean'd
-//     literal equality, because the marker is the literal afHomeDir() the
-//     spawning daemon stamped (cleanup.go);
+//   - AF_HOME == this home — sameDir: exact literal equality, or both paths
+//     stat to the same file. A path that only Cleans to the home must NOT be
+//     accepted: filepath.Clean resolves ".." lexically, but the filesystem
+//     resolves it against a real directory, so a foreign home whose path
+//     merely cleans to this one was admitted when the compare was lexical
+//     (#7433 review). A marker that does not stat is unproven;
 //   - AF_SESSION_GEN present — heritage from a post-marker binary, so a
 //     same-named session from before the marker set existed is excluded;
 //   - AF_INSTANCE_ID ABSENT — the bare-pane discriminator: a same-shaped
@@ -200,7 +203,7 @@ func ReapProvenBareSession(cmdExec cmd.Executor, program string, proof BareSessi
 			return refusal
 		case !present:
 			return fmt.Sprintf("session %q carries no %s, so its owning home cannot be proven (pre-marker build or tmux <3.2)", proof.SessionName, EnvMarkerHome)
-		case filepath.Clean(got) != filepath.Clean(proof.Home):
+		case !sameDir(got, proof.Home):
 			return fmt.Sprintf("session %q belongs to a different agent-factory home (%s)", proof.SessionName, got)
 		}
 		if _, present, refusal := read(EnvMarkerGeneration); refusal != "" {
@@ -215,6 +218,28 @@ func ReapProvenBareSession(cmdExec cmd.Executor, program string, proof BareSessi
 		}
 		return ""
 	})
+}
+
+// sameDir reports whether a and b provably name the same directory: true for
+// an exact literal match, or when both stat and os.SameFile finds them the
+// same file. Anything else — a path that does not exist, a path that cannot be
+// stat'd, different files — is unproven, and unproven is never "same" on a
+// kill path (#7433 review): filepath.Clean is NOT a substitute, because ".." in
+// a marker resolves lexically while the filesystem resolves it against a real
+// directory, so a path that only Cleans to the home can be a different home.
+func sameDir(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
 }
 
 // Seams for tests: the pane-row parse needs a real tmux server's process tree, and

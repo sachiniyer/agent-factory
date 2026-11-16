@@ -653,6 +653,38 @@ func selfAndAncestorProcesses(snap map[int]proctree.Process) map[int]bool {
 	return ancestors
 }
 
+// reapProtectedChain is the pid set a captured-tree reap must never signal,
+// whatever the caller: this process, its ancestors, and its descendants
+// (#7433 R2). Captured-tree membership is proven by descent, and descent is
+// not ownership — a daemon EnsureDaemon forked from a CLI running inside an
+// orphaned pane lands in that pane's tree with everything it has already
+// spawned, and the pane itself is its ancestor. proctree.Signal spares only
+// the reaper's own pid; without this set the reap waited on the caller for
+// seconds and then signalled its CLI and its children (a new daemon's ssh
+// tunnels, a foreign home's daemon started from the same pane).
+//
+// The set is computed once from one snapshot: only the processes captured
+// BEFORE the kill can ever be signalled, and no process can re-parent into
+// the caller's subtree, so a chain established at reap entry cannot go stale.
+// When the table cannot be read the chain beyond the caller is unprovable and
+// only the caller itself is excluded — the per-signal identity checks apply
+// unchanged to everything else.
+func reapProtectedChain() map[int]bool {
+	protected := map[int]bool{os.Getpid(): true}
+	snap, err := proctree.Snapshot()
+	if err != nil {
+		log.WarningLog.Printf("cannot snapshot the process table to exclude the caller's own chain from signalling: %v", err)
+		return protected
+	}
+	for pid := range selfAndAncestorProcesses(snap) {
+		protected[pid] = true
+	}
+	for _, p := range proctree.TreeOf(snap, os.Getpid()) {
+		protected[p.PID] = true
+	}
+	return protected
+}
+
 // reapReason says WHY a captured process tree is being reaped. It is the
 // caller's answer and never proctree's: KillEscalating is handed a list and
 // cannot know whether those processes escaped anything (#2765).
@@ -711,11 +743,27 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 				"excluding it from signalling (#5182)", p.PID, p.Comm)
 		}
 	}
+	// #7433 R2: the reaper's own chain — self, ancestors, descendants — is
+	// likewise exempt for EVERY caller. Descent is not membership: a daemon
+	// EnsureDaemon forked out of the pane being reaped lands in that pane's
+	// tree, and captured procs include it, the CLI above it, and its children.
+	// proctree.Signal spares only os.Getpid; without this set the reap waited
+	// seconds on the caller, then signalled its CLI and its children.
+	protected := reapProtectedChain()
+	exemptedProtected := make(map[int]bool)
 	// And it can be registered AFTER the capture — a teardown still in its
 	// grace wait when this process's own destructive RPC finally reaches its
 	// handler (Codex on #5186). The exempt predicate is re-run before every
 	// signal tier so a late-tracked requester is still spared.
 	return proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
+		if protected[p.PID] {
+			if !exemptedProtected[p.PID] {
+				exemptedProtected[p.PID] = true
+				log.InfoLog.Printf("process pid %d (%s) is the %s reaper's own process, ancestor, or descendant; "+
+					"excluding it from signalling (#7433)", p.PID, p.Comm, reason.clause)
+			}
+			return true
+		}
 		if !isTeardownRequester(p) {
 			return false
 		}

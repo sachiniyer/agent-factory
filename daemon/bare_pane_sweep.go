@@ -3,6 +3,7 @@ package daemon
 import (
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
@@ -22,17 +23,30 @@ import (
 //   - config agents: NewTmuxSession("af-config-<n>") → af_af-config-<n>, <n>
 //     the per-daemon counter (daemon/configagent.go).
 //   - account logins: NewTmuxSession(agentaccount.LoginSessionName) →
-//     af_af-loginx-<agent>-<hexname> (internal/agentaccount/login.go), plus the
-//     legacy af_af-login-<agent>-<rawname> shape pre-hex binaries left.
+//     af_af-loginx-<agent>-<hexname> (internal/agentaccount/login.go).
+//
+// The legacy af_af-login-<agent>-<rawname> shape is deliberately NOT selected:
+// a raw account name accepts the same characters ValidateName permits, so the
+// shape cannot be told apart from an instance tab's <name>__<tab> suffix —
+// and a missing AF_INSTANCE_ID does not distinguish a bare pane from a tab
+// (#7433 review). Any genuinely orphaned legacy pane is a two-month-old
+// leftover af doctor reports; it is never reaped here.
 var barePaneNamePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^` + regexp.QuoteMeta(tmux.TmuxPrefix+configAgentSessionPrefix) + `[0-9]+$`),
 	regexp.MustCompile(`^` + regexp.QuoteMeta(tmux.TmuxPrefix+"af-loginx-") + `.+-[0-9a-f]+$`),
-	regexp.MustCompile(`^` + regexp.QuoteMeta(tmux.TmuxPrefix+"af-login-") + `.+-.+$`),
 }
 
 // barePaneCandidateName reports whether name has one of the exact shapes af
-// derives for its daemon-owned bare panes.
+// derives for its daemon-owned bare panes. A name containing "__" is never a
+// candidate: "__" is the instance-tab separator (session/tab.go), so such a
+// name can only ever be an instance TAB's session — and a tab carries
+// AF_SESSION, AF_HOME and AF_SESSION_GEN with no AF_INSTANCE_ID, which is
+// exactly the bare-pane marker set. The name test is where the two are told
+// apart (#7433 review).
 func barePaneCandidateName(name string) bool {
+	if strings.Contains(name, "__") {
+		return false
+	}
 	return slices.ContainsFunc(barePaneNamePatterns, func(re *regexp.Regexp) bool {
 		return re.MatchString(name)
 	})
@@ -72,7 +86,21 @@ var (
 // — a missing marker, an unreadable environment, a foreign home, a replaced
 // incarnation, an unanswerable listing — is left alone and logged for
 // af doctor.
+//
+// The sweep runs NOTHING while any repo's instances.json failed to load:
+// instance tabs carry the same bare-pane marker set (AF_SESSION/AF_HOME/
+// AF_SESSION_GEN, no AF_INSTANCE_ID), and only a restored row claims their
+// names. A skipped repo makes that claim set incomplete in exactly the way a
+// name match cannot cover, so the whole sweep refuses — the same guard
+// sweepStartupOrphanSandboxDirs runs (#7433 review).
 func (m *Manager) sweepOrphanBarePanes() {
+	m.mu.Lock()
+	skipped := len(m.skippedRepos)
+	m.mu.Unlock()
+	if skipped > 0 {
+		log.WarningLog.Printf("bare pane sweep: skipped; %d repo(s) did not load, so the set of owned tmux names is incomplete", skipped)
+		return
+	}
 	home, err := config.GetConfigDir()
 	if err != nil {
 		log.WarningLog.Printf("bare pane sweep: cannot resolve the AF home: %v", err)
