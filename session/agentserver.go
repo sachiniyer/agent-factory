@@ -213,6 +213,14 @@ type AgentServer interface {
 	Archive() (string, error)
 }
 
+// RowsPreviewer is an optional AgentServer capability: PreviewByID with the
+// pane captured as the rows it draws, never joining a soft-wrapped row onto the
+// row below it (#7406). A renderer asks for it; a server without it answers the
+// joined capture, which is what every preview returned before.
+type RowsPreviewer interface {
+	PreviewRowsByID(tabID string, full bool) (PreviewSnapshot, error)
+}
+
 // Seq is a monotonic cursor into a session's PTY output ring buffer, used by
 // Subscribe(since) to replay the gap after a reconnect (#1592 Phase 2). Defined
 // here so the data-plane signatures are stable; the ring buffer that mints these
