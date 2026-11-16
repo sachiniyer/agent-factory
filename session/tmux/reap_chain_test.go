@@ -92,6 +92,7 @@ func runReapChainDaemon(t *testing.T) {
 	child := exec.Command("sleep", "300")
 	require.NoError(t, child.Start())
 	self := os.Getpid()
+	fmt.Fprintf(os.Stderr, "chain-daemon %d: spawned child %d\n", self, child.Process.Pid)
 
 	var paneP, cliP, selfP, otherP proctree.Process
 	require.Eventually(t, func() bool {
@@ -120,12 +121,14 @@ func runReapChainDaemon(t *testing.T) {
 		}
 		return false
 	}, 10*time.Second, 25*time.Millisecond, "the pane -> cli -> daemon chain never became visible")
+	fmt.Fprintf(os.Stderr, "chain-daemon %d: chain pane=%d cli=%d other=%d\n", self, paneP.PID, cliP.PID, otherP.PID)
 
 	childP, err := proctree.Lookup(child.Process.Pid)
 	require.NoError(t, err)
 	procs := []proctree.Process{paneP, cliP, selfP, childP, otherP}
 
 	reapSessionProcesses(reapOnRequest, "af_test_chain", procs, 100*time.Millisecond, 100*time.Millisecond)
+	fmt.Fprintf(os.Stderr, "chain-daemon %d: reap returned\n", self)
 
 	var why []string
 	for _, pc := range []struct {
@@ -154,8 +157,13 @@ func runReapChainDaemon(t *testing.T) {
 
 func reexecReapChain(t *testing.T, role, resultFile string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestReapSessionProcessesNeverSignalsTheCallersChain$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestReapSessionProcessesNeverSignalsTheCallersOwnChain$")
 	cmd.Env = append(os.Environ(), reapChainRoleEnv+"="+role, reapChainResultEnv+"="+resultFile)
+	// Every level forwards its stderr through its parent's, which ultimately
+	// lands on the driver's stderr — a helper that dies or fails a require is
+	// otherwise invisible to the test's log.
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
 	return cmd
 }
 
