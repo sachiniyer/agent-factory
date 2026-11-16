@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,21 +34,7 @@ import (
 // bounded non-answer a blocked read does, never a hang.
 func wedgeCodexRolloutOpenForTest(t *testing.T) {
 	t.Helper()
-	release := make(chan struct{})
-	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
-	old := openCodexRollout
-	openCodexRollout = func(string) (*os.File, error) {
-		<-release
-		return nil, os.ErrNotExist
-	}
-	t.Cleanup(func() {
-		close(release)
-		// Let any flight still blocked in the open finish before the real
-		// open comes back.
-		time.Sleep(50 * time.Millisecond)
-		openCodexRollout = old
-		restoreTimeout()
-	})
+	stallCodexRolloutOpens(t, func(string) bool { return true })
 }
 
 // heldStoreBoundSnap is the held-rollout judge bound to a runtime that holds one
@@ -157,4 +144,179 @@ func TestHeldCodexConversationDoesNotStallOnAWedgedStoreHeaderRead(t *testing.T)
 	})
 	require.False(t, got.conv.HasID(), "a header af could not read names no conversation")
 	require.True(t, errors.Is(got.err, errCodexCaptureUndecided), "the answer is undecided, never another directory's: %v", got.err)
+}
+
+// heldAliasStore is the #7370 review's layout B: a Codex store at home/sessions
+// that the runtime reaches under a second spelling, alias, which only (device,
+// inode) proves is the same directory. That is #7120 review F7's shape: on
+// darwin a CODEX_HOME spelled in a case other than the one on disk, or a store
+// reached through a second mount of it. A resolver that keeps the alias's
+// spelling stands in for darwin's EvalSymlinks, which keeps the case it was
+// given; every other path resolves for real.
+type heldAliasStore struct {
+	home, sessions, alias, workDir string
+}
+
+func newHeldAliasStore(t *testing.T) heldAliasStore {
+	t.Helper()
+	base := testguard.CanonicalTempDir(t)
+	s := heldAliasStore{
+		home:    filepath.Join(base, "home"),
+		alias:   filepath.Join(base, "alias"),
+		workDir: filepath.Join(base, "wt"),
+	}
+	s.sessions = filepath.Join(s.home, "sessions")
+	require.NoError(t, os.MkdirAll(s.sessions, 0o755))
+	require.NoError(t, os.MkdirAll(s.workDir, 0o755))
+	require.NoError(t, os.Symlink(s.home, s.alias))
+	t.Cleanup(fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+		if path == s.alias || strings.HasPrefix(path, s.alias+string(filepath.Separator)) {
+			if _, err := os.Stat(path); err != nil {
+				return "", err
+			}
+			return path, nil
+		}
+		return filepath.EvalSymlinks(path)
+	}))
+	return s
+}
+
+// rollout writes a top-level rollout of the worktree for id and returns its
+// path spelled under home, and spelled under the alias.
+func (s heldAliasStore) rollout(t *testing.T, id string) (own, aliased string) {
+	t.Helper()
+	path := writeCodexRolloutFileWithCwd(t, s.home, "rollout-2026-11-11T13-50-27-"+id+".jsonl", s.workDir)
+	rel, err := filepath.Rel(s.home, path)
+	require.NoError(t, err)
+	return path, filepath.Join(s.alias, rel)
+}
+
+// judge is HeldAgentConversation for a runtime that holds held, bound to this
+// store and worktree, within the test's bound.
+func (s heldAliasStore) judge(t *testing.T, held ...string) (AgentConversationData, error) {
+	t.Helper()
+	snap := heldTestInstance(t, held...).BindConversationCaptureRuntime(
+		beginConversationCaptureAtCodexHomeAndWorkingDir(s.home, s.workDir))
+	type answer struct {
+		conv AgentConversationData
+		err  error
+	}
+	got := withinBound(t, func() answer {
+		conv, err := HeldAgentConversation(tmux.ProgramCodex, snap)
+		return answer{conv, err}
+	})
+	return got.conv, got.err
+}
+
+// wedgeStatOf makes every stat of exactly path block until the test ends, as
+// one directory on a mount that lost that lookup does, and bounds af's probes
+// at 50ms. Its ancestors and the paths under it answer.
+func wedgeStatOf(t *testing.T, path string) {
+	t.Helper()
+	release := make(chan struct{})
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	restoreStat := fsprobe.SetStatPathForTest(func(p string) (os.FileInfo, error) {
+		if p == path {
+			<-release
+		}
+		return os.Stat(p)
+	})
+	t.Cleanup(func() {
+		close(release)
+		// Let any flight still blocked in the stat finish before the real
+		// stat comes back.
+		time.Sleep(50 * time.Millisecond)
+		restoreStat()
+		restoreTimeout()
+	})
+}
+
+// requireHeldUndecided asserts the judge's could-not-look answer: no
+// conversation, and errCodexCaptureUndecided, which the follow reads as
+// Unchanged, capture's held fallback as nothing to record, and a repair's
+// observation as unstamped.
+func requireHeldUndecided(t *testing.T, conv AgentConversationData, err error, msg string) {
+	t.Helper()
+	require.False(t, conv.HasID(), "%s: named %q", msg, conv.ID)
+	require.True(t, errors.Is(err, errCodexCaptureUndecided), "%s: the answer is undecided: %v", msg, err)
+}
+
+// Layout B (#7370 review R1). The runtime holds this worktree's rollout under a
+// spelling of the store that only (device, inode) proves is the store.
+// Containment has three answers: in, out, and could-not-look. "Out" needs both
+// the spelling and the identity to have looked: the store root's stat, and
+// every ancestor's, with a proven absence counting as an answer. A stat on
+// that path that did not answer leaves the rollout unclassified, so the judge
+// is undecided. It used to read as "another store" and answer (∅, nil): the
+// runtime holds nothing. A set-conversation repair then stamped held="" and the
+// next follow read the pane's own thread as a move, undoing the repair.
+func TestHeldCodexConversationUnderAnAliasedStoreNeedsTheIdentityToLook(t *testing.T) {
+	t.Run("every lookup answers: the identity proves it is the store", func(t *testing.T) {
+		s := newHeldAliasStore(t)
+		_, aliased := s.rollout(t, heldTestOwnID)
+		conv, err := s.judge(t, aliased)
+		require.NoError(t, err)
+		require.Equal(t, heldTestOwnID, conv.ID, "precondition: (device, inode) proves the aliased rollout is the store's")
+	})
+	t.Run("the store root's stat does not answer", func(t *testing.T) {
+		s := newHeldAliasStore(t)
+		_, aliased := s.rollout(t, heldTestOwnID)
+		wedgeStatOf(t, s.sessions)
+		conv, err := s.judge(t, aliased)
+		requireHeldUndecided(t, conv, err, "a store root af could not stat proves nothing outside it")
+		// The stuck stat keeps its latch while the resolve registry keeps
+		// answering, so every check in that window takes this path too.
+		conv, err = s.judge(t, aliased)
+		requireHeldUndecided(t, conv, err, "a check while the root's stat is still stuck")
+	})
+	t.Run("the aliased store directory's stat does not answer", func(t *testing.T) {
+		s := newHeldAliasStore(t)
+		_, aliased := s.rollout(t, heldTestOwnID)
+		// The ancestor whose identity is the store's: alias/sessions.
+		wedgeStatOf(t, filepath.Join(s.alias, "sessions"))
+		conv, err := s.judge(t, aliased)
+		requireHeldUndecided(t, conv, err, "an ancestor af could not stat may be the store")
+	})
+	t.Run("a lower ancestor's stat does not answer", func(t *testing.T) {
+		s := newHeldAliasStore(t)
+		_, aliased := s.rollout(t, heldTestOwnID)
+		// The day directory is not the store; the walk goes on past it and
+		// finds the store above.
+		wedgeStatOf(t, filepath.Dir(aliased))
+		conv, err := s.judge(t, aliased)
+		require.NoError(t, err)
+		require.Equal(t, heldTestOwnID, conv.ID, "an ancestor above the stuck one proves containment")
+	})
+}
+
+// Layout C (#7370 review R1): layout B plus a second top-level rollout of this
+// worktree, held under the store's own spelling. With every lookup answering
+// the runtime holds two candidates, which is ambiguous. When the aliased one's
+// identity could not be looked up, the judge must not name the other from a
+// partial view: a follow would move a record naming the aliased thread, and
+// capture would record from half the evidence.
+func TestHeldCodexConversationNeverNamesOneRolloutWhileAnotherIsUnclassified(t *testing.T) {
+	layout := func(t *testing.T) (heldAliasStore, []string) {
+		s := newHeldAliasStore(t)
+		own, _ := s.rollout(t, heldTestOwnID)
+		_, sibling := s.rollout(t, heldTestSiblingID)
+		return s, []string{own, sibling}
+	}
+	t.Run("every lookup answers", func(t *testing.T) {
+		s, held := layout(t)
+		_, err := s.judge(t, held...)
+		require.True(t, errors.Is(err, ErrCodexConversationAmbiguous), "precondition: two candidates are ambiguous: %v", err)
+	})
+	t.Run("the store root's stat does not answer", func(t *testing.T) {
+		s, held := layout(t)
+		wedgeStatOf(t, s.sessions)
+		conv, err := s.judge(t, held...)
+		requireHeldUndecided(t, conv, err, "one candidate named while the other is unclassified")
+	})
+	t.Run("the aliased store directory's stat does not answer", func(t *testing.T) {
+		s, held := layout(t)
+		wedgeStatOf(t, filepath.Join(s.alias, "sessions"))
+		conv, err := s.judge(t, held...)
+		requireHeldUndecided(t, conv, err, "one candidate named while the other is unclassified")
+	})
 }
