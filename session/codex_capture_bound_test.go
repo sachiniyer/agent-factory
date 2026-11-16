@@ -5,11 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
@@ -363,4 +365,154 @@ func TestCodexRestoreResumesWhenAFormsLstatDoesNotAnswer(t *testing.T) {
 
 	wedgeLstatMatching(t, pathIs(compressed))
 	requireRestoreResumes(t, inst, formsThreadID)
+}
+
+// wedgeNthLstatMatching makes only the n-th fsprobe.Lstat of a path match
+// accepts block until the test ends; every other lstat answers.
+func wedgeNthLstatMatching(t *testing.T, n int32, match func(string) bool) {
+	t.Helper()
+	wait := lookupWedge(t, func(string) bool { return true })
+	var seen atomic.Int32
+	t.Cleanup(fsprobe.SetLstatForTest(func(p string) (os.FileInfo, error) {
+		if match(p) && seen.Add(1) == n {
+			wait(p)
+		}
+		return os.Lstat(p)
+	}))
+}
+
+// requireCarryRefusedUnverified asserts the live swap's plan refused the
+// carry as a look that did not happen.
+func requireCarryRefusedUnverified(t *testing.T, inst *Instance) {
+	t.Helper()
+	require.NoError(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }))
+	require.NotNil(t, inst.accountSwapLaunch)
+	require.Nil(t, inst.accountSwapLaunch.carry, "a rollout af could not look up is not carried")
+	require.Equal(t, handoff.CarryUnverified, carryRefusalCode(inst.accountSwapLaunch.carryFallback),
+		"it refuses as a look that did not happen: %q", inst.accountSwapLaunch.carryFallback)
+}
+
+// #7384 review R1. Where a newer thread does not count, as in a session in
+// the user's own checkout, the carry still looks up the recorded rollout.
+// Gone, it refuses as missing, whatever a newer thread would mean. A lookup of
+// it that does not answer must refuse too (unverified), in the check-ahead
+// and in the live plan. The copy reads that file next, unbounded, after the
+// outgoing agent stops, so the plan's refusal is what keeps a swap on a dead
+// mount failing before teardown.
+func TestCodexCarryRefusesWhenTheRecordedRolloutsLstatDoesNotAnswerWhereNewerDoesNotCount(t *testing.T) {
+	layout := func(t *testing.T) *Instance {
+		inst := codexCarryLayout(t, false)
+		inst.inPlace = true
+		require.Empty(t, inst.AccountSwapCarryRefusal(), "precondition: the rollout carries")
+		return inst
+	}
+	recorded := baseIs(filepath.Base(codexRolloutRel(carryTestID)))
+	t.Run("the check-ahead", func(t *testing.T) {
+		inst := layout(t)
+		wedgeLstatMatching(t, recorded)
+		require.Equal(t, handoff.CarryUnverified, withinBound(t, inst.AccountSwapCarryRefusal))
+	})
+	t.Run("the live plan", func(t *testing.T) {
+		inst := layout(t)
+		wedgeLstatMatching(t, recorded)
+		requireCarryRefusedUnverified(t, inst)
+	})
+}
+
+// #7384 review R3: the staleness walk lstats the recorded rollout again, after
+// the judge's own lstat of it answered. That second lstat not answering stops
+// the walk where it is, so the walk has not seen the rest: the carry refuses,
+// and never carries past a newer thread it did not see.
+func TestCodexCarryRefusesWhenTheWalksLstatOfTheRecordedRolloutDoesNotAnswer(t *testing.T) {
+	inst := codexCarryLayout(t, true)
+	wedgeNthLstatMatching(t, 2, baseIs(filepath.Base(codexRolloutRel(carryTestID))))
+	requireCarryRefusedUnverified(t, inst)
+}
+
+// #7384 review R2. An unscoped resume pool tracks every rollout in the store.
+// One whose tracking stat does not answer has no boundary, so it cannot be
+// tracked, but it may hold the briefing too. Here both A and B record it, so
+// with every lookup answering the receipt is ambiguous. With A untracked, B's
+// lone match must not read as received in any check of that wait. And B is
+// still tracked: the pool never shrinks past the member it could not track.
+func TestCodexPromptReceiptNeverConfirmsFromAPoolWithAMemberItCouldNotTrack(t *testing.T) {
+	const prompt = "the af briefing"
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	a := writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-11-11T13-50-27-"+heldTestOwnID+".jsonl", workDir)
+	b := writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-11-11T13-50-28-"+heldTestSiblingID+".jsonl", workDir)
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	appendTurn := func(path string) {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		require.NoError(t, err)
+		_, err = f.WriteString(`{"type":"event_msg","payload":{"type":"user_message","message":"` + prompt + `"}}` + "\n")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+	}
+
+	all := snap
+	all.TrackCodexReceiptPool(true)
+	require.Len(t, all.receiptPaths, 2, "precondition: the pool tracks both")
+
+	// A's stat does not answer while the pool is tracked, and answers again
+	// once its stuck flight has returned, so every later read answers.
+	release := make(chan struct{})
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	restoreStat := fsprobe.SetStatPathForTest(func(p string) (os.FileInfo, error) {
+		if p == a {
+			<-release
+		}
+		return os.Stat(p)
+	})
+	pool := snap
+	withinBound(t, func() bool { pool.TrackCodexReceiptPool(true); return true })
+	close(release)
+	time.Sleep(50 * time.Millisecond)
+	restoreStat()
+	restoreTimeout()
+	var tracked []string
+	for _, member := range pool.receiptPaths {
+		tracked = append(tracked, member.path)
+	}
+	require.Equal(t, []string{b}, tracked, "the pool keeps every member it could track")
+
+	appendTurn(a)
+	appendTurn(b)
+	answered := receiptOnceWithinBound(t, all, prompt)
+	require.ErrorIs(t, answered.err, ErrPromptReceiptAmbiguous, "precondition: two members record the briefing")
+	for check := 0; check < 2; check++ {
+		got := receiptOnceWithinBound(t, pool, prompt)
+		require.NoError(t, got.err)
+		require.False(t, got.received, "check %d: a lone match is no receipt while a member af could not track may hold another", check)
+		require.True(t, got.undecided, "check %d: the receipt is undecided", check)
+	}
+}
+
+// #7384 review R3: a receipt poll stops at the first scan that does not
+// answer, as undecided, rather than wait out a bound for every tracked rollout
+// on the same mount in turn.
+func TestCodexPromptReceiptPollStopsAtTheFirstScanThatDoesNotAnswer(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	members := map[string]bool{}
+	for _, id := range []string{heldTestOwnID, heldTestSiblingID, repairHeldID, repairNextID} {
+		members[writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-11-11T13-50-27-"+id+".jsonl", workDir)] = true
+	}
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	snap.TrackCodexReceiptPool(true)
+	require.Len(t, snap.receiptPaths, len(members), "precondition: the pool tracks every member")
+
+	var stalled atomic.Int32
+	wedgeStatMatching(t, func(p string) bool {
+		if members[p] {
+			stalled.Add(1)
+			return true
+		}
+		return false
+	})
+	got := receiptOnceWithinBound(t, snap, "the af briefing")
+	require.NoError(t, got.err)
+	require.False(t, got.received)
+	require.True(t, got.undecided, "a scan that did not answer leaves the receipt undecided")
+	require.EqualValues(t, 1, stalled.Load(), "the poll stops at the first scan that does not answer")
 }
