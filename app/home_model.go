@@ -21,7 +21,11 @@ import (
 )
 
 type home struct {
-	failedCreate         *instanceStartedMsg
+	// failedCreates holds each project's kept failed-create draft, by repo ID:
+	// the next create in that project reopens it (restoreFailedCreate). One slot
+	// per project, so a failure or a restore in one never displaces or consumes
+	// the draft another is keeping (#7386).
+	failedCreates        map[string]*instanceStartedMsg
 	recovery             *recoveryNotice
 	snapshotUnavailable  bool
 	snapshotFailureSince *time.Time

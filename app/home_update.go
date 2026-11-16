@@ -463,14 +463,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// session — and the removed placeholder is not a claim either way:
 			// the next snapshot poll adds the session back if the daemon made it.
 			if mutationMayHaveLanded(msg.err) {
-				return m, tea.Batch(m.handleError(mutationOutcomeError(
-					fmt.Sprintf("creating session %q", msg.instance.Title), "the sidebar", msg.err)),
+				action, where := m.outcomeScope(fmt.Sprintf("creating session %q", msg.instance.Title), msg.repoID, msg.repoRoot)
+				return m, tea.Batch(m.handleError(mutationOutcomeError(action, where, msg.err)),
 					m.selectionChanged())
 			}
 
 			var restoreCmd tea.Cmd
 			if msg.draft != nil {
-				m.failedCreate = &msg
+				m.keepFailedCreate(&msg)
 				if userStillWatching {
 					_, restoreCmd = m.restoreFailedCreate()
 				}
