@@ -15,17 +15,27 @@ import (
 type recoveryNotice struct{ condition, detail, action string }
 
 func (m *home) showRecovery(condition, detail, action string, err error) tea.Cmd {
-	return m.showSessionRecovery("", condition, detail, action, err)
+	return m.showSessionRecovery("", m.repoID, m.repoRoot, condition, detail, action, err)
 }
 
 // showSessionRecovery is showRecovery for a failed action on the session titled
-// title. A failure for the project the user is leaving raises no modal: it
-// would hold the screen while keys are held for the switch, then sit over the
-// next project once it commits (#7379). The bar says it instead, naming the
-// session and its project, because the notice can outlast the switch (#7381).
-func (m *home) showSessionRecovery(title, condition, detail, action string, err error) tea.Cmd {
-	if m.leavingProject() {
-		return m.handleError(elsewhereFailure(condition, title, filepath.Base(m.repoRoot), detail))
+// title, which ran in the project repoID (rooted at repoRoot when it began). A
+// failure for a project the user is leaving (#7379) or has left (#7381) raises
+// no modal: it would hold the screen while keys are held for a switch, or sit
+// over a project it is not about. The bar says it instead, naming the session
+// and the project the action ran in — never the one on screen, which may be a
+// later project still loading or already committed.
+func (m *home) showSessionRecovery(title, repoID, repoRoot, condition, detail, action string, err error) tea.Cmd {
+	if m.leavingProject() || repoID != m.repoID {
+		root := repoRoot
+		if repoID == m.repoID {
+			root = m.repoRoot
+		}
+		project := "another project"
+		if root != "" {
+			project = filepath.Base(root)
+		}
+		return m.handleError(elsewhereFailure(condition, title, project, detail))
 	}
 	m.recovery = &recoveryNotice{condition, detail, action}
 	// The recovery overlay is a stateless modal — it never changes m.state — so

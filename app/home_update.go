@@ -487,7 +487,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				detail += " The next create in " + where + " reopens the failed draft."
 				action = "Press any key to continue."
 			}
-			return m, tea.Batch(m.showSessionRecovery(msg.instance.Title, "Cannot create session", detail, action, msg.err), m.selectionChanged(), restoreCmd)
+			return m, tea.Batch(m.showSessionRecovery(msg.instance.Title, msg.repoID, msg.repoRoot, "Cannot create session", detail, action, msg.err), m.selectionChanged(), restoreCmd)
 		}
 
 		started := msg.instance

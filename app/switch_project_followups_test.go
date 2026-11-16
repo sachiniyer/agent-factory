@@ -215,3 +215,52 @@ func TestSwitchProjectRedirectedKillOrArchiveNamesSessionAndProject(t *testing.T
 		})
 	}
 }
+
+// TestSwitchProjectArchiveReplyForAnEarlierProjectNamesThatProject: an archive
+// started in A whose failure lands after the switch to B committed names A —
+// the project the action ran in, not whichever one is on screen or loading —
+// and raises no modal over B (Codex on #7385). Both with a further switch from
+// B pending and with none.
+func TestSwitchProjectArchiveReplyForAnEarlierProjectNamesThatProject(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pending bool
+	}{
+		{"after the commit", false},
+		{"while a further switch loads", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, repoB, repoC := asyncSwitchHome(t)
+			h.errBox.SetSize(300, 1)
+			repoARoot := h.repoRoot
+			h.snapshotFetcher = func(_ context.Context, repoID string) (daemon.SnapshotResponse, error) {
+				return snapshotWith("session-of-" + repoID), nil
+			}
+
+			// Archive a session in A through its confirmation, as the user does.
+			inst := archiveActionInstance(t, "repoA-worker", session.Ready)
+			h.store.AddInstance(inst)
+			h.sidebar.SelectInstance(inst)
+			model, _ := h.handleArchive()
+			h = model.(*home)
+			require.NotNil(t, h.confirmationOverlay)
+			h.confirmationOverlay.OnConfirm()
+			start, ok := h.pendingConfirmMsg.(startArchiveMsg)
+			require.True(t, ok, "the confirmed archive must start")
+			h.confirmationOverlay, h.pendingConfirmMsg, h.state = nil, nil, stateDefault
+
+			switchProjectNow(t, h, repoB)
+			require.Equal(t, repoB.ID, h.repoID)
+			if tc.pending {
+				require.NotNil(t, startSwitch(t, h, repoC, nil))
+			}
+			h.Update(instanceArchivedMsg{target: start.target, err: errors.New("The daemon refused this archive.")})
+
+			assert.Nil(t, h.recovery, "no modal about A's session over another project")
+			notice, _ := h.errBox.RetainedNotice()
+			assert.Contains(t, notice, "repoA-worker", "the report names the session")
+			assert.Contains(t, notice, filepath.Base(repoARoot), "and the project the archive ran in")
+			assert.NotContains(t, notice, filepath.Base(repoB.Root), "not the project on screen")
+		})
+	}
+}
