@@ -146,6 +146,9 @@ func holdTasksFileLock(t *testing.T) (release func()) {
 // lock) held the stop until the stopper's SIGKILL and skipped every later
 // defer. Each now drains under drainBudget and names the handler it abandoned.
 func TestRunDaemonWarmupExitsDrainBothPlanesUnderTheBound(t *testing.T) {
+	// The in-flight registry's name for the stuck write, as the control codec
+	// records it: the registered service name, not a guess at it.
+	addTaskCall := "control RPC " + controlServiceName + ".AddTask"
 	for _, tc := range []struct {
 		name string
 		// transactionID runs the daemon as an upgrade candidate, parked in
@@ -182,17 +185,37 @@ func TestRunDaemonWarmupExitsDrainBothPlanesUnderTheBound(t *testing.T) {
 			runExited := make(chan struct{})
 			addDone := make(chan struct{})
 			releaseLock := func() {}
+			var manager *Manager
 			// One cleanup, in order: let the stuck write and the held restore
-			// finish, then join the daemon and the client, so neither outlives
-			// this test.
+			// finish, stop a daemon a failure left running, then join the
+			// daemon, the client and the abandoned handler, so none outlives
+			// this test or writes into its home after it is removed.
 			t.Cleanup(func() {
 				releaseLock()
 				close(holdRestore)
+				select {
+				case <-runExited:
+				default:
+					// A failure before the Shutdown below; stop the daemon so
+					// the failure reports only its own cause.
+					var resp ShutdownResponse
+					_ = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
+				}
 				for _, ch := range []chan struct{}{runExited, addDone} {
 					select {
 					case <-ch:
 					case <-time.After(10 * time.Second):
 						t.Error("an in-process daemon or its stuck client did not exit during cleanup")
+					}
+				}
+				if manager != nil {
+					deadline := time.Now().Add(10 * time.Second)
+					for strings.Contains(manager.lifecycle.inFlight().describe(time.Now()), addTaskCall) {
+						if time.Now().After(deadline) {
+							t.Error("the abandoned task write never finished after its lock was released")
+							break
+						}
+						time.Sleep(5 * time.Millisecond)
 					}
 				}
 				restoreManagerForStartup = previousRestore
@@ -201,7 +224,6 @@ func TestRunDaemonWarmupExitsDrainBothPlanesUnderTheBound(t *testing.T) {
 				defer close(runExited)
 				_ = runDaemon(cfg, tc.transactionID)
 			}()
-			var manager *Manager
 			select {
 			case manager = <-managers:
 			case <-time.After(10 * time.Second):
@@ -231,14 +253,14 @@ func TestRunDaemonWarmupExitsDrainBothPlanesUnderTheBound(t *testing.T) {
 			// first step, and the stop cannot close admission until well after
 			// the Shutdown below is acknowledged.
 			waitForReady(t, "the task write to be in flight", func() bool {
-				return strings.Contains(manager.lifecycle.inFlight().describe(time.Now()), "control RPC Daemon.AddTask")
+				return strings.Contains(manager.lifecycle.inFlight().describe(time.Now()), addTaskCall)
 			})
 
 			requestShutdown(t, runExited)
 			got := warn.String()
 			require.Contains(t, got, "drain daemon control server did not finish within the 300ms drain budget",
 				"the warm-up exit must drain the control plane under the bound")
-			require.Contains(t, got, "control RPC Daemon.AddTask (running", "the log must name the handler the stop abandoned")
+			require.Contains(t, got, addTaskCall+" (running", "the log must name the handler the stop abandoned")
 		})
 	}
 }
