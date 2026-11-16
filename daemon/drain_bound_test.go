@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/rpc"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -227,4 +228,55 @@ func TestInflightCallsDescribeOldestFirstAndCapped(t *testing.T) {
 	var none *inflightCalls
 	none.begin("ignored")()
 	require.Equal(t, "no handler is recorded as in flight", none.describe(time.Now()))
+}
+
+// TestAbandonedStopLeavesInstancesJSONUntouched tests the no-write claim where
+// the write is decided (#7393 review). It seeds a live session whose in-memory
+// state is ahead of its disk row (the row has no task binding; the session in
+// memory runs one), abandons the stop on a control handler that never
+// returns, and compares instances.json byte for byte after the checkpoint
+// decision runDaemon makes.
+func TestAbandonedStopLeavesInstancesJSONUntouched(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	testguard.IsolateTmux(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	registerTaskSpawnedSession(t, manager, repo.ID, repoPath, "drain-mutated", "task-7393")
+
+	path, err := config.RepoInstancesPath(repo.ID)
+	require.NoError(t, err)
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NotContains(t, string(before), "task-7393", "fixture: the disk row predates the in-memory change")
+
+	shortenDrainTotal(t, 300*time.Millisecond)
+	var workers sync.WaitGroup
+	joined, _ := runDrain(t, 5*time.Second, manager, nil, neverReturns(t), &workers)
+	require.False(t, joined, "fixture: the stop abandoned a handler")
+	checkpointAfterDrain(manager, joined)
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "an abandoned stop rewrote instances.json")
+
+	// The comparison can fail: the checkpoint a joined drain takes rewrites the
+	// same file with the in-memory state.
+	checkpointAfterDrain(manager, true)
+	saved, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(saved), "task-7393", "a joined drain's checkpoint must persist the in-memory change")
+}
+
+// TestDrainBudgetsShipThePinnedValues: the vars the drain reads start at the
+// production consts the compile-time pins in daemon_shutdown.go check, and the
+// worst stop those values allow fits the stopper's grace.
+func TestDrainBudgetsShipThePinnedValues(t *testing.T) {
+	require.Equal(t, defaultDrainBudget, drainBudget)
+	require.Equal(t, defaultDrainJoinBudget, drainJoinBudget)
+	require.Equal(t, sigtermFallbackGrace, stopDaemonGrace)
+	worst := defaultDrainBudget + drainPlaneSteps*drainStepFloor + drainSaveReserve
+	require.LessOrEqual(t, worst, sigtermFallbackGrace, "drain budget + a floor per later step + the save reserve outgrows the stopper's grace")
+	require.LessOrEqual(t, defaultDrainJoinBudget, defaultDrainBudget)
 }

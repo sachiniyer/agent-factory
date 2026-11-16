@@ -23,8 +23,10 @@ import (
 // 3s. A join that finishes between this budget and roughly grace minus the save
 // used to be saved on master and now is not; that window is about 1s wide.
 //
-// The join also never outlasts drainBudget, which the steps before it share.
-var drainJoinBudget = 3 * time.Second
+// The join also never outlasts drainBudget, which the steps before it share. So
+// handler joins that do finish now eat into this join's 3s: an HTTP drain that
+// takes 1.5s leaves the join 2s, where it used to get the full 3s (#7393).
+var drainJoinBudget = defaultDrainJoinBudget
 
 // drainBudget bounds the whole drain from its first step: the HTTP and
 // control-plane handler joins, the web-listener close, and the background join
@@ -33,18 +35,46 @@ var drainJoinBudget = 3 * time.Second
 // SIGKILL, and the final save, every deferred teardown and the exit all went
 // with it.
 //
-// Sizing: it leaves the save's pessimistic 1s (see drainJoinBudget) inside the
-// stopper's 5s grace (stopDaemonGrace). A handler still running at the deadline
-// is abandoned, and the save is skipped exactly as for a timed-out join: that
+// Sizing: the worst stop is the whole budget, plus one floor for every step
+// after the first, plus the save's reserve. That is 3.5s + 3×100ms + 1s =
+// 4.8s, inside the stopper's 5s grace (stopDaemonGrace), and the pins below
+// fail the build if it outgrows it. A handler still running at the deadline is
+// abandoned, and the save is skipped exactly as for a timed-out join: that
 // handler passed admission, so it can still commit, and it may hold m.mu, an
 // archive settlement or a repo flock that the save would wait on.
-var drainBudget = 4 * time.Second
+var drainBudget = defaultDrainBudget
+
+// The drain's production values. The vars above are initialised from these and
+// only tests reassign them, so the pins below hold over what ships, whatever a
+// test helper sets.
+const (
+	defaultDrainJoinBudget = 3 * time.Second
+	defaultDrainBudget     = 3500 * time.Millisecond
+	// drainSaveReserve is the pessimistic time budgeted for the final save
+	// (drainJoinBudget's sizing).
+	drainSaveReserve = time.Second
+	// drainPlaneSteps is how many steps before the background join draw on the
+	// deadline: the HTTP drain, the control drain, the web-listener close. It
+	// sizes drainDaemon's step array, so a fourth step does not compile until
+	// this is raised, and raising it re-checks the pin below.
+	drainPlaneSteps = 3
+)
+
+// Pins (#7393 review). Each fails to build when its relation breaks, because a
+// negative constant cannot be converted to uint.
+const (
+	// The worst stop fits the stopper's grace: the first step spends the whole
+	// budget, every later step (the other planes and the background join) gets
+	// its floor, then the save runs.
+	_ = uint(sigtermFallbackGrace - (defaultDrainBudget + drainPlaneSteps*drainStepFloor + drainSaveReserve))
+	// The background join never claims more than the whole drain.
+	_ = uint(defaultDrainBudget - defaultDrainJoinBudget)
+)
 
 // drainStepFloor is the least any drain step is given, even past the deadline,
 // so a step that would finish at once is never reported as abandoned just
 // because an earlier one spent the budget. Past the deadline it adds at most one
-// floor per step still to run (three: control, web listeners, the join), which
-// the save's 1s reserve absorbs.
+// floor per step still to run, which the pins above count.
 const drainStepFloor = 100 * time.Millisecond
 
 // drainRemaining is what is left of the drain's deadline, never below the floor.
@@ -136,16 +166,31 @@ func drainDaemon(
 	}
 	if closeHTTP != nil {
 		*httpClosed = true
-		step("drain daemon HTTP server", closeHTTP)
 	}
 	*controlClosed = true
-	step("drain daemon control server", closeControl)
-	// A control-socket ApplyConfig admitted before quiescing can rebind a TCP
-	// listener after closeHTTP's sync.Once-guarded double close. Close once
-	// more after every control handler has returned so no replacement listener
-	// outlives shutdown.
+	var closeWebListeners func() error
 	if m.webListeners != nil {
-		step("close web listeners after control drain", m.webListeners.close)
+		closeWebListeners = m.webListeners.close
+	}
+	// The array's length is drainPlaneSteps, which the budget pins count, so a
+	// step added here does not compile until the pins have been re-checked. A
+	// step that is absent on this daemon has no run and is skipped.
+	steps := [drainPlaneSteps]struct {
+		what string
+		run  func() error
+	}{
+		{"drain daemon HTTP server", closeHTTP},
+		{"drain daemon control server", closeControl},
+		// A control-socket ApplyConfig admitted before quiescing can rebind a
+		// TCP listener after closeHTTP's sync.Once-guarded double close. Close
+		// once more after every control handler has returned so no replacement
+		// listener outlives shutdown.
+		{"close web listeners after control drain", closeWebListeners},
+	}
+	for _, st := range steps {
+		if st.run != nil {
+			step(st.what, st.run)
+		}
 	}
 
 	// Stop and join daemon-owned writers too. The lifecycle gate above also
@@ -172,6 +217,27 @@ func drainDaemon(
 			joinBudget, m.skippedOnJoinTimeout())
 	}
 	return joined && handlersJoined
+}
+
+// checkpointAfterDrain takes the daemon's terminal checkpoint when, and only
+// when, the drain joined everything. A drain that abandoned a handler (#7393)
+// or timed out its join (#5846) writes nothing. An admitted writer may still
+// commit, so the save would race it, or queue behind the lock it holds past
+// the SIGKILL grace.
+//
+// What a skipped save leaves on disk is still whole. Every real mutation was
+// already made durable by its own targeted persist, and every instances.json
+// write, those and an abandoned writer's late one alike, goes through
+// SaveRepoInstances to config.AtomicWriteFile (temp file, fsync, rename). The
+// file is therefore the old version or the new one, never torn.
+// config.TestEveryConfigWriterGoesThroughAtomicWriteFile pins that path.
+func checkpointAfterDrain(m *Manager, joined bool) {
+	if !joined {
+		return
+	}
+	if err := m.SaveInstancesForShutdown(); err != nil {
+		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
+	}
 }
 
 // skippedOnJoinTimeout names what a timed-out join leaves undurable, for the log.
