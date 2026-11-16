@@ -9,21 +9,21 @@ import (
 )
 
 // AccountHandoffConfig is the [account_handoff] table — the configuration
-// contract for the automatic account-handoff engine staged in #6776.
+// contract for the automatic account-handoff engine (#6776).
 //
-// NOTHING consumes these values yet: this is the parser/schema slice. The
-// engine (evidence, shadow decisions, live moves) lands in later slices, so a
-// resolved table is staged configuration only and an absent table means the
-// same thing it always has — off.
+// The shadow engine consumes it: once mode = "shadow" opts in, the daemon's
+// ~45-second passes read every leaf except probe_ttl (staged for a live usage
+// probe that does not exist yet — accepted, but it changes nothing). An
+// absent table means the same thing it always has — off.
 //
 // The mode leaf is the opt-in. Its compiled default is "off", NOT "shadow":
 // the design's invariant is "absent table ≡ off ≡ today", and the resolver has
 // no presence-dependent leaf defaults, so an absent table — and a present
 // table that never writes mode — both resolve to off. Writing
-// mode = "shadow" is the deliberate gesture that enables shadow once the
-// engine exists. mode = "live" is a recognized spelling but rejected at
-// validation until the live-mover slice ships: a config asking for behavior
-// that does not exist yet must fail loudly rather than degrade silently.
+// mode = "shadow" is the deliberate gesture that enables the shadow engine.
+// mode = "live" is a recognized spelling but rejected at validation until the
+// live-mover slice ships: a config asking for behavior that does not exist
+// yet must fail loudly rather than degrade silently.
 //
 // The table is global + personal-project only, never checked-in repo config —
 // identity policy (whose accounts a machine may spend) is machine-local, the
@@ -32,8 +32,7 @@ import (
 // project can pin just the leaves it means to override.
 type AccountHandoffConfig struct {
 	// Mode selects the engine state: "off" (default), "shadow", or — once its
-	// slice ships — "live". The table only exists as staged configuration
-	// until then.
+	// slice ships — "live".
 	Mode string `json:"mode" toml:"mode"`
 	// IncludePinned opts sessions pinned to an account (--account or a manual
 	// handoff) INTO handoff governance. Default false: a pin holds the session
