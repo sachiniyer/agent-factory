@@ -658,17 +658,43 @@ func orderCandidates(eligible []scoredAccount, cfg config.AccountHandoffConfig) 
 		}
 		return 3
 	}
+	// maxReported is the highest worst-window percent reported by any
+	// eligible observed candidate. A windowless ReadingObserved snapshot
+	// ("no windows is evidence of absence of data, not a zero reading",
+	// per quota/rate_limits.go) and a ReadingNone candidate are both keyed
+	// to this value so neither wins the UsedPercent tiebreak as 0%: each
+	// ranks with the worst reported candidate — never above it — and
+	// otherwise falls through to occupancy/listed order. Applying one
+	// per-candidate key to every same-tier candidate (rather than only
+	// running the percent comparison when both sides are ReadingObserved)
+	// keeps the comparator transitive: a no-reading candidate no longer
+	// forms a cycle with reported/windowless ones via listed order
+	// (#7371 review, #7322/#7314).
+	maxReported := 0.0
+	for _, c := range eligible {
+		if c.facts.Reading.Status != ReadingObserved {
+			continue
+		}
+		if w, ok := worstWindow(c.facts.Reading); ok && w.UsedPercent > maxReported {
+			maxReported = w.UsedPercent
+		}
+	}
+	percentKey := func(c scoredAccount) float64 {
+		if c.facts.Reading.Status != ReadingObserved {
+			return maxReported
+		}
+		if w, ok := worstWindow(c.facts.Reading); ok {
+			return w.UsedPercent
+		}
+		return maxReported
+	}
 	sort.SliceStable(eligible, func(i, j int) bool {
 		a, b := eligible[i], eligible[j]
 		if ta, tb := tier(a), tier(b); ta != tb {
 			return ta < tb
 		}
-		if a.facts.Reading.Status == ReadingObserved && b.facts.Reading.Status == ReadingObserved {
-			wa, _ := worstWindow(a.facts.Reading)
-			wb, _ := worstWindow(b.facts.Reading)
-			if wa.UsedPercent != wb.UsedPercent {
-				return wa.UsedPercent < wb.UsedPercent
-			}
+		if pa, pb := percentKey(a), percentKey(b); pa != pb {
+			return pa < pb
 		}
 		oa := a.facts.Occupancy + a.facts.RecentMoveCredits
 		ob := b.facts.Occupancy + b.facts.RecentMoveCredits
