@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,4 +182,157 @@ func TestClaudeCarryCheckAheadRefusesWhenTheStalenessComparisonDoesNotAnswer(t *
 
 	stallCarryLookups(t, carryOpOn("open", resolvedPath))
 	require.Equal(t, handoff.CarryUnverified, withinBound(t, inst.AccountSwapCarryRefusal))
+}
+
+// paceCarryLookups makes every descriptor-walk syscall answer after delay, as
+// on a slow mount that still answers, and bounds af's probes at 50ms. When n
+// is positive, the n-th read of stallPath does not answer at all until the
+// test ends.
+func paceCarryLookups(t *testing.T, delay time.Duration, stallPath string, n int32) {
+	t.Helper()
+	release := make(chan struct{})
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	prev := carryLookupStandIn.Load()
+	var reads atomic.Int32
+	standIn := func(op, path string) {
+		if n > 0 && op == "read" && path == stallPath && reads.Add(1) == n {
+			<-release
+		}
+		time.Sleep(delay)
+	}
+	carryLookupStandIn.Store(&standIn)
+	t.Cleanup(func() {
+		close(release)
+		time.Sleep(50 * time.Millisecond)
+		carryLookupStandIn.Store(prev)
+		restoreTimeout()
+	})
+}
+
+// slowRead is how long each walk syscall takes on the slow mount below: one
+// twenty-fifth of the 50ms bound.
+const slowRead = 2 * time.Millisecond
+
+// largeCopyBody is a transcript of about 4 MiB after first: 64 of the
+// compare's 64 KiB chunks per file, so a compare of two copies makes 128
+// reads, which at slowRead apiece is five bounds in all.
+func largeCopyBody(first string) string {
+	line := `{"type":"response_item","payload":{"text":"` + strings.Repeat("x", 4000) + `"}}` + "\n"
+	return first + strings.Repeat(line, 1024)
+}
+
+// #7389 review R1. The bound is per read, never per judgement: a compare of
+// two large copies on a slow mount whose every read answers within the bound
+// reaches the answer every lookup answering gives, however many bounds its
+// reads take in all, in the check-ahead and in the live plan. A single read
+// that does not answer still refuses, as unverified.
+func TestCodexCarryJudgesALargeTargetCopyOnASlowMountWhoseReadsAnswer(t *testing.T) {
+	layout := func(t *testing.T) (*Instance, string) {
+		inst, source, target := codexAccountCarry(t)
+		full := largeCopyBody(codexRollout(inst.GetWorktreePath()))
+		writeCarryFile(t, source, codexRolloutRel(carryTestID), full)
+		// The account holds the copy from an earlier swap, one turn short.
+		older := full[:strings.LastIndex(strings.TrimSuffix(full, "\n"), "\n")+1]
+		dst := writeCarryFile(t, target, codexRolloutRel(carryTestID), older)
+		return inst, dst
+	}
+	t.Run("every read answers", func(t *testing.T) {
+		inst, _ := layout(t)
+		paceCarryLookups(t, slowRead, "", 0)
+		require.Empty(t, withinBound(t, func() string { return inst.AccountSwapCarryRefusalTo("work") }), "the check-ahead carries")
+		require.NoError(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }))
+		require.NotNil(t, inst.accountSwapLaunch.carry, "the live plan carries: %q", inst.accountSwapLaunch.carryFallback)
+	})
+	t.Run("one read does not answer", func(t *testing.T) {
+		inst, dst := layout(t)
+		paceCarryLookups(t, slowRead, dst, 10)
+		require.Equal(t, handoff.CarryUnverified, withinBound(t, func() string { return inst.AccountSwapCarryRefusalTo("work") }))
+	})
+	t.Run("one read does not answer, in the live plan", func(t *testing.T) {
+		inst, dst := layout(t)
+		paceCarryLookups(t, slowRead, dst, 10)
+		requireCarryRefusedUnverified(t, inst)
+	})
+}
+
+// #7389 review R1, the Claude copy comparison: two large copies under two
+// spellings, the newer extending the older, on a slow mount whose reads
+// answer. The carry takes the newer, as it would with every read fast.
+func TestClaudeCarryComparesLargeCopiesOnASlowMountWhoseReadsAnswer(t *testing.T) {
+	layout := func(t *testing.T) (*Instance, string) {
+		body := largeCopyBody("{\"base\":1}\n")
+		inst, _, resolvedPath := claudeTwoSpellingCarry(t, body, body+"{\"more\":1}\n")
+		return inst, resolvedPath
+	}
+	t.Run("every read answers", func(t *testing.T) {
+		inst, resolvedPath := layout(t)
+		paceCarryLookups(t, slowRead, "", 0)
+		require.Empty(t, withinBound(t, inst.AccountSwapCarryRefusal), "the check-ahead carries")
+		require.NoError(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }))
+		require.NotNil(t, inst.accountSwapLaunch.carry, "the live plan carries: %q", inst.accountSwapLaunch.carryFallback)
+		require.Equal(t, filepath.Base(filepath.Dir(resolvedPath)), filepath.Base(filepath.Dir(inst.accountSwapLaunch.carry.transcript)),
+			"it takes the copy that extends the other")
+	})
+	t.Run("one read does not answer", func(t *testing.T) {
+		inst, resolvedPath := layout(t)
+		paceCarryLookups(t, slowRead, resolvedPath, 10)
+		require.Equal(t, handoff.CarryUnverified, withinBound(t, inst.AccountSwapCarryRefusal))
+	})
+}
+
+// #7389 review R1, against a target: the new account holds an older copy
+// under the other spelling, which the carried copy extends, so the carry goes
+// ahead past it. The comparison runs inside the target lookup's own flight,
+// paced by the same walk, so a large one on a slow mount still carries.
+func TestClaudeCarryPastALargeOlderTargetCopyOnASlowMountWhoseReadsAnswer(t *testing.T) {
+	layout := func(t *testing.T) (*Instance, string) {
+		home := carryAmbientProviderHomes(t)
+		inst, recorded, resolved := symlinkedClaudeCarryInstance(t)
+		target := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "accounts", tmux.ProgramClaude, "work")
+		recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
+		past := time.Now().Add(-time.Hour)
+		body := largeCopyBody("{\"base\":1}\n")
+		setModTime(t, writeCarryFile(t, filepath.Join(home, ".claude"), filepath.Join(resolved, carryTestID+".jsonl"),
+			body+"{\"live\":1}\n"), past.Add(time.Minute))
+		left := writeCarryFile(t, target, filepath.Join(recorded, carryTestID+".jsonl"), body)
+		setModTime(t, left, past)
+		return inst, left
+	}
+	t.Run("every read answers", func(t *testing.T) {
+		inst, _ := layout(t)
+		paceCarryLookups(t, slowRead, "", 0)
+		require.Empty(t, withinBound(t, func() string { return inst.AccountSwapCarryRefusalTo("work") }), "the check-ahead carries")
+		require.NoError(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }))
+		require.NotNil(t, inst.accountSwapLaunch.carry, "the live plan carries: %q", inst.accountSwapLaunch.carryFallback)
+	})
+	t.Run("one read does not answer", func(t *testing.T) {
+		inst, left := layout(t)
+		paceCarryLookups(t, slowRead, left, 10)
+		require.Equal(t, handoff.CarryUnverified, withinBound(t, func() string { return inst.AccountSwapCarryRefusalTo("work") }))
+	})
+}
+
+// #7389 review R1, the staleness comparison: a large bound copy and a newer
+// copy under another spelling that it holds, on a slow mount whose reads
+// answer. The carry goes ahead, as it would with every read fast.
+func TestClaudeCarryStalenessComparesLargeCopiesOnASlowMountWhoseReadsAnswer(t *testing.T) {
+	layout := func(t *testing.T) (*Instance, string) {
+		body := largeCopyBody("{\"base\":1}\n")
+		inst, _, resolvedPath := claudeTwoSpellingCarry(t, body+"{\"more\":1}\n", body)
+		return inst, resolvedPath
+	}
+	t.Run("every read answers", func(t *testing.T) {
+		inst, _ := layout(t)
+		paceCarryLookups(t, slowRead, "", 0)
+		require.Empty(t, withinBound(t, inst.AccountSwapCarryRefusal), "the check-ahead carries")
+		require.NoError(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }))
+		require.NotNil(t, inst.accountSwapLaunch.carry, "the live plan carries: %q", inst.accountSwapLaunch.carryFallback)
+	})
+	t.Run("one read does not answer", func(t *testing.T) {
+		inst, resolvedPath := layout(t)
+		// The locate step compares the copies first; stall the staleness
+		// comparison's own read, which opens the file by path.
+		paceCarryLookups(t, slowRead, resolvedPath, 64+10)
+		require.Equal(t, handoff.CarryUnverified, withinBound(t, inst.AccountSwapCarryRefusal))
+	})
 }
