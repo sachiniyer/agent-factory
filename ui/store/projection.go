@@ -18,9 +18,11 @@
 // Concurrency contract: every method must be called on the bubbletea event
 // loop, with two deliberate exceptions — ActiveTab/SetActiveTab are backed by
 // an atomic because the background capture goroutine reads the active tab
-// index while the event loop writes it (#684), and the *session.Instance
-// elements themselves guard their fields with their own mutexes so a
-// goroutine holding a captured pointer may read them (#682).
+// index while the event loop writes it (#684), Naming is backed by one too
+// because the same goroutine asks whether the row it captures is the create
+// form's (#7407), and the *session.Instance elements themselves guard their
+// fields with their own mutexes so a goroutine holding a captured pointer may
+// read them (#682).
 package store
 
 import (
@@ -89,7 +91,9 @@ type Projection struct {
 
 	// naming is the row the create form is naming, nil when no form is open. Its
 	// title is a draft, so it carries no title identity — see SameRow (#7060).
-	naming *session.Instance
+	// It is an atomic because the background capture goroutine reads it to pick
+	// the form row's preview copy (#7407).
+	naming atomic.Pointer[session.Instance]
 }
 
 // NewProjection creates an empty projection.
@@ -162,7 +166,7 @@ func (p *Projection) GetInstanceTitles() map[string]bool {
 // through here, so they cannot reach it either.
 func (p *Projection) GetInstanceByTitle(title string) *session.Instance {
 	for _, inst := range p.instances {
-		if inst != p.naming && inst.Title == title {
+		if inst != p.naming.Load() && inst.Title == title {
 			return inst
 		}
 	}

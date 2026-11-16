@@ -253,3 +253,19 @@ func claudeTrustFrameRule(line string) bool {
 	}
 	return strings.ContainsAny(line, "─━═┄┈")
 }
+
+// claudeTrustFrameClosingRule reports whether line is a framed box's closing
+// (bottom) edge: a frame rule whose left corner is a bottom corner (╰, └, ╚,
+// ┗), the way Claude Code paints below a boxed composer (╰…╯). A framed
+// dialog's top border (╭…╮) is not. Used by the case-3 scan to reject a
+// top-cropped boxed composer by its closing edge alone — the opening rule has
+// scrolled off the top, so the prompt above it is not welded on its other
+// side (#7399 review).
+func claudeTrustFrameClosingRule(line string) bool {
+	if strings.IndexByte(line, '\x1b') >= 0 {
+		line = ansiCSISequence.ReplaceAllString(line, "")
+	}
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "╰") || strings.HasPrefix(line, "└") ||
+		strings.HasPrefix(line, "╚") || strings.HasPrefix(line, "┗")
+}

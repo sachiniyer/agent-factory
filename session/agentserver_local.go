@@ -235,7 +235,7 @@ func (s *localAgentServer) Preview(tab int, full bool) (PreviewSnapshot, error) 
 		started := s.inst.started
 		s.inst.mu.RUnlock()
 		if ts != nil && started {
-			if content, above, known, cerr := captureVisibleWithCount(ts); cerr == nil {
+			if content, above, known, cerr := captureVisibleWithCount(ts, false); cerr == nil {
 				snap := previewSnapshotWithModes(content, ts)
 				snap.LinesAbove, snap.LinesAboveKnown = above, known
 				return snap, nil
@@ -306,6 +306,11 @@ func (s *localAgentServer) PreviewGridByID(tabID string) (PaneSnapshot, error) {
 // instance lock. No ordinal crosses that lock boundary (#2200).
 func (s *localAgentServer) PreviewByID(tabID string, full bool) (PreviewSnapshot, error) {
 	return s.inst.PreviewTabSnapshotByID(tabID, full)
+}
+
+// PreviewRowsByID implements RowsPreviewer.
+func (s *localAgentServer) PreviewRowsByID(tabID string, full bool) (PreviewSnapshot, error) {
+	return s.inst.PreviewTabRowsSnapshotByID(tabID, full)
 }
 
 // ctxPreviewBackend is the optional backend capability for a pane capture bound to

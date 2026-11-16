@@ -90,17 +90,68 @@ func (s *watcherSupervisor) shuttingDown() bool {
 	return s.shutdownBegun
 }
 
-// daemonStopArrives waits up to grace for this watcher's own stop or the
-// daemon's shutdown and reports whether either came.
-func (w *taskWatcher) daemonStopArrives(grace time.Duration) bool {
-	timer := time.NewTimer(grace)
+// stopArrival says which stop ended a lifecycle grace, if any.
+type stopArrival int
+
+const (
+	noStopArrived stopArrival = iota
+	// watcherStopArrived is this watcher's own stop: a reload, a disable, a
+	// restart, or the supervisor's Stop.
+	watcherStopArrived
+	// daemonStopArrived is the daemon's shutdown latch.
+	daemonStopArrived
+)
+
+// lifecycleGrace names the branch of run() that is holding an exit to see
+// whether the daemon's stop caused it.
+type lifecycleGrace string
+
+const (
+	graceSigterm      lifecycleGrace = "sigterm"
+	graceScopeRefused lifecycleGrace = "scope-refused"
+	graceBreaker      lifecycleGrace = "breaker"
+	graceCleanExit    lifecycleGrace = "clean-exit"
+)
+
+// watchGraceEntered is a test seam, nil in production. It runs on the
+// watcher's goroutine as an exit enters one of run()'s lifecycle graces, before
+// the grace starts to wait, so a test can land a stop inside exactly the branch
+// it means to pin (#7404). A test sets it before the watcher starts and
+// restores it after the supervisor's Stop.
+var watchGraceEntered func(taskID string, grace lifecycleGrace)
+
+// boundScopeStopSlack covers what follows a bound scope's stop timeout before
+// the daemon's own stop reaches the latch: systemd SIGKILLs and reaps the
+// scope, starts the daemon unit's stop job, and the daemon's signal handler
+// begins its drain (#7404).
+const boundScopeStopSlack = 500 * time.Millisecond
+
+// Pin (#7404). Every lifecycle grace waits watcherStopGrace for the daemon's
+// stop. systemd holds that stop until every bound scope has stopped, which
+// takes up to the bound-scope stop timeout plus the slack. If the grace were
+// shorter, a watch that a TERM-ignoring sibling scope delayed would have its
+// stop-caused exit counted, and its fifth could write a durable give-up. A
+// negative constant cannot be converted to uint, so raising the scope timeout
+// past the grace fails the build.
+const _ = uint(watcherStopGrace - (systemdunit.BoundChildStopTimeoutDuration + boundScopeStopSlack))
+
+// awaitDaemonStop holds an exit in the grace named by grace for up to
+// w.sup.stopGrace, and returns the moment either stop fires. That way a
+// watcher in a grace never makes Stop, or a stopping daemon, wait the grace
+// out. It reports which stop arrived, or noStopArrived when the grace
+// expired.
+func (w *taskWatcher) awaitDaemonStop(grace lifecycleGrace) stopArrival {
+	if hook := watchGraceEntered; hook != nil {
+		hook(w.taskID, grace)
+	}
+	timer := time.NewTimer(w.sup.stopGrace)
 	defer timer.Stop()
 	select {
 	case <-w.stopCh:
-		return true
+		return watcherStopArrived
 	case <-w.sup.daemonStopping():
-		return true
+		return daemonStopArrived
 	case <-timer.C:
-		return false
+		return noStopArrived
 	}
 }

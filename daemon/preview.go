@@ -59,6 +59,12 @@ type PreviewRequest struct {
 	// typo deserves the roster rather than a silent empty capture.
 	TabName string `json:"tab_name,omitempty"`
 	Full    bool   `json:"full"`
+	// Rows asks for the pane's rows as drawn instead of joined logical lines
+	// (#7406). Joining glues a row readline filled exactly to the pane width
+	// onto the output printed below it, so a renderer must not get it. Only the
+	// TUI's render path sets it; `af sessions preview` keeps joined lines, and a
+	// server without the capability answers joined, as before.
+	Rows bool `json:"rows,omitempty"`
 }
 
 // PreviewResponse carries the captured content, or Gone=true when the session's
@@ -167,7 +173,11 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 	if tabID == "" {
 		return fmt.Errorf("session %q tab %d has no stable identity; reload the session before previewing it", req.Title, tab)
 	}
-	snapshot, err := as.PreviewByID(tabID, req.Full)
+	preview := as.PreviewByID
+	if rp, ok := as.(session.RowsPreviewer); ok && req.Rows {
+		preview = rp.PreviewRowsByID
+	}
+	snapshot, err := preview(tabID, req.Full)
 	if err != nil {
 		if errors.Is(err, session.ErrTabGone) {
 			resp.Gone, resp.TabGone = true, true

@@ -34,9 +34,18 @@ type gobServerCodec struct {
 	curSeq    uint64
 	seqMu     sync.Mutex
 	argvBySeq map[uint64]any
+
+	// calls is the daemon's in-flight handler registry (#7393). Every request
+	// header read successfully is answered by exactly one WriteResponse —
+	// net/rpc answers even an unreadable body or unknown method — so a call is
+	// recorded at the header and released at its response, and stays on record
+	// for exactly as long as its handler runs. doneBySeq holds the release for
+	// each Seq; a slice, so a client that reuses a Seq cannot orphan an entry.
+	calls     *inflightCalls
+	doneBySeq map[uint64][]func()
 }
 
-func newGobServerCodec(conn net.Conn, pending *pendingUntracks) *gobServerCodec {
+func newGobServerCodec(conn net.Conn, pending *pendingUntracks, calls *inflightCalls) *gobServerCodec {
 	encBuf := bufio.NewWriter(conn)
 	return &gobServerCodec{
 		rwc:       conn,
@@ -45,6 +54,8 @@ func newGobServerCodec(conn net.Conn, pending *pendingUntracks) *gobServerCodec 
 		encBuf:    encBuf,
 		pending:   pending,
 		argvBySeq: make(map[uint64]any),
+		calls:     calls,
+		doneBySeq: make(map[uint64][]func()),
 	}
 }
 
@@ -52,6 +63,12 @@ func (c *gobServerCodec) ReadRequestHeader(r *rpc.Request) error {
 	err := c.dec.Decode(r)
 	if err == nil {
 		c.curSeq = r.Seq
+		if c.calls != nil {
+			done := c.calls.begin("control RPC " + r.ServiceMethod)
+			c.seqMu.Lock()
+			c.doneBySeq[r.Seq] = append(c.doneBySeq[r.Seq], done)
+			c.seqMu.Unlock()
+		}
 		return nil
 	}
 	// A peer that can no longer be read can never receive a reply still owed —
@@ -95,7 +112,21 @@ func (c *gobServerCodec) WriteResponse(r *rpc.Response, body any) error {
 	if registered {
 		delete(c.argvBySeq, r.Seq)
 	}
+	var done func()
+	if dones := c.doneBySeq[r.Seq]; len(dones) > 0 {
+		done = dones[0]
+		if len(dones) == 1 {
+			delete(c.doneBySeq, r.Seq)
+		} else {
+			c.doneBySeq[r.Seq] = dones[1:]
+		}
+	}
 	c.seqMu.Unlock()
+	// The handler has returned by the time its response is written, whether
+	// or not the write below succeeds.
+	if done != nil {
+		done()
+	}
 	if err := c.enc.Encode(r); err != nil {
 		return c.fail(err)
 	}

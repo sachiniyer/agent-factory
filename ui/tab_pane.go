@@ -97,6 +97,35 @@ type TabPane struct {
 	// tmux.ErrSessionGone when the session vanished mid-capture so the pane shows
 	// its session-gone fallback exactly as before.
 	previewSrc PreviewSource
+
+	// isNaming reports whether an instance is the row the create form is
+	// naming. It is called off the event loop; nil means no row ever is.
+	isNaming func(*session.Instance) bool
+}
+
+// namingFallback is the agent slot's copy for the create form's own row.
+const namingFallback = "Please enter a name for the session."
+
+// SetNamingCheck installs the predicate the creating fallback asks whether an
+// instance is the create form's row (#7407). It must be safe to call off the
+// event loop.
+func (p *TabPane) SetNamingCheck(isNaming func(*session.Instance) bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.isNaming = isNaming
+}
+
+// creatingFallbackLocked is the agent slot's copy for an instance whose create
+// op is raised. The create form raises that op on its row the moment the form
+// opens, long before any request exists, and keeps it there while a refused
+// name is retried. "Setting up workspace…" is reserved for a create actually in
+// flight, so no in-progress signal outlives the request it stood for (#7407).
+// Caller holds p.mu.
+func (p *TabPane) creatingFallbackLocked(instance *session.Instance) string {
+	if p.isNaming != nil && p.isNaming(instance) {
+		return namingFallback
+	}
+	return "Setting up workspace…"
 }
 
 // PreviewSnapshot binds rendered content to the owner that can truthfully scroll
@@ -472,7 +501,7 @@ func (p *TabPane) fillHostHistoryLocked(
 	// gesture disappear into a phantom blank line. Keep AF chrome out of this
 	// value too; TabbedWindow renders the scroll cue in its header, outside the
 	// child's history coordinate system.
-	content := capturePaneHistoryRows(snapshot.Content)
+	content := carrySGRAcrossRows(capturePaneHistoryRows(snapshot.Content))
 	if history.CompleteFill(token, &p.viewport, content) {
 		p.renderRevision++
 	}
@@ -493,7 +522,7 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 		p.mu.Unlock()
 		return nil
 	case instance.IsCreating():
-		p.setFallbackState("Setting up workspace…")
+		p.setFallbackState(p.creatingFallbackLocked(instance))
 		p.mu.Unlock()
 		return nil
 	case instance.IsTearingDown():
@@ -557,9 +586,9 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	// Always update with content, even if empty, so a newly created instance
 	// displays immediately.
 	if len(snapshot.Content) == 0 && !instance.Started() {
-		p.setFallbackState("Please enter a name for the session.")
+		p.setFallbackState(namingFallback)
 	} else {
-		p.publishContent(tabContentState{fallback: false, text: snapshot.Content})
+		p.publishContent(tabContentState{fallback: false, text: carrySGRAcrossRows(snapshot.Content)})
 	}
 	return nil
 }
@@ -704,7 +733,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 		return fmt.Errorf("tab pane: failed to capture terminal content: %w", err)
 	}
 	p.setScrollOwnerLocked(snapshot.Owner)
-	p.publishContent(tabContentState{fallback: false, text: snapshot.Content})
+	p.publishContent(tabContentState{fallback: false, text: carrySGRAcrossRows(snapshot.Content)})
 	return nil
 }
 
@@ -934,7 +963,7 @@ func (p *TabPane) ResetToNormalMode(instance *session.Instance, activeTab int) e
 	// through to its live screen rather than a fallback.
 	switch {
 	case instance.IsCreating():
-		p.setFallbackState("Setting up workspace…")
+		p.setFallbackState(p.creatingFallbackLocked(instance))
 	case instance.IsTearingDown():
 		p.setFallbackState("Tearing down session…")
 	case instance.GetLiveness() == session.LiveDead:

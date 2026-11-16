@@ -867,11 +867,22 @@ func (t *TmuxSession) CursorPosition() (row, col int, err error) {
 // package running on bare exec.Command. On a tripped deadline it returns
 // ErrTmuxTimeout without probing ExistsOrUnknown — see tmuxTimeoutContext.
 func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, error) {
+	return t.capturePaneWithOptions(start, end, joinWrappedRows)
+}
+
+// CapturePaneRowsWithOptions is CapturePaneContentWithOptions without -J, for a
+// renderer: see CaptureVisibleRowsWithScrollback (#7406).
+func (t *TmuxSession) CapturePaneRowsWithOptions(start, end string) (string, error) {
+	return t.capturePaneWithOptions(start, end, keepRowsAsDrawn)
+}
+
+func (t *TmuxSession) capturePaneWithOptions(start, end string, join bool) (string, error) {
 	// Add -e flag to preserve escape sequences (ANSI color codes). `=` forces
 	// an exact session match, mirroring CapturePaneContent (#1006).
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	output, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-e", "-J", "-S", start, "-E", end, "-t", ExactTarget(t.sanitizedName))
+	args := append([]string{"capture-pane"}, captureFlags(join)...)
+	output, err := t.outputTmuxBounded(ctx, append(args, "-S", start, "-E", end, "-t", ExactTarget(t.sanitizedName))...)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("%w: capture-pane options after %s", ErrTmuxTimeout, tmuxCommandTimeout)
@@ -916,11 +927,41 @@ func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, 
 var ErrScrollbackCaptureUnparseable = errors.New("tmux answer carries no capture after the history size")
 
 func (t *TmuxSession) CaptureVisibleWithScrollback() (string, int, error) {
+	return t.captureVisibleWithScrollback(joinWrappedRows)
+}
+
+// CaptureVisibleRowsWithScrollback is CaptureVisibleWithScrollback without -J:
+// the visible screen as the rows the pane draws, for a renderer (#7406). -J
+// joins every row tmux flagged as soft-wrapped onto the next one, and readline
+// flags a row it filled exactly to the pane width before printing the command's
+// output on the row below. Joined, "$ echo hi" and "hi" read as one line. The
+// count is unchanged: history_size counts rows, so rows are what it describes.
+func (t *TmuxSession) CaptureVisibleRowsWithScrollback() (string, int, error) {
+	return t.captureVisibleWithScrollback(keepRowsAsDrawn)
+}
+
+// joinWrappedRows and keepRowsAsDrawn name capture-pane's -J choice at the call
+// sites that make it: detectors match text across a wrap, renderers draw rows.
+const (
+	joinWrappedRows = true
+	keepRowsAsDrawn = false
+)
+
+// captureFlags returns capture-pane's flags for a capture that joins wrapped rows
+// or keeps them as drawn.
+func captureFlags(join bool) []string {
+	if join {
+		return []string{"-p", "-e", "-J"}
+	}
+	return []string{"-p", "-e"}
+}
+
+func (t *TmuxSession) captureVisibleWithScrollback(join bool) (string, int, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	target := ExactTarget(t.sanitizedName)
-	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", target, "#{history_size}",
-		";", "capture-pane", "-p", "-e", "-J", "-t", target)
+	args := append([]string{"display-message", "-p", "-t", target, "#{history_size}", ";", "capture-pane"}, captureFlags(join)...)
+	output, err := t.outputTmuxBounded(ctx, append(args, "-t", target)...)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", 0, fmt.Errorf("%w: capture-pane with scrollback after %s", ErrTmuxTimeout, tmuxCommandTimeout)

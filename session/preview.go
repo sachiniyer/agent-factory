@@ -48,8 +48,12 @@ type PreviewSnapshot struct {
 //
 // A degraded capture reports the count as UNKNOWN, which renders "not measured"
 // rather than "nothing above" — so losing the count never fabricates completeness.
-func captureVisibleWithCount(ts *tmux.TmuxSession) (string, int, bool, error) {
-	content, size, err := ts.CaptureVisibleWithScrollback()
+func captureVisibleWithCount(ts *tmux.TmuxSession, rows bool) (string, int, bool, error) {
+	capture, plainCapture := ts.CaptureVisibleWithScrollback, ts.CapturePaneContent
+	if rows {
+		capture, plainCapture = ts.CaptureVisibleRowsWithScrollback, ts.CaptureVisiblePaneGrid
+	}
+	content, size, err := capture()
 	switch {
 	case err == nil:
 		return content, size, true, nil
@@ -59,11 +63,20 @@ func captureVisibleWithCount(ts *tmux.TmuxSession) (string, int, bool, error) {
 	}
 	// This producer does not answer the combined shape. Capture exactly as before and
 	// leave the count unknown.
-	plain, plainErr := ts.CapturePaneContent()
+	plain, plainErr := plainCapture()
 	if plainErr != nil {
 		return "", 0, false, plainErr
 	}
 	return plain, 0, false, nil
+}
+
+// captureFullHistory captures the whole scrollback, as drawn rows when rows is
+// set (#7406).
+func captureFullHistory(ts *tmux.TmuxSession, rows bool) (string, error) {
+	if rows {
+		return ts.CapturePaneRowsWithOptions("-", "-")
+	}
+	return ts.CapturePaneContentWithOptions("-", "-")
 }
 
 func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnapshot {
@@ -97,7 +110,7 @@ func (i *Instance) PreviewTabSnapshot(idx int, full bool) (PreviewSnapshot, erro
 	}
 
 	if !full {
-		content, above, known, err := captureVisibleWithCount(ts)
+		content, above, known, err := captureVisibleWithCount(ts, false)
 		if err != nil {
 			return PreviewSnapshot{}, err
 		}
@@ -116,6 +129,19 @@ func (i *Instance) PreviewTabSnapshot(idx int, full bool) (PreviewSnapshot, erro
 // identity. A mode read can fail without losing a valid capture; HasModes=false
 // makes that uncertainty explicit to routing clients.
 func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnapshot, error) {
+	return i.previewTabSnapshotByID(tabID, full, false)
+}
+
+// PreviewTabRowsSnapshotByID is PreviewTabSnapshotByID for a renderer: a local
+// pane is captured as the rows it draws, never joining a soft-wrapped row onto
+// the row below it (#7406). Detectors and `af sessions preview` keep the joined
+// capture, where a match must not break at a wrap. An off-box sandbox's content
+// arrives over REST already joined, as before.
+func (i *Instance) PreviewTabRowsSnapshotByID(tabID string, full bool) (PreviewSnapshot, error) {
+	return i.previewTabSnapshotByID(tabID, full, true)
+}
+
+func (i *Instance) previewTabSnapshotByID(tabID string, full, rows bool) (PreviewSnapshot, error) {
 	i.mu.RLock()
 	idx, exists := i.tabIndexByIDLocked(tabID)
 	if !exists {
@@ -139,7 +165,7 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 		// Read the floor BEFORE the capture, so a clear-history afterwards cannot turn
 		// this partial capture into a measured zero (#3169 review).
 		if !full {
-			content, above, known, err := captureVisibleWithCount(ts)
+			content, above, known, err := captureVisibleWithCount(ts, rows)
 			if err != nil {
 				return PreviewSnapshot{}, err
 			}
@@ -147,7 +173,7 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 			snapshot.LinesAbove, snapshot.LinesAboveKnown = above, known
 			return snapshot, nil
 		}
-		content, err := ts.CapturePaneContentWithOptions("-", "-")
+		content, err := captureFullHistory(ts, rows)
 		if err != nil {
 			return PreviewSnapshot{}, err
 		}
@@ -171,7 +197,7 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 	// nothing measures — so it stays unknown, which renders as "not measured". That is
 	// the honest answer, and it is why unknown is a real state rather than a default.
 	if !full && ts != nil {
-		content, above, known, err := captureVisibleWithCount(ts)
+		content, above, known, err := captureVisibleWithCount(ts, rows)
 		if err != nil {
 			return PreviewSnapshot{}, err
 		}
@@ -183,9 +209,13 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 		content string
 		err     error
 	)
-	if full {
+	switch {
+	case full && rows && ts != nil:
+		// LocalBackend.PreviewFullHistory is this capture joined.
+		content, err = captureFullHistory(ts, rows)
+	case full:
 		content, err = backend.PreviewFullHistory(i)
-	} else {
+	default:
 		content, err = backend.Preview(i)
 	}
 	if err != nil {

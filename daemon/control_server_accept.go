@@ -134,6 +134,12 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 		return nil, err
 	}
 
+	// Every dispatched method is named in the daemon's in-flight registry while
+	// it runs, so a stop that cannot join it can say which one held it (#7393).
+	var calls *inflightCalls
+	if manager != nil {
+		calls = manager.lifecycle.inFlight()
+	}
 	var (
 		connectionsMu sync.Mutex
 		connections   = make(map[net.Conn]struct{})
@@ -216,7 +222,7 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 				// releases one parked unregister per reply written, so an
 				// exemption outlives only the response it is for — never the
 				// whole connection (Codex on #5186).
-				connServer.ServeCodec(newGobServerCodec(conn, pending))
+				connServer.ServeCodec(newGobServerCodec(conn, pending, calls))
 				// Backstop for a codec path that returned without Close: any
 				// unregister still parked is for a reply the client will never
 				// read.

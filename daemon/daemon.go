@@ -665,15 +665,10 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		return nil
 	}
 
-	if !joined {
-		// A joined goroutine is wedged. Whatever it holds, the final save would
-		// queue behind it past the SIGKILL grace, and a write taken while
-		// admitted writers can still commit is unsound (see drainDaemon), so
-		// nothing is written; drainDaemon logged what was left behind (#5846).
-		return fatalAcceptShutdownErr()
-	}
-	if err := manager.SaveInstancesForShutdown(); err != nil {
-		log.ErrorLog.Printf("failed to save instances when terminating daemon: %v", err)
-	}
+	// A drain that left a handler or a joined goroutine running writes
+	// nothing: whatever it holds, the final save would queue behind it past the
+	// SIGKILL grace, and a write taken while admitted writers can still commit
+	// is unsound. drainDaemon logged what was left behind (#5846, #7393).
+	checkpointAfterDrain(manager, joined)
 	return fatalAcceptShutdownErr()
 }

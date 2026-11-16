@@ -9,11 +9,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The [account_handoff] table is a parser/schema slice of the automatic
-// account-handoff feature: the values are validated, resolved, and writable,
-// but nothing consumes them yet. Every fixture below is handwritten from the
-// table's record shape only — no real session titles, conversation text, ids,
-// or account names appear.
+// The [account_handoff] table is the automatic account-handoff engine's
+// configuration contract: the values are validated, resolved, and writable,
+// and the shadow engine consumes them once mode = "shadow" opts in. Every
+// fixture below is handwritten from the table's record shape only — no real
+// session titles, conversation text, ids, or account names appear.
 
 func TestAccountHandoffAbsentTableIsOff(t *testing.T) {
 	home := t.TempDir()
@@ -25,7 +25,7 @@ func TestAccountHandoffAbsentTableIsOff(t *testing.T) {
 	assert.Equal(t, defaultAccountHandoffConfig(), cfg.AccountHandoff,
 		"an absent table must resolve to the compiled defaults, byte-for-byte today's behaviour")
 	assert.Equal(t, AccountHandoffModeOff, cfg.AccountHandoff.Mode,
-		"absent table ≡ off — the engine slice may read Mode and see no opt-in")
+		"absent table ≡ off — the engine reads Mode and sees no opt-in")
 
 	resolved, err := ResolveGlobalConfig()
 	require.NoError(t, err)

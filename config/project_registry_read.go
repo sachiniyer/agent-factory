@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/sachiniyer/agent-factory/internal/hostlayout"
 )
@@ -31,13 +32,7 @@ func ListProjects() ([]Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	projects := make([]Project, 0, len(records))
-	for _, record := range records {
-		p := projectFromRecord(record)
-		hostlayout.Default.Note(p.Root)
-		projects = append(projects, p)
-	}
-	return projects, nil
+	return projectsFromRecords(records), nil
 }
 
 // projectRegistryDirPresent follows the registry path so a dangling symlink is
@@ -85,12 +80,7 @@ func ListProjectsDetailed() ([]Project, []ProjectRecordFailure, []string, bool, 
 	if err != nil {
 		return nil, nil, nil, true, err
 	}
-	projects := make([]Project, 0, len(records))
-	for _, record := range records {
-		p := projectFromRecord(record)
-		hostlayout.Default.Note(p.Root)
-		projects = append(projects, p)
-	}
+	projects := projectsFromRecords(records)
 	if len(projects) == 0 && len(failures) == 0 && len(strays) == 0 {
 		present, err = projectRegistryDirPresent(dir)
 		if err != nil {
@@ -101,6 +91,85 @@ func ListProjectsDetailed() ([]Project, []ProjectRecordFailure, []string, bool, 
 		}
 	}
 	return projects, failures, strays, true, nil
+}
+
+// ListProjectsAlongside is ListProjects with a caller's own per-root probe run
+// in the SAME concurrent phase as each root's existence stat (#7397 review R1).
+// alongside[i] is probe's answer for projects[i].Root.
+//
+// It exists for a caller that must look at every registered root anyway — the
+// TUI's spelling canonicalization on the bubbletea event loop. Stat first and
+// probe after, and a registry of roots on one stalled mount holds that caller
+// for one bound in each phase; run together, it holds for one bound in total,
+// whatever the number of projects or stalled roots. probe must bound itself:
+// this waits for every answer. Each root still gets its own stat bound and its
+// own probe bound — nothing here shares one deadline across roots, which would
+// refuse a slow but healthy root that answers inside its own (#7389 review R1).
+// The read is strict, exactly as ListProjects is.
+func ListProjectsAlongside[T any](probe func(root string) T) ([]Project, []T, error) {
+	dir, err := projectRegistryDir()
+	if err != nil {
+		return nil, nil, err
+	}
+	records, err := loadProjectRecords(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	alongside := make([]T, len(records))
+	projects := projectsFromRecordsAlongside(records, func(i int) {
+		alongside[i] = probe(records[i].Root)
+	})
+	return projects, alongside, nil
+}
+
+// projectsFromRecords builds Project values for every record, running the
+// per-root existence stats CONCURRENTLY so a registry read holds its caller for
+// one fsprobe flight bound in total rather than one per stalled root.
+// ListProjects is the read buildProjectListFromCounted performs synchronously
+// on the bubbletea event loop; when several registered roots sit on the same
+// stalled NFS/FUSE/sshfs mount, statting them in turn would spend each one's
+// whole bound before the next began — ten such projects park input, repaint
+// and Ctrl+C for ~20 s. Each root still gets its own bound (the per-path flight
+// registry joins duplicate roots onto one worker), so a slow root that answers
+// inside its bound is read exactly as before. A non-answer for any root is not
+// determinate absence, so its row keeps PathExists=true exactly as a sequential
+// read would report.
+//
+// loadProjectColor stays sequential: it reads a sidecar inside the registry
+// directory (a local path this process owns), not the recorded root, so it is
+// not on a wedged user mount and need not join the bounded flights.
+func projectsFromRecords(records []projectRecord) []Project {
+	return projectsFromRecordsAlongside(records, nil)
+}
+
+// projectsFromRecordsAlongside is projectsFromRecords with alongside(i), when
+// non-nil, started for every record in the same phase as the stats — on its own
+// goroutine, so a root whose stat and probe both stall costs one bound, not two.
+func projectsFromRecordsAlongside(records []projectRecord, alongside func(i int)) []Project {
+	exists := make([]bool, len(records))
+	var wg sync.WaitGroup
+	for i := range records {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			exists[i] = projectPathExists(records[i].Root)
+		}(i)
+		if alongside != nil {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				alongside(i)
+			}(i)
+		}
+	}
+	wg.Wait()
+	projects := make([]Project, 0, len(records))
+	for i, record := range records {
+		p := projectFromRecordWithExists(record, exists[i])
+		hostlayout.Default.Note(p.Root)
+		projects = append(projects, p)
+	}
+	return projects
 }
 
 // ProjectRecordFailure names one registry entry that could not be used: its

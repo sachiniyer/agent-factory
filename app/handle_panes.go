@@ -41,7 +41,14 @@ func (m *home) openPaneWindow(instance *session.Instance, tab int) *store.OpenPa
 	if p == nil {
 		return nil
 	}
-	w := ui.NewTabbedWindow(ui.NewTabPane(m.newTabPaneSource()), p)
+	tp := ui.NewTabPane(m.newTabPaneSource())
+	// The create form's row carries OpCreating while it is only being named;
+	// the store tells the off-loop capture which row that is (#7407).
+	naming := m.store
+	tp.SetNamingCheck(func(inst *session.Instance) bool {
+		return inst != nil && naming.Naming() == inst
+	})
+	w := ui.NewTabbedWindow(tp, p)
 	// Wire the pane's mouse identity (#1024 R4): its zone ids are keyed by
 	// the same region id the focus ring and layout use, stable for the
 	// window's life.

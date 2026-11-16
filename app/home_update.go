@@ -121,7 +121,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// cross-repo snapshot fetched on the same poll (#1590), so a session
 		// created/removed in another repo updates the rows without a project
 		// switch. Its own error path leaves the last-known rows intact.
-		if m.refreshSidebarProjectsFromSnapshot(msg.allRepos, msg.allReposSkipped, msg.allReposErr) {
+		if m.refreshSidebarProjectsFromPoll(msg.allRepos, msg.allReposSkipped, msg.allReposErr, msg.registry) {
 			changed = true
 		}
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")

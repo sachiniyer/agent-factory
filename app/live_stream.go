@@ -32,7 +32,9 @@ func (m *home) newTabPaneSource() ui.PreviewSource {
 		// wrong tab after a reorder/close. Only an empty id uses the legacy ordinal;
 		// a non-empty id that no longer resolves is refused, never fallen back.
 		tabID, _ := instance.TabIDAt(tab)
-		resp, err := fetch(daemon.PreviewRequest{Title: instance.Title, RepoID: repoID, Tab: tab, TabID: tabID, Full: full})
+		// Rows: this capture is drawn, so it must be the pane's rows, not lines
+		// joined across a soft wrap (#7406).
+		resp, err := fetch(daemon.PreviewRequest{Title: instance.Title, RepoID: repoID, Tab: tab, TabID: tabID, Full: full, Rows: true})
 		if err != nil {
 			return ui.PreviewSnapshot{}, err
 		}

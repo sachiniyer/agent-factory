@@ -346,6 +346,14 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 				!claudeLaunchDialogOwnRowsBetween(pane, prompt, pane.index[block]) {
 				return claudeLaunchDialogMatch{}, false
 			}
+			// A top-cropped boxed composer: its opening rule scrolled off the
+			// top, so its prompt row sits straight above the composer's closing
+			// edge — a bottom-cornered frame (╰…╯ closes; ╭…╮ opens). A bare
+			// transcript ">" row sits above the framed dialog's own top border
+			// (╭…╮), never above a ╰…╯ closing rule (#7399 review).
+			if claudeLaunchDialogPromptRow(pane, i-1) && claudeTrustFrameClosingRule(pane.lines[i]) {
+				return claudeLaunchDialogMatch{}, false
+			}
 		}
 		match.saw = "its option rows and its footer under rows af cannot read as the dialog's question"
 		return match, true
