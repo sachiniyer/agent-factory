@@ -109,6 +109,20 @@ type daemonLifecycle struct {
 	// reported DaemonPhaseQuiescing so a stuck hand-off is visible, not silent.
 	quiescing bool
 	listeners DaemonListenerStatus
+
+	// handlers records every dispatched HTTP and control-socket handler, so a
+	// stop that cannot join them can name the ones it abandoned (#7393). It
+	// has its own mutex; mu does not guard it.
+	handlers inflightCalls
+}
+
+// inFlight returns the daemon's in-flight handler registry; nil-safe, so a
+// synthetic server without a lifecycle records nothing.
+func (l *daemonLifecycle) inFlight() *inflightCalls {
+	if l == nil {
+		return nil
+	}
+	return &l.handlers
 }
 
 const daemonBootIDBytes = 16

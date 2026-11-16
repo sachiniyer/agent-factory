@@ -66,6 +66,12 @@ func (s *controlServer) trackHTTPRPC(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		defer s.httpRequests.leave()
+		// Named while it runs, so a stop that abandons it can say so (#7393).
+		var calls *inflightCalls
+		if s.manager != nil {
+			calls = s.manager.lifecycle.inFlight()
+		}
+		defer calls.begin("HTTP " + r.Method + " " + r.URL.Path)()
 		next(w, r)
 	}
 }
