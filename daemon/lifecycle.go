@@ -114,6 +114,10 @@ type daemonLifecycle struct {
 	// stop that cannot join them can name the ones it abandoned (#7393). It
 	// has its own mutex; mu does not guard it.
 	handlers inflightCalls
+
+	// stop is the daemon's stop clock, installed by runDaemon (#7416). The
+	// Shutdown RPC stamps it on acceptance; nil on a manager no daemon runs.
+	stop *stopClock
 }
 
 // inFlight returns the daemon's in-flight handler registry; nil-safe, so a
@@ -123,6 +127,23 @@ func (l *daemonLifecycle) inFlight() *inflightCalls {
 		return nil
 	}
 	return &l.handlers
+}
+
+// useStopClock installs the clock this daemon's stop deadline is measured from.
+func (l *daemonLifecycle) useStopClock(c *stopClock) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.stop = c
+}
+
+// stopClock returns the installed stop clock, or nil; both nil-safe to use.
+func (l *daemonLifecycle) stopClock() *stopClock {
+	if l == nil {
+		return nil
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.stop
 }
 
 const daemonBootIDBytes = 16

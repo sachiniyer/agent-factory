@@ -220,8 +220,19 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// teardown. Go's default SIGTERM termination would skip every defer —
 	// leaving the published PID file behind and abandoning whatever the
 	// manager and listeners already created.
+	//
+	// The stop's deadline starts when its signal arrives (#7416), not when the
+	// main flow next reads sigChan: a stop that lands during a startup step
+	// sits buffered until the restore select while the stopper's clock runs.
+	// So the signals arrive on rawSigs, and a relay stamps the stop clock
+	// before handing each one on.
+	stop := &stopClock{}
+	rawSigs := make(chan os.Signal, 1)
+	signal.Notify(rawSigs, syscall.SIGINT, syscall.SIGTERM)
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	relayDone := make(chan struct{})
+	defer close(relayDone)
+	go relayStopSignals(rawSigs, sigChan, stop, relayDone)
 	// Notify has already disabled the default disposition for these
 	// signals, but nothing RECEIVES on sigChan until the restore select far
 	// below — the manager storage load, the unbounded daemon.spawn lock
@@ -301,6 +312,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	if err != nil {
 		return err
 	}
+	// The Shutdown RPC stamps the same clock the signal relay does.
+	manager.lifecycle.useStopClock(stop)
 
 	// The task-delivery shutdown classifier (#5503) needs this daemon's drain
 	// state; install it as soon as the lifecycle exists so a run already in
@@ -310,56 +323,67 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	daemonDrainingFn = func() bool { return manager.lifecycle.isQuiescing() }
 	defer func() { daemonDrainingFn = func() bool { return false } }()
 
-	// Stop every daemon-spawned VS Code editor on the way out. Without this a
-	// shutdown would strand a code-server per session, still holding its loopback
-	// port and now reachable by nothing — the leak class this feature must not
-	// introduce. (A SIGKILLed daemon still orphans them; ensureServer's
-	// worktree-checked reuse means a restarted daemon starts fresh editors rather
-	// than adopting the strays.)
-	//
-	// Registered HERE — the instant the supervisor exists, before the control
-	// socket and HTTP server bind — rather than after the instance restore, so the
-	// warm-up exit paths cannot skip it. Both early returns from the restore select
-	// below (SIGTERM and the Shutdown RPC) leave RunDaemon without ever reaching
-	// the post-restore section, and an editor CAN exist by then: the webtab proxy
-	// route is serving from the moment the HTTP server binds, and it resolves its
-	// session through refreshLocked, which loads instances from disk on its own. So
-	// a stale iframe refresh during a slow restore can drive its own restore, spawn
-	// an editor, and a SIGTERM moments later would orphan it. Deferring at the
-	// point of construction makes the stop unconditional on how far startup got.
-	defer manager.vscode.Stop()
-	// Same reasoning, same place: a config agent is a bare tmux session with no
-	// Instance, so NOTHING else knows it exists — not instances.json, not the
-	// roster, not the restore loop. If this daemon exits without reaping them
-	// they are orphans no future daemon can find, which is the #1093/#1104 class
-	// this repo has already been bitten by. Registered at construction so the
-	// warm-up exit paths (SIGTERM, the Shutdown RPC) cannot skip it.
-	defer manager.configAgents.Stop()
-	// And the login panes, for exactly the same reason (#3384). An account login
-	// is a bare tmux session with no Instance, so this is the only thing that
+	// The teardown: every supervisor that stops what this daemon started, run
+	// in parallel and bounded by the stop's deadline (daemon_teardown.go,
+	// #7416). It is deferred HERE — the instant the supervisors exist, before
+	// the control socket and HTTP server bind — rather than after the instance
+	// restore, so the warm-up exits cannot skip it: both early returns from the
+	// restore select below (SIGTERM and the Shutdown RPC) leave RunDaemon
+	// without ever reaching the post-restore section, and each step below can
+	// already have something to stop by then.
+	teardown := &daemonTeardown{}
+	defer func() { teardown.run(stop.began().Add(stopTeardownBy)) }()
+	// Every daemon-spawned VS Code editor. Without this a shutdown would strand
+	// a code-server per session, still holding its loopback port and now
+	// reachable by nothing — the leak class this feature must not introduce. (A
+	// SIGKILLed daemon still orphans them; ensureServer's worktree-checked reuse
+	// means a restarted daemon starts fresh editors rather than adopting the
+	// strays.) An editor CAN exist during warm-up: the webtab proxy route is
+	// serving from the moment the HTTP server binds, and it resolves its session
+	// through refreshLocked, which loads instances from disk on its own, so a
+	// stale iframe refresh during a slow restore can spawn one.
+	teardown.add("VS Code editors", manager.vscode.Stop)
+	// A config agent is a bare tmux session with no Instance, so NOTHING else
+	// knows it exists — not instances.json, not the roster, not the restore
+	// loop. If this daemon exits without reaping them they are orphans no
+	// future daemon can find, which is the #1093/#1104 class this repo has
+	// already been bitten by. The web config-assistant stream is torn down
+	// first, in the same step, so the clientless capture goroutine ends cleanly
+	// before the pane it reads is reaped: stop() closes the streamer only, and
+	// configAgents.Stop() owns killing the tmux (#2467).
+	teardown.add("config assistant streams, then config-agent sessions", func() {
+		manager.configAssistants.stop()
+		manager.configAgents.Stop()
+	})
+	// The login panes, for exactly the same reason (#3384). An account login is
+	// a bare tmux session with no Instance, so this is the only thing that
 	// knows it exists; a half-finished OAuth flow must die with the daemon that
 	// spawned it rather than sit on the tmux server forever.
-	defer manager.accountLogins.Stop()
-	// Tear the web config-assistant stream down before its tmux session is reaped
-	// above, so the clientless capture goroutine ends cleanly. stop() closes the
-	// streamer only; configAgents.Stop() owns killing the tmux (#2467). Deferred
-	// after configAgents.Stop() so it runs BEFORE it (LIFO): the capture stops, then
-	// the pane it was reading is torn down.
-	defer manager.configAssistants.stop()
-
-	// And the ssh -L tunnels behind ssh/sandbox sessions (#5564). They are
-	// children of THIS daemon, not of any session teardown — a session must
-	// survive the daemon that hosts it, so nothing else ever stops them on
-	// exit, and a clean exit would orphan them exactly like a SIGKILL does.
-	// Registered here, before the control socket binds and restore runs, for
-	// the same reason as the supervisors above: a signal during warm-up must
-	// not slip past it, and the session-side registry covers tunnels no
-	// instance points at yet (a provision still in flight).
-	defer stopSandboxTunnels()
+	teardown.add("account login panes", manager.accountLogins.Stop)
+	// The ssh -L tunnels behind ssh/sandbox sessions (#5564). They are children
+	// of THIS daemon, not of any session teardown — a session must survive the
+	// daemon that hosts it, so nothing else ever stops them on exit, and a
+	// clean exit would orphan them exactly like a SIGKILL does. The
+	// session-side registry covers tunnels no instance points at yet (a
+	// provision still in flight). The seam is read here, on the main flow.
+	teardown.add("sandbox tunnels", stopSandboxTunnels)
 
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)
 	watchers.observeTargetLimit = manager.observeTaskTargetLimit
+	// The watch-task supervisor's Stop: SIGTERM to each watch group, group
+	// SIGKILL after the grace. It is registered before the upgrade-probation
+	// select below, not after it: a released upgrade candidate transitions to
+	// DaemonPhaseHandoffPending while still parked in that select, and in that
+	// window it admits task-mutating RPCs (AddTask/UpdateTask/ReloadTasks) that
+	// arm real watcher subprocesses via watchers.reconcile -> go w.run() ->
+	// cmd.Start() ($SHELL -c watch_cmd, Setpgid). The select exits via `return
+	// nil` on signal or shutdown, and the reliable SIGTERM/SIGKILL group teardown
+	// lives only in watchers.Stop; no startup sweep can discover orphaned
+	// watch_cmd processes. A no-op if reconcile() was never called. A watcher
+	// still stopping at the stop deadline (a script that ignores SIGTERM) is
+	// abandoned there, and its lifeline and bound scope kill it after the exit.
+	teardown.add("watch tasks", watchers.Stop)
 
 	shutdownCh := make(chan struct{})
 	resetFatalAcceptErr() // clear any fatal error from a prior daemon in this process (tests)
@@ -375,30 +399,23 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("another agent-factory daemon bound the control socket first; exiting")
 		return nil
 	}
-	controlClosed := false
+	// Every exit from here on drains both control planes under the stop's one
+	// deadline (#7416). On the graceful path drainDaemon does it and sets
+	// controlClosed. This covers every other exit — a signal or Shutdown during
+	// the restore or upgrade probation, a failed restore — which used to call
+	// closeHTTP and closeControl directly, with no bound, so a handler stuck in
+	// either plane held the stop until the SIGKILL and skipped every later
+	// defer. drainPlanes latches the watchers before anything in it can block:
+	// a released upgrade candidate may already be running watchers armed by RPC
+	// (#7392). It runs before the teardown (LIFO).
+	var closeHTTP func() error
+	httpClosed, controlClosed := false, false
 	defer func() {
 		if controlClosed {
 			return
 		}
-		if err := closeControl(); err != nil {
-			log.WarningLog.Printf("failed to close daemon control socket: %v", err)
-		}
+		drainPlanes(manager, watchers, closeHTTP, closeControl, &httpClosed, &controlClosed, drainDeadline(manager))
 	}()
-
-	// Hoist the watch-task supervisor's Stop above the upgrade-probation
-	// select below: a released upgrade candidate transitions to
-	// DaemonPhaseHandoffPending while still parked in that select, and in that
-	// window it admits task-mutating RPCs (AddTask/UpdateTask/ReloadTasks) that
-	// arm real watcher subprocesses via watchers.reconcile -> go w.run() ->
-	// cmd.Start() ($SHELL -c watch_cmd, Setpgid). The select exits via
-	// `return nil` on signal or shutdown, which would skip a defer placed after
-	// it and leak those subprocesses: the reliable SIGTERM/SIGKILL group
-	// teardown lives only in watchers.Stop, and no startup sweep can discover
-	// orphaned watch_cmd processes. Registered after the closeControl defer so
-	// it runs BEFORE closeControl on LIFO, leaving the control socket live for
-	// any in-flight watch-event deliveries during teardown. No-op if reconcile()
-	// was never called — it iterates an empty map and Stop is idempotent.
-	defer watchers.Stop()
 
 	// Stand the startup watcher down BEFORE the HTTP listener starts serving:
 	// once the webtab proxy is reachable it can spawn editors, and a signal
@@ -415,27 +432,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// point, so no extra spawn race applies. A bind failure is logged but never
 	// fatal: HTTP is auxiliary — the gob control plane every existing client
 	// depends on must not regress if the HTTP socket cannot bind.
-	var closeHTTP func() error
-	httpClosed := false
+	// The deferred plane drain above picks closeHTTP up from here.
 	if closeCandidate, err := startHTTPServer(manager, scheduler, watchers); err != nil {
 		log.WarningLog.Printf("failed to start daemon HTTP server: %v", err)
 	} else {
 		closeHTTP = closeCandidate
-		defer func() {
-			if httpClosed {
-				return
-			}
-			if err := closeHTTP(); err != nil {
-				log.WarningLog.Printf("failed to close daemon HTTP server: %v", err)
-			}
-		}()
 	}
-	// The warm-up exits (a signal or Shutdown during restore or probation)
-	// return without drainDaemon, so latch the watchers here, ahead of the HTTP
-	// close above (LIFO), which joins handlers and can block: a released
-	// upgrade candidate may already be running watchers armed by RPC (#7392).
-	// On the graceful path drainDaemon has latched them long before this runs.
-	defer watchers.beginShutdown()
 
 	// Run the restore concurrently so a shutdown or signal during warm-up exits
 	// promptly instead of waiting for the restore to finish. The
