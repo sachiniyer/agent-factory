@@ -16,7 +16,9 @@ import (
 // allowed to touch.
 //
 // A watcher that returned from run() is in a TERMINAL state: the crash-loop
-// breaker tripped, or the script exited 0 and said it was done. Both promise the
+// breaker tripped, or the script exited 0 and said it was done. So is one whose
+// script exited 0 and which is only waiting out the clean-exit grace before it
+// records "stopped" (taskWatcher.terminal, #7423). Both promise the
 // operator a durable stop. That promise used to be decorative (#3837): every
 // task write ran a reconcile over the WHOLE store, a terminal watcher failed the
 // `!w.finished()` freshness test, and it was dropped and replaced by a fresh one
@@ -132,7 +134,7 @@ func (s *watcherSupervisor) reconcile(armed, allTasks []task.Task, scope watchSc
 			continue
 		}
 		t, ok := desired[id]
-		if ok && watcherSignature(t) == w.sig && !(w.finished() && scope.rearmsTerminal(id)) {
+		if ok && watcherSignature(t) == w.sig && !(w.terminal() && scope.rearmsTerminal(id)) {
 			continue
 		}
 		stale = append(stale, w)

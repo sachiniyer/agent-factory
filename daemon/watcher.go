@@ -308,6 +308,11 @@ type taskWatcher struct {
 	// in the kernel pipe — from one blocked on a writer that never closes (#4321).
 	readerBusy     atomic.Int32
 	readerProgress atomic.Uint64
+	// exitedClean is set as run() enters the clean-exit grace: the command
+	// exited 0 and the watcher is only waiting to see whether a stop caused
+	// it. A re-arm treats that watcher as already terminal (terminal), so the
+	// gesture is not dropped during the grace (#7423).
+	exitedClean atomic.Bool
 
 	taskID string
 	name   string
@@ -409,6 +414,14 @@ func (w *taskWatcher) finished() bool {
 	}
 }
 
+// terminal reports whether the watcher has stopped for good, or is only
+// waiting out the clean-exit grace before it records that it has. A re-arm
+// replaces either: before #7404 added the grace, an exit 0 finished the
+// watcher at once, and a re-arm in those 5 seconds must still re-arm (#7423).
+func (w *taskWatcher) terminal() bool {
+	return w.finished() || w.exitedClean.Load()
+}
+
 func (w *taskWatcher) stopRequested() bool {
 	select {
 	case <-w.stopCh:
@@ -460,7 +473,10 @@ func (w *taskWatcher) run() {
 			// Node handler) exits 0 before the latch arrives. "stopped" is
 			// durable, so it waits the same grace and is not recorded when a
 			// stop arrives. The grace returns the moment one does, so it never
-			// holds Stop (#7404).
+			// holds Stop (#7404). A re-arm during the grace reads this watcher
+			// as terminal and stops it, so the grace ends on stopCh, records
+			// nothing, and a replacement runs (#7423).
+			w.exitedClean.Store(true)
 			switch w.awaitDaemonStop(graceCleanExit) {
 			case daemonStopArrived:
 				log.InfoLog.Printf("watch task %s: watch command exited cleanly as the daemon began stopping; not recording it as stopped", w.taskID)
