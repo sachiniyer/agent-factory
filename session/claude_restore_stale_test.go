@@ -23,14 +23,23 @@ import (
 // its two project-directory spellings: as recorded first, then as resolved.
 func claudeRestoreWorktree(t *testing.T) (string, string, string) {
 	t.Helper()
+	workDir, recorded, resolved, _ := claudeRestoreWorktreeNamed(t, "repo")
+	return workDir, recorded, resolved
+}
+
+// claudeRestoreWorktreeNamed is claudeRestoreWorktree for a worktree whose last
+// path element is leaf. It also returns the real directory the symlinked
+// parent points at.
+func claudeRestoreWorktreeNamed(t *testing.T, leaf string) (string, string, string, string) {
+	t.Helper()
 	real := filepath.Join(testguard.CanonicalTempDir(t), "real")
-	require.NoError(t, os.MkdirAll(filepath.Join(real, "repo"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(real, leaf), 0o755))
 	link := filepath.Join(testguard.CanonicalTempDir(t), "link")
 	require.NoError(t, os.Symlink(real, link))
-	workDir := filepath.Join(link, "repo")
+	workDir := filepath.Join(link, leaf)
 	projects := claudeProjectCandidates(workDir)
 	require.Len(t, projects, 2, "the worktree must have two project-directory spellings")
-	return workDir, projects[0], projects[1]
+	return workDir, projects[0], projects[1], real
 }
 
 // claudeRestoreInstance is a Claude session whose agent tab recorded
@@ -158,6 +167,29 @@ func TestExactResumeRefusesAClaudeConversationThatIsNoLongerTheNewest(t *testing
 			require.True(t, refusal.retire, "the stale id is retired once the fresh spawn commits")
 		})
 	}
+}
+
+// #7375 review R1: the restore reads this worktree's own /clear, made after
+// the agent cd'd through a symlink below the worktree, as the carry does: the
+// recorded conversation was abandoned, and the restore starts fresh instead of
+// resuming it.
+func TestExactResumeAbandonsAConversationLeftAfterACdThroughASymlinkedSubdirectory(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	workDir, recorded, resolved, real := claudeRestoreWorktreeNamed(t, "a.b")
+	claudeSymlinkedSubdirs(t, workDir, real)
+	require.Equal(t, resolved, claudeProjectCandidates(filepath.Join(real, "a-b"))[0], "premise: a-b files under a.b's resolved project name")
+	past := time.Now().Add(-time.Hour)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(recorded, carryTestID+".jsonl"), claudeRecordLine(t, workDir)), past)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(resolved, newerConversationID+".jsonl"),
+		claudeRecordLine(t, filepath.Join(workDir, "ext"))), past.Add(time.Minute))
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+
+	require.Equal(t, recordedClaudeAbandoned, inst.judgeRecordedClaude("claude", workDir, carryTestID))
+	rewritten, ok, decline := prepareExactResumeConversation(inst, "claude")
+	require.False(t, ok)
+	require.Equal(t, "claude", rewritten, "a refused resume launches fresh")
+	require.Equal(t, staleCarryReason, decline.reason)
 }
 
 // A spelling af found but could not list is no evidence about the recorded

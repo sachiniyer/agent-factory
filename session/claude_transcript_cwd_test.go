@@ -28,6 +28,23 @@ func claudeRecordLine(t testing.TB, cwd string) string {
 	return string(line) + "\n"
 }
 
+// claudeSymlinkedSubdirs gives the a.b worktree symlinkedClaudeCarryInstanceNamed
+// builds under real the symlinks below it a conversation can cd through
+// (#7375 review R1): ext leads out of the worktree to outside/ext (which holds
+// pkg), tof leads into the colliding directory's subdirectory real/a-b/web,
+// and outside/alias is the worktree under another name. It returns outside.
+func claudeSymlinkedSubdirs(t *testing.T, worktree, real string) string {
+	t.Helper()
+	outside := filepath.Join(testguard.CanonicalTempDir(t), "outside")
+	for _, dir := range []string{filepath.Join(outside, "ext", "pkg"), filepath.Join(real, "a-b", "web")} {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+	}
+	require.NoError(t, os.Symlink(filepath.Join(outside, "ext"), filepath.Join(real, "a.b", "ext")))
+	require.NoError(t, os.Symlink(filepath.Join(real, "a-b", "web"), filepath.Join(real, "a.b", "tof")))
+	require.NoError(t, os.Symlink(worktree, filepath.Join(outside, "alias")))
+	return outside
+}
+
 func TestClaudeTranscriptDirReadsWhatClaudesResumeReads(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, content string) string {
@@ -115,6 +132,15 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 		// conversation unknown: the next one names the directory (R2).
 		{name: "a /clear whose first record is a pasted image", cwd: "oversize first", verdict: claudeRecordedStale},
 		{name: "a conversation that records the worktree's path before a move", cwd: "before a move", verdict: claudeRecordedStale},
+		// The same /clear after a cd through a symlink below the worktree: the
+		// recorded dir resolves outside it, but a lexical ancestor resolves to
+		// it, so the colliding name that ancestor files under is this
+		// worktree's own, never another directory's (#7375 review R1).
+		{name: "a /clear after a cd into a symlinked subdirectory", cwd: "symlinked subdirectory", verdict: claudeRecordedStale},
+		{name: "a /clear after a cd into a symlinked subdirectory, spelled resolved", cwd: "symlinked subdirectory resolved", verdict: claudeRecordedStale},
+		{name: "a /clear after a cd below a symlinked subdirectory", cwd: "below a symlinked subdirectory", verdict: claudeRecordedStale},
+		{name: "a /clear after a cd through an alias of the worktree", cwd: "through an alias", verdict: claudeRecordedStale},
+		{name: "a /clear after a cd into a symlink to the colliding directory's subdirectory", cwd: "symlink to foreign subdirectory", verdict: claudeRecordedStale},
 		{name: "a colliding directory's conversation", cwd: "foreign", verdict: claudeRecordedCurrent},
 		// A foreign conversation cd'd into its own subdirectory records the
 		// subdirectory, which has no project name matching the launch dir's:
@@ -134,6 +160,7 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 			require.NoError(t, os.MkdirAll(foreign, 0o755))
 			require.NoError(t, os.MkdirAll(filepath.Join(foreign, "web"), 0o755))
 			require.Equal(t, resolved, claudeProjectCandidates(foreign)[0], "premise: a-b files under a.b's resolved project name")
+			outside := claudeSymlinkedSubdirs(t, worktree, real)
 			recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
 			source := filepath.Join(home, ".claude")
 			setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), claudeRecordLine(t, worktree)), past)
@@ -145,12 +172,17 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 				"relocated in": claudeRecordLine(t, t.TempDir()) + relocation(worktree),
 				"relocated in long ago": claudeRecordLine(t, foreign) + relocation(worktree) +
 					strings.Repeat(claudeRecordLine(t, worktree), 2000),
-				"oversize first":       `{"type":"user","message":{"content":"` + strings.Repeat("x", claudeTranscriptRecordLimit) + `"}}` + "\n" + claudeRecordLine(t, worktree),
-				"before a move":        claudeRecordLine(t, filepath.Join(t.TempDir(), "old-place")),
-				"foreign":              claudeRecordLine(t, foreign),
-				"foreign subdirectory": claudeRecordLine(t, filepath.Join(foreign, "web")),
-				"relocated away":       claudeRecordLine(t, worktree) + relocation(foreign),
-				"":                     `{"type":"summary","summary":"s"}` + "\n",
+				"oversize first":                  `{"type":"user","message":{"content":"` + strings.Repeat("x", claudeTranscriptRecordLimit) + `"}}` + "\n" + claudeRecordLine(t, worktree),
+				"before a move":                   claudeRecordLine(t, filepath.Join(t.TempDir(), "old-place")),
+				"symlinked subdirectory":          claudeRecordLine(t, filepath.Join(worktree, "ext")),
+				"symlinked subdirectory resolved": claudeRecordLine(t, filepath.Join(real, "a.b", "ext")),
+				"below a symlinked subdirectory":  claudeRecordLine(t, filepath.Join(worktree, "ext", "pkg")),
+				"through an alias":                claudeRecordLine(t, filepath.Join(outside, "alias", "ext")),
+				"symlink to foreign subdirectory": claudeRecordLine(t, filepath.Join(worktree, "tof")),
+				"foreign":                         claudeRecordLine(t, foreign),
+				"foreign subdirectory":            claudeRecordLine(t, filepath.Join(foreign, "web")),
+				"relocated away":                  claudeRecordLine(t, worktree) + relocation(foreign),
+				"":                                `{"type":"summary","summary":"s"}` + "\n",
 			}[tc.cwd]
 			setModTime(t, writeCarryFile(t, source, filepath.Join(resolved, otherID+".jsonl"), content), past.Add(time.Minute))
 
