@@ -97,6 +97,12 @@ type claudeFolderTrustPane struct {
 	// them — Claude Code does exactly this in the instant after it paints the
 	// dialog, before it is reading input.
 	deaf int
+	// prefix is painted above the dialog, modelling earlier agent output a
+	// live modal can appear beneath — the composition the routing bug is about:
+	// a quoted "Yes, I trust this folder" above a live dialog. It is blank-row
+	// separated from the dialog so the trailing-region readers see only the
+	// dialog, the way a real pane that scrolled past its first output does.
+	prefix string
 }
 
 func (p *claudeFolderTrustPane) freeze(frozen bool) {
@@ -114,9 +120,15 @@ func (p *claudeFolderTrustPane) render() string {
 		if p.height > 0 {
 			frame = syntheticPane(frame, p.height)
 		}
+		if p.prefix != "" {
+			return p.prefix + frame.text
+		}
 		return frame.text
 	}
 	var b strings.Builder
+	if p.prefix != "" {
+		b.WriteString(p.prefix)
+	}
 	write := func(line string) {
 		if p.boxed {
 			fmt.Fprintf(&b, "│ %-48s │\n", line)
@@ -461,6 +473,26 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 		coloured = strings.ReplaceAll(coloured, claudeTrustYesLabel, "\x1b[32m"+claudeTrustYesLabel+"\x1b[0m")
 		dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(coloured))
 		require.NoError(t, err)
+		require.Equal(t, "Down", dialog.keyTowardAffirmative())
+	})
+
+	// A bare row that quotes the affirmative label ABOVE a live reworded dialog
+	// must not be counted as a second affirmative (affirmatives > 1). The parser
+	// reads the same trailing region claudeFolderTrustDialogOf reads — from the
+	// question to the bottom — so the quote above the question is outside it.
+	// This is the parse-level twin of the routing bug: the old whole-pane scan
+	// counted the quote, refused an otherwise answerable dialog, and the picker
+	// path never sent a key.
+	t.Run("a bare affirmative label quoted above the dialog is one affirmative, not two", func(t *testing.T) {
+		content := "Yes, I trust this folder\n" +
+			"Quick safety check:\nIs this a project you created or one you trust?\n\n" +
+			"❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\n" +
+			"Enter to confirm · Esc to cancel\n"
+		dialog, err := parseClaudeFolderTrustDialog(visibleTextOf(content))
+		require.NoError(t, err,
+			"a quoted label above the dialog must not make an answerable dialog read as ambiguous")
+		require.Equal(t, claudeTrustNoLabel, dialog.selectedLabel())
+		require.False(t, dialog.onAffirmative())
 		require.Equal(t, "Down", dialog.keyTowardAffirmative())
 	})
 
@@ -882,6 +914,11 @@ func TestCheckAndHandleTrustPrompt_RealClaudeFolderTrustDialogIsStillDriven(t *t
 	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
 	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(keys))
 }
+
+// Regression tests for the routing bug in answerClaudeTrustPrompt live in
+// claude_trust_quote_above_test.go (split out of this file in #1145's name to
+// keep this file under the 1500-line ceiling). The parse-level twin below
+// stays here, with the rest of TestParseClaudeFolderTrustDialog.
 
 // The legacy folder-trust wording ("Do you trust the files in this folder?")
 // is anchored on its unique question AND its picker row (the

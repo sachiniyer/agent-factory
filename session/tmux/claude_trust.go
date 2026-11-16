@@ -364,12 +364,17 @@ func (d claudeFolderTrustDialog) selectedLabel() string {
 	return d.rows[d.cursor].label
 }
 
-// claudeFolderTrustDialogPresent reports whether the capture shows the dialog
-// whose affirmative row af locates by label. The older MCP-server prompt and the
-// legacy "Do you trust the files in this folder?" wording render no such row;
-// they keep the historical Enter tap. Claude Code 2.1.322's MCP-server dialog
-// never reaches this check: answerClaudeTrustPrompt routes it to
-// declineClaudeMCPServer first.
+// claudeFolderTrustDialogPresent reports whether the affirmative label the
+// reworded folder-trust dialog renders appears anywhere in the captured pane.
+// It is a coarse SUBSTRING presence check, not a structural one: a bare quote
+// of the label in earlier agent output satisfies it, as does a grep of this
+// repo's own source. answerClaudeTrustPrompt therefore routes on
+// claudeFolderTrustDialogOf — which reads the dialog's own trailing region, the
+// way the legacy, MCP and 2.1.322 dialogs already do — not on this substring, so
+// a live legacy/MCP modal with the label quoted elsewhere on the pane still
+// reaches the Enter tap built for it. Keeping the substring here lets the
+// styled-rendering tests assert that the label survives ANSI stripping; it must
+// not be used to choose between the Enter tap and the label-picker.
 func claudeFolderTrustDialogPresent(screen visibleText) bool {
 	return strings.Contains(string(screen), claudeTrustAffirmativeLabel)
 }
@@ -560,7 +565,21 @@ func parseClaudeFolderTrustDialog(screen visibleText) (claudeFolderTrustDialog, 
 
 	dialog := claudeFolderTrustDialog{rows: rows, cursor: -1, affirmative: -1}
 	cursors, affirmatives := 0, 0
-	for idx, row := range rows {
+	// Count the cursor and the affirmative row only inside the dialog's own
+	// trailing region — from the question that opens it to the bottom of the
+	// pane — the same region claudeFolderTrustDialogOf reads. A bare row that
+	// quotes the affirmative label above a live dialog must not be counted as a
+	// second affirmative and make an answerable dialog read as ambiguous
+	// (affirmatives > 1); the routing split's whole-pane match had the same
+	// fault one layer up. When no question is on screen the parser is being
+	// called directly on an arbitrary fragment; fall back to the whole pane so
+	// those cases keep their existing verdicts.
+	start := 0
+	if first, _, ok := claudeFolderTrustQuestionRows(rows); ok {
+		start = first
+	}
+	for idx := start; idx < len(rows); idx++ {
+		row := rows[idx]
 		if row.selected {
 			dialog.cursor, cursors = idx, cursors+1
 		}
@@ -670,15 +689,24 @@ func (t *TmuxSession) answerClaudeTrustPrompt(screen visibleText) bool {
 		// that the preselection IS the decline row (#7163).
 		return t.declineClaudeMCPServer(dialog)
 	}
-	if !claudeFolderTrustDialogPresent(screen) {
+	if claudeFolderTrustDialogOf(screen) != claudeFolderTrustComplete {
 		// The older MCP-server trust prompt, or the legacy folder-trust
 		// wording. Neither renders a row af can locate by label and neither is
 		// what regressed in 2.1.257, so both keep the historical Enter tap on
 		// whatever Claude Code preselected. Both are structurally guarded at
 		// the predicate — claudeMCPTrustFooterIsLast for the MCP branch,
 		// claudeLegacyTrustDialogOf for the legacy branch — so only a live
-		// modal reaches this Enter; quoted output with the composer painted
-		// below it never reaches this branch.
+		// modal reaches this Enter.
+		//
+		// Routing on claudeFolderTrustDialogOf rather than a whole-pane
+		// substring of the affirmative label keeps this Enter branch reachable
+		// for a live legacy/MCP modal even when earlier agent output on the
+		// pane quotes "Yes, I trust this folder": claudeFolderTrustDialogOf
+		// reads the reworded dialog's own trailing region, so a quote above a
+		// legacy/MCP modal does not satisfy it. A whole-pane Contains did
+		// satisfy it on the quote alone, misrouting the live modal into the
+		// picker path, which refused without sending a key and failed after
+		// the trust-prompt budget — the modal this branch was built to answer.
 		if err := t.TapEnter(); err != nil {
 			log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
 			return true
