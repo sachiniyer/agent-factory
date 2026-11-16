@@ -42,3 +42,20 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(code)
 }
+
+// OwnsTmuxName is the startup bare-pane sweep's live-ownership check (#7428):
+// it must find a tracked pane by its tmux name — the map is keyed by account
+// identity, not name — and never claim a name it does not track.
+func TestSupervisorOwnsTmuxName(t *testing.T) {
+	s := New()
+	s.sessions[key("codex", "work")] = tmux.NewTmuxSessionFromSanitizedName("af_af-loginx-codex-776f726b", "")
+
+	if !s.OwnsTmuxName("af_af-loginx-codex-776f726b") {
+		t.Fatal("a tracked pane's tmux name must be reported owned")
+	}
+	for _, name := range []string{"af_af-loginx-codex-6f74686572", "af_af-config-1", ""} {
+		if s.OwnsTmuxName(name) {
+			t.Fatalf("untracked name %q must not be reported owned", name)
+		}
+	}
+}

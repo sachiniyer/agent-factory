@@ -483,6 +483,22 @@ func (s *Supervisor) Live(agent, name string) bool {
 	return s.live(agent, name) != nil
 }
 
+// OwnsTmuxName reports whether sanitizedName is the tmux name of a login pane
+// this supervisor currently tracks — the live-ownership check the daemon's
+// startup bare-pane sweep applies before it may ever reap a same-named
+// session (#7428). The pane map is keyed by account identity (agent/name), not
+// by the tmux name, so the lookup scans it.
+func (s *Supervisor) OwnsTmuxName(sanitizedName string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, pane := range s.sessions {
+		if pane.SanitizedName() == sanitizedName {
+			return true
+		}
+	}
+	return false
+}
+
 // live returns the tracked session only when tmux confirms it is still there,
 // forgetting it otherwise.
 //

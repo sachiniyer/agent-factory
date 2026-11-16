@@ -653,6 +653,80 @@ func selfAndAncestorProcesses(snap map[int]proctree.Process) map[int]bool {
 	return ancestors
 }
 
+// reapProtectedChain is the pid set a captured-tree reap must never signal,
+// whatever the caller: this process and its ancestors unconditionally, and a
+// descendant only when the descendant's own parent walk meets this process
+// strictly below a tmux process — descendant → reaper → tmux (#7433 R2).
+// Captured-tree membership is proven by descent, and descent is not
+// ownership — a daemon EnsureDaemon forked from a CLI running inside an
+// orphaned pane lands in that pane's tree with everything it has already
+// spawned, and the pane itself is its ancestor. proctree.Signal spares only
+// the reaper's own pid; without this set the reap waited on the caller for
+// seconds and then signalled its CLI and its children (a new daemon's ssh
+// tunnels, a foreign home's daemon started from the same pane).
+//
+// The server-above-self requirement is what keeps the exemption narrow. A
+// pane process's own walk always reaches the session's tmux server first —
+// even when the server sits UNDER the reaper, reparented to a subreaper or
+// spawned by it — so a captured pane process is never exempted here, and a
+// reaper whose own ancestry holds no tmux process exempts no descendant at
+// all. The set is computed once from one snapshot: only the processes
+// captured BEFORE the kill can ever be signalled, and no process can
+// re-parent into the caller's subtree, so a chain established at reap entry
+// cannot go stale. When the table cannot be read the chain beyond the caller
+// is unprovable and only the caller itself is excluded.
+func reapProtectedChain() map[int]bool {
+	self := os.Getpid()
+	protected := map[int]bool{self: true}
+	snap, err := proctree.Snapshot()
+	if err != nil {
+		log.WarningLog.Printf("cannot snapshot the process table to exclude the caller's own chain from signalling: %v", err)
+		return protected
+	}
+	for pid := range selfAndAncestorProcesses(snap) {
+		protected[pid] = true
+	}
+	for _, p := range proctree.TreeOf(snap, self) {
+		if p.PID != self && reachesSelfThenTmux(snap, p.PID, self) {
+			protected[p.PID] = true
+		}
+	}
+	return protected
+}
+
+// reachesSelfThenTmux walks pid's parent chain and reports whether it meets
+// the reaper strictly below a tmux process — both appear, in that order. The
+// reaper's own children inside the killed session's tree (the R2 tunnels:
+// processes a daemon spawned from inside the pane now being reaped) meet the
+// reaper first and the server above it. A pane process meets the server
+// first — including a pane under a server reparented beneath the reaper —
+// and a descendant under a reaper with no tmux ancestor meets no server at
+// all; both stay eligible. Only a POSITIVELY identified tmux process ends
+// the walk: an ancestor whose identity cannot be read is passed, because an
+// unproven link is not the server and must not exempt the descendant —
+// platforms where identity reads fail for non-child processes would then
+// spare every child of the reaper (macOS CI, where the same tests that run
+// under the linux subreaper showed this).
+func reachesSelfThenTmux(snap map[int]proctree.Process, pid, self int) bool {
+	seenSelf := false
+	for range 128 {
+		if pid <= 0 {
+			return false
+		}
+		if pid == self {
+			seenSelf = true
+		} else if proctree.TmuxIdentityOf(pid) == proctree.Tmux {
+			return seenSelf
+		}
+		p, ok := snap[pid]
+		if !ok {
+			return false
+		}
+		pid = p.PPID
+	}
+	return false
+}
+
 // reapReason says WHY a captured process tree is being reaped. It is the
 // caller's answer and never proctree's: KillEscalating is handed a list and
 // cannot know whether those processes escaped anything (#2765).
@@ -695,7 +769,14 @@ var (
 // verified — see proctree.KillEscalating). Runs synchronously; teardown
 // paths that must stay snappy call it in a goroutine. Every signal is logged
 // per-process, at the severity the reason and the outcome agree on.
-func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) []proctree.Process {
+//
+// protected is the reaper's own-chain exemption — see reapProtectedChain. A
+// caller that kills before reaping must capture it BEFORE the kill, alongside
+// the pane-tree capture: a pane shell or CLI dying on the kill reparents the
+// reaper out of the tree, and a chain reconstructed afterwards is the wrong
+// one (Codex on #7433). nil computes it at reap entry — correct only for a
+// caller with no preceding kill.
+func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration, protected map[int]bool) []proctree.Process {
 	// A tracked teardown requester stays IN the candidate set — the reaper's
 	// per-signal recheck spares it only while the registry still reports it
 	// tracked, so a reprieve that ends mid-reap lets the next tier reap it
@@ -711,11 +792,33 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 				"excluding it from signalling (#5182)", p.PID, p.Comm)
 		}
 	}
+	// #7433 R2: the reaper's own chain is likewise exempt for EVERY caller —
+	// self and ancestors unconditionally, a descendant only when its parent
+	// walk meets the reaper strictly below a tmux process. Descent is not
+	// membership: a daemon EnsureDaemon forked out of the pane being reaped
+	// lands in that pane's tree, and captured procs include it, the CLI above
+	// it, and its children. proctree.Signal spares only os.Getpid; without
+	// this set the reap waited seconds on the caller, then signalled its CLI
+	// and its children. The server-above-self requirement keeps it narrow:
+	// a pane process under a server reparented beneath the reaper still
+	// meets the server first and is reaped.
+	if protected == nil {
+		protected = reapProtectedChain()
+	}
+	exemptedProtected := make(map[int]bool)
 	// And it can be registered AFTER the capture — a teardown still in its
 	// grace wait when this process's own destructive RPC finally reaches its
 	// handler (Codex on #5186). The exempt predicate is re-run before every
 	// signal tier so a late-tracked requester is still spared.
 	return proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
+		if protected[p.PID] {
+			if !exemptedProtected[p.PID] {
+				exemptedProtected[p.PID] = true
+				log.InfoLog.Printf("process pid %d (%s) is the %s reaper's own process, ancestor, or descendant; "+
+					"excluding it from signalling (#7433)", p.PID, p.Comm, reason.clause)
+			}
+			return true
+		}
 		if !isTeardownRequester(p) {
 			return false
 		}

@@ -2,6 +2,8 @@ package tmux
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -60,48 +62,195 @@ func ReapProvenIncarnation(cmdExec cmd.Executor, program string, proof Incarnati
 	if proof.SessionName == "" || proof.Home == "" || proof.InstanceID == "" {
 		return IncarnationReap{Why: "the fire recorded no instance id before its spawn, so no session can be proven to be its own"}
 	}
-	t := NewTmuxSessionFromSanitizedName(proof.SessionName, program)
+	return reapProvenSession(cmdExec, program, proof.SessionName, func(t *TmuxSession, gen *tmuxGeneration) string {
+		for _, want := range []struct{ marker, value string }{
+			{EnvMarkerInstance, proof.InstanceID},
+			{EnvMarkerHome, proof.Home},
+			{EnvMarkerSession, proof.SessionName},
+		} {
+			got, present, err := sessionEnvMarkerAt(cmdExec, gen.sessionID, proof.SessionName, want.marker, "")
+			switch {
+			case err != nil:
+				return markerReadRefusal(t, gen, proof.SessionName, want.marker, err)
+			case !present:
+				return fmt.Sprintf("session %q carries no %s, so it cannot be proven to be this fire's", proof.SessionName, want.marker)
+			case got != want.value:
+				return fmt.Sprintf("session %q carries a different %s, so it was not created by this fire", proof.SessionName, want.marker)
+			}
+		}
+		return ""
+	})
+}
+
+// reapProvenSession is the guarded-kill spine both proven-session reapers
+// share: resolve the exact incarnation answering at sanitizedName once (its
+// "$N" id, server pid and creation stamp), let check prove that incarnation's
+// heritage from ITS OWN session environment, re-confirm the same incarnation
+// is still answering, then kill it through the atomic server-side re-check
+// (killVerifiedIncarnation). check returns "" when the incarnation is proven
+// and the refusal to record otherwise.
+func reapProvenSession(cmdExec cmd.Executor, program, sanitizedName string, check func(t *TmuxSession, gen *tmuxGeneration) string) IncarnationReap {
+	t := NewTmuxSessionFromSanitizedName(sanitizedName, program)
 	t.cmdExec = cmdExec
 
 	gen, answered := t.confirmedGeneration()
 	if !answered {
-		return IncarnationReap{Why: fmt.Sprintf("tmux did not answer while resolving session %q", proof.SessionName)}
+		return IncarnationReap{Why: fmt.Sprintf("tmux did not answer while resolving session %q", sanitizedName)}
 	}
 	if gen == nil {
 		// Resolved to nothing provable: the session vanished after it was listed,
 		// or tmux answered with a failure that is not "absent". Either way there is
 		// no incarnation to prove, and nothing may be killed by name instead.
-		return IncarnationReap{Why: fmt.Sprintf("session %q did not resolve to a tmux session id", proof.SessionName)}
+		return IncarnationReap{Why: fmt.Sprintf("session %q did not resolve to a tmux session id", sanitizedName)}
 	}
 
-	for _, want := range []struct{ marker, value string }{
-		{EnvMarkerInstance, proof.InstanceID},
-		{EnvMarkerHome, proof.Home},
-		{EnvMarkerSession, proof.SessionName},
-	} {
-		got, present, err := sessionEnvMarkerAt(cmdExec, gen.sessionID, proof.SessionName, want.marker, "")
-		switch {
-		case err != nil:
-			if same, known, gerr := t.confirmIncarnation(gen); gerr == nil && known && !same {
-				return IncarnationReap{Why: fmt.Sprintf("session %q was replaced after it was probed", proof.SessionName)}
-			}
-			return IncarnationReap{Why: fmt.Sprintf("could not read %s of session %q: %v", want.marker, proof.SessionName, err)}
-		case !present:
-			return IncarnationReap{Why: fmt.Sprintf("session %q carries no %s, so it cannot be proven to be this fire's", proof.SessionName, want.marker)}
-		case got != want.value:
-			return IncarnationReap{Why: fmt.Sprintf("session %q carries a different %s, so it was not created by this fire", proof.SessionName, want.marker)}
-		}
+	if why := check(t, gen); why != "" {
+		return IncarnationReap{Why: why}
 	}
 
 	same, known, err := t.confirmIncarnation(gen)
 	if err != nil || !known {
-		return IncarnationReap{Why: fmt.Sprintf("could not re-confirm session %q before stopping it: %v", proof.SessionName, err)}
+		return IncarnationReap{Why: fmt.Sprintf("could not re-confirm session %q before stopping it: %v", sanitizedName, err)}
 	}
 	if !same {
-		return IncarnationReap{Why: fmt.Sprintf("session %q was replaced after it was probed", proof.SessionName)}
+		return IncarnationReap{Why: fmt.Sprintf("session %q was replaced after it was probed", sanitizedName)}
 	}
 
 	return t.killVerifiedIncarnation(gen)
+}
+
+// markerReadRefusal names the condition that left a marker read unanswered:
+// the incarnation's provable replacement, when the session the id resolved to
+// is already gone, or the bare read failure otherwise.
+func markerReadRefusal(t *TmuxSession, gen *tmuxGeneration, sanitizedName, marker string, err error) string {
+	if same, known, gerr := t.confirmIncarnation(gen); gerr == nil && known && !same {
+		return fmt.Sprintf("session %q was replaced after it was probed", sanitizedName)
+	}
+	return fmt.Sprintf("could not read %s of session %q: %v", marker, sanitizedName, err)
+}
+
+// BareSessionProof is the durable ownership evidence for a daemon-owned bare
+// tmux session — a config-agent or account-login pane, spawned with no
+// instance id and so carrying no instance row (#7428). Every field must be
+// set: an empty one proves nothing, so the session is left alone.
+type BareSessionProof struct {
+	// SessionName is the sanitized tmux session name (AF_SESSION).
+	SessionName string
+	// Home is the agent-factory home that owns the session (AF_HOME).
+	Home string
+}
+
+// ReapProvenBareSession stops the tmux session answering at proof.SessionName
+// ONLY if that exact incarnation proves to be a bare pane this home's daemon
+// spawned — and kills it by its tmux session id, through the same
+// reapProvenSession spine ReapProvenIncarnation uses.
+//
+// Where an incarnation's heritage is a journaled instance id, a bare pane's is
+// the marker set itself: a bare pane is an af session with no instance
+// identity BY CONSTRUCTION — sessionEnvFlags stamps AF_INSTANCE_ID only when
+// the launch carries a minted id, which only journaled creates do
+// (envmarker.go). The set a bare pane provably carries is therefore:
+//
+//   - AF_SESSION == the name (the same proof an incarnation's marker loop
+//     applies);
+//   - AF_HOME == this home — sameDir: exact literal equality, or both paths
+//     stat to the same file. A path that only Cleans to the home must NOT be
+//     accepted: filepath.Clean resolves ".." lexically, but the filesystem
+//     resolves it against a real directory, so a foreign home whose path
+//     merely cleans to this one was admitted when the compare was lexical
+//     (#7433 review). A marker that does not stat is unproven;
+//   - AF_SESSION_GEN present — heritage from a post-marker binary, so a
+//     same-named session from before the marker set existed is excluded;
+//   - AF_INSTANCE_ID ABSENT — the bare-pane discriminator: a same-shaped
+//     session carrying one is an instance spawn, the pending-creates sweep's
+//     class, not this one's.
+//
+// The reads come from the resolved incarnation's SESSION environment only —
+// `show-environment -t $N`, the same scope `new-session -e` stamped. Never the
+// global environment (`-g`): tmux copies the first starter's environment into
+// the server's global environment, so an unrelated session on a shared server
+// can APPEAR to carry this home's markers when the read is not session-scoped
+// (#6846 review). Never a pane process's inherited environ either — the same
+// untrusted channel.
+//
+// Every uncertainty leaves the session alone: no markers (a session from
+// before the marker set, or tmux < 3.2 which cannot stamp one), an unreadable
+// environment, a probe that did not answer, a mismatch, a carried
+// AF_INSTANCE_ID, a replaced incarnation. "Unknown" is never "ours".
+func ReapProvenBareSession(cmdExec cmd.Executor, program string, proof BareSessionProof) IncarnationReap {
+	if proof.SessionName == "" || proof.Home == "" {
+		return IncarnationReap{Why: "the proof carries no name or home, so no session can be proven to be a daemon-owned bare pane"}
+	}
+	return reapProvenSession(cmdExec, program, proof.SessionName, func(t *TmuxSession, gen *tmuxGeneration) string {
+		read := func(marker string) (got string, present bool, refusal string) {
+			got, present, err := sessionEnvMarkerAt(cmdExec, gen.sessionID, proof.SessionName, marker, "")
+			if err != nil {
+				return "", false, markerReadRefusal(t, gen, proof.SessionName, marker, err)
+			}
+			return got, present, ""
+		}
+		got, present, refusal := read(EnvMarkerSession)
+		switch {
+		case refusal != "":
+			return refusal
+		case !present:
+			return fmt.Sprintf("session %q carries no %s, so it cannot be proven to be this daemon's bare pane", proof.SessionName, EnvMarkerSession)
+		case got != proof.SessionName:
+			return fmt.Sprintf("session %q carries a different %s, so it was not spawned under this name", proof.SessionName, EnvMarkerSession)
+		}
+		got, present, refusal = read(EnvMarkerHome)
+		switch {
+		case refusal != "":
+			return refusal
+		case !present:
+			return fmt.Sprintf("session %q carries no %s, so its owning home cannot be proven (pre-marker build or tmux <3.2)", proof.SessionName, EnvMarkerHome)
+		case !sameDir(got, proof.Home):
+			return fmt.Sprintf("session %q belongs to a different agent-factory home (%s)", proof.SessionName, got)
+		}
+		if _, present, refusal := read(EnvMarkerGeneration); refusal != "" {
+			return refusal
+		} else if !present {
+			return fmt.Sprintf("session %q carries no %s, so it predates the marker set and cannot be proven a daemon-owned bare pane", proof.SessionName, EnvMarkerGeneration)
+		}
+		if _, present, refusal := read(EnvMarkerInstance); refusal != "" {
+			return refusal
+		} else if present {
+			return fmt.Sprintf("session %q carries an %s, so it is an instance create, not a bare pane", proof.SessionName, EnvMarkerInstance)
+		}
+		return ""
+	})
+}
+
+// sameDir reports whether a and b provably name the same directory: true for
+// an exact literal match, or when both stat and os.SameFile finds them the
+// same file. Anything else — a path that does not exist, a path that cannot be
+// stat'd, different files — is unproven, and unproven is never "same" on a
+// kill path (#7433 review): filepath.Clean is NOT a substitute, because ".." in
+// a marker resolves lexically while the filesystem resolves it against a real
+// directory, so a path that only Cleans to the home can be a different home.
+//
+// Both sides must be absolute BEFORE either comparison runs (#7433 Codex):
+// a relative path is anchored to the resolving process's working directory —
+// afHomeDir stamps AGENT_FACTORY_HOME unchanged, so two daemons launched from
+// different directories with AF_HOME=.af carry markers that match literally
+// while naming different installs, and the marker's own cwd is unrecoverable.
+// doctor/tmux_sessions.go classifies the same shape as unproven ownership.
+func sameDir(a, b string) bool {
+	if !filepath.IsAbs(a) || !filepath.IsAbs(b) {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
 }
 
 // Seams for tests: the pane-row parse needs a real tmux server's process tree, and
@@ -173,7 +322,12 @@ func (t *TmuxSession) killVerifiedIncarnation(gen *tmuxGeneration) IncarnationRe
 
 	// Capture the pane process trees BEFORE the kill (afterwards survivors are
 	// reparented and the ancestry is gone), from the verified incarnation only.
+	// The reaper's own-chain evidence is captured with it, at the same pre-kill
+	// shape: a pane shell or CLI dying on the kill reparents a daemon spawned
+	// inside this pane out from under the server, and protection decided from
+	// the post-kill tree is decided from the wrong tree (Codex on #7433).
 	leaked, captureNote := t.captureVerifiedTrees(r, gen)
+	protected := reapProtectedChain()
 
 	out, err := r.output(guardedKillArgs(gen)...)
 	if err != nil {
@@ -201,7 +355,7 @@ func (t *TmuxSession) killVerifiedIncarnation(gen *tmuxGeneration) IncarnationRe
 	if len(leaked) > 0 {
 		// Synchronous: the boot reconcile that calls this is not latency-sensitive,
 		// and a caller told "stopped" should find the pane's processes stopped too.
-		incarnationReapProcesses(reapOnRequest, name, leaked, reapGraceWait, reapTermWait)
+		incarnationReapProcesses(reapOnRequest, name, leaked, reapGraceWait, reapTermWait, protected)
 	}
 	return IncarnationReap{Stopped: true}
 }

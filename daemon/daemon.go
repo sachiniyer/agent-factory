@@ -580,6 +580,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// every stamped live session it could act on belongs to a previous
 	// generation — and a journaled leftover is gone before its fire reconciles.
 	startupStep("unrecorded create sweep", sweepUnrecordedCreateSessions)
+	// Reaps bare config-agent and account-login panes a previous generation
+	// abandoned (#7428). After the restore so instance rows can claim their
+	// sessions' names, and before finishInstanceRestore opens readiness: every
+	// path that can create a bare pane sits behind requireStateMutationAdmission,
+	// so a candidate here can only belong to a previous daemon — or to nobody.
+	startupStep("bare pane sweep", manager.sweepOrphanBarePanes)
 	// Background and read-only until it proves an orphan; see sandbox_dir_sweep.go.
 	startupStep("sandbox orphan dir sweep", manager.sweepStartupOrphanSandboxDirs)
 	// Reaps marked sibling sandboxes that are expired or proven orphaned —

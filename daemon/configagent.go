@@ -197,6 +197,18 @@ func (c *configAgentSupervisor) session(name string) *tmux.TmuxSession {
 	return c.sessions[name]
 }
 
+// ownsTmuxName reports whether name is a config-agent tmux session this daemon
+// currently tracks — the live-ownership check the startup bare-pane sweep
+// applies before it may ever reap a same-named session (#7428). The map is
+// keyed by the sanitized tmux name (af_af-config-<n>), so this is membership,
+// not a scan.
+func (c *configAgentSupervisor) ownsTmuxName(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.sessions[name]
+	return ok
+}
+
 // watchReceipt keeps a bounded post-attach receipt check under the same
 // ownership as the bare tmux session. Reap and daemon shutdown cancel and join
 // it, so a closed config agent cannot emit a later degradation warning.
