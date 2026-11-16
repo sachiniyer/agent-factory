@@ -122,3 +122,18 @@ func TestThrowawayLabelProofSkipsAVanishedHome(t *testing.T) {
 		require.False(t, isHome(file), "a label naming a file is skipped")
 	})
 }
+
+// TestThrowawayTeardownNeverReapsTheDefaultHomesContainers: the teardown
+// refuses the default install's home before it reaps anything, so the real
+// install's containers are never put to the proof at all.
+func TestThrowawayTeardownNeverReapsTheDefaultHomesContainers(t *testing.T) {
+	home := t.TempDir()
+	previousDefault := throwawayDefaultHomeFn
+	throwawayDefaultHomeFn = func() (string, error) { return home, nil }
+	t.Cleanup(func() { throwawayDefaultHomeFn = previousDefault })
+	calls := captureContainerReap(t)
+
+	teardownThrowawaySandbox(home, &throwawaysandbox.Marker{Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 1})
+
+	require.Empty(t, *calls, "the default install's home must be refused before its containers are reaped")
+}
