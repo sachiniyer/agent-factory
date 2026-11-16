@@ -58,6 +58,29 @@ func symlinkedClaudeCarryInstanceNamed(t *testing.T, leaf string) (*Instance, st
 	return inst, projects[0], projects[1], real
 }
 
+// #7375 review R1: this worktree's own /clear, made after the agent cd'd
+// through a symlink below the worktree, records a directory that resolves
+// outside it. Its lexical ancestor is the worktree, so the colliding project
+// name that ancestor files under is this worktree's own, not a colliding
+// directory's: the newer conversation is evidence and the carry refuses.
+func TestClaudeCarryRefusesAfterACdThroughASymlinkedSubdirectory(t *testing.T) {
+	home := carryAmbientProviderHomes(t)
+	inst, recorded, resolved, real := symlinkedClaudeCarryInstanceNamed(t, "a.b")
+	worktree := inst.GetWorktreePath()
+	claudeSymlinkedSubdirs(t, worktree, real)
+	require.Equal(t, resolved, claudeProjectCandidates(filepath.Join(real, "a-b"))[0], "premise: a-b files under a.b's resolved project name")
+	recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
+	source := filepath.Join(home, ".claude")
+	past := time.Now().Add(-time.Hour)
+	setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), claudeRecordLine(t, worktree)), past)
+	setModTime(t, writeCarryFile(t, source, filepath.Join(resolved, newerConversationID+".jsonl"),
+		claudeRecordLine(t, filepath.Join(worktree, "ext"))), past.Add(time.Minute))
+
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	require.Nil(t, inst.accountSwapLaunch.carry, "the newer conversation is this worktree's, so the recorded one is stale")
+	require.Equal(t, staleCarryReason, inst.accountSwapLaunch.carryFallback)
+}
+
 func TestClaudeCarryStalenessReadsEveryProjectSpelling(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 	// cwd is the worktree each subtest's conversations were launched in.

@@ -169,6 +169,14 @@ func claudeProjectName(path string) string {
 // incomplete list, and ownership reads one as unknown (either side); one whose
 // safe answer is the recorded spelling's uses claudeProjectCandidates.
 func claudeProjectSpellings(dir string) (projects []string, complete bool) {
+	projects, _, complete = claudeResolvedProjectSpellings(dir)
+	return projects, complete
+}
+
+// claudeResolvedProjectSpellings is claudeProjectSpellings that also returns
+// the kernel's spelling of dir it computed: what dir resolves to, in
+// fsprobe.ResolveForCompare's form. resolved is "" when complete is false.
+func claudeResolvedProjectSpellings(dir string) (projects []string, resolved string, complete bool) {
 	projects = []string{filepath.Join("projects", claudeProjectName(dir))}
 	resolved, err := fsprobe.EvalSymlinks(dir)
 	if pathutil.IsAbsent(err) {
@@ -179,12 +187,12 @@ func claudeProjectSpellings(dir string) (projects []string, complete bool) {
 	if err != nil {
 		// A lookup that did not answer, or failed for any reason but absence
 		// (EIO, ESTALE, EACCES…), leaves the kernel's spelling unknown (#7286).
-		return projects, false
+		return projects, "", false
 	}
 	if name := claudeProjectName(resolved); name != claudeProjectName(dir) {
 		projects = append(projects, filepath.Join("projects", name))
 	}
-	return projects, true
+	return projects, resolved, true
 }
 
 // claudeProjectCandidates is claudeProjectSpellings for a caller whose answer
