@@ -279,7 +279,10 @@ func TestSweepConvergesPastBound(t *testing.T) {
 		m.MaxLifetimeSeconds = 60
 	})
 	register(expired)
-	sweepThrowawaySandboxes(self)
+	pending := sweepThrowawaySandboxes(self)
+	// A swept home stays registered until its containers are reaped after
+	// readiness (#7447); run that pass, with nothing left to remove.
+	reapSweptThrowawayContainers(pending, regDir, func(string) bool { return true }, nil)
 	expiredCanon, err := canonicalDir(expired)
 	if err != nil {
 		t.Fatal(err)

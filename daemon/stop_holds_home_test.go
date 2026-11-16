@@ -369,8 +369,11 @@ func TestRunDaemonExpiredThrowawayIsTornDownBeforeTheExitHoldingTheHome(t *testi
 	throwawayRegistryDirFn = func() string { return registry }
 	order := &stopOrder{}
 	throwawayTeardownFn = func(string, *throwawaysandbox.Marker) { order.note("throwaway teardown") }
+	previousContainerReap := throwawayHomeContainerReapFn
+	throwawayHomeContainerReapFn = func(string) bool { order.note("container reap"); return true }
 	t.Cleanup(func() {
 		throwawayDefaultHomeFn, throwawayRegistryDirFn, throwawayTeardownFn = previousDefault, previousRegistry, previousTeardown
+		throwawayHomeContainerReapFn = previousContainerReap
 	})
 	// Expired before the daemon starts, so its watchdog ends it at once.
 	require.NoError(t, throwawaysandbox.WriteMarker(home, &throwawaysandbox.Marker{
@@ -402,6 +405,10 @@ func TestRunDaemonExpiredThrowawayIsTornDownBeforeTheExitHoldingTheHome(t *testi
 		}
 	}
 	require.Equal(t, 1, teardowns, "the sandbox is torn down once: %v", seen)
+	// Its containers go with it, before the exit too (#7447).
+	require.GreaterOrEqual(t, len(seen), 2, "the expired sandbox's containers were never reaped: %v", seen)
+	require.Equal(t, "container reap", seen[1],
+		"the expired sandbox's containers must be reaped right after its teardown, before the exit: %v", seen)
 }
 
 // TestRunDaemonPanicDuringAnAbandonedStopExitsTwoWithItsStack: a panic on the
@@ -452,7 +459,14 @@ func TestRunDaemonPanicDuringAnAbandonedStopExitsTwoWithItsStack(t *testing.T) {
 	select {
 	case exit = <-exits:
 	case <-runExited:
-		t.Fatalf("the panicking stop never exited holding the home; the panic escaped RunDaemon: %v", <-escaped)
+		// The exit is recorded before RunDaemon returns, so both can be ready
+		// at once; look for it before calling this a skipped exit (Codex on
+		// #7448).
+		select {
+		case exit = <-exits:
+		default:
+			t.Fatalf("the panicking stop never exited holding the home; the panic escaped RunDaemon: %v", <-escaped)
+		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("the panicking daemon never stopped")
 	}

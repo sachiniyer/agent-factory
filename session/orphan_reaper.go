@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -17,6 +18,11 @@ type OrphanSweepResult struct {
 	Skipped int // containers spared as a live or mid-create session
 	Unknown int // orphans left for a later sweep (state unknown)
 	Errors  int // orphans docker refused to remove for a definite reason
+	// Unlisted is set when the pass could not list this engine's containers
+	// at all — no endpoint, no engine identity, or a failed listing — so it
+	// proved nothing about what is still there (#7447). A missing docker CLI
+	// is not unlisted: nothing on this host could have created a container.
+	Unlisted bool
 }
 
 // afContainer is one listed managed container: its id, its af.session slug,
@@ -137,6 +143,7 @@ func reapListedContainers(pass containerReap) OrphanSweepResult {
 	// here before the sweep's first docker call (#4413 review).
 	if _, _, err := resolveDockerEngineEndpoint(env); err != nil {
 		log.WarningLog.Printf("%s: cannot resolve the Docker engine endpoint; skipping this sweep: %v", pass.logPrefix, err)
+		result.Unlisted = true
 		return result
 	}
 
@@ -145,12 +152,14 @@ func reapListedContainers(pass containerReap) OrphanSweepResult {
 	cancel()
 	if err != nil {
 		log.WarningLog.Printf("%s: cannot read the Docker engine identity; skipping this sweep: %v", pass.logPrefix, err)
+		result.Unlisted = true
 		return result
 	}
 
 	containers, err := pass.list(env)
 	if err != nil {
 		log.WarningLog.Printf("%s: cannot list af containers; skipping this sweep: %v", pass.logPrefix, err)
+		result.Unlisted = true
 		return result
 	}
 
@@ -218,14 +227,17 @@ func listAfContainers(env []string, homeID string) ([]afContainer, error) {
 	return containers, nil
 }
 
-// dockerHomeReapListFormat prints "<id>\t<af.session slug>\t<af.home>" per
-// container, so a whole-home reap can prove each container's home from its
-// own label.
-const dockerHomeReapListFormat = "{{.ID}}\t{{.Label \"" + dockerSessionLabel + "\"}}\t{{.Label \"" + dockerHomeLabel + "\"}}"
+// dockerHomeReapListFormat prints, per container, its id, then its af.session
+// slug and its af.home label each as a JSON string. JSON keeps a label's bytes
+// exactly — a trailing space, a tab or a newline is part of a distinct home's
+// path, and a whole-home reap must never trim one home's label into another's
+// (#7447) — and keeps a newline inside a label from splitting the line.
+const dockerHomeReapListFormat = "{{.ID}}\t{{json (.Label \"" + dockerSessionLabel + "\")}}\t{{json (.Label \"" + dockerHomeLabel + "\")}}"
 
 // listLabelledAfContainers lists every managed container that carries an
-// af.home label, with its slug and that label, on the engine env selects. Which
-// of them belong to a home is the caller's proof, made per container.
+// af.home label, with its slug and that label verbatim, on the engine env
+// selects. Which of them belong to a home is the caller's proof, made per
+// container.
 func listLabelledAfContainers(env []string) ([]afContainer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
 	defer cancel()
@@ -239,17 +251,22 @@ func listLabelledAfContainers(env []string) ([]afContainer, error) {
 		return nil, err
 	}
 	var containers []afContainer
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.Split(strings.TrimSpace(line), "\t")
+	// The label is never trimmed: only the line terminator is removed.
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
 		if len(fields) != 3 {
 			continue // not a line this format prints; never guess at one
 		}
 		id := strings.TrimSpace(fields[0])
-		home := strings.TrimSpace(fields[2])
-		if id == "" || home == "" {
+		var slug, home string
+		if id == "" || json.Unmarshal([]byte(fields[1]), &slug) != nil || json.Unmarshal([]byte(fields[2]), &home) != nil || home == "" {
 			continue
 		}
-		containers = append(containers, afContainer{id: id, slug: strings.TrimSpace(fields[1]), home: home})
+		containers = append(containers, afContainer{id: id, slug: slug, home: home})
 	}
 	return containers, nil
 }

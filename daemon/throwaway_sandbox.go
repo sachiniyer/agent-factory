@@ -277,15 +277,22 @@ func throwawayOwnerDead(m *throwawaysandbox.Marker) bool {
 // proven orphaned. It runs at daemon startup, only in a marked daemon — the
 // marker gate is what makes "the next start of the tooling that creates
 // them" rather than "any af start" the reaper.
-func sweepThrowawaySandboxes(selfHome string) {
+//
+// It tears down each such home's processes and private tmux servers here, and
+// returns the homes whose containers are still to be reaped. That reap is
+// Docker work, slow or hung with its engine, so it runs after readiness
+// (launchThrowawayContainerReaps), as the orphan-container sweep's does
+// (#5815), and each home stays registered until it finishes: a later marked
+// start can still find whatever it could not remove (#7447).
+func sweepThrowawaySandboxes(selfHome string) (pending []throwawayContainerReap) {
 	if _, marked := loadThrowawayMarker(selfHome); !marked {
-		return
+		return nil
 	}
 	dir := throwawayRegistryDirFn()
 	homes, malformed, err := throwawaysandbox.ReadRegistryHomes(dir)
 	if err != nil {
 		log.WarningLog.Printf("throwaway sandbox registry %s could not be read; sweep skipped: %v", dir, err)
-		return
+		return nil
 	}
 	if malformed > 0 {
 		log.WarningLog.Printf("throwaway sandbox registry holds %d unreadable entries; skipping them", malformed)
@@ -293,7 +300,7 @@ func sweepThrowawaySandboxes(selfHome string) {
 	selfCanonical, err := canonicalDir(selfHome)
 	if err != nil {
 		log.WarningLog.Printf("cannot canonicalize own home %s; throwaway sandbox sweep skipped: %v", selfHome, err)
-		return
+		return nil
 	}
 	now := throwawayNowFn()
 	started := time.Now()
@@ -340,8 +347,53 @@ sweep:
 		log.InfoLog.Printf("reaping throwaway sandbox %s (kind %s): %s", home, m.Kind, reason)
 		throwawayTeardownFn(home, m)
 		reaped++
-		if err := throwawaysandbox.RemoveRegistryEntry(dir, registered); err != nil {
-			log.WarningLog.Printf("throwaway sandbox %s could not be deregistered after teardown: %v", home, err)
+		pending = append(pending, throwawayContainerReap{home: home, registered: registered})
+	}
+	return pending
+}
+
+// throwawayContainerReap is a swept home whose processes are gone and whose
+// containers are still to be reaped, with its registry entry as listed.
+type throwawayContainerReap struct {
+	home       string
+	registered string
+}
+
+// launchThrowawayContainerReaps reaps the swept homes' containers on a worker
+// tracked by wg, after readiness, and deregisters each home only once its
+// reap finished with nothing left (#7447). A stop ends the pass between
+// homes, leaving the rest registered for the next marked start.
+func launchThrowawayContainerReaps(pending []throwawayContainerReap, stopCh <-chan struct{}, wg interface {
+	Add(int)
+	Done()
+}) {
+	if len(pending) == 0 {
+		return
+	}
+	// Read the seams here, on the main flow, not in the worker.
+	dir, reap := throwawayRegistryDirFn(), throwawayHomeContainerReapFn
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		reapSweptThrowawayContainers(pending, dir, reap, stopCh)
+	}()
+}
+
+// reapSweptThrowawayContainers is the worker's pass: for each swept home,
+// reap its containers, then deregister it if, and only if, none is left.
+func reapSweptThrowawayContainers(pending []throwawayContainerReap, dir string, reap func(string) bool, stopCh <-chan struct{}) {
+	for _, p := range pending {
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+		if !reap(p.home) {
+			log.WarningLog.Printf("throwaway sandbox %s stays registered: its containers were not all removed, so a later marked start retries", p.home)
+			continue
+		}
+		if err := throwawaysandbox.RemoveRegistryEntry(dir, p.registered); err != nil {
+			log.WarningLog.Printf("throwaway sandbox %s could not be deregistered after teardown: %v", p.home, err)
 		}
 	}
 }
@@ -383,32 +435,56 @@ func teardownThrowawaySandbox(home string, m *throwawaysandbox.Marker) {
 			log.WarningLog.Printf("throwaway teardown of %s left %d processes after SIGKILL: %s", home, len(remaining), strings.Join(pids, ","))
 		}
 	}
-	reapThrowawayContainers(canonHome)
 }
 
 // throwawayReapContainersFn removes the session containers a home created. A
 // seam so tests need no docker engine.
 var throwawayReapContainersFn = session.ReapHomeContainers
 
-// reapThrowawayContainers removes every session container the sandbox home
-// created (#7447). Nothing else would: the orphan sweep reaps only its own
-// daemon's home, and a throwaway's daemon may never start again. Each
-// container is proven by its own af.home label (throwawayLabelNamesHome), and
-// removed through the orphan sweep's per-container reap, which re-verifies the
-// engine identity before the rm. A sandbox's sessions all end with it, so none
-// is spared.
-func reapThrowawayContainers(canonHome string) {
+// throwawayHomeContainerReapFn is the container half of an expired sandbox's
+// teardown; a seam so tests can record or hold it.
+var throwawayHomeContainerReapFn = reapThrowawayHomeContainers
+
+// reapThrowawayHomeContainers removes every session container the sandbox
+// home created, and reports whether none is left (#7447). Nothing else would
+// remove them: the orphan sweep reaps only its own daemon's home, and a
+// throwaway's daemon may never start again. The expiring daemon runs it on
+// its own way out, after its teardown; a marked start runs it for a swept
+// sibling, after readiness. The default install's home is refused first, as
+// teardownThrowawaySandbox refuses it.
+func reapThrowawayHomeContainers(home string) (complete bool) {
+	canonHome, err := canonicalDir(home)
+	if err != nil {
+		log.WarningLog.Printf("cannot canonicalize throwaway sandbox home %s for its container reap: %v", home, err)
+		return false
+	}
+	if isDefaultThrowawayHome(canonHome) {
+		log.ErrorLog.Printf("refusing to reap the containers of the default AF home %s", canonHome)
+		return true
+	}
+	return reapThrowawayContainers(canonHome)
+}
+
+// reapThrowawayContainers removes the containers of canonHome. Each is proven
+// by its own af.home label (throwawayLabelNamesHome) and removed through the
+// orphan sweep's per-container reap, which re-verifies the engine identity
+// before the rm. A sandbox's sessions all end with it, so none is spared. It
+// is complete when the engine was listed and every proven container went; a
+// home already gone is complete too, since no label can prove it again.
+func reapThrowawayContainers(canonHome string) (complete bool) {
 	homeInfo, err := os.Stat(canonHome)
 	if err != nil || !homeInfo.IsDir() {
 		// A home already gone proves no label: nothing is reaped (#7447).
 		log.WarningLog.Printf("throwaway teardown: home %s is not a directory any more; leaving its containers, which no label can now prove: %v", canonHome, err)
-		return
+		return true
 	}
 	result := throwawayReapContainersFn(func(label string) bool { return throwawayLabelNamesHome(label, homeInfo) })
-	if result.Unknown > 0 || result.Errors > 0 {
-		log.WarningLog.Printf("throwaway teardown of %s: %d container(s) left in an unknown state and %d not removed; a later reap of this home may still find them",
-			canonHome, result.Unknown, result.Errors)
+	if result.Unlisted || result.Unknown > 0 || result.Errors > 0 {
+		log.WarningLog.Printf("throwaway teardown of %s did not finish its containers (engine unlisted: %t, %d in an unknown state, %d not removed)",
+			canonHome, result.Unlisted, result.Unknown, result.Errors)
+		return false
 	}
+	return true
 }
 
 // throwawayLabelNamesHome reports whether an af.home label proves its

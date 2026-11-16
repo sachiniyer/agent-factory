@@ -227,6 +227,10 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 					stopWatch()
 					if throwawayExpired {
 						throwawayTeardownFn(homeDir, marker)
+						// Then its containers (#7447): the home is never
+						// deregistered here, so a later marked start retries
+						// whatever this reap could not remove.
+						throwawayHomeContainerReapFn(homeDir)
 					}
 				})
 			}
@@ -602,7 +606,10 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// the "next start of the tooling that creates them" net (#6844). The
 	// sweep itself is gated on this daemon's own marker: a real install
 	// never reaps, and teardown refuses the default home outright.
-	startupStep("throwaway sandbox reap", func() { sweepThrowawaySandboxes(throwawayHome) })
+	// Their containers are reaped after readiness, on a tracked worker: that is
+	// Docker work, which must not hold readiness (#5815, #7447).
+	var throwawayContainerReaps []throwawayContainerReap
+	startupStep("throwaway sandbox reap", func() { throwawayContainerReaps = sweepThrowawaySandboxes(throwawayHome) })
 	manager.finishInstanceRestore()
 
 	// Start task automation only after the control server is up and restore has
@@ -680,6 +687,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	launchDeferredOrphanSweepIfReady(manager, stopCh, wg)
 	// Finish a prune the previous daemon began (#5189): bounded, logged, off readiness.
 	launchPruneIntentResume(manager, stopCh, wg)
+	// The containers of the throwaway siblings the startup sweep tore down.
+	launchThrowawayContainerReaps(throwawayContainerReaps, stopCh, wg)
 
 	// Start the daemon-owned release check only now, past the readiness barrier:
 	// a box that never opens the TUI never reaches the launch-path updater, so
