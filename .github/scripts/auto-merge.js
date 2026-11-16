@@ -493,17 +493,35 @@ async function findBrokenIssue(github, owner, repo) {
 // new as the event:
 //   - another merger run STARTED AFTER the triggering run completed
 //     (`workflow_run.updated_at`), or
-//   - a newer merger run is already queued (it has not read anything yet).
+//   - a newer merger run is already queued (it has not read anything yet) and
+//     is still fresh enough to count on it starting.
 // Anything else proceeds. `runs` is the newest-first listWorkflowRuns result.
 const PENDING_STATUSES = new Set(["queued", "waiting", "pending", "requested"]);
 
-function shouldDebounce({ eventName, triggerUpdatedAt, runs, runId }) {
+// A pending run has read nothing, so when it starts it reads state at least as
+// new as the trigger — but only while it can still start. GitHub sometimes
+// strands a queued run: 43919350620 sat `queued` for over an hour with no jobs
+// and could not be cancelled (HTTP 409), and every workflow_run trigger
+// debounced on it until a manual dispatch intervened (#7427). Ten minutes is
+// well beyond normal queue latency (a healthy run is picked up in seconds);
+// past it, proceeding beside the pending run costs at most one redundant
+// merger pass, which the debounce already accepts (#5786). Measured from the
+// pending run's created_at against `now` (epoch ms; the caller's wall clock by
+// default, injected by tests). An unreadable created_at cannot vouch for the
+// bound either, so it suppresses nothing.
+const PENDING_RUN_MAX_AGE_MS = 10 * 60 * 1000;
+
+function shouldDebounce({ eventName, triggerUpdatedAt, runs, runId, now = Date.now() }) {
   if (eventName !== "workflow_run") return { skip: false, reason: "not a workflow_run trigger" };
   const triggered = Date.parse(triggerUpdatedAt);
   for (const r of runs) {
     if (r.id === runId || r.conclusion === "cancelled") continue;
     if (PENDING_STATUSES.has(r.status)) {
-      return { skip: true, reason: `run ${r.id} is already queued and will read newer state` };
+      const pendingAge = now - Date.parse(r.created_at);
+      if (Number.isFinite(pendingAge) && pendingAge <= PENDING_RUN_MAX_AGE_MS) {
+        return { skip: true, reason: `run ${r.id} is already queued and will read newer state` };
+      }
+      continue;
     }
     // A run that was itself debounced (or halted) completed "success" having
     // read nothing, so it cannot vouch for this trigger (#5786).
@@ -534,7 +552,7 @@ async function runReadState(github, owner, repo, run) {
   }
 }
 
-async function checkDebounce({ github, core, context }) {
+async function checkDebounce({ github, core, context, now }) {
   if (context.eventName !== "workflow_run") return core.setOutput("skip", "false");
   const { owner, repo } = context.repo;
   const res = await github.rest.actions.listWorkflowRuns({
@@ -555,6 +573,7 @@ async function checkDebounce({ github, core, context }) {
     triggerUpdatedAt,
     runs,
     runId: context.runId,
+    now,
   });
   core.notice(`${verdict.skip ? "Debounced" : "Proceeding"}: ${verdict.reason}.`);
   core.setOutput("skip", verdict.skip ? "true" : "false");
@@ -831,6 +850,6 @@ module.exports = {
   runReadState,
   checkHalt, checkDebounce, shouldDebounce, settleBroken, mergeAll, pickHaltFixes, mergeHaltFix, reportBroken,
   workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, hasUnansweredFinding, isDetailPr, reviewBlockReason, checksGreen, evaluate,
-  MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
+  MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX, PENDING_RUN_MAX_AGE_MS,
   resolveUnknownMergeable, isTruncated, ACK_RE, branchDeletionDecision,
 };

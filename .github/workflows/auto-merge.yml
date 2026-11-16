@@ -68,8 +68,9 @@ jobs:
         with:
           script: |
             // Skips a workflow_run trigger only when a merger run that started
-            // after the triggering run completed (or one already queued) will read
-            // state at least as new. Never merely because a run was "recent".
+            // after the triggering run completed (or one still fresh in the
+            // queue) will read state at least as new. Never merely because a
+            // run was "recent".
             await require('./.github/scripts/auto-merge.js').checkDebounce({ github, core, context });
 
       - name: Check for a broken-master halt
