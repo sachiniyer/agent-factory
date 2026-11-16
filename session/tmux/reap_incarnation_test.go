@@ -328,7 +328,7 @@ func stubIncarnationProcesses(t *testing.T, srv *fakeTmuxServer) *reapRecord {
 	incarnationPaneProcesses = func(rows, name string) ([]proctree.Process, error) {
 		return []proctree.Process{{PID: 777001}}, nil
 	}
-	incarnationReapProcesses = func(_ reapReason, _ string, procs []proctree.Process, _, _ time.Duration) []proctree.Process {
+	incarnationReapProcesses = func(_ reapReason, _ string, procs []proctree.Process, _, _ time.Duration, _ map[int]bool) []proctree.Process {
 		rec.reapCallCount++
 		rec.killsAtReap = len(srv.kills())
 		for _, p := range procs {

@@ -111,7 +111,7 @@ func TestReapLogsSessionNameLiterally(t *testing.T) {
 	// reap_severity_test.go — including its own #1211 assertion, so neither
 	// severity can drift into splicing the name into the format string.
 	const name = "af_fmt%d%s%n_evil"
-	reapSessionProcesses(reapEscaped, name, []proctree.Process{proc}, time.Millisecond, 300*time.Millisecond)
+	reapSessionProcesses(reapEscaped, name, []proctree.Process{proc}, time.Millisecond, 300*time.Millisecond, nil)
 
 	out := buf.String()
 	require.Contains(t, out, "tmux "+name+":",
@@ -1175,9 +1175,9 @@ func TestCleanupSessionsReportsProcessesThatSurvivedSIGKILL(t *testing.T) {
 	survivor := spawnLiveProcess(t)
 	realReap := reapOnRequestProcesses
 	reapOnRequestProcesses = func(reason reapReason, sanitizedName string, procs []proctree.Process,
-		grace, termWait time.Duration,
+		grace, termWait time.Duration, protected map[int]bool,
 	) []proctree.Process {
-		realReap(reason, sanitizedName, procs, grace, termWait)
+		realReap(reason, sanitizedName, procs, grace, termWait, protected)
 		return []proctree.Process{survivor}
 	}
 	t.Cleanup(func() { reapOnRequestProcesses = realReap })

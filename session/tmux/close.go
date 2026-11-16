@@ -191,8 +191,12 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
-	// (#1104).
+	// (#1104). The reaper's own-chain evidence is captured with it, at the same
+	// pre-kill shape: a CLI dying on the kill reparents a daemon the pane
+	// spawned out from under the server, and protection decided from the
+	// post-kill tree is decided from the wrong tree (Codex on #7433).
 	leaked, captureErr := CaptureSessionProcessTrees(t.cmdExec, t.sanitizedName)
+	protected := reapProtectedChain()
 
 	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
 	// itself: an unbounded kill-session against a wedged server blocks
@@ -312,13 +316,13 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 		// succeeding, not a leak. The requester is skipped by the reaper itself
 		// while its registration holds — never waited on, never signalled.
 		if waitForProcesses {
-			processes.remaining = reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
+			processes.remaining = reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait, protected)
 		} else {
 			// Capture the test seam and waits before launching the goroutine.
 			done, name := t.closeReapDone, t.sanitizedName
 			grace, term := reapGraceWait, reapTermWait
 			go func() {
-				reapSessionProcesses(reapOnRequest, name, leaked, grace, term)
+				reapSessionProcesses(reapOnRequest, name, leaked, grace, term, protected)
 				if done != nil {
 					done()
 				}

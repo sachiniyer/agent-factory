@@ -63,18 +63,23 @@ func TestReapSessionProcessesNeverSignalsTheCallersOwnChain(t *testing.T) {
 
 	verdict := waitForReapChainVerdict(t, resultFile)
 	require.Equal(t, "ok", verdict["verdict"],
-		"the reap signalled part of its own chain")
+		"the kill path left the caller's chain inconsistent with the captured evidence")
 
-	for _, role := range []string{"pane", "cli", "daemon", "child"} {
+	// The session kill ends the pane and the cli — their deaths are the
+	// ordering this test covers: the daemon reparents mid-flight, and only a
+	// protection set captured BEFORE the kill still spares its child.
+	for _, role := range []string{"pane", "cli"} {
 		pid, err := strconv.Atoi(verdict[role])
 		require.NoError(t, err, "the verdict did not report the %s pid", role)
 		_, err = proctree.Lookup(pid)
-		require.NoError(t, err, "the %s (pid %d) is the caller's chain and must still be alive", role, pid)
+		require.Error(t, err, "the %s (pid %d) dies with the session kill", role, pid)
 	}
-	otherPID, err := strconv.Atoi(verdict["other"])
-	require.NoError(t, err)
-	_, err = proctree.Lookup(otherPID)
-	require.Error(t, err, "the pane outside the caller's chain must have been reaped")
+	for _, role := range []string{"daemon", "child", "other"} {
+		pid, err := strconv.Atoi(verdict[role])
+		require.NoError(t, err, "the verdict did not report the %s pid", role)
+		_, err = proctree.Lookup(pid)
+		require.NoError(t, err, "the %s (pid %d) must still be alive — it is the caller's chain or an unrelated session", role, pid)
+	}
 }
 
 // runReapChainHelper plays one node of pane -> cli -> setsid daemon -> child.
@@ -96,12 +101,15 @@ func runReapChainHelper(t *testing.T, role string) {
 }
 
 // The daemon role: spawn its own child and an unrelated pane on the same
-// server, discover the chain above it from the process table, then run the
-// real reap over all of them and report what survived. "pane" is cli's
-// parent — the pane-root shell — so the daemon's ancestors include the pane
-// exactly as a pane-spawned daemon's would.
+// server, stamp the bare-pane markers on its own session, then run the REAL
+// kill path — ReapProvenBareSession, which captures the pane tree and the
+// reaper's own-chain evidence, kills the session (the pane shell and the cli
+// die with it, reparenting the daemon), and reaps the capture. The ordering
+// this pins is the one Codex flagged: the protection evidence must come from
+// before the kill, or the reparented daemon's child loses it.
 func runReapChainDaemon(t *testing.T) {
 	sock := os.Getenv(reapChainSockEnv)
+	home := filepath.Dir(sock)
 	child := exec.Command("sleep", "300")
 	require.NoError(t, child.Start())
 	self := os.Getpid()
@@ -110,6 +118,19 @@ func runReapChainDaemon(t *testing.T) {
 	out, err := exec.Command("tmux", "-S", sock,
 		"new-session", "-d", "-s", "other", "sleep", "300").CombinedOutput()
 	require.NoError(t, err, "spawn the unrelated pane: %s", out)
+
+	// The session proves itself a bare pane this home owns, exactly as a
+	// config-agent/login session does: name, absolute home, generation — and
+	// no AF_INSTANCE_ID.
+	for _, kv := range [][2]string{
+		{EnvMarkerSession, "chain"},
+		{EnvMarkerHome, home},
+		{EnvMarkerGeneration, "1"},
+	} {
+		out, err := exec.Command("tmux", "-S", sock, "set-environment", "-t", "chain",
+			kv[0], kv[1]).CombinedOutput()
+		require.NoError(t, err, "stamp %s: %s", kv[0], out)
+	}
 
 	var paneP, cliP, selfP, otherP proctree.Process
 	require.Eventually(t, func() bool {
@@ -143,26 +164,45 @@ func runReapChainDaemon(t *testing.T) {
 	}, 10*time.Second, 50*time.Millisecond, "the pane -> cli -> daemon chain and the other pane never became visible")
 	fmt.Fprintf(os.Stderr, "chain-daemon %d: chain pane=%d cli=%d other=%d\n", self, paneP.PID, cliP.PID, otherP.PID)
 
+	reap := ReapProvenBareSession(socketExecutor{socket: sock}, "", BareSessionProof{
+		SessionName: "chain",
+		Home:        home,
+	})
+	fmt.Fprintf(os.Stderr, "chain-daemon %d: kill path returned stopped=%v why=%q\n", self, reap.Stopped, reap.Why)
+
 	childP, err := proctree.Lookup(child.Process.Pid)
 	require.NoError(t, err)
-	procs := []proctree.Process{paneP, cliP, selfP, childP, otherP}
 
-	reapSessionProcesses(reapOnRequest, "af_test_chain", procs, 100*time.Millisecond, 100*time.Millisecond)
-	fmt.Fprintf(os.Stderr, "chain-daemon %d: reap returned\n", self)
+	// pane and cli die with the session kill — that is the ordering this test
+	// exists to cover — but SIGHUP may still be in flight when the kill path
+	// returns, so their deaths are waited on rather than read once.
+	paneDead, cliDead := false, false
+	for range 40 {
+		paneDead, cliDead = !proctree.AliveSame(paneP), !proctree.AliveSame(cliP)
+		if paneDead && cliDead {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	var why []string
-	for _, pc := range []struct {
-		name string
-		p    proctree.Process
-	}{
-		{name: "pane", p: paneP}, {name: "cli", p: cliP}, {name: "daemon", p: selfP}, {name: "child", p: childP},
-	} {
-		if !proctree.AliveSame(pc.p) {
-			why = append(why, pc.name+" was signalled")
-		}
+	if !reap.Stopped {
+		why = append(why, "the session kill did not fire: "+reap.Why)
 	}
-	if proctree.AliveSame(otherP) {
-		why = append(why, "the pane outside the chain survived")
+	if !proctree.AliveSame(selfP) {
+		why = append(why, "daemon was signalled")
+	}
+	if !proctree.AliveSame(childP) {
+		why = append(why, "child was signalled")
+	}
+	if !proctree.AliveSame(otherP) {
+		why = append(why, "the pane on another session was signalled")
+	}
+	if !paneDead {
+		why = append(why, "pane survived the session kill")
+	}
+	if !cliDead {
+		why = append(why, "cli survived the session kill")
 	}
 	status := "ok"
 	if len(why) > 0 {
@@ -244,7 +284,7 @@ func runReapChainServerDescendant(t *testing.T) {
 
 	serverP, err := proctree.Lookup(server.Process.Pid)
 	require.NoError(t, err)
-	reapSessionProcesses(reapOnRequest, "af_test_srvreap", []proctree.Process{paneP}, 100*time.Millisecond, 100*time.Millisecond)
+	reapSessionProcesses(reapOnRequest, "af_test_srvreap", []proctree.Process{paneP}, 100*time.Millisecond, 100*time.Millisecond, nil)
 	fmt.Fprintf(os.Stderr, "srvreaper %d: reap returned\n", os.Getpid())
 
 	status := "ok"

@@ -454,6 +454,11 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	recoveries := make([]vanishedSessionRecovery, 0, len(matches))
 	var incompleteCaptures error
 	var killErr error
+	// The reaper's own-chain evidence precedes the first kill-session: a pane
+	// process dying on a kill reparents a reaper the pane spawned, and
+	// protection decided afterwards is decided from the wrong tree
+	// (Codex on #7433).
+	protected := reapProtectedChain()
 	for _, match := range matches {
 		leaked, captureErr := CaptureSessionProcessTrees(cmdExec, match)
 		if captureErr != nil {
@@ -546,7 +551,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// had its directory removed underneath it, silently. Same rule as
 			// CloseAndWaitForPaneExit, which already refuses on this exact signal.
 			if remaining := reapOnRequestProcesses(reapOnRequest, match, leaked,
-				reapGraceWait, reapTermWait); len(remaining) > 0 {
+				reapGraceWait, reapTermWait, protected); len(remaining) > 0 {
 				processSweepErrs <- survivingProcessesError(match, remaining)
 			}
 		}(match, leaked)
@@ -698,7 +703,10 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		// The tmux session is GONE and these processes are still alive carrying its
 		// ownership markers: they outlived the pane tree that was supposed to
 		// contain them. This is the real leak, and the one worth a WARNING (#2765).
-		remaining := reapSessionProcesses(reapEscaped, match, marked, 0, reapTermWait)
+		// nil protected: no kill precedes this reap — its targets are marked
+		// processes whose session is already gone — so the own-chain set is
+		// computed at reap entry, where the tree is still intact.
+		remaining := reapSessionProcesses(reapEscaped, match, marked, 0, reapTermWait, nil)
 		if len(remaining) > 0 {
 			sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s are still alive after bounded teardown",
 				processPIDList(remaining)))

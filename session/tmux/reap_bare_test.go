@@ -214,6 +214,25 @@ func TestReapProvenBareSessionRefusesAHomeAliasThatCleansToTheHome(t *testing.T)
 	require.True(t, srv.has(bareName))
 }
 
+// A relative AF_HOME can match literally and still be another install: two
+// daemons launched from different working directories with AF_HOME=.af stamp
+// the same marker while naming different homes, and the marker's own cwd is
+// unrecoverable. Relative is unproven, checked BEFORE literal equality —
+// matching doctor/tmux_sessions.go's classification (Codex on #7433).
+func TestReapProvenBareSessionRefusesARelativeHomeThatMatchesLiterally(t *testing.T) {
+	env := bareEnv()
+	env[EnvMarkerHome] = ".af"
+	srv := newBareServer(t, env)
+	rec := stubIncarnationProcesses(t, srv)
+	got := ReapProvenBareSession(srv.executor(), "", BareSessionProof{SessionName: bareName, Home: ".af"})
+
+	require.False(t, got.Stopped)
+	require.NotEmpty(t, got.Why)
+	require.Empty(t, srv.kills(), "a relative home cannot be resolved to an install, match or not")
+	require.Zero(t, rec.reapCallCount)
+	require.True(t, srv.has(bareName))
+}
+
 // The complement: a marker that differs literally but stats to the SAME
 // directory is this home — the compare is os.SameFile after stat, not string
 // equality alone.

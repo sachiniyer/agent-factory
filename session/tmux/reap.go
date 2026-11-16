@@ -766,7 +766,14 @@ var (
 // verified — see proctree.KillEscalating). Runs synchronously; teardown
 // paths that must stay snappy call it in a goroutine. Every signal is logged
 // per-process, at the severity the reason and the outcome agree on.
-func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) []proctree.Process {
+//
+// protected is the reaper's own-chain exemption — see reapProtectedChain. A
+// caller that kills before reaping must capture it BEFORE the kill, alongside
+// the pane-tree capture: a pane shell or CLI dying on the kill reparents the
+// reaper out of the tree, and a chain reconstructed afterwards is the wrong
+// one (Codex on #7433). nil computes it at reap entry — correct only for a
+// caller with no preceding kill.
+func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration, protected map[int]bool) []proctree.Process {
 	// A tracked teardown requester stays IN the candidate set — the reaper's
 	// per-signal recheck spares it only while the registry still reports it
 	// tracked, so a reprieve that ends mid-reap lets the next tier reap it
@@ -792,7 +799,9 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 	// and its children. The server-above-self requirement keeps it narrow:
 	// a pane process under a server reparented beneath the reaper still
 	// meets the server first and is reaped.
-	protected := reapProtectedChain()
+	if protected == nil {
+		protected = reapProtectedChain()
+	}
 	exemptedProtected := make(map[int]bool)
 	// And it can be registered AFTER the capture — a teardown still in its
 	// grace wait when this process's own destructive RPC finally reaches its

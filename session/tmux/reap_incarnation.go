@@ -3,6 +3,7 @@ package tmux
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -227,7 +228,17 @@ func ReapProvenBareSession(cmdExec cmd.Executor, program string, proof BareSessi
 // kill path (#7433 review): filepath.Clean is NOT a substitute, because ".." in
 // a marker resolves lexically while the filesystem resolves it against a real
 // directory, so a path that only Cleans to the home can be a different home.
+//
+// Both sides must be absolute BEFORE either comparison runs (#7433 Codex):
+// a relative path is anchored to the resolving process's working directory —
+// afHomeDir stamps AGENT_FACTORY_HOME unchanged, so two daemons launched from
+// different directories with AF_HOME=.af carry markers that match literally
+// while naming different installs, and the marker's own cwd is unrecoverable.
+// doctor/tmux_sessions.go classifies the same shape as unproven ownership.
 func sameDir(a, b string) bool {
+	if !filepath.IsAbs(a) || !filepath.IsAbs(b) {
+		return false
+	}
 	if a == b {
 		return true
 	}
@@ -311,7 +322,12 @@ func (t *TmuxSession) killVerifiedIncarnation(gen *tmuxGeneration) IncarnationRe
 
 	// Capture the pane process trees BEFORE the kill (afterwards survivors are
 	// reparented and the ancestry is gone), from the verified incarnation only.
+	// The reaper's own-chain evidence is captured with it, at the same pre-kill
+	// shape: a pane shell or CLI dying on the kill reparents a daemon spawned
+	// inside this pane out from under the server, and protection decided from
+	// the post-kill tree is decided from the wrong tree (Codex on #7433).
 	leaked, captureNote := t.captureVerifiedTrees(r, gen)
+	protected := reapProtectedChain()
 
 	out, err := r.output(guardedKillArgs(gen)...)
 	if err != nil {
@@ -339,7 +355,7 @@ func (t *TmuxSession) killVerifiedIncarnation(gen *tmuxGeneration) IncarnationRe
 	if len(leaked) > 0 {
 		// Synchronous: the boot reconcile that calls this is not latency-sensitive,
 		// and a caller told "stopped" should find the pane's processes stopped too.
-		incarnationReapProcesses(reapOnRequest, name, leaked, reapGraceWait, reapTermWait)
+		incarnationReapProcesses(reapOnRequest, name, leaked, reapGraceWait, reapTermWait, protected)
 	}
 	return IncarnationReap{Stopped: true}
 }
