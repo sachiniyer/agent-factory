@@ -74,10 +74,12 @@ export default defineConfig({
     // Scope it to the mermaid spec (testMatch by filename) so the suite does
     // not double; the image already ships the browser. Goldens stay
     // chromium-only — they are pixel-calibrated to one engine's rasterizer.
+    // docs-tab-refresh rides along (#7409): WebKit is where a Docs tab click
+    // that straddled a doc-list refresh was lost, so it proves the fix there.
     {
       name: "webkit",
       use: { ...devices["Desktop Safari"] },
-      testMatch: /docs-mermaid\.spec\.ts$/,
+      testMatch: /docs-(mermaid|tab-refresh)\.spec\.ts$/,
     },
   ],
 });

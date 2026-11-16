@@ -78,9 +78,15 @@ test("docs mermaid: a mermaid fence renders an SVG, only when a doc holds one, i
   await expect(pane.locator(".cm-content")).toContainText("No diagrams here");
   expect(mermaidLoads, "a doc without a mermaid block must not fetch the chunk").toHaveLength(0);
 
-  await pane.locator(".af-docs-tab", { hasText: "diagram" }).click();
+  const diagramTab = pane.locator(".af-docs-tab", { hasText: "diagram" });
+  await diagramTab.click();
+  // Two steps, each with its own expectation, so a failure names which one broke:
+  // the doc opening (#7409: a lost tab click read as "the SVG never appeared"),
+  // then the diagram rendering inside it.
+  await expect(diagramTab, "the tab click opens b-diagram").toHaveAttribute("aria-selected", "true");
+  await expect(pane.locator(".cm-content"), "b-diagram's text is in the editor").toContainText("The shape of the change");
   const mermaid = pane.locator(".cm-md-mermaid");
-  await expect(mermaid.locator("svg")).toBeVisible({ timeout: 30_000 });
+  await expect(mermaid.locator("svg"), "the fence renders as an SVG").toBeVisible({ timeout: 30_000 });
   expect(mermaidLoads, "the mermaid frame document loads once, on demand").toHaveLength(1);
   await expect(mermaid.locator("svg text").filter({ hasText: "af daemon" })).toHaveCount(1);
   await expect(pane.locator(".cm-md-mermaid-errtext:visible")).toHaveCount(0);

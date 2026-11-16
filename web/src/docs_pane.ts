@@ -18,6 +18,7 @@ import {
 import { PushChip, type PushView } from "./docs_push.js";
 import { DRAFT_HEARTBEAT_MS, DraftStorage, type KV, localStorageKV, windowId } from "./docs_draft_store.js";
 import { DocSync, type SyncStatus } from "./docs_sync.js";
+import { DocTabs } from "./docs_tabs.js";
 import { h } from "./dom.js";
 import { icon } from "./icon.js";
 import {
@@ -110,6 +111,7 @@ export interface DocsPaneOptions {
 export class DocsPane {
   private readonly root: HTMLElement;
   private readonly strip: HTMLElement;
+  private readonly tabs: DocTabs;
   private readonly addButton: HTMLButtonElement;
   private readonly menu: HTMLElement;
   private readonly docMenu: HTMLElement;
@@ -193,6 +195,36 @@ export class DocsPane {
     this.drafts = newPaneDrafts(opts.sessionId, opts.slug);
     this.strip = h("div", { class: "af-docs-strip", role: "tablist" });
     this.strip.setAttribute("aria-label", "Proposal docs");
+    this.tabs = new DocTabs(this.strip, {
+      open: (doc) => {
+        // The touch long-press that opened the doc menu is followed by a
+        // synthesized `click` on lift (iOS Safari fires no `contextmenu`); the
+        // one-shot flag eats it so the doc the user long-pressed does not open
+        // the moment they go to tap Delete.
+        if (this.longPressFired) {
+          this.longPressFired = false;
+          return;
+        }
+        void this.openDoc(doc);
+      },
+      openGone: (doc) => void this.openDoc(doc),
+      key: (e, doc) => this.onStripKey(e, doc),
+      menu: (e, doc, tab) => {
+        e.preventDefault();
+        this.cancelLongPress();
+        const at = e.button === -1 || (e.clientX === 0 && e.clientY === 0) ? null : { x: e.clientX, y: e.clientY };
+        this.openDocMenu(doc, tab, at);
+      },
+      press: (e, doc, tab) => this.startLongPress(e, doc, tab),
+      move: (e) => {
+        const p = this.longPress;
+        if (p && p.pointerId === e.pointerId && tabPressVerdict({ heldMs: 0,
+          movedPx: pressDistance(p.x, p.y, e.clientX, e.clientY) }, TAB_PRESS_LIMITS) === "abandon") {
+          this.cancelLongPress();
+        }
+      },
+      release: () => this.cancelLongPress(),
+    });
     this.addButton = h("button", { type: "button", class: "af-ghost af-docs-add", title: "Add doc" }, icon("plus"));
     this.addButton.setAttribute("aria-label", "Add doc");
     this.addButton.setAttribute("aria-haspopup", "menu");
@@ -457,54 +489,7 @@ export class DocsPane {
   }
 
   private renderStrip(): void {
-    const tabs = this.ordered.map((doc) => {
-      const selected = doc.name === this.current?.name;
-      const tab = h("button", { type: "button", class: "af-docs-tab", role: "tab" }, doc.name);
-      tab.setAttribute("aria-selected", selected ? "true" : "false");
-      tab.tabIndex = selected ? 0 : -1;
-      tab.title = doc.file;
-      tab.addEventListener("click", () => {
-        // The touch long-press that opened the doc menu is followed by a
-        // synthesized `click` on lift (iOS Safari fires no `contextmenu`); the
-        // one-shot flag eats it so the doc the user long-pressed does not open
-        // the moment they go to tap Delete.
-        if (this.longPressFired) {
-          this.longPressFired = false;
-          return;
-        }
-        void this.openDoc(doc);
-      });
-      tab.addEventListener("keydown", (e) => this.onStripKey(e, doc));
-      tab.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        this.cancelLongPress();
-        const at = e.button === -1 || (e.clientX === 0 && e.clientY === 0) ? null : { x: e.clientX, y: e.clientY };
-        this.openDocMenu(doc, tab, at);
-      });
-      tab.addEventListener("pointerdown", (e) => this.startLongPress(e, doc, tab));
-      tab.addEventListener("pointermove", (e) => {
-        const p = this.longPress;
-        if (p && p.pointerId === e.pointerId && tabPressVerdict({ heldMs: 0,
-          movedPx: pressDistance(p.x, p.y, e.clientX, e.clientY) }, TAB_PRESS_LIMITS) === "abandon") {
-          this.cancelLongPress();
-        }
-      });
-      for (const type of ["pointerup", "pointercancel", "pointerleave"] as const) {
-        tab.addEventListener(type, () => this.cancelLongPress());
-      }
-      return tab;
-    });
-    for (const [name, ref] of this.goneDocs) {
-      if (this.ordered.some((d) => d.name === name)) continue;
-      const selected = name === this.current?.name;
-      const tab = h("button", { type: "button", class: "af-docs-tab af-docs-tab-gone", role: "tab" }, `${name} (deleted)`);
-      tab.setAttribute("aria-selected", selected ? "true" : "false");
-      tab.tabIndex = selected ? 0 : -1;
-      tab.title = `${ref.file} was deleted; your unsaved changes are kept`;
-      tab.addEventListener("click", () => void this.openDoc(ref));
-      tabs.push(tab);
-    }
-    this.strip.replaceChildren(...tabs);
+    this.tabs.render(this.ordered, this.goneDocs, this.current?.name ?? null);
   }
 
   // iOS Safari fires no contextmenu event on a long press, so touch opens the
