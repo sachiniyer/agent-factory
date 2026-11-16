@@ -108,6 +108,8 @@ func TestCheckAndHandleTrustPrompt_LiveDialogUnderAStaleComposerBoxHolds(t *test
 		cases := map[string]string{
 			"its frame's top edge below the composer":                    stale + framed,
 			"its frame's top edge below a composer with no closing edge": unclosed[0] + unclosed[1] + framed,
+			"its frame's top edge below a composer with a pad row and no closing edge": unclosed[0] + unclosed[1] +
+				"│                      │\n" + framed,
 		}
 		for width := 3; width <= 24; width++ {
 			cases[fmt.Sprintf("its question below the composer at %d columns", width)] = staleComposerOverDialog(prompt, width)
@@ -122,23 +124,85 @@ func TestCheckAndHandleTrustPrompt_LiveDialogUnderAStaleComposerBoxHolds(t *test
 	}
 }
 
-// A composer's prompt row is its mode's glyph followed by nothing or by the
+// A composer box's prompt row is its mode's glyph followed by nothing or by the
 // space the composer paints after it, and 2.1.322 paints U+00A0 there
-// (testdata/claude_2_1_322_composer_after_mcp_decline.ansi). A ruled or boxed
-// composer whose prompt is "!", "#" or ">" then U+00A0 is a composer like any
-// other, and the quoted options under it stay clear (#7391 review).
+// (testdata/claude_2_1_322_composer_after_mcp_decline.ansi). A composer box
+// whose prompt is "!", "#" or ">" then U+00A0 is a composer like any other, and
+// the quoted options right under it stay clear (#7391 review).
 func TestCheckAndHandleTrustPrompt_ComposerPromptAfterANonBreakingSpaceStaysClear(t *testing.T) {
-	const rule = "────────────"
-	for _, prompt := range []string{"! ls", "# note", "> npm test", "! "} {
-		for _, tt := range []struct{ name, content string }{
-			{"ruled", rule + "\n" + prompt + "\n" + rule + "\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
-			{"boxed", "╭──────────────────────╮\n│ " + prompt + strings.Repeat(" ", max(0, 21-len([]rune(prompt)))) + "│\n╰──────────────────────╯\n" + quotedFolderOptions},
-		} {
-			t.Run(fmt.Sprintf("%s composer, prompt %q", tt.name, prompt), func(t *testing.T) {
-				handled, cmds := pollStaticPane(t, tt.content, 4)
-				require.False(t, handled, "a composer above quoted options is no dialog:\n%s", tt.content)
+	for _, prompt := range []string{"!\u00a0ls", "#\u00a0note", ">\u00a0npm test", "!\u00a0"} {
+		content := boxedComposer(prompt) + quotedFolderOptions
+		t.Run(fmt.Sprintf("prompt %q", prompt), func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, content, 4)
+			require.False(t, handled, "a composer above quoted options is no dialog:\n%s", content)
+			require.Empty(t, sentKeystrokes(cmds))
+		})
+	}
+}
+
+// boxedComposer is a closed composer box whose prompt row is prompt.
+func boxedComposer(prompt string) string {
+	return "╭──────────────────────╮\n│ " + prompt + strings.Repeat(" ", max(0, 21-len([]rune(prompt)))) + "│\n╰──────────────────────╯\n"
+}
+
+// U+00A0 reaches only the box test. #7391's plain-rule test keeps its ASCII
+// prompt, because it has no #7388 anchor yet: a live framed dialog under a
+// ruled composer whose prompt follows U+00A0 holds, as on master (#7412
+// review, R2).
+func TestCheckAndHandleTrustPrompt_LiveDialogUnderARuledComposerAfterANonBreakingSpaceHolds(t *testing.T) {
+	const rule = "─────────────"
+	framed := "╭───────────╮\n│ Security  │\n│ guide     │\n│           │\n│ ❯ 1. Yes, I │\n│ trust this │\n│ folder    │\n│   2. No,  │\n│ exit      │\n╰───────────╯\nEnter to\nconfirm · Esc\nto cancel"
+	for _, prompt := range []string{"!\u00a0ls", "#\u00a0note", ">\u00a0x"} {
+		for _, gap := range []string{"", "\n"} {
+			content := rule + "\n" + prompt + "\n" + rule + "\n" + gap + framed
+			t.Run(fmt.Sprintf("prompt %q, gap %q", prompt, gap), func(t *testing.T) {
+				handled, cmds := pollStaticPane(t, content, 4)
+				require.True(t, handled, "a live dialog under a ruled composer is in the way:\n%s", content)
 				require.Empty(t, sentKeystrokes(cmds))
 			})
 		}
+	}
+}
+
+// A composer decides only over rows af can place as quoted: none, the bare
+// options, or the end of one of the dialog's own first rows it hides. A row af
+// cannot read between it and the options may be the dialog's question, in
+// wording af does not know, so the dialog holds (#7412 review, R3). So it does
+// when that wording is in the composer box's own rows below its prompt.
+func TestCheckAndHandleTrustPrompt_DialogInWordingAfCannotReadUnderAComposerBoxHolds(t *testing.T) {
+	body := []string{"Opening a workspace:", "", "/home/u/proj", "", "Before you start: do you want Claude to", "work in this folder?", "", "Security guide", "", "❯ 1. Yes, I trust this folder", "  2. No, exit"}
+	framedBy := func(top string) string {
+		rows := []string{top}
+		for _, row := range body {
+			rows = append(rows, "│ "+row+strings.Repeat(" ", max(0, 44-len([]rune(row))))+" │")
+		}
+		return strings.Join(append(rows, "╰"+strings.Repeat("─", 46)+"╯"), "\n") + "\nEnter to confirm · Esc to cancel"
+	}
+	edge := strings.Repeat("─", 46)
+	dialogs := map[string]string{
+		"unframed":                 strings.Join(body, "\n") + "\nEnter to confirm · Esc to cancel",
+		"in a box":                 framedBy("╭" + edge + "╮"),
+		"in a box with a title":    framedBy("╭─ Trust " + strings.Repeat("─", 38) + "╮"),
+		"in a box opened by a tee": framedBy("├" + edge + "┤"),
+	}
+	for _, prompt := range []string{"! ls", "# note", "!\u00a0ls"} {
+		for name, dialog := range dialogs {
+			content := boxedComposer(prompt) + dialog
+			t.Run(fmt.Sprintf("prompt %q, the dialog %s", prompt, name), func(t *testing.T) {
+				handled, cmds := pollStaticPane(t, content, 4)
+				require.True(t, handled, "a dialog af cannot read under a composer is still in the way:\n%s", content)
+				require.Empty(t, sentKeystrokes(cmds))
+			})
+		}
+		around := "╭──────────────────────╮\n│ " + prompt + strings.Repeat(" ", max(0, 21-len([]rune(prompt)))) + "│\n"
+		for _, row := range body[:9] {
+			around += "│ " + row + strings.Repeat(" ", max(0, 40-len([]rune(row)))) + "│\n"
+		}
+		around += "╰──────────────────────╯\n" + strings.Join(body[9:], "\n") + "\nEnter to confirm · Esc to cancel"
+		t.Run(fmt.Sprintf("prompt %q, that wording in the composer box's own rows", prompt), func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, around, 4)
+			require.True(t, handled, "a dialog af cannot read in a composer box is still in the way:\n%s", around)
+			require.Empty(t, sentKeystrokes(cmds))
+		})
 	}
 }

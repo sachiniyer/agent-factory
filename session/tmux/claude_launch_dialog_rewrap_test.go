@@ -236,7 +236,7 @@ func TestCheckAndHandleTrustPrompt_FolderTrustDialogTextThatIsNoDialogStaysClear
 		// A boxed composer painted ABOVE the dialog's option rows and footer
 		// (a quoted dialog with the agent's live composer above it) must stay
 		// clear: the case-3 scan rejects the box because its first row is a
-		// prompt (claudeTrustBoxComposerAt, #7380), not because every frame
+		// prompt (claudeTrustBoxPromptRow, #7380), not because every frame
 		// rule rejects. This is the false-hold a plain-rule-only scan would
 		// produce, so it pins that the fix did not weaken the boxed-composer
 		// guard.
