@@ -341,8 +341,12 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 			// framed dialog does not make it a composer. And a composer
 			// explains only its own rows: one with the dialog's own first
 			// rows on screen below it is a stale frame above a live dialog
-			// (#7388), and decides nothing.
+			// (#7388), and decides nothing. Nor can it explain a row above
+			// its box: af cannot tell the dialog's question above a stale
+			// composer from transcript, so the box decides only when every
+			// row above it is one af can place (#7412 review, R7).
 			if prompt := claudeTrustBoxPromptRow(pane.lines, pane.rows, i); prompt >= 0 &&
+				!claudeLaunchDialogOwnRowsAbove(pane, i) &&
 				!claudeLaunchDialogOwnRowsBetween(pane, prompt, pane.index[block]) {
 				return claudeLaunchDialogMatch{}, false
 			}
@@ -352,8 +356,11 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 			// transcript ">" row sits above the framed dialog's own top border
 			// (╭…╮), never above a ╰…╯ closing rule (#7399 review). It explains
 			// only its own rows too, under the same #7388 anchor as the box
-			// test (#7412 review, R4).
+			// test (#7412 review, R4). And it is top-cropped only when its top
+			// is off screen: every line above its prompt row is one of the
+			// box's own pad rows (claudeTrustBoxTopCropped, #7412 review, R6).
 			if claudeLaunchDialogPromptRow(pane, i-1) && claudeTrustFrameClosingRule(pane.lines[i]) &&
+				claudeTrustBoxTopCropped(pane, i-1) &&
 				!claudeLaunchDialogOwnRowsBetween(pane, i-1, pane.index[block]) {
 				return claudeLaunchDialogMatch{}, false
 			}
@@ -458,11 +465,47 @@ func claudeLaunchDialogOwnRowsBetween(pane claudeLaunchDialogPane, from, to int)
 			if claudeTrustBoxOpensAt(strings.TrimSpace(line)) && claudeTrustBoxOpenUntil(pane.lines, i, to) {
 				return true
 			}
-		case !pane.rows[i].blank && claudeSquash(pane.rows[i].label) != "":
+		case claudeLaunchDialogUnplacedRow(pane, i):
 			return true
 		}
 	}
 	return false
+}
+
+// claudeLaunchDialogOwnRowsAbove reports whether any line above line top, a
+// composer box's top edge, may hold one of the dialog's own first rows. A
+// composer explains only the rows below it, so a row above its box that af
+// cannot place may be the dialog's question with a stale composer between it
+// and the options (#7412 review, R7). The lines af can place above a box are
+// blank rows and frame rules.
+func claudeLaunchDialogOwnRowsAbove(pane claudeLaunchDialogPane, top int) bool {
+	for i := 0; i < top; i++ {
+		if !claudeTrustFrameRule(pane.lines[i]) && claudeLaunchDialogUnplacedRow(pane, i) {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeLaunchDialogUnplacedRow reports whether pane line i is a row af cannot
+// place: any row with text on it. A blank row, a bordered blank row and a lone
+// wrapped ❯ are rows af can place.
+func claudeLaunchDialogUnplacedRow(pane claudeLaunchDialogPane, i int) bool {
+	return !pane.rows[i].blank && claudeSquash(pane.rows[i].label) != ""
+}
+
+// claudeTrustBoxTopCropped reports whether the box whose prompt row is line
+// prompt has its top edge off screen: every line above the prompt row is one
+// of the box's own pad rows, bordered and blank. Anything else above it means
+// the box's top is on screen, and the box test reads the box by its first row,
+// or the row is no composer's prompt (#7412 review, R6).
+func claudeTrustBoxTopCropped(pane claudeLaunchDialogPane, prompt int) bool {
+	for i := 0; i < prompt; i++ {
+		if !claudeTrustBordered(pane.lines[i]) || !pane.rows[i].blank {
+			return false
+		}
+	}
+	return true
 }
 
 // claudeTrustBoxOpensAt reports whether edge, a trimmed frame rule, is a box's

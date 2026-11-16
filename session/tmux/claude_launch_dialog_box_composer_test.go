@@ -286,3 +286,196 @@ func TestCheckAndHandleTrustPrompt_LiveDialogUnderATopCroppedComposerHolds(t *te
 		})
 	}
 }
+
+// boxStyles are the corner, edge and side glyphs of the four box styles a
+// composer or a dialog paints: top-left, top-right, bottom-left, bottom-right,
+// edge, side.
+var boxStyles = map[string][6]string{
+	"round":  {"╭", "╮", "╰", "╯", "─", "│"},
+	"square": {"┌", "┐", "└", "┘", "─", "│"},
+	"heavy":  {"┏", "┓", "┗", "┛", "━", "┃"},
+	"double": {"╔", "╗", "╚", "╝", "═", "║"},
+}
+
+// styledBox frames rows in a box width columns wide, in box style style. A row
+// wider than the box wraps at its spaces, and an empty row is a pad row.
+func styledBox(style string, width int, rows ...string) []string {
+	g := boxStyles[style]
+	inner := width - 4
+	box := []string{g[0] + strings.Repeat(g[4], width-2) + g[1]}
+	for _, row := range rows {
+		pieces := []string{row}
+		if len([]rune(row)) > inner {
+			pieces = wrapAtSpaces(row, inner)
+		}
+		for _, piece := range pieces {
+			box = append(box, g[5]+" "+piece+strings.Repeat(" ", max(0, inner-len([]rune(piece))))+" "+g[5])
+		}
+	}
+	return append(box, g[2]+strings.Repeat(g[4], width-2)+g[3])
+}
+
+// indentedRows wraps each row at width as Claude Code's renderer does, keeping
+// the row's indent on each piece.
+func indentedRows(width int, rows ...string) []string {
+	var out []string
+	for _, row := range rows {
+		if row == "" {
+			out = append(out, "")
+			continue
+		}
+		indent := row[:len(row)-len(strings.TrimLeft(row, " "))]
+		for _, piece := range wrapAtSpaces(row, max(1, width-len(indent))) {
+			out = append(out, indent+piece)
+		}
+	}
+	return out
+}
+
+// dialogHeads are a dialog's own first rows, each with the options and footer
+// that follow them.
+var dialogHeads = []struct {
+	name          string
+	head, options []string
+}{
+	{"the folder question", []string{"Before you start: do you want Claude to work in this folder?"},
+		[]string{"❯ 1. Yes, I trust this folder", "  2. No, exit", "", "Enter to confirm · Esc to cancel"}},
+	{"the reworded title and question", []string{"Accessing workspace:", "", "/home/u/proj", "", "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team)."},
+		[]string{"❯ 1. Yes, I trust this folder", "  2. No, exit", "", "Enter to confirm · Esc to cancel"}},
+	{"the legacy question", []string{"Do you trust the files in this folder?"},
+		[]string{"❯ 1. Yes, proceed", "  2. No, exit", "", "Enter to confirm · Esc to exit"}},
+	{"the MCP preamble", []string{"New MCP server found in this project: probe"},
+		[]string{"  Use this MCP server", "  Use this and all future MCP servers in this project", "❯ Continue without using this MCP server", "", "Enter to confirm · Esc to cancel"}},
+}
+
+// A composer explains only the rows below it. The dialog's own question above
+// a composer box that sits between it and the options is a row af cannot tell
+// from transcript, so the box decides nothing and the dialog holds, in every
+// composer mode, padded or not (#7412 review, R7). A composer box with nothing
+// above it but blank rows and frame rules still stays clear over quoted options.
+func TestCheckAndHandleTrustPrompt_DialogQuestionAboveAComposerBoxHolds(t *testing.T) {
+	const question = "Before you start: do you want Claude to\nwork in this folder?\n"
+	review := map[string]string{
+		"the review's bash-mode box": question +
+			"╭──────────────────────────────────────╮\n│ ! ls                                 │\n╰──────────────────────────────────────╯\n" + quotedFolderOptions,
+		"the review's padded prompt-mode box": question +
+			"╭──────────────────────────────────────╮\n│                                      │\n│ > x                                  │\n│                                      │\n╰──────────────────────────────────────╯\n" + quotedFolderOptions,
+	}
+	for name, content := range review {
+		t.Run(name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, content, 4)
+			require.True(t, handled, "a dialog's question above a composer box is still in the way:\n%s", content)
+			require.Empty(t, sentKeystrokes(cmds))
+		})
+	}
+	composers := map[string][]string{
+		"a bash-mode box":            {"! ls"},
+		"a memory-mode box":          {"# note"},
+		"a bash-mode box after NBSP": {"! ls"},
+		"a prompt-mode box":          {"> x"},
+		"an empty prompt-mode box":   {">"},
+		"a padded prompt-mode box":   {"", "> x", ""},
+	}
+	for _, dialog := range dialogHeads {
+		for name, composer := range composers {
+			t.Run(fmt.Sprintf("%s above %s", dialog.name, name), func(t *testing.T) {
+				for style := range boxStyles {
+					for _, width := range []int{16, 40} {
+						for _, gap := range [][]string{nil, {""}} {
+							rows := append(indentedRows(width, dialog.head...), gap...)
+							rows = append(append(rows, styledBox(style, width, composer...)...), gap...)
+							content := strings.Join(append(rows, indentedRows(width, dialog.options...)...), "\n")
+							handled, cmds := pollStaticPane(t, content, 4)
+							require.True(t, handled, "%s, %d columns: a dialog's question above a composer box is still in the way:\n%s", style, width, content)
+							require.Empty(t, sentKeystrokes(cmds))
+						}
+					}
+				}
+			})
+		}
+	}
+	for name, composer := range composers {
+		t.Run(fmt.Sprintf("%s, only blank rows and frame rules above it", name), func(t *testing.T) {
+			for style, g := range boxStyles {
+				for _, above := range []string{"\n", g[2] + strings.Repeat(g[4], 22) + g[3] + "\n", strings.Repeat("─", 24) + "\n\n"} {
+					content := above + strings.Join(styledBox(style, 24, composer...), "\n") + "\n" + quotedFolderOptions
+					handled, cmds := pollStaticPane(t, content, 4)
+					require.False(t, handled, "%s: a composer box with only blank rows and frame rules above quoted options is no dialog:\n%s", style, content)
+					require.Empty(t, sentKeystrokes(cmds))
+				}
+			}
+		})
+	}
+}
+
+// A box whose last row is a prompt, straight above its bottom edge, is a
+// top-cropped composer only when its top is off screen: every line above its
+// prompt row is one of the box's own pad rows. With the box's top edge, its
+// first row or the dialog's question on screen above that row, the box is no
+// top-cropped composer and decides nothing, so the dialog holds (#7412 review,
+// R6). That covers a whole composer box whose own rows hold the question, and
+// a box of the dialog's own rows that ends in a "> " row. #7399's top-cropped
+// composer, with nothing above its prompt row but its own pad rows, stays
+// clear.
+func TestCheckAndHandleTrustPrompt_BoxEndingInAPromptRowWithItsTopOnScreenHolds(t *testing.T) {
+	review := "╭──────────────────────────────────────╮\n│ ! ls                                 │\n│ Before you start: do you want Claude │\n│ to work in this folder?              │\n│ > x                                  │\n╰──────────────────────────────────────╯\n" + quotedFolderOptions
+	t.Run("the review's bash-mode box holding the question", func(t *testing.T) {
+		handled, cmds := pollStaticPane(t, review, 4)
+		require.True(t, handled, "a dialog's question inside a box that ends in a prompt row is still in the way:\n%s", review)
+		require.Empty(t, sentKeystrokes(cmds))
+	})
+	without := strings.Replace(review, "│ ! ls                                 │\n", "", 1)
+	t.Run("the review's box without its bash-mode row", func(t *testing.T) {
+		handled, cmds := pollStaticPane(t, without, 4)
+		require.True(t, handled, "a dialog's question inside a box that ends in a prompt row is still in the way:\n%s", without)
+		require.Empty(t, sentKeystrokes(cmds))
+	})
+	shapes := map[string]func(style string, width int, head []string, prompt string) []string{
+		"a bash-mode box whose own rows hold the head": func(style string, width int, head []string, prompt string) []string {
+			return styledBox(style, width, append(append([]string{"! ls"}, head...), prompt)...)
+		},
+		"the dialog's own box ending in the prompt row": func(style string, width int, head []string, prompt string) []string {
+			return styledBox(style, width, append(append([]string{}, head...), prompt)...)
+		},
+		"the dialog's own box, its top edge cropped": func(style string, width int, head []string, prompt string) []string {
+			return styledBox(style, width, append(append([]string{}, head...), prompt)...)[1:]
+		},
+		"the head unframed above a bordered prompt row": func(style string, width int, head []string, prompt string) []string {
+			return append(indentedRows(width, head...), styledBox(style, width, prompt)[1:]...)
+		},
+		"the head unframed above a bare prompt row": func(style string, width int, head []string, prompt string) []string {
+			box := styledBox(style, width, prompt)
+			return append(indentedRows(width, head...), prompt, box[len(box)-1])
+		},
+	}
+	for _, dialog := range dialogHeads {
+		for name, shape := range shapes {
+			t.Run(fmt.Sprintf("%s, %s", dialog.name, name), func(t *testing.T) {
+				for style := range boxStyles {
+					for _, prompt := range []string{"> x", ">", "> /home/u/proj"} {
+						for _, width := range []int{16, 40} {
+							for _, gap := range [][]string{nil, {""}} {
+								rows := append(shape(style, width, dialog.head, prompt), gap...)
+								content := strings.Join(append(rows, indentedRows(width, dialog.options...)...), "\n")
+								handled, cmds := pollStaticPane(t, content, 4)
+								require.True(t, handled, "%s, %q, %d columns: a dialog's own row above the prompt row is still in the way:\n%s", style, prompt, width, content)
+								require.Empty(t, sentKeystrokes(cmds))
+							}
+						}
+					}
+				}
+			})
+		}
+	}
+	t.Run("a top-cropped composer, only its own pad rows above its prompt", func(t *testing.T) {
+		for style := range boxStyles {
+			for _, pads := range [][]string{nil, {""}, {"", ""}} {
+				box := styledBox(style, 24, append(append([]string{}, pads...), "> x")...)
+				content := strings.Join(box[1:], "\n") + "\n" + quotedFolderOptions
+				handled, cmds := pollStaticPane(t, content, 4)
+				require.False(t, handled, "%s: a top-cropped composer above quoted options is no dialog (#7399):\n%s", style, content)
+				require.Empty(t, sentKeystrokes(cmds))
+			}
+		}
+	})
+}
