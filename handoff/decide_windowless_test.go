@@ -5,10 +5,14 @@ package handoff
 // target_order = "emptiest", the orderCandidates percent tiebreak must not
 // treat a zero-window Observed reading as 0% used. worstWindow returns
 // ok=false for a windowless reading ("no window is not a zero reading", per
-// quota/rate_limits.go's contract), and the comparator must honor that flag —
-// only applying the UsedPercent tiebreak when BOTH candidates report at least
-// one window — mirroring the `reported` guard in tier() and
-// readingBelowAllFresh's len(r.Windows)==0 rejection (#7322/#7314).
+// quota/rate_limits.go's contract), and the comparator must honor that flag:
+// a windowless reading is keyed to the batch's highest reported percent, so
+// it ranks with the worst reported candidate — never above it as a phantom
+// 0% — and otherwise falls through to occupancy/listed order. Keying every
+// candidate once (rather than skipping the percent comparison pairwise when
+// either side is windowless) keeps the comparator transitive, mirroring the
+// `reported` guard in tier() and readingBelowAllFresh's len(r.Windows)==0
+// rejection (#7371 review, #7322/#7314).
 
 import (
 	"strings"
@@ -38,12 +42,13 @@ func windowlessObservedReading() ReadingFacts {
 // orderCandidates comparator fix. Before the fix, when both candidates were
 // ReadingObserved the comparator discarded worstWindow's ok flag, so a
 // windowless reading read as UsedPercent 0 and won the percent tiebreak over
-// any candidate with a real reported window. The fix honors ok: the percent
-// tiebreak fires only when BOTH sides report a window; otherwise the
-// comparator falls through to occupancy and listed order, exactly as a
-// no-reading (ReadingNone) account does. All cases below share tier 3 (an
-// incomplete below-prefer observed reading and a windowless observed reading
-// both land there alongside ReadingNone, per #7314/#7322).
+// any candidate with a real reported window. The fix honors ok: a windowless
+// reading is keyed to the batch's highest reported percent, so it ties the
+// worst reported candidate and otherwise falls through to occupancy and
+// listed order — never beating a reported candidate on percent. All cases
+// below share tier 3 (an incomplete below-prefer observed reading and a
+// windowless observed reading both land there alongside ReadingNone, per
+// #7314/#7322).
 func TestOrderCandidatesWindowlessObservedDoesNotWinAsZeroPercent(t *testing.T) {
 	cfg := shadowCfg()
 	cfg.TargetOrder = config.AccountHandoffTargetOrderEmptiest
@@ -74,8 +79,9 @@ func TestOrderCandidatesWindowlessObservedDoesNotWinAsZeroPercent(t *testing.T) 
 	t.Run("windowless does not outrank a reported partial reading listed first", func(t *testing.T) {
 		// The core repro: partial (one 10% window, tier 3) listed BEFORE
 		// blind (zero windows, tier 3). Before the fix, blind read as 0%
-		// and won the percent tiebreak; after the fix the tiebreak is
-		// skipped and listed order decides -> partial first.
+		// and won the percent tiebreak; after the fix blind is keyed to
+		// the batch's only reported percent (10%), ties partial on
+		// percent, and falls through to listed order -> partial first.
 		want(t, order(
 			AccountFacts{Name: "partial", Registered: true, Reading: partialReading(10, future())},
 			blind("blind"),
@@ -86,7 +92,8 @@ func TestOrderCandidatesWindowlessObservedDoesNotWinAsZeroPercent(t *testing.T) 
 		// blind is windowless and listed FIRST with occupancy 2; reported
 		// is a partial 50% reading with occupancy 0. Before the fix,
 		// blind's phantom 0% beat 50% on the percent tiebreak; after the
-		// fix the tiebreak is skipped and occupancy decides -> reported
+		// fix blind is keyed to the batch's only reported percent (50%),
+		// ties reported on percent, and occupancy decides -> reported
 		// (0) ranks ahead of blind (2) even though blind is listed first.
 		got := order(
 			blind("blind", withOccupancy(2)),
@@ -114,8 +121,9 @@ func TestOrderCandidatesWindowlessObservedDoesNotWinAsZeroPercent(t *testing.T) 
 	})
 
 	t.Run("two windowless readings fall through to occupancy then listed order", func(t *testing.T) {
-		// Both windowless -> percent skipped (no phantom comparison) ->
-		// occupancy breaks the tie; equal occupancy -> listed order.
+		// Both windowless -> both keyed to the same (no-reported) value,
+		// tie on percent -> occupancy breaks the tie; equal occupancy ->
+		// listed order.
 		want(t, order(
 			blind("a"),
 			blind("b"),
@@ -132,11 +140,12 @@ func TestOrderCandidatesWindowlessObservedDoesNotWinAsZeroPercent(t *testing.T) 
 	t.Run("a windowless Observed reading orders the same as a no-reading account", func(t *testing.T) {
 		// The percent branch only fires when BOTH sides are ReadingObserved,
 		// so a windowless Observed vs a ReadingNone candidate already fell
-		// through to occupancy/listed order before the fix. After the fix
-		// the windowless-vs-reported case falls through too, so a windowless
-		// Observed reading now orders identically to a ReadingNone account
-		// — no phantom 0% comparison either way. Pin both listings to
-		// confirm there is no regression and the two shapes are peers.
+		// through to occupancy/listed order before the fix. After the fix a
+		// windowless Observed reading is keyed to the batch's highest
+		// reported percent, so versus a no-reading account (still outside
+		// the percent branch) it still falls through to occupancy/listed
+		// order — no phantom 0% comparison either way. Pin both listings
+		// to confirm there is no regression and the two shapes are peers.
 		noReading := ReadingFacts{Status: ReadingNone}
 		want(t, order(
 			blind("blind"),
@@ -187,10 +196,12 @@ func TestDecideEmptiestWindowlessObservedDoesNotBeatReportedEvidence(t *testing.
 	}
 
 	// Sanity: reversing the listed order (blind before partial) keeps the
-	// fix honest — the percent tiebreak is skipped, so listed order alone
-	// decides and blind (now listed first) heads the order. This documents
-	// that the fix removes the phantom-0% comparison rather than adding a
-	// reverse rule that windowless is strictly below reported evidence.
+	// fix honest — blind is keyed to the batch's only reported percent
+	// (partial's 10%), ties it on percent, and listed order alone decides,
+	// so blind (now listed first) heads the order. This documents that the
+	// fix removes the phantom-0% comparison rather than adding a reverse
+	// rule that windowless is strictly below reported evidence: a
+	// windowless reading ties the worst reported candidate, never beats it.
 	f.Accounts[1], f.Accounts[2] = f.Accounts[2], f.Accounts[1]
 	d2 := Decide(f)
 	wantDecision(t, d2, KindMove, reasonTriggerWall)

@@ -658,22 +658,42 @@ func orderCandidates(eligible []scoredAccount, cfg config.AccountHandoffConfig) 
 		}
 		return 3
 	}
+	// maxReported is the highest worst-window percent reported by any
+	// eligible observed candidate. A windowless ReadingObserved snapshot
+	// ("no windows is evidence of absence of data, not a zero reading",
+	// per quota/rate_limits.go) is keyed to this value so it never wins
+	// the UsedPercent tiebreak as 0%: it ranks with the worst reported
+	// candidate — never above it — and otherwise falls through to
+	// occupancy/listed order. Keying every candidate once (rather than
+	// skipping the percent comparison pairwise when either side is
+	// windowless) keeps the comparator transitive: there is one consistent
+	// per-candidate key, not a per-pair choice (#7371 review, #7322/#7314).
+	maxReported := 0.0
+	for _, c := range eligible {
+		if c.facts.Reading.Status != ReadingObserved {
+			continue
+		}
+		if w, ok := worstWindow(c.facts.Reading); ok && w.UsedPercent > maxReported {
+			maxReported = w.UsedPercent
+		}
+	}
+	percentKey := func(c scoredAccount) float64 {
+		if c.facts.Reading.Status != ReadingObserved {
+			return 0
+		}
+		if w, ok := worstWindow(c.facts.Reading); ok {
+			return w.UsedPercent
+		}
+		return maxReported
+	}
 	sort.SliceStable(eligible, func(i, j int) bool {
 		a, b := eligible[i], eligible[j]
 		if ta, tb := tier(a), tier(b); ta != tb {
 			return ta < tb
 		}
 		if a.facts.Reading.Status == ReadingObserved && b.facts.Reading.Status == ReadingObserved {
-			wa, waOK := worstWindow(a.facts.Reading)
-			wb, wbOK := worstWindow(b.facts.Reading)
-			// "No windows" is evidence of absence of data, not a zero
-			// reading: a windowless Observed snapshot must not win the
-			// UsedPercent tiebreak as if it reported 0% used. Only apply the
-			// percent tiebreak when BOTH sides report a window — otherwise
-			// fall through to occupancy/listed order (mirrors the `reported`
-			// guard in tier() and readingBelowAllFresh, #7322/#7314).
-			if waOK && wbOK && wa.UsedPercent != wb.UsedPercent {
-				return wa.UsedPercent < wb.UsedPercent
+			if pa, pb := percentKey(a), percentKey(b); pa != pb {
+				return pa < pb
 			}
 		}
 		oa := a.facts.Occupancy + a.facts.RecentMoveCredits
