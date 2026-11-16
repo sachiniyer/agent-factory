@@ -701,9 +701,12 @@ func reapProtectedChain() map[int]bool {
 // reaper first and the server above it. A pane process meets the server
 // first — including a pane under a server reparented beneath the reaper —
 // and a descendant under a reaper with no tmux ancestor meets no server at
-// all; both stay eligible. An unreadable identity is not a stop: a process
-// that cannot be told apart from the server is never the link a descendant's
-// own-ness is proven through (#7238's direction).
+// all; both stay eligible. Only a POSITIVELY identified tmux process ends
+// the walk: an ancestor whose identity cannot be read is passed, because an
+// unproven link is not the server and must not exempt the descendant —
+// platforms where identity reads fail for non-child processes would then
+// spare every child of the reaper (macOS CI, where the same tests that run
+// under the linux subreaper showed this).
 func reachesSelfThenTmux(snap map[int]proctree.Process, pid, self int) bool {
 	seenSelf := false
 	for range 128 {
@@ -712,7 +715,7 @@ func reachesSelfThenTmux(snap map[int]proctree.Process, pid, self int) bool {
 		}
 		if pid == self {
 			seenSelf = true
-		} else if proctree.TmuxIdentityOf(pid) != proctree.NotTmux {
+		} else if proctree.TmuxIdentityOf(pid) == proctree.Tmux {
 			return seenSelf
 		}
 		p, ok := snap[pid]

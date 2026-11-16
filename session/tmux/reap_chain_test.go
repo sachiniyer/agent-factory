@@ -48,7 +48,10 @@ func TestReapSessionProcessesNeverSignalsTheCallersOwnChain(t *testing.T) {
 	testguard.IsolateTmux(t)
 
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "chain.sock")
+	// A socket under t.TempDir overruns darwin's 104-byte sun_path ceiling —
+	// testguard.SocketPath hands back a path proven short up front, which is
+	// what the comment in codex_safety_real_test.go exists for.
+	sock := testguard.SocketPath(t, "chain.sock")
 	resultFile := filepath.Join(dir, "verdict")
 	// The pane command runs WITHOUT exec, so the pane's own shell stays a
 	// distinct node between the server and the cli role: the chain below the
@@ -235,7 +238,7 @@ func TestReapSessionProcessesReapsAPaneWhoseServerIsADescendantOfTheReaper(t *te
 	testguard.IsolateTmux(t)
 
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "srv.sock")
+	sock := testguard.SocketPath(t, "srv.sock")
 	resultFile := filepath.Join(dir, "verdict")
 
 	reaper := reexecReapChain(t, "srvreaper")
