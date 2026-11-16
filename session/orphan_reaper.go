@@ -19,10 +19,12 @@ type OrphanSweepResult struct {
 	Errors  int // orphans docker refused to remove for a definite reason
 }
 
-// afContainer is one listed managed container: its id and its af.session slug.
+// afContainer is one listed managed container: its id, its af.session slug,
+// and, when the listing asked for it, its af.home label.
 type afContainer struct {
 	id   string
 	slug string
+	home string
 }
 
 // dockerSweepListFormat prints "<id>\t<af.session slug>" per container so the
@@ -62,10 +64,65 @@ const dockerSweepListFormat = "{{.ID}}\t{{.Label \"" + dockerSessionLabel + "\"}
 // (config.GetConfigDir()). An empty homeID disables the sweep — there is nothing
 // to scope to safely, and a broad sweep is exactly what must never happen.
 func SweepOrphanContainers(homeID string, protectedSlugs map[string]bool) OrphanSweepResult {
-	var result OrphanSweepResult
 	if strings.TrimSpace(homeID) == "" {
-		return result
+		return OrphanSweepResult{}
 	}
+	return reapListedContainers(containerReap{
+		logPrefix: "orphan sweep",
+		list:      func(env []string) ([]afContainer, error) { return listAfContainers(env, homeID) },
+		spare:     func(c afContainer) bool { return protectedSlugs[c.slug] },
+		reapedWhy: "no live session owns it",
+	})
+}
+
+// ReapHomeContainers removes every af session container whose af.home label
+// isHome accepts, whatever its session (#7447). It is for tearing down a whole
+// home — an expired throwaway sandbox — that no daemon will start in again, so
+// SweepOrphanContainers, scoped to the home of the daemon that runs it, never
+// would.
+//
+// The proof is per container. The listing reads each container's af.session
+// slug and its af.home label, and only a container whose label isHome proves
+// is a candidate: an unlabelled container, or one another home created, never
+// is, and nothing is chosen by name. The label is the raw home path the
+// creating daemon resolved, so the caller proves it by what the path names,
+// not by its spelling. Each removal then goes through the same per-session
+// reap the sweep uses, re-verifying the engine identity before the rm.
+func ReapHomeContainers(isHome func(labelHome string) bool) OrphanSweepResult {
+	return reapListedContainers(containerReap{
+		logPrefix: "home container reap",
+		list: func(env []string) ([]afContainer, error) {
+			all, err := listLabelledAfContainers(env)
+			if err != nil {
+				return nil, err
+			}
+			var proven []afContainer
+			for _, c := range all {
+				if isHome(c.home) {
+					proven = append(proven, c)
+				}
+			}
+			return proven, nil
+		},
+		spare:     func(afContainer) bool { return false },
+		reapedWhy: "its home is being torn down",
+	})
+}
+
+// containerReap is one pass of reapListedContainers: what it lists, what it
+// spares, and how it names itself in the log.
+type containerReap struct {
+	logPrefix string
+	list      func(env []string) ([]afContainer, error)
+	spare     func(afContainer) bool
+	reapedWhy string
+}
+
+// reapListedContainers resolves the engine the way every docker caller does,
+// lists the pass's candidates on it, and removes each one it does not spare
+// through the per-session reap.
+func reapListedContainers(pass containerReap) OrphanSweepResult {
+	var result OrphanSweepResult
 	if _, err := lookPath("docker"); err != nil {
 		return result // no docker CLI → nothing this daemon could have created
 	}
@@ -79,7 +136,7 @@ func SweepOrphanContainers(homeID string, protectedSlugs map[string]bool) Orphan
 	// read from whichever engine that guess picked. The same refusal applies
 	// here before the sweep's first docker call (#4413 review).
 	if _, _, err := resolveDockerEngineEndpoint(env); err != nil {
-		log.WarningLog.Printf("orphan sweep: cannot resolve the Docker engine endpoint; skipping this sweep: %v", err)
+		log.WarningLog.Printf("%s: cannot resolve the Docker engine endpoint; skipping this sweep: %v", pass.logPrefix, err)
 		return result
 	}
 
@@ -87,19 +144,19 @@ func SweepOrphanContainers(homeID string, protectedSlugs map[string]bool) Orphan
 	engineID, err := currentDockerEngineID(ctx, env)
 	cancel()
 	if err != nil {
-		log.WarningLog.Printf("orphan sweep: cannot read the Docker engine identity; skipping this sweep: %v", err)
+		log.WarningLog.Printf("%s: cannot read the Docker engine identity; skipping this sweep: %v", pass.logPrefix, err)
 		return result
 	}
 
-	containers, err := listAfContainers(env, homeID)
+	containers, err := pass.list(env)
 	if err != nil {
-		log.WarningLog.Printf("orphan sweep: cannot list af containers; skipping this sweep: %v", err)
+		log.WarningLog.Printf("%s: cannot list af containers; skipping this sweep: %v", pass.logPrefix, err)
 		return result
 	}
 
 	for _, c := range containers {
 		result.Listed++
-		if protectedSlugs[c.slug] {
+		if pass.spare(c) {
 			result.Skipped++
 			continue
 		}
@@ -115,18 +172,18 @@ func SweepOrphanContainers(homeID string, protectedSlugs map[string]bool) Orphan
 		switch err := p.reap(); {
 		case err == nil:
 			result.Reaped++
-			log.InfoLog.Printf("orphan sweep: reaped leaked container %s (af.session=%q) — no live session owns it", shortContainerID(c.id), c.slug)
+			log.InfoLog.Printf("%s: reaped leaked container %s (af.session=%q) — %s", pass.logPrefix, shortContainerID(c.id), c.slug, pass.reapedWhy)
 		case errors.Is(err, ErrWorkspaceStateUnknown):
 			result.Unknown++
-			log.WarningLog.Printf("orphan sweep: leaving container %s for a later sweep (state unknown): %v", shortContainerID(c.id), err)
+			log.WarningLog.Printf("%s: leaving container %s for a later sweep (state unknown): %v", pass.logPrefix, shortContainerID(c.id), err)
 		default:
 			result.Errors++
-			log.WarningLog.Printf("orphan sweep: could not reap container %s: %v", shortContainerID(c.id), err)
+			log.WarningLog.Printf("%s: could not reap container %s: %v", pass.logPrefix, shortContainerID(c.id), err)
 		}
 	}
 	if result.Reaped > 0 || result.Unknown > 0 || result.Errors > 0 {
-		log.InfoLog.Printf("orphan sweep: listed=%d reaped=%d skipped=%d unknown=%d errors=%d",
-			result.Listed, result.Reaped, result.Skipped, result.Unknown, result.Errors)
+		log.InfoLog.Printf("%s: listed=%d reaped=%d skipped=%d unknown=%d errors=%d",
+			pass.logPrefix, result.Listed, result.Reaped, result.Skipped, result.Unknown, result.Errors)
 	}
 	return result
 }
@@ -157,6 +214,42 @@ func listAfContainers(env []string, homeID string) ([]afContainer, error) {
 			continue
 		}
 		containers = append(containers, afContainer{id: id, slug: strings.TrimSpace(slug)})
+	}
+	return containers, nil
+}
+
+// dockerHomeReapListFormat prints "<id>\t<af.session slug>\t<af.home>" per
+// container, so a whole-home reap can prove each container's home from its
+// own label.
+const dockerHomeReapListFormat = "{{.ID}}\t{{.Label \"" + dockerSessionLabel + "\"}}\t{{.Label \"" + dockerHomeLabel + "\"}}"
+
+// listLabelledAfContainers lists every managed container that carries an
+// af.home label, with its slug and that label, on the engine env selects. Which
+// of them belong to a home is the caller's proof, made per container.
+func listLabelledAfContainers(env []string) ([]afContainer, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
+	defer cancel()
+	out, err := dockerExec(ctx, env,
+		"ps", "-a",
+		"--filter", "label="+dockerSessionLabel,
+		"--filter", "label="+dockerHomeLabel,
+		"--format", dockerHomeReapListFormat,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var containers []afContainer
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Split(strings.TrimSpace(line), "\t")
+		if len(fields) != 3 {
+			continue // not a line this format prints; never guess at one
+		}
+		id := strings.TrimSpace(fields[0])
+		home := strings.TrimSpace(fields[2])
+		if id == "" || home == "" {
+			continue
+		}
+		containers = append(containers, afContainer{id: id, slug: strings.TrimSpace(fields[1]), home: home})
 	}
 	return containers, nil
 }

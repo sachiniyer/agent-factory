@@ -61,6 +61,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/throwawaysandbox"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // throwawayCheckInterval is how often a marked daemon rechecks its declared
@@ -366,23 +367,73 @@ func teardownThrowawaySandbox(home string, m *throwawaysandbox.Marker) {
 	}
 	procs := throwawayMemberProcesses(canonHome, m)
 	killThrowawayTmuxSockets(canonHome, m)
-	if len(procs) == 0 {
+	if len(procs) > 0 {
+		remaining := throwawayKillFn(procs, throwawayReapGrace, throwawayReapTermWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
+			if outcome == proctree.ReapSignalled {
+				log.InfoLog.Printf("throwaway teardown: "+format, args...)
+			} else {
+				log.WarningLog.Printf("throwaway teardown: "+format, args...)
+			}
+		})
+		if len(remaining) > 0 {
+			pids := make([]string, 0, len(remaining))
+			for _, p := range remaining {
+				pids = append(pids, fmt.Sprintf("%d", p.PID))
+			}
+			log.WarningLog.Printf("throwaway teardown of %s left %d processes after SIGKILL: %s", home, len(remaining), strings.Join(pids, ","))
+		}
+	}
+	reapThrowawayContainers(canonHome)
+}
+
+// throwawayReapContainersFn removes the session containers a home created. A
+// seam so tests need no docker engine.
+var throwawayReapContainersFn = session.ReapHomeContainers
+
+// reapThrowawayContainers removes every session container the sandbox home
+// created (#7447). Nothing else would: the orphan sweep reaps only its own
+// daemon's home, and a throwaway's daemon may never start again. Each
+// container is proven by its own af.home label (throwawayLabelNamesHome), and
+// removed through the orphan sweep's per-container reap, which re-verifies the
+// engine identity before the rm. A sandbox's sessions all end with it, so none
+// is spared.
+func reapThrowawayContainers(canonHome string) {
+	homeInfo, err := os.Stat(canonHome)
+	if err != nil || !homeInfo.IsDir() {
+		// A home already gone proves no label: nothing is reaped (#7447).
+		log.WarningLog.Printf("throwaway teardown: home %s is not a directory any more; leaving its containers, which no label can now prove: %v", canonHome, err)
 		return
 	}
-	remaining := throwawayKillFn(procs, throwawayReapGrace, throwawayReapTermWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
-		if outcome == proctree.ReapSignalled {
-			log.InfoLog.Printf("throwaway teardown: "+format, args...)
-		} else {
-			log.WarningLog.Printf("throwaway teardown: "+format, args...)
-		}
-	})
-	if len(remaining) > 0 {
-		pids := make([]string, 0, len(remaining))
-		for _, p := range remaining {
-			pids = append(pids, fmt.Sprintf("%d", p.PID))
-		}
-		log.WarningLog.Printf("throwaway teardown of %s left %d processes after SIGKILL: %s", home, len(remaining), strings.Join(pids, ","))
+	result := throwawayReapContainersFn(func(label string) bool { return throwawayLabelNamesHome(label, homeInfo) })
+	if result.Unknown > 0 || result.Errors > 0 {
+		log.WarningLog.Printf("throwaway teardown of %s: %d container(s) left in an unknown state and %d not removed; a later reap of this home may still find them",
+			canonHome, result.Unknown, result.Errors)
 	}
+}
+
+// throwawayLabelNamesHome reports whether an af.home label proves its
+// container belongs to the home homeInfo describes. The label is the raw
+// config.GetConfigDir() of the daemon that created the container, so it is
+// proven by the directory it names, never by its spelling, and in this order:
+//
+//   - a relative label is unproven, before any comparison: resolving it would
+//     use this process's cwd, not the creator's, so two throwaways launched
+//     from different directories with the same relative home would each prove
+//     the other's containers (#7447, the shape of Codex's P1 on #7433);
+//   - a label whose directory no longer exists (an already-deleted home), or
+//     that names something other than a directory, is skipped, never matched;
+//   - the label's directory must be the home itself (os.SameFile: the same
+//     device and inode), which a symlinked or differently spelled path to the
+//     same home still is.
+func throwawayLabelNamesHome(label string, homeInfo os.FileInfo) bool {
+	if label == "" || !filepath.IsAbs(label) {
+		return false
+	}
+	info, err := os.Stat(label)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	return os.SameFile(info, homeInfo)
 }
 
 // throwawayPrivateTmuxDir returns the marker's recorded TMUX_TMPDIR when

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -108,26 +109,36 @@ func (c *stopClock) began() time.Time {
 	return c.at
 }
 
-// exitHoldingHome ends the process at once, with the exit status runDaemon's
-// err would have given it, while it still holds the AF home's flock and latch
-// (#7439). The kernel releases the flock only when nothing of the process is
-// left, so nothing the stop abandoned can write to or act on the home after a
-// successor may own it, or re-create it after it was deleted. What it skips —
-// the latch release and removeDaemonPIDFile — is what a SIGKILL at this
-// moment would skip: the latch dies with the process, and a daemon.pid naming
-// an exited process is the case the stale-PID paths own (#5188).
+// holdingHomeExit is how a stop that abandoned something ends the process.
+type holdingHomeExit struct {
+	// abandoned is the stop's ledger, already logged.
+	abandoned []string
+	// code is the exit status: 2 when runDaemon was panicking (Go's own status
+	// for an unrecovered panic), 1 when it returned an error, 0 otherwise.
+	code int
+	// panicReport is the panic's value and stack when runDaemon was
+	// panicking, already logged to the af log; empty otherwise.
+	panicReport string
+}
+
+// exitHoldingHome ends the process at once while it still holds the AF home's
+// flock and latch (#7439). The kernel releases the flock only when nothing of
+// the process is left, so nothing the stop abandoned can write to or act on
+// the home after a successor may own it, or re-create it after it was deleted.
+// What it skips — the latch release and removeDaemonPIDFile — is what a
+// SIGKILL at this moment would skip: the latch dies with the process, and a
+// daemon.pid naming an exited process is the case the stale-PID paths own
+// (#5188). A panic's report goes to stderr as well, where Go would have
+// printed it and where the journal collects it (#7447).
 //
 // A seam: the package's TestMain installs a recorder, so an in-process daemon
-// in a test never ends the test binary. abandoned is for that recorder;
-// production has already logged it.
-var exitHoldingHome = func(abandoned []string, err error) {
-	code := 0
-	if err != nil {
-		log.ErrorLog.Printf("daemon exiting: %v", err)
-		code = 1
+// in a test never ends the test binary.
+var exitHoldingHome = func(exit holdingHomeExit) {
+	if exit.panicReport != "" {
+		_, _ = fmt.Fprint(os.Stderr, exit.panicReport)
 	}
 	log.Close()
-	os.Exit(code)
+	os.Exit(exit.code)
 }
 
 // holdHomeIfAbandoned ends the process through exitHoldingHome when the stop
@@ -136,16 +147,33 @@ var exitHoldingHome = func(abandoned []string, err error) {
 // this home's daemon never starts again (#7439). A stop that abandoned nothing
 // returns and unwinds as usual, releasing the latch and the flock and removing
 // daemon.pid.
-func holdHomeIfAbandoned(stop *stopClock, beforeExit func(), err error) {
+//
+// panicked is what the caller recovered when runDaemon was panicking, with
+// the stack it was panicking on. The exit then reports it — the af log, then
+// stderr — and exits 2, never 0: os.Exit would otherwise end the panic
+// silently and report success, so systemd's Restart=on-failure would not
+// restart the daemon (#7447).
+func holdHomeIfAbandoned(stop *stopClock, beforeExit func(), err error, panicked any, stack []byte) {
 	abandoned := stop.abandonments()
 	if len(abandoned) == 0 {
 		return
+	}
+	exit := holdingHomeExit{abandoned: abandoned}
+	switch {
+	case panicked != nil:
+		exit.code = 2
+		exit.panicReport = fmt.Sprintf("panic: %v [recovered to exit holding the AF home; the stop abandoned %s (#7447)]\n\n%s",
+			panicked, strings.Join(abandoned, "; "), stack)
+		log.ErrorLog.Printf("daemon panicked during a stop that abandoned %s: %v\n%s", strings.Join(abandoned, "; "), panicked, stack)
+	case err != nil:
+		exit.code = 1
+		log.ErrorLog.Printf("daemon exiting: %v", err)
 	}
 	log.WarningLog.Printf("shutdown: this stop abandoned %s; exiting while the daemon still holds its AF home's lock and latch, "+
 		"so nothing it abandoned can touch the home after their release. daemon.pid stays behind naming this exited process, "+
 		"as after a SIGKILL (#7439)", strings.Join(abandoned, "; "))
 	beforeExit()
-	exitHoldingHome(abandoned, err)
+	exitHoldingHome(exit)
 }
 
 // relayStopSignals stamps stop as each signal arrives on raw, then hands the

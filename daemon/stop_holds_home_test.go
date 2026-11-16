@@ -23,20 +23,20 @@ import (
 // recordExitHoldingHome is the package-wide exitHoldingHome TestMain installs:
 // an in-process daemon must never end the test binary. It records nothing a
 // test reads; tests that assert on the exit install captureExitHoldingHome.
-func recordExitHoldingHome([]string, error) {}
+func recordExitHoldingHome(holdingHomeExit) {}
 
 // captureExitHoldingHome replaces exitHoldingHome for one test. atExit runs
 // inside the exit, before it is reported on the returned channel, so a test can
 // look at what the process still holds at that instant.
-func captureExitHoldingHome(t *testing.T, atExit func()) <-chan []string {
+func captureExitHoldingHome(t *testing.T, atExit func()) <-chan holdingHomeExit {
 	t.Helper()
-	exits := make(chan []string, 4)
+	exits := make(chan holdingHomeExit, 4)
 	previous := exitHoldingHome
-	exitHoldingHome = func(abandoned []string, _ error) {
+	exitHoldingHome = func(exit holdingHomeExit) {
 		if atExit != nil {
 			atExit()
 		}
-		exits <- abandoned
+		exits <- exit
 	}
 	// Registered before the test starts its daemon, so it is restored only
 	// after that daemon has been joined (cleanups run LIFO).
@@ -149,8 +149,9 @@ func TestRunDaemonStopThatAbandonedSomethingExitsHoldingTheHome(t *testing.T) {
 		requestShutdown(t, runExited)
 
 		select {
-		case abandoned := <-exits:
-			require.Equal(t, []string{"teardown: sandbox tunnels"}, abandoned)
+		case exit := <-exits:
+			require.Equal(t, []string{"teardown: sandbox tunnels"}, exit.abandoned)
+			require.Zero(t, exit.code, "a requested stop that abandoned a step still exits 0")
 		default:
 			t.Fatalf("the stop abandoned a step but never exited holding the home; it unwound through %v", order.seen())
 		}
@@ -171,8 +172,8 @@ func TestRunDaemonStopThatAbandonedSomethingExitsHoldingTheHome(t *testing.T) {
 		requestShutdown(t, runExited)
 
 		select {
-		case abandoned := <-exits:
-			t.Fatalf("a stop that abandoned nothing exited holding the home: %v", abandoned)
+		case exit := <-exits:
+			t.Fatalf("a stop that abandoned nothing exited holding the home: %v", exit.abandoned)
 		default:
 		}
 		_, err := os.Stat(filepath.Join(home, "daemon.pid"))
@@ -401,4 +402,62 @@ func TestRunDaemonExpiredThrowawayIsTornDownBeforeTheExitHoldingTheHome(t *testi
 		}
 	}
 	require.Equal(t, 1, teardowns, "the sandbox is torn down once: %v", seen)
+}
+
+// TestRunDaemonPanicDuringAnAbandonedStopExitsTwoWithItsStack: a panic on the
+// main flow during a stop that abandoned something must not end the process
+// with success. The exit holding the home reports the panic's value and the
+// stack it panicked on, and exits 2, so systemd's Restart=on-failure fires
+// (#7447). Before, its os.Exit(0) swallowed the panic without a trace.
+func TestRunDaemonPanicDuringAnAbandonedStopExitsTwoWithItsStack(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	stubContainerSweep(t)
+	shortenTeardown(t, time.Second)
+	exits := captureExitHoldingHome(t, nil)
+
+	release := make(chan struct{})
+	previousStop := stopSandboxTunnels
+	stopSandboxTunnels = func() { <-release }
+	t.Cleanup(func() { stopSandboxTunnels = previousStop })
+
+	const panicValue = "boom-7447: a post-restore startup step panicked"
+	previousHook := testHookStartupStep
+	testHookStartupStep = func(name string) {
+		// On the main flow, after the exit-holding defer is registered.
+		if name == "legacy task unit sweep" {
+			panic(panicValue)
+		}
+	}
+	t.Cleanup(func() { testHookStartupStep = previousHook })
+
+	// A panic that escapes RunDaemon is caught here, so a regression fails this
+	// test instead of ending the test binary.
+	runExited := make(chan struct{})
+	escaped := make(chan any, 1)
+	go func() {
+		defer close(runExited)
+		defer func() { escaped <- recover() }()
+		_ = RunDaemon(tcpDisabledConfig())
+	}()
+	t.Cleanup(func() {
+		close(release)
+		select {
+		case <-runExited:
+		case <-time.After(10 * time.Second):
+			t.Error("in-process daemon did not exit during cleanup")
+		}
+	})
+
+	var exit holdingHomeExit
+	select {
+	case exit = <-exits:
+	case <-runExited:
+		t.Fatalf("the panicking stop never exited holding the home; the panic escaped RunDaemon: %v", <-escaped)
+	case <-time.After(20 * time.Second):
+		t.Fatal("the panicking daemon never stopped")
+	}
+	require.Contains(t, exit.abandoned, "teardown: sandbox tunnels")
+	require.Equal(t, 2, exit.code, "a panicking runDaemon must never exit holding the home with success")
+	require.Contains(t, exit.panicReport, panicValue, "the exit must report the panic's value")
+	require.Contains(t, exit.panicReport, "startupStep(", "the exit must report the stack the daemon panicked on")
 }

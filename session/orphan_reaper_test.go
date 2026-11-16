@@ -183,3 +183,48 @@ func TestSweepNoOpWithoutHomeOrDocker(t *testing.T) {
 
 	assert.False(t, called, "the sweep must not invoke docker in either no-op path")
 }
+
+// TestReapHomeContainersRemovesOnlyProvenContainers: a whole-home reap lists
+// every af session container that carries an af.home label, and removes only
+// the ones whose label the caller proves; an unproven label, another home's,
+// and a line the format never prints are all left alone (#7447).
+func TestReapHomeContainersRemovesOnlyProvenContainers(t *testing.T) {
+	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
+	var psArgs, removed []string
+	cli := &fakeDockerContextCLI{}
+	defer SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "context":
+			return cli.exec(ctx, environ, args...)
+		case "info":
+			return []byte("engine-1\n"), nil
+		case "ps":
+			psArgs = append([]string(nil), args...)
+			return []byte("cid-mine\tslug-a\t/h/mine\n" +
+				"cid-alias\tslug-b\t/h/alias-of-mine\n" +
+				"cid-other\tslug-c\t/h/other\n" +
+				"cid-relative\tslug-d\t.af\n" +
+				"cid-unlabelled\tslug-e\t\n" +
+				"not a listing line\n"), nil
+		case "rm":
+			removed = append(removed, args[len(args)-1])
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unexpected docker call: %v", args)
+		}
+	})()
+
+	var asked []string
+	got := ReapHomeContainers(func(label string) bool {
+		asked = append(asked, label)
+		return label == "/h/mine" || label == "/h/alias-of-mine"
+	})
+
+	require.True(t, slices.Contains(psArgs, "label="+dockerSessionLabel), "must list only af session containers")
+	require.True(t, slices.Contains(psArgs, "label="+dockerHomeLabel), "must list only containers that carry an af.home label")
+	assert.Equal(t, []string{"/h/mine", "/h/alias-of-mine", "/h/other", ".af"}, asked,
+		"every labelled container's own label is put to the proof, and nothing else is")
+	assert.Equal(t, []string{"cid-mine", "cid-alias"}, removed, "only the proven containers are removed")
+	assert.Equal(t, 2, got.Listed)
+	assert.Equal(t, 2, got.Reaped)
+}
