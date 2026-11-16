@@ -95,6 +95,11 @@ func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bou
 	}
 	copies, stale, uncorrelated, unlooked := false, false, false, false
 	for _, other := range transcripts {
+		if unlooked {
+			// The first comparison that did not answer settles it: the rest
+			// are on the same mount (#7389 review R2).
+			break
+		}
 		if !other.modTime.After(recorded.modTime) {
 			continue
 		}
@@ -378,29 +383,30 @@ func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationD
 
 // claudeTranscriptExtends reports whether the transcript longer begins with
 // every byte of shorter. One that is not there extends nothing. The
-// comparison runs in a bounded flight (#7383), and err is a lookup in it that
-// did not answer, or failed: then af could not tell.
+// comparison runs in a paced flight whose bound is per read (#7383), and err
+// is a lookup in it that did not answer, or failed: then af could not tell.
 func claudeTranscriptExtends(longer, shorter claudeTranscript) (bool, error) {
 	longPath, shortPath := filepath.Join(longer.dir, longer.name), filepath.Join(shorter.dir, shorter.name)
-	return fsprobe.Bounded("Claude transcript comparison", longPath+"\x00"+shortPath, func() (bool, error) {
-		carryLookup("open", longPath)
+	return fsprobe.Paced("Claude transcript comparison", longPath+"\x00"+shortPath, func(step func()) (bool, error) {
+		p := pacedCarryWalk(step)
+		p.at("open", longPath)
 		long, err := os.Open(longPath)
 		if err != nil {
 			return false, unlookedOnly(err)
 		}
 		defer long.Close()
-		carryLookup("open", shortPath)
+		p.at("open", shortPath)
 		short, err := os.Open(shortPath)
 		if err != nil {
 			return false, unlookedOnly(err)
 		}
 		defer short.Close()
-		carryLookup("fstat", longPath)
+		p.at("fstat", longPath)
 		longInfo, err := long.Stat()
 		if err != nil {
 			return false, err
 		}
-		carryLookup("fstat", shortPath)
+		p.at("fstat", shortPath)
 		shortInfo, err := short.Stat()
 		if err != nil {
 			return false, err
@@ -411,7 +417,7 @@ func claudeTranscriptExtends(longer, shorter claudeTranscript) (bool, error) {
 		if os.SameFile(longInfo, shortInfo) {
 			return true, nil
 		}
-		same, err := carryPrefixMatches(long, short, shortInfo.Size())
+		same, err := carryPrefixMatches(p, long, short, shortInfo.Size())
 		if err != nil {
 			return false, unlookedOnly(err)
 		}

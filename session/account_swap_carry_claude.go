@@ -61,14 +61,16 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 			refused = symlinkCarryReason(carrySymlinkPath(err))
 		}
 	}
+	// The first lookup that does not answer settles it: the rest are on the
+	// same mount, and each would wait out a bound of its own (#7389 review R2).
 	for _, project := range c.claudeProjects {
 		note(c.srcRoot, project, &src)
-		if c.committed {
+		if c.committed && !unlooked {
 			note(c.dstRoot, project, &dst)
 		}
-	}
-	if unlooked {
-		return carryUnlookedReason
+		if unlooked {
+			return carryUnlookedReason
+		}
 	}
 	root, copies := c.srcRoot, src
 	if len(dst) > 0 {
@@ -91,11 +93,11 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 
 // statClaudeCopy reports the copy of conversation id under project in root,
 // reached the way openCarryArtifact opens it, or nil and why not. The lookup
-// runs in a bounded flight (#7383).
+// runs in a paced flight (#7383).
 func statClaudeCopy(root carryRoot, project, id string) (*claudeCopy, error) {
 	rel := filepath.Join(project, id+".jsonl")
-	return fsprobe.Bounded("Claude transcript copy lookup", root.key()+"\x00"+rel, func() (*claudeCopy, error) {
-		file, info, err := openCarryArtifact(root, rel)
+	return fsprobe.Paced("Claude transcript copy lookup", root.key()+"\x00"+rel, func(step func()) (*claudeCopy, error) {
+		file, info, err := openCarryArtifact(pacedCarryWalk(step), root, rel)
 		if err != nil {
 			return nil, err
 		}
@@ -150,34 +152,40 @@ func liveClaudeCopy(root carryRoot, id string, copies []claudeCopy) (string, str
 // begins with every byte of the file at shorter, beneath shortRoot: the
 // longer one is the shorter one with turns appended. A file that is not there,
 // or is not a plain file, extends nothing; one file under two names extends
-// itself. The comparison runs in a bounded flight (#7383), and err is a lookup
-// in it that did not answer, or failed: then af could not tell.
+// itself. The comparison runs in a paced flight whose bound is per read
+// (#7383), and err is a lookup in it that did not answer, or failed: then af
+// could not tell.
 func claudeCopyExtends(longRoot carryRoot, longer string, shortRoot carryRoot, shorter string) (bool, error) {
-	return fsprobe.Bounded("Claude transcript copy comparison",
+	return fsprobe.Paced("Claude transcript copy comparison",
 		longRoot.key()+"\x00"+longer+"\x00"+shortRoot.key()+"\x00"+shorter,
-		func() (bool, error) {
-			long, longInfo, err := openCarryArtifact(longRoot, longer)
-			if err != nil {
-				return false, unlookedOnly(err)
-			}
-			defer long.Close()
-			short, shortInfo, err := openCarryArtifact(shortRoot, shorter)
-			if err != nil {
-				return false, unlookedOnly(err)
-			}
-			defer short.Close()
-			if os.SameFile(longInfo, shortInfo) {
-				return true, nil
-			}
-			if longInfo.Size() < shortInfo.Size() {
-				return false, nil
-			}
-			same, err := carryPrefixMatches(long, short, shortInfo.Size())
-			if err != nil {
-				return false, unlookedOnly(err)
-			}
-			return same, nil
+		func(step func()) (bool, error) {
+			return claudeCopyExtendsWith(pacedCarryWalk(step), longRoot, longer, shortRoot, shorter)
 		})
+}
+
+// claudeCopyExtendsWith is claudeCopyExtends on a walk p already paces.
+func claudeCopyExtendsWith(p carryPace, longRoot carryRoot, longer string, shortRoot carryRoot, shorter string) (bool, error) {
+	long, longInfo, err := openCarryArtifact(p, longRoot, longer)
+	if err != nil {
+		return false, unlookedOnly(err)
+	}
+	defer long.Close()
+	short, shortInfo, err := openCarryArtifact(p, shortRoot, shorter)
+	if err != nil {
+		return false, unlookedOnly(err)
+	}
+	defer short.Close()
+	if os.SameFile(longInfo, shortInfo) {
+		return true, nil
+	}
+	if longInfo.Size() < shortInfo.Size() {
+		return false, nil
+	}
+	same, err := carryPrefixMatches(p, long, short, shortInfo.Size())
+	if err != nil {
+		return false, unlookedOnly(err)
+	}
+	return same, nil
 }
 
 // unlookedOnly is err when it is a look that did not happen
@@ -197,14 +205,14 @@ func unlookedOnly(err error) error {
 // plan accepts as an older copy Claude has moved past, so it is left in place
 // (#7220 review R3); af deletes nothing from an account's home.
 //
-// The lookups run in a bounded flight; one that does not answer is af could
-// not check the new account's home (#7383).
+// The lookups run in one paced flight whose bound is per syscall; one that
+// does not answer is af could not check the new account's home (#7383).
 func (c *conversationCarry) claudeTargetReason() string {
 	in := claudeTargetLookup{srcRoot: c.srcRoot, dstRoot: c.dstRoot, dstHome: c.dstHome, transcript: c.transcript,
 		id: c.id, projects: append([]string(nil), c.claudeProjects...)}
-	reason, err := fsprobe.Bounded("Claude target copy lookup",
+	reason, err := fsprobe.Paced("Claude target copy lookup",
 		in.srcRoot.key()+"\x00"+in.dstRoot.key()+"\x00"+in.transcript+"\x00"+strings.Join(in.projects, "\x00"),
-		func() (string, error) { return judgeClaudeTarget(in), nil })
+		func(step func()) (string, error) { return judgeClaudeTarget(pacedCarryWalk(step), in), nil })
 	if err != nil {
 		return carryTargetUncheckedReason
 	}
@@ -220,8 +228,8 @@ type claudeTargetLookup struct {
 	projects            []string
 }
 
-func judgeClaudeTarget(in claudeTargetLookup) string {
-	carried, carriedInfo, err := openCarryArtifact(in.srcRoot, in.transcript)
+func judgeClaudeTarget(p carryPace, in claudeTargetLookup) string {
+	carried, carriedInfo, err := openCarryArtifact(p, in.srcRoot, in.transcript)
 	if err != nil {
 		return carryTargetUncheckedReason
 	}
@@ -231,12 +239,12 @@ func judgeClaudeTarget(in claudeTargetLookup) string {
 		if rel == in.transcript {
 			continue
 		}
-		other, otherInfo, err := openCarryArtifact(in.dstRoot, rel)
+		other, otherInfo, err := openCarryArtifact(p, in.dstRoot, rel)
 		switch {
 		case err == nil:
 			_ = other.Close()
 			if otherInfo.ModTime().Before(carriedInfo.ModTime()) {
-				extends, err := claudeCopyExtends(in.srcRoot, in.transcript, in.dstRoot, rel)
+				extends, err := claudeCopyExtendsWith(p, in.srcRoot, in.transcript, in.dstRoot, rel)
 				if err != nil {
 					return carryTargetUncheckedReason
 				}

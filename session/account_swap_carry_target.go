@@ -34,13 +34,15 @@ func (c *conversationCarry) targetReason() string {
 // the source writes in between — bytes that turn an extending target copy
 // into a diverging one, say — is left for the copy to find.
 //
-// The judgement opens and reads both accounts' homes, so it runs in a bounded
-// flight: one that does not answer, or a lookup in it that fails, refuses as
-// unverified (#7383).
+// The judgement opens and reads both accounts' homes, so it runs in a paced
+// flight whose bound is per syscall: one that does not answer, or a lookup in
+// it that fails, refuses as unverified (#7383).
 func (c *conversationCarry) targetCopyReason() string {
 	srcRoot, dstRoot, rel := c.srcRoot, c.dstRoot, c.transcript
-	judged, err := fsprobe.Bounded("carry target-copy judgement", srcRoot.key()+"\x00"+dstRoot.key()+"\x00"+rel,
-		func() (targetCopyJudgement, error) { return judgeTargetCopy(srcRoot, dstRoot, rel), nil })
+	judged, err := fsprobe.Paced("carry target-copy judgement", srcRoot.key()+"\x00"+dstRoot.key()+"\x00"+rel,
+		func(step func()) (targetCopyJudgement, error) {
+			return judgeTargetCopy(pacedCarryWalk(step), srcRoot, dstRoot, rel), nil
+		})
 	switch {
 	case err != nil:
 		return carryUnlookedReason
@@ -59,8 +61,8 @@ type targetCopyJudgement struct {
 
 // judgeTargetCopy is the copy's decision on rel in srcRoot and dstRoot, made
 // from the two open files without writing anything.
-func judgeTargetCopy(srcRoot, dstRoot carryRoot, rel string) targetCopyJudgement {
-	src, srcInfo, err := openCarryArtifact(srcRoot, rel)
+func judgeTargetCopy(p carryPace, srcRoot, dstRoot carryRoot, rel string) targetCopyJudgement {
+	src, srcInfo, err := openCarryArtifact(p, srcRoot, rel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		src = nil
@@ -69,7 +71,7 @@ func judgeTargetCopy(srcRoot, dstRoot carryRoot, rel string) targetCopyJudgement
 	default:
 		defer src.Close()
 	}
-	dst, dstInfo, err := openCarryArtifact(dstRoot, rel)
+	dst, dstInfo, err := openCarryArtifact(p, dstRoot, rel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		dst = nil
@@ -78,7 +80,7 @@ func judgeTargetCopy(srcRoot, dstRoot carryRoot, rel string) targetCopyJudgement
 	default:
 		defer dst.Close()
 	}
-	if _, err := judgeCarryFile(src, srcInfo, dst, dstInfo, carryNewTranscript); err != nil {
+	if _, err := judgeCarryFile(p, src, srcInfo, dst, dstInfo, carryNewTranscript); err != nil {
 		return targetCopyJudgement{err}
 	}
 	return targetCopyJudgement{}

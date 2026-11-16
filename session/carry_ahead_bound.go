@@ -16,10 +16,13 @@ import (
 // handoff engine asks that plan on its decision tick as require_carry's
 // check-ahead. On a mount that stops answering, none of those syscalls
 // returns, and fsprobe's path probes cannot reach them, so each read-only
-// judgement the plan makes runs as a whole inside one bounded flight
-// (fsprobe.Bounded, #7383). A lookup that does not answer, or fails, is a
-// look that did not happen: the plan refuses the carry as unverified. It
-// never carries, and it never hangs. The copy itself, which runs after the
+// judgement the plan makes runs in one paced flight (fsprobe.Paced, #7383):
+// the judgement keeps its descriptors open from the first openat to the last
+// read, and the bound restarts at every syscall (carryPace), so it is per
+// read, never per judgement. A judgement whose every syscall answers within
+// the bound reaches its answer whatever the files' size. A lookup that does
+// not answer, or fails, is a look that did not happen: the plan refuses the
+// carry as unverified. It never carries, and it never hangs. The copy itself, which runs after the
 // outgoing agent stops and must not be abandoned mid-write, is not bounded.
 
 // key names the home r anchors, for a bounded flight's key.
@@ -44,10 +47,10 @@ func carryLookupUnlooked(err error) bool {
 	return errors.As(err, &pathErr)
 }
 
-// boundedProbeCarryDir is probeCarryDir in a bounded flight.
+// boundedProbeCarryDir is probeCarryDir in a paced flight.
 func boundedProbeCarryDir(home carryRoot, rel string) error {
-	_, err := fsprobe.Bounded("carry store probe", home.key()+"\x00"+rel, func() (struct{}, error) {
-		return struct{}{}, probeCarryDir(home, rel)
+	_, err := fsprobe.Paced("carry store probe", home.key()+"\x00"+rel, func(step func()) (struct{}, error) {
+		return struct{}{}, probeCarryDir(pacedCarryWalk(step), home, rel)
 	})
 	return err
 }
