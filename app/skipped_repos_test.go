@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -33,7 +34,7 @@ import (
 // ticker would carry, Update applies it on the event loop.
 func pollSnapshotReply(t *testing.T, h *home, resp daemon.SnapshotResponse, err error) {
 	t.Helper()
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) { return resp, err }
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) { return resp, err }
 	msg, ok := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
 	require.True(t, ok, "fetchSnapshotCmd must return a snapshotFetchedMsg")
 	_, _ = h.Update(msg)
@@ -306,7 +307,7 @@ func TestSkippedRepoNoticeOncePerSet(t *testing.T) {
 func TestSkippedRepoColdStart(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(220, 1)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{
 			SkippedRepos: []daemon.SkippedRepo{{
 				RepoID: h.repoID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON,
@@ -352,7 +353,7 @@ func TestSkippedRepoSwitchProject(t *testing.T) {
 	h.errBox.SetSize(220, 1)
 	repoBRoot := initTestGitRepo(t)
 	repoB := &config.RepoContext{Root: repoBRoot, ID: config.RepoIDFromRoot(repoBRoot)}
-	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, repoID string) (daemon.SnapshotResponse, error) {
 		resp := daemon.SnapshotResponse{}
 		if repoID == repoB.ID {
 			resp.SkippedRepos = []daemon.SkippedRepo{{

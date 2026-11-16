@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -343,7 +344,7 @@ func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	// snapshots; sustained poll failures correctly show daemon recovery.
 	// Return a frozen snapshot, never read the live model from the fetch goroutine.
 	snapshot := daemon.SnapshotResponse{Instances: []session.InstanceData{alpha.ToInstanceData()}}
-	eh.home.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) { return snapshot, nil }
+	eh.home.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) { return snapshot, nil }
 	// The same poll reloads tasks from disk. Persist the rail fixture so it cannot
 	// disappear mid-focus-cycle, and let the poll populate the task editor too.
 	// Match production's resolved RepoContext.ID, not a hash of the raw path:

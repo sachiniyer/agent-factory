@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -36,7 +37,7 @@ func TestColdStartFromSnapshot_PopulatesSidebar(t *testing.T) {
 		return newSnapshotTestInstance(t, d.Title), nil
 	}))
 
-	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, repoID string) (daemon.SnapshotResponse, error) {
 		require.Equal(t, h.repoID, repoID, "cold start must fetch the TUI's repo scope")
 		return daemon.SnapshotResponse{Instances: []session.InstanceData{{Title: "alpha"}, {Title: "beta"}}}, nil
 	}
@@ -62,7 +63,7 @@ func TestColdStartFromSnapshot_WaitsOutWarmingDaemon(t *testing.T) {
 	defer func() { coldStartWarmupPoll = prevPoll }()
 
 	calls := 0
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		calls++
 		if calls < 3 {
 			return daemon.SnapshotResponse{}, errDaemonStarting()
@@ -92,7 +93,7 @@ func TestColdStartFromSnapshot_LaunchSelectionParity(t *testing.T) {
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
 		return newSnapshotTestInstance(t, d.Title), nil
 	}))
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{Instances: []session.InstanceData{{Title: "first"}, {Title: "second"}, {Title: "third"}}}, nil
 	}
 
@@ -135,7 +136,7 @@ func TestColdStartFromSnapshot_AutoOpensFirstInstancePane(t *testing.T) {
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
 		return newSnapshotTestInstance(t, d.Title), nil
 	}))
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{Instances: []session.InstanceData{{Title: "first"}, {Title: "second"}}}, nil
 	}
 
@@ -173,7 +174,7 @@ func TestColdStartFromSnapshot_AutoOpenWaitsOutTransientStatus(t *testing.T) {
 		inst.SetStatusForTest(session.Loading)
 		return inst, nil
 	}))
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{Instances: []session.InstanceData{{Title: "restoring"}}}, nil
 	}
 
@@ -194,7 +195,7 @@ func TestColdStartFromSnapshot_AutoOpenWaitsOutTransientStatus(t *testing.T) {
 // with the launch paint path running clean — matching the pre-store TUI.
 func TestColdStartFromSnapshot_EmptySnapshotNoSelection(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
@@ -213,7 +214,7 @@ func TestColdStartFromSnapshot_EmptySnapshotNoSelection(t *testing.T) {
 func TestColdStartFromSnapshot_HardErrorAborts(t *testing.T) {
 	h := newTestHome(t)
 
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, errors.New("connection refused")
 	}
 

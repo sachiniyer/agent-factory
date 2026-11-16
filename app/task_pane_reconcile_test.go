@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -147,7 +148,7 @@ func TestRefreshTasksReconcilesPaneAroundRetainedEdit(t *testing.T) {
 // user held against the previous project may follow them into the next.
 func TestSwitchProjectDiscardsTaskPaneDrafts(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	sp := h.automations.TaskPane()

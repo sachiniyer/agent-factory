@@ -26,7 +26,9 @@ func unansweredConfigRead(root string) error {
 // goes unanswered, at switch time and on every live re-read after it.
 func switchToUnreadableProject(t *testing.T, h *home) string {
 	t.Helper()
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) { return daemon.SnapshotResponse{}, nil }
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
 	prevSwitch, prevLive := resolveSwitchProjectConfig, resolveConfiguredProgramContext
 	resolveSwitchProjectConfig = func(repo *config.RepoContext) (*config.ResolvedConfig, error) {
 		return nil, unansweredConfigRead(repo.Root)

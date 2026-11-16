@@ -191,7 +191,7 @@ func TestFetchSnapshotCmd_UsesFetcherSeam(t *testing.T) {
 	}))
 
 	called := false
-	h.snapshotFetcher = func(repoID string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, repoID string) (daemon.SnapshotResponse, error) {
 		called = true
 		require.Equal(t, h.repoID, repoID, "the snapshot fetch must be scoped to this repo")
 		return daemon.SnapshotResponse{Instances: []session.InstanceData{{Title: "viaseam", CreatedAt: time.Now()}}}, nil
@@ -212,7 +212,7 @@ func TestFetchSnapshotCmdUsesKnownRepoIDForTaskScope(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot = "/recorded/workspace"
 	h.repoID = "already-resolved-repo-id"
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {

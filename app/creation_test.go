@@ -136,7 +136,7 @@ func newTestHome(t *testing.T) *home {
 		// Same reason for the web-listener poll (#6386): Init arms it, so the
 		// harness must never reach the real fetcher, which dials the daemon.
 		webListenerFetcher: func() string { return "" },
-		snapshotFetcher: func(string) (daemon.SnapshotResponse, error) {
+		snapshotFetcher: func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 			return daemon.SnapshotResponse{}, fmt.Errorf("snapshot fetcher not stubbed in test")
 		},
 		// Default the #1160 poll-pause seams to no-ops so a test that incidentally

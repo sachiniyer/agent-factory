@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -26,7 +27,7 @@ import (
 // does (#1891).
 func TestHandleTaskCreate_CrossRepoSurfacesBindingNotice(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
@@ -106,7 +107,7 @@ func TestHandleTaskCreate_CrossRepoSurfacesBindingNotice(t *testing.T) {
 // now names where the task landed the way the nil-error branch does.
 func TestHandleTaskCreate_CrossRepoCommittedWarningNamesTheBinding(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
@@ -175,7 +176,7 @@ func TestHandleTaskCreate_CrossRepoCommittedWarningNamesTheBinding(t *testing.T)
 // launch repo's tasks until the next snapshot poll.
 func TestHandleTaskCreate_SameRepoAfterSwitchAppearsInList(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
@@ -238,7 +239,7 @@ func TestHandleTaskCreate_SameRepoAfterSwitchAppearsInList(t *testing.T) {
 // mistake the empty pane for a failed save.
 func TestHandleTaskCreate_CrossRepoAfterSwitchNamesTheCrossRepoBinding(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
@@ -306,7 +307,7 @@ func TestHandleTaskCreate_CrossRepoAfterSwitchNamesTheCrossRepoBinding(t *testin
 // carries no delayed clear (the cross-repo branch is not taken).
 func TestHandleTaskCreate_SameRepoSilentSuccessIsUnchanged(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
@@ -358,7 +359,7 @@ func TestHandleTaskCreate_SameRepoSilentSuccessIsUnchanged(t *testing.T) {
 // #1836).
 func TestSaveContentPaneState_CrossRepoRetargetQueuesBindingNotice(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	repoA := initTestGitRepo(t)
@@ -452,7 +453,7 @@ func TestSaveContentPaneState_CrossRepoRetargetQueuesBindingNotice(t *testing.T)
 // left the user with a generic "failed to save task" and no idea where it landed.
 func TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeOnCommittedWarning(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	repoA := initTestGitRepo(t)
@@ -545,7 +546,7 @@ func TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeOnCommittedWarning(t 
 // task vanishes the way this change exists to prevent (#1836).
 func TestSaveContentPaneState_CrossRepoRetargetQueuesNoticeWhenReloadFails(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	repoA := initTestGitRepo(t)
@@ -676,7 +677,7 @@ func TestPollSurfacesDiscardedDraftAndRetargetTogether(t *testing.T) {
 // row stays in the active-scope pane and there is nothing to echo.
 func TestSaveContentPaneState_SameRepoEditQueuesNoCrossRepoNotice(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	repoA := initTestGitRepo(t)
@@ -730,7 +731,7 @@ func TestSaveContentPaneState_SameRepoEditQueuesNoCrossRepoNotice(t *testing.T) 
 // alignment.)
 func TestHandleTaskCreate_CrossRepoTaskSurvivesSnapshotPoll(t *testing.T) {
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	repoA := initTestGitRepo(t)

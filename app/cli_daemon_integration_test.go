@@ -135,7 +135,7 @@ func findSidebarInstance(h *home, title string) *session.Instance {
 // CLI→daemon→TUI integration checks.
 func reconcileFromDaemon(t *testing.T, h *home) bool {
 	t.Helper()
-	resp, err := snapshotThroughDaemon(h.repoID)
+	resp, err := snapshotThroughDaemon(context.Background(), h.repoID)
 	require.NoError(t, err)
 	changed := h.reconcileSnapshot(resp.Instances)
 	if h.applyDeliveryAlarms(resp.DeliveryAlarms) {

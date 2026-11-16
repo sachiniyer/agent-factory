@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -31,7 +32,7 @@ import (
 func armingPollHome(t *testing.T) *home {
 	t.Helper()
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	root := t.TempDir()
@@ -151,7 +152,7 @@ func TestFetchSnapshotCmdPairsAScopedRowWithItsOwnRowInTheAnswer(t *testing.T) {
 	// displays, first in its own list and second in the store. Its warning is
 	// exactly the one worth keeping: that task will never fire.
 	h := newTestHome(t)
-	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+	h.snapshotFetcher = func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
 	rootA, rootB := t.TempDir(), t.TempDir()

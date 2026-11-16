@@ -635,11 +635,25 @@ var renameTabThroughDaemon = func(request daemon.RenameTabRequest) (string, erro
 // goroutine, so a mutable global would race a test seam swap under
 // `go test -parallel`; the fetcher lives per-home instead, and tests assign a
 // fake to home.snapshotFetcher directly (#960 PR 4 race fix).
-func snapshotThroughDaemon(repoID string) (daemon.SnapshotResponse, error) {
+//
+// ctx bounds the WHOLE chain — the ensure phase as well as the HTTP read — exactly
+// like allReposSnapshotFetcher does. The LOCAL unix-socket transport bounds only
+// the dial, and the http.Client sets no Timeout, so once the daemon accepts the
+// connection a wedged handler (blocked acquiring a session's op lock, deadlocked
+// under restore) would park the read forever. switchProject runs this fetch
+// synchronously on the bubbletea event loop, so an unbounded read would park
+// Update — key input, repaint and the Ctrl+C hard exit with it — until the
+// process is killed (#6045, the same hazard the sibling picker fetch is bounded
+// for). The deadline rides the transport read via SnapshotWithAlarmsCtx, and its
+// expiry surfaces as a normal fetch failure the switch aborts on, leaving the
+// current project intact (#1788). A ctx with no deadline (the off-loop poll,
+// which passes context.Background) preserves the unbounded read the background
+// poll has always relied on.
+func snapshotThroughDaemon(ctx context.Context, repoID string) (daemon.SnapshotResponse, error) {
 	var resp daemon.SnapshotResponse
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPCtx(ctx, func(c *apiclient.Client) error {
 		var e error
-		resp, e = c.SnapshotWithAlarms(daemon.SnapshotRequest{RepoID: repoID})
+		resp, e = c.SnapshotWithAlarmsCtx(ctx, daemon.SnapshotRequest{RepoID: repoID})
 		return e
 	})
 	return resp, err
