@@ -105,7 +105,9 @@ func TestDocsTab_LegacyPushModeLoads(t *testing.T) {
 	assert.Equal(t, "auth-rework", restored.Tabs[1].Proposal, "a retired wire key must not break the load")
 
 	for _, tab := range restored.ToInstanceData().Tabs {
-		assert.NotContains(t, string(mustJSON(t, tab)), "push_mode", "the retired key is not written back")
+		var wire map[string]any
+		require.NoError(t, json.Unmarshal(mustJSON(t, tab), &wire))
+		assert.NotContains(t, wire, "push_mode", "the retired key is not written back")
 	}
 }
 
