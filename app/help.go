@@ -471,6 +471,11 @@ func (h helpTypeInteractive) toContent() string {
 		"",
 		descStyle.Render("Press ")+keyStyle.Render(helpKey(keys.KeyExitInteractive))+descStyle.Render(" to navigate."),
 		descStyle.Render("Attach full-screen with ")+keyStyle.Render(helpKey(keys.KeyAttach))+descStyle.Render(" in navigation mode."),
+		"",
+		// The same actions row as the "Session created" screen (#7408): the
+		// overlay is a modal, so it must name its way out. Both keys close it
+		// and continue into the pane; neither reaches the pane (#4722).
+		firstRunActionLine("enter continue · esc close"),
 	)
 	return content
 }
