@@ -358,6 +358,15 @@ type TmuxSession struct {
 	// re-filters the environment before exec, so a value tmux holds and the
 	// allowlist does not admit never reaches the agent.
 	accountLoginEnv []string
+	// skipWindowSizePin exempts this pane from the window-size manual pin that
+	// Start queues and reattach renews (#7434). The pin exists so a plain
+	// `tmux attach` cannot reflow a pane whose churn answers attention
+	// requests — but panes a REAL tmux client is the interface for (account
+	// login panes, the config agent) need exactly that attach-resizes
+	// behaviour, or they render inside the pin's stored size instead of the
+	// attaching terminal's (#7437 review). Guarded by programMu with the
+	// other launch settings; set before Start and never mutated after.
+	skipWindowSizePin bool
 	// generatedArgs are the argument words af authored for program, declared so
 	// the account boundary can verify af's output instead of refusing it (#3083,
 	// #3108). Guarded by programMu with program itself, because a launch reads

@@ -42,6 +42,20 @@ func (t *TmuxSession) ApplyRemainOnExit() {
 	cancel()
 }
 
+// SkipWindowSizePin exempts this pane from the `window-size manual` pin Start
+// queues and reattach renews (#7434). The pin keeps a plain `tmux attach` from
+// resizing a session pane to the client's terminal — the reflow would read as
+// churn and answer a live attention request — but panes a REAL tmux client is
+// the interface for need that very behaviour: an account login pane and the
+// config agent are operated through `tmux attach`, so the pin would render
+// them inside the stored size instead of the attaching terminal's (#7437
+// review). Call it before Start; agent and tab instance panes stay pinned.
+func (t *TmuxSession) SkipWindowSizePin() {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.skipWindowSizePin = true
+}
+
 // SetEnvPassthrough replaces the exact-name extension to this session's
 // default-deny environment. Call it before Start or Restore; sibling tabs copy
 // the normalized list from their agent session.

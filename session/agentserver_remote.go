@@ -239,6 +239,9 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 		Content:     resp.Content,
 		ModelChange: cloneAgentModelChange(resp.ModelChange),
 		Captured:    captured,
+		// A sandbox that predates the field reports no resize attribution —
+		// absent resolves to false, the legacy churn-is-work behavior (#7434).
+		Reflow: resp.Reflow,
 	}, nil
 }
 
@@ -888,6 +891,12 @@ type agentSnapshotResp struct {
 	// review): nil resolves to the legacy contract — an all-false frame is
 	// unconfirmed, positive evidence marks the capture real.
 	Captured *bool `json:"captured,omitempty"`
+	// Reflow marks a changed capture attributed to a daemon-driven viewer
+	// resize (#7434). A plain bool suffices: a server that predates the field
+	// reports nothing, and absent resolves to the same false the legacy
+	// contract already meant — a resize is never attributed, so churn keeps
+	// answering attention exactly as it did before the field existed.
+	Reflow bool `json:"reflow,omitempty"`
 	// Conversation is the conversation identity the server has for the agent, once
 	// it has one (#5571 W7.2).
 	Conversation *AgentConversationData `json:"conversation,omitempty"`

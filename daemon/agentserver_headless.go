@@ -674,6 +674,12 @@ type agentSnapshotResponse struct {
 	// client can distinguish a reported miss from a server that predates the
 	// field.
 	Captured bool `json:"captured"`
+	// Reflow marks an updated frame attributed to a viewer resize (#7434) —
+	// churn a no-indicator agent must not answer an attention request with.
+	// Always sent like Captured so a new client can tell a real "not reflow"
+	// from a server that predates the field; the client's absent→false
+	// resolution makes the two indistinguishable by design.
+	Reflow bool `json:"reflow"`
 	// Conversation is the conversation identity once the server has one
 	// (#5571 W7.2); omitted until then.
 	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
@@ -690,6 +696,7 @@ func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) erro
 	resp.Content = obs.Content
 	resp.ModelChange = obs.ModelChange
 	resp.Captured = obs.Captured
+	resp.Reflow = obs.Reflow
 	if hs.inst != nil {
 		if conv := hs.inst.AgentConversation(); conv.HasID() {
 			resp.Conversation = &conv

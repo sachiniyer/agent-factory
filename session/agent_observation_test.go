@@ -215,8 +215,8 @@ type uncapturedProbeBackend struct {
 	*FakeBackend
 }
 
-func (b *uncapturedProbeBackend) HasUpdatedObserved(*Instance) (bool, bool, string, bool, bool) {
-	return false, false, "", false, false
+func (b *uncapturedProbeBackend) HasUpdatedObserved(*Instance) (bool, bool, string, bool, bool, bool) {
+	return false, false, "", false, false, false
 }
 
 // The capture bit rides the observation, not the error (#5221 review): a

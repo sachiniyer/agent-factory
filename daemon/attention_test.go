@@ -171,7 +171,7 @@ func TestAttentionSurvivesTypingADraftIntoClaudesComposer(t *testing.T) {
 
 	settle := func(frame string) {
 		_, epoch := inst.InFlightOpAndEpoch()
-		manager.settleChurnedLiveness(inst, true, frame, epoch)
+		manager.settleChurnedLiveness(inst, true, frame, epoch, false)
 	}
 
 	settle(fixturePane(t, "claude_idle_draft.ansi"))
@@ -214,14 +214,14 @@ func TestStaleWorkingFrameCannotClearARequestRaisedAfterTheCapture(t *testing.T)
 	require.NoError(t, err)
 	require.True(t, inst.Attention().SeenIdle, "premise: the request inherits a satisfied idle spell")
 
-	manager.settleChurnedLiveness(inst, true, fixturePane(t, "claude_working_tool.ansi"), captureEpoch)
+	manager.settleChurnedLiveness(inst, true, fixturePane(t, "claude_working_tool.ansi"), captureEpoch, false)
 	require.Empty(t, pending, "a frame from before the request queues no clear for it")
 	require.True(t, inst.HasAttention())
 
 	// Control: the same frame decided after the request answers it.
 	inst.SetStatusForTest(session.Ready)
 	_, epoch := inst.InFlightOpAndEpoch()
-	manager.settleChurnedLiveness(inst, true, fixturePane(t, "claude_working_tool.ansi"), epoch)
+	manager.settleChurnedLiveness(inst, true, fixturePane(t, "claude_working_tool.ansi"), epoch, false)
 	require.Len(t, pending, 1, "a frame observed after the request answers it")
 	pending[0]()
 	require.False(t, inst.HasAttention())

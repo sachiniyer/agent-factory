@@ -440,6 +440,11 @@ func (m *Manager) SpawnConfigAgent(ctx context.Context, req SpawnConfigAgentRequ
 	// every af cleanup path recognizes (`^af_`).
 	seq := fmt.Sprintf("%s%d", configAgentSessionPrefix, configAgentSeq.Add(1))
 	ts := tmux.NewTmuxSession(seq, req.Program)
+	// The config agent is operated through a real `tmux attach` — like the
+	// account login panes it keeps tmux's attach-sizes-the-window behaviour,
+	// or it would render inside the window-size pin's stored size instead of
+	// the attaching terminal's (#7437 review).
+	ts.SkipWindowSizePin()
 	currentConfig, err := config.LoadConfig()
 	if err != nil {
 		return "", "", fmt.Errorf("config agent: cannot load current session environment configuration: %w", err)
