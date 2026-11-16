@@ -280,7 +280,14 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
 		}
 		// Bounded (fsprobe, #7378): a member whose stat does not answer has
 		// no honest boundary, so it is left out, as one whose stat fails is.
-		if info, err := fsprobe.Stat(path); err == nil {
+		// So is the rest of the pool, which is on the same mount and whose
+		// stats would each wait out a bound of their own; an unpinned
+		// receipt's absence stays indeterminate either way.
+		info, err := fsprobe.Stat(path)
+		if errors.Is(err, fsprobe.ErrProbeTimedOut) {
+			return
+		}
+		if err == nil {
 			s.receiptPaths = append(s.receiptPaths, trackedReceiptPath{
 				path:     path,
 				offset:   info.Size(),
@@ -735,21 +742,12 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 	candidates, uncorrelated := codexRolloutFilesForWorkingDir(observed, snap.workingDir)
 	seen := make(map[string]struct{}, len(candidates)+len(snap.receiptPaths))
 	matched := 0
-	// unanswered counts the candidates whose scan did not answer within its
-	// bound (#7378). Like a header still being written, each could still be
-	// the receipt, so the answer waits on it rather than ending the wait or
-	// confirming the receipt from the rest.
-	unanswered := 0
 	scan := func(path string, offset int64) error {
 		if _, dup := seen[path]; dup {
 			return nil
 		}
 		seen[path] = struct{}{}
 		has, err := state.scanPrompt(path, prompt, offset)
-		if errors.Is(err, fsprobe.ErrProbeTimedOut) {
-			unanswered++
-			return nil
-		}
 		if err != nil {
 			return err
 		}
@@ -758,13 +756,24 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 		}
 		return nil
 	}
+	// A scan that did not answer within its bound (#7378) could still be the
+	// receipt, like a header still being written: the answer is undecided, so
+	// the wait goes on, and neither ends nor confirms the receipt from the
+	// rest. The poll stops there, since the rest are on the same mount and
+	// each would wait out a bound of its own.
 	for _, path := range candidates {
-		if err := scan(path, 0); err != nil {
+		if err := scan(path, 0); errors.Is(err, fsprobe.ErrProbeTimedOut) {
+			return false, true, nil
+		} else if err != nil {
 			return false, false, err
 		}
 	}
 	for _, tracked := range snap.receiptPaths {
-		if err := scan(tracked.path, tracked.offset); err != nil {
+		err := scan(tracked.path, tracked.offset)
+		if errors.Is(err, fsprobe.ErrProbeTimedOut) {
+			return false, true, nil
+		}
+		if err != nil {
 			if tracked.unpinned {
 				// A pool member that cannot be statted or read is
 				// unobservable this round: it can never produce a match, and
@@ -779,14 +788,14 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 	switch {
 	case matched > 1:
 		return false, false, fmt.Errorf("%w: %d Codex rollout files recorded the briefing", ErrPromptReceiptAmbiguous, matched)
-	case matched == 1 && uncorrelated == 0 && unanswered == 0:
+	case matched == 1 && uncorrelated == 0:
 		return true, false, nil
 	default:
 		// Zero matches is absence; a lone match while an unclassifiable
-		// rollout, or one af could not scan, could still settle into a
-		// second match is not yet a unique attribution — keep waiting rather
-		// than confirm early (#5471 review).
-		return false, uncorrelated > 0 || unanswered > 0, nil
+		// rollout could still settle into a second match is not yet a
+		// unique attribution — keep waiting rather than confirm early
+		// (#5471 review).
+		return false, uncorrelated > 0, nil
 	}
 }
 

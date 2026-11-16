@@ -252,13 +252,15 @@ func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string,
 	// that did not answer, or an lstat that did not answer or failed.
 	undated, undatedUnresolved := 0, 0
 	for path, rollout := range rollouts {
-		if path == recordedPath {
-			continue
-		}
 		if rollout.unread != nil {
-			// It may be newer: a lookup that did not happen (#7378).
+			// It may be newer: a lookup that did not happen (#7378). That
+			// holds for the recorded rollout's own entry too, since a walk
+			// that stopped there did not see the rest.
 			undated++
 			undatedUnresolved++
+			continue
+		}
+		if path == recordedPath {
 			continue
 		}
 		modTime := rollout.at
