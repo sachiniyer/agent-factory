@@ -208,6 +208,63 @@ func TestCheckAndHandleTrustPrompt_FramedRewordedDialogHoldsAtAnyWidth(t *testin
 		"the hold is reported as the reworded folder-trust dialog; got:\n%s", errLog.String())
 }
 
+// A transcript line that renders with a ">" prefix (a markdown blockquote,
+// quoted/reply text, or command output beginning with ">") painted directly
+// above a fully painted FRAMED reworded dialog's own top border ╭───╮ must NOT
+// defeat the hold. The #7376 fix's case-3 scan rejected on a frame rule adjacent
+// (either side) to a row reducing to ">" / "> "; claudeTrustRowOf reduces an
+// ordinary "> please refactor the parser" transcript row to a "> " label too, so
+// the transcript line directly above the dialog's top border satisfied the
+// adjacency check with no boxed composer present, and at narrow pane widths
+// (including 8, 9, 13, 14 — the widths #7369 reported) the fully painted framed
+// dialog read CLEAR — the create path's permission to type the user's prompt +
+// Enter into the live modal, re-leaking the exact verdict #7369 reported.
+//
+// With the fix, a frame rule above the options only bounds a boxed COMPOSER: a
+// ">" / "> " row directly below it (the one-sided shape the package's other
+// composer detectors use), or a ">" / "> " row directly above it welded to a
+// frame rule on its other side too. A bare transcript ">" row above the
+// dialog's own top border has no rule above it, so the framed dialog parses
+// identically to the unframed one regardless of the transcript content above
+// it. The plain-line control already held at every width; the ">"-prefixed line
+// must hold too.
+func TestCheckAndHandleTrustPrompt_FramedRewordedDialogHoldsAboveTranscriptGtPrefix(t *testing.T) {
+	_, _, errLog := captureTrustPromptLogs(t)
+	for width := 8; width <= 60; width++ {
+		for _, variant := range []string{"inside", "outside"} {
+			rows := framedRewordedDialogRows(width, variant)
+			base := strings.Join(rows, "\n")
+			for _, above := range []string{
+				"> please refactor the parser", // markdown blockquote / quoted text
+				">",                            // a bare ">" prompt glyph, no message
+				"please refactor the parser",   // control: a plain (non-">") line above
+			} {
+				content := above + "\n" + base
+				name := fmt.Sprintf("%d columns, %s the box, %q above", width, variant, above)
+				handled, cmds := pollStaticPane(t, content, 4)
+				require.True(t, handled, "%s read clear; a framed dialog holds with any transcript above it (#7376 transcript-> regression):\n%s", name, content)
+				require.Empty(t, sentKeystrokes(cmds), "%s sends no key:\n%s", name, content)
+			}
+		}
+	}
+	require.Contains(t, errLog.String(), "refusing to answer the "+claudeFolderTrustDialogName+" dialog",
+		"the hold is reported as the reworded folder-trust dialog; got:\n%s", errLog.String())
+}
+
+// A "blank line, then a ">"-prefixed transcript line, then the framed dialog" —
+// the transcript row is NOT adjacent to the dialog's top border — already held
+// before the fix, and must keep holding. Pins that the fix tightened the
+// adjacency check rather than widening it to any ">" row in the pane.
+func TestCheckAndHandleTrustPrompt_FramedRewordedDialogHoldsAboveTranscriptGtPrefixWithBlank(t *testing.T) {
+	for width := 8; width <= 60; width++ {
+		rows := framedRewordedDialogRows(width, "inside")
+		content := "> please refactor the parser\n\n" + strings.Join(rows, "\n")
+		handled, cmds := pollStaticPane(t, content, 4)
+		require.True(t, handled, "%d columns, a \">\" row separated from the top border holds:\n%s", width, content)
+		require.Empty(t, sentKeystrokes(cmds), "%d columns sends no key:\n%s", width, content)
+	}
+}
+
 // A framed dialog whose body has scrolled off the top — so only the top border
 // is NOT visible — already held before the fix. This pins that the fix does not
 // regress the headless case: removing the top border must leave the pane held
@@ -223,6 +280,44 @@ func TestCheckAndHandleTrustPrompt_FramedRewordedDialogTopScrolledOffHolds(t *te
 		handled, cmds := pollStaticPane(t, content, 4)
 		require.True(t, handled, "%d columns, top border scrolled off still holds:\n%s", width, content)
 		require.Empty(t, sentKeystrokes(cmds), "%d columns, top scrolled sends no key:\n%s", width, content)
+	}
+}
+
+// A boxed composer whose opening rule has scrolled off the top of the pane —
+// leaving its ">" prompt row and its closing rule directly above a quoted/stale
+// folder-trust option block — must still read CLEAR. The full-box form (opening
+// rule visible) is covered by "the boxed composer above the options"; the #7376
+// fix's welding check rejects only when the prompt is welded on its other side
+// too, so this ordinary top-cropped form — opening rule gone, so i-2 is not a
+// frame rule — would slip past it and hold, reclassifying a stale/quoted option
+// block under a live composer as a live dialog. The composer's closing edge
+// (╰…╯) is a bottom-cornered frame; a bare transcript ">" row sits above the
+// framed dialog's own top border (╭…╮), never above a ╰…╯ closing rule, so the
+// closing-edge shape still rejects without reclassifying the transcript row the
+// fix targets (#7399 review).
+func TestCheckAndHandleTrustPrompt_TopCroppedBoxedComposerAboveOptionsStaysClear(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			"the top-cropped boxed composer above the options",
+			"│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, I trust this folder\n2. No, exit\n\nEnter to confirm · Esc to cancel",
+		},
+		{
+			"the top-cropped boxed composer above the legacy options",
+			"│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, proceed\n2. No, exit\n\nEnter to confirm · Esc to exit",
+		},
+		// The full-box form (opening rule visible) keeps clearing: the
+		// welding check rejects it, pinning that the closing-edge guard
+		// did not weaken the full-box guard.
+		{
+			"the full boxed composer above the options",
+			"╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, I trust this folder\n2. No, exit\n\nEnter to confirm · Esc to cancel",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled, "%s held; a boxed composer above a quoted/stale option block must stay clear (#7399):\n%s", tt.name, tt.content)
+			require.Empty(t, sentKeystrokes(cmds), "%s sends no key:\n%s", tt.name, tt.content)
+		})
 	}
 }
 
