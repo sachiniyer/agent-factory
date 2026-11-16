@@ -249,8 +249,17 @@ var unprivilegedFullnessFlights = &flightRegistry{byDir: map[string]*probeFlight
 
 func runBounded(dir string, flights *flightRegistry, what, detail string,
 	run func() (any, error)) (any, error) {
+	return runBoundedKeyed(dir, dir, flights, what, detail, run)
+}
+
+// runBoundedKeyed is runBounded with the flight keyed apart from the path its
+// messages name: a registry that holds more than one question about a path
+// keys each flight by its question too, so a caller joins only a flight
+// asking what it asks (#7370 review R5).
+func runBoundedKeyed(key, dir string, flights *flightRegistry, what, detail string,
+	run func() (any, error)) (any, error) {
 	flights.Lock()
-	if active := flights.byDir[dir]; active != nil {
+	if active := flights.byDir[key]; active != nil {
 		if active.timedOut {
 			flights.Unlock()
 			return nil, fmt.Errorf(
@@ -259,24 +268,24 @@ func runBounded(dir string, flights *flightRegistry, what, detail string,
 			)
 		}
 		flights.Unlock()
-		return waitForFlight(dir, flights, what, detail, active)
+		return waitForFlight(key, dir, flights, what, detail, active)
 	}
 	flight := &probeFlight{done: make(chan struct{})}
-	flights.byDir[dir] = flight
+	flights.byDir[key] = flight
 	flights.Unlock()
 	go func() {
 		flight.res, flight.err = run()
 		flights.Lock()
-		if flights.byDir[dir] == flight {
-			delete(flights.byDir, dir)
+		if flights.byDir[key] == flight {
+			delete(flights.byDir, key)
 		}
 		close(flight.done)
 		flights.Unlock()
 	}()
-	return waitForFlight(dir, flights, what, detail, flight)
+	return waitForFlight(key, dir, flights, what, detail, flight)
 }
 
-func waitForFlight(dir string, flights *flightRegistry, what, detail string,
+func waitForFlight(key, dir string, flights *flightRegistry, what, detail string,
 	flight *probeFlight) (any, error) {
 	timeout := probeTimeout.load()
 	timer := time.NewTimer(timeout)
@@ -286,7 +295,7 @@ func waitForFlight(dir string, flights *flightRegistry, what, detail string,
 		return flight.res, flight.err
 	case <-timer.C:
 		flights.Lock()
-		if flights.byDir[dir] == flight {
+		if flights.byDir[key] == flight {
 			flight.timedOut = true
 			flights.Unlock()
 			return nil, fmt.Errorf(

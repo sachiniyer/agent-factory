@@ -98,11 +98,11 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 	var repair operatorRepairWindow
 	if conv.CaptureKind == ConversationCaptureOperator {
 		switch decline := operatorRepairProvenance(recordedPath, launchDir); {
-		case decline.reason == operatorRepairUnresolvedReason:
+		case decline.provenanceUnanswered():
 			// A provenance lookup that did not answer is no answer about the
 			// repair: the attribution timeout's answer, which resumes the
 			// recorded thread and retires nothing. Only an answered provenance
-			// declines (#7287 review R5).
+			// declines (#7287 review R5, #7370 review R3).
 			return noEvidence()
 		case decline.reason != "":
 			return decline, false
@@ -127,10 +127,11 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 		// mid-write — is a look that failed, not evidence about the id.
 		return declineResumeUnverified("af could not confirm the recorded conversation is still the newest one in this worktree"), false
 	case codexRolloutUnresolved:
-		// A lookup that did not answer within its bound, the launch dir's or a
-		// newer rollout's cwd, attributes nothing: the no-evidence resume the
-		// attribution rule's own timeout gives above. Only a look that
-		// answered declines (#7287 review R1).
+		// A lookup that did not answer within its bound — the launch dir's, a
+		// newer rollout's cwd, or a header read a newer rollout needed —
+		// attributes nothing: the no-evidence resume the attribution rule's
+		// own timeout gives above. Only a look that answered declines (#7287
+		// review R1, #7370 review R2, R3).
 		return resumeDecline{}, false
 	case codexRolloutRecordedGone:
 		return resumeDecline{}, true
@@ -157,9 +158,9 @@ const (
 	codexRolloutStale
 	codexRolloutUncorrelated
 	codexRolloutRecordedGone
-	// codexRolloutUnresolved: a lookup a newer rollout's correlation needed,
-	// the launch dir's or the rollout's own cwd, did not answer within its
-	// bound. Nothing newer was attributed either way.
+	// codexRolloutUnresolved: a lookup a newer rollout's judgement needed —
+	// the launch dir's, the rollout's own cwd, or its header read — did not
+	// answer within its bound. Nothing newer was attributed either way.
 	codexRolloutUnresolved
 )
 
@@ -175,8 +176,16 @@ const (
 //
 // repair is an operator repair's window (operatorRepairWindowOf): a newer
 // file it disregards is a thread the operator chose over and is dropped; any
-// other, including one af cannot date, stays a candidate exactly as it would
-// for any record. The zero window drops nothing.
+// other, including one whose header af read but cannot date, stays a candidate
+// exactly as it would for any record. The zero window drops nothing.
+//
+// A newer file whose header the window needed and could not read is neither:
+// whether the operator overrode it is unknown. It is counted the way the
+// correlation counts the same read — uncorrelated, and unresolved when the
+// read did not answer within its bound — and never read again, so a read that
+// answers a moment later cannot make a thread af could not date the evidence
+// that the repair is stale (#7370 review R2). Stale needs a newer file every
+// read of which answered.
 func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{}, resolveLaunch func() (string, bool), repair operatorRepairWindow) codexStalenessVerdict {
 	return judgeCodexRecordedStaleness(recordedPath, lstatRolloutModTimes(files), resolveLaunch, repair)
 }
@@ -202,25 +211,37 @@ func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string,
 		return codexRolloutRecordedGone
 	}
 	var newer []string
+	// undated counts the newer files whose header the repair's window could
+	// not read, and undatedUnresolved those of them whose read did not answer.
+	undated, undatedUnresolved := 0, 0
 	for path, modTime := range rollouts {
-		if path == recordedPath {
+		if path == recordedPath || !modTime.After(recorded.ModTime()) {
 			continue
 		}
-		if modTime.After(recorded.ModTime()) && !repair.disregards(path, modTime) {
+		disregarded, unread := repair.disregards(path, modTime)
+		switch {
+		case unread != nil:
+			undated++
+			if codexHeaderReadUnanswered(unread) {
+				undatedUnresolved++
+			}
+		case !disregarded:
 			newer = append(newer, path)
 		}
 	}
-	if len(newer) == 0 {
-		return codexRolloutCurrent
+	uncorrelated, unresolved := undated, undatedUnresolved
+	if len(newer) > 0 {
+		launchDir, ok := resolveLaunch()
+		if !ok {
+			return codexRolloutUnresolved
+		}
+		matches, u, r, _ := classifyCodexRolloutFiles(newer, launchDir)
+		if len(matches) > 0 {
+			return codexRolloutStale
+		}
+		uncorrelated, unresolved = uncorrelated+u, unresolved+r
 	}
-	launchDir, ok := resolveLaunch()
-	if !ok {
-		return codexRolloutUnresolved
-	}
-	matches, uncorrelated, unresolved, _ := classifyCodexRolloutFiles(newer, launchDir)
 	switch {
-	case len(matches) > 0:
-		return codexRolloutStale
 	case uncorrelated > unresolved:
 		// A header af could not classify: Codex may still be writing it.
 		return codexRolloutUncorrelated

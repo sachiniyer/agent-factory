@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
@@ -73,22 +74,38 @@ func (s ConversationCaptureSnapshot) judgeHeldCodexRollouts(held map[string]stru
 		return AgentConversationData{}, "", fmt.Errorf("%w: %w", errCodexCaptureUndecided, s.scopeErr)
 	}
 	sessions := filepath.Join(s.codexHome, "sessions")
-	root := pathutil.ResolveForCompare(sessions) + string(filepath.Separator)
-	rootID, rootIDOK := fileIdentityOf(sessions)
+	// The store root is the mount the runtime holds its rollout files open on,
+	// so every lookup of it is bounded (fsprobe, #7279): a CODEX_HOME that does
+	// not answer never wedges the follow/capture loop. A resolution that did not
+	// answer or failed leaves the store unlookable, so the answer is undecided,
+	// never another directory's — and the empty string a timeout returns is
+	// never made the root, which would be "/" and admit any foreign rollout.
+	store, err := lookUpCodexHeldStore(sessions)
+	if err != nil {
+		return AgentConversationData{}, "", fmt.Errorf("%w: af could not resolve the Codex session store %s: %w",
+			errCodexCaptureUndecided, sessions, err)
+	}
 	var matches []string
 	unclassified := 0
 	for path := range held {
 		// The name filter runs first: it is free, and it leaves only rollout
-		// files for the symlink resolution and header classification below.
+		// files for the containment lookups and header classification below.
 		if codexConversationIDFromPath(path) == "" {
 			continue
 		}
-		if !strings.HasPrefix(pathutil.ResolveForCompare(path), root) &&
-			!(rootIDOK && underDirectoryIdentity(path, rootID)) {
-			// Another store — never this snapshot's conversation. Spelling is
-			// checked first, then (device, inode) ancestry, as #6847's
-			// attribution does: on darwin a CODEX_HOME whose case differs
-			// from the on-disk name is the same store (#7120 review F7).
+		switch store.contains(path) {
+		case storeOutside:
+			// Both the spelling and the identity looked, and the rollout is
+			// under neither: another store, never this snapshot's
+			// conversation.
+			continue
+		case storeUnknown:
+			// A lookup containment needed did not answer or failed, and none
+			// that did proves the rollout is this store's. A look that did not
+			// happen is never another directory's: the rollout is
+			// unclassified, so the answer is undecided, and no other rollout
+			// is named from the rest of the view (#7370 review R1).
+			unclassified++
 			continue
 		}
 		cwd, subagent, ok := classifyHeldCodexRollout(path)
@@ -162,13 +179,104 @@ var heldCodexHeaders = struct {
 	byKey map[heldCodexHeaderKey]heldCodexHeader
 }{byKey: make(map[heldCodexHeaderKey]heldCodexHeader)}
 
+// fileIdentityOfBounded is fileIdentityOf through fsprobe.Stat's bounded
+// flight, for a store-touching identity lookup on the judge's poll path that
+// must not hang on a wedged CODEX_HOME (#7279). err is the stat's own error
+// when it failed, so a caller can tell a proven absence from a lookup that did
+// not answer.
+func fileIdentityOfBounded(path string) (fileID, error) {
+	fi, err := fsprobe.Stat(path)
+	if err != nil {
+		return fileID{}, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fileID{}, fmt.Errorf("stat of %s carries no device and inode", path)
+	}
+	return fileID{dev: uint64(st.Dev), ino: uint64(st.Ino)}, nil
+}
+
+// storeContainment is whether a held rollout is in a judgement's Codex store.
+// It has three answers, because a lookup on a wedged mount can fail to happen
+// (#7370 review R1).
+type storeContainment int
+
+const (
+	// storeOutside: the spelling and the identity both looked, and the
+	// rollout is under neither.
+	storeOutside storeContainment = iota
+	// storeInside: the spelling or the identity proved the rollout is under
+	// the store.
+	storeInside
+	// storeUnknown: neither proved it, and a lookup that could have did not
+	// answer or failed.
+	storeUnknown
+)
+
+// codexHeldStore is the Codex session store a held-rollout judgement contains
+// rollouts in: its resolved spelling, and its (device, inode) identity, or the
+// stat error that left the identity unknown.
+type codexHeldStore struct {
+	root  string // the resolved store root, ending in a separator
+	id    fileID
+	idErr error
+}
+
+// lookUpCodexHeldStore resolves the store at sessions and stats its identity,
+// each bounded. An error is a resolution that did not answer or failed: with
+// no root to compare spellings against, the store is unlookable.
+func lookUpCodexHeldStore(sessions string) (codexHeldStore, error) {
+	resolved, err := fsprobe.ResolveForCompare(sessions)
+	if err != nil {
+		return codexHeldStore{}, err
+	}
+	store := codexHeldStore{root: resolved + string(filepath.Separator)}
+	store.id, store.idErr = fileIdentityOfBounded(sessions)
+	return store, nil
+}
+
+// contains is whether path is in the store. Spelling is checked first, then
+// (device, inode) ancestry, as #6847's attribution does: on darwin a
+// CODEX_HOME whose case differs from the on-disk name is the same store, and
+// so is one reached under a second spelling (#7120 review F7). Either proves
+// "in" on its own. "Out" needs both to have looked: a resolution of path that
+// answered, and an identity walk in which the store root's stat and every
+// ancestor's answered, a proven absence counting as an answer. Anything else
+// is storeUnknown.
+func (s codexHeldStore) contains(path string) storeContainment {
+	resolved, err := fsprobe.ResolveForCompare(path)
+	if err == nil && strings.HasPrefix(resolved, s.root) {
+		return storeInside
+	}
+	byIdentity := s.containsByIdentity(path)
+	if byIdentity == storeOutside && err != nil {
+		// The identity looked and found nothing, but the spelling did not
+		// look.
+		return storeUnknown
+	}
+	return byIdentity
+}
+
+// containsByIdentity is contains' (device, inode) half.
+func (s codexHeldStore) containsByIdentity(path string) storeContainment {
+	switch {
+	case s.idErr == nil:
+		return underDirectoryIdentity(path, s.id)
+	case pathutil.IsAbsent(s.idErr):
+		// No store directory, so nothing is under it.
+		return storeOutside
+	}
+	return storeUnknown
+}
+
 // classifyHeldCodexRollout is codexRolloutSessionMeta memoized by path and
 // file identity: the follow check asks it on every rearm for every recorded Codex
 // session, and re-reading a header that cannot change would turn a quiet
 // check into steady file I/O. Only a complete classification is cached; a
 // header Codex has not finished writing is read again next time.
 func classifyHeldCodexRollout(path string) (cwd string, subagent, ok bool) {
-	id, idOK := fileIdentityOf(path)
+	id, idErr := fileIdentityOfBounded(path)
+	idOK := idErr == nil
 	key := heldCodexHeaderKey{path: path, id: id}
 	if idOK {
 		heldCodexHeaders.Lock()
@@ -347,18 +455,31 @@ func (i *Instance) ClearConversationFollowFrozen() {
 	i.followFreeze = conversationFollowFreeze{}
 }
 
-// underDirectoryIdentity reports whether one of path's ancestor directories is
-// the directory with identity dir — containment by (device, inode), immune to
-// how either side is spelled.
-func underDirectoryIdentity(path string, dir fileID) bool {
+// underDirectoryIdentity is whether one of path's ancestor directories is the
+// directory with identity dir: containment by (device, inode), immune to how
+// either side is spelled. Each ancestor stat is bounded (fsprobe, #7279).
+// storeInside when one is; storeOutside when every ancestor's stat answered and
+// none is, a proven absence counting as an answer; storeUnknown when none is
+// and a stat did not answer or failed, since that ancestor may be the one
+// (#7370 review R1).
+func underDirectoryIdentity(path string, dir fileID) storeContainment {
+	answered := true
 	for d := filepath.Dir(path); ; {
-		if id, ok := fileIdentityOf(d); ok && id == dir {
-			return true
+		id, err := fileIdentityOfBounded(d)
+		switch {
+		case err == nil && id == dir:
+			return storeInside
+		case err != nil && !pathutil.IsAbsent(err):
+			answered = false
 		}
 		parent := filepath.Dir(d)
 		if parent == d {
-			return false
+			break
 		}
 		d = parent
 	}
+	if !answered {
+		return storeUnknown
+	}
+	return storeOutside
 }

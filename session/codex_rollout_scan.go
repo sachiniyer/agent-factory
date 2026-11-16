@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -183,8 +184,9 @@ func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string
 // read none of them: an unreadable header is a channel af could not look
 // through, while a readable one that does not parse is an answer (#7140). A
 // window holding both is an answer, so it reports nil (#7160). unresolved
-// counts the uncorrelated files whose cwd did not resolve within its bound, a
-// lookup that did not happen rather than a header still being written.
+// counts the uncorrelated files whose header read did not answer, or whose cwd
+// did not resolve, within its bound: a lookup that did not happen rather than
+// a header still being written (#7370 review R3).
 func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []string, uncorrelated, unresolved int, unreadable error) {
 	if workingDir != "" && !filepath.IsAbs(workingDir) {
 		return nil, len(paths), 0, nil
@@ -204,6 +206,9 @@ func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []str
 					unreadableCount++
 					if unreadable == nil {
 						unreadable = readErr
+					}
+					if codexHeaderReadUnanswered(readErr) {
+						unresolved++
 					}
 				}
 			}
@@ -353,6 +358,23 @@ func codexRolloutHasPrompt(path, prompt string, fromOffset int64) (bool, error) 
 	return false, nil
 }
 
+// codexRolloutOpenStandIn is a test's stand-in for the open behind every
+// rollout header read (#7279), nil in production. It is atomic, and loaded
+// once in the caller: a read that outlives its bound by design can still be
+// running when its test puts the real open back (#7278 review).
+var codexRolloutOpenStandIn atomic.Pointer[func(string) (*os.File, error)]
+
+// codexRolloutHeaderOpen is the open a header read runs inside its bound.
+func codexRolloutHeaderOpen() func(string) (*os.File, error) {
+	if open := codexRolloutOpenStandIn.Load(); open != nil {
+		return *open
+	}
+	return openCodexRollout
+}
+
+// openCodexRollout opens a Codex rollout. O_NOFOLLOW rejects a symlink planted
+// at the leaf, and O_NONBLOCK keeps a FIFO planted there from hanging it; both
+// are no-ops on the regular file a real rollout is.
 func openCodexRollout(path string) (*os.File, error) {
 	file, err := os.OpenFile(
 		path,
@@ -385,30 +407,48 @@ const codexSessionMetaReadCap = 8 << 20
 
 var errCodexSessionMetaOverBound = fmt.Errorf("first record exceeds %d-byte bound", codexSessionMetaReadCap)
 
-func readCodexRolloutFirstLine(path string) ([]byte, error) {
-	file, err := openCodexRollout(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
+// codexRolloutHeaderQuestion is what readCodexRolloutFirstLine asks of a
+// rollout: its bounded flights are joined by no other read of the file.
+const codexRolloutHeaderQuestion = "Codex rollout header read"
 
-	reader := bufio.NewReader(file)
-	var line []byte
-	for {
-		fragment, err := reader.ReadSlice('\n')
-		line = append(line, fragment...)
-		if len(line) > codexSessionMetaReadCap {
-			return nil, fmt.Errorf("read Codex rollout %s: %w", path, errCodexSessionMetaOverBound)
+// readCodexRolloutFirstLine reads the first line of the rollout at path — its
+// session_meta record — inside fsprobe's per-path bound (#7279). The header
+// read runs on the follow/capture loop's every rearm, on the set-conversation
+// RPC handler, and on the restore and carry staleness checks, none of which a
+// wedged CODEX_HOME may hang: the open and the read run in one bounded flight,
+// and one that does not answer is the ErrProbeTimedOut +
+// context.DeadlineExceeded non-answer (codexHeaderReadUnanswered).
+func readCodexRolloutFirstLine(path string) ([]byte, error) {
+	return fsprobe.ReadFileWithOpen(codexRolloutHeaderQuestion, path, codexRolloutHeaderOpen(), func(file *os.File) ([]byte, error) {
+		reader := bufio.NewReader(file)
+		var line []byte
+		for {
+			fragment, rerr := reader.ReadSlice('\n')
+			line = append(line, fragment...)
+			if len(line) > codexSessionMetaReadCap {
+				return nil, fmt.Errorf("read Codex rollout %s: %w", path, errCodexSessionMetaOverBound)
+			}
+			switch {
+			case rerr == nil, errors.Is(rerr, io.EOF):
+				return bytes.TrimSuffix(line, []byte{'\n'}), nil
+			case errors.Is(rerr, bufio.ErrBufferFull):
+				continue
+			default:
+				return nil, fmt.Errorf("read Codex rollout %s: %w", path, rerr)
+			}
 		}
-		switch {
-		case err == nil, errors.Is(err, io.EOF):
-			return bytes.TrimSuffix(line, []byte{'\n'}), nil
-		case errors.Is(err, bufio.ErrBufferFull):
-			continue
-		default:
-			return nil, fmt.Errorf("read Codex rollout %s: %w", path, err)
-		}
-	}
+	})
+}
+
+// codexHeaderReadUnanswered reports whether err, from a rollout header read,
+// is a read that did not answer within its bound: a lookup that did not
+// happen. Every caller counts it with the other bounded lookups that did not
+// answer, never with a header that answered but is still being written (#7370
+// review R3): the restore resumes, the carry refuses, and capture waits. A
+// read that failed outright (EIO, EACCES) is an unreadable header, which keeps
+// its own answer (#7140; #7287 review R5).
+func codexHeaderReadUnanswered(err error) bool {
+	return errors.Is(err, fsprobe.ErrProbeTimedOut)
 }
 
 func jsonValueContainsPrompt(value any, prompt string) bool {
