@@ -41,7 +41,7 @@ func armingPollHome(t *testing.T) *home {
 		ID: "t1", Name: "nightly", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
 	}))
-	h.switchProject(repo)
+	switchProjectNow(t, h, repo)
 	return h
 }
 
@@ -171,7 +171,7 @@ func TestFetchSnapshotCmdPairsAScopedRowWithItsOwnRowInTheAnswer(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(raw), "dup00002")
 	require.NoError(t, os.WriteFile(tasksPath, bytes.ReplaceAll(raw, []byte("dup00002"), []byte("dup00001")), 0o600))
-	h.switchProject(&config.RepoContext{Root: rootB, ID: config.RepoIDFromRoot(rootB)})
+	switchProjectNow(t, h, &config.RepoContext{Root: rootB, ID: config.RepoIDFromRoot(rootB)})
 
 	next := time.Date(2026, time.March, 4, 9, 0, 0, 0, time.UTC)
 	t.Cleanup(SetLiveTaskArmingFetcherForTest(func() ([]task.Task, error) {

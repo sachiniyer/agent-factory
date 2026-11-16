@@ -363,7 +363,7 @@ func TestSkippedRepoSwitchProject(t *testing.T) {
 		return resp, nil
 	}
 
-	_, _ = h.switchProject(repoB)
+	_, _ = switchProjectNow(t, h, repoB)
 	bar := requireSkippedRepoNotice(t, h)
 	assert.Contains(t, bar, repoBRoot,
 		"the notice names the skipped repo by its root, which the switch just registered")

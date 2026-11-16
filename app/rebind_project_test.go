@@ -113,6 +113,7 @@ func TestOwnedRebindReplyStillReachesItsPicker(t *testing.T) {
 		stubRebind(t, errors.New("path is already bound to another project"))
 		picker := openRebindPicker(h)
 		h.Update(submitPickerRebind(t, h, "/taken")())
+		settleProjectSwitch(t, h)
 
 		require.Same(t, picker, h.projectPickerOverlay)
 		assert.False(t, picker.RebindPending(), "an owned rejection re-arms the form")
@@ -124,6 +125,7 @@ func TestOwnedRebindReplyStillReachesItsPicker(t *testing.T) {
 		openRebindPicker(h)
 		noticeBefore := h.transientNoticeID
 		h.Update(submitPickerRebind(t, h, "/new/project")())
+		settleProjectSwitch(t, h)
 
 		assert.Nil(t, h.projectPickerOverlay, "an owned success closes the picker")
 		assert.Equal(t, stateDefault, h.state)
@@ -164,6 +166,7 @@ func TestUncertainRebindDoesNotReArmThePicker(t *testing.T) {
 	stubRebind(t, &apiclient.TransportError{Err: errors.New("read: connection reset by peer")})
 	picker := openRebindPicker(h)
 	h.Update(submitPickerRebind(t, h, "/new/project")())
+	settleProjectSwitch(t, h)
 
 	assert.True(t, picker.RebindPending(), "an uncertain outcome must not re-arm the rebind form")
 	assert.Nil(t, h.projectPickerOverlay, "the picker closes on an uncertain outcome")
@@ -221,6 +224,7 @@ func TestRebindOfActiveProjectSwitchesToNewCheckout(t *testing.T) {
 	newRoot := initTestGitRepo(t)
 
 	h.Update(submitPickerRebind(t, h, newRoot)())
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, newRoot, h.repoRoot, "the TUI must follow its active project to the rebound checkout")
 	assert.Equal(t, config.RepoIDFromRoot(newRoot), h.repoID)
@@ -240,6 +244,7 @@ func TestRebindFollowsTheRegistryNotTheEcho(t *testing.T) {
 	echo := initTestGitRepo(t)
 
 	h.Update(submitPickerRebind(t, h, echo)())
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, newer, h.repoRoot, "the scope must follow the registry's current binding, not the stale echo")
 }
@@ -257,6 +262,7 @@ func TestRebindOfAnUnregisteredRecordKeepsScope(t *testing.T) {
 	h.projectPickerOverlay.SetMaxSize(80, 24)
 
 	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, rootBefore, h.repoRoot, "a record the registry no longer has must not move the scope to the echo")
 }
@@ -269,6 +275,7 @@ func TestRebindOfOtherProjectKeepsScope(t *testing.T) {
 	rootBefore, idBefore := h.repoRoot, h.repoID
 	openRebindPicker(h) // rows name /old/project, not the active repo
 	h.Update(submitPickerRebind(t, h, "/new/project")())
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, rootBefore, h.repoRoot)
 	assert.Equal(t, idBefore, h.repoID)
@@ -291,6 +298,7 @@ func TestUnknownRebindOutcomeNeverFollows(t *testing.T) {
 	t.Cleanup(func() { rebindProjectThroughDaemon = old })
 
 	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, rootBefore, h.repoRoot, "an unknown outcome must not move the scope, even if it landed")
 	assert.Equal(t, "Rebind of active · outcome unknown · check the project list", h.errBox.FullError())
@@ -312,6 +320,7 @@ func TestCommittedRebindFollowsAndReports(t *testing.T) {
 	newRoot := initTestGitRepo(t)
 
 	h.Update(submitPickerRebind(t, h, newRoot)())
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, newRoot, h.repoRoot, "a committed rebind is confirmed: the scope follows it")
 	assert.Contains(t, h.errBox.FullError(), "publishing projects.changed failed", "the follow-up failure is reported")
@@ -338,6 +347,7 @@ func TestRebindToastNamesTheRegistryRootNotTheEcho(t *testing.T) {
 	echo := initTestGitRepo(t)
 
 	h.Update(submitPickerRebind(t, h, echo)())
+	settleProjectSwitch(t, h)
 
 	toast := h.errBox.FullError()
 	assert.Contains(t, toast, newer, "the toast must name the registry's current root")
@@ -364,6 +374,7 @@ func TestNoOpRebindOfAnAggregatedRowKeepsScope(t *testing.T) {
 	stubRebind(t, nil) // confirmed success that writes nothing: the record is unmoved
 
 	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+	settleProjectSwitch(t, h)
 
 	assert.Equal(t, rootBefore, h.repoRoot, "an unmoved record must not look moved because the row displayed another root")
 }
@@ -383,6 +394,7 @@ func TestRebindGuardedSendRefusalReArmsWithTheUpgradeMessage(t *testing.T) {
 	t.Cleanup(func() { rebindProjectThroughDaemon = old })
 
 	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+	settleProjectSwitch(t, h)
 
 	require.Same(t, displayed, h.projectPickerOverlay,
 		"a definitive refusal re-arms the picker, never closes it")

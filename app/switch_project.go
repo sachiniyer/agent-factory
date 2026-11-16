@@ -724,29 +724,15 @@ func (m *home) closeProjectPicker() {
 // tests can stand in a config that cannot be read in time.
 var resolveSwitchProjectConfig = config.ResolveConfigForRepo
 
-// switchProject re-scopes the running TUI to repo in place (#1461): it flushes
-// the outgoing project's view state, tears down its panes (and their live
-// termpane PTYs), resets the projection, then re-primes everything — sidebar,
-// tasks, hooks, view state — from the new project's daemon snapshot, which the
-// daemon already filters by repoID (so the sidebar shows ONLY the new project).
-// New sessions/tabs then target the new repoRoot. A no-op when already viewing
-// repo.
-func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
-	if repo.ID == m.repoID {
-		return m, nil
-	}
-
-	// Fetch the INCOMING project's snapshot FIRST, while the outgoing project is
-	// still fully intact. Everything below this point is unconditional mutation
-	// with no way back — the panes are torn down and the projection reset — so a
-	// fetch failure (a wedged or unreachable daemon, common against a remote
-	// target) must abort here, leaving the current project exactly as it was,
-	// rather than stranding the TUI on the new repoID with an empty sidebar
-	// (#1788).
-	data, skipped, err := m.fetchColdStartSnapshot(repo.ID)
-	if err != nil {
-		return m, m.handleError(fmt.Errorf("failed to load sessions for %s: %w", filepath.Base(repo.Root), err))
-	}
+// commitProjectSwitch re-scopes the running TUI to repo in place (#1461) from
+// the snapshot switchProject fetched for it: it flushes the outgoing project's
+// view state, tears down its panes (and their live termpane PTYs), resets the
+// projection, then re-primes everything — sidebar, tasks, hooks, view state —
+// from the new project's snapshot, which the daemon already filters by repoID
+// (so the sidebar shows ONLY the new project). New sessions/tabs then target the
+// new repoRoot. Everything here is unconditional mutation with no way back, which
+// is why it runs only once the fetch has succeeded (#1788).
+func (m *home) commitProjectSwitch(repo *config.RepoContext, data []session.InstanceData, skipped []daemon.SkippedRepo) (tea.Model, tea.Cmd) {
 	// Fold the incoming project's skipped set into the retained set before the
 	// scope flips (#6986): rows and skip state came from the one response, and
 	// a skipped project just entered must never look like a clean empty one.

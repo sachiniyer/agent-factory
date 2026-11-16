@@ -199,7 +199,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.handleError(fmt.Errorf("failed to trigger task %q: %w", msg.title, msg.err))
 		}
 		return m, m.showTransientMessage(fmt.Sprintf("triggered %s", msg.title))
+	case projectSwitchFetchedMsg:
+		return m.handleProjectSwitchFetched(msg)
 	case tea.MouseMsg:
+		if m.projectSwitch != nil {
+			// A switch is loading: a click must not act on the project the user
+			// is leaving (#7377).
+			return m, nil
+		}
 		dismissed, endInput := m.beginUserInput()
 		defer endInput()
 		if dismissed {
@@ -214,6 +221,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fully sufficient.
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
+		if m.projectSwitch != nil {
+			// A switch is loading: Esc cancels it, and no other key may act on
+			// the project the user is leaving (#7377).
+			return m.handleKeyWhileSwitchingProject(msg)
+		}
 		// A burst of keys from one terminal read is handled key by key (#7015).
 		if burst := m.splitNavKeyBurst(msg); burst != nil {
 			return m.handleKeyBurst(msg, burst)

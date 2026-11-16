@@ -306,7 +306,7 @@ func TestSwitchProjectFromRegistryModeMakesHooksEditableAgain(t *testing.T) {
 	// Switch to a real local project whose config resolves.
 	projectRoot := initTestGitRepo(t)
 	repo := &config.RepoContext{Root: projectRoot, ID: config.RepoIDFromRoot(projectRoot)}
-	_, _ = h.switchProject(repo)
+	_, _ = switchProjectNow(t, h, repo)
 
 	require.Equal(t, projectRoot, h.repoRoot, "switched to the new project")
 	require.True(t, hooksPaneAcceptsEditKey(h.hooksPane),
@@ -336,7 +336,7 @@ func TestSwitchProjectFromRegistryModeMakesHooksEditableWhenConfigResolveFails(t
 	_, err := config.ResolveConfig(projectRoot)
 	require.Error(t, err, "precondition: the incoming project's config must fail to resolve")
 
-	_, _ = h.switchProject(repo)
+	_, _ = switchProjectNow(t, h, repo)
 
 	require.Equal(t, projectRoot, h.repoRoot, "switched to the new project")
 	require.Empty(t, h.hooksPane.GetCommands(), "hooks are cleared on a failed resolve (#1686)")

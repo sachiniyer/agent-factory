@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -56,26 +57,50 @@ func TestProjectListSnapshotFetchIsBoundedOnTheEventLoop(t *testing.T) {
 // wedgedSnapshotFetcher mimics a local daemon that accepts the unix-socket
 // connection and then never writes a response: the transport's read parks on
 // a socket that never answers, so the fetch returns ONLY when the caller's
-// context — the one switchSnapshotFetchTimeout bounds — is done. With an
-// unbounded context (the pre-fix local-transport shape, context.Background all
-// the way down) the call never returns; with the bound the deadline rides the
-// read and the call returns at switchSnapshotFetchTimeout.
+// context — the one switchSnapshotFetchTimeout bounds — is done.
 func wedgedSnapshotFetcher(ctx context.Context, _ string) (daemon.SnapshotResponse, error) {
 	<-ctx.Done()
 	return daemon.SnapshotResponse{}, ctx.Err()
 }
 
+// switchProjectNow drives h.switchProject(repo) to completion the way the
+// program does: the cmd it returns — the switch's snapshot fetch — runs (here,
+// on the test goroutine), and its reply is applied. It returns what applying
+// the reply returned, or nil for a switch that started nothing.
+func switchProjectNow(t *testing.T, h *home, repo *config.RepoContext) (tea.Model, tea.Cmd) {
+	t.Helper()
+	_, cmd := h.switchProject(repo)
+	if cmd == nil {
+		require.Nil(t, h.projectSwitch, "a switch that returned no fetch must not be left pending")
+		return h, nil
+	}
+	msg, ok := cmd().(projectSwitchFetchedMsg)
+	require.True(t, ok, "switchProject's cmd must be the switch's snapshot fetch")
+	return h.handleProjectSwitchFetched(msg)
+}
+
+// settleProjectSwitch completes a switch an entry point left pending — picker
+// Enter, a Projects row, a click, the rebind follow-up — by running its fetch
+// and applying the reply, as the program would. It is a no-op when no switch is
+// pending, so a test of a REFUSED switch calls it too: a switch that should
+// have been refused but was started then lands, and the test sees it.
+func settleProjectSwitch(t *testing.T, h *home) {
+	t.Helper()
+	p := h.projectSwitch
+	if p == nil {
+		return
+	}
+	msg, ok := projectSwitchFetchCmd(p.ctx, p.gen, p.repo, h.snapshotFetcher)().(projectSwitchFetchedMsg)
+	require.True(t, ok)
+	h.handleProjectSwitchFetched(msg)
+}
+
 // TestSwitchProjectSnapshotFetchIsBoundedOnTheEventLoop is the regression for the
-// switch-path half of #6045. switchProject runs synchronously on the bubbletea
-// event loop (the Ctrl+P picker selection, a Projects-section row activation, and
-// add-project submit all reach it from a KeyMsg handler), and its cold-start
-// snapshot fetch goes through fetchColdStartSnapshot → m.snapshotFetcher. The
-// LOCAL unix-socket transport bounds only the dial, so a daemon that accepts the
-// connection and never answers used to park Update — key input, repaint and the
-// Ctrl+C hard exit along with it — forever. The bound (switchSnapshotFetchTimeout)
-// rides the transport read; its expiry lands in the same abort branch as any
-// other failed fetch, so the switch reverts and the current project survives
-// intact (#1788) instead of the TUI freezing mid-switch.
+// switch-path half of #6045, now that the fetch runs in a tea.Cmd (#7377):
+// switchProject returns at once against a daemon that accepts the connection and
+// never answers, and the fetch it starts ends at switchSnapshotFetchTimeout. Its
+// expiry is a failed fetch, so the switch reverts and the current project
+// survives intact (#1788) instead of "Loading…" never ending.
 func TestSwitchProjectSnapshotFetchIsBoundedOnTheEventLoop(t *testing.T) {
 	h := newTestHome(t)
 	h.sidebar.SetSize(40, 20)
@@ -84,7 +109,7 @@ func TestSwitchProjectSnapshotFetchIsBoundedOnTheEventLoop(t *testing.T) {
 	}))
 
 	// Shrink the bound so the regression is fast: the wedged read must return at
-	// this deadline, not park the event loop until the process is killed.
+	// this deadline, not hold the switch until the process is killed.
 	oldTimeout := switchSnapshotFetchTimeout
 	switchSnapshotFetchTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { switchSnapshotFetchTimeout = oldTimeout })
@@ -103,27 +128,23 @@ func TestSwitchProjectSnapshotFetchIsBoundedOnTheEventLoop(t *testing.T) {
 	// The incoming project's daemon accepts the connection and never answers.
 	h.snapshotFetcher = wedgedSnapshotFetcher
 
-	// switchProject must return within the bound rather than parking the event
-	// loop. Pre-fix the goroutine never returns and the time.After branch fatals.
-	type switchResult struct {
-		repoID   string
-		repoRoot string
-	}
-	done := make(chan switchResult, 1)
-	go func() {
-		h.switchProject(repoB)
-		done <- switchResult{h.repoID, h.repoRoot}
-	}()
+	_, cmd := h.switchProject(repoB)
+	require.NotNil(t, cmd, "the switch's fetch must be handed to the program, not run here")
+
+	replies := make(chan tea.Msg, 1)
+	go func() { replies <- cmd() }()
 	select {
-	case r := <-done:
-		// The switch aborted at the bound: the current project is exactly as it
-		// was (#1788), so polls and new sessions keep targeting it.
-		assert.Equal(t, repoAID, r.repoID, "a bounded-out switch must not re-scope repoID")
-		assert.Equal(t, repoARoot, r.repoRoot, "a bounded-out switch must not re-scope repoRoot")
+	case msg := <-replies:
+		h.Update(msg)
 	case <-time.After(5 * time.Second):
-		t.Fatal("switchProject did not return against a wedged daemon: the event loop would be parked on an unanswered read")
+		t.Fatal("the switch's fetch did not end at its deadline against a wedged daemon")
 	}
 
+	// The switch aborted at the bound: the current project is exactly as it
+	// was (#1788), so polls and new sessions keep targeting it.
+	assert.Equal(t, repoAID, h.repoID, "a bounded-out switch must not re-scope repoID")
+	assert.Equal(t, repoARoot, h.repoRoot, "a bounded-out switch must not re-scope repoRoot")
+	assert.Nil(t, h.projectSwitch, "a bounded-out switch is no longer pending")
 	require.NotNil(t, findSidebarInstance(h, "repoA-session"),
 		"the current project's sessions must survive a switch whose fetch was bounded out")
 	assert.Contains(t, h.sidebar.String(), filepath.Base(repoARoot),
@@ -137,13 +158,13 @@ func TestSwitchProjectSnapshotFetchIsBoundedOnTheEventLoop(t *testing.T) {
 		"new sessions must still target the current project after a bounded-out switch")
 }
 
-// TestFetchColdStartSnapshotIsBoundedOnTheEventLoop pins the shared cold-start
-// fetcher directly: the same fetchColdStartSnapshot switchProject reaches on the
-// loop is also the cold-start path, and a wedged read must return at the bound
-// there too — surfacing a real error rather than parking newHome forever against
-// a daemon that never answers. The warming case (IsDaemonStartingErr) must still
-// retry up to coldStartWarmupWait once each bounded attempt returns promptly, so
-// the 2-minute ceiling behaves as the whole-operation deadline.
+// TestFetchColdStartSnapshotIsBoundedOnTheEventLoop pins the cold-start fetcher
+// directly: it shares fetchSnapshotWaitingOutWarmup with the switch's cmd, and a
+// wedged read must return at the bound there too — surfacing a real error
+// rather than parking newHome forever against a daemon that never answers. The
+// warming case (IsDaemonStartingErr) must still retry up to coldStartWarmupWait
+// once each bounded attempt returns promptly, so the 2-minute ceiling behaves as
+// the whole-operation deadline.
 func TestFetchColdStartSnapshotIsBoundedOnTheEventLoop(t *testing.T) {
 	h := newTestHome(t)
 	oldTimeout := switchSnapshotFetchTimeout

@@ -38,7 +38,7 @@ func switchToUnreadableProject(t *testing.T, h *home) string {
 	}
 	t.Cleanup(func() { resolveSwitchProjectConfig, resolveConfiguredProgramContext = prevSwitch, prevLive })
 	root := initTestGitRepo(t)
-	h.switchProject(&config.RepoContext{Root: root, ID: config.RepoIDFromRoot(root)})
+	switchProjectNow(t, h, &config.RepoContext{Root: root, ID: config.RepoIDFromRoot(root)})
 	return root
 }
 

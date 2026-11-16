@@ -163,7 +163,7 @@ func TestSwitchProjectDiscardsTaskPaneDrafts(t *testing.T) {
 	require.True(t, sp.IsDirty(), "precondition: an edit and a deletion are held")
 
 	projectBRoot := initTestGitRepo(t)
-	h.switchProject(&config.RepoContext{Root: projectBRoot, ID: config.RepoIDFromRoot(projectBRoot)})
+	switchProjectNow(t, h, &config.RepoContext{Root: projectBRoot, ID: config.RepoIDFromRoot(projectBRoot)})
 	require.Equal(t, projectBRoot, h.repoRoot, "precondition: the switch happened")
 
 	assert.Empty(t, taskIDs(sp.GetTasks()), "a row from the previous project must not appear in this one")

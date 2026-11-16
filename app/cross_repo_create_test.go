@@ -189,7 +189,7 @@ func TestHandleTaskCreate_SameRepoAfterSwitchAppearsInList(t *testing.T) {
 	t.Chdir(repoA)
 	h.repoRoot = repoA
 	h.repoID = config.RepoIDFromRoot(repoA)
-	h.switchProject(&config.RepoContext{Root: repoB, ID: config.RepoIDFromRoot(repoB)})
+	switchProjectNow(t, h, &config.RepoContext{Root: repoB, ID: config.RepoIDFromRoot(repoB)})
 	require.Equal(t, repoB, h.repoRoot, "precondition: the switch must move the active scope to B")
 	require.Equal(t, config.RepoIDFromRoot(repoB), h.repoID)
 
@@ -253,7 +253,7 @@ func TestHandleTaskCreate_CrossRepoAfterSwitchNamesTheCrossRepoBinding(t *testin
 	t.Chdir(repoA)
 	h.repoRoot = repoA
 	h.repoID = config.RepoIDFromRoot(repoA)
-	h.switchProject(&config.RepoContext{Root: repoB, ID: config.RepoIDFromRoot(repoB)})
+	switchProjectNow(t, h, &config.RepoContext{Root: repoB, ID: config.RepoIDFromRoot(repoB)})
 	require.Equal(t, repoB, h.repoRoot)
 	require.Equal(t, config.RepoIDFromRoot(repoB), h.repoID)
 

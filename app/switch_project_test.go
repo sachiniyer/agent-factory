@@ -58,6 +58,7 @@ func TestSelectProjectRowSwitchesProject(t *testing.T) {
 
 	// Enter is routed through the focused Projects section.
 	mod, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	settleProjectSwitch(t, h)
 	require.True(t, consumed, "Enter must be consumed by the focused Projects section")
 	require.NotNil(t, mod)
 
@@ -549,7 +550,7 @@ func TestSwitchProjectRescopesSidebar(t *testing.T) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
-	mod, _ := h.switchProject(repoB)
+	mod, _ := switchProjectNow(t, h, repoB)
 	require.NotNil(t, mod)
 
 	// repoID/repoRoot re-scoped to the target project.
@@ -590,7 +591,7 @@ func TestSwitchProjectDropsStaleSnapshot(t *testing.T) {
 		}
 		return daemon.SnapshotResponse{}, nil
 	}
-	h.switchProject(repoB)
+	switchProjectNow(t, h, repoB)
 	require.NotNil(t, findSidebarInstance(h, "repoB-session"))
 
 	// A stale snapshot for the OLD repo lands after the switch. The repoID guard
@@ -626,7 +627,7 @@ func TestBackgroundRefreshFollowsActiveProject(t *testing.T) {
 		ProjectPath: "/some/other/repo", Program: "claude", Enabled: true, CreatedAt: time.Now(),
 	}))
 
-	h.switchProject(repoB)
+	switchProjectNow(t, h, repoB)
 
 	msg, ok := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
 	require.True(t, ok)
@@ -669,7 +670,7 @@ func TestSwitchProjectWithArchivedSection(t *testing.T) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
-	h.switchProject(repoB)
+	switchProjectNow(t, h, repoB)
 
 	assert.Nil(t, findSidebarInstance(h, "repoA-live"), "previous project's live row must be gone")
 	assert.Nil(t, findSidebarInstance(h, "repoA-archived"), "previous project's archived row must be gone")
@@ -688,7 +689,7 @@ func TestSwitchProjectSameRepoIsNoop(t *testing.T) {
 	h.store.AddInstance(newSnapshotTestInstance(t, "existing"))
 
 	same := &config.RepoContext{Root: h.repoRoot, ID: h.repoID}
-	h.switchProject(same)
+	switchProjectNow(t, h, same)
 
 	require.NotNil(t, findSidebarInstance(h, "existing"), "a same-repo switch must not wipe the sidebar")
 }
@@ -726,7 +727,7 @@ func TestSwitchProjectFailedSnapshotLeavesProjectIntact(t *testing.T) {
 		return daemon.SnapshotResponse{}, nil
 	}
 
-	h.switchProject(repoB)
+	switchProjectNow(t, h, repoB)
 
 	// The repo context never moved, so polls and new sessions stay on repo A.
 	assert.Equal(t, repoAID, h.repoID, "a failed switch must not re-scope repoID")
@@ -776,7 +777,7 @@ func TestSwitchProjectClearsHooksWhenConfigResolveFails(t *testing.T) {
 	_, err = config.ResolveConfig(projectBRoot)
 	require.Error(t, err, "precondition: ResolveConfig must fail with the corrupt global config")
 
-	h.switchProject(repoB)
+	switchProjectNow(t, h, repoB)
 
 	assert.Equal(t, projectBRoot, h.repoRoot, "repoRoot must be re-scoped to the new project")
 	assert.Empty(t, h.hooksPane.GetCommands(), "stale hooks from the previous project must be cleared, not carried over")
@@ -827,7 +828,7 @@ func TestSwitchProjectResetsProgramWhenConfigResolveFails(t *testing.T) {
 	require.NoError(t, err, "precondition: the global config must still load")
 	require.Equal(t, globalDefault, global.DefaultProgram)
 
-	h.switchProject(repoB)
+	switchProjectNow(t, h, repoB)
 
 	assert.Equal(t, projectBRoot, h.repoRoot, "repoRoot must be re-scoped to the new project")
 	assert.Equal(t, globalDefault, h.program,
@@ -851,7 +852,7 @@ func TestSwitchProjectAppliesProjectProgramWhenConfigResolves(t *testing.T) {
 	writeInRepoConfig(t, projectBRoot, "default_program = \"aider\"\n")
 	repoB := &config.RepoContext{Root: projectBRoot, ID: config.RepoIDFromRoot(projectBRoot)}
 
-	h.switchProject(repoB)
+	switchProjectNow(t, h, repoB)
 
 	assert.Equal(t, "aider", h.program, "the incoming project's default_program must win on a successful resolve")
 }
@@ -886,14 +887,14 @@ func TestSwitchProjectUsesGlobalDefaultWhenProjectSetsNoProgram(t *testing.T) {
 		"precondition: a project with no default_program resolves to the global default")
 
 	h.program = "codex"
-	h.switchProject(&config.RepoContext{Root: withConfig, ID: config.RepoIDFromRoot(withConfig)})
+	switchProjectNow(t, h, &config.RepoContext{Root: withConfig, ID: config.RepoIDFromRoot(withConfig)})
 	assert.Equal(t, globalDefault, h.program,
 		"a project that sets no default_program must use the global default, not the outgoing project's program")
 
 	// (2) A project with no in-repo config at all — the common case.
 	noConfig := initTestGitRepo(t)
 	h.program = "codex"
-	h.switchProject(&config.RepoContext{Root: noConfig, ID: config.RepoIDFromRoot(noConfig)})
+	switchProjectNow(t, h, &config.RepoContext{Root: noConfig, ID: config.RepoIDFromRoot(noConfig)})
 	assert.Equal(t, globalDefault, h.program,
 		"a project with no in-repo config must use the global default, not the outgoing project's program")
 }
@@ -915,7 +916,7 @@ func TestTaskCreateAfterFailedResolveUsesGlobalProgram(t *testing.T) {
 	_, err := config.ResolveConfig(projectBRoot)
 	require.Error(t, err, "precondition: ResolveConfig must fail with the corrupt in-repo config")
 
-	h.switchProject(repoB)
+	switchProjectNow(t, h, repoB)
 
 	// Enter the form with the switched-to repo explicitly: this test is about the
 	// program fallback, not the list's `n` shortcut or its process-CWD fallback.
@@ -1064,10 +1065,12 @@ func TestHandleAddProjectRegistersAndSwitches(t *testing.T) {
 	// A real git repo so RepoFromPath resolves.
 	repoRoot := initTestGitRepo(t)
 	mod, cmd := h.handleAddProject(repoRoot)
+	settleProjectSwitch(t, h)
 	require.NotNil(t, mod)
 
-	// The switch happens SYNCHRONOUSLY (fast + local), and the registration is
-	// dispatched as an off-loop command rather than blocking this keystroke (#2456).
+	// The switch lands once its off-loop fetch replies (#7377; settled above), and
+	// the registration is dispatched as an off-loop command too, rather than
+	// blocking this keystroke (#2456).
 	assert.Equal(t, stateDefault, h.state, "a valid add closes the picker")
 	assert.Nil(t, h.projectPickerOverlay)
 	assert.Equal(t, config.RepoIDFromRoot(repoRoot), h.repoID, "add should switch to the new project")

@@ -543,6 +543,7 @@ func TestSwitchToProjectRootRefusesStaleRowInLocalMode(t *testing.T) {
 	require.NotEqual(t, outerID, beforeRepoID, "fixture: the active project must not be the enclosing repo")
 
 	mod, cmd := h.switchToProjectRoot(nested, nestedID, "")
+	settleProjectSwitch(t, h)
 	require.NotNil(t, mod)
 	_ = cmd
 	// The switch was refused: the rail stays on the active project, not the
@@ -570,6 +571,7 @@ func TestSwitchToProjectRootSwitchesOnMatchingIdentity(t *testing.T) {
 	require.NotEqual(t, repoID, h.repoID, "fixture: the target must differ from the active project")
 
 	mod, _ := h.switchToProjectRoot(repoRoot, repoID, "")
+	settleProjectSwitch(t, h)
 	require.NotNil(t, mod)
 	assert.Equal(t, repoID, h.repoID, "a matching identity switches the rail to the target project")
 	assert.Equal(t, repoRoot, h.repoRoot)
@@ -595,6 +597,7 @@ func TestSwitchToProjectRootSwitchesOnAbsentIdentity(t *testing.T) {
 	require.NotEqual(t, repoID, h.repoID)
 
 	mod, _ := h.switchToProjectRoot(repoRoot, "", "")
+	settleProjectSwitch(t, h)
 	require.NotNil(t, mod)
 	assert.Equal(t, repoID, h.repoID, "an empty identity probes and switches")
 	assert.Equal(t, repoRoot, h.repoRoot)
@@ -638,6 +641,7 @@ func TestProjectsSectionEnterRefusesStaleRow(t *testing.T) {
 
 	// Enter on the stale row: the switch is refused, the rail stays put.
 	_, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	settleProjectSwitch(t, h)
 	require.True(t, consumed, "Enter must be consumed by the focused Projects section")
 	assert.Equal(t, beforeRepoID, h.repoID, "Enter on a stale row must not re-scope the rail")
 	assert.NotEqual(t, outerID, h.repoID, "the enclosing repo must not have been opened")
@@ -677,6 +681,7 @@ func TestProjectsSectionEnterSwitchesHealthyRowWithIdentity(t *testing.T) {
 	require.Equal(t, repoBRoot, proj.Root)
 
 	_, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	settleProjectSwitch(t, h)
 	require.True(t, consumed)
 	assert.Equal(t, repoBID, h.repoID, "Enter on a healthy row switches to it")
 	assert.Equal(t, repoBRoot, h.repoRoot)
