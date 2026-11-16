@@ -471,7 +471,8 @@ func (m *home) handleWheel(msg tea.MouseMsg) tea.Cmd {
 		// off-loop refresh so the scrollback fill lands within a frame instead of
 		// waiting up to a preview tick. panesRefresh bypasses its throttle while
 		// the pane NeedsScrollFill.
-		return m.panesRefresh(m.attached.Load())
+		refresh, _ := m.panesRefresh(m.attached.Load())
+		return refresh
 	}
 	switch {
 	case strings.HasPrefix(id, "tree:"):

@@ -272,7 +272,7 @@ func (m *home) focusAdjacentPane(delta int) tea.Cmd {
 	if m.panePreviewTxn != nil {
 		m.suppressActivePanePreview()
 		m.cancelPanePreview(true)
-		refresh = m.panesRefresh(m.attached.Load())
+		refresh, _ = m.panesRefresh(m.attached.Load())
 	}
 	if delta == 0 || len(m.visiblePanes) < 2 {
 		return refresh

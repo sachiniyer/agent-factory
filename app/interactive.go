@@ -217,7 +217,8 @@ func (m *home) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if m.panePreviewTxn != nil {
 					m.suppressActivePanePreview()
 					m.cancelPanePreview(true)
-					return m, m.panesRefresh(m.attached.Load())
+					refresh, _ := m.panesRefresh(m.attached.Load())
+					return m, refresh
 				}
 				return m, m.selectionChanged()
 			}

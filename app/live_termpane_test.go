@@ -127,7 +127,7 @@ func TestSyncLiveTermPaneBindsFocusedPane(t *testing.T) {
 	// A live pane's capture polling is skipped: panesRefresh must not dispatch a
 	// daemon-Preview fetch for it.
 	h.lastPaneCapture = map[int]time.Time{}
-	_ = h.panesRefresh(false)
+	_, _ = h.panesRefresh(false)
 	assert.NotContains(t, h.lastPaneCapture, p.ID(), "live pane must not capture-poll")
 }
 
@@ -157,7 +157,7 @@ func TestLivePaneScrollFillCapturesDespiteLiveSkip(t *testing.T) {
 	// The pending fill MUST get a capture dispatched even though the pane is live
 	// — otherwise the viewport renders blank until scroll mode is left (#1704).
 	h.lastPaneCapture = map[int]time.Time{}
-	_ = h.panesRefresh(false)
+	_, _ = h.panesRefresh(false)
 	assert.Contains(t, h.lastPaneCapture, p.ID(),
 		"a live pane with a pending scroll fill must capture the scrollback (#1704)")
 }

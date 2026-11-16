@@ -79,7 +79,7 @@ func (m *home) cycleFocus(back bool) tea.Cmd {
 	if m.panePreviewTxn != nil {
 		m.suppressActivePanePreview()
 		m.cancelPanePreview(false)
-		refresh = m.panesRefresh(m.attached.Load())
+		refresh, _ = m.panesRefresh(m.attached.Load())
 	}
 	if back {
 		m.ring.Prev()
@@ -107,7 +107,7 @@ func (m *home) focusAdjacentSection(back bool) tea.Cmd {
 	if m.panePreviewTxn != nil {
 		m.suppressActivePanePreview()
 		m.cancelPanePreview(false)
-		refresh = m.panesRefresh(m.attached.Load())
+		refresh, _ = m.panesRefresh(m.attached.Load())
 	}
 	// Step the ring, skipping workspace panes, until it rests on a section
 	// region. The tree is always a visible non-pane stop, so this always

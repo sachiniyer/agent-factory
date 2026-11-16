@@ -165,7 +165,7 @@ func TestPanesRefreshNoRedundantScrollFillCapture(t *testing.T) {
 
 	// First refresh cycle dispatches the fill. Run it off the event loop like
 	// bubbletea would; it blocks in the gated capture, holding the fill in flight.
-	cmd1 := h.panesRefresh(false)
+	cmd1, _ := h.panesRefresh(false)
 	require.NotNil(t, cmd1, "the first refresh must dispatch the scroll fill")
 	go cmd1()
 	require.Eventually(t, func() bool { return atomic.LoadInt32(&fullCaptures) == 1 },
@@ -173,7 +173,7 @@ func TestPanesRefreshNoRedundantScrollFillCapture(t *testing.T) {
 
 	// Second refresh cycle WHILE the fill is still in flight: it must not dispatch
 	// another capture. Before the fix this fired a redundant second capture.
-	if cmd2 := h.panesRefresh(false); cmd2 != nil {
+	if cmd2, _ := h.panesRefresh(false); cmd2 != nil {
 		go cmd2()
 	}
 	require.Never(t, func() bool { return atomic.LoadInt32(&fullCaptures) > 1 },
