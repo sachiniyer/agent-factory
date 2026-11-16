@@ -122,6 +122,21 @@ func (m *home) handleStateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.searchOverlay.IsSubmitted() {
 			if inst := m.searchOverlay.GetSelectedInstance(); inst != nil {
 				m.sidebar.SelectInstance(inst)
+				// Re-home the focus ring onto the tree so selection-scoped
+				// verbs (the attach verb `o`, Enter) resolve the session the
+				// user just searched for. Every other selection-changing entry
+				// point does this (handleTaskTrigger, tree nav via
+				// focusTreeForNav, mouse wheel/click, project switch/delete, Esc
+				// out of the Automations/Projects rails); the search close
+				// predates the focus ring and never gained it. Without this the
+				// ring stays wherever `/` was pressed — on a workspace pane, so
+				// `o` attaches the pane's stale committed binding instead of the
+				// searched session; or on the Projects rail, where `o` is an
+				// inert no-op and the searched session is unreachable. The mouse
+				// submit path closes through this same branch, so it is covered.
+				// tea.WindowSize()'s relayout preserves the active ring id, so
+				// setting it here before the return sticks through the resize.
+				m.focusRegion(layout.RegionTree)
 			}
 		}
 		m.searchOverlay = nil
