@@ -320,10 +320,29 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 			// options is the dialog's top border and must NOT reject: the
 			// framed form must parse identically to the unframed one
 			// (claudeTrustBoxDrawing). The one frame that grounds a
-			// rejection here is a boxed COMPOSER's, recognised the same way
-			// claudeLaunchDialogComposerBelow recognises it: a frame-rule
-			// line adjacent to a row reading ">" or "> ".
-			if claudeLaunchDialogPromptRow(pane, i+1) || claudeLaunchDialogPromptRow(pane, i-1) {
+			// rejection here is a boxed COMPOSER's.
+			//
+			// A composer's edge is a frame rule with its ">" / "> " prompt
+			// row on the far side — the same one-sided shape the package's
+			// other composer detectors read (claudeLaunchDialogComposerBelow,
+			// claudeFolderTrustComposerRow, claudeMCPTrustComposerRow: a ">"
+			// row straight below a frame rule). That holds for the composer's
+			// top border with the prompt directly under it; the panel also
+			// grows a transcript, and a transcript line that renders with a
+			// ">" prefix (a markdown blockquote, quoted/reply text, command
+			// output) sits directly ABOVE the dialog's own top border and
+			// reduces to ">" / "> " too. To tell that bare transcript row
+			// from a composer's prompt the row just ABOVE a rule (the
+			// composer's bottom edge, when its top scrolled off), require
+			// the prompt to be welded: a frame rule must sit on its other
+			// side as well. A transcript ">" row above the dialog's top
+			// border has no rule above it, so it must not reject (#7376
+			// review R5).
+			above, below := claudeLaunchDialogPromptRow(pane, i-1), claudeLaunchDialogPromptRow(pane, i+1)
+			if below {
+				return claudeLaunchDialogMatch{}, false
+			}
+			if above && i >= 2 && claudeTrustFrameRule(pane.lines[i-2]) {
 				return claudeLaunchDialogMatch{}, false
 			}
 		}
