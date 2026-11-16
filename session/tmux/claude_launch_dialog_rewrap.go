@@ -225,19 +225,17 @@ func claudeLaunchDialogRewrapOf(screen visibleText) (claudeLaunchDialogMatch, bo
 //     of the dialog's options (claudeLaunchDialogOptions.read): the folder
 //     dialog's affirmative label, or every option of the MCP server dialog.
 //     Those rows are the dialog's body, as far as the pane shows. None of them
-//     may be a ❯ row, a rule or a footer, which is what
-//     claudeFolderTrustHeadless asks of them: a launch dialog owns the pane
-//     above its options.
+//     may be a ❯ row or a footer, which is what claudeFolderTrustHeadless
+//     asks of them: a launch dialog owns the pane above its options.
 //
-// A ❯ row must begin an option. No row may be a plain rule, which is what a
-// composer draws. And the footer must be the last content, so a composer or
-// any other row below the dialog keeps the pane clear.
+// A ❯ row must begin an option. A plain rule, which is what a composer draws
+// above and below its prompt row, keeps the pane clear from the options down.
+// Above them it is the dialog's own top rule, which Claude Code 2.1.322 paints
+// over its launch dialogs (testdata/claude_2_1_322_mcp_server_dialog.ansi),
+// unless it bounds a prompt row (#7380). And the footer must be the last
+// content, so a composer or any other row below the dialog keeps the pane
+// clear.
 func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDialogOptions) (claudeLaunchDialogMatch, bool) {
-	for _, line := range pane.lines {
-		if claudeComposerRule(line) {
-			return claudeLaunchDialogMatch{}, false
-		}
-	}
 	end, footerIndex := -1, -1
 	for i, footer := range options.footers {
 		if strings.HasSuffix(pane.text, footer) {
@@ -295,14 +293,20 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 	match := claudeLaunchDialogMatch{kind: kind}
 	switch {
 	case at == 0 && labels > 0:
+		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
+			return claudeLaunchDialogMatch{}, false
+		}
 		match.saw = "only its option rows and its footer"
 		return match, true
 	case at > 0 && claudeLaunchDialogLabelTail(pane.text[:at], options.labels):
+		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
+			return claudeLaunchDialogMatch{}, false
+		}
 		match.saw = "only the end of its option rows and its footer"
 		return match, true
 	case at > 0 && labels > 0 && block:
 		block, ok := pane.rowStart(at)
-		if !ok {
+		if !ok || claudeLaunchDialogRuleFrom(pane, pane.index[block]) {
 			return claudeLaunchDialogMatch{}, false
 		}
 		for content := 0; content < block; content++ {
@@ -313,6 +317,16 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 		}
 		for i := 0; i < pane.index[block]; i++ {
 			if !claudeTrustFrameRule(pane.lines[i]) {
+				continue
+			}
+			if claudeComposerRule(pane.lines[i]) {
+				// A plain rule above the options is the dialog's own top
+				// rule (#7380), unless it bounds a composer's prompt row in
+				// any of the composer's modes. A ❯ prompt row above the
+				// options is refused above.
+				if claudeLaunchDialogModePromptRow(pane, i+1) || claudeLaunchDialogModePromptRow(pane, i-1) {
+					return claudeLaunchDialogMatch{}, false
+				}
 				continue
 			}
 			// Box corners and tees are a framed dialog's own edges (#7284
@@ -331,6 +345,35 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 		return match, true
 	}
 	return claudeLaunchDialogMatch{}, false
+}
+
+// claudeLaunchDialogModePromptRow reports whether pane line i is a composer's
+// prompt row in one of its modes (claudeComposerPromptLabel).
+func claudeLaunchDialogModePromptRow(pane claudeLaunchDialogPane, i int) bool {
+	return i >= 0 && i < len(pane.lines) && !pane.rows[i].selected && claudeComposerPromptLabel(pane.rows[i].label)
+}
+
+// claudeComposerPromptLabel reports a row Claude Code's composer paints as its
+// prompt, in each of its modes: "> " (prompt), "! " (bash) and "# " (memory),
+// or the mode's glyph alone on an empty prompt.
+func claudeComposerPromptLabel(label string) bool {
+	for _, mode := range []string{">", "!", "#"} {
+		if label == mode || strings.HasPrefix(label, mode+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeLaunchDialogRuleFrom reports a plain rule on line from or below it,
+// where only a composer draws one.
+func claudeLaunchDialogRuleFrom(pane claudeLaunchDialogPane, from int) bool {
+	for i := from; i < len(pane.lines); i++ {
+		if claudeComposerRule(pane.lines[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeLaunchDialogOrdinalBefore returns the length of a picker ordinal ("1.")
