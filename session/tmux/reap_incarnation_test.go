@@ -47,6 +47,13 @@ type fakeTmuxServer struct {
 	// sent directly or as the branch of a guarded if-shell. A guarded kill whose
 	// condition failed is not in here — that is the whole point of the guard.
 	executedKills []string
+	// globalEnv is the server's GLOBAL environment — the shared, inherited
+	// storage `show-environment -g` reads. tmux copies the first starter's
+	// environment into it, so a marker living here says nothing about which
+	// session was created with it. A production read that asks -g finds the
+	// markers and this fake answers them, so a test can prove no production
+	// read goes there.
+	globalEnv map[string]string
 }
 
 func exitOneWith(t *testing.T, stderr string) error {
@@ -138,6 +145,19 @@ func (s *fakeTmuxServer) answerLocked(args []string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("fake tmux: unexpected display-message format %q", format)
 	case "show-environment":
+		if len(args) > 1 && args[1] == "-g" {
+			// Global-environment queries answer from globalEnv alone — no
+			// session is involved or needed. Membership reads must be
+			// session-scoped (-t $N); a reader that asks -g is precisely the
+			// bug the bare-pane sweep tests exist to catch.
+			if len(args) < 3 {
+				return nil, nil
+			}
+			if v, ok := s.globalEnv[args[2]]; ok {
+				return []byte(args[2] + "=" + v + "\n"), nil
+			}
+			return nil, exitOneWith(s.t, "unknown variable: "+args[2])
+		}
 		if sess == nil {
 			return nil, missing
 		}
@@ -238,6 +258,14 @@ func (s *fakeTmuxServer) kills() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.executedKills...)
+}
+
+// issued is every argv the fake recorded — for assertions about which
+// commands a read did or did not reach for.
+func (s *fakeTmuxServer) issued() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.commands...)
 }
 
 // guardedKills are the if-shell commands sent: every kill goes through one.
