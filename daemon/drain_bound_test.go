@@ -46,11 +46,11 @@ func neverReturns(t *testing.T) func() error {
 // whose handler never returns holds it forever.
 func runDrain(t *testing.T, limit time.Duration, manager *Manager, closeHTTP, closeControl func() error, workers *sync.WaitGroup) (joined bool, elapsed time.Duration) {
 	t.Helper()
-	httpClosed, controlClosed := false, false
+	controlClosed := false
 	done := make(chan bool, 1)
 	start := time.Now()
 	go func() {
-		done <- drainDaemon(manager, nil, closeHTTP, closeControl, &httpClosed, &controlClosed, make(chan struct{}), workers)
+		done <- drainDaemon(manager, nil, closeHTTP, closeControl, &controlClosed, make(chan struct{}), workers)
 	}()
 	select {
 	case joined = <-done:

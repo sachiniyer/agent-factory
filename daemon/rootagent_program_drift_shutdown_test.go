@@ -48,10 +48,10 @@ func TestShutdownAbandonsBlockedRootProgramInspection(t *testing.T) {
 
 	stopCh := make(chan struct{})
 	var workers sync.WaitGroup
-	httpClosed, controlClosed := false, false
+	controlClosed := false
 	drained := make(chan struct{})
 	go func() {
-		drainDaemon(manager, nil, nil, func() error { return nil }, &httpClosed, &controlClosed, stopCh, &workers)
+		drainDaemon(manager, nil, nil, func() error { return nil }, &controlClosed, stopCh, &workers)
 		close(drained)
 	}()
 

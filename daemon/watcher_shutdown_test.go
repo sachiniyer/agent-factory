@@ -122,14 +122,14 @@ func TestDrainStandsWatchersDownBeforeItCanHang(t *testing.T) {
 	release := make(chan struct{})
 	drained := make(chan struct{})
 	var workers sync.WaitGroup
-	httpClosed, controlClosed := false, false
+	controlClosed := false
 	go func() {
 		defer close(drained)
 		drainDaemon(manager, s, nil, func() error {
 			close(hung)
 			<-release
 			return nil
-		}, &httpClosed, &controlClosed, make(chan struct{}), &workers)
+		}, &controlClosed, make(chan struct{}), &workers)
 	}()
 	t.Cleanup(func() {
 		close(release)

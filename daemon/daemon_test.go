@@ -68,6 +68,11 @@ func TestMain(m *testing.M) {
 	// cleanup — leaving later tests' os.Getwd() failing with "no such file or
 	// directory". The daemon_cwd_test.go tests exercise the real chdir directly.
 	chdirToNeutralHomeFn = func() {}
+	// #7439: a stop that abandoned something ends its process holding the home.
+	// In-process, that process is this test binary, so record the exit instead;
+	// the daemon then unwinds as it always has. Tests that assert on the exit
+	// install their own (captureExitHoldingHome).
+	exitHoldingHome = recordExitHoldingHome
 	log.Initialize(false)
 	code := m.Run()
 	log.Close()
