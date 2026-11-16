@@ -215,8 +215,28 @@ func postEnsureDialDeadline(deadline time.Time) time.Time {
 	return time.Now().Add(daemonDialTimeout)
 }
 
+// ErrAdmissionDeadline is the sentinel for an ensure-phase admission deadline
+// expiry: the control-socket ensure (EnsureDaemonUntil) failed BEFORE the
+// caller's request was ever dispatched, so no handler could have run and no
+// background teardown can exist. It is returned by daemonHTTPClient's
+// EnsureDaemonUntil call (and the net/rpc callDaemon admission phase) when the
+// admission budget elapses against a wedged control socket or a holder of
+// ensureDaemonMu that never released within the bound.
+//
+// Callers that classify a context.DeadlineExceeded as "the daemon took the
+// request and went quiet" (the TUI kill path's errDaemonUnresponsive rewrap) or
+// as an uncertain mutation outcome (apiclient.IsMutationOutcomeUncertain) must
+// recognize this sentinel FIRST: for this error the request was never sent, the
+// daemon provably did not act, and the outcome is definitive — not unknown. The
+// wrap below keeps context.DeadlineExceeded in the chain too, because the
+// daemon-internal callDaemon handoff guard keys on it
+// (errors.Is(ensureErr, context.DeadlineExceeded) in the retry loop), so the
+// sentinel is added alongside rather than replacing the DeadlineExceeded wrap.
+// The Error() text is unchanged.
+var ErrAdmissionDeadline = errors.New("daemon admission retry deadline elapsed")
+
 func daemonAdmissionDeadlineError() error {
-	return fmt.Errorf("daemon admission retry deadline elapsed: %w", context.DeadlineExceeded)
+	return fmt.Errorf("%w: %w", ErrAdmissionDeadline, context.DeadlineExceeded)
 }
 
 func waitUntilAdmissionDeadline(deadline time.Time, delay time.Duration) bool {
