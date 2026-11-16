@@ -235,10 +235,11 @@ func TestCheckAndHandleTrustPrompt_FolderTrustDialogTextThatIsNoDialogStaysClear
 		{"the boxed composer below", legacy + boxedComposerBelow},
 		// A boxed composer painted ABOVE the dialog's option rows and footer
 		// (a quoted dialog with the agent's live composer above it) must stay
-		// clear: the case-3 scan rejects the composer's box edge because the
-		// row next to it reads "> ", not because every frame rule rejects.
-		// This is the false-hold a plain-rule-only scan would produce, so it
-		// pins that the fix did not weaken the boxed-composer guard.
+		// clear: the case-3 scan rejects the box because its first row is a
+		// prompt (claudeTrustBoxComposerAt, #7380), not because every frame
+		// rule rejects. This is the false-hold a plain-rule-only scan would
+		// produce, so it pins that the fix did not weaken the boxed-composer
+		// guard.
 		{"the boxed composer above the options", "╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, I trust this folder\n2. No, exit\n\nEnter to confirm · Esc to cancel"},
 		{"the boxed composer above the legacy options", "╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, proceed\n2. No, exit\n\nEnter to confirm · Esc to exit"},
 		{"a hint row below the footer", legacy + "\n? for shortcuts"},

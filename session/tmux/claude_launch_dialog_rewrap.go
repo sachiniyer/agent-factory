@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -333,11 +334,16 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 			// review R5), not the composer's, so a frame rule above the
 			// options is the dialog's top border and must NOT reject: the
 			// framed form must parse identically to the unframed one
-			// (claudeTrustBoxDrawing). The one frame that grounds a
-			// rejection here is a boxed COMPOSER's, recognised the same way
-			// claudeLaunchDialogComposerBelow recognises it: a frame-rule
-			// line adjacent to a row reading ">" or "> ".
-			if claudeLaunchDialogPromptRow(pane, i+1) || claudeLaunchDialogPromptRow(pane, i-1) {
+			// (claudeTrustBoxDrawing). The one box that grounds a rejection
+			// here is a composer's, and a box is a composer by what is
+			// inside it (claudeTrustBoxComposerAt, #7380). Rows outside the
+			// box decide nothing, so a shell's "> claude" line above a live
+			// framed dialog does not make it a composer. And a composer
+			// explains only its own rows: one with the dialog's own first
+			// rows on screen below it is a stale frame above a live dialog
+			// (#7388), and decides nothing.
+			if claudeTrustBoxComposerAt(pane.lines, pane.rows, i) &&
+				!claudeLaunchDialogOwnRowsBetween(pane, claudeTrustBoxClose(pane.lines, i), pane.index[block]) {
 				return claudeLaunchDialogMatch{}, false
 			}
 		}
@@ -347,6 +353,121 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 	return claudeLaunchDialogMatch{}, false
 }
 
+// claudeTrustBoxTopCorners open a box: a frame rule that starts with one is a
+// box's top edge.
+const claudeTrustBoxTopCorners = "╭┌╔┏"
+
+// claudeTrustBoxComposerAt reports whether line top is the top edge of a box
+// that is a composer: its first row below the edge, past any pad rows, is a
+// prompt in one of the composer's modes (claudeComposerPromptLabel). A bottom
+// edge or a tee decides nothing on its own, and neither does a box whose top
+// edge is off screen: what is inside a box is below its top edge.
+func claudeTrustBoxComposerAt(lines []string, rows []claudeTrustRow, top int) bool {
+	edge := strings.TrimSpace(lines[top])
+	if first, _ := utf8.DecodeRuneInString(edge); !strings.ContainsRune(claudeTrustBoxTopCorners, first) {
+		return false
+	}
+	for i := top + 1; i < len(lines); i++ {
+		if claudeTrustFrameRule(lines[i]) {
+			// The box closed, or another edge began, before any row.
+			return false
+		}
+		if rows[i].blank {
+			continue
+		}
+		return !rows[i].selected && claudeComposerPromptLabel(rows[i].label)
+	}
+	return false
+}
+
+// claudeTrustBoxClose returns the line that closes the box whose top edge is
+// line top: the next frame rule below it, or len(lines) when none does.
+func claudeTrustBoxClose(lines []string, top int) int {
+	for i := top + 1; i < len(lines); i++ {
+		if claudeTrustFrameRule(lines[i]) {
+			return i
+		}
+	}
+	return len(lines)
+}
+
+// claudeTrustBoxBottomCorners close a box: a frame rule that starts with one
+// is a box's bottom edge.
+const claudeTrustBoxBottomCorners = "╰└╚┗"
+
+// claudeLaunchDialogOwnQuestions are the launch dialogs' own first rows that
+// af knows the words of, squashed: the folder dialogs' questions and the MCP
+// dialogs' preambles.
+var claudeLaunchDialogOwnQuestions = []string{
+	claudeSquash(claudeFolderTrustQuestion),
+	claudeLegacyTrustQuestionSquashed,
+	claudeMCPServerPreambleSquashed,
+	claudeMCPTrustPreambleSquashed,
+	claudeMCPTrustQuestionSquashed,
+	"newMCPserversfoundinthisproject",
+}
+
+// claudeLaunchDialogOwnRowsBetween reports whether one of the dialog's own
+// first rows is on screen strictly between lines from and to, below a
+// composer and above the options (#7388): the top edge of a box that is still
+// open at the options, the dialog's own top rule (a plain rule bounding no
+// prompt row), or its question or preamble.
+func claudeLaunchDialogOwnRowsBetween(pane claudeLaunchDialogPane, from, to int) bool {
+	var text strings.Builder
+	for i := from + 1; i < to; i++ {
+		line := pane.lines[i]
+		switch {
+		case claudeComposerRule(line):
+			if !claudeLaunchDialogBoundsPrompt(pane, i) {
+				return true
+			}
+		case claudeTrustFrameRule(line):
+			if edge := strings.TrimSpace(line); claudeTrustBoxOpensAt(edge) && claudeTrustBoxOpenUntil(pane.lines, i, to) {
+				return true
+			}
+		case !pane.rows[i].blank:
+			text.WriteString(claudeSquash(pane.rows[i].label))
+		}
+	}
+	for _, own := range claudeLaunchDialogOwnQuestions {
+		if strings.Contains(text.String(), own) {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeTrustBoxOpensAt reports whether edge, a trimmed frame rule, is a box's
+// top edge.
+func claudeTrustBoxOpensAt(edge string) bool {
+	first, _ := utf8.DecodeRuneInString(edge)
+	return strings.ContainsRune(claudeTrustBoxTopCorners, first)
+}
+
+// claudeTrustBoxOpenUntil reports whether the box whose top edge is line top
+// has no bottom edge before line to.
+func claudeTrustBoxOpenUntil(lines []string, top, to int) bool {
+	for i := top + 1; i < to; i++ {
+		first, _ := utf8.DecodeRuneInString(strings.TrimSpace(lines[i]))
+		if claudeTrustFrameRule(lines[i]) && strings.ContainsRune(claudeTrustBoxBottomCorners, first) {
+			return false
+		}
+	}
+	return true
+}
+
+// claudeLaunchDialogBoundsPrompt reports whether the plain rule on line i
+// bounds a composer's prompt row: a ❯ row, or a prompt in any of the
+// composer's modes, straight above or below it.
+func claudeLaunchDialogBoundsPrompt(pane claudeLaunchDialogPane, i int) bool {
+	for _, j := range []int{i - 1, i + 1} {
+		if j >= 0 && j < len(pane.lines) && (pane.rows[j].selected || claudeLaunchDialogModePromptRow(pane, j)) {
+			return true
+		}
+	}
+	return false
+}
+
 // claudeLaunchDialogModePromptRow reports whether pane line i is a composer's
 // prompt row in one of its modes (claudeComposerPromptLabel).
 func claudeLaunchDialogModePromptRow(pane claudeLaunchDialogPane, i int) bool {
@@ -354,11 +475,18 @@ func claudeLaunchDialogModePromptRow(pane claudeLaunchDialogPane, i int) bool {
 }
 
 // claudeComposerPromptLabel reports a row Claude Code's composer paints as its
-// prompt, in each of its modes: "> " (prompt), "! " (bash) and "# " (memory),
-// or the mode's glyph alone on an empty prompt.
+// prompt, in each of its modes: ">" (prompt), "!" (bash) and "#" (memory). The
+// mode's glyph is followed by nothing, on an empty prompt, or by the space the
+// composer paints after it: U+0020, or U+00A0, which 2.1.322 paints after its
+// glyph (testdata/claude_2_1_322_composer_after_mcp_decline.ansi, #7391
+// review).
 func claudeComposerPromptLabel(label string) bool {
 	for _, mode := range []string{">", "!", "#"} {
-		if label == mode || strings.HasPrefix(label, mode+" ") {
+		rest, ok := strings.CutPrefix(label, mode)
+		if !ok {
+			continue
+		}
+		if after, _ := utf8.DecodeRuneInString(rest); rest == "" || after == ' ' || after == '\u00a0' {
 			return true
 		}
 	}
