@@ -15,6 +15,9 @@ import (
 // pin both write — the only readback that proves the pin landed, because a
 // session-scoped `-t =name` write sets nothing tmux ever reads (#7437 review:
 // window-size is a WINDOW option on tmux 3.4, and -q swallows the miss).
+// The readback is EMPTY for a window with no own setting: `latest` is the
+// global default and only prints at -g scope, so an unpinned pane reads "",
+// not "window-size latest" — the distinction the test assertions rely on.
 func windowSize(t *testing.T, name string) string {
 	t.Helper()
 	out, err := exec.Command("tmux", "show-options", "-w", "-t", ExactTarget(name), "window-size").CombinedOutput()
@@ -48,8 +51,8 @@ func TestSkippedPinPaneKeepsAttachSizing(t *testing.T) {
 	session.SkipWindowSizePin()
 
 	require.NoError(t, session.Start(t.TempDir()))
-	require.Equal(t, "window-size latest", windowSize(t, name),
-		"a client-attached pane keeps tmux's attach-sizes behaviour — the pin is only for agent and tab panes")
+	require.Empty(t, windowSize(t, name),
+		"a client-attached pane keeps tmux's attach-sizes behaviour: no window-scope window-size is set, so the global `latest` default still applies")
 }
 
 // TestReattachPinLandsAtWindowScope covers the heal half of M2: a session
@@ -61,7 +64,7 @@ func TestReattachPinLandsAtWindowScope(t *testing.T) {
 	name := "af_winsize-reattach-7437"
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-x", "80", "-y", "24", "cat").CombinedOutput()
 	require.NoError(t, err, "new-session: %s", out)
-	require.Equal(t, "window-size latest", windowSize(t, name), "the bare session starts unpinned")
+	require.Empty(t, windowSize(t, name), "the bare session starts unpinned — no window-scope setting")
 
 	session := NewTmuxSessionFromSanitizedNameWithDeps(name, "cat", MakePtyFactory(), cmd.MakeExecutor())
 	require.NoError(t, session.ReattachInert())
