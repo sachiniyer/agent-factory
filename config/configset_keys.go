@@ -218,10 +218,12 @@ var settableKeySpecs = map[string]settableKeySpec{
 		"terminal_font_size_desktop": {kind: cfgFloat, validate: validateWebTerminalFontSize},
 	}},
 	"keys": {structured: true},
-	// The staged [account_handoff] table (#6776) — parser/schema only, nothing
-	// consumes the values yet. Every leaf is settable so the staged surface is
-	// complete, and each leaf validator is the loader's own, so a write cannot
-	// produce a table the next load would refuse.
+	// The [account_handoff] table (#6776) — live configuration the shadow
+	// engine reads on every pass once mode = "shadow" opts in (probe_ttl is
+	// the exception, staged for a live usage probe that does not exist yet).
+	// Every leaf is settable so the surface is complete, and each leaf
+	// validator is the loader's own, so a write cannot produce a table the
+	// next load would refuse.
 	"account_handoff": {structured: true, subkeys: map[string]settableLeafSpec{
 		"mode":                 {kind: cfgString, validate: validateAccountHandoffLeaf},
 		"include_pinned":       {kind: cfgBool},

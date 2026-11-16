@@ -64,9 +64,9 @@ type ObservedAccount struct {
 
 // MoverStatus is what af can honestly say about the automatic-handoff engine:
 // the mode the [account_handoff] table configures, plus the halt the engine
-// records durably when it stops itself. The engine lands in a later slice, so
-// this reports configuration and recorded state — never a claim about a
-// running process.
+// records durably when it stops itself. It reports configuration and recorded
+// state — never a claim about a running process (the daemon answers whether
+// its engine is engaged separately, on HandoffStatus).
 type MoverStatus struct {
 	// Mode is the configured account_handoff.mode — "off" or "shadow". The
 	// absent-table form is also "off" (absent table ≡ off ≡ no machinery).

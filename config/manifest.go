@@ -500,7 +500,7 @@ var configManifest = []ManifestEntry{
 		Key:        "account_handoff",
 		Type:       "table",
 		Default:    "no table · handoff stays off",
-		Purpose:    "Staged settings for automatic account handoff (#6776): mode, thresholds, and safety rails · NOT ACTIVE YET — an absent table ≡ off ≡ today, and mode = \"live\" is rejected · set the whole table with compact JSON, or set one leaf (mode, wall_percent, …) directly · global or personal per-project, never checked in: whose accounts a machine may spend is identity policy, the #3174 boundary.",
+		Purpose:    "Automatic account handoff policy (#6776): mode, thresholds, and safety rails · mode = \"shadow\" runs the observe-only decision engine, \"live\" is rejected until live moves ship, and an absent table ≡ off ≡ no machinery · set the whole table with compact JSON, or set one leaf (mode, wall_percent, …) directly · global or personal per-project, never checked in: whose accounts a machine may spend is identity policy, the #3174 boundary.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalPersonal,
