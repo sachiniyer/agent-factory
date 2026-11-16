@@ -55,8 +55,10 @@ async function raise(request: APIRequestContext, id: string, reason: string) {
 // meant to answer. The gate is "ready AND the burst is already inside a
 // captured frame": last_pane_churn_at is proof the sweep saw the output and
 // idled after it, while a session whose first capture already contained the
-// burst never stamps it — so the fallback is created_at two sweeps old, by
-// which every startup byte is necessarily inside a captured frame.
+// burst never stamps it — so the fallback is created_at ~two sweeps old at
+// worst, long enough that even a serial sweep stretched by the session count
+// has captured the pane at least twice and no post-baseline `updated` can
+// still be in flight.
 async function paneSettled(request: APIRequestContext, id: string) {
   await expect
     .poll(
@@ -64,7 +66,7 @@ async function paneSettled(request: APIRequestContext, id: string) {
         const snapshot = await (await request.post("/v1/Snapshot", { data: {} })).json();
         const inst = snapshot.data.instances.find((s: { id: string; liveness_name?: string; last_pane_churn_at?: string; created_at?: string }) => s.id === id);
         if (inst?.liveness_name !== "ready") return false;
-        return inst.last_pane_churn_at != null || Date.now() - Date.parse(inst.created_at!) >= 2500;
+        return inst.last_pane_churn_at != null || Date.now() - Date.parse(inst.created_at!) >= 6_000;
       },
       { timeout: 15_000, message: "the pane's startup output is inside a captured frame and it settles to ready" },
     )
