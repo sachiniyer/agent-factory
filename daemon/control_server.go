@@ -444,6 +444,11 @@ func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) erro
 		return nil
 	}
 	s.shutdownOnce.Do(func() {
+		// The stop begins now, not when the main loop wakes after the ack
+		// grace: the stopper's clock started with this call (#7416).
+		if s.manager != nil {
+			s.manager.lifecycle.stopClock().begin()
+		}
 		go func() {
 			time.Sleep(shutdownAckGrace)
 			close(s.shutdownCh)

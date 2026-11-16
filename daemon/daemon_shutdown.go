@@ -28,9 +28,10 @@ import (
 // takes 1.5s leaves the join 2s, where it used to get the full 3s (#7393).
 var drainJoinBudget = defaultDrainJoinBudget
 
-// drainBudget bounds the whole drain from its first step: the HTTP and
-// control-plane handler joins, the web-listener close, and the background join
-// all draw on this one deadline (#7393). Those handler joins used to be
+// drainBudget bounds the whole drain, measured from when the stop was
+// requested (#7416): the HTTP and control-plane handler joins, the
+// web-listener close, and the background join all draw on this one deadline
+// (#7393). Those handler joins used to be
 // unbounded. On 11-15 one of them held a stop for 90s, until systemd's
 // SIGKILL, and the final save, every deferred teardown and the exit all went
 // with it.
@@ -38,7 +39,8 @@ var drainJoinBudget = defaultDrainJoinBudget
 // Sizing: the worst stop is the whole budget, plus one floor for every step
 // after the first, plus the save's reserve. That is 3.5s + 3×100ms + 1s =
 // 4.8s, inside the stopper's 5s grace (stopDaemonGrace), and the pins below
-// fail the build if it outgrows it. A handler still running at the deadline is
+// fail the build if it outgrows it. The teardown's floor and the exit reserve
+// take the last 200ms (daemon_teardown.go, #7416). A handler still running at the deadline is
 // abandoned, and the save is skipped exactly as for a timed-out join: that
 // handler passed admission, so it can still commit, and it may hold m.mu, an
 // archive settlement or a repo flock that the save would wait on.
@@ -55,7 +57,7 @@ const (
 	drainSaveReserve = time.Second
 	// drainPlaneSteps is how many steps before the background join draw on the
 	// deadline: the HTTP drain, the control drain, the web-listener close. It
-	// sizes drainDaemon's step array, so a fourth step does not compile until
+	// sizes drainPlanes' step array, so a fourth step does not compile until
 	// this is raised, and raising it re-checks the pin below.
 	drainPlaneSteps = 3
 )
@@ -101,6 +103,12 @@ func joinWithin(d time.Duration, join func()) bool {
 	}
 }
 
+// drainDeadline is when m's drain must be done: drainBudget after its stop
+// began (#7416). A manager with no stop clock starts the clock now.
+func drainDeadline(m *Manager) time.Time {
+	return m.lifecycle.stopClock().began().Add(drainBudget)
+}
+
 // drainDaemon quiesces the daemon's externally reachable control planes and
 // daemon-owned writers before the terminal checkpoint. It closes mutation
 // admission, drains the HTTP and control servers (joining all dispatched
@@ -111,11 +119,11 @@ func joinWithin(d time.Duration, join func()) bool {
 // abandoned, and the caller then skips the final save (#5846, #7393).
 //
 // httpClosed and controlClosed are set via the supplied pointers so the
-// deferred fallback-closers in runDaemon can skip a redundant close.
+// deferred fallback drain in runDaemon can skip a redundant one.
 //
 // watchers is latched first, before anything here can block: its watch loops
 // stop restarting and stop counting exits from this instant, not from the
-// deferred watchers.Stop that runs only after this drain and the final save
+// deferred teardown that runs only after this drain and the final save
 // (#7392). nil is allowed.
 func drainDaemon(
 	m *Manager,
@@ -127,30 +135,74 @@ func drainDaemon(
 	stopCh chan struct{},
 	wg *sync.WaitGroup,
 ) (joined bool) {
-	// Close mutation admission, then close and JOIN both externally reachable
-	// control planes before taking the terminal snapshot. Closing only their
-	// listeners is insufficient: an ArchiveSession (or any other writer) that
-	// already passed admission can still mutate memory and block its targeted
-	// persist behind SaveInstances' repo flock. The transport cleanup functions
-	// wait for those dispatched handlers, so nothing user-driven can begin or
-	// remain in flight across the checkpoint.
-	// Advisory work (host probes) is abandoned before anything else: it must not be
-	// able to hold the drain, or the final checkpoint below, past the stopper's
-	// SIGKILL (#5839).
-	//
+	// Every step from here to the save draws on one deadline (#7393), measured
+	// from when the stop was requested (#7416). A step that cannot finish in
+	// what is left is abandoned, named in the log, and costs the final save —
+	// never the whole stop.
+	deadline := drainDeadline(m)
+	handlersJoined := drainPlanes(m, watchers, closeHTTP, closeControl, httpClosed, controlClosed, deadline)
+
+	// Stop and join daemon-owned writers too. The lifecycle gate drainPlanes
+	// closed also refuses any scheduler/watcher delivery that reaches the closed
+	// transports during their deferred teardown.
+	close(stopCh)
+	joinBudget := min(drainJoinBudget, drainRemaining(deadline))
+	joined = joinWithin(joinBudget, func() {
+		wg.Wait()
+		// The poll loop is out, so no further root-agent create can be launched; wait
+		// for one that already is (#3721). JOINED, never cancelled — a create torn
+		// down mid-provision is the half-created session the always-ensure loop has
+		// no way to reconcile — and BEFORE the final SaveInstances, so a create that
+		// lands late is persisted rather than overwritten by a save that predates it.
+		m.abandonRootProgramDriftInspectionsForShutdown()
+		m.waitRootAgentCreatesForShutdown()
+		// RPCs and the poll are gone, and root creates are joined. No detached durable
+		// writer may now be admitted; let pre-destructive and permanently stalled work
+		// stand down, and join any mutation already admitted through its targeted persist.
+		m.stopAndWaitBackgroundMutationsForShutdown()
+	})
+	if !joined {
+		log.WarningLog.Printf("shutdown join exceeded %s; skipping the final save so a wedged goroutine cannot hold exit past the SIGKILL grace, and writing nothing: %s (#5846)",
+			joinBudget, m.skippedOnJoinTimeout())
+	}
+	return joined && handlersJoined
+}
+
+// drainPlanes closes mutation admission and drains both externally reachable
+// control planes by deadline: the HTTP drain, the control drain, then the
+// web-listener close. It is every stop's plane drain (#7416). drainDaemon runs
+// it on the graceful path, and runDaemon defers it for every other exit — a
+// signal or Shutdown during the restore or upgrade probation, a failed restore
+// — which used to call both closes directly, with no bound. handlersJoined is
+// false when a step was abandoned; the step and what was still running are
+// named in the log.
+//
+// Closing only the listeners is insufficient: an ArchiveSession (or any other
+// writer) that already passed admission can still mutate memory and block its
+// targeted persist behind SaveInstances' repo flock. The transport cleanup
+// functions wait for those dispatched handlers, so nothing user-driven can
+// begin or remain in flight across the checkpoint.
+func drainPlanes(
+	m *Manager,
+	watchers *watcherSupervisor,
+	closeHTTP func() error,
+	closeControl func() error,
+	httpClosed *bool,
+	controlClosed *bool,
+	deadline time.Time,
+) (handlersJoined bool) {
 	// The watchers stand down first of all. Stopping the daemon's unit also
 	// stops every watch's bound scope, and a drain that hangs past that would
 	// otherwise keep restarting watch commands into systemd's refusals and
 	// spend their crash-loop budget on its own stop (#7392).
 	watchers.beginShutdown()
+	// Advisory work (host probes) is abandoned before anything else: it must not be
+	// able to hold the drain, or the final checkpoint below, past the stopper's
+	// SIGKILL (#5839).
 	m.advisory.Cancel()
 	m.lifecycle.markQuiescing()
 
-	// Every step from here to the save draws on one deadline (#7393). A step
-	// that cannot finish in what is left is abandoned, named in the log, and
-	// costs the final save — never the whole stop.
-	deadline := time.Now().Add(drainBudget)
-	handlersJoined := true
+	handlersJoined = true
 	step := func(what string, run func() error) {
 		var err error
 		if !joinWithin(drainRemaining(deadline), func() { err = run() }) {
@@ -192,31 +244,7 @@ func drainDaemon(
 			step(st.what, st.run)
 		}
 	}
-
-	// Stop and join daemon-owned writers too. The lifecycle gate above also
-	// refuses any scheduler/watcher delivery that reaches the closed transports
-	// during their deferred teardown.
-	close(stopCh)
-	joinBudget := min(drainJoinBudget, drainRemaining(deadline))
-	joined = joinWithin(joinBudget, func() {
-		wg.Wait()
-		// The poll loop is out, so no further root-agent create can be launched; wait
-		// for one that already is (#3721). JOINED, never cancelled — a create torn
-		// down mid-provision is the half-created session the always-ensure loop has
-		// no way to reconcile — and BEFORE the final SaveInstances, so a create that
-		// lands late is persisted rather than overwritten by a save that predates it.
-		m.abandonRootProgramDriftInspectionsForShutdown()
-		m.waitRootAgentCreatesForShutdown()
-		// RPCs and the poll are gone, and root creates are joined. No detached durable
-		// writer may now be admitted; let pre-destructive and permanently stalled work
-		// stand down, and join any mutation already admitted through its targeted persist.
-		m.stopAndWaitBackgroundMutationsForShutdown()
-	})
-	if !joined {
-		log.WarningLog.Printf("shutdown join exceeded %s; skipping the final save so a wedged goroutine cannot hold exit past the SIGKILL grace, and writing nothing: %s (#5846)",
-			joinBudget, m.skippedOnJoinTimeout())
-	}
-	return joined && handlersJoined
+	return handlersJoined
 }
 
 // checkpointAfterDrain takes the daemon's terminal checkpoint when, and only
