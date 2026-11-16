@@ -395,7 +395,7 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 	// Only rollouts written after the recorded one can be a newer thread, so
 	// only those have their session metadata read: a shared home can hold
 	// thousands of rollouts for other worktrees.
-	var rollouts iter.Seq2[string, time.Time]
+	var rollouts iter.Seq2[string, rolloutModTime]
 	switch {
 	case c.srcStore != nil:
 		rollouts = c.srcStore.rollouts()
@@ -425,6 +425,12 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 	switch judgeCodexRecordedStaleness(recordedPath, rollouts, boundedLaunchDir(launchDir), repair) {
 	case codexRolloutRecordedGone:
 		return carryRolloutMissingReason
+	case codexRolloutRecordedUnresolved:
+		// Its answered form, gone, refuses whatever a newer thread would
+		// mean, so its non-answer refuses too. The copy reads that file next,
+		// unbounded, after the outgoing agent stops: refusing here keeps a
+		// swap on a dead mount failing before teardown (#7384 review R1).
+		return carryRolloutUnlookedReason
 	case codexRolloutStale:
 		if c.newerCounts(launchDir) {
 			return staleCarryReason

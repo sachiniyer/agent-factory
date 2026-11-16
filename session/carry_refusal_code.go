@@ -27,6 +27,7 @@ const (
 	carrySpellingsUnresolvedReason     = "af could not look up every spelling of the worktree's path, so it cannot tell which copy of the conversation Claude is appending to"
 	carryTranscriptMissingReason       = "its transcript is missing from the previous account's home"
 	carryRolloutMissingReason          = "its rollout is missing from the previous account's home"
+	carryRolloutUnlookedReason         = "af could not look up its rollout in the previous account's home"
 	carryTranscriptEmptyReason         = "its transcript is empty in the previous account's home"
 	carryRolloutEmptyReason            = "its rollout is empty in the previous account's home"
 	carryTargetDivergesReason          = "the new account already holds a different copy of this conversation"
@@ -99,6 +100,7 @@ var carryRefusalCodeOf = map[string]string{
 	carrySpellingsUnresolvedReason:     handoff.CarryUnverified,
 	carryTranscriptMissingReason:       handoff.CarryMissing,
 	carryRolloutMissingReason:          handoff.CarryMissing,
+	carryRolloutUnlookedReason:         handoff.CarryUnverified,
 	carryTranscriptEmptyReason:         handoff.CarryMissing,
 	carryRolloutEmptyReason:            handoff.CarryMissing,
 	carryStoreUnlistedReason:           handoff.CarryUnverified,

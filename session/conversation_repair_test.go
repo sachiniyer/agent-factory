@@ -181,8 +181,8 @@ func TestUnderDirectoryIdentityMatchesByInode(t *testing.T) {
 	require.NoError(t, os.MkdirAll(day, 0o755))
 	rollout := filepath.Join(day, "rollout-2026-11-11T13-50-27-"+heldTestOwnID+".jsonl")
 	require.NoError(t, os.WriteFile(rollout, []byte("{}\n"), 0o644))
-	id, ok := fileIdentityOf(sessions)
-	require.True(t, ok)
+	id, err := fileIdentityOfBounded(sessions)
+	require.NoError(t, err)
 
 	require.Equal(t, storeInside, underDirectoryIdentity(rollout, id))
 	elsewhere := filepath.Join(t.TempDir(), "rollout.jsonl")

@@ -108,10 +108,10 @@ func (s *codexStoreSnapshot) otherOf(id string) []string {
 }
 
 // rollouts yields every listed rollout with its mtime at the walk.
-func (s *codexStoreSnapshot) rollouts() iter.Seq2[string, time.Time] {
-	return func(yield func(string, time.Time) bool) {
+func (s *codexStoreSnapshot) rollouts() iter.Seq2[string, rolloutModTime] {
+	return func(yield func(string, rolloutModTime) bool) {
 		for path, modTime := range s.modTimes {
-			if !yield(path, modTime) {
+			if !yield(path, rolloutModTime{at: modTime}) {
 				return
 			}
 		}

@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -99,6 +99,13 @@ type ConversationCaptureSnapshot struct {
 	// resolves, rescoped filters it to the members a scoped pool would hold,
 	// keeping their offsets (#7299).
 	poolScopePending bool
+	// receiptUntracked marks a receipt wait whose tracking could not look at
+	// a rollout the launch could append to (#7378): a pool member's or the
+	// pinned target's stat did not answer within its bound, or the store
+	// listing that finds them did not answer or failed. That rollout may hold
+	// the receipt too, so no check of this wait may confirm a lone match
+	// (#7384 review R2, R5).
+	receiptUntracked bool
 	// receiptState carries the scan memoization across the separate
 	// WaitForPromptReceipt calls that share one snapshot — the config agent's
 	// initial, escalation, and five-minute windows are three different calls
@@ -186,7 +193,7 @@ func (s *codexReceiptState) scanPrompt(path, prompt string, fromOffset int64) (b
 	if seen && !prev.hot && time.Since(prev.checked) < codexReceiptQuietStatInterval {
 		return prev.matched, nil
 	}
-	info, err := os.Stat(path)
+	info, err := fsprobe.Stat(path)
 	if err != nil {
 		return false, fmt.Errorf("inspect Codex rollout %s: %w", path, err)
 	}
@@ -239,13 +246,41 @@ func (s *codexReceiptState) scanPrompt(path, prompt string, fromOffset int64) (b
 // boundary — tracking it unbounded would let a pre-launch turn pass for this
 // launch's receipt — so it reports false and the caller treats the resume
 // target as unidentified.
+//
+// The stat is bounded (fsprobe, #7378); one that does not answer gives no
+// boundary either. Unlike a stat that fails, it leaves a rollout the resume
+// may append to unseen, so it also marks the wait: no check may confirm a
+// lone match from another rollout (#7384 review R5).
 func (s *ConversationCaptureSnapshot) TrackCodexReceiptRollout(path string) bool {
-	info, err := os.Stat(path)
+	info, err := fsprobe.Stat(path)
+	if errors.Is(err, fsprobe.ErrProbeTimedOut) {
+		s.receiptUntracked = true
+	}
 	if err != nil {
 		return false
 	}
 	s.receiptPaths = append(s.receiptPaths, trackedReceiptPath{path: path, offset: info.Size()})
 	return true
+}
+
+// TrackCodexReceiptTarget pins an explicit `codex resume <SESSION_ID>`
+// target: it resolves id to its rollout (CodexRolloutPathByID) and tracks it
+// (TrackCodexReceiptRollout), reporting whether the target is pinned and
+// bounded. An id the store answers for with no rollout, or with several, is
+// unpinned, as before, and the verdict stays positive-only. A store listing
+// that does not answer, or fails, is not that: the target may be in it, so it
+// marks the wait as a stat of the target that does not answer does
+// (#7384 review R5).
+func (s *ConversationCaptureSnapshot) TrackCodexReceiptTarget(id string) bool {
+	path, err := codexRolloutPathByID(s.codexHome, id)
+	switch {
+	case err != nil:
+		s.receiptUntracked = true
+		return false
+	case path == "":
+		return false
+	}
+	return s.TrackCodexReceiptRollout(path)
 }
 
 // TrackCodexReceiptPool bounds every rollout a resume WITHOUT an explicit id
@@ -264,6 +299,10 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
 	*s = s.rescoped()
 	files, err := codexRolloutFiles(s.codexHome)
 	if err != nil {
+		// A listing that did not answer, or failed, tracks nothing: every
+		// rollout the resume may append to is unseen, so no check of this
+		// wait may confirm a lone match (#7384 review R5).
+		s.receiptUntracked = true
 		return
 	}
 	// A working directory that did not resolve scopes nothing (#7292), until
@@ -275,7 +314,18 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
 		if !unscoped && s.workingDir != "" && !receiptPoolMember(path, s.workingDir) {
 			continue
 		}
-		if info, err := os.Stat(path); err == nil {
+		// Bounded (fsprobe, #7378): a member whose stat does not answer has
+		// no honest boundary, so it cannot be tracked. Unlike one whose stat
+		// fails, it may still hold the receipt, so the pool is marked
+		// untracked and no check of this wait confirms a lone match. The
+		// rest of the pool is still tracked, so two matches among them stay
+		// ambiguous (#7384 review R2).
+		info, err := fsprobe.Stat(path)
+		if errors.Is(err, fsprobe.ErrProbeTimedOut) {
+			s.receiptUntracked = true
+			continue
+		}
+		if err == nil {
 			s.receiptPaths = append(s.receiptPaths, trackedReceiptPath{
 				path:     path,
 				offset:   info.Size(),
@@ -461,7 +511,7 @@ func WaitForPromptReceipt(
 		}
 		if timeout <= 0 || !time.Now().Before(deadline) {
 			if undecided {
-				return fmt.Errorf("%w within %s: a new Codex rollout's session metadata never became classifiable", ErrPromptReceiptUndecidable, timeout)
+				return fmt.Errorf("%w within %s: a Codex rollout that could hold it never became classifiable, or af's read of one did not answer", ErrPromptReceiptUndecidable, timeout)
 			}
 			return fmt.Errorf("%w in Codex rollout within %s", ErrPromptReceiptNotObserved, timeout)
 		}
@@ -677,9 +727,18 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
 		if _, existed := snap.codexBefore[path]; existed {
 			continue
 		}
-		info, err := os.Stat(path)
-		if err == nil && info.ModTime().Before(snap.startedAt.Add(-time.Second)) {
+		// The stat is bounded (fsprobe, #7378): the store may sit on a mount
+		// that stopped answering. One that did not answer, or failed, leaves
+		// the rollout's age unknown, so capture waits on it rather than adopt
+		// a rollout that may predate the snapshot. A rollout gone since the
+		// scan stays a candidate, as before: its header read reports it.
+		info, err := fsprobe.Stat(path)
+		switch {
+		case err == nil && info.ModTime().Before(snap.startedAt.Add(-time.Second)):
 			continue
+		case err != nil && !pathutil.IsAbsent(err):
+			return nil, captureChannelUnavailable(fmt.Errorf("%w: af could not read the age of new rollout %s: %w",
+				errCodexCaptureUndecided, path, err))
 		}
 		candidates = append(candidates, path)
 	}
@@ -710,7 +769,12 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 		state = newCodexReceiptState()
 	}
 	observed, err := newCodexRolloutFiles(snap)
-	if err != nil {
+	switch {
+	case errors.Is(err, errCodexCaptureUndecided):
+		// A new rollout whose age af could not read could be the receipt:
+		// wait on it, as on a header still being written (#7378).
+		return false, true, nil
+	case err != nil:
 		return false, false, err
 	}
 	candidates, uncorrelated := codexRolloutFilesForWorkingDir(observed, snap.workingDir)
@@ -730,13 +794,24 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 		}
 		return nil
 	}
+	// A scan that did not answer within its bound (#7378) could still be the
+	// receipt, like a header still being written: the answer is undecided, so
+	// the wait goes on, and neither ends nor confirms the receipt from the
+	// rest. The poll stops there, since the rest are on the same mount and
+	// each would wait out a bound of its own.
 	for _, path := range candidates {
-		if err := scan(path, 0); err != nil {
+		if err := scan(path, 0); errors.Is(err, fsprobe.ErrProbeTimedOut) {
+			return false, true, nil
+		} else if err != nil {
 			return false, false, err
 		}
 	}
 	for _, tracked := range snap.receiptPaths {
-		if err := scan(tracked.path, tracked.offset); err != nil {
+		err := scan(tracked.path, tracked.offset)
+		if errors.Is(err, fsprobe.ErrProbeTimedOut) {
+			return false, true, nil
+		}
+		if err != nil {
 			if tracked.unpinned {
 				// A pool member that cannot be statted or read is
 				// unobservable this round: it can never produce a match, and
@@ -751,14 +826,15 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 	switch {
 	case matched > 1:
 		return false, false, fmt.Errorf("%w: %d Codex rollout files recorded the briefing", ErrPromptReceiptAmbiguous, matched)
-	case matched == 1 && uncorrelated == 0:
+	case matched == 1 && uncorrelated == 0 && !snap.receiptUntracked:
 		return true, false, nil
 	default:
 		// Zero matches is absence; a lone match while an unclassifiable
 		// rollout could still settle into a second match is not yet a
 		// unique attribution — keep waiting rather than confirm early
-		// (#5471 review).
-		return false, uncorrelated > 0, nil
+		// (#5471 review). So is one while a rollout af could not track may
+		// hold a second (#7384 review R2, R5).
+		return false, uncorrelated > 0 || snap.receiptUntracked, nil
 	}
 }
 

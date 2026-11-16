@@ -26,12 +26,12 @@ import (
 // evidence that the record is stale, even when a later read of the same
 // header answers.
 
-// standInCodexRolloutOpen replaces the open behind every rollout header read
+// standInCodexRolloutOpen replaces the open behind every bounded rollout read
 // with stand, which is handed the open it replaces, until the test ends.
 func standInCodexRolloutOpen(t *testing.T, stand func(open func(string) (*os.File, error), path string) (*os.File, error)) {
 	t.Helper()
 	prev := codexRolloutOpenStandIn.Load()
-	open := codexRolloutHeaderOpen()
+	open := codexRolloutBoundedOpen()
 	standIn := func(path string) (*os.File, error) { return stand(open, path) }
 	codexRolloutOpenStandIn.Store(&standIn)
 	t.Cleanup(func() { codexRolloutOpenStandIn.Store(prev) })
