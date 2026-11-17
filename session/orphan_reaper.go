@@ -172,21 +172,6 @@ func reapListedContainers(pass containerReap) OrphanSweepResult {
 		result.Unlisted = true
 		return result
 	}
-	// The listing proves what is on the engine it came from, and only that one
-	// (Codex on #7458). If the endpoint moved to another engine between the
-	// identity read and the listing, an empty listing would read as "nothing
-	// left" on the first. So read the identity again, and a listing that may
-	// have come from elsewhere proves nothing and removes nothing. Each
-	// removal still re-verifies the engine before its rm.
-	ctx, cancel = context.WithTimeout(context.Background(), dockerShortStepTimeout)
-	listedOn, err := currentDockerEngineID(ctx, env)
-	cancel()
-	if err != nil || listedOn != engineID {
-		log.WarningLog.Printf("%s: the Docker engine changed or could not be read again while listing (was %q, now %q: %v); skipping this sweep", pass.logPrefix, engineID, listedOn, err)
-		result.Unlisted = true
-		result.EngineID = ""
-		return result
-	}
 
 	for _, c := range containers {
 		result.Listed++
@@ -214,6 +199,22 @@ func reapListedContainers(pass containerReap) OrphanSweepResult {
 			result.Errors++
 			log.WarningLog.Printf("%s: could not reap container %s: %v", pass.logPrefix, shortContainerID(c.id), err)
 		}
+	}
+	// The listing proves what is on the engine it came from, and only that one
+	// (Codex on #7458). If the endpoint moved to another engine after the
+	// identity read, an empty listing would read as "nothing left" on the
+	// first. So read the identity again once the pass is done. A pass whose
+	// engine changed, or cannot be read, proved nothing about the engine it
+	// named: it is unlisted and credits no engine. Each removal already
+	// re-verified the engine before its rm, so a container listed from the
+	// wrong engine was left alone.
+	ctx, cancel = context.WithTimeout(context.Background(), dockerShortStepTimeout)
+	listedOn, err := currentDockerEngineID(ctx, env)
+	cancel()
+	if err != nil || listedOn != engineID {
+		log.WarningLog.Printf("%s: the Docker engine changed or could not be read again during this pass (was %q, now %q: %v); it proves nothing about what is left", pass.logPrefix, engineID, listedOn, err)
+		result.Unlisted = true
+		result.EngineID = ""
 	}
 	if result.Reaped > 0 || result.Unknown > 0 || result.Errors > 0 {
 		log.InfoLog.Printf("%s: listed=%d reaped=%d skipped=%d unknown=%d errors=%d",

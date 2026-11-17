@@ -126,10 +126,9 @@ func TestSweepScopesQueryToHome(t *testing.T) {
 func TestSweepLeavesUnknownStateForNextSweep(t *testing.T) {
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
 	var removed []string
-	// The sweep's identity read and its re-read after the listing (#7458) see
-	// engine-1; the reap's verify sees engine-2 → #2382 mismatch →
-	// ErrWorkspaceStateUnknown, no rm.
-	defer dockerExecStub(t, []string{"engine-1", "engine-1", "engine-2"}, "cid-orphan\tgone\n", &removed)()
+	// First info (sweep's own read) = engine-1; the reap's verify sees engine-2 →
+	// #2382 mismatch → ErrWorkspaceStateUnknown, no rm.
+	defer dockerExecStub(t, []string{"engine-1", "engine-2"}, "cid-orphan\tgone\n", &removed)()
 
 	got := SweepOrphanContainers("/home/af", nil)
 
