@@ -437,17 +437,38 @@ func TestTunnelPeerProofNeverBlocksOnReapMu(t *testing.T) {
 	}
 }
 
+// TestPeerHelperLeader is not a test — it is the middle half of
+// TestTunnelPeerAdmitsAReSessionedDescendant, run inside the test binary
+// under AF_TEST_PEER_LEADER=1. It stands in for the tunnel spawn's wrapper
+// (sshpass, `script -c`) and spawns the listener helper in a NEW SESSION from
+// Go — SysProcAttr.Setsid, since darwin ships no setsid(1) and an `sh -c`
+// indirection can exec straight into the helper and make unix.Setsid() fail.
+func TestPeerHelperLeader(t *testing.T) {
+	sock := os.Getenv("AF_TEST_PEER_SOCK")
+	exe := os.Getenv("AF_TEST_PEER_EXE")
+	if os.Getenv("AF_TEST_PEER_LEADER") != "1" || sock == "" || exe == "" {
+		t.Skip("leader helper for the peer-descent test")
+	}
+	listener := exec.Command(exe, "-test.run=TestPeerHelperListener$")
+	listener.Env = append(os.Environ(), "AF_TEST_PEER_LISTENER=1")
+	listener.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// The listener shares the parent's lifetime pipe: EOF ends it, so a
+	// reaped leader cannot strand the socket holder.
+	listener.Stdin = os.Stdin
+	listener.Stderr = os.Stderr
+	if err := listener.Run(); err != nil {
+		t.Fatalf("listener helper: %v", err)
+	}
+}
+
 // TestPeerHelperListener is not a test — it is the child half of
 // TestTunnelPeerAdmitsAReSessionedDescendant, run inside the test binary under
-// AF_TEST_PEER_LISTENER=1. It re-sessions itself (the sshpass/script shape),
-// binds the requested socket privately, and serves until stdin closes.
+// AF_TEST_PEER_LISTENER=1 in its own session (the sshpass/`script -c` shape).
+// It binds the requested socket privately and serves until stdin closes.
 func TestPeerHelperListener(t *testing.T) {
 	sock := os.Getenv("AF_TEST_PEER_SOCK")
 	if os.Getenv("AF_TEST_PEER_LISTENER") != "1" || sock == "" {
 		t.Skip("unix listener helper for the peer-descent test")
-	}
-	if _, err := unix.Setsid(); err != nil {
-		t.Fatalf("setsid: %v", err)
 	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -470,7 +491,7 @@ func TestPeerHelperListener(t *testing.T) {
 }
 
 // The discriminating peer-proof test (#7495 R4): a listener that is a distinct
-// child in its OWN session and process group — spawned by the tunnel's
+// descendant in its OWN session and process group — spawned by the tunnel's
 // stand-in leader, the sshpass/`script -c` shape — is admitted by descent,
 // while a listener in the dialer's own group is refused. Runs on linux and
 // darwin alike, where group-only admission would refuse af's own transport.
@@ -478,16 +499,22 @@ func TestTunnelPeerAdmitsAReSessionedDescendant(t *testing.T) {
 	sockPath := testguard.SocketPath(t, "desc.sock")
 	exe, err := os.Executable()
 	require.NoError(t, err)
-	// The stand-in for the tunnel spawn: an sh that leads its own process
-	// group and forks the listener helper, which re-sessions itself. The
-	// acceptor's group then differs from the leader's, but its ancestry still
-	// reaches the spawn — the proof admits it.
+	// The stand-in for the tunnel spawn: a re-exec'd leader in its own
+	// process group that forks the listener helper, which SysProcAttr places
+	// in a fresh session. The acceptor's group then differs from the
+	// leader's, but its ancestry still reaches the spawn — the proof admits
+	// it.
 	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
-	leader := exec.Command("sh", "-c",
-		fmt.Sprintf("AF_TEST_PEER_LISTENER=1 AF_TEST_PEER_SOCK=%q %q -test.run=TestPeerHelperListener$", sockPath, exe))
+	leader := exec.Command(exe, "-test.run=TestPeerHelperLeader$")
+	leader.Env = append(os.Environ(),
+		"AF_TEST_PEER_LEADER=1",
+		"AF_TEST_PEER_SOCK="+sockPath,
+		"AF_TEST_PEER_EXE="+exe,
+	)
 	leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	leader.Stdin = stdinR
+	leader.Stderr = os.Stderr
 	require.NoError(t, leader.Start())
 	require.NoError(t, stdinR.Close())
 	t.Cleanup(func() {
