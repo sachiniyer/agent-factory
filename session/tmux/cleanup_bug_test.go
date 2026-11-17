@@ -154,13 +154,16 @@ func TestCleanupSessionsClassifiesHomeByFilesystem(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	// A regular file sits where a directory would need to be: the path Cleans
 	// to the home but traversal through it fails with ENOTDIR on every
-	// platform — stat can never prove it, no matter how the kernel treats a
-	// missing intermediate (#7435).
+	// platform — stat can never prove it. The ".." is spliced in by hand
+	// because filepath.Join CLEANS its result: a Join-built alias collapses
+	// to the home literally and the fixture proves nothing (#7435).
 	notDir := filepath.Join(filepath.Dir(home), "not-a-dir")
 	require.NoError(t, os.WriteFile(notDir, []byte("x"), 0o600))
-	alias := filepath.Join(notDir, "..", filepath.Base(home))
+	alias := notDir + string(os.PathSeparator) + ".." + string(os.PathSeparator) + filepath.Base(home)
 	require.Equal(t, home, filepath.Clean(alias),
 		"the alias fixture must differ only lexically — a Clean-based compare would admit it")
+	require.NotEqual(t, home, alias,
+		"the alias must not BE the home literally, or the fixture tests nothing")
 	link := filepath.Join(t.TempDir(), "link")
 	require.NoError(t, os.Symlink(home, link))
 	foreign := t.TempDir()

@@ -24,12 +24,13 @@ func TestClassifyHomeDir(t *testing.T) {
 	require.NoError(t, os.Symlink(home, link))
 	// Cleans to the home, but resolves through a REGULAR FILE — path
 	// traversal through a non-directory fails with ENOTDIR on every platform,
-	// so nothing can prove the names name the same place. A missing-directory
-	// variant was tried first; platform fs behavior around ENOENT-in-lookup
-	// made it unreliable (#7435 CI on Ubuntu 26.04).
+	// so nothing can prove the names name the same place. The ".." must be
+	// built into the string by hand: filepath.Join CLEANS its result, so a
+	// Join-built alias collapses to the home literally and the fixture tests
+	// literal equality instead of unprovability (#7435 CI).
 	notDir := filepath.Join(filepath.Dir(home), "not-a-dir")
 	require.NoError(t, os.WriteFile(notDir, []byte("x"), 0o600))
-	lexicalAlias := filepath.Join(notDir, "..", filepath.Base(home))
+	lexicalAlias := notDir + string(os.PathSeparator) + ".." + string(os.PathSeparator) + filepath.Base(home)
 	require.Equal(t, home, filepath.Clean(lexicalAlias),
 		"the fixture must only differ lexically, not after Clean")
 
