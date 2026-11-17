@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
@@ -33,21 +36,30 @@ import (
 // ssh child. Each mechanism gets its own pin.
 
 // verifyTunnelSocketRoot must create a private tunnels/ when it can — and
-// REFUSE anything that is not a real 0700 directory owned by this uid. The
-// checks run on the opened directory, so a swap between stat and use cannot
-// slip a foreign path past them.
+// REFUSE anything that is not a real 0700 directory owned by this uid, inside
+// an AF home no other account can write. The checks run on the opened
+// objects, so a swap between stat and use cannot slip a foreign path past
+// them — and everything later created under tunnels/ stays relative to the
+// verified fd (#7503).
 func TestTunnelSocketRootVerifiesTheOpenedDir(t *testing.T) {
+	privateHome := func() string {
+		home := t.TempDir()
+		require.NoError(t, os.Chmod(home, 0o700))
+		return home
+	}
+
 	// Fresh home: af creates tunnels/ 0700 and accepts it.
-	home := t.TempDir()
+	home := privateHome()
 	root, err := verifyTunnelSocketRoot(home)
 	require.NoError(t, err)
-	st, err := os.Stat(root)
+	defer func() { _ = root.dir.Close() }()
+	st, err := os.Stat(root.path)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), st.Mode().Perm(), "af must create tunnels/ 0700")
 
 	// A pre-existing dir whose mode was loosened is refused, and the error
 	// carries the fix rather than repairing silently.
-	home2 := t.TempDir()
+	home2 := privateHome()
 	require.NoError(t, os.Mkdir(filepath.Join(home2, tunnelSocketRootName), 0o755))
 	_, err = verifyTunnelSocketRoot(home2)
 	require.Error(t, err)
@@ -55,18 +67,41 @@ func TestTunnelSocketRootVerifiesTheOpenedDir(t *testing.T) {
 	assert.Contains(t, err.Error(), "chmod 0700", "the refusal must name the fix")
 
 	// A symlink is refused at the open itself.
-	home3 := t.TempDir()
+	home3 := privateHome()
 	require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(home3, tunnelSocketRootName)))
 	_, err = verifyTunnelSocketRoot(home3)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "symlink")
 
 	// A regular file is refused.
-	home4 := t.TempDir()
+	home4 := privateHome()
 	require.NoError(t, os.WriteFile(filepath.Join(home4, tunnelSocketRootName), nil, 0o600))
 	_, err = verifyTunnelSocketRoot(home4)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a directory")
+}
+
+// A group- or other-writable AF home is refused before tunnels/ is ever
+// trusted: writing the home is what lets ANY local account swap the verified
+// directory out from under af (#7503). 0755 — the mode the daemon creates —
+// is fine; the refusal is about WRITE, not read.
+func TestTunnelSocketRootRefusesAWritableHome(t *testing.T) {
+	for _, mode := range []os.FileMode{0o775, 0o777, 0o707} {
+		home := t.TempDir()
+		require.NoError(t, os.Chmod(home, mode))
+		_, err := verifyTunnelSocketRoot(home)
+		require.Error(t, err, "home mode %04o is writable beyond the owner", mode)
+		assert.Contains(t, err.Error(), "writable by group or other")
+		assert.Contains(t, err.Error(), "AGENT_FACTORY_HOME",
+			"the refusal must name the knob a wrong path is fixed with")
+	}
+	// ...while a merely world-READABLE home — what the daemon itself creates —
+	// still verifies.
+	home := t.TempDir()
+	require.NoError(t, os.Chmod(home, 0o755))
+	root, err := verifyTunnelSocketRoot(home)
+	require.NoError(t, err)
+	defer func() { _ = root.dir.Close() }()
 }
 
 // The spawn must pass the stream-local options explicitly (#7495): the mask
@@ -167,7 +202,11 @@ func TestSweepStaleTunnelSocketDirsPreservesLiveGenerations(t *testing.T) {
 	// A loose file in the root: same.
 	require.NoError(t, os.WriteFile(filepath.Join(root, "stray.sock"), nil, 0o600))
 
-	swept, err := sweepStaleTunnelSocketDirs(root)
+	// The sweep reads and removes fd-relative to the VERIFIED root — stand the
+	// root up the way production does, on the opened directory.
+	rootFd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	require.NoError(t, err)
+	swept, err := sweepStaleTunnelSocketDirs(&tunnelSocketRoot{path: root, dir: os.NewFile(uintptr(rootFd), root)})
 	require.NoError(t, err)
 	assert.Equal(t, 2, swept, "the dead generation and the dead setup, nothing more")
 
@@ -609,4 +648,220 @@ func TestTunnelSocketPathRefusesAClosingBracket(t *testing.T) {
 	_, err := p.tunnelSocketPath()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AGENT_FACTORY_HOME")
+}
+
+// Everything af creates under tunnels/ is created relative to the VERIFIED
+// root's held fd — a swapped-in directory at the path cannot redirect af's
+// writes into whatever replaced it (#7503). The decoy planted at the path
+// stays empty; the real files land inside the moved-aside verified dir.
+func TestTunnelCreateStaysRelativeToTheVerifiedFd(t *testing.T) {
+	home := t.TempDir()
+	require.NoError(t, os.Chmod(home, 0o700))
+	root, err := verifyTunnelSocketRoot(home)
+	require.NoError(t, err)
+	defer func() { _ = root.dir.Close() }()
+
+	// Swap the verified dir out: the held fd still names the real object, now
+	// parked at tunnels.moved — while a decoy takes the path.
+	moved := filepath.Join(home, "tunnels.moved")
+	require.NoError(t, os.Rename(root.path, moved))
+	decoy := filepath.Join(home, tunnelSocketRootName)
+	require.NoError(t, os.Mkdir(decoy, 0o700))
+
+	e := &tunnelGenDirEntry{root: root}
+	require.NoError(t, e.establishLocked())
+	defer func() { _ = e.lock.Close() }()
+
+	assert.DirExists(t, filepath.Join(moved, e.name),
+		"the generation dir was created under the verified object, not the path")
+	_, statErr := os.Stat(filepath.Join(decoy, e.name))
+	assert.True(t, os.IsNotExist(statErr),
+		"nothing af created may land in the swapped-in decoy")
+	// The .lock is held through the held fd too: a second flock fails.
+	lf, err := os.OpenFile(filepath.Join(moved, e.name, tunnelGenLockName), os.O_RDWR, 0)
+	require.NoError(t, err)
+	defer func() { _ = lf.Close() }()
+	require.Error(t, unix.Flock(int(lf.Fd()), unix.LOCK_EX|unix.LOCK_NB),
+		"the re-established lock must be held by this process")
+}
+
+// A generation dir deleted while the daemon runs is re-established — same
+// name, fresh .lock — rather than served from a cache that points at nothing
+// (#7503). Minted socket paths stay valid, and the next spawn's bind lands.
+func TestTunnelGenerationDirIsReestablished(t *testing.T) {
+	home := t.TempDir()
+	require.NoError(t, os.Chmod(home, 0o700))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	canonical, err := currentTunnelHome()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if ent, ok := tunnelGenDirs.Load(canonical); ok {
+			e := ent.(*tunnelGenDirEntry)
+			_ = e.lock.Close()
+			_ = e.root.dir.Close()
+			tunnelGenDirs.Delete(canonical)
+		}
+	})
+
+	dir, err := defaultTunnelGenerationDir()
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(dir), "mid-life deletion of the generation dir")
+
+	dir2, err := defaultTunnelGenerationDir()
+	require.NoError(t, err)
+	assert.Equal(t, dir, dir2,
+		"the same generation is re-established — socket paths minted against it stay valid")
+	lf, err := os.OpenFile(filepath.Join(dir2, tunnelGenLockName), os.O_RDWR, 0)
+	require.NoError(t, err)
+	defer func() { _ = lf.Close() }()
+	require.Error(t, unix.Flock(int(lf.Fd()), unix.LOCK_EX|unix.LOCK_NB),
+		"the re-established generation's .lock is held again")
+}
+
+// The sweep's reads and removals are relative to the verified fd too: a
+// swapped-in decoy at the tunnels/ path is never even looked at (#7503).
+func TestSweepStaysInsideTheVerifiedDirFd(t *testing.T) {
+	home := t.TempDir()
+	require.NoError(t, os.Chmod(home, 0o700))
+	root, err := verifyTunnelSocketRoot(home)
+	require.NoError(t, err)
+	defer func() { _ = root.dir.Close() }()
+
+	// A dead generation inside the verified root: lock file present, holder gone.
+	dead := filepath.Join(root.path, "d999999-eeeeee")
+	require.NoError(t, os.Mkdir(dead, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dead, tunnelGenLockName), nil, 0o600))
+
+	moved := filepath.Join(home, "tunnels.moved")
+	require.NoError(t, os.Rename(root.path, moved))
+	decoy := filepath.Join(home, tunnelSocketRootName)
+	require.NoError(t, os.Mkdir(decoy, 0o700))
+	decoyGen := filepath.Join(decoy, "d888888-ffffff")
+	require.NoError(t, os.Mkdir(decoyGen, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(decoyGen, tunnelGenLockName), nil, 0o600))
+
+	swept, err := sweepStaleTunnelSocketDirs(root)
+	require.NoError(t, err)
+	assert.Equal(t, 1, swept, "only the dead generation inside the verified dir")
+	assert.NoDirExists(t, filepath.Join(moved, "d999999-eeeeee"))
+	assert.DirExists(t, decoyGen, "the sweep never reaches a swapped-in decoy")
+	assert.FileExists(t, filepath.Join(decoyGen, tunnelGenLockName))
+}
+
+// A leader published without a readable start stamp anchors nothing: every
+// dial refuses until a stamped leader is published — liveness alone can never
+// carry the proof (#7503).
+func TestTunnelPeerRefusesAnUnstampedLeader(t *testing.T) {
+	sockPath := testguard.SocketPath(t, "unstamped.sock")
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	conn, err := net.DialTimeout("unix", sockPath, time.Second)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	prev := proctreeLookup
+	proctreeLookup = func(int) (proctree.Process, error) {
+		return proctree.Process{}, errors.New("the process table is unreadable")
+	}
+	p := &sandboxProvisioner{socketPath: sockPath}
+	p.setTunnel(tunnelChildOnMyGroup(t))
+	proctreeLookup = prev
+
+	err = p.verifyTunnelPeer(conn.(*net.UnixConn))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "start stamp",
+		"an unstamped leader is refused by name, not mistaken for a dead or foreign one")
+
+	// Republished with the process table readable, the same leader admits.
+	p.setTunnel(tunnelChildOnMyGroup(t))
+	require.NoError(t, p.verifyTunnelPeer(conn.(*net.UnixConn)))
+}
+
+// The walk's two orderings are refused loudly: an ancestor that started AFTER
+// its claimed child, and a chain whose links reparented while af walked them
+// (#7503 — bare-pid links get evidence, not trust).
+func TestTunnelPeerRefusesAnImpossibleAncestry(t *testing.T) {
+	sockPath := testguard.SocketPath(t, "impossible.sock")
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+
+	dial := func() *net.UnixConn {
+		conn, err := net.DialTimeout("unix", sockPath, time.Second)
+		require.NoError(t, err)
+		return conn.(*net.UnixConn)
+	}
+	self := os.Getpid()
+	prev := proctreeLookup
+	t.Cleanup(func() { proctreeLookup = prev })
+
+	// (a) The claimed parent started AFTER the acceptor — impossible.
+	proctreeLookup = func(pid int) (proctree.Process, error) {
+		switch pid {
+		case self:
+			return proctree.Process{PID: self, PPID: 9001, StartID: 10}, nil
+		case 9001:
+			return proctree.Process{PID: 9001, PPID: 9000, StartID: 50}, nil
+		case 9000:
+			return proctree.Process{PID: 9000, PPID: 1, StartID: 5}, nil
+		}
+		return proctree.Process{}, fmt.Errorf("no such process %d", pid)
+	}
+	p := &sandboxProvisioner{socketPath: sockPath}
+	p.tunnelLeader.Store(&tunnelLeaderRef{pid: 9000, startID: 5})
+	conn := dial()
+	err = p.verifyTunnelPeer(conn)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AFTER its claimed child")
+	_ = conn.Close()
+
+	// (b) A valid-looking walk whose first link reparents underfoot: the
+	// re-read catches it.
+	var selfCalls atomic.Int64
+	proctreeLookup = func(pid int) (proctree.Process, error) {
+		switch pid {
+		case self:
+			ppid := 9001
+			if selfCalls.Add(1) > 1 {
+				ppid = 9002 // reparented between walk and re-read
+			}
+			return proctree.Process{PID: self, PPID: ppid, StartID: 100}, nil
+		case 9001:
+			return proctree.Process{PID: 9001, PPID: 9000, StartID: 50}, nil
+		case 9000:
+			return proctree.Process{PID: 9000, PPID: 1, StartID: 5}, nil
+		}
+		return proctree.Process{}, fmt.Errorf("no such process %d", pid)
+	}
+	conn = dial()
+	err = p.verifyTunnelPeer(conn)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reparented")
+	_ = conn.Close()
+}
+
+// The placeholder authority is scrubbed from EVERY transport error — REST was
+// covered before; the stream and relay wrap the websocket library's "failed
+// to send handshake request: Get ws://af-tunnel.invalid/…" and operators saw
+// it anyway (#7503). A dead socket still names the socket.
+func TestTunnelStreamAndRelayErrorsNameTheSocket(t *testing.T) {
+	p := &sandboxProvisioner{socketPath: "/nonexistent/af-tunnel-dead.sock"}
+	ep := p.tunnelEndpoint("the-session-bearer")
+	rc, err := newRemoteAgentClient(*ep, "t")
+	require.NoError(t, err)
+
+	_, err = rc.dialStreamByID(context.Background(), "tab-1")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "af-tunnel.invalid",
+		"the stream's handshake error must not leak the placeholder authority")
+	assert.Contains(t, err.Error(), "af-tunnel-dead.sock",
+		"the stream error names the socket af actually dialed")
+
+	_, err = rc.dialRelay(context.Background(), 8080)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "af-tunnel.invalid",
+		"the relay's handshake error must not leak the placeholder authority")
+	assert.Contains(t, err.Error(), "af-tunnel-dead.sock",
+		"the relay error names the socket af actually dialed")
 }

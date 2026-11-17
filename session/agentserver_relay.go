@@ -61,7 +61,7 @@ func (c *remoteAgentClient) dialRelayQuery(ctx context.Context, key, value, notS
 			return nil, errors.New(notServing)
 		}
 		return nil, fmt.Errorf("remote agent-server: dial port relay: %w",
-			agentproto.RedactAccessTokenError(err, c.token))
+			c.scrubEndpointURL(agentproto.RedactAccessTokenError(err, c.token)))
 	}
 	conn.SetReadLimit(4 << 20)
 	// The conn outlives the dial: bind it to Background, not ctx, so a request

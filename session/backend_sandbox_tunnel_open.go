@@ -18,8 +18,8 @@ import (
 // carries the session's bearer credential. A unix path inside a
 // uid-verified 0700 directory cannot be taken by another account, and
 // StreamLocalBindUnlink makes even a same-uid squatter impossible to keep —
-// while every dial still proves the acceptor is this tunnel's own process
-// group before a byte is written (verifyTunnelPeer).
+// while every dial still proves the acceptor is, or descends from, this
+// tunnel's own spawn before a byte is written (verifyTunnelPeer).
 //
 // The child is bound to this process's lifetime by the machinery in
 // sandbox_tunnel.go (#5564): spawned under the watch lifeline when this binary
@@ -45,9 +45,9 @@ func (p *sandboxProvisioner) startTunnel(remoteAddr string) (*AgentServerEndpoin
 // every dial goes to SocketPath through the unix dialer, so a code path that
 // bypassed it would fail name resolution before a byte is written rather than
 // reach a listener af did not provision. VerifyPeer is the per-connection
-// proof that the acceptor is this tunnel's own process group: nothing is
-// written — the session's bearer included — to an endpoint that is not
-// provably af's own ssh child.
+// proof that the acceptor is — or descends from — this tunnel's own spawn:
+// nothing is written — the session's bearer included — to an endpoint that is
+// not provably af's own ssh child.
 //
 // The token is filled by the caller: the credential's provenance is the
 // provisioner's own derivation, and the endpoint that carries it must never
@@ -153,7 +153,7 @@ func sandboxTransportConfigKey(label string) string {
 var waitForSandboxTunnelFn = waitForSandboxTunnelWithin
 
 // waitForSandboxTunnelWithin probes the local socket until it answers AND its
-// acceptor proves to be this tunnel's own process group (#7495). Without this
+// acceptor proves to descend from this tunnel's own spawn (#7495). Without this
 // the provision would return an endpoint whose first request races the
 // forward — and without the peer check, "something answered" could not be
 // told apart from "af's ssh bound the socket".

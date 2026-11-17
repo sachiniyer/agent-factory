@@ -59,6 +59,15 @@ import (
 //     spawn (verifyTunnelPeer). No credential is sent to an endpoint that is
 //     not provably af's own ssh child.
 //
+// The directory is verified ONCE, on the opened object, and that fd is held
+// for the process's life: everything af creates under tunnels/ — generation
+// dirs, their .lock files — is created relative to it (mkdirat/openat, then
+// fstat), never by re-resolving the path (#7503). A same-uid process that
+// swaps tunnels/ afterwards cannot redirect af's files; an AF home writable
+// by another account — where the swap needs no same-uid access at all — is
+// refused outright. And a generation dir deleted mid-life is re-established
+// under the held fd rather than served from a dead cache entry.
+//
 // There is deliberately no TCP fallback: a transport that cannot do a unix
 // forward fails the provision loudly, naming the transport, rather than
 // silently re-opening the race this exists to close.
@@ -82,6 +91,19 @@ var tunnelGenDirRE = regexp.MustCompile(tunnelGenDirPattern)
 // (and two dials of the same reattach) never share a path.
 var tunnelSocketSeq atomic.Uint64
 
+// tunnelSocketRoot is the verified <home>/tunnels directory held OPEN for the
+// process's life. Everything af creates under it — generation dirs, their
+// .lock files — is created RELATIVE TO THE FD (mkdirat/openat, then fstat),
+// never by re-resolving the path: a swap of the directory after verification
+// cannot redirect af's writes into whatever replaced it (#7503). The path is
+// kept only to mint the socket paths ssh's -L binds and errors name.
+type tunnelSocketRoot struct {
+	path string
+	// dir is the verified directory fd (O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC) —
+	// the boundary every create under tunnels/ is relative to.
+	dir *os.File
+}
+
 // tunnelGenDirEntry pins one generation dir plus its held .lock per canonical
 // AF home. Production resolves one home per process; a test binary can run
 // several homes through the same code — keying the dir on the CURRENT home
@@ -89,6 +111,9 @@ var tunnelSocketSeq atomic.Uint64
 // inheriting a dir under an earlier, deleted one.
 type tunnelGenDirEntry struct {
 	once sync.Once
+	mu   sync.Mutex // serializes establish/ensure between concurrent provisions
+	root *tunnelSocketRoot
+	name string // the generation dir's basename — re-established under root if it vanishes
 	dir  string
 	err  error
 	// lock keeps the generation's .lock fd open for the process's life so the
@@ -112,14 +137,27 @@ func defaultTunnelGenerationDir() (string, error) {
 	ent, _ := tunnelGenDirs.LoadOrStore(home, &tunnelGenDirEntry{})
 	e := ent.(*tunnelGenDirEntry)
 	e.once.Do(func() {
-		root, verr := verifyTunnelSocketRoot(home)
-		if verr != nil {
-			e.err = verr
+		e.root, e.err = verifyTunnelSocketRoot(home)
+		if e.err != nil {
 			return
 		}
-		e.dir, e.err = createTunnelGenerationDir(root, e)
+		e.mu.Lock()
+		e.err = e.establishLocked()
+		e.mu.Unlock()
 	})
-	return e.dir, e.err
+	if e.err != nil {
+		return "", e.err
+	}
+	// Every caller gets a LIVE generation dir, not the cached name: a dir
+	// deleted while the daemon runs is re-established under the held root fd
+	// rather than served from a stale cache entry (#7503). Cheap when nothing
+	// is wrong — one fstatat per spawn.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.ensureLocked(); err != nil {
+		return "", err
+	}
+	return e.dir, nil
 }
 
 // currentTunnelHome resolves this process's canonical AF home FRESH on every
@@ -140,107 +178,203 @@ func currentTunnelHome() (string, error) {
 	return pathutil.ResolveForCompare(abs), nil
 }
 
-// verifyTunnelSocketRoot returns <home>/tunnels after proving ON THE OPENED
-// DIRECTORY — never a re-read path — that it is a real directory owned by
-// this uid with mode 0700. Anything else is refused with the fix to run:
-// checking the opened fd is what keeps a swap between stat and use from
-// slipping a foreign directory past the check.
-func verifyTunnelSocketRoot(home string) (string, error) {
-	root := filepath.Join(home, tunnelSocketRootName)
+// verifyTunnelSocketRoot returns <home>/tunnels held open, after proving —
+// on the OPENED objects, never a re-read path — that the AF home is not
+// writable by another account and that tunnels/ is a real directory owned by
+// this uid with mode 0700. The held fd is the one boundary later creates are
+// relative to: checking the opened fd is what keeps a swap between stat and
+// use from slipping a foreign directory past the check (#7495), and holding
+// it is what keeps a swap AFTER the check from redirecting af's own files
+// (#7503). The caller owns the fd: generation-dir users hold it for the
+// process's life; the startup sweep closes it when done.
+func verifyTunnelSocketRoot(home string) (*tunnelSocketRoot, error) {
+	// The AF home first: tunnels/ can only be swapped by someone who can
+	// WRITE the home — the same uid (accepted; the peer proof bounds that to
+	// denial of service) or any other account, which a group/other-writable
+	// home would allow. Refuse the writable home before trusting anything in
+	// it (#7503).
+	_ = unix.Mkdir(home, 0o700) // best effort; the open below reports a real failure
+	homeFd, err := unix.Open(home, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open the AF home directory %q — af must verify it before trusting "+
+			"the tunnel directory inside: %w. If this path is wrong, point AGENT_FACTORY_HOME at af's "+
+			"configuration directory", home, err)
+	}
+	defer func() { _ = unix.Close(homeFd) }()
+	var hst unix.Stat_t
+	if err := unix.Fstat(homeFd, &hst); err != nil {
+		return nil, fmt.Errorf("cannot stat the AF home directory %q: %w", home, err)
+	}
+	if hst.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return nil, fmt.Errorf("the AF home %q is not a directory: point AGENT_FACTORY_HOME at a "+
+			"directory af can keep private", home)
+	}
+	if perm := hst.Mode & 0o777; perm&0o022 != 0 {
+		return nil, fmt.Errorf("the AF home %q has mode %04o writable by group or other — another local "+
+			"account could replace af's private tunnels/ directory after af verifies it. af refuses to "+
+			"build its tunnel endpoints there: chmod go-w %s, or point AGENT_FACTORY_HOME at a private directory",
+			home, perm, home)
+	}
+
+	rootPath := filepath.Join(home, tunnelSocketRootName)
 	created := false
-	if err := unix.Mkdir(root, 0o700); err != nil {
+	if err := unix.Mkdirat(homeFd, tunnelSocketRootName, 0o700); err != nil {
 		if !errors.Is(err, unix.EEXIST) {
-			return "", fmt.Errorf("cannot create the tunnel socket directory %q: %w", root, err)
+			return nil, fmt.Errorf("cannot create the tunnel socket directory %q: %w", rootPath, err)
 		}
 	} else {
 		created = true
 	}
 	// O_NOFOLLOW + O_DIRECTORY refuse a symlink or a non-directory at the open
 	// itself; Fstat then describes the very object the socket paths will be
-	// created under.
-	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	// created under — and stays open, held, for every later create.
+	fd, err := unix.Openat(homeFd, tunnelSocketRootName,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		switch {
 		case errors.Is(err, unix.EACCES):
 			// A foreign-owned 0700 dir fails the open itself — the owner
 			// check below never gets to speak. Name the requirement and
 			// the fix rather than reporting a bare EACCES (#7495).
-			return "", fmt.Errorf("cannot enter the tunnel socket directory %q — it is owned by another "+
+			return nil, fmt.Errorf("cannot enter the tunnel socket directory %q — it is owned by another "+
 				"account, and af requires it be owned by this user (uid %d) because af's credential-bearing "+
 				"tunnel endpoints live there: chown it to this user, or remove it and let af create it",
-				root, os.Geteuid())
+				rootPath, os.Geteuid())
 		case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
 			// O_NOFOLLOW reports a symlink ELOOP on some kernels and ENOTDIR
 			// (with O_DIRECTORY) on others — refuse both spellings.
-			return "", fmt.Errorf("the tunnel socket directory %q is a symlink or not a directory; af requires a "+
-				"real directory it can verify as private — remove it and let af create it: rm %s", root, root)
+			return nil, fmt.Errorf("the tunnel socket directory %q is a symlink or not a directory; af requires a "+
+				"real directory it can verify as private — remove it and let af create it: rm %s", rootPath, rootPath)
 		default:
-			return "", fmt.Errorf("cannot open the tunnel socket directory %q: %w", root, err)
+			return nil, fmt.Errorf("cannot open the tunnel socket directory %q: %w", rootPath, err)
 		}
 	}
-	defer func() { _ = unix.Close(fd) }()
+	dir := os.NewFile(uintptr(fd), rootPath)
 	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return "", fmt.Errorf("cannot stat the opened tunnel socket directory %q: %w", root, err)
+	if err := unix.Fstat(int(dir.Fd()), &st); err != nil {
+		_ = dir.Close()
+		return nil, fmt.Errorf("cannot stat the opened tunnel socket directory %q: %w", rootPath, err)
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return "", fmt.Errorf("the tunnel socket directory %q is not a directory — remove it and let af create it: rm %s", root, root)
+		_ = dir.Close()
+		return nil, fmt.Errorf("the tunnel socket directory %q is not a directory — remove it and let af create it: rm %s", rootPath, rootPath)
 	}
 	if st.Uid != uint32(os.Geteuid()) {
-		return "", fmt.Errorf("the tunnel socket directory %q is owned by uid %d, not this user (uid %d): "+
+		_ = dir.Close()
+		return nil, fmt.Errorf("the tunnel socket directory %q is owned by uid %d, not this user (uid %d): "+
 			"af's credential-bearing tunnel endpoints live there, so af refuses to use it — chown it to this user or remove it and let af create it",
-			root, st.Uid, os.Geteuid())
+			rootPath, st.Uid, os.Geteuid())
 	}
 	if st.Mode&0o777 != 0o700 {
 		if !created {
-			return "", fmt.Errorf("the tunnel socket directory %q has mode %04o; af requires 0700 so no other local "+
+			_ = dir.Close()
+			return nil, fmt.Errorf("the tunnel socket directory %q has mode %04o; af requires 0700 so no other local "+
 				"account can reach the tunnel endpoints it holds — fix it with: chmod 0700 %s",
-				root, st.Mode&0o777, root)
+				rootPath, st.Mode&0o777, rootPath)
 		}
 		// af created it just now under a umask that stripped bits; normalize
 		// through the opened fd — a path-based chmod could follow a swapped-in
 		// link.
-		if err := unix.Fchmod(fd, 0o700); err != nil {
-			return "", fmt.Errorf("cannot set mode 0700 on the tunnel socket directory %q: %w", root, err)
+		if err := unix.Fchmod(int(dir.Fd()), 0o700); err != nil {
+			_ = dir.Close()
+			return nil, fmt.Errorf("cannot set mode 0700 on the tunnel socket directory %q: %w", rootPath, err)
 		}
 	}
-	return root, nil
+	return &tunnelSocketRoot{path: rootPath, dir: dir}, nil
 }
 
-// createTunnelGenerationDir mkdirs this daemon's own generation dir under the
-// verified root and takes its .lock — exclusive, held for the process's life
-// on the entry's fd, O_CLOEXEC so no spawned child can hold it open past
-// daemon death. The lock is the sweep's hand-off safety: while ANY af daemon
-// — this one, or a predecessor mid-upgrade — is alive, its generation dir
-// cannot be swept.
-func createTunnelGenerationDir(root string, e *tunnelGenDirEntry) (string, error) {
+// establishLocked creates this daemon's generation dir under the verified
+// root fd and takes its .lock — exclusive, held for the process's life on the
+// entry's fd, O_CLOEXEC so no spawned child can hold it open past daemon
+// death. The lock is the sweep's hand-off safety: while ANY af daemon — this
+// one, or a predecessor mid-upgrade — is alive, its generation dir cannot be
+// swept. Callers hold e.mu.
+func (e *tunnelGenDirEntry) establishLocked() error {
 	for attempt := 0; attempt < 4; attempt++ {
-		name := fmt.Sprintf("d%d-%06x", os.Getpid(), rand.Uint32()&0xffffff)
-		dir := filepath.Join(root, name)
-		if err := unix.Mkdir(dir, 0o700); err != nil {
+		e.name = fmt.Sprintf("d%d-%06x", os.Getpid(), rand.Uint32()&0xffffff)
+		if err := unix.Mkdirat(int(e.root.dir.Fd()), e.name, 0o700); err != nil {
 			if errors.Is(err, unix.EEXIST) {
 				continue
 			}
-			return "", fmt.Errorf("cannot create the tunnel generation directory %q: %w", dir, err)
+			return fmt.Errorf("cannot create the tunnel generation directory under %q: %w", e.root.path, err)
 		}
-		lockPath := filepath.Join(dir, tunnelGenLockName)
-		lock, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
-		if err != nil {
-			_ = os.RemoveAll(dir)
-			return "", fmt.Errorf("cannot create the tunnel generation lock %q: %w", lockPath, err)
+		e.dir = filepath.Join(e.root.path, e.name)
+		if err := e.takeLockLocked(); err != nil {
+			_ = unix.Unlinkat(int(e.root.dir.Fd()), e.name, unix.AT_REMOVEDIR)
+			return err
 		}
-		// LOCK_EX|LOCK_NB cannot fail against a just-created dir in practice;
-		// if it ever did, a foreign holder is exactly what the lock exists to
-		// detect — treat the dir as unusable rather than shared.
-		if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-			_ = lock.Close()
-			_ = os.RemoveAll(dir)
-			return "", fmt.Errorf("cannot lock the tunnel generation directory %q: %w", dir, err)
-		}
-		e.lock = lock
-		return dir, nil
+		return nil
 	}
-	return "", fmt.Errorf("cannot mint a unique tunnel generation directory under %q", root)
+	return fmt.Errorf("cannot mint a unique tunnel generation directory under %q", e.root.path)
+}
+
+// ensureLocked guarantees the entry's generation dir exists and is af's own —
+// re-establishing it (same name, fresh .lock) when it has gone missing
+// (#7503). A directory that exists but no longer reads as this daemon's own
+// is refused rather than adopted. Callers hold e.mu.
+func (e *tunnelGenDirEntry) ensureLocked() error {
+	var st unix.Stat_t
+	err := unix.Fstatat(int(e.root.dir.Fd()), e.name, &st, unix.AT_SYMLINK_NOFOLLOW)
+	switch {
+	case err == nil && st.Mode&unix.S_IFMT == unix.S_IFDIR && st.Uid == uint32(os.Geteuid()) && st.Mode&0o777 == 0o700:
+		return nil // alive and provably ours — nothing to do
+	case err == nil:
+		return fmt.Errorf("the tunnel generation directory %q was replaced by something that is not "+
+			"af's own 0700 dir — refusing to use it; remove %s and let af re-establish it",
+			e.dir, e.dir)
+	case errors.Is(err, unix.ENOENT):
+		break // deleted mid-life: re-establish it below
+	default:
+		return fmt.Errorf("cannot stat the tunnel generation directory %q: %w", e.dir, err)
+	}
+	if err := unix.Mkdirat(int(e.root.dir.Fd()), e.name, 0o700); err != nil {
+		if !errors.Is(err, unix.EEXIST) {
+			return fmt.Errorf("cannot re-create the tunnel generation directory %q: %w", e.dir, err)
+		}
+		// A racing recreate (or a foreign plant) won the name: verify it is a
+		// dir af can own — the takeLock fstat refuses anything else.
+	}
+	return e.takeLockLocked()
+}
+
+// takeLockLocked opens the generation dir through the root fd, re-proves it
+// (a directory, this uid, 0700), creates its .lock relative to the dir fd,
+// and holds the flock for the process's life. The generation's previous lock
+// fd — guarding an inode a deleted dir abandoned — is released. Callers hold
+// e.mu.
+func (e *tunnelGenDirEntry) takeLockLocked() error {
+	genFd, err := unix.Openat(int(e.root.dir.Fd()), e.name,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("cannot open the tunnel generation directory %q: %w", e.dir, err)
+	}
+	defer func() { _ = unix.Close(genFd) }()
+	var st unix.Stat_t
+	if err := unix.Fstat(genFd, &st); err != nil {
+		return fmt.Errorf("cannot stat the opened tunnel generation directory %q: %w", e.dir, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != uint32(os.Geteuid()) || st.Mode&0o777 != 0o700 {
+		return fmt.Errorf("the tunnel generation directory %q is not a private directory owned by this "+
+			"user — refusing to use it; remove it and let af re-establish it: rm -rf %s", e.dir, e.dir)
+	}
+	lockFd, err := unix.Openat(genFd, tunnelGenLockName,
+		unix.O_RDWR|unix.O_CREAT|unix.O_TRUNC|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return fmt.Errorf("cannot create the tunnel generation lock in %q: %w", e.dir, err)
+	}
+	lock := os.NewFile(uintptr(lockFd), filepath.Join(e.dir, tunnelGenLockName))
+	// LOCK_EX|LOCK_NB cannot fail against a just-established dir in practice;
+	// if it ever did, a foreign holder is exactly what the lock exists to
+	// detect — treat the dir as unusable rather than shared.
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = lock.Close()
+		return fmt.Errorf("cannot lock the tunnel generation directory %q: %w", e.dir, err)
+	}
+	if e.lock != nil {
+		_ = e.lock.Close()
+	}
+	e.lock = lock
+	return nil
 }
 
 // newTunnelSocketName mints a socket name unique within this generation dir
@@ -274,6 +408,10 @@ func newTunnelSocketName(title string, budget int) string {
 	return fmt.Sprintf("s%d-%s.sock", seq, slug)
 }
 
+// proctreeLookup is the one seam the peer proof reads the process table
+// through — a var so a test can answer for pids no kernel will attest.
+var proctreeLookup = proctree.Lookup
+
 // tunnelLeaderRef is the lock-free snapshot of one tunnel generation's spawn
 // the peer proof reads on EVERY fresh dial (#7495): the spawned child's pid —
 // the group/session leader supervision kills by — plus the proctree start
@@ -285,7 +423,7 @@ func newTunnelSocketName(title string, budget int) string {
 // on it.
 type tunnelLeaderRef struct {
 	pid     int
-	startID uint64 // proctree identity stamp; 0 = unreadable at publish — liveness only
+	startID uint64 // proctree identity stamp; 0 = unreadable at publish, and UNPROVABLE — every dial refuses (#7503)
 }
 
 // setTunnel assigns this provisioner's current tunnel generation AND the
@@ -298,16 +436,19 @@ func (p *sandboxProvisioner) setTunnel(t *tunnelChild) {
 }
 
 // publishTunnelLeader refreshes the atomic snapshot verifyTunnelPeer reads:
-// the spawned child's pid and — when the process table will still read it —
-// its start stamp, so a dead leader, or a reused pid, can never adopt the
-// acceptor's ancestry.
+// the spawned child's pid and its start stamp, so a dead leader — or a
+// reused pid — can never adopt the acceptor's ancestry. A stamp the process
+// table cannot be read for is published as 0, which the proof refuses
+// outright (#7503): a leader af cannot distinguish from a pid reuse is no
+// anchor at all, and a dial must fail closed until a STAMPED leader is
+// published — never pass on liveness alone.
 func (p *sandboxProvisioner) publishTunnelLeader(t *tunnelChild) {
 	if t == nil || t.cmd == nil || t.cmd.Process == nil {
 		p.tunnelLeader.Store(nil)
 		return
 	}
 	ref := &tunnelLeaderRef{pid: t.cmd.Process.Pid}
-	if pr, err := proctree.Lookup(ref.pid); err == nil {
+	if pr, err := proctreeLookup(ref.pid); err == nil {
 		ref.startID = pr.StartID
 	}
 	p.tunnelLeader.Store(ref)
@@ -316,15 +457,28 @@ func (p *sandboxProvisioner) publishTunnelLeader(t *tunnelChild) {
 // verifyTunnelPeer is the endpoint's per-connection proof (#7495): the kernel
 // names the pid that accepted this unix-socket connection, and af writes
 // nothing until that pid is shown to be — or to descend from — THIS tunnel
-// generation's own spawn, identity-checked link by link up the parent chain.
-// Descent is the rule rather than group membership because a documented
-// sandbox.ssh wrapper (sshpass, `setsid`, `script -c`) puts its ssh in a
-// fresh process group or session: the ssh is still provably af's own spawn,
-// and a group-equality check would refuse it. The walk ends at init — an
-// acceptor reparented off the spawn's chain cannot prove the spawn started
-// it, and is refused. A foreign listener can forge neither the pid the kernel
-// reports nor its ancestry; a refusal is a tunnel failure, never a request
-// sent to the wrong endpoint.
+// generation's own spawn. Descent is the rule rather than group membership
+// because a documented sandbox.ssh wrapper (sshpass, `setsid`, `script -c`)
+// puts its ssh in a fresh process group or session: the ssh is still provably
+// af's own spawn, and a group-equality check would refuse it.
+//
+// The honest shape of the proof (#7503): only the leader carries an
+// af-minted identity — the (pid, startID) pair stamped at publish. The
+// acceptor is a pid the KERNEL reports, and every intermediate link is a
+// bare pid read from the process table. The walk still gives each link two
+// cheap orderings an impostor cannot satisfy: a parent cannot have started
+// after its child, so each ancestor's StartID must be no later than its
+// descendant's; and every link's PPID is re-read after the walk, so a
+// reparent that landed mid-check is caught rather than adopted. The walk
+// ends at init — an acceptor reparented off the spawn's chain cannot prove
+// the spawn started it, and is refused.
+//
+// That is same-uid defence in depth, deliberately: the verified 0700
+// directory keeps other accounts from placing a listener at all, and the
+// peer proof keeps a same-uid process from answering in the forward's place.
+// A foreign listener can forge neither the pid the kernel reports nor a
+// consistently-ordered ancestry; a refusal is a tunnel failure, never a
+// request sent to the wrong endpoint.
 //
 // The leader comes from an atomic snapshot — never from a lock a caller can
 // hold (see tunnelLeaderRef).
@@ -337,22 +491,57 @@ func (p *sandboxProvisioner) verifyTunnelPeer(conn *net.UnixConn) error {
 	if leader == nil {
 		return errors.New("the tunnel's ssh child is not running")
 	}
-	lp, err := proctree.Lookup(leader.pid)
+	lp, err := proctreeLookup(leader.pid)
 	if err != nil {
 		return fmt.Errorf("the tunnel's ssh child (pid %d) is not running: %w", leader.pid, err)
 	}
-	if leader.startID != 0 && lp.StartID != leader.startID {
+	if leader.startID == 0 {
+		// The leader was published without a readable start stamp: nothing
+		// distinguishes it from a stranger reusing the pid, so liveness alone
+		// must never carry the proof (#7503). Refuse every dial until a
+		// stamped leader is published.
+		return fmt.Errorf("the tunnel's ssh child (pid %d) has no readable start stamp — af refuses to "+
+			"anchor its proof on a process it cannot distinguish from a reused pid", leader.pid)
+	}
+	if lp.StartID != leader.startID {
 		return fmt.Errorf("the tunnel's ssh child (pid %d) was replaced by another process — "+
 			"a reused pid cannot anchor af's proof of its own transport", leader.pid)
 	}
+	var chain []proctree.Process
 	for cur, depth := pid, 0; depth < 64 && cur > 1; depth++ {
 		if cur == leader.pid {
+			if len(chain) == 0 {
+				return nil // the acceptor IS the spawn — nothing to order
+			}
+			// The anchor must predate its claimed child, and every link's
+			// PPID is re-read: a chain that moved while we walked it is no
+			// proof of anything (#7503).
+			if lp.StartID > chain[len(chain)-1].StartID {
+				return fmt.Errorf("the tunnel's ssh child (pid %d) started AFTER the process claiming "+
+					"descent from it — an impossible ancestry is no proof af started this listener",
+					leader.pid)
+			}
+			for _, rec := range chain {
+				now, rerr := proctreeLookup(rec.PID)
+				if rerr != nil {
+					return fmt.Errorf("the acceptor's ancestry (pid %d) vanished mid-check: %w", rec.PID, rerr)
+				}
+				if now.PPID != rec.PPID {
+					return fmt.Errorf("the acceptor's ancestry (pid %d) reparented mid-check — "+
+						"refusing a chain af cannot prove is stable", rec.PID)
+				}
+			}
 			return nil
 		}
-		pr, err := proctree.Lookup(cur)
+		pr, err := proctreeLookup(cur)
 		if err != nil {
 			return fmt.Errorf("cannot trace the acceptor's ancestry (pid %d): %w", cur, err)
 		}
+		if len(chain) > 0 && pr.StartID > chain[len(chain)-1].StartID {
+			return fmt.Errorf("the acceptor's ancestor (pid %d) started AFTER its claimed child — "+
+				"an impossible ancestry is no proof af started this listener", cur)
+		}
+		chain = append(chain, pr)
 		if pr.PPID <= 1 || pr.PPID == cur {
 			break
 		}
@@ -426,58 +615,94 @@ func (p *sandboxProvisioner) removeTunnelSocketLocked() {
 }
 
 // sweepStaleTunnelSocketDirs removes generation dirs under root whose owning
-// daemon is provably dead, and nothing else (#7495):
+// daemon is provably dead, and nothing else (#7495). Every read and every
+// removal is relative to the VERIFIED root fd (#7503) — a swapped tunnels/
+// between verify and sweep can never turn the removals loose on a directory
+// af did not prove.
 //
 //   - a dir whose .lock can be FLOCK'd has no live owner — flock dies with the
 //     process that holds it, which pid reuse cannot fake. Its sockets are
-//     dead-path files; RemoveAll takes the whole dir.
+//     dead-path files; the dir's entries are unlinked and it is removed.
 //   - a dir whose .lock is HELD belongs to a live af process — including a
 //     predecessor daemon still serving sessions during an upgrade hand-off —
 //     and is never touched.
 //   - a dir with no .lock at all is removed only when empty (a generation
 //     that died between mkdir and its lock; it can hold no socket yet). A
 //     non-empty lockless dir is unproven and stays.
+//   - a dir containing a SUBDIRECTORY is more than af ever creates — unproven,
+//     it stays.
 //   - anything not named like a generation dir is not af's to classify and
 //     stays.
-func sweepStaleTunnelSocketDirs(root string) (swept int, err error) {
-	entries, err := os.ReadDir(root)
+func sweepStaleTunnelSocketDirs(root *tunnelSocketRoot) (swept int, err error) {
+	rootFd := int(root.dir.Fd())
+	names, err := root.dir.Readdirnames(-1)
 	if err != nil {
 		return 0, err
 	}
-	for _, e := range entries {
-		if !e.IsDir() || !tunnelGenDirRE.MatchString(e.Name()) {
+	for _, name := range names {
+		if !tunnelGenDirRE.MatchString(name) {
 			continue
 		}
-		dir := filepath.Join(root, e.Name())
-		lockPath := filepath.Join(dir, tunnelGenLockName)
-		lock, lerr := os.OpenFile(lockPath, os.O_RDWR, 0)
-		if errors.Is(lerr, os.ErrNotExist) {
+		genFd, gerr := unix.Openat(rootFd, name,
+			unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if gerr != nil {
+			continue // not a dir af can classify — a symlink or a file stays
+		}
+		gen := os.NewFile(uintptr(genFd), name)
+		inner, derr := gen.Readdirnames(-1)
+		if derr != nil {
+			_ = gen.Close()
+			continue
+		}
+		lockFd, lerr := unix.Openat(genFd, tunnelGenLockName,
+			unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		switch {
+		case errors.Is(lerr, unix.ENOENT):
 			// No lock file: only an EMPTY dir is provably a dead setup —
 			// nothing can be served through it.
-			inner, derr := os.ReadDir(dir)
-			if derr == nil && len(inner) == 0 {
-				if rerr := os.Remove(dir); rerr == nil {
+			if len(inner) == 0 {
+				if unix.Unlinkat(rootFd, name, unix.AT_REMOVEDIR) == nil {
 					swept++
 				}
 			}
-			continue
+			_ = gen.Close()
+		case lerr != nil:
+			_ = gen.Close()
+		default:
+			if ferr := unix.Flock(lockFd, unix.LOCK_EX|unix.LOCK_NB); ferr != nil {
+				// Held by a live process — this generation, or a
+				// predecessor's.
+				_ = unix.Close(lockFd)
+				_ = gen.Close()
+				continue
+			}
+			// The lock was free: the holder is dead and pid reuse cannot
+			// fake it. Remove the dir's contents fd-relative — but only if
+			// everything inside is a plain non-directory entry, the only
+			// shape af itself ever creates (#7503: nested dirs are unproven).
+			removable := true
+			for _, in := range inner {
+				var ist unix.Stat_t
+				if unix.Fstatat(genFd, in, &ist, unix.AT_SYMLINK_NOFOLLOW) != nil ||
+					ist.Mode&unix.S_IFMT == unix.S_IFDIR {
+					removable = false
+					break
+				}
+			}
+			if removable {
+				for _, in := range inner {
+					_ = unix.Unlinkat(genFd, in, 0)
+				}
+				if unix.Unlinkat(rootFd, name, unix.AT_REMOVEDIR) == nil {
+					swept++
+				} else {
+					log.WarningLog.Printf("orphan tunnel sweep: cannot remove dead generation dir %q", filepath.Join(root.path, name))
+				}
+			}
+			_ = unix.Flock(lockFd, unix.LOCK_UN)
+			_ = unix.Close(lockFd)
+			_ = gen.Close()
 		}
-		if lerr != nil {
-			continue
-		}
-		if ferr := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); ferr != nil {
-			// Held by a live process — this generation, or a predecessor's.
-			_ = lock.Close()
-			continue
-		}
-		// The lock was free: the holder is dead and pid reuse cannot fake it.
-		_ = unix.Flock(int(lock.Fd()), unix.LOCK_UN)
-		_ = lock.Close()
-		if rerr := os.RemoveAll(dir); rerr != nil {
-			log.WarningLog.Printf("orphan tunnel sweep: cannot remove dead generation dir %q: %v", dir, rerr)
-			continue
-		}
-		swept++
 	}
 	return swept, nil
 }
@@ -488,10 +713,10 @@ func sweepStaleTunnelSocketDirs(root string) (swept int, err error) {
 // this removes their now-dead socket paths once the flock proves the daemon
 // that owned them is gone.
 func SweepStaleTunnelSocketDirs() {
-	root, err := func() (string, error) {
+	root, err := func() (*tunnelSocketRoot, error) {
 		home, err := currentTunnelHome()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		return verifyTunnelSocketRoot(home)
 	}()
@@ -502,6 +727,7 @@ func SweepStaleTunnelSocketDirs() {
 		log.WarningLog.Printf("orphan tunnel sweep: cannot verify the tunnel socket directory; skipping the dir sweep: %v", err)
 		return
 	}
+	defer func() { _ = root.dir.Close() }()
 	swept, err := sweepStaleTunnelSocketDirs(root)
 	if err != nil {
 		log.WarningLog.Printf("orphan tunnel sweep: cannot list the tunnel socket directory; skipping the dir sweep: %v", err)

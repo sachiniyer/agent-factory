@@ -188,10 +188,10 @@ func TestSandboxTunnelProbeFailsWhenNothingListens(t *testing.T) {
 	assert.Contains(t, err.Error(), "sandbox.ssh", "the error must name the thing the operator can test by hand")
 }
 
-// tunnelChildOnMyGroup builds a tunnelChild whose group the test process's own
-// listener is a member of: the leader pid is this process's group id, so the
-// peer check's getpgid(acceptor) == leader comparison passes — the stand-in for
-// "af's own ssh child bound the socket".
+// tunnelChildOnMyGroup builds a tunnelChild whose leader is this process's
+// own process-group leader: the leader pid is this process's group id, so the
+// test binary's listeners walk straight up their ancestry to it — the
+// stand-in for "af's own ssh child bound the socket".
 func tunnelChildOnMyGroup(t *testing.T) *tunnelChild {
 	t.Helper()
 	pgid, err := unix.Getpgid(0)
@@ -202,8 +202,8 @@ func tunnelChildOnMyGroup(t *testing.T) *tunnelChild {
 }
 
 // The probe must also succeed when something listens — and only because the
-// acceptor proved to be the tunnel's own group (#7495): a listener nobody can
-// attribute never reaches "ready".
+// acceptor proved to descend from the tunnel's own spawn (#7495): a listener
+// nobody can attribute never reaches "ready".
 func TestSandboxTunnelProbeSucceedsWhenSomethingListens(t *testing.T) {
 	sockPath := testguard.SocketPath(t, "probe.sock")
 	ln, err := net.Listen("unix", sockPath)
@@ -217,9 +217,10 @@ func TestSandboxTunnelProbeSucceedsWhenSomethingListens(t *testing.T) {
 	require.NoError(t, waitForSandboxTunnelWithin(p, 2*time.Second, 20*time.Millisecond))
 }
 
-// ...and a listener that ANSWERS but is not the tunnel's own group is refused:
-// "ready" is never reported for an endpoint af cannot prove is its own ssh
-// child, and the error says so rather than blaming the transport (#7495).
+// ...and a listener that ANSWERS but does not descend from the tunnel's own
+// spawn is refused: "ready" is never reported for an endpoint af cannot prove
+// is its own ssh child, and the error says so rather than blaming the
+// transport (#7495).
 func TestSandboxTunnelProbeRefusesAForeignListener(t *testing.T) {
 	sockPath := testguard.SocketPath(t, "foreign-probe.sock")
 	ln, err := net.Listen("unix", sockPath)
