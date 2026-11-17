@@ -230,6 +230,11 @@ func displaceDetachedDaemon(w io.Writer) (daemon.ShutdownTarget, error) {
 	}
 	escalated, err := finishShutdownFn(target)
 	if err != nil {
+		if !escalated {
+			// Its process could not be identified, so it was not signalled
+			// (#7482): report that it did not exit, as adopt always has.
+			return target, fmt.Errorf("it did not exit within its grace after the restart RPC, so the installed unit cannot take it over: %w", err)
+		}
 		return target, fmt.Errorf("it did not exit within its grace, and stopping it by signal failed: %w", err)
 	}
 	switch {
