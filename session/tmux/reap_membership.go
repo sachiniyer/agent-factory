@@ -638,7 +638,17 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 	exeMatch := make(map[int]bool)
 	for _, c := range eligible {
 		eligibleSet[c.PID] = true
-		if agentExe != "" && exeMatchesProgram(c, agentExe) {
+		// An identity ANCHOR is a carrier that passes EVERY tier-2 guard —
+		// clean ancestry, a nonzero recorded root, and StartID no earlier
+		// than it — not merely an exe match: a pre-root carrier matching the
+		// program's identity is REFUSED below, and letting it anchor descent
+		// would signal children of an agent this pane cannot attribute to
+		// itself (Codex 4598849310). exeMatchesProgram's own agentExe==""
+		// guard makes an empty allowlist anchor nothing.
+		if eligibleClean[c.PID] &&
+			membership.Root.PID > 0 && membership.Root.StartID != 0 &&
+			c.StartID >= membership.Root.StartID &&
+			exeMatchesProgram(c, agentExe) {
 			exeMatch[c.PID] = true
 		}
 	}
@@ -746,8 +756,12 @@ func recordedPaneProgramExe(argv []string) string {
 		}
 	} else if len(argv) > 1 {
 		// The root already exec'd through: argv[0] IS the program, and the
-		// joined args keep wrappers like `env FOO=1 claude` classifiable.
-		command = strings.Join(argv, " ")
+		// args keep wrappers like `env FOO=1 claude` classifiable. Each
+		// element is quoted so an agent installed under a path with spaces
+		// still parses as ONE word — a bare Join would split `/opt/My
+		// Apps/claude` into words the parser cannot attribute (Codex
+		// 4598849320).
+		command = joinArgvPreservingWords(argv)
 	}
 	if sessionenv.AgentForCommand(command) == "" {
 		return ""
@@ -759,14 +773,37 @@ func recordedPaneProgramExe(argv []string) string {
 	return filepath.Base(exe.Name)
 }
 
+// joinArgvPreservingWords renders a captured argv as one shell command line
+// without losing element boundaries (Codex 4598849320). Every element is
+// single-quoted — the only POSIX quoting literal for every byte — with an
+// embedded quote re-closed and re-opened around a quoted literal. The result
+// tokenizes back to exactly argv under the shell parsers AgentForCommand and
+// LocateProgramExecutable use.
+func joinArgvPreservingWords(argv []string) string {
+	var b strings.Builder
+	for i, a := range argv {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteByte('\'')
+		b.WriteString(strings.ReplaceAll(a, "'", `'\''`))
+		b.WriteByte('\'')
+	}
+	return b.String()
+}
+
 // tier2ProgramAdmits is the executable-identity allowlist inside tier 2
 // (#7435 R9/R14). It admits a carrier only when its own identity is one of
 // two proven shapes inside the eligible cohort:
 //
 //   - the carrier IS the session's program — comm or argv[0] names AgentExe
-//     (the #3699 re-hosted claude, a process tab's own binary);
-//   - the carrier descends from an admitted program through marked eligible
-//     ancestors — helpers the re-hosted agent itself spawned.
+//     (the #3699 re-hosted claude, a process tab's own binary) AND passes
+//     every tier-2 guard itself — clean ancestry, nonzero recorded root,
+//     StartID no earlier than it. An exe match alone is NOT an anchor: a
+//     pre-root carrier is refused, and must not vouch for descendants it
+//     happens to hold (Codex 4598849310);
+//   - the carrier descends from such an admitted anchor through marked
+//     eligible ancestors — helpers the re-hosted agent itself spawned.
 //
 // A host is admitted by its OWN executable identity, never by its child's
 // (#7435 R14): the earlier one-hop "direct marked parent" rule let a

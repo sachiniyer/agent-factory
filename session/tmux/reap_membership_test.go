@@ -905,6 +905,8 @@ func TestRecordedPaneProgramExeReadsTheProgramNotTheWrapper(t *testing.T) {
 		{"pre-exec account-shim line", []string{"/bin/sh", "-c",
 			"/usr/local/bin/af __af-session-env-exec-account /run/af.sock tok 'claude'"}, "claude"},
 		{"exec'd-through root", []string{"/d/pbin/claude", "300"}, "claude"},
+		{"exec'd-through path with spaces", []string{"/opt/My Apps/claude", "--resume"}, "claude"},
+		{"exec'd-through path with spaces, non-agent", []string{"/opt/My Apps/sleep", "300"}, ""},
 		{"bare agent root", []string{"claude"}, "claude"},
 		{"argv0 look-alike", []string{"claude-helper", "--serve"}, ""},
 		{"shell tab sh -c", []string{"/bin/sh", "-c", "bash pane.sh"}, ""},
@@ -1064,9 +1066,11 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 
 	rows := []struct {
 		name string
-		// build spawns the row's real carrier and returns it plus the
-		// cohort membership the sweep is asked to judge it against.
-		build     func(t *testing.T) (candidate proctree.Process, membership cohortMembership)
+		// build spawns the row's real carriers and returns them plus the
+		// cohort membership the sweep is asked to judge them against. Rows
+		// whose verdict needs a sibling carrier in the cohort (a refused
+		// ancestor that would vouch for a descendant) return all of them.
+		build     func(t *testing.T) (candidates []proctree.Process, membership cohortMembership)
 		gens      []string
 		wantOwned bool
 		wantErr   string
@@ -1075,9 +1079,9 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			// Baseline member: descent from a proven parent with clean
 			// markers — proof AND NOT foreign evidence = admit.
 			name: "descent proof, clean markers — owned",
-			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				parent, child := spawnMarkedParentWithMarkedChild(t, name, home, &gen)
-				return child, cohortMembership{
+				return []proctree.Process{child}, cohortMembership{
 					Proven: map[int]uint64{parent.PID: parent.StartID},
 				}
 			},
@@ -1088,9 +1092,9 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			// CHANGED generation — foreign evidence about the process beats
 			// its proof.
 			name: "descent proof, generation differs — refused",
-			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				parent, child := spawnMarkedParentWithMarkedChild(t, name, home, &otherGen)
-				return child, cohortMembership{
+				return []proctree.Process{child}, cohortMembership{
 					Proven: map[int]uint64{parent.PID: parent.StartID},
 				}
 			},
@@ -1101,9 +1105,9 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			// MISSING generation — the cohort gate requires one, so the
 			// absence is foreign evidence.
 			name: "descent proof, generation missing — refused",
-			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				parent, child := spawnMarkedParentWithMarkedChild(t, name, home, nil)
-				return child, cohortMembership{
+				return []proctree.Process{child}, cohortMembership{
 					Proven: map[int]uint64{parent.PID: parent.StartID},
 				}
 			},
@@ -1114,9 +1118,9 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			// recorded (pid, StartID) pair is proof, the changed marker is
 			// foreign — refuse.
 			name: "recorded pair, generation differs — refused",
-			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				_, child := spawnMarkedParentWithMarkedChild(t, name, home, &otherGen)
-				return child, cohortMembership{
+				return []proctree.Process{child}, cohortMembership{
 					Recorded: map[int]uint64{child.PID: child.StartID},
 				}
 			},
@@ -1128,9 +1132,9 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			// is owned. The real-server row is the close_dead_pane SIGHUP
 			// test; this is the same verdict on a tmux-comm'd fixture.
 			name: "kernel SID, tmux parent — owned",
-			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				_, child := spawnTmuxNamedParentWithMarkedChild(t, name, home, gen)
-				return child, cohortMembership{
+				return []proctree.Process{child}, cohortMembership{
 					PaneSIDs: map[int]bool{child.PID: true},
 					Recorded: map[int]uint64{child.PID: child.StartID},
 				}
@@ -1142,9 +1146,9 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			// same tmux parent — the sibling-pane shape — is refused and
 			// reported, never signalled.
 			name: "no proof, tmux parent — refused",
-			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				_, child := spawnTmuxNamedParentWithMarkedChild(t, name, home, gen)
-				return child, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
+				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
 			},
 			wantErr: "sits behind a tmux server",
 		},
@@ -1153,9 +1157,9 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			// at the tmux ancestor even though a proven member sits above
 			// it in the same chain.
 			name: "proven member above a different server — refused",
-			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				leader, _, child := spawnProvenLeaderBehindTmuxParent(t, name, home, gen)
-				return child, cohortMembership{
+				return []proctree.Process{child}, cohortMembership{
 					Proven: map[int]uint64{leader.PID: leader.StartID},
 				}
 			},
@@ -1165,9 +1169,9 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			// The reaper's own subtree is foreign evidence (#7435 R2):
 			// refused, reported, never signalled.
 			name: "no proof, reaper subtree — refused",
-			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				child := spawnCohortSleeper(t, name, home, gen, true)
-				return child, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
+				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
 			},
 			wantErr: "ancestry places it under",
 		},
@@ -1175,9 +1179,9 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			// A positively-identified af-daemon subtree is foreign
 			// evidence: refused, reported, never signalled.
 			name: "no proof, af-daemon subtree — refused",
-			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				child := spawnDaemonChild(t)
-				return child, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
+				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
 			},
 			wantErr: "ancestry places it under",
 		},
@@ -1186,9 +1190,33 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			// for tier 2 and — with no agent identity on this row — is
 			// reported as unprovable, never silently dropped.
 			name: "no proof, no foreign evidence — reported",
-			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				child := spawnMarkedProcess(t, name, home)
-				return child, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
+				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
+			},
+			gens:    []string{gen},
+			wantErr: "cannot be proven",
+		},
+		{
+			// Codex 4598849310: an agent-identity carrier that PREDATES the
+			// recorded root is refused by the StartID guard — yet the old
+			// loop keyed it into exeMatch on identity alone, so its newer
+			// marked child was admitted by descent from a refused ancestor.
+			// Anchors are only carriers that pass EVERY tier-2 guard;
+			// descent is admitted only from an admitted anchor — both
+			// refuse, both are reported, neither is signalled. The escapee
+			// pauses between publishing itself and spawning the child so the
+			// two StartIDs sit on different kernel ticks and the root's
+			// bound lands strictly between them.
+			name: "pre-root agent does not vouch for its newer child — refused",
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
+				host, child := spawnMarkedProcessWithChild(t, name, home, gen, "sleep", "300")
+				require.Less(t, host.StartID, child.StartID,
+					"the fixture must order the agent strictly before the child — StartIDs are kernel ticks")
+				return []proctree.Process{host, child}, cohortMembership{
+					AgentExe: "claude",
+					Root:     proctree.Process{PID: 1, StartID: child.StartID},
+				}
 			},
 			gens:    []string{gen},
 			wantErr: "cannot be proven",
@@ -1196,40 +1224,42 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			candidate, membership := row.build(t)
+			candidates, membership := row.build(t)
 			gens := row.gens
 			if gens == nil {
 				gens = []string{gen}
 			}
 			marked, _, err := markedOrphanProcesses(
-				[]proctree.Process{candidate}, name, home,
+				candidates, name, home,
 				fixtureCohort(gens...), membership, map[int]bool{})
-			pid := strconv.Itoa(candidate.PID)
-			if row.wantOwned {
-				found := false
-				for _, m := range marked {
-					if m.PID == candidate.PID {
-						found = true
+			for _, candidate := range candidates {
+				pid := strconv.Itoa(candidate.PID)
+				if row.wantOwned {
+					found := false
+					for _, m := range marked {
+						if m.PID == candidate.PID {
+							found = true
+						}
 					}
+					require.True(t, found, "pid %s must be admitted to the marked set", pid)
+					if err != nil {
+						require.NotContains(t, err.Error(), "pid "+pid,
+							"an admitted carrier must not appear in the refusals")
+					}
+				} else {
+					for _, m := range marked {
+						require.NotEqual(t, candidate.PID, m.PID,
+							"a refused carrier must never reach the kill set")
+					}
+					require.Error(t, err, "every exclusion is REPORTED — nothing is silently left")
+					require.Contains(t, err.Error(), "pid "+pid+" ",
+						"the refusal names the carrier's pid")
+					if row.wantErr != "" {
+						require.Contains(t, err.Error(), row.wantErr)
+					}
+					require.True(t, proctree.AliveSame(candidate),
+						"refused means never signalled")
 				}
-				require.True(t, found, "pid %s must be admitted to the marked set", pid)
-				if err != nil {
-					require.NotContains(t, err.Error(), "pid "+pid,
-						"an admitted carrier must not appear in the refusals")
-				}
-			} else {
-				for _, m := range marked {
-					require.NotEqual(t, candidate.PID, m.PID,
-						"a refused carrier must never reach the kill set")
-				}
-				require.Error(t, err, "every exclusion is REPORTED — nothing is silently left")
-				require.Contains(t, err.Error(), "pid "+pid+" ",
-					"the refusal names the carrier's pid")
-				if row.wantErr != "" {
-					require.Contains(t, err.Error(), row.wantErr)
-				}
-				require.True(t, proctree.AliveSame(candidate),
-					"refused means never signalled")
 			}
 		})
 	}

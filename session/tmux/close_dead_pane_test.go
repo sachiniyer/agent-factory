@@ -1167,6 +1167,34 @@ func TestStartHeldPaneStampsItsRootPid(t *testing.T) {
 	}
 }
 
+// Codex 4597265491 — every successful fresh spawn records its OWN pane
+// root's evidence. A respawn of an existing TmuxSession (restored shell
+// tabs) reaches Start with the previous launch's paneRootEvidence already
+// populated; the nil-gate skipped the restamp, so the recorded anchor
+// stayed a different pane incarnation's pair forever and tier 2's
+// no-earlier-than bound anchored on the wrong root. Seeding a stale pair
+// and spawning once exercises the same gate: the stamp must name the pane
+// tmux just answered for.
+func TestStartRestampsPaneRootEvidenceOnEverySpawn(t *testing.T) {
+	testguard.IsolateTmux(t)
+	session := NewTmuxSession("af-restamp-anchor", "sleep 300")
+	session.SeedPaneRootEvidence(424242, 1)
+
+	require.NoError(t, session.Start(t.TempDir()))
+	t.Cleanup(func() { _, _ = session.Close() })
+
+	pid, startID, ok := session.PaneRootEvidence()
+	require.True(t, ok, "a successful spawn must leave pane-root evidence")
+	require.NotEqual(t, 424242, pid,
+		"the previous launch's anchor must be replaced by THIS spawn's root")
+	require.NotEqual(t, uint64(1), startID,
+		"the previous launch's pair is replaced, not kept")
+	matches, err := session.PaneRootProcessMatches(pid, startID)
+	require.NoError(t, err)
+	require.True(t, matches,
+		"the restamped pair must name a pane tmux still answers for")
+}
+
 // startDeadLeaderWithSessionChild spawns a kernel-session leader with one
 // long-lived member, then kills the leader: the child is orphaned but keeps
 // the leader's pid as its SID, which is exactly how a held dead pane's

@@ -448,11 +448,16 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 		// original pane still running (#2103). The process-table identity makes
 		// both distinctions explicit.
 		paneProcess, waitForPane, processErr = capturePaneProcess(pid)
-		if processErr == nil {
+		if processErr == nil && waitForPane {
 			// Same evidence PaneRootProcess stamps: the resolved root's
 			// (pid, StartID) — whose pid is also the pane SID — is what a
 			// later blind retry's vanished-session sweep may admit on (#7435
 			// R2), including on a TmuxSession that never saw setRuntimeLaunch.
+			// Only a CAPTURED live root may replace it: a root that exited in
+			// the panePID→snapshot gap returns the zero identity, and storing
+			// that erases the previous anchor's SID and tier-2 root — the
+			// surviving cohort then refuses forever on every retry (Codex
+			// 4596311717).
 			t.paneRootEvidence.Store(&paneProcess)
 		}
 	}

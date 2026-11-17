@@ -46,6 +46,13 @@ func runMarkedEscapee(pidFile string, child []string) error {
 		return err
 	}
 	if len(child) > 0 {
+		// Kernel StartIDs carry tick granularity — jiffies on Linux — so a
+		// child forked in the same tick would share this process's StartID.
+		// The decision-table's pre-root-anchor row needs parent and child
+		// STRICTLY ordered across the recorded root; one bounded pause after
+		// the readiness write lands them in different ticks without any
+		// test-side sleep.
+		time.Sleep(30 * time.Millisecond)
 		// The re-hosted member's own child, inheriting this helper's marked
 		// environment and leading its OWN kernel session — the #3699 shape's
 		// bottom half: `claude` under `bg-pty-host`, each a session leader.
