@@ -289,7 +289,10 @@ func deliverCronTaskPromptRun(t *task.Task, prompt string, run *task.RunKey) (st
 		// A parked delivery stops parking the moment the daemon starts to
 		// stop (#7440): it would otherwise wait for its next transport failure,
 		// racing the drain, and could still be parked when the stop gives up
-		// on it. The fire stays owed; the shutdown abort keeps its marker.
+		// on it. Only a targeted send parks (an attached target defers it),
+		// and a targeted send writes no fire marker, so the stop drops this
+		// occurrence, as a targeted cron occurrence that cannot be delivered
+		// is skipped; nothing replays it (#7474).
 		if parkUntilNextPoll() {
 			return status, errDaemonStopping()
 		}

@@ -142,6 +142,13 @@ the refusal both rebind routes give a compare-and-set rebind — see
 [Rebinding a project](#rebinding-a-project). Nothing was written, so it is a
 definitive refusal, not an uncertain outcome.
 
+`error.code: "daemon_restarting"` (status `503`, with `daemon_rejected: true`)
+says the daemon refused the request without running it because it is
+restarting: whoever stopped it starts its successor (`af upgrade`, `af daemon
+restart`, the CLI auto-update, or a `systemctl --user restart` of its unit).
+Retry the request, and it reaches the successor. Classify the refusal by its
+code, never by `error.message`, whose wording may change.
+
 ## Status codes
 
 | Status | Meaning |
@@ -153,6 +160,7 @@ definitive refusal, not an uncertain outcome.
 | `409 Conflict` | `POST /v1/RebindProject` and `POST /v1/RebindProjectGuarded`: part of the request's expected pair no longer matches the project's record — `expected_root` against the recorded root, `expected_checkout_id` against the recorded checkout marker (which a same-path reclone or repair rotates) — because another rebind or re-clone landed first. `error.code` is `project_rebound`. See [Rebinding a project](#rebinding-a-project). |
 | `409 Conflict` | `SaveProposalDoc`: the save conflicts with a newer edit and nothing was committed. `error.code` is `proposal_conflict`, and `data` is not `null` — it holds `{ours, theirs, base, head}` (see `docs/dev/proposals/proposal-mode/api.md`). |
 | `413 Request Entity Too Large` | The body exceeded the 16 MiB cap. The request is **rejected, never truncated-then-processed** — the daemon is never reached. |
+| `503 Service Unavailable` | The daemon refused the request without running it, because of where it is in its lifecycle. A daemon that is starting, validating an upgrade, handing off to one, or restarting (`error.code` is `daemon_restarting`) refuses only for a moment, so retry. A daemon shutting down for good answers "agent-factory daemon is shutting down; retry after it restarts": retry once a daemon is running again. |
 | `500 Internal Server Error` | The handler ran but returned an error (validation failure, not-found session, a disabled task refused by `TriggerTask`, etc.). `error.message` carries the detail. |
 
 The status maps the *transport* outcome; a business-logic failure (e.g. "session

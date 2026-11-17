@@ -437,7 +437,7 @@ func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigRespo
 // Shutdown acknowledges a request to terminate the daemon, then asynchronously
 // signals the main loop to tear down after a short grace period. The grace
 // lets the RPC response flush back to the caller before the listener closes.
-func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
+func (s *controlServer) Shutdown(req ShutdownRequest, resp *ShutdownResponse) error {
 	resp.OK = true
 	resp.PID = os.Getpid()
 	if s.shutdownCh == nil || s.shutdownOnce == nil {
@@ -446,8 +446,11 @@ func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) erro
 	s.shutdownOnce.Do(func() {
 		// The stop begins now, not when the main loop wakes after the ack
 		// grace: the stopper's clock started with this call (#7416).
+		// And the stopper says whether it starts the successor (#7474).
 		if s.manager != nil {
-			s.manager.lifecycle.stopClock().begin()
+			stop := s.manager.lifecycle.stopClock()
+			stop.begin()
+			stop.declareIntent(req.Restart)
 		}
 		go func() {
 			time.Sleep(shutdownAckGrace)

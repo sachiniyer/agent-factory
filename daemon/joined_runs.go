@@ -40,10 +40,18 @@ func (r *joinedRuns) closeAndWait() {
 	if r == nil {
 		return
 	}
+	r.close()
+	r.wg.Wait()
+}
+
+// close refuses every new run, without waiting for the running ones. nil-safe.
+func (r *joinedRuns) close() {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	r.closed = true
 	r.mu.Unlock()
-	r.wg.Wait()
 }
 
 // joinCronDeliveries is the "cron deliveries" teardown step (#7440). It waits

@@ -73,6 +73,11 @@ func TestMain(m *testing.M) {
 	// the daemon then unwinds as it always has. Tests that assert on the exit
 	// install their own (captureExitHoldingHome).
 	exitHoldingHome = recordExitHoldingHome
+	// #7474: a returned daemon latches its process's delivery gates closed,
+	// since its process then exits. This binary runs daemon after daemon, so
+	// each return restores the inert defaults instead; the latch's own tests
+	// turn it back off (latchStoppedDaemonForTest).
+	daemonReturnRestoresProcessDefaults = true
 	log.Initialize(false)
 	code := m.Run()
 	log.Close()

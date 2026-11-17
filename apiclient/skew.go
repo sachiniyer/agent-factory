@@ -120,6 +120,13 @@ func interpretEnvelopeError(route string, status int, envErr *apiproto.EnvelopeE
 		if envErr.DaemonRejected && !gatewayStatus {
 			return &ProjectReboundError{Detail: envErr.Message}
 		}
+	case apiproto.ErrorCodeDaemonRestarting:
+		// The daemon refused the request unrun because it is restarting; the
+		// caller retries into its successor, by this code and not its text
+		// (#7474).
+		if envErr.DaemonRejected && !gatewayStatus {
+			return &apiproto.LifecycleRefusal{Code: envErr.Code, Message: envErr.Message}
+		}
 	default:
 		if m := unknownFieldPattern.FindStringSubmatch(envErr.Message); m != nil {
 			return &VersionSkewError{Field: m[1], Detail: envErr.Message}

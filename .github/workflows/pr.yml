@@ -623,8 +623,11 @@ jobs:
           # sweep kills a TERM-ignoring hook inside its own bound, and the
           # launcher oracle releases a scope once systemd-run has exec'd (#3667 —
           # a stub cannot exec, so only a real launcher proves that handoff).
+          # And a stop's job read (#7474): a unit's process, handling its
+          # SIGTERM, reads a real `systemctl --user restart` as a restart and a
+          # `stop` as final, on each systemd generation.
           run_pinned ./internal/systemdunit \
-            '^(TestBoundScopeDiesWithItsOwnerWhileUnboundScopeSurvives|TestUnboundScopeIsASiblingOfTheDaemonUnit|TestStopHookScopesKillsATermIgnoringSurvivorWithinTheBound|TestTheLauncherOracleReleasesAScopeOnceItIsRegistered)$' 4
+            '^(TestBoundScopeDiesWithItsOwnerWhileUnboundScopeSurvives|TestUnboundScopeIsASiblingOfTheDaemonUnit|TestStopHookScopesKillsATermIgnoringSurvivorWithinTheBound|TestTheLauncherOracleReleasesAScopeOnceItIsRegistered|TestRestartJobReadsAsRestartAndStopAsFinal)$' 5
           # Then the RESTORE leg (#3682): a successor daemon adopts a hook run
           # still live in its real scope, and reports it finished only once that
           # scope actually exits. Every other adoption test scripts systemctl,

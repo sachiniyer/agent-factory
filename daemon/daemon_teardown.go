@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -63,12 +64,19 @@ var stopTeardownBy = defaultStopTeardownBy
 // may still be running — a drain step, the background join, the final save, a
 // teardown step, the instance restore. A stop whose ledger is not empty ends
 // the process while it still holds the home (holdHomeIfAbandoned).
+//
+// And it keeps the stop's intent (#7474): whether the stopper starts this
+// daemon's successor (stop_intent.go).
 type stopClock struct {
 	once sync.Once
 	at   time.Time
 
 	mu        sync.Mutex
 	abandoned []string
+	// intentSettled is nil until something names the stop's intent, and is
+	// closed once restart holds its answer. Both are guarded by mu.
+	intentSettled chan struct{}
+	restart       bool
 }
 
 // abandon enters what in the stop's ledger. nil-safe.
@@ -185,6 +193,14 @@ func relayStopSignals(raw <-chan os.Signal, out chan<- os.Signal, stop *stopCloc
 		select {
 		case sig := <-raw:
 			stop.begin()
+			// After the stamp, never ahead of it (#7474): asking systemd
+			// whether this SIGTERM is a restart runs beside the stop, bounded,
+			// and charged to the drain that waits for it.
+			if sig == syscall.SIGTERM {
+				stop.settleIntentAsync(stopSignalIsRestartFn)
+			} else {
+				stop.declareIntent(false)
+			}
 			select {
 			case out <- sig:
 			default:
