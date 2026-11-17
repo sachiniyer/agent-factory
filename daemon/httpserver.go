@@ -392,7 +392,9 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 		if err := call(ctx, req, &resp); err != nil {
 			status := httpStatusForTab(err)
 			var shaped interface{ HTTPStatus() int }
-			if IsDaemonAdmissionRetryable(err) {
+			if IsDaemonAdmissionRetryable(err) || IsDaemonStoppingErr(err) {
+				// A stopping daemon is unavailable too, though not one to
+				// retry against (#7440).
 				status = http.StatusServiceUnavailable
 			} else if errors.As(err, &shaped) {
 				// A refusal that names its own status (projectReboundError's

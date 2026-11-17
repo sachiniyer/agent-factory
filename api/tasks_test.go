@@ -711,6 +711,24 @@ func TestTasksTrigger_RunsThroughDaemon(t *testing.T) {
 	assert.Equal(t, []string{"t6abcd"}, calls.triggered)
 }
 
+// TestTasksTrigger_DuringADaemonStopSaysToRetryAfterItRestarts: a trigger that
+// reaches a daemon in the middle of its stop is refused with a clear reason,
+// and the CLI prints it as the user's next step, not an opaque abort (#7440).
+// The stub returns the text net/rpc delivers for the daemon's refusal.
+func TestTasksTrigger_DuringADaemonStopSaysToRetryAfterItRestarts(t *testing.T) {
+	useTempConfig(t)
+	calls := stubDaemon(t)
+	calls.runErr = errors.New("agent-factory daemon is shutting down; retry after it restarts")
+	seedTask(t, task.Task{ID: "t7440ab", Name: "n", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
+
+	var err error
+	stderr := captureStderr(t, func() { err = tasksRunCmd.RunE(tasksRunCmd, []string{"t7440ab"}) })
+
+	require.Error(t, err)
+	require.True(t, daemon.IsDaemonStoppingErr(err), "the stopping daemon's refusal must reach the caller as such: %v", err)
+	assert.Contains(t, stderr, "failed to trigger task: agent-factory daemon is shutting down; retry after it restarts")
+}
+
 func TestTasksTrigger_RejectsInvalidTaskID(t *testing.T) {
 	useTempConfig(t)
 	calls := stubDaemon(t)

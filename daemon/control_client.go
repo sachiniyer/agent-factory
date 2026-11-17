@@ -54,6 +54,25 @@ func errDaemonQuiescing() error {
 	return errors.New(daemonQuiescingErrText + "; retry shortly")
 }
 
+// daemonStoppingErrText is the stable wire prefix for work refused or cut short
+// because the daemon is stopping: not handing off to an upgrade, just going
+// away (#7440). It is deliberately not an admission retry. The client must not
+// wait it out, nor re-ensure a daemon behind the caller's own stop. The caller
+// retries after the daemon restarts.
+const daemonStoppingErrText = "agent-factory daemon is shutting down"
+
+// errDaemonStopping refuses work the stopping daemon will not do, and tells the
+// caller what to do instead.
+func errDaemonStopping() error {
+	return errors.New(daemonStoppingErrText + "; retry after it restarts")
+}
+
+// IsDaemonStoppingErr reports whether err is the stopping daemon's refusal or
+// abort. It matches the wire prefix, since net/rpc flattens errors to text.
+func IsDaemonStoppingErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), daemonStoppingErrText)
+}
+
 // IsDaemonQuiescingErr reports whether a mutation was refused because the daemon is
 // quiescing for an upgrade hand-off. net/rpc flattens the server error to text, so
 // this matches the stable wire prefix like the other admission classifiers.

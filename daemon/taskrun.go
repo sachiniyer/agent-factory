@@ -286,9 +286,35 @@ func deliverCronTaskPromptRun(t *task.Task, prompt string, run *task.RunKey) (st
 		if err != nil || status != StatusDeferredAttached {
 			return status, err
 		}
-		time.Sleep(cronDeferPollInterval)
+		// A parked delivery stops parking the moment the daemon starts to
+		// stop (#7440): it would otherwise wait for its next transport failure,
+		// racing the drain, and could still be parked when the stop gives up
+		// on it. The fire stays owed; the shutdown abort keeps its marker.
+		if parkUntilNextPoll() {
+			return status, errDaemonStopping()
+		}
 	}
 }
+
+// parkUntilNextPoll waits out one cronDeferPollInterval, and reports true as
+// soon as the daemon is stopping, however much of the interval is left.
+func parkUntilNextPoll() (stopping bool) {
+	deadline := time.Now().Add(cronDeferPollInterval)
+	for {
+		if daemonDrainingFn() {
+			return true
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			return false
+		}
+		time.Sleep(min(left, cronParkStopPoll))
+	}
+}
+
+// cronParkStopPoll is how often a parked delivery checks whether the daemon
+// has started to stop.
+const cronParkStopPoll = 20 * time.Millisecond
 
 // repoHasSessionTitle reports whether a persisted session with the given
 // title exists in the repo. Mirrors api.repoHasInstanceTitle, which daemon/
@@ -330,6 +356,17 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 // fresh cron fire or manual trigger landing on the same stale marker is a NEW
 // occurrence that must still deliver.
 func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *taskFireMarker) (err error) {
+	// A slot in the daemon's delivery tracker, held for the whole run, so a
+	// stop joins this delivery before it releases the home (#7440). Once the
+	// stop has closed the tracker, a new delivery is refused here, before it
+	// writes anything: no status, and an owed fire's marker stays for the
+	// replacement daemon to replay.
+	deliveryDone, admitted := beginTaskDelivery()
+	if !admitted {
+		return errDaemonStopping()
+	}
+	defer deliveryDone()
+
 	// Validate the task ID before it flows into any filesystem path. The
 	// CLI boundary also validates, but this is the shared chokepoint that
 	// protects every caller.
@@ -471,6 +508,17 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 		if isLiveUpgradeGateErr(err) || (daemonDrainingFn() && isShutdownAbortErr(err)) {
 			status = taskStatusAbortedShutdown
 			keepFire = true
+			if !isLiveUpgradeGateErr(err) {
+				// Tell the caller what the stop did to this run (#7440), not
+				// the transport error it ended on. A kept marker is replayed
+				// by the next daemon, so that caller must not fire it again;
+				// a run with no marker (a targeted send) is simply undone.
+				if fire != nil {
+					err = fmt.Errorf("%s; this run of task %s was interrupted, and the daemon replays it when it next starts: %w", daemonStoppingErrText, taskID, err)
+				} else if !IsDaemonStoppingErr(err) {
+					err = fmt.Errorf("%s; retry after it restarts: %w", daemonStoppingErrText, err)
+				}
+			}
 		}
 		if _, uerr := task.UpdateTaskStatus(taskID, &now, status); uerr != nil {
 			log.ErrorLog.Printf("failed to record run status for task %s: %v", taskID, uerr)

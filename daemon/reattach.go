@@ -38,7 +38,14 @@ func (m *Manager) reattachRestoredRuntimes() {
 		}
 	}
 	m.mu.Unlock()
+	// Tracked so a stop joins it by its deadline, or enters it in its ledger
+	// and exits holding the home (#7440): it persists to instances.json.
+	reattachDone, admitted := m.reattachRuns.begin()
+	if !admitted {
+		return
+	}
 	go func() {
+		defer reattachDone()
 		sem := make(chan struct{}, reattachConcurrency)
 		var wg sync.WaitGroup
 		for _, r := range rows {
