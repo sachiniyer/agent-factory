@@ -405,7 +405,8 @@ has-session)     exit 1 ;;`)
 //
 // The orphan shape is load-bearing (#7435 R2): a marked process still
 // descending from the test reaper is positively placed in the reaper's own
-// subtree — protectReasonSelfSubtree — and excluded silently, exactly the way
+// subtree — protectReasonSelfSubtree — and excluded as proven-foreign
+// (named in the log, never blocking, #7484 item 1), exactly the way
 // signalling spares it. These tests exist to check the marker verdicts a
 // sweep reaches only for processes it cannot otherwise place, so the marked
 // process must outlive an intermediate sh and reparent above the reaper's

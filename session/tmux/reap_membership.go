@@ -355,6 +355,13 @@ func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Proce
 // tree, unreadable or mismatched provenance is genuinely UNKNOWN and blocks
 // worktree deletion rather than being collapsed into "not ours".
 //
+// The error carries only the UNATTRIBUTABLE refusals: a carrier positively
+// placed in a foreign subtree (the reaper's own outside a boundary, a proven
+// af-daemon's) is proven NOT ours — refused and left alive like any other
+// exclusion, but NAMED in the log rather than the refusal set, because a
+// carrier the sweep CAN attribute out of the cohort is not what the
+// cleanup-authorizing Unknown exists for (#7484 item 1).
+//
 // An EMPTY cohort — the blind vanished-session sweep, which captured no
 // predecessor to place anyone against — still refuses, but as ONE message rather
 // than a line per pid: there the pid/generation pairing is the operator's whole
@@ -521,15 +528,29 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		case reason != "" && reason != protectReasonUnproven:
 			// A process POSITIVELY placed in another protected subtree —
 			// the reaper's own descendant outside a tmux boundary, or a
-			// proven af-daemon subtree — is proven NOT ours: protected like
-			// signalling spares it, but REPORTED all the same — an excluded
-			// marked carrier is left alive and must never read as a silent
-			// keep (#7435, Codex 4597265500). Foreign evidence beats proof:
-			// a proven member here cannot exist — the protected subtrees
-			// are disjoint from the pane tree.
-			report(process.PID, fmt.Errorf(
-				"captured live pid %d marks session %s but its ancestry places it under %s — refusing to attribute it; left alive, never signalled",
-				process.PID, sanitizedName, reason))
+			// proven af-daemon subtree — is proven NOT ours: protected
+			// like signalling spares it, and NAMED, but named in the LOG
+			// rather than the refusal set. Naming an exclusion and
+			// blocking on it are separate verdicts: only a carrier the
+			// sweep cannot ATTRIBUTE makes the close Unknown, and this
+			// one is positively proven foreign (#7484 item 1 —
+			// reportableSurvivors and reapSessionProcesses already apply
+			// the same rule to their survivors and signalled set). A
+			// throwaway daemon launched from a lane pane inherits the
+			// lane's markers and would otherwise hold the worktree's
+			// cleanup for the daemon's whole lifetime. Foreign evidence
+			// still beats proof: a proven member here cannot exist — the
+			// protected subtrees are disjoint from the pane tree.
+			// reported[] is deliberately NOT marked — a pid that a later
+			// pass re-verdicts unattributable must still produce its
+			// blocking refusal. WARNING, not INFO: a Known close lets
+			// teardown remove the worktree while this process — typically
+			// with its cwd inside it — keeps running, so the line names
+			// the pid, its placement, and that it was left alive (#7484
+			// review).
+			log.WarningLog.Printf("captured live pid %d marks session %s but its ancestry places it under %s — "+
+				"proven foreign: refused, LEFT ALIVE, never signalled, and not blocking cleanup (#7484)",
+				process.PID, sanitizedName, reason)
 		case hasGeneration && generations.empty():
 			// An EMPTY cohort is the blind vanished-session sweep (cleanup.go): it
 			// captured no predecessor, so it has nothing to place this generation

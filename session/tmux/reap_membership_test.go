@@ -1073,10 +1073,15 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 		// cohort membership the sweep is asked to judge them against. Rows
 		// whose verdict needs a sibling carrier in the cohort (a refused
 		// ancestor that would vouch for a descendant) return all of them.
-		build     func(t *testing.T) (candidates []proctree.Process, membership cohortMembership)
-		gens      []string
-		wantOwned bool
-		wantErr   string
+		build func(t *testing.T) (candidates []proctree.Process, membership cohortMembership)
+		gens  []string
+		// wantPlaced rows are refused like wantErr rows — never marked,
+		// never signalled — but the placement is positive PROOF the carrier
+		// is foreign, so it is named in the log instead of the refusal set
+		// that makes the close Unknown (#7484 item 1).
+		wantPlaced string
+		wantOwned  bool
+		wantErr    string
 	}{
 		{
 			// Baseline member: descent from a proven parent with clean
@@ -1170,23 +1175,27 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 		},
 		{
 			// The reaper's own subtree is foreign evidence (#7435 R2):
-			// refused, reported, never signalled.
-			name: "no proof, reaper subtree — refused",
+			// refused and never signalled — but a POSITIVELY placed
+			// carrier is named in the log, not the refusal set: it does
+			// not block the close (#7484 item 1).
+			name: "no proof, reaper subtree — refused, named not blocking",
 			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				child := spawnCohortSleeper(t, name, home, gen, true)
 				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
 			},
-			wantErr: "ancestry places it under",
+			wantPlaced: "ancestry places it under",
 		},
 		{
 			// A positively-identified af-daemon subtree is foreign
-			// evidence: refused, reported, never signalled.
-			name: "no proof, af-daemon subtree — refused",
+			// evidence: refused and never signalled — named in the log,
+			// never blocking the close on a proven-foreign carrier
+			// (#7484 item 1).
+			name: "no proof, af-daemon subtree — refused, named not blocking",
 			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				child := spawnDaemonChild(t)
 				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
 			},
-			wantErr: "ancestry places it under",
+			wantPlaced: "ancestry places it under",
 		},
 		{
 			// No proof and no foreign evidence: the carrier stays eligible
@@ -1232,11 +1241,36 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			if gens == nil {
 				gens = []string{gen}
 			}
+			var placedLog bytes.Buffer
+			oldWarnings := log.WarningLog.Writer()
+			log.WarningLog.SetOutput(&placedLog)
+			defer log.WarningLog.SetOutput(oldWarnings)
 			marked, _, err := markedOrphanProcesses(
 				candidates, name, home,
 				fixtureCohort(gens...), membership, map[int]bool{})
 			for _, candidate := range candidates {
 				pid := strconv.Itoa(candidate.PID)
+				if row.wantPlaced != "" {
+					// Refused, but the refusal is positively PLACED —
+					// named in the log, never in the refusal set that
+					// blocks the close (#7484 item 1).
+					for _, m := range marked {
+						require.NotEqual(t, candidate.PID, m.PID,
+							"a refused carrier must never reach the kill set")
+					}
+					if err != nil {
+						require.NotContains(t, err.Error(), "pid "+pid,
+							"a positively-placed carrier must not appear in the refusals that block the close")
+					}
+					require.Contains(t, placedLog.String(), "pid "+pid,
+						"a positively-placed carrier is NAMED in the log — never silent")
+					require.Contains(t, placedLog.String(), row.wantPlaced)
+					require.Contains(t, placedLog.String(), "LEFT ALIVE",
+						"the warning must say the carrier outlives the teardown it did not block")
+					require.True(t, proctree.AliveSame(candidate),
+						"refused means never signalled")
+					continue
+				}
 				if row.wantOwned {
 					found := false
 					for _, m := range marked {
