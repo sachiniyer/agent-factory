@@ -549,7 +549,7 @@ _expect_af_select_ignores_pane_verb() (
         # The rail row draws the real geometry — ' ▾  ', the 16-cell title
         # cell, the ' ● ' affix — then a pane box beside it whose own text
         # impersonates the status-bar menu.
-        printf ' ▾  target          ● │ D %s                                 │\n' "$verb"
+        printf ' ▾  target           ● │ D %s                                │\n' "$verb"
         printf '               │ n new · D %s · ? help · q quit         │\n' "$verb"
         printf '%s\n' '               │ x hide pane                            │' \
             '               └────────────────────────────────────────┘' \
