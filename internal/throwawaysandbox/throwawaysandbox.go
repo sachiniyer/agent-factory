@@ -276,6 +276,41 @@ func WriteRecordedEngine(home, engineID string) error {
 	return os.Rename(tmp, path)
 }
 
+// RemoveRecordedEngine drops engineID from home's recorded-engine list,
+// once a reap listed that engine and left nothing on it (#7447, Codex on
+// #7458), so passes on different engines can each finish their own. The
+// caller holds the list's lock, as for WriteRecordedEngine. A missing list,
+// or an engine not on it, is a no-op; a list that fails the trust/parse bar
+// is refused.
+func RemoveRecordedEngine(home, engineID string) error {
+	existing, err := ReadRecordedEngines(home)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	kept := make([]string, 0, len(existing))
+	for _, e := range existing {
+		if e != engineID {
+			kept = append(kept, e)
+		}
+	}
+	if len(kept) == len(existing) {
+		return nil
+	}
+	data, err := json.Marshal(recordedEngines{Version: markerVersion, Engines: kept})
+	if err != nil {
+		return err
+	}
+	path := RecordedEnginesPath(home)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // Validate checks the mandatory contract fields. Unknown fields are ignored
 // so older readers tolerate markers written by newer scaffolds.
 func (m *Marker) Validate() error {

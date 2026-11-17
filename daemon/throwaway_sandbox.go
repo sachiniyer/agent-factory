@@ -522,28 +522,43 @@ func reapThrowawayContainers(canonHome string) (complete bool) {
 	return reapCoveredRecordedEngines(canonHome, result.EngineID)
 }
 
-// reapCoveredRecordedEngines reports whether a reap that listed engine covered
-// every Docker engine the home recorded before creating a container on it
-// (#7447, Codex on #7448). An empty listing on one engine proves nothing about
-// containers on another, so the home stays registered for a marked start
-// whose engine matches. No record means no container was ever created, since
-// the record precedes every docker run; a record that cannot be read or
-// trusted is incomplete.
+// reapCoveredRecordedEngines records what a complete reap on engine proved,
+// and reports whether nothing is left to prove (#7447). The home recorded
+// every Docker engine before creating a container on it. A reap that listed
+// engine and left nothing there has finished that engine, so it leaves the
+// record, under the record's lock; a pass on another engine finishes its own,
+// and successive passes converge (Codex on #7458). An empty listing on one
+// engine proves nothing about another, so the home stays registered while any
+// recorded engine is outstanding. No record means no container was ever
+// created; a record that cannot be read or trusted is incomplete.
 func reapCoveredRecordedEngines(canonHome, engine string) bool {
-	recorded, err := throwawaysandbox.ReadRecordedEngines(canonHome)
-	if errors.Is(err, os.ErrNotExist) {
+	if _, err := throwawaysandbox.ReadRecordedEngines(canonHome); errors.Is(err, os.ErrNotExist) {
 		return true
 	}
+	var outstanding []string
+	err := config.WithFileLock(throwawaysandbox.RecordedEnginesPath(canonHome), func() error {
+		recorded, err := throwawaysandbox.ReadRecordedEngines(canonHome)
+		if err != nil {
+			return err
+		}
+		if err := throwawaysandbox.RemoveRecordedEngine(canonHome, engine); err != nil {
+			return err
+		}
+		for _, e := range recorded {
+			if e != engine {
+				outstanding = append(outstanding, e)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		log.WarningLog.Printf("throwaway teardown of %s: cannot read the Docker engines it recorded, so cannot confirm its containers are gone: %v", canonHome, err)
+		log.WarningLog.Printf("throwaway teardown of %s: cannot read or update the Docker engines it recorded, so cannot confirm its containers are gone: %v", canonHome, err)
 		return false
 	}
-	for _, e := range recorded {
-		if e != engine {
-			log.WarningLog.Printf("throwaway teardown of %s: its containers were created on Docker engine %s, but this reap listed engine %q; keeping it registered for a start that can reach that engine",
-				canonHome, e, engine)
-			return false
-		}
+	if len(outstanding) > 0 {
+		log.WarningLog.Printf("throwaway teardown of %s: its containers on Docker engine %q are gone, but it also created containers on %s, which this reap cannot reach; keeping it registered for a start that can",
+			canonHome, engine, strings.Join(outstanding, ", "))
+		return false
 	}
 	return true
 }

@@ -415,3 +415,35 @@ func TestRecordedEnginesRefusesACorruptList(t *testing.T) {
 		t.Fatal("a corrupt list must not be overwritten")
 	}
 }
+
+// TestRemoveRecordedEngine: a reaped engine leaves the list, others stay, and
+// removing one not on it, or from a home with no list, changes nothing.
+func TestRemoveRecordedEngine(t *testing.T) {
+	home := t.TempDir()
+	if err := RemoveRecordedEngine(home, "engine-a"); err != nil {
+		t.Fatalf("removing from a home with no list must be a no-op, got %v", err)
+	}
+	for _, id := range []string{"engine-a", "engine-b"} {
+		if err := WriteRecordedEngine(home, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"engine-a", "engine-c"} {
+		if err := RemoveRecordedEngine(home, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := ReadRecordedEngines(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "engine-b" {
+		t.Fatalf("recorded engines = %v, want [engine-b]", got)
+	}
+	if err := os.WriteFile(RecordedEnginesPath(home), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveRecordedEngine(home, "engine-b"); err == nil {
+		t.Fatal("a corrupt list must be refused, never rewritten")
+	}
+}

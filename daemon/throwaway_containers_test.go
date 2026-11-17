@@ -334,3 +334,26 @@ func TestThrowawayContainerReapCoversEveryRecordedEngine(t *testing.T) {
 		})
 	}
 }
+
+// TestThrowawayContainerReapsOnEachEngineConverge: a home that created
+// containers on two Docker engines is let go once a complete reap has run on
+// each, whichever order the passes come in. Each pass finishes its own engine
+// and leaves only the others outstanding (#7447, Codex on #7458).
+func TestThrowawayContainerReapsOnEachEngineConverge(t *testing.T) {
+	home := t.TempDir()
+	notTheDefaultHome(t)
+	for _, e := range []string{"engine-a", "engine-b"} {
+		require.NoError(t, throwawaysandbox.WriteRecordedEngine(home, e))
+	}
+
+	// Whether an outstanding engine keeps the home is the previous test's
+	// property; this one is that each pass finishes its own engine.
+	captureContainerReapReporting(t, session.OrphanSweepResult{EngineID: "engine-b"})
+	reapThrowawayHomeContainers(home)
+	left, err := throwawaysandbox.ReadRecordedEngines(home)
+	require.NoError(t, err)
+	require.Equal(t, []string{"engine-a"}, left, "the reaped engine leaves the record")
+
+	captureContainerReapReporting(t, session.OrphanSweepResult{EngineID: "engine-a"})
+	require.True(t, reapThrowawayHomeContainers(home), "with both engines reaped, the home is complete")
+}
