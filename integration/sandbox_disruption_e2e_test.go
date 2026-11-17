@@ -39,6 +39,24 @@ const agentServerScanScript = `for d in /root/.af-sessions/*/; do d=${d%/}; af=$
 	`st=$(awk '{sub(/^.*\) /,""); print $20}' "$p/stat" 2>/dev/null); ` +
 	`[ -n "$st" ] && echo "$pid:$st $(tr '\000' ' ' < "$p/cmdline")"; done; done`
 
+// leftoverScanScript lists agent-server-shaped leftovers on the sandbox
+// host as "pid cmdline", one per line. It is deliberately broad — argv
+// carrying "agent-server --listen" OR argv[0] under the sessions root —
+// because it answers "is anything left", the question the precise
+// identity scan cannot answer once teardown has removed the session dir
+// (and with it the af-identity.env anchor the precise match needs). An
+// orphaned server's argv[0] still names its deleted dir, so it proves
+// itself here (TestSandboxReapScriptWithUnresolvedSessionDirOrphansThe-
+// Process documents that failure mode). Over-detection can only fail the
+// test — the safe direction. The AFLEFTOVERSCAN marker keeps the scanning
+// shell out of its own result: its cmdline carries the marker text, and
+// every $(...) child inherits it.
+const leftoverScanScript = `for p in /proc/[0-9]*; do pid=${p#/proc/}; ` +
+	`c=$(tr '\000' ' ' < "$p/cmdline" 2>/dev/null); [ -n "$c" ] || continue; ` +
+	`case "$c" in *AFLEFTOVERSCAN*) continue;; esac; ` +
+	`a0=${c%% *}; case "$a0" in /root/.af-sessions/*) echo "$pid $c"; continue;; esac; ` +
+	`case "$c" in *"agent-server --listen"*) echo "$pid $c";; esac; done`
+
 // TestSandboxDisruptionsE2E is the W10.4 regression net (epic #5571): the same
 // real daemon and containerized sshd host as TestSandboxDaemonE2E, but the point
 // is what survives a disruption, not the happy lifecycle. One live session takes
@@ -160,6 +178,40 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 		t.Helper()
 		if got := wantSingleAgentServer(what); got != want {
 			t.Fatalf("%s replaced the agent-server: %s -> %s", what, want, got)
+		}
+	}
+	// The BROAD leftover scan answers "is anything left" — a job the
+	// precise scan cannot do, because a server orphaned by teardown
+	// deleting its session dir no longer has the identity anchor it needs
+	// (an established failure mode; see leftoverScanScript).
+	agentServerLeftovers := func() map[string]string {
+		out, _ := exec.Command("docker", "exec", host.container, "sh", "-c", leftoverScanScript).Output()
+		procs := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if pid, cmd, ok := strings.Cut(line, " "); ok && pid != "" {
+				procs[pid] = cmd
+			}
+		}
+		return procs
+	}
+	requireNoAgentServers := func(what string, timeout time.Duration) {
+		t.Helper()
+		var procs map[string]string
+		deadline := time.Now().Add(timeout)
+		for {
+			procs = agentServerLeftovers()
+			if len(procs) == 0 {
+				return
+			}
+			if !time.Now().Before(deadline) {
+				var dump []string
+				for pid, cmd := range procs {
+					dump = append(dump, pid+" "+cmd)
+				}
+				sort.Strings(dump)
+				t.Fatalf("%s:\n%s", what, strings.Join(dump, "\n"))
+			}
+			time.Sleep(300 * time.Millisecond)
 		}
 	}
 	sessionDirs := func() string { return host.exec(t, "ls -1 /root/.af-sessions 2>/dev/null") }
@@ -293,7 +345,7 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 
 	var archived daemon.ArchiveSessionResponse
 	post("/v1/ArchiveSession", daemon.ArchiveSessionRequest{Title: title, RepoID: repoID}, &archived)
-	waitFor(t, "the archived session's agent-server to stop", 30*time.Second, func() bool { return len(agentServers()) == 0 })
+	requireNoAgentServers("the archived session's agent-server to stop", 30*time.Second)
 	if loc := archived.ArchivedWorkspace; loc == nil || loc.Pushed || loc.Dir == "" {
 		t.Fatalf("archive response archived_workspace = %+v, want an unpushed preserved dir", loc)
 	}
@@ -330,9 +382,8 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 	prompt("after-host-restart-marker")
 
 	post("/v1/KillSession", daemon.KillSessionRequest{Title: title, RepoID: repoID}, &daemon.KillSessionResponse{})
-	waitFor(t, "the host to be clean after kill", 60*time.Second, func() bool {
-		return len(agentServers()) == 0 && sessionDirs() == ""
-	})
+	requireNoAgentServers("the host has agent-server leftovers after kill", 60*time.Second)
+	waitFor(t, "the session dirs to be gone after kill", 30*time.Second, func() bool { return sessionDirs() == "" })
 }
 
 // tunnelProc is one daemon-host `ssh -L` tunnel process and the local port it
