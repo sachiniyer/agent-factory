@@ -154,6 +154,13 @@ func paneRootEvidenceAfter(cur *proctree.Process, a paneRootAnswer) (*proctree.P
 	return cur, paneRootVerdictKept
 }
 
+// paneRootReconcileGap is a test-only seam between the cell's Load and the
+// write the table computed from it: the storm test parks a racer inside the
+// gap to stage — deterministically — the lost update a reconcile built as
+// Load-then-Store would suffer, so the test goes red the moment the CAS
+// loop is replaced (#7494 item 4). nil in production.
+var paneRootReconcileGap func()
+
 // reconcilePaneRootEvidence applies the rule table to the stored anchor,
 // atomically: the table is the SOLE writer of the cell's next value (#7484
 // item 3), and the CAS loop is what makes "read the table, write the cell"
@@ -164,6 +171,9 @@ func paneRootEvidenceAfter(cur *proctree.Process, a paneRootAnswer) (*proctree.P
 func (t *TmuxSession) reconcilePaneRootEvidence(a paneRootAnswer) {
 	for {
 		cur := t.paneRootEvidence.Load()
+		if paneRootReconcileGap != nil {
+			paneRootReconcileGap()
+		}
 		next, _ := paneRootEvidenceAfter(cur, a)
 		if next == cur {
 			return

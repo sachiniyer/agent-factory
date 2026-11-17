@@ -1358,6 +1358,42 @@ func TestReconcilePaneRootEvidenceAppliesTheTableAtomically(t *testing.T) {
 		require.Equal(t, newer, *cur,
 			"every serial order converges on the resolved root — the seed surviving is a lost update")
 	})
+
+	t.Run("a racer parked in the Load-CAS gap cannot resurrect its verdict", func(t *testing.T) {
+		// The deterministic lost update (#7494 item 4): park the seed's
+		// reconcile between Load and CAS, let resolved win the cell, then
+		// release. Under the real CAS loop the seed's swap fails on the
+		// newer cell and its retry keeps it; under Load-then-Store the
+		// parked write lands on top — the cell ends at `old`, red.
+		s := &TmuxSession{}
+		seated := make(chan struct{})
+		release := make(chan struct{})
+		var parked atomic.Bool
+		oldGap := paneRootReconcileGap
+		paneRootReconcileGap = func() {
+			if parked.CompareAndSwap(false, true) {
+				close(seated)
+				<-release
+			}
+		}
+		t.Cleanup(func() { paneRootReconcileGap = oldGap })
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.reconcilePaneRootEvidence(paneRootAnswer{seed: &old})
+		}()
+		<-seated
+		s.reconcilePaneRootEvidence(paneRootAnswer{resolved: newer})
+		close(release)
+		wg.Wait()
+
+		cur := s.paneRootEvidence.Load()
+		require.NotNil(t, cur)
+		require.Equal(t, newer, *cur,
+			"the verdict the parked load lost to must stand — a stale Store resurrects the seed")
+	})
 }
 
 // startDeadLeaderWithSessionChild spawns a kernel-session leader with one
