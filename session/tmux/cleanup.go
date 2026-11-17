@@ -772,9 +772,13 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 	// without signalling anything (#3309 review). markedOrphanProcesses renders
 	// that refusal through blindGenerationRefusal, which names the unplaceable
 	// pids and the read that tells a leftover from a replacement (#3706).
+	// One attestation scope for the whole sweep: the claimant pids these
+	// passes meet are stable across refreshes, so blind, per-pass and final
+	// inspection share the memo (#7494 item 2).
+	att := proctree.NewExeAttestations()
 	if generations.empty() {
 		blindCandidates, refreshErr := refreshOrphanCandidates(candidates, match, nil)
-		_, _, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations, membership, reported)
+		_, _, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations, membership, reported, att)
 		return errors.Join(sweepErr, refreshErr, inspectErr)
 	}
 	initialCandidates, initialErr := refreshOrphanCandidates(candidates, match, &generations)
@@ -792,7 +796,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		observed, observeErr := observeOrphanAncestryObserved(refreshed, match, reapGraceWait)
 		refreshed, afterErr := refreshOrphanCandidates(observed, match, &generations)
 		sweepErr = errors.Join(sweepErr, beforeErr, observeErr, afterErr)
-		marked, _, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations, membership, reported)
+		marked, _, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations, membership, reported, att)
 		sweepErr = errors.Join(sweepErr, inspectErr)
 		// The tmux session is GONE and these processes are still alive carrying its
 		// ownership markers: they outlived the pane tree that was supposed to
@@ -809,7 +813,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		candidates = refreshed
 	}
 	finalCandidates, refreshErr := refreshOrphanCandidates(candidates, match, &generations)
-	left, leftSnap, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations, membership, reported)
+	left, leftSnap, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations, membership, reported, att)
 	sweepErr = errors.Join(sweepErr, refreshErr, inspectErr)
 	// The survivor check applies the SAME exclusion set signalling did
 	// (#7435 R3, Codex 4593411284): a POSITIVELY protected process — the

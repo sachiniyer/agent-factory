@@ -51,10 +51,15 @@ func protectReasonDaemonDescendant(daemonPID int) string {
 // protectReasonDaemonUnverified names the BLOCKING placement for a process
 // whose argv CLAIMS agent-factory daemon identity but whose kernel-attested
 // executable does not attest it — `exec -a af … --daemon` can write argv, it
-// cannot write the binary the kernel links (#7491 item 1). The claim still
-// keeps the process from being signalled; it can never authorize a close.
+// cannot write the binary the kernel links (#7491 item 1), and on darwin a
+// REAL daemon whose executable was replaced after exec reads the same way:
+// its text vnode lost every name, and an unlinked vnode has no userspace
+// opener (#7494 item 1). Either way the refusal must be actionable — it
+// names the pid as an af daemon that could not be verified and gives the
+// remedy: restart or stop it. The claim still keeps the process from being
+// signalled; it can never authorize a close.
 func protectReasonDaemonUnverified(daemonPID int) string {
-	return fmt.Sprintf("a descendant of pid %d, which claims agent-factory daemon argv its kernel executable does not attest (#7491)", daemonPID)
+	return fmt.Sprintf("a descendant of pid %d, an agent-factory daemon its kernel executable could not verify — restart or stop that daemon to unblock the close", daemonPID)
 }
 
 // reapProtectedSet computes, from ONE pre-kill process-table snapshot — the
@@ -102,11 +107,12 @@ func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process
 			protected[pid] = protectedVerdict{reason: protectReasonAncestor, positive: true}
 		}
 	}
+	att := proctree.NewExeAttestations()
 	for _, p := range captured {
 		if protected.protects(p.PID) {
 			continue
 		}
-		if reason, positive, _ := classifyCaptureAncestry(snap, p.PID, self); reason != "" {
+		if reason, positive, _, _ := classifyCaptureAncestry(snap, p.PID, self, att); reason != "" {
 			protected[p.PID] = protectedVerdict{reason: reason, positive: positive}
 		}
 	}
@@ -137,45 +143,48 @@ func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process
 // server parents it — a SIGHUP-ignoring pane root outlives its session
 // exactly that way — and only a carrier proof could NOT place is refused
 // behind the boundary, reported and never signalled.
-func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int) (reason string, positive bool, tmuxBoundary bool) {
+func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int, att *proctree.ExeAttestations) (reason string, positive bool, tmuxBoundary bool, unverifiedDaemon int) {
 	start := pid
 	for range 128 {
 		if pid <= 0 {
-			return "", false, false
+			return "", false, false, 0
 		}
 		p, ok := snap[pid]
 		if !ok {
-			return "", false, false
+			return "", false, false, 0
 		}
 		switch {
 		case pid == self:
-			return protectReasonSelfSubtree, true, false
+			return protectReasonSelfSubtree, true, false, 0
 		case proctree.TmuxIdentityOf(pid) == proctree.Tmux:
-			return "", false, true
+			return "", false, true, 0
 		default:
-			switch afDaemonClass(p) {
+			switch afDaemonClass(p, att) {
 			case afDaemonIs:
 				// VERIFIED daemon ancestry — the kernel attested the
 				// executable is an af build (#7491 item 1): a positive
 				// placement, excluded and named, that does not block.
 				if pid == start {
-					return protectReasonAFDaemon, true, false
+					return protectReasonAFDaemon, true, false, 0
 				}
-				return protectReasonDaemonDescendant(pid), true, false
+				return protectReasonDaemonDescendant(pid), true, false, 0
 			case afDaemonUnverified:
 				// argv CLAIMS daemon ancestry the kernel executable will
 				// not attest — `exec -a af … --daemon` writes argv, not
 				// the binary. The claim still spares the process from
 				// signals (safe direction) but can never authorize the
 				// close it tried to veto around: BLOCKING like unproven.
-				return protectReasonDaemonUnverified(pid), false, false
+				// The claimant's pid rides out so the refusal can NAME
+				// the daemon and its remedy, not just the candidate
+				// (#7494 item 1).
+				return protectReasonDaemonUnverified(pid), false, false, pid
 			case afDaemonUncertain:
-				return protectReasonUnproven, false, false
+				return protectReasonUnproven, false, false, 0
 			}
 		}
 		pid = p.PPID
 	}
-	return "", false, false
+	return "", false, false, 0
 }
 
 // reportableSurvivors filters a survivor set the way signalling filtered its
@@ -230,7 +239,11 @@ const (
 // executable argv[0] names, so a comm that cannot be an af binary rules the
 // process OUT. Only an af-named comm with unreadable argv stays uncertain —
 // the still-fail-closed direction for a real foreign-uid daemon.
-func afDaemonClass(p proctree.Process) afDaemonVerdict {
+// att scopes kernel attestation to one sweep: callers holding a
+// *proctree.ExeAttestations pay the attestation read once per claimant no
+// matter how many candidates its ancestry walk meets (#7494 item 2). nil
+// attests directly — the verdict is unchanged.
+func afDaemonClass(p proctree.Process, att *proctree.ExeAttestations) afDaemonVerdict {
 	if p.KernelThread {
 		return afDaemonNot
 	}
@@ -243,7 +256,7 @@ func afDaemonClass(p proctree.Process) afDaemonVerdict {
 		// attestation promotes the claim to a placement that may
 		// authorize cleanup: an exe whose Go build info names this
 		// module is af at any path, and a foreign binary named af is not.
-		if proctree.ExeAttestsAF(p) {
+		if att.AttestsAF(p) {
 			return afDaemonIs
 		}
 		return afDaemonUnverified
