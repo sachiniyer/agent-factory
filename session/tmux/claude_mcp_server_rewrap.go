@@ -41,8 +41,8 @@ var (
 //	          least claudeMCPTrustPaintingOf reads of the old modal too)
 //	body      the server's name and the text below it: no ❯ row, no footer
 //	options   whole option labels, each beginning a row, each at most once
-//	end       nothing, the start of one more option, or the footer or the
-//	          start of it, beginning a row
+//	end       nothing, the start of one more option (as little as its ❯,
+//	          #7390), or the footer or the start of it, beginning a row
 //
 // A ❯ row must begin one of the options, and there is at most one. No line from
 // the preamble down may be a plain rule or a boxed composer's "> " row. A
@@ -129,15 +129,16 @@ func claudeMCPServerPaintedFrom(pane claudeLaunchDialogPane, first int) (string,
 
 	rest := pane.text[at:]
 	switch {
-	case rest == "":
+	case rest == "" && !claudeMCPServerCursorPainted(pane):
 		return claudeMCPServerOneCursor(pane, first, cursorRows, "its options, with its footer not painted yet")
 	case rest == claudeMCPServerFooterSquashed:
 		return claudeMCPServerOneCursor(pane, first, cursorRows, "all of it, in rows a narrow pane wrapped or a frame surrounds")
-	case strings.HasPrefix(claudeMCPServerFooterSquashed, rest):
+	case rest != "" && strings.HasPrefix(claudeMCPServerFooterSquashed, rest):
 		return claudeMCPServerOneCursor(pane, first, cursorRows, "its options, with its footer still being painted")
 	}
 	if rows, ok := claudeMCPServerPartialOption(pane, at, seen); ok {
-		// One more option, painted as far as its ordinal or its first rows.
+		// One more option, painted as far as its ordinal, its first rows, or
+		// its cursor alone (#7390).
 		for _, content := range rows {
 			cursorRows[content] = true
 		}
@@ -145,6 +146,27 @@ func claudeMCPServerPaintedFrom(pane claudeLaunchDialogPane, first int) (string,
 	}
 	// Anything else below the options is not this dialog's.
 	return "", false
+}
+
+// claudeMCPServerCursorPainted reports whether the pane's last content row is
+// a ❯ and nothing else, with no rule between it and the content row above it:
+// one more option, painted as far as its cursor glyph (#7390). Claude Code
+// paints the cursor before the label it points at, so a frame caught between
+// the two shows a bare ❯ under the options. It is no composer: a composer's ❯
+// sits under its own rule, and claudeMCPServerPaintedFrom has already turned
+// down a plain rule anywhere below the preamble; a box's edge straight above
+// the ❯ is turned down here.
+func claudeMCPServerCursorPainted(pane claudeLaunchDialogPane) bool {
+	last := len(pane.starts) - 1
+	if last < 1 || !pane.rows[pane.index[last]].selected || pane.starts[last] != len(pane.text) {
+		return false
+	}
+	for i := pane.index[last-1] + 1; i < pane.index[last]; i++ {
+		if claudeTrustFrameRule(pane.lines[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // claudeMCPServerOneCursor reports saw, unless a ❯ row from content row first
@@ -202,7 +224,9 @@ func claudeMCPServerWholeLabelAt(pane claudeLaunchDialogPane, content int, seen 
 // claudeMCPServerPartialOption reports whether the text from offset at, which
 // begins a row, is one more option with the paint stopped inside it: its
 // ordinal alone, or the start of a label not yet seen, after its ordinal or
-// not. rows are the content rows a ❯ may sit on.
+// not. The start can be empty: a ❯ row with no label painted yet, which the
+// caller has checked with claudeMCPServerCursorPainted (#7390). rows are the
+// content rows a ❯ may sit on.
 func claudeMCPServerPartialOption(pane claudeLaunchDialogPane, at int, seen map[int]bool) ([]int, bool) {
 	content, ok := pane.rowStart(at)
 	if !ok {

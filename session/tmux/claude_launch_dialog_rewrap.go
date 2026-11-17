@@ -20,7 +20,10 @@ import (
 // one. So the matcher compares text with its whitespace removed:
 //
 //   - a pane whose content ENDS with the dialog's option block and whole footer
-//     is the dialog scrolled off the top, at any width (claudeLaunchDialogTail);
+//     is the dialog scrolled off the top, at any width (claudeLaunchDialogTail),
+//     and one that ends with the block and the start of the footer is the
+//     same, with the footer still being painted
+//     (claudeLaunchDialogFooterPainting, #7390);
 //   - a pane whose content ENDS with the start of the legacy dialog's question,
 //     or with the whole question and the rows it paints below it, is that
 //     dialog being painted (claudeLaunchDialogPainting).
@@ -212,7 +215,16 @@ func claudeLaunchDialogRewrapOf(screen visibleText) (claudeLaunchDialogMatch, bo
 	if match, ok := claudeLaunchDialogPainting(pane); ok {
 		return match, true
 	}
-	return claudeLaunchDialogMCPServerFromPreamble(pane)
+	if match, ok := claudeLaunchDialogMCPServerFromPreamble(pane); ok {
+		return match, true
+	}
+	// Asked last, so every pane a reader above holds is held as before.
+	for _, options := range claudeLaunchDialogOptionSets {
+		if match, ok := claudeLaunchDialogFooterPainting(pane, options); ok {
+			return match, true
+		}
+	}
+	return claudeLaunchDialogMatch{}, false
 }
 
 // claudeLaunchDialogTail reports a pane whose content ends with a launch
@@ -247,6 +259,41 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 			end, footerIndex = len(pane.text)-len(footer), i
 		}
 	}
+	return claudeLaunchDialogTailOver(pane, options, end, footerIndex, "its footer")
+}
+
+// claudeLaunchDialogFooterPainting reports a pane whose content ends with a
+// launch dialog's option block and the start of its footer, read exactly as
+// claudeLaunchDialogTail reads the block over the whole footer (#7390). A
+// frame caught while Claude Code paints the footer, on a pane too short for
+// the dialog's top, shows whole option labels over "Enter to confirm ·"; the
+// same rows over the whole footer held, and these read clear.
+//
+// The start is one or more whole rows, the last content in the pane, whose
+// text is the start of one of the dialog's footers and not the whole of it.
+// Each content row a footer could start on is tried, from the bottom up: a
+// one-column pane paints a row "E" for "Esc" as well as for "Enter".
+func claudeLaunchDialogFooterPainting(pane claudeLaunchDialogPane, options claudeLaunchDialogOptions) (claudeLaunchDialogMatch, bool) {
+	for content := len(pane.starts) - 1; content > 0; content-- {
+		start := pane.text[pane.starts[content]:]
+		for i, footer := range options.footers {
+			if start == "" || len(start) >= len(footer) || !strings.HasPrefix(footer, start) {
+				continue
+			}
+			if match, ok := claudeLaunchDialogTailOver(pane, options, pane.starts[content], i,
+				"the start of its footer, still being painted"); ok {
+				return match, true
+			}
+			break
+		}
+	}
+	return claudeLaunchDialogMatch{}, false
+}
+
+// claudeLaunchDialogTailOver reads the option block up from offset end, where
+// the dialog's footers[footerIndex], or as much of it as shown names, begins
+// and runs to the end of the pane's text: the rest of claudeLaunchDialogTail.
+func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunchDialogOptions, end, footerIndex int, shown string) (claudeLaunchDialogMatch, bool) {
 	if end <= 0 {
 		return claudeLaunchDialogMatch{}, false
 	}
@@ -301,13 +348,13 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
 			return claudeLaunchDialogMatch{}, false
 		}
-		match.saw = "only its option rows and its footer"
+		match.saw = "only its option rows and " + shown
 		return match, true
 	case at > 0 && claudeLaunchDialogLabelTail(pane.text[:at], options.labels):
 		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
 			return claudeLaunchDialogMatch{}, false
 		}
-		match.saw = "only the end of its option rows and its footer"
+		match.saw = "only the end of its option rows and " + shown
 		return match, true
 	case at > 0 && labels > 0 && block:
 		block, ok := pane.rowStart(at)
@@ -385,7 +432,7 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 				return claudeLaunchDialogMatch{}, false
 			}
 		}
-		match.saw = "its option rows and its footer under rows af cannot read as the dialog's question"
+		match.saw = "its option rows and " + shown + " under rows af cannot read as the dialog's question"
 		return match, true
 	}
 	return claudeLaunchDialogMatch{}, false
