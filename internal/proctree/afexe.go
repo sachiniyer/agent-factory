@@ -118,6 +118,12 @@ type attestFlight struct {
 	done chan struct{}
 	ok   bool
 	id   exeID
+	// chans counts the result channels this flight holds open: exactly
+	// one — the shared done every waiter selects on. x/sync's DoChan
+	// allocated one channel per waiter and retained each abandoned one
+	// until the worker finished (#7496); the counter makes the constant-
+	// memory invariant directly assertable by the test.
+	chans int
 }
 
 // attestFlightSet tracks in-flight attestation reads by process instance.
@@ -139,7 +145,7 @@ func (s *attestFlightSet) begin(key attestKey) (f *attestFlight, leader bool) {
 	if f, ok := s.inFlight[key]; ok {
 		return f, false
 	}
-	f = &attestFlight{done: make(chan struct{})}
+	f = &attestFlight{done: make(chan struct{}), chans: 1}
 	s.inFlight[key] = f
 	return f, true
 }

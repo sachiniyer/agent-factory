@@ -222,6 +222,12 @@ func TestExeAttestsAFSingleFlightsAStalledRead(t *testing.T) {
 	// same leak in another shape (#7496).
 	require.Equal(t, 1, attestFlights.inFlightCount(),
 		"expired waiters must leave nothing behind — a stalled read holds constant memory")
+	f, _ := attestFlights.begin(attestKey{pid: p.PID, startID: p.StartID})
+	require.Equal(t, 1, f.chans,
+		"every waiter shares the one completion channel — none are retained per attempt")
+	// The test's own begin was a follower join on the still-running
+	// flight, so it adds no worker and no channel either.
+	require.Equal(t, int32(1), workers.Load())
 }
 
 // One sweep scope pays the kernel read once per claimant instance no matter
