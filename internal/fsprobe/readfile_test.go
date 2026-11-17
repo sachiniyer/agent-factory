@@ -207,7 +207,7 @@ func TestReadFileWithOpen_AnAnswerOfAnotherTypeIsAnError(t *testing.T) {
 	key := testQuestion + "\x00" + path
 	// A flight of the same question already running, whose read answers a
 	// string. It stays published, so the caller below joins it.
-	flight := &probeFlight{done: make(chan struct{}), res: "a string"}
+	flight := &probeFlight{done: make(chan struct{}), res: "a string", clock: wallFlightClock{}, started: time.Now()}
 	readFileQuestionFlights.Lock()
 	readFileQuestionFlights.byDir[key] = flight
 	readFileQuestionFlights.Unlock()

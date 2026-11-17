@@ -57,16 +57,23 @@ func TestPaced_BoundsAStepThatDoesNotAnswer(t *testing.T) {
 }
 
 // The bound is per step. Work whose every step answers well within the bound
-// answers, however many bounds its whole run takes.
+// answers, however many bounds its whole run takes. The steps' cost is
+// declared on a manual clock (#7456), so no scheduler can stretch one past
+// the bound.
 func TestPaced_AnswersWhateverItsTotalTimeWhenEveryStepAnswers(t *testing.T) {
+	clock := NewManualClock(time.Now())
+	restoreClock := SetFlightClockForTest(clock)
 	restoreTimeout := SetProbeTimeoutForTest(50 * time.Millisecond)
-	defer restoreTimeout()
-	start := time.Now()
+	defer func() {
+		restoreTimeout()
+		restoreClock()
+	}()
+	start := clock.Now()
 	got, err := Paced("question", t.Name(), func(step func()) (int, error) {
 		steps := 0
-		for time.Since(start) < 250*time.Millisecond {
+		for clock.Since(start) < 250*time.Millisecond {
 			step()
-			time.Sleep(10 * time.Millisecond)
+			clock.Advance(10 * time.Millisecond)
 			steps++
 		}
 		return steps, nil

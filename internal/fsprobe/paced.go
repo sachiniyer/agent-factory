@@ -15,8 +15,12 @@ type pacedFlight struct {
 	res      any
 	err      error
 	timedOut bool // guarded by pacedFlights
-	// lastStep is when work last reported a step, in Unix nanoseconds.
+	// lastStep is when work last reported a step, in Unix nanoseconds on the
+	// flight's clock.
 	lastStep atomic.Int64
+	// clock is the time source the bound runs on, loaded when the flight
+	// begins (#7456).
+	clock flightClock
 }
 
 // pacedFlights is Paced's registry, keyed by question and key.
@@ -65,12 +69,12 @@ func runPaced(id, question, key string, work func(step func()) (any, error)) (an
 		pacedFlights.Unlock()
 		return waitPaced(id, question, key, active)
 	}
-	flight := &pacedFlight{done: make(chan struct{})}
-	flight.lastStep.Store(time.Now().UnixNano())
+	flight := &pacedFlight{done: make(chan struct{}), clock: flightClocks.load()}
+	flight.lastStep.Store(flight.clock.Now().UnixNano())
 	pacedFlights.byKey[id] = flight
 	pacedFlights.Unlock()
 	go func() {
-		res, err := work(func() { flight.lastStep.Store(time.Now().UnixNano()) })
+		res, err := work(func() { flight.lastStep.Store(flight.clock.Now().UnixNano()) })
 		pacedFlights.Lock()
 		flight.res, flight.err = res, err
 		if pacedFlights.byKey[id] == flight {
@@ -86,15 +90,20 @@ func runPaced(id, question, key string, work func(step func()) (any, error)) (an
 // passed since its last step.
 func waitPaced(id, question, key string, flight *pacedFlight) (any, error) {
 	timeout := probeTimeout.load()
-	timer := time.NewTimer(timeout)
+	// The bound is measured from the flight's last step, so the deadline is
+	// the absolute instant lastStep + timeout: arming a fixed instant can't
+	// overshoot however the work's steps and advances interleave with the
+	// arm (#7456). Each staleness read takes the clock before lastStep so a
+	// step that lands mid-read makes the flight look fresher, never staler.
+	timer := flight.clock.NewTimer(time.Unix(0, flight.lastStep.Load()).Add(timeout))
 	defer timer.Stop()
 	for {
 		select {
 		case <-flight.done:
 			return flight.res, flight.err
-		case <-timer.C:
-			if since := time.Since(time.Unix(0, flight.lastStep.Load())); since < timeout {
-				timer.Reset(timeout - since)
+		case <-timer.C():
+			if since := flight.clock.Now().Sub(time.Unix(0, flight.lastStep.Load())); since < timeout {
+				timer.Reset(time.Unix(0, flight.lastStep.Load()).Add(timeout))
 				continue
 			}
 			pacedFlights.Lock()

@@ -58,3 +58,12 @@ func SetLstatForTest(f func(string) (os.FileInfo, error)) func() {
 func SetOpenForTest(f func(string) (*os.File, error)) func() {
 	return openPath.replace(f)
 }
+
+// SetFlightClockForTest installs the clock every bounded flight's bound runs
+// on — Paced's per-step bound and the plain probes' deadlines alike — so a
+// test can declare how long each lookup takes on a ManualClock instead of
+// racing the runner's scheduler (#7456). Callers must restore the original
+// via the returned function.
+func SetFlightClockForTest(c *ManualClock) func() {
+	return flightClocks.replace(c)
+}
