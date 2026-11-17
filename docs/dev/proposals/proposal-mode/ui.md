@@ -15,7 +15,6 @@ The web UI only gets this tab, in step 2 and step 3.
 │                           │                                           │
 │                           │ ## Endpoints                              │
 │                           │ …                                         │
-│                           │                     Sending in 4s · Hold  │
 └───────────────────────────┴───────────────────────────────────────────┘
 ```
 
