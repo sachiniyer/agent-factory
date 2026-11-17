@@ -20,12 +20,12 @@ import (
 // issue7453Frame is the issue's frame. The composer's prompt row is its ❯ and
 // the U+00A0 2.1.322 paints after it.
 const issue7453Frame = "Before you start: do you want Claude to\nwork in this folder?\n" +
-	"────────────────────────────────────────\n❯ \n────────────────────────────────────────\n" +
+	"────────────────────────────────────────\n❯\u00a0\n────────────────────────────────────────\n" +
 	"❯ 1. Yes, I trust this folder\n  2. No, exit\n\nEnter to confirm · Esc to cancel"
 
 // emptyComposerPrompts are an empty composer's prompt row as a pane shows it:
 // its ❯, then the U+00A0 2.1.322 paints, a space, or nothing.
-var emptyComposerPrompts = []string{"❯ ", "❯ ", "❯"}
+var emptyComposerPrompts = []string{"❯\u00a0", "❯ ", "❯"}
 
 // emptyComposerForms are the composer's rows straight above the options: its
 // prompt row between its plain rules, or under its opening rule or over its
@@ -74,7 +74,7 @@ func TestCheckAndHandleTrustPrompt_Issue7453EmptyComposerOverTheOptionsAndTheirF
 		for _, options := range dialogOptionSets {
 			for _, width := range []int{16, 40} {
 				rows := indentedRows(width, dialog.head...)
-				rows = append(append(rows, ruledComposers["ruled"](width, "❯ ")...), indentedRows(width, options[:len(options)-1]...)...)
+				rows = append(append(rows, ruledComposers["ruled"](width, "❯\u00a0")...), indentedRows(width, options[:len(options)-1]...)...)
 				rows = append(rows, "Enter to confirm ·")
 				requireHeldWithoutAKey(t, strings.Join(rows, "\n"), fmt.Sprintf(
 					"%s at %d columns: the options over the footer's first words, under an empty composer", dialog.name, width))
@@ -85,7 +85,7 @@ func TestCheckAndHandleTrustPrompt_Issue7453EmptyComposerOverTheOptionsAndTheirF
 
 // The hold says why, once, and names the dialog the options are.
 func TestCheckAndHandleTrustPrompt_Issue7453RefusalNamesTheDialog(t *testing.T) {
-	mcp := strings.Join(slices.Concat(dialogHeads[3].head, ruledComposers["ruled"](40, "❯ "), dialogHeads[3].options), "\n")
+	mcp := strings.Join(slices.Concat(dialogHeads[3].head, ruledComposers["ruled"](40, "❯\u00a0"), dialogHeads[3].options), "\n")
 	for _, tt := range []struct{ name, content, dialog string }{
 		{"the issue's frame", issue7453Frame, claudeFolderTrustDialogName},
 		{"the MCP server dialog's", mcp, claudeMCPServerDialogName},
