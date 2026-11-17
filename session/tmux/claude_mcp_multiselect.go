@@ -136,7 +136,10 @@ func claudeMCPServerCheckboxStart(label string) (string, bool) {
 // output, so the picker quoted in a transcript has something painted after its
 // footer and never matches (#4254, #4735). A proper prefix of the grammar is
 // partial. A picker whose header the pane does not show, or whose footer it
-// wraps, is none of these; claudeMCPServersTailOf holds it, last (#7463).
+// wraps, is none of these; claudeMCPServersTailOf holds it, last (#7463). So is
+// one still being painted under a composer an earlier Claude left above it, or
+// with a row only begun or wrapped; claudeMCPServersPaintingOf holds it, after
+// that (#7504).
 func claudeMCPServersPickerOf(screen visibleText) claudeMCPServersVerdict {
 	if v := claudeMCPServersGrammarOf(screen); v != claudeMCPServersNone {
 		return v
@@ -172,62 +175,14 @@ func claudeMCPServersGrammarOf(screen visibleText) claudeMCPServersVerdict {
 		return claudeMCPServersNone
 	}
 
-	const (
-		inBody = iota
-		inServers
-		// unpainted: blank rows straight after the server rows. The picker
-		// paints its submit row with no gap, so these can only be the bottom
-		// of a picker still being painted — anything painted below them means
-		// this is not the picker.
-		unpainted
-		afterSubmit
-		afterFooter
-	)
-	phase := inBody
+	phase := claudeMCPServersInBody
 	for i := header + 1; i < len(rows); i++ {
-		row, rule := rows[i], claudeTrustFrameRule(lines[i])
-		footer := row.label == claudeMCPServersFooter
-		switch phase {
-		case inBody:
-			switch {
-			case rule || footer || row.label == claudeMCPServersSubmitLabel:
-				return claudeMCPServersNone
-			case row.blank:
-			case claudeMCPServerCheckboxRow(row.label):
-				phase = inServers
-			case row.selected:
-				// A ❯ row that is not a server row is a composer.
-				return claudeMCPServersNone
-			}
-		case inServers:
-			switch {
-			case claudeMCPServerCheckboxRow(row.label):
-			case row.label == claudeMCPServersSubmitLabel:
-				phase = afterSubmit
-			case row.blank && !rule:
-				phase = unpainted
-			default:
-				return claudeMCPServersNone
-			}
-		case unpainted:
-			if !row.blank || rule {
-				return claudeMCPServersNone
-			}
-		case afterSubmit:
-			switch {
-			case row.blank && !rule:
-			case footer:
-				phase = afterFooter
-			default:
-				return claudeMCPServersNone
-			}
-		case afterFooter:
-			if !row.blank || rule {
-				return claudeMCPServersNone
-			}
+		var ok bool
+		if phase, ok = claudeMCPServersRowAfter(phase, rows[i], claudeTrustFrameRule(lines[i])); !ok {
+			return claudeMCPServersNone
 		}
 	}
-	if phase == afterFooter {
+	if phase == claudeMCPServersAfterFooter {
 		if len(cursorRows) != 1 {
 			// A picker always has its cursor on one row.
 			return claudeMCPServersNone
@@ -235,6 +190,70 @@ func claudeMCPServersGrammarOf(screen visibleText) claudeMCPServersVerdict {
 		return claudeMCPServersComplete
 	}
 	return claudeMCPServersPartial
+}
+
+// claudeMCPServersPhase is how far down the picker's grammar
+// (claudeMCPServersPickerOf) the rows below its header have read.
+type claudeMCPServersPhase int
+
+const (
+	claudeMCPServersInBody claudeMCPServersPhase = iota
+	claudeMCPServersInServers
+	// claudeMCPServersUnpainted: blank rows straight after the server rows.
+	// The picker paints its submit row with no gap, so these can only be the
+	// bottom of a picker still being painted — anything painted below them
+	// means this is not the picker.
+	claudeMCPServersUnpainted
+	claudeMCPServersAfterSubmit
+	claudeMCPServersAfterFooter
+)
+
+// claudeMCPServersRowAfter reads one row below the picker's header, in phase:
+// the phase the row leaves the grammar in, and false when the row is none the
+// picker paints there. rule says whether the row is a frame rule, which
+// claudeTrustRowOf reads as blank.
+func claudeMCPServersRowAfter(phase claudeMCPServersPhase, row claudeTrustRow, rule bool) (claudeMCPServersPhase, bool) {
+	footer := row.label == claudeMCPServersFooter
+	switch phase {
+	case claudeMCPServersInBody:
+		switch {
+		case rule || footer || row.label == claudeMCPServersSubmitLabel:
+			return phase, false
+		case row.blank:
+		case claudeMCPServerCheckboxRow(row.label):
+			return claudeMCPServersInServers, true
+		case row.selected:
+			// A ❯ row that is not a server row is a composer.
+			return phase, false
+		}
+	case claudeMCPServersInServers:
+		switch {
+		case claudeMCPServerCheckboxRow(row.label):
+		case row.label == claudeMCPServersSubmitLabel:
+			return claudeMCPServersAfterSubmit, true
+		case row.blank && !rule:
+			return claudeMCPServersUnpainted, true
+		default:
+			return phase, false
+		}
+	case claudeMCPServersUnpainted:
+		if !row.blank || rule {
+			return phase, false
+		}
+	case claudeMCPServersAfterSubmit:
+		switch {
+		case row.blank && !rule:
+		case footer:
+			return claudeMCPServersAfterFooter, true
+		default:
+			return phase, false
+		}
+	case claudeMCPServersAfterFooter:
+		if !row.blank || rule {
+			return phase, false
+		}
+	}
+	return phase, true
 }
 
 // claudeMCPServersUnreadableOf reports a picker that is plainly on screen but

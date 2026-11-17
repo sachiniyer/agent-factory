@@ -14,10 +14,10 @@ import "strings"
 // matched, the pane read clear, and the create typed its prompt and pressed
 // Enter into a picker that has every server pre-checked.
 //
-// It is the last clause CheckAndHandleTrustPrompt asks before it reports a
-// Claude pane clear. It sends no key and runs after every clause that answers
-// a dialog has declined the frame, so it turns a clear pane into a hold and
-// changes nothing else.
+// CheckAndHandleTrustPrompt asks it after every clause that answers a dialog
+// has declined the frame, and asks only claudeMCPServersPaintingOf (#7504)
+// after it. It sends no key, so it turns a clear pane into a hold and changes
+// nothing else.
 //
 // It holds when both of these are true:
 //
