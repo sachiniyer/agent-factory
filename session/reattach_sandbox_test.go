@@ -13,6 +13,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -195,6 +196,9 @@ func TestReattachSaysSoWhenTheCallbackCannotBeRestored(t *testing.T) {
 // callback — and keep the forward for the supervisor's next re-dial.
 func TestOpenTunnelForReattachFallsBackWithoutTheCallbackForward(t *testing.T) {
 	forceTunnelLifelineExe(t, "")
+	// The tunnel endpoint is a real socket path under AGENT_FACTORY_HOME;
+	// give it a home the platform's sun_path can hold.
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	prev := waitForSandboxTunnelFn
 	var p *sandboxProvisioner
 	waitForSandboxTunnelFn = func(*sandboxProvisioner, time.Duration, time.Duration) error {
@@ -237,6 +241,9 @@ func TestOpenTunnelForReattachFallsBackWithoutTheCallbackForward(t *testing.T) {
 func confirmedTunnelFixture(t *testing.T, confirm func(*sandboxProvisioner) error) *sandboxProvisioner {
 	t.Helper()
 	forceTunnelLifelineExe(t, "")
+	// The tunnel endpoint is a real socket path under AGENT_FACTORY_HOME;
+	// give it a home the platform's sun_path can hold.
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	prevWait, prevConfirm := waitForSandboxTunnelFn, confirmCallbackForward
 	waitForSandboxTunnelFn = func(*sandboxProvisioner, time.Duration, time.Duration) error { return nil }
 	confirmCallbackForward = confirm

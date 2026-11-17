@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,6 +52,9 @@ func TestTunnelNeverListenedQuotesTheTunnelsLastWords(t *testing.T) {
 	} {
 		t.Run(path.name, func(t *testing.T) {
 			forceTunnelLifelineExe(t, path.lifeline)
+			// openTunnel mints a real socket path under AGENT_FACTORY_HOME;
+			// give it a home the platform's sun_path can hold.
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 			dir := t.TempDir()
 			ssh := filepath.Join(dir, "ssh")
 			require.NoError(t, os.WriteFile(ssh, []byte("#!/bin/sh\n"+

@@ -93,7 +93,7 @@ func TestSpawnTunnelPassesStreamLocalOptions(t *testing.T) {
 // StreamLocalBindUnlink can only ever unlink inside this daemon's own
 // generation dir: the socket path is minted there, and nowhere else.
 func TestTunnelSocketStaysInsideTheGenerationDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := testguard.SocketTempDir(t)
 	prev := tunnelGenerationDir
 	tunnelGenerationDir = func() (string, error) { return dir, nil }
 	t.Cleanup(func() { tunnelGenerationDir = prev })
@@ -180,7 +180,7 @@ func TestSweepStaleTunnelSocketDirsPreservesLiveGenerations(t *testing.T) {
 // to collide, where a TCP port reservation could be lost between close and
 // ssh's bind.
 func TestTunnelSocketPathsNeverCollide(t *testing.T) {
-	dir := t.TempDir()
+	dir := testguard.SocketTempDir(t)
 	prev := tunnelGenerationDir
 	tunnelGenerationDir = func() (string, error) { return dir, nil }
 	t.Cleanup(func() { tunnelGenerationDir = prev })
