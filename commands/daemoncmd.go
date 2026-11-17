@@ -493,7 +493,7 @@ func runDaemonRestart(w, errOut io.Writer) error {
 	if unproven {
 		// daemon.pid names a live af daemon whose home cannot be verified.
 		// Restart is powerless here either way: this home's socket is dead
-		// (RequestShutdown would no-op) and the pid may belong to another
+		// (RequestRestartShutdown would no-op) and the pid may belong to another
 		// home's daemon, so mutating the unit on its behalf is not
 		// authorized. This is an inconclusive refusal, not the documented
 		// no-daemon no-op — it must exit nonzero: install.sh and
@@ -602,7 +602,7 @@ var errRestartPresenceUnproven = errors.New("daemon.pid names a live af daemon w
 
 // probeDaemonRestartPresence gives the explicit restart command a three-value
 // read-only answer before it mutates an installed unit. A responding daemon or
-// a verified daemon PID is positive evidence. Only RequestShutdown's own
+// a verified daemon PID is positive evidence. Only RequestRestartShutdown's own
 // kernel-level absent answers are negative; every other failure to look remains
 // Undetermined, so it cannot silently authorize the no-op.
 func probeDaemonRestartPresence() daemon.ProbeAnswer {
@@ -614,7 +614,7 @@ func probeDaemonRestartPresence() daemon.ProbeAnswer {
 		// A live af daemon exists but its home is unproven — possibly
 		// another home's daemon under this home's pid file. The sentinel is
 		// earned ONLY when the ping proved the socket absent — ENOENT or
-		// ECONNREFUSED, the same kernel answers RequestShutdown treats as
+		// ECONNREFUSED, the same kernel answers RequestRestartShutdown treats as
 		// daemon-absent, so the gate goes through ClassifyShutdownTarget
 		// rather than ClassifyPingFailure (which reads every non-timeout
 		// failure as No). A timeout, EACCES, or reset is indeterminate (a
@@ -749,7 +749,7 @@ type restartOutcome struct {
 	// FailedPhase is restartPhaseNone unless the accompanying error is
 	// non-nil, and names which half of the sequence broke.
 	FailedPhase restartPhase
-	// OldPID is the stopped daemon's PID as RequestShutdown reported it, 0 when
+	// OldPID is the stopped daemon's PID as RequestRestartShutdown reported it, 0 when
 	// unknown. Carried so the report can name the process a user may need to
 	// inspect when its shutdown did not finish.
 	OldPID int
@@ -771,7 +771,7 @@ func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	outcome := restartOutcome{Shutdown: result, OldPID: target.PID}
 	if shutdownErr != nil {
 		// ShutdownNoDaemon alongside an ERROR is not "no daemon" and not "a daemon
-		// refused to stop" — it is RequestShutdown saying it could not determine
+		// refused to stop" — it is RequestRestartShutdown saying it could not determine
 		// which (a socket it could not stat, for instance). Reporting it as a failed
 		// stop asserts a running daemon that was never observed (#3097).
 		if result == daemon.ShutdownNoDaemon {

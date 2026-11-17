@@ -132,7 +132,7 @@ does not reach it is not really installed. Live sessions survive — they run in
 tmux and the new daemon re-adopts them. Pass --no-restart to leave the daemon
 on the old binary until you restart it yourself with 'af daemon restart'.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// RequestShutdown's SIGTERM fallback (#504) writes through
+		// RequestRestartShutdown's SIGTERM fallback (#504) writes through
 		// log.InfoLog / log.WarningLog. Initialize logging up-front so those
 		// pointers are non-nil when we hit a pre-#501 daemon — otherwise the
 		// upgrade panics with a nil-deref instead of finishing cleanly (#514).
@@ -300,7 +300,7 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 	// Linux, so users would keep running the stale image until they killed it
 	// manually. Restart any running daemon now from the freshly written binary
 	// (#498/#1386). Pre-#501 daemons don't speak the Shutdown RPC, so
-	// RequestShutdown falls back to PID-file-based SIGTERM (#504).
+	// RequestRestartShutdown falls back to PID-file-based SIGTERM (#504).
 	outcome, restartErr := restartDaemonFromPathDetailed(resolvedPath)
 	reportUpgradeRestart(out, errOut, outcome, restartErr, resolvedPath)
 	return nil
@@ -311,7 +311,7 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 //
 // It is deliberately NOT `af daemon restart`. Every state this hint fires in
 // is one where the control socket did not answer, and `af daemon restart` goes
-// straight back through it: daemon.RequestShutdown stats the socket and
+// straight back through it: daemon.RequestRestartShutdown stats the socket and
 // returns (ShutdownNoDaemon, nil) on fs.ErrNotExist or ECONNREFUSED — the
 // SIGTERM fallback fires only for a method-not-found reply on a socket that
 // DID answer — so restartDaemonFromPath returns early and `af daemon restart`
@@ -448,7 +448,7 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 	}
 
 	if !outcome.Respawned {
-		// RequestShutdown reports ShutdownNoDaemon for a missing or
+		// RequestRestartShutdown reports ShutdownNoDaemon for a missing or
 		// unreachable socket, so "no daemon was running" and "a daemon is
 		// running that we cannot see" arrive identically. Ask the health probe
 		// which one this is before printing an all-clear.

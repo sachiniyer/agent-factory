@@ -42,13 +42,13 @@ func inProcessDaemonEnsureRefusal() error {
 // installInProcessDaemon publishes a starting daemon's lifecycle and delivery
 // tracker, and returns what its return must run.
 func installInProcessDaemon(lifecycle *daemonLifecycle, deliveries *joinedRuns) (onReturn func()) {
-	daemonDrainingFn = func() bool { return lifecycle.isQuiescing() }
+	setDaemonDraining(lifecycle.isQuiescing)
 	taskDeliveries.Store(deliveries)
 	inProcessDaemon.Store(lifecycle)
 	inProcessDaemonStopped.Store(false)
 	return func() {
 		if daemonReturnRestoresProcessDefaults {
-			daemonDrainingFn = func() bool { return false }
+			setDaemonDraining(nil)
 			taskDeliveries.CompareAndSwap(deliveries, nil)
 			inProcessDaemon.CompareAndSwap(lifecycle, nil)
 			return
@@ -65,7 +65,7 @@ func installInProcessDaemon(lifecycle *daemonLifecycle, deliveries *joinedRuns) 
 // it must be refused before it writes, keeping its marker for the next daemon.
 func latchStoppedDaemon(deliveries *joinedRuns) {
 	deliveries.close()
-	daemonDrainingFn = func() bool { return true }
+	setDaemonDraining(func() bool { return true })
 	inProcessDaemonStopped.Store(true)
 	inProcessDaemon.Store(nil)
 }

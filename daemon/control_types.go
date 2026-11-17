@@ -746,7 +746,7 @@ type ShutdownRequest struct {
 }
 type ShutdownResponse struct {
 	OK bool `json:"ok"`
-	// PID is the acknowledging daemon's process id (#5007). RequestShutdown
+	// PID is the acknowledging daemon's process id (#5007). RequestRestartShutdown
 	// cross-checks it against the PID the pre-shutdown Ping reported on the
 	// same connection and drops the target on a mismatch; it never uses it
 	// alone, because a PID learned only from the ack cannot be pinned before

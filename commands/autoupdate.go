@@ -223,7 +223,7 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 		// Same rationale as `af upgrade` (#498/#1386): restart the running daemon
 		// immediately from the freshly written binary. Quiet on the no-daemon path
 		// since this runs on every launch. Pre-#501 daemons don't speak the
-		// Shutdown RPC; RequestShutdown falls back to PID-file-based SIGTERM (#504).
+		// Shutdown RPC; RequestRestartShutdown falls back to PID-file-based SIGTERM (#504).
 		if unitRefreshErr == nil {
 			result, restartErr := restartDaemonFromPath(resolvedPath)
 			switch {

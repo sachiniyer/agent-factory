@@ -2,8 +2,8 @@
 
 package systemdunit
 
-import "time"
+import "context"
 
 // RestartJobPending is false off Linux: there is no systemd job to read, so a
 // stop signal is a final stop (#7474).
-func RestartJobPending(string, time.Duration) bool { return false }
+func RestartJobPending(context.Context, string, int) bool { return false }

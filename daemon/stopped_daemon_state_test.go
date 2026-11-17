@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/rpc"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func installInProcessLifecycleForTest(t *testing.T, lifecycle *daemonLifecycle) 
 }
 
 func resetInProcessDaemonForTest() {
-	daemonDrainingFn = func() bool { return false }
+	setDaemonDraining(nil)
 	taskDeliveries.Store(nil)
 	inProcessDaemon.Store(nil)
 	inProcessDaemonStopped.Store(false)
@@ -134,4 +135,34 @@ func TestARestartingDaemonsOwnCallIsNotRetried(t *testing.T) {
 	err := callDaemon("QuiescingMutation", struct{}{}, &struct{}{})
 	require.True(t, IsDaemonStoppingErr(err), "got %v", err)
 	require.Less(t, time.Since(start), time.Second, "the restarting daemon waited out its own refusal")
+}
+
+// TestDrainPredicateIsPublishedAtomically: a delivery starved through the whole
+// teardown reads the drain predicate while the daemon's start and return write
+// it (#7480). Under the race detector, a plain variable there is a data race.
+func TestDrainPredicateIsPublishedAtomically(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	latchStoppedDaemonForTest(t)
+	lifecycle := stoppingLifecycle(t, false)
+
+	stopReading := make(chan struct{})
+	var reads sync.WaitGroup
+	reads.Add(1)
+	go func() {
+		defer reads.Done()
+		for {
+			select {
+			case <-stopReading:
+				return
+			default:
+				_ = daemonDrainingFn()
+			}
+		}
+	}()
+	for range 50 {
+		installInProcessDaemon(lifecycle, &joinedRuns{})()
+	}
+	close(stopReading)
+	reads.Wait()
+	require.True(t, daemonDrainingFn(), "a returned daemon's drain predicate is latched")
 }

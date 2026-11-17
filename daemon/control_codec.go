@@ -127,6 +127,9 @@ func (c *gobServerCodec) WriteResponse(r *rpc.Response, body any) error {
 	if done != nil {
 		done()
 	}
+	// Only the gate's own refusal may lead with a lifecycle refusal's code
+	// (#7480).
+	r.Error = controlSocketErrorText(r.Error)
 	if err := c.enc.Encode(r); err != nil {
 		return c.fail(err)
 	}
