@@ -48,6 +48,8 @@ func TestArgvIsAFDaemon(t *testing.T) {
 		{"the lifeline's job flag is not af's", []string{"af", "__watch-lifeline", "v1", "0", "--", "sh", "-c", "job", "--daemon"}, false},
 		{"the lifeline's flag before -- is still not af's", []string{"af", "__watch-lifeline", "--daemon"}, false},
 		{"the recovery marker's flag is not af's", []string{"af", "__upgrade-recovery", "--daemon"}, false},
+		{"a repeated flag's last value wins", []string{"af", "--daemon", "--help", "--help=false"}, true},
+		{"last value wins for the daemon flag too", []string{"af", "--daemon", "--help", "--help=false", "--daemon=false"}, false},
 		{"--help exits before the daemon runs", []string{"af", "--help", "--daemon"}, false},
 		{"--version exits before the daemon runs", []string{"af", "--version", "--daemon"}, false},
 		{"an unknown flag is not a live af", []string{"af", "--bogus", "--daemon"}, false},

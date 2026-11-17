@@ -16,6 +16,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/configagent"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/afcli"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -385,45 +386,21 @@ func NewRootCommand(opts Options) *cobra.Command {
 
 func init() {
 	rootCmd.SetFlagErrorFunc(removedAutoYesFlagError)
+	// af's root flags come from the ONE definition commands and the
+	// daemon-claim recognizer share (#7496): a process claiming to be an
+	// af daemon is judged by the same parse af itself would run. Help and
+	// Version bind nil here — cobra auto-registers them on the real root.
 	// The --program flag is validated as an enum (bare agent name) via
 	// tmux.SupportedPrograms, so advertise exactly those accepted values.
-	rootCmd.Flags().StringVarP(&programFlag, "program", "p", "",
-		fmt.Sprintf("Program to run in new sessions (one of: %s)",
-			tmux.SupportedProgramsString()))
-	rootCmd.Flags().BoolVar(&daemonFlag, "daemon", false, "Run the background daemon that schedules"+
-		" tasks and monitors session status.")
-
-	// Hide the daemonFlag as it's only for internal use
-	err := rootCmd.Flags().MarkHidden("daemon")
-	if err != nil {
-		panic(err)
-	}
-
-	// Internal only (#2212 R2): the recovery actor's StartCandidate passes this to
-	// launch a candidate in upgrade probation. Hidden so it never appears in help.
-	rootCmd.Flags().StringVar(&upgradeTransactionFlag, "upgrade-transaction", "",
-		"Internal: run the daemon in upgrade probation for this transaction id")
-	if err := rootCmd.Flags().MarkHidden("upgrade-transaction"); err != nil {
-		panic(err)
-	}
-
-	// Remote-daemon target (#1592 Phase 3 PR4; HTTP-only since 2026-07-14).
-	// Persistent so they apply to the bare TUI and every `af sessions ...`/`af
-	// tasks ...` subcommand. Unset ⇒ the local unix socket (unchanged); each has
-	// an AF_DAEMON_* env fallback resolved in apiclient. The remote listener is
-	// plain HTTP; a client reaches it over http:///ws:// directly, or over
-	// https:///wss:// through a TLS front (tailscale serve, a proxy), verified
-	// against the system CAs (W9.5).
-	rootCmd.PersistentFlags().StringVar(&apiclient.FlagDaemonURL, "daemon-url", "",
-		"Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket "+
-			"(env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve.")
-	// NOTE: no backticks in these usage strings. pflag's UnquoteUsage treats the
-	// first backticked span as the flag's arg-name placeholder, so `af token
-	// show` would render "--token af token show" instead of "--token string" on
-	// every help screen (#1749). Use plain quotes for inline example commands.
-	rootCmd.PersistentFlags().StringVar(&apiclient.FlagDaemonToken, "token", "",
-		"Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). "+
-			"Get it with 'af token show' on the daemon host.")
+	afcli.DefineRootFlags(rootCmd.Flags(), rootCmd.PersistentFlags(), afcli.RootFlagBinds{
+		Program: &programFlag,
+		ProgramUsage: fmt.Sprintf("Program to run in new sessions (one of: %s)",
+			tmux.SupportedProgramsString()),
+		Daemon:             &daemonFlag,
+		UpgradeTransaction: &upgradeTransactionFlag,
+		DaemonURL:          &apiclient.FlagDaemonURL,
+		Token:              &apiclient.FlagDaemonToken,
+	})
 
 	rootCmd.AddCommand(debugCmd)
 	keysCmd.Flags().Bool("json", false, "Wrap output in the {data,error} JSON envelope")

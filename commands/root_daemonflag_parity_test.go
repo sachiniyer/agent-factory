@@ -92,6 +92,13 @@ func TestDaemonFlagParseMatchesAfRoot(t *testing.T) {
 		{"-h", "--daemon"},
 		{"-h=true", "--daemon"},
 		{"-h=foo", "--daemon"},
+		// #7496: pflag's last value wins — `--help --help=false` parses
+		// help=false and the daemon claim stands. The recognizer IS a real
+		// flagset parse now, so these are pinned by construction, but the
+		// rows keep the contract explicit.
+		{"--daemon", "--help", "--help=false"},
+		{"--daemon", "--help", "--help=false", "--daemon=false"},
+		{"--daemon", "--daemon", "--daemon=false"},
 	} {
 		assertParity(t, tail)
 	}
