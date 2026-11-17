@@ -422,6 +422,11 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 		return ProvisionResult{}, dockerStepErr(fmt.Errorf("backend=docker: cannot establish the Docker cleanup target before creating a container: %w", err), dockerOpLocal)
 	}
 	p.engineID = engineID
+	// In a throwaway sandbox home, record the engine before the container
+	// exists, or create none (#7447).
+	if err := p.ensureThrowawayEngineRecorded(); err != nil {
+		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
+	}
 	if err := p.runContainer(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
