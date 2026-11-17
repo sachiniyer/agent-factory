@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -66,13 +67,13 @@ func TestAgentServerRelayCarriesAnHTTPServerOnWorkspaceLoopback(t *testing.T) {
 func TestAgentServerRelayRefusesAClosedPort(t *testing.T) {
 	_, rel, _ := startRelayAgentServer(t)
 	// The closed port refuses on every platform: a real listener that accepts
-	// each connection and closes it with SO_LINGER 0, so the workspace dial's
-	// handshake completes and the conn the relay just opened meets a prompt
-	// RST. deadPortAddr can't stand in here — its bound, never-listening socket
-	// draws an immediate RST on Linux but has its SYN dropped on darwin, where
-	// the dial hangs to its deadline instead of refusing (#7466). Holding the
-	// listener for the whole test keeps the release-and-rebind race #7460
-	// removed out too.
+	// each connection and closes it with SO_LINGER 0 — a prompt RST that lands
+	// inside the workspace connect() or just after it, never a SYN left to
+	// time out. deadPortAddr can't stand in here — its bound, never-listening
+	// socket draws an immediate RST on Linux but has its SYN dropped on
+	// darwin, where the dial hangs to its deadline instead of refusing (#7466).
+	// Holding the listener for the whole test keeps the release-and-rebind
+	// race #7460 removed out too.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
@@ -91,7 +92,15 @@ func TestAgentServerRelayRefusesAClosedPort(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := rel.DialLoopback(ctx, port)
-	require.NoError(t, err, "the reset lands after the handshake, so the relay's own dial succeeds")
+	if err != nil {
+		// The RST reached the workspace connect() itself: the daemon reports
+		// the refusal.
+		require.Contains(t, err.Error(),
+			"nothing is listening on 127.0.0.1:"+strconv.Itoa(port))
+		return
+	}
+	// The RST landed just after the handshake: the relayed conn opened and
+	// its first read must meet the reset — never hang to the deadline.
 	defer conn.Close()
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
 	_, err = conn.Read(make([]byte, 1))
