@@ -1195,6 +1195,53 @@ func TestStartRestampsPaneRootEvidenceOnEverySpawn(t *testing.T) {
 		"the restamped pair must name a pane tmux still answers for")
 }
 
+// The four pane-root anchor rules share ONE table — paneRootEvidenceAfter —
+// instead of four separate edits: an answered mismatch retires the seeded
+// pair only (R11), an unanswered query keeps whatever stands (R17), a root
+// that exited before capture keeps the previous anchor (Codex 4596311717),
+// and a fresh spawn records its own root — superseding the previous
+// incarnation's pair even when the re-stamp cannot answer (Codex
+// 4597265491). Exercised as a pure function so every rule and the races
+// between them are decided without a tmux server.
+func TestPaneRootEvidenceReconcilesTheFourRules(t *testing.T) {
+	old := &proctree.Process{PID: 4242, StartID: 99}
+	newer := &proctree.Process{PID: 7777, StartID: 55}
+	for _, tc := range []struct {
+		name   string
+		cur    *proctree.Process
+		answer paneRootAnswer
+		want   *proctree.Process
+	}{
+		{"answered mismatch retires the claim's seeded pair (R11)", old,
+			paneRootAnswer{disproven: *old}, nil},
+		{"answered mismatch leaves a different claim's pair standing", newer,
+			paneRootAnswer{disproven: *old}, newer},
+		{"unanswered query keeps the anchor (R17)", old, paneRootAnswer{}, old},
+		{"root exited before capture keeps the previous anchor", old,
+			paneRootAnswer{}, old},
+		{"a fresh spawn records its own root", old,
+			paneRootAnswer{resolved: *newer}, newer},
+		{"a fresh spawn supersedes even when the re-stamp cannot answer", old,
+			paneRootAnswer{supersede: true}, nil},
+		{"supersede then resolve lands the new root", old,
+			paneRootAnswer{supersede: true, resolved: *newer}, newer},
+		{"a live resolution outranks a racing disproof", newer,
+			paneRootAnswer{resolved: *newer, disproven: *old}, newer},
+		{"no anchor to retire", nil,
+			paneRootAnswer{disproven: *old}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := paneRootEvidenceAfter(tc.cur, tc.answer)
+			if tc.want == nil {
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			require.Equal(t, *tc.want, *got)
+		})
+	}
+}
+
 // startDeadLeaderWithSessionChild spawns a kernel-session leader with one
 // long-lived member, then kills the leader: the child is orphaned but keeps
 // the leader's pid as its SID, which is exactly how a held dead pane's

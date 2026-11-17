@@ -458,7 +458,7 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 			// that erases the previous anchor's SID and tier-2 root — the
 			// surviving cohort then refuses forever on every retry (Codex
 			// 4596311717).
-			t.paneRootEvidence.Store(&paneProcess)
+			t.reconcilePaneRootEvidence(paneRootAnswer{resolved: paneProcess})
 		}
 	}
 	closeState, closeErr, processes := t.close(true)

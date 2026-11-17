@@ -94,11 +94,12 @@ func (t *TmuxSession) Start(workDir string) error {
 		// tab) always replaced the pane — a surviving start() reaches here
 		// only through new-session — so evidence the previous launch left
 		// names a different pane incarnation and must be restamped (Codex
-		// 4597265491). A re-stamp that cannot answer retires the stale pair:
-		// keeping an anchor whose StartID predates the actual root would
-		// lower tier 2's no-earlier-than bound onto the wrong incarnation.
+		// 4597265491). The supersede clears the stale pair first, so even a
+		// re-stamp that cannot answer retires it: keeping an anchor whose
+		// StartID predates the actual root would lower tier 2's
+		// no-earlier-than bound onto the wrong incarnation.
+		t.reconcilePaneRootEvidence(paneRootAnswer{supersede: true})
 		if _, rootErr := t.PaneRootProcess(); rootErr != nil {
-			t.paneRootEvidence.Store(nil)
 			log.InfoLog.Printf("tmux session %s: could not record pane-root identity at spawn: %v", t.sanitizedName, rootErr)
 		}
 	}

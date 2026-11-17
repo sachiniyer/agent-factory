@@ -17,6 +17,16 @@ import (
 // not the session's — lowering the admission floor for the wrong processes.
 func TestSettleReattachVerificationRetiresThePaneRootAnchor(t *testing.T) {
 	testguard.IsolateTmux(t)
+	// The verdict must be an ANSWERED absence, and only a live server holding
+	// another session produces it deterministically: list-panes on the named
+	// session answers "can't find session: <name>" — classified — while a
+	// zero-session server answers the unclassified "no current target" (the
+	// R17 sibling's unanswered shape) and an unstarted server answers the
+	// ENOENT connect line. Which of the three the FIRST query meets races
+	// the private server's startup, so a holder session pins the classified
+	// answer instead of leaving the verdict to timing.
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", "holder", "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "start the holder session: %s", out)
 	ts := tmux.NewTmuxSessionFromSanitizedName("af_retire_anchor_test", "sleep 300")
 	ts.SeedPaneRootEvidence(4242, 99)
 

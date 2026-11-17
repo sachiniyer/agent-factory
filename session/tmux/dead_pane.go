@@ -434,52 +434,8 @@ func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
 	// item 5): every launch/reattach boundary resolves through here, so the
 	// vanished-session sweep can admit only what the recorded root's kernel
 	// session still leads — never an env-marker scan's unverifiable finds.
-	t.paneRootEvidence.Store(&proc)
+	t.reconcilePaneRootEvidence(paneRootAnswer{resolved: proc})
 	return proc, nil
-}
-
-// SeedPaneRootEvidence primes the recorded pane-root identity a restore
-// already trusts — the persisted (RuntimePID, RuntimeStartID) pair the launch
-// recorded for this exact session name — so a session whose pane vanishes
-// before any live resolution still carries the membership evidence the
-// vanished-session sweep needs (#7435 R6). It is a SEED, not a proof: the
-// sweep's per-candidate SameIdentity and generation checks keep a stale seed
-// from admitting a process that is not this generation's, the way
-// PaneRootProcessMatches re-proves the same pair against live panes.
-// A zero pair is no anchor — a 0 StartID would pass every later-bound check —
-// and a live resolution that already stamped this session's root stays: the
-// persisted pair is older than anything tmux just answered for.
-func (t *TmuxSession) SeedPaneRootEvidence(pid int, startID uint64) {
-	if pid <= 0 || startID == 0 || t.paneRootEvidence.Load() != nil {
-		return
-	}
-	t.paneRootEvidence.Store(&proctree.Process{PID: pid, StartID: startID})
-}
-
-// RetirePaneRootEvidence drops the recorded pane-root anchor when the claim
-// that produced it is retired — the instance's persisted (runtimePID,
-// runtimeStartID) cleared on an answered reattach mismatch (#7435 R11). A
-// seed outlives nothing it was seeded from: keeping the disproven pair would
-// let tier 2 anchor on a root tmux just said is not this session's. The
-// retire is a COMPARE-and-clear like the instance's own re-check under the
-// write lock — a live resolution that stamped newer evidence after the seed
-// landed is a different claim, and stays.
-func (t *TmuxSession) RetirePaneRootEvidence(pid int, startID uint64) {
-	if cur := t.paneRootEvidence.Load(); cur != nil &&
-		cur.PID == pid && cur.StartID == startID {
-		t.paneRootEvidence.Store(nil)
-	}
-}
-
-// PaneRootEvidence reports the recorded pane-root pair this session would
-// anchor a vanished-session sweep on, when it carries one. The caller-side
-// counterpart of SeedPaneRootEvidence: a restore that retires the claim the
-// seed came from must see the anchor retire too (#7435 R11).
-func (t *TmuxSession) PaneRootEvidence() (pid int, startID uint64, ok bool) {
-	if cur := t.paneRootEvidence.Load(); cur != nil {
-		return cur.PID, cur.StartID, true
-	}
-	return 0, 0, false
 }
 
 // PaneRootProcessMatches reports whether SOME pane of this session is rooted
@@ -517,7 +473,9 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 		// A confirmed match re-proves the recorded root on THIS session —
 		// the same kernel identity PaneRootProcess stamps, so a reattach
 		// leaves the vanished-session sweep its evidence too (#7435 R2).
-		t.paneRootEvidence.Store(&proctree.Process{PID: pid, StartID: startID})
+		t.reconcilePaneRootEvidence(paneRootAnswer{
+			resolved: proctree.Process{PID: pid, StartID: startID},
+		})
 	}
 	return holds, err
 }
