@@ -48,8 +48,8 @@ import (
 //	stream af     — copy the daemon's own `af` binary into <dir>/af over ssh stdin
 //	af agent-server — start it headless bound to 127.0.0.1:0 on the remote; read
 //	                its startup banner (addr/token) from a file
-//	local-forward — an `ssh -L` child from a daemon-local loopback port to the
-//	                remote agent-server's loopback addr → http://127.0.0.1:<localport>
+//	local-forward — an `ssh -L` child from a daemon-local unix socket to the
+//	                remote agent-server's loopback addr (#7495)
 //
 // The result is an AgentServerEndpoint the daemon dials over the tunnel, plus a
 // teardown that kills the remote agent-server, removes the session dir, and closes

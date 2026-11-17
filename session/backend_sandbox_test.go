@@ -11,11 +11,16 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // The two traps the #2476 handoff calls "the whole risk of PR2", pinned WITHOUT
@@ -174,36 +179,77 @@ func TestSandboxReapWithoutASessionDirIsANoOp(t *testing.T) {
 // The tunnel readiness probe must FAIL a provision whose forward never came up,
 // rather than handing back an endpoint nothing is listening on.
 func TestSandboxTunnelProbeFailsWhenNothingListens(t *testing.T) {
-	// Bind and release a port so it is almost certainly free, then never listen.
-	free := freeLocalAddrForTest(t)
+	p := &sandboxProvisioner{socketPath: filepath.Join(t.TempDir(), "never.sock")}
 	start := time.Now()
-	err := waitForSandboxTunnelWithin(string(BackendSandbox), free, 300*time.Millisecond, 50*time.Millisecond)
+	err := waitForSandboxTunnelWithin(p, 300*time.Millisecond, 50*time.Millisecond)
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 5*time.Second)
 	assert.Contains(t, err.Error(), "never started listening")
 	assert.Contains(t, err.Error(), "sandbox.ssh", "the error must name the thing the operator can test by hand")
 }
 
+// tunnelChildOnMyGroup builds a tunnelChild whose group the test process's own
+// listener is a member of: the leader pid is this process's group id, so the
+// peer check's getpgid(acceptor) == leader comparison passes — the stand-in for
+// "af's own ssh child bound the socket".
+func tunnelChildOnMyGroup(t *testing.T) *tunnelChild {
+	t.Helper()
+	pgid, err := unix.Getpgid(0)
+	require.NoError(t, err)
+	leader, err := os.FindProcess(pgid)
+	require.NoError(t, err)
+	return &tunnelChild{cmd: &exec.Cmd{Process: leader}, done: make(chan struct{})}
+}
+
+// The probe must also succeed when something listens — and only because the
+// acceptor proved to be the tunnel's own group (#7495): a listener nobody can
+// attribute never reaches "ready".
 func TestSandboxTunnelProbeSucceedsWhenSomethingListens(t *testing.T) {
-	ln := listenLocalForTest(t)
+	sockPath := testguard.SocketPath(t, "probe.sock")
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
 	defer func() { _ = ln.Close() }()
-	require.NoError(t, waitForSandboxTunnelWithin(string(BackendSandbox), ln.Addr().String(), 2*time.Second, 20*time.Millisecond))
+	// The probe lstat-proves the bound socket (af's ssh masks it 0600) — the
+	// test's listener binds under its own umask, so tighten it the same way.
+	require.NoError(t, os.Chmod(sockPath, 0o600))
+	p := &sandboxProvisioner{socketPath: sockPath}
+	p.setTunnel(tunnelChildOnMyGroup(t))
+	require.NoError(t, waitForSandboxTunnelWithin(p, 2*time.Second, 20*time.Millisecond))
 }
 
-func freeLocalAddrForTest(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// ...and a listener that ANSWERS but is not the tunnel's own group is refused:
+// "ready" is never reported for an endpoint af cannot prove is its own ssh
+// child, and the error says so rather than blaming the transport (#7495).
+func TestSandboxTunnelProbeRefusesAForeignListener(t *testing.T) {
+	sockPath := testguard.SocketPath(t, "foreign-probe.sock")
+	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
-}
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	defer func() { _ = ln.Close() }()
 
-func listenLocalForTest(t *testing.T) net.Listener {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	return ln
+	// The listener is this test process; the provisioner's tunnel is a real
+	// child in a DIFFERENT process group — exactly a foreign holder.
+	fakeChild := exec.Command("sleep", "30")
+	fakeChild.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, fakeChild.Start())
+	t.Cleanup(func() {
+		_ = fakeChild.Process.Kill()
+		_ = fakeChild.Wait()
+	})
+	p := &sandboxProvisioner{socketPath: sockPath}
+	p.setTunnel(&tunnelChild{cmd: fakeChild, done: make(chan struct{})})
+
+	err = waitForSandboxTunnelWithin(p, 300*time.Millisecond, 30*time.Millisecond)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not provably af's own")
 }
 
 // Codex 3725079692: sandbox_ssh is a free-form shell command, so a wrapper can
@@ -257,10 +303,10 @@ func TestSandboxReapScriptKillsByIdentityAndGatesTheRemoval(t *testing.T) {
 	assert.Contains(t, noPID, "| tr 'a-z' 'A-Z'")
 }
 
-// Codex 3725079706: the local port is reserved by binding :0 and closing it, so
-// another process can win it in the gap. Without ExitOnForwardFailure, ssh stays
-// up after a FAILED bind and the readiness probe connects to the competing
-// listener — reporting a healthy tunnel owned by an unrelated process.
+// A forward that cannot bind must kill the child rather than leave it up:
+// without ExitOnForwardFailure, ssh stays up after a FAILED bind and the
+// readiness probe connects to whatever already held the endpoint — reporting
+// a healthy tunnel owned by an unrelated process.
 func TestSandboxTunnelRefusesToOutliveAFailedForward(t *testing.T) {
 	p := &sandboxProvisioner{sshCmd: "ssh host"}
 	// Reach the composed command without starting it: the flag must be present
@@ -271,9 +317,9 @@ func TestSandboxTunnelRefusesToOutliveAFailedForward(t *testing.T) {
 	// the lifeline and direct spawn shapes alike), so that is the file pinned.
 	src, err := os.ReadFile("sandbox_tunnel.go")
 	require.NoError(t, err)
-	assert.Contains(t, string(src), `-o ExitOnForwardFailure=yes -N -L`,
+	assert.Contains(t, string(src), `-o ExitOnForwardFailure=yes`,
 		"spawnTunnel must pass ExitOnForwardFailure so a lost bind kills the child instead of "+
-			"leaving the probe to succeed against whoever won the port")
+			"leaving the probe to succeed against whatever held the endpoint")
 }
 
 // Codex 3725178152: the first sentinel was a fixed string echoed verbatim, and

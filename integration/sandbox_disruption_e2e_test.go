@@ -267,32 +267,33 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 	// --- 2. the ssh connection dies ---------------------------------------------
 	// The supervisor (W1.2) re-dials after a capped backoff, so the forward is
 	// down for a moment after the kill and liveness has not noticed yet: a prompt
-	// sent now is refused on the dead local port (the first run of this test did
-	// exactly that). Wait on the transport itself, not on a sleep: a replacement
-	// ssh -L process (not one of the killed pids) must carry the SAME local port
-	// the session already holds, and that port must accept connections. The bound
-	// is the redial ladder's ceiling (30s, +25% jitter) plus the readiness probe
-	// (20s) with margin.
+	// sent now is refused on the dead local endpoint (the first run of this test
+	// did exactly that). Wait on the transport itself, not on a sleep: a
+	// replacement ssh -L process (not one of the killed pids) must carry the SAME
+	// local endpoint the session already holds — a unix socket path in its
+	// generation dir (#7495) — and that endpoint must accept connections. The
+	// bound is the redial ladder's ceiling (30s, +25% jitter) plus the readiness
+	// probe (20s) with margin.
 	killed := killTunnelSSH(t, host.privKey)
 	if len(killed) == 0 {
 		t.Fatalf("found no daemon-owned ssh -L tunnel for %s to kill", host.privKey)
 	}
-	forwardPort := killed[0].port
+	forwardAddr := killed[0].addr
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("supervisor lines from the daemon log:\n%s", transportLogLines(home))
 		}
 	})
-	waitFor(t, "a replacement ssh tunnel forwarding local port "+forwardPort, 90*time.Second, func() bool {
+	waitFor(t, "a replacement ssh tunnel forwarding local endpoint "+forwardAddr, 90*time.Second, func() bool {
 		for _, tun := range tunnelSSHProcs(host.privKey) {
-			if tun.port == forwardPort && !containsInt(pidsOf(killed), tun.pid) {
+			if tun.addr == forwardAddr && !containsInt(pidsOf(killed), tun.pid) {
 				return true
 			}
 		}
 		return false
 	})
-	waitFor(t, "the restored forward on 127.0.0.1:"+forwardPort+" to accept connections", 60*time.Second, func() bool {
-		c, err := net.DialTimeout("tcp", "127.0.0.1:"+forwardPort, time.Second)
+	waitFor(t, "the restored forward on "+forwardAddr+" to accept connections", 60*time.Second, func() bool {
+		c, err := dialLocalForward(forwardAddr)
 		if err != nil {
 			return false
 		}
@@ -386,11 +387,12 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 	waitFor(t, "the session dirs to be gone after kill", 30*time.Second, func() bool { return sessionDirs() == "" })
 }
 
-// tunnelProc is one daemon-host `ssh -L` tunnel process and the local port it
-// forwards.
+// tunnelProc is one daemon-host `ssh -L` tunnel process and the local endpoint
+// it forwards — a unix socket path under the daemon's generation dir (#7495),
+// or a bare port if a forward ever goes back to TCP.
 type tunnelProc struct {
 	pid  int
-	port string
+	addr string
 }
 
 // tunnelSSHProcs lists the daemon-host `ssh -L` processes that carry a session's
@@ -409,8 +411,8 @@ func tunnelSSHProcs(privKey string) []tunnelProc {
 		if strings.TrimSpace(string(comm)) != "ssh" {
 			continue
 		}
-		if port := forwardLocalPort(strings.Split(string(cmdline), "\x00")); port != "" {
-			procs = append(procs, tunnelProc{pid: pid, port: port})
+		if addr := forwardLocalAddr(strings.Split(string(cmdline), "\x00")); addr != "" {
+			procs = append(procs, tunnelProc{pid: pid, addr: addr})
 		}
 	}
 	return procs
@@ -448,9 +450,13 @@ func containsInt(xs []int, x int) bool {
 	return false
 }
 
-// forwardLocalPort returns the local port of an ssh argv's -L forward, spelled
-// `-L spec` or `-Lspec` with spec `[bind:]port:host:hostport`; "" if none.
-func forwardLocalPort(args []string) string {
+// forwardLocalAddr returns the local end of an ssh argv's -L forward, spelled
+// `-L spec` or `-Lspec`. The spec is a path local end when the first field is a
+// path (`socket:host:hostport`, `socket:socket`, or bracket-escaped
+// `[socket]:host:hostport` — af quotes the unix path so a ':' in the AF home
+// still parses, #7495 R5) and a TCP port otherwise
+// (`[bind:]port:host:hostport`); "" if none.
+func forwardLocalAddr(args []string) string {
 	for i, a := range args {
 		spec := ""
 		switch {
@@ -461,14 +467,44 @@ func forwardLocalPort(args []string) string {
 		default:
 			continue
 		}
-		switch f := strings.Split(spec, ":"); len(f) {
-		case 3:
+		if strings.HasPrefix(spec, "[") {
+			// A bracket-escaped first field is literal: the local end runs to
+			// the matching ']'. Inside the brackets a '/' names a socket
+			// path; anything else is a TCP bind address and the port follows.
+			end := strings.Index(spec, "]:")
+			if end < 0 {
+				continue
+			}
+			if inner := spec[1:end]; strings.HasPrefix(inner, "/") {
+				return inner
+			}
+			rest := spec[end+2:]
+			if f := strings.SplitN(rest, ":", 2); len(f) == 2 && f[0] != "" {
+				return f[0]
+			}
+			continue
+		}
+		f := strings.Split(spec, ":")
+		switch {
+		case strings.HasPrefix(f[0], "/"):
 			return f[0]
-		case 4:
+		case len(f) == 3:
+			return f[0]
+		case len(f) == 4:
 			return f[1]
 		}
 	}
 	return ""
+}
+
+// dialLocalForward connects to a local forward endpoint the way the endpoint
+// itself dictates: a unix socket when the address is a path, loopback TCP when
+// it is a bare port (#7495).
+func dialLocalForward(addr string) (net.Conn, error) {
+	if strings.HasPrefix(addr, "/") {
+		return net.DialTimeout("unix", addr, time.Second)
+	}
+	return net.DialTimeout("tcp", "127.0.0.1:"+addr, time.Second)
 }
 
 // transportLogLines returns the supervisor's lines from the daemon log.
@@ -481,4 +517,28 @@ func transportLogLines(home string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// forwardLocalAddr must read the endpoint's own shape from an ssh -L argv:
+// bracket-escaped unix paths (af quotes the socket so a ':' in the AF home
+// still parses, #7495 R5), bare unix paths, and the legacy TCP forms.
+func TestForwardLocalAddrShapes(t *testing.T) {
+	cases := []struct {
+		spec string
+		want string
+	}{
+		{"[/tmp/af/tunnels/d1-abcdef/s1-x.sock]:127.0.0.1:9", "/tmp/af/tunnels/d1-abcdef/s1-x.sock"},
+		{"[/tmp/a:b/t/s1.sock]:127.0.0.1:9", "/tmp/a:b/t/s1.sock"},
+		{"/tmp/af/tunnels/d1-abcdef/s1-x.sock:127.0.0.1:9", "/tmp/af/tunnels/d1-abcdef/s1-x.sock"},
+		{"/tmp/af/tunnels/d1-abcdef/s1-x.sock:/run/agent.sock", "/tmp/af/tunnels/d1-abcdef/s1-x.sock"},
+		{"40001:127.0.0.1:9", "40001"},
+		{"127.0.0.1:40001:127.0.0.1:9", "40001"},
+		{"[::1]:40001:127.0.0.1:9", "40001"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := forwardLocalAddr([]string{"ssh", "-N", "-L", c.spec}); got != c.want {
+			t.Errorf("forwardLocalAddr(%q) = %q, want %q", c.spec, got, c.want)
+		}
+	}
 }

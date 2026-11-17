@@ -16,6 +16,12 @@ var sweepOrphanContainers = session.SweepOrphanContainers
 // generation for this home leaked (#5564). Package-level for the same reason.
 var sweepOrphanSandboxTunnels = session.SweepOrphanSandboxTunnels
 
+// sweepStaleTunnelSocketDirs removes tunnel socket dirs a previous daemon
+// generation left under <home>/tunnels — only once the per-generation flock
+// proves its owner exited, so a live predecessor (an upgrade hand-off) keeps
+// its endpoints (#7495). Package-level for the same reason.
+var sweepStaleTunnelSocketDirs = session.SweepStaleTunnelSocketDirs
+
 // sweepStaleSetupPayloads removes af-setup/<id> staging dirs whose session id
 // has no remaining handle — payloads a ghost kill, a post-hook create
 // failure, or a dead daemon generation dropped without reclaiming (#6674
@@ -101,6 +107,10 @@ func sweepStartupOrphanSandboxTunnels() {
 		return
 	}
 	sweepOrphanSandboxTunnels(canonical)
+	// The socket-dir half: remove dead generations' endpoint paths once their
+	// flock proves the owning daemon exited. Same "proof, never a guess" rule
+	// as the process sweep — a live predecessor's dir is never touched.
+	sweepStaleTunnelSocketDirs()
 }
 
 // runDeferredOrphanSweepIfReady runs the startup orphan sweep that was deferred

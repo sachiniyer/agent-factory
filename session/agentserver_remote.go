@@ -7,11 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -103,21 +101,6 @@ type remoteAgentServer struct {
 }
 
 var _ AgentServer = (*remoteAgentServer)(nil)
-
-// AgentServerEndpoint is the runtime handle that points an Instance at a remote
-// agent-server (#1592 Phase 4 PR2): the authed URL of the `af agent-server` in the
-// sandbox plus the auth material to reach it. A nil endpoint ⇒ the local
-// in-process runtime (the default, unchanged). Phase 4 PR3 generalizes this into a
-// Runtime that PROVISIONS the sandbox and fills these in; PR2 only consumes them.
-type AgentServerEndpoint struct {
-	// URL is the agent-server's plain-HTTP base URL — `http://host:port` or
-	// `ws://host:port` (equivalent; both select the same plaintext transport,
-	// only the authority is used). A wss://host:port is rejected — the
-	// agent-server is HTTP-only.
-	URL string
-	// Token is the bearer credential presented on every REST call and WS handshake.
-	Token string
-}
 
 // NewRemoteAgentServer builds a remoteAgentServer that drives the `af agent-server`
 // reachable at ep.URL for a single workspace titled `title`. It validates the URL
@@ -475,46 +458,6 @@ var remoteAgentDialTimeout = 10 * time.Second
 // severed. A var (not const) so a test can shrink it to prove the bound fires.
 var remoteAgentWSHandshakeTimeout = 10 * time.Second
 
-// remoteAgentClient is the transport to ONE `af agent-server`: a token-bearing
-// plain-HTTP client for the /v1/agent/* control REST and a matching WS dialer for
-// the /v1/sessions/{title}/stream data plane. It is the session-package analogue
-// of apiclient.Client (which session cannot import — the cycle), sharing the
-// pieces that define the contract through the agentproto/apiproto leaves.
-type remoteAgentClient struct {
-	httpClient *http.Client
-	transport  *http.Transport
-	httpBase   string // http://host:port
-	wsBase     string // ws://host:port
-	token      string
-	title      string // the sandbox's single-workspace session title (the stream path id)
-}
-
-// newRemoteAgentClient builds the transport for ep, validating the URL up front
-// (no dial). It mirrors apiclient.NewRemote: the transport is plain HTTP/WS (no
-// TLS — the sandbox is reached over a private hop) and the token rides every
-// request.
-func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentClient, error) {
-	if title == "" {
-		return nil, fmt.Errorf("remote agent-server requires a workspace title")
-	}
-	httpBase, wsBase, err := splitHTTPBaseURL(ep.URL)
-	if err != nil {
-		return nil, err
-	}
-	dialer := &net.Dialer{Timeout: remoteAgentDialTimeout}
-	transport := &http.Transport{DialContext: dialer.DialContext}
-	return &remoteAgentClient{
-		httpClient: &http.Client{
-			Transport: transport,
-		},
-		transport: transport,
-		httpBase:  httpBase,
-		wsBase:    wsBase,
-		token:     ep.Token,
-		title:     title,
-	}, nil
-}
-
 // call POSTs req as JSON to the agent-server control route at `path`, decodes the
 // shared {data,error} envelope, and unmarshals the data member into resp (nil resp
 // ⇒ success/failure only). It is the client-side twin of the agent-server's
@@ -587,7 +530,7 @@ func (c *remoteAgentClient) doJSON(method, path string, req, resp any, timeout t
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("remote agent-server: %s %s: %w", method, path, err)
+		return fmt.Errorf("remote agent-server: %s %s: %w", method, path, c.scrubEndpointURL(err))
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
@@ -813,33 +756,6 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, tabID strin
 // decode to refuse on, so the features check is the only guard.
 func (c *remoteAgentClient) dialStreamByID(ctx context.Context, tabID string) (*websocket.Conn, error) {
 	return c.dialStream(ctx, 0, tabID, 0)
-}
-
-// splitHTTPBaseURL validates an agent-server base URL and derives its REST
-// (http://host:port) and WS (ws://host:port) authorities. It accepts the
-// plaintext schemes http/ws interchangeably (the agent-server serves REST and WS
-// on one HTTP listener) and rejects the TLS schemes wss/https — the agent-server
-// is HTTP-only (af terminates no TLS; the sandbox is reached over a private hop).
-// Only scheme+authority are used. It mirrors apiclient's parseDaemonURL but with
-// agent-server-appropriate error text — including its u.Hostname() host check,
-// which (unlike u.Host) rejects the hostless `http://:8443` form instead of
-// deferring it to an opaque dial error (#1784).
-func splitHTTPBaseURL(raw string) (httpBase, wsBase string, err error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return "", "", fmt.Errorf("invalid agent-server URL %q: %w", raw, err)
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "http", "ws":
-	case "https", "wss":
-		return "", "", fmt.Errorf("agent-server URL %q uses a TLS scheme, but the agent-server is HTTP-only; use http:// or ws://", raw)
-	default:
-		return "", "", fmt.Errorf("agent-server URL %q must be an http:// or ws:// URL", raw)
-	}
-	if u.Hostname() == "" {
-		return "", "", fmt.Errorf("invalid agent-server URL %q: missing host; use http://HOST:PORT", raw)
-	}
-	return "http://" + u.Host, "ws://" + u.Host, nil
 }
 
 // --- wire structs: the /v1/agent/* request/response shapes (mirror PR1) ---

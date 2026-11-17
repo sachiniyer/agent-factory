@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,7 +20,8 @@ import (
 // ControlMaster can apply, so its error must not send anyone looking for one.
 func TestTunnelNeverListenedNamesItsOwnLogin(t *testing.T) {
 	for _, label := range []string{string(BackendSandbox), string(BackendHook)} {
-		err := waitForSandboxTunnelWithin(label, freeLocalAddrForTest(t), 100*time.Millisecond, 20*time.Millisecond)
+		p := &sandboxProvisioner{backendLabel: label, socketPath: "/nonexistent/af-tunnel.sock"}
+		err := waitForSandboxTunnelWithin(p, 100*time.Millisecond, 20*time.Millisecond)
 		require.Error(t, err)
 		msg := err.Error()
 		assert.Contains(t, msg, "never started listening", label)
@@ -29,7 +31,8 @@ func TestTunnelNeverListenedNamesItsOwnLogin(t *testing.T) {
 		assert.Contains(t, msg, "without a prompt", "%s: the error must say what that requires of the login", label)
 	}
 
-	err := waitForSandboxTunnelWithin(string(BackendSSH), freeLocalAddrForTest(t), 100*time.Millisecond, 20*time.Millisecond)
+	p := &sandboxProvisioner{backendLabel: string(BackendSSH), socketPath: "/nonexistent/af-tunnel.sock"}
+	err := waitForSandboxTunnelWithin(p, 100*time.Millisecond, 20*time.Millisecond)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "ControlMaster",
 		"backend=ssh passes -F none, so no ControlMaster can apply and none must be suggested")
@@ -49,6 +52,9 @@ func TestTunnelNeverListenedQuotesTheTunnelsLastWords(t *testing.T) {
 	} {
 		t.Run(path.name, func(t *testing.T) {
 			forceTunnelLifelineExe(t, path.lifeline)
+			// openTunnel mints a real socket path under AGENT_FACTORY_HOME;
+			// give it a home the platform's sun_path can hold.
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 			dir := t.TempDir()
 			ssh := filepath.Join(dir, "ssh")
 			require.NoError(t, os.WriteFile(ssh, []byte("#!/bin/sh\n"+
@@ -56,8 +62,8 @@ func TestTunnelNeverListenedQuotesTheTunnelsLastWords(t *testing.T) {
 				"echo 'user@sandbox.invalid: Permission denied (keyboard-interactive).' >&2\n"+
 				"exit 255\n"), 0o755))
 			prevProbe := waitForSandboxTunnelFn
-			waitForSandboxTunnelFn = func(label, addr string, _, poll time.Duration) error {
-				return waitForSandboxTunnelWithin(label, addr, 500*time.Millisecond, poll)
+			waitForSandboxTunnelFn = func(p *sandboxProvisioner, _, poll time.Duration) error {
+				return waitForSandboxTunnelWithin(p, 500*time.Millisecond, poll)
 			}
 			t.Cleanup(func() { waitForSandboxTunnelFn = prevProbe })
 
