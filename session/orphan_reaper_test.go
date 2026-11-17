@@ -126,9 +126,10 @@ func TestSweepScopesQueryToHome(t *testing.T) {
 func TestSweepLeavesUnknownStateForNextSweep(t *testing.T) {
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
 	var removed []string
-	// First info (sweep's own read) = engine-1; the reap's verify sees engine-2 →
-	// #2382 mismatch → ErrWorkspaceStateUnknown, no rm.
-	defer dockerExecStub(t, []string{"engine-1", "engine-2"}, "cid-orphan\tgone\n", &removed)()
+	// The sweep's identity read and its re-read after the listing (#7458) see
+	// engine-1; the reap's verify sees engine-2 → #2382 mismatch →
+	// ErrWorkspaceStateUnknown, no rm.
+	defer dockerExecStub(t, []string{"engine-1", "engine-1", "engine-2"}, "cid-orphan\tgone\n", &removed)()
 
 	got := SweepOrphanContainers("/home/af", nil)
 
@@ -298,4 +299,20 @@ func TestReapHomeContainersSaysWhenDockerIsMissing(t *testing.T) {
 	got := ReapHomeContainers(func(string) bool { return true })
 
 	assert.True(t, got.Unlisted, "a missing docker CLI must be reported as unlisted")
+}
+
+// TestHomeReapListingOnAChangedEngineProvesNothing: an engine that changed
+// between the identity read and the listing leaves the listing unproven. An
+// empty listing then reads as unlisted, not as "nothing left" on the engine
+// the pass named (Codex on #7458).
+func TestHomeReapListingOnAChangedEngineProvesNothing(t *testing.T) {
+	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
+	var removed []string
+	defer dockerExecStub(t, []string{"engine-a", "engine-b"}, "", &removed)()
+
+	got := ReapHomeContainers(func(string) bool { return true })
+
+	assert.True(t, got.Unlisted, "a listing that may have come from another engine proves nothing")
+	assert.Empty(t, got.EngineID, "and credits no engine with coverage")
+	assert.Empty(t, removed)
 }
