@@ -150,8 +150,11 @@ func TestCohortMembershipAdmitsByDescentFromTheProvenTree(t *testing.T) {
 //     "nothing found" on this path authorizes worktree cleanup;
 //   - a setsid'd child of the reaper itself: positively placed in the
 //     reaper's own subtree, so it is excluded like signalling excludes it —
-//     never signalled — but REPORTED all the same: an excluded marked
-//     carrier is never a silent keep (#7435, Codex 4597265500).
+//     never signalled — and NAMED at WARNING all the same: an excluded
+//     marked carrier is never a silent keep. Item 1 of #7484 moved the
+//     naming out of the blocking error — the carrier is LEFT ALIVE under a
+//     worktree a Known close may remove, not a reason the close is Unknown
+//     (#7435, Codex 4597265500; channel change is intended).
 func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.T) {
 	name := "af_membership"
 	home := t.TempDir()
@@ -165,6 +168,11 @@ func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.
 		Recorded: map[int]uint64{root.PID: root.StartID},
 	}
 
+	var warnings bytes.Buffer
+	oldWarnings := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarnings) })
+
 	marked, _, err := markedOrphanProcesses(
 		[]proctree.Process{member, unadmitted, ownChild}, name, home,
 		fixtureCohort(gen), membership, nil)
@@ -172,8 +180,12 @@ func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.
 	require.Contains(t, err.Error(), "cannot be proven a member")
 	require.Contains(t, err.Error(), strconv.Itoa(unadmitted.PID),
 		"the report names the carrier it could not place")
-	require.Contains(t, err.Error(), strconv.Itoa(ownChild.PID),
-		"the reaper's own descendant is excluded — and an excluded marked carrier is reported, never silently left")
+	require.NotContains(t, err.Error(), strconv.Itoa(ownChild.PID),
+		"a positively-placed carrier is NOT a blocking refusal — it is named, not reported (#7484 item 1)")
+	require.Contains(t, warnings.String(), strconv.Itoa(ownChild.PID),
+		"the reaper's own descendant is excluded — and an excluded marked carrier is NAMED, never silently left")
+	require.Contains(t, warnings.String(), "LEFT ALIVE",
+		"the naming says the carrier was left running, not signalled")
 	require.Equal(t, []proctree.Process{member}, marked,
 		"only the survivor still in the recorded root's kernel session is admitted")
 
