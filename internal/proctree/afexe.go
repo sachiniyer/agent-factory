@@ -2,6 +2,7 @@ package proctree
 
 import (
 	"debug/buildinfo"
+	"os"
 	"time"
 )
 
@@ -25,13 +26,16 @@ var exeAttestBudget = 2 * time.Second
 // write (#7491 item 1). argv alone still protects a claimant from signals;
 // this is what a claim needs before it may also authorize a cleanup verdict:
 //
-//   - the exe path comes from the KERNEL (readlink /proc/<pid>/exe, or
-//     proc_info(PROC_PIDPATHINFO) on darwin), not from argv[0] — exec -a can
-//     write argv[0] but cannot write the link;
-//   - the file at that path is an af build iff its embedded Go build info
-//     names this module — `cp /bin/bash ./af` passes an af-named path and
-//     fails here, while a real af build verifies at ANY path, including
-//     another home's daemon (the #7484 R18 shape);
+//   - the executable is opened on its INODE, not re-resolved by path:
+//     /proc/<pid>/exe opens the running image even after the name is
+//     unlinked, and on darwin the PROC_PIDPATHINFO path is re-verified
+//     against the text vnode's (dev,ino) in the process's own memory map —
+//     a deleted or replaced name can never stand in for the running binary
+//     (#7303's reopen-by-path class, #7492);
+//   - the file opened that way is an af build iff its embedded Go build
+//     info names this module — `cp /bin/bash ./af` passes an af-named path
+//     and fails here, while a real af build verifies at ANY path,
+//     including another home's daemon (the #7484 R18 shape);
 //   - the read is revalidated against the snapshot's StartID: the exe read
 //     happens outside the snapshot, so a pid recycled between them must not
 //     carry one process's verdict onto the next;
@@ -41,7 +45,7 @@ func ExeAttestsAF(p Process) bool {
 	// a worker that outlives its budget must never read a package var a
 	// test later restores — the lazy read races the restore (the same
 	// shape a racing caller would hit in production, #7491).
-	fn := exePathFn
+	fn := exeOpenFn
 	done := make(chan bool, 1)
 	go func() {
 		done <- exeAttestsAF(fn, p)
@@ -59,17 +63,18 @@ func ExeAttestsAF(p Process) bool {
 // exeAttestsAF is the attestation itself, run under exeAttestBudget. A
 // leaked goroutine on timeout costs one blocked read per stalled
 // attestation and never lands a verdict — a timeout answers unverified.
-// exePathFn is the platform kernel read, behind a package var so the budget
+// exeOpenFn is the platform kernel read, behind a package var so the budget
 // test can stall it deterministically; ExeAttestsAF snapshots it before
 // spawning so an abandoned read can never see a later write.
-var exePathFn = exePath
+var exeOpenFn = exeOpen
 
-func exeAttestsAF(fn func(pid int) (string, bool), p Process) bool {
-	path, ok := fn(p.PID)
+func exeAttestsAF(fn func(pid int) (*os.File, bool), p Process) bool {
+	f, ok := fn(p.PID)
 	if !ok {
 		return false
 	}
-	bi, err := buildinfo.ReadFile(path)
+	defer f.Close()
+	bi, err := buildinfo.Read(f)
 	if err != nil || bi.Main.Path != afModulePath {
 		return false
 	}
