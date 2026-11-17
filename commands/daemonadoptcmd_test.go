@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -367,6 +368,20 @@ func TestAdopt_SignalsADaemonStillRunningAtItsGrace(t *testing.T) {
 		_, out := adoptADetachedDaemon(t)
 		require.Equal(t, []daemon.ShutdownTarget{{PID: 111}}, finished, "adopt must bound its wait on the RPC-stopped daemon")
 		require.Contains(t, out, "then stopped it by signal when it had not exited within its grace")
+	})
+	t.Run("an unidentified daemon is not signalled", func(t *testing.T) {
+		stubAdoptVars(t)
+		adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+			return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
+		}
+		finishShutdownFn = func(daemon.ShutdownTarget) (bool, error) {
+			return false, fmt.Errorf("%w: still answering; its process is not known, so it was not stopped by signal", daemon.ErrShutdownIncomplete)
+		}
+		daemonHealthFn = func() daemon.HealthStatus { return respondingHealth(111) }
+		daemonStatusSupervisionFn = func() daemon.SupervisionInfo { return inactiveInfo() }
+		err := runDaemonAdopt(&bytes.Buffer{}, false)
+		require.ErrorContains(t, err, "it did not exit within its grace after the restart RPC, so the installed unit cannot take it over")
+		require.ErrorIs(t, err, daemon.ErrShutdownIncomplete)
 	})
 	t.Run("the signal fails", func(t *testing.T) {
 		stubAdoptVars(t)

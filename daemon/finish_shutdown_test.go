@@ -142,3 +142,96 @@ func TestRequestRestartShutdownWithinAbandonsAnUnansweredShutdown(t *testing.T) 
 		})
 	}
 }
+
+// pingOnlyControl is a daemon that answers Ping: a socket still answering.
+type pingOnlyControl struct{}
+
+func (pingOnlyControl) Ping(_ PingRequest, _ *PingResponse) error { return nil }
+
+// termIgnoringFakeDaemon starts a fake af daemon for this home that ignores
+// SIGTERM, and returns it with a channel that reports its exit.
+func termIgnoringFakeDaemon(t *testing.T, home, name string) (*exec.Cmd, <-chan *os.ProcessState) {
+	t.Helper()
+	ready := filepath.Join(home, name+"-ready")
+	cmd := spawnFakeDaemonHomeProc(t, "af", fmt.Sprintf(`trap "" TERM; : > %s; %s`, ready,
+		testguard.BoundedSpin(time.Second, 5*time.Minute)), "--daemon", "af-test")
+	pid := cmd.Process.Pid
+	waitForReady(t, fmt.Sprintf("%s pid=%d trapped TERM and exposes --daemon", name, pid), func() bool {
+		_, err := os.Stat(ready)
+		return err == nil && isAgentFactoryDaemon(pid)
+	})
+	exited := make(chan *os.ProcessState, 1)
+	go func() {
+		state, _ := cmd.Process.Wait()
+		exited <- state
+	}()
+	return cmd, exited
+}
+
+// TestFinishShutdownSignalsOnlyItsOwnTarget: the escalation signals only the
+// process the Shutdown was sent to, by pid and start time, never whatever
+// daemon.pid names by then (#7482). Here a successor rewrites daemon.pid while
+// the target's grace runs: the target is SIGKILLed, and the successor and its
+// daemon.pid are left alone. A target whose identity is unknown is never
+// signalled, and the stop reports that the daemon did not exit.
+func TestFinishShutdownSignalsOnlyItsOwnTarget(t *testing.T) {
+	origGrace, origPoll := stopDaemonGrace, stopDaemonPoll
+	stopDaemonGrace, stopDaemonPoll = time.Second, 25*time.Millisecond
+	t.Cleanup(func() { stopDaemonGrace, stopDaemonPoll = origGrace, origPoll })
+
+	t.Run("a successor rewrites daemon.pid in the window", func(t *testing.T) {
+		home := testguard.SocketTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		pidFile := filepath.Join(home, "daemon.pid")
+		target, targetExited := termIgnoringFakeDaemon(t, home, "target")
+		successor, successorExited := termIgnoringFakeDaemon(t, home, "successor")
+		require.NoError(t, os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", target.Process.Pid)), 0o600))
+		shutdown := ShutdownTarget{PID: target.Process.Pid, StartToken: processStartTokenFn(target.Process.Pid)}
+		go func() {
+			time.Sleep(stopDaemonGrace / 2)
+			_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", successor.Process.Pid)), 0o600)
+		}()
+
+		escalated, err := FinishShutdownWithinGrace(shutdown)
+		require.NoError(t, err)
+		require.True(t, escalated)
+		select {
+		case state := <-targetExited:
+			ws, ok := state.Sys().(syscall.WaitStatus)
+			require.True(t, ok)
+			require.True(t, ws.Signaled() && ws.Signal() == syscall.SIGKILL, "want the target SIGKILLed, got %v", state)
+		case <-time.After(5 * time.Second):
+			t.Fatal("the Shutdown's target was not stopped")
+		}
+		select {
+		case state := <-successorExited:
+			t.Fatalf("the escalation signalled the successor daemon.pid named, not the Shutdown's target: %v", state)
+		case <-time.After(500 * time.Millisecond):
+		}
+		got, err := os.ReadFile(pidFile)
+		require.NoError(t, err)
+		require.Equal(t, fmt.Sprintf("%d", successor.Process.Pid), string(got), "the successor's daemon.pid must be left in place")
+	})
+
+	t.Run("an unknown target is never signalled", func(t *testing.T) {
+		home := testguard.SocketTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		srv := rpc.NewServer()
+		require.NoError(t, srv.RegisterName(controlServiceName, pingOnlyControl{}))
+		_, cleanup := startFakeControlListener(t, srv)
+		t.Cleanup(cleanup)
+		running, exited := termIgnoringFakeDaemon(t, home, "running")
+		require.NoError(t, os.WriteFile(filepath.Join(home, "daemon.pid"), []byte(fmt.Sprintf("%d", running.Process.Pid)), 0o600))
+
+		for _, unknown := range []ShutdownTarget{{}, {PID: running.Process.Pid}} {
+			escalated, err := FinishShutdownWithinGrace(unknown)
+			require.False(t, escalated, "target %+v was signalled", unknown)
+			require.ErrorIs(t, err, ErrShutdownIncomplete, "the stop must report that the daemon did not exit")
+		}
+		select {
+		case state := <-exited:
+			t.Fatalf("a daemon whose identity the Shutdown did not know was signalled: %v", state)
+		case <-time.After(500 * time.Millisecond):
+		}
+	})
+}
