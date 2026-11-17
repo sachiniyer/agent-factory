@@ -226,16 +226,6 @@ type runFragment struct {
 	prio int
 }
 
-// nextRunSummary derives the "next/last" column of a compact row: a cron
-// task's next fire time (from its schedule), a watch task's supervision
-// state, plus the last run when one is recorded.
-//
-// A cron can be syntactically legal and still match no date at all —
-// "0 0 31 2 *" is February 31st. ParseCron succeeds on it, but Next gives up
-// after five years and returns the ZERO time.Time, which formats as a
-// thoroughly plausible "next Jan 01 00:00"; name the absence instead of
-// promising a fire time the task will never reach. The schedule picker's
-// Custom preview guards the same trap (see renderPreviewLine).
 // watchSupervision is the watch branch's status fragment: what the supervisor is
 // LIVE-observed to be doing, falling back to persisted history only where
 // nothing observed it.
@@ -278,15 +268,6 @@ func nextRunLabel(tsk task.Task, now time.Time) string {
 		return note
 	}
 	return tsk.NextRunAt.Format("Jan 02 15:04")
-}
-
-func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
-	frags := a.runFragments(tsk)
-	parts := make([]string, 0, len(frags))
-	for _, f := range frags {
-		parts = append(parts, f.text)
-	}
-	return strings.Join(parts, " · ")
 }
 
 func (a *AutomationsPane) runFragments(tsk task.Task) []runFragment {
@@ -486,7 +467,7 @@ func attentionFragment(tsk task.Task, now time.Time) string {
 		//
 		// Which shape comes from the SHARED classifier rather than a local
 		// ParseCron, which is what had this row calling an ABSENT expression
-		// invalid. nextRunSummary suppresses its own copy, so the line says it once.
+		// invalid. runFragments suppresses its own copy, so the line says it once.
 		switch task.UnschedulableReason(tsk, now) {
 		case task.ReasonNoTrigger:
 			return "No trigger"
