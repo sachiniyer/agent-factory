@@ -31,10 +31,11 @@ const codexForkCarryReason = "it was forked from another Codex conversation, and
 // first line that is not a session_meta record is no fork — Codex cannot
 // resume that file either — but a file that cannot be read is an error.
 func codexRolloutHistoryBase(path string) (bool, error) {
-	line, err := readCodexRolloutFirstLine(path)
+	rec, err := readCodexRolloutFirstLine(path)
 	if err != nil {
 		return false, err
 	}
+	line := rec.line
 	var meta struct {
 		Type    string `json:"type"`
 		Payload struct {

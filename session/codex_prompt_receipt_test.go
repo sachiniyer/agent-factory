@@ -547,8 +547,11 @@ func TestReceiptPoolMemberUnclassifiedByFailureNeverConfirms(t *testing.T) {
 		"a match in a member af could not classify is inconclusive, never a confirmation: %v", err)
 
 	// The mount answers again: the member re-judges foreign and drops out,
-	// so the same briefing answers absence.
+	// so the same briefing answers absence. Re-judgement is paced to the
+	// quiet cadence (#7475 review R3), so this check ages the member's last
+	// judgement to owe it a retry.
 	failing.Store(false)
+	snap.receiptPaths[0].memberChecked = time.Now().Add(-time.Hour)
 	err = WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, prompt, 0)
 	require.ErrorIs(t, err, ErrPromptReceiptNotObserved,
 		"re-judged foreign, the rollout's match is discounted for good: %v", err)
@@ -639,6 +642,161 @@ func TestReceiptPoolMemberUnclassifiableStaysInconclusiveAndWarns(t *testing.T) 
 		"the warning names the rollout af could never judge")
 	require.Contains(t, warnings.String(), "no absolute cwd",
 		"and why it can never be judged: %s", warnings.String())
+}
+
+// One check spends at most one bound on re-judgement and stops at the first
+// non-answer, as the scan does (#7475 review R1): two members whose recorded
+// cwds stall past the probe bound cost one stall, not one each — and a
+// cancelled ctx runs no lookup at all. Re-judgement runs once per check in
+// the wait, so a verdict it reaches persists.
+func TestReceiptPoolRepooledStopsAtFirstNonAnswer(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	other1, other2 := t.TempDir(), t.TempDir()
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", other1)
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", other2)
+
+	clock := fsprobe.NewManualClock(time.Now())
+	t.Cleanup(fsprobe.SetFlightClockForTest(clock))
+
+	// The mount answers with a definitive error at track — each member's
+	// resolve completes and keeps it unclassified — then wedges: every
+	// re-judgement resolve advances past the bound on the manual clock and
+	// blocks, a stall the bound must cut, never a scheduling accident.
+	var stallCalls atomic.Int32
+	var wedged atomic.Bool
+	release := make(chan struct{})
+	defer close(release)
+	t.Cleanup(fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+		if path == other1 || path == other2 ||
+			strings.HasPrefix(path, other1+string(filepath.Separator)) ||
+			strings.HasPrefix(path, other2+string(filepath.Separator)) {
+			if wedged.Load() {
+				stallCalls.Add(1)
+				clock.Advance(3 * time.Second)
+				<-release
+			}
+			return "", &fs.PathError{Op: "lstat", Path: path, Err: syscall.EIO}
+		}
+		return filepath.EvalSymlinks(path)
+	}))
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	snap.TrackCodexReceiptPool(false)
+	require.Len(t, snap.receiptPaths, 2,
+		"precondition: both members' failed resolves keep them unclassified")
+	for i := range snap.receiptPaths {
+		require.Equal(t, poolMemberFailed, snap.receiptPaths[i].membership)
+		// Re-judgement is paced to the quiet cadence (#7475 review R3): age
+		// both judgements so this check owes each a retry.
+		snap.receiptPaths[i].memberChecked = time.Now().Add(-time.Hour)
+	}
+	wedged.Store(true)
+
+	snap = snap.repooled(context.Background())
+	require.Equal(t, int32(1), stallCalls.Load(),
+		"re-judgement stops at the first non-answer: the second member is never probed")
+	require.Len(t, snap.receiptPaths, 2,
+		"a member that never answered is kept unclassified, never dropped nor confirmed")
+	for _, tracked := range snap.receiptPaths {
+		require.Equal(t, poolMemberFailed, tracked.membership)
+	}
+
+	// A cancelled ctx ends the pass the same way: no lookup is even attempted.
+	for i := range snap.receiptPaths {
+		snap.receiptPaths[i].memberChecked = time.Now().Add(-time.Hour)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	snap = snap.repooled(cancelled)
+	require.Equal(t, int32(1), stallCalls.Load(),
+		"a cancelled ctx performs no re-judgement")
+	require.Len(t, snap.receiptPaths, 2)
+}
+
+// A first record still mid-write — an empty file, or a line without its
+// newline — is transient, never unclassifiable by contract (#7475 review R2):
+// the member is re-judged, and when the record lands the verdict settles
+// like a lookup that recovered. Here an empty rollout's session_meta lands
+// with this launch's cwd, then the briefing: the match confirms.
+func TestReceiptPoolMemberIncompleteHeaderIsRejudgedAndConfirms(t *testing.T) {
+	const prompt = "config briefing 7470"
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	incomplete := writeEmptyCodexRolloutFile(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	snap.TrackCodexReceiptPool(false)
+	require.Len(t, snap.receiptPaths, 1)
+	require.Equal(t, poolMemberFailed, snap.receiptPaths[0].membership,
+		"a first record with no newline is transient, not unclassifiable by contract")
+
+	// The session_meta lands with this launch's cwd, then the briefing.
+	appendCodexRolloutEvent(t, incomplete, map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": workDir, "source": "cli"},
+	})
+	appendCodexRolloutEvent(t, incomplete, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": prompt},
+	})
+	snap.receiptPaths[0].memberChecked = time.Now().Add(-time.Hour)
+	require.NoError(t, WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, prompt, 0),
+		"re-judged positive once the record completes, the member's match confirms")
+}
+
+// A member whose lookup answers with a definitive error is failure-class,
+// re-judged no faster than the 1s quiet cadence pool files restat on (#7475
+// review R3) — not twice per poll. And a wait that ends undecidable on that
+// failure-class matcher names it, as the contract case does.
+func TestReceiptPoolFailedMemberRejudgementIsPacedAndNamed(t *testing.T) {
+	const prompt = "config briefing 7470"
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	other := t.TempDir()
+	member := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", other)
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	var resolveCalls atomic.Int32
+	t.Cleanup(fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+		if path == other || strings.HasPrefix(path, other+string(filepath.Separator)) {
+			resolveCalls.Add(1)
+			return "", &fs.PathError{Op: "lstat", Path: path, Err: syscall.EIO}
+		}
+		return filepath.EvalSymlinks(path)
+	}))
+	snap.TrackCodexReceiptPool(false)
+	require.Len(t, snap.receiptPaths, 1)
+	require.Equal(t, poolMemberFailed, snap.receiptPaths[0].membership)
+	base := resolveCalls.Load()
+
+	// Pacing: judged a tick ago the member owes no retry; aged past the
+	// quiet cadence it re-judges once, then is paced again.
+	snap = snap.repooled(context.Background())
+	require.Equal(t, base, resolveCalls.Load(), "a member judged a tick ago is not re-walked")
+	snap.receiptPaths[0].memberChecked = time.Now().Add(-time.Hour)
+	snap = snap.repooled(context.Background())
+	require.Equal(t, base+1, resolveCalls.Load(), "the aged member re-judges once")
+	snap = snap.repooled(context.Background())
+	require.Equal(t, base+1, resolveCalls.Load(), "and is then paced again")
+
+	// The wait ends undecidable on the failure-class matcher, and names it.
+	appendCodexRolloutEvent(t, member, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": prompt},
+	})
+	warnings := &logtest.Buffer{}
+	log.CaptureOutput(t, log.WarningLog, "", warnings)
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, prompt, 0)
+	require.ErrorIs(t, err, ErrPromptReceiptUndecidable,
+		"the lone match in a lookup-failed member stays inconclusive: %v", err)
+	require.Contains(t, warnings.String(), member,
+		"the warning names the rollout af could never classify")
+	require.Contains(t, warnings.String(), "launch-directory lookup",
+		"and why it was never classified: %s", warnings.String())
 }
 
 // A tracked pool file whose size has not passed its boundary is never opened,

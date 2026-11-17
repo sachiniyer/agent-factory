@@ -65,10 +65,17 @@ type trackedReceiptPath struct {
 	// launch's can confirm a receipt; a match in an unclassified member is
 	// inconclusive. Pinned targets leave it zero: the user named the file.
 	membership poolMembership
-	// memberWhy, on a poolMemberUnclassifiable member, names why the rollout
-	// can never be judged — reported when it alone holds the match a wait
-	// ends undecidable on, so a Codex format change is visible (#7470).
+	// memberWhy, on a member that is not positively classified, names why it
+	// could not be judged — reported when it alone holds the match a wait
+	// ends undecidable on, so a Codex format change or a lookup that keeps
+	// failing is visible (#7470, #7475 review R3).
 	memberWhy string
+	// memberChecked is when the member's classification was last judged,
+	// for members whose last judgement was a lookup failure: those are
+	// re-judged no faster than the quiet cadence pool files restat on,
+	// so a member whose lookup answers with a definitive error is not
+	// walked every poll (#7475 review R3).
+	memberChecked time.Time
 }
 
 // poolMembership is how a receipt-pool member last classified against the
@@ -239,9 +246,10 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
 		// A scoped member's classification decides whether its match may
 		// confirm (#7470): unscoped pools and unbound snapshots keep every
 		// member unjudged, where a match confirms by the pool's contract.
-		membership, why := poolMemberUnjudged, ""
+		membership, why, checked := poolMemberUnjudged, "", time.Time{}
 		if !unscoped && s.workingDir != "" {
-			membership, why = classifyReceiptPoolMember(path, s.workingDir)
+			membership, why, _ = classifyReceiptPoolMember(path, s.workingDir)
+			checked = time.Now()
 			if membership == poolMemberForeign {
 				continue
 			}
@@ -259,11 +267,12 @@ func (s *ConversationCaptureSnapshot) TrackCodexReceiptPool(unscoped bool) {
 		}
 		if err == nil {
 			s.receiptPaths = append(s.receiptPaths, trackedReceiptPath{
-				path:       path,
-				offset:     info.Size(),
-				unpinned:   true,
-				membership: membership,
-				memberWhy:  why,
+				path:          path,
+				offset:        info.Size(),
+				unpinned:      true,
+				membership:    membership,
+				memberWhy:     why,
+				memberChecked: checked,
 			})
 		}
 	}
@@ -311,9 +320,11 @@ func WaitForPromptReceipt(
 	for {
 		// Kept across polls: a scope that resolves scopes its pool once, not
 		// on every poll (#7299); a pool member whose classification lookup
-		// did not answer or failed is re-judged on every poll (#7470).
+		// did not answer or failed is re-judged once per check, at most one
+		// bound spent and no faster than the quiet cadence (#7470, #7475
+		// review R1/R3).
 		snap = snap.rescoped()
-		snap = snap.repooled()
+		snap = snap.repooled(ctx)
 		received, undecided, soft, err := codexPromptReceiptOnce(snap, prompt)
 		if err != nil {
 			return err
@@ -323,9 +334,14 @@ func WaitForPromptReceipt(
 		}
 		if timeout <= 0 || !time.Now().Before(deadline) {
 			if undecided {
-				if soft != nil && soft.membership == poolMemberUnclassifiable {
+				switch {
+				case soft != nil && soft.membership == poolMemberUnclassifiable:
 					log.WarningLog.Printf(
 						"prompt receipt: the only rollout that recorded the briefing can never be classified against the launch directory — %s: %s (a Codex format change would look exactly like this)",
+						soft.memberWhy, soft.path)
+				case soft != nil && soft.membership == poolMemberFailed:
+					log.WarningLog.Printf(
+						"prompt receipt: the only rollout that recorded the briefing was never classified against the launch directory — %s: %s",
 						soft.memberWhy, soft.path)
 				}
 				return fmt.Errorf("%w within %s: a Codex rollout that could hold it never became classifiable, or af's read of one did not answer", ErrPromptReceiptUndecidable, timeout)
@@ -380,7 +396,6 @@ func WaitForPromptReceipt(
 // its match confirms; foreign, and the match is discounted for good.
 func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (received, undecided bool, soft *trackedReceiptPath, err error) {
 	snap = snap.rescoped()
-	snap = snap.repooled()
 	state := snap.receiptState
 	if state == nil {
 		state = newCodexReceiptState()
@@ -472,16 +487,23 @@ func codexPromptReceiptOnce(snap ConversationCaptureSnapshot, prompt string) (re
 	}
 }
 
-// repooled is s with each pool member whose last classification lookup did
-// not answer or failed judged again (#7470): membership decided by contract —
-// member, foreign, unclassifiable — memoizes, but a lookup that did not
-// happen must not freeze a member unknown forever, because only a positively
-// classified member's match may confirm. A member that now classifies
-// foreign drops out for good: it was never this launch's. The judgements are
-// bounded, and the flight latch refuses a retry whose lookup is still
+// repooled is s with failed pool members re-judged against the pool's scope
+// (#7470): membership decided by contract — member, foreign, unclassifiable —
+// memoizes, but a lookup that did not happen must not freeze a member unknown
+// forever, because only a positively classified member's match may confirm.
+// A member that now classifies foreign drops out for good: it was never this
+// launch's. One check spends at most one bound on re-judgement and stops at
+// the first non-answer, as the scan does: the rest keep their stale judgement
+// rather than each waiting out a bound of its own on what is plausibly the
+// same mount (#7475 review R1). A member whose lookup answered is re-judged
+// no faster than the quiet cadence pool files restat on, so a definitive
+// error is not walked every poll (#7475 review R3); a cancelled ctx ends the
+// pass the same way. It runs once per check, in the wait, so a verdict it
+// reaches persists into the snapshot the next check reads. The judgements
+// are bounded, and the flight latch refuses a retry whose lookup is still
 // blocked. A new slice: the caller's copy shares the old one's backing
 // array.
-func (s ConversationCaptureSnapshot) repooled() ConversationCaptureSnapshot {
+func (s ConversationCaptureSnapshot) repooled(ctx context.Context) ConversationCaptureSnapshot {
 	if s.workingDir == "" {
 		return s
 	}
@@ -496,16 +518,29 @@ func (s ConversationCaptureSnapshot) repooled() ConversationCaptureSnapshot {
 		return s
 	}
 	kept := make([]trackedReceiptPath, 0, len(s.receiptPaths))
-	for _, tracked := range s.receiptPaths {
-		if tracked.unpinned && tracked.membership == poolMemberFailed {
-			membership, why := classifyReceiptPoolMember(tracked.path, s.workingDir)
-			if membership == poolMemberForeign {
-				continue
-			}
-			tracked.membership, tracked.memberWhy = membership, why
+	i := 0
+	for ; i < len(s.receiptPaths); i++ {
+		tracked := s.receiptPaths[i]
+		if ctx.Err() != nil {
+			break
 		}
+		if !tracked.unpinned || tracked.membership != poolMemberFailed ||
+			time.Since(tracked.memberChecked) < codexReceiptQuietStatInterval {
+			kept = append(kept, tracked)
+			continue
+		}
+		membership, why, err := classifyReceiptPoolMember(tracked.path, s.workingDir)
+		if membership == poolMemberForeign {
+			continue
+		}
+		tracked.membership, tracked.memberWhy, tracked.memberChecked = membership, why, time.Now()
 		kept = append(kept, tracked)
+		if errors.Is(err, fsprobe.ErrProbeTimedOut) {
+			i++
+			break
+		}
 	}
+	kept = append(kept, s.receiptPaths[i:]...)
 	s.receiptPaths = kept
 	return s
 }
@@ -518,23 +553,33 @@ func (s ConversationCaptureSnapshot) repooled() ConversationCaptureSnapshot {
 // header that read whole and can never be judged (not session_meta,
 // unparseable, no absolute cwd — permanent), while poolMemberFailed is a
 // lookup that did not answer or failed (the header read or the cwd's bounded
-// resolution, #7292) — transient, so the member is re-judged on each check.
-// Only a poolMemberPositive match may confirm a receipt.
-func classifyReceiptPoolMember(path, workingDir string) (poolMembership, string) {
+// resolution, #7292), including a first record still mid-write
+// (#7475 review R2) — transient, so the member is re-judged. Only a
+// poolMemberPositive match may confirm a receipt. On a failure it returns
+// the lookup's error so the caller can tell a non-answer (ErrProbeTimedOut)
+// from a definitive error, and why names what failed for the diagnostic a
+// wait ending undecidable emits (#7475 review R3).
+func classifyReceiptPoolMember(path, workingDir string) (poolMembership, string, error) {
 	cwd, _, ok, readErr, unjudged := codexRolloutHeader(path)
 	switch {
+	case errors.Is(readErr, fsprobe.ErrProbeTimedOut):
+		return poolMemberFailed, "its session_meta read did not answer", readErr
+	case errors.Is(readErr, errCodexSessionMetaIncomplete):
+		return poolMemberFailed, "its session_meta record is still incomplete", readErr
 	case readErr != nil:
-		return poolMemberFailed, ""
+		return poolMemberFailed, "its session_meta read failed", readErr
 	case !ok:
-		return poolMemberUnclassifiable, unjudged
+		return poolMemberUnclassifiable, unjudged, nil
 	}
 	resolved, err := fsprobe.ResolveForCompare(cwd)
 	switch {
+	case errors.Is(err, fsprobe.ErrProbeTimedOut):
+		return poolMemberFailed, "its launch-directory lookup did not answer", err
 	case err != nil:
-		return poolMemberFailed, ""
+		return poolMemberFailed, "its launch-directory lookup failed", err
 	case resolved == workingDir:
-		return poolMemberPositive, ""
+		return poolMemberPositive, "", nil
 	default:
-		return poolMemberForeign, ""
+		return poolMemberForeign, "", nil
 	}
 }

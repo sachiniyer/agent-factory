@@ -509,11 +509,11 @@ func (s ConversationCaptureSnapshot) rescoped() ConversationCaptureSnapshot {
 				kept = append(kept, tracked)
 				continue
 			}
-			membership, why := classifyReceiptPoolMember(tracked.path, resolved)
+			membership, why, _ := classifyReceiptPoolMember(tracked.path, resolved)
 			if membership == poolMemberForeign {
 				continue
 			}
-			tracked.membership, tracked.memberWhy = membership, why
+			tracked.membership, tracked.memberWhy, tracked.memberChecked = membership, why, time.Now()
 			kept = append(kept, tracked)
 		}
 		s.receiptPaths, s.poolScopePending = kept, false

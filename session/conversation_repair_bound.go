@@ -376,7 +376,7 @@ func (d resumeDecline) provenanceUnanswered() bool {
 // all — the read failed, or did not answer within its bound — is no answer
 // about the date, and is reported as err.
 func codexRolloutStoredAt(path string) (stored time.Time, ok bool, err error) {
-	line, err := readCodexRolloutFirstLine(path)
+	rec, err := readCodexRolloutFirstLine(path)
 	switch {
 	case errors.Is(err, errCodexSessionMetaOverBound):
 		// Read, just too large to judge: answered, and undatable.
@@ -384,6 +384,7 @@ func codexRolloutStoredAt(path string) (stored time.Time, ok bool, err error) {
 	case err != nil:
 		return time.Time{}, false, err
 	}
+	line := rec.line
 	var header struct {
 		Type      string `json:"type"`
 		Timestamp string `json:"timestamp"`
