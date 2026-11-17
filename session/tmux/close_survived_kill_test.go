@@ -354,7 +354,11 @@ func TestVanishedSessionIgnoresAnotherHomesProcess(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	const name = "af_vanished_foreign"
-	foreign := spawnMarkedProcess(t, name, filepath.Join(t.TempDir(), "some-other-home"))
+	// The foreign home must EXIST: a marker naming an unstat-able path is
+	// homeUnproven — which under #7435 refuses rather than skips — while a
+	// home that stats to a different directory is homeForeign and skipped
+	// silently. A foreign AF home in the real world is a real directory.
+	foreign := spawnMarkedProcess(t, name, t.TempDir())
 
 	scriptedTmuxOnPath(t, `
 display-message) exit 0 ;;
