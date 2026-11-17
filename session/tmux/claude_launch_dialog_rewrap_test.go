@@ -220,14 +220,13 @@ func TestCheckAndHandleTrustPrompt_FramedRewordedDialogHoldsAtAnyWidth(t *testin
 // dialog read CLEAR — the create path's permission to type the user's prompt +
 // Enter into the live modal, re-leaking the exact verdict #7369 reported.
 //
-// With the fix, a frame rule above the options only bounds a boxed COMPOSER: a
-// ">" / "> " row directly below it (the one-sided shape the package's other
-// composer detectors use), or a ">" / "> " row directly above it welded to a
-// frame rule on its other side too. A bare transcript ">" row above the
-// dialog's own top border has no rule above it, so the framed dialog parses
-// identically to the unframed one regardless of the transcript content above
-// it. The plain-line control already held at every width; the ">"-prefixed line
-// must hold too.
+// With the fix, a box above the options is a COMPOSER only by what is inside
+// it, its first row a prompt (claudeTrustBoxPromptRow, #7380), or by a prompt
+// row straight above its bottom edge when its top scrolled off (#7399 review).
+// A bare transcript ">" row sits outside the dialog's own top border, so the
+// framed dialog parses identically to the unframed one regardless of the
+// transcript content above it. The plain-line control already held at every
+// width; the ">"-prefixed line must hold too.
 func TestCheckAndHandleTrustPrompt_FramedRewordedDialogHoldsAboveTranscriptGtPrefix(t *testing.T) {
 	_, _, errLog := captureTrustPromptLogs(t)
 	for width := 8; width <= 60; width++ {
@@ -286,11 +285,11 @@ func TestCheckAndHandleTrustPrompt_FramedRewordedDialogTopScrolledOffHolds(t *te
 // A boxed composer whose opening rule has scrolled off the top of the pane —
 // leaving its ">" prompt row and its closing rule directly above a quoted/stale
 // folder-trust option block — must still read CLEAR. The full-box form (opening
-// rule visible) is covered by "the boxed composer above the options"; the #7376
-// fix's welding check rejects only when the prompt is welded on its other side
-// too, so this ordinary top-cropped form — opening rule gone, so i-2 is not a
-// frame rule — would slip past it and hold, reclassifying a stale/quoted option
-// block under a live composer as a live dialog. The composer's closing edge
+// rule visible) is covered by "the boxed composer above the options"; the box
+// test reads a box by its first row below its top edge, so this ordinary
+// top-cropped form — opening rule gone — would slip past it and hold,
+// reclassifying a stale/quoted option block under a live composer as a live
+// dialog. The composer's closing edge
 // (╰…╯) is a bottom-cornered frame; a bare transcript ">" row sits above the
 // framed dialog's own top border (╭…╮), never above a ╰…╯ closing rule, so the
 // closing-edge shape still rejects without reclassifying the transcript row the
@@ -306,8 +305,8 @@ func TestCheckAndHandleTrustPrompt_TopCroppedBoxedComposerAboveOptionsStaysClear
 			"│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, proceed\n2. No, exit\n\nEnter to confirm · Esc to exit",
 		},
 		// The full-box form (opening rule visible) keeps clearing: the
-		// welding check rejects it, pinning that the closing-edge guard
-		// did not weaken the full-box guard.
+		// box test rejects it, pinning that the closing-edge guard did
+		// not weaken the full-box guard.
 		{
 			"the full boxed composer above the options",
 			"╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, I trust this folder\n2. No, exit\n\nEnter to confirm · Esc to cancel",
@@ -330,10 +329,11 @@ func TestCheckAndHandleTrustPrompt_FolderTrustDialogTextThatIsNoDialogStaysClear
 		{"the boxed composer below", legacy + boxedComposerBelow},
 		// A boxed composer painted ABOVE the dialog's option rows and footer
 		// (a quoted dialog with the agent's live composer above it) must stay
-		// clear: the case-3 scan rejects the composer's box edge because the
-		// row next to it reads "> ", not because every frame rule rejects.
-		// This is the false-hold a plain-rule-only scan would produce, so it
-		// pins that the fix did not weaken the boxed-composer guard.
+		// clear: the case-3 scan rejects the box because its first row is a
+		// prompt (claudeTrustBoxPromptRow, #7380), not because every frame
+		// rule rejects. This is the false-hold a plain-rule-only scan would
+		// produce, so it pins that the fix did not weaken the boxed-composer
+		// guard.
 		{"the boxed composer above the options", "╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, I trust this folder\n2. No, exit\n\nEnter to confirm · Esc to cancel"},
 		{"the boxed composer above the legacy options", "╭────────────────────────────────────╮\n│ > Type your message here           │\n╰────────────────────────────────────╯\n❯ 1. Yes, proceed\n2. No, exit\n\nEnter to confirm · Esc to exit"},
 		{"a hint row below the footer", legacy + "\n? for shortcuts"},

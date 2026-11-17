@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -333,39 +334,34 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 			// review R5), not the composer's, so a frame rule above the
 			// options is the dialog's top border and must NOT reject: the
 			// framed form must parse identically to the unframed one
-			// (claudeTrustBoxDrawing). The one frame that grounds a
-			// rejection here is a boxed COMPOSER's.
-			//
-			// A composer's edge is a frame rule with its ">" / "> " prompt
-			// row on the far side — the same one-sided shape the package's
-			// other composer detectors read (claudeLaunchDialogComposerBelow,
-			// claudeFolderTrustComposerRow, claudeMCPTrustComposerRow: a ">"
-			// row straight below a frame rule). That holds for the composer's
-			// top border with the prompt directly under it; the panel also
-			// grows a transcript, and a transcript line that renders with a
-			// ">" prefix (a markdown blockquote, quoted/reply text, command
-			// output) sits directly ABOVE the dialog's own top border and
-			// reduces to ">" / "> " too. To tell that bare transcript row
-			// from a composer's prompt the row just ABOVE a rule (the
-			// composer's bottom edge, when its top scrolled off), require
-			// the prompt to be welded: a frame rule must sit on its other
-			// side as well. A transcript ">" row above the dialog's top
-			// border has no rule above it, so it must not reject (#7376
-			// review R5).
-			above, below := claudeLaunchDialogPromptRow(pane, i-1), claudeLaunchDialogPromptRow(pane, i+1)
-			if below {
-				return claudeLaunchDialogMatch{}, false
-			}
-			if above && i >= 2 && claudeTrustFrameRule(pane.lines[i-2]) {
+			// (claudeTrustBoxDrawing). The one box that grounds a rejection
+			// here is a composer's, and a box is a composer by what is
+			// inside it (claudeTrustBoxPromptRow, #7380). Rows outside the
+			// box decide nothing, so a shell's "> claude" line above a live
+			// framed dialog does not make it a composer. And a composer
+			// explains only its own rows: one with the dialog's own first
+			// rows on screen below it is a stale frame above a live dialog
+			// (#7388), and decides nothing. Nor can it explain a row above
+			// its box: af cannot tell the dialog's question above a stale
+			// composer from transcript, so the box decides only when every
+			// row above it is one af can place (#7412 review, R7).
+			if prompt := claudeTrustBoxPromptRow(pane.lines, pane.rows, i); prompt >= 0 &&
+				!claudeLaunchDialogOwnRowsAbove(pane, i) &&
+				!claudeLaunchDialogOwnRowsBetween(pane, prompt, pane.index[block]) {
 				return claudeLaunchDialogMatch{}, false
 			}
 			// A top-cropped boxed composer: its opening rule scrolled off the
-			// top, so the prompt at i-1 is not welded on top, but the rule at i
-			// is still the composer's closing edge — a bottom-cornered frame
-			// (╰…╯ closes; ╭…╮ opens). Reject that closing-edge shape; a bare
+			// top, so its prompt row sits straight above the composer's closing
+			// edge — a bottom-cornered frame (╰…╯ closes; ╭…╮ opens). A bare
 			// transcript ">" row sits above the framed dialog's own top border
-			// (╭…╮), never above a ╰…╯ closing rule (#7399 review).
-			if above && claudeTrustFrameClosingRule(pane.lines[i]) {
+			// (╭…╮), never above a ╰…╯ closing rule (#7399 review). It explains
+			// only its own rows too, under the same #7388 anchor as the box
+			// test (#7412 review, R4). And it is top-cropped only when its top
+			// is off screen: every line above its prompt row is one of the
+			// box's own pad rows (claudeTrustBoxTopCropped, #7412 review, R6).
+			if claudeLaunchDialogPromptRow(pane, i-1) && claudeTrustFrameClosingRule(pane.lines[i]) &&
+				claudeTrustBoxTopCropped(pane, i-1) &&
+				!claudeLaunchDialogOwnRowsBetween(pane, i-1, pane.index[block]) {
 				return claudeLaunchDialogMatch{}, false
 			}
 		}
@@ -373,6 +369,185 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 		return match, true
 	}
 	return claudeLaunchDialogMatch{}, false
+}
+
+// claudeTrustBoxTopCorners open a box: a frame rule that starts with one is a
+// box's top edge.
+const claudeTrustBoxTopCorners = "╭┌╔┏"
+
+// claudeTrustBoxPromptRow returns the line of a composer box's prompt row,
+// given its top edge, or -1 when the box is no composer. A box is a composer by
+// what is inside it: its first row inside the box, past any pad rows, is a
+// prompt in one of the composer's modes (claudeTrustBoxPromptLabel). A bottom
+// edge or a tee decides nothing on its own, and neither does a box whose top
+// edge is off screen: what is inside a box is below its top edge, between its
+// side borders.
+func claudeTrustBoxPromptRow(lines []string, rows []claudeTrustRow, top int) int {
+	if !claudeTrustBoxOpensAt(strings.TrimSpace(lines[top])) {
+		return -1
+	}
+	for i := top + 1; i < len(lines); i++ {
+		if claudeTrustFrameRule(lines[i]) || !claudeTrustBordered(lines[i]) {
+			// The box closed, another edge began, or a row outside any box
+			// came, before the box's first row.
+			return -1
+		}
+		if rows[i].blank {
+			continue
+		}
+		if !rows[i].selected && claudeTrustBoxPromptLabel(rows[i].label) {
+			return i
+		}
+		return -1
+	}
+	return -1
+}
+
+// claudeTrustBordered reports whether line carries a box's side borders.
+func claudeTrustBordered(line string) bool {
+	line = strings.TrimSpace(line)
+	first, _ := utf8.DecodeRuneInString(line)
+	last, _ := utf8.DecodeLastRuneInString(line)
+	return strings.ContainsRune(claudeTrustBoxSides, first) && strings.ContainsRune(claudeTrustBoxSides, last)
+}
+
+// claudeTrustBoxPromptLabel reports a composer box's prompt row: the glyph of
+// one of the composer's modes, ">" (prompt), "!" (bash) or "#" (memory),
+// followed by nothing or by the space the composer paints after it, U+0020 or
+// U+00A0. 2.1.322 paints U+00A0 after its glyph
+// (testdata/claude_2_1_322_composer_after_mcp_decline.ansi, #7391 review).
+// Only the box test reads U+00A0. The plain-rule test keeps
+// claudeComposerPromptLabel, as #7391 left it, until #7388 gives it the same
+// anchor the box test has (#7412 review, R2).
+func claudeTrustBoxPromptLabel(label string) bool {
+	for _, mode := range []string{">", "!", "#"} {
+		rest, ok := strings.CutPrefix(label, mode)
+		if !ok {
+			continue
+		}
+		if after, _ := utf8.DecodeRuneInString(rest); rest == "" || after == ' ' || after == '\u00a0' {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeTrustBoxBottomCorners close a box: a frame rule that starts with one
+// is a box's bottom edge.
+const claudeTrustBoxBottomCorners = "╰└╚┗"
+
+// claudeTrustBoxCorners are every corner a box edge can carry. An edge with
+// none on it, a tee, a junction or a rule, neither opens nor closes a box.
+const claudeTrustBoxCorners = claudeTrustBoxTopCorners + "╮┐╗┓" + claudeTrustBoxBottomCorners + "╯┘╝┛"
+
+// claudeLaunchDialogOwnRowsBetween reports whether the lines strictly between
+// from, a composer's prompt row, and to, where the options begin, may hold one
+// of the dialog's own first rows (#7388). Every line below the prompt is read,
+// the box's own rows below it too: only a bottom edge closes a box, and a
+// bottom edge, the composer's or any other, is read as no row at all (#7412
+// review, R1). A composer decides only over rows af can place as quoted
+// (#7412 review, R3), so any of these is one of the dialog's own first rows:
+//
+//   - the top edge of a box that is still open at the options;
+//   - an edge with no corner on it: a tee, a junction, or a rule in a style
+//     other than the composer's ─. It neither opens nor closes a box, so it is
+//     an edge inside the dialog's frame or the dialog's own rule (Codex review
+//     on #7412);
+//   - the dialog's own top rule: a plain rule bounding no prompt row between
+//     the composer and the options;
+//   - a row af cannot place: any row with text on it. The rows af can place
+//     are none at all and the bare options, so a blank row, a bordered blank
+//     row or a lone wrapped ❯. Any other row may be the dialog's question in
+//     wording af does not know, a title such as "Accessing workspace:" among
+//     them. A row that reads as the end of a question af knows is no evidence
+//     that the composer hides its start, so it counts too (#7412 review, R5).
+func claudeLaunchDialogOwnRowsBetween(pane claudeLaunchDialogPane, from, to int) bool {
+	for i := from + 1; i < to; i++ {
+		line := pane.lines[i]
+		switch {
+		case claudeComposerRule(line):
+			if !claudeLaunchDialogBoundsPrompt(pane, i, from, to) {
+				return true
+			}
+		case claudeTrustFrameRule(line):
+			edge := strings.TrimSpace(line)
+			if claudeTrustBoxOpensAt(edge) && claudeTrustBoxOpenUntil(pane.lines, i, to) || !strings.ContainsAny(edge, claudeTrustBoxCorners) {
+				return true
+			}
+		case claudeLaunchDialogUnplacedRow(pane, i):
+			return true
+		}
+	}
+	return false
+}
+
+// claudeLaunchDialogOwnRowsAbove reports whether any line above line top, a
+// composer box's top edge, may hold one of the dialog's own first rows. A
+// composer explains only the rows below it, so a row above its box that af
+// cannot place may be the dialog's question with a stale composer between it
+// and the options (#7412 review, R7). The lines af can place above a box are
+// blank rows and frame rules.
+func claudeLaunchDialogOwnRowsAbove(pane claudeLaunchDialogPane, top int) bool {
+	for i := 0; i < top; i++ {
+		if !claudeTrustFrameRule(pane.lines[i]) && claudeLaunchDialogUnplacedRow(pane, i) {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeLaunchDialogUnplacedRow reports whether pane line i is a row af cannot
+// place: any row with text on it. A blank row, a bordered blank row and a lone
+// wrapped ❯ are rows af can place.
+func claudeLaunchDialogUnplacedRow(pane claudeLaunchDialogPane, i int) bool {
+	return !pane.rows[i].blank && claudeSquash(pane.rows[i].label) != ""
+}
+
+// claudeTrustBoxTopCropped reports whether the box whose prompt row is line
+// prompt has its top edge off screen: every line above the prompt row is one
+// of the box's own pad rows, bordered and blank. Anything else above it means
+// the box's top is on screen, and the box test reads the box by its first row,
+// or the row is no composer's prompt (#7412 review, R6).
+func claudeTrustBoxTopCropped(pane claudeLaunchDialogPane, prompt int) bool {
+	for i := 0; i < prompt; i++ {
+		if !claudeTrustBordered(pane.lines[i]) || !pane.rows[i].blank {
+			return false
+		}
+	}
+	return true
+}
+
+// claudeTrustBoxOpensAt reports whether edge, a trimmed frame rule, is a box's
+// top edge.
+func claudeTrustBoxOpensAt(edge string) bool {
+	first, _ := utf8.DecodeRuneInString(edge)
+	return strings.ContainsRune(claudeTrustBoxTopCorners, first)
+}
+
+// claudeTrustBoxOpenUntil reports whether the box whose top edge is line top
+// has no bottom edge before line to.
+func claudeTrustBoxOpenUntil(lines []string, top, to int) bool {
+	for i := top + 1; i < to; i++ {
+		first, _ := utf8.DecodeRuneInString(strings.TrimSpace(lines[i]))
+		if claudeTrustFrameRule(lines[i]) && strings.ContainsRune(claudeTrustBoxBottomCorners, first) {
+			return false
+		}
+	}
+	return true
+}
+
+// claudeLaunchDialogBoundsPrompt reports whether the plain rule on line i
+// bounds a composer's prompt row strictly between lines from and to: a ❯ row,
+// or a prompt in any of the composer's modes, straight above or below it. The
+// composer above, at from or higher, explains only its own rows, so its prompt
+// does not make a rule straight under it a composer's (#7412 review, R1).
+func claudeLaunchDialogBoundsPrompt(pane claudeLaunchDialogPane, i, from, to int) bool {
+	for _, j := range []int{i - 1, i + 1} {
+		if j > from && j < to && (pane.rows[j].selected || claudeLaunchDialogModePromptRow(pane, j)) {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeLaunchDialogModePromptRow reports whether pane line i is a composer's
