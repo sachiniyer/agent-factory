@@ -457,16 +457,20 @@ func TestTeardownFreesThePortBeforeServeStarts(t *testing.T) {
 			require.NoError(t, err)
 			addr := ln.Addr().String()
 
-			h := &tcpListenerHandle{srv: &http.Server{}, ln: ln, addr: addr}
-			require.NoError(t, teardown.stop(h))
-
-			// "The port is freed" asserted on the socket itself: a closed
-			// listener errors on the spot while a live one would wait out the
-			// deadline. A rebound bind would carry a release→rebind window a
-			// third party could win (#7460).
+			// Arm the deadline BEFORE the teardown under test — SetDeadline on
+			// an already-closed listener errors too, so it cannot be set after
+			// the close it exists to observe. "The port is freed" is then
+			// asserted on the socket itself: a closed listener's Accept errors
+			// on the spot while a live one would wait out the deadline. A
+			// rebound bind would carry a release→rebind window a third party
+			// could win (#7460).
 			tl, ok := ln.(*net.TCPListener)
 			require.True(t, ok)
 			require.NoError(t, tl.SetDeadline(time.Now().Add(2*time.Second)))
+
+			h := &tcpListenerHandle{srv: &http.Server{}, ln: ln, addr: addr}
+			require.NoError(t, teardown.stop(h))
+
 			_, err = tl.Accept()
 			require.Error(t, err,
 				"a %s that lands before Serve ever ran must still free the port — http.Server only closes listeners Serve registered", teardown.name)
