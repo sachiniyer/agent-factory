@@ -122,12 +122,25 @@ func exeOpen(pid int) (*os.File, bool) {
 	if !ok {
 		return nil, false
 	}
-	f, err := os.Open(path)
+	return openRegularExe(path, dev, ino)
+}
+
+// openRegularExe opens path and admits the file only when it is a REGULAR
+// file whose (dev, ino) is the caller's — the text vnode's — identity.
+// O_NONBLOCK is what makes that gate honest: a non-regular file renamed
+// over the exe path — the FIFO wedge #7494 item 2 names — must refuse
+// without ever parking on a writer that never comes, and a regular file is
+// all buildinfo can read anyway. The whole gated open is one step so the
+// refusal property is testable without staging a process behind a wedged
+// name.
+func openRegularExe(path string, dev, ino uint64) (*os.File, bool) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, false
 	}
+	f := os.NewFile(uintptr(fd), path)
 	st, err := f.Stat()
-	if err != nil {
+	if err != nil || !st.Mode().IsRegular() {
 		f.Close()
 		return nil, false
 	}

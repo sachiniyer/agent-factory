@@ -3,7 +3,11 @@ package proctree
 import (
 	"debug/buildinfo"
 	"os"
+	"strconv"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // afModulePath is the Go module path a kernel-attested executable must carry
@@ -52,18 +56,75 @@ func ExeAttestsAF(p Process) bool {
 	// test later restores — the lazy read races the restore (the same
 	// shape a racing caller would hit in production, #7491).
 	fn := exeOpenFn
-	done := make(chan bool, 1)
-	go func() {
-		done <- exeAttestsAF(fn, p)
-	}()
+	// Attempts on the SAME process instance fly in formation (#7494 item
+	// 2): a wedged exe — a hung NFS mount, a FIFO renamed over the exe
+	// path — holds at most ONE worker, goroutine and fd no matter how many
+	// candidates its pid reaches in one sweep or the next. Each caller
+	// still bounds its own wait: an expired budget reports false and the
+	// shared read keeps the worker it already paid.
+	key := strconv.Itoa(p.PID) + ":" + strconv.FormatUint(p.StartID, 10)
+	done := attestFlights.DoChan(key, func() (any, error) {
+		return exeAttestsAF(fn, p), nil
+	})
 	timer := time.NewTimer(exeAttestBudget)
 	defer timer.Stop()
 	select {
-	case ok := <-done:
-		return ok
+	case r := <-done:
+		return r.Val.(bool)
 	case <-timer.C:
 		return false
 	}
+}
+
+// attestFlights single-flights the attestation read by (pid, StartID) so a
+// stalled executable leaks ONE worker rather than one per attempt (#7494
+// item 2). In-flight attempts share a result; a finished attempt is not
+// cached here — cross-attempt dedup is the caller's ExeAttestations scope,
+// so a wedged-mount verdict can recover on the next sweep.
+var attestFlights singleflight.Group
+
+// ExeAttestations memoizes ExeAttestsAF per (pid, StartID) for the scope of
+// ONE sweep: a vanished-session reap classifies the same claimant about nine
+// times per candidate (the ancestry walk and the candidate loop both meet
+// it), and each attempt used to pay the full kernel read, buildinfo parse
+// and StartID revalidation — with the full stall budget when the read
+// wedges (#7494 item 2). The verdict is instance-stable — a pid re-exec'd
+// is a new StartID and re-attests — so a memo by instance is honest, and
+// scoping it to the sweep means a wedged-mount false is retried next sweep
+// rather than cached forever. A nil *ExeAttestations attests directly, so
+// callers without a sweep scope pay nothing extra.
+type ExeAttestations struct {
+	mu   sync.Mutex
+	seen map[attestKey]bool
+}
+
+type attestKey struct {
+	pid     int
+	startID uint64
+}
+
+// NewExeAttestations returns the per-sweep attestation memo.
+func NewExeAttestations() *ExeAttestations {
+	return &ExeAttestations{seen: map[attestKey]bool{}}
+}
+
+// AttestsAF is ExeAttestsAF deduplicated per (pid, StartID) for this scope.
+func (a *ExeAttestations) AttestsAF(p Process) bool {
+	if a == nil {
+		return ExeAttestsAF(p)
+	}
+	k := attestKey{pid: p.PID, startID: p.StartID}
+	a.mu.Lock()
+	v, ok := a.seen[k]
+	a.mu.Unlock()
+	if ok {
+		return v
+	}
+	v = ExeAttestsAF(p)
+	a.mu.Lock()
+	a.seen[k] = v
+	a.mu.Unlock()
+	return v
 }
 
 // exeAttestsAF is the attestation itself, run under exeAttestBudget. A

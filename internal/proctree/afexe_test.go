@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -156,4 +158,77 @@ func TestExeAttestsAFHonoursTheBudget(t *testing.T) {
 	require.False(t, ExeAttestsAF(self), "an attestation that cannot answer inside the budget is unverified")
 	require.Less(t, time.Since(start), 5*time.Second,
 		"the budget, not the stalled read, ends the wait")
+}
+
+// The stall that used to leak a goroutine, thread and fd PER ATTEMPT holds
+// ONE worker now: concurrent attestations of the same (pid, StartID) share
+// a single in-flight read, and a caller whose budget expires while it runs
+// — or that arrives after others expired — joins that worker rather than
+// spawning another (#7494 item 2).
+func TestExeAttestsAFSingleFlightsAStalledRead(t *testing.T) {
+	oldOpen, oldBudget := exeOpenFn, exeAttestBudget
+	var workers atomic.Int32
+	gate := make(chan struct{})
+	exeOpenFn = func(pid int) (*os.File, bool) {
+		workers.Add(1)
+		<-gate
+		return nil, false
+	}
+	exeAttestBudget = 30 * time.Millisecond
+	t.Cleanup(func() {
+		close(gate)
+		exeOpenFn, exeAttestBudget = oldOpen, oldBudget
+	})
+
+	p := Process{PID: 424242, StartID: 7}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ExeAttestsAF(p)
+		}()
+	}
+	wg.Wait()
+	require.Equal(t, int32(1), workers.Load(),
+		"eight expired attestations of one stalled instance must share ONE worker")
+
+	// A later attempt while the read is still wedged joins the same worker —
+	// the flight, not another spawn, is what it waits on.
+	ExeAttestsAF(p)
+	require.Equal(t, int32(1), workers.Load())
+}
+
+// One sweep scope pays the kernel read once per claimant instance no matter
+// how many candidate paths meet it (#7494 item 2). The memo keys the
+// INSTANCE — a recycled pid under a new StartID attests anew — and a fresh
+// scope retries what the last sweep could not verify, so a wedged-mount
+// verdict never pins forever.
+func TestExeAttestationsMemoizesPerSweep(t *testing.T) {
+	oldOpen := exeOpenFn
+	var opens atomic.Int32
+	exeOpenFn = func(pid int) (*os.File, bool) {
+		opens.Add(1)
+		return nil, false
+	}
+	t.Cleanup(func() { exeOpenFn = oldOpen })
+
+	p := Process{PID: 424243, StartID: 7}
+	att := NewExeAttestations()
+	for range 5 {
+		require.False(t, att.AttestsAF(p))
+	}
+	require.Equal(t, int32(1), opens.Load(), "one scope attests an instance once")
+
+	require.False(t, att.AttestsAF(Process{PID: p.PID, StartID: 8}),
+		"the same pid under a new StartID is a new instance")
+	require.Equal(t, int32(2), opens.Load())
+
+	require.False(t, NewExeAttestations().AttestsAF(p),
+		"a new sweep retries what the last one could not verify")
+	require.Equal(t, int32(3), opens.Load())
+
+	var unscoped *ExeAttestations
+	require.False(t, unscoped.AttestsAF(p), "nil scope attests directly")
+	require.Equal(t, int32(4), opens.Load())
 }
