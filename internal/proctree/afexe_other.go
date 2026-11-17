@@ -10,3 +10,11 @@ import "os"
 func exeOpen(pid int) (*os.File, bool) {
 	return nil, false
 }
+
+// exeIdentity reports no identity on platforms without an attestation
+// backend: there is no kernel exe source to read, so a cached positive can
+// never be confirmed — the memo re-attests, which itself reports
+// unverified, the fail-closed direction.
+func exeIdentity(pid int) (exeID, bool) {
+	return exeID{}, false
+}

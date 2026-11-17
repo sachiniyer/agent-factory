@@ -125,6 +125,25 @@ func exeOpen(pid int) (*os.File, bool) {
 	return openRegularExe(path, dev, ino)
 }
 
+// exeIdentity is the memo's cheap revalidation: the (dev,ino) of the file
+// the exe path names NOW. A positive attestation pinned the running text
+// vnode to that path's identity, so while the path still answers the same
+// (dev,ino) the cached verdict still describes the running image; an exec
+// (PROC_PIDPATHINFO answers the new image's path), a replaced file, or a
+// deleted one all change or lose the identity and force a re-attestation
+// (#7496). A process too far gone to name reports no identity.
+func exeIdentity(pid int) (exeID, bool) {
+	path, ok := exePath(pid)
+	if !ok {
+		return exeID{}, false
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return exeID{}, false
+	}
+	return exeID{dev: uint64(uint32(st.Dev)), ino: st.Ino}, true
+}
+
 // openRegularExe opens path and admits the file only when it is a REGULAR
 // file whose (dev, ino) is the caller's — the text vnode's — identity.
 // O_NONBLOCK is what makes that gate honest: a non-regular file renamed

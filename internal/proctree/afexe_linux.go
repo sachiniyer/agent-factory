@@ -3,6 +3,7 @@ package proctree
 import (
 	"os"
 	"strconv"
+	"syscall"
 )
 
 // exeOpen opens the kernel-attested executable for pid: /proc/<pid>/exe is a
@@ -20,4 +21,17 @@ func exeOpen(pid int) (*os.File, bool) {
 		return nil, false
 	}
 	return f, true
+}
+
+// exeIdentity stats the same kernel link exeOpen reads: /proc/<pid>/exe
+// resolves to the inode the process is executing NOW — the running image
+// even after its name is unlinked, and a new inode the moment the process
+// execs. The memo compares it against the inode a positive verdict was
+// read from, so an exec invalidates the cached verdict (#7496).
+func exeIdentity(pid int) (exeID, bool) {
+	var st syscall.Stat_t
+	if err := syscall.Stat("/proc/"+strconv.Itoa(pid)+"/exe", &st); err != nil {
+		return exeID{}, false
+	}
+	return exeID{dev: uint64(uint32(st.Dev)), ino: st.Ino}, true
 }
