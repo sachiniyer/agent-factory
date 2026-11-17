@@ -145,10 +145,9 @@ func boxedComposer(prompt string) string {
 	return "╭──────────────────────╮\n│ " + prompt + strings.Repeat(" ", max(0, 21-len([]rune(prompt)))) + "│\n╰──────────────────────╯\n"
 }
 
-// U+00A0 reaches only the box test. #7391's plain-rule test keeps its ASCII
-// prompt, because it has no #7388 anchor yet: a live framed dialog under a
-// ruled composer whose prompt follows U+00A0 holds, as on master (#7412
-// review, R2).
+// A ruled composer whose prompt follows U+00A0 is a composer too (#7454), and
+// it explains only its own rows (#7388): a live framed dialog under it, with
+// its heading on screen, holds (#7412 review, R2).
 func TestCheckAndHandleTrustPrompt_LiveDialogUnderARuledComposerAfterANonBreakingSpaceHolds(t *testing.T) {
 	const rule = "─────────────"
 	framed := "╭───────────╮\n│ Security  │\n│ guide     │\n│           │\n│ ❯ 1. Yes, I │\n│ trust this │\n│ folder    │\n│   2. No,  │\n│ exit      │\n╰───────────╯\nEnter to\nconfirm · Esc\nto cancel"

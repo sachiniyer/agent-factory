@@ -503,7 +503,7 @@ const claudeTrustBoxTopCorners = "╭┌╔┏"
 // claudeTrustBoxPromptRow returns the line of a composer box's prompt row,
 // given its top edge, or -1 when the box is no composer. A box is a composer by
 // what is inside it: its first row inside the box, past any pad rows, is a
-// prompt in one of the composer's modes (claudeTrustBoxPromptLabel). A bottom
+// prompt in one of the composer's modes (claudeComposerPromptLabel). A bottom
 // edge or a tee decides nothing on its own, and neither does a box whose top
 // edge is off screen: what is inside a box is below its top edge, between its
 // side borders.
@@ -520,7 +520,7 @@ func claudeTrustBoxPromptRow(lines []string, rows []claudeTrustRow, top int) int
 		if rows[i].blank {
 			continue
 		}
-		if !rows[i].selected && claudeTrustBoxPromptLabel(rows[i].label) {
+		if !rows[i].selected && claudeComposerPromptLabel(rows[i].label) {
 			return i
 		}
 		return -1
@@ -534,28 +534,6 @@ func claudeTrustBordered(line string) bool {
 	first, _ := utf8.DecodeRuneInString(line)
 	last, _ := utf8.DecodeLastRuneInString(line)
 	return strings.ContainsRune(claudeTrustBoxSides, first) && strings.ContainsRune(claudeTrustBoxSides, last)
-}
-
-// claudeTrustBoxPromptLabel reports a composer box's prompt row: the glyph of
-// one of the composer's modes, ">" (prompt), "!" (bash) or "#" (memory),
-// followed by nothing or by the space the composer paints after it, U+0020 or
-// U+00A0. 2.1.322 paints U+00A0 after its glyph
-// (testdata/claude_2_1_322_composer_after_mcp_decline.ansi, #7391 review).
-// Only the box test reads U+00A0. The plain-rule test keeps
-// claudeComposerPromptLabel, as #7391 left it: with #7388's anchor, U+00A0
-// there would turn ruled composers over bare quoted options from hold to clear,
-// which is #7454's own change (#7412 review, R2).
-func claudeTrustBoxPromptLabel(label string) bool {
-	for _, mode := range []string{">", "!", "#"} {
-		rest, ok := strings.CutPrefix(label, mode)
-		if !ok {
-			continue
-		}
-		if after, _ := utf8.DecodeRuneInString(rest); rest == "" || after == ' ' || after == '\u00a0' {
-			return true
-		}
-	}
-	return false
 }
 
 // claudeTrustBoxBottomCorners close a box: a frame rule that starts with one
@@ -703,11 +681,22 @@ func claudeLaunchDialogModePromptRow(pane claudeLaunchDialogPane, i int) bool {
 }
 
 // claudeComposerPromptLabel reports a row Claude Code's composer paints as its
-// prompt, in each of its modes: "> " (prompt), "! " (bash) and "# " (memory),
-// or the mode's glyph alone on an empty prompt.
+// prompt, boxed or between plain rules: the glyph of one of its modes, ">"
+// (prompt), "!" (bash) or "#" (memory), followed by nothing or by the space
+// the composer paints after it, U+0020 or U+00A0. 2.1.322 paints U+00A0 after
+// its glyph (testdata/claude_2_1_322_composer_after_mcp_decline.ansi, #7391
+// review). The box test read U+00A0 since #7412, and the plain-rule test only
+// U+0020, so a ruled composer in 2.1.322's own spacing straight over bare
+// quoted options held where its ASCII twin cleared. Both read it now, under
+// #7388's anchor: a composer decides only when it explains every row on
+// screen outside it (#7454).
 func claudeComposerPromptLabel(label string) bool {
 	for _, mode := range []string{">", "!", "#"} {
-		if label == mode || strings.HasPrefix(label, mode+" ") {
+		rest, ok := strings.CutPrefix(label, mode)
+		if !ok {
+			continue
+		}
+		if after, _ := utf8.DecodeRuneInString(rest); rest == "" || after == ' ' || after == '\u00a0' {
 			return true
 		}
 	}
