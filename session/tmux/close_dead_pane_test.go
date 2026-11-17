@@ -1213,38 +1213,50 @@ func TestPaneRootEvidenceTableIsTheOnlyRule(t *testing.T) {
 		cur    *proctree.Process
 		answer paneRootAnswer
 		want   *proctree.Process
+		// wantVerdict names the rule the row must fire — the observable
+		// that keeps the two keep inputs DISTINCT rows: a mutation that
+		// drops one keep kind from the answer's fields returns
+		// verdictKept here instead of the kind the row asserts (#7491
+		// item 4).
+		wantVerdict paneRootVerdict
 	}{
 		{"answered mismatch retires the claim's seeded pair (R11)", old,
-			paneRootAnswer{disproven: *old}, nil},
+			paneRootAnswer{disproven: *old}, nil, paneRootVerdictRetired},
 		{"answered mismatch leaves a different claim's pair standing", newer,
-			paneRootAnswer{disproven: *old}, newer},
+			paneRootAnswer{disproven: *old}, newer, paneRootVerdictKept},
 		{"unanswered query keeps the anchor (R17)", old,
-			paneRootAnswer{unanswered: true}, old},
+			paneRootAnswer{keep: paneRootKeepUnanswered}, old, paneRootVerdictKeptUnanswered},
 		{"root exited before capture keeps the previous anchor", old,
-			paneRootAnswer{exitedBeforeCapture: true}, old},
+			paneRootAnswer{keep: paneRootKeepExited}, old, paneRootVerdictKeptExited},
 		{"a fresh spawn records its own root", old,
-			paneRootAnswer{resolved: *newer}, newer},
+			paneRootAnswer{resolved: *newer}, newer, paneRootVerdictResolved},
 		{"a fresh spawn supersedes even when the re-stamp cannot answer", old,
-			paneRootAnswer{supersede: true}, nil},
+			paneRootAnswer{supersede: true}, nil, paneRootVerdictSuperseded},
 		{"supersede then resolve lands the new root", old,
-			paneRootAnswer{supersede: true, resolved: *newer}, newer},
+			paneRootAnswer{supersede: true, resolved: *newer}, newer, paneRootVerdictResolved},
 		{"a live resolution outranks a racing disproof", newer,
-			paneRootAnswer{resolved: *newer, disproven: *old}, newer},
+			paneRootAnswer{resolved: *newer, disproven: *old}, newer, paneRootVerdictResolved},
 		{"no anchor to retire", nil,
-			paneRootAnswer{disproven: *old}, nil},
+			paneRootAnswer{disproven: *old}, nil, paneRootVerdictKept},
 		{"a restore seed fills an empty cell", nil,
-			paneRootAnswer{seed: old}, old},
+			paneRootAnswer{seed: old}, old, paneRootVerdictSeeded},
 		{"a restore seed never displaces a standing anchor", newer,
-			paneRootAnswer{seed: old}, newer},
+			paneRootAnswer{seed: old}, newer, paneRootVerdictKept},
 		{"supersede clears, then the seed fills", old,
-			paneRootAnswer{supersede: true, seed: newer}, newer},
+			paneRootAnswer{supersede: true, seed: newer}, newer, paneRootVerdictSeeded},
 		{"a disproof in the same answer outranks a seed", old,
-			paneRootAnswer{disproven: *old, seed: newer}, nil},
+			paneRootAnswer{disproven: *old, seed: newer}, nil, paneRootVerdictRetired},
 		{"a keep keeps an empty cell empty", nil,
-			paneRootAnswer{unanswered: true}, nil},
+			paneRootAnswer{keep: paneRootKeepUnanswered}, nil, paneRootVerdictKeptUnanswered},
+		{"an exited keep keeps an empty cell empty", nil,
+			paneRootAnswer{keep: paneRootKeepExited}, nil, paneRootVerdictKeptExited},
+		{"an answer that names nothing keeps", old,
+			paneRootAnswer{}, old, paneRootVerdictKept},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := paneRootEvidenceAfter(tc.cur, tc.answer)
+			got, verdict := paneRootEvidenceAfter(tc.cur, tc.answer)
+			require.Equal(t, tc.wantVerdict, verdict,
+				"the rule that fired must name THIS input's kind — two keep kinds are not interchangeable")
 			if tc.want == nil {
 				require.Nil(t, got)
 				return
@@ -1292,8 +1304,8 @@ func TestReconcilePaneRootEvidenceAppliesTheTableAtomically(t *testing.T) {
 			{resolved: newer},
 			{supersede: true, resolved: third},
 			{disproven: old},
-			{unanswered: true},
-			{exitedBeforeCapture: true},
+			{keep: paneRootKeepUnanswered},
+			{keep: paneRootKeepExited},
 		}
 		var wg sync.WaitGroup
 		for _, a := range answers {
@@ -1311,6 +1323,40 @@ func TestReconcilePaneRootEvidenceAppliesTheTableAtomically(t *testing.T) {
 			require.True(t, legal[*cur],
 				"the cell holds %v — a pair no answer ever produced", *cur)
 		}
+	})
+
+	t.Run("a racing storm converges to the serial order's winner", func(t *testing.T) {
+		// The oracle: seed and resolved racing — EVERY serial order of
+		// the two inputs converges on the resolved pair (seed fills only
+		// an empty cell; resolved replaces anything). A reconcile built
+		// as Load-then-Store would let the seed's write land AFTER the
+		// resolved write it lost to, so this goes red on any lost update
+		// (#7491 item 4).
+		s := &TmuxSession{}
+		var start, wg sync.WaitGroup
+		start.Add(2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			start.Done()
+			start.Wait()
+			for range 300 {
+				s.reconcilePaneRootEvidence(paneRootAnswer{seed: &old})
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			start.Done()
+			start.Wait()
+			for range 300 {
+				s.reconcilePaneRootEvidence(paneRootAnswer{resolved: newer})
+			}
+		}()
+		wg.Wait()
+		cur := s.paneRootEvidence.Load()
+		require.NotNil(t, cur)
+		require.Equal(t, newer, *cur,
+			"every serial order converges on the resolved root — the seed surviving is a lost update")
 	})
 }
 

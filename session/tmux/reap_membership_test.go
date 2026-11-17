@@ -18,6 +18,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -272,7 +273,7 @@ func TestClassifyCaptureAncestryProtectsTheReapersOwnDescendant(t *testing.T) {
 		60: {PID: 60, PPID: 50, Comm: "sleep"},
 		50: {PID: 50, PPID: 1, Comm: "af"},
 	}
-	reason, boundary := classifyCaptureAncestry(snap, 60, 50)
+	reason, _, boundary := classifyCaptureAncestry(snap, 60, 50)
 	require.Equal(t, protectReasonSelfSubtree, reason,
 		"a captured process that reaches the reaper with no tmux between is the reaper's own descendant")
 	require.False(t, boundary)
@@ -309,7 +310,7 @@ func TestClassifyCaptureAncestryReportsTheTmuxBoundaryWithoutProtecting(t *testi
 
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
-	reason, boundary := classifyCaptureAncestry(snap, paneP.PID, os.Getpid())
+	reason, _, boundary := classifyCaptureAncestry(snap, paneP.PID, os.Getpid())
 	require.Equal(t, "", reason,
 		"the pane's walk ends eligible at the server — it is what protects the pane, not what protects FROM it")
 	require.True(t, boundary,
@@ -330,7 +331,7 @@ func TestClassifyCaptureAncestryProtectsUnprovenAncestry(t *testing.T) {
 		600001: {PID: 600001, PPID: 600000, Comm: "sleep"},
 		600000: deadAncestor,
 	}
-	reason, boundary := classifyCaptureAncestry(snap, 600001, os.Getpid())
+	reason, _, boundary := classifyCaptureAncestry(snap, 600001, os.Getpid())
 	require.Equal(t, protectReasonUnproven, reason,
 		"an af-comm ancestor whose argv cannot be read keeps the carrier unattributable")
 	require.False(t, boundary)
@@ -346,9 +347,10 @@ func TestReportableSurvivorsKeepsOnlyTheUnattributableAndTheEligible(t *testing.
 		time.Sleep(5 * time.Minute)
 		return
 	}
-	// Positively placed: a descendant of a real af --daemon argv. The helper's
-	// forged argv is what afDaemonClass positively identifies, so this member
-	// is spared by PROOF and filtered out of the report.
+	// Positively placed: a descendant of a real af-module build running
+	// af --daemon argv. The helper's argv CLAIMS the daemon; the test
+	// binary's kernel-attested module build is what VERIFIES it (#7491),
+	// so this member is spared by PROOF and filtered out of the report.
 	daemon := exec.Command(os.Args[0], "-test.run=^TestReportableSurvivorsKeepsOnlyTheUnattributableAndTheEligible$")
 	daemon.Args = []string{"af", "--daemon", "-test.run=^TestReportableSurvivorsKeepsOnlyTheUnattributableAndTheEligible$"}
 	daemon.Env = append(os.Environ(), afDaemonSleepEnv+"=1")
@@ -436,7 +438,7 @@ func TestClassifyCaptureAncestryEndsEligibleAtAnUnreadableTopOfChain(t *testing.
 		4242: survivor,
 		1:    {PID: 1, PPID: 0, Comm: "launchd"},
 	}
-	reason, boundary := classifyCaptureAncestry(snap, survivor.PID, os.Getpid())
+	reason, _, boundary := classifyCaptureAncestry(snap, survivor.PID, os.Getpid())
 	require.Equal(t, "", reason,
 		"a survivor reparented to the unreadable top of chain stays reapable")
 	require.False(t, boundary)
@@ -462,6 +464,92 @@ func TestAFDaemonClassOnDarwinUsesTheKernelTaskNameForLaunchd(t *testing.T) {
 
 // The env flag the forged-argv daemon sleeper reexecs on.
 const afDaemonSleepEnv = "AF_TEST_AFDAEMON_SLEEP"
+
+// #7491 item 1 — the claim and the attestation are different verdicts. A
+// daemon placement that authorizes a close must rest on identity the
+// carrier cannot write: argv CLAIMS, and a process can write argv
+// (`exec -a af … --daemon`), while the kernel-attested executable's Go
+// build info either names this module or does not.
+//
+//   - VERIFIED: the test binary itself — a real af-module build — running
+//     af-daemon argv attests at whatever path it was built to (the #7484
+//     R18 shape: another home's real daemon must still verify);
+//   - UNVERIFIED: a foreign binary (`yes`) under the same forged argv —
+//     claimed, never proven: still never signalled, but blocking.
+func TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation(t *testing.T) {
+	if os.Getenv(afDaemonSleepEnv) == "1" {
+		time.Sleep(5 * time.Minute)
+		return
+	}
+	verified := exec.Command(os.Args[0])
+	verified.Args = []string{"af", "--daemon",
+		"-test.run=^TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation$"}
+	verified.Env = append(os.Environ(), afDaemonSleepEnv+"=1")
+	require.NoError(t, verified.Start())
+	t.Cleanup(func() { _ = verified.Process.Kill(); _, _ = verified.Process.Wait() })
+	require.Eventually(t, func() bool {
+		return proctree.ArgvIsAFDaemon(proctree.Argv(verified.Process.Pid))
+	}, 5*time.Second, 20*time.Millisecond, "the daemon argv must land before the verdict is read")
+	verifiedProc, err := proctree.Lookup(verified.Process.Pid)
+	require.NoError(t, err)
+	require.Equal(t, afDaemonIs, afDaemonClass(verifiedProc),
+		"a real af build running daemon argv is VERIFIED — at any install path")
+
+	// The forged carrier is the unsigned test sleeper under the name "af",
+	// not a host binary: an Apple platform binary like /usr/bin/yes can have
+	// its kern.procargs2 withheld even from a same-uid reader, so on darwin
+	// the claim it mounts can never be observed (#7492). The sleeper's
+	// unsigned argv reads everywhere and its build info names no af module.
+	carrier := sleeper.Named(t, filepath.Join(t.TempDir(), "af"))
+	forged := exec.Command(carrier, "--daemon")
+	forged.Args[0] = "af"
+	forged.Stdout = nil
+	require.NoError(t, forged.Start())
+	t.Cleanup(func() { _ = forged.Process.Kill(); _, _ = forged.Process.Wait() })
+	require.Eventually(t, func() bool {
+		return proctree.ArgvIsAFDaemon(proctree.Argv(forged.Process.Pid))
+	}, 5*time.Second, 20*time.Millisecond, "the forged argv must land before the verdict is read")
+	forgedProc, err := proctree.Lookup(forged.Process.Pid)
+	require.NoError(t, err)
+	require.Equal(t, afDaemonUnverified, afDaemonClass(forgedProc),
+		"a foreign binary under af argv CLAIMS the daemon — it can never prove it")
+}
+
+// #7491 item 2 — the live-capture close path names a positively-placed
+// exclusion at WARNING, the same severity the blind path uses (#7484): the
+// process keeps running under a Known close that may remove the worktree it
+// typically sits inside, so the line must name the pid, its placement, and
+// that it was LEFT ALIVE.
+func TestReapSessionProcessesNamesAPositivePlacementAtWarning(t *testing.T) {
+	shrinkReapWaits(t)
+	sleeper := exec.Command("sleep", "300")
+	require.NoError(t, sleeper.Start())
+	t.Cleanup(func() { _ = sleeper.Process.Kill(); _, _ = sleeper.Process.Wait() })
+	proc, err := proctree.Lookup(sleeper.Process.Pid)
+	require.NoError(t, err)
+
+	var warnings bytes.Buffer
+	oldWarnings := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarnings) })
+
+	protected := protectedSet{proc.PID: {
+		reason:   protectReasonDaemonDescendant(4242),
+		positive: true,
+	}}
+	remaining := reapSessionProcesses(reapOnRequest, "af_positive_warning",
+		[]proctree.Process{proc}, time.Millisecond, 100*time.Millisecond, protected)
+	require.Empty(t, remaining,
+		"a positively-placed exclusion is exempt from signals and not a leak")
+	require.Contains(t, warnings.String(), strconv.Itoa(proc.PID),
+		"the WARNING names the pid it left alive")
+	require.Contains(t, warnings.String(), "LEFT ALIVE",
+		"the WARNING says the carrier keeps running under a close that may remove its worktree")
+	require.Contains(t, warnings.String(), "descendant of agent-factory daemon",
+		"the WARNING names the placement, not just the pid")
+	require.True(t, proctree.AliveSame(proc),
+		"excluded means never signalled")
+}
 
 // #7435 R6 — tier 2, the generation-identity admission: a marker carrier that
 // fails every kernel membership tier because it leads its OWN kernel session
@@ -1002,9 +1090,10 @@ func TestReapVanishedSessionProcessCohortTakesAgentExeFromTheRecordedProgram(t *
 		"refused means never signalled — Root.Comm must not substitute for the recorded program")
 }
 
-// The reexec'd fake-daemon branch of the decision-table test: argv is forged
-// to `af --daemon` so afDaemonClass answers afDaemonIs, and it spawns a
-// marked sleep as a direct child so the child's chain is child → daemon.
+// The reexec'd fake-daemon branch of the decision-table test: argv claims
+// `af --daemon` and the test binary's kernel-attested module build VERIFIES
+// it (#7491), so afDaemonClass answers afDaemonIs, and it spawns a marked
+// sleep as a direct child so the child's chain is child → daemon.
 const (
 	decisionDaemonEnv     = "AF_TEST_DECISION_DAEMON"
 	decisionDaemonSpecEnv = "AF_TEST_DECISION_DAEMON_SPEC"
@@ -1074,7 +1163,40 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return proctree.ArgvIsAFDaemon(proctree.Argv(daemon.Process.Pid))
 		}, 5*time.Second, 20*time.Millisecond,
-			"the forged argv must positively classify afDaemonIs")
+			"the daemon argv claim must land — the test binary's kernel exe VERIFIES it")
+		waitForPIDFile(t, childPidFile)
+		return processFromPIDFile(t, childPidFile)
+	}
+
+	// spawnForgedDaemonChild spawns a marked sleep whose parent CLAIMS the
+	// daemon through argv — `exec -a af <non-af binary> --daemon` — on an
+	// executable the kernel attests is NOT an af build (#7491 item 1). bash
+	// forks the sleep and then execs the forged process in place, so the
+	// child's parent chain is child → forged-daemon. The claim still spares
+	// the child from signals; it can never authorize a close.
+	spawnForgedDaemonChild := func(t *testing.T) proctree.Process {
+		dir := t.TempDir()
+		childPidFile := filepath.Join(dir, "child.pid")
+		// The forged carrier is the unsigned test sleeper, not a host
+		// binary like /usr/bin/yes: an Apple platform binary can have its
+		// kern.procargs2 withheld even from a same-uid reader, so on darwin
+		// the claim it mounts can never be observed (#7492).
+		carrier := sleeper.Named(t, filepath.Join(dir, "af"))
+		forged := exec.Command("bash", "-c",
+			`sleep 300 & echo $! > "`+childPidFile+`" && exec -a af "`+carrier+`" --daemon`)
+		forged.Env = append(os.Environ(),
+			EnvMarkerSession+"="+name,
+			EnvMarkerHome+"="+home,
+			EnvMarkerGeneration+"="+gen)
+		require.NoError(t, forged.Start())
+		t.Cleanup(func() {
+			_ = forged.Process.Kill()
+			_, _ = forged.Process.Wait()
+		})
+		require.Eventually(t, func() bool {
+			return proctree.ArgvIsAFDaemon(proctree.Argv(forged.Process.Pid))
+		}, 5*time.Second, 20*time.Millisecond,
+			"the forged argv must CLAIM daemon identity before the child is read")
 		waitForPIDFile(t, childPidFile)
 		return processFromPIDFile(t, childPidFile)
 	}
@@ -1208,6 +1330,19 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
 			},
 			wantPlaced: "ancestry places it under",
+		},
+		{
+			// #7491 item 1: argv CLAIMS daemon ancestry the kernel
+			// executable does not attest — `exec -a af` on a NON-af
+			// binary. The claim still spares the child from signals
+			// (the safe direction), but it can never make the close
+			// Known around it: refused, reported, BLOCKING.
+			name: "no proof, forged af-daemon argv — refused, blocking",
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
+				child := spawnForgedDaemonChild(t)
+				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
+			},
+			wantErr: "cannot be proven",
 		},
 		{
 			// Every foreign-evidence column needs a row with proof

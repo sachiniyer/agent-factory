@@ -1,6 +1,10 @@
 package tmux
 
 import (
+	"errors"
+	"os"
+	"syscall"
+
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
@@ -35,16 +39,55 @@ func (t *TmuxSession) RetirePaneRootEvidence(pid int, startID uint64) {
 	})
 }
 
+// paneRootKeep names WHICH door a pane-root resolution left through when it
+// produced no new evidence (#7491 item 4). The two keeps converge on the same
+// cell — whatever stands, stands — but they are different answers and must
+// stay distinguishable at the table: a site that answered "no live root"
+// must never report the same input as a site that could not answer at all.
+type paneRootKeep uint8
+
+const (
+	// paneRootKeepNone: the answer carried a real verdict — resolved,
+	// disproven, seed, or supersede. Not a keep at all.
+	paneRootKeepNone paneRootKeep = iota
+	// paneRootKeepUnanswered marks a pane-root query that could not
+	// answer — a tmux timeout, an unclassified query failure, a root pid
+	// the process table could not READ (as opposed to one it reported
+	// absent). It disproves nothing, so whatever evidence stands keeps
+	// standing (R17).
+	paneRootKeepUnanswered
+	// paneRootKeepExited marks a query that ANSWERED with no live root —
+	// a held dead pane, a session tmux reports absent, a pid the process
+	// table proves gone. The answer carries no new identity, so the
+	// PREVIOUS anchor survives (Codex 4596311717): storing the zero
+	// identity would erase the recorded SID and tier-2 root, and the
+	// surviving cohort would refuse forever on every retry.
+	paneRootKeepExited
+)
+
+// paneRootVerdict names which rule paneRootEvidenceAfter fired — the
+// observable the table test asserts so distinct inputs stay distinct rows:
+// two inputs that leave the same cell MUST NOT collapse into one undifferent
+// keep, or a mutation that drops one of them passes silently (#7491 item 4).
+type paneRootVerdict uint8
+
+const (
+	paneRootVerdictKept paneRootVerdict = iota
+	paneRootVerdictKeptUnanswered
+	paneRootVerdictKeptExited
+	paneRootVerdictResolved
+	paneRootVerdictRetired
+	paneRootVerdictSeeded
+	paneRootVerdictSuperseded
+)
+
 // paneRootAnswer is what ONE pane-root resolution learned about the recorded
 // anchor — a discriminated input, one field per rule (#7484 item 3). Every
 // site that resolves a pane root — spawn stamp, close-path capture, reattach
 // settle, restore seed — funnels its outcome through
 // reconcilePaneRootEvidence, so the anchor rules live in exactly one table
 // instead of a separate edit per site (#7435 R11/R17, Codex 4596311717,
-// 4597265491). The two KEEP verdicts are deliberately distinct inputs:
-// unanswered is a tmux query that could not answer, exitedBeforeCapture is a
-// query that answered with no live root — the same outcome through different
-// doors, and the table test drives them as different answers.
+// 4597265491).
 type paneRootAnswer struct {
 	// resolved is a LIVE root the query captured — a fresh spawn's new pane
 	// or a confirmed recorded pair. Zero when no live root answered.
@@ -52,29 +95,25 @@ type paneRootAnswer struct {
 	// disproven is the recorded pair an ANSWERED mismatch disproved — tmux
 	// placed some other root in this session's panes.
 	disproven proctree.Process
-	// seed is a persisted pair a restore trusts: installed only while
-	// nothing stands, so a live resolution — or even a cleared but
-	// newer claim — always outranks it.
+	// seed is a persisted pair a restore trusts. It fills the cell the
+	// higher rules leave: a live resolution or a standing claim outranks
+	// it, but a cell supersede just emptied is EMPTY — the seed installs
+	// there too, because the cleared claim was already discarded as
+	// obsolete, not upheld over the seed (#7491 item 4).
 	seed *proctree.Process
 	// supersede marks a fresh spawn boundary: a surviving start() always
 	// created a new pane, so previous evidence names a DIFFERENT
 	// incarnation and is obsolete whether or not the new root resolves.
 	supersede bool
-	// unanswered marks a pane-root query that could not answer — a tmux
-	// timeout, an uninspectable pid, a held dead pane. It disproves
-	// nothing, so whatever evidence stands keeps standing (R17).
-	unanswered bool
-	// exitedBeforeCapture marks a capture that answered with no live
-	// root — the pane root exited between panePID and the snapshot. The
-	// answer carries no new identity, so the PREVIOUS anchor survives
-	// (Codex 4596311717): storing the zero identity would erase the
-	// recorded SID and tier-2 root, and the surviving cohort would refuse
-	// forever on every retry.
-	exitedBeforeCapture bool
+	// keep is WHICH non-answer this resolution produced — unanswered
+	// (could not ask) versus exited (asked, told none). Distinct kinds
+	// with distinct verdicts; both keep the standing cell.
+	keep paneRootKeep
 }
 
 // paneRootEvidenceAfter is the rule table itself, a pure function over
-// (current anchor, resolution answer) → next anchor, in strength order:
+// (current anchor, resolution answer) → (next anchor, fired rule), in
+// strength order:
 //
 //   - supersede clears first — a fresh spawn's evidence names a different
 //     incarnation whether or not the new root resolves (4597265491);
@@ -82,27 +121,37 @@ type paneRootAnswer struct {
 //     there is;
 //   - an answered mismatch retires ONLY the pair the disproven claim seeded
 //     — a newer live resolution is a different claim and survives (R11);
-//   - a seed fills only an EMPTY cell — a standing claim, even one a
-//     supersede just cleared conceptually, never loses to a persisted pair;
+//   - a seed fills only an EMPTY cell — including one supersede just
+//     emptied: a standing claim outranks a persisted pair, a discarded one
+//     does not;
 //   - anything else KEEPS whatever stands: an unanswered query disproves
 //     nothing (R17), and a root that exited before capture carries no new
 //     evidence (4596311717).
-func paneRootEvidenceAfter(cur *proctree.Process, a paneRootAnswer) *proctree.Process {
+func paneRootEvidenceAfter(cur *proctree.Process, a paneRootAnswer) (*proctree.Process, paneRootVerdict) {
 	if a.supersede {
 		cur = nil
 	}
 	if a.resolved.PID > 0 && a.resolved.StartID != 0 {
 		resolved := a.resolved
-		return &resolved
+		return &resolved, paneRootVerdictResolved
 	}
 	if a.disproven.PID > 0 && a.disproven.StartID != 0 &&
 		cur != nil && cur.PID == a.disproven.PID && cur.StartID == a.disproven.StartID {
-		return nil
+		return nil, paneRootVerdictRetired
 	}
 	if cur == nil && a.seed != nil {
-		return a.seed
+		return a.seed, paneRootVerdictSeeded
 	}
-	return cur
+	switch a.keep {
+	case paneRootKeepUnanswered:
+		return cur, paneRootVerdictKeptUnanswered
+	case paneRootKeepExited:
+		return cur, paneRootVerdictKeptExited
+	}
+	if a.supersede {
+		return cur, paneRootVerdictSuperseded
+	}
+	return cur, paneRootVerdictKept
 }
 
 // reconcilePaneRootEvidence applies the rule table to the stored anchor,
@@ -115,7 +164,7 @@ func paneRootEvidenceAfter(cur *proctree.Process, a paneRootAnswer) *proctree.Pr
 func (t *TmuxSession) reconcilePaneRootEvidence(a paneRootAnswer) {
 	for {
 		cur := t.paneRootEvidence.Load()
-		next := paneRootEvidenceAfter(cur, a)
+		next, _ := paneRootEvidenceAfter(cur, a)
 		if next == cur {
 			return
 		}
@@ -123,6 +172,16 @@ func (t *TmuxSession) reconcilePaneRootEvidence(a paneRootAnswer) {
 			return
 		}
 	}
+}
+
+// proctreeErrIsGone reports whether a Lookup failure is the process table
+// ANSWERING "no such process" — the same three shapes proctree's own
+// gone-predicate accepts (#7491 item 4) — as opposed to a read that failed.
+// It is how a resolution site classifies its error into the exited keep kind.
+func proctreeErrIsGone(err error) bool {
+	return errors.Is(err, proctree.ErrProcessExited) ||
+		errors.Is(err, os.ErrNotExist) ||
+		errors.Is(err, syscall.ESRCH)
 }
 
 // PaneRootEvidence reports the recorded pane-root pair this session would

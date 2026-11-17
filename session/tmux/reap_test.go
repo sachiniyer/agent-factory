@@ -29,7 +29,7 @@ import (
 // would exempt every child of the test binary and defeat the fixture (#7435
 // item 4).
 func selfProtectedSet() protectedSet {
-	return protectedSet{os.Getpid(): protectReasonSelf}
+	return protectedSet{os.Getpid(): {reason: protectReasonSelf, positive: true}}
 }
 
 // shrinkReapWaits lowers the grace periods so reap tests finish in

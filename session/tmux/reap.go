@@ -498,8 +498,19 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 		if exclusion, excluded := protected[p.PID]; excluded {
 			if !exemptedProtected[p.PID] {
 				exemptedProtected[p.PID] = true
-				log.InfoLog.Printf("process pid %d (%s) is %s; "+
-					"excluding it from signalling (#7435)", p.PID, p.Comm, exclusion)
+				if exclusion.positive {
+					// WARNING, not INFO: a positively-placed carrier is
+					// LEFT ALIVE under a Known close, and that close may
+					// remove the worktree out from under it — the line
+					// names the pid, its placement, and that it keeps
+					// running (#7491 item 2).
+					log.WarningLog.Printf("process pid %d (%s) is %s; "+
+						"excluding it from signalling — LEFT ALIVE, and not blocking cleanup (#7435, #7491)",
+						p.PID, p.Comm, exclusion.reason)
+				} else {
+					log.InfoLog.Printf("process pid %d (%s) is %s; "+
+						"excluding it from signalling (#7435)", p.PID, p.Comm, exclusion.reason)
+				}
 			}
 			return true
 		}
@@ -523,7 +534,7 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 	// Codex 4593788804). A POSITIVELY identified exclusion (a proven daemon
 	// subtree, the reaper's own chain) is legitimately spared and stays out.
 	for _, p := range procs {
-		if protected[p.PID] != protectReasonUnproven {
+		if verdict, ok := protected[p.PID]; !ok || verdict.positive {
 			continue
 		}
 		if same, err := proctree.SameIdentity(p); err != nil || same {

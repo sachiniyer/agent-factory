@@ -459,7 +459,7 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 			// The capture could not answer — it disproves nothing, so the
 			// standing anchor keeps (R17's keep as a named input, #7484
 			// item 3).
-			t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
+			t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepUnanswered})
 		default:
 			// The capture answered with no live root: only a CAPTURED live
 			// root may replace the anchor — a root that exited in the
@@ -467,7 +467,7 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 			// evidence erases the previous anchor's SID and tier-2 root, so
 			// the surviving cohort would refuse forever on every retry
 			// (Codex 4596311717, kept as a named input, #7484 item 3).
-			t.reconcilePaneRootEvidence(paneRootAnswer{exitedBeforeCapture: true})
+			t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepExited})
 		}
 	}
 	closeState, closeErr, processes := t.close(true)
