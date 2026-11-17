@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -74,9 +75,14 @@ type stopClock struct {
 	mu        sync.Mutex
 	abandoned []string
 	// intentSettled is nil until something names the stop's intent, and is
-	// closed once restart holds its answer. Both are guarded by mu.
-	intentSettled chan struct{}
-	restart       bool
+	// closed once restart holds its answer. intentReadCancel and
+	// intentReadDone own the systemd job read that may be settling it, and
+	// intentReadsEnded says the stop has ended it (#7480). All guarded by mu.
+	intentSettled    chan struct{}
+	restart          bool
+	intentReadCancel context.CancelFunc
+	intentReadDone   chan struct{}
+	intentReadsEnded bool
 }
 
 // abandon enters what in the stop's ledger. nil-safe.

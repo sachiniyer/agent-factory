@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"net/rpc"
+	"slices"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
@@ -69,8 +70,35 @@ func (e *lifecycleRefusalError) Unwrap() error { return &e.refusal }
 
 func lifecycleRefusalWirePrefix(code string) string { return "[" + code + "] " }
 
+// bareLifecycleRefusalTexts are the exact texts the admission gate raises its
+// lifecycle refusals with.
+var bareLifecycleRefusalTexts = []string{errDaemonRestarting().Error()}
+
+// controlSocketErrorText is the text the control socket sends for a handler's
+// error (gobServerCodec.WriteResponse). Only the admission gate's own refusal,
+// unwrapped, may lead with a lifecycle refusal's code (#7480). Any other error
+// that does, such as a wrap of one (`fmt.Errorf("%w; …", refusal)`,
+// `errors.Join(refusal, x)`), came from a handler that ran. Its code is
+// removed, so the client reads a plain error and never retries the request,
+// exactly as HTTP's exact type assertion already answers it.
+func controlSocketErrorText(text string) string {
+	if slices.Contains(bareLifecycleRefusalTexts, text) {
+		return text
+	}
+	for stripped := true; stripped; {
+		stripped = false
+		for _, code := range lifecycleRefusalCodes {
+			if rest, ok := strings.CutPrefix(text, lifecycleRefusalWirePrefix(code)); ok {
+				text, stripped = rest, true
+			}
+		}
+	}
+	return text
+}
+
 // lifecycleRefusalFromRPCError reads a lifecycle refusal back out of the text
-// net/rpc carried, and returns any other error unchanged.
+// net/rpc carried, and returns any other error unchanged. The server lets the
+// code lead only the gate's own refusal (controlSocketErrorText).
 func lifecycleRefusalFromRPCError(err error) error {
 	srv, ok := err.(rpc.ServerError)
 	if !ok {

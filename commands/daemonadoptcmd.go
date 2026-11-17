@@ -119,10 +119,11 @@ func runDaemonAdopt(w io.Writer, force bool) error {
 		// A detached, unsupervised daemon is serving. Stop it and wait for its
 		// control socket to go quiet so the unit's fresh daemon acquires the freed
 		// singleton lock instead of exiting against a still-live socket (#854).
-		if _, err := daemonStopFn(); err != nil {
+		target, err := displaceDetachedDaemon()
+		if err != nil {
 			return fmt.Errorf("failed to stop the unsupervised daemon before adopting: %w", err)
 		}
-		if err := waitForShutdownCompletionFn(daemon.ShutdownTarget{}); err != nil {
+		if err := waitForShutdownCompletionFn(target); err != nil {
 			return fmt.Errorf("the unsupervised daemon did not release the control socket, so the installed unit cannot take it over: %w", err)
 		}
 		stoppedDetached = true
@@ -188,4 +189,25 @@ func init() {
 	daemonAdoptCmd.Flags().Bool("force", false,
 		"displace the running daemon even if af cannot confirm it is unsupervised (you assert it is yours to replace)")
 	daemonCmd.AddCommand(daemonAdoptCmd)
+}
+
+// displaceDetachedDaemon stops the unsupervised daemon adopt is replacing, and
+// names the process to wait for. The installed unit is its successor, so it
+// stops through the Shutdown RPC as a restart: a caller refused mid-adopt is
+// retried into the unit's daemon rather than told the daemon is gone for good
+// (#7480). If the RPC cannot stop it, adopt falls back to the signal it has
+// always sent (StopDaemon), as a final stop.
+func displaceDetachedDaemon() (daemon.ShutdownTarget, error) {
+	result, target, err := requestDaemonShutdownFn()
+	if err == nil {
+		if result == daemon.ShutdownNoDaemon {
+			return daemon.ShutdownTarget{}, nil
+		}
+		return target, nil
+	}
+	log.WarningLog.Printf("adopt: the Shutdown RPC could not stop the unsupervised daemon (%v); stopping it by signal", err)
+	if _, err := daemonStopFn(); err != nil {
+		return daemon.ShutdownTarget{}, err
+	}
+	return daemon.ShutdownTarget{}, nil
 }

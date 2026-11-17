@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -103,7 +104,7 @@ func TestRequestRestartShutdownSaysRestartOnTheWire(t *testing.T) {
 func TestSIGTERMAsksWhetherItIsARestartAfterStampingTheStop(t *testing.T) {
 	asked := make(chan time.Time, 1)
 	previous := stopSignalIsRestartFn
-	stopSignalIsRestartFn = func() bool {
+	stopSignalIsRestartFn = func(context.Context) bool {
 		asked <- time.Now()
 		time.Sleep(100 * time.Millisecond)
 		return true
@@ -141,7 +142,7 @@ func TestStopIntentFailsClosedAtItsBound(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	stop := &stopClock{}
-	stop.settleIntentAsync(func() bool {
+	stop.settleIntentAsync(func(context.Context) bool {
 		<-release
 		return true
 	})
@@ -338,4 +339,81 @@ func TestARestartShutdownDecodesInAnOlderDaemon(t *testing.T) {
 	require.NoError(t, gob.NewEncoder(&wire).Encode(ShutdownRequest{Restart: true}))
 	var older struct{}
 	require.NoError(t, gob.NewDecoder(&wire).Decode(&older))
+}
+
+// blockingJobRead is a systemd job read that answers only when its context
+// ends, and reports how it ended.
+func blockingJobRead() (resolve func(context.Context) bool, ended <-chan error) {
+	done := make(chan error, 1)
+	return func(ctx context.Context) bool {
+		<-ctx.Done()
+		done <- ctx.Err()
+		return false
+	}, done
+}
+
+// lengthenStopIntentBound makes the stop's own bound on its job read long
+// enough that only the stop ending the read can end it.
+func lengthenStopIntentBound(t *testing.T) {
+	t.Helper()
+	previous := stopIntentBound
+	stopIntentBound = 30 * time.Second
+	t.Cleanup(func() { stopIntentBound = previous })
+}
+
+// TestTheStopEndsItsJobRead: ending the stop's job read cancels it, which kills
+// its systemctl, and waits for it, so the read never outlives the daemon
+// (#7480).
+func TestTheStopEndsItsJobRead(t *testing.T) {
+	lengthenStopIntentBound(t)
+	stop := &stopClock{}
+	resolve, ended := blockingJobRead()
+	stop.settleIntentAsync(resolve)
+
+	start := time.Now()
+	stop.endIntentRead()
+	select {
+	case err := <-ended:
+		require.ErrorIs(t, err, context.Canceled, "the stop must cancel its read, not wait out its bound")
+	default:
+		t.Fatal("endIntentRead returned with the read still running")
+	}
+	require.Less(t, time.Since(start), 5*time.Second)
+	require.False(t, stop.restartIntended())
+}
+
+// TestAJobReadAskedForAfterTheStopEndedItsReadsNeverStarts: a SIGTERM that
+// arrives once the stop has ended its job reads starts no systemctl that could
+// outlive the daemon, and is a final stop (#7480).
+func TestAJobReadAskedForAfterTheStopEndedItsReadsNeverStarts(t *testing.T) {
+	stop := &stopClock{}
+	stop.endIntentRead()
+	var started atomic.Bool
+	stop.settleIntentAsync(func(context.Context) bool { started.Store(true); return true })
+	require.False(t, stop.restartIntended(), "a read asked for after the stop ended its reads is a final stop")
+	require.False(t, started.Load(), "a read asked for after the stop ended its reads started")
+}
+
+// TestRunDaemonEndsItsStopsJobRead: the daemon's stop ends a job read still
+// running, before RunDaemon returns, rather than leaving its systemctl to
+// outlive the process.
+func TestRunDaemonEndsItsStopsJobRead(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	stubContainerSweep(t)
+	lengthenStopIntentBound(t)
+	managers := captureManager(t)
+
+	runExited := startInProcessDaemon(t, nil)
+	manager := <-managers
+	waitForDaemonPhase(t, DaemonPhaseReady)
+	resolve, ended := blockingJobRead()
+	manager.lifecycle.stopClock().settleIntentAsync(resolve)
+	requestShutdown(t, runExited)
+
+	select {
+	case err := <-ended:
+		require.ErrorIs(t, err, context.Canceled)
+	default:
+		t.Fatal("RunDaemon returned with the stop's job read still running")
+	}
 }

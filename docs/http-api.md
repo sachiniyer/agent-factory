@@ -145,7 +145,8 @@ definitive refusal, not an uncertain outcome.
 `error.code: "daemon_restarting"` (status `503`, with `daemon_rejected: true`)
 says the daemon refused the request without running it because it is
 restarting: whoever stopped it starts its successor (`af upgrade`, `af daemon
-restart`, the CLI auto-update, or a `systemctl --user restart` of its unit).
+restart`, `af daemon adopt`, the CLI auto-update, or a `systemctl --user
+restart` of its unit).
 Retry the request, and it reaches the successor. Classify the refusal by its
 code, never by `error.message`, whose wording may change.
 

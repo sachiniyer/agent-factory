@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -76,12 +77,36 @@ type taskFireMarker struct {
 	WorktreePath string    `json:"worktree_path,omitempty"`
 }
 
+// daemonDrainingPredicate is what daemonDrainingFn asks. runDaemon installs
+// the real check once its manager exists, and a returned daemon latches it
+// true (latchStoppedDaemon); unset, as in the CLI, it answers false. It is an
+// atomic.Pointer because a delivery starved through the whole teardown reads it
+// while the daemon's return writes it (#7480). Tests pin it without a daemon,
+// through setDaemonDraining.
+var daemonDrainingPredicate atomic.Pointer[func() bool]
+
 // daemonDrainingFn reports whether the owning daemon has closed mutation
-// admission and is draining toward exit. runDaemon installs the real check once
-// its manager exists; the zero value keeps CLI-side RunTask calls (which run in
-// a process that owns no daemon lifecycle) answering false. Indirected for the
-// same reason createSessionForTask is: tests pin it without a daemon.
-var daemonDrainingFn = func() bool { return false }
+// admission and is draining toward exit. In a process that owns no daemon
+// lifecycle (CLI-side RunTask calls) it answers false.
+func daemonDrainingFn() bool {
+	if draining := daemonDrainingPredicate.Load(); draining != nil {
+		return (*draining)()
+	}
+	return false
+}
+
+// setDaemonDraining installs the drain predicate atomically, and returns the
+// one it replaced. A nil draining unsets it.
+func setDaemonDraining(draining func() bool) (previous func() bool) {
+	var next *func() bool
+	if draining != nil {
+		next = &draining
+	}
+	if old := daemonDrainingPredicate.Swap(next); old != nil {
+		return *old
+	}
+	return nil
+}
 
 func taskFireDir() (string, error) {
 	configDir, err := config.GetConfigDir()

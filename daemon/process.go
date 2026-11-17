@@ -146,7 +146,7 @@ var (
 
 // writeDaemonPIDFile atomically writes the current process's PID to the daemon
 // PID file with mode 0600. Used by RunDaemon so callers (StopDaemon, the
-// SIGTERM fallback in RequestShutdown) can locate and signal this daemon.
+// SIGTERM fallback in RequestRestartShutdown) can locate and signal this daemon.
 //
 // It REFUSES a symlinked path (#3672). The PID file is af's own liveness
 // bookkeeping at a path af chose, written on start and deleted on teardown, so

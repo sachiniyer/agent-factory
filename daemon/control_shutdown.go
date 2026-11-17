@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// ShutdownResult reports how RequestShutdown stopped (or failed to stop) the
+// ShutdownResult reports how RequestRestartShutdown stopped (or failed to stop) the
 // running daemon. Used by upgrade.go and autoupdate.go to pick the right
 // user-facing message after a binary swap.
 type ShutdownResult int
@@ -57,7 +57,19 @@ const sigtermFallbackGrace = 5 * time.Second
 // exited.
 const sigtermFallbackPoll = 100 * time.Millisecond
 
-// RequestShutdown asks any running daemon to exit cleanly. The normal path
+// RequestRestartShutdown asks the running daemon to stop for a stopper that
+// starts its successor itself: `af upgrade`, `af daemon restart`, the CLI
+// auto-update and `af daemon adopt`. The daemon refuses requests during its stop
+// as a restart, which a client retries into the successor, rather than as a
+// final stop (#7474). It is af's only Shutdown request: a final stop comes from
+// a signal or a cause of the daemon's own (#7480). See requestShutdownWith for
+// what it returns.
+func RequestRestartShutdown() (ShutdownResult, ShutdownTarget, error) {
+	return requestShutdownWith(ShutdownRequest{Restart: true})
+}
+
+// requestShutdownWith asks any running daemon to exit cleanly, with req saying
+// whether its stopper starts the successor (#7474). The normal path
 // uses the Shutdown RPC (#498/#501). When the running daemon is a pre-#501
 // binary that does not register Shutdown, we fall back to locating the
 // daemon's PID and sending SIGTERM directly (#504) so an `af upgrade` does
@@ -83,18 +95,6 @@ const sigtermFallbackPoll = 100 * time.Millisecond
 // wait — when that PID is unknown, could not be pinned before shutdown, or
 // cannot be verified in this pid namespace as the daemon serving this home
 // (see shutdownTargetIsOursFn).
-func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
-	return requestShutdownWith(ShutdownRequest{})
-}
-
-// RequestRestartShutdown is RequestShutdown for a stopper that starts the
-// daemon's successor itself: `af upgrade`, `af daemon restart` and the CLI
-// auto-update. The daemon refuses requests during its stop as a restart, which
-// a client retries into the successor, rather than as a final stop (#7474).
-func RequestRestartShutdown() (ShutdownResult, ShutdownTarget, error) {
-	return requestShutdownWith(ShutdownRequest{Restart: true})
-}
-
 func requestShutdownWith(req ShutdownRequest) (ShutdownResult, ShutdownTarget, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
@@ -209,8 +209,8 @@ func requestShutdownWith(req ShutdownRequest) (ShutdownResult, ShutdownTarget, e
 var shutdownTargetIsOursFn = pidBelongsToThisHome
 
 // ClassifyShutdownTarget turns the read-only ping made before a restart into
-// the exact presence answer RequestShutdown will rely on. Only the two kernel
-// answers that RequestShutdown already treats as daemon-absent — ENOENT and
+// the exact presence answer RequestRestartShutdown will rely on. Only the two kernel
+// answers that RequestRestartShutdown already treats as daemon-absent — ENOENT and
 // ECONNREFUSED — become No. Permission errors, resets, timeouts, and every
 // other failure remain Undetermined, so a failed observation cannot authorize
 // a supposedly harmless no-op before restart-safety checks run.
@@ -262,18 +262,18 @@ var (
 // WaitForShutdownCompletion blocks until the daemon that acknowledged Shutdown
 // has finished tearing down. The Shutdown RPC acknowledges before the daemon
 // tears down (shutdownAckGrace plus the drain), so a caller that respawns
-// immediately after RequestShutdown races the dying daemon: EnsureDaemon's
+// immediately after RequestRestartShutdown races the dying daemon: EnsureDaemon's
 // liveness ping — or a unit-restarted daemon's startup ping guard — can see
 // the old daemon still answering, skip the spawn, and leave nothing running
 // once it exits (#854, #5007). Callers on the shutdown-then-respawn path must
 // wait for this to return nil before respawning.
 //
-// With target.PID > 0 (the target RequestShutdown returned) it waits for that
+// With target.PID > 0 (the target RequestRestartShutdown returned) it waits for that
 // process to exit, bounded by shutdownCompleteGrace. Process exit is a positive signal;
 // socket quietness is not — a draining daemon can stop answering pings well
 // before it releases what a successor needs. The wait itself checks only
 // liveness and start time, never the process name — a PID recycled to another
-// process counts as the daemon's exit. (RequestShutdown's home binding does
+// process counts as the daemon's exit. (RequestRestartShutdown's home binding does
 // check the name, via isAgentFactoryDaemon, so a daemon running under a
 // renamed binary gets the zero target and the socket-quiet wait.) On
 // the SIGTERM fallback path the process is already gone, so the first check

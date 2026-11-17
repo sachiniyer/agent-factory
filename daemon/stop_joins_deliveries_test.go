@@ -45,8 +45,7 @@ func TestParkedCronDeliveryStopsParkingWhenTheDaemonStops(t *testing.T) {
 	previousPoll := cronDeferPollInterval
 	cronDeferPollInterval = poll
 	var stopping, ended atomic.Bool
-	previousDraining := daemonDrainingFn
-	daemonDrainingFn = stopping.Load
+	previousDraining := setDaemonDraining(stopping.Load)
 	previousDeliver := deliverPromptForTask
 	deliverPromptForTask = func(DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 		if ended.Load() {
@@ -73,7 +72,8 @@ func TestParkedCronDeliveryStopsParkingWhenTheDaemonStops(t *testing.T) {
 		case <-time.After(3 * poll):
 			t.Error("the parked delivery did not end after the test")
 		}
-		cronDeferPollInterval, daemonDrainingFn, deliverPromptForTask = previousPoll, previousDraining, previousDeliver
+		cronDeferPollInterval, deliverPromptForTask = previousPoll, previousDeliver
+		setDaemonDraining(previousDraining)
 	})
 	time.Sleep(100 * time.Millisecond)
 	stopped := time.Now()

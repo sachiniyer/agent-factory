@@ -455,6 +455,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// home (#7443). A parked delivery has already stopped parking: it watches
 	// the drain flag.
 	teardown.add("sandbox reattach", manager.reattachRuns.closeAndWait)
+	// The systemd job read a SIGTERM started to learn the stop's intent
+	// (#7474), cancelled and joined, so it never outlives the daemon (#7480).
+	teardown.add("the stop's systemd job read", stop.endIntentRead)
 
 	scheduler := newTaskScheduler()
 	// The cron's own deliveries join first: every job the cron launched before

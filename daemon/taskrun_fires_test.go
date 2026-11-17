@@ -26,9 +26,8 @@ import (
 // for the test's duration.
 func pinDaemonDraining(t *testing.T, draining bool) {
 	t.Helper()
-	orig := daemonDrainingFn
-	daemonDrainingFn = func() bool { return draining }
-	t.Cleanup(func() { daemonDrainingFn = orig })
+	orig := setDaemonDraining(func() bool { return draining })
+	t.Cleanup(func() { setDaemonDraining(orig) })
 }
 
 func seedCronTask(t *testing.T, id, repoPath string) {

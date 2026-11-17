@@ -4,9 +4,9 @@ import "errors"
 
 // ErrorCodeDaemonRestarting says the daemon refused the request, without
 // running it, because it is restarting: whoever stopped it starts its
-// successor (`af upgrade`, `af daemon restart`, the CLI auto-update, a
-// `systemctl --user restart` of its unit). A client retries the request into
-// that successor (#7474).
+// successor (`af upgrade`, `af daemon restart`, `af daemon adopt`, the CLI
+// auto-update, a `systemctl --user restart` of its unit). A client retries the
+// request into that successor (#7474).
 const ErrorCodeDaemonRestarting = "daemon_restarting"
 
 // LifecycleRefusal is a request the daemon refused, without running it,
