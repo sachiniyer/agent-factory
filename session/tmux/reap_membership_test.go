@@ -510,6 +510,42 @@ func TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation(t *testing.T
 		"a foreign binary under af argv CLAIMS the daemon — it can never prove it")
 }
 
+// #7491 item 2 — the live-capture close path names a positively-placed
+// exclusion at WARNING, the same severity the blind path uses (#7484): the
+// process keeps running under a Known close that may remove the worktree it
+// typically sits inside, so the line must name the pid, its placement, and
+// that it was LEFT ALIVE.
+func TestReapSessionProcessesNamesAPositivePlacementAtWarning(t *testing.T) {
+	shrinkReapWaits(t)
+	sleeper := exec.Command("sleep", "300")
+	require.NoError(t, sleeper.Start())
+	t.Cleanup(func() { _ = sleeper.Process.Kill(); _, _ = sleeper.Process.Wait() })
+	proc, err := proctree.Lookup(sleeper.Process.Pid)
+	require.NoError(t, err)
+
+	var warnings bytes.Buffer
+	oldWarnings := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarnings) })
+
+	protected := protectedSet{proc.PID: {
+		reason:   protectReasonDaemonDescendant(4242),
+		positive: true,
+	}}
+	remaining := reapSessionProcesses(reapOnRequest, "af_positive_warning",
+		[]proctree.Process{proc}, time.Millisecond, 100*time.Millisecond, protected)
+	require.Empty(t, remaining,
+		"a positively-placed exclusion is exempt from signals and not a leak")
+	require.Contains(t, warnings.String(), strconv.Itoa(proc.PID),
+		"the WARNING names the pid it left alive")
+	require.Contains(t, warnings.String(), "LEFT ALIVE",
+		"the WARNING says the carrier keeps running under a close that may remove its worktree")
+	require.Contains(t, warnings.String(), "descendant of agent-factory daemon",
+		"the WARNING names the placement, not just the pid")
+	require.True(t, proctree.AliveSame(proc),
+		"excluded means never signalled")
+}
+
 // #7435 R6 — tier 2, the generation-identity admission: a marker carrier that
 // fails every kernel membership tier because it leads its OWN kernel session
 // — the #3699 re-hosted shape — is still ours when it began no earlier than
