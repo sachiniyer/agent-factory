@@ -62,6 +62,14 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				if ts != nil && kind == TabKindProcess {
 					ts.SetRemainOnExit()
 				}
+				// Anchor coverage (#7435 R6): the persisted runtime pair names
+				// the AGENT pane root (the tab at index 0 is the agent's), so
+				// it seeds that tab's evidence — a session whose pane vanishes
+				// before any live resolution still proves its cohort instead
+				// of wedging the sweep on no evidence.
+				if ts != nil && idx == 0 && kind == TabKindAgent {
+					ts.SeedPaneRootEvidence(data.RuntimePID, data.RuntimeStartID)
+				}
 			}
 			var conversation AgentConversationData
 			if td.Conversation != nil {
@@ -105,6 +113,11 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 	var ts *tmux.TmuxSession
 	if data.TmuxName != "" {
 		ts = restoreTmuxSession(data.TmuxName, data.Program)
+		// Same seed as the new-format agent tab (#7435 R6): the persisted
+		// runtime pair is this exact legacy session's recorded pane root.
+		if ts != nil {
+			ts.SeedPaneRootEvidence(data.RuntimePID, data.RuntimeStartID)
+		}
 	} else {
 		ts = tmux.NewTmuxSession(data.Title, data.Program)
 	}

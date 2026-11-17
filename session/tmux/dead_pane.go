@@ -438,6 +438,24 @@ func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
 	return proc, nil
 }
 
+// SeedPaneRootEvidence primes the recorded pane-root identity a restore
+// already trusts — the persisted (RuntimePID, RuntimeStartID) pair the launch
+// recorded for this exact session name — so a session whose pane vanishes
+// before any live resolution still carries the membership evidence the
+// vanished-session sweep needs (#7435 R6). It is a SEED, not a proof: the
+// sweep's per-candidate SameIdentity and generation checks keep a stale seed
+// from admitting a process that is not this generation's, the way
+// PaneRootProcessMatches re-proves the same pair against live panes.
+// A zero pair is no anchor — a 0 StartID would pass every later-bound check —
+// and a live resolution that already stamped this session's root stays: the
+// persisted pair is older than anything tmux just answered for.
+func (t *TmuxSession) SeedPaneRootEvidence(pid int, startID uint64) {
+	if pid <= 0 || startID == 0 || t.paneRootEvidence.Load() != nil {
+		return
+	}
+	t.paneRootEvidence.Store(&proctree.Process{PID: pid, StartID: startID})
+}
+
 // PaneRootProcessMatches reports whether SOME pane of this session is rooted
 // at the recorded (pid, start-time) identity — not only the active one, which
 // is what panePID resolves: between launch and a daemon restart the user can

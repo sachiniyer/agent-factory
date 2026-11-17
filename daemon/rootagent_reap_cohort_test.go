@@ -53,15 +53,22 @@ const (
 // the local tmux backend does differently for the #3699 shape: a vanished
 // session that left a marker-carrying process behind is refused while the caller
 // asks for the STRICT empty-cohort guard, and reaped once the caller vouches for
-// exclusive ownership of the session's lifecycle so the live marker scan may seed
-// the cohort (session/tmux/cleanup.go's reapVanishedSessionProcessCohort).
+// exclusive ownership of the session's lifecycle — the trusted sweep then admits
+// the survivor through the recorded pane-root evidence: kernel membership
+// (tier 1) for a same-session member, or the generation-identity tier
+// (tier 2, #7435 R6) for the re-hosted shape that leads its own kernel session
+// but began no earlier than the root with a positively clean ancestry
+// (session/tmux/cleanup.go's reapVanishedSessionProcessCohort).
 //
 // That layer's behavior is pinned against real tmux and real escaped processes in
 // session/tmux/reap_generation_test.go — TestBlindVanishedSessionSweepDoesNotAdopt
 // ReplacementGeneration for the strict refusal, TestTrustedBlindVanishedSession
-// SweepReapsNewerGeneration for the trusted reap — so this double is a model of
-// tested behavior, not an invention. What is untested until now, and what this
-// file is about, is which of the two reapDeadRoot asks for.
+// SweepReapsNewerGeneration for the trusted reap — and the re-hosted convergence
+// this double's "trusted reap" models is proven against real tmux and a real
+// setsid'd survivor in session/tmux/close_dead_pane_test.go's
+// TestCloseAndWaitForPaneExit_VanishedRehostedAgentConverges — so this double is
+// a model of tested behavior, not an invention. What is untested until now, and
+// what this file is about, is which of the two reapDeadRoot asks for.
 type markedSurvivorBackend struct {
 	readyFakeBackend
 

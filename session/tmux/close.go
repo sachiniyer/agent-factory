@@ -652,6 +652,11 @@ func (t *TmuxSession) sweepVanishedSessionProcesses(trustLiveGeneration bool) er
 	// on any marked candidate instead of reaping on env markers.
 	var membership cohortMembership
 	if root := t.paneRootEvidence.Load(); root != nil {
+		// The recorded pane SID plus its (pid, StartID) pair is what anchors
+		// tier 2's generation-identity admission (#7435 R6): the cohort
+		// derives Root from this same evidence, so a marker carrier that
+		// fails kernel membership is still reapable when it began no earlier
+		// than the pane root — the #3699 re-hosted shape.
 		membership = cohortMembership{
 			PaneSIDs: map[int]bool{root.PID: true},
 			Recorded: map[int]uint64{root.PID: root.StartID},

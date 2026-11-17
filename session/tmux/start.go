@@ -82,6 +82,20 @@ func (t *TmuxSession) Start(workDir string) error {
 		t.revokePendingCapabilities()
 	} else {
 		t.commitCapabilities(true)
+		// Stamp the launch's pane-root identity for the vanished-session
+		// sweep's membership evidence (#7435 R6): this is the one point every
+		// spawn passes through — agent launch, shell/process tab, respawn —
+		// and a session whose pane later vanishes can still prove its cohort
+		// only if the root was recorded while tmux could answer for it.
+		// Best-effort like the evidence itself: an unanswerable pane query
+		// leaves the sweep fail-closed rather than failing a healthy launch.
+		// The inner attach's reattach stamp usually lands this already; this
+		// retry covers the window where the pane query failed there.
+		if t.paneRootEvidence.Load() == nil {
+			if _, rootErr := t.PaneRootProcess(); rootErr != nil {
+				log.InfoLog.Printf("tmux session %s: could not record pane-root identity at spawn: %v", t.sanitizedName, rootErr)
+			}
+		}
 	}
 	return err
 }
@@ -792,6 +806,19 @@ func (t *TmuxSession) reattach(opts reattachOptions) error {
 		answered:   answered || confirmedFresh,
 		startedAt:  resolvedAt,
 	})
+	// Anchor coverage (#7435 R6): a reattached session whose pane-root
+	// identity was never recorded — a restored shell/process tab carrying no
+	// persisted pair — stamps its resolved root here so a later vanish still
+	// has membership evidence to judge its escapees against. Once stamped the
+	// launch/verify paths own the refresh; a nil stamp is the only case that
+	// pays the bounded pane query on this path. The query runs only when tmux
+	// just answered — an unanswered rebind must not spend another probe on a
+	// server that already failed to reply (the rebinding-only contract).
+	if (answered || confirmedFresh) && t.paneRootEvidence.Load() == nil {
+		if _, rootErr := t.PaneRootProcess(); rootErr != nil {
+			log.InfoLog.Printf("tmux session %s: could not record pane-root identity on reattach: %v", t.sanitizedName, rootErr)
+		}
+	}
 	return nil
 }
 

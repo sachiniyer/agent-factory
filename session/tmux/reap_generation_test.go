@@ -75,6 +75,11 @@ func TestVanishedSessionSweepDoesNotReapSameNameReplacement(t *testing.T) {
 // With no captured predecessor identity, a post-absence marker scan cannot
 // distinguish an escaped process from a replacement that reused the name. It
 // must refuse cleanup without signalling either one.
+//
+// The fixture is a reparented marker carrier: the genuinely ambiguous shape.
+// A carrier still behind a tmux server is adjudicated POSITIVELY — a foreign
+// pane, excluded silently (#7435 R6) — so the refusal this test pins only
+// fires for a carrier with no tmux ancestor left to place it.
 func TestBlindVanishedSessionSweepDoesNotAdoptReplacementGeneration(t *testing.T) {
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
@@ -82,11 +87,11 @@ func TestBlindVanishedSessionSweepDoesNotAdoptReplacementGeneration(t *testing.T
 	const name = "af_blind_vanished_recreated"
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
-	replacement := spawnMarkedSessionWithEscapee(t, name, home, "replacement")
+	replacement := spawnMarkedProcess(t, name, home)
 
 	err := reapVanishedSessionProcesses(name, home, nil, nil, cohortMembership{}, false)
 	require.True(t, proctree.AliveSame(replacement),
-		"a blind vanished-session sweep reaped a same-named replacement")
+		"a blind vanished-session sweep reaped a process it could not place")
 	require.ErrorContains(t, err, "generation",
 		"blind recovery must refuse when it cannot identify the predecessor generation")
 }

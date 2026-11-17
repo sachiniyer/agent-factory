@@ -689,6 +689,26 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		proven[p.PID] = p.StartID
 	}
 	membership.Proven = proven
+	if membership.Root.PID == 0 {
+		// Anchor tier 2 on a recorded pane root when the caller did not carry
+		// one in: a SID the pane evidence names whose leader pair the recorded
+		// or captured sets also hold (#7435 R6). The background CleanupSessions
+		// sweep reaches the same anchor through the pane roots it observed.
+		for sid := range membership.PaneSIDs {
+			if startID, ok := membership.Recorded[sid]; ok {
+				membership.Root = proctree.Process{PID: sid, StartID: startID}
+				break
+			}
+			if startID, ok := proven[sid]; ok {
+				membership.Root = proctree.Process{PID: sid, StartID: startID}
+				break
+			}
+		}
+	}
+	// One dedupe set across every markedOrphanProcesses pass below keeps a
+	// refused survivor from being reported once per pass it reappears in
+	// (#7435 R8).
+	reported := make(map[int]bool)
 	var sweepErr error
 	if captureErr != nil {
 		sweepErr = fmt.Errorf("could not establish the complete pane process tree before ownership lookup: %w", captureErr)
@@ -721,7 +741,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 	// pids and the read that tells a leftover from a replacement (#3706).
 	if generations.empty() {
 		blindCandidates, refreshErr := refreshOrphanCandidates(candidates, match, nil)
-		_, _, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations, membership)
+		_, _, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations, membership, reported)
 		return errors.Join(sweepErr, refreshErr, inspectErr)
 	}
 	initialCandidates, initialErr := refreshOrphanCandidates(candidates, match, &generations)
@@ -739,7 +759,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		observed, observeErr := observeOrphanAncestryObserved(refreshed, match, reapGraceWait)
 		refreshed, afterErr := refreshOrphanCandidates(observed, match, &generations)
 		sweepErr = errors.Join(sweepErr, beforeErr, observeErr, afterErr)
-		marked, _, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations, membership)
+		marked, _, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations, membership, reported)
 		sweepErr = errors.Join(sweepErr, inspectErr)
 		// The tmux session is GONE and these processes are still alive carrying its
 		// ownership markers: they outlived the pane tree that was supposed to
@@ -756,7 +776,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		candidates = refreshed
 	}
 	finalCandidates, refreshErr := refreshOrphanCandidates(candidates, match, &generations)
-	left, leftSnap, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations, membership)
+	left, leftSnap, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations, membership, reported)
 	sweepErr = errors.Join(sweepErr, refreshErr, inspectErr)
 	// The survivor check applies the SAME exclusion set signalling did
 	// (#7435 R3, Codex 4593411284): a POSITIVELY protected process — the

@@ -144,6 +144,88 @@ func requireSessionGone(t *testing.T, name string) {
 		"the held dead pane's session must be gone after teardown")
 }
 
+// #3699 via #7435 R6 — the re-hosted shape, end to end: a process that
+// setsid'd out of the pane leads its own kernel session while carrying the
+// pane's exact markers. Once the session vanishes no kernel membership tier
+// can place it — not the recorded root's SID, not a recorded pair, not
+// capture inside a tree that no longer exists — and before tier 2 every
+// trusting close refused it as unproven, which is what wedged root-reap
+// forever. The generation-identity admission converges it: exact markers, an
+// in-cohort generation, a start no earlier than the recorded pane root, and a
+// positively clean ancestry.
+//
+// The same close holds the boundary's other half: a pane on a SECOND tmux
+// server stamped with the vanished session's exact markers — the #6846
+// global-env copy — is positively foreign, excluded the way signalling
+// excludes a placed subtree: never signalled, never reported.
+func TestCloseAndWaitForPaneExit_VanishedRehostedAgentConverges(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+	name := fmt.Sprintf("af_test_rehost_%d", time.Now().UnixNano())
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	gen := "gen-rehost"
+
+	// The re-hosted member: setsid'd and SIGHUP-ignoring inside the pane —
+	// the `claude daemon run -> bg-pty-host -> claude` shape.
+	escapee := spawnMarkedSessionWithEscapee(t, name, home, gen)
+
+	// Record the pane root while tmux can still answer for it — the stamp
+	// Start plants in production. Without it the trusting sweep has no anchor
+	// and tier 2 cannot run.
+	s := NewTmuxSessionFromSanitizedName(name, "sleep 300")
+	root, err := s.PaneRootProcess()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, escapee.StartID, root.StartID,
+		"the re-hosted process must postdate the recorded root for tier 2 to admit it")
+
+	// The unrelated server: the vanished session's exact markers copied onto
+	// a pane of a DIFFERENT server — #6846's global-env leak shape. A tmux
+	// server sits in its ancestry, so the vanished sweep must exclude it as
+	// positively foreign.
+	sock2 := testguard.SocketPath(t, "rehostforeign.sock")
+	out, err := exec.Command("tmux", "-S", sock2, "new-session", "-d", "-s", "foreign",
+		"-e", EnvMarkerSession+"="+name,
+		"-e", EnvMarkerHome+"="+home,
+		"-e", EnvMarkerGeneration+"="+gen,
+		"sleep", "300").CombinedOutput()
+	require.NoError(t, err, "start the foreign marked session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sock2, "kill-server").Run() })
+	var foreignPane int
+	require.Eventually(t, func() bool {
+		lout, err := exec.Command("tmux", "-S", sock2, "list-panes", "-t", "foreign", "-F", "#{pane_pid}").Output()
+		if err != nil {
+			return false
+		}
+		foreignPane, err = strconv.Atoi(strings.TrimSpace(string(lout)))
+		return err == nil && foreignPane > 0
+	}, 5*time.Second, 20*time.Millisecond, "the foreign pane never reported its pid")
+	foreign := processIdentity(t, foreignPane)
+
+	// The session vanishes externally — the #3699 shape: tmux forgot the
+	// ancestry before af ever closed, so the close below is the trusting
+	// vanished-session sweep, not a captured-tree reap.
+	vanishSessionWithObservableEscapee(t, name, escapee)
+
+	state, blind, err := s.CloseAndWaitForPaneExitTrustingOwnGeneration()
+	require.NoError(t, err,
+		"the trusting close must converge the re-hosted member, not refuse it forever as unproven")
+	require.True(t, blind, "a session gone before the close ran is the vanished-sweep path")
+	require.Equal(t, PaneStateKnown, state)
+
+	require.Eventually(t, func() bool {
+		return !proctree.AliveSame(escapee)
+	}, 10*time.Second, 50*time.Millisecond,
+		"the re-hosted marker carrier (pid %d) must be reaped — tier 2 admits it", escapee.PID)
+
+	// The foreign pane on its own server must be untouched: still alive, its
+	// server still answering — excluded as positively foreign, never signalled.
+	require.True(t, proctree.AliveSame(foreign),
+		"the marked process behind a foreign tmux server was signalled — the boundary exclusion failed")
+	require.NoError(t, exec.Command("tmux", "-S", sock2, "has-session", "-t", "foreign").Run(),
+		"the unrelated tmux server must still own its session")
+}
+
 func TestCloseAndWaitForPaneExit_TearsDownAHeldDeadPane(t *testing.T) {
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
