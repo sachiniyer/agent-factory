@@ -2510,11 +2510,58 @@ _expect_ambiguous_truncated_titles() {
     return 0
 }
 
+# --- #7506 regression: the complete title cell, not a whitespace prefix ---
+# 'foo' beside 'foo bar': the old boundary `title([[:space:]]|$)` counted the
+# 'foo bar' row as a rendering of 'foo', so creating/selecting 'foo' refused
+# as ambiguous. The cell is complete only when the title's bytes are followed
+# by its OWN padding and the status affix — the cells ' bar' occupies are
+# neither. Both names must create, select, and assert-selected cleanly.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_space_prefixed_names() {
+    af_new_instance 'foo bar' || return 1
+    af_new_instance 'foo' || return 1
+    af_select 'foo' || return 1
+    af_expect_selected 'foo' || return 1
+    af_select 'foo bar' || return 1
+    af_expect_selected 'foo bar' || return 1
+}
+
+# 'ééééééééx' beside 'ééééééééy': 17 UTF-8 bytes but only 9 display cells —
+# both fit the 16-cell budget and render whole and DISTINCTLY. The byte-wise
+# measure refused them as unmeasurable, then the prefix fallback called them
+# a collision. Measured in cells they are neither. A wide-char name past the
+# budget exercises the same cell math through the ellipsis path.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_display_cell_names() {
+    af_new_instance 'ééééééééx' || return 1
+    af_new_instance 'ééééééééy' || return 1
+    af_select 'ééééééééx' || return 1
+    af_expect_selected 'ééééééééx' || return 1
+    af_select 'ééééééééy' || return 1
+    af_expect_selected 'ééééééééy' || return 1
+    af_new_instance 'のテストですのテストです' || return 1
+    af_select 'のテストですのテストです' || return 1
+    af_expect_selected 'のテストですのテストです' || return 1
+    # A name whose cells the sandbox measure cannot score must be refused,
+    # naming the name — never guessed at.
+    local out
+    if out="$(af_new_instance 'x👨‍👩‍👧y' 2>&1)"; then
+        _af_fail 'af_new_instance created a session it cannot measure'
+        return 1
+    fi
+    printf '%s\n' "$out" | grep -qF 'x👨‍👩‍👧y' || {
+        _af_fail "the unmeasurable-name refusal must name the name: $out"
+        return 1
+    }
+}
+
 # --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
 # Runs last because it adds sessions and relaunches the TUI.
 step "literal a+b creates, reaches ready, and is selectable" _expect_literal_instance_title
 step "a rail-truncated name drives create, select and assert (#7485)" _expect_truncated_title_roundtrip
 step "a shared truncated prefix fails loudly, never picks (#7485)" _expect_ambiguous_truncated_titles
+step "a whitespace prefix is not the title cell; foo beside foo bar (#7506)" _expect_space_prefixed_names
+step "names measured in display cells, unmeasurable refused loudly (#7506)" _expect_display_cell_names
 step "relaunch boots with the rail scrolled past the header (#2148)" _expect_scrolled_rail_relaunch
 
 printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"
