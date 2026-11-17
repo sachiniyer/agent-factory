@@ -66,7 +66,9 @@ func reattachFixtureStops(t *testing.T, srvToken string, failStop bool) (*Instan
 	p := backend.(*sandboxBackend).provisioner
 	// The "tunnel" is the test server itself: the forward's local end is simply
 	// the server's address, so the probe reaches the stand-in agent-server.
-	p.startTunnelFn = func(string) (string, error) { return srv.Listener.Addr().String(), nil }
+	p.startTunnelFn = func(string) (*AgentServerEndpoint, error) {
+		return &AgentServerEndpoint{URL: "http://" + srv.Listener.Addr().String()}, nil
+	}
 	inst := &Instance{Title: "reattach me", liveness: LiveLost, backend: backend, runtimeTeardown: teardown}
 	return inst, p, stops
 }
@@ -195,7 +197,7 @@ func TestOpenTunnelForReattachFallsBackWithoutTheCallbackForward(t *testing.T) {
 	forceTunnelLifelineExe(t, "")
 	prev := waitForSandboxTunnelFn
 	var p *sandboxProvisioner
-	waitForSandboxTunnelFn = func(string, string, time.Duration, time.Duration) error {
+	waitForSandboxTunnelFn = func(*sandboxProvisioner, time.Duration, time.Duration) error {
 		// Stand-in readiness probe: a generation that exits on its own never
 		// became ready.
 		p.reapMu.Lock()
@@ -219,9 +221,10 @@ func TestOpenTunnelForReattachFallsBackWithoutTheCallbackForward(t *testing.T) {
 		p.reapMu.Unlock()
 	})
 
-	addr, withCallback, note, err := p.openTunnelForReattach()
+	ep, withCallback, note, err := p.openTunnelForReattach()
 	require.NoError(t, err, "the data plane must open even when the -R cannot")
-	assert.NotEmpty(t, addr)
+	assert.NotNil(t, ep)
+	assert.NotEmpty(t, ep.SocketPath, "the endpoint carries the socket af's own ssh child bound")
 	assert.False(t, withCallback, "the caller is told the callback forward did not come up")
 	assert.Contains(t, note, "could not be confirmed")
 	assert.Equal(t, []string{"127.0.0.1:23456:/s.sock"}, p.reverseFwds,
@@ -235,7 +238,7 @@ func confirmedTunnelFixture(t *testing.T, confirm func(*sandboxProvisioner) erro
 	t.Helper()
 	forceTunnelLifelineExe(t, "")
 	prevWait, prevConfirm := waitForSandboxTunnelFn, confirmCallbackForward
-	waitForSandboxTunnelFn = func(string, string, time.Duration, time.Duration) error { return nil }
+	waitForSandboxTunnelFn = func(*sandboxProvisioner, time.Duration, time.Duration) error { return nil }
 	confirmCallbackForward = confirm
 	t.Cleanup(func() { waitForSandboxTunnelFn, confirmCallbackForward = prevWait, prevConfirm })
 	p := &sandboxProvisioner{sshCmd: `sh -c 'sleep 60' x`, remoteAddr: "127.0.0.1:7", sessionDir: "/work/s"}
@@ -252,9 +255,10 @@ func confirmedTunnelFixture(t *testing.T, confirm func(*sandboxProvisioner) erro
 // unconfirmed forward must NOT be reported as restored.
 func TestOpenTunnelForReattachDoesNotReportAnUnconfirmedCallbackForward(t *testing.T) {
 	p := confirmedTunnelFixture(t, func(*sandboxProvisioner) error { return errors.New("the sandbox host never bound the socket") })
-	addr, withCallback, note, err := p.openTunnelForReattach()
+	ep, withCallback, note, err := p.openTunnelForReattach()
 	require.NoError(t, err, "the data plane still opens")
-	assert.NotEmpty(t, addr)
+	assert.NotNil(t, ep)
+	assert.NotEmpty(t, ep.SocketPath, "the endpoint carries the socket af's own ssh child bound")
 	assert.False(t, withCallback)
 	assert.Contains(t, note, "never bound the socket")
 	assert.NotEmpty(t, p.reverseFwds, "the supervisor keeps the forward for its next re-dial")

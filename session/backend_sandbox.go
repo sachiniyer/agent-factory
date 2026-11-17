@@ -50,8 +50,9 @@ import (
 
 const (
 	// sandboxTunnelReadyTimeout bounds the wait for the `ssh -L` child to make
-	// the local port answer. A forward that never comes up must fail the
-	// provision rather than hand back an endpoint nothing is listening on.
+	// the local socket answer AND prove af's own ssh child accepted it. A
+	// forward that never comes up must fail the provision rather than hand
+	// back an endpoint nothing is listening on (#7495).
 	sandboxTunnelReadyTimeout = 20 * time.Second
 	sandboxTunnelReadyPoll    = 100 * time.Millisecond
 	// sandboxTunnelWaitDelay bounds how long a killed tunnel child may take to
@@ -182,9 +183,10 @@ type sandboxProvisioner struct {
 
 	// tunnel is the currently published generation of the supervised ssh
 	// transport (#5571 W1.2): nil between a death and its re-dial, and after
-	// stopTunnel. forward/localAddr pin the -L contract — localAddr is the
-	// endpoint every consumer dials, fixed at provision and re-bound verbatim
-	// on every re-dial so a consumer's cached URL is never stale — and forward
+	// stopTunnel. forward/socketPath pin the -L contract — socketPath is the
+	// unix socket every consumer dials, minted inside this daemon's own
+	// generation dir at provision (#7495) and re-bound verbatim on every
+	// re-dial so a consumer's cached endpoint is never stale — and forward
 	// embeds the remote agent-server's listen address it targets. reverseFwds
 	// is W3.4's -R slot (the in-sandbox callback), set at provision when a
 	// credential was granted; each element is composed into the spawn as
@@ -192,7 +194,7 @@ type sandboxProvisioner struct {
 	// fatality, group teardown, and supervision.
 	tunnel      *tunnelChild
 	forward     string
-	localAddr   string
+	socketPath  string
 	reverseFwds []string
 	// callbackRef is the reference the granted callback credential derives from
 	// (W3.6). It persists with the runtime identity, together with the -R spec in
@@ -237,8 +239,11 @@ type sandboxProvisioner struct {
 	// without a real sshd. Production leaves it nil.
 	runCommandFn func(timeout time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error)
 	// startTunnelFn is the same kind of seam for the -L child: a provision()
-	// test substitutes it rather than needing a real forward. nil ⇒ startTunnel.
-	startTunnelFn func(remoteAddr string) (localAddr string, err error)
+	// test substitutes it rather than needing a real forward, handing back a
+	// stand-in endpoint (usually a test server's TCP URL — TCP endpoints never
+	// get the tunnel's peer proof, which is exactly what keeps the seam honest).
+	// nil ⇒ startTunnel.
+	startTunnelFn func(remoteAddr string) (endpoint *AgentServerEndpoint, err error)
 }
 
 // hostReadinessKey is the readiness-cache key this provisioner's probe records
@@ -378,22 +383,26 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if p.hostProgram == "" {
 		p.hostProgram = p.program
 	}
-	localAddr, err := p.startTunnel(banner.Addr)
+	endpoint, err := p.startTunnel(banner.Addr)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
-
-	if err := p.awaitAdoptedServer(localAddr, token); err != nil {
-		return ProvisionResult{}, err
-	}
-
 	// The endpoint presents the token WE minted — identical to the banner's per
 	// the check above, but the provenance matters: the daemon must never adopt
 	// a credential the remote happened to report.
-	endpoint := &AgentServerEndpoint{URL: "http://" + localAddr, Token: token}
+	endpoint.Token = token
+
+	if err := p.awaitAdoptedServer(endpoint); err != nil {
+		return ProvisionResult{}, err
+	}
+
 	teardown := p.reap
+	localDesc := endpoint.SocketPath
+	if localDesc == "" {
+		localDesc = endpoint.URL // a non-tunnel endpoint (test seam, hook contract)
+	}
 	log.InfoLog.Printf("sandbox runtime: session %q running via %q (dir %s), agent-server tunneled at %s",
-		p.spec.Title, p.sshCmd, p.sessionDir, endpoint.URL)
+		p.spec.Title, p.sshCmd, p.sessionDir, localDesc)
 	return ProvisionResult{
 		// Only the branch this runtime actually handed the agent-server via
 		// --branch is the one it ran on (#5971). A runtime that does not take
@@ -828,6 +837,10 @@ func (p *sandboxProvisioner) stopTunnel() {
 	}
 	killTunnel(p.tunnel)
 	p.tunnel = nil
+	// The dead generation's socket file is unlinked here — hygiene inside this
+	// daemon's own generation dir only (#7495): the dir itself is swept by the
+	// next daemon's startup pass once its lock proves the owner exited.
+	p.removeTunnelSocketLocked()
 }
 
 type sandboxBackend struct {

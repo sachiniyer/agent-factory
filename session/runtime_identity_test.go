@@ -322,9 +322,9 @@ func TestProvisionMintsAndPersistsTheRuntimeIdentity(t *testing.T) {
 		}
 	}
 	var forwardedAddr string
-	p.startTunnelFn = func(remoteAddr string) (string, error) {
+	p.startTunnelFn = func(remoteAddr string) (*AgentServerEndpoint, error) {
 		forwardedAddr = remoteAddr
-		return "127.0.0.1:5555", nil
+		return &AgentServerEndpoint{URL: "http://127.0.0.1:5555"}, nil
 	}
 
 	res, err := p.provision()
@@ -389,7 +389,9 @@ func TestProvisionRefusesABannerOnTheWrongCredential(t *testing.T) {
 			return nil, nil
 		}
 	}
-	p.startTunnelFn = func(string) (string, error) { return "127.0.0.1:1", nil }
+	p.startTunnelFn = func(string) (*AgentServerEndpoint, error) {
+		return &AgentServerEndpoint{URL: "http://127.0.0.1:1"}, nil
+	}
 
 	_, err := p.provision()
 	require.Error(t, err, "a banner on a foreign credential must fail the provision")

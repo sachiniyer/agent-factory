@@ -71,9 +71,8 @@ func (i *Instance) ReattachSandbox() error {
 	// working transport" (restartable) from a transport that never opened.
 	callbackConfirmed := false
 	dial := func() (endpoint *AgentServerEndpoint, rc *remoteAgentClient, aliveErr, err error) {
-		var localAddr string
 		if p.startTunnelFn != nil {
-			localAddr, err = p.startTunnelFn(p.remoteAddr)
+			endpoint, err = p.startTunnelFn(p.remoteAddr)
 			// The test seam has no -R to confirm: it stands in for a confirmed one.
 			callbackConfirmed = true
 		} else {
@@ -84,24 +83,31 @@ func (i *Instance) ReattachSandbox() error {
 			}
 			var note string
 			var withCallback bool
-			localAddr, withCallback, note, err = p.openTunnelForReattach()
+			endpoint, withCallback, note, err = p.openTunnelForReattach()
 			if err == nil && note != "" && callbackLost == "" {
 				callbackLost = note
 			}
 			callbackConfirmed = withCallback
 		}
+		if err == nil && endpoint == nil {
+			err = errors.New("the tunnel transport returned no endpoint")
+		}
 		if err != nil {
 			p.abandonUnadoptedTunnel()
 			return nil, nil, nil, err
 		}
-		endpoint = &AgentServerEndpoint{URL: "http://" + localAddr, Token: token}
+		// The derived token is what proves identity — bound onto the endpoint
+		// HERE, by the daemon that derived it: it is never adopted from a value
+		// the remote reported (#5571 W1.1), and it is written only after the
+		// endpoint's acceptor proves to be af's own ssh child (#7495).
+		endpoint.Token = token
 		rc, err = newRemoteAgentClient(*endpoint, i.Title)
 		if err != nil {
 			p.abandonUnadoptedTunnel()
 			return nil, nil, nil, err
 		}
-		// The derived token is what proves identity: only the agent-server launched
-		// with this session's file-supplied token accepts it.
+		// The derived token is what proves identity: only the agent-server
+		// launched with this session's file-supplied token accepts it.
 		if _, aerr := (&remoteAgentServer{rc: rc}).Alive(); aerr != nil {
 			p.abandonUnadoptedTunnel()
 			return nil, nil, aerr, nil
@@ -230,7 +236,11 @@ func (i *Instance) ReattachSandbox() error {
 	}
 	i.touchLocked()
 	i.mu.Unlock()
-	log.InfoLog.Printf("sandbox runtime: session %q reattached to its agent-server at %s", i.Title, endpoint.URL)
+	localDesc := endpoint.SocketPath
+	if localDesc == "" {
+		localDesc = endpoint.URL
+	}
+	log.InfoLog.Printf("sandbox runtime: session %q reattached to its agent-server at %s", i.Title, localDesc)
 	return nil
 }
 
@@ -244,6 +254,9 @@ func (p *sandboxProvisioner) abandonUnadoptedTunnel() {
 	p.tunnel = nil
 	p.reapMu.Unlock()
 	killTunnel(t)
+	p.reapMu.Lock()
+	p.removeTunnelSocketLocked()
+	p.reapMu.Unlock()
 }
 
 // callbackReverse is the persisted form of the provisioner's -R spec: the one
@@ -362,20 +375,21 @@ var confirmCallbackForward = func(p *sandboxProvisioner) error {
 // leaves the forward in place for the supervisor to re-establish on its next
 // re-dial. The original error is the one returned when the data plane cannot
 // open either way.
-func (p *sandboxProvisioner) openTunnelForReattach() (localAddr string, withCallback bool, note string, err error) {
-	localAddr, err = p.openTunnel(p.remoteAddr)
+func (p *sandboxProvisioner) openTunnelForReattach() (endpoint *AgentServerEndpoint, withCallback bool, note string, err error) {
+	_, err = p.openTunnel(p.remoteAddr)
 	if err == nil {
+		endpoint = p.tunnelEndpoint("")
 		if !p.callbackForwardPersisted() {
-			return localAddr, false, "", nil
+			return endpoint, false, "", nil
 		}
 		if cerr := confirmCallbackForward(p); cerr == nil {
-			return localAddr, true, "", nil
+			return endpoint, true, "", nil
 		} else {
 			err = cerr
 		}
 	}
 	if !p.callbackForwardPersisted() {
-		return "", false, "", err
+		return nil, false, "", err
 	}
 	note = "the callback forward could not be confirmed on reattach (" + err.Error() + "); it is retried each time the connection is re-dialed"
 	p.abandonUnadoptedTunnel()
@@ -383,12 +397,12 @@ func (p *sandboxProvisioner) openTunnelForReattach() (localAddr string, withCall
 	saved := p.reverseFwds
 	p.reverseFwds = nil
 	p.reapMu.Unlock()
-	localAddr, retryErr := p.openTunnel(p.remoteAddr)
+	_, retryErr := p.openTunnel(p.remoteAddr)
 	p.reapMu.Lock()
 	p.reverseFwds = saved
 	p.reapMu.Unlock()
 	if retryErr != nil {
-		return "", false, "", err
+		return nil, false, "", err
 	}
-	return localAddr, false, note, nil
+	return p.tunnelEndpoint(""), false, note, nil
 }

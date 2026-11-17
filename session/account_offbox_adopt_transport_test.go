@@ -64,7 +64,9 @@ func (r adoptOverFakeTransport) Provision(spec ProvisionSpec) (ProvisionResult, 
 		}
 		return nil, nil
 	}
-	p.startTunnelFn = func(string) (string, error) { return "127.0.0.1:1", nil }
+	p.startTunnelFn = func(string) (*AgentServerEndpoint, error) {
+		return &AgentServerEndpoint{URL: "http://127.0.0.1:1"}, nil
+	}
 	_, err = p.provision()
 	return ProvisionResult{}, err
 }

@@ -516,7 +516,7 @@ func (p *sandboxProvisioner) beginAdoption(w *sandboxWorkspace) error {
 
 // clearStaleAdoptedCallbackSocket removes the previous run's callback socket from
 // the preserved dir. A -R onto an existing socket fails the whole tunnel
-// (ExitOnForwardFailure): the local port would answer the readiness probe and
+// (ExitOnForwardFailure): the local socket would answer the readiness probe and
 // then vanish. The reattach after a daemon restart clears it for the same reason.
 func (p *sandboxProvisioner) clearStaleAdoptedCallbackSocket() {
 	if p.spec.Adopt != nil {
@@ -525,12 +525,14 @@ func (p *sandboxProvisioner) clearStaleAdoptedCallbackSocket() {
 }
 
 // awaitAdoptedServer gates an adopting launch on the agent-server answering
-// through the forward. A listening local port only proves ssh bound it.
-func (p *sandboxProvisioner) awaitAdoptedServer(localAddr, token string) error {
+// through the forward. A listening local socket only proves ssh bound it —
+// the readiness poll that follows is the first credential-bearing request,
+// and the endpoint's peer proof is what stands it up (#7495).
+func (p *sandboxProvisioner) awaitAdoptedServer(endpoint *AgentServerEndpoint) error {
 	if p.spec.Adopt == nil {
 		return nil
 	}
-	if err := waitAdoptedServerReady(localAddr, token, p.spec.Title); err != nil {
+	if err := waitAdoptedServerReady(endpoint, p.spec.Title); err != nil {
 		return p.sandboxErr(err)
 	}
 	return nil
@@ -543,8 +545,8 @@ var adoptReadyTimeout = 20 * time.Second
 // waitAdoptedServerReady polls the agent-server's health through the forward
 // until it answers with the session's token. It is the readiness gate between
 // "the tunnel is up" and the first agent RPC.
-func waitAdoptedServerReady(localAddr, token, title string) error {
-	rc, err := newRemoteAgentClient(AgentServerEndpoint{URL: "http://" + localAddr, Token: token}, title)
+func waitAdoptedServerReady(ep *AgentServerEndpoint, title string) error {
+	rc, err := newRemoteAgentClient(*ep, title)
 	if err != nil {
 		return err
 	}

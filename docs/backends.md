@@ -449,11 +449,18 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
    `/proc/<pid>/environ` probe can bind the live process to the record; it is
    the one variable that probe may read, and it never reaches agent or shell
    panes.
-4. It opens an **SSH local-forward tunnel** from a daemon-local loopback port to
-   that remote port and drives the agent-server over `http://127.0.0.1:<localport>`.
-   Attach, preview, prompts, and the live terminal stream all flow through the one
-   tunneled, authed connection (the SSH tunnel encrypts it; the bearer token still applies end to end inside the
-   tunnel — defense in depth).
+4. It opens an **SSH local-forward tunnel** to that remote port and drives the
+   agent-server through it. The tunnel's local end is a **unix-domain socket**,
+   not a TCP port: `ssh -L <socket>:<remote>` binds a path inside a private
+   `tunnels/` directory in af's home (created mode 0700, verified on the opened
+   directory), where no other local account can place a listener. Every
+   connection through the socket proves its acceptor is af's own ssh child
+   before a byte is written, so nothing credential-bearing can reach an
+   endpoint af did not provision — and a forward that cannot be established
+   fails the session rather than falling back to a TCP port. Attach, preview,
+   prompts, and the live terminal stream all flow through the one tunneled,
+   authed connection (the SSH tunnel encrypts it; the bearer token still applies
+   end to end inside the tunnel — defense in depth).
 5. On kill, the remote `af agent-server` is stopped, the session directory is
    removed, and the tunnel + SSH connection are closed — no leaked process, dir,
    or tunnel. The remote host itself is left running (it is your machine, not a
@@ -761,10 +768,14 @@ the `ssh` backend stages it — platform-probed, cached under
 >
 > **Flags af appends to the port-forward.** A `sandbox.ssh` that wraps `ssh` has
 > to pass these through to it: `-o` (`ExitOnForwardFailure`,
-> `ServerAliveInterval`, `ServerAliveCountMax`, `ControlMaster`), `-S`, `-N`,
-> `-L`, and `-R` when the session has a callback. A wrapper that rejects one of
-> them fails every port-forward the same way. The setup and cleanup steps add
-> only the remote command.
+> `ServerAliveInterval`, `ServerAliveCountMax`, `ControlMaster`,
+> `StreamLocalBindUnlink`, `StreamLocalBindMask`), `-S`, `-N`, `-L`, and `-R`
+> when the session has a callback. A wrapper that rejects one of them fails
+> every port-forward the same way. The setup and cleanup steps add only the
+> remote command. The `-L` forward's local end is a **unix-domain socket**
+> (`-L <socket-path>:<host>:<port>`), not a TCP port — an OpenSSH client that
+> cannot bind one fails the session with its own error; af has no TCP
+> fallback.
 
 > **Known limitation: af cannot pin a `sandbox.ssh` target to one machine.**
 > af runs a separate invocation of your command for each step — the setup

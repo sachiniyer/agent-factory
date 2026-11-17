@@ -78,15 +78,15 @@ func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner,
 	t.Cleanup(srv.Close)
 
 	var dialed []string
-	p.startTunnelFn = func(addr string) (string, error) {
+	p.startTunnelFn = func(addr string) (*AgentServerEndpoint, error) {
 		dialed = append(dialed, addr)
 		h.mu.Lock()
 		refuse := h.failDial && h.restarted
 		h.mu.Unlock()
 		if refuse {
-			return "", errors.New("transient dial failure")
+			return nil, errors.New("transient dial failure")
 		}
-		return srv.Listener.Addr().String(), nil
+		return &AgentServerEndpoint{URL: "http://" + srv.Listener.Addr().String()}, nil
 	}
 	t.Cleanup(func() {
 		if t.Failed() {

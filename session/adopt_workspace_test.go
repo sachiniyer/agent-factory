@@ -400,7 +400,7 @@ func TestWaitAdoptedServerReady(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"status": "ok"}})
 		}))
 		defer srv.Close()
-		require.NoError(t, waitAdoptedServerReady(strings.TrimPrefix(srv.URL, "http://"), "tok", "t"))
+		require.NoError(t, waitAdoptedServerReady(&AgentServerEndpoint{URL: srv.URL, Token: "tok"}, "t"))
 		assert.GreaterOrEqual(t, calls.Load(), int32(3))
 	})
 	t.Run("a tunnel that never answers is an error", func(t *testing.T) {
@@ -409,7 +409,7 @@ func TestWaitAdoptedServerReady(t *testing.T) {
 		require.NoError(t, err)
 		addr := ln.Addr().String()
 		require.NoError(t, ln.Close()) // the port now refuses, like a tunnel whose ssh exited
-		err = waitAdoptedServerReady(addr, "tok", "t")
+		err = waitAdoptedServerReady(&AgentServerEndpoint{URL: "http://" + addr, Token: "tok"}, "t")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "did not answer")
 	})

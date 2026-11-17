@@ -46,7 +46,7 @@ func spawnTestTunnel(t *testing.T, p *sandboxProvisioner) *tunnelChild {
 	t.Helper()
 	registerSandboxTunnel(p)
 	if p.forward == "" {
-		p.forward = "127.0.0.1:40000:127.0.0.1:40001"
+		p.forward = "/s/d0-t0/s1-t.sock:127.0.0.1:40001"
 	}
 	child, err := p.provisionTunnelChild()
 	require.NoError(t, err)
@@ -93,7 +93,7 @@ func TestSandboxTunnelLifelineKillsGroupWhenDaemonPipeCloses(t *testing.T) {
 	require.NotNil(t, child.ll, "the tunnel must run under the lifeline when the binary speaks it")
 
 	// The inner tunnel command reaches the lifeline verbatim: sh -c '<sshCmd>
-	// -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"'
+	// -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -N -L "$1"'
 	// af-sandbox <forward> — argv[6:] after '<exe> __watch-lifeline v1 <ms> --'.
 	// ExitOnForwardFailure is the failed-bind pin of
 	// TestSandboxTunnelRefusesToOutliveAFailedForward; the ServerAlive pair is
@@ -103,9 +103,10 @@ func TestSandboxTunnelLifelineKillsGroupWhenDaemonPipeCloses(t *testing.T) {
 	assert.Equal(t, watchlifeline.Protocol, child.cmd.Args[2])
 	assert.Equal(t, "sh", child.cmd.Args[5])
 	assert.Equal(t, "-c", child.cmd.Args[6])
-	assert.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"`, child.cmd.Args[7])
+	assert.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -N -L "$1"`, child.cmd.Args[7])
 	assert.Equal(t, "af-sandbox", child.cmd.Args[8])
-	assert.Equal(t, "127.0.0.1:40000:127.0.0.1:40001", child.cmd.Args[9])
+	assert.Equal(t, "/s/d0-t0/s1-t.sock:127.0.0.1:40001", child.cmd.Args[9],
+		"the -L spec is a unix socket forward: <socket>:<remote-host>:<remote-port>")
 
 	pgid := child.cmd.Process.Pid
 	// The daemon's half of the death pact is closing this write end — exactly
@@ -134,7 +135,7 @@ func TestSandboxTunnelFallsBackOncePerDaemon(t *testing.T) {
 	require.Nil(t, child.ll, "a non-acking lifeline must fall back to the direct spawn")
 	require.Equal(t, "sh", child.cmd.Args[0], "the fallback is the direct sh -c spawn: %v", child.cmd.Args)
 	require.Equal(t, "-c", child.cmd.Args[1])
-	require.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"`, child.cmd.Args[2])
+	require.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -N -L "$1"`, child.cmd.Args[2])
 	assert.True(t, sandboxTunnelLifelineUnavailable.Load(), "the failed probe must latch the fallback")
 
 	// A second provision goes straight to the direct spawn and does NOT warn
@@ -211,7 +212,7 @@ func TestTunnelSpawnAfterStopKillsItself(t *testing.T) {
 	p.stopTunnel()
 	p.reapMu.Unlock()
 
-	p.forward = "127.0.0.1:45555:127.0.0.1:45556"
+	p.forward = "/s/d0-t0/s9-x.sock:127.0.0.1:45556"
 	child, err := p.provisionTunnelChild()
 	require.ErrorIs(t, err, errTunnelOwnerStopped, "a spent provisioner must refuse the spawn")
 	assert.Nil(t, child)
@@ -397,7 +398,7 @@ func TestSweepOrphanSandboxTunnelsForeignOnly(t *testing.T) {
 // lands inside a poll window (the same vars the ptybroker recovery tests
 // shrink), the readiness probe is replaced by probeFn so the fake tunnel never
 // needs a real listener, and cleanup stops everything via spawnTestTunnel's.
-func startSupervisedTestTunnel(t *testing.T, p *sandboxProvisioner, probeFn func(label, localAddr string, timeout, poll time.Duration) error) (*tunnelChild, <-chan struct{}) {
+func startSupervisedTestTunnel(t *testing.T, p *sandboxProvisioner, probeFn func(p *sandboxProvisioner, timeout, poll time.Duration) error) (*tunnelChild, <-chan struct{}) {
 	t.Helper()
 	forceTunnelLifelineExe(t, "")
 	prevInitial, prevMax, prevHealthy := redialInitialBackoff, redialMaxBackoff, redialHealthySpan
@@ -406,8 +407,8 @@ func startSupervisedTestTunnel(t *testing.T, p *sandboxProvisioner, probeFn func
 	prevProbe := waitForSandboxTunnelFn
 	waitForSandboxTunnelFn = probeFn
 	t.Cleanup(func() { waitForSandboxTunnelFn = prevProbe })
-	if p.localAddr == "" {
-		p.localAddr = "127.0.0.1:40000"
+	if p.socketPath == "" {
+		p.socketPath = "/nonexistent/tunnel.sock"
 	}
 	child := spawnTestTunnel(t, p)
 	done := make(chan struct{})
@@ -459,10 +460,10 @@ func requireSupervisorExit(t *testing.T, done <-chan struct{}, timeout time.Dura
 
 // TestSuperviseTunnelRedialsAfterDeath is the W1.2 core: a tunnel child that
 // dies for any reason other than teardown is re-established — a NEW generation
-// under the same provisioner, re-bound to the same localAddr spec.
+// under the same provisioner, re-bound to the same socket path spec.
 func TestSuperviseTunnelRedialsAfterDeath(t *testing.T) {
 	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	child, done := startSupervisedTestTunnel(t, p, func(string, string, time.Duration, time.Duration) error { return nil })
+	child, done := startSupervisedTestTunnel(t, p, func(*sandboxProvisioner, time.Duration, time.Duration) error { return nil })
 	// LIFO: this cleanup runs before spawnTestTunnel's, so it must stop the
 	// provisioner itself before expecting the supervisor to exit (stopTunnel
 	// is idempotent — spawnTestTunnel's teardown will harmlessly re-run it).
@@ -487,7 +488,7 @@ func TestSuperviseTunnelRedialsAfterDeath(t *testing.T) {
 func TestSuperviseTunnelStopsWithOwner(t *testing.T) {
 	// Parked on a live generation's exit chan.
 	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	child, done := startSupervisedTestTunnel(t, p, func(string, string, time.Duration, time.Duration) error { return nil })
+	child, done := startSupervisedTestTunnel(t, p, func(*sandboxProvisioner, time.Duration, time.Duration) error { return nil })
 	p.reapMu.Lock()
 	p.stopTunnel()
 	p.reapMu.Unlock()
@@ -497,7 +498,7 @@ func TestSuperviseTunnelStopsWithOwner(t *testing.T) {
 	// Parked in a re-dial backoff: the child died, the dial is delayed, and
 	// stoppedCh must wake the sleep rather than let it finish.
 	p2 := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	child2, done2 := startSupervisedTestTunnel(t, p2, func(string, string, time.Duration, time.Duration) error {
+	child2, done2 := startSupervisedTestTunnel(t, p2, func(*sandboxProvisioner, time.Duration, time.Duration) error {
 		return errors.New("the forward never answers")
 	})
 	killTunnelGeneration(t, child2)
@@ -514,7 +515,7 @@ func TestSuperviseTunnelStopsWithOwner(t *testing.T) {
 // the supervisor sees the latch, not an outage.
 func TestSuperviseTunnelNoRedialOnTeardown(t *testing.T) {
 	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	child, done := startSupervisedTestTunnel(t, p, func(string, string, time.Duration, time.Duration) error { return nil })
+	child, done := startSupervisedTestTunnel(t, p, func(*sandboxProvisioner, time.Duration, time.Duration) error { return nil })
 	t.Cleanup(func() { requireSupervisorExit(t, done, 5*time.Second) })
 
 	p.reapMu.Lock()
@@ -537,7 +538,7 @@ func TestSuperviseTunnelNoRedialOnTeardown(t *testing.T) {
 func TestSuperviseTunnelDialFailureKeepsRetrying(t *testing.T) {
 	var probes atomic.Int32
 	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	child, done := startSupervisedTestTunnel(t, p, func(string, string, time.Duration, time.Duration) error {
+	child, done := startSupervisedTestTunnel(t, p, func(*sandboxProvisioner, time.Duration, time.Duration) error {
 		probes.Add(1)
 		return errors.New("the forward never answers")
 	})
@@ -598,7 +599,7 @@ func TestSuperviseTunnelBackoffBounds(t *testing.T) {
 func TestTunnelSpawnsReverseForwardSlot(t *testing.T) {
 	forceTunnelLifelineExe(t, "")
 	p := &sandboxProvisioner{sshCmd: tunnelTestSleep}
-	p.forward = "127.0.0.1:40000:127.0.0.1:40001"
+	p.forward = "/s/d0-t0/s1-t.sock:127.0.0.1:40001"
 	p.reverseFwds = []string{"127.0.0.1:9000:127.0.0.1:7070", "0:127.0.0.1:8080"}
 	registerSandboxTunnel(p)
 	child, err := p.provisionTunnelChild()
@@ -609,9 +610,9 @@ func TestTunnelSpawnsReverseForwardSlot(t *testing.T) {
 		p.reapMu.Unlock()
 	})
 
-	want := tunnelTestSleep + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1" -R "$2" -R "$3"`
+	want := tunnelTestSleep + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -N -L "$1" -R "$2" -R "$3"`
 	assert.Equal(t, want, child.cmd.Args[2], "the spawn script composes each -R as a positional arg: %v", child.cmd.Args)
-	assert.Equal(t, "127.0.0.1:40000:127.0.0.1:40001", child.cmd.Args[4])
+	assert.Equal(t, "/s/d0-t0/s1-t.sock:127.0.0.1:40001", child.cmd.Args[4])
 	assert.Equal(t, "127.0.0.1:9000:127.0.0.1:7070", child.cmd.Args[5])
 	assert.Equal(t, "0:127.0.0.1:8080", child.cmd.Args[6])
 }

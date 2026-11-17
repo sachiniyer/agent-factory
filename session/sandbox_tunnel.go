@@ -294,18 +294,30 @@ func killTunnel(t *tunnelChild) {
 // when this process's own binary can serve as one and directly otherwise.
 //
 // The inner command text is identical on both paths —
-// `<sandbox_ssh> -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"`
+// `<sandbox_ssh> -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -N -L "$1"`
 // run by `sh -c` with $0=af-sandbox — because each flag is load-bearing rather
 // than hygiene:
 //
-//   - ExitOnForwardFailure: the local port is reserved by binding :0 and
-//     closing it, so another process can win it in the gap. OpenSSH defaults
-//     the option to NO (`ssh -G` confirms), which would leave this -N child
-//     alive after a FAILED bind — and the readiness probe would then connect
-//     to whatever DID win the port and report a healthy tunnel owned by an
-//     unrelated process. With it, ssh exits on the failed forward and the
-//     probe times out honestly. The same option covers the -R reverse binds
-//     W3.4 will add: a refused remote bind is fatal, never silently absent.
+//   - ExitOnForwardFailure: a forward that cannot bind must kill the child,
+//     not leave it up. OpenSSH defaults the option to NO (`ssh -G` confirms),
+//     which would keep this -N child alive after a FAILED bind — and the
+//     readiness probe would then connect to whatever already held the
+//     endpoint and report a healthy tunnel owned by an unrelated process.
+//     With it, ssh exits on the failed forward and the probe times out
+//     honestly. The same option covers the -R reverse binds W3.4 will add:
+//     a refused remote bind is fatal, never silently absent.
+//   - StreamLocalBindUnlink=yes: before binding the -L unix socket, ssh
+//     unlinks whatever file is already at the path — so a stale socket the
+//     last generation left (or anything a same-uid process placed) can never
+//     stand between af and its forward (#7495). It can only ever unlink a
+//     path inside THIS daemon's own generation dir: the socket path is
+//     generated there, and the per-daemon dir is the boundary.
+//   - StreamLocalBindMask=0177: the socket file is bound 0600 — and inside
+//     the uid-verified 0700 tunnels dir that mode is defense in depth, since
+//     no other account can reach the path at all. It lands AFTER p.sshCmd
+//     with the other -o values, so an operator's own explicit mask wins —
+//     OpenSSH takes the FIRST setting it reads — and that is the right call:
+//     a looser socket mode relaxes nothing outside af's own private dir.
 //   - ServerAliveInterval/CountMax: the protocol-level keepalive (#5571 W1.2).
 //     Without it a dead peer — a host that vanished, a NAT mapping that
 //     expired — is indistinguishable from a quiet tunnel until TCP gives up
@@ -322,7 +334,7 @@ func killTunnel(t *tunnelChild) {
 //     lives (5 generations in 12 s), each re-dial handing the master a
 //     forward it already holds, while the forward itself lives in the master:
 //     it outlives stopTunnel's group kill and keeps answering on the
-//     session's local port. With no master and ControlPersist set, the tunnel
+//     session's local socket. With no master and ControlPersist set, the tunnel
 //     becomes the master and detaches out of its group, with the same result.
 //     With no master and no ControlPersist, the tunnel is the master, and the
 //     operator's other ssh sessions to that host multiplex over a process
@@ -340,7 +352,7 @@ func killTunnel(t *tunnelChild) {
 // ExitOnForwardFailure fatality, the same process-group teardown, and the same
 // supervision on every re-dial.
 func (p *sandboxProvisioner) spawnTunnel(forward string, reverse ...string) (*exec.Cmd, *tunnelLifeline, error) {
-	script := p.sshCmd + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"`
+	script := p.sshCmd + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -N -L "$1"`
 	args := []string{forward}
 	for i := range reverse {
 		args = append(args, reverse[i])
@@ -733,7 +745,7 @@ func (p *sandboxProvisioner) superviseTunnel() {
 			// Probe readiness outside reapMu — same contract as the first
 			// provision. A re-dial that never answers is an event, and its
 			// stillborn generation is killed before the next round.
-			if err := waitForSandboxTunnelFn(p.label(), p.localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
+			if err := waitForSandboxTunnelFn(p, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
 				p.reapMu.Lock()
 				if p.tunnel == next {
 					killTunnel(next)
