@@ -1094,20 +1094,31 @@ _af_title_cell() {
 # _af_row_re <name> <arrow-ere> [icon-ere] — an ERE matching a rail row
 # whose COMPLETE title cell is what the rail draws for <name>: the row's
 # leading space, the ' <arrow> ' prefix and separator, the title's literal
-# bytes, exactly avail-width(T) padding cells, then the status affix — a
-# space, the two-cell status glyph, its trailing space. A name that is
-# only a whitespace-delimited PREFIX of a visible title — 'foo' beside
-# 'foo bar' — cannot match: the cells the rest of the sibling's title
-# occupies are neither padding nor the affix boundary. <icon-ere> defaults
-# to every status glyph the rail draws (● ○ ◌ ▧ ◆ ! or a blank cell).
-# Returns 1 when <name>'s rendering cannot be derived — refuse, don't guess.
+# bytes, exactly the padding cells the rail draws out to the cell
+# boundary, then the status affix — a space, the two-cell status glyph,
+# its trailing space. tmux capture strips trailing whitespace, so a row
+# whose tail is all padding and a blank status (or whose affix ends the
+# line) loses those cells entirely: the pattern therefore also accepts
+# the title's bytes ending the line, and folds the title's own trailing
+# spaces into the padding count — 'foo ' and 'foo' are the same cell. A
+# name that is only a whitespace-delimited PREFIX of a visible title —
+# 'foo' beside 'foo bar' — still cannot match: the cells ' bar'
+# occupies are neither padding, the affix, nor end-of-line. <icon-ere>
+# defaults to every status glyph the rail draws (● ○ ◌ ▧ ◆ ! or a blank
+# cell). Returns 1 when <name>'s rendering cannot be derived — refuse,
+# don't guess.
 _af_row_re() {
-    local name="$1" arrow="$2" icon="${3:-●|○|◌|▧|◆|!| }" out xw t pad
+    local name="$1" arrow="$2" icon="${3:-●|○|◌|▧|◆|!| }" out xw t tws pad
     out="$(_af_draw_title "$name")" || return 1
     xw="${out%% *}"
     t="${out#* }"
-    pad=$(( $(_af_rail_title_avail) - xw ))
-    printf '[[:space:]](%s)[[:space:]]+(%s) {%d} (%s) ' \
+    # Only ' ' folds into padding — it is the only char the rail pads with
+    # and the only ws tmux capture strips; a locale-aware class could eat
+    # a trailing NBSP the draw actually emits.
+    tws="${t##*[^ ]}"
+    t="${t%"$tws"}"
+    pad=$(( $(_af_rail_title_avail) - xw + ${#tws} ))
+    printf '[[:space:]](%s)[[:space:]]+(%s)( {%d} (%s)([[:space:]]|$)|[[:space:]]*$)' \
         "$arrow" "$(_af_regex_escape "$t")" "$pad" "$icon"
 }
 
