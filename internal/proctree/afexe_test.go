@@ -22,10 +22,13 @@ func TestExeAttestsAFVerifiesThisBinaryAtItsPath(t *testing.T) {
 // The forgery the verdict exists to refuse: argv[0]="af" plus --daemon on an
 // executable the kernel attests is NOT an af build. `exec -a` can write the
 // argv; it can never write the module path baked into the linked binary.
+// `yes -- --daemon` keeps the carrier alive: GNU yes exits on an
+// unrecognized OPTION, so the `--` ends parsing and the discrete "--daemon"
+// argument still lands in argv for the claim.
 func TestExeAttestsAFRejectsAForeignBinaryUnderAForgedArgv(t *testing.T) {
 	yesPath, err := exec.LookPath("yes")
 	require.NoError(t, err)
-	forged := exec.Command(yesPath, "--daemon")
+	forged := exec.Command(yesPath, "--", "--daemon")
 	forged.Args[0] = "af"
 	require.NoError(t, forged.Start())
 	t.Cleanup(func() { _ = forged.Process.Kill(); _, _ = forged.Process.Wait() })

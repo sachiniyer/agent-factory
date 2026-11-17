@@ -496,7 +496,11 @@ func TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation(t *testing.T
 
 	yesPath, err := exec.LookPath("yes")
 	require.NoError(t, err)
-	forged := exec.Command(yesPath, "--daemon")
+	// `yes -- --daemon`: GNU yes refuses an unrecognized OPTION and exits —
+	// the `--` ends option parsing so the process stays alive printing the
+	// token, and ArgvHasDaemonFlag still sees the discrete "--daemon"
+	// argument (#7491). A forged carrier that dies at launch claims nothing.
+	forged := exec.Command(yesPath, "--", "--daemon")
 	forged.Args[0] = "af"
 	forged.Stdout = nil
 	require.NoError(t, forged.Start())
@@ -1175,7 +1179,10 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 		yesPath, err := exec.LookPath("yes")
 		require.NoError(t, err)
 		forged := exec.Command("bash", "-c",
-			`sleep 300 & echo $! > "`+childPidFile+`" && exec -a af "`+yesPath+`" --daemon`)
+			// `yes -- --daemon`: the `--` ends option parsing so the
+			// forged process lives and argv still carries the discrete
+			// "--daemon" token the claim needs (#7491).
+			`sleep 300 & echo $! > "`+childPidFile+`" && exec -a af "`+yesPath+`" -- --daemon`)
 		forged.Env = append(os.Environ(),
 			EnvMarkerSession+"="+name,
 			EnvMarkerHome+"="+home,

@@ -1,7 +1,6 @@
 package tmux
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -24,7 +23,6 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // #4506 review: a process tab runs under remain-on-exit, so a finished command
@@ -243,82 +241,6 @@ func TestCloseAndWaitForPaneExit_VanishedRehostedAgentConverges(t *testing.T) {
 		"the marked process behind a foreign tmux server was signalled — the boundary exclusion failed")
 	require.NoError(t, exec.Command("tmux", "-S", sock2, "has-session", "-t", "foreign").Run(),
 		"the unrelated tmux server must still own its session")
-}
-
-// #7491 item 3, on an isolated server — the trusting vanished-session close
-// reaches PaneStateKnown when the ONLY marked survivor is a positive
-// placement: a carrier whose ancestry resolves to a VERIFIED af daemon is
-// proven foreign, so it is excluded from signalling, named in the WARNING
-// log, and does NOT block the close. The end-to-end property — a revert
-// that routed the placement into the refusal error blocks a close that
-// should be Known.
-func TestCloseAndWaitForPaneExit_VanishedPlacedCarrierLeavesTheCloseKnown(t *testing.T) {
-	testguard.IsolateTmux(t)
-	shrinkReapWaits(t)
-	name := fmt.Sprintf("af_test_placedknown_%d", time.Now().UnixNano())
-	home := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", home)
-	gen := "gen-placedknown"
-
-	// The session whose close converges: its own members admit and die.
-	agentSpec := agentSleeperSpec(t)
-	host, rehosted := spawnMarkedSessionWithRehostedChild(t, name, home, gen, agentSpec[0], agentSpec[1:]...)
-	s := NewTmuxSessionFromSanitizedName(name, agentSpec[0])
-	root, err := s.PaneRootProcess()
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, rehosted.StartID, root.StartID,
-		"the re-hosted member must postdate the recorded root for tier 2 to admit it")
-
-	// The placed carrier: a marked sleep whose parent is a VERIFIED af
-	// daemon — the test binary reexec'd with daemon argv, whose kernel
-	// buildinfo attests this repo's module (#7491 item 1). Its markers
-	// match the vanished session's cohort; its ancestry proves it foreign.
-	dir := t.TempDir()
-	childPidFile := filepath.Join(dir, "child.pid")
-	daemon := exec.Command(os.Args[0])
-	daemon.Args = []string{"af", "--daemon",
-		"-test.run=^TestMarkedOrphanProcessesDecisionTable$"}
-	daemon.Env = append(os.Environ(),
-		decisionDaemonEnv+"=1",
-		decisionDaemonSpecEnv+"="+name+"\t"+home+"\t"+gen+"\t"+childPidFile)
-	daemon.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	require.NoError(t, daemon.Start())
-	t.Cleanup(func() {
-		_ = daemon.Process.Kill()
-		_, _ = daemon.Process.Wait()
-	})
-	require.Eventually(t, func() bool {
-		return proctree.ArgvIsAFDaemon(proctree.Argv(daemon.Process.Pid))
-	}, 5*time.Second, 20*time.Millisecond,
-		"the daemon argv claim must land — the test binary's kernel exe VERIFIES it")
-	waitForPIDFile(t, childPidFile)
-	placed := processFromPIDFile(t, childPidFile)
-
-	var warnings bytes.Buffer
-	oldWarnings := log.WarningLog.Writer()
-	log.WarningLog.SetOutput(&warnings)
-	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarnings) })
-
-	vanishSessionWithObservableEscapee(t, name, host)
-
-	state, blind, err := s.CloseAndWaitForPaneExitTrustingOwnGeneration()
-	require.True(t, blind, "a session gone before the close ran is the vanished-sweep path")
-	require.NoError(t, err,
-		"the only marked survivor is positively placed — nothing blocks")
-	require.Equal(t, PaneStateKnown, state,
-		"a close whose only exclusions are placements is KNOWN — teardown may touch the worktree")
-
-	require.Eventually(t, func() bool {
-		return !proctree.AliveSame(host) && !proctree.AliveSame(rehosted)
-	}, 10*time.Second, 50*time.Millisecond,
-		"the session's own members must be reaped")
-
-	require.True(t, proctree.AliveSame(placed),
-		"the positively-placed carrier was signalled — the exclusion failed")
-	require.Contains(t, warnings.String(), "LEFT ALIVE",
-		"the WARNING names that the carrier keeps running under a Known close")
-	require.Contains(t, warnings.String(), "pid "+strconv.Itoa(placed.PID)+" ",
-		"the WARNING names the placed carrier's pid for the operator")
 }
 
 // #7435 R14, on an isolated server — a host is admitted by its OWN

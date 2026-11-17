@@ -37,9 +37,14 @@ var exeAttestBudget = 2 * time.Second
 //     carry one process's verdict onto the next;
 //   - the whole check is budget-bounded: an expired wait reports false.
 func ExeAttestsAF(p Process) bool {
+	// Read the seam in the CALLER's goroutine before spawning the worker:
+	// a worker that outlives its budget must never read a package var a
+	// test later restores — the lazy read races the restore (the same
+	// shape a racing caller would hit in production, #7491).
+	fn := exePathFn
 	done := make(chan bool, 1)
 	go func() {
-		done <- exeAttestsAF(p)
+		done <- exeAttestsAF(fn, p)
 	}()
 	timer := time.NewTimer(exeAttestBudget)
 	defer timer.Stop()
@@ -55,11 +60,12 @@ func ExeAttestsAF(p Process) bool {
 // leaked goroutine on timeout costs one blocked read per stalled
 // attestation and never lands a verdict — a timeout answers unverified.
 // exePathFn is the platform kernel read, behind a package var so the budget
-// test can stall it deterministically.
+// test can stall it deterministically; ExeAttestsAF snapshots it before
+// spawning so an abandoned read can never see a later write.
 var exePathFn = exePath
 
-func exeAttestsAF(p Process) bool {
-	path, ok := exePathFn(p.PID)
+func exeAttestsAF(fn func(pid int) (string, bool), p Process) bool {
+	path, ok := fn(p.PID)
 	if !ok {
 		return false
 	}
