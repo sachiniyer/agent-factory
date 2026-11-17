@@ -340,11 +340,12 @@ func TestCheckAndHandleTrustPrompt_FolderTrustDialogTextThatIsNoDialogStaysClear
 		{"a ❯ row above the options", "❯ fix it\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
 		// A plain rule above the options is the dialog's own top rule unless
 		// it bounds a prompt row; from the options down it is a composer's
-		// (#7380).
+		// (#7380). A ruled composer over a row it cannot explain holds since
+		// #7388 (…RuledComposerOverARowItCannotExplainHolds).
 		{"a plain rule below the options", "Security guide\n\n❯ 1. Yes, proceed\n  2. No, exit\n────────────\n\nEnter to confirm · Esc to\nexit"},
-		{"a plain rule bounding a prompt row above the options", "────────────\n> fix it\n────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
-		{"a plain rule bounding a bash-mode prompt row above the options", "────────────\n! ls\n────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
-		{"a plain rule bounding a memory-mode prompt row above the options", "────────────\n# keep it short\n────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
+		{"a plain rule bounding a prompt row straight above the options", "────────────\n> fix it\n────────────\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
+		{"a plain rule bounding a bash-mode prompt row straight above the options", "────────────\n! ls\n────────────\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
+		{"a plain rule bounding a memory-mode prompt row straight above the options", "────────────\n# keep it short\n────────────\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
 		{"the footer's words closing a sentence", "Claude Code may read files\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nThen press Enter to confirm · Esc to\nexit"},
 		{"body rows over the exit row alone", "Claude Code may read files\nin this folder.\n\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
 		{"the wrapped legacy question quoted above the composer", "Do you trust the\nfiles in this\nfolder?\n\nThat is what it asks." + ruledComposerBelow},

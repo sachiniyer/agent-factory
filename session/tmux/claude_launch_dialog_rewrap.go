@@ -226,14 +226,16 @@ func claudeLaunchDialogRewrapOf(screen visibleText) (claudeLaunchDialogMatch, bo
 //     of the dialog's options (claudeLaunchDialogOptions.read): the folder
 //     dialog's affirmative label, or every option of the MCP server dialog.
 //     Those rows are the dialog's body, as far as the pane shows. None of them
-//     may be a ❯ row or a footer, which is what claudeFolderTrustHeadless
-//     asks of them: a launch dialog owns the pane above its options.
+//     may be a footer, which is what claudeFolderTrustHeadless asks of them:
+//     a launch dialog owns the pane above its options. A ❯ row or a composer
+//     among them keeps the pane clear only when it explains every row on
+//     screen outside it (#7388).
 //
 // A ❯ row must begin an option. A plain rule, which is what a composer draws
 // above and below its prompt row, keeps the pane clear from the options down.
 // Above them it is the dialog's own top rule, which Claude Code 2.1.322 paints
 // over its launch dialogs (testdata/claude_2_1_322_mcp_server_dialog.ansi),
-// unless it bounds a prompt row (#7380). And the footer must be the last
+// unless it is a ruled composer's (#7380). And the footer must be the last
 // content, so a composer or any other row below the dialog keeps the pane
 // clear.
 func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDialogOptions) (claudeLaunchDialogMatch, bool) {
@@ -312,7 +314,15 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 		}
 		for content := 0; content < block; content++ {
 			i := pane.index[content]
-			if pane.rows[i].selected || claudeTrustIsFooter(pane.rows[i].label) {
+			if claudeTrustIsFooter(pane.rows[i].label) {
+				return claudeLaunchDialogMatch{}, false
+			}
+			// A ❯ row above the options is a prompt: the 2.1.322
+			// composer's, between its plain rules, or a shell's
+			// ("❯ claude"). It explains only its own rows, so it decides
+			// only when it explains every row on screen outside it
+			// (#7388).
+			if pane.rows[i].selected && claudeLaunchDialogPromptExplains(pane, i, pane.index[block]) {
 				return claudeLaunchDialogMatch{}, false
 			}
 		}
@@ -322,11 +332,20 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 			}
 			if claudeComposerRule(pane.lines[i]) {
 				// A plain rule above the options is the dialog's own top
-				// rule (#7380), unless it bounds a composer's prompt row in
-				// any of the composer's modes. A ❯ prompt row above the
-				// options is refused above.
-				if claudeLaunchDialogModePromptRow(pane, i+1) || claudeLaunchDialogModePromptRow(pane, i-1) {
-					return claudeLaunchDialogMatch{}, false
+				// rule (#7380), unless it is a ruled composer's: it bounds
+				// an unbordered prompt row in any of the composer's modes,
+				// straight below it (its opening rule) or straight above it
+				// (its closing rule, its top cropped). Even then the
+				// composer decides only when it explains every row on
+				// screen outside it (#7388). A bordered prompt row is a
+				// box's, so the rule under it is not the composer's: the
+				// box test reads it as the dialog's own top rule (#7412
+				// review, R1). A ❯ prompt row is read above.
+				for _, prompt := range []int{i + 1, i - 1} {
+					if claudeLaunchDialogModePromptRow(pane, prompt) && !claudeTrustBordered(pane.lines[prompt]) &&
+						claudeLaunchDialogPromptExplains(pane, prompt, pane.index[block]) {
+						return claudeLaunchDialogMatch{}, false
+					}
 				}
 				continue
 			}
@@ -417,8 +436,9 @@ func claudeTrustBordered(line string) bool {
 // U+00A0. 2.1.322 paints U+00A0 after its glyph
 // (testdata/claude_2_1_322_composer_after_mcp_decline.ansi, #7391 review).
 // Only the box test reads U+00A0. The plain-rule test keeps
-// claudeComposerPromptLabel, as #7391 left it, until #7388 gives it the same
-// anchor the box test has (#7412 review, R2).
+// claudeComposerPromptLabel, as #7391 left it: with #7388's anchor, U+00A0
+// there would turn ruled composers over bare quoted options from hold to clear,
+// which is #7454's own change (#7412 review, R2).
 func claudeTrustBoxPromptLabel(label string) bool {
 	for _, mode := range []string{">", "!", "#"} {
 		rest, ok := strings.CutPrefix(label, mode)
@@ -494,6 +514,26 @@ func claudeLaunchDialogOwnRowsAbove(pane claudeLaunchDialogPane, top int) bool {
 		}
 	}
 	return false
+}
+
+// claudeLaunchDialogPromptExplains reports whether the composer whose prompt is
+// pane line prompt, a ❯ row or a ruled composer's prompt row, explains every
+// row on screen outside it (#7388): nothing af cannot place between its last
+// own row and to, where the options begin, and nothing above its first own row
+// (#7412 review, R7, as the box test reads it). An unbordered prompt row's own
+// rows are the plain rules welded straight above and straight under it, which
+// 2.1.322 paints around its composer's ❯ row.
+func claudeLaunchDialogPromptExplains(pane claudeLaunchDialogPane, prompt, to int) bool {
+	top, end := prompt, prompt
+	if !claudeTrustBordered(pane.lines[prompt]) {
+		if prompt > 0 && claudeComposerRule(pane.lines[prompt-1]) {
+			top = prompt - 1
+		}
+		if prompt+1 < len(pane.lines) && claudeComposerRule(pane.lines[prompt+1]) {
+			end = prompt + 1
+		}
+	}
+	return !claudeLaunchDialogOwnRowsAbove(pane, top) && !claudeLaunchDialogOwnRowsBetween(pane, end, to)
 }
 
 // claudeLaunchDialogUnplacedRow reports whether pane line i is a row af cannot

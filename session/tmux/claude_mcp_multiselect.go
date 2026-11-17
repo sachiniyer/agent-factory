@@ -248,7 +248,11 @@ func claudeMCPServersGrammarOf(screen visibleText) claudeMCPServersVerdict {
 //   - the last content in the pane is the footer, with frame rules counted as
 //     content, so a composer's bottom rule below a draft disqualifies it;
 //   - no frame rule between the header and the footer;
-//   - exactly one ❯ in the pane, inside the region.
+//   - exactly one ❯ inside the region. A ❯ row above the header is no part of
+//     the picker: a stale composer left above a live picker, say by an account
+//     swap or a respawn that relaunched Claude in the same pane, explains only
+//     its own rows (#7388). The grammar still refuses that pane, so af never
+//     sends it Esc; it holds.
 //
 // A working session has its composer at the bottom, so it can never meet the
 // footer condition, and holding cannot wedge one.
@@ -266,7 +270,7 @@ func claudeMCPServersUnreadableOf(screen visibleText) bool {
 			last = i
 		}
 	}
-	if last < 0 || rows[last].label != claudeMCPServersFooter || len(cursorRows) != 1 {
+	if last < 0 || rows[last].label != claudeMCPServersFooter {
 		return false
 	}
 	header, checkbox, submit := -1, false, false
@@ -283,7 +287,16 @@ func claudeMCPServersUnreadableOf(screen visibleText) bool {
 			break
 		}
 	}
-	return header >= 0 && checkbox && submit && cursorRows[0] > header && cursorRows[0] < last
+	if header < 0 || !checkbox || !submit {
+		return false
+	}
+	inside := 0
+	for _, cursor := range cursorRows {
+		if cursor > header && cursor < last {
+			inside++
+		}
+	}
+	return inside == 1
 }
 
 // rejectClaudeMCPServers answers a complete multi-select picker with Esc, once,
