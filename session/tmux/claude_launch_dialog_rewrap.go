@@ -24,6 +24,10 @@ import (
 //     and one that ends with the block and the start of the footer is the
 //     same, with the footer still being painted
 //     (claudeLaunchDialogFooterPainting, #7390);
+//   - the same block read again, with a bare ❯ at the block's offset as a row
+//     above the block, not its first row: an empty composer straight above
+//     the options, under the dialog's head (claudeLaunchDialogPromptOverOptions,
+//     #7453);
 //   - a pane whose content ENDS with the start of the legacy dialog's question,
 //     or with the whole question and the rows it paints below it, is that
 //     dialog being painted (claudeLaunchDialogPainting).
@@ -170,6 +174,10 @@ type claudeLaunchDialogPane struct {
 	text   string
 	starts []int // offset in text where content row i begins
 	index  []int // the pane row each content row is
+	// blockOnLabel: the option block begins on the row its first label, or
+	// that label's ordinal, is painted on, and a bare ❯ above it at the same
+	// offset is a row above the block (claudeLaunchDialogPromptOverOptions).
+	blockOnLabel bool
 }
 
 func claudeLaunchDialogPaneOf(screen visibleText) claudeLaunchDialogPane {
@@ -199,6 +207,19 @@ func (p claudeLaunchDialogPane) rowStart(at int) (content int, ok bool) {
 	return 0, false
 }
 
+// blockRow returns the content row an option block that begins at offset at
+// begins on. A bare ❯ row has no text, so it begins at the same offset as the
+// row below it. Read as the block's first row, it is the dialog's own cursor,
+// which a narrow pane leaves on a row of its own above "1. Yes, …". With
+// blockOnLabel it is a row above the block (#7453).
+func (p claudeLaunchDialogPane) blockRow(at int) (content int, ok bool) {
+	content, ok = p.rowStart(at)
+	for ok && p.blockOnLabel && content+1 < len(p.starts) && p.starts[content+1] == at {
+		content++
+	}
+	return content, ok
+}
+
 // claudeLaunchDialogRewrapOf reports a launch dialog the pane ends with a part
 // of, as wrapped at any width: a folder-trust dialog, or the 2.1.322 MCP
 // server dialog.
@@ -220,6 +241,43 @@ func claudeLaunchDialogRewrapOf(screen visibleText) (claudeLaunchDialogMatch, bo
 	}
 	// Asked last, so every pane a reader above holds is held as before.
 	for _, options := range claudeLaunchDialogOptionSets {
+		if match, ok := claudeLaunchDialogFooterPainting(pane, options); ok {
+			return match, true
+		}
+	}
+	// Last of all, for the same reason (#7453).
+	return claudeLaunchDialogPromptOverOptions(pane)
+}
+
+// claudeLaunchDialogPromptOverOptions reads the option block again, over its
+// footer or the start of it, with any bare ❯ at the block's offset read as a
+// row above the block (#7453). The 2.1.322 composer paints its empty prompt
+// as a ❯ alone between its plain rules. Straight above the options, that ❯
+// begins at the block's offset, so claudeLaunchDialogTail read it as the
+// block's first row, and the composer's closing rule under it as a composer
+// below the options: a dialog's head, then an empty composer, then the
+// dialog's options and footer read clear. The same composer with a draft in
+// it held (#7412 round-3 review, R7).
+//
+// Read this way, the ❯ is a prompt above the options, like any ❯ row there: it
+// keeps the pane clear only when it explains every row on screen outside it
+// (#7388). The first reading is not replaced: a narrow pane's own cursor row
+// still reads as the block's first row, and a pane either reading holds is
+// held.
+func claudeLaunchDialogPromptOverOptions(pane claudeLaunchDialogPane) (claudeLaunchDialogMatch, bool) {
+	shared := false
+	for i := 1; i < len(pane.starts) && !shared; i++ {
+		shared = pane.starts[i] == pane.starts[i-1]
+	}
+	if !shared {
+		// No bare ❯ over another row: both readings are the same.
+		return claudeLaunchDialogMatch{}, false
+	}
+	pane.blockOnLabel = true
+	for _, options := range claudeLaunchDialogOptionSets {
+		if match, ok := claudeLaunchDialogTail(pane, options); ok {
+			return match, true
+		}
 		if match, ok := claudeLaunchDialogFooterPainting(pane, options); ok {
 			return match, true
 		}
@@ -357,7 +415,7 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 		match.saw = "only the end of its option rows and " + shown
 		return match, true
 	case at > 0 && labels > 0 && block:
-		block, ok := pane.rowStart(at)
+		block, ok := pane.blockRow(at)
 		if !ok || claudeLaunchDialogRuleFrom(pane, pane.index[block]) {
 			return claudeLaunchDialogMatch{}, false
 		}
