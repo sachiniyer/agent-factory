@@ -45,7 +45,8 @@ import (
 //     grammar's order (claudeMCPServersRowAfter). Below a server row, a row of
 //     plain text also counts: the wrapped rest of its name;
 //   - the last content row is a whole row of the grammar, or the start of
-//     the row the picker paints next (claudeMCPServersRowStart);
+//     the row the picker paints next (claudeMCPServersRowStart). A frame
+//     rule is neither;
 //   - the paint has not reached the whole footer. A whole picker is for the
 //     readers before this one: the grammar answers it, and the unreadable
 //     hold holds it.
@@ -88,7 +89,11 @@ func claudeMCPServersPaintingOf(screen visibleText) bool {
 		case phase == claudeMCPServersInServers && !rule && !rows[i].selected && rows[i].label != claudeMCPServersFooter:
 			// The wrapped rest of a long server name: a row of its own,
 			// below the server row it continues.
-		case i == last:
+		case i == last && !rule:
+			// A frame rule is never a row begun: claudeTrustRowOf reads it as
+			// an empty label, which would pass for a checkbox not yet painted.
+			// A composer's closing rule under a draft that quotes the picker
+			// ends that way (#7507 review).
 			return claudeMCPServersRowStart(phase, rows[i])
 		default:
 			return false

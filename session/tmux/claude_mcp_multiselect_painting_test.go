@@ -126,7 +126,8 @@ func TestCheckAndHandleTrustPrompt_Issue7504PickerWithAWrappedRowHoldsWhilePaint
 }
 
 // What is no picker being painted stays clear: the picker quoted whole, cut
-// inside a row, or only its header, above a working agent's composer; and the
+// inside a row, or only its header, above a working agent's composer; the
+// picker pasted into a composer draft, over the draft's closing rule; and the
 // real composer captures alone. The composer below the header is a rule or a
 // second ❯ the picker never paints.
 func TestCheckAndHandleTrustPrompt_Issue7504PickerQuotedAboveAComposerStaysClear(t *testing.T) {
@@ -137,8 +138,18 @@ func TestCheckAndHandleTrustPrompt_Issue7504PickerQuotedAboveAComposerStaysClear
 		"the header quoted above the composer":         "  2 new MCP servers found in this project\n" + composer,
 		"the wrapped header quoted above the composer": "  3 new MCP servers found in this\n  project\n" + composer,
 	}
+	rule := strings.Repeat("─", 80)
 	for _, fixture := range mcpServersPickerCaptures {
 		rows, header := mcpServersPickerRowsOf(t, fixture)
+		// The picker pasted into a multi-line composer draft, as far as each
+		// of its rows, under the draft's ❯ and over its closing rule, with
+		// and without the status row below (#7507 review).
+		for k := header; k < len(rows); k++ {
+			draft := append([]string{rule, claudeTrustSelectionGlyph + " Explain this picker:"}, rows[header:k+1]...)
+			draft = append(draft, rule)
+			frames[fmt.Sprintf("%s to its row %d, in a composer draft", fixture, k)] = strings.Join(draft, "\n")
+			frames[fmt.Sprintf("%s to its row %d, in a composer draft over its status row", fixture, k)] = strings.Join(draft, "\n") + "\n  ? for shortcuts"
+		}
 		frames[fixture+" whole, above the composer"] = strings.Join(rows, "\n") + "\n" + composer
 		frames[fixture+" whole, above the ruled composer"] = strings.Join(rows, "\n") + ruledComposerBelow
 		for k := header; k < len(rows); k++ {
