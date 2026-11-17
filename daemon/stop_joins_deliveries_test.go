@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,29 +36,43 @@ func installDeliveryTracker(t *testing.T, tracker *joinedRuns) {
 // TestParkedCronDeliveryStopsParkingWhenTheDaemonStops: a cron fire parked
 // behind an attached target returns the stop's abort as soon as the daemon
 // starts to stop, rather than sleeping out its poll and waiting for the next
-// transport failure. The poll here is far longer than the test allows.
+// transport failure.
 func TestParkedCronDeliveryStopsParkingWhenTheDaemonStops(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	const poll = 2 * time.Second
 	previousPoll := cronDeferPollInterval
-	cronDeferPollInterval = time.Minute
-	t.Cleanup(func() { cronDeferPollInterval = previousPoll })
-	var stopping atomic.Bool
+	cronDeferPollInterval = poll
+	var stopping, ended atomic.Bool
 	previousDraining := daemonDrainingFn
 	daemonDrainingFn = stopping.Load
-	t.Cleanup(func() { daemonDrainingFn = previousDraining })
 	previousDeliver := deliverPromptForTask
 	deliverPromptForTask = func(DeliverPromptRequest) (taskPromptDeliveryResult, error) {
+		if ended.Load() {
+			return taskPromptDeliveryResult{}, errors.New("test over")
+		}
 		return taskPromptDeliveryResult{status: StatusDeferredAttached}, nil
 	}
-	t.Cleanup(func() { deliverPromptForTask = previousDeliver })
 
 	parked := &task.Task{ID: "ab7440a1", Prompt: "p", TargetSession: "attached-target", ProjectPath: t.TempDir()}
 	done := make(chan error, 1)
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		var run task.RunKey
 		_, err := deliverCronTaskPromptRun(parked, "p", &run)
 		done <- err
 	}()
+	// The delivery must be gone before its seams are restored, whatever this
+	// test concludes: the stub ends it within one poll once the test is over.
+	t.Cleanup(func() {
+		ended.Store(true)
+		select {
+		case <-exited:
+		case <-time.After(3 * poll):
+			t.Error("the parked delivery did not end after the test")
+		}
+		cronDeferPollInterval, daemonDrainingFn, deliverPromptForTask = previousPoll, previousDraining, previousDeliver
+	})
 	time.Sleep(100 * time.Millisecond)
 	stopped := time.Now()
 	stopping.Store(true)
@@ -65,8 +80,8 @@ func TestParkedCronDeliveryStopsParkingWhenTheDaemonStops(t *testing.T) {
 	select {
 	case err := <-done:
 		require.True(t, IsDaemonStoppingErr(err), "a parked delivery must end with the stop's abort, got %v", err)
-		require.Less(t, time.Since(stopped), time.Second, "it must stop parking at once, not after its poll")
-	case <-time.After(5 * time.Second):
+		require.Less(t, time.Since(stopped), poll/2, "it must stop parking at once, not after its poll")
+	case <-time.After(2 * poll):
 		t.Fatal("a parked delivery kept parking after the daemon began to stop")
 	}
 }
