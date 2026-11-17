@@ -17,6 +17,28 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
+// agentServerScanScript lists the sandbox host's agent-server processes as
+// "pid:starttime cmdline", one per line. The match is the product's own
+// identity proof (sweepFindPIDs): argv[0] is the session dir's `af` binary
+// AND the process environment's AF_TOKEN_REF equals the ref that session's
+// af-identity.env carries — not a substring of the command line. The
+// `pgrep -f "agent-server --listen"` snapshot this replaced (#7472) also
+// counted any `sh -c` carrying the launch text and every $(...) subshell
+// that inherits it, which is how a transient remote helper read as a
+// second agent-server. The start time (field 22 of /proc/<pid>/stat once
+// the comm field is stripped) keeps a recycled pid from faking identity, so
+// pid:starttime is the "same process" the assertions compare.
+const agentServerScanScript = `for d in /root/.af-sessions/*/; do d=${d%/}; af=$d/af; ` +
+	`[ -f "$d/af-identity.env" ] || continue; ` +
+	`tok=$(sed -n "s/^AF_TOKEN_REF=//p" "$d/af-identity.env" | sed "s/^'//; s/'\$//" | head -1); ` +
+	`[ -n "$tok" ] || continue; ` +
+	`for p in /proc/[0-9]*; do pid=${p#/proc/}; ` +
+	`a=$(tr '\000' '\n' < "$p/cmdline" 2>/dev/null | sed -n '1p'); [ "$a" = "$af" ] || continue; ` +
+	`r=$(tr '\000' '\n' < "$p/environ" 2>/dev/null | sed -n 's/^AF_TOKEN_REF=//p' | sed -n '1p'); ` +
+	`[ "$r" = "$tok" ] || continue; ` +
+	`st=$(awk '{sub(/^.*\) /,""); print $20}' "$p/stat" 2>/dev/null); ` +
+	`[ -n "$st" ] && echo "$pid:$st $(tr '\000' ' ' < "$p/cmdline")"; done; done`
+
 // TestSandboxDisruptionsE2E is the W10.4 regression net (epic #5571): the same
 // real daemon and containerized sshd host as TestSandboxDaemonE2E, but the point
 // is what survives a disruption, not the happy lifecycle. One live session takes
@@ -89,12 +111,56 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 			return strings.Contains(preview(), marker)
 		})
 	}
-	// The agent-server pids on the host, sorted: "the same process" is the same set.
-	agentPIDs := func() string {
-		out, _ := exec.Command("docker", "exec", host.container, "pgrep", "-f", "agent-server --listen").CombinedOutput()
-		pids := strings.Fields(string(out))
-		sort.Strings(pids)
-		return strings.Join(pids, ",")
+	// The session's agent-server processes on the host, keyed by stable
+	// identity — "pid:starttime" — with each match's full command line for
+	// the failure dump. The remote scan proves the product's own identity
+	// rule (agentServerScanScript), so a helper that merely carries the
+	// launch text never appears in this set.
+	agentServers := func() map[string]string {
+		out, _ := exec.Command("docker", "exec", host.container, "sh", "-c", agentServerScanScript).Output()
+		procs := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if id, cmd, ok := strings.Cut(line, " "); ok && id != "" {
+				procs[id] = cmd
+			}
+		}
+		return procs
+	}
+	// A transient matching process lives seconds; a real second agent-server
+	// persists. The property under test is that exactly one agent-server
+	// exists once observation settles, so poll to a singleton instead of
+	// comparing a pid set captured at a racy instant (#7472), and on timeout
+	// dump every match so a genuine duplicate names itself.
+	wantSingleAgentServer := func(what string) string {
+		t.Helper()
+		var procs map[string]string
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			procs = agentServers()
+			if len(procs) == 1 {
+				for id := range procs {
+					return id
+				}
+			}
+			if !time.Now().Before(deadline) {
+				var dump []string
+				for id, cmd := range procs {
+					dump = append(dump, id+" "+cmd)
+				}
+				sort.Strings(dump)
+				t.Fatalf("%s: the agent-server set never settled to one (%d match):\n%s",
+					what, len(procs), strings.Join(dump, "\n"))
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	// A disruption must not replace the server: once the set settles, the
+	// one agent-server is still the SAME pid+start time it was before.
+	requireSameAgentServer := func(what, want string) {
+		t.Helper()
+		if got := wantSingleAgentServer(what); got != want {
+			t.Fatalf("%s replaced the agent-server: %s -> %s", what, want, got)
+		}
 	}
 	sessionDirs := func() string { return host.exec(t, "ls -1 /root/.af-sessions 2>/dev/null") }
 	roster := func() string {
@@ -125,18 +191,16 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 		"git -c user.name=e2e -c user.email=e2e@example.com commit -q -m sbx-disrupt-work 2>&1; git log --oneline -1"); !strings.Contains(out, "sbx-disrupt-work") {
 		t.Fatalf("could not commit in the sandbox workspace:\n%s", out)
 	}
-	pids, dirs, tabs := agentPIDs(), sessionDirs(), roster()
-	if pids == "" || dirs == "" || !strings.HasSuffix(tabs, ":dev") {
-		t.Fatalf("setup: agent-server pids %q, session dirs %q, roster %q", pids, dirs, tabs)
+	server, dirs, tabs := wantSingleAgentServer("setup"), sessionDirs(), roster()
+	if dirs == "" || !strings.HasSuffix(tabs, ":dev") {
+		t.Fatalf("setup: session dirs %q, roster %q", dirs, tabs)
 	}
 
 	// --- 1. daemon restart mid-session ------------------------------------------
 	stopDaemons(t, afBin, home)
 	h.startDaemon()
 	waitFor(t, "the session to be live again after the daemon restart", 120*time.Second, live)
-	if got := agentPIDs(); got != pids {
-		t.Fatalf("daemon restart replaced the agent-server: pids %q -> %q", pids, got)
-	}
+	requireSameAgentServer("daemon restart", server)
 	if got := sessionDirs(); got != dirs {
 		t.Fatalf("daemon restart re-provisioned the session: dirs %q -> %q", dirs, got)
 	}
@@ -196,9 +260,7 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 	if len(tunnelSSHPIDs(host.privKey)) == 0 {
 		t.Fatalf("the prompt round-tripped but no ssh tunnel is running")
 	}
-	if got := agentPIDs(); got != pids {
-		t.Fatalf("tunnel loss replaced the agent-server: pids %q -> %q", pids, got)
-	}
+	requireSameAgentServer("tunnel loss", server)
 	if got := sessionDirs(); got != dirs {
 		t.Fatalf("tunnel loss re-provisioned the session: dirs %q -> %q", dirs, got)
 	}
@@ -231,7 +293,7 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 
 	var archived daemon.ArchiveSessionResponse
 	post("/v1/ArchiveSession", daemon.ArchiveSessionRequest{Title: title, RepoID: repoID}, &archived)
-	waitFor(t, "the archived session's agent-server to stop", 30*time.Second, func() bool { return agentPIDs() == "" })
+	waitFor(t, "the archived session's agent-server to stop", 30*time.Second, func() bool { return len(agentServers()) == 0 })
 	if loc := archived.ArchivedWorkspace; loc == nil || loc.Pushed || loc.Dir == "" {
 		t.Fatalf("archive response archived_workspace = %+v, want an unpushed preserved dir", loc)
 	}
@@ -251,7 +313,7 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 
 	post("/v1/RestoreArchived", daemon.RestoreArchivedRequest{Title: title, RepoID: repoID}, &daemon.RestoreArchivedResponse{})
 	waitFor(t, "the preserved session to be live again after the host restart", 240*time.Second, func() bool {
-		return live() && agentPIDs() != ""
+		return live() && len(agentServers()) > 0
 	})
 	if got := treeState(); got != stateAtArchive {
 		t.Fatalf("restore did not hand back the workspace exactly as archived:\nbefore:\n%s\nafter:\n%s", stateAtArchive, got)
@@ -269,7 +331,7 @@ func TestSandboxDisruptionsE2E(t *testing.T) {
 
 	post("/v1/KillSession", daemon.KillSessionRequest{Title: title, RepoID: repoID}, &daemon.KillSessionResponse{})
 	waitFor(t, "the host to be clean after kill", 60*time.Second, func() bool {
-		return agentPIDs() == "" && sessionDirs() == ""
+		return len(agentServers()) == 0 && sessionDirs() == ""
 	})
 }
 
