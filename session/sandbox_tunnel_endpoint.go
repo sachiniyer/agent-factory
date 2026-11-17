@@ -234,18 +234,35 @@ func createTunnelGenerationDir(root string, e *tunnelGenDirEntry) (string, error
 	return "", fmt.Errorf("cannot mint a unique tunnel generation directory under %q", root)
 }
 
-// newTunnelSocketName mints a socket name unique within this generation dir.
-// The session's slug rides along so `ls` answers "which session is this" —
-// capped short because the whole path must fit sun_path.
-func newTunnelSocketName(title string) string {
-	slug := Slugify(title)
-	if len(slug) > 24 {
-		slug = strings.TrimRight(slug[:24], "-")
+// newTunnelSocketName mints a socket name unique within this generation dir
+// and short enough to leave dir + name inside sun_path. The sequence is what
+// makes the name unique; the session's slug rides along only for readability
+// (`ls` answers "which session is this") and only as far as the remaining
+// budget allows — trimmed, then dropped — so a deep but valid AF home still
+// gets a socket (#7495). When even the minimal s<N>.sock does not fit the
+// name comes back anyway and the caller's sockpath.Check refuses it, naming
+// AGENT_FACTORY_HOME as the knob.
+func newTunnelSocketName(title string, budget int) string {
+	seq := tunnelSocketSeq.Add(1)
+	slug := ""
+	if s := Slugify(title); s != "" {
+		// "s<N>-<slug>.sock": the slug's room is whatever the minimal name
+		// leaves behind it and its separator — at most the usual cap.
+		room := budget - len(fmt.Sprintf("s%d-.sock", seq))
+		if room > 24 {
+			room = 24
+		}
+		if room > 0 {
+			if len(s) > room {
+				s = strings.TrimRight(s[:room], "-")
+			}
+			slug = s
+		}
 	}
 	if slug == "" {
-		return fmt.Sprintf("s%d.sock", tunnelSocketSeq.Add(1))
+		return fmt.Sprintf("s%d.sock", seq)
 	}
-	return fmt.Sprintf("s%d-%s.sock", tunnelSocketSeq.Add(1), slug)
+	return fmt.Sprintf("s%d-%s.sock", seq, slug)
 }
 
 // verifyTunnelPeer is the endpoint's per-connection proof (#7495): the kernel
@@ -287,7 +304,7 @@ func (p *sandboxProvisioner) tunnelSocketPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, newTunnelSocketName(p.spec.Title))
+	path := filepath.Join(dir, newTunnelSocketName(p.spec.Title, sockpath.Max-len(dir)-1))
 	if err := sockpath.Check("sandbox tunnel endpoint", path); err != nil {
 		return "", err
 	}

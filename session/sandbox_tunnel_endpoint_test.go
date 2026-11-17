@@ -2,12 +2,14 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -300,4 +303,89 @@ func TestTunnelEndpointReachesItsOwnForward(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, agentproto.BearerScheme+"the-session-bearer", gotAuth,
 		"the credential reaches af's own proven endpoint")
+}
+
+// The name must fit whatever budget the generation dir leaves: the slug is
+// trimmed to the room remaining after the minimal s<N>.sock, then dropped —
+// the sequence already supplies uniqueness. Only a name that cannot fit at
+// all comes back over-budget, for the caller's sockpath.Check to refuse.
+// (Codex 4605447172: a fixed 24-byte slug pushed a valid deep home over
+// macOS's 103-byte ceiling; the same endpoint named s1.sock fit.)
+func TestTunnelSocketNameFitsTheRemainingBudget(t *testing.T) {
+	nameRe := regexp.MustCompile(`^s\d+(-[a-z0-9-]+)?\.sock$`)
+	rows := []struct {
+		budget int
+		title  string
+	}{
+		{80, "abcdefghijklmnopqrstuvwx"}, // roomy: the full 24-char slug rides
+		{12, "abcdefghijklmnopqrstuvwx"}, // Codex's example: 90-byte dir on darwin's 103
+		{10, "abcdefghijklmnopqrstuvwx"}, // tighter still: a shorter slug or none
+		{8, "abcdefghijklmnopqrstuvwx"},  // the slug's room is gone: minimal name
+		{6, "abcdefghijklmnopqrstuvwx"},  // even the minimal name is over: returned for refusal
+		{80, ""},                         // nothing to describe: minimal name
+	}
+
+	seq0 := tunnelSocketSeq.Load()
+	seen := map[string]bool{}
+	for i, r := range rows {
+		seq := int(seq0) + i + 1
+		name := newTunnelSocketName(r.title, r.budget)
+		assert.True(t, nameRe.MatchString(name), "budget %d minted %q", r.budget, name)
+		require.False(t, seen[name], "names must stay unique whatever the budget")
+		seen[name] = true
+
+		min := fmt.Sprintf("s%d.sock", seq)
+		room := r.budget - len(fmt.Sprintf("s%d-.sock", seq))
+		slug := Slugify(r.title)
+		switch {
+		case slug == "" || room <= 0:
+			assert.Equal(t, min, name,
+				"budget %d leaves the slug no room — the minimal name stands alone", r.budget)
+		default:
+			if room > 24 {
+				room = 24
+			}
+			want := slug
+			if len(want) > room {
+				want = strings.TrimRight(want[:room], "-")
+			}
+			assert.Equal(t, fmt.Sprintf("s%d-%s.sock", seq, want), name,
+				"the slug is trimmed to the room the minimal name leaves")
+			assert.LessOrEqual(t, len(name), r.budget)
+		}
+	}
+}
+
+// The probe end to end: minted through tunnelSocketPath, Codex's 90-byte home
+// yields a socket inside the platform's sun_path where the un-trimmed name
+// could not — and only a home too deep for even s<N>.sock is refused, naming
+// AGENT_FACTORY_HOME as the remedy.
+func TestTunnelSocketPathTrimsToFitOrRefuses(t *testing.T) {
+	prev := tunnelGenerationDir
+	t.Cleanup(func() { tunnelGenerationDir = prev })
+	p := &sandboxProvisioner{spec: ProvisionSpec{Title: "abcdefghijklmnopqrstuvwx"}}
+
+	// Codex's example dir (4605447172): 89 bytes — a valid home whose daemon
+	// sockets fit, where "s1-<24-char slug>.sock" reached 121 bytes over the
+	// 103-byte ceiling while "s1.sock" needed only 97.
+	codexDir := "/Users/firstname.lastname/Library/Application Support/agent-factory/tunnels/d12345-abcdef"
+	require.Len(t, codexDir, 89)
+	tunnelGenerationDir = func() (string, error) { return codexDir, nil }
+	path, err := p.tunnelSocketPath()
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(path, codexDir+"/"),
+		"the socket never leaves its generation dir to fit")
+	assert.LessOrEqual(t, len(path), sockpath.Max,
+		"the trimmed name binds where the full slug could not")
+	assert.Greater(t, len(filepath.Join(codexDir, "s1-"+"abcdefghijklmnopqrstuvwx.sock")), sockpath.Max,
+		"untrimmed, the same endpoint overruns the ceiling — the failure Codex caught")
+
+	// A home too deep for even the minimal name: refused with the remedy.
+	deepDir := "/" + strings.Repeat("h", sockpath.Max-8) // dir + "/s<N>.sock" > Max for any N
+	require.Greater(t, len(deepDir)+len("/s1.sock"), sockpath.Max)
+	tunnelGenerationDir = func() (string, error) { return deepDir, nil }
+	_, err = p.tunnelSocketPath()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AGENT_FACTORY_HOME",
+		"the only refusal left is the actionable one")
 }
