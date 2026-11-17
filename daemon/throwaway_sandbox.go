@@ -326,6 +326,11 @@ sweep:
 		if home == selfCanonical {
 			continue
 		}
+		// The directory instance this proof is about, taken just before its
+		// marker is read: the container reap runs minutes later, after
+		// readiness, and acts only if the path still names this instance
+		// (sweptThrowawayStillProven, #7458 review).
+		provedDir, provedErr := os.Stat(home)
 		m, err := throwawaysandbox.LoadMarker(home)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -353,7 +358,13 @@ sweep:
 		log.InfoLog.Printf("reaping throwaway sandbox %s (kind %s): %s", home, m.Kind, reason)
 		throwawayTeardownFn(home, m)
 		reaped++
-		pending = append(pending, throwawayContainerReap{home: home, registered: registered})
+		if provedErr != nil {
+			// No identity to re-prove the reap against: leave the containers,
+			// and the registration, for a later marked start.
+			log.WarningLog.Printf("throwaway sandbox %s: cannot record which directory was proven expired, so its containers wait for a later marked start: %v", home, provedErr)
+			continue
+		}
+		pending = append(pending, throwawayContainerReap{home: home, registered: registered, provedDir: provedDir, provedMarker: *m})
 	}
 	return pending
 }
@@ -383,10 +394,44 @@ func oldestTouchedFirst(dir string, homes []string) []string {
 }
 
 // throwawayContainerReap is a swept home whose processes are gone and whose
-// containers are still to be reaped, with its registry entry as listed.
+// containers are still to be reaped, with its registry entry as listed, and
+// what the sweep proved: the directory instance and the marker it read there.
 type throwawayContainerReap struct {
-	home       string
-	registered string
+	home         string
+	registered   string
+	provedDir    os.FileInfo
+	provedMarker throwawaysandbox.Marker
+}
+
+// sweptThrowawayStillProven reports whether p.home is still the sandbox the
+// sweep proved expired or orphaned (#7458 review). The container reap runs
+// after readiness, minutes after that proof, and acts on a path. If the home
+// was removed and a new one created there, a reap of the path would remove
+// the new home's live containers. So all three must still hold:
+//   - the path names the same directory (os.SameFile with the proof's Stat);
+//   - its marker states the same contract (kind, creation time, declared
+//     owner). An inode can be reused once its directory is gone, so the
+//     identity alone is not enough;
+//   - by that marker it is still expired, or its owner still gone.
+//
+// Otherwise the reap is skipped, and the home stays registered.
+func sweptThrowawayStillProven(p throwawayContainerReap) bool {
+	if p.provedDir == nil {
+		return false
+	}
+	now, err := os.Stat(p.home)
+	if err != nil || !os.SameFile(now, p.provedDir) {
+		return false
+	}
+	m, err := throwawaysandbox.LoadMarker(p.home)
+	if err != nil {
+		return false
+	}
+	was := p.provedMarker
+	if m.Kind != was.Kind || m.CreatedUnix != was.CreatedUnix || m.OwnerPID != was.OwnerPID || m.OwnerStartID != was.OwnerStartID {
+		return false
+	}
+	return m.Expired(throwawayNowFn()) || throwawayOwnerDead(m)
 }
 
 // launchThrowawayContainerReaps reaps the swept homes' containers on a worker
@@ -418,8 +463,14 @@ func reapSweptThrowawayContainers(pending []throwawayContainerReap, dir string, 
 			return
 		default:
 		}
-		if !reap(p.home) {
-			log.WarningLog.Printf("throwaway sandbox %s stays registered: its containers were not all removed, so a later marked start retries", p.home)
+		reproved := sweptThrowawayStillProven(p)
+		if !reproved {
+			log.WarningLog.Printf("throwaway sandbox %s is no longer the sandbox the sweep proved expired (the directory or its marker changed, or it is live again); leaving its containers, and its registration", p.home)
+		}
+		if !reproved || !reap(p.home) {
+			if reproved {
+				log.WarningLog.Printf("throwaway sandbox %s stays registered: its containers were not all removed, so a later marked start retries", p.home)
+			}
 			// To the back of the next sweep's order (oldestTouchedFirst).
 			now := time.Now()
 			if err := os.Chtimes(throwawaysandbox.RegistryEntryPath(dir, p.registered), now, now); err != nil {

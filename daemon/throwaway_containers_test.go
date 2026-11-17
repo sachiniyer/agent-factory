@@ -199,22 +199,112 @@ func registered(t *testing.T, dir string) []string {
 	return homes
 }
 
+// sweepExpiredSibling marks home expired, registers it, and runs the startup
+// sweep from a marked self, with the process teardown stubbed out. It returns
+// the registry dir and the reaps the sweep handed on.
+func sweepExpiredSibling(t *testing.T, homes ...string) (string, []throwawayContainerReap) {
+	t.Helper()
+	self := markedHome(t, nil)
+	for _, home := range homes {
+		require.NoError(t, throwawaysandbox.WriteMarker(home, &throwawaysandbox.Marker{
+			Version: 1, Kind: "test-7458", CreatedUnix: 1, MaxLifetimeSeconds: 60,
+		}))
+	}
+	dir, _ := registerHomes(t, homes...)
+	previousReg, previousNow, previousTeardown := throwawayRegistryDirFn, throwawayNowFn, throwawayTeardownFn
+	throwawayRegistryDirFn = func() string { return dir }
+	throwawayNowFn = func() time.Time { return time.Unix(100000, 0) }
+	throwawayTeardownFn = func(string, *throwawaysandbox.Marker) {}
+	t.Cleanup(func() {
+		throwawayRegistryDirFn, throwawayNowFn, throwawayTeardownFn = previousReg, previousNow, previousTeardown
+	})
+	pending := sweepThrowawaySandboxes(self)
+	require.Len(t, pending, len(homes))
+	return dir, pending
+}
+
 // TestThrowawaySweptHomeStaysRegisteredUntilItsContainersAreGone: after
 // readiness the worker reaps each swept home's containers and deregisters the
 // home only when none is left, so a later marked start can still find the
 // rest — the only reap a throwaway nobody restarts will get (Codex on #7448).
 func TestThrowawaySweptHomeStaysRegisteredUntilItsContainersAreGone(t *testing.T) {
 	done, unfinished := t.TempDir(), t.TempDir()
-	dir, entries := registerHomes(t, done, unfinished)
-	pending := []throwawayContainerReap{
-		{home: entries[done], registered: entries[done]},
-		{home: entries[unfinished], registered: entries[unfinished]},
-	}
+	dir, pending := sweepExpiredSibling(t, done, unfinished)
+	doneCanon, err := canonicalDir(done)
+	require.NoError(t, err)
+	unfinishedCanon, err := canonicalDir(unfinished)
+	require.NoError(t, err)
 
-	reapSweptThrowawayContainers(pending, dir, func(home string) bool { return home == entries[done] }, nil)
+	reapSweptThrowawayContainers(pending, dir, func(home string) bool { return home == doneCanon }, nil)
 
-	require.Equal(t, []string{entries[unfinished]}, registered(t, dir),
+	require.Equal(t, []string{unfinishedCanon}, registered(t, dir),
 		"only the home whose containers are all gone is deregistered")
+}
+
+// TestThrowawaySweptHomeIsReprovedBeforeItsContainersAreReaped: the container
+// reap runs minutes after the sweep proved the home expired, and acts on a
+// path. It reaps only when that path still names the directory the sweep
+// proved, with the marker contract the sweep read, still expired. A new home
+// created at the same path keeps its live containers, and stays registered
+// (#7458 review).
+func TestThrowawaySweptHomeIsReprovedBeforeItsContainersAreReaped(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// after changes the home between the proof and the reap.
+		after  func(t *testing.T, home string)
+		reaped bool
+	}{
+		{name: "the proven home, unchanged", after: func(*testing.T, string) {}, reaped: true},
+		{
+			name: "a new directory at the same path, with a copy of the marker",
+			after: func(t *testing.T, home string) {
+				// Moved aside rather than removed, so its inode stays in use and
+				// the new directory cannot reuse it.
+				m, err := throwawaysandbox.LoadMarker(home)
+				require.NoError(t, err)
+				require.NoError(t, os.Rename(home, home+".old"))
+				require.NoError(t, os.Mkdir(home, 0o700))
+				require.NoError(t, throwawaysandbox.WriteMarker(home, m))
+			},
+		},
+		{
+			name: "the same directory, re-marked for another sandbox",
+			after: func(t *testing.T, home string) {
+				require.NoError(t, throwawaysandbox.WriteMarker(home, &throwawaysandbox.Marker{
+					Version: 1, Kind: "test-7458", CreatedUnix: 2, MaxLifetimeSeconds: 60,
+				}))
+			},
+		},
+		{
+			name: "the same sandbox, its lifetime extended so it is live again",
+			after: func(t *testing.T, home string) {
+				require.NoError(t, throwawaysandbox.WriteMarker(home, &throwawaysandbox.Marker{
+					Version: 1, Kind: "test-7458", CreatedUnix: 1, MaxLifetimeSeconds: 1 << 30,
+				}))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), "p")
+			require.NoError(t, os.Mkdir(home, 0o700))
+			dir, pending := sweepExpiredSibling(t, home)
+
+			tc.after(t, home)
+			var reapedHomes []string
+			reapSweptThrowawayContainers(pending, dir, func(h string) bool {
+				reapedHomes = append(reapedHomes, h)
+				return true
+			}, nil)
+
+			if tc.reaped {
+				require.Len(t, reapedHomes, 1, "the proven home's containers must be reaped")
+				require.Empty(t, registered(t, dir))
+				return
+			}
+			require.Empty(t, reapedHomes, "a home that is no longer the proven sandbox must keep its containers")
+			require.Len(t, registered(t, dir), 1, "and stay registered")
+		})
+	}
 }
 
 // TestThrowawaySweepLeavesContainerReapsForAfterReadiness: the startup sweep
@@ -244,8 +334,10 @@ func TestThrowawaySweepLeavesContainerReapsForAfterReadiness(t *testing.T) {
 
 	require.Equal(t, []string{entries[expired]}, tornDown, "the sweep still tears down the expired sibling's processes")
 	require.Zero(t, reapedDuringSweep, "the sweep must not reap containers on the readiness path")
-	require.Equal(t, []throwawayContainerReap{{home: entries[expired], registered: entries[expired]}}, pending,
-		"the sibling is handed on for its container reap")
+	require.Len(t, pending, 1, "the sibling is handed on for its container reap")
+	require.Equal(t, entries[expired], pending[0].home)
+	require.Equal(t, entries[expired], pending[0].registered)
+	require.NotNil(t, pending[0].provedDir, "with the directory the sweep proved, for the reap to re-prove")
 	require.Equal(t, []string{entries[expired]}, registered(t, dir), "and stays registered until that reap finishes")
 }
 
