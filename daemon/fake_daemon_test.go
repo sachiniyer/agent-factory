@@ -171,29 +171,21 @@ const fakeDaemonHomeKey = "AGENT_FACTORY_HOME"
 // the setup's timing rather than on the code under test (#6129, and again in
 // TestStopDaemon_SIGTERMFirst: "PID could not be bound to this home").
 //
-// The argv half also matters. spawnFakeDaemonProc runs `bash -c "exec -a <argv0>
-// bash ..."`, so the outer bash has a readable argv — ["bash", "-c", ...] — for a
-// moment BEFORE it execs into the crafted one. Classify it in that window and
-// argsAreDaemonBinary sees "bash" and writes the daemon off as foreign: an
-// assertion that should fail passes, and one that should pass fails, for a reason
-// that has nothing to do with the code under test.
-//
-// The environ half has a second window neither wait above covers: for a moment
-// after exec the child is still rewriting its initial environ block in place —
-// bash's startup variable pass temporarily NULs the '=' in a "KEY=VALUE" entry,
-// so AGENT_FACTORY_HOME that already read back correctly can read ABSENT on the
-// very next read. The classifier reads that as a default-home daemon, and with
-// no $HOME to resolve the default against it is daemonUnverifiable — the
-// fail-closed verdict the code under test then gets blamed for (#6705:
-// TestSigtermFallback_AmbiguousCandidates signaling only one of two fakes,
-// TestStopDaemon_ForeignHomePIDFileNotKilled erroring "could not be bound to
-// this home"). A first good environ read does not prove the block has settled;
+// The environ half matters more than one good read suggests. The predicate
+// the code under test runs — classifyDaemonHome or verifyScopedDaemon —
+// performs uid, environ, and path/frame reads of its own, and any of them
+// can fail transiently even after the environ itself reads back right. A
+// first good environ read does not prove the process is classifiable;
 // waitForFakeDaemonProvable polls the predicate itself until it decides.
+// (The interim bash recipe added a second hazard — its startup variable
+// pass rewrote the exec-time environ block in place — which the
+// arg-ignoring fakedaemon binary does not have: its environ is stable
+// from exec, so there is no interpreter-settle signal left to wait on.)
 //
 // When the environ stays unreadable (EnvUnknown) the test is SKIPPED with the
-// reason, not failed: on a SIP-enabled Mac with Apple's /bin/bash, this binary can
-// read its own environ but not the SIP-protected bash child's, so no amount of
-// waiting helps and the failure would say nothing about the code under test.
+// reason, not failed: on a SIP-enabled Mac a same-uid child's environ can still
+// be refused to this binary, so no amount of waiting helps and the failure
+// would say nothing about the code under test.
 //
 // The expected home is read from cmd.Env (the whole environment the child was
 // given), or from this process's environment when cmd.Env is nil. A child started
@@ -257,13 +249,9 @@ func fakeDaemonEnv(environ []string, key string) (string, bool) {
 // the code under test binds it with — the uid, environ, and path/frame reads
 // classifyDaemonHome (StopDaemon, the sigterm fallback's recorded-PID handling)
 // or verifyScopedDaemon (the reset scan) performs — not merely until one
-// environ read looks right. See waitForFakeDaemon for why a single good read
-// is not proof: the child rewrites its exec-time environ in place during bash
-// startup, so the settle signal is the rewrite being done, which a child of
-// the fake in /proc/<pid>/task/<pid>/children marks (bash finishes variable
-// init before it runs the script's first command, and every fake recipe opens
-// with `sleep`). The environ check is re-verified on every poll so a settled
-// read is never mistaken for a mid-rewrite one.
+// environ read looks right. A single good read is not proof: the predicate
+// can still fail transiently on its other per-process reads, so it is
+// re-polled here until it reaches a decisive verdict.
 //
 // Env spellings the recorded-PID classifier can never decide — a bare env with
 // no $HOME to expand the default in, a raw "~user", or a home that is (or
@@ -289,7 +277,7 @@ func waitForFakeDaemonProvable(t *testing.T, pid int, environ []string) {
 		return status == proctree.EnvAbsent
 	}
 	ready := func() bool {
-		if !envOK() || !fakeDaemonPastEnvScan(pid) {
+		if !envOK() {
 			return false
 		}
 		if fakeDaemonHomeIndecidable(pid, env, environ) {
@@ -348,24 +336,6 @@ func fakeDaemonHomeIndecidable(pid int, env string, environ []string) bool {
 		resolved = filepath.Join(cwd, env)
 	}
 	return isProcessRelativeProcfsHome(resolved) || homeSymlinkEntersProcessRelativeProcfs(resolved)
-}
-
-// fakeDaemonPastEnvScan reports whether the fake's bash has finished rewriting
-// its initial environ. During startup bash writes its variable table over the
-// exec-time block in place — a "KEY=VALUE" entry can transiently read back as
-// a bare "KEY" plus a bare value while it does — so one environ read that saw
-// the right value is no proof the block has settled. The rewrite happens in
-// initialize_shell_variables, before bash runs the script's first command;
-// every fake recipe's script opens with `sleep`, so a child in
-// /proc/<pid>/task/<pid>/children marks init complete. Where that file cannot
-// be read (no /proc, an older kernel) there is nothing better than the polling
-// itself, so this returns true.
-func fakeDaemonPastEnvScan(pid int) bool {
-	children, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
-	if err != nil {
-		return true
-	}
-	return len(strings.Fields(string(children))) > 0
 }
 
 // waitForFakeDaemonArgv blocks until cmd's process has exec'd into the crafted

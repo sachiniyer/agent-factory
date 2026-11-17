@@ -27,6 +27,7 @@ func TestArgvIsAFDaemon(t *testing.T) {
 		{"shorthand value attached to its flag", []string{"af", "-pclaude", "--daemon"}, true},
 		{"remote flags before the daemon flag", []string{"af", "--daemon-url", "https://x", "--token", "t", "--daemon"}, true},
 		{"upgrade probation keeps the daemon flag", []string{"af", "--upgrade-transaction", "tx1", "--daemon"}, true},
+		{"the upgrade candidate's real spawn order", []string{"af", "--daemon", "--upgrade-transaction", "tx1"}, true},
 		{"the last --daemon wins", []string{"af", "--daemon=false", "--daemon"}, true},
 		{"flag as an unparseable form exits af", []string{"af", "--daemon=foo"}, false},
 		{"--daemon=false is a client, explicitly", []string{"af", "--daemon=false"}, false},
