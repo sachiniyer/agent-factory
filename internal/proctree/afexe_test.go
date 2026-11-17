@@ -222,7 +222,7 @@ func TestExeAttestsAFSingleFlightsAStalledRead(t *testing.T) {
 	// same leak in another shape (#7496).
 	require.Equal(t, 1, attestFlights.inFlightCount(),
 		"expired waiters must leave nothing behind — a stalled read holds constant memory")
-	f, _ := attestFlights.begin(attestKey{pid: p.PID, startID: p.StartID})
+	f, _ := attestFlights.begin(flightKey{attestKey{pid: p.PID, startID: p.StartID}, false})
 	require.Equal(t, 1, f.chans,
 		"every waiter shares the one completion channel — none are retained per attempt")
 	// The test's own begin was a follower join on the still-running
@@ -308,4 +308,51 @@ func TestExeAttestationsRevalidatesTheExecutableImage(t *testing.T) {
 	require.False(t, att.AttestsAF(self), "the new image's verdict memoizes too")
 	require.Equal(t, int32(2), opens.Load(),
 		"the image change forced exactly one re-attestation")
+}
+
+// The revalidation is part of the bounded operation: on darwin it reads
+// exePath plus a stat on the executable's filesystem, so a stalled mount
+// after a first positive attestation must expire as unverified — not hang
+// the reap outside the timer (#7496). A synchronous revalidation would
+// park on the gate forever; bounded, the call falls through to a
+// re-attestation that is itself bounded.
+func TestExeAttestationsRevalidationIsBounded(t *testing.T) {
+	oldOpen, oldID, oldBudget := exeOpenFn, exeIdentityFn, exeAttestBudget
+	gate := make(chan struct{})
+	var opens atomic.Int32
+	exeOpenFn = func(pid int) (*os.File, bool) {
+		opens.Add(1)
+		f, err := os.Open(os.Args[0])
+		return f, err == nil
+	}
+	exeIdentityFn = func(pid int) (exeID, bool) {
+		<-gate // a revalidation read that cannot answer
+		return exeID{}, false
+	}
+	exeAttestBudget = 50 * time.Millisecond
+	t.Cleanup(func() {
+		close(gate)
+		require.Eventually(t, func() bool {
+			return attestFlights.inFlightCount() == 0
+		}, 5*time.Second, 5*time.Millisecond,
+			"the stalled flight's worker must finish in cleanup, not leak into later attestations")
+		exeOpenFn, exeIdentityFn, exeAttestBudget = oldOpen, oldID, oldBudget
+	})
+
+	self, err := Lookup(os.Getpid())
+	require.NoError(t, err)
+	att := NewExeAttestations()
+	require.True(t, att.AttestsAF(self), "the first attestation memoizes a positive")
+
+	// The memo now holds a positive, and the identity seam is wedged: a
+	// synchronous revalidation would never return. Bounded, it expires as
+	// unverified — the fail-closed direction.
+	done := make(chan bool, 1)
+	go func() { done <- att.AttestsAF(self) }()
+	select {
+	case v := <-done:
+		require.False(t, v, "a revalidation timeout reports unverified — fail-closed, not a hang")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the identity revalidation hung — it must run inside the same bounded, single-flighted operation")
+	}
 }

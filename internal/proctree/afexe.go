@@ -64,17 +64,43 @@ func exeAttestsAFShared(p Process) (bool, exeID) {
 	// test later restores — the lazy read races the restore (the same
 	// shape a racing caller would hit in production, #7491).
 	fn := exeOpenFn
-	// Attempts on the SAME process instance fly in formation (#7494 item
-	// 2): a wedged exe — a hung NFS mount, a FIFO renamed over the exe
-	// path — holds at most ONE worker, goroutine and fd no matter how many
-	// candidates its pid reaches in one sweep or the next. Each caller
-	// still bounds its own wait: an expired budget reports false and the
-	// shared read keeps the worker it already paid.
-	key := attestKey{pid: p.PID, startID: p.StartID}
+	return exeCheckShared(
+		flightKey{attestKey{pid: p.PID, startID: p.StartID}, false},
+		func() (bool, exeID) { return exeAttestsAF(fn, p) })
+}
+
+// exeIdentityShared runs the memo's revalidation read inside the SAME
+// bounded, single-flighted operation as the full attestation (#7496): on
+// darwin the identity check is exePath plus a stat on the executable's
+// filesystem, and a stalled mount after a first positive attestation must
+// expire as unverified, not hang the reap outside the timer. It flies its
+// own phase — a cheap identity read never joins a full attestation's
+// worker, and an attestation never reports a bare identity as its verdict.
+func exeIdentityShared(p Process) (exeID, bool) {
+	fn := exeIdentityFn
+	ok, id := exeCheckShared(
+		flightKey{attestKey{pid: p.PID, startID: p.StartID}, true},
+		func() (bool, exeID) {
+			id, ok := fn(p.PID)
+			return ok, id
+		})
+	return id, ok
+}
+
+// exeCheckShared runs work under the in-flight set and the attestation
+// budget: concurrent callers on the same key share one flight, each bounds
+// its own wait, and an expired budget reports the fail-closed answer.
+func exeCheckShared(key flightKey, work func() (bool, exeID)) (bool, exeID) {
+	// Attempts on the SAME key fly in formation (#7494 item 2): a wedged
+	// read — a hung NFS mount, a FIFO renamed over the exe path — holds at
+	// most ONE worker, goroutine and fd no matter how many candidates its
+	// pid reaches in one sweep or the next. Each caller still bounds its
+	// own wait: an expired budget reports false and the shared read keeps
+	// the worker it already paid.
 	f, leader := attestFlights.begin(key)
 	if leader {
 		go func() {
-			f.ok, f.id = exeAttestsAF(fn, p)
+			f.ok, f.id = work()
 			attestFlights.finish(key, f)
 		}()
 	}
@@ -94,6 +120,14 @@ func exeAttestsAFShared(p Process) (bool, exeID) {
 type attestKey struct {
 	pid     int
 	startID uint64
+}
+
+// flightKey scopes an in-flight read to what it reads: a full attestation
+// and the memo's identity revalidation are different work on the same
+// instance, so a waiter for one never joins the other's flight (#7496).
+type flightKey struct {
+	attestKey
+	identity bool
 }
 
 // exeID is the (dev, ino) of the executable image a verdict was read from.
@@ -132,14 +166,14 @@ type attestFlight struct {
 // wedged-mount verdict can recover on the next sweep.
 type attestFlightSet struct {
 	mu       sync.Mutex
-	inFlight map[attestKey]*attestFlight
+	inFlight map[flightKey]*attestFlight
 }
 
-var attestFlights = attestFlightSet{inFlight: map[attestKey]*attestFlight{}}
+var attestFlights = attestFlightSet{inFlight: map[flightKey]*attestFlight{}}
 
 // begin returns the flight for key, creating and leading it if none exists.
 // A follower must never start a worker — the leader already paid for it.
-func (s *attestFlightSet) begin(key attestKey) (f *attestFlight, leader bool) {
+func (s *attestFlightSet) begin(key flightKey) (f *attestFlight, leader bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if f, ok := s.inFlight[key]; ok {
@@ -152,7 +186,7 @@ func (s *attestFlightSet) begin(key attestKey) (f *attestFlight, leader bool) {
 
 // finish publishes the leader's result to every waiter and drops the key so
 // the next attempt starts a fresh flight.
-func (s *attestFlightSet) finish(key attestKey, f *attestFlight) {
+func (s *attestFlightSet) finish(key flightKey, f *attestFlight) {
 	s.mu.Lock()
 	delete(s.inFlight, key)
 	s.mu.Unlock()
@@ -212,12 +246,20 @@ func (a *ExeAttestations) AttestsAF(p Process) bool {
 		if !e.verdict {
 			return false
 		}
-		if id, known := exeIdentityFn(p.PID); known && id == e.exe {
+		id, known := exeIdentityShared(p)
+		if !known {
+			// The revalidation could not answer — a stalled mount is a
+			// real shape, and the same filesystem a re-attestation would
+			// block on — so the cached positive cannot be trusted:
+			// timeout means unverified, and unverified blocks (#7496).
+			return false
+		}
+		if id == e.exe {
 			return true
 		}
-		// The image changed under the same instance, or its identity
-		// cannot be confirmed: re-attest rather than ride the old
-		// executable's verdict onto a different binary (#7496).
+		// The image changed under the same instance: re-attest rather
+		// than ride the old executable's verdict onto a different
+		// binary (#7496).
 	}
 	v, id := exeAttestsAFShared(p)
 	a.mu.Lock()
