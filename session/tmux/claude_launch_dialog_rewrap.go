@@ -225,11 +225,13 @@ func claudeLaunchDialogRewrapOf(screen visibleText) (claudeLaunchDialogMatch, bo
 //   - other rows, with the block beginning on a row of its own and being enough
 //     of the dialog's options (claudeLaunchDialogOptions.read): the folder
 //     dialog's affirmative label, or every option of the MCP server dialog.
-//     Those rows are the dialog's body, as far as the pane shows. None of them
-//     may be a footer, which is what claudeFolderTrustHeadless asks of them:
-//     a launch dialog owns the pane above its options. A ❯ row or a composer
-//     among them keeps the pane clear only when it explains every row on
-//     screen outside it (#7388).
+//     Those rows are the dialog's body, as far as the pane shows. A ❯ row or
+//     a composer among them keeps the pane clear only when it explains every
+//     row on screen outside it (#7388). Nothing else does: another dialog's
+//     footer among them is a row af cannot place, like any other. It says
+//     an older dialog was on screen and nothing about the one below it,
+//     which a relaunch in the same pane paints under the old process's last
+//     frame (#7452).
 //
 // A ❯ row must begin an option. A plain rule, which is what a composer draws
 // above and below its prompt row, keeps the pane clear from the options down.
@@ -314,14 +316,13 @@ func claudeLaunchDialogTail(pane claudeLaunchDialogPane, options claudeLaunchDia
 		}
 		for content := 0; content < block; content++ {
 			i := pane.index[content]
-			if claudeTrustIsFooter(pane.rows[i].label) {
-				return claudeLaunchDialogMatch{}, false
-			}
 			// A ❯ row above the options is a prompt: the 2.1.322
 			// composer's, between its plain rules, or a shell's
 			// ("❯ claude"). It explains only its own rows, so it decides
 			// only when it explains every row on screen outside it
-			// (#7388).
+			// (#7388). A footer above the options is another dialog's,
+			// and no evidence about this one, so it is read as any row
+			// af cannot place (#7452).
 			if pane.rows[i].selected && claudeLaunchDialogPromptExplains(pane, i, pane.index[block]) {
 				return claudeLaunchDialogMatch{}, false
 			}
