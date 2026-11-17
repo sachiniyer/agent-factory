@@ -530,7 +530,7 @@ func (c *remoteAgentClient) doJSON(method, path string, req, resp any, timeout t
 
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("remote agent-server: %s %s: %w", method, path, err)
+		return fmt.Errorf("remote agent-server: %s %s: %w", method, path, c.scrubEndpointURL(err))
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 

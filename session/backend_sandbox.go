@@ -196,6 +196,12 @@ type sandboxProvisioner struct {
 	forward     string
 	socketPath  string
 	reverseFwds []string
+	// tunnelLeader is the lock-free snapshot of tunnel's spawn the peer proof
+	// reads on EVERY fresh unix dial (#7495): it moves atomically with tunnel
+	// under setTunnel, because a dial must never take reapMu — account swaps
+	// hold it across the very REST calls that dial through the proof, and a
+	// dial that needed it would stall until its deadline.
+	tunnelLeader atomic.Pointer[tunnelLeaderRef]
 	// callbackRef is the reference the granted callback credential derives from
 	// (W3.6). It persists with the runtime identity, together with the -R spec in
 	// reverseFwds, so a reattach after a daemon restart re-registers the credential
@@ -836,7 +842,7 @@ func (p *sandboxProvisioner) stopTunnel() {
 		close(p.stoppedChanLocked())
 	}
 	killTunnel(p.tunnel)
-	p.tunnel = nil
+	p.setTunnel(nil)
 	// The dead generation's socket file is unlinked here — hygiene inside this
 	// daemon's own generation dir only (#7495): the dir itself is swept by the
 	// next daemon's startup pass once its lock proves the owner exited.

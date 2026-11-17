@@ -17,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/peercred"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -54,9 +55,9 @@ import (
 //     own generation dir, because af generates it there.
 //   - Every connection is proven before a byte is written: the kernel names
 //     the acceptor's pid (SO_PEERCRED/LOCAL_PEERPID), and af refuses any
-//     acceptor outside the tunnel child's own process group
-//     (verifyTunnelPeer). No credential is sent to an endpoint that is not
-//     provably af's own ssh child.
+//     acceptor that is not — or does not descend from — the tunnel's own
+//     spawn (verifyTunnelPeer). No credential is sent to an endpoint that is
+//     not provably af's own ssh child.
 //
 // There is deliberately no TCP fallback: a transport that cannot do a unix
 // forward fails the provision loudly, naming the transport, rather than
@@ -160,6 +161,14 @@ func verifyTunnelSocketRoot(home string) (string, error) {
 	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		switch {
+		case errors.Is(err, unix.EACCES):
+			// A foreign-owned 0700 dir fails the open itself — the owner
+			// check below never gets to speak. Name the requirement and
+			// the fix rather than reporting a bare EACCES (#7495).
+			return "", fmt.Errorf("cannot enter the tunnel socket directory %q — it is owned by another "+
+				"account, and af requires it be owned by this user (uid %d) because af's credential-bearing "+
+				"tunnel endpoints live there: chown it to this user, or remove it and let af create it",
+				root, os.Geteuid())
 		case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
 			// O_NOFOLLOW reports a symlink ELOOP on some kernels and ENOTDIR
 			// (with O_DIRECTORY) on others — refuse both spellings.
@@ -265,33 +274,120 @@ func newTunnelSocketName(title string, budget int) string {
 	return fmt.Sprintf("s%d-%s.sock", seq, slug)
 }
 
+// tunnelLeaderRef is the lock-free snapshot of one tunnel generation's spawn
+// the peer proof reads on EVERY fresh dial (#7495): the spawned child's pid —
+// the group/session leader supervision kills by — plus the proctree start
+// stamp captured at publish, so the proof can distinguish this generation's
+// leader from any stranger that later reuses the pid. Written only through
+// setTunnel; read with no lock a caller can hold — account swaps hold reapMu
+// across the very REST calls that dial through this proof, and a dial that
+// needed the same mutex would stall to its deadline with the caller parked
+// on it.
+type tunnelLeaderRef struct {
+	pid     int
+	startID uint64 // proctree identity stamp; 0 = unreadable at publish — liveness only
+}
+
+// setTunnel assigns this provisioner's current tunnel generation AND the
+// lock-free leader snapshot the peer proof reads on every dial — the two must
+// move together, so every p.tunnel write goes through here. Callers hold
+// reapMu (or own the provisioner outright, as tests do).
+func (p *sandboxProvisioner) setTunnel(t *tunnelChild) {
+	p.tunnel = t
+	p.publishTunnelLeader(t)
+}
+
+// publishTunnelLeader refreshes the atomic snapshot verifyTunnelPeer reads:
+// the spawned child's pid and — when the process table will still read it —
+// its start stamp, so a dead leader, or a reused pid, can never adopt the
+// acceptor's ancestry.
+func (p *sandboxProvisioner) publishTunnelLeader(t *tunnelChild) {
+	if t == nil || t.cmd == nil || t.cmd.Process == nil {
+		p.tunnelLeader.Store(nil)
+		return
+	}
+	ref := &tunnelLeaderRef{pid: t.cmd.Process.Pid}
+	if pr, err := proctree.Lookup(ref.pid); err == nil {
+		ref.startID = pr.StartID
+	}
+	p.tunnelLeader.Store(ref)
+}
+
 // verifyTunnelPeer is the endpoint's per-connection proof (#7495): the kernel
 // names the pid that accepted this unix-socket connection, and af writes
-// nothing until that pid is a member of THIS tunnel generation's process
-// group — the group the spawn's Setpgid put its ssh child into, whose id is
-// the group leader's pid. A foreign listener cannot forge the pid the kernel
-// reports; it can only be refused, and a refusal is a tunnel failure, never a
-// request sent to the wrong endpoint.
+// nothing until that pid is shown to be — or to descend from — THIS tunnel
+// generation's own spawn, identity-checked link by link up the parent chain.
+// Descent is the rule rather than group membership because a documented
+// sandbox.ssh wrapper (sshpass, `setsid`, `script -c`) puts its ssh in a
+// fresh process group or session: the ssh is still provably af's own spawn,
+// and a group-equality check would refuse it. The walk ends at init — an
+// acceptor reparented off the spawn's chain cannot prove the spawn started
+// it, and is refused. A foreign listener can forge neither the pid the kernel
+// reports nor its ancestry; a refusal is a tunnel failure, never a request
+// sent to the wrong endpoint.
+//
+// The leader comes from an atomic snapshot — never from a lock a caller can
+// hold (see tunnelLeaderRef).
 func (p *sandboxProvisioner) verifyTunnelPeer(conn *net.UnixConn) error {
 	pid, err := peercred.ConnPID(conn)
 	if err != nil {
 		return fmt.Errorf("the kernel cannot name the socket's acceptor: %w", err)
 	}
-	p.reapMu.Lock()
-	t := p.tunnel
-	p.reapMu.Unlock()
-	if t == nil || t.cmd == nil || t.cmd.Process == nil {
+	leader := p.tunnelLeader.Load()
+	if leader == nil {
 		return errors.New("the tunnel's ssh child is not running")
 	}
-	leader := t.cmd.Process.Pid
-	pgid, err := unix.Getpgid(pid)
+	lp, err := proctree.Lookup(leader.pid)
 	if err != nil {
-		return fmt.Errorf("cannot read the acceptor's process group (pid %d): %w", pid, err)
+		return fmt.Errorf("the tunnel's ssh child (pid %d) is not running: %w", leader.pid, err)
 	}
-	if pgid != leader {
-		return fmt.Errorf("the tunnel endpoint's acceptor (pid %d, process group %d) is not a member of "+
-			"this tunnel's process group %d — refusing to use a listener that is not provably af's own ssh child",
-			pid, pgid, leader)
+	if leader.startID != 0 && lp.StartID != leader.startID {
+		return fmt.Errorf("the tunnel's ssh child (pid %d) was replaced by another process — "+
+			"a reused pid cannot anchor af's proof of its own transport", leader.pid)
+	}
+	for cur, depth := pid, 0; depth < 64 && cur > 1; depth++ {
+		if cur == leader.pid {
+			return nil
+		}
+		pr, err := proctree.Lookup(cur)
+		if err != nil {
+			return fmt.Errorf("cannot trace the acceptor's ancestry (pid %d): %w", cur, err)
+		}
+		if pr.PPID <= 1 || pr.PPID == cur {
+			break
+		}
+		cur = pr.PPID
+	}
+	return fmt.Errorf("the tunnel endpoint's acceptor (pid %d) does not descend from this tunnel's "+
+		"ssh child (pid %d) — refusing to use a listener that is not provably af's own ssh child",
+		pid, leader.pid)
+}
+
+// verifyTunnelSocketFile lstat-proves the socket ssh just bound — the thing
+// itself, not the option af asked for. StreamLocalBindMask=0177 states the
+// intent (0600), but that keyword has no first-obtained-wins guard: an
+// ssh_config value is read after the command line and can still strip the
+// mode. So the probe proves the filesystem's answer: a socket, owned by this
+// uid, with no group or other bits. Inside the two verified 0700 directories
+// a stripped mode would still be unreachable to another account — the check
+// is defense in depth that fails loudly rather than quietly relaxing.
+func verifyTunnelSocketFile(sockPath string) error {
+	var st unix.Stat_t
+	if err := unix.Lstat(sockPath, &st); err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFSOCK {
+		return fmt.Errorf("the tunnel endpoint %q is not a socket", sockPath)
+	}
+	if st.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("the tunnel endpoint %q is owned by uid %d, not this user (uid %d)",
+			sockPath, st.Uid, os.Geteuid())
+	}
+	if perm := st.Mode & 0o777; perm&0o077 != 0 {
+		return fmt.Errorf("the tunnel endpoint %q has mode %04o reachable by group or other — af requires "+
+			"the bound socket be private (0600). af passes -o StreamLocalBindMask=0177, but an ssh_config "+
+			"StreamLocalBindMask overrides the command line: scope that option out of the transport's "+
+			"config file, or remove it", sockPath, perm)
 	}
 	return nil
 }
@@ -307,6 +403,14 @@ func (p *sandboxProvisioner) tunnelSocketPath() (string, error) {
 	path := filepath.Join(dir, newTunnelSocketName(p.spec.Title, sockpath.Max-len(dir)-1))
 	if err := sockpath.Check("sandbox tunnel endpoint", path); err != nil {
 		return "", err
+	}
+	// The -L spec quotes the path inside [brackets] — OpenSSH's escape, read
+	// since before the 7.6 floor — which expresses every byte but a literal
+	// ']'. A ':' home needs the escape; a ']' home cannot be expressed at
+	// all, and is refused with the same remedy.
+	if strings.Contains(path, "]") {
+		return "", fmt.Errorf("the tunnel socket path %q contains ']', which af's bracket-quoted "+
+			"ssh -L spec cannot express: set AGENT_FACTORY_HOME to a directory without ']'", path)
 	}
 	return path, nil
 }

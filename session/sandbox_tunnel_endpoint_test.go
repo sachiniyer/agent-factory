@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -118,8 +119,9 @@ func TestTunnelSocketStaysInsideTheGenerationDir(t *testing.T) {
 		})
 		assert.True(t, strings.HasPrefix(sockPath, dir+string(os.PathSeparator)),
 			"socket %q must live inside this daemon's generation dir %q — the only place Unlink may ever reach", sockPath, dir)
-		// The -L spec targets that socket, on this generation's contract.
-		assert.Equal(t, sockPath+":127.0.0.1:9", p.forward)
+		// The -L spec targets that socket, on this generation's contract —
+		// bracket-quoted so a ':' in the AF home still parses (R5).
+		assert.Equal(t, "["+sockPath+"]:127.0.0.1:9", p.forward)
 		seen = append(seen, sockPath)
 	}
 	assert.NotEqual(t, seen[0], seen[1], "each tunnel mints a unique name within the generation dir")
@@ -250,14 +252,14 @@ func TestTunnelEndpointSendsNoCredentialToAForeignListener(t *testing.T) {
 		_ = fakeChild.Wait()
 	})
 	p := &sandboxProvisioner{socketPath: sockPath}
-	p.tunnel = &tunnelChild{cmd: fakeChild, done: make(chan struct{})}
+	p.setTunnel(&tunnelChild{cmd: fakeChild, done: make(chan struct{})})
 
 	ep := p.tunnelEndpoint("the-session-bearer")
 	rc, err := newRemoteAgentClient(*ep, "t")
 	require.NoError(t, err)
 	err = rc.call("/v1/agent/provision", agentLifecycleReq{FirstTimeSetup: true}, nil)
 	require.Error(t, err, "the connection must be refused before the credential is written")
-	assert.Contains(t, err.Error(), "process group")
+	assert.Contains(t, err.Error(), "does not descend")
 
 	select {
 	case buf := <-got:
@@ -294,7 +296,8 @@ func TestTunnelEndpointReachesItsOwnForward(t *testing.T) {
 
 	// The listener is this test process: the tunnel it stands in for names
 	// this process's own process group — af's own ssh child, proven.
-	p := &sandboxProvisioner{socketPath: sockPath, tunnel: tunnelChildOnMyGroup(t)}
+	p := &sandboxProvisioner{socketPath: sockPath}
+	p.setTunnel(tunnelChildOnMyGroup(t))
 	ep := p.tunnelEndpoint("the-session-bearer")
 	rc, err := newRemoteAgentClient(*ep, "t")
 	require.NoError(t, err)
@@ -388,4 +391,195 @@ func TestTunnelSocketPathTrimsToFitOrRefuses(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AGENT_FACTORY_HOME",
 		"the only refusal left is the actionable one")
+}
+
+// The peer proof reads the tunnel generation with NO lock a caller can hold
+// (#7495 R1): SwapOffBoxAccount holds reapMu across its REST calls, so a dial
+// that took the same mutex would stall to its deadline with the caller parked
+// on it — exactly when the connection pool is empty. The leader is an atomic
+// snapshot, so the health check completes while the test holds the lock.
+func TestTunnelPeerProofNeverBlocksOnReapMu(t *testing.T) {
+	sockPath := testguard.SocketPath(t, "swap.sock")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ok": true}})
+	})
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = ln.Close()
+	})
+
+	p := &sandboxProvisioner{socketPath: sockPath}
+	p.setTunnel(tunnelChildOnMyGroup(t))
+	ep := p.tunnelEndpoint("the-session-bearer")
+	rc, err := newRemoteAgentClient(*ep, "t")
+	require.NoError(t, err)
+
+	// reapMu held across the whole request — the swap's exact shape — with a
+	// fresh transport, so the dial (and the proof inside it) runs while the
+	// caller owns the lock.
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := rc.health()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err, "the REST call must complete with reapMu held")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the peer proof deadlocked on reapMu — a caller holding it stalls every fresh dial")
+	}
+}
+
+// TestPeerHelperListener is not a test — it is the child half of
+// TestTunnelPeerAdmitsAReSessionedDescendant, run inside the test binary under
+// AF_TEST_PEER_LISTENER=1. It re-sessions itself (the sshpass/script shape),
+// binds the requested socket privately, and serves until stdin closes.
+func TestPeerHelperListener(t *testing.T) {
+	sock := os.Getenv("AF_TEST_PEER_SOCK")
+	if os.Getenv("AF_TEST_PEER_LISTENER") != "1" || sock == "" {
+		t.Skip("unix listener helper for the peer-descent test")
+	}
+	if _, err := unix.Setsid(); err != nil {
+		t.Fatalf("setsid: %v", err)
+	}
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := os.Chmod(sock, 0o600); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	go func() {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	}()
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+	}
+}
+
+// The discriminating peer-proof test (#7495 R4): a listener that is a distinct
+// child in its OWN session and process group — spawned by the tunnel's
+// stand-in leader, the sshpass/`script -c` shape — is admitted by descent,
+// while a listener in the dialer's own group is refused. Runs on linux and
+// darwin alike, where group-only admission would refuse af's own transport.
+func TestTunnelPeerAdmitsAReSessionedDescendant(t *testing.T) {
+	sockPath := testguard.SocketPath(t, "desc.sock")
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	// The stand-in for the tunnel spawn: an sh that leads its own process
+	// group and forks the listener helper, which re-sessions itself. The
+	// acceptor's group then differs from the leader's, but its ancestry still
+	// reaches the spawn — the proof admits it.
+	stdinR, stdinW, err := os.Pipe()
+	require.NoError(t, err)
+	leader := exec.Command("sh", "-c",
+		fmt.Sprintf("AF_TEST_PEER_LISTENER=1 AF_TEST_PEER_SOCK=%q %q -test.run=TestPeerHelperListener$", sockPath, exe))
+	leader.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	leader.Stdin = stdinR
+	require.NoError(t, leader.Start())
+	require.NoError(t, stdinR.Close())
+	t.Cleanup(func() {
+		_ = stdinW.Close()
+		_ = leader.Process.Kill()
+		_ = leader.Wait()
+	})
+
+	p := &sandboxProvisioner{socketPath: sockPath}
+	p.setTunnel(&tunnelChild{cmd: leader, done: make(chan struct{})})
+
+	var conn net.Conn
+	require.Eventually(t, func() bool {
+		c, err := net.DialTimeout("unix", sockPath, 100*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		conn = c
+		return true
+	}, 10*time.Second, 50*time.Millisecond, "the descendant listener never bound")
+	require.NoError(t, p.verifyTunnelPeer(conn.(*net.UnixConn)),
+		"a descendant of the tunnel spawn is admitted even from a fresh session/group")
+	require.NoError(t, conn.Close())
+
+	// The dialer's own group: an in-process listener never descends from the
+	// tunnel spawn — refused, on the same proof.
+	foreignPath := testguard.SocketPath(t, "foreign-group.sock")
+	fln, err := net.Listen("unix", foreignPath)
+	require.NoError(t, err)
+	defer func() { _ = fln.Close() }()
+	fc, err := net.DialTimeout("unix", foreignPath, time.Second)
+	require.NoError(t, err)
+	err = p.verifyTunnelPeer(fc.(*net.UnixConn))
+	require.Error(t, err, "a listener outside the spawn's ancestry must be refused")
+	assert.Contains(t, err.Error(), "does not descend")
+	require.NoError(t, fc.Close())
+}
+
+// af does not trust the option it passed: the bound socket itself is proven
+// (a socket, this uid, no group/other bits), because an ssh_config
+// StreamLocalBindMask overrides af's -o on the command line (#7495 R3).
+func TestTunnelSocketFileProofNotTrustedOption(t *testing.T) {
+	sockPath := testguard.SocketPath(t, "mode.sock")
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+
+	require.NoError(t, os.Chmod(sockPath, 0o666))
+	err = verifyTunnelSocketFile(sockPath)
+	require.Error(t, err, "a group/other-reachable bound socket must be refused")
+	assert.Contains(t, err.Error(), "StreamLocalBindMask",
+		"the refusal names the option that can silently override af's mask")
+
+	require.NoError(t, os.Chmod(sockPath, 0o600))
+	require.NoError(t, verifyTunnelSocketFile(sockPath))
+
+	// A regular file at the path is refused outright — never mistaken for the
+	// forward's socket.
+	reg := testguard.SocketPath(t, "file.sock")
+	require.NoError(t, os.WriteFile(reg, nil, 0o600))
+	require.Error(t, verifyTunnelSocketFile(reg), "a non-socket at the endpoint path is not the forward")
+}
+
+// Transport errors name the socket, never the placeholder authority: an
+// operator facing Post "http://af-tunnel.invalid/…" has no way to connect it
+// to the tunnel af built (#7495 R7).
+func TestTunnelEndpointErrorsNameTheSocketNotThePlaceholder(t *testing.T) {
+	p := &sandboxProvisioner{socketPath: "/nonexistent/af-tunnel-dead.sock"}
+	ep := p.tunnelEndpoint("the-session-bearer")
+	rc, err := newRemoteAgentClient(*ep, "t")
+	require.NoError(t, err)
+	err = rc.call("/v1/health", nil, nil)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "af-tunnel.invalid",
+		"the placeholder authority is an implementation detail, never an operator's error text")
+	assert.Contains(t, err.Error(), "af-tunnel-dead.sock",
+		"the error names the socket af actually dialed")
+	// The errors.Is chain survives the rewrite.
+	assert.True(t, errors.Is(err, os.ErrNotExist), "the dial error must stay inspectable")
+}
+
+// A ']' in the AF home cannot be expressed by the bracket-quoted -L spec —
+// refused at mint with the AGENT_FACTORY_HOME remedy, never handed to ssh as
+// a spec that parses to a different path (#7495 R5).
+func TestTunnelSocketPathRefusesAClosingBracket(t *testing.T) {
+	prev := tunnelGenerationDir
+	t.Cleanup(func() { tunnelGenerationDir = prev })
+	tunnelGenerationDir = func() (string, error) {
+		return "/tmp/af-home-with]bracket/tunnels/d1-abcdef", nil
+	}
+	p := &sandboxProvisioner{spec: ProvisionSpec{Title: "s"}}
+	_, err := p.tunnelSocketPath()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AGENT_FACTORY_HOME")
 }

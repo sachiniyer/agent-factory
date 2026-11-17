@@ -452,8 +452,10 @@ func containsInt(xs []int, x int) bool {
 
 // forwardLocalAddr returns the local end of an ssh argv's -L forward, spelled
 // `-L spec` or `-Lspec`. The spec is a path local end when the first field is a
-// path (`socket:host:hostport` or `socket:socket`, #7495) and a TCP port
-// otherwise (`[bind:]port:host:hostport`); "" if none.
+// path (`socket:host:hostport`, `socket:socket`, or bracket-escaped
+// `[socket]:host:hostport` — af quotes the unix path so a ':' in the AF home
+// still parses, #7495 R5) and a TCP port otherwise
+// (`[bind:]port:host:hostport`); "" if none.
 func forwardLocalAddr(args []string) string {
 	for i, a := range args {
 		spec := ""
@@ -463,6 +465,23 @@ func forwardLocalAddr(args []string) string {
 		case strings.HasPrefix(a, "-L") && len(a) > 2:
 			spec = a[2:]
 		default:
+			continue
+		}
+		if strings.HasPrefix(spec, "[") {
+			// A bracket-escaped first field is literal: the local end runs to
+			// the matching ']'. Inside the brackets a '/' names a socket
+			// path; anything else is a TCP bind address and the port follows.
+			end := strings.Index(spec, "]:")
+			if end < 0 {
+				continue
+			}
+			if inner := spec[1:end]; strings.HasPrefix(inner, "/") {
+				return inner
+			}
+			rest := spec[end+2:]
+			if f := strings.SplitN(rest, ":", 2); len(f) == 2 && f[0] != "" {
+				return f[0]
+			}
 			continue
 		}
 		f := strings.Split(spec, ":")
@@ -498,4 +517,28 @@ func transportLogLines(home string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// forwardLocalAddr must read the endpoint's own shape from an ssh -L argv:
+// bracket-escaped unix paths (af quotes the socket so a ':' in the AF home
+// still parses, #7495 R5), bare unix paths, and the legacy TCP forms.
+func TestForwardLocalAddrShapes(t *testing.T) {
+	cases := []struct {
+		spec string
+		want string
+	}{
+		{"[/tmp/af/tunnels/d1-abcdef/s1-x.sock]:127.0.0.1:9", "/tmp/af/tunnels/d1-abcdef/s1-x.sock"},
+		{"[/tmp/a:b/t/s1.sock]:127.0.0.1:9", "/tmp/a:b/t/s1.sock"},
+		{"/tmp/af/tunnels/d1-abcdef/s1-x.sock:127.0.0.1:9", "/tmp/af/tunnels/d1-abcdef/s1-x.sock"},
+		{"/tmp/af/tunnels/d1-abcdef/s1-x.sock:/run/agent.sock", "/tmp/af/tunnels/d1-abcdef/s1-x.sock"},
+		{"40001:127.0.0.1:9", "40001"},
+		{"127.0.0.1:40001:127.0.0.1:9", "40001"},
+		{"[::1]:40001:127.0.0.1:9", "40001"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := forwardLocalAddr([]string{"ssh", "-N", "-L", c.spec}); got != c.want {
+			t.Errorf("forwardLocalAddr(%q) = %q, want %q", c.spec, got, c.want)
+		}
+	}
 }

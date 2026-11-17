@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -57,6 +58,10 @@ type remoteAgentClient struct {
 	wsBase     string // ws://host:port
 	token      string
 	title      string // the sandbox's single-workspace session title (the stream path id)
+	// socketPath is set for a unix-tunnel endpoint: the URL's placeholder
+	// authority (af-tunnel.invalid) must never surface to an operator, so
+	// transport errors are rewritten to name the socket instead (#7495).
+	socketPath string
 }
 
 // newRemoteAgentClient builds the transport for ep, validating the URL up front
@@ -105,12 +110,32 @@ func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentCli
 		httpClient: &http.Client{
 			Transport: transport,
 		},
-		transport: transport,
-		httpBase:  httpBase,
-		wsBase:    wsBase,
-		token:     ep.Token,
-		title:     title,
+		transport:  transport,
+		httpBase:   httpBase,
+		wsBase:     wsBase,
+		token:      ep.Token,
+		title:      title,
+		socketPath: ep.SocketPath,
 	}, nil
+}
+
+// scrubEndpointURL rewrites transport errors so the tunnel endpoint's
+// placeholder authority never reaches an operator: Post
+// "http://af-tunnel.invalid/…" is nonsense next to a unix-socket dial failure
+// — the endpoint is the socket af's tunnel bound (#7495 R7). The *url.Error
+// copy keeps its inner error, so errors.Is chains (deadlines, refused) still
+// resolve.
+func (c *remoteAgentClient) scrubEndpointURL(err error) error {
+	if c.socketPath == "" {
+		return err
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		cp := *ue
+		cp.URL = c.socketPath
+		return &cp
+	}
+	return err
 }
 
 // splitHTTPBaseURL validates an agent-server base URL and derives its REST

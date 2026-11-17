@@ -303,7 +303,7 @@ func TestConfirmCallbackForwardNeedsTheSocketOnTheSandboxHost(t *testing.T) {
 
 	done := make(chan struct{})
 	close(done)
-	p.tunnel = &tunnelChild{done: done}
+	p.setTunnel(&tunnelChild{done: done})
 	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) { return nil, nil }
 	err = confirmCallbackForward(p)
 	require.Error(t, err, "an ssh that exited on ExitOnForwardFailure is not a working path even if a stale socket exists")

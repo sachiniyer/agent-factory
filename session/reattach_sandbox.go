@@ -251,7 +251,7 @@ func (p *sandboxProvisioner) abandonUnadoptedTunnel() {
 	unregisterSandboxTunnel(p)
 	p.reapMu.Lock()
 	t := p.tunnel
-	p.tunnel = nil
+	p.setTunnel(nil)
 	p.reapMu.Unlock()
 	killTunnel(t)
 	p.reapMu.Lock()

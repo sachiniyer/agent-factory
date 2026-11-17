@@ -209,7 +209,11 @@ func TestSandboxTunnelProbeSucceedsWhenSomethingListens(t *testing.T) {
 	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
 	defer func() { _ = ln.Close() }()
-	p := &sandboxProvisioner{socketPath: sockPath, tunnel: tunnelChildOnMyGroup(t)}
+	// The probe lstat-proves the bound socket (af's ssh masks it 0600) — the
+	// test's listener binds under its own umask, so tighten it the same way.
+	require.NoError(t, os.Chmod(sockPath, 0o600))
+	p := &sandboxProvisioner{socketPath: sockPath}
+	p.setTunnel(tunnelChildOnMyGroup(t))
 	require.NoError(t, waitForSandboxTunnelWithin(p, 2*time.Second, 20*time.Millisecond))
 }
 
@@ -240,7 +244,8 @@ func TestSandboxTunnelProbeRefusesAForeignListener(t *testing.T) {
 		_ = fakeChild.Process.Kill()
 		_ = fakeChild.Wait()
 	})
-	p := &sandboxProvisioner{socketPath: sockPath, tunnel: &tunnelChild{cmd: fakeChild, done: make(chan struct{})}}
+	p := &sandboxProvisioner{socketPath: sockPath}
+	p.setTunnel(&tunnelChild{cmd: fakeChild, done: make(chan struct{})})
 
 	err = waitForSandboxTunnelWithin(p, 300*time.Millisecond, 30*time.Millisecond)
 	require.Error(t, err)

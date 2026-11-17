@@ -1,8 +1,10 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 )
 
@@ -81,9 +83,12 @@ func (p *sandboxProvisioner) openTunnel(remoteAddr string) (string, error) {
 		return "", fmt.Errorf("backend=%s: %w", p.label(), err)
 	}
 
-	// `ssh -L <unix-socket>:<remote-host>:<remote-port>`: the local end is the
-	// socket file; the remote end is still the agent-server's loopback port.
-	forward := sockPath + ":" + remoteAddr
+	// `ssh -L [<unix-socket>]:<remote-host>:<remote-port>`: the local end is
+	// the socket file, bracket-quoted so a ':' anywhere in the AF home still
+	// parses — OpenSSH's parse_fwd_field has read the escape since before
+	// af's 7.6 floor (#7495 R5). The remote end is still the agent-server's
+	// loopback port.
+	forward := "[" + sockPath + "]:" + remoteAddr
 	// Registered before the spawn so a daemon exit racing this provision —
 	// StopAllSandboxTunnels — has the entry it needs the moment the child is
 	// born; the entry is dropped by stopTunnel, which reap reaches on every
@@ -168,7 +173,21 @@ func waitForSandboxTunnelWithin(p *sandboxProvisioner, timeout, poll time.Durati
 			peerErr = p.verifyTunnelPeer(conn.(*net.UnixConn))
 			_ = conn.Close()
 			if peerErr == nil {
-				return nil
+				// The peer says af's own ssh answered — but the proof asks the
+				// FILESYSTEM, not the option af passed: an ssh_config
+				// StreamLocalBindMask can still have stripped the bound
+				// socket's mode (#7495 R3).
+				fileErr := verifyTunnelSocketFile(sockPath)
+				if fileErr == nil {
+					return nil
+				}
+				if !errors.Is(fileErr, os.ErrNotExist) {
+					// A wrong-shaped bound socket never self-heals — fail
+					// now with the remedy rather than burn the deadline.
+					return fmt.Errorf("backend=%s: %v", p.label(), fileErr)
+				}
+				// ENOENT: a re-dial is mid-rebind — keep polling; the peer
+				// check reruns on the next pass.
 			}
 		} else {
 			peerErr = nil
@@ -180,7 +199,9 @@ func waitForSandboxTunnelWithin(p *sandboxProvisioner, timeout, poll time.Durati
 					p.label(), sockPath, peerErr)
 			}
 			return fmt.Errorf("backend=%s: the ssh tunnel to %s never started listening within %s — "+
-				"check that the transport af runs for %s works by hand and that the remote permits port forwarding%s",
+				"af needs the transport's ssh to bind a UNIX-socket -L forward (OpenSSH 6.7+); testing "+
+				"it by hand with a TCP -L proves nothing. Check that the transport af runs for %s accepts "+
+				"a socket forward and that the remote permits port forwarding%s",
 				p.label(), sockPath, timeout, sandboxTransportConfigKey(p.label()), tunnelOwnLoginNote(p.label()))
 		}
 		time.Sleep(poll)

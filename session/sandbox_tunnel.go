@@ -246,7 +246,7 @@ func (p *sandboxProvisioner) provisionTunnelChild() (*tunnelChild, error) {
 		killTunnel(child)
 		return nil, errTunnelOwnerStopped
 	}
-	p.tunnel = child
+	p.setTunnel(child)
 	return child, nil
 }
 
@@ -312,12 +312,17 @@ func killTunnel(t *tunnelChild) {
 //     stand between af and its forward (#7495). It can only ever unlink a
 //     path inside THIS daemon's own generation dir: the socket path is
 //     generated there, and the per-daemon dir is the boundary.
-//   - StreamLocalBindMask=0177: the socket file is bound 0600 — and inside
-//     the uid-verified 0700 tunnels dir that mode is defense in depth, since
-//     no other account can reach the path at all. It lands AFTER p.sshCmd
-//     with the other -o values, so an operator's own explicit mask wins —
-//     OpenSSH takes the FIRST setting it reads — and that is the right call:
-//     a looser socket mode relaxes nothing outside af's own private dir.
+//   - StreamLocalBindMask=0177: af asks for the socket file bound 0600. On
+//     the command line the LAST -o wins, so this placement after p.sshCmd
+//     beats an operator's own -o mask — but the keyword carries no
+//     first-obtained-wins guard, and an ssh_config value is read after the
+//     command line, so a config file can still override it (backend=ssh runs
+//     -F none and is unaffected). The readiness probe therefore trusts the
+//     filesystem rather than the option: it lstat-proves the bound socket —
+//     a socket, this uid, no group or other bits — before reporting ready
+//     (verifyTunnelSocketFile). Inside the uid-verified 0700 dirs a stripped
+//     mode still could not be reached by another account; the proof exists
+//     so a quieter socket is a loud tunnel failure, never a relaxed one.
 //   - ServerAliveInterval/CountMax: the protocol-level keepalive (#5571 W1.2).
 //     Without it a dead peer — a host that vanished, a NAT mapping that
 //     expired — is indistinguishable from a quiet tunnel until TCP gives up
@@ -750,7 +755,7 @@ func (p *sandboxProvisioner) superviseTunnel() {
 				p.reapMu.Lock()
 				if p.tunnel == next {
 					killTunnel(next)
-					p.tunnel = nil
+					p.setTunnel(nil)
 				}
 				p.reapMu.Unlock()
 				m.noteEvent(withTunnelStderr(err, next))
@@ -775,7 +780,7 @@ func (p *sandboxProvisioner) superviseTunnel() {
 			p.reapMu.Lock()
 			if p.tunnel == child {
 				killTunnel(child)
-				p.tunnel = nil
+				p.setTunnel(nil)
 			}
 			stopped := p.stopped
 			p.reapMu.Unlock()
