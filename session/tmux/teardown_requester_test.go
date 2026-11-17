@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/log/logtest"
 )
@@ -108,7 +110,7 @@ func TestReapSessionProcessesNeverWaitsOnOrSignalsRequester(t *testing.T) {
 	// the wait a non-event, not merely a shorter one.
 	grace := 2 * time.Second
 	start := time.Now()
-	remaining := reapSessionProcesses(reapOnRequest, "af_requester_reap", []proctree.Process{requester}, grace, 300*time.Millisecond, nil)
+	remaining := reapSessionProcesses(reapOnRequest, "af_requester_reap", []proctree.Process{requester}, grace, 300*time.Millisecond, selfProtectedSet())
 	elapsed := time.Since(start)
 
 	require.Empty(t, remaining, "the exempt requester is not a leftover — nothing was reaped")
@@ -130,7 +132,7 @@ func TestReapSessionProcessesStillReapsGenuineLeaksBesideRequester(t *testing.T)
 	defer untrack()
 
 	remaining := reapSessionProcesses(reapOnRequest, "af_requester_and_leak",
-		[]proctree.Process{requester, leak}, 200*time.Millisecond, 500*time.Millisecond, nil)
+		[]proctree.Process{requester, leak}, 200*time.Millisecond, 500*time.Millisecond, selfProtectedSet())
 
 	require.Empty(t, remaining, "a plain sleeper dies to SIGTERM — nothing should outlive the reap")
 	require.True(t, proctree.AliveSame(requester),
@@ -160,7 +162,7 @@ func TestReapSessionProcessesSparesRequesterRegisteredMidGrace(t *testing.T) {
 	t.Cleanup(func() { (<-untrackCh)() })
 
 	remaining := reapSessionProcesses(reapOnRequest, "af_requester_late",
-		[]proctree.Process{requester}, 900*time.Millisecond, 300*time.Millisecond, nil)
+		[]proctree.Process{requester}, 900*time.Millisecond, 300*time.Millisecond, selfProtectedSet())
 
 	require.Empty(t, remaining, "the late-tracked requester leaves the signal set, not the wait")
 	require.True(t, proctree.AliveSame(requester),
@@ -180,7 +182,7 @@ func TestReapSessionProcessesReapsRequesterAfterUnregister(t *testing.T) {
 	untrack()
 
 	reapSessionProcesses(reapOnRequest, "af_requester_untracked", []proctree.Process{requester},
-		200*time.Millisecond, 500*time.Millisecond, nil)
+		200*time.Millisecond, 500*time.Millisecond, selfProtectedSet())
 	require.False(t, proctree.AliveSame(requester),
 		"an unregistered process is reaped like anything else — the exemption does not leak past its scope")
 }
@@ -252,11 +254,32 @@ func TestCloseAndWaitForPaneExitNeverReapsItsRequester(t *testing.T) {
 // reaped. This is what pins the exemption to kernel-verified registration —
 // a process cannot get itself spared merely by being in the captured set.
 func TestCloseAndWaitForPaneExitReapsUntrackedCallerInSameTree(t *testing.T) {
+	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
-	require.True(t, strings.HasPrefix(testProcessComm(t), "tmux"),
-		"fixture requires this test binary's comm (%q) to verify as a tmux server", testProcessComm(t))
 
-	stranger := spawnRequesterSleeper(t)
+	// The stranger must be a REAL pane member — a child of a real tmux
+	// server, not of this test process. Since #7435 R2 a descendant of the
+	// reaper outside a tmux boundary is protectReasonSelfSubtree and spared
+	// for that reason, so the test-child sleeper this fixture used to spawn
+	// would now be protected before registration is ever consulted — the
+	// exemption under test (the registry is the ONLY thing that spares a
+	// captured process) could not be observed. A real pane's own process
+	// walks to the tmux server first and stays in the kill set.
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", "af_untracked", "sleep", "300").CombinedOutput()
+	require.NoError(t, err, "spawn the stranger pane: %s", out)
+	var stranger proctree.Process
+	require.Eventually(t, func() bool {
+		lout, err := exec.Command("tmux", "list-panes", "-t", "af_untracked", "-F", "#{pane_pid}").Output()
+		if err != nil {
+			return false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(lout)))
+		if err != nil {
+			return false
+		}
+		stranger, err = proctree.Lookup(pid)
+		return err == nil
+	}, 10*time.Second, 50*time.Millisecond, "the stranger pane never became visible")
 
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(*exec.Cmd) error { return nil },

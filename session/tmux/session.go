@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
@@ -410,6 +412,15 @@ type TmuxSession struct {
 	// text is not enough to claim that a prior delivery was stranded (#2225).
 	// Protected by inputMu; it never gates delivery.
 	lastPastedTail string
+	// paneRootEvidence is the most recently resolved (pid, StartID) pane-root
+	// identity — stamped by PaneRootProcess at every launch and reattach
+	// boundary that proves a root stands behind the name. If the session then
+	// vanishes, the process sweep admits a survivor only on kernel evidence
+	// this recorded root supplies: its pid is the SID its same-session
+	// members carry, and the pair names the root itself (#7435 item 5, R2).
+	// A session whose root was never resolved carries none — and the sweep
+	// refuses on any marked candidate rather than signalling on env markers.
+	paneRootEvidence atomic.Pointer[proctree.Process]
 	// provenNoPane records that a Start attempt PROVED this name had no tmux
 	// session and then returned before running new-session, so nothing can be
 	// running behind it. Guarded by provenMu; read through ProvenNoPane.

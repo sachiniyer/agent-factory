@@ -191,12 +191,14 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 
 	// Capture the panes' process trees before kill-session — afterwards any
 	// survivor is reparented to init and its ancestry is unrecoverable
-	// (#1104). The reaper's own-chain evidence is captured with it, at the same
-	// pre-kill shape: a CLI dying on the kill reparents a daemon the pane
-	// spawned out from under the server, and protection decided from the
-	// post-kill tree is decided from the wrong tree (Codex on #7433).
-	leaked, captureErr := CaptureSessionProcessTrees(t.cmdExec, t.sanitizedName)
-	protected := reapProtectedChain()
+	// (#1104). Protection is computed from the SAME snapshot the capture used,
+	// at the same pre-kill point: a CLI dying on the kill reparents a daemon
+	// the pane spawned out from under the server, and protection decided from
+	// a later table is decided from the wrong one (Codex on #7433, #7435
+	// item 3).
+	captured, captureErr := captureSessionProcessTrees(t.cmdExec, t.sanitizedName, "")
+	leaked := captured.Procs
+	protected := reapProtectedSet(captured.Snapshot, leaked)
 
 	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
 	// itself: an unbounded kill-session against a wedged server blocks
@@ -446,6 +448,18 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 		// original pane still running (#2103). The process-table identity makes
 		// both distinctions explicit.
 		paneProcess, waitForPane, processErr = capturePaneProcess(pid)
+		if processErr == nil && waitForPane {
+			// Same evidence PaneRootProcess stamps: the resolved root's
+			// (pid, StartID) — whose pid is also the pane SID — is what a
+			// later blind retry's vanished-session sweep may admit on (#7435
+			// R2), including on a TmuxSession that never saw setRuntimeLaunch.
+			// Only a CAPTURED live root may replace it: a root that exited in
+			// the panePID→snapshot gap returns the zero identity, and storing
+			// that erases the previous anchor's SID and tier-2 root — the
+			// surviving cohort then refuses forever on every retry (Codex
+			// 4596311717).
+			t.reconcilePaneRootEvidence(paneRootAnswer{resolved: paneProcess})
+		}
 	}
 	closeState, closeErr, processes := t.close(true)
 
@@ -632,7 +646,33 @@ func (t *TmuxSession) sweepVanishedSessionProcesses(trustLiveGeneration bool) er
 	// refresh — the marker scan IS the evidence standing in for the ancestry tmux
 	// lost, so passing the capture failure through would make it a blocker again
 	// and defeat the point.
-	return reapVanishedSessionProcesses(t.sanitizedName, ownHome, nil, nil, trustLiveGeneration)
+	//
+	// What the scan CANNOT do is prove membership on env alone (#7435 item 5,
+	// R2): an af daemon EnsureDaemon'd out of the pane and every tmux server or
+	// helper it later spawns all inherit the markers. The kernel evidence the
+	// sweep may admit on is the pane-root identity the launch recorded — the
+	// root led its own kernel session, so its pid IS the SID its surviving
+	// same-session members carry, and the (pid, StartID) pair names the root
+	// itself. With no recorded root the gate admits nothing: the sweep refuses
+	// on any marked candidate instead of reaping on env markers.
+	var membership cohortMembership
+	if root := t.paneRootEvidence.Load(); root != nil {
+		// The recorded pane SID plus its (pid, StartID) pair is what anchors
+		// tier 2's generation-identity admission (#7435 R6): the cohort
+		// derives Root from this same evidence, so a marker carrier that
+		// fails kernel membership is still reapable when it began no earlier
+		// than the pane root — the #3699 re-hosted shape. AgentExe is the
+		// allowlist's identity: it comes from the session's recorded program,
+		// NEVER the anchor's Comm — the pane root is af's `sh` wrapper, so
+		// Comm answers "sh" for every agent launch (#7435 R16).
+		membership = cohortMembership{
+			PaneSIDs: map[int]bool{root.PID: true},
+			Recorded: map[int]uint64{root.PID: root.StartID},
+			Root:     *root,
+			AgentExe: t.agentProgramExe(),
+		}
+	}
+	return reapVanishedSessionProcesses(t.sanitizedName, ownHome, nil, nil, membership, trustLiveGeneration)
 }
 
 // capturePaneProcess turns tmux's bare pane PID into a process-table identity

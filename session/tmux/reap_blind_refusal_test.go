@@ -33,7 +33,7 @@ func TestBlindVanishedSessionRefusalTellsOperatorHowToTell(t *testing.T) {
 	marked := spawnMarkedSessionWithEscapee(t, name, home, generation)
 	vanishSessionWithObservableEscapee(t, name, marked)
 
-	err := reapVanishedSessionProcesses(name, home, nil, nil, false)
+	err := reapVanishedSessionProcesses(name, home, nil, nil, cohortMembership{}, false)
 	require.Error(t, err, "a blind sweep with no captured predecessor must refuse")
 	require.True(t, proctree.AliveSame(marked),
 		"the blind refusal must not signal a process it cannot attribute")
@@ -127,8 +127,8 @@ func TestBlindRefusalDoesNotOfferTheSweepsOwnProcessAsSafeToKill(t *testing.T) {
 		self, err := proctree.Lookup(os.Getpid())
 		require.NoError(t, err)
 
-		_, inspectErr := markedOrphanProcesses([]proctree.Process{self}, name, home,
-			orphanGenerationSet{values: map[string]bool{}})
+		_, _, inspectErr := markedOrphanProcesses([]proctree.Process{self}, name, home,
+			orphanGenerationSet{values: map[string]bool{}}, cohortMembership{}, nil)
 
 		require.Error(t, inspectErr, "an unplaceable marked process must still refuse")
 		require.Contains(t, inspectErr.Error(), strconv.Itoa(os.Getpid()),

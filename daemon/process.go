@@ -877,66 +877,20 @@ func isAgentFactoryDaemon(pid int) bool {
 	if len(args) == 0 {
 		return false
 	}
-	return argsHaveDaemonFlag(args) && argsAreDaemonBinary(args)
+	return proctree.ArgvIsAFDaemon(args)
 }
 
-// argsHaveDaemonFlag reports whether argv contains "--daemon" as a discrete argument (either bare
-// or in the "--daemon=value" form). It deliberately rejects substring matches like "--daemonize"
-// or "--daemon-mode". Because it scans real argv elements, spaces inside another argument (such as
-// a spaced binary path in argv[0]) can never fabricate or hide a "--daemon" token (#1214).
+// argsHaveDaemonFlag is proctree.ArgvHasDaemonFlag under this package's
+// historical name: the flag half of the shared agent-factory daemon classifier
+// every PID-validation and kill path must agree on (#1004/#7435).
 func argsHaveDaemonFlag(args []string) bool {
-	for _, a := range args {
-		if a == "--daemon" {
-			return true
-		}
-		value, ok := strings.CutPrefix(a, "--daemon=")
-		if !ok {
-			continue
-		}
-		// `--daemon=false` is a client saying, explicitly, that it is NOT a
-		// daemon. Matching the prefix and calling it one made every such client
-		// a daemon to every caller here: doctor counted it as a duplicate, the
-		// host scan offered it for a kill, and the #1004 pid guard would have
-		// accepted it as ours. The flag's VALUE is the answer; its name is only
-		// where the answer lives.
-		//
-		// Only an explicitly FALSE value flips the answer. An unparseable one
-		// ("--daemon=foo") keeps the long-standing "the form is present, so treat
-		// it as a daemon flag" reading that TestArgsHaveDaemonFlag has pinned
-		// since #342: that case is about recognizing the `--daemon=` FORM (as
-		// against `--daemonize`), and its value is a placeholder, not a boolean.
-		// It is also unobservable in practice — cobra rejects a non-boolean here,
-		// so no such process is ever live to classify — and narrowing a seam that
-		// gates signals on a hypothetical is not worth the blast radius.
-		enabled, err := strconv.ParseBool(value)
-		if err != nil {
-			return true
-		}
-		return enabled
-	}
-	return false
+	return proctree.ArgvHasDaemonFlag(args)
 }
 
-// argsAreDaemonBinary reports whether argv[0] is an agent-factory daemon binary: installed as "af"
-// or built from source (`go build .`) as "agent-factory". The host-wide pgrep scan in
-// sigterm_fallback.go matches any process carrying a "--daemon" token, so this restores the
-// binary-name specificity that the old "af --daemon" substring pattern provided — while still
-// catching source-built `agent-factory --daemon` daemons that the old pattern missed (#937).
-//
-// argv[0] is a single argv element, so filepath.Base sees the whole executable path even when it
-// contains spaces (e.g. "/home/John Smith/.local/bin/af" → base "af"). The previous
-// implementation space-joined the argv and re-split on whitespace, which turned that same path
-// into base "John" and made every spaced-install daemon undetectable (#1214).
+// argsAreDaemonBinary is proctree.ArgvIsAFBinary under this package's
+// historical name: the binary-name half of the shared classifier.
 func argsAreDaemonBinary(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	switch filepath.Base(args[0]) {
-	case "af", "agent-factory":
-		return true
-	default:
-		return false
-	}
+	return proctree.ArgvIsAFBinary(args)
 }
 
 // daemonArgs returns the argv of pid with argument BOUNDARIES preserved, or nil when no argv is

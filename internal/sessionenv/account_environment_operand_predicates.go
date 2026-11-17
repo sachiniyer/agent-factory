@@ -135,7 +135,7 @@ func shellCommandIsUnproven(words []*syntax.Word) bool {
 		return false
 	}
 	command, literal := literalShellWord(words[0])
-	if !literal || !knownShellName(filepath.Base(command)) {
+	if !literal || !KnownShellName(filepath.Base(command)) {
 		return false
 	}
 	return !accountShellCommandWordsProven(words)
@@ -177,7 +177,13 @@ func accountShellCommandWordsProven(words []*syntax.Word) bool {
 	return literal && slices.Equal(args, want)
 }
 
-func knownShellName(name string) bool {
+// KnownShellName reports whether a basename names one of the shells the
+// account-environment judgements recognize — the POSIX family plus fish and
+// csh/tcsh. Callers feed it filepath.Base output: a path-qualified shell is
+// the same shell (Codex 4599228958: argv[1] == "-c" reads as a command ONLY
+// behind one of these — `codex -c check_for_update_on_startup=false` is codex
+// taking a config flag, and `python -c <script>` names no agent at all).
+func KnownShellName(name string) bool {
 	switch name {
 	case "ash", "bash", "csh", "dash", "fish", "ksh", "mksh", "sh", "tcsh", "zsh":
 		return true

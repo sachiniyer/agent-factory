@@ -1,7 +1,9 @@
 package tmux
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -95,7 +97,12 @@ af_a:b:c: 1 windows (created Wed May 20 12:03:00 2026) [179x47]`
 // (pre-marker build, tmux <3.2) must both survive the sweep; only sessions
 // carrying THIS home's marker die.
 func TestCleanupSessionsOnlyKillsOwnedSessions(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", "/owned-home")
+	// BOTH homes must exist: an unstat-able side classifies as homeUnproven
+	// — which under #7435 refuses the whole sweep — while two paths that
+	// stat to different directories are homeForeign and skipped silently.
+	own := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", own)
+	foreign := t.TempDir()
 	tmuxOutput := `af_mine: 1 windows (created Wed May 20 12:00:00 2026) [179x47]
 af_theirs: 1 windows (created Wed May 20 12:01:00 2026) [179x47]
 af_legacy: 1 windows (created Wed May 20 12:02:00 2026) [179x47]`
@@ -115,9 +122,9 @@ af_legacy: 1 windows (created Wed May 20 12:02:00 2026) [179x47]`
 			if len(cmd.Args) > 1 && cmd.Args[1] == "show-environment" {
 				switch {
 				case strings.Contains(strings.Join(cmd.Args, " "), "af_mine"):
-					return []byte("AF_HOME=/owned-home\n"), nil
+					return []byte("AF_HOME=" + own + "\n"), nil
 				case strings.Contains(strings.Join(cmd.Args, " "), "af_theirs"):
-					return []byte("AF_HOME=/another-home\n"), nil
+					return []byte("AF_HOME=" + foreign + "\n"), nil
 				default:
 					if cmd.Args[len(cmd.Args)-1] == EnvMarkerHome {
 						return nil, missingMarkerErr
@@ -138,6 +145,148 @@ af_legacy: 1 windows (created Wed May 20 12:02:00 2026) [179x47]`
 	require.NoError(t, err)
 	require.Equal(t, []string{"=af_mine:"}, killedSessions,
 		"only the session carrying this home's AF_HOME marker may be killed; foreign-home and marker-less sessions must survive (#1122)")
+}
+
+// TestCleanupSessionsRefusesOnAnUnprovableHome is the R1 property: on a path
+// whose success authorizes cleanup — `af reset` deletes the worktrees on a
+// nil return — a session whose AF_HOME cannot be PROVEN (a relative marker
+// like .af is accepted as a home by ConfigDirFor, so panes can really carry
+// it) is an ERROR, never "leave it" and return nil. Only homeForeign skips
+// silently.
+func TestCleanupSessionsRefusesOnAnUnprovableHome(t *testing.T) {
+	own := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", own)
+	tmuxOutput := `af_ambiguous: 1 windows (created Wed May 20 12:00:00 2026) [179x47]
+af_mine: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
+
+	var killedSessions []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			for i, arg := range cmd.Args {
+				if arg == "-t" && i+1 < len(cmd.Args) {
+					killedSessions = append(killedSessions, cmd.Args[i+1])
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if len(cmd.Args) > 1 && cmd.Args[1] == "show-environment" {
+				if strings.Contains(strings.Join(cmd.Args, " "), "af_ambiguous") {
+					return []byte("AF_HOME=.af\n"), nil
+				}
+				return []byte("AF_HOME=" + own + "\n"), nil
+			}
+			if len(cmd.Args) > 1 && cmd.Args[1] == "list-panes" {
+				return nil, nil
+			}
+			return []byte(tmuxOutput), nil
+		},
+	}
+
+	err := CleanupSessions(cmdExec)
+	require.Error(t, err, "an unprovable home marker must fail the sweep so reset refuses")
+	require.Contains(t, err.Error(), "cannot be proven")
+	require.Equal(t, []string{"=af_mine:"}, killedSessions,
+		"the provable session is still killed; only the unprovable one is left alone AND reported")
+}
+
+// #7435 R10 — when the unprovable side is THIS install's own home (af was
+// launched with a relative AGENT_FACTORY_HOME), the refusal must name that
+// root cause and its fix once, not print a per-session "cannot be proven"
+// that reads as N marker problems. `af reset` surfaces this error.
+func TestCleanupSessionsNamesARelativeOwnHome(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", "relative/af-home")
+	tmuxOutput := `af_one: 1 windows (created Wed May 20 12:00:00 2026) [179x47]
+af_two: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if len(cmd.Args) > 1 && cmd.Args[1] == "show-environment" {
+				return []byte("AF_HOME=/abs/marker-home\n"), nil
+			}
+			if len(cmd.Args) > 1 && cmd.Args[1] == "list-panes" {
+				return nil, nil
+			}
+			return []byte(tmuxOutput), nil
+		},
+	}
+
+	err := CleanupSessions(cmdExec)
+	require.Error(t, err, "a relative own home must fail the sweep so reset refuses")
+	require.Contains(t, err.Error(), "is not an absolute path",
+		"the refusal names the real cause: this install's own home is relative")
+	require.Contains(t, err.Error(), "AGENT_FACTORY_HOME",
+		"and the fix: set it to an absolute path")
+	require.Equal(t, 1, strings.Count(err.Error(), "is not an absolute path"),
+		"the root cause is said once — not repeated per session it blocked")
+}
+
+// TestCleanupSessionsClassifiesHomeByFilesystem guards #7435 item 2: the
+// sweep's AF_HOME compare used to be filepath.Clean on both sides, so a
+// marker that only Cleans to this home was admitted. Now only literal
+// equality or a SameFile stat proves the home: a lexical alias through a
+// missing directory is unproven (left alone AND reported — the R1 error, so
+// `af reset` refuses over it), while a symlink that stats to the home is the
+// same home and its session dies.
+func TestCleanupSessionsClassifiesHomeByFilesystem(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	// A regular file sits where a directory would need to be: the path Cleans
+	// to the home but traversal through it fails with ENOTDIR on every
+	// platform — stat can never prove it. The ".." is spliced in by hand
+	// because filepath.Join CLEANS its result: a Join-built alias collapses
+	// to the home literally and the fixture proves nothing (#7435).
+	notDir := filepath.Join(filepath.Dir(home), "not-a-dir")
+	require.NoError(t, os.WriteFile(notDir, []byte("x"), 0o600))
+	alias := notDir + string(os.PathSeparator) + ".." + string(os.PathSeparator) + filepath.Base(home)
+	require.Equal(t, home, filepath.Clean(alias),
+		"the alias fixture must differ only lexically — a Clean-based compare would admit it")
+	require.NotEqual(t, home, alias,
+		"the alias must not BE the home literally, or the fixture tests nothing")
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(home, link))
+	foreign := t.TempDir()
+	require.NotEqual(t, home, foreign)
+
+	tmuxOutput := `af_alias: 1 windows (created Wed May 20 12:00:00 2026) [179x47]
+af_link: 1 windows (created Wed May 20 12:01:00 2026) [179x47]
+af_foreign: 1 windows (created Wed May 20 12:02:00 2026) [179x47]`
+
+	var killedSessions []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			for i, arg := range cmd.Args {
+				if arg == "-t" && i+1 < len(cmd.Args) {
+					killedSessions = append(killedSessions, cmd.Args[i+1])
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if len(cmd.Args) > 1 && cmd.Args[1] == "show-environment" {
+				switch {
+				case strings.Contains(strings.Join(cmd.Args, " "), "af_alias"):
+					return []byte("AF_HOME=" + alias + "\n"), nil
+				case strings.Contains(strings.Join(cmd.Args, " "), "af_link"):
+					return []byte("AF_HOME=" + link + "\n"), nil
+				default:
+					return []byte("AF_HOME=" + foreign + "\n"), nil
+				}
+			}
+			if len(cmd.Args) > 1 && cmd.Args[1] == "list-panes" {
+				return nil, nil
+			}
+			return []byte(tmuxOutput), nil
+		},
+	}
+
+	err := CleanupSessions(cmdExec)
+	require.Error(t, err,
+		"the unproven alias must fail the sweep — `af reset` may not delete worktrees under an unattributable session")
+	require.Contains(t, err.Error(), "cannot be proven")
+	require.Equal(t, []string{"=af_link:"}, killedSessions,
+		"only the session whose AF_HOME stats to this home may be killed; a lexical alias and a foreign home must survive (#7435)")
 }
 
 func tmuxMissingEnvironmentError(t *testing.T) error {

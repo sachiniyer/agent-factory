@@ -82,6 +82,26 @@ func (t *TmuxSession) Start(workDir string) error {
 		t.revokePendingCapabilities()
 	} else {
 		t.commitCapabilities(true)
+		// Stamp the launch's pane-root identity for the vanished-session
+		// sweep's membership evidence (#7435 R6): this is the one point every
+		// spawn passes through — agent launch, shell/process tab, respawn —
+		// and a session whose pane later vanishes can still prove its cohort
+		// only if the root was recorded while tmux could answer for it.
+		// Best-effort like the evidence itself: an unanswerable pane query
+		// leaves the sweep fail-closed rather than failing a healthy launch.
+		// The stamp runs on EVERY successful spawn, not only when no evidence
+		// exists yet: a respawn of an existing TmuxSession (a restored shell
+		// tab) always replaced the pane — a surviving start() reaches here
+		// only through new-session — so evidence the previous launch left
+		// names a different pane incarnation and must be restamped (Codex
+		// 4597265491). The supersede clears the stale pair first, so even a
+		// re-stamp that cannot answer retires it: keeping an anchor whose
+		// StartID predates the actual root would lower tier 2's
+		// no-earlier-than bound onto the wrong incarnation.
+		t.reconcilePaneRootEvidence(paneRootAnswer{supersede: true})
+		if _, rootErr := t.PaneRootProcess(); rootErr != nil {
+			log.InfoLog.Printf("tmux session %s: could not record pane-root identity at spawn: %v", t.sanitizedName, rootErr)
+		}
 	}
 	return err
 }
@@ -302,12 +322,14 @@ func (t *TmuxSession) start(workDir string) error {
 		// session. ExistsOrUnknown is safe here: the only action gated on true is a
 		// bounded best-effort kill-session, never a false liveness claim.
 		if t.ExistsOrUnknown() {
-			leaked := SessionProcessTrees(t.cmdExec, t.sanitizedName)
-			// Captured with the tree, at the same pre-kill shape: a pane process
-			// dying on the cleanup kill reparents a reaper the pane spawned, and
-			// protection decided afterwards is decided from the wrong tree
-			// (Codex on #7433).
-			protected := reapProtectedChain()
+			captured, _ := captureSessionProcessTrees(t.cmdExec, t.sanitizedName, "")
+			leaked := captured.Procs
+			// Protection is decided from the SAME snapshot the capture used —
+			// even a partial one is better than a second, later table: a pane
+			// process dying on the cleanup kill reparents a reaper the pane
+			// spawned, and protection decided afterwards is decided from the
+			// wrong tree (Codex on #7433, #7435 item 3).
+			protected := reapProtectedSet(captured.Snapshot, leaked)
 			// Bound the cleanup kill-session (#2028): on bare exec.Command it could
 			// hang forever on a wedged tmux server, and Start is on the daemon's
 			// create/launch path, so an unbounded stall here wedges that handler. Route
@@ -790,6 +812,19 @@ func (t *TmuxSession) reattach(opts reattachOptions) error {
 		answered:   answered || confirmedFresh,
 		startedAt:  resolvedAt,
 	})
+	// Anchor coverage (#7435 R6): a reattached session whose pane-root
+	// identity was never recorded — a restored shell/process tab carrying no
+	// persisted pair — stamps its resolved root here so a later vanish still
+	// has membership evidence to judge its escapees against. Once stamped the
+	// launch/verify paths own the refresh; a nil stamp is the only case that
+	// pays the bounded pane query on this path. The query runs only when tmux
+	// just answered — an unanswered rebind must not spend another probe on a
+	// server that already failed to reply (the rebinding-only contract).
+	if (answered || confirmedFresh) && t.paneRootEvidence.Load() == nil {
+		if _, rootErr := t.PaneRootProcess(); rootErr != nil {
+			log.InfoLog.Printf("tmux session %s: could not record pane-root identity on reattach: %v", t.sanitizedName, rootErr)
+		}
+	}
 	return nil
 }
 

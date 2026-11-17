@@ -61,7 +61,7 @@ func judgeShadowedChildSuffix(words []*syntax.Word, names map[string]struct{}, m
 // The dispatch controls how each listed name is matched, so the candidate
 // filter follows the same shape the dispatch actually triggers on: an
 // executable wrapper or shell is recognized by basename (isAccountCommandName
-// uses filepath.Base; knownShellName is fed one), so a path form
+// uses filepath.Base; KnownShellName is fed one), so a path form
 // (/usr/bin/nice, /bin/sh) is the same command a shadowed wrapper can shift to
 // and stays a candidate. A builtin is recognized by isBareName, which rejects
 // any path component, so a path or empty operand that merely shares a basename
@@ -87,7 +87,7 @@ func accountChildTailSuffixStartsVerdict(word *syntax.Word) bool {
 // a per-suffix wrapperOperandTailMutates judgement must still inspect after an
 // earlier suffix's judgement has already covered a buried env word, shell, and
 // option value. Every entry is matched by basename: the form the dispatch
-// recognizes for wrappers (isAccountCommandName) and shells (knownShellName).
+// recognizes for wrappers (isAccountCommandName) and shells (KnownShellName).
 var accountChildTailSuffixVerdictNames = map[string]struct{}{
 	// Recognized wrappers peeled by unwrapAccountCommand that are dispatched
 	// by isAccountCommandName, so a path form is the same wrapper.
@@ -101,7 +101,7 @@ var accountChildTailSuffixVerdictNames = map[string]struct{}{
 	// unrecognizedWrapperHidesAccountAssignment, so a buried strace can begin a
 	// verdict only when judged from strace's own suffix.
 	"strace": {},
-	// Shells knownShellName recognizes. The opaque-head scan flags a buried
+	// Shells KnownShellName recognizes. The opaque-head scan flags a buried
 	// shell only while words follow it, so a bare trailing shell — which a
 	// shadowed wrapper can shift to and exec — is judged at its own suffix,
 	// where shellCommandIsUnproven sees it as the head and refuses it.

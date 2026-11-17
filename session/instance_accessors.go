@@ -702,8 +702,18 @@ func (i *Instance) settleReattachVerification(ts *tmux.TmuxSession) (verified, c
 	i.runtimeStartID = 0
 	switch {
 	case unanswered:
+		// tmux never answered, so nothing was DISPROVEN: the claim's pair
+		// stays as capture evidence, and the anchor it seeded in the
+		// TmuxSession stays too — a restore that timed out must not lose its
+		// tier-2 root to a query that proved nothing (#7435 R17).
 		i.captureEvidence = keptCaptureEvidence{pid: pid, startID: startID}
 	case pid > 0 && ts != nil:
+		// The seed this claim produced retires with it (#7435 R11/R17):
+		// a restore primed the TmuxSession's vanished-sweep anchor from
+		// this exact pair, and tmux just ANSWERED that it is not this
+		// session's root — keeping it would let tier 2 anchor on a
+		// disproven root.
+		ts.RetirePaneRootEvidence(pid, startID)
 		i.markRepairRuntimeReplacedLocked(time.Now())
 	}
 	return false, true
