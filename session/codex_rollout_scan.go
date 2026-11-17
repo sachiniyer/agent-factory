@@ -211,7 +211,10 @@ func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []str
 				matches = append(matches, path)
 			} else {
 				uncorrelated++
-				if readErr != nil {
+				// A first record still mid-write is a readable channel
+				// whose answer has not landed — uncorrelated, never an
+				// unreadable one (#7140; #7475 review R2).
+				if readErr != nil && !errors.Is(readErr, errCodexSessionMetaIncomplete) {
 					unreadableCount++
 					if unreadable == nil {
 						unreadable = readErr
