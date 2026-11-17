@@ -284,6 +284,13 @@ var (
 // the bound is left alone, and the returned error wraps ErrShutdownIncomplete
 // so the caller can withhold the respawn and tell the user.
 func WaitForShutdownCompletion(target ShutdownTarget) error {
+	return waitForShutdownCompletionWithin(target, shutdownCompleteGrace, shutdownSocketQuietGrace)
+}
+
+// waitForShutdownCompletionWithin is WaitForShutdownCompletion with its two
+// bounds given: pidGrace for a known PID's exit, socketGrace for the
+// socket-quiet fallback.
+func waitForShutdownCompletionWithin(target ShutdownTarget, pidGrace, socketGrace time.Duration) error {
 	if pid := target.PID; pid > 0 {
 		// The start-time token, taken when the PID was learned, tells a recycled
 		// PID from the daemon: if the daemon exits and its PID is reused, liveness
@@ -298,7 +305,7 @@ func WaitForShutdownCompletion(target ShutdownTarget) error {
 			cur := processStartTokenFn(pid)
 			return token != "" && cur != "" && cur != token
 		}
-		deadline := time.Now().Add(shutdownCompleteGrace)
+		deadline := time.Now().Add(pidGrace)
 		for time.Now().Before(deadline) {
 			if gone() {
 				return nil
@@ -310,9 +317,9 @@ func WaitForShutdownCompletion(target ShutdownTarget) error {
 		if gone() {
 			return nil
 		}
-		return fmt.Errorf("%w: daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, pid, shutdownCompleteGrace)
+		return fmt.Errorf("%w: daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, pid, pidGrace)
 	}
-	deadline := time.Now().Add(shutdownSocketQuietGrace)
+	deadline := time.Now().Add(socketGrace)
 	for time.Now().Before(deadline) {
 		if pingDaemon() != nil {
 			return nil
@@ -325,7 +332,7 @@ func WaitForShutdownCompletion(target ShutdownTarget) error {
 	if pingDaemon() != nil {
 		return nil
 	}
-	return fmt.Errorf("%w: daemon control socket still answering %s after shutdown was acknowledged", ErrShutdownIncomplete, shutdownSocketQuietGrace)
+	return fmt.Errorf("%w: daemon control socket still answering %s after shutdown was acknowledged", ErrShutdownIncomplete, socketGrace)
 }
 
 // isDaemonAbsentErr reports whether err from a dial/RPC call indicates that

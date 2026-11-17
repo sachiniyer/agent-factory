@@ -57,6 +57,10 @@ func TestRestartJobPendingReadsTheUnitsJob(t *testing.T) {
 		{"another unit's restart", unitSystemctl(pid, "42 other.service restart running"), false},
 		{"no job", unitSystemctl(pid, ""), false},
 		{"a failed systemctl", unitSystemctl(pid, "42 "+unit+" restart running") + "\nexit 1", false},
+		{"a job read that fails after MainPID matched", `case "$*" in
+*"show"*"--property=MainPID"*) echo ` + strconv.Itoa(pid) + ` ;;
+*"list-jobs"*) echo "42 ` + unit + ` restart running"; exit 1 ;;
+esac`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeSystemctl(t, tc.script)

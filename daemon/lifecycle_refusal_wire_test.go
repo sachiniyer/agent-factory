@@ -26,6 +26,12 @@ func (refusalWrappingControl) SuffixWrap(_ struct{}, _ *struct{}) error {
 func (refusalWrappingControl) Join(_ struct{}, _ *struct{}) error {
 	return errors.Join(errDaemonRestarting(), errors.New("and the handler ran"))
 }
+func (refusalWrappingControl) PrefixOnly(_ struct{}, _ *struct{}) error {
+	return errors.New("[daemon_restarting] ")
+}
+func (refusalWrappingControl) PrefixOnlyTwice(_ struct{}, _ *struct{}) error {
+	return errors.New("[daemon_restarting] [daemon_restarting] ")
+}
 func (refusalWrappingControl) Restacked(_ struct{}, _ *struct{}) error {
 	return errors.New("[daemon_restarting] " + errDaemonRestarting().Error() + "; and the handler ran")
 }
@@ -72,6 +78,23 @@ func TestOnlyTheGatesOwnRefusalLeadsWithItsCode(t *testing.T) {
 			require.False(t, IsDaemonAdmissionRetryable(err))
 			require.Contains(t, err.Error(), "and the handler ran", "the handler's own error must still reach the caller")
 			require.False(t, strings.HasPrefix(err.Error(), "[daemon_restarting]"), "got %q", err.Error())
+		})
+	}
+}
+
+// TestTheStripNeverEmptiesAnError: an error that is only a refusal's code,
+// once or stacked, must still reach the client as an error. Stripped to an
+// empty text, net/rpc would deliver it as a success with a zero reply (#7480).
+func TestTheStripNeverEmptiesAnError(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	serveThroughTheControlCodec(t, refusalWrappingControl{})
+
+	for _, method := range []string{"PrefixOnly", "PrefixOnlyTwice"} {
+		t.Run(method, func(t *testing.T) {
+			err := callDaemonNoEnsure(method, struct{}{}, &struct{}{})
+			require.Error(t, err, "an error that was only the code arrived as a success")
+			require.False(t, IsDaemonRestartingErr(err), "a handler that ran must not read as a refusal: %v", err)
+			require.NotEmpty(t, strings.TrimSpace(err.Error()))
 		})
 	}
 }

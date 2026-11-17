@@ -81,10 +81,15 @@ var bareLifecycleRefusalTexts = []string{errDaemonRestarting().Error()}
 // `errors.Join(refusal, x)`), came from a handler that ran. Its code is
 // removed, so the client reads a plain error and never retries the request,
 // exactly as HTTP's exact type assertion already answers it.
+//
+// The strip never empties the text: net/rpc delivers an empty error as a
+// success with a zero reply, so an error that was only the code keeps a text
+// that still reads as a failure and decodes as nothing.
 func controlSocketErrorText(text string) string {
 	if slices.Contains(bareLifecycleRefusalTexts, text) {
 		return text
 	}
+	original := text
 	for stripped := true; stripped; {
 		stripped = false
 		for _, code := range lifecycleRefusalCodes {
@@ -92,6 +97,9 @@ func controlSocketErrorText(text string) string {
 				text, stripped = rest, true
 			}
 		}
+	}
+	if text == "" && original != "" {
+		return "the daemon failed with an error that held only " + strings.TrimSpace(original)
 	}
 	return text
 }

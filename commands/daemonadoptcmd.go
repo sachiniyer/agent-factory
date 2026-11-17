@@ -119,7 +119,7 @@ func runDaemonAdopt(w io.Writer, force bool) error {
 		// A detached, unsupervised daemon is serving. Stop it and wait for its
 		// control socket to go quiet so the unit's fresh daemon acquires the freed
 		// singleton lock instead of exiting against a still-live socket (#854).
-		target, err := displaceDetachedDaemon()
+		target, err := displaceDetachedDaemon(w)
 		if err != nil {
 			return fmt.Errorf("failed to stop the unsupervised daemon before adopting: %w", err)
 		}
@@ -191,23 +191,44 @@ func init() {
 	daemonCmd.AddCommand(daemonAdoptCmd)
 }
 
-// displaceDetachedDaemon stops the unsupervised daemon adopt is replacing, and
-// names the process to wait for. The installed unit is its successor, so it
-// stops through the Shutdown RPC as a restart: a caller refused mid-adopt is
-// retried into the unit's daemon rather than told the daemon is gone for good
-// (#7480). If the RPC cannot stop it, adopt falls back to the signal it has
-// always sent (StopDaemon), as a final stop.
-func displaceDetachedDaemon() (daemon.ShutdownTarget, error) {
-	result, target, err := requestDaemonShutdownFn()
-	if err == nil {
-		if result == daemon.ShutdownNoDaemon {
-			return daemon.ShutdownTarget{}, nil
+// finishShutdownFn waits for the daemon the restart RPC stopped, within the
+// grace StopDaemon gives a SIGTERM, and stops it by signal when it has not
+// exited, so adopt displaces a daemon within the signal path's own bound
+// (#7480).
+var finishShutdownFn = daemon.FinishShutdownWithinGrace
+
+// displaceDetachedDaemon stops the unsupervised daemon adopt is replacing, says
+// on w how it stopped it, and names the process to wait for. The installed unit
+// is its successor, so it stops through the Shutdown RPC as a restart: a caller
+// refused mid-adopt is retried into the unit's daemon rather than told the
+// daemon is gone for good (#7480). If the RPC cannot stop it, adopt falls back
+// to the signal it has always sent (StopDaemon), which is a final stop, and the
+// user is told so: callers refused then failed instead of retrying.
+func displaceDetachedDaemon(w io.Writer) (daemon.ShutdownTarget, error) {
+	result, target, rpcErr := requestDaemonShutdownFn()
+	if rpcErr != nil {
+		log.WarningLog.Printf("adopt: the Shutdown RPC could not stop the unsupervised daemon (%v); stopping it by signal", rpcErr)
+		if _, err := daemonStopFn(); err != nil {
+			return daemon.ShutdownTarget{}, err
 		}
-		return target, nil
+		fmt.Fprintf(w, "stopped the unsupervised daemon by signal, as a final stop, because the restart RPC could not stop it (%v): requests it refused meanwhile failed instead of retrying\n", rpcErr)
+		return daemon.ShutdownTarget{}, nil
 	}
-	log.WarningLog.Printf("adopt: the Shutdown RPC could not stop the unsupervised daemon (%v); stopping it by signal", err)
-	if _, err := daemonStopFn(); err != nil {
-		return daemon.ShutdownTarget{}, err
+	if result == daemon.ShutdownNoDaemon {
+		fmt.Fprintln(w, "the unsupervised daemon had already exited")
+		return daemon.ShutdownTarget{}, nil
 	}
-	return daemon.ShutdownTarget{}, nil
+	escalated, err := finishShutdownFn(target)
+	if err != nil {
+		return target, fmt.Errorf("it did not exit within its grace, and stopping it by signal failed: %w", err)
+	}
+	switch {
+	case result == daemon.ShutdownViaSIGTERM:
+		fmt.Fprintln(w, "stopped the unsupervised daemon by signal, as a final stop, because it predates the restart RPC: requests it refused meanwhile failed instead of retrying")
+	case escalated:
+		fmt.Fprintln(w, "asked the unsupervised daemon to stop through the restart RPC, then stopped it by signal when it had not exited within its grace")
+	default:
+		fmt.Fprintln(w, "stopped the unsupervised daemon through the restart RPC: requests it refused meanwhile retry into the unit's daemon")
+	}
+	return target, nil
 }

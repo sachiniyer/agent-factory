@@ -646,6 +646,24 @@ func StopDaemon() (bool, error) {
 	return stopDaemonUntil(time.Time{})
 }
 
+// FinishShutdownWithinGrace waits for the daemon a Shutdown RPC stopped to
+// exit, within the grace StopDaemon gives a SIGTERM (stopDaemonGrace). A daemon
+// still running then is stopped through StopDaemon's own verified path with no
+// second grace: SIGTERM, then SIGKILL. So a stopper that asked through the RPC
+// displaces a daemon within StopDaemon's bound, rather than waiting out
+// shutdownCompleteGrace for one whose stop never ends (`af daemon adopt`,
+// #7480). escalated says the signal path ran.
+func FinishShutdownWithinGrace(target ShutdownTarget) (escalated bool, err error) {
+	if waitForShutdownCompletionWithin(target, stopDaemonGrace, stopDaemonGrace) == nil {
+		return false, nil
+	}
+	log.WarningLog.Printf("the daemon did not exit within %s of its Shutdown; stopping it by signal", stopDaemonGrace)
+	if _, err := stopDaemonWithGrace(time.Time{}, 0); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 // testHookStopDaemonBeforeStaleUnlink runs between stopDaemonUntil's stale-PID
 // classification (an invalid PID, a dead PID, or a live PID that does not look
 // like an agent-factory daemon) and the PID-file cleanup that classification
@@ -664,6 +682,13 @@ var testHookStopDaemonBeforeStaleUnlink = func() {}
 // launch path rather than start a replacement while the old process may still
 // be releasing its singleton lock.
 func stopDaemonUntil(deadline time.Time) (bool, error) {
+	return stopDaemonWithGrace(deadline, stopDaemonGrace)
+}
+
+// stopDaemonWithGrace is stopDaemonUntil with the wait between SIGTERM and
+// SIGKILL given by grace: zero for a stopper that already gave the daemon its
+// grace (FinishShutdownWithinGrace).
+func stopDaemonWithGrace(deadline time.Time, grace time.Duration) (bool, error) {
 	if admissionDeadlineExpired(deadline) {
 		return false, daemonAdmissionDeadlineError()
 	}
@@ -808,7 +833,7 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 		// Poll for graceful exit. AliveSame checks the captured instance, not the
 		// PID number, so a recycled PID does not masquerade as the original still
 		// being alive (which would send it SIGKILL).
-		gracefulDeadline := admissionBoundedDeadline(deadline, stopDaemonGrace)
+		gracefulDeadline := admissionBoundedDeadline(deadline, grace)
 		exited := false
 		for time.Now().Before(gracefulDeadline) {
 			if !proctree.AliveSame(daemonProc) {
@@ -825,7 +850,7 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 		} else if admissionDeadlineExpired(deadline) {
 			return true, daemonAdmissionDeadlineError()
 		} else {
-			log.WarningLog.Printf("daemon process (PID: %d) did not exit within %s of SIGTERM; escalating to SIGKILL", pid, stopDaemonGrace)
+			log.WarningLog.Printf("daemon process (PID: %d) did not exit within %s of SIGTERM; escalating to SIGKILL", pid, grace)
 			if err := proctree.Signal(daemonProc, syscall.SIGKILL); err != nil {
 				if errors.Is(err, proctree.ErrIdentityChanged) {
 					// Exited between the grace poll and SIGKILL — the daemon is
