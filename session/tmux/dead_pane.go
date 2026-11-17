@@ -421,16 +421,31 @@ func (t *TmuxSession) readPaneRow(budget time.Duration) (paneRow, error) {
 func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
 	row, err := t.panePID()
 	if err != nil {
-		t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
+		if errors.Is(err, errPaneQueryFoundNoPane) {
+			// tmux ANSWERED — the session reports no pane, so no live
+			// root. That is the same class as a held dead pane: answered,
+			// no live root (#7491 item 4).
+			t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepExited})
+		} else {
+			t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepUnanswered})
+		}
 		return proctree.Process{}, err
 	}
 	if row.dead {
-		t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
+		// tmux answered that the pane's root already exited — answered,
+		// no live root — not an unanswerable query (#7491 item 4).
+		t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepExited})
 		return proctree.Process{}, fmt.Errorf("tmux session %s: pane root is a held dead pane", t.sanitizedName)
 	}
 	proc, err := proctree.Lookup(row.pid)
 	if err != nil {
-		t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
+		if proctreeErrIsGone(err) {
+			// The pid tmux named is absent from the process table —
+			// answered, no live root (#7491 item 4).
+			t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepExited})
+		} else {
+			t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepUnanswered})
+		}
 		return proctree.Process{}, fmt.Errorf("cannot inspect pane root pid %d: %w", row.pid, err)
 	}
 	// Stamp the resolved root as this session's membership evidence (#7435
@@ -470,21 +485,25 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 	output, err := t.outputTmuxBounded(ctx, "list-panes", "-s", "-t", ExactTarget(t.sanitizedName), "-F", paneRowFormat)
 	if err != nil {
 		if ctx.Err() != nil {
-			t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
+			t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepUnanswered})
 			return false, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, t.sanitizedName, tmuxCommandTimeout)
 		}
 		if missingTmuxSession(err, t.sanitizedName) {
+			// tmux ANSWERED — this session is absent, so no live root
+			// (#7491 item 4).
+			t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepExited})
 			return false, errPaneQueryFoundNoPane
 		}
-		t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
+		t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepUnanswered})
 		return false, fmt.Errorf("failed to list session panes: %w", err)
 	}
 	if strings.TrimSpace(string(output)) == "" {
+		t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepExited})
 		return false, errPaneQueryFoundNoPane
 	}
 	holds, err := paneRowsHoldRoot(strings.Fields(string(output)), pid, startID)
 	if err != nil {
-		t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
+		t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepUnanswered})
 	}
 	if err == nil && holds {
 		// A confirmed match re-proves the recorded root on THIS session —
