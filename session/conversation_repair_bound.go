@@ -307,7 +307,7 @@ func operatorRepairProvenance(rolloutPath, launchDir string) resumeDecline {
 		return declineResumeUnverified("the operator-recorded conversation's rollout is stored compressed, and af cannot read a compressed rollout to confirm it is this session's own; " +
 			"to resume it, decompress it in place (zstd -d --rm " + strconv.Quote(rolloutPath) + ") and run af sessions set-conversation again")
 	}
-	cwd, subagent, ok, readErr := codexRolloutHeader(rolloutPath)
+	cwd, subagent, ok, readErr, _ := codexRolloutHeader(rolloutPath)
 	switch {
 	case !ok && codexHeaderReadUnanswered(readErr):
 		// A header read that did not answer is a look that did not happen,

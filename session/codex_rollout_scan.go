@@ -202,7 +202,7 @@ func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []str
 	}
 	unreadableCount := 0
 	for _, path := range paths {
-		cwd, subagent, ok, readErr := codexRolloutHeader(path)
+		cwd, subagent, ok, readErr, _ := codexRolloutHeader(path)
 		switch {
 		case !ok:
 			if workingDir == "" {
@@ -261,20 +261,26 @@ func codexRolloutWorkingDir(path string) (string, bool) {
 // judge; subagent reports whether its source PROVES the file is a sub-agent
 // thread, which can never be the session's own top-level conversation (#6766).
 func codexRolloutSessionMeta(path string) (cwd string, subagent, ok bool) {
-	cwd, subagent, ok, _ = codexRolloutHeader(path)
+	cwd, subagent, ok, _, _ = codexRolloutHeader(path)
 	return cwd, subagent, ok
 }
 
 // codexRolloutHeader is codexRolloutSessionMeta that also says why the header
-// could not be judged when af could not open or read it at all. A first record
-// over the read bound was read, just too large to judge, so it reports none.
-func codexRolloutHeader(path string) (cwd string, subagent, ok bool, unreadable error) {
+// could not be judged: unreadable when af could not open or read it at all,
+// and unjudged naming why a header it read whole still cannot classify — not
+// session_meta, unparseable, or recording no absolute cwd. A first record
+// over the read bound was read, just too large to judge, so it reports its
+// reason as unjudged rather than as a channel af could not look through.
+// unjudged is a permanent property of the file, not a lookup that failed:
+// callers that keep unclassifiable files warn with it so a Codex format
+// change is visible (#7470).
+func codexRolloutHeader(path string) (cwd string, subagent, ok bool, unreadable error, unjudged string) {
 	line, err := readCodexRolloutFirstLine(path)
 	if err != nil {
 		if errors.Is(err, errCodexSessionMetaOverBound) {
-			return "", false, false, nil
+			return "", false, false, nil, "the first record exceeds the session_meta read bound"
 		}
-		return "", false, false, err
+		return "", false, false, err, ""
 	}
 	var metadata struct {
 		Type    string `json:"type"`
@@ -283,11 +289,15 @@ func codexRolloutHeader(path string) (cwd string, subagent, ok bool, unreadable 
 			Source json.RawMessage `json:"source"`
 		} `json:"payload"`
 	}
-	if err := json.Unmarshal(line, &metadata); err != nil ||
-		metadata.Type != "session_meta" || !filepath.IsAbs(metadata.Payload.Cwd) {
-		return "", false, false, nil
+	switch {
+	case json.Unmarshal(line, &metadata) != nil:
+		return "", false, false, nil, "the session_meta record is not parseable"
+	case metadata.Type != "session_meta":
+		return "", false, false, nil, "the first record is not session_meta"
+	case !filepath.IsAbs(metadata.Payload.Cwd):
+		return "", false, false, nil, "the session_meta records no absolute cwd"
 	}
-	return metadata.Payload.Cwd, codexRolloutIsSubagentSource(metadata.Payload.Source), true, nil
+	return metadata.Payload.Cwd, codexRolloutIsSubagentSource(metadata.Payload.Source), true, nil, ""
 }
 
 // codexRolloutIsSubagentSource reports whether a session_meta source proves the
