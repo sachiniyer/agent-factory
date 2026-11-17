@@ -1198,6 +1198,32 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			wantPlaced: "ancestry places it under",
 		},
 		{
+			// Every foreign-evidence column needs a row with proof
+			// PRESENT (#7484 item 2): hoisting `case proven` above the
+			// placement cases must turn a row red, and with only
+			// mismatched-Recorded rows there was nothing to go red on.
+			// A captured Proven pair is proof; the daemon-subtree
+			// placement is foreign — foreign still wins.
+			name: "capture-proven child, af-daemon subtree — refused, named not blocking",
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
+				child := spawnDaemonChild(t)
+				return []proctree.Process{child}, cohortMembership{Proven: map[int]uint64{child.PID: child.StartID}}
+			},
+			wantPlaced: "ancestry places it under",
+		},
+		{
+			// Same column, reaper subtree: a captured SETSID'D child of
+			// the reaper — the Proven pair is its only possible proof
+			// (it leads its own kernel session, so no pane SID can
+			// vouch) — and the placement still wins.
+			name: "capture-proven setsid'd child, reaper subtree — refused, named not blocking",
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
+				child := spawnCohortSleeper(t, name, home, gen, true)
+				return []proctree.Process{child}, cohortMembership{Proven: map[int]uint64{child.PID: child.StartID}}
+			},
+			wantPlaced: "ancestry places it under",
+		},
+		{
 			// No proof and no foreign evidence: the carrier stays eligible
 			// for tier 2 and — with no agent identity on this row — is
 			// reported as unprovable, never silently dropped.
