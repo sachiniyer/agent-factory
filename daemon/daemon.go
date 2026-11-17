@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -372,7 +373,22 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		if restoreRunning.Load() {
 			stop.abandon("the instance restore")
 		}
-		holdHomeIfAbandoned(stop, endThrowaway, retErr)
+		if len(stop.abandonments()) == 0 {
+			// Nothing abandoned: the unwind goes on, and so does a panic, which
+			// then exits 2 with Go's own trace, as it always has.
+			return
+		}
+		// The process ends in holdHomeIfAbandoned, so a panic must be stopped
+		// and reported here: os.Exit would end it silently, exit 0, and keep
+		// systemd's Restart=on-failure from firing (#7447). recover is called
+		// directly by this deferred function, as it must be, and only now that
+		// the exit is certain. The stack still holds the panicking frames.
+		panicked := recover()
+		var stack []byte
+		if panicked != nil {
+			stack = debug.Stack()
+		}
+		holdHomeIfAbandoned(stop, endThrowaway, retErr, panicked, stack)
 	}()
 	// Every daemon-spawned VS Code editor. Without this a shutdown would strand
 	// a code-server per session, still holding its loopback port and now
