@@ -1,6 +1,11 @@
 package tmux
 
-import "github.com/sachiniyer/agent-factory/internal/sessionenv"
+import (
+	"path/filepath"
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+)
 
 // Program-command accessors for TmuxSession.
 //
@@ -74,6 +79,27 @@ func (t *TmuxSession) programCmd() string {
 	t.programMu.RLock()
 	defer t.programMu.RUnlock()
 	return t.program
+}
+
+// agentProgramExe returns the basename of the session's resolved program
+// binary — the executable identity the vanished-session tier-2 allowlist
+// matches on (#7435 R9). The launch's recorded trusted executable is the
+// resolved binary af actually picked ("claude", "aider", "sleep"); when no
+// launch recorded one (an untrusted absolute override records none) the
+// program string's first word is the fallback. Empty means the session
+// cannot name its program, so tier 2 must not run.
+func (t *TmuxSession) agentProgramExe() string {
+	t.programMu.RLock()
+	defer t.programMu.RUnlock()
+	if exe := filepath.Base(t.trustedExecutable); exe != "" && exe != "." && exe != "/" {
+		return exe
+	}
+	if fields := strings.Fields(t.program); len(fields) > 0 {
+		if exe := filepath.Base(fields[0]); exe != "" && exe != "." && exe != "/" {
+			return exe
+		}
+	}
+	return ""
 }
 
 // rewriteProgramCmdByAf replaces the program with a rewrite AF ITSELF produced and

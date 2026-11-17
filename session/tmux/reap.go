@@ -246,28 +246,33 @@ func paneRowsToProcesses(rows, sanitizedName string) (paneCapture, error) {
 	return captured, errors.Join(captureErrs...)
 }
 
-// cohortMembership is the kernel evidence a vanished-session cohort can still
-// demand after the tmux record is gone (#7435 item 5):
+// graceObservationBarrier is called at the top of every observation pass of a
+// vanished-session grace wait, BEFORE that pass takes its process snapshot.
+// Production leaves it nil, so this costs one nil check per pass.
 //
-//   - Proven holds (pid → StartID) pairs the caller itself captured inside the
-//     proven live tree before the session vanished — descent capture IS
-//     membership proof (item 1): a process observed inside the verified pane
-//     tree is the session's own even if it setsid'd out of its kernel session
-//     (the escapee shape, #1104). Processes discovered by descent from a proven
-//     member during the sweep are admitted the same way.
-//   - PaneSIDs holds the kernel session ids the capture's verified pane roots
-//     led — a marker-matched process still carrying one is a pane member.
-//   - Recorded holds (pid → StartID) pairs a caller recorded when the pane was
-//     spawned (#5066).
+// It exists because the descendant a refusal is ABOUT has to exist, and still be
+// attributable, at the moment a pass looks — and a fixture that forks it N
+// milliseconds into the grace is racing reapGraceWait for that rather than
+// establishing it. That race is what made
+// TestVanishedSessionSweepRefusesDescendantThatChangesGeneration turn master red
+// on a loaded arm64 runner with the sweep code untouched (#3766): the child was
+// simply born after the last pass, so nothing mismatched and the refusal the
+// assertion demands was never produced. A barrier here lets the fixture create
+// the process and block until it has PROVED the process table shows it, knowing
+// the pass that follows is the one that will see it.
 //
-// What is NOT evidence is the point: a marker-matched process with none of
-// these is exactly the inherited-env case — an af daemon's or helper's child
-// that setsid'd out of the pane, carrying markers it inherited — and it is
-// REPORTED, never silently dropped: "nothing found" on this path authorizes
-// worktree cleanup, so an unattributable survivor must block it. With NO
-// evidence at all the gate refuses every candidate rather than signalling on
-// env alone (#7435 R2): a blind sweep that captured nothing to place against
-// keeps its refusals — it just never opens the kill set.
+// The placement is the contract, and it is two-sided:
+//
+//   - BEFORE the snapshot, not after. A hook past the refresh could only report
+//     what the pass already saw, and a fixture that built its process there would
+//     be released into the deadline check below with nothing left to look again.
+//   - The deadline is checked at the BOTTOM of the loop, so the pass that follows
+//     a barrier return always happens, however long the barrier held. That is the
+//     guarantee the fixtures rely on; a barrier that held past the deadline would
+//     otherwise buy nothing.
+//
+// It does not extend the deadline: with the hook nil this loop is byte-for-byte
+// the loop it was, and a holding barrier simply spends the window it was given.
 var graceObservationBarrier func(match string)
 
 // observeOrphanAncestry keeps the verified tree connected throughout its grace

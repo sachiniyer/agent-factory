@@ -659,6 +659,183 @@ func spawnMarkedSessionWithEscapee(t *testing.T, name, home string, generation .
 	return marked
 }
 
+// The two-level #3699 shape (#7435 R9): the escapee helper (this test
+// binary's comm — the pty-host shim) re-hosts the session's OWN program —
+// `claude daemon run` -> `bg-pty-host` -> `claude`. The child program must
+// name the fixture's resolved agent binary for the tier-2 allowlist to see
+// it: the host is admitted as the program's direct marked parent, the child
+// as the program itself.
+func spawnMarkedSessionWithRehostedChild(t *testing.T, name, home, generation, childProg string, childArgs ...string) (host, child proctree.Process) {
+	t.Helper()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "escapee.pid")
+	args := []string{"new-session", "-d", "-s", name, "-c", dir, "-e", EnvMarkerSession + "=" + name,
+		"-e", EnvMarkerHome + "=" + home, "-e", EnvMarkerGeneration + "=" + generation}
+	reexec := append([]string{os.Args[0], markedEscapeeArg, pidFile, childProg}, childArgs...)
+	args = append(args, shellsuggest.Command(reexec[0], reexec[1:]...)+
+		" </dev/null >/dev/null 2>&1 & exec sleep 300")
+	out, err := exec.Command("tmux", args...).CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
+
+	lookup := func(pid int) proctree.Process {
+		p, lookupErr := proctree.Lookup(pid)
+		require.NoError(t, lookupErr)
+		t.Cleanup(func() { _ = proctree.Signal(p, syscall.SIGKILL) })
+		return p
+	}
+	host = lookup(awaitPIDFile(t, pidFile))
+	child = lookup(awaitPIDFile(t, pidFile+".child"))
+	for _, p := range []proctree.Process{host, child} {
+		environ, envErr := proctree.Environ(p.PID)
+		require.NoError(t, envErr)
+		require.Contains(t, environ, EnvMarkerSession+"="+name,
+			"the re-host pair must carry the session marker")
+	}
+	require.Equal(t, host.PID, child.PPID,
+		"the re-hosted child must descend from the host shim — the one-hop host shape")
+	return host, child
+}
+
+// A marked process that is NOT the session's program, detached and reparented
+// — the pty-host look-alike the tier-2 allowlist must refuse (#7435 R9): a
+// screen server, an escaped daemon helper, anything else that merely shaped
+// like the re-host. An intermediate setsid'd sh backgrounds it and exits, so
+// it reparents to init inside a session whose leader is already gone — clean
+// ancestry, exact markers, and nothing kernel membership can vouch with.
+func spawnMarkedProgram(t *testing.T, sessionName, afHome, generation, prog string, progArgs ...string) proctree.Process {
+	t.Helper()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "marked.pid")
+	env := []string{"PATH=" + os.Getenv("PATH"),
+		EnvMarkerSession + "=" + sessionName,
+		EnvMarkerGeneration + "=" + generation,
+	}
+	if afHome != "" {
+		env = append(env, EnvMarkerHome+"="+afHome)
+	}
+	c := exec.Command("sh", "-c",
+		shellsuggest.Command(prog, progArgs...)+
+			" </dev/null >/dev/null 2>&1 & echo $! > '"+pidFile+"'")
+	c.Env = env
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, c.Run(), "spawn marked %s", prog)
+
+	marked := processIdentity(t, awaitPIDFile(t, pidFile))
+	// The intermediate sh is dead, so the program reparents — wait for the
+	// kernel to hand it away, or the sweep sees a live test descendant and
+	// silently excludes it instead of exercising the refusal.
+	require.Eventually(t, func() bool {
+		current, lookupErr := proctree.Lookup(marked.PID)
+		return lookupErr == nil && current.PPID != c.Process.Pid
+	}, 5*time.Second, 20*time.Millisecond,
+		"the marked %s must be reparented above the test — a test child is silently excluded, not swept", prog)
+	environ, err := proctree.Environ(marked.PID)
+	require.NoError(t, err)
+	require.Contains(t, environ, EnvMarkerSession+"="+sessionName)
+	t.Cleanup(func() { _ = proctree.Signal(marked, syscall.SIGKILL) })
+	return marked
+}
+
+// The screen-server shape (#7435 R9): a marked host that is NOT the session's
+// program, itself parenting a marked window program. Neither matches the
+// agent executable, so the pair is refused wholesale — a user multiplexer
+// survives exactly the way a foreign tmux server does.
+func spawnMarkedHostPair(t *testing.T, sessionName, afHome, generation, childProg string, childArgs ...string) (host, child proctree.Process) {
+	t.Helper()
+	dir := t.TempDir()
+	hostFile := filepath.Join(dir, "host.pid")
+	childFile := filepath.Join(dir, "child.pid")
+	env := []string{"PATH=" + os.Getenv("PATH"),
+		EnvMarkerSession + "=" + sessionName,
+		EnvMarkerGeneration + "=" + generation,
+	}
+	if afHome != "" {
+		env = append(env, EnvMarkerHome+"="+afHome)
+	}
+	// The host is a persistent sh so the window's parent link is observable;
+	// `wait` keeps it alive until the sweep's verdict. The intermediate sh
+	// backgrounds the pair and exits so the host reparents to init.
+	inner := "echo $$ > '" + hostFile + "'; " +
+		shellsuggest.Command(childProg, childArgs...) + " </dev/null >/dev/null 2>&1 & " +
+		"echo $! > '" + childFile + "'; wait"
+	c := exec.Command("sh", "-c", shellsuggest.Command("sh", "-c", inner)+" </dev/null >/dev/null 2>&1 &")
+	c.Env = env
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, c.Run(), "spawn marked host pair")
+
+	host = processIdentity(t, awaitPIDFile(t, hostFile))
+	child = processIdentity(t, awaitPIDFile(t, childFile))
+	// The intermediate sh is dead, so the host reparents — wait for the
+	// kernel to hand it away, or the sweep sees a live test descendant and
+	// silently excludes it instead of exercising the refusal.
+	require.Eventually(t, func() bool {
+		current, lookupErr := proctree.Lookup(host.PID)
+		return lookupErr == nil && current.PPID != c.Process.Pid
+	}, 5*time.Second, 20*time.Millisecond,
+		"the marked host must be reparented above the test — a test child is silently excluded, not swept")
+	require.Equal(t, host.PID, child.PPID, "the window must descend from the marked host")
+	for _, p := range []proctree.Process{host, child} {
+		environ, envErr := proctree.Environ(p.PID)
+		require.NoError(t, envErr)
+		require.Contains(t, environ, EnvMarkerSession+"="+sessionName)
+		t.Cleanup(func() { _ = proctree.Signal(p, syscall.SIGKILL) })
+	}
+	return host, child
+}
+
+// The detached counterpart of spawnMarkedSessionWithRehostedChild for
+// sweep-level tests: the escapee helper (this test binary — the fixture's
+// program) reparents to init leading its own session, then re-hosts
+// childProg as its own setsid'd marked child (#7435 R9). The pair covers
+// tier 2's identity match, its subtree descent, and the one-hop host
+// admission without a live tmux server.
+func spawnMarkedProcessWithChild(t *testing.T, sessionName, afHome, generation, childProg string, childArgs ...string) (host, child proctree.Process) {
+	t.Helper()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "marked.pid")
+	env := []string{"PATH=" + os.Getenv("PATH"),
+		EnvMarkerSession + "=" + sessionName,
+		EnvMarkerGeneration + "=" + generation,
+	}
+	if afHome != "" {
+		env = append(env, EnvMarkerHome+"="+afHome)
+	}
+	reexec := append([]string{os.Args[0], markedEscapeeArg, pidFile, childProg}, childArgs...)
+	c := exec.Command("sh", "-c", shellsuggest.Command(reexec[0], reexec[1:]...)+" </dev/null >/dev/null 2>&1 &")
+	c.Env = env
+	require.NoError(t, c.Run(), "spawn marked process with child")
+
+	lookup := func(file string) proctree.Process {
+		p := processIdentity(t, awaitPIDFile(t, file))
+		t.Cleanup(func() { _ = proctree.Signal(p, syscall.SIGKILL) })
+		return p
+	}
+	host = lookup(pidFile)
+	child = lookup(pidFile + ".child")
+	require.Equal(t, host.PID, child.PPID, "the re-hosted child must descend from the host shim")
+	for _, p := range []proctree.Process{host, child} {
+		environ, envErr := proctree.Environ(p.PID)
+		require.NoError(t, envErr)
+		require.Contains(t, environ, EnvMarkerSession+"="+sessionName)
+	}
+	return host, child
+}
+
+func awaitPIDFile(t *testing.T, file string) int {
+	t.Helper()
+	var pid int
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return false
+		}
+		pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+		return err == nil && pid > 1
+	}, 5*time.Second, 20*time.Millisecond, "pid file %s never appeared", file)
+	return pid
+}
+
 func spawnSessionWaitingToStartHelper(t *testing.T, name, home string) (trigger, pidFile string) {
 	t.Helper()
 	dir := t.TempDir()

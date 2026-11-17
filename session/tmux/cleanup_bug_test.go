@@ -190,6 +190,38 @@ af_mine: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
 		"the provable session is still killed; only the unprovable one is left alone AND reported")
 }
 
+// #7435 R10 — when the unprovable side is THIS install's own home (af was
+// launched with a relative AGENT_FACTORY_HOME), the refusal must name that
+// root cause and its fix once, not print a per-session "cannot be proven"
+// that reads as N marker problems. `af reset` surfaces this error.
+func TestCleanupSessionsNamesARelativeOwnHome(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", "relative/af-home")
+	tmuxOutput := `af_one: 1 windows (created Wed May 20 12:00:00 2026) [179x47]
+af_two: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error { return nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if len(cmd.Args) > 1 && cmd.Args[1] == "show-environment" {
+				return []byte("AF_HOME=/abs/marker-home\n"), nil
+			}
+			if len(cmd.Args) > 1 && cmd.Args[1] == "list-panes" {
+				return nil, nil
+			}
+			return []byte(tmuxOutput), nil
+		},
+	}
+
+	err := CleanupSessions(cmdExec)
+	require.Error(t, err, "a relative own home must fail the sweep so reset refuses")
+	require.Contains(t, err.Error(), "is not an absolute path",
+		"the refusal names the real cause: this install's own home is relative")
+	require.Contains(t, err.Error(), "AGENT_FACTORY_HOME",
+		"and the fix: set it to an absolute path")
+	require.Equal(t, 1, strings.Count(err.Error(), "is not an absolute path"),
+		"the root cause is said once — not repeated per session it blocked")
+}
+
 // TestCleanupSessionsClassifiesHomeByFilesystem guards #7435 item 2: the
 // sweep's AF_HOME compare used to be filepath.Clean on both sides, so a
 // marker that only Cleans to this home was admitted. Now only literal

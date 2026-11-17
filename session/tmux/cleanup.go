@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -404,6 +405,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	}
 	matches := make([]string, 0, len(prefixed))
 	var unprovenErrs error
+	ownHomeUnprovableReported := false
 	for _, match := range prefixed {
 		home, ok, markerErr := sessionHomeMarker(cmdExec, match)
 		if markerErr != nil {
@@ -449,9 +451,24 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// and return nil. `af reset` takes a nil return as permission
 			// to delete worktrees, and a live pane it cannot attribute may
 			// still be writing to one (Codex on #7435).
-			log.InfoLog.Printf("leaving tmux session %s: home marker (%s) ownership cannot be proven", match, home)
-			unprovenErrs = errors.Join(unprovenErrs, fmt.Errorf(
-				"tmux session %s home marker (%s) ownership cannot be proven; refusing cleanup", match, home))
+			switch {
+			case !filepath.IsAbs(ownHome):
+				// The unprovable side is THIS install's own home: af was
+				// launched with a relative (or empty) home, so no session's
+				// marker can be proven against it. Name that root cause and
+				// its fix ONCE — repeating it per session reads as N
+				// distinct failures (#7435 R10).
+				log.InfoLog.Printf("leaving tmux session %s: this install's own home (%s) is not an absolute path, so its home marker (%s) cannot be proven to name it", match, ownHome, home)
+				if !ownHomeUnprovableReported {
+					ownHomeUnprovableReported = true
+					unprovenErrs = errors.Join(unprovenErrs, fmt.Errorf(
+						"this install's own home (%s) is not an absolute path, so no tmux session's ownership can be proven; set AGENT_FACTORY_HOME to an absolute path and retry; refusing cleanup", ownHome))
+				}
+			default:
+				log.InfoLog.Printf("leaving tmux session %s: home marker (%s) ownership cannot be proven", match, home)
+				unprovenErrs = errors.Join(unprovenErrs, fmt.Errorf(
+					"tmux session %s home marker (%s) ownership cannot be proven; refusing cleanup", match, home))
+			}
 		default:
 			matches = append(matches, match)
 		}
@@ -694,13 +711,19 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		// one in: a SID the pane evidence names whose leader pair the recorded
 		// or captured sets also hold (#7435 R6). The background CleanupSessions
 		// sweep reaches the same anchor through the pane roots it observed.
-		for sid := range membership.PaneSIDs {
-			if startID, ok := membership.Recorded[sid]; ok {
-				membership.Root = proctree.Process{PID: sid, StartID: startID}
-				break
-			}
-			if startID, ok := proven[sid]; ok {
-				membership.Root = proctree.Process{PID: sid, StartID: startID}
+		// With several pane SIDs the anchor is the EARLIEST recorded root —
+		// the conservative floor, and deterministic: ranging a map would pick
+		// one at random (#7435 R13).
+		membership.Root = earliestRecordedRoot(membership.PaneSIDs, membership.Recorded, proven)
+	}
+	if membership.AgentExe == "" && membership.Root.PID > 0 {
+		// The pane root's own kernel name IS the resolved program binary the
+		// allowlist matches on — the pane ran exactly that executable
+		// (#7435 R9). A caller that knows the program (the close path's own
+		// TmuxSession) sets AgentExe itself and wins.
+		for _, p := range candidates {
+			if p.PID == membership.Root.PID && p.Comm != "" {
+				membership.AgentExe = p.Comm
 				break
 			}
 		}
@@ -790,4 +813,29 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 			processPIDList(left)))
 	}
 	return sweepErr
+}
+
+// earliestRecordedRoot picks the tier-2 anchor when several pane SIDs carry
+// recorded or proven leader pairs (#7435 R13): the EARLIEST StartID wins —
+// the conservative floor, admitting the largest span the evidence can
+// honestly cover — and the pid breaks ties, so the answer is deterministic
+// no matter what order the SID map hands its members out in. A zero StartID
+// is no anchor at all (tier 2's bound would be vacuous), so it is skipped
+// rather than "earliest".
+func earliestRecordedRoot(paneSIDs map[int]bool, recorded, proven map[int]uint64) proctree.Process {
+	var root proctree.Process
+	for sid := range paneSIDs {
+		startID, ok := recorded[sid]
+		if !ok {
+			startID, ok = proven[sid]
+		}
+		if !ok || startID == 0 {
+			continue
+		}
+		if root.PID == 0 || startID < root.StartID ||
+			(startID == root.StartID && sid < root.PID) {
+			root = proctree.Process{PID: sid, StartID: startID}
+		}
+	}
+	return root
 }

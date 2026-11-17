@@ -212,6 +212,34 @@ func commNamesAFDaemonBinary(comm string) bool {
 	return comm == "af" || comm == "agent-factory"
 }
 
+// cohortMembership is the kernel evidence a vanished-session cohort can still
+// demand after the tmux record is gone (#7435 item 5):
+//
+//   - Proven holds (pid → StartID) pairs the caller itself captured inside the
+//     proven live tree before the session vanished — descent capture IS
+//     membership proof (item 1): a process observed inside the verified pane
+//     tree is the session's own even if it setsid'd out of its kernel session
+//     (the escapee shape, #1104). Processes discovered by descent from a proven
+//     member during the sweep are admitted the same way.
+//   - PaneSIDs holds the kernel session ids the capture's verified pane roots
+//     led — a marker-matched process still carrying one is a pane member.
+//   - Recorded holds (pid → StartID) pairs a caller recorded when the pane was
+//     spawned (#5066).
+//   - Root is the recorded pane root — the launch's own (pid, StartID) — when
+//     the caller carries one. It anchors the generation-identity tier.
+//   - AgentExe names the session's resolved program binary (its basename —
+//     "claude", "sleep"): the only executable identity tier 2 will admit by
+//     (#7435 R9). Empty means the caller does not know it, and tier 2 cannot
+//     run at all.
+//
+// What is NOT evidence is the point: a marker-matched process with none of
+// these is exactly the inherited-env case — an af daemon's or helper's child
+// that setsid'd out of the pane, carrying markers it inherited — and it is
+// REPORTED, never silently dropped: "nothing found" on this path authorizes
+// worktree cleanup, so an unattributable survivor must block it. With NO
+// evidence at all the gate refuses every candidate rather than signalling on
+// env alone (#7435 R2): a blind sweep that captured nothing to place against
+// keeps its refusals — it just never opens the kill set.
 type cohortMembership struct {
 	Proven   map[int]uint64
 	PaneSIDs map[int]bool
@@ -222,6 +250,14 @@ type cohortMembership struct {
 	// spawned under this session's life (#7435 R6). A zero Process means no
 	// recorded root, and that tier cannot run.
 	Root proctree.Process
+	// AgentExe is the basename of the session's resolved program binary —
+	// "claude" for an agent tab, "sleep" for a process tab, "af" for an
+	// internal pane. Tier 2 admits only a candidate whose own executable
+	// identity matches it (plus that candidate's marked subtree and its
+	// direct marked host); every other marker carrier without kernel evidence
+	// is refused and reported, never signalled (#7435 R9). Empty means the
+	// caller could not name the program, and tier 2 admits nothing.
+	AgentExe string
 }
 
 func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Process) bool {
@@ -319,8 +355,9 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		return nil, nil, fmt.Errorf("cannot determine reset process ownership while checking vanished tmux session %s", sanitizedName)
 	}
 	selfChain := selfAndAncestorProcesses(snap)
-	var owned []proctree.Process
 	var unplaceable []markedGeneration
+	var eligible []proctree.Process
+	eligibleClean := make(map[int]bool)
 	for _, process := range candidates {
 		same, identityErr := proctree.SameIdentity(process)
 		if identityErr != nil {
@@ -479,40 +516,74 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				process.PID, sanitizedName, EnvMarkerGeneration))
 			continue
 		}
-		// Environment is proof of CARRYING the session's launch markers, never
-		// of MEMBERSHIP: a daemon or helper that setsid'd out of the pane keeps
-		// inherited markers while joining a session this sweep has no claim on
-		// (#7435 item 5 — tmux's global environment can expose them to unrelated
-		// later panes too, #6846). Membership is decided in two tiers. Tier 1
-		// is kernel evidence: a SID one of the proven pane roots led, a
-		// (pid, StartID) pair recorded at spawn, capture inside the proven
-		// live tree, or descent from one of those proven members. Tier 2
-		// (#7435 R6) is the re-hosted shape kernel membership cannot see: a
-		// marker carrier that leads its OWN kernel session — a claude under
-		// bg-pty-host, a setsid'd dev server, anything PTY-reparented — can
-		// never match a SID or a recorded pair, but it could only have been
-		// spawned under this session's life when it began no earlier than
-		// the recorded pane root. Tier 2 therefore requires all of: a
-		// recorded root, an eligible-clean ancestry verdict above (every
-		// positive outside — tmux boundary, af-daemon subtree, reaper chain —
-		// already excluded, and an unproven ancestor stays excluded), and
-		// StartID at or after the root's. An unadmitted carrier is REPORTED,
-		// never silently dropped: "nothing found" on this path authorizes
-		// worktree cleanup, so an unattributable survivor must block it
-		// exactly like an unproven home (#7435 R3, Codex 4593576722).
+		// Everything below the generation gate is a MEMBERSHIP verdict, so
+		// gate-passed candidates are collected first and admitted second: the
+		// tier-2 allowlist needs the whole eligible cohort before it can tell
+		// an agent program's host apart from a look-alike (#7435 R9).
+		eligible = append(eligible, process)
+		eligibleClean[process.PID] = reason == ""
+	}
+	// Environment is proof of CARRYING the session's launch markers, never
+	// of MEMBERSHIP: a daemon or helper that setsid'd out of the pane keeps
+	// inherited markers while joining a session this sweep has no claim on
+	// (#7435 item 5 — tmux's global environment can expose them to unrelated
+	// later panes too, #6846). Membership is decided in two tiers. Tier 1
+	// is kernel evidence: a SID one of the proven pane roots led, a
+	// (pid, StartID) pair recorded at spawn, capture inside the proven
+	// live tree, or descent from one of those proven members. Tier 2
+	// (#7435 R6/R9) is the re-hosted shape kernel membership cannot see —
+	// but as an ALLOWLIST on executable identity, not the open "clean
+	// ancestry plus StartID" rule it replaced, which admitted anything
+	// pty-host-shaped: a screen server and its window, an af daemon's
+	// double-forked helper, the reaper's own escaped helper. A carrier is
+	// admitted only when its OWN executable identity — comm or argv[0], the
+	// same sources the af-daemon classifier uses — is the session's resolved
+	// program binary, or it descends from such a carrier through marked
+	// eligible ancestors, or it is the direct marked parent of one. The
+	// #3699 chain (claude daemon run → bg-pty-host → claude) is the agent
+	// binary re-hosting itself under a shim exactly one hop up, so it still
+	// converges; a screen/zellij/dtach server or any other pty host fails
+	// the identity match and is REFUSED and reported, never signalled — the
+	// safe direction for a process af cannot prove it owns, with its pids
+	// named for the operator. Tier 2 still requires the R6 guards: a
+	// recorded root, an eligible-clean ancestry verdict above (every
+	// positive outside — tmux boundary, af-daemon subtree, reaper chain —
+	// already excluded, and an unproven ancestor stays excluded), and
+	// StartID at or after the root's. An unadmitted carrier is REPORTED,
+	// never silently dropped: "nothing found" on this path authorizes
+	// worktree cleanup, so an unattributable survivor must block it
+	// exactly like an unproven home (#7435 R3, Codex 4593576722).
+	agentExe := membership.AgentExe
+	if agentExe == "" {
+		// The recorded root's own kernel name IS the program that ran in the
+		// pane — the strongest form of the same identity, available whenever
+		// the anchor carries it (#7435 R9).
+		agentExe = membership.Root.Comm
+	}
+	eligibleSet := make(map[int]bool, len(eligible))
+	exeMatch := make(map[int]bool)
+	for _, c := range eligible {
+		eligibleSet[c.PID] = true
+		if agentExe != "" && exeMatchesProgram(c, agentExe) {
+			exeMatch[c.PID] = true
+		}
+	}
+	var owned []proctree.Process
+	for _, process := range eligible {
 		if !membership.admits(snap, process) {
 			// Root.StartID must be nonzero too: a 0 anchor makes the
 			// no-earlier-than bound vacuous and would admit every clean
 			// carrier (#7435 R6).
-			if reason == "" && membership.Root.PID > 0 && membership.Root.StartID != 0 &&
-				process.StartID >= membership.Root.StartID {
+			if eligibleClean[process.PID] && membership.Root.PID > 0 && membership.Root.StartID != 0 &&
+				process.StartID >= membership.Root.StartID &&
+				tier2ProgramAdmits(snap, eligibleSet, exeMatch, process) {
 				// One WARNING per tier-2 admission: the pid, comm, StartID,
 				// ancestry chain and session are the audit trail a wrong
 				// reap is traced from (#7435 R6, review addition 2).
 				log.WarningLog.Printf(
-					"tmux session %s: admitting marked pid %d (%s, StartID %d, chain %s) to the vanished-session reap by generation identity — it began no earlier than the recorded pane root and no exclusion places it outside (#7435 R6)",
+					"tmux session %s: admitting marked pid %d (%s, StartID %d, chain %s) to the vanished-session reap by generation identity — its executable identity places it inside the session's own %s program and it began no earlier than the recorded pane root (#7435 R9)",
 					sanitizedName, process.PID, process.Comm, process.StartID,
-					ancestryChainForLog(snap, process.PID))
+					ancestryChainForLog(snap, process.PID), agentExe)
 				owned = append(owned, process)
 				continue
 			}
@@ -550,6 +621,65 @@ func ancestryChainForLog(snap map[int]proctree.Process, pid int) string {
 		pid = p.PPID
 	}
 	return b.String()
+}
+
+// exeMatchesProgram reports whether a candidate's own executable identity is
+// the session's resolved program binary — the same evidence sources the
+// af-daemon classifier trusts: the kernel task name (p_comm, what Comm
+// carries) or argv[0]'s basename when the argv scan can read it.
+func exeMatchesProgram(p proctree.Process, agentExe string) bool {
+	if p.Comm == agentExe {
+		return true
+	}
+	if argv := proctree.Argv(p.PID); len(argv) > 0 && filepath.Base(argv[0]) == agentExe {
+		return true
+	}
+	return false
+}
+
+// tier2ProgramAdmits is the executable-identity allowlist inside tier 2
+// (#7435 R9). It admits a carrier only when the carrier's own identity is one
+// of three proven shapes inside the eligible cohort:
+//
+//   - the carrier IS the session's program — comm or argv[0] names AgentExe
+//     (the #3699 re-hosted claude, a process tab's own binary);
+//   - the carrier descends from an admitted program through marked eligible
+//     ancestors — helpers the re-hosted agent itself spawned;
+//   - the carrier is the DIRECT marked parent of one — a one-hop host like
+//     #3699's bg-pty-host, the agent binary's own re-host shim.
+//
+// The host hop is bounded at one level deliberately: a user's own
+// multiplexer — screen, zellij, abduco, dtach — sits deeper and stays out
+// the way a tmux server already does. Anything else is refused.
+func tier2ProgramAdmits(snap map[int]proctree.Process, eligibleSet, exeMatch map[int]bool, p proctree.Process) bool {
+	if len(exeMatch) == 0 {
+		return false
+	}
+	if exeMatch[p.PID] {
+		return true
+	}
+	// Descent from an admitted program: walking the marked eligible ancestors
+	// up from p, the chain that reaches an exe match places p inside that
+	// program's own re-host subtree. The first non-eligible ancestor closes
+	// the cohort.
+	for ancestor, i := p.PPID, 0; ancestor > 1 && i < 128; i++ {
+		q, ok := snap[ancestor]
+		if !ok || !eligibleSet[ancestor] {
+			break
+		}
+		if exeMatch[ancestor] {
+			return true
+		}
+		ancestor = q.PPID
+	}
+	// Host of an admitted program: p is the direct parent of an eligible
+	// carrier whose own identity is the agent program.
+	for pid := range exeMatch {
+		if q, ok := snap[pid]; ok && q.PPID == p.PID {
+			return true
+		}
+	}
+	return false
 }
 
 // markedGeneration is one live process carrying the vanished session's
@@ -687,31 +817,3 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 	}
 	return refreshed, nil
 }
-
-// graceObservationBarrier is called at the top of every observation pass of a
-// vanished-session grace wait, BEFORE that pass takes its process snapshot.
-// Production leaves it nil, so this costs one nil check per pass.
-//
-// It exists because the descendant a refusal is ABOUT has to exist, and still be
-// attributable, at the moment a pass looks — and a fixture that forks it N
-// milliseconds into the grace is racing reapGraceWait for that rather than
-// establishing it. That race is what made
-// TestVanishedSessionSweepRefusesDescendantThatChangesGeneration turn master red
-// on a loaded arm64 runner with the sweep code untouched (#3766): the child was
-// simply born after the last pass, so nothing mismatched and the refusal the
-// assertion demands was never produced. A barrier here lets the fixture create
-// the process and block until it has PROVED the process table shows it, knowing
-// the pass that follows is the one that will see it.
-//
-// The placement is the contract, and it is two-sided:
-//
-//   - BEFORE the snapshot, not after. A hook past the refresh could only report
-//     what the pass already saw, and a fixture that built its process there would
-//     be released into the deadline check below with nothing left to look again.
-//   - The deadline is checked at the BOTTOM of the loop, so the pass that follows
-//     a barrier return always happens, however long the barrier held. That is the
-//     guarantee the fixtures rely on; a barrier that held past the deadline would
-//     otherwise buy nothing.
-//
-// It does not extend the deadline: with the hook nil this loop is byte-for-byte
-// the loop it was, and a holding barrier simply spends the window it was given.

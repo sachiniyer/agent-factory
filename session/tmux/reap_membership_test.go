@@ -468,11 +468,14 @@ func TestMarkedOrphanProcessesAdmitsARehostedMemberByGenerationIdentity(t *testi
 
 	// The recorded pane root predates the carrier by construction — the
 	// launch happened first — and the carrier's own StartID is the only
-	// comparison the tier needs.
+	// comparison the tier needs. The carrier IS the fixture's program (the
+	// test binary's own comm), so it passes the R9 executable-identity
+	// allowlist too.
 	membership := cohortMembership{
 		PaneSIDs: map[int]bool{400001: true},
 		Recorded: map[int]uint64{400001: 1},
 		Root:     proctree.Process{PID: 400001, StartID: 1},
+		AgentExe: filepath.Base(os.Args[0]),
 	}
 	marked, _, err := markedOrphanProcesses(
 		[]proctree.Process{carrier}, name, home,
@@ -528,18 +531,133 @@ func TestMarkedOrphanProcessesRefusesTheTier2Edges(t *testing.T) {
 		Root: proctree.Process{PID: 400001, StartID: 0},
 	}, "a zero-StartID root makes the no-earlier-than bound vacuous")
 
+	carrierIsRefused(cohortMembership{
+		PaneSIDs: map[int]bool{400001: true},
+		Recorded: map[int]uint64{400001: 1},
+		// An anchored root but NO program identity: the R9 allowlist has
+		// nothing to match on, so tier 2 refuses rather than falling back to
+		// the open "clean ancestry" rule it replaced.
+		Root: proctree.Process{PID: 400001, StartID: 1},
+	}, "without the session's program identity the allowlist admits nothing")
+
+	carrierIsRefused(cohortMembership{
+		PaneSIDs: map[int]bool{400001: true},
+		Recorded: map[int]uint64{400001: 1},
+		// A program identity that is NOT the carrier's: the carrier is some
+		// other program (the screen/daemon-helper class), not the session's
+		// own re-host.
+		Root:     proctree.Process{PID: 400001, StartID: 1},
+		AgentExe: "sleep",
+	}, "a carrier that is not the session's own program is refused")
+
 	marked, _, err := markedOrphanProcesses(
 		[]proctree.Process{carrier}, name, home, cohort,
 		cohortMembership{
 			PaneSIDs: map[int]bool{400001: true},
 			Recorded: map[int]uint64{400001: 1},
 			Root:     proctree.Process{PID: 400001, StartID: 1},
+			AgentExe: filepath.Base(os.Args[0]),
 		}, nil)
 	require.NoError(t, err, "the same carrier with a predating root must admit — the edge pins differ")
 	require.Equal(t, []proctree.Process{carrier}, marked)
 }
 
-// A carrier still behind a tmux server is a foreign pane (#6846's global-env
+// #7435 R9 — tier 2 is an ALLOWLIST on the session's own program identity,
+// not the open pty-host rule it replaced. Each admitted shape pins its own
+// leg: the program itself, a helper inside its marked subtree, and the
+// direct marked host one hop above it — and the refused shapes pin the other
+// side: a multiplexer pair and a lone non-program orphan are reported and
+// left alive.
+func TestMarkedOrphanProcessesTier2AdmitsOnlyTheAgentProgram(t *testing.T) {
+	home := t.TempDir()
+	cohort := fixtureCohort("af_tier2_allow-gen")
+	exe := filepath.Base(os.Args[0])
+	membership := cohortMembership{
+		PaneSIDs: map[int]bool{400001: true},
+		Recorded: map[int]uint64{400001: 1},
+		Root:     proctree.Process{PID: 400001, StartID: 1},
+		AgentExe: exe,
+	}
+	sweep := func(candidates ...proctree.Process) ([]proctree.Process, error) {
+		marked, _, err := markedOrphanProcesses(
+			candidates, "af_tier2_allow", home, cohort, membership, nil)
+		return marked, err
+	}
+
+	// The program itself re-hosted: the escapee helper IS the fixture's
+	// program (this test binary's comm).
+	agent := spawnMarkedProcess(t, "af_tier2_allow", home)
+	marked, err := sweep(agent)
+	require.NoError(t, err)
+	require.Equal(t, []proctree.Process{agent}, marked,
+		"the session's own re-hosted program is admitted")
+
+	// The two-level #3699 shape: a marked sh host (not the program) with a
+	// marked escapee child that IS the program — the host takes the
+	// one-hop parent admission, the child the identity match.
+	host, rehosted := spawnMarkedHostPair(t, "af_tier2_allow", home, "af_tier2_allow-gen",
+		os.Args[0], markedEscapeeArg, filepath.Join(t.TempDir(), "rehost.pid"))
+	marked, err = sweep(host, rehosted)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []proctree.Process{host, rehosted}, marked,
+		"the program and its one-hop marked host are both admitted — bg-pty-host's shape")
+
+	// The screen shape: the same pair structure but the window is `tail`,
+	// not the program — the host is not the program's parent in any sense
+	// the allowlist accepts, and neither is the window.
+	screenHost, screenWin := spawnMarkedHostPair(t, "af_tier2_allow", home, "af_tier2_allow-gen",
+		"tail", "-f", "/dev/null")
+	marked, err = sweep(screenHost, screenWin)
+	require.Error(t, err, "the multiplexer pair must be REFUSED, not silently kept")
+	require.Contains(t, err.Error(), "pid "+strconv.Itoa(screenHost.PID)+" ",
+		"the refusal names the screen host's pid")
+	require.Contains(t, err.Error(), "pid "+strconv.Itoa(screenWin.PID)+" ",
+		"the refusal names the screen window's pid")
+	require.Empty(t, marked)
+	require.True(t, proctree.AliveSame(screenHost), "refused means never signalled")
+	require.True(t, proctree.AliveSame(screenWin), "refused means never signalled")
+
+	// A lone marked orphan that is not the program — the escaped
+	// daemon-helper shape: refused, reported, alive.
+	helper := spawnMarkedProgram(t, "af_tier2_allow", home, "af_tier2_allow-gen",
+		"tail", "-f", "/dev/null")
+	marked, err = sweep(helper)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "pid "+strconv.Itoa(helper.PID)+" ")
+	require.Empty(t, marked)
+	require.True(t, proctree.AliveSame(helper))
+}
+
+// The subtree leg in isolation (#7435 R9): a marked helper descending from
+// the program through marked ancestors is the program's own workload —
+// admitted with it. An equally-shaped helper under a NON-program host is
+// refused — the walk closes at the first ancestor that is not the program.
+func TestMarkedOrphanProcessesTier2AdmitsOnlyTheProgramSubtree(t *testing.T) {
+	home := t.TempDir()
+	exe := filepath.Base(os.Args[0])
+	membership := cohortMembership{
+		PaneSIDs: map[int]bool{400001: true},
+		Recorded: map[int]uint64{400001: 1},
+		Root:     proctree.Process{PID: 400001, StartID: 1},
+		AgentExe: exe,
+	}
+	sweep := func(candidates ...proctree.Process) ([]proctree.Process, error) {
+		marked, _, err := markedOrphanProcesses(
+			candidates, "af_tier2_sub", home, fixtureCohort("af_tier2_sub-gen"), membership, nil)
+		return marked, err
+	}
+
+	// escapee(test binary = the program) -> tail: the marked child descends
+	// from the program inside the eligible cohort — admitted as its subtree
+	// even though its own comm is not the program's.
+	program, helper := spawnMarkedProcessWithChild(t, "af_tier2_sub", home, "af_tier2_sub-gen",
+		"tail", "-f", "/dev/null")
+	marked, err := sweep(program, helper)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []proctree.Process{program, helper}, marked,
+		"the program's marked descendants are its subtree — admitted with it")
+}
+
 // copy), not a member that escaped: positively placed OUTSIDE the cohort, so
 // the vanished sweep excludes it the way signalling excludes a placed subtree
 // — silently, and never reported as a leak (#7435 R6). The fixture drives the
@@ -638,6 +756,52 @@ func TestSeedPaneRootEvidence(t *testing.T) {
 	ts.SeedPaneRootEvidence(7777, 55)
 	require.Equal(t, *root, *ts.paneRootEvidence.Load(),
 		"a live resolution that already stamped stays — the persisted pair is older evidence")
+}
+
+// RetirePaneRootEvidence is the R11 half: a seed outlives the claim it came
+// from only while the claim stands. Retiring the pair clears the anchor;
+// retiring a DIFFERENT pair — a claim this seed never made — leaves it.
+func TestRetirePaneRootEvidence(t *testing.T) {
+	ts := NewTmuxSessionFromSanitizedName("af_retire_test", "sleep 300")
+
+	ts.SeedPaneRootEvidence(4242, 99)
+	_, _, ok := ts.PaneRootEvidence()
+	require.True(t, ok)
+
+	ts.RetirePaneRootEvidence(7777, 55)
+	pid, _, ok := ts.PaneRootEvidence()
+	require.True(t, ok, "a different pair is a different claim — the anchor stays")
+	require.Equal(t, 4242, pid)
+
+	ts.RetirePaneRootEvidence(4242, 99)
+	_, _, ok = ts.PaneRootEvidence()
+	require.False(t, ok,
+		"the retired claim's anchor retires with it — a disproven root cannot floor tier 2")
+}
+
+// The R13 anchor rule: with several pane roots the floor is the EARLIEST
+// recorded root, chosen deterministically — map order must never pick the
+// anchor.
+func TestEarliestRecordedRootIsDeterministic(t *testing.T) {
+	sids := map[int]bool{10: true, 20: true, 30: true, 40: true}
+	recorded := map[int]uint64{10: 50, 30: 40, 40: 40}
+	proven := map[int]uint64{20: 70}
+
+	// Earliest by StartID: 30 and 40 both carry 40 — the lower pid breaks
+	// the tie, and it wins no matter which order the map range hands them.
+	want := proctree.Process{PID: 30, StartID: 40}
+	for range 50 {
+		require.Equal(t, want, earliestRecordedRoot(sids, recorded, proven))
+	}
+
+	// A sid with no pair anywhere contributes nothing; a zero StartID is no
+	// anchor even though it "orders earliest".
+	require.Equal(t, proctree.Process{},
+		earliestRecordedRoot(map[int]bool{90: true}, recorded, proven))
+	require.Equal(t, proctree.Process{PID: 11, StartID: 5},
+		earliestRecordedRoot(map[int]bool{11: true, 12: true},
+			map[int]uint64{11: 5}, map[int]uint64{12: 0}),
+		"a zero-StartID leader is skipped, never treated as the earliest root")
 }
 
 // The spawn path's half of anchor coverage: Start must leave the pane-root

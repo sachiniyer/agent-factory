@@ -23,17 +23,17 @@ const markedEscapeeArg = "--tmux-test-marked-escapee"
 // dependency. The pane shell must not publish $!: that only proves a fork,
 // not that the child has exec'd with its markers or installed HUP protection.
 func handleMarkedEscapeeExec() {
-	if len(os.Args) != 3 || os.Args[1] != markedEscapeeArg {
+	if len(os.Args) < 3 || os.Args[1] != markedEscapeeArg {
 		return
 	}
-	if err := runMarkedEscapee(os.Args[2]); err != nil {
+	if err := runMarkedEscapee(os.Args[2], os.Args[3:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	os.Exit(0)
 }
 
-func runMarkedEscapee(pidFile string) error {
+func runMarkedEscapee(pidFile string, child []string) error {
 	signal.Ignore(syscall.SIGHUP)
 	if _, err := syscall.Setsid(); err != nil {
 		return err
@@ -43,6 +43,21 @@ func runMarkedEscapee(pidFile string) error {
 	}
 	if err := os.Rename(pidFile+".tmp", pidFile); err != nil {
 		return err
+	}
+	if len(child) > 0 {
+		// The re-hosted member's own child, inheriting this helper's marked
+		// environment and leading its OWN kernel session — the #3699 shape's
+		// bottom half: `claude` under `bg-pty-host`, each a session leader.
+		// Its identity publishes to a sibling pid file so the fixture can
+		// assert on it directly.
+		rehost := exec.Command(child[0], child[1:]...)
+		rehost.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := rehost.Start(); err != nil {
+			return err
+		}
+		if err := os.WriteFile(pidFile+".child", []byte(strconv.Itoa(rehost.Process.Pid)), 0o600); err != nil {
+			return err
+		}
 	}
 	// Stay in this image after publishing readiness. An exec here races the
 	// parent's environment read: Darwin can return EIO while replacing the

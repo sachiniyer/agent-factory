@@ -144,15 +144,17 @@ func requireSessionGone(t *testing.T, name string) {
 		"the held dead pane's session must be gone after teardown")
 }
 
-// #3699 via #7435 R6 — the re-hosted shape, end to end: a process that
+// #3699 via #7435 R6/R9 — the re-hosted shape, end to end: a process that
 // setsid'd out of the pane leads its own kernel session while carrying the
 // pane's exact markers. Once the session vanishes no kernel membership tier
 // can place it — not the recorded root's SID, not a recorded pair, not
 // capture inside a tree that no longer exists — and before tier 2 every
 // trusting close refused it as unproven, which is what wedged root-reap
 // forever. The generation-identity admission converges it: exact markers, an
-// in-cohort generation, a start no earlier than the recorded pane root, and a
-// positively clean ancestry.
+// in-cohort generation, a start no earlier than the recorded pane root, a
+// positively clean ancestry — and, since R9, an executable identity the
+// allowlist accepts: the session's own program plus its marked subtree and
+// one-hop marked host, nothing else.
 //
 // The same close holds the boundary's other half: a pane on a SECOND tmux
 // server stamped with the vanished session's exact markers — the #6846
@@ -166,9 +168,12 @@ func TestCloseAndWaitForPaneExit_VanishedRehostedAgentConverges(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	gen := "gen-rehost"
 
-	// The re-hosted member: setsid'd and SIGHUP-ignoring inside the pane —
-	// the `claude daemon run -> bg-pty-host -> claude` shape.
-	escapee := spawnMarkedSessionWithEscapee(t, name, home, gen)
+	// The re-hosted member: the full two-level `claude daemon run ->
+	// bg-pty-host -> claude` shape — a marked host shim (this test binary's
+	// comm) re-hosting a marked `sleep`, the session's own program. Tier 2's
+	// allowlist admits the program itself and its direct marked host
+	// (#7435 R9); nothing else.
+	host, rehosted := spawnMarkedSessionWithRehostedChild(t, name, home, gen, "sleep", "300")
 
 	// Record the pane root while tmux can still answer for it — the stamp
 	// Start plants in production. Without it the trusting sweep has no anchor
@@ -176,7 +181,7 @@ func TestCloseAndWaitForPaneExit_VanishedRehostedAgentConverges(t *testing.T) {
 	s := NewTmuxSessionFromSanitizedName(name, "sleep 300")
 	root, err := s.PaneRootProcess()
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, escapee.StartID, root.StartID,
+	require.GreaterOrEqual(t, rehosted.StartID, root.StartID,
 		"the re-hosted process must postdate the recorded root for tier 2 to admit it")
 
 	// The unrelated server: the vanished session's exact markers copied onto
@@ -205,7 +210,7 @@ func TestCloseAndWaitForPaneExit_VanishedRehostedAgentConverges(t *testing.T) {
 	// The session vanishes externally — the #3699 shape: tmux forgot the
 	// ancestry before af ever closed, so the close below is the trusting
 	// vanished-session sweep, not a captured-tree reap.
-	vanishSessionWithObservableEscapee(t, name, escapee)
+	vanishSessionWithObservableEscapee(t, name, host)
 
 	state, blind, err := s.CloseAndWaitForPaneExitTrustingOwnGeneration()
 	require.NoError(t, err,
@@ -214,9 +219,10 @@ func TestCloseAndWaitForPaneExit_VanishedRehostedAgentConverges(t *testing.T) {
 	require.Equal(t, PaneStateKnown, state)
 
 	require.Eventually(t, func() bool {
-		return !proctree.AliveSame(escapee)
+		return !proctree.AliveSame(host) && !proctree.AliveSame(rehosted)
 	}, 10*time.Second, 50*time.Millisecond,
-		"the re-hosted marker carrier (pid %d) must be reaped — tier 2 admits it", escapee.PID)
+		"the re-hosted pair (host %d, program %d) must be reaped — tier 2 admits the program plus its marked host",
+		host.PID, rehosted.PID)
 
 	// The foreign pane on its own server must be untouched: still alive, its
 	// server still answering — excluded as positively foreign, never signalled.
@@ -224,6 +230,57 @@ func TestCloseAndWaitForPaneExit_VanishedRehostedAgentConverges(t *testing.T) {
 		"the marked process behind a foreign tmux server was signalled — the boundary exclusion failed")
 	require.NoError(t, exec.Command("tmux", "-S", sock2, "has-session", "-t", "foreign").Run(),
 		"the unrelated tmux server must still own its session")
+}
+
+// #7435 R9, on an isolated server — the allowlist's other half. The same
+// trusting close that converges the #3699 re-host must REFUSE the pty-host
+// look-alikes the old open rule killed: a marked multiplexer pair (the
+// screen shape — a host and its window, neither the session's program) and
+// a lone marked orphan (the escaped daemon-helper shape). Refused means
+// reported with its pids and never signalled — the close errors while the
+// session's own re-host still dies.
+func TestCloseAndWaitForPaneExit_VanishedTier2RefusesNonAgentPtyHosts(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+	name := fmt.Sprintf("af_test_tier2ref_%d", time.Now().UnixNano())
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	gen := "gen-tier2ref"
+
+	host, rehosted := spawnMarkedSessionWithRehostedChild(t, name, home, gen, "sleep", "300")
+	s := NewTmuxSessionFromSanitizedName(name, "sleep 300")
+	_, err := s.PaneRootProcess()
+	require.NoError(t, err)
+
+	// The screen shape: a marked `sh` host and its marked `tail` window —
+	// neither is the session's program, so both refuse.
+	screenHost, screenWin := spawnMarkedHostPair(t, name, home, gen, "tail", "-f", "/dev/null")
+	// The escaped helper: a lone marked orphan that is not the program.
+	helper := spawnMarkedProgram(t, name, home, gen, "tail", "-f", "/dev/null")
+
+	vanishSessionWithObservableEscapee(t, name, host)
+
+	state, blind, err := s.CloseAndWaitForPaneExitTrustingOwnGeneration()
+	require.True(t, blind, "a session gone before the close ran is the vanished-sweep path")
+	require.Error(t, err,
+		"the refused cohort must be REPORTED — an error, never a silent keep and never a signal")
+	require.Equal(t, PaneStateUnknown, state,
+		"refused survivors mean the teardown cannot prove the cohort dead — "+
+			"the close must not claim Known while look-alikes still run")
+	for _, p := range []proctree.Process{screenHost, screenWin, helper} {
+		require.Contains(t, err.Error(), "pid "+strconv.Itoa(p.PID)+" ",
+			"the refusal names pid %d for the operator", p.PID)
+	}
+
+	// The session's own re-host still converges; the look-alikes all live.
+	require.Eventually(t, func() bool {
+		return !proctree.AliveSame(host) && !proctree.AliveSame(rehosted)
+	}, 10*time.Second, 50*time.Millisecond,
+		"the agent program and its marked host must still be reaped")
+	for _, p := range []proctree.Process{screenHost, screenWin, helper} {
+		require.True(t, proctree.AliveSame(p),
+			"pid %d (%s) is not the session's program — refused means never signalled", p.PID, p.Comm)
+	}
 }
 
 func TestCloseAndWaitForPaneExit_TearsDownAHeldDeadPane(t *testing.T) {
