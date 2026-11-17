@@ -1523,7 +1523,7 @@
       "title": "Inspect whether a task is actually firing on its schedule, and who last changed it",
       "tui": {
         "status": "yes",
-        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue · missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
+        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue · missed N\", the unschedulable reason, or \"not armed\") and runFragments (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
       },
       "web": {
         "status": "yes",
