@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"testing"
 	"time"
 
@@ -66,19 +65,39 @@ func TestAgentServerRelayCarriesAnHTTPServerOnWorkspaceLoopback(t *testing.T) {
 
 func TestAgentServerRelayRefusesAClosedPort(t *testing.T) {
 	_, rel, _ := startRelayAgentServer(t)
-	// Held bound-but-never-listening: the port provably has nothing serving on
-	// it for the whole dial — a released grab could have been re-taken and
-	// served by a third party (#7460).
-	_, portStr, err := net.SplitHostPort(deadPortAddr(t, "127.0.0.1"))
+	// The closed port refuses on every platform: a real listener that accepts
+	// each connection and closes it with SO_LINGER 0, so the workspace dial's
+	// handshake completes and the conn the relay just opened meets a prompt
+	// RST. deadPortAddr can't stand in here — its bound, never-listening socket
+	// draws an immediate RST on Linux but has its SYN dropped on darwin, where
+	// the dial hangs to its deadline instead of refusing (#7466). Holding the
+	// listener for the whole test keeps the release-and-rebind race #7460
+	// removed out too.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	port, err := strconv.Atoi(portStr)
-	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			_ = c.(*net.TCPConn).SetLinger(0)
+			_ = c.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err = rel.DialLoopback(ctx, port)
+	conn, err := rel.DialLoopback(ctx, port)
+	require.NoError(t, err, "the reset lands after the handshake, so the relay's own dial succeeds")
+	defer conn.Close()
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, err = conn.Read(make([]byte, 1))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "nothing is listening on 127.0.0.1:"+strconv.Itoa(port))
+	require.NotContains(t, err.Error(), "i/o timeout",
+		"the reset must reach the relayed conn promptly, not hang until the deadline")
 }
 
 func TestAgentServerRelayRejectsBadPortsAndMissingToken(t *testing.T) {
