@@ -183,7 +183,7 @@ type receiptOnceAnswer struct {
 func receiptOnceWithinBound(t *testing.T, snap ConversationCaptureSnapshot, prompt string) receiptOnceAnswer {
 	t.Helper()
 	return withinBound(t, func() receiptOnceAnswer {
-		received, undecided, err := codexPromptReceiptOnce(snap, prompt)
+		received, undecided, _, err := codexPromptReceiptOnce(snap, prompt)
 		return receiptOnceAnswer{received, undecided, err}
 	})
 }

@@ -202,7 +202,7 @@ func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []str
 	}
 	unreadableCount := 0
 	for _, path := range paths {
-		cwd, subagent, ok, readErr := codexRolloutHeader(path)
+		cwd, subagent, ok, readErr, _ := codexRolloutHeader(path)
 		switch {
 		case !ok:
 			if workingDir == "" {
@@ -211,7 +211,10 @@ func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []str
 				matches = append(matches, path)
 			} else {
 				uncorrelated++
-				if readErr != nil {
+				// A first record still mid-write is a readable channel
+				// whose answer has not landed — uncorrelated, never an
+				// unreadable one (#7140; #7475 review R2).
+				if readErr != nil && !errors.Is(readErr, errCodexSessionMetaIncomplete) {
 					unreadableCount++
 					if unreadable == nil {
 						unreadable = readErr
@@ -261,21 +264,36 @@ func codexRolloutWorkingDir(path string) (string, bool) {
 // judge; subagent reports whether its source PROVES the file is a sub-agent
 // thread, which can never be the session's own top-level conversation (#6766).
 func codexRolloutSessionMeta(path string) (cwd string, subagent, ok bool) {
-	cwd, subagent, ok, _ = codexRolloutHeader(path)
+	cwd, subagent, ok, _, _ = codexRolloutHeader(path)
 	return cwd, subagent, ok
 }
 
 // codexRolloutHeader is codexRolloutSessionMeta that also says why the header
-// could not be judged when af could not open or read it at all. A first record
-// over the read bound was read, just too large to judge, so it reports none.
-func codexRolloutHeader(path string) (cwd string, subagent, ok bool, unreadable error) {
-	line, err := readCodexRolloutFirstLine(path)
+// could not be judged: unreadable when af could not open or read it at all OR
+// when the first record is not yet a complete line — both transient — and
+// unjudged naming why a header it read whole still cannot classify — not
+// session_meta, unparseable, or recording no absolute cwd. A first record
+// over the read bound was read, just too large to judge, so it reports its
+// reason as unjudged rather than as a channel af could not look through.
+// unjudged is a permanent property of the file, not a lookup that failed:
+// callers that keep unclassifiable files warn with it so a Codex format
+// change is visible (#7470).
+func codexRolloutHeader(path string) (cwd string, subagent, ok bool, unreadable error, unjudged string) {
+	rec, err := readCodexRolloutFirstLine(path)
 	if err != nil {
 		if errors.Is(err, errCodexSessionMetaOverBound) {
-			return "", false, false, nil
+			return "", false, false, nil, "the first record exceeds the session_meta read bound"
 		}
-		return "", false, false, err
+		return "", false, false, err, ""
 	}
+	if !rec.complete {
+		// The first record's newline has not landed: the file is empty or
+		// its header is still mid-write. Transient — the record can still
+		// complete — so it rides the lookup-failure channel, never the
+		// permanent unjudged one (#7475 review R2).
+		return "", false, false, errCodexSessionMetaIncomplete, ""
+	}
+	line := rec.line
 	var metadata struct {
 		Type    string `json:"type"`
 		Payload struct {
@@ -283,11 +301,15 @@ func codexRolloutHeader(path string) (cwd string, subagent, ok bool, unreadable 
 			Source json.RawMessage `json:"source"`
 		} `json:"payload"`
 	}
-	if err := json.Unmarshal(line, &metadata); err != nil ||
-		metadata.Type != "session_meta" || !filepath.IsAbs(metadata.Payload.Cwd) {
-		return "", false, false, nil
+	switch {
+	case json.Unmarshal(line, &metadata) != nil:
+		return "", false, false, nil, "the session_meta record is not parseable"
+	case metadata.Type != "session_meta":
+		return "", false, false, nil, "the first record is not session_meta"
+	case !filepath.IsAbs(metadata.Payload.Cwd):
+		return "", false, false, nil, "the session_meta records no absolute cwd"
 	}
-	return metadata.Payload.Cwd, codexRolloutIsSubagentSource(metadata.Payload.Source), true, nil
+	return metadata.Payload.Cwd, codexRolloutIsSubagentSource(metadata.Payload.Source), true, nil, ""
 }
 
 // codexRolloutIsSubagentSource reports whether a session_meta source proves the
@@ -451,6 +473,12 @@ const codexSessionMetaReadCap = 8 << 20
 
 var errCodexSessionMetaOverBound = fmt.Errorf("first record exceeds %d-byte bound", codexSessionMetaReadCap)
 
+// errCodexSessionMetaIncomplete marks a first record that is not yet a
+// complete line — an empty file, or a header still mid-write. It is transient
+// like a lookup that did not answer, never a permanent unclassifiable
+// (#7475 review R2).
+var errCodexSessionMetaIncomplete = errors.New("the first record is not yet complete")
+
 // codexRolloutHeaderQuestion is what readCodexRolloutFirstLine asks of a
 // rollout: its bounded flights are joined by no other read of the file.
 const codexRolloutHeaderQuestion = "Codex rollout header read"
@@ -462,26 +490,41 @@ const codexRolloutHeaderQuestion = "Codex rollout header read"
 // wedged CODEX_HOME may hang: the open and the read run in one bounded flight,
 // and one that does not answer is the ErrProbeTimedOut +
 // context.DeadlineExceeded non-answer (codexHeaderReadUnanswered).
-func readCodexRolloutFirstLine(path string) ([]byte, error) {
-	return fsprobe.ReadFileWithOpen(codexRolloutHeaderQuestion, path, codexRolloutBoundedOpen(), func(file *os.File) ([]byte, error) {
+func readCodexRolloutFirstLine(path string) (codexRolloutFirstRecord, error) {
+	return fsprobe.ReadFileWithOpen(codexRolloutHeaderQuestion, path, codexRolloutBoundedOpen(), func(file *os.File) (codexRolloutFirstRecord, error) {
 		reader := bufio.NewReader(file)
-		var line []byte
+		var rec codexRolloutFirstRecord
 		for {
 			fragment, rerr := reader.ReadSlice('\n')
-			line = append(line, fragment...)
-			if len(line) > codexSessionMetaReadCap {
-				return nil, fmt.Errorf("read Codex rollout %s: %w", path, errCodexSessionMetaOverBound)
+			rec.line = append(rec.line, fragment...)
+			if len(rec.line) > codexSessionMetaReadCap {
+				return rec, fmt.Errorf("read Codex rollout %s: %w", path, errCodexSessionMetaOverBound)
 			}
 			switch {
-			case rerr == nil, errors.Is(rerr, io.EOF):
-				return bytes.TrimSuffix(line, []byte{'\n'}), nil
+			case rerr == nil:
+				rec.line = bytes.TrimSuffix(rec.line, []byte{'\n'})
+				rec.complete = true
+				return rec, nil
+			case errors.Is(rerr, io.EOF):
+				rec.line = bytes.TrimSuffix(rec.line, []byte{'\n'})
+				return rec, nil
 			case errors.Is(rerr, bufio.ErrBufferFull):
 				continue
 			default:
-				return nil, fmt.Errorf("read Codex rollout %s: %w", path, rerr)
+				return rec, fmt.Errorf("read Codex rollout %s: %w", path, rerr)
 			}
 		}
 	})
+}
+
+// codexRolloutFirstRecord is the first line of a rollout — its session_meta
+// record — with whether it is newline-terminated. A record whose newline has
+// not landed (an empty file, or a line still mid-write) is not yet the
+// session_meta it will be: it is transient, and only a complete record can
+// memoize a classification verdict (#7475 review R2).
+type codexRolloutFirstRecord struct {
+	line     []byte
+	complete bool
 }
 
 // codexHeaderReadUnanswered reports whether err, from a rollout header read,

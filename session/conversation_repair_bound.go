@@ -307,7 +307,7 @@ func operatorRepairProvenance(rolloutPath, launchDir string) resumeDecline {
 		return declineResumeUnverified("the operator-recorded conversation's rollout is stored compressed, and af cannot read a compressed rollout to confirm it is this session's own; " +
 			"to resume it, decompress it in place (zstd -d --rm " + strconv.Quote(rolloutPath) + ") and run af sessions set-conversation again")
 	}
-	cwd, subagent, ok, readErr := codexRolloutHeader(rolloutPath)
+	cwd, subagent, ok, readErr, _ := codexRolloutHeader(rolloutPath)
 	switch {
 	case !ok && codexHeaderReadUnanswered(readErr):
 		// A header read that did not answer is a look that did not happen,
@@ -376,7 +376,7 @@ func (d resumeDecline) provenanceUnanswered() bool {
 // all — the read failed, or did not answer within its bound — is no answer
 // about the date, and is reported as err.
 func codexRolloutStoredAt(path string) (stored time.Time, ok bool, err error) {
-	line, err := readCodexRolloutFirstLine(path)
+	rec, err := readCodexRolloutFirstLine(path)
 	switch {
 	case errors.Is(err, errCodexSessionMetaOverBound):
 		// Read, just too large to judge: answered, and undatable.
@@ -384,6 +384,7 @@ func codexRolloutStoredAt(path string) (stored time.Time, ok bool, err error) {
 	case err != nil:
 		return time.Time{}, false, err
 	}
+	line := rec.line
 	var header struct {
 		Type      string `json:"type"`
 		Timestamp string `json:"timestamp"`

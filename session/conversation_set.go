@@ -120,7 +120,7 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 		return AgentConversationData{}, fmt.Errorf(
 			"no rollout named %s exists in the session's Codex store at %s — check the id with 'codex resume' there", id, home)
 	}
-	cwd, subagent, ok, readErr := codexRolloutHeader(rolloutPath)
+	cwd, subagent, ok, readErr, _ := codexRolloutHeader(rolloutPath)
 	switch {
 	case !ok && codexHeaderReadUnanswered(readErr):
 		// Not a header that is missing or incomplete: af could not look at it
