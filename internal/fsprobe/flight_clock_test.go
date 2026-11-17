@@ -14,7 +14,7 @@ import (
 // before, and the fired value is waiting when Advance returns.
 func TestManualClock_FiresWhenAdvanceReachesTheDeadline(t *testing.T) {
 	clock := NewManualClock(time.Now())
-	timer := clock.NewTimer(50 * time.Millisecond)
+	timer := clock.NewTimer(clock.Now().Add(50 * time.Millisecond))
 	select {
 	case <-timer.C():
 		t.Fatal("the timer fired before its deadline")
@@ -38,14 +38,14 @@ func TestManualClock_FiresWhenAdvanceReachesTheDeadline(t *testing.T) {
 // armed one.
 func TestManualClock_RearmsAndStops(t *testing.T) {
 	clock := NewManualClock(time.Now())
-	timer := clock.NewTimer(10 * time.Millisecond)
+	timer := clock.NewTimer(clock.Now().Add(10 * time.Millisecond))
 	clock.Advance(10 * time.Millisecond)
 	select {
 	case <-timer.C():
 	default:
 		t.Fatal("the timer did not fire at its deadline")
 	}
-	timer.Reset(10 * time.Millisecond)
+	timer.Reset(clock.Now().Add(10 * time.Millisecond))
 	clock.Advance(9 * time.Millisecond)
 	select {
 	case <-timer.C():

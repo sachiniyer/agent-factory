@@ -90,11 +90,12 @@ func runPaced(id, question, key string, work func(step func()) (any, error)) (an
 // passed since its last step.
 func waitPaced(id, question, key string, flight *pacedFlight) (any, error) {
 	timeout := probeTimeout.load()
-	// The bound is measured from the flight's last step, and each read of it
-	// takes the clock before lastStep so a step that lands mid-read makes the
-	// flight look fresher, never staler (#7456).
-	since := flight.clock.Now().Sub(time.Unix(0, flight.lastStep.Load()))
-	timer := flight.clock.NewTimer(timeout - since)
+	// The bound is measured from the flight's last step, so the deadline is
+	// the absolute instant lastStep + timeout: arming a fixed instant can't
+	// overshoot however the work's steps and advances interleave with the
+	// arm (#7456). Each staleness read takes the clock before lastStep so a
+	// step that lands mid-read makes the flight look fresher, never staler.
+	timer := flight.clock.NewTimer(time.Unix(0, flight.lastStep.Load()).Add(timeout))
 	defer timer.Stop()
 	for {
 		select {
@@ -102,7 +103,7 @@ func waitPaced(id, question, key string, flight *pacedFlight) (any, error) {
 			return flight.res, flight.err
 		case <-timer.C():
 			if since := flight.clock.Now().Sub(time.Unix(0, flight.lastStep.Load())); since < timeout {
-				timer.Reset(timeout - since)
+				timer.Reset(time.Unix(0, flight.lastStep.Load()).Add(timeout))
 				continue
 			}
 			pacedFlights.Lock()

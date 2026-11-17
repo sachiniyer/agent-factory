@@ -13,15 +13,20 @@ import (
 // measured against how the scheduler happened to run beside it. A flight
 // loads it once, when it begins, the way every seam here loads in the
 // caller.
+// A timer takes an absolute deadline on its clock, never a duration: the
+// deadline a flight is bounded by — its start plus the bound, or its last
+// step plus the bound — is a fixed instant, so arming it can never overshoot
+// no matter how the work's advances interleave with the arm. A timer whose
+// deadline the clock has already passed fires at once.
 type flightClock interface {
 	Now() time.Time
-	NewTimer(d time.Duration) flightTimer
+	NewTimer(deadline time.Time) flightTimer
 }
 
 // flightTimer is a bounded flight's deadline under its clock.
 type flightTimer interface {
 	C() <-chan time.Time
-	Reset(d time.Duration) bool
+	Reset(deadline time.Time) bool
 	Stop() bool
 }
 
@@ -29,13 +34,16 @@ type flightTimer interface {
 type wallFlightClock struct{}
 
 func (wallFlightClock) Now() time.Time { return time.Now() }
-func (wallFlightClock) NewTimer(d time.Duration) flightTimer {
-	return wallFlightTimer{time.NewTimer(d)}
+func (wallFlightClock) NewTimer(deadline time.Time) flightTimer {
+	return wallFlightTimer{time.NewTimer(time.Until(deadline))}
 }
 
 type wallFlightTimer struct{ *time.Timer }
 
 func (t wallFlightTimer) C() <-chan time.Time { return t.Timer.C }
+func (t wallFlightTimer) Reset(deadline time.Time) bool {
+	return t.Timer.Reset(time.Until(deadline))
+}
 
 // flightClocks is the seam under a flight's clock, the wall clock in
 // production.
@@ -81,12 +89,12 @@ func (c *ManualClock) Advance(d time.Duration) {
 	}
 }
 
-func (c *ManualClock) NewTimer(d time.Duration) flightTimer {
+func (c *ManualClock) NewTimer(deadline time.Time) flightTimer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	timer := &manualFlightTimer{clock: c, ch: make(chan time.Time, 1)}
 	c.timers[timer] = struct{}{}
-	timer.reset(d)
+	timer.reset(deadline)
 	return timer
 }
 
@@ -99,10 +107,12 @@ type manualFlightTimer struct {
 
 func (t *manualFlightTimer) C() <-chan time.Time { return t.ch }
 
-// reset arms the timer d past the clock's now, firing at once when that
-// deadline is already reached. Callers hold the clock's lock.
-func (t *manualFlightTimer) reset(d time.Duration) {
-	t.deadline = t.clock.now.Add(d)
+// reset arms the timer for the deadline, firing at once when the clock has
+// already reached it — arming can never overshoot a clock that has moved
+// past the deadline before the timer registered (#7456). Callers hold the
+// clock's lock.
+func (t *manualFlightTimer) reset(deadline time.Time) {
+	t.deadline = deadline
 	t.active = true
 	t.fireDue()
 }
@@ -117,7 +127,7 @@ func (t *manualFlightTimer) fireDue() {
 	}
 }
 
-func (t *manualFlightTimer) Reset(d time.Duration) bool {
+func (t *manualFlightTimer) Reset(deadline time.Time) bool {
 	t.clock.mu.Lock()
 	defer t.clock.mu.Unlock()
 	// Drop a fired value still in the channel, as a real Reset requires its
@@ -126,7 +136,7 @@ func (t *manualFlightTimer) Reset(d time.Duration) bool {
 	case <-t.ch:
 	default:
 	}
-	t.reset(d)
+	t.reset(deadline)
 	return true
 }
 

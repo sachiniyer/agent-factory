@@ -235,9 +235,11 @@ type probeFlight struct {
 	res      any
 	err      error
 	timedOut bool
-	// clock is the time source the bound runs on, loaded when the flight
-	// begins (#7456).
-	clock flightClock
+	// clock is the time source the bound runs on, and started when the
+	// flight began on it — both fixed at flight creation, so the bound's
+	// deadline is a fixed instant whatever waiter arrives whenever (#7456).
+	clock   flightClock
+	started time.Time
 }
 
 type flightRegistry struct {
@@ -274,6 +276,7 @@ func runBoundedKeyed(key, dir string, flights *flightRegistry, what, detail stri
 		return waitForFlight(key, dir, flights, what, detail, active)
 	}
 	flight := &probeFlight{done: make(chan struct{}), clock: flightClocks.load()}
+	flight.started = flight.clock.Now()
 	flights.byDir[key] = flight
 	flights.Unlock()
 	go func() {
@@ -291,7 +294,7 @@ func runBoundedKeyed(key, dir string, flights *flightRegistry, what, detail stri
 func waitForFlight(key, dir string, flights *flightRegistry, what, detail string,
 	flight *probeFlight) (any, error) {
 	timeout := probeTimeout.load()
-	timer := flight.clock.NewTimer(timeout)
+	timer := flight.clock.NewTimer(flight.started.Add(timeout))
 	defer timer.Stop()
 	select {
 	case <-flight.done:
