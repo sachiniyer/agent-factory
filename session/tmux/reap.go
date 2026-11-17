@@ -394,7 +394,19 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				process.PID, sanitizedName, EnvMarkerHome))
 			continue
 		}
-		if classifyHomeDir(processHome, ownHome) != homeSame {
+		switch classifyHomeDir(processHome, ownHome) {
+		case homeForeign:
+			continue
+		case homeUnproven:
+			// Unproven is never "not ours, carry on" (#7435 Codex): a relative
+			// or unstat-able marker could name this home or another's, so the
+			// process is UNATTRIBUTABLE — refusing is the only answer that
+			// keeps a survivor check from reporting an empty set while the
+			// process is still alive (the close path would authorize deleting
+			// the worktree under it).
+			inspectErrs = append(inspectErrs, fmt.Errorf(
+				"captured live pid %d marks session %s but its %s marker (%s) cannot be proven to name this home",
+				process.PID, sanitizedName, EnvMarkerHome, processHome))
 			continue
 		}
 		// Environment is proof of CARRYING the session's launch markers, never

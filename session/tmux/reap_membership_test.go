@@ -117,6 +117,33 @@ func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.
 	require.True(t, proctree.AliveSame(setsid))
 }
 
+// #7435 Codex — an UNPROVABLE home is never "not ours, carry on". A survivor
+// whose AF_HOME is relative (.af) can name this home or another's, so the
+// vanished-session sweep must refuse on it: error, not an empty survivor set
+// — the empty answer is what licensed deleting the worktree underneath it.
+func TestVanishedSessionSweepRefusesAnUnprovableHomeSurvivor(t *testing.T) {
+	name := "af_unproven_home"
+	ownHome := t.TempDir()
+	gen := "gen-unproven"
+	survivor := spawnCohortSleeper(t, name, ".af", gen, false)
+
+	err := reapVanishedSessionProcesses(name, ownHome,
+		[]proctree.Process{survivor}, nil, false)
+	require.Error(t, err, "an unprovable home must refuse the sweep, not silently clear it")
+	require.Contains(t, err.Error(), "cannot be proven",
+		"the refusal must name the attribution failure, not a generic skip")
+	require.True(t, proctree.AliveSame(survivor),
+		"the survivor stays alive AND the cleanup is not authorized — both halves of fail-closed")
+
+	// The same process read as a candidate directly shows the per-pid split:
+	// foreign is skipped by proof, unproven blocks.
+	marked, inspectErr := markedOrphanProcesses(
+		[]proctree.Process{survivor}, name, ownHome, fixtureCohort(gen), cohortMembership{})
+	require.Error(t, inspectErr)
+	require.Contains(t, inspectErr.Error(), "cannot be proven")
+	require.Empty(t, marked)
+}
+
 // spawnCohortSleeper starts a live sleeper carrying this session's full
 // marker environment, setsid'd out of it when asked.
 func spawnCohortSleeper(t *testing.T, name, home, gen string, newSession bool) proctree.Process {
