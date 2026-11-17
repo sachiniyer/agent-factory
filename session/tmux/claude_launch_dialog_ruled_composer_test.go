@@ -232,3 +232,23 @@ func TestCheckAndHandleTrustPrompt_StaleComposerAboveALiveMCPServersPickerHolds(
 		}
 	}
 }
+
+// A ruled composer explains only its own rows. A row of text between it and
+// the options is one af cannot place: it may be the dialog's own body or
+// question, in wording af does not know, under a stale composer. So the
+// composer decides nothing and the pane holds (#7388, the "between" half of
+// its property; #7412 round-1 review R3 gave composer boxes the same rule).
+// These frames are the three #7391 pinned as clear under its stay-clear test,
+// moved here unchanged; with the "some output" row taken out, the same
+// composers straight over the options still pin clear there.
+func TestCheckAndHandleTrustPrompt_RuledComposerOverARowItCannotExplainHolds(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{"a ruled composer over a row of text above the options", "────────────\n> fix it\n────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
+		{"a ruled bash-mode composer over a row of text above the options", "────────────\n! ls\n────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
+		{"a ruled memory-mode composer over a row of text above the options", "────────────\n# keep it short\n────────────\nsome output\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to\nexit"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			requireHeldWithoutAKey(t, tt.content, "a ruled composer over a row it cannot explain decides nothing")
+		})
+	}
+}
