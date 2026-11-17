@@ -84,6 +84,18 @@ const sigtermFallbackPoll = 100 * time.Millisecond
 // cannot be verified in this pid namespace as the daemon serving this home
 // (see shutdownTargetIsOursFn).
 func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
+	return requestShutdownWith(ShutdownRequest{})
+}
+
+// RequestRestartShutdown is RequestShutdown for a stopper that starts the
+// daemon's successor itself: `af upgrade`, `af daemon restart` and the CLI
+// auto-update. The daemon refuses requests during its stop as a restart, which
+// a client retries into the successor, rather than as a final stop (#7474).
+func RequestRestartShutdown() (ShutdownResult, ShutdownTarget, error) {
+	return requestShutdownWith(ShutdownRequest{Restart: true})
+}
+
+func requestShutdownWith(req ShutdownRequest) (ShutdownResult, ShutdownTarget, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
 		return ShutdownNoDaemon, ShutdownTarget{}, err
@@ -138,7 +150,7 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 		// connection. Send Shutdown on a fresh connection, as before the Ping
 		// existed — a slow-but-healthy daemon is still stopped, not misreported
 		// as one that could not be — and target no PID.
-		rpcErr = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
+		rpcErr = callDaemonNoEnsure("Shutdown", req, &resp)
 	} else {
 		pingResp = pinged
 		// Pin the pinged process's incarnation now, while it is certainly still
@@ -149,7 +161,7 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 			pingOurs = shutdownTargetIsOursFn(pingResp.PID)
 		}
 		// Shutdown keeps its historical unbounded call once connected.
-		rpcErr = client.Call(controlServiceName+".Shutdown", ShutdownRequest{}, &resp)
+		rpcErr = client.Call(controlServiceName+".Shutdown", req, &resp)
 	}
 	if rpcErr != nil {
 		if isDaemonAbsentErr(rpcErr) {

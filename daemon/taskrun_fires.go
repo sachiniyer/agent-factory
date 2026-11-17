@@ -247,6 +247,7 @@ func isShutdownAbortErr(err error) bool {
 	}
 	return IsDaemonQuiescingErr(err) ||
 		IsDaemonStoppingErr(err) ||
+		IsDaemonRestartingErr(err) ||
 		isDaemonHandoffConnectionErr(err) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)

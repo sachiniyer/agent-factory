@@ -56,7 +56,9 @@ func callDaemon(method string, req any, resp any) error {
 
 	for attempt.err != nil {
 		err := attempt.err
-		if IsDaemonQuiescingErr(err) {
+		// A hand-off or a restart is proof a successor is coming, so a dial
+		// that fails once the socket closes is retried into it (#7474).
+		if IsDaemonQuiescingErr(err) || IsDaemonRestartingErr(err) {
 			handoffSeen = true
 			if fallbackErr == nil {
 				fallbackErr = err
@@ -70,6 +72,12 @@ func callDaemon(method string, req any, resp any) error {
 		liveGateErr := isLiveUpgradeGateErr(err)
 		if !admissionErr && !retryableDial && !liveGateErr {
 			return err
+		}
+		// Inside a daemon that is stopping or restarting, nothing is waited
+		// out or retried into a successor (#7474): the delivery that made this
+		// call ends as a shutdown abort, and a fire keeps its marker.
+		if refusal := inProcessDaemonEnsureRefusal(); refusal != nil {
+			return refusal
 		}
 
 		if retryableDial {

@@ -533,6 +533,14 @@ func writeHTTPSuccess(w http.ResponseWriter, r *http.Request, data any) {
 // writeHTTPError encodes err in a failure envelope with the given status. The
 // envelope body is always returned on error, never a bare status.
 func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err error) {
+	// A lifecycle refusal carries its code in the envelope, and its message
+	// without the code the control socket's text leads with (#7474). Only an
+	// unwrapped one: a handler that wraps a refusal ran, so its outcome is not
+	// one a client may retry, exactly as on the control socket.
+	if refusal, ok := err.(*lifecycleRefusalError); ok {
+		writeHTTPEnvelope(w, r, status, apiproto.FailureWithCode(refusal.refusal.Message, refusal.refusal.Code))
+		return
+	}
 	type codedError interface {
 		APIErrorCode() string
 	}

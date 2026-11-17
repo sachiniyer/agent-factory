@@ -737,7 +737,13 @@ type PingResponse struct {
 	RefusedHosts []RefusedHost `json:"refused_hosts,omitempty"`
 }
 
-type ShutdownRequest struct{}
+type ShutdownRequest struct {
+	// Restart says the stopper starts this daemon's successor itself, so
+	// requests refused during the stop are retried into it (#7474). Additive:
+	// an older client sends none and is a final stop, which is what a stop
+	// without it has always meant since #7440; an older daemon ignores it.
+	Restart bool `json:"restart,omitempty"`
+}
 type ShutdownResponse struct {
 	OK bool `json:"ok"`
 	// PID is the acknowledging daemon's process id (#5007). RequestShutdown

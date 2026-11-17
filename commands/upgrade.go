@@ -22,7 +22,7 @@ import (
 // implementation contacts the local control plane (#436) and asks any
 // running daemon to exit before the upgrade path respawns it from the freshly
 // written binary (#498/#1386).
-var requestDaemonShutdownFn = daemon.RequestShutdown
+var requestDaemonShutdownFn = daemon.RequestRestartShutdown
 
 // osExecutableFn is indirected so tests can point the upgrade flow at a
 // temp file rather than overwriting the test binary itself.

@@ -62,7 +62,14 @@ func (s *controlServer) trackHTTPRPC(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if !s.httpRequests.enter() {
-			writeHTTPError(w, r, http.StatusServiceUnavailable, errDaemonQuiescing())
+			// The lifecycle's own refusal: a stop refuses as a stop, a
+			// restart as a restart, and a hand-off as a hand-off, just as
+			// the control socket does (#7474).
+			refusal := errDaemonQuiescing()
+			if s.manager != nil {
+				refusal = s.manager.lifecycle.closedAdmissionRefusal()
+			}
+			writeHTTPError(w, r, http.StatusServiceUnavailable, refusal)
 			return
 		}
 		defer s.httpRequests.leave()

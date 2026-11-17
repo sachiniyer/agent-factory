@@ -340,22 +340,23 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// The Shutdown RPC stamps the same clock the signal relay does.
 	manager.lifecycle.useStopClock(stop)
 
-	// The task-delivery shutdown classifier (#5503) needs this daemon's drain
-	// state; install it as soon as the lifecycle exists so a run already in
-	// flight when drainDaemon marks quiescing classifies its transport error
-	// as aborted rather than errored. Restored on return so a later in-process
-	// caller (tests) sees the inert default again.
-	daemonDrainingFn = func() bool { return manager.lifecycle.isQuiescing() }
-	defer func() { daemonDrainingFn = func() bool { return false } }()
-
-	// This daemon's cron deliveries (#7440). Each one, scheduled, replayed or
-	// triggered, holds a slot while it runs; the teardown step below closes
-	// the tracker and joins them. Installed here, before the teardown is
-	// deferred, so its removal runs after the teardown (defers unwind LIFO):
-	// a run arriving during the teardown meets the closed tracker, not none.
+	// What in-process code without a handle on this daemon reads
+	// (stopped_daemon_state.go), published as soon as the lifecycle exists:
+	//   - the drain predicate, for the task-delivery shutdown classifier
+	//     (#5503), so a run already in flight when drainDaemon marks quiescing
+	//     classifies its transport error as aborted rather than errored;
+	//   - the cron delivery tracker (#7440): each delivery, scheduled,
+	//     replayed or triggered, holds a slot while it runs, and the teardown
+	//     step below closes it and joins them;
+	//   - the lifecycle, which the control client asks before it would ensure
+	//     a daemon (#7474).
+	// Installed before the teardown is deferred, so what its return runs
+	// comes after the teardown (defers unwind LIFO): a run arriving during the
+	// teardown meets the closed tracker. And they stay closed once the daemon
+	// returns (#7474): a goroutine starved through the whole teardown is
+	// refused, never admitted untracked (latchStoppedDaemon).
 	deliveries := &joinedRuns{}
-	taskDeliveries.Store(deliveries)
-	defer taskDeliveries.CompareAndSwap(deliveries, nil)
+	defer installInProcessDaemon(manager.lifecycle, deliveries)()
 
 	// The teardown: every supervisor that stops what this daemon started, run
 	// in parallel and bounded by the stop's deadline (daemon_teardown.go,

@@ -54,25 +54,6 @@ func errDaemonQuiescing() error {
 	return errors.New(daemonQuiescingErrText + "; retry shortly")
 }
 
-// daemonStoppingErrText is the stable wire prefix for work refused or cut short
-// because the daemon is stopping: not handing off to an upgrade, just going
-// away (#7440). It is deliberately not an admission retry. The client must not
-// wait it out, nor re-ensure a daemon behind the caller's own stop. The caller
-// retries after the daemon restarts.
-const daemonStoppingErrText = "agent-factory daemon is shutting down"
-
-// errDaemonStopping refuses work the stopping daemon will not do, and tells the
-// caller what to do instead.
-func errDaemonStopping() error {
-	return errors.New(daemonStoppingErrText + "; retry after it restarts")
-}
-
-// IsDaemonStoppingErr reports whether err is the stopping daemon's refusal or
-// abort. It matches the wire prefix, since net/rpc flattens errors to text.
-func IsDaemonStoppingErr(err error) bool {
-	return err != nil && strings.Contains(err.Error(), daemonStoppingErrText)
-}
-
 // IsDaemonQuiescingErr reports whether a mutation was refused because the daemon is
 // quiescing for an upgrade hand-off. net/rpc flattens the server error to text, so
 // this matches the stable wire prefix like the other admission classifiers.
@@ -101,7 +82,8 @@ func IsDaemonUpgradeProbationErr(err error) bool {
 // and HTTP/TUI transports use this predicate so a new admission phase cannot
 // become retryable on one transport while failing immediately on the other.
 func IsDaemonAdmissionRetryable(err error) bool {
-	return IsDaemonStartingErr(err) || IsDaemonUpgradeProbationErr(err) || IsDaemonQuiescingErr(err)
+	return IsDaemonStartingErr(err) || IsDaemonUpgradeProbationErr(err) || IsDaemonQuiescingErr(err) ||
+		IsDaemonRestartingErr(err)
 }
 
 // DaemonSocketPath returns the Unix socket path used by the local control
@@ -182,6 +164,11 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 
 	if err := pingDaemonUntil(deadline); err == nil {
 		return nil
+	}
+	// A daemon that is stopping or restarting never ensures a daemon from
+	// inside itself (#7474): its unanswered socket is its own stop.
+	if refusal := inProcessDaemonEnsureRefusal(); refusal != nil {
+		return refusal
 	}
 	if admissionDeadlineExpired(deadline) {
 		return daemonAdmissionDeadlineError()
@@ -528,7 +515,7 @@ func callDaemonNoEnsureAttemptBefore(method string, req any, resp any, deadline 
 		if committed := committedFromLegacyRPCError(err); committed != nil {
 			return daemonCallAttempt{err: committed, requestStarted: true}
 		}
-		return daemonCallAttempt{err: err, requestStarted: true}
+		return daemonCallAttempt{err: lifecycleRefusalFromRPCError(err), requestStarted: true}
 	}
 	// A committed mutation answers OK and reports itself in the response
 	// envelope: net/rpc reduces a concrete error to rpc.ServerError and keeps

@@ -230,10 +230,11 @@ func (l *daemonLifecycle) markQuiescing() {
 }
 
 // markStopping is markQuiescing for an ordinary stop: the same terminal
-// quiescence, but a refusal says the daemon is shutting down rather than
-// handing off (#7440). A client given that is not retried into a daemon it
-// would have to start behind the caller's own stop. A hand-off already
-// marked stays one: the hand-off's own drain calls this too. Idempotent.
+// quiescence, but a refusal says the daemon is restarting or shutting down
+// rather than handing off (#7440, #7474); the stop's intent says which. A
+// client refused by a final stop is not retried into a daemon it would have to
+// start behind the caller's own stop. A hand-off already marked stays one: the
+// hand-off's own drain calls this too. Idempotent.
 func (l *daemonLifecycle) markStopping() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -324,17 +325,45 @@ func (l *daemonLifecycle) isQuiescing() bool {
 // Manager.Ready by requireStateMutationAdmission.
 func (l *daemonLifecycle) mutationAdmissionError() error {
 	l.mu.RLock()
-	defer l.mu.RUnlock()
-	if l.quiescing {
-		if !l.handoff {
-			return errDaemonStopping()
-		}
-		return errDaemonQuiescing()
-	}
+	quiescing := l.quiescing
+	var probationErr error
 	if l.inProbationLocked() {
-		return errDaemonUpgradeProbation(l.transactionID)
+		probationErr = errDaemonUpgradeProbation(l.transactionID)
 	}
-	return nil
+	l.mu.RUnlock()
+	if quiescing {
+		return l.closedAdmissionRefusal()
+	}
+	return probationErr
+}
+
+// closedAdmissionRefusal is what a daemon that has stopped admitting work
+// answers, the same on both transports (#7474): an upgrade hand-off's refusal,
+// a restart's, or a final stop's. A restart and a hand-off are retried into
+// the daemon that follows; a final stop is not. A stop's intent may still be
+// settling while the stop reads its unit's job from systemd, and the refusal
+// waits for that within its hard bound (stopClock.restartIntended).
+func (l *daemonLifecycle) closedAdmissionRefusal() error {
+	l.mu.RLock()
+	handoff, stop := l.handoff, l.stop
+	l.mu.RUnlock()
+	switch {
+	case handoff:
+		return errDaemonQuiescing()
+	case stop.restartIntended():
+		return errDaemonRestarting()
+	default:
+		return errDaemonStopping()
+	}
+}
+
+// stoppingWithoutHandoff reports whether the daemon is stopping, for good or
+// to restart, rather than handing off to an upgrade. A delivery in such a
+// daemon must never ensure a daemon (#7474).
+func (l *daemonLifecycle) stoppingWithoutHandoff() bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.quiescing && !l.handoff
 }
 
 func (l *daemonLifecycle) snapshot() daemonLifecycleSnapshot {
