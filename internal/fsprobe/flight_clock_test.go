@@ -3,6 +3,7 @@ package fsprobe
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -65,7 +66,7 @@ func TestManualClock_RearmsAndStops(t *testing.T) {
 // when a whole bound has passed is the bounded non-answer (#7456).
 func TestPaced_TheBoundRunsOnTheInstalledClock(t *testing.T) {
 	clock := NewManualClock(time.Now())
-	restoreClock := SetPacedClockForTest(clock)
+	restoreClock := SetFlightClockForTest(clock)
 	restoreTimeout := SetProbeTimeoutForTest(50 * time.Millisecond)
 	defer func() {
 		restoreTimeout()
@@ -95,4 +96,47 @@ func TestPaced_TheBoundRunsOnTheInstalledClock(t *testing.T) {
 	require.True(t, errors.Is(err, context.DeadlineExceeded))
 	close(release)
 	awaitPacedFlightsGone(t)
+}
+
+// A plain bounded probe's deadline runs on the installed clock too (#7456):
+// work that answers does so however long the wall clock took, and work still
+// out when the declared bound passes is the non-answer.
+func TestBounded_TheBoundRunsOnTheInstalledClock(t *testing.T) {
+	clock := NewManualClock(time.Now())
+	restoreClock := SetFlightClockForTest(clock)
+	restoreTimeout := SetProbeTimeoutForTest(50 * time.Millisecond)
+	release := make(chan struct{})
+	restoreStat := SetStatPathForTest(func(path string) (os.FileInfo, error) {
+		<-release
+		return os.Stat(path)
+	})
+	defer func() {
+		close(release)
+		restoreStat()
+		restoreTimeout()
+		restoreClock()
+	}()
+
+	dir := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Stat(dir)
+		done <- err
+	}()
+
+	// A hundred real milliseconds pass while the stat is still out — two
+	// bounds on a wall clock, but nothing has advanced the declared one, so
+	// the flight keeps waiting.
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("the flight ended before its declared bound: %v", err)
+	default:
+	}
+
+	// Declaring the bound spent makes the unanswered stat the non-answer.
+	clock.Advance(50 * time.Millisecond)
+	err := <-done
+	require.True(t, errors.Is(err, ErrProbeTimedOut), "a probe still out at the declared bound is the non-answer: %v", err)
+	require.True(t, errors.Is(err, context.DeadlineExceeded))
 }

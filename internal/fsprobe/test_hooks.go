@@ -59,10 +59,11 @@ func SetOpenForTest(f func(string) (*os.File, error)) func() {
 	return openPath.replace(f)
 }
 
-// SetPacedClockForTest installs the clock Paced's per-step bound runs on, so
-// a test can declare how long each step takes on a ManualClock instead of
+// SetFlightClockForTest installs the clock every bounded flight's bound runs
+// on — Paced's per-step bound and the plain probes' deadlines alike — so a
+// test can declare how long each lookup takes on a ManualClock instead of
 // racing the runner's scheduler (#7456). Callers must restore the original
 // via the returned function.
-func SetPacedClockForTest(c *ManualClock) func() {
-	return pacedClocks.replace(c)
+func SetFlightClockForTest(c *ManualClock) func() {
+	return flightClocks.replace(c)
 }

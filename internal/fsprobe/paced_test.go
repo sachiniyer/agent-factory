@@ -62,7 +62,7 @@ func TestPaced_BoundsAStepThatDoesNotAnswer(t *testing.T) {
 // the bound.
 func TestPaced_AnswersWhateverItsTotalTimeWhenEveryStepAnswers(t *testing.T) {
 	clock := NewManualClock(time.Now())
-	restoreClock := SetPacedClockForTest(clock)
+	restoreClock := SetFlightClockForTest(clock)
 	restoreTimeout := SetProbeTimeoutForTest(50 * time.Millisecond)
 	defer func() {
 		restoreTimeout()

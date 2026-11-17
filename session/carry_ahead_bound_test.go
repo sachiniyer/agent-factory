@@ -191,15 +191,18 @@ func TestClaudeCarryCheckAheadRefusesWhenTheStalenessComparisonDoesNotAnswer(t *
 // paceCarryLookups makes every descriptor-walk syscall answer after delay on
 // a manual bound clock it installs, as on a slow mount that still answers
 // (#7456): a syscall's cost is declared on the clock, never slept, so no
-// scheduler can stretch one read past the bound. When n is positive, the
-// n-th read of stallPath spends a whole bound on the clock and then does not
+// scheduler can stretch one read past the bound. The check-ahead's other
+// bounded lookups — symlink resolutions and store listings that never call
+// the stand-in — answer on the same clock whenever their real work finishes,
+// since nothing advances it while they run. When n is positive, the n-th
+// read of stallPath spends a whole bound on the clock and then does not
 // answer at all until the test ends — the flight has timed out on it before
 // the walk resumes.
 func paceCarryLookups(t *testing.T, delay time.Duration, stallPath string, n int32) {
 	t.Helper()
 	release := make(chan struct{})
 	clock := fsprobe.NewManualClock(time.Now())
-	restoreClock := fsprobe.SetPacedClockForTest(clock)
+	restoreClock := fsprobe.SetFlightClockForTest(clock)
 	restoreTimeout := fsprobe.SetProbeTimeoutForTest(carryLookBound)
 	prev := carryLookupStandIn.Load()
 	var reads atomic.Int32

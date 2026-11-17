@@ -20,7 +20,7 @@ type pacedFlight struct {
 	lastStep atomic.Int64
 	// clock is the time source the bound runs on, loaded when the flight
 	// begins (#7456).
-	clock paceClock
+	clock flightClock
 }
 
 // pacedFlights is Paced's registry, keyed by question and key.
@@ -69,7 +69,7 @@ func runPaced(id, question, key string, work func(step func()) (any, error)) (an
 		pacedFlights.Unlock()
 		return waitPaced(id, question, key, active)
 	}
-	flight := &pacedFlight{done: make(chan struct{}), clock: pacedClocks.load()}
+	flight := &pacedFlight{done: make(chan struct{}), clock: flightClocks.load()}
 	flight.lastStep.Store(flight.clock.Now().UnixNano())
 	pacedFlights.byKey[id] = flight
 	pacedFlights.Unlock()
