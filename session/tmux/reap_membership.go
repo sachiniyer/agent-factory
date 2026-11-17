@@ -144,19 +144,37 @@ const (
 
 // afDaemonClass positively identifies an agent-factory daemon from the
 // snapshot entry: the same af-binary-plus---daemon argv classification the
-// daemon's own PID validation uses (proctree.ArgvIsAFDaemon). A process whose
-// argv cannot be read is NOT ruled out — it reports uncertain so the caller
-// errs toward exclusion. A kernel thread can never be a daemon.
+// daemon's own PID validation uses (proctree.ArgvIsAFDaemon). A kernel thread
+// can never be a daemon.
+//
+// When argv cannot be read the kernel task name answers instead. An unreadable
+// argv is ROUTINE on darwin — the kernel declines KERN_PROCARGS2 for a
+// foreign-uid target, so every orphan reparented to launchd would report
+// "uncertain" and be protected, and nothing on darwin could ever be reaped
+// (#7435 CI on macOS). p.Comm needs no permission and names the same
+// executable argv[0] names, so a comm that cannot be an af binary rules the
+// process OUT. Only an af-named comm with unreadable argv stays uncertain —
+// the still-fail-closed direction for a real foreign-uid daemon.
 func afDaemonClass(p proctree.Process) afDaemonVerdict {
 	if p.KernelThread {
 		return afDaemonNot
 	}
-	argv := proctree.Argv(p.PID)
-	if len(argv) == 0 {
+	if argv := proctree.Argv(p.PID); len(argv) > 0 {
+		if proctree.ArgvIsAFDaemon(argv) {
+			return afDaemonIs
+		}
+		return afDaemonNot
+	}
+	if commNamesAFDaemonBinary(p.Comm) {
 		return afDaemonUncertain
 	}
-	if proctree.ArgvIsAFDaemon(argv) {
-		return afDaemonIs
-	}
 	return afDaemonNot
+}
+
+// commNamesAFDaemonBinary reports whether a kernel task name is one argv[0]
+// could carry for an agent-factory daemon: the same {af, agent-factory} set
+// proctree.ArgvIsAFBinary checks. Both names fit inside the task-name field
+// (MAXCOMLEN) untruncated.
+func commNamesAFDaemonBinary(comm string) bool {
+	return comm == "af" || comm == "agent-factory"
 }

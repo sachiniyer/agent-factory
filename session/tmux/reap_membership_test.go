@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -170,4 +171,84 @@ func spawnCohortSleeper(t *testing.T, name, home, gen string, newSession bool) p
 		require.Equal(t, p.PID, p.SID, "the setsid'd helper must lead its own session")
 	}
 	return p
+}
+
+// commNamesAFDaemonBinary mirrors the {af, agent-factory} name set
+// proctree.ArgvIsAFBinary checks: the kernel task name is the same
+// executable's name, so the same set applies.
+func TestCommNamesAFDaemonBinary(t *testing.T) {
+	for _, tc := range []struct {
+		comm string
+		want bool
+	}{
+		{"af", true},
+		{"agent-factory", true},
+		{"launchd", false},
+		{"sleep", false},
+		{"af-helper", false},
+		{"agent-factory-dev", false},
+		{"", false},
+	} {
+		t.Run(tc.comm, func(t *testing.T) {
+			require.Equal(t, tc.want, commNamesAFDaemonBinary(tc.comm))
+		})
+	}
+}
+
+// When a process's argv cannot be read — routine on darwin for a
+// foreign-uid ancestor like launchd (the kernel declines KERN_PROCARGS2) —
+// the kernel task name rules the daemon verdict out instead: a comm that
+// cannot name an af binary cannot be an af daemon. Without the fallback
+// every orphan reparented to launchd reported "unproven" and was protected,
+// which is why darwin reaped nothing (#7435 CI). The verdict is the same on
+// both platforms — linux reaches it through /proc/1/cmdline instead.
+func TestAFDaemonClassRulesOutAnUnreadableAncestorByItsTaskName(t *testing.T) {
+	// pid 1 exists on every platform; on darwin its argv is unreadable to a
+	// non-root caller, on linux it reads as init/systemd. Either way it is
+	// not an af daemon.
+	initProc := proctree.Process{PID: 1, Comm: "launchd"}
+	require.Equal(t, afDaemonNot, afDaemonClass(initProc),
+		"a non-af task name rules the daemon verdict out when argv cannot be read")
+
+	// An af-NAMED comm with unreadable argv is the case that must stay
+	// uncertain: a real foreign-uid af daemon.
+	if len(proctree.Argv(1)) == 0 {
+		// Only assertable where pid 1's argv is genuinely unreadable (darwin).
+		require.Equal(t, afDaemonUncertain,
+			afDaemonClass(proctree.Process{PID: 1, Comm: "af"}),
+			"an af-named comm keeps the unreadable-argv daemon case protected")
+	}
+}
+
+// The reparented-survivor shape darwin hands every vanished pane: the
+// survivor's only ancestor left is launchd (pid 1), whose argv the kernel
+// will not give a foreign uid. The chain must end ELIGIBLE there — the
+// survivor is not the reaper's chain, not a daemon subtree, not behind a
+// tmux boundary — so the reap verdict equals linux's.
+func TestClassifyCaptureAncestryEndsEligibleAtAnUnreadableTopOfChain(t *testing.T) {
+	survivor := proctree.Process{PID: 4242, PPID: 1, Comm: "sleep"}
+	snap := map[int]proctree.Process{
+		4242: survivor,
+		1:    {PID: 1, PPID: 0, Comm: "launchd"},
+	}
+	require.Equal(t, "", classifyCaptureAncestry(snap, survivor.PID, os.Getpid()),
+		"a survivor reparented to the unreadable top of chain stays reapable")
+}
+
+// Darwin-specific pin for the missing input itself: the kernel refuses
+// KERN_PROCARGS2 for a foreign-uid process, so a reparented survivor's
+// launchd ancestor can never be argv-classified — the kernel task name is
+// the membership proof darwin does have (#7435 CI on macOS).
+func TestAFDaemonClassOnDarwinUsesTheKernelTaskNameForLaunchd(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the unreadable-argv premise is darwin's")
+	}
+	require.Empty(t, proctree.Argv(1),
+		"launchd must not answer KERN_PROCARGS2 to a foreign uid — the premise this test pins")
+	require.Equal(t, afDaemonNot,
+		afDaemonClass(proctree.Process{PID: 1, Comm: "launchd"}),
+		"launchd's task name rules it out — the survivor reparented to it stays reapable")
+	require.Equal(t, afDaemonUncertain,
+		afDaemonClass(proctree.Process{PID: 1, Comm: "af"}),
+		"an af-named unreadable process stays protected even at the top of the chain")
 }
