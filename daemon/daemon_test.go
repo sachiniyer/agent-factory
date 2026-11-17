@@ -49,6 +49,14 @@ func TestMain(m *testing.M) {
 		recoveryExit0ReexecMain()
 		return
 	}
+	// A re-exec of this test binary standing in for a lock-less af daemon
+	// holding a web port (listener_takeover_test.go's spawnHelperDaemon): its
+	// argv is a pure [af --daemon] claim, so role selection rides this env
+	// intercept, before flag parsing, exactly like the re-execs above.
+	if os.Getenv("AF_TAKEOVER_TEST_HELPER") == "1" {
+		takeoverHelperDaemonMain()
+		return
+	}
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux

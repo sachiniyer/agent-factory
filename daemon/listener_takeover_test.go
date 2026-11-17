@@ -181,16 +181,15 @@ func flockHomeLock(t *testing.T, home string) *os.File {
 	return lock
 }
 
-// TestTakeoverHelperDaemon is not a test — it is the subprocess
-// spawnHelperDaemon launches: argv and environ shaped exactly like a real af
-// daemon's ("af --daemon" + AGENT_FACTORY_HOME), it binds a free port, prints
-// the bound address for its parent, then holds it until killed. A real child
-// process is the only honest way to give the lock-less classifier a kernel
-// argv/environ it did not make up.
-func TestTakeoverHelperDaemon(t *testing.T) {
-	if os.Getenv("AF_TAKEOVER_TEST_HELPER") != "1" {
-		t.Skip("helper process — run only via spawnHelperDaemon")
-	}
+// takeoverHelperDaemonMain is the subprocess spawnHelperDaemon launches:
+// argv and environ shaped exactly like a real af daemon's ("af --daemon" +
+// AGENT_FACTORY_HOME), it binds a free port, prints the bound address for its
+// parent, then holds it until killed. A real child process is the only honest
+// way to give the lock-less classifier a kernel argv/environ it did not make
+// up. TestMain dispatches here on AF_TAKEOVER_TEST_HELPER before flag parsing,
+// so the child's argv stays a pure af-daemon claim — a -test.run token is a
+// shorthand af's own root-flag parse rejects (#7494 item 3).
+func takeoverHelperDaemonMain() {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		os.Exit(2)
@@ -199,19 +198,19 @@ func TestTakeoverHelperDaemon(t *testing.T) {
 	select {} // hold the port until the parent kills us
 }
 
-// spawnHelperDaemon launches TestTakeoverHelperDaemon as a child whose argv
-// is "af --daemon" and whose AGENT_FACTORY_HOME is home — the lock-less af
+// spawnHelperDaemon launches a re-exec of this test binary as a child whose
+// argv is "af --daemon" and whose AGENT_FACTORY_HOME is home — the lock-less af
 // holder shape. It returns the address the helper is bound on; the child is
 // killed on test cleanup.
 func spawnHelperDaemon(t *testing.T, home string) string {
 	t.Helper()
 	cmd := exec.Command(os.Args[0])
 	// argv[0] "af" plus a discrete "--daemon" token is the real daemon's argv
-	// shape the classifier tests. The token goes AFTER "--": the test
-	// binary's flag parser stops there, so the child reaches the helper at
-	// all — a bare "--daemon" is not a registered test flag and exits the
-	// child before it binds anything.
-	cmd.Args = []string{"af", "-test.run=^TestTakeoverHelperDaemon$", "--", "--daemon"}
+	// shape the classifier tests — and the ONLY shape af's own root-flag parse
+	// accepts. Role selection rides the environment (TestMain intercepts
+	// AF_TAKEOVER_TEST_HELPER before flag parsing), so no test-flag token ever
+	// enters argv.
+	cmd.Args = []string{"af", "--daemon"}
 	cmd.Env = append(os.Environ(),
 		"AF_TAKEOVER_TEST_HELPER=1",
 		"AGENT_FACTORY_HOME="+home,

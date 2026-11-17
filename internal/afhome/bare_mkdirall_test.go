@@ -68,6 +68,11 @@ var allowedBareMkdirAll = map[string]struct {
 		"Creates the parent of a path the calling test chose, always under t.TempDir() or another " +
 			"test-owned temp dir (a fake tmux or agent-server location). It never takes an AF-home path " +
 			"and is test-only (#6281)."},
+	"internal/testguard/fakedaemon/fakedaemon.go:Path": {1,
+		"Creates the content-addressed fake-daemon build cache directly under os.TempDir() " +
+			"(af-testfakedaemon-<uid>-<hash>) — the same shape as sleeper.go:Path. Nothing in it " +
+			"derives from HOME or AGENT_FACTORY_HOME; it is a build cache for a test fixture " +
+			"binary and is never at or inside the AF home (#7494)."},
 	"daemon/singleton_lock.go:acquireHomeLock": {1,
 		"The one deliberate pre-arm creator, and creating the home is its job. Its " +
 			"only production caller is RunDaemon (daemon/daemon.go:129), which arms " +
