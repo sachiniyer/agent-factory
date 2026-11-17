@@ -341,21 +341,32 @@ func TestReceiptPoolTrackedUnscopedIsScopedOnceTheScopeRecovers(t *testing.T) {
 			require.NoError(t, os.MkdirAll(other, 0o755))
 			foreign := writeCodexRolloutFileWithCwd(t, home, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", other)
 
+			// Every bounded lookup in this test runs on an installed clock
+			// whose time only the test moves (#7337): a lookup's cost is what
+			// the test declares — held out past the bound for the wedged
+			// resolution below, a slow listing where the test declares one —
+			// never what the runner's scheduler measured against a real-time
+			// bound (#7457). A lookup the test does not hold out answers
+			// whenever its work finishes, since nothing advances the clock
+			// while it runs.
+			clock := fsprobe.NewManualClock(time.Now())
+			t.Cleanup(fsprobe.SetFlightClockForTest(clock))
+
 			never := BeginConversationCaptureAtCodexHomeAndWorkingDir(home, launchDir)
 			never.TrackCodexReceiptPool(false)
 			require.Empty(t, never.receiptPaths, "precondition: a scoped pool holds no other directory's rollout")
 
-			// Wedge the launch dir. Its first resolution runs under a shrunken
-			// bound so the phase stays fast, and it stays stuck until the mount
-			// answers, so every later resolution of it is refused at once. The
-			// production bound comes back before the snapshot is taken: only the
-			// lookup this test wedges runs under the shrunken bound. The store
-			// listings the recovered verdict needs, the snapshot's before-image
-			// and its pool scan, run under the production one (#7337). One of
-			// them is slow here, past the shrunken bound, as on a loaded runner.
+			// Wedge the launch dir. Its resolution declares a whole bound on
+			// the clock and then holds until the mount answers, so its flight
+			// times out on it deterministically and every later resolution of
+			// it is refused at once. The recovered verdict's own reads — the
+			// snapshot's before-image, the pool scan, and the one-shot
+			// re-scope's header read and cwd resolve — answer whenever their
+			// work finishes: they can never miss a bound to scheduler load.
 			release := make(chan struct{})
 			restoreSeam := fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
 				if path == wedgeRoot || strings.HasPrefix(path, wedgeRoot+string(filepath.Separator)) {
+					clock.Advance(50 * time.Millisecond)
 					<-release
 				}
 				return filepath.EvalSymlinks(path)
@@ -366,7 +377,7 @@ func TestReceiptPoolTrackedUnscopedIsScopedOnceTheScopeRecovers(t *testing.T) {
 			restoreTimeout()
 			require.True(t, errors.Is(err, fsprobe.ErrProbeTimedOut), "precondition: the launch dir does not answer: %v", err)
 
-			restoreSlow := slowFirstListing(t, filepath.Dir(filepath.Dir(filepath.Dir(foreign))))
+			restoreSlow := slowFirstListing(t, clock, filepath.Dir(filepath.Dir(filepath.Dir(foreign))))
 			wedged := withinBound(t, func() ConversationCaptureSnapshot {
 				s := BeginConversationCaptureAtCodexHomeAndWorkingDir(home, launchDir)
 				s.TrackCodexReceiptPool(false)
@@ -428,15 +439,17 @@ func TestSetConversationNamesADanglingLaunchDir(t *testing.T) {
 	require.NotContains(t, err.Error(), "is responding", "not a mount that did not answer")
 }
 
-// slowFirstListing makes the first listing of dir take past the wedge phase's
-// shrunken bound, and well within the production one, as an ordinary listing
-// on a loaded runner can (#7337). Every other listing answers at once.
-func slowFirstListing(t *testing.T, dir string) (restore func()) {
+// slowFirstListing makes the first listing of dir cost a declared delay on
+// the test's clock — inside the bound, as a slow but answering listing on a
+// loaded runner is — while every other listing answers at once (#7337). The
+// cost is declared on the clock, never slept, so no scheduler can stretch it
+// past the bound the flight's verdict is measured against (#7457).
+func slowFirstListing(t *testing.T, clock *fsprobe.ManualClock, dir string) (restore func()) {
 	t.Helper()
 	var slowed atomic.Bool
 	restore = fsprobe.SetReadDirForTest(func(d string) ([]os.DirEntry, error) {
 		if d == dir && slowed.CompareAndSwap(false, true) {
-			time.Sleep(200 * time.Millisecond)
+			clock.Advance(time.Second)
 		}
 		return os.ReadDir(d)
 	})
