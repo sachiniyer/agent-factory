@@ -84,6 +84,14 @@ func TestDaemonFlagParseMatchesAfRoot(t *testing.T) {
 		{"--program"},
 		{"--daemon", "--daemon=false"},
 		{"--daemon=false", "--daemon"},
+		// #7496: a bool shorthand carries an explicit value — pflag parses
+		// `-h=false` as help=false and the daemon claim stands. A bare -h,
+		// a truthy one, and an unparseable bool all exit af first.
+		{"-h=false", "--daemon"},
+		{"--daemon", "-h=false"},
+		{"-h", "--daemon"},
+		{"-h=true", "--daemon"},
+		{"-h=foo", "--daemon"},
 	} {
 		assertParity(t, tail)
 	}
@@ -99,6 +107,7 @@ func TestDaemonFlagParseMatchesAfRoot(t *testing.T) {
 				assertParity(t, []string{"-" + f.Shorthand + "v", "--daemon"})
 			} else {
 				assertParity(t, []string{"-" + f.Shorthand, "--daemon"})
+				assertParity(t, []string{"-" + f.Shorthand + "=false", "--daemon"})
 			}
 		}
 		if f.NoOptDefVal == "" {

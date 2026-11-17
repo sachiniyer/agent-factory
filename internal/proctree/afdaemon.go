@@ -76,20 +76,36 @@ func ArgvHasDaemonFlag(args []string) bool {
 				return false
 			}
 		default:
-			// Shorthand zone: root has only -h (bool) and -p (value). pflag
-			// lets -p take the rest of the token or the next argument.
+			// Shorthand zone: root has -h/--help and -v/--version (bools)
+			// plus -p/--program (value). pflag reads a cluster
+			// char-by-char: a bool shorthand may carry an explicit =value,
+			// and a value shorthand takes the rest of the token or the
+			// next argument.
 			for j := 1; j < len(a); j++ {
 				switch a[j] {
-				case 'h':
-					return false
-				case 'p':
-					if j+1 == len(a) {
-						if i+1 >= len(rest) {
+				case 'h', 'v':
+					// -h=false / -v=false parse the bool false and the
+					// run continues (#7496); a bare shorthand anywhere in
+					// the cluster, a truthy one, or an unparseable bool
+					// exits af before RunE (help/version print).
+					if j+1 < len(a) && a[j+1] == '=' {
+						if v, err := strconv.ParseBool(a[j+2:]); err != nil || v {
 							return false
 						}
-						i++
+						j = len(a)
+					} else {
+						return false
 					}
-					j = len(a)
+				case 'p':
+					// The rest of the token is the value — -pfoo or
+					// -p=foo — or the next argument when nothing follows.
+					if j+1 < len(a) {
+						j = len(a)
+					} else if i+1 < len(rest) {
+						i++
+					} else {
+						return false
+					}
 				default:
 					return false
 				}
