@@ -141,8 +141,8 @@ func newPreviewDaemonWithTabs(t *testing.T, tune func(*config.Config), targets .
 	autoPreview := cfg.PreviewListenAddr == autoPreviewListenAddr
 
 	var closeHTTP func() error
-	startHTTP := func(attemptCfg *config.Config, requirePreview bool) error {
-		candidate, err := NewManager(attemptCfg)
+	startHTTP := func(attemptCfg *config.Config, requirePreview bool, listenTCP func(network, address string) (net.Listener, error)) error {
+		candidate, err := newManagerWithOptions(attemptCfg, managerOptions{listenTCP: listenTCP})
 		if err != nil {
 			return err
 		}
@@ -164,16 +164,16 @@ func newPreviewDaemonWithTabs(t *testing.T, tune func(*config.Config), targets .
 
 	if autoPreview {
 		err = retryPreviewFixtureBind(previewFixtureBindAttempts, func() error {
-			addr, acquireErr := freeLoopbackAddr()
-			if acquireErr != nil {
-				return acquireErr
-			}
+			// The configured port is a LISTENER this attempt holds open until
+			// startHTTPServer's own bind takes it over — a grabbed-then-
+			// released port could be re-taken in between (#7460).
+			addr, listenTCP := heldTCPListener(t, "127.0.0.1", net.Listen)
 			attemptCfg := *cfg
 			attemptCfg.PreviewListenAddr = addr
-			return startHTTP(&attemptCfg, true)
+			return startHTTP(&attemptCfg, true, listenTCP)
 		})
 	} else {
-		err = startHTTP(cfg, false)
+		err = startHTTP(cfg, false, nil)
 	}
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, closeHTTP()) })

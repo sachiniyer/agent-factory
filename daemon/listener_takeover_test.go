@@ -137,15 +137,15 @@ func takeoverFixture(t *testing.T) (wl *webListeners, defHome, myHome string) {
 	return wl, defHome, myHome
 }
 
-// contestPort re-points the "default" web address at a free loopback port and
-// returns its listen_addr — the seam that keeps every reconcile in a test off
-// the shipped 127.0.0.1:8443 (#6625).
-func contestPort(t *testing.T) string {
+// contestPort re-points the "default" web address at a loopback port this
+// test HOLDS and returns its listen_addr — the seam that keeps every
+// reconcile in a test off the shipped 127.0.0.1:8443 (#6625). The port stays
+// reserved until wl's bind adopts the socket (#7460): a refused bind leaves
+// it held until cleanup, a proceeding one takes it over — the contested
+// port can never be lost to a third party in between.
+func contestPort(t *testing.T, wl *webListeners) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
+	addr := heldLoopbackAddr(t, wl)
 	oldDefault := defaultWebListenAddr
 	defaultWebListenAddr = addr
 	t.Cleanup(func() { defaultWebListenAddr = oldDefault })
@@ -486,8 +486,10 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 	})
 
 	t.Run("an unbound port finds no socket — unproven", func(t *testing.T) {
-		require.NoError(t, l.Close())
-		verdict, _, _ := classifyPortHolder(req)
+		// Bound-but-never-listening: the port stays held (nothing else can
+		// take it) yet has no LISTEN row to classify — the unbound answer
+		// without a release window another holder could win (#7460).
+		verdict, _, _ := classifyPortHolder(reqFor(t, deadPortAddr(t, "127.0.0.1")))
 		require.Equal(t, holderUnproven, verdict)
 	})
 }
@@ -501,7 +503,7 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 // to bind the shipped 8443 as its failure mode (#6625).
 func TestBindRefusesOnDefaultHomeClaim(t *testing.T) {
 	wl, defHome, _ := takeoverFixture(t)
-	contested := contestPort(t)
+	contested := contestPort(t, wl)
 
 	// The claim: a live daemon.lock in the default home — its daemon is
 	// running — with a config.toml still wanting this very port.
@@ -536,7 +538,7 @@ func TestBindRefusesOnDefaultHomeClaim(t *testing.T) {
 // whole web UI — is silently lost behind a refusal the TUI only whispered.
 func TestRelocatedHomeKeepsDefaultPort(t *testing.T) {
 	wl, defHome, _ := takeoverFixture(t)
-	contested := contestPort(t)
+	contested := contestPort(t, wl)
 
 	// The stray home: exactly what first-run materialization leaves behind.
 	writeDefHomeConfig(t, defHome, `"`+contested+`"`)
@@ -556,7 +558,7 @@ func TestRelocatedHomeKeepsDefaultPort(t *testing.T) {
 // default address binds normally.
 func TestBindProceedsWhenNoHomeClaims(t *testing.T) {
 	wl, _, _ := takeoverFixture(t)
-	free := contestPort(t)
+	free := contestPort(t, wl)
 
 	cfg := wl.manager.Config()
 	cfg.ListenAddr = free
@@ -856,12 +858,10 @@ func TestWildcardRefusalLatchesProvenEndpointEndToEnd(t *testing.T) {
 func TestLatchedRefusalHoldsOnRebind(t *testing.T) {
 	wl, _, _ := takeoverFixture(t)
 
-	// Serve a real free port first — the "daemon bound a different port
-	// after refusing" state.
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	serving := l.Addr().String()
-	require.NoError(t, l.Close())
+	// Serve a real port first — the "daemon bound a different port
+	// after refusing" state. The port is held until this reconcile's own
+	// bind adopts the socket (#7460).
+	serving := heldLoopbackAddr(t, wl)
 	cfg := wl.manager.Config()
 	cfg.ListenAddr = serving
 	failed, err := wl.reconcile(cfg)
