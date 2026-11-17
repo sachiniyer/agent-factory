@@ -26,6 +26,7 @@ import (
 // InfoLog/ErrorLog (e.g. Restore's re-spawn fallback) do not nil-deref.
 func TestMain(m *testing.M) {
 	handleMarkedEscapeeExec()
+	handleDaemonFixtureExec()
 	// Match main's account lookup before the internal pane shim can consume this
 	// test binary. Real-pane account tests then exercise the same registry-backed
 	// child boundary as the shipped executable rather than a test-only shortcut.

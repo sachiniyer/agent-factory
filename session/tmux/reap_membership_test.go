@@ -343,16 +343,14 @@ func TestClassifyCaptureAncestryProtectsUnprovenAncestry(t *testing.T) {
 // and an eligible one both stay reported so a cleanup-authorizing caller
 // still refuses (#7435 R3/R7).
 func TestReportableSurvivorsKeepsOnlyTheUnattributableAndTheEligible(t *testing.T) {
-	if os.Getenv(afDaemonSleepEnv) == "1" {
-		time.Sleep(5 * time.Minute)
-		return
-	}
 	// Positively placed: a descendant of a real af-module build running
 	// af --daemon argv. The helper's argv CLAIMS the daemon; the test
 	// binary's kernel-attested module build is what VERIFIES it (#7491),
 	// so this member is spared by PROOF and filtered out of the report.
-	daemon := exec.Command(os.Args[0], "-test.run=^TestReportableSurvivorsKeepsOnlyTheUnattributableAndTheEligible$")
-	daemon.Args = []string{"af", "--daemon", "-test.run=^TestReportableSurvivorsKeepsOnlyTheUnattributableAndTheEligible$"}
+	// The argv is a pure claim — af's own parse accepts no -test.run
+	// (#7494 item 3), so the sleep role is env-dispatched in TestMain.
+	daemon := exec.Command(os.Args[0])
+	daemon.Args = []string{"af", "--daemon"}
 	daemon.Env = append(os.Environ(), afDaemonSleepEnv+"=1")
 	daemon.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	require.NoError(t, daemon.Start())
@@ -477,13 +475,8 @@ const afDaemonSleepEnv = "AF_TEST_AFDAEMON_SLEEP"
 //   - UNVERIFIED: a foreign binary (`yes`) under the same forged argv —
 //     claimed, never proven: still never signalled, but blocking.
 func TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation(t *testing.T) {
-	if os.Getenv(afDaemonSleepEnv) == "1" {
-		time.Sleep(5 * time.Minute)
-		return
-	}
 	verified := exec.Command(os.Args[0])
-	verified.Args = []string{"af", "--daemon",
-		"-test.run=^TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation$"}
+	verified.Args = []string{"af", "--daemon"}
 	verified.Env = append(os.Environ(), afDaemonSleepEnv+"=1")
 	require.NoError(t, verified.Start())
 	t.Cleanup(func() { _ = verified.Process.Kill(); _, _ = verified.Process.Wait() })
@@ -1118,26 +1111,9 @@ const (
 // close_dead_pane_test.go pair TestCloseAndWaitForPaneExit_VanishedSighup*
 // on an isolated server.
 func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
-	if os.Getenv(decisionDaemonEnv) == "1" {
-		// Inside the forged-argv daemon: publish the marked child's pid,
-		// then park. exec.Command with a clean Env hands the child only the
-		// fixture's markers.
-		spec := strings.Split(os.Getenv(decisionDaemonSpecEnv), "\t")
-		require.Len(t, spec, 4)
-		cmd := exec.Command("sleep", "300")
-		cmd.Env = []string{
-			"PATH=" + os.Getenv("PATH"),
-			EnvMarkerSession + "=" + spec[0],
-			EnvMarkerHome + "=" + spec[1],
-			EnvMarkerGeneration + "=" + spec[2],
-		}
-		require.NoError(t, cmd.Start())
-		require.NoError(t, os.WriteFile(spec[3],
-			[]byte(strconv.Itoa(cmd.Process.Pid)), 0o600))
-		_, _ = cmd.Process.Wait()
-		time.Sleep(5 * time.Minute)
-		return
-	}
+	// The daemon-child role this fixture used to re-enter here now runs in
+	// TestMain under decisionDaemonEnv: the daemon's argv must be a pure
+	// `af --daemon` claim — af's own parse rejects -test.run (#7494 item 3).
 	shrinkReapWaits(t)
 	const name = "af_decision_table"
 	home := t.TempDir()
@@ -1149,8 +1125,7 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 		dir := t.TempDir()
 		childPidFile := filepath.Join(dir, "child.pid")
 		daemon := exec.Command(os.Args[0])
-		daemon.Args = []string{"af", "--daemon",
-			"-test.run=^TestMarkedOrphanProcessesDecisionTable$"}
+		daemon.Args = []string{"af", "--daemon"}
 		daemon.Env = append(os.Environ(),
 			decisionDaemonEnv+"=1",
 			decisionDaemonSpecEnv+"="+name+"\t"+home+"\t"+gen+"\t"+childPidFile)

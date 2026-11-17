@@ -19,44 +19,101 @@ func ArgvIsAFDaemon(args []string) bool {
 	return ArgvHasDaemonFlag(args) && ArgvIsAFBinary(args)
 }
 
-// ArgvHasDaemonFlag reports whether argv contains "--daemon" as a discrete
-// argument (either bare or in the "--daemon=value" form). It deliberately
-// rejects substring matches like "--daemonize" or "--daemon-mode". Because it
-// scans real argv elements, spaces inside another argument (such as a spaced
-// binary path in argv[0]) can never fabricate or hide a "--daemon" token
-// (#1214).
+// ArgvHasDaemonFlag reports whether argv claims the daemon by af's OWN parse
+// of its root --daemon flag (#7494 item 3), not merely whether the token
+// appears somewhere. af registers --daemon as a root-local cobra flag, so a
+// live af daemon's argv is the binary plus a flags-only zone: every token is
+// a known flag or a flag's value, terminated by "--" or the first positional.
+// Anything after "--" is job argv (`af __watch-lifeline v1 N -- sh -c 'job'
+// --daemon` passes --daemon to the job, not to af), and a positional token —
+// including the __watch-lifeline / __upgrade-recovery exec markers, which are
+// consumed before cobra sees argv — is a subcommand or a fatal "unknown
+// command", so no daemon is live under it either. An argv real af would have
+// refused (unknown flag, missing value, unparseable bool, --help/--version)
+// is not a daemon claim: the process carrying it cannot be af's daemon.
+//
+// The root flag table is duplicated here because proctree is a leaf and
+// commands/root.go is not; commands' own test pins the two parsers to parity
+// so a flag added at root fails that test until this table learns it.
 func ArgvHasDaemonFlag(args []string) bool {
-	for _, a := range args {
-		if a == "--daemon" {
-			return true
-		}
-		value, ok := strings.CutPrefix(a, "--daemon=")
-		if !ok {
-			continue
-		}
-		// `--daemon=false` is a client saying, explicitly, that it is NOT a
-		// daemon. Matching the prefix and calling it one made every such client
-		// a daemon to every caller: doctor counted it as a duplicate, the host
-		// scan offered it for a kill, and the #1004 pid guard would have
-		// accepted it as ours. The flag's VALUE is the answer; its name is only
-		// where the answer lives.
-		//
-		// Only an explicitly FALSE value flips the answer. An unparseable one
-		// ("--daemon=foo") keeps the long-standing "the form is present, so
-		// treat it as a daemon flag" reading that TestArgsHaveDaemonFlag has
-		// pinned since #342: that case is about recognizing the `--daemon=`
-		// FORM (as against `--daemonize`), and its value is a placeholder, not
-		// a boolean. It is also unobservable in practice — cobra rejects a
-		// non-boolean here, so no such process is ever live to classify — and
-		// narrowing a seam that gates signals on a hypothetical is not worth
-		// the blast radius.
-		enabled, err := strconv.ParseBool(value)
-		if err != nil {
-			return true
-		}
-		return enabled
+	if len(args) < 2 {
+		return false
 	}
-	return false
+	rest := args[1:]
+	claim := false
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		switch {
+		case a == "--":
+			// Remaining tokens are positionals; a live af daemon has none.
+			return claim && i+1 == len(rest)
+		case len(a) < 2 || a[0] != '-':
+			return false
+		case a[1] == '-':
+			name, value, hasEq := cutFlagValue(a[2:])
+			switch {
+			case name == "daemon":
+				if !hasEq {
+					claim = true
+				} else if v, err := strconv.ParseBool(value); err == nil {
+					claim = v
+				} else {
+					return false
+				}
+			case name == "help" || name == "version":
+				if truthy, err := strconv.ParseBool(value); !hasEq || (err == nil && truthy) {
+					// cobra prints help/version and exits before RunE.
+					return false
+				}
+			case afRootFlagTakesValue[name]:
+				if !hasEq {
+					if i+1 >= len(rest) {
+						return false
+					}
+					i++
+				}
+			default:
+				return false
+			}
+		default:
+			// Shorthand zone: root has only -h (bool) and -p (value). pflag
+			// lets -p take the rest of the token or the next argument.
+			for j := 1; j < len(a); j++ {
+				switch a[j] {
+				case 'h':
+					return false
+				case 'p':
+					if j+1 == len(a) {
+						if i+1 >= len(rest) {
+							return false
+						}
+						i++
+					}
+					j = len(a)
+				default:
+					return false
+				}
+			}
+		}
+	}
+	return claim
+}
+
+// afRootFlagTakesValue is root's value-consuming flags at commands/root.go:
+// anything else in the flag zone is a bool (--daemon, --help, --version, all
+// handled inline above). Kept in sync by the commands parity test.
+var afRootFlagTakesValue = map[string]bool{
+	"program":             true,
+	"upgrade-transaction": true,
+	"daemon-url":          true,
+	"token":               true,
+}
+
+func cutFlagValue(s string) (name, value string, hasEq bool) {
+	if j := strings.IndexByte(s, '='); j >= 0 {
+		return s[:j], s[j+1:], true
+	}
+	return s, "", false
 }
 
 // ArgvIsAFBinary reports whether argv[0] is an agent-factory binary: installed

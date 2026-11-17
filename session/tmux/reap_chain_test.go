@@ -1,7 +1,6 @@
 package tmux
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,12 +17,11 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
-// The -daemon flag is registered so a re-exec'd helper can carry a FORGED
-// agent-factory daemon argv — `af --daemon -test.run=...` — without tripping
-// the binary's own flag parser. proctree.ArgvIsAFDaemon reads only argv, so
-// the helper is positively identified as a daemon by the kill path exactly the
-// way a real one is (#7435).
-var _ = flag.Bool("daemon", false, "test-only: lets a re-exec'd helper carry daemon-shaped argv")
+// Daemon fixtures carry a pure `af --daemon` argv and dispatch on an env
+// marker in TestMain (handleDaemonFixtureExec): since #7494 item 3 the
+// classifier reads the claim by af's own root-flag parse, which accepts no
+// -test.run token — so no re-exec'd helper reaches flag.Parse with --daemon
+// any more, and the -daemon flag this file once registered is gone.
 
 // #7433 R2 — reapSessionProcesses must never signal the calling process's own
 // chain — itself, its ancestors, or a descendant that meets the reaper below a
@@ -471,29 +469,23 @@ func runDaemonSubtreeHelper(t *testing.T, role string) {
 		writeReapChainPids(t, os.Getenv(subtreePidFileEnv), map[string]int{
 			"afdaemon": af.Process.Pid, "detached": det.Process.Pid,
 		})
-	case "afdaemon":
-		child := exec.Command("sleep", "300")
-		require.NoError(t, child.Start())
-		writeReapChainPids(t, os.Getenv(subtreeAfPidFileEnv), map[string]int{
-			"afchild": child.Process.Pid,
-		})
 	default:
 		return
 	}
 	time.Sleep(5 * time.Minute)
 }
 
-// reexecDaemonSubtree re-executes the test binary under the daemonchain
-// fixture's own -test.run regex. The afdaemon role additionally forges its
-// argv to `af --daemon -test.run=...`: argv is all the classifier reads, so
-// the helper is a positively-identified agent-factory daemon to the kill path
-// while remaining this test's dispatch.
+// reexecDaemonSubtree re-executes the test binary for a daemonchain role.
+// The afdaemon role carries a pure `af --daemon` argv: af's own root-flag
+// parse accepts no -test.run token (#7494 item 3), so its role is dispatched
+// by env in TestMain (handleDaemonFixtureExec) rather than by the run regex,
+// and argv is all the classifier needs to read.
 func reexecDaemonSubtree(t *testing.T, role string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^"+reapDaemonSubtreeTestName+"$")
 	cmd.Env = append(os.Environ(), reapChainRoleEnv+"="+role)
 	if role == "afdaemon" {
-		cmd.Args = []string{"af", "--daemon", "-test.run=^" + reapDaemonSubtreeTestName + "$"}
+		cmd.Args = []string{"af", "--daemon"}
 	}
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	return cmd

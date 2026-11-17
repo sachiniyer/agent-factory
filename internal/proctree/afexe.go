@@ -9,9 +9,12 @@ import (
 // afModulePath is the Go module path a kernel-attested executable must carry
 // in its build info to count as an agent-factory binary (#7491). Any build of
 // this repo — the installed af, a source-built agent-factory, a test binary —
-// carries it; a foreign executable renamed to "af" does not, which is exactly
-// the forgery `exec -a af … --daemon` mounts: it can write argv and comm but
-// not the module path baked into the executable the kernel links.
+// carries it. This is a guard against RENAMING, not proof of identity: a
+// foreign executable renamed to "af" fails because rename cannot rewrite the
+// bytes, but the path is chosen at build time — a binary purpose-built with
+// our module in its go.mod carries it too (#7494 item 3). That residual cost
+// floor — building or borrowing a real af binary — is the one #7484's design
+// already accepts; every cheaper forgery (rename, argv, comm) now blocks.
 const afModulePath = "github.com/sachiniyer/agent-factory"
 
 // exeAttestBudget bounds the whole attestation — the kernel exe read, the
@@ -35,7 +38,10 @@ var exeAttestBudget = 2 * time.Second
 //   - the file opened that way is an af build iff its embedded Go build
 //     info names this module — `cp /bin/bash ./af` passes an af-named path
 //     and fails here, while a real af build verifies at ANY path,
-//     including another home's daemon (the #7484 R18 shape);
+//     including another home's daemon (the #7484 R18 shape). The module
+//     path is chosen at build time, so this attests "built as the af
+//     module", a bar a rename cannot reach — not "the af project built
+//     it" (#7494 item 3);
 //   - the read is revalidated against the snapshot's StartID: the exe read
 //     happens outside the snapshot, so a pid recycled between them must not
 //     carry one process's verdict onto the next;
