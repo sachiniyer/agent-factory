@@ -708,13 +708,204 @@ af_boot() {
     af_focus_tree
 }
 
+# ----------------------------------------------------------------------------
+# Session-name identity on the rail (#7485).
+#
+# The rail ellipsizes a title that outgrows its cell: a row draws
+# ` ▾  a-very-long-… ●`, never the full name — so a literal-name match times
+# out on any descriptive title. The helpers therefore key on the RENDERED
+# title: the name itself while it fits, else its kept prefix + '…', derived
+# from the rail's own width math — never a hard-coded length — so an
+# af_resize keeps them correct at a different geometry.
+#
+# Two sessions can legitimately draw the SAME truncated title
+# ('a-very-long-…' on two rows). A helper that cannot tell its target's row
+# from the sibling's must fail loudly and name the collision, never pick one
+# silently.
+# ----------------------------------------------------------------------------
+
+# _af_rail_title_avail — the title cell's width in display cells at the
+# current driver geometry. ui/layout/grid.go clamps the rail itself to
+# clamp(⌊cols·25%⌋, 22, 36); sidebar.contentWidth drops the row's 2-cell
+# padding; ui/tree/render.go's Render then subtracts the 3-cell right status
+# affix, the 3-cell ' ▾ ' prefix and its separator — so the title gets the
+# rail width minus 9 cells. A wider title renders its first avail-1 cells +
+# '…' (runewidth.Truncate's tail).
+_af_rail_title_avail() {
+    local w=$(( AF_DRIVER_COLS * 25 / 100 ))
+    (( w < 22 )) && w=22
+    (( w > 36 )) && w=36
+    printf '%s' "$(( w - 9 ))"
+}
+
+# _af_render_title <name> — print the title text the rail draws for <name>:
+# the name itself while it fits the title cell, else its first avail-1 cells
+# + '…'. Returns 1 when the rendering cannot be derived: a name carrying bytes
+# outside printable ASCII has runewidth the shell cannot measure, unless its
+# BYTE length already fits the cell budget (bytes ≥ cells, so a byte fit
+# proves the full name renders).
+_af_render_title() {
+    local name="$1" avail
+    avail="$(_af_rail_title_avail)"
+    if printf '%s' "$name" | LC_ALL=C grep -q '[^ -~]'; then
+        [ "$(printf '%s' "$name" | wc -c)" -le "$avail" ] || return 1
+        printf '%s\n' "$name"
+        return 0
+    fi
+    if [ "${#name}" -le "$avail" ]; then
+        printf '%s\n' "$name"
+    else
+        printf '%s…\n' "${name:0:$((avail - 1))}"
+    fi
+}
+
+# _af_take_chars <n> — the first <n> characters of stdin, UTF-8 aware in the
+# sandbox's C locale: a lead byte starts a character, continuation bytes
+# (\200-\277) ride with it — the same trick _task_dialog_frame's cols() uses
+# in scripts/tui-driver-selftest.sh.
+_af_take_chars() {
+    LC_ALL=C awk -v k="$1" '{
+        n = split($0, ch, "")
+        for (i = 1; i <= n; i++) {
+            if (ch[i] ~ /[\200-\277]/) { printf "%s", ch[i]; continue }
+            if (k-- <= 0) break
+            printf "%s", ch[i]
+        }
+    }'
+}
+
+# _af_title_re <name> — an ERE for the title TEXT a rail row draws for <name>.
+# _af_render_title's literal when it derives; otherwise — a too-long name
+# carrying multibyte runes — the union of every rendering the rail could draw:
+# the full name, or a kept prefix followed by '…'. A kept prefix is avail-1
+# CELLS, hence between ⌈(avail-1)/2⌉ and avail-1 CHARACTERS; the alternation
+# covers exactly that range. Unparenthesized — callers wrap it in a group.
+_af_title_re() {
+    local name="$1" rendered avail k p re
+    if rendered="$(_af_render_title "$name")"; then
+        _af_regex_escape "$rendered"
+        return 0
+    fi
+    avail="$(_af_rail_title_avail)"
+    re="$(_af_regex_escape "$name")"
+    for ((k = avail / 2; k <= avail - 1; k++)); do
+        p="$(printf '%s' "$name" | _af_take_chars "$k")"
+        [ -n "$p" ] && [ "$p" != "$name" ] || continue
+        re="$re|$(_af_regex_escape "$p")…"
+    done
+    printf '%s' "$re"
+}
+
+# _af_char_count — characters on stdin (C locale: continuation bytes belong to
+# their lead byte's character).
+_af_char_count() { LC_ALL=C sed 's/[\200-\277]//g' | wc -c; }
+
+# _af_common_prefix_chars <a> <b> — the length in characters of the leading
+# run the two strings share.
+_af_common_prefix_chars() {
+    printf '%s\n%s\n' "$1" "$2" | LC_ALL=C awk '
+        function splitchars(s, out,   i, n, ch, k) {
+            n = split(s, ch, "")
+            for (i = 1; i <= n; i++) {
+                if (ch[i] ~ /[\200-\277]/) { out[k] = out[k] ch[i] }
+                else { k++; out[k] = ch[i] }
+            }
+            return k
+        }
+        NR == 1 { na = splitchars($0, A); next }
+        { nb = splitchars($0, B)
+          for (i = 1; i <= na && i <= nb; i++) { if (A[i] != B[i]) break }
+          print i - 1; exit }'
+}
+
+# _af_titles_collide <a> <b> — could the rail draw the SAME title for <a> and
+# <b>? Exact when both renderings derive (_af_render_title); when either is
+# multibyte-and-too-long to derive, conservative: a shared leading run of at
+# least ⌈(avail-1)/2⌉ characters — the shortest prefix a truncated row can
+# keep — is a possible collision, and a name spelled 'prefix…' itself
+# collides with anything that prefix could lead.
+_af_titles_collide() {
+    local a="$1" b="$2" ra rb floor
+    ra="$(_af_render_title "$a" 2>/dev/null)" || ra=""
+    rb="$(_af_render_title "$b" 2>/dev/null)" || rb=""
+    if [ -n "$ra" ] && [ -n "$rb" ]; then
+        [ "$ra" = "$rb" ]; return
+    fi
+    floor=$(( $(_af_rail_title_avail) / 2 ))
+    if [ -n "$ra" ]; then
+        case "$ra" in
+            *…) [ "$b" != "${ra%…}" ] && [ "${b#"${ra%…}"}" != "$b" ] &&
+                [ "$(printf '%s' "${ra%…}" | _af_char_count)" -ge "$floor" ] ;;
+            *) false ;;
+        esac
+        return
+    fi
+    if [ -n "$rb" ]; then
+        case "$rb" in
+            *…) [ "$a" != "${rb%…}" ] && [ "${a#"${rb%…}"}" != "$a" ] &&
+                [ "$(printf '%s' "${rb%…}" | _af_char_count)" -ge "$floor" ] ;;
+            *) false ;;
+        esac
+        return
+    fi
+    [ "$(_af_common_prefix_chars "$a" "$b")" -ge "$floor" ]
+}
+
+# _af_session_titles — every session title in the driver repo's project, one
+# per line. Non-zero when the store cannot be read (no af binary, repo, or jq)
+# so the caller can fall back to what the screen shows. Authoritative for
+# ambiguity when it answers: a collider scrolled off the rail is still a
+# collider.
+_af_session_titles() {
+    local bin out
+    command -v jq >/dev/null 2>&1 || return 1
+    bin="$(_af_resolve_bin)"
+    [ -n "$bin" ] && [ -d "$AF_DRIVER_REPO" ] || return 1
+    out="$(cd "$AF_DRIVER_REPO" 2>/dev/null \
+        && timeout 15 "$bin" sessions list --json 2>/dev/null)" || return 1
+    printf '%s' "$out" | jq -re \
+        'if type == "array" then .[] elif (.data | type) == "array" then .data[] else empty end | .title // empty'
+}
+
+# _af_unique_rendering <helper> <name> <max-rows> — the ambiguity guard: a
+# helper must never resolve <name> to one of several rows drawing the same
+# title. <max-rows> is how many rail rows may legitimately draw it — 0 before
+# a create (<name>'s own row is not up yet), 1 elsewhere (the target's own
+# row). The session list names the colliders when it answers; the rows on
+# screen decide when it cannot.
+_af_unique_rendering() {
+    local helper="$1" name="$2" maxrows="$3" rendered titles t colliders="" n
+    rendered="$(_af_render_title "$name" 2>/dev/null || true)"
+    if titles="$(_af_session_titles)"; then
+        while IFS= read -r t; do
+            [ -n "$t" ] && [ "$t" != "$name" ] || continue
+            _af_titles_collide "$name" "$t" && colliders="${colliders:+$colliders, }'$t'"
+        done <<< "$titles"
+        if [ -n "$colliders" ]; then
+            _af_fail "$helper: '$name' is ambiguous on the rail: it renders as '${rendered:-<truncated prefix>}' and so does session(s) $colliders; rename for a unique leading prefix"
+            return 1
+        fi
+    fi
+    n="$(af_capture | grep -cE -- "[[:space:]](▾|▸)[[:space:]]+($(_af_title_re "$name"))([[:space:]]|\$)" || true)"
+    n="${n//[^0-9]/}"
+    if [ "${n:-0}" -gt "$maxrows" ]; then
+        _af_fail "$helper: '$name' is ambiguous on the rail: $n session rows draw '${rendered:-a shared truncated prefix}'; rename for a unique leading prefix"
+        return 1
+    fi
+    return 0
+}
+
 # af_new_instance <name> — create an instance and wait until it is ready
 # (its row shows the ● ready dot). Cheap-instance config makes `bash` the
 # program, so ready arrives in seconds.
 af_new_instance() {
-    local name="$1" name_re
+    local name="$1" title_re
     [ -n "$name" ] || { _af_fail "af_new_instance: name required"; return 1; }
-    name_re="$(_af_regex_escape "$name")"
+    title_re="$(_af_title_re "$name")"
+    # Refuse to add a row the rail cannot tell apart from a sibling's, and
+    # re-check after the wait so a collider created meanwhile cannot slip the
+    # ready match onto the wrong row.
+    _af_unique_rendering af_new_instance "$name" 0 || return 1
     af_ensure_nav
     af_focus_tree || return 1
     af_send n
@@ -722,7 +913,8 @@ af_new_instance() {
     af_wait_gone '[Ss]ession [Nn]ame:' 1 'old name prompt label' || return 1
     af_send_literal "$name"
     af_send Enter
-    af_wait_for "${name_re}.*●" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
+    af_wait_for "(${title_re})[[:space:]]*●" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
+    _af_unique_rendering af_new_instance "$name" 1 || return 1
 }
 
 # af_select <name> — put the tree cursor on one of <name>'s TAB rows (so it is
@@ -743,9 +935,12 @@ af_new_instance() {
 # GetSelectedInstance()), so requiring it forces `j` past the header/title rows
 # until the cursor truly lands on an actionable tab row.
 af_select() {
-    local name="$1" i screen menu name_re
+    local name="$1" i screen menu title_re
     [ -n "$name" ] || { _af_fail "af_select: name required"; return 1; }
-    name_re="$(_af_regex_escape "$name")"
+    title_re="$(_af_title_re "$name")"
+    # A row the rail cannot tell apart from a sibling's must not be scanned
+    # to: an identical ▾ on either of two sessions is silently the wrong pick.
+    _af_unique_rendering af_select "$name" 1 || return 1
     af_ensure_nav
     af_focus_tree || return 1
     # Check the current actionable selection BEFORE sending navigation. Re-selecting
@@ -786,7 +981,7 @@ af_select() {
             _af_wait_key_effect _af_select_state "$before" || true
         fi
         screen="$(af_capture)"
-        printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)" || continue
+        printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+(${title_re})([[:space:]]|\$)" || continue
         menu="$(printf '%s\n' "$screen" | _af_menu_row)"
         if printf '%s\n' "$menu" | grep -qE -- "$_AF_INSTANCE_VERB_RE"; then
             return 0
@@ -802,7 +997,7 @@ af_select() {
         # never the pane menu.
         if printf '%s\n' "$menu" | grep -qE -- 'hide pane'; then
             af_focus_tree || return 1
-            if af_capture | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)"; then
+            if af_capture | grep -qE -- "▾[[:space:]]+(${title_re})([[:space:]]|\$)"; then
                 return 0
             fi
         fi
@@ -1486,9 +1681,10 @@ af_click() {
 
 # af_click_instance <name> — find <name>'s row on screen and click it.
 af_click_instance() {
-    local name="$1" line name_re
-    name_re="$(_af_regex_escape "$name")"
-    line="$(af_capture | grep -nE "[▾▸][[:space:]]+${name_re}([[:space:]]|\$)" | head -1 | cut -d: -f1)"
+    local name="$1" line title_re
+    title_re="$(_af_title_re "$name")"
+    _af_unique_rendering af_click_instance "$name" 1 || return 1
+    line="$(af_capture | grep -nE "[▾▸][[:space:]]+(${title_re})([[:space:]]|\$)" | head -1 | cut -d: -f1)"
     [ -n "$line" ] || { _af_fail "instance '$name' not visible to click"; return 1; }
     af_click 14 "$line"
 }
@@ -1576,9 +1772,12 @@ af_refute_screen() {
 # (its row carries the ▾ arrow). This is the two-line answer to the #1156
 # failure: af_select + af_expect_selected.
 af_expect_selected() {
-    local name="$1" name_re
-    name_re="$(_af_regex_escape "$name")"
-    af_assert_screen "▾[[:space:]]+${name_re}([[:space:]]|\$)" \
+    local name="$1" title_re
+    title_re="$(_af_title_re "$name")"
+    # A ▾ match the rail cannot attribute to <name> over a same-rendered
+    # sibling must not pass silently.
+    _af_unique_rendering af_expect_selected "$name" 1 || return 1
+    af_assert_screen "▾[[:space:]]+(${title_re})([[:space:]]|\$)" \
         "instance '${name}' selected"
 }
 
