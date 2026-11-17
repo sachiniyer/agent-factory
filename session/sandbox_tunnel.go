@@ -294,7 +294,7 @@ func killTunnel(t *tunnelChild) {
 // when this process's own binary can serve as one and directly otherwise.
 //
 // The inner command text is identical on both paths —
-// `<sandbox_ssh> -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -N -L "$1"`
+// `<sandbox_ssh> -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1" -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177`
 // run by `sh -c` with $0=af-sandbox — because each flag is load-bearing rather
 // than hygiene:
 //
@@ -352,7 +352,8 @@ func killTunnel(t *tunnelChild) {
 // ExitOnForwardFailure fatality, the same process-group teardown, and the same
 // supervision on every re-dial.
 func (p *sandboxProvisioner) spawnTunnel(forward string, reverse ...string) (*exec.Cmd, *tunnelLifeline, error) {
-	script := p.sshCmd + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -N -L "$1"`
+	script := p.sshCmd + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"` +
+		` -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177`
 	args := []string{forward}
 	for i := range reverse {
 		args = append(args, reverse[i])

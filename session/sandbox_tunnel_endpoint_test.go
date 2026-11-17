@@ -79,11 +79,15 @@ func TestSpawnTunnelPassesStreamLocalOptions(t *testing.T) {
 		"the socket must be bound 0600, explicitly, not by default")
 	assert.Contains(t, script, "-o StreamLocalBindUnlink=yes",
 		"ssh must unlink whatever already holds the path before binding")
-	// Both land after the operator's sandbox.ssh and before -N -L.
+	// Both land after the operator's sandbox.ssh, and after the -L spec's
+	// pinned literal — the source grep of
+	// TestEveryTransportStepRidesTheOnePinnedCommand owns that text, so af's
+	// stream-local options ride behind it. ssh reads the whole command line
+	// before it binds anything, so position after the spec changes nothing.
 	assert.Less(t, strings.Index(script, tunnelTestSleep), strings.Index(script, "StreamLocalBindMask"),
 		"the options are af's, appended after the operator's command")
-	assert.Less(t, strings.Index(script, "StreamLocalBindMask"), strings.Index(script, `-N -L`),
-		"and before the forward spec")
+	assert.Less(t, strings.Index(script, `-N -L`), strings.Index(script, "StreamLocalBindMask"),
+		"and after the pinned forward-spec literal")
 }
 
 // StreamLocalBindUnlink can only ever unlink inside this daemon's own
