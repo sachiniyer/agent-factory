@@ -2,10 +2,7 @@ package proctree
 
 import (
 	"bytes"
-	"syscall"
 	"unsafe"
-
-	"golang.org/x/sys/unix"
 )
 
 // procPIDPathInfo is PROC_PIDPATHINFO, the proc_info flavor returning the
@@ -14,30 +11,23 @@ import (
 // than a struct.
 const procPIDPathInfo = 11
 
-// exePath asks the kernel for pid's executable path via proc_info, cgo-free
-// for the same reason readWorkingDir and readCPUTime take this syscall shape.
-// The kernel refuses it for processes we may not inspect; every failure —
+// exePath asks the kernel for pid's executable path via proc_info, through
+// the same procInfoRaw helper readCPUTime and openfiles use (Syscall6, never
+// RawSyscall6 — proc_find can wait uninterruptibly mid-exec, #7241). The
+// kernel refuses it for processes we may not inspect; every failure —
 // refusal, short write, missing NUL — reports "cannot resolve", which the
 // attestation caller treats as unverified (fail-closed, never a verdict).
 func exePath(pid int) (string, bool) {
 	const maxPathLen = 1024 // MAXPATHLEN
 	var buf [maxPathLen]byte
-	n, _, errno := syscall.Syscall6(
-		uintptr(unix.SYS_PROC_INFO),
-		uintptr(procInfoCallPIDInfo),
-		uintptr(pid),
-		uintptr(procPIDPathInfo),
-		0,
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(maxPathLen),
-	)
-	if errno != 0 {
+	n, err := procInfoRaw(procInfoCallPIDInfo, pid, procPIDPathInfo, 0,
+		unsafe.Pointer(&buf[0]), maxPathLen)
+	if err != nil || n <= 0 {
 		return "", false
 	}
-	end := bytes.IndexByte(buf[:], 0)
+	end := bytes.IndexByte(buf[:n], 0)
 	if end <= 0 {
 		return "", false
 	}
-	_ = n
 	return string(buf[:end]), true
 }
