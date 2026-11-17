@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func stubAdoptVars(t *testing.T) {
 	prevHealth := daemonHealthFn
 	prevSupervision := daemonStatusSupervisionFn
 	prevStop := daemonStopFn
-	prevShutdown := requestDaemonShutdownFn
+	prevShutdown := adoptShutdownFn
 	prevFinish := finishShutdownFn
 	prevWait := waitForShutdownCompletionFn
 	prevRestart := restartAutostartUnitFn
@@ -37,7 +38,7 @@ func stubAdoptVars(t *testing.T) {
 		daemonHealthFn = prevHealth
 		daemonStatusSupervisionFn = prevSupervision
 		daemonStopFn = prevStop
-		requestDaemonShutdownFn = prevShutdown
+		adoptShutdownFn = prevShutdown
 		finishShutdownFn = prevFinish
 		waitForShutdownCompletionFn = prevWait
 		restartAutostartUnitFn = prevRestart
@@ -54,7 +55,7 @@ func stubAdoptVars(t *testing.T) {
 		return daemon.SupervisionInfo{Supported: true, UnitPresent: true}
 	}
 	daemonStopFn = func() (bool, error) { t.Fatal("StopDaemon must not be called on this path"); return false, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+	adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		t.Fatal("the Shutdown RPC must not be called on this path")
 		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, nil
 	}
@@ -147,7 +148,7 @@ func TestAdopt_UndeterminedSupervision_ForceDisplaces(t *testing.T) {
 	started := false
 	stopCalls, restartCalls := 0, 0
 	daemonStopFn = func() (bool, error) { stopCalls++; return true, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+	adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		stopCalls++
 		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
@@ -182,7 +183,7 @@ func TestAdopt_DetachedDaemon_StopsStartsVerifies(t *testing.T) {
 	started := false
 	stopCalls, waitCalls, restartCalls := 0, 0, 0
 	daemonStopFn = func() (bool, error) { stopCalls++; return true, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+	adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		stopCalls++
 		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
@@ -243,7 +244,7 @@ func TestAdopt_VerifyFails_ReportsDoctor(t *testing.T) {
 	stubAdoptVars(t)
 	started := false
 	daemonStopFn = func() (bool, error) { return true, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+	adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
 	waitForShutdownCompletionFn = func(daemon.ShutdownTarget) error { return nil }
@@ -301,7 +302,7 @@ func TestAdopt_StopsTheDetachedDaemonAsARestart(t *testing.T) {
 	t.Run("through the restart RPC", func(t *testing.T) {
 		stubAdoptVars(t)
 		rpcCalls := 0
-		requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 			rpcCalls++
 			return daemon.ShutdownViaRPC, daemon.ShutdownTarget{PID: 111}, nil
 		}
@@ -311,7 +312,7 @@ func TestAdopt_StopsTheDetachedDaemonAsARestart(t *testing.T) {
 	})
 	t.Run("by signal when the RPC cannot", func(t *testing.T) {
 		stubAdoptVars(t)
-		requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 			return daemon.ShutdownError, daemon.ShutdownTarget{}, errors.New("connection reset")
 		}
 		stopCalls := 0
@@ -329,7 +330,7 @@ func TestAdopt_StopsTheDetachedDaemonAsARestart(t *testing.T) {
 func TestAdopt_SaysWhichStopItUsed(t *testing.T) {
 	t.Run("the restart RPC", func(t *testing.T) {
 		stubAdoptVars(t)
-		requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 			return daemon.ShutdownViaRPC, daemon.ShutdownTarget{PID: 111}, nil
 		}
 		_, out := adoptADetachedDaemon(t)
@@ -338,7 +339,7 @@ func TestAdopt_SaysWhichStopItUsed(t *testing.T) {
 	})
 	t.Run("a signal, as a final stop", func(t *testing.T) {
 		stubAdoptVars(t)
-		requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 			return daemon.ShutdownError, daemon.ShutdownTarget{}, errors.New("connection reset")
 		}
 		daemonStopFn = func() (bool, error) { return true, nil }
@@ -355,7 +356,7 @@ func TestAdopt_SaysWhichStopItUsed(t *testing.T) {
 func TestAdopt_SignalsADaemonStillRunningAtItsGrace(t *testing.T) {
 	t.Run("signalled, then adopted", func(t *testing.T) {
 		stubAdoptVars(t)
-		requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 			return daemon.ShutdownViaRPC, daemon.ShutdownTarget{PID: 111}, nil
 		}
 		var finished []daemon.ShutdownTarget
@@ -369,7 +370,7 @@ func TestAdopt_SignalsADaemonStillRunningAtItsGrace(t *testing.T) {
 	})
 	t.Run("the signal fails", func(t *testing.T) {
 		stubAdoptVars(t)
-		requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		adoptShutdownFn = func(time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 			return daemon.ShutdownViaRPC, daemon.ShutdownTarget{PID: 111}, nil
 		}
 		finishShutdownFn = func(daemon.ShutdownTarget) (bool, error) { return true, errors.New("permission denied") }
@@ -378,4 +379,22 @@ func TestAdopt_SignalsADaemonStillRunningAtItsGrace(t *testing.T) {
 		err := runDaemonAdopt(&bytes.Buffer{}, false)
 		require.ErrorContains(t, err, "permission denied")
 	})
+}
+
+// TestAdopt_BoundsTheRestartRPC: adopt's restart RPC is bounded, so a displaced
+// daemon that stopped servicing RPCs after adopt's health check falls through
+// to the signal path rather than holding adopt (#7481).
+func TestAdopt_BoundsTheRestartRPC(t *testing.T) {
+	require.Equal(t, reflect.ValueOf(daemon.RequestRestartShutdownWithin).Pointer(), reflect.ValueOf(adoptShutdownFn).Pointer(),
+		"adopt must stop the displaced daemon through the bounded restart RPC")
+
+	stubAdoptVars(t)
+	var bound time.Duration
+	adoptShutdownFn = func(answerBound time.Duration) (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		bound = answerBound
+		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{PID: 111}, nil
+	}
+	adoptADetachedDaemon(t)
+	require.Positive(t, bound, "adopt's restart RPC must be bounded")
+	require.Equal(t, adoptShutdownAnswerBound, bound)
 }

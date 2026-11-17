@@ -96,6 +96,46 @@ func RequestRestartShutdown() (ShutdownResult, ShutdownTarget, error) {
 // cannot be verified in this pid namespace as the daemon serving this home
 // (see shutdownTargetIsOursFn).
 func requestShutdownWith(req ShutdownRequest) (ShutdownResult, ShutdownTarget, error) {
+	return requestShutdownAnsweredWithin(req, 0)
+}
+
+// RequestRestartShutdownWithin is RequestRestartShutdown with the Shutdown call
+// itself bounded: a daemon that accepted the connection but has not answered
+// its Shutdown within answerBound has the call abandoned and its connection
+// closed, and the request fails with ShutdownError. It is for a stopper with a
+// signal to fall back on, which an unresponsive daemon must never hold
+// (`af daemon adopt`, #7481). Every other caller keeps the historical
+// unbounded call.
+func RequestRestartShutdownWithin(answerBound time.Duration) (ShutdownResult, ShutdownTarget, error) {
+	return requestShutdownAnsweredWithin(ShutdownRequest{Restart: true}, answerBound)
+}
+
+// errShutdownUnanswered is a Shutdown call abandoned at its bound.
+var errShutdownUnanswered = errors.New("the daemon did not answer its Shutdown")
+
+// shutdownCall sends Shutdown on client, bounded by answerBound when it is
+// positive: a call still unanswered then is abandoned and client closed, which
+// closes its connection. The reply decodes into its own variable, which only
+// the abandoned call may still write after a timeout.
+func shutdownCall(client *rpc.Client, req ShutdownRequest, resp *ShutdownResponse, answerBound time.Duration) error {
+	if answerBound <= 0 {
+		return client.Call(controlServiceName+".Shutdown", req, resp)
+	}
+	var answered ShutdownResponse
+	call := client.Go(controlServiceName+".Shutdown", req, &answered, nil)
+	timer := time.NewTimer(answerBound)
+	defer timer.Stop()
+	select {
+	case <-call.Done:
+		*resp = answered
+		return call.Error
+	case <-timer.C:
+		_ = client.Close()
+		return fmt.Errorf("%w within %s", errShutdownUnanswered, answerBound)
+	}
+}
+
+func requestShutdownAnsweredWithin(req ShutdownRequest, answerBound time.Duration) (ShutdownResult, ShutdownTarget, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
 		return ShutdownNoDaemon, ShutdownTarget{}, err
@@ -150,7 +190,11 @@ func requestShutdownWith(req ShutdownRequest) (ShutdownResult, ShutdownTarget, e
 		// connection. Send Shutdown on a fresh connection, as before the Ping
 		// existed — a slow-but-healthy daemon is still stopped, not misreported
 		// as one that could not be — and target no PID.
-		rpcErr = callDaemonNoEnsure("Shutdown", req, &resp)
+		if answerBound > 0 {
+			rpcErr = shutdownOnFreshConnection(socketPath, req, &resp, answerBound)
+		} else {
+			rpcErr = callDaemonNoEnsure("Shutdown", req, &resp)
+		}
 	} else {
 		pingResp = pinged
 		// Pin the pinged process's incarnation now, while it is certainly still
@@ -160,8 +204,9 @@ func requestShutdownWith(req ShutdownRequest) (ShutdownResult, ShutdownTarget, e
 			pingToken = processStartTokenFn(pingResp.PID)
 			pingOurs = shutdownTargetIsOursFn(pingResp.PID)
 		}
-		// Shutdown keeps its historical unbounded call once connected.
-		rpcErr = client.Call(controlServiceName+".Shutdown", req, &resp)
+		// Shutdown keeps its historical unbounded call once connected, unless
+		// the caller bounded it (RequestRestartShutdownWithin).
+		rpcErr = shutdownCall(client, req, &resp, answerBound)
 	}
 	if rpcErr != nil {
 		if isDaemonAbsentErr(rpcErr) {
@@ -369,4 +414,16 @@ func isRPCMethodNotFoundErr(err error) bool {
 	}
 	s := string(serverErr)
 	return strings.Contains(s, "can't find method") || strings.Contains(s, "can't find service")
+}
+
+// shutdownOnFreshConnection sends Shutdown, bounded, on a connection of its
+// own: the failed-Ping path of a bounded request.
+func shutdownOnFreshConnection(socketPath string, req ShutdownRequest, resp *ShutdownResponse, answerBound time.Duration) error {
+	conn, err := net.DialTimeout("unix", socketPath, daemonDialTimeout)
+	if err != nil {
+		return err
+	}
+	client := rpc.NewClient(conn)
+	defer client.Close()
+	return shutdownCall(client, req, resp, answerBound)
 }

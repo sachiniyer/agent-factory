@@ -191,6 +191,16 @@ func init() {
 	daemonCmd.AddCommand(daemonAdoptCmd)
 }
 
+// adoptShutdownFn stops the displaced daemon through the restart RPC, with the
+// Shutdown call bounded by adoptShutdownAnswerBound, so a daemon that stopped
+// servicing RPCs after adopt's health check falls through to the signal path
+// rather than holding adopt (#7481). A healthy daemon acknowledges a Shutdown
+// at once; a second without an answer means it is not servicing RPCs.
+var (
+	adoptShutdownFn          = daemon.RequestRestartShutdownWithin
+	adoptShutdownAnswerBound = time.Second
+)
+
 // finishShutdownFn waits for the daemon the restart RPC stopped, within the
 // grace StopDaemon gives a SIGTERM, and stops it by signal when it has not
 // exited, so adopt displaces a daemon within the signal path's own bound
@@ -205,7 +215,7 @@ var finishShutdownFn = daemon.FinishShutdownWithinGrace
 // to the signal it has always sent (StopDaemon), which is a final stop, and the
 // user is told so: callers refused then failed instead of retrying.
 func displaceDetachedDaemon(w io.Writer) (daemon.ShutdownTarget, error) {
-	result, target, rpcErr := requestDaemonShutdownFn()
+	result, target, rpcErr := adoptShutdownFn(adoptShutdownAnswerBound)
 	if rpcErr != nil {
 		log.WarningLog.Printf("adopt: the Shutdown RPC could not stop the unsupervised daemon (%v); stopping it by signal", rpcErr)
 		if _, err := daemonStopFn(); err != nil {

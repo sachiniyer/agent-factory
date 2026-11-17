@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"net/rpc"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,4 +82,63 @@ func TestFinishShutdownWithinGraceSignalsADaemonStillRunning(t *testing.T) {
 		state := <-exited
 		require.True(t, state.Exited(), "it exited on its own, unsignalled: %v", state)
 	})
+}
+
+// unansweringShutdownControl is a daemon that accepted the connection but does
+// not answer its Shutdown, and, if pingStalls, not its Ping either, until
+// release closes.
+type unansweringShutdownControl struct {
+	release    <-chan struct{}
+	pingStalls bool
+}
+
+func (c unansweringShutdownControl) Ping(_ PingRequest, _ *PingResponse) error {
+	if c.pingStalls {
+		<-c.release
+	}
+	return nil
+}
+
+func (c unansweringShutdownControl) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
+	<-c.release
+	resp.OK = true
+	return nil
+}
+
+// TestRequestRestartShutdownWithinAbandonsAnUnansweredShutdown: a bounded
+// restart Shutdown to a daemon that never answers it gives up at its bound with
+// ShutdownError, rather than holding its caller, so `af daemon adopt` reaches
+// its signal fallback (#7481). That holds on both paths: Shutdown on the pinged
+// connection, and on a fresh one after a Ping that missed its own bound.
+func TestRequestRestartShutdownWithinAbandonsAnUnansweredShutdown(t *testing.T) {
+	for _, pingStalls := range []bool{false, true} {
+		t.Run(map[bool]string{false: "after a Ping", true: "after a stalled Ping"}[pingStalls], func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			release := make(chan struct{})
+			srv := rpc.NewServer()
+			require.NoError(t, srv.RegisterName(controlServiceName, unansweringShutdownControl{release: release, pingStalls: pingStalls}))
+			_, cleanup := startFakeControlListener(t, srv)
+			t.Cleanup(cleanup)
+			t.Cleanup(func() { close(release) })
+
+			type answer struct {
+				result ShutdownResult
+				err    error
+			}
+			answered := make(chan answer, 1)
+			start := time.Now()
+			go func() {
+				result, _, err := RequestRestartShutdownWithin(200 * time.Millisecond)
+				answered <- answer{result, err}
+			}()
+			select {
+			case got := <-answered:
+				require.Equal(t, ShutdownError, got.result)
+				require.ErrorIs(t, got.err, errShutdownUnanswered)
+				require.Less(t, time.Since(start), 2*time.Second)
+			case <-time.After(5 * time.Second):
+				t.Fatal("an unanswered Shutdown held its caller past its bound")
+			}
+		})
+	}
 }
