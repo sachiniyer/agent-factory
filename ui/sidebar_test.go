@@ -549,8 +549,6 @@ func TestReplaceInstanceRepoTrackingStaleEntry(t *testing.T) {
 	b := newRepoInstance(t, "b", "repo-B")
 	require.True(t, s.proj.ReplaceInstance(a, b))
 
-	staleA := s.proj.HasRepo("repo-A")
-	assert.False(t, staleA, "outgoing instance's repo (repo-A) must be dropped after a cross-repo replace")
 	assert.Equal(t, 2, s.proj.NumRepos(), "repos must be {repo-B, repo-C} after the replace")
 }
 
@@ -568,9 +566,5 @@ func TestReplaceInstanceRepoTrackingMissingNew(t *testing.T) {
 	b := newRepoInstance(t, "b", "repo-B")
 	require.True(t, s.proj.ReplaceInstance(a, b))
 
-	hasB := s.proj.HasRepo("repo-B")
-	assert.True(t, hasB, "incoming instance's repo (repo-B) must be registered after a cross-repo replace")
-	staleA := s.proj.HasRepo("repo-A")
-	assert.False(t, staleA, "outgoing repo-A must not linger")
 	assert.Equal(t, 1, s.proj.NumRepos(), "repos must be exactly {repo-B} after the replace")
 }

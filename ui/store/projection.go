@@ -142,15 +142,6 @@ func (p *Projection) GetInstancesSnapshot() []*session.Instance {
 	return out
 }
 
-// GetInstanceTitles returns a set of all instance titles for quick comparison.
-func (p *Projection) GetInstanceTitles() map[string]bool {
-	titles := make(map[string]bool, len(p.instances))
-	for _, inst := range p.instances {
-		titles[inst.Title] = true
-	}
-	return titles
-}
-
 // GetInstanceByTitle returns the instance carrying the given title, or nil
 // when none matches. Async handlers that captured an *Instance pointer before
 // awaiting a background fetch use this to re-resolve the live instance: a
@@ -401,12 +392,6 @@ func (p *Projection) RemoveInstanceByTitle(title string) bool {
 // NumRepos returns the number of repositories represented in the projection.
 func (p *Projection) NumRepos() int {
 	return len(p.repos)
-}
-
-// HasRepo reports whether the given repo is currently registered.
-func (p *Projection) HasRepo(repo string) bool {
-	_, ok := p.repos[repo]
-	return ok
 }
 
 func (p *Projection) addRepo(repo string) {
