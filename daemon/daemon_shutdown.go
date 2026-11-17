@@ -200,7 +200,8 @@ func drainPlanes(
 	// able to hold the drain, or the final checkpoint below, past the stopper's
 	// SIGKILL (#5839).
 	m.advisory.Cancel()
-	m.lifecycle.markQuiescing()
+	// An ordinary stop; an upgrade hand-off has already marked itself (#7440).
+	m.lifecycle.markStopping()
 
 	handlersJoined = true
 	step := func(what string, run func() error) {

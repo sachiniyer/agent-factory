@@ -22,6 +22,10 @@ type Manager struct {
 	// transports or joins anything, so a probe's ssh child is killed rather than
 	// waited on (#5839). Zero-value safe; see advisory.go.
 	advisory advisoryScope
+	// reattachRuns tracks the startup sandbox reattach (reattachRestoredRuntimes),
+	// which persists to instances.json, so a stop joins it by its deadline or
+	// exits holding the home (#7440). Zero-value safe.
+	reattachRuns joinedRuns
 	// cfg is the FROZEN startup config. It is read only by the keys that
 	// deliberately do NOT hot-reload: root_agents (its next-daemon-start contract,
 	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and

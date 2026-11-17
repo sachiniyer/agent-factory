@@ -246,6 +246,7 @@ func isShutdownAbortErr(err error) bool {
 		return false
 	}
 	return IsDaemonQuiescingErr(err) ||
+		IsDaemonStoppingErr(err) ||
 		isDaemonHandoffConnectionErr(err) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
@@ -647,6 +648,14 @@ func taskFireRowOwnsTmuxName(d *session.InstanceData, name string) bool {
 // if one does. Each marker re-enters the normal firing path, which reconciles
 // residue, adoption, and leftovers before deciding the fire is still owed.
 func replayPendingTaskFires() {
+	// The scan holds a delivery slot of its own (#7440), so a stop joins it as
+	// it joins each delivery it starts; a scan the stop has already closed out
+	// starts none, and every marker stays owed.
+	scanDone, admitted := beginTaskDelivery()
+	if !admitted {
+		return
+	}
+	defer scanDone()
 	var wg sync.WaitGroup
 	dir, err := taskFireDir()
 	if err != nil {

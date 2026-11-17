@@ -104,10 +104,15 @@ type daemonLifecycle struct {
 	// which used to fail the actor until its restart budget ran out and wedge
 	// the upgrade permanently (#5693).
 	releaseRequested bool
-	// quiescing is set when this daemon has authorized an upgrade activation and is
-	// handing off. It closes admission (the daemon is about to exit) and drives the
-	// reported DaemonPhaseQuiescing so a stuck hand-off is visible, not silent.
+	// quiescing is set when this daemon stops admitting new work for good: it has
+	// authorized an upgrade activation and is handing off, or it is stopping. It
+	// closes admission (the daemon is about to exit) and drives the reported
+	// DaemonPhaseQuiescing so a stuck stop or hand-off is visible, not silent.
 	quiescing bool
+	// handoff says the quiescence is an upgrade hand-off (markQuiescing), whose
+	// refusals a client retries against the candidate taking over; without it
+	// the daemon is only stopping (markStopping, #7440).
+	handoff   bool
 	listeners DaemonListenerStatus
 
 	// handlers records every dispatched HTTP and control-socket handler, so a
@@ -211,12 +216,25 @@ func (l *daemonLifecycle) markReady() error {
 	return nil
 }
 
-// markQuiescing moves a daemon into terminal quiescence: it stops admitting new
-// mutations and reports DaemonPhaseQuiescing. Upgrade activation calls it after
-// authorization; ordinary shutdown calls it before draining the control planes.
-// A daemon stuck in either drain is therefore visible rather than reporting ready.
-// Idempotent.
+// markQuiescing moves a daemon into terminal quiescence for an upgrade hand-off:
+// it stops admitting new mutations, refuses them as a hand-off (which a client
+// retries against the candidate taking over), and reports DaemonPhaseQuiescing.
+// Upgrade activation calls it after authorization. A daemon stuck in its drain
+// is therefore visible rather than reporting ready. Idempotent.
 func (l *daemonLifecycle) markQuiescing() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.quiescing = true
+	l.handoff = true
+	l.phase = DaemonPhaseQuiescing
+}
+
+// markStopping is markQuiescing for an ordinary stop: the same terminal
+// quiescence, but a refusal says the daemon is shutting down rather than
+// handing off (#7440). A client given that is not retried into a daemon it
+// would have to start behind the caller's own stop. A hand-off already
+// marked stays one: the hand-off's own drain calls this too. Idempotent.
+func (l *daemonLifecycle) markStopping() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.quiescing = true
@@ -308,6 +326,9 @@ func (l *daemonLifecycle) mutationAdmissionError() error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if l.quiescing {
+		if !l.handoff {
+			return errDaemonStopping()
+		}
 		return errDaemonQuiescing()
 	}
 	if l.inProbationLocked() {

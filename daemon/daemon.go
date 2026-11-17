@@ -348,6 +348,15 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	daemonDrainingFn = func() bool { return manager.lifecycle.isQuiescing() }
 	defer func() { daemonDrainingFn = func() bool { return false } }()
 
+	// This daemon's cron deliveries (#7440). Each one, scheduled, replayed or
+	// triggered, holds a slot while it runs; the teardown step below closes
+	// the tracker and joins them. Installed here, before the teardown is
+	// deferred, so its removal runs after the teardown (defers unwind LIFO):
+	// a run arriving during the teardown meets the closed tracker, not none.
+	deliveries := &joinedRuns{}
+	taskDeliveries.Store(deliveries)
+	defer taskDeliveries.CompareAndSwap(deliveries, nil)
+
 	// The teardown: every supervisor that stops what this daemon started, run
 	// in parallel and bounded by the stop's deadline (daemon_teardown.go,
 	// #7416). It is deferred HERE — the instant the supervisors exist, before
@@ -437,8 +446,19 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 			reapExpiredThrowawayContainers(throwawayHome)
 		}
 	})
+	// Work this daemon starts that writes in the home and was never joined
+	// (#7440): its cron deliveries (scheduled fires, the boot replay and its
+	// scan, `af tasks trigger`) and the startup sandbox reattach. Each closes
+	// to new runs, then waits for the running ones, within the stop's deadline;
+	// a run still going then is abandoned, named, and makes the exit hold the
+	// home (#7443). A parked delivery has already stopped parking: it watches
+	// the drain flag.
+	teardown.add("sandbox reattach", manager.reattachRuns.closeAndWait)
 
 	scheduler := newTaskScheduler()
+	// The cron's own deliveries join first: every job the cron launched before
+	// scheduler.Stop is admitted before the tracker closes (#7468 review).
+	teardown.add("cron deliveries", func() { joinCronDeliveries(scheduler, deliveries) })
 	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)
 	watchers.observeTargetLimit = manager.observeTaskTargetLimit
 	// The watch-task supervisor's Stop: SIGTERM to each watch group, group
