@@ -546,7 +546,10 @@ _expect_af_select_ignores_pane_verb() (
     af_send() { :; }
     sleep() { :; }
     af_capture() {
-        printf ' ▾ target      │ D %s                                  │\n' "$verb"
+        # The rail row draws the real geometry — ' ▾  ', the 16-cell title
+        # cell, the ' ● ' affix — then a pane box beside it whose own text
+        # impersonates the status-bar menu.
+        printf ' ▾  target          ● │ D %s                                 │\n' "$verb"
         printf '               │ n new · D %s · ? help · q quit         │\n' "$verb"
         printf '%s\n' '               │ x hide pane                            │' \
             '               └────────────────────────────────────────┘' \
@@ -683,9 +686,13 @@ _af_select_behind_tui() (
         for i in "${!sessions[@]}"; do
             if [ "$i" -eq "$cursor" ]; then
                 anchor=${#rail[@]}
-                rail+=("$(printf '  ▾  %-15s●  │' "${sessions[$i]}")" '    └ 1 Agent            │')
+                # Session rows draw the rail's real geometry — the ' <arrow>  '
+                # prefix, the 16-cell title cell, then the ' ● ' status
+                # affix — so the driver's complete-cell row match sees the
+                # same bytes the live rail emits.
+                rail+=("$(printf '  ▾  %-16s ●  │' "${sessions[$i]}")" '    └ 1 Agent            │')
             else
-                rail+=("$(printf '  ▸  %-15s●  │' "${sessions[$i]}")")
+                rail+=("$(printf '  ▸  %-16s ●  │' "${sessions[$i]}")")
             fi
         done
         read -r offset < "$dir/offset"
