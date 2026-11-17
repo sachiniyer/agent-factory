@@ -656,10 +656,10 @@ func (t *TmuxSession) sweepVanishedSessionProcesses(trustLiveGeneration bool) er
 		// tier 2's generation-identity admission (#7435 R6): the cohort
 		// derives Root from this same evidence, so a marker carrier that
 		// fails kernel membership is still reapable when it began no earlier
-		// than the pane root — the #3699 re-hosted shape. The full Process
-		// goes in as Root too: a live-stamped anchor's Comm is the program's
-		// own kernel name, the strongest form of the allowlist's identity
-		// (#7435 R9).
+		// than the pane root — the #3699 re-hosted shape. AgentExe is the
+		// allowlist's identity: it comes from the session's recorded program,
+		// NEVER the anchor's Comm — the pane root is af's `sh` wrapper, so
+		// Comm answers "sh" for every agent launch (#7435 R16).
 		membership = cohortMembership{
 			PaneSIDs: map[int]bool{root.PID: true},
 			Recorded: map[int]uint64{root.PID: root.StartID},

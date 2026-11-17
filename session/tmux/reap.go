@@ -162,10 +162,15 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket stri
 // protection from Snapshot so the kill cannot move a reaper out from under a
 // stale tree (#7435 item 3), and a vanished-session cohort proves membership
 // against PaneSIDs rather than trusting a marker alone (#7435 item 5).
+// RecordedPrograms is the tier-2 identity evidence the same window affords:
+// each verified pane root's RECORDED launch program resolved to its agent
+// executable, read from the root's argv while tmux can still answer for it
+// (#7435 R16 — the root's Comm is af's `sh` wrapper, never the program).
 type paneCapture struct {
-	Procs    []proctree.Process
-	Snapshot map[int]proctree.Process
-	PaneSIDs map[int]bool
+	Procs            []proctree.Process
+	Snapshot         map[int]proctree.Process
+	PaneSIDs         map[int]bool
+	RecordedPrograms map[int]string
 }
 
 // paneRowsToProcesses turns list-panes rows (paneRowFormat, one per whitespace-
@@ -233,6 +238,17 @@ func paneRowsToProcesses(rows, sanitizedName string) (paneCapture, error) {
 			continue
 		}
 		captured.PaneSIDs[root.SID] = true
+		// The pane root's argv is the last read of its RECORDED launch
+		// program while tmux can still name the pane — a vanished session
+		// loses both, so the tier-2 identity must be taken now or never
+		// (#7435 R16). A non-agent or unresolvable program records no entry:
+		// shell and process tabs leave tier 2 shut (#7435 R15).
+		if exe := recordedPaneProgramExe(proctree.Argv(panePID)); exe != "" {
+			if captured.RecordedPrograms == nil {
+				captured.RecordedPrograms = make(map[int]string)
+			}
+			captured.RecordedPrograms[panePID] = exe
+		}
 		for _, p := range proctree.TreeOf(snap, panePID) {
 			add(p)
 		}

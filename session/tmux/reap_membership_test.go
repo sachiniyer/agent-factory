@@ -149,8 +149,9 @@ func TestCohortMembershipAdmitsByDescentFromTheProvenTree(t *testing.T) {
 //     inherited-marker case — REPORTED, not silently dropped (R3), because
 //     "nothing found" on this path authorizes worktree cleanup;
 //   - a setsid'd child of the reaper itself: positively placed in the
-//     reaper's own subtree, so it is excluded silently the way signalling
-//     excludes it — neither a member nor a reported leak.
+//     reaper's own subtree, so it is excluded like signalling excludes it —
+//     never signalled — but REPORTED all the same: an excluded marked
+//     carrier is never a silent keep (#7435, Codex 4597265500).
 func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.T) {
 	name := "af_membership"
 	home := t.TempDir()
@@ -171,8 +172,8 @@ func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.
 	require.Contains(t, err.Error(), "cannot be proven a member")
 	require.Contains(t, err.Error(), strconv.Itoa(unadmitted.PID),
 		"the report names the carrier it could not place")
-	require.NotContains(t, err.Error(), strconv.Itoa(ownChild.PID),
-		"the reaper's own descendant is positively placed — excluded, not reported")
+	require.Contains(t, err.Error(), strconv.Itoa(ownChild.PID),
+		"the reaper's own descendant is excluded — and an excluded marked carrier is reported, never silently left")
 	require.Equal(t, []proctree.Process{member}, marked,
 		"only the survivor still in the recorded root's kernel session is admitted")
 
@@ -562,66 +563,84 @@ func TestMarkedOrphanProcessesRefusesTheTier2Edges(t *testing.T) {
 	require.Equal(t, []proctree.Process{carrier}, marked)
 }
 
-// #7435 R9 — tier 2 is an ALLOWLIST on the session's own program identity,
-// not the open pty-host rule it replaced. Each admitted shape pins its own
-// leg: the program itself, a helper inside its marked subtree, and the
-// direct marked host one hop above it — and the refused shapes pin the other
-// side: a multiplexer pair and a lone non-program orphan are reported and
-// left alive.
+// #7435 R9/R14 — tier 2 is an ALLOWLIST on the session's own AGENT
+// identity, and every admission is by a process's OWN executable identity:
+// the program itself, a `claude`-named host re-hosting a `claude`-named
+// window (the real bg-pty-host shape), and the program's marked subtree.
+// The refused shapes pin the other side: a marked host that is NOT the
+// program is refused even when it parents a program-named window — a host
+// is never admitted by its child's identity (#7435 R14) — and a
+// multiplexer pair or lone non-program orphan is reported and left alive.
 func TestMarkedOrphanProcessesTier2AdmitsOnlyTheAgentProgram(t *testing.T) {
 	home := t.TempDir()
 	cohort := fixtureCohort("af_tier2_allow-gen")
-	exe := filepath.Base(os.Args[0])
-	membership := cohortMembership{
-		PaneSIDs: map[int]bool{400001: true},
-		Recorded: map[int]uint64{400001: 1},
-		Root:     proctree.Process{PID: 400001, StartID: 1},
-		AgentExe: exe,
-	}
-	sweep := func(candidates ...proctree.Process) ([]proctree.Process, error) {
+	sweep := func(agentExe string, candidates ...proctree.Process) ([]proctree.Process, error) {
 		marked, _, err := markedOrphanProcesses(
-			candidates, "af_tier2_allow", home, cohort, membership, nil)
+			candidates, "af_tier2_allow", home, cohort,
+			cohortMembership{
+				PaneSIDs: map[int]bool{400001: true},
+				Recorded: map[int]uint64{400001: 1},
+				Root:     proctree.Process{PID: 400001, StartID: 1},
+				AgentExe: agentExe,
+			}, nil)
 		return marked, err
 	}
+	exe := filepath.Base(os.Args[0])
 
 	// The program itself re-hosted: the escapee helper IS the fixture's
 	// program (this test binary's comm).
 	agent := spawnMarkedProcess(t, "af_tier2_allow", home)
-	marked, err := sweep(agent)
+	marked, err := sweep(exe, agent)
 	require.NoError(t, err)
 	require.Equal(t, []proctree.Process{agent}, marked,
-		"the session's own re-hosted program is admitted")
+		"the session's own re-hosted program is admitted by its own identity")
 
-	// The two-level #3699 shape: a marked sh host (not the program) with a
-	// marked escapee child that IS the program — the host takes the
-	// one-hop parent admission, the child the identity match.
-	host, rehosted := spawnMarkedHostPair(t, "af_tier2_allow", home, "af_tier2_allow-gen",
-		os.Args[0], markedEscapeeArg, filepath.Join(t.TempDir(), "rehost.pid"))
-	marked, err = sweep(host, rehosted)
+	// The two-level #3699 shape on OWN identity (#7435 R14): a
+	// `claude`-named host shim re-hosting a `claude`-named window — each
+	// admits by what IT is, the way the real re-exec'd bg-pty-host does.
+	agentSpec := agentSleeperSpec(t)
+	host, rehosted := spawnMarkedProcessWithChild(t, "af_tier2_allow", home, "af_tier2_allow-gen",
+		agentSpec[0], agentSpec[1:]...)
+	marked, err = sweep("claude", host, rehosted)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []proctree.Process{host, rehosted}, marked,
-		"the program and its one-hop marked host are both admitted — bg-pty-host's shape")
+		"the claude-named host and its window each admit by their own identity")
 
-	// The screen shape: the same pair structure but the window is `tail`,
-	// not the program — the host is not the program's parent in any sense
-	// the allowlist accepts, and neither is the window.
-	screenHost, screenWin := spawnMarkedHostPair(t, "af_tier2_allow", home, "af_tier2_allow-gen",
-		"tail", "-f", "/dev/null")
-	marked, err = sweep(screenHost, screenWin)
-	require.Error(t, err, "the multiplexer pair must be REFUSED, not silently kept")
+	// The R14 property, negative leg: a marked `sh` host parenting a window
+	// that IS the program. The window admits by its own identity; the host
+	// does not inherit the admission — it is refused by ITS OWN identity,
+	// reported, and left alive. A refused process's host is never
+	// signalled through it.
+	screenHost, programWin := spawnMarkedHostPair(t, "af_tier2_allow", home, "af_tier2_allow-gen",
+		os.Args[0], markedEscapeeArg, filepath.Join(t.TempDir(), "rehost.pid"))
+	marked, err = sweep(exe, screenHost, programWin)
+	require.Error(t, err, "a host that is not the program is REFUSED even beside a program window")
 	require.Contains(t, err.Error(), "pid "+strconv.Itoa(screenHost.PID)+" ",
+		"the refusal names the host the one-hop rule used to admit")
+	require.Equal(t, []proctree.Process{programWin}, marked,
+		"the program-named window admits by its own identity; its host does not")
+	require.True(t, proctree.AliveSame(screenHost),
+		"a refused process's host is never signalled through it")
+
+	// The plain screen shape: an `sh` host and `tail` window, neither the
+	// program — the pair is refused wholesale like a user multiplexer.
+	screenHost2, screenWin := spawnMarkedHostPair(t, "af_tier2_allow", home, "af_tier2_allow-gen",
+		"tail", "-f", "/dev/null")
+	marked, err = sweep(exe, screenHost2, screenWin)
+	require.Error(t, err, "the multiplexer pair must be REFUSED, not silently kept")
+	require.Contains(t, err.Error(), "pid "+strconv.Itoa(screenHost2.PID)+" ",
 		"the refusal names the screen host's pid")
 	require.Contains(t, err.Error(), "pid "+strconv.Itoa(screenWin.PID)+" ",
 		"the refusal names the screen window's pid")
 	require.Empty(t, marked)
-	require.True(t, proctree.AliveSame(screenHost), "refused means never signalled")
+	require.True(t, proctree.AliveSame(screenHost2), "refused means never signalled")
 	require.True(t, proctree.AliveSame(screenWin), "refused means never signalled")
 
 	// A lone marked orphan that is not the program — the escaped
 	// daemon-helper shape: refused, reported, alive.
 	helper := spawnMarkedProgram(t, "af_tier2_allow", home, "af_tier2_allow-gen",
 		"tail", "-f", "/dev/null")
-	marked, err = sweep(helper)
+	marked, err = sweep(exe, helper)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "pid "+strconv.Itoa(helper.PID)+" ")
 	require.Empty(t, marked)
@@ -634,12 +653,11 @@ func TestMarkedOrphanProcessesTier2AdmitsOnlyTheAgentProgram(t *testing.T) {
 // refused — the walk closes at the first ancestor that is not the program.
 func TestMarkedOrphanProcessesTier2AdmitsOnlyTheProgramSubtree(t *testing.T) {
 	home := t.TempDir()
-	exe := filepath.Base(os.Args[0])
 	membership := cohortMembership{
 		PaneSIDs: map[int]bool{400001: true},
 		Recorded: map[int]uint64{400001: 1},
 		Root:     proctree.Process{PID: 400001, StartID: 1},
-		AgentExe: exe,
+		AgentExe: "claude",
 	}
 	sweep := func(candidates ...proctree.Process) ([]proctree.Process, error) {
 		marked, _, err := markedOrphanProcesses(
@@ -647,9 +665,10 @@ func TestMarkedOrphanProcessesTier2AdmitsOnlyTheProgramSubtree(t *testing.T) {
 		return marked, err
 	}
 
-	// escapee(test binary = the program) -> tail: the marked child descends
-	// from the program inside the eligible cohort — admitted as its subtree
-	// even though its own comm is not the program's.
+	// `claude`-named escapee (= the program's own identity) -> tail: the
+	// marked child descends from the program inside the eligible cohort —
+	// admitted as its subtree even though its own comm is not the
+	// program's.
 	program, helper := spawnMarkedProcessWithChild(t, "af_tier2_sub", home, "af_tier2_sub-gen",
 		"tail", "-f", "/dev/null")
 	marked, err := sweep(program, helper)
@@ -658,11 +677,11 @@ func TestMarkedOrphanProcessesTier2AdmitsOnlyTheProgramSubtree(t *testing.T) {
 		"the program's marked descendants are its subtree — admitted with it")
 }
 
-// copy), not a member that escaped: positively placed OUTSIDE the cohort, so
-// the vanished sweep excludes it the way signalling excludes a placed subtree
-// — silently, and never reported as a leak (#7435 R6). The fixture drives the
-// real boundary: an isolated second server hosting a pane stamped with the
-// vanished session's exact markers.
+// copy), not a member that escaped: it holds no kernel proof, so proof
+// cannot place it and the boundary refuses it — REPORTED, never silently
+// left, and never signalled (#7435 R6, Codex 4597265500). The fixture
+// drives the real boundary: an isolated second server hosting a pane
+// stamped with the vanished session's exact markers.
 func TestMarkedOrphanProcessesExcludesACarrierBehindAForeignTmuxServer(t *testing.T) {
 	testguard.IsolateTmux(t)
 	name := "af_tier2_foreign"
@@ -699,10 +718,12 @@ func TestMarkedOrphanProcessesExcludesACarrierBehindAForeignTmuxServer(t *testin
 			Recorded: map[int]uint64{400001: 1},
 			Root:     proctree.Process{PID: 400001, StartID: 1},
 		}, nil)
-	require.NoError(t, inspectErr,
-		"a positively foreign carrier is excluded silently, never reported as an unattributable survivor")
+	require.Error(t, inspectErr,
+		"an excluded carrier is REPORTED, never silently left (#7435, Codex 4597265500)")
+	require.Contains(t, inspectErr.Error(), "pid "+strconv.Itoa(paneP.PID)+" ",
+		"the refusal names the foreign carrier's pid")
 	require.Empty(t, marked,
-		"a carrier behind a tmux server is a foreign pane — the sweep owes it nothing")
+		"a carrier behind a tmux server is refused — the sweep owes it no signal")
 	require.True(t, proctree.AliveSame(paneP),
 		"and it must never be signalled — it is still alive")
 }
@@ -825,4 +846,391 @@ func TestStartStampsPaneRootEvidence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, live.PID, root.PID)
 	require.Equal(t, live.StartID, root.StartID)
+}
+
+// #7435 R15 — the allowlist's identity is an AGENT executable only:
+// agentProgramExe answers "" for every general-purpose runtime, so a
+// shell or process tab's vanished-session sweep gets kernel evidence only
+// and a carrier can never be admitted "because it ran the same
+// interpreter". The gate is AgentForCommand — the same predicate the
+// launch's credential boundary trusts — so a look-alike name
+// (claude-helper, myclaude) or a compound command resolves "" too.
+func TestAgentProgramExeNamesOnlyAnAgentIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		program string
+		want    string
+	}{
+		{"claude", "claude"},
+		{"claude --resume", "claude"},
+		{"aider --model x", "aider"},
+		{"codex", "codex"},
+		{"env TERM=x claude", "claude"},
+		{"bash", ""},
+		{"bash pane.sh", ""},
+		{"sh", ""},
+		{"zsh -i", ""},
+		{"fish", ""},
+		{"python server.py", ""},
+		{"python3 -m http.server", ""},
+		{"node srv.js", ""},
+		{"npm run dev", ""},
+		{"sleep 300", ""},
+		{"claude-helper", ""},
+		{"myclaude", ""},
+		{"cd /x && claude", ""},
+	} {
+		s := NewTmuxSessionFromSanitizedName("af_prog_gate", tc.program)
+		require.Equal(t, tc.want, s.agentProgramExe(), "program %q", tc.program)
+	}
+}
+
+// #7435 R16 — the recorded program lives in the pane root's argv, never
+// its Comm: the root is af's `sh` wrapper on every launch, so Comm is
+// exactly the wrong place to learn the identity. recordedPaneProgramExe
+// recovers it from the `sh -c <command>` payload (post-exec), the
+// exec-shim line (pre-exec, where the command is the last word), or the
+// exec'd-through root's own argv[0] — and returns "" for anything that is
+// not a supported agent identity (#7435 R15).
+func TestRecordedPaneProgramExeReadsTheProgramNotTheWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"post-exec sh -c agent", []string{"/bin/sh", "-c", "claude --resume"}, "claude"},
+		{"post-exec sh -c path agent", []string{"/bin/sh", "-c", "/opt/x/claude --foo"}, "claude"},
+		{"post-exec sh -c env-wrapped agent", []string{"/bin/sh", "-c", "env TERM=x claude"}, "claude"},
+		{"pre-exec exec-shim line", []string{"/bin/sh", "-c",
+			"/usr/local/bin/af __af-session-env-exec claude 2 PATH HOME 'claude --resume'"}, "claude"},
+		{"pre-exec account-shim line", []string{"/bin/sh", "-c",
+			"/usr/local/bin/af __af-session-env-exec-account /run/af.sock tok 'claude'"}, "claude"},
+		{"exec'd-through root", []string{"/d/pbin/claude", "300"}, "claude"},
+		{"bare agent root", []string{"claude"}, "claude"},
+		{"argv0 look-alike", []string{"claude-helper", "--serve"}, ""},
+		{"shell tab sh -c", []string{"/bin/sh", "-c", "bash pane.sh"}, ""},
+		{"process tab", []string{"/bin/sh", "-c", "sleep 300"}, ""},
+		{"interpreter", []string{"/bin/sh", "-c", "python x.py"}, ""},
+		{"node", []string{"/bin/sh", "-c", "node srv.js"}, ""},
+		{"compound command", []string{"/bin/sh", "-c", "cd /x && claude"}, ""},
+		{"sleep root", []string{"sleep", "300"}, ""},
+		{"empty argv", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, recordedPaneProgramExe(tc.argv))
+		})
+	}
+}
+
+// #7435 R15 — an EMPTY allowlist identity matches nothing. Without the
+// guard a carrier whose own Comm the kernel would not name would satisfy
+// "" == "" and admit itself under a shell or process tab's shut tier 2 —
+// the wrong side of the same gate.
+func TestExeMatchesProgramMatchesNothingOnAnEmptyIdentity(t *testing.T) {
+	nameless := proctree.Process{PID: 4242, StartID: 1, Comm: ""}
+	require.False(t, exeMatchesProgram(nameless, ""),
+		"a comm-less carrier must not admit itself against an empty allowlist")
+	named := proctree.Process{PID: 4242, StartID: 1, Comm: "claude"}
+	require.False(t, exeMatchesProgram(named, ""),
+		"no identity admits against an empty allowlist")
+	require.True(t, exeMatchesProgram(named, "claude"))
+}
+
+// #7435 R16, end to end at the cohort: the vanished-session sweep takes
+// the allowlist's identity from the pane's RECORDED program — the map the
+// pre-marker capture filled from the root's argv — never from the anchor
+// root's Comm. A cohort whose anchor recorded `claude` admits and reaps a
+// `claude`-named carrier; the same carrier under an anchor with NO
+// recorded program (and Comm left holding "claude" as bait — the deleted
+// Root.Comm path would have taken it) is refused, reported, and left
+// alive.
+func TestReapVanishedSessionProcessCohortTakesAgentExeFromTheRecordedProgram(t *testing.T) {
+	shrinkReapWaits(t)
+	home := t.TempDir()
+	name := "af_tier2_recorded"
+	gen := name + "-gen"
+	agentSpec := agentSleeperSpec(t)
+
+	carrier := spawnMarkedProgram(t, name, home, gen, agentSpec[0], agentSpec[1:]...)
+	require.NoError(t, reapVanishedSessionProcessCohort(name, home,
+		nil, nil, fixtureCohort(gen),
+		cohortMembership{
+			PaneSIDs:         map[int]bool{400001: true},
+			Recorded:         map[int]uint64{400001: 1},
+			RecordedPrograms: map[int]string{400001: "claude"},
+		}, false),
+		"the anchor root's recorded `claude` program admits the claude-named carrier")
+	require.Eventually(t, func() bool {
+		return !proctree.AliveSame(carrier)
+	}, 5*time.Second, 20*time.Millisecond, "the admitted carrier must be reaped")
+
+	// The same carrier under an anchor whose own Comm would have named
+	// the program — the exact substitution R16 removes: nothing admits,
+	// the carrier is refused and left alive.
+	carrier2 := spawnMarkedProgram(t, name, home, gen, agentSpec[0], agentSpec[1:]...)
+	err := reapVanishedSessionProcessCohort(name, home,
+		nil, nil, fixtureCohort(gen),
+		cohortMembership{
+			PaneSIDs: map[int]bool{400002: true},
+			Recorded: map[int]uint64{400002: 1},
+			Root:     proctree.Process{PID: 400002, StartID: 1, Comm: "claude"},
+			// A recorded program on a DIFFERENT pane root must not leak
+			// into this anchor's identity either.
+			RecordedPrograms: map[int]string{999999: "claude"},
+		}, false)
+	require.Error(t, err,
+		"no recorded program on the ANCHOR root means no allowlist identity — even when Comm says claude")
+	require.Contains(t, err.Error(), "pid "+strconv.Itoa(carrier2.PID)+" ",
+		"the refusal names the refused carrier's pid")
+	require.True(t, proctree.AliveSame(carrier2),
+		"refused means never signalled — Root.Comm must not substitute for the recorded program")
+}
+
+// The reexec'd fake-daemon branch of the decision-table test: argv is forged
+// to `af --daemon` so afDaemonClass answers afDaemonIs, and it spawns a
+// marked sleep as a direct child so the child's chain is child → daemon.
+const (
+	decisionDaemonEnv     = "AF_TEST_DECISION_DAEMON"
+	decisionDaemonSpecEnv = "AF_TEST_DECISION_DAEMON_SPEC"
+)
+
+// THE DECISION TABLE (#7435, Codex 4597265500 + 4598089582): admit = proof
+// AND NOT foreign evidence about THIS process. Both P1s were ORDERING
+// regressions — boundary consulted before proof left this session's own
+// recorded root behind the shared server unreported and alive; proof
+// consulted before the generation gate admitted a changed-generation
+// descendant of a proven parent. Each row below drives a real carrier
+// through markedOrphanProcesses and asserts the verdict: `owned` carriers
+// land in the marked set; every refusal is reported by pid and left alive,
+// never signalled.
+//
+//	proof side:   none | kernel SID | recorded pair | descent from proven
+//	foreign side: none | generation differs | generation missing |
+//	              tmux-parent boundary | reaper subtree | af-daemon subtree
+//
+// The two rows that cannot fit a unit table — a recorded pane root parented
+// by a REAL shared server, and a sibling session's pane under it — are the
+// close_dead_pane_test.go pair TestCloseAndWaitForPaneExit_VanishedSighup*
+// on an isolated server.
+func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
+	if os.Getenv(decisionDaemonEnv) == "1" {
+		// Inside the forged-argv daemon: publish the marked child's pid,
+		// then park. exec.Command with a clean Env hands the child only the
+		// fixture's markers.
+		spec := strings.Split(os.Getenv(decisionDaemonSpecEnv), "\t")
+		require.Len(t, spec, 4)
+		cmd := exec.Command("sleep", "300")
+		cmd.Env = []string{
+			"PATH=" + os.Getenv("PATH"),
+			EnvMarkerSession + "=" + spec[0],
+			EnvMarkerHome + "=" + spec[1],
+			EnvMarkerGeneration + "=" + spec[2],
+		}
+		require.NoError(t, cmd.Start())
+		require.NoError(t, os.WriteFile(spec[3],
+			[]byte(strconv.Itoa(cmd.Process.Pid)), 0o600))
+		_, _ = cmd.Process.Wait()
+		time.Sleep(5 * time.Minute)
+		return
+	}
+	shrinkReapWaits(t)
+	const name = "af_decision_table"
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	gen := name + "-gen"
+	otherGen := "gen-other"
+
+	spawnDaemonChild := func(t *testing.T) proctree.Process {
+		dir := t.TempDir()
+		childPidFile := filepath.Join(dir, "child.pid")
+		daemon := exec.Command(os.Args[0])
+		daemon.Args = []string{"af", "--daemon",
+			"-test.run=^TestMarkedOrphanProcessesDecisionTable$"}
+		daemon.Env = append(os.Environ(),
+			decisionDaemonEnv+"=1",
+			decisionDaemonSpecEnv+"="+name+"\t"+home+"\t"+gen+"\t"+childPidFile)
+		daemon.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		require.NoError(t, daemon.Start())
+		t.Cleanup(func() {
+			_ = daemon.Process.Kill()
+			_, _ = daemon.Process.Wait()
+		})
+		require.Eventually(t, func() bool {
+			return proctree.ArgvIsAFDaemon(proctree.Argv(daemon.Process.Pid))
+		}, 5*time.Second, 20*time.Millisecond,
+			"the forged argv must positively classify afDaemonIs")
+		waitForPIDFile(t, childPidFile)
+		return processFromPIDFile(t, childPidFile)
+	}
+
+	rows := []struct {
+		name string
+		// build spawns the row's real carrier and returns it plus the
+		// cohort membership the sweep is asked to judge it against.
+		build     func(t *testing.T) (candidate proctree.Process, membership cohortMembership)
+		gens      []string
+		wantOwned bool
+		wantErr   string
+	}{
+		{
+			// Baseline member: descent from a proven parent with clean
+			// markers — proof AND NOT foreign evidence = admit.
+			name: "descent proof, clean markers — owned",
+			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+				parent, child := spawnMarkedParentWithMarkedChild(t, name, home, &gen)
+				return child, cohortMembership{
+					Proven: map[int]uint64{parent.PID: parent.StartID},
+				}
+			},
+			wantOwned: true,
+		},
+		{
+			// Codex 4598089582, first shape: the SAME descent proof with a
+			// CHANGED generation — foreign evidence about the process beats
+			// its proof.
+			name: "descent proof, generation differs — refused",
+			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+				parent, child := spawnMarkedParentWithMarkedChild(t, name, home, &otherGen)
+				return child, cohortMembership{
+					Proven: map[int]uint64{parent.PID: parent.StartID},
+				}
+			},
+			wantErr: "outside the vanished session",
+		},
+		{
+			// Codex 4598089582, second shape: the SAME descent proof with a
+			// MISSING generation — the cohort gate requires one, so the
+			// absence is foreign evidence.
+			name: "descent proof, generation missing — refused",
+			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+				parent, child := spawnMarkedParentWithMarkedChild(t, name, home, nil)
+				return child, cohortMembership{
+					Proven: map[int]uint64{parent.PID: parent.StartID},
+				}
+			},
+			wantErr: "has no",
+		},
+		{
+			// Self-proof cannot waive a differing generation either: the
+			// recorded (pid, StartID) pair is proof, the changed marker is
+			// foreign — refuse.
+			name: "recorded pair, generation differs — refused",
+			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+				_, child := spawnMarkedParentWithMarkedChild(t, name, home, &otherGen)
+				return child, cohortMembership{
+					Recorded: map[int]uint64{child.PID: child.StartID},
+				}
+			},
+			wantErr: "outside the vanished session",
+		},
+		{
+			// Codex 4597265500: kernel-SID proof with a tmux parent — the
+			// parent being a server is NOT foreign evidence, so the member
+			// is owned. The real-server row is the close_dead_pane SIGHUP
+			// test; this is the same verdict on a tmux-comm'd fixture.
+			name: "kernel SID, tmux parent — owned",
+			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+				_, child := spawnTmuxNamedParentWithMarkedChild(t, name, home, gen)
+				return child, cohortMembership{
+					PaneSIDs: map[int]bool{child.PID: true},
+					Recorded: map[int]uint64{child.PID: child.StartID},
+				}
+			},
+			wantOwned: true,
+		},
+		{
+			// The boundary's other half: an UNPROVEN carrier behind the
+			// same tmux parent — the sibling-pane shape — is refused and
+			// reported, never signalled.
+			name: "no proof, tmux parent — refused",
+			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+				_, child := spawnTmuxNamedParentWithMarkedChild(t, name, home, gen)
+				return child, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
+			},
+			wantErr: "sits behind a tmux server",
+		},
+		{
+			// Nothing below a DIFFERENT server inherits: the walk must stop
+			// at the tmux ancestor even though a proven member sits above
+			// it in the same chain.
+			name: "proven member above a different server — refused",
+			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+				leader, _, child := spawnProvenLeaderBehindTmuxParent(t, name, home, gen)
+				return child, cohortMembership{
+					Proven: map[int]uint64{leader.PID: leader.StartID},
+				}
+			},
+			wantErr: "sits behind a tmux server",
+		},
+		{
+			// The reaper's own subtree is foreign evidence (#7435 R2):
+			// refused, reported, never signalled.
+			name: "no proof, reaper subtree — refused",
+			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+				child := spawnCohortSleeper(t, name, home, gen, true)
+				return child, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
+			},
+			wantErr: "ancestry places it under",
+		},
+		{
+			// A positively-identified af-daemon subtree is foreign
+			// evidence: refused, reported, never signalled.
+			name: "no proof, af-daemon subtree — refused",
+			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+				child := spawnDaemonChild(t)
+				return child, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
+			},
+			wantErr: "ancestry places it under",
+		},
+		{
+			// No proof and no foreign evidence: the carrier stays eligible
+			// for tier 2 and — with no agent identity on this row — is
+			// reported as unprovable, never silently dropped.
+			name: "no proof, no foreign evidence — reported",
+			build: func(t *testing.T) (proctree.Process, cohortMembership) {
+				child := spawnMarkedProcess(t, name, home)
+				return child, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
+			},
+			gens:    []string{gen},
+			wantErr: "cannot be proven",
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			candidate, membership := row.build(t)
+			gens := row.gens
+			if gens == nil {
+				gens = []string{gen}
+			}
+			marked, _, err := markedOrphanProcesses(
+				[]proctree.Process{candidate}, name, home,
+				fixtureCohort(gens...), membership, map[int]bool{})
+			pid := strconv.Itoa(candidate.PID)
+			if row.wantOwned {
+				found := false
+				for _, m := range marked {
+					if m.PID == candidate.PID {
+						found = true
+					}
+				}
+				require.True(t, found, "pid %s must be admitted to the marked set", pid)
+				if err != nil {
+					require.NotContains(t, err.Error(), "pid "+pid,
+						"an admitted carrier must not appear in the refusals")
+				}
+			} else {
+				for _, m := range marked {
+					require.NotEqual(t, candidate.PID, m.PID,
+						"a refused carrier must never reach the kill set")
+				}
+				require.Error(t, err, "every exclusion is REPORTED — nothing is silently left")
+				require.Contains(t, err.Error(), "pid "+pid+" ",
+					"the refusal names the carrier's pid")
+				if row.wantErr != "" {
+					require.Contains(t, err.Error(), row.wantErr)
+				}
+				require.True(t, proctree.AliveSame(candidate),
+					"refused means never signalled")
+			}
+		})
+	}
 }

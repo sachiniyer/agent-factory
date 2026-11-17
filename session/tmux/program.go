@@ -2,7 +2,6 @@ package tmux
 
 import (
 	"path/filepath"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
@@ -81,21 +80,32 @@ func (t *TmuxSession) programCmd() string {
 	return t.program
 }
 
-// agentProgramExe returns the basename of the session's resolved program
-// binary — the executable identity the vanished-session tier-2 allowlist
-// matches on (#7435 R9). The launch's recorded trusted executable is the
-// resolved binary af actually picked ("claude", "aider", "sleep"); when no
-// launch recorded one (an untrusted absolute override records none) the
-// program string's first word is the fallback. Empty means the session
-// cannot name its program, so tier 2 must not run.
+// agentProgramExe returns the basename of the session's resolved AGENT
+// executable — the identity the vanished-session tier-2 allowlist matches
+// on (#7435 R9). The launch's recorded trusted executable is the resolved
+// binary af actually picked; when no launch recorded one (an untrusted
+// absolute override records none) the program's own executable word is the
+// fallback.
+//
+// Only a supported AGENT identity answers at all (#7435 R15): a shell or
+// process tab's program — sh, bash, zsh, fish, python, node — is a
+// general-purpose runtime nothing about the agent's re-host is specific
+// to, and tier 2 on that identity is just "kill anything running the
+// runtime". The gate is the same AgentForCommand the launch's credential
+// boundary trusts, so the allowlist's identity can never diverge from the
+// agent af itself resolved at spawn. Empty means tier 2 must not run: the
+// tab gets kernel evidence only.
 func (t *TmuxSession) agentProgramExe() string {
 	t.programMu.RLock()
 	defer t.programMu.RUnlock()
+	if sessionenv.AgentForCommand(t.program) == "" {
+		return ""
+	}
 	if exe := filepath.Base(t.trustedExecutable); exe != "" && exe != "." && exe != "/" {
 		return exe
 	}
-	if fields := strings.Fields(t.program); len(fields) > 0 {
-		if exe := filepath.Base(fields[0]); exe != "" && exe != "." && exe != "/" {
+	if located, err := sessionenv.LocateProgramExecutable(t.program); err == nil {
+		if exe := filepath.Base(located.Name); exe != "" && exe != "." && exe != "/" {
 			return exe
 		}
 	}

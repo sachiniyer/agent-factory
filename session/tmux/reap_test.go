@@ -659,19 +659,106 @@ func spawnMarkedSessionWithEscapee(t *testing.T, name, home string, generation .
 	return marked
 }
 
-// The two-level #3699 shape (#7435 R9): the escapee helper (this test
-// binary's comm — the pty-host shim) re-hosts the session's OWN program —
-// `claude daemon run` -> `bg-pty-host` -> `claude`. The child program must
-// name the fixture's resolved agent binary for the tier-2 allowlist to see
-// it: the host is admitted as the program's direct marked parent, the child
-// as the program itself.
+// namedBinary hands the fixture an arbitrary binary under a chosen
+// executable identity: a `name`-d symlink to target. A process exec'd
+// through it answers comm and argv[0] basename `name`; nothing else about
+// the binary matters.
+func namedBinary(t *testing.T, name, target string) string {
+	t.Helper()
+	link := filepath.Join(t.TempDir(), name)
+	require.NoError(t, os.Symlink(target, link))
+	return link
+}
+
+// agentNamedBinary hands the fixture an arbitrary binary under the session's
+// AGENT identity: a `claude`-named symlink to target. A process exec'd
+// through it answers argv[0] basename "claude" — the same identity the real
+// bg-pty-host carries, because the re-exec'd shim IS the agent binary
+// (#7435 R14). The tier-2 allowlist matches on that name; nothing else
+// about the binary matters.
+func agentNamedBinary(t *testing.T, target string) string {
+	t.Helper()
+	return namedBinary(t, "claude", target)
+}
+
+// namedSleeperSpec is the (prog, args) vector for a `name`-named carrier
+// that must simply STAY alive: /bin/sh under a `name`-spelled link holding
+// a `sleep` child. The exec'd path's basename is what comm and argv[0]
+// answer, so the carrier carries the chosen identity — while the image
+// itself is sh, which ignores argv[0]. That is the portability a
+// coreutils link lacks: on uutils-coreutils hosts (ubuntu-26.04) every
+// coreutils binary is one multicall image dispatching on argv[0], and an
+// applet name like "claude" or "bash" does not exist, so a name→/bin/sleep
+// link exits on spawn (#7435).
+func namedSleeperSpec(t *testing.T, name string) []string {
+	t.Helper()
+	return []string{namedBinary(t, name, "/bin/sh"), "-c", "sleep 300 & wait"}
+}
+
+// agentSleeperSpec is namedSleeperSpec for the fixture's agent identity.
+func agentSleeperSpec(t *testing.T) []string {
+	t.Helper()
+	return namedSleeperSpec(t, "claude")
+}
+
+// spawnSighupIgnoringPaneRoot creates a tmux session named name whose pane
+// root IGNORES SIGHUP, and returns the root's process identity. The pane
+// command installs the disposition in an inner `sh -c` and execs the final
+// image — ignored signals survive exec — so `tmux kill-session` destroys
+// the session while the root stays alive, still parented by the still-live
+// server: the exact shape Codex 4597265500 named for #7435, where the
+// recorded root's chain meets a tmux-server ancestor even though kernel
+// membership (its recorded pid, StartID and the pane SID it leads) proves
+// it is this session's own.
+func spawnSighupIgnoringPaneRoot(t *testing.T, name, home, gen string) proctree.Process {
+	t.Helper()
+	// The pane command is ONE string — tmux joins bare args with spaces, and
+	// the shell would then read the `;` as a separator and exec sleep without
+	// the trap.
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name,
+		"-e", EnvMarkerSession+"="+name,
+		"-e", EnvMarkerHome+"="+home,
+		"-e", EnvMarkerGeneration+"="+gen,
+		`sh -c 'trap "" HUP; exec sleep 300'`).CombinedOutput()
+	require.NoError(t, err, "spawn the SIGHUP-ignoring pane: %s", out)
+	var panePID int
+	require.Eventually(t, func() bool {
+		lout, lerr := exec.Command("tmux", "list-panes", "-t", ExactTarget(name),
+			"-F", "#{pane_pid}").Output()
+		if lerr != nil {
+			return false
+		}
+		panePID, lerr = strconv.Atoi(strings.TrimSpace(string(lout)))
+		if lerr != nil || panePID <= 0 {
+			return false
+		}
+		// pane_pid exists from spawn — before the inner sh installs the trap
+		// and execs. Only the exec'd "sleep" image proves the SIG_IGN
+		// disposition is in place; a kill before it lands a default HUP.
+		p, lerr := proctree.Lookup(panePID)
+		return lerr == nil && p.Comm == "sleep"
+	}, 5*time.Second, 20*time.Millisecond, "the ignoring pane never exec'd to its sleep image")
+	root := processIdentity(t, panePID)
+	t.Cleanup(func() { _ = proctree.Signal(root, syscall.SIGKILL) })
+	return root
+}
+
+// The two-level #3699 shape (#7435 R9/R14): a marked pty-host shim re-hosts
+// the session's OWN program — `claude daemon run` -> `bg-pty-host` ->
+// `claude`. The host is this test binary exec'd through a `claude`-named
+// symlink, so its OWN argv[0] answers the program's name the way the real
+// re-exec'd shim does — it is admitted by its own identity, never by its
+// child's (#7435 R14). childProg must likewise name a `claude`-spelled
+// carrier — agentSleeperSpec's argv-0-immune sh, not a coreutils link —
+// for the identity match to see it.
 func spawnMarkedSessionWithRehostedChild(t *testing.T, name, home, generation, childProg string, childArgs ...string) (host, child proctree.Process) {
 	t.Helper()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "escapee.pid")
 	args := []string{"new-session", "-d", "-s", name, "-c", dir, "-e", EnvMarkerSession + "=" + name,
 		"-e", EnvMarkerHome + "=" + home, "-e", EnvMarkerGeneration + "=" + generation}
-	reexec := append([]string{os.Args[0], markedEscapeeArg, pidFile, childProg}, childArgs...)
+	hostBin := agentNamedBinary(t, os.Args[0])
+	reexec := append([]string{hostBin, markedEscapeeArg, pidFile, childProg}, childArgs...)
 	args = append(args, shellsuggest.Command(reexec[0], reexec[1:]...)+
 		" </dev/null >/dev/null 2>&1 & exec sleep 300")
 	out, err := exec.Command("tmux", args...).CombinedOutput()
@@ -742,10 +829,18 @@ func spawnMarkedProgram(t *testing.T, sessionName, afHome, generation, prog stri
 // agent executable, so the pair is refused wholesale — a user multiplexer
 // survives exactly the way a foreign tmux server does.
 func spawnMarkedHostPair(t *testing.T, sessionName, afHome, generation, childProg string, childArgs ...string) (host, child proctree.Process) {
+	host, children := spawnMarkedHostWithWindows(t, sessionName, afHome, generation,
+		append([]string{childProg}, childArgs...))
+	return host, children[0]
+}
+
+// One marked host carrying N marked windows — the multiplexer shape a
+// screen or tmux-in-a-pane presents: every window descends from the same
+// refused-or-admitted host. Each window spec is {prog, args...}.
+func spawnMarkedHostWithWindows(t *testing.T, sessionName, afHome, generation string, windows ...[]string) (host proctree.Process, children []proctree.Process) {
 	t.Helper()
 	dir := t.TempDir()
 	hostFile := filepath.Join(dir, "host.pid")
-	childFile := filepath.Join(dir, "child.pid")
 	env := []string{"PATH=" + os.Getenv("PATH"),
 		EnvMarkerSession + "=" + sessionName,
 		EnvMarkerGeneration + "=" + generation,
@@ -753,19 +848,27 @@ func spawnMarkedHostPair(t *testing.T, sessionName, afHome, generation, childPro
 	if afHome != "" {
 		env = append(env, EnvMarkerHome+"="+afHome)
 	}
-	// The host is a persistent sh so the window's parent link is observable;
-	// `wait` keeps it alive until the sweep's verdict. The intermediate sh
-	// backgrounds the pair and exits so the host reparents to init.
-	inner := "echo $$ > '" + hostFile + "'; " +
-		shellsuggest.Command(childProg, childArgs...) + " </dev/null >/dev/null 2>&1 & " +
-		"echo $! > '" + childFile + "'; wait"
+	// The host is a persistent sh so every window's parent link is
+	// observable; `wait` keeps it alive until the sweep's verdict. The
+	// intermediate sh backgrounds the host and exits so the host reparents
+	// to init.
+	inner := "echo $$ > '" + hostFile + "'; "
+	childFiles := make([]string, len(windows))
+	for i, w := range windows {
+		childFiles[i] = filepath.Join(dir, "child"+strconv.Itoa(i)+".pid")
+		inner += shellsuggest.Command(w[0], w[1:]...) +
+			" </dev/null >/dev/null 2>&1 & echo $! > '" + childFiles[i] + "'; "
+	}
+	inner += "wait"
 	c := exec.Command("sh", "-c", shellsuggest.Command("sh", "-c", inner)+" </dev/null >/dev/null 2>&1 &")
 	c.Env = env
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	require.NoError(t, c.Run(), "spawn marked host pair")
+	require.NoError(t, c.Run(), "spawn marked host with windows")
 
 	host = processIdentity(t, awaitPIDFile(t, hostFile))
-	child = processIdentity(t, awaitPIDFile(t, childFile))
+	for _, f := range childFiles {
+		children = append(children, processIdentity(t, awaitPIDFile(t, f)))
+	}
 	// The intermediate sh is dead, so the host reparents — wait for the
 	// kernel to hand it away, or the sweep sees a live test descendant and
 	// silently excludes it instead of exercising the refusal.
@@ -774,22 +877,25 @@ func spawnMarkedHostPair(t *testing.T, sessionName, afHome, generation, childPro
 		return lookupErr == nil && current.PPID != c.Process.Pid
 	}, 5*time.Second, 20*time.Millisecond,
 		"the marked host must be reparented above the test — a test child is silently excluded, not swept")
-	require.Equal(t, host.PID, child.PPID, "the window must descend from the marked host")
-	for _, p := range []proctree.Process{host, child} {
+	for _, child := range children {
+		require.Equal(t, host.PID, child.PPID, "the window must descend from the marked host")
+	}
+	for _, p := range append([]proctree.Process{host}, children...) {
 		environ, envErr := proctree.Environ(p.PID)
 		require.NoError(t, envErr)
 		require.Contains(t, environ, EnvMarkerSession+"="+sessionName)
 		t.Cleanup(func() { _ = proctree.Signal(p, syscall.SIGKILL) })
 	}
-	return host, child
+	return host, children
 }
 
 // The detached counterpart of spawnMarkedSessionWithRehostedChild for
-// sweep-level tests: the escapee helper (this test binary — the fixture's
-// program) reparents to init leading its own session, then re-hosts
-// childProg as its own setsid'd marked child (#7435 R9). The pair covers
-// tier 2's identity match, its subtree descent, and the one-hop host
-// admission without a live tmux server.
+// sweep-level tests: the escapee helper — this test binary exec'd through a
+// `claude`-named symlink, so its own argv[0] answers the agent's name the
+// way the real re-host shim does (#7435 R14) — reparents to init leading
+// its own session, then re-hosts childProg as its own setsid'd marked child
+// (#7435 R9). The pair covers tier 2's identity match and its subtree
+// descent without a live tmux server.
 func spawnMarkedProcessWithChild(t *testing.T, sessionName, afHome, generation, childProg string, childArgs ...string) (host, child proctree.Process) {
 	t.Helper()
 	dir := t.TempDir()
@@ -801,7 +907,7 @@ func spawnMarkedProcessWithChild(t *testing.T, sessionName, afHome, generation, 
 	if afHome != "" {
 		env = append(env, EnvMarkerHome+"="+afHome)
 	}
-	reexec := append([]string{os.Args[0], markedEscapeeArg, pidFile, childProg}, childArgs...)
+	reexec := append([]string{agentNamedBinary(t, os.Args[0]), markedEscapeeArg, pidFile, childProg}, childArgs...)
 	c := exec.Command("sh", "-c", shellsuggest.Command(reexec[0], reexec[1:]...)+" </dev/null >/dev/null 2>&1 &")
 	c.Env = env
 	require.NoError(t, c.Run(), "spawn marked process with child")

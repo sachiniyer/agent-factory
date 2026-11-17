@@ -377,11 +377,13 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	preMarkerProcesses := make(map[string][]proctree.Process, len(prefixed))
 	preMarkerCaptureErrs := make(map[string]error, len(prefixed))
 	preMarkerPaneSIDs := make(map[string]map[int]bool, len(prefixed))
+	preMarkerPrograms := make(map[string]map[int]string, len(prefixed))
 	preMarkerGenerations := make(map[string]orphanGenerationSet, len(prefixed))
 	for _, match := range prefixed {
 		preMarkerCapture, captureErr := captureSessionProcessTrees(cmdExec, match, "")
 		preMarkerProcesses[match], preMarkerCaptureErrs[match] = preMarkerCapture.Procs, captureErr
 		preMarkerPaneSIDs[match] = preMarkerCapture.PaneSIDs
+		preMarkerPrograms[match] = preMarkerCapture.RecordedPrograms
 		// Retain the generation while the captured pane tree is still alive.
 		// Waiting until a vanished-session recovery begins may be too late to
 		// read its immutable environment, especially when a helper starts after
@@ -425,7 +427,10 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			if known && !exists {
 				if reapErr := reapVanishedSessionProcessCohort(match, ownHome, preMarkerProcesses[match],
 					preMarkerCaptureErrs[match], preMarkerGenerations[match],
-					cohortMembership{PaneSIDs: preMarkerPaneSIDs[match]}, false); reapErr != nil {
+					cohortMembership{
+						PaneSIDs:         preMarkerPaneSIDs[match],
+						RecordedPrograms: preMarkerPrograms[match],
+					}, false); reapErr != nil {
 					return fmt.Errorf("tmux session %s vanished during ownership lookup, but its process cleanup is incomplete: %w",
 						match, reapErr)
 				}
@@ -514,6 +519,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 				verifiedProcesses:  leaked,
 				markerCandidates:   preMarkerProcesses[match],
 				markerPaneSIDs:     preMarkerPaneSIDs[match],
+				recordedPrograms:   preMarkerPrograms[match],
 				markerCaptureError: preMarkerCaptureErrs[match],
 				captureError:       captureErr,
 				generations:        preMarkerGenerations[match],
@@ -646,6 +652,7 @@ type vanishedSessionRecovery struct {
 	verifiedProcesses  []proctree.Process
 	markerCandidates   []proctree.Process
 	markerPaneSIDs     map[int]bool
+	recordedPrograms   map[int]string
 	markerCaptureError error
 	captureError       error
 	generations        orphanGenerationSet
@@ -664,7 +671,10 @@ func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome s
 	// exclusive claim on any one session's lifecycle — see reapVanishedSessionProcesses.
 	return reapVanishedSessionProcessCohort(recovery.match, ownHome, candidates,
 		recovery.markerCaptureError, recovery.generations,
-		cohortMembership{PaneSIDs: recovery.markerPaneSIDs}, false)
+		cohortMembership{
+			PaneSIDs:         recovery.markerPaneSIDs,
+			RecordedPrograms: recovery.recordedPrograms,
+		}, false)
 }
 
 // reapVanishedSessionProcesses answers "did anything this session spawned
@@ -717,16 +727,16 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		membership.Root = earliestRecordedRoot(membership.PaneSIDs, membership.Recorded, proven)
 	}
 	if membership.AgentExe == "" && membership.Root.PID > 0 {
-		// The pane root's own kernel name IS the resolved program binary the
-		// allowlist matches on — the pane ran exactly that executable
-		// (#7435 R9). A caller that knows the program (the close path's own
-		// TmuxSession) sets AgentExe itself and wins.
-		for _, p := range candidates {
-			if p.PID == membership.Root.PID && p.Comm != "" {
-				membership.AgentExe = p.Comm
-				break
-			}
-		}
+		// The identity is the pane root's RECORDED program, never the root's
+		// own Comm: the pane root is af's `sh` wrapper, so Comm answers "sh"
+		// for every agent launch and the allowlist would match on the
+		// general-purpose runtime, not the agent (#7435 R16). The capture
+		// read the program out of the root's live argv while tmux could
+		// still answer — and already filtered it to a supported agent
+		// identity, so a shell or process tab's entry is absent and tier 2
+		// stays shut (#7435 R15). A caller that knows the program (the close
+		// path's own TmuxSession) sets AgentExe itself and wins.
+		membership.AgentExe = membership.RecordedPrograms[membership.Root.PID]
 	}
 	// One dedupe set across every markedOrphanProcesses pass below keeps a
 	// refused survivor from being reported once per pass it reappears in
