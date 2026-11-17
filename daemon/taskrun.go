@@ -296,6 +296,23 @@ func deliverCronTaskPromptRun(t *task.Task, prompt string, run *task.RunKey) (st
 	}
 }
 
+// replayedFireAbort is a fire the daemon's stop cut short whose marker is kept,
+// so the next daemon replays it. Its text tells the caller so, and never
+// invites a retry, whatever the inner error said (#7468 review): an inner
+// "retry after it restarts" would lead a user to re-trigger, and the replay
+// and the retry would deliver twice. The cause stays in the chain for
+// errors.Is and errors.As, and it is logged.
+type replayedFireAbort struct {
+	taskID string
+	cause  error
+}
+
+func (e *replayedFireAbort) Error() string {
+	return fmt.Sprintf("%s; this run of task %s was interrupted, and the daemon replays it when it next starts", daemonStoppingErrText, e.taskID)
+}
+
+func (e *replayedFireAbort) Unwrap() error { return e.cause }
+
 // parkUntilNextPoll waits out one cronDeferPollInterval, and reports true as
 // soon as the daemon is stopping, however much of the interval is left.
 func parkUntilNextPoll() (stopping bool) {
@@ -514,7 +531,8 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 				// by the next daemon, so that caller must not fire it again;
 				// a run with no marker (a targeted send) is simply undone.
 				if fire != nil {
-					err = fmt.Errorf("%s; this run of task %s was interrupted, and the daemon replays it when it next starts: %w", daemonStoppingErrText, taskID, err)
+					log.WarningLog.Printf("task %s: the daemon's stop interrupted this run, which is kept for replay: %v", taskID, err)
+					err = &replayedFireAbort{taskID: taskID, cause: err}
 				} else if !IsDaemonStoppingErr(err) {
 					err = fmt.Errorf("%s; retry after it restarts: %w", daemonStoppingErrText, err)
 				}

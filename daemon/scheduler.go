@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -24,7 +25,11 @@ type taskScheduler struct {
 	controlMu sync.Mutex
 	mu        sync.Mutex
 	cron      *cron.Cron
-	entries   map[string]scheduledEntry // task ID → what the cron is holding for it
+	// launchedJobs is cron.Stop()'s context: it is done once every job the
+	// cron launched before it stopped has returned (#7468 review). Nil until
+	// Stop.
+	launchedJobs context.Context
+	entries      map[string]scheduledEntry // task ID → what the cron is holding for it
 	// armed latches on the first completed reload. Before it, an empty entry set
 	// means "arming has not run yet", not "nothing is armed" — the daemon accepts
 	// control RPCs while it is still warming up, and reporting every task as
@@ -102,7 +107,7 @@ func (s *taskScheduler) Start() {
 }
 
 // Stop halts schedule evaluation. Already-running task fires are left to
-// finish on their own goroutines.
+// finish on their own goroutines; waitForLaunchedJobs waits for them.
 func (s *taskScheduler) Stop() {
 	// Clear both latches so a read landing during shutdown reports ArmingUnknown
 	// rather than a fabricated verdict about a cron that has stopped.
@@ -123,10 +128,27 @@ func (s *taskScheduler) Stop() {
 	// verdict fire during shutdown.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cron.Stop()
+	s.launchedJobs = s.cron.Stop()
 	s.started = false
 	s.armed = false
 	s.stopped = true
+}
+
+// waitForLaunchedJobs returns once every job the cron launched before Stop has
+// returned, or at once if Stop has not run. A job is launched on its own
+// goroutine before it reaches its delivery, so a stop that closes the delivery
+// tracker without this could refuse an occurrence the cron had already fired,
+// before its fire marker exists, and lose it (#7468 review). nil-safe.
+func (s *taskScheduler) waitForLaunchedJobs() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	launched := s.launchedJobs
+	s.mu.Unlock()
+	if launched != nil {
+		<-launched.Done()
+	}
 }
 
 // Reload re-reads tasks.json and replaces the scheduled entry set so it

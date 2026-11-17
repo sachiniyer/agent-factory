@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	cron "github.com/robfig/cron/v3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -247,4 +249,86 @@ func TestRunDaemonJoinsTheSandboxReattach(t *testing.T) {
 	requestShutdown(t, runExited)
 
 	require.Contains(t, manager.lifecycle.stopClock().abandonments(), "teardown: sandbox reattach")
+}
+
+// TestCronJobLaunchedJustBeforeStopIsAdmittedAndKeepsItsMarker: robfig runs a
+// job on its own goroutine, so one the cron launched just before
+// scheduler.Stop can reach its delivery after the stop's teardown began. The
+// "cron deliveries" step waits for every launched job before it closes the
+// tracker, so that occurrence is admitted and records its fire marker for the
+// next daemon. Refused at a closed tracker, it would have had no marker yet and
+// been lost (#7468 review).
+func TestCronJobLaunchedJustBeforeStopIsAdmittedAndKeepsItsMarker(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repo := setupTaskRepo(t)
+	seedCronTask(t, "ab7468a1", repo)
+	pinDaemonDraining(t, true)
+	previousCreate := createSessionForTask
+	createSessionForTask = func(CreateSessionRequest) (*session.InstanceData, error) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	t.Cleanup(func() { createSessionForTask = previousCreate })
+	tracker := &joinedRuns{}
+	installDeliveryTracker(t, tracker)
+
+	scheduler := newTaskScheduler()
+	launched := make(chan struct{}, 1)
+	jobDone := make(chan struct{})
+	var once sync.Once
+	scheduler.cron.Schedule(cron.Every(time.Second), cron.FuncJob(func() {
+		once.Do(func() {
+			defer close(jobDone)
+			launched <- struct{}{}
+			// Launched, but not yet at its delivery when the stop arrives.
+			time.Sleep(200 * time.Millisecond)
+			_ = RunTask("ab7468a1", task.ProjectExpectation{})
+		})
+	}))
+	scheduler.Start()
+	// The job must be done before its seams are restored.
+	t.Cleanup(func() {
+		scheduler.Stop()
+		select {
+		case <-jobDone:
+		case <-time.After(10 * time.Second):
+			t.Error("the cron job did not finish")
+		}
+	})
+	select {
+	case <-launched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cron never launched the job")
+	}
+
+	scheduler.Stop()
+	joinCronDeliveries(scheduler, tracker)
+
+	require.True(t, markerExists(t, "ab7468a1"),
+		"an occurrence the cron launched before it stopped must be admitted and keep its marker for replay")
+	require.Equal(t, taskStatusAbortedShutdown, lastRunStatus(t, "ab7468a1"))
+}
+
+// TestShutdownAbortOfAnOwedFireNeverInvitesARetry: a fire the stop cut short
+// whose marker is kept is replayed by the next daemon, so its error must not
+// tell the caller to retry, even when the delivery failed on the stopping
+// daemon's own "retry after it restarts" refusal. A retry and the replay would
+// deliver twice. The refusal stays in the error chain (#7468 review).
+func TestShutdownAbortOfAnOwedFireNeverInvitesARetry(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repo := setupTaskRepo(t)
+	seedCronTask(t, "ab7468b1", repo)
+	pinDaemonDraining(t, true)
+	previousCreate := createSessionForTask
+	createSessionForTask = func(CreateSessionRequest) (*session.InstanceData, error) {
+		return nil, errDaemonStopping()
+	}
+	t.Cleanup(func() { createSessionForTask = previousCreate })
+
+	err := RunTask("ab7468b1", task.ProjectExpectation{})
+
+	require.True(t, IsDaemonStoppingErr(err), "the caller must be told the daemon is shutting down, got %v", err)
+	require.Contains(t, err.Error(), "replays it when it next starts")
+	require.NotContains(t, err.Error(), "retry", "a replayed fire's error must never invite another one")
+	require.True(t, IsDaemonStoppingErr(errors.Unwrap(err)), "the inner refusal stays in the error chain")
+	require.True(t, markerExists(t, "ab7468b1"))
 }

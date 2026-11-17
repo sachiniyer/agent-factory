@@ -46,6 +46,16 @@ func (r *joinedRuns) closeAndWait() {
 	r.wg.Wait()
 }
 
+// joinCronDeliveries is the "cron deliveries" teardown step (#7440). It waits
+// first for every job the cron launched before scheduler.Stop, so each one is
+// admitted and records its fire marker before the tracker closes (#7468
+// review), then closes the tracker and joins every delivery still running. The
+// stop's deadline bounds both waits: it bounds the step.
+func joinCronDeliveries(scheduler *taskScheduler, deliveries *joinedRuns) {
+	scheduler.waitForLaunchedJobs()
+	deliveries.closeAndWait()
+}
+
 // taskDeliveries is the running daemon's cron delivery tracker, installed by
 // runDaemon and cleared on its return. Every cron delivery — a scheduled fire,
 // a boot replay, `af tasks trigger` — passes runTaskDelivery, so it is tracked

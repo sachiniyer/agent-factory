@@ -453,10 +453,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// a run still going then is abandoned, named, and makes the exit hold the
 	// home (#7443). A parked delivery has already stopped parking: it watches
 	// the drain flag.
-	teardown.add("cron deliveries", deliveries.closeAndWait)
 	teardown.add("sandbox reattach", manager.reattachRuns.closeAndWait)
 
 	scheduler := newTaskScheduler()
+	// The cron's own deliveries join first: every job the cron launched before
+	// scheduler.Stop is admitted before the tracker closes (#7468 review).
+	teardown.add("cron deliveries", func() { joinCronDeliveries(scheduler, deliveries) })
 	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)
 	watchers.observeTargetLimit = manager.observeTaskTargetLimit
 	// The watch-task supervisor's Stop: SIGTERM to each watch group, group
