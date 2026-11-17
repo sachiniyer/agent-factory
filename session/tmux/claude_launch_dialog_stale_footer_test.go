@@ -124,21 +124,22 @@ var quotedDialogText = map[string][]string{
 }
 
 // quotedInTranscript wraps quote at width as Claude's transcript paints it:
-// flush, two columns in, or behind its ⏺ bullet.
+// flush, two columns in, or behind its ⏺ bullet, which only the quote's first
+// row carries. Both prefixes are two columns wide.
 func quotedInTranscript(quote []string, how string, width int) []string {
 	prefixes := map[string][2]string{"flush": {"", ""}, "indented": {"  ", "  "}, "behind its bullet": {"⏺ ", "  "}}[how]
 	var out []string
-	for i, row := range quote {
+	for _, row := range quote {
 		if row == "" {
 			out = append(out, "")
 			continue
 		}
-		prefix := prefixes[1]
-		if i == 0 {
-			prefix = prefixes[0]
-		}
 		indent := row[:len(row)-len(strings.TrimLeft(row, " "))]
-		for _, piece := range wrapAtSpaces(row, max(1, width-len(prefix)-len(indent))) {
+		for _, piece := range wrapAtSpaces(row, max(1, width-len([]rune(prefixes[1]))-len(indent))) {
+			prefix := prefixes[1]
+			if len(out) == 0 {
+				prefix = prefixes[0]
+			}
 			out = append(out, prefix+indent+piece)
 		}
 	}
