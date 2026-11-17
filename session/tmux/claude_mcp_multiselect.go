@@ -135,7 +135,8 @@ func claudeMCPServerCheckboxStart(label string) (string, bool) {
 // A working agent paints its composer — framed by rules, led by ❯ — below its
 // output, so the picker quoted in a transcript has something painted after its
 // footer and never matches (#4254, #4735). A proper prefix of the grammar is
-// partial.
+// partial. A picker whose header the pane does not show, or whose footer it
+// wraps, is none of these; claudeMCPServersTailOf holds it, last (#7463).
 func claudeMCPServersPickerOf(screen visibleText) claudeMCPServersVerdict {
 	if v := claudeMCPServersGrammarOf(screen); v != claudeMCPServersNone {
 		return v

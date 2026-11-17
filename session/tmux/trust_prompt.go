@@ -133,6 +133,16 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			t.refuseClaudeLaunchDialog(match)
 			return true
 		}
+		// The multi-server picker by its own trailing rows: its footer the
+		// last content, under its "Enable selected" row, with or without its
+		// header (#7463). A pane too short scrolls the header off, and one too
+		// narrow wraps the footer; either way the picker clauses above, which
+		// read it from its header down, declined it. Asked last too: it only
+		// turns a clear pane into a hold.
+		if claudeMCPServersTailOf(screen) {
+			t.refuseClaudeMCPServers("the pane shows its footer under its \"Enable selected\" row, but not the picker whole (a pane too short scrolls its header off, one too narrow wraps its footer)")
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//
