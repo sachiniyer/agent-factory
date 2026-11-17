@@ -152,7 +152,11 @@ type webListeners struct {
 // newWebListeners builds the manager (never binds — startHTTPServer's initial
 // bind and ApplyConfig's rebinds both go through reconcileFromLocked/bind* below).
 func newWebListeners(manager *Manager, webMux, previewMux http.Handler) *webListeners {
-	return &webListeners{manager: manager, webMux: webMux, previewMux: previewMux, listenTCP: net.Listen, webTracker: newConnTracker()}
+	listenTCP := net.Listen
+	if manager.listenTCP != nil {
+		listenTCP = manager.listenTCP
+	}
+	return &webListeners{manager: manager, webMux: webMux, previewMux: previewMux, listenTCP: listenTCP, webTracker: newConnTracker()}
 }
 
 // reconcile brings the two socket listeners in line with newCfg, rebinding only

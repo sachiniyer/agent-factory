@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -170,7 +172,7 @@ func TestWebListenerRebindsOnListenAddrChange(t *testing.T) {
 	m, wl, oldAddr := boundWebListeners(t, cfg)
 	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"))
 
-	freeAddr := grabFreeLoopbackAddr(t)
+	freeAddr := heldLoopbackAddr(t, wl)
 	next := *m.Config()
 	next.ListenAddr = freeAddr
 	m.storeLivePosture(&next)
@@ -464,27 +466,68 @@ func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *
 	}
 }
 
-// grabFreeLoopbackAddr returns a currently-free 127.0.0.1:port address by binding
-// and immediately releasing it. Callers that require a later bind to succeed must
-// retry the complete reserve-and-bind operation; retrying this reservation alone
-// cannot close the release/rebind race.
-func grabFreeLoopbackAddr(t *testing.T) string {
+// heldTCPListener reserves a listening socket on host's :0 and returns its
+// bound address plus a listenTCP-shaped factory that hands THE HELD SOCKET to
+// the first bind requesting that address — every other request falls through
+// to next. The reserved port never crosses a release→rebind window (#7460 —
+// the window is what let a runner's other process take the port between the
+// check and the use): the socket holding it IS the socket the code under test
+// ends up serving on, so the port can never be lost and the bound address is
+// still the reserved one. A reservation no bind ever consumed is closed at
+// cleanup; a consumed one belongs to the listener that adopted it and goes
+// down with wl.close().
+func heldTCPListener(t *testing.T, host string, next func(network, address string) (net.Listener, error)) (string, func(network, address string) (net.Listener, error)) {
 	t.Helper()
-	addr, err := freeLoopbackAddr()
+	held, err := net.Listen("tcp", host+":0")
 	require.NoError(t, err)
+	addr := held.Addr().String()
+	var consumed atomic.Bool
+	t.Cleanup(func() {
+		if !consumed.Load() {
+			_ = held.Close()
+		}
+	})
+	return addr, func(network, address string) (net.Listener, error) {
+		if address == addr && consumed.CompareAndSwap(false, true) {
+			return held, nil
+		}
+		return next(network, address)
+	}
+}
+
+// heldLoopbackAddr installs heldTCPListener on wl's listenTCP so the first
+// bind under test that asks for the returned address adopts the reservation
+// socket (#7460). Binds of any other address fall through to wl's listenTCP
+// as it stood when this was installed.
+func heldLoopbackAddr(t *testing.T, wl *webListeners) string {
+	t.Helper()
+	wl.mu.Lock()
+	addr, listenTCP := heldTCPListener(t, "127.0.0.1", wl.listenTCP)
+	wl.listenTCP = listenTCP
+	wl.mu.Unlock()
 	return addr
 }
 
-func freeLoopbackAddr() (string, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", err
-	}
-	addr := l.Addr().String()
-	if err := l.Close(); err != nil {
-		return "", err
-	}
-	return addr, nil
+// deadPortAddr reserves a port that stays provably unbound for the whole
+// test: a socket held bound to it that is never listen()ed. The kernel
+// refuses every other bind to the port — ours included — and refuses every
+// client dial, so "an address nothing is serving on" is literally true for
+// the test's duration rather than being a released grab any other process
+// could win between the release and the use (#7460). host must be an IPv4
+// literal; "0.0.0.0" reserves on every interface, "127.0.0.1" on loopback.
+func deadPortAddr(t *testing.T, host string) string {
+	t.Helper()
+	ip := net.ParseIP(host).To4()
+	require.NotNil(t, ip, "deadPortAddr needs an IPv4 literal, got %q", host)
+	var addr4 [4]byte
+	copy(addr4[:], ip)
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, unix.IPPROTO_TCP)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	require.NoError(t, unix.Bind(fd, &unix.SockaddrInet4{Addr: addr4}))
+	sa, err := unix.Getsockname(fd)
+	require.NoError(t, err)
+	return net.JoinHostPort(host, strconv.Itoa(sa.(*unix.SockaddrInet4).Port))
 }
 
 // The same-port rebind tests (#5140). A listen_addr move that keeps the port and
@@ -1348,7 +1391,7 @@ func TestWebListenerChangesKeepSandboxCredentials(t *testing.T) {
 	}
 
 	moved := *m.Config()
-	moved.ListenAddr = grabFreeLoopbackAddr(t)
+	moved.ListenAddr = heldLoopbackAddr(t, wl)
 	m.storeLivePosture(&moved)
 	failed, err := wl.reconcile(&moved)
 	require.NoError(t, err)

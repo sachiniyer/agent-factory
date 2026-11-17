@@ -62,10 +62,13 @@ func postSetConfigValue(t *testing.T, addr, key, value string) (int, setConfigVa
 func TestSetListenAddrRepliesOnTheListenerItMoves(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0"
-	_, _, oldAddr := boundWebListeners(t, cfg)
+	_, wl, oldAddr := boundWebListeners(t, cfg)
 	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"))
 
-	newAddr := grabFreeLoopbackAddr(t)
+	// The move target is held open until the handler's rebind takes it — the
+	// reply must name the address the daemon then serves, so it must be a port
+	// this test still owns at bind time, not one released after a grab (#7460).
+	newAddr := heldLoopbackAddr(t, wl)
 	status, env, raw := postSetConfigValue(t, oldAddr, "network.listen_addr", newAddr)
 
 	require.Equal(t, http.StatusOK, status, "body: %s", raw)
@@ -175,7 +178,7 @@ func hangingControlListener(t *testing.T) (m *Manager, wl *webListeners, addr st
 func rebindControl(t *testing.T, m *Manager, wl *webListeners) {
 	t.Helper()
 	next := *m.Config()
-	next.ListenAddr = grabFreeLoopbackAddr(t)
+	next.ListenAddr = heldLoopbackAddr(t, wl)
 	m.storeLivePosture(&next)
 	failed, err := wl.reconcile(&next)
 	require.NoError(t, err)
@@ -273,9 +276,9 @@ func TestRebindRetiresTheOldListenerRatherThanClosingIt(t *testing.T) {
 
 			next := *m.Config()
 			if kind == "control" {
-				next.ListenAddr = grabFreeLoopbackAddr(t)
+				next.ListenAddr = heldLoopbackAddr(t, wl)
 			} else {
-				next.PreviewListenAddr = grabFreeLoopbackAddr(t)
+				next.PreviewListenAddr = heldLoopbackAddr(t, wl)
 			}
 			m.storeLivePosture(&next)
 			failed, err = wl.reconcile(&next)
@@ -356,8 +359,10 @@ func TestControlDrainWindowListenerIsClosedAfterControlReturns(t *testing.T) {
 
 	// An ApplyConfig that was admitted before markQuiescing rebinds the listener
 	// during closeControl's handler drain. Move to a fresh address to ensure the
-	// new listener is distinct.
-	newAddr := grabFreeLoopbackAddr(t)
+	// new listener is distinct. The port is owned-but-dead for the whole test:
+	// the dial assertions below need nothing serving on it, and a released grab
+	// could have been re-taken by a third party before the dials (#7460).
+	newAddr := deadPortAddr(t, "127.0.0.1")
 	next := *m.Config()
 	next.ListenAddr = newAddr
 	m.storeLivePosture(&next)
@@ -455,10 +460,19 @@ func TestTeardownFreesThePortBeforeServeStarts(t *testing.T) {
 			h := &tcpListenerHandle{srv: &http.Server{}, ln: ln, addr: addr}
 			require.NoError(t, teardown.stop(h))
 
-			rebound, err := net.Listen("tcp", addr)
-			require.NoError(t, err,
+			// "The port is freed" asserted on the socket itself: a closed
+			// listener errors on the spot while a live one would wait out the
+			// deadline. A rebound bind would carry a release→rebind window a
+			// third party could win (#7460).
+			tl, ok := ln.(*net.TCPListener)
+			require.True(t, ok)
+			require.NoError(t, tl.SetDeadline(time.Now().Add(2*time.Second)))
+			_, err = tl.Accept()
+			require.Error(t, err,
 				"a %s that lands before Serve ever ran must still free the port — http.Server only closes listeners Serve registered", teardown.name)
-			require.NoError(t, rebound.Close())
+			var netErr net.Error
+			require.False(t, errors.As(err, &netErr) && netErr.Timeout(),
+				"a live listener would have made Accept wait — the %s did not close it", teardown.name)
 		})
 	}
 }

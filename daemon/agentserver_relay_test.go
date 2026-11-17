@@ -66,10 +66,13 @@ func TestAgentServerRelayCarriesAnHTTPServerOnWorkspaceLoopback(t *testing.T) {
 
 func TestAgentServerRelayRefusesAClosedPort(t *testing.T) {
 	_, rel, _ := startRelayAgentServer(t)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// Held bound-but-never-listening: the port provably has nothing serving on
+	// it for the whole dial — a released grab could have been re-taken and
+	// served by a third party (#7460).
+	_, portStr, err := net.SplitHostPort(deadPortAddr(t, "127.0.0.1"))
 	require.NoError(t, err)
-	port := ln.Addr().(*net.TCPAddr).Port
-	require.NoError(t, ln.Close())
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

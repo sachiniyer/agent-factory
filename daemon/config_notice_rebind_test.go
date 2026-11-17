@@ -151,8 +151,7 @@ func (s *rebindFailureControl) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConf
 // printed "Applied — the running daemon is using the new value now." on stdout while
 // resp.Warnings said the daemon was still serving the old address.
 func TestServerUnsetReportsDeferredWhenListenerRebindFails(t *testing.T) {
-	bound := grabFreeLoopbackAddr(t)
-	server := rebindNoticeFixture(t, "[network]\nlisten_addr = '"+bound+"'\n", true)
+	server := rebindNoticeFixture(t, "[network]\nlisten_addr = '127.0.0.1:0'\n", true)
 
 	var resp UnsetConfigValueResponse
 	require.NoError(t, server.UnsetConfigValue(UnsetConfigValueRequest{Key: "network.listen_addr"}, &resp))
@@ -169,15 +168,12 @@ func TestServerUnsetReportsDeferredWhenListenerRebindFails(t *testing.T) {
 // through set rather than unset for the reason the next test explains. GREEN on
 // master, like the other set surfaces.
 func TestServerSetPreviewListenAddrReportsDeferredWhenRebindFails(t *testing.T) {
-	bound := grabFreeLoopbackAddr(t)
-	preview := grabFreeLoopbackAddr(t)
-	target := grabFreeLoopbackAddr(t)
 	server := rebindNoticeFixture(t,
-		"[network]\nlisten_addr = '"+bound+"'\npreview_listen_addr = '"+preview+"'\n", true)
+		"[network]\nlisten_addr = '127.0.0.1:0'\npreview_listen_addr = '127.0.0.1:0'\n", true)
 
 	var resp SetConfigValueResponse
 	require.NoError(t, server.SetConfigValue(
-		SetConfigValueRequest{Key: "network.preview_listen_addr", Value: target}, &resp))
+		SetConfigValueRequest{Key: "network.preview_listen_addr", Value: "127.0.0.1:9"}, &resp))
 	requireDeferredNotice(t, resp.RestartNotice, "network.preview_listen_addr")
 	require.Equal(t, config.ApplyStatusDeferred, resp.ApplyOutcome)
 }
@@ -193,10 +189,8 @@ func TestServerSetPreviewListenAddrReportsDeferredWhenRebindFails(t *testing.T) 
 // deferred notice off "this is a socket key and something is failing" rather than
 // off FailedListenerKeys would report deferred here and be wrong.
 func TestServerUnsetPreviewListenAddrReportsAppliedBecauseTeardownCannotFail(t *testing.T) {
-	bound := grabFreeLoopbackAddr(t)
-	preview := grabFreeLoopbackAddr(t)
 	server := rebindNoticeFixture(t,
-		"[network]\nlisten_addr = '"+bound+"'\npreview_listen_addr = '"+preview+"'\n", true)
+		"[network]\nlisten_addr = '127.0.0.1:0'\npreview_listen_addr = '127.0.0.1:0'\n", true)
 
 	var resp UnsetConfigValueResponse
 	require.NoError(t, server.UnsetConfigValue(UnsetConfigValueRequest{Key: "network.preview_listen_addr"}, &resp))
@@ -246,13 +240,11 @@ func TestClientFallbackUnsetCannotConfirmWhenListenerRebindFails(t *testing.T) {
 // prove the refactor that moved that decision into config.EffectNotice did not change
 // this surface's behaviour. Its passing is NOT evidence of the reported bug.
 func TestServerSetReportsDeferredWhenListenerRebindFails(t *testing.T) {
-	bound := grabFreeLoopbackAddr(t)
-	target := grabFreeLoopbackAddr(t)
-	server := rebindNoticeFixture(t, "[network]\nlisten_addr = '"+bound+"'\n", true)
+	server := rebindNoticeFixture(t, "[network]\nlisten_addr = '127.0.0.1:0'\n", true)
 
 	var resp SetConfigValueResponse
 	require.NoError(t, server.SetConfigValue(
-		SetConfigValueRequest{Key: "network.listen_addr", Value: target}, &resp))
+		SetConfigValueRequest{Key: "network.listen_addr", Value: "127.0.0.1:9"}, &resp))
 	require.NotNil(t, resp.Result)
 
 	require.NotEmpty(t, resp.Warnings, "a failed rebind must warn")
@@ -346,9 +338,10 @@ func TestClientFallbackUnsetAliasSpellingCanonicalizesTheResultKey(t *testing.T)
 // over-correcting: a real rebind onto a free port succeeds, so the honest answer is
 // still that the daemon is using the new value now.
 func TestServerSetReportsAppliedWhenListenerRebindSucceeds(t *testing.T) {
-	bound := grabFreeLoopbackAddr(t)
-	target := grabFreeLoopbackAddr(t)
-	server := rebindNoticeFixture(t, "[network]\nlisten_addr = '"+bound+"'\n", false)
+	server := rebindNoticeFixture(t, "[network]\nlisten_addr = '127.0.0.1:0'\n", false)
+	// The destination is a port this test holds open until the rebind takes
+	// it — a grabbed-then-released port could be re-taken before the bind.
+	target := heldLoopbackAddr(t, server.manager.webListeners)
 
 	var resp SetConfigValueResponse
 	require.NoError(t, server.SetConfigValue(
@@ -368,9 +361,8 @@ func TestServerSetReportsAppliedWhenListenerRebindSucceeds(t *testing.T) {
 // runner. The successful-rebind half of the contract is covered above, on set, where
 // the destination can be a port the test owns.
 func TestServerUnsetReportsAppliedWhenNothingRebinds(t *testing.T) {
-	bound := grabFreeLoopbackAddr(t)
 	server := rebindNoticeFixture(t,
-		"[network]\nlisten_addr = '"+bound+"'\nrequire_token = true\n", false)
+		"[network]\nlisten_addr = '127.0.0.1:0'\nrequire_token = true\n", false)
 
 	var resp UnsetConfigValueResponse
 	require.NoError(t, server.UnsetConfigValue(UnsetConfigValueRequest{Key: "network.require_token"}, &resp))

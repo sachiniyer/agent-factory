@@ -358,17 +358,16 @@ func TestStartHTTPServer_BindConflictNonFatal(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
-// freeNetworkPort reserves a port on all interfaces, then releases it, so a test
-// can assert on an address NOTHING is listening on. Binding 0.0.0.0 (rather than
-// a 127.x address, which net.IP.IsLoopback covers in full) is what makes the
-// address genuinely non-loopback to the guard under test.
-func freeNetworkPort(t *testing.T) string {
+// heldNetworkPort reserves a wildcard listening socket and returns the
+// concrete address a test should configure — plus the managerOptions carrying
+// the dispatch that hands the held socket itself to the bind inside
+// startHTTPServer (#7460: no release→rebind window). Binding 0.0.0.0 (rather
+// than a 127.x address, which net.IP.IsLoopback covers in full) is what makes
+// the address genuinely non-loopback to the guard under test.
+func heldNetworkPort(t *testing.T) (string, managerOptions) {
 	t.Helper()
-	l, err := net.Listen("tcp", "0.0.0.0:0")
-	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
-	return addr
+	addr, listenTCP := heldTCPListener(t, "0.0.0.0", net.Listen)
+	return addr, managerOptions{listenTCP: listenTCP}
 }
 
 // TestStartHTTPServer_RefusesUnauthenticatedNetworkListener is the #5137 half of
@@ -385,7 +384,10 @@ func TestStartHTTPServer_RefusesUnauthenticatedNetworkListener(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	errors := captureErrors(t)
 
-	addr := freeNetworkPort(t)
+	// The address is owned-but-dead for the whole test: a port this test holds
+	// bound WITHOUT listening, so the assertion below measures "nothing is
+	// listening" rather than "the release window was lucky" (#7460).
+	addr := deadPortAddr(t, "0.0.0.0")
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = addr // network-bound…
 	cfg.RequireToken = false
@@ -441,7 +443,7 @@ func TestStartHTTPServer_BindsOptedInUnauthenticatedNetworkListener(t *testing.T
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	warnings := captureWarnings(t)
 
-	addr := freeNetworkPort(t)
+	addr, opts := heldNetworkPort(t)
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = addr // network-bound…
 	cfg.RequireToken = false
@@ -451,7 +453,7 @@ func TestStartHTTPServer_BindsOptedInUnauthenticatedNetworkListener(t *testing.T
 	// The explicit #5137 opt-in — without it this exact posture is refused.
 	cfg.AllowUnauthenticatedNetwork = true
 
-	m, err := NewManager(cfg)
+	m, err := newManagerWithOptions(cfg, opts)
 	require.NoError(t, err)
 
 	closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
@@ -492,12 +494,12 @@ func TestStartHTTPServer_BindsOptedInUnauthenticatedNetworkListener(t *testing.T
 func TestStartHTTPServer_NetworkListenerServesWithToken(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
-	addr := freeNetworkPort(t)
+	addr, opts := heldNetworkPort(t)
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = addr
 	cfg.RequireToken = true
 
-	m, err := NewManager(cfg)
+	m, err := newManagerWithOptions(cfg, opts)
 	require.NoError(t, err)
 
 	closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
