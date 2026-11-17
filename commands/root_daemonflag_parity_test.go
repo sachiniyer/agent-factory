@@ -22,8 +22,28 @@ func TestDaemonFlagParseMatchesAfRoot(t *testing.T) {
 		// is exactly what af parses.
 		cmd.InitDefaultHelpFlag()
 		fs := cmd.Flags()
-		daemonFlag = false
-		t.Cleanup(func() { daemonFlag = false })
+		// The flags bind to package-level state the REAL cli parses into —
+		// fs.Parse writes straight into it. Compare against the real flagset
+		// without ever changing it: snapshot every flag's value and Changed
+		// bit and restore exactly, so a parity argv like `--program --daemon`
+		// cannot leave "--daemon" parked as the program for the next test's
+		// real rootCmd.RunE (#7496).
+		type flagState struct {
+			value   string
+			changed bool
+		}
+		saved := map[string]flagState{}
+		fs.VisitAll(func(f *pflag.Flag) {
+			saved[f.Name] = flagState{f.Value.String(), f.Changed}
+		})
+		// The restore runs the moment the answer is read, not at Cleanup —
+		// a deferred restore would leave "--daemon" parked as --program's
+		// value (and daemonFlag true) for the next parity argv AND for any
+		// real rootCmd.RunE another commands test runs after this one.
+		defer fs.VisitAll(func(f *pflag.Flag) {
+			_ = f.Value.Set(saved[f.Name].value)
+			f.Changed = saved[f.Name].changed
+		})
 		// A parse error, a positional, or help/version: real af never reaches
 		// the daemon RunE, so no live daemon exists under that argv.
 		if err := fs.Parse(tail); err != nil || fs.NArg() > 0 {

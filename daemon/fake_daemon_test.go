@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/testguard/fakedaemon"
 )
 
 // shSingleQuote wraps s in single quotes for safe embedding in a `bash -c`
@@ -37,12 +40,12 @@ func shSingleQuote(s string) string {
 // environ. Keeping the environ out of this one means an argv-only caller never
 // depends on environ access (#6195).
 //
-// The underlying program is bash running `script`. `script` MUST be a compound
-// command (contain a `;`, a loop, etc.) so bash's single-simple-command exec
-// optimization does not replace the crafted argv with the child's. The process
-// and any children share a new process group so cleanup can reap the whole tree
-// — bash dies by the test's SIGTERM/SIGKILL, orphaning any `sleep` child in the
-// group.
+// The underlying program is the arg-ignoring testguard/fakedaemon binary:
+// a pure af-daemon argv is one no interpreter can carry — every scripting
+// flag is a token af's own root-flag parse rejects (#7494 item 3) — so
+// `script` names the fakedaemon's env contract (see fakeDaemonScriptEnv),
+// not a command line. The process and any children share a new process
+// group so cleanup can reap the whole tree.
 func spawnFakeDaemonProc(t *testing.T, argv0, script string, extraArgs ...string) *exec.Cmd {
 	t.Helper()
 	cmd := fakeDaemonCmd(t, argv0, script, extraArgs...)
@@ -69,22 +72,82 @@ func spawnFakeDaemonHomeProc(t *testing.T, argv0, script string, extraArgs ...st
 // ENVIRONMENT before it execs can do so: AF-home scoping reads a daemon's
 // AGENT_FACTORY_HOME from /proc/<pid>/environ, which is fixed at exec and
 // cannot be set afterwards.
+//
+// The fake is the arg-ignoring testguard/fakedaemon binary under a rewritten
+// argv[0], not a bash -c script: a pure af-daemon argv is one no interpreter
+// can carry — every scripting flag (-c, -e, -s) is a token af's own
+// root-flag parse rejects, and ArgvIsAFDaemon mirrors that parse (#7494
+// item 3). `script` therefore names the fakedaemon's env contract rather
+// than a command line: "sleep N; :", "read line" (a blocking read),
+// `trap "" TERM; : > <ready>; <sleep>` for the TERM-ignoring sentinel
+// shape, and testguard.BoundedSpin's output — each maps to FAKE_* env.
 func fakeDaemonCmd(t *testing.T, argv0, script string, extraArgs ...string) *exec.Cmd {
 	t.Helper()
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash not available: %v", err)
-	}
-	// Build: exec -a <argv0> bash -c <script> <argv0> <extraArgs...>
-	// The resulting bash process argv is [<argv0>, "-c", <script>, <argv0>, extraArgs...].
-	parts := []string{"exec", "-a", shSingleQuote(argv0), "bash", "-c", shSingleQuote(script), shSingleQuote(argv0)}
-	for _, a := range extraArgs {
-		parts = append(parts, shSingleQuote(a))
-	}
-	cmd := exec.Command("bash", "-c", strings.Join(parts, " "))
+	cmd := exec.Command(fakedaemon.Path(t))
+	// The argv is exactly what the fixture promises: argv0 plus the flag
+	// tail — no interpreter token between them, so /proc/<pid>/cmdline
+	// reports the claim directly.
+	cmd.Args = append([]string{argv0}, extraArgs...)
+	cmd.Env = append(os.Environ(), fakeDaemonScriptEnv(t, script)...)
 	// Put the process (and its children) in their own group so cleanup can reap
-	// the whole tree — bash dies by signal, orphaning any `sleep` child.
+	// the whole tree — the fake dies by signal like bash did.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
+}
+
+var (
+	fakeDaemonSleepScript = regexp.MustCompile(`^sleep ([\d.]+); :$`)
+	fakeDaemonTrapScript  = regexp.MustCompile(`^trap "" TERM; : > (\S+); (.*)$`)
+	fakeDaemonSpinScript  = regexp.MustCompile(`^_af_spin_i=0; while \[ "\$_af_spin_i" -lt (\d+) \]; do sleep ([\d.]+);`)
+)
+
+// fakeDaemonScriptEnv maps the script spec to the fakedaemon binary's
+// FAKE_* env; an unmapped spec is a fixture bug, so it fails loudly.
+func fakeDaemonScriptEnv(t *testing.T, script string) []string {
+	t.Helper()
+	if script == "read line" {
+		return nil
+	}
+	if m := fakeDaemonSleepScript.FindStringSubmatch(script); m != nil {
+		return []string{"FAKE_SLEEP=" + m[1]}
+	}
+	if m := fakeDaemonTrapScript.FindStringSubmatch(script); m != nil {
+		return append([]string{"FAKE_TERM=ignore", "FAKE_READY=" + m[1]}, fakeDaemonSleepEnv(t, m[2])...)
+	}
+	if secs, ok := fakeDaemonSpinSecs(script); ok {
+		return []string{fmt.Sprintf("FAKE_SLEEP=%g", secs)}
+	}
+	t.Fatalf("fake daemon script %q has no fakedaemon env mapping", script)
+	return nil
+}
+
+// fakeDaemonSleepEnv maps the tail of a trap spec — "sleep N; :" or a
+// BoundedSpin loop — to a FAKE_SLEEP duration.
+func fakeDaemonSleepEnv(t *testing.T, tail string) []string {
+	t.Helper()
+	if m := fakeDaemonSleepScript.FindStringSubmatch(tail); m != nil {
+		return []string{"FAKE_SLEEP=" + m[1]}
+	}
+	if secs, ok := fakeDaemonSpinSecs(tail); ok {
+		return []string{fmt.Sprintf("FAKE_SLEEP=%g", secs)}
+	}
+	t.Fatalf("fake daemon sleep spec %q has no fakedaemon env mapping", tail)
+	return nil
+}
+
+// fakeDaemonSpinSecs reads the lifetime out of a testguard.BoundedSpin
+// script text: iterations × period.
+func fakeDaemonSpinSecs(script string) (float64, bool) {
+	m := fakeDaemonSpinScript.FindStringSubmatch(script)
+	if m == nil {
+		return 0, false
+	}
+	iters, err1 := strconv.Atoi(m[1])
+	period, err2 := strconv.ParseFloat(m[2], 64)
+	if err1 != nil || err2 != nil {
+		return 0, false
+	}
+	return float64(iters) * period, true
 }
 
 // fakeDaemonHomeKey is the variable daemon scoping reads from a process's environ.

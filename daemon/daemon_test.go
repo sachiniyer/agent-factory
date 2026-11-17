@@ -212,8 +212,11 @@ func TestArgsHaveDaemonFlag(t *testing.T) {
 	}{
 		{name: "empty", args: nil, want: false},
 		{name: "bare --daemon flag", args: []string{"/usr/local/bin/agent-factory", "--daemon"}, want: true},
-		{name: "--daemon with leading args", args: []string{"agent-factory", "--verbose", "--daemon"}, want: true},
-		{name: "--daemon= form", args: []string{"agent-factory", "--daemon=foo"}, want: true},
+		// #7494 item 3: the claim is af's own root-flag parse now, not a
+		// token scan — af exits on a flag it does not know and on a
+		// non-boolean --daemon= before RunE ever runs.
+		{name: "--daemon behind an unknown flag exits", args: []string{"agent-factory", "--verbose", "--daemon"}, want: false},
+		{name: "--daemon= with an unparseable value exits", args: []string{"agent-factory", "--daemon=foo"}, want: false},
 		{name: "--daemonize substring should not match", args: []string{"/usr/bin/some-tool", "--daemonize"}, want: false},
 		{name: "--daemon-mode substring should not match", args: []string{"agent-factory", "--daemon-mode"}, want: false},
 		{name: "no daemon flag at all", args: []string{"/usr/bin/sleep", "60"}, want: false},
@@ -300,19 +303,20 @@ func TestLooksLikeDaemonArgv(t *testing.T) {
 // scan path (pgrepDaemonCandidates). Hermetic: spawns long-lived sleeps and
 // reads /proc cmdline; never signals any real daemon.
 func TestIsAgentFactoryDaemon_RequiresBinaryName(t *testing.T) {
-	// spawn launches a process whose argv is [argv0, "--daemon", "af-test"]
+	// spawn launches a process whose argv is [argv0, "--daemon"]
 	// with REAL argv boundaries and waits until that argv is visible in /proc.
 	// argv0 may contain spaces (the #1214 spaced-install case).
 	spawn := func(argv0 string) int {
 		t.Helper()
-		cmd := spawnFakeDaemonProc(t, argv0, "sleep 60; :", "--daemon", "af-test")
+		cmd := spawnFakeDaemonProc(t, argv0, "sleep 60; :", "--daemon")
 		pid := cmd.Process.Pid
 		// Wait until the crafted argv is visible: the last element is the
-		// "af-test" marker. Reading argv (not a joined string) means a spaced
-		// argv0 stays intact, which is the whole point of the fix.
+		// --daemon flag itself — af's own parse accepts no positional after
+		// it (#7494 item 3). Reading argv (not a joined string) means a
+		// spaced argv0 stays intact, which is the whole point of the fix.
 		waitForReady(t, fmt.Sprintf("pid=%d post-exec argv visible", pid), func() bool {
 			args := daemonArgs(pid)
-			return len(args) > 0 && args[len(args)-1] == "af-test"
+			return len(args) > 0 && args[len(args)-1] == "--daemon"
 		})
 		return pid
 	}
@@ -381,7 +385,7 @@ func TestStopDaemon_SIGTERMFirst(t *testing.T) {
 	// argv[0] plus a discrete "--daemon" token as a real argv element, so it
 	// satisfies both checks isAgentFactoryDaemon requires (#1004, #1214). This
 	// is the same recipe used in TestSigtermFallback_KillsPIDFileDaemon.
-	cmd := spawnFakeDaemonHomeProc(t, "af", "sleep 60; :", "--daemon", "af-test")
+	cmd := spawnFakeDaemonHomeProc(t, "af", "sleep 60; :", "--daemon")
 	pid := cmd.Process.Pid
 
 	// Wait for the post-exec cmdline to be readable. Event-driven with a
@@ -473,7 +477,7 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 	// escalation this test exercises still lands long before the ceiling.
 	script := fmt.Sprintf(`trap "" TERM; : > %s; %s`, readyFile,
 		testguard.BoundedSpin(time.Second, 5*time.Minute))
-	cmd := spawnFakeDaemonHomeProc(t, "af", script, "--daemon", "af-test")
+	cmd := spawnFakeDaemonHomeProc(t, "af", script, "--daemon")
 	pid := cmd.Process.Pid
 
 	// Wait until the trap is installed (sentinel present) AND the rewritten
