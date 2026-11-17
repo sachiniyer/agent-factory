@@ -51,6 +51,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +62,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/throwawaysandbox"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // throwawayCheckInterval is how often a marked daemon rechecks its declared
@@ -276,23 +278,35 @@ func throwawayOwnerDead(m *throwawaysandbox.Marker) bool {
 // proven orphaned. It runs at daemon startup, only in a marked daemon — the
 // marker gate is what makes "the next start of the tooling that creates
 // them" rather than "any af start" the reaper.
-func sweepThrowawaySandboxes(selfHome string) {
+//
+// It tears down each such home's processes and private tmux servers here, and
+// returns the homes whose containers are still to be reaped. That reap is
+// Docker work, slow or hung with its engine, so it runs after readiness
+// (launchThrowawayContainerReaps), as the orphan-container sweep's does
+// (#5815), and each home stays registered until it finishes: a later marked
+// start can still find whatever it could not remove (#7447).
+func sweepThrowawaySandboxes(selfHome string) (pending []throwawayContainerReap) {
 	if _, marked := loadThrowawayMarker(selfHome); !marked {
-		return
+		return nil
 	}
 	dir := throwawayRegistryDirFn()
 	homes, malformed, err := throwawaysandbox.ReadRegistryHomes(dir)
 	if err != nil {
 		log.WarningLog.Printf("throwaway sandbox registry %s could not be read; sweep skipped: %v", dir, err)
-		return
+		return nil
 	}
 	if malformed > 0 {
 		log.WarningLog.Printf("throwaway sandbox registry holds %d unreadable entries; skipping them", malformed)
 	}
+	// Oldest-touched first. An entry kept for a container retry is touched
+	// each time its reap is incomplete (reapSweptThrowawayContainers), so it
+	// moves behind homes not yet tried, and retries that keep failing cannot
+	// hold the teardown bound start after start (#7447, Codex on #7448).
+	homes = oldestTouchedFirst(dir, homes)
 	selfCanonical, err := canonicalDir(selfHome)
 	if err != nil {
 		log.WarningLog.Printf("cannot canonicalize own home %s; throwaway sandbox sweep skipped: %v", selfHome, err)
-		return
+		return nil
 	}
 	now := throwawayNowFn()
 	started := time.Now()
@@ -339,8 +353,82 @@ sweep:
 		log.InfoLog.Printf("reaping throwaway sandbox %s (kind %s): %s", home, m.Kind, reason)
 		throwawayTeardownFn(home, m)
 		reaped++
-		if err := throwawaysandbox.RemoveRegistryEntry(dir, registered); err != nil {
-			log.WarningLog.Printf("throwaway sandbox %s could not be deregistered after teardown: %v", home, err)
+		pending = append(pending, throwawayContainerReap{home: home, registered: registered})
+	}
+	return pending
+}
+
+// oldestTouchedFirst orders registered homes by when their registry entry was
+// last written or touched, oldest first; ties keep the listing's order. An
+// entry that cannot be read sorts first, so it is examined, and dropped or
+// kept by the sweep's own rules.
+func oldestTouchedFirst(dir string, homes []string) []string {
+	type entry struct {
+		home    string
+		touched time.Time
+	}
+	entries := make([]entry, len(homes))
+	for i, home := range homes {
+		entries[i].home = home
+		if info, err := os.Stat(throwawaysandbox.RegistryEntryPath(dir, home)); err == nil {
+			entries[i].touched = info.ModTime()
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].touched.Before(entries[j].touched) })
+	ordered := make([]string, len(entries))
+	for i, e := range entries {
+		ordered[i] = e.home
+	}
+	return ordered
+}
+
+// throwawayContainerReap is a swept home whose processes are gone and whose
+// containers are still to be reaped, with its registry entry as listed.
+type throwawayContainerReap struct {
+	home       string
+	registered string
+}
+
+// launchThrowawayContainerReaps reaps the swept homes' containers on a worker
+// tracked by wg, after readiness, and deregisters each home only once its
+// reap finished with nothing left (#7447). A stop ends the pass between
+// homes, leaving the rest registered for the next marked start.
+func launchThrowawayContainerReaps(pending []throwawayContainerReap, stopCh <-chan struct{}, wg interface {
+	Add(int)
+	Done()
+}) {
+	if len(pending) == 0 {
+		return
+	}
+	// Read the seams here, on the main flow, not in the worker.
+	dir, reap := throwawayRegistryDirFn(), throwawayHomeContainerReapFn
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		reapSweptThrowawayContainers(pending, dir, reap, stopCh)
+	}()
+}
+
+// reapSweptThrowawayContainers is the worker's pass: for each swept home,
+// reap its containers, then deregister it if, and only if, none is left.
+func reapSweptThrowawayContainers(pending []throwawayContainerReap, dir string, reap func(string) bool, stopCh <-chan struct{}) {
+	for _, p := range pending {
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+		if !reap(p.home) {
+			log.WarningLog.Printf("throwaway sandbox %s stays registered: its containers were not all removed, so a later marked start retries", p.home)
+			// To the back of the next sweep's order (oldestTouchedFirst).
+			now := time.Now()
+			if err := os.Chtimes(throwawaysandbox.RegistryEntryPath(dir, p.registered), now, now); err != nil {
+				log.WarningLog.Printf("throwaway sandbox %s: could not move its registration to the back of the sweep order: %v", p.home, err)
+			}
+			continue
+		}
+		if err := throwawaysandbox.RemoveRegistryEntry(dir, p.registered); err != nil {
+			log.WarningLog.Printf("throwaway sandbox %s could not be deregistered after teardown: %v", p.home, err)
 		}
 	}
 }
@@ -366,23 +454,123 @@ func teardownThrowawaySandbox(home string, m *throwawaysandbox.Marker) {
 	}
 	procs := throwawayMemberProcesses(canonHome, m)
 	killThrowawayTmuxSockets(canonHome, m)
-	if len(procs) == 0 {
-		return
-	}
-	remaining := throwawayKillFn(procs, throwawayReapGrace, throwawayReapTermWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
-		if outcome == proctree.ReapSignalled {
-			log.InfoLog.Printf("throwaway teardown: "+format, args...)
-		} else {
-			log.WarningLog.Printf("throwaway teardown: "+format, args...)
+	if len(procs) > 0 {
+		remaining := throwawayKillFn(procs, throwawayReapGrace, throwawayReapTermWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
+			if outcome == proctree.ReapSignalled {
+				log.InfoLog.Printf("throwaway teardown: "+format, args...)
+			} else {
+				log.WarningLog.Printf("throwaway teardown: "+format, args...)
+			}
+		})
+		if len(remaining) > 0 {
+			pids := make([]string, 0, len(remaining))
+			for _, p := range remaining {
+				pids = append(pids, fmt.Sprintf("%d", p.PID))
+			}
+			log.WarningLog.Printf("throwaway teardown of %s left %d processes after SIGKILL: %s", home, len(remaining), strings.Join(pids, ","))
 		}
-	})
-	if len(remaining) > 0 {
-		pids := make([]string, 0, len(remaining))
-		for _, p := range remaining {
-			pids = append(pids, fmt.Sprintf("%d", p.PID))
-		}
-		log.WarningLog.Printf("throwaway teardown of %s left %d processes after SIGKILL: %s", home, len(remaining), strings.Join(pids, ","))
 	}
+}
+
+// throwawayReapContainersFn removes the session containers a home created. A
+// seam so tests need no docker engine.
+var throwawayReapContainersFn = session.ReapHomeContainers
+
+// throwawayHomeContainerReapFn is the container half of an expired sandbox's
+// teardown; a seam so tests can record or hold it.
+var throwawayHomeContainerReapFn = reapThrowawayHomeContainers
+
+// reapThrowawayHomeContainers removes every session container the sandbox
+// home created, and reports whether none is left (#7447). Nothing else would
+// remove them: the orphan sweep reaps only its own daemon's home, and a
+// throwaway's daemon may never start again. The expiring daemon runs it on
+// its own way out, after its teardown; a marked start runs it for a swept
+// sibling, after readiness. The default install's home is refused first, as
+// teardownThrowawaySandbox refuses it.
+func reapThrowawayHomeContainers(home string) (complete bool) {
+	canonHome, err := canonicalDir(home)
+	if err != nil {
+		log.WarningLog.Printf("cannot canonicalize throwaway sandbox home %s for its container reap: %v", home, err)
+		return false
+	}
+	if isDefaultThrowawayHome(canonHome) {
+		log.ErrorLog.Printf("refusing to reap the containers of the default AF home %s", canonHome)
+		return true
+	}
+	return reapThrowawayContainers(canonHome)
+}
+
+// reapThrowawayContainers removes the containers of canonHome. Each is proven
+// by its own af.home label (throwawayLabelNamesHome) and removed through the
+// orphan sweep's per-container reap, which re-verifies the engine identity
+// before the rm. A sandbox's sessions all end with it, so none is spared. It
+// is complete when the engine was listed and every proven container went; a
+// home already gone is complete too, since no label can prove it again.
+func reapThrowawayContainers(canonHome string) (complete bool) {
+	homeInfo, err := os.Stat(canonHome)
+	if err != nil || !homeInfo.IsDir() {
+		// A home already gone proves no label: nothing is reaped (#7447).
+		log.WarningLog.Printf("throwaway teardown: home %s is not a directory any more; leaving its containers, which no label can now prove: %v", canonHome, err)
+		return true
+	}
+	result := throwawayReapContainersFn(func(label string) bool { return throwawayLabelNamesHome(label, homeInfo) })
+	if result.Unlisted || result.Unknown > 0 || result.Errors > 0 {
+		log.WarningLog.Printf("throwaway teardown of %s did not finish its containers (engine unlisted: %t, %d in an unknown state, %d not removed)",
+			canonHome, result.Unlisted, result.Unknown, result.Errors)
+		return false
+	}
+	return reapCoveredRecordedEngines(canonHome, result.EngineID)
+}
+
+// reapCoveredRecordedEngines reports whether a reap that listed engine covered
+// every Docker engine the home recorded before creating a container on it
+// (#7447, Codex on #7448). An empty listing on one engine proves nothing about
+// containers on another, so the home stays registered for a marked start
+// whose engine matches. No record means no container was ever created, since
+// the record precedes every docker run; a record that cannot be read or
+// trusted is incomplete.
+func reapCoveredRecordedEngines(canonHome, engine string) bool {
+	recorded, err := throwawaysandbox.ReadRecordedEngines(canonHome)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		log.WarningLog.Printf("throwaway teardown of %s: cannot read the Docker engines it recorded, so cannot confirm its containers are gone: %v", canonHome, err)
+		return false
+	}
+	for _, e := range recorded {
+		if e != engine {
+			log.WarningLog.Printf("throwaway teardown of %s: its containers were created on Docker engine %s, but this reap listed engine %q; keeping it registered for a start that can reach that engine",
+				canonHome, e, engine)
+			return false
+		}
+	}
+	return true
+}
+
+// throwawayLabelNamesHome reports whether an af.home label proves its
+// container belongs to the home homeInfo describes. The label is the raw
+// config.GetConfigDir() of the daemon that created the container, so it is
+// proven by the directory it names, never by its spelling, and in this order:
+//
+//   - a relative label is unproven, before any comparison: resolving it would
+//     use this process's cwd, not the creator's, so two throwaways launched
+//     from different directories with the same relative home would each prove
+//     the other's containers (#7447, the shape of Codex's P1 on #7433);
+//   - a label whose directory no longer exists (an already-deleted home), or
+//     that names something other than a directory, is skipped, never matched;
+//   - the label's directory must be the home itself (os.SameFile: the same
+//     device and inode), which a symlinked or differently spelled path to the
+//     same home still is.
+func throwawayLabelNamesHome(label string, homeInfo os.FileInfo) bool {
+	if label == "" || !filepath.IsAbs(label) {
+		return false
+	}
+	info, err := os.Stat(label)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	return os.SameFile(info, homeInfo)
 }
 
 // throwawayPrivateTmuxDir returns the marker's recorded TMUX_TMPDIR when

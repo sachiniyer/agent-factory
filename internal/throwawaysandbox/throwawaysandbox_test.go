@@ -375,3 +375,43 @@ func TestRecordedPIDsRefusesUntrustedAndMalformed(t *testing.T) {
 		t.Fatal("a malformed recorded-pid file was silently clobbered")
 	}
 }
+
+// TestRecordedEnginesRoundTrip: an engine recorded once is listed once, a
+// second engine joins it, and a home with no list reports ErrNotExist — the
+// "never created a container" answer (#7447).
+func TestRecordedEnginesRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	if _, err := ReadRecordedEngines(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a home with nothing recorded must say so with ErrNotExist, got %v", err)
+	}
+	for _, id := range []string{"engine-a", "engine-a", "engine-b"} {
+		if err := WriteRecordedEngine(home, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := ReadRecordedEngines(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "engine-a" || got[1] != "engine-b" {
+		t.Fatalf("recorded engines = %v, want [engine-a engine-b]", got)
+	}
+	if err := WriteRecordedEngine(home, ""); err == nil {
+		t.Fatal("an empty engine id must be refused, never recorded")
+	}
+}
+
+// TestRecordedEnginesRefusesACorruptList: a list that fails to parse is an
+// error, and writing to it is refused rather than overwriting the evidence.
+func TestRecordedEnginesRefusesACorruptList(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(RecordedEnginesPath(home), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRecordedEngines(home); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a corrupt list must be an error the caller fails closed on, got %v", err)
+	}
+	if err := WriteRecordedEngine(home, "engine-a"); err == nil {
+		t.Fatal("a corrupt list must not be overwritten")
+	}
+}

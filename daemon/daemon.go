@@ -424,6 +424,19 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// session-side registry covers tunnels no instance points at yet (a
 	// provision still in flight). The seam is read here, on the main flow.
 	teardown.add("sandbox tunnels", stopSandboxTunnels)
+	// An expired throwaway's session containers (#7447). A teardown step, so
+	// the stop's deadline bounds it like every other: on a slow or hung Docker
+	// engine it is abandoned at the deadline, named, and the stop exits holding
+	// the home (Codex on #7448). Its own daemon never deregisters the home, so
+	// a later marked start retries whatever this could not remove. A no-op
+	// unless this daemon's sandbox expired. The seam is read here, on the main
+	// flow.
+	reapExpiredThrowawayContainers := throwawayHomeContainerReapFn
+	teardown.add("expired throwaway sandbox containers", func() {
+		if throwawayExpired {
+			reapExpiredThrowawayContainers(throwawayHome)
+		}
+	})
 
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)
@@ -608,7 +621,10 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// the "next start of the tooling that creates them" net (#6844). The
 	// sweep itself is gated on this daemon's own marker: a real install
 	// never reaps, and teardown refuses the default home outright.
-	startupStep("throwaway sandbox reap", func() { sweepThrowawaySandboxes(throwawayHome) })
+	// Their containers are reaped after readiness, on a tracked worker: that is
+	// Docker work, which must not hold readiness (#5815, #7447).
+	var throwawayContainerReaps []throwawayContainerReap
+	startupStep("throwaway sandbox reap", func() { throwawayContainerReaps = sweepThrowawaySandboxes(throwawayHome) })
 	manager.finishInstanceRestore()
 
 	// Start task automation only after the control server is up and restore has
@@ -686,6 +702,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	launchDeferredOrphanSweepIfReady(manager, stopCh, wg)
 	// Finish a prune the previous daemon began (#5189): bounded, logged, off readiness.
 	launchPruneIntentResume(manager, stopCh, wg)
+	// The containers of the throwaway siblings the startup sweep tore down.
+	launchThrowawayContainerReaps(throwawayContainerReaps, stopCh, wg)
 
 	// Start the daemon-owned release check only now, past the readiness barrier:
 	// a box that never opens the TUI never reaches the launch-path updater, so

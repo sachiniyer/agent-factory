@@ -155,7 +155,8 @@ func TestSweepRefusesConflictingDockerSelectors(t *testing.T) {
 
 	got := SweepOrphanContainers("/home/af", nil)
 
-	assert.Equal(t, OrphanSweepResult{}, got, "an ambiguous selector set must skip the whole sweep")
+	// Skipped before any listing, so it proved nothing about what is there.
+	assert.Equal(t, OrphanSweepResult{Unlisted: true}, got, "an ambiguous selector set must skip the whole sweep")
 	require.Len(t, calls, 1, "nothing past the resolver's context inspect may run")
 	assert.Equal(t, "context", calls[0][0])
 	assert.Equal(t, "inspect", calls[0][1])
@@ -178,8 +179,123 @@ func TestSweepNoOpWithoutHomeOrDocker(t *testing.T) {
 
 	// No docker CLI: no-op.
 	restoreLook = SetLookPathForTest(func(string) (string, error) { return "", fmt.Errorf("not found") })
-	assert.Equal(t, OrphanSweepResult{}, SweepOrphanContainers("/home/af", nil))
+	got := SweepOrphanContainers("/home/af", nil)
+	assert.Zero(t, got.Listed+got.Reaped+got.Skipped+got.Unknown+got.Errors, "no docker CLI: the sweep does nothing")
 	restoreLook()
 
 	assert.False(t, called, "the sweep must not invoke docker in either no-op path")
+}
+
+// TestReapHomeContainersRemovesOnlyProvenContainers: a whole-home reap lists
+// every af session container that carries an af.home label, and removes only
+// the ones whose label the caller proves; an unproven label, another home's,
+// and a line the format never prints are all left alone (#7447).
+func TestReapHomeContainersRemovesOnlyProvenContainers(t *testing.T) {
+	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
+	var psArgs, removed []string
+	cli := &fakeDockerContextCLI{}
+	defer SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "context":
+			return cli.exec(ctx, environ, args...)
+		case "info":
+			return []byte("engine-1\n"), nil
+		case "ps":
+			psArgs = append([]string(nil), args...)
+			return []byte("cid-mine\t\"slug-a\"\t\"/h/mine\"\n" +
+				"cid-alias\t\"slug-b\"\t\"/h/alias-of-mine\"\n" +
+				"cid-other\t\"slug-c\"\t\"/h/other\"\n" +
+				"cid-relative\t\"slug-d\"\t\".af\"\n" +
+				"cid-unlabelled\t\"slug-e\"\t\"\"\n" +
+				"not a listing line\n"), nil
+		case "rm":
+			removed = append(removed, args[len(args)-1])
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unexpected docker call: %v", args)
+		}
+	})()
+
+	var asked []string
+	got := ReapHomeContainers(func(label string) bool {
+		asked = append(asked, label)
+		return label == "/h/mine" || label == "/h/alias-of-mine"
+	})
+
+	require.True(t, slices.Contains(psArgs, "label="+dockerSessionLabel), "must list only af session containers")
+	require.True(t, slices.Contains(psArgs, "label="+dockerHomeLabel), "must list only containers that carry an af.home label")
+	assert.Equal(t, []string{"/h/mine", "/h/alias-of-mine", "/h/other", ".af"}, asked,
+		"every labelled container's own label is put to the proof, and nothing else is")
+	assert.Equal(t, []string{"cid-mine", "cid-alias"}, removed, "only the proven containers are removed")
+	assert.Equal(t, 2, got.Listed)
+	assert.Equal(t, 2, got.Reaped)
+}
+
+// homeReapDocker is a fake docker CLI for whole-home reaps: `ps` prints
+// listing, or fails with listErr, and `rm` records the removed id.
+func homeReapDocker(t *testing.T, listing string, listErr error, removed *[]string) func() {
+	t.Helper()
+	cli := &fakeDockerContextCLI{}
+	return SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "context":
+			return cli.exec(ctx, environ, args...)
+		case "info":
+			return []byte("engine-1\n"), nil
+		case "ps":
+			return []byte(listing), listErr
+		case "rm":
+			*removed = append(*removed, args[len(args)-1])
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unexpected docker call: %v", args)
+		}
+	})
+}
+
+// TestHomeReapListingKeepsEachLabelVerbatim: the listing a whole-home reap
+// proves from never trims or splits a label. "/h/mine " (a trailing space),
+// "/h/mine\t" and a label holding a newline name homes distinct from
+// "/h/mine", and each reaches the proof byte for byte (#7447, Codex on #7448).
+func TestHomeReapListingKeepsEachLabelVerbatim(t *testing.T) {
+	var removed []string
+	defer homeReapDocker(t, "cid-exact\t\"a\"\t\"/h/mine\"\n"+
+		"cid-space\t\"b\"\t\"/h/mine \"\n"+
+		"cid-tab\t\"c\"\t\"/h/mine\\t\"\n"+
+		"cid-newline\t\"d\"\t\"/h/mine\\n/h/other\"\n", nil, &removed)()
+
+	listed, err := listLabelledAfContainers(nil)
+	require.NoError(t, err)
+
+	homes := make([]string, 0, len(listed))
+	for _, c := range listed {
+		homes = append(homes, c.home)
+	}
+	assert.Equal(t, []string{"/h/mine", "/h/mine ", "/h/mine\t", "/h/mine\n/h/other"}, homes,
+		"each label is listed byte for byte, one container per line")
+}
+
+// TestReapHomeContainersSaysWhenItCouldNotList: a pass that could not list the
+// engine's containers proved nothing, and says so, so a caller does not read
+// "nothing removed" as "nothing left" (#7447).
+func TestReapHomeContainersSaysWhenItCouldNotList(t *testing.T) {
+	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
+	var removed []string
+	defer homeReapDocker(t, "", fmt.Errorf("Cannot connect to the Docker daemon"), &removed)()
+
+	got := ReapHomeContainers(func(string) bool { return true })
+
+	assert.True(t, got.Unlisted, "a failed listing must be reported as unlisted")
+	assert.Empty(t, removed)
+}
+
+// TestReapHomeContainersSaysWhenDockerIsMissing: without a docker CLI the pass
+// lists nothing, and says so: a CLI missing now does not prove that an earlier
+// daemon, with one, created no container (Codex on #7448).
+func TestReapHomeContainersSaysWhenDockerIsMissing(t *testing.T) {
+	defer SetLookPathForTest(func(string) (string, error) { return "", fmt.Errorf("docker: not found") })()
+
+	got := ReapHomeContainers(func(string) bool { return true })
+
+	assert.True(t, got.Unlisted, "a missing docker CLI must be reported as unlisted")
 }

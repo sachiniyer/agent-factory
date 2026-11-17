@@ -217,6 +217,65 @@ func WriteRecordedPID(home string, rec RecordedPID) error {
 	return os.Rename(tmp, path)
 }
 
+// EnginesFileName is where a marked home lists the Docker engines that were
+// about to host its containers (#7447). Each is recorded before its
+// container exists, so a home with no list never created one, and a reap
+// that listed a different engine knows it has not looked where they are.
+const EnginesFileName = "throwaway-engines.json"
+
+type recordedEngines struct {
+	Version int      `json:"version"`
+	Engines []string `json:"engines"`
+}
+
+// RecordedEnginesPath is where home's recorded-engine list lives.
+func RecordedEnginesPath(home string) string { return filepath.Join(home, EnginesFileName) }
+
+// ReadRecordedEngines returns the Docker engine identities home recorded.
+// The file must pass the marker's trust bar. ErrNotExist means nothing was
+// recorded, so no container was ever created; malformed or untrusted content
+// is an error the caller must fail closed on.
+func ReadRecordedEngines(home string) ([]string, error) {
+	data, err := TrustedOwnedFile(RecordedEnginesPath(home))
+	if err != nil {
+		return nil, err
+	}
+	var r recordedEngines
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("parsing recorded engines: %w", err)
+	}
+	return r.Engines, nil
+}
+
+// WriteRecordedEngine merges engineID into home's recorded-engine list
+// atomically. The caller serializes writers (a file lock): the merge reads
+// before it writes. A list that exists but fails the trust/parse bar is
+// refused rather than rewritten over, as WriteRecordedPID refuses its own.
+func WriteRecordedEngine(home, engineID string) error {
+	if engineID == "" {
+		return errors.New("recording a Docker engine: empty engine id")
+	}
+	existing, err := ReadRecordedEngines(home)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, e := range existing {
+		if e == engineID {
+			return nil
+		}
+	}
+	data, err := json.Marshal(recordedEngines{Version: markerVersion, Engines: append(existing, engineID)})
+	if err != nil {
+		return err
+	}
+	path := RecordedEnginesPath(home)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // Validate checks the mandatory contract fields. Unknown fields are ignored
 // so older readers tolerate markers written by newer scaffolds.
 func (m *Marker) Validate() error {
