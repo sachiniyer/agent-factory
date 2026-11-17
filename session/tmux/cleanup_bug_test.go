@@ -152,7 +152,13 @@ af_legacy: 1 windows (created Wed May 20 12:02:00 2026) [179x47]`
 func TestCleanupSessionsClassifiesHomeByFilesystem(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
-	alias := filepath.Join(home+"-missing", "..", filepath.Base(home))
+	// A regular file sits where a directory would need to be: the path Cleans
+	// to the home but traversal through it fails with ENOTDIR on every
+	// platform — stat can never prove it, no matter how the kernel treats a
+	// missing intermediate (#7435).
+	notDir := filepath.Join(filepath.Dir(home), "not-a-dir")
+	require.NoError(t, os.WriteFile(notDir, []byte("x"), 0o600))
+	alias := filepath.Join(notDir, "..", filepath.Base(home))
 	require.Equal(t, home, filepath.Clean(alias),
 		"the alias fixture must differ only lexically — a Clean-based compare would admit it")
 	link := filepath.Join(t.TempDir(), "link")

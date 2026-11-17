@@ -22,10 +22,14 @@ func TestClassifyHomeDir(t *testing.T) {
 	other := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
 	require.NoError(t, os.Symlink(home, link))
-	// Cleans to the home, but resolves through a directory that does not
-	// exist: stat fails, so nothing can prove the names name the same place —
-	// and if the middle directory later appears, they may name DIFFERENT ones.
-	lexicalAlias := filepath.Join(home+"-missing", "..", filepath.Base(home))
+	// Cleans to the home, but resolves through a REGULAR FILE — path
+	// traversal through a non-directory fails with ENOTDIR on every platform,
+	// so nothing can prove the names name the same place. A missing-directory
+	// variant was tried first; platform fs behavior around ENOENT-in-lookup
+	// made it unreliable (#7435 CI on Ubuntu 26.04).
+	notDir := filepath.Join(filepath.Dir(home), "not-a-dir")
+	require.NoError(t, os.WriteFile(notDir, []byte("x"), 0o600))
+	lexicalAlias := filepath.Join(notDir, "..", filepath.Base(home))
 	require.Equal(t, home, filepath.Clean(lexicalAlias),
 		"the fixture must only differ lexically, not after Clean")
 
@@ -48,23 +52,45 @@ func TestClassifyHomeDir(t *testing.T) {
 	}
 }
 
-// #7435 item 5 — the cohort gate admits only what the kernel session evidence
-// proves: a SID one of the pane roots led, or a (pid, StartID) recorded at
-// spawn. No evidence at all means the gate is off, never silently on.
+// #7435 item 5 — the cohort gate admits only what kernel evidence proves:
+// capture inside the proven live tree, a SID one of the pane roots led, a
+// (pid, StartID) recorded at spawn, or descent from a proven member. No
+// evidence at all means the gate is off, never silently on.
 func TestCohortMembershipAdmits(t *testing.T) {
 	member := proctree.Process{PID: 100, SID: 40, StartID: 9}
 
-	require.True(t, cohortMembership{}.admits(member), "no evidence: gate off")
-	require.True(t, cohortMembership{PaneSIDs: map[int]bool{}}.admits(member),
+	require.True(t, cohortMembership{}.admits(nil, member), "no evidence: gate off")
+	require.True(t, cohortMembership{PaneSIDs: map[int]bool{}}.admits(nil, member),
 		"an EMPTY sid set is still no evidence: gate off")
-	require.True(t, cohortMembership{PaneSIDs: map[int]bool{40: true}}.admits(member))
-	require.True(t, cohortMembership{Recorded: map[int]uint64{100: 9}}.admits(member))
-	require.False(t, cohortMembership{PaneSIDs: map[int]bool{41: true}}.admits(member),
+	require.True(t, cohortMembership{PaneSIDs: map[int]bool{40: true}}.admits(nil, member))
+	require.True(t, cohortMembership{Recorded: map[int]uint64{100: 9}}.admits(nil, member))
+	require.True(t, cohortMembership{Proven: map[int]uint64{100: 9}}.admits(nil, member),
+		"captured inside the proven live tree is membership proof on its own")
+	require.False(t, cohortMembership{PaneSIDs: map[int]bool{41: true}}.admits(nil, member),
 		"a foreign SID is not membership however the markers read")
-	require.False(t, cohortMembership{Recorded: map[int]uint64{100: 8}}.admits(member),
+	require.False(t, cohortMembership{Recorded: map[int]uint64{100: 8}}.admits(nil, member),
 		"a recycled pid with a different StartID is not the recorded process")
-	require.False(t, cohortMembership{Recorded: map[int]uint64{101: 9}}.admits(member),
+	require.False(t, cohortMembership{Recorded: map[int]uint64{101: 9}}.admits(nil, member),
 		"a different pid carrying the same StartID is not the recorded process")
+	require.False(t, cohortMembership{Proven: map[int]uint64{100: 8}}.admits(nil, member),
+		"a recycled pid with a different StartID was never inside the tree")
+}
+
+// A process never itself captured still proves membership by descending from
+// one that was — the shape a refresh pass finds when a proven leftover forks a
+// child during the sweep.
+func TestCohortMembershipAdmitsByDescentFromTheProvenTree(t *testing.T) {
+	proven := proctree.Process{PID: 50, PPID: 1, SID: 50, StartID: 7}
+	child := proctree.Process{PID: 60, PPID: 50, SID: 60, StartID: 8}
+	snap := map[int]proctree.Process{50: proven, 60: child}
+	membership := cohortMembership{Proven: map[int]uint64{50: 7}}
+
+	require.True(t, membership.admits(snap, child),
+		"a child of a proven member is inside the proven tree whatever the env scan says")
+	require.False(t, cohortMembership{Proven: map[int]uint64{50: 99}}.admits(snap, child),
+		"a reused ancestor pid with a different StartID proves nothing")
+	require.False(t, cohortMembership{PaneSIDs: map[int]bool{40: true}}.admits(snap, child),
+		"descent cannot help without a proven member to reach")
 }
 
 // #7435 item 5 — inherited markers are never membership proof. Two live

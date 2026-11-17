@@ -247,29 +247,60 @@ func paneRowsToProcesses(rows, sanitizedName string) (paneCapture, error) {
 	return captured, errors.Join(captureErrs...)
 }
 
-// cohortMembership is the kernel-session proof a vanished-session cohort can
-// still demand after the tmux record is gone (#7435 item 5). PaneSIDs holds
-// the kernel session ids the capture's verified pane roots led; Recorded
-// holds (pid → StartID) pairs a caller recorded when the pane was spawned
-// (#5066). A marker-matched process is a cohort member only when its SID is
-// one the panes led or its (pid, StartID) is recorded — inherited markers
-// alone never prove membership. With NO evidence at all the gate is off: a
-// blind sweep captured nothing to place against, so it keeps rendering its
-// refusals exactly as before.
+// cohortMembership is the kernel evidence a vanished-session cohort can still
+// demand after the tmux record is gone (#7435 item 5):
+//
+//   - Proven holds (pid → StartID) pairs the caller itself captured inside the
+//     proven live tree before the session vanished — descent capture IS
+//     membership proof (item 1): a process observed inside the verified pane
+//     tree is the session's own even if it setsid'd out of its kernel session
+//     (the escapee shape, #1104). Processes discovered by descent from a proven
+//     member during the sweep are admitted the same way.
+//   - PaneSIDs holds the kernel session ids the capture's verified pane roots
+//     led — a marker-matched process still carrying one is a pane member.
+//   - Recorded holds (pid → StartID) pairs a caller recorded when the pane was
+//     spawned (#5066).
+//
+// What is NOT evidence is the point: a marker-matched process with none of
+// these is exactly the inherited-env case — an af daemon's or helper's child
+// that setsid'd out of the pane, carrying markers it inherited — and it is
+// skipped. With NO evidence at all the gate is off: a blind sweep captured
+// nothing to place against, so it keeps rendering its refusals exactly as
+// before.
 type cohortMembership struct {
+	Proven   map[int]uint64
 	PaneSIDs map[int]bool
 	Recorded map[int]uint64
 }
 
-func (m cohortMembership) admits(p proctree.Process) bool {
-	if len(m.PaneSIDs) == 0 && len(m.Recorded) == 0 {
+func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Process) bool {
+	if len(m.Proven) == 0 && len(m.PaneSIDs) == 0 && len(m.Recorded) == 0 {
 		return true
 	}
 	if m.PaneSIDs[p.SID] {
 		return true
 	}
-	startID, recorded := m.Recorded[p.PID]
-	return recorded && startID == p.StartID
+	if startID, ok := m.Recorded[p.PID]; ok && startID == p.StartID {
+		return true
+	}
+	if startID, ok := m.Proven[p.PID]; ok && startID == p.StartID {
+		return true
+	}
+	// Descent from a proven member: a child a captured process forked after
+	// the session died was never in the capture, but its ancestry places it
+	// inside the proven tree all the same. The StartID recheck keeps a reused
+	// pid from minting membership it does not hold.
+	for ancestor, i := p.PPID, 0; ancestor > 1 && i < 128; i++ {
+		q, ok := snap[ancestor]
+		if !ok {
+			break
+		}
+		if startID, ok := m.Proven[ancestor]; ok && startID == q.StartID {
+			return true
+		}
+		ancestor = q.PPID
+	}
+	return false
 }
 
 // markedOrphanProcesses filters a previously captured pane process tree down to
@@ -373,7 +404,7 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		// later panes too, #6846). Membership requires kernel-session evidence:
 		// the process's SID is one the proven pane roots led, or the pid matches
 		// a (pid, StartID) pair recorded when the pane was spawned.
-		if !membership.admits(process) {
+		if !membership.admits(snap, process) {
 			continue
 		}
 		processGeneration, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)

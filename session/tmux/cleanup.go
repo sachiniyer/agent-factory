@@ -668,6 +668,19 @@ func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.P
 func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctree.Process, captureErr error,
 	generations orphanGenerationSet, membership cohortMembership, trustLiveGeneration bool,
 ) error {
+	// Every candidate the caller hands in was captured inside the PROVEN live
+	// tree — a pane-descent or pane-session capture while the session still
+	// existed — so the capture itself is its membership proof (item 1 kept
+	// descent for exactly this). Candidates added later by the marker scan in
+	// refreshOrphanCandidates carry no such proof: they must earn admission
+	// through a pane-root SID or a recorded (pid, StartID) pair — or through
+	// descent from one of these proven members — so an inherited-marker child
+	// of a foreign daemon stays excluded (#7435 item 5).
+	proven := make(map[int]uint64, len(candidates))
+	for _, p := range candidates {
+		proven[p.PID] = p.StartID
+	}
+	membership.Proven = proven
 	var sweepErr error
 	if captureErr != nil {
 		sweepErr = fmt.Errorf("could not establish the complete pane process tree before ownership lookup: %w", captureErr)
