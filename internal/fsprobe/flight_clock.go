@@ -15,7 +15,6 @@ import (
 // caller.
 type flightClock interface {
 	Now() time.Time
-	Since(t time.Time) time.Duration
 	NewTimer(d time.Duration) flightTimer
 }
 
@@ -29,8 +28,7 @@ type flightTimer interface {
 // wallFlightClock is production's flightClock: the wall clock and its timers.
 type wallFlightClock struct{}
 
-func (wallFlightClock) Now() time.Time                  { return time.Now() }
-func (wallFlightClock) Since(t time.Time) time.Duration { return time.Since(t) }
+func (wallFlightClock) Now() time.Time { return time.Now() }
 func (wallFlightClock) NewTimer(d time.Duration) flightTimer {
 	return wallFlightTimer{time.NewTimer(d)}
 }

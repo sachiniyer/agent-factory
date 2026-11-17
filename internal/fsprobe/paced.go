@@ -90,14 +90,18 @@ func runPaced(id, question, key string, work func(step func()) (any, error)) (an
 // passed since its last step.
 func waitPaced(id, question, key string, flight *pacedFlight) (any, error) {
 	timeout := probeTimeout.load()
-	timer := flight.clock.NewTimer(timeout)
+	// The bound is measured from the flight's last step, and each read of it
+	// takes the clock before lastStep so a step that lands mid-read makes the
+	// flight look fresher, never staler (#7456).
+	since := flight.clock.Now().Sub(time.Unix(0, flight.lastStep.Load()))
+	timer := flight.clock.NewTimer(timeout - since)
 	defer timer.Stop()
 	for {
 		select {
 		case <-flight.done:
 			return flight.res, flight.err
 		case <-timer.C():
-			if since := flight.clock.Since(time.Unix(0, flight.lastStep.Load())); since < timeout {
+			if since := flight.clock.Now().Sub(time.Unix(0, flight.lastStep.Load())); since < timeout {
 				timer.Reset(timeout - since)
 				continue
 			}
