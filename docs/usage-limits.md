@@ -584,6 +584,11 @@ tried to carry the conversation and why it could not, when:
 - the new account already holds a thread/revert rollout of this
   conversation, which its Codex would resume instead of the carried
   copy, so the carry cannot put that copy in front of it;
+- the recorded Codex thread was forked in Codex (`/fork`) and its
+  rollout holds only the turns after the fork, while the history it
+  shares with its parent lives in the parent's rollout, which af does
+  not carry, so the new account starts fresh rather than resume a fork
+  whose lineage it cannot resolve;
 - a replacement already launched on the carried conversation stopped before it
   was confirmed working.
 
