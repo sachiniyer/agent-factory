@@ -738,67 +738,378 @@ _af_rail_title_avail() {
     printf '%s' "$(( w - 9 ))"
 }
 
-# _af_render_title <name> — print the title text the rail draws for <name>:
-# the name itself while it fits the title cell, else its first avail-1 cells
-# + '…'. Returns 1 when the rendering cannot be derived: a name carrying bytes
-# outside printable ASCII has runewidth the shell cannot measure, unless its
-# BYTE length already fits the cell budget (bytes ≥ cells, so a byte fit
-# proves the full name renders).
-_af_render_title() {
+# _af_draw_title <name> — print "<cell-width>\n<title bytes>" for the title
+# cell the rail draws for <name>: the name itself while its display width
+# fits _af_rail_title_avail, else the kept grapheme prefix + '…'. The model
+# replicates render.go's draw under the sandbox's non-EastAsian locale —
+# runewidth's per-cluster truncation for the ellipsis, then the layout
+# contract's x/ansi clip to the cell — over a codepoint model generated
+# from the very libraries the TUI links (go-runewidth, uax29 graphemes,
+# displaywidth; see the table comment). Returns 1 when a codepoint cannot
+# be measured reliably — invalid UTF-8, a rune whose two measures disagree
+# (ZWJ, emoji modifiers, tag letters, VS16), or an Indic linker whose
+# conjunct clustering needs the full InCB tables — so callers refuse
+# loudly, naming the name, rather than guess a rendering.
+_af_draw_title() {
     local name="$1" avail
     avail="$(_af_rail_title_avail)"
-    if printf '%s' "$name" | LC_ALL=C grep -q '[^ -~]'; then
-        [ "$(printf '%s' "$name" | wc -c)" -le "$avail" ] || return 1
-        printf '%s\n' "$name"
-        return 0
-    fi
-    if [ "${#name}" -le "$avail" ]; then
-        printf '%s\n' "$name"
-    else
-        printf '%s…\n' "${name:0:$((avail - 1))}"
-    fi
+    printf '%s\n' "$name" | LC_ALL=C awk -v avail="$avail" '# _af_cell_draw — replicates the TUI rail title draw under the sandbox
+# non-EastAsian locale:
+#   1. runewidth.Truncate-style: while the total runewidth would exceed
+#      avail-1, drop trailing GRAPHEME CLUSTERS and append "…" (U+2026).
+#   2. x/ansi contract-clip: keep the longest grapheme prefix of rt whose
+#      x/ansi (displaywidth) width fits avail.
+# Prints one line "<cells> <title>" — the x/ansi cell width of the drawn
+# title and its bytes (empty when the name draws only padding).
+# Exit 1 with the offending char on stderr when the input is not valid UTF-8
+# or contains a codepoint the two measures are known to score differently
+# (ZWJ, VS16, emoji modifiers, tag chars) or an InCB=Linker virama whose
+# conjunct segmentation we cannot model without the full InCB tables.
+BEGIN {
+	for (i = 0; i < 256; i++) ORD[sprintf("%c", i)] = i
+	# Codepoint range tables (decimal lo-hi[-class]), generated from the
+	# measure stack the rail itself links: mattn/go-runewidth v0.0.23 for
+	# the ellipsis truncation, clipperhouse/displaywidth v0.11.0 (via
+	# charmbracelet/x/ansi v0.11.7) for the contract cell width, and
+	# clipperhouse/uax29 v2.7.0 for grapheme clustering.
+	TW = 	"0-31-0 127-159-0 173-173-0 768-879-0 1155-1161-0 1425-1469-2 1471-1471-2 1473-1474-2 1476-1477-2 1479-1479-2 " \
+		"1536-1541-2 1552-1562-2 1564-1564-2 1611-1631-2 1648-1648-2 1750-1757-2 1759-1764-2 1767-1768-2 1770-1773-2 " \
+		"1807-1807-0 1809-1809-2 1840-1866-2 1958-1968-2 2027-2035-0 2045-2045-2 2070-2073-2 2075-2083-2 2085-2087-2 " \
+		"2089-2093-2 2137-2139-2 2192-2193-2 2200-2207-2 2250-2306-2 2362-2362-2 2364-2364-2 2369-2376-2 2381-2381-2 " \
+		"2385-2391-2 2402-2403-2 2433-2433-2 2492-2492-2 2497-2500-2 2509-2509-2 2530-2531-2 2558-2558-2 2561-2562-2 " \
+		"2620-2620-2 2625-2626-2 2631-2632-2 2635-2637-2 2641-2641-2 2672-2673-2 2677-2677-2 2689-2690-2 2748-2748-2 " \
+		"2753-2757-2 2759-2760-2 2765-2765-2 2786-2787-2 2810-2815-2 2817-2817-2 2876-2876-2 2879-2879-2 2881-2884-2 " \
+		"2893-2893-2 2901-2902-2 2914-2915-2 2946-2946-2 3008-3008-2 3021-3021-2 3072-3072-0 3076-3076-0 3132-3132-2 " \
+		"3134-3136-2 3142-3144-2 3146-3149-2 3157-3158-2 3170-3171-2 3201-3201-2 3260-3260-2 3263-3263-2 3270-3270-2 " \
+		"3276-3277-2 3298-3299-2 3315-3315-1 3328-3329-0 3387-3388-2 3393-3396-2 3405-3405-2 3426-3427-2 3457-3457-2 " \
+		"3530-3530-2 3538-3540-2 3542-3542-2 3633-3633-2 3636-3642-2 3655-3662-2 3761-3761-2 3764-3772-2 3784-3790-2 " \
+		"3864-3865-2 3893-3893-2 3895-3895-2 3897-3897-2 3953-3966-2 3968-3972-2 3974-3975-2 3981-3991-2 3993-4028-2 " \
+		"4038-4038-2 4141-4144-2 4146-4151-2 4153-4154-2 4157-4158-2 4184-4185-2 4190-4192-2 4209-4212-2 4226-4226-2 " \
+		"4229-4230-2 4237-4237-2 4253-4253-2 4352-4447-5 4957-4959-0 5906-5908-2 5938-5939-2 5970-5971-2 6002-6003-2 " \
+		"6068-6069-2 6071-6077-2 6086-6086-2 6089-6099-2 6109-6109-2 6155-6159-0 6277-6278-2 6313-6313-2 6432-6434-2 " \
+		"6439-6440-2 6450-6450-2 6457-6459-2 6679-6680-2 6683-6683-2 6742-6742-2 6744-6750-2 6752-6752-2 6754-6754-2 " \
+		"6757-6764-2 6771-6780-2 6783-6783-0 6832-6862-0 6863-6877-1 6880-6891-1 6912-6915-2 6964-6964-2 6966-6970-2 " \
+		"6972-6972-2 6978-6978-2 7019-7027-0 7040-7041-2 7074-7077-2 7080-7081-2 7083-7085-2 7142-7142-2 7144-7145-2 " \
+		"7149-7149-2 7151-7153-2 7212-7219-2 7222-7223-2 7376-7378-2 7380-7392-2 7394-7400-2 7405-7405-2 7412-7412-2 " \
+		"7416-7417-2 7616-7679-0 8203-8207-0 8232-8238-0 8288-8292-2 8294-8297-2 8298-8303-0 8400-8432-0 8986-8987-5 " \
+		"9001-9002-5 9193-9196-5 9200-9200-5 9203-9203-5 9725-9726-5 9748-9749-5 9776-9783-5 9800-9811-5 9855-9855-5 " \
+		"9866-9871-5 9875-9875-5 9889-9889-5 9898-9899-5 9917-9918-5 9924-9925-5 9934-9934-5 9940-9940-5 9962-9962-5 " \
+		"9970-9971-5 9973-9973-5 9978-9978-5 9981-9981-5 9989-9989-5 9994-9995-5 10024-10024-5 10060-10060-5 " \
+		"10062-10062-5 10067-10069-5 10071-10071-5 10133-10135-5 10160-10160-5 10175-10175-5 11035-11036-5 " \
+		"11088-11088-5 11093-11093-5 11503-11505-0 11647-11647-2 11744-11775-0 11904-11929-5 11931-12019-5 " \
+		"12032-12245-5 12272-12329-5 12330-12333-4 12334-12350-5 12353-12438-5 12441-12442-0 12443-12543-5 " \
+		"12549-12591-5 12593-12686-5 12688-12773-5 12783-12830-5 12832-12871-5 12880-42124-5 42128-42182-5 " \
+		"42607-42610-0 42612-42621-0 42654-42655-0 42736-42737-0 43010-43010-2 43014-43014-2 43019-43019-2 " \
+		"43045-43046-2 43052-43052-2 43204-43205-2 43232-43249-0 43263-43263-2 43302-43309-2 43335-43345-2 " \
+		"43360-43388-5 43392-43394-2 43443-43443-2 43446-43449-2 43452-43453-2 43493-43493-2 43561-43566-2 " \
+		"43569-43570-2 43573-43574-2 43587-43587-2 43596-43596-2 43644-43644-2 43696-43696-2 43698-43700-2 " \
+		"43703-43704-2 43710-43711-2 43713-43713-2 43756-43757-2 43766-43766-2 44005-44005-2 44008-44008-2 " \
+		"44013-44013-2 44032-55203-5 63744-64255-5 64286-64286-2 65024-65039-0 65040-65049-5 65056-65071-0 " \
+		"65072-65106-5 65108-65126-5 65128-65131-5 65279-65279-0 65281-65376-5 65504-65510-5 65529-65531-0 " \
+		"65534-65535-0 66045-66045-0 66272-66272-2 66422-66426-0 68097-68099-2 68101-68102-2 68108-68111-2 " \
+		"68152-68154-2 68159-68159-2 68325-68326-2 68900-68903-2 69291-69292-0 69373-69375-2 69446-69456-0 " \
+		"69506-69509-0 69633-69633-2 69688-69702-2 69744-69744-2 69747-69748-2 69759-69761-2 69811-69814-2 " \
+		"69817-69818-2 69821-69821-2 69826-69826-2 69837-69837-2 69888-69890-2 69927-69931-2 69933-69940-2 " \
+		"70003-70003-2 70016-70017-2 70070-70078-2 70089-70092-2 70095-70095-2 70191-70193-2 70196-70196-2 " \
+		"70198-70199-2 70206-70206-2 70209-70209-2 70367-70367-2 70371-70378-2 70400-70401-0 70459-70460-0 " \
+		"70464-70464-2 70502-70508-0 70512-70516-0 70712-70719-2 70722-70724-2 70726-70726-2 70750-70750-2 " \
+		"70835-70840-2 70842-70842-2 70847-70848-2 70850-70851-2 71090-71093-2 71100-71101-2 71103-71104-2 " \
+		"71132-71133-2 71219-71226-2 71229-71229-2 71231-71232-2 71339-71339-2 71341-71341-2 71344-71349-2 " \
+		"71351-71351-2 71453-71455-2 71458-71461-2 71463-71467-2 71727-71735-2 71737-71738-2 71995-71996-2 " \
+		"71998-71998-2 72003-72003-2 72148-72151-2 72154-72155-2 72160-72160-2 72193-72202-2 72243-72248-2 " \
+		"72251-72254-2 72263-72263-2 72273-72278-2 72281-72283-2 72330-72342-2 72344-72345-2 72752-72758-2 " \
+		"72760-72765-2 72767-72767-2 72850-72871-2 72874-72880-2 72882-72883-2 72885-72886-2 73009-73014-2 " \
+		"73018-73018-2 73020-73021-2 73023-73029-2 73031-73031-2 73104-73105-2 73109-73109-2 73111-73111-2 " \
+		"73459-73460-2 73472-73473-2 73526-73530-2 73536-73536-2 73538-73538-2 78896-78912-2 78919-78933-2 " \
+		"92912-92916-0 92976-92982-2 94031-94031-2 94095-94098-2 94176-94179-5 94180-94180-4 94192-94198-5 " \
+		"94208-101589-5 101631-101662-5 101760-101874-5 110576-110579-5 110581-110587-5 110589-110590-5 " \
+		"110592-110882-5 110898-110898-5 110928-110930-5 110933-110933-5 110948-110951-5 110960-111355-5 " \
+		"113821-113822-2 113824-113827-2 118528-118573-0 118576-118598-0 119141-119142-1 119143-119145-0 " \
+		"119149-119154-1 119155-119162-2 119163-119170-0 119173-119179-0 119210-119213-0 119362-119364-0 " \
+		"119552-119638-5 119648-119670-5 121344-121398-2 121403-121452-2 121461-121461-2 121476-121476-2 " \
+		"121499-121503-2 121505-121519-2 122880-122886-0 122888-122904-0 122907-122913-0 122915-122916-0 " \
+		"122918-122922-0 123023-123023-0 123184-123190-2 123566-123566-2 123628-123631-2 124140-124143-2 " \
+		"125136-125142-0 125252-125258-2 126980-126980-5 127183-127183-5 127374-127374-5 127377-127386-5 " \
+		"127462-127487-3 127488-127490-5 127504-127547-5 127552-127560-5 127568-127569-5 127584-127589-5 " \
+		"127744-127776-5 127789-127797-5 127799-127868-5 127870-127891-5 127904-127946-5 127951-127955-5 " \
+		"127968-127984-5 127988-127988-5 127992-128062-5 128064-128064-5 128066-128252-5 128255-128317-5 " \
+		"128331-128334-5 128336-128359-5 128378-128378-5 128405-128406-5 128420-128420-5 128507-128591-5 " \
+		"128640-128709-5 128716-128716-5 128720-128722-5 128725-128728-5 128732-128735-5 128747-128748-5 " \
+		"128756-128764-5 128992-129003-5 129008-129008-5 129292-129338-5 129340-129349-5 129351-129535-5 " \
+		"129648-129660-5 129664-129674-5 129678-129734-5 129736-129736-5 129741-129756-5 129759-129770-5 " \
+		"129775-129784-5 131072-196605-5 196608-262141-5 917505-917505-2 917536-917631-2 917760-917999-0 "
+	TJ = 	"768-879 1155-1161 1425-1469 1471-1471 1473-1474 1476-1477 1479-1479 1552-1562 1611-1631 1648-1648 1750-1756 " \
+		"1759-1764 1767-1768 1770-1773 1809-1809 1840-1866 1958-1968 2027-2035 2045-2045 2070-2073 2075-2083 2085-2087 " \
+		"2089-2093 2137-2139 2199-2207 2250-2273 2275-2307 2362-2364 2366-2383 2385-2391 2402-2403 2433-2435 2492-2492 " \
+		"2494-2500 2503-2504 2507-2509 2519-2519 2530-2531 2558-2558 2561-2563 2620-2620 2622-2626 2631-2632 2635-2637 " \
+		"2641-2641 2672-2673 2677-2677 2689-2691 2748-2748 2750-2757 2759-2761 2763-2765 2786-2787 2810-2815 2817-2819 " \
+		"2876-2876 2878-2884 2887-2888 2891-2893 2901-2903 2914-2915 2946-2946 3006-3010 3014-3016 3018-3021 3031-3031 " \
+		"3072-3076 3132-3132 3134-3140 3142-3144 3146-3149 3157-3158 3170-3171 3201-3203 3260-3260 3262-3268 3270-3272 " \
+		"3274-3277 3285-3286 3298-3299 3315-3315 3328-3331 3387-3388 3390-3396 3398-3400 3402-3405 3415-3415 3426-3427 " \
+		"3457-3459 3530-3530 3535-3540 3542-3542 3544-3551 3570-3571 3633-3633 3635-3642 3655-3662 3761-3761 3763-3772 " \
+		"3784-3790 3864-3865 3893-3893 3895-3895 3897-3897 3902-3903 3953-3972 3974-3975 3981-3991 3993-4028 4038-4038 " \
+		"4141-4151 4153-4158 4182-4185 4190-4192 4209-4212 4226-4226 4228-4230 4237-4237 4253-4253 4957-4959 5906-5909 " \
+		"5938-5940 5970-5971 6002-6003 6068-6099 6109-6109 6155-6157 6159-6159 6277-6278 6313-6313 6432-6443 6448-6459 " \
+		"6679-6683 6741-6750 6752-6752 6754-6754 6757-6780 6783-6783 6832-6877 6880-6891 6912-6916 6964-6980 7019-7027 " \
+		"7040-7042 7073-7085 7142-7155 7204-7223 7376-7378 7380-7400 7405-7405 7412-7412 7415-7417 7616-7679 8204-8205 " \
+		"8400-8432 11503-11505 11647-11647 11744-11775 12330-12335 12441-12442 42607-42610 42612-42621 42654-42655 " \
+		"42736-42737 43010-43010 43014-43014 43019-43019 43043-43047 43052-43052 43136-43137 43188-43205 43232-43249 " \
+		"43263-43263 43302-43309 43335-43347 43392-43395 43443-43456 43493-43493 43561-43574 43587-43587 43596-43597 " \
+		"43644-43644 43696-43696 43698-43700 43703-43704 43710-43711 43713-43713 43755-43759 43765-43766 44003-44010 " \
+		"44012-44013 64286-64286 65024-65039 65056-65071 65438-65439 66045-66045 66272-66272 66422-66426 68097-68099 " \
+		"68101-68102 68108-68111 68152-68154 68159-68159 68325-68326 68900-68903 68969-68973 69291-69292 69370-69375 " \
+		"69446-69456 69506-69509 69632-69634 69688-69702 69744-69744 69747-69748 69759-69762 69808-69818 69826-69826 " \
+		"69888-69890 69927-69940 69957-69958 70003-70003 70016-70018 70067-70080 70089-70092 70094-70095 70188-70199 " \
+		"70206-70206 70209-70209 70367-70378 70400-70403 70459-70460 70462-70468 70471-70472 70475-70477 70487-70487 " \
+		"70498-70499 70502-70508 70512-70516 70584-70592 70594-70594 70597-70597 70599-70602 70604-70608 70610-70610 " \
+		"70625-70626 70709-70726 70750-70750 70832-70851 71087-71093 71096-71104 71132-71133 71216-71232 71339-71351 " \
+		"71453-71455 71458-71467 71724-71738 71984-71989 71991-71992 71995-71998 72000-72000 72002-72003 72145-72151 " \
+		"72154-72160 72164-72164 72193-72202 72243-72249 72251-72254 72263-72263 72273-72283 72330-72345 72544-72551 " \
+		"72751-72758 72760-72767 72850-72871 72873-72886 73009-73014 73018-73018 73020-73021 73023-73029 73031-73031 " \
+		"73098-73102 73104-73105 73107-73111 73459-73462 73472-73473 73475-73475 73524-73530 73534-73538 73562-73562 " \
+		"78912-78912 78919-78933 90398-90415 92912-92916 92976-92982 94031-94031 94033-94087 94095-94098 94180-94180 " \
+		"94192-94193 113821-113822 118528-118573 118576-118598 119141-119145 119149-119154 119163-119170 119173-119179 " \
+		"119210-119213 119362-119364 121344-121398 121403-121452 121461-121461 121476-121476 121499-121503 " \
+		"121505-121519 122880-122886 122888-122904 122907-122913 122915-122916 122918-122922 123023-123023 " \
+		"123184-123190 123566-123566 123628-123631 124140-124143 124398-124399 124643-124643 124646-124646 " \
+		"124654-124655 124661-124661 125136-125142 125252-125258 127995-127999 917536-917631 917760-917999 "
+	TP = 	"1536-1541 1757-1757 1807-1807 2192-2193 2274-2274 3406-3406 69821-69821 69837-69837 70082-70083 70609-70609 " \
+		"71999-71999 72001-72001 72324-72329 73030-73030 73474-73474 "
+	TL = 	"2381-2381 2509-2509 2765-2765 2893-2893 3149-3149 3405-3405 4153-4153 6098-6098 6752-6752 6980-6980 7083-7083 " \
+		"43456-43456 43766-43766 68159-68159 69939-69939 70608-70608 71998-71998 72263-72263 72345-72345 73538-73538 "
+	TG = 	"0-31 127-159 173-173 1564-1564 6158-6158 8203-8203 8206-8207 8232-8238 8288-8303 65279-65279 65520-65531 " \
+		"78896-78911 113824-113827 119155-119162 917504-917535 917632-917759 918000-921599 "
+	TPL = 	"4352-4447 43360-43388 "
+	TPV = 	"4448-4519 55216-55238 93539-93539 93543-93546 "
+	TPT = 	"4520-4607 55243-55291 "
+	TCX = 	"4352-4447 43360-43388 "
+	TCV = 	"4448-4519 55216-55238 93539-93539 93543-93546 "
+	TCT = 	"4520-4607 55243-55291 "
+	nW = tabw(TW, WLO, WHI, WCL)
+	nJB = tab(TJ, JBLO, JBHI)
+	nPP = tab(TP, PLO, PHI)
+	nLK = tab(TL, LKLO, LKHI)
+	nGB = tab(TG, GBLO, GBHI)
+	nPL = tab(TPL, PLLO, PLHI)
+	nPV = tab(TPV, PVLO, PVHI)
+	nPT = tab(TPT, PTLO, PTHI)
+	nCX = tab(TCX, CXLO, CXHI)
+	nCV = tab(TCV, CVLO, CVHI)
+	nCT = tab(TCT, CTLO, CTHI)
+	# class -> (rww, xaw)
+	split("0 0 1 1 2 2", RWV, " ")
+	split("0 1 0 2 0 2", XAV, " ")
+}
+function tab(str, lo, hi,   n, i, j, a, b) {
+	n = split(str, a, " ")
+	j = 0
+	for (i = 1; i <= n; i++) {
+		if (a[i] == "") continue
+		split(a[i], b, "-")
+		j++
+		lo[j] = b[1] + 0
+		hi[j] = b[2] + 0
+	}
+	return j
+}
+function tabw(str, lo, hi, cl,   n, i, j, a, b) {
+	n = split(str, a, " ")
+	j = 0
+	for (i = 1; i <= n; i++) {
+		if (a[i] == "") continue
+		split(a[i], b, "-")
+		j++
+		lo[j] = b[1] + 0
+		hi[j] = b[2] + 0
+		cl[j] = b[3] + 0
+	}
+	return j
+}
+function inr(cp, lo, hi, n,   a, b, m) {
+	a = 1; b = n
+	while (a <= b) {
+		m = int((a + b) / 2)
+		if (cp < lo[m]) b = m - 1
+		else if (cp > hi[m]) a = m + 1
+		else return m
+	}
+	return 0
+}
+function widths(cp,   m) {
+	m = inr(cp, WLO, WHI, nW)
+	RWv = (m ? RWV[WCL[m] + 1] : 1)
+	XAv = (m ? XAV[WCL[m] + 1] : 1)
+}
+function jamocp(cp,   d) {
+	# AC00..D7A3 syllables join only after L, like L/LV/LVT jamo (GB6).
+	if (cp >= 44032 && cp <= 55203) return 1
+	if (inr(cp, CXLO, CXHI, nCX)) return 1
+	if (inr(cp, CVLO, CVHI, nCV)) return 2
+	if (inr(cp, CTLO, CTHI, nCT)) return 3
+	return 0
+}
+function jamoprev(cp,   d) {
+	if (cp >= 44032 && cp <= 55203) {
+		d = (cp - 44032) % 28
+		return (d == 0 ? 2 : 3)                     # LV : LVT
+	}
+	if (inr(cp, PLLO, PLHI, nPL)) return 1          # L
+	if (inr(cp, PVLO, PVHI, nPV)) return 2          # V|LV
+	if (inr(cp, PTLO, PTHI, nPT)) return 3          # T|LVT
+	return 0
+}
+function refuse(cp) {
+	# measure-disagreement chars (RW vs x/ansi score these differently) and
+	# InCB=Linker viramas (conjunct segmentation we cannot model).
+	if (cp == 8205 || cp == 65039 || (cp >= 127995 && cp <= 127999) || (cp >= 917536 && cp <= 917631)) return 1
+	return inr(cp, LKLO, LKHI, nLK)
+}
+{
+	n = split($0, ch, "")
+	nc = 0; i = 1
+	while (i <= n) {
+		b = ORD[ch[i]]
+		if (b < 128) { len = 1; cp = b }
+		else if (b >= 194 && b <= 223) {
+			len = 2
+			if (i + 1 > n) bad()
+			c1 = ORD[ch[i + 1]]
+			if (c1 < 128 || c1 > 191) bad()
+			cp = (b - 192) * 64 + c1 - 128
+		} else if (b >= 224 && b <= 239) {
+			len = 3
+			if (i + 2 > n) bad()
+			c1 = ORD[ch[i + 1]]; c2 = ORD[ch[i + 2]]
+			lo1 = (b == 224 ? 160 : (b == 237 ? 144 : 128))
+			if (c1 < lo1 || c1 > 191 || c2 < 128 || c2 > 191) bad()
+			cp = (b - 224) * 4096 + (c1 - 128) * 64 + c2 - 128
+		} else if (b >= 240 && b <= 244) {
+			len = 4
+			if (i + 3 > n) bad()
+			c1 = ORD[ch[i + 1]]; c2 = ORD[ch[i + 2]]; c3 = ORD[ch[i + 3]]
+			lo1 = (b == 240 ? 144 : 128)
+			hi1 = (b == 244 ? 143 : 191)
+			if (c1 < lo1 || c1 > hi1 || c2 < 128 || c2 > 191 || c3 < 128 || c3 > 191) bad()
+			cp = (b - 240) * 262144 + (c1 - 128) * 4096 + (c2 - 128) * 64 + c3 - 128
+		} else bad()
+		if (refuse(cp)) die(cp)
+		nc++
+		CP[nc] = cp
+		OFF[nc] = i
+		i += len
+	}
+	ENDOFF = i - 1
+
+	# Grapheme clustering + per-cluster (rww, xaw) widths.
+	ncl = 0; open = 0; force = 0; rirun = 0; pj = 0; pend = 0; headnz = 0
+	for (i = 1; i <= nc; i++) {
+		cp = CP[i]
+		widths(cp)
+		if (inr(cp, GBLO, GBHI, nGB)) {
+			if (open) { open = 0 }
+			ncl++
+			CS[ncl] = OFF[i]; CE[ncl] = OFF[i] - 1 + clen(i)
+			CW[ncl] = RWv; CX[ncl] = XAv
+			force = 1; rirun = 0; pj = 0; pend = 0
+			continue
+		}
+		j = jamocp(cp)
+		join = 0
+		if (!force) {
+			if (pend) join = 1
+			else if (inr(cp, JBLO, JBHI, nJB)) join = 1
+			else if (cp >= 127462 && cp <= 127487 && prevri && rirun % 2 == 1) join = 1
+			else if (j == 1 && pj == 1) join = 1                        # X after L
+			else if (j == 2 && (pj == 1 || pj == 2)) join = 1           # V after L|VLV
+			else if (j == 3 && (pj == 2 || pj == 3)) join = 1           # T after VLV|TLVT
+		}
+		if (open && join) {
+			if (RWv > 0 && !headnz) { CW[ncl] += RWv; headnz = 1 }
+		} else {
+			ncl++; open = 1; headnz = 0
+			CS[ncl] = OFF[i]
+			CW[ncl] = 0; CX[ncl] = XAv
+			if (RWv > 0) { CW[ncl] = RWv; headnz = 1 }
+		}
+		CE[ncl] = OFF[i] - 1 + clen(i)
+		force = 0
+		rirun = (cp >= 127462 && cp <= 127487) ? rirun + 1 : 0
+		prevri = (cp >= 127462 && cp <= 127487)
+		pj = jamoprev(cp)
+		pend = inr(cp, PLO, PHI, nPP)
+	}
+
+	# rt: runewidth truncation to avail with "…" tail.
+	rwtot = 0
+	for (i = 1; i <= ncl; i++) rwtot += CW[i]
+	nk = ncl; ell = 0
+	if (rwtot > avail) {
+		sum = 0; nk = 0
+		for (i = 1; i <= ncl; i++) {
+			if (sum + CW[i] > avail - 1) break
+			sum += CW[i]; nk = i
+		}
+		ell = 1
+	}
+	# x/ansi contract clip: longest cluster prefix of rt within avail cells.
+	xw = 0; out = ""; keep = 0
+	for (i = 1; i <= nk; i++) {
+		if (xw + CX[i] > avail) break
+		xw += CX[i]
+		out = out substr($0, CS[i], CE[i] - CS[i] + 1)
+		keep = i
+	}
+	# The clip is a prefix of rt: "…" survives only when every cluster
+	# before it did.
+	if (ell && keep == nk && xw + 1 <= avail) { xw++; out = out "\342\200\246" }
+	# One line, "<width> <title>": the space separator survives the
+	# trailing-newline strip of $( ) where a second line would not — a
+	# zero-cell title (a name that draws only padding) reads as "" not "0".
+	printf "%d %s\n", xw, out
+}
+function clen(i) { return (i == nc ? ENDOFF + 1 : OFF[i + 1]) - OFF[i] }
+function bad() { print "invalid utf-8" > "/dev/stderr"; exit 1 }
+function die(cp) { printf "cannot measure U+%04X\n", cp > "/dev/stderr"; exit 1 }'
 }
 
-# _af_take_chars <n> — the first <n> characters of stdin, UTF-8 aware in the
-# sandbox's C locale: a lead byte starts a character, continuation bytes
-# (\200-\277) ride with it — the same trick _task_dialog_frame's cols() uses
-# in scripts/tui-driver-selftest.sh.
-_af_take_chars() {
-    LC_ALL=C awk -v k="$1" '{
-        n = split($0, ch, "")
-        for (i = 1; i <= n; i++) {
-            if (ch[i] ~ /[\200-\277]/) { printf "%s", ch[i]; continue }
-            if (k-- <= 0) break
-            printf "%s", ch[i]
-        }
-    }'
+# _af_render_title <name> — only the drawn title bytes (for messages and
+# collision checks). Returns 1 exactly when _af_draw_title does.
+_af_render_title() {
+    local out
+    out="$(_af_draw_title "$1")" || return 1
+    printf '%s\n' "${out#* }"
 }
 
-# _af_title_re <name> — an ERE for the title TEXT a rail row draws for <name>.
-# _af_render_title's literal when it derives; otherwise — a too-long name
-# carrying multibyte runes — the union of every rendering the rail could draw:
-# the full name, or a kept prefix followed by '…'. A kept prefix is avail-1
-# CELLS, hence between ⌈(avail-1)/2⌉ and avail-1 CHARACTERS; the alternation
-# covers exactly that range. Unparenthesized — callers wrap it in a group.
-_af_title_re() {
-    local name="$1" rendered avail k p re
-    if rendered="$(_af_render_title "$name")"; then
-        _af_regex_escape "$rendered"
-        return 0
-    fi
-    avail="$(_af_rail_title_avail)"
-    re="$(_af_regex_escape "$name")"
-    for ((k = avail / 2; k <= avail - 1; k++)); do
-        p="$(printf '%s' "$name" | _af_take_chars "$k")"
-        [ -n "$p" ] && [ "$p" != "$name" ] || continue
-        re="$re|$(_af_regex_escape "$p")…"
-    done
-    printf '%s' "$re"
+# _af_title_cell <name> — the complete title cell as bytes: the drawn title
+# plus its padding out to avail. 'foo ' and 'foo' print the same cell — the
+# trailing space is padding — and cell equality is what the eye sees.
+_af_title_cell() {
+    local out xw t
+    out="$(_af_draw_title "$1")" || return 1
+    xw="${out%% *}"
+    t="${out#* }"
+    printf '%s%*s\n' "$t" "$(( $(_af_rail_title_avail) - xw ))" ""
 }
 
-# _af_char_count — characters on stdin (C locale: continuation bytes belong to
-# their lead byte's character).
-_af_char_count() { LC_ALL=C sed 's/[\200-\277]//g' | wc -c; }
+# _af_row_re <name> <arrow-ere> [icon-ere] — an ERE matching a rail row
+# whose COMPLETE title cell is what the rail draws for <name>: the row's
+# leading space, the ' <arrow> ' prefix and separator, the title's literal
+# bytes, exactly avail-width(T) padding cells, then the status affix — a
+# space, the two-cell status glyph, its trailing space. A name that is
+# only a whitespace-delimited PREFIX of a visible title — 'foo' beside
+# 'foo bar' — cannot match: the cells the rest of the sibling's title
+# occupies are neither padding nor the affix boundary. <icon-ere> defaults
+# to every status glyph the rail draws (● ○ ◌ ▧ ◆ ! or a blank cell).
+# Returns 1 when <name>'s rendering cannot be derived — refuse, don't guess.
+_af_row_re() {
+    local name="$1" arrow="$2" icon="${3:-●|○|◌|▧|◆|!| }" out xw t pad
+    out="$(_af_draw_title "$name")" || return 1
+    xw="${out%% *}"
+    t="${out#* }"
+    pad=$(( $(_af_rail_title_avail) - xw ))
+    printf '[[:space:]](%s)[[:space:]]+(%s) {%d} (%s) ' \
+        "$arrow" "$(_af_regex_escape "$t")" "$pad" "$icon"
+}
 
 # _af_common_prefix_chars <a> <b> — the length in characters of the leading
 # run the two strings share.
@@ -818,37 +1129,41 @@ _af_common_prefix_chars() {
           print i - 1; exit }'
 }
 
-# _af_titles_collide <a> <b> — could the rail draw the SAME title for <a> and
-# <b>? Exact when both renderings derive (_af_render_title); when either is
-# multibyte-and-too-long to derive, conservative: a shared leading run of at
-# least ⌈(avail-1)/2⌉ characters — the shortest prefix a truncated row can
-# keep — is a possible collision, and a name spelled 'prefix…' itself
-# collides with anything that prefix could lead.
+# _af_titles_collide <a> <b> — could the rail draw the SAME complete title
+# cell for <a> and <b>? Exact when both renderings derive: equal cells
+# collide, anything else does not. When one side cannot be measured
+# the answer stays conservative without guessing a rendering: a derived
+# non-truncated cell can only come from the identical name, so it never
+# collides with a different one; a derived 'P…' cell collides with any
+# name carrying the literal prefix P; two underivable names collide on
+# any shared leading character.
 _af_titles_collide() {
-    local a="$1" b="$2" ra rb floor
-    ra="$(_af_render_title "$a" 2>/dev/null)" || ra=""
-    rb="$(_af_render_title "$b" 2>/dev/null)" || rb=""
+    local a="$1" b="$2" ra rb ta tb ca cb
+    ra="$(_af_draw_title "$a" 2>/dev/null)" || ra=""
+    rb="$(_af_draw_title "$b" 2>/dev/null)" || rb=""
+    ta="${ra#* }"
+    tb="${rb#* }"
     if [ -n "$ra" ] && [ -n "$rb" ]; then
-        [ "$ra" = "$rb" ]; return
+        ca="$(_af_title_cell "$a")"
+        cb="$(_af_title_cell "$b")"
+        [ "$ca" = "$cb" ]
+        return
     fi
-    floor=$(( $(_af_rail_title_avail) / 2 ))
     if [ -n "$ra" ]; then
-        case "$ra" in
-            *…) [ "$b" != "${ra%…}" ] && [ "${b#"${ra%…}"}" != "$b" ] &&
-                [ "$(printf '%s' "${ra%…}" | _af_char_count)" -ge "$floor" ] ;;
-            *) false ;;
+        case "$ta" in
+            *…) [ "$b" != "${ta%…}" ] && [ "${b#"${ta%…}"}" != "$b" ] ;;
+            *)  return 1 ;;
         esac
         return
     fi
     if [ -n "$rb" ]; then
-        case "$rb" in
-            *…) [ "$a" != "${rb%…}" ] && [ "${a#"${rb%…}"}" != "$a" ] &&
-                [ "$(printf '%s' "${rb%…}" | _af_char_count)" -ge "$floor" ] ;;
-            *) false ;;
+        case "$tb" in
+            *…) [ "$a" != "${tb%…}" ] && [ "${a#"${tb%…}"}" != "$a" ] ;;
+            *)  return 1 ;;
         esac
         return
     fi
-    [ "$(_af_common_prefix_chars "$a" "$b")" -ge "$floor" ]
+    [ "$(_af_common_prefix_chars "$a" "$b")" -gt 0 ]
 }
 
 # _af_session_titles — every session title in the driver repo's project, one
@@ -869,27 +1184,38 @@ _af_session_titles() {
 
 # _af_unique_rendering <helper> <name> <max-rows> — the ambiguity guard: a
 # helper must never resolve <name> to one of several rows drawing the same
-# title. <max-rows> is how many rail rows may legitimately draw it — 0 before
-# a create (<name>'s own row is not up yet), 1 elsewhere (the target's own
-# row). The session list names the colliders when it answers; the rows on
-# screen decide when it cannot.
+# title cell. <max-rows> is how many rail rows may legitimately draw it —
+# 0 before a create (<name>'s own row is not up yet), 1 elsewhere (the
+# target's own row). The session list names the colliders when it answers;
+# the rows on screen decide when it cannot. A <name> whose title cell
+# cannot be derived is refused outright — the helpers could not tell its
+# row from any other anyway.
 _af_unique_rendering() {
-    local helper="$1" name="$2" maxrows="$3" rendered titles t colliders="" n
-    rendered="$(_af_render_title "$name" 2>/dev/null || true)"
+    local helper="$1" name="$2" maxrows="$3" rendered row_re titles t colliders="" n
+    # _af_draw_title's stderr — "cannot measure U+XXXX" — is left visible so
+    # the refusal names the offending codepoint, not just the name.
+    if ! rendered="$(_af_render_title "$name")"; then
+        _af_fail "$helper: '$name' contains a character the driver cannot measure in display cells; refusing to match its rail row rather than guess"
+        return 1
+    fi
+    row_re="$(_af_row_re "$name" '▾|▸')" || {
+        _af_fail "$helper: cannot derive the rail's title cell for '$name'"
+        return 1
+    }
     if titles="$(_af_session_titles)"; then
         while IFS= read -r t; do
             [ -n "$t" ] && [ "$t" != "$name" ] || continue
             _af_titles_collide "$name" "$t" && colliders="${colliders:+$colliders, }'$t'"
         done <<< "$titles"
         if [ -n "$colliders" ]; then
-            _af_fail "$helper: '$name' is ambiguous on the rail: it renders as '${rendered:-<truncated prefix>}' and so does session(s) $colliders; rename for a unique leading prefix"
+            _af_fail "$helper: '$name' is ambiguous on the rail: it renders as '${rendered}' and so does session(s) $colliders; rename for a unique leading prefix"
             return 1
         fi
     fi
-    n="$(af_capture | grep -cE -- "[[:space:]](▾|▸)[[:space:]]+($(_af_title_re "$name"))([[:space:]]|\$)" || true)"
+    n="$(af_capture | grep -cE -- "$row_re" || true)"
     n="${n//[^0-9]/}"
     if [ "${n:-0}" -gt "$maxrows" ]; then
-        _af_fail "$helper: '$name' is ambiguous on the rail: $n session rows draw '${rendered:-a shared truncated prefix}'; rename for a unique leading prefix"
+        _af_fail "$helper: '$name' is ambiguous on the rail: $n session rows draw '${rendered}'; rename for a unique leading prefix"
         return 1
     fi
     return 0
@@ -899,9 +1225,12 @@ _af_unique_rendering() {
 # (its row shows the ● ready dot). Cheap-instance config makes `bash` the
 # program, so ready arrives in seconds.
 af_new_instance() {
-    local name="$1" title_re
+    local name="$1" row_re
     [ -n "$name" ] || { _af_fail "af_new_instance: name required"; return 1; }
-    title_re="$(_af_title_re "$name")"
+    row_re="$(_af_row_re "$name" '▾|▸' '●')" || {
+        _af_fail "af_new_instance: cannot derive the rail's title cell for '$name'"
+        return 1
+    }
     # Refuse to add a row the rail cannot tell apart from a sibling's, and
     # re-check after the wait so a collider created meanwhile cannot slip the
     # ready match onto the wrong row.
@@ -913,7 +1242,7 @@ af_new_instance() {
     af_wait_gone '[Ss]ession [Nn]ame:' 1 'old name prompt label' || return 1
     af_send_literal "$name"
     af_send Enter
-    af_wait_for "(${title_re})[[:space:]]*●" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
+    af_wait_for "$row_re" "$AF_DRIVER_TIMEOUT" "instance '${name}' ready" || return 1
     _af_unique_rendering af_new_instance "$name" 1 || return 1
 }
 
@@ -935,9 +1264,12 @@ af_new_instance() {
 # GetSelectedInstance()), so requiring it forces `j` past the header/title rows
 # until the cursor truly lands on an actionable tab row.
 af_select() {
-    local name="$1" i screen menu title_re
+    local name="$1" i screen menu row_re
     [ -n "$name" ] || { _af_fail "af_select: name required"; return 1; }
-    title_re="$(_af_title_re "$name")"
+    row_re="$(_af_row_re "$name" '▾')" || {
+        _af_fail "af_select: cannot derive the rail's title cell for '$name'"
+        return 1
+    }
     # A row the rail cannot tell apart from a sibling's must not be scanned
     # to: an identical ▾ on either of two sessions is silently the wrong pick.
     _af_unique_rendering af_select "$name" 1 || return 1
@@ -981,7 +1313,7 @@ af_select() {
             _af_wait_key_effect _af_select_state "$before" || true
         fi
         screen="$(af_capture)"
-        printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+(${title_re})([[:space:]]|\$)" || continue
+        printf '%s\n' "$screen" | grep -qE -- "$row_re" || continue
         menu="$(printf '%s\n' "$screen" | _af_menu_row)"
         if printf '%s\n' "$menu" | grep -qE -- "$_AF_INSTANCE_VERB_RE"; then
             return 0
@@ -997,7 +1329,7 @@ af_select() {
         # never the pane menu.
         if printf '%s\n' "$menu" | grep -qE -- 'hide pane'; then
             af_focus_tree || return 1
-            if af_capture | grep -qE -- "▾[[:space:]]+(${title_re})([[:space:]]|\$)"; then
+            if af_capture | grep -qE -- "$row_re"; then
                 return 0
             fi
         fi
@@ -1681,10 +2013,13 @@ af_click() {
 
 # af_click_instance <name> — find <name>'s row on screen and click it.
 af_click_instance() {
-    local name="$1" line title_re
-    title_re="$(_af_title_re "$name")"
+    local name="$1" line row_re
+    row_re="$(_af_row_re "$name" '▾|▸')" || {
+        _af_fail "af_click_instance: cannot derive the rail's title cell for '$name'"
+        return 1
+    }
     _af_unique_rendering af_click_instance "$name" 1 || return 1
-    line="$(af_capture | grep -nE "[▾▸][[:space:]]+(${title_re})([[:space:]]|\$)" | head -1 | cut -d: -f1)"
+    line="$(af_capture | grep -nE "$row_re" | head -1 | cut -d: -f1)"
     [ -n "$line" ] || { _af_fail "instance '$name' not visible to click"; return 1; }
     af_click 14 "$line"
 }
@@ -1772,12 +2107,15 @@ af_refute_screen() {
 # (its row carries the ▾ arrow). This is the two-line answer to the #1156
 # failure: af_select + af_expect_selected.
 af_expect_selected() {
-    local name="$1" title_re
-    title_re="$(_af_title_re "$name")"
+    local name="$1" row_re
+    row_re="$(_af_row_re "$name" '▾')" || {
+        _af_fail "af_expect_selected: cannot derive the rail's title cell for '$name'"
+        return 1
+    }
     # A ▾ match the rail cannot attribute to <name> over a same-rendered
     # sibling must not pass silently.
     _af_unique_rendering af_expect_selected "$name" 1 || return 1
-    af_assert_screen "▾[[:space:]]+(${title_re})([[:space:]]|\$)" \
+    af_assert_screen "$row_re" \
         "instance '${name}' selected"
 }
 
