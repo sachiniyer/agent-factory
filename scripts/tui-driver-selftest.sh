@@ -2438,9 +2438,83 @@ step "a committed pane on an idle alternate-screen tab renders it (#7037)" _expe
 # Same 'cycle' instance; the previewing pane it opens from is the one above.
 step "a pane opened on a finished one-shot tab shows its output and the dead marker (#7061)" _expect_dead_tab_pane_renders
 
+# --- #7485 regression: the rail ellipsizes a title past its cell ---
+# The rail gives a title avail = clamp(⌊cols·25%⌋,22,36) − 9 cells and draws
+# `prefix…` past it, so a literal-name match times out on any descriptive
+# name. At the default 100x30 the title cell is 16 cells, so
+# 'a-very-long-session-name' (24 cells) draws 'a-very-long-ses…' — the same
+# `a-very-long-…` row the issue hit. Create must see its ●, select must land
+# on its row, and expect-selected must see its ▾. (The title cap is 32 cells
+# — handle_input.go — so the name has to stay under it or the form clips.)
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_truncated_title_roundtrip() {
+    local name='a-very-long-session-name'
+    af_new_instance "$name" || return 1
+    # The premise, pinned — vacuous if the row ever renders in full.
+    af_assert_screen 'a-very-long-ses…[[:space:]]*●' \
+        'the rail truncated the 24-cell title' || return 1
+    af_select "$name" || return 1
+    af_expect_selected "$name" || return 1
+}
+
+# 'collision-alpha-x' and 'collision-alpha-y' both draw 'collision-alpha…':
+# the helpers must refuse loudly and name the collision, never pick one. The
+# second collider goes in through the raw TUI path — af_new_instance's own
+# refusal to create into an ambiguous fixture is asserted separately.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_ambiguous_truncated_titles() {
+    local a='collision-alpha-x' b='collision-alpha-y' out deadline
+    af_new_instance "$a" || return 1
+    af_ensure_nav
+    af_focus_tree || return 1
+    af_send n
+    af_wait_for 'submit name' "$AF_DRIVER_TIMEOUT" 'name prompt' || return 1
+    af_wait_gone '[Ss]ession [Nn]ame:' 1 'old name prompt label' || return 1
+    af_send_literal "$b"
+    af_send Enter
+    # Wait until BOTH colliding rows are drawn: a bare 'collision-alpha…'
+    # wait matches a's row and cannot tell when b's has materialized.
+    deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+    while [ "$(af_capture | grep -cE '[▾▸][[:space:]]+collision-alpha…')" -lt 2 ]; do
+        [ "$(_af_now)" -lt "$deadline" ] || {
+            _af_fail "collider '${b}' never drew a second 'collision-alpha…' row"
+            return 1
+        }
+        sleep "$AF_DRIVER_POLL"
+    done
+
+    if out="$(af_new_instance 'collision-alpha-z' 2>&1)"; then
+        _af_fail 'af_new_instance created into a rendered-title collision'
+        return 1
+    fi
+    printf '%s\n' "$out" | grep -qF "$a" || {
+        _af_fail "af_new_instance's refusal must name collider '$a': $out"
+        return 1
+    }
+    printf '%s\n' "$out" | grep -qF "$b" || {
+        _af_fail "af_new_instance's refusal must name collider '$b': $out"
+        return 1
+    }
+    if out="$(af_select "$a" 2>&1)"; then
+        _af_fail 'af_select silently picked one of two identical rendered rows'
+        return 1
+    fi
+    printf '%s\n' "$out" | grep -qF "$b" || {
+        _af_fail "af_select's refusal must name collider '$b': $out"
+        return 1
+    }
+    if af_expect_selected "$a" >/dev/null 2>&1; then
+        _af_fail 'af_expect_selected silently accepted one of two identical rendered rows'
+        return 1
+    fi
+    return 0
+}
+
 # --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
 # Runs last because it adds sessions and relaunches the TUI.
 step "literal a+b creates, reaches ready, and is selectable" _expect_literal_instance_title
+step "a rail-truncated name drives create, select and assert (#7485)" _expect_truncated_title_roundtrip
+step "a shared truncated prefix fails loudly, never picks (#7485)" _expect_ambiguous_truncated_titles
 step "relaunch boots with the rail scrolled past the header (#2148)" _expect_scrolled_rail_relaunch
 
 printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"
