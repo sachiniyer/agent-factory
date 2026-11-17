@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -1195,15 +1196,16 @@ func TestStartRestampsPaneRootEvidenceOnEverySpawn(t *testing.T) {
 		"the restamped pair must name a pane tmux still answers for")
 }
 
-// The four pane-root anchor rules share ONE table — paneRootEvidenceAfter —
-// instead of four separate edits: an answered mismatch retires the seeded
-// pair only (R11), an unanswered query keeps whatever stands (R17), a root
-// that exited before capture keeps the previous anchor (Codex 4596311717),
-// and a fresh spawn records its own root — superseding the previous
-// incarnation's pair even when the re-stamp cannot answer (Codex
-// 4597265491). Exercised as a pure function so every rule and the races
-// between them are decided without a tmux server.
-func TestPaneRootEvidenceReconcilesTheFourRules(t *testing.T) {
+// The pane-root anchor rules share ONE table — paneRootEvidenceAfter — and
+// ONE writer that applies it (#7484 item 3): an answered mismatch retires
+// the seeded pair only (R11), an unanswered query keeps whatever stands
+// (R17), a root that exited before capture keeps the previous anchor (Codex
+// 4596311717), a fresh spawn records its own root (Codex 4597265491), and a
+// persisted restore seed fills only an empty cell. Exercised as a pure
+// function so every rule and the races between them are decided without a
+// tmux server — the two keeps are DISTINCT inputs even though they produce
+// the same verdict, because the answer a site reports is its own evidence.
+func TestPaneRootEvidenceTableIsTheOnlyRule(t *testing.T) {
 	old := &proctree.Process{PID: 4242, StartID: 99}
 	newer := &proctree.Process{PID: 7777, StartID: 55}
 	for _, tc := range []struct {
@@ -1216,9 +1218,10 @@ func TestPaneRootEvidenceReconcilesTheFourRules(t *testing.T) {
 			paneRootAnswer{disproven: *old}, nil},
 		{"answered mismatch leaves a different claim's pair standing", newer,
 			paneRootAnswer{disproven: *old}, newer},
-		{"unanswered query keeps the anchor (R17)", old, paneRootAnswer{}, old},
+		{"unanswered query keeps the anchor (R17)", old,
+			paneRootAnswer{unanswered: true}, old},
 		{"root exited before capture keeps the previous anchor", old,
-			paneRootAnswer{}, old},
+			paneRootAnswer{exitedBeforeCapture: true}, old},
 		{"a fresh spawn records its own root", old,
 			paneRootAnswer{resolved: *newer}, newer},
 		{"a fresh spawn supersedes even when the re-stamp cannot answer", old,
@@ -1229,6 +1232,16 @@ func TestPaneRootEvidenceReconcilesTheFourRules(t *testing.T) {
 			paneRootAnswer{resolved: *newer, disproven: *old}, newer},
 		{"no anchor to retire", nil,
 			paneRootAnswer{disproven: *old}, nil},
+		{"a restore seed fills an empty cell", nil,
+			paneRootAnswer{seed: old}, old},
+		{"a restore seed never displaces a standing anchor", newer,
+			paneRootAnswer{seed: old}, newer},
+		{"supersede clears, then the seed fills", old,
+			paneRootAnswer{supersede: true, seed: newer}, newer},
+		{"a disproof in the same answer outranks a seed", old,
+			paneRootAnswer{disproven: *old, seed: newer}, nil},
+		{"a keep keeps an empty cell empty", nil,
+			paneRootAnswer{unanswered: true}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := paneRootEvidenceAfter(tc.cur, tc.answer)
@@ -1240,6 +1253,65 @@ func TestPaneRootEvidenceReconcilesTheFourRules(t *testing.T) {
 			require.Equal(t, *tc.want, *got)
 		})
 	}
+}
+
+// The reconcile writer applies the table to the cell atomically. In sequence
+// it composes like the pure table; under a racing storm every goroutine's
+// verdict is computed against a value that actually won a CAS, so the cell
+// only ever holds a pair some input produced — never a write built on a cell
+// the caller already lost.
+func TestReconcilePaneRootEvidenceAppliesTheTableAtomically(t *testing.T) {
+	old := proctree.Process{PID: 4242, StartID: 99}
+	newer := proctree.Process{PID: 7777, StartID: 55}
+	third := proctree.Process{PID: 9001, StartID: 12}
+
+	t.Run("serial answers compose like the pure table", func(t *testing.T) {
+		s := &TmuxSession{}
+		s.reconcilePaneRootEvidence(paneRootAnswer{seed: &old})
+		pid, startID, ok := s.PaneRootEvidence()
+		require.True(t, ok)
+		require.Equal(t, proctree.Process{PID: 4242, StartID: 99},
+			proctree.Process{PID: pid, StartID: startID},
+			"the seed fills the empty cell")
+		s.reconcilePaneRootEvidence(paneRootAnswer{seed: &newer})
+		pid, _, _ = s.PaneRootEvidence()
+		require.Equal(t, 4242, pid, "a second seed loses to the standing anchor")
+		s.reconcilePaneRootEvidence(paneRootAnswer{disproven: old})
+		_, _, ok = s.PaneRootEvidence()
+		require.False(t, ok, "the disproof retires the seeded pair")
+		s.reconcilePaneRootEvidence(paneRootAnswer{resolved: newer})
+		pid, startID, ok = s.PaneRootEvidence()
+		require.True(t, ok)
+		require.Equal(t, newer, proctree.Process{PID: pid, StartID: startID})
+	})
+
+	t.Run("a racing storm lands only pairs an input produced", func(t *testing.T) {
+		s := &TmuxSession{}
+		answers := []paneRootAnswer{
+			{seed: &old},
+			{resolved: newer},
+			{supersede: true, resolved: third},
+			{disproven: old},
+			{unanswered: true},
+			{exitedBeforeCapture: true},
+		}
+		var wg sync.WaitGroup
+		for _, a := range answers {
+			wg.Add(1)
+			go func(a paneRootAnswer) {
+				defer wg.Done()
+				s.reconcilePaneRootEvidence(a)
+			}(a)
+		}
+		wg.Wait()
+		// Every table output names one of the input pairs, or the empty
+		// cell — whichever interleaving won, the cell is coherent.
+		legal := map[proctree.Process]bool{old: true, newer: true, third: true}
+		if cur := s.paneRootEvidence.Load(); cur != nil {
+			require.True(t, legal[*cur],
+				"the cell holds %v — a pair no answer ever produced", *cur)
+		}
+	})
 }
 
 // startDeadLeaderWithSessionChild spawns a kernel-session leader with one
