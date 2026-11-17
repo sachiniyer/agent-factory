@@ -18,6 +18,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -494,13 +495,13 @@ func TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation(t *testing.T
 	require.Equal(t, afDaemonIs, afDaemonClass(verifiedProc),
 		"a real af build running daemon argv is VERIFIED — at any install path")
 
-	yesPath, err := exec.LookPath("yes")
-	require.NoError(t, err)
-	// `yes -- --daemon`: GNU yes refuses an unrecognized OPTION and exits —
-	// the `--` ends option parsing so the process stays alive printing the
-	// token, and ArgvHasDaemonFlag still sees the discrete "--daemon"
-	// argument (#7491). A forged carrier that dies at launch claims nothing.
-	forged := exec.Command(yesPath, "--", "--daemon")
+	// The forged carrier is the unsigned test sleeper under the name "af",
+	// not a host binary: an Apple platform binary like /usr/bin/yes can have
+	// its kern.procargs2 withheld even from a same-uid reader, so on darwin
+	// the claim it mounts can never be observed (#7492). The sleeper's
+	// unsigned argv reads everywhere and its build info names no af module.
+	carrier := sleeper.Named(t, filepath.Join(t.TempDir(), "af"))
+	forged := exec.Command(carrier, "--daemon")
 	forged.Args[0] = "af"
 	forged.Stdout = nil
 	require.NoError(t, forged.Start())
@@ -1176,13 +1177,13 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 	spawnForgedDaemonChild := func(t *testing.T) proctree.Process {
 		dir := t.TempDir()
 		childPidFile := filepath.Join(dir, "child.pid")
-		yesPath, err := exec.LookPath("yes")
-		require.NoError(t, err)
+		// The forged carrier is the unsigned test sleeper, not a host
+		// binary like /usr/bin/yes: an Apple platform binary can have its
+		// kern.procargs2 withheld even from a same-uid reader, so on darwin
+		// the claim it mounts can never be observed (#7492).
+		carrier := sleeper.Named(t, filepath.Join(dir, "af"))
 		forged := exec.Command("bash", "-c",
-			// `yes -- --daemon`: the `--` ends option parsing so the
-			// forged process lives and argv still carries the discrete
-			// "--daemon" token the claim needs (#7491).
-			`sleep 300 & echo $! > "`+childPidFile+`" && exec -a af "`+yesPath+`" -- --daemon`)
+			`sleep 300 & echo $! > "`+childPidFile+`" && exec -a af "`+carrier+`" --daemon`)
 		forged.Env = append(os.Environ(),
 			EnvMarkerSession+"="+name,
 			EnvMarkerHome+"="+home,

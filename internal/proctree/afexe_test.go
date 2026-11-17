@@ -3,10 +3,13 @@ package proctree
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 )
 
 // The verdict afDaemonClass may place on rests on identity the carrier
@@ -21,14 +24,15 @@ func TestExeAttestsAFVerifiesThisBinaryAtItsPath(t *testing.T) {
 
 // The forgery the verdict exists to refuse: argv[0]="af" plus --daemon on an
 // executable the kernel attests is NOT an af build. `exec -a` can write the
-// argv; it can never write the module path baked into the linked binary.
-// `yes -- --daemon` keeps the carrier alive: GNU yes exits on an
-// unrecognized OPTION, so the `--` ends parsing and the discrete "--daemon"
-// argument still lands in argv for the claim.
+// argv; it can never write the module path baked into the linked binary. The
+// carrier is the test sleeper under the name "af", not a host binary: an
+// Apple platform binary like /usr/bin/yes can have its kern.procargs2
+// withheld even from a same-uid reader, so on darwin the claim it mounts can
+// never be observed (#7492). The unsigned sleeper's argv reads on every host
+// and its build info names no af module — foreign at any path.
 func TestExeAttestsAFRejectsAForeignBinaryUnderAForgedArgv(t *testing.T) {
-	yesPath, err := exec.LookPath("yes")
-	require.NoError(t, err)
-	forged := exec.Command(yesPath, "--", "--daemon")
+	carrier := sleeper.Named(t, filepath.Join(t.TempDir(), "af"))
+	forged := exec.Command(carrier, "--daemon")
 	forged.Args[0] = "af"
 	require.NoError(t, forged.Start())
 	t.Cleanup(func() { _ = forged.Process.Kill(); _, _ = forged.Process.Wait() })
