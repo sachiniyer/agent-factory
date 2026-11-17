@@ -55,6 +55,7 @@ func TestReplacedExecutableDaemonBlocksWithANamedRemedy(t *testing.T) {
 	daemon.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	require.NoError(t, daemon.Start())
 	t.Cleanup(func() { _ = daemon.Process.Kill(); _, _ = daemon.Process.Wait() })
+	waitForPIDFile(t, childPidFile)
 	child := processFromPIDFile(t, childPidFile)
 
 	daemonProc, err := proctree.Lookup(daemon.Process.Pid)
