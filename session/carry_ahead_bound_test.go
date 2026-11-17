@@ -24,13 +24,17 @@ import (
 // a lookup that does not answer refuses the carry as a look that did not
 // happen (unverified): it never carries, and it never hangs.
 
+// carryLookBound is the per-syscall bound the tests here install: af's 2s
+// bound shrunk so a lookup that does not answer costs 50ms, not seconds.
+const carryLookBound = 50 * time.Millisecond
+
 // stallCarryLookups makes every descriptor-walk syscall match accepts block
 // until the test ends, as one on a wedged mount does, and bounds af's probes
-// at 50ms.
+// at carryLookBound.
 func stallCarryLookups(t *testing.T, match func(op, path string) bool) {
 	t.Helper()
 	release := make(chan struct{})
-	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(carryLookBound)
 	prev := carryLookupStandIn.Load()
 	standIn := func(op, path string) {
 		if match(op, path) {
@@ -184,34 +188,44 @@ func TestClaudeCarryCheckAheadRefusesWhenTheStalenessComparisonDoesNotAnswer(t *
 	require.Equal(t, handoff.CarryUnverified, withinBound(t, inst.AccountSwapCarryRefusal))
 }
 
-// paceCarryLookups makes every descriptor-walk syscall answer after delay, as
-// on a slow mount that still answers, and bounds af's probes at 50ms. When n
-// is positive, the n-th read of stallPath does not answer at all until the
-// test ends.
+// paceCarryLookups makes every descriptor-walk syscall answer after delay on
+// a manual bound clock it installs, as on a slow mount that still answers
+// (#7456): a syscall's cost is declared on the clock, never slept, so no
+// scheduler can stretch one read past the bound. When n is positive, the
+// n-th read of stallPath spends a whole bound on the clock and then does not
+// answer at all until the test ends — the flight has timed out on it before
+// the walk resumes.
 func paceCarryLookups(t *testing.T, delay time.Duration, stallPath string, n int32) {
 	t.Helper()
 	release := make(chan struct{})
-	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	clock := fsprobe.NewManualClock(time.Now())
+	restoreClock := fsprobe.SetPacedClockForTest(clock)
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(carryLookBound)
 	prev := carryLookupStandIn.Load()
 	var reads atomic.Int32
 	standIn := func(op, path string) {
 		if n > 0 && op == "read" && path == stallPath && reads.Add(1) == n {
+			clock.Advance(carryLookBound)
 			<-release
+			return
 		}
-		time.Sleep(delay)
+		clock.Advance(delay)
 	}
 	carryLookupStandIn.Store(&standIn)
 	t.Cleanup(func() {
 		close(release)
+		// Let any walk still blocked in the stand-in finish before the real
+		// syscalls come back.
 		time.Sleep(50 * time.Millisecond)
 		carryLookupStandIn.Store(prev)
 		restoreTimeout()
+		restoreClock()
 	})
 }
 
 // slowRead is how long each walk syscall takes on the slow mount below: one
-// twenty-fifth of the 50ms bound.
-const slowRead = 2 * time.Millisecond
+// twenty-fifth of the bound.
+const slowRead = carryLookBound / 25
 
 // largeCopyBody is a transcript of about 4 MiB after first: 64 of the
 // compare's 64 KiB chunks per file, so a compare of two copies makes 128

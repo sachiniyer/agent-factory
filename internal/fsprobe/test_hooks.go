@@ -58,3 +58,11 @@ func SetLstatForTest(f func(string) (os.FileInfo, error)) func() {
 func SetOpenForTest(f func(string) (*os.File, error)) func() {
 	return openPath.replace(f)
 }
+
+// SetPacedClockForTest installs the clock Paced's per-step bound runs on, so
+// a test can declare how long each step takes on a ManualClock instead of
+// racing the runner's scheduler (#7456). Callers must restore the original
+// via the returned function.
+func SetPacedClockForTest(c *ManualClock) func() {
+	return pacedClocks.replace(c)
+}
