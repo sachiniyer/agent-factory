@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"testing"
 	"time"
 
@@ -66,19 +65,70 @@ func TestAgentServerRelayCarriesAnHTTPServerOnWorkspaceLoopback(t *testing.T) {
 
 func TestAgentServerRelayRefusesAClosedPort(t *testing.T) {
 	_, rel, _ := startRelayAgentServer(t)
-	// Held bound-but-never-listening: the port provably has nothing serving on
-	// it for the whole dial — a released grab could have been re-taken and
-	// served by a third party (#7460).
-	_, portStr, err := net.SplitHostPort(deadPortAddr(t, "127.0.0.1"))
+	// The closed port refuses on every platform: a real listener accepts the
+	// workspace conn and hands it to the test, which resets it with SO_LINGER
+	// 0 — but only after the relay's dial has returned, so the RST can never
+	// race the connect() itself (Codex on #7467: sent from the accept loop it
+	// occasionally lands inside DialContext, and the dial fails "nothing is
+	// listening"). deadPortAddr can't stand in here — its bound,
+	// never-listening socket draws an immediate RST on Linux but has its SYN
+	// dropped on darwin, where the dial hangs to its deadline instead of
+	// refusing (#7466). Holding the listener for the whole test keeps the
+	// release-and-rebind race #7460 removed out too.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	port, err := strconv.Atoi(portStr)
-	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			select {
+			case accepted <- c:
+			default:
+				_ = c.Close()
+			}
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err = rel.DialLoopback(ctx, port)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "nothing is listening on 127.0.0.1:"+strconv.Itoa(port))
+	conn, err := rel.DialLoopback(ctx, port)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// The conn the relay just opened in the workspace: it was established
+	// before the handshake reply reached us, so it is already in `accepted`
+	// or about to be. Resetting it now hits an established conn — always the
+	// open relay, never the dial.
+	var target net.Conn
+	select {
+	case target = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the opened relay produced no workspace connection")
+	}
+	require.NoError(t, target.(*net.TCPConn).SetLinger(0))
+	require.NoError(t, target.Close())
+
+	// The relay must tear the conn down on the reset — promptly, and only on
+	// the reset. The read carries no deadline of its own: a watchdog ends the
+	// test instead, so a read that would only finish on a deadline (the
+	// websocket NetConn reports those as context errors, not "i/o timeout")
+	// is a failure, never a pass (Codex on #7467).
+	readErr := make(chan error, 1)
+	go func() {
+		_, rerr := conn.Read(make([]byte, 1))
+		readErr <- rerr
+	}()
+	select {
+	case err = <-readErr:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reset never reached the relayed conn")
+	}
 }
 
 func TestAgentServerRelayRejectsBadPortsAndMissingToken(t *testing.T) {
