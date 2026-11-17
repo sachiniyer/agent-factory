@@ -150,8 +150,11 @@ func TestCohortMembershipAdmitsByDescentFromTheProvenTree(t *testing.T) {
 //     "nothing found" on this path authorizes worktree cleanup;
 //   - a setsid'd child of the reaper itself: positively placed in the
 //     reaper's own subtree, so it is excluded like signalling excludes it —
-//     never signalled — but REPORTED all the same: an excluded marked
-//     carrier is never a silent keep (#7435, Codex 4597265500).
+//     never signalled — and NAMED at WARNING all the same: an excluded
+//     marked carrier is never a silent keep. Item 1 of #7484 moved the
+//     naming out of the blocking error — the carrier is LEFT ALIVE under a
+//     worktree a Known close may remove, not a reason the close is Unknown
+//     (#7435, Codex 4597265500; channel change is intended).
 func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.T) {
 	name := "af_membership"
 	home := t.TempDir()
@@ -165,6 +168,11 @@ func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.
 		Recorded: map[int]uint64{root.PID: root.StartID},
 	}
 
+	var warnings bytes.Buffer
+	oldWarnings := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarnings) })
+
 	marked, _, err := markedOrphanProcesses(
 		[]proctree.Process{member, unadmitted, ownChild}, name, home,
 		fixtureCohort(gen), membership, nil)
@@ -172,8 +180,12 @@ func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.
 	require.Contains(t, err.Error(), "cannot be proven a member")
 	require.Contains(t, err.Error(), strconv.Itoa(unadmitted.PID),
 		"the report names the carrier it could not place")
-	require.Contains(t, err.Error(), strconv.Itoa(ownChild.PID),
-		"the reaper's own descendant is excluded — and an excluded marked carrier is reported, never silently left")
+	require.NotContains(t, err.Error(), strconv.Itoa(ownChild.PID),
+		"a positively-placed carrier is NOT a blocking refusal — it is named, not reported (#7484 item 1)")
+	require.Contains(t, warnings.String(), strconv.Itoa(ownChild.PID),
+		"the reaper's own descendant is excluded — and an excluded marked carrier is NAMED, never silently left")
+	require.Contains(t, warnings.String(), "LEFT ALIVE",
+		"the naming says the carrier was left running, not signalled")
 	require.Equal(t, []proctree.Process{member}, marked,
 		"only the survivor still in the recorded root's kernel session is admitted")
 
@@ -1073,10 +1085,15 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 		// cohort membership the sweep is asked to judge them against. Rows
 		// whose verdict needs a sibling carrier in the cohort (a refused
 		// ancestor that would vouch for a descendant) return all of them.
-		build     func(t *testing.T) (candidates []proctree.Process, membership cohortMembership)
-		gens      []string
-		wantOwned bool
-		wantErr   string
+		build func(t *testing.T) (candidates []proctree.Process, membership cohortMembership)
+		gens  []string
+		// wantPlaced rows are refused like wantErr rows — never marked,
+		// never signalled — but the placement is positive PROOF the carrier
+		// is foreign, so it is named in the log instead of the refusal set
+		// that makes the close Unknown (#7484 item 1).
+		wantPlaced string
+		wantOwned  bool
+		wantErr    string
 	}{
 		{
 			// Baseline member: descent from a proven parent with clean
@@ -1170,23 +1187,53 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 		},
 		{
 			// The reaper's own subtree is foreign evidence (#7435 R2):
-			// refused, reported, never signalled.
-			name: "no proof, reaper subtree — refused",
+			// refused and never signalled — but a POSITIVELY placed
+			// carrier is named in the log, not the refusal set: it does
+			// not block the close (#7484 item 1).
+			name: "no proof, reaper subtree — refused, named not blocking",
 			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				child := spawnCohortSleeper(t, name, home, gen, true)
 				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
 			},
-			wantErr: "ancestry places it under",
+			wantPlaced: "ancestry places it under",
 		},
 		{
 			// A positively-identified af-daemon subtree is foreign
-			// evidence: refused, reported, never signalled.
-			name: "no proof, af-daemon subtree — refused",
+			// evidence: refused and never signalled — named in the log,
+			// never blocking the close on a proven-foreign carrier
+			// (#7484 item 1).
+			name: "no proof, af-daemon subtree — refused, named not blocking",
 			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				child := spawnDaemonChild(t)
 				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
 			},
-			wantErr: "ancestry places it under",
+			wantPlaced: "ancestry places it under",
+		},
+		{
+			// Every foreign-evidence column needs a row with proof
+			// PRESENT (#7484 item 2): hoisting `case proven` above the
+			// placement cases must turn a row red, and with only
+			// mismatched-Recorded rows there was nothing to go red on.
+			// A captured Proven pair is proof; the daemon-subtree
+			// placement is foreign — foreign still wins.
+			name: "capture-proven child, af-daemon subtree — refused, named not blocking",
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
+				child := spawnDaemonChild(t)
+				return []proctree.Process{child}, cohortMembership{Proven: map[int]uint64{child.PID: child.StartID}}
+			},
+			wantPlaced: "ancestry places it under",
+		},
+		{
+			// Same column, reaper subtree: a captured SETSID'D child of
+			// the reaper — the Proven pair is its only possible proof
+			// (it leads its own kernel session, so no pane SID can
+			// vouch) — and the placement still wins.
+			name: "capture-proven setsid'd child, reaper subtree — refused, named not blocking",
+			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
+				child := spawnCohortSleeper(t, name, home, gen, true)
+				return []proctree.Process{child}, cohortMembership{Proven: map[int]uint64{child.PID: child.StartID}}
+			},
+			wantPlaced: "ancestry places it under",
 		},
 		{
 			// No proof and no foreign evidence: the carrier stays eligible
@@ -1232,11 +1279,36 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			if gens == nil {
 				gens = []string{gen}
 			}
+			var placedLog bytes.Buffer
+			oldWarnings := log.WarningLog.Writer()
+			log.WarningLog.SetOutput(&placedLog)
+			defer log.WarningLog.SetOutput(oldWarnings)
 			marked, _, err := markedOrphanProcesses(
 				candidates, name, home,
 				fixtureCohort(gens...), membership, map[int]bool{})
 			for _, candidate := range candidates {
 				pid := strconv.Itoa(candidate.PID)
+				if row.wantPlaced != "" {
+					// Refused, but the refusal is positively PLACED —
+					// named in the log, never in the refusal set that
+					// blocks the close (#7484 item 1).
+					for _, m := range marked {
+						require.NotEqual(t, candidate.PID, m.PID,
+							"a refused carrier must never reach the kill set")
+					}
+					if err != nil {
+						require.NotContains(t, err.Error(), "pid "+pid,
+							"a positively-placed carrier must not appear in the refusals that block the close")
+					}
+					require.Contains(t, placedLog.String(), "pid "+pid,
+						"a positively-placed carrier is NAMED in the log — never silent")
+					require.Contains(t, placedLog.String(), row.wantPlaced)
+					require.Contains(t, placedLog.String(), "LEFT ALIVE",
+						"the warning must say the carrier outlives the teardown it did not block")
+					require.True(t, proctree.AliveSame(candidate),
+						"refused means never signalled")
+					continue
+				}
 				if row.wantOwned {
 					found := false
 					for _, m := range marked {

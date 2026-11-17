@@ -448,17 +448,26 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 		// original pane still running (#2103). The process-table identity makes
 		// both distinctions explicit.
 		paneProcess, waitForPane, processErr = capturePaneProcess(pid)
-		if processErr == nil && waitForPane {
+		switch {
+		case processErr == nil && waitForPane:
 			// Same evidence PaneRootProcess stamps: the resolved root's
 			// (pid, StartID) — whose pid is also the pane SID — is what a
 			// later blind retry's vanished-session sweep may admit on (#7435
 			// R2), including on a TmuxSession that never saw setRuntimeLaunch.
-			// Only a CAPTURED live root may replace it: a root that exited in
-			// the panePID→snapshot gap returns the zero identity, and storing
-			// that erases the previous anchor's SID and tier-2 root — the
-			// surviving cohort then refuses forever on every retry (Codex
-			// 4596311717).
 			t.reconcilePaneRootEvidence(paneRootAnswer{resolved: paneProcess})
+		case processErr != nil:
+			// The capture could not answer — it disproves nothing, so the
+			// standing anchor keeps (R17's keep as a named input, #7484
+			// item 3).
+			t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
+		default:
+			// The capture answered with no live root: only a CAPTURED live
+			// root may replace the anchor — a root that exited in the
+			// panePID→snapshot gap carries no identity, and treating that as
+			// evidence erases the previous anchor's SID and tier-2 root, so
+			// the surviving cohort would refuse forever on every retry
+			// (Codex 4596311717, kept as a named input, #7484 item 3).
+			t.reconcilePaneRootEvidence(paneRootAnswer{exitedBeforeCapture: true})
 		}
 	}
 	closeState, closeErr, processes := t.close(true)

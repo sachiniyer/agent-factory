@@ -77,9 +77,10 @@ func TestVanishedSessionSweepDoesNotReapSameNameReplacement(t *testing.T) {
 // must refuse cleanup without signalling either one.
 //
 // The fixture is a reparented marker carrier: the genuinely ambiguous shape.
-// A carrier still behind a tmux server is adjudicated POSITIVELY — a foreign
-// pane, excluded silently (#7435 R6) — so the refusal this test pins only
-// fires for a carrier with no tmux ancestor left to place it.
+// A carrier still behind a tmux server is refused as UNATTRIBUTABLE — the
+// sweep cannot tell a foreign pane from an unreachable member — so the
+// refusal this test pins only fires for a carrier with no tmux ancestor
+// left to place it.
 func TestBlindVanishedSessionSweepDoesNotAdoptReplacementGeneration(t *testing.T) {
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
@@ -312,9 +313,11 @@ func sweepDescendantThatChangesGeneration(t *testing.T, envDir string) {
 	}
 	// The parent must outlive the sweep WITHOUT descending from the test
 	// reaper: since #7435 R2 a marked process that still descends from the
-	// reaper is protectReasonSelfSubtree and is excluded silently — the same
-	// exclusion signalling applies — so neither it nor its changed-generation
-	// child would ever reach the marker verdicts this fixture asserts.
+	// reaper is protectReasonSelfSubtree and excluded as proven-foreign —
+	// the same exemption signalling applies, and since #7484 item 1 it is
+	// named in the log rather than blocking — so neither it nor its
+	// changed-generation child would ever reach the marker verdicts this
+	// fixture asserts.
 	// Spawning through an intermediate sh that exits reparents the parent to
 	// init: the sweep sees an unattributable marked process, the shape the
 	// #3439 refusal exists for. Setsid lands on the INTERMEDIATE, so the

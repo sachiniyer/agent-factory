@@ -421,13 +421,16 @@ func (t *TmuxSession) readPaneRow(budget time.Duration) (paneRow, error) {
 func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
 	row, err := t.panePID()
 	if err != nil {
+		t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
 		return proctree.Process{}, err
 	}
 	if row.dead {
+		t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
 		return proctree.Process{}, fmt.Errorf("tmux session %s: pane root is a held dead pane", t.sanitizedName)
 	}
 	proc, err := proctree.Lookup(row.pid)
 	if err != nil {
+		t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
 		return proctree.Process{}, fmt.Errorf("cannot inspect pane root pid %d: %w", row.pid, err)
 	}
 	// Stamp the resolved root as this session's membership evidence (#7435
@@ -451,24 +454,38 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 	// A restore pass primes one server-wide listing (#6423): a session that is in
 	// it answers from there, in place of its own list-panes.
 	if rows, ok := currentSnapshot().paneRows(t.sanitizedName); ok {
-		return paneRowsHoldRoot(rows, pid, startID)
+		holds, err := paneRowsHoldRoot(rows, pid, startID)
+		if err == nil && holds {
+			// The same confirmed match the list-panes path stamps below —
+			// the funnel takes the verdict, not the transport (#7484
+			// item 3).
+			t.reconcilePaneRootEvidence(paneRootAnswer{
+				resolved: proctree.Process{PID: pid, StartID: startID},
+			})
+		}
+		return holds, err
 	}
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	output, err := t.outputTmuxBounded(ctx, "list-panes", "-s", "-t", ExactTarget(t.sanitizedName), "-F", paneRowFormat)
 	if err != nil {
 		if ctx.Err() != nil {
+			t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
 			return false, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, t.sanitizedName, tmuxCommandTimeout)
 		}
 		if missingTmuxSession(err, t.sanitizedName) {
 			return false, errPaneQueryFoundNoPane
 		}
+		t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
 		return false, fmt.Errorf("failed to list session panes: %w", err)
 	}
 	if strings.TrimSpace(string(output)) == "" {
 		return false, errPaneQueryFoundNoPane
 	}
 	holds, err := paneRowsHoldRoot(strings.Fields(string(output)), pid, startID)
+	if err != nil {
+		t.reconcilePaneRootEvidence(paneRootAnswer{unanswered: true})
+	}
 	if err == nil && holds {
 		// A confirmed match re-proves the recorded root on THIS session —
 		// the same kernel identity PaneRootProcess stamps, so a reattach
