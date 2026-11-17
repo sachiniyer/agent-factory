@@ -565,7 +565,7 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		// under `nice sh -c ...`. Only the trusted account-shell form
 		// proves out. A trailing shell name with no argv (echo sh,
 		// strace -p 1 sh) has nothing to judge and stays allowed.
-		return 1, len(words) > 1 && knownShellName(filepath.Base(literal)) &&
+		return 1, len(words) > 1 && KnownShellName(filepath.Base(literal)) &&
 			shellCommandIsUnproven(words)
 	}
 	if strace {

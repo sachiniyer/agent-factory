@@ -744,8 +744,12 @@ func recordedPaneProgramExe(argv []string) string {
 		return ""
 	}
 	command := argv[0]
-	if len(argv) >= 3 && argv[1] == "-c" {
+	if len(argv) >= 3 && argv[1] == "-c" && sessionenv.KnownShellName(filepath.Base(argv[0])) {
 		// `shell -c <command>` — argv[2] is the recorded command directly.
+		// The shell gate is what makes the read safe: `-c` takes a config
+		// operand on codex and a program STRING on python, neither of which
+		// is the pane's launch command (Codex 4599228958). Only behind a
+		// known shell basename does argv[2] hold a shell command line.
 		// Caught inside the shim's pre-exec window it is af's exec-shim
 		// line instead, which carries the recorded command as its LAST
 		// word (every `__af-…-exec` protocol ends that way).
