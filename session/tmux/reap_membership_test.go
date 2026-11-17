@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -57,13 +58,14 @@ func TestClassifyHomeDir(t *testing.T) {
 // #7435 item 5 — the cohort gate admits only what kernel evidence proves:
 // capture inside the proven live tree, a SID one of the pane roots led, a
 // (pid, StartID) recorded at spawn, or descent from a proven member. No
-// evidence at all means the gate is off, never silently on.
+// evidence at all means nothing is admitted: refuse, never signal (R2).
 func TestCohortMembershipAdmits(t *testing.T) {
 	member := proctree.Process{PID: 100, SID: 40, StartID: 9}
 
-	require.True(t, cohortMembership{}.admits(nil, member), "no evidence: gate off")
-	require.True(t, cohortMembership{PaneSIDs: map[int]bool{}}.admits(nil, member),
-		"an EMPTY sid set is still no evidence: gate off")
+	require.False(t, cohortMembership{}.admits(nil, member),
+		"no evidence: nothing is admitted — markers alone never prove membership")
+	require.False(t, cohortMembership{PaneSIDs: map[int]bool{}}.admits(nil, member),
+		"an EMPTY sid set is still no evidence: nothing is admitted")
 	require.True(t, cohortMembership{PaneSIDs: map[int]bool{40: true}}.admits(nil, member))
 	require.True(t, cohortMembership{Recorded: map[int]uint64{100: 9}}.admits(nil, member))
 	require.True(t, cohortMembership{Proven: map[int]uint64{100: 9}}.admits(nil, member),
@@ -95,28 +97,45 @@ func TestCohortMembershipAdmitsByDescentFromTheProvenTree(t *testing.T) {
 		"descent cannot help without a proven member to reach")
 }
 
-// #7435 item 5 — inherited markers are never membership proof. Two live
-// helpers carry identical AF_SESSION/AF_HOME/AF_SESSION_GEN markers: the one
-// still in the proven pane's kernel session is a cohort member; the one that
-// setsid'd out of it — the af-daemon-child shape — is not.
+// #7435 item 5 — inherited markers are never membership proof. Three live
+// helpers carry identical AF_SESSION/AF_HOME/AF_SESSION_GEN markers:
+//
+//   - a survivor still in the recorded pane root's kernel session: a member,
+//     admitted by its SID;
+//   - a same-shaped survivor whose leader's session was never recorded: the
+//     inherited-marker case — REPORTED, not silently dropped (R3), because
+//     "nothing found" on this path authorizes worktree cleanup;
+//   - a setsid'd child of the reaper itself: positively placed in the
+//     reaper's own subtree, so it is excluded silently the way signalling
+//     excludes it — neither a member nor a reported leak.
 func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.T) {
 	name := "af_membership"
 	home := t.TempDir()
 	gen := "gen-membership"
 
-	member := spawnCohortSleeper(t, name, home, gen, false)
-	setsid := spawnCohortSleeper(t, name, home, gen, true)
-	membership := cohortMembership{PaneSIDs: map[int]bool{member.SID: true}}
+	root, member := spawnMarkedLeaderWithOrphanedChild(t, name, home, gen)
+	_, unadmitted := spawnMarkedLeaderWithOrphanedChild(t, name, home, gen)
+	ownChild := spawnCohortSleeper(t, name, home, gen, true)
+	membership := cohortMembership{
+		PaneSIDs: map[int]bool{root.PID: true},
+		Recorded: map[int]uint64{root.PID: root.StartID},
+	}
 
-	marked, err := markedOrphanProcesses(
-		[]proctree.Process{member, setsid}, name, home,
+	marked, _, err := markedOrphanProcesses(
+		[]proctree.Process{member, unadmitted, ownChild}, name, home,
 		fixtureCohort(gen), membership)
-	require.NoError(t, err)
+	require.Error(t, err, "an unadmitted marker-carrier is reported, not silently skipped")
+	require.Contains(t, err.Error(), "cannot be proven a member")
+	require.Contains(t, err.Error(), strconv.Itoa(unadmitted.PID),
+		"the report names the carrier it could not place")
+	require.NotContains(t, err.Error(), strconv.Itoa(ownChild.PID),
+		"the reaper's own descendant is positively placed — excluded, not reported")
 	require.Equal(t, []proctree.Process{member}, marked,
-		"the setsid'd helper carries the same markers but left the proven session — it must be skipped")
+		"only the survivor still in the recorded root's kernel session is admitted")
 
 	require.True(t, proctree.AliveSame(member))
-	require.True(t, proctree.AliveSame(setsid))
+	require.True(t, proctree.AliveSame(unadmitted))
+	require.True(t, proctree.AliveSame(ownChild))
 }
 
 // #7435 Codex — an UNPROVABLE home is never "not ours, carry on". A survivor
@@ -130,7 +149,7 @@ func TestVanishedSessionSweepRefusesAnUnprovableHomeSurvivor(t *testing.T) {
 	survivor := spawnCohortSleeper(t, name, ".af", gen, false)
 
 	err := reapVanishedSessionProcesses(name, ownHome,
-		[]proctree.Process{survivor}, nil, false)
+		[]proctree.Process{survivor}, nil, cohortMembership{}, false)
 	require.Error(t, err, "an unprovable home must refuse the sweep, not silently clear it")
 	require.Contains(t, err.Error(), "cannot be proven",
 		"the refusal must name the attribution failure, not a generic skip")
@@ -139,7 +158,7 @@ func TestVanishedSessionSweepRefusesAnUnprovableHomeSurvivor(t *testing.T) {
 
 	// The same process read as a candidate directly shows the per-pid split:
 	// foreign is skipped by proof, unproven blocks.
-	marked, inspectErr := markedOrphanProcesses(
+	marked, _, inspectErr := markedOrphanProcesses(
 		[]proctree.Process{survivor}, name, ownHome, fixtureCohort(gen), cohortMembership{})
 	require.Error(t, inspectErr)
 	require.Contains(t, inspectErr.Error(), "cannot be proven")
@@ -171,6 +190,22 @@ func spawnCohortSleeper(t *testing.T, name, home, gen string, newSession bool) p
 		require.Equal(t, p.PID, p.SID, "the setsid'd helper must lead its own session")
 	}
 	return p
+}
+
+// The reaper's own descendant is excluded like any af daemon's subtree —
+// no tmux server has to sit above the reaper for the exclusion to hold
+// (#7435 R2): a marker-carrying child of the reaper is the EnsureDaemon'd
+// shape Codex's e5b repro signalled. Only a tmux boundary BETWEEN them
+// keeps a pane process eligible; that direction is the live chain fixture
+// TestReapSessionProcessesReapsAPaneWhoseServerIsADescendantOfTheReaper.
+func TestClassifyCaptureAncestryProtectsTheReapersOwnDescendant(t *testing.T) {
+	snap := map[int]proctree.Process{
+		60: {PID: 60, PPID: 50, Comm: "sleep"},
+		50: {PID: 50, PPID: 1, Comm: "af"},
+	}
+	require.Equal(t, protectReasonSelfSubtree,
+		classifyCaptureAncestry(snap, 60, 50),
+		"a captured process that reaches the reaper with no tmux between is the reaper's own descendant")
 }
 
 // commNamesAFDaemonBinary mirrors the {af, agent-factory} name set

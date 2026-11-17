@@ -448,6 +448,13 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 		// original pane still running (#2103). The process-table identity makes
 		// both distinctions explicit.
 		paneProcess, waitForPane, processErr = capturePaneProcess(pid)
+		if processErr == nil {
+			// Same evidence PaneRootProcess stamps: the resolved root's
+			// (pid, StartID) — whose pid is also the pane SID — is what a
+			// later blind retry's vanished-session sweep may admit on (#7435
+			// R2), including on a TmuxSession that never saw setRuntimeLaunch.
+			t.paneRootEvidence.Store(&paneProcess)
+		}
 	}
 	closeState, closeErr, processes := t.close(true)
 
@@ -634,7 +641,23 @@ func (t *TmuxSession) sweepVanishedSessionProcesses(trustLiveGeneration bool) er
 	// refresh — the marker scan IS the evidence standing in for the ancestry tmux
 	// lost, so passing the capture failure through would make it a blocker again
 	// and defeat the point.
-	return reapVanishedSessionProcesses(t.sanitizedName, ownHome, nil, nil, trustLiveGeneration)
+	//
+	// What the scan CANNOT do is prove membership on env alone (#7435 item 5,
+	// R2): an af daemon EnsureDaemon'd out of the pane and every tmux server or
+	// helper it later spawns all inherit the markers. The kernel evidence the
+	// sweep may admit on is the pane-root identity the launch recorded — the
+	// root led its own kernel session, so its pid IS the SID its surviving
+	// same-session members carry, and the (pid, StartID) pair names the root
+	// itself. With no recorded root the gate admits nothing: the sweep refuses
+	// on any marked candidate instead of reaping on env markers.
+	var membership cohortMembership
+	if root := t.paneRootEvidence.Load(); root != nil {
+		membership = cohortMembership{
+			PaneSIDs: map[int]bool{root.PID: true},
+			Recorded: map[int]uint64{root.PID: root.StartID},
+		}
+	}
+	return reapVanishedSessionProcesses(t.sanitizedName, ownHome, nil, nil, membership, trustLiveGeneration)
 }
 
 // capturePaneProcess turns tmux's bare pane PID into a process-table identity

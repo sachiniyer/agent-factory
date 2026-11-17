@@ -23,7 +23,7 @@ func (s protectedSet) protects(pid int) bool {
 const (
 	protectReasonSelf        = "the reaper's own process"
 	protectReasonAncestor    = "an ancestor of the reaper"
-	protectReasonSelfSubtree = "a descendant of the reaper that reached it below this session's tmux server"
+	protectReasonSelfSubtree = "a descendant of the reaper outside a tmux server boundary"
 	protectReasonAFDaemon    = "an agent-factory daemon"
 	protectReasonUnproven    = "a process whose daemon ancestry cannot be proven"
 )
@@ -37,9 +37,11 @@ func protectReasonDaemonDescendant(daemonPID int) string {
 // of that captured tree must never signal, and why:
 //
 //   - the reaper's own process and its ancestors, unconditionally;
-//   - a captured process whose parent walk meets the reaper strictly below a
-//     positively-identified tmux process — descendant → reaper → tmux (#7433
-//     R2);
+//   - a captured process whose parent walk REACHES the reaper — the reaper's
+//     own descendant — unless a positively-identified tmux process lies
+//     between them (#7433 R2, #7435): the reaper's own children are excluded
+//     like any af daemon's subtree, because descent is not ownership and an
+//     inherited-marker child of the reaper is not this session's to kill;
 //   - a captured process that IS an agent-factory daemon, of ANY home, or that
 //     descends from one (#7435): a daemon EnsureDaemon forked from a CLI
 //     running inside an orphaned pane lands in that pane's captured tree with
@@ -90,18 +92,18 @@ func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process
 // snapshot and returns the reason the process is protected, or "" when it
 // stays reapable. The first decisive verdict wins:
 //
-//   - the reaper itself is marked reached; a POSITIVELY identified tmux
-//     process afterwards ends the walk — the R2 own-chain descendant
-//     (reaper → tmux above it) is protected, while every pane process reaches
-//     its server first and stays eligible;
+//   - the reaper ends the walk protected: the captured process is the
+//     reaper's own descendant, excluded like an af daemon's subtree (#7435).
+//     A POSITIVELY identified tmux process is checked FIRST, so a pane
+//     process under a server that itself descends from the reaper still ends
+//     eligible at the server — the boundary verdict only fails to protect
+//     the reaper's own children when no server lies between them and it;
 //   - a positively-identified agent-factory daemon ends the walk protected;
 //   - a pid whose argv cannot be read ends the walk protected (unproven);
-//   - the top of the chain ends it eligible: a reaper with no tmux or daemon
-//     above it exempts nothing, and an orphan whose parent died reaches that
-//     end like any other chain.
+//   - the top of the chain ends it eligible: an orphan whose parent died
+//     reaches that end like any other chain.
 func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int) string {
 	start := pid
-	reachedSelf := false
 	for range 128 {
 		if pid <= 0 {
 			return ""
@@ -112,11 +114,8 @@ func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int) strin
 		}
 		switch {
 		case pid == self:
-			reachedSelf = true
+			return protectReasonSelfSubtree
 		case proctree.TmuxIdentityOf(pid) == proctree.Tmux:
-			if reachedSelf {
-				return protectReasonSelfSubtree
-			}
 			return ""
 		default:
 			switch afDaemonClass(p) {
@@ -132,6 +131,29 @@ func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int) strin
 		pid = p.PPID
 	}
 	return ""
+}
+
+// reportableSurvivors filters a survivor set the way signalling filtered its
+// kill set (#7435 R3): a process the protected set spares by PROOF — the
+// reaper's own chain, a positively-identified af-daemon subtree — is not a
+// leak and must not read as one forever. A process spared only because its
+// daemon ancestry could not be proven is different: alive, unattributable,
+// and never "nothing found" — it stays reported so a cleanup-authorizing
+// caller still refuses. snap is the SAME table the survivor set was built
+// from, so both verdicts classify against identical ancestry.
+func reportableSurvivors(snap map[int]proctree.Process, survivors []proctree.Process) []proctree.Process {
+	if len(survivors) == 0 {
+		return survivors
+	}
+	protected := reapProtectedSet(snap, survivors)
+	var reportable []proctree.Process
+	for _, p := range survivors {
+		if reason := protected[p.PID]; reason != "" && reason != protectReasonUnproven {
+			continue
+		}
+		reportable = append(reportable, p)
+	}
+	return reportable
 }
 
 type afDaemonVerdict int

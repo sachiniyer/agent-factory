@@ -430,6 +430,11 @@ func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
 	if err != nil {
 		return proctree.Process{}, fmt.Errorf("cannot inspect pane root pid %d: %w", row.pid, err)
 	}
+	// Stamp the resolved root as this session's membership evidence (#7435
+	// item 5): every launch/reattach boundary resolves through here, so the
+	// vanished-session sweep can admit only what the recorded root's kernel
+	// session still leads — never an env-marker scan's unverifiable finds.
+	t.paneRootEvidence.Store(&proc)
 	return proc, nil
 }
 
@@ -463,7 +468,14 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 	if strings.TrimSpace(string(output)) == "" {
 		return false, errPaneQueryFoundNoPane
 	}
-	return paneRowsHoldRoot(strings.Fields(string(output)), pid, startID)
+	holds, err := paneRowsHoldRoot(strings.Fields(string(output)), pid, startID)
+	if err == nil && holds {
+		// A confirmed match re-proves the recorded root on THIS session —
+		// the same kernel identity PaneRootProcess stamps, so a reattach
+		// leaves the vanished-session sweep its evidence too (#7435 R2).
+		t.paneRootEvidence.Store(&proctree.Process{PID: pid, StartID: startID})
+	}
+	return holds, err
 }
 
 // PaneQueryFoundNoPane reports whether err is a pane query that tmux ANSWERED

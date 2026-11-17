@@ -400,53 +400,85 @@ has-session)     exit 1 ;;`)
 	}
 }
 
-// spawnMarkedProcess starts a child carrying AF_SESSION=<name> and returns its
-// pid, cleaned up by the test.
+// spawnMarkedProcess starts an ORPHANED process carrying AF_SESSION=<name>
+// and returns its identity, cleaned up by the test.
+//
+// The orphan shape is load-bearing (#7435 R2): a marked process still
+// descending from the test reaper is positively placed in the reaper's own
+// subtree — protectReasonSelfSubtree — and excluded silently, exactly the way
+// signalling spares it. These tests exist to check the marker verdicts a
+// sweep reaches only for processes it cannot otherwise place, so the marked
+// process must outlive an intermediate sh and reparent above the reaper's
+// subtree: its ancestry then ends at init, unattributable — the survivor
+// shape the sweep must classify on markers alone.
 func spawnMarkedProcess(t *testing.T, sessionName, afHome string) proctree.Process {
 	t.Helper()
-	c := exec.Command("sleep", "300")
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "marked.pid")
 	// A CLEAN env, not os.Environ(). processEnvValue returns the FIRST match, and
 	// this test binary runs inside a real af session — so inheriting the ambient
 	// environment puts THAT session's AF_SESSION ahead of the one appended here,
 	// and the child reads as belonging to the developer's session instead of the
 	// fixture's. Measured: the sweep then reported live pids from the running
 	// session rather than the spawned child.
-	c.Env = []string{"PATH=" + os.Getenv("PATH"), EnvMarkerSession + "=" + sessionName}
-	if afHome != "" {
-		c.Env = append(c.Env, EnvMarkerHome+"="+afHome)
+	env := []string{"PATH=" + os.Getenv("PATH"),
+		EnvMarkerSession + "=" + sessionName,
+		EnvMarkerGeneration + "=" + sessionName + "-gen",
 	}
-	// Its OWN kernel session, because the sweep expands a matched process to its
-	// SID members — which is scoped in production precisely because tmux makes a
-	// pane root a session leader (see CaptureSessionProcessTrees). A child that
-	// merely inherits the test runner's SID is not that shape: measured, the
-	// expansion then pulled in the developer's live af session processes and the
-	// fixture indicted them instead of its own child.
-	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := c.Start(); err != nil {
+	if afHome != "" {
+		env = append(env, EnvMarkerHome+"="+afHome)
+	}
+	// The intermediate sh backgrounds the escapee and exits; c.Run returns once
+	// sh is dead, so the marked process is already reparented when this
+	// returns. The escapee setsid's into its OWN kernel session before
+	// publishing its pid, because the sweep expands a matched process to its
+	// SID members — which is scoped in production precisely because tmux makes
+	// a pane root a session leader (see CaptureSessionProcessTrees). A child
+	// that merely inherits the test runner's SID is not that shape: measured,
+	// the expansion then pulled in the developer's live af session processes
+	// and the fixture indicted them instead of its own child.
+	c := exec.Command("sh", "-c",
+		"'"+os.Args[0]+"' '"+markedEscapeeArg+"' '"+pidFile+"' </dev/null >/dev/null 2>&1 &")
+	c.Env = env
+	if err := c.Run(); err != nil {
 		t.Fatalf("spawn marked process: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = c.Process.Kill()
-		_, _ = c.Process.Wait()
-	})
-	// The scan reads /proc/<pid>/environ; wait until it is readable, then take the
-	// full process IDENTITY. A bare pid is not enough for later liveness checks:
-	// AliveSame compares (PID, StartID), so a fabricated Process{PID: n} reports
-	// "not alive" for a perfectly live process — which made an earlier version of
-	// these assertions pass vacuously.
+	// The escapee publishes its own pid only after setsid and SIGHUP protection
+	// — the same handshake spawnMarkedSessionWithEscapee relies on. Take the
+	// full process IDENTITY once it lands: a bare pid is not enough for later
+	// liveness checks, because AliveSame compares (PID, StartID) and a
+	// fabricated Process{PID: n} reports "not alive" for a perfectly live
+	// process — which made an earlier version of these assertions pass
+	// vacuously.
+	var marked proctree.Process
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if env, err := proctree.Environ(c.Process.Pid); err == nil {
-			if v, ok := processEnvValue(env, EnvMarkerSession); ok && v == sessionName {
-				p, lookupErr := proctree.Lookup(c.Process.Pid)
-				if lookupErr != nil {
-					t.Fatalf("look up spawned pid %d: %v", c.Process.Pid, lookupErr)
+		data, readErr := os.ReadFile(pidFile)
+		if readErr == nil {
+			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 1 {
+				if p, lookupErr := proctree.Lookup(pid); lookupErr == nil {
+					marked = p
+					break
 				}
-				return p
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Skipf("child %d environ never became readable; this fixture needs a marker-visible process", c.Process.Pid)
+	if marked.PID == 0 {
+		t.Skipf("marked escapee pid file %s never materialized; this fixture needs a marker-visible process", pidFile)
+	}
+	t.Cleanup(func() { _ = proctree.Signal(marked, syscall.SIGKILL) })
+
+	// The scan reads /proc/<pid>/environ; wait until the marker is visible.
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if env, err := proctree.Environ(marked.PID); err == nil {
+			if v, ok := processEnvValue(env, EnvMarkerSession); ok && v == sessionName {
+				return marked
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Skipf("orphan %d environ never became readable; this fixture needs a marker-visible process", marked.PID)
 	return proctree.Process{}
 }

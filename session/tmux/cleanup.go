@@ -661,14 +661,16 @@ func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome s
 // scan finds, instead of failing closed on an empty one. Every other caller
 // (this package's own background CleanupSessions sweep included) passes
 // false and keeps the strict #3309 refusal: see reapVanishedSessionProcessCohort.
-func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error, trustLiveGeneration bool) error {
-	// An empty membership: this entry's callers hand in candidates they
-	// captured themselves but hold no pane-SID evidence to place them
-	// against, so the SID gate stays off — the daemon-subtree exclusion in
-	// the reap's own protected set still keeps a positively-identified
-	// daemon's descendants out of the signal set (#7435).
+//
+// membership is the kernel evidence the sweep may admit a survivor on: a SID
+// a proven pane root led, or a (pid, StartID) pair recorded at spawn — the
+// trusting close's caller wires the instance's recorded PaneRootProcess here.
+// With NO evidence the gate refuses rather than opening: nothing the marker
+// scan finds is signalled or silently cleared (#7435 item 5, R2).
+func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error,
+	membership cohortMembership, trustLiveGeneration bool) error {
 	return reapVanishedSessionProcessCohort(match, ownHome, candidates, captureErr,
-		orphanGenerations(candidates, match), cohortMembership{}, trustLiveGeneration)
+		orphanGenerations(candidates, match), membership, trustLiveGeneration)
 }
 
 func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctree.Process, captureErr error,
@@ -719,7 +721,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 	// pids and the read that tells a leftover from a replacement (#3706).
 	if generations.empty() {
 		blindCandidates, refreshErr := refreshOrphanCandidates(candidates, match, nil)
-		_, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations, membership)
+		_, _, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations, membership)
 		return errors.Join(sweepErr, refreshErr, inspectErr)
 	}
 	initialCandidates, initialErr := refreshOrphanCandidates(candidates, match, &generations)
@@ -737,7 +739,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		observed, observeErr := observeOrphanAncestryObserved(refreshed, match, reapGraceWait)
 		refreshed, afterErr := refreshOrphanCandidates(observed, match, &generations)
 		sweepErr = errors.Join(sweepErr, beforeErr, observeErr, afterErr)
-		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations, membership)
+		marked, _, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations, membership)
 		sweepErr = errors.Join(sweepErr, inspectErr)
 		// The tmux session is GONE and these processes are still alive carrying its
 		// ownership markers: they outlived the pane tree that was supposed to
@@ -754,8 +756,15 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		candidates = refreshed
 	}
 	finalCandidates, refreshErr := refreshOrphanCandidates(candidates, match, &generations)
-	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations, membership)
+	left, leftSnap, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations, membership)
 	sweepErr = errors.Join(sweepErr, refreshErr, inspectErr)
+	// The survivor check applies the SAME exclusion set signalling did
+	// (#7435 R3, Codex 4593411284): a POSITIVELY protected process — the
+	// reaper's own chain or a proven af-daemon subtree — is spared by proof
+	// and must not read as a leak "remained" forever; an unproven-ancestry
+	// process is never reported as nothing-found either, so it stays in the
+	// set. Both verdicts come out of the same snapshot the filter used.
+	left = reportableSurvivors(leftSnap, left)
 	if len(left) > 0 {
 		sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s appeared or remained after the orphan sweep",
 			processPIDList(left)))

@@ -84,7 +84,7 @@ func TestBlindVanishedSessionSweepDoesNotAdoptReplacementGeneration(t *testing.T
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	replacement := spawnMarkedSessionWithEscapee(t, name, home, "replacement")
 
-	err := reapVanishedSessionProcesses(name, home, nil, nil, false)
+	err := reapVanishedSessionProcesses(name, home, nil, nil, cohortMembership{}, false)
 	require.True(t, proctree.AliveSame(replacement),
 		"a blind vanished-session sweep reaped a same-named replacement")
 	require.ErrorContains(t, err, "generation",
@@ -99,6 +99,12 @@ func TestBlindVanishedSessionSweepDoesNotAdoptReplacementGeneration(t *testing.T
 // reap a survivor whose generation is simply NEWER than anything captured,
 // restoring the non-destructive escape hatch for a session that flapped
 // through a restore between capture and teardown.
+//
+// Since #7435 the survivor must also prove MEMBERSHIP on kernel evidence —
+// env markers alone never admit. The fixture models what production wires
+// through: a marked session leader (the pane root) whose same-session child
+// outlives it, and the leader's recorded (pid, StartID) pair — whose pid is
+// also the pane SID — as the sweep's evidence.
 func TestTrustedBlindVanishedSessionSweepReapsNewerGeneration(t *testing.T) {
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
@@ -106,12 +112,89 @@ func TestTrustedBlindVanishedSessionSweepReapsNewerGeneration(t *testing.T) {
 	const name = "af_trusted_blind_newer_generation"
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
-	survivor := spawnMarkedSessionWithEscapee(t, name, home, "newer-generation")
+	root, survivor := spawnMarkedLeaderWithOrphanedChild(t, name, home, "newer-generation")
 
-	err := reapVanishedSessionProcesses(name, home, nil, nil, true)
+	err := reapVanishedSessionProcesses(name, home, nil, nil,
+		cohortMembership{
+			PaneSIDs: map[int]bool{root.PID: true},
+			Recorded: map[int]uint64{root.PID: root.StartID},
+		}, true)
 	require.NoError(t, err, "a trusted sweep must reap its own session's survivor, not refuse it")
 	require.False(t, proctree.AliveSame(survivor),
 		"the newer-generation survivor must be reaped once the caller vouches for exclusivity")
+}
+
+// TestVanishedSessionSweepRefusesWithNoMembershipEvidence is the R2 guard:
+// a vanished-session caller — trusting ones included — that arrives with no
+// captured tree, no pane SID and no recorded pair must REFUSE on a marked
+// candidate, never signal on env markers. The marked scan can carry inherited
+// markers from an EnsureDaemon'd daemon or an unrelated tmux server (#7435).
+func TestVanishedSessionSweepRefusesWithNoMembershipEvidence(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_trusted_blind_no_evidence"
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	_, survivor := spawnMarkedLeaderWithOrphanedChild(t, name, home, "newer-generation")
+
+	err := reapVanishedSessionProcesses(name, home, nil, nil, cohortMembership{}, true)
+	require.Error(t, err, "with no kernel evidence the gate refuses — it does not open on env alone")
+	require.Contains(t, err.Error(), "cannot be proven a member")
+	require.True(t, proctree.AliveSame(survivor),
+		"an unadmitted marker-carrier survives AND is reported — never silently dropped")
+}
+
+// spawnMarkedLeaderWithOrphanedChild runs a marked session leader (Setsid —
+// the pane-root shape tmux creates) whose child inherits the markers and
+// keeps the leader's pid as its session id, then kills the leader so the
+// child is orphaned under it. The returned leader identity is the recorded
+// (pid, StartID) evidence a trusting caller wires into the sweep; the child
+// is the survivor that evidence admits.
+func spawnMarkedLeaderWithOrphanedChild(t *testing.T, name, home, generation string) (root, child proctree.Process) {
+	t.Helper()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	c := exec.Command("sh", "-c", "sleep 300 & echo $! >\""+pidFile+"\"; exec sleep 300")
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	c.Env = []string{"PATH=" + os.Getenv("PATH"),
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+		EnvMarkerGeneration + "=" + generation,
+	}
+	require.NoError(t, c.Start())
+	t.Cleanup(func() {
+		_ = c.Process.Kill()
+		_, _ = c.Process.Wait()
+	})
+	root, err := proctree.Lookup(c.Process.Pid)
+	require.NoError(t, err)
+	require.Equal(t, root.PID, root.SID, "the fixture leader must head its own kernel session, like a pane root")
+
+	var childPid int
+	require.Eventually(t, func() bool {
+		data, readErr := os.ReadFile(pidFile)
+		if readErr != nil {
+			return false
+		}
+		childPid, readErr = strconv.Atoi(strings.TrimSpace(string(data)))
+		return readErr == nil && childPid > 1
+	}, 5*time.Second, 20*time.Millisecond, "the child pid file never appeared")
+	require.Eventually(t, func() bool {
+		var lookupErr error
+		child, lookupErr = proctree.Lookup(childPid)
+		return lookupErr == nil
+	}, 5*time.Second, 20*time.Millisecond)
+	require.Equal(t, root.PID, child.SID, "the child must carry the leader's pid as its session id")
+
+	require.NoError(t, proctree.Signal(root, syscall.SIGKILL), "kill the marked leader")
+	t.Cleanup(func() { _ = proctree.Signal(child, syscall.SIGKILL) })
+	require.Eventually(t, func() bool {
+		current, lookupErr := proctree.Lookup(child.PID)
+		return lookupErr == nil && current.StartID == child.StartID && current.PPID != root.PID
+	}, 5*time.Second, 20*time.Millisecond,
+		"the child must outlive the leader and reparent, like a pane survivor")
+	return root, child
 }
 
 // TestTrustedBlindVanishedSessionSweepStillRejectsForeignHome pins the boundary
@@ -129,7 +212,7 @@ func TestTrustedBlindVanishedSessionSweepStillRejectsForeignHome(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", ourHome)
 	foreign := spawnMarkedSessionWithEscapee(t, name, foreignHome, "some-generation")
 
-	err := reapVanishedSessionProcesses(name, ourHome, nil, nil, true)
+	err := reapVanishedSessionProcesses(name, ourHome, nil, nil, cohortMembership{}, true)
 	require.NoError(t, err, "a foreign-home process is silently skipped, not an error")
 	require.True(t, proctree.AliveSame(foreign),
 		"trusting the live generation must not waive the AF_HOME ownership boundary")
@@ -167,6 +250,7 @@ func sweepDescendantThatChangesGeneration(t *testing.T, envDir string) {
 	dir := t.TempDir()
 	trigger := filepath.Join(dir, "fork")
 	pidFile := filepath.Join(dir, "child.pid")
+	parentPidFile := filepath.Join(dir, "parent.pid")
 	// The parent outlives the sweep (#3439). The changed-generation child is
 	// reachable only as a ppid-descendant of a LIVE parent: it calls setsid, so it
 	// shares no session id, and the moment the parent exits it reparents to init
@@ -210,32 +294,40 @@ func sweepDescendantThatChangesGeneration(t *testing.T, envDir string) {
 		changedGeneration  = "changed"
 		vanishedGeneration = "vanished"
 	)
-	script := fmt.Sprintf("%s; "+
+	script := fmt.Sprintf("%s; %s; "+
 		"env %s=%s setsid sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
+		recordPIDShell("$$", parentPidFile),
 		testguard.BoundedGateWait(trigger, 10*time.Millisecond, 5*time.Minute),
 		EnvMarkerGeneration, changedGeneration, recordPIDShell("$!", pidFile))
+	parentScript := filepath.Join(dir, "parent.sh")
+	require.NoError(t, os.WriteFile(parentScript, []byte("#!/bin/sh\n"+script+"\n"), 0o700))
 	path := os.Getenv("PATH")
 	if envDir != "" {
 		path = envDir + string(os.PathListSeparator) + path
 	}
-	parentCmd := exec.Command("sh", "-c", script)
-	parentCmd.Env = []string{
+	// The parent must outlive the sweep WITHOUT descending from the test
+	// reaper: since #7435 R2 a marked process that still descends from the
+	// reaper is protectReasonSelfSubtree and is excluded silently — the same
+	// exclusion signalling applies — so neither it nor its changed-generation
+	// child would ever reach the marker verdicts this fixture asserts.
+	// Spawning through an intermediate sh that exits reparents the parent to
+	// init: the sweep sees an unattributable marked process, the shape the
+	// #3439 refusal exists for. Setsid lands on the INTERMEDIATE, so the
+	// parent's own session — not the test runner's — is what its SID members
+	// expand to.
+	outer := exec.Command("sh", "-c", "'"+parentScript+"' </dev/null >/dev/null 2>&1 &")
+	outer.Env = []string{
 		"PATH=" + path,
 		EnvMarkerSession + "=" + name,
 		EnvMarkerHome + "=" + home,
 		EnvMarkerGeneration + "=" + vanishedGeneration,
 	}
-	parentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	require.NoError(t, parentCmd.Start())
-	t.Cleanup(func() {
-		_ = parentCmd.Process.Kill()
-		_, _ = parentCmd.Process.Wait()
-	})
+	outer.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, outer.Run())
 
-	snap, err := proctree.Snapshot()
-	require.NoError(t, err)
-	parent, ok := snap[parentCmd.Process.Pid]
-	require.True(t, ok, "parent %d not in process snapshot", parentCmd.Process.Pid)
+	waitForPIDFile(t, parentPidFile)
+	parent := processFromPIDFile(t, parentPidFile)
+	t.Cleanup(func() { _ = proctree.Signal(parent, syscall.SIGKILL) })
 
 	barrier, sweepDone := startSweepAtGraceBarrier(t, name, func() error {
 		return reapVanishedSessionProcessCohort(name, home, []proctree.Process{parent}, nil,
@@ -250,7 +342,7 @@ func sweepDescendantThatChangesGeneration(t *testing.T, envDir string) {
 		requireReMarkedDescendant(t, parent, child, changedGeneration)
 	})
 
-	err = <-sweepDone
+	err := <-sweepDone
 	require.ErrorContains(t, err, "generation",
 		"a generation mismatch on captured ancestry must remain a refusal")
 	require.True(t, proctree.AliveSame(child),

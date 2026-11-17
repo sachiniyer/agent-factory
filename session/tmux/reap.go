@@ -264,9 +264,11 @@ func paneRowsToProcesses(rows, sanitizedName string) (paneCapture, error) {
 // What is NOT evidence is the point: a marker-matched process with none of
 // these is exactly the inherited-env case — an af daemon's or helper's child
 // that setsid'd out of the pane, carrying markers it inherited — and it is
-// skipped. With NO evidence at all the gate is off: a blind sweep captured
-// nothing to place against, so it keeps rendering its refusals exactly as
-// before.
+// REPORTED, never silently dropped: "nothing found" on this path authorizes
+// worktree cleanup, so an unattributable survivor must block it. With NO
+// evidence at all the gate refuses every candidate rather than signalling on
+// env alone (#7435 R2): a blind sweep that captured nothing to place against
+// keeps its refusals — it just never opens the kill set.
 type cohortMembership struct {
 	Proven   map[int]uint64
 	PaneSIDs map[int]bool
@@ -275,7 +277,11 @@ type cohortMembership struct {
 
 func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Process) bool {
 	if len(m.Proven) == 0 && len(m.PaneSIDs) == 0 && len(m.Recorded) == 0 {
-		return true
+		// No kernel evidence at all: nothing is admitted — refuse, never
+		// signal (#7435 R2). A marker-only scan cannot prove membership, so
+		// the caller that arrives without captured, SID, or recorded
+		// evidence gets refusals for every candidate it asks about.
+		return false
 	}
 	if m.PaneSIDs[p.SID] {
 		return true
@@ -320,17 +326,23 @@ func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Proce
 // predecessor to place anyone against — still refuses, but as ONE message rather
 // than a line per pid: there the pid/generation pairing is the operator's whole
 // decision procedure, and blindGenerationRefusal is what carries it (#3706).
-func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string, generations orphanGenerationSet, membership cohortMembership) ([]proctree.Process, error) {
+// The returned snapshot is the ONE process-table read this filter made: it
+// decided identity, ancestry and membership for every verdict, so a caller
+// that must apply the same exclusions the signalling reap did — the final
+// survivor check (#7435 R3) — classifies against this same table instead of
+// a second read that could disagree with it.
+func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string, generations orphanGenerationSet, membership cohortMembership) ([]proctree.Process, map[int]proctree.Process, error) {
 	if len(candidates) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	snap, err := proctree.Snapshot()
 	if err != nil {
-		return nil, fmt.Errorf("cannot inspect captured processes after tmux session vanished: %w", err)
+		return nil, nil, fmt.Errorf("cannot inspect captured processes after tmux session vanished: %w", err)
 	}
-	selfUID, selfUIDKnown := proctree.UID(os.Getpid())
+	self := os.Getpid()
+	selfUID, selfUIDKnown := proctree.UID(self)
 	if !selfUIDKnown {
-		return nil, fmt.Errorf("cannot determine reset process ownership while checking vanished tmux session %s", sanitizedName)
+		return nil, nil, fmt.Errorf("cannot determine reset process ownership while checking vanished tmux session %s", sanitizedName)
 	}
 	selfChain := selfAndAncestorProcesses(snap)
 	var owned []proctree.Process
@@ -409,19 +421,29 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				process.PID, sanitizedName, EnvMarkerHome, processHome))
 			continue
 		}
-		// Environment is proof of CARRYING the session's launch markers, never
-		// of MEMBERSHIP: a daemon or helper that setsid'd out of the pane keeps
-		// inherited markers while joining a session this sweep has no claim on
-		// (#7435 item 5 — tmux's global environment can expose them to unrelated
-		// later panes too, #6846). Membership requires kernel-session evidence:
-		// the process's SID is one the proven pane roots led, or the pid matches
-		// a (pid, StartID) pair recorded when the pane was spawned.
-		if !membership.admits(snap, process) {
+		// The exclusion set is the same one signalling applies (#7435 R3): the
+		// marker checks below decide MEMBERSHIP only for a process whose
+		// ancestry does not already place it. The reaper and its ancestors keep
+		// their refusal — reaching here carrying this session's markers means
+		// the reaper is inside the cohort it is judging, so it refuses. A
+		// process POSITIVELY placed in another protected subtree — the reaper's
+		// own descendant outside a tmux boundary, or a proven af-daemon subtree
+		// — is proven NOT ours: skipped silently like signalling spares it, and
+		// never reported as a leak (Codex 4593411284). Only protectReasonUnproven
+		// falls through: it stays unattributable and must surface below.
+		if selfChain[process.PID] {
+			inspectErrs = append(inspectErrs, fmt.Errorf("refusing to reap reset process or ancestor pid %d for vanished session %s",
+				process.PID, sanitizedName))
+			continue
+		}
+		if reason := classifyCaptureAncestry(snap, process.PID, self); reason != "" && reason != protectReasonUnproven {
+			log.InfoLog.Printf("tmux session %s: marked pid %d (%s) is %s; excluding it the way signalling does",
+				sanitizedName, process.PID, process.Comm, reason)
 			continue
 		}
 		processGeneration, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
 		switch {
-		case hasGeneration && generations.empty() && !selfChain[process.PID]:
+		case hasGeneration && generations.empty():
 			// An EMPTY cohort is the blind vanished-session sweep (cleanup.go): it
 			// captured no predecessor, so it has nothing to place this generation
 			// against — a different statement from "outside a cohort I know", which
@@ -431,15 +453,13 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			// the operator's entire decision procedure, and it does not fit in a
 			// per-pid line (#3706). See blindGenerationRefusal.
 			//
-			// selfChain is excluded HERE rather than relied on below, because the
-			// check below runs AFTER this switch and would never be reached. A
-			// blind scan really can reach our own process: refreshOrphanCandidates
-			// walks the whole table for AF_SESSION matches with no self-exclusion,
-			// so an af invoked inside a pane of the session that then vanished
-			// carries that session's markers. Collecting it would print "safe to
-			// kill" at the running af — the exact footgun this message exists to
-			// avoid. It falls through to the case below instead, which refuses it
-			// with no advice attached, as it did before this message existed.
+			// The reaper's own chain never reaches this bucket — it is refused
+			// above, before ancestry is consulted — so collecting here cannot
+			// print "safe to kill" at the running af, the footgun this message
+			// exists to avoid. A blind scan really can reach it:
+			// refreshOrphanCandidates walks the whole table for AF_SESSION
+			// matches with no self-exclusion, so an af invoked inside a pane of
+			// the session that then vanished carries that session's markers.
 			unplaceable = append(unplaceable, markedGeneration{pid: process.PID, generation: processGeneration})
 			continue
 		case hasGeneration && !generations.values[processGeneration]:
@@ -456,8 +476,20 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				process.PID, sanitizedName, EnvMarkerGeneration))
 			continue
 		}
-		if selfChain[process.PID] {
-			inspectErrs = append(inspectErrs, fmt.Errorf("refusing to reap reset process or ancestor pid %d for vanished session %s",
+		// Environment is proof of CARRYING the session's launch markers, never
+		// of MEMBERSHIP: a daemon or helper that setsid'd out of the pane keeps
+		// inherited markers while joining a session this sweep has no claim on
+		// (#7435 item 5 — tmux's global environment can expose them to unrelated
+		// later panes too, #6846). Membership requires kernel-session evidence:
+		// the process's SID is one the proven pane roots led, or the pid matches
+		// a (pid, StartID) pair recorded when the pane was spawned. An
+		// unadmitted carrier is REPORTED, never silently dropped: "nothing
+		// found" on this path authorizes worktree cleanup, so an unattributable
+		// survivor must block it exactly like an unproven home (#7435 R3,
+		// Codex 4593576722).
+		if !membership.admits(snap, process) {
+			inspectErrs = append(inspectErrs, fmt.Errorf(
+				"captured live pid %d marks session %s but cannot be proven a member of its vanished pane cohort",
 				process.PID, sanitizedName))
 			continue
 		}
@@ -466,7 +498,7 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 	if len(unplaceable) > 0 {
 		inspectErrs = append(inspectErrs, blindGenerationRefusal(sanitizedName, unplaceable))
 	}
-	return owned, errors.Join(inspectErrs...)
+	return owned, snap, errors.Join(inspectErrs...)
 }
 
 // markedGeneration is one live process carrying the vanished session's
@@ -837,7 +869,7 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 	// grace wait when this process's own destructive RPC finally reaches its
 	// handler (Codex on #5186). The exempt predicate is re-run before every
 	// signal tier so a late-tracked requester is still spared.
-	return proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
+	remaining := proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
 		if exclusion, excluded := protected[p.PID]; excluded {
 			if !exemptedProtected[p.PID] {
 				exemptedProtected[p.PID] = true
@@ -858,6 +890,22 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 	}, teardownreq.SignalUnlessTracked, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
 		logReapOutcome(reason, sanitizedName, outcome, format, args...)
 	})
+	// An UNPROVEN-ancestry exclusion is exempt from signals but not from the
+	// survivor report: KillEscalatingExcept drops every still-exempt process
+	// from its return, and "nothing left" on this path authorizes cleanup —
+	// so a process whose daemon ancestry could not be proven must be reported
+	// exactly like a SIGKILL survivor rather than silently dropped (#7435 R3,
+	// Codex 4593788804). A POSITIVELY identified exclusion (a proven daemon
+	// subtree, the reaper's own chain) is legitimately spared and stays out.
+	for _, p := range procs {
+		if protected[p.PID] != protectReasonUnproven {
+			continue
+		}
+		if same, err := proctree.SameIdentity(p); err != nil || same {
+			remaining = append(remaining, p)
+		}
+	}
+	return remaining
 }
 
 // processPIDs renders a process set as its PIDs, in order.

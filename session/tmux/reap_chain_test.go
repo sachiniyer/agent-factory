@@ -392,11 +392,25 @@ func TestReapSessionProcessesSparesAFDaemonSubtreeButReapsItsDetachedPeers(t *te
 			return false
 		}
 		repP, err = proctree.Lookup(atoiReapChainPid(t, pids["reparented"]))
-		if err != nil || repP.PPID != 1 {
-			// Still the dying sh's child: the reparented shape is only real
-			// once the kernel hands it to init (no reaper in this chain marks
-			// itself a subreaper).
+		if err != nil {
 			return false
+		}
+		// The reparented shape is only real once the kernel hands the process
+		// UP out of the fixture's own chain. What it lands on is the nearest
+		// subreaper: pid 1 on a bare runner, but a systemd --user instance
+		// marks itself PR_SET_CHILD_SUBREAPER, so under a user session the
+		// orphan arrives at that pid instead — still outside the chain, which
+		// is all this fixture needs. Reaching cliP above it would mean the
+		// reparent never happened (no reaper in this chain is a subreaper).
+		for anc := repP.PPID; anc > 1; {
+			if anc == cliP.PID {
+				return false
+			}
+			q, ok := snap[anc]
+			if !ok {
+				break
+			}
+			anc = q.PPID
 		}
 		lout, err := exec.Command("tmux", "-S", sock, "list-panes", "-t", "subother", "-F", "#{pane_pid}").Output()
 		if err != nil {
@@ -546,7 +560,14 @@ func runReapChainServerDescendant(t *testing.T) {
 
 	serverP, err := proctree.Lookup(server.Process.Pid)
 	require.NoError(t, err)
-	reapSessionProcesses(reapOnRequest, "af_test_srvreap", []proctree.Process{paneP}, 100*time.Millisecond, 100*time.Millisecond, selfProtectedSet())
+	// nil protected on purpose — the ONLY fixture where that is right. Every
+	// other chain fixture pins an explicit set because it exists to check what
+	// the reap DOES under a fixed protection answer. This one exists to check
+	// the protection walk itself (#7435 R5): pane → tmux server → reaper, and
+	// the walk must meet the server BEFORE the reaper so the pane stays
+	// eligible. An explicit selfProtectedSet() would pass without the walk
+	// ever running.
+	reapSessionProcesses(reapOnRequest, "af_test_srvreap", []proctree.Process{paneP}, 100*time.Millisecond, 100*time.Millisecond, nil)
 	fmt.Fprintf(os.Stderr, "srvreaper %d: reap returned\n", os.Getpid())
 
 	status := "ok"
