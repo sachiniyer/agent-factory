@@ -403,6 +403,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		return fmt.Errorf("cannot resolve this agent-factory home; refusing to sweep tmux sessions: %w", err)
 	}
 	matches := make([]string, 0, len(prefixed))
+	var unprovenErrs error
 	for _, match := range prefixed {
 		home, ok, markerErr := sessionHomeMarker(cmdExec, match)
 		if markerErr != nil {
@@ -442,10 +443,15 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		case classifyHomeDir(home, ownHome) == homeForeign:
 			log.InfoLog.Printf("leaving tmux session %s: owned by another agent-factory home (%s)", match, home)
 		case classifyHomeDir(home, ownHome) != homeSame:
-			// Unproven is not "foreign": a relative or unstat-able marker could
-			// not be compared, so the session is left alone for a different
-			// reason and the log must say so (#7435).
+			// Unproven is not "foreign": a relative or unstat-able marker
+			// could name THIS home just as easily as another's, so the
+			// session is left alone — and it is an ERROR, never "leave it"
+			// and return nil. `af reset` takes a nil return as permission
+			// to delete worktrees, and a live pane it cannot attribute may
+			// still be writing to one (Codex on #7435).
 			log.InfoLog.Printf("leaving tmux session %s: home marker (%s) ownership cannot be proven", match, home)
+			unprovenErrs = errors.Join(unprovenErrs, fmt.Errorf(
+				"tmux session %s home marker (%s) ownership cannot be proven; refusing cleanup", match, home))
 		default:
 			matches = append(matches, match)
 		}
@@ -591,7 +597,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	if incompleteCaptures != nil {
 		captureRefusal = fmt.Errorf("refusing to kill incompletely captured tmux sessions: %w", incompleteCaptures)
 	}
-	return errors.Join(killErr, captureRefusal, processSweepErr)
+	return errors.Join(killErr, captureRefusal, processSweepErr, unprovenErrs)
 }
 
 // survivingProcessesError reports processes that outlived the bounded on-request
