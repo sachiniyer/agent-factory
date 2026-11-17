@@ -248,3 +248,51 @@ func TestThrowawaySweepLeavesContainerReapsForAfterReadiness(t *testing.T) {
 		"the sibling is handed on for its container reap")
 	require.Equal(t, []string{entries[expired]}, registered(t, dir), "and stays registered until that reap finishes")
 }
+
+// TestThrowawaySweepRotatesRetainedHomesBehindUntriedOnes: a home kept
+// registered because its container reap was incomplete moves to the back of
+// the next sweep. More of them than the teardown bound, failing start after
+// start, can then never keep a home behind them from being torn down (#7447,
+// Codex on #7448).
+func TestThrowawaySweepRotatesRetainedHomesBehindUntriedOnes(t *testing.T) {
+	self := markedHome(t, nil)
+	homes := make([]string, throwawaySweepMaxHomes+1)
+	for i := range homes {
+		homes[i] = markedHome(t, func(m *throwawaysandbox.Marker) {
+			m.CreatedUnix = 1
+			m.MaxLifetimeSeconds = 60
+		})
+	}
+	dir, entries := registerHomes(t, homes...)
+	// Every entry registered at the same, earlier moment.
+	registeredAt := time.Now().Add(-time.Hour)
+	for _, canon := range entries {
+		require.NoError(t, os.Chtimes(throwawaysandbox.RegistryEntryPath(dir, canon), registeredAt, registeredAt))
+	}
+	previousReg, previousNow, previousTeardown, previousReap := throwawayRegistryDirFn, throwawayNowFn, throwawayTeardownFn, throwawayHomeContainerReapFn
+	throwawayRegistryDirFn = func() string { return dir }
+	throwawayNowFn = func() time.Time { return time.Unix(100000, 0) }
+	var tornDown []string
+	throwawayTeardownFn = func(home string, _ *throwawaysandbox.Marker) { tornDown = append(tornDown, home) }
+	throwawayHomeContainerReapFn = func(string) bool { return false }
+	t.Cleanup(func() {
+		throwawayRegistryDirFn, throwawayNowFn, throwawayTeardownFn, throwawayHomeContainerReapFn = previousReg, previousNow, previousTeardown, previousReap
+	})
+
+	// The first start reaches the bound, and every container reap fails.
+	first := sweepThrowawaySandboxes(self)
+	require.Len(t, first, throwawaySweepMaxHomes)
+	reapSweptThrowawayContainers(first, dir, func(string) bool { return false }, nil)
+	firstSet := map[string]bool{}
+	for _, p := range first {
+		firstSet[p.home] = true
+	}
+
+	// The next start must reach the one home the bound left untried.
+	tornDown = nil
+	second := sweepThrowawaySandboxes(self)
+	require.NotEmpty(t, second)
+	require.False(t, firstSet[second[0].home],
+		"the home the first start never reached must come before the ones it retried: %s", second[0].home)
+	require.Contains(t, tornDown, second[0].home)
+}

@@ -227,10 +227,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 					stopWatch()
 					if throwawayExpired {
 						throwawayTeardownFn(homeDir, marker)
-						// Then its containers (#7447): the home is never
-						// deregistered here, so a later marked start retries
-						// whatever this reap could not remove.
-						throwawayHomeContainerReapFn(homeDir)
 					}
 				})
 			}
@@ -428,6 +424,19 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// session-side registry covers tunnels no instance points at yet (a
 	// provision still in flight). The seam is read here, on the main flow.
 	teardown.add("sandbox tunnels", stopSandboxTunnels)
+	// An expired throwaway's session containers (#7447). A teardown step, so
+	// the stop's deadline bounds it like every other: on a slow or hung Docker
+	// engine it is abandoned at the deadline, named, and the stop exits holding
+	// the home (Codex on #7448). Its own daemon never deregisters the home, so
+	// a later marked start retries whatever this could not remove. A no-op
+	// unless this daemon's sandbox expired. The seam is read here, on the main
+	// flow.
+	reapExpiredThrowawayContainers := throwawayHomeContainerReapFn
+	teardown.add("expired throwaway sandbox containers", func() {
+		if throwawayExpired {
+			reapExpiredThrowawayContainers(throwawayHome)
+		}
+	})
 
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)

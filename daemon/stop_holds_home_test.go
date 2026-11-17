@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"testing"
@@ -393,10 +394,16 @@ func TestRunDaemonExpiredThrowawayIsTornDownBeforeTheExitHoldingTheHome(t *testi
 		t.Fatal("the expired throwaway's daemon never stopped")
 	}
 	// Whether the stop exits holding the home is the first test's property;
-	// this one is that such an exit never skips the sandbox's teardown.
+	// this one is that such an exit never skips the sandbox's teardown, nor
+	// its containers' reap (#7447), which runs as a step of the teardown.
 	seen := order.seen()
-	require.NotEmpty(t, seen, "the expired sandbox was never torn down")
-	require.Equal(t, "throwaway teardown", seen[0],
+	exitAt := slices.Index(seen, "exit")
+	if exitAt < 0 {
+		exitAt = len(seen)
+	}
+	teardownAt := slices.Index(seen, "throwaway teardown")
+	require.NotEqual(t, -1, teardownAt, "the expired sandbox was never torn down: %v", seen)
+	require.Less(t, teardownAt, exitAt,
 		"the expired sandbox must be torn down before the exit that skips the rest of the unwind: %v", seen)
 	teardowns := 0
 	for _, event := range seen {
@@ -405,10 +412,64 @@ func TestRunDaemonExpiredThrowawayIsTornDownBeforeTheExitHoldingTheHome(t *testi
 		}
 	}
 	require.Equal(t, 1, teardowns, "the sandbox is torn down once: %v", seen)
-	// Its containers go with it, before the exit too (#7447).
-	require.GreaterOrEqual(t, len(seen), 2, "the expired sandbox's containers were never reaped: %v", seen)
-	require.Equal(t, "container reap", seen[1],
-		"the expired sandbox's containers must be reaped right after its teardown, before the exit: %v", seen)
+	reapAt := slices.Index(seen, "container reap")
+	require.NotEqual(t, -1, reapAt, "the expired sandbox's containers were never reaped: %v", seen)
+	require.Less(t, reapAt, exitAt, "the expired sandbox's containers must be reaped before the exit: %v", seen)
+}
+
+// TestRunDaemonExpiredThrowawaysContainerReapEndsAtTheStopDeadline: the
+// expiring daemon's container reap is a step of its bounded teardown, so a
+// Docker engine that never answers holds the stop no longer than the stop's
+// deadline (#7447, Codex on #7448). The reap is abandoned there, and the
+// home, which its own daemon never deregisters, stays for a later marked
+// start to retry.
+func TestRunDaemonExpiredThrowawaysContainerReapEndsAtTheStopDeadline(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	stubContainerSweep(t)
+	const teardownBy = time.Second
+	shortenTeardown(t, teardownBy)
+
+	notDefault, registry := t.TempDir(), t.TempDir()
+	previousDefault, previousRegistry, previousTeardown := throwawayDefaultHomeFn, throwawayRegistryDirFn, throwawayTeardownFn
+	throwawayDefaultHomeFn = func() (string, error) { return notDefault, nil }
+	throwawayRegistryDirFn = func() string { return registry }
+	throwawayTeardownFn = func(string, *throwawaysandbox.Marker) {}
+	reaping := make(chan time.Time, 1)
+	releaseReap := make(chan struct{})
+	previousContainerReap := throwawayHomeContainerReapFn
+	throwawayHomeContainerReapFn = func(string) bool {
+		reaping <- time.Now()
+		<-releaseReap // a Docker engine that never answers
+		return false
+	}
+	t.Cleanup(func() {
+		throwawayDefaultHomeFn, throwawayRegistryDirFn, throwawayTeardownFn = previousDefault, previousRegistry, previousTeardown
+		throwawayHomeContainerReapFn = previousContainerReap
+	})
+	require.NoError(t, throwawaysandbox.WriteMarker(home, &throwawaysandbox.Marker{
+		Version: 1, Kind: "test-7447", CreatedUnix: time.Now().Add(-time.Hour).Unix(), MaxLifetimeSeconds: 1,
+	}))
+	captureExitHoldingHome(t, nil)
+
+	runExited := startInProcessDaemon(t, func() { close(releaseReap) })
+	var reapStarted time.Time
+	select {
+	case reapStarted = <-reaping:
+	case <-runExited:
+		// No reap ran, so none could hold the stop. Whether the reap runs at
+		// all is the previous test's property.
+		return
+	case <-time.After(20 * time.Second):
+		t.Fatal("the expired throwaway's daemon never reached its container reap")
+	}
+	select {
+	case <-runExited:
+	case <-time.After(teardownBy + 5*time.Second):
+		t.Fatal("a container reap that never returns held the expiring daemon past its stop deadline")
+	}
+	require.Less(t, time.Since(reapStarted), teardownBy+boundMargin,
+		"the container reap must end at the stop's deadline")
 }
 
 // TestRunDaemonPanicDuringAnAbandonedStopExitsTwoWithItsStack: a panic on the

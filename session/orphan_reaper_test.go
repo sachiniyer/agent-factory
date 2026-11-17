@@ -179,7 +179,8 @@ func TestSweepNoOpWithoutHomeOrDocker(t *testing.T) {
 
 	// No docker CLI: no-op.
 	restoreLook = SetLookPathForTest(func(string) (string, error) { return "", fmt.Errorf("not found") })
-	assert.Equal(t, OrphanSweepResult{}, SweepOrphanContainers("/home/af", nil))
+	got := SweepOrphanContainers("/home/af", nil)
+	assert.Zero(t, got.Listed+got.Reaped+got.Skipped+got.Unknown+got.Errors, "no docker CLI: the sweep does nothing")
 	restoreLook()
 
 	assert.False(t, called, "the sweep must not invoke docker in either no-op path")
@@ -286,4 +287,15 @@ func TestReapHomeContainersSaysWhenItCouldNotList(t *testing.T) {
 
 	assert.True(t, got.Unlisted, "a failed listing must be reported as unlisted")
 	assert.Empty(t, removed)
+}
+
+// TestReapHomeContainersSaysWhenDockerIsMissing: without a docker CLI the pass
+// lists nothing, and says so: a CLI missing now does not prove that an earlier
+// daemon, with one, created no container (Codex on #7448).
+func TestReapHomeContainersSaysWhenDockerIsMissing(t *testing.T) {
+	defer SetLookPathForTest(func(string) (string, error) { return "", fmt.Errorf("docker: not found") })()
+
+	got := ReapHomeContainers(func(string) bool { return true })
+
+	assert.True(t, got.Unlisted, "a missing docker CLI must be reported as unlisted")
 }

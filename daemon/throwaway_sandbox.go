@@ -51,6 +51,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -297,6 +298,11 @@ func sweepThrowawaySandboxes(selfHome string) (pending []throwawayContainerReap)
 	if malformed > 0 {
 		log.WarningLog.Printf("throwaway sandbox registry holds %d unreadable entries; skipping them", malformed)
 	}
+	// Oldest-touched first. An entry kept for a container retry is touched
+	// each time its reap is incomplete (reapSweptThrowawayContainers), so it
+	// moves behind homes not yet tried, and retries that keep failing cannot
+	// hold the teardown bound start after start (#7447, Codex on #7448).
+	homes = oldestTouchedFirst(dir, homes)
 	selfCanonical, err := canonicalDir(selfHome)
 	if err != nil {
 		log.WarningLog.Printf("cannot canonicalize own home %s; throwaway sandbox sweep skipped: %v", selfHome, err)
@@ -352,6 +358,30 @@ sweep:
 	return pending
 }
 
+// oldestTouchedFirst orders registered homes by when their registry entry was
+// last written or touched, oldest first; ties keep the listing's order. An
+// entry that cannot be read sorts first, so it is examined, and dropped or
+// kept by the sweep's own rules.
+func oldestTouchedFirst(dir string, homes []string) []string {
+	type entry struct {
+		home    string
+		touched time.Time
+	}
+	entries := make([]entry, len(homes))
+	for i, home := range homes {
+		entries[i].home = home
+		if info, err := os.Stat(throwawaysandbox.RegistryEntryPath(dir, home)); err == nil {
+			entries[i].touched = info.ModTime()
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].touched.Before(entries[j].touched) })
+	ordered := make([]string, len(entries))
+	for i, e := range entries {
+		ordered[i] = e.home
+	}
+	return ordered
+}
+
 // throwawayContainerReap is a swept home whose processes are gone and whose
 // containers are still to be reaped, with its registry entry as listed.
 type throwawayContainerReap struct {
@@ -390,6 +420,11 @@ func reapSweptThrowawayContainers(pending []throwawayContainerReap, dir string, 
 		}
 		if !reap(p.home) {
 			log.WarningLog.Printf("throwaway sandbox %s stays registered: its containers were not all removed, so a later marked start retries", p.home)
+			// To the back of the next sweep's order (oldestTouchedFirst).
+			now := time.Now()
+			if err := os.Chtimes(throwawaysandbox.RegistryEntryPath(dir, p.registered), now, now); err != nil {
+				log.WarningLog.Printf("throwaway sandbox %s: could not move its registration to the back of the sweep order: %v", p.home, err)
+			}
 			continue
 		}
 		if err := throwawaysandbox.RemoveRegistryEntry(dir, p.registered); err != nil {

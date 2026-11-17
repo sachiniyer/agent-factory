@@ -19,9 +19,10 @@ type OrphanSweepResult struct {
 	Unknown int // orphans left for a later sweep (state unknown)
 	Errors  int // orphans docker refused to remove for a definite reason
 	// Unlisted is set when the pass could not list this engine's containers
-	// at all — no endpoint, no engine identity, or a failed listing — so it
-	// proved nothing about what is still there (#7447). A missing docker CLI
-	// is not unlisted: nothing on this host could have created a container.
+	// at all — no docker CLI, no endpoint, no engine identity, or a failed
+	// listing — so it proved nothing about what is still there (#7447). A
+	// docker CLI missing now does not prove that a daemon which ran earlier,
+	// with one, created no container.
 	Unlisted bool
 }
 
@@ -130,7 +131,10 @@ type containerReap struct {
 func reapListedContainers(pass containerReap) OrphanSweepResult {
 	var result OrphanSweepResult
 	if _, err := lookPath("docker"); err != nil {
-		return result // no docker CLI → nothing this daemon could have created
+		// No docker CLI: nothing to do now, and nothing proven about what an
+		// earlier daemon may have left (Codex on #7448).
+		result.Unlisted = true
+		return result
 	}
 
 	env := sessionenv.DockerCLIEnvironment(os.Environ(), "", nil)
