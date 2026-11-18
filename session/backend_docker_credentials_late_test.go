@@ -56,39 +56,41 @@ func TestDockerCredentialRunArgs_RefusesLateLoadedEndpointNames(t *testing.T) {
 	}
 }
 
-// TestCredentialMountLateNamesStayOffTheAllowlist pins the shape that makes
-// the late-loaded tables meaningful: their names are NOT per-agent
-// allowlisted — af never passes them through its env boundary — so the only
-// way they reach the agent is a source af does not filter (the .env loader,
-// the image, or run_args). If one is ever added to the allowlist it must be
-// reclassified in the regular routing table instead.
-func TestCredentialMountLateNamesStayOffTheAllowlist(t *testing.T) {
-	for agent, table := range credentialMountLateRoutingNames {
-		allowlist := sortedNamesToSet(sessionenv.AgentAllowlistNames(agent))
-		for name := range table {
-			require.NotContainsf(t, allowlist, name,
-				"agent %q: %s joined the per-agent allowlist — move it to credentialMountRoutingNames instead",
-				agent, name)
-		}
+// TestCredentialMountEndpointPinsReachTheAgent is the reachability half of
+// the endpoint fix (#7531 review): a `-e NAME=` pin or `-e NAME=value`
+// re-assert on `docker run` is worthless if the agent-server's env filter
+// strips the name before the agent execs — gemini's .env loader would see it
+// unset and restore a repo value. Every endpoint name the boundary emits
+// for gemini must therefore be allowlisted AND survive FilterForCommand at
+// the exec, in exactly the emitted shape.
+func TestCredentialMountEndpointPinsReachTheAgent(t *testing.T) {
+	source := []string{
+		"CODE_ASSIST_ENDPOINT=" + credentialMountFirstPartyNames[tmux.ProgramGemini]["CODE_ASSIST_ENDPOINT"],
+		"GOOGLE_GEMINI_BASE_URL=",
+		"GOOGLE_VERTEX_BASE_URL=",
+		"CODE_ASSIST_API_VERSION=",
 	}
-	for agent, table := range credentialMountFirstPartyNames {
-		allowlist := sortedNamesToSet(sessionenv.AgentAllowlistNames(agent))
-		for name := range table {
-			require.NotContainsf(t, allowlist, name,
-				"agent %q: %s joined the per-agent allowlist — a first-party re-assert must not be forwardable as a built-in",
-				agent, name)
-		}
+	allowlist := sortedNamesToSet(sessionenv.AgentAllowlistNames(tmux.ProgramGemini))
+	for _, entry := range source {
+		name, _, _ := strings.Cut(entry, "=")
+		require.Containsf(t, allowlist, name,
+			"gemini: %s must be allowlisted so the pin or re-assert reaches the agent's exec environment", name)
+	}
+	got := sortedNamesToSet(sessionenv.FilterForCommand(source, "gemini", "gemini", nil))
+	for _, entry := range source {
+		require.Containsf(t, got, entry,
+			"gemini: the exec filter must carry %q through to the agent — a stripped name is unset to the .env loader", entry)
 	}
 }
 
-// TestCredentialMountDeniedReason_LateClasses covers the refusal's
+// TestCredentialMountDeniedReason_EndpointClasses covers the refusal's
 // because-clause for the new classes so the operator-facing message names
 // the mechanism each defends.
-func TestCredentialMountDeniedReason_LateClasses(t *testing.T) {
-	for name := range credentialMountLateRoutingNames[tmux.ProgramGemini] {
+func TestCredentialMountDeniedReason_EndpointClasses(t *testing.T) {
+	for _, name := range []string{"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "CODE_ASSIST_API_VERSION"} {
 		reason, ok := credentialMountDeniedReason(tmux.ProgramGemini, name)
 		require.True(t, ok, "gemini: %s must have a refusal reason", name)
-		require.Contains(t, reason, ".env", "gemini: %s's reason must name the late loader that restores it", name)
+		require.Contains(t, reason, "where the agent sends", "gemini: %s is a routing name", name)
 	}
 	for name := range credentialMountFirstPartyNames[tmux.ProgramGemini] {
 		reason, ok := credentialMountDeniedReason(tmux.ProgramGemini, name)
@@ -130,6 +132,36 @@ func TestRunContainer_ReassertsFirstPartyEndpointAndPinsLateNames(t *testing.T) 
 	for _, name := range []string{"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "CODE_ASSIST_API_VERSION"} {
 		require.Greater(t, pinFor[name], addHostAt,
 			"the %s pin must come after run_args so a repo value cannot dominate it", name)
+	}
+}
+
+// TestRunContainer_ReassertsGitConfigRoots is the argv pin for the
+// path-valued names (#7531 review): GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are
+// re-asserted to working paths under the boundary's own roots — never
+// defined-empty, which would break `git config --global` — and
+// GIT_CONFIG_NOSYSTEM, a boolean, stays pinned defined-and-empty.
+func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
+	runCalled, _, runArgv := provisionDockerCredentialGrant(t, tmux.ProgramGemini, nil)
+	require.True(t, runCalled)
+
+	joined := strings.Join(runArgv, "\x00")
+	require.Contains(t, joined, "GIT_CONFIG_GLOBAL=",
+		"the global config root must be re-asserted to a working path")
+	require.NotContains(t, joined, "-e\x00GIT_CONFIG_GLOBAL=\x00",
+		"an empty GIT_CONFIG_GLOBAL breaks `git config --global` — the re-assert must carry a real path")
+	require.NotContains(t, joined, "GIT_CONFIG_GLOBAL=/dev/null",
+		"/dev/null fails git config writes with EACCES — the re-assert must be a writable location")
+	require.Contains(t, joined, "GIT_CONFIG_SYSTEM=/etc/gitconfig",
+		"the system config root must be re-asserted to git's own default path")
+	require.Contains(t, joined, "-e\x00GIT_CONFIG_NOSYSTEM=\x00",
+		"a boolean name pins defined-and-empty — the default behavior")
+	// The re-asserted path lives under the re-asserted HOME.
+	for i, arg := range runArgv {
+		if strings.HasPrefix(arg, "GIT_CONFIG_GLOBAL=") {
+			require.Equal(t, runArgv[i-1], "-e")
+			require.True(t, strings.HasSuffix(arg, "/.gitconfig"),
+				"the global config root must point at a writable file under the session home: %s", arg)
+		}
 	}
 }
 

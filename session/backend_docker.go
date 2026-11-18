@@ -689,6 +689,19 @@ func (p *dockerProvisioner) runContainer() error {
 				args = append(args, "-e", "PATH="+imagePATH)
 			}
 		}
+		// GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM relocate git's config files —
+		// a repo-chosen file can set a credential helper, proxy, or trust
+		// root. Defined-empty is not neutral for a path-valued name:
+		// measured on git 2.43, `git config --global` fails writing to an
+		// empty path and /dev/null fails with EACCES, so af re-asserts each
+		// to the location git would consult under the boundary's own roots —
+		// defined (no late loader can claim it) and working (#7531).
+		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_GLOBAL") {
+			args = append(args, "-e", "GIT_CONFIG_GLOBAL="+home+"/.gitconfig")
+		}
+		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_SYSTEM") {
+			args = append(args, "-e", "GIT_CONFIG_SYSTEM=/etc/gitconfig")
+		}
 		// Late-loaded endpoint names whose agent treats defined-empty as a
 		// real value rather than falling back to its default (gemini reads
 		// CODE_ASSIST_ENDPOINT with a nullish coalesce): pinning them empty

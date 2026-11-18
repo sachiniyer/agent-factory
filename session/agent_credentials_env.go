@@ -27,10 +27,10 @@ import (
 //     auth selectors, and the conditional cloud-credential groups they unlock.
 //   - config-root: a name that relocates where the agent reads its credential
 //     or config — CODEX_HOME, CLAUDE_CONFIG_DIR, OPENCODE_CONFIG{,_DIR} — plus
-//     the HOME/XDG names af re-asserts to real values rather than blanking,
-//     and the shared names that relocate credential-bearing state (git's
-//     config files, the GnuPG home, the runtime dir sockets resolve under,
-//     af's own home).
+//     the names af re-asserts to real values rather than blanking (HOME/XDG
+//     roots, the path-valued git config roots, SHELL, PATH), and the shared
+//     names that relocate credential-bearing state (the GnuPG home, the
+//     runtime dir sockets resolve under).
 //   - routing: a name that changes WHERE the agent sends the credential —
 //     base URLs and endpoints, proxies, and CA bundles / trust roots.
 //   - program-choice: a name that selects a program af's tools or the agent
@@ -39,12 +39,14 @@ import (
 //     names that select a server af execs into.
 //   - late-loaded: a name the agent's own loader can restore from a
 //     repository file after af's boundary runs. gemini walks up from the
-//     workspace applying <dir>/.gemini/.env and <dir>/.env fill-if-unset, so
-//     names af never passes are still reachable inside the container: the
-//     falsy-safe endpoint names are pinned defined-and-empty like the rest
-//     of the denied set, while CODE_ASSIST_ENDPOINT is read with a nullish
-//     coalesce that treats empty as a real endpoint, so af re-asserts its
-//     first-party default instead.
+//     workspace applying <dir>/.gemini/.env and <dir>/.env fill-if-unset —
+//     the falsy-safe endpoint names are pinned defined-and-empty like the
+//     rest of the denied set, while CODE_ASSIST_ENDPOINT is read with a
+//     nullish coalesce that treats empty as a real endpoint, so af re-asserts
+//     its first-party default instead. The pins only bite because the names
+//     are allowlisted: a name the agent-server's exec filter strips is unset
+//     to the loader, so every pinned or re-asserted name must also sit in a
+//     set the filter admits.
 //
 // The shared credential, routing, config-root, program-choice, and af-state
 // sets apply to every rostered agent: they are common-allowlist names
@@ -137,19 +139,28 @@ var credentialMountReassertedNames = map[string]struct{}{
 	// relocate where the agent's cache and state land (#7531).
 	"XDG_CACHE_HOME": {},
 	"XDG_STATE_HOME": {},
-	"SHELL":          {},
-	"PATH":           {},
+	// GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM relocate git's config files — a
+	// repo-chosen file can name a credential helper, proxy, or trust root.
+	// They take REAL values rather than empty pins because a path-valued
+	// name must keep the program WORKING, not just neutral: measured on git
+	// 2.43, `GIT_CONFIG_GLOBAL=` makes `git config --global` fail writing to
+	// an empty path and `/dev/null` fails the write with EACCES, so af
+	// re-asserts each to the location git would consult under the
+	// boundary's own roots (#7531).
+	"GIT_CONFIG_GLOBAL": {},
+	"GIT_CONFIG_SYSTEM": {},
+	"SHELL":             {},
+	"PATH":              {},
 }
 
 // credentialMountSharedConfigRootNames are common-allowlist names that
-// relocate where a tool reads credential-bearing state: git's config files
-// (which can set credential.helper, http.* endpoints, and sslCAInfo),
-// gpg's keyring root, and the runtime directory agent/keyring sockets are
-// discovered under. A repo-chosen value redirects the lookup somewhere the
-// repo writes.
+// relocate where a tool reads credential-bearing state and pin empty
+// safely: gpg's keyring root and the runtime directory agent/keyring
+// sockets are discovered under fall back to their defaults when empty, and
+// GIT_CONFIG_NOSYSTEM is a boolean where empty is the same as unset. The
+// path-valued git config roots are in credentialMountReassertedNames
+// instead — an empty path breaks the program, not just neutralizes it.
 var credentialMountSharedConfigRootNames = map[string]struct{}{
-	"GIT_CONFIG_GLOBAL":   {},
-	"GIT_CONFIG_SYSTEM":   {},
 	"GIT_CONFIG_NOSYSTEM": {},
 	"GNUPGHOME":           {},
 	"XDG_RUNTIME_DIR":     {},
@@ -277,32 +288,21 @@ var credentialMountRoutingNames = map[string]map[string]struct{}{
 		"OPENAI_BASE_URL":       {},
 		"AZURE_OPENAI_ENDPOINT": {},
 	},
-}
-
-// credentialMountLateRoutingNames are routing names the agent's OWN late
-// loader can restore from a repository file after af's environment boundary
-// runs — so they are reachable for the agent even though af's filter never
-// passes them (they are not in any per-agent allowlist, by design: passing
-// them through is exactly what a repository abuses). gemini walks up from
-// the workspace applying <dir>/.gemini/.env and <dir>/.env fill-if-unset —
-// measured in internal/sessionenv/account.go — so a checked-in .env can name
-// the base URL the session's OAuth traffic goes to unless the name is
-// already defined. af pins them defined-and-empty like the rest of the
-// denied set: gemini-cli reads each through a truthy check
-// (if (process.env[NAME]) / envBaseUrl || default), so an empty string is
-// the same as unset for its own endpoint selection while the .env loader
-// treats the defined name as claimed (#7531).
-var credentialMountLateRoutingNames = map[string]map[string]struct{}{
 	tmux.ProgramGemini: {
-		// API-key / gateway mode base URL. A truthy value also flips
-		// getAuthTypeFromEnv to GATEWAY, which is why the pin is empty
-		// rather than a first-party value: defining the real default
-		// would change auth detection for operators who never set it.
-		"GOOGLE_GEMINI_BASE_URL": {},
-		// Vertex AI base URL — same truthy read, falsy-safe empty.
-		"GOOGLE_VERTEX_BASE_URL": {},
-		// Code Assist API version selector: read with || so empty falls
-		// back to the compiled default.
+		// gemini's endpoint names are per-agent allowlisted so the pins
+		// reach the exec environment, and late-loaded besides: the CLI
+		// walks up from the workspace applying <dir>/.gemini/.env and
+		// <dir>/.env fill-if-unset (measured in
+		// internal/sessionenv/account.go), so a checked-in .env can name
+		// the base URL the session's OAuth traffic goes to unless the
+		// name is already defined. Each is read through a truthy/|| check
+		// in gemini-cli, so a defined-empty pin falls back to the compiled
+		// default while the .env loader treats the name as claimed (#7531).
+		// GOOGLE_GEMINI_BASE_URL truthy also flips getAuthTypeFromEnv to
+		// GATEWAY — one more reason the pin must be empty, not a
+		// first-party value.
+		"GOOGLE_GEMINI_BASE_URL":  {},
+		"GOOGLE_VERTEX_BASE_URL":  {},
 		"CODE_ASSIST_API_VERSION": {},
 	},
 }
@@ -417,7 +417,6 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 	add(credentialMountIdentityEnvNames[agent])
 	add(credentialMountConfigRootNames[agent])
 	add(credentialMountRoutingNames[agent])
-	add(credentialMountLateRoutingNames[agent])
 	for name := range credentialMountFirstPartyNames[agent] {
 		denied[name] = struct{}{}
 	}
@@ -461,9 +460,6 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	}
 	if _, ok := credentialMountRoutingNames[agent][name]; ok {
 		return "it changes where the agent sends the mounted credential", true
-	}
-	if _, ok := credentialMountLateRoutingNames[agent][name]; ok {
-		return "it changes where the agent sends the mounted credential, and the agent's own .env loader can restore it after af's boundary", true
 	}
 	if _, ok := credentialMountFirstPartyNames[agent][name]; ok {
 		return "af re-asserts the agent's first-party endpoint after run_args so the agent's .env loader sees a defined name", true

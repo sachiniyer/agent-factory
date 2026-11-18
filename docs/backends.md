@@ -260,12 +260,16 @@ user's real home and mounts it only if it exists, so:
       `GEMINI_API_KEY` only when the name was unset; defined-and-empty
       survived the `.env`.) `HOME` and the `XDG_*` roots are re-asserted to
       the mount's real roots, `SHELL` to `/bin/sh`, `PATH` to the image's own
-      `Config.Env` `PATH`, and — for gemini, whose `.env` loader fills only
-      unset names but treats a defined-empty endpoint as real —
-      `CODE_ASSIST_ENDPOINT` to its first-party default — so tmux's
-      `default-shell -c` chain, af's own execs, the agent's bare executable,
-      and the agent's endpoint choice all resolve through first-party
-      values, never a repo-added one.
+      `Config.Env` `PATH`, `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to the
+      locations git would consult under the boundary's own roots (an empty
+      pin there is not neutral — it breaks `git config --global`), and — for
+      gemini, whose `.env` loader fills only unset names but treats a
+      defined-empty endpoint as real — `CODE_ASSIST_ENDPOINT` to its
+      first-party default — so tmux's `default-shell -c` chain, af's own
+      execs, the agent's bare executable, and the agent's endpoint choice
+      all resolve through first-party values, never a repo-added one. Every
+      pinned or re-asserted name is one the agent-server's exec filter
+      admits, so the boundary survives the hop to the agent process itself.
     - In af's own `docker exec` steps: every one names `/bin/sh` by absolute
       path, so the container's `PATH` — whatever it is — cannot hand af a
       repo-written `sh` to intercept the agent-server launch. Commands
