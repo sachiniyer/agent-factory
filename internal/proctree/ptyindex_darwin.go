@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -53,7 +54,7 @@ var errPtyFdTimeout = errors.New("pty fd read exceeded its deadline")
 // holds. devfs is single-instance — there is no second devpts to mint a
 // colliding index — so the Dev half is 0 and the index alone qualifies.
 func ptySlaveIndices(pid int) ([]PtyIndex, error) {
-	fds, err := ptyFdIndices(pid, func(path string, viType int32, rdev uint32) (PtyIndex, bool) {
+	fds, err := ptyFdIndices(pid, true, func(path string, viType int32, rdev uint32) (PtyIndex, bool) {
 		if viType == vnodeFdInfoViTypeVCHR && strings.HasPrefix(path, "/dev/ttys") {
 			if idx, ok := ptySlaveIndexFromPath(path); ok {
 				return PtyIndex{Index: idx}, true
@@ -76,7 +77,7 @@ func ptySlaveIndices(pid int) ([]PtyIndex, error) {
 // masters — paired with the descriptor number, so a cached ownership claim
 // re-verifies one fd instead of re-walking the table (#7581 item 2).
 func ptyMasterFdIndices(pid int) ([]PtyFdIndex, error) {
-	return ptyFdIndices(pid, func(path string, viType int32, rdev uint32) (PtyIndex, bool) {
+	return ptyFdIndices(pid, false, func(path string, viType int32, rdev uint32) (PtyIndex, bool) {
 		if viType == vnodeFdInfoViTypeVCHR && path == darwinPtmxPath {
 			return PtyIndex{Index: int(rdev & darwinDevTMinorMask)}, true
 		}
@@ -126,30 +127,94 @@ var ptyFdVnodeRead = func(pid, fd int) (PtyIndex, bool) {
 	return PtyIndex{}, false
 }
 
-// ptyFdIndices runs pid's vnode walk under ptyFdReadBudget: a walk that
-// does not answer in bounded wall-clock time — a getattr parked on a hung
-// mount — is "could not see", never a silent partial read (#7469 R2). The
-// abandoned worker cannot be cancelled (an uninterruptible syscall is a
-// one-way door), so the channel is buffered: it never blocks on send.
-func ptyFdIndices(pid int, classify func(path string, viType int32, rdev uint32) (PtyIndex, bool)) ([]PtyFdIndex, error) {
-	type result struct {
-		indices []PtyFdIndex
-		err     error
+// ptyFdKey scopes a shared walk to what it reads: the process INSTANCE —
+// (pid, StartID) so a recycled pid can never join another process's flight
+// — and which side the walk gathers. A slave walk and a master walk of the
+// same pid are different work and never share a flight.
+type ptyFdKey struct {
+	pid     int
+	startID uint64
+	slave   bool
+}
+
+// ptyFdFlight is ONE shared fd-table walk. Every carrier whose verdict
+// meets the same process and side — a tmux server's table read for the
+// owners map while carriers' slaves are walked — joins this record
+// instead of each paying a vnode walk and, worst case, a hung-mount stall
+// (#7581 item 3 — the attestFlight shape, keyed on the instance and side).
+type ptyFdFlight struct {
+	done    chan struct{}
+	indices []PtyFdIndex
+	err     error
+}
+
+type ptyFdFlightSet struct {
+	mu       sync.Mutex
+	inFlight map[ptyFdKey]*ptyFdFlight
+}
+
+var ptyFdFlights = ptyFdFlightSet{inFlight: map[ptyFdKey]*ptyFdFlight{}}
+
+func (s *ptyFdFlightSet) begin(key ptyFdKey) (f *ptyFdFlight, leader bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if f, ok := s.inFlight[key]; ok {
+		return f, false
 	}
-	done := make(chan result, 1)
-	// The walk is captured on THIS goroutine: an abandoned worker must
-	// never read the package var lazily — a test restoring it after the
-	// deadline would race that read.
-	walk := ptyFdWalk
-	go func() {
-		indices, err := walk(pid, classify)
-		done <- result{indices, err}
-	}()
+	f = &ptyFdFlight{done: make(chan struct{})}
+	s.inFlight[key] = f
+	return f, true
+}
+
+func (s *ptyFdFlightSet) finish(key ptyFdKey, f *ptyFdFlight) {
+	s.mu.Lock()
+	delete(s.inFlight, key)
+	s.mu.Unlock()
+	close(f.done)
+}
+
+// inFlightCount is the test seam for the memory bound: under a wedged walk
+// it must stay 1 per key however many waiters expire.
+func (s *ptyFdFlightSet) inFlightCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.inFlight)
+}
+
+// ptyFdIndices runs pid's vnode walk — slave or master per the side flag —
+// under ptyFdReadBudget AND the in-flight set: concurrent walks of the same
+// (pid, StartID, side) share one worker, each caller bounds its own wait,
+// and a walk that cannot answer in bounded wall-clock time — a getattr
+// parked on a hung mount — is "could not see", never a silent partial read
+// (#7469 R2, #7581 item 3). The abandoned worker cannot be cancelled (an
+// uninterruptible syscall is a one-way door), so the flight record holds
+// constant state however many waiters expire.
+func ptyFdIndices(pid int, slave bool, classify func(path string, viType int32, rdev uint32) (PtyIndex, bool)) ([]PtyFdIndex, error) {
+	// Key the flight on the process INSTANCE: the walk reads a live fd
+	// table, so a pid recycled between snapshot and read must never share
+	// or inherit another instance's flight. A dead pid's walk fails fast
+	// regardless — the zero StartID conflates only processes already gone.
+	var startID uint64
+	if p, err := Lookup(pid); err == nil {
+		startID = p.StartID
+	}
+	key := ptyFdKey{pid: pid, startID: startID, slave: slave}
+	f, leader := ptyFdFlights.begin(key)
+	if leader {
+		// The walk is captured on THIS goroutine: an abandoned worker
+		// must never read the package var lazily — a test restoring it
+		// after the deadline would race that read.
+		walk := ptyFdWalk
+		go func() {
+			f.indices, f.err = walk(pid, classify)
+			ptyFdFlights.finish(key, f)
+		}()
+	}
 	timer := time.NewTimer(ptyFdReadBudget)
 	defer timer.Stop()
 	select {
-	case r := <-done:
-		return r.indices, r.err
+	case <-f.done:
+		return f.indices, f.err
 	case <-timer.C:
 		return nil, errPtyFdTimeout
 	}

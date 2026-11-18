@@ -4,6 +4,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -436,4 +438,95 @@ func TestCarrierServerVerdict_UnprovenPidEqualsNoRecord(t *testing.T) {
 	require.Equal(t, serverVerdictForeign,
 		tmuxEnvServerVerdict(other+",9999,3", unproven, "pidns:test"),
 		"a different socket still proves foreign — the proof gates the pid, never the socket")
+}
+
+// #7581 item 3: concurrent compares of the SAME socket pair share one
+// flight — every marked carrier's env names one of a handful of sockets,
+// so a wedged compare must hold at most one worker no matter how many
+// candidates reach the verdict at once. Each waiter still bounds its own
+// wait, and a different pair always pays its own compare.
+func TestSameRecordedSocket_ConcurrentComparesShareOneFlight(t *testing.T) {
+	oldWalk, oldBudget := socketCompareWalk, socketCompareBudget
+	release := make(chan struct{})
+	var walks atomic.Int64
+	socketCompareBudget = 100 * time.Millisecond
+	socketCompareWalk = func(envSocket, recordedSocket string) (bool, bool) {
+		walks.Add(1)
+		<-release
+		return true, true
+	}
+	t.Cleanup(func() {
+		socketCompareWalk, socketCompareBudget = oldWalk, oldBudget
+		close(release) // free the shared worker — the flight publishes, never leaks
+	})
+
+	const waiters = 5
+	var wg sync.WaitGroup
+	outcomes := make(chan bool, waiters)
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, comparable := sameRecordedSocket("/a/one.sock", "/b/two.sock")
+			outcomes <- comparable
+		}()
+	}
+	wg.Wait()
+	close(outcomes)
+	require.Equal(t, 1, socketCompareFlights.inFlightCount(),
+		"the wedged compare holds exactly ONE flight — no per-waiter state")
+	for comparable := range outcomes {
+		require.False(t, comparable,
+			"every waiter whose budget expired reads 'could not compare' — never foreign")
+	}
+	require.Equal(t, int64(1), walks.Load(),
+		"N waiters on one socket pair share a single filesystem walk")
+
+	// A different pair is different work — its own flight, its own walk.
+	_, _ = sameRecordedSocket("/c/three.sock", "/d/four.sock")
+	require.Equal(t, 2, socketCompareFlights.inFlightCount(),
+		"a second pair never joins the first flight")
+}
+
+// And the shared flight still answers its waiters when the walk lands: one
+// leader's result publishes to every concurrent caller.
+func TestSameRecordedSocket_SharedFlightPublishesOneAnswer(t *testing.T) {
+	oldWalk, oldBudget := socketCompareWalk, socketCompareBudget
+	release := make(chan struct{})
+	var walks atomic.Int64
+	socketCompareBudget = 2 * time.Second
+	socketCompareWalk = func(envSocket, recordedSocket string) (bool, bool) {
+		walks.Add(1)
+		<-release
+		return true, true
+	}
+	t.Cleanup(func() {
+		socketCompareWalk, socketCompareBudget = oldWalk, oldBudget
+		close(release)
+	})
+
+	const waiters = 4
+	ready := make(chan struct{})
+	var wg sync.WaitGroup
+	outcomes := make(chan bool, waiters)
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-ready
+			_, comparable := sameRecordedSocket("/a/one.sock", "/b/two.sock")
+			outcomes <- comparable
+		}()
+	}
+	close(ready)
+	require.Eventually(t, func() bool { return walks.Load() == 1 }, 2*time.Second, 5*time.Millisecond,
+		"the leader's walk has begun")
+	close(release)
+	wg.Wait()
+	close(outcomes)
+	for comparable := range outcomes {
+		require.True(t, comparable, "the published answer reaches every waiter")
+	}
+	require.Equal(t, 0, socketCompareFlights.inFlightCount(),
+		"a finished flight drops its key — the next compare starts fresh")
 }

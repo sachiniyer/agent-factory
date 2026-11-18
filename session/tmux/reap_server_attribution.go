@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
@@ -184,6 +185,60 @@ func parseTmuxEnvTuple(tmuxEnv string) (socket string, serverPID int, sessionIdx
 // answers "could not compare" — undecidable, never foreign.
 var socketCompareBudget = 2 * time.Second
 
+// socketPairKey scopes a shared compare to what it reads: the env spelling
+// and the recorded socket. The compare is not symmetric — the recorded
+// side carries the backslash check — so the pair is keyed in argument
+// order, never merged.
+type socketPairKey struct {
+	env, recorded string
+}
+
+// socketCompareFlight is ONE shared socket-pair comparison. Every marked
+// carrier's env names one of a handful of sockets, so concurrent compares
+// of the same pair — and a wedged one most of all — must share a single
+// worker: a compare parked on a dead mount holds at most one goroutine and
+// one filesystem walk however many waiters attach (#7581 item 3 — the
+// attestFlight shape from proctree, applied to the socket pair). The
+// record IS the bound: nothing a waiter can leave behind.
+type socketCompareFlight struct {
+	done             chan struct{}
+	same, comparable bool
+}
+
+type socketCompareFlightSet struct {
+	mu       sync.Mutex
+	inFlight map[socketPairKey]*socketCompareFlight
+}
+
+var socketCompareFlights = socketCompareFlightSet{inFlight: map[socketPairKey]*socketCompareFlight{}}
+
+func (s *socketCompareFlightSet) begin(key socketPairKey) (f *socketCompareFlight, leader bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if f, ok := s.inFlight[key]; ok {
+		return f, false
+	}
+	f = &socketCompareFlight{done: make(chan struct{})}
+	s.inFlight[key] = f
+	return f, true
+}
+
+func (s *socketCompareFlightSet) finish(key socketPairKey, f *socketCompareFlight) {
+	s.mu.Lock()
+	delete(s.inFlight, key)
+	s.mu.Unlock()
+	close(f.done)
+}
+
+// inFlightCount is the test seam for the memory bound: under a wedged
+// compare it must stay 1 however many waiters expire, and reach 0 once the
+// walk lands.
+func (s *socketCompareFlightSet) inFlightCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.inFlight)
+}
+
 // sameRecordedSocket compares the carrier's env socket spelling against the
 // recorded one the way the socket-binding code does (#7533): canonicalized
 // kernel-walk equality or the same-directory fallback. comparable is false
@@ -194,21 +249,22 @@ func sameRecordedSocket(envSocket, recordedSocket string) (same, comparable bool
 	if !filepath.IsAbs(envSocket) || !filepath.IsAbs(recordedSocket) {
 		return false, false
 	}
-	type verdict struct{ same, comparable bool }
-	done := make(chan verdict, 1)
-	// The walk is captured on THIS goroutine: an abandoned worker must
-	// never read the package var lazily — a test restoring it after the
-	// deadline would race that read.
-	walk := socketCompareWalk
-	go func() {
-		s, c := walk(envSocket, recordedSocket)
-		done <- verdict{s, c}
-	}()
+	key := socketPairKey{env: envSocket, recorded: recordedSocket}
+	f, leader := socketCompareFlights.begin(key)
+	if leader {
+		// The walk is captured on THIS goroutine — the flight's worker
+		// must never read the package var lazily after the deadline.
+		walk := socketCompareWalk
+		go func() {
+			f.same, f.comparable = walk(envSocket, recordedSocket)
+			socketCompareFlights.finish(key, f)
+		}()
+	}
 	timer := time.NewTimer(socketCompareBudget)
 	defer timer.Stop()
 	select {
-	case v := <-done:
-		return v.same, v.comparable
+	case <-f.done:
+		return f.same, f.comparable
 	case <-timer.C:
 		return false, false
 	}
