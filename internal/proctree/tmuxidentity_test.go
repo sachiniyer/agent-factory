@@ -195,36 +195,82 @@ func TestOccupantsOfDir_ExcludesATmuxClient(t *testing.T) {
 }
 
 // Every shape IsTmuxServer has to decide, pinned without a live tmux. Each row
-// names the platform fact it stands for.
+// names the platform fact it stands for. shape is the process's fork shape
+// (linux: read; zero: a backend that does not read it), parent is the parent's
+// process-table entry, and parentUnread marks a parent that could not be read.
 func TestTmuxServerIdentity(t *testing.T) {
-	const af, systemdUser = 4100, 1426
+	const af, systemdUser, server = 4100, 1426, 500
+	var (
+		linux       = forkShape{known: true}
+		linuxCTTY   = forkShape{known: true, ctty: true}
+		linuxMasked = forkShape{known: true, usr1Blocked: true}
+		linuxBoth   = forkShape{known: true, ctty: true, usr1Blocked: true}
+		systemd     = Process{PID: systemdUser, SID: systemdUser, Comm: "systemd"}
+		initSystemd = Process{PID: 1, SID: 1, Comm: "systemd"}
+		afParent    = Process{PID: af, SID: 77, Comm: "af"}
+		tmuxServer  = Process{PID: server, SID: server, Comm: "tmux: server"}
+		// A PID namespace whose init is tmux: `docker run -it img tmux` makes
+		// pid 1 the client, a `tmux -D` entrypoint makes it the server.
+		initClient = Process{PID: 1, SID: 1, Comm: "tmux: client"}
+		initServer = Process{PID: 1, SID: 1, Comm: "tmux: server"}
+		launchd    = Process{PID: 1, SID: 1, Comm: "launchd"}
+	)
 	for _, tc := range []struct {
-		name string
-		p    Process
-		want bool
+		name         string
+		p            Process
+		shape        forkShape
+		parent       Process
+		parentUnread bool
+		want         bool
 	}{
 		// Linux: tmux retitles the task in proc_start, so the name is the answer.
-		{"linux daemonised server under a subreaper", Process{PID: 500, PPID: systemdUser, SID: 500, Comm: "tmux: server"}, true},
-		{"linux foreground -D server", Process{PID: 501, PPID: af, SID: 77, Comm: "tmux: server"}, true},
-		{"linux client", Process{PID: 502, PPID: af, SID: 77, Comm: "tmux: client"}, false},
-		{"linux orphaned PTY client reparented to init", Process{PID: 503, PPID: 1, SID: 503, Comm: "tmux: client"}, false},
-		{"linux process not yet retitled, under a subreaper", Process{PID: 504, PPID: systemdUser, SID: 504, Comm: "tmux"}, false},
+		{"linux daemonised server under a subreaper", Process{PID: server, PPID: systemdUser, SID: server, Comm: "tmux: server"}, linux, systemd, false, true},
+		{"linux daemonised server under init", Process{PID: 510, PPID: 1, SID: 510, Comm: "tmux: server"}, linux, initSystemd, false, true},
+		{"linux foreground -D server", Process{PID: 501, PPID: af, SID: 77, Comm: "tmux: server"}, linuxCTTY, afParent, false, true},
+		{"linux client", Process{PID: 502, PPID: af, SID: 77, Comm: "tmux: client"}, linux, afParent, false, false},
+		{"linux orphaned PTY client reparented to init", Process{PID: 503, PPID: 1, SID: 503, Comm: "tmux: client"}, linux, initSystemd, false, false},
+		{"linux process not yet retitled, under a subreaper", Process{PID: 504, PPID: systemdUser, SID: 504, Comm: "tmux"}, linux, systemd, false, false},
+		{"linux server whose parent cannot be read", Process{PID: 508, PPID: systemdUser, SID: 508, Comm: "tmux: server"}, linux, Process{}, true, false},
+		{"linux daemonised server, init hidden by hidepid", Process{PID: 509, PPID: 1, SID: 509, Comm: "tmux: server"}, linux, Process{}, true, true},
+
+		// #6581: a server's forked child keeps the server's title and argv until
+		// it execs, with SIGUSR1 back at its default action before the exec. At
+		// every point it shares the server's session, holds a terminal, or has
+		// SIGUSR1 blocked, and that refuses it.
+		{"linux pane child before login_tty: the server's session", Process{PID: 505, PPID: server, SID: server, Comm: "tmux: server"}, linuxMasked, tmuxServer, false, false},
+		{"linux pane child inside login_tty: own session, no terminal yet, SIGUSR1 blocked", Process{PID: 505, PPID: server, SID: 505, Comm: "tmux: server"}, linuxMasked, tmuxServer, false, false},
+		{"linux pane child after login_tty: holds the pane's terminal", Process{PID: 505, PPID: server, SID: 505, Comm: "tmux: server"}, linuxBoth, tmuxServer, false, false},
+		{"linux pane child after unblocking, SIGUSR1 at its default", Process{PID: 505, PPID: server, SID: 505, Comm: "tmux: server"}, linuxCTTY, tmuxServer, false, false},
+		{"linux job child (pipe-pane, run-shell) before exec", Process{PID: 506, PPID: server, SID: server, Comm: "tmux: server"}, linux, tmuxServer, false, false},
+		{"linux -D server a pane exec'd directly", Process{PID: 507, PPID: server, SID: 507, Comm: "tmux: server"}, linuxCTTY, tmuxServer, false, false},
+		{"linux tmux-parented process that leads no session, its parent's or its own", Process{PID: 512, PPID: server, SID: 77, Comm: "tmux: server"}, linux, tmuxServer, false, false},
+		{"tmux-parented process whose fork shape is not read", Process{PID: 513, PPID: server, SID: 513, Comm: "tmux: server"}, forkShape{}, tmuxServer, false, false},
+
+		// R1 on #7535: in a PID namespace whose init is tmux, every daemonised
+		// server is reparented to that tmux. daemon(3) left it leading its own
+		// session with no terminal, and it runs with signals unblocked, so it
+		// cannot be a fork-before-exec child and is still a server.
+		{"linux server parented to a tmux init (a client)", Process{PID: 511, PPID: 1, SID: 511, Comm: "tmux: server"}, linux, initClient, false, true},
+		{"linux server parented to a tmux init (a -D server)", Process{PID: 511, PPID: 1, SID: 511, Comm: "tmux: server"}, linux, initServer, false, true},
+		{"linux server parented to a tmux init, read while it forks (signals blocked)", Process{PID: 511, PPID: 1, SID: 511, Comm: "tmux: server"}, linuxMasked, initServer, false, false},
+		{"linux pane child of a tmux init that is a -D server", Process{PID: 514, PPID: 1, SID: 514, Comm: "tmux: server"}, linuxCTTY, initServer, false, false},
 
 		// darwin: tmux cannot retitle, so every tmux process is "tmux" and the
 		// daemon(3) shape is the only positive answer.
-		{"darwin daemonised server", Process{PID: 600, PPID: 1, SID: 600, Comm: "tmux"}, true},
-		{"darwin client af runs as a plain child", Process{PID: 601, PPID: af, SID: 77, Comm: "tmux"}, false},
-		{"darwin client af runs on a PTY (setsid)", Process{PID: 602, PPID: af, SID: 602, Comm: "tmux"}, false},
-		{"darwin client started from a shell", Process{PID: 603, PPID: 300, SID: 300, Comm: "tmux"}, false},
-		{"darwin session id unreadable", Process{PID: 604, PPID: 1, SID: sidUnknown, Comm: "tmux"}, false},
+		{"darwin daemonised server", Process{PID: 600, PPID: 1, SID: 600, Comm: "tmux"}, forkShape{}, launchd, false, true},
+		{"darwin client af runs as a plain child", Process{PID: 601, PPID: af, SID: 77, Comm: "tmux"}, forkShape{}, afParent, false, false},
+		{"darwin client af runs on a PTY (setsid)", Process{PID: 602, PPID: af, SID: 602, Comm: "tmux"}, forkShape{}, afParent, false, false},
+		{"darwin client started from a shell", Process{PID: 603, PPID: 300, SID: 300, Comm: "tmux"}, forkShape{}, Process{PID: 300, SID: 300, Comm: "zsh"}, false, false},
+		{"darwin session id unreadable", Process{PID: 604, PPID: 1, SID: sidUnknown, Comm: "tmux"}, forkShape{}, launchd, false, false},
+		{"darwin pane child before exec", Process{PID: 605, PPID: 600, SID: 605, Comm: "tmux"}, forkShape{}, Process{PID: 600, SID: 600, Comm: "tmux"}, false, false},
 
 		// Anything else is not positively a server.
-		{"unknown title", Process{PID: 700, PPID: 1, SID: 700, Comm: "tmux: frobnicate"}, false},
-		{"not tmux at all", Process{PID: 701, PPID: 1, SID: 701, Comm: "sleep"}, false},
-		{"no pid", Process{PID: 0, PPID: 1, SID: 0, Comm: "tmux"}, false},
+		{"unknown title", Process{PID: 700, PPID: 1, SID: 700, Comm: "tmux: frobnicate"}, linux, initSystemd, false, false},
+		{"not tmux at all", Process{PID: 701, PPID: 1, SID: 701, Comm: "sleep"}, linux, initSystemd, false, false},
+		{"no pid", Process{PID: 0, PPID: 1, SID: 0, Comm: "tmux"}, forkShape{}, launchd, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, tmuxServerIdentity(tc.p))
+			require.Equal(t, tc.want, tmuxServerIdentity(tc.p, tc.shape, tc.parent, !tc.parentUnread))
 		})
 	}
 }

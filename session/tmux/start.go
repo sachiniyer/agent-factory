@@ -484,6 +484,16 @@ func (t *TmuxSession) start(workDir string) error {
 	}
 	ptmx.Close()
 
+	// The server this session was created on, read once while tmux still
+	// answers for it. If the attach below finds the session gone, comparing
+	// this pid with whichever server answers then is what tells a pane that
+	// died from a server that died or was replaced (#6581). Diagnostic only:
+	// an unanswered read leaves it empty and changes nothing else.
+	var createdOnServer string
+	if gen, _ := t.confirmedGeneration(); gen != nil {
+		createdOnServer = gen.serverPID
+	}
+
 	// Set history limit to enable scrollback (default is 2000, we'll use 10000 for
 	// more history). Bounded like every other tmux command in this package (#1917/
 	// #2028): these run on the daemon's create path, so a wedged server must not
@@ -523,6 +533,12 @@ func (t *TmuxSession) start(workDir string) error {
 		// claim against a merely-slow server. This only picks the error wording;
 		// no destructive action is gated on it (#1962).
 		vanished := !t.ExistsOrUnknown()
+		// Which server answers now, read BEFORE Close: the report names the
+		// server's state at the vanish, not after af's own teardown ran.
+		var fate serverFateReport
+		if vanished {
+			fate = t.serverFateSince(createdOnServer)
+		}
 		// Preserve the teardown's unknown classification for callers even though
 		// Launch now independently fails closed on every post-spawn Start error.
 		state, cleanupErr := t.Close()
@@ -533,7 +549,7 @@ func (t *TmuxSession) start(workDir string) error {
 			err = fmt.Errorf("%w: %w", err, ErrTmuxTimeout)
 		}
 		if vanished {
-			return fmt.Errorf("tmux session %s vanished before attach; the pane program likely exited immediately after launch — check that it runs and accepts its flags (program: %q): %w", t.sanitizedName, t.programCmd(), err)
+			return t.vanishedBeforeAttachError(fate, err)
 		}
 		return fmt.Errorf("error restoring tmux session: %w", err)
 	}
