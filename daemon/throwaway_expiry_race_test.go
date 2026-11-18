@@ -28,12 +28,13 @@ import (
 //
 // The race is made deterministic: a marked home whose marker declares a live
 // owner process the watchdog polls every 20ms; a background durable-state
-// writer admitted before the stop ignores the stop channel and sleeps 1.5s, so
-// drainDaemon's join holds the stop open; 400ms into the stop (while the drain
-// is guaranteed still running) the declared owner is killed, so the watchdog
-// fires mid-drain. The test asserts the drain really was held, the watchdog
-// really fired, and then that the fix's guarantees hold: teardown ran, the
-// container reap ran, and the final save was skipped.
+// writer admitted before the stop blocks on its stop channel and then sleeps
+// 1.5s, so drainDaemon's join holds the stop open; the test waits until that
+// stop channel closes (proof the Shutdown RPC was received and the main select
+// already chose shutdownCh) before killing the declared owner, so the
+// watchdog fires mid-drain. The test asserts the drain really was held, the
+// watchdog really fired, and then that the fix's guarantees hold: teardown
+// ran, the container reap ran, and the final save was skipped.
 func TestRunDaemonThrowawayExpiryIsObservedWhenItRacesTheStop(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -108,28 +109,47 @@ func TestRunDaemonThrowawayExpiryIsObservedWhenItRacesTheStop(t *testing.T) {
 	}
 	waitForDaemonPhase(t, DaemonPhaseReady)
 
-	// Admit a background durable-state writer that ignores the stop channel
-	// and sleeps well past the kill below, so drainDaemon's join (which waits
-	// for admitted background mutations through
+	// Admit a background durable-state writer that blocks on its stop channel
+	// and then sleeps well past the kill below, so drainDaemon's join (which
+	// waits for admitted background mutations through
 	// stopAndWaitBackgroundMutationsForShutdown) holds the stop open. The
 	// drain then runs for ~this long, giving the watchdog's fire a guaranteed
 	// mid-drain landing window after the main select already returned.
+	//
+	// drainEntered closes the instant stopAndWaitBackgroundMutationsForShutdown
+	// closes the mutation's stop channel, which is proof that the Shutdown RPC
+	// was received and the main select already chose shutdownCh and returned —
+	// the regression's precondition. Waiting on it before the kill (instead of
+	// a fixed delay) keeps the test honest on a slow or heavily scheduled
+	// runner, where a 400 ms sleep could let the main select choose
+	// throwawayExpireCh under the old implementation and pass every assertion
+	// without exercising the race.
 	const drainHold = 1500 * time.Millisecond
+	drainEntered := make(chan struct{})
 	require.True(t, manager.launchBackgroundMutation(func(stop <-chan struct{}) {
+		<-stop
+		close(drainEntered)
+		// Hold the drain open for the full drainHold after the drain entered
+		// stopAndWait, so the watchdog's fire is guaranteed to land mid-drain.
 		time.Sleep(drainHold)
 	}), "the background mutation that holds the drain was not admitted")
 
-	// Stop the daemon; the drain immediately starts holding for drainHold.
+	// Stop the daemon; the drain starts once the Shutdown RPC is received.
 	asked := time.Now()
 	go func() {
 		var resp ShutdownResponse
 		_ = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
 	}()
-	// 400ms in, while the drain is guaranteed still running (drainHold is
-	// 1.5s), kill the declared owner. The watchdog polls every 20ms, so it
-	// closes throwawayExpireCh within ~40ms — mid-drain, after the main
-	// select already took the shutdownCh case and returned.
-	time.Sleep(400 * time.Millisecond)
+	// Wait until the drain has actually entered stopAndWait — the background
+	// mutation's stop channel closed — so the main select already took the
+	// shutdownCh case and returned before the watchdog fires. Then kill the
+	// declared owner. The watchdog polls every 20ms, so it closes
+	// throwawayExpireCh within ~40ms — mid-drain, the race this test pins.
+	select {
+	case <-drainEntered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the drain never started; the Shutdown RPC was not observed before the kill")
+	}
 	require.NoError(t, owner.Process.Kill())
 	_, _ = owner.Process.Wait()
 
