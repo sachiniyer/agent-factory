@@ -18,7 +18,7 @@ func TestPtyFdIndices_AHungWalkAnswersCouldNotSee(t *testing.T) {
 	oldWalk, oldBudget := ptyFdWalk, ptyFdReadBudget
 	release := make(chan struct{})
 	ptyFdReadBudget = 100 * time.Millisecond
-	ptyFdWalk = func(pid int, classify func(string, int32, uint32) (PtyIndex, bool)) ([]PtyIndex, error) {
+	ptyFdWalk = func(pid int, classify func(string, int32, uint32) (PtyIndex, bool)) ([]PtyFdIndex, error) {
 		<-release
 		return nil, nil
 	}
@@ -34,6 +34,6 @@ func TestPtyFdIndices_AHungWalkAnswersCouldNotSee(t *testing.T) {
 	require.Less(t, time.Since(start), 5*time.Second,
 		"the deadline is wall-clock, not the mount's mercy")
 
-	_, err = ptyMasterIndices(4242)
+	_, err = PtyMasterIndices(4242)
 	require.ErrorIs(t, err, errPtyFdTimeout)
 }

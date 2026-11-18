@@ -359,9 +359,11 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		// bucket: a kernel-proven member cannot be overridden by attribution
 		// — the proof came from this session's own recorded pane evidence,
 		// so a carrier carrying it was never the foreign server's work (R4).
-		// Undecidable is today's verdict — it admits nothing and blocks
-		// nothing on its own.
-		serverVerdict := carrierServerVerdict(process, environ, membership.OwnServer, snap, membership.owners, selfNS)
+		// So the attribution read itself runs only in the bucket it can move
+		// (#7581 item 2): every arm above the default is already decided, and
+		// paying the env walk, socket compare and pty reads there buys
+		// nothing. Undecidable is today's verdict — it admits nothing and
+		// blocks nothing on its own.
 		switch {
 		case selfChain[process.PID]:
 			// The reaper and its ancestors keep their refusal — reaching
@@ -470,7 +472,7 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				"captured live pid %d marks session %s but sits behind a tmux server and cannot be proven a member — refusing to attribute it; left alive, never signalled",
 				process.PID, sanitizedName))
 		default:
-			if serverVerdict == serverVerdictForeign {
+			if carrierServerVerdict(process, environ, membership.OwnServer, snap, membership.owners, selfNS) == serverVerdictForeign {
 				// #7469: a DETACHED carrier positively attributed to a tmux
 				// server OTHER than the recorded one — a different socket
 				// in its TMUX env, or a live foreign server holding its

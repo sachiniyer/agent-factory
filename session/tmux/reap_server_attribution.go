@@ -3,7 +3,6 @@ package tmux
 import (
 	"net"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -283,22 +282,23 @@ func ptyFdServerVerdict(pid int, own ServerIdentity, snap map[int]proctree.Proce
 	m := owners.forSnapshot(snap)
 	verdict := serverVerdictUndecidable
 	for _, key := range indices {
-		holder, ok := m[key]
+		owner, ok := m[key]
 		if !ok {
 			continue
 		}
 		// The map was built at the sweep's start; a carrier may be judged
 		// one pass later, after the holder released the index and it was
 		// reallocated to a DIFFERENT server. A cached hit alone cannot
-		// stand as positive foreign evidence — the holder must still hold
-		// this master when the verdict is made, or the slave contributes
-		// nothing (Codex on #7469). One bounded fdinfo read per matched
-		// key, no subprocess; the map itself stays once-per-sweep.
-		held, err := ptyMasterIndices(holder)
-		if err != nil || !slices.Contains(held, key) {
+		// stand as positive foreign evidence — the very descriptor the
+		// map recorded must still master this index when the verdict is
+		// made, or the slave contributes nothing (Codex on #7469). One
+		// fdinfo read on the RECORDED fd where a whole fd-table walk used
+		// to run (#7581 item 2); the map itself stays once-per-sweep.
+		held, ok := ptyMasterFdIndex(owner.pid, owner.fd)
+		if !ok || held != key {
 			continue
 		}
-		switch v := compareHeldServer(snap, holder, own, selfNS); v {
+		switch v := compareHeldServer(snap, owner.pid, own, selfNS); v {
 		case serverVerdictForeign:
 			return serverVerdictForeign
 		case serverVerdictOwn:
@@ -335,25 +335,35 @@ func compareHeldServer(snap map[int]proctree.Process, holder int, own ServerIden
 	return serverVerdictOwn
 }
 
-// serverPtyOwners is the once-per-sweep pty-index → server-pid map the pty
-// channel consults. It is built lazily — only when a detached-shape carrier
-// reaches the verdict — from the same process-table snapshot the sweep judges
-// against, so the attribution cannot disagree with the ancestry that saw the
-// same table. Only POSITIVELY identified tmux servers contribute: an
-// unreadable or fork-child tmux process is never a server's name here, which
-// is the safe direction for the foreign verdict it feeds.
+// ptyOwner is one recorded ownership claim: which positively-identified
+// server holds the pty index's master, and on which of its descriptors —
+// the pair a later verdict re-verifies with ONE read instead of a fresh
+// walk of the holder's fd table (#7581 item 2).
+type ptyOwner struct {
+	pid int
+	fd  int
+}
+
+// serverPtyOwners is the once-per-sweep pty-index → owning-descriptor map
+// the pty channel consults. It is built lazily — only when a detached-shape
+// carrier reaches the verdict — from the same process-table snapshot the
+// sweep judges against, so the attribution cannot disagree with the
+// ancestry that saw the same table. Only POSITIVELY identified tmux
+// servers contribute: an unreadable or fork-child tmux process is never a
+// server's name here, which is the safe direction for the foreign verdict
+// it feeds.
 type serverPtyOwners struct {
 	built  bool
-	byIdx  map[proctree.PtyIndex]int
+	byIdx  map[proctree.PtyIndex]ptyOwner
 	server func(pid int) bool
 }
 
-func (o *serverPtyOwners) forSnapshot(snap map[int]proctree.Process) map[proctree.PtyIndex]int {
+func (o *serverPtyOwners) forSnapshot(snap map[int]proctree.Process) map[proctree.PtyIndex]ptyOwner {
 	if o.built {
 		return o.byIdx
 	}
 	o.built = true
-	o.byIdx = make(map[proctree.PtyIndex]int)
+	o.byIdx = make(map[proctree.PtyIndex]ptyOwner)
 	server := o.server
 	if server == nil {
 		server = tmuxServerIdentified
@@ -365,15 +375,15 @@ func (o *serverPtyOwners) forSnapshot(snap map[int]proctree.Process) map[proctre
 		if (o.server == nil && !strings.HasPrefix(proc.Comm, "tmux")) || !server(pid) {
 			continue
 		}
-		indices, err := ptyMasterIndices(pid)
+		indices, err := ptyMasterFdIndices(pid)
 		if err != nil {
 			// A server whose fds cannot be read names nothing; the carrier
 			// it might have mastered stays undecidable.
 			continue
 		}
-		for _, key := range indices {
-			if _, taken := o.byIdx[key]; !taken {
-				o.byIdx[key] = pid
+		for _, fi := range indices {
+			if _, taken := o.byIdx[fi.PtyIndex]; !taken {
+				o.byIdx[fi.PtyIndex] = ptyOwner{pid: pid, fd: fi.Fd}
 			}
 		}
 	}
@@ -397,10 +407,13 @@ func serverVerdictReason(environ []string, own ServerIdentity, selfNS string) st
 	return "pty descriptors"
 }
 
-// ptySlaveIndices and ptyMasterIndices are package vars so a test can stage
-// the kernel reads the verdict consumes — the real ones read /proc fd/fdinfo
-// on linux and proc_pidfdinfo vnodes on darwin (internal/proctree/ptyindex*).
+// ptySlaveIndices, ptyMasterFdIndices and ptyMasterFdIndex are package vars
+// so a test can stage the kernel reads the verdict consumes — the real ones
+// read /proc fd/fdinfo on linux and proc_pidfdinfo vnodes on darwin
+// (internal/proctree/ptyindex*). The fd-paired calls back the ownership
+// map's build and the single-fd re-verify (#7581 item 2).
 var (
-	ptySlaveIndices  = proctree.PtySlaveIndices
-	ptyMasterIndices = proctree.PtyMasterIndices
+	ptySlaveIndices    = proctree.PtySlaveIndices
+	ptyMasterFdIndices = proctree.PtyMasterFdIndices
+	ptyMasterFdIndex   = proctree.PtyMasterFdIndex
 )

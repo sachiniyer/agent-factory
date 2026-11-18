@@ -373,6 +373,45 @@ func TestVanishedSessionSweep_UnprovenPidKeepsMastersVerdict(t *testing.T) {
 	require.True(t, proctree.AliveSame(carrier), "the sweep only marks in a fixture")
 }
 
+// #7581 item 2: the attribution read — the carrier's pty-slave walk the
+// verdict consults — runs ONLY for a candidate the verdict can move. A
+// kernel-proven member admits at the proven arm above it; the sweep must
+// never pay the read for it. Counted per pid so a skipped arm and an
+// attributed one are distinguished, not just totaled.
+func TestVanishedSessionSweep_AttributionRunsOnlyInTheUnprovenBucket(t *testing.T) {
+	name := "af_scoped_attr"
+	home := t.TempDir()
+	gen := name + "-gen"
+	own := recordedOwnServer(t)
+
+	provenCarrier := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0])
+	defaultCarrier := spawnOrphanedMarkedCarrier(t, name, home, gen,
+		agentNamedBinary(t, os.Args[0]))
+
+	slavesRead := make(map[int]int)
+	oldSlaves := ptySlaveIndices
+	ptySlaveIndices = func(pid int) ([]proctree.PtyIndex, error) {
+		slavesRead[pid]++
+		return nil, nil
+	}
+	t.Cleanup(func() { ptySlaveIndices = oldSlaves })
+
+	marked, _, err := markedOrphanProcesses(
+		[]proctree.Process{provenCarrier, defaultCarrier}, name, home, fixtureCohort(gen),
+		cohortMembership{
+			Recorded:  map[int]uint64{provenCarrier.PID: provenCarrier.StartID},
+			Root:      proctree.Process{PID: provenCarrier.PPID, StartID: 1},
+			AgentExe:  "claude",
+			OwnServer: own,
+		}, nil, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []proctree.Process{provenCarrier, defaultCarrier}, marked)
+	require.Zero(t, slavesRead[provenCarrier.PID],
+		"a kernel-proven member is decided above attribution — its pty table is never walked")
+	require.Equal(t, 1, slavesRead[defaultCarrier.PID],
+		"the unproven-bucket carrier pays exactly one attribution read")
+}
+
 // #3699 pinned: the re-hosted claude keeps converging. A claude-comm carrier
 // under a recorded root — no TMUX env, no pty, no foreign anything — still
 // passes tier 2's executable identity with a server record standing beside

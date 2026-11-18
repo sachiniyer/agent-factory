@@ -120,17 +120,33 @@ func TestPtyFdServerVerdict_AttributesThroughTheOwnersMap(t *testing.T) {
 		own.PID: {PID: own.PID, StartID: own.StartID},
 		foreign: {PID: foreign, StartID: 5},
 	}
-	oldSlaves, oldMasters := ptySlaveIndices, ptyMasterIndices
-	defer func() { ptySlaveIndices, ptyMasterIndices = oldSlaves, oldMasters }()
+	oldSlaves, oldMasters, oldFd := ptySlaveIndices, ptyMasterFdIndices, ptyMasterFdIndex
+	defer func() { ptySlaveIndices, ptyMasterFdIndices, ptyMasterFdIndex = oldSlaves, oldMasters, oldFd }()
 	ptySlaveIndices = func(pid int) ([]proctree.PtyIndex, error) { return []proctree.PtyIndex{{Index: 42}}, nil }
-	ptyMasterIndices = func(pid int) ([]proctree.PtyIndex, error) {
+	ptyMasterFdIndices = func(pid int) ([]proctree.PtyFdIndex, error) {
 		switch pid {
 		case own.PID:
-			return []proctree.PtyIndex{{Index: 1}, {Index: 2}}, nil
+			return []proctree.PtyFdIndex{
+				{PtyIndex: proctree.PtyIndex{Index: 1}, Fd: 11},
+				{PtyIndex: proctree.PtyIndex{Index: 2}, Fd: 12},
+			}, nil
 		case foreign:
-			return []proctree.PtyIndex{{Index: 42}}, nil
+			return []proctree.PtyFdIndex{{PtyIndex: proctree.PtyIndex{Index: 42}, Fd: 9}}, nil
 		}
 		return nil, nil
+	}
+	// The re-verify reads exactly the recorded descriptor — the holder's
+	// fd table is never walked again (#7581 item 2).
+	ptyMasterFdIndex = func(pid, fd int) (proctree.PtyIndex, bool) {
+		switch {
+		case pid == foreign && fd == 9:
+			return proctree.PtyIndex{Index: 42}, true
+		case pid == own.PID && fd == 11:
+			return proctree.PtyIndex{Index: 1}, true
+		case pid == own.PID && fd == 12:
+			return proctree.PtyIndex{Index: 2}, true
+		}
+		return proctree.PtyIndex{}, false
 	}
 	owners := &serverPtyOwners{server: func(pid int) bool { return pid == own.PID || pid == foreign }}
 
@@ -168,21 +184,57 @@ func TestPtyFdServerVerdict_AttributesThroughTheOwnersMap(t *testing.T) {
 func TestPtyFdServerVerdict_OwnersMapBuiltOncePerSweep(t *testing.T) {
 	own := ownServerFixture(t)
 	snap := map[int]proctree.Process{own.PID: {PID: own.PID, StartID: own.StartID}}
-	oldSlaves, oldMasters := ptySlaveIndices, ptyMasterIndices
-	defer func() { ptySlaveIndices, ptyMasterIndices = oldSlaves, oldMasters }()
+	oldSlaves, oldMasters, oldFd := ptySlaveIndices, ptyMasterFdIndices, ptyMasterFdIndex
+	defer func() { ptySlaveIndices, ptyMasterFdIndices, ptyMasterFdIndex = oldSlaves, oldMasters, oldFd }()
 	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) { return []proctree.PtyIndex{{Index: 1}}, nil }
-	masterCalls := 0
-	ptyMasterIndices = func(pid int) ([]proctree.PtyIndex, error) {
-		masterCalls++
-		return []proctree.PtyIndex{{Index: 1}}, nil
+	mapCalls, verifyCalls := 0, 0
+	ptyMasterFdIndices = func(pid int) ([]proctree.PtyFdIndex, error) {
+		mapCalls++
+		return []proctree.PtyFdIndex{{PtyIndex: proctree.PtyIndex{Index: 1}, Fd: 7}}, nil
+	}
+	ptyMasterFdIndex = func(pid, fd int) (proctree.PtyIndex, bool) {
+		verifyCalls++
+		require.Equal(t, 7, fd, "the re-verify reads the RECORDED descriptor, not a fresh walk")
+		return proctree.PtyIndex{Index: 1}, true
 	}
 	owners := &serverPtyOwners{server: func(pid int) bool { return pid == own.PID }}
 
-	require.Equal(t, serverVerdictOwn, ptyFdServerVerdict(1, own, snap, owners, ""))
-	require.Equal(t, serverVerdictOwn, ptyFdServerVerdict(2, own, snap, owners, ""))
-	// 1 map build + 1 liveness re-verify per matched carrier; the map
-	// itself is still built exactly once.
-	require.Equal(t, 3, masterCalls, "the server→pty map is built once per sweep, not per carrier")
+	require.Equal(t, serverVerdictOwn, ptyFdServerVerdict(1, own, snap, owners, "pidns:test"))
+	require.Equal(t, serverVerdictOwn, ptyFdServerVerdict(2, own, snap, owners, "pidns:test"))
+	require.Equal(t, 1, mapCalls, "the server→pty map is built once per sweep, not per carrier")
+	require.Equal(t, 2, verifyCalls, "one single-fd re-verify per matched carrier — never a table re-walk")
+}
+
+// A recorded claim whose descriptor no longer answers — the fd closed, was
+// reused, or the holder exited between the map build and the verdict —
+// contributes NOTHING: the slave is skipped, the carrier stays
+// undecidable, never foreign on a stale entry (#7581 item 2).
+func TestPtyFdServerVerdict_UnverifiableRecordedFdContributesNothing(t *testing.T) {
+	own := ownServerFixture(t)
+	foreign := 7777
+	snap := map[int]proctree.Process{foreign: {PID: foreign, StartID: 5}}
+	oldSlaves, oldMasters, oldFd := ptySlaveIndices, ptyMasterFdIndices, ptyMasterFdIndex
+	defer func() { ptySlaveIndices, ptyMasterFdIndices, ptyMasterFdIndex = oldSlaves, oldMasters, oldFd }()
+	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) { return []proctree.PtyIndex{{Index: 42}}, nil }
+	ptyMasterFdIndices = func(pid int) ([]proctree.PtyFdIndex, error) {
+		return []proctree.PtyFdIndex{{PtyIndex: proctree.PtyIndex{Index: 42}, Fd: 9}}, nil
+	}
+	owners := &serverPtyOwners{server: func(pid int) bool { return pid == foreign }}
+
+	// The recorded fd no longer answers at all → nothing contributed.
+	ptyMasterFdIndex = func(int, int) (proctree.PtyIndex, bool) { return proctree.PtyIndex{}, false }
+	require.Equal(t, serverVerdictUndecidable,
+		ptyFdServerVerdict(1, own, snap, owners, "pidns:test"),
+		"an fd that cannot be re-read proves nothing")
+
+	// The recorded fd answers a DIFFERENT index — reused since the map
+	// was built → the stale claim is dropped, never foreign.
+	ptyMasterFdIndex = func(int, int) (proctree.PtyIndex, bool) {
+		return proctree.PtyIndex{Index: 43}, true
+	}
+	require.Equal(t, serverVerdictUndecidable,
+		ptyFdServerVerdict(1, own, snap, owners, "pidns:test"),
+		"a reused descriptor must not stand as the cached claim's evidence")
 }
 
 func TestParsePaneServerFields_TailOnly(t *testing.T) {
