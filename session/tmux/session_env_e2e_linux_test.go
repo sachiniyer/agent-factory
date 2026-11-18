@@ -337,6 +337,125 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 	assertAccountScopedNewWindow(t, process, accountDir, dir)
 }
 
+// TestAccountLoaderNamesKeepIfSetAtThePane is the #7555 end-to-end: the
+// keep-if-set names are decided at the pane boundary, where the forwarded
+// value actually lives. A forwarded GIT_CONFIG_COUNT reaches the agent's own
+// environment with its value; an unforwarded loader name arrives defined-EMPTY
+// — never absent, or a repository .env could claim it — and the same answer
+// holds in a restored session's tmux-created window, whose pane inherits the
+// imported session environment through the same boundary.
+func TestAccountLoaderNamesKeepIfSetAtThePane(t *testing.T) {
+	testguard.IsolateTmux(t)
+	forceNewSessionEnvMarkers(t, true)
+	// This process stands in for the daemon: it owns the capability the new
+	// windows claim, and serves the claim socket they connect to (#4731).
+	forceLaunchCapabilityOwner(t, true)
+
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	accountDir, err := agentaccount.Register(home, ProgramGemini, "work")
+	if err != nil {
+		t.Fatalf("register fixture account: %v", err)
+	}
+	// The operator's claim: GIT_CONFIG_COUNT forwarded AND set. The indexed
+	// pair must exist or git fails the count inside this process's own git
+	// calls — af does not soften GIT_CONFIG_* semantics.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.directory")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/work")
+	// Unforwarded loader names must be genuinely absent from the client env:
+	// an ambient value is exactly what the claim test must not mistake.
+	for _, name := range []string{"CLOUD_SHELL", "GCE_METADATA_IP", "GCE_METADATA_HOST", "GIT_CONFIG_PARAMETERS", "GEMINI_CLI_USE_COMPUTE_ADC"} {
+		_ = os.Unsetenv(name)
+	}
+
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	agentPath := filepath.Join(binDir, ProgramGemini)
+	reportPath := filepath.Join(dir, "agent-environment")
+	// The fixture reports its own process environment — the agent's, not a
+	// shell's — so the assertion reaches the final hop, not an intermediate.
+	// The pane command is the bare program name: an account launch proves the
+	// pane's argv against af's generated-argument declaration, and a positional
+	// report-path argument is not part of that declaration.
+	agent := "#!/bin/sh\n" +
+		"env | grep -E '^(GIT_CONFIG_COUNT|CLOUD_SHELL|GEMINI_CLI_HOME)=' | sort > " +
+		shellquote.Quote(reportPath+".partial") +
+		" && mv -f " + shellquote.Quote(reportPath+".partial") + " " + shellquote.Quote(reportPath) + "\n" +
+		testguard.BoundedSpin(time.Second, 5*time.Minute) + "\n"
+	if err := os.WriteFile(agentPath, []byte(agent), 0o700); err != nil {
+		t.Fatalf("write agent fixture: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	session := NewTmuxSession("account-loader-names", ProgramGemini)
+	session.SetAccountForAgent(ProgramGemini, "work")
+	if err := session.SetEnvPassthrough([]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Start(dir); err != nil {
+		t.Fatalf("start account-scoped gemini session: %v", err)
+	}
+	t.Cleanup(func() { _, _ = session.CloseAndWaitForPaneExit() })
+
+	got := waitForReport(t, "agent pane", reportPath)
+	if !strings.Contains(got, "GIT_CONFIG_COUNT=1\n") {
+		t.Fatalf("the forwarded value is the operator's claim and must reach the agent; report:\n%s", got)
+	}
+	if !strings.Contains(got, "CLOUD_SHELL=\n") {
+		t.Fatalf("an unforwarded loader name must reach the agent defined-EMPTY so a repository .env cannot claim it; report:\n%s", got)
+	}
+	if !strings.Contains(got, "GEMINI_CLI_HOME="+accountDir+"\n") {
+		t.Fatalf("the account root must reach the agent; report:\n%s", got)
+	}
+
+	// The restored session inherits the same boundary: the imported session
+	// environment still carries the forwarded value, and the per-pane shim
+	// decides keep-if-set identically.
+	restored := NewTmuxSessionFromSanitizedName(session.SanitizedName(), ProgramGemini)
+	restored.SetAccountForAgent(ProgramGemini, "work")
+	if err := restored.SetEnvPassthrough([]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := restored.RestoreWithResult(dir)
+	if err != nil {
+		t.Fatalf("restore account-scoped gemini session: %v", err)
+	}
+	if result != RestoreReattached {
+		t.Fatalf("restored session result = %v, want reattached", result)
+	}
+	assertLoaderScopedNewWindow(t, restored, accountDir, dir)
+}
+
+func assertLoaderScopedNewWindow(t *testing.T, session *TmuxSession, accountDir, dir string) {
+	t.Helper()
+	if output, err := exec.Command("tmux", "set-option", "-t", ExactTarget(session.SanitizedName()), "default-shell", "/bin/bash").CombinedOutput(); err != nil {
+		t.Fatalf("select profile-reading default shell: %v: %s", err, output)
+	}
+	newPane, err := exec.Command(
+		"tmux", "new-window", "-dP", "-F", "#{pane_id}", "-t", "="+session.SanitizedName()+":",
+	).Output()
+	if err != nil {
+		t.Fatalf("open tmux-created shell window: %v", err)
+	}
+	newWindowReport := filepath.Join(dir, session.SanitizedName()+"-loader-window-environment")
+	newWindowCommand := atomicReport(newWindowReport,
+		"printf 'GIT_CONFIG_COUNT=%s\\nCLOUD_SHELL=%s\\nGEMINI_CLI_HOME=%s\\n' "+
+			"\"${GIT_CONFIG_COUNT-<unset>}\" \"${CLOUD_SHELL-<unset>}\" \"${GEMINI_CLI_HOME-<unset>}\"")
+	target := strings.TrimSpace(string(newPane))
+	if output, err := exec.Command("tmux", "send-keys", "-t", target, "-l", newWindowCommand).CombinedOutput(); err != nil {
+		t.Fatalf("write new-window probe: %v: %s", err, output)
+	}
+	if output, err := exec.Command("tmux", "send-keys", "-t", target, "Enter").CombinedOutput(); err != nil {
+		t.Fatalf("submit new-window probe: %v: %s", err, output)
+	}
+	got := waitForReport(t, "tmux-created window", newWindowReport)
+	want := "GIT_CONFIG_COUNT=1\nCLOUD_SHELL=\nGEMINI_CLI_HOME=" + accountDir + "\n"
+	if got != want {
+		t.Fatalf("restored window did not inherit the keep-if-set boundary; report:\n%s", got)
+	}
+}
+
 func assertAccountScopedNewWindow(t *testing.T, session *TmuxSession, accountDir, dir string) {
 	t.Helper()
 	// An unqualified tmux new-window uses the session's default command. It must

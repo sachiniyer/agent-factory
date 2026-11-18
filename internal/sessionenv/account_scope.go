@@ -37,7 +37,16 @@ func ResolveAccountEnvironment(agent, account string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ApplyAccountEnvironment(nil, "", scope)
+	entries, err := ApplyAccountEnvironment(nil, "", scope)
+	if err != nil {
+		return nil, err
+	}
+	// The keep-if-set names are never stamped here: this env becomes tmux -e
+	// arguments, and an -e NAME= would beat the forwarded value the
+	// update-environment import delivers before the pane shim can see it. The
+	// claim is decided only at the pane hop, where the forwarded value
+	// actually lives (#7555).
+	return omitAccountLoaderFilledNames(scope.Agent, entries), nil
 }
 
 func applyNamedAccountScope(environ []string, agent, account, command string, proof AccountLaunchProof, validateCommand bool) ([]string, error) {

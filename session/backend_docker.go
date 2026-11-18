@@ -794,7 +794,8 @@ func (p *dockerProvisioner) runContainer() error {
 }
 
 func (p *dockerProvisioner) containerEnvironmentNames() []string {
-	names := sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
+	source := os.Environ()
+	names := sessionenv.DockerForwardNames(source, p.agentName(), p.spec.SessionEnvPassthrough)
 	// A forwarded proxy spelling claims its case twin too: emit the twin so the
 	// image's value for it cannot survive (the twin resolves to the forwarded
 	// value through dockerEnvironment's synthesized entries). Scoped to the
@@ -802,10 +803,38 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 	// contract, and an account or plain session's env stays byte-identical
 	// to before (#7529 R8).
 	if len(p.credentialMounts) > 0 {
-		twins, _ := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, os.Environ())
+		twins, _ := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, source)
 		if len(twins) > 0 {
 			names = append(names, twins...)
 			sort.Strings(names)
+		}
+	}
+	if p.spec.Account.Dir != "" {
+		// A keep-if-set name the operator forwarded but did not set must still
+		// blank the image's value for it: -e admits the name through the wrap's
+		// passthrough extras, and an image ENV value that survived would reach
+		// ScopeAgentServerAccount reading exactly like the operator's claim
+		// (#7555). Emitting the explicit-empty form gives the name the same
+		// answer an unset local import gives the pane shim — defined-empty —
+		// rather than whatever the repository-selected image declared.
+		present := make(map[string]struct{}, len(source))
+		for _, entry := range source {
+			if name, _, ok := strings.Cut(entry, "="); ok {
+				present[name] = struct{}{}
+			}
+		}
+		forwarded := make(map[string]struct{}, len(p.spec.SessionEnvPassthrough))
+		for _, name := range p.spec.SessionEnvPassthrough {
+			forwarded[name] = struct{}{}
+		}
+		for _, name := range sessionenv.AccountLoaderFilledNames(p.spec.Account.Agent) {
+			if _, ok := forwarded[name]; !ok {
+				continue
+			}
+			if _, ok := present[name]; ok {
+				continue
+			}
+			names = append(names, name+"=")
 		}
 	}
 	return names

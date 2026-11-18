@@ -239,6 +239,31 @@ or on a sandbox or hook target, is refused with the remedy. Automatic account
 replacement also excludes Docker and every off-box session; see
 [Opt-in auto-resume](#opt-in-auto-resume).
 
+**Environment names the agent's own loader can fill.** Gemini's `.env` loader
+walks up from the workspace and fills only names that are unset — so on an
+account-scoped gemini session, the names a checked-in `.env` could use to
+redirect the account's identity are pinned by af at the agent boundary:
+`CLOUD_SHELL`, `GEMINI_CLI_USE_COMPUTE_ADC`, `GCE_METADATA_IP`,
+`GCE_METADATA_HOST`, `GIT_CONFIG_COUNT`, and `GIT_CONFIG_PARAMETERS`. The pin
+is **keep-if-set**: a name the operator forwards through the global
+`session_env_passthrough` carries the operator's own value — that is the
+claim af exists to deliver — while a name the operator did not forward is
+installed defined-and-empty, so neither a workspace `.env` nor a repo- or
+image-supplied value can claim it. A name forwarded but unset in the daemon
+environment still counts as claimed: it arrives defined-and-empty rather
+than whatever the source would have supplied, and the same answer holds on
+every backend — at the pane boundary locally, at `docker run` plus the
+agent's own exec filter in a container (where `docker.run_args` entries
+naming any of the six, or the indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`
+pairs a forwarded count would activate, are refused — forward the pairs
+through `session_env_passthrough` instead), and at the remote launch shell
+on ssh and sandbox sessions, where the check reads the *remote* environment
+because that is where the value lives. `GIT_CONFIG` itself is deliberately
+not pinned: git reads a defined-empty value as a real config-file path and
+`git config` would break. On claude and codex sessions none of these names
+are pinned, so the `GIT_CONFIG_*` `safe.directory` passthrough those agents
+use keeps working.
+
 ### Account-scoped handoff
 
 Local account-scoped sessions support both same-agent and cross-agent handoffs.

@@ -177,6 +177,90 @@ func TestDockerAccount_RejectsIdentityRunArgs(t *testing.T) {
 	}
 }
 
+// #7555: a forwarded keep-if-set name is the operator's claim channel, and the
+// claim is the DAEMON's environment — never the repository-selected image's. A
+// forwarded name the daemon env actually sets rides bare -e NAME into the
+// container; one the daemon env does NOT set must still blank the image's ENV
+// value, or that image value survives the extras admission and reaches
+// ScopeAgentServerAccount reading exactly like the claim.
+func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
+	f := newDockerAccountFixture(t, "", "gemini", nil)
+	// Forwarded AND set: the real claim. The indexed pair must exist or git
+	// itself fails the count inside the daemon — GIT_CONFIG_* semantics are
+	// whole, af does not soften them.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.directory")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/work")
+	var runArgs []string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "run" {
+			runArgs = append([]string(nil), args...)
+			return nil, fmt.Errorf("stop after docker run")
+		}
+		return fakeLocalDockerResponse(args)
+	}))
+
+	_, _ = createDockerAccountSession(f, "gemini",
+		[]string{"GIT_CONFIG_COUNT", "CLOUD_SHELL", "GIT_CONFIG_PARAMETERS"})
+	require.NotEmpty(t, runArgs, "the account create never reached docker run")
+
+	// Forwarded+set: bare -e NAME, so docker resolves the operator's value.
+	assignment, found := dockerEnvArg(runArgs, "GIT_CONFIG_COUNT")
+	require.True(t, found, "a forwarded-and-set name must ride -e into the container")
+	require.Equal(t, "GIT_CONFIG_COUNT", assignment,
+		"bare -e NAME: docker imports the daemon's value, dominating the image's ENV")
+
+	// Forwarded but NOT set: -e NAME= blanks the image's value. An image ENV
+	// GIT_CONFIG_PARAMETERS=x surviving would read as the operator's claim at
+	// the scope hop — it must be defined-empty instead.
+	for _, name := range []string{"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS"} {
+		assignment, found = dockerEnvArg(runArgs, name)
+		require.True(t, found, "%s: a forwarded-but-unset name must still blank the image value", name)
+		require.Equal(t, name+"=", assignment,
+			"%s: defined-empty is the honest 'forwarded but nothing arrived' answer", name)
+	}
+	// Unforwarded: no -e at all — the scope's pin answers at the exec boundary.
+	_, found = dockerEnvArg(runArgs, "GCE_METADATA_HOST")
+	require.False(t, found, "an unforwarded loader name is never stamped: the scope pin decides it")
+}
+
+// #7555: gemini's keep-if-set names — and the indexed git-config pair prefixes
+// a forwarded GIT_CONFIG_COUNT would animate — are refused to docker.run_args.
+// A repo `-e NAME=…` appended after af's `-e NAME` is last-wins at docker run,
+// which would turn a repository value into what the claim channel reports as
+// the operator's own forward. The refusal names session_env_passthrough, the
+// channel a real operator value takes instead. The refusal is scoped to the
+// agent that pins them: claude and codex keep the GIT_CONFIG_* family because
+// af pins nothing for them to defend, and their safe.directory workaround
+// rides run_args (#7555 R7).
+func TestDockerAccount_RefusesLoaderFilledRunArgsWhereThePinExists(t *testing.T) {
+	for _, args := range [][]string{
+		{"-e", "CLOUD_SHELL=true"},
+		{"-e", "GEMINI_CLI_USE_COMPUTE_ADC=true"},
+		{"-e", "GCE_METADATA_IP=169.254.169.254"},
+		{"-e", "GCE_METADATA_HOST=metadata.google.internal"},
+		{"-e", "GIT_CONFIG_COUNT=1"},
+		{"-e", "GIT_CONFIG_PARAMETERS=core.x=y"},
+		{"-e", "GIT_CONFIG_KEY_0=safe.directory"},
+		{"-e", "GIT_CONFIG_VALUE_0=/work"},
+		{"--env=GIT_CONFIG_PARAMETERS=core.x=y"},
+		{"-e=GIT_CONFIG_KEY_0=safe.directory"},
+	} {
+		err := validateAccountDockerRunArgs(args, "gemini")
+		require.Error(t, err, "a repo-chosen value for %v must not reach a gemini account container", args)
+		require.Contains(t, err.Error(), "session_env_passthrough",
+			"the refusal must name the channel a real operator value takes")
+	}
+	// Agents that pin nothing keep their run_args — the GIT_CONFIG_* family is
+	// how their safe.directory workaround is expressed.
+	for _, agent := range []string{"claude", "codex"} {
+		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_COUNT=1"}, agent),
+			"%s pins no keep-if-set name — the pair workaround must keep working", agent)
+		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_KEY_0=safe.directory"}, agent))
+		require.NoError(t, validateAccountDockerRunArgs([]string{"-e", "GIT_CONFIG_VALUE_0=/work"}, agent))
+	}
+}
+
 func TestDockerAccount_AllowsSimilarlyNamedMountTargets(t *testing.T) {
 	err := validateAccountDockerRunArgs(
 		[]string{"--mount", "type=bind,src=/tmp/cache,dst=/af-account-cache"},

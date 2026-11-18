@@ -182,6 +182,40 @@ func TestClaimedShim_OldProtocolArgvTakesTheRestartHintPath(t *testing.T) {
 	require.True(t, strings.HasPrefix(err.Error(), "launch capability refused"), "got %q", err)
 }
 
+// Required by #7555: the keep-if-set claim is decided at the in-pane boundary,
+// where the forwarded value actually lives. A name the launch admitted in the
+// capability's passthrough extras reaches the shim's filtered env and is the
+// operator's claim — kept. A name the capability does not forward is filtered
+// out before the scope, and applyAccount installs it defined-empty: the tmux
+// -e half never stamped it, so absence here is honest.
+func TestClaimedShim_LoaderNamesKeepIfSetAtThePane(t *testing.T) {
+	forwarded := Capability{
+		Session: "s", Agent: "gemini", Account: "work", Command: "gemini",
+		Extras: []string{"GIT_CONFIG_COUNT"},
+	}
+	b, sock, token := mintFor(t, forwarded)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("CLOUD_SHELL", "repo-or-ambient-value")
+	run := runShim(t, b, sock, token, false, "gemini")
+	require.NoError(t, run.err)
+	if v, ok := envValue(run.environ, "GIT_CONFIG_COUNT"); !ok || v != "1" {
+		t.Errorf("GIT_CONFIG_COUNT = %q (present %v): the forwarded value is the operator's claim and must reach the agent", v, ok)
+	}
+	if v, ok := envValue(run.environ, "CLOUD_SHELL"); !ok || v != "" {
+		t.Errorf("CLOUD_SHELL = %q (present %v): an ambient value on an unforwarded name is not a claim — pinned empty", v, ok)
+	}
+
+	// The same ambient value, with the name absent from the capability's
+	// extras: the claim channel never carried it, so the pin answers instead.
+	b2, sock2, token2 := mintFor(t, Capability{Session: "s", Agent: "gemini", Account: "work", Command: "gemini"})
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	run = runShim(t, b2, sock2, token2, false, "gemini")
+	require.NoError(t, run.err)
+	if v, ok := envValue(run.environ, "GIT_CONFIG_COUNT"); !ok || v != "" {
+		t.Errorf("GIT_CONFIG_COUNT = %q (present %v): unforwarded, the ambient value must be pinned empty — presence here is the claim", v, ok)
+	}
+}
+
 func TestWrapAccountCommand_CarriesOnlyTheClaimCoordinates(t *testing.T) {
 	wrapped, err := WrapAccountCommand("/usr/local/bin/af", "/tmp/af-claim/claim.sock", "tok123", "claude --x 'a b'")
 	require.NoError(t, err)

@@ -336,6 +336,77 @@ func TestGeminiIdentityPinsSurviveTheLaunchFilters(t *testing.T) {
 	assert.Empty(t, plain.accountPassthroughNames())
 }
 
+// #7555's keep-if-set, decided where the value lives: the identity file's
+// conditional lines run in the remote launch shell, against the remote login
+// environment — the daemon cannot see it, so it emits a test the remote shell
+// evaluates. A name the operator forwarded keeps whatever their remote env set
+// — a deliberate EMPTY included, because ${NAME+x} is true for defined-empty —
+// while an unforwarded name is remote ambient state and pinned unconditionally.
+func TestAccountScrubEnv_LoaderNamesAreConditionalOnPassthrough(t *testing.T) {
+	acct := writeAccount(t, "gemini", "gemini-cred")
+	loader := sessionenv.AccountLoaderFilledNames("gemini")
+	require.NotEmpty(t, loader)
+
+	forwarded := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "gemini",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target,
+			SessionEnvPassthrough: []string{"GIT_CONFIG_COUNT", "CLOUD_SHELL"}}}
+	scrub := forwarded.accountScrubEnv()
+	for _, name := range loader {
+		if name == "GIT_CONFIG_COUNT" || name == "CLOUD_SHELL" {
+			require.Contains(t, scrub, "[ -n \"${"+name+"+x}\" ] || "+name+"=",
+				"a forwarded name is decided remotely: the conditional keeps the remote value (an empty one included)")
+		} else {
+			require.Contains(t, scrub, "\n"+name+"=\n",
+				"an unforwarded name is remote ambient state: pinned unconditionally")
+			require.NotContains(t, scrub, "${"+name+"+x}")
+		}
+	}
+	// Identity pins stay unconditional — a forwarded value can never resurrect one.
+	require.Contains(t, scrub, "GEMINI_API_KEY=\n")
+
+	plain := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "gemini",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
+	scrub = plain.accountScrubEnv()
+	for _, name := range loader {
+		require.Contains(t, scrub, "\n"+name+"=\n", "%s: unforwarded means unconditionally pinned", name)
+	}
+}
+
+// The conditional's semantics, executed the way the launch shell runs it: under
+// `set -a` against a remote login environment. A forwarded name with a remote
+// value keeps it — including a defined-EMPTY one, which ${NAME+x} reads as set
+// — and an unforwarded name is neutralized whatever the remote env held.
+func TestAccountScrubEnv_ConditionalRunsInTheRemoteEnvironment(t *testing.T) {
+	acct := writeAccount(t, "gemini", "gemini-cred")
+	w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "gemini",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target,
+			SessionEnvPassthrough: []string{"GIT_CONFIG_COUNT", "CLOUD_SHELL", "GCE_METADATA_IP"}}}
+	envFile := filepath.Join(t.TempDir(), "af-identity.env")
+	require.NoError(t, os.WriteFile(envFile, []byte(w.accountScrubEnv()), 0o600))
+
+	// The remote login env: GIT_CONFIG_COUNT forwarded+valued, CLOUD_SHELL
+	// forwarded+defined-EMPTY, GCE_METADATA_IP forwarded but unset remotely,
+	// GCE_METADATA_HOST NOT forwarded but set remotely (ambient, must die).
+	script := "set -a && . " + shellQuote(envFile) + " && set +a || exit 1; " +
+		`for n in GIT_CONFIG_COUNT CLOUD_SHELL GCE_METADATA_IP GCE_METADATA_HOST GIT_CONFIG_PARAMETERS; do` +
+		` eval "v=\${$n+x}"; if [ "$v" = x ]; then eval "printf '%s=%s\n' $n \"\${$n}\""; else echo "$n=<unset>"; fi; done`
+	run := func(env ...string) string {
+		cmd := exec.Command("sh", "-c", script)
+		cmd.Env = append([]string{"PATH=/usr/bin:/bin"}, env...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return string(out)
+	}
+	got := run(
+		"GIT_CONFIG_COUNT=1", "CLOUD_SHELL=", "GCE_METADATA_HOST=ambient-host",
+		"GIT_CONFIG_PARAMETERS=ambient-params")
+	assert.Contains(t, got, "GIT_CONFIG_COUNT=1\n", "a forwarded remote value is the operator's claim — kept")
+	assert.Contains(t, got, "CLOUD_SHELL=\n", "a forwarded DEFINED-EMPTY is kept: ${NAME+x} reads it as set")
+	assert.Contains(t, got, "GCE_METADATA_IP=\n", "forwarded but unset remotely: pinned empty, not removed")
+	assert.Contains(t, got, "GCE_METADATA_HOST=\n", "unforwarded: the remote ambient value is neutralized")
+	assert.Contains(t, got, "GIT_CONFIG_PARAMETERS=\n", "unforwarded: the remote ambient value is neutralized")
+}
+
 // A fresh gemini scope must start without the authentication picker: the Google-login
 // selection is seeded, and nothing else from the account's own settings travels.
 func TestGeminiScopeIsSeededWithTheGoogleLoginSelectionOnly(t *testing.T) {

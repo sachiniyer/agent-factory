@@ -673,6 +673,202 @@ func TestApplyAccount_PinsGeminiIdentityNamesAgainstAProjectDotenv(t *testing.T)
 	require.False(t, present, "codex keeps the removal boundary it was measured with")
 }
 
+// THE THIRD CLASS (#7555). The loader-filled names are not identities, so the
+// unconditional pin of accountLateEnvironmentNames is wrong for them: they are
+// the operator's deployment configuration, and a value that survived every
+// upstream filter is exactly the operator's claim and must be kept. The
+// boundary is KEEP-IF-SET — decided by presence alone in the already-filtered
+// env this function receives. An absent name gets the same defined-empty
+// treatment the identity pins get, because the `.env` hole is identical: an
+// undefined name is the repository's to claim.
+func TestApplyAccount_LoaderFilledNamesAreKeepIfSet(t *testing.T) {
+	account := Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"}
+	loader := AccountLoaderFilledNames("gemini")
+	require.NotEmpty(t, loader)
+
+	// A forwarded value survives — including a deliberately forwarded EMPTY
+	// one: presence is the claim, not non-emptiness.
+	scoped, err := ApplyAccount([]string{
+		"PATH=/usr/bin",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/work",
+		"CLOUD_SHELL=",
+	}, "", account)
+	require.NoError(t, err)
+	if v, ok := envValue(scoped, "GIT_CONFIG_COUNT"); !ok || v != "1" {
+		t.Errorf("GIT_CONFIG_COUNT = %q (present %v): a forwarded value is the operator's own claim and must be kept", v, ok)
+	}
+	if v, ok := envValue(scoped, "GIT_CONFIG_KEY_0"); !ok || v != "safe.directory" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q (present %v): the indexed pair rides the operator's claim unexamined", v, ok)
+	}
+	if v, ok := envValue(scoped, "CLOUD_SHELL"); !ok || v != "" {
+		t.Errorf("CLOUD_SHELL = %q (present %v): a forwarded defined-empty keeps the name claimed, empty", v, ok)
+	}
+	for _, name := range loader {
+		if name == "GIT_CONFIG_COUNT" || name == "CLOUD_SHELL" {
+			continue // forwarded above — kept, not pinned
+		}
+		v, ok := envValue(scoped, name)
+		require.True(t, ok, "%s: absent from the forwarded set, the name must be DEFINED so the .env loader finds it claimed", name)
+		require.Empty(t, v, "%s: defined AND EMPTY is the pin, not a fill", name)
+	}
+
+	// Nothing forwarded: every loader name is pinned defined-empty — the same
+	// shape the identity pins install, for the same .env reason.
+	scoped, err = ApplyAccount([]string{"PATH=/usr/bin"}, "", account)
+	require.NoError(t, err)
+	for _, name := range loader {
+		v, ok := envValue(scoped, name)
+		require.True(t, ok, "%s must be defined so the repository's .env cannot claim it", name)
+		require.Empty(t, v)
+	}
+}
+
+// #7555 changed EXACTLY the six gemini loader names: a forwarded one is kept,
+// an unforwarded one is pinned defined-empty. Every other decision ApplyAccount
+// makes is unchanged, and this table is the byte-level proof — claude, codex,
+// and every gemini identity-class name produce the output they always did,
+// with and without forwards. Each want is master's literal output; the six
+// `NAME=` additions land only where the new class says they do.
+func TestApplyAccount_LeavesTheNonLoaderPathsByteIdentical(t *testing.T) {
+	geminiPins := []string{
+		"CODE_ASSIST_API_VERSION=", "GEMINI_API_KEY=", "GOOGLE_API_KEY=",
+		"GOOGLE_APPLICATION_CREDENTIALS=", "GOOGLE_GEMINI_BASE_URL=",
+		"GOOGLE_GENAI_USE_GCA=", "GOOGLE_GENAI_USE_VERTEXAI=",
+		"GOOGLE_VERTEX_BASE_URL=", "CODE_ASSIST_ENDPOINT=https://cloudcode-pa.googleapis.com",
+	}
+	geminiLoaderPins := []string{
+		"CLOUD_SHELL=", "GCE_METADATA_HOST=", "GCE_METADATA_IP=",
+		"GEMINI_CLI_USE_COMPUTE_ADC=", "GIT_CONFIG_COUNT=", "GIT_CONFIG_PARAMETERS=",
+	}
+	tests := []struct {
+		name    string
+		account Account
+		env     []string
+		want    []string
+	}{
+		{
+			name:    "claude drops identities, injects root",
+			account: Account{Agent: "claude", Name: "work", Dir: "/d"},
+			env:     []string{"ANTHROPIC_API_KEY=sk", "ANTHROPIC_BASE_URL=https://proxy", "PATH=/bin"},
+			want:    []string{"ANTHROPIC_BASE_URL=https://proxy", "PATH=/bin", "CLAUDE_CONFIG_DIR=/d"},
+		},
+		{
+			name:    "claude passes a git-env name it does not classify",
+			account: Account{Agent: "claude", Name: "work", Dir: "/d"},
+			env:     []string{"PATH=/bin", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory"},
+			want:    []string{"PATH=/bin", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "CLAUDE_CONFIG_DIR=/d"},
+		},
+		{
+			name:    "codex drops identities, injects root",
+			account: Account{Agent: "codex", Name: "work", Dir: "/d"},
+			env:     []string{"OPENAI_API_KEY=sk", "PATH=/bin"},
+			want:    []string{"PATH=/bin", "CODEX_HOME=/d"},
+		},
+		{
+			name:    "codex passes a git-env name it does not classify",
+			account: Account{Agent: "codex", Name: "work", Dir: "/d"},
+			env:     []string{"PATH=/bin", "GIT_CONFIG_PARAMETERS=core.x=y"},
+			want:    []string{"PATH=/bin", "GIT_CONFIG_PARAMETERS=core.x=y", "CODEX_HOME=/d"},
+		},
+		{
+			name:    "gemini identity-class names pin and fill exactly as before",
+			account: Account{Agent: "gemini", Name: "work", Dir: "/d"},
+			env: []string{
+				"GEMINI_API_KEY=ambient", "GOOGLE_APPLICATION_CREDENTIALS=/sa.json",
+				"CODE_ASSIST_ENDPOINT=https://repo.example", "PATH=/bin",
+			},
+			want: append(append(append([]string{"PATH=/bin"}, geminiPins...), geminiLoaderPins...), "GEMINI_CLI_HOME=/d"),
+		},
+		{
+			name:    "gemini keeps only the forwarded loader names",
+			account: Account{Agent: "gemini", Name: "work", Dir: "/d"},
+			env:     []string{"PATH=/bin", "GIT_CONFIG_COUNT=1", "GCE_METADATA_IP=10.0.0.1"},
+			want: append(append(append([]string{
+				"PATH=/bin", "GIT_CONFIG_COUNT=1", "GCE_METADATA_IP=10.0.0.1",
+			}, geminiPins...),
+				"CLOUD_SHELL=", "GCE_METADATA_HOST=",
+				"GEMINI_CLI_USE_COMPUTE_ADC=", "GIT_CONFIG_PARAMETERS="),
+				"GEMINI_CLI_HOME=/d"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ApplyAccount(tt.env, "", tt.account)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// The claim test is presence-in-the-filtered-env, so NO loader name may be
+// admitted by any ordinary allowlist — a repository .env's value riding the
+// common or per-agent list would read exactly like the operator's forward
+// (#7555 decision: verify it, because the whole keep-if-set model rests on it).
+// The names reach their claim only through the explicit passthrough extras.
+func TestAccountLoaderFilledNames_ReachTheClaimOnlyAsExtras(t *testing.T) {
+	six := AccountLoaderFilledNames("gemini")
+	require.Len(t, six, 6, "the measured set is exactly the six names of #7555")
+	for _, name := range six {
+		for _, agent := range AccountAgents() {
+			filtered := FilterForCommand([]string{name + "=repo-set"}, agent, agent, nil)
+			_, present := envValue(filtered, name)
+			require.False(t, present,
+				"%s is admitted for %s without an extra: a repository value would read as the operator's claim", name, agent)
+		}
+		filtered := FilterForCommand([]string{name + "=forwarded"}, "", "", nil)
+		_, present := envValue(filtered, name)
+		require.False(t, present, "%s must not be admitted by the common allowlist alone", name)
+		admitted := FilterForCommand([]string{name + "=forwarded"}, "gemini", "gemini", []string{name})
+		require.Contains(t, admitted, name+"=forwarded", "%s must be reachable through the passthrough extras", name)
+	}
+}
+
+// Keep-if-set names must NEVER join the unconditional identity set: the day one
+// does, ApplyAccount pins it unconditionally and eats the operator's forwarded
+// value — #7555's R1 exactly. And they join ImportedCredentialNames, because a
+// forwarded git-config or auth-source value is credential-class material whose
+// stale tmux update-environment copy must be dropped like any other.
+func TestAccountLoaderFilledNames_NeverJoinTheIdentitySet(t *testing.T) {
+	for _, name := range AccountLoaderFilledNames("gemini") {
+		require.NotContains(t, AccountIdentityNames("gemini"), name,
+			"%s must stay keep-if-set — identity names are pinned unconditionally", name)
+		_, inLate := accountLateEnvironmentNames["gemini"][name]
+		require.False(t, inLate, "%s must stay keep-if-set — late-environment names are pinned unconditionally", name)
+		_, inValues := accountLateEnvironmentValues["gemini"][name]
+		require.False(t, inValues, "%s is keep-if-set, not a valued fill", name)
+		require.Contains(t, ImportedCredentialNames(), name,
+			"%s can carry forwarded credential-class material; its stale tmux import must be dropped", name)
+	}
+}
+
+// ResolveAccountEnvironment feeds tmux's new-session -e, which WINS over the
+// update-environment import that delivers the forwarded value — an -e NAME=
+// would always beat the operator's claim into the pane (#7555's R1 shape). The
+// loader names are therefore never stamped; the pane shim's FilterForCommand
+// plus applyAccount decides them where the forwarded value actually lives.
+func TestResolveAccountEnvironment_NeverStampsLoaderNames(t *testing.T) {
+	dir := t.TempDir()
+	prev := AccountLookup
+	AccountLookup = func(agent, name string) (Account, error) {
+		return Account{Agent: agent, Name: name, Dir: dir}, nil
+	}
+	t.Cleanup(func() { AccountLookup = prev })
+
+	entries, err := ResolveAccountEnvironment("gemini", "work")
+	require.NoError(t, err)
+	for _, name := range AccountLoaderFilledNames("gemini") {
+		for _, entry := range entries {
+			require.False(t, strings.HasPrefix(entry, name+"="),
+				"%s must not be a tmux -e stamp: the pane shim decides it where the forwarded value lives", name)
+		}
+	}
+	require.Contains(t, entries, "GEMINI_CLI_HOME="+dir,
+		"the account root still rides -e: it is unconditional")
+	require.Contains(t, entries, "GEMINI_API_KEY=",
+		"an unconditional identity pin still rides -e: nothing forwards it")
+}
+
 // Every identity a late-environment agent has must be pinned, not just the ones
 // somebody remembered. A credential or selector added to that agent later and
 // left out of the pinned set is a silent reopening of the `.env` hole, and it

@@ -556,6 +556,23 @@ func (w *sandboxWorkspace) accountScrubEnv() string {
 	for _, name := range w.accountPinnedNames() {
 		b.WriteString(name + "=\n")
 	}
+	// The keep-if-set names are decided in the remote launch shell, where the
+	// forwarded value actually lives: a name the operator forwarded keeps
+	// whatever their own login environment set — including a deliberate empty
+	// (`${NAME+x}` is true for a defined-empty value, so the conditional never
+	// clobbers one) — while an unforwarded name is remote ambient state the
+	// boundary neutralizes unconditionally (#7555).
+	passthrough := make(map[string]struct{}, len(w.spec.SessionEnvPassthrough))
+	for _, name := range w.spec.SessionEnvPassthrough {
+		passthrough[name] = struct{}{}
+	}
+	for _, name := range sessionenv.AccountLoaderFilledNames(w.spec.Account.Agent) {
+		if _, forwarded := passthrough[name]; forwarded {
+			b.WriteString("[ -n \"${" + name + "+x}\" ] || " + name + "=\n")
+		} else {
+			b.WriteString(name + "=\n")
+		}
+	}
 	return b.String()
 }
 
