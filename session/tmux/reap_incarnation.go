@@ -392,14 +392,14 @@ func (t *TmuxSession) captureVerifiedTrees(r *closeRun, gen *tmuxGeneration) (pa
 	}
 	prefix := gen.sessionID + paneFieldSeparator + gen.serverPID + paneFieldSeparator + gen.created + paneFieldSeparator
 	var rows []string
-	for _, field := range strings.Fields(string(out)) {
+	for _, field := range splitPaneRows(string(out)) {
 		row, ok := strings.CutPrefix(field, prefix)
 		if !ok {
 			return paneCapture{}, "a pane row was not stamped with the verified server pid and creation stamp, so no processes will be reaped"
 		}
 		rows = append(rows, row)
 	}
-	captured, err := incarnationPaneProcesses(strings.Join(rows, " "), t.sanitizedName)
+	captured, err := incarnationPaneProcesses(strings.Join(rows, "\n"), t.sanitizedName)
 	if err != nil {
 		return captured, fmt.Sprintf("the pane process capture was incomplete (%v)", err)
 	}

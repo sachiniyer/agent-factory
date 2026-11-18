@@ -52,7 +52,7 @@ func TestPtyIndices_ADetachedCarrierStillNamesTheServerItLeft(t *testing.T) {
 	require.NotEmpty(t, masters, "a tmux server with one live pane must report its master")
 	for _, idx := range slaves {
 		require.Contains(t, masters, idx,
-			"the carrier's slave index %d is mastered by server pid %d", idx, server)
+			"the carrier's slave %+v is mastered by server pid %d", idx, server)
 	}
 
 	// The pane's own shell reports the same slave index — the carrier and the

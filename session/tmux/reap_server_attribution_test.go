@@ -102,13 +102,13 @@ func TestPtyFdServerVerdict_AttributesThroughTheOwnersMap(t *testing.T) {
 	}
 	oldSlaves, oldMasters := ptySlaveIndices, ptyMasterIndices
 	defer func() { ptySlaveIndices, ptyMasterIndices = oldSlaves, oldMasters }()
-	ptySlaveIndices = func(pid int) ([]int, error) { return []int{42}, nil }
-	ptyMasterIndices = func(pid int) ([]int, error) {
+	ptySlaveIndices = func(pid int) ([]proctree.PtyIndex, error) { return []proctree.PtyIndex{{Index: 42}}, nil }
+	ptyMasterIndices = func(pid int) ([]proctree.PtyIndex, error) {
 		switch pid {
 		case own.PID:
-			return []int{1, 2}, nil
+			return []proctree.PtyIndex{{Index: 1}, {Index: 2}}, nil
 		case foreign:
-			return []int{42}, nil
+			return []proctree.PtyIndex{{Index: 42}}, nil
 		}
 		return nil, nil
 	}
@@ -119,17 +119,28 @@ func TestPtyFdServerVerdict_AttributesThroughTheOwnersMap(t *testing.T) {
 		"the carrier's slave is mastered by the foreign server")
 
 	// Own-mastered slave → own.
-	ptySlaveIndices = func(int) ([]int, error) { return []int{2}, nil }
+	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) { return []proctree.PtyIndex{{Index: 2}}, nil }
 	require.Equal(t, serverVerdictOwn,
 		ptyFdServerVerdict(1234, own, snap, owners, "pidns:test"))
 
 	// A slave no server masters (the #3699 bg-pty-host shape) → undecidable.
-	ptySlaveIndices = func(int) ([]int, error) { return []int{77}, nil }
+	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) { return []proctree.PtyIndex{{Index: 77}}, nil }
 	require.Equal(t, serverVerdictUndecidable,
 		ptyFdServerVerdict(1234, own, snap, owners, "pidns:test"))
 
+	// Same index on a DIFFERENT terminal instance — the container devpts
+	// case from the Codex review: the index collides but the instance does
+	// not match, so the carrier is attributed to nobody, never to the
+	// wrong-instance server.
+	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) {
+		return []proctree.PtyIndex{{Dev: 99, Index: 42}}, nil
+	}
+	require.Equal(t, serverVerdictUndecidable,
+		ptyFdServerVerdict(1234, own, snap, owners, "pidns:test"),
+		"a slave on another devpts instance must not match the foreign master's bare index")
+
 	// A carrier holding no pty at all → undecidable (carrier D's residual).
-	ptySlaveIndices = func(int) ([]int, error) { return nil, nil }
+	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) { return nil, nil }
 	require.Equal(t, serverVerdictUndecidable,
 		ptyFdServerVerdict(1234, own, snap, owners, "pidns:test"))
 }
@@ -139,9 +150,12 @@ func TestPtyFdServerVerdict_OwnersMapBuiltOncePerSweep(t *testing.T) {
 	snap := map[int]proctree.Process{own.PID: {PID: own.PID, StartID: own.StartID}}
 	oldSlaves, oldMasters := ptySlaveIndices, ptyMasterIndices
 	defer func() { ptySlaveIndices, ptyMasterIndices = oldSlaves, oldMasters }()
-	ptySlaveIndices = func(int) ([]int, error) { return []int{1}, nil }
+	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) { return []proctree.PtyIndex{{Index: 1}}, nil }
 	masterCalls := 0
-	ptyMasterIndices = func(pid int) ([]int, error) { masterCalls++; return []int{1}, nil }
+	ptyMasterIndices = func(pid int) ([]proctree.PtyIndex, error) {
+		masterCalls++
+		return []proctree.PtyIndex{{Index: 1}}, nil
+	}
 	owners := &serverPtyOwners{server: func(pid int) bool { return pid == own.PID }}
 
 	require.Equal(t, serverVerdictOwn, ptyFdServerVerdict(1, own, snap, owners, ""))

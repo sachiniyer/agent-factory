@@ -31,36 +31,41 @@ const (
 	darwinDevTMinorMask   = 0xffffff // makedev(major<<24 | minor)
 )
 
-// ptySlaveIndices returns the index of every /dev/ttysNNN vnode pid holds.
-func ptySlaveIndices(pid int) ([]int, error) {
-	return ptyFdIndices(pid, func(path string, viType int32, rdev uint32) (int, bool) {
+// ptySlaveIndices returns the identity of every /dev/ttysNNN vnode pid
+// holds. devfs is single-instance — there is no second devpts to mint a
+// colliding index — so the Dev half is 0 and the index alone qualifies.
+func ptySlaveIndices(pid int) ([]PtyIndex, error) {
+	return ptyFdIndices(pid, func(path string, viType int32, rdev uint32) (PtyIndex, bool) {
 		if viType == vnodeFdInfoViTypeVCHR && strings.HasPrefix(path, "/dev/ttys") {
-			return ptySlaveIndexFromPath(path)
+			if idx, ok := ptySlaveIndexFromPath(path); ok {
+				return PtyIndex{Index: idx}, true
+			}
 		}
-		return 0, false
+		return PtyIndex{}, false
 	})
 }
 
-// ptyMasterIndices returns the index of every /dev/ptmx vnode pid holds, read
-// from the vnode's rdev minor — the name cannot say which pty it masters.
-func ptyMasterIndices(pid int) ([]int, error) {
-	return ptyFdIndices(pid, func(path string, viType int32, rdev uint32) (int, bool) {
+// ptyMasterIndices returns the identity of every /dev/ptmx vnode pid holds,
+// read from the vnode's rdev minor — the name cannot say which pty it
+// masters.
+func ptyMasterIndices(pid int) ([]PtyIndex, error) {
+	return ptyFdIndices(pid, func(path string, viType int32, rdev uint32) (PtyIndex, bool) {
 		if viType == vnodeFdInfoViTypeVCHR && path == darwinPtmxPath {
-			return int(rdev & darwinDevTMinorMask), true
+			return PtyIndex{Index: int(rdev & darwinDevTMinorMask)}, true
 		}
-		return 0, false
+		return PtyIndex{}, false
 	})
 }
 
 // ptyFdIndices walks pid's vnode descriptors, decoding each one's path,
 // vi_type and vst_rdev for classify. A refused or short read of the LIST is
 // "could not see"; a single fd closing mid-walk is a smaller open set.
-func ptyFdIndices(pid int, classify func(path string, viType int32, rdev uint32) (int, bool)) ([]int, error) {
+func ptyFdIndices(pid int, classify func(path string, viType int32, rdev uint32) (PtyIndex, bool)) ([]PtyIndex, error) {
 	fds, err := listProcFds(pid)
 	if err != nil {
 		return nil, err
 	}
-	var indices []int
+	var indices []PtyIndex
 	for _, fi := range fds {
 		fd := int(int32(binary.LittleEndian.Uint32(fi[procFdInfoFdOffset:])))
 		if binary.LittleEndian.Uint32(fi[procFdInfoFdTypeOffset:]) != procFdTypeVnode || fd < 0 {

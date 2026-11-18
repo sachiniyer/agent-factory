@@ -67,10 +67,17 @@ func parseSessionSnapshot(out string, taken time.Time) *SessionSnapshot {
 			sess = &snapshotSession{gen: tmuxGeneration{sessionID: parts[1], serverPID: parts[2], created: parts[3]}}
 			s.sessions[parts[0]] = sess
 		}
-		// A pane row never contains whitespace (paneRowFormat is built so), which
-		// is what the per-session path's strings.Fields relied on too.
-		if row := strings.TrimSpace(parts[4]); row != "" && !strings.ContainsAny(row, " \t") {
-			sess.rows = append(sess.rows, row)
+		// A pane row's fields carry no whitespace through the separator —
+		// except the last, the free-form socket path, which may. Whitespace
+		// before the final separator still marks a malformed row.
+		if row := strings.TrimSpace(parts[4]); row != "" {
+			prefix := row
+			if idx := strings.LastIndex(row, paneFieldSeparator); idx >= 0 {
+				prefix = row[:idx]
+			}
+			if !strings.ContainsAny(prefix, " \t") {
+				sess.rows = append(sess.rows, row)
+			}
 		}
 	}
 	return s

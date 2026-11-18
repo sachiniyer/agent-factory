@@ -179,8 +179,8 @@ type paneCapture struct {
 	Server ServerIdentity
 }
 
-// paneRowsToProcesses turns list-panes rows (paneRowFormat, one per whitespace-
-// separated field) into the captured process trees of those panes. Split out of
+// paneRowsToProcesses turns list-panes rows (paneRowFormat, one per line)
+// into the captured process trees of those panes. Split out of
 // CaptureSessionProcessTrees so a caller that verified the incarnation the rows
 // came from (the pinned reap, #6258) shares the exact same parsing.
 func paneRowsToProcesses(rows, sanitizedName string) (paneCapture, error) {
@@ -200,7 +200,7 @@ func paneRowsToProcesses(rows, sanitizedName string) (paneCapture, error) {
 			captured.Procs = append(captured.Procs, p)
 		}
 	}
-	for _, field := range strings.Fields(rows) {
+	for _, field := range splitPaneRows(rows) {
 		row, err := parsePaneRow(field)
 		panePID := row.pid
 		if err != nil {

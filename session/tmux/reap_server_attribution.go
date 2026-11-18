@@ -169,8 +169,8 @@ func ptyFdServerVerdict(pid int, own ServerIdentity, snap map[int]proctree.Proce
 	}
 	m := owners.forSnapshot(snap)
 	verdict := serverVerdictUndecidable
-	for _, idx := range indices {
-		holder, ok := m[idx]
+	for _, key := range indices {
+		holder, ok := m[key]
 		if !ok {
 			continue
 		}
@@ -217,16 +217,16 @@ func compareHeldServer(snap map[int]proctree.Process, holder int, own ServerIden
 // is the safe direction for the foreign verdict it feeds.
 type serverPtyOwners struct {
 	built  bool
-	byIdx  map[int]int
+	byIdx  map[proctree.PtyIndex]int
 	server func(pid int) bool
 }
 
-func (o *serverPtyOwners) forSnapshot(snap map[int]proctree.Process) map[int]int {
+func (o *serverPtyOwners) forSnapshot(snap map[int]proctree.Process) map[proctree.PtyIndex]int {
 	if o.built {
 		return o.byIdx
 	}
 	o.built = true
-	o.byIdx = make(map[int]int)
+	o.byIdx = make(map[proctree.PtyIndex]int)
 	server := o.server
 	if server == nil {
 		server = tmuxServerIdentified
@@ -244,9 +244,9 @@ func (o *serverPtyOwners) forSnapshot(snap map[int]proctree.Process) map[int]int
 			// it might have mastered stays undecidable.
 			continue
 		}
-		for _, idx := range indices {
-			if _, taken := o.byIdx[idx]; !taken {
-				o.byIdx[idx] = pid
+		for _, key := range indices {
+			if _, taken := o.byIdx[key]; !taken {
+				o.byIdx[key] = pid
 			}
 		}
 	}

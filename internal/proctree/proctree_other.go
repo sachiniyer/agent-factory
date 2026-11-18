@@ -78,10 +78,10 @@ func groupMembers(int) ([]Process, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
-func ptySlaveIndices(int) ([]int, error) {
+func ptySlaveIndices(int) ([]PtyIndex, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
-func ptyMasterIndices(int) ([]int, error) {
+func ptyMasterIndices(int) ([]PtyIndex, error) {
 	return nil, ErrUnsupportedPlatform
 }

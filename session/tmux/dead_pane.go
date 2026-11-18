@@ -291,7 +291,7 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 		t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepExited})
 		return false, errPaneQueryFoundNoPane
 	}
-	holds, err := paneRowsHoldRoot(strings.Fields(string(output)), pid, startID)
+	holds, err := paneRowsHoldRoot(splitPaneRows(string(output)), pid, startID)
 	if err != nil {
 		t.reconcilePaneRootEvidence(paneRootAnswer{keep: paneRootKeepUnanswered})
 	}
@@ -302,7 +302,7 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 		t.reconcilePaneRootEvidence(paneRootAnswer{
 			resolved: proctree.Process{PID: pid, StartID: startID},
 		})
-		t.noteServerIdentity(serverFromPaneRows(strings.Fields(string(output))))
+		t.noteServerIdentity(serverFromPaneRows(splitPaneRows(string(output))))
 	}
 	return holds, err
 }

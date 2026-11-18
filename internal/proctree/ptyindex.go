@@ -5,27 +5,40 @@ import (
 	"strings"
 )
 
-// PtySlaveIndices returns the pseudo-terminal SLAVE indices pid holds open:
-// every /dev/pts/N link (linux) or /dev/ttysNNN vnode (darwin) among its
-// descriptors contributes its index N. A pane process's stdio is its pane's
-// slave; a detached carrier that kept its stdio still holds it, and the index
-// names the pty pair whose MASTER side some tmux server holds — the only
-// kernel link a reparented process keeps to the server it left (#7469).
+// PtyIndex names one pty allocation: the index a pty pair is known by inside
+// its terminal instance plus that instance's identity, because the index
+// alone is not unique — two tmux servers on separate devpts mounts (a host
+// and a container, say) each mint their own /dev/pts/0. The Dev half keeps a
+// carrier's slave matched only to the master of its own pair (Codex on
+// #7469); on darwin, where devfs is single-instance, it is 0.
+type PtyIndex struct {
+	Dev   uint64
+	Index int
+}
+
+// PtySlaveIndices returns the pseudo-terminal SLAVE identities pid holds
+// open: every /dev/pts/N link (linux) or /dev/ttysNNN vnode (darwin) among
+// its descriptors contributes its N. A pane process's stdio is its pane's
+// slave; a detached carrier that kept its stdio still holds it, and the
+// identity names the pty pair whose MASTER side some tmux server holds —
+// the only kernel link a reparented process keeps to the server it left
+// (#7469).
 //
 // An error means the descriptor table could not be READ — "could not see",
 // never "holds none". A process that holds no slave reports an empty slice.
-func PtySlaveIndices(pid int) ([]int, error) {
+func PtySlaveIndices(pid int) ([]PtyIndex, error) {
 	return ptySlaveIndices(pid)
 }
 
-// PtyMasterIndices returns the pseudo-terminal MASTER indices pid holds open:
-// the tty-index of each ptmx fd (linux fdinfo) or each /dev/ptmx vnode's rdev
-// minor (darwin). A tmux server holds one master per live pane; pairing these
-// with a carrier's PtySlaveIndices is what attributes the carrier's stdio to
-// the server that created it.
+// PtyMasterIndices returns the pseudo-terminal MASTER identities pid holds
+// open: the tty-index of each ptmx fd (linux fdinfo) or each /dev/ptmx
+// vnode's rdev minor (darwin), qualified by the terminal instance exactly
+// like the slave side. A tmux server holds one master per live pane;
+// pairing these with a carrier's PtySlaveIndices is what attributes the
+// carrier's stdio to the server that created it.
 //
 // Same contract as PtySlaveIndices: an error is "could not see".
-func PtyMasterIndices(pid int) ([]int, error) {
+func PtyMasterIndices(pid int) ([]PtyIndex, error) {
 	return ptyMasterIndices(pid)
 }
 
