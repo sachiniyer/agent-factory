@@ -407,6 +407,18 @@ type home struct {
 	// same two funnels, so rows and their provenance never come from
 	// different fetches.
 	sidebarSnapshotDegraded bool
+	// goneProjectRepoIDs and goneProjectRegistryIDs record the rows THIS
+	// session itself established as gone: a confirmed delete's repo id, a
+	// confirmed rebind's registry id (prj_…). A degraded-registry merge
+	// preserves a last-known row it cannot prove absent — but the session
+	// proved THESE absences by performing the mutations itself, so the merge
+	// must not resurrect them while the registry stays unreadable (#7522
+	// review). Written by the delete/rebind completions on confirmed outcomes
+	// only — a definitive refusal or an unverifiable outcome proves nothing —
+	// and cleared when a registry read lands clean and the union states the
+	// truth itself.
+	goneProjectRepoIDs     map[string]bool
+	goneProjectRegistryIDs map[string]bool
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay

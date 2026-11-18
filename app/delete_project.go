@@ -271,6 +271,11 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 			m.state = stateDefault
 		}
 	}
+	// The completion CONFIRMED the deletion: the row's registry identity is
+	// dead even where the refresh's read lands degraded and cannot prove the
+	// record's absence. Tombstone it before the refresh, so a preserving merge
+	// cannot resurrect the row from the last-known set (#7522 review).
+	m.noteProjectDeleted(msg.repoID)
 	m.refreshSidebarProjects()
 	if rescoped {
 		// Re-home focus on the tree (the rail is now empty — a focused pane

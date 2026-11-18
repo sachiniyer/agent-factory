@@ -409,64 +409,6 @@ func (m *home) buildProjectListFromView(data []session.InstanceData, view *proje
 	return projects, registryDegraded, probeBudgets
 }
 
-// projectRows maps the discovered project list into Projects-section rows,
-// marking the active project so the section highlights where the rail is scoped.
-func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
-	rows := make([]ui.SidebarProject, 0, len(projects))
-	for _, p := range projects {
-		rows = append(rows, ui.SidebarProject{
-			RepoID:       p.RepoID,
-			CheckoutID:   p.RegistryCheckoutID,
-			Name:         p.Name,
-			Root:         p.Root,
-			SessionCount: p.SessionCount,
-			InPlaceCount: p.InPlaceCount,
-			Active:       p.Root == m.repoRoot,
-		})
-	}
-	return rows
-}
-
-// sidebarProjectRows is projectRows' inverse for the merge fallback in
-// applySidebarProjects: a pane row has no registry fields, so the converted row
-// is session-derived — the merge preserves it unconditionally, and the coalesce
-// grafts a fresh registration's identity back onto it when the RepoID matches.
-func sidebarProjectRows(rows []ui.SidebarProject) []overlay.Project {
-	projects := make([]overlay.Project, 0, len(rows))
-	for _, r := range rows {
-		projects = append(projects, overlay.Project{
-			RepoID:       r.RepoID,
-			Name:         r.Name,
-			Root:         r.Root,
-			SessionCount: r.SessionCount,
-			InPlaceCount: r.InPlaceCount,
-		})
-	}
-	return projects
-}
-
-// registryBackedRows filters a row set to the registry-backed half — the rows
-// a degraded registry read cannot prove absent, for a merge where the session
-// snapshot is live truth and the old session rows would only shadow it.
-func registryBackedRows(rows []overlay.Project) []overlay.Project {
-	registry := make([]overlay.Project, 0, len(rows))
-	for _, r := range rows {
-		if r.RegistryID != "" {
-			// Both callers run this only when the session snapshot landed and
-			// the REGISTRY read degraded, so the snapshot is the authority on
-			// counts: a repo it does not count has none. A preserved row that
-			// a fresh session row later claims gets the live counts grafted on
-			// (#4888 review); carrying the stale tallies instead would keep
-			// dead sessions on screen for as long as the registry stays
-			// degraded.
-			r.SessionCount = 0
-			r.InPlaceCount = 0
-			registry = append(registry, r)
-		}
-	}
-	return registry
-}
-
 // refreshSidebarProjects rebuilds the bottom Projects section from the same
 // cross-repo discovery the ctrl+p picker uses
 // (buildProjectListWithSnapshotStatus). Pushed at launch and on project switch
@@ -512,6 +454,9 @@ func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded b
 	m.sidebarSnapshotDegraded = false
 	m.projects.SetProjects(m.projectRows(projects))
 	m.projects.SetDegraded(registryDegraded)
+	if !registryDegraded {
+		m.clearGoneProjectRows()
+	}
 	m.syncProjectsHint()
 }
 
@@ -576,7 +521,16 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 			// only registry-backed rows have absence left unproven.
 			old = registryBackedRows(old)
 		}
+		// Rows this session itself just deleted or rebound ARE proven absent —
+		// the session performed the mutations — so the merge's "cannot prove
+		// absence" reasoning never applies to them (#7522 review).
+		old = m.dropSessionGoneRows(old)
 		projects = overlay.MergePreservingSessionRows(old, projects, registryDegraded)
+	}
+	if !registryDegraded {
+		// A clean registry read states the truth itself; the recorded absences
+		// have nothing left to defend and would filter re-registrations.
+		m.clearGoneProjectRows()
 	}
 	changed := m.projects.SetProjects(m.projectRows(projects))
 	m.sidebarProjects = projects

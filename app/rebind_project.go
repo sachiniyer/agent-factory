@@ -122,6 +122,12 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 		m.refreshSidebarProjects()
 		return m, m.handleError(fmt.Errorf("Rebind of %s · outcome unknown · check the project list", msg.name))
 	}
+	// The completion CONFIRMED the record moved — err is nil or the move
+	// committed — so the old binding is dead even where the refresh's registry
+	// read lands degraded and cannot prove the absence. Tombstone it before
+	// the refresh, so the preserving merge cannot resurrect the old root and
+	// checkout id from the last-known set (#7522 review).
+	m.noteProjectRebound(msg.projectID)
 	// The refresh resolves every root the follow compares in the same phase as
 	// its registry read, so the reply holds Update for one bound in total even
 	// when the root the rebind moved AWAY from — no longer in the registry — is
@@ -241,8 +247,11 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		// the registry-side union, so rebuilding wholesale would drop every
 		// session-derived row and zero the counts the daemon still runs. Keep
 		// the picker's session-derived rows and re-attach their counts; only
-		// registry truth replaces registry truth (#4888 review).
-		m.projectPickerOverlay.SetRebindConflictPreserving(text, fresh, degraded)
+		// registry truth replaces registry truth (#4888 review). Rows the
+		// session itself just deleted or rebound are proven absent by the
+		// mutations, though — the merge must not resurrect them (#7522 review).
+		m.projectPickerOverlay.SetRebindConflict(text,
+			overlay.MergePreservingSessionRows(m.dropSessionGoneRows(m.projectPickerOverlay.Projects()), fresh, degraded))
 		return m, nil
 	}
 	if degraded {
@@ -255,7 +264,7 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		// flag preserves each record whose absence was never established, and
 		// the merge grafts a same-repo session row onto the stale identity.
 		m.projectPickerOverlay.SetRebindConflict(text,
-			overlay.MergePreservingSessionRows(registryBackedRows(m.projectPickerOverlay.Projects()), fresh, true))
+			overlay.MergePreservingSessionRows(m.dropSessionGoneRows(registryBackedRows(m.projectPickerOverlay.Projects())), fresh, true))
 		return m, nil
 	}
 	m.projectPickerOverlay.SetRebindConflict(text, fresh)
