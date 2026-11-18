@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sachiniyer/agent-factory/ui/theme"
@@ -153,22 +154,99 @@ func widestLine(lines []string) int {
 	return widest
 }
 
-// osc8Regex matches an OSC 8 hyperlink introducer with any terminator xansi.Strip
-// recognises — ST (ESC backslash), BEL, and the C1 ST (U+009C).
+// osc8Stops holds every character that ends an OSC string in a terminal — BEL,
+// the C1 ST (U+009C, two bytes in UTF-8), ESC, and the cancellation bytes CAN
+// (0x18) and SUB (0x1A). The parameter field stops at all of them exactly as
+// the URI field does; a class that admitted them (say [^;]*) would let a
+// sequence ended mid-parameter cross the byte that ended it and manufacture an
+// opener the terminal never made — "\x1b]8;foo\x1b[31m;FAKE\x1b[0m" ended at
+// the first ESC, or "\x1b]8;foo\x18bar;u\x1b\\" cancelled at the CAN.
+const osc8Stops = "\x07\x18\x1a\x1b\u009c"
+
+// osc8Seq is one terminated OSC 8 sequence found in a row. uri is the field
+// after the second ';': nonempty OPENS a hyperlink, empty CLOSES one. raw is
+// the sequence byte-for-byte, introducer through terminator — the form carried
+// forward when a link outlives a modal.
+type osc8Seq struct {
+	raw string
+	uri string
+}
+
+// scanOSC8 reads OSC 8 hyperlink sequences exactly as a terminal does, where a
+// non-overlapping regex match cannot:
 //
-// Its coverage is PINNED to the parser's by a test rather than left to drift: a
-// terminator the parser discounts in the width but this pattern does not recognise
-// would mean a link the compositor never closes. They share one gap, the C1 OSC
-// INTRODUCER (U+009D), which xansi.Strip does not handle either. The capture is the URI: a hyperlink is OPENED by a
-// sequence carrying one and CLOSED by the same sequence with it empty.
+//   - ESC ends an OSC wherever it lands — mid-parameter field included — and
+//     is reconsidered as the introducer of the NEXT escape. A bare ESC shared
+//     by two sequences ("\x1b]8;;\x1b]8;;u\x1b\\" — a closer whose terminator
+//     opens the next one) is rescanned here, where FindAllStringSubmatch
+//     consumes it and misses the second sequence. The bare-ESC form itself is
+//     a fourth terminator the x/ansi parser discounts but the old regex never
+//     matched, so "\x1b]8;;u\x1b[31m" kept the whole surface clickable (#7560).
+//   - CAN and SUB end the string as an ABORT — the command is cancelled, no
+//     link ever opens, and nothing may be carried. They stop the fields just
+//     like the true terminators.
+//   - A sequence a terminal can't complete — the row ends mid-OSC, or the ';'
+//     separator never arrives — yields no event at all. One gap is shared
+//     with the parser the width measure uses: the C1 OSC INTRODUCER (U+009D),
+//     which xansi.Strip does not handle either, is not an introducer here.
 //
-// Written as a raw literal with \x1b and \x07 as REGEX escapes rather than as
-// literal control bytes. Embedding a real BEL trips CodeQL's
-// go/suspicious-character-in-regex, which exists because a bell in a pattern is
-// far more often a mistyped \A or [[:alpha:]] than an intended 0x07 — and the one
-// place it is genuinely intended is exactly this, an OSC terminator. Spelling it
-// as an escape says so, to the query and to the next reader.
-var osc8Regex = regexp.MustCompile(`\x1b\]8;[^;]*;([^\x1b\x07\x{9c}]*)(?:\x1b\\|\x07|\x{9c})`)
+// Its coverage of the four real terminators is PINNED to the parser's by a
+// test rather than left to drift: a terminator the parser discounts in the
+// width but this scan does not recognise is a link the compositor never closes.
+func scanOSC8(line string) []osc8Seq {
+	var seqs []osc8Seq
+	pos := 0
+	for {
+		off := strings.Index(line[pos:], "\x1b]8;")
+		if off < 0 {
+			return seqs
+		}
+		start := pos + off
+		p := start + len("\x1b]8;")
+
+		// Parameter field, up to the ';' that introduces the URI — or to any
+		// character that ends the string first, which ends the sequence
+		// unreadable (a true terminator means the ';' never arrived; CAN/SUB
+		// abort it).
+		off = strings.IndexAny(line[p:], ";"+osc8Stops)
+		if off < 0 {
+			return seqs
+		}
+		p += off
+		if line[p] != ';' {
+			_, size := utf8.DecodeRuneInString(line[p:])
+			pos = p + size
+			if line[p] == '\x1b' {
+				pos = p // the terminating ESC may introduce the next sequence
+			}
+			continue
+		}
+
+		// URI field, up to the character that ends the string.
+		p++
+		uri := p
+		off = strings.IndexAny(line[p:], osc8Stops)
+		if off < 0 {
+			return seqs
+		}
+		p += off
+		r, size := utf8.DecodeRuneInString(line[p:])
+		switch r {
+		case '\x18', '\x1a':
+			pos = p + size // CAN/SUB abort: no link opened, nothing carries
+			continue
+		case '\x1b':
+			pos = p // bare ESC or ST: reconsider the ESC for the next sequence
+		default:
+			pos = p + size
+		}
+		end := p + size
+		if r == '\x1b' && p+1 < len(line) && line[p+1] == '\\' {
+			end = p + 2 // ST consumes the backslash with the ESC
+		}
+		seqs = append(seqs, osc8Seq{raw: line[start:end], uri: line[uri:p]})
+	}
+}
 
 // closeSequences returns what must be emitted after line so that whatever follows
 // it — a background segment, or the end of the frame — starts clean.
@@ -194,8 +272,8 @@ func closeSequences(line string) string {
 			closers += "\x1b[0m"
 		}
 	}
-	if matches := osc8Regex.FindAllStringSubmatch(line, -1); len(matches) > 0 {
-		if last := matches[len(matches)-1]; last[1] != "" {
+	if seqs := scanOSC8(line); len(seqs) > 0 {
+		if last := seqs[len(seqs)-1]; last.uri != "" {
 			// A hyperlink opened and not closed on this row would otherwise keep
 			// every background cell after it clickable, and outlive the frame.
 			closers += "\x1b]8;;\x1b\\"
@@ -220,9 +298,19 @@ func backdropOpen(line string, sgrOpen []string, osc8Open string) ([]string, str
 			sgrOpen = append(sgrOpen, m)
 		}
 	}
-	if matches := osc8Regex.FindAllStringSubmatch(line, -1); len(matches) > 0 {
-		if last := matches[len(matches)-1]; last[1] != "" {
-			osc8Open = last[0]
+	if seqs := scanOSC8(line); len(seqs) > 0 {
+		if last := seqs[len(seqs)-1]; last.uri != "" {
+			// The carry is re-emitted verbatim below the modal, so it must end
+			// in a real terminator. A bare-ESC match ends in a dangling ESC a
+			// terminal would dispatch as the next escape's start — eating the
+			// first byte of the row it precedes. Normalise by appending the
+			// backslash that turns it into ST, keeping the parameter field
+			// (the id= that associates cells with the link) intact rather
+			// than rebuilding from the URI alone.
+			osc8Open = last.raw
+			if strings.HasSuffix(osc8Open, "\x1b") {
+				osc8Open += "\\"
+			}
 		} else {
 			osc8Open = ""
 		}
