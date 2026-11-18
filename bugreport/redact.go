@@ -600,6 +600,11 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	d.Path = r.collapsePathField(d.Path)
 	d.Worktree.RepoPath = r.collapsePathField(d.Worktree.RepoPath)
 	d.Worktree.WorktreePath = r.collapsePathField(d.Worktree.WorktreePath)
+	// RuntimeServerSocket is a filesystem path with user-chosen text in it —
+	// TMUX_TMPDIR, a username, a lane scratch dir (#7469). It takes Path's
+	// trade; the pid/StartID pair and tmux's machine-minted session id beside
+	// it stay verbatim.
+	d.RuntimeServerSocket = r.collapsePathField(d.RuntimeServerSocket)
 	// The prune tombstone and its durable intent (#5189). The two paths are the
 	// archived worktree's location and its renamed sibling: WorktreePath's own
 	// treatment. LeafName is git's registration directory name, derived from the

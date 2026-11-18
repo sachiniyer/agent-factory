@@ -446,7 +446,12 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			// 4598089582).
 			report(process.PID, fmt.Errorf("captured live pid %d marks session %s but has no %s generation marker",
 				process.PID, sanitizedName, EnvMarkerGeneration))
-		case serverVerdict == serverVerdictForeign:
+		case serverVerdict == serverVerdictForeign && !boundary:
+			// An ATTACHED foreign carrier — one a tmux server still parents
+			// — never reaches here: the boundary arm below keeps its
+			// blocking refusal exactly as it was. This arm is the DETACHED
+			// shape only, where the server is gone from the chain and only
+			// the carrier's own env or held ptys still name it.
 			// #7469: a detached carrier positively attributed to a tmux
 			// server OTHER than the recorded one — a different socket in
 			// its TMUX env, or a live foreign server holding its pty

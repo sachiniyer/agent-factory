@@ -8,36 +8,54 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/require"
 )
 
-// spawnMarkedCarrier starts a live marker-carrying sleeper with extra env
-// pairs — the detached foreign-server carrier of #7469 carries the pane's
-// inherited AF_* markers AND the nested server's TMUX tuple.
-func spawnMarkedCarrier(t *testing.T, name, home, gen string, extraEnv ...string) proctree.Process {
+// spawnOrphanedMarkedCarrier starts a marked escapee REPARENTED ABOVE the
+// test reaper — an intermediate sh backgrounds the reexec'd binary and exits,
+// exactly the spawnMarkedProcess harness — so the carrier's ancestry ends at
+// init and reaches the decision table the way #7469's detached carrier does:
+// no protected placement, no tmux boundary. bin selects the carrier's
+// executable identity (os.Args[0] for the plain case, an agent-named link for
+// the AgentExe row); extraEnv carries the foreign server's TMUX tuple.
+func spawnOrphanedMarkedCarrier(t *testing.T, name, home, gen, bin string, extraEnv ...string) proctree.Process {
 	t.Helper()
-	cmd := exec.Command("sleep", "300")
-	// stdio pinned to /dev/null: an inherited pty would make the carrier hold
-	// a REAL tmux pane's slave and turn "undecidable" fixtures foreign.
-	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = devNull.Close() })
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = devNull, devNull, devNull
-	cmd.Env = append(os.Environ(),
-		EnvMarkerSession+"="+name,
-		EnvMarkerHome+"="+home,
-		EnvMarkerGeneration+"="+gen,
-	)
-	cmd.Env = append(cmd.Env, extraEnv...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
-	p, err := proctree.Lookup(cmd.Process.Pid)
-	require.NoError(t, err)
-	return p
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "carrier.pid")
+	// A CLEAN env, not os.Environ() — processEnvValue returns the FIRST match
+	// and this test binary runs inside a real af session, so the ambient
+	// AF_SESSION would win over the fixture's (spawnMarkedProcess, #7435 R2).
+	env := []string{"PATH=" + os.Getenv("PATH"),
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+		EnvMarkerGeneration + "=" + gen,
+	}
+	env = append(env, extraEnv...)
+	c := exec.Command("sh", "-c",
+		"'"+bin+"' '"+markedEscapeeArg+"' '"+pidFile+"' </dev/null >/dev/null 2>&1 &")
+	c.Env = env
+	require.NoError(t, c.Run())
+	waitForPIDFile(t, pidFile)
+	marked := processFromPIDFile(t, pidFile)
+	t.Cleanup(func() { _ = proctree.Signal(marked, syscall.SIGKILL) })
+	require.NotEqual(t, os.Getpid(), marked.PPID,
+		"the carrier must be reparented above the reaper — inside its subtree the exclusion verdict, not the server verdict, answers")
+	// The scan reads /proc/<pid>/environ; wait until the marker is visible.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if env, err := proctree.Environ(marked.PID); err == nil {
+			if v, ok := processEnvValue(env, EnvMarkerSession); ok && v == name {
+				return marked
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Skipf("carrier %d environ never became readable; this fixture needs a marker-visible process", marked.PID)
+	return proctree.Process{}
 }
 
 func foreignSocketFile(t *testing.T) string {
@@ -64,7 +82,7 @@ func TestVanishedSessionSweep_NeverSignalsAForeignServerCarrier(t *testing.T) {
 	gen := name + "-gen"
 	own := recordedOwnServer(t)
 
-	carrier := spawnMarkedCarrier(t, name, home, gen,
+	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0],
 		"TMUX="+foreignSocketFile(t)+",9999,3")
 
 	var warnings bytes.Buffer
@@ -89,17 +107,16 @@ func TestVanishedSessionSweep_NeverSignalsAForeignServerCarrier(t *testing.T) {
 
 // #7469: even a carrier that PASSES tier-2's executable identity (a
 // claude-comm carrier, the #3699 look-alike) is refused when a foreign server
-// holds its launch — the allowlist may admit only what the server attribution
-// does not place elsewhere. Staged here on the verdict the arm consumes: an
-// anchor-eligible carrier with foreign server evidence never reaches the
-// eligible set.
+// spawned it — the allowlist may admit only what the server attribution does
+// not place elsewhere.
 func TestVanishedSessionSweep_ForeignBeatsAgentExeIdentity(t *testing.T) {
 	name := "af_foreign_exe"
 	home := t.TempDir()
 	gen := name + "-gen"
 	own := recordedOwnServer(t)
 
-	carrier := spawnMarkedCarrier(t, name, home, gen,
+	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen,
+		agentNamedBinary(t, os.Args[0]),
 		"TMUX="+foreignSocketFile(t)+",9999,3")
 
 	membership := cohortMembership{
@@ -125,9 +142,8 @@ func TestVanishedSessionSweep_NoServerEvidenceKeepsTodaysVerdict(t *testing.T) {
 	gen := name + "-gen"
 
 	// No TMUX env, no pty — undecidable. With no membership evidence at all
-	// the gate refuses as before (the verdict changes nothing); with a
-	// recorded pair it admits as before. Both directions pinned in one test.
-	carrier := spawnMarkedCarrier(t, name, home, gen)
+	// the gate refuses as before; with a recorded pair it admits as before.
+	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0])
 
 	marked, _, err := markedOrphanProcesses(
 		[]proctree.Process{carrier}, name, home, fixtureCohort(gen),
