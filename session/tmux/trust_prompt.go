@@ -151,6 +151,14 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeMCPServersPaintingOf(screen) {
 			return true
 		}
+		// The reworded folder-trust dialog while Claude Code paints it, read
+		// from its head down (#7505): its title and path before the question
+		// is whole, or an option row begun, or cut short by a narrow pane, that
+		// the grammar above took for a composer. Asked last too: it only turns
+		// a clear pane into a hold.
+		if claudeFolderTrustPaintingOf(screen) {
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//
