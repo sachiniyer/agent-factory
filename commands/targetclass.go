@@ -29,6 +29,13 @@ const (
 // completes "<verb> is local-only: it <does> and cannot act on the daemon at
 // <url>". Each has no daemon API: the token file, the autostart unit, the
 // daemon process and the af home are properties of the machine the verb runs on.
+//
+// `af --daemon` is NOT here on purpose: the root verb's TUI form is routed,
+// and its --daemon form refuses only a target named explicitly on that
+// invocation (a saved target is logged and ignored, never refused — the
+// daemon it starts is always this machine's). Both halves live in root's RunE
+// (requireLocalDaemonStart), because this table's central guard would fire on
+// the saved target too and on the bare `af` TUI.
 var localOnlyVerbs = map[string]string{
 	"af token show":       "prints the bearer token stored in this machine's af home",
 	"af token rotate":     "rewrites the bearer token file in this machine's af home",

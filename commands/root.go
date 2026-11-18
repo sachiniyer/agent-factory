@@ -29,6 +29,14 @@ import (
 var (
 	runLaunchApp               = app.Run
 	launchEnsureDaemonForTasks = ensureDaemonForTasks
+	// runDaemon / runDaemonForUpgrade are the daemon entrypoints the `--daemon`
+	// branch of root's RunE reaches, behind a package-level seam for the same
+	// reason runLaunchApp is: a test exercising that branch must not bind the
+	// real control/HTTP sockets and start a daemon on the host. The two are
+	// the daemon package's exported entrypoints, so production calls through
+	// the vars harmlessly.
+	runDaemon           = daemon.RunDaemon
+	runDaemonForUpgrade = daemon.RunDaemonForUpgrade
 	// version is supplied by root main.go so release -ldflags keep stamping
 	// main.version. The fallback only covers direct package tests.
 	version     = "dev"
@@ -74,6 +82,22 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			defer log.Close()
 
 			if daemonFlag {
+				// `af --daemon` starts the daemon process on THIS machine —
+				// no daemon API stands in for it — so it is the one local-only
+				// form of this otherwise-routed verb (W9.4). The refusal covers
+				// only a target named EXPLICITLY on this invocation
+				// (--daemon-url / AF_DAEMON_URL): a SAVED target never refuses,
+				// because the daemon is always local and a saved target is a
+				// client preference — it is logged and ignored instead. That is
+				// what lets the supervisor launches — the autostart unit's
+				// ExecStart, rollback's startPreviousDaemon, the committed
+				// handoff's startArmedDaemonUnderOwner, and the probation
+				// candidate's --upgrade-transaction spawn — run under a home
+				// that happens to hold one: their argv carries no --daemon-url
+				// and their environment no AF_DAEMON_URL.
+				if err := requireLocalDaemonStart(); err != nil {
+					return err
+				}
 				cfg, err := config.LoadConfig()
 				if err != nil {
 					return err
@@ -91,9 +115,9 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 					return configagent.BuildSpawnRequest(configagent.Options{Mode: configagent.ModeChange})
 				})
 				if upgradeTransactionFlag != "" {
-					err = daemon.RunDaemonForUpgrade(cfg, upgradeTransactionFlag)
+					err = runDaemonForUpgrade(cfg, upgradeTransactionFlag)
 				} else {
-					err = daemon.RunDaemon(cfg)
+					err = runDaemon(cfg)
 				}
 				if err != nil {
 					log.ErrorLog.Printf("failed to start daemon %v", err)
