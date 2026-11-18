@@ -409,64 +409,6 @@ func (m *home) buildProjectListFromView(data []session.InstanceData, view *proje
 	return projects, registryDegraded, probeBudgets
 }
 
-// projectRows maps the discovered project list into Projects-section rows,
-// marking the active project so the section highlights where the rail is scoped.
-func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
-	rows := make([]ui.SidebarProject, 0, len(projects))
-	for _, p := range projects {
-		rows = append(rows, ui.SidebarProject{
-			RepoID:       p.RepoID,
-			CheckoutID:   p.RegistryCheckoutID,
-			Name:         p.Name,
-			Root:         p.Root,
-			SessionCount: p.SessionCount,
-			InPlaceCount: p.InPlaceCount,
-			Active:       p.Root == m.repoRoot,
-		})
-	}
-	return rows
-}
-
-// sidebarProjectRows is projectRows' inverse for the merge fallback in
-// applySidebarProjects: a pane row has no registry fields, so the converted row
-// is session-derived — the merge preserves it unconditionally, and the coalesce
-// grafts a fresh registration's identity back onto it when the RepoID matches.
-func sidebarProjectRows(rows []ui.SidebarProject) []overlay.Project {
-	projects := make([]overlay.Project, 0, len(rows))
-	for _, r := range rows {
-		projects = append(projects, overlay.Project{
-			RepoID:       r.RepoID,
-			Name:         r.Name,
-			Root:         r.Root,
-			SessionCount: r.SessionCount,
-			InPlaceCount: r.InPlaceCount,
-		})
-	}
-	return projects
-}
-
-// registryBackedRows filters a row set to the registry-backed half — the rows
-// a degraded registry read cannot prove absent, for a merge where the session
-// snapshot is live truth and the old session rows would only shadow it.
-func registryBackedRows(rows []overlay.Project) []overlay.Project {
-	registry := make([]overlay.Project, 0, len(rows))
-	for _, r := range rows {
-		if r.RegistryID != "" {
-			// Both callers run this only when the session snapshot landed and
-			// the REGISTRY read degraded, so the snapshot is the authority on
-			// counts: a repo it does not count has none. A preserved row that
-			// a fresh session row later claims gets the live counts grafted on
-			// (#4888 review); carrying the stale tallies instead would keep
-			// dead sessions on screen for as long as the registry stays
-			// degraded.
-			r.SessionCount = 0
-			r.InPlaceCount = 0
-			registry = append(registry, r)
-		}
-	}
-	return registry
-}
-
 // refreshSidebarProjects rebuilds the bottom Projects section from the same
 // cross-repo discovery the ctrl+p picker uses
 // (buildProjectListWithSnapshotStatus). Pushed at launch and on project switch
@@ -483,10 +425,23 @@ func (m *home) refreshSidebarProjects() {
 
 // refreshSidebarProjectsResolving is refreshSidebarProjects with extra paths
 // resolved in the same phase as its registry read (the rebind reply's follow).
+//
+// A failed snapshot fetch takes the poll's error path (#7180), and so does a
+// LANDED snapshot whose registry read degraded: the fresh list then holds only
+// live session rows (the registry union is empty), and installing it wholesale
+// would drop every registered project with no live sessions — a read that
+// cannot prove absence — and overwrite the merge shadow a later failed-snapshot
+// poll reads from. The merge preserves the registry-backed rows instead, while
+// the landed session snapshot still replaces the session half at once, so the
+// synchronous path's "show that action's result at once" is preserved.
+// TestSyncRefreshDegradedRegistryKeepsRegistryRows pins this funnel.
 func (m *home) refreshSidebarProjectsResolving(extra []string) {
 	projects, registryDegraded, snapshotErr := m.buildProjectListWithSnapshotStatusResolving(extra)
-	if snapshotErr != nil {
-		m.applySidebarProjects(projects, registryDegraded, snapshotErr)
+	if snapshotErr != nil || registryDegraded {
+		// The on-loop refresh is by construction post-mutation — its fetch
+		// began after any tombstone was recorded — so the current sequence is
+		// its observation point.
+		m.applySidebarProjects(projects, registryDegraded, snapshotErr, m.projectMutationSeq)
 		return
 	}
 	m.setSidebarProjects(projects, registryDegraded)
@@ -502,6 +457,9 @@ func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded b
 	m.sidebarSnapshotDegraded = false
 	m.projects.SetProjects(m.projectRows(projects))
 	m.projects.SetDegraded(registryDegraded)
+	if !registryDegraded {
+		m.clearGoneProjectRows()
+	}
 	m.syncProjectsHint()
 }
 
@@ -513,8 +471,8 @@ func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded b
 // response (#6986): on success it replaces the retained set — rows and their
 // completeness verdict from one snapshot — and on error the last set stands,
 // never cleared by a hiccup. Returns whether the visible rows changed.
-func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error) bool {
-	return m.refreshSidebarProjectsFromPoll(data, skipped, fetchErr, nil)
+func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error, observedAtSeq uint64) bool {
+	return m.refreshSidebarProjectsFromPoll(data, skipped, fetchErr, nil, observedAtSeq)
 }
 
 // refreshSidebarProjectsFromPoll is refreshSidebarProjectsFromSnapshot for the
@@ -522,7 +480,7 @@ func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, s
 // (fetchSnapshotCmd): the rows are built from that view while it is current, so
 // the poll touches neither the registry nor any root's spelling on the loop
 // (#7397). A nil view — a message built without one — reads on the loop.
-func (m *home) refreshSidebarProjectsFromPoll(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error, polled *projectRegistryView) bool {
+func (m *home) refreshSidebarProjectsFromPoll(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error, polled *projectRegistryView, observedAtSeq uint64) bool {
 	changed := false
 	if fetchErr == nil {
 		changed = m.applySkippedRepos(skipped)
@@ -534,7 +492,7 @@ func (m *home) refreshSidebarProjectsFromPoll(data []session.InstanceData, skipp
 	} else {
 		projects, registryDegraded, _ = m.buildProjectListFromView(data, m.registryViewForPoll(polled))
 	}
-	return m.applySidebarProjects(projects, registryDegraded, fetchErr) || changed
+	return m.applySidebarProjects(projects, registryDegraded, fetchErr, observedAtSeq) || changed
 }
 
 // applySidebarProjects pushes an already-built project list into the Projects
@@ -546,7 +504,22 @@ func (m *home) refreshSidebarProjectsFromPoll(data []session.InstanceData, skipp
 // moved a record between polls would otherwise leave the old root on screen
 // indefinitely while the poll stays unhealthy (#4888 review). Returns whether
 // the visible rows changed.
-func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, fetchErr error) bool {
+func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, fetchErr error, observedAtSeq uint64) bool {
+	if fetchErr == nil {
+		// A landed snapshot that reports live work for a tombstoned repo
+		// retires that repo's deletion tombstone: the session data itself
+		// establishes the project is live again, and leaving the tombstone
+		// in place would drop the revived row on the next failed snapshot
+		// (#7522 review). The observation must POSTDATE the tombstone — a
+		// poll created before the delete still carries the repo's pre-delete
+		// sessions, which are not a revival (observedAtSeq, #7522 review).
+		m.retireGoneProjectRowsForLiveSessions(projects, observedAtSeq)
+	}
+	// Tombstoned rows never land from the INCOMING set either: a degraded
+	// remote registry read re-emits the record from its last-good cache, and
+	// a poll created before a delete can still carry the repo's pre-delete
+	// session rows (#7522 review).
+	projects = m.dropSessionGoneRows(projects, registryDegraded)
 	if fetchErr != nil || registryDegraded {
 		if fetchErr != nil {
 			log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
@@ -566,7 +539,27 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 			// only registry-backed rows have absence left unproven.
 			old = registryBackedRows(old)
 		}
+		// Rows this session itself just deleted or rebound ARE proven absent —
+		// the session performed the mutations — so the merge's "cannot prove
+		// absence" reasoning never applies to them (#7522 review). The rebind
+		// tombstone applies only while the registry read cannot establish the
+		// record's current binding; a healthy read replaces the row through
+		// the merge instead.
+		old = m.dropSessionGoneRows(old, registryDegraded)
+		if !registryDegraded {
+			// A row an earlier degraded apply stripped of its rebind
+			// tombstone's identity has nothing left to merge the recovered
+			// registration against — the coalesce would graft it on without
+			// replacing the row's stale navigable Root. Re-attach the
+			// provenance so the merge replaces the row wholesale (#7522).
+			old = m.reconcileGoneRebindRows(old, projects)
+		}
 		projects = overlay.MergePreservingSessionRows(old, projects, registryDegraded)
+	}
+	if !registryDegraded {
+		// A clean registry read states the truth itself; the recorded absences
+		// have nothing left to defend and would filter re-registrations.
+		m.clearGoneProjectRows()
 	}
 	changed := m.projects.SetProjects(m.projectRows(projects))
 	m.sidebarProjects = projects

@@ -238,7 +238,7 @@ func TestProjectsSection_FailedSnapshotMergesFreshRegistryRows(t *testing.T) {
 	// the alpha record rebound to a different repo (RepoID changed).
 	changed := h.applySidebarProjects([]overlay.Project{
 		{Name: "alpha", Root: "/new/alpha", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/new/alpha"},
-	}, false, errors.New("daemon snapshot unavailable"))
+	}, false, errors.New("daemon snapshot unavailable"), h.projectMutationSeq)
 	require.True(t, changed, "fresh registry truth still reaches the section")
 
 	rows := map[string]ui.SidebarProject{}
@@ -280,7 +280,7 @@ func TestProjectsSection_DegradedRegistryKeepsRegistryRows(t *testing.T) {
 	// counterpart.
 	changed := h.applySidebarProjects([]overlay.Project{
 		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", SessionCount: 5},
-	}, true, nil)
+	}, true, nil, h.projectMutationSeq)
 	require.True(t, changed, "fresh session truth still reaches the section")
 
 	rows := map[string]ui.SidebarProject{}

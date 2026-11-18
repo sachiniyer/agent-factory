@@ -122,6 +122,14 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 		m.refreshSidebarProjects()
 		return m, m.handleError(fmt.Errorf("Rebind of %s · outcome unknown · check the project list", msg.name))
 	}
+	// The completion CONFIRMED the record moved — err is nil or the move
+	// committed — so the old binding is dead even where the refresh's registry
+	// read lands degraded and cannot prove the absence. Tombstone it before
+	// the refresh, so the preserving merge cannot resurrect the old root and
+	// checkout id from the last-known set (#7522 review). The row's repo id
+	// rides the tombstone so a later CLEAN read can re-attach the record's
+	// provenance to a row an earlier degraded apply already stripped.
+	m.noteProjectRebound(msg.projectID, msg.oldRepoID)
 	// The refresh resolves every root the follow compares in the same phase as
 	// its registry read, so the reply holds Update for one bound in total even
 	// when the root the rebind moved AWAY from — no longer in the registry — is
@@ -175,6 +183,7 @@ var rebindConflictRefreshTimeout = 10 * time.Second
 // treats as "session rows unknown, registry truth still applies".
 func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 	fetch := allReposSnapshotFetcher
+	mutationSeq := m.projectMutationSeq // the mutation count this fetch starts from
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), rebindConflictRefreshTimeout)
 		defer cancel()
@@ -185,12 +194,13 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 				rebindConflictRefreshTimeout)
 		}
 		return rebindConflictSnapshotMsg{
-			token:     msg.token,
-			projectID: msg.projectID,
-			refusal:   msg.err,
-			data:      data,
-			skipped:   skipped,
-			fetchErr:  err,
+			token:       msg.token,
+			projectID:   msg.projectID,
+			refusal:     msg.err,
+			data:        data,
+			skipped:     skipped,
+			fetchErr:    err,
+			mutationSeq: mutationSeq,
 		}
 	}
 }
@@ -208,7 +218,11 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		m.applySkippedRepos(msg.skipped)
 	}
 	fresh, degraded := m.buildProjectListFrom(msg.data)
-	m.applySidebarProjects(fresh, degraded, msg.fetchErr)
+	m.applySidebarProjects(fresh, degraded, msg.fetchErr, msg.mutationSeq)
+	// Tombstoned rows never land in the picker's rebuilt set either — the
+	// sidebar's own apply already ran the same filter on its copy (#7522
+	// review).
+	fresh = m.dropSessionGoneRows(fresh, degraded)
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject ||
 		!m.projectPickerOverlay.OwnsRebindReply(msg.token) {
 		return m, nil
@@ -241,8 +255,18 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		// the registry-side union, so rebuilding wholesale would drop every
 		// session-derived row and zero the counts the daemon still runs. Keep
 		// the picker's session-derived rows and re-attach their counts; only
-		// registry truth replaces registry truth (#4888 review).
-		m.projectPickerOverlay.SetRebindConflictPreserving(text, fresh, degraded)
+		// registry truth replaces registry truth (#4888 review). Rows the
+		// session itself just deleted or rebound are proven absent by the
+		// mutations, though — the merge must not resurrect them (#7522 review).
+		// And a row an earlier degraded apply stripped needs its provenance
+		// re-attached under this healthy read, or the coalesce grafts the
+		// recovered registration onto the stale root (#7522 review).
+		old := m.dropSessionGoneRows(m.projectPickerOverlay.Projects(), degraded)
+		if !degraded {
+			old = m.reconcileGoneRebindRows(old, fresh)
+		}
+		m.projectPickerOverlay.SetRebindConflict(text,
+			overlay.MergePreservingSessionRows(old, fresh, degraded))
 		return m, nil
 	}
 	if degraded {
@@ -255,7 +279,7 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		// flag preserves each record whose absence was never established, and
 		// the merge grafts a same-repo session row onto the stale identity.
 		m.projectPickerOverlay.SetRebindConflict(text,
-			overlay.MergePreservingSessionRows(registryBackedRows(m.projectPickerOverlay.Projects()), fresh, true))
+			overlay.MergePreservingSessionRows(m.dropSessionGoneRows(registryBackedRows(m.projectPickerOverlay.Projects()), true), fresh, true))
 		return m, nil
 	}
 	m.projectPickerOverlay.SetRebindConflict(text, fresh)

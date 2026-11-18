@@ -115,6 +115,10 @@ type rebindConflictSnapshotMsg struct {
 	// retained set is written from it alongside data, never from a later read.
 	skipped  []daemon.SkippedRepo
 	fetchErr error
+	// mutationSeq is the project-mutation count the conflict fetch was created
+	// at — the same read-start bookkeeping snapshotFetchedMsg.mutationSeq
+	// applies to the regular poll (#7522 review).
+	mutationSeq uint64
 }
 
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async

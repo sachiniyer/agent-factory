@@ -70,6 +70,12 @@ type snapshotFetchedMsg struct {
 	// the completeness witness the retained set is written from (#6986).
 	allReposSkipped []daemon.SkippedRepo
 	allReposErr     error
+	// mutationSeq is the project-mutation count this poll STARTED from — the
+	// same read-start bookkeeping remoteSeq applies to the task channel. A
+	// poll already in flight when a delete completed can carry the deleted
+	// repo's sessions from BEFORE it, so retiring the deletion tombstone on
+	// this poll's "live sessions" would resurrect the row (#7522 review).
+	mutationSeq uint64
 	// registry is the project registry and the spelling of every path the
 	// Projects union compares, read on the same off-loop poll (#7397): a root on
 	// a stalled mount then delays this poll, never Update. Nil in remote mode,
@@ -112,7 +118,8 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	repoRoot := m.repoRoot
 	fetch := m.snapshotFetcher
 	lifetime := m.ctx
-	remoteSeq := m.remote.seq // the task-mutation count this poll starts from
+	remoteSeq := m.remote.seq           // the task-mutation count this poll starts from
+	mutationSeq := m.projectMutationSeq // the project-mutation count likewise (#7522)
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
 	registryGen := m.registryViewGen
@@ -182,7 +189,8 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 			skippedRepos: resp.SkippedRepos,
 			tasks:        tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
 			allRepos: allReposData, allReposSkipped: allReposSkipped, allReposErr: allReposErr,
-			registry: registry,
+			mutationSeq: mutationSeq,
+			registry:    registry,
 		}
 	}
 }

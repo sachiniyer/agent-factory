@@ -428,13 +428,13 @@ func TestSnapshotPoll_DoesNotApplyARegistryViewOlderThanTheLoops(t *testing.T) {
 	both := append(append([]config.Project{}, first...), added...)
 	requireRegistryRowsKept(t, h.sidebarProjects, both, nil)
 
-	h.refreshSidebarProjectsFromPoll(nil, nil, nil, stale)
+	h.refreshSidebarProjectsFromPoll(nil, nil, nil, stale, h.projectMutationSeq)
 	requireRegistryRowsKept(t, h.sidebarProjects, both, nil)
 	assert.NotSame(t, stale, h.registryView, "the older poll read is not installed over the loop's")
 
 	current := readProjectRegistryView(h.rootAgentKeys(), nil, h.spellingCache(), true)
 	current.gen = h.registryViewGen
-	h.refreshSidebarProjectsFromPoll(nil, nil, nil, current)
+	h.refreshSidebarProjectsFromPoll(nil, nil, nil, current, h.projectMutationSeq)
 	assert.Same(t, current, h.registryView, "a poll read that nothing superseded is the one installed")
 	requireRegistryRowsKept(t, h.sidebarProjects, both, nil)
 }
