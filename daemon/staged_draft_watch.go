@@ -259,16 +259,22 @@ func (m *Manager) clearStagedDraftDue(key string, attemptAt time.Time) {
 	m.pausedMu.Unlock()
 }
 
-// dropStagedDraftWatch ends a send's watch — the gate no longer holds (the
-// session left Ready, a newer send moved the verdict, or the send was never
-// armable). A closed entry is kept: it is the memory that the same attempt
-// must never be captured for again, and a Ready→Running→Ready flap must not
-// re-pay the read it resolved (#7545 review). Cheap; called on the gate's
-// fast exit paths.
+// dropStagedDraftWatch disarms a send's watch — the gate no longer holds
+// (the session left Ready, a newer send moved the verdict, or the send was
+// never armable). The entry is KEPT, not deleted, for two kinds of memory
+// it carries (#7545 review, #7547 independent review): a closed latch so a
+// delivered send's durable verdict is never captured for again, and the
+// blind budget already spent — a Ready→Running→Ready flap or an attention
+// owner alternating ticks must not re-spend 300 captures by resetting the
+// count. The armed state alone is reset: since reopens on the next provable
+// staged read, due clears, and a newer send's attemptAt mismatch still
+// re-arms fresh like every other watch state.
 func (m *Manager) dropStagedDraftWatch(key string) {
 	m.pausedMu.Lock()
-	if e := m.stagedDraftWatches[key]; e == nil || !e.closed {
-		delete(m.stagedDraftWatches, key)
+	if e := m.stagedDraftWatches[key]; e != nil && !e.closed {
+		e.since = time.Time{}
+		e.due = false
+		e.dueWhy = ""
 	}
 	m.pausedMu.Unlock()
 }
@@ -316,8 +322,10 @@ func stagedDraftAttentionReason(attemptAt time.Time) string {
 // persists and publishes it the way every other attention write does. It
 // reports whether the flag actually landed. Callers hold the session's op
 // lock and repo start lock — the ordering daemon/attention.go's own writes
-// use — and this must never run under the observation-settlement fence, where
-// the same op lock is an ABBA deadlock against automated sends (#7545 review).
+// use — and run it after the observation-settlement fence releases: with
+// TryLock at the caller that order is hygiene, not deadlock prevention — a
+// contended acquisition fails fast and keeps the due mark rather than
+// parking the sweep (#7547 independent review).
 //
 // The flag is the whole resolution path by design (#7545, flag-only): the
 // recheck never presses Enter. #4200's remedy Enter is safe only inside its

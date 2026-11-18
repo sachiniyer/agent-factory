@@ -252,6 +252,56 @@ func TestStagedDraftReading(t *testing.T) {
 			want: StagedDraftSubmitted,
 		},
 		{
+			// The same recall with the echo scrolled out of view: the
+			// composer copy is verbatim, nothing above the anchor
+			// matches, and the boundary's transcript tail is gone from
+			// the bounded capture — so the count's silence cannot be
+			// trusted. Never Staged, never Gone (Codex #7547, fourth
+			// round): the blind budget retires the watch.
+			name: "a user's up-arrow recall whose echo scrolled off is unreadable",
+			pane: strings.Join([]string{
+				"✻ done",
+				"❯ continue",
+			}, "\n"),
+			ev:   stagedDraftEvidence{tail: "continue", tailWhole: true, boundaryMark: "boundarytranscripttail"},
+			want: StagedDraftUnreadable,
+		},
+		{
+			// The chip twin: a bound paste chip recalled into the
+			// composer while the boundary's line is out of reach — the
+			// chip is still af's own text, but the echo may have scrolled,
+			// so it is blind, never a flag.
+			name: "a user's recalled chip whose boundary scrolled off is unreadable",
+			pane: strings.Join([]string{
+				"✻ done",
+				"❯ " + claudeChip,
+			}, "\n"),
+			ev:   stagedDraftEvidence{chip: normalizeDelivery(claudeChip), boundaryMark: "boundarytranscripttail"},
+			want: StagedDraftUnreadable,
+		},
+		{
+			// The boundary's line still in view proves nothing scrolled
+			// since the send — a genuinely staged tail may flag.
+			name: "a staged tail with the boundary still in view is staged",
+			pane: claudeInsertPane("❯ continue"),
+			ev:   stagedDraftEvidence{tail: "continue", tailWhole: true, boundaryMark: "Cogitatedfor4m47s"},
+			want: StagedDraftStaged,
+		},
+		{
+			// A grown echo resolves Submitted even from deep in the
+			// scrollback — the count rose past the boundary's baseline,
+			// which needs no completeness proof.
+			name: "a grown echo deep in the transcript is submitted",
+			pane: strings.Join([]string{
+				"the boundary's transcript tail",
+				"❯ continue",
+				"✻ done",
+				"❯ continue",
+			}, "\n"),
+			ev:   stagedDraftEvidence{tail: "continue", tailWhole: true, boundaryMark: "boundarytranscripttail"},
+			want: StagedDraftSubmitted,
+		},
+		{
 			// A payload of 32 runes or fewer binds its whole text as the
 			// tail (submit.go: it IS the completion). Contained is not
 			// enough — "yes" sent must not read staged inside a user's

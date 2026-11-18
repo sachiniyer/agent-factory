@@ -527,6 +527,67 @@ func TestStagedDraftFlushKeepsTheDueMarkUnderOpLockContention(t *testing.T) {
 	require.True(t, inst.HasAttention(), "the kept due mark lands on the next uncontended flush")
 }
 
+// The repo start lock gets the same rule: CreateSession holds it across a
+// whole provisioning + send while the sweep walks local sessions serially,
+// so a blocking wait would suspend every sibling's poll behind one create.
+// On contention the flush returns promptly and keeps the due mark (Codex
+// #7547).
+func TestStagedDraftFlushKeepsTheDueMarkUnderRepoStartLockContention(t *testing.T) {
+	attemptAt := time.Now().Add(-time.Minute)
+	manager, repoID, _, inst := stagedDraftFixture(t, attemptAt)
+	key := stagedDraftKey(repoID, inst)
+	manager.pausedMu.Lock()
+	manager.stagedDraftWatches[key] = &stagedDraftWatch{
+		attemptAt: attemptAt, since: time.Now().Add(-2 * stagedDraftSettleWindow), due: true, dueWhy: "test"}
+	manager.pausedMu.Unlock()
+
+	repoStartLock := manager.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	flushDone := make(chan struct{})
+	go func() {
+		manager.raiseDueStagedDraftFlag(repoID, key, inst)
+		close(flushDone)
+	}()
+	select {
+	case <-flushDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the deferred flush blocked on the contended repo start lock")
+	}
+	repoStartLock.Unlock()
+	entry := stagedDraftWatchEntry(manager, key)
+	require.True(t, entry.due, "a contended flush keeps the due mark for a later tick")
+	require.False(t, inst.HasAttention(), "nothing may be raised while the repo start lock is contended")
+
+	// The next flush — the lock now free — lands the retained due mark.
+	manager.raiseDueStagedDraftFlag(repoID, key, inst)
+	require.True(t, inst.HasAttention(), "the kept due mark lands on the next uncontended flush")
+}
+
+// A dropped watch keeps its spent blind budget: the gate disarms rather
+// than deleting, so a Ready→Running→Ready flap or an alternating attention
+// owner cannot re-spend stagedDraftMaxBlindReads captures by resetting the
+// count (Codex #7547, fifth round).
+func TestStagedDraftWatchDropKeepsTheSpentBlindBudget(t *testing.T) {
+	manager, repoID, _, inst := stagedDraftFixture(t, time.Now().Add(-time.Minute))
+	checker := &fakeStagedChecker{reads: []session.StagedDraftRead{session.StagedDraftUnreadable}}
+	key := stagedDraftKey(repoID, inst)
+
+	// The full budget, then a Running tick drops the watch...
+	for i := 0; i < stagedDraftMaxBlindReads; i++ {
+		feedStagedDraftTick(manager, repoID, key, inst, checker)
+	}
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveRunning)))
+	manager.noteStagedDraftEvidence(repoID, key, inst, nil)
+
+	// ...and the next Ready tick still counts against the SAME budget: one
+	// more blind read retires the attempt instead of starting it over.
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	entry := stagedDraftWatchEntry(manager, key)
+	require.NotNil(t, entry)
+	require.True(t, entry.closed, "the blind budget survives a flap — a flapping pane cannot re-spend it")
+}
+
 // A blind read that precedes the first staged verdict must not count toward
 // the sustain: the window opens on the first PROVABLE staged read, so a send
 // rechecked once during a redraw and once staged still waits the full window
@@ -673,7 +734,10 @@ func TestStagedDraftPollTickNeverBlocksBehindAnOpLockSend(t *testing.T) {
 		t.Fatal("the post-send poll tick blocked")
 	}
 	require.False(t, inst.HasAttention(), "the send superseded the due mark — no flag for a stale send")
-	require.Nil(t, stagedDraftWatchEntry(manager, key), "a delivered send's open watch is dropped")
+	entry = stagedDraftWatchEntry(manager, key)
+	require.NotNil(t, entry, "a delivered send's watch is disarmed, kept for its blind budget")
+	require.True(t, entry.since.IsZero(), "the disarmed watch's sustain window is cleared")
+	require.False(t, entry.due, "the disarmed watch owes no flag")
 
 	// And the deferred raise is still the working path through the real tick:
 	// re-qualify and the flag lands once the op lock is free.

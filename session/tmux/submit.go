@@ -390,20 +390,37 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 			// review): identical text already visible ABOVE the boundary's
 			// composer predates this send, so only a count that GROWS past
 			// it proves the send itself echoed — the recheck demotes a
-			// composer match to Submitted or Unreadable otherwise. Counted
-			// on the same physical-grid frame the binding was judged on;
-			// a glyph-less boundary counts its whole frame. The anchor is
-			// the recheck's own set — stagedLastComposerAnchor also knows
-			// the Ultra » — never the submit path's narrower set, which
-			// would count the composer's own copy as a pre-existing echo
-			// and demote every Ultra staged read to Unreadable.
-			brows := paneGridRows(xansi.Strip(boundaryGrid))
+			// composer match to Submitted or Unreadable otherwise. The
+			// frame is scrollback-inclusive (`capture-pane -S`), matching
+			// the recheck's own reach — a visible-only baseline would
+			// under-count pre-existing echoes deep in history and the
+			// later count could never honestly grow past it. A glyph-less
+			// boundary counts its whole frame; the anchor is the recheck's
+			// own set — stagedLastComposerAnchor also knows the Ultra » —
+			// never the submit path's narrower set, which would count the
+			// composer's own copy as a pre-existing echo and demote every
+			// Ultra staged read to Unreadable. The mark records the
+			// transcript's tail — the boundary's line — so the recheck can
+			// prove its scrollback reach actually got back to it. A failed
+			// history capture falls back to the visible boundary frame:
+			// the baselines under-count against scrollback, which can only
+			// ever RESOLVE a watch early, never raise one — and the mark
+			// stays empty, leaving the recheck's history-start rule as the
+			// only completeness proof.
+			hist, ok := t.capturePaneForDeliveryHistory()
+			if !ok {
+				hist = boundaryGrid
+			}
+			brows := paneGridRows(xansi.Strip(hist))
 			banchor := stagedLastComposerAnchor(brows)
 			bupperRows := brows
 			if banchor >= 0 {
 				bupperRows = brows[:banchor]
 			}
 			bupper := normalizeDelivery(strings.Join(bupperRows, ""))
+			if ok {
+				ev.boundaryMark = stagedBoundaryMark(bupper)
+			}
 			if bound.tail {
 				ev.tail = probe.completion
 				ev.tailWhole = probe.completion == probe.payload
@@ -832,6 +849,25 @@ func (t *TmuxSession) capturePaneForDeliveryWithin(budget time.Duration) (string
 // with any failure (including a tripped deadline) reported as "could not look".
 func (t *TmuxSession) capturePaneForDeliveryContext(ctx context.Context) (string, bool) {
 	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-t", ExactTarget(t.sanitizedName))
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
+}
+
+// capturePaneForDeliveryHistory is the staged-draft watch's capture
+// (#7545): the visible grid PLUS up to stagedDraftHistoryBound scrollback
+// rows. A staged verdict may stand on an absent echo only when everything
+// printed since the boundary is in view — a -p read alone treats a
+// scrolled-off echo as no echo, and a user's identical composer copy then
+// flags an instruction that already ran (Codex #7547, fourth round). The
+// bound keeps the read finite on deep-history panes.
+func (t *TmuxSession) capturePaneForDeliveryHistory() (string, bool) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p",
+		"-S", fmt.Sprintf("-%d", stagedDraftHistoryBound),
+		"-t", ExactTarget(t.sanitizedName))
 	if err != nil {
 		return "", false
 	}

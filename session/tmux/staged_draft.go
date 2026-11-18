@@ -2,6 +2,33 @@ package tmux
 
 import "strings"
 
+// stagedDraftHistoryBound caps how far the staged-draft recheck reaches back
+// through scrollback — the -S bound on every capture it makes (Codex #7547,
+// fourth round). A staged verdict may stand on an absent echo only when the
+// whole transcript since the send's boundary is in view, and that reach is
+// bounded, not "all history".
+const stagedDraftHistoryBound = 2000
+
+// stagedBoundaryMark turns the transcript that sat above the send's composer
+// into the boundary's line — the recheck's completeness witness: every
+// post-boundary row is newer than it, so while it survives the scrollback-
+// inclusive capture, nothing since the boundary can be missing. It is the
+// normalized TAIL of that transcript (bounded, rune-safe), and it is empty
+// when the transcript was too small to identify a line — fewer than 16
+// normalized runes could collide with ordinary output — in which case the
+// recheck's history-start rule is the proof instead.
+func stagedBoundaryMark(bupper string) string {
+	const maxRunes, minRunes = 160, 16
+	rs := []rune(bupper)
+	if len(rs) < minRunes {
+		return ""
+	}
+	if len(rs) > maxRunes {
+		rs = rs[len(rs)-maxRunes:]
+	}
+	return string(rs)
+}
+
 // StagedDraftRead is the verdict of one staged-draft recheck (#7545): where
 // the bound evidence of a session's last prompt send sits in the pane now.
 // The daemon's staged-draft watch folds these across polls; the contract is
@@ -42,8 +69,12 @@ const (
 // a delivery. tailWhole records that the bound tail IS the whole normalized
 // payload (32 runes or fewer), and tailEcho/chipEcho count how many copies of
 // each kind were already visible above the composer at the boundary — the
-// baseline a transcript must beat to prove THIS send echoed. Only bound
-// strings are ever stored, and only while their send is the latest.
+// baseline a transcript must beat to prove THIS send echoed. boundaryMark is
+// the normalized tail of that same above-anchor transcript — the boundary's
+// line: every post-boundary row is newer than it, so while it survives in a
+// scrollback-inclusive recheck nothing printed since the boundary can be
+// missing (tmux evicts oldest-first). Only bound strings are ever stored,
+// and only while their send is the latest.
 //
 // The strings alone do not make a draft af's, and the recheck never lets
 // them: Staged is answered only for a frame af's still-unsubmitted paste
@@ -55,11 +86,12 @@ const (
 // restart forgets sends it did not watch, rather than putting prompt-derived
 // content on a durable row.
 type stagedDraftEvidence struct {
-	tail      string
-	tailWhole bool
-	tailEcho  int
-	chip      string
-	chipEcho  int
+	tail         string
+	tailWhole    bool
+	tailEcho     int
+	chip         string
+	chipEcho     int
+	boundaryMark string
 }
 
 // BoundDraftStillStaged reports where the last send's bound evidence sits in
@@ -68,9 +100,11 @@ type stagedDraftEvidence struct {
 // sent-unverified, and it spends a capture only when evidence was stashed —
 // the common sent-unverified send that submitted fine answers StagedDraft-
 // Submitted (or Gone) on its first read and is never asked again. The pane is
-// captured with capturePaneForDelivery's convention — `capture-pane -p`,
-// physical grid rows — because the composer geometry helpers it feeds are the
-// same ones stagedReading trusted at the Enter boundary.
+// captured with capturePaneForDeliveryHistory — `capture-pane -p -S -<bound>`,
+// scrollback then physical grid rows — because a staged verdict may stand on
+// an absent echo only when every row printed since the boundary is in view
+// (Codex #7547, fourth round); the composer geometry helpers it feeds are
+// the same ones stagedReading trusted at the Enter boundary.
 //
 // The check is positional and baseline-bound, never a bare text match:
 // evidence inside the composer region — the same region boundEvidence
@@ -88,7 +122,7 @@ func (t *TmuxSession) BoundDraftStillStaged() (StagedDraftRead, string) {
 	if ev == nil || (ev.tail == "" && ev.chip == "") {
 		return StagedDraftNoEvidence, "the last send bound no composer evidence"
 	}
-	pane, ok := t.capturePaneForDelivery()
+	pane, ok := t.capturePaneForDeliveryHistory()
 	if !ok {
 		return StagedDraftUnreadable, "the pane could not be captured"
 	}
@@ -166,7 +200,8 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 		(ev.tailWhole && composerText == ev.tail || !ev.tailWhole && strings.HasSuffix(composerText, ev.tail))
 	chipStaged := ev.chip != "" && strings.Contains(region, ev.chip)
 	ambiguous := stagedAnchorAmbiguous(rows, anchor)
-	upper := normalizeDelivery(strings.Join(rows[:anchor], ""))
+	upperRows := rows[:anchor]
+	upper := normalizeDelivery(strings.Join(upperRows, ""))
 	tailEchoes, chipEchoes := 0, 0
 	if ev.tail != "" {
 		tailEchoes = strings.Count(upper, ev.tail)
@@ -174,6 +209,19 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 	if ev.chip != "" {
 		chipEchoes = strings.Count(upper, ev.chip)
 	}
+	// Staged may stand on an ABSENT echo only when everything printed since
+	// the boundary is in view — otherwise af's own echo could have scrolled
+	// out of reach, and a user's identical recall or retype would flag and
+	// invite an Enter that re-runs a finished instruction (Codex #7547,
+	// fourth round). The boundary mark is the tail of the transcript that
+	// sat above the send's composer: tmux history evicts oldest-first, so
+	// every post-boundary row is newer than it — while it survives in the
+	// scrollback-inclusive capture, nothing since the boundary is missing.
+	// A boundary with no transcript above it needs no mark: reaching the
+	// -S bound's start — fewer rows above the anchor than the bound —
+	// already shows the whole post-boundary output.
+	boundaryReached := ev.boundaryMark == "" && len(upperRows) < stagedDraftHistoryBound ||
+		ev.boundaryMark != "" && strings.Contains(upper, ev.boundaryMark)
 	switch {
 	case tailStaged:
 		switch {
@@ -188,6 +236,12 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 			// boundary: the send landed, and the matching composer copy is
 			// the user's — a recall or a retype — never af's to flag.
 			return StagedDraftSubmitted, "the send's bound text echoed into the transcript since the boundary"
+		case !boundaryReached:
+			// The transcript moved past what the capture can prove — the
+			// echo count is incomplete and may be hiding the send's own
+			// scrolled-off echo. Blind, never a flag: the blind-read
+			// budget retires the watch (Codex #7547, fourth round).
+			return StagedDraftUnreadable, "the transcript scrolled beyond the bounded history — the echo count is incomplete"
 		case tailEchoes > 0 || ev.tailEcho > 0:
 			// An identical echo predates the send (or one scrolled off
 			// since it bound): the composer match could be the user's own
@@ -202,6 +256,8 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 			return StagedDraftUnreadable, "the last composer glyph may be a quote line inside the draft — the anchor is ambiguous"
 		case chipEchoes > ev.chipEcho:
 			return StagedDraftSubmitted, "the send's bound paste chip echoed into the transcript since the boundary"
+		case !boundaryReached:
+			return StagedDraftUnreadable, "the transcript scrolled beyond the bounded history — the echo count is incomplete"
 		case chipEchoes > 0 || ev.chipEcho > 0:
 			return StagedDraftUnreadable, "an identical chip echo predates the send — the composer copy may be the user's own recall"
 		default:
