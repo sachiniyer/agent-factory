@@ -302,6 +302,11 @@ func TestPrepareAccountUser_BusyBoxStatLocation(t *testing.T) {
 			return []byte("1000:1000\n"), nil
 		case strings.Contains(joined, "stat -c %u:%g"):
 			return nil, fmt.Errorf("a PATH-resolved stat must never be attempted: %v", args)
+		case strings.Contains(joined, "/proc/self/mountinfo"):
+			// prepareAccountUser reads the container's mount table before
+			// chowning; answer with a plain root filesystem so the chown
+			// of /af-home and /workspace proceeds.
+			return mountTableAnswer(), nil
 		default:
 			return nil, nil
 		}
