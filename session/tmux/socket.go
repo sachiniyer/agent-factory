@@ -70,7 +70,12 @@ func (t *TmuxSession) serverSocketPID() (pid int, socket string, err error) {
 // a socket path may legally hold. Only tmux's own trailing newline is
 // trimmed. A non-numeric pid or an empty socket is not an answer.
 func parseServerSocketReply(output string) (int, string, error) {
-	trimmed := strings.TrimRight(output, "\n")
+	// TrimSuffix, not TrimRight: the delimiter is exactly ONE newline, and
+	// a socket filename may itself end in one — tmux writes the path
+	// verbatim, so "pid /sock\n\n" carries socket "/sock\n" and stripping
+	// both newlines would record a socket the carrier's env tuple never
+	// names — an own carrier misread as foreign (Codex on #7469).
+	trimmed := strings.TrimSuffix(output, "\n")
 	pidRaw, socket, ok := strings.Cut(trimmed, " ")
 	if !ok {
 		return 0, "", fmt.Errorf("malformed server socket reply %q", trimmed)
