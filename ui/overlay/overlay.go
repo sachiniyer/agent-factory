@@ -175,7 +175,19 @@ func widestLine(lines []string) int {
 // consumes its backslash (\x1b\\ is tried before \x1b); without that ordering an
 // ST immediately followed by more would match only the ESC and leak the '\'. The
 // URI class already excludes \x1b, so the capture stops before any terminator,
-// bare ESC included.
+// bare ESC included. The PARAMETER class excludes the terminators too, for the
+// same reason: a malformed OSC whose parameter field runs into an ESC (as in
+// "\x1b]8;foo\x1b[31m;FAKE \x1b[0m") is ended by the terminal at that ESC and
+// never opens a hyperlink, but a [^;]* that crosses the ESC would let the
+// bare-ESC alternative treat a LATER ESC as the terminator and manufacture an
+// opener the terminal never made.
+//
+// The bare-ESC terminator CONSUMES its ESC, so an ESC that ends one OSC 8
+// sequence and introduces the next (as in "\x1b]8;;\x1b]8;;uri\x1b\\") is eaten
+// by the first match and Go's non-overlapping FindAllStringSubmatch resumes
+// after it, missing the second opener. RE2 has no lookahead, so the reconsider
+// cannot be done in the pattern; osc8FindAll repositions the next search AT
+// that ESC instead.
 //
 // Written as a raw literal with \x1b and \x07 as REGEX escapes rather than as
 // literal control bytes. Embedding a real BEL trips CodeQL's
@@ -183,7 +195,46 @@ func widestLine(lines []string) int {
 // far more often a mistyped \A or [[:alpha:]] than an intended 0x07 — and the one
 // place it is genuinely intended is exactly this, an OSC terminator. Spelling it
 // as an escape says so, to the query and to the next reader.
-var osc8Regex = regexp.MustCompile(`\x1b\]8;[^;]*;([^\x1b\x07\x{9c}]*)(?:\x1b\\|\x07|\x{9c}|\x1b)`)
+var osc8Regex = regexp.MustCompile(`\x1b\]8;[^;\x1b\x07\x{9c}]*;([^\x1b\x07\x{9c}]*)(?:\x1b\\|\x07|\x{9c}|\x1b)`)
+
+// osc8FindAll returns every OSC 8 introducer match in line, like
+// osc8Regex.FindAllStringSubmatch, except a bare-ESC terminator does NOT advance
+// the search past the ESC. The regex consumes the ESC as the terminator, so an
+// ESC that ends one OSC 8 sequence and simultaneously introduces the next (as in
+// "\x1b]8;;\x1b]8;;uri\x1b\\") would otherwise be eaten by the first match and
+// the second opener missed — leaving a link the compositor never closes. RE2
+// has no lookahead, so the reconsider is done by repositioning: the next search
+// resumes AT the ESC, where a terminal sees the next opener begin.
+func osc8FindAll(line string) [][]string {
+	var all [][]string
+	pos := 0
+	for pos <= len(line) {
+		loc := osc8Regex.FindStringSubmatchIndex(line[pos:])
+		if loc == nil {
+			break
+		}
+		m := make([]string, len(loc)/2)
+		for i := 0; i < len(loc); i += 2 {
+			if loc[i] < 0 {
+				m[i/2] = ""
+				continue
+			}
+			m[i/2] = line[pos+loc[i] : pos+loc[i+1]]
+		}
+		all = append(all, m)
+		end := pos + loc[1]
+		// A bare-ESC terminator leaves the match ending in \x1b; resume the next
+		// search AT it so an opener beginning there is seen. ST ends in '\\',
+		// BEL in '\x07', and the C1 ST in the trailing byte of U+009C, so only
+		// the bare-ESC case is repositioned.
+		if end > pos && line[end-1] == '\x1b' {
+			pos = end - 1
+		} else {
+			pos = end
+		}
+	}
+	return all
+}
 
 // closeSequences returns what must be emitted after line so that whatever follows
 // it — a background segment, or the end of the frame — starts clean.
@@ -209,7 +260,7 @@ func closeSequences(line string) string {
 			closers += "\x1b[0m"
 		}
 	}
-	if matches := osc8Regex.FindAllStringSubmatch(line, -1); len(matches) > 0 {
+	if matches := osc8FindAll(line); len(matches) > 0 {
 		if last := matches[len(matches)-1]; last[1] != "" {
 			// A hyperlink opened and not closed on this row would otherwise keep
 			// every background cell after it clickable, and outlive the frame.
@@ -235,9 +286,20 @@ func backdropOpen(line string, sgrOpen []string, osc8Open string) ([]string, str
 			sgrOpen = append(sgrOpen, m)
 		}
 	}
-	if matches := osc8Regex.FindAllStringSubmatch(line, -1); len(matches) > 0 {
+	if matches := osc8FindAll(line); len(matches) > 0 {
 		if last := matches[len(matches)-1]; last[1] != "" {
-			osc8Open = last[0]
+			// The carry is RE-EMITTED verbatim below a modal (PlaceOverlay writes
+			// bgOsc8Open straight into the stream), so it must end in a real
+			// terminator. A bare-ESC match ends in a dangling ESC that a terminal
+			// would dispatch as the start of the next escape and consume the
+			// first character of the row that follows; normalise to the ST form
+			// (rebuilt from the captured URI) so the carry opens the link
+			// cleanly. The ST/BEL/C1-ST forms already end in a terminator.
+			if strings.HasSuffix(last[0], "\x1b") {
+				osc8Open = "\x1b]8;;" + last[1] + "\x1b\\"
+			} else {
+				osc8Open = last[0]
+			}
 		} else {
 			osc8Open = ""
 		}

@@ -574,3 +574,49 @@ func TestPlaceOverlayEmitsBackdropGuardForABareEscHyperlink(t *testing.T) {
 			"does not cover the modal cells; got %q, want prefix %q", out[1], guard)
 	}
 }
+
+// A bare ESC that terminates one OSC 8 sequence and simultaneously introduces
+// the next (as in "\x1b]8;;\x1b]8;;uri\x1b\\") is a closer followed by an opener
+// for a real terminal, but Go's non-overlapping FindAllStringSubmatch consumed
+// the shared ESC as the first match's terminator and resumed after it, so the
+// second opener was missed and the link stayed open across the frame. osc8FindAll
+// repositions the next search at that ESC so the second opener is seen and
+// closed.
+func TestCloseSequencesSeesOpenerAfterSharedEsc(t *testing.T) {
+	// First sequence is a closer (empty URI), terminated by a bare ESC that also
+	// opens the second sequence (uri), which an ST then terminates — an opener.
+	row := "\x1b]8;;\x1b]8;;https://evil.example\x1b\\"
+	got := closeSequences(row)
+	if !strings.Contains(got, "\x1b]8;;\x1b\\") {
+		t.Fatalf("a shared-ESC opener must be detected so its link is closed; "+
+			"closeSequences(%q) = %q", row, got)
+	}
+}
+
+// A malformed OSC 8 whose parameter field runs into an ESC (as in
+// "\x1b]8;foo\x1b[31m;FAKE \x1b[0m") is ended by the terminal at that ESC and
+// never opens a hyperlink, but a [^;]* parameter class that crossed the ESC
+// would let the bare-ESC alternative treat a later ESC as the terminator and
+// manufacture an opener the terminal never made. The parameter class must
+// exclude the terminators, so no opener is detected and no closer emitted.
+func TestCloseSequencesIgnoresMalformedParamFieldEndedByEsc(t *testing.T) {
+	row := "\x1b]8;foo\x1b[31m;FAKE \x1b[0m"
+	if got := closeSequences(row); strings.Contains(got, "\x1b]8;;\x1b\\") {
+		t.Fatalf("a malformed OSC ended in its parameter field must not be read as "+
+			"an opener; closeSequences(%q) = %q", row, got)
+	}
+}
+
+// The carry bgOsc8Open is re-emitted verbatim below a modal, so it must end in a
+// real terminator. A bare-ESC match ends in a dangling ESC; the carry must be
+// normalised to the ST form (rebuilt from the captured URI) so the re-emitted
+// opener doesn't eat the first character of the row that follows.
+func TestBackdropOpenNormalisesBareEscCarryToSt(t *testing.T) {
+	_, carry := backdropOpen("\x1b]8;;https://evil.example\x1bAAAA", nil, "")
+	const want = "\x1b]8;;https://evil.example\x1b\\"
+	if carry != want {
+		t.Fatalf("a bare-ESC opener must be carried as its ST form so the dangling "+
+			"ESC doesn't eat the next character on re-emit; got %q, want %q",
+			carry, want)
+	}
+}
