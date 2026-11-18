@@ -44,16 +44,17 @@ func stagingBinarySource(t *testing.T) string {
 	return p
 }
 
-// writeGuardTableAnswer renders the mount-table read's answer in the two-dir
-// form verifyWriteTargets parses: the resolved parent of each write
-// destination, then a mountinfo whose "/" is overlay and whose extra mounts
-// are (mountPoint, fstype) pairs.
+// writeGuardTableAnswer renders verifyWriteTargets' NUL-framed answer: the
+// resolved parent of each write destination (pwd -P's trailing newline kept,
+// then the shell's '\0'), then a mountinfo whose "/" is overlay and whose
+// extra mounts are (mountPoint, fstype) pairs.
 func writeGuardTableAnswer(realA, realB string, mounts ...[2]string) []byte {
-	lines := []string{realA, realB, mountinfoLine(1, "/", "overlay")}
+	var b strings.Builder
+	b.WriteString(mountinfoLine(1, "/", "overlay") + "\n")
 	for i, m := range mounts {
-		lines = append(lines, mountinfoLine(10+i, m[0], m[1]))
+		b.WriteString(mountinfoLine(10+i, m[0], m[1]) + "\n")
 	}
-	return []byte(strings.Join(lines, "\n") + "\n")
+	return writeGuardAnswerRaw(realA, realB, b.String())
 }
 
 // stagingDockerAnswers installs a fake docker CLI that records every call into
@@ -110,7 +111,7 @@ func stagingDockerAnswers(t *testing.T, calls *[][]string, engineName string, ro
 				if mountAnswer != nil {
 					return mountAnswer(joined)
 				}
-				return mountTableAnswer(), nil
+				return writeGuardTableAnswer("/usr/local/bin", "/etc"), nil
 			case strings.Contains(joined, "cat "+dockerBannerPath):
 				return []byte(`{"addr":":8000","token":"t","title":"staging"}` + "\n" + remoteProcAlive + "\n"), nil
 			}
@@ -462,6 +463,15 @@ func TestDockerWriteGuardRefusesHostMounts(t *testing.T) {
 			mounts:      [][2]string{{"/usr/local/bin/af/inner", "tmpfs"}},
 			wantRefused: dockerAfBinaryPath,
 		},
+		{
+			name:  "resolved parent with a trailing space is judged byte-exactly",
+			realA: "/usr/local/bin ",
+			realB: "/usr/local/bin",
+			// A mount over "/usr/local/bin " covers "/usr/local/bin /af" — a
+			// TrimSpace'd read would judge "/usr/local/bin/af" and miss it.
+			mounts:      [][2]string{{"/usr/local/bin ", "tmpfs"}},
+			wantRefused: dockerAfBinaryPath,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -500,20 +510,32 @@ func TestDockerWriteGuardRefusesHostMounts(t *testing.T) {
 func TestDockerWriteGuardAllowsRootfs(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
+		realA  string
 		mounts [][2]string
 		policy bool
 	}{
 		{name: "plain rootfs"},
 		{name: "a private tmpfs over /tmp elsewhere is irrelevant", mounts: [][2]string{{"/tmp", "tmpfs"}}, policy: true},
+		{
+			name:  "a trailing-spaced sibling is not under the unspaced mount",
+			realA: "/usr/local/bin ",
+			// "/usr/local/bin/af" is under this mount; "/usr/local/bin /af"
+			// is not — judging the resolved path byte-exactly is what lets
+			// the write proceed.
+			mounts: [][2]string{{"/usr/local/bin", "tmpfs"}},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			stagingTestEnv(t)
 			var calls [][]string
-			realB := "/usr/local/bin"
+			realA, realB := tt.realA, "/usr/local/bin"
+			if realA == "" {
+				realA = "/usr/local/bin"
+			}
 			if tt.policy {
 				realB = "/etc"
 			}
-			answer := writeGuardTableAnswer("/usr/local/bin", realB, tt.mounts...)
+			answer := writeGuardTableAnswer(realA, realB, tt.mounts...)
 			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false,
 				func(string) ([]byte, error) { return answer, nil }, nil))
 
@@ -575,6 +597,16 @@ func TestDockerWriteGuardUnreadableTableRefuses(t *testing.T) {
 			// must refuse it rather than prefix-match the cleaned "/host".
 			return writeGuardTableAnswer("/usr/local/bin", "/usr/local/bin",
 				[2]string{"//host", "ext4"}), nil
+		}},
+		{name: "resolved parent with a leading space refuses as non-absolute", answer: func(string) ([]byte, error) {
+			return writeGuardTableAnswer(" /usr/local/bin", "/usr/local/bin"), nil
+		}},
+		{name: "empty resolved parent", answer: func(string) ([]byte, error) {
+			return writeGuardTableAnswer("", "/usr/local/bin"), nil
+		}},
+		{name: "missing NUL framing", answer: func(string) ([]byte, error) {
+			// The old newline-delimited shape has no NUL fields to split on.
+			return mountTableAnswer(), nil
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

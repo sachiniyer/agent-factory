@@ -16,6 +16,7 @@
 package session
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -393,22 +394,38 @@ func (p *dockerProvisioner) verifyWriteTargets() error {
 	// image that makes those paths unsearchable refuses the write instead.
 	out, err := p.docker(dockerShortStepTimeout,
 		"exec", p.containerID, dockerContainerShell, "-c",
-		// No mkdir -p: /usr/local/bin and /tmp exist on any image that can
+		// No mkdir -p: /usr/local/bin and /etc exist on any image that can
 		// host a container at all, and a cd failure is a refused write, the
-		// fail-closed verdict this guard exists to give.
-		`cd -- "$1" && pwd -P && cd -- "$2" && pwd -P && cat /proc/self/mountinfo && for f in "$3" "$4"; do if [ -L "$f" ]; then printf '`+leafSymlinkMarker+`%s\n' "$f"; fi; done`,
+		// fail-closed verdict this guard exists to give. Each resolved parent
+		// is framed by a NUL the shell prints itself — a NUL can never sit
+		// inside a path — so a directory name carrying whitespace or a
+		// newline is judged byte-exactly instead of trimmed into a different
+		// path. pwd -P's own trailing newline stays in the field.
+		`cd -- "$1" && pwd -P && printf '\0' && cd -- "$2" && pwd -P && printf '\0' && cat /proc/self/mountinfo && for f in "$3" "$4"; do if [ -L "$f" ]; then printf '`+leafSymlinkMarker+`%s\n' "$f"; fi; done`,
 		"sh", dirA, dirB, dockerAfBinaryPath, leafB)
 	if err != nil {
 		return dockerStepErr(fmt.Errorf("backend=docker: cannot read the container mount table, so af's files are not written (a cp must stay on the container's own filesystem): %s: %w", strings.TrimSpace(string(out)), err), dockerOpSessionExec)
 	}
-	lines := strings.SplitN(string(out), "\n", 3)
-	if len(lines) < 3 || !strings.HasPrefix(lines[0], "/") || !strings.HasPrefix(lines[1], "/") || strings.TrimSpace(lines[2]) == "" {
-		return dockerStepErr(fmt.Errorf("backend=docker: the container mount table answer was not understood, so af's files are not written: %q", strings.TrimSpace(string(out))), dockerOpLocal)
+	parts := bytes.SplitN(out, []byte{0}, 3)
+	if len(parts) < 3 || len(parts[2]) == 0 {
+		return dockerStepErr(fmt.Errorf("backend=docker: the container mount table answer was not understood, so af's files are not written: %q", string(out)), dockerOpLocal)
+	}
+	// Each resolved field must end in exactly the newline pwd -P prints —
+	// remove that one byte and keep the rest verbatim. An empty or
+	// non-absolute field can only be a corrupt or hostile answer; the check
+	// refuses rather than guess a path.
+	realDirs := make([]string, 2)
+	for i, field := range parts[:2] {
+		dir, ok := bytes.CutSuffix(field, []byte("\n"))
+		if !ok || len(dir) == 0 || dir[0] != '/' {
+			return dockerStepErr(fmt.Errorf("backend=docker: the container mount table answer was not understood, so af's files are not written: %q", string(out)), dockerOpLocal)
+		}
+		realDirs[i] = string(dir)
 	}
 	var mountLines []string
-	for _, line := range strings.Split(lines[2], "\n") {
+	for _, line := range strings.Split(string(parts[2]), "\n") {
 		if strings.HasPrefix(line, leafSymlinkMarker) {
-			leaf := strings.TrimSpace(strings.TrimPrefix(line, leafSymlinkMarker))
+			leaf := strings.TrimPrefix(line, leafSymlinkMarker)
 			return dockerStepErr(fmt.Errorf("backend=docker: refusing to write %s: the destination is a symbolic link in the image, so `docker cp` would follow it somewhere the mount-table check cannot prove is the container's own filesystem; use an image whose %s is a real path",
 				leaf, leaf), dockerOpLocal)
 		}
@@ -418,7 +435,7 @@ func (p *dockerProvisioner) verifyWriteTargets() error {
 	if err != nil {
 		return dockerStepErr(fmt.Errorf("backend=docker: cannot parse the container mount table, so af's files are not written (a cp must stay on the container's own filesystem): %w", err), dockerOpLocal)
 	}
-	for i, realParent := range []string{strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1])} {
+	for i, realParent := range realDirs {
 		target := dockerAfBinaryPath
 		if i == 1 {
 			if len(p.spec.AgentPolicy) == 0 {

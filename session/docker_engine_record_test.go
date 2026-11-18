@@ -46,10 +46,10 @@ func engineRecordDocker(t *testing.T, engineID string, atRun func()) func() {
 				return []byte("0:0\n"), nil
 			}
 			if strings.Contains(joined, "/proc/self/mountinfo") {
-				// The cp fallback's write-target guard reads the table in
-				// readMountTable's two-dir form (#7577): resolved parents,
-				// then a rootfs-only mountinfo so the write proceeds.
-				return mountTableAnswer(), nil
+				// The cp fallback's write-target guard reads the table
+				// (#7577): resolved parents, then a rootfs-only mountinfo
+				// so the write proceeds.
+				return probeAnswer(args), nil
 			}
 			if strings.Contains(joined, "cat "+dockerBannerPath) {
 				return []byte(`{"addr":":8000","token":"test-only","title":"engine-record"}` + "\n" + remoteProcAlive + "\n"), nil

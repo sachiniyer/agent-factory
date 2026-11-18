@@ -48,7 +48,10 @@ func isAccountReadMountTableExec(args []string) bool {
 	if len(args) == 0 || args[0] != "exec" {
 		return false
 	}
-	return strings.Contains(strings.Join(args, " "), `cd -- "$2" && pwd -P`)
+	joined := strings.Join(args, " ")
+	// verifyWriteTargets' read shares the `cd -- "$2" && pwd -P` clause; the
+	// leafSymlinkMarker in its script is what tells the two readers apart.
+	return strings.Contains(joined, `cd -- "$2" && pwd -P`) && !strings.Contains(joined, leafSymlinkMarker)
 }
 
 // accountChownScenario parameterizes the container answers the chown-guard
@@ -664,11 +667,11 @@ func TestPrepareAccountUser_Differential_SkipsWorkspaceChownLikeNonAccount(t *te
 				case isAccountReadMountTableExec(args):
 					return accountMountTableAnswer(dockerWorkspaceDir), nil // account: /workspace is a mount
 				case isMountTableExec(args):
-					// Non-account's readMountTable is matched here too, since
+					// Non-account's reads land here too, since
 					// isAccountReadMountTableExec is stricter. The non-account
 					// mountinfo should also report a /workspace mount so the
 					// guard skips its chown.
-					return mountTableAnswer(dockerWorkspaceDir), nil
+					return probeAnswer(args, dockerWorkspaceDir), nil
 				}
 				return nil, nil
 			}

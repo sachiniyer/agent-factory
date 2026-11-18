@@ -225,7 +225,7 @@ func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 						// The cp fallback's write-target guard reads the
 						// table before cp runs (#7577); a rootfs-only answer
 						// lets the targeted step be the one that fails.
-						return mountTableAnswer(), nil
+						return probeAnswer(args), nil
 					}
 					if args[0] == "run" {
 						return []byte(dockerCreatedID + "\n"), nil
@@ -959,7 +959,7 @@ func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 					// The cp fallback's write-target guard reads the
 					// table before cp runs (#7577); a rootfs-only answer
 					// lets the banner read be the step under test.
-					return mountTableAnswer(), nil
+					return probeAnswer(args), nil
 				case args[0] == "exec":
 					return []byte("\n"), nil
 				}
