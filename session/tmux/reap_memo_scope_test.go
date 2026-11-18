@@ -71,4 +71,3 @@ func TestOneAttestationScopeThreadsTheWholeSweep(t *testing.T) {
 	require.Equal(t, int32(2), allocs.Load(),
 		"nil att allocates a scope local to that call — the single-call path is unchanged")
 }
-
