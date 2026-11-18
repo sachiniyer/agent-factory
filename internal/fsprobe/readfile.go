@@ -5,8 +5,13 @@ import (
 	"os"
 )
 
-// openPath is the test seam under ReadFileWith's bounded flight.
-var openPath = newSeam(os.Open)
+// openPath is the test seam under ReadFileWith's bounded flight: the
+// production openBoundedFile, or a test's stand-in for a wedged mount
+// (#7221 review R4). openBoundedFile is the same guarded open every sibling
+// open inside a bounded flight carries, so a FIFO or symlink planted at the
+// path is answered within the bound rather than wedging the flight's
+// goroutine.
+var openPath = newSeam(openBoundedFile)
 
 var readFileFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 
@@ -14,11 +19,16 @@ var readFileFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 // per-path bounded flight shape as Stat. A caller that reads a file it does
 // not own on the poll and load paths, the head of an agent's transcript
 // (#7221 review R4), cannot afford an unbounded open or read: on a wedged
-// mount neither returns, and neither would the poll. A read that does not
-// answer within the bound is the ErrProbeTimedOut + context.DeadlineExceeded
-// non-answer every probe here gives, and a retry while the stuck read is still
-// blocked is refused the same way. A read that answers returns what read
-// returned, and os.Open's error, ENOENT included, when the open fails.
+// mount neither returns, and neither would the poll. The open is the bounded
+// openBoundedFile — O_NONBLOCK|O_NOFOLLOW with a regular-file refusal on the
+// opened descriptor — so a FIFO or symlink planted at the path is answered
+// within the bound rather than wedging the flight's work goroutine in openat
+// forever and latching its registry entry, the same guard openCodexRollout
+// and openCarryFileAt carry. A read that does not answer within the bound is
+// the ErrProbeTimedOut + context.DeadlineExceeded non-answer every probe
+// here gives, and a retry while the stuck read is still blocked is refused
+// the same way. A read that answers returns what read returned, and the
+// open's error, ENOENT included, when the open fails.
 //
 // read must not keep the file or anything that reads from it: the flight
 // closes the file when read returns, which for an abandoned flight is after

@@ -1,9 +1,11 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
@@ -381,36 +383,59 @@ func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationD
 	return resumeDecline{}
 }
 
+// openClaudeTranscript opens the transcript at path for the staleness
+// comparison's paced flight. O_NOFOLLOW rejects a symlink planted at the leaf,
+// O_NONBLOCK keeps a FIFO planted there from hanging the open, and a
+// regular-file check on the opened descriptor refuses a non-regular file
+// swapped in after the listing's lstat — the same stat-then-open hazards
+// every sibling open inside a bounded flight guards (openCarryFileAt,
+// openCodexRollout). The open runs inside the flight's bound, so a planted
+// FIFO is answered as a non-regular refusal within the bound rather than
+// wedging the flight's work goroutine in openat forever and latching its
+// registry entry against every later ask (#7383).
+func openClaudeTranscript(p carryPace, path string) (*os.File, os.FileInfo, error) {
+	p.at("open", path)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	p.at("fstat", path)
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("%s is not a regular file (%s)", path, info.Mode().Type())
+	}
+	return file, info, nil
+}
+
 // claudeTranscriptExtends reports whether the transcript longer begins with
 // every byte of shorter. One that is not there extends nothing. The
 // comparison runs in a paced flight whose bound is per read (#7383), and err
 // is a lookup in it that did not answer, or failed: then af could not tell.
+// Each transcript is opened the way openCarryFileAt opens a carried copy:
+// non-blocking and no-follow, with a regular-file refusal on the opened
+// descriptor, so a FIFO or symlink planted at a transcript path between the
+// listing's lstat and this open is answered within the bound rather than
+// wedging the flight (the one bounded open #7389 wrapped without the guard
+// its siblings carry).
 func claudeTranscriptExtends(longer, shorter claudeTranscript) (bool, error) {
 	longPath, shortPath := filepath.Join(longer.dir, longer.name), filepath.Join(shorter.dir, shorter.name)
 	return fsprobe.Paced("Claude transcript comparison", longPath+"\x00"+shortPath, func(step func()) (bool, error) {
 		p := pacedCarryWalk(step)
-		p.at("open", longPath)
-		long, err := os.Open(longPath)
+		long, longInfo, err := openClaudeTranscript(p, longPath)
 		if err != nil {
 			return false, unlookedOnly(err)
 		}
 		defer long.Close()
-		p.at("open", shortPath)
-		short, err := os.Open(shortPath)
+		short, shortInfo, err := openClaudeTranscript(p, shortPath)
 		if err != nil {
 			return false, unlookedOnly(err)
 		}
 		defer short.Close()
-		p.at("fstat", longPath)
-		longInfo, err := long.Stat()
-		if err != nil {
-			return false, err
-		}
-		p.at("fstat", shortPath)
-		shortInfo, err := short.Stat()
-		if err != nil {
-			return false, err
-		}
 		if longInfo.Size() < shortInfo.Size() {
 			return false, nil
 		}
