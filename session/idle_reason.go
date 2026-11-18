@@ -495,6 +495,14 @@ func (i *Instance) markAgentRespawned() {
 	defer i.mu.Unlock()
 	i.markAgentRuntimeReplacedLocked(true)
 	i.agentRespawned = true
+	// A run already ended interrupted, by a replacement that proved nothing (an
+	// unverified reattach, or a record from before the proof existed), never
+	// reaches an interrupt edge again: its run is no longer active. It is owed
+	// the proof now. tmux confirmed this session absent, so every process it
+	// ran is gone, the one the prompt went to included (Codex on #7524).
+	if i.taskRunInterrupted {
+		i.taskRunInterruptedByRespawn = true
+	}
 }
 
 // InterruptTaskRunIfRuntimeReplaced ends a still-in-flight task run as

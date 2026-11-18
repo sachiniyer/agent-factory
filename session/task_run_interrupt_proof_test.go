@@ -1,8 +1,10 @@
 package session
 
 import (
+	"os/exec"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 
@@ -65,6 +67,18 @@ func TestTaskRunInterruptRecordsWhetherARespawnEndedIt(t *testing.T) {
 		require.True(t, inst.InterruptTaskRunIfRuntimeReplaced())
 		require.False(t, inst.ToInstanceData().TaskRunInterruptedByRespawn)
 	})
+	t.Run("a later respawn proves an interrupt that proved nothing", func(t *testing.T) {
+		inst := taskRunSession(t)
+		lostRestoreFence(t, inst)
+		inst.MarkAgentRuntimeReplacedForTest(true)
+		require.NoError(t, inst.Transition(ConfirmLive()))
+		require.False(t, inst.ToInstanceData().TaskRunInterruptedByRespawn, "precondition: the first interrupt proved nothing")
+		lostRestoreFence(t, inst)
+		inst.markAgentRespawned()
+		require.NoError(t, inst.Transition(ConfirmLive()))
+		require.True(t, inst.ToInstanceData().TaskRunInterruptedByRespawn,
+			"the run is no longer active, so no interrupt edge runs again; the respawn itself must record the proof")
+	})
 	t.Run("a resumed run drops it with the interrupt", func(t *testing.T) {
 		inst := taskRunSession(t)
 		inst.markAgentRespawned()
@@ -83,6 +97,7 @@ func TestTaskRunInterruptRecordsWhetherARespawnEndedIt(t *testing.T) {
 // the one that proves the agent gone. The load path draws the same line.
 func TestLocalBackendTaskRunInterruptCause(t *testing.T) {
 	const tmuxName = "af_7518_interrupt_cause"
+	var tmuxExec cmd_test.MockCmdExec // the latest local's tmux, so a test can end its agent
 	local := func(t *testing.T, alive bool, liveness Liveness) *Instance {
 		t.Helper()
 		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -90,6 +105,7 @@ func TestLocalBackendTaskRunInterruptCause(t *testing.T) {
 		gw, err := git.NewGitWorktreeFromStorage(repoRoot, repoRoot, tmuxName, "main", "", true, false)
 		require.NoError(t, err)
 		cmdExec := nameKeyedExec(map[string]bool{tmuxName: alive})
+		tmuxExec = cmdExec
 		ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps(tmuxName, "claude", persistPtyFactory{t: t, cmdExec: cmdExec}, cmdExec)
 		return &Instance{
 			Title: "interrupt-cause", TaskID: "task-1", Path: repoRoot, Program: "claude",
@@ -115,6 +131,17 @@ func TestLocalBackendTaskRunInterruptCause(t *testing.T) {
 		inst := local(t, false, LiveLost)
 		recoverAndConfirm(t, inst)
 		require.True(t, inst.ToInstanceData().TaskRunInterruptedByRespawn)
+	})
+	t.Run("recover reattaches unverified, then the agent dies and recover respawns", func(t *testing.T) {
+		inst := local(t, true, LiveLost)
+		recoverAndConfirm(t, inst)
+		require.False(t, inst.ToInstanceData().TaskRunInterruptedByRespawn, "precondition: the first stage proved nothing")
+		// The agent dies: tmux no longer has the session.
+		require.NoError(t, tmuxExec.Run(exec.Command("tmux", "kill-session", "-t", "="+tmuxName+":")))
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveLost)))
+		recoverAndConfirm(t, inst)
+		require.True(t, inst.ToInstanceData().TaskRunInterruptedByRespawn,
+			"tmux confirmed the session absent before this respawn, so the prompted process is gone")
 	})
 	t.Run("load reattaches a live agent it cannot verify", func(t *testing.T) {
 		inst := local(t, true, LiveReady)
