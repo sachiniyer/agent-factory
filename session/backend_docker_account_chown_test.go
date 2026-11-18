@@ -71,6 +71,75 @@ func accountChownDockerStub(calls *[][]string, owner string, mountPoints ...stri
 	}
 }
 
+// execShellScript returns the script a `docker exec … sh -c <script>` call
+// runs, or "" when the call is not a sh -c exec.
+func execShellScript(call []string) string {
+	for i, arg := range call {
+		if arg == "-c" && i+1 < len(call) {
+			return call[i+1]
+		}
+	}
+	return ""
+}
+
+// rootExecScripts returns the sh -c scripts of every root (0:0) docker exec in
+// calls — the whole set of commands af ran as container root during
+// preparation.
+func rootExecScripts(calls [][]string) []string {
+	var scripts []string
+	for _, call := range calls {
+		if len(call) == 0 || call[0] != "exec" || !strings.Contains(strings.Join(call, " "), "--user 0:0") {
+			continue
+		}
+		scripts = append(scripts, execShellScript(call))
+	}
+	return scripts
+}
+
+// rootScriptChowns reports whether a shell snippet runs a chown command that
+// takes target as an operand — in ANY position, so the unguarded mutant
+// `chown -h <owner> '/af-home' '/workspace'` is caught even though /workspace
+// follows another operand rather than the owner (#7563 R5). The snippet is
+// split into commands on the &&, ||, ; and | boundaries af's scripts join
+// on; within a command a bare `chown` word starts operand collection, which
+// runs to the command's end or to find(1)'s -exec terminator `+`. Shell
+// quote wrapping is stripped before comparing, so a quoted and a bare
+// operand spell the same path. A target named only as find's -path argument
+// (a prune entry) is NOT a chown operand and does not match.
+func rootScriptChowns(script, target string) bool {
+	commands := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n", "|", "\n").Replace(script)
+	for _, command := range strings.Split(commands, "\n") {
+		inChown := false
+		for _, field := range strings.Fields(command) {
+			if inChown {
+				if field == "+" {
+					inChown = false
+					continue
+				}
+				if strings.Trim(field, `'"`) == target {
+					return true
+				}
+			}
+			if field == "chown" {
+				inChown = true
+			}
+		}
+	}
+	return false
+}
+
+// requireNoRootChownOn asserts no root exec in calls hands target to any
+// chown command — the operand-level assertion #7563 R5 requires, so a
+// regression that reinstates an unguarded chown goes red however the
+// operands are ordered (`chown -h <o> '/af-home' '/workspace'` included).
+func requireNoRootChownOn(t *testing.T, calls [][]string, target string) {
+	t.Helper()
+	for _, script := range rootExecScripts(calls) {
+		require.Falsef(t, rootScriptChowns(script, target),
+			"the path must not be an operand of any root chown; target=%s script=%v", target, script)
+	}
+}
+
 // newAccountChownProvisioner returns a dockerProvisioner wired for a unit test
 // of prepareAccountUser: an account-scoped spec (so the account path dispatch
 // takes effect) and a container ID the stub records into each call.
@@ -170,10 +239,11 @@ func TestPrepareAccountUser_WorkspaceInBindMountNotChowned(t *testing.T) {
 		"/af-home on the root filesystem is still chowned; call=%v", chown)
 	// The chown of /workspace is skipped — its enclosing mount is the bind,
 	// not the container root fs, so af would re-own the operator's host dir.
-	require.NotContains(t, joined, "chown "+accountProbeOwner+" "+shellQuote(dockerWorkspaceDir),
-		"a mount AT /workspace is the operator's directory: it must not be re-owned; call=%v", chown)
-	require.NotContains(t, joined, "chown -h "+accountProbeOwner+" "+shellQuote(dockerWorkspaceDir),
-		"/workspace in a host bind must not be chowned under any flag; call=%v", chown)
+	// The check is operand-level, not shape-matched: /workspace must not be
+	// ANY operand of ANY root chown, so the unguarded mutant
+	// `chown -h <o> '/af-home' '/workspace'` — where /workspace follows
+	// another operand rather than the owner — goes red here too (#7563 R5).
+	requireNoRootChownOn(t, calls, dockerWorkspaceDir)
 	require.Equal(t, accountProbeOwner, p.containerUser,
 		"containerUser records the probed uid:gid so later execs still run as it, even when /workspace is a mount; calls=%v", calls)
 }
@@ -213,10 +283,10 @@ func TestPrepareAccountUser_HomeInBindMountNotChowned(t *testing.T) {
 	chown := findExecCall(calls, "--user 0:0", "mkdir -p "+shellQuote(dockerAccountRuntimeHome))
 	require.NotNil(t, chown, "the mkdir step must run for /workspace even when /af-home is a mount; calls=%v", calls)
 	joined := strings.Join(chown, " ")
-	require.NotContains(t, joined, "chown "+accountProbeOwner+" "+shellQuote(dockerAccountRuntimeHome),
-		"a mount AT /af-home is the operator's directory: it must not be re-owned; call=%v", chown)
-	require.NotContains(t, joined, "chown -h "+accountProbeOwner+" "+shellQuote(dockerAccountRuntimeHome),
-		"/af-home in a host bind must not be chowned under any flag; call=%v", chown)
+	// Operand-level, not shape-matched: /af-home must not be ANY operand of
+	// ANY root chown, so a mutant `chown -h <o> '/workspace' '/af-home'`
+	// goes red here as well (#7563 R5).
+	requireNoRootChownOn(t, calls, dockerAccountRuntimeHome)
 	require.Contains(t, joined, "chown -h "+accountProbeOwner+" "+shellQuote(dockerWorkspaceDir),
 		"/workspace on the root filesystem is still chowned; call=%v", chown)
 }
@@ -239,6 +309,8 @@ func TestPrepareAccountUser_BothInBindMountsChownsNothing(t *testing.T) {
 	joined := strings.Join(chown, " ")
 	require.NotContains(t, joined, "chown",
 		"nothing is chowned when /af-home and /workspace are both mounts; call=%v", chown)
+	requireNoRootChownOn(t, calls, dockerAccountRuntimeHome)
+	requireNoRootChownOn(t, calls, dockerWorkspaceDir)
 	require.Equal(t, accountProbeOwner, p.containerUser,
 		"containerUser records the probed uid:gid even when the chowns were skipped, so later execs run as it (mirrors the non-account path); calls=%v", calls)
 }
@@ -300,10 +372,8 @@ func TestPrepareAccountUser_UnreadableMountTableRefusesTheChown(t *testing.T) {
 			require.Error(t, err, "an unreadable mount table must refuse the chown, not proceed without it")
 			assert.Contains(t, err.Error(), "mount table",
 				"the refusal must name the mount table so an operator sees the real cause")
-			assert.Nil(t, findExecCall(calls, "chown "+accountProbeOwner),
-				"no chown may run without a usable mount table; calls=%v", calls)
-			assert.Nil(t, findExecCall(calls, "chown -h "+accountProbeOwner),
-				"no -h-form chown may run without a usable mount table either; calls=%v", calls)
+			requireNoRootChownOn(t, calls, dockerAccountRuntimeHome)
+			requireNoRootChownOn(t, calls, dockerWorkspaceDir)
 			assert.Empty(t, p.containerUser,
 				"the user must not be recorded when the chown was refused; calls=%v", calls)
 		})
@@ -342,10 +412,8 @@ func TestPrepareAccountUser_UnparseableMountTableRefusesTheChown(t *testing.T) {
 			require.Error(t, err, "an unparseable mount table must refuse the chown")
 			assert.Contains(t, err.Error(), "mount table",
 				"the refusal must name the mount table")
-			assert.Nil(t, findExecCall(calls, "chown "+accountProbeOwner),
-				"no chown may run over an unparseable mount table; calls=%v", calls)
-			assert.Nil(t, findExecCall(calls, "chown -h "+accountProbeOwner),
-				"no -h-form chown may run over an unparseable mount table either; calls=%v", calls)
+			requireNoRootChownOn(t, calls, dockerAccountRuntimeHome)
+			requireNoRootChownOn(t, calls, dockerWorkspaceDir)
 			assert.Empty(t, p.containerUser,
 				"the user must not be recorded when the chown was refused; calls=%v", calls)
 		})
@@ -452,19 +520,13 @@ func TestPrepareAccountUser_Differential_SkipsWorkspaceChownLikeNonAccount(t *te
 			require.NoError(t, p.prepareContainerUser())
 
 			// Both paths must skip the chown of /workspace; neither re-owns
-			// the operator's host directory through the bind.
-			for _, call := range calls {
-				if len(call) == 0 || call[0] != "exec" {
-					continue
-				}
-				joined := strings.Join(call, " ")
-				if !strings.Contains(joined, "--user 0:0") {
-					continue
-				}
-				assert.NotContainsf(t, joined, "chown "+accountProbeOwner+" "+shellQuote(dockerWorkspaceDir),
-					"%s path: the /workspace bind must NOT be chowned under any form; call=%v", tc.name, call)
-				assert.NotContainsf(t, joined, "chown -h "+accountProbeOwner+" "+shellQuote(dockerWorkspaceDir),
-					"%s path: the /workspace bind must NOT be chowned under any flag; call=%v", tc.name, call)
+			// the operator's host directory through the bind. Operand-level:
+			// /workspace must not be ANY operand of ANY root chown on either
+			// path, so the unguarded mutant `chown -h <o> '/af-home'
+			// '/workspace'` — or its non-account twin — goes red (#7563 R5).
+			for _, script := range rootExecScripts(calls) {
+				assert.Falsef(t, rootScriptChowns(script, dockerWorkspaceDir),
+					"%s path: the /workspace bind must NOT be chowned under any form; script=%v", tc.name, script)
 			}
 		})
 	}
@@ -552,4 +614,57 @@ func TestPrepareAccountUser_SkippedChown_NoWarningForKeptPath(t *testing.T) {
 
 	assert.NotContains(t, warnings.String(), "not chowning it",
 		"no skip warning must appear when both /af-home and /workspace are chowned on the root fs; warnings=%q", warnings.String())
+}
+
+// TestRootScriptChowns_CatchesOperandPositions pins the detector the #7563
+// R5 assertions run on: /workspace flagged as an operand of a chown command
+// wherever it sits — directly after the owner, after another operand, or
+// inside find's -exec — while a /workspace that is only find's -path prune
+// argument or mkdir's operand is not a chown operand and must not trip it.
+func TestRootScriptChowns_CatchesOperandPositions(t *testing.T) {
+	owner := accountProbeOwner
+	for name, tc := range map[string]struct {
+		script string
+		want   bool
+	}{
+		"unguarded mutant, workspace last": {
+			script: "mkdir -p " + shellQuote(dockerAccountRuntimeHome) + " " + shellQuote(dockerWorkspaceDir) +
+				" && chown -h " + owner + " " + shellQuote(dockerAccountRuntimeHome) + " " + shellQuote(dockerWorkspaceDir),
+			want: true,
+		},
+		"unguarded mutant, workspace first": {
+			script: "chown -h " + owner + " " + shellQuote(dockerWorkspaceDir) + " " + shellQuote(dockerAccountRuntimeHome),
+			want:   true,
+		},
+		"guarded workspace chown alone": {
+			script: "mkdir -p " + shellQuote(dockerAccountRuntimeHome) + " && chown -h " + owner + " " + shellQuote(dockerWorkspaceDir),
+			want:   true,
+		},
+		"workspace skipped, home chowned": {
+			script: "mkdir -p " + shellQuote(dockerAccountRuntimeHome) + " " + shellQuote(dockerWorkspaceDir) +
+				" && chown -h " + owner + " " + shellQuote(dockerAccountRuntimeHome),
+			want: false,
+		},
+		"workspace is find's prune, not chown's operand": {
+			// The recursive HOME chown prunes mounts under home; a /workspace
+			// -path entry is find's operand, never chown's, and the session
+			// must not read it as a chown of /workspace.
+			script: "find '/root' \\( -path '/root/mnt' \\) -prune -o -exec chown -h " + owner + " {} + && " +
+				"chown -h " + owner + " " + shellQuote(dockerAccountRuntimeHome),
+			want: false,
+		},
+		"workspace chowned via find -exec": {
+			script: "find '/root' -exec chown -h " + owner + " " + shellQuote(dockerWorkspaceDir) + " \\;",
+			want:   true,
+		},
+		"workspace only as mkdir operand": {
+			script: "mkdir -p " + shellQuote(dockerWorkspaceDir),
+			want:   false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.want, rootScriptChowns(tc.script, dockerWorkspaceDir),
+				"script=%v", tc.script)
+		})
+	}
 }
