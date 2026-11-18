@@ -341,7 +341,10 @@ func TestDedicatedServerWrapperCapturesStderr(t *testing.T) {
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "args")
 	tmuxShim := filepath.Join(dir, "tmux")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$AF_TEST_TMUX_ARGS\"\nprintf '%s\\n' 'fatal-sentinel-3307' >&2\nexit 42\n"
+	// Presence reads go to the probe path, not the captured launch args: the
+	// post-exit verdict read (#7557) is a show-options call, and only the
+	// foreground -D launch is what this fixture means to capture.
+	script := "#!/bin/sh\nif [ \"$1\" != \"show-options\" ]; then printf '%s\\n' \"$*\" >\"$AF_TEST_TMUX_ARGS\"; fi\nprintf '%s\\n' 'fatal-sentinel-3307' >&2\nexit 42\n"
 	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
 		t.Fatalf("write tmux shim: %v", err)
 	}
@@ -357,17 +360,8 @@ func TestDedicatedServerWrapperCapturesStderr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tmux shim args: %v", err)
 	}
-	// The wrapper's post-exit presence read (mandated by #7557's marker
-	// property) calls tmux after `-D`, so the log holds more than one call;
-	// the assertion that matters is that the foreground `-D` launch ran.
-	launched := false
-	for _, line := range strings.Split(string(args), "\n") {
-		if strings.TrimSpace(line) == "-D" {
-			launched = true
-		}
-	}
-	if !launched {
-		t.Fatalf("tmux wrapper calls = %q, want a foreground -D launch among them", args)
+	if got := strings.TrimSpace(string(args)); got != "-D" {
+		t.Fatalf("tmux wrapper args = %q, want foreground -D", got)
 	}
 	contents, err := os.ReadFile(logPath)
 	if err != nil {
