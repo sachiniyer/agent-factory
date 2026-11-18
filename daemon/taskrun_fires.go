@@ -402,8 +402,11 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 			// could not verify the socket under a possibly-live server, and in
 			// the second case the agent may be working on this very prompt. So
 			// the occurrence delivers fresh only when the loader proved the agent
-			// gone (LostAgentGone), the respawn arm's policy one step earlier.
-			if data.TaskRunActive && data.LostAgentGone {
+			// gone (LostAgentGone), the respawn arm's policy one step earlier. That
+			// proof covers an interrupted run too: tmux confirmed the session
+			// absent, so every process it ran is gone, whatever an earlier
+			// unverified reattach could not prove.
+			if data.LostAgentGone {
 				continue
 			}
 			// Otherwise it is held while something is still settling the row:

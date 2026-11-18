@@ -785,3 +785,41 @@ func TestReplayTaskFire_HoldsThroughARestoreInFlight(t *testing.T) {
 		})
 	}
 }
+
+// Codex 4609079862 on 50f3e13c8: a run interrupted without proof (an earlier
+// unverified reattach) whose row a later load parked Lost with its agent proven
+// gone. The loader's proof covers it: tmux confirmed the session absent, so the
+// prompted process is gone, and the occurrence delivers exactly once. That holds
+// whether or not anything is still settling the row.
+func TestRunTask_ALoadsProofCoversAnInterruptedRun(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	creates, _ := stubTaskDelivery(t)
+	intendedAt := time.Now().Add(-time.Minute)
+	for _, tc := range []struct {
+		name    string
+		taskID  string
+		settles bool
+	}{
+		{"its restore still retrying", "ab0r753a", true},
+		{"its restore gave up", "ab0r753b", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settling(t, tc.settles)
+			before := len(*creates)
+			lostFire(t, tc.taskID, repoPath, intendedAt, func(d *session.InstanceData) {
+				unverifiedRebind(d)
+				d.Liveness, d.LostAgentGone = session.LiveLost, true
+			})
+			if err := runTaskDelivery(tc.taskID, task.ProjectExpectation{}, replayMarker(tc.taskID, intendedAt)); err != nil {
+				t.Fatalf("a proven-gone agent's occurrence is owed, not held: %v", err)
+			}
+			if got := len(*creates) - before; got != 1 {
+				t.Fatalf("the prompted process is proven gone, so the occurrence delivers exactly once; creates = %d", got)
+			}
+			if markerExists(t, tc.taskID) {
+				t.Fatal("the fresh delivery discharges the marker")
+			}
+		})
+	}
+}
