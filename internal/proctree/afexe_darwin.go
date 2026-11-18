@@ -125,23 +125,27 @@ func exeOpen(pid int) (*os.File, bool) {
 	return openRegularExe(path, dev, ino)
 }
 
-// exeIdentity is the memo's cheap revalidation: the (dev,ino) of the file
-// the exe path names NOW. A positive attestation pinned the running text
-// vnode to that path's identity, so while the path still answers the same
-// (dev,ino) the cached verdict still describes the running image; an exec
-// (PROC_PIDPATHINFO answers the new image's path), a replaced file, or a
-// deleted one all change or lose the identity and force a re-attestation
-// (#7496). A process too far gone to name reports no identity.
+// exeIdentity is the memo's revalidation read: the (dev,ino) of the TEXT
+// VNODE — the inode the kernel is executing — from the same region walk
+// the first attestation gates on, never a stat of the path name (#7509).
+// A path stat can launder a dead verdict: exec a foreign binary at Q under
+// a claimed argv, then `mv` the attested af image onto Q — stat(Q) returns
+// the attested inode while the text vnode still belongs to the foreign
+// image. The region walk reports the vnode itself, so the name swap can
+// never carry it. An exec, a replaced file, a deleted name, and any map
+// that can no longer be read all change or lose the identity and force a
+// re-attestation (#7496). A process too far gone to name reports no
+// identity; the instance recheck lives in the shared caller.
 func exeIdentity(pid int) (exeID, bool) {
 	path, ok := exePath(pid)
 	if !ok {
 		return exeID{}, false
 	}
-	var st syscall.Stat_t
-	if err := syscall.Stat(path, &st); err != nil {
+	dev, ino, ok := exeTextVnode(pid, path)
+	if !ok {
 		return exeID{}, false
 	}
-	return exeID{dev: uint64(uint32(st.Dev)), ino: st.Ino}, true
+	return exeID{dev: uint64(uint32(dev)), ino: ino}, true
 }
 
 // openRegularExe opens path and admits the file only when it is a REGULAR

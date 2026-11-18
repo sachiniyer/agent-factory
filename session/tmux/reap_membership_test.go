@@ -373,7 +373,7 @@ func TestReportableSurvivorsKeepsOnlyTheUnattributableAndTheEligible(t *testing.
 	snap[600005] = eligible
 
 	survivors := []proctree.Process{placed, unproven, eligible}
-	reportable := reportableSurvivors(snap, survivors)
+	reportable := reportableSurvivors(snap, survivors, nil)
 	require.Equal(t, []proctree.Process{unproven, eligible}, reportable,
 		"a positively-placed daemon descendant is not a leak; unproven and eligible survivors stay reported")
 }
@@ -531,7 +531,7 @@ func TestReapSessionProcessesNamesAPositivePlacementAtWarning(t *testing.T) {
 		positive: true,
 	}}
 	remaining := reapSessionProcesses(reapOnRequest, "af_positive_warning",
-		[]proctree.Process{proc}, time.Millisecond, 100*time.Millisecond, protected)
+		[]proctree.Process{proc}, time.Millisecond, 100*time.Millisecond, protected, nil)
 	require.Empty(t, remaining,
 		"a positively-placed exclusion is exempt from signals and not a leak")
 	require.Contains(t, warnings.String(), strconv.Itoa(proc.PID),

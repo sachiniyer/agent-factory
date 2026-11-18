@@ -147,10 +147,19 @@ func unverifiedDaemonSurvivorClause(remaining []proctree.Process, protected prot
 // daemon can hide in a dead link — the walk simply ends there, which is what
 // keeps genuine orphans (whose parents die by definition) reapable.
 //
+// newExeAttestations is the sweep-memo constructor behind a var so the
+// scope-threading test can count how many memos a sweep opens: one (#7509).
+var newExeAttestations = proctree.NewExeAttestations
+
 // Protection is decided only for captured processes, so in the common case —
 // no captured process sits in the reaper's ancestry or subtree — no identity
 // walk runs at all.
-func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process) protectedSet {
+//
+// att scopes kernel attestation to the sweep this set is computed for: a
+// caller that owns one passes it through so every identity walk in the sweep
+// shares the memo; nil allocates a set-local scope, which is all a
+// single-call path needs (#7509).
+func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process, att *proctree.ExeAttestations) protectedSet {
 	self := os.Getpid()
 	protected := protectedSet{self: {reason: protectReasonSelf, positive: true}}
 	if snap == nil {
@@ -162,7 +171,9 @@ func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process
 			protected[pid] = protectedVerdict{reason: protectReasonAncestor, positive: true}
 		}
 	}
-	att := proctree.NewExeAttestations()
+	if att == nil {
+		att = newExeAttestations()
+	}
 	for _, p := range captured {
 		if protected.protects(p.PID) {
 			continue
@@ -263,12 +274,15 @@ func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int, att *
 // daemon ancestry could not be proven is different: alive, unattributable,
 // and never "nothing found" — it stays reported so a cleanup-authorizing
 // caller still refuses. snap is the SAME table the survivor set was built
-// from, so both verdicts classify against identical ancestry.
-func reportableSurvivors(snap map[int]proctree.Process, survivors []proctree.Process) []proctree.Process {
+// from, so both verdicts classify against identical ancestry. att is the
+// caller's sweep memo — the survivor check reclassifies the same claimants
+// the sweep already attested, so it must share their scope rather than open
+// a fresh one (#7509).
+func reportableSurvivors(snap map[int]proctree.Process, survivors []proctree.Process, att *proctree.ExeAttestations) []proctree.Process {
 	if len(survivors) == 0 {
 		return survivors
 	}
-	protected := reapProtectedSet(snap, survivors)
+	protected := reapProtectedSet(snap, survivors, att)
 	var reportable []proctree.Process
 	for _, p := range survivors {
 		if verdict, ok := protected[p.PID]; ok && verdict.positive {

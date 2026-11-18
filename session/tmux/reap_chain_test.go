@@ -559,7 +559,7 @@ func runReapChainServerDescendant(t *testing.T) {
 	// the walk must meet the server BEFORE the reaper so the pane stays
 	// eligible. An explicit selfProtectedSet() would pass without the walk
 	// ever running.
-	reapSessionProcesses(reapOnRequest, "af_test_srvreap", []proctree.Process{paneP}, 100*time.Millisecond, 100*time.Millisecond, nil)
+	reapSessionProcesses(reapOnRequest, "af_test_srvreap", []proctree.Process{paneP}, 100*time.Millisecond, 100*time.Millisecond, nil, nil)
 	fmt.Fprintf(os.Stderr, "srvreaper %d: reap returned\n", os.Getpid())
 
 	status := "ok"
