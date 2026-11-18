@@ -182,6 +182,13 @@ func widestLine(lines []string) int {
 // bare-ESC alternative treat a LATER ESC as the terminator and manufacture an
 // opener the terminal never made.
 //
+// CAN (\x18) and SUB (\x1a) cancel the OSC in flight the same way a terminator
+// ends it: ECMA-48 aborts the string on either byte, and the terminal never
+// opens a link. Both classes exclude them too, so a canceled opener such as
+// "\x1b]8;foo\x18bar;https://evil\x1b[0m" cannot cross the CAN and let the
+// bare-ESC alternative manufacture an opener (and, via backdropOpen's
+// normalise, a valid carried link) the terminal never made.
+//
 // The bare-ESC terminator CONSUMES its ESC, so an ESC that ends one OSC 8
 // sequence and introduces the next (as in "\x1b]8;;\x1b]8;;uri\x1b\\") is eaten
 // by the first match and Go's non-overlapping FindAllStringSubmatch resumes
@@ -195,7 +202,7 @@ func widestLine(lines []string) int {
 // far more often a mistyped \A or [[:alpha:]] than an intended 0x07 — and the one
 // place it is genuinely intended is exactly this, an OSC terminator. Spelling it
 // as an escape says so, to the query and to the next reader.
-var osc8Regex = regexp.MustCompile(`\x1b\]8;[^;\x1b\x07\x{9c}]*;([^\x1b\x07\x{9c}]*)(?:\x1b\\|\x07|\x{9c}|\x1b)`)
+var osc8Regex = regexp.MustCompile(`\x1b\]8;[^;\x1b\x07\x{9c}\x18\x1a]*;([^\x1b\x07\x{9c}\x18\x1a]*)(?:\x1b\\|\x07|\x{9c}|\x1b)`)
 
 // osc8FindAll returns every OSC 8 introducer match in line, like
 // osc8Regex.FindAllStringSubmatch, except a bare-ESC terminator does NOT advance
@@ -292,11 +299,13 @@ func backdropOpen(line string, sgrOpen []string, osc8Open string) ([]string, str
 			// bgOsc8Open straight into the stream), so it must end in a real
 			// terminator. A bare-ESC match ends in a dangling ESC that a terminal
 			// would dispatch as the start of the next escape and consume the
-			// first character of the row that follows; normalise to the ST form
-			// (rebuilt from the captured URI) so the carry opens the link
-			// cleanly. The ST/BEL/C1-ST forms already end in a terminator.
+			// first character of the row that follows; normalise by replacing
+			// ONLY that trailing ESC with ST so the parameter field (e.g.
+			// id=...) is preserved, instead of rebuilding the opener from the
+			// captured URI and dropping the parameters. The ST/BEL/C1-ST forms
+			// already end in a terminator and are carried unchanged.
 			if strings.HasSuffix(last[0], "\x1b") {
-				osc8Open = "\x1b]8;;" + last[1] + "\x1b\\"
+				osc8Open = strings.TrimSuffix(last[0], "\x1b") + "\x1b\\"
 			} else {
 				osc8Open = last[0]
 			}

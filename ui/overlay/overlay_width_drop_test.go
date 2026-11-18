@@ -607,6 +607,26 @@ func TestCloseSequencesIgnoresMalformedParamFieldEndedByEsc(t *testing.T) {
 	}
 }
 
+// CAN (\x18) and SUB (\x1a) cancel an OSC in flight — ECMA-48 aborts the string
+// on either byte and the terminal never opens a link. A parameter class that
+// crossed the CAN (or SUB) would let the bare-ESC alternative treat a later
+// ESC as the terminator and manufacture an opener the terminal never made, and
+// backdropOpen's normalise would then carry that as a valid link. The class
+// must exclude CAN and SUB, so no opener is detected and no closer emitted.
+func TestCloseSequencesIgnoresCanceledOscOpener(t *testing.T) {
+	for _, name := range []string{"CAN", "SUB"} {
+		cancel := byte('\x18')
+		if name == "SUB" {
+			cancel = '\x1a'
+		}
+		row := "\x1b]8;foo" + string(cancel) + "bar;https://evil\x1b[0m"
+		if got := closeSequences(row); strings.Contains(got, "\x1b]8;;\x1b\\") {
+			t.Fatalf("%s: a canceled OSC must not be read as an opener; "+
+				"closeSequences(%q) = %q", name, row, got)
+		}
+	}
+}
+
 // The carry bgOsc8Open is re-emitted verbatim below a modal, so it must end in a
 // real terminator. A bare-ESC match ends in a dangling ESC; the carry must be
 // normalised to the ST form (rebuilt from the captured URI) so the re-emitted
@@ -618,5 +638,18 @@ func TestBackdropOpenNormalisesBareEscCarryToSt(t *testing.T) {
 		t.Fatalf("a bare-ESC opener must be carried as its ST form so the dangling "+
 			"ESC doesn't eat the next character on re-emit; got %q, want %q",
 			carry, want)
+	}
+}
+
+// The normalise replaces ONLY the trailing bare ESC with ST, so the parameter
+// field (e.g. id=...) survives the carry. Rebuilding from the captured URI
+// alone (ESC]8;;URI ST) would silently drop the parameters, unlike the
+// ST/BEL/C1-ST paths that carry the opener verbatim.
+func TestBackdropOpenNormalisingBareEscCarryPreservesParams(t *testing.T) {
+	_, carry := backdropOpen("\x1b]8;id=42;https://evil.example\x1bAAAA", nil, "")
+	const want = "\x1b]8;id=42;https://evil.example\x1b\\"
+	if carry != want {
+		t.Fatalf("a bare-ESC opener's parameter field must survive the ST normalise; "+
+			"got %q, want %q", carry, want)
 	}
 }
