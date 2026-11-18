@@ -71,7 +71,7 @@ func fakeNonRootImageDockerAnswers(t *testing.T, calls *[][]string, imageUser st
 				// prepareNonAccountUser's probe of the image's default USER.
 				return []byte(imageUser + "\n"), nil
 			case strings.Contains(joined, "/proc/self/mountinfo"):
-				return mountTableAnswer(), nil
+				return probeAnswer(args), nil
 			case strings.Contains(joined, "cat "+dockerBannerPath):
 				return []byte(`{"addr":":8000","token":"test-only","title":"non-root-image"}`), nil
 			}
@@ -89,15 +89,42 @@ func mountinfoLine(id int, mountPoint, fstype string) string {
 	return fmt.Sprintf("%d 1 0:%d / %s rw,relatime - %s src rw", id, id, esc, fstype)
 }
 
+// mountinfoFor renders a mount table with a root mount plus mountPoints.
+func mountinfoFor(mountPoints ...string) string {
+	lines := []string{mountinfoLine(1, "/", "overlay")}
+	for i, mp := range mountPoints {
+		lines = append(lines, mountinfoLine(10+i, mp, "ext4"))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 // mountTableAnswer is the fake container's answer to readMountTable's exec: the
 // resolved home and workspace, then a mountinfo with a root mount plus
 // mountPoints.
 func mountTableAnswer(mountPoints ...string) []byte {
-	lines := []string{dockerContainerHome, dockerWorkspaceDir, mountinfoLine(1, "/", "overlay")}
-	for i, mp := range mountPoints {
-		lines = append(lines, mountinfoLine(10+i, mp, "ext4"))
+	return []byte(dockerContainerHome + "\n" + dockerWorkspaceDir + "\n" + mountinfoFor(mountPoints...))
+}
+
+// writeGuardAnswerRaw is the fake container's answer to verifyWriteTargets'
+// read — the same exec is distinguishable by the leafSymlinkMarker in its
+// script. Each resolved dir is NUL-framed exactly as the shell's printf emits
+// it, then the mount table.
+func writeGuardAnswerRaw(dirA, dirB, mountinfo string) []byte {
+	return []byte(dirA + "\n\x00" + dirB + "\n\x00" + mountinfo)
+}
+
+func writeGuardAnswer(dirA, dirB string, mountPoints ...string) []byte {
+	return writeGuardAnswerRaw(dirA, dirB, mountinfoFor(mountPoints...))
+}
+
+// probeAnswer answers whichever in-container read a provision-path fake saw:
+// the write-target guard's NUL-framed parents (its script carries
+// leafSymlinkMarker) or the chown guard's newline-framed readMountTable.
+func probeAnswer(args []string, mountPoints ...string) []byte {
+	if strings.Contains(strings.Join(args, " "), leafSymlinkMarker) {
+		return writeGuardAnswer("/usr/local/bin", "/etc", mountPoints...)
 	}
-	return []byte(strings.Join(lines, "\n") + "\n")
+	return mountTableAnswer(mountPoints...)
 }
 
 func isMountTableExec(args []string) bool {
@@ -113,7 +140,7 @@ func nonRootDockerStub(calls *[][]string, mountPoints ...string) func(context.Co
 			return []byte(dockerNonRootImageUser + "\n"), nil
 		}
 		if isMountTableExec(args) {
-			return mountTableAnswer(mountPoints...), nil
+			return probeAnswer(args, mountPoints...), nil
 		}
 		return nil, nil
 	}
@@ -785,7 +812,7 @@ func nonRootChownScenarioStub(calls *[][]string, sc accountChownScenario) func(c
 		case strings.Contains(joined, "id -u"):
 			return []byte(dockerNonRootImageUser + "\n"), nil
 		case isMountTableExec(args):
-			return mountTableAnswer(sc.mountPoints...), nil
+			return probeAnswer(args, sc.mountPoints...), nil
 		case strings.Contains(joined, "test -w"):
 			if sc.writable {
 				return nil, nil

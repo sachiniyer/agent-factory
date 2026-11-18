@@ -652,7 +652,7 @@ func TestDockerAccount_ReadBannerRunsAsTheImageDefaultUser(t *testing.T) {
 				// scenario the bug report reproduces.
 				return []byte("1000:1000\n"), nil
 			case isMountTableExec(args):
-				return mountTableAnswer(), nil
+				return probeAnswer(args), nil
 			case strings.Contains(joined, "cat "+dockerBannerPath):
 				return []byte(`{"addr":":8000","token":"test-only","title":"non-account"}`), nil
 			}
