@@ -17,6 +17,16 @@ import (
 // set is read from the container's own kernel mount table at chown time
 // instead (parseMountPoints), and provisioning fails closed when that table
 // cannot be read or trusted.
+//
+// Mountinfo alone cannot say what BACKS a mount point — a host bind and a
+// docker-managed volume both look like ordinary filesystems there — so when a
+// chown target lands inside a non-"/" mount, the guard consults the daemon's
+// own record via host-side `docker inspect` (chownGuardMounts): a Type=bind is
+// a host path af must not re-own, while Type=volume/tmpfs is docker's own
+// storage and keeps being chowned — the named-volume and image-VOLUME
+// configurations that worked before the guard keep working (#7563 R6). A mount
+// the inspect record cannot identify is treated as a host path, the same
+// fail-closed posture the mount-table read itself has.
 
 // unescapeMountinfo decodes the octal escapes (\040 for a space, \011, \012,
 // \134) the kernel uses in mountinfo path fields.
@@ -175,6 +185,153 @@ func findLiteralPattern(p string) string {
 	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`, "]", `\]`).Replace(p)
 }
 
+// inspectedMounts returns the daemon's own record of the container's mounts:
+// .Mounts indexed by cleaned destination, plus the --tmpfs destinations
+// Docker records on HostConfig separately — read with host-side
+// `docker inspect`, whose output a repository cannot fake because it never
+// passes through the container. The chown guard consults it only when a
+// chown target sits inside a non-"/" mount: mountinfo proves the mount is
+// there but cannot say whether its backing is a host path (Type=bind) or
+// docker-managed storage (Type=volume/tmpfs) — the distinction that decides
+// whether the chown may run (#7563 R6).
+func (p *dockerProvisioner) inspectedMounts() (map[string]dockerInspectMount, map[string]bool, error) {
+	out, err := p.docker(dockerShortStepTimeout, "inspect", "--type", "container", p.containerID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("`docker inspect` could not describe the container's mounts: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	c, err := parseDockerInspectContainer(out)
+	if err != nil {
+		return nil, nil, err
+	}
+	mounts := make(map[string]dockerInspectMount, len(c.Mounts))
+	for _, m := range c.Mounts {
+		mounts[path.Clean(m.Destination)] = m
+	}
+	tmpfs := make(map[string]bool, len(c.HostConfig.Tmpfs))
+	for dest := range c.HostConfig.Tmpfs {
+		tmpfs[path.Clean(dest)] = true
+	}
+	return mounts, tmpfs, nil
+}
+
+// chownGuardMounts lazily loads and classifies the daemon's inspect record
+// for the chown guard — fetched at most once per preparation, and only when
+// a chown target sits inside a non-"/" mount.
+type chownGuardMounts struct {
+	p      *dockerProvisioner
+	loaded bool
+	byDest map[string]dockerInspectMount
+	tmpfs  map[string]bool
+	err    error
+}
+
+// classify reports what backs the mount point mp. chownable is true only for
+// docker-managed storage — a Type=volume, or a tmpfs — because re-owning
+// docker's own storage re-owns no host content, so named volumes, anonymous
+// image VOLUME mounts and tmpfs mounts keep working. Type=bind is a host
+// path af must not re-own; any other recorded type is not provably
+// docker-managed and is skipped the same way. A mount the inspect record
+// does not describe — or that inspect could not read — is classified=false
+// and treated as a host path (#7563 R6).
+func (g *chownGuardMounts) classify(mp string) (mount dockerInspectMount, chownable, classified bool) {
+	if !g.loaded {
+		g.loaded = true
+		g.byDest, g.tmpfs, g.err = g.p.inspectedMounts()
+	}
+	if g.err != nil {
+		return dockerInspectMount{}, false, false
+	}
+	if g.tmpfs[mp] {
+		return dockerInspectMount{Type: "tmpfs", Destination: mp}, true, true
+	}
+	m, ok := g.byDest[mp]
+	if !ok {
+		return dockerInspectMount{}, false, false
+	}
+	return m, m.Type == "volume" || m.Type == "tmpfs", true
+}
+
+// chownGuardTarget is one resolved chown candidate: the name warnings and
+// refusals print, its symlink-free container path, and the chown step to
+// emit when the guard allows re-owning it.
+type chownGuardTarget struct {
+	kind  string // "HOME" / "workspace"
+	real  string
+	chown string
+}
+
+// appendGuardedChowns appends each target's chown step when the mount guard
+// allows re-owning it: always when the enclosing mount is "/", and inside
+// another mount only when the daemon's record says the mount backs
+// docker-managed storage. A skipped target is probed for writability as the
+// session's user — a writable mount costs the session nothing and warns as
+// before, while an unwritable one refuses with the mount and the remedy
+// named, so the session's ERROR is actionable rather than a later clone's
+// bare "Permission denied" (#7563 R6).
+func (p *dockerProvisioner) appendGuardedChowns(steps []string, points []string, owner string, targets []chownGuardTarget) ([]string, error) {
+	guard := &chownGuardMounts{p: p}
+	for _, target := range targets {
+		mp := enclosingMount(points, target.real)
+		if mp == "/" {
+			steps = append(steps, target.chown)
+			continue
+		}
+		mount, chownable, classified := guard.classify(mp)
+		if chownable {
+			steps = append(steps, target.chown)
+			continue
+		}
+		if err := p.skipUnchownableTarget(target.kind, target.real, mp, owner, mount, classified, guard.err); err != nil {
+			return nil, err
+		}
+	}
+	return steps, nil
+}
+
+// skipUnchownableTarget handles a chown target af must not re-own — a host
+// bind mount, or a mount af could not classify (treated as a host path, the
+// same fail-closed posture the mount-table read itself has). When the
+// session's user can already write the mounted directory the skip costs the
+// session nothing and the guard's warning stands; when the user cannot —
+// or the `test` probe cannot settle it — provisioning refuses, naming the
+// mount, its host source when the daemon's record knows it, and the remedy,
+// so the session's ERROR is actionable rather than a later clone's bare
+// "Permission denied" (#7563 R6).
+//
+// The probe is `test`, a /bin/sh builtin, run as the session's own user — no
+// PATH-resolved program decides the verdict.
+func (p *dockerProvisioner) skipUnchownableTarget(kind, target, mp, owner string, mount dockerInspectMount, classified bool, inspectErr error) error {
+	out, err := p.docker(dockerShortStepTimeout,
+		"exec", "--user", owner, p.containerID, dockerContainerShell, "-c",
+		`test -w "$1" && test -x "$1"`, "sh", target)
+	if err == nil {
+		log.WarningLog.Printf("docker session %s %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure it is writable by that user", kind, target, mp, owner)
+		return nil
+	}
+	probe := fmt.Sprintf("%v", err)
+	if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
+		probe += ": " + trimmed
+	}
+	var mountDesc, remedy string
+	switch {
+	case classified && mount.Type == "bind":
+		mountDesc = fmt.Sprintf("the host bind mount %s of %q on the host", mp, mount.Source)
+		remedy = fmt.Sprintf("chown %q to %s on the host, or mount a directory that user can already write at %s, or remove the mount from docker.run_args", mount.Source, owner, target)
+	case classified:
+		mountDesc = fmt.Sprintf("the %s mount %s, whose backing af must not re-own", mount.Type, mp)
+		remedy = fmt.Sprintf("mount a directory the session's user %s can already write at %s, or remove the mount from docker.run_args", owner, target)
+	default:
+		mountDesc = fmt.Sprintf("a mount at %s that af could not classify — treated as a host path it must not re-own", mp)
+		if inspectErr != nil {
+			mountDesc += fmt.Sprintf(" (inspection: %v)", inspectErr)
+		}
+		remedy = fmt.Sprintf("if it is a host bind, chown its source to %s on the host; otherwise mount a directory that user can already write at %s, or remove the mount from docker.run_args", owner, target)
+	}
+	return dockerStepErr(fmt.Errorf(
+		"backend=docker: refusing to prepare the docker session %s %s: it is inside %s, and the session's user %s cannot write it (%s) — the clone and the agent's own writes would only fail with \"Permission denied\" later; %s",
+		kind, target, mountDesc, owner, probe, remedy), dockerOpLocal)
+}
+
 // prepareNonAccountUser mirrors prepareAccountUser for a session with no
 // credential account. A BYO image may set a non-root `USER` directive (a common
 // hardening practice), and the container is launched with HOME=dockerContainerHome
@@ -268,19 +425,20 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	}
 	steps := []string{fmt.Sprintf("mkdir -p %s %s", shellQuote(home), shellQuote(workspace))}
 	// Only a directory whose containing mount is the container's own root
-	// filesystem is af's to re-own. One AT or BENEATH any other mount (a host
-	// bind, a volume, a tmpfs — including via a symlinked HOME, which the resolved
-	// path above sees through) would have the chown land on files the container
-	// does not own, so it is skipped and reported, never attempted.
-	if mp := enclosingMount(points, realHome); mp != "/" {
-		log.WarningLog.Printf("docker session HOME %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure it is writable by that user", realHome, mp, owner)
-	} else {
-		steps = append(steps, chownRecursiveScript(realHome, owner, mountPointsUnder(points, realHome)))
-	}
-	if mp := enclosingMount(points, realWorkspace); mp != "/" {
-		log.WarningLog.Printf("docker session workspace %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure it is writable by that user", realWorkspace, mp, owner)
-	} else {
-		steps = append(steps, fmt.Sprintf("chown -h %s %s", owner, shellQuote(realWorkspace)))
+	// filesystem is af's to re-own outright. One AT or BENEATH another mount
+	// (including via a symlinked HOME, which the resolved path above sees
+	// through) is decided by what backs that mount: a host bind is the
+	// operator's directory and is never chowned, while docker-managed
+	// storage — a named volume or an image VOLUME, a tmpfs — is not a host
+	// path and keeps being chowned. A skipped target the session's user
+	// cannot write refuses here with the mount and the remedy named, rather
+	// than surfacing later as the clone's "Permission denied" (#7563 R6).
+	steps, err = p.appendGuardedChowns(steps, points, owner, []chownGuardTarget{
+		{kind: "HOME", real: realHome, chown: chownRecursiveScript(realHome, owner, mountPointsUnder(points, realHome))},
+		{kind: "workspace", real: realWorkspace, chown: fmt.Sprintf("chown -h %s %s", owner, shellQuote(realWorkspace))},
+	})
+	if err != nil {
+		return err
 	}
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", strings.Join(steps, " && "))

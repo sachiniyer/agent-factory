@@ -1,7 +1,9 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // dockerNonAccountProvisionFixture wires the hermetic preconditions a non-account
@@ -761,4 +764,112 @@ func TestPrepareNonAccountUser_PrunesReadOnlyAndNamedVolumesUnderHome(t *testing
 		assert.Contains(t, joined, "-path "+shellQuote(dockerContainerHome+m), "mount %s must be pruned", m)
 	}
 	assert.NotContains(t, joined, "chown -R")
+}
+
+// nonRootChownScenarioStub drives prepareNonAccountUser with the R6 mount
+// classification answers: the container mount table lists sc.mountPoints,
+// `docker inspect` describes sc.mounts plus sc.tmpfs destinations, and the
+// `test -w` writability probe af runs as the session's user on a mount it
+// declines to re-own reports sc.writable.
+func nonRootChownScenarioStub(calls *[][]string, sc accountChownScenario) func(context.Context, []string, ...string) ([]byte, error) {
+	inspected := []dockerInspectContainer{{
+		Mounts:     sc.mounts,
+		HostConfig: dockerInspectHostConfig{Tmpfs: map[string]string{}},
+	}}
+	for _, dest := range sc.tmpfs {
+		inspected[0].HostConfig.Tmpfs[dest] = "rw"
+	}
+	inspectedJSON, err := json.Marshal(inspected)
+	if err != nil {
+		panic(err)
+	}
+	return func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		*calls = append(*calls, append([]string(nil), args...))
+		if len(args) == 0 {
+			return nil, nil
+		}
+		joined := strings.Join(args, " ")
+		switch {
+		case args[0] == "inspect":
+			return inspectedJSON, nil
+		case args[0] != "exec":
+			return nil, nil
+		case strings.Contains(joined, "id -u"):
+			return []byte(dockerNonRootImageUser + "\n"), nil
+		case isMountTableExec(args):
+			return mountTableAnswer(sc.mountPoints...), nil
+		case strings.Contains(joined, "test -w"):
+			if sc.writable {
+				return nil, nil
+			}
+			return nil, errors.New("exit status 1")
+		default:
+			return nil, nil
+		}
+	}
+}
+
+// #7563 R6 on the non-account path: an image-declared VOLUME or a named
+// volume at /workspace is docker-managed storage, not a host path — the
+// daemon's inspect record says Type=volume — so the chown keeps running
+// exactly as it did before the guard. Only HOST bind mounts are skipped.
+func TestPrepareNonAccountUser_WorkspaceVolumeIsChowned(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(nonRootChownScenarioStub(&calls, accountChownScenario{
+		mountPoints: []string{dockerWorkspaceDir},
+		mounts: []dockerInspectMount{
+			{Type: "volume", Source: "/var/lib/docker/volumes/ws/_data", Destination: dockerWorkspaceDir},
+		},
+	})))
+	p := &dockerProvisioner{containerID: "cid"}
+	require.NoError(t, p.prepareNonAccountUser())
+	var chowned bool
+	for _, script := range rootExecScripts(calls) {
+		if rootScriptChowns(script, dockerWorkspaceDir) {
+			chowned = true
+		}
+	}
+	require.True(t, chowned,
+		"a docker volume at /workspace is docker-managed storage — the chown must run as before; calls=%v", calls)
+}
+
+// The R6 error contract on the non-account path: a host bind at /workspace
+// the image's USER cannot write refuses at prepare, naming the mount, its
+// host source, and the remedy — not a later clone "Permission denied".
+func TestPrepareNonAccountUser_UnwritableBindRefusesNamingTheMount(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(nonRootChownScenarioStub(&calls, accountChownScenario{
+		mountPoints: []string{dockerWorkspaceDir},
+		mounts: []dockerInspectMount{
+			{Type: "bind", Source: "/operator/secrets", Destination: dockerWorkspaceDir},
+		},
+		writable: false,
+	})))
+	p := &dockerProvisioner{containerID: "cid"}
+	err := p.prepareNonAccountUser()
+	require.Error(t, err)
+	for _, want := range []string{dockerWorkspaceDir, "/operator/secrets", "bind", dockerNonRootImageUser, "chown"} {
+		assert.Containsf(t, err.Error(), want, "the refusal must name %q; err=%v", want, err)
+	}
+	requireNoRootChownOn(t, calls, dockerWorkspaceDir)
+}
+
+// A host bind the image's USER can already write skips only the chown; the
+// warning stands and provisioning proceeds.
+func TestPrepareNonAccountUser_WritableBindProceedsWithWarning(t *testing.T) {
+	var warnings bytes.Buffer
+	log.CaptureOutput(t, log.WarningLog, "", &warnings)
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(nonRootChownScenarioStub(&calls, accountChownScenario{
+		mountPoints: []string{dockerWorkspaceDir},
+		mounts: []dockerInspectMount{
+			{Type: "bind", Source: "/operator/workspace", Destination: dockerWorkspaceDir},
+		},
+		writable: true,
+	})))
+	p := &dockerProvisioner{containerID: "cid"}
+	require.NoError(t, p.prepareNonAccountUser())
+	requireNoRootChownOn(t, calls, dockerWorkspaceDir)
+	assert.Contains(t, warnings.String(), "not chowning it",
+		"a writable bind still warns that its chown was skipped; warnings=%q", warnings.String())
 }

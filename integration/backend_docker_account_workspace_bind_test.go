@@ -225,16 +225,19 @@ func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 	t.Logf("host.workspace %s owner unchanged after provisioning (was=%s is=%s): the mount-table guard skipped the chown of the bind-mounted /workspace", hostWorkspace, wantOwner, gotOwner)
 
 	if err != nil {
-		// On the fix, the provision fails at the clone step because the
-		// account user (uid 65534) cannot write to a root:root
-		// /workspace that was NOT re-owned. Confirm the failure names the
-		// clone's permission denial — not an earlier (chown-induced)
-		// issue and not the agent-server startup that would only run
-		// after a successful clone.
-		if !strings.Contains(err.Error(), "cloning") || !strings.Contains(err.Error(), "Permission denied") {
-			t.Fatalf("a clone failure on a root:root /workspace is the warned-about (and expected) outcome when the chown is skipped; got: %v", err)
+		// Under the R6 contract, the provision refuses at the chown-guard
+		// step: /workspace is inside a host bind the daemon's inspect record
+		// confirms, and the account user (uid 65534) cannot write a
+		// root:root directory that was NOT re-owned. The session's ERROR
+		// must name the mount, its host source, and the remedy — the
+		// operator should never be handed a bare clone "Permission denied"
+		// to debug.
+		for _, want := range []string{hostWorkspace, "/workspace", "bind", "chown"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("an unwritable host bind must refuse with %q named in the error; got: %v", want, err)
+			}
 		}
-		t.Logf("provision failed at the clone step as expected (the warned-about outcome), not at the chown: %v", err)
+		t.Logf("provision refused at the chown guard, naming the mount and the remedy: %v", err)
 		// Procedure #15: the prepareAccountUser skip warning lands in the
 		// host's agent-factory.log under AGENT_FACTORY_HOME when
 		// log.Initialize has run. This in-process test path does not call

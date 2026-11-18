@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 const dockerEndpointFormat = "{{.Endpoints.docker.Host}}"
@@ -928,21 +927,21 @@ func (p *dockerProvisioner) prepareAccountUser() error {
 		return dockerStepErr(fmt.Errorf("backend=docker: refusing to chown the account session HOME and workspace for the account owner %s: the container mount table is unusable: %w", owner, err), dockerOpLocal)
 	}
 	// Only a directory whose containing mount is the container's own root
-	// filesystem is af's to re-own. One AT or BENEATH any other mount (a host
-	// bind, a volume, a tmpfs — including via a symlinked HOME, which the
-	// resolved path above sees through) would have the chown land on files
-	// the container does not own, so it is skipped and reported, never
-	// attempted.
+	// filesystem is af's to re-own outright. One AT or BENEATH another mount
+	// (including via a symlinked HOME, which the resolved path above sees
+	// through) is decided by what backs that mount: a host bind is the
+	// operator's directory and is never chowned, while docker-managed
+	// storage — a named volume or an image VOLUME, a tmpfs — is not a host
+	// path and keeps being chowned. A skipped target the session's user
+	// cannot write refuses here with the mount and the remedy named, rather
+	// than surfacing later as the clone's "Permission denied" (#7563 R6).
 	steps := []string{fmt.Sprintf("mkdir -p %s %s", shellQuote(home), shellQuote(workspace))}
-	if mp := enclosingMount(points, realHome); mp != "/" {
-		log.WarningLog.Printf("docker session HOME %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure it is writable by that user", realHome, mp, owner)
-	} else {
-		steps = append(steps, fmt.Sprintf("chown -h %s %s", owner, shellQuote(realHome)))
-	}
-	if mp := enclosingMount(points, realWorkspace); mp != "/" {
-		log.WarningLog.Printf("docker session workspace %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure it is writable by that user", realWorkspace, mp, owner)
-	} else {
-		steps = append(steps, fmt.Sprintf("chown -h %s %s", owner, shellQuote(realWorkspace)))
+	steps, err = p.appendGuardedChowns(steps, points, owner, []chownGuardTarget{
+		{kind: "HOME", real: realHome, chown: fmt.Sprintf("chown -h %s %s", owner, shellQuote(realHome))},
+		{kind: "workspace", real: realWorkspace, chown: fmt.Sprintf("chown -h %s %s", owner, shellQuote(realWorkspace))},
+	})
+	if err != nil {
+		return err
 	}
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", strings.Join(steps, " && "))

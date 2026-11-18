@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -50,25 +51,80 @@ func isAccountReadMountTableExec(args []string) bool {
 	return strings.Contains(strings.Join(args, " "), `cd -- "$2" && pwd -P`)
 }
 
-// accountChownDockerStub answers the account owner stat probe and the new
-// readMountTable chown-guard read with mountPoints, recording every docker
-// call. Other execs (mkdir+chown, etc.) return (nil, nil), the success answer
-// for a stub whose every step says "nothing to report".
-func accountChownDockerStub(calls *[][]string, owner string, mountPoints ...string) func(context.Context, []string, ...string) ([]byte, error) {
+// accountChownScenario parameterizes the container answers the chown-guard
+// tests drive: the mount table's extra mount points, the host-side
+// `docker inspect` record the R6 classification consults (its .Mounts entries
+// and HostConfig.Tmpfs destinations), and the `test -w && test -x`
+// writability probe's verdict for a mount af declines to re-own.
+type accountChownScenario struct {
+	mountPoints []string
+	mounts      []dockerInspectMount
+	tmpfs       []string
+	writable    bool
+}
+
+// accountChownScenarioStub answers the account owner stat probe, the
+// readMountTable chown-guard read, the host-side `docker inspect` the R6
+// mount classification uses, and the writability probe, recording every
+// docker call. Other execs (mkdir+chown, etc.) return (nil, nil), the
+// success answer for a stub whose every step says "nothing to report".
+func accountChownScenarioStub(calls *[][]string, owner string, scenario accountChownScenario) func(context.Context, []string, ...string) ([]byte, error) {
+	inspected := []dockerInspectContainer{{
+		Mounts:     scenario.mounts,
+		HostConfig: dockerInspectHostConfig{Tmpfs: map[string]string{}},
+	}}
+	for _, dest := range scenario.tmpfs {
+		inspected[0].HostConfig.Tmpfs[dest] = "rw"
+	}
+	inspectedJSON, err := json.Marshal(inspected)
+	if err != nil {
+		panic(err)
+	}
 	return func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		*calls = append(*calls, append([]string(nil), args...))
-		if len(args) == 0 || args[0] != "exec" {
+		if len(args) == 0 {
 			return nil, nil
 		}
 		joined := strings.Join(args, " ")
-		if strings.Contains(joined, "stat -c %u:%g") {
+		switch {
+		case args[0] == "inspect":
+			return inspectedJSON, nil
+		case args[0] != "exec":
+			return nil, nil
+		case strings.Contains(joined, "stat -c %u:%g"):
 			return []byte(owner + "\n"), nil
+		case isAccountReadMountTableExec(args):
+			return accountMountTableAnswer(scenario.mountPoints...), nil
+		case strings.Contains(joined, "test -w"):
+			// The writability probe af runs as the session's user when a
+			// chown target sits inside a mount it must not re-own.
+			if scenario.writable {
+				return nil, nil
+			}
+			return nil, errors.New("exit status 1")
+		default:
+			return nil, nil
 		}
-		if isAccountReadMountTableExec(args) {
-			return accountMountTableAnswer(mountPoints...), nil
-		}
-		return nil, nil
 	}
+}
+
+// accountChownDockerStub answers the account owner stat probe and the new
+// readMountTable chown-guard read with mountPoints — each recorded in the
+// `docker inspect` answer as the host bind mounts the tests mean them to be —
+// plus a writable verdict on the session-user probe, so a skipped target
+// proceeds with the guard's warning exactly as the pre-R6 contract had it.
+// Other execs (mkdir+chown, etc.) return (nil, nil), the success answer
+// for a stub whose every step says "nothing to report".
+func accountChownDockerStub(calls *[][]string, owner string, mountPoints ...string) func(context.Context, []string, ...string) ([]byte, error) {
+	mounts := make([]dockerInspectMount, len(mountPoints))
+	for i, mp := range mountPoints {
+		mounts[i] = dockerInspectMount{Type: "bind", Source: "/host-src" + mp, Destination: mp}
+	}
+	return accountChownScenarioStub(calls, owner, accountChownScenario{
+		mountPoints: mountPoints,
+		mounts:      mounts,
+		writable:    true,
+	})
 }
 
 // execShellScript returns the script a `docker exec … sh -c <script>` call
@@ -530,6 +586,190 @@ func TestPrepareAccountUser_Differential_SkipsWorkspaceChownLikeNonAccount(t *te
 			}
 		})
 	}
+}
+
+// TestPrepareAccountUser_WorkspaceVolumeIsChowned pins the R6 property that
+// ONLY host bind mounts are skipped: a docker volume at /workspace — the
+// inspect answer a named volume (`-v ws-vol:/workspace`) and an image
+// `VOLUME /workspace` both produce — is docker-managed storage, not a host
+// path, so re-owning it is safe and the chown runs exactly as it did before
+// the guard existed.
+func TestPrepareAccountUser_WorkspaceVolumeIsChowned(t *testing.T) {
+	for _, source := range []string{
+		"/var/lib/docker/volumes/ws-named/_data", // a named volume's backing
+		"/var/lib/docker/volumes/9f2c/_data",     // an anonymous VOLUME's backing
+	} {
+		t.Run(source, func(t *testing.T) {
+			var calls [][]string
+			t.Cleanup(SetDockerExecForTest(accountChownScenarioStub(&calls, accountProbeOwner, accountChownScenario{
+				mountPoints: []string{dockerWorkspaceDir},
+				mounts: []dockerInspectMount{
+					{Type: "volume", Source: source, Destination: dockerWorkspaceDir},
+				},
+			})))
+			p := newAccountChownProvisioner(t)
+			require.NoError(t, p.prepareAccountUser())
+
+			var chowned bool
+			for _, script := range rootExecScripts(calls) {
+				if rootScriptChowns(script, dockerWorkspaceDir) {
+					chowned = true
+				}
+			}
+			require.True(t, chowned,
+				"a docker volume at /workspace is docker-managed storage — the chown must run as before; calls=%v", calls)
+			require.Equal(t, accountProbeOwner, p.containerUser)
+		})
+	}
+}
+
+// TestPrepareAccountUser_WorkspaceTmpfsIsChowned covers the other
+// docker-managed mount kind: a --tmpfs at /workspace (recorded on
+// HostConfig.Tmpfs, and in .Mounts with Type=tmpfs on modern daemons) is
+// container-private storage, never a host path, so the chown runs.
+func TestPrepareAccountUser_WorkspaceTmpfsIsChowned(t *testing.T) {
+	for name, sc := range map[string]accountChownScenario{
+		"Mounts Type=tmpfs": {
+			mountPoints: []string{dockerWorkspaceDir},
+			mounts:      []dockerInspectMount{{Type: "tmpfs", Destination: dockerWorkspaceDir}},
+		},
+		"HostConfig.Tmpfs": {
+			mountPoints: []string{dockerWorkspaceDir},
+			tmpfs:       []string{dockerWorkspaceDir},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls [][]string
+			t.Cleanup(SetDockerExecForTest(accountChownScenarioStub(&calls, accountProbeOwner, sc)))
+			p := newAccountChownProvisioner(t)
+			require.NoError(t, p.prepareAccountUser())
+			var chowned bool
+			for _, script := range rootExecScripts(calls) {
+				if rootScriptChowns(script, dockerWorkspaceDir) {
+					chowned = true
+				}
+			}
+			require.True(t, chowned, "a tmpfs at /workspace is container-private — the chown must run; calls=%v", calls)
+		})
+	}
+}
+
+// TestPrepareAccountUser_UnwritableBindRefusesNamingTheMount is the R6 error
+// contract: when af declines to prepare /workspace because a host bind sits
+// there AND the session's user cannot write it, the session's ERROR names
+// the mount, its host source, and the remedy — so the operator is not left
+// with a bare clone "Permission denied" to debug.
+func TestPrepareAccountUser_UnwritableBindRefusesNamingTheMount(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(accountChownScenarioStub(&calls, accountProbeOwner, accountChownScenario{
+		mountPoints: []string{dockerWorkspaceDir},
+		mounts: []dockerInspectMount{
+			{Type: "bind", Source: "/operator/secrets", Destination: dockerWorkspaceDir},
+		},
+		writable: false,
+	})))
+	p := newAccountChownProvisioner(t)
+	err := p.prepareAccountUser()
+	require.Error(t, err, "an unwritable host bind at /workspace must refuse at prepare, not fail later at the clone")
+	for _, want := range []string{
+		dockerWorkspaceDir,  // the affected mount
+		"/operator/secrets", // the host path the bind shares — named in the remedy
+		"bind",              // the mount's kind
+		accountProbeOwner,   // who cannot write it
+		"chown",             // the remedy's mechanism
+		"docker.run_args",   // where the mount came from
+	} {
+		assert.Containsf(t, err.Error(), want, "the refusal must name %q; err=%v", want, err)
+	}
+	var se *dockerStepError
+	require.True(t, errors.As(err, &se), "the refusal must carry an operation class")
+	assert.Equal(t, dockerOpLocal, se.op, "the refusal is af's own decision, never a filesystem verdict")
+	requireNoRootChownOn(t, calls, dockerWorkspaceDir)
+	assert.Empty(t, p.containerUser, "a refused provisioning must not switch the exec user")
+}
+
+// TestPrepareAccountUser_UnwritableHomeBindRefusesNamingTheMount covers the
+// symmetric target: a host bind at /af-home the account owner cannot write
+// refuses with the mount and remedy named too.
+func TestPrepareAccountUser_UnwritableHomeBindRefusesNamingTheMount(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(accountChownScenarioStub(&calls, accountProbeOwner, accountChownScenario{
+		mountPoints: []string{dockerAccountRuntimeHome},
+		mounts: []dockerInspectMount{
+			{Type: "bind", Source: "/operator/home", Destination: dockerAccountRuntimeHome},
+		},
+		writable: false,
+	})))
+	p := newAccountChownProvisioner(t)
+	err := p.prepareAccountUser()
+	require.Error(t, err)
+	for _, want := range []string{"HOME", dockerAccountRuntimeHome, "/operator/home", "chown"} {
+		assert.Containsf(t, err.Error(), want, "the refusal must name %q; err=%v", want, err)
+	}
+	requireNoRootChownOn(t, calls, dockerAccountRuntimeHome)
+	assert.Empty(t, p.containerUser)
+}
+
+// TestPrepareAccountUser_WritableBindProceedsWithWarning pins the writable-
+// bind half of R6: a host bind at /workspace the session's user CAN already
+// write costs the session nothing — the chown is skipped (the host dir is
+// never re-owned), the guard's warning stands, and provisioning proceeds.
+func TestPrepareAccountUser_WritableBindProceedsWithWarning(t *testing.T) {
+	var warnings bytes.Buffer
+	log.CaptureOutput(t, log.WarningLog, "", &warnings)
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(accountChownScenarioStub(&calls, accountProbeOwner, accountChownScenario{
+		mountPoints: []string{dockerWorkspaceDir},
+		mounts: []dockerInspectMount{
+			{Type: "bind", Source: "/operator/workspace", Destination: dockerWorkspaceDir},
+		},
+		writable: true,
+	})))
+	p := newAccountChownProvisioner(t)
+	require.NoError(t, p.prepareAccountUser())
+	requireNoRootChownOn(t, calls, dockerWorkspaceDir)
+	assert.Contains(t, warnings.String(), "not chowning it",
+		"a writable bind still warns that its chown was skipped; warnings=%q", warnings.String())
+	require.Equal(t, accountProbeOwner, p.containerUser)
+}
+
+// TestPrepareAccountUser_UnclassifiableMountFailsClosed pins the fail-closed
+// posture the inspect classification adds: when `docker inspect` cannot say
+// what backs the mount at /workspace (here: inspect fails entirely), af
+// treats it as a host path — no chown — and an unwritable verdict refuses
+// with wording that says the mount could not be classified, not a claim it
+// is a bind.
+func TestPrepareAccountUser_UnclassifiableMountFailsClosed(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) == 0 {
+			return nil, nil
+		}
+		joined := strings.Join(args, " ")
+		switch {
+		case args[0] == "inspect":
+			return nil, errors.New("daemon unreachable for test")
+		case args[0] != "exec":
+			return nil, nil
+		case strings.Contains(joined, "stat -c %u:%g"):
+			return []byte(accountProbeOwner + "\n"), nil
+		case isAccountReadMountTableExec(args):
+			return accountMountTableAnswer(dockerWorkspaceDir), nil
+		case strings.Contains(joined, "test -w"):
+			return nil, errors.New("exit status 1")
+		default:
+			return nil, nil
+		}
+	}))
+	p := newAccountChownProvisioner(t)
+	err := p.prepareAccountUser()
+	require.Error(t, err, "an unclassifiable mount the session's user cannot write must refuse")
+	assert.Contains(t, err.Error(), dockerWorkspaceDir, "the refusal names the affected path; err=%v", err)
+	assert.Contains(t, err.Error(), "could not classify",
+		"the refusal says the mount's backing is unknown — af does not claim a bind it cannot prove; err=%v", err)
+	requireNoRootChownOn(t, calls, dockerWorkspaceDir)
+	assert.Empty(t, p.containerUser)
 }
 
 // TestPrepareAccountUser_NoOpForNonAccount pins the dispatch half: when
