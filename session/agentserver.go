@@ -66,9 +66,13 @@ const (
 
 // StagedDraftChecker is the additive capability a runtime implements when it
 // can re-read where the last send's bound composer evidence sits (#7545). The
-// local tmux runtime implements it; off-box runtimes cannot read a sandbox's
-// composer and do not — the daemon's staged-draft watch then never arms for
-// them, which is the honest answer the capability exists to give.
+// local tmux runtime implements it, and remoteAgentServer implements it for
+// every off-box runtime (#7546): the bound evidence already lives in the
+// sandbox's own tmux session — the remote read is the same checker, reached
+// over the authenticated agent-server route. A runtime that cannot answer —
+// or an agent-server old enough not to know the route — reports
+// StagedDraftNoEvidence, and the daemon's watch never arms on an answer it
+// cannot make.
 //
 // The call runs under the instance's observation-settlement fence on the
 // daemon's status poll: an implementation must be bounded (the local read is
@@ -97,6 +101,17 @@ func SendPromptWithStatus(server AgentServer, prompt string) (PromptDeliveryStat
 		return PromptCouldNotConfirm, err
 	}
 	return PromptCouldNotConfirm, nil
+}
+
+// BoundDraftStillStaged asks a runtime where the last send's bound composer
+// evidence sits (#7545) — the staged-draft watch's one read. A runtime
+// without the capability honestly cannot read: StagedDraftNoEvidence, the
+// same answer the watch treats as never armed.
+func BoundDraftStillStaged(server AgentServer) (StagedDraftRead, string) {
+	if checker, ok := server.(StagedDraftChecker); ok {
+		return checker.BoundDraftStillStaged()
+	}
+	return StagedDraftNoEvidence, "the runtime cannot read bound composer evidence"
 }
 
 // TabAddressableServer is implemented by an agent-server whose data plane can be

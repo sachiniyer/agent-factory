@@ -202,6 +202,85 @@ func TestRemoteAgentServerCarriesPromptDeliveryStatus(t *testing.T) {
 	}
 }
 
+// TestRemoteAgentServerBoundDraftStillStaged pins the #7546 wire contract:
+// the closed enum ferries verbatim, and the version-skew rules hold — a 404,
+// envelope or bare, is an agent-server that predates the route (NoEvidence);
+// a transport failure, a coded refusal, or a verdict this daemon does not
+// know is a blind read (Unreadable), so the watch's blind budget bounds it.
+func TestRemoteAgentServerBoundDraftStillStaged(t *testing.T) {
+	newServer := func(t *testing.T, status int, body any) *httptest.Server {
+		t.Helper()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/agent/bound-draft-still-staged" {
+				t.Errorf("path = %q, want bound-draft-still-staged route", r.URL.Path)
+			}
+			if raw, ok := body.(string); ok {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(raw))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			if err := json.NewEncoder(w).Encode(body); err != nil {
+				t.Errorf("encode response: %v", err)
+			}
+		}))
+	}
+	call := func(t *testing.T, url string) (StagedDraftRead, string) {
+		as, err := NewRemoteAgentServer(AgentServerEndpoint{URL: url, Token: "test-token"}, "remote")
+		if err != nil {
+			t.Fatalf("NewRemoteAgentServer: %v", err)
+		}
+		return as.(StagedDraftChecker).BoundDraftStillStaged()
+	}
+
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   any
+		want   StagedDraftRead
+	}{
+		{name: "no evidence", body: map[string]any{"data": map[string]any{"read": int(StagedDraftNoEvidence)}, "error": nil}, want: StagedDraftNoEvidence},
+		{name: "unreadable", body: map[string]any{"data": map[string]any{"read": int(StagedDraftUnreadable)}, "error": nil}, want: StagedDraftUnreadable},
+		{name: "gone", body: map[string]any{"data": map[string]any{"read": int(StagedDraftGone)}, "error": nil}, want: StagedDraftGone},
+		{name: "submitted", body: map[string]any{"data": map[string]any{"read": int(StagedDraftSubmitted)}, "error": nil}, want: StagedDraftSubmitted},
+		{name: "staged", body: map[string]any{"data": map[string]any{"read": int(StagedDraftStaged)}, "error": nil}, want: StagedDraftStaged},
+		{name: "a verdict this daemon does not know is a blind read",
+			body: map[string]any{"data": map[string]any{"read": 99}, "error": nil}, want: StagedDraftUnreadable},
+		{name: "an envelope 404 is an older agent-server",
+			status: http.StatusNotFound,
+			body:   map[string]any{"data": nil, "error": map[string]any{"message": `unknown route "/v1/agent/bound-draft-still-staged"`}},
+			want:   StagedDraftNoEvidence},
+		{name: "a bare 404 is an agent-server without the route",
+			status: http.StatusNotFound, body: "404 page not found", want: StagedDraftNoEvidence},
+		{name: "a coded 404 answered, not route-missing",
+			status: http.StatusNotFound,
+			body:   map[string]any{"data": nil, "error": map[string]any{"message": "tab is gone", "code": apiproto.ErrorCodeTabGone}},
+			want:   StagedDraftUnreadable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newServer(t, tc.status, tc.body)
+			defer server.Close()
+			got, why := call(t, server.URL)
+			if got != tc.want {
+				t.Fatalf("read = %v, want %v (why: %q)", got, tc.want, why)
+			}
+		})
+	}
+
+	t.Run("a transport failure is a blind read", func(t *testing.T) {
+		server := newServer(t, http.StatusOK, map[string]any{})
+		server.Close() // drop the listener: the dial itself must fail
+		got, _ := call(t, server.URL)
+		if got != StagedDraftUnreadable {
+			t.Fatalf("read = %v, want %v", got, StagedDraftUnreadable)
+		}
+	})
+}
+
 // TestRemoteAgentCallWithin_ResourceExhaustedCode pins the #5295 wire
 // contract: a failure envelope carrying ErrorCodeResourceExhausted
 // reconstructs ErrRemoteResourceExhausted inside the client-side error chain,
