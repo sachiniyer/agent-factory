@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -40,14 +41,18 @@ import (
 // that the chown has either run (the bug) or been skipped (the fix).
 //
 // Runs only on a host with a real rootful docker daemon; `requireDocker` and
-// an euid-0 check skip cleanly otherwise. SKIPS under `testing.Short()`,
-// mirroring the other real-docker E2E tests.
+// the daemon's own rootless check skip cleanly otherwise. SKIPS under
+// `testing.Short()`, mirroring the other real-docker E2E tests. The fixture's
+// ownership change runs through a root container on the same daemon, so the
+// test process itself does NOT need host root — a non-root CI runner against
+// a rootful daemon exercises the guard for real.
 func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing-sensitive real-backend E2E/integration; skipped under -short — see #2052")
 	}
 	requireDocker(t)
 	requireTool(t, "git")
+	baseImage := requireRoundTripBaseImage(t)
 
 	// Rootful engines are where the chown-through-bind re-own hazard
 	// manifests. On a rootless engine the chown executes as uid 0 in the
@@ -111,8 +116,25 @@ func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 	// Make the account directory owned by a non-root uid so the in-container
 	// stat probe reports that uid and the chown of /workspace would re-own
 	// the operator's root:root host directory to it (the bug).
-	if out, err := exec.Command("chown", "-R", "65534:65534", accountDir).CombinedOutput(); err != nil {
-		t.Fatalf("chown account dir to nobody: %v\n%s", err, out)
+	//
+	// The test process does not have the privilege this chown needs (CI runs
+	// as a non-root user whose daemon is rootful), so it runs through a root
+	// container on the same rootful engine: container-root re-owns the
+	// bind-mounted host directory exactly as a host-root chown would.
+	chownCtx, chownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	out, err := exec.CommandContext(chownCtx, "docker", "run", "--rm",
+		"-v", accountDir+":/af-account-fixture",
+		baseImage, "chown", "-R", "65534:65534", "/af-account-fixture").CombinedOutput()
+	chownCancel()
+	if err != nil {
+		t.Fatalf("fixture chown of the account dir through a root container failed: %v\n%s", err, out)
+	}
+	// A bind source resolves on the DAEMON host: when the engine is not local
+	// the chown landed somewhere this test cannot see, and the owner check
+	// below would measure nothing. Verify the fixture actually took before
+	// relying on it — that is exactly what this test needs.
+	if got := fileOwner(t, accountDir); got != "65534:65534" {
+		t.Skipf("the root-container fixture chown did not take on the host account dir (owner is %s): the daemon resolves bind sources on a different host", got)
 	}
 
 	// A static `af` binary the runtime copies into the container.
@@ -154,9 +176,12 @@ func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 	runExternal(t, repo, "git", "remote", "add", "origin", "file:///repo.git")
 
 	// Repo config: backend=docker + the bind-mount at /workspace AND the
-	// bare clone source /repo.git (read-only) AND the fake claude on PATH.
-	// The /workspace bind is the repo-controlled run_args case the account
-	// run_args screen accepts and the chown guard must skip.
+	// bare clone source /repo.git (read-only) AND the fake claude bound at a
+	// fixed PATH location. The /workspace bind is the repo-controlled
+	// run_args case the account run_args screen accepts and the chown guard
+	// must skip. A repo `-e PATH=` to reach the fake agent is not an option:
+	// the account run_args screen refuses it, so the fake binary is bound
+	// where the image's own PATH already looks.
 	//
 	// With the fix the /workspace chown is skipped, so when the clone runs
 	// later as the account user (uid 65534) against a root:root /workspace,
@@ -168,8 +193,7 @@ func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 	writeDockerRepoConfig(t, repo, image, []string{
 		"-v", bare + ":/repo.git:ro",
 		"-v", hostWorkspace + ":/workspace",
-		"-v", fakeBin + ":/usr/local/bin/claude-agent:ro",
-		"-e", "PATH=/usr/local/bin/claude-agent:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"-v", filepath.Join(fakeBin, "claude") + ":/usr/local/bin/claude:ro",
 	})
 
 	title := "docker-account-workspace-bind"
@@ -240,14 +264,20 @@ func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 	t.Logf("session provisioned; the host directory's owner is preserved as %s", gotOwner)
 }
 
-// fileOwner reports the "uid:gid" of path via `stat -c %u:%g`. The test runs on
-// the host where the docker daemon also runs (rootful), so this is the same
-// filesystem inode the in-container chown would have targeted through the bind.
+// fileOwner reports the "uid:gid" of path via stat(1). The test runs on the
+// host where the docker daemon also runs (rootful), so this is the same
+// filesystem inode the in-container chown would have targeted through the
+// bind. GNU stat spells the format flag -c; BSD stat (a macOS host driving
+// its VM daemon) spells it -f — both render uid:gid the same way.
 func fileOwner(t *testing.T, path string) string {
 	t.Helper()
+	formatFlag := "-c"
+	if runtime.GOOS == "darwin" {
+		formatFlag = "-f"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "stat", "-c", "%u:%g", path).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "stat", formatFlag, "%u:%g", path).CombinedOutput()
 	if err != nil {
 		t.Fatalf("stat %s: %v\n%s", path, err, out)
 	}
