@@ -26,13 +26,29 @@ import (
 )
 
 // source sleeps for argv[1] seconds (fractional allowed) and exits 0.
+//
+// It also honors an OPTIONAL mmap directive, driven by env vars so every
+// existing consumer that does not set them behaves exactly as before —
+// asleep for argv[1] seconds, nothing else. The directive exists for
+// proctree's darwin text-vnode attestation test, which needs a FOREIGN
+// (non-af-module) process that maps a chosen regular file at a chosen
+// fixed address — the exact shape of the name-swap poison the attestation
+// refuses (see internal/proctree/afexe_darwin_test.go
+// TestExeAttestsAFRefusesAMmapSpoofOfTheTextVnode). The env names are
+// pinned to the exported constants below by sleeper_test.go.
 const source = `package main
 
 import (
 	"os"
 	"strconv"
+	"syscall"
 	"time"
 )
+
+const mmapPathEnv = "PROCTREE_SLEEPER_MMAP_PATH"
+const mmapAddrEnv = "PROCTREE_SLEEPER_MMAP_ADDR"
+const mmapGateEnv = "PROCTREE_SLEEPER_MMAP_GATE"
+const mmapSize = 4096
 
 func main() {
 	secs := 300.0
@@ -41,9 +57,50 @@ func main() {
 			secs = v
 		}
 	}
+	if p := os.Getenv(mmapPathEnv); p != "" {
+		mmapAt(p, os.Getenv(mmapAddrEnv), os.Getenv(mmapGateEnv))
+	}
 	time.Sleep(time.Duration(secs * float64(time.Second)))
 }
+
+// mmapAt maps the regular file at path at the fixed address addrStr (parsed
+// as a Go integer literal, so "0x200000" works), waiting for gatePath to
+// appear first when the caller needs the test to stage a name swap before
+// the mmap reads the swapped-to file. A failed mmap exits nonzero so a
+// test that mis-stages fails loudly rather than sleeping silently.
+func mmapAt(path, addrStr, gatePath string) {
+	if gatePath != "" {
+		for {
+			if _, err := os.Stat(gatePath); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	addr, _ := strconv.ParseUint(addrStr, 0, 64)
+	f, err := os.Open(path)
+	if err != nil {
+		os.Exit(11)
+	}
+	defer f.Close()
+	_, _, errno := syscall.Syscall6(syscall.SYS_MMAP, uintptr(addr), mmapSize,
+		syscall.PROT_READ, syscall.MAP_PRIVATE|syscall.MAP_FIXED, uintptr(f.Fd()), 0)
+	if errno != 0 {
+		os.Exit(12)
+	}
+}
 `
+
+// The env vars the optional mmap directive in source reads. Exported so a
+// test that needs the directive (proctree's darwin attestation test) can
+// set them by name; sleeper_test.go pins that source names the same
+// strings. Every consumer that does not set them gets the plain-sleep
+// behavior the package always had.
+const (
+	MmapPathEnv = "PROCTREE_SLEEPER_MMAP_PATH"
+	MmapAddrEnv = "PROCTREE_SLEEPER_MMAP_ADDR"
+	MmapGateEnv = "PROCTREE_SLEEPER_MMAP_GATE"
+)
 
 var (
 	mu     sync.Mutex

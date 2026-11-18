@@ -29,23 +29,10 @@ const procPIDPathInfoMaxSize = 4 * 1024
 // file the process is executing.
 const procPIDRegionPathInfo2 = 22
 
-// Layout of struct proc_regionwithpathinfo (bsd/sys/proc_info.h), derived in
-// the same spirit as vnodepathinfo.go: proc_regioninfo is 96 bytes
-// (pri_address at 80, pri_size at 88), then vnode_info_path — vi_stat
-// (vst_dev uint32 @96, vst_ino uint64 @104, inside the 136-byte stat block)
-// then vip_path[MAXPATHLEN] at 96+152 = 248.
-const (
-	procRegionWithPathInfoSize = 1272
-	regionPriAddressOff        = 80
-	regionPriSizeOff           = 88
-	regionVnodeDevOff          = 96
-	regionVnodeInoOff          = 104
-	regionPathOff              = 248
-	regionPathLen              = 1024
-	// regionScanBound caps the cursor walk so a hostile or pathological map
-	// can never make the attestation read unbounded.
-	regionScanBound = 16384
-)
+// The proc_regionwithpathinfo byte layout the walk indexes lives in
+// afexe_textvnode.go (untagged, like vnodepathinfo.go's offsets) so Linux
+// CI re-derives it from the SDK field table on every run — see
+// TestRegionWithPathInfoLayoutMatchesSDKHeaders.
 
 // exePath asks the kernel for pid's executable path via proc_info, through
 // the same procInfoRaw helper readCPUTime and openfiles use (Syscall6, never
@@ -78,12 +65,43 @@ func exePath(pid int) (string, bool) {
 // the kernel's own record of what the process is executing, read by walking
 // pid's vnode-mapped regions to the one carrying the kernel-attested exe
 // path (xnu proc_pidregionpathinfo3 walks the same way). The walk is
-// cursor-bounded; any refusal, short answer, stalled advance, or a map with
-// no region naming that path reports false — fail-closed like every other
+// cursor-bounded; any refusal, short answer, stalled advance, no match, or
+// AMBIGUOUS match reports false — fail-closed like every other
 // "cannot resolve".
+//
+// AMBIGUITY. PROC_PIDREGIONPATHINFO2 reports ANY vnode-backed regular-file
+// mapping at/after the cursor, in address order, without filtering on
+// protection or binding to p_textvp (xnu bsd/kern/proc_info.c
+// fill_procregioninfo_onlymappedvnodes / fill_vnodeinfoforaddr — a vnode
+// pager exists only for a VREG, and pri_protection is copied, never
+// checked). The process controls its own map, so the FIRST region whose
+// vip_path string equals the kernel's exe path is not necessarily the text
+// vnode: a process can mmap a DIFFERENT regular file — name-swapped onto
+// the exe path — at an address below its own text region (x86_64 only; the
+// arm64 hard 4 GiB pagezero leaves nothing mappable beneath the text). The
+// walk therefore treats its answer as the text vnode only when UNSOLICITED:
+//
+//   - every region whose vip_path equals the exe path is collected, not
+//     returned on first match;
+//   - at least one must be PROT_EXEC (the executed image's own __TEXT);
+//   - all must agree on the same (dev, ino) — a benign executable names
+//     only its text vnode, across __TEXT/__DATA/__LINKEDIT (one inode); a
+//     SECOND inode answering the same exe path is a foreign inode the
+//     process mapped under the name: the only witness an unfiltered walk
+//     has, and a forced fail-closed.
+//
+// Two or more distinct inodes naming the exe path — the poison — report
+// false. A REPLACED-ONLY name (the legit upgradetxn case, exe renamed over
+// while running) answers the text vnode alone — the replacement lives only
+// on disk, never mapped under the running process — so the verdict still
+// stands on the running image (#7492, #7494 item 2). exeOpen, exeIdentity,
+// and the first attestation all read the SAME kernel-attested identity —
+// never a path stat — so a name swap can never carry the cached positive
+// across sweeps (#7509).
 func exeTextVnode(pid int, exePath string) (dev uint64, ino uint64, ok bool) {
 	var buf [procRegionWithPathInfoSize]byte
 	addr := uint64(0)
+	var matches []regionMatch
 	for i := 0; i < regionScanBound; i++ {
 		n, err := procInfoRaw(procInfoCallPIDInfo, pid, procPIDRegionPathInfo2, addr,
 			unsafe.Pointer(&buf[0]), procRegionWithPathInfoSize)
@@ -94,14 +112,28 @@ func exeTextVnode(pid int, exePath string) (dev uint64, ino uint64, ok bool) {
 			binary.NativeEndian.Uint64(buf[regionPriSizeOff:])
 		path := cString(buf[regionPathOff : regionPathOff+regionPathLen])
 		if path == exePath {
-			return uint64(binary.NativeEndian.Uint32(buf[regionVnodeDevOff:])),
-				binary.NativeEndian.Uint64(buf[regionVnodeInoOff:]), true
+			matches = append(matches, regionMatch{
+				dev:        uint64(binary.NativeEndian.Uint32(buf[regionVnodeDevOff:])),
+				ino:        binary.NativeEndian.Uint64(buf[regionVnodeInoOff:]),
+				protection: binary.NativeEndian.Uint32(buf[regionPriProtectionOff:]),
+			})
 		}
 		if regionEnd <= addr {
-			return 0, 0, false
+			// End of walk: the kernel returns the last vnode-backed region
+			// for a cursor past the end of the map (regionEnd <= addr),
+			// so the cursor no longer advances. Fold whatever matches
+			// the walk collected into one identity — empty (no region
+			// names the exe path) collapses to the honest "foreign"
+			// answer inside collectTextVnode, exactly the fail-closed
+			// direction.
+			return collectTextVnode(matches)
 		}
 		addr = regionEnd
 	}
+	// Region cap: a map this fragmented is itself suspicious, and a
+	// consensus read that did not terminate before the cap cannot be
+	// trusted — fail-closed, the same direction the unbounded-walk guard
+	// already takes.
 	return 0, 0, false
 }
 
@@ -131,11 +163,19 @@ func exeOpen(pid int) (*os.File, bool) {
 // A path stat can launder a dead verdict: exec a foreign binary at Q under
 // a claimed argv, then `mv` the attested af image onto Q — stat(Q) returns
 // the attested inode while the text vnode still belongs to the foreign
-// image. The region walk reports the vnode itself, so the name swap can
-// never carry it. An exec, a replaced file, a deleted name, and any map
-// that can no longer be read all change or lose the identity and force a
-// re-attestation (#7496). A process too far gone to name reports no
-// identity; the instance recheck lives in the shared caller.
+// image. The region walk reports the vnode by a path-STRING match, so the
+// walk itself only stands as evidence when UNSOLICITED: it folds every
+// region naming the exe path, requires at least one to be PROT_EXEC, and
+// requires all to agree on one (dev,ino); a SECOND inode naming the path —
+// a foreign inode the process mapped under the name — makes the fold
+// fail-closed (see exeTextVnode). A replaced name (the legit upgradetxn
+// case) names only the running text vnode, so the identity still stands on
+// the running image; a name swap that maps a different inode under the
+// path reports no identity instead. An exec, a replaced file, a deleted
+// name, and any map that can no longer be read all change or lose the
+// identity and force a re-attestation (#7496). A process too far gone to
+// name reports no identity; the instance recheck lives in the shared
+// caller.
 func exeIdentity(pid int) (exeID, bool) {
 	path, ok := exePath(pid)
 	if !ok {
