@@ -91,6 +91,12 @@ type closeRun struct {
 type closeProcessOutcome struct {
 	captureErr error
 	remaining  []proctree.Process
+	// protected is the never-signal verdict set computed pre-kill from the
+	// capture's own snapshot — the same one the reap exempted by. The
+	// survivors refusal consults it so a survivor excluded as an af-daemon
+	// CLAIM is named with its claimant pid and remedy, not just a bare pid
+	// list (#7496 R2).
+	protected protectedSet
 }
 
 // tmux runs one bounded tmux command and RECORDS a tripped deadline. The only
@@ -311,7 +317,7 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// Async so the SIGHUP grace period never adds latency to user-driven
 	// teardown; the daemon and TUI processes are long-lived, so the sweep
 	// always gets to finish. CLI kills run daemon-side (KillSession RPC).
-	processes := closeProcessOutcome{captureErr: captureErr}
+	processes := closeProcessOutcome{captureErr: captureErr, protected: protected}
 	if len(leaked) > 0 {
 		// Close IS the requested teardown (#2765): a caller asked for this session
 		// to die, so every process in its pane tree dying with it is the operation
@@ -552,8 +558,13 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 		return refuse(fmt.Errorf("could not establish the pane's complete process tree before kill-session: %w",
 			processes.captureErr))
 	case len(processes.remaining) > 0:
-		return refuse(fmt.Errorf("pane processes %s are still alive after bounded teardown",
-			processPIDList(processes.remaining)))
+		// A survivor excluded as an af-daemon CLAIM — unverified, or one this
+		// build's parse cannot decide — is named with its claimant and remedy
+		// (#7496 R2): the generic pid list alone leaves the operator the
+		// daemon-shaped blocker with no way to act on it.
+		return refuse(fmt.Errorf("pane processes %s are still alive after bounded teardown%s",
+			processPIDList(processes.remaining),
+			unverifiedDaemonSurvivorClause(processes.remaining, processes.protected)))
 	case waitForPane && !waitForPaneExitOrRequester(paneProcess, paneExitWait):
 		// kill-session returning establishes only that SIGHUP was sent, not that
 		// the process stopped writing.

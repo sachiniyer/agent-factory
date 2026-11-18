@@ -594,7 +594,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// CloseAndWaitForPaneExit, which already refuses on this exact signal.
 			if remaining := reapOnRequestProcesses(reapOnRequest, match, leaked,
 				reapGraceWait, reapTermWait, protected); len(remaining) > 0 {
-				processSweepErrs <- survivingProcessesError(match, remaining)
+				processSweepErrs <- survivingProcessesError(match, remaining, protected)
 			}
 		}(match, leaked, protectedBySession[match])
 	}
@@ -630,11 +630,12 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 // actionable if the user is told what to go look at: the caller (`af reset`)
 // stops before deleting anything and prints "Nothing was removed", so this
 // message is the entire explanation of why.
-func survivingProcessesError(match string, remaining []proctree.Process) error {
+func survivingProcessesError(match string, remaining []proctree.Process, protected protectedSet) error {
 	return fmt.Errorf("tmux session %s was killed but its processes %s are still alive after bounded teardown"+
-		" — they may still be writing to its worktree, which `af reset` deletes next."+
+		" — they may still be writing to its worktree, which `af reset` deletes next.%s"+
 		" Stop them and re-run; inspect them with: %s",
 		match, processPIDList(remaining),
+		unverifiedDaemonSurvivorClause(remaining, protected),
 		shellsuggest.Command("ps", "-o", "pid,ppid,args", "-p", strings.Join(processPIDs(remaining), ",")))
 }
 

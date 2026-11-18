@@ -247,15 +247,24 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		processSession, hasSession := processEnvValue(environ, EnvMarkerSession)
 		if !hasSession {
 			// An unmarked candidate that argv-claims the af daemon but whose
-			// kernel executable cannot verify the claim is named for what it
-			// is — a daemon that could not be verified — with the remedy an
-			// operator can act on (#7494 item 1): a REAL daemon whose exe was
-			// replaced after exec (darwin upgrade) reads exactly like a forged
-			// claim, and "restart or stop it" unblocks either way.
-			if afDaemonClass(process, att) == afDaemonUnverified {
+			// kernel executable cannot verify the claim — or whose claim this
+			// build's parse cannot decide (#7496 R1) — is named for what it
+			// is with the remedy an operator can act on (#7494 item 1): a
+			// REAL daemon whose exe was replaced after exec (darwin upgrade)
+			// reads exactly like a forged claim, and stopping it — or
+			// restarting it under its own AF_HOME — unblocks either way.
+			switch class := afDaemonClass(process, att); class {
+			case afDaemonUnverified:
 				report(process.PID, fmt.Errorf(
-					"captured live pid %d has no %s marker for vanished session %s — its argv claims an agent-factory daemon its kernel executable could not verify; restart or stop that daemon to unblock the close",
-					process.PID, EnvMarkerSession, sanitizedName))
+					"captured live pid %d has no %s marker for vanished session %s — its %s; %s",
+					process.PID, EnvMarkerSession, sanitizedName,
+					daemonUnverifiedClaimClause, daemonClaimRemedy(process.PID)))
+				continue
+			case afDaemonUndecidable:
+				report(process.PID, fmt.Errorf(
+					"captured live pid %d has no %s marker for vanished session %s — its %s; %s",
+					process.PID, EnvMarkerSession, sanitizedName,
+					daemonUndecidableClaimClause, daemonClaimRemedy(process.PID)))
 				continue
 			}
 			report(process.PID, fmt.Errorf("captured live pid %d has no %s marker for vanished session %s",
@@ -366,14 +375,17 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				process.PID, sanitizedName, reason)
 		case unverifiedDaemon > 0:
 			// A cohort member whose ancestry ends at an UNVERIFIED af-daemon
-			// claimant blocks — the daemon may be a real af daemon whose exe
-			// was replaced (#7494 item 1) or a foreign carrier mounting the
-			// claim — and the refusal must be actionable: it names the daemon
-			// pid and the remedy, not just the generic cohort wording. The
-			// claim still spares both processes from signals.
+			// claimant — or at an af binary this build's parse cannot decide
+			// (#7496 R1) — blocks: the daemon may be a real af daemon whose
+			// exe was replaced (#7494 item 1) or a foreign carrier mounting
+			// the claim — and the refusal must be actionable: it carries the
+			// ancestry walk's own reason, which names the claimant pid and
+			// says only what the argv CLAIMS (#7496 R3), plus the remedy
+			// that acts on that pid. The claim still spares both processes
+			// from signals.
 			report(process.PID, fmt.Errorf(
-				"captured live pid %d marks session %s but descends from pid %d, an agent-factory daemon its kernel executable could not verify — restart or stop that daemon to unblock the close",
-				process.PID, sanitizedName, unverifiedDaemon))
+				"captured live pid %d marks session %s but is %s; %s",
+				process.PID, sanitizedName, reason, daemonClaimRemedy(unverifiedDaemon)))
 		case hasGeneration && generations.empty():
 			// An EMPTY cohort is the blind vanished-session sweep (cleanup.go): it
 			// captured no predecessor, so it has nothing to place this generation

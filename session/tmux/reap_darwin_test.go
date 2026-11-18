@@ -3,16 +3,19 @@
 package tmux
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 	"github.com/stretchr/testify/require"
 )
@@ -85,14 +88,102 @@ func TestReplacedExecutableDaemonBlocksWithANamedRemedy(t *testing.T) {
 	require.Error(t, err, "an unverified daemon still blocks the close it sits in")
 	require.Contains(t, err.Error(), "an agent-factory daemon its kernel executable could not verify",
 		"the refusal names it as an af daemon that could not be verified")
-	require.Contains(t, err.Error(), "descends from pid "+strconv.Itoa(daemonProc.PID),
+	require.Contains(t, err.Error(), "descendant of pid "+strconv.Itoa(daemonProc.PID),
 		"the marked child's refusal names the daemon pid it descends from")
-	require.Contains(t, err.Error(), "restart or stop that daemon",
-		"the refusal carries the remedy — restart or stop it")
+	require.Contains(t, err.Error(), "stop pid "+strconv.Itoa(daemonProc.PID)+", or restart it under its own AF_HOME",
+		"the refusal carries the remedy that acts on the claimant pid (#7496 R3)")
 	for _, p := range marked {
 		require.NotEqual(t, daemonProc.PID, p.PID)
 		require.NotEqual(t, child.PID, p.PID)
 	}
+	require.True(t, proctree.AliveSame(daemonProc),
+		"the claim keeps the unverified daemon protected from signals")
+	require.True(t, proctree.AliveSame(child),
+		"and its marked descendant alike — blocking never means signalled")
+}
+
+// #7496 R2 — the named remedy must reach the LIVE close's survivors refusal,
+// not only the blind vanished-session sweep above. Same replaced-executable
+// shape as TestReplacedExecutableDaemonBlocksWithANamedRemedy, but the daemon
+// IS a live session's pane root: CloseAndWaitForPaneExit kills the session,
+// the captured-tree reap spares the unverified claimant and its descendant
+// from signals, and the "still alive after bounded teardown" refusal names
+// the claimant's pid with the remedy that acts on it (#7496 R3).
+func TestReplacedExecutableDaemonBlocksTheLiveCloseWithANamedRemedy(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+	dir := t.TempDir()
+	name := fmt.Sprintf("af_livedaemon_%d", time.Now().UnixNano())
+	home := t.TempDir()
+	gen := name + "-gen"
+	childPidFile := filepath.Join(dir, "child.pid")
+
+	// The same REAL af-module build as the blind-path test — a copy of this
+	// test binary so replacing its path never touches the running suite —
+	// becomes the pane root itself: tmux runs it under a sh that first
+	// ignores SIGHUP, and an IGNORED disposition survives the execs, so the
+	// daemon outlives kill-session exactly like a daemon the pane spawned
+	// and detached from its hangup (#7496 R2 needs the claim still alive
+	// when the survivors refusal renders).
+	exePath := filepath.Join(dir, "af")
+	src, err := os.Open(os.Args[0])
+	require.NoError(t, err)
+	dst, err := os.OpenFile(exePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
+	require.NoError(t, err)
+	_, err = io.Copy(dst, src)
+	require.NoError(t, err)
+	require.NoError(t, dst.Close())
+	require.NoError(t, src.Close())
+
+	spec := strings.Join([]string{name, home, gen, childPidFile}, "\t")
+	command := fmt.Sprintf("trap '' HUP; exec env '%s=1' '%s=%s' '%s' --daemon",
+		decisionDaemonEnv, decisionDaemonSpecEnv, spec, exePath)
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", name, command).Run())
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", name).Run() })
+
+	waitForPIDFile(t, childPidFile)
+	child := processFromPIDFile(t, childPidFile)
+	// The daemon is the marked child's parent — it exec'd as the pane root.
+	daemonProc, err := proctree.Lookup(child.PPID)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = syscall.Kill(daemonProc.PID, syscall.SIGKILL)
+		_ = syscall.Kill(child.PID, syscall.SIGKILL)
+	})
+	require.Equal(t, afDaemonIs, afDaemonClass(daemonProc, nil),
+		"a real af build attests while its path still names the running inode")
+
+	// The upgrade shape again: a foreign build renamed over the running exe
+	// unlinks the daemon's text vnode — on darwin no name can reopen it, so
+	// attestation can never pass again.
+	replacement := sleeper.Named(t, filepath.Join(dir, "replacement"))
+	require.NoError(t, os.Rename(replacement, exePath))
+	require.Eventually(t, func() bool {
+		cur, err := proctree.Lookup(daemonProc.PID)
+		return err == nil && afDaemonClass(cur, nil) == afDaemonUnverified
+	}, 10*time.Second, 50*time.Millisecond,
+		"once its path opens a different inode the daemon can never verify on darwin")
+
+	s := NewTmuxSessionFromSanitizedName(name, "af")
+	state, err := s.CloseAndWaitForPaneExit()
+	require.Error(t, err, "an unverified daemon still blocks the live close it sits in")
+	require.Equal(t, PaneStateUnknown, state,
+		"a survivor that cannot be placed refuses the worktree cleanup")
+	require.Contains(t, err.Error(), "still alive after bounded teardown")
+	require.Contains(t, err.Error(),
+		"pid "+strconv.Itoa(daemonProc.PID)+" is the claimant itself — its argv claims an agent-factory daemon",
+		"the live-close refusal names the claimant pid, not just a bare pid list")
+	require.Contains(t, err.Error(),
+		"pid "+strconv.Itoa(child.PID)+" is a descendant of pid "+strconv.Itoa(daemonProc.PID),
+		"and the descendant's exclusion names the daemon it stands behind")
+	require.Contains(t, err.Error(),
+		"stop pid "+strconv.Itoa(daemonProc.PID)+", or restart it under its own AF_HOME",
+		"the remedy acts on the claimant pid — never a bare `af daemon restart` (#7496 R3)")
+	require.NotContains(t, err.Error(), "af daemon restart",
+		"the remedy must not point at the operator's own home")
 	require.True(t, proctree.AliveSame(daemonProc),
 		"the claim keeps the unverified daemon protected from signals")
 	require.True(t, proctree.AliveSame(child),

@@ -1319,7 +1319,7 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 				child := spawnForgedDaemonChild(t)
 				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
 			},
-			wantErr: "restart or stop that daemon",
+			wantErr: "restart it under its own AF_HOME",
 		},
 		{
 			// Every foreign-evidence column needs a row with proof

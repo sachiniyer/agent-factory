@@ -3,7 +3,9 @@ package tmux
 import (
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/afcli"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -22,6 +24,11 @@ import (
 type protectedVerdict struct {
 	reason   string
 	positive bool
+	// unverifiedDaemon is the pid a remedy must act on when this exclusion
+	// stands on an af-daemon CLAIM — the claimant's own pid for a process
+	// whose argv is itself the claim, or the claimant ancestor's for a
+	// descendant spared by it. Zero for every other reason.
+	unverifiedDaemon int
 }
 
 // protectedSet is the pid set a captured-tree reap must never signal, each
@@ -48,18 +55,66 @@ func protectReasonDaemonDescendant(daemonPID int) string {
 	return fmt.Sprintf("a descendant of agent-factory daemon pid %d", daemonPID)
 }
 
-// protectReasonDaemonUnverified names the BLOCKING placement for a process
-// whose argv CLAIMS agent-factory daemon identity but whose kernel-attested
-// executable does not attest it — `exec -a af … --daemon` can write argv, it
-// cannot write the binary the kernel links (#7491 item 1), and on darwin a
-// REAL daemon whose executable was replaced after exec reads the same way:
-// its text vnode lost every name, and an unlinked vnode has no userspace
-// opener (#7494 item 1). Either way the refusal must be actionable — it
-// names the pid as an af daemon that could not be verified and gives the
-// remedy: restart or stop it. The claim still keeps the process from being
-// signalled; it can never authorize a close.
-func protectReasonDaemonUnverified(daemonPID int) string {
-	return fmt.Sprintf("a descendant of pid %d, an agent-factory daemon its kernel executable could not verify — restart or stop that daemon to unblock the close", daemonPID)
+// The BLOCKING placements for a process whose argv is an af-daemon claim the
+// kernel executable does not attest (#7491 item 1: `exec -a af … --daemon`
+// can write argv, it cannot write the binary the kernel links), or whose
+// af-daemon claim this build's own parse cannot decide (#7496 R1: an unknown
+// flag, a positional that may name a subcommand the recognizer does not
+// carry — a REAL daemon's launch shape in a newer build). On darwin a REAL
+// daemon whose executable was replaced after exec reads exactly like a
+// forged claim: its text vnode lost every name, and an unlinked vnode has no
+// userspace opener (#7494 item 1). Every string says the argv CLAIMS a
+// daemon — never that it IS one — names the claimant's pid, and the refusal
+// it feeds carries the remedy that acts on THAT pid: stop it, or restart it
+// under its own AF_HOME (#7496 R3 — `af daemon restart` acts on the
+// invoker's home, not the claimant's). A marked process that IS the claimant
+// gets its own wording: it does not "descend" from itself.
+const (
+	daemonUnverifiedClaimClause  = "argv claims an agent-factory daemon its kernel executable could not verify"
+	daemonUndecidableClaimClause = "argv could not be decided by af's own parse — it may be an agent-factory daemon this build cannot verify"
+)
+
+// daemonClaimRemedy renders the remedy every refusal on an af-daemon
+// claimant carries: it acts on the CLAIMANT'S pid — stop that pid, or
+// restart it under its own AF_HOME — never a bare `af daemon restart`,
+// which would bounce the operator's OWN daemon and leave the claimant
+// blocking (#7496 R3).
+func daemonClaimRemedy(claimantPID int) string {
+	return fmt.Sprintf("stop pid %d, or restart it under its own AF_HOME, to unblock the close", claimantPID)
+}
+
+func protectReasonDaemonUnverifiedSelf() string {
+	return "the claimant itself — its " + daemonUnverifiedClaimClause
+}
+
+func protectReasonDaemonUnverifiedDescendant(daemonPID int) string {
+	return fmt.Sprintf("a descendant of pid %d, whose %s", daemonPID, daemonUnverifiedClaimClause)
+}
+
+func protectReasonDaemonUndecidableSelf() string {
+	return "the claimant itself — its " + daemonUndecidableClaimClause
+}
+
+func protectReasonDaemonUndecidableDescendant(daemonPID int) string {
+	return fmt.Sprintf("a descendant of pid %d, whose %s", daemonPID, daemonUndecidableClaimClause)
+}
+
+// unverifiedDaemonSurvivorClause renders the named-remedy tail of a
+// survivors refusal: for every remaining process an af-daemon claim stands
+// behind, one "; pid N is <reason> — <remedy>" clause. The reason is the
+// exclusion's own — it says only what the argv CLAIMS, and words the
+// claimant itself apart from a descendant (#7496 R3) — and the remedy acts
+// on the claimant's pid, not the invoker's home (#7496 R2/R3).
+func unverifiedDaemonSurvivorClause(remaining []proctree.Process, protected protectedSet) string {
+	var b strings.Builder
+	for _, p := range remaining {
+		v, ok := protected[p.PID]
+		if !ok || v.unverifiedDaemon == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "; pid %d is %s — %s", p.PID, v.reason, daemonClaimRemedy(v.unverifiedDaemon))
+	}
+	return b.String()
 }
 
 // reapProtectedSet computes, from ONE pre-kill process-table snapshot — the
@@ -112,8 +167,8 @@ func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process
 		if protected.protects(p.PID) {
 			continue
 		}
-		if reason, positive, _, _ := classifyCaptureAncestry(snap, p.PID, self, att); reason != "" {
-			protected[p.PID] = protectedVerdict{reason: reason, positive: positive}
+		if reason, positive, _, unverified := classifyCaptureAncestry(snap, p.PID, self, att); reason != "" {
+			protected[p.PID] = protectedVerdict{reason: reason, positive: positive, unverifiedDaemon: unverified}
 		}
 	}
 	return protected
@@ -177,7 +232,21 @@ func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int, att *
 				// The claimant's pid rides out so the refusal can NAME
 				// the daemon and its remedy, not just the candidate
 				// (#7494 item 1).
-				return protectReasonDaemonUnverified(pid), false, false, pid
+				if pid == start {
+					return protectReasonDaemonUnverifiedSelf(), false, false, pid
+				}
+				return protectReasonDaemonUnverifiedDescendant(pid), false, false, pid
+			case afDaemonUndecidable:
+				// The argv is an af binary's, but this build's parse cannot
+				// say whether it runs the daemon — an unknown flag or a
+				// positional that may name a subcommand (#7496 R1). "Can't
+				// tell" is BLOCKING like unverified, never Not: collapsing
+				// it to Not is exactly how `af --daemon -- x` lost its
+				// signal protection.
+				if pid == start {
+					return protectReasonDaemonUndecidableSelf(), false, false, pid
+				}
+				return protectReasonDaemonUndecidableDescendant(pid), false, false, pid
 			case afDaemonUncertain:
 				return protectReasonUnproven, false, false, 0
 			}
@@ -223,6 +292,15 @@ const (
 	// (the claim may be true for a binary af cannot read), but it blocks
 	// every cleanup verdict it sits in front of.
 	afDaemonUnverified
+	// afDaemonUndecidable is the CAN'T-TELL verdict (#7496 R1): argv names
+	// an af binary, but this build's own parse cannot decide whether it
+	// runs the daemon — an unknown flag or a tail it cannot resolve. On
+	// the reap path that is Unverified's semantics exactly — protected and
+	// blocking, never Not — because collapsing "can't tell" to Not is how
+	// `af --daemon -- x` lost its signal protection. Attestation cannot
+	// settle it: the exe being an af build does not prove THIS argv ran
+	// the daemon.
+	afDaemonUndecidable
 	afDaemonUncertain
 )
 
@@ -248,18 +326,26 @@ func afDaemonClass(p proctree.Process, att *proctree.ExeAttestations) afDaemonVe
 		return afDaemonNot
 	}
 	if argv := proctree.Argv(p.PID); len(argv) > 0 {
-		if !proctree.ArgvIsAFDaemon(argv) {
+		switch proctree.ArgvDaemonClaim(argv) {
+		case afcli.DaemonClaimNo:
 			return afDaemonNot
+		case afcli.DaemonClaimYes:
+			// argv CLAIMS the daemon — and argv is the one field the
+			// process can write (`exec -a af … --daemon`, #7491 item 1).
+			// Only kernel attestation promotes the claim to a placement
+			// that may authorize cleanup: an exe whose Go build info
+			// names this module is af at any path, and a foreign binary
+			// named af is not.
+			if att.AttestsAF(p) {
+				return afDaemonIs
+			}
+			return afDaemonUnverified
+		default:
+			// DaemonClaimUndecidable: this build's parse cannot decide.
+			// Never Not — protected and blocking like a claim the kernel
+			// refused to attest (#7496 R1).
+			return afDaemonUndecidable
 		}
-		// argv CLAIMS the daemon — and argv is the one field the process
-		// can write (`exec -a af … --daemon`, #7491 item 1). Only kernel
-		// attestation promotes the claim to a placement that may
-		// authorize cleanup: an exe whose Go build info names this
-		// module is af at any path, and a foreign binary named af is not.
-		if att.AttestsAF(p) {
-			return afDaemonIs
-		}
-		return afDaemonUnverified
 	}
 	if commNamesAFDaemonBinary(p.Comm) {
 		return afDaemonUncertain
