@@ -1721,6 +1721,35 @@ step "naming row keeps the selection through a taken title (#7060)" _expect_nami
 step "reselect beta after the #7060 create"                 af_select beta
 step "assert beta is selected again"                        af_expect_selected beta
 
+# --- #7551 regression: a verb sent with no settle after selection lands ---
+# af_select returns once the screen shows the landed selection — but the
+# TUI's own queue can still be settling behind it, and a snapshot reconcile
+# landing in that window used to drop the verb or point it at a neighbour.
+# The gesture is the assertion: send the verb the moment af_select returns,
+# then read the confirmation — it must name the row the scan landed on, never
+# nothing and never another session. All three dialogs are cancelled with `n`
+# so no session is torn down.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_verb_after_select_names_row() {
+    local verb="$1" target="$2" confirm_re="$3"
+    af_select "$target" || return 1
+    af_send "$verb"
+    af_wait_for "$confirm_re" 10 "'$verb' confirmation on $target" || return 1
+    af_send n
+    af_wait_gone "$confirm_re" 10 "'$verb' confirmation on $target cancelled" || return 1
+}
+step "create instance 'hello-task'"                         af_new_instance hello-task
+# The repro is a SCAN onto hello-task: anchor on alpha first so af_select
+# walks several rows, then fire D the instant it returns.
+step "anchor on alpha before the hello-task scan"           af_select alpha
+step "verb D right after a j/k scan names the landed row (#7551)" \
+    _expect_verb_after_select_names_row D hello-task 'Delete session "hello-task"'
+step "verb a right after selecting alpha names it (#7551)" \
+    _expect_verb_after_select_names_row a alpha 'Archive session "alpha"'
+step "verb a right after selecting beta names it (#7551)" \
+    _expect_verb_after_select_names_row a beta 'Archive session "beta"'
+step "reselect beta after the #7551 rows"                   af_select beta
+
 # --- #1759 regression: af_select must check AFTER the final scan step ---
 # A row that only becomes actionable on the loop's boundary `j` used to be
 # missed (false selection failure). Deterministic stub proof — no live TUI.

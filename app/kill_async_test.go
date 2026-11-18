@@ -261,17 +261,20 @@ func TestInstanceKilled_RowAlreadyRemoved(t *testing.T) {
 	assert.Empty(t, h.store.GetInstances())
 }
 
-// TestHandleKill_RestoringInstanceIsSilentNoOp is the TUI-side regression for the
-// "Kill shown during session restore" bug. A row mid-restore (OpRestoring) cannot
-// be killed: the daemon takes the per-session operation lock for the whole restore
-// (claimRestoreOperation sets killsInFlight), so a Kill pressed now is rejected at
-// the admission gate with "kill already in progress for session X" — a message that
-// contradicts a user who started a restore, not a kill. canKillFor hides Kill during
-// OpRestoring (mirroring OpRespawning), so handleKill's CanKill gate turns a stray
-// 'k' into a silent no-op rather than dispatching a doomed kill whose error
-// mismatches the user's mental model. This pins the handler-level behavior end to
-// end: no confirmation dialog, no daemon dispatch, no error surfaced.
-func TestHandleKill_RestoringInstanceIsSilentNoOp(t *testing.T) {
+// TestHandleKill_RestoringInstanceAnswersWithNotice is the TUI-side regression
+// for the "Kill shown during session restore" bug. A row mid-restore
+// (OpRestoring) cannot be killed: the daemon takes the per-session operation
+// lock for the whole restore (claimRestoreOperation sets killsInFlight), so a
+// Kill pressed now is rejected at the admission gate with "kill already in
+// progress for session X" — a message that contradicts a user who started a
+// restore, not a kill. canKillFor hides Kill during OpRestoring (mirroring
+// OpRespawning), so handleKill's CanKill gate declines the press — and answers
+// it with the same accurate "already being restored" notice Restore shows for
+// the row, rather than dispatching a doomed kill or dropping the key silently
+// (#7551: a fence that lands between the painted frame and the press must not
+// eat the key). This pins the handler-level behavior end to end: no
+// confirmation dialog, no daemon dispatch, an accurate notice surfaced.
+func TestHandleKill_RestoringInstanceAnswersWithNotice(t *testing.T) {
 	setKillerForTest(t, func(title, repoID string) error {
 		t.Errorf("kill must not be dispatched for a restoring instance (title %q); "+
 			"canKillFor hides Kill during OpRestoring so the misleading 'kill already in progress' "+
@@ -292,8 +295,9 @@ func TestHandleKill_RestoringInstanceIsSilentNoOp(t *testing.T) {
 	hm := model.(*home)
 	assert.Equal(t, stateDefault, hm.state, "no confirmation dialog for a restoring row")
 	assert.Nil(t, hm.confirmationOverlay, "no kill confirmation overlay")
-	assert.Empty(t, h.errBox.FullError(),
-		"a restoring row must answer 'k' with silence, not the misleading 'kill already in progress'")
+	assert.Contains(t, h.errBox.FullError(), "already being restored",
+		"a restoring row answers 'D' by naming its fence, not silence and not "+
+			"the misleading 'kill already in progress' (#7551)")
 
 	// The restore verb is unchanged: it still has its own accurate guard for this
 	// row (handleRestore shows "is already being restored"), confirming the fix is
