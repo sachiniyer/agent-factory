@@ -95,15 +95,13 @@ const (
 	// image's own Config.Env value — the image's binaries are the documented
 	// residual trust there.
 	dockerContainerShell = "/bin/sh"
-	// dockerContainerCat and dockerContainerStat are the absolute forms af
-	// execs directly instead of a shell for single-command reads — the same
-	// reasoning as dockerContainerShell: never a PATH-resolved name (#7529
-	// R7). cat is /bin on every coreutils and busybox image; stat is
-	// /usr/bin, where coreutils installs it on merged and non-merged
-	// layouts alike. An image whose tools live elsewhere surfaces as the
-	// same step error a PATH miss would have produced — fail-closed.
-	dockerContainerCat  = "/bin/cat"
-	dockerContainerStat = "/usr/bin/stat"
+	// dockerContainerCat is the absolute form af execs directly instead of a
+	// shell for single-command reads — the same reasoning as
+	// dockerContainerShell: never a PATH-resolved name (#7529 R7). cat is
+	// /bin/cat on every coreutils and busybox image; an image whose tool
+	// lives elsewhere surfaces as the same step error a PATH miss would have
+	// produced — fail-closed.
+	dockerContainerCat = "/bin/cat"
 	// dockerSessionLabel tags every managed container so orphans can be swept with
 	// `docker ps -aq -f label=af.session` (documented in docs/backends.md). The
 	// runtime reaps by container ID; the label is for operators.
@@ -116,6 +114,14 @@ const (
 	// alone. The value is the AF home path — human-legible in `docker inspect`.
 	dockerHomeLabel = "af.home"
 )
+
+// dockerContainerStatPaths are the absolute stat locations af tries in
+// order — coreutils' /usr/bin/stat first, then BusyBox's /bin/stat (BusyBox
+// registers applets under BB_DIR_BIN). The list is exhaustive rather than
+// PATH-resolved, for the same reason as dockerContainerShell (#7529 R7); an
+// image whose stat lives elsewhere fails the owner probe closed with the
+// last candidate's error.
+var dockerContainerStatPaths = []string{"/usr/bin/stat", "/bin/stat"}
 
 // docker command timeouts. Provisioning steps (run/clone/cp/exec) get a generous
 // budget because a first-run image pull or a large clone can be slow; reaping is

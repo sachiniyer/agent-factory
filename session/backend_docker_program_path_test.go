@@ -198,7 +198,7 @@ func TestDockerExecProgramsUseAbsoluteShell(t *testing.T) {
 		require.Greaterf(t, idIdx, 0, "exec call missing the container id: %v", call)
 		require.Lessf(t, idIdx+1, len(call), "exec call names no program after the container id: %v", call)
 		require.Containsf(t,
-			[]string{dockerContainerShell, dockerContainerCat, dockerContainerStat},
+			append([]string{dockerContainerShell, dockerContainerCat}, dockerContainerStatPaths...),
 			call[idIdx+1],
 			"the exec's program must be an absolute path, never a PATH-resolved name: %v", call)
 	}
@@ -276,4 +276,43 @@ func TestCredentialMountPinnedNames_ProgramChoiceNamesNotPinned(t *testing.T) {
 		require.Contains(t, denied, name, "%s must be refused to run_args", name)
 		require.NotContains(t, pinned, name, "%s must not be pinned defined-empty", name)
 	}
+}
+
+// TestPrepareAccountUser_BusyBoxStatLocation is the review regression on
+// #7529 R7's absolute stat: coreutils installs stat at /usr/bin/stat but
+// BusyBox registers applets under BB_DIR_BIN (/bin/stat), so requiring the
+// coreutils layout would break --account sessions on BusyBox-based BYO
+// images. The owner probe must try the fixed absolute candidates in order —
+// and never fall back to a PATH-resolved stat, which a repo-controlled PATH
+// could point at its own binary.
+func TestPrepareAccountUser_BusyBoxStatLocation(t *testing.T) {
+	var statCalls []string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) == 0 || args[0] != "exec" {
+			return nil, fmt.Errorf("unexpected docker call: %v", args)
+		}
+		joined := strings.Join(args, " ")
+		// Order matters: "/usr/bin/stat" contains "/bin/stat" as a substring.
+		switch {
+		case strings.Contains(joined, "/usr/bin/stat -c %u:%g"):
+			statCalls = append(statCalls, "/usr/bin/stat")
+			return nil, fmt.Errorf("no such file or directory")
+		case strings.Contains(joined, "/bin/stat -c %u:%g"):
+			statCalls = append(statCalls, "/bin/stat")
+			return []byte("1000:1000\n"), nil
+		case strings.Contains(joined, "stat -c %u:%g"):
+			return nil, fmt.Errorf("a PATH-resolved stat must never be attempted: %v", args)
+		default:
+			return nil, nil
+		}
+	}))
+
+	p := &dockerProvisioner{
+		spec:        ProvisionSpec{Account: sessionenv.Account{Dir: t.TempDir()}},
+		containerID: dockerCreatedID,
+	}
+	require.NoError(t, p.prepareAccountUser(), "the BusyBox stat location must satisfy the owner probe")
+	require.Equal(t, "1000:1000", p.containerUser)
+	require.Equal(t, []string{"/usr/bin/stat", "/bin/stat"}, statCalls,
+		"the candidates are tried in order, coreutils first — the PATH is never walked")
 }

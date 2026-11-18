@@ -843,8 +843,19 @@ func (p *dockerProvisioner) prepareAccountUser() error {
 	if p.spec.Account.Dir == "" {
 		return nil
 	}
-	out, err := p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, dockerContainerStat, "-c", "%u:%g", dockerAccountHome)
+	// stat lives at /usr/bin/stat on coreutils images and /bin/stat on BusyBox
+	// ones, and a PATH walk is never an option here — a repo-controlled PATH
+	// must not pick a program af runs (#7529 R7) — so the fixed absolute
+	// candidates are tried in order and the last failure is the one reported.
+	var out []byte
+	var err error
+	for _, statPath := range dockerContainerStatPaths {
+		out, err = p.docker(dockerShortStepTimeout,
+			"exec", "--user", "0:0", p.containerID, statPath, "-c", "%u:%g", dockerAccountHome)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		// The owner read writes nothing under the account bind; the only
 		// data-root writes are dockerd's privileged exec bookkeeping —
