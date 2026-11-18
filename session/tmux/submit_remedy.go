@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	xansi "github.com/charmbracelet/x/ansi"
 
@@ -223,13 +224,12 @@ func lastComposerGlyphRow(rows []string) int {
 }
 
 // isComposerGlyphRow reports whether a normalized row opens with a composer
-// prompt glyph — Claude's ❯, Codex's › or its Ultra tier's »
-// (codexComposerGlyphs), Devin's ❭ (task/runner.go), or the plain > some
-// composers draw.
+// prompt glyph — Claude's ❯, Codex's ›, Devin's ❭ (task/runner.go), or the
+// plain > some composers draw.
 func isComposerGlyphRow(norm string) bool {
 	return strings.HasPrefix(norm, claudeComposerGlyph) ||
-		strings.HasPrefix(norm, "›") || strings.HasPrefix(norm, "»") ||
-		strings.HasPrefix(norm, "❭") || strings.HasPrefix(norm, ">")
+		strings.HasPrefix(norm, "›") || strings.HasPrefix(norm, "❭") ||
+		strings.HasPrefix(norm, ">")
 }
 
 // busyComposerHints are the hints an agent draws inside its EMPTY input row
@@ -262,7 +262,7 @@ var busyComposerHints = map[string][]string{
 // ">quote" row is not bare, because it carries content.
 func bareComposerGlyphRow(row string) bool {
 	norm := normalizeDelivery(row)
-	for _, glyph := range []string{"›", "»", claudeComposerGlyph, "❭"} {
+	for _, glyph := range []string{"›", claudeComposerGlyph, "❭"} {
 		rest, ok := strings.CutPrefix(norm, glyph)
 		if !ok {
 			continue
@@ -398,7 +398,9 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	// content. Strip exactly one leading prompt glyph, not one of each — the
 	// payload itself may open with '>'.
 	regionContent := normalizeDelivery(strings.Join(bRegion, ""))
-	regionContent = afterComposerGlyph(regionContent)
+	if r, size := utf8.DecodeRuneInString(regionContent); r == '❯' || r == '›' || r == '❭' || r == '>' {
+		regionContent = regionContent[size:]
+	}
 	if regionContent != chipText {
 		return false, fmt.Sprintf("the composer region at the Enter boundary held %q, not only the bound chip %q", regionContent, chipText)
 	}
@@ -445,7 +447,7 @@ func firstContentCol(row string) int {
 	col := 0
 	for _, r := range row {
 		if unicode.IsSpace(r) || (r >= 0x2500 && r <= 0x259F) ||
-			r == '❯' || r == '›' || r == '»' || r == '>' || r == '|' {
+			r == '❯' || r == '›' || r == '>' || r == '|' {
 			col++
 			continue
 		}

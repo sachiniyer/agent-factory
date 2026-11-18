@@ -392,9 +392,13 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 			// it proves the send itself echoed — the recheck demotes a
 			// composer match to Submitted or Unreadable otherwise. Counted
 			// on the same physical-grid frame the binding was judged on;
-			// a glyph-less boundary counts its whole frame.
+			// a glyph-less boundary counts its whole frame. The anchor is
+			// the recheck's own set — stagedLastComposerAnchor also knows
+			// the Ultra » — never the submit path's narrower set, which
+			// would count the composer's own copy as a pre-existing echo
+			// and demote every Ultra staged read to Unreadable.
 			brows := paneGridRows(xansi.Strip(boundaryGrid))
-			banchor := lastComposerGlyphRow(brows)
+			banchor := stagedLastComposerAnchor(brows)
 			bupperRows := brows
 			if banchor >= 0 {
 				bupperRows = brows[:banchor]

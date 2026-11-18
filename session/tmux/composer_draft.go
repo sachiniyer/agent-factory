@@ -89,10 +89,9 @@ func ComposerDraftPresent(content string) (present, provable bool) {
 
 // afterComposerGlyph strips exactly one leading prompt glyph from normalized
 // composer text — the payload itself may open with '>' (the same discipline
-// stillChipComposer holds). » is Codex's Ultra-tier composer glyph
-// (codexComposerGlyphs); the rest are the isComposerGlyphRow set.
+// stillChipComposer holds).
 func afterComposerGlyph(s string) string {
-	if r, size := utf8.DecodeRuneInString(s); r == '❯' || r == '›' || r == '»' || r == '❭' || r == '>' {
+	if r, size := utf8.DecodeRuneInString(s); r == '❯' || r == '›' || r == '❭' || r == '>' {
 		return s[size:]
 	}
 	return s
@@ -257,7 +256,7 @@ func composerAnchorAmbiguous(rows []string, anchor int) bool {
 			return false
 		}
 		r, _ := utf8.DecodeRuneInString(norm)
-		if r != '❯' && r != '›' && r != '»' && r != '❭' && r != '>' {
+		if r != '❯' && r != '›' && r != '❭' && r != '>' {
 			return false
 		}
 		if afterComposerGlyph(norm) != "" {

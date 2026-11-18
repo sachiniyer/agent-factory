@@ -109,7 +109,7 @@ func (t *TmuxSession) BoundDraftStillStaged() (StagedDraftRead, string) {
 // Unreadable (it predates the send, or the anchor itself is ambiguous).
 func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, string) {
 	rows := paneGridRows(pane)
-	anchor := lastComposerGlyphRow(rows)
+	anchor := stagedLastComposerAnchor(rows)
 	if anchor < 0 {
 		return StagedDraftUnreadable, "no composer-glyph row is visible"
 	}
@@ -140,11 +140,11 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 	// A longer payload's bound tail is its END, so the same claim for a long
 	// send is a suffix match: user text appended after the paste breaks it,
 	// exactly the way an edit breaks the short-payload equality.
-	composerText := afterComposerGlyph(region)
+	composerText := stagedComposerText(region)
 	tailStaged := ev.tail != "" &&
 		(ev.tailWhole && composerText == ev.tail || !ev.tailWhole && strings.HasSuffix(composerText, ev.tail))
 	chipStaged := ev.chip != "" && strings.Contains(region, ev.chip)
-	ambiguous := composerAnchorAmbiguous(rows, anchor)
+	ambiguous := stagedAnchorAmbiguous(rows, anchor)
 	upper := normalizeDelivery(strings.Join(rows[:anchor], ""))
 	tailEchoes, chipEchoes := 0, 0
 	if ev.tail != "" {
@@ -201,4 +201,54 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 		return StagedDraftSubmitted, "the send's bound paste chip reads as a submitted echo"
 	}
 	return StagedDraftGone, "the send's bound evidence is nowhere in the frame"
+}
+
+// stagedComposerGlyphRow is the recheck's composer-glyph set — the shared
+// readers' set PLUS Codex's Ultra-tier » (codexComposerGlyphs). The submit
+// path deliberately leaves » unrecognized (composer_draft.go: an echoed » is
+// indistinguishable from the live composer there, so non-placeholder text
+// proves nothing). The recheck makes that distinction a different way — the
+// last glyph row anchors the live composer, and the echo baselines bound at
+// send time attribute what sits above it — so the wider set only widens what
+// the watch can prove. It lives here, not in the shared readers, because
+// master's #4200 tests pin their narrower set (Codex #7547 review).
+func stagedComposerGlyphRow(norm string) bool {
+	return isComposerGlyphRow(norm) || strings.HasPrefix(norm, "»")
+}
+
+// stagedLastComposerAnchor is lastComposerGlyphRow over the recheck's glyph
+// set: the pane's last prompt-glyph row, » included.
+func stagedLastComposerAnchor(rows []string) int {
+	last := -1
+	for i, r := range rows {
+		if stagedComposerGlyphRow(normalizeDelivery(r)) {
+			last = i
+		}
+	}
+	return last
+}
+
+// stagedComposerText is afterComposerGlyph over the recheck's glyph set —
+// strips exactly one leading prompt glyph, » included.
+func stagedComposerText(norm string) string {
+	if rest, ok := strings.CutPrefix(norm, "»"); ok {
+		return rest
+	}
+	return afterComposerGlyph(norm)
+}
+
+// stagedAnchorAmbiguous is composerAnchorAmbiguous over the recheck's glyph
+// set — a »-leading draft line makes the anchor ambiguous exactly the way a
+// `>` quote line does.
+func stagedAnchorAmbiguous(rows []string, anchor int) bool {
+	for j := anchor - 1; j >= 0; j-- {
+		norm := normalizeDelivery(rows[j])
+		if norm == "" || !stagedComposerGlyphRow(norm) {
+			return false
+		}
+		if stagedComposerText(norm) != "" {
+			return true
+		}
+	}
+	return false
 }
