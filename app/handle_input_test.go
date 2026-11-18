@@ -272,14 +272,25 @@ func TestStartNewInstanceSelectsNamingInstanceAfterSortedInsert(t *testing.T) {
 }
 
 // TestCancelNamingRemovesZombieAfterSelectionDrift is the regression guard for
-// issue #717. While the user is naming a new instance, a background sidebar
-// mutation can remove a *preceding* instance, which rebuilds the sidebar's
-// visibleItems and drifts the selection off the naming row onto a section
-// header. The old cancel handlers called selection-based
-// sidebar.Kill(), which silently no-ops on a header — leaving the naming
-// instance behind as a "Loading" zombie. The fix kills by the captured
-// namingInstance pointer instead. Both cancel paths (Escape and ctrl+c) must
-// remove the zombie regardless of where the selection drifted.
+// issue #717. While the user is naming a new instance, the sidebar selection
+// can sit on a row that is not the naming row — in #717 a background sync
+// removed a *preceding* instance and the rebuilt visibleItems drifted the
+// selection off the naming row onto a section header. The old cancel handlers
+// called selection-based sidebar.Kill(), which silently no-ops on a header —
+// leaving the naming instance behind as a "Loading" zombie. The fix kills by
+// the captured namingInstance pointer instead. Both cancel paths (Escape and
+// ctrl+c) must remove the zombie regardless of where the selection sits.
+//
+// Post-#7551 the removal-above drift #717 rode is closed: followCursorRow
+// (ui/sidebar_follow.go) re-pins the cursor to its own row whenever that row
+// still exists, and during stateNew nothing else can move the selection off
+// the naming row — tree clicks are swallowed (handle_mouse.go's stateNew
+// branch only routes status-hint clicks), the search overlay cannot open
+// (keys route to handleNamingFormKey), the snapshot reconcile re-asserts the
+// captured selection — the naming row itself — and instanceStartedMsg
+// explicitly declines to re-select. So the displacement is now driven by
+// putting the selection on another row directly; the removal still runs so
+// the cancel is exercised under concurrent mutation.
 func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 	cases := []struct {
 		name string
@@ -313,20 +324,23 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 			h.sidebar.SetSelectedInstance(h.store.NumInstances() - 1)
 			h.namingInstance = naming
 
-			// A trailing instance gives the drift somewhere to land now that
-			// the rail has no trailing Tasks/Hooks headers (#1024 PR 4).
+			// A trailing instance gives the displaced selection somewhere to
+			// sit now that the rail has no trailing Tasks/Hooks headers
+			// (#1024 PR 4).
 			trailing := newLoadingInstance(t, "trailing")
 			trailing.SetStatusForTest(session.Running)
 			h.store.AddInstance(trailing)
 
 			// A background mutation removes `preceding` (a daemon-owned row the
-			// snapshot no longer lists). RemoveInstanceByTitle rebuilds
-			// visibleItems without adjusting selectedIdx, drifting the selection
-			// off the naming row — here onto the trailing instance, which a
-			// selection-based cancel would wrongly target.
+			// snapshot no longer lists). Post-#7551 the cursor follows the
+			// naming row instead of drifting onto `trailing` — the exact #717
+			// mechanism, now closed — so displace the selection directly.
 			h.store.RemoveInstanceByTitle("preceding")
+			require.Same(t, naming, h.sidebar.GetSelectedInstance(),
+				"post-#7551 the cursor must follow the naming row across the removal, not drift")
+			h.sidebar.SetSelectedInstance(h.store.NumInstances() - 1)
 			require.NotSame(t, naming, h.sidebar.GetSelectedInstance(),
-				"precondition: selection must have drifted off the naming row")
+				"precondition: selection sits on another row")
 
 			_, _ = h.handleStateNew(tc.key)
 
@@ -336,7 +350,7 @@ func TestCancelNamingRemovesZombieAfterSelectionDrift(t *testing.T) {
 				"the naming instance must be removed on cancel, not left as a Loading zombie; remaining titles: %v",
 				collectTitles(h.store.GetInstances()))
 			assert.Equal(t, "trailing", h.store.GetInstances()[0].Title,
-				"cancel must kill the captured naming instance, never the drifted selection")
+				"cancel must kill the captured naming instance, never the displaced selection")
 		})
 	}
 }
