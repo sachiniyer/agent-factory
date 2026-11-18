@@ -43,6 +43,19 @@ type Projection struct {
 	// the multi-repo indicator.
 	instances []*session.Instance
 	repos     map[string]int
+	// repoOf maps each instance in `instances` to the repo name it was
+	// counted under in `repos`, captured at registration time. The spend
+	// paths (RemoveInstance/ReplaceInstance/KillInstance) decrement by
+	// this captured key rather than re-reading repoKeyOf, so an in-place
+	// liveness transition that flips Started=false on a row that already
+	// counted — archiving a local-worktree session does exactly this on
+	// the same *Instance the projection holds — cannot be misread as
+	// "never counted" and skip the paired rmRepo (leaving a phantom repo
+	// entry on archive→delete, or a double count on archive→restore→delete).
+	// An instance absent from repoOf was never counted (an unstarted
+	// placeholder, or a cold-started archived record that loaded inert), so
+	// its removal stays a no-op exactly as before.
+	repoOf    map[*session.Instance]string
 	tasks     []task.Task
 	hookCount int
 
@@ -98,7 +111,7 @@ type Projection struct {
 
 // NewProjection creates an empty projection.
 func NewProjection() *Projection {
-	return &Projection{repos: make(map[string]int)}
+	return &Projection{repos: make(map[string]int), repoOf: make(map[*session.Instance]string)}
 }
 
 // Version returns the mutation counter. See the version field.
@@ -195,6 +208,7 @@ func (p *Projection) AddInstance(instance *session.Instance) (finalize func()) {
 func (p *Projection) ResetInstances() {
 	p.instances = nil
 	p.repos = make(map[string]int)
+	p.repoOf = make(map[*session.Instance]string)
 	p.selected = nil
 	p.activeTab.Store(0)
 	p.selectionSeq++
@@ -222,18 +236,51 @@ func (p *Projection) sortInstances() {
 }
 
 // RegisterRepoForInstance records the instance's repo after the instance has
-// started and its worktree is available.
+// started and its worktree is available. The mapping is captured in repoOf so
+// a later in-place archive (which flips Started=false on this same row) cannot
+// make its removal/replace skip the paired decrement.
 func (p *Projection) RegisterRepoForInstance(instance *session.Instance) {
-	if repoName, ok := repoKeyOf(instance); ok {
-		p.addRepo(repoName)
-	}
+	p.registerRepo(instance)
 }
 
-// repoKeyOf names the repo a row is counted under in the multi-repo indicator.
-// A local row counts once started (its worktree exists); an off-box row counts
-// from the moment it is listed, because the inert snapshot row that represents
-// it is never "started" on the TUI side (W8.8). Add, remove, kill and replace
-// all key through here so the counts stay symmetric.
+// registerRepo counts inst toward the multi-repo indicator and records the
+// repo name it was counted under in repoOf, so spend paths can decrement by
+// that captured key regardless of later liveness transitions. A row that does
+// not count now (an unstarted local placeholder, or an instance whose repo
+// name is unavailable) is left out of repoOf — its removal must then be a
+// no-op, which unregisterRepo honors by skipping rows absent from the map.
+func (p *Projection) registerRepo(inst *session.Instance) {
+	repoName, ok := repoKeyOf(inst)
+	if !ok {
+		return
+	}
+	p.addRepo(repoName)
+	p.repoOf[inst] = repoName
+}
+
+// unregisterRepo decrements the repo inst was counted under, if any. Reading
+// the captured key — rather than re-reading repoKeyOf — is what keeps the
+// decrement symmetric with the increment across an in-place archive: an
+// archived local row that already counted stays in repoOf, so the decrement
+// fires; a row that was never counted is absent and stays a no-op (so rmRepo
+// is never called for a repo the projection never incremented).
+func (p *Projection) unregisterRepo(inst *session.Instance) {
+	repoName, ok := p.repoOf[inst]
+	if !ok {
+		return
+	}
+	delete(p.repoOf, inst)
+	p.rmRepo(repoName)
+}
+
+// repoKeyOf names the repo a row would count under in the multi-repo
+// indicator at the moment it is read. A local row counts once started (its
+// worktree exists); an off-box row counts from the moment it is listed,
+// because the inert snapshot row that represents it is never "started" on the
+// TUI side (W8.8). Registration paths key through here to DECIDE whether to
+// count; spend paths use the repoOf entry captured at registration time, so
+// the counts stay symmetric across a later archive that flips Started=false
+// in place on an already-counted row.
 func repoKeyOf(inst *session.Instance) (string, bool) {
 	if inst == nil {
 		return "", false
@@ -274,16 +321,17 @@ func (p *Projection) KillInstance(target *session.Instance) error {
 	if idx < 0 {
 		return nil
 	}
-	// Capture repo name before Kill(), because Kill() sets started=false
-	// which causes RepoName() to fail. Unstarted placeholders were never
-	// registered in the repo counts, so there is nothing to decrement.
-	repoName, counted := repoKeyOf(target)
 	if err := target.Kill(); err != nil {
 		return fmt.Errorf("could not kill instance: %w", err)
 	}
-	if counted {
-		p.rmRepo(repoName)
-	}
+	// Decrement by the repo captured at registration time. Kill flips
+	// started=false (and an earlier archive would have too), but the row
+	// was counted when it started, so the decrement must follow that
+	// captured key — not re-read repoKeyOf, which reads the post-Kill state
+	// and would skip the decrement. A row never registered (an unstarted
+	// placeholder) is absent from repoOf, so this is a no-op exactly as
+	// before.
+	p.unregisterRepo(target)
 	p.instances = append(p.instances[:idx], p.instances[idx+1:]...)
 	p.bump()
 	return nil
@@ -311,13 +359,18 @@ func (p *Projection) ReplaceInstance(target, replacement *session.Instance) bool
 		if inst != target {
 			continue
 		}
-		if repoName, ok := repoKeyOf(inst); ok {
-			p.rmRepo(repoName)
-		}
+		// Decrement by the repo the outgoing row was counted under (captured
+		// at registration time), then register the replacement's repo. An
+		// outgoing row that was archived in place (Started flipped false
+		// after counting) stays in repoOf, so the decrement fires; this is
+		// the archive→restore path, where the outgoing archived row
+		// decrements and the fresh started replacement increments, keeping
+		// the counts balanced — the old re-read of repoKeyOf would skip the
+		// outgoing decrement and double-count. A replacement that does not
+		// count now is left out of repoOf, so a later removal is a no-op.
+		p.unregisterRepo(inst)
 		p.instances[i] = replacement
-		if repoName, ok := repoKeyOf(replacement); ok {
-			p.addRepo(repoName)
-		}
+		p.registerRepo(replacement)
 		if p.selected == target {
 			// Silent re-point: keep the panes bound to the live replacement
 			// (the swapped-in row occupies the same index, so the sidebar
@@ -367,9 +420,11 @@ func (p *Projection) ReplaceInstanceByTitle(title string, replacement *session.I
 func (p *Projection) RemoveInstance(target *session.Instance) bool {
 	for i, inst := range p.instances {
 		if inst == target {
-			if repoName, ok := repoKeyOf(inst); ok {
-				p.rmRepo(repoName)
-			}
+			// Decrement by the repo captured at registration time, not the
+			// current repoKeyOf: archive flips Started=false in place on the
+			// already-counted row, so re-reading would skip the decrement and
+			// leave the repo in the map as a phantom (archive→delete).
+			p.unregisterRepo(inst)
 			p.instances = append(p.instances[:i], p.instances[i+1:]...)
 			p.bump()
 			return true
