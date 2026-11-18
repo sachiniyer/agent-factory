@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -51,9 +52,16 @@ func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 	// Rootful engines are where the chown-through-bind re-own hazard
 	// manifests. On a rootless engine the chown executes as uid 0 in the
 	// userns and maps to the operator's own uid, so the host-file re-own is
-	// a no-op and the test cannot distinguish "fixed" from "no-op".
-	if os.Geteuid() != 0 {
-		t.Skipf("this proof requires a rootful docker engine (daemon as root); current euid=%d", os.Geteuid())
+	// a no-op and the test cannot distinguish "fixed" from "no-op". Query
+	// the daemon's own rootless flag (`docker info` reports `name=rootless`
+	// in SecurityOptions — the same signal the capacity probe's
+	// parseDockerEngineInfo uses) rather than the CLI client's EUID: a
+	// non-root client talking to a rootful system daemon must NOT be
+	// skipped (the daemon has exactly the chown behavior this test
+	// exercises), and a root client talking to a rootless daemon must NOT
+	// run (the chown is a no-op there).
+	if daemonRootless(t) {
+		t.Skip("this proof requires a rootful docker engine (daemon as root); the daemon reports name=rootless in SecurityOptions")
 	}
 
 	home := testguard.SocketTempDir(t)
@@ -232,6 +240,38 @@ func fileOwner(t *testing.T, path string) string {
 		t.Fatalf("stat %s: %v\n%s", path, err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// daemonRootless reports whether the reachable docker daemon is rootless by
+// querying `docker info`'s SecurityOptions for `name=rootless` — the same
+// signal the capacity probe (session.parseDockerEngineInfo) uses. Detecting
+// rootlessness via the daemon (not the CLI client's EUID) keeps the test from
+// skipping on a non-root client talking to a rootful system daemon, and from
+// running on a root client talking to a rootless daemon.
+func daemonRootless(t *testing.T) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{json .}}").CombinedOutput()
+	if err != nil {
+		t.Skipf("docker info not reachable; skipping the rootful-engine proof: %s", strings.TrimSpace(string(out)))
+	}
+	start := strings.IndexByte(string(out), '{')
+	if start < 0 {
+		return false
+	}
+	var raw struct {
+		SecurityOptions []string `json:"SecurityOptions"`
+	}
+	if err := json.NewDecoder(strings.NewReader(string(out)[start:])).Decode(&raw); err != nil {
+		return false
+	}
+	for _, opt := range raw.SecurityOptions {
+		if opt == "name=rootless" {
+			return true
+		}
+	}
+	return false
 }
 
 // hold these references so `go vet` does not flag them as unused if the test
