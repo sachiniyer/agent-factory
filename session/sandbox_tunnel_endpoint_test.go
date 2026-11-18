@@ -639,7 +639,10 @@ func TestTunnelSocketPathRefusesAClosingBracket(t *testing.T) {
 // Everything af creates under tunnels/ is created relative to the VERIFIED
 // root's held fd — a swapped-in directory at the path cannot redirect af's
 // writes into whatever replaced it (#7503). The decoy planted at the path
-// stays empty; the real files land inside the moved-aside verified dir.
+// stays empty; the real files land inside the moved-aside verified dir. This
+// pins the establish layer: defaultTunnelGenerationDir's own staleness check
+// would notice the (dev, inode) mismatch and re-verify the path instead —
+// either way the decoy is never trusted because the name matches (#7511).
 func TestTunnelCreateStaysRelativeToTheVerifiedFd(t *testing.T) {
 	home := t.TempDir()
 	root, err := verifyTunnelSocketRoot(home)
@@ -761,10 +764,13 @@ func TestTunnelPeerRefusesAnUnstampedLeader(t *testing.T) {
 	require.NoError(t, p.verifyTunnelPeer(conn.(*net.UnixConn)))
 }
 
-// The walk's two orderings are refused loudly: an ancestor that started AFTER
-// its claimed child, and a chain whose links reparented while af walked them
-// (#7503 — bare-pid links get evidence, not trust).
-func TestTunnelPeerRefusesAnImpossibleAncestry(t *testing.T) {
+// A chain whose links reparented while af walked them is refused loudly —
+// bare-pid links get evidence, not trust (#7503). Ordering on StartID is NOT
+// one of the checks: proctree documents it as an equality stamp only, and on
+// darwin it is wall-clock p_starttime — arithmetic could refuse af's own
+// transport after a backwards clock step (#7511). The PPID re-read is what
+// catches a moving chain.
+func TestTunnelPeerRefusesAReparentingAncestry(t *testing.T) {
 	sockPath := testguard.SocketPath(t, "impossible.sock")
 	ln, err := net.Listen("unix", sockPath)
 	require.NoError(t, err)
@@ -779,27 +785,7 @@ func TestTunnelPeerRefusesAnImpossibleAncestry(t *testing.T) {
 	prev := proctreeLookup
 	t.Cleanup(func() { proctreeLookup = prev })
 
-	// (a) The claimed parent started AFTER the acceptor — impossible.
-	proctreeLookup = func(pid int) (proctree.Process, error) {
-		switch pid {
-		case self:
-			return proctree.Process{PID: self, PPID: 9001, StartID: 10}, nil
-		case 9001:
-			return proctree.Process{PID: 9001, PPID: 9000, StartID: 50}, nil
-		case 9000:
-			return proctree.Process{PID: 9000, PPID: 1, StartID: 5}, nil
-		}
-		return proctree.Process{}, fmt.Errorf("no such process %d", pid)
-	}
-	p := &sandboxProvisioner{socketPath: sockPath}
-	p.tunnelLeader.Store(&tunnelLeaderRef{pid: 9000, startID: 5})
-	conn := dial()
-	err = p.verifyTunnelPeer(conn)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "AFTER its claimed child")
-	_ = conn.Close()
-
-	// (b) A valid-looking walk whose first link reparents underfoot: the
+	// A valid-looking walk whose first link reparents underfoot: the
 	// re-read catches it.
 	var selfCalls atomic.Int64
 	proctreeLookup = func(pid int) (proctree.Process, error) {
@@ -817,7 +803,9 @@ func TestTunnelPeerRefusesAnImpossibleAncestry(t *testing.T) {
 		}
 		return proctree.Process{}, fmt.Errorf("no such process %d", pid)
 	}
-	conn = dial()
+	p := &sandboxProvisioner{socketPath: sockPath}
+	p.tunnelLeader.Store(&tunnelLeaderRef{pid: 9000, startID: 5})
+	conn := dial()
 	err = p.verifyTunnelPeer(conn)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "reparented")
@@ -847,4 +835,274 @@ func TestTunnelStreamAndRelayErrorsNameTheSocket(t *testing.T) {
 		"the relay's handshake error must not leak the placeholder authority")
 	assert.Contains(t, err.Error(), "af-tunnel-dead.sock",
 		"the relay error names the socket af actually dialed")
+}
+
+// stubTunnelHome points the tunnel generation machinery at home and cleans up
+// the cached entry — the held root fd, the generation lock, the map slot —
+// when the test ends.
+func stubTunnelHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	canonical, err := currentTunnelHome()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ent, ok := tunnelGenDirs.Load(canonical)
+		if !ok {
+			return
+		}
+		e := ent.(*tunnelGenDirEntry)
+		if e.lock != nil {
+			_ = e.lock.Close()
+		}
+		if e.root != nil && e.root.dir != nil {
+			_ = e.root.dir.Close()
+		}
+		tunnelGenDirs.Delete(canonical)
+	})
+}
+
+// tunnels/ ITSELF unlinked mid-life kills the held root fd (nlink 0): the
+// next call re-verifies the path end-to-end — recreating a fresh private
+// tunnels/ when nothing is there, refusing a foreign one, and re-establishing
+// the SAME generation dir so minted socket paths stay valid (#7511). Never
+// "tell the user to restart" while af can still prove the replacement.
+func TestTunnelGenRootIsReverifiedAfterUnlink(t *testing.T) {
+	home := t.TempDir()
+	stubTunnelHome(t, home)
+
+	dir, err := defaultTunnelGenerationDir()
+	require.NoError(t, err)
+	rootPath := filepath.Dir(dir)
+
+	require.NoError(t, os.RemoveAll(rootPath), "mid-life removal of tunnels/ itself")
+	dir2, err := defaultTunnelGenerationDir()
+	require.NoError(t, err)
+	assert.Equal(t, dir, dir2,
+		"the same generation is re-established under the re-verified root — socket paths stay valid")
+	lf, err := os.OpenFile(filepath.Join(dir2, tunnelGenLockName), os.O_RDWR, 0)
+	require.NoError(t, err)
+	require.Error(t, unix.Flock(int(lf.Fd()), unix.LOCK_EX|unix.LOCK_NB),
+		"the re-established generation's .lock is held again")
+	_ = lf.Close()
+
+	// A FOREIGN tunnels/ swapped in for the unlinked one is refused — the
+	// same checks as the first verify, never trusted because the name
+	// matches — and the failure names the remedy that always works.
+	require.NoError(t, os.RemoveAll(rootPath))
+	require.NoError(t, os.Mkdir(rootPath, 0o755))
+	require.NoError(t, os.Chmod(rootPath, 0o755), "pin the mode past umask")
+	_, err = defaultTunnelGenerationDir()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "0700",
+		"a foreign tunnels/ swapped under the dead fd is refused, not adopted")
+	assert.Contains(t, err.Error(), "restarting af",
+		"an unverifiable replacement names the restart remedy")
+
+	// A replacement that DOES verify — own-uid, 0700, real directory — is
+	// adopted rather than name-trusted: af re-proves it end-to-end exactly
+	// like a first verify, then keeps working.
+	require.NoError(t, os.RemoveAll(rootPath))
+	require.NoError(t, os.Mkdir(rootPath, 0o700))
+	require.NoError(t, os.Chmod(rootPath, 0o700), "pin the mode past umask")
+	dir3, err := defaultTunnelGenerationDir()
+	require.NoError(t, err)
+	assert.Equal(t, dir, dir3)
+
+	// And once the replacement is gone the next call heals — create + verify.
+	require.NoError(t, os.RemoveAll(rootPath))
+	dir4, err := defaultTunnelGenerationDir()
+	require.NoError(t, err)
+	assert.Equal(t, dir, dir4)
+}
+
+// The generation's lock is provably the dir's own .lock — the same (dev,
+// inode) on the held fd and on the name inside the dir — never a foreign or
+// replaced file af cannot name (#7511). The sweep reads the PATH's .lock, so
+// a held lock that is some other inode would guard nothing.
+func TestTunnelHeldLockIsTheNamedFile(t *testing.T) {
+	dirA, dirB, dirC := t.TempDir(), t.TempDir(), t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dirA, tunnelGenLockName), nil, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dirB, tunnelGenLockName), nil, 0o600))
+	// dirC deliberately gets no .lock.
+
+	openDir := func(dir string) int {
+		fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = unix.Close(fd) })
+		return fd
+	}
+	lock, err := os.Open(filepath.Join(dirA, tunnelGenLockName))
+	require.NoError(t, err)
+	defer func() { _ = lock.Close() }()
+
+	require.NoError(t, heldLockIsTheNamedFile(openDir(dirA), lock),
+		"the lock opened on the dir's own .lock proves identical")
+	err = heldLockIsTheNamedFile(openDir(dirB), lock)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not the",
+		"another dir's .lock is a different inode — never adopted as the guard")
+	err = heldLockIsTheNamedFile(openDir(dirC), lock)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot stat",
+		"a dir with no .lock offers nothing to prove against")
+
+	// The lock a real generation establishes passes this same proof —
+	// takeLockLocked consults it on every establish.
+	home := t.TempDir()
+	stubTunnelHome(t, home)
+	dir, err := defaultTunnelGenerationDir()
+	require.NoError(t, err)
+	canonical, err := currentTunnelHome()
+	require.NoError(t, err)
+	ent, ok := tunnelGenDirs.Load(canonical)
+	require.True(t, ok)
+	e := ent.(*tunnelGenDirEntry)
+	require.NoError(t, heldLockIsTheNamedFile(openDir(dir), e.lock),
+		"the live generation's held lock IS its dir's .lock")
+}
+
+// An ENOENT on the socket dial is the signal that the generation's file
+// vanished mid-life — EndpointGone is what recycles it into a supervisor
+// re-dial (#7511). It fires on a MISSING socket only: a live socket, and a
+// path that exists but is not a socket, never trigger it — and no dial at
+// all retries a credential write onto an unproven endpoint.
+func TestTunnelDialGoneFiresOnlyOnAMissingSocket(t *testing.T) {
+	var gone atomic.Int64
+	mkClient := func(sockPath string) *remoteAgentClient {
+		rc, err := newRemoteAgentClient(AgentServerEndpoint{
+			URL:          tunnelEndpointURL,
+			SocketPath:   sockPath,
+			Token:        "t",
+			EndpointGone: func() { gone.Add(1) },
+		}, "t")
+		require.NoError(t, err)
+		return rc
+	}
+
+	// Missing file: ENOENT — the generation dir was deleted under a live ssh.
+	// Socket-safe path: a t.TempDir() path exceeds sun_path under macOS's long
+	// TMPDIR and the dial reports EINVAL rather than ENOENT (#7511 review).
+	missing := testguard.SocketPath(t, "deleted.sock")
+	rc := mkClient(missing)
+	_, err := rc.transport.DialContext(context.Background(), "unix", missing)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, unix.ENOENT))
+	assert.Equal(t, int64(1), gone.Load(), "a missing socket file triggers the re-dial hook")
+
+	// A path that exists but is not a socket: a different errno, no trigger.
+	regular := testguard.SocketPath(t, "not-a-socket")
+	require.NoError(t, os.WriteFile(regular, nil, 0o600))
+	rc = mkClient(regular)
+	_, err = rc.transport.DialContext(context.Background(), "unix", regular)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, unix.ENOENT))
+	assert.Equal(t, int64(1), gone.Load(),
+		"a non-ENOENT failure is the operator's own network state, not a re-dial")
+
+	// A live socket: dialed, never gone.
+	sockPath := testguard.SocketPath(t, "live.sock")
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	defer func() { _ = ln.Close() }()
+	rc = mkClient(sockPath)
+	conn, err := rc.transport.DialContext(context.Background(), "unix", sockPath)
+	require.NoError(t, err)
+	_ = conn.Close()
+	assert.Equal(t, int64(1), gone.Load())
+}
+
+// The endpoint's re-dial trigger (#7511): a socket that vanished while its
+// generation lives is killed so superviseTunnel re-dials it into the
+// re-established dir — but only for a generation that was ready. A dial that
+// raced the respawn's bind, and a still-binding generation whose socket has
+// simply not landed, must never be killed: the supervisor's readiness probe
+// owns the newborn's fate, and a request storm cannot starve recovery.
+func TestRecycleMissingTunnelSocketKillsOnlyAReadyGeneration(t *testing.T) {
+	newSleep := func(t *testing.T) *tunnelChild {
+		t.Helper()
+		cmd := exec.Command("sleep", "60")
+		require.NoError(t, cmd.Start())
+		child := newTunnelChild(cmd, nil)
+		t.Cleanup(func() { killTunnel(child) })
+		return child
+	}
+	spared := func(child *tunnelChild) {
+		t.Helper()
+		select {
+		case <-child.done:
+			t.Fatal("this generation must not be recycled")
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+
+	missing := filepath.Join(t.TempDir(), "gone.sock")
+
+	// Socket file gone on a READY generation: recycled — killTunnel's join on
+	// done returns only after the reaper confirmed the exit.
+	p := &sandboxProvisioner{socketPath: missing}
+	child := newSleep(t)
+	p.setTunnel(child)
+	child.ready.Store(true)
+	p.recycleMissingTunnelSocket()
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a missing socket on a ready generation must recycle the tunnel")
+	}
+
+	// Socket file present — the respawn's bind already landed: spared.
+	present := filepath.Join(t.TempDir(), "bound.sock")
+	require.NoError(t, os.WriteFile(present, nil, 0o600))
+	p2 := &sandboxProvisioner{socketPath: present}
+	child2 := newSleep(t)
+	p2.setTunnel(child2)
+	child2.ready.Store(true)
+	p2.recycleMissingTunnelSocket()
+	spared(child2)
+
+	// A generation that never reached readiness is still binding its socket —
+	// the missing file is the expected mid-bind state (#7511 review).
+	p3 := &sandboxProvisioner{socketPath: missing}
+	child3 := newSleep(t) // ready never set
+	p3.setTunnel(child3)
+	p3.recycleMissingTunnelSocket()
+	spared(child3)
+
+	// Nothing to recycle: a nil generation and an unminted endpoint are no-ops.
+	(&sandboxProvisioner{socketPath: missing}).recycleMissingTunnelSocket()
+	(&sandboxProvisioner{}).recycleMissingTunnelSocket()
+}
+
+// The gone-callback never waits on reapMu: a caller may hold it across the
+// remote request whose dial failed (SwapOffBoxAccount), so a synchronous lock
+// would turn an instant ENOENT into the request's full timeout and stall the
+// recycle behind its own trigger (#7511 review). The callback queues the work
+// and returns; the queued recycle still runs once the lock frees.
+func TestNoteEndpointGoneDoesNotBlockOnReapMu(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	require.NoError(t, cmd.Start())
+	child := newTunnelChild(cmd, nil)
+	t.Cleanup(func() { killTunnel(child) })
+
+	p := &sandboxProvisioner{socketPath: filepath.Join(t.TempDir(), "gone.sock")}
+	p.setTunnel(child)
+	child.ready.Store(true)
+
+	p.reapMu.Lock()
+	done := make(chan struct{})
+	go func() { p.noteEndpointGone(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		p.reapMu.Unlock()
+		t.Fatal("the gone callback must return without waiting on reapMu")
+	}
+	p.reapMu.Unlock()
+
+	// The queued recycle runs once the lock frees — the generation is killed.
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the queued recycle never ran after reapMu freed")
+	}
 }
