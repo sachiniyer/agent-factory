@@ -1,11 +1,13 @@
 package tmux
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
@@ -28,11 +30,17 @@ const (
 	// socketBindingBound: a listening socket it holds is bound to the absent
 	// path. It is the owner, and SIGUSR1 is how it recreates the socket.
 	socketBindingBound
+	// socketBindingGone: the server exited while its sockets were being read,
+	// and an independent lookup of the pid confirms it (#7541). A server that
+	// is gone owns nothing, so it is disproved, as the probe's ESRCH arm treats
+	// a server that vanishes before its signal. It is not signalled.
+	socketBindingGone
 )
 
 // tmuxServerSocketBinding classifies pid against socketPath and returns the
-// listening path that decided it ("" when unresolved). A package var so a test
-// can stage a binding for a real server; the real one reads the kernel.
+// listening path that decided it: the matching path when bound, every path it
+// holds when bound elsewhere, and "" otherwise. A package var so a test can
+// stage a binding for a real server; the real one reads the kernel.
 var tmuxServerSocketBinding = readTmuxServerSocketBinding
 
 func readTmuxServerSocketBinding(pid int, socketPath string) (socketBinding, string) {
@@ -44,10 +52,42 @@ func readTmuxServerSocketBinding(pid int, socketPath string) (socketBinding, str
 	paths, err := proctree.UnixListenerPaths(pid)
 	if err != nil || len(paths) == 0 {
 		// A read that failed, or one that found no listener, names nothing to
-		// compare. Neither rules the server out.
+		// compare. Neither rules the server out, unless the server is proved
+		// gone: an independent lookup says the pid names no live process, an
+		// exited pid or a zombie, which holds no sockets at all. That covers a
+		// server that exits between the snapshot and the read, whatever error
+		// the read met on the way. A process found there, even one that
+		// reused the pid, proves nothing.
+		if serverPIDExited(pid) {
+			return socketBindingGone, ""
+		}
 		return socketBindingUnresolved, ""
 	}
 	return bindingAgainst(socketPath, paths)
+}
+
+// serverPIDExited reports whether pid is PROVED to name no live process (#7541):
+//
+//   - proctree.Lookup answers ErrProcessExited: a zombie, which holds no
+//     sockets, or (darwin) a pid kern.proc no longer has.
+//   - On Linux a pid with no process at all reads ENOENT from
+//     /proc/<pid>/stat, not ErrProcessExited (measured on Linux 6.17 for a
+//     reaped child). ENOENT alone is not proof, since a /proc entry hidden by
+//     hidepid reads the same. So it counts only when the kernel's own answer
+//     agrees: kill(pid, 0), which delivers nothing, is ESRCH only when no
+//     process has the pid. A live process this uid may not signal answers
+//     EPERM (measured: pid 1).
+//
+// Any other answer, an error included, is not proof.
+var serverPIDExited = func(pid int) bool {
+	_, err := proctree.Lookup(pid)
+	if errors.Is(err, proctree.ErrProcessExited) {
+		return true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	}
+	return false
 }
 
 // bindingAgainst classifies a server whose listening sockets are bound to
@@ -171,22 +211,26 @@ func canonicalSocketPath(p string) (string, bool) {
 }
 
 // possibleSocketOwners is the socket-absent refusal's list of who could still
-// own socketPath: every candidate the probe could not rule out. That is a tmux
-// server bound to the path or unresolved against it, a candidate not positively
-// identified as a server, and the 0 sentinel for a table that could not be
-// read. A server bound to another path is left out. It reads the facts the
-// probe reads but sends nothing.
-func possibleSocketOwners(socketPath string, pids []int) []int {
-	var owners []int
+// own socketPath: every candidate the probe could not rule out, read the way
+// the probe reads them but with nothing sent. servers are positively
+// identified tmux servers that are bound to the path or unresolved against
+// it. unidentified are candidates not positively identified as a server, the
+// 0 sentinel for a table that could not be read among them; the refusal
+// offers them no signal (#7541). A server bound to another path, or proved
+// gone, is left out.
+func possibleSocketOwners(socketPath string, pids []int) (servers, unidentified []int) {
 	for _, pid := range pids {
-		if pid > 0 && tmuxServerIdentified(pid) {
-			if binding, _ := tmuxServerSocketBinding(pid, socketPath); binding == socketBindingElsewhere {
-				continue
-			}
+		if pid <= 0 || !tmuxServerIdentified(pid) {
+			unidentified = append(unidentified, pid)
+			continue
 		}
-		owners = append(owners, pid)
+		switch binding, _ := tmuxServerSocketBinding(pid, socketPath); binding {
+		case socketBindingElsewhere, socketBindingGone:
+		default:
+			servers = append(servers, pid)
+		}
 	}
-	return owners
+	return servers, unidentified
 }
 
 // socketProbeCaller names the code that asked for the socket-absent probe: the

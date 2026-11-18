@@ -352,12 +352,13 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			classifyNoServerDiagnostic(diagnostic) == socketAbsent {
 			// Name only who could still own the socket: a server bound to some
 			// other socket was ruled out, and signalling it recovers nothing.
-			owners := possibleSocketOwners(absentTmuxSocketPath(diagnostic), tmuxServerProcessPIDs())
+			// Only identified servers are offered a signal (#7541).
+			servers, unidentified := possibleSocketOwners(absentTmuxSocketPath(diagnostic), tmuxServerProcessPIDs())
 			return fmt.Errorf("could not list tmux sessions%s, but %s. A server whose socket is removed "+
 				"(a /tmp cleaner will do it) keeps running with its sessions alive, so the missing socket "+
 				"does not prove there are none. Refusing to sweep: no tmux session was killed. %s: %w",
-				tmuxDiagnosticSuffix(err), describeLiveTmuxServers(owners),
-				recreateSocketAdvice(owners), err)
+				tmuxDiagnosticSuffix(err), describeSocketOwners(servers, unidentified),
+				recreateSocketAdvice(servers, unidentified), err)
 		}
 		return fmt.Errorf("could not list tmux sessions%s; refusing to sweep with the session set "+
 			"unknown — no tmux session was killed: %w", tmuxDiagnosticSuffix(err), err)

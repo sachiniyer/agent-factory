@@ -447,7 +447,7 @@ func classifyNoServerDiagnostic(diagnostic string) noServerDiagnosticKind {
 	return notANoServerDiagnostic
 }
 
-// describeLiveTmuxServers and recreateSocketAdvice render the socket-absent
+// describeSocketOwners and recreateSocketAdvice render the socket-absent
 // refusal. They name the exact PIDs rather than a pattern because the obvious
 // pattern does not work: tmux renames the server task to "tmux: server", and
 // `pkill -x ... tmux` matches NOTHING against that — verified with pgrep, which
@@ -459,25 +459,59 @@ func classifyNoServerDiagnostic(diagnostic string) noServerDiagnosticKind {
 // Dropping -x is not the fix either. SIGUSR1's default disposition is TERMINATE,
 // so a loose name match would kill any unrelated process whose name merely
 // contains "tmux". Naming the PID is exact, portable, and cannot spray.
-func describeLiveTmuxServers(pids []int) string {
-	named := namedPIDs(pids)
-	if named == "" {
+//
+// For the same reason `kill -USR1` is offered only for servers, the pids
+// positively identified as tmux servers (#7541). A candidate that is not, such
+// as a darwin tmux client, whose task name the server prefilter cannot tell
+// from a server's, is named with a check to run first and no signal: SIGUSR1
+// kills a client. The 0 sentinel for an unreadable process table is never
+// named.
+func describeSocketOwners(servers, unidentified []int) string {
+	named, unknown := pidArgsForSignal(servers), pidArgsForSignal(unidentified)
+	var head string
+	switch {
+	case len(named) == 1:
+		head = "a tmux server is running for this user (pid " + named[0] + ")"
+	case len(named) > 1:
+		head = "tmux servers are running for this user (pids " + strings.Join(named, ", ") + ")"
+	case len(unknown) == 0:
 		return "a tmux server is running for this user"
+	default:
+		head = "a tmux server may be running for this user"
 	}
-	if len(pids) == 1 {
-		return "a tmux server is running for this user (pid " + named + ")"
+	switch len(unknown) {
+	case 0:
+		return head
+	case 1:
+		return head + "; pid " + unknown[0] + " could not be identified as a tmux server or ruled out"
+	default:
+		return head + "; pids " + strings.Join(unknown, ", ") + " could not be identified as tmux servers or ruled out"
 	}
-	return "tmux server(s) are running for this user (pids " + named + ")"
 }
 
-func recreateSocketAdvice(pids []int) string {
-	named := pidArgsForSignal(pids)
+func recreateSocketAdvice(servers, unidentified []int) string {
+	named, unknown := pidArgsForSignal(servers), pidArgsForSignal(unidentified)
+	var advice string
 	if len(named) == 0 {
-		return "Find the server (`ps -o pid,comm,args -u \"$(id -u)\"`, look for `tmux: server`), then " +
+		advice = "Find the server (`ps -o pid,comm,args -u \"$(id -u)\"`, look for `tmux: server`), then " +
 			"signal it with `kill -USR1 <pid>` to recreate its socket — or stop it — and re-run"
+	} else {
+		advice = "Recreate its socket with " + shellsuggest.Command("kill", append([]string{"-USR1"}, named...)...) +
+			" — or stop that server — then re-run"
 	}
-	return "Recreate its socket with " + shellsuggest.Command("kill", append([]string{"-USR1"}, named...)...) +
-		" — or stop that server — then re-run"
+	if len(unknown) > 0 {
+		advice += ". Check " + shellsuggest.Command("ps", "-o", "pid,comm,args", "-p", strings.Join(unknown, ",")) +
+			" before signalling " + pidNoun(unknown) + ": SIGUSR1 terminates a process that is not a tmux server, a tmux client included"
+	}
+	return advice
+}
+
+// pidNoun is "pid N" or "pids N, M".
+func pidNoun(pids []string) string {
+	if len(pids) == 1 {
+		return "pid " + pids[0]
+	}
+	return "pids " + strings.Join(pids, ", ")
 }
 
 // isTmuxServerComm reports whether a kernel task name is a tmux SERVER.
@@ -536,12 +570,17 @@ func absentTmuxSocketPath(diagnostic string) string {
 //     its handler (#4678) and a server's child before it execs (#6581). It
 //     remains a possible owner.
 //   - bound to another path: ruled out, never signalled.
+//   - exited while its sockets were read, as an independent lookup of the pid
+//     confirms: disproved like a pid that vanishes before its signal, never
+//     signalled (#7541).
 //   - bound to this path: the owner. It is signalled, and the path is watched.
 //   - unresolved (its sockets could not be read, it holds no listener, or the
 //     path is relative): never signalled, and it remains a possible owner.
 //
 // Each SIGUSR1 is logged at INFO with its target, the path the target is bound
-// to, and the code that asked.
+// to, and the code that asked, and so is each rule-out, with the paths the
+// server is bound to instead (#7541). An "unclaimed" answer resting on a
+// rule-out can then be traced the way a signal can.
 //
 // An owner that recreates the path claims it. Otherwise the answer is
 // "unclaimed", a determinate empty, only when no possible owner remains. That
@@ -574,6 +613,12 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 		binding, boundTo := tmuxServerSocketBinding(pid, socketPath)
 		switch binding {
 		case socketBindingElsewhere:
+			log.InfoLog.Printf("tmux socket %s is missing: tmux server pid %d is bound to %s instead, "+
+				"so it is ruled out and not signalled (asked by %s)", socketPath, pid, boundTo, socketProbeCaller())
+			continue
+		case socketBindingGone:
+			log.InfoLog.Printf("tmux socket %s is missing: tmux server pid %d exited while its sockets were "+
+				"read, so it is ruled out and not signalled (asked by %s)", socketPath, pid, socketProbeCaller())
 			continue
 		case socketBindingUnresolved:
 			unprobedOwnerPossible = true

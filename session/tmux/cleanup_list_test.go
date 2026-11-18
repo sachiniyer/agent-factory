@@ -49,13 +49,27 @@ esac
 // reads the host process table and a developer box with tmux running gives a
 // different answer from a container with none. A test that did not pin it would
 // assert one thing locally and another in CI.
+//
+// An alive server is staged as positively identified and unresolved against
+// the missing socket: a live server that may own it, which the refusal names
+// and offers its signal (#7541).
 func pinTmuxServerProbe(t *testing.T, alive bool) {
 	t.Helper()
 	var pids []int
 	if alive {
 		pids = []int{4242}
+		pinPossibleOwnerServers(t, pids...)
 	}
 	t.Cleanup(PinServerProbeForTest(pids...))
+}
+
+// pinPossibleOwnerServers stages pids as positively identified tmux servers
+// whose binding to the missing socket could not be resolved, so each one
+// stays a possible owner and is never signalled.
+func pinPossibleOwnerServers(t *testing.T, pids ...int) {
+	t.Helper()
+	pinServerIdentityForTest(t, pids...)
+	pinSocketBindingForTest(t, func(int, string) (socketBinding, string) { return socketBindingUnresolved, "" })
 }
 
 // TestCleanupSessionsListFailureIsNotAnEmptySessionSet is the #2870 regression
@@ -406,6 +420,7 @@ func TestSocketAbsentWithALiveServerIsNotAnEmptySessionSet(t *testing.T) {
 // Naming the PID is exact and cannot spray.
 func TestSocketAbsentRefusalNamesAWorkingRecovery(t *testing.T) {
 	touched := filepath.Join(t.TempDir(), "reached-another-tmux-command")
+	pinPossibleOwnerServers(t, 4242, 4243)
 	t.Cleanup(PinServerProbeForTest(4242, 4243))
 	listFailureTmuxOnPath(t, touched, "error connecting to /tmp/tmux-1000/default (No such file or directory)", 1)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -427,6 +442,60 @@ func TestSocketAbsentRefusalNamesAWorkingRecovery(t *testing.T) {
 		if !strings.Contains(msg, pid) {
 			t.Errorf("error = %q, want it to name server pid %s", msg, pid)
 		}
+	}
+}
+
+// The refusal offers `kill -USR1` only for a positively identified server
+// (#7541). A candidate af could not identify, such as a darwin tmux client
+// (named "tmux" exactly like a server there), is named with a check to run
+// first, because SIGUSR1 terminates a client. Following the advice must never
+// kill the user's own tmux client.
+func TestSocketAbsentRefusalNeverOffersASignalForAnUnidentifiedCandidate(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		pids        []int
+		identified  []int
+		want        []string
+		wantMissing []string
+	}{
+		{
+			name: "one identified server beside an unidentified candidate", pids: []int{4242, 4243}, identified: []int{4242},
+			want: []string{"a tmux server is running for this user (pid 4242)", "kill -USR1 4242 —",
+				"pid 4243 could not be identified as a tmux server", "ps -o pid,comm,args -p 4243",
+				"before signalling pid 4243: SIGUSR1 terminates a process that is not a tmux server"},
+			wantMissing: []string{"kill -USR1 4242 4243", "kill -USR1 4243"},
+		},
+		{
+			name: "only unidentified candidates", pids: []int{4243, 4244},
+			want: []string{"a tmux server may be running for this user", "pids 4243, 4244 could not be identified as tmux servers",
+				"ps -o pid,comm,args -p 4243,4244", "look for `tmux: server`"},
+			wantMissing: []string{"kill -USR1 4243", "kill -USR1 4244"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			touched := filepath.Join(t.TempDir(), "reached-another-tmux-command")
+			pinServerIdentityForTest(t, tc.identified...)
+			pinSocketBindingForTest(t, func(int, string) (socketBinding, string) { return socketBindingUnresolved, "" })
+			t.Cleanup(PinServerProbeForTest(tc.pids...))
+			listFailureTmuxOnPath(t, touched, "error connecting to /tmp/tmux-1000/default (No such file or directory)", 1)
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+			err := CleanupSessions(cmd.MakeExecutor())
+			if err == nil {
+				t.Fatal("CleanupSessions returned nil with a possible owner and an absent socket")
+			}
+			msg := err.Error()
+			for _, w := range tc.want {
+				if !strings.Contains(msg, w) {
+					t.Errorf("error = %q, want it to contain %q", msg, w)
+				}
+			}
+			for _, w := range tc.wantMissing {
+				if strings.Contains(msg, w) {
+					t.Errorf("error = %q offers %q: a candidate not identified as a tmux server must never be offered SIGUSR1", msg, w)
+				}
+			}
+		})
 	}
 }
 
