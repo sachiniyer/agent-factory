@@ -18,11 +18,11 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
-// tmuxSocketClaimed disambiguates an ENOENT tmux socket by signalling every
-// live same-uid tmux server with SIGUSR1 — tmux's documented recreate-socket
-// signal — and watching the path. A server that recreates it owns it; a path
-// that stays absent is unclaimed, UNLESS a candidate we could not probe may
-// still be the owner. The function's own contract, in server_presence.go,
+// tmuxSocketClaimed disambiguates an ENOENT tmux socket by signalling the live
+// same-uid tmux server bound to it with SIGUSR1 — tmux's documented
+// recreate-socket signal — and watching the path. A server that recreates it
+// owns it; a path that stays absent is unclaimed, UNLESS a candidate we could
+// not probe may still be the owner. The function's own contract, in server_presence.go,
 // says so plainly: "a table with live servers that could not all be signaled
 // answers 'claimed' (unknown), because a live owner was not disproved."
 //
@@ -55,7 +55,12 @@ import (
 // proctree.IsTmuxServer positively identifies it (the kernel task name
 // "tmux: server" on Linux, the daemon(3) shape on darwin) and the signal loop
 // reaches the kill() call — the branch the bug lives in, which a fixture
-// that merely fails IsTmuxServer (the #4878 test) never enters.
+// that merely fails IsTmuxServer (the #4878 test) never enters. Since #7533
+// only a server bound to the probed socket is signalled, and each of these is
+// really bound to its own -L socket, so pinClaimedNeighbours stages both as
+// bound to the probed one (pinSocketBindingForTest). They are signalled for
+// real, recreate only their own sockets, and leave the probed path absent: the
+// "owner that does not recreate" these outcomes are about.
 
 // pinServerProbeSignalForTest overrides the SIGUSR1 delivery used by
 // tmuxSocketClaimed for the duration of t, mirroring pinSocketClaimProof's
@@ -115,6 +120,12 @@ func pinClaimedNeighbours(t *testing.T, labelA, labelB string) (n1, n2 int, sock
 	n1 = startNamedTmuxNeighbour(t, labelA)
 	n2 = startNamedTmuxNeighbour(t, labelB)
 	t.Cleanup(PinServerProbeForTest(n1, n2))
+	pinSocketBindingForTest(t, func(pid int, path string) (socketBinding, string) {
+		if pid == n1 || pid == n2 {
+			return socketBindingBound, path
+		}
+		return socketBindingUnresolved, ""
+	})
 	socket = defaultSocketInPrivateTmuxWorld(t)
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(socket)
@@ -223,8 +234,8 @@ func TestProbeSessionStrictStaysUnknownWhenASignallableServerKillFails(t *testin
 // TestTmuxSocketClaimedAllKillsFailStaysClaimed pins the !signaled arm of
 // tmuxSocketClaimed for the kill-error case: when EVERY positively-identified
 // server's kill() fails with a non-ESRCH errno, the function must NOT fall
-// through to the deadline arm — it must answer "claimed" outright via the
-// `return len(pids) != 0` path, because no candidate was disproved. This arm
+// through to the deadline arm — it must answer "claimed" outright, because no
+// candidate was disproved. This arm
 // pre-dates the fix and already behaved safely, but it is the structurally
 // obvious cousin of the mixed-table bug, so it is pinned here against a
 // future change that "tidies" one branch and forgets the other.

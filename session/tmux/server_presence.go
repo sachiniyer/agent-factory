@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // socketTmuxArgs prepends tmux's `-S <socket>` server option to a command's
@@ -164,16 +165,17 @@ func NoServerRunning(err error) bool {
 		// Reproduced: a session and its `sleep 300` pane survived `rm -f` of
 		// the socket, and `tmux ls` answered exactly this diagnostic (#2875).
 		//
-		// SIGUSR1 is what makes the disambiguation possible: it is tmux's own
-		// recreate-socket signal, so every live same-uid server is asked to
-		// reclaim its socket and the path is watched. A path that reappears
-		// had a live owner and nothing is proved; one that stays absent is
-		// unclaimed — a server that cannot or does not recreate its socket is
-		// unreachable to every tmux client anyway, including the kill-session
-		// a refusal would have suggested. Before this, ANY live same-uid
-		// server — an unrelated `tmux -L` session — made every missing-socket
-		// read answer "unknown" forever, which a routine caller cannot retry
-		// past.
+		// The kernel and SIGUSR1 make the disambiguation possible. Each live
+		// same-uid server is asked which socket it is bound to, and only the
+		// one bound to this path is sent SIGUSR1, tmux's own recreate-socket
+		// signal, while the path is watched (#7533). A path that reappears had
+		// a live owner and nothing is proved. One that stays absent, or that no
+		// server is bound to, is unclaimed: a server that cannot or does not
+		// recreate its socket is unreachable to every tmux client anyway,
+		// including the kill-session a refusal would have suggested. Before
+		// this, ANY live same-uid server — an unrelated `tmux -L` session —
+		// made every missing-socket read answer "unknown" forever, which a
+		// routine caller cannot retry past.
 		return !tmuxSocketClaimed(absentTmuxSocketPath(diagnostic), tmuxServerProcessPIDs())
 	default:
 		return false
@@ -213,6 +215,11 @@ var tmuxServerProcessPIDs = liveTmuxServerPIDs
 // so overriding this var cannot change how a teardown signals anything.
 var tmuxServerSignal = syscall.Kill
 
+// tmuxServerIdentified is proctree.IsTmuxServer, the positive identity check
+// every candidate passes before anything else is asked of it. A package var so
+// the decision table can stand fake pids in for servers; nothing else sets it.
+var tmuxServerIdentified = proctree.IsTmuxServer
+
 // PinServerProbeForTest fixes the "is a tmux server alive for this uid?" answer
 // and returns the restore. It exists for internal/testguard.IsolateTmux, which
 // declares a private-socket world for a test; without it that isolation is
@@ -227,15 +234,15 @@ func PinServerProbeForTest(pids ...int) (restore func()) {
 	return func() { tmuxServerProcessPIDs = prev }
 }
 
-// liveTmuxServerProcess looks for a tmux server owned by this uid.
+// liveTmuxServerPIDs lists the tmux servers owned by this uid: the candidates
+// for owning an unlinked socket.
 //
 // It answers a deliberately BROAD question — "could any live server own an
-// unlinked socket?" — rather than "is the server for THIS socket alive?", which
-// would need the server's own socket path and is not worth the machinery. The
-// asymmetry is chosen: a false "yes" costs a refused sweep the user can retry
-// after checking; a false "no" lets reset delete worktrees out from under a live
-// agent. Over-refusal is also rare in practice, because a server on the DEFAULT
-// socket has a socket file, so it answers ECONNREFUSED rather than ENOENT.
+// unlinked socket?" — by task name alone. Which candidate is bound to THIS
+// socket is tmuxSocketClaimed's question, answered from each server's own
+// listening sockets (#7533). The asymmetry is chosen: a false "yes" here costs
+// that per-server read; a false "no" lets reset delete worktrees out from under
+// a live agent.
 //
 // A process table we cannot read reports TRUE, for the same reason: an
 // unreadable table is not evidence of absence.
@@ -512,34 +519,47 @@ func absentTmuxSocketPath(diagnostic string) string {
 // tmuxSocketClaimed reports whether a live tmux server claims the socket at
 // socketPath. It is the active half of the socket-absent check: ENOENT alone
 // cannot distinguish "no server ever created this socket" from "a server lost
-// its socket to a /tmp cleaner and keeps running orphaned" (#2875), so every
-// live same-uid tmux server is sent SIGUSR1 — tmux's documented
-// recreate-socket signal — and the path is watched. An orphaned owner
-// recreates the path; the socket staying absent afterward means no live
-// server was bound to it, so a failed read against it is a determinate empty.
+// its socket to a /tmp cleaner and keeps running orphaned" (#2875).
 //
-// pids comes from tmuxServerProcessPIDs — deliberately uid-wide, because which
-// server owns an unlinked socket is exactly what cannot be read back. A pid is
-// re-verified as a tmux server at signal time, positively (proctree.IsTmuxServer:
-// the kernel task name tmux gives a server, or the daemon(3) shape a server is
-// left in). SIGUSR1's default disposition is TERMINATE, so anything that is not
-// positively a server must never receive it. That covers a pid reused since the
-// snapshot, and — the defect behind #4678 — a tmux CLIENT, which is killed by
-// SIGUSR1 if it arrives before the client has installed its handler. The
-// command line cannot make this distinction: a daemonised server carries its
-// launching client's argv.
+// The kernel can tell them apart. A listening socket keeps the address it was
+// bound to after its file is unlinked, so each candidate server is asked which
+// socket it is bound to (tmuxServerSocketBinding), and only a server bound to
+// THIS path is sent SIGUSR1, tmux's documented recreate-socket signal (#7533).
+// Before that, every live same-uid tmux server was signalled. Each one briefly
+// unlinked and rebound its own socket, and a client of an unrelated server that
+// connected in that gap failed (measured: 57 of 2,000 capture-pane calls under
+// a ~2 ms signal storm). Per candidate:
 //
-// Ambiguity survives in one direction only: a table with live servers that
-// could not all be signaled answers "claimed" (unknown), because a live owner
-// was not disproved. An empty table answers "unclaimed" outright.
+//   - not positively a tmux server (proctree.IsTmuxServer), or the 0 sentinel
+//     for a table that could not be read: never signalled. SIGUSR1's default
+//     disposition is TERMINATE, which kills a tmux CLIENT before it installs
+//     its handler (#4678) and a server's child before it execs (#6581). It
+//     remains a possible owner.
+//   - bound to another path: ruled out, never signalled.
+//   - bound to this path: the owner. It is signalled, and the path is watched.
+//   - unresolved (its sockets could not be read, it holds no listener, or the
+//     path is relative): never signalled, and it remains a possible owner.
+//
+// Each SIGUSR1 is logged at INFO with its target, the path the target is bound
+// to, and the code that asked.
+//
+// An owner that recreates the path claims it. Otherwise the answer is
+// "unclaimed", a determinate empty, only when no possible owner remains. That
+// means every candidate was ruled out, or the signalled owners left the path
+// absent: a server that cannot or does not recreate its socket is unreachable to
+// every tmux client anyway. A possible owner, or an owner whose signal was
+// refused, keeps the answer "claimed" (unknown), because it was never
+// disproved. With nothing signalled the answer comes at once, with no watch.
 func tmuxSocketClaimed(socketPath string, pids []int) bool {
 	signaled := false
 	unprobedOwnerPossible := false
 	for _, pid := range pids {
 		if pid <= 0 {
+			// The process table could not be read: an owner was not disproved.
+			unprobedOwnerPossible = true
 			continue
 		}
-		if !proctree.IsTmuxServer(pid) {
+		if !tmuxServerIdentified(pid) {
 			// The pid passed the liveTmuxServerPIDs comm prefilter but
 			// could not be positively identified as a server (proctree.
 			// IsTmuxServer is strict: an unreadable command line, a
@@ -551,7 +571,21 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 			unprobedOwnerPossible = true
 			continue
 		}
+		binding, boundTo := tmuxServerSocketBinding(pid, socketPath)
+		switch binding {
+		case socketBindingElsewhere:
+			continue
+		case socketBindingUnresolved:
+			unprobedOwnerPossible = true
+			continue
+		}
 		kerr := tmuxServerSignal(pid, syscall.SIGUSR1)
+		outcome := "sent"
+		if kerr != nil {
+			outcome = "not delivered: " + kerr.Error()
+		}
+		log.InfoLog.Printf("tmux socket %s is missing: SIGUSR1 to tmux server pid %d, which is bound to %s, "+
+			"so it recreates the socket (%s; asked by %s)", socketPath, pid, boundTo, outcome, socketProbeCaller())
 		switch {
 		case kerr == nil:
 			signaled = true
@@ -576,9 +610,15 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 		}
 	}
 	if !signaled {
-		return len(pids) != 0
+		if unprobedOwnerPossible {
+			return true
+		}
+		// Every candidate was ruled out. A server that bound the path since the
+		// client's read would show as the file itself.
+		_, err := os.Stat(socketPath)
+		return err == nil
 	}
-	deadline := time.Now().Add(500 * time.Millisecond)
+	deadline := time.Now().Add(socketReclaimWindow)
 	for {
 		if _, err := os.Stat(socketPath); err == nil {
 			return true
@@ -598,6 +638,11 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 		time.Sleep(25 * time.Millisecond)
 	}
 }
+
+// socketReclaimWindow is how long tmuxSocketClaimed watches for a signalled
+// owner to recreate its socket. A package var so a test can widen it and prove
+// that a probe with no owner to signal never waits on it.
+var socketReclaimWindow = 500 * time.Millisecond
 
 // namedPIDs renders the PIDs we can actually name; the 0 sentinel means the
 // process table could not be read, so there is no pid to print.

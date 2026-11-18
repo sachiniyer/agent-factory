@@ -208,13 +208,13 @@ func probeSessionStrict(cmdExec cmd.Executor, name string) (exists bool, known b
 		return exists, known, err
 	}
 	// The one re-probe that can change an "unknown" answer: classification
-	// already asked every live same-uid server to reclaim an unlinked socket
-	// (tmuxSocketClaimed, via NoServerRunning). If the socket path reappeared,
-	// a server owns it and is reachable now — ask it directly rather than
-	// reporting unknown for a server that just proved it is alive. A socket
-	// that stayed absent is either proved unclaimed (handled inside) or still
-	// ambiguous because some server could not be signaled; re-asking changes
-	// nothing in the second case.
+	// already asked the live same-uid server bound to an unlinked socket to
+	// reclaim it (tmuxSocketClaimed, via NoServerRunning). If the socket path
+	// reappeared, a server owns it and is reachable now — ask it directly
+	// rather than reporting unknown for a server that just proved it is alive.
+	// A socket that stayed absent is either proved unclaimed (handled inside)
+	// or still ambiguous because some server could not be signaled or
+	// resolved; re-asking changes nothing in the second case.
 	diagnostic, exitOne := tmuxExitOneDiagnostic(err)
 	if !exitOne || classifyNoServerDiagnostic(diagnostic) != socketAbsent {
 		return exists, known, err
@@ -350,11 +350,14 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		// reason is not guessable from the diagnostic (#2875).
 		if diagnostic, exitOne := tmuxExitOneDiagnostic(err); exitOne &&
 			classifyNoServerDiagnostic(diagnostic) == socketAbsent {
+			// Name only who could still own the socket: a server bound to some
+			// other socket was ruled out, and signalling it recovers nothing.
+			owners := possibleSocketOwners(absentTmuxSocketPath(diagnostic), tmuxServerProcessPIDs())
 			return fmt.Errorf("could not list tmux sessions%s, but %s. A server whose socket is removed "+
 				"(a /tmp cleaner will do it) keeps running with its sessions alive, so the missing socket "+
 				"does not prove there are none. Refusing to sweep: no tmux session was killed. %s: %w",
-				tmuxDiagnosticSuffix(err), describeLiveTmuxServers(tmuxServerProcessPIDs()),
-				recreateSocketAdvice(tmuxServerProcessPIDs()), err)
+				tmuxDiagnosticSuffix(err), describeLiveTmuxServers(owners),
+				recreateSocketAdvice(owners), err)
 		}
 		return fmt.Errorf("could not list tmux sessions%s; refusing to sweep with the session set "+
 			"unknown — no tmux session was killed: %w", tmuxDiagnosticSuffix(err), err)
