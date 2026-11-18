@@ -2574,13 +2574,18 @@ _expect_relaunch_expands_restored_session() {
     af_select 'relaunch-me' || return 1
     af_wait_for '▾  relaunch-me' "$AF_DRIVER_TIMEOUT" \
         'premise: the live selection is expanded before the quit' || return 1
-    af_wait_for '└ 2 › Terminal' "$AF_DRIVER_TIMEOUT" \
+    # The tab row carries the `· open` pane badge, which pushes the label past
+    # the rail width (renders `└ 2 › Termin… · open`); the connector `└ 2 ›`
+    # is the truncation-proof part of the row.
+    af_wait_for '└ 2 ›' "$AF_DRIVER_TIMEOUT" \
         'premise: its tab rows render before the quit' || return 1
     af_relaunch || return 1
     af_wait_for '▾  relaunch-me' "$AF_DRIVER_TIMEOUT" \
         'the restored session comes back expanded (#7552)' || return 1
-    af_wait_for '└ 2 › Terminal' "$AF_DRIVER_TIMEOUT" \
+    af_wait_for '└ 2 ›' "$AF_DRIVER_TIMEOUT" \
         'the restored session keeps its tab rows visible (#7552)' || return 1
+    af_wait_for '▸  alpha' "$AF_DRIVER_TIMEOUT" \
+        'every other session stays collapsed — no fold state persists (#7552)' || return 1
 }
 
 # --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
