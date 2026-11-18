@@ -179,7 +179,7 @@ func TestHealth_PIDVerifiedRequiresOwnHome(t *testing.T) {
 
 	// A live `af --daemon` argv whose AGENT_FACTORY_HOME names a DIFFERENT
 	// home — the recycled-PID shape the file would point at.
-	cmd := fakeDaemonCmd(t, "af", "sleep 60; :", "--daemon", "af-test")
+	cmd := fakeDaemonCmd(t, "af", "sleep 60; :", "--daemon")
 	env := make([]string, 0, len(os.Environ()))
 	for _, e := range os.Environ() {
 		if !strings.HasPrefix(e, "AGENT_FACTORY_HOME=") {
@@ -224,7 +224,7 @@ func TestHealth_PIDUnverifiableIsNotAbsent(t *testing.T) {
 	// form: classifyDaemonHome cannot resolve it (config.ConfigDirFor
 	// rejects "~user"), so the binding is daemonUnverifiable rather than
 	// foreign — the process is a real af daemon, its home merely unproven.
-	cmd := fakeDaemonCmd(t, "af", "sleep 60; :", "--daemon", "af-test")
+	cmd := fakeDaemonCmd(t, "af", "sleep 60; :", "--daemon")
 	env := make([]string, 0, len(os.Environ()))
 	for _, e := range os.Environ() {
 		if !strings.HasPrefix(e, "AGENT_FACTORY_HOME=") {

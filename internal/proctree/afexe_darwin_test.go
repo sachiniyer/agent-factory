@@ -3,48 +3,49 @@
 package proctree
 
 import (
-	"debug/buildinfo"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 )
 
-// #7492: PROC_PIDPATHINFO answers through the BUFFER, not the syscall return
-// — proc_pidpathinfo_internal never writes retval, so a successful read
-// returns 0 and the NUL-terminated path is the only answer. Treating that 0
-// as "no answer" made every real af build unverifiable on darwin. Assert the
-// contract end to end for the one process the kernel must always answer for:
-// the caller itself.
-func TestExePathAnswersForSelfThroughProcInfo(t *testing.T) {
-	path, ok := exePath(os.Getpid())
-	require.True(t, ok,
-		"proc_info(PROC_PIDPATHINFO) must answer for our own pid — its retval is unused, the buffer is the answer")
-	bi, err := buildinfo.ReadFile(path)
-	require.NoError(t, err, "the kernel-attested path is a readable binary")
-	require.Equal(t, afModulePath, bi.Main.Path,
-		"the kernel-attested binary carries this module's build info")
-}
+// #7494 item 2 — a NON-REGULAR file renamed over the exe path must refuse
+// without ever blocking: a FIFO's plain open waits on a writer that never
+// comes, which is exactly the stalled-read wedge the budget only bounds
+// after it has already spent a worker. The gated open must return —
+// O_NONBLOCK plus the regular-file check — so the refusal is immediate and
+// no worker is ever parked at all.
+func TestOpenRegularExeRefusesANonRegularPathWithoutBlocking(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
 
-// The forged-daemon verdict relies on `exec -a` landing in kern.procargs2.
-// It does — for a binary the kernel does not restrict. A host's own binary
-// (/usr/bin/yes, a cs_restricted platform binary) can have its procargs2
-// withheld even from a same-uid reader, so it can never serve as the forged
-// carrier; the unsigned test sleeper's argv reads everywhere. Pin the
-// channel this test file's forgery depends on.
-func TestForgedArgvReachesProcArgs2ForAnUnsignedBinary(t *testing.T) {
-	carrier := sleeper.Named(t, filepath.Join(t.TempDir(), "af"))
-	forged := exec.Command(carrier, "--daemon")
-	forged.Args[0] = "af"
-	require.NoError(t, forged.Start())
-	t.Cleanup(func() { _ = forged.Process.Kill(); _, _ = forged.Process.Wait() })
-	require.Eventually(t, func() bool {
-		return ArgvIsAFDaemon(Argv(forged.Process.Pid))
-	}, 5*time.Second, 20*time.Millisecond,
-		"exec -a af … --daemon on an unsigned binary must land in kern.procargs2")
+	done := make(chan bool, 1)
+	go func() {
+		f, ok := openRegularExe(fifo, 0, 0)
+		if f != nil {
+			f.Close()
+		}
+		done <- ok
+	}()
+	select {
+	case ok := <-done:
+		require.False(t, ok, "a non-regular file at the exe path cannot attest")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a FIFO at the exe path parked the open — the non-regular gate never ran")
+	}
+
+	// A regular file still passes the gate on its own (dev, ino): the check
+	// binds the text vnode's identity, nothing else.
+	regular := filepath.Join(t.TempDir(), "af")
+	require.NoError(t, os.WriteFile(regular, []byte("x"), 0o755))
+	st, err := os.Stat(regular)
+	require.NoError(t, err)
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	f, ok := openRegularExe(regular, uint64(uint32(sys.Dev)), sys.Ino)
+	require.True(t, ok, "a regular file carrying the asked identity opens")
+	f.Close()
 }

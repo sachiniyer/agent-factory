@@ -13,8 +13,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
-// protectedVerdict is why a protected pid is excluded, and whether the
-
 // cohortMembership is the kernel evidence a vanished-session cohort can still
 // demand after the tmux record is gone (#7435 item 5):
 //
@@ -76,7 +74,7 @@ type cohortMembership struct {
 	RecordedPrograms map[int]string
 }
 
-func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Process) bool {
+func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Process, att *proctree.ExeAttestations) bool {
 	if len(m.Proven) == 0 && len(m.PaneSIDs) == 0 && len(m.Recorded) == 0 {
 		// No kernel evidence at all: nothing is admitted — refuse, never
 		// signal (#7435 R2). A marker-only scan cannot prove membership, so
@@ -133,7 +131,7 @@ func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Proce
 		}
 		// The stops apply only to ancestors that carry no proof of their
 		// own — a proven member vouches first.
-		if proctree.TmuxIdentityOf(ancestor) == proctree.Tmux || afDaemonClass(q) != afDaemonNot {
+		if proctree.TmuxIdentityOf(ancestor) == proctree.Tmux || afDaemonClass(q, att) != afDaemonNot {
 			break
 		}
 		ancestor = q.PPID
@@ -170,7 +168,11 @@ func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Proce
 // that must apply the same exclusions the signalling reap did — the final
 // survivor check (#7435 R3) — classifies against this same table instead of
 // a second read that could disagree with it.
-func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string, generations orphanGenerationSet, membership cohortMembership, reported map[int]bool) ([]proctree.Process, map[int]proctree.Process, error) {
+// att scopes kernel attestation to the sweep this call belongs to: every
+// claimant — the same daemon an ancestry walk, the marker gate and admits
+// each meet — pays ONE attestation per (pid, StartID) here instead of one
+// per candidate path that touches it (#7494 item 2). nil attests directly.
+func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string, generations orphanGenerationSet, membership cohortMembership, reported map[int]bool, att *proctree.ExeAttestations) ([]proctree.Process, map[int]proctree.Process, error) {
 	if len(candidates) == 0 {
 		return nil, nil, nil
 	}
@@ -244,6 +246,27 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		}
 		processSession, hasSession := processEnvValue(environ, EnvMarkerSession)
 		if !hasSession {
+			// An unmarked candidate that argv-claims the af daemon but whose
+			// kernel executable cannot verify the claim — or whose claim this
+			// build's parse cannot decide (#7496 R1) — is named for what it
+			// is with the remedy an operator can act on (#7494 item 1): a
+			// REAL daemon whose exe was replaced after exec (darwin upgrade)
+			// reads exactly like a forged claim, and stopping it — or
+			// restarting it under its own AF_HOME — unblocks either way.
+			switch class := afDaemonClass(process, att); class {
+			case afDaemonUnverified:
+				report(process.PID, fmt.Errorf(
+					"captured live pid %d has no %s marker for vanished session %s — its %s; %s",
+					process.PID, EnvMarkerSession, sanitizedName,
+					daemonUnverifiedClaimClause, daemonClaimRemedy(process.PID)))
+				continue
+			case afDaemonUndecidable:
+				report(process.PID, fmt.Errorf(
+					"captured live pid %d has no %s marker for vanished session %s — its %s; %s",
+					process.PID, EnvMarkerSession, sanitizedName,
+					daemonUndecidableClaimClause, daemonClaimRemedy(process.PID)))
+				continue
+			}
 			report(process.PID, fmt.Errorf("captured live pid %d has no %s marker for vanished session %s",
 				process.PID, EnvMarkerSession, sanitizedName))
 			continue
@@ -314,8 +337,8 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		// recorded root as a foreign pane and left it alive and unreported
 		// (4597265500), and proof-ahead-of-the-generation-gate admitted a
 		// changed-generation descendant of a proven parent (4598089582).
-		reason, positive, boundary := classifyCaptureAncestry(snap, process.PID, self)
-		proven := membership.admits(snap, process)
+		reason, positive, boundary, unverifiedDaemon := classifyCaptureAncestry(snap, process.PID, self, att)
+		proven := membership.admits(snap, process, att)
 		processGeneration, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
 		switch {
 		case selfChain[process.PID]:
@@ -350,6 +373,19 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			log.WarningLog.Printf("captured live pid %d marks session %s but its ancestry places it under %s — "+
 				"proven foreign: refused, LEFT ALIVE, never signalled, and not blocking cleanup (#7484)",
 				process.PID, sanitizedName, reason)
+		case unverifiedDaemon > 0:
+			// A cohort member whose ancestry ends at an UNVERIFIED af-daemon
+			// claimant — or at an af binary this build's parse cannot decide
+			// (#7496 R1) — blocks: the daemon may be a real af daemon whose
+			// exe was replaced (#7494 item 1) or a foreign carrier mounting
+			// the claim — and the refusal must be actionable: it carries the
+			// ancestry walk's own reason, which names the claimant pid and
+			// says only what the argv CLAIMS (#7496 R3), plus the remedy
+			// that acts on that pid. The claim still spares both processes
+			// from signals.
+			report(process.PID, fmt.Errorf(
+				"captured live pid %d marks session %s but is %s; %s",
+				process.PID, sanitizedName, reason, daemonClaimRemedy(unverifiedDaemon)))
 		case hasGeneration && generations.empty():
 			// An EMPTY cohort is the blind vanished-session sweep (cleanup.go): it
 			// captured no predecessor, so it has nothing to place this generation

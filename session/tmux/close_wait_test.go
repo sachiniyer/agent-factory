@@ -257,8 +257,7 @@ func TestCloseAndWaitForPaneExit_VanishedPlacedCarrierLeavesTheCloseKnown(t *tes
 	foreignHome := t.TempDir()
 	childPidFile := filepath.Join(dir, "child.pid")
 	daemon := exec.Command(os.Args[0])
-	daemon.Args = []string{"af", "--daemon",
-		"-test.run=^TestMarkedOrphanProcessesDecisionTable$"}
+	daemon.Args = []string{"af", "--daemon"}
 	daemon.Env = append(os.Environ(),
 		decisionDaemonEnv+"=1",
 		decisionDaemonSpecEnv+"="+name+"\t"+home+"\t"+gen+"\t"+childPidFile,

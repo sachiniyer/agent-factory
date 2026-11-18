@@ -6,6 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -141,14 +144,27 @@ func TestExeAttestsAFRevalidatesTheInstance(t *testing.T) {
 
 // The bound: an exe read that cannot answer — a stalled filesystem is a real
 // shape — expires as UNVERIFIED, the fail-closed direction, rather than
-// holding the sweep.
+// holding the sweep. The stall is releasable AND its worker must finish in
+// cleanup: the flight set is process-global, so a permanently stalled read
+// would make every later attestation of this instance — the next -count
+// iteration, any shuffled test — join the dead flight instead of using the
+// restored opener (#7496).
 func TestExeAttestsAFHonoursTheBudget(t *testing.T) {
 	oldOpen, oldBudget := exeOpenFn, exeAttestBudget
+	gate := make(chan struct{})
 	exeOpenFn = func(pid int) (*os.File, bool) {
-		select {} // a read that never answers
+		<-gate // a read that answers only when released
+		return nil, false
 	}
 	exeAttestBudget = 50 * time.Millisecond
-	t.Cleanup(func() { exeOpenFn, exeAttestBudget = oldOpen, oldBudget })
+	t.Cleanup(func() {
+		close(gate)
+		require.Eventually(t, func() bool {
+			return attestFlights.inFlightCount() == 0
+		}, 5*time.Second, 5*time.Millisecond,
+			"the stalled flight's worker must finish in cleanup, not leak into later attestations")
+		exeOpenFn, exeAttestBudget = oldOpen, oldBudget
+	})
 
 	start := time.Now()
 	self, err := Lookup(os.Getpid())
@@ -156,4 +172,187 @@ func TestExeAttestsAFHonoursTheBudget(t *testing.T) {
 	require.False(t, ExeAttestsAF(self), "an attestation that cannot answer inside the budget is unverified")
 	require.Less(t, time.Since(start), 5*time.Second,
 		"the budget, not the stalled read, ends the wait")
+}
+
+// The stall that used to leak a goroutine, thread and fd PER ATTEMPT holds
+// ONE worker now: concurrent attestations of the same (pid, StartID) share
+// a single in-flight read, and a caller whose budget expires while it runs
+// — or that arrives after others expired — joins that worker rather than
+// spawning another (#7494 item 2).
+func TestExeAttestsAFSingleFlightsAStalledRead(t *testing.T) {
+	oldOpen, oldBudget := exeOpenFn, exeAttestBudget
+	var workers atomic.Int32
+	gate := make(chan struct{})
+	exeOpenFn = func(pid int) (*os.File, bool) {
+		workers.Add(1)
+		<-gate
+		return nil, false
+	}
+	exeAttestBudget = 30 * time.Millisecond
+	t.Cleanup(func() {
+		close(gate)
+		require.Eventually(t, func() bool {
+			return attestFlights.inFlightCount() == 0
+		}, 5*time.Second, 5*time.Millisecond,
+			"the stalled flight's worker must finish in cleanup, not leak into later attestations")
+		exeOpenFn, exeAttestBudget = oldOpen, oldBudget
+	})
+
+	p := Process{PID: 424242, StartID: 7}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ExeAttestsAF(p)
+		}()
+	}
+	wg.Wait()
+	require.Equal(t, int32(1), workers.Load(),
+		"eight expired attestations of one stalled instance must share ONE worker")
+
+	// A later attempt while the read is still wedged joins the same worker —
+	// the flight, not another spawn, is what it waits on.
+	ExeAttestsAF(p)
+	require.Equal(t, int32(1), workers.Load())
+
+	// And the flight itself is all that remains: one shared record holding
+	// one channel and one result, not one channel per abandoned waiter —
+	// DoChan retained each timed-out caller until the worker finished, the
+	// same leak in another shape (#7496).
+	require.Equal(t, 1, attestFlights.inFlightCount(),
+		"expired waiters must leave nothing behind — a stalled read holds constant memory")
+	f, _ := attestFlights.begin(flightKey{attestKey{pid: p.PID, startID: p.StartID}, false})
+	require.Equal(t, 1, f.chans,
+		"every waiter shares the one completion channel — none are retained per attempt")
+	// The test's own begin was a follower join on the still-running
+	// flight, so it adds no worker and no channel either.
+	require.Equal(t, int32(1), workers.Load())
+}
+
+// One sweep scope pays the kernel read once per claimant instance no matter
+// how many candidate paths meet it (#7494 item 2). The memo keys the
+// INSTANCE — a recycled pid under a new StartID attests anew — and a fresh
+// scope retries what the last sweep could not verify, so a wedged-mount
+// verdict never pins forever.
+func TestExeAttestationsMemoizesPerSweep(t *testing.T) {
+	oldOpen := exeOpenFn
+	var opens atomic.Int32
+	exeOpenFn = func(pid int) (*os.File, bool) {
+		opens.Add(1)
+		return nil, false
+	}
+	t.Cleanup(func() { exeOpenFn = oldOpen })
+
+	p := Process{PID: 424243, StartID: 7}
+	att := NewExeAttestations()
+	for range 5 {
+		require.False(t, att.AttestsAF(p))
+	}
+	require.Equal(t, int32(1), opens.Load(), "one scope attests an instance once")
+
+	require.False(t, att.AttestsAF(Process{PID: p.PID, StartID: 8}),
+		"the same pid under a new StartID is a new instance")
+	require.Equal(t, int32(2), opens.Load())
+
+	require.False(t, NewExeAttestations().AttestsAF(p),
+		"a new sweep retries what the last one could not verify")
+	require.Equal(t, int32(3), opens.Load())
+
+	var unscoped *ExeAttestations
+	require.False(t, unscoped.AttestsAF(p), "nil scope attests directly")
+	require.Equal(t, int32(4), opens.Load())
+}
+
+// An exec keeps pid and StartID but swaps the executable image: a claimant
+// that attested as an af build and then exec'd a foreign binary must not
+// carry the old verdict — StartID does not change on exec, so the memo
+// re-checks the exe's (dev,ino) before trusting a cached positive (#7496).
+// The identity seam answers for whatever file the open will present, so the
+// memo sees the same image the attestation reads.
+func TestExeAttestationsRevalidatesTheExecutableImage(t *testing.T) {
+	oldOpen, oldID := exeOpenFn, exeIdentityFn
+	var opens atomic.Int32
+	var image atomic.Value
+	image.Store(os.Args[0])
+	exeOpenFn = func(pid int) (*os.File, bool) {
+		opens.Add(1)
+		f, err := os.Open(image.Load().(string))
+		return f, err == nil
+	}
+	exeIdentityFn = func(pid int) (exeID, bool) {
+		st, err := os.Stat(image.Load().(string))
+		if err != nil {
+			return exeID{}, false
+		}
+		sys, ok := st.Sys().(*syscall.Stat_t)
+		if !ok {
+			return exeID{}, false
+		}
+		return exeID{dev: uint64(uint32(sys.Dev)), ino: sys.Ino}, true
+	}
+	t.Cleanup(func() { exeOpenFn, exeIdentityFn = oldOpen, oldID })
+
+	self, err := Lookup(os.Getpid())
+	require.NoError(t, err)
+	att := NewExeAttestations()
+	require.True(t, att.AttestsAF(self), "this test build attests as af-module")
+	require.True(t, att.AttestsAF(self), "the same image answers from the memo")
+	require.Equal(t, int32(1), opens.Load())
+
+	// The instance execs a foreign build: the exe identity changes, so the
+	// cached positive must not ride the old image.
+	image.Store(sleeper.Named(t, filepath.Join(t.TempDir(), "af")))
+	require.False(t, att.AttestsAF(self),
+		"a different image under the same (pid,StartID) re-attests — the old verdict cannot carry over")
+	require.False(t, att.AttestsAF(self), "the new image's verdict memoizes too")
+	require.Equal(t, int32(2), opens.Load(),
+		"the image change forced exactly one re-attestation")
+}
+
+// The revalidation is part of the bounded operation: on darwin it reads
+// exePath plus a stat on the executable's filesystem, so a stalled mount
+// after a first positive attestation must expire as unverified — not hang
+// the reap outside the timer (#7496). A synchronous revalidation would
+// park on the gate forever; bounded, the call falls through to a
+// re-attestation that is itself bounded.
+func TestExeAttestationsRevalidationIsBounded(t *testing.T) {
+	oldOpen, oldID, oldBudget := exeOpenFn, exeIdentityFn, exeAttestBudget
+	gate := make(chan struct{})
+	var opens atomic.Int32
+	exeOpenFn = func(pid int) (*os.File, bool) {
+		opens.Add(1)
+		f, err := os.Open(os.Args[0])
+		return f, err == nil
+	}
+	exeIdentityFn = func(pid int) (exeID, bool) {
+		<-gate // a revalidation read that cannot answer
+		return exeID{}, false
+	}
+	exeAttestBudget = 50 * time.Millisecond
+	t.Cleanup(func() {
+		close(gate)
+		require.Eventually(t, func() bool {
+			return attestFlights.inFlightCount() == 0
+		}, 5*time.Second, 5*time.Millisecond,
+			"the stalled flight's worker must finish in cleanup, not leak into later attestations")
+		exeOpenFn, exeIdentityFn, exeAttestBudget = oldOpen, oldID, oldBudget
+	})
+
+	self, err := Lookup(os.Getpid())
+	require.NoError(t, err)
+	att := NewExeAttestations()
+	require.True(t, att.AttestsAF(self), "the first attestation memoizes a positive")
+
+	// The memo now holds a positive, and the identity seam is wedged: a
+	// synchronous revalidation would never return. Bounded, it expires as
+	// unverified — the fail-closed direction.
+	done := make(chan bool, 1)
+	go func() { done <- att.AttestsAF(self) }()
+	select {
+	case v := <-done:
+		require.False(t, v, "a revalidation timeout reports unverified — fail-closed, not a hang")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the identity revalidation hung — it must run inside the same bounded, single-flighted operation")
+	}
 }

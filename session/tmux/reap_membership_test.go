@@ -79,21 +79,21 @@ func TestCohortMembershipAdmits(t *testing.T) {
 		return map[int]proctree.Process{p.PID: p, 100: member}
 	}
 
-	require.False(t, cohortMembership{}.admits(nil, member),
+	require.False(t, cohortMembership{}.admits(nil, member, nil),
 		"no evidence: nothing is admitted — markers alone never prove membership")
-	require.False(t, cohortMembership{PaneSIDs: map[int]bool{}}.admits(nil, member),
+	require.False(t, cohortMembership{PaneSIDs: map[int]bool{}}.admits(nil, member, nil),
 		"an EMPTY sid set is still no evidence: nothing is admitted")
-	require.True(t, cohortMembership{PaneSIDs: map[int]bool{40: true}}.admits(nil, member))
-	require.True(t, cohortMembership{Recorded: map[int]uint64{100: 9}}.admits(nil, member))
-	require.True(t, cohortMembership{Proven: map[int]uint64{100: 9}}.admits(nil, member),
+	require.True(t, cohortMembership{PaneSIDs: map[int]bool{40: true}}.admits(nil, member, nil))
+	require.True(t, cohortMembership{Recorded: map[int]uint64{100: 9}}.admits(nil, member, nil))
+	require.True(t, cohortMembership{Proven: map[int]uint64{100: 9}}.admits(nil, member, nil),
 		"captured inside the proven live tree is membership proof on its own")
-	require.False(t, cohortMembership{PaneSIDs: map[int]bool{41: true}}.admits(nil, member),
+	require.False(t, cohortMembership{PaneSIDs: map[int]bool{41: true}}.admits(nil, member, nil),
 		"a foreign SID is not membership however the markers read")
-	require.False(t, cohortMembership{Recorded: map[int]uint64{100: 8}}.admits(nil, member),
+	require.False(t, cohortMembership{Recorded: map[int]uint64{100: 8}}.admits(nil, member, nil),
 		"a recycled pid with a different StartID is not the recorded process")
-	require.False(t, cohortMembership{Recorded: map[int]uint64{101: 9}}.admits(nil, member),
+	require.False(t, cohortMembership{Recorded: map[int]uint64{101: 9}}.admits(nil, member, nil),
 		"a different pid carrying the same StartID is not the recorded process")
-	require.False(t, cohortMembership{Proven: map[int]uint64{100: 8}}.admits(nil, member),
+	require.False(t, cohortMembership{Proven: map[int]uint64{100: 8}}.admits(nil, member, nil),
 		"a recycled pid with a different StartID was never inside the tree")
 
 	// The SID voucher is bound to the recorded leader's StartID (#7435 R8):
@@ -103,24 +103,24 @@ func TestCohortMembershipAdmits(t *testing.T) {
 	// minted matching markers, so it vouches for nothing.
 	require.True(t,
 		cohortMembership{PaneSIDs: map[int]bool{40: true}, Recorded: map[int]uint64{40: 5}}.
-			admits(snapWith(leader), member),
+			admits(snapWith(leader), member, nil),
 		"the recorded leader still heading its session vouches for its members")
 	require.False(t,
 		cohortMembership{PaneSIDs: map[int]bool{40: true}, Recorded: map[int]uint64{40: 5}}.
-			admits(snapWith(recycledLeader), member),
+			admits(snapWith(recycledLeader), member, nil),
 		"a recycled leader pid heading a session it never led must not vouch")
 	require.True(t,
 		cohortMembership{PaneSIDs: map[int]bool{40: true}, Proven: map[int]uint64{40: 5}}.
-			admits(snapWith(leader), member),
+			admits(snapWith(leader), member, nil),
 		"the proven capture's own leader identity binds the voucher the same way")
 	require.False(t,
 		cohortMembership{PaneSIDs: map[int]bool{40: true}}.
-			admits(snapWith(leader), member),
+			admits(snapWith(leader), member, nil),
 		"a live leader the evidence cannot bind to an identity vouches for nothing — "+
 			"admitting on SID alone would trust a name, not a process")
 	require.True(t,
 		cohortMembership{PaneSIDs: map[int]bool{40: true}, Recorded: map[int]uint64{40: 5}}.
-			admits(snapWith(member), member),
+			admits(snapWith(member), member, nil),
 		"the session persists through its members when the leader is gone")
 }
 
@@ -133,11 +133,11 @@ func TestCohortMembershipAdmitsByDescentFromTheProvenTree(t *testing.T) {
 	snap := map[int]proctree.Process{50: proven, 60: child}
 	membership := cohortMembership{Proven: map[int]uint64{50: 7}}
 
-	require.True(t, membership.admits(snap, child),
+	require.True(t, membership.admits(snap, child, nil),
 		"a child of a proven member is inside the proven tree whatever the env scan says")
-	require.False(t, cohortMembership{Proven: map[int]uint64{50: 99}}.admits(snap, child),
+	require.False(t, cohortMembership{Proven: map[int]uint64{50: 99}}.admits(snap, child, nil),
 		"a reused ancestor pid with a different StartID proves nothing")
-	require.False(t, cohortMembership{PaneSIDs: map[int]bool{40: true}}.admits(snap, child),
+	require.False(t, cohortMembership{PaneSIDs: map[int]bool{40: true}}.admits(snap, child, nil),
 		"descent cannot help without a proven member to reach")
 }
 
@@ -176,7 +176,7 @@ func TestMarkedOrphanProcessesRequiresSessionMembershipBeyondMarkers(t *testing.
 
 	marked, _, err := markedOrphanProcesses(
 		[]proctree.Process{member, unadmitted, ownChild}, name, home,
-		fixtureCohort(gen), membership, nil)
+		fixtureCohort(gen), membership, nil, nil)
 	require.Error(t, err, "an unadmitted marker-carrier is reported, not silently skipped")
 	require.Contains(t, err.Error(), "cannot be proven a member")
 	require.Contains(t, err.Error(), strconv.Itoa(unadmitted.PID),
@@ -228,7 +228,7 @@ func TestVanishedSessionSweepRefusesAnUnprovableHomeSurvivor(t *testing.T) {
 	// The same process read as a candidate directly shows the per-pid split:
 	// foreign is skipped by proof, unproven blocks.
 	marked, _, inspectErr := markedOrphanProcesses(
-		[]proctree.Process{survivor}, name, ownHome, fixtureCohort(gen), membership, nil)
+		[]proctree.Process{survivor}, name, ownHome, fixtureCohort(gen), membership, nil, nil)
 	require.Error(t, inspectErr)
 	require.Contains(t, inspectErr.Error(), strconv.Itoa(survivor.PID))
 	require.Contains(t, inspectErr.Error(), "cannot be proven to name this home")
@@ -273,7 +273,7 @@ func TestClassifyCaptureAncestryProtectsTheReapersOwnDescendant(t *testing.T) {
 		60: {PID: 60, PPID: 50, Comm: "sleep"},
 		50: {PID: 50, PPID: 1, Comm: "af"},
 	}
-	reason, _, boundary := classifyCaptureAncestry(snap, 60, 50)
+	reason, _, boundary, _ := classifyCaptureAncestry(snap, 60, 50, nil)
 	require.Equal(t, protectReasonSelfSubtree, reason,
 		"a captured process that reaches the reaper with no tmux between is the reaper's own descendant")
 	require.False(t, boundary)
@@ -310,7 +310,7 @@ func TestClassifyCaptureAncestryReportsTheTmuxBoundaryWithoutProtecting(t *testi
 
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
-	reason, _, boundary := classifyCaptureAncestry(snap, paneP.PID, os.Getpid())
+	reason, _, boundary, _ := classifyCaptureAncestry(snap, paneP.PID, os.Getpid(), nil)
 	require.Equal(t, "", reason,
 		"the pane's walk ends eligible at the server — it is what protects the pane, not what protects FROM it")
 	require.True(t, boundary,
@@ -331,7 +331,7 @@ func TestClassifyCaptureAncestryProtectsUnprovenAncestry(t *testing.T) {
 		600001: {PID: 600001, PPID: 600000, Comm: "sleep"},
 		600000: deadAncestor,
 	}
-	reason, _, boundary := classifyCaptureAncestry(snap, 600001, os.Getpid())
+	reason, _, boundary, _ := classifyCaptureAncestry(snap, 600001, os.Getpid(), nil)
 	require.Equal(t, protectReasonUnproven, reason,
 		"an af-comm ancestor whose argv cannot be read keeps the carrier unattributable")
 	require.False(t, boundary)
@@ -343,16 +343,14 @@ func TestClassifyCaptureAncestryProtectsUnprovenAncestry(t *testing.T) {
 // and an eligible one both stay reported so a cleanup-authorizing caller
 // still refuses (#7435 R3/R7).
 func TestReportableSurvivorsKeepsOnlyTheUnattributableAndTheEligible(t *testing.T) {
-	if os.Getenv(afDaemonSleepEnv) == "1" {
-		time.Sleep(5 * time.Minute)
-		return
-	}
 	// Positively placed: a descendant of a real af-module build running
 	// af --daemon argv. The helper's argv CLAIMS the daemon; the test
 	// binary's kernel-attested module build is what VERIFIES it (#7491),
 	// so this member is spared by PROOF and filtered out of the report.
-	daemon := exec.Command(os.Args[0], "-test.run=^TestReportableSurvivorsKeepsOnlyTheUnattributableAndTheEligible$")
-	daemon.Args = []string{"af", "--daemon", "-test.run=^TestReportableSurvivorsKeepsOnlyTheUnattributableAndTheEligible$"}
+	// The argv is a pure claim — af's own parse accepts no -test.run
+	// (#7494 item 3), so the sleep role is env-dispatched in TestMain.
+	daemon := exec.Command(os.Args[0])
+	daemon.Args = []string{"af", "--daemon"}
 	daemon.Env = append(os.Environ(), afDaemonSleepEnv+"=1")
 	daemon.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	require.NoError(t, daemon.Start())
@@ -414,7 +412,7 @@ func TestAFDaemonClassRulesOutAnUnreadableAncestorByItsTaskName(t *testing.T) {
 	// non-root caller, on linux it reads as init/systemd. Either way it is
 	// not an af daemon.
 	initProc := proctree.Process{PID: 1, Comm: "launchd"}
-	require.Equal(t, afDaemonNot, afDaemonClass(initProc),
+	require.Equal(t, afDaemonNot, afDaemonClass(initProc, nil),
 		"a non-af task name rules the daemon verdict out when argv cannot be read")
 
 	// An af-NAMED comm with unreadable argv is the case that must stay
@@ -422,7 +420,7 @@ func TestAFDaemonClassRulesOutAnUnreadableAncestorByItsTaskName(t *testing.T) {
 	if len(proctree.Argv(1)) == 0 {
 		// Only assertable where pid 1's argv is genuinely unreadable (darwin).
 		require.Equal(t, afDaemonUncertain,
-			afDaemonClass(proctree.Process{PID: 1, Comm: "af"}),
+			afDaemonClass(proctree.Process{PID: 1, Comm: "af"}, nil),
 			"an af-named comm keeps the unreadable-argv daemon case protected")
 	}
 }
@@ -438,7 +436,7 @@ func TestClassifyCaptureAncestryEndsEligibleAtAnUnreadableTopOfChain(t *testing.
 		4242: survivor,
 		1:    {PID: 1, PPID: 0, Comm: "launchd"},
 	}
-	reason, _, boundary := classifyCaptureAncestry(snap, survivor.PID, os.Getpid())
+	reason, _, boundary, _ := classifyCaptureAncestry(snap, survivor.PID, os.Getpid(), nil)
 	require.Equal(t, "", reason,
 		"a survivor reparented to the unreadable top of chain stays reapable")
 	require.False(t, boundary)
@@ -455,10 +453,10 @@ func TestAFDaemonClassOnDarwinUsesTheKernelTaskNameForLaunchd(t *testing.T) {
 	require.Empty(t, proctree.Argv(1),
 		"launchd must not answer KERN_PROCARGS2 to a foreign uid — the premise this test pins")
 	require.Equal(t, afDaemonNot,
-		afDaemonClass(proctree.Process{PID: 1, Comm: "launchd"}),
+		afDaemonClass(proctree.Process{PID: 1, Comm: "launchd"}, nil),
 		"launchd's task name rules it out — the survivor reparented to it stays reapable")
 	require.Equal(t, afDaemonUncertain,
-		afDaemonClass(proctree.Process{PID: 1, Comm: "af"}),
+		afDaemonClass(proctree.Process{PID: 1, Comm: "af"}, nil),
 		"an af-named unreadable process stays protected even at the top of the chain")
 }
 
@@ -477,13 +475,8 @@ const afDaemonSleepEnv = "AF_TEST_AFDAEMON_SLEEP"
 //   - UNVERIFIED: a foreign binary (`yes`) under the same forged argv —
 //     claimed, never proven: still never signalled, but blocking.
 func TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation(t *testing.T) {
-	if os.Getenv(afDaemonSleepEnv) == "1" {
-		time.Sleep(5 * time.Minute)
-		return
-	}
 	verified := exec.Command(os.Args[0])
-	verified.Args = []string{"af", "--daemon",
-		"-test.run=^TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation$"}
+	verified.Args = []string{"af", "--daemon"}
 	verified.Env = append(os.Environ(), afDaemonSleepEnv+"=1")
 	require.NoError(t, verified.Start())
 	t.Cleanup(func() { _ = verified.Process.Kill(); _, _ = verified.Process.Wait() })
@@ -492,7 +485,7 @@ func TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation(t *testing.T
 	}, 5*time.Second, 20*time.Millisecond, "the daemon argv must land before the verdict is read")
 	verifiedProc, err := proctree.Lookup(verified.Process.Pid)
 	require.NoError(t, err)
-	require.Equal(t, afDaemonIs, afDaemonClass(verifiedProc),
+	require.Equal(t, afDaemonIs, afDaemonClass(verifiedProc, nil),
 		"a real af build running daemon argv is VERIFIED — at any install path")
 
 	// The forged carrier is the unsigned test sleeper under the name "af",
@@ -511,7 +504,7 @@ func TestAFDaemonClassDistinguishesTheClaimFromTheKernelAttestation(t *testing.T
 	}, 5*time.Second, 20*time.Millisecond, "the forged argv must land before the verdict is read")
 	forgedProc, err := proctree.Lookup(forged.Process.Pid)
 	require.NoError(t, err)
-	require.Equal(t, afDaemonUnverified, afDaemonClass(forgedProc),
+	require.Equal(t, afDaemonUnverified, afDaemonClass(forgedProc, nil),
 		"a foreign binary under af argv CLAIMS the daemon — it can never prove it")
 }
 
@@ -580,7 +573,7 @@ func TestMarkedOrphanProcessesAdmitsARehostedMemberByGenerationIdentity(t *testi
 	}
 	marked, _, err := markedOrphanProcesses(
 		[]proctree.Process{carrier}, name, home,
-		fixtureCohort(name+"-gen"), membership, nil)
+		fixtureCohort(name+"-gen"), membership, nil, nil)
 	require.NoError(t, err, "the re-hosted carrier must be admitted, not reported")
 	require.Equal(t, []proctree.Process{carrier}, marked,
 		"tier 2 admits the marker carrier kernel membership cannot see")
@@ -602,7 +595,7 @@ func TestMarkedOrphanProcessesRefusesTheTier2Edges(t *testing.T) {
 	carrierIsRefused := func(membership cohortMembership, why string) {
 		t.Helper()
 		marked, _, err := markedOrphanProcesses(
-			[]proctree.Process{carrier}, name, home, cohort, membership, nil)
+			[]proctree.Process{carrier}, name, home, cohort, membership, nil, nil)
 		require.Error(t, err, why)
 		require.Contains(t, err.Error(), "cannot be proven a member", why)
 		require.Empty(t, marked, why)
@@ -658,7 +651,7 @@ func TestMarkedOrphanProcessesRefusesTheTier2Edges(t *testing.T) {
 			Recorded: map[int]uint64{400001: 1},
 			Root:     proctree.Process{PID: 400001, StartID: 1},
 			AgentExe: filepath.Base(os.Args[0]),
-		}, nil)
+		}, nil, nil)
 	require.NoError(t, err, "the same carrier with a predating root must admit — the edge pins differ")
 	require.Equal(t, []proctree.Process{carrier}, marked)
 }
@@ -682,7 +675,7 @@ func TestMarkedOrphanProcessesTier2AdmitsOnlyTheAgentProgram(t *testing.T) {
 				Recorded: map[int]uint64{400001: 1},
 				Root:     proctree.Process{PID: 400001, StartID: 1},
 				AgentExe: agentExe,
-			}, nil)
+			}, nil, nil)
 		return marked, err
 	}
 	exe := filepath.Base(os.Args[0])
@@ -761,7 +754,7 @@ func TestMarkedOrphanProcessesTier2AdmitsOnlyTheProgramSubtree(t *testing.T) {
 	}
 	sweep := func(candidates ...proctree.Process) ([]proctree.Process, error) {
 		marked, _, err := markedOrphanProcesses(
-			candidates, "af_tier2_sub", home, fixtureCohort("af_tier2_sub-gen"), membership, nil)
+			candidates, "af_tier2_sub", home, fixtureCohort("af_tier2_sub-gen"), membership, nil, nil)
 		return marked, err
 	}
 
@@ -817,7 +810,7 @@ func TestMarkedOrphanProcessesExcludesACarrierBehindAForeignTmuxServer(t *testin
 			PaneSIDs: map[int]bool{400001: true},
 			Recorded: map[int]uint64{400001: 1},
 			Root:     proctree.Process{PID: 400001, StartID: 1},
-		}, nil)
+		}, nil, nil)
 	require.Error(t, inspectErr,
 		"an excluded carrier is REPORTED, never silently left (#7435, Codex 4597265500)")
 	require.Contains(t, inspectErr.Error(), "pid "+strconv.Itoa(paneP.PID)+" ",
@@ -843,7 +836,7 @@ func TestMarkedOrphanProcessesReportsARefusedPidOnceAcrossPasses(t *testing.T) {
 	for range 3 {
 		_, _, err := markedOrphanProcesses(
 			[]proctree.Process{carrier}, name, home,
-			fixtureCohort(name+"-gen"), cohortMembership{}, reported)
+			fixtureCohort(name+"-gen"), cohortMembership{}, reported, nil)
 		errs = append(errs, err)
 	}
 	require.Error(t, errs[0], "the first pass that sees a refused pid must report it")
@@ -1118,26 +1111,9 @@ const (
 // close_dead_pane_test.go pair TestCloseAndWaitForPaneExit_VanishedSighup*
 // on an isolated server.
 func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
-	if os.Getenv(decisionDaemonEnv) == "1" {
-		// Inside the forged-argv daemon: publish the marked child's pid,
-		// then park. exec.Command with a clean Env hands the child only the
-		// fixture's markers.
-		spec := strings.Split(os.Getenv(decisionDaemonSpecEnv), "\t")
-		require.Len(t, spec, 4)
-		cmd := exec.Command("sleep", "300")
-		cmd.Env = []string{
-			"PATH=" + os.Getenv("PATH"),
-			EnvMarkerSession + "=" + spec[0],
-			EnvMarkerHome + "=" + spec[1],
-			EnvMarkerGeneration + "=" + spec[2],
-		}
-		require.NoError(t, cmd.Start())
-		require.NoError(t, os.WriteFile(spec[3],
-			[]byte(strconv.Itoa(cmd.Process.Pid)), 0o600))
-		_, _ = cmd.Process.Wait()
-		time.Sleep(5 * time.Minute)
-		return
-	}
+	// The daemon-child role this fixture used to re-enter here now runs in
+	// TestMain under decisionDaemonEnv: the daemon's argv must be a pure
+	// `af --daemon` claim — af's own parse rejects -test.run (#7494 item 3).
 	shrinkReapWaits(t)
 	const name = "af_decision_table"
 	home := t.TempDir()
@@ -1149,8 +1125,7 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 		dir := t.TempDir()
 		childPidFile := filepath.Join(dir, "child.pid")
 		daemon := exec.Command(os.Args[0])
-		daemon.Args = []string{"af", "--daemon",
-			"-test.run=^TestMarkedOrphanProcessesDecisionTable$"}
+		daemon.Args = []string{"af", "--daemon"}
 		daemon.Env = append(os.Environ(),
 			decisionDaemonEnv+"=1",
 			decisionDaemonSpecEnv+"="+name+"\t"+home+"\t"+gen+"\t"+childPidFile)
@@ -1332,17 +1307,19 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			wantPlaced: "ancestry places it under",
 		},
 		{
-			// #7491 item 1: argv CLAIMS daemon ancestry the kernel
-			// executable does not attest — `exec -a af` on a NON-af
+			// #7491 item 1 + #7494 item 1: argv CLAIMS daemon ancestry the
+			// kernel executable does not attest — `exec -a af` on a NON-af
 			// binary. The claim still spares the child from signals
 			// (the safe direction), but it can never make the close
-			// Known around it: refused, reported, BLOCKING.
-			name: "no proof, forged af-daemon argv — refused, blocking",
+			// Known around it: refused, reported, BLOCKING — and the
+			// refusal NAMES the claimant as an af daemon that could not
+			// be verified, with the remedy.
+			name: "no proof, forged af-daemon argv — refused, blocking, named with remedy",
 			build: func(t *testing.T) ([]proctree.Process, cohortMembership) {
 				child := spawnForgedDaemonChild(t)
 				return []proctree.Process{child}, cohortMembership{Recorded: map[int]uint64{child.PID: child.StartID + 1}}
 			},
-			wantErr: "cannot be proven",
+			wantErr: "restart it under its own AF_HOME",
 		},
 		{
 			// Every foreign-evidence column needs a row with proof
@@ -1420,7 +1397,7 @@ func TestMarkedOrphanProcessesDecisionTable(t *testing.T) {
 			defer log.WarningLog.SetOutput(oldWarnings)
 			marked, _, err := markedOrphanProcesses(
 				candidates, name, home,
-				fixtureCohort(gens...), membership, map[int]bool{})
+				fixtureCohort(gens...), membership, map[int]bool{}, nil)
 			for _, candidate := range candidates {
 				pid := strconv.Itoa(candidate.PID)
 				if row.wantPlaced != "" {

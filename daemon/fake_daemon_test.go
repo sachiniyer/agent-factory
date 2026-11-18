@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/testguard/fakedaemon"
 )
 
 // shSingleQuote wraps s in single quotes for safe embedding in a `bash -c`
@@ -37,12 +40,12 @@ func shSingleQuote(s string) string {
 // environ. Keeping the environ out of this one means an argv-only caller never
 // depends on environ access (#6195).
 //
-// The underlying program is bash running `script`. `script` MUST be a compound
-// command (contain a `;`, a loop, etc.) so bash's single-simple-command exec
-// optimization does not replace the crafted argv with the child's. The process
-// and any children share a new process group so cleanup can reap the whole tree
-// — bash dies by the test's SIGTERM/SIGKILL, orphaning any `sleep` child in the
-// group.
+// The underlying program is the arg-ignoring testguard/fakedaemon binary:
+// a pure af-daemon argv is one no interpreter can carry — every scripting
+// flag is a token af's own root-flag parse rejects (#7494 item 3) — so
+// `script` names the fakedaemon's env contract (see fakeDaemonScriptEnv),
+// not a command line. The process and any children share a new process
+// group so cleanup can reap the whole tree.
 func spawnFakeDaemonProc(t *testing.T, argv0, script string, extraArgs ...string) *exec.Cmd {
 	t.Helper()
 	cmd := fakeDaemonCmd(t, argv0, script, extraArgs...)
@@ -69,22 +72,82 @@ func spawnFakeDaemonHomeProc(t *testing.T, argv0, script string, extraArgs ...st
 // ENVIRONMENT before it execs can do so: AF-home scoping reads a daemon's
 // AGENT_FACTORY_HOME from /proc/<pid>/environ, which is fixed at exec and
 // cannot be set afterwards.
+//
+// The fake is the arg-ignoring testguard/fakedaemon binary under a rewritten
+// argv[0], not a bash -c script: a pure af-daemon argv is one no interpreter
+// can carry — every scripting flag (-c, -e, -s) is a token af's own
+// root-flag parse rejects, and ArgvIsAFDaemon mirrors that parse (#7494
+// item 3). `script` therefore names the fakedaemon's env contract rather
+// than a command line: "sleep N; :", "read line" (a blocking read),
+// `trap "" TERM; : > <ready>; <sleep>` for the TERM-ignoring sentinel
+// shape, and testguard.BoundedSpin's output — each maps to FAKE_* env.
 func fakeDaemonCmd(t *testing.T, argv0, script string, extraArgs ...string) *exec.Cmd {
 	t.Helper()
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash not available: %v", err)
-	}
-	// Build: exec -a <argv0> bash -c <script> <argv0> <extraArgs...>
-	// The resulting bash process argv is [<argv0>, "-c", <script>, <argv0>, extraArgs...].
-	parts := []string{"exec", "-a", shSingleQuote(argv0), "bash", "-c", shSingleQuote(script), shSingleQuote(argv0)}
-	for _, a := range extraArgs {
-		parts = append(parts, shSingleQuote(a))
-	}
-	cmd := exec.Command("bash", "-c", strings.Join(parts, " "))
+	cmd := exec.Command(fakedaemon.Path(t))
+	// The argv is exactly what the fixture promises: argv0 plus the flag
+	// tail — no interpreter token between them, so /proc/<pid>/cmdline
+	// reports the claim directly.
+	cmd.Args = append([]string{argv0}, extraArgs...)
+	cmd.Env = append(os.Environ(), fakeDaemonScriptEnv(t, script)...)
 	// Put the process (and its children) in their own group so cleanup can reap
-	// the whole tree — bash dies by signal, orphaning any `sleep` child.
+	// the whole tree — the fake dies by signal like bash did.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
+}
+
+var (
+	fakeDaemonSleepScript = regexp.MustCompile(`^sleep ([\d.]+); :$`)
+	fakeDaemonTrapScript  = regexp.MustCompile(`^trap "" TERM; : > (\S+); (.*)$`)
+	fakeDaemonSpinScript  = regexp.MustCompile(`^_af_spin_i=0; while \[ "\$_af_spin_i" -lt (\d+) \]; do sleep ([\d.]+);`)
+)
+
+// fakeDaemonScriptEnv maps the script spec to the fakedaemon binary's
+// FAKE_* env; an unmapped spec is a fixture bug, so it fails loudly.
+func fakeDaemonScriptEnv(t *testing.T, script string) []string {
+	t.Helper()
+	if script == "read line" {
+		return nil
+	}
+	if m := fakeDaemonSleepScript.FindStringSubmatch(script); m != nil {
+		return []string{"FAKE_SLEEP=" + m[1]}
+	}
+	if m := fakeDaemonTrapScript.FindStringSubmatch(script); m != nil {
+		return append([]string{"FAKE_TERM=ignore", "FAKE_READY=" + m[1]}, fakeDaemonSleepEnv(t, m[2])...)
+	}
+	if secs, ok := fakeDaemonSpinSecs(script); ok {
+		return []string{fmt.Sprintf("FAKE_SLEEP=%g", secs)}
+	}
+	t.Fatalf("fake daemon script %q has no fakedaemon env mapping", script)
+	return nil
+}
+
+// fakeDaemonSleepEnv maps the tail of a trap spec — "sleep N; :" or a
+// BoundedSpin loop — to a FAKE_SLEEP duration.
+func fakeDaemonSleepEnv(t *testing.T, tail string) []string {
+	t.Helper()
+	if m := fakeDaemonSleepScript.FindStringSubmatch(tail); m != nil {
+		return []string{"FAKE_SLEEP=" + m[1]}
+	}
+	if secs, ok := fakeDaemonSpinSecs(tail); ok {
+		return []string{fmt.Sprintf("FAKE_SLEEP=%g", secs)}
+	}
+	t.Fatalf("fake daemon sleep spec %q has no fakedaemon env mapping", tail)
+	return nil
+}
+
+// fakeDaemonSpinSecs reads the lifetime out of a testguard.BoundedSpin
+// script text: iterations × period.
+func fakeDaemonSpinSecs(script string) (float64, bool) {
+	m := fakeDaemonSpinScript.FindStringSubmatch(script)
+	if m == nil {
+		return 0, false
+	}
+	iters, err1 := strconv.Atoi(m[1])
+	period, err2 := strconv.ParseFloat(m[2], 64)
+	if err1 != nil || err2 != nil {
+		return 0, false
+	}
+	return float64(iters) * period, true
 }
 
 // fakeDaemonHomeKey is the variable daemon scoping reads from a process's environ.
@@ -108,29 +171,21 @@ const fakeDaemonHomeKey = "AGENT_FACTORY_HOME"
 // the setup's timing rather than on the code under test (#6129, and again in
 // TestStopDaemon_SIGTERMFirst: "PID could not be bound to this home").
 //
-// The argv half also matters. spawnFakeDaemonProc runs `bash -c "exec -a <argv0>
-// bash ..."`, so the outer bash has a readable argv — ["bash", "-c", ...] — for a
-// moment BEFORE it execs into the crafted one. Classify it in that window and
-// argsAreDaemonBinary sees "bash" and writes the daemon off as foreign: an
-// assertion that should fail passes, and one that should pass fails, for a reason
-// that has nothing to do with the code under test.
-//
-// The environ half has a second window neither wait above covers: for a moment
-// after exec the child is still rewriting its initial environ block in place —
-// bash's startup variable pass temporarily NULs the '=' in a "KEY=VALUE" entry,
-// so AGENT_FACTORY_HOME that already read back correctly can read ABSENT on the
-// very next read. The classifier reads that as a default-home daemon, and with
-// no $HOME to resolve the default against it is daemonUnverifiable — the
-// fail-closed verdict the code under test then gets blamed for (#6705:
-// TestSigtermFallback_AmbiguousCandidates signaling only one of two fakes,
-// TestStopDaemon_ForeignHomePIDFileNotKilled erroring "could not be bound to
-// this home"). A first good environ read does not prove the block has settled;
+// The environ half matters more than one good read suggests. The predicate
+// the code under test runs — classifyDaemonHome or verifyScopedDaemon —
+// performs uid, environ, and path/frame reads of its own, and any of them
+// can fail transiently even after the environ itself reads back right. A
+// first good environ read does not prove the process is classifiable;
 // waitForFakeDaemonProvable polls the predicate itself until it decides.
+// (The interim bash recipe added a second hazard — its startup variable
+// pass rewrote the exec-time environ block in place — which the
+// arg-ignoring fakedaemon binary does not have: its environ is stable
+// from exec, so there is no interpreter-settle signal left to wait on.)
 //
 // When the environ stays unreadable (EnvUnknown) the test is SKIPPED with the
-// reason, not failed: on a SIP-enabled Mac with Apple's /bin/bash, this binary can
-// read its own environ but not the SIP-protected bash child's, so no amount of
-// waiting helps and the failure would say nothing about the code under test.
+// reason, not failed: on a SIP-enabled Mac a same-uid child's environ can still
+// be refused to this binary, so no amount of waiting helps and the failure
+// would say nothing about the code under test.
 //
 // The expected home is read from cmd.Env (the whole environment the child was
 // given), or from this process's environment when cmd.Env is nil. A child started
@@ -194,13 +249,9 @@ func fakeDaemonEnv(environ []string, key string) (string, bool) {
 // the code under test binds it with — the uid, environ, and path/frame reads
 // classifyDaemonHome (StopDaemon, the sigterm fallback's recorded-PID handling)
 // or verifyScopedDaemon (the reset scan) performs — not merely until one
-// environ read looks right. See waitForFakeDaemon for why a single good read
-// is not proof: the child rewrites its exec-time environ in place during bash
-// startup, so the settle signal is the rewrite being done, which a child of
-// the fake in /proc/<pid>/task/<pid>/children marks (bash finishes variable
-// init before it runs the script's first command, and every fake recipe opens
-// with `sleep`). The environ check is re-verified on every poll so a settled
-// read is never mistaken for a mid-rewrite one.
+// environ read looks right. A single good read is not proof: the predicate
+// can still fail transiently on its other per-process reads, so it is
+// re-polled here until it reaches a decisive verdict.
 //
 // Env spellings the recorded-PID classifier can never decide — a bare env with
 // no $HOME to expand the default in, a raw "~user", or a home that is (or
@@ -226,7 +277,7 @@ func waitForFakeDaemonProvable(t *testing.T, pid int, environ []string) {
 		return status == proctree.EnvAbsent
 	}
 	ready := func() bool {
-		if !envOK() || !fakeDaemonPastEnvScan(pid) {
+		if !envOK() {
 			return false
 		}
 		if fakeDaemonHomeIndecidable(pid, env, environ) {
@@ -285,24 +336,6 @@ func fakeDaemonHomeIndecidable(pid int, env string, environ []string) bool {
 		resolved = filepath.Join(cwd, env)
 	}
 	return isProcessRelativeProcfsHome(resolved) || homeSymlinkEntersProcessRelativeProcfs(resolved)
-}
-
-// fakeDaemonPastEnvScan reports whether the fake's bash has finished rewriting
-// its initial environ. During startup bash writes its variable table over the
-// exec-time block in place — a "KEY=VALUE" entry can transiently read back as
-// a bare "KEY" plus a bare value while it does — so one environ read that saw
-// the right value is no proof the block has settled. The rewrite happens in
-// initialize_shell_variables, before bash runs the script's first command;
-// every fake recipe's script opens with `sleep`, so a child in
-// /proc/<pid>/task/<pid>/children marks init complete. Where that file cannot
-// be read (no /proc, an older kernel) there is nothing better than the polling
-// itself, so this returns true.
-func fakeDaemonPastEnvScan(pid int) bool {
-	children, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
-	if err != nil {
-		return true
-	}
-	return len(strings.Fields(string(children))) > 0
 }
 
 // waitForFakeDaemonArgv blocks until cmd's process has exec'd into the crafted

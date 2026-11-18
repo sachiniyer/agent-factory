@@ -981,10 +981,10 @@ func TestLooksLikeDaemonArgv_DaemonFalseIsNotADaemon(t *testing.T) {
 		{[]string{"af", "--daemon=0"}, false},
 		{[]string{"af", "--daemon=f"}, false},
 		{[]string{"af", "--daemon=FALSE"}, false},
-		// An unparseable value keeps the pre-existing "the form is present"
-		// reading (TestArgsHaveDaemonFlag pins it since #342); cobra rejects a
-		// non-boolean, so no such process is ever live to classify.
-		{[]string{"af", "--daemon=maybe"}, true},
+		// An unparseable value is no claim at all under af's own parse —
+		// cobra exits on the non-boolean before RunE, so no such process is
+		// ever live to classify (#7494 item 3's strict parse).
+		{[]string{"af", "--daemon=maybe"}, false},
 		{[]string{"af", "sessions", "list"}, false},
 	} {
 		require.Equal(t, tc.want, LooksLikeDaemonArgv(tc.args), "argv %v", tc.args)

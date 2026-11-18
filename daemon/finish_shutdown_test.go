@@ -20,7 +20,7 @@ import (
 // channel that reports its exit.
 func fakeShutdownTarget(t *testing.T, home, script string) (ShutdownTarget, <-chan *os.ProcessState) {
 	t.Helper()
-	cmd := spawnFakeDaemonHomeProc(t, "af", script, "--daemon", "af-test")
+	cmd := spawnFakeDaemonHomeProc(t, "af", script, "--daemon")
 	pid := cmd.Process.Pid
 	waitForReady(t, fmt.Sprintf("pid=%d cmdline exposes --daemon", pid), func() bool { return isAgentFactoryDaemon(pid) })
 	exited := make(chan *os.ProcessState, 1)
@@ -154,7 +154,7 @@ func termIgnoringFakeDaemon(t *testing.T, home, name string) (*exec.Cmd, <-chan 
 	t.Helper()
 	ready := filepath.Join(home, name+"-ready")
 	cmd := spawnFakeDaemonHomeProc(t, "af", fmt.Sprintf(`trap "" TERM; : > %s; %s`, ready,
-		testguard.BoundedSpin(time.Second, 5*time.Minute)), "--daemon", "af-test")
+		testguard.BoundedSpin(time.Second, 5*time.Minute)), "--daemon")
 	pid := cmd.Process.Pid
 	waitForReady(t, fmt.Sprintf("%s pid=%d trapped TERM and exposes --daemon", name, pid), func() bool {
 		_, err := os.Stat(ready)

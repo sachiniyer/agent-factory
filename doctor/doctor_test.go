@@ -22,6 +22,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/testguard/fakedaemon"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -168,10 +169,10 @@ func snapshotOf(t *testing.T, pids ...int) func() (map[int]proctree.Process, err
 
 // spawnWithEnv starts a long-lived child owned by this test, with argv0 and
 // args controlling how its cmdline reads and env appended to the test's
-// environment. The child is a shell blocked on its `read` builtin against a
-// pipe this test holds open — a single process with NO descendants, so the
-// cleanup Kill can never orphan anything (a forked `sleep` here once leaked
-// the very orphans this suite hunts). Waits until the child's /proc environ
+// environment. The child is the arg-ignoring testguard/fakedaemon binary —
+// a single process with NO descendants, so the cleanup Kill can never
+// orphan anything (a forked `sleep` here once leaked the very orphans this
+// suite hunts). Waits until the child's /proc environ
 // is readable (the fork→exec window would otherwise race the scan).
 // It reads the child's environ through proctree, which since #1939 has a real
 // backend on both platforms we ship — so this runs on macOS rather than
@@ -181,8 +182,12 @@ func spawnWithEnv(t *testing.T, argv0 string, extraArgs []string, env map[string
 	t.Helper()
 	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
-	args := append([]string{argv0, "-c", "read line"}, extraArgs...)
-	c := &exec.Cmd{Path: "/bin/sh", Args: args, Env: os.Environ(), Stdin: stdinR}
+	// The child is the arg-ignoring fakedaemon binary under a rewritten
+	// argv[0]: an [af --daemon] claim is an argv no shell can carry — every
+	// interpreter flag (-c) is a token af's own root-flag parse rejects,
+	// and the classifier under test mirrors that parse (#7494 item 3).
+	args := append([]string{argv0}, extraArgs...)
+	c := &exec.Cmd{Path: fakedaemon.Path(t), Args: args, Env: os.Environ(), Stdin: stdinR}
 	for k, v := range env {
 		c.Env = append(c.Env, k+"="+v)
 	}

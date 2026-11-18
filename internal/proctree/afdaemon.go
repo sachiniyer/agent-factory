@@ -2,8 +2,8 @@ package proctree
 
 import (
 	"path/filepath"
-	"strconv"
-	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/afcli"
 )
 
 // ArgvIsAFDaemon reports whether args is the argv of an agent-factory daemon:
@@ -15,48 +15,45 @@ import (
 // space-joined string, so a binary installed under a path containing spaces
 // is classified correctly (#1214), and an exact "--daemon" token (or the
 // "--daemon=..." form) is required, so flags like --daemonize never match.
+//
+// Only a DECIDED claim counts here — ArgvDaemonClaimYes — because the stop
+// and kill paths this feeds must act on "ours" alone: an argv this build
+// cannot decide is protected on the reap path but never answered "yes" to a
+// signaller (#7496 R1).
 func ArgvIsAFDaemon(args []string) bool {
-	return ArgvHasDaemonFlag(args) && ArgvIsAFBinary(args)
+	return ArgvDaemonClaim(args) == afcli.DaemonClaimYes
 }
 
-// ArgvHasDaemonFlag reports whether argv contains "--daemon" as a discrete
-// argument (either bare or in the "--daemon=value" form). It deliberately
-// rejects substring matches like "--daemonize" or "--daemon-mode". Because it
-// scans real argv elements, spaces inside another argument (such as a spaced
-// binary path in argv[0]) can never fabricate or hide a "--daemon" token
-// (#1214).
-func ArgvHasDaemonFlag(args []string) bool {
-	for _, a := range args {
-		if a == "--daemon" {
-			return true
-		}
-		value, ok := strings.CutPrefix(a, "--daemon=")
-		if !ok {
-			continue
-		}
-		// `--daemon=false` is a client saying, explicitly, that it is NOT a
-		// daemon. Matching the prefix and calling it one made every such client
-		// a daemon to every caller: doctor counted it as a duplicate, the host
-		// scan offered it for a kill, and the #1004 pid guard would have
-		// accepted it as ours. The flag's VALUE is the answer; its name is only
-		// where the answer lives.
-		//
-		// Only an explicitly FALSE value flips the answer. An unparseable one
-		// ("--daemon=foo") keeps the long-standing "the form is present, so
-		// treat it as a daemon flag" reading that TestArgsHaveDaemonFlag has
-		// pinned since #342: that case is about recognizing the `--daemon=`
-		// FORM (as against `--daemonize`), and its value is a placeholder, not
-		// a boolean. It is also unobservable in practice — cobra rejects a
-		// non-boolean here, so no such process is ever live to classify — and
-		// narrowing a seam that gates signals on a hypothetical is not worth
-		// the blast radius.
-		enabled, err := strconv.ParseBool(value)
-		if err != nil {
-			return true
-		}
-		return enabled
+// ArgvDaemonClaim is af's own verdict on whether args could name a LIVE af
+// daemon under this build: argv[0] must be an af binary (ArgvIsAFBinary),
+// and the tail is run through af's real root flag definitions under cobra —
+// see afcli.DaemonClaimOf. The three answers matter differently to different
+// callers (#7496 R1):
+//
+//   - DaemonClaimYes: a decided claim — the reap path attests the kernel
+//     executable, and the stop/kill paths may act.
+//   - DaemonClaimNo: a decided refusal — help/version, daemon=false, or an
+//     argv af itself could never run a daemon under.
+//   - DaemonClaimUndecidable: this build cannot tell (an unknown flag, a
+//     pre-"--" positional that may name a subcommand the recognizer does not
+//     carry). On the reap path it must NEVER collapse to Not — it is
+//     Unverified, protected and blocking; on the stop and kill paths it is
+//     not-ours.
+func ArgvDaemonClaim(args []string) afcli.DaemonClaim {
+	if !ArgvIsAFBinary(args) {
+		return afcli.DaemonClaimNo
 	}
-	return false
+	return afcli.DaemonClaimOf(args)
+}
+
+// ArgvHasDaemonFlag reports whether argv's daemon claim is DECIDED: cobra
+// reaches af's root RunE with --daemon under af's own flag definitions
+// (#7494 item 3, cobra-decision form #7496). An undecidable argv answers
+// false — on the stop and kill paths "can't tell" is not-ours; the reap
+// path reads the full verdict through ArgvDaemonClaim instead, where it is
+// protected and blocking, never Not.
+func ArgvHasDaemonFlag(args []string) bool {
+	return ArgvDaemonClaim(args) == afcli.DaemonClaimYes
 }
 
 // ArgvIsAFBinary reports whether argv[0] is an agent-factory binary: installed
