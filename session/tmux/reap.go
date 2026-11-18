@@ -171,7 +171,7 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket stri
 		captured.Server = resolveServerIdentity(corroboratedServerSocket(captured.Server,
 			func() (int, string, error) {
 				return serverSocketPIDForWithin(cmdExec, socket, sanitizedName, time.Until(deadline))
-			}))
+			}), time.Until(deadline))
 	}
 	return captured, perr
 }

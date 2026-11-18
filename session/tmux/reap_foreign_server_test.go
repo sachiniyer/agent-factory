@@ -488,7 +488,7 @@ func TestVanishedSessionSweep_RealTmuxForeignServerCarrier(t *testing.T) {
 	require.NoError(t, err, string(out))
 	ownPID, ownSock, err := parseServerSocketReply(string(out))
 	require.NoError(t, err)
-	own := resolveServerIdentity(ServerIdentity{Socket: ownSock, PID: ownPID})
+	own := resolveServerIdentity(ServerIdentity{Socket: ownSock, PID: ownPID}, tmuxCommandTimeout)
 	require.True(t, own.valid(), "a real server answers with a complete identity")
 
 	// The FOREIGN server — the user's own tmux started inside a pane, the

@@ -337,7 +337,7 @@ func TestResolveServerIdentity_UnprovenPidKeepsNoNamespaceClaim(t *testing.T) {
 	}
 	t.Cleanup(func() { tmuxServerSignal, tmuxServerSocketBinding = oldSignal, oldBinding })
 
-	id := resolveServerIdentity(ServerIdentity{Socket: sock, PID: 4242, SessionID: "$7"})
+	id := resolveServerIdentity(ServerIdentity{Socket: sock, PID: 4242, SessionID: "$7"}, tmuxCommandTimeout)
 	require.True(t, id.valid(), "an unproven record still carries socket+pid for naming")
 	require.Zero(t, id.StartID, "an unproven pid must not borrow a local process's StartID")
 	require.Empty(t, id.PIDNS, "an unproven pid carries no namespace claim")
@@ -363,7 +363,7 @@ func TestResolveServerIdentity_ProvenPidStampsThisNamespace(t *testing.T) {
 	}
 	t.Cleanup(func() { tmuxServerSocketBinding = oldBinding })
 
-	id := resolveServerIdentity(ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid()})
+	id := resolveServerIdentity(ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid()}, tmuxCommandTimeout)
 	require.NotZero(t, id.StartID, "a proven pid stamps its local instance identity")
 	ns, _ := proctree.PIDNamespaceID()
 	require.Equal(t, ns, id.PIDNS, "PIDNS records the namespace the proof ran in")
@@ -377,6 +377,51 @@ func TestResolveServerIdentity_ProvenPidStampsThisNamespace(t *testing.T) {
 		"a proven pid restores the pty channel's own answer")
 }
 
+// The proof spends only what the caller's deadline has left (Codex on
+// #7581): a binding read that outruns the budget is unproven — PIDNS empty,
+// StartID zero, undecidable — and the stamp is never blocked on it. The
+// abandoned worker writes to a buffered channel and exits on release
+// without touching the restored seam.
+func TestResolveServerIdentity_ProofBeyondTheDeadlineIsUnproven(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRead := func() { releaseOnce.Do(func() { close(release) }) }
+	workerDone := make(chan struct{})
+	oldBinding := tmuxServerSocketBinding
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		<-release
+		close(workerDone) // the staged read completing after abandonment
+		return socketBindingBound, "/bound/here"
+	}
+	// The close has exactly one owner on every exit — Cleanup frees the
+	// abandoned worker whether the assertions hold or fail.
+	t.Cleanup(func() {
+		tmuxServerSocketBinding = oldBinding
+		releaseRead()
+	})
+
+	sock := filepath.Join(t.TempDir(), "af.sock")
+	start := time.Now()
+	id := resolveServerIdentity(
+		ServerIdentity{Socket: sock, PID: os.Getpid(), SessionID: "$7"},
+		100*time.Millisecond)
+	require.Less(t, time.Since(start), 2*time.Second,
+		"the stamp returns on the deadline, never blocks on the read")
+	require.Empty(t, id.PIDNS, "a proof past the deadline claims no namespace")
+	require.Zero(t, id.StartID, "a proof past the deadline claims no instance identity")
+	require.Equal(t, sock, id.Socket, "the socket still rides the unproven record")
+
+	// The abandoned worker unwedges on release, writes to the buffered
+	// channel — never blocked, never leaked — and exits having touched
+	// only the seam captured before it started.
+	releaseRead()
+	select {
+	case <-workerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the abandoned proof worker never finished — the buffered answer must always drain")
+	}
+}
+
 // The namespace proof is read-only against the REAL reader too: a pid the
 // kernel shows no listener for is simply unproven — nothing is ever
 // signalled to find out.
@@ -387,7 +432,7 @@ func TestResolveServerIdentity_NamespaceProofNeverSignals(t *testing.T) {
 	t.Cleanup(func() { tmuxServerSignal = oldSignal })
 
 	sock := filepath.Join(t.TempDir(), "af.sock")
-	_ = resolveServerIdentity(ServerIdentity{Socket: sock, PID: os.Getpid()})
+	_ = resolveServerIdentity(ServerIdentity{Socket: sock, PID: os.Getpid()}, tmuxCommandTimeout)
 	require.Zero(t, signals, "tmuxServerSocketBinding reads listeners; it must never signal")
 }
 
@@ -405,18 +450,18 @@ func TestNoteServerIdentity_CarriesTheProofForward(t *testing.T) {
 	t.Cleanup(func() { tmuxServerSocketBinding = oldBinding })
 
 	raw := ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid(), SessionID: "$7"}
-	ts.noteServerIdentity(raw)
+	ts.noteServerIdentity(raw, tmuxCommandTimeout)
 	require.Equal(t, 1, calls)
 	first, ok := ts.ServerEvidence()
 	require.True(t, ok)
 	require.NotZero(t, first.PIDNS)
 
-	ts.noteServerIdentity(raw)
+	ts.noteServerIdentity(raw, tmuxCommandTimeout)
 	require.Equal(t, 1, calls, "an unchanged tuple reuses the standing proof")
 	second, _ := ts.ServerEvidence()
 	require.Equal(t, first, second)
 
-	ts.noteServerIdentity(ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid(), SessionID: "$8"})
+	ts.noteServerIdentity(ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid(), SessionID: "$8"}, tmuxCommandTimeout)
 	require.Equal(t, 2, calls, "a changed record re-proves")
 }
 
@@ -498,6 +543,8 @@ func TestSameRecordedSocket_ConcurrentComparesShareOneFlight(t *testing.T) {
 func TestSameRecordedSocket_SharedFlightPublishesOneAnswer(t *testing.T) {
 	oldWalk, oldBudget := socketCompareWalk, socketCompareBudget
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWalk := func() { releaseOnce.Do(func() { close(release) }) }
 	var walks atomic.Int64
 	socketCompareBudget = 2 * time.Second
 	socketCompareWalk = func(envSocket, recordedSocket string) (bool, bool) {
@@ -505,9 +552,12 @@ func TestSameRecordedSocket_SharedFlightPublishesOneAnswer(t *testing.T) {
 		<-release
 		return true, true
 	}
+	// The close has exactly one owner on every exit — the body releases the
+	// walk on the happy path and Cleanup covers an early failure; sync.Once
+	// makes the two paths idempotent (Codex on #7581).
 	t.Cleanup(func() {
 		socketCompareWalk, socketCompareBudget = oldWalk, oldBudget
-		close(release)
+		releaseWalk()
 	})
 
 	const waiters = 4
@@ -526,7 +576,7 @@ func TestSameRecordedSocket_SharedFlightPublishesOneAnswer(t *testing.T) {
 	close(ready)
 	require.Eventually(t, func() bool { return walks.Load() == 1 }, 2*time.Second, 5*time.Millisecond,
 		"the leader's walk has begun")
-	close(release)
+	releaseWalk()
 	wg.Wait()
 	close(outcomes)
 	for comparable := range outcomes {

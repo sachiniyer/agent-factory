@@ -209,7 +209,7 @@ func (t *TmuxSession) readPaneRow(budget time.Duration) (paneRow, error) {
 	row.server = corroboratedServerSocket(row.server, func() (int, string, error) {
 		return readSocketPIDWithin(t, time.Until(deadline))
 	})
-	t.noteServerIdentity(row.server)
+	t.noteServerIdentity(row.server, time.Until(deadline))
 	return row, nil
 }
 
@@ -282,8 +282,10 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 				t.reconcilePaneRootEvidence(paneRootAnswer{
 					resolved: proctree.Process{PID: pid, StartID: startID},
 				})
+				// The snapshot carries no caller deadline — the proof's
+				// bound is the flat command timeout (#7581 item 4).
 				t.noteServerIdentity(corroboratedServerSocket(
-					serverFromPaneRows(rows), snap.serverSocketPID))
+					serverFromPaneRows(rows), snap.serverSocketPID), tmuxCommandTimeout)
 			}
 			return holds, err
 		}
@@ -328,7 +330,7 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 			serverFromPaneRows(splitPaneRows(string(output))),
 			func() (int, string, error) {
 				return readSocketPIDWithin(t, time.Until(deadline))
-			}))
+			}), time.Until(deadline))
 	}
 	return holds, err
 }

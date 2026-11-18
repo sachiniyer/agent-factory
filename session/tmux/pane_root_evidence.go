@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
@@ -216,19 +217,47 @@ func (t *TmuxSession) PaneRootEvidence() (pid int, startID uint64, ok bool) {
 // the pid leaves StartID and PIDNS empty and every pid-derived compare is
 // undecidable. Socket and PID still ride the record: the socket compare no
 // namespace can break, and the pid still names the verdict's reason.
-func resolveServerIdentity(id ServerIdentity) ServerIdentity {
+func resolveServerIdentity(id ServerIdentity, budget time.Duration) ServerIdentity {
 	if !id.valid() {
 		return ServerIdentity{}
 	}
 	id.StartID, id.PIDNS = 0, ""
-	switch binding, _ := tmuxServerSocketBinding(id.PID, id.Socket); binding {
-	case socketBindingBound, socketBindingBoundByTable:
-		if p, err := proctree.Lookup(id.PID); err == nil {
-			id.StartID = p.StartID
+	// The proof's kernel reads run INSIDE what the caller's deadline has
+	// left (Codex on #7581): a proof that does not finish in time is
+	// unproven — undecidable — never a stamp that blocked the bounded read
+	// it rode in on. The seam is captured before the worker starts, so a
+	// worker abandoned past the deadline touches no package state a test
+	// may already have restored (the #7550 flight race).
+	bind := tmuxServerSocketBinding
+	type proof struct {
+		startID uint64
+		ns      string
+		bound   bool
+	}
+	answered := make(chan proof, 1)
+	go func() {
+		switch binding, _ := bind(id.PID, id.Socket); binding {
+		case socketBindingBound, socketBindingBoundByTable:
+			p := proof{bound: true}
+			if proc, err := proctree.Lookup(id.PID); err == nil {
+				p.startID = proc.StartID
+			}
+			if ns, err := proctree.PIDNamespaceID(); err == nil {
+				p.ns = ns
+			}
+			answered <- p
+		default:
+			answered <- proof{}
 		}
-		if ns, err := proctree.PIDNamespaceID(); err == nil {
-			id.PIDNS = ns
+	}()
+	ctx, cancel := tmuxTimeoutContextWithin(budget)
+	defer cancel()
+	select {
+	case p := <-answered:
+		if p.bound {
+			id.StartID, id.PIDNS = p.startID, p.ns
 		}
+	case <-ctx.Done():
 	}
 	return id
 }
@@ -241,13 +270,16 @@ func resolveServerIdentity(id ServerIdentity) ServerIdentity {
 // session's current incarnation (#7469 R1a). A stamp naming the SAME
 // (socket, pid, session) carries the standing record's proof fields forward
 // — the namespace proof is paid once per record, not once per row (#7581).
-func (t *TmuxSession) noteServerIdentity(raw ServerIdentity) {
+// budget bounds the namespace proof's kernel reads to what the calling
+// read's deadline has left — a proof that outruns it is simply unproven
+// (#7581, Codex).
+func (t *TmuxSession) noteServerIdentity(raw ServerIdentity, budget time.Duration) {
 	id := raw
 	if cur := t.serverEvidence.Load(); cur != nil &&
 		cur.Socket == raw.Socket && cur.PID == raw.PID && cur.SessionID == raw.SessionID {
 		id.StartID, id.PIDNS = cur.StartID, cur.PIDNS
 	} else {
-		id = resolveServerIdentity(raw)
+		id = resolveServerIdentity(raw, budget)
 	}
 	if id.valid() {
 		stored := id
