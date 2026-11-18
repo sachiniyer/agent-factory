@@ -525,7 +525,14 @@ func TestPeerHelperListener(t *testing.T) {
 		if err != nil {
 			return
 		}
-		_ = c.Close()
+		// Hold the conn like ssh holds the local forward, draining it. On
+		// darwin, closing the accepted side can flip the client socket to
+		// not-connected before the dialer's LOCAL_PEERPID query lands —
+		// an instant-close listener is refused the way a squatter's is.
+		go func(c net.Conn) {
+			_, _ = io.Copy(io.Discard, c)
+			_ = c.Close()
+		}(c)
 	}
 }
 
