@@ -352,6 +352,16 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			p.credentialEnvPins = credentialMountPinnedNames(p.agentName(), p.spec.SessionEnvPassthrough)
 		}
 	}
+	// The pane-boundary blanking in runContainer runs on EVERY docker
+	// session, so a passthrough entry naming one of those names would be
+	// silently overridden — refuse it with a message rather than let the
+	// blank win (#7544).
+	for _, name := range spec.SessionEnvPassthrough {
+		if _, ok := credentialMountPaneBoundaryNames[name]; ok {
+			return ProvisionResult{}, fmt.Errorf(
+				"backend=docker: session_env_passthrough cannot forward %s — af and tmux stamp that name at the pane boundary and runContainer blanks it on every docker session; remove it from session_env_passthrough", name)
+		}
+	}
 	res, err := p.provision()
 	if err != nil {
 		return ProvisionResult{}, p.reapProvisionFailure(err)
@@ -651,9 +661,10 @@ func (p *dockerProvisioner) runContainer() error {
 	// identity into them. Defined-empty after run_args dominates the
 	// image's ENV and any repo entry the same last-wins way the pins do.
 	// The pane keeps the real values: the in-container tmux stamps them per
-	// pane over this baseline, and af's filtered launch environment strips
-	// the boundary names before new-session, so a defined-empty TMUX never
-	// reaches the nested-session presence check (#7544).
+	// pane over this baseline. A defined-empty TMUX is safe because tmux
+	// itself treats an empty value as unset — measured on tmux 3.4 and
+	// 3.2a — so the blanked baseline cannot trip the nested-session guard
+	// or fake pane identity anywhere af or the agent reads it (#7544).
 	for _, name := range credentialMountPaneBoundaryNamesSorted() {
 		args = append(args, "-e", name+"=")
 	}

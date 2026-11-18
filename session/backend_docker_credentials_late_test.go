@@ -590,9 +590,9 @@ func TestCredentialMountOverriddenWarning_NamesReassertedToo(t *testing.T) {
 // environment every `docker exec` child inherits (the agent-server, the
 // provisioning steps) carries defined-empty names instead of a forged
 // image ENV value. The in-pane agent still gets the real values: tmux
-// stamps them per pane over this baseline, and af's filtered launch
-// environment strips the boundary names before new-session, so the blank
-// TMUX can never reach the nested-session presence check.
+// stamps them per pane over this baseline, and the blank TMUX is safe
+// because tmux itself treats an empty value as unset (measured on tmux
+// 3.4 and 3.2a) — the baseline cannot trip the nested-session guard.
 func TestRunContainer_BlanksPaneBoundaryNamesForExecChildren(t *testing.T) {
 	imageEnv := []string{
 		"AF_SESSION_GEN=image-spoof-gen", "AF_SESSION=image-spoof-session",
@@ -629,16 +629,19 @@ func TestRunContainer_BlanksPaneBoundaryNamesForExecChildren(t *testing.T) {
 // TestCredentialMount_LoaderFilledNamesArePinnedEmpty is #7544's dotenv
 // property: the classes of name an agent's own .env loader fills when
 // unset are pinned defined-and-empty on a credential-mount session, so
-// the loader's only-if-unset rule leaves af's claim alone. Measured
-// falsy-safe on @google/gemini-cli 0.42.0: GEMINI_CLI_USE_COMPUTE_ADC is
-// read === "true", GCE_METADATA_HOST through `env || default`, and git
-// treats GIT_CONFIG_COUNT="" as count 0 — making every indexed
-// GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* pair inert — and an empty
-// GIT_CONFIG_PARAMETERS as zero -c pairs.
+// the loader's only-if-unset rule leaves af's claim alone — and a class
+// is pinned only when EVERY name the agent's read consults is pinned, so
+// the test walks each 0.42.0 read expression link by link. Measured
+// falsy-safe on @google/gemini-cli 0.42.0: the auth source is
+// CLOUD_SHELL === "true" || GEMINI_CLI_USE_COMPUTE_ADC === "true", the
+// metadata endpoint is GCE_METADATA_IP || GCE_METADATA_HOST ||
+// HOST_ADDRESS, and git treats GIT_CONFIG_COUNT="" as count 0 — making
+// every indexed GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* pair inert — and an
+// empty GIT_CONFIG_PARAMETERS as zero -c pairs.
 func TestCredentialMount_LoaderFilledNamesArePinnedEmpty(t *testing.T) {
 	// The git-env class is shared: any agent's loader — or an image ENV /
 	// run_args with no loader at all — injects git configuration the same
-	// way, so every mountable agent pins it. The identity-source pair is
+	// way, so every mountable agent pins it. The identity-source reads are
 	// gemini's measured loader surface.
 	shared := []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"}
 	for _, agent := range []string{tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramGemini} {
@@ -651,14 +654,17 @@ func TestCredentialMount_LoaderFilledNamesArePinnedEmpty(t *testing.T) {
 		}
 	}
 	geminiPins := credentialMountPinnedNames(tmux.ProgramGemini, nil)
-	for _, name := range []string{"GEMINI_CLI_USE_COMPUTE_ADC", "GCE_METADATA_HOST"} {
+	for _, name := range []string{
+		"GEMINI_CLI_USE_COMPUTE_ADC", "CLOUD_SHELL",
+		"GCE_METADATA_HOST", "GCE_METADATA_IP", "HOST_ADDRESS",
+	} {
 		require.Contains(t, geminiPins, name,
-			"%s must be pinned empty for gemini — the .env loader skips only defined names", name)
+			"%s must be pinned empty for gemini — a chain link left unset is the one a .env claims", name)
 		_, denied := credentialMountDeniedNames(tmux.ProgramGemini)[name]
 		require.True(t, denied, "%s must be refused to repository run_args", name)
 	}
-	// The identity pair is gemini's surface — pinning it for every agent
-	// would blank names those agents do not read for no gain.
+	// The identity reads are gemini's surface — pinning them for every
+	// agent would blank names those agents do not read for no gain.
 	for _, agent := range []string{tmux.ProgramClaude, tmux.ProgramCodex} {
 		require.NotContains(t, credentialMountPinnedNames(agent, nil), "GEMINI_CLI_USE_COMPUTE_ADC",
 			"a gemini-specific identity selector is not another agent's to pin")
@@ -668,4 +674,59 @@ func TestCredentialMount_LoaderFilledNamesArePinnedEmpty(t *testing.T) {
 	forwarded := credentialMountPinnedNames(tmux.ProgramGemini, []string{"GIT_CONFIG_COUNT", "GCE_METADATA_HOST"})
 	require.NotContains(t, forwarded, "GIT_CONFIG_COUNT")
 	require.NotContains(t, forwarded, "GCE_METADATA_HOST")
+}
+
+// TestDockerCredentialRunArgs_RefusesGitConfigPairs is #7544's indexed-pair
+// policy: a forwarded GIT_CONFIG_COUNT activates GIT_CONFIG_KEY_*/
+// GIT_CONFIG_VALUE_* pairs, so the repository's run_args spelling of a pair
+// is refused — the family stays af's or the operator's own.
+func TestDockerCredentialRunArgs_RefusesGitConfigPairs(t *testing.T) {
+	for _, name := range []string{"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_17", "GIT_CONFIG_VALUE_17"} {
+		err := validateCredentialDockerRunArgs([]string{"-e", name + "=x"}, tmux.ProgramGemini)
+		require.Errorf(t, err, "%s in repository run_args must be refused — a forwarded count would activate it", name)
+		require.Contains(t, err.Error(), name)
+		require.Contains(t, err.Error(), "session_env_passthrough", "the refusal must name the operator remedy")
+	}
+}
+
+// TestDockerAccountRunArgs_RefusesGitEnvConfig applies the same family
+// refusal on the account path: the git environment-config names are not
+// identity (the passthrough filter must keep them) but are still never the
+// repository's — a run_args count activates pairs any repo source supplies
+// for af's own provisioning git runs.
+func TestDockerAccountRunArgs_RefusesGitEnvConfig(t *testing.T) {
+	for _, name := range []string{
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_4", "GIT_CONFIG_VALUE_4",
+	} {
+		err := validateAccountDockerRunArgs([]string{"-e", name + "=x"}, "gemini")
+		require.Errorf(t, err, "%s in account-session run_args must be refused — git env config is af's or the operator's, not the repo's", name)
+		require.Contains(t, err.Error(), name)
+	}
+	// But the operator's own forward is honored: the passthrough filter
+	// keeps git env config names — they are not identity.
+	got := filterAccountPassthrough(
+		[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GEMINI_API_KEY"}, "gemini")
+	require.Contains(t, got, "GIT_CONFIG_COUNT", "a forwarded count is the operator's claim, not an identity to strip")
+	require.Contains(t, got, "GIT_CONFIG_KEY_0")
+	require.Contains(t, got, "GIT_CONFIG_VALUE_0")
+	require.NotContains(t, got, "GEMINI_API_KEY", "an identity name is still filtered")
+}
+
+// TestProvision_RefusesPaneBoundaryPassthrough is #7544's no-silent-override
+// rule: the pane-boundary blank runs on EVERY docker session, so a
+// session_env_passthrough entry naming one would be silently overridden —
+// it is refused with a message instead.
+func TestProvision_RefusesPaneBoundaryPassthrough(t *testing.T) {
+	for _, name := range []string{
+		"AF_SESSION", "AF_SESSION_GEN", "AF_HOME", "AF_INSTANCE_ID",
+		"AF_TESTGUARD_RUN", "TMUX", "TMUX_PANE",
+	} {
+		runCalled, err, _ := provisionDockerCredentialGrantImageEnv(t, tmux.ProgramGemini,
+			nil, []string{name}, nil)
+		require.Falsef(t, runCalled, "%s must be refused before docker run — the blank would override it", name)
+		require.Errorf(t, err, "%s must produce a refusal", name)
+		require.Contains(t, err.Error(), name, "the refusal must name the variable")
+		require.Contains(t, err.Error(), "session_env_passthrough", "the refusal must name the config knob to edit")
+	}
 }
