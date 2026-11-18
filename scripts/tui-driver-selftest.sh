@@ -2591,6 +2591,32 @@ _expect_display_cell_names() {
     }
 }
 
+# _expect_relaunch_expands_restored_session — #7552 real-TUI repro: the
+# session the cursor is restored to on relaunch must come back expanded —
+# the same expansion a live selection produces — with its tab rows visible,
+# while every other row stays collapsed (persisting every row's fold is out
+# of scope under the feature freeze). Runs late: it relaunches the TUI.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_relaunch_expands_restored_session() {
+    af_new_instance relaunch-me || return 1
+    af_new_tab || return 1
+    af_select 'relaunch-me' || return 1
+    af_wait_for '▾  relaunch-me' "$AF_DRIVER_TIMEOUT" \
+        'premise: the live selection is expanded before the quit' || return 1
+    # The tab row carries the `· open` pane badge, which pushes the label past
+    # the rail width (renders `└ 2 › Termin… · open`); the connector `└ 2 ›`
+    # is the truncation-proof part of the row.
+    af_wait_for '└ 2 ›' "$AF_DRIVER_TIMEOUT" \
+        'premise: its tab rows render before the quit' || return 1
+    af_relaunch || return 1
+    af_wait_for '▾  relaunch-me' "$AF_DRIVER_TIMEOUT" \
+        'the restored session comes back expanded (#7552)' || return 1
+    af_wait_for '└ 2 ›' "$AF_DRIVER_TIMEOUT" \
+        'the restored session keeps its tab rows visible (#7552)' || return 1
+    af_wait_for '▸  alpha' "$AF_DRIVER_TIMEOUT" \
+        'every other session stays collapsed — no fold state persists (#7552)' || return 1
+}
+
 # --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
 # Runs last because it adds sessions and relaunches the TUI.
 step "literal a+b creates, reaches ready, and is selectable" _expect_literal_instance_title
@@ -2598,6 +2624,7 @@ step "a rail-truncated name drives create, select and assert (#7485)" _expect_tr
 step "a shared truncated prefix fails loudly, never picks (#7485)" _expect_ambiguous_truncated_titles
 step "a whitespace prefix is not the title cell; foo beside foo bar (#7506)" _expect_space_prefixed_names
 step "names measured in display cells, unmeasurable refused loudly (#7506)" _expect_display_cell_names
+step "the relaunched session under the cursor comes back expanded (#7552)" _expect_relaunch_expands_restored_session
 step "relaunch boots with the rail scrolled past the header (#2148)" _expect_scrolled_rail_relaunch
 
 printf '\n=== SELF-TEST PASSED — %d/%d steps green ===\n' "$PASS" "$PASS"
