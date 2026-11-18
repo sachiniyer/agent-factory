@@ -868,7 +868,10 @@ func daemonServerTestEnv(t *testing.T, home string) {
 // mark a bootstrap decision: a "show-options" presence read and the "LAUNCH"
 // line the systemd-run shim writes when a launch is attempted. Fixture calls
 // (new-session, display-message) and probes after the launch are noise for
-// the one-read-before-launch assertion, not signal.
+// the one-read-before-launch assertion, not signal — and neither are repeated
+// entries: a readiness poll that lands while the shim's LAUNCH write is still
+// in flight logs the same "show-options" a gate read does, so only the
+// decision's SHAPE is stable, not its positions.
 func decisionCallOrder(t *testing.T, logPath string) []string {
 	t.Helper()
 	contents, err := os.ReadFile(logPath)
@@ -877,11 +880,32 @@ func decisionCallOrder(t *testing.T, logPath string) []string {
 	}
 	var seq []string
 	for _, line := range strings.Split(string(contents), "\n") {
-		if line == "show-options" || line == "LAUNCH" {
-			seq = append(seq, line)
+		if line != "show-options" && line != "LAUNCH" {
+			continue
 		}
+		if n := len(seq); n > 0 && seq[n-1] == line {
+			continue
+		}
+		seq = append(seq, line)
 	}
 	return seq
+}
+
+// launchesIn counts the LAUNCH entries in the raw call log: the launch-once
+// property counts every attempt, not the deduped decision shape.
+func launchesIn(t *testing.T, logPath string) int {
+	t.Helper()
+	contents, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux call log: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(contents), "\n") {
+		if line == "LAUNCH" {
+			n++
+		}
+	}
+	return n
 }
 
 func noServerDeathMarker(t *testing.T, home string) {
@@ -912,7 +936,10 @@ func TestEnsureDaemonServerAbsentSocketLaunchesOnce(t *testing.T) {
 		t.Fatalf("EnsureDaemonServer error = %v, want the refusing launch to surface", err)
 	}
 	if seq := decisionCallOrder(t, logPath); len(seq) < 2 || seq[0] != "show-options" || seq[1] != "LAUNCH" {
-		t.Fatalf("call order = %v, want a single show-options read before the launch attempt", seq)
+		t.Fatalf("call order = %v, want a gate read then the launch decision", seq)
+	}
+	if n := launchesIn(t, logPath); n != 1 {
+		t.Fatalf("launch attempts = %d, want exactly one", n)
 	}
 	if verdict := probeDedicatedServer(); verdict != dedicatedServerAbsent {
 		t.Fatalf("ENOENT verdict = %v, want absent", verdict)
@@ -955,7 +982,10 @@ func TestEnsureDaemonServerRefusedSocketLaunchesOnce(t *testing.T) {
 		t.Fatalf("EnsureDaemonServer error = %v, want the refusing launch to surface", err)
 	}
 	if seq := decisionCallOrder(t, logPath); len(seq) < 2 || seq[0] != "show-options" || seq[1] != "LAUNCH" {
-		t.Fatalf("call order = %v, want a single show-options read before the launch attempt", seq)
+		t.Fatalf("call order = %v, want a gate read then the launch decision", seq)
+	}
+	if n := launchesIn(t, logPath); n != 1 {
+		t.Fatalf("launch attempts = %d, want exactly one", n)
 	}
 	if verdict := probeDedicatedServer(); verdict != dedicatedServerAbsent {
 		t.Fatalf("ECONNREFUSED verdict = %v, want absent", verdict)
