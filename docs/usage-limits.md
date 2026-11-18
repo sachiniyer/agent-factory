@@ -262,13 +262,15 @@ differs per backend:
   names the operator's tmux `update-environment` import delivered keep their
   imported value, and names absent there are pinned empty.
 - **Docker** — in two places. At `docker run` a forwarded name the daemon
-  environment sets rides bare `-e NAME`, and every forwarded-but-unset name is
-  emitted `-e NAME=` so an image `ENV` value cannot reach the agent as if it
-  were the claim; then at the agent's own exec filter the names still unset are
-  pinned empty. `docker.run_args` entries naming any of the six — or the
-  indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pairs a forwarded count would
-  activate — are refused: forward the pairs through `session_env_passthrough`
-  instead.
+  environment sets rides bare `-e NAME`, and a forwarded-but-unset loader or
+  indexed-pair name (`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`, which a forwarded
+  count would activate) is emitted `-e NAME=` so an image `ENV` value cannot
+  reach the agent as if it were the claim; then at the agent's own exec filter
+  the names still unset are pinned empty. Any other forwarded-but-unset name
+  keeps the ordinary contract — no `-e`, so the image's own value stands.
+  `docker.run_args` entries naming any of the six — or the indexed
+  `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pairs — are refused: forward the
+  pairs through `session_env_passthrough` instead.
 - **SSH and sandbox** — in the remote launch shell, evaluated against the
   *remote* environment, because that is where a forwarded value lives. A name
   set remotely — including defined-empty — keeps its remote value; a forwarded

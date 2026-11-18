@@ -810,25 +810,33 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 		}
 	}
 	if p.spec.Account.Dir != "" {
-		// A name the operator forwarded but did not set must still blank the
-		// image's value for it: -e admits the name through the wrap's
-		// passthrough extras, and an image ENV value that survived would reach
-		// ScopeAgentServerAccount reading exactly like the operator's claim
-		// (#7555). Emitting the explicit-empty form gives the name the same
-		// answer an unset local import gives the pane shim — defined-empty —
-		// rather than whatever the repository-selected image declared. The rule
-		// is uniform for every forwarded name, not just the six loader-filled
-		// ones: the claim channel admits daemon-env values, and a GIT_CONFIG_KEY_*
-		// or any other pair/helper name unset there claims empty, not the
-		// image's spelling (#7582 review).
+		// A loader-filled name the operator forwarded but did not set must
+		// still blank the image's value for it: -e admits the name through the
+		// wrap's passthrough extras, and an image ENV value that survived would
+		// reach ScopeAgentServerAccount reading exactly like the operator's
+		// claim (#7555). The indexed pair names get the same treatment because
+		// a forwarded GIT_CONFIG_COUNT animates whatever GIT_CONFIG_KEY_* or
+		// GIT_CONFIG_VALUE_* the image declared (#7582 review). Every other
+		// forwarded name keeps master's contract: unset in the daemon env means
+		// no -e at all, so the image's own value stands — blanking those would
+		// eat legitimate image-supplied values like proxy or locale settings.
 		present := make(map[string]struct{}, len(source))
 		for _, entry := range source {
 			if name, _, ok := strings.Cut(entry, "="); ok {
 				present[name] = struct{}{}
 			}
 		}
+		loaderNames := make(map[string]struct{})
+		for _, name := range sessionenv.AccountLoaderFilledNames(p.spec.Account.Agent) {
+			loaderNames[name] = struct{}{}
+		}
 		for _, name := range p.spec.SessionEnvPassthrough {
 			if _, ok := present[name]; ok {
+				continue
+			}
+			if _, loader := loaderNames[name]; !loader &&
+				!strings.HasPrefix(name, "GIT_CONFIG_KEY_") &&
+				!strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
 				continue
 			}
 			names = append(names, name+"=")

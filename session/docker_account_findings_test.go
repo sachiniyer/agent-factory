@@ -190,6 +190,17 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	// be observed for them too. GIT_CONFIG_* semantics are whole: af does not
 	// soften them.
 	t.Setenv("GIT_CONFIG_COUNT", "0")
+	// Every name the test asserts "unset" for must be genuinely unset — the
+	// provisioner reads os.Environ, and HTTP_PROXY in particular is commonly
+	// set on CI runners. t.Setenv registers the restore, os.Unsetenv removes.
+	for _, name := range []string{
+		"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS",
+		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"HTTP_PROXY", "GCE_METADATA_HOST",
+	} {
+		t.Setenv(name, "")
+		require.NoError(t, os.Unsetenv(name))
+	}
 	var runArgs []string
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "run" {
@@ -201,7 +212,7 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 
 	_, _ = createDockerAccountSession(f, "gemini",
 		[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
-			"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS", "MY_OPERATOR_FLAG"})
+			"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS", "HTTP_PROXY"})
 	require.NotEmpty(t, runArgs, "the account create never reached docker run")
 
 	// Forwarded+set: bare -e NAME, so docker resolves the operator's value.
@@ -211,13 +222,13 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 		"bare -e NAME: docker imports the daemon's value, dominating the image's ENV")
 
 	// Forwarded but NOT set: -e NAME= blanks the image's value — for the six
-	// loader names, the indexed pair names, and every other forwarded name
-	// alike: an image ENV value surviving the extras admission would read as
-	// the operator's claim at the scope hop, so defined-empty is the honest
+	// loader names and the indexed pair names a forwarded count animates.
+	// An image ENV value surviving the extras admission would read as the
+	// operator's claim at the scope hop, so defined-empty is the honest
 	// "forwarded but nothing arrived" answer.
 	for _, name := range []string{
 		"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS",
-		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "MY_OPERATOR_FLAG",
+		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 	} {
 		assignment, found = dockerEnvArg(runArgs, name)
 		require.True(t, found, "%s: a forwarded-but-unset name must still blank the image value", name)
@@ -227,6 +238,13 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	// Unforwarded: no -e at all — the scope's pin answers at the exec boundary.
 	_, found = dockerEnvArg(runArgs, "GCE_METADATA_HOST")
 	require.False(t, found, "an unforwarded loader name is never stamped: the scope pin decides it")
+
+	// Every other forwarded-but-unset name keeps master's contract: no -e of
+	// any form, so the image's own ENV value for it stands. HTTP_PROXY is the
+	// shape of a legitimate image-supplied fill that must not be blanked.
+	_, found = dockerEnvArg(runArgs, "HTTP_PROXY")
+	require.False(t, found,
+		"a forwarded-but-unset ordinary name emits no -e — the image's value survives untouched")
 }
 
 // #7555: gemini's keep-if-set names — and the indexed git-config pair prefixes
