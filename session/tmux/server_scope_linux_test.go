@@ -860,6 +860,26 @@ func daemonServerTestEnv(t *testing.T, home string) {
 	t.Cleanup(ConfigureDaemonServer(home))
 }
 
+// decisionCallOrder reads the shared call log and keeps only the entries that
+// mark a bootstrap decision: a "show-options" presence read and the "LAUNCH"
+// line the systemd-run shim writes when a launch is attempted. Fixture calls
+// (new-session, display-message) and probes after the launch are noise for
+// the one-read-before-launch assertion, not signal.
+func decisionCallOrder(t *testing.T, logPath string) []string {
+	t.Helper()
+	contents, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux call log: %v", err)
+	}
+	var seq []string
+	for _, line := range strings.Split(string(contents), "\n") {
+		if line == "show-options" || line == "LAUNCH" {
+			seq = append(seq, line)
+		}
+	}
+	return seq
+}
+
 func noServerDeathMarker(t *testing.T, home string) {
 	t.Helper()
 	if _, ok, err := ReadServerDeath(home); err != nil || ok {
@@ -883,20 +903,15 @@ func TestEnsureDaemonServerAbsentSocketLaunchesOnce(t *testing.T) {
 	home := t.TempDir()
 	daemonServerTestEnv(t, home)
 
-	if verdict := probeDedicatedServer(); verdict != dedicatedServerAbsent {
-		t.Fatalf("ENOENT verdict = %v, want absent", verdict)
-	}
 	err := EnsureDaemonServer()
 	if err == nil || !strings.Contains(err.Error(), "dedicated tmux server scope exited before readiness") {
 		t.Fatalf("EnsureDaemonServer error = %v, want the refusing launch to surface", err)
 	}
-	calls, readErr := os.ReadFile(logPath)
-	if readErr != nil {
-		t.Fatalf("read tmux call log: %v", readErr)
+	if seq := decisionCallOrder(t, logPath); len(seq) < 2 || seq[0] != "show-options" || seq[1] != "LAUNCH" {
+		t.Fatalf("call order = %v, want a single show-options read before the launch attempt", seq)
 	}
-	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
-	if len(lines) < 2 || lines[0] != "show-options" || lines[1] != "LAUNCH" {
-		t.Fatalf("call order = %v, want a single show-options read before the launch attempt", lines)
+	if verdict := probeDedicatedServer(); verdict != dedicatedServerAbsent {
+		t.Fatalf("ENOENT verdict = %v, want absent", verdict)
 	}
 	noServerDeathMarker(t, home)
 }
@@ -932,15 +947,15 @@ func TestEnsureDaemonServerRefusedSocketLaunchesOnce(t *testing.T) {
 	home := t.TempDir()
 	daemonServerTestEnv(t, home)
 
-	if verdict := probeDedicatedServer(); verdict != dedicatedServerAbsent {
-		t.Fatalf("ECONNREFUSED verdict = %v, want absent", verdict)
-	}
 	err = EnsureDaemonServer()
 	if err == nil || !strings.Contains(err.Error(), "dedicated tmux server scope exited before readiness") {
 		t.Fatalf("EnsureDaemonServer error = %v, want the refusing launch to surface", err)
 	}
-	if got := countTmuxCalls(t, logPath, "show-options"); got != 2 {
-		t.Fatalf("socket probes = %d, want gate read plus the post-launch re-check", got)
+	if seq := decisionCallOrder(t, logPath); len(seq) < 2 || seq[0] != "show-options" || seq[1] != "LAUNCH" {
+		t.Fatalf("call order = %v, want a single show-options read before the launch attempt", seq)
+	}
+	if verdict := probeDedicatedServer(); verdict != dedicatedServerAbsent {
+		t.Fatalf("ECONNREFUSED verdict = %v, want absent", verdict)
 	}
 	noServerDeathMarker(t, home)
 }
