@@ -695,12 +695,6 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 // that a probe with no owner to signal never waits on it.
 var socketReclaimWindow = 500 * time.Millisecond
 
-// namedPIDs renders the PIDs we can actually name; the 0 sentinel means the
-// process table could not be read, so there is no pid to print.
-func namedPIDs(pids []int) string {
-	return strings.Join(pidArgsForSignal(pids), ", ")
-}
-
 func pidArgsForSignal(pids []int) []string {
 	var out []string
 	for _, pid := range pids {
