@@ -340,7 +340,11 @@ func TestDedicatedServerWrapperCapturesStderr(t *testing.T) {
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "args")
 	tmuxShim := filepath.Join(dir, "tmux")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$AF_TEST_TMUX_ARGS\"\nprintf '%s\\n' 'fatal-sentinel-3307' >&2\nexit 42\n"
+	// Append one line per tmux invocation: the wrapper now re-probes the socket
+	// with `show-options` after `tmux -D` exits (runDedicatedServer's
+	// post-exit check for a headless attach against a pre-existing server),
+	// so the args file records every invocation rather than only the last.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$AF_TEST_TMUX_ARGS\"\nprintf '%s\\n' 'fatal-sentinel-3307' >&2\nexit 42\n"
 	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
 		t.Fatalf("write tmux shim: %v", err)
 	}
@@ -356,8 +360,11 @@ func TestDedicatedServerWrapperCapturesStderr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tmux shim args: %v", err)
 	}
-	if got := strings.TrimSpace(string(args)); got != "-D" {
-		t.Fatalf("tmux wrapper args = %q, want foreground -D", got)
+	// The wrapper's primary command is `tmux -D` (the foreground server flag);
+	// the post-exit liveness re-probe may add `show-options -gv exit-empty`
+	// invocations after it. Assert the foreground -D invocation is present.
+	if !strings.Contains(string(args), "\n-D\n") && !strings.HasPrefix(string(args), "-D\n") {
+		t.Fatalf("tmux wrapper args = %q, want the foreground -D invocation among them", strings.TrimSpace(string(args)))
 	}
 	contents, err := os.ReadFile(logPath)
 	if err != nil {
@@ -796,5 +803,486 @@ func TestServerStateRoundTripAndDedupe(t *testing.T) {
 	recordServerState(home, st) // identical decision: no rewrite on every spawn
 	if _, ok, _ := ReadServerState(home); ok {
 		t.Fatal("an unchanged decision was rewritten")
+	}
+}
+
+// writeTmuxProbeShim writes a tmux shim to dir that appends each invocation's
+// args to argsPath and dispatches on the first positional arg group. It is
+// the shared harness for the liveness-probe tests: the shim lets a test
+// script a single-shot `show-options -gv exit-empty` miss, recovery, or
+// diagnostic without depending on a real tmux server's timing.
+func writeTmuxProbeShim(t *testing.T, dir, argsPath, body string) {
+	t.Helper()
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >>\"" + argsPath + "\"\n" + body
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestProbeServerDefinitively_DistinguishesDefinitiveNoServer pins that the
+// retrying liveness probe treats tmux's authoritative "no server running on
+// <socket>" diagnostic as a DEFINITIVE empty — the same invariant
+// NoServerRunning enforces elsewhere — rather than collapsing it (or a
+// timeout) into "no server" on a single shot.
+func TestProbeServerDefinitively_DistinguishesDefinitiveNoServer(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	writeTmuxProbeShim(t, dir, argsPath, `case "$*" in
+    "show-options -gv exit-empty")
+        echo "no server running on /tmp/tmux-1000/default" >&2
+        exit 1
+        ;;
+    *)
+        exit 99
+        ;;
+esac
+`)
+	running, definite := probeServerDefinitively()
+	if running || !definite {
+		t.Fatalf("definitive no-server diagnostic: probeServerDefinitively = (running=%v, definite=%v), want (false, true)", running, definite)
+	}
+}
+
+// TestProbeServerDefinitively_RetriesTransientTimeout pins the root-cause
+// fix: a single transient timeout against a live server no longer collapses
+// into "no server". The first probe sleeps past serverProbeTimeout; the
+// retry answers and the probe adopts the server definitively.
+func TestProbeServerDefinitively_RetriesTransientTimeout(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	writeTmuxProbeShim(t, dir, argsPath, `case "$*" in
+    "show-options -gv exit-empty")
+        n=$(cat "$AF_TEST_TMUX_ARGS" 2>/dev/null | wc -l)
+        if [ "$n" -eq 1 ]; then
+            sleep 0.4
+        fi
+        printf '%s\n' "on"
+        exit 0
+        ;;
+    *)
+        exit 99
+        ;;
+esac
+`)
+	t.Setenv("AF_TEST_TMUX_ARGS", argsPath)
+	running, definite := probeServerDefinitively()
+	if !running || !definite {
+		t.Fatalf("transient miss with recovery: probeServerDefinitively = (running=%v, definite=%v), want (true, true)", running, definite)
+	}
+	args, _ := os.ReadFile(argsPath)
+	if got := strings.Count(string(args), "\n"); got != 2 {
+		t.Fatalf("probe attempts = %d, want 2 (one miss + one successful retry)", got)
+	}
+}
+
+// TestProbeServerDefinitively_NonConclusiveAfterBudget pins that a probe
+// which never reaches a definitive answer (every attempt times out) returns
+// definite == false after exactly serverProbeMaxAttempts tries, so callers
+// do not act on "I could not look" as "it is gone".
+func TestProbeServerDefinitively_NonConclusiveAfterBudget(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	writeTmuxProbeShim(t, dir, argsPath, `case "$*" in
+    "show-options -gv exit-empty")
+        sleep 0.4
+        ;;
+    *)
+        exit 99
+        ;;
+esac
+`)
+	t.Setenv("AF_TEST_TMUX_ARGS", argsPath)
+	running, definite := probeServerDefinitively()
+	if running || definite {
+		t.Fatalf("sustained timeout: probeServerDefinitively = (running=%v, definite=%v), want (false, false)", running, definite)
+	}
+	args, _ := os.ReadFile(argsPath)
+	if got := strings.Count(string(args), "\n"); got != serverProbeMaxAttempts {
+		t.Fatalf("probe attempts = %d, want the bound %d", got, serverProbeMaxAttempts)
+	}
+}
+
+// TestProbeServerDefinitively_UnknownDiagnosticIsNonConclusive pins that an
+// unrecognized exit-1 diagnostic is NOT treated as a definitive no-server
+// answer — mirroring NoServerRunning's contract, an unknown diagnostic is
+// "I could not tell", never "it is gone".
+func TestProbeServerDefinitively_UnknownDiagnosticIsNonConclusive(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	writeTmuxProbeShim(t, dir, argsPath, `case "$*" in
+    "show-options -gv exit-empty")
+        echo "error connecting to /tmp/tmux-1000/default (Permission denied)" >&2
+        exit 1
+        ;;
+    *)
+        exit 99
+        ;;
+esac
+`)
+	t.Setenv("AF_TEST_TMUX_ARGS", argsPath)
+	running, definite := probeServerDefinitively()
+	if running || definite {
+		t.Fatalf("unknown diagnostic: probeServerDefinitively = (running=%v, definite=%v), want (false, false)", running, definite)
+	}
+}
+
+// TestEnsureDaemonServer_TransientProbeMissAdoptsExistingServer is the
+// primary end-to-end regression: a live, healthy dedicated server is still
+// running when the gate's liveness probe transiently misses it. The retry
+// must catch the server on the second probe and adopt it — never relaunching
+// a wrapper whose `tmux -D` would attach-fail and stamp a false death marker
+// plus a wrong hosting-unit record.
+func TestEnsureDaemonServer_TransientProbeMissAdoptsExistingServer(t *testing.T) {
+	testguard.IsolateTmux(t)
+	realTmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Fatalf("locate real tmux before installing the shim: %v", err)
+	}
+	if out, err := exec.Command(realTmux, "new-session", "-d", "-s", "oldgen", "sleep", "60").CombinedOutput(); err != nil {
+		t.Fatalf("start preexisting tmux server: %v: %s", err, out)
+	}
+
+	home := t.TempDir()
+	resetLastServerState()
+	recordServerState(home, ServerState{
+		Mode:   ServerModeDedicated,
+		Socket: DefaultSocketPath(),
+		Unit:   "agent-factory-tmux-server-oldgen",
+		At:     time.Now(),
+	})
+
+	// tmux shim: the FIRST show-options sleeps past serverProbeTimeout (a
+	// transient miss against the live server); every later show-options
+	// answers "on" (the server recovered). The counter is shared via
+	// TMUX_TMPDIR, which sessionenv.Filter allows through to the wrapper.
+	dir := t.TempDir()
+	tmuxShim := filepath.Join(dir, "tmux")
+	counter := filepath.Join(os.Getenv("TMUX_TMPDIR"), "af-test-shim-counter")
+	_ = os.Remove(counter)
+	script := `#!/bin/sh
+set -eu
+counter="$TMUX_TMPDIR/af-test-shim-counter"
+attempt=0
+if [ -f "$counter" ]; then attempt=$(cat "$counter"); fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$counter"
+case "$*" in
+    "show-options -gv exit-empty")
+        if [ "$attempt" -eq 1 ]; then
+            sleep 0.4
+        fi
+        printf '%s\n' "on"
+        exit 0
+        ;;
+    *)
+        exit 99
+        ;;
+esac
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux shim: %v", err)
+	}
+	systemdRunCalled := filepath.Join(dir, "systemd-run.called")
+	systemdRun := filepath.Join(dir, "systemd-run")
+	// Canary: records that systemd-run was invoked. The gate must AVOID this
+	// path entirely (adopt the pre-existing server on retry), so the canary
+	// file must NOT exist after EnsureDaemonServer.
+	if err := os.WriteFile(systemdRun, []byte("#!/bin/sh\nprintf '%s\\n' \"$$\" >\""+systemdRunCalled+"\"\nexit 64\n"), 0o700); err != nil {
+		t.Fatalf("write systemd-run canary: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(home)
+	t.Cleanup(restore)
+	t.Cleanup(func() { _ = os.Remove(counter) })
+
+	if err := EnsureDaemonServer(); err != nil {
+		t.Fatalf("EnsureDaemonServer over a transiently-missed server: %v", err)
+	}
+
+	// The gate's retry must have adopted on the second probe — never invoking
+	// systemd-run to relaunch a wrapper.
+	if _, err := os.ReadFile(systemdRunCalled); err == nil {
+		t.Fatal("systemd-run was invoked after a transient probe miss — the gate must adopt the pre-existing server, not relaunch")
+	}
+	if got, err := os.ReadFile(counter); err != nil {
+		t.Fatalf("read shim counter: %v", err)
+	} else if strings.TrimSpace(string(got)) != "2" {
+		t.Fatalf("gate probe attempts = %q, want 2 (one transient miss + one adopt)", strings.TrimSpace(string(got)))
+	}
+
+	// No death marker: no wrapper was launched, so nothing died.
+	if _, found, _ := ReadServerDeath(home); found {
+		t.Fatal("tmux-server-death.json was written even though the gate adopted the pre-existing server")
+	}
+
+	// The hosting record preserves the oldgen unit, not a fresh wrapper's.
+	st, ok, err := ReadServerState(home)
+	if err != nil || !ok {
+		t.Fatalf("read server-state record: ok=%v err=%v", ok, err)
+	}
+	if st.Unit != "agent-factory-tmux-server-oldgen" {
+		t.Fatalf("server-state record unit = %q, want the preserved oldgen unit — a transient probe miss must not rewrite the hosting unit", st.Unit)
+	}
+
+	// The pre-existing server is still alive and the oldgen session survives.
+	if out, err := exec.Command(realTmux, "has-session", "-t", "oldgen").CombinedOutput(); err != nil {
+		t.Fatalf("pre-existing oldgen session vanished after the adopt: %v: %s", err, out)
+	}
+}
+
+// TestRunDedicatedServer_DoesNotStampDeathOnAttachFailure is the wrapper-side
+// fix: when `tmux -D` attach-fails against a pre-existing server, the
+// wrapper's post-exit probe finds the server still answering and bails
+// cleanly WITHOUT stamping tmux-server-death.json — nothing the wrapper owns
+// died.
+func TestRunDedicatedServer_DoesNotStampDeathOnAttachFailure(t *testing.T) {
+	testguard.IsolateTmux(t)
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", "preexisting", "sleep", "60").CombinedOutput(); err != nil {
+		t.Fatalf("start preexisting tmux server: %v: %s", err, out)
+	}
+	home := t.TempDir()
+	logPath := filepath.Join(home, dedicatedServerLogName)
+	t.Setenv(dedicatedServerLogEnv, logPath)
+	t.Setenv(dedicatedServerUnitEnv, "agent-factory-tmux-server-attachfail")
+
+	if err := runDedicatedServer(); err != nil {
+		t.Fatalf("runDedicatedServer returned %v for an attach failure against a pre-existing server, want nil (clean bail)", err)
+	}
+
+	if _, found, _ := ReadServerDeath(home); found {
+		t.Fatal("tmux-server-death.json was written for a headless attach failure against a pre-existing server — the wrapper owns nothing that died")
+	}
+
+	// The pre-existing server is still alive and serving.
+	out, err := exec.Command("tmux", "show-options", "-gv", "exit-empty").CombinedOutput()
+	if err != nil {
+		t.Fatalf("pre-existing server is not answering after the wrapper bailed: %v: %s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "on" {
+		t.Fatalf("pre-existing server exit-empty = %q, want on (the foreign server's policy is unchanged)", got)
+	}
+	if out, err := exec.Command("tmux", "has-session", "-t", "preexisting").CombinedOutput(); err != nil {
+		t.Fatalf("pre-existing session vanished after the wrapper bailed: %v: %s", err, out)
+	}
+
+	contents, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux server log: %v", err)
+	}
+	if !strings.Contains(string(contents), "did not start") || !strings.Contains(string(contents), "headless attach failure") {
+		t.Fatalf("tmux server log %q does not record the headless attach failure bail", string(contents))
+	}
+}
+
+// TestRunDedicatedServer_StampsDeathOnGenuineExit is the regression guard for
+// #5429/#6182's death-marker behavior: a genuine `tmux -D` failure with no
+// pre-existing server still stamps tmux-server-death.json. The post-exit
+// probe must not suppress the marker when no server answers.
+func TestRunDedicatedServer_StampsDeathOnGenuineExit(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	tmuxShim := filepath.Join(dir, "tmux")
+	// A genuine `tmux -D` failure: the shim exits 42 (no server on the socket,
+	// and tmux itself failed for its own reason). The post-exit probe invokes
+	// the shim again with show-options; the shim's exit 42 is not a definitive
+	// no-server diagnostic, so the probe is non-conclusive and the wrapper
+	// falls through to recordServerDeath — preserving the death marker.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"" + argsPath + "\"\nprintf '%s\\n' 'fatal-sentinel-3307' >&2\nexit 42\n"
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux shim: %v", err)
+	}
+	home := t.TempDir()
+	logPath := filepath.Join(home, dedicatedServerLogName)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TEST_TMUX_ARGS", argsPath)
+	t.Setenv(dedicatedServerLogEnv, logPath)
+	t.Setenv(dedicatedServerUnitEnv, "agent-factory-tmux-server-genuine")
+
+	if err := runDedicatedServer(); err == nil {
+		t.Fatal("genuine tmux -D failure was reported as success")
+	}
+	d, found, err := ReadServerDeath(home)
+	if err != nil || !found {
+		t.Fatalf("tmux-server-death.json was not written for a genuine tmux -D failure: found=%v err=%v", found, err)
+	}
+	if d.ExitCode != 42 {
+		t.Fatalf("death marker exit code = %d, want 42", d.ExitCode)
+	}
+	if d.Unit != "agent-factory-tmux-server-genuine" {
+		t.Fatalf("death marker unit = %q, want agent-factory-tmux-server-genuine", d.Unit)
+	}
+	contents, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux server log: %v", err)
+	}
+	if !strings.Contains(string(contents), "fatal-sentinel-3307") || !strings.Contains(string(contents), "exit status 42") {
+		t.Fatalf("tmux server log %q does not contain the genuine failure's sentinel and exit status", string(contents))
+	}
+}
+
+// TestEnsureDedicatedServer_TransientMissRelaunchAdoptsNotStampsDedicated is
+// the belt-and-braces end-to-end regression: when the gate's retries ALL time
+// out (a sustained transient miss) and the wrapper IS relaunched against a
+// still-healthy server, the wrapper's post-exit check skips the death marker
+// AND the readiness loop's adopt-on-exit preserves the prior dedicated
+// record rather than stamping the freshly-launched, already-exiting wrapper's
+// unit as the host.
+func TestEnsureDedicatedServer_TransientMissRelaunchAdoptsNotStampsDedicated(t *testing.T) {
+	testguard.IsolateTmux(t)
+	realTmux, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Fatalf("locate real tmux before installing the shim: %v", err)
+	}
+	if out, err := exec.Command(realTmux, "new-session", "-d", "-s", "oldgen", "sleep", "60").CombinedOutput(); err != nil {
+		t.Fatalf("start preexisting tmux server: %v: %s", err, out)
+	}
+
+	home := t.TempDir()
+	resetLastServerState()
+	recordServerState(home, ServerState{
+		Mode:   ServerModeDedicated,
+		Socket: DefaultSocketPath(),
+		Unit:   "agent-factory-tmux-server-oldgen",
+		At:     time.Now(),
+	})
+
+	// tmux shim: the first 3 show-options calls (the gate's retries) sleep
+	// past serverProbeTimeout and return non-conclusive; later calls answer
+	// "on". The counter is shared via TMUX_TMPDIR (inherited by the wrapper).
+	dir := t.TempDir()
+	tmuxShim := filepath.Join(dir, "tmux")
+	counter := filepath.Join(os.Getenv("TMUX_TMPDIR"), "af-test-shim-counter")
+	_ = os.Remove(counter)
+	tmuxScript := `#!/bin/sh
+set -eu
+counter="$TMUX_TMPDIR/af-test-shim-counter"
+attempt=0
+if [ -f "$counter" ]; then attempt=$(cat "$counter"); fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$counter"
+case "$*" in
+    "show-options -gv exit-empty")
+        if [ "$attempt" -le 3 ]; then
+            sleep 0.3
+            exit 0
+        fi
+        printf '%s\n' "on"
+        exit 0
+        ;;
+    *)
+        exit 99
+        ;;
+esac
+`
+	if err := os.WriteFile(tmuxShim, []byte(tmuxScript), 0o700); err != nil {
+		t.Fatalf("write tmux shim: %v", err)
+	}
+	// systemd-run shim that execs the wrapper (as production does) so the
+	// real HandleDedicatedServerExec → runDedicatedServer path runs.
+	systemdRun := filepath.Join(dir, "systemd-run")
+	systemdRunScript := `#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --user|--scope|--quiet|--collect|--unit=*|--property=*) shift ;;
+        --) shift; break ;;
+        *) exit 64 ;;
+    esac
+done
+exec "$@"
+`
+	if err := os.WriteFile(systemdRun, []byte(systemdRunScript), 0o700); err != nil {
+		t.Fatalf("write systemd-run shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(home)
+	t.Cleanup(restore)
+	t.Cleanup(func() { _ = os.Remove(counter) })
+
+	if err := EnsureDaemonServer(); err != nil {
+		t.Fatalf("EnsureDaemonServer over a transiently-missed server (sustained miss): %v", err)
+	}
+
+	// The gate's 3 retries all missed, so it fell through to the relaunch
+	// path and the systemd-run shim exec'd the wrapper — the wrapper bailed
+	// on the pre-existing server, so no death marker was written.
+	if _, found, _ := ReadServerDeath(home); found {
+		t.Fatal("tmux-server-death.json was written for a headless attach failure — the wrapper's post-exit check must skip the marker")
+	}
+
+	// The readiness loop's adopt-on-exit must have preserved the oldgen unit
+	// rather than stamping the freshly-launched wrapper's unit.
+	st, ok, err := ReadServerState(home)
+	if err != nil || !ok {
+		t.Fatalf("read server-state record: ok=%v err=%v", ok, err)
+	}
+	if st.Unit != "agent-factory-tmux-server-oldgen" {
+		t.Fatalf("server-state record unit = %q, want the preserved oldgen unit — the readiness loop must adopt on wrapper exit, not stamp the dead wrapper's unit", st.Unit)
+	}
+
+	// The pre-existing server is still alive and the oldgen session survives.
+	if out, err := exec.Command(realTmux, "has-session", "-t", "oldgen").CombinedOutput(); err != nil {
+		t.Fatalf("pre-existing oldgen session vanished: %v: %s", err, out)
+	}
+}
+
+// TestEnsureDedicatedServer_HappyPathStampsLaunchedUnit is the no-regression
+// guard for the legitimate launch: when the gate DEFINITIVELY proved no
+// server is running and the wrapper's `tmux -D` started one and stayed alive,
+// the readiness loop stamps the LAUNCHED unit as the dedicated host — not
+// adopt. This is the path that must not pay the attachFailureGrace penalty.
+func TestEnsureDedicatedServer_HappyPathStampsLaunchedUnit(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	systemdRun := filepath.Join(dir, "systemd-run")
+	script := `#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --user|--scope|--quiet|--collect|--unit=*|--property=*) shift ;;
+        --) shift; break ;;
+        *) exit 64 ;;
+    esac
+done
+exec "$@"
+`
+	if err := os.WriteFile(systemdRun, []byte(script), 0o700); err != nil {
+		t.Fatalf("write systemd-run shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	home := t.TempDir()
+	resetLastServerState()
+	restore := ConfigureDaemonServer(home)
+	t.Cleanup(restore)
+
+	if err := EnsureDaemonServer(); err != nil {
+		t.Fatalf("ensure dedicated server on an empty socket: %v", err)
+	}
+
+	st, ok, err := ReadServerState(home)
+	if err != nil || !ok {
+		t.Fatalf("read server-state record: ok=%v err=%v", ok, err)
+	}
+	if st.Mode != ServerModeDedicated {
+		t.Fatalf("happy-path record mode = %q, want dedicated", st.Mode)
+	}
+	if st.Unit == "" {
+		t.Fatal("happy-path record unit is empty — the launched dedicated unit must be stamped")
+	}
+	if !strings.HasPrefix(st.Unit, dedicatedServerScopeName()+"-") {
+		t.Fatalf("happy-path record unit = %q, want a per-launch dedicated unit", st.Unit)
+	}
+
+	// No death marker on the happy path — the wrapper is still alive.
+	if _, found, _ := ReadServerDeath(home); found {
+		t.Fatal("tmux-server-death.json was written on the happy path — the wrapper is still alive")
 	}
 }
