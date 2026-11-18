@@ -240,6 +240,12 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "the same const script for a single directory (the setup-hook staging dir); the path " +
 			"arrives as the $1 positional parameter, never spliced into the script text",
 	}},
+	"session/backend_docker_account_chown.go:(*dockerProvisioner).reportSkippedMount": {{
+		class: afAuthored,
+		note: "the writability probe for a mount af declines to chown — the `test -w \"$1\" && test -x \"$1\"` " +
+			"script is a fixed const and the mounted path arrives as the $1 positional parameter, never " +
+			"spliced into the script text (#7563 R6)",
+	}},
 
 	"session/host_program.go:(hostProgramProber).probePath": {{
 		class: afAuthored,
