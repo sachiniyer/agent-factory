@@ -147,16 +147,32 @@ func isTmuxTaskName(comm string) bool {
 // a client into a "server": whatever the subcommand, a client runs through
 // client_main, which titles it a client and never daemonises it.
 //
-// Both rules are also safe to act on. tmux blocks every signal from before its
-// fork until the server's own handler is installed, and on Linux the
-// retitling happens inside that window. So a SIGUSR1 sent to a process matched
-// here is handled (tmux recreates its socket), never fatal.
+// A process whose PARENT is tmux is never a server (#6581). A server spawns
+// every pane (spawn.c) and job — pipe-pane, run-shell, #() (job.c) — by forking,
+// and until that child execs it carries the server's task name AND argv, so
+// both rules above match it. Before the exec the child resets SIGUSR1 to its
+// default action (proc_clear_signals(server_proc, 1)) and unblocks signals, so
+// a SIGUSR1 in that window kills the pane before its program runs, and the
+// session closes within milliseconds. Measured on an isolated tmux 3.4 server:
+// signalling only that server's children that passed the old check, 199 of 200
+// fresh sessions were gone 50 ms after new-session, against 0 of 200 without.
+// The parent separates them: a daemonised server's parent is init or a
+// subreaper, a foreground `-D` server's is whatever launched it, and a pane or
+// job child's is always its server. On darwin the daemon(3) rule already
+// refused these children (their ppid is the server, not 1); the parent rule
+// makes that hold on every platform, not by accident of one.
+//
+// With that, both rules are safe to act on. tmux blocks every signal from
+// before the server's fork until its own handler is installed, and on Linux
+// the retitling happens inside that window. So a SIGUSR1 sent to a process
+// matched here is handled (tmux recreates its socket), never fatal.
 //
 // Not identified, deliberately: a foreground `tmux -D` server where tmux cannot
 // retitle. It starts as a client, with SIGUSR1 still at its default disposition
 // (terminate), and nothing readable separates its first milliseconds from the
 // rest. It also never daemonises, so the daemon(3) shape never appears to name
-// it. It reports false, which leaves it unsignalled.
+// it. It reports false, which leaves it unsignalled. The same goes for a `-D`
+// server a tmux pane exec'd directly: its parent is the outer server.
 func IsTmuxServer(pid int) bool {
 	argv := Argv(pid)
 	if !isTmuxArgv(argv) {
@@ -166,25 +182,41 @@ func IsTmuxServer(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return tmuxServerIdentity(p)
+	parentComm, parentRead := "", true
+	if p.PPID > 0 {
+		parent, err := Lookup(p.PPID)
+		parentComm, parentRead = parent.Comm, err == nil
+	}
+	return tmuxServerIdentity(p, parentComm, parentRead)
 }
 
 // tmuxServerIdentity is IsTmuxServer's decision over a process-table entry whose
-// argv already names tmux. It is separate so that every shape can be pinned
-// without a live tmux.
-func tmuxServerIdentity(p Process) bool {
+// argv already names tmux, and its parent's task name. parentRead is false when
+// the parent's entry could not be read. It is separate so that every shape can
+// be pinned without a live tmux.
+func tmuxServerIdentity(p Process, parentComm string, parentRead bool) bool {
 	switch p.Comm {
 	case "tmux: server":
-		return true
 	case "tmux":
 		// Un-retitled. Only the daemon(3) shape identifies a server here. On a
 		// platform that does retitle, this is a process that has not reached
 		// proc_start yet, and a server in that state has every signal blocked.
 		// It is refused alongside a client: nothing positive names it yet.
-		return p.PID > 0 && p.SID == p.PID && p.PPID == 1
+		if p.PID <= 0 || p.SID != p.PID || p.PPID != 1 {
+			return false
+		}
 	default:
 		// `tmux: client`, or a title this code does not know. A known title
 		// that is not the server's is positively not a server.
 		return false
 	}
+	if !parentRead {
+		// An unreadable parent cannot be ruled out as the server this is a
+		// child of — except init. Pid 1 is hidden from other users under
+		// hidepid, and it is tmux only where a same-uid tmux IS pid 1, whose
+		// entry this uid can read; refusing every daemonised server there would
+		// leave the socket-absent probe unable to prove anything.
+		return p.PPID == 1
+	}
+	return !isTmuxTaskName(parentComm)
 }

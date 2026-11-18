@@ -415,7 +415,7 @@ func (t *TmuxSession) capturePaneContentTarget(ctx context.Context, target strin
 			return "", fmt.Errorf("error capturing pane content: %v; %w: %w",
 				err, errLivenessProbeUnanswered, probeErr)
 		case !alive:
-			return "", t.sessionGoneError("capture-pane", err)
+			return "", t.sessionGoneError("capture-pane", t.withServerFate(err, gen))
 		default:
 			// Only tmux's own failure answer may read as "the pane died
 			// under a session still being removed": a nonzero EXIT means
