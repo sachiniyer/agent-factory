@@ -285,10 +285,12 @@ var credentialMountSharedAFStateNames = map[string]struct{}{
 // credentialMountPaneBoundaryNames are the names the pane boundary itself
 // installs — by af or by tmux — with values no repository source may
 // choose and no af mechanism may erase:
-//   - AF_SESSION/AF_SESSION_GEN/AF_HOME are af's OWN trusted session
-//     markers, the names sessionEnvFlags (session/tmux/envmarker.go)
-//     stamps into every pane environment with per-session values:
-//     the session name, its generation, and af's home provenance.
+//   - AF_SESSION/AF_SESSION_GEN/AF_HOME/AF_INSTANCE_ID/AF_TESTGUARD_RUN are
+//     af's OWN trusted session markers, the names sessionEnvFlags
+//     (session/tmux/envmarker.go) stamps into every pane environment with
+//     per-session values: the session name, its generation, af's home
+//     provenance, the create attempt's instance id, and the test run that
+//     owns a guarded launch.
 //   - TMUX and TMUX_PANE are stamped by the tmux server for every pane:
 //     the server socket identity and the pane's %N id. Claude Code's tmux
 //     detection reads TMUX, and af's own in-pane commands read it too —
@@ -306,13 +308,28 @@ var credentialMountSharedAFStateNames = map[string]struct{}{
 // names make in-pane `--self` report "not running inside a tmux session"
 // (#7531). These values come from af and tmux, not a repo source, and
 // reach the agent through the boundary itself — the boundary only has to
-// NOT erase them.
+// NOT erase them. runContainer instead blanks every member at `docker
+// run` so the image's ENV cannot forge a marker in the container
+// environment a `docker exec` child inherits (#7544).
 var credentialMountPaneBoundaryNames = map[string]struct{}{
-	"AF_SESSION":     {},
-	"AF_SESSION_GEN": {},
-	"AF_HOME":        {},
-	"TMUX":           {},
-	"TMUX_PANE":      {},
+	"AF_SESSION":       {},
+	"AF_SESSION_GEN":   {},
+	"AF_HOME":          {},
+	"AF_INSTANCE_ID":   {},
+	"AF_TESTGUARD_RUN": {},
+	"TMUX":             {},
+	"TMUX_PANE":        {},
+}
+
+// credentialMountPaneBoundaryNamesSorted returns the pane-boundary names in
+// a stable order for `docker run` emission (#7544).
+func credentialMountPaneBoundaryNamesSorted() []string {
+	out := make([]string, 0, len(credentialMountPaneBoundaryNames))
+	for name := range credentialMountPaneBoundaryNames {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // credentialMountProgramLoaderNames are names that choose which CODE the
@@ -528,9 +545,11 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 	add(credentialMountPaneBoundaryNames)
 	add(credentialMountReassertedNames)
 	add(credentialMountProgramLoaderNames)
+	add(credentialMountSharedGitEnvNames)
 	add(credentialMountIdentityEnvNames[agent])
 	add(credentialMountConfigRootNames[agent])
 	add(credentialMountRoutingNames[agent])
+	add(credentialMountLoaderFilledNames[agent])
 	for name := range credentialMountFirstPartyNames[agent] {
 		denied[name] = struct{}{}
 	}
@@ -577,6 +596,12 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	}
 	if _, ok := credentialMountRoutingNames[agent][name]; ok {
 		return "it changes where the agent sends the mounted credential", true
+	}
+	if _, ok := credentialMountLoaderFilledNames[agent][name]; ok {
+		return "the agent's own .env loader fills it when unset, and af pins it defined-and-empty", true
+	}
+	if _, ok := credentialMountSharedGitEnvNames[name]; ok {
+		return "it injects git configuration through the environment for every git run in the container, and af pins it defined-and-empty", true
 	}
 	if _, ok := credentialMountFirstPartyNames[agent][name]; ok {
 		return "af re-asserts the agent's first-party endpoint after run_args so the agent's .env loader sees a defined name", true

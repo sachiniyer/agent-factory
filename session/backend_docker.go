@@ -643,6 +643,20 @@ func (p *dockerProvisioner) runContainer() error {
 	for _, name := range p.credentialEnvPins {
 		args = append(args, "-e", name+"=")
 	}
+	// af's and tmux's own pane-boundary names are blanked here, at the
+	// container boundary, never at the exec shim: the container environment
+	// is what every `docker exec` child af starts inherits — the
+	// agent-server, the provisioning steps — so an image ENV AF_SESSION_GEN
+	// or TMUX would otherwise carry a forged session marker or pane
+	// identity into them. Defined-empty after run_args dominates the
+	// image's ENV and any repo entry the same last-wins way the pins do.
+	// The pane keeps the real values: the in-container tmux stamps them per
+	// pane over this baseline, and af's filtered launch environment strips
+	// the boundary names before new-session, so a defined-empty TMUX never
+	// reaches the nested-session presence check (#7544).
+	for _, name := range credentialMountPaneBoundaryNamesSorted() {
+		args = append(args, "-e", name+"=")
+	}
 	// The account's env goes LAST, after run_args, and that ordering is the boundary
 	// rather than a preference. docker.run_args is repository-controlled and checked
 	// in; appended after the account it could set `-e CODEX_HOME=/another/home` and

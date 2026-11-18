@@ -227,6 +227,19 @@ var accountLateEnvironmentNames = map[string]map[string]struct{}{
 		"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
 		"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL",
 		"CODE_ASSIST_API_VERSION",
+		// GEMINI_CLI_USE_COMPUTE_ADC selects compute-ADC as the auth source
+		// (=== "true" — empty is falsy) and GCE_METADATA_HOST retargets the
+		// metadata endpoint the ADC probe dials (|| default — empty falls
+		// back): a repository `.env` could claim either to move the
+		// ACCOUNT's identity source or endpoint, so both are pinned
+		// falsy-safe empty like the routing names above (#7544).
+		// GIT_CONFIG_COUNT/GIT_CONFIG_PARAMETERS are not identity but ride
+		// the same fill channel into every git run the session makes —
+		// injected git config is code execution (core.hooksPath), which
+		// reaches the mounted account. Empty is measured safe: strtoul("")
+		// yields count 0, and "" parses to zero -c pairs.
+		"GEMINI_CLI_USE_COMPUTE_ADC", "GCE_METADATA_HOST",
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
 	),
 }
 

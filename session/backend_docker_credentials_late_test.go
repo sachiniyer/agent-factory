@@ -379,7 +379,7 @@ func TestProvision_WarnsBeforeDependentStepFails(t *testing.T) {
 func TestCredentialMount_SessionMarkersSurviveTheExecBoundary(t *testing.T) {
 	markers := []string{
 		tmux.EnvMarkerSession, tmux.EnvMarkerGeneration, tmux.EnvMarkerHome, tmux.EnvMarkerInstance,
-		"TMUX", "TMUX_PANE",
+		"AF_TESTGUARD_RUN", "TMUX", "TMUX_PANE",
 	}
 	for _, name := range markers {
 		for _, agent := range []string{tmux.ProgramGemini, tmux.ProgramClaude} {
@@ -416,8 +416,7 @@ func TestCredentialMount_SessionMarkersSurviveTheExecBoundary(t *testing.T) {
 	// only af may write these names.
 	for _, name := range markers {
 		_, denied := credentialMountDeniedNames(tmux.ProgramGemini)[name]
-		require.True(t, denied || name == tmux.EnvMarkerInstance,
-			"%s must still be refused to repository run_args (AF_INSTANCE_ID is unallowlisted — unreachable either way)", name)
+		require.True(t, denied, "%s must still be refused to repository run_args", name)
 	}
 }
 
@@ -583,4 +582,90 @@ func TestCredentialMountOverriddenWarning_NamesReassertedToo(t *testing.T) {
 	require.Contains(t, out, "HTTPS_PROXY", "a blanked pin is still named")
 	require.NotContains(t, out, "TZ", "an unoverridden image name is not named")
 	require.Contains(t, out, "pinned empty or re-asserted")
+}
+
+// TestRunContainer_BlanksPaneBoundaryNamesForExecChildren is #7544's
+// marker-authority property: af's session markers and tmux's pane names
+// are blanked at `docker run` — never at the exec shim — so the container
+// environment every `docker exec` child inherits (the agent-server, the
+// provisioning steps) carries defined-empty names instead of a forged
+// image ENV value. The in-pane agent still gets the real values: tmux
+// stamps them per pane over this baseline, and af's filtered launch
+// environment strips the boundary names before new-session, so the blank
+// TMUX can never reach the nested-session presence check.
+func TestRunContainer_BlanksPaneBoundaryNamesForExecChildren(t *testing.T) {
+	imageEnv := []string{
+		"AF_SESSION_GEN=image-spoof-gen", "AF_SESSION=image-spoof-session",
+		"TMUX=/tmp/tmux-0/fake,1,0", "TZ=UTC",
+	}
+	runCalled, _, runArgv := provisionDockerCredentialGrantImageEnv(t, tmux.ProgramGemini,
+		[]string{"--add-host", "repo.internal:10.0.0.1"}, nil, imageEnv)
+	require.True(t, runCalled)
+
+	for _, name := range []string{
+		"AF_SESSION", "AF_SESSION_GEN", "AF_HOME", "AF_INSTANCE_ID", "AF_TESTGUARD_RUN",
+		"TMUX", "TMUX_PANE",
+	} {
+		entry := name + "="
+		idx := indexIn(runArgv, entry)
+		require.Greaterf(t, idx, 0,
+			"%s must be blanked at docker run — the container env is what docker exec children inherit", name)
+		require.Equal(t, "-e", runArgv[idx-1], "%s must be a -e emission", entry)
+		require.Greater(t, idx, indexIn(runArgv, "--add-host"),
+			"%s must land after run_args so last-wins dominates an image ENV or repo entry", entry)
+	}
+
+	// Blanked, never re-set with a value: no pane-boundary name may carry a
+	// value in the run argv — the real values are tmux's per-pane stamps,
+	// and the forged image values must not survive anywhere in the docker
+	// invocation af built.
+	joined := strings.Join(runArgv, "\x00")
+	for _, forged := range []string{"image-spoof-gen", "image-spoof-session", "tmux-0/fake"} {
+		require.NotContains(t, joined, forged,
+			"the image's forged marker value must not reach the container env at all")
+	}
+}
+
+// TestCredentialMount_LoaderFilledNamesArePinnedEmpty is #7544's dotenv
+// property: the classes of name an agent's own .env loader fills when
+// unset are pinned defined-and-empty on a credential-mount session, so
+// the loader's only-if-unset rule leaves af's claim alone. Measured
+// falsy-safe on @google/gemini-cli 0.42.0: GEMINI_CLI_USE_COMPUTE_ADC is
+// read === "true", GCE_METADATA_HOST through `env || default`, and git
+// treats GIT_CONFIG_COUNT="" as count 0 — making every indexed
+// GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* pair inert — and an empty
+// GIT_CONFIG_PARAMETERS as zero -c pairs.
+func TestCredentialMount_LoaderFilledNamesArePinnedEmpty(t *testing.T) {
+	// The git-env class is shared: any agent's loader — or an image ENV /
+	// run_args with no loader at all — injects git configuration the same
+	// way, so every mountable agent pins it. The identity-source pair is
+	// gemini's measured loader surface.
+	shared := []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"}
+	for _, agent := range []string{tmux.ProgramClaude, tmux.ProgramCodex, tmux.ProgramGemini} {
+		pins := credentialMountPinnedNames(agent, nil)
+		for _, name := range shared {
+			require.Contains(t, pins, name,
+				"%s must be pinned empty on %s — count 0 / zero pairs makes loader-filled config inert", name, agent)
+			_, denied := credentialMountDeniedNames(agent)[name]
+			require.True(t, denied, "%s must also be refused to repository run_args on %s", name, agent)
+		}
+	}
+	geminiPins := credentialMountPinnedNames(tmux.ProgramGemini, nil)
+	for _, name := range []string{"GEMINI_CLI_USE_COMPUTE_ADC", "GCE_METADATA_HOST"} {
+		require.Contains(t, geminiPins, name,
+			"%s must be pinned empty for gemini — the .env loader skips only defined names", name)
+		_, denied := credentialMountDeniedNames(tmux.ProgramGemini)[name]
+		require.True(t, denied, "%s must be refused to repository run_args", name)
+	}
+	// The identity pair is gemini's surface — pinning it for every agent
+	// would blank names those agents do not read for no gain.
+	for _, agent := range []string{tmux.ProgramClaude, tmux.ProgramCodex} {
+		require.NotContains(t, credentialMountPinnedNames(agent, nil), "GEMINI_CLI_USE_COMPUTE_ADC",
+			"a gemini-specific identity selector is not another agent's to pin")
+	}
+	// An operator who forwards a name keeps their own value — the pin
+	// yields to the explicit claim, same as every pinned name.
+	forwarded := credentialMountPinnedNames(tmux.ProgramGemini, []string{"GIT_CONFIG_COUNT", "GCE_METADATA_HOST"})
+	require.NotContains(t, forwarded, "GIT_CONFIG_COUNT")
+	require.NotContains(t, forwarded, "GCE_METADATA_HOST")
 }
