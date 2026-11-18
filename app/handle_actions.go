@@ -158,6 +158,28 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	}
 }
 
+// inFlightOpNotice names the non-teardown operation fencing a row's lifecycle
+// verbs (#7551): the op can arrive between the last painted frame and the key
+// press — the 750ms snapshot reconcile adopts daemon-owned ops onto the row
+// (adoptSnapshotOp) — so the fence was not on screen when the verb read as
+// offered. Naming what the row is doing beats the silence an unguarded press
+// got before, and beats the daemon's own "busy; try again" refusal a
+// dispatched RPC would surface instead. Teardown ops report through
+// IsTearingDown's own notices before this is reached.
+func inFlightOpNotice(inst *session.Instance) error {
+	switch inst.GetInFlightOp() {
+	case session.OpCreating:
+		return fmt.Errorf("session '%s' is still being created", inst.Title)
+	case session.OpRestoring:
+		return fmt.Errorf("session '%s' is already being restored", inst.Title)
+	case session.OpReplacing:
+		return fmt.Errorf("session '%s' is mid-handoff", inst.Title)
+	case session.OpRespawning:
+		return fmt.Errorf("session '%s' is resuming", inst.Title)
+	}
+	return nil
+}
+
 // handleKill handles the kill/delete session action against the sidebar's
 // row-verb target — the cursor's row, or the ▾-marked resting row while the
 // cursor rests on its section header (#4755). The confirmation only
@@ -167,7 +189,7 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.RowVerbTarget()
 	if selected == nil {
-		return m, nil
+		return m, m.handleNotice(errors.New("No session under the cursor"))
 	}
 	// IsTearingDown BEFORE CanKill: a teardown-in-progress row now reports
 	// CanKill()==false (#2500), so checking CanKill first would fold this
@@ -177,7 +199,14 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is already being deleted", selected.Title))
 	}
 	if !selected.CanKill() {
-		return m, nil
+		// A non-teardown in-flight op (create/restore/handoff/respawn) is the
+		// transient fence #7551's rapid verb hit; an id-less row cannot
+		// address the destructive API at all. Either way the press must say
+		// so rather than no-op silently (#5373 convention).
+		if notice := inFlightOpNotice(selected); notice != nil {
+			return m, m.handleNotice(notice)
+		}
+		return m, m.handleNotice(fmt.Errorf("session '%s' can't be deleted", selected.Title))
 	}
 
 	// Capture stable identity at confirmation-open time. A title may be reused
@@ -356,7 +385,7 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
 	if selected == nil {
-		return m, nil
+		return m, m.handleNotice(errors.New("No session under the cursor"))
 	}
 	// IsTearingDown BEFORE the LifecycleAction gate: a teardown-in-progress row now
 	// reports LifecycleAction()==None (#2500), so gating first would fold this
@@ -364,17 +393,25 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 	if selected.IsTearingDown() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
+	// A non-teardown in-flight op (create/restore/handoff/respawn) is the
+	// transient fence #7551's rapid verb hit: adopted onto the row between the
+	// painted frame and the press, it reports LifecycleAction()==None. Answer
+	// the press by name rather than dropping it silently (#5373 convention).
+	if notice := inFlightOpNotice(selected); notice != nil {
+		return m, m.handleNotice(notice)
+	}
 	lifecycleAction := selected.LifecycleAction()
 	if lifecycleAction == session.LifecycleActionNone {
-		return m, nil
+		return m, m.handleNotice(fmt.Errorf("session '%s' can't be archived", selected.Title))
 	}
 	title := selected.Title
 	target := m.captureProjectActionTarget(selected)
 
 	// A resting (Archived/Lost/Dead) row has no live worktree/tmux to tear down;
-	// `a` does nothing. Restore is on its own key now (`r`).
+	// `a` archives nothing there — say so rather than no-op silently, and point
+	// at the restore key that owns that row's transition (#5373 convention).
 	if lifecycleAction != session.LifecycleActionArchive {
-		return m, nil
+		return m, m.handleNotice(fmt.Errorf("session '%s' is not live — restore it with %s", title, restoreKeyHint()))
 	}
 
 	// Live row → archive. Fail fast on the unarchivable session kinds for a

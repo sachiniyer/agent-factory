@@ -139,10 +139,14 @@ func TestHandleRestore_LostRowRestoresWithoutConfirmation(t *testing.T) {
 	require.Equal(t, inst.ID, done.target.id)
 }
 
-// TestHandleArchive_RestingRowIsNoOp: after the #1605 clean break, `a` on an
-// archived/lost/dead row does nothing — restore moved to `r`. It must not open a
-// confirmation, mark a restore op, or dispatch anything.
-func TestHandleArchive_RestingRowIsNoOp(t *testing.T) {
+// TestHandleArchive_RestingRowAnswersWithNotice: after the #1605 clean break,
+// `a` on an archived/lost/dead row archives nothing — restore moved to `r`.
+// It must not open a confirmation or mark a restore op, and — rather than
+// no-op silently — it answers with the #5373-style transient notice pointing
+// at the restore key (`a` pressed on a resting row IS an answerable press,
+// whether the cursor landed there through navigation or through a rebuild
+// drifting it past the live tail, #7551).
+func TestHandleArchive_RestingRowAnswersWithNotice(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status session.Status
@@ -163,7 +167,10 @@ func TestHandleArchive_RestingRowIsNoOp(t *testing.T) {
 
 			require.Equal(t, stateDefault, h.state, "`a` on a resting row must not open any overlay")
 			require.Equal(t, session.OpNone, inst.GetInFlightOp(), "`a` on a resting row must not start a restore")
-			require.Nil(t, cmd, "`a` on a resting row must dispatch nothing")
+			require.NotNil(t, cmd, "the notice schedules its auto-clear (#5373)")
+			text, _ := h.errBox.RetainedNotice()
+			require.Contains(t, text, "is not live",
+				"`a` on a resting row must say why nothing happened and name the way back")
 		})
 	}
 }
