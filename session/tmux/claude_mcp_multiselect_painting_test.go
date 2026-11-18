@@ -166,3 +166,89 @@ func TestCheckAndHandleTrustPrompt_Issue7504PickerQuotedAboveAComposerStaysClear
 		require.Empty(t, sentKeystrokes(cmds), "%s", name)
 	}
 }
+
+// At 19 to 35 columns the footer wraps ("Space to select · Esc to reject" over
+// "all", and onto more rows below 30 columns), while the header's first row
+// still reads "<N> new MCP servers". Painted past the footer's first row, the
+// picker read clear: the reader took the footer only as one row, or a start of
+// it as the pane's last row (#7530). First the issue's frame: twelve servers
+// at 35 columns, the footer begun on its second row. Then the three-server
+// picker at each of those widths, painted from the header down to each row,
+// and to each row's first letter and word ends, short of the whole footer,
+// with nothing above it and under each stale composer. Every frame holds,
+// with no Esc.
+func TestCheckAndHandleTrustPrompt_Issue7530PickerWithAWrappedFooterHoldsWhilePainting(t *testing.T) {
+	issue := strings.Join([]string{
+		strings.Repeat("─", 35),
+		"  12 new MCP servers found in this",
+		"  project",
+		"  Select any you wish to enable.",
+		"",
+		"  MCP servers may execute code or",
+		"  access system resources. All tool",
+		"  calls require approval. Learn more",
+		"  in the MCP documentation.",
+		"",
+		"  ❯ [✔] a",
+		"    [✔] b",
+		"    [✔] c",
+		"    [✔] d",
+		"    [✔] e",
+		"  ↓ [✔] f",
+		"       Enable selected",
+		" Space to select · Esc to reject",
+		" al",
+	}, "\n")
+	requireHeldWithoutAKey(t, issue, "the issue's frame (#7530)")
+	composers := staleComposerRows(t)
+	composers["nothing"] = nil
+	for width := 19; width <= 35; width++ {
+		rows := mcpServersPickerAt(width)
+		for k := 1; k < len(rows); k++ {
+			steps := rowStarts(rows[k])
+			if k < len(rows)-1 {
+				steps = append(steps, rows[k])
+			}
+			for _, step := range steps {
+				if k == 1 && !claudeMCPServersHeaderStart.MatchString(strings.TrimSpace(step)) {
+					continue
+				}
+				painted := append(slices.Clone(rows[:k]), step)
+				for name, composer := range composers {
+					requireHeldWithoutAKey(t, strings.Join(append(slices.Clone(composer), painted...), "\n"),
+						fmt.Sprintf("at %d columns, painted as far as %q, under %s", width, step, name))
+				}
+			}
+		}
+	}
+}
+
+// What is no picker being painted stays clear at those widths: the picker
+// quoted above a working agent's composer, cut inside its wrapped footer or
+// whole; and the picker pasted into a composer draft, cut the same way, over
+// the draft's closing rule, with and without the status row below. A rule
+// below the footer's rows is no row of the footer.
+func TestCheckAndHandleTrustPrompt_Issue7530WrappedFooterQuotedAboveAComposerStaysClear(t *testing.T) {
+	rule := strings.Repeat("─", 40)
+	for width := 19; width <= 35; width++ {
+		rows := mcpServersPickerAt(width)
+		footer := len(rows) - len(wrapAtSpaces(claudeMCPServersFooter, width-1))
+		for k := footer; k < len(rows); k++ {
+			for _, step := range append(rowStarts(rows[k]), rows[k]) {
+				painted := append(slices.Clone(rows[:k]), step)
+				draft := append([]string{rule, claudeTrustSelectionGlyph + " Explain this picker:"}, painted[1:]...)
+				draft = append(draft, rule)
+				for name, content := range map[string]string{
+					"above the ruled composer":                strings.Join(painted, "\n") + ruledComposerBelow,
+					"above the boxed composer":                strings.Join(painted, "\n") + boxedComposerBelow,
+					"in a composer draft":                     strings.Join(draft, "\n"),
+					"in a composer draft over its status row": strings.Join(draft, "\n") + "\n  ? for shortcuts",
+				} {
+					handled, cmds := pollStaticPane(t, content, 4)
+					require.False(t, handled, "at %d columns, cut at %q, %s:\n%s", width, step, name, content)
+					require.Empty(t, sentKeystrokes(cmds), "at %d columns, cut at %q, %s", width, step, name)
+				}
+			}
+		}
+	}
+}

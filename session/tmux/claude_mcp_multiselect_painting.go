@@ -25,6 +25,9 @@ import (
 //     "project", the 40-column capture), or a server name it wraps (the
 //     long-name capture). The grammar reads the header only as one row, and
 //     each server only as one checkbox row.
+//   - A footer the pane wraps, painted past its first row: under 36 columns,
+//     "Space to select · Esc to reject" over "al" (#7530). The grammar reads
+//     the footer only as one row.
 //
 // In each shape, the create typed its prompt and pressed Enter into a picker
 // that has every server pre-checked. That enables every server once the picker
@@ -43,13 +46,16 @@ import (
 //   - every row below the header, down to the pane's last content (frame
 //     rules counted as content), is a row of the picker's grammar, in the
 //     grammar's order (claudeMCPServersRowAfter). Below a server row, a row of
-//     plain text also counts: the wrapped rest of its name;
+//     plain text also counts: the wrapped rest of its name. Below the "Enable
+//     selected" row, so do rows with no ❯ that spell the footer's start, or
+//     the whole footer, read with their whitespace removed so that no wrap
+//     point matters: a footer the pane wraps;
 //   - the last content row is a whole row of the grammar, or the start of
 //     the row the picker paints next (claudeMCPServersRowStart). A frame
 //     rule is neither;
 //   - the paint has not reached the whole footer. A whole picker is for the
 //     readers before this one: the grammar answers it, and the unreadable
-//     hold holds it.
+//     hold holds it, or claudeMCPServersTailOf when the footer wraps.
 //
 // Nothing above the header is asked. A working agent paints its composer,
 // framed by rules and led by ❯, below its output. So a picker it quotes has a
@@ -80,16 +86,25 @@ func claudeMCPServersPaintingOf(screen visibleText) bool {
 		return false
 	}
 	phase := claudeMCPServersInBody
+	// footer is the footer read so far, squashed, while the pane wraps it.
+	footer := ""
 	for i := header + 1; i <= last; i++ {
 		rule := claudeTrustFrameRule(lines[i])
 		next, ok := claudeMCPServersRowAfter(phase, rows[i], rule)
 		switch {
-		case ok:
+		case ok && footer == "":
 			phase = next
+		case phase == claudeMCPServersAfterSubmit && claudeMCPServersFooterGoesOn(footer, rows[i], rule):
+			// A footer the pane wraps (#7530): with this row, its rows spell
+			// its start, or the whole of it.
+			footer += claudeSquash(rows[i].label)
+			if footer == claudeSquash(claudeMCPServersFooter) {
+				phase, footer = claudeMCPServersAfterFooter, ""
+			}
 		case phase == claudeMCPServersInServers && !rule && !rows[i].selected && rows[i].label != claudeMCPServersFooter:
 			// The wrapped rest of a long server name: a row of its own,
 			// below the server row it continues.
-		case i == last && !rule:
+		case i == last && !rule && footer == "":
 			// A frame rule is never a row begun: claudeTrustRowOf reads it as
 			// an empty label, which would pass for a checkbox not yet painted.
 			// A composer's closing rule under a draft that quotes the picker
@@ -100,6 +115,17 @@ func claudeMCPServersPaintingOf(screen visibleText) bool {
 		}
 	}
 	return phase != claudeMCPServersAfterFooter
+}
+
+// claudeMCPServersFooterGoesOn reports whether row carries on the footer from
+// read, the footer's rows above it squashed: a row with no ❯ that is neither
+// blank nor a frame rule, and whose label, squashed, takes read no further
+// than the whole footer.
+func claudeMCPServersFooterGoesOn(read string, row claudeTrustRow, rule bool) bool {
+	if rule || row.blank || row.selected {
+		return false
+	}
+	return strings.HasPrefix(claudeSquash(claudeMCPServersFooter), read+claudeSquash(row.label))
 }
 
 // claudeMCPServersRowStart reports whether row is the start of the row the
