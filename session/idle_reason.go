@@ -473,6 +473,7 @@ func (i *Instance) markAgentRuntimeReplaced(replaced bool) {
 // proves a claim's emission can be what a sighting shows (#6972, Codex).
 func (i *Instance) markAgentRuntimeReplacedLocked(replaced bool) {
 	i.agentRuntimeReplaced = replaced
+	i.agentRespawned = false
 	// Remember WHEN, so an interruption's boundary is the launch, not the later
 	// settle edge: an agent already mid-turn at ConfirmLive started after this (#6231).
 	if replaced {
@@ -482,6 +483,18 @@ func (i *Instance) markAgentRuntimeReplacedLocked(replaced bool) {
 	} else {
 		i.agentReplacedAt = time.Time{}
 	}
+}
+
+// markAgentRespawned is markAgentRuntimeReplaced(true) for a respawn, the
+// replacement that proves the prompted process gone (agentRespawned). Only the
+// local backend's respawn branches call it: on load and on Recover, each taken
+// after tmux confirmed the agent's session absent, or after af stopped the pane
+// and waited for its exit.
+func (i *Instance) markAgentRespawned() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.markAgentRuntimeReplacedLocked(true)
+	i.agentRespawned = true
 }
 
 // InterruptTaskRunIfRuntimeReplaced ends a still-in-flight task run as
@@ -579,6 +592,7 @@ func (i *Instance) ResumeInterruptedTaskRunAtEpoch(observedAt time.Time, observe
 	}
 	i.taskRunActive = true
 	i.taskRunInterrupted = false
+	i.taskRunInterruptedByRespawn = false
 	i.taskRunInterruptedAt = time.Time{}
 	i.taskRunIdleEdgeHeld = true
 	i.taskRunPromptAttemptAt = time.Time{}

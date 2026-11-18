@@ -670,7 +670,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// deferred delivery can park until its target detaches (#1586), and boot
 	// must not wait on that. RunTask's per-task flock serializes each replay
 	// against a due-now cron entry of the same task — the loser coalesces, which
-	// is the existing same-task overlap semantics.
+	// is the existing same-task overlap semantics. A held fire's reconcile asks
+	// this manager whether anything still settles its Lost row (#7518).
+	defer setTaskFireRowSettles(setTaskFireRowSettles(manager.lostRowSettles))
 	go replayPendingTaskFires()
 	scheduler.Start()
 	defer scheduler.Stop()

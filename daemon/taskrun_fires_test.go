@@ -371,8 +371,10 @@ func TestRunTask_ReplayDoesNotAdoptAnInterruptedRow(t *testing.T) {
 		Status:             session.Ready,
 		Liveness:           session.LiveReady,
 		TaskRunInterrupted: true,
-		CreatedAt:          intendedAt.Add(2 * time.Second),
-		UpdatedAt:          intendedAt.Add(2 * time.Second),
+		// A respawn ended it: only that proves the prompted process gone (#7518).
+		TaskRunInterruptedByRespawn: true,
+		CreatedAt:                   intendedAt.Add(2 * time.Second),
+		UpdatedAt:                   intendedAt.Add(2 * time.Second),
 	}); err != nil {
 		t.Fatalf("seed session row: %v", err)
 	}

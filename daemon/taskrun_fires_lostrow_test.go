@@ -2,7 +2,11 @@ package daemon
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -94,10 +98,28 @@ func rebound(d *session.InstanceData) {
 	d.Liveness, d.LostAgentGone = session.LiveRunning, false
 }
 
-// respawned is a restore that replaced the agent without replaying its prompt.
+// respawned is a restore that replaced the agent without replaying its prompt,
+// after tmux confirmed its session absent.
 func respawned(d *session.InstanceData) {
 	d.Liveness, d.LostAgentGone = session.LiveRunning, false
-	d.TaskRunActive, d.TaskRunInterrupted = false, true
+	d.TaskRunActive, d.TaskRunInterrupted, d.TaskRunInterruptedByRespawn = false, true, true
+}
+
+// unverifiedRebind is a restore that reattached a live agent whose pane identity
+// it could not verify (a timed-out query, or no recorded pid). #4222 still ends
+// the run as interrupted, but nothing proves the prompted process gone: it may be
+// this very agent.
+func unverifiedRebind(d *session.InstanceData) {
+	d.Liveness, d.LostAgentGone = session.LiveRunning, false
+	d.TaskRunActive, d.TaskRunInterrupted, d.TaskRunInterruptedByRespawn = false, true, false
+}
+
+// settling pins what the manager answers about whether anything still settles
+// a Lost row.
+func settling(t *testing.T, settles bool) {
+	t.Helper()
+	prev := setTaskFireRowSettles(func(string, *session.InstanceData) bool { return settles })
+	t.Cleanup(func() { setTaskFireRowSettles(prev) })
 }
 
 func lastRun(t *testing.T, taskID string) *task.Task {
@@ -163,8 +185,8 @@ func TestRunTask_ReplayHoldsALostRowWhoseAgentMayBeRunning(t *testing.T) {
 		t.Fatal("a held fire keeps its marker: the occurrence is still owed until the restore settles")
 	}
 	first := lastRun(t, "ab0r7521")
-	if !strings.HasPrefix(first.LastRunStatus, "errored: "+errTaskFireReconcile.Error()) {
-		t.Fatalf("LastRunStatus = %q, want the reconcile-failure status", first.LastRunStatus)
+	if !strings.HasPrefix(first.LastRunStatus, taskStatusHeldPrefix) {
+		t.Fatalf("LastRunStatus = %q, want the held status: the run is probably still working, not failed", first.LastRunStatus)
 	}
 	if !strings.Contains(first.LastRunStatus, lostRowTitle+"-ab0r7521") {
 		t.Fatalf("the held status must name the session it waits on; got %q", first.LastRunStatus)
@@ -317,6 +339,7 @@ func TestRunTask_HeldReplayResolvesWhenTheRestoreSettles(t *testing.T) {
 	}{
 		{"rebind adopts", "ab0r752a", rebound, 0},
 		{"respawn delivers fresh", "ab0r752b", respawned, 1},
+		{"unverified rebind adopts", "ab0r7530", unverifiedRebind, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := len(*creates)
@@ -356,6 +379,7 @@ func TestReplayTaskFire_LooksAgainUntilTheRestoreSettles(t *testing.T) {
 	}{
 		{"rebind adopts", "ab0r752c", rebound, 0},
 		{"respawn delivers fresh", "ab0r752d", respawned, 1},
+		{"unverified rebind adopts", "ab0r7531", unverifiedRebind, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := len(*creates)
@@ -438,5 +462,235 @@ func TestRunTask_NewFireSupersedesAHeldOne(t *testing.T) {
 	}
 	if len(*creates) != 1 {
 		t.Fatalf("nothing may deliver the superseded occurrence later as well; creates = %d", len(*creates))
+	}
+}
+
+// R1 on the load path: a load whose reattach could not verify the pane's
+// identity ends the run interrupted, but the row is live and nothing proves its
+// agent gone. It is adopted, not run a second time. The same row Lost is held.
+func TestReconcilePendingTaskFire_AnInterruptThatProvesNothing(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	creates, _ := stubTaskDelivery(t)
+	intendedAt := time.Now().Add(-time.Minute)
+
+	lostFire(t, "ab0r7532", repoPath, intendedAt, unverifiedRebind)
+	if err := runTaskDelivery("ab0r7532", task.ProjectExpectation{}, replayMarker("ab0r7532", intendedAt)); err != nil {
+		t.Fatalf("replay runTaskDelivery: %v", err)
+	}
+	if len(*creates) != 0 {
+		t.Fatalf("an unproven interrupt on a live row is adopted; creates = %d", len(*creates))
+	}
+	if got := lastRunStatus(t, "ab0r7532"); got != "started" {
+		t.Fatalf("LastRunStatus = %q, want started (adopted)", got)
+	}
+
+	lostFire(t, "ab0r7533", repoPath, intendedAt, func(d *session.InstanceData) {
+		unverifiedRebind(d)
+		d.Liveness = session.LiveLost
+	})
+	requireHeld(t, runTaskDelivery("ab0r7533", task.ProjectExpectation{}, replayMarker("ab0r7533", intendedAt)))
+	if len(*creates) != 0 || !markerExists(t, "ab0r7533") {
+		t.Fatalf("an unproven interrupt on a Lost row is held; creates = %d", len(*creates))
+	}
+}
+
+// R2: a hold lasts only while something is still settling the row. When nothing
+// is (lost-restore gave up, or never retries a sandbox row whose reattach
+// failed), the row is adopted at once, as it always was, and the occurrence is
+// not run a second time.
+func TestReconcilePendingTaskFire_AdoptsARowNothingWillSettle(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	creates, _ := stubTaskDelivery(t)
+	intendedAt := time.Now().Add(-time.Minute)
+	settling(t, false)
+	for _, tc := range []struct {
+		name   string
+		taskID string
+		shape  func(*session.InstanceData)
+	}{
+		{"run in flight", "ab0r7534", nil},
+		{"unproven interrupt", "ab0r7535", func(d *session.InstanceData) {
+			unverifiedRebind(d)
+			d.Liveness = session.LiveLost
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(*creates)
+			lostFire(t, tc.taskID, repoPath, intendedAt, tc.shape)
+			if err := runTaskDelivery(tc.taskID, task.ProjectExpectation{}, replayMarker(tc.taskID, intendedAt)); err != nil {
+				t.Fatalf("a row nothing will settle is adopted, not held: %v", err)
+			}
+			if got := len(*creates) - before; got != 0 {
+				t.Fatalf("nothing proves the agent gone, so nothing is delivered again; creates = %d", got)
+			}
+			if got := lastRunStatus(t, tc.taskID); got != "started" {
+				t.Fatalf("LastRunStatus = %q, want started (adopted)", got)
+			}
+			if markerExists(t, tc.taskID) {
+				t.Fatal("adoption discharges the marker")
+			}
+		})
+	}
+
+	// A proven-gone agent still delivers fresh: settling only decides a hold.
+	lostFire(t, "ab0r7536", repoPath, intendedAt, proveAgentGone)
+	if err := runTaskDelivery("ab0r7536", task.ProjectExpectation{}, replayMarker("ab0r7536", intendedAt)); err != nil {
+		t.Fatalf("replay runTaskDelivery: %v", err)
+	}
+	if len(*creates) != 1 {
+		t.Fatalf("a proven-gone agent's occurrence delivers once whatever settles its row; creates = %d", len(*creates))
+	}
+}
+
+// R2: what the daemon answers. A row it holds Lost and will retry is settling;
+// one whose restore gave up, that it holds unstarted (a sandbox whose reattach
+// failed), that a successor holds under the same title, or that it does not hold
+// at all, is not. A row already out of Lost in memory is settling: the record on
+// disk has not caught up, and the next look reads it.
+func TestManagerLostRowSettles(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	installInstantBackend(t)
+	const repoID = "repo-7518"
+	newLost := func(t *testing.T, title string) *session.Instance {
+		t.Helper()
+		inst, err := session.NewInstance(session.InstanceOptions{Title: title, TaskID: "task1", Path: t.TempDir(), Program: "claude"})
+		if err != nil {
+			t.Fatalf("NewInstance: %v", err)
+		}
+		inst.SetStartedForTest(true)
+		if err := inst.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+			t.Fatalf("transition to lost: %v", err)
+		}
+		return inst
+	}
+	ask := func(t *testing.T, inst *session.Instance, row session.InstanceData) bool {
+		t.Helper()
+		m := &Manager{instances: map[string]*session.Instance{daemonInstanceKey(repoID, inst.Title): inst}}
+		return m.lostRowSettles(repoID, &row)
+	}
+
+	t.Run("retried by lost-restore", func(t *testing.T) {
+		inst := newLost(t, "retried")
+		if !ask(t, inst, inst.ToInstanceData()) {
+			t.Fatal("lost-restore is still retrying this row")
+		}
+	})
+	t.Run("restore gave up", func(t *testing.T) {
+		inst := newLost(t, "gave-up")
+		inst.SetLostRestoreFailure(lostRestoreMaxAttempts, errors.New("agent exited at startup"))
+		if ask(t, inst, inst.ToInstanceData()) {
+			t.Fatal("a durable give-up means nothing will settle the row")
+		}
+	})
+	t.Run("unstarted", func(t *testing.T) {
+		inst := newLost(t, "unstarted")
+		inst.SetStartedForTest(false)
+		if ask(t, inst, inst.ToInstanceData()) {
+			t.Fatal("lost-restore never admits an unstarted row")
+		}
+	})
+	t.Run("already out of Lost in memory", func(t *testing.T) {
+		inst := newLost(t, "rebound")
+		row := inst.ToInstanceData()
+		if err := inst.Transition(session.ObserveLiveness(session.LiveRunning)); err != nil {
+			t.Fatalf("transition to running: %v", err)
+		}
+		if !ask(t, inst, row) {
+			t.Fatal("the row settled in memory; the next look reads it from disk")
+		}
+	})
+	t.Run("a successor under the same title", func(t *testing.T) {
+		inst := newLost(t, "successor")
+		row := inst.ToInstanceData()
+		row.ID = "someone-else"
+		if ask(t, inst, row) {
+			t.Fatal("the daemon does not hold this row; another session took its title")
+		}
+	})
+	t.Run("not held", func(t *testing.T) {
+		m := &Manager{instances: map[string]*session.Instance{}}
+		if m.lostRowSettles(repoID, &session.InstanceData{ID: "gone", Title: "gone"}) {
+			t.Fatal("a row the daemon does not hold never settles on its own")
+		}
+	})
+}
+
+// holdTaskLock takes the task's flock the way a parked targeted delivery holds
+// it, and returns its release.
+func holdTaskLock(t *testing.T, taskID string) (release func()) {
+	t.Helper()
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatalf("GetConfigDir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "locks"), 0o755); err != nil {
+		t.Fatalf("mkdir locks: %v", err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "locks", "task-"+taskID+".lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open lock: %v", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("flock: %v", err)
+	}
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+		})
+	}
+	t.Cleanup(release)
+	return release
+}
+
+// R4: a look that finds the task's lock taken looks again rather than leave the
+// fire to the next boot. Here the task was retargeted while its fire was held,
+// so no later fire will ever reconcile its marker; a targeted delivery holds the
+// lock for the first look, then the restore settles. A fire that collides with
+// the held one keeps its long-standing refusal.
+func TestReplayTaskFire_LooksAgainPastABusyTaskLock(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	creates, delivers := stubTaskDelivery(t)
+	intendedAt := time.Now().Add(-time.Minute)
+	repoID := lostFire(t, "ab0r7537", repoPath, intendedAt, nil)
+	requireHeld(t, runTaskDelivery("ab0r7537", task.ProjectExpectation{}, replayMarker("ab0r7537", intendedAt)))
+	target := "nightly-target"
+	if _, err := task.UpdateTask("ab0r7537", task.TaskUpdate{TargetSession: &target}, task.ProjectExpectation{}); err != nil {
+		t.Fatalf("retarget: %v", err)
+	}
+
+	release := holdTaskLock(t, "ab0r7537")
+	err := RunTask("ab0r7537", task.ProjectExpectation{})
+	if !errors.Is(err, errTaskRunActive) || err.Error() != "another run is already active for task ab0r7537" {
+		t.Fatalf("a colliding fire keeps its refusal and its message; got %v", err)
+	}
+
+	var waits []int
+	orig := taskFireRecheckDelay
+	taskFireRecheckDelay = func(attempt int) time.Duration {
+		waits = append(waits, attempt)
+		switch attempt {
+		case 1:
+			release()
+		case 2:
+			settleRow(t, repoID, "ab0r7537", rebound)
+		}
+		return 0
+	}
+	t.Cleanup(func() { taskFireRecheckDelay = orig })
+
+	replayTaskFire(replayMarker("ab0r7537", intendedAt))
+	if len(waits) != 2 {
+		t.Fatalf("the replay waits once past the busy lock and once while held; waited at attempts %v", waits)
+	}
+	if len(*creates) != 0 || len(*delivers) != 0 {
+		t.Fatalf("a rebind is adopted; creates = %d, delivers = %d", len(*creates), len(*delivers))
+	}
+	if markerExists(t, "ab0r7537") {
+		t.Fatal("the held fire resolved without waiting for the next boot")
 	}
 }

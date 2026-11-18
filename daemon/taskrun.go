@@ -448,7 +448,10 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 	defer lockFile.Close()
 
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return fmt.Errorf("another run is already active for task %s", taskID)
+		if replay == nil {
+			noteFireCoalescedBesideHeld(t)
+		}
+		return fmt.Errorf("%w for task %s", errTaskRunActive, taskID)
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
@@ -520,6 +523,10 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 		}
 		now := time.Now()
 		status := "errored: " + err.Error()
+		// A held fire is not a failed run (#7518): it records its own status.
+		if heldStatus, held := heldTaskFireStatus(err); held {
+			status = heldStatus
+		}
 		// A reconcile failure is not a completed run either — the marker stays
 		// so the next boot retries the reconcile rather than silently dropping
 		// an occurrence whose outcome could not be established.
@@ -601,7 +608,8 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 				// into this delivery of the same prompt, the coalescing an owed
 				// fire already gets from a fresh one. Its marker is retired here
 				// so no replay delivers it later as well.
-				log.WarningLog.Printf("task %s: %v; this fire supersedes it and delivers its own occurrence", taskID, recErr)
+				log.WarningLog.Printf("task %s: the fire intended %s was held (%v); this new fire retires it, so the held occurrence is never delivered on its own, and delivers its own occurrence instead",
+					taskID, fire.IntendedAt.Format(time.RFC3339), recErr)
 				clearTaskFire(taskID)
 				done, recErr = true, nil
 			}

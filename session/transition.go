@@ -386,6 +386,9 @@ func (i *Instance) endTaskRunInterruptedLocked() {
 	i.taskRunIdleEdgeHeld = false
 	i.taskRunTurnGateHeld = false
 	i.taskRunInterrupted = true
+	// Whether the replacement that ended it was a respawn: the one interrupt
+	// that proves the prompted process gone (#7518).
+	i.taskRunInterruptedByRespawn = i.agentRuntimeReplaced && i.agentRespawned
 	i.taskRunInterruptedAt = time.Now()
 	if at := i.agentReplacedAt; !at.IsZero() && at.Before(i.taskRunInterruptedAt) &&
 		i.taskRunInterruptedAt.Sub(at) <= taskRunResumeWindow {

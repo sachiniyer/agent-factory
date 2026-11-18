@@ -183,6 +183,18 @@ type InstanceData struct {
 	// indistinguishable from a normally-ended run (the pre-fix reading).
 	TaskRunInterrupted   bool      `json:"task_run_interrupted,omitempty"`
 	TaskRunInterruptedAt time.Time `json:"task_run_interrupted_at,omitzero"` // #6223 re-arm window
+	// TaskRunInterruptedByRespawn records that the interrupt came from a
+	// respawn: tmux confirmed the agent's session absent before af started its
+	// replacement, so the process the prompt went to is proven gone. Every other
+	// interrupt leaves it false: a reattach whose pane identity could not be
+	// verified (a timed-out query, or no recorded pid), an adopted restart, an
+	// off-box relaunch or re-provision. Those prove nothing about the prompted
+	// process. Only the daemon's pending cron fire reconcile reads it (#7518): a
+	// TaskRunInterrupted row delivers its occurrence fresh only with this set.
+	// Written only alongside TaskRunInterrupted. omitempty + additive: an older
+	// record decodes to false, unknown, which adopts a live row rather than run
+	// the occurrence twice.
+	TaskRunInterruptedByRespawn bool `json:"task_run_interrupted_by_respawn,omitempty"`
 	// TaskRunFailurePending records that the run ended failed (initial prompt
 	// proven undelivered, #5278) and the task's errored status has not yet been
 	// acknowledged as written (#5646). omitempty + additive: an older record
