@@ -455,8 +455,7 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
    `tunnels/` directory in af's home (created mode 0700, verified on the opened
    directory — and that directory fd is held for the daemon's life, so
    everything af creates under it is created relative to the verified object,
-   never a re-resolved path; an AF home writable by another account is
-   refused), where no other local account can place a listener. Every
+   never a re-resolved path), where no other local account can place a listener. Every
    connection through the socket proves its acceptor is, or descends from,
    af's own ssh spawn before a byte is written, so nothing credential-bearing
    can reach an endpoint af did not provision — and a forward that cannot be

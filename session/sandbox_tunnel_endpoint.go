@@ -63,10 +63,9 @@ import (
 // for the process's life: everything af creates under tunnels/ — generation
 // dirs, their .lock files — is created relative to it (mkdirat/openat, then
 // fstat), never by re-resolving the path (#7503). A same-uid process that
-// swaps tunnels/ afterwards cannot redirect af's files; an AF home writable
-// by another account — where the swap needs no same-uid access at all — is
-// refused outright. And a generation dir deleted mid-life is re-established
-// under the held fd rather than served from a dead cache entry.
+// swaps tunnels/ afterwards cannot redirect af's files. And a generation dir
+// deleted mid-life is re-established under the held fd rather than served
+// from a dead cache entry.
 //
 // There is deliberately no TCP fallback: a transport that cannot do a unix
 // forward fails the provision loudly, naming the transport, rather than
@@ -179,21 +178,19 @@ func currentTunnelHome() (string, error) {
 }
 
 // verifyTunnelSocketRoot returns <home>/tunnels held open, after proving —
-// on the OPENED objects, never a re-read path — that the AF home is not
-// writable by another account and that tunnels/ is a real directory owned by
-// this uid with mode 0700. The held fd is the one boundary later creates are
-// relative to: checking the opened fd is what keeps a swap between stat and
-// use from slipping a foreign directory past the check (#7495), and holding
-// it is what keeps a swap AFTER the check from redirecting af's own files
-// (#7503). The caller owns the fd: generation-dir users hold it for the
-// process's life; the startup sweep closes it when done.
+// on the OPENED object, never a re-read path — that tunnels/ is a real
+// directory owned by this uid with mode 0700. The held fd is the one boundary
+// later creates are relative to: checking the opened fd is what keeps a swap
+// between stat and use from slipping a foreign directory past the check
+// (#7495), and holding it is what keeps a swap AFTER the check from
+// redirecting af's own files (#7503). Only tunnels/ must be private — it is
+// the part af owns; the home itself is verified to open and read as a
+// directory, never created here (the AF home latch is #3845/#3850's domain)
+// and never mode-checked (the peer and socket proofs already refuse a foreign
+// acceptor, so home writability is at most a doctor warning). The caller owns
+// the fd: generation-dir users hold it for the process's life; the startup
+// sweep closes it when done.
 func verifyTunnelSocketRoot(home string) (*tunnelSocketRoot, error) {
-	// The AF home first: tunnels/ can only be swapped by someone who can
-	// WRITE the home — the same uid (accepted; the peer proof bounds that to
-	// denial of service) or any other account, which a group/other-writable
-	// home would allow. Refuse the writable home before trusting anything in
-	// it (#7503).
-	_ = unix.Mkdir(home, 0o700) // best effort; the open below reports a real failure
 	homeFd, err := unix.Open(home, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open the AF home directory %q — af must verify it before trusting "+
@@ -208,12 +205,6 @@ func verifyTunnelSocketRoot(home string) (*tunnelSocketRoot, error) {
 	if hst.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return nil, fmt.Errorf("the AF home %q is not a directory: point AGENT_FACTORY_HOME at a "+
 			"directory af can keep private", home)
-	}
-	if perm := hst.Mode & 0o777; perm&0o022 != 0 {
-		return nil, fmt.Errorf("the AF home %q has mode %04o writable by group or other — another local "+
-			"account could replace af's private tunnels/ directory after af verifies it. af refuses to "+
-			"build its tunnel endpoints there: chmod go-w %s, or point AGENT_FACTORY_HOME at a private directory",
-			home, perm, home)
 	}
 
 	rootPath := filepath.Join(home, tunnelSocketRootName)

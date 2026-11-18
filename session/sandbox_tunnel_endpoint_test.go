@@ -36,20 +36,13 @@ import (
 // ssh child. Each mechanism gets its own pin.
 
 // verifyTunnelSocketRoot must create a private tunnels/ when it can — and
-// REFUSE anything that is not a real 0700 directory owned by this uid, inside
-// an AF home no other account can write. The checks run on the opened
-// objects, so a swap between stat and use cannot slip a foreign path past
-// them — and everything later created under tunnels/ stays relative to the
-// verified fd (#7503).
+// REFUSE anything that is not a real 0700 directory owned by this uid. The
+// checks run on the opened objects, so a swap between stat and use cannot
+// slip a foreign path past them — and everything later created under
+// tunnels/ stays relative to the verified fd (#7503).
 func TestTunnelSocketRootVerifiesTheOpenedDir(t *testing.T) {
-	privateHome := func() string {
-		home := t.TempDir()
-		require.NoError(t, os.Chmod(home, 0o700))
-		return home
-	}
-
 	// Fresh home: af creates tunnels/ 0700 and accepts it.
-	home := privateHome()
+	home := t.TempDir()
 	root, err := verifyTunnelSocketRoot(home)
 	require.NoError(t, err)
 	defer func() { _ = root.dir.Close() }()
@@ -59,7 +52,7 @@ func TestTunnelSocketRootVerifiesTheOpenedDir(t *testing.T) {
 
 	// A pre-existing dir whose mode was loosened is refused, and the error
 	// carries the fix rather than repairing silently.
-	home2 := privateHome()
+	home2 := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(home2, tunnelSocketRootName), 0o755))
 	_, err = verifyTunnelSocketRoot(home2)
 	require.Error(t, err)
@@ -67,41 +60,27 @@ func TestTunnelSocketRootVerifiesTheOpenedDir(t *testing.T) {
 	assert.Contains(t, err.Error(), "chmod 0700", "the refusal must name the fix")
 
 	// A symlink is refused at the open itself.
-	home3 := privateHome()
+	home3 := t.TempDir()
 	require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(home3, tunnelSocketRootName)))
 	_, err = verifyTunnelSocketRoot(home3)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "symlink")
 
 	// A regular file is refused.
-	home4 := privateHome()
+	home4 := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(home4, tunnelSocketRootName), nil, 0o600))
 	_, err = verifyTunnelSocketRoot(home4)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a directory")
-}
 
-// A group- or other-writable AF home is refused before tunnels/ is ever
-// trusted: writing the home is what lets ANY local account swap the verified
-// directory out from under af (#7503). 0755 — the mode the daemon creates —
-// is fine; the refusal is about WRITE, not read.
-func TestTunnelSocketRootRefusesAWritableHome(t *testing.T) {
-	for _, mode := range []os.FileMode{0o775, 0o777, 0o707} {
-		home := t.TempDir()
-		require.NoError(t, os.Chmod(home, mode))
-		_, err := verifyTunnelSocketRoot(home)
-		require.Error(t, err, "home mode %04o is writable beyond the owner", mode)
-		assert.Contains(t, err.Error(), "writable by group or other")
-		assert.Contains(t, err.Error(), "AGENT_FACTORY_HOME",
-			"the refusal must name the knob a wrong path is fixed with")
-	}
-	// ...while a merely world-READABLE home — what the daemon itself creates —
-	// still verifies.
-	home := t.TempDir()
-	require.NoError(t, os.Chmod(home, 0o755))
-	root, err := verifyTunnelSocketRoot(home)
-	require.NoError(t, err)
-	defer func() { _ = root.dir.Close() }()
+	// A missing home is refused by the open itself — and NOT created: the
+	// home latch (#3845/#3850) is how af notices a deleted throwaway home,
+	// so tunnel code must never resurrect it.
+	missing := filepath.Join(t.TempDir(), "no-such-home")
+	_, err = verifyTunnelSocketRoot(missing)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot open the AF home")
+	assert.NoDirExists(t, missing, "verify must never create the AF home")
 }
 
 // The spawn must pass the stream-local options explicitly (#7495): the mask
@@ -663,7 +642,6 @@ func TestTunnelSocketPathRefusesAClosingBracket(t *testing.T) {
 // stays empty; the real files land inside the moved-aside verified dir.
 func TestTunnelCreateStaysRelativeToTheVerifiedFd(t *testing.T) {
 	home := t.TempDir()
-	require.NoError(t, os.Chmod(home, 0o700))
 	root, err := verifyTunnelSocketRoot(home)
 	require.NoError(t, err)
 	defer func() { _ = root.dir.Close() }()
@@ -697,7 +675,6 @@ func TestTunnelCreateStaysRelativeToTheVerifiedFd(t *testing.T) {
 // (#7503). Minted socket paths stay valid, and the next spawn's bind lands.
 func TestTunnelGenerationDirIsReestablished(t *testing.T) {
 	home := t.TempDir()
-	require.NoError(t, os.Chmod(home, 0o700))
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	canonical, err := currentTunnelHome()
 	require.NoError(t, err)
@@ -729,7 +706,6 @@ func TestTunnelGenerationDirIsReestablished(t *testing.T) {
 // swapped-in decoy at the tunnels/ path is never even looked at (#7503).
 func TestSweepStaysInsideTheVerifiedDirFd(t *testing.T) {
 	home := t.TempDir()
-	require.NoError(t, os.Chmod(home, 0o700))
 	root, err := verifyTunnelSocketRoot(home)
 	require.NoError(t, err)
 	defer func() { _ = root.dir.Close() }()
