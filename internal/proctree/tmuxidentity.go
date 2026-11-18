@@ -147,20 +147,24 @@ func isTmuxTaskName(comm string) bool {
 // a client into a "server": whatever the subcommand, a client runs through
 // client_main, which titles it a client and never daemonises it.
 //
-// A process whose PARENT is tmux is never a server (#6581). A server spawns
-// every pane (spawn.c) and job — pipe-pane, run-shell, #() (job.c) — by forking,
-// and until that child execs it carries the server's task name AND argv, so
-// both rules above match it. Before the exec the child resets SIGUSR1 to its
-// default action (proc_clear_signals(server_proc, 1)) and unblocks signals, so
-// a SIGUSR1 in that window kills the pane before its program runs, and the
-// session closes within milliseconds. Measured on an isolated tmux 3.4 server:
-// signalling only that server's children that passed the old check, 199 of 200
-// fresh sessions were gone 50 ms after new-session, against 0 of 200 without.
-// The parent separates them: a daemonised server's parent is init or a
-// subreaper, a foreground `-D` server's is whatever launched it, and a pane or
-// job child's is always its server. On darwin the daemon(3) rule already
-// refused these children (their ppid is the server, not 1); the parent rule
-// makes that hold on every platform, not by accident of one.
+// Both rules also match a tmux server's own child before it execs (#6581). A
+// server spawns every pane (spawn.c) and job — pipe-pane, run-shell, #()
+// (job.c) — by forking, and until that child execs it carries the server's task
+// name AND argv. Before the exec the child resets SIGUSR1 to its default action
+// (proc_clear_signals(server_proc, 1)) and unblocks signals, so a SIGUSR1 in
+// that window kills the pane before its program runs, and the session closes
+// within milliseconds. Measured on an isolated tmux 3.4 server: signalling only
+// that server's children that passed the old check, 199 of 200 fresh sessions
+// were gone 50 ms after new-session, against 0 of 200 without.
+//
+// Such a child's parent is always a tmux process, its server. A real server's
+// parent usually is not: a daemonised server's is init or a subreaper, and a
+// foreground `-D` server's is whatever launched it. The exception is a PID
+// namespace whose init is tmux (a container started as `tmux`, or with
+// `tmux -D` as its entrypoint, and no --init): there every daemonised server is
+// reparented to that tmux. So a tmux parent alone does not refuse. It refuses a
+// process only when that process CAN be the parent's fork-before-exec child
+// (mayBeForkChildOf), which a daemonised server never can.
 //
 // With that, both rules are safe to act on. tmux blocks every signal from
 // before the server's fork until its own handler is installed, and on Linux
@@ -172,29 +176,76 @@ func isTmuxTaskName(comm string) bool {
 // (terminate), and nothing readable separates its first milliseconds from the
 // rest. It also never daemonises, so the daemon(3) shape never appears to name
 // it. It reports false, which leaves it unsignalled. The same goes for a `-D`
-// server a tmux pane exec'd directly: its parent is the outer server.
+// server a tmux pane exec'd directly: it holds the pane's terminal, exactly as
+// the pane's own child would.
 func IsTmuxServer(pid int) bool {
 	argv := Argv(pid)
 	if !isTmuxArgv(argv) {
 		return false
 	}
-	p, err := Lookup(pid)
+	p, shape, err := lookupForkShape(pid)
 	if err != nil {
 		return false
 	}
-	parentComm, parentRead := "", true
+	var parent Process
+	parentRead := true
 	if p.PPID > 0 {
-		parent, err := Lookup(p.PPID)
-		parentComm, parentRead = parent.Comm, err == nil
+		parent, err = Lookup(p.PPID)
+		parentRead = err == nil
 	}
-	return tmuxServerIdentity(p, parentComm, parentRead)
+	return tmuxServerIdentity(p, shape, parent, parentRead)
+}
+
+// forkShape is what tells a tmux server's fork-before-exec child apart from a
+// daemonised server when both have a tmux parent (#6581). It comes from the
+// same read of the process-table entry as the Process it goes with, so the two
+// describe one moment of one process.
+type forkShape struct {
+	// known is false where the backend does not read the fields below
+	// (everywhere but Linux). Nothing may then be inferred from them.
+	known bool
+	// ctty: the process has a controlling terminal.
+	ctty bool
+	// usr1Blocked: SIGUSR1 is in the process's blocked-signal mask.
+	usr1Blocked bool
+}
+
+// mayBeForkChildOf reports whether p, whose parent is a tmux process, can be
+// that tmux's child between fork and exec, and so must be refused.
+//
+// tmux blocks every signal and then forks. A pane child goes through
+// forkpty's login_tty: setsid(), which makes it lead its own session, and then
+// TIOCSCTTY, which gives it the pane's terminal. Next it resets its signal
+// handlers, unblocks signals, and execs. A job child is a plain fork and keeps
+// the server's session up to its exec. So at every point before the exec the
+// child either does not lead its own session (it is still in its server's),
+// or has a controlling terminal, or has SIGUSR1 blocked. The last covers the
+// moment inside login_tty between setsid and TIOCSCTTY, where it leads its own
+// session with no terminal and looks exactly like a daemonised server.
+// Measured on an isolated tmux 3.4 server: without the SIGUSR1 clause,
+// TestIsTmuxServer_RefusesAServersChildBeforeItExecs accepted 4 to 8 pane
+// children per 100 sessions, in each of 3 runs; with it, none in 30 runs
+// (3,000 sessions, 3,000 jobs). A watcher saw every job child of 600 run-shell
+// and pipe-pane spawns in the server's session.
+//
+// A daemonised server is none of these: daemon(3) put it in a session of its
+// own (SID == PID) and left it no controlling terminal, and it runs with
+// signals unblocked. It blocks them only for the moment it forks a child of its
+// own. A read that lands there refuses it once, which leaves it unsignalled
+// for that probe only. That is the safe direction. Measured under heavy job
+// spawning, the server read as blocked in 0.4% of reads.
+func mayBeForkChildOf(p Process, shape forkShape) bool {
+	if !shape.known {
+		return true
+	}
+	return p.SID != p.PID || shape.ctty || shape.usr1Blocked
 }
 
 // tmuxServerIdentity is IsTmuxServer's decision over a process-table entry whose
-// argv already names tmux, and its parent's task name. parentRead is false when
-// the parent's entry could not be read. It is separate so that every shape can
-// be pinned without a live tmux.
-func tmuxServerIdentity(p Process, parentComm string, parentRead bool) bool {
+// argv already names tmux, with its fork shape and its parent's entry.
+// parentRead is false when the parent's entry could not be read. It is separate
+// so that every shape can be pinned without a live tmux.
+func tmuxServerIdentity(p Process, shape forkShape, parent Process, parentRead bool) bool {
 	switch p.Comm {
 	case "tmux: server":
 	case "tmux":
@@ -218,5 +269,8 @@ func tmuxServerIdentity(p Process, parentComm string, parentRead bool) bool {
 		// leave the socket-absent probe unable to prove anything.
 		return p.PPID == 1
 	}
-	return !isTmuxTaskName(parentComm)
+	if !isTmuxTaskName(parent.Comm) {
+		return true
+	}
+	return !mayBeForkChildOf(p, shape)
 }
