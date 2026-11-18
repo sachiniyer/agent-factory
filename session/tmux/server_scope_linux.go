@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/afhome"
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
@@ -103,7 +104,8 @@ func ensureDedicatedServer(home string) error {
 	// (#6610).
 	_ = priorDaemonGenerationEvidence(home)
 
-	if tmuxServerRunning() {
+	switch probeDedicatedServer() {
+	case dedicatedServerPresent:
 		// Do not mutate a foreign or legacy server. Its ordinary exit-empty
 		// policy lets it retire after its last session, at which point a later
 		// spawn replaces it with the dedicated server below. The record must
@@ -113,7 +115,18 @@ func ensureDedicatedServer(home string) error {
 		// uses (#6339).
 		recordAdoptedServer(home)
 		return nil
+	case dedicatedServerUnknown:
+		// A read that did not answer is not a licence to launch a second
+		// server on the socket. The old Run()==nil probe collapsed this case
+		// into absence, so a one-off stall relaunched a wrapper over a healthy
+		// server: tmux -D only attach-failed against it, and the wrapper's
+		// unconditional recordServerDeath overwrote the real marker with a
+		// false one while recordServerState credited a dead scope (#7557).
+		// Refusing here leaves the spawn to its loud fallback instead.
+		return fmt.Errorf("tmux server presence could not be determined; refusing to launch a second server")
 	}
+	// dedicatedServerAbsent — tmux's own diagnostic said definitively nobody
+	// is on the socket, so the wrapper below binds a fresh server.
 	// afhome.MkdirAll, not os.MkdirAll: the argument IS the AF home, so this is
 	// the most direct resurrection there is — and it runs on any spawn where the
 	// dedicated server is not up, which is exactly the state the comment above
@@ -159,27 +172,44 @@ func ensureDedicatedServer(home string) error {
 	_ = launchLog.Close()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	launcherExited := false
 
 	deadline := time.NewTimer(serverStartupTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if tmuxServerRunning() {
-			dedicatedServerReady(home, unit)
+		if probeDedicatedServer() == dedicatedServerPresent {
+			// A launcher that already exited cannot be the server that just
+			// answered: `tmux -D` IS the server, and it is gone. Adopt the
+			// answerer rather than credit this scope's dead unit (#7557).
+			select {
+			case <-done:
+				launcherExited = true
+			default:
+			}
+			if launcherExited {
+				recordAdoptedServer(home)
+			} else {
+				dedicatedServerReady(home, unit)
+			}
 			return nil
 		}
 		select {
 		case launchErr := <-done:
 			done = nil
-			if launchErr != nil {
+			launcherExited = true
+			if probeDedicatedServer() == dedicatedServerPresent {
 				// A concurrent AF home may have won the same socket after this
-				// launcher failed. Prefer the observed healthy server to a false
-				// startup refusal.
-				if tmuxServerRunning() {
-					dedicatedServerReady(home, unit)
-					return nil
-				}
+				// launcher failed — and once `done` delivers, the answering
+				// server is provably not the tmux -D this scope ran. Prefer the
+				// observed healthy server to a false startup refusal, but record
+				// it as adopted: crediting this scope's already-exited unit is
+				// how a false "dedicated" claim reached doctor (#7557).
+				recordAdoptedServer(home)
+				return nil
+			}
+			if launchErr != nil {
 				return fmt.Errorf("dedicated tmux server scope exited before readiness: %w", launchErr)
 			}
 		case <-ticker.C:
@@ -238,10 +268,71 @@ func secureExistingServerLog(path string) error {
 	return os.Chmod(path, 0o600)
 }
 
-func tmuxServerRunning() bool {
+// dedicatedServerVerdict is the bootstrap's read of the dedicated server's
+// socket. The verdict is PASSIVE — read from tmux's own diagnostic alone, so
+// it sends no signal, reads no process table, and does not depend on what
+// other servers may be running for this uid.
+type dedicatedServerVerdict int
+
+const (
+	// dedicatedServerPresent: a server answered the probe.
+	dedicatedServerPresent dedicatedServerVerdict = iota
+	// dedicatedServerAbsent: tmux's diagnostic said definitively there is no
+	// server — ECONNREFUSED (a socket is there, nobody listens) or ENOENT
+	// (no socket at all). ENOENT counts as definitive here even though
+	// NoServerRunning treats it as ambiguous, because the question differs:
+	// this verdict gates a LAUNCH, and `tmux -D` on an absent path binds a
+	// fresh socket rather than attaching to a server orphaned from an
+	// unlinked one. The process-table scan and the SIGUSR1 reclaim probe
+	// that make NoServerRunning's ENOENT verdict safe have nothing to buy
+	// here, so this path never runs them.
+	dedicatedServerAbsent
+	// dedicatedServerUnknown: the read did not answer — a tripped deadline,
+	// a killed probe, or a diagnostic tmux gives no definitive meaning to.
+	// A failed read is not evidence of absence.
+	dedicatedServerUnknown
+)
+
+// probeDedicatedServer asks the dedicated server's socket, ONCE and inside
+// the probe bound, whether a server answers. Every tmux read on this path
+// carries the package's full bound — boundedTmuxCommand puts the client in
+// its own process group with WaitDelay, so a wedged answer is killed rather
+// than parked on. A live server answers in this one attempt; a cold start
+// pays no retry and no grace.
+//
+// The deadline is checked BEFORE the error is classified: a probe killed on
+// the bound is unknown even when its error string happens to parse, and a
+// WaitDelay-normalized nil is never mistaken for an answer the deadline cut
+// off. Anything else that is not an exit-1 diagnostic is likewise unknown —
+// never "no server" — which is what keeps a one-off stall from relaunching a
+// wrapper over a healthy server and stamping a false death marker (#7557).
+func probeDedicatedServer() dedicatedServerVerdict {
 	ctx, cancel := context.WithTimeout(context.Background(), serverProbeTimeout)
-	defer cancel()
-	return exec.CommandContext(ctx, "tmux", tmuxArgv("show-options", "-gv", "exit-empty")...).Run() == nil
+	c := boundedTmuxCommand(ctx, "show-options", "-gv", "exit-empty")
+	_, err := c.Output()
+	execgroup.Reap(c)
+	err = normalizeWaitDelay(err)
+	timedOut := ctx.Err() != nil
+	cancel()
+	switch {
+	case timedOut:
+		return dedicatedServerUnknown
+	case err == nil:
+		return dedicatedServerPresent
+	}
+	diagnostic, exitOne := tmuxExitOneDiagnostic(err)
+	if !exitOne {
+		return dedicatedServerUnknown
+	}
+	switch classifyNoServerDiagnostic(diagnostic) {
+	case serverRefusedConnection, socketAbsent:
+		return dedicatedServerAbsent
+	}
+	return dedicatedServerUnknown
+}
+
+func tmuxServerRunning() bool {
+	return probeDedicatedServer() == dedicatedServerPresent
 }
 
 func tmuxSupportsNoStart() (bool, error) {
@@ -253,7 +344,10 @@ func tmuxSupportsNoStart() (bool, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxVersionProbeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", tmuxArgv("-V")...).Output()
+	c := boundedTmuxCommand(ctx, "-V")
+	out, err := c.Output()
+	execgroup.Reap(c)
+	err = normalizeWaitDelay(err)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return false, fmt.Errorf("tmux -V timed out after %s: %w", tmuxVersionProbeTimeout, ctxErr)
@@ -386,7 +480,14 @@ func runDedicatedServer() error {
 	cmd.Stderr = writer
 	started := time.Now()
 	err = cmd.Run()
-	recordServerDeath(filepath.Dir(logPath), unit, started, err)
+	// The death marker is evidence for doctor's post-mortem, so it is written
+	// only on a definitive no-server read: a socket that still answers means
+	// this tmux -D attached to somebody else's server and nothing owned by
+	// this wrapper died, and a read that did not answer proves nothing either
+	// way — a non-definitive exit never writes the marker (#7557).
+	if probeDedicatedServer() == dedicatedServerAbsent {
+		recordServerDeath(filepath.Dir(logPath), unit, started, err)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(writer, "%s af tmux server exited: %v\n", time.Now().Format(time.RFC3339), err)
 		return err
@@ -425,7 +526,7 @@ func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd
 		return exec.Command("tmux", tmuxArgv(args...)...), false
 	}
 	if home, configured := configuredDaemonServerHome(); configured {
-		serverReady := serverErr == nil || tmuxServerRunning()
+		serverReady := serverErr == nil || probeDedicatedServer() == dedicatedServerPresent
 		if serverReady {
 			supportsNoStart, probeErr := tmuxSupportsNoStart()
 			if probeErr != nil {

@@ -680,6 +680,24 @@ func (p *dockerProvisioner) runContainer() error {
 		// agent's config root is explicit, but the non-root agent-server still needs
 		// its writable runtime home, so make this execution invariant win last.
 		args = append(args, "-e", "HOME="+p.sessionHome())
+		// PATH chooses which program every PATH-resolved command in the
+		// container runs — af's account provisioning execs (the mount-table
+		// probe's mkdir/cat and the chown itself) and the agent's bare
+		// executable. validateAccountDockerRunArgs refuses the repo
+		// spellings, and this last-wins -e re-asserts the image's own
+		// Config.Env PATH after run_args, so even a run_args PATH spelling
+		// that escaped the lexical guard cannot put a repository binary in
+		// front of af's steps — the #7529 R7 boundary, extended to account
+		// sessions (#7563 R2). The image's binaries are the documented
+		// residual trust here, the same class as its /bin/sh; the operator
+		// keeps their own PATH whenever they forward it, and when the
+		// image's PATH cannot be read nothing is emitted — with run_args
+		// PATH refused the container inherits that same trusted value.
+		if !slices.Contains(p.spec.SessionEnvPassthrough, "PATH") {
+			if imagePATH := credentialMountImagePATH(p.dockerImageEnv()); imagePATH != "" {
+				args = append(args, "-e", "PATH="+imagePATH)
+			}
+		}
 	} else if len(p.credentialMounts) > 0 {
 		// For credential-mount sessions, credential files are mounted at paths
 		// relative to dockerContainerHome (/root). docker.run_args is repo-controlled

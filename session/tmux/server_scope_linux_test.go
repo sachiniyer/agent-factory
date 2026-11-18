@@ -5,6 +5,7 @@ package tmux
 import (
 	"bytes"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -340,7 +341,10 @@ func TestDedicatedServerWrapperCapturesStderr(t *testing.T) {
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "args")
 	tmuxShim := filepath.Join(dir, "tmux")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$AF_TEST_TMUX_ARGS\"\nprintf '%s\\n' 'fatal-sentinel-3307' >&2\nexit 42\n"
+	// Presence reads go to the probe path, not the captured launch args: the
+	// post-exit verdict read (#7557) is a show-options call, and only the
+	// foreground -D launch is what this fixture means to capture.
+	script := "#!/bin/sh\nif [ \"$1\" != \"show-options\" ]; then printf '%s\\n' \"$*\" >\"$AF_TEST_TMUX_ARGS\"; fi\nprintf '%s\\n' 'fatal-sentinel-3307' >&2\nexit 42\n"
 	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
 		t.Fatalf("write tmux shim: %v", err)
 	}
@@ -797,4 +801,393 @@ func TestServerStateRoundTripAndDedupe(t *testing.T) {
 	if _, ok, _ := ReadServerState(home); ok {
 		t.Fatal("an unchanged decision was rewritten")
 	}
+}
+
+// --- #7557: the dedicated-server presence verdict is passive and read from
+// tmux's own diagnostic alone. A live server answers in one bounded attempt;
+// ENOENT and ECONNREFUSED are both definitive for a launch decision; a stalled
+// or unclassified read is unknown and licenses neither a second server nor a
+// death marker. Nothing on this path signals a server or reads a process
+// table — the fixtures below never reach NoServerRunning/tmuxSocketClaimed.
+
+// writeShim drops an executable script under a private dir so a test can put a
+// fake tmux or systemd-run first on PATH. Paths the script needs are baked
+// into its text, not passed through the environment: the dedicated-server
+// wrapper inherits a filtered environment in which test-only variables do not
+// survive.
+func writeShim(t *testing.T, name, script string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o700); err != nil {
+		t.Fatalf("write %s shim: %v", name, err)
+	}
+	return dir
+}
+
+func tmuxShimOnPath(t *testing.T, script string) {
+	t.Helper()
+	t.Setenv("PATH", writeShim(t, "tmux", script)+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// delegatingTmuxShim logs every invocation's first arg to logPath, runs
+// prelude (extra shell lines inserted before delegation), then execs the REAL
+// tmux resolved before the shim dir went on PATH — so fixtures get genuine
+// tmux diagnostics with invocation counting on top.
+func delegatingTmuxShim(t *testing.T, logPath, prelude string) {
+	t.Helper()
+	real, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skipf("tmux not available: %v", err)
+	}
+	tmuxShimOnPath(t, "#!/bin/sh\nprintf '%s\\n' \"$1\" >>\""+logPath+"\"\n"+prelude+"exec \""+real+"\" \"$@\"\n")
+}
+
+func countTmuxCalls(t *testing.T, logPath, arg string) int {
+	t.Helper()
+	contents, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux call log: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(contents), "\n") {
+		if line == arg {
+			n++
+		}
+	}
+	return n
+}
+
+func daemonServerTestEnv(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	t.Cleanup(ConfigureDaemonServer(home))
+}
+
+// decisionCallOrder reads the shared call log and keeps only the entries that
+// mark a bootstrap decision: a "show-options" presence read and the "LAUNCH"
+// line the systemd-run shim writes when a launch is attempted. Fixture calls
+// (new-session, display-message) and probes after the launch are noise for
+// the one-read-before-launch assertion, not signal — and neither are repeated
+// entries: a readiness poll that lands while the shim's LAUNCH write is still
+// in flight logs the same "show-options" a gate read does, so only the
+// decision's SHAPE is stable, not its positions.
+func decisionCallOrder(t *testing.T, logPath string) []string {
+	t.Helper()
+	contents, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux call log: %v", err)
+	}
+	var seq []string
+	for _, line := range strings.Split(string(contents), "\n") {
+		if line != "show-options" && line != "LAUNCH" {
+			continue
+		}
+		if n := len(seq); n > 0 && seq[n-1] == line {
+			continue
+		}
+		seq = append(seq, line)
+	}
+	return seq
+}
+
+// launchesIn counts the LAUNCH entries in the raw call log: the launch-once
+// property counts every attempt, not the deduped decision shape.
+func launchesIn(t *testing.T, logPath string) int {
+	t.Helper()
+	contents, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux call log: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(contents), "\n") {
+		if line == "LAUNCH" {
+			n++
+		}
+	}
+	return n
+}
+
+func noServerDeathMarker(t *testing.T, home string) {
+	t.Helper()
+	if _, ok, err := ReadServerDeath(home); err != nil || ok {
+		t.Fatalf("a death marker exists (ok=%v err=%v) on a path that never proved a server death", ok, err)
+	}
+}
+
+// TestEnsureDaemonServerAbsentSocketLaunchesOnce is the ENOENT fixture: a
+// machine with no tmux server answers "error connecting to <socket> (No such
+// file or directory)" — definitive for a launch decision — so the bootstrap
+// commits after exactly one bounded read and pays no retry and no grace.
+func TestEnsureDaemonServerAbsentSocketLaunchesOnce(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux-calls")
+	delegatingTmuxShim(t, logPath, "")
+	// A systemd-run shim that refuses at Start records whether a launch was
+	// ever attempted — the gate's absent verdict is what should commit to one.
+	systemdRun := writeShim(t, "systemd-run", "#!/bin/sh\nprintf '%s\\n' LAUNCH >>\""+logPath+"\"\nexit 77\n")
+	t.Setenv("PATH", systemdRun+string(os.PathListSeparator)+os.Getenv("PATH"))
+	home := t.TempDir()
+	daemonServerTestEnv(t, home)
+
+	err := EnsureDaemonServer()
+	if err == nil || !strings.Contains(err.Error(), "dedicated tmux server scope exited before readiness") {
+		t.Fatalf("EnsureDaemonServer error = %v, want the refusing launch to surface", err)
+	}
+	if seq := decisionCallOrder(t, logPath); len(seq) < 2 || seq[0] != "show-options" || seq[1] != "LAUNCH" {
+		t.Fatalf("call order = %v, want a gate read then the launch decision", seq)
+	}
+	if n := launchesIn(t, logPath); n != 1 {
+		t.Fatalf("launch attempts = %d, want exactly one", n)
+	}
+	if verdict := probeDedicatedServer(); verdict != dedicatedServerAbsent {
+		t.Fatalf("ENOENT verdict = %v, want absent", verdict)
+	}
+	noServerDeathMarker(t, home)
+}
+
+// TestEnsureDaemonServerRefusedSocketLaunchesOnce is the ECONNREFUSED
+// fixture: a socket file that outlives its server answers "no server running
+// on <socket>" — definitive — so the same one-read launch path applies.
+func TestEnsureDaemonServerRefusedSocketLaunchesOnce(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux-calls")
+	delegatingTmuxShim(t, logPath, "")
+
+	// A socket file nobody listens on is exactly what a SIGKILLed server
+	// leaves behind, but binding and closing one directly skips the teardown
+	// window where a real connect can be answered with a transient error
+	// instead of the definitive refusal the verdict needs.
+	if err := os.MkdirAll(filepath.Dir(DefaultSocketPath()), 0o700); err != nil {
+		t.Fatalf("create private socket dir: %v", err)
+	}
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: DefaultSocketPath()})
+	if err != nil {
+		t.Fatalf("bind stale socket: %v", err)
+	}
+	ln.SetUnlinkOnClose(false)
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close stale socket: %v", err)
+	}
+
+	systemdRun := writeShim(t, "systemd-run", "#!/bin/sh\nprintf '%s\\n' LAUNCH >>\""+logPath+"\"\nexit 77\n")
+	t.Setenv("PATH", systemdRun+string(os.PathListSeparator)+os.Getenv("PATH"))
+	home := t.TempDir()
+	daemonServerTestEnv(t, home)
+
+	err = EnsureDaemonServer()
+	if err == nil || !strings.Contains(err.Error(), "dedicated tmux server scope exited before readiness") {
+		t.Fatalf("EnsureDaemonServer error = %v, want the refusing launch to surface", err)
+	}
+	if seq := decisionCallOrder(t, logPath); len(seq) < 2 || seq[0] != "show-options" || seq[1] != "LAUNCH" {
+		t.Fatalf("call order = %v, want a gate read then the launch decision", seq)
+	}
+	if n := launchesIn(t, logPath); n != 1 {
+		t.Fatalf("launch attempts = %d, want exactly one", n)
+	}
+	if verdict := probeDedicatedServer(); verdict != dedicatedServerAbsent {
+		t.Fatalf("ECONNREFUSED verdict = %v, want absent", verdict)
+	}
+	noServerDeathMarker(t, home)
+}
+
+// TestEnsureDaemonServerAdoptsASlowLiveServer pins the other half of "a live
+// server answers in one attempt": an answer that is merely SLOW — but inside
+// the probe bound — is still a live server. It is adopted in that one read,
+// with no second wrapper and no death marker.
+func TestEnsureDaemonServerAdoptsASlowLiveServer(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux-calls")
+	// The shim delays only the presence read, comfortably inside the bound.
+	delegatingTmuxShim(t, logPath, "if [ \"$1\" = \"show-options\" ]; then sleep 0.05; fi\n")
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", "alive", "sleep", "60").CombinedOutput(); err != nil {
+		t.Fatalf("start private tmux server: %v: %s", err, out)
+	}
+	home := t.TempDir()
+	daemonServerTestEnv(t, home)
+
+	if err := EnsureDaemonServer(); err != nil {
+		t.Fatalf("ensure dedicated server over a slow live one: %v", err)
+	}
+	st, ok, err := ReadServerState(home)
+	if err != nil || !ok || st.Mode != ServerModeAdopted {
+		t.Fatalf("server state = %+v ok=%v err=%v, want adopted", st, ok, err)
+	}
+	if got := countTmuxCalls(t, logPath, "show-options"); got != 1 {
+		t.Fatalf("socket probes = %d, want one bounded read", got)
+	}
+	noServerDeathMarker(t, home)
+}
+
+// TestEnsureDaemonServerStalledProbeRefusesLaunch is the wedge case the
+// boolean probe got wrong: a read that never answers is UNKNOWN, not absent.
+// The bootstrap must refuse to launch inside the bound — no second server, no
+// death marker, and the whole thing returns promptly instead of parking on
+// the stalled client.
+func TestEnsureDaemonServerStalledProbeRefusesLaunch(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "tmux-calls")
+	tmuxShimOnPath(t, "#!/bin/sh\nprintf '%s\\n' \"$1\" >>\""+logPath+"\"\nif [ \"$1\" = \"show-options\" ]; then exec sleep 15; fi\nexit 1\n")
+	systemdRun := writeShim(t, "systemd-run", "#!/bin/sh\nprintf '%s\\n' LAUNCH >>\""+logPath+"\"\nexit 77\n")
+	t.Setenv("PATH", systemdRun+string(os.PathListSeparator)+os.Getenv("PATH"))
+	home := t.TempDir()
+	daemonServerTestEnv(t, home)
+
+	started := time.Now()
+	err := EnsureDaemonServer()
+	elapsed := time.Since(started)
+	if err == nil || !strings.Contains(err.Error(), "could not be determined") {
+		t.Fatalf("EnsureDaemonServer error = %v, want a non-definitive-read refusal", err)
+	}
+	if elapsed >= 5*time.Second {
+		t.Fatalf("stalled probe returned after %s — the bound did not engage", elapsed)
+	}
+	if got := countTmuxCalls(t, logPath, "show-options"); got != 1 {
+		t.Fatalf("socket probes = %d, want the one bounded read", got)
+	}
+	contents, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read tmux call log: %v", readErr)
+	}
+	if strings.Contains(string(contents), "LAUNCH") {
+		t.Fatal("a second server was launched on a verdict that was never definitive")
+	}
+	noServerDeathMarker(t, home)
+}
+
+// TestDedicatedServerWrapperSkipsMarkerWhenServerStillAnswers is the attach
+// case: the socket was definitively absent when the wrapper's pre-check ran,
+// but another server bound it before `tmux -D` executed — which is exactly
+// how a stale probe once let a launcher overwrite a healthy server's record.
+// `tmux -D` exits with the attach failure; the socket still answering means
+// nothing this wrapper owned died, so no death marker may be written.
+func TestDedicatedServerWrapperSkipsMarkerWhenServerStillAnswers(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, dedicatedServerLogName)
+	countPath := filepath.Join(dir, "probe-count")
+	tmuxShimOnPath(t, "#!/bin/sh\n"+
+		"n=0\nif [ -f \""+countPath+"\" ]; then n=$(cat \""+countPath+"\"); fi\n"+
+		"n=$((n+1))\nprintf '%s\\n' \"$n\" > \""+countPath+"\"\n"+
+		"if [ \"$1\" = \"show-options\" ]; then\n"+
+		"  if [ \"$n\" -eq 1 ]; then\n"+
+		"    printf '%s\\n' \"error connecting to /nonexistent (No such file or directory)\" >&2\n    exit 1\n"+
+		"  fi\n  echo on\n  exit 0\nfi\n"+
+		"if [ \"$1\" = \"-D\" ]; then\n"+
+		"  printf '%s\\n' \"open terminal failed: not a terminal\" >&2\n  exit 1\nfi\n"+
+		"exit 0\n")
+	t.Setenv(dedicatedServerLogEnv, logPath)
+
+	err := runDedicatedServer()
+	if err == nil {
+		t.Fatal("tmux -D attach failure was reported as success")
+	}
+	noServerDeathMarker(t, dir)
+}
+
+// TestDedicatedServerWrapperSkipsMarkerOnAStalledRead is the long-stall
+// requirement: when the post-exit presence read does not answer, the verdict
+// is non-definitive and the marker must stay unwritten.
+func TestDedicatedServerWrapperSkipsMarkerOnAStalledRead(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, dedicatedServerLogName)
+	tmuxShimOnPath(t, "#!/bin/sh\n"+
+		"if [ \"$1\" = \"show-options\" ]; then exec sleep 15; fi\n"+
+		"if [ \"$1\" = \"-D\" ]; then exit 0; fi\nexit 0\n")
+	t.Setenv(dedicatedServerLogEnv, logPath)
+
+	started := time.Now()
+	if err := runDedicatedServer(); err != nil {
+		t.Fatalf("clean tmux -D exit errored: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("stalled presence read returned after %s — the bound did not engage", elapsed)
+	}
+	noServerDeathMarker(t, dir)
+}
+
+// TestDedicatedServerWrapperRecordsDeathOnDefinitiveAbsence pins the marker's
+// surviving role: `tmux -D` exited and tmux's own diagnostic proves nobody is
+// on the socket — a real death — so the record is written.
+func TestDedicatedServerWrapperRecordsDeathOnDefinitiveAbsence(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, dedicatedServerLogName)
+	tmuxShimOnPath(t, "#!/bin/sh\n"+
+		"if [ \"$1\" = \"show-options\" ]; then\n"+
+		"  printf '%s\\n' \"error connecting to /nonexistent (No such file or directory)\" >&2\n  exit 1\nfi\n"+
+		"if [ \"$1\" = \"-D\" ]; then\n"+
+		"  printf '%s\\n' 'fatal-sentinel-7557' >&2\n  exit 42\nfi\nexit 0\n")
+	t.Setenv(dedicatedServerLogEnv, logPath)
+
+	if err := runDedicatedServer(); err == nil {
+		t.Fatal("failing tmux -D was reported as success")
+	}
+	death, ok, err := ReadServerDeath(dir)
+	if err != nil || !ok {
+		t.Fatalf("death marker not written on a definitive no-server read (ok=%v err=%v)", ok, err)
+	}
+	if death.ExitCode != 42 {
+		t.Fatalf("death marker exit code = %d, want 42", death.ExitCode)
+	}
+}
+
+// TestDedicatedServerLauncherAdoptsTheSurvivingServer walks the full
+// systemd-run path: the gate reads a definitive absence, the wrapper starts,
+// but a racer owns the socket so `tmux -D` attach-fails and exits — and the
+// server that still answers afterward is recorded as ADOPTED, never credited
+// to this scope's already-exited unit, and no death marker is written.
+func TestDedicatedServerLauncherAdoptsTheSurvivingServer(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	racerUp := filepath.Join(dir, "racer-answers")
+	// The wrapper's presence reads carry AF_TMUX_SERVER_LOG in their
+	// environment; the launcher's do not. Until the wrapper's own post-exit
+	// read has answered, every launcher-side read sees the racer's socket
+	// still refuse — so a `present` answer can only reach the launcher once
+	// the wrapper has definitively failed. The answer's short delay is the
+	// cushion for the exit to be reaped before it is classified.
+	tmuxScript := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"show-options\" ]; then\n" +
+		"  if [ -n \"$AF_TMUX_SERVER_LOG\" ]; then\n" +
+		"    touch \"" + racerUp + "\"\n  echo on\n  exit 0\n  fi\n" +
+		"  if [ ! -f \"" + racerUp + "\" ]; then\n" +
+		"    printf '%s\\n' \"error connecting to /nonexistent (No such file or directory)\" >&2\n    exit 1\n  fi\n" +
+		"  sleep 0.1\n  echo on\n  exit 0\nfi\n" +
+		"if [ \"$1\" = \"-D\" ]; then\n" +
+		"  printf '%s\\n' \"open terminal failed: not a terminal\" >&2\n  exit 1\nfi\n" +
+		"exit 0\n"
+	systemdRunScript := `#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --user|--scope|--quiet|--collect|--unit=*|--property=*) shift ;;
+        --) shift; break ;;
+        *) exit 64 ;;
+    esac
+done
+exec "$@"
+`
+	shimDir := t.TempDir()
+	for name, script := range map[string]string{"tmux": tmuxScript, "systemd-run": systemdRunScript} {
+		if err := os.WriteFile(filepath.Join(shimDir, name), []byte(script), 0o700); err != nil {
+			t.Fatalf("write %s shim: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	home := t.TempDir()
+	daemonServerTestEnv(t, home)
+
+	if err := EnsureDaemonServer(); err != nil {
+		t.Fatalf("ensure dedicated server under a socket racer: %v", err)
+	}
+	st, ok, err := ReadServerState(home)
+	if err != nil || !ok {
+		t.Fatalf("server state not recorded (ok=%v err=%v)", ok, err)
+	}
+	if st.Mode != ServerModeAdopted || st.Unit != "" {
+		t.Fatalf("server state = %+v, want adopted with no owning unit — the answering server is not this scope's", st)
+	}
+	noServerDeathMarker(t, home)
 }

@@ -485,10 +485,20 @@ only needs the workspace tooling:
   an agent-credential mount) — so it neither re-owns the operator's host files
   (a read-write bind) nor EROFS-aborts on a read-only one. `find` walks HOME with
   that prune list when there is at least one such mount; with none it is a plain
-  `chown -R -h`. Only a directory whose containing mount is the container's own root filesystem is chowned: if HOME or `/workspace` is itself a mount, or lives beneath one (a host bind, a volume, a tmpfs, or a symlinked HOME that resolves into one), af skips that chown and logs why. If the
+  `chown -R -h`. Only a directory whose containing mount is the container's own root filesystem is chowned: if HOME or `/workspace` is itself a mount, or lives beneath one (a host bind, a volume, a tmpfs, or a symlinked HOME that resolves into one), af never chowns or creates through it — the mount table cannot say what backs a mount, and a docker "volume" can itself be bind-backed through local-driver options, so no mount-kind carve-out is safe. What happens next depends on the session kind: a non-account session warns that it skipped the chown and proceeds, exactly as it always has; an account session probes the mounted directory for writability as the session's own user — a `test -w`/`test -x` shell builtin, run after the permitted rootfs chowns so a just-re-owned ancestor is already traversable — warns and proceeds when it is writable, and otherwise refuses provisioning with an error naming the container mount and a remedy fitted to where the mount came from: for a host bind, chown the host directory to that user or drop the bind from `docker.run_args`; for a named or image volume, chown the volume's content or fix ownership in the image; or drop the mount — rather than surfacing later as the clone's bare "Permission denied". If the
   mount table cannot be read or understood, provisioning fails with an error
   naming it rather than chowning blind. `chown` runs with `-h` in either form so a symlink the image ships under `/root`
-  is re-owned itself, not its target outside HOME. These entries and `cat` were
+  is re-owned itself, not its target outside HOME. On an account session af
+  additionally refuses `docker.run_args` `PATH`, `LD_PRELOAD` and
+  `LD_LIBRARY_PATH` entries before `docker run` — they would let the repo
+  choose which program af's in-container provisioning commands resolve to
+  (the mount-table `cat` and `pwd`, the `chown`, the agent's own
+  executable) — and the refusal names the remedy: set the value in the
+  image's `ENV`, or have the operator forward it through
+  `session_env_passthrough`. The image's own `Config.Env` `PATH` is then
+  re-asserted after `run_args`, so docker's last-wins rule keeps every
+  PATH-resolved command on the image's own binaries unless the operator
+  forwarded `PATH` themselves. These entries and `cat` were
   already required and simply missing from this list (#3602 review); busybox and
   coreutils each provide all of them.
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).

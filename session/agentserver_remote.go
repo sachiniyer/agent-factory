@@ -296,6 +296,43 @@ func (s *remoteAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryS
 	return resp.Status, nil
 }
 
+// BoundDraftStillStaged is the staged-draft recheck for every off-box runtime
+// (#7546): the bound evidence and the capture-pane read both live inside the
+// sandbox's own agent-server, so this call only ferries the closed enum over
+// the authenticated control plane — never a reason string, so nothing on the
+// wire can carry text the flag or logs might repeat. The daemon-side phrases
+// below are the watch's fixed wording per verdict; the wire's {read} alone
+// cannot widen them.
+//
+// Version skew: an agent-server that predates the route 404s — the same
+// honest "cannot read" as a backend without the capability, so NoEvidence.
+// A transport failure, timeout, or a verdict this daemon does not know is a
+// blind read: Unreadable, and the watch's blind budget bounds the retries.
+func (s *remoteAgentServer) BoundDraftStillStaged() (StagedDraftRead, string) {
+	var resp agentBoundDraftStillStagedResp
+	if err := s.rc.call("/v1/agent/bound-draft-still-staged", struct{}{}, &resp); err != nil {
+		if errors.Is(err, errAgentRouteMissing) {
+			return StagedDraftNoEvidence, "the agent-server predates the staged-draft recheck"
+		}
+		return StagedDraftUnreadable, "the agent-server's staged-draft read could not be fetched"
+	}
+	switch resp.Read {
+	case StagedDraftNoEvidence:
+		return resp.Read, "the agent-server bound no composer evidence for the last send"
+	case StagedDraftUnreadable:
+		return resp.Read, "the agent-server could not judge the pane this tick"
+	case StagedDraftGone:
+		return resp.Read, "the agent-server no longer sees the bound evidence"
+	case StagedDraftSubmitted:
+		return resp.Read, "the agent-server sees the bound evidence in the transcript"
+	case StagedDraftStaged:
+		return resp.Read, "the agent-server still sees the bound evidence in the composer"
+	}
+	// A NEWER agent-server may answer with a verdict this daemon has no
+	// phrase for — an unknown enum is a blind read, never trusted.
+	return StagedDraftUnreadable, "the agent-server answered with an unrecognized staged-draft verdict"
+}
+
 // trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
 // StopPreservingWorkspace stops the remote agent and closes this side's data
 // plane without running the runtime teardown, so the workspace stays on its host
@@ -508,6 +545,13 @@ type agentAnswered struct{ err error }
 func (e *agentAnswered) Error() string { return e.err.Error() }
 func (e *agentAnswered) Unwrap() error { return e.err }
 
+// errAgentRouteMissing marks a 404 that names no application class — the mux's
+// own "unknown route" answer (envelope, uncoded) or a bare non-envelope 404
+// from a server that predates the path entirely (#7546). It stays distinct
+// from the coded 404s real handlers emit (tab_gone): an unknown ROUTE is a
+// version-skew fact about the server, not a refusal of the call.
+var errAgentRouteMissing = errors.New("the agent-server does not know this route")
+
 func (c *remoteAgentClient) doJSON(method, path string, req, resp any, timeout time.Duration) error {
 	var body io.Reader
 	if req != nil {
@@ -546,10 +590,22 @@ func (c *remoteAgentClient) doJSON(method, path string, req, resp any, timeout t
 		Error *apiproto.EnvelopeError `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
+		if httpResp.StatusCode == http.StatusNotFound {
+			// A 404 without an envelope is the mux answering for a path
+			// it does not have — a server older than the route (#7546).
+			return fmt.Errorf("remote agent-server: %s %s: %w", method, path, errAgentRouteMissing)
+		}
 		return fmt.Errorf("remote agent-server: malformed %s response envelope: %w", path, err)
 	}
 	if env.Error != nil {
 		err := fmt.Errorf("%s", env.Error.Message)
+		if httpResp.StatusCode == http.StatusNotFound && env.Error.Code == "" {
+			// The catch-all's uncoded 404 envelope: the path does not
+			// exist on this server — an older agent-server, not a
+			// refused call (#7546). Coded 404s (tab_gone) keep their
+			// reconstruction below.
+			err = fmt.Errorf("%s: %w", env.Error.Message, errAgentRouteMissing)
+		}
 		if env.Error.Code == apiproto.ErrorCodeResourceExhausted {
 			// The server verified a kernel resource limit behind this
 			// failure; the errno cannot cross the wire, so the code
@@ -857,6 +913,13 @@ type agentSendPromptReq struct {
 type agentSendPromptResp struct {
 	OK     bool                 `json:"ok"`
 	Status PromptDeliveryStatus `json:"status"`
+}
+
+// agentBoundDraftStillStagedResp mirrors
+// daemon/agentserver_headless.go's agentBoundDraftStillStagedResponse — the
+// closed enum alone crosses the wire; the daemon phrases it (#7546).
+type agentBoundDraftStillStagedResp struct {
+	Read StagedDraftRead `json:"read"`
 }
 
 type agentArchiveResp struct {

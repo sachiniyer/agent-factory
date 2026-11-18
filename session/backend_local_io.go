@@ -96,6 +96,22 @@ func (b *LocalBackend) SendPromptCommandWithStatus(i *Instance, prompt string) (
 	return ts.SendKeysCommandObserved(prompt)
 }
 
+// BoundDraftStillStaged asks this instance's agent tmux session where the last
+// send's bound composer evidence sits now (#7545) — still staged in the live
+// composer, echoed above it as submitted, gone, or unreadable. The daemon's
+// staged-draft watch is the only caller; it runs the check's own bounded
+// capture, never the poll's joined/ANSI frame, because the composer geometry
+// it feeds is physical-grid.
+func (b *LocalBackend) BoundDraftStillStaged(i *Instance) (StagedDraftRead, string) {
+	i.mu.RLock()
+	ts := i.tmuxLocked()
+	i.mu.RUnlock()
+	if ts == nil {
+		return StagedDraftNoEvidence, "no tmux session is bound"
+	}
+	return ts.BoundDraftStillStaged()
+}
+
 func (b *LocalBackend) IsAlive(i *Instance) (bool, error) {
 	i.mu.RLock()
 	ts := i.tmuxLocked()

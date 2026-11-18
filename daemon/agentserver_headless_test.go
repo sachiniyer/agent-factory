@@ -39,6 +39,7 @@ type fakeHeadlessAgentServer struct {
 	snapshotText string
 	baseline     bool
 	modelChange  *session.AgentModelChange
+	stagedRead   session.StagedDraftRead
 }
 
 func newFakeHeadlessAgentServer() *fakeHeadlessAgentServer {
@@ -83,6 +84,13 @@ func (f *fakeHeadlessAgentServer) SendPromptWithStatus(p string) (session.Prompt
 		return session.PromptCouldNotConfirm, err
 	}
 	return session.PromptNotDelivered, nil
+}
+
+// BoundDraftStillStaged is the fake's StagedDraftChecker half (#7546): the
+// read a test sets, with a fake phrase the wire must NOT carry — the response
+// is {read} alone, the daemon phrases verdicts itself.
+func (f *fakeHeadlessAgentServer) BoundDraftStillStaged() (session.StagedDraftRead, string) {
+	return f.stagedRead, "a fake reason the wire must not carry"
 }
 func (f *fakeHeadlessAgentServer) Subscribe(_ int, _ session.Seq) (session.PTYSubscription, error) {
 	f.mu.Lock()
@@ -295,6 +303,54 @@ func TestHeadlessAgentServer_HTTPTokenRoundTrip(t *testing.T) {
 		_ = badConn.Close(websocket.StatusNormalClosure, "")
 	}
 	require.Error(t, err, "unauthenticated WS handshake must be rejected")
+}
+
+// TestHeadlessBoundDraftStillStagedGate pins the #7546 wire contract: the
+// staged-draft recheck route answers {read} — the closed enum ALONE, never a
+// reason string — for the same bearer token send-prompt already requires,
+// and refuses without it. The raw body pins the shape, not a decoded struct
+// that could silently drop a widened field.
+func TestHeadlessBoundDraftStillStagedGate(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	fake := newFakeHeadlessAgentServer()
+	fake.stagedRead = session.StagedDraftStaged
+	hs := &headlessServer{as: fake, title: "probe", events: newEventsHub()}
+
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	closeTCP, info, err := startTCPListener(hs.newMux(), cfg.ListenAddr, cfg, tokenGatePolicy{}, withoutWebShell, nil, nil)
+	require.NoError(t, err)
+	defer func() { _ = closeTCP.close() }()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	baseURL := "http://" + info.Addr
+
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/agent/bound-draft-still-staged", strings.NewReader(`{}`))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+info.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Contains(t, string(body), `"read"`)
+	require.NotContains(t, string(body), "a fake reason the wire must not carry")
+	var env struct {
+		Data agentBoundDraftStillStagedResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &env))
+	require.Equal(t, session.StagedDraftStaged, env.Data.Read)
+
+	req, err = http.NewRequest(http.MethodPost, baseURL+"/v1/agent/bound-draft-still-staged", nil)
+	require.NoError(t, err)
+	resp, err = client.Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+		"the staged-draft route must sit behind the same token gate as send-prompt")
 }
 
 func TestHeadlessAgentServerRemovedTapEnterReturnsMigrationGuidance(t *testing.T) {

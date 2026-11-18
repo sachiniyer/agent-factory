@@ -50,6 +50,39 @@ type PromptDeliveryReporter interface {
 	SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error)
 }
 
+// StagedDraftRead is the closed verdict of the staged-draft recheck (#7545) —
+// where a sent-unverified send's bound composer evidence sits in the pane now.
+// It is an alias of the tmux-layer type so the read can cross the runtime
+// boundary without a second vocabulary.
+type StagedDraftRead = tmux.StagedDraftRead
+
+const (
+	StagedDraftNoEvidence = tmux.StagedDraftNoEvidence
+	StagedDraftUnreadable = tmux.StagedDraftUnreadable
+	StagedDraftGone       = tmux.StagedDraftGone
+	StagedDraftSubmitted  = tmux.StagedDraftSubmitted
+	StagedDraftStaged     = tmux.StagedDraftStaged
+)
+
+// StagedDraftChecker is the additive capability a runtime implements when it
+// can re-read where the last send's bound composer evidence sits (#7545). The
+// local tmux runtime implements it, and remoteAgentServer implements it for
+// every off-box runtime (#7546): the bound evidence already lives in the
+// sandbox's own tmux session — the remote read is the same checker, reached
+// over the authenticated agent-server route. A runtime that cannot answer —
+// or an agent-server old enough not to know the route — reports
+// StagedDraftNoEvidence, and the daemon's watch never arms on an answer it
+// cannot make.
+//
+// The call runs under the instance's observation-settlement fence on the
+// daemon's status poll: an implementation must be bounded (the local read is
+// an atomic load plus one capture-pane subprocess) and must never acquire a
+// session-operation lock — the send path holds those while it waits on this
+// same fence.
+type StagedDraftChecker interface {
+	BoundDraftStillStaged() (StagedDraftRead, string)
+}
+
 // SendPromptWithStatus uses a runtime's observation when available. A legacy
 // runtime that only implements SendPrompt is honest uncertainty, not delivery:
 // nil error proves the command completed, not that the pane received the text.
@@ -68,6 +101,17 @@ func SendPromptWithStatus(server AgentServer, prompt string) (PromptDeliveryStat
 		return PromptCouldNotConfirm, err
 	}
 	return PromptCouldNotConfirm, nil
+}
+
+// BoundDraftStillStaged asks a runtime where the last send's bound composer
+// evidence sits (#7545) — the staged-draft watch's one read. A runtime
+// without the capability honestly cannot read: StagedDraftNoEvidence, the
+// same answer the watch treats as never armed.
+func BoundDraftStillStaged(server AgentServer) (StagedDraftRead, string) {
+	if checker, ok := server.(StagedDraftChecker); ok {
+		return checker.BoundDraftStillStaged()
+	}
+	return StagedDraftNoEvidence, "the runtime cannot read bound composer evidence"
 }
 
 // TabAddressableServer is implemented by an agent-server whose data plane can be

@@ -50,6 +50,8 @@ var agentServerMethodWritesToThePTY = map[string]bool{
 	"ResizeTab":    false,
 	"Kill":         false,
 	"Archive":      false,
+	// BoundDraftStillStaged captures the pane only — it never injects input.
+	"BoundDraftStillStaged": false,
 }
 
 // agentServerContract is the set of interfaces a runtime may satisfy. Enumerated
@@ -59,6 +61,7 @@ func agentServerContract() []reflect.Type {
 		reflect.TypeOf((*AgentServer)(nil)).Elem(),
 		reflect.TypeOf((*TabAddressableServer)(nil)).Elem(),
 		reflect.TypeOf((*PromptDeliveryReporter)(nil)).Elem(),
+		reflect.TypeOf((*StagedDraftChecker)(nil)).Elem(),
 	}
 }
 
