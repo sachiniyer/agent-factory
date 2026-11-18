@@ -557,7 +557,6 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 	if !ok {
 		return run.done(nil, true)
 	}
-	leafIndex := i
 	i++
 	if spec, passthrough := dockerPassthroughLeaf(group, leaf); passthrough {
 		for i < len(words) {
@@ -587,7 +586,10 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 	}
 	// Every other subcommand: the leaf itself is the command the launcher
 	// runs, so an env spelling refuses on sight — requireCommand is already
-	// satisfied and only the denied-name cut applies.
+	// satisfied and only the denied-name cut applies. The leaf stays docker
+	// grammar and is never promoted into shell-command dispatch: `docker
+	// history alpine` or `docker kill c1` would otherwise re-enter the walk
+	// as the history/kill builtins and refuse ordinary docker verbs.
 	for i < len(words) {
 		if cached, seen := run.visit(words[i:], requireCommand); seen {
 			return run.done(cached.words, cached.unsafe)
@@ -605,7 +607,7 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 		}
 		i = next
 	}
-	return run.done(words[leafIndex:], false)
+	return run.done(nil, false)
 }
 
 // dockerOptionSpec is one option region's table: long names to whether they
@@ -904,7 +906,7 @@ var dockerComposeRunOptions = dockerOptionSpec{
 		"use-aliases": false,
 	},
 	shortFlags:  "diTqP",
-	shortValues: "lpuvw",
+	shortValues: "elpuvw",
 }
 
 var dockerComposeExecOptions = dockerOptionSpec{
@@ -915,7 +917,7 @@ var dockerComposeExecOptions = dockerOptionSpec{
 		"privileged": false,
 	},
 	shortFlags:  "dT",
-	shortValues: "uw",
+	shortValues: "euw",
 }
 
 // launcherSuffixMutates judges a launcher word found in an unrecognized

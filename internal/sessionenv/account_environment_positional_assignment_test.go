@@ -341,6 +341,21 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// A bare env NAME that is not denied is docker's "copy the caller's
 		// value" spelling — admitted.
 		{"docker run -e FOO img", false},
+		// compose run/exec carry a real short -e: a non-denied name consumes
+		// it as ordinary env text, a denied name still refuses.
+		{"docker compose run -e PORT=3000 svc codex", false},
+		{"docker compose exec -e PORT=3000 svc codex", false},
+		{"docker compose run -e CODEX_HOME=/other svc codex", true},
+		{"docker compose exec -e CODEX_HOME=/other svc codex", true},
+		// Non-passthrough docker leaves stay docker grammar and are never
+		// promoted into shell-command dispatch — `history`, `kill`,
+		// `export`, `wait` are real docker verbs whose names collide with
+		// shell builtins.
+		{"docker history alpine", false},
+		{"docker image history alpine", false},
+		{"docker kill c1", false},
+		{"docker export c1", false},
+		{"docker wait c1", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)
