@@ -75,15 +75,17 @@ func TestProjectionArchiveRepoCount(t *testing.T) {
 		inst := newStartedRepoInstance(t, "R", "repo-R")
 		p.AddInstance(inst)() // finalize registers repo-R
 		require.Equal(t, 1, p.NumRepos())
-		require.True(t, p.HasRepo("repo-R"))
+		_, hasR := p.repos["repo-R"]
+		require.True(t, hasR)
 
 		inst.SetArchived() // flips Started=false in place on the counted row
 		require.False(t, inst.Started(), "archive must flip Started=false in place")
 		require.True(t, p.ContainsInstance(inst))
 
 		require.True(t, p.RemoveInstance(inst))
-		require.False(t, p.HasRepo("repo-R"),
-			"HasRepo(repo-R) = true after removing an archived row that counted; want false")
+		_, hasR = p.repos["repo-R"]
+		require.False(t, hasR,
+			"repos[repo-R] still present after removing an archived row that counted; want absent")
 		require.Equal(t, 0, p.NumRepos(),
 			"NumRepos() = %d after removing the archived row; want 0 (phantom repo left behind)", p.NumRepos())
 	})
@@ -111,12 +113,14 @@ func TestProjectionArchiveRepoCount(t *testing.T) {
 		require.True(t, p.ReplaceInstance(inst, fresh))
 		require.Equal(t, 1, p.NumRepos(),
 			"replace must balance (decrement outgoing archived, increment replacement); want 1, got double-count")
-		require.True(t, p.HasRepo("repo-R"))
+		_, hasR := p.repos["repo-R"]
+		require.True(t, hasR)
 
 		// A later delete (kill) of the replacement must drop repo-R.
 		require.NoError(t, p.KillInstance(fresh))
-		require.False(t, p.HasRepo("repo-R"),
-			"HasRepo(repo-R) = true after killing the replacement; want false")
+		_, hasR = p.repos["repo-R"]
+		require.False(t, hasR,
+			"repos[repo-R] still present after killing the replacement; want absent")
 		require.Equal(t, 0, p.NumRepos(),
 			"NumRepos() = %d after killing the replacement; want 0 (double-counted repo-R left a phantom)", p.NumRepos())
 	})
@@ -135,8 +139,9 @@ func TestProjectionArchiveRepoCount(t *testing.T) {
 		require.False(t, inst.Started())
 
 		require.NoError(t, p.KillInstance(inst))
-		require.False(t, p.HasRepo("repo-R"),
-			"HasRepo(repo-R) = true after killing an archived row that counted; want false")
+		_, hasR := p.repos["repo-R"]
+		require.False(t, hasR,
+			"repos[repo-R] still present after killing an archived row that counted; want absent")
 		require.Equal(t, 0, p.NumRepos(),
 			"NumRepos() = %d after killing the archived row; want 0 (phantom repo left behind)", p.NumRepos())
 		require.False(t, p.ContainsInstance(inst))
@@ -152,7 +157,8 @@ func TestProjectionArchiveRepoCount(t *testing.T) {
 		inst := newColdStartArchivedInstance(t, "archived")
 		p.AddInstance(inst)() // finalize: archived ⇒ never counted ⇒ repoOf empty
 		require.Equal(t, 0, p.NumRepos())
-		require.False(t, p.HasRepo("repo-R"))
+		_, hasR := p.repos["repo-R"]
+		require.False(t, hasR)
 
 		require.True(t, p.RemoveInstance(inst))
 		require.False(t, p.ContainsInstance(inst))
@@ -179,6 +185,8 @@ func TestProjectionArchiveRepoCountMultiRepoAnnotation(t *testing.T) {
 	require.True(t, p.RemoveInstance(a))
 	require.Equal(t, 1, p.NumRepos(),
 		"archive→delete of repo-A's only session must drop NumRepos() to 1 so the annotation stops rendering")
-	require.False(t, p.HasRepo("repo-A"))
-	require.True(t, p.HasRepo("repo-B"))
+	_, hasA := p.repos["repo-A"]
+	require.False(t, hasA)
+	_, hasB := p.repos["repo-B"]
+	require.True(t, hasB)
 }
