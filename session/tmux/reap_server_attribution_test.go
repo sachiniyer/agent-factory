@@ -182,17 +182,14 @@ func TestPtyFdServerVerdict_OwnersMapBuiltOncePerSweep(t *testing.T) {
 }
 
 func TestParsePaneServerFields_TailOnly(t *testing.T) {
-	// spid|sid|sock rides last; a socket path containing the separator can
-	// only blank the record, never corrupt the pane fields.
-	id := parsePaneServerFields([]string{"1", "0", "", "0", "0", "/dev/pts/0", "1", "4242", "$7", "/tmp/s"})
+	// spid|sid rides last; the socket is never a row field (R5) — it arrives
+	// through the corroborated single-value read instead.
+	id := parsePaneServerFields([]string{"1", "0", "", "0", "0", "/dev/pts/0", "1", "4242", "$7"})
 	require.Equal(t, 4242, id.PID)
 	require.Equal(t, "$7", id.SessionID)
-	require.Equal(t, "/tmp/s", id.Socket)
-	require.True(t, id.valid())
+	require.Empty(t, id.Socket)
 
-	require.False(t, parsePaneServerFields([]string{"1", "0"}).valid(), "legacy rows carry no record")
-	require.False(t, parsePaneServerFields([]string{"1", "0", "", "0", "0", "/dev/pts/0", "1", "abc", "$7", "/tmp/s"}).valid(),
+	require.Zero(t, parsePaneServerFields([]string{"1", "0"}).PID, "legacy rows carry no record")
+	require.Zero(t, parsePaneServerFields([]string{"1", "0", "", "0", "0", "/dev/pts/0", "1", "abc", "$7"}).PID,
 		"a non-numeric server pid makes the whole record absent")
-	require.False(t, parsePaneServerFields([]string{"1", "0", "", "0", "0", "/dev/pts/0", "1", "4242", "$7", ""}).valid(),
-		"an empty socket makes the whole record absent")
 }

@@ -153,7 +153,33 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket stri
 		}
 		return paneCapture{}, fmt.Errorf("cannot list panes before teardown: %w", err)
 	}
-	return paneRowsToProcesses(string(out), sanitizedName)
+	captured, perr := paneRowsToProcesses(string(out), sanitizedName)
+	// The rows carry only the numeric server fields — the socket path is
+	// free-form text and is never a listing field (#7469 R5) — so the
+	// capture completes the identity from the server's own single-value
+	// answer on the SAME pinned socket, corroborated by its pid. A read
+	// that fails leaves the record incomplete: undecidable, never wrong.
+	if captured.Server.PID > 0 {
+		captured.Server = resolveServerIdentity(corroboratedServerSocket(captured.Server,
+			func() (int, string, error) {
+				return serverSocketPIDFor(cmdExec, socket, sanitizedName)
+			}))
+	}
+	return captured, perr
+}
+
+// serverSocketPIDFor is the capture path's corroborated (pid, socket_path)
+// read — the free-function counterpart of TmuxSession.serverSocketPID,
+// pinned to the same socket the listing came from (#7469 R5).
+func serverSocketPIDFor(cmdExec cmd.Executor, socket, sanitizedName string) (int, string, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := outputTmuxBoundedWith(ctx, cmdExec, socketTmuxArgs(socket,
+		"display-message", "-p", "-t", ExactTarget(sanitizedName), "#{pid} #{socket_path}")...)
+	if err != nil {
+		return 0, "", err
+	}
+	return parseServerSocketReply(string(out))
 }
 
 // paneCapture is the verified pre-kill process evidence for one tmux session:
@@ -214,11 +240,12 @@ func paneRowsToProcesses(rows, sanitizedName string) (paneCapture, error) {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
 			continue
 		}
-		if captured.Server.PID == 0 && row.server.valid() {
+		if captured.Server.PID == 0 && row.server.PID > 0 {
 			// The server identity is identical on every row of a session —
-			// the first answered row records it, resolved to kernel
-			// identity (#7469).
-			captured.Server = resolveServerIdentity(row.server)
+			// the first answered row records its numeric fields; the
+			// caller merges the corroborated socket read and resolves the
+			// kernel fields (#7469 R5).
+			captured.Server = row.server
 		}
 		if row.dead {
 			// A held dead pane (#4506 review): its pid may already be reaped, or

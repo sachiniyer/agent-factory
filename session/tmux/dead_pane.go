@@ -199,7 +199,10 @@ func (t *TmuxSession) readPaneRow(budget time.Duration) (paneRow, error) {
 	// here, while the row is in hand: callers that return early because the
 	// root is already gone or uninspectable would otherwise leave a stale
 	// record standing, and a replacement server's own survivors would then
-	// be judged foreign against the old identity (Codex on #7469).
+	// be judged foreign against the old identity (Codex on #7469). The
+	// socket is no row field (R5): merge the corroborated single-value read
+	// so the stamped record is complete, or stays incomplete — never wrong.
+	row.server = corroboratedServerSocket(row.server, t.serverSocketPID)
 	t.noteServerIdentity(row.server)
 	return row, nil
 }
@@ -269,7 +272,8 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 			t.reconcilePaneRootEvidence(paneRootAnswer{
 				resolved: proctree.Process{PID: pid, StartID: startID},
 			})
-			t.noteServerIdentity(serverFromPaneRows(rows))
+			t.noteServerIdentity(corroboratedServerSocket(
+				serverFromPaneRows(rows), t.serverSocketPID))
 		}
 		return holds, err
 	}
@@ -305,7 +309,8 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 		t.reconcilePaneRootEvidence(paneRootAnswer{
 			resolved: proctree.Process{PID: pid, StartID: startID},
 		})
-		t.noteServerIdentity(serverFromPaneRows(splitPaneRows(string(output))))
+		t.noteServerIdentity(corroboratedServerSocket(
+			serverFromPaneRows(splitPaneRows(string(output))), t.serverSocketPID))
 	}
 	return holds, err
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/require"
 )
@@ -75,7 +76,10 @@ func recordedOwnServer(t *testing.T) ServerIdentity {
 // #7469 acceptance: a DETACHED carrier whose TMUX env names a server that is
 // not the recorded one — the user's own tmux server started inside the pane —
 // is proven foreign: never signalled, named at WARNING, and NOT a blocking
-// refusal, so teardown proceeds while it stays alive.
+// refusal, so teardown proceeds while it stays alive. The carrier reaches the
+// sweep's unproven tier — no recorded pair, no membership — so the foreign
+// arm itself is what excludes it; the admitted sibling alongside is what
+// keeps the verdict non-blocking.
 func TestVanishedSessionSweep_NeverSignalsAForeignServerCarrier(t *testing.T) {
 	name := "af_foreign_server"
 	home := t.TempDir()
@@ -84,6 +88,10 @@ func TestVanishedSessionSweep_NeverSignalsAForeignServerCarrier(t *testing.T) {
 
 	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0],
 		"TMUX="+foreignSocketFile(t)+",9999,3")
+	// A second carrier today's rules already admit: its recorded pair makes
+	// the sweep's answer "some members were reaped" — the verdict that lets
+	// teardown proceed while the foreign carrier stays behind.
+	sibling := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0])
 
 	var warnings bytes.Buffer
 	oldWarnings := log.WarningLog.Writer()
@@ -91,24 +99,28 @@ func TestVanishedSessionSweep_NeverSignalsAForeignServerCarrier(t *testing.T) {
 	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarnings) })
 
 	membership := cohortMembership{
-		Recorded:  map[int]uint64{carrier.PID: carrier.StartID},
+		Recorded:  map[int]uint64{sibling.PID: sibling.StartID},
 		OwnServer: own,
 	}
 	marked, _, err := markedOrphanProcesses(
-		[]proctree.Process{carrier}, name, home, fixtureCohort(gen), membership, nil, nil)
+		[]proctree.Process{carrier, sibling}, name, home, fixtureCohort(gen), membership, nil, nil)
 	require.NoError(t, err,
 		"a positively-foreign carrier is attributed — it is named, not a blocking refusal")
-	require.Empty(t, marked, "the foreign-server carrier is never eligible for signals")
+	require.Equal(t, []proctree.Process{sibling}, marked,
+		"the foreign-server carrier is never eligible for signals")
 	require.Contains(t, warnings.String(), strconv.Itoa(carrier.PID))
 	require.Contains(t, warnings.String(), "foreign tmux server")
 	require.Contains(t, warnings.String(), "LEFT ALIVE")
 	require.True(t, proctree.AliveSame(carrier), "the carrier survives the sweep")
+	require.True(t, proctree.AliveSame(sibling), "the sweep only marks; nothing signals in a fixture")
 }
 
 // #7469: even a carrier that PASSES tier-2's executable identity (a
 // claude-comm carrier, the #3699 look-alike) is refused when a foreign server
 // spawned it — the allowlist may admit only what the server attribution does
-// not place elsewhere.
+// not place elsewhere. The carrier is UNPROVEN — no recorded pair — so its
+// admission runs through tier 2's AgentExe arm, exactly where the foreign
+// verdict must beat it.
 func TestVanishedSessionSweep_ForeignBeatsAgentExeIdentity(t *testing.T) {
 	name := "af_foreign_exe"
 	home := t.TempDir()
@@ -118,17 +130,18 @@ func TestVanishedSessionSweep_ForeignBeatsAgentExeIdentity(t *testing.T) {
 	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen,
 		agentNamedBinary(t, os.Args[0]),
 		"TMUX="+foreignSocketFile(t)+",9999,3")
+	sibling := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0])
 
 	membership := cohortMembership{
-		Recorded:  map[int]uint64{carrier.PID: carrier.StartID},
-		Root:      proctree.Process{PID: carrier.PPID, StartID: 1},
+		Recorded:  map[int]uint64{sibling.PID: sibling.StartID},
+		Root:      proctree.Process{PID: sibling.PPID, StartID: 1},
 		AgentExe:  "claude",
 		OwnServer: own,
 	}
 	marked, _, err := markedOrphanProcesses(
-		[]proctree.Process{carrier}, name, home, fixtureCohort(gen), membership, nil, nil)
+		[]proctree.Process{carrier, sibling}, name, home, fixtureCohort(gen), membership, nil, nil)
 	require.NoError(t, err)
-	require.Empty(t, marked,
+	require.Equal(t, []proctree.Process{sibling}, marked,
 		"an AgentExe-matching carrier on a foreign server is left alive, never signalled")
 	require.True(t, proctree.AliveSame(carrier))
 }
@@ -161,4 +174,186 @@ func TestVanishedSessionSweep_NoServerEvidenceKeepsTodaysVerdict(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []proctree.Process{carrier}, marked,
 		"an undecidable carrier keeps its existing admission — undecidable is never foreign")
+}
+
+// #7469 R1: a STALE server record — one predating the session's current
+// incarnation, the shape a respawn-onto-new-server leaves when its stamp
+// fails — must never turn the session's own survivors foreign. The carrier
+// here carries an own-TMUX tuple (the recorded socket, the recorded pid)
+// against a stale record naming an older server pid on the same socket:
+// with proven membership evidence it is reaped exactly as before.
+func TestVanishedSessionSweep_StaleRecordCannotExcludeAProvenSurvivor(t *testing.T) {
+	name := "af_stale_server"
+	home := t.TempDir()
+	gen := name + "-gen"
+
+	sock := filepath.Join(t.TempDir(), "af-tmux.sock")
+	require.NoError(t, os.WriteFile(sock, nil, 0o600))
+	// The record a respawn left behind: server pid 1111 answered the previous
+	// incarnation; the incumbent server answering the pane now is 2222.
+	stale := ServerIdentity{Socket: sock, PID: 1111, StartID: 1, SessionID: "$7"}
+
+	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0],
+		"TMUX="+sock+",2222,3")
+
+	marked, _, err := markedOrphanProcesses(
+		[]proctree.Process{carrier}, name, home, fixtureCohort(gen),
+		cohortMembership{
+			Recorded:  map[int]uint64{carrier.PID: carrier.StartID},
+			OwnServer: stale,
+		}, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, []proctree.Process{carrier}, marked,
+		"a kernel-proven member is never overridden by server attribution — stale or fresh (R4)")
+	require.True(t, proctree.AliveSame(carrier), "the sweep only marks in a fixture")
+}
+
+// #7469 R1/R3: an own verdict NEVER promotes. A carrier that reads own
+// against the recorded server — same socket, same server pid — but that
+// today's evidence rules refuse is refused exactly as before: the gate still
+// blocks, nothing is marked, the carrier stays alive.
+func TestVanishedSessionSweep_OwnServerCarrierKeepsTodaysRefusal(t *testing.T) {
+	name := "af_own_server"
+	home := t.TempDir()
+	gen := name + "-gen"
+	own := recordedOwnServer(t)
+
+	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0],
+		"TMUX="+own.Socket+","+strconv.Itoa(own.PID)+",3")
+
+	marked, _, err := markedOrphanProcesses(
+		[]proctree.Process{carrier}, name, home, fixtureCohort(gen),
+		cohortMembership{OwnServer: own}, nil, nil)
+	require.Error(t, err,
+		"an own verdict is not evidence — the gate still refuses a member it cannot prove")
+	require.Empty(t, marked, "own never promotes a refused carrier into the reap set")
+	require.True(t, proctree.AliveSame(carrier))
+}
+
+// #3699 pinned: the re-hosted claude keeps converging. A claude-comm carrier
+// under a recorded root — no TMUX env, no pty, no foreign anything — still
+// passes tier 2's executable identity with a server record standing beside
+// it, and is reaped.
+func TestVanishedSessionSweep_RehostedAgentStillConverges(t *testing.T) {
+	name := "af_rehost_3699"
+	home := t.TempDir()
+	gen := name + "-gen"
+
+	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen,
+		agentNamedBinary(t, os.Args[0]))
+
+	marked, _, err := markedOrphanProcesses(
+		[]proctree.Process{carrier}, name, home, fixtureCohort(gen),
+		cohortMembership{
+			Root:      proctree.Process{PID: carrier.PPID, StartID: 1},
+			AgentExe:  "claude",
+			OwnServer: recordedOwnServer(t),
+		}, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, []proctree.Process{carrier}, marked,
+		"the #3699 re-hosted claude is reaped exactly as before")
+}
+
+// #7469 R1: the retirement itself — a stamped record drops to absent, and
+// absent reads undecidable, never stale. Every spawn boundary calls this
+// before the re-stamp, so a failed stamp leaves the cell empty rather than
+// carrying the previous incarnation's server into the new one's survivors.
+func TestRetireServerIdentity_DropsTheRecord(t *testing.T) {
+	s := &TmuxSession{}
+	s.SeedServerEvidence("/tmp/sock", 4242, 987654321, "$7", "pid:[4026531836]")
+	_, ok := s.ServerEvidence()
+	require.True(t, ok, "the seed stamps when the cell is empty")
+
+	s.RetireServerIdentity()
+	_, ok = s.ServerEvidence()
+	require.False(t, ok, "retired is absent — a failed re-stamp leaves undecidable, not stale")
+
+	// And a fresh stamp can still land after the retire — retirement is a
+	// boundary, not a tombstone.
+	s.SeedServerEvidence("/tmp/sock", 5555, 111, "$8", "pid:[4026531836]")
+	got, ok := s.ServerEvidence()
+	require.True(t, ok)
+	require.Equal(t, 5555, got.PID)
+}
+
+// #7469 R3 — the real-tmux close shape, CI only: a marked carrier spawned
+// inside a SECOND, user-owned tmux server, detached to init, still holding
+// its pane's pty slave and that server's TMUX tuple. Both attribution
+// channels run against REAL servers — real socket paths, real pids, a real
+// pty master — and the outcome-level verdict must keep the foreign carrier
+// outside the reap set and alive, while the session's own member converges.
+func TestVanishedSessionSweep_RealTmuxForeignServerCarrier(t *testing.T) {
+	if os.Getenv("CI") == "" {
+		t.Skip("the real-tmux probe runs in CI only — it drives two private tmux servers")
+	}
+	testguard.IsolateTmux(t)
+
+	name := "af_foreign_rt"
+	home := t.TempDir()
+	gen := name + "-gen"
+
+	// The session's OWN server — the default socket IsolateTmux pins inside
+	// the private dir; its real pid/socket_path become the recorded
+	// identity, resolved to kernel fields exactly like the spawn stamp.
+	sessName := "af_own_rt"
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s",
+		sessName, "sleep 300").Run())
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-session", "-t", ExactTarget(sessName)).Run()
+	})
+	out, err := exec.Command("tmux", "display-message", "-p", "-t",
+		ExactTarget(sessName), "#{pid} #{socket_path}").CombinedOutput()
+	require.NoError(t, err, string(out))
+	ownPID, ownSock, err := parseServerSocketReply(string(out))
+	require.NoError(t, err)
+	own := resolveServerIdentity(ServerIdentity{Socket: ownSock, PID: ownPID})
+	require.True(t, own.valid(), "a real server answers with a complete identity")
+
+	// The FOREIGN server — the user's own tmux started inside a pane, the
+	// #7469 shape. Its pane exports the AF markers, spawns a setsid'd
+	// init-reparented carrier that keeps the pane's slave pty and the
+	// server's TMUX tuple, then stays alive so the masters stay held.
+	dir := testguard.SocketTempDir(t)
+	fsock := filepath.Join(dir, "f.sock")
+	pidFile := filepath.Join(dir, "carrier.pid")
+	pane := "export " + EnvMarkerSession + "=" + name +
+		" " + EnvMarkerHome + "=" + home +
+		" " + EnvMarkerGeneration + "=" + gen +
+		"; setsid -f sh -c 'echo $$ > " + pidFile + "; exec sleep 300'" +
+		"; exec sleep 300"
+	require.NoError(t, exec.Command("tmux", "-S", fsock, "-f", "/dev/null",
+		"new-session", "-d", "-s", "foreign", "sh", "-c", pane).Run())
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", fsock, "kill-server").Run() })
+	waitForPIDFile(t, pidFile)
+	carrier := processFromPIDFile(t, pidFile)
+	t.Cleanup(func() { _ = proctree.Signal(carrier, syscall.SIGKILL) })
+	require.Equal(t, 1, carrier.PPID,
+		"the carrier must be init-reparented — the detached shape #7469 reports")
+	require.Equal(t, carrier.PID, carrier.SID,
+		"a setsid'd carrier leads its own session — no pane SID carries it")
+
+	// The attribution channels themselves, on real evidence: the carrier's
+	// env tuple names a socket that is not the recorded one, and its held
+	// slave is mastered by a server pid that is not the recorded one.
+	environ, err := proctree.Environ(carrier.PID)
+	require.NoError(t, err)
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	owners := &serverPtyOwners{}
+	require.Equal(t, serverVerdictForeign,
+		carrierServerVerdict(carrier, environ, own, snap, owners, own.PIDNS),
+		"real evidence attributes the carrier to the foreign server")
+
+	// And the outcome: the carrier is excluded and alive while a proven
+	// member converges — foreign never blocks teardown.
+	sibling := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0])
+	marked, _, err := markedOrphanProcesses(
+		[]proctree.Process{carrier, sibling}, name, home, fixtureCohort(gen),
+		cohortMembership{
+			Recorded:  map[int]uint64{sibling.PID: sibling.StartID},
+			OwnServer: own,
+		}, nil, nil)
+	require.NoError(t, err, "a foreign carrier is named, never a blocking refusal")
+	require.Equal(t, []proctree.Process{sibling}, marked)
+	require.True(t, proctree.AliveSame(carrier), "the foreign carrier survives the sweep")
 }

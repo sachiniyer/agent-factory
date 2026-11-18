@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -41,4 +42,63 @@ func (t *TmuxSession) SocketPath(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("tmux reported an empty socket path for session %s", t.sanitizedName)
 	}
 	return path, nil
+}
+
+// serverSocketPID answers the server's (pid, socket_path) pair as ONE
+// display-message value — the single-value socket read #7469 R5 requires:
+// the socket path is free-form text, so it rides no multi-row listing where
+// an embedded newline would print raw and change the row count. The pid
+// rides beside it to corroborate that the socket names the same server a
+// pane row answered for: a session respawned onto another server between
+// the two reads must never pair one server's socket with another's pid.
+// The pid fields are compared by the caller; any answer that does not parse
+// is "could not read" — an incomplete record, never a wrong one.
+func (t *TmuxSession) serverSocketPID() (pid int, socket string, err error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t",
+		ExactTarget(t.sanitizedName), "#{pid} #{socket_path}")
+	if err != nil {
+		return 0, "", err
+	}
+	return parseServerSocketReply(string(output))
+}
+
+// parseServerSocketReply reads "pid socket_path": the pid is the first
+// field, the socket is EVERYTHING after the first space — verbatim,
+// including spaces, commas, separators, and embedded newlines, all of which
+// a socket path may legally hold. Only tmux's own trailing newline is
+// trimmed. A non-numeric pid or an empty socket is not an answer.
+func parseServerSocketReply(output string) (int, string, error) {
+	trimmed := strings.TrimRight(output, "\n")
+	pidRaw, socket, ok := strings.Cut(trimmed, " ")
+	if !ok {
+		return 0, "", fmt.Errorf("malformed server socket reply %q", trimmed)
+	}
+	pid, err := strconv.Atoi(pidRaw)
+	if err != nil || pid <= 0 {
+		return 0, "", fmt.Errorf("malformed server pid in socket reply %q", trimmed)
+	}
+	if socket == "" {
+		return 0, "", fmt.Errorf("empty socket path in reply %q", trimmed)
+	}
+	return pid, socket, nil
+}
+
+// corroboratedServerSocket fills the socket half of a row-derived server
+// identity from the server's own single-value answer, but only when the
+// answer's pid matches the row's — the corroboration that keeps a mid-stamp
+// server replacement from pairing one server's socket with another's pid
+// (#7469 R5). A read failure or a pid mismatch leaves Socket empty, and the
+// record stays incomplete — undecidable, never a wrong-but-valid one.
+func corroboratedServerSocket(id ServerIdentity, read func() (int, string, error)) ServerIdentity {
+	if id.PID <= 0 || id.Socket != "" {
+		return id
+	}
+	pid, socket, err := read()
+	if err != nil || pid != id.PID {
+		return id
+	}
+	id.Socket = socket
+	return id
 }

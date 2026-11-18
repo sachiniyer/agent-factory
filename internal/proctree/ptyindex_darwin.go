@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -30,6 +31,23 @@ const (
 	darwinPtmxPath        = "/dev/ptmx"
 	darwinDevTMinorMask   = 0xffffff // makedev(major<<24 | minor)
 )
+
+// ptyFdReadBudget bounds ONE process's fd walk. Every vnode decode goes
+// through vn_stat → VNOP_GETATTR, which BLOCKS on a hung NFS, SMB or macFUSE
+// mount — and a carrier or tmux server holding a single fd into such a mount
+// would otherwise wedge the sweep's attribution read forever (#7469 R2). No
+// getattr-free discriminator exists for another process's vnodes — the fd
+// list says only "vnode", and both VNODEINFO and VNODEPATHINFO getattr — so
+// the deadline is the mechanism: the whole walk runs on a worker goroutine
+// (the same idiom exeCheckShared uses for its kernel reads), an expired
+// budget reports "could not see" — undecidable, never foreign or own — and
+// the abandoned worker is the only thing left on the mount. Package var so
+// the deadline test can shrink it.
+var ptyFdReadBudget = 2 * time.Second
+
+// errPtyFdTimeout is the expired-budget answer: the fd table could not be
+// READ in bounded time — "could not see", never "holds none".
+var errPtyFdTimeout = errors.New("pty fd read exceeded its deadline")
 
 // ptySlaveIndices returns the identity of every /dev/ttysNNN vnode pid
 // holds. devfs is single-instance — there is no second devpts to mint a
@@ -57,10 +75,36 @@ func ptyMasterIndices(pid int) ([]PtyIndex, error) {
 	})
 }
 
-// ptyFdIndices walks pid's vnode descriptors, decoding each one's path,
-// vi_type and vst_rdev for classify. A refused or short read of the LIST is
-// "could not see"; a single fd closing mid-walk is a smaller open set.
+// ptyFdIndices runs pid's vnode walk under ptyFdReadBudget: a walk that
+// does not answer in bounded wall-clock time — a getattr parked on a hung
+// mount — is "could not see", never a silent partial read (#7469 R2). The
+// abandoned worker cannot be cancelled (an uninterruptible syscall is a
+// one-way door), so the channel is buffered: it never blocks on send.
 func ptyFdIndices(pid int, classify func(path string, viType int32, rdev uint32) (PtyIndex, bool)) ([]PtyIndex, error) {
+	type result struct {
+		indices []PtyIndex
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		indices, err := ptyFdWalk(pid, classify)
+		done <- result{indices, err}
+	}()
+	timer := time.NewTimer(ptyFdReadBudget)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.indices, r.err
+	case <-timer.C:
+		return nil, errPtyFdTimeout
+	}
+}
+
+// ptyFdWalk is the unbounded scan ptyFdIndices bounds — a package var so the
+// deadline test can stage a walk that never answers. A refused or short read
+// of the LIST is "could not see"; a single fd closing mid-walk is a smaller
+// open set.
+var ptyFdWalk = func(pid int, classify func(path string, viType int32, rdev uint32) (PtyIndex, bool)) ([]PtyIndex, error) {
 	fds, err := listProcFds(pid)
 	if err != nil {
 		return nil, err

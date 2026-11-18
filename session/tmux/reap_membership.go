@@ -355,9 +355,10 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		proven := membership.admits(snap, process, att)
 		processGeneration, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
 		// #7469: attribute the carrier to a tmux server through its TMUX env
-		// and its held pty slaves — foreign beats everything below it, so a
-		// detached carrier of another server is never signalled even when it
-		// carries this session's markers or matches the agent executable.
+		// and its held pty slaves. The verdict consults only the UNPROVEN
+		// bucket: a kernel-proven member cannot be overridden by attribution
+		// — the proof came from this session's own recorded pane evidence,
+		// so a carrier carrying it was never the foreign server's work (R4).
 		// Undecidable is today's verdict — it admits nothing and blocks
 		// nothing on its own.
 		serverVerdict := carrierServerVerdict(process, environ, membership.OwnServer, snap, membership.owners, selfNS)
@@ -446,34 +447,15 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			// 4598089582).
 			report(process.PID, fmt.Errorf("captured live pid %d marks session %s but has no %s generation marker",
 				process.PID, sanitizedName, EnvMarkerGeneration))
-		case serverVerdict == serverVerdictForeign && !boundary:
-			// An ATTACHED foreign carrier — one a tmux server still parents
-			// — never reaches here: the boundary arm below keeps its
-			// blocking refusal exactly as it was. This arm is the DETACHED
-			// shape only, where the server is gone from the chain and only
-			// the carrier's own env or held ptys still name it.
-			// #7469: a detached carrier positively attributed to a tmux
-			// server OTHER than the recorded one — a different socket in
-			// its TMUX env, or a live foreign server holding its pty
-			// master. The invariant a vanished session must keep: no
-			// process descended from a foreign server is signalled. Like
-			// the positive-ancestry arm above, this is a NAMED WARNING, not
-			// a blocking refusal — the carrier is attributed, it is simply
-			// not ours, so teardown proceeds while it stays alive (its
-			// markers inherited from the pane are the trap #7469 closes).
-			// Foreign beats proof because descent capture is a window in
-			// time, not server lineage: a marked carrier the capture caught
-			// inside our tree may still have been spawned by a nested
-			// server that was only transiently our descendant.
-			log.WarningLog.Printf("captured live pid %d marks session %s but its %s places it on a foreign tmux server — "+
-				"proven foreign: refused, LEFT ALIVE, never signalled, and not blocking cleanup (#7469)",
-				process.PID, sanitizedName, serverVerdictReason(environ, membership.OwnServer))
 		case proven:
 			// Proof with NO foreign evidence: the candidate is a member
 			// even while a tmux server parents it — a SIGHUP-ignoring pane
 			// root whose session vanished under a live shared server is
 			// exactly that shape, and the boundary rule below would have
-			// classified it foreign (Codex 4597265500).
+			// classified it foreign (Codex 4597265500). Proof also outranks
+			// the server attribution: the record it would be judged against
+			// can only ever be older than the incarnation the kernel
+			// evidence describes (#7469 R4).
 			owned = append(owned, process)
 		case boundary:
 			// A positively-identified tmux process in the chain means this
@@ -482,11 +464,33 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			// markers), or a member the evidence cannot reach. Either way
 			// it is UNATTRIBUTABLE: refused, reported, and never signalled
 			// — an excluded carrier is never left silently (#7435, Codex
-			// 4597265500).
+			// 4597265500). An ATTACHED foreign carrier takes this arm — its
+			// blocking refusal is unchanged (#7469 R4).
 			report(process.PID, fmt.Errorf(
 				"captured live pid %d marks session %s but sits behind a tmux server and cannot be proven a member — refusing to attribute it; left alive, never signalled",
 				process.PID, sanitizedName))
 		default:
+			if serverVerdict == serverVerdictForeign {
+				// #7469: a DETACHED carrier positively attributed to a tmux
+				// server OTHER than the recorded one — a different socket
+				// in its TMUX env, or a live foreign server holding its
+				// pty master — while holding no kernel membership proof.
+				// The invariant a vanished session must keep: no unproven
+				// process descended from a foreign server is signalled.
+				// This arm lives ONLY in the unproven bucket (R4): a
+				// kernel-proven member is admitted above whatever the
+				// attribution says, and an attached foreign carrier keeps
+				// the boundary arm's blocking refusal. Like the
+				// positive-ancestry arm, this is a NAMED WARNING, not a
+				// blocking refusal — the carrier is attributed, it is
+				// simply not ours, so teardown proceeds while it stays
+				// alive (its markers inherited from the pane are the trap
+				// #7469 closes).
+				log.WarningLog.Printf("captured live pid %d marks session %s but its %s places it on a foreign tmux server — "+
+					"proven foreign: refused, LEFT ALIVE, never signalled, and not blocking cleanup (#7469)",
+					process.PID, sanitizedName, serverVerdictReason(environ, membership.OwnServer))
+				continue
+			}
 			// No proof and no foreign evidence: a MEMBERSHIP verdict only —
 			// the tier-2 allowlist needs the whole eligible cohort before
 			// it can tell an agent program's host from a look-alike

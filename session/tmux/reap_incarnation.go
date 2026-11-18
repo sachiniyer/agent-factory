@@ -403,6 +403,14 @@ func (t *TmuxSession) captureVerifiedTrees(r *closeRun, gen *tmuxGeneration) (pa
 	if err != nil {
 		return captured, fmt.Sprintf("the pane process capture was incomplete (%v)", err)
 	}
+	// Complete the row-derived server identity exactly like the unpinned
+	// capture path: the socket path is never a listing field (#7469 R5), so
+	// it comes from the server's own single-value answer, corroborated by
+	// its pid, and a failed read leaves the record incomplete.
+	if captured.Server.PID > 0 {
+		captured.Server = resolveServerIdentity(corroboratedServerSocket(
+			captured.Server, t.serverSocketPID))
+	}
 	return captured, ""
 }
 

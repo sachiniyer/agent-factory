@@ -97,8 +97,14 @@ func (t *TmuxSession) Start(workDir string) error {
 		// 4597265491). The supersede clears the stale pair first, so even a
 		// re-stamp that cannot answer retires it: keeping an anchor whose
 		// StartID predates the actual root would lower tier 2's
-		// no-earlier-than bound onto the wrong incarnation.
+		// no-earlier-than bound onto the wrong incarnation. The server
+		// identity retires beside it (#7469 R1): a record the previous
+		// incarnation left names that incarnation's server, and a respawn
+		// onto a new server pid on the same socket that then fails its
+		// pane-query stamp would leave the stale record judging the
+		// replacement's own survivors foreign — stale must mean absent.
 		t.reconcilePaneRootEvidence(paneRootAnswer{supersede: true})
+		t.RetireServerIdentity()
 		if _, rootErr := t.PaneRootProcess(); rootErr != nil {
 			log.InfoLog.Printf("tmux session %s: could not record pane-root identity at spawn: %v", t.sanitizedName, rootErr)
 		}

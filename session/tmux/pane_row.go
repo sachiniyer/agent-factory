@@ -25,17 +25,19 @@ const paneFieldSeparator = "|"
 // cannot expand the later fields, or a test executor, returns. It reads as a
 // live pane, the behaviour from before #4479.
 //
-// The last three fields are the SERVER identity #7469 persists — server pid,
-// session id, socket path — repeated identically on every pane row of a
-// session, so any row stamps it. socket_path rides last and is free-form: it
-// may hold whitespace, so every consumer must split rows on newlines, never
-// strings.Fields; and it may hold the separator, which parsePaneServerFields
-// reassembles by joining the tail.
+// The last two fields are the SERVER identity #7469 persists — server pid and
+// session id — repeated identically on every pane row of a session, so any
+// row stamps it. The SOCKET PATH is deliberately NOT a row field: it is
+// free-form text (a TMUX_TMPDIR can hold spaces, commas, or the separator
+// itself), and a free-form field in a listing's output can change its row
+// count — a newline in the path prints raw and invents a pane that never
+// existed (R5). Every site that needs the socket reads it once, as a single
+// value, corroborated to the answering server pid (serverSocketPID).
 const paneRowFormat = "#{pane_pid}" + paneFieldSeparator + "#{pane_dead}" + paneFieldSeparator +
 	"#{pane_dead_status}#{pane_dead_signal}#{pane_dead_time}" + paneFieldSeparator + "#{" + PanePidMarker + "}" +
 	paneFieldSeparator + "#{" + paneDeathsMarker + "}" + paneFieldSeparator + "#{pane_tty}" +
 	paneFieldSeparator + paneCommandMatchField +
-	paneFieldSeparator + "#{pid}" + paneFieldSeparator + "#{session_id}" + paneFieldSeparator + "#{socket_path}"
+	paneFieldSeparator + "#{pid}" + paneFieldSeparator + "#{session_id}"
 
 // paneCommandMatchField asks the server — not the row — whether the pane's
 // recorded start command is still the exact command the stamp pinned: one
@@ -46,10 +48,10 @@ const paneRowFormat = "#{pane_pid}" + paneFieldSeparator + "#{pane_dead}" + pane
 const paneCommandMatchField = "#{==:#{" + paneCommandMarker + "},#{pane_start_command}}"
 
 // splitPaneRows cuts tmux's pane listing into its rows. Rows are newline-
-// delimited, and a row is never whitespace-split first: the trailing socket
-// field is free-form and may hold spaces (a TMUX_TMPDIR or home path with
-// one), which Fields would cut mid-path and leave the fragment to parse as
-// its own row (Codex on #7469). Empty lines are not rows.
+// delimited, and a row is never whitespace-split first: a whitespace split
+// would shift fields left (the stamp proof can carry spaces) and leave a
+// fragment to parse as its own row (Codex on #7469). Empty lines are not
+// rows.
 func splitPaneRows(output string) []string {
 	var rows []string
 	for line := range strings.Lines(output) {
@@ -132,29 +134,23 @@ func parsePaneRow(field string) (paneRow, error) {
 }
 
 // parsePaneServerFields reads the server identity a pane row's tail carries
-// (#7469): server pid, session id, socket path. The socket rides LAST, so
-// everything after field 8 is the path verbatim — the fields before it are
-// numeric, a pty name or a predicate digit, none of which can hold the
-// separator, so joining the tail reassembles a path that itself contains it
-// (a TMUX_TMPDIR like /tmp/tmux|x) instead of silently truncating to its
-// last fragment — a wrong-but-valid record, the shape Codex flagged. A tail
-// that does not fully parse is an absent record, never a partial one.
+// (#7469): the server pid (field 7) and the session's $N id (field 8). The
+// socket path is never a row field — free-form text has no place inside a
+// listing's framing (R5) — so the record leaves here with Socket empty and
+// the caller fills it from the server's own corroborated single-value
+// answer (serverSocketPID). A tail that does not fully parse is an absent
+// record, never a partial one.
 func parsePaneServerFields(parts []string) ServerIdentity {
-	if len(parts) < 10 {
+	if len(parts) < 9 {
 		return ServerIdentity{}
 	}
 	serverPID, err := strconv.Atoi(strings.TrimSpace(parts[7]))
 	if err != nil || serverPID <= 0 {
 		return ServerIdentity{}
 	}
-	sock := strings.Join(parts[9:], paneFieldSeparator)
-	if strings.TrimSpace(sock) == "" {
-		return ServerIdentity{}
-	}
 	return ServerIdentity{
 		PID:       serverPID,
 		SessionID: strings.TrimSpace(parts[8]),
-		Socket:    sock,
 	}
 }
 
@@ -279,12 +275,15 @@ func paneStampPID(stamp, deathsNow, ttyNow, cmdMatch string) (int, paneStampVerd
 }
 
 // serverFromPaneRows returns the server identity a pane listing carried —
-// identical on every answered row (#7469), so the first valid one speaks for
-// the session; a listing without server fields yields an empty identity and
-// noteServerIdentity keeps whatever stands.
+// identical on every answered row (#7469), so the first answered one speaks
+// for the session; a listing without server fields yields an empty identity
+// and noteServerIdentity keeps whatever stands. The rows carry pid and
+// session id only — the socket is never a row field (R5) — so the caller
+// merges the corroborated single-value socket read before the record can
+// stamp.
 func serverFromPaneRows(fields []string) ServerIdentity {
 	for _, field := range fields {
-		if row, err := parsePaneRow(field); err == nil && row.server.valid() {
+		if row, err := parsePaneRow(field); err == nil && row.server.PID > 0 {
 			return row.server
 		}
 	}

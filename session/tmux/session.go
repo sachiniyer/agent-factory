@@ -431,10 +431,12 @@ type TmuxSession struct {
 	// recorded at every pane resolution and seeded from the persisted
 	// launch record on restore (#7469). The vanished-session sweep judges a
 	// detached marked carrier against it: provably another server means
-	// foreign, which is refused and named, never signalled. A stale or
-	// absent record degrades the verdict to undecidable — today's verdict,
-	// never a promotion — so this cell needs no paired atomicity with
-	// paneRootEvidence: a mismatch can only over-protect, never admit.
+	// foreign, which is refused and named, never signalled. An absent
+	// record degrades the verdict to undecidable — today's verdict, never
+	// a promotion. A STALE record is worse than absent — it can read the
+	// session's own survivors foreign — so every spawn boundary retires it
+	// before the re-stamp, in memory and on the row (R1): the cell never
+	// names an incarnation older than the session's current one.
 	serverEvidence atomic.Pointer[ServerIdentity]
 	// provenNoPane records that a Start attempt PROVED this name had no tmux
 	// session and then returned before running new-session, so nothing can be

@@ -235,6 +235,19 @@ func (t *TmuxSession) noteServerIdentity(raw ServerIdentity) {
 	}
 }
 
+// RetireServerIdentity drops the recorded tmux-server identity when the
+// incarnation it describes is retired — every spawn boundary (#7469 R1). A
+// record must never predate the session's CURRENT incarnation: if the
+// post-spawn pane resolution cannot restamp (a timeout, an instantly-dead
+// pane, an empty reply), keeping the previous launch's record would let a
+// stale (socket, old server pid) judge the replacement server's own
+// survivors foreign — named, left alive, while teardown deletes the
+// worktree under them. Absent is undecidable, and undecidable keeps today's
+// verdict — the safe direction either way.
+func (t *TmuxSession) RetireServerIdentity() {
+	t.serverEvidence.Store(nil)
+}
+
 // SeedServerEvidence primes the recorded server identity from the persisted
 // launch fields on restore, the server-side counterpart of
 // SeedPaneRootEvidence (#7469). A seed fills only an EMPTY cell — anything a

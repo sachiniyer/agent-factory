@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -50,4 +51,30 @@ func TestRuntimeServerFields_LegacyRowRestoresEmpty(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(`{"runtime_pid":31337,"runtime_start_id":123}`), &back))
 	require.Empty(t, back.RuntimeServerSocket)
 	require.Zero(t, back.RuntimeServerPID)
+}
+
+// #7469 R1: every launch boundary retires the row's server record BEFORE the
+// new incarnation stamps — a respawn whose pane query then fails must persist
+// ABSENT, never the previous incarnation's identity, so a stale (socket, old
+// server pid) can never read the replacement's own survivors foreign.
+func TestSetRuntimeLaunch_RetiresTheServerRecordFirst(t *testing.T) {
+	i := &Instance{}
+	i.runtimeServerSocket = "/tmp/tmux-1001/af"
+	i.runtimeServerPID = 1111
+	i.runtimeServerStartID = 555
+	i.runtimeServerSessionID = "$3"
+	i.runtimeServerPIDNS = "pid:[4026531836]"
+
+	// ts == nil is the failed-stamp shape: the launch boundary still clears
+	// the standing record rather than letting it ride into the new runtime.
+	i.setRuntimeLaunch("claude", nil, time.Time{})
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	require.Empty(t, i.runtimeServerSocket, "a launch boundary retires the socket")
+	require.Zero(t, i.runtimeServerPID, "a launch boundary retires the server pid")
+	require.Zero(t, i.runtimeServerStartID)
+	require.Empty(t, i.runtimeServerSessionID)
+	require.Empty(t, i.runtimeServerPIDNS,
+		"the previous incarnation's record never outlives the boundary — absent means undecidable")
 }

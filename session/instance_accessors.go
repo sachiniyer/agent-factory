@@ -608,9 +608,10 @@ func (i *Instance) setRuntimeLaunch(program string, ts *tmux.TmuxSession, spawne
 	i.setRuntimeEvidenceSinceLocked(program, pid, startID, spawnedAt)
 	// The same pane answer carried the tmux-server identity (#7469): record
 	// it beside the root so a daemon restart restores what the
-	// vanished-session sweep attributes detached carriers against. A pane
-	// query that could not answer leaves the standing record — the session's
-	// server did not move just because the root could not be read.
+	// vanished-session sweep attributes detached carriers against. The
+	// launch boundary already retired the standing fields inside
+	// setRuntimeEvidenceSinceLocked — what lands here can only be the new
+	// incarnation's own stamp.
 	if ts != nil {
 		if server, ok := ts.ServerEvidence(); ok {
 			i.runtimeServerSocket = server.Socket
@@ -635,7 +636,17 @@ func (i *Instance) setRuntimeEvidenceSinceLocked(program string, pid int, startI
 	// beyond the command, when its pane query failed — describes the new
 	// runtime, so an identity kept from the old one's unanswerable reattach
 	// probe can never stand in for it (#7123). A standing operator repair
-	// records that its runtime was replaced (#7129).
+	// records that its runtime was replaced (#7129). The tmux-server record
+	// retires at the same boundary (#7469 R1): a launch whose pane query
+	// then fails must persist ABSENT, never the previous incarnation's
+	// identity — a stale (socket, old server pid) would read the
+	// replacement's own survivors foreign. The re-stamp, when a pane
+	// answered, lands in setRuntimeLaunch just below.
+	i.runtimeServerSocket = ""
+	i.runtimeServerPID = 0
+	i.runtimeServerStartID = 0
+	i.runtimeServerSessionID = ""
+	i.runtimeServerPIDNS = ""
 	i.captureEvidence = keptCaptureEvidence{}
 	i.markRepairRuntimeReplacedLocked(launchReplacementInstant(spawnedAt, time.Now()))
 	if i.runtimeProgram == program && i.runtimePID == pid && i.runtimeStartID == startID {
