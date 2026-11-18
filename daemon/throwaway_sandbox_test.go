@@ -482,12 +482,12 @@ func TestThrowawayMembersServerTreeAndRecorded(t *testing.T) {
 	throwawayUIDFn = func(int) (int, bool) { return os.Getuid(), true }
 	throwawaySameRootFn = func(int) bool { return true }
 	throwawayIsTmuxServerFn = func(pid int) bool { return pid == 40 || pid == 70 }
-	throwawayUnixSocketPathsFn = func(pid int) ([]string, bool) {
+	throwawayUnixSocketsFn = func(pid int) ([]proctree.UnixSocket, bool) {
 		switch pid {
 		case 40:
-			return []string{"/tmp/tmux-" + strconv.Itoa(os.Getuid()) + "/default"}, true
+			return []proctree.UnixSocket{{Path: "/tmp/tmux-" + strconv.Itoa(os.Getuid()) + "/default", Listening: true}}, true
 		case 70:
-			return []string{filepath.Join(tmuxDir, "drive")}, true
+			return []proctree.UnixSocket{{Path: filepath.Join(tmuxDir, "drive"), Listening: true}}, true
 		}
 		return nil, true
 	}
@@ -549,8 +549,8 @@ func TestSharedServerPaneSurvivesTeardown(t *testing.T) {
 	throwawayUIDFn = func(int) (int, bool) { return os.Getuid(), true }
 	throwawaySameRootFn = func(int) bool { return true }
 	throwawayIsTmuxServerFn = func(int) bool { return true }
-	throwawayUnixSocketPathsFn = func(int) ([]string, bool) {
-		return []string{"/tmp/tmux-" + strconv.Itoa(os.Getuid()) + "/default"}, true
+	throwawayUnixSocketsFn = func(int) ([]proctree.UnixSocket, bool) {
+		return []proctree.UnixSocket{{Path: "/tmp/tmux-" + strconv.Itoa(os.Getuid()) + "/default", Listening: true}}, true
 	}
 	throwawayLookupFn = func(pid int) (proctree.Process, error) { return snap[pid], nil }
 	if got := throwawayMemberProcesses(canonHome, m); len(got) != 0 {
@@ -583,7 +583,7 @@ func TestThrowawayMembersNoSocketEvidence(t *testing.T) {
 	throwawayUIDFn = func(int) (int, bool) { return os.Getuid(), true }
 	throwawaySameRootFn = func(int) bool { return true }
 	throwawayIsTmuxServerFn = func(pid int) bool { return pid == 70 }
-	throwawayUnixSocketPathsFn = func(int) ([]string, bool) { return nil, false }
+	throwawayUnixSocketsFn = func(int) ([]proctree.UnixSocket, bool) { return nil, false }
 	throwawayLookupFn = func(pid int) (proctree.Process, error) { return snap[pid], nil }
 	got := map[int]bool{}
 	for _, p := range throwawayMemberProcesses(canonHome, m) {
@@ -824,7 +824,7 @@ type throwawaySeamSet struct {
 	lookup    func(int) (proctree.Process, error)
 	sameRoot  func(int) bool
 	tmuxSrv   func(int) bool
-	unixSocks func(int) ([]string, bool)
+	unixSocks func(int) ([]proctree.UnixSocket, bool)
 	scope     func() (string, string)
 }
 
@@ -832,12 +832,12 @@ func throwawaySeams() throwawaySeamSet {
 	return throwawaySeamSet{
 		snapshot: throwawaySnapshotFn, uid: throwawayUIDFn, lookup: throwawayLookupFn,
 		sameRoot: throwawaySameRootFn, tmuxSrv: throwawayIsTmuxServerFn,
-		unixSocks: throwawayUnixSocketPathsFn, scope: throwawayScopeIDsFn,
+		unixSocks: throwawayUnixSocketsFn, scope: throwawayScopeIDsFn,
 	}
 }
 
 func throwawayRestoreSeams(s throwawaySeamSet) {
 	throwawaySnapshotFn, throwawayUIDFn, throwawayLookupFn = s.snapshot, s.uid, s.lookup
-	throwawaySameRootFn, throwawayIsTmuxServerFn, throwawayUnixSocketPathsFn = s.sameRoot, s.tmuxSrv, s.unixSocks
+	throwawaySameRootFn, throwawayIsTmuxServerFn, throwawayUnixSocketsFn = s.sameRoot, s.tmuxSrv, s.unixSocks
 	throwawayScopeIDsFn = s.scope
 }

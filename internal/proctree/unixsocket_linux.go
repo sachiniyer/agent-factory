@@ -133,10 +133,12 @@ func isUnixSocketFd(link string, ino uint32) (unixSock, held bool, err error) {
 }
 
 // unixDiagConn is one NETLINK_SOCK_DIAG socket, used for every lookup of one
-// read.
+// read. portid is the netlink port id the kernel bound it to, which every
+// reply must be addressed to.
 type unixDiagConn struct {
-	fd  int
-	seq uint32
+	fd     int
+	seq    uint32
+	portid uint32
 }
 
 // unixDiagReplyTimeout bounds one lookup's wait for its reply. An exact lookup
@@ -153,7 +155,19 @@ func openUnixDiag() (*unixDiagConn, error) {
 		_ = unix.Close(fd)
 		return nil, err
 	}
-	return &unixDiagConn{fd: fd}, nil
+	// Bind explicitly so the kernel assigns the port id now, and read it back:
+	// every reply must be addressed to it.
+	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	sa, err := unix.Getsockname(fd)
+	nl, ok := sa.(*unix.SockaddrNetlink)
+	if err != nil || !ok {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("sock_diag: cannot read the socket's own port id: %v", err)
+	}
+	return &unixDiagConn{fd: fd, portid: nl.Pid}, nil
 }
 
 func (c *unixDiagConn) close() {
@@ -176,11 +190,18 @@ func (c *unixDiagConn) lookup(ino uint32) (unixDiagAnswer, error) {
 		return unixDiagAnswer{}, err
 	}
 	buf := make([]byte, 16<<10)
-	n, _, err := unix.Recvfrom(c.fd, buf, 0)
+	n, from, err := unix.Recvfrom(c.fd, buf, 0)
 	if err != nil {
 		return unixDiagAnswer{}, err
 	}
-	return parseUnixDiagReply(buf[:n], c.seq, ino)
+	// Only the kernel may answer: port id 0, no multicast group (#7543 review
+	// R4). Another process able to send to this port could otherwise forge a
+	// socket's state and name. Measured on Linux 6.17: every sock_diag reply,
+	// answer or error, comes from port 0.
+	if nl, ok := from.(*unix.SockaddrNetlink); !ok || nl.Pid != 0 || nl.Groups != 0 {
+		return unixDiagAnswer{}, fmt.Errorf("sock_diag: a reply that did not come from the kernel (%#v)", from)
+	}
+	return parseUnixDiagReply(buf[:n], c.seq, ino, c.portid)
 }
 
 // unixListenerPathsByTable reads which sockets pid holds from /proc/<pid>/fd

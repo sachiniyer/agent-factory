@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -48,12 +49,60 @@ type UnixSocket struct {
 // socket: unix_diag missing, refused, or a socket in another network
 // namespace. A descriptor that closes, or turns into something else, between
 // the listing and its read is no longer held and is skipped.
+//
+// A read is complete only if the process it began on is still the one
+// running when it ends: the same pid with the same start stamp. A process
+// that exits part-way closes its descriptors, and the reads after that find
+// them gone and skip them as closed, which would pass a partial list off as a
+// complete one (#7543 review R3). That answers ErrProcessExited instead.
 func UnixSockets(pid int) ([]UnixSocket, error) {
-	socks, err := unixSockets(pid)
+	var socks []UnixSocket
+	err := sameInstanceThroughout(pid, func() (err error) {
+		socks, err = unixSockets(pid)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
 	return resolveSocketPaths(socks, func() (string, bool) { return WorkingDir(pid) })
+}
+
+// instanceLookup is the process lookup sameInstanceThroughout brackets a read
+// with. A package var so a test can make the process exit, or be replaced,
+// mid-read; nothing else sets it.
+var instanceLookup = Lookup
+
+// sameInstanceThroughout runs read, and returns its error, only if pid names
+// the same process instance (pid and start stamp) before and after it.
+// Otherwise it answers ErrProcessExited: the process read is gone, so the read
+// cannot be complete. A lookup that fails for any other reason is returned as
+// it is, never as an exit.
+func sameInstanceThroughout(pid int, read func() error) error {
+	before, err := instanceLookup(pid)
+	if err != nil {
+		if processGone(err) {
+			return ErrProcessExited
+		}
+		return err
+	}
+	readErr := read()
+	after, err := instanceLookup(pid)
+	switch {
+	case err != nil && processGone(err):
+		return ErrProcessExited
+	case err != nil:
+		return err
+	case after.StartID != before.StartID:
+		return ErrProcessExited
+	}
+	return readErr
+}
+
+// processGone reports whether a lookup error says the pid names no live
+// process: ErrProcessExited (a zombie, or darwin's no-such-pid), or the Linux
+// stat file being gone.
+func processGone(err error) bool {
+	return errors.Is(err, ErrProcessExited) || errors.Is(err, os.ErrNotExist)
 }
 
 // resolveSocketPaths prefixes each relative filesystem path with the working
@@ -116,7 +165,11 @@ func UnixListenerPaths(pid int) ([]string, error) {
 // another network namespace), and it must never rule a server out or prove
 // anything private. Linux only; elsewhere ErrUnsupportedPlatform.
 func UnixListenerPathsByTable(pid int) ([]string, error) {
-	paths, err := unixListenerPathsByTable(pid)
+	var paths []string
+	err := sameInstanceThroughout(pid, func() (err error) {
+		paths, err = unixListenerPathsByTable(pid)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -103,9 +103,9 @@ var (
 	// Server-identification seams: a tmux server is proven private by the
 	// unix sockets the kernel reports it holding — the only socket
 	// evidence that survives argv retitling and absent environment.
-	throwawayIsTmuxServerFn    = proctree.IsTmuxServer
-	throwawayUnixSocketPathsFn = unixSocketPathsOf
-	throwawayScopeIDsFn        = func() (boot, ns string) {
+	throwawayIsTmuxServerFn = proctree.IsTmuxServer
+	throwawayUnixSocketsFn  = unixSocketsOf
+	throwawayScopeIDsFn     = func() (boot, ns string) {
 		b, _ := proctree.BootID()
 		n, _ := proctree.PIDNamespaceID()
 		return b, n
@@ -885,13 +885,22 @@ func tmuxServerSocketPrivate(pid int, canonTmux string) bool {
 	if uid, ok := throwawayUIDFn(pid); !ok || uid != os.Getuid() {
 		return false
 	}
-	paths, ok := throwawayUnixSocketPathsFn(pid)
-	if !ok || len(paths) == 0 {
+	socks, ok := throwawayUnixSocketsFn(pid)
+	if !ok || len(socks) == 0 {
 		return false
 	}
 	sep := string(os.PathSeparator)
-	for _, p := range paths {
-		c, err := canonicalDir(p)
+	for _, s := range socks {
+		// Decide on the reader's own facts before any path arithmetic (#7543
+		// review R2). An abstract socket names no file, so it lies in no
+		// directory, whatever its name spells: "@/../../<canonTmux>/x" would
+		// otherwise resolve, against this process's working directory, to a
+		// path inside it. And a path that is not absolute is relative to the
+		// server's directory, not this one's, so it proves nothing here.
+		if s.Abstract || !filepath.IsAbs(s.Path) {
+			return false
+		}
+		c, err := canonicalDir(s.Path)
 		if err != nil || (c != canonTmux && !strings.HasPrefix(c, canonTmux+sep)) {
 			return false
 		}

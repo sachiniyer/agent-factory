@@ -74,11 +74,18 @@ type unixDiagAnswer struct {
 	abstract  bool
 }
 
-// parseUnixDiagReply decodes the reply to the request with seq for inode ino.
-// Anything that is not exactly that answer is an error: a reply for another
-// request, another inode or another family, or a malformed message, so a
-// confused exchange reads as "could not tell", never as a socket.
-func parseUnixDiagReply(data []byte, seq, ino uint32) (unixDiagAnswer, error) {
+// parseUnixDiagReply decodes the reply to the request with seq for inode ino,
+// sent to this socket's netlink port id portid. Anything that is not exactly
+// that answer is an error, so a confused exchange reads as "could not tell",
+// never as a socket: a reply to another request, another port, inode or
+// family, or a malformed message. That includes one whose length is not
+// 4-aligned at the end of the buffer (#7543 review R1). The step to the next
+// message is clamped to the buffer, so no input can slice past it.
+//
+// The kernel addresses every reply to the requester's port: measured on Linux
+// 6.17, a sock_diag reply's nlmsg_pid is the requesting socket's own port id,
+// for an answer and for an error alike (#7543 review R4).
+func parseUnixDiagReply(data []byte, seq, ino, portid uint32) (unixDiagAnswer, error) {
 	for len(data) >= nlmsgHdrLen {
 		msgLen := int(binary.LittleEndian.Uint32(data[0:]))
 		if msgLen < nlmsgHdrLen || msgLen > len(data) {
@@ -86,10 +93,14 @@ func parseUnixDiagReply(data []byte, seq, ino uint32) (unixDiagAnswer, error) {
 		}
 		typ := binary.LittleEndian.Uint16(data[4:])
 		gotSeq := binary.LittleEndian.Uint32(data[8:])
+		gotPort := binary.LittleEndian.Uint32(data[12:])
 		payload := data[nlmsgHdrLen:msgLen]
-		data = data[(msgLen+3)&^3:]
+		data = data[min((msgLen+3)&^3, len(data)):]
 		if gotSeq != seq {
 			return unixDiagAnswer{}, fmt.Errorf("sock_diag: reply to request %d, want %d", gotSeq, seq)
+		}
+		if gotPort != portid {
+			return unixDiagAnswer{}, fmt.Errorf("sock_diag: reply addressed to port %d, want %d", gotPort, portid)
 		}
 		switch typ {
 		case nlmsgError:
