@@ -325,6 +325,19 @@ func TestReadTmuxServerSocketBinding(t *testing.T) {
 	require.Equal(t, socketBindingGone, b, "a pid proved to name no process is gone, not unresolved")
 }
 
+// The proof of an exit, on real pids (#7541): a reaped child is proved gone
+// (Linux reads ENOENT from /proc/<pid>/stat and kill(pid, 0) agrees with ESRCH;
+// darwin's lookup says so outright). A live process is not, and neither is a
+// live process this uid may not signal: pid 1, which kill(pid, 0) answers
+// EPERM.
+func TestServerPIDExited(t *testing.T) {
+	reaped := exec.Command("true")
+	require.NoError(t, reaped.Run())
+	require.True(t, serverPIDExited(reaped.ProcessState.Pid()), "a reaped pid names no process")
+	require.False(t, serverPIDExited(os.Getpid()), "a live process is not gone")
+	require.False(t, serverPIDExited(1), "init is not gone, whether or not this uid may signal it")
+}
+
 // gone needs the independent lookup to agree: a failed or empty read of a pid
 // that still names a process stays unresolved (#7541).
 func TestReadTmuxServerSocketBindingNeedsTheLookupToProveAnExit(t *testing.T) {

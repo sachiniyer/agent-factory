@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
@@ -65,12 +66,28 @@ func readTmuxServerSocketBinding(pid int, socketPath string) (socketBinding, str
 	return bindingAgainst(socketPath, paths)
 }
 
-// serverPIDExited reports whether pid is confirmed to name no live process: the
-// lookup itself says it exited (a zombie included). Any other answer, an error
-// included, is not proof.
+// serverPIDExited reports whether pid is PROVED to name no live process (#7541):
+//
+//   - proctree.Lookup answers ErrProcessExited: a zombie, which holds no
+//     sockets, or (darwin) a pid kern.proc no longer has.
+//   - On Linux a pid with no process at all reads ENOENT from
+//     /proc/<pid>/stat, not ErrProcessExited (measured on Linux 6.17 for a
+//     reaped child). ENOENT alone is not proof, since a /proc entry hidden by
+//     hidepid reads the same. So it counts only when the kernel's own answer
+//     agrees: kill(pid, 0), which delivers nothing, is ESRCH only when no
+//     process has the pid. A live process this uid may not signal answers
+//     EPERM (measured: pid 1).
+//
+// Any other answer, an error included, is not proof.
 var serverPIDExited = func(pid int) bool {
 	_, err := proctree.Lookup(pid)
-	return errors.Is(err, proctree.ErrProcessExited)
+	if errors.Is(err, proctree.ErrProcessExited) {
+		return true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	}
+	return false
 }
 
 // bindingAgainst classifies a server whose listening sockets are bound to
