@@ -692,6 +692,13 @@ func (t *TmuxSession) sweepVanishedSessionProcesses(trustLiveGeneration bool) er
 			AgentExe: t.agentProgramExe(),
 		}
 	}
+	// The server identity the last pane resolution recorded rides every
+	// sweep, root evidence or not (#7469): the carrier attribution only needs
+	// the server record — a session that never resolved a root still names
+	// its server from the last answered row or the persisted seed.
+	if server, ok := t.ServerEvidence(); ok {
+		membership.OwnServer = server
+	}
 	return reapVanishedSessionProcesses(t.sanitizedName, ownHome, nil, nil, membership, trustLiveGeneration)
 }
 

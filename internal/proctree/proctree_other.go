@@ -77,3 +77,11 @@ func checkPipePair(uint64, uint64) error {
 func groupMembers(int) ([]Process, error) {
 	return nil, ErrUnsupportedPlatform
 }
+
+func ptySlaveIndices(int) ([]int, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+func ptyMasterIndices(int) ([]int, error) {
+	return nil, ErrUnsupportedPlatform
+}

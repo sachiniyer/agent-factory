@@ -606,6 +606,19 @@ func (i *Instance) setRuntimeLaunch(program string, ts *tmux.TmuxSession, spawne
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.setRuntimeEvidenceSinceLocked(program, pid, startID, spawnedAt)
+	// The same pane answer carried the tmux-server identity (#7469): record
+	// it beside the root so a daemon restart restores what the
+	// vanished-session sweep attributes detached carriers against. A pane
+	// query that could not answer leaves the standing record — the session's
+	// server did not move just because the root could not be read.
+	if ts != nil {
+		if server, ok := ts.ServerEvidence(); ok {
+			i.runtimeServerSocket = server.Socket
+			i.runtimeServerPID = server.PID
+			i.runtimeServerStartID = server.StartID
+			i.runtimeServerSessionID = server.SessionID
+		}
+	}
 }
 
 func (i *Instance) setRuntimeProgramLocked(program string) {

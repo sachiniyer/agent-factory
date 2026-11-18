@@ -518,6 +518,18 @@ type Instance struct {
 	// before this evidence existed and everywhere runtimeProgram is cleared.
 	runtimePID     int
 	runtimeStartID uint64
+	// runtimeServer* record WHICH tmux server the session's pane belonged to
+	// at the last launch boundary — socket path, server process identity and
+	// tmux session id (#7469). Unlike the pane-root pair they describe the
+	// session's host, not the launch's root process, so a launch boundary that
+	// cannot answer its pane keeps whatever stands; a live resolution rewrites
+	// them. The vanished-session sweep judges detached marked carriers against
+	// this record — provably another server means foreign, never signalled.
+	// Zero on records written before this evidence existed.
+	runtimeServerSocket    string
+	runtimeServerPID       int
+	runtimeServerStartID   uint64
+	runtimeServerSessionID string
 	// captureEvidence is the launch identity a reattach probe could not answer
 	// about (#7123): the retire above still clears runtimePID/runtimeStartID for
 	// every consumer that reads them, but "could not answer" is no evidence of a

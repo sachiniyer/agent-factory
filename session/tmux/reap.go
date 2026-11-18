@@ -171,6 +171,12 @@ type paneCapture struct {
 	Snapshot         map[int]proctree.Process
 	PaneSIDs         map[int]bool
 	RecordedPrograms map[int]string
+	// Server is the tmux-server identity the pane rows carried, kernel-
+	// resolved (#7469): the vanished-session sweep judges a detached marked
+	// carrier against it — provably another server means foreign, refused
+	// and named, never signalled. Zero when the rows could not answer the
+	// server fields, which keeps every verdict undecidable.
+	Server ServerIdentity
 }
 
 // paneRowsToProcesses turns list-panes rows (paneRowFormat, one per whitespace-
@@ -207,6 +213,12 @@ func paneRowsToProcesses(rows, sanitizedName string) (paneCapture, error) {
 		if panePID <= 1 {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
 			continue
+		}
+		if captured.Server.PID == 0 && row.server.valid() {
+			// The server identity is identical on every row of a session —
+			// the first answered row records it, resolved to kernel
+			// identity (#7469).
+			captured.Server = resolveServerIdentity(row.server)
 		}
 		if row.dead {
 			// A held dead pane (#4506 review): its pid may already be reaped, or

@@ -426,6 +426,16 @@ type TmuxSession struct {
 	// A session whose root was never resolved carries none — and the sweep
 	// refuses on any marked candidate rather than signalling on env markers.
 	paneRootEvidence atomic.Pointer[proctree.Process]
+	// serverEvidence is the tmux-server identity stamped beside the pane
+	// root — socket, server (pid, StartID), session id, pid namespace —
+	// recorded at every pane resolution and seeded from the persisted
+	// launch record on restore (#7469). The vanished-session sweep judges a
+	// detached marked carrier against it: provably another server means
+	// foreign, which is refused and named, never signalled. A stale or
+	// absent record degrades the verdict to undecidable — today's verdict,
+	// never a promotion — so this cell needs no paired atomicity with
+	// paneRootEvidence: a mismatch can only over-protect, never admit.
+	serverEvidence atomic.Pointer[ServerIdentity]
 	// provenNoPane records that a Start attempt PROVED this name had no tmux
 	// session and then returned before running new-session, so nothing can be
 	// running behind it. Guarded by provenMu; read through ProvenNoPane.

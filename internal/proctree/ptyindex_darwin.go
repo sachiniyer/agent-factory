@@ -1,0 +1,95 @@
+//go:build darwin
+
+package proctree
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"strings"
+	"syscall"
+	"unsafe"
+)
+
+// Darwin decodes each held pty through proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO),
+// the same kernel read openFilePaths already performs — plus the vnode's
+// vst_rdev, which for a /dev/ptmx master carries the pty index in its minor
+// (measured on the macOS runner, tmux 3.4: master's rdev 0x0f000000 = major 15
+// minor 0 against its /dev/ttys000 slave's 0x10000000 = major 16 minor 0; the
+// shared minor is the index #7469 needs). The slave side keeps its name's
+// numeric tail — /dev/ttysNNN — the same convention /dev/pts/N uses on linux.
+//
+// Offsets inside vnode_fdinfowithpath, from Apple's headers: proc_fileinfo is
+// 24 bytes, then vinfo_stat — vst_dev u32 at 24, vst_rdev u32 at 140 — then
+// vnode_info's vi_type i32 at 160, vip_path at 176 (fdinfopath.go). vi_type
+// VCHR is 4, measured on both ptmx and ttys vnodes.
+const (
+	vnodeFdInfoRdevOffset = 140
+	vnodeFdInfoViTypeOff  = 160
+	vnodeFdInfoViTypeVCHR = 4
+	darwinPtmxPath        = "/dev/ptmx"
+	darwinDevTMinorMask   = 0xffffff // makedev(major<<24 | minor)
+)
+
+// ptySlaveIndices returns the index of every /dev/ttysNNN vnode pid holds.
+func ptySlaveIndices(pid int) ([]int, error) {
+	return ptyFdIndices(pid, func(path string, viType int32, rdev uint32) (int, bool) {
+		if viType == vnodeFdInfoViTypeVCHR && strings.HasPrefix(path, "/dev/ttys") {
+			return ptySlaveIndexFromPath(path)
+		}
+		return 0, false
+	})
+}
+
+// ptyMasterIndices returns the index of every /dev/ptmx vnode pid holds, read
+// from the vnode's rdev minor — the name cannot say which pty it masters.
+func ptyMasterIndices(pid int) ([]int, error) {
+	return ptyFdIndices(pid, func(path string, viType int32, rdev uint32) (int, bool) {
+		if viType == vnodeFdInfoViTypeVCHR && path == darwinPtmxPath {
+			return int(rdev & darwinDevTMinorMask), true
+		}
+		return 0, false
+	})
+}
+
+// ptyFdIndices walks pid's vnode descriptors, decoding each one's path,
+// vi_type and vst_rdev for classify. A refused or short read of the LIST is
+// "could not see"; a single fd closing mid-walk is a smaller open set.
+func ptyFdIndices(pid int, classify func(path string, viType int32, rdev uint32) (int, bool)) ([]int, error) {
+	fds, err := listProcFds(pid)
+	if err != nil {
+		return nil, err
+	}
+	var indices []int
+	for _, fi := range fds {
+		fd := int(int32(binary.LittleEndian.Uint32(fi[procFdInfoFdOffset:])))
+		if binary.LittleEndian.Uint32(fi[procFdInfoFdTypeOffset:]) != procFdTypeVnode || fd < 0 {
+			continue
+		}
+		var buf [vnodeFdInfoWithPathSize]byte
+		n, err := procInfoRaw(procInfoCallPIDFDInfo, pid, procPIDFdVnodePathInfo,
+			uint64(fd), unsafe.Pointer(&buf[0]), int32(len(buf)))
+		if err != nil {
+			if errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.ENOENT) {
+				continue // closed since the listing
+			}
+			if errors.Is(err, syscall.ESRCH) {
+				return nil, ErrProcessExited
+			}
+			return nil, fmt.Errorf("proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO) for fd %d: %w", fd, err)
+		}
+		if int(n) != len(buf) {
+			return nil, fmt.Errorf("proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO) for fd %d wrote %d bytes, want %d", fd, n, len(buf))
+		}
+		path, ok := fdPathFromVnodeFdInfo(buf[:])
+		if !ok {
+			continue
+		}
+		viType := int32(binary.LittleEndian.Uint32(buf[vnodeFdInfoViTypeOff:]))
+		rdev := binary.LittleEndian.Uint32(buf[vnodeFdInfoRdevOffset:])
+		if idx, ok := classify(path, viType, rdev); ok {
+			indices = append(indices, idx)
+		}
+	}
+	return indices, nil
+}
