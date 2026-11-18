@@ -73,7 +73,7 @@ func TestPaced_TheBoundRunsOnTheInstalledClock(t *testing.T) {
 		restoreClock()
 	}()
 
-	got, err := Paced("question", t.Name()+"-answered", func(step func()) (int, error) {
+	got, err := Paced("question", t.Name()+"-answered", func(step func(), _ RegularStatFunc) (int, error) {
 		steps := 0
 		for i := 0; i < 30; i++ {
 			step()
@@ -86,7 +86,7 @@ func TestPaced_TheBoundRunsOnTheInstalledClock(t *testing.T) {
 	require.Equal(t, 30, got)
 
 	release := make(chan struct{})
-	_, err = Paced("question", t.Name()+"-stalled", func(step func()) (int, error) {
+	_, err = Paced("question", t.Name()+"-stalled", func(step func(), _ RegularStatFunc) (int, error) {
 		step()
 		clock.Advance(50 * time.Millisecond)
 		<-release

@@ -35,21 +35,22 @@ func (c *conversationCarry) targetReason() string {
 // into a diverging one, say — is left for the copy to find.
 //
 // The judgement opens and reads both accounts' homes, so it runs in a paced
-// flight whose bound is per syscall: one that does not answer, or a lookup in
-// it that fails, refuses as unverified (#7383).
+// flight whose bound is per syscall: one that does not answer refuses as
+// unverified (#7383). The judgement's own refusal keeps the copy's wording:
+// a check that already names what sits at the path — "the new account holds
+// something other than a plain file where the conversation belongs" — keeps
+// the name rather than reading as the generic could-not-look clause (#7539).
 func (c *conversationCarry) targetCopyReason() string {
 	srcRoot, dstRoot, rel := c.srcRoot, c.dstRoot, c.transcript
 	judged, err := fsprobe.Paced("carry target-copy judgement", srcRoot.key()+"\x00"+dstRoot.key()+"\x00"+rel,
-		func(step func()) (targetCopyJudgement, error) {
-			return judgeTargetCopy(pacedCarryWalk(step), srcRoot, dstRoot, rel), nil
+		func(step func(), stat fsprobe.RegularStatFunc) (targetCopyJudgement, error) {
+			return judgeTargetCopy(pacedCarryWalk(step, stat), srcRoot, dstRoot, rel), nil
 		})
 	switch {
 	case err != nil:
 		return carryUnlookedReason
 	case judged.refusal == nil:
 		return ""
-	case carryLookupUnlooked(judged.refusal):
-		return carryUnlookedReason
 	}
 	return c.copyRefusal(judged.refusal)
 }

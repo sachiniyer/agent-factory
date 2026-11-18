@@ -56,8 +56,8 @@ func carryLookupUnlooked(err error) bool {
 
 // boundedProbeCarryDir is probeCarryDir in a paced flight.
 func boundedProbeCarryDir(home carryRoot, rel string) error {
-	_, err := fsprobe.Paced("carry store probe", home.key()+"\x00"+rel, func(step func()) (struct{}, error) {
-		return struct{}{}, probeCarryDir(pacedCarryWalk(step), home, rel)
+	_, err := fsprobe.Paced("carry store probe", home.key()+"\x00"+rel, func(step func(), stat fsprobe.RegularStatFunc) (struct{}, error) {
+		return struct{}{}, probeCarryDir(pacedCarryWalk(step, stat), home, rel)
 	})
 	return err
 }

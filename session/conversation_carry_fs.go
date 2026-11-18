@@ -60,12 +60,19 @@ var carryLookupStandIn atomic.Pointer[func(op, path string)]
 type carryPace struct {
 	step    func()
 	standIn *func(op, path string)
-	loaded  bool
+	// stat is the regularFileStat seam the flight was handed when it began —
+	// loaded before the flight's goroutine started, so a flight that outlives
+	// its test stats with the seam it began with (#7539). The zero pace's nil
+	// stat loads the seam where openCarryFileAt runs, which for an unpaced
+	// walk is the caller's own goroutine.
+	stat   fsprobe.RegularStatFunc
+	loaded bool
 }
 
-// pacedCarryWalk is the pace of a walk that reports each syscall to step.
-func pacedCarryWalk(step func()) carryPace {
-	return carryPace{step: step, standIn: carryLookupStandIn.Load(), loaded: true}
+// pacedCarryWalk is the pace of a walk that reports each syscall to step and
+// stats regular files through the flight's stat.
+func pacedCarryWalk(step func(), stat fsprobe.RegularStatFunc) carryPace {
+	return carryPace{step: step, standIn: carryLookupStandIn.Load(), stat: stat, loaded: true}
 }
 
 // at marks op on path, before the syscall.
@@ -321,7 +328,7 @@ func openCarryFileAt(p carryPace, dir *os.File, name string) (*os.File, os.FileI
 		return nil, nil, err
 	}
 	p.at("fstat", file.Name())
-	info, err := fsprobe.RegularFileInfo(file, file.Name())
+	info, err := fsprobe.RegularFileInfo(file, file.Name(), p.stat)
 	if err != nil {
 		return nil, nil, err
 	}
