@@ -214,6 +214,14 @@ type tunnelChild struct {
 	done chan struct{} // closed by the reaper once cmd.Wait() returns
 	err  error         // the Wait result; valid once done is closed
 	born time.Time
+	// ready latches when this generation's readiness probe first passed — the
+	// socket was bound and peer-proven. The endpoint's gone-recycle consults
+	// it: a still-binding child's missing socket is the expected mid-bind
+	// state, never a vanished endpoint, and must not be killed for it —
+	// the supervisor's own readiness timeout reaps a child that never binds
+	// (#7511). Atomic: written by the probe outside reapMu, read by the
+	// recycle under it.
+	ready atomic.Bool
 }
 
 // newTunnelChild wraps an already-started child with its reaper.
@@ -767,6 +775,7 @@ func (p *sandboxProvisioner) superviseTunnel() {
 				m.noteEvent(withTunnelStderr(err, next))
 				continue
 			}
+			next.ready.Store(true) // the gone-recycle may now see a vanished socket as gone
 			m.armHealthyTimer(next)
 			continue
 		}

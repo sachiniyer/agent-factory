@@ -66,13 +66,26 @@ func (p *sandboxProvisioner) tunnelEndpoint(token string) *AgentServerEndpoint {
 }
 
 // noteEndpointGone is the endpoint's re-dial trigger for a socket that
-// vanished while its tunnel generation lives (#7511): the supervisor re-dials
-// only on tunnel death, so a dial that found no file at the socket path is
-// what must recycle the transport — kill the current generation and the
-// supervisor re-dials it into the re-established dir. The socket is
-// re-checked first: a dial that raced a respawn whose file already landed
-// must not kill the newborn.
+// vanished while its tunnel generation lives (#7511). It must never wait on
+// reapMu: the dial that reports the missing file runs inside a remote request,
+// and a caller can hold reapMu across that request (SwapOffBoxAccount) — a
+// synchronous lock would turn an instant ENOENT into the request's full
+// timeout and stall the recycle behind its own trigger. The callback only
+// queues the recycle; the worker decides under the lock.
 func (p *sandboxProvisioner) noteEndpointGone() {
+	go p.recycleMissingTunnelSocket()
+}
+
+// recycleMissingTunnelSocket is the queued half of the endpoint's re-dial
+// trigger (#7511): the supervisor re-dials only on tunnel death, so a dial
+// that found no file at the socket path is what must recycle the transport —
+// kill the current generation and the supervisor re-dials it into the
+// re-established dir. Two generations are spared: one whose socket already
+// landed again (a dial that raced the respawn's bind), and one that never
+// reached readiness — its missing file is the expected mid-bind state, and
+// the supervisor's own readiness timeout reaps it, so a request storm cannot
+// starve a recovery by killing every newborn.
+func (p *sandboxProvisioner) recycleMissingTunnelSocket() {
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
 	if p.tunnel == nil || p.socketPath == "" {
@@ -80,6 +93,9 @@ func (p *sandboxProvisioner) noteEndpointGone() {
 	}
 	if _, err := os.Lstat(p.socketPath); err == nil {
 		return // the path exists again — leave the fresh generation alone
+	}
+	if !p.tunnel.ready.Load() {
+		return // still binding — the readiness probe owns this generation's fate
 	}
 	killTunnel(p.tunnel) // child.done fires; the supervisor re-dials
 }
@@ -132,6 +148,7 @@ func (p *sandboxProvisioner) openTunnel(remoteAddr string) (string, error) {
 	if err := waitForSandboxTunnelFn(p, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
 		return "", withTunnelStderr(err, child)
 	}
+	child.ready.Store(true) // the gone-recycle may now see a vanished socket as gone
 	return sockPath, nil
 }
 

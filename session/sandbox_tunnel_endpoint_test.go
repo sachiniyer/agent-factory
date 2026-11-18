@@ -964,7 +964,9 @@ func TestTunnelDialGoneFiresOnlyOnAMissingSocket(t *testing.T) {
 	}
 
 	// Missing file: ENOENT — the generation dir was deleted under a live ssh.
-	missing := filepath.Join(t.TempDir(), "deleted.sock")
+	// Socket-safe path: a t.TempDir() path exceeds sun_path under macOS's long
+	// TMPDIR and the dial reports EINVAL rather than ENOENT (#7511 review).
+	missing := testguard.SocketPath(t, "deleted.sock")
 	rc := mkClient(missing)
 	_, err := rc.transport.DialContext(context.Background(), "unix", missing)
 	require.Error(t, err)
@@ -972,7 +974,7 @@ func TestTunnelDialGoneFiresOnlyOnAMissingSocket(t *testing.T) {
 	assert.Equal(t, int64(1), gone.Load(), "a missing socket file triggers the re-dial hook")
 
 	// A path that exists but is not a socket: a different errno, no trigger.
-	regular := filepath.Join(t.TempDir(), "not-a-socket")
+	regular := testguard.SocketPath(t, "not-a-socket")
 	require.NoError(t, os.WriteFile(regular, nil, 0o600))
 	rc = mkClient(regular)
 	_, err = rc.transport.DialContext(context.Background(), "unix", regular)
@@ -995,9 +997,11 @@ func TestTunnelDialGoneFiresOnlyOnAMissingSocket(t *testing.T) {
 
 // The endpoint's re-dial trigger (#7511): a socket that vanished while its
 // generation lives is killed so superviseTunnel re-dials it into the
-// re-established dir — but only while the file is still missing. A dial that
-// raced the respawn's bind must never kill the newborn.
-func TestNoteEndpointGoneRecyclesTheTunnel(t *testing.T) {
+// re-established dir — but only for a generation that was ready. A dial that
+// raced the respawn's bind, and a still-binding generation whose socket has
+// simply not landed, must never be killed: the supervisor's readiness probe
+// owns the newborn's fate, and a request storm cannot starve recovery.
+func TestRecycleMissingTunnelSocketKillsOnlyAReadyGeneration(t *testing.T) {
 	newSleep := func(t *testing.T) *tunnelChild {
 		t.Helper()
 		cmd := exec.Command("sleep", "60")
@@ -1006,34 +1010,83 @@ func TestNoteEndpointGoneRecyclesTheTunnel(t *testing.T) {
 		t.Cleanup(func() { killTunnel(child) })
 		return child
 	}
+	spared := func(child *tunnelChild) {
+		t.Helper()
+		select {
+		case <-child.done:
+			t.Fatal("this generation must not be recycled")
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 
-	// Socket file gone: the live generation is recycled — killTunnel's join
-	// on done returns only after the reaper confirmed the exit.
 	missing := filepath.Join(t.TempDir(), "gone.sock")
+
+	// Socket file gone on a READY generation: recycled — killTunnel's join on
+	// done returns only after the reaper confirmed the exit.
 	p := &sandboxProvisioner{socketPath: missing}
 	child := newSleep(t)
 	p.setTunnel(child)
-	p.noteEndpointGone()
+	child.ready.Store(true)
+	p.recycleMissingTunnelSocket()
 	select {
 	case <-child.done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("a missing socket on a live generation must recycle the tunnel")
+		t.Fatal("a missing socket on a ready generation must recycle the tunnel")
 	}
 
-	// Socket file present — the respawn's bind already landed: no recycle.
+	// Socket file present — the respawn's bind already landed: spared.
 	present := filepath.Join(t.TempDir(), "bound.sock")
 	require.NoError(t, os.WriteFile(present, nil, 0o600))
 	p2 := &sandboxProvisioner{socketPath: present}
 	child2 := newSleep(t)
 	p2.setTunnel(child2)
-	p2.noteEndpointGone()
-	select {
-	case <-child2.done:
-		t.Fatal("a dial that raced the respawn's bind must not kill the newborn")
-	case <-time.After(200 * time.Millisecond):
-	}
+	child2.ready.Store(true)
+	p2.recycleMissingTunnelSocket()
+	spared(child2)
+
+	// A generation that never reached readiness is still binding its socket —
+	// the missing file is the expected mid-bind state (#7511 review).
+	p3 := &sandboxProvisioner{socketPath: missing}
+	child3 := newSleep(t) // ready never set
+	p3.setTunnel(child3)
+	p3.recycleMissingTunnelSocket()
+	spared(child3)
 
 	// Nothing to recycle: a nil generation and an unminted endpoint are no-ops.
-	(&sandboxProvisioner{socketPath: missing}).noteEndpointGone()
-	(&sandboxProvisioner{}).noteEndpointGone()
+	(&sandboxProvisioner{socketPath: missing}).recycleMissingTunnelSocket()
+	(&sandboxProvisioner{}).recycleMissingTunnelSocket()
+}
+
+// The gone-callback never waits on reapMu: a caller may hold it across the
+// remote request whose dial failed (SwapOffBoxAccount), so a synchronous lock
+// would turn an instant ENOENT into the request's full timeout and stall the
+// recycle behind its own trigger (#7511 review). The callback queues the work
+// and returns; the queued recycle still runs once the lock frees.
+func TestNoteEndpointGoneDoesNotBlockOnReapMu(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	require.NoError(t, cmd.Start())
+	child := newTunnelChild(cmd, nil)
+	t.Cleanup(func() { killTunnel(child) })
+
+	p := &sandboxProvisioner{socketPath: filepath.Join(t.TempDir(), "gone.sock")}
+	p.setTunnel(child)
+	child.ready.Store(true)
+
+	p.reapMu.Lock()
+	done := make(chan struct{})
+	go func() { p.noteEndpointGone(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		p.reapMu.Unlock()
+		t.Fatal("the gone callback must return without waiting on reapMu")
+	}
+	p.reapMu.Unlock()
+
+	// The queued recycle runs once the lock frees — the generation is killed.
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the queued recycle never ran after reapMu freed")
+	}
 }
