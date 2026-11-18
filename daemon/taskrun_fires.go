@@ -367,7 +367,25 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		// that never landed. The row stays — its interrupted work is kept —
 		// while the fire falls through to a fresh delivery, and the leftover
 		// path below already declines to reap an identity this row still owns.
-		if data.TaskRunInterrupted {
+		//
+		// A row the boot loader deferred to the lost-restore loop
+		// (Liveness == LiveLost) is the same not-yet-delivered shape, just
+		// observed one step earlier. The loader hands such a row to the
+		// lost-restore pass WITHOUT respawning — a deferred restore (worktree
+		// missing/unreachable, socket unverifiable under a possibly-live
+		// server, or a staged replacement conversation not made durable) — and
+		// it does not pre-stamp TaskRunInterrupted on this path; the durable
+		// interrupt lands only after lost-restore runs git worktree add + tmux
+		// spawn, which is unsequenced against this replay's file read. Adopting
+		// the row here would stamp "started" and clear the marker before the
+		// replacement ever received the prompt, consuming the occurrence for
+		// nothing — the lost-restore respawn never replays it. Skipping keeps
+		// the fire owed (it delivers fresh under a new suffix), and the row is
+		// preserved for its own lost-restore recovery; the leftover scan's
+		// foreign-row title match already declines to reap an identity this row
+		// still owns. Same policy as the TaskRunInterrupted arm above: a
+		// runtime replaced without prompt replay keeps the occurrence owed.
+		if data.TaskRunInterrupted || data.Liveness == session.LiveLost {
 			continue
 		}
 		// An adopted tombstone or uncertain row is already owned by the retained-
