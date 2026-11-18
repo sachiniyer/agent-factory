@@ -163,7 +163,6 @@ func leadingFields(line string, n int) (fields []string, rest string) {
 // every number below matches it:
 //
 //	sizeof(struct socket_fdinfo)            = 792
-//	offsetof(psi.soi_stat.vst_mode)         = 28
 //	offsetof(psi.soi_type)                  = 176
 //	offsetof(psi.soi_family)                = 184
 //	offsetof(psi.soi_options)               = 188
@@ -173,7 +172,6 @@ func leadingFields(line string, n int) (fields []string, rest string) {
 //	offsetof(psi.soi_proto.pri_un.unsi_addr.ua_sun.sun_path)   = 282
 const (
 	socketFdInfoSize         = 792
-	socketFdInfoModeOffset   = 28
 	socketFdInfoTypeOffset   = 176
 	socketFdInfoFamilyOffset = 184
 	socketFdInfoOptsOffset   = 188
@@ -183,14 +181,13 @@ const (
 	socketFdInfoSunPathOff   = 282
 	darwinSunPathLen         = 104
 
-	darwinAFUnix        = 1      // AF_UNIX
-	darwinSockinfoUn    = 3      // SOCKINFO_UN
-	darwinSoAcceptConn  = 0x0002 // SO_ACCEPTCONN
-	darwinSIFMT         = 0o170000
-	darwinSIFSOCK       = 0o140000
-	darwinSockStream    = 1 // SOCK_STREAM
-	darwinSockDgram     = 2 // SOCK_DGRAM
-	darwinSockSeqpacket = 5 // SOCK_SEQPACKET
+	darwinAFUnix          = 1      // AF_UNIX
+	darwinSockinfoGeneric = 0      // SOCKINFO_GENERIC
+	darwinSockinfoUn      = 3      // SOCKINFO_UN
+	darwinSoAcceptConn    = 0x0002 // SO_ACCEPTCONN
+	darwinSockStream      = 1      // SOCK_STREAM
+	darwinSockDgram       = 2      // SOCK_DGRAM
+	darwinSockSeqpacket   = 5      // SOCK_SEQPACKET
 )
 
 // darwinUnixSocket is one decoded socket_fdinfo.
@@ -209,21 +206,29 @@ type darwinUnixSocket struct {
 // above breaks one of them:
 //
 //   - the buffer is exactly sizeof(struct socket_fdinfo);
-//   - soi_stat.vst_mode says S_IFSOCK;
-//   - an AF_UNIX socket's soi_kind is SOCKINFO_UN, and its soi_type is a unix
-//     socket type;
-//   - a bound address has sun_family AF_UNIX, a length that fits sockaddr_un,
-//     and a path that is NUL-terminated within sun_path and free of control
+//   - soi_kind SOCKINFO_UN only ever comes with soi_family AF_UNIX, and an
+//     AF_UNIX socket's soi_type is a unix socket type;
+//   - a bound address has sun_family AF_UNIX, a sun_len of at least its own
+//     two header bytes, and a path within sun_len that is free of control
 //     bytes.
+//
+// An AF_UNIX socket whose soi_kind is still SOCKINFO_GENERIC is one the kernel
+// had no protocol block for (fill_socketinfo skips the per-protocol part then,
+// as for a socket being torn down). It has no address to report and is skipped:
+// a listener being read always has its block. sun_len is the length the binder
+// passed, which may exceed sockaddr_un's 106 bytes up to SOCK_MAXADDRLEN, and
+// the kernel copies that many bytes into the 255-byte union, so the path is
+// bounded by sun_len.
+//
+// soi_stat is not one of them. The kernel leaves it zeroed for a socket:
+// measured on the macOS 15.8 arm64 runner, every socket fd read vst_mode 0 at
+// the offset the SDK header confirms (#7537).
 //
 // A refusal is the caller's "could not read", which leaves the process
 // unresolved.
 func unixSocketFromSocketFdInfo(buf []byte) (darwinUnixSocket, error) {
 	if len(buf) != socketFdInfoSize {
 		return darwinUnixSocket{}, fmt.Errorf("socket_fdinfo is %d bytes, want %d", len(buf), socketFdInfoSize)
-	}
-	if mode := binary.LittleEndian.Uint16(buf[socketFdInfoModeOffset:]); uint32(mode)&darwinSIFMT != darwinSIFSOCK {
-		return darwinUnixSocket{}, fmt.Errorf("socket_fdinfo: vst_mode %#o is not a socket", mode)
 	}
 	family := int32(binary.LittleEndian.Uint32(buf[socketFdInfoFamilyOffset:]))
 	kind := int32(binary.LittleEndian.Uint32(buf[socketFdInfoKindOffset:]))
@@ -233,13 +238,17 @@ func unixSocketFromSocketFdInfo(buf []byte) (darwinUnixSocket, error) {
 		}
 		return darwinUnixSocket{}, nil
 	}
-	if kind != darwinSockinfoUn {
-		return darwinUnixSocket{}, fmt.Errorf("socket_fdinfo: AF_UNIX with soi_kind %d", kind)
-	}
 	switch typ := int32(binary.LittleEndian.Uint32(buf[socketFdInfoTypeOffset:])); typ {
 	case darwinSockStream, darwinSockDgram, darwinSockSeqpacket:
 	default:
 		return darwinUnixSocket{}, fmt.Errorf("socket_fdinfo: AF_UNIX with soi_type %d", typ)
+	}
+	switch kind {
+	case darwinSockinfoUn:
+	case darwinSockinfoGeneric:
+		return darwinUnixSocket{unix: true}, nil
+	default:
+		return darwinUnixSocket{}, fmt.Errorf("socket_fdinfo: AF_UNIX with soi_kind %d", kind)
 	}
 	s := darwinUnixSocket{
 		unix:      true,
@@ -252,13 +261,13 @@ func unixSocketFromSocketFdInfo(buf []byte) (darwinUnixSocket, error) {
 	if fam := buf[socketFdInfoSunFamOffset]; fam != darwinAFUnix {
 		return darwinUnixSocket{}, fmt.Errorf("socket_fdinfo: bound address has sun_family %d", fam)
 	}
-	if sunLen > 2+darwinSunPathLen {
-		return darwinUnixSocket{}, fmt.Errorf("socket_fdinfo: sun_len %d exceeds sockaddr_un", sunLen)
+	if sunLen < 2 {
+		return darwinUnixSocket{}, fmt.Errorf("socket_fdinfo: sun_len %d is shorter than its own header", sunLen)
 	}
-	raw := buf[socketFdInfoSunPathOff : socketFdInfoSunPathOff+darwinSunPathLen]
+	raw := buf[socketFdInfoSunPathOff : socketFdInfoSunLenOffset+sunLen]
 	end := bytes.IndexByte(raw, 0)
 	if end < 0 {
-		return darwinUnixSocket{}, errors.New("socket_fdinfo: sun_path is not NUL-terminated")
+		end = len(raw)
 	}
 	for _, c := range raw[:end] {
 		if c < 0x20 || c == 0x7f {

@@ -39,7 +39,6 @@ func TestSocketFdInfoLayoutMatchesTheSDKHeader(t *testing.T) {
 #define P(name, v) printf("%s %ld\n", name, (long)(v))
 int main(void) {
 	P("size", sizeof(struct socket_fdinfo));
-	P("mode", offsetof(struct socket_fdinfo, psi.soi_stat.vst_mode));
 	P("type", offsetof(struct socket_fdinfo, psi.soi_type));
 	P("family", offsetof(struct socket_fdinfo, psi.soi_family));
 	P("options", offsetof(struct socket_fdinfo, psi.soi_options));
@@ -50,11 +49,10 @@ int main(void) {
 	P("sun_path_len", sizeof(((struct sockaddr_un *)0)->sun_path));
 	P("PROC_PIDFDSOCKETINFO", PROC_PIDFDSOCKETINFO);
 	P("PROX_FDTYPE_SOCKET", PROX_FDTYPE_SOCKET);
+	P("SOCKINFO_GENERIC", SOCKINFO_GENERIC);
 	P("SOCKINFO_UN", SOCKINFO_UN);
 	P("AF_UNIX", AF_UNIX);
 	P("SO_ACCEPTCONN", SO_ACCEPTCONN);
-	P("S_IFMT", S_IFMT);
-	P("S_IFSOCK", S_IFSOCK);
 	P("SOCK_STREAM", SOCK_STREAM);
 	P("SOCK_DGRAM", SOCK_DGRAM);
 	P("SOCK_SEQPACKET", SOCK_SEQPACKET);
@@ -78,7 +76,6 @@ int main(void) {
 	t.Logf("socket_fdinfo per the SDK header: %v", sdk)
 	for name, want := range map[string]int{
 		"size":                 socketFdInfoSize,
-		"mode":                 socketFdInfoModeOffset,
 		"type":                 socketFdInfoTypeOffset,
 		"family":               socketFdInfoFamilyOffset,
 		"options":              socketFdInfoOptsOffset,
@@ -89,11 +86,10 @@ int main(void) {
 		"sun_path_len":         darwinSunPathLen,
 		"PROC_PIDFDSOCKETINFO": procPIDFdSocketInfo,
 		"PROX_FDTYPE_SOCKET":   procFdTypeSocket,
+		"SOCKINFO_GENERIC":     darwinSockinfoGeneric,
 		"SOCKINFO_UN":          darwinSockinfoUn,
 		"AF_UNIX":              darwinAFUnix,
 		"SO_ACCEPTCONN":        darwinSoAcceptConn,
-		"S_IFMT":               darwinSIFMT,
-		"S_IFSOCK":             darwinSIFSOCK,
 		"SOCK_STREAM":          darwinSockStream,
 		"SOCK_DGRAM":           darwinSockDgram,
 		"SOCK_SEQPACKET":       darwinSockSeqpacket,

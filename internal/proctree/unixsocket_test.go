@@ -67,45 +67,55 @@ func TestResolveListenerPaths(t *testing.T) {
 // socketFdInfo builds a PROC_PIDFDSOCKETINFO buffer from its own table of
 // offsets, written out independently of the constants the decoder uses, so a
 // typo in either fails here instead of decoding a different path.
-func socketFdInfo(mode uint16, typ, family, kind int32, options uint16, sunLen, sunFamily byte, path string) []byte {
+func socketFdInfo(typ, family, kind int32, options uint16, sunLen, sunFamily byte, path string) []byte {
 	buf := make([]byte, 792)
-	binary.LittleEndian.PutUint16(buf[28:], mode)
 	binary.LittleEndian.PutUint32(buf[176:], uint32(typ))
 	binary.LittleEndian.PutUint32(buf[184:], uint32(family))
 	binary.LittleEndian.PutUint16(buf[188:], options)
 	binary.LittleEndian.PutUint32(buf[256:], uint32(kind))
 	buf[280] = sunLen
 	buf[281] = sunFamily
-	copy(buf[282:282+104], path)
+	copy(buf[282:280+255], path) // the address union is SOCK_MAXADDRLEN bytes
 	return buf
 }
 
 func TestUnixSocketFromSocketFdInfo(t *testing.T) {
-	const sock, unix, un, stream, accept = 0o140644, 1, 3, 1, 0x0002
+	const unix, un, stream, accept = 1, 3, 1, 0x0002
 	path := "/private/tmp/tmux-501/default"
 
-	got, err := unixSocketFromSocketFdInfo(socketFdInfo(sock, stream, unix, un, accept, 106, unix, path))
+	got, err := unixSocketFromSocketFdInfo(socketFdInfo(stream, unix, un, accept, 106, unix, path))
 	require.NoError(t, err)
 	require.Equal(t, darwinUnixSocket{unix: true, listening: true, path: path}, got)
 
-	got, err = unixSocketFromSocketFdInfo(socketFdInfo(sock, stream, unix, un, 0, 0, 0, ""))
+	got, err = unixSocketFromSocketFdInfo(socketFdInfo(stream, unix, un, 0, 0, 0, ""))
 	require.NoError(t, err)
 	require.Equal(t, darwinUnixSocket{unix: true}, got, "an unbound socket has no path")
 
-	got, err = unixSocketFromSocketFdInfo(socketFdInfo(sock, stream, 2, 2, accept, 0, 0, ""))
+	got, err = unixSocketFromSocketFdInfo(socketFdInfo(stream, 2, 2, accept, 0, 0, ""))
 	require.NoError(t, err)
 	require.Equal(t, darwinUnixSocket{}, got, "an AF_INET socket is not a unix socket")
 
+	got, err = unixSocketFromSocketFdInfo(socketFdInfo(stream, unix, 0, accept, 0, 0, ""))
+	require.NoError(t, err)
+	require.Equal(t, darwinUnixSocket{unix: true}, got, "an AF_UNIX socket with no protocol block (SOCKINFO_GENERIC) has nothing to report")
+
+	long := "/" + strings.Repeat("a", 120)
+	got, err = unixSocketFromSocketFdInfo(socketFdInfo(stream, unix, un, accept, byte(2+len(long)), unix, long))
+	require.NoError(t, err)
+	require.Equal(t, long, got.path, "a binder may pass a sun_len past sockaddr_un; the path is bounded by sun_len")
+
+	got, err = unixSocketFromSocketFdInfo(socketFdInfo(stream, unix, un, accept, byte(2+len(path)), unix, path+"trailing"))
+	require.NoError(t, err)
+	require.Equal(t, path, got.path, "without a NUL, sun_len ends the path")
+
 	for name, buf := range map[string][]byte{
-		"short buffer":                  socketFdInfo(sock, stream, unix, un, accept, 106, unix, path)[:791],
-		"not a socket's vst_mode":       socketFdInfo(0o100644, stream, unix, un, accept, 106, unix, path),
-		"AF_UNIX without SOCKINFO_UN":   socketFdInfo(sock, stream, unix, 2, accept, 106, unix, path),
-		"SOCKINFO_UN without AF_UNIX":   socketFdInfo(sock, stream, 2, un, accept, 106, unix, path),
-		"not a unix socket type":        socketFdInfo(sock, 3, unix, un, accept, 106, unix, path),
-		"bound address of another kind": socketFdInfo(sock, stream, unix, un, accept, 106, 2, path),
-		"sun_len past sockaddr_un":      socketFdInfo(sock, stream, unix, un, accept, 107, unix, path),
-		"sun_path without its NUL":      socketFdInfo(sock, stream, unix, un, accept, 106, unix, strings.Repeat("a", 104)),
-		"sun_path with a control byte":  socketFdInfo(sock, stream, unix, un, accept, 106, unix, "/tmp/a\x01b"),
+		"short buffer":                    socketFdInfo(stream, unix, un, accept, 106, unix, path)[:791],
+		"AF_UNIX with another kind":       socketFdInfo(stream, unix, 2, accept, 106, unix, path),
+		"SOCKINFO_UN without AF_UNIX":     socketFdInfo(stream, 2, un, accept, 106, unix, path),
+		"not a unix socket type":          socketFdInfo(3, unix, un, accept, 106, unix, path),
+		"bound address of another kind":   socketFdInfo(stream, unix, un, accept, 106, 2, path),
+		"sun_len shorter than its header": socketFdInfo(stream, unix, un, accept, 1, unix, path),
+		"sun_path with a control byte":    socketFdInfo(stream, unix, un, accept, 106, unix, "/tmp/a\x01b"),
 	} {
 		_, err := unixSocketFromSocketFdInfo(buf)
 		require.Error(t, err, name)
