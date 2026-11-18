@@ -373,6 +373,8 @@ func TestExeAttestationsRevalidationIsBounded(t *testing.T) {
 func TestExeAttestationsMemoizesARevalidationTimeout(t *testing.T) {
 	oldOpen, oldID, oldBudget := exeOpenFn, exeIdentityFn, exeAttestBudget
 	gate := make(chan struct{})
+	var gateOnce sync.Once
+	release := func() { gateOnce.Do(func() { close(gate) }) }
 	var opens, identities atomic.Int32
 	exeOpenFn = func(pid int) (*os.File, bool) {
 		opens.Add(1)
@@ -381,12 +383,14 @@ func TestExeAttestationsMemoizesARevalidationTimeout(t *testing.T) {
 	}
 	exeIdentityFn = func(pid int) (exeID, bool) {
 		identities.Add(1)
-		<-gate // a revalidation read that cannot answer
+		if identities.Load() == 1 {
+			<-gate // only the FIRST revalidation read wedges
+		}
 		return exeID{}, false
 	}
 	exeAttestBudget = 50 * time.Millisecond
 	t.Cleanup(func() {
-		close(gate)
+		release()
 		require.Eventually(t, func() bool {
 			return attestFlights.inFlightCount() == 0
 		}, 5*time.Second, 5*time.Millisecond,
@@ -403,13 +407,20 @@ func TestExeAttestationsMemoizesARevalidationTimeout(t *testing.T) {
 		"the wedged revalidation expires as unverified — and is then CACHED unverified")
 	require.Equal(t, int32(1), identities.Load())
 
-	// Later candidates meeting the same instance in this sweep answer
-	// from the memo: no second wait on the wedged filesystem, and no
-	// re-attestation — a cached false is fail-closed on any image.
+	// The pin needs the wedged flight to RETIRE: while it is still
+	// stalled, later callers join the same flight and never re-invoke the
+	// read, so a missing memoize cannot be told apart — the same vacuous
+	// shape the f.chans counter was (#7509). Released, the next candidate
+	// must answer from the memo alone: a fresh flight means the timeout
+	// was never stored.
+	release()
+	require.Eventually(t, func() bool {
+		return attestFlights.inFlightCount() == 0
+	}, 5*time.Second, 5*time.Millisecond, "the wedged flight must retire before the next hit")
 	require.False(t, att.AttestsAF(self))
 	require.False(t, att.AttestsAF(self))
 	require.Equal(t, int32(1), identities.Load(),
-		"a memoized revalidation timeout never re-enters the wedged read in this scope")
+		"a memoized revalidation timeout never re-enters the read in this scope")
 	require.Equal(t, int32(1), opens.Load(),
 		"the memoized false is trusted — it never pays a re-attestation either")
 }
