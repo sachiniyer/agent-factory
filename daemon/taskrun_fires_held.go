@@ -82,12 +82,20 @@ func setTaskFireRowSettles(settles func(repoID string, row *session.InstanceData
 }
 
 // lostRowSettles reports whether this daemon is still working to settle a
-// persisted Lost row. It is if it holds the row and either the lost-restore
-// loop will retry it (canAutoRestoreLostSession, which also reads a durable
-// give-up), or the row has already left Lost in memory and the record on disk
-// has not caught up. A row it does not hold, or holds Lost with nothing
-// retrying it, never settles on its own: a sandbox row whose reattach failed
-// loads inert, and a local row can exhaust its restore budget.
+// persisted Lost row. It is if it holds the row and any of these is true:
+//   - an operation is in flight on it. A restore runs under OpRestoring while
+//     the row still reads Lost, and canAutoRestoreLostSession refuses any
+//     in-flight op, so asking it mid-restore would read "abandoned" and adopt
+//     a row whose restore may be about to respawn its agent. A kill or archive
+//     in flight decides the row too.
+//   - the lost-restore loop will retry it (canAutoRestoreLostSession, which also
+//     reads a durable give-up).
+//   - the row has already left Lost in memory, and the record on disk has not
+//     caught up.
+//
+// A row it does not hold, or holds Lost and idle with nothing retrying it,
+// never settles on its own: a sandbox row whose reattach failed loads inert,
+// and a local row can exhaust its restore budget.
 func (m *Manager) lostRowSettles(repoID string, row *session.InstanceData) bool {
 	m.mu.Lock()
 	inst := m.instances[daemonInstanceKey(repoID, row.Title)]
@@ -96,9 +104,14 @@ func (m *Manager) lostRowSettles(repoID string, row *session.InstanceData) bool 
 		return false
 	}
 	view := inst.LifecycleView()
-	if view.Liveness != session.LiveLost {
+	if view.Liveness != session.LiveLost || view.InFlightOp != session.OpNone {
 		return true
 	}
+	// Idle and Lost, the row settles only if the restore loop will still take
+	// it. canAutoRestoreLostSession is that loop's own eligibility, and for an
+	// idle row every gate it reads is durable intent: started, not tombstoned
+	// or uncertain, no give-up, a backend that can recover, not the root. Its
+	// one transient gate, an op in flight, is answered above as settling.
 	return canAutoRestoreLostSession(view) && !inst.OwesPreservedWorkspace()
 }
 

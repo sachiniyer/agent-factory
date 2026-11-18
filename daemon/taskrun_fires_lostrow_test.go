@@ -591,6 +591,18 @@ func TestManagerLostRowSettles(t *testing.T) {
 			t.Fatal("lost-restore never admits an unstarted row")
 		}
 	})
+	t.Run("restore in flight", func(t *testing.T) {
+		inst := newLost(t, "restoring")
+		if err := inst.Transition(session.MarkRestoring()); err != nil {
+			t.Fatalf("raise the restore fence: %v", err)
+		}
+		if canAutoRestoreLostSession(inst.LifecycleView()) {
+			t.Fatal("precondition: the restore loop refuses a row with an op in flight")
+		}
+		if !ask(t, inst, inst.ToInstanceData()) {
+			t.Fatal("a restore in flight is settling the row; it may be about to respawn the agent")
+		}
+	})
 	t.Run("already out of Lost in memory", func(t *testing.T) {
 		inst := newLost(t, "rebound")
 		row := inst.ToInstanceData()
@@ -692,5 +704,84 @@ func TestReplayTaskFire_LooksAgainPastABusyTaskLock(t *testing.T) {
 	}
 	if markerExists(t, "ab0r7537") {
 		t.Fatal("the held fire resolved without waiting for the next boot")
+	}
+}
+
+// Codex 4608961740 on 6c617f9d6: the replay can look while the row's restore is
+// in flight. The restore runs under OpRestoring with the row still Lost, and the
+// restore loop's admission refuses any op in flight, so reading admission as
+// "nothing will settle it" would adopt the row mid-recovery and lose the
+// occurrence if that restore then respawns. Through the daemon's own answer, the
+// look holds; the restore's outcome then decides. A respawn delivers exactly
+// once, and a rebind is adopted with no delivery.
+func TestReplayTaskFire_HoldsThroughARestoreInFlight(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	repoPath := setupTaskRepo(t)
+	creates, _ := stubTaskDelivery(t)
+	intendedAt := time.Now().Add(-time.Minute)
+	for _, tc := range []struct {
+		name        string
+		taskID      string
+		settle      func(*session.InstanceData)
+		wantCreates int
+	}{
+		{"then respawns", "ab0r7538", respawned, 1},
+		{"then rebinds", "ab0r7539", rebound, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(*creates)
+			repoID := lostFire(t, tc.taskID, repoPath, intendedAt, nil)
+
+			// The daemon holds the row Lost, with its restore in flight.
+			inst, err := session.NewInstance(session.InstanceOptions{
+				ID: "inst-" + tc.taskID, Title: lostRowTitle + "-" + tc.taskID, TaskID: tc.taskID, Path: t.TempDir(), Program: "claude",
+			})
+			if err != nil {
+				t.Fatalf("NewInstance: %v", err)
+			}
+			inst.SetStartedForTest(true)
+			if err := inst.Transition(session.ObserveLiveness(session.LiveLost)); err != nil {
+				t.Fatalf("transition to lost: %v", err)
+			}
+			if err := inst.Transition(session.MarkRestoring()); err != nil {
+				t.Fatalf("raise the restore fence: %v", err)
+			}
+			m := &Manager{instances: map[string]*session.Instance{daemonInstanceKey(repoID, inst.Title): inst}}
+			prev := setTaskFireRowSettles(m.lostRowSettles)
+			t.Cleanup(func() { setTaskFireRowSettles(prev) })
+
+			var waits []int
+			orig := taskFireRecheckDelay
+			taskFireRecheckDelay = func(attempt int) time.Duration {
+				waits = append(waits, attempt)
+				if attempt == 1 {
+					// The first look held, beside the restore. Now it lands.
+					if got := len(*creates) - before; got != 0 {
+						t.Fatalf("a look during the restore delivers nothing; creates = %d", got)
+					}
+					if !markerExists(t, tc.taskID) {
+						t.Fatal("a look during the restore keeps the marker; adopting it there loses the occurrence to a respawn")
+					}
+					if err := inst.Transition(session.ConfirmLive()); err != nil {
+						t.Fatalf("confirm the restore live: %v", err)
+					}
+					settleRow(t, repoID, tc.taskID, tc.settle)
+				}
+				return 0
+			}
+			t.Cleanup(func() { taskFireRecheckDelay = orig })
+
+			replayTaskFire(replayMarker(tc.taskID, intendedAt))
+			if len(waits) != 1 {
+				t.Fatalf("the replay holds once, through the restore, then resolves; waited at attempts %v", waits)
+			}
+			if got := len(*creates) - before; got != tc.wantCreates {
+				t.Fatalf("creates = %d, want %d", got, tc.wantCreates)
+			}
+			if markerExists(t, tc.taskID) {
+				t.Fatal("the resolved fire discharges its marker")
+			}
+		})
 	}
 }
