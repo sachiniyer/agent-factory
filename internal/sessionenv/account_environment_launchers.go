@@ -414,9 +414,7 @@ func systemdRunPropertyOperandDenied(operand string, names map[string]struct{}) 
 	}
 	switch {
 	case strings.EqualFold(property, "Environment"):
-		fragments := strings.FieldsFunc(value, func(r rune) bool {
-			return r == ' ' || r == '\t' || r == '"' || r == '\''
-		})
+		fragments := systemdEnvironmentFragments(value)
 		if len(fragments) == 0 {
 			// `Environment=` empties the unit's environment — the pins go
 			// with it.
@@ -432,7 +430,7 @@ func systemdRunPropertyOperandDenied(operand string, names map[string]struct{}) 
 	case strings.EqualFold(property, "EnvironmentFile"):
 		return true
 	case strings.EqualFold(property, "UnsetEnvironment"):
-		for _, name := range strings.Fields(value) {
+		for _, name := range systemdEnvironmentFragments(value) {
 			if accountEnvironmentOperandDenied(name, names) {
 				return true
 			}
@@ -441,6 +439,48 @@ func systemdRunPropertyOperandDenied(operand string, names map[string]struct{}) 
 	default:
 		return false
 	}
+}
+
+// systemdEnvironmentFragments splits a systemd Environment= value into
+// NAME=value fragments the way systemd does: whitespace separates
+// assignments, but double or single quotes protect whitespace inside one
+// assignment (`Environment="FOO=hello world"` is one fragment) and a
+// backslash escapes the next rune. The quote characters themselves are
+// stripped, matching the value the unit file would store.
+func systemdEnvironmentFragments(value string) []string {
+	var fragments []string
+	var cur strings.Builder
+	var quote rune
+	escaped := false
+	flush := func() {
+		if cur.Len() > 0 {
+			fragments = append(fragments, cur.String())
+			cur.Reset()
+		}
+	}
+	for _, r := range value {
+		switch {
+		case escaped:
+			cur.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '"' || r == '\'':
+			quote = r
+		case r == ' ' || r == '\t':
+			flush()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
+	return fragments
 }
 
 var systemdRunLongOptions = map[string]bool{
@@ -455,7 +495,8 @@ var systemdRunLongOptions = map[string]bool{
 
 	"collect": false, "help": false, "no-ask-password": false,
 	"no-block": false, "on-clock-change": false,
-	"on-timezone-change": false, "pty": false, "quiet": false,
+	"on-timezone-change": false, "pipe": false, "pty": false,
+	"quiet":             false,
 	"remain-after-exit": false, "same-dir": false, "scope": false,
 	"send-sighup": false, "shell": false, "slice-inherit": false,
 	"user": false, "version": false, "wait": false,
@@ -568,13 +609,20 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 				return run.done(nil, true)
 			}
 			if literal == "--" {
-				return run.done(words[i+1:], requireCommand && denied && len(words[i+1:]) > 0)
+				if i+1 < len(words) {
+					// After `--` the first word is still the image name —
+					// consume it as well; child argv begins one word later.
+					return run.done(words[i+2:], requireCommand && denied)
+				}
+				return run.done(nil, false)
 			}
 			if !strings.HasPrefix(literal, "-") || literal == "-" {
-				// The image, container or service word: docker's parser
-				// hands every later word to the child, so this is the
-				// boundary where the returned tail begins.
-				return run.done(words[i:], requireCommand && denied)
+				// The image, container or service word is docker config,
+				// not the child executable — consume it inside docker's
+				// grammar so a `docker run --rm bash` image never re-enters
+				// the walk as an unproven shell. Only the words after it
+				// (the container's COMMAND ARG…) form the returned tail.
+				return run.done(words[i+1:], requireCommand && denied)
 			}
 			next, unsafe := dockerOptionStep(words, i, spec, names, memo, requireCommand, &denied)
 			if unsafe {

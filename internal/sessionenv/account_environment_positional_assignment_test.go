@@ -289,10 +289,18 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker run img sudo CODEX_HOME=/other codex", true},
 		{"docker exec -e FOO=x c1 sudo CODEX_HOME=/other codex", true},
 		{"docker exec c1 env CODEX_HOME=/other codex", true},
-		// …but env print-mode (`env X` with no command) inside a container
-		// argv stays admitted, matching `prog env CODEX_HOME=/other`.
-		{"docker exec c1 env CODEX_HOME=/other", false},
-		{"docker exec -e FOO=x c1 sudo CODEX_HOME=/other", false},
+		// …but the container/service word is docker config, so the argv
+		// after it gets command-position judgment: an `env` or `sudo`
+		// env spelling in the COMMAND slot refuses at head position
+		// exactly as it would at top level.
+		{"docker exec c1 env CODEX_HOME=/other", true},
+		{"docker exec -e FOO=x c1 sudo CODEX_HOME=/other", true},
+		// …while an image/container name that happens to be a shell or
+		// launcher name is just config — `docker run --rm bash` runs bash
+		// inside the image and never reaches a pane executable.
+		{"docker run --rm bash", false},
+		{"docker run --rm alpine", false},
+		{"docker exec c1 ls", false},
 		// sudo's command word is itself re-judged: a bare unproven shell or
 		// an env invocation there refuses exactly as it would at head.
 		{"sudo env CODEX_HOME=/other codex", true},
@@ -356,6 +364,12 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker kill c1", false},
 		{"docker export c1", false},
 		{"docker wait c1", false},
+		// systemd-run: --pipe is the long form of the already-listed -P;
+		// the Environment= property honors systemd's quoting, so a quoted
+		// assignment with spaces inside its value is one fragment.
+		{"systemd-run --user --pipe make", false},
+		{"systemd-run -p 'Environment=\"FOO=hello world\"' codex", false},
+		{"systemd-run -p 'Environment=\"CODEX_HOME=/x y\" FOO=1' codex", true},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)
