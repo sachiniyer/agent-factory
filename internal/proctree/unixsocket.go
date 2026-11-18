@@ -5,39 +5,171 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 )
 
+// UnixSocket is one unix-domain socket a process holds (#7536).
+type UnixSocket struct {
+	// Path is the address the socket is bound to, as the kernel spelled it: a
+	// filesystem path, with a relative one prefixed by the process's current
+	// working directory and never lexically cleaned; "@name" for an abstract
+	// socket, the way /proc/net/unix prints it; "" for an unbound one.
+	Path string
+	// Abstract marks an abstract-namespace address, which names no file.
+	Abstract bool
+	// Listening marks a listening socket.
+	Listening bool
+}
+
+// UnixSockets returns every unix-domain socket pid holds, each one read from
+// the kernel on its own (#7536). The kernel records a socket's address at bind
+// time and keeps it for the socket's life, so a bound path survives an unlink
+// of the socket file.
+//
+// Each socket is read on its own because a verdict that RULES something OUT, or
+// PROVES something, must rest on the socket itself. A walk of a whole socket
+// table is not atomic and can miss a row, and a missed row is a socket the
+// verdict never saw. The socket-absent probe rules a tmux server out with this
+// ("bound elsewhere"), and the daemon's throwaway proof requires every path a
+// server holds to lie in a private directory.
+//
+//   - Linux: for each fd in /proc/<pid>/fd that is a socket, the socket's
+//     protocol name (the sockfs xattr system.sockprotoname: "UNIX", or
+//     "UNIX-STREAM" since Linux 5.15) says whether it is a unix socket, and an
+//     exact NETLINK_SOCK_DIAG lookup by its inode reads its state and address
+//     (unixdiag.go). The lookup runs in this process's network namespace.
+//   - darwin: proc_pidfdinfo(PROC_PIDFDSOCKETINFO) for each socket fd.
+//   - elsewhere: ErrUnsupportedPlatform.
+//
+// An error means some socket pid holds could not be read, never "holds none".
+// That includes a lookup the kernel cannot answer while the fd still holds the
+// socket: unix_diag missing, refused, or a socket in another network
+// namespace. A descriptor that closes, or turns into something else, between
+// the listing and its read is no longer held and is skipped.
+//
+// A read is complete only if the process it began on is still the one
+// running when it ends: the same pid with the same start stamp. A process
+// that exits part-way closes its descriptors, and the reads after that find
+// them gone and skip them as closed, which would pass a partial list off as a
+// complete one (#7543 review R3). That answers ErrProcessExited instead.
+func UnixSockets(pid int) ([]UnixSocket, error) {
+	var socks []UnixSocket
+	err := sameInstanceThroughout(pid, func() (err error) {
+		socks, err = unixSockets(pid)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resolveSocketPaths(socks, func() (string, bool) { return WorkingDir(pid) })
+}
+
+// instanceLookup is the process lookup sameInstanceThroughout brackets a read
+// with. A package var so a test can make the process exit, or be replaced,
+// mid-read; nothing else sets it.
+var instanceLookup = Lookup
+
+// sameInstanceThroughout runs read, and returns its error, only if pid names
+// the same process instance (pid and start stamp) before and after it.
+// Otherwise it answers ErrProcessExited: the process read is gone, so the read
+// cannot be complete. A lookup that fails for any other reason is returned as
+// it is, never as an exit.
+func sameInstanceThroughout(pid int, read func() error) error {
+	before, err := instanceLookup(pid)
+	if err != nil {
+		if processGone(err) {
+			return ErrProcessExited
+		}
+		return err
+	}
+	readErr := read()
+	after, err := instanceLookup(pid)
+	switch {
+	case err != nil && processGone(err):
+		return ErrProcessExited
+	case err != nil:
+		return err
+	case after.StartID != before.StartID:
+		return ErrProcessExited
+	}
+	return readErr
+}
+
+// processGone reports whether a lookup error says the pid names no live
+// process: ErrProcessExited (a zombie, or darwin's no-such-pid), or the Linux
+// stat file being gone.
+func processGone(err error) bool {
+	return errors.Is(err, ErrProcessExited) || errors.Is(err, os.ErrNotExist)
+}
+
+// resolveSocketPaths prefixes each relative filesystem path with the working
+// directory cwd reports, read at most once and only when needed. An unbound
+// socket and an abstract one name no file and are left as they are.
+func resolveSocketPaths(socks []UnixSocket, cwd func() (string, bool)) ([]UnixSocket, error) {
+	var relative []string
+	for _, s := range socks {
+		if s.Path != "" && !s.Abstract && !filepath.IsAbs(s.Path) {
+			relative = append(relative, s.Path)
+		}
+	}
+	if len(relative) == 0 {
+		return socks, nil
+	}
+	resolved, err := resolveListenerPaths(relative, cwd)
+	if err != nil {
+		return nil, err
+	}
+	for i := range socks {
+		if s := socks[i]; s.Path != "" && !s.Abstract && !filepath.IsAbs(s.Path) {
+			socks[i].Path, resolved = resolved[0], resolved[1:]
+		}
+	}
+	return socks, nil
+}
+
 // UnixListenerPaths returns the filesystem path each LISTENING unix-domain
-// socket that pid holds was bound to (#7533). The kernel records that address
-// at bind time and keeps it for the socket's life, so it still names the path
-// after the socket file is unlinked. That is what lets the socket-absent probe
-// ask which tmux server is bound to a missing socket, rather than signalling
-// every server. A path bound relative to the process's working directory comes
-// back prefixed with its current one, which is where the process itself would
-// rebind it. Paths are returned as the kernel spelled them, never lexically
-// cleaned: a ".." after a symlink names the symlink target's parent, and
-// cleaning would turn it into a different socket. Compare them only after
-// resolving symlinks.
+// socket that pid holds was bound to (#7533), from UnixSockets' per-socket
+// read. That is what lets the socket-absent probe ask which tmux server is
+// bound to a missing socket, rather than signalling every server.
 //
 // Only listening sockets count: a tmux server's accepted connections carry its
 // path too, but the listener is the socket it recreates. Abstract-namespace
-// sockets (Linux) and unbound sockets have no filesystem path and are left out.
+// and unbound sockets have no filesystem path and are left out.
 //
-// An error means the descriptor table, the socket table, or a needed working
-// directory could not be read completely. It is never "holds none". A
-// descriptor that closes between the listing and its read is no longer held and
-// is skipped, the same as OpenFilePaths. An empty result is a complete read
-// that found no listener, which a caller must not read as "bound elsewhere"
-// either: it names nothing to compare.
-//
-// Linux reads /proc/<pid>/fd and /proc/<pid>/net/unix; darwin reads
-// proc_pidfdinfo(PROC_PIDFDSOCKETINFO). Every other platform answers
-// ErrUnsupportedPlatform.
+// An error is UnixSockets' error, never "holds none". An empty result is a
+// complete read that found no listener, which a caller must not read as
+// "bound elsewhere" either: it names nothing to compare.
 func UnixListenerPaths(pid int) ([]string, error) {
-	paths, err := unixListenerPaths(pid)
+	socks, err := UnixSockets(pid)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, s := range socks {
+		if s.Listening && s.Path != "" && !s.Abstract {
+			paths = append(paths, s.Path)
+		}
+	}
+	return paths, nil
+}
+
+// UnixListenerPathsByTable is UnixListenerPaths read from the socket TABLE,
+// /proc/<pid>/net/unix, matched to the inodes in /proc/<pid>/fd: the reader
+// #7533 shipped, kept for one use only (#7536). The walk is not atomic, so it
+// can miss a row, and a missed row can only LOSE a listener, never invent one.
+// So its answer is positive evidence and nothing more. It may find the server
+// bound to a missing socket where UnixSockets cannot answer (no unix_diag,
+// another network namespace), and it must never rule a server out or prove
+// anything private. Linux only; elsewhere ErrUnsupportedPlatform.
+func UnixListenerPathsByTable(pid int) ([]string, error) {
+	var paths []string
+	err := sameInstanceThroughout(pid, func() (err error) {
+		paths, err = unixListenerPathsByTable(pid)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +182,7 @@ var errNoWorkingDir = errors.New("a socket is bound to a relative path and the p
 
 // resolveListenerPaths makes every relative path absolute against the working
 // directory cwd reports, read at most once and only when needed. It joins by
-// concatenation and cleans nothing (see UnixListenerPaths).
+// concatenation and cleans nothing (see UnixSocket).
 func resolveListenerPaths(paths []string, cwd func() (string, bool)) ([]string, error) {
 	out := make([]string, 0, len(paths))
 	dir, dirRead := "", false

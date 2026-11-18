@@ -30,11 +30,28 @@ const (
 	// socketBindingBound: a listening socket it holds is bound to the absent
 	// path. It is the owner, and SIGUSR1 is how it recreates the socket.
 	socketBindingBound
+	// socketBindingBoundByTable: the per-socket read could not answer (no
+	// unix_diag, or the server is in another network namespace), and the
+	// /proc/<pid>/net/unix table shows a listener bound to the absent path
+	// (#7536). The table walk can miss a row, which only ever loses a match,
+	// so a match it does show is the owner, signalled like socketBindingBound.
+	// The table never rules a server out: without the per-socket read, a
+	// server with no match stays unresolved.
+	socketBindingBoundByTable
 	// socketBindingGone: the server exited while its sockets were being read,
 	// and an independent lookup of the pid confirms it (#7541). A server that
 	// is gone owns nothing, so it is disproved, as the probe's ESRCH arm treats
 	// a server that vanishes before its signal. It is not signalled.
 	socketBindingGone
+)
+
+// listenerPathsOf and listenerPathsByTableOf are the two readers
+// readTmuxServerSocketBinding consults: the per-socket read, which may rule a
+// server out, and the table walk, which may only find one bound. Package vars
+// so a test can stand in a host without unix_diag.
+var (
+	listenerPathsOf        = proctree.UnixListenerPaths
+	listenerPathsByTableOf = proctree.UnixListenerPathsByTable
 )
 
 // tmuxServerSocketBinding classifies pid against socketPath and returns the
@@ -49,7 +66,16 @@ func readTmuxServerSocketBinding(pid int, socketPath string) (socketBinding, str
 		// relative to a working directory this process cannot know.
 		return socketBindingUnresolved, ""
 	}
-	paths, err := proctree.UnixListenerPaths(pid)
+	paths, err := listenerPathsOf(pid)
+	if err != nil && !errors.Is(err, proctree.ErrProcessExited) {
+		// The per-socket read could not answer. The table may still show the
+		// owner (positive evidence only; see socketBindingBoundByTable).
+		if tablePaths, tableErr := listenerPathsByTableOf(pid); tableErr == nil {
+			if b, p := bindingAgainst(socketPath, tablePaths); b == socketBindingBound {
+				return socketBindingBoundByTable, p
+			}
+		}
+	}
 	if err != nil || len(paths) == 0 {
 		// A read that failed, or one that found no listener, names nothing to
 		// compare. Neither rules the server out, unless the server is proved
@@ -225,6 +251,7 @@ func possibleSocketOwners(socketPath string, pids []int) (servers, unidentified 
 			continue
 		}
 		switch binding, _ := tmuxServerSocketBinding(pid, socketPath); binding {
+		// socketBindingBoundByTable stays: it is an owner.
 		case socketBindingElsewhere, socketBindingGone:
 		default:
 			servers = append(servers, pid)

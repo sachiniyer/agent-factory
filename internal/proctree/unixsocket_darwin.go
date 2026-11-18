@@ -15,16 +15,17 @@ const (
 	procFdTypeSocket    = 2 // PROX_FDTYPE_SOCKET
 )
 
-// unixListenerPaths lists pid's descriptors with proc_pidinfo(PROC_PIDLISTFDS)
-// and decodes each socket with proc_pidfdinfo(PROC_PIDFDSOCKETINFO). A buffer
-// the decoder refuses is an error for the whole read: the caller must treat the
-// process as unresolved, never as holding no listener.
-func unixListenerPaths(pid int) ([]string, error) {
+// unixSockets lists pid's descriptors with proc_pidinfo(PROC_PIDLISTFDS) and
+// reads each socket on its own with proc_pidfdinfo(PROC_PIDFDSOCKETINFO): the
+// per-socket read UnixSockets requires (#7536). A buffer the decoder refuses is
+// an error for the whole read: the caller must treat the process as
+// unresolved, never as holding no socket.
+func unixSockets(pid int) ([]UnixSocket, error) {
 	fds, err := listProcFds(pid)
 	if err != nil {
 		return nil, err
 	}
-	var paths []string
+	var socks []UnixSocket
 	for _, fi := range fds {
 		fd := int(int32(binary.LittleEndian.Uint32(fi[procFdInfoFdOffset:])))
 		if binary.LittleEndian.Uint32(fi[procFdInfoFdTypeOffset:]) != procFdTypeSocket || fd < 0 {
@@ -49,9 +50,13 @@ func unixListenerPaths(pid int) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("fd %d: %w", fd, err)
 		}
-		if s.unix && s.listening && s.path != "" {
-			paths = append(paths, s.path)
+		if s.unix {
+			socks = append(socks, UnixSocket{Path: s.path, Listening: s.listening})
 		}
 	}
-	return paths, nil
+	return socks, nil
 }
+
+// unixListenerPathsByTable: darwin has no socket table to walk, and needs no
+// fallback, since its read is already per socket.
+func unixListenerPathsByTable(int) ([]string, error) { return nil, ErrUnsupportedPlatform }

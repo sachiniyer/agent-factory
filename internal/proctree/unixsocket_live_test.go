@@ -3,6 +3,7 @@
 package proctree
 
 import (
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -142,4 +143,71 @@ func TestUnixListenerPaths_OnlyListenersAndOnlyTheirOwnPaths(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, n, "the listener is reported once; the accepted connection and the client are not listeners")
+}
+
+// A read is complete only if the process it began on is still the one running
+// when it ends (#7543 review R3). A process that exits part-way makes its later
+// descriptors read as closed and be skipped, so the list would look complete.
+// The lookups bracketing the read are stubbed here so the process exits,
+// becomes a zombie, or is replaced by another with its pid, between them.
+func TestUnixSocketsAnswersExitedWhenTheProcessChangesMidRead(t *testing.T) {
+	dir := privateSocketDir(t)
+	sock := filepath.Join(dir, "m")
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	real, err := Lookup(os.Getpid())
+	require.NoError(t, err)
+
+	readers := map[string]func(int) error{
+		"UnixSockets": func(pid int) error { _, err := UnixSockets(pid); return err },
+	}
+	if _, err := UnixListenerPathsByTable(os.Getpid()); !errors.Is(err, ErrUnsupportedPlatform) {
+		readers["UnixListenerPathsByTable"] = func(pid int) error { _, err := UnixListenerPathsByTable(pid); return err }
+	}
+	denied := errors.New("lookup refused")
+	for _, tc := range []struct {
+		name          string
+		before, after func() (Process, error)
+		want          error // nil means the read must succeed
+	}{
+		{"the same instance throughout", nil, nil, nil},
+		{"exited by the end (no /proc entry)", nil, func() (Process, error) { return Process{}, os.ErrNotExist }, ErrProcessExited},
+		{"a zombie by the end", nil, func() (Process, error) { return Process{}, ErrProcessExited }, ErrProcessExited},
+		{"replaced by another process with the pid", nil, func() (Process, error) {
+			p := real
+			p.StartID++
+			return p, nil
+		}, ErrProcessExited},
+		{"gone before the read began", func() (Process, error) { return Process{}, os.ErrNotExist }, nil, ErrProcessExited},
+		{"a lookup refused for another reason", nil, func() (Process, error) { return Process{}, denied }, denied},
+	} {
+		for rname, read := range readers {
+			t.Run(rname+": "+tc.name, func(t *testing.T) {
+				calls := 0
+				prev := instanceLookup
+				instanceLookup = func(pid int) (Process, error) {
+					calls++
+					if calls == 1 && tc.before != nil {
+						return tc.before()
+					}
+					if calls == 2 && tc.after != nil {
+						return tc.after()
+					}
+					return prev(pid)
+				}
+				t.Cleanup(func() { instanceLookup = prev })
+				err := read(os.Getpid())
+				if tc.want == nil {
+					require.NoError(t, err)
+					require.Equal(t, 2, calls, "the read is bracketed by one lookup on each side")
+					return
+				}
+				require.ErrorIs(t, err, tc.want)
+				if !errors.Is(tc.want, ErrProcessExited) {
+					require.NotErrorIs(t, err, ErrProcessExited, "a refused lookup is not an exit")
+				}
+			})
+		}
+	}
 }

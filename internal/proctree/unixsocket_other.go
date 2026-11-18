@@ -2,4 +2,6 @@
 
 package proctree
 
-func unixListenerPaths(int) ([]string, error) { return nil, ErrUnsupportedPlatform }
+func unixSockets(int) ([]UnixSocket, error) { return nil, ErrUnsupportedPlatform }
+
+func unixListenerPathsByTable(int) ([]string, error) { return nil, ErrUnsupportedPlatform }

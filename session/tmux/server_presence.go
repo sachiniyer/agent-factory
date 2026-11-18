@@ -574,6 +574,8 @@ func absentTmuxSocketPath(diagnostic string) string {
 //     confirms: disproved like a pid that vanishes before its signal, never
 //     signalled (#7541).
 //   - bound to this path: the owner. It is signalled, and the path is watched.
+//     Where its sockets cannot be read one by one, a match in the socket
+//     table also counts, as positive evidence only (#7536).
 //   - unresolved (its sockets could not be read, it holds no listener, or the
 //     path is relative): never signalled, and it remains a possible owner.
 //
@@ -613,8 +615,8 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 		binding, boundTo := tmuxServerSocketBinding(pid, socketPath)
 		switch binding {
 		case socketBindingElsewhere:
-			log.InfoLog.Printf("tmux socket %s is missing: tmux server pid %d is bound to %s instead, "+
-				"so it is ruled out and not signalled (asked by %s)", socketPath, pid, boundTo, socketProbeCaller())
+			log.InfoLog.Printf("tmux socket %s is missing: tmux server pid %d is bound to %s instead, per its own "+
+				"sockets read one by one, so it is ruled out and not signalled (asked by %s)", socketPath, pid, boundTo, socketProbeCaller())
 			continue
 		case socketBindingGone:
 			log.InfoLog.Printf("tmux socket %s is missing: tmux server pid %d exited while its sockets were "+
@@ -629,8 +631,12 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 		if kerr != nil {
 			outcome = "not delivered: " + kerr.Error()
 		}
-		log.InfoLog.Printf("tmux socket %s is missing: SIGUSR1 to tmux server pid %d, which is bound to %s, "+
-			"so it recreates the socket (%s; asked by %s)", socketPath, pid, boundTo, outcome, socketProbeCaller())
+		source := "its own socket, read by sock_diag/proc_pidfdinfo"
+		if binding == socketBindingBoundByTable {
+			source = "the /proc/<pid>/net/unix table, since its own socket could not be read"
+		}
+		log.InfoLog.Printf("tmux socket %s is missing: SIGUSR1 to tmux server pid %d, which is bound to %s per %s, "+
+			"so it recreates the socket (%s; asked by %s)", socketPath, pid, boundTo, source, outcome, socketProbeCaller())
 		switch {
 		case kerr == nil:
 			signaled = true
