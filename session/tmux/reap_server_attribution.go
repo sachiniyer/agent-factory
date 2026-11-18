@@ -98,6 +98,14 @@ func tmuxEnvServerVerdict(tmuxEnv string, own ServerIdentity, selfNS string) ser
 	if len(parts) != 3 {
 		return serverVerdictUndecidable
 	}
+	// A tuple that is not genuine tmux output proves nothing in either
+	// direction: tmux always writes a numeric server pid, so a malformed
+	// one means the env was fabricated or corrupted and its socket claim
+	// cannot be trusted as positive foreign evidence (Codex on #7469).
+	serverPID, err := strconv.Atoi(parts[1])
+	if err != nil || serverPID <= 0 {
+		return serverVerdictUndecidable
+	}
 	same, comparable := sameRecordedSocket(parts[0], own.Socket)
 	if !comparable {
 		return serverVerdictUndecidable
@@ -109,10 +117,6 @@ func tmuxEnvServerVerdict(tmuxEnv string, own ServerIdentity, selfNS string) ser
 	// namespace — meaningful to compare only when the record and this sweep
 	// agree on which namespace that is.
 	if own.PIDNS != "" && selfNS != "" && own.PIDNS != selfNS {
-		return serverVerdictUndecidable
-	}
-	serverPID, err := strconv.Atoi(parts[1])
-	if err != nil || serverPID <= 0 {
 		return serverVerdictUndecidable
 	}
 	if serverPID != own.PID {

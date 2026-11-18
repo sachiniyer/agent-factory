@@ -39,6 +39,13 @@ func TestCarrierServerVerdict_ForeignSocketInTmuxEnv(t *testing.T) {
 	got := tmuxEnvServerVerdict(foreignSock+",9999,3", own, "pidns:test")
 	require.Equal(t, serverVerdictForeign, got,
 		"a carrier whose TMUX env names another socket is descended from a foreign server")
+
+	// The same foreign socket riding a tuple tmux itself could never have
+	// written — a fabricated or corrupted env is not positive evidence of
+	// anything, so it cannot make a foreign verdict (Codex on #7469).
+	got = tmuxEnvServerVerdict(foreignSock+",notapid,3", own, "pidns:test")
+	require.Equal(t, serverVerdictUndecidable, got,
+		"a malformed tuple cannot be trusted as foreign evidence")
 }
 
 func TestCarrierServerVerdict_SameSocketDifferentServerPid(t *testing.T) {
