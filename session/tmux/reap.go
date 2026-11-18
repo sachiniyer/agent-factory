@@ -456,8 +456,11 @@ var (
 // reparents the reaper out of the tree, and protection decided from a later
 // table is decided from the wrong one (Codex on #7433, #7435 item 3). nil
 // computes it at reap entry from a fresh snapshot — correct only for a
-// caller with no preceding kill.
-func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration, protected protectedSet) []proctree.Process {
+// caller with no preceding kill. att is the caller's sweep attestation
+// memo: a recompute that runs inside a sweep must classify claimants in
+// that sweep's scope, not open a fresh memo per pass (#7509); callers with
+// no sweep scope pass nil.
+func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration, protected protectedSet, att *proctree.ExeAttestations) []proctree.Process {
 	// A tracked teardown requester stays IN the candidate set — the reaper's
 	// per-signal recheck spares it only while the registry still reports it
 	// tracked, so a reprieve that ends mid-reap lets the next tier reap it
@@ -487,7 +490,7 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 		if err != nil {
 			log.WarningLog.Printf("cannot snapshot the process table to compute the reaper's protected set at reap entry: %v", err)
 		}
-		protected = reapProtectedSet(snap, procs)
+		protected = reapProtectedSet(snap, procs, att)
 	}
 	exemptedProtected := make(map[int]bool)
 	// And it can be registered AFTER the capture — a teardown still in its

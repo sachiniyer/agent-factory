@@ -219,15 +219,23 @@ func TestExeAttestsAFSingleFlightsAStalledRead(t *testing.T) {
 	// And the flight itself is all that remains: one shared record holding
 	// one channel and one result, not one channel per abandoned waiter —
 	// DoChan retained each timed-out caller until the worker finished, the
-	// same leak in another shape (#7496).
+	// same leak in another shape (#7496). The bound is read off the flight
+	// set's own structure — the map is the only place a flight can live —
+	// not off a self-reported counter the code must remember to bump
+	// (#7509): one entry, however many waiters expired.
 	require.Equal(t, 1, attestFlights.inFlightCount(),
-		"expired waiters must leave nothing behind — a stalled read holds constant memory")
-	f, _ := attestFlights.begin(flightKey{attestKey{pid: p.PID, startID: p.StartID}, false})
-	require.Equal(t, 1, f.chans,
-		"every waiter shares the one completion channel — none are retained per attempt")
-	// The test's own begin was a follower join on the still-running
-	// flight, so it adds no worker and no channel either.
-	require.Equal(t, int32(1), workers.Load())
+		"expired waiters must leave nothing behind — a stalled read holds one record per key")
+
+	// And a waiter's own allocation stays flat under the stalled read: a
+	// per-waiter channel is a heap allocation per call, so an allocation
+	// bound that stays small across however many expired callers is the
+	// structural pin the old self-counted f.chans could not give (#7509).
+	allocs := testing.AllocsPerRun(32, func() { ExeAttestsAF(p) })
+	require.Less(t, allocs, 8.0,
+		"a wait on a stalled flight allocates a constant handful — no per-waiter record is retained")
+	require.Equal(t, 1, attestFlights.inFlightCount())
+	require.Equal(t, int32(1), workers.Load(),
+		"the alloc probe joins the same flight — no new worker")
 }
 
 // One sweep scope pays the kernel read once per claimant instance no matter
@@ -355,4 +363,79 @@ func TestExeAttestationsRevalidationIsBounded(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the identity revalidation hung — it must run inside the same bounded, single-flighted operation")
 	}
+}
+
+// A revalidation timeout is memoized UNVERIFIED, not just reported
+// (#7509): the wedged filesystem will not answer the next candidate
+// either, and an unmemoized timeout would price the full budget once per
+// candidate per pass. Cached false is the fail-closed direction on any
+// image — later hits must not re-enter the read at all.
+func TestExeAttestationsMemoizesARevalidationTimeout(t *testing.T) {
+	oldOpen, oldID, oldBudget := exeOpenFn, exeIdentityFn, exeAttestBudget
+	gate := make(chan struct{})
+	var opens, identities atomic.Int32
+	exeOpenFn = func(pid int) (*os.File, bool) {
+		opens.Add(1)
+		f, err := os.Open(os.Args[0])
+		return f, err == nil
+	}
+	exeIdentityFn = func(pid int) (exeID, bool) {
+		identities.Add(1)
+		<-gate // a revalidation read that cannot answer
+		return exeID{}, false
+	}
+	exeAttestBudget = 50 * time.Millisecond
+	t.Cleanup(func() {
+		close(gate)
+		require.Eventually(t, func() bool {
+			return attestFlights.inFlightCount() == 0
+		}, 5*time.Second, 5*time.Millisecond,
+			"the stalled flight's worker must finish in cleanup, not leak into later attestations")
+		exeOpenFn, exeIdentityFn, exeAttestBudget = oldOpen, oldID, oldBudget
+	})
+
+	self, err := Lookup(os.Getpid())
+	require.NoError(t, err)
+	att := NewExeAttestations()
+	require.True(t, att.AttestsAF(self), "the first attestation memoizes a positive")
+
+	require.False(t, att.AttestsAF(self),
+		"the wedged revalidation expires as unverified — and is then CACHED unverified")
+	require.Equal(t, int32(1), identities.Load())
+
+	// Later candidates meeting the same instance in this sweep answer
+	// from the memo: no second wait on the wedged filesystem, and no
+	// re-attestation — a cached false is fail-closed on any image.
+	require.False(t, att.AttestsAF(self))
+	require.False(t, att.AttestsAF(self))
+	require.Equal(t, int32(1), identities.Load(),
+		"a memoized revalidation timeout never re-enters the wedged read in this scope")
+	require.Equal(t, int32(1), opens.Load(),
+		"the memoized false is trusted — it never pays a re-attestation either")
+}
+
+// The revalidation read revalidates the INSTANCE too (#7509): the
+// identity read happens outside the snapshot, so a pid recycled between
+// the memo's key and the read must not carry the new process's exe
+// identity onto the old instance's verdict — the same rule the full
+// attestation already applies.
+func TestExeAttestationsRevalidationRevalidatesTheInstance(t *testing.T) {
+	oldID := exeIdentityFn
+	exeIdentityFn = func(pid int) (exeID, bool) {
+		return exeID{dev: 1, ino: 1}, true // the read "answers" for whatever pid it is given
+	}
+	t.Cleanup(func() { exeIdentityFn = oldID })
+
+	_, ok := exeIdentityShared(Process{PID: 4194304, StartID: 1})
+	require.False(t, ok,
+		"a pid that no longer exists cannot revalidate — its answer belongs to a different process")
+
+	self, err := Lookup(os.Getpid())
+	require.NoError(t, err)
+	_, ok = exeIdentityShared(Process{PID: os.Getpid(), StartID: self.StartID + 1})
+	require.False(t, ok,
+		"a stale StartID fails the instance check — the read answered for another instance")
+	id, ok := exeIdentityShared(self)
+	require.True(t, ok, "the live instance still revalidates")
+	require.Equal(t, exeID{dev: 1, ino: 1}, id)
 }
