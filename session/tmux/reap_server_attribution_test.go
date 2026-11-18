@@ -422,6 +422,48 @@ func TestResolveServerIdentity_ProofBeyondTheDeadlineIsUnproven(t *testing.T) {
 	}
 }
 
+// The retries share ONE worker per (pid, socket) — an unproven record
+// re-proves on its next stamp's budget, and a wedged binding walk must
+// never accumulate a blocked goroutine per retry (Codex on #7581). Every
+// expiring stamp still bounds its own wait; the shared worker publishes
+// once.
+func TestResolveServerIdentity_WedgedProofSharesOneWorker(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRead := func() { releaseOnce.Do(func() { close(release) }) }
+	var walks atomic.Int64
+	oldBinding := tmuxServerSocketBinding
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		walks.Add(1)
+		<-release
+		return socketBindingBound, "/bound/here"
+	}
+	t.Cleanup(func() {
+		tmuxServerSocketBinding = oldBinding
+		releaseRead()
+	})
+
+	sock := filepath.Join(t.TempDir(), "af.sock")
+	id := ServerIdentity{Socket: sock, PID: os.Getpid(), SessionID: "$7"}
+	for i := 0; i < 4; i++ {
+		got := resolveServerIdentity(id, 50*time.Millisecond)
+		require.Empty(t, got.PIDNS, "an expiring stamp is unproven, never blocked")
+	}
+	require.Equal(t, int64(1), walks.Load(),
+		"N expiring stamps shared ONE binding read — no worker per retry")
+	require.Equal(t, 1, serverProofFlights.inFlightCount(),
+		"the wedged proof holds exactly one flight")
+
+	// Once the walk lands, the next stamp pays a fresh flight that answers
+	// at once — the record proves.
+	releaseRead()
+	got := resolveServerIdentity(id, 2*time.Second)
+	ns, _ := proctree.PIDNamespaceID()
+	require.Equal(t, ns, got.PIDNS, "the landed proof reaches the next stamp")
+	require.Equal(t, 0, serverProofFlights.inFlightCount(),
+		"a finished flight drops its key")
+}
+
 // The namespace proof is read-only against the REAL reader too: a pid the
 // kernel shows no listener for is simply unproven — nothing is ever
 // signalled to find out.

@@ -3,6 +3,7 @@ package tmux
 import (
 	"errors"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 
@@ -206,6 +207,60 @@ func (t *TmuxSession) PaneRootEvidence() (pid int, startID uint64, ok bool) {
 	return 0, 0, false
 }
 
+// serverProofKey scopes a shared namespace proof to what it reads: the
+// recorded server pid and socket.
+type serverProofKey struct {
+	pid    int
+	socket string
+}
+
+// serverProofFlight is ONE shared proof for a (pid, socket) pair. An
+// unproven record re-proves on its next stamp's budget, and a binding walk
+// wedged on a dead mount must never accumulate a blocked worker per retry —
+// every waiter bounds its own wait; the shared worker publishes its answer
+// once (Codex on #7581 — the socketCompareFlight shape, applied to the
+// proof). The record IS the bound: nothing a waiter leaves behind.
+type serverProofFlight struct {
+	done    chan struct{}
+	startID uint64
+	ns      string
+	bound   bool
+}
+
+type serverProofFlightSet struct {
+	mu       sync.Mutex
+	inFlight map[serverProofKey]*serverProofFlight
+}
+
+var serverProofFlights = serverProofFlightSet{inFlight: map[serverProofKey]*serverProofFlight{}}
+
+func (s *serverProofFlightSet) begin(key serverProofKey) (f *serverProofFlight, leader bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if f, ok := s.inFlight[key]; ok {
+		return f, false
+	}
+	f = &serverProofFlight{done: make(chan struct{})}
+	s.inFlight[key] = f
+	return f, true
+}
+
+func (s *serverProofFlightSet) finish(key serverProofKey, f *serverProofFlight) {
+	s.mu.Lock()
+	delete(s.inFlight, key)
+	s.mu.Unlock()
+	close(f.done)
+}
+
+// inFlightCount is the test seam for the memory bound: under a wedged
+// proof it stays 1 however many stamps expire against it, and reaches 0
+// once the read lands.
+func (s *serverProofFlightSet) inFlightCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.inFlight)
+}
+
 // resolveServerIdentity fills the kernel fields a pane row cannot carry —
 // the server process's StartID and the pid namespace the pid was PROVEN in —
 // so the record survives a daemon restart and a recycled server pid (#7469).
@@ -225,37 +280,33 @@ func resolveServerIdentity(id ServerIdentity, budget time.Duration) ServerIdenti
 	// The proof's kernel reads run INSIDE what the caller's deadline has
 	// left (Codex on #7581): a proof that does not finish in time is
 	// unproven — undecidable — never a stamp that blocked the bounded read
-	// it rode in on. The seam is captured before the worker starts, so a
+	// it rode in on. The seam is captured on the LEADER's goroutine, so a
 	// worker abandoned past the deadline touches no package state a test
 	// may already have restored (the #7550 flight race).
-	bind := tmuxServerSocketBinding
-	type proof struct {
-		startID uint64
-		ns      string
-		bound   bool
+	key := serverProofKey{pid: id.PID, socket: id.Socket}
+	f, leader := serverProofFlights.begin(key)
+	if leader {
+		bind := tmuxServerSocketBinding
+		go func() {
+			defer serverProofFlights.finish(key, f)
+			switch binding, _ := bind(id.PID, id.Socket); binding {
+			case socketBindingBound, socketBindingBoundByTable:
+				f.bound = true
+				if p, err := proctree.Lookup(id.PID); err == nil {
+					f.startID = p.StartID
+				}
+				if ns, err := proctree.PIDNamespaceID(); err == nil {
+					f.ns = ns
+				}
+			}
+		}()
 	}
-	answered := make(chan proof, 1)
-	go func() {
-		switch binding, _ := bind(id.PID, id.Socket); binding {
-		case socketBindingBound, socketBindingBoundByTable:
-			p := proof{bound: true}
-			if proc, err := proctree.Lookup(id.PID); err == nil {
-				p.startID = proc.StartID
-			}
-			if ns, err := proctree.PIDNamespaceID(); err == nil {
-				p.ns = ns
-			}
-			answered <- p
-		default:
-			answered <- proof{}
-		}
-	}()
 	ctx, cancel := tmuxTimeoutContextWithin(budget)
 	defer cancel()
 	select {
-	case p := <-answered:
-		if p.bound {
-			id.StartID, id.PIDNS = p.startID, p.ns
+	case <-f.done:
+		if f.bound {
+			id.StartID, id.PIDNS = f.startID, f.ns
 		}
 	case <-ctx.Done():
 	}
