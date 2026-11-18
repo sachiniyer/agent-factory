@@ -111,6 +111,12 @@ func dockerOptionStep(words []*syntax.Word, i int, spec dockerOptionSpec, names 
 		c := cluster[j]
 		switch {
 		case strings.IndexByte(spec.shortFlags, c) >= 0:
+			// pflag's `-f=true` bool syntax: an `=` right after a flag
+			// letter carries the flag's explicit value and ends the word
+			// (`-t=false` consumes like `--tty=false`).
+			if j+1 < len(cluster) && cluster[j+1] == '=' {
+				return i + 1, false
+			}
 		case c == 'e' && strings.IndexByte(spec.shortValues, 'e') >= 0:
 			// pflag's `-n=1234` short-option syntax: an `=` right after the
 			// letter is the separator, not part of the operand, so
@@ -171,6 +177,9 @@ func dockerEnvSpellingStep(words []*syntax.Word, i int, names map[string]struct{
 		c := cluster[j]
 		switch {
 		case strings.IndexByte(dockerInertLeafSpec.shortFlags, c) >= 0:
+			if j+1 < len(cluster) && cluster[j+1] == '=' {
+				return i + 1, false
+			}
 		case c == 'e':
 			operand := strings.TrimPrefix(cluster[j+1:], "=")
 			if operand != "" {

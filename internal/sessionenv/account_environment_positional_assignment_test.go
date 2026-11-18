@@ -455,6 +455,17 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker logs c1 env CODEX_HOME=/other codex", true},
 		{"docker build sudo CODEX_HOME=/other codex", true},
 		{"docker compose run svc env CODEX_HOME=/other codex", true},
+
+		// systemd-run's separate-word env operand stays a shadowed command
+		// head — a run that discards it execs the `env` invocation one word
+		// later, the same check docker's -e operand gets.
+		{"systemd-run --setenv env CODEX_HOME=/other codex", true},
+		{"systemd-run -E env CODEX_HOME=/other codex", true},
+		{"systemd-run --setenv PORT codex", false},
+		// pflag's `-f=true` bool syntax: `=value` after a flag letter ends
+		// the word, it is not more cluster letters.
+		{"docker run -t=false alpine echo hi", false},
+		{"docker run -it=true alpine echo hi", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)

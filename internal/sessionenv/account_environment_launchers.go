@@ -257,7 +257,7 @@ func systemdRunLongOptionStep(words []*syntax.Word, names map[string]struct{}, m
 	switch {
 	case resolved == "setenv":
 		if !attached {
-			return systemdRunEnvOperandStep(words, names, requireCommand, denied)
+			return systemdRunEnvOperandStep(words, names, memo, requireCommand, denied)
 		}
 		if accountEnvironmentOperandDenied(operand, names) {
 			if !requireCommand {
@@ -320,7 +320,7 @@ func systemdRunClusterStep(words []*syntax.Word, names map[string]struct{}, memo
 			operand := strings.TrimPrefix(cluster[i+1:], "=")
 			if operand == "" {
 				if c == 'E' {
-					return systemdRunEnvOperandStep(words, names, requireCommand, denied)
+					return systemdRunEnvOperandStep(words, names, memo, requireCommand, denied)
 				}
 				if len(words) < 2 {
 					return 0, true
@@ -369,9 +369,11 @@ func systemdRunClusterStep(words []*syntax.Word, names map[string]struct{}, memo
 
 // systemdRunEnvOperandStep judges -E's or --setenv's separate-word operand:
 // `NAME` (copy the caller's value) and `NAME=value` both run through the
-// shared denied-name cut. Under requireCommand a denial is deferred to the
-// caller's command-boundary check rather than refusing here.
-func systemdRunEnvOperandStep(words []*syntax.Word, names map[string]struct{}, requireCommand bool, denied *bool) (int, bool) {
+// shared denied-name cut, and the consumed operand stays a command-head
+// candidate for the shadowed reading — a run that discards it can exec the
+// `env`/`sudo` spelling one word later. Under requireCommand a denial is
+// deferred to the caller's command-boundary check rather than refusing here.
+func systemdRunEnvOperandStep(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, denied *bool) (int, bool) {
 	if len(words) < 2 {
 		return 0, true
 	}
@@ -396,6 +398,9 @@ func systemdRunEnvOperandStep(words []*syntax.Word, names map[string]struct{}, r
 			return 0, true
 		}
 		*denied = true
+	}
+	if wrapperOperandTailMutates(words[1:], names, memo) {
+		return 0, true
 	}
 	return 2, false
 }
