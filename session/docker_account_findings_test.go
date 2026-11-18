@@ -185,12 +185,11 @@ func TestDockerAccount_RejectsIdentityRunArgs(t *testing.T) {
 // ScopeAgentServerAccount reading exactly like the claim.
 func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	f := newDockerAccountFixture(t, "", "gemini", nil)
-	// Forwarded AND set: the real claim. The indexed pair must exist or git
-	// itself fails the count inside the daemon — GIT_CONFIG_* semantics are
-	// whole, af does not soften them.
-	t.Setenv("GIT_CONFIG_COUNT", "1")
-	t.Setenv("GIT_CONFIG_KEY_0", "safe.directory")
-	t.Setenv("GIT_CONFIG_VALUE_0", "/work")
+	// Forwarded AND set: the real claim. A count of 0 is a complete forward —
+	// the pairs it would animate stay unset on purpose below, so the blank can
+	// be observed for them too. GIT_CONFIG_* semantics are whole: af does not
+	// soften them.
+	t.Setenv("GIT_CONFIG_COUNT", "0")
 	var runArgs []string
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "run" {
@@ -201,7 +200,8 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	}))
 
 	_, _ = createDockerAccountSession(f, "gemini",
-		[]string{"GIT_CONFIG_COUNT", "CLOUD_SHELL", "GIT_CONFIG_PARAMETERS"})
+		[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+			"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS", "MY_OPERATOR_FLAG"})
 	require.NotEmpty(t, runArgs, "the account create never reached docker run")
 
 	// Forwarded+set: bare -e NAME, so docker resolves the operator's value.
@@ -210,10 +210,15 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	require.Equal(t, "GIT_CONFIG_COUNT", assignment,
 		"bare -e NAME: docker imports the daemon's value, dominating the image's ENV")
 
-	// Forwarded but NOT set: -e NAME= blanks the image's value. An image ENV
-	// GIT_CONFIG_PARAMETERS=x surviving would read as the operator's claim at
-	// the scope hop — it must be defined-empty instead.
-	for _, name := range []string{"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS"} {
+	// Forwarded but NOT set: -e NAME= blanks the image's value — for the six
+	// loader names, the indexed pair names, and every other forwarded name
+	// alike: an image ENV value surviving the extras admission would read as
+	// the operator's claim at the scope hop, so defined-empty is the honest
+	// "forwarded but nothing arrived" answer.
+	for _, name := range []string{
+		"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS",
+		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "MY_OPERATOR_FLAG",
+	} {
 		assignment, found = dockerEnvArg(runArgs, name)
 		require.True(t, found, "%s: a forwarded-but-unset name must still blank the image value", name)
 		require.Equal(t, name+"=", assignment,

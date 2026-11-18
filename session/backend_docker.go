@@ -810,27 +810,24 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 		}
 	}
 	if p.spec.Account.Dir != "" {
-		// A keep-if-set name the operator forwarded but did not set must still
-		// blank the image's value for it: -e admits the name through the wrap's
+		// A name the operator forwarded but did not set must still blank the
+		// image's value for it: -e admits the name through the wrap's
 		// passthrough extras, and an image ENV value that survived would reach
 		// ScopeAgentServerAccount reading exactly like the operator's claim
 		// (#7555). Emitting the explicit-empty form gives the name the same
 		// answer an unset local import gives the pane shim — defined-empty —
-		// rather than whatever the repository-selected image declared.
+		// rather than whatever the repository-selected image declared. The rule
+		// is uniform for every forwarded name, not just the six loader-filled
+		// ones: the claim channel admits daemon-env values, and a GIT_CONFIG_KEY_*
+		// or any other pair/helper name unset there claims empty, not the
+		// image's spelling (#7582 review).
 		present := make(map[string]struct{}, len(source))
 		for _, entry := range source {
 			if name, _, ok := strings.Cut(entry, "="); ok {
 				present[name] = struct{}{}
 			}
 		}
-		forwarded := make(map[string]struct{}, len(p.spec.SessionEnvPassthrough))
 		for _, name := range p.spec.SessionEnvPassthrough {
-			forwarded[name] = struct{}{}
-		}
-		for _, name := range sessionenv.AccountLoaderFilledNames(p.spec.Account.Agent) {
-			if _, ok := forwarded[name]; !ok {
-				continue
-			}
 			if _, ok := present[name]; ok {
 				continue
 			}

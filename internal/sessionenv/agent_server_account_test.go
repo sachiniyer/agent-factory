@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strings"
@@ -10,16 +11,26 @@ import (
 )
 
 // execCaptured runs an agent-server handoff with processExec stubbed and returns
-// the environment it would have exec'd with.
+// the environment it would have exec'd with. The pane bookkeeping seams are
+// stubbed too: execAgentServer calls stampPaneRootPid first, and when the test
+// runs inside an af pane (TMUX_PANE set) the real write would run
+// `tmux set-hook -p`/`set-option -p` on that LIVE pane — no sessionenv test may
+// reach paneBookkeepingWrite or paneStampRead unstubbed (#7582 review).
 func execCaptured(t *testing.T, run func() error) (env []string, err error) {
 	t.Helper()
 	stop := errors.New("stop before exec")
 	previous := processExec
+	prevWrite, prevRead := paneBookkeepingWrite, paneStampRead
 	processExec = func(_ string, _ []string, environ []string) error {
 		env = append([]string(nil), environ...)
 		return stop
 	}
-	t.Cleanup(func() { processExec = previous })
+	paneBookkeepingWrite = func(context.Context, string) error { return nil }
+	paneStampRead = func(context.Context, string) (string, error) { return "", nil }
+	t.Cleanup(func() {
+		processExec = previous
+		paneBookkeepingWrite, paneStampRead = prevWrite, prevRead
+	})
 	err = run()
 	if errors.Is(err, stop) {
 		err = nil

@@ -69,6 +69,12 @@ func TestMain(m *testing.M) {
 			}()
 		}
 	}
+	// A test run inside an af pane inherits TMUX_PANE — and every unstubbed
+	// stampPaneRootPid would then write pane-scoped hooks and options onto that
+	// LIVE pane. Clearing it here means stampPaneRootPid sees no pane unless a
+	// test sets one explicitly, and every test that does must stub the
+	// paneBookkeepingWrite/paneStampRead seams (#7582 review).
+	os.Unsetenv("TMUX_PANE")
 	os.Exit(m.Run())
 }
 

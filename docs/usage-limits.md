@@ -249,20 +249,36 @@ is **keep-if-set**: a name the operator forwards through the global
 `session_env_passthrough` carries the operator's own value — that is the
 claim af exists to deliver — while a name the operator did not forward is
 installed defined-and-empty, so neither a workspace `.env` nor a repo- or
-image-supplied value can claim it. A name forwarded but unset in the daemon
-environment still counts as claimed: it arrives defined-and-empty rather
-than whatever the source would have supplied, and the same answer holds on
-every backend — at the pane boundary locally, at `docker run` plus the
-agent's own exec filter in a container (where `docker.run_args` entries
-naming any of the six, or the indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`
-pairs a forwarded count would activate, are refused — forward the pairs
-through `session_env_passthrough` instead), and at the remote launch shell
-on ssh and sandbox sessions, where the check reads the *remote* environment
-because that is where the value lives. `GIT_CONFIG` itself is deliberately
-not pinned: git reads a defined-empty value as a real config-file path and
-`git config` would break. On claude and codex sessions none of these names
-are pinned, so the `GIT_CONFIG_*` `safe.directory` passthrough those agents
-use keeps working.
+image-supplied value can claim it. A forward is a real choice, not decoration:
+forwarding `CLOUD_SHELL` or `GEMINI_CLI_USE_COMPUTE_ADC` set true moves
+Gemini's authentication off the selected account onto the host's Compute ADC
+entirely, and a `GIT_CONFIG_*` forward lets the operator — not the repository
+— supply git config into the session.
+
+Where the keep-if-set test is evaluated is where the value lives, and that
+differs per backend:
+
+- **Local** — at the pane boundary, on the environment composed for the pane:
+  names the operator's tmux `update-environment` import delivered keep their
+  imported value, and names absent there are pinned empty.
+- **Docker** — in two places. At `docker run` a forwarded name the daemon
+  environment sets rides bare `-e NAME`, and every forwarded-but-unset name is
+  emitted `-e NAME=` so an image `ENV` value cannot reach the agent as if it
+  were the claim; then at the agent's own exec filter the names still unset are
+  pinned empty. `docker.run_args` entries naming any of the six — or the
+  indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pairs a forwarded count would
+  activate — are refused: forward the pairs through `session_env_passthrough`
+  instead.
+- **SSH and sandbox** — in the remote launch shell, evaluated against the
+  *remote* environment, because that is where a forwarded value lives. A name
+  set remotely — including defined-empty — keeps its remote value; a forwarded
+  name unset remotely is set empty there; an unforwarded name is pinned empty
+  unconditionally.
+
+`GIT_CONFIG` itself is deliberately not pinned: git reads a defined-empty
+value as a real config-file path and `git config` would break. On claude and
+codex sessions none of these names are pinned, so the `GIT_CONFIG_*`
+`safe.directory` passthrough those agents use keeps working.
 
 ### Account-scoped handoff
 
