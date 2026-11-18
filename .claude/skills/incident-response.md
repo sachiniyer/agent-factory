@@ -17,9 +17,11 @@ lost sessions as recoverable until proven otherwise.
    `codex resume <id>` or `claude --continue`, when that id is still provably
    current. A Codex or Amp session whose id was never captured starts fresh
    instead — af no longer resumes the account-wide "latest", which could name
-   a sibling's conversation. A Claude or Codex session whose recorded id is
-   no longer the newest one in a worktree af created for it also starts
-   fresh, rather than continuing the wrong thread; in your own checkout
+   a sibling's conversation. A Claude session whose recorded id is no longer
+   the newest one in a worktree af created for it (after a `/clear`), or a
+   Codex session af didn't see switch threads (af follows a Codex `/new` it
+   saw, so the recorded id stays current then), also starts fresh, rather
+   than continuing the wrong thread; in your own checkout
    (`--here`, or the root agent) your own agent files conversations there
    too, so a newer one says nothing and the recorded conversation resumes
    regardless. A Codex session whose recorded id is missing or cannot be
