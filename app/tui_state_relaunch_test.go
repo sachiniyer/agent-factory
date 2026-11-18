@@ -109,6 +109,38 @@ func TestTUIViewStateRelaunchBringsTheCursorsOwnPaneForward(t *testing.T) {
 	assert.Same(t, beta, h.sidebar.GetSelectedInstance(), "the cursor stays where it was restored")
 }
 
+// TestTUIViewStateRelaunchExpandsTheRestoredCursorsSession is the #7552
+// play-test repro: the session the cursor is restored to must come back
+// expanded — the same expansion a live selection produces — so its tab rows
+// are visible without the user pressing l. Every other row stays collapsed by
+// design (the issue's broader ask — persisting every row's fold — is out of
+// scope under the feature freeze).
+func TestTUIViewStateRelaunchExpandsTheRestoredCursorsSession(t *testing.T) {
+	before := newTestHome(t)
+	before.store.AddInstance(tuiStateTestInstance(t, "alpha"))
+	before.store.AddInstance(tuiStateTestInstance(t, "beta"))
+	before.sidebar.SetSelectedInstance(1) // a live selection expands beta
+	resizeHome(before, 100, 30)
+	require.Contains(t, before.View(), "▾  beta", "premise: a live selection expands the row")
+	require.Contains(t, before.View(), "└ 2 › Terminal", "premise: beta's tab rows show")
+	saved := before.captureTUIViewState()
+
+	h := newTestHome(t)
+	h.store.AddInstance(tuiStateTestInstance(t, "alpha"))
+	beta := tuiStateTestInstance(t, "beta")
+	h.store.AddInstance(beta)
+	require.NoError(t, config.SaveTUIRepoViewState(h.repoID, saved))
+	require.Equal(t, 0, h.restoreTUIViewStateOnLaunch())
+	resizeHome(h, 100, 30)
+
+	view := h.View()
+	assert.Same(t, beta, h.sidebar.GetSelectedInstance(), "the cursor comes back on beta")
+	assert.Contains(t, view, "▾  beta",
+		"the restored session comes back expanded, exactly as a live selection would expand it")
+	assert.Contains(t, view, "└ 2 › Terminal", "the restored session's tab rows are visible")
+	assert.NotContains(t, view, "▾  alpha", "every other row stays collapsed")
+}
+
 // requireWorkspaceShowsCursor asserts the #7293 property: the workspace shows
 // the session under the tree cursor, so no pane header carries the `— cursor:`
 // clause that discloses a split.
