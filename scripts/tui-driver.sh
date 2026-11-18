@@ -757,10 +757,16 @@ _af_draw_title() {
 # non-EastAsian locale:
 #   1. runewidth.Truncate-style: while the total runewidth would exceed
 #      avail-1, drop trailing GRAPHEME CLUSTERS and append "…" (U+2026).
-#   2. x/ansi contract-clip: keep the longest grapheme prefix of rt whose
-#      x/ansi (displaywidth) width fits avail.
-# Prints one line "<cells> <title>" — the x/ansi cell width of the drawn
-# title and its bytes (empty when the name draws only padding).
+#   2. the layout contracts x/ansi clip of " ▾  "+rt to avail+4 cells,
+#      as xansi.Truncate actually computes it — the StringWidth fast
+#      path, else a byte walk where printable ASCII is a one-cell unit
+#      and each non-ASCII byte opens a fresh FirstGraphemeCluster priced
+#      at its lead rune; padding then re-prices the drawn bytes by whole
+#      clusters, which is why a leading mark rides the separator cell
+#      and a mark clipped mid-cluster rejoins its base on screen.
+# Prints one line "<cells> <title>" — the cells the drawn title bytes
+# occupy in the title region and the bytes (empty when the name draws
+# only padding).
 # Exit 1 with the offending char on stderr when the input is not valid UTF-8
 # or contains a codepoint the two measures are known to score differently
 # (ZWJ, VS16, emoji modifiers, tag chars) or an InCB=Linker virama whose
@@ -980,8 +986,9 @@ function refuse(cp) {
 			len = 3
 			if (i + 2 > n) bad()
 			c1 = ORD[ch[i + 1]]; c2 = ORD[ch[i + 2]]
-			lo1 = (b == 224 ? 160 : (b == 237 ? 144 : 128))
-			if (c1 < lo1 || c1 > 191 || c2 < 128 || c2 > 191) bad()
+			lo1 = (b == 224 ? 160 : 128)
+			hi1 = (b == 237 ? 159 : 191)
+			if (c1 < lo1 || c1 > hi1 || c2 < 128 || c2 > 191) bad()
 			cp = (b - 224) * 4096 + (c1 - 128) * 64 + c2 - 128
 		} else if (b >= 240 && b <= 244) {
 			len = 4
@@ -1009,6 +1016,7 @@ function refuse(cp) {
 			if (open) { open = 0 }
 			ncl++
 			CS[ncl] = OFF[i]; CE[ncl] = OFF[i] - 1 + clen(i)
+			CSI[ncl] = i
 			CW[ncl] = RWv; CX[ncl] = XAv
 			force = 1; rirun = 0; pj = 0; pend = 0
 			continue
@@ -1028,6 +1036,7 @@ function refuse(cp) {
 		} else {
 			ncl++; open = 1; headnz = 0
 			CS[ncl] = OFF[i]
+			CSI[ncl] = i
 			CW[ncl] = 0; CX[ncl] = XAv
 			if (RWv > 0) { CW[ncl] = RWv; headnz = 1 }
 		}
@@ -1051,17 +1060,56 @@ function refuse(cp) {
 		}
 		ell = 1
 	}
-	# x/ansi contract clip: longest cluster prefix of rt within avail cells.
-	xw = 0; out = ""; keep = 0
-	for (i = 1; i <= nk; i++) {
-		if (xw + CX[i] > avail) break
-		xw += CX[i]
-		out = out substr($0, CS[i], CE[i] - CS[i] + 1)
-		keep = i
+	rtend = (nk == ncl ? nc : CSI[nk + 1] - 1)
+	# A trailing "…" after a Prepend glues into that cluster (GB9b) — free;
+	# otherwise it is a one-cell unit of its own.
+	ellw = (ell ? (rtend >= 1 && inr(CP[rtend], PLO, PHI, nPP) ? 0 : 1) : 0)
+
+	# tc = " ▾  " + rt, clipped to avail+4 cells by the layout contract.
+	# StringWidth prices each whole grapheme cluster at the lead rune
+	# property; when rt opens with a mark that joins the separator space
+	# (GB9/9a), the mark rides inside that cell and the title region sees
+	# one cluster fewer than rt carries.
+	csum = ellw
+	for (i = 1; i <= nk; i++) csum += CX[i]
+	swtc = 4 + csum - (rtend >= 1 && inr(CP[1], JBLO, JBHI, nJB) ? CX[1] : 0)
+
+	if (swtc <= avail + 4) {
+		# The StringWidth fast path — titleContent draws untouched.
+		lastkept = rtend; ellkept = ell
+	} else {
+		# xansi.Truncate walks bytes: printable ASCII is a one-cell
+		# unit; each non-ASCII byte opens a fresh FirstGraphemeCluster of
+		# the suffix priced at its lead rune — so a mark after an ASCII
+		# byte is its own unit even though it renders in the same cell.
+		# The first unit past the edge ends the draw; nothing is skipped.
+		cur = 4; lastkept = 0; ellkept = 0
+		for (c = 1; c <= nk; c++) {
+			s = CSI[c]; e = (c == nk ? rtend : CSI[c + 1] - 1)
+			if (CP[s] < 128) {
+				if (cur + (CP[s] < 32 || CP[s] == 127 ? 0 : 1) > avail + 4) break
+				cur += (CP[s] < 32 || CP[s] == 127 ? 0 : 1); lastkept = s
+				if (e > s) {
+					widths(CP[s + 1])
+					if (cur + XAv > avail + 4) break
+					cur += XAv; lastkept = e
+				}
+			} else {
+				if (cur + CX[c] > avail + 4) break
+				cur += CX[c]; lastkept = e
+			}
+		}
+		if (c > nk && cur + ellw <= avail + 4) { cur += ellw; ellkept = 1 }
 	}
-	# The clip is a prefix of rt: "…" survives only when every cluster
-	# before it did.
-	if (ell && keep == nk && xw + 1 <= avail) { xw++; out = out "\342\200\246" }
+	# The padding the rail draws prices StringWidth of the drawn bytes —
+	# a trailing ASCII lead rejoins its cut marks on screen, so the kept
+	# prefix counts whole clusters by their lead rune property, the
+	# separator-joined first mark excepted as above.
+	ksum = (ellkept ? ellw : 0)
+	for (i = 1; i <= nk && CSI[i] <= lastkept; i++) ksum += CX[i]
+	xw = ksum - (lastkept >= 1 && inr(CP[1], JBLO, JBHI, nJB) ? CX[1] : 0)
+	out = (lastkept >= 1 ? substr($0, 1, OFF[lastkept] + clen(lastkept) - 1) : "")
+	if (ellkept) out = out "\342\200\246"
 	# One line, "<width> <title>": the space separator survives the
 	# trailing-newline strip of $( ) where a second line would not — a
 	# zero-cell title (a name that draws only padding) reads as "" not "0".
@@ -1118,8 +1166,17 @@ _af_row_re() {
     tws="${t##*[^ ]}"
     t="${t%"$tws"}"
     pad=$(( $(_af_rail_title_avail) - xw + ${#tws} ))
-    printf '[[:space:]](%s)[[:space:]]+(%s)( {%d} (%s)([[:space:]]|$)|[[:space:]]*$)' \
-        "$arrow" "$(_af_regex_escape "$t")" "$pad" "$icon"
+    # The bare-EOL alternative exists only when <icon-ere> admits the
+    # blank status a stripped tail implies — a row capture trims to just
+    # ' ▾  foo' iff its affix was all whitespace. af_new_instance's '●'
+    # wait must not be satisfied by that row: it is still loading.
+    if [[ "$icon" == *" "* ]]; then
+        printf '[[:space:]](%s)[[:space:]]+(%s)( {%d} (%s)([[:space:]]|$)|[[:space:]]*$)' \
+            "$arrow" "$(_af_regex_escape "$t")" "$pad" "$icon"
+    else
+        printf '[[:space:]](%s)[[:space:]]+(%s) {%d} (%s)([[:space:]]|$)' \
+            "$arrow" "$(_af_regex_escape "$t")" "$pad" "$icon"
+    fi
 }
 
 # _af_common_prefix_chars <a> <b> — the length in characters of the leading
