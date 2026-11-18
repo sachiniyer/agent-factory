@@ -467,6 +467,34 @@ func TestStagedDraftFlushKeepsTheDueMarkUnderOpLockContention(t *testing.T) {
 	require.True(t, inst.HasAttention(), "the kept due mark lands on the next uncontended flush")
 }
 
+// A blind read that precedes the first staged verdict must not count toward
+// the sustain: the window opens on the first PROVABLE staged read, so a send
+// rechecked once during a redraw and once staged still waits the full window
+// (Codex #7547, third round — a blind-owned entry carried a zero since and
+// flagged a fresh send in seconds).
+func TestStagedDraftWatchOpensTheWindowOnTheFirstStagedRead(t *testing.T) {
+	base := time.Now()
+	now := base
+	prev := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = prev })
+
+	manager, repoID, _, inst := stagedDraftFixture(t, base.Add(-time.Minute))
+	checker := &fakeStagedChecker{reads: []session.StagedDraftRead{
+		session.StagedDraftUnreadable, session.StagedDraftStaged, session.StagedDraftStaged}}
+	key := stagedDraftKey(repoID, inst)
+
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	now = base.Add(time.Hour) // far past any window — only the blind read ran so far
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	require.False(t, inst.HasAttention(),
+		"the window opens on the first staged verdict, not the blind reads before it")
+
+	now = now.Add(stagedDraftSettleWindow + time.Second)
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	require.True(t, inst.HasAttention(), "a full sustained window after the first staged read flags")
+}
+
 // Blind reads are never a negative — but they are not free either: a pane
 // unjudgeable for stagedDraftMaxBlindReads consecutive ticks retires the
 // attempt's watch rather than capturing per poll forever (#7547 independent

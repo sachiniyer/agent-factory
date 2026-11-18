@@ -127,6 +127,14 @@ func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.
 			entry = &stagedDraftWatch{attemptAt: attemptAt, since: now}
 			m.stagedDraftWatches[key] = entry
 		}
+		// A blind streak may own this entry already: its since is unset,
+		// and must stay unset — the window measures sustained STAGED
+		// evidence, so it opens on this first provable staged read, never
+		// backdated to the blind ticks (Codex #7547, third round: a zero
+		// since flags a fresh send in seconds).
+		if entry.since.IsZero() {
+			entry.since = now
+		}
 		entry.blind = 0
 		if !entry.closed && now.Sub(entry.since) >= stagedDraftSettleWindow {
 			entry.due = true
