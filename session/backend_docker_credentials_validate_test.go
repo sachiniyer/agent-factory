@@ -1012,19 +1012,19 @@ func TestCredentialMountProxyTwinForwarding_NormalizesToForwardedValue(t *testin
 	}
 
 	// Uppercase forwarded alone: the lowercase twin is emitted and normalized.
-	names, synth := credentialMountProxyTwinForwarding([]string{"HTTPS_PROXY"}, environ)
+	names, synth := credentialMountTwinForwarding(credentialMountProxyCasePairs, []string{"HTTPS_PROXY"}, environ)
 	require.Equal(t, []string{"https_proxy"}, names)
 	require.Equal(t, []string{"https_proxy=http://operator-proxy:8080"}, synth,
 		"the twin resolves to the forwarded spelling's value, never the image's")
 
 	// Lowercase forwarded alone: the uppercase twin is emitted and normalized.
-	names, synth = credentialMountProxyTwinForwarding([]string{"http_proxy"}, environ)
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs, []string{"http_proxy"}, environ)
 	require.Equal(t, []string{"HTTP_PROXY"}, names)
 	require.Equal(t, []string{"HTTP_PROXY=http://host-lowercase:3128"}, synth)
 
 	// Both spellings forwarded and set: each keeps its own approved value —
 	// nothing to normalize.
-	names, synth = credentialMountProxyTwinForwarding(
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs,
 		[]string{"http_proxy", "HTTP_PROXY"},
 		[]string{"http_proxy=http://host-lowercase:3128", "HTTP_PROXY=http://host-upper:3128"})
 	require.Empty(t, names)
@@ -1032,7 +1032,7 @@ func TestCredentialMountProxyTwinForwarding_NormalizesToForwardedValue(t *testin
 
 	// Both forwarded but only the lowercase spelling set on the host: the
 	// unset member still takes the operator's value rather than the image's.
-	names, synth = credentialMountProxyTwinForwarding(
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs,
 		[]string{"http_proxy", "HTTP_PROXY"},
 		[]string{"http_proxy=http://host-lowercase:3128"})
 	require.Equal(t, []string{"HTTP_PROXY"}, names)
@@ -1040,14 +1040,14 @@ func TestCredentialMountProxyTwinForwarding_NormalizesToForwardedValue(t *testin
 
 	// A host-set but unforwarded twin is still normalized to the forwarded
 	// value: the operator's claim on the pair is the forwarded spelling.
-	names, synth = credentialMountProxyTwinForwarding([]string{"HTTPS_PROXY"},
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs, []string{"HTTPS_PROXY"},
 		append(environ, "https_proxy=http://host-twin:8080"))
 	require.Equal(t, []string{"https_proxy"}, names)
 	require.Equal(t, []string{"https_proxy=http://operator-proxy:8080"}, synth)
 
 	// Forwarded but unset on the host claims nothing — the "operator named a
 	// name they do not set" semantics already lets the image stand.
-	names, synth = credentialMountProxyTwinForwarding([]string{"NO_PROXY"}, environ)
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs, []string{"NO_PROXY"}, environ)
 	require.Empty(t, names)
 	require.Empty(t, synth)
 }
@@ -1082,11 +1082,11 @@ func TestDockerMountAgentCredentials_ProxyTwinRidesRunArgvAndClientEnv(t *testin
 	require.NotContains(t, p.dockerEnvironment(), "https_proxy=http://operator-proxy:8080")
 }
 
-// TestCredentialMountBlankedWarning_NamesOnly pins the migration warning's
+// TestCredentialMountOverriddenWarning_NamesOnly pins the migration warning's
 // contract: it names each blanked name the image or run_args actually set —
 // once, sorted — and never echoes a value, so a credential the image carried
 // cannot leak into the log it warns about.
-func TestCredentialMountBlankedWarning_NamesOnly(t *testing.T) {
+func TestCredentialMountOverriddenWarning_NamesOnly(t *testing.T) {
 	pinned := credentialMountPinnedNames(tmux.ProgramOpencode, nil)
 	imageEnv := []string{
 		"HTTPS_PROXY=https://user:pass@proxy.corp.example:8080",
@@ -1095,7 +1095,7 @@ func TestCredentialMountBlankedWarning_NamesOnly(t *testing.T) {
 		"OPENCODE_CONFIG_DIR", // name without a value
 	}
 	runArgs := []string{"-e", "SSL_CERT_FILE=/etc/ssl/evil.pem", "-e", "TZ=UTC"}
-	names := credentialMountBlankedWarning(imageEnv, runArgs, pinned)
+	names := credentialMountOverriddenWarning(imageEnv, runArgs, pinned)
 	require.Equal(t, []string{"HTTPS_PROXY", "OPENAI_API_KEY", "OPENCODE_CONFIG_DIR", "SSL_CERT_FILE"}, names)
 	joined := strings.Join(names, ",")
 	for _, secret := range []string{"proxy.corp.example", "sk-live-looking-value", "evil.pem"} {

@@ -360,17 +360,18 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 }
 
 // warnBlankedCredentialNames emits the once-per-session migration warning
-// for the classified names the image or docker.run_args had actually set —
-// names only, values never inspected (#7526). It runs immediately after the
+// for the classified names the image or docker.run_args had actually set
+// and af overrode — pinned empty or re-asserted to a value; names only,
+// values never inspected (#7526, #7531). It runs immediately after the
 // container exists, BEFORE the dependent steps (trust, clone, agent-server):
 // the image side must describe the image the container ACTUALLY runs —
 // resolved off the created container, not whatever the configured tag
-// inspected as before `docker run` pulled or updated it — and a blanked
-// name a later step depended on (a proxy or private CA the clone needs)
-// would make provisioning fail first, so the session most in need of the
-// passthrough remedy would never see it (#7531). When that inspect fails,
-// say so and warn over run_args names alone; the pins are already in argv
-// either way.
+// inspected as before `docker run` pulled or updated it — and an
+// overridden name a later step depended on (a proxy or private CA the
+// clone needs) would make provisioning fail first, so the session most in
+// need of the passthrough remedy would never see it (#7531). When that
+// inspect fails, say so and warn over run_args names alone; the overrides
+// are already in argv either way.
 func (p *dockerProvisioner) warnBlankedCredentialNames() {
 	if len(p.credentialMounts) == 0 {
 		return
@@ -378,12 +379,23 @@ func (p *dockerProvisioner) warnBlankedCredentialNames() {
 	imageEnv, ok := p.dockerContainerImageEnv()
 	if !ok {
 		log.WarningLog.Printf(
-			"backend=docker: docker.mount_agent_credentials could not inspect the environment of the image the container runs — the blanked-env warning covers docker.run_args names only")
+			"backend=docker: docker.mount_agent_credentials could not inspect the environment of the image the container runs — the overridden-env warning covers docker.run_args names only")
 	}
-	if blanked := credentialMountBlankedWarning(imageEnv, p.runArgs, p.credentialEnvPins); len(blanked) > 0 {
+	// Every name af overrode on this session: the defined-empty pins, the
+	// re-asserted git config roots, and the re-asserted selector/endpoint
+	// names — all post-exemption, so a name the operator claimed through
+	// session_env_passthrough is not reported as overridden (#7531).
+	overridden := append(slices.Clone(p.credentialEnvPins),
+		credentialMountReassertNames(p.agentName(), p.spec.SessionEnvPassthrough)...)
+	for _, name := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"} {
+		if !slices.Contains(p.spec.SessionEnvPassthrough, name) {
+			overridden = append(overridden, name)
+		}
+	}
+	if named := credentialMountOverriddenWarning(imageEnv, p.runArgs, overridden); len(named) > 0 {
 		log.WarningLog.Printf(
-			"backend=docker: docker.mount_agent_credentials blanked %d env name(s) the image or docker.run_args had set for agent %q: %s — forward any the session needs through the global session_env_passthrough",
-			len(blanked), p.agentName(), strings.Join(blanked, ", "))
+			"backend=docker: docker.mount_agent_credentials overrode %d env name(s) the image or docker.run_args had set for agent %q (pinned empty or re-asserted): %s — forward any the session needs through the global session_env_passthrough",
+			len(named), p.agentName(), strings.Join(named, ", "))
 	}
 }
 
@@ -765,7 +777,7 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 	// contract, and an account or plain session's env stays byte-identical
 	// to before (#7529 R8).
 	if len(p.credentialMounts) > 0 {
-		twins, _ := credentialMountProxyTwinForwarding(p.spec.SessionEnvPassthrough, os.Environ())
+		twins, _ := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, os.Environ())
 		if len(twins) > 0 {
 			names = append(names, twins...)
 			sort.Strings(names)
@@ -806,7 +818,7 @@ func (p *dockerProvisioner) dockerEnvironment() []string {
 	if len(p.credentialMounts) == 0 {
 		return env
 	}
-	_, synth := credentialMountProxyTwinForwarding(p.spec.SessionEnvPassthrough, os.Environ())
+	_, synth := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, os.Environ())
 	return append(env, synth...)
 }
 

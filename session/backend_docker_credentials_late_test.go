@@ -365,27 +365,32 @@ func TestProvision_WarnsBeforeDependentStepFails(t *testing.T) {
 }
 
 // TestCredentialMount_SessionMarkersSurviveTheExecBoundary is the Codex P2
-// regression property (#7531): af's OWN session markers — the names
-// sessionEnvFlags stamps into every pane environment — are trusted values
-// from af itself, not a repo source. Classifying them pinnable put them in
-// --session-env-empty, so the exec shim re-asserted them defined-and-empty
-// AFTER tmux installed af's values, and the agent's children lost the
-// markers markedOrphanProcesses needs to attribute and reap them inside
-// the container. Every marker must stay OUT of the pins and the
-// --session-env-empty argv while still being refused to repo run_args.
+// regression property (#7531): the names the pane boundary itself installs —
+// af's OWN session markers from sessionEnvFlags, plus TMUX and TMUX_PANE
+// which the tmux server stamps for every pane — are trusted values, not a
+// repo source. Classifying them pinnable put them in --session-env-empty,
+// so the exec shim re-asserted them defined-and-empty AFTER tmux installed
+// the real values: the agent's children lost the markers
+// markedOrphanProcesses needs to attribute and reap them, and blanked TMUX
+// names broke Claude Code's tmux detection and af's own in-pane `--self`
+// (currentTmuxName). Every pane-boundary name must stay OUT of the pins
+// and the --session-env-empty argv while still being refused to repo
+// run_args.
 func TestCredentialMount_SessionMarkersSurviveTheExecBoundary(t *testing.T) {
 	markers := []string{
 		tmux.EnvMarkerSession, tmux.EnvMarkerGeneration, tmux.EnvMarkerHome, tmux.EnvMarkerInstance,
+		"TMUX", "TMUX_PANE",
 	}
 	for _, name := range markers {
 		for _, agent := range []string{tmux.ProgramGemini, tmux.ProgramClaude} {
 			require.NotContains(t, credentialMountPinnedNames(agent, nil), name,
-				"%s is af's own marker — pinning it empty erases the membership proof at the exec shim", name)
+				"%s is installed at the pane boundary — pinning it empty erases it at the exec shim", name)
 		}
 	}
 
 	// The argv level: --session-env-empty is what the exec shim re-asserts;
-	// a marker there is the blank-after-tmux order the finding describes.
+	// a pane-boundary name there is the blank-after-tmux order the finding
+	// describes.
 	p := &dockerProvisioner{
 		program:           tmux.ProgramGemini,
 		credentialMounts:  []string{"mount"},
@@ -394,9 +399,17 @@ func TestCredentialMount_SessionMarkersSurviveTheExecBoundary(t *testing.T) {
 	}
 	argv, err := p.agentServerCommand()
 	require.NoError(t, err)
+	fields := strings.Fields(argv)
+	emptied := make(map[string]struct{})
+	for i, f := range fields {
+		if f == "--session-env-empty" && i+1 < len(fields) {
+			emptied[fields[i+1]] = struct{}{}
+		}
+	}
 	for i, name := range markers {
-		require.NotContains(t, argv, "--session-env-empty "+name,
-			"--session-env-empty %s would blank the marker after tmux installed af's value (marker %d)", name, i)
+		_, blank := emptied[name]
+		require.False(t, blank,
+			"--session-env-empty %s would blank the value after tmux installed it (marker %d)", name, i)
 	}
 
 	// The deny half stays: a repository run_args marker is still refused —
@@ -406,4 +419,104 @@ func TestCredentialMount_SessionMarkersSurviveTheExecBoundary(t *testing.T) {
 		require.True(t, denied || name == tmux.EnvMarkerInstance,
 			"%s must still be refused to repository run_args (AF_INSTANCE_ID is unallowlisted — unreachable either way)", name)
 	}
+}
+
+// TestCredentialMount_SelectorGroupForwardingExemptsTheWholeGroup is the
+// R2(a) property (#7531): the selector names are precedence groups — a
+// tool reads GIT_SSH_COMMAND before GIT_SSH, GIT_ASKPASS before
+// SSH_ASKPASS, VISUAL before EDITOR — so forwarding ANY member exempts the
+// WHOLE group from the re-assert, and the unforwarded member is reseated
+// to the operator's forwarded value so an image-supplied sibling cannot
+// keep precedence over the operator's program.
+func TestCredentialMount_SelectorGroupForwardingExemptsTheWholeGroup(t *testing.T) {
+	// Without a claim every member is still re-asserted (the bound).
+	for _, group := range credentialMountSelectorGroups {
+		for _, name := range group {
+			require.Contains(t, credentialMountReassertEntries(tmux.ProgramClaude, nil), name+"="+credentialMountSharedProgramEntries[name],
+				"unclaimed %s keeps its working re-assert", name)
+		}
+	}
+	// Forwarding either member exempts BOTH, in either order, and reseats
+	// the unforwarded sibling to the operator's value.
+	for _, group := range credentialMountSelectorGroups {
+		for _, forwarded := range group {
+			var sibling string
+			if forwarded == group[0] {
+				sibling = group[1]
+			} else {
+				sibling = group[0]
+			}
+			entries := credentialMountReassertEntries(tmux.ProgramClaude, []string{forwarded})
+			for _, entry := range entries {
+				name, _, _ := strings.Cut(entry, "=")
+				require.NotEqual(t, group[0], name, "forwarding %s must exempt %s from the re-assert", forwarded, name)
+				require.NotEqual(t, group[1], name, "forwarding %s must exempt %s from the re-assert", forwarded, name)
+			}
+			names, synth := credentialMountTwinForwarding(credentialMountSelectorGroups,
+				[]string{forwarded}, []string{forwarded + "=/op-program"})
+			require.Equal(t, []string{sibling}, names,
+				"the unforwarded sibling must be re-emitted so the image's value cannot stand")
+			require.Equal(t, []string{sibling + "=/op-program"}, synth,
+				"the sibling resolves to the operator's forwarded value, not af's default or the image's")
+		}
+	}
+	// Ungrouped selectors are untouched: forwarding EDITOR does not exempt
+	// PAGER, and PAGER is still re-asserted.
+	require.Contains(t, credentialMountReassertEntries(tmux.ProgramClaude, []string{"EDITOR"}), "PAGER=/bin/cat")
+}
+
+// TestDockerMountAgentCredentials_SelectorTwinRidesRunArgvAndClientEnv is the
+// group claim end-to-end: the sibling's bare `-e NAME` lands in the run argv
+// (name only) and the client environment synthesizes the operator's value.
+func TestDockerMountAgentCredentials_SelectorTwinRidesRunArgvAndClientEnv(t *testing.T) {
+	t.Setenv("GIT_SSH", "/op-ssh")
+	p := &dockerProvisioner{
+		spec: ProvisionSpec{
+			Title:                 "selector-twin-test",
+			Program:               tmux.ProgramClaude,
+			SessionEnvPassthrough: []string{"GIT_SSH"},
+		},
+		program:          tmux.ProgramClaude,
+		credentialMounts: []string{"-v", "/h/cred:/c/cred:ro"},
+	}
+	require.Contains(t, p.containerEnvironmentNames(), "GIT_SSH_COMMAND",
+		"the unforwarded sibling must be emitted so the image's value cannot stand")
+	require.Contains(t, p.dockerEnvironment(), "GIT_SSH_COMMAND=/op-ssh",
+		"the client env must resolve the sibling to the operator's forwarded program")
+	p.spec.SessionEnvPassthrough = nil
+	require.NotContains(t, p.containerEnvironmentNames(), "GIT_SSH_COMMAND")
+	require.NotContains(t, p.dockerEnvironment(), "GIT_SSH_COMMAND=/op-ssh")
+}
+
+// TestCredentialMountOverriddenWarning_NamesReassertedToo is the R2(b)
+// property (#7531): the migration warning names every image- or
+// run_args-set name af overrode — blanked OR re-asserted — so nothing is
+// overridden silently. A re-asserted EDITOR=vim in the image is named, and
+// the message says the override may be either a pin or a re-assert.
+func TestCredentialMountOverriddenWarning_NamesReassertedToo(t *testing.T) {
+	p := &dockerProvisioner{
+		program:           tmux.ProgramClaude,
+		credentialMounts:  []string{"mount"},
+		credentialEnvPins: credentialMountPinnedNames(tmux.ProgramClaude, nil),
+		spec:              ProvisionSpec{Program: "claude", Title: "warn"},
+		containerID:       "cid",
+	}
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "inspect":
+			return []byte("sha256:resolved\n"), nil
+		case len(args) > 1 && args[0] == "image" && args[1] == "inspect":
+			return []byte(`["EDITOR=vim","HTTPS_PROXY=http://corp:8080","TZ=UTC"]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected docker call: %v", args)
+		}
+	}))
+	buf := captureWarningLog(t)
+	p.warnBlankedCredentialNames()
+	out := buf.String()
+	require.Contains(t, out, "EDITOR",
+		"an image-set selector af re-asserts must be named — /bin/false silently replacing vim is the R2 finding")
+	require.Contains(t, out, "HTTPS_PROXY", "a blanked pin is still named")
+	require.NotContains(t, out, "TZ", "an unoverridden image name is not named")
+	require.Contains(t, out, "pinned empty or re-asserted")
 }

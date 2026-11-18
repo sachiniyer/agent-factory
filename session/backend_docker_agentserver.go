@@ -54,16 +54,25 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 		args = append(args, "--program", p.program, "--program-resolved")
 	}
 	// agentServerEnvNames are the names the in-container env filter admits: the
-	// operator's passthrough plus the credential-mount pins. A pin reaches the
-	// agent DEFINED and empty — the container env holds it as `NAME=` from
-	// runContainer, and an agent-side workspace config loader treats a defined
-	// name as set and does not apply the repo's value (#7526). A pin cannot
-	// carry a value instead: every pinned name is a classified name the
-	// run_args validator refuses and af emitted empty, so the only value the
-	// filter can pass is the empty one.
+	// operator's passthrough, the credential-mount pins, and the re-asserted
+	// names. A pin reaches the agent DEFINED and empty — the container env
+	// holds it as `NAME=` from runContainer, and an agent-side workspace
+	// config loader treats a defined name as set and does not apply the
+	// repo's value (#7526). A pin cannot carry a value instead: every pinned
+	// name is a classified name the run_args validator refuses and af emitted
+	// empty, so the only value the filter can pass is the empty one. The
+	// re-asserted names ride the same extras channel: the container env holds
+	// their af-emitted values, and carrying the name as an extra means the
+	// value is admitted at both inner hops on af's explicit list rather than
+	// depending on the agent allowlist — which a GrantAgentForCommand
+	// disagreement at the exec shim would revoke (#7531).
 	agentServerEnvNames := append(
 		append([]string(nil), p.spec.SessionEnvPassthrough...),
 		p.credentialEnvPins...)
+	if len(p.credentialMounts) > 0 {
+		agentServerEnvNames = append(agentServerEnvNames,
+			credentialMountReassertNames(p.agentName(), p.spec.SessionEnvPassthrough)...)
+	}
 	for _, name := range agentServerEnvNames {
 		args = append(args, "--session-env", name)
 	}

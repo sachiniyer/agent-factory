@@ -37,7 +37,14 @@ import (
 //   - program-choice: a name that selects a program af's tools or the agent
 //     run in the container — the askpass and GIT_SSH commands git spawns to
 //     answer credential prompts, the editor/pager programs, and the tmux
-//     names that select a server af execs into.
+//     names that select a server af execs into. The selector precedence
+//     groups (credentialMountSelectorGroups) are claimed as groups:
+//     forwarding one member exempts every member of its group.
+//   - pane-boundary: a name af or tmux stamps at the pane boundary — af's
+//     session markers (AF_SESSION, AF_SESSION_GEN, AF_HOME) and tmux's own
+//     TMUX/TMUX_PANE. Refused to run_args like the rest but NEVER pinned:
+//     a defined-empty pin is re-asserted at the exec shim after tmux
+//     installed the real values, erasing them.
 //   - late-loaded: a name the agent's own loader can restore from a
 //     repository file after af's boundary runs. gemini walks up from the
 //     workspace applying <dir>/.gemini/.env and <dir>/.env fill-if-unset —
@@ -180,9 +187,12 @@ var credentialMountSharedConfigRootNames = map[string]struct{}{
 //   - GIT_SSH/GIT_SSH_COMMAND re-assert git's own default `ssh`, resolved
 //     through the re-asserted image PATH — the image's binaries are the
 //     declared residual trust here.
-//   - GIT_ASKPASS/SSH_ASKPASS re-assert /bin/false: a working program that
-//     never answers — an empty name is not a safe fallback when the pane
-//     HAS a tty (tmux) and an unset askpass would prompt on it.
+//   - GIT_ASKPASS/SSH_ASKPASS re-assert /bin/false: a program that fails
+//     every prompt immediately. It does not suppress prompting — with no
+//     usable askpass git falls back to the tty prompt exactly as it does
+//     for an empty name — but the pane HAS a tty (tmux), and /bin/false
+//     keeps a repository-supplied askpass binary from being the program
+//     that answers.
 //   - EDITOR/VISUAL re-assert /bin/false so an interactive `git commit`
 //     fails clearly instead of silently accepting the template via
 //     `sh -c ""`.
@@ -199,41 +209,77 @@ var credentialMountSharedProgramEntries = map[string]string{
 	"PAGER":           "/bin/cat",
 }
 
+// credentialMountSelectorGroups pairs the program-selector names whose
+// consumers consult them as a precedence ladder: git runs GIT_SSH_COMMAND
+// before GIT_SSH (an askpass client reads GIT_ASKPASS before SSH_ASKPASS),
+// and the editors claude and codex shell out to read VISUAL before EDITOR.
+// Forwarding ANY member through session_env_passthrough exempts the WHOLE
+// group from the re-assert — the operator's choice must win whichever name
+// a tool reads. Measured on git 2.43 why per-name exemption is not enough:
+// forwarding GIT_SSH=/op-ssh while GIT_SSH_COMMAND=ssh is re-asserted
+// leaves the re-asserted name ahead in precedence, so the operator's
+// program never runs; forwarding EDITOR=vim while VISUAL=/bin/false is
+// re-asserted hides the operator's editor behind the sibling. The
+// unforwarded member still cannot keep an image value — the twin
+// forwarding in credentialMountTwinForwarding reseats it to the
+// operator's forwarded value, so every name in the group resolves to the
+// same operator program (#7531).
+var credentialMountSelectorGroups = [][2]string{
+	{"GIT_SSH", "GIT_SSH_COMMAND"},
+	{"GIT_ASKPASS", "SSH_ASKPASS"},
+	{"EDITOR", "VISUAL"},
+}
+
 // credentialMountSharedAFStateNames are af's own state and control-plane
-// names in the common allowlist: af's home directory, its auto-update
-// toggle, and the tmux names that select which server af's in-container
-// client execs into. A repo- or image-supplied value relocates af's state
-// directory or points af's tmux calls at a server the image controls —
+// names in the common allowlist that are NOT stamped at the pane boundary:
+// af's home directory and auto-update toggle arrive ambiently through the
+// process environment, and TMUX_TMPDIR is a client-side socket-directory
+// selector carried to preserve a non-default server af was launched from.
+// A repo- or image-supplied value relocates af's state directory or points
+// a tmux client's socket discovery at a directory the image controls —
 // none of which a non-operator source may choose on the path that mounts
 // the operator's credential. af's own in-container programs take their
 // configuration from argv, not the container environment, so pinning them
-// defined-and-empty leaves af unaffected. (af's session markers are
-// deliberately NOT here — see credentialMountSessionMarkerNames.)
+// defined-and-empty leaves af unaffected. (Names tmux or af themselves
+// stamp at the pane boundary are deliberately NOT here — see
+// credentialMountPaneBoundaryNames.)
 var credentialMountSharedAFStateNames = map[string]struct{}{
 	"AGENT_FACTORY_HOME":        {},
 	"AGENT_FACTORY_AUTO_UPDATE": {},
-	"TMUX":                      {},
-	"TMUX_PANE":                 {},
 	"TMUX_TMPDIR":               {},
 }
 
-// credentialMountSessionMarkerNames are af's OWN trusted session markers —
-// the names sessionEnvFlags (session/tmux/envmarker.go) stamps into every
-// pane environment with per-session values: the session name, its
-// generation, and af's home provenance. They are refused to repository
-// run_args like every classified name — a repo-supplied marker falsifies
-// membership — but they are NEVER pinned: a defined-empty pin is carried by
-// --session-env-empty and re-asserted at the exec shim AFTER tmux has
-// installed af's values, erasing exactly the markers the agent's children
-// need. markedOrphanProcesses (session/tmux/reap_membership.go) proves
-// ownership by those markers: a child orphaned inside the container can no
-// longer be attributed, discovered, or reaped (#7531). af's values come
-// from af, not a repo source, and reach the agent through tmux's -e flags —
-// the boundary only has to NOT erase them.
-var credentialMountSessionMarkerNames = map[string]struct{}{
+// credentialMountPaneBoundaryNames are the names the pane boundary itself
+// installs — by af or by tmux — with values no repository source may
+// choose and no af mechanism may erase:
+//   - AF_SESSION/AF_SESSION_GEN/AF_HOME are af's OWN trusted session
+//     markers, the names sessionEnvFlags (session/tmux/envmarker.go)
+//     stamps into every pane environment with per-session values:
+//     the session name, its generation, and af's home provenance.
+//   - TMUX and TMUX_PANE are stamped by the tmux server for every pane:
+//     the server socket identity and the pane's %N id. Claude Code's tmux
+//     detection reads TMUX, and af's own in-pane commands read it too —
+//     currentTmuxName (api/sessions_identity.go) resolves the session a
+//     `--self` invocation belongs to from it.
+//
+// They are refused to repository run_args like every classified name — a
+// repo-supplied marker falsifies membership, and a repo-supplied TMUX
+// points in-pane tools at a server the repo controls — but they are NEVER
+// pinned: a defined-empty pin is carried by --session-env-empty and
+// re-asserted at the exec shim AFTER tmux installed the real values,
+// erasing them. markedOrphanProcesses (session/tmux/reap_membership.go)
+// proves ownership by the markers: a child orphaned inside the container
+// can no longer be attributed, discovered, or reaped, and blanked TMUX
+// names make in-pane `--self` report "not running inside a tmux session"
+// (#7531). These values come from af and tmux, not a repo source, and
+// reach the agent through the boundary itself — the boundary only has to
+// NOT erase them.
+var credentialMountPaneBoundaryNames = map[string]struct{}{
 	"AF_SESSION":     {},
 	"AF_SESSION_GEN": {},
 	"AF_HOME":        {},
+	"TMUX":           {},
+	"TMUX_PANE":      {},
 }
 
 // credentialMountProgramLoaderNames are names that choose which CODE the
@@ -446,7 +492,7 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 		denied[name] = struct{}{}
 	}
 	add(credentialMountSharedAFStateNames)
-	add(credentialMountSessionMarkerNames)
+	add(credentialMountPaneBoundaryNames)
 	add(credentialMountReassertedNames)
 	add(credentialMountProgramLoaderNames)
 	add(credentialMountIdentityEnvNames[agent])
@@ -487,8 +533,8 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	if _, ok := credentialMountSharedAFStateNames[name]; ok {
 		return "it relocates af's own state or falsifies af's session and tool selection", true
 	}
-	if _, ok := credentialMountSessionMarkerNames[name]; ok {
-		return "it falsifies af's session membership — af re-stamps the real marker at the pane boundary", true
+	if _, ok := credentialMountPaneBoundaryNames[name]; ok {
+		return "it falsifies af's session membership or pane identity — the real value is stamped at the pane boundary", true
 	}
 	if _, ok := credentialMountIdentityEnvNames[agent][name]; ok {
 		return "it can substitute the credential af mounts read-only", true
@@ -533,24 +579,28 @@ var credentialMountProxyCasePairs = [][2]string{
 	{"NO_PROXY", "no_proxy"},
 }
 
-// credentialMountProxyTwinForwarding normalizes a proxy pair so the
-// unforwarded spelling cannot keep an image-supplied value: every spelling is
-// in the inner filter's always-admitted set, so exempting a twin from the pin
-// without reseating it would leave the image's proxy reachable by clients that
-// prefer that spelling (Python's getproxies prefers a set lowercase name over
-// an uppercase one). For each pair the operator claimed through
-// session_env_passthrough, the first forwarded-and-host-set spelling supplies
-// the value V; every other spelling of the pair is emitted `-e NAME` and the
-// docker client environment synthesizes `NAME=V`, so both spellings resolve to
-// the operator's value. A pair member that is itself forwarded AND set keeps
-// its own approved value. When no forwarded spelling is set on the host the
-// pair contributes nothing — the "claimed a name they do not set" semantics
-// already lets the image's values stand for names the operator forwarded empty.
+// credentialMountTwinForwarding normalizes a name pair (proxy case
+// spellings, or a program-selector precedence group) so the unforwarded
+// spelling cannot keep an image-supplied value: every spelling is in the
+// inner filter's always-admitted set, so exempting a twin from the pin or
+// re-assert without reseating it would leave the image's value reachable
+// by clients that prefer that spelling (Python's getproxies prefers a set
+// lowercase name over an uppercase one; git consults GIT_SSH_COMMAND
+// before GIT_SSH). For each pair the operator claimed through
+// session_env_passthrough, the first forwarded-and-host-set spelling
+// supplies the value V; every other spelling of the pair is emitted
+// `-e NAME` and the docker client environment synthesizes `NAME=V`, so
+// both spellings resolve to the operator's value. A pair member that is
+// itself forwarded AND set keeps its own approved value. When no
+// forwarded spelling is set on the host the pair contributes nothing —
+// the "claimed a name they do not set" semantics already lets the image's
+// values stand for names the operator forwarded empty.
 //
-// names is the extra `-e NAME` set for docker run; synth is `NAME=V` entries
-// appended to the docker client's filtered environment, which is where a bare
-// `-e NAME` resolves its value — values therefore never appear in argv.
-func credentialMountProxyTwinForwarding(passthrough []string, environ []string) (names, synth []string) {
+// names is the extra `-e NAME` set for docker run; synth is `NAME=V`
+// entries appended to the docker client's filtered environment, which is
+// where a bare `-e NAME` resolves its value — values therefore never
+// appear in argv.
+func credentialMountTwinForwarding(pairs [][2]string, passthrough []string, environ []string) (names, synth []string) {
 	forwarded := make(map[string]struct{}, len(passthrough))
 	for _, name := range passthrough {
 		forwarded[name] = struct{}{}
@@ -561,7 +611,7 @@ func credentialMountProxyTwinForwarding(passthrough []string, environ []string) 
 			host[name] = value
 		}
 	}
-	for _, pair := range credentialMountProxyCasePairs {
+	for _, pair := range pairs {
 		var value string
 		claimed := false
 		for _, s := range pair {
@@ -585,6 +635,18 @@ func credentialMountProxyTwinForwarding(passthrough []string, environ []string) 
 			names = append(names, s)
 			synth = append(synth, s+"="+value)
 		}
+	}
+	return names, synth
+}
+
+// credentialMountGroupForwarding applies credentialMountTwinForwarding to
+// every pair table — proxy case spellings and selector precedence groups
+// share the same claim semantics (#7531).
+func credentialMountGroupForwarding(passthrough []string, environ []string) (names, synth []string) {
+	for _, pairs := range [][][2]string{credentialMountProxyCasePairs, credentialMountSelectorGroups} {
+		n, s := credentialMountTwinForwarding(pairs, passthrough, environ)
+		names = append(names, n...)
+		synth = append(synth, s...)
 	}
 	return names, synth
 }
@@ -631,10 +693,10 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 		if _, program := credentialMountSharedProgramEntries[name]; program {
 			continue
 		}
-		// af's session markers are af's own values, stamped at the pane
-		// boundary — an empty pin would erase them at the exec shim after
-		// tmux installed them (#7531).
-		if _, marker := credentialMountSessionMarkerNames[name]; marker {
+		// Pane-boundary names are af's and tmux's own values, stamped at
+		// the pane boundary — an empty pin would erase them at the exec
+		// shim after tmux installed them (#7531).
+		if _, marker := credentialMountPaneBoundaryNames[name]; marker {
 			continue
 		}
 		if _, ok := forwarded[name]; ok {
@@ -646,19 +708,24 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 	return out
 }
 
-// credentialMountBlankedWarning reports once per credential-mount session the
-// classified names that were actually set by the image or by docker.run_args
-// and that af pinned empty. The values are never inspected or printed — names
-// only. An unset variable can always be blanked silently; these are the ones a
-// working setup may have depended on, so each gets named with the remedy:
-// forward it in the global session_env_passthrough.
+// credentialMountOverriddenWarning reports once per credential-mount
+// session the classified names that were actually set by the image or by
+// docker.run_args and that af OVERRODE — pinned defined-and-empty or
+// re-asserted to a value. The values are never inspected or printed —
+// names only. An unset variable can always be blanked silently; these are
+// the ones a working setup may have depended on, so each gets named with
+// the remedy: forward it in the global session_env_passthrough. The
+// session-shaping re-asserts every credential-mount session emits
+// unconditionally (HOME, the XDG roots, SHELL, and PATH — which re-asserts
+// the image's own value) are not in `overridden` and stay out of this
+// notice.
 //
-// Blanked names run_args carried are reported even though the run_args
+// Overridden names run_args carried are reported even though the run_args
 // validator refuses classified entries — the warning is the migration's
-// notice layer and stays honest if a future flag spelling reaches the pin.
-func credentialMountBlankedWarning(imageEnv, runArgs []string, pinned []string) []string {
-	blanked := make(map[string]struct{}, len(pinned))
-	for _, name := range pinned {
+// notice layer and stays honest if a future flag spelling reaches one.
+func credentialMountOverriddenWarning(imageEnv, runArgs []string, overridden []string) []string {
+	blanked := make(map[string]struct{}, len(overridden))
+	for _, name := range overridden {
 		blanked[name] = struct{}{}
 	}
 	seen := make(map[string]struct{})
@@ -722,16 +789,26 @@ func dockerRunArgsEnvNames(args []string) []string {
 	return names
 }
 
-// credentialMountReassertEntries returns the sorted NAME=value re-asserts
-// runContainer emits after run_args: the agent's first-party endpoint
-// names plus the shared program-selector defaults — the names af cannot
-// pin empty because a defined empty value is itself a real (broken)
-// configuration. A name the operator forwards is skipped: their forwarded
-// -e NAME already carries their approved value.
-func credentialMountReassertEntries(agent string, passthrough []string) []string {
+// credentialMountReassertValues returns the re-assert value map after the
+// operator's claims: the agent's first-party endpoint names plus the
+// shared program-selector defaults, minus every name the operator
+// forwarded — and, because selector names form precedence groups, minus
+// every sibling of a forwarded member (credentialMountSelectorGroups: a
+// re-asserted sibling would sit ahead of the operator's program in
+// precedence and silently win, #7531).
+func credentialMountReassertValues(agent string, passthrough []string) map[string]string {
 	forwarded := make(map[string]struct{}, len(passthrough))
 	for _, name := range passthrough {
 		forwarded[name] = struct{}{}
+	}
+	for _, pair := range credentialMountSelectorGroups {
+		if _, ok := forwarded[pair[0]]; ok {
+			forwarded[pair[1]] = struct{}{}
+			continue
+		}
+		if _, ok := forwarded[pair[1]]; ok {
+			forwarded[pair[0]] = struct{}{}
+		}
 	}
 	values := make(map[string]string, len(credentialMountSharedProgramEntries)+len(credentialMountFirstPartyNames[agent]))
 	for name, value := range credentialMountSharedProgramEntries {
@@ -740,11 +817,36 @@ func credentialMountReassertEntries(agent string, passthrough []string) []string
 	for name, value := range credentialMountFirstPartyNames[agent] {
 		values[name] = value
 	}
+	for name := range forwarded {
+		delete(values, name)
+	}
+	return values
+}
+
+// credentialMountReassertNames returns the sorted names af re-asserts —
+// the keys of credentialMountReassertValues.
+func credentialMountReassertNames(agent string, passthrough []string) []string {
+	values := credentialMountReassertValues(agent, passthrough)
+	out := make([]string, 0, len(values))
+	for name := range values {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// credentialMountReassertEntries returns the sorted NAME=value re-asserts
+// runContainer emits after run_args: the names af cannot pin empty because
+// a defined empty value is itself a real (broken) configuration. The
+// re-assert stays UNCONDITIONAL over non-operator sources — an image's
+// ENV is the same trust class as its binaries for program CHOICE, but an
+// env value can name a path inside the mounted repository workspace,
+// which no image binary can; the bound is against values that point into
+// repo content, and only the operator's own claim exempts a name (#7531).
+func credentialMountReassertEntries(agent string, passthrough []string) []string {
+	values := credentialMountReassertValues(agent, passthrough)
 	out := make([]string, 0, len(values))
 	for name, value := range values {
-		if _, ok := forwarded[name]; ok {
-			continue
-		}
 		out = append(out, name+"="+value)
 	}
 	sort.Strings(out)

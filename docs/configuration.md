@@ -218,7 +218,10 @@ The built-in allowlist keeps the pieces sessions need:
   dynamic words require exporting the selector before starting af, or
   explicitly listing the provider credential names. Codex gets
   `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_HOME`,
-  `CODEX_SQLITE_HOME`, and its CA path; Gemini gets Gemini/Google API keys, and
+  `CODEX_SQLITE_HOME`, and its CA path; Gemini gets Gemini/Google API keys, its
+  first-party endpoint overrides (`CODE_ASSIST_ENDPOINT`,
+  `CODE_ASSIST_API_VERSION`, `GOOGLE_GEMINI_BASE_URL`,
+  `GOOGLE_VERTEX_BASE_URL`), and
   gets Google Cloud's credentials (`GOOGLE_APPLICATION_CREDENTIALS`,
   `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`) only when one of its own cloud
   modes is selected by `GOOGLE_GENAI_USE_VERTEXAI` or `GOOGLE_GENAI_USE_GCA`, on
