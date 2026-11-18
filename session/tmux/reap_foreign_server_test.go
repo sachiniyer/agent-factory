@@ -310,16 +310,18 @@ func TestVanishedSessionSweep_RealTmuxForeignServerCarrier(t *testing.T) {
 	require.True(t, own.valid(), "a real server answers with a complete identity")
 
 	// The FOREIGN server — the user's own tmux started inside a pane, the
-	// #7469 shape. Its pane exports the AF markers, spawns a setsid'd
-	// init-reparented carrier that keeps the pane's slave pty and the
-	// server's TMUX tuple, then stays alive so the masters stay held.
+	// #7469 shape. Its pane exports the AF markers and spawns a carrier in a
+	// self-exiting subshell — ( cmd & ) is the portable double-detach; there
+	// is no setsid binary on darwin — so the carrier reparents to init while
+	// keeping the pane's slave pty as its stdio and the server's TMUX tuple.
+	// The pane then sleeps so the foreign masters stay held.
 	dir := testguard.SocketTempDir(t)
 	fsock := filepath.Join(dir, "f.sock")
 	pidFile := filepath.Join(dir, "carrier.pid")
 	pane := "export " + EnvMarkerSession + "=" + name +
 		" " + EnvMarkerHome + "=" + home +
 		" " + EnvMarkerGeneration + "=" + gen +
-		"; setsid -f sh -c 'echo $$ > " + pidFile + "; exec sleep 300'" +
+		"; ( sh -c 'echo $$ > " + pidFile + "; exec sleep 300' </dev/null & )" +
 		"; exec sleep 300"
 	require.NoError(t, exec.Command("tmux", "-S", fsock, "-f", "/dev/null",
 		"new-session", "-d", "-s", "foreign", "sh", "-c", pane).Run())
@@ -329,8 +331,6 @@ func TestVanishedSessionSweep_RealTmuxForeignServerCarrier(t *testing.T) {
 	t.Cleanup(func() { _ = proctree.Signal(carrier, syscall.SIGKILL) })
 	require.Equal(t, 1, carrier.PPID,
 		"the carrier must be init-reparented — the detached shape #7469 reports")
-	require.Equal(t, carrier.PID, carrier.SID,
-		"a setsid'd carrier leads its own session — no pane SID carries it")
 
 	// The attribution channels themselves, on real evidence: the carrier's
 	// env tuple names a socket that is not the recorded one, and its held
