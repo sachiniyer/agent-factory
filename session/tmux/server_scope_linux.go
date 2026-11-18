@@ -172,6 +172,7 @@ func ensureDedicatedServer(home string) error {
 	_ = launchLog.Close()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	launcherExited := false
 
 	deadline := time.NewTimer(serverStartupTimeout)
 	defer deadline.Stop()
@@ -179,12 +180,25 @@ func ensureDedicatedServer(home string) error {
 	defer ticker.Stop()
 	for {
 		if probeDedicatedServer() == dedicatedServerPresent {
-			dedicatedServerReady(home, unit)
+			// A launcher that already exited cannot be the server that just
+			// answered: `tmux -D` IS the server, and it is gone. Adopt the
+			// answerer rather than credit this scope's dead unit (#7557).
+			select {
+			case <-done:
+				launcherExited = true
+			default:
+			}
+			if launcherExited {
+				recordAdoptedServer(home)
+			} else {
+				dedicatedServerReady(home, unit)
+			}
 			return nil
 		}
 		select {
 		case launchErr := <-done:
 			done = nil
+			launcherExited = true
 			if probeDedicatedServer() == dedicatedServerPresent {
 				// A concurrent AF home may have won the same socket after this
 				// launcher failed — and once `done` delivers, the answering
@@ -460,14 +474,6 @@ func runDedicatedServer() error {
 	_, _ = fmt.Fprintf(writer, "%s af tmux server starting in foreground\n", time.Now().Format(time.RFC3339))
 
 	unit := os.Getenv(dedicatedServerUnitEnv)
-	// Recheck the socket before binding it: the launcher committed on a
-	// definitive absent verdict, but a concurrent AF home may have won the
-	// socket in between, and `tmux -D` against a server that already answers
-	// is a failed attach — exiting after one is not a server death (#7557).
-	if probeDedicatedServer() == dedicatedServerPresent {
-		_, _ = fmt.Fprintf(writer, "%s af tmux server not launched: the socket already has a server\n", time.Now().Format(time.RFC3339))
-		return nil
-	}
 	cmd := exec.Command("tmux", tmuxArgv("-D")...)
 	cmd.Env = withoutEnvironment(withoutEnvironment(os.Environ(), dedicatedServerLogEnv), dedicatedServerUnitEnv)
 	cmd.Stdout = writer

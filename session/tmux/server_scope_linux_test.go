@@ -5,6 +5,7 @@ package tmux
 import (
 	"bytes"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -340,7 +341,7 @@ func TestDedicatedServerWrapperCapturesStderr(t *testing.T) {
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "args")
 	tmuxShim := filepath.Join(dir, "tmux")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$AF_TEST_TMUX_ARGS\"\nprintf '%s\\n' 'fatal-sentinel-3307' >&2\nexit 42\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$AF_TEST_TMUX_ARGS\"\nprintf '%s\\n' 'fatal-sentinel-3307' >&2\nexit 42\n"
 	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
 		t.Fatalf("write tmux shim: %v", err)
 	}
@@ -356,8 +357,17 @@ func TestDedicatedServerWrapperCapturesStderr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read tmux shim args: %v", err)
 	}
-	if got := strings.TrimSpace(string(args)); got != "-D" {
-		t.Fatalf("tmux wrapper args = %q, want foreground -D", got)
+	// The wrapper's post-exit presence read (mandated by #7557's marker
+	// property) calls tmux after `-D`, so the log holds more than one call;
+	// the assertion that matters is that the foreground `-D` launch ran.
+	launched := false
+	for _, line := range strings.Split(string(args), "\n") {
+		if strings.TrimSpace(line) == "-D" {
+			launched = true
+		}
+	}
+	if !launched {
+		t.Fatalf("tmux wrapper calls = %q, want a foreground -D launch among them", args)
 	}
 	contents, err := os.ReadFile(logPath)
 	if err != nil {
@@ -925,21 +935,20 @@ func TestEnsureDaemonServerRefusedSocketLaunchesOnce(t *testing.T) {
 	logPath := filepath.Join(dir, "tmux-calls")
 	delegatingTmuxShim(t, logPath, "")
 
-	// A private server killed with SIGKILL cannot unlink its socket file, so
-	// the stale path refuses the next client — a dead server's own diagnostic.
-	if out, err := exec.Command("tmux", "new-session", "-d", "-s", "stale", "sleep", "60").CombinedOutput(); err != nil {
-		t.Fatalf("start private tmux server: %v: %s", err, out)
+	// A socket file nobody listens on is exactly what a SIGKILLed server
+	// leaves behind, but binding and closing one directly skips the teardown
+	// window where a real connect can be answered with a transient error
+	// instead of the definitive refusal the verdict needs.
+	if err := os.MkdirAll(filepath.Dir(DefaultSocketPath()), 0o700); err != nil {
+		t.Fatalf("create private socket dir: %v", err)
 	}
-	out, err := exec.Command("tmux", "display-message", "-p", "#{pid}").Output()
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: DefaultSocketPath()})
 	if err != nil {
-		t.Fatalf("read private server pid: %v", err)
+		t.Fatalf("bind stale socket: %v", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		t.Fatalf("parse private server pid %q: %v", out, err)
-	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-		t.Fatalf("kill private tmux server %d: %v", pid, err)
+	ln.SetUnlinkOnClose(false)
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close stale socket: %v", err)
 	}
 
 	systemdRun := writeShim(t, "systemd-run", "#!/bin/sh\nprintf '%s\\n' LAUNCH >>\""+logPath+"\"\nexit 77\n")
@@ -1102,20 +1111,26 @@ func TestDedicatedServerWrapperRecordsDeathOnDefinitiveAbsence(t *testing.T) {
 
 // TestDedicatedServerLauncherAdoptsTheSurvivingServer walks the full
 // systemd-run path: the gate reads a definitive absence, the wrapper starts,
-// but a racer owns the socket by the time it probes — so `tmux -D` never even
-// runs, the answering server is recorded as ADOPTED (never credited to this
-// scope's already-exited unit), and no death marker is written.
+// but a racer owns the socket so `tmux -D` attach-fails and exits — and the
+// server that still answers afterward is recorded as ADOPTED, never credited
+// to this scope's already-exited unit, and no death marker is written.
 func TestDedicatedServerLauncherAdoptsTheSurvivingServer(t *testing.T) {
 	testguard.IsolateTmux(t)
 	dir := t.TempDir()
-	countPath := filepath.Join(dir, "probe-count")
+	racerUp := filepath.Join(dir, "racer-answers")
+	// The wrapper's presence reads carry AF_TMUX_SERVER_LOG in their
+	// environment; the launcher's do not. Until the wrapper's own post-exit
+	// read has answered, every launcher-side read sees the racer's socket
+	// still refuse — so a `present` answer can only reach the launcher once
+	// the wrapper has definitively failed. The answer's short delay is the
+	// cushion for the exit to be reaped before it is classified.
 	tmuxScript := "#!/bin/sh\n" +
-		"n=0\nif [ -f \"" + countPath + "\" ]; then n=$(cat \"" + countPath + "\"); fi\n" +
-		"n=$((n+1))\nprintf '%s\\n' \"$n\" > \"" + countPath + "\"\n" +
 		"if [ \"$1\" = \"show-options\" ]; then\n" +
-		"  if [ \"$n\" -eq 1 ]; then\n" +
-		"    printf '%s\\n' \"error connecting to /nonexistent (No such file or directory)\" >&2\n    exit 1\n" +
-		"  fi\n  echo on\n  exit 0\nfi\n" +
+		"  if [ -n \"$AF_TMUX_SERVER_LOG\" ]; then\n" +
+		"    touch \"" + racerUp + "\"\n  echo on\n  exit 0\n  fi\n" +
+		"  if [ ! -f \"" + racerUp + "\" ]; then\n" +
+		"    printf '%s\\n' \"error connecting to /nonexistent (No such file or directory)\" >&2\n    exit 1\n  fi\n" +
+		"  sleep 0.1\n  echo on\n  exit 0\nfi\n" +
 		"if [ \"$1\" = \"-D\" ]; then\n" +
 		"  printf '%s\\n' \"open terminal failed: not a terminal\" >&2\n  exit 1\nfi\n" +
 		"exit 0\n"
