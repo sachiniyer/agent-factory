@@ -117,8 +117,13 @@ func (p *dockerProvisioner) copyAfBinary() error {
 }
 
 // dockerPolicyPath is where the daemon-resolved operator policy lands in the
-// container (#5571 W2.5).
-const dockerPolicyPath = "/tmp/af-policy.json"
+// container (#5571 W2.5). /etc rather than /tmp: the cp fallback's mount-table
+// check refuses any non-rootfs mount covering a write target — a private
+// --tmpfs is indistinguishable from a host tmpfs bind there — and --tmpfs /tmp
+// is a common hardening flag, while a mount over /etc breaks the container's
+// own resolv.conf/hostname/hosts and is correspondingly rare. /etc also exists
+// on every image that can host a container at all.
+const dockerPolicyPath = "/etc/af-policy.json"
 
 // copyPolicy places spec.AgentPolicy in the container for the agent-server to
 // read instead of the image's own config. On the cp fallback path the staged

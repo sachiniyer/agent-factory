@@ -464,9 +464,8 @@ type dockerProvisioner struct {
 	reapErr error
 
 	// Staged payload delivery (#7577 item 2): stagingDir is the af-owned
-	// per-session dir (removed on reap) holding the payload files;
-	// stagedAfPath/stagedPolicyPath are its members; payloadViaBinds marks
-	// the bind-delivery decision (see preparePayloadDelivery).
+	// per-session dir (removed on reap) holding stagedAfPath/stagedPolicyPath;
+	// payloadViaBinds marks the bind-delivery decision (preparePayloadDelivery).
 	stagingDir       string
 	stagedAfPath     string
 	stagedPolicyPath string
@@ -532,8 +531,7 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 	}
 	// Deliver af's own payload through read-only binds appended last in
-	// `docker run` — no cp, no root chmod for a run_args mount to redirect
-	// onto the host (#7577 item 2).
+	// `docker run` — no cp/chmod for a run_args mount to redirect (#7577 item 2).
 	p.preparePayloadDelivery()
 	if err := p.runPayloadContainer(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
@@ -608,6 +606,8 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 			cleanup: &DockerRuntimeCleanupData{
 				ContainerID: p.containerID,
 				EngineID:    p.engineID,
+				// Base name only: restore re-roots it under the staging root.
+				StagingDir: dockerStagingRecordName(p.stagingDir),
 			},
 		},
 		Endpoint: endpoint,

@@ -3,7 +3,7 @@
 // bind mounts appended LAST in the `docker run` argv — after docker.run_args —
 // rather than through `docker cp` + root chmod. A repo-controlled run_args mount
 // can then no longer redirect af's writes through a host bind at
-// /usr/local/bin/af or /tmp/af-policy.json: there is no write, and a bind
+// /usr/local/bin/af or /etc/af-policy.json: there is no write, and a bind
 // shadowing the af destination is a docker-level duplicate mount the provisioner
 // turns into an actionable error.
 //
@@ -12,7 +12,7 @@
 // OrbStack, a podman machine), and a source path outside the shared roots
 // cannot mount at all. The fallback is the old cp mechanism — but only after a
 // mount-table check proves each write target sits on the container's own root
-// filesystem (or a tmpfs), refusing any other enclosing mount.
+// filesystem, refusing any other enclosing mount, tmpfs included.
 package session
 
 import (
@@ -68,9 +68,18 @@ func (p *dockerProvisioner) preparePayloadDelivery() {
 		log.WarningLog.Printf("docker runtime: cannot stage the container payload (%v); delivering it via `docker cp` after the mount-table check", err)
 		p.stagedAfPath, p.stagedPolicyPath = "", ""
 	}
-	p.payloadViaBinds = p.stagedAfPath != "" && p.stagingShareable(p.stagingDir)
-	if p.stagedAfPath != "" && !p.payloadViaBinds {
+	switch {
+	case p.stagedAfPath == "":
+		// Staging failed — the whole pre-#7577 cp+chmod path runs behind the guard.
+	case !p.stagingShareable(p.stagingDir):
 		log.InfoLog.Printf("docker runtime: staging dir %s is outside the engine's shared file roots; delivering af's payload via `docker cp` after the mount-table check", p.stagingDir)
+	case strings.ContainsAny(p.stagingDir, ":,"):
+		// dockerAccountMount's rule: ':' splits a -v spec's fields and ',' splits
+		// --mount's. The staged files still carry the right modes, so the guarded
+		// cp fallback needs no bind at all.
+		log.InfoLog.Printf("docker runtime: staging dir %s contains ':' or ',', which a bind-mount spec cannot encode; delivering af's payload via `docker cp` after the mount-table check", p.stagingDir)
+	default:
+		p.payloadViaBinds = true
 	}
 }
 
@@ -88,7 +97,13 @@ func (p *dockerProvisioner) runPayloadContainer() error {
 	p.payloadViaBinds = false
 	if p.containerID != "" {
 		if _, rerr := p.docker(dockerShortStepTimeout, "rm", "-f", p.containerID); rerr != nil {
-			log.WarningLog.Printf("docker runtime: cleanup of the sharing-refused container %s failed: %v", p.shortID(), rerr)
+			// Keep the handle: resetForRunRetry clearing it would orphan a
+			// container no record reaches — the orphan sweeper spares a live
+			// session's slug. Failing the provision hands it to
+			// reapProvisionFailure's `docker rm -f`, which either removes it or
+			// confirms it gone.
+			return fmt.Errorf("backend=docker: `docker run` refused the staged binds and `docker rm -f %s` on the refused container also failed (%v); abandoning the retry rather than leaking the first container: %w",
+				p.shortID(), rerr, err)
 		}
 	}
 	p.resetForRunRetry()
@@ -98,8 +113,8 @@ func (p *dockerProvisioner) runPayloadContainer() error {
 // deliverPayload gets af's files into the container. On the bind path there is
 // nothing to write — the mounts already serve them. The cp fallback is the
 // only path that writes into the container at all, so it is the only path
-// verifyWriteTargets must prove stays on the container's own filesystem (or a
-// tmpfs) — a run_args mount at the destination would otherwise carry af's
+// verifyWriteTargets must prove stays on the container's own filesystem —
+// a run_args mount at the destination would otherwise carry af's
 // write onto a host path the repo chose (#7577 item 2's exact hole).
 func (p *dockerProvisioner) deliverPayload() error {
 	if !p.payloadViaBinds {
@@ -153,6 +168,12 @@ func (p *dockerProvisioner) stageContainerPayload(dir string) error {
 	if err := os.WriteFile(afStaged, afBytes, 0o755); err != nil {
 		return fmt.Errorf("backend=docker: cannot stage the af binary into %s: %w", dir, err)
 	}
+	// WriteFile applies the daemon's umask — under 0077 the file lands 0700 and
+	// a non-root container user cannot exec it. Pin the mode the contract means;
+	// both delivery paths carry it verbatim now that no in-container chmod runs.
+	if err := os.Chmod(afStaged, 0o755); err != nil {
+		return fmt.Errorf("backend=docker: cannot set the staged af binary's mode in %s: %w", dir, err)
+	}
 	// Guard the file-bind contract: docker creates a DIRECTORY at a missing
 	// source path, silently turning the mount into an empty dir over
 	// /usr/local/bin/af. Staging wrote the file a line ago; a vanished source
@@ -165,6 +186,9 @@ func (p *dockerProvisioner) stageContainerPayload(dir string) error {
 		policyStaged := filepath.Join(dir, "af-policy.json")
 		if err := os.WriteFile(policyStaged, p.spec.AgentPolicy, 0o644); err != nil {
 			return fmt.Errorf("backend=docker: cannot stage the operator policy into %s: %w", dir, err)
+		}
+		if err := os.Chmod(policyStaged, 0o644); err != nil {
+			return fmt.Errorf("backend=docker: cannot set the staged policy's mode in %s: %w", dir, err)
 		}
 		if st, err := os.Stat(policyStaged); err != nil || !st.Mode().IsRegular() {
 			return fmt.Errorf("backend=docker: the staged operator policy %s is not a regular file; refusing to bind-mount a missing source", policyStaged)
@@ -253,9 +277,9 @@ func dockerDuplicateMountError(out string, err error) error {
 }
 
 // mountEntry is one mountinfo row's usable slice: the mount point and its
-// filesystem type. parseMountPoints pre-dates the need for the type; the
-// write-target check needs it to allow tmpfs while refusing host-backed
-// mounts at the same destination.
+// filesystem type. The type no longer decides anything — no fstype is an
+// exception to the rootfs rule — but it still names the refused mount in the
+// operator-facing error.
 type mountEntry struct {
 	point  string
 	fstype string
@@ -277,10 +301,18 @@ func parseMountEntries(mountinfo string) ([]mountEntry, error) {
 		if len(fields) < 7 {
 			return nil, fmt.Errorf("unparseable mountinfo line %q", line)
 		}
-		mp := path.Clean(unescapeMountinfo(fields[4]))
-		if !strings.HasPrefix(mp, "/") {
+		// Check the decoded-but-uncleaned point: path.Clean would collapse a
+		// "//" prefix before it could be refused, and a backslash in the raw
+		// field is a legitimately-escaped byte in a real path. "//" and "\"
+		// in the DECODED value are never in a real mountinfo mount point (the
+		// kernel octal-escapes special bytes), so a table carrying one is
+		// hostile or corrupt — refuse it rather than prefix-match a cleaned
+		// path that lost the signal.
+		mp := unescapeMountinfo(fields[4])
+		if !strings.HasPrefix(mp, "/") || strings.HasPrefix(mp, "//") || strings.ContainsRune(mp, '\\') {
 			return nil, fmt.Errorf("unparseable mountinfo mount point %q", fields[4])
 		}
+		mp = path.Clean(mp)
 		sep := -1
 		for i := 5; i < len(fields); i++ {
 			if fields[i] == "-" {
@@ -328,18 +360,20 @@ func enclosingMountEntry(entries []mountEntry, p string) mountEntry {
 const leafSymlinkMarker = "AF-LEAF-SYMLINK "
 
 // verifyWriteTargets proves every path af is about to `docker cp` into lands on
-// the container's own root filesystem — or on a tmpfs, whose contents never
-// reach a host file — before the cp runs. A bind at the destination or an
-// ancestor would otherwise let the write land on a host path the repo chose
-// (#7577 item 2's exact hole). This runs only on the cp fallback: when the
-// staging binds are used there is no write to guard.
+// the container's own root filesystem before the cp runs. A bind at the
+// destination or an ancestor would otherwise let the write land on a host path
+// the repo chose (#7577 item 2's exact hole). This runs only on the cp
+// fallback: when the staging binds are used there is no write to guard.
 //
 // One exec resolves both destination parents and reads the container's own
 // /proc/self/mountinfo — the same table shape the chown guard uses — then a
 // `test -L` tail marks any symlinked destination leaf. Three cases get refused:
-// a non-rootfs non-tmpfs mount enclosing the resolved destination, a non-tmpfs
-// mount below it (cp writes into a destination that is a directory), and a
-// symlinked leaf, whose write escapes the checked path entirely.
+// any non-rootfs mount enclosing the resolved destination, any mount below it
+// (cp writes into a destination that is a directory), and a symlinked leaf,
+// whose write escapes the checked path entirely. There is no fstype exception:
+// a private --tmpfs and a host tmpfs bind (-v /dev/shm:/dst) report the same
+// fstype, so allowing tmpfs would read a host bind as safe — a write through
+// one reaches the HOST, not the container.
 //
 // The mount table is read through the container's /bin/sh — image code. That
 // reader is the documented residual: an image can already run anything as
@@ -394,21 +428,52 @@ func (p *dockerProvisioner) verifyWriteTargets() error {
 		}
 		realTarget := path.Join(realParent, path.Base(target))
 		entry := enclosingMountEntry(entries, realTarget)
-		if entry.point != "/" && entry.fstype != "tmpfs" {
-			return dockerStepErr(fmt.Errorf("backend=docker: refusing to write %s: it resolves to %s, inside the mount %s (%s) rather than the container's root filesystem — a docker.run_args mount there would carry af's write onto the host; remove that mount or move it elsewhere",
+		// No fstype exception: the mount table reports a host tmpfs bind
+		// (-v /dev/shm:/dst) exactly as a private --tmpfs, so an exception
+		// for tmpfs would read a host bind as safe. Only a resolution under
+		// "/" itself is the container's own filesystem.
+		if entry.point != "/" {
+			return dockerStepErr(fmt.Errorf("backend=docker: refusing to write %s: it resolves to %s, inside the mount %s (%s) rather than the container's root filesystem — the mount table cannot tell a private tmpfs from a host tmpfs bind, so any non-rootfs mount is refused; a docker.run_args mount there would carry af's write onto the host; remove that mount or move it elsewhere",
 				target, realTarget, entry.point, entry.fstype), dockerOpLocal)
 		}
 		// A directory at the destination makes cp write beneath it, onto
-		// whatever mount owns the matching name. Any non-tmpfs mount below
-		// the resolved target could catch that write.
+		// whatever mount owns the matching name. Any mount below the
+		// resolved target could catch that write, tmpfs included.
 		for _, e := range entries {
-			if strings.HasPrefix(e.point, realTarget+"/") && e.fstype != "tmpfs" {
+			if strings.HasPrefix(e.point, realTarget+"/") {
 				return dockerStepErr(fmt.Errorf("backend=docker: refusing to write %s: the mount %s (%s) sits beneath the destination, where a cp landing inside it would reach the host — a docker.run_args mount there would carry af's write onto the host; remove that mount or move it elsewhere",
 					target, e.point, e.fstype), dockerOpLocal)
 			}
 		}
 	}
 	return nil
+}
+
+// dockerStagingRecordName is the persistable half of the staging path: its
+// base name only. The cleanup record is operator-visible storage, and a full
+// path in it would be a deletion target a tampered record could aim anywhere;
+// the base name re-roots under the af-owned staging root on restore instead.
+func dockerStagingRecordName(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return filepath.Base(dir)
+}
+
+// restoredDockerStagingDir re-binds a persisted staging dir name for a
+// teardown rebuilt after a daemon restart. Only the exact shape provisioning
+// mints — Slugify(title)+"-"+8 hex — is accepted: anything else is a stale or
+// tampered record, and degrades to the pre-field leak rather than removing a
+// directory this session cannot prove it owns.
+func restoredDockerStagingDir(title, recorded string) string {
+	if recorded == "" || filepath.Base(recorded) != recorded || !strings.HasPrefix(recorded, Slugify(title)+"-") {
+		return ""
+	}
+	afHome, err := config.GetConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(afHome, dockerStagingDirName, recorded)
 }
 
 // resetForRunRetry clears the container handle and reap latch after a

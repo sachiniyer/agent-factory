@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -382,9 +383,11 @@ func TestDockerStagingSharingFailureRetriesOnceWithCp(t *testing.T) {
 }
 
 // TestDockerWriteGuardRefusesHostMounts is option A's fallback check: on the
-// cp path, a write target enclosed by — or covering — a mount that is neither
-// the container rootfs nor a tmpfs is refused with an actionable error, and
-// no cp runs.
+// cp path, a write target enclosed by — or covering — ANY mount other than the
+// container rootfs is refused with an actionable error, and no cp runs. tmpfs
+// rows are refused on purpose: a host tmpfs bind (-v /dev/shm:/dst) reports the
+// same fstype as a private --tmpfs, so the check cannot tell them apart — and
+// a write through the host bind escapes the container.
 func TestDockerWriteGuardRefusesHostMounts(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -397,37 +400,66 @@ func TestDockerWriteGuardRefusesHostMounts(t *testing.T) {
 		{
 			name:        "bind over the af directory",
 			realA:       "/usr/local/bin",
-			realB:       "/tmp",
+			realB:       "/usr/local/bin",
 			mounts:      [][2]string{{"/usr/local/bin", "ext4"}},
 			wantRefused: dockerAfBinaryPath,
 		},
 		{
 			name:        "bind at the af file itself",
 			realA:       "/usr/local/bin",
-			realB:       "/tmp",
+			realB:       "/usr/local/bin",
 			mounts:      [][2]string{{"/usr/local/bin/af", "ext4"}},
 			wantRefused: dockerAfBinaryPath,
 		},
 		{
 			name:        "bind over the policy directory",
 			realA:       "/usr/local/bin",
-			realB:       "/tmp",
-			mounts:      [][2]string{{"/tmp", "ext4"}},
+			realB:       "/etc",
+			mounts:      [][2]string{{"/etc", "ext4"}},
 			wantRefused: dockerPolicyPath,
 			policy:      true,
 		},
 		{
 			name:        "symlinked parent resolving onto a bind",
 			realA:       "/mnt/host-bin",
-			realB:       "/tmp",
+			realB:       "/usr/local/bin",
 			mounts:      [][2]string{{"/mnt/host-bin", "ext4"}},
 			wantRefused: dockerAfBinaryPath,
 		},
 		{
 			name:        "mount beneath a directory destination",
 			realA:       "/usr/local/bin",
-			realB:       "/tmp",
+			realB:       "/usr/local/bin",
 			mounts:      [][2]string{{"/usr/local/bin/af/inner", "nfs"}},
+			wantRefused: dockerAfBinaryPath,
+		},
+		{
+			name:        "host tmpfs bind over the af directory",
+			realA:       "/usr/local/bin",
+			realB:       "/usr/local/bin",
+			mounts:      [][2]string{{"/usr/local/bin", "tmpfs"}},
+			wantRefused: dockerAfBinaryPath,
+		},
+		{
+			name:        "tmpfs bind at the af file itself",
+			realA:       "/usr/local/bin",
+			realB:       "/usr/local/bin",
+			mounts:      [][2]string{{"/usr/local/bin/af", "tmpfs"}},
+			wantRefused: dockerAfBinaryPath,
+		},
+		{
+			name:        "tmpfs mount over the policy directory",
+			realA:       "/usr/local/bin",
+			realB:       "/etc",
+			mounts:      [][2]string{{"/etc", "tmpfs"}},
+			wantRefused: dockerPolicyPath,
+			policy:      true,
+		},
+		{
+			name:        "tmpfs mount beneath a directory destination",
+			realA:       "/usr/local/bin",
+			realB:       "/usr/local/bin",
+			mounts:      [][2]string{{"/usr/local/bin/af/inner", "tmpfs"}},
 			wantRefused: dockerAfBinaryPath,
 		},
 	}
@@ -460,29 +492,39 @@ func TestDockerWriteGuardRefusesHostMounts(t *testing.T) {
 	}
 }
 
-// TestDockerWriteGuardAllowsRootfsAndTmpfs pins the two allowed cases: the
-// destination resolving under "/" itself, and a destination on a tmpfs —
-// whose contents never reach a host file.
-func TestDockerWriteGuardAllowsRootfsAndTmpfs(t *testing.T) {
+// TestDockerWriteGuardAllowsRootfs pins the allowed case: every write target
+// resolves under "/" itself. The second row is the --tmpfs /tmp preservation
+// the policy path exists for: a private tmpfs over /tmp is a common hardening
+// flag, and with the policy at /etc nothing af writes lands beneath it, so the
+// fallback still delivers.
+func TestDockerWriteGuardAllowsRootfs(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		mounts [][2]string
+		policy bool
 	}{
 		{name: "plain rootfs"},
-		{name: "tmpfs over the af directory", mounts: [][2]string{{"/usr/local/bin", "tmpfs"}}},
-		{name: "tmpfs at the af file", mounts: [][2]string{{"/usr/local/bin/af", "tmpfs"}}},
+		{name: "a private tmpfs over /tmp elsewhere is irrelevant", mounts: [][2]string{{"/tmp", "tmpfs"}}, policy: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			stagingTestEnv(t)
 			var calls [][]string
-			answer := writeGuardTableAnswer("/usr/local/bin", "/tmp", tt.mounts...)
+			realB := "/usr/local/bin"
+			if tt.policy {
+				realB = "/etc"
+			}
+			answer := writeGuardTableAnswer("/usr/local/bin", realB, tt.mounts...)
 			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false,
 				func(string) ([]byte, error) { return answer, nil }, nil))
 
+			spec := ProvisionSpec{Title: "allowed", CloneURL: "file:///repo"}
+			if tt.policy {
+				spec.AgentPolicy = []byte(`{"hooks":{}}`)
+			}
 			p := &dockerProvisioner{
 				image: "img:latest",
 				afBin: filepath.Join(t.TempDir(), "missing-af"),
-				spec:  ProvisionSpec{Title: "allowed", CloneURL: "file:///repo"},
+				spec:  spec,
 			}
 			_, err := p.provision()
 			require.NoError(t, err, "calls=%v", calls)
@@ -497,7 +539,7 @@ func TestDockerWriteGuardAllowsRootfsAndTmpfs(t *testing.T) {
 func TestDockerWriteGuardRefusesSymlinkLeaf(t *testing.T) {
 	stagingTestEnv(t)
 	var calls [][]string
-	answer := append(writeGuardTableAnswer("/usr/local/bin", "/tmp"),
+	answer := append(writeGuardTableAnswer("/usr/local/bin", "/usr/local/bin"),
 		[]byte(leafSymlinkMarker+dockerAfBinaryPath+"\n")...)
 	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false,
 		func(string) ([]byte, error) { return answer, nil }, nil))
@@ -527,6 +569,12 @@ func TestDockerWriteGuardUnreadableTableRefuses(t *testing.T) {
 		}},
 		{name: "unparseable answer", answer: func(string) ([]byte, error) {
 			return []byte("not a mount table\n"), nil
+		}},
+		{name: "double-slash mount point in the table", answer: func(string) ([]byte, error) {
+			// "//host" is not a shape a kernel mountinfo emits; the parser
+			// must refuse it rather than prefix-match the cleaned "/host".
+			return writeGuardTableAnswer("/usr/local/bin", "/usr/local/bin",
+				[2]string{"//host", "ext4"}), nil
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -626,4 +674,194 @@ func TestDockerStagingRelabelsForSELinux(t *testing.T) {
 	run := findDockerCall(calls, "run", ":"+dockerAfBinaryPath+":ro,z")
 	require.NotNil(t, run,
 		"an enforcing host must relabel the staged bind (ro,z); calls=%v", calls)
+}
+
+// TestDockerStagingModesIgnoreTheUmask: os.WriteFile applies the daemon's
+// umask, so under 0077 an unpinned stage would land af at 0700 and the policy
+// at 0600 — a non-root container user could neither exec the binary nor read
+// the policy, the exact regression the removed in-container chmod used to
+// repair. Staging pins both modes explicitly.
+func TestDockerStagingModesIgnoreTheUmask(t *testing.T) {
+	original := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(original) })
+
+	home := stagingTestEnv(t)
+	var calls [][]string
+	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+
+	p := &dockerProvisioner{
+		image: "img:latest",
+		afBin: stagingBinarySource(t),
+		spec: ProvisionSpec{
+			Title:       "umasked",
+			CloneURL:    "file:///repo",
+			AgentPolicy: []byte(`{"hooks":{}}`),
+		},
+	}
+	_, err := p.provision()
+	require.NoError(t, err, "calls=%v", calls)
+
+	dirs, err := os.ReadDir(filepath.Join(home, dockerStagingDirName))
+	require.NoError(t, err)
+	require.Len(t, dirs, 1)
+	afStaged := filepath.Join(home, dockerStagingDirName, dirs[0].Name(), "af")
+	st, err := os.Stat(afStaged)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), st.Mode().Perm(), "a 0077 umask must not strip the binary's exec bits")
+	st, err = os.Stat(filepath.Join(home, dockerStagingDirName, dirs[0].Name(), "af-policy.json"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), st.Mode().Perm(), "a 0077 umask must not strip the policy's read bits")
+}
+
+// TestDockerStagingDirReapedWhenRunNeverCreated: a `docker run` refusal that
+// creates no container — the duplicate-mount error is exactly this shape —
+// still has to clear the staged payload. reapProvisionFailure's old early
+// return skipped reap() entirely, leaking one af-binary copy per failed
+// provision.
+func TestDockerStagingDirReapedWhenRunNeverCreated(t *testing.T) {
+	home := stagingTestEnv(t)
+	var calls [][]string
+	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil,
+		func(string, int) ([]byte, error) {
+			return nil, fmt.Errorf("exit status 125: duplicate mount point")
+		}))
+
+	p := &dockerProvisioner{
+		image: "img:latest",
+		afBin: stagingBinarySource(t),
+		spec:  ProvisionSpec{Title: "norun", CloneURL: "file:///repo"},
+	}
+	_, err := p.provision()
+	require.Error(t, err, "calls=%v", calls)
+	// The production pair: dockerRuntime.Provision wraps a failed provision()
+	// in reapProvisionFailure — the inner method alone runs no cleanup.
+	require.Error(t, p.reapProvisionFailure(err))
+
+	entries, rerr := os.ReadDir(filepath.Join(home, dockerStagingDirName))
+	require.NoError(t, rerr)
+	assert.Empty(t, entries, "a run that never created a container must still clear the staging dir")
+	assert.Empty(t, p.stagingDir)
+}
+
+// TestDockerStagingColonHomeUsesTheCpFallback: an AF home path carrying ':' or
+// ',' cannot be encoded — ':' splits a -v spec's fields, ',' splits
+// --mount's (dockerAccountMount's rule). The staged files keep their correct
+// modes, so the guarded cp path delivers them rather than emit a mount Docker
+// would misread.
+func TestDockerStagingColonHomeUsesTheCpFallback(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "co:l")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
+	t.Setenv("DOCKER_CONTEXT", "")
+	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
+
+	var calls [][]string
+	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+
+	p := &dockerProvisioner{
+		image: "img:latest",
+		afBin: stagingBinarySource(t),
+		spec:  ProvisionSpec{Title: "colon", CloneURL: "file:///repo"},
+	}
+	_, err := p.provision()
+	require.NoError(t, err, "calls=%v", calls)
+
+	assert.False(t, p.payloadViaBinds, "a ':' or ',' staging path cannot use binds")
+	require.NotNil(t, findDockerCall(calls, "cp"),
+		"the unencodable path must fall back to cp; calls=%v", calls)
+	require.NotNil(t, findDockerCall(calls, "exec", "/proc/self/mountinfo"),
+		"the mount-table guard still gates the cp; calls=%v", calls)
+	run := findDockerCall(calls, "run")
+	require.NotNil(t, run, "calls=%v", calls)
+	for _, m := range stagingBindVolumes(run) {
+		assert.NotContains(t, m, home, "a colon-bearing source must not reach a -v spec: %q", m)
+	}
+}
+
+// TestDockerStagingRetryAbortKeepsTheContainer: when the sharing-refused run
+// DID create a container and `docker rm -f` fails, the retry must not run —
+// clearing the handle would orphan a container no record can reach (the orphan
+// sweeper spares a live session's slug). The failed provision keeps the
+// handle so reapProvisionFailure owns the container.
+func TestDockerStagingRetryAbortKeepsTheContainer(t *testing.T) {
+	home := stagingTestEnv(t)
+	var calls [][]string
+	runCount := 0
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch args[0] {
+		case "info":
+			return []byte("staging-test-engine\n"), nil
+		case "run":
+			runCount++
+			if runCount == 1 {
+				return []byte("docker: Error response from daemon: Mounts denied:\r\nThe path /x is not shared from the host\n" + dockerCreatedID + "\n"),
+					fmt.Errorf("exit status 125")
+			}
+			return []byte(dockerCreatedID + "\n"), nil
+		case "rm":
+			return nil, fmt.Errorf("exit status 1")
+		}
+		return nil, nil
+	}))
+
+	p := &dockerProvisioner{
+		image: "img:latest",
+		afBin: stagingBinarySource(t),
+		spec:  ProvisionSpec{Title: "abort", CloneURL: "file:///repo"},
+	}
+	_, err := p.provision()
+	require.Error(t, err, "the failed cleanup must surface rather than run a second container; calls=%v", calls)
+	// The production pair: dockerRuntime.Provision wraps a failed provision()
+	// in reapProvisionFailure — which now owns the refused container's rm.
+	require.Error(t, p.reapProvisionFailure(err))
+	assert.Equal(t, 1, runCount, "no retry may run while the first container is untracked")
+	require.NotNil(t, findDockerCall(calls, "rm"),
+		"the refused container's cleanup must be attempted; calls=%v", calls)
+	assert.Equal(t, dockerCreatedID, p.containerID,
+		"the handle must stay bound so the record can still reap it")
+
+	// The staging dir is still reaped — the af-owned copy is never the part
+	// that lingers.
+	entries, rerr := os.ReadDir(filepath.Join(home, dockerStagingDirName))
+	require.NoError(t, rerr)
+	assert.Empty(t, entries)
+}
+
+// TestDockerStagingDirRestoredReap: a teardown rebuilt after a daemon restart
+// re-roots the recorded staging base name under the af-owned staging root and
+// removes it with the container. A record naming anything else — a full path,
+// a parent hop, a name provision never minted — is refused, and the teardown
+// touches nothing.
+func TestDockerStagingDirRestoredReap(t *testing.T) {
+	home := stagingTestEnv(t)
+	var calls [][]string
+	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+
+	staged := filepath.Join(home, dockerStagingDirName, Slugify("restored")+"-deadbeef")
+	require.NoError(t, os.MkdirAll(staged, 0o700))
+
+	data := &RuntimeCleanupData{Docker: &DockerRuntimeCleanupData{
+		ContainerID: dockerCreatedID,
+		EngineID:    "staging-test-engine",
+		StagingDir:  filepath.Base(staged),
+	}}
+	_, teardown, err := restoreRuntimeCleanupWithAccount("restored", "docker", data, restoredAccount{})
+	require.NoError(t, err)
+	require.NoError(t, teardown())
+	_, err = os.Stat(staged)
+	assert.True(t, os.IsNotExist(err), "the restored teardown must remove the recorded staging dir")
+
+	for _, bogus := range []string{"..", "../escape", filepath.Join(home, "elsewhere"), "other-title-deadbeef"} {
+		data := &RuntimeCleanupData{Docker: &DockerRuntimeCleanupData{
+			ContainerID: dockerCreatedID,
+			EngineID:    "staging-test-engine",
+			StagingDir:  bogus,
+		}}
+		_, teardown, err := restoreRuntimeCleanupWithAccount("restored", "docker", data, restoredAccount{})
+		require.NoError(t, err)
+		require.NoError(t, teardown())
+	}
+	_, err = os.Stat(filepath.Join(home, dockerStagingDirName))
+	require.NoError(t, err, "a refused staging name must remove nothing")
 }

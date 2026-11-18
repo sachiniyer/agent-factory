@@ -31,10 +31,10 @@ const dockerEngineIDFormat = "{{.ID}}"
 // reapProvisionFailure cleans up a container created by a failed provision. No
 // Instance record exists to carry a future retry, so a reap that does not succeed
 // must remain visible to the caller with both causes and the orphan risk (#2590).
+// reap() runs even when `docker run` refused before naming a container — the
+// staged payload dir still needs clearing, or every failed provision leaks one
+// full copy of the af binary.
 func (p *dockerProvisioner) reapProvisionFailure(provisionErr error) error {
-	if p.containerID == "" {
-		return provisionErr
-	}
 	reapErr := p.reap()
 	if reapErr == nil {
 		return provisionErr

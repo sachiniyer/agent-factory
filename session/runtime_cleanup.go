@@ -84,6 +84,14 @@ type DockerRuntimeCleanupData struct {
 	// EngineID is Docker's stable, non-secret daemon ID. Empty means a legacy
 	// tombstone that cannot be targeted safely and must fail closed.
 	EngineID string `json:"engine_id,omitempty"`
+	// StagingDir is the BASE NAME of the provision's staged-payload directory
+	// under <af-home>/docker-staging/ (#7577 item 2) — never a path. A teardown
+	// rebuilt after a daemon restart re-roots it under the af-owned staging
+	// root and only accepts the Slugify(title)+"-"+hex shape provisioning
+	// mints, so the field can remove exactly what this session created and a
+	// tampered or stale record degrades to the pre-field leak rather than
+	// naming a directory af does not own.
+	StagingDir string `json:"staging_dir,omitempty"`
 }
 
 type SSHRuntimeCleanupData struct {
@@ -335,6 +343,7 @@ func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCl
 			containerID:        data.Docker.ContainerID,
 			engineID:           data.Docker.EngineID,
 			verifyEngineOnReap: true,
+			stagingDir:         restoredDockerStagingDir(title, data.Docker.StagingDir),
 		}
 		teardown := p.reap
 		return &dockerBackend{
