@@ -67,16 +67,22 @@ func missing(t *testing.T) error { return tmuxExitOneError(t, missingDiag) }
 // session died with it.
 var noExitClaim = []string{"has exited", "died with", "the server died"}
 
+// No verdict knows why the session ended (#7535 R2, R3): tmux keeps no exit
+// status, so none may say the pane exited, or that the session died with its
+// server when exit-empty retiring it after the session ended fits the same
+// evidence. Checked on every case.
+var neverClaimed = []string{"died with", "only the session's own pane", "pane program exited", "exited immediately", "likely exited"}
+
 func fateCases() []fateCase {
 	return []fateCase{
 		{
-			name: "the same server still answers: only the pane died", serverPID: "111", want: serverFateSameServer,
-			contains: "the tmux server it was created on (pid 111) is still running, so only the session's own pane exited",
+			name: "the same server still answers: the session ended while it ran", serverPID: "111", want: serverFateSameServer,
+			contains: "the session ended while the tmux server it was created on (pid 111) kept running",
 		},
 
 		{
 			name: "nothing listens, original exited", serverErr: refused, original: serverProcessExited, want: serverFateNoServer,
-			contains: "the tmux server it was created on (pid 111) has exited, and nothing answers on its socket (" + refusedDiag + ")",
+			contains: "the tmux server it was created on (pid 111) has exited, and nothing answers on its socket (" + refusedDiag + "): " + serverExitHedge,
 		},
 		{
 			name: "nothing listens, original still a live tmux process", serverErr: refused, original: serverProcessRunning, want: serverFateNoServer,
@@ -106,7 +112,7 @@ func fateCases() []fateCase {
 
 		{
 			name: "another server answers, original exited", serverPID: "222", original: serverProcessExited, want: serverFateReplaced,
-			contains: "the tmux server it was created on (pid 111) has exited, and a different tmux server (pid 222) now answers on its socket",
+			contains: "the tmux server it was created on (pid 111) has exited, and a different tmux server (pid 222) now answers on its socket: " + serverExitHedge,
 		},
 		{
 			name: "another server answers, original still a live tmux process", serverPID: "222", original: serverProcessRunning, want: serverFateReplaced,
@@ -148,7 +154,7 @@ func (tc fateCase) tmux(t *testing.T) (cmd_test.MockCmdExec, *int) {
 func (tc fateCase) check(t *testing.T, text string) {
 	t.Helper()
 	require.Contains(t, text, tc.contains)
-	for _, claim := range tc.notContains {
+	for _, claim := range append(tc.notContains, neverClaimed...) {
 		require.NotContains(t, text, claim)
 	}
 }
@@ -217,12 +223,12 @@ func TestVanishedBeforeAttachErrorNamesWhatDied(t *testing.T) {
 			require.Contains(t, msg, "tmux session af_fate vanished before attach")
 			require.Contains(t, msg, `(program: "claude")`)
 			tc.check(t, msg)
-			if tc.want == serverFateReplaced {
-				require.NotContains(t, msg, "check that it runs",
-					"another server on the socket is not the program's fault")
-				if tc.original == serverProcessExited {
-					require.Contains(t, msg, "so the session died with the server that held it")
-				}
+			if tc.want == serverFateReplaced && tc.original != serverProcessExited {
+				require.NotContains(t, msg, "check that its program runs",
+					"a session out of reach behind another server is not the program's fault")
+			} else {
+				require.Contains(t, msg, "if the pane exited, check that its program runs and accepts its flags",
+					"where the pane exiting is one explanation, the error says what to check, not that it happened")
 			}
 		})
 	}

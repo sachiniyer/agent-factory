@@ -25,6 +25,14 @@ import (
 // hook fires with an empty status and signal once its session is gone), so this
 // is the most a vanished session can tell.
 //
+// It also means af can never say WHY a session ended. With its server still
+// answering, a pane program that exited, a kill-session from another client
+// and a signal to the pane all read the same, so the verdict is only that the
+// session ended while its server kept running. And a server that exited may
+// have taken the session with it, or may have retired because this was its
+// only session and it ended (exit-empty), whether or not another server has
+// since bound the socket. A verdict naming an exited server says both.
+//
 // The socket alone never proves the server died. A server whose socket was
 // removed keeps running with its sessions (#2875), and another server can bind
 // the freed path while it does (see ServerPIDOnSocket). So an exit is claimed
@@ -37,7 +45,7 @@ const (
 	// got no clear answer. Nothing is claimed.
 	serverFateUnknown serverFate = iota
 	// serverFateSameServer: the server the session was created on still
-	// answers, so only the session's own pane exited.
+	// answers. The session ended while that server kept running.
 	serverFateSameServer
 	// serverFateNoServer: the socket is there and nothing listens on it
 	// (ECONNREFUSED).
@@ -106,16 +114,21 @@ func (r serverFateReport) originalServerExited() bool {
 	return r.original == serverProcessExited
 }
 
+// serverExitHedge is what an exited server's verdict says about the order of
+// events: the evidence fits the server dying first, and it fits the session
+// ending first and the server retiring with it.
+const serverExitHedge = "the server died, or this was its only session and tmux retired it when the session ended"
+
 // clause renders the report as the clause an error carries, or "" when there
 // is nothing to say.
 func (r serverFateReport) clause() string {
 	switch r.fate {
 	case serverFateSameServer:
-		return fmt.Sprintf("the tmux server it was created on (pid %s) is still running, so only the session's own pane exited", r.createdPID)
+		return fmt.Sprintf("the session ended while the tmux server it was created on (pid %s) kept running", r.createdPID)
 	case serverFateNoServer:
 		switch r.original {
 		case serverProcessExited:
-			return fmt.Sprintf("the tmux server it was created on (pid %s) has exited, and nothing answers on its socket (%s): the server died, or this was its only session and tmux retired it when the pane exited", r.createdPID, r.diagnostic)
+			return fmt.Sprintf("the tmux server it was created on (pid %s) has exited, and nothing answers on its socket (%s): %s", r.createdPID, r.diagnostic, serverExitHedge)
 		case serverProcessRunning:
 			return fmt.Sprintf("nothing answers on its socket (%s), though the tmux server it was created on (pid %s) is still a live tmux process", r.diagnostic, r.createdPID)
 		default:
@@ -133,7 +146,7 @@ func (r serverFateReport) clause() string {
 	case serverFateReplaced:
 		switch r.original {
 		case serverProcessExited:
-			return fmt.Sprintf("the tmux server it was created on (pid %s) has exited, and a different tmux server (pid %s) now answers on its socket", r.createdPID, r.nowPID)
+			return fmt.Sprintf("the tmux server it was created on (pid %s) has exited, and a different tmux server (pid %s) now answers on its socket: %s", r.createdPID, r.nowPID, serverExitHedge)
 		case serverProcessRunning:
 			return fmt.Sprintf("a different tmux server (pid %s) now answers on its socket, though the tmux server it was created on (pid %s) is still a live tmux process: the session is out of reach, not proven gone", r.nowPID, r.createdPID)
 		default:
@@ -226,20 +239,19 @@ func (t *TmuxSession) withServerFate(cause error, gen *tmuxGeneration) error {
 // read when the poll confirmed the session; an unknown fate (that read, or the
 // later one, did not answer) keeps the wording of the guess af made before
 // #6581.
+//
+// Wherever the pane exiting is one of the explanations, the error says what to
+// check if it did, and never that it did. The one verdict that leaves the pane
+// out is a different server on the socket while the original is still alive or
+// unknown: the session is out of reach there, not shown to have ended.
 func (t *TmuxSession) vanishedBeforeAttachError(report serverFateReport, err error) error {
 	program := t.programCmd()
-	switch report.fate {
-	case serverFateSameServer:
-		return fmt.Errorf("tmux session %s vanished before attach; %s: the pane program exited immediately after launch — check that it runs and accepts its flags (program: %q): %w",
-			t.sanitizedName, report.clause(), program, err)
-	case serverFateNoServer, serverFateUnreachable:
+	switch {
+	case report.fate == serverFateSameServer, report.fate == serverFateNoServer, report.fate == serverFateUnreachable,
+		report.fate == serverFateReplaced && report.originalServerExited():
 		return fmt.Errorf("tmux session %s vanished before attach; %s — if the pane exited, check that its program runs and accepts its flags (program: %q): %w",
 			t.sanitizedName, report.clause(), program, err)
-	case serverFateReplaced:
-		if report.originalServerExited() {
-			return fmt.Errorf("tmux session %s vanished before attach; %s, so the session died with the server that held it (program: %q): %w",
-				t.sanitizedName, report.clause(), program, err)
-		}
+	case report.fate == serverFateReplaced:
 		return fmt.Errorf("tmux session %s vanished before attach; %s (program: %q): %w",
 			t.sanitizedName, report.clause(), program, err)
 	default:
