@@ -110,6 +110,9 @@ func stagingDockerAnswers(t *testing.T, calls *[][]string, engineName string, ro
 			switch {
 			case strings.Contains(joined, "id -u"):
 				return []byte("0:0\n"), nil
+			case strings.Contains(joined, "wc -c"):
+				// The post-create delivery check: staged files delivered.
+				return nil, nil
 			case strings.Contains(joined, "/proc/self/mountinfo"):
 				if mountAnswer != nil {
 					return mountAnswer(joined)
@@ -272,29 +275,29 @@ func TestDockerStagingRootlessStillBinds(t *testing.T) {
 	require.Nil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
 }
 
-// TestDockerStagingDuplicateDestinationIsActionable: a run_args mount already
-// claiming an af destination makes docker refuse the pair as a duplicate; the
-// error must name the destination and the fix rather than surface docker's
-// raw text.
+// TestDockerStagingDuplicateDestinationIsActionable: a docker-level duplicate
+// — two mounts claiming the same in-container path — is rewritten into an
+// actionable error rather than surfaced as docker's raw text. (An af
+// destination's duplicate never reaches docker anymore: the enclosing-mount
+// check refuses it pre-flight — covered above.)
 func TestDockerStagingDuplicateDestinationIsActionable(t *testing.T) {
 	stagingTestEnv(t)
 	var calls [][]string
 	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil,
 		func(string, int) ([]byte, error) {
-			return []byte("docker: Error response from daemon: Duplicate mount point: " + dockerAfBinaryPath + "\n"),
+			return []byte("docker: Error response from daemon: Duplicate mount point: /opt/dup\n"),
 				fmt.Errorf("exit status 125")
 		}))
 
 	p := &dockerProvisioner{
 		image:   "img:latest",
 		afBin:   stagingBinarySource(t),
-		runArgs: []string{"-v", "/repo/evil:" + dockerAfBinaryPath},
+		runArgs: []string{"-v", "/repo/a:/opt/dup", "-v", "/repo/b:/opt/dup"},
 		spec:    ProvisionSpec{Title: "dup", CloneURL: "file:///repo"},
 	}
 	_, err := p.provision()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "duplicate mount destination")
-	assert.Contains(t, err.Error(), dockerAfBinaryPath)
 	assert.Contains(t, err.Error(), "run_args")
 	require.Nil(t, findDockerCall(calls, "cp"), "a duplicate refusal must not fall through to cp; calls=%v", calls)
 }
@@ -917,11 +920,11 @@ func TestDockerStagingRetryAbortKeepsTheContainer(t *testing.T) {
 	assert.Equal(t, dockerCreatedID, p.containerID,
 		"the handle must stay bound so the record can still reap it")
 
-	// The staging dir is still reaped — the af-owned copy is never the part
-	// that lingers.
+	// R5: the staging dir stays while `docker rm` has not confirmed the
+	// container gone — the record's StagingDir still names a real directory.
 	entries, rerr := os.ReadDir(filepath.Join(home, dockerStagingDirName))
 	require.NoError(t, rerr)
-	assert.Empty(t, entries)
+	assert.Len(t, entries, 1, "the staging dir must outlive an unproven container reap")
 }
 
 // TestDockerStagingDirRestoredReap: a teardown rebuilt after a daemon restart
@@ -965,4 +968,237 @@ func TestDockerStagingDirRestoredReap(t *testing.T) {
 	}
 	_, err = os.Stat(filepath.Join(home, dockerStagingDirName))
 	require.NoError(t, err, "a refused staging name must remove nothing")
+}
+
+// TestDockerStagingEnclosingRunArgsMountRefused is R1: a run_args mount whose
+// destination encloses (or equals) an af staging destination does NOT collide
+// as a duplicate — the engine would create a root-owned stub in the host
+// source directory for af's file bind, and the stub persists. It is refused
+// before `docker run` with an actionable error naming the entry.
+func TestDockerStagingEnclosingRunArgsMountRefused(t *testing.T) {
+	refused := []struct {
+		name    string
+		runArgs []string
+		want    string
+	}{
+		{"bind over /usr/local/bin", []string{"-v", "/host/dir:/usr/local/bin"}, "-v /host/dir:/usr/local/bin"},
+		{"bind over /etc", []string{"--volume=/host/dir:/etc"}, "/etc"},
+		{"--mount flag", []string{"--mount", "type=bind,source=/h,target=/usr"}, "--mount"},
+		{"tmpfs", []string{"--tmpfs", "/usr/local"}, "/usr/local"},
+		{"root bind", []string{"-v", "/h:/"}, "-v /h:/"},
+		{"exact file dest", []string{"-v", "/h/f:" + dockerAfBinaryPath}, dockerAfBinaryPath},
+	}
+	for _, tt := range refused {
+		t.Run("refused/"+tt.name, func(t *testing.T) {
+			home := stagingTestEnv(t)
+			var calls [][]string
+			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+			p := &dockerProvisioner{
+				image:   "img:latest",
+				afBin:   stagingBinarySource(t),
+				runArgs: tt.runArgs,
+				spec:    ProvisionSpec{Title: "enc", CloneURL: "file:///repo", AgentPolicy: []byte(`{"hooks":{}}`)},
+			}
+			_, err := p.provision()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "encloses")
+			assert.Contains(t, err.Error(), tt.want)
+			assert.Contains(t, err.Error(), "run_args")
+			require.Nil(t, findDockerCall(calls, "run"), "no container may be started; calls=%v", calls)
+			// The staged dir the refusal left behind still reaps cleanly.
+			require.Error(t, p.reapProvisionFailure(err))
+			entries, rerr := os.ReadDir(filepath.Join(home, dockerStagingDirName))
+			require.NoError(t, rerr)
+			assert.Empty(t, entries)
+		})
+	}
+	allowed := []struct {
+		name    string
+		runArgs []string
+	}{
+		{"sibling under /usr/local/bin", []string{"-v", "/host/dir:/usr/local/bin/other"}},
+		{"beneath the file destination", []string{"-v", "/host/dir:" + dockerAfBinaryPath + "/sub"}},
+		{"workspace mount", []string{"-v", "/host:/workspace"}},
+	}
+	for _, tt := range allowed {
+		t.Run("allowed/"+tt.name, func(t *testing.T) {
+			stagingTestEnv(t)
+			var calls [][]string
+			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+			p := &dockerProvisioner{
+				image:   "img:latest",
+				afBin:   stagingBinarySource(t),
+				runArgs: tt.runArgs,
+				spec:    ProvisionSpec{Title: "ok", CloneURL: "file:///repo"},
+			}
+			_, err := p.provision()
+			require.NoError(t, err, "calls=%v", calls)
+		})
+	}
+}
+
+// TestDockerStagingDeliveryConfirmFailsBackToCp is R2: when the post-create
+// delivery check reports the staged files did not arrive — a unix:// endpoint
+// with a different filesystem view the upfront proof cannot see — the
+// provisioner takes the same one-shot retry as a sharing refusal: rm the
+// mis-delivered container, run again without binds, deliver by cp.
+func TestDockerStagingDeliveryConfirmFailsBackToCp(t *testing.T) {
+	stagingTestEnv(t)
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		joined := strings.Join(args, " ")
+		switch args[0] {
+		case "info":
+			return []byte("confirm-engine\n"), nil
+		case "run":
+			return []byte(dockerCreatedID + "\n"), nil
+		case "cp", "rm":
+			return nil, nil
+		case "port":
+			return []byte("127.0.0.1:49152\n"), nil
+		case "exec":
+			switch {
+			case strings.Contains(joined, "wc -c"):
+				// Delivery check: the staged af did not arrive as a
+				// regular file of the staged size.
+				return []byte(""), fmt.Errorf("exit status 1")
+			case strings.Contains(joined, "id -u"):
+				return []byte("0:0\n"), nil
+			case strings.Contains(joined, "/proc/self/mountinfo"):
+				return probeAnswer(args), nil
+			case strings.Contains(joined, "cat "+dockerBannerPath):
+				return []byte(`{"addr":":8000","token":"t","title":"staging"}` + "\n" + remoteProcAlive + "\n"), nil
+			}
+			return nil, nil
+		}
+		return nil, nil
+	}))
+
+	p := &dockerProvisioner{
+		image: "img:latest",
+		afBin: stagingBinarySource(t),
+		spec:  ProvisionSpec{Title: "confirm", CloneURL: "file:///repo"},
+	}
+	_, err := p.provision()
+	require.NoError(t, err, "calls=%v", calls)
+
+	var runs [][]string
+	for _, c := range calls {
+		if len(c) > 0 && c[0] == "run" {
+			runs = append(runs, c)
+		}
+	}
+	require.Len(t, runs, 2, "exactly one retry is expected; calls=%v", calls)
+	require.Empty(t, stagingBindVolumes(runs[1]),
+		"the retry must not carry the binds that did not deliver; argv=%v", runs[1])
+	require.NotNil(t, findDockerCall(calls, "rm"),
+		"the mis-delivered container must be removed before the retry; calls=%v", calls)
+	require.NotNil(t, findDockerCall(calls, "cp"),
+		"the retried provision delivers via cp; calls=%v", calls)
+}
+
+// TestDockerStagingDirRemovedOnlyAfterRmSucceeds is R5: the staged dir goes
+// only once the container is known gone. A `docker rm` failure or an engine
+// check refusal leaves it — the cleanup record still needs it — while a
+// successful rm and the never-created path both clear it.
+func TestDockerStagingDirRemovedOnlyAfterRmSucceeds(t *testing.T) {
+	newStaged := func(t *testing.T) string {
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		dir := filepath.Join(home, dockerStagingDirName, Slugify("reap")+"-0badc0de")
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		return dir
+	}
+	newP := func(dir, engineID string, verify bool) *dockerProvisioner {
+		return &dockerProvisioner{
+			containerID:        dockerCreatedID,
+			engineID:           engineID,
+			verifyEngineOnReap: verify,
+			stagingDir:         dir,
+			spec:               ProvisionSpec{Title: "reap"},
+		}
+	}
+
+	t.Run("rm failure keeps the dir", func(t *testing.T) {
+		dir := newStaged(t)
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+			if args[0] == "rm" {
+				return []byte("Error response from daemon: rm failed"), fmt.Errorf("exit status 1")
+			}
+			return []byte("engine\n"), nil
+		}))
+		p := newP(dir, "engine", false)
+		require.Error(t, p.reap())
+		_, err := os.Stat(dir)
+		require.NoError(t, err, "the staging dir must stay while the container's fate is unproven")
+	})
+
+	t.Run("engine check refusal keeps the dir", func(t *testing.T) {
+		dir := newStaged(t)
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+			if args[0] == "info" {
+				return []byte("other-engine\n"), nil
+			}
+			return nil, fmt.Errorf("unexpected call %v", args)
+		}))
+		p := newP(dir, "engine", true)
+		require.Error(t, p.reap())
+		_, err := os.Stat(dir)
+		require.NoError(t, err, "the staging dir must stay while the engine check is unproven")
+	})
+
+	t.Run("rm success removes the dir", func(t *testing.T) {
+		dir := newStaged(t)
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+			return nil, nil
+		}))
+		p := newP(dir, "engine", false)
+		require.NoError(t, p.reap())
+		_, err := os.Stat(dir)
+		assert.True(t, os.IsNotExist(err), "a confirmed-gone container releases the staging dir")
+	})
+}
+
+// TestRestoredDockerStagingDirMintedShape is R7: only the exact provision-minted
+// name — Slugify(title)+"-"+8 lowercase hex — is restored; every other shape,
+// prefix-adjacent or not, is refused.
+func TestRestoredDockerStagingDirMintedShape(t *testing.T) {
+	home := stagingTestEnv(t)
+	slug := Slugify("My Session")
+	tests := []struct {
+		recorded string
+		want     bool
+	}{
+		{slug + "-1a2b3c4d", true},
+		{slug + "-1a2b3c4", false},   // 7 hex
+		{slug + "-1a2b3c4d5", false}, // 9 hex
+		{slug + "-1a2b3c4g", false},  // non-hex
+		{slug + "-1A2B3C4D", false},  // uppercase — not minted
+		{"other-1a2b3c4d", false},    // wrong slug
+		{slug + "x-1a2b3c4d", false}, // slug prefix, not exact
+		{"../" + slug + "-1a2b3c4d", false},
+		{slug + "-1a2b3c4d/extra", false},
+	}
+	for _, tt := range tests {
+		got := restoredDockerStagingDir("My Session", tt.recorded)
+		if tt.want {
+			assert.Equal(t, filepath.Join(home, dockerStagingDirName, tt.recorded), got, "recorded %q", tt.recorded)
+		} else {
+			assert.Empty(t, got, "recorded %q must be refused", tt.recorded)
+		}
+	}
+}
+
+// TestDockerReadOnlyMountpointErrorRewritten is R8: runc's mountpoint-creation
+// failure under a read-only parent bind is rewritten into an actionable error
+// rather than surfaced raw.
+func TestDockerReadOnlyMountpointErrorRewritten(t *testing.T) {
+	raw := "docker: Error response from daemon: error creating mountpoint '" + dockerAfBinaryPath + "': mkdir " + dockerAfBinaryPath + ": read-only file system."
+	err := dockerReadOnlyMountpointError(raw, fmt.Errorf("exit status 126"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read-only bind")
+	assert.Contains(t, err.Error(), dockerAfBinaryPath)
+	assert.Contains(t, err.Error(), "run_args")
+	assert.Nil(t, dockerReadOnlyMountpointError("docker: some other failure", nil))
 }

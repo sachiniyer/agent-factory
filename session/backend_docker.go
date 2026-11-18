@@ -790,9 +790,8 @@ func (p *dockerProvisioner) runContainer() error {
 		}
 	}
 	// The staged payload binds go LAST in argv — after run_args and every -e
-	// pin — so af's own files come from an af-owned read-only source nothing
-	// repo-controlled can precede (#7577 item 2). A run_args mount claiming
-	// the same destination is a docker-level duplicate error.
+	// pin — so af's files come from an af-owned read-only source nothing
+	// repo-controlled can precede (#7577 item 2).
 	args = append(args, p.stagingMounts()...)
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
@@ -803,15 +802,16 @@ func (p *dockerProvisioner) runContainer() error {
 		// nonexistent device/volume/network, `--gpus all` on a GPU-less host. The
 		// container is then left behind in `created` state. Capture the id off the
 		// combined output even on this error path and store it so the
-		// provision-failure reap in Provision (guarded on p.containerID != "") removes
-		// it instead of leaking it (#2008). This is the exec started-vs-succeeded
-		// rule: gate cleanup on the container having been CREATED, not on `docker run`
-		// exiting zero.
+		// provision-failure reap in Provision removes it instead of leaking it
+		// (#2008): gate cleanup on the container having been CREATED, not on
+		// `docker run` exiting zero.
 		if id := parseCreatedContainerID(out); id != "" {
 			p.containerID = id
 		}
 		if derr := dockerDuplicateMountError(string(out), err); derr != nil {
 			return derr
+		} else if rerr := dockerReadOnlyMountpointError(string(out), err); rerr != nil {
+			return rerr
 		}
 		// The data-root capacity evidence joins at the provision() boundary,
 		// shared with every other provisioning step (#5382).

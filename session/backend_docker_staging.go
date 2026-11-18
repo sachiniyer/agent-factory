@@ -110,14 +110,35 @@ func (p *dockerProvisioner) preparePayloadDelivery() {
 // mount arguments. A bind source the sharing layer still refuses — a Docker
 // Desktop config the upfront check could not see, or a Desktop install
 // reporting an unusual engine name — retries once without the binds rather
-// than failing the session for a delivery mechanism.
+// than failing the session for a delivery mechanism. A post-create delivery
+// check confirms the staged files actually arrived — the visibility proof can
+// false-positive (a unix:// endpoint behind an ssh forward or a snap/lima
+// daemon with a different filesystem view) — and its failure takes the same
+// one-shot cp retry.
 func (p *dockerProvisioner) runPayloadContainer() error {
-	err := p.runContainer()
-	if err == nil || !p.payloadViaBinds || !dockerSharingFailure(err.Error()) {
+	if err := p.refuseEnclosingRunArgsMounts(); err != nil {
 		return err
 	}
-	log.WarningLog.Printf("docker runtime: `docker run` refused the staged binds; retrying once with `docker cp` delivery: %v", err)
-	p.payloadViaBinds = false
+	err := p.runContainer()
+	switch {
+	case err != nil && (!p.payloadViaBinds || !dockerSharingFailure(err.Error())):
+		return err
+	case err != nil:
+		log.WarningLog.Printf("docker runtime: `docker run` refused the staged binds; retrying once with `docker cp` delivery: %v", err)
+		return p.retryRunWithCpDelivery(fmt.Sprintf("`docker run` refused the staged binds: %v", err))
+	case p.payloadViaBinds && !p.payloadDeliveryConfirmed():
+		log.WarningLog.Printf("docker runtime: the staged binds did not deliver af's payload; retrying once with `docker cp` delivery")
+		return p.retryRunWithCpDelivery("the staged binds did not deliver af's payload")
+	default:
+		return nil
+	}
+}
+
+// retryRunWithCpDelivery removes the just-created container, drops the bind
+// decision, and runs once more so the cp fallback delivers the payload — the
+// single retry shared by a sharing-layer refusal and a failed post-create
+// delivery confirmation.
+func (p *dockerProvisioner) retryRunWithCpDelivery(cause string) error {
 	if p.containerID != "" {
 		if _, rerr := p.docker(dockerShortStepTimeout, "rm", "-f", p.containerID); rerr != nil {
 			// Keep the handle: resetForRunRetry clearing it would orphan a
@@ -125,12 +146,148 @@ func (p *dockerProvisioner) runPayloadContainer() error {
 			// session's slug. Failing the provision hands it to
 			// reapProvisionFailure's `docker rm -f`, which either removes it or
 			// confirms it gone.
-			return fmt.Errorf("backend=docker: `docker run` refused the staged binds and `docker rm -f %s` on the refused container also failed (%v); abandoning the retry rather than leaking the first container: %w",
-				p.shortID(), rerr, err)
+			return fmt.Errorf("backend=docker: %s and `docker rm -f %s` on the container also failed (%v); abandoning the retry rather than leaking the first container",
+				cause, p.shortID(), rerr)
 		}
 	}
+	p.payloadViaBinds = false
 	p.resetForRunRetry()
 	return p.runContainer()
+}
+
+// stagingDestinations returns the in-container paths af's staged payload
+// claims: the af binary always, the policy when one is staged.
+func (p *dockerProvisioner) stagingDestinations() []string {
+	dsts := []string{dockerAfBinaryPath}
+	if p.stagedPolicyPath != "" {
+		dsts = append(dsts, dockerPolicyPath)
+	}
+	return dsts
+}
+
+// runArgsMountDestinations extracts (entry, destination) pairs for every
+// mount-shaped run_args token: -v/--volume specs (the second ':'-field, or
+// the only field for an anonymous volume), --mount's target/destination/dst
+// key, and --tmpfs's mount point.
+func runArgsMountDestinations(runArgs []string) [][2]string {
+	var out [][2]string
+	for i := 0; i < len(runArgs); i++ {
+		a := runArgs[i]
+		var spec, entry string
+		var isMount, isTmpfs bool
+		next := func() string {
+			i++
+			if i < len(runArgs) {
+				return runArgs[i]
+			}
+			return ""
+		}
+		switch {
+		case a == "-v" || a == "--volume":
+			spec = next()
+			entry = a + " " + spec
+		case strings.HasPrefix(a, "-v=") || strings.HasPrefix(a, "--volume="):
+			spec = strings.SplitN(a, "=", 2)[1]
+			entry = a
+		case a == "--mount":
+			spec = next()
+			entry = a + " " + spec
+			isMount = true
+		case strings.HasPrefix(a, "--mount="):
+			spec = strings.SplitN(a, "=", 2)[1]
+			entry = a
+			isMount = true
+		case a == "--tmpfs":
+			spec = next()
+			entry = a + " " + spec
+			isTmpfs = true
+		case strings.HasPrefix(a, "--tmpfs="):
+			spec = strings.SplitN(a, "=", 2)[1]
+			entry = a
+			isTmpfs = true
+		default:
+			continue
+		}
+		if spec == "" {
+			continue
+		}
+		dest := ""
+		switch {
+		case isMount:
+			for _, kv := range strings.Split(spec, ",") {
+				k, v, ok := strings.Cut(kv, "=")
+				if ok && (k == "target" || k == "destination" || k == "dst") {
+					dest = v
+				}
+			}
+		case isTmpfs:
+			dest = spec
+		default:
+			fields := strings.Split(spec, ":")
+			if len(fields) > 1 {
+				dest = fields[1]
+			} else {
+				dest = fields[0]
+			}
+		}
+		if dest != "" {
+			out = append(out, [2]string{entry, dest})
+		}
+	}
+	return out
+}
+
+// refuseEnclosingRunArgsMounts refuses — before the container starts — any
+// run_args mount whose destination equals or encloses a path af must install.
+// Such a mount is NOT a duplicate Docker can reject: af's file bind targets a
+// path INSIDE it, so runc creates a root-owned zero-byte stub in the host
+// source directory so the mount exists, and that stub persists after the
+// session (#7577 item 2 R1). The cp fallback does not rescue it either — the
+// same mount would be refused by the write-target guard — so it is refused
+// outright with an actionable error naming the entry.
+func (p *dockerProvisioner) refuseEnclosingRunArgsMounts() error {
+	if !p.payloadViaBinds {
+		return nil
+	}
+	for _, m := range runArgsMountDestinations(p.runArgs) {
+		dest := path.Clean("/" + m[1])
+		for _, target := range p.stagingDestinations() {
+			if dest == target || dest == "/" || strings.HasPrefix(target, dest+"/") {
+				return fmt.Errorf("backend=docker: docker.run_args entry %q mounts at %s, which encloses %s — af must install that path itself, and the engine would create a root-owned stub inside the host source directory so its mount exists; remove that run_args entry or move it to another destination",
+					m[0], m[1], target)
+			}
+		}
+	}
+	return nil
+}
+
+// payloadDeliveryConfirmed checks — after create — that the staged files
+// reached their destinations as the staged regular files. A unix:// endpoint
+// can still carry a different filesystem view (an ssh-forwarded socket, a
+// snap Docker with a private /tmp, a lima or colima VM): the visibility proof
+// cannot see those, and a bind source the engine cannot resolve is silently
+// replaced by an empty directory Docker creates at the source path. The check
+// proves the destination is a regular, executable file of the staged size —
+// an empty-dir mount fails `test -f`, a wrong-but-readable source fails the
+// size check — so a delivery miss is caught here rather than surfacing later
+// as a session that dies with no clear cause.
+func (p *dockerProvisioner) payloadDeliveryConfirmed() bool {
+	st, err := os.Stat(p.stagedAfPath)
+	if err != nil || !st.Mode().IsRegular() {
+		return false
+	}
+	policyDest := ""
+	if p.stagedPolicyPath != "" {
+		policyDest = dockerPolicyPath
+	}
+	out, err := p.docker(dockerShortStepTimeout,
+		"exec", p.containerID, dockerContainerShell, "-c",
+		`test -f "$1" && test -x "$1" && [ "$(wc -c < "$1" | tr -d '[:space:]')" = "$2" ] && { [ -z "$3" ] || { test -f "$3" && test -r "$3"; }; }`,
+		"sh", dockerAfBinaryPath, fmt.Sprintf("%d", st.Size()), policyDest)
+	if err != nil {
+		log.WarningLog.Printf("docker runtime: staged-payload delivery check failed in container %s (%v): %s", p.shortID(), err, strings.TrimSpace(string(out)))
+	}
+	return err == nil
 }
 
 // deliverPayload gets af's files into the container. On the bind path there is
@@ -157,21 +314,35 @@ func (p *dockerProvisioner) deliverPayload() error {
 // dockerStagingDir is the per-session staging root beneath the AF home: mode
 // 0700, unique per provision, removed on reap. The unique suffix keeps two
 // projects that share a session title from colliding, and makes a leftover
-// directory identifiable rather than ambiguous.
+// directory identifiable rather than ambiguous. The leaf is created with an
+// EXCLUSIVE os.Mkdir: a pre-existing leaf is collision or residue, so a fresh
+// suffix is tried rather than silently sharing or reusing a directory.
 func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 	afHome, err := config.GetConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("backend=docker: cannot resolve the AF home for the session staging dir: %w", err)
 	}
-	var suffix [4]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		return "", fmt.Errorf("backend=docker: cannot name the session staging dir: %w", err)
+	root := filepath.Join(afHome, dockerStagingDirName)
+	if err := config.MkdirAllUnderAFHome(root, 0o700); err != nil {
+		return "", fmt.Errorf("backend=docker: cannot create the session staging root %s: %w", root, err)
 	}
-	dir := filepath.Join(afHome, dockerStagingDirName, Slugify(p.spec.Title)+"-"+hex.EncodeToString(suffix[:]))
-	if err := config.MkdirAllUnderAFHome(dir, 0o700); err != nil {
-		return "", fmt.Errorf("backend=docker: cannot create the session staging dir %s: %w", dir, err)
+	for range 4 {
+		var suffix [4]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return "", fmt.Errorf("backend=docker: cannot name the session staging dir: %w", err)
+		}
+		dir := filepath.Join(root, Slugify(p.spec.Title)+"-"+hex.EncodeToString(suffix[:]))
+		err := os.Mkdir(dir, 0o700)
+		switch {
+		case err == nil:
+			return dir, nil
+		case os.IsExist(err):
+			continue
+		default:
+			return "", fmt.Errorf("backend=docker: cannot create the session staging dir %s: %w", dir, err)
+		}
 	}
-	return dir, nil
+	return "", fmt.Errorf("backend=docker: cannot create the session staging dir under %s: every candidate name already exists", root)
 }
 
 // stageContainerPayload copies every file af owns into the staging dir with the
@@ -307,7 +478,19 @@ func dockerDuplicateMountError(out string, err error) error {
 	if !strings.Contains(strings.ToLower(out), "duplicate mount point") {
 		return nil
 	}
-	return fmt.Errorf("backend=docker: `docker run` failed for a duplicate mount destination: %s — a docker.run_args mount shadows a path af must install itself (%s%s); remove that run_args entry or move it to another destination",
+	return fmt.Errorf("backend=docker: `docker run` failed for a duplicate mount destination: %s — two mounts claim the same in-container path; if a docker.run_args entry shadows a path af must install itself (%s%s), remove that entry or move it to another destination",
+		strings.TrimSpace(out), dockerAfBinaryPath, ", "+dockerPolicyPath)
+}
+
+// dockerReadOnlyMountpointError rewrites runc's mountpoint-creation failure —
+// the error a read-only parent bind produces when the engine tries to create
+// the destination node for af's staged bind inside it — into an actionable
+// error instead of raw runc text.
+func dockerReadOnlyMountpointError(out string, err error) error {
+	if !strings.Contains(strings.ToLower(out), "creating mountpoint") {
+		return nil
+	}
+	return fmt.Errorf("backend=docker: `docker run` failed creating the mountpoint for af's staged bind: %s — a docker.run_args mount covers a destination af installs (%s%s) with a read-only bind, so the engine cannot create the mount node inside it; remove that run_args entry or make it writable",
 		strings.TrimSpace(out), dockerAfBinaryPath, ", "+dockerPolicyPath)
 }
 
@@ -512,12 +695,23 @@ func dockerStagingRecordName(dir string) string {
 
 // restoredDockerStagingDir re-binds a persisted staging dir name for a
 // teardown rebuilt after a daemon restart. Only the exact shape provisioning
-// mints — Slugify(title)+"-"+8 hex — is accepted: anything else is a stale or
-// tampered record, and degrades to the pre-field leak rather than removing a
-// directory this session cannot prove it owns.
+// mints — Slugify(title)+"-"+exactly 8 lowercase hex — is accepted: any other
+// prefix-shaped name is a stale or tampered record, and degrades to the
+// pre-field leak rather than removing a directory this session cannot prove
+// it owns.
 func restoredDockerStagingDir(title, recorded string) string {
-	if recorded == "" || filepath.Base(recorded) != recorded || !strings.HasPrefix(recorded, Slugify(title)+"-") {
+	slug := Slugify(title)
+	if recorded == "" || filepath.Base(recorded) != recorded || !strings.HasPrefix(recorded, slug+"-") {
 		return ""
+	}
+	suffix := recorded[len(slug)+1:]
+	if len(suffix) != 8 {
+		return ""
+	}
+	for _, c := range suffix {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
 	}
 	afHome, err := config.GetConfigDir()
 	if err != nil {

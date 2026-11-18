@@ -251,8 +251,14 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "the cp-fallback mount-table + leaf-symlink probe (#7577 item 2) — the same " +
 			"`cd -- \"$N\" && pwd -P && cat /proc/self/mountinfo` shape readMountTable carries, plus a " +
 			"`test -L` tail. Both destination parents and both leaf paths are af constants " +
-			"(/usr/local/bin, /tmp, the two payload paths) arriving as $1..$4 positional parameters, " +
+			"(/usr/local/bin, /etc, the two payload paths) arriving as $1..$4 positional parameters, " +
 			"never spliced into the script text; no operator value reaches this shell",
+	}},
+	"session/backend_docker_staging.go:(*dockerProvisioner).payloadDeliveryConfirmed": {{
+		class: afAuthored,
+		note: "the post-create delivery check (#7577 item 2 R2) — a fixed const test/wc script; the " +
+			"af destination path, the staged file's size, and the policy destination are af-computed " +
+			"values arriving as $1..$3 positional parameters, never spliced into the script text",
 	}},
 
 	"session/host_program.go:(hostProgramProber).probePath": {{

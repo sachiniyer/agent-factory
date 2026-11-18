@@ -74,16 +74,14 @@ func (p *dockerProvisioner) reap() error {
 	if p.reaped {
 		return p.reapErr
 	}
-	// The staged payload dir is af-owned and safe to remove however the run
-	// went — provision-failure reaps (container never ran), normal teardown,
-	// and the early-return path all clear it here so it never lingers.
-	if p.stagingDir != "" {
-		if err := os.RemoveAll(p.stagingDir); err != nil {
-			log.WarningLog.Printf("docker runtime: removing the staging dir %s failed: %v", p.stagingDir, err)
-		}
-		p.stagingDir = ""
-	}
 	if p.containerID == "" {
+		// No container was ever created — the staged payload dir's only
+		// consumer cannot exist, so it is safe to clear. Every other path
+		// clears it only after `docker rm` succeeds (#7577 item 2 R5): while
+		// the container's fate is unproven — an engine check refusal, a
+		// timeout, an answered error — the directory stays so the cleanup
+		// record's StagingDir still names a real directory a later reap owns.
+		p.clearStagingDir()
 		p.reaped = true
 		return nil
 	}
@@ -115,6 +113,10 @@ func (p *dockerProvisioner) reap() error {
 	}
 	out, err := dockerExec(ctx, p.dockerEnvironment(), "rm", "-f", p.containerID)
 	if err == nil {
+		// The container is confirmed gone — now the staged payload dir may go
+		// too. Clearing it only here keeps the ordering: never before `docker
+		// rm` has succeeded (and never ahead of the engine check above).
+		p.clearStagingDir()
 		p.reaped = true
 		p.reapErr = nil
 		log.InfoLog.Printf("docker runtime: reaped container %s for session %q", p.shortID(), p.spec.Title)
@@ -141,6 +143,19 @@ func (p *dockerProvisioner) reap() error {
 	p.reapErr = reapErr
 	log.WarningLog.Printf("%v", reapErr)
 	return reapErr
+}
+
+// clearStagingDir removes the per-session staging dir. Called only once the
+// container it fed is confirmed gone — after `docker rm` succeeds, or when no
+// container was ever created.
+func (p *dockerProvisioner) clearStagingDir() {
+	if p.stagingDir == "" {
+		return
+	}
+	if err := os.RemoveAll(p.stagingDir); err != nil {
+		log.WarningLog.Printf("docker runtime: removing the staging dir %s failed: %v", p.stagingDir, err)
+	}
+	p.stagingDir = ""
 }
 
 // currentEngineID returns the daemon identity that the provisioner's Docker
