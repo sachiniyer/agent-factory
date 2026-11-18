@@ -200,24 +200,40 @@ var credentialMountSharedProgramEntries = map[string]string{
 }
 
 // credentialMountSharedAFStateNames are af's own state and control-plane
-// names in the common allowlist: af's home and session markers, its
-// auto-update toggle, and the tmux names that select which server af's
-// in-container client execs into. A repo- or image-supplied value relocates
-// af's state directory, falsifies session membership, or points af's tmux
-// calls at a server the image controls — none of which a non-operator source
-// may choose on the path that mounts the operator's credential. af's own
-// in-container programs take their configuration from argv, not the
-// container environment, so pinning them defined-and-empty leaves af
-// unaffected.
+// names in the common allowlist: af's home directory, its auto-update
+// toggle, and the tmux names that select which server af's in-container
+// client execs into. A repo- or image-supplied value relocates af's state
+// directory or points af's tmux calls at a server the image controls —
+// none of which a non-operator source may choose on the path that mounts
+// the operator's credential. af's own in-container programs take their
+// configuration from argv, not the container environment, so pinning them
+// defined-and-empty leaves af unaffected. (af's session markers are
+// deliberately NOT here — see credentialMountSessionMarkerNames.)
 var credentialMountSharedAFStateNames = map[string]struct{}{
-	"AF_HOME":                   {},
 	"AGENT_FACTORY_HOME":        {},
 	"AGENT_FACTORY_AUTO_UPDATE": {},
-	"AF_SESSION":                {},
-	"AF_SESSION_GEN":            {},
 	"TMUX":                      {},
 	"TMUX_PANE":                 {},
 	"TMUX_TMPDIR":               {},
+}
+
+// credentialMountSessionMarkerNames are af's OWN trusted session markers —
+// the names sessionEnvFlags (session/tmux/envmarker.go) stamps into every
+// pane environment with per-session values: the session name, its
+// generation, and af's home provenance. They are refused to repository
+// run_args like every classified name — a repo-supplied marker falsifies
+// membership — but they are NEVER pinned: a defined-empty pin is carried by
+// --session-env-empty and re-asserted at the exec shim AFTER tmux has
+// installed af's values, erasing exactly the markers the agent's children
+// need. markedOrphanProcesses (session/tmux/reap_membership.go) proves
+// ownership by those markers: a child orphaned inside the container can no
+// longer be attributed, discovered, or reaped (#7531). af's values come
+// from af, not a repo source, and reach the agent through tmux's -e flags —
+// the boundary only has to NOT erase them.
+var credentialMountSessionMarkerNames = map[string]struct{}{
+	"AF_SESSION":     {},
+	"AF_SESSION_GEN": {},
+	"AF_HOME":        {},
 }
 
 // credentialMountProgramLoaderNames are names that choose which CODE the
@@ -430,6 +446,7 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 		denied[name] = struct{}{}
 	}
 	add(credentialMountSharedAFStateNames)
+	add(credentialMountSessionMarkerNames)
 	add(credentialMountReassertedNames)
 	add(credentialMountProgramLoaderNames)
 	add(credentialMountIdentityEnvNames[agent])
@@ -469,6 +486,9 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	}
 	if _, ok := credentialMountSharedAFStateNames[name]; ok {
 		return "it relocates af's own state or falsifies af's session and tool selection", true
+	}
+	if _, ok := credentialMountSessionMarkerNames[name]; ok {
+		return "it falsifies af's session membership — af re-stamps the real marker at the pane boundary", true
 	}
 	if _, ok := credentialMountIdentityEnvNames[agent][name]; ok {
 		return "it can substitute the credential af mounts read-only", true
@@ -609,6 +629,12 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 			continue
 		}
 		if _, program := credentialMountSharedProgramEntries[name]; program {
+			continue
+		}
+		// af's session markers are af's own values, stamped at the pane
+		// boundary — an empty pin would erase them at the exec shim after
+		// tmux installed them (#7531).
+		if _, marker := credentialMountSessionMarkerNames[name]; marker {
 			continue
 		}
 		if _, ok := forwarded[name]; ok {

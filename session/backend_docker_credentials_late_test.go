@@ -363,3 +363,47 @@ func TestProvision_WarnsBeforeDependentStepFails(t *testing.T) {
 	require.Contains(t, out, "session_env_passthrough",
 		"the warning must still carry its operator remedy")
 }
+
+// TestCredentialMount_SessionMarkersSurviveTheExecBoundary is the Codex P2
+// regression property (#7531): af's OWN session markers — the names
+// sessionEnvFlags stamps into every pane environment — are trusted values
+// from af itself, not a repo source. Classifying them pinnable put them in
+// --session-env-empty, so the exec shim re-asserted them defined-and-empty
+// AFTER tmux installed af's values, and the agent's children lost the
+// markers markedOrphanProcesses needs to attribute and reap them inside
+// the container. Every marker must stay OUT of the pins and the
+// --session-env-empty argv while still being refused to repo run_args.
+func TestCredentialMount_SessionMarkersSurviveTheExecBoundary(t *testing.T) {
+	markers := []string{
+		tmux.EnvMarkerSession, tmux.EnvMarkerGeneration, tmux.EnvMarkerHome, tmux.EnvMarkerInstance,
+	}
+	for _, name := range markers {
+		for _, agent := range []string{tmux.ProgramGemini, tmux.ProgramClaude} {
+			require.NotContains(t, credentialMountPinnedNames(agent, nil), name,
+				"%s is af's own marker — pinning it empty erases the membership proof at the exec shim", name)
+		}
+	}
+
+	// The argv level: --session-env-empty is what the exec shim re-asserts;
+	// a marker there is the blank-after-tmux order the finding describes.
+	p := &dockerProvisioner{
+		program:           tmux.ProgramGemini,
+		credentialMounts:  []string{"mount"},
+		credentialEnvPins: credentialMountPinnedNames(tmux.ProgramGemini, nil),
+		spec:              ProvisionSpec{Program: "gemini", Title: "markers"},
+	}
+	argv, err := p.agentServerCommand()
+	require.NoError(t, err)
+	for i, name := range markers {
+		require.NotContains(t, argv, "--session-env-empty "+name,
+			"--session-env-empty %s would blank the marker after tmux installed af's value (marker %d)", name, i)
+	}
+
+	// The deny half stays: a repository run_args marker is still refused —
+	// only af may write these names.
+	for _, name := range markers {
+		_, denied := credentialMountDeniedNames(tmux.ProgramGemini)[name]
+		require.True(t, denied || name == tmux.EnvMarkerInstance,
+			"%s must still be refused to repository run_args (AF_INSTANCE_ID is unallowlisted — unreachable either way)", name)
+	}
+}
