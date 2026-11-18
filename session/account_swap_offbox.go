@@ -342,7 +342,7 @@ func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: %w", i.Title, name, err)
 	}
 	if next.Agent != old.Agent {
-		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: it is a %s account, and the session runs %s; a sandbox session keeps its agent when it changes account",
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("cannot hand %q off to account %q: it belongs to the %s agent, and the session runs %s; a sandbox session keeps its agent when it changes account",
 			i.Title, name, next.Agent, old.Agent)
 	}
 	check := *w

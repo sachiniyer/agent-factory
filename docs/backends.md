@@ -232,6 +232,40 @@ user's real home and mounts it only if it exists, so:
     blocked, so containment is **partial by design**. Turn it on only for images
     you trust with read access to that agent's credential.
 
+    **The environment cannot carry a credential the operator did not forward.**
+    af classifies every name that can substitute for, relocate, or route the
+    mounted credential — API keys and tokens, inline-config names like
+    `OPENCODE_CONFIG_CONTENT`, config roots like `CODEX_HOME` and
+    `OPENCODE_CONFIG_DIR`, endpoints and base URLs, proxies and CA bundles,
+    `HOME`/`XDG_*`, GitHub token and SSH-agent names — for every agent in the
+    mount table above. `docker.run_args` entries naming one are **refused**
+    before `docker run`; the same names the operator did not forward are then
+    defined **and empty** in the container environment, so the image's own
+    `ENV`, a workspace `.env` loader, or any other late source finds the name
+    already set to nothing. `HOME`, `XDG_DATA_HOME`, and `XDG_CONFIG_HOME` are
+    re-asserted to the mount's real roots rather than emptied. The operator's
+    escape hatch is unchanged: names listed in the global
+    `session_env_passthrough` keep their forwarded value and are never blanked
+    or refused for the operator's own use.
+
+    **Migration.** If a working setup legitimately carried one of these names —
+    a corporate `HTTPS_PROXY`, a private CA bundle, a private-cloud
+    `OPENAI_BASE_URL` — af now blanks it and logs a **WARNING once per
+    session** naming each blanked variable (names only, never values) with the
+    remedy: forward the name through `session_env_passthrough`. A repo-set
+    `docker.run_args` entry for one is refused outright with the same remedy in
+    the error.
+
+    **What still trusts the image and the repo.** The pins cover the
+    *environment* only. The repo chose the image: its agent binary, its CA
+    store, and its config files can read the mounted file directly, and an
+    agent's own workspace configuration (an `.env` file the CLI force-loads, an
+    `opencode.json` in the repo, a settings file that sets a provider or key)
+    can configure where the agent sends what it read — those are file content,
+    not environment, and af does not audit them. Turn the grant on only for
+    images and repositories you trust to that degree; the credential is what
+    they get.
+
 ### Image requirements (bring-your-own image)
 
 There is **no `af`-published image**: you bring your own (Sachin-locked

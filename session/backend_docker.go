@@ -313,6 +313,22 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			return ProvisionResult{}, err
 		}
 		p.credentialMounts = resolveAgentCredentialMounts(p.agentName(), p.bindMountRelabel())
+		// The environment boundary behind the mount (#7526): every classified
+		// credential-bearing or credential-routing name the operator did not
+		// forward is pinned defined-and-empty after run_args, so it is empty
+		// whatever its source — the repo-chosen image's ENV, run_args, or a
+		// workspace config the agent loads later. Names the image or run_args
+		// actually set get a once-per-session warning, names only: a working
+		// setup that legitimately carried one (a corporate proxy, a CA bundle)
+		// needs it forwarded through session_env_passthrough.
+		if len(p.credentialMounts) > 0 {
+			p.credentialEnvPins = credentialMountPinnedNames(p.agentName(), p.spec.SessionEnvPassthrough)
+			if blanked := credentialMountBlankedWarning(p.dockerImageEnvNames(), runArgs, p.credentialEnvPins); len(blanked) > 0 {
+				log.WarningLog.Printf(
+					"backend=docker: docker.mount_agent_credentials blanked %d env name(s) the image or docker.run_args had set for agent %q: %s — forward any the session needs through the global session_env_passthrough",
+					len(blanked), p.agentName(), strings.Join(blanked, ", "))
+			}
+		}
 	}
 	res, err := p.provision()
 	if err != nil {
@@ -340,8 +356,16 @@ type dockerProvisioner struct {
 	// bind mounts (docker.mount_agent_credentials, #2194), resolved once in
 	// Provision and appended to the `docker run` argv before runArgs.
 	credentialMounts []string
-	afBin            string
-	program          string
+	// credentialEnvPins are the classified credential-bearing/routing env names
+	// the operator did not forward, emitted as `-e NAME=` after runArgs so they
+	// are defined and empty whatever their source (#7526). Set only when
+	// credentialMounts resolved a file; they are also admitted to the
+	// agent-server's --session-env so the empty value survives the inner env
+	// filter and reaches the agent — a workspace config loader treats
+	// defined-empty as set.
+	credentialEnvPins []string
+	afBin             string
+	program           string
 	// hostProgram is the program the container actually resolved and bound,
 	// reported back in the startup banner (#5571 W2.1). Empty until the banner
 	// arrives; remoteAgentBackend falls back to the wire program without it.
@@ -542,6 +566,16 @@ func (p *dockerProvisioner) runContainer() error {
 	// credential mounts, so an operator's own run_args still come last.
 	args = append(args, p.accountMount...)
 	args = append(args, p.runArgs...)
+	// The credential-mount env pins go after run_args for the same reason the
+	// account env does: Docker gives the LAST -e for a name precedence, so a
+	// `-e NAME=` here blanks the name whatever set it earlier — the image's own
+	// ENV, or a run_args entry the validator's classification did not reach.
+	// Defined-and-empty is the same shape the account boundary installs: a
+	// workspace config loader treats it as set and does not supply the repo's
+	// value (#7526).
+	for _, name := range p.credentialEnvPins {
+		args = append(args, "-e", name+"=")
+	}
 	// The account's env goes LAST, after run_args, and that ordering is the boundary
 	// rather than a preference. docker.run_args is repository-controlled and checked
 	// in; appended after the account it could set `-e CODEX_HOME=/another/home` and
@@ -651,7 +685,18 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	if strings.TrimSpace(p.program) != "" {
 		args = append(args, "--program", p.program, "--program-resolved")
 	}
-	for _, name := range p.spec.SessionEnvPassthrough {
+	// agentServerEnvNames are the names the in-container env filter admits: the
+	// operator's passthrough plus the credential-mount pins. A pin reaches the
+	// agent DEFINED and empty — the container env holds it as `NAME=` from
+	// runContainer, and an agent-side workspace config loader treats a defined
+	// name as set and does not apply the repo's value (#7526). A pin cannot
+	// carry a value instead: every pinned name is a classified name the
+	// run_args validator refuses and af emitted empty, so the only value the
+	// filter can pass is the empty one.
+	agentServerEnvNames := append(
+		append([]string(nil), p.spec.SessionEnvPassthrough...),
+		p.credentialEnvPins...)
+	for _, name := range agentServerEnvNames {
 		args = append(args, "--session-env", name)
 	}
 	if branch := strings.TrimSpace(p.spec.Branch); branch != "" {
@@ -670,7 +715,7 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	if _, ok := sessionenv.SupportsAccounts(p.spec.Account.Agent); ok && p.spec.Account.Dir != "" {
 		filteredInner, err = sessionenv.WrapAgentServerAccountCommand(dockerAfBinaryPath, p.spec.Account.Agent, p.spec.SessionEnvPassthrough, args)
 	} else {
-		filteredInner, err = sessionenv.WrapAgentServerCommand(dockerAfBinaryPath, p.spec.SessionEnvPassthrough, args)
+		filteredInner, err = sessionenv.WrapAgentServerCommand(dockerAfBinaryPath, agentServerEnvNames, args)
 	}
 	if err != nil {
 		return "", fmt.Errorf("backend=docker: preparing filtered agent-server environment failed: %w", err)

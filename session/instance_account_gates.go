@@ -175,7 +175,7 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	agent := sessionenv.AgentForCommand(config.ResolveProgram(cfg, opts.Program))
 	if agent != requested {
 		return accountRefusalWithSource(opts, fmt.Errorf(
-			"account %q was validated as a %s account, but this session's program_overrides resolves %s to "+
+			"account %q was validated under the %s agent, but this session's program_overrides resolves %s to "+
 				"a %s command — the account namespaces are separate, so a same-named %s account would be "+
 				"used instead of the %s one you selected. Remove the override, or create the session on the "+
 				"agent whose account you mean",
@@ -264,7 +264,7 @@ func resolveAccountForProvision(repoRoot, program, accountName string) (sessione
 	resolvedAgent := sessionenv.AgentForCommand(resolvedProgram)
 	if resolvedAgent != requestedAgent {
 		return sessionenv.Account{}, fmt.Errorf(
-			"account %q is a %s account, but this session resolves %s to a %s command; account namespaces are separate, so the session would not use the identity you selected",
+			"account %q belongs to the %s agent, but this session resolves %s to a %s command; account namespaces are separate, so the session would not use the identity you selected",
 			accountName, requestedAgent, requestedAgent, resolvedAgent)
 	}
 	return selectAccountInNamespace(requestedAgent, accountName)
