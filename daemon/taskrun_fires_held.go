@@ -43,6 +43,35 @@ func (e *taskFireHeld) Is(target error) bool {
 	return target == errTaskFireReconcile || target == errTaskFireRuntimeUnknown
 }
 
+// taskStatusAbortedHeldSessionRemoved records a held fire consumed because the
+// session it was held on was removed (heldRowRemoved).
+const taskStatusAbortedHeldSessionRemoved = "aborted: the session it was held on was removed"
+
+// bindHeldRow records on the marker the row its fire is held on, the first
+// time it holds there. The caller holds the task's flock. A failed write
+// degrades only the removal check (heldRowRemoved) for this marker.
+func bindHeldRow(taskID string, fire *taskFireMarker, id string) {
+	if id == "" || fire.HeldInstanceID == id {
+		return
+	}
+	mutateTaskFireMarker(taskID, func(m *taskFireMarker) { m.HeldInstanceID = id })
+	fire.HeldInstanceID = id
+}
+
+// heldRowRemoved reports whether the fire was held on a row that is no longer
+// persisted.
+func heldRowRemoved(fire *taskFireMarker, rows []session.InstanceData) bool {
+	if fire.HeldInstanceID == "" {
+		return false
+	}
+	for i := range rows {
+		if rows[i].ID == fire.HeldInstanceID {
+			return false
+		}
+	}
+	return true
+}
+
 // heldTaskFireStatus is the run status a held fire records, and whether err
 // is one.
 func heldTaskFireStatus(err error) (string, bool) {

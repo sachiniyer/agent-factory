@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -819,6 +820,149 @@ func TestRunTask_ALoadsProofCoversAnInterruptedRun(t *testing.T) {
 			}
 			if markerExists(t, tc.taskID) {
 				t.Fatal("the fresh delivery discharges the marker")
+			}
+		})
+	}
+}
+
+// deleteRow removes a persisted row the way a completed kill does.
+func deleteRow(t *testing.T, repoID, id string) {
+	t.Helper()
+	if err := config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
+		var rows []session.InstanceData
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			return nil, err
+		}
+		kept := rows[:0]
+		for _, r := range rows {
+			if r.ID != id {
+				kept = append(kept, r)
+			}
+		}
+		return json.Marshal(kept)
+	}); err != nil {
+		t.Fatalf("delete row %s: %v", id, err)
+	}
+}
+
+// Re-review R1: a fire held on a persisted row is consumed, never delivered
+// again, when that row is killed. A kill still in flight leaves its tombstone,
+// which retained-failure precedence already consumes. A completed kill deletes
+// the row, so the marker remembers which row it was held on, and the next look
+// finds it gone.
+func TestRunTask_AHeldFireWhoseSessionIsKilledIsConsumed(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	creates, _ := stubTaskDelivery(t)
+	intendedAt := time.Now().Add(-time.Minute)
+	for _, tc := range []struct {
+		name       string
+		taskID     string
+		kill       func(t *testing.T, repoID, taskID string)
+		wantStatus string
+	}{
+		{"the kill completes", "ab0r753c", func(t *testing.T, repoID, taskID string) {
+			deleteRow(t, repoID, "inst-"+taskID)
+		}, taskStatusAbortedHeldSessionRemoved},
+		{"the kill is still a tombstone", "ab0r753d", func(t *testing.T, repoID, taskID string) {
+			settleRow(t, repoID, taskID, func(d *session.InstanceData) { d.UserKilled = true })
+		}, taskStatusAbortedShutdown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(*creates)
+			repoID := lostFire(t, tc.taskID, repoPath, intendedAt, nil)
+			requireHeld(t, runTaskDelivery(tc.taskID, task.ProjectExpectation{}, replayMarker(tc.taskID, intendedAt)))
+			if m, err := readTaskFireMarker(tc.taskID); err != nil || m == nil || m.HeldInstanceID != "inst-"+tc.taskID {
+				t.Fatalf("the marker must remember the row it was held on; got %+v (err %v)", m, err)
+			}
+
+			tc.kill(t, repoID, tc.taskID)
+			if err := runTaskDelivery(tc.taskID, task.ProjectExpectation{}, replayMarker(tc.taskID, intendedAt)); err != nil {
+				t.Fatalf("the look after the kill: %v", err)
+			}
+			if got := len(*creates) - before; got != 0 {
+				t.Fatalf("the user killed the run the occurrence went to; it must not run again; creates = %d", got)
+			}
+			if got := lastRunStatus(t, tc.taskID); got != tc.wantStatus {
+				t.Fatalf("LastRunStatus = %q, want %q", got, tc.wantStatus)
+			}
+			if markerExists(t, tc.taskID) {
+				t.Fatal("the consumed fire discharges its marker")
+			}
+		})
+	}
+}
+
+// The same kill landing between two looks of the boot replay.
+func TestReplayTaskFire_AKillBetweenLooksConsumesTheFire(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	creates, _ := stubTaskDelivery(t)
+	intendedAt := time.Now().Add(-time.Minute)
+	repoID := lostFire(t, "ab0r7540", repoPath, intendedAt, nil)
+	var waits []int
+	orig := taskFireRecheckDelay
+	taskFireRecheckDelay = func(attempt int) time.Duration {
+		waits = append(waits, attempt)
+		if attempt == 1 {
+			deleteRow(t, repoID, "inst-ab0r7540")
+		}
+		return 0
+	}
+	t.Cleanup(func() { taskFireRecheckDelay = orig })
+
+	replayTaskFire(replayMarker("ab0r7540", intendedAt))
+	if len(waits) != 1 {
+		t.Fatalf("the replay holds once, then the kill consumes the fire; waited at attempts %v", waits)
+	}
+	if len(*creates) != 0 {
+		t.Fatalf("hold, kill completes, look: zero sessions; creates = %d", len(*creates))
+	}
+	if got := lastRunStatus(t, "ab0r7540"); got != taskStatusAbortedHeldSessionRemoved {
+		t.Fatalf("LastRunStatus = %q, want %q", got, taskStatusAbortedHeldSessionRemoved)
+	}
+	if markerExists(t, "ab0r7540") {
+		t.Fatal("the consumed fire discharges its marker")
+	}
+}
+
+// Re-review R2: no sandbox restore can prove its agent gone, so a sandbox row is
+// never held: a hold could only end in adoption, later. It is adopted at once,
+// as on master, even while something is still settling it.
+func TestReconcilePendingTaskFire_AdoptsASandboxRowAtOnce(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupTaskRepo(t)
+	creates, _ := stubTaskDelivery(t)
+	intendedAt := time.Now().Add(-time.Minute)
+	settling(t, true)
+	for _, tc := range []struct {
+		name   string
+		taskID string
+		shape  func(*session.InstanceData)
+	}{
+		{"run in flight", "ab0r7541", func(d *session.InstanceData) { d.BackendType = "docker" }},
+		{"unproven interrupt", "ab0r7542", func(d *session.InstanceData) {
+			unverifiedRebind(d)
+			d.Liveness, d.BackendType = session.LiveLost, "docker"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !session.IsSandboxBackendType("docker") {
+				t.Fatal("precondition: docker is a sandbox backend")
+			}
+			before := len(*creates)
+			lostFire(t, tc.taskID, repoPath, intendedAt, tc.shape)
+			if err := runTaskDelivery(tc.taskID, task.ProjectExpectation{}, replayMarker(tc.taskID, intendedAt)); err != nil {
+				t.Fatalf("a sandbox row is adopted, not held: %v", err)
+			}
+			if got := len(*creates) - before; got != 0 {
+				t.Fatalf("nothing proves the agent gone, so nothing is delivered again; creates = %d", got)
+			}
+			if got := lastRunStatus(t, tc.taskID); got != "started" {
+				t.Fatalf("LastRunStatus = %q, want started (adopted)", got)
+			}
+			if markerExists(t, tc.taskID) {
+				t.Fatal("adoption discharges the marker")
 			}
 		})
 	}

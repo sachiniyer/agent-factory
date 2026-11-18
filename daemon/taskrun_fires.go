@@ -75,6 +75,11 @@ type taskFireMarker struct {
 	Title        string    `json:"title,omitempty"`
 	InstanceID   string    `json:"instance_id,omitempty"`
 	WorktreePath string    `json:"worktree_path,omitempty"`
+	// HeldInstanceID is the persisted row a reconcile held this fire on
+	// (#7518), bound the first time it holds. A held row that later disappears
+	// (its kill completed and deleted the record) consumes the fire instead of
+	// letting the next look deliver it again.
+	HeldInstanceID string `json:"held_instance_id,omitempty"`
 }
 
 // daemonDrainingPredicate is what daemonDrainingFn asks. runDaemon installs
@@ -412,16 +417,20 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 			// Otherwise it is held while something is still settling the row:
 			// nothing delivers, the marker stays, and the restore decides it. A
 			// rebind leaves a live row to adopt, and a respawn proves the agent
-			// gone and delivers fresh. A row nothing will settle (lost-restore
-			// gave up, or never retries it) would hold forever, so it is adopted
-			// instead, as it always was: the occurrence is not run a second time.
-			if taskFireRowSettles(repo.ID, data) {
+			// gone and delivers fresh. Only a local row's restore can prove that,
+			// so only a local row is held: the loader's own split, under which
+			// every non-sandbox row loads on the local backend. No sandbox path
+			// raises either proof, so a sandbox hold could only ever end in
+			// adoption, and a row nothing will settle (lost-restore gave up, or
+			// never retries it) would hold forever. Both are adopted now, as they
+			// always were: the occurrence is not run a second time.
+			if !session.IsSandboxBackendType(data.BackendType) && taskFireRowSettles(repo.ID, data) {
 				if held == nil {
 					held = data
 				}
 				continue
 			}
-			log.WarningLog.Printf("task %s: adopting Lost session %q as the interrupted fire's product: nothing will restore it, and nothing proves its agent stopped, so the occurrence is not delivered again", t.ID, data.Title)
+			log.WarningLog.Printf("task %s: adopting Lost session %q as the interrupted fire's product: nothing that could prove its agent stopped is settling it, so the occurrence is not delivered again", t.ID, data.Title)
 		case data.Liveness == session.LiveLimitReached:
 			status = TaskStatusLimitParked
 		}
@@ -433,7 +442,21 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		log.InfoLog.Printf("task %s: adopted session %q persisted by an interrupted cron fire", t.ID, data.Title)
 		return true, nil
 	}
+	if held == nil && heldRowRemoved(fire, rows) {
+		// This fire was held on a row that has since disappeared: its kill
+		// completed and deleted the record. The agent the occurrence went to was
+		// running when it was held, and the user removed it, so the occurrence
+		// is consumed here, never delivered again by the next look.
+		now := time.Now()
+		if _, uerr := task.UpdateTaskStatus(t.ID, &now, taskStatusAbortedHeldSessionRemoved); uerr != nil {
+			return false, fmt.Errorf("%w: recording the consumed held run: %v", errTaskFireReconcile, uerr)
+		}
+		clearTaskFire(t.ID)
+		log.WarningLog.Printf("task %s: the session this fire was held on (%s) was removed; the occurrence is consumed, not delivered again", t.ID, fire.HeldInstanceID)
+		return true, nil
+	}
 	if held != nil {
+		bindHeldRow(t.ID, fire, held.ID)
 		return false, &taskFireHeld{session: held.Title}
 	}
 
