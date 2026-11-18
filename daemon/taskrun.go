@@ -318,8 +318,12 @@ func (e *replayedFireAbort) Unwrap() error { return e.cause }
 
 // parkUntilNextPoll waits out one cronDeferPollInterval, and reports true as
 // soon as the daemon is stopping, however much of the interval is left.
-func parkUntilNextPoll() (stopping bool) {
-	deadline := time.Now().Add(cronDeferPollInterval)
+func parkUntilNextPoll() (stopping bool) { return parkFor(cronDeferPollInterval) }
+
+// parkFor waits out d the same way: it reports true as soon as the daemon is
+// stopping, however much of d is left.
+func parkFor(d time.Duration) (stopping bool) {
+	deadline := time.Now().Add(d)
 	for {
 		if daemonDrainingFn() {
 			return true
@@ -541,8 +545,12 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 				}
 			}
 		}
-		if _, uerr := task.UpdateTaskStatus(taskID, &now, status); uerr != nil {
-			log.ErrorLog.Printf("failed to record run status for task %s: %v", taskID, uerr)
+		// A held replay asks again on a cadence (replayTaskFire). The same verdict
+		// again is not a new run outcome, so it does not rewrite the status.
+		if !errors.Is(err, errTaskFireRuntimeUnknown) || t.LastRunStatus != status {
+			if _, uerr := task.UpdateTaskStatus(taskID, &now, status); uerr != nil {
+				log.ErrorLog.Printf("failed to record run status for task %s: %v", taskID, uerr)
+			}
 		}
 		if !keepFire {
 			clearTaskFire(taskID)
@@ -584,6 +592,19 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 		}
 		if fire != nil && pendingFire {
 			done, recErr := reconcilePendingTaskFire(t, fire)
+			if recErr != nil && replay == nil && errors.Is(recErr, errTaskFireRuntimeUnknown) {
+				// A NEW occurrence never waits on an older one that is held
+				// (#7518), or one unverifiable session would stop the task
+				// firing. This run delivers its own occurrence, which is not a
+				// second run of the held one: that one is either still running
+				// in its Lost session or, if that agent is in fact gone, folded
+				// into this delivery of the same prompt, the coalescing an owed
+				// fire already gets from a fresh one. Its marker is retired here
+				// so no replay delivers it later as well.
+				log.WarningLog.Printf("task %s: %v; this fire supersedes it and delivers its own occurrence", taskID, recErr)
+				clearTaskFire(taskID)
+				done, recErr = true, nil
+			}
 			if recErr != nil {
 				return recErr
 			}

@@ -431,8 +431,9 @@ func (i *Instance) ClearIdleEvidence() bool {
 }
 
 // markLoadRuntimeReplaced records that Start(false) created a replacement
-// process, retired an unverified reattachment's persisted runtime command, or
-// recorded a process tab's observed exit (#4506 review). The daemon loader
+// process, retired an unverified reattachment's persisted runtime command,
+// recorded a process tab's observed exit (#4506 review), or deferred the row to
+// the lost-restore loop with its Lost verdict (#7518). The daemon loader
 // consumes this after FromInstanceData returns so the timestamp, evidence
 // clear or exit stamp is checkpointed before the row is installed. Marking a
 // sibling replacement does not clear agent evidence.

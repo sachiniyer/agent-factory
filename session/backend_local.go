@@ -347,7 +347,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// lost-restore loop can Recover it — which needs this exact
 			// persisted binding to respawn the same name (#5172).
 			preserveAgentHandle = retainsInertInstance(err) || restoreDeferred(err)
-			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
+			// Marked as the agent's own, so the loader can tell what it proves.
+			setupErr = fmt.Errorf("failed to restore existing session: %w", &agentRestoreRefusal{err})
 			return setupErr
 		}
 		if restoreResult == tmux.RestoreRespawned {

@@ -118,6 +118,19 @@ type InstanceData struct {
 	// row that reloads INERT drops it on load instead: no automatic retry can
 	// reach that row, so the record would report an armed retry forever.
 	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
+	// LostAgentGone records that the loader parked this row Lost after tmux
+	// confirmed the AGENT's own session absent and the respawn was then refused:
+	// its worktree was gone (tmux.ErrSpawnDirMissing), or the replacement for a
+	// refused conversation could not be made durable (ErrReplacementNotDurable).
+	// The process the row's prompt went to is proven gone. Every other Lost
+	// leaves it false, because nothing proves that: a socket that could not be
+	// verified under a possibly-live server, a sibling tab's refusal beside a
+	// reattached agent, a provisional sandbox Lost, a poll's observation. Written
+	// only while Liveness is LiveLost; leaving Lost drops it. The daemon's pending
+	// cron fire reconcile reads it (#7518): only a proven-gone agent lets the
+	// occurrence deliver fresh. omitempty + additive: an older record decodes to
+	// false, which holds the fire rather than deliver it twice.
+	LostAgentGone bool `json:"lost_agent_gone,omitempty"`
 	// Unreachable projects a live remote-probe outage (#5571 W1.3): the
 	// daemon's observation stopped being answered at Since, and Error is the
 	// last transport failure — collapsed, bounded, and token-redacted before it

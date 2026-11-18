@@ -42,6 +42,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		SetupHookFailed:          i.setupHookFailed,
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
 		LostRestoreWait:          cloneLostRestoreWait(i.lostRestoreWait),
+		LostAgentGone:            i.liveness == LiveLost && i.lostAgentGone,
 		RebuildTeardownPending:   i.rebuildTeardownPending,
 		Unreachable:              i.unreachableDataLocked(),
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
@@ -542,6 +543,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		setupHookFailed:          data.SetupHookFailed,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
 		lostRestoreWait:          lostRestoreWaitFromData(data.LostRestoreWait),
+		lostAgentGone:            liveness == LiveLost && data.LostAgentGone,
 		rebuildTeardownPending:   data.RebuildTeardownPending,
 		unreachableSince:         unreachableSinceFromData(data.Unreachable),
 		unreachableErr:           unreachableErrFromData(data.Unreachable),
@@ -973,20 +975,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 			return inertReturn(), nil
 		}
 		if restoreDeferred(err) {
-			// The tmux session is gone and its persisted worktree is missing:
-			// the spawn-dir seam refused a respawn that tmux would have
-			// silently placed in the server's cwd (#5172). Load the row Lost
-			// (started, so SaveInstances keeps the record and
-			// lostSessionWantsRestore admits it) instead of dropping it — the
-			// daemon's lost-restore loop owns the rebuild-then-respawn path,
-			// and it can only reach a row that materialized.
-			instance.mu.Lock()
-			instance.assignLivenessLocked(LiveLost)
-			instance.started = true
-			instance.dropAttentionIfStoppedLocked()
-			instance.touchLocked()
-			instance.mu.Unlock()
-			return instance, nil
+			return instance.deferToLostRestore(err), nil
 		}
 		return nil, err
 	}

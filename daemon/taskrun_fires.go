@@ -61,6 +61,15 @@ const taskStatusAbortedPrefix = "aborted:"
 // a transient probe failure.
 var errTaskFireReconcile = errors.New("task fire reconcile failed")
 
+// errTaskFireRuntimeUnknown is the reconcile failure that holds a fire (#7518):
+// the session the interrupted attempt created is Lost with its run in flight,
+// and nothing proves the agent it prompted has stopped. Delivering would start
+// a second run of the occurrence beside one that may still be working, so the
+// marker stays and nothing delivers until that session's restore settles. It
+// always travels inside errTaskFireReconcile, so every rule that keeps a marker
+// on a reconcile failure keeps this one.
+var errTaskFireRuntimeUnknown = errors.New("the session it created is Lost, and nothing proves the agent it prompted has stopped")
+
 // taskFireMarker is the durable record of one intended cron fire. TaskID and
 // IntendedAt are written by RunTask before delivery; Title and InstanceID are
 // bound by the create path as it commits them, and WorktreePath is bound the
@@ -302,13 +311,17 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 // reconcilePendingTaskFire decides what a surviving marker still owes.
 // Returned done=true means the occurrence is fully consumed and RunTask must
 // return without delivering; done=false means the fire is still owed and the
-// caller proceeds to a fresh delivery. The order matters:
+// caller proceeds to a fresh delivery. An error carrying
+// errTaskFireRuntimeUnknown holds the fire: neither, until a later reconcile can
+// tell. The order matters:
 //
 //  1. A persisted row the interrupted create already committed (matched by the
 //     bound instance id, then by task-association created at-or-after the
 //     recorded intent) IS the fire's product — adopt it, never duplicate it.
 //     The persisted row also implies the prompt was already sent: the create
-//     path submits it before appending the record.
+//     path submits it before appending the record. A row whose prompted runtime
+//     is proven gone is not its product, and the fire delivers fresh; a Lost row
+//     whose agent may still be running it holds the fire instead.
 //  2. A foreign row owning the title, its derived branch, or its worktree path
 //     means the leftover identity is not ours to touch — leave it and deliver
 //     fresh under a new suffix.
@@ -345,6 +358,10 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		return false, fmt.Errorf("%w: listing persisted sessions: %v", errTaskFireReconcile, err)
 	}
 
+	// held is the first matched Lost row whose agent nothing proves gone. It is
+	// reported only after every row was seen: another matched row that is this
+	// fire's settled product still wins.
+	var held *session.InstanceData
 	for i := range rows {
 		data := &rows[i]
 		matched := fire.InstanceID != "" && data.ID == fire.InstanceID
@@ -367,33 +384,35 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		// that never landed. The row stays — its interrupted work is kept —
 		// while the fire falls through to a fresh delivery, and the leftover
 		// path below already declines to reap an identity this row still owns.
-		//
-		// A row the boot loader deferred to the lost-restore loop
-		// (Liveness == LiveLost) is the same not-yet-delivered shape, just
-		// observed one step earlier. The loader hands such a row to the
-		// lost-restore pass WITHOUT respawning — a deferred restore (worktree
-		// missing/unreachable, socket unverifiable under a possibly-live
-		// server, or a staged replacement conversation not made durable) — and
-		// it does not pre-stamp TaskRunInterrupted on this path; the durable
-		// interrupt lands only after lost-restore runs git worktree add + tmux
-		// spawn, which is unsequenced against this replay's file read. Adopting
-		// the row here would stamp "started" and clear the marker before the
-		// replacement ever received the prompt, consuming the occurrence for
-		// nothing — the lost-restore respawn never replays it. Skipping keeps
-		// the fire owed (it delivers fresh under a new suffix), and the row is
-		// preserved for its own lost-restore recovery; the leftover scan's
-		// foreign-row title match already declines to reap an identity this row
-		// still owns. Same policy as the TaskRunInterrupted arm above: a
-		// runtime replaced without prompt replay keeps the occurrence owed.
-		if data.TaskRunInterrupted || data.Liveness == session.LiveLost {
+		if data.TaskRunInterrupted {
 			continue
 		}
 		// An adopted tombstone or uncertain row is already owned by the retained-
 		// failure machinery — the fire is consumed, not restarted underneath it.
+		// That classification outranks any liveness the row also carries: an
+		// uncertain row is kept precisely because its runtime may be alive.
 		status := "started"
 		switch {
 		case data.UserKilled || data.StartupStateUnknown:
 			status = taskStatusAbortedShutdown
+		case data.Liveness == session.LiveLost && data.TaskRunActive:
+			// A Lost row whose run is still in flight was prompted and has not
+			// finished, and Lost alone cannot say whether that agent still runs
+			// (#7518). The loader parks a row Lost whether tmux confirmed its
+			// agent's session absent or could not verify the socket under a
+			// possibly-live server, and in the second case the agent may be
+			// working on this very prompt. So the occurrence delivers fresh
+			// only when the loader proved the agent gone (LostAgentGone),
+			// which is the TaskRunInterrupted arm's policy one step earlier.
+			// Otherwise it is held: nothing delivers, the marker stays, and
+			// the row's own restore decides it. A rebind leaves a live row to
+			// adopt, and a respawn stamps TaskRunInterrupted, which then
+			// delivers fresh. A run that already finished is adopted below:
+			// its agent processed the prompt.
+			if !data.LostAgentGone && held == nil {
+				held = data
+			}
+			continue
 		case data.Liveness == session.LiveLimitReached:
 			status = TaskStatusLimitParked
 		}
@@ -404,6 +423,10 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		clearTaskFire(t.ID)
 		log.InfoLog.Printf("task %s: adopted session %q persisted by an interrupted cron fire", t.ID, data.Title)
 		return true, nil
+	}
+	if held != nil {
+		return false, fmt.Errorf("%w: %w (session %q); the fire is held until that session's restore settles",
+			errTaskFireReconcile, errTaskFireRuntimeUnknown, held.Title)
 	}
 
 	if fire.Title == "" {
@@ -753,10 +776,45 @@ func replayPendingTaskFires() {
 		wg.Add(1)
 		go func(m *taskFireMarker) {
 			defer wg.Done()
-			if err := runTaskDelivery(m.TaskID, task.ProjectExpectation{}, m); err != nil {
-				log.WarningLog.Printf("replay of interrupted cron fire for task %s failed: %v", m.TaskID, err)
-			}
+			replayTaskFire(m)
 		}(marker)
 	}
 	wg.Wait()
+}
+
+// taskFireRecheckDelay paces a held replay's next look (replayTaskFire). The
+// session's restore is what settles a hold, so the replay asks again on the
+// restore loop's own backoff. A var so tests can drive it.
+var taskFireRecheckDelay = lostRestoreBackoff
+
+// replayTaskFire replays one interrupted fire. A reconcile that cannot tell
+// whether the prompted agent is gone holds the fire (errTaskFireRuntimeUnknown):
+// nothing delivers and the marker stays. That session's restore decides it,
+// so the replay looks again as the restore loop retries rather than waiting for
+// the next boot. A rebind leaves a live row the next look adopts, and a respawn
+// stamps TaskRunInterrupted, after which it delivers fresh.
+//
+// The hold is bounded by things outside this loop. It ends when the restore
+// settles; when another fire discharges or replaces the marker, since the task's
+// next scheduled or manual fire supersedes a held one rather than wait on it; when
+// the task is disabled or deleted; or when the daemon starts to stop, which
+// leaves the marker for the next daemon's replay. Every look runs under the
+// task's flock and re-reads the marker, so the fire has one deliverer at a time
+// (#7468).
+func replayTaskFire(m *taskFireMarker) {
+	for attempt := 1; ; attempt++ {
+		err := runTaskDelivery(m.TaskID, task.ProjectExpectation{}, m)
+		if !errors.Is(err, errTaskFireRuntimeUnknown) {
+			if err != nil {
+				log.WarningLog.Printf("replay of interrupted cron fire for task %s failed: %v", m.TaskID, err)
+			}
+			return
+		}
+		if attempt == 1 {
+			log.InfoLog.Printf("replay of interrupted cron fire for task %s: %v; looking again as that session's restore retries", m.TaskID, err)
+		}
+		if parkFor(taskFireRecheckDelay(attempt)) {
+			return
+		}
+	}
 }
