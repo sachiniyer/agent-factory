@@ -219,6 +219,50 @@ func TestSameSocketPath(t *testing.T) {
 	require.False(t, sameSocketPath(dotdot, filepath.Join(root, "s")), "and is not the lexically cleaned path")
 	require.True(t, sameSocketPath(child+"/../gone/s", filepath.Join(real, "gone", "s")),
 		"the same, below a directory that no longer exists")
+
+	// A dangling symlink is still followed (Codex on #7537): a client that
+	// reached the socket through alias.sock -> actual.sock names the server
+	// bound to actual.sock once that file is unlinked. Absolute and relative
+	// link targets, and a directory link whose target is gone.
+	require.NoError(t, os.Symlink(filepath.Join(root, "actual.sock"), filepath.Join(root, "alias.sock")))
+	require.True(t, sameSocketPath(filepath.Join(root, "alias.sock"), filepath.Join(root, "actual.sock")), "a dangling socket alias")
+	require.False(t, sameSocketPath(filepath.Join(root, "alias.sock"), filepath.Join(root, "other.sock")))
+	require.NoError(t, os.Symlink("actual2.sock", filepath.Join(root, "relalias.sock")))
+	require.True(t, sameSocketPath(filepath.Join(root, "relalias.sock"), filepath.Join(root, "actual2.sock")), "a relative dangling alias")
+	require.NoError(t, os.Symlink(filepath.Join(root, "gone-dir"), filepath.Join(root, "dirlink")))
+	require.True(t, sameSocketPath(filepath.Join(root, "dirlink", "s"), filepath.Join(root, "gone-dir", "s")), "a dangling directory link")
+}
+
+// A server is ruled out only by a certain mismatch. A symlink loop on either
+// side makes the comparison uncertain, which leaves the server unresolved.
+func TestBindingAgainst(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(filepath.Join(root, "actual.sock"), filepath.Join(root, "alias.sock")))
+	loopA, loopB := filepath.Join(root, "loopa"), filepath.Join(root, "loopb")
+	require.NoError(t, os.Symlink(loopB, loopA))
+	require.NoError(t, os.Symlink(loopA, loopB))
+	_, ok := canonicalSocketPath(loopA + "/s")
+	require.False(t, ok, "a symlink loop resolves to nothing certain")
+
+	for _, tc := range []struct {
+		name   string
+		target string
+		bound  []string
+		want   socketBinding
+	}{
+		{"bound through a dangling alias", root + "/alias.sock", []string{root + "/x.sock", root + "/actual.sock"}, socketBindingBound},
+		{"bound elsewhere", root + "/alias.sock", []string{root + "/x.sock"}, socketBindingElsewhere},
+		{"a bound path that loops", root + "/s", []string{loopA + "/s"}, socketBindingUnresolved},
+		{"a looping bound path beside a certain mismatch", root + "/s", []string{root + "/x.sock", loopA + "/s"}, socketBindingUnresolved},
+		{"a looping bound path beside the owner's", root + "/s", []string{loopA + "/s", root + "/s"}, socketBindingBound},
+		{"a target that loops", loopA + "/s", []string{root + "/s"}, socketBindingUnresolved},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := bindingAgainst(tc.target, tc.bound)
+			require.Equal(t, tc.want, got)
+		})
+	}
 }
 
 // The real binding read, against this process's own listener: bound to its

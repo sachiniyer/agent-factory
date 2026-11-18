@@ -47,34 +47,53 @@ func readTmuxServerSocketBinding(pid int, socketPath string) (socketBinding, str
 		// compare. Neither rules the server out.
 		return socketBindingUnresolved, ""
 	}
+	return bindingAgainst(socketPath, paths)
+}
+
+// bindingAgainst classifies a server whose listening sockets are bound to
+// paths against the absent socketPath. A comparison that cannot be made
+// certain (a symlink loop on either side) leaves the server unresolved: only a
+// certain mismatch rules it out.
+func bindingAgainst(socketPath string, paths []string) (socketBinding, string) {
+	want, ok := canonicalSocketPath(socketPath)
+	if !ok {
+		return socketBindingUnresolved, ""
+	}
+	uncertain := false
 	for _, p := range paths {
-		if sameSocketPath(p, socketPath) {
+		got, ok := canonicalSocketPath(p)
+		if !ok {
+			uncertain = true
+			continue
+		}
+		if got == want || sameSocketDir(p, socketPath) {
 			return socketBindingBound, p
 		}
+	}
+	if uncertain {
+		return socketBindingUnresolved, ""
 	}
 	return socketBindingElsewhere, strings.Join(paths, ", ")
 }
 
-// sameSocketPath reports whether two absolute socket paths name the same
-// socket. Each is compared with its deepest existing ancestor resolved, so
-// /tmp/... and /private/tmp/... agree on darwin even after the socket file, or
-// its directory, is gone. Two paths whose directories both still exist and are
-// the same directory (a bind mount, say) also agree.
-//
-// Nothing is cleaned lexically before symlinks are resolved. The kernel keeps a
-// bound address as the binder spelled it, and a ".." after a symlink names the
-// symlink target's parent: /tmp/base/link/../s, with link pointing at
-// /tmp/base/real/child, is /tmp/base/real/s, not /tmp/base/s (Codex on #7537).
+// sameSocketPath reports whether two absolute socket paths certainly name the
+// same socket (see canonicalSocketPath and sameSocketDir).
 func sameSocketPath(a, b string) bool {
-	if canonicalSocketPath(a) == canonicalSocketPath(b) {
-		return true
-	}
+	ca, okA := canonicalSocketPath(a)
+	cb, okB := canonicalSocketPath(b)
+	return (okA && okB && ca == cb) || sameSocketDir(a, b)
+}
+
+// sameSocketDir reports whether two paths have the same last component in
+// directories that both exist and are the same directory: a bind mount, say,
+// which no spelling reveals. os.Stat lets the kernel walk each spelling,
+// symlinks and ".." included.
+func sameSocketDir(a, b string) bool {
 	dirA, baseA := splitSocketPath(a)
 	dirB, baseB := splitSocketPath(b)
 	if baseA != baseB {
 		return false
 	}
-	// os.Stat lets the kernel walk each spelling, symlinks and ".." included.
 	da, errA := os.Stat(dirA)
 	db, errB := os.Stat(dirB)
 	return errA == nil && errB == nil && os.SameFile(da, db)
@@ -92,21 +111,63 @@ func splitSocketPath(p string) (dir, base string) {
 	return p[:i], p[i+1:]
 }
 
-// canonicalSocketPath resolves the longest prefix of p's components that
-// exists, symlinks and ".." walked the way the kernel walks them
-// (filepath.EvalSymlinks), and appends the components past it as written.
-func canonicalSocketPath(p string) string {
-	parts := strings.Split(p, "/")
-	for i := len(parts); i > 0; i-- {
-		prefix := strings.Join(parts[:i], "/")
-		if prefix == "" {
-			prefix = "/"
+// maxSocketPathLinks bounds the dangling symlinks canonicalSocketPath follows,
+// as the kernel bounds a path walk (Linux MAXSYMLINKS is 40).
+const maxSocketPathLinks = 40
+
+// canonicalSocketPath resolves p the way the kernel walks it, so two spellings
+// of one socket compare equal (#7533):
+//
+//   - The longest prefix of p's raw components that exists is resolved with
+//     filepath.EvalSymlinks, which walks symlinks and ".." the way the kernel
+//     does. Nothing is cleaned lexically first: a ".." after a symlink names
+//     the symlink TARGET's parent, so /tmp/base/link/../s, with link pointing
+//     at /tmp/base/real/child, is /tmp/base/real/s (Codex on #7537).
+//   - The first component past that prefix may be a symlink whose target is
+//     gone. EvalSymlinks fails on a dangling link, but the kernel still
+//     follows it, so it is followed here: a client that reached the socket
+//     through /tmp/alias.sock -> /tmp/actual.sock names the server bound to
+//     /tmp/actual.sock after that file is unlinked (Codex on #7537).
+//   - Whatever lies past that is kept as written. It cannot be walked: the
+//     kernel would fail there too.
+//
+// false means the walk did not end within maxSocketPathLinks links (a loop):
+// the path names nothing certain, and a comparison with it rules nothing out.
+func canonicalSocketPath(p string) (string, bool) {
+	for range maxSocketPathLinks + 1 {
+		parts := strings.Split(p, "/")
+		resolved, i := "", len(parts)
+		for ; i > 0; i-- {
+			prefix := strings.Join(parts[:i], "/")
+			if prefix == "" {
+				prefix = "/"
+			}
+			if r, err := filepath.EvalSymlinks(prefix); err == nil {
+				resolved = r
+				break
+			}
 		}
-		if resolved, err := filepath.EvalSymlinks(prefix); err == nil {
-			return filepath.Join(append([]string{resolved}, parts[i:]...)...)
+		if i == 0 {
+			return filepath.Clean(p), true
+		}
+		rest := parts[i:]
+		if len(rest) == 0 {
+			return resolved, true
+		}
+		dir := strings.TrimSuffix(resolved, "/")
+		target, err := os.Readlink(dir + "/" + rest[0])
+		if err != nil {
+			return filepath.Join(append([]string{resolved}, rest...)...), true
+		}
+		if !filepath.IsAbs(target) {
+			target = dir + "/" + target
+		}
+		p = target
+		if len(rest) > 1 {
+			p += "/" + strings.Join(rest[1:], "/")
 		}
 	}
-	return filepath.Clean(p)
+	return "", false
 }
 
 // possibleSocketOwners is the socket-absent refusal's list of who could still
