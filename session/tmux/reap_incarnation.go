@@ -346,7 +346,7 @@ func (t *TmuxSession) killVerifiedIncarnation(gen *tmuxGeneration) IncarnationRe
 	// decided from a later table is decided from the wrong one (Codex on #7433,
 	// #7435 item 3).
 	captured, captureNote := t.captureVerifiedTrees(r, gen)
-	protected := reapProtectedSet(captured.Snapshot, captured.Procs)
+	protected := reapProtectedSet(captured.Snapshot, captured.Procs, nil)
 
 	out, err := r.output(guardedKillArgs(gen)...)
 	if err != nil {
@@ -374,7 +374,7 @@ func (t *TmuxSession) killVerifiedIncarnation(gen *tmuxGeneration) IncarnationRe
 	if len(captured.Procs) > 0 {
 		// Synchronous: the boot reconcile that calls this is not latency-sensitive,
 		// and a caller told "stopped" should find the pane's processes stopped too.
-		incarnationReapProcesses(reapOnRequest, name, captured.Procs, reapGraceWait, reapTermWait, protected)
+		incarnationReapProcesses(reapOnRequest, name, captured.Procs, reapGraceWait, reapTermWait, protected, nil)
 	}
 	return IncarnationReap{Stopped: true}
 }

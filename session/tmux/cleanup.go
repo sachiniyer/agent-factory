@@ -499,7 +499,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		// reaper the pane spawned, and protection decided from a later table —
 		// or from an earlier match's — is decided from the wrong tree
 		// (Codex on #7433, #7435 item 3).
-		protected := reapProtectedSet(captured.Snapshot, leaked)
+		protected := reapProtectedSet(captured.Snapshot, leaked, nil)
 		if captureErr != nil {
 			vanished := errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
 			var probeErr error
@@ -593,7 +593,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// had its directory removed underneath it, silently. Same rule as
 			// CloseAndWaitForPaneExit, which already refuses on this exact signal.
 			if remaining := reapOnRequestProcesses(reapOnRequest, match, leaked,
-				reapGraceWait, reapTermWait, protected); len(remaining) > 0 {
+				reapGraceWait, reapTermWait, protected, nil); len(remaining) > 0 {
 				processSweepErrs <- survivingProcessesError(match, remaining, protected)
 			}
 		}(match, leaked, protectedBySession[match])
@@ -775,8 +775,11 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 	// pids and the read that tells a leftover from a replacement (#3706).
 	// One attestation scope for the whole sweep: the claimant pids these
 	// passes meet are stable across refreshes, so blind, per-pass and final
-	// inspection share the memo (#7494 item 2).
-	att := proctree.NewExeAttestations()
+	// inspection share the memo (#7494 item 2). The reap-entry recomputes
+	// and the survivor report below take this same att rather than opening
+	// a fresh scope per call — four scopes for one sweep priced a wedged
+	// claim's full budget once per site (#7509).
+	att := newExeAttestations()
 	if generations.empty() {
 		blindCandidates, refreshErr := refreshOrphanCandidates(candidates, match, nil)
 		_, _, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations, membership, reported, att)
@@ -806,7 +809,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		// already gone — so the protected set is computed at reap entry, where it
 		// still positively excludes the reaper's chain and any af-daemon subtree
 		// in the signalled set (#7435).
-		remaining := reapSessionProcesses(reapEscaped, match, marked, 0, reapTermWait, nil)
+		remaining := reapSessionProcesses(reapEscaped, match, marked, 0, reapTermWait, nil, att)
 		if len(remaining) > 0 {
 			sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s are still alive after bounded teardown",
 				processPIDList(remaining)))
@@ -822,7 +825,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 	// and must not read as a leak "remained" forever; an unproven-ancestry
 	// process is never reported as nothing-found either, so it stays in the
 	// set. Both verdicts come out of the same snapshot the filter used.
-	left = reportableSurvivors(leftSnap, left)
+	left = reportableSurvivors(leftSnap, left, att)
 	if len(left) > 0 {
 		sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s appeared or remained after the orphan sweep",
 			processPIDList(left)))

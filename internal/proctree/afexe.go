@@ -71,18 +71,29 @@ func exeAttestsAFShared(p Process) (bool, exeID) {
 
 // exeIdentityShared runs the memo's revalidation read inside the SAME
 // bounded, single-flighted operation as the full attestation (#7496): on
-// darwin the identity check is exePath plus a stat on the executable's
-// filesystem, and a stalled mount after a first positive attestation must
-// expire as unverified, not hang the reap outside the timer. It flies its
-// own phase — a cheap identity read never joins a full attestation's
-// worker, and an attestation never reports a bare identity as its verdict.
+// darwin the identity check is exePath plus the region walk over the
+// executable's memory map, and a stalled mount after a first positive
+// attestation must expire as unverified, not hang the reap outside the
+// timer. It flies its own phase — a cheap identity read never joins a
+// full attestation's worker, and an attestation never reports a bare
+// identity as its verdict. The instance check rides along on every
+// platform: the identity read happens outside the snapshot, so a pid
+// recycled into the flight key must not carry the old instance's answer
+// onto a verdict (#7509).
 func exeIdentityShared(p Process) (exeID, bool) {
 	fn := exeIdentityFn
 	ok, id := exeCheckShared(
 		flightKey{attestKey{pid: p.PID, startID: p.StartID}, true},
 		func() (bool, exeID) {
 			id, ok := fn(p.PID)
-			return ok, id
+			if !ok {
+				return false, exeID{}
+			}
+			cur, err := Lookup(p.PID)
+			if err != nil || cur.StartID != p.StartID {
+				return false, exeID{}
+			}
+			return true, id
 		})
 	return id, ok
 }
@@ -147,17 +158,14 @@ type exeID struct {
 // and leaves NOTHING behind: the flight holds constant memory no matter how
 // many waiters attach or abandon (#7496 — x/sync's singleflight.DoChan
 // allocated a channel PER WAITER and retained every abandoned one until the
-// worker finished, which is the item-2 leak in another shape).
+// worker finished, which is the item-2 leak in another shape). The struct
+// is deliberately the whole record — there is nowhere a waiter could leave
+// state — so inFlightCount's map length IS the memory bound, not a
+// self-reported counter the code must remember to bump (#7509).
 type attestFlight struct {
 	done chan struct{}
 	ok   bool
 	id   exeID
-	// chans counts the result channels this flight holds open: exactly
-	// one — the shared done every waiter selects on. x/sync's DoChan
-	// allocated one channel per waiter and retained each abandoned one
-	// until the worker finished (#7496); the counter makes the constant-
-	// memory invariant directly assertable by the test.
-	chans int
 }
 
 // attestFlightSet tracks in-flight attestation reads by process instance.
@@ -179,7 +187,7 @@ func (s *attestFlightSet) begin(key flightKey) (f *attestFlight, leader bool) {
 	if f, ok := s.inFlight[key]; ok {
 		return f, false
 	}
-	f = &attestFlight{done: make(chan struct{}), chans: 1}
+	f = &attestFlight{done: make(chan struct{})}
 	s.inFlight[key] = f
 	return f, true
 }
@@ -252,6 +260,14 @@ func (a *ExeAttestations) AttestsAF(p Process) bool {
 			// real shape, and the same filesystem a re-attestation would
 			// block on — so the cached positive cannot be trusted:
 			// timeout means unverified, and unverified blocks (#7496).
+			// And it must be MEMOIZED unverified, not just reported:
+			// uncached, every later candidate meeting this instance in
+			// the same sweep would queue its own full-budget wait on the
+			// same wedged filesystem — one worker, but a timeout priced
+			// per candidate per pass (#7509).
+			a.mu.Lock()
+			a.seen[k] = attestEntry{verdict: false}
+			a.mu.Unlock()
 			return false
 		}
 		if id == e.exe {

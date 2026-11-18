@@ -110,7 +110,7 @@ func TestReapSessionProcessesNeverWaitsOnOrSignalsRequester(t *testing.T) {
 	// the wait a non-event, not merely a shorter one.
 	grace := 2 * time.Second
 	start := time.Now()
-	remaining := reapSessionProcesses(reapOnRequest, "af_requester_reap", []proctree.Process{requester}, grace, 300*time.Millisecond, selfProtectedSet())
+	remaining := reapSessionProcesses(reapOnRequest, "af_requester_reap", []proctree.Process{requester}, grace, 300*time.Millisecond, selfProtectedSet(), nil)
 	elapsed := time.Since(start)
 
 	require.Empty(t, remaining, "the exempt requester is not a leftover — nothing was reaped")
@@ -132,7 +132,7 @@ func TestReapSessionProcessesStillReapsGenuineLeaksBesideRequester(t *testing.T)
 	defer untrack()
 
 	remaining := reapSessionProcesses(reapOnRequest, "af_requester_and_leak",
-		[]proctree.Process{requester, leak}, 200*time.Millisecond, 500*time.Millisecond, selfProtectedSet())
+		[]proctree.Process{requester, leak}, 200*time.Millisecond, 500*time.Millisecond, selfProtectedSet(), nil)
 
 	require.Empty(t, remaining, "a plain sleeper dies to SIGTERM — nothing should outlive the reap")
 	require.True(t, proctree.AliveSame(requester),
@@ -162,7 +162,7 @@ func TestReapSessionProcessesSparesRequesterRegisteredMidGrace(t *testing.T) {
 	t.Cleanup(func() { (<-untrackCh)() })
 
 	remaining := reapSessionProcesses(reapOnRequest, "af_requester_late",
-		[]proctree.Process{requester}, 900*time.Millisecond, 300*time.Millisecond, selfProtectedSet())
+		[]proctree.Process{requester}, 900*time.Millisecond, 300*time.Millisecond, selfProtectedSet(), nil)
 
 	require.Empty(t, remaining, "the late-tracked requester leaves the signal set, not the wait")
 	require.True(t, proctree.AliveSame(requester),
@@ -182,7 +182,7 @@ func TestReapSessionProcessesReapsRequesterAfterUnregister(t *testing.T) {
 	untrack()
 
 	reapSessionProcesses(reapOnRequest, "af_requester_untracked", []proctree.Process{requester},
-		200*time.Millisecond, 500*time.Millisecond, selfProtectedSet())
+		200*time.Millisecond, 500*time.Millisecond, selfProtectedSet(), nil)
 	require.False(t, proctree.AliveSame(requester),
 		"an unregistered process is reaped like anything else — the exemption does not leak past its scope")
 }
