@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
 
@@ -234,7 +235,10 @@ func TestSameRecordedSocket_AHungCompareIsUndecidable(t *testing.T) {
 // record is incomparable — undecidable, never foreign — unless the literal
 // spelling itself answers as a live unix listener.
 func TestCarrierServerVerdict_EscapedRecordedSocketIsIncomparable(t *testing.T) {
-	dir := t.TempDir()
+	// SocketTempDir, not t.TempDir(): the bound socket below must fit
+	// darwin's 104-byte sun_path — a test-name-bearing TempDir path
+	// overruns it and net.Listen fails with a bare "invalid argument".
+	dir := testguard.SocketTempDir(t)
 	realSock := filepath.Join(dir, "so\x01ck")  // byte 0x01 — what TMUX holds raw
 	recorded := filepath.Join(dir, "so\\001ck") // tmux's \NNN rendering of it
 	own := ServerIdentity{Socket: recorded, PID: 4242, StartID: 1, SessionID: "$7"}
