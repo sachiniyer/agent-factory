@@ -188,30 +188,6 @@ func launcherSeparateOperandStep(words []*syntax.Word, i int, names map[string]s
 	return i + 2, false
 }
 
-// sudoLongOptions is sudo 1.9's long-option table; true means the option
-// requires an operand, which may be the next word. getopt_long resolves any
-// unambiguous abbreviation, so the table must be closed: an option missing
-// from it refuses rather than being assumed a flag.
-var sudoLongOptions = map[string]bool{
-	"chdir": true, "chroot": true, "close-from": true,
-	"command-timeout": true, "group": true, "host": true,
-	"other-user": true, "prompt": true, "role": true,
-	"type": true, "user": true,
-
-	"askpass": false, "background": false, "bell": false,
-	"edit": false, "help": false, "list": false, "login": false,
-	"non-interactive": false, "preserve-env": false,
-	"preserve-groups": false, "remove-timestamp": false,
-	"reset-timestamp": false, "set-home": false, "shell": false,
-	"stdin": false, "validate": false, "version": false,
-}
-
-// sudoShortFlags are sudo's no-operand short options; sudoShortValueFlags
-// are the ones that take an operand (attached in the cluster or as the next
-// word). `-h` is neither: its host operand is optional and attached-only.
-const sudoShortFlags = "ABbEHikKNnPsSve"
-const sudoShortValueFlags = "CDgpRrTtUu"
-
 // unwrapSystemdRun walks systemd-run's option region to its COMMAND word.
 // The env-injection spellings are `-E`/`--setenv` (NAME[=VALUE], attached or
 // separate — a bare NAME copies the caller's value, so a denied name there
@@ -236,6 +212,16 @@ func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo oper
 		}
 		literal, ok := literalShellWord(words[0])
 		if !ok {
+			if envSpelling, deniedEnv := systemdRunDynamicEnvName(words[0], names); envSpelling {
+				if deniedEnv {
+					if !requireCommand {
+						return run.done(nil, true)
+					}
+					denied = true
+				}
+				words = words[1:]
+				continue
+			}
 			return run.done(nil, true)
 		}
 		switch {
@@ -386,6 +372,18 @@ func systemdRunEnvOperandStep(words []*syntax.Word, names map[string]struct{}, r
 	}
 	operand, ok := literalShellWord(words[1])
 	if !ok {
+		// Same rule as sudo's region and docker's env operand: a literal
+		// `NAME=` prefix pins the target (`PORT="$PORT"`), so only a word
+		// that cannot name its variable stays unprovable.
+		if name, assignment := shellWordAssignmentName(words[1]); assignment {
+			if accountEnvironmentOperandDenied(name, names) {
+				if !requireCommand {
+					return 0, true
+				}
+				*denied = true
+			}
+			return 2, false
+		}
 		return 0, true
 	}
 	if accountEnvironmentOperandDenied(operand, names) {
@@ -395,6 +393,45 @@ func systemdRunEnvOperandStep(words []*syntax.Word, names map[string]struct{}, r
 		*denied = true
 	}
 	return 2, false
+}
+
+// systemdRunDynamicEnvName reads a non-literal systemd-run word whose
+// literal prefix still pins it to an env option — `--setenv=PORT="$PORT"`,
+// `-EPORT="$PORT"`, `--property=Environment=PORT="$V"`. envSpelling is true
+// when the prefix proves such an option, and denied reports whether its
+// visible name already runs afoul of the denied-name cut; an unclosed quote
+// or a `*property` value that denies makes denied true so the caller can
+// refuse rather than consume an unreadable tail.
+func systemdRunDynamicEnvName(word *syntax.Word, names map[string]struct{}) (envSpelling, denied bool) {
+	prefix := launcherLiteralPrefix(word)
+	eq := strings.Index(prefix, "=")
+	if eq < 0 {
+		return false, false
+	}
+	sigil, rest := prefix[:eq], prefix[eq+1:]
+	var name string
+	switch {
+	case strings.HasPrefix(sigil, "--"):
+		resolved, _, known := resolveLongOption(sigil[2:], systemdRunLongOptions)
+		if !known {
+			return false, false
+		}
+		if resolved == "setenv" {
+			name, _, _ = strings.Cut(rest, "=")
+		} else if strings.HasSuffix(resolved, "property") {
+			return true, systemdRunPropertyOperandDenied(rest, names)
+		} else {
+			return false, false
+		}
+	case strings.HasPrefix(sigil, "-E"):
+		name = sigil[2:]
+	default:
+		return false, false
+	}
+	if !validName(name) {
+		return false, false
+	}
+	return true, accountEnvironmentOperandDenied(name, names)
 }
 
 // systemdRunPropertyOperandDenied judges a `-p`/`--property` NAME=VALUE
@@ -414,10 +451,11 @@ func systemdRunPropertyOperandDenied(operand string, names map[string]struct{}) 
 	}
 	switch {
 	case strings.EqualFold(property, "Environment"):
-		fragments := systemdEnvironmentFragments(value)
-		if len(fragments) == 0 {
-			// `Environment=` empties the unit's environment — the pins go
-			// with it.
+		fragments, closed := systemdEnvironmentFragments(value)
+		if !closed || len(fragments) == 0 {
+			// An unclosed quote leaves hidden text unprovable; an empty
+			// `Environment=` clears the unit's environment — the pins go
+			// with it either way.
 			return true
 		}
 		for _, fragment := range fragments {
@@ -430,7 +468,11 @@ func systemdRunPropertyOperandDenied(operand string, names map[string]struct{}) 
 	case strings.EqualFold(property, "EnvironmentFile"):
 		return true
 	case strings.EqualFold(property, "UnsetEnvironment"):
-		for _, name := range systemdEnvironmentFragments(value) {
+		names2, closed := systemdEnvironmentFragments(value)
+		if !closed {
+			return true
+		}
+		for _, name := range names2 {
 			if accountEnvironmentOperandDenied(name, names) {
 				return true
 			}
@@ -447,7 +489,7 @@ func systemdRunPropertyOperandDenied(operand string, names map[string]struct{}) 
 // assignment (`Environment="FOO=hello world"` is one fragment) and a
 // backslash escapes the next rune. The quote characters themselves are
 // stripped, matching the value the unit file would store.
-func systemdEnvironmentFragments(value string) []string {
+func systemdEnvironmentFragments(value string) ([]string, bool) {
 	var fragments []string
 	var cur strings.Builder
 	var quote rune
@@ -480,30 +522,8 @@ func systemdEnvironmentFragments(value string) []string {
 		}
 	}
 	flush()
-	return fragments
+	return fragments, quote == 0 && !escaped
 }
-
-var systemdRunLongOptions = map[string]bool{
-	"description": true, "expand-environment": true, "gid": true,
-	"host": true, "machine": true, "nice": true, "on-active": true,
-	"on-boot": true, "on-calendar": true, "on-startup": true,
-	"on-unit-active": true, "on-unit-inactive": true,
-	"path-property": true, "property": true, "service-type": true,
-	"setenv": true, "slice": true, "socket-property": true,
-	"timer-property": true, "uid": true, "unit": true,
-	"working-directory": true,
-
-	"collect": false, "help": false, "no-ask-password": false,
-	"no-block": false, "on-clock-change": false,
-	"on-timezone-change": false, "pipe": false, "pty": false,
-	"quiet":             false,
-	"remain-after-exit": false, "same-dir": false, "scope": false,
-	"send-sighup": false, "shell": false, "slice-inherit": false,
-	"user": false, "version": false, "wait": false,
-}
-
-const systemdRunShortFlags = "hdGtPqrS"
-const systemdRunShortValueFlags = "HMu"
 
 // unwrapDocker walks docker's command line to the point where child argv
 // begins. docker's layout is `docker [globals] [group] LEAF [leaf options]
@@ -543,6 +563,13 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 		}
 		literal, ok := literalShellWord(words[i])
 		if !ok {
+			if name, envSpelling := dockerDynamicEnvName(words[i]); envSpelling {
+				if dockerEnvNameDenied(name, names, requireCommand, &denied) {
+					return run.done(nil, true)
+				}
+				i++
+				continue
+			}
 			return run.done(nil, true)
 		}
 		if literal == "--" {
@@ -571,6 +598,13 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 			for i < len(words) {
 				literal, ok := literalShellWord(words[i])
 				if !ok {
+					if name, envSpelling := dockerDynamicEnvName(words[i]); envSpelling {
+						if dockerEnvNameDenied(name, names, requireCommand, &denied) {
+							return run.done(nil, true)
+						}
+						i++
+						continue
+					}
 					return run.done(nil, true)
 				}
 				if literal == "--" {
@@ -606,6 +640,13 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 			}
 			literal, ok := literalShellWord(words[i])
 			if !ok {
+				if name, envSpelling := dockerDynamicEnvName(words[i]); envSpelling {
+					if dockerEnvNameDenied(name, names, requireCommand, &denied) {
+						return run.done(nil, true)
+					}
+					i++
+					continue
+				}
 				return run.done(nil, true)
 			}
 			if literal == "--" {
@@ -644,7 +685,16 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 		}
 		literal, ok := literalShellWord(words[i])
 		if !ok {
-			return run.done(nil, true)
+			// A non-launching leaf's operands are inert data, so a dynamic
+			// word is skipped exactly like the unrecognized tail scan —
+			// `docker logs "$CONTAINER"` admits — while the words after it
+			// may still open an env invocation.
+			if memo.xargsItemFollows(words[i+1:]) ||
+				envCallMutatesAccountEnvironment(words[i+1:], names, true, memo) {
+				return run.done(nil, true)
+			}
+			i++
+			continue
 		}
 		if literal == "--" {
 			break
@@ -656,316 +706,6 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 		i = next
 	}
 	return run.done(nil, false)
-}
-
-// dockerOptionSpec is one option region's table: long names to whether they
-// take an operand (exact-match — docker's parser is pflag and never
-// abbreviates), and the short letters that are flags or take operands.
-type dockerOptionSpec struct {
-	longs       map[string]bool
-	shortFlags  string
-	shortValues string
-}
-
-// dockerOptionStep consumes the literal dash-word at words[i] under spec.
-// The env spellings are judged before the table so `-e`/`--env` variants
-// get the denied-name cut even on a leaf whose table does not list them. A
-// denied assign spelling is deferred through denied under requireCommand;
-// an env file stays an immediate refusal — its contents are unverifiable
-// with or without a child.
-func dockerOptionStep(words []*syntax.Word, i int, spec dockerOptionSpec, names map[string]struct{}, memo operandTailMemo, requireCommand bool, denied *bool) (int, bool) {
-	literal, _ := literalShellWord(words[i])
-	if strings.HasPrefix(literal, "--") {
-		name, value, attached := strings.Cut(literal[2:], "=")
-		switch {
-		case dockerEnvFileLong(name):
-			return 0, true
-		case dockerEnvAssignLong(name):
-			if !attached {
-				return dockerEnvOperandStep(words, i, names, memo, requireCommand, denied)
-			}
-			if accountEnvironmentOperandDenied(value, names) {
-				if !requireCommand {
-					return 0, true
-				}
-				*denied = true
-			}
-			return i + 1, false
-		}
-		requiresArg, known := spec.longs[name]
-		if !known {
-			// An unknown long option is inert: docker's parser is pflag,
-			// which never abbreviates and never reads the next word as an
-			// operand of a name it does not know — it errors on the word
-			// itself. Consuming it as one word keeps option sets on other
-			// docker versions from regressing the command.
-			return i + 1, false
-		}
-		if !requiresArg || attached {
-			return i + 1, false
-		}
-		return launcherSeparateOperandStep(words, i, names, memo)
-	}
-	cluster := literal[1:]
-	for j := 0; j < len(cluster); j++ {
-		c := cluster[j]
-		switch {
-		case strings.IndexByte(spec.shortFlags, c) >= 0:
-		case c == 'e' && strings.IndexByte(spec.shortValues, 'e') >= 0:
-			operand := cluster[j+1:]
-			if operand != "" {
-				if accountEnvironmentOperandDenied(operand, names) {
-					if !requireCommand {
-						return 0, true
-					}
-					*denied = true
-				}
-				return i + 1, false
-			}
-			return dockerEnvOperandStep(words, i, names, memo, requireCommand, denied)
-		case strings.IndexByte(spec.shortValues, c) >= 0:
-			if j+1 < len(cluster) {
-				return i + 1, false
-			}
-			return launcherSeparateOperandStep(words, i, names, memo)
-		default:
-			return 0, true
-		}
-	}
-	return i + 1, false
-}
-
-// dockerEnvSpellingStep is the inert-tail counterpart of dockerOptionStep
-// for the subcommands that take no env option of their own: an env spelling
-// is still refused, every other word is inert and consumed. Short clusters
-// are read with the union of every docker leaf's flag letters so a `-te`
-// next to `docker build` still finds the `e`; a letter outside the union
-// ends the read — the word is data, and docker rejects it anyway.
-func dockerEnvSpellingStep(words []*syntax.Word, i int, names map[string]struct{}, memo operandTailMemo) (int, bool) {
-	literal, _ := literalShellWord(words[i])
-	if strings.HasPrefix(literal, "--") {
-		name, value, attached := strings.Cut(literal[2:], "=")
-		switch {
-		case dockerEnvFileLong(name):
-			return 0, true
-		case dockerEnvAssignLong(name):
-			if !attached {
-				return dockerEnvOperandStep(words, i, names, memo, false, nil)
-			}
-			if accountEnvironmentOperandDenied(value, names) {
-				return 0, true
-			}
-		}
-		return i + 1, false
-	}
-	if !strings.HasPrefix(literal, "-") || literal == "-" {
-		return i + 1, false
-	}
-	cluster := literal[1:]
-	for j := 0; j < len(cluster); j++ {
-		c := cluster[j]
-		switch {
-		case strings.IndexByte("diPqtT", c) >= 0:
-		case c == 'e':
-			operand := cluster[j+1:]
-			if operand != "" {
-				if accountEnvironmentOperandDenied(operand, names) {
-					return 0, true
-				}
-				return i + 1, false
-			}
-			return dockerEnvOperandStep(words, i, names, memo, false, nil)
-		default:
-			return i + 1, false
-		}
-	}
-	return i + 1, false
-}
-
-// dockerEnvOperandStep judges a `-e`/`--env` family's separate-word
-// operand: it must be literal to read the name (`$V` spells anything), the
-// operand is denied when its `=`-cut name is, and it stays a command-head
-// candidate because a shadowed docker can discard it and exec there —
-// `docker run -e sudo CODEX_HOME=/x` places the injection one word later.
-// A denial defers to the caller's boundary check under requireCommand.
-func dockerEnvOperandStep(words []*syntax.Word, i int, names map[string]struct{}, memo operandTailMemo, requireCommand bool, denied *bool) (int, bool) {
-	if i+1 >= len(words) {
-		return 0, true
-	}
-	operand, ok := literalShellWord(words[i+1])
-	if !ok {
-		return 0, true
-	}
-	if accountEnvironmentOperandDenied(operand, names) {
-		if !requireCommand {
-			return 0, true
-		}
-		*denied = true
-	}
-	if wrapperOperandTailMutates(words[i+1:], names, memo) {
-		return 0, true
-	}
-	return i + 2, false
-}
-
-// dockerEnvAssignLong names the long options whose operand is a NAME or
-// NAME=value docker applies to the child's environment: run/create/exec's
-// --env, and compose exec's --env-add/--env-rm (a removal drops a pin the
-// same way UnsetEnvironment does). dockerEnvFileLong names the file
-// spellings, whose contents the gate cannot prove.
-func dockerEnvAssignLong(name string) bool {
-	switch name {
-	case "env", "env-add", "env-rm":
-		return true
-	}
-	return false
-}
-
-func dockerEnvFileLong(name string) bool {
-	switch name {
-	case "env-file", "env-from-file":
-		return true
-	}
-	return false
-}
-
-// dockerManagementGroup names docker's subcommand groups — the word whose
-// NEXT word is the real leaf (`docker container exec`, `docker image
-// build`). Only the group dispatch needs these: their leaves all take the
-// inert-tail scan, so an unlisted group merely anchors the returned tail
-// one word earlier without changing the verdict.
-func dockerManagementGroup(word string) bool {
-	switch word {
-	case "builder", "buildx", "checkpoint", "config", "container", "context",
-		"image", "manifest", "model", "network", "node", "plugin", "scout",
-		"secret", "service", "stack", "swarm", "system", "trust", "volume":
-		return true
-	}
-	return false
-}
-
-// dockerPassthroughLeaf returns the option spec for a leaf that places a
-// child inside a container: run/create/exec under docker or the container
-// group, and run/exec under compose.
-func dockerPassthroughLeaf(group, leaf string) (dockerOptionSpec, bool) {
-	switch {
-	case group == "compose":
-		switch leaf {
-		case "run":
-			return dockerComposeRunOptions, true
-		case "exec":
-			return dockerComposeExecOptions, true
-		}
-	case group == "" || group == "container":
-		switch leaf {
-		case "run", "create":
-			return dockerRunCreateOptions, true
-		case "exec":
-			return dockerExecOptions, true
-		}
-	}
-	return dockerOptionSpec{}, false
-}
-
-var dockerGlobalOptions = dockerOptionSpec{
-	longs: map[string]bool{
-		"config": true, "context": true, "host": true, "log-level": true,
-		"tlscacert": true, "tlscert": true, "tlskey": true,
-
-		"debug": false, "help": false, "tls": false, "tlsverify": false,
-		"version": false,
-	},
-	shortFlags:  "Dv",
-	shortValues: "cHl",
-}
-
-var dockerComposeGlobalOptions = dockerOptionSpec{
-	longs: map[string]bool{
-		"ansi": true, "file": true, "parallel": true, "profile": true,
-		"progress": true, "project-directory": true, "project-name": true,
-
-		"all-resources": false, "compatibility": false, "dry-run": false,
-		"help": false,
-	},
-	shortFlags:  "",
-	shortValues: "fp",
-}
-
-var dockerRunCreateOptions = dockerOptionSpec{
-	longs: map[string]bool{
-		"add-host": true, "annotation": true, "attach": true,
-		"blkio-weight": true, "blkio-weight-device": true, "cap-add": true,
-		"cap-drop": true, "cgroup-parent": true, "cgroupns": true,
-		"cidfile": true, "cpu-period": true, "cpu-quota": true,
-		"cpu-rt-period": true, "cpu-rt-runtime": true, "cpu-shares": true,
-		"cpus": true, "cpuset-cpus": true, "cpuset-mems": true,
-		"detach-keys": true, "device": true, "device-cgroup-rule": true,
-		"device-read-bps": true, "device-read-iops": true,
-		"device-write-bps": true, "device-write-iops": true, "dns": true,
-		"dns-option": true, "dns-search": true, "domainname": true,
-		"entrypoint": true, "expose": true, "gpus": true, "group-add": true,
-		"health-cmd": true, "health-interval": true, "health-retries": true,
-		"health-start-interval": true, "health-start-period": true,
-		"health-timeout": true, "hostname": true, "ip": true, "ip6": true,
-		"ipc": true, "isolation": true, "label": true, "label-file": true,
-		"link": true, "link-local-ip": true, "log-driver": true,
-		"log-opt": true, "mac-address": true, "memory": true,
-		"memory-reservation": true, "memory-swap": true,
-		"memory-swappiness": true, "mount": true, "name": true,
-		"network": true, "network-alias": true, "oom-score-adj": true,
-		"pid": true, "pids-limit": true, "platform": true, "publish": true,
-		"pull": true, "restart": true, "runtime": true, "security-opt": true,
-		"shm-size": true, "stop-signal": true, "stop-timeout": true,
-		"storage-opt": true, "sysctl": true, "tmpfs": true, "ulimit": true,
-		"user": true, "userns": true, "uts": true, "volume": true,
-		"volume-driver": true, "volumes-from": true, "workdir": true,
-
-		"detach": false, "help": false, "init": false, "interactive": false,
-		"no-healthcheck": false, "oom-kill-disable": false,
-		"privileged": false, "publish-all": false, "quiet": false,
-		"read-only": false, "rm": false, "sig-proxy": false, "tty": false,
-		"use-api-socket": false,
-	},
-	shortFlags:  "diPqt",
-	shortValues: "acehlmpuvw",
-}
-
-var dockerExecOptions = dockerOptionSpec{
-	longs: map[string]bool{
-		"detach-keys": true, "user": true, "workdir": true,
-
-		"detach": false, "help": false, "interactive": false,
-		"privileged": false, "tty": false,
-	},
-	shortFlags:  "dit",
-	shortValues: "euw",
-}
-
-var dockerComposeRunOptions = dockerOptionSpec{
-	longs: map[string]bool{
-		"cap-add": true, "cap-drop": true, "entrypoint": true, "label": true,
-		"name": true, "publish": true, "pull": true, "user": true,
-		"volume": true, "workdir": true,
-
-		"build": false, "detach": false, "dry-run": false,
-		"interactive": false, "no-TTY": false, "no-deps": false,
-		"quiet": false, "quiet-build": false, "quiet-pull": false,
-		"remove-orphans": false, "rm": false, "service-ports": false,
-		"use-aliases": false,
-	},
-	shortFlags:  "diTqP",
-	shortValues: "elpuvw",
-}
-
-var dockerComposeExecOptions = dockerOptionSpec{
-	longs: map[string]bool{
-		"index": true, "user": true, "workdir": true,
-
-		"detach": false, "dry-run": false, "no-tty": false,
-		"privileged": false,
-	},
-	shortFlags:  "dT",
-	shortValues: "euw",
 }
 
 // launcherSuffixMutates judges a launcher word found in an unrecognized

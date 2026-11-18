@@ -370,6 +370,20 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"systemd-run --user --pipe make", false},
 		{"systemd-run -p 'Environment=\"FOO=hello world\"' codex", false},
 		{"systemd-run -p 'Environment=\"CODEX_HOME=/x y\" FOO=1' codex", true},
+		// A dynamic env VALUE with a literal `NAME=` prefix still proves
+		// its target, so `PORT="$PORT"` consumes like any allowed name
+		// while a denied name still refuses — separate and attached
+		// spellings alike.
+		{"docker run -e PORT=\"$PORT\" busybox codex", false},
+		{"docker run --env=PORT=\"$PORT\" busybox codex", false},
+		{"docker run -e CODEX_HOME=\"$V\" busybox codex", true},
+		{"systemd-run --setenv PORT=\"$PORT\" codex", false},
+		{"systemd-run --setenv=CODEX_HOME=\"$V\" codex", true},
+		// Non-launching subcommands skip a dynamic operand the way the
+		// inert tail scan does — it is data, not an option boundary.
+		{"docker logs \"$CONTAINER\"", false},
+		{"docker compose exec -it svc ls", false},
+		{"docker compose run -it svc echo hi", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)
