@@ -691,17 +691,19 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		runtimeKind = session.BackendHook
 	}
 	backendOpts := req.backendSelection()
-	if kind, kerr := createBackendKind(req, workspace); kerr == nil {
+	// A kerr means either an unusable `backend` value or, since #5807, an in-repo
+	// project config that exists but cannot be resolved (broken TOML, invalid
+	// value). The canonical refusal used to live at NewInstance, but since #5801
+	// that lands AFTER renameArchivedForReuseLocked has relocated and re-keyed the
+	// archived session for a create that can never succeed, with no rollback
+	// (#2127, #2415). Capture here and refuse below, ahead of the rename, mirroring
+	// the unlisted --host hoist (#5744/#6988). The in-place/off-box contradiction
+	// is resolved here too but REPORTED below, ahead of the archived rename and
+	// behind the project-delete fence, exactly where it was (#2778/#2415).
+	kind, backendResolveErr := createBackendKind(req, workspace)
+	if backendResolveErr == nil {
 		runtimeKind = kind
 	}
-	// A kerr means an invalid backend value. Leave the conservative default above
-	// and let NewInstance surface the canonical error rather than duplicating it.
-	//
-	// The in-place/off-box contradiction is resolved here too but REPORTED below,
-	// inside the lock, at the point it was refused before. Hoisting the resolution
-	// must not hoist the refusal: reserveCreate's admission order is load-bearing
-	// (#2778/#2415), and this check has to stay ahead of the archived-name-reuse
-	// rename and behind the project-delete fence, exactly where it was.
 	inPlaceConflict := session.InPlaceBackendConflict(backendOpts, workspace)
 	nameNamespace := runtimeNamespaceForKind(runtimeKind)
 
@@ -771,6 +773,12 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 		return nil, "", nil, nil, err
 	}
 
+	// Refuse the captured backend-resolution error before the archived rename
+	// (see the capture above); InPlaceBackendConflict's nil-on-error clause
+	// would otherwise carry it straight into the rename.
+	if backendResolveErr != nil {
+		return nil, "", nil, nil, backendResolveErr
+	}
 	// An in-place session and an off-box runtime are contradictory, and
 	// NewInstance is where that is enforced — but it runs long after this
 	// function, and this function MUTATES (#2778). For an explicit title held
@@ -785,9 +793,9 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	// after provisioning work has begun.
 	//
 	// Through session.InPlaceBackendConflict rather than a local comparison
-	// against runtimeKind, so the daemon's answer and NewInstance's cannot drift
-	// — including on the deliberate non-firing for a backend value that will not
-	// resolve, which belongs to the factory's canonical error.
+	// against runtimeKind, so the daemon's answer and NewInstance's cannot drift.
+	// A kind that will not resolve yields nil here; the backendResolveErr check
+	// above carries the canonical factory error instead.
 	if inPlaceConflict != nil {
 		return nil, "", nil, nil, inPlaceConflict
 	}
