@@ -352,6 +352,16 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			p.credentialEnvPins = credentialMountPinnedNames(p.agentName(), p.spec.SessionEnvPassthrough)
 		}
 	}
+	// The pane-boundary blanking in runContainer runs on EVERY docker
+	// session, so a passthrough entry naming one of those names would be
+	// silently overridden — refuse it with a message rather than let the
+	// blank win (#7544).
+	for _, name := range spec.SessionEnvPassthrough {
+		if _, ok := credentialMountPaneBoundaryNames[name]; ok {
+			return ProvisionResult{}, fmt.Errorf(
+				"backend=docker: session_env_passthrough cannot forward %s — af and tmux stamp that name at the pane boundary, so the forwarded value would be blanked on every docker session; remove %s from session_env_passthrough", name, name)
+		}
+	}
 	res, err := p.provision()
 	if err != nil {
 		return ProvisionResult{}, p.reapProvisionFailure(err)
@@ -641,6 +651,21 @@ func (p *dockerProvisioner) runContainer() error {
 	// workspace config loader treats it as set and does not supply the repo's
 	// value (#7526).
 	for _, name := range p.credentialEnvPins {
+		args = append(args, "-e", name+"=")
+	}
+	// af's and tmux's own pane-boundary names are blanked here, at the
+	// container boundary, never at the exec shim: the container environment
+	// is what every `docker exec` child af starts inherits — the
+	// agent-server, the provisioning steps — so an image ENV AF_SESSION_GEN
+	// or TMUX would otherwise carry a forged session marker or pane
+	// identity into them. Defined-empty after run_args dominates the
+	// image's ENV and any repo entry the same last-wins way the pins do.
+	// The pane keeps the real values: the in-container tmux stamps them per
+	// pane over this baseline. A defined-empty TMUX is safe because tmux
+	// itself treats an empty value as unset — measured on tmux 3.4 and
+	// 3.2a — so the blanked baseline cannot trip the nested-session guard
+	// or fake pane identity anywhere af or the agent reads it (#7544).
+	for _, name := range credentialMountPaneBoundaryNamesSorted() {
 		args = append(args, "-e", name+"=")
 	}
 	// The account's env goes LAST, after run_args, and that ordering is the boundary

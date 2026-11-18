@@ -274,7 +274,27 @@ user's real home and mounts it only if it exists, so:
       defined-empty endpoint as real — `CODE_ASSIST_ENDPOINT` to its
       first-party default — so tmux's `default-shell -c` chain, af's own
       execs, the agent's bare executable, and the agent's endpoint choice
-      all resolve through first-party values, never a repo-added one. Every
+      all resolve through first-party values, never a repo-added one.
+      The names an agent's own dotenv loader can fill are pinned for the
+      same reason the endpoint names are: gemini walks up from the
+      workspace applying `<dir>/.gemini/.env` and `<dir>/.env`
+      fill-if-unset, so a checked-in file claims any name af leaves
+      unset. af pins each class defined-and-empty where the measured
+      read is falsy-safe, and a class counts as pinned only when **every
+      name the agent's read consults** is pinned — a chain
+      `A || B || default` leaves `A` free for the `.env` to claim if only
+      `B` is held. The full 0.42.0 reads, pinned link by link:
+      the auth source is `CLOUD_SHELL === "true" || GEMINI_CLI_USE_COMPUTE_ADC === "true"`
+      (each compare fails on empty, so the default source stands), the
+      metadata endpoint is `GCE_METADATA_IP || GCE_METADATA_HOST || HOST_ADDRESS`
+      (empty is falsy on either env link and falls back to `HOST_ADDRESS`,
+      gcp-metadata's compiled constant `169.254.169.254` — a module
+      constant, not an env read, so there is no third link to pin), and the git
+      environment-config names `GIT_CONFIG_COUNT` and
+      `GIT_CONFIG_PARAMETERS` (git parses `""` as count 0 — making every
+      indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pair inert — and as
+      zero `-c` pairs) — so the loader finds them claimed and the agent's
+      own read falls back to the safe default. Every
       pinned or re-asserted name is one the agent-server's exec filter
       admits, so the boundary survives the hop to the agent process itself.
     - In af's own `docker exec` steps: every one names `/bin/sh` by absolute
@@ -296,15 +316,30 @@ user's real home and mounts it only if it exists, so:
 
     Two name sets are handled differently from the pins:
 
-    - **Pane-boundary names are refused but never blanked.** `AF_SESSION`,
-      `AF_SESSION_GEN`, `AF_HOME`, `TMUX`, and `TMUX_PANE` are stamped by af
-      and by tmux at the pane boundary — a defined-empty pin would be
-      re-asserted at the exec shim AFTER tmux installed the real values,
-      erasing the session-membership markers the reaper attributes children
-      by and the pane identity in-pane tools read (`--self`,
+    - **Pane-boundary names are refused, blanked at `docker run`, and never
+      pinned at the exec shim.** `AF_SESSION`, `AF_SESSION_GEN`, `AF_HOME`,
+      `AF_INSTANCE_ID`, `AF_TESTGUARD_RUN`, `TMUX`, and `TMUX_PANE` are
+      stamped by af and by tmux at the pane boundary — a defined-empty pin
+      would be re-asserted at the exec shim AFTER tmux installed the real
+      values, erasing the session-membership markers the reaper attributes
+      children by and the pane identity in-pane tools read (`--self`,
       Claude Code's tmux detection). They are refused to `docker.run_args`
       like every classified name — a repo value would falsify membership —
-      and simply left alone.
+      and instead blanked defined-and-empty at `docker run`, after
+      `run_args`: the container environment is what every `docker exec`
+      child af starts inherits (the agent-server, the provisioning steps),
+      so an image `ENV AF_SESSION_GEN` or `TMUX` cannot forge a session
+      marker or pane identity outside the pane. **The blanking runs on
+      every docker session** — account, credential-mount, and plain alike —
+      because an exec child's container environment does not depend on
+      which grant the session carries, so a `session_env_passthrough`
+      entry naming any of the seven is refused with an explicit error
+      rather than silently overridden by the blank. The in-pane agent
+      still gets the real values — tmux stamps them per pane over the
+      blanked baseline — and a defined-empty `TMUX` is safe because tmux
+      itself treats an empty value as unset (measured on tmux 3.4 and
+      3.2a), so the baseline cannot trip the nested-session presence
+      check.
     - **Selector precedence groups are claimed as groups.** Forwarding any
       member of `GIT_SSH`/`GIT_SSH_COMMAND`, `GIT_ASKPASS`/`SSH_ASKPASS`, or
       `EDITOR`/`VISUAL` through `session_env_passthrough` — when that member
@@ -379,7 +414,34 @@ user's real home and mounts it only if it exists, so:
     - **Env names the classification does not cover.** A name that neither
       substitutes, relocates, nor routes the credential is allowed through;
       the per-agent reachable surface is pinned by test, but a name an agent
-      adds upstream is discovered on review, not by construction.
+      adds upstream is discovered on review, not by construction. Every
+      class of name an agent's own dotenv loader could fill — measured on
+      gemini's `.env`, which fills only names that are unset — is either
+      pinned or named here: the identity-source names — both selectors the
+      auth-source read consults (`CLOUD_SHELL`, `GEMINI_CLI_USE_COMPUTE_ADC`)
+      and every env link of the metadata-endpoint chain (`GCE_METADATA_IP`,
+      `GCE_METADATA_HOST`; the chain's third link is `HOST_ADDRESS`,
+      gcp-metadata's compiled constant `169.254.169.254`, not an env read)
+      — and the git environment-config names (`GIT_CONFIG_COUNT`,
+      `GIT_CONFIG_PARAMETERS` — pinning the
+      count makes the whole indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`
+      family inert) are pinned defined-and-empty as described above;
+      `GIT_CONFIG` alone stays unpinned because git reads a defined-empty
+      value as a real config file path and `git config` would break, so it
+      is documented instead — a loader can still claim it. For an
+      operator-forwarded `GIT_CONFIG_COUNT`, the indexed pairs it activates
+      are refused to `docker.run_args` (`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`
+      are never the repository's to supply) — the operator's own pairs ride
+      `session_env_passthrough`; the image's `Config.Env` pairs remain a
+      repo source the environment boundary cannot enumerate, part of the
+      image trust above.
+    - **ssh's user config follows the passwd home, not `$HOME`.** OpenSSH
+      reads `~/.ssh/config` from the account's `getpwuid` home directory,
+      so af's `HOME` re-assertion does not move it — the image controls
+      that file, which is already inside the image trust this grant
+      requires, **unless** the image user's passwd home is the workspace
+      itself, in which case a repo-committed `.ssh/config` applies to
+      every ssh the session runs.
 
     Turn the grant on only for images and repositories you trust to that
     degree; the credential is what they get.

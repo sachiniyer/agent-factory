@@ -285,10 +285,12 @@ var credentialMountSharedAFStateNames = map[string]struct{}{
 // credentialMountPaneBoundaryNames are the names the pane boundary itself
 // installs — by af or by tmux — with values no repository source may
 // choose and no af mechanism may erase:
-//   - AF_SESSION/AF_SESSION_GEN/AF_HOME are af's OWN trusted session
-//     markers, the names sessionEnvFlags (session/tmux/envmarker.go)
-//     stamps into every pane environment with per-session values:
-//     the session name, its generation, and af's home provenance.
+//   - AF_SESSION/AF_SESSION_GEN/AF_HOME/AF_INSTANCE_ID/AF_TESTGUARD_RUN are
+//     af's OWN trusted session markers, the names sessionEnvFlags
+//     (session/tmux/envmarker.go) stamps into every pane environment with
+//     per-session values: the session name, its generation, af's home
+//     provenance, the create attempt's instance id, and the test run that
+//     owns a guarded launch.
 //   - TMUX and TMUX_PANE are stamped by the tmux server for every pane:
 //     the server socket identity and the pane's %N id. Claude Code's tmux
 //     detection reads TMUX, and af's own in-pane commands read it too —
@@ -306,13 +308,28 @@ var credentialMountSharedAFStateNames = map[string]struct{}{
 // names make in-pane `--self` report "not running inside a tmux session"
 // (#7531). These values come from af and tmux, not a repo source, and
 // reach the agent through the boundary itself — the boundary only has to
-// NOT erase them.
+// NOT erase them. runContainer instead blanks every member at `docker
+// run` so the image's ENV cannot forge a marker in the container
+// environment a `docker exec` child inherits (#7544).
 var credentialMountPaneBoundaryNames = map[string]struct{}{
-	"AF_SESSION":     {},
-	"AF_SESSION_GEN": {},
-	"AF_HOME":        {},
-	"TMUX":           {},
-	"TMUX_PANE":      {},
+	"AF_SESSION":       {},
+	"AF_SESSION_GEN":   {},
+	"AF_HOME":          {},
+	"AF_INSTANCE_ID":   {},
+	"AF_TESTGUARD_RUN": {},
+	"TMUX":             {},
+	"TMUX_PANE":        {},
+}
+
+// credentialMountPaneBoundaryNamesSorted returns the pane-boundary names in
+// a stable order for `docker run` emission (#7544).
+func credentialMountPaneBoundaryNamesSorted() []string {
+	out := make([]string, 0, len(credentialMountPaneBoundaryNames))
+	for name := range credentialMountPaneBoundaryNames {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // credentialMountProgramLoaderNames are names that choose which CODE the
@@ -528,74 +545,15 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 	add(credentialMountPaneBoundaryNames)
 	add(credentialMountReassertedNames)
 	add(credentialMountProgramLoaderNames)
+	add(credentialMountSharedGitEnvNames)
 	add(credentialMountIdentityEnvNames[agent])
 	add(credentialMountConfigRootNames[agent])
 	add(credentialMountRoutingNames[agent])
+	add(credentialMountLoaderFilledNames[agent])
 	for name := range credentialMountFirstPartyNames[agent] {
 		denied[name] = struct{}{}
 	}
 	return denied
-}
-
-// credentialMountDeniedReason returns, for a refused run_args name, the
-// because-clause the refusal prints — worded for the mechanism the name's
-// class defends, so "substitute" is only claimed where substitution is the
-// mechanism (#7526 item 4).
-func credentialMountDeniedReason(agent, name string) (string, bool) {
-	if name == "PATH" {
-		return "it chooses which program every PATH-resolved command in the container runs — af's provisioning steps and the agent's own executable — and af re-asserts the image's own PATH after run_args", true
-	}
-	if _, ok := credentialMountReassertedNames[name]; ok {
-		return "af re-asserts it after run_args for the mounted credential", true
-	}
-	if _, ok := credentialMountProgramLoaderNames[name]; ok {
-		return "it loads a repository-chosen library into the programs af runs in the container before the agent-side env filter applies", true
-	}
-	if _, ok := credentialMountSharedCredentialNames[name]; ok {
-		return "it can substitute an identity the operator did not forward", true
-	}
-	if _, ok := credentialMountSharedRoutingNames[name]; ok {
-		return "it changes where the agent sends the mounted credential", true
-	}
-	if _, ok := credentialMountSharedConfigRootNames[name]; ok {
-		return "it can redirect where the agent reads credential-bearing state", true
-	}
-	if _, ok := credentialMountSharedProgramEntries[name]; ok {
-		return "it chooses which program af's tools or the agent run in the container, and af re-asserts a working default after run_args", true
-	}
-	if _, ok := credentialMountSharedAFStateNames[name]; ok {
-		return "it relocates af's own state or falsifies af's session and tool selection", true
-	}
-	if _, ok := credentialMountPaneBoundaryNames[name]; ok {
-		return "it falsifies af's session membership or pane identity — the real value is stamped at the pane boundary", true
-	}
-	if _, ok := credentialMountIdentityEnvNames[agent][name]; ok {
-		return "it can substitute the credential af mounts read-only", true
-	}
-	if _, ok := credentialMountConfigRootNames[agent][name]; ok {
-		return "it can redirect where the agent reads the mounted credential", true
-	}
-	if _, ok := credentialMountRoutingNames[agent][name]; ok {
-		return "it changes where the agent sends the mounted credential", true
-	}
-	if _, ok := credentialMountFirstPartyNames[agent][name]; ok {
-		return "af re-asserts the agent's first-party endpoint after run_args so the agent's .env loader sees a defined name", true
-	}
-	if configVar, ok := sessionenv.SupportsAccounts(agent); ok && configVar == name {
-		return "it can redirect where the agent reads the mounted credential", true
-	}
-	for _, account := range [][]string{
-		sessionenv.AccountIdentityNames(agent),
-		sessionenv.AgentAuthSelectors(agent),
-		sessionenv.AgentConditionalNames(agent),
-	} {
-		for _, denied := range account {
-			if denied == name {
-				return "it can substitute the credential af mounts read-only", true
-			}
-		}
-	}
-	return "", false
 }
 
 // credentialMountProxyCasePairs pairs each proxy variable's upper- and
