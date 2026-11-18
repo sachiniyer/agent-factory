@@ -386,7 +386,7 @@ func (p *dockerProvisioner) warnBlankedCredentialNames() {
 	// names — all post-exemption, so a name the operator claimed through
 	// session_env_passthrough is not reported as overridden (#7531).
 	overridden := append(slices.Clone(p.credentialEnvPins),
-		credentialMountReassertNames(p.agentName(), p.spec.SessionEnvPassthrough)...)
+		credentialMountReassertNames(p.agentName(), p.spec.SessionEnvPassthrough, os.Environ())...)
 	for _, name := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"} {
 		if !slices.Contains(p.spec.SessionEnvPassthrough, name) {
 			overridden = append(overridden, name)
@@ -733,7 +733,7 @@ func (p *dockerProvisioner) runContainer() error {
 		// .env loader sees a defined name and a repo value is dominated by
 		// last-wins (#7531). Operator-forwarded names keep the operator's
 		// value.
-		for _, entry := range credentialMountReassertEntries(p.agentName(), p.spec.SessionEnvPassthrough) {
+		for _, entry := range credentialMountReassertEntries(p.agentName(), p.spec.SessionEnvPassthrough, os.Environ()) {
 			args = append(args, "-e", entry)
 		}
 	}

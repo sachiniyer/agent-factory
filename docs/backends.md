@@ -307,14 +307,21 @@ user's real home and mounts it only if it exists, so:
       and simply left alone.
     - **Selector precedence groups are claimed as groups.** Forwarding any
       member of `GIT_SSH`/`GIT_SSH_COMMAND`, `GIT_ASKPASS`/`SSH_ASKPASS`, or
-      `EDITOR`/`VISUAL` through `session_env_passthrough` exempts the whole
-      group from the re-assert, and the unforwarded member is reseated to
-      the operator's forwarded value — a re-asserted sibling would sit
-      ahead in precedence and silently win, while an image-supplied sibling
-      would route around the operator's program. The same shape as the
-      proxy case pairs (`HTTP/HTTPS/ALL/NO_PROXY`, either case), where the
-      unforwarded twin is set to the forwarded spelling's value because a
-      defined-empty twin would cancel it in clients that read both.
+      `EDITOR`/`VISUAL` through `session_env_passthrough` — when that member
+      is set in the daemon environment — exempts the whole group from the
+      re-assert, and the unforwarded member is reseated to the operator's
+      forwarded value **in the sibling's own grammar**: `GIT_SSH` is a
+      program path while `GIT_SSH_COMMAND` is a shell command line, so the
+      path is shell-quoted on its way into the command slot, and a command
+      line that cannot be expressed as a path leaves `GIT_SSH` at af's
+      `ssh` default. A re-asserted sibling would sit ahead in precedence
+      and silently win, while an image-supplied sibling would route around
+      the operator's program — and a forwarded-but-unset member claims
+      nothing, so its sibling keeps the working re-assert. The same shape
+      as the proxy case pairs (`HTTP/HTTPS/ALL/NO_PROXY`, either case),
+      where the unforwarded twin is set to the forwarded spelling's value
+      because a defined-empty twin would cancel it in clients that read
+      both.
 
     The operator's escape hatch is unchanged: names listed in the global
     `session_env_passthrough` keep their forwarded value and are never blanked

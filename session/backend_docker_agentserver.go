@@ -10,6 +10,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -71,7 +72,7 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 		p.credentialEnvPins...)
 	if len(p.credentialMounts) > 0 {
 		agentServerEnvNames = append(agentServerEnvNames,
-			credentialMountReassertNames(p.agentName(), p.spec.SessionEnvPassthrough)...)
+			credentialMountReassertNames(p.agentName(), p.spec.SessionEnvPassthrough, os.Environ())...)
 	}
 	for _, name := range agentServerEnvNames {
 		args = append(args, "--session-env", name)

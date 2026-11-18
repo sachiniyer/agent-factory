@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -221,13 +222,45 @@ var credentialMountSharedProgramEntries = map[string]string{
 // program never runs; forwarding EDITOR=vim while VISUAL=/bin/false is
 // re-asserted hides the operator's editor behind the sibling. The
 // unforwarded member still cannot keep an image value — the twin
-// forwarding in credentialMountTwinForwarding reseats it to the
-// operator's forwarded value, so every name in the group resolves to the
-// same operator program (#7531).
+// forwarding in credentialMountSelectorForwarding reseats it to the
+// operator's forwarded value in the SIBLING's own grammar, so every name
+// in the group resolves to the same operator program (#7531).
 var credentialMountSelectorGroups = [][2]string{
 	{"GIT_SSH", "GIT_SSH_COMMAND"},
 	{"GIT_ASKPASS", "SSH_ASKPASS"},
 	{"EDITOR", "VISUAL"},
+}
+
+// credentialMountSelectorReseat re-expresses a forwarded member's value in
+// the SIBLING's own grammar — a verbatim copy is only faithful between
+// names a consumer reads the same way (#7531):
+//   - GIT_SSH_COMMAND is a shell COMMAND LINE git parses and runs through
+//     the shell, while GIT_SSH is a program path exec'd directly. A path
+//     with whitespace, quotes, or shell metacharacters lands verbatim as
+//     several words — measured on git 2.43, GIT_SSH='/op dir/op-ssh'
+//     copied raw fails `/op: not found` and the operator's program never
+//     runs. The sibling value is therefore shell-quoted (' -> '"'"') —
+//     measured byte-identical to running the path under GIT_SSH alone.
+//   - GIT_SSH is a program path: a command line cannot be expressed as
+//     one. When the forwarded command is not already a single bare word
+//     (shellquote.Quote leaves a bare path unchanged), no faithful
+//     translation exists, so the sibling keeps af's own working default —
+//     git's own `ssh` — which can never name a repository program and
+//     sits behind the forwarded command in precedence anyway.
+//   - The askpass and editor pairs are same-grammar (a program path or
+//     command each consumer reads identically), so the sibling takes the
+//     value verbatim.
+func credentialMountSelectorReseat(sibling, value string) string {
+	switch sibling {
+	case "GIT_SSH_COMMAND":
+		return shellquote.Quote(value)
+	case "GIT_SSH":
+		if shellquote.Quote(value) == value {
+			return value
+		}
+		return credentialMountSharedProgramEntries["GIT_SSH"]
+	}
+	return value
 }
 
 // credentialMountSharedAFStateNames are af's own state and control-plane
@@ -639,16 +672,27 @@ func credentialMountTwinForwarding(pairs [][2]string, passthrough []string, envi
 	return names, synth
 }
 
-// credentialMountGroupForwarding applies credentialMountTwinForwarding to
-// every pair table — proxy case spellings and selector precedence groups
-// share the same claim semantics (#7531).
-func credentialMountGroupForwarding(passthrough []string, environ []string) (names, synth []string) {
-	for _, pairs := range [][][2]string{credentialMountProxyCasePairs, credentialMountSelectorGroups} {
-		n, s := credentialMountTwinForwarding(pairs, passthrough, environ)
-		names = append(names, n...)
-		synth = append(synth, s...)
+// credentialMountSelectorForwarding is credentialMountTwinForwarding for
+// the selector groups with each sibling's synthesized value re-expressed
+// in the sibling's own grammar (credentialMountSelectorReseat) — a path
+// copied verbatim into a command-line slot would split on the operator's
+// whitespace and run nothing.
+func credentialMountSelectorForwarding(passthrough []string, environ []string) (names, synth []string) {
+	names, synth = credentialMountTwinForwarding(credentialMountSelectorGroups, passthrough, environ)
+	for i, entry := range synth {
+		name, value, _ := strings.Cut(entry, "=")
+		synth[i] = name + "=" + credentialMountSelectorReseat(name, value)
 	}
 	return names, synth
+}
+
+// credentialMountGroupForwarding applies the twin forwarding to every
+// pair table — proxy case spellings and selector precedence groups share
+// the same claim semantics (#7531).
+func credentialMountGroupForwarding(passthrough []string, environ []string) (names, synth []string) {
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs, passthrough, environ)
+	n, s := credentialMountSelectorForwarding(passthrough, environ)
+	return append(names, n...), append(synth, s...)
 }
 
 // credentialMountPinnedNames returns the classified names af pins
@@ -793,21 +837,33 @@ func dockerRunArgsEnvNames(args []string) []string {
 // operator's claims: the agent's first-party endpoint names plus the
 // shared program-selector defaults, minus every name the operator
 // forwarded — and, because selector names form precedence groups, minus
-// every sibling of a forwarded member (credentialMountSelectorGroups: a
-// re-asserted sibling would sit ahead of the operator's program in
-// precedence and silently win, #7531).
-func credentialMountReassertValues(agent string, passthrough []string) map[string]string {
+// every member of a group the operator CLAIMED. The claim test is the same
+// one the reseat uses — a member forwarded AND set in the daemon
+// environment — because an exemption keyed on forwarding alone would drop
+// the sibling's re-assert while the reseat (which needs a host value)
+// emitted nothing, leaving an image-supplied sibling in precedence over
+// the operator's claim (#7531). environ is the daemon environment
+// (os.Environ at the call sites, a fixture in tests).
+func credentialMountReassertValues(agent string, passthrough []string, environ []string) map[string]string {
 	forwarded := make(map[string]struct{}, len(passthrough))
 	for _, name := range passthrough {
 		forwarded[name] = struct{}{}
 	}
-	for _, pair := range credentialMountSelectorGroups {
-		if _, ok := forwarded[pair[0]]; ok {
-			forwarded[pair[1]] = struct{}{}
-			continue
+	host := make(map[string]string, len(environ))
+	for _, entry := range environ {
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			host[name] = value
 		}
-		if _, ok := forwarded[pair[1]]; ok {
-			forwarded[pair[0]] = struct{}{}
+	}
+	for _, pair := range credentialMountSelectorGroups {
+		for _, s := range pair {
+			if _, fwd := forwarded[s]; !fwd {
+				continue
+			}
+			if _, set := host[s]; set {
+				forwarded[pair[0]] = struct{}{}
+				forwarded[pair[1]] = struct{}{}
+			}
 		}
 	}
 	values := make(map[string]string, len(credentialMountSharedProgramEntries)+len(credentialMountFirstPartyNames[agent]))
@@ -825,8 +881,8 @@ func credentialMountReassertValues(agent string, passthrough []string) map[strin
 
 // credentialMountReassertNames returns the sorted names af re-asserts —
 // the keys of credentialMountReassertValues.
-func credentialMountReassertNames(agent string, passthrough []string) []string {
-	values := credentialMountReassertValues(agent, passthrough)
+func credentialMountReassertNames(agent string, passthrough []string, environ []string) []string {
+	values := credentialMountReassertValues(agent, passthrough, environ)
 	out := make([]string, 0, len(values))
 	for name := range values {
 		out = append(out, name)
@@ -838,13 +894,12 @@ func credentialMountReassertNames(agent string, passthrough []string) []string {
 // credentialMountReassertEntries returns the sorted NAME=value re-asserts
 // runContainer emits after run_args: the names af cannot pin empty because
 // a defined empty value is itself a real (broken) configuration. The
-// re-assert stays UNCONDITIONAL over non-operator sources — an image's
-// ENV is the same trust class as its binaries for program CHOICE, but an
-// env value can name a path inside the mounted repository workspace,
-// which no image binary can; the bound is against values that point into
-// repo content, and only the operator's own claim exempts a name (#7531).
-func credentialMountReassertEntries(agent string, passthrough []string) []string {
-	values := credentialMountReassertValues(agent, passthrough)
+// re-assert stays UNCONDITIONAL over non-operator sources — the repo picks
+// the image, so an image's ENV is a repo source by construction, exactly
+// like docker.run_args. Only the operator's own passthrough claim exempts
+// a name (#7531).
+func credentialMountReassertEntries(agent string, passthrough []string, environ []string) []string {
+	values := credentialMountReassertValues(agent, passthrough, environ)
 	out := make([]string, 0, len(values))
 	for name, value := range values {
 		out = append(out, name+"="+value)

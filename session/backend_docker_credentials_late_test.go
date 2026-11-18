@@ -432,12 +432,13 @@ func TestCredentialMount_SelectorGroupForwardingExemptsTheWholeGroup(t *testing.
 	// Without a claim every member is still re-asserted (the bound).
 	for _, group := range credentialMountSelectorGroups {
 		for _, name := range group {
-			require.Contains(t, credentialMountReassertEntries(tmux.ProgramClaude, nil), name+"="+credentialMountSharedProgramEntries[name],
+			require.Contains(t, credentialMountReassertEntries(tmux.ProgramClaude, nil, nil), name+"="+credentialMountSharedProgramEntries[name],
 				"unclaimed %s keeps its working re-assert", name)
 		}
 	}
-	// Forwarding either member exempts BOTH, in either order, and reseats
-	// the unforwarded sibling to the operator's value.
+	// Forwarding either member SET in the daemon env exempts BOTH, in
+	// either order, and reseats the unforwarded sibling to the operator's
+	// value in the sibling's grammar.
 	for _, group := range credentialMountSelectorGroups {
 		for _, forwarded := range group {
 			var sibling string
@@ -446,23 +447,86 @@ func TestCredentialMount_SelectorGroupForwardingExemptsTheWholeGroup(t *testing.
 			} else {
 				sibling = group[0]
 			}
-			entries := credentialMountReassertEntries(tmux.ProgramClaude, []string{forwarded})
+			entries := credentialMountReassertEntries(tmux.ProgramClaude,
+				[]string{forwarded}, []string{forwarded + "=/op-program"})
 			for _, entry := range entries {
 				name, _, _ := strings.Cut(entry, "=")
 				require.NotEqual(t, group[0], name, "forwarding %s must exempt %s from the re-assert", forwarded, name)
 				require.NotEqual(t, group[1], name, "forwarding %s must exempt %s from the re-assert", forwarded, name)
 			}
-			names, synth := credentialMountTwinForwarding(credentialMountSelectorGroups,
+			names, synth := credentialMountSelectorForwarding(
 				[]string{forwarded}, []string{forwarded + "=/op-program"})
 			require.Equal(t, []string{sibling}, names,
 				"the unforwarded sibling must be re-emitted so the image's value cannot stand")
-			require.Equal(t, []string{sibling + "=/op-program"}, synth,
-				"the sibling resolves to the operator's forwarded value, not af's default or the image's")
+			require.Equal(t, []string{sibling + "=" + credentialMountSelectorReseat(sibling, "/op-program")}, synth,
+				"the sibling resolves to the operator's forwarded value in its own grammar")
 		}
 	}
 	// Ungrouped selectors are untouched: forwarding EDITOR does not exempt
 	// PAGER, and PAGER is still re-asserted.
-	require.Contains(t, credentialMountReassertEntries(tmux.ProgramClaude, []string{"EDITOR"}), "PAGER=/bin/cat")
+	require.Contains(t, credentialMountReassertEntries(tmux.ProgramClaude, []string{"EDITOR"}, []string{"EDITOR=vim"}), "PAGER=/bin/cat")
+}
+
+// TestCredentialMount_SelectorReseat_TranslatesGrammar is the R2a-P1
+// property (#7531): the reseated sibling names the same program in the
+// SIBLING's grammar. GIT_SSH is a path exec'd directly; GIT_SSH_COMMAND
+// is a shell command line — a path with whitespace or metacharacters
+// copied verbatim splits into words and the operator's program never
+// runs (measured git 2.43: '/op dir/op-ssh' → `/op: not found`). The
+// sibling value is shell-quoted; the reverse direction keeps af's
+// working default when the command is not a bare path.
+func TestCredentialMount_SelectorReseat_TranslatesGrammar(t *testing.T) {
+	// Path with a space AND a quote → single-quoted command line.
+	require.Equal(t, `'/op dir/o'"'"'p-ssh'`,
+		credentialMountSelectorReseat("GIT_SSH_COMMAND", `/op dir/o'p-ssh`),
+		"a path with whitespace and a quote must land in GIT_SSH_COMMAND as one shell word")
+	// End-to-end through the twin forwarding: the synthesized env entry
+	// carries the quoted command, never the raw path.
+	_, synth := credentialMountSelectorForwarding([]string{"GIT_SSH"}, []string{`GIT_SSH=/op dir/o'p-ssh`})
+	require.Equal(t, []string{`GIT_SSH_COMMAND='/op dir/o'"'"'p-ssh'`}, synth)
+	// A plain path stays bare — shellquote leaves safe words unquoted.
+	require.Equal(t, "/op-ssh", credentialMountSelectorReseat("GIT_SSH_COMMAND", "/op-ssh"))
+	// Command → path direction: a bare path translates verbatim; a real
+	// command line cannot be a path, so the sibling keeps af's `ssh`
+	// (git's own default — never a repository program, and the forwarded
+	// command wins precedence anyway).
+	require.Equal(t, "/op-ssh", credentialMountSelectorReseat("GIT_SSH", "/op-ssh"))
+	require.Equal(t, "ssh", credentialMountSelectorReseat("GIT_SSH", "/op-ssh -p 2222"),
+		"a command line cannot be reseated as a path — af's own default is the floor")
+	_, synth = credentialMountSelectorForwarding([]string{"GIT_SSH_COMMAND"}, []string{"GIT_SSH_COMMAND=/op-ssh -p 2222"})
+	require.Equal(t, []string{"GIT_SSH=ssh"}, synth)
+	// Same-grammar groups reseat verbatim.
+	require.Equal(t, "/op dir/ask", credentialMountSelectorReseat("GIT_ASKPASS", "/op dir/ask"))
+	require.Equal(t, "vim --cmd x", credentialMountSelectorReseat("VISUAL", "vim --cmd x"))
+}
+
+// TestCredentialMount_SelectorGroup_UnclaimedKeepsReassert is the R2a-P2
+// property (#7531): the exemption and the reseat share ONE claim test —
+// forwarded AND set in the daemon environment. A member forwarded but
+// unset (common under systemd) does not claim the group, so the
+// unforwarded member keeps af's working re-assert and an image-supplied
+// sibling cannot slip in under precedence.
+func TestCredentialMount_SelectorGroup_UnclaimedKeepsReassert(t *testing.T) {
+	// SSH_ASKPASS forwarded but NOT in the daemon env: the group is
+	// unclaimed, so GIT_ASKPASS keeps /bin/false — the image's
+	// /workspace/.x/ask can never run.
+	entries := credentialMountReassertEntries(tmux.ProgramClaude, []string{"SSH_ASKPASS"}, nil)
+	require.Contains(t, entries, "GIT_ASKPASS=/bin/false",
+		"a forwarded-but-unset member must not exempt the group — the sibling keeps its re-assert")
+	for _, entry := range entries {
+		name, _, _ := strings.Cut(entry, "=")
+		require.NotEqual(t, "SSH_ASKPASS", name,
+			"the forwarded name itself still keeps the operator's claim")
+	}
+	// Same for the other two groups' higher-precedence members.
+	entries = credentialMountReassertEntries(tmux.ProgramClaude, []string{"GIT_SSH"}, nil)
+	require.Contains(t, entries, "GIT_SSH_COMMAND=ssh")
+	entries = credentialMountReassertEntries(tmux.ProgramClaude, []string{"EDITOR"}, nil)
+	require.Contains(t, entries, "VISUAL=/bin/false")
+	// And the reseat agrees: an unset forwarded member emits nothing.
+	names, synth := credentialMountSelectorForwarding([]string{"SSH_ASKPASS"}, nil)
+	require.Empty(t, names)
+	require.Empty(t, synth)
 }
 
 // TestDockerMountAgentCredentials_SelectorTwinRidesRunArgvAndClientEnv is the
