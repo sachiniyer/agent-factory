@@ -165,6 +165,7 @@ func (t *TmuxSession) readPaneRow(budget time.Duration) (paneRow, error) {
 	// kill-session is even attempted.
 	ctx, cancel := tmuxTimeoutContextWithin(budget)
 	defer cancel()
+	deadline, _ := ctx.Deadline()
 	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", ExactTarget(t.sanitizedName), paneRowFormat)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -202,7 +203,12 @@ func (t *TmuxSession) readPaneRow(budget time.Duration) (paneRow, error) {
 	// be judged foreign against the old identity (Codex on #7469). The
 	// socket is no row field (R5): merge the corroborated single-value read
 	// so the stamped record is complete, or stays incomplete — never wrong.
-	row.server = corroboratedServerSocket(row.server, t.serverSocketPID)
+	// That read spends only what this row's budget has LEFT — it is part of
+	// this bounded read, never a fresh deadline stacked after it (#7581
+	// item 4); an exhausted budget leaves the record incomplete.
+	row.server = corroboratedServerSocket(row.server, func() (int, string, error) {
+		return readSocketPIDWithin(t, time.Until(deadline))
+	})
 	t.noteServerIdentity(row.server)
 	return row, nil
 }
@@ -314,8 +320,15 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 		t.reconcilePaneRootEvidence(paneRootAnswer{
 			resolved: proctree.Process{PID: pid, StartID: startID},
 		})
+		// The socket corroboration spends what the list-panes ctx had LEFT
+		// — part of this bounded read, never a fresh deadline after it
+		// (#7581 item 4).
+		deadline, _ := ctx.Deadline()
 		t.noteServerIdentity(corroboratedServerSocket(
-			serverFromPaneRows(splitPaneRows(string(output))), t.serverSocketPID))
+			serverFromPaneRows(splitPaneRows(string(output))),
+			func() (int, string, error) {
+				return readSocketPIDWithin(t, time.Until(deadline))
+			}))
 	}
 	return holds, err
 }

@@ -1,15 +1,20 @@
 package tmux
 
 import (
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/require"
@@ -529,4 +534,116 @@ func TestSameRecordedSocket_SharedFlightPublishesOneAnswer(t *testing.T) {
 	}
 	require.Equal(t, 0, socketCompareFlights.inFlightCount(),
 		"a finished flight drops its key — the next compare starts fresh")
+}
+
+// #7581 item 4: the #{pid} #{socket_path} round trip exists to COMPLETE a
+// record a caller stores — and the pre-marker sweep is the only consumer of
+// captured.Server (preMarkerServers). A capture that does not store the
+// record must never issue the read; one that does issues exactly one, and it
+// spends only what the listing's own deadline had left.
+func TestCaptureSessionProcessTrees_SocketReadOnlyWhenTheRecordIsStored(t *testing.T) {
+	// The namespace proof rides the same stamp (#7581 item 1) — staged so
+	// the storing capture's record resolves complete and hermetically.
+	oldBinding := tmuxServerSocketBinding
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		return socketBindingBound, ""
+	}
+	t.Cleanup(func() { tmuxServerSocketBinding = oldBinding })
+	var reads []time.Duration
+	oldRead := serverSocketPIDForWithin
+	serverSocketPIDForWithin = func(_ cmd.Executor, _, _ string, budget time.Duration) (int, string, error) {
+		reads = append(reads, budget)
+		return 4242, "/tmp/af-capture.sock", nil
+	}
+	t.Cleanup(func() { serverSocketPIDForWithin = oldRead })
+
+	ex := cmd_test.MockCmdExec{
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			line := strings.Join(c.Args[1:], " ")
+			if strings.HasPrefix(line, "list-panes") {
+				return []byte("5555|0||||||4242|$7\n"), nil
+			}
+			return nil, fmt.Errorf("unexpected tmux command %q", line)
+		},
+		RunFunc: func(c *exec.Cmd) error {
+			return fmt.Errorf("unexpected tmux run %q", strings.Join(c.Args, " "))
+		},
+	}
+
+	// The discarding capture pays only the listing — the socket read seam
+	// is never reached at all.
+	captured, _ := captureSessionProcessTrees(ex, "af_s", "", false)
+	require.Empty(t, reads,
+		"a capture whose Server nobody stores never pays the socket round trip")
+	require.Equal(t, 4242, captured.Server.PID,
+		"the row-derived fields still parse — they ride the listing for free")
+	require.Empty(t, captured.Server.Socket,
+		"an unread record never gains a socket it was never given")
+
+	// The storing capture pays exactly one corroborated read, bounded by
+	// what the listing's tmuxCommandTimeout ctx had left.
+	captured, _ = captureSessionProcessTrees(ex, "af_s", "", true)
+	require.Len(t, reads, 1, "the storing capture pays the one corroborated read")
+	require.Equal(t, "/tmp/af-capture.sock", captured.Server.Socket,
+		"the stored record completed its identity")
+	require.Less(t, reads[0], tmuxCommandTimeout,
+		"the read is bounded by what the listing's deadline had LEFT")
+	require.Greater(t, reads[0], 8*time.Second,
+		"and that remainder is the listing's own deadline, not a re-minted one")
+}
+
+// #7581 item 4 at the readPaneRow site: the corroborated socket read is part
+// of the row's bounded read — it is called with what the caller's budget has
+// LEFT, so a nearly spent budget leaves an incomplete record rather than
+// buying a fresh tmuxCommandTimeout.
+func TestReadPaneRow_SocketReadSpendsTheRowsRemainingBudget(t *testing.T) {
+	oldBinding := tmuxServerSocketBinding
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		return socketBindingBound, ""
+	}
+	t.Cleanup(func() { tmuxServerSocketBinding = oldBinding })
+	var reads []time.Duration
+	oldRead := readSocketPIDWithin
+	readSocketPIDWithin = func(_ *TmuxSession, budget time.Duration) (int, string, error) {
+		reads = append(reads, budget)
+		return 4242, "/tmp/af-row.sock", nil
+	}
+	t.Cleanup(func() { readSocketPIDWithin = oldRead })
+
+	ex := cmd_test.MockCmdExec{
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			return []byte("5555|0||||||4242|$7\n"), nil
+		},
+		RunFunc: func(c *exec.Cmd) error {
+			return fmt.Errorf("unexpected tmux run %q", strings.Join(c.Args, " "))
+		},
+	}
+	ts := &TmuxSession{cmdExec: ex, sanitizedName: "af_x"}
+
+	row, err := ts.readPaneRow(200 * time.Millisecond)
+	require.NoError(t, err)
+	require.Equal(t, "/tmp/af-row.sock", row.server.Socket,
+		"the row's corroboration completed the record inside the shared budget")
+	require.Len(t, reads, 1, "exactly one corroborated socket read")
+	require.Greater(t, reads[0], 100*time.Millisecond,
+		"the remainder of a barely-started 200ms budget")
+	require.Less(t, reads[0], 201*time.Millisecond,
+		"the remainder — never a fresh tmuxCommandTimeout stacked on")
+
+	// A budget already spent reaches the corroboration as spent: the mock
+	// ignores the ctx (a real tmux would die on the deadline, but the
+	// remainder arithmetic is what is being pinned), so the row parses and
+	// the read is called with nothing left — where the real
+	// serverSocketPIDWithin gets an already-expired context and leaves the
+	// record incomplete.
+	reads = nil
+	ex.OutputFunc = func(c *exec.Cmd) ([]byte, error) {
+		time.Sleep(220 * time.Millisecond)
+		return []byte("5555|0||||||4242|$7\n"), nil
+	}
+	_, err = ts.readPaneRow(200 * time.Millisecond)
+	require.NoError(t, err)
+	require.Len(t, reads, 1)
+	require.LessOrEqual(t, reads[0], time.Duration(0),
+		"a spent budget reaches the socket read as spent — no fresh timeout buys it back")
 }

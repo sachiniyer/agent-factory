@@ -202,7 +202,7 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// the pane spawned out from under the server, and protection decided from
 	// a later table is decided from the wrong one (Codex on #7433, #7435
 	// item 3).
-	captured, captureErr := captureSessionProcessTrees(t.cmdExec, t.sanitizedName, "")
+	captured, captureErr := captureSessionProcessTrees(t.cmdExec, t.sanitizedName, "", false)
 	leaked := captured.Procs
 	protected := reapProtectedSet(captured.Snapshot, leaked, nil)
 
