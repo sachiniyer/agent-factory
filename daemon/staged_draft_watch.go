@@ -210,8 +210,13 @@ func (m *Manager) raiseDueStagedDraftFlag(repoID, key string, instance *session.
 		return
 	}
 	defer opLock.Unlock()
+	// Same rule for the repo start lock: CreateSession holds it across a
+	// whole provisioning + send, and the sweep is serial — a blocking wait
+	// here suspends every sibling's poll behind one create (Codex #7547).
 	repoStartLock := m.startLockForRepo(repoID)
-	repoStartLock.Lock()
+	if !repoStartLock.TryLock() {
+		return
+	}
 	defer repoStartLock.Unlock()
 
 	m.pausedMu.Lock()

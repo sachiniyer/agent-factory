@@ -56,6 +56,16 @@ func TestStagedDraftReading(t *testing.T) {
 			want: StagedDraftStaged,
 		},
 		{
+			// Codex's Ultra tier draws » at the composer, which
+			// codexComposerGlyphs already knows — a glyph the classifier
+			// missed read Unreadable forever and retired the watch blind
+			// (Codex #7547, third round).
+			name: "bound chip staged in an Ultra codex composer",
+			pane: codexWarningPane("» "+codexChip, false),
+			ev:   stagedDraftEvidence{chip: normalizeDelivery(codexChip)},
+			want: StagedDraftStaged,
+		},
+		{
 			// The common delivered-but-unverified resolution: the bound
 			// evidence is a transcript echo above the composer, so the
 			// watch ends — the Captain's named case.
