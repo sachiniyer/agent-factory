@@ -596,6 +596,28 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker run -v ~/.npm:/root/.npm alpine echo hi", false},
 		{"docker run -v ~/data:/data alpine echo hi", false},
 		{"systemd-run -p 'Environment=FOO=1' codex", false},
+
+		// Query-only and exec wrappers inside a launcher tail (Codex P1
+		// on the lexical head): a shadowed launcher can shift to any tail
+		// word, so `command -v`/`builtin`/`exec` must not classify — and
+		// discard — the dangerous suffix as query operands. The tail is
+		// judged at every reachable command position first.
+		{"sudo command -v env -i codex", true},
+		{"systemd-run command -v env -i codex", true},
+		{"run0 command -v env -i codex", true},
+		{"sudo builtin command -v env -i codex", true},
+		{"sudo exec env -i codex", true},
+		{"sudo hash env -i codex", true},
+		{"sudo command -v codex", false},
+		{"sudo command -v env codex", false},
+		{"sudo nice codex", false},
+		{"sudo sudo codex", false},
+		{"command sudo CODEX_HOME=/o codex", true},
+		{"builtin exec sudo CODEX_HOME=/o codex", true},
+		{"command -v sudo", false},
+		{"prog sudo command -v env -i codex", true},
+		{"prog run0 command -v env -i codex", true},
+		{"prog sudo command -v codex", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)

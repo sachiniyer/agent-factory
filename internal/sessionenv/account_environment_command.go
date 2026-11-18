@@ -441,12 +441,14 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		// get the conservative lexical scan of
 		// account_environment_launchers.go: any argument word that could
 		// assign or name a protected variable refuses, env-file
-		// spellings refuse on sight, and the surviving tail is the whole
-		// argv, so every word still gets the same inert scan every
-		// unrecognized command's argv gets — plus the launcher arm in
-		// wrapperTailWordHidesAccountAssignment — rather than the
-		// buried-suffix scan, which would judge operand words like the
-		// `.` in `docker build .` as possible exec boundaries and
+		// spellings refuse on sight, and the surviving tail is judged
+		// in place before it returns — a shadowed launcher can exec at
+		// any tail word, so sudo and systemd-run's tails get the
+		// per-position child-tail judgement rather than re-entering
+		// wrapper peeling at command position (where `command -v`
+		// could discard a later `env` as query operands) and rather
+		// than the buried-suffix scan, which would judge operand words
+		// like the `.` in `docker build .` as exec boundaries and
 		// refuse ordinary use. requireCommand is false here: at command
 		// position a denied env spelling refuses on sight, the same
 		// contract the env command itself keeps.

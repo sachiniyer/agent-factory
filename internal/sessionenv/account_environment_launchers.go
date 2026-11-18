@@ -70,12 +70,19 @@ import (
 //     `--env-file`, compose's `env_file`, `--env-from-file` and systemd's
 //     `EnvironmentFile=` read a file the command line cannot prove, and a
 //     bare `Environment=` clears the unit's pins outright.
-//   - Whatever survives is all-literal and returns the WHOLE tail, so the
-//     ordinary mutation scan every unrecognized command's argv gets still
-//     runs over it — a buried `env`, `nohup` or nested launcher inside
-//     `sudo …`, `docker …` or `systemd-run …` keeps its coverage, and a
-//     leaf word like `build` or `history` is never promoted into
-//     shell-builtin dispatch.
+//   - Whatever survives is all-literal, and the tail is judged before
+//     anything else in it is classified. A shadowed launcher (`shift N;
+//     exec "$@"`) can reach every word of its tail as a command word, so
+//     sudo and systemd-run's tails get the per-position child-tail
+//     judgement (head plus every literal verdict suffix) — a `command -v`
+//     or `builtin` prefix inside the tail is only ever argv text to the
+//     launcher, and letting it peel at command position let
+//     `command -v env -i codex` discard the `env -i codex` a shadowed
+//     `shift 2` actually execs (Codex P1 on this head). docker's tail
+//     gets the argv-position mutation scan instead: its leaf word is
+//     config, not the pane's child executable — `docker exec` is not the
+//     exec builtin and `docker history` is not the history builtin — and
+//     neither path promotes a tail word into shell-builtin dispatch.
 //
 // requireCommand is envCallMutatesAccountEnvironment's rule applied to
 // the launchers' denied spellings: at command position a protected-name
@@ -99,9 +106,9 @@ import (
 // after a launcher name. decodes marks the launchers that re-decode
 // quote/escape text in their operands (systemd-run and run0): for them a
 // literal word still carrying `"`, `'` or `\` is unverifiable. It returns
-// the tail the caller judges — the whole argv, every word proven
-// literal — and whether the launcher's own spellings already refuse.
-func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{}, decodes bool, requireCommand bool) ([]*syntax.Word, bool) {
+// whether the command line refuses on the launcher's own spellings; the
+// caller still owes every surviving word the tail judgement.
+func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{}, decodes bool, requireCommand bool) bool {
 	denied := false
 	commandish := false
 	for index, word := range words {
@@ -110,10 +117,10 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 			// Any dynamic word could expand into a protected
 			// assignment or env spelling the command line cannot
 			// show — unverifiable, refused wherever it sits.
-			return nil, true
+			return true
 		}
 		if launcherEnvFileSpelling(literal) {
-			return nil, true
+			return true
 		}
 		if decodes && strings.ContainsAny(literal, "\"'\\") {
 			// systemd-run unquotes and C-unescapes property
@@ -121,11 +128,11 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 			// `Environment=CODEX\x5fHOME=/o` both land
 			// CODEX_HOME. A word still carrying quote or escape
 			// text cannot be judged by the raw-text cut.
-			return nil, true
+			return true
 		}
 		if launcherWordDenied(literal, names) {
 			if !requireCommand {
-				return nil, true
+				return true
 			}
 			denied = true
 			continue
@@ -135,21 +142,43 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 			commandish = true
 		}
 	}
-	return words, requireCommand && denied && commandish
+	return requireCommand && denied && commandish
 }
 
+// unwrapSudo and unwrapSystemdRun refuse the launcher's own spellings and
+// then judge the tail in place: a shadowed launcher execs at ANY word of
+// its tail, so every suffix a shell could reach as a command is judged
+// before a query-only wrapper near its front can classify the dangerous
+// one away — `sudo command -v env -i codex` refuses on the `env -i codex`
+// a shadowed `shift 2; exec "$@"` would run, where re-peeling the tail at
+// command position let `command -v` discard it as query operands. The
+// judgement draws on shadowedChildJudgementLimit, so the nested
+// `sudo sudo …` chain that re-scanned the whole tail per peel level now
+// fails closed at the shared budget instead of running quadratic (Codex
+// P2 on this head).
 func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	return unwrapEnvInjectionLauncher(words, names, false, requireCommand)
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+		return nil, true
+	}
+	if shadowedLiteralChildTailMutates(words, names, memo) {
+		return nil, true
+	}
+	return nil, false
 }
 
 func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	return unwrapEnvInjectionLauncher(words, names, true, requireCommand)
+	if unwrapEnvInjectionLauncher(words, names, true, requireCommand) {
+		return nil, true
+	}
+	if shadowedLiteralChildTailMutates(words, names, memo) {
+		return nil, true
+	}
+	return nil, false
 }
 
 func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	tail, unsafe := unwrapEnvInjectionLauncher(words, names, false, requireCommand)
-	if unsafe || len(tail) == 0 {
-		return nil, unsafe
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+		return nil, true
 	}
 	// docker's first argument is a subcommand leaf, not the pane's child
 	// executable — `docker exec` is not the exec builtin and `docker
@@ -159,7 +188,7 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 	// unrecognized command's argv gets (a shadowed docker execs at `env`
 	// or a buried launcher just as a shadowed `prog` does), then nothing
 	// is left for the caller to judge.
-	if wrapperTailHidesAccountAssignment(tail, false, names, memo) {
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
 	return nil, false
@@ -276,18 +305,14 @@ func launcherSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo
 	if *memo.childJudgements > shadowedChildJudgementLimit {
 		return true
 	}
-	var tail []*syntax.Word
 	var unsafe bool
 	switch {
 	case isAccountCommandName(words[0], "sudo"):
-		tail, unsafe = unwrapSudo(words[1:], names, memo, true)
+		_, unsafe = unwrapSudo(words[1:], names, memo, true)
 	case isAccountCommandName(words[0], "docker") || isAccountCommandName(words[0], "docker-compose"):
-		tail, unsafe = unwrapDocker(words[1:], names, memo, true)
+		_, unsafe = unwrapDocker(words[1:], names, memo, true)
 	default:
-		tail, unsafe = unwrapSystemdRun(words[1:], names, memo, true)
+		_, unsafe = unwrapSystemdRun(words[1:], names, memo, true)
 	}
-	if unsafe || len(tail) == 0 {
-		return unsafe
-	}
-	return wrapperOperandTailMutates(tail, names, memo)
+	return unsafe
 }
