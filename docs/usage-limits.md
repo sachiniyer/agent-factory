@@ -243,12 +243,14 @@ prove the word will not reach the child's environment.
   name a file whose contents the command line cannot prove. They are refused
   even when the file would be safe: `af` cannot read it to know whether it
   assigns a protected name.
-- **Dynamic words fail closed where they could hide a protected name** — a
-  shell expansion in an env-operand position (`docker run -e "$V"`,
-  `systemd-run --setenv "$V"`), or any word that could split into further
-  arguments on a launcher that injects environment, is refused. A dynamic word
-  that stays one argument and names nothing protected — `docker run -v
-  "$PWD:/app"`, `sudo -u "$USER" id` — is admitted.
+- **Any dynamic word refuses** — a `$VAR`, `${VAR}`, `$(…)`, backtick,
+  arithmetic or glob expansion anywhere in the launcher's command line could
+  produce a protected assignment or an env spelling the visible command line
+  cannot show, so the command is unverifiable and refused wherever the word
+  sits (`sudo "$CMD" -i codex`, `docker run $IMG`, `docker run -e "$V"`).
+  Ordinary dynamic uses pay the same price: `docker run -v "$PWD:/app"` and
+  `sudo -u "$USER" id` are refused although their expansions would stay
+  benign.
 
 A launcher buried inside another command's argv (`nohup sudo
 CODEX_HOME=/other codex`, `docker build env CODEX_HOME=/other codex`) is

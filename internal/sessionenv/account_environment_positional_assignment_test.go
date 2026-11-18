@@ -378,23 +378,22 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker export c1", false},
 		{"docker wait c1", false},
 		// systemd-run: --pipe is the long form of the already-listed -P;
-		// the Environment= property honors systemd's quoting, so a quoted
-		// assignment with spaces inside its value is one fragment.
+		// a literal quoted Environment= value names nothing protected.
 		{"systemd-run --user --pipe make", false},
 		{"systemd-run -p 'Environment=\"FOO=hello world\"' codex", false},
 		{"systemd-run -p 'Environment=\"CODEX_HOME=/x y\" FOO=1' codex", true},
-		// A dynamic env VALUE with a literal `NAME=` prefix still proves
-		// its target, so `PORT="$PORT"` consumes like any allowed name
-		// while a denied name still refuses — separate and attached
-		// spellings alike.
-		{"docker run -e PORT=\"$PORT\" busybox codex", false},
-		{"docker run --env=PORT=\"$PORT\" busybox codex", false},
+		// ANY dynamic word in a launcher command line is unverifiable —
+		// the expansion could produce a protected assignment or an env
+		// spelling the command line cannot show — so even benign dynamic
+		// values refuse: `-e PORT="$PORT"` proves an allowed name to the
+		// eye, but the gate cannot prove the expansion stays one benign
+		// word.
+		{"docker run -e PORT=\"$PORT\" busybox codex", true},
+		{"docker run --env=PORT=\"$PORT\" busybox codex", true},
 		{"docker run -e CODEX_HOME=\"$V\" busybox codex", true},
-		{"systemd-run --setenv PORT=\"$PORT\" codex", false},
+		{"systemd-run --setenv PORT=\"$PORT\" codex", true},
 		{"systemd-run --setenv=CODEX_HOME=\"$V\" codex", true},
-		// Non-launching subcommands skip a dynamic operand the way the
-		// inert tail scan does — it is data, not an option boundary.
-		{"docker logs \"$CONTAINER\"", false},
+		{"docker logs \"$CONTAINER\"", true},
 		{"docker compose exec -it svc ls", false},
 		{"docker compose run -it svc echo hi", false},
 
@@ -415,11 +414,12 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker compose run -e=CODEX_HOME=/other svc codex", true},
 		{"docker compose exec -e=PORT=3000 svc codex", false},
 		{"docker service create -e=CODEX_HOME=/other img", true},
-		// The same spellings with a dynamic value name their target from
-		// the literal prefix, clustered sigils included.
+		// The same spellings with a dynamic value refuse outright — a
+		// dynamic word is unverifiable wherever it sits, so even a proven
+		// literal `PORT=` prefix cannot save the word.
 		{"docker run -e=CODEX_HOME=\"$V\" busybox codex", true},
-		{"docker run -e=PORT=\"$P\" busybox codex", false},
-		{"docker run -tePORT=\"$P\" busybox codex", false},
+		{"docker run -e=PORT=\"$P\" busybox codex", true},
+		{"docker run -tePORT=\"$P\" busybox codex", true},
 		{"docker run -te=CODEX_HOME=\"$V\" busybox codex", true},
 		{"docker service create --env=CODEX_HOME=$V img", true},
 		// systemd-run's `-E` gets the same normalization — `-E N=v`,
@@ -431,29 +431,29 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"systemd-run -E=CODEX_HOME codex", true},
 		{"systemd-run -tE=CODEX_HOME=/other codex", true},
 		{"systemd-run -tE=PORT=3000 codex", false},
-		{"systemd-run -EPORT=\"$P\" codex", false},
-		{"systemd-run -E=PORT=\"$P\" codex", false},
+		{"systemd-run -EPORT=\"$P\" codex", true},
+		{"systemd-run -E=PORT=\"$P\" codex", true},
 		{"systemd-run -E=CODEX_HOME=\"$V\" codex", true},
 		{"systemd-run -tE=CODEX_HOME=\"$V\" codex", true},
 		{"systemd-run -p=Environment=CODEX_HOME=/x codex", true},
 		{"systemd-run -p=Description=x codex", false},
-		// An env-family property whose value is dynamic can expand into
-		// fragments the word does not show, so it refuses; under the
-		// lexical rule ANY dynamic --property operand is unreadable
-		// NAME=VALUE text and refuses the same way.
+		// A dynamic --property operand is unverifiable text under the
+		// lexical rule — env-family or not, it refuses like every other
+		// dynamic word.
 		{"systemd-run --property=Environment=PORT=$P codex", true},
 		{"systemd-run --property=Description=$P codex", true},
-		// sudo's -l and -V are no-operand flags; -l's command word is
-		// positional and the assignment region ahead of it is unchanged.
+		// sudo's -l/-V are ordinary dash words to the lexical scan —
+		// admitted because they name nothing protected — and a denied
+		// spelling alongside them still refuses.
 		{"sudo -l", false},
 		{"sudo -l codex", false},
 		{"sudo -V", false},
 		{"sudo -l CODEX_HOME=/x codex", true},
 
-		// docker/cli registers hidden operand-taking aliases (docker
-		// 29.4.0): `--net` for `--network`, `--net-alias` for
-		// `--network-alias`, `--dns-opt` for `--dns-option`. Each must
-		// consume its operand so the image boundary lands on the image.
+		// docker/cli's hidden operand-taking aliases (docker 29.4.0's
+		// `--net`, `--net-alias`, `--dns-opt`) no longer need a table:
+		// the operand is inert text and the env word refuses wherever it
+		// sits, so no boundary can shift the injection past the scan.
 		{"docker run --net host --env=CODEX_HOME=/other alpine codex", true},
 		{"docker run --net-alias a1 --env=CODEX_HOME=/other alpine codex", true},
 		{"docker run --dns-opt ndots:1 --env=CODEX_HOME=/other alpine codex", true},
@@ -481,18 +481,20 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker run -t=false alpine echo hi", false},
 		{"docker run -it=true alpine echo hi", false},
 
-		// Dynamic words: a word that cannot word-split is inert data —
-		// `alpine:"$TAG"` can only ever expand to one argument and a
-		// double-quoted `-v` operand the same, so both admit exactly as
-		// the ordinary tail scan admits them.
-		{"docker run -v \"$PWD:/app\" alpine echo hi", false},
-		{"docker run --rm alpine:\"$TAG\" echo hi", false},
-		{"sudo -u \"$USER\" id", false},
-		{"docker build $CTX", false},
-		// …while a word that CAN split on an injectable tail could carry
-		// `-e CODEX_HOME=x` inside it and refuses, an env option's own
-		// unreadable operand refuses under any leaf, and a protected
-		// name proven by the literal prefix still refuses.
+		// ANY dynamic word refuses, wherever it sits: a $VAR, ${VAR},
+		// $(…), backtick, arithmetic or glob expansion could produce a
+		// protected assignment, an env spelling, or extra argv the
+		// command line cannot show. Quoted single-word expansions pay
+		// the same price — over-refusal is the accepted trade-off.
+		{"sudo $X codex", true},
+		{"sudo \"$CMD\" -i codex", true},
+		{"systemd-run \"$CMD\" -i codex", true},
+		{"systemd-run $(echo --setenv=CODEX_HOME=/x) codex", true},
+		{"docker run -e \"$V\" img codex", true},
+		{"docker run -v \"$PWD:/app\" alpine echo hi", true},
+		{"docker run --rm alpine:\"$TAG\" echo hi", true},
+		{"sudo -u \"$USER\" id", true},
+		{"docker build $CTX", true},
 		{"docker run $IMG alpine echo hi", true},
 		{"sudo -u $USER id", true},
 		{"docker run -e \"$V\" busybox codex", true},
