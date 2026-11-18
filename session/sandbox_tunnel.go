@@ -234,9 +234,15 @@ func newTunnelChild(cmd *exec.Cmd, ll *tunnelLifeline) *tunnelChild {
 //
 // The spawn composes p.forward plus p.reverseFwds — W3.4's -R slot, empty when no
 // callback was granted — so every re-dial re-establishes the same endpoint contract.
+// The generation dir is ensured on every spawn, not just the first: the pinned
+// socketPath never moves, so a dir deleted mid-life must be re-established
+// under the verified root before ssh's bind lands in it (#7503).
 func (p *sandboxProvisioner) provisionTunnelChild() (*tunnelChild, error) {
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
+	if _, err := tunnelGenerationDir(); err != nil {
+		return nil, err
+	}
 	cmd, ll, err := p.spawnTunnel(p.forward, p.reverseFwds...)
 	if err != nil {
 		return nil, err

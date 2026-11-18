@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -40,9 +39,9 @@ type AgentServerEndpoint struct {
 	// VerifyPeer, when set, runs on every freshly dialed unix connection
 	// BEFORE any request bytes are written; a non-nil result closes the
 	// connection unused. The sandbox tunnel fills it with the proof that the
-	// socket's acceptor is af's own ssh child's process group — so nothing
-	// credential-bearing is ever sent to an endpoint that is not provably
-	// af's own forward.
+	// socket's acceptor is — or descends from — af's own ssh spawn — so
+	// nothing credential-bearing is ever sent to an endpoint that is not
+	// provably af's own forward.
 	VerifyPeer func(conn *net.UnixConn) error
 }
 
@@ -122,21 +121,43 @@ func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentCli
 // scrubEndpointURL rewrites transport errors so the tunnel endpoint's
 // placeholder authority never reaches an operator: Post
 // "http://af-tunnel.invalid/…" is nonsense next to a unix-socket dial failure
-// — the endpoint is the socket af's tunnel bound (#7495 R7). The *url.Error
-// copy keeps its inner error, so errors.Is chains (deadlines, refused) still
-// resolve.
+// — the endpoint is the socket af's tunnel bound (#7495 R7). Two shapes are
+// covered: REST's top-level *url.Error is rewritten in place (the *url.Error
+// copy keeps its inner error, so errors.Is chains — deadlines, refused —
+// still resolve), and any deeper-nested placeholder — the websocket library's
+// `failed to send handshake request: Get "ws://af-tunnel.invalid/…"` the
+// stream and relay paths wrap — is scrubbed textually under a wrapper that
+// still unwraps to the original (#7503).
 func (c *remoteAgentClient) scrubEndpointURL(err error) error {
-	if c.socketPath == "" {
+	if c.socketPath == "" || err == nil {
 		return err
 	}
-	var ue *url.Error
-	if errors.As(err, &ue) {
+	if ue, ok := err.(*url.Error); ok {
 		cp := *ue
 		cp.URL = c.socketPath
 		return &cp
 	}
-	return err
+	msg := err.Error()
+	if !strings.Contains(msg, "af-tunnel.invalid") {
+		return err
+	}
+	msg = strings.ReplaceAll(msg, "ws://af-tunnel.invalid", "unix://"+c.socketPath)
+	msg = strings.ReplaceAll(msg, "http://af-tunnel.invalid", "unix://"+c.socketPath)
+	msg = strings.ReplaceAll(msg, "af-tunnel.invalid", c.socketPath)
+	return &scrubbedTunnelError{msg: msg, err: err}
 }
+
+// scrubbedTunnelError presents the operator-facing message with the
+// placeholder authority replaced by the socket af actually dialed, while
+// Unwrap keeps the original error — and everything it wraps — inspectable
+// through errors.Is/As.
+type scrubbedTunnelError struct {
+	msg string
+	err error
+}
+
+func (e *scrubbedTunnelError) Error() string { return e.msg }
+func (e *scrubbedTunnelError) Unwrap() error { return e.err }
 
 // splitHTTPBaseURL validates an agent-server base URL and derives its REST
 // (http://host:port) and WS (ws://host:port) authorities. It accepts the

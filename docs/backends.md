@@ -453,14 +453,16 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
    agent-server through it. The tunnel's local end is a **unix-domain socket**,
    not a TCP port: `ssh -L <socket>:<remote>` binds a path inside a private
    `tunnels/` directory in af's home (created mode 0700, verified on the opened
-   directory), where no other local account can place a listener. Every
-   connection through the socket proves its acceptor is af's own ssh child
-   before a byte is written, so nothing credential-bearing can reach an
-   endpoint af did not provision — and a forward that cannot be established
-   fails the session rather than falling back to a TCP port. Attach, preview,
-   prompts, and the live terminal stream all flow through the one tunneled,
-   authed connection (the SSH tunnel encrypts it; the bearer token still applies
-   end to end inside the tunnel — defense in depth).
+   directory — and that directory fd is held for the daemon's life, so
+   everything af creates under it is created relative to the verified object,
+   never a re-resolved path), where no other local account can place a listener. Every
+   connection through the socket proves its acceptor is, or descends from,
+   af's own ssh spawn before a byte is written, so nothing credential-bearing
+   can reach an endpoint af did not provision — and a forward that cannot be
+   established fails the session rather than falling back to a TCP port.
+   Attach, preview, prompts, and the live terminal stream all flow through the
+   one tunneled, authed connection (the SSH tunnel encrypts it; the bearer
+   token still applies end to end inside the tunnel — defense in depth).
 5. On kill, the remote `af agent-server` is stopped, the session directory is
    removed, and the tunnel + SSH connection are closed — no leaked process, dir,
    or tunnel. The remote host itself is left running (it is your machine, not a

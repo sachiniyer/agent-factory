@@ -741,7 +741,7 @@ func (c *remoteAgentClient) dialStream(ctx context.Context, tab int, tabID strin
 			return nil, fmt.Errorf("remote agent-server: tab id %q: %w", tabID, ErrTabGone)
 		}
 		return nil, fmt.Errorf("remote agent-server: dial pty stream: %w",
-			agentproto.RedactAccessTokenError(err, c.token))
+			c.scrubEndpointURL(agentproto.RedactAccessTokenError(err, c.token)))
 	}
 	conn.SetReadLimit(4 << 20)
 	return conn, nil
