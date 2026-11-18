@@ -284,3 +284,102 @@ func TestDeleteNonActiveProjectWhilePickerOpenClosesPicker(t *testing.T) {
 	assert.Equal(t, activeID, h.repoID, "the active scope must be untouched by a non-active delete")
 	assert.Equal(t, activeRoot, h.repoRoot)
 }
+
+// TestDeleteCompletionInvalidatesPickerRetainedBehindConfirmation is the
+// regression for #7525's Codex finding (review thread 4608285856): the
+// completion's close only fired in stateSwitchProject, so a delete landing
+// while a SECOND picker-launched confirmation sat in stateConfirm left the
+// picker — rows captured before the delete — retained underneath it.
+// Cancelling that confirmation ran the OnCancel that restores
+// stateSwitchProject, re-showing the stale rows; Enter on the deleted project
+// then re-created the zombie scope. The completion now invalidates the
+// retained overlay whatever the model's state, and the confirmation's cancel
+// returns to a freshly built picker — never the captured one.
+func TestDeleteCompletionInvalidatesPickerRetainedBehindConfirmation(t *testing.T) {
+	h, deletedRoot, deletedID := armDeletePickerRepoHome(t)
+
+	// A second project so the reopened picker has "another row" to press D on:
+	// the second confirmation asks about a project that is NOT the one whose
+	// delete is in flight, which is exactly what makes its picker stale — the
+	// rows were captured before the first delete completed.
+	otherRoot, otherID := deletePickerTestRepo(t)
+	_, err := config.RegisterProject(otherRoot)
+	require.NoError(t, err)
+
+	// Open the picker and start a delete of the ACTIVE project: D → y.
+	openPickerOnActive(t, h, deletedRoot, deletedID)
+	model, _ := h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	h = model.(*home)
+	require.Equal(t, stateConfirm, h.state, "D on the active project's row must open the delete confirmation")
+
+	stubDeleteSuccess(t, 1)
+	model, confirmCmd := h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	h = model.(*home)
+	startMsg, ok := confirmCmd().(startDeleteProjectMsg)
+	require.True(t, ok, "confirm must forward startDeleteProjectMsg")
+	require.Equal(t, deletedID, startMsg.repoID)
+	require.Equal(t, stateDefault, h.state)
+
+	// While the daemon round-trip is in flight, reopen the picker (Ctrl+P) and
+	// press D on ANOTHER row. The picker keeps its just-built rows underneath
+	// the confirmation — rows captured BEFORE the first delete completed.
+	h.showProjectPickerOverlay()
+	require.Equal(t, stateSwitchProject, h.state)
+	retained := h.projectPickerOverlay
+	rows := retained.Projects()
+	otherIdx, sawDeleted := -1, false
+	for i, p := range rows {
+		if p.RepoID == otherID {
+			otherIdx = i
+		}
+		if p.RepoID == deletedID {
+			sawDeleted = true
+		}
+	}
+	require.True(t, sawDeleted, "precondition: the reopened picker still lists the in-flight-deleted project")
+	require.NotEqual(t, -1, otherIdx, "precondition: the other project is a picker row")
+	retained.SetSelectedIndex(otherIdx)
+	model, _ = h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	h = model.(*home)
+	require.Equal(t, stateConfirm, h.state, "D on the other row must open a second confirmation")
+	require.NotNil(t, h.confirmationOverlay)
+
+	// The FIRST delete completes while that confirmation is open. Its captured
+	// picker must be invalidated whatever state the model is in — stateConfirm
+	// included — while the confirmation itself is left alone.
+	runDeleteCompletion(t, h, startMsg)
+	require.Equal(t, stateConfirm, h.state, "the completion leaves the open confirmation alone")
+	assert.Nil(t, h.projectPickerOverlay,
+		"a completed delete invalidates the retained picker, not only a visibly open one")
+	assert.Equal(t, "", h.repoID, "the rescope still cleared the active scope (#4741)")
+
+	// Cancel the confirmation. It must NOT return to the captured picker: the
+	// user lands on a freshly built picker whose rows postdate the delete.
+	model, _ = h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyEsc})
+	h = model.(*home)
+	require.Equal(t, stateSwitchProject, h.state, "cancel returns to a freshly built picker")
+	require.NotNil(t, h.projectPickerOverlay)
+	assert.NotSame(t, retained, h.projectPickerOverlay,
+		"the pre-delete picker is invalidated, not restored")
+	deletedRowIdx := -1
+	for i, p := range h.projectPickerOverlay.Projects() {
+		assert.NotEqual(t, deletedID, p.RepoID, "the deleted project must not be a row: %v", p)
+		assert.NotEqual(t, deletedRoot, p.Root, "the deleted project's root must not be a row: %v", p)
+		if p.RepoID == deletedID {
+			deletedRowIdx = i
+		}
+	}
+
+	// Enter — even pointed at the stale row where the deleted project sat —
+	// can no longer commit a switch into it.
+	if deletedRowIdx >= 0 {
+		h.projectPickerOverlay.SetSelectedIndex(deletedRowIdx)
+	}
+	model, _ = h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*home)
+	if h.projectSwitch != nil {
+		assert.NotEqual(t, deletedID, h.projectSwitch.repo.ID,
+			"Enter must not start a switch into the deleted project")
+	}
+	assert.NotEqual(t, deletedID, h.repoID, "the zombie active scope stays cleared")
+}

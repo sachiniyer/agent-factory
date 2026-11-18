@@ -179,12 +179,15 @@ func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
 //
 // On every completion that may have landed (success, committed warning, or an
 // outcome the daemon may have applied with only the reply lost #4824) it ALSO
-// closes the project picker when it is open. The overlay builds its row list
+// invalidates the retained project picker. The overlay builds its row list
 // once at open time and nothing here rebuilds it, so the just-deleted project
 // would remain a selectable row; Enter would re-commit a switch into the
-// deleted project and revive the zombie active scope the rescope cleared. A
-// definitive refusal leaves the picker open: nothing reached the daemon, so the
-// project is still registered and its rows are accurate. This mirrors the
+// deleted project and revive the zombie active scope the rescope cleared.
+// Retained includes a picker hidden behind its own D-launched delete
+// confirmation (stateConfirm): the invalidation fires whatever the model's
+// state so the confirmation's cancel cannot restore the stale rows. A
+// definitive refusal leaves the picker open: nothing reached the daemon, so
+// the project is still registered and its rows are accurate. This mirrors the
 // rebind flow, which closes the picker on every owned async outcome.
 func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) {
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
@@ -204,7 +207,7 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 			// unknown" handling. A definitive refusal (the fall-through return
 			// below) leaves the picker open: nothing reached the daemon, so
 			// the project is still there and its rows are not stale.
-			m.closeProjectPickerIfOpen()
+			m.invalidateProjectPicker()
 			return m, m.handleError(mutationOutcomeError(
 				fmt.Sprintf("deleting project '%s'", msg.name), "the projects list", msg.err))
 		}
@@ -312,20 +315,25 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 			m.syncFocus()
 		}
 	}
-	// Close the project picker if the delete completed with it open. The
-	// overlay builds its row list once at open time (pre-selecting the active
-	// project) and nothing here rebuilds it, so the deleted project would
-	// remain a selectable row; Enter would then run the normal switch flow
-	// (repoContextForSelection still resolves — delete leaves the git repo on
-	// disk in local mode, and remote mode fabricates a context from the row
-	// without a registry re-check) and re-commit a switch into the project
-	// just deleted, reviving the zombie active scope the rescope above
-	// cleared. Mirroring the rebind flow, which closes the picker on every
-	// owned async outcome, the delete tears the stale picker down; a
-	// subsequent Ctrl+P rebuilds rows from the refreshed list at open time.
-	// Runs after the rescope/refresh/focus block so those run against a
-	// fully-loaded model, then the close re-homes state/focus to default.
-	m.closeProjectPickerIfOpen()
+	// Invalidate the retained project picker now that the delete has
+	// completed. The overlay builds its row list once at open time
+	// (pre-selecting the active project) and nothing here rebuilds it, so the
+	// deleted project would remain a selectable row; Enter would then run the
+	// normal switch flow (repoContextForSelection still resolves — delete
+	// leaves the git repo on disk in local mode, and remote mode fabricates a
+	// context from the row without a registry re-check) and re-commit a
+	// switch into the project just deleted, reviving the zombie active scope
+	// the rescope above cleared. "Retained" covers a picker hidden behind its
+	// own D-launched delete confirmation (stateConfirm) too: the
+	// confirmation's OnCancel restores stateSwitchProject, and without the
+	// invalidation it would re-show the stale rows (#7525 review).
+	// Mirroring the rebind flow, which closes the picker on every owned async
+	// outcome, the delete tears the stale picker down; a subsequent Ctrl+P —
+	// or that confirmation's cancel — rebuilds rows from the refreshed list
+	// at open time. Runs after the rescope/refresh/focus block so those run
+	// against a fully-loaded model, then the close re-homes state/focus to
+	// default.
+	m.invalidateProjectPicker()
 	success := m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.killed))
 	if committedWarning {
 		return m, tea.Batch(success, m.handleError(msg.err))
