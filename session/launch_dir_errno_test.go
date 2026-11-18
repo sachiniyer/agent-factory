@@ -29,7 +29,16 @@ import (
 // soft NFS mount or a reconnecting sshfs erroring for the length of one walk.
 func worktreeLookupFault(t *testing.T, cwd string, k int32, mode string) *atomic.Int32 {
 	t.Helper()
-	wait := launchDirWedge(t, cwd)
+	// The wedge's 50ms bound exists to turn a stall into "did not answer"
+	// quickly; an eio fault answers at once and never needs it. Shrinking the
+	// bound for eio runs is a real flake source: on a loaded runner a real
+	// lookup can answer just past 50ms, read as a look that did not happen,
+	// and end the walk before the k the test injected is ever reached
+	// (#7532, run 44244027492's lookup_3_of_5_fails: seen=1).
+	wait := func(string) {}
+	if mode == "stall" {
+		wait = launchDirWedge(t, cwd)
+	}
 	var seen atomic.Int32
 	var armed atomic.Bool
 	parent := filepath.Dir(cwd)

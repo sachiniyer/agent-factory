@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
 	"golang.org/x/sys/unix"
 )
@@ -312,21 +313,17 @@ func openCarryDirChain(p carryPace, root *os.File, components []string, create b
 
 // openCarryFileAt opens a regular file beneath dir for reading. O_NONBLOCK
 // keeps a FIFO planted at the path from hanging the swap; it has no effect on a
-// regular file.
+// regular file. What is not regular is refused with *fsprobe.NonRegularError —
+// the same typed refusal fsprobe.OpenRegular gives every sibling open (#7527).
 func openCarryFileAt(p carryPace, dir *os.File, name string) (*os.File, os.FileInfo, error) {
 	file, err := openCarryAt(p, dir, name, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, nil, err
 	}
 	p.at("fstat", file.Name())
-	info, err := file.Stat()
+	info, err := fsprobe.RegularFileInfo(file, file.Name())
 	if err != nil {
-		_ = file.Close()
 		return nil, nil, err
-	}
-	if !info.Mode().IsRegular() {
-		_ = file.Close()
-		return nil, nil, fmt.Errorf("%s is not a regular file (%s)", file.Name(), info.Mode().Type())
 	}
 	return file, info, nil
 }

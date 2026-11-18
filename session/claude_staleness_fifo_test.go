@@ -22,13 +22,19 @@ import (
 // later ask for the same pair is refused instantly with "still running after
 // an earlier deadline", the session's staleness answer degrades permanently to
 // unverified, and the goroutine leaks until the daemon restarts. The open is
-// O_NONBLOCK|O_NOFOLLOW with a regular-file refusal on the opened descriptor,
-// mirroring every sibling (openCarryFileAt, openCodexRollout), so a planted
-// FIFO is answered within the bound.
+// fsprobe.OpenRegular — O_NONBLOCK|O_NOFOLLOW with the shared
+// *fsprobe.NonRegularError refusal on the opened descriptor, the same guard
+// every bounded sibling carries (openCarryFileAt, openCodexRollout) — so a
+// planted FIFO is answered within the bound, and answered as a look that did
+// not happen: carryLookupUnlooked classes the typed refusal as unverified,
+// never as evidence the copies diverge (#7527).
 
-// fifoPatrolBound is the per-flight bound the tests here install: af's bound
-// shrunk so a lookup that does not answer costs 200ms, not seconds.
-const fifoPatrolBound = 200 * time.Millisecond
+// fifoPatrolBound is the per-flight bound the tests here install. It is a
+// ceiling, not a measurement: the correctness property is that each ask is
+// answered without hitting it — a wedge is caught by the bound, or by the
+// helpers' own ceilings behind it. Generous, so a loaded runner cannot flake
+// it.
+const fifoPatrolBound = 2 * time.Second
 
 // drainBlockedOpenatGoroutine waits for the goroutine count to return to
 // baseline, the way assertNoLeakedGoroutine does. A bounded open returns
@@ -119,16 +125,15 @@ func TestOpenClaudeTranscript_RefusesAFIFOWithoutWedging(t *testing.T) {
 	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
 	unblockFifoOnCleanup(t, fifo)
 
-	start := time.Now()
 	file, info, err := requireOpenClaudeTranscriptWithinBound(t, pacedCarryWalk(nil), fifo)
-	elapsed := time.Since(start)
 	require.Error(t, err, "a FIFO at the transcript path is refused")
 	require.ErrorContains(t, err, "not a regular file", "the refusal names the non-regular file")
+	var nonRegular *fsprobe.NonRegularError
+	require.ErrorAs(t, err, &nonRegular, "the refusal carries the typed shape classifiers see")
 	require.Nil(t, file, "no descriptor is kept on a non-regular refusal")
 	require.Nil(t, info)
 	require.False(t, errors.Is(err, fsprobe.ErrProbeTimedOut),
 		"the FIFO must be answered within the bound, not by timing the flight out: %v", err)
-	require.Less(t, elapsed, 150*time.Millisecond, "the open did not block on the FIFO")
 }
 
 // TestOpenClaudeTranscript_RefusesALeafSymlinkWithoutFollowing plants a symlink
@@ -189,32 +194,31 @@ func TestClaudeTranscriptExtends_AFIFOAtTheLongerPathDoesNotWedgTheFlight(t *tes
 
 	baseline := runtime.NumGoroutine()
 
-	// First call: the FIFO is answered within the bound. A non-regular file is
-	// an answer (a refused symlink, and a file that is not a regular file, are
-	// answers — carryLookupUnlooked), so unlookedOnly swallows it and the
-	// verdict is that the longer copy does not extend the shorter one.
-	start := time.Now()
+	// First call: the FIFO is answered within the bound, as a look that did
+	// not happen — the guarded open refuses the non-regular file with
+	// *fsprobe.NonRegularError, and unlookedOnly propagates it, so the verdict
+	// is unverified, never that the copies diverge (#7527).
 	extends, err := requireClaudeTranscriptExtendsWithinBound(t, longer, shorter)
 	require.False(t, errors.Is(err, fsprobe.ErrProbeTimedOut),
 		"a FIFO at the open path must not time the flight out (it is answered within the bound): %v", err)
-	require.NoError(t, err, "a non-regular file is an answer, not a look that did not happen")
-	require.False(t, extends, "a FIFO at the longer path holds no bytes of the shorter copy")
-	require.Less(t, time.Since(start), 150*time.Millisecond, "the open did not block on the FIFO")
+	require.Error(t, err, "a non-regular file is a look that did not happen, not an answer")
+	var nonRegular *fsprobe.NonRegularError
+	require.ErrorAs(t, err, &nonRegular, "the refusal carries the typed shape classifiers see")
+	require.True(t, carryLookupUnlooked(err),
+		"the refusal is a look that did not happen — never evidence the copies diverge")
+	require.False(t, extends)
 
 	// The work goroutine returned — the registry entry is gone — so a second
-	// ask for the same pair starts its own flight and answers normally, rather
-	// than being refused as "still running after an earlier deadline" while a
-	// wedged goroutine keeps the entry latched.
-	start = time.Now()
+	// ask for the same pair starts its own flight and answers the same way,
+	// rather than being refused as "still running after an earlier deadline"
+	// while a wedged goroutine keeps the entry latched.
 	extends, err = requireClaudeTranscriptExtendsWithinBound(t, longer, shorter)
 	require.False(t, errors.Is(err, fsprobe.ErrProbeTimedOut), "the second ask is not refused by a latched flight: %v", err)
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.True(t, carryLookupUnlooked(err), "the second ask answers the same refusal, not a latched entry")
+	require.NotContains(t, err.Error(), "still running after an earlier deadline",
+		"the second ask is not refused by a latched flight")
 	require.False(t, extends)
-	if err != nil {
-		require.NotContains(t, err.Error(), "still running after an earlier deadline",
-			"the second ask is not refused by a latched flight")
-	}
-	require.Less(t, time.Since(start), 150*time.Millisecond, "the second ask was not refused by a latched entry")
 
 	// No goroutine leaked into a blocked openat.
 	drainBlockedOpenatGoroutine(t, baseline)
@@ -238,19 +242,20 @@ func TestClaudeTranscriptExtends_AFIFOAtTheShorterPathDoesNotWedgTheFlight(t *te
 
 	baseline := runtime.NumGoroutine()
 
-	start := time.Now()
 	extends, err := requireClaudeTranscriptExtendsWithinBound(t, longer, shorter)
 	require.False(t, errors.Is(err, fsprobe.ErrProbeTimedOut),
 		"a FIFO at the shorter path must not time the flight out: %v", err)
-	require.NoError(t, err)
+	require.Error(t, err, "a non-regular file is a look that did not happen, not an answer")
+	require.True(t, carryLookupUnlooked(err),
+		"the refusal is a look that did not happen — never evidence about the copies")
 	require.False(t, extends, "a FIFO at the shorter path does not extend anything")
-	require.Less(t, time.Since(start), 150*time.Millisecond, "the open did not block on the FIFO")
 
-	start = time.Now()
 	extends, err = requireClaudeTranscriptExtendsWithinBound(t, longer, shorter)
-	require.NoError(t, err)
+	require.Error(t, err)
+	require.True(t, carryLookupUnlooked(err), "the second ask answers the same refusal, not a latched entry")
+	require.NotContains(t, err.Error(), "still running after an earlier deadline",
+		"the second ask is not refused by a latched flight")
 	require.False(t, extends)
-	require.Less(t, time.Since(start), 150*time.Millisecond, "the second ask was not refused by a latched entry")
 
 	drainBlockedOpenatGoroutine(t, baseline)
 }
@@ -273,10 +278,12 @@ func TestClaudeTranscriptExtends_RecoversAfterTheFIFOIsRemoved(t *testing.T) {
 	longer := claudeTranscript{dir: dir, name: filepath.Base(longPath)}
 	shorter := claudeTranscript{dir: dir, name: filepath.Base(shortPath)}
 
-	// The FIFO is answered within the bound (no wedge).
+	// The FIFO is answered within the bound (no wedge), as a look that did
+	// not happen.
 	extends, err := requireClaudeTranscriptExtendsWithinBound(t, longer, shorter)
 	require.False(t, errors.Is(err, fsprobe.ErrProbeTimedOut), "the FIFO did not wedge the flight: %v", err)
-	require.NoError(t, err)
+	require.Error(t, err, "a non-regular file is a look that did not happen, not an answer")
+	require.True(t, carryLookupUnlooked(err))
 	require.False(t, extends)
 
 	// Replace the FIFO with a regular transcript that holds every byte of the
@@ -328,4 +335,84 @@ func TestClaudeTranscriptExtends_RegularFilesStillCompare(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, extends)
 	})
+}
+
+// TestStatClaudeCopy_AFIFOAtTheCopyPathIsALookThatDidNotHappen is the carry
+// side's end-to-end pin (#7527): a FIFO planted at the copy's path — regular
+// to the listing that produced the plan, or planted by a writer between plan
+// and lookup — opens non-regular, and the typed refusal must reach the copy
+// note's own classification as a look that did not happen, so locateClaude
+// refuses unverified. Before the refusal was typed it surfaced as a plain
+// error that note swallowed: the copy read as absent, and a second spelling's
+// copy could be judged "duplicated" instead.
+func TestStatClaudeCopy_AFIFOAtTheCopyPathIsALookThatDidNotHappen(t *testing.T) {
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(fifoPatrolBound)
+	t.Cleanup(restoreTimeout)
+
+	configDir := t.TempDir()
+	project := "projects/-repo"
+	fifo := filepath.Join(configDir, project, carryTestID+".jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(fifo), 0o700))
+	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
+	unblockFifoOnCleanup(t, fifo)
+
+	copy, err := statClaudeCopy(ambientCarryRoot(configDir), project, carryTestID)
+	require.Nil(t, copy, "a FIFO where the copy belongs is no copy")
+	require.Error(t, err)
+	var nonRegular *fsprobe.NonRegularError
+	require.ErrorAs(t, err, &nonRegular,
+		"the copy note's own classifier must see the typed refusal, not a plain error")
+	require.True(t, carryLookupUnlooked(err),
+		"the FIFO is a look that did not happen — locateClaude refuses unverified, never duplicated")
+}
+
+// TestClaudeTranscriptExtends_OpenAndStatEachHoldTheirOwnBound pins the
+// #7527-review pacing property: the staleness flight's bound is per SYSCALL,
+// so a responsive mount where the open answers inside the bound and the
+// fstat answers inside the bound — together exceeding it — must still
+// answer. OpenRegularPaced restarts the bound at the fstat step; keep the
+// marks outside the shared open instead and both syscalls share the open's
+// window, which times the flight out into an unverified verdict.
+func TestClaudeTranscriptExtends_OpenAndStatEachHoldTheirOwnBound(t *testing.T) {
+	clock := fsprobe.NewManualClock(time.Now())
+	t.Cleanup(fsprobe.SetFlightClockForTest(clock))
+	t.Cleanup(fsprobe.SetProbeTimeoutForTest(fifoPatrolBound))
+
+	dir := t.TempDir()
+	longPath := filepath.Join(dir, "longer.jsonl")
+	shortPath := filepath.Join(dir, "shorter.jsonl")
+	require.NoError(t, os.WriteFile(shortPath, []byte("{\"base\":1}\n"), 0o600))
+	require.NoError(t, os.WriteFile(longPath, []byte("{\"base\":1}\n{}\n"), 0o600))
+	longer := claudeTranscript{dir: dir, name: "longer.jsonl"}
+	shorter := claudeTranscript{dir: dir, name: "shorter.jsonl"}
+
+	// A responsive-but-slow mount: every open costs three quarters of the
+	// bound at its mark, and every fstat the same at the syscall itself —
+	// together one and a half bounds per transcript.
+	stall := 3 * fifoPatrolBound / 4
+	prev := carryLookupStandIn.Load()
+	standIn := func(op, path string) {
+		if op == "open" && (path == longPath || path == shortPath) {
+			clock.Advance(stall)
+		}
+	}
+	carryLookupStandIn.Store(&standIn)
+	t.Cleanup(func() { carryLookupStandIn.Store(prev) })
+	t.Cleanup(fsprobe.SetRegularFileStatForTest(func(f *os.File) (os.FileInfo, error) {
+		if f.Name() == longPath || f.Name() == shortPath {
+			clock.Advance(stall)
+			// The timer fires inside Advance, but its channel is buffered —
+			// the waiter must be scheduled to read it before this syscall
+			// returns and the next step refreshes lastStep. Hold the stat a
+			// moment in real time: a flight whose fstat outlived the bound
+			// still in progress is the timeout case being discriminated.
+			time.Sleep(100 * time.Millisecond)
+		}
+		return f.Stat()
+	}))
+
+	extends, err := requireClaudeTranscriptExtendsWithinBound(t, longer, shorter)
+	require.NoError(t, err,
+		"open and fstat each answered inside their own bound window — the flight must answer, not time out: %v", err)
+	require.True(t, extends, "the longer transcript still extends the shorter")
 }

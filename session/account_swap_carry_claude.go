@@ -189,7 +189,8 @@ func claudeCopyExtendsWith(p carryPace, longRoot carryRoot, longer string, short
 }
 
 // unlookedOnly is err when it is a look that did not happen
-// (carryLookupUnlooked), and nil for an answer such as absence.
+// (carryLookupUnlooked — a timeout, a failed syscall, or the guarded open's
+// non-regular refusal, #7527), and nil for an answer such as absence.
 func unlookedOnly(err error) error {
 	if carryLookupUnlooked(err) {
 		return err

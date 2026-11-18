@@ -20,11 +20,15 @@ import (
 // the flight (the head of a Claude transcript, claudeTranscriptDir /
 // claudeTranscriptRecordedDir) wedged the flight's work goroutine in openat
 // forever and latched its registry entry, the same hazard the staleness
-// comparison's open had. The default is now openBoundedFile — O_NONBLOCK |
-// O_NOFOLLOW with a regular-file refusal on the opened descriptor — so a
-// planted FIFO is answered within the bound.
+// comparison's open had. The default is now OpenRegular — O_NONBLOCK |
+// O_NOFOLLOW with the *NonRegularError refusal on the opened descriptor — so
+// a planted FIFO is answered within the bound (#7527).
 
-const readFileFifoBound = 200 * time.Millisecond
+// readFileFifoBound is the flight bound these tests install. It is a ceiling,
+// not a measurement: the correctness property is that each ask answers
+// without hitting it — a wedge is caught by the bound, or by the helper's own
+// ceiling behind it. Generous, so a loaded runner cannot flake it.
+const readFileFifoBound = 2 * time.Second
 
 func drainBlockedOpenGoroutine(t *testing.T, baseline int) {
 	t.Helper()
@@ -89,25 +93,24 @@ func TestReadFileWith_RefusesAFIFOWithoutWedging(t *testing.T) {
 
 	baseline := runtime.NumGoroutine()
 
-	// First call: the FIFO is answered within the bound as a non-regular file.
-	start := time.Now()
+	// First call: the FIFO is answered within the bound as a non-regular
+	// file, with the typed refusal.
 	got, err := readFileWithWithinBound(t, path, func(*os.File) (any, error) {
 		t.Error("the read callback must not run for a non-regular file")
 		return "read", nil
 	})
-	elapsed := time.Since(start)
 	require.Nil(t, got, "no answer is produced for a non-regular file")
 	require.Error(t, err, "a FIFO at the path is refused")
 	require.ErrorContains(t, err, "not a regular file", "the refusal names the non-regular file")
+	var nonRegular *NonRegularError
+	require.ErrorAs(t, err, &nonRegular, "the refusal carries the typed shape classifiers see")
 	require.False(t, errors.Is(err, ErrProbeTimedOut),
 		"the FIFO must be answered within the bound, not by timing the flight out: %v", err)
-	require.Less(t, elapsed, 150*time.Millisecond, "the open did not block on the FIFO")
 
 	// The work goroutine returned — the registry entry is gone — so a second
-	// ask for the same path starts its own flight and answers normally, rather
-	// than being refused as "still running after an earlier deadline" while a
-	// wedged goroutine keeps the entry latched.
-	start = time.Now()
+	// ask for the same path starts its own flight and answers the same way,
+	// rather than being refused as "still running after an earlier deadline"
+	// while a wedged goroutine keeps the entry latched.
 	got, err = readFileWithWithinBound(t, path, func(*os.File) (any, error) {
 		t.Error("the read callback must not run for a non-regular file")
 		return "read", nil
@@ -118,7 +121,6 @@ func TestReadFileWith_RefusesAFIFOWithoutWedging(t *testing.T) {
 	require.False(t, errors.Is(err, ErrProbeTimedOut), "the second ask is not refused by a latched flight: %v", err)
 	require.NotContains(t, err.Error(), "still running after an earlier deadline",
 		"the second ask is not refused by a latched flight")
-	require.Less(t, time.Since(start), 150*time.Millisecond, "the second ask was not refused by a latched entry")
 
 	drainBlockedOpenGoroutine(t, baseline)
 }

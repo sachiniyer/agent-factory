@@ -59,6 +59,16 @@ func SetOpenForTest(f func(string) (*os.File, error)) func() {
 	return openPath.replace(f)
 }
 
+// SetRegularFileStatForTest overrides the fstat RegularFileInfo runs on the
+// descriptor a guarded open produced — OpenRegular and the descriptor-relative
+// opens share it — so a test can make a responsive filesystem's stat take
+// measurable time and prove each syscall inside a paced open holds its own
+// bound step rather than sharing the open's window (#7527 review).
+// Callers must restore the original via the returned function.
+func SetRegularFileStatForTest(f func(*os.File) (os.FileInfo, error)) func() {
+	return regularFileStat.replace(f)
+}
+
 // SetFlightClockForTest installs the clock every bounded flight's bound runs
 // on — Paced's per-step bound and the plain probes' deadlines alike — so a
 // test can declare how long each lookup takes on a ManualClock instead of

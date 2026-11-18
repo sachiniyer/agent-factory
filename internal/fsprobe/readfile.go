@@ -6,12 +6,14 @@ import (
 )
 
 // openPath is the test seam under ReadFileWith's bounded flight: the
-// production openBoundedFile, or a test's stand-in for a wedged mount
-// (#7221 review R4). openBoundedFile is the same guarded open every sibling
-// open inside a bounded flight carries, so a FIFO or symlink planted at the
-// path is answered within the bound rather than wedging the flight's
-// goroutine.
-var openPath = newSeam(openBoundedFile)
+// production OpenRegular, or a test's stand-in for a wedged mount (#7221
+// review R4). OpenRegular is the same guarded open every sibling open inside
+// a bounded flight carries, so a FIFO or symlink planted at the path is
+// answered within the bound rather than wedging the flight's goroutine.
+var openPath = newSeam(func(path string) (*os.File, error) {
+	file, _, err := OpenRegular(path)
+	return file, err
+})
 
 var readFileFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 
@@ -20,7 +22,7 @@ var readFileFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 // not own on the poll and load paths, the head of an agent's transcript
 // (#7221 review R4), cannot afford an unbounded open or read: on a wedged
 // mount neither returns, and neither would the poll. The open is the bounded
-// openBoundedFile — O_NONBLOCK|O_NOFOLLOW with a regular-file refusal on the
+// OpenRegular — O_NONBLOCK|O_NOFOLLOW with a regular-file refusal on the
 // opened descriptor — so a FIFO or symlink planted at the path is answered
 // within the bound rather than wedging the flight's work goroutine in openat
 // forever and latching its registry entry, the same guard openCodexRollout
