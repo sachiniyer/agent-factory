@@ -365,6 +365,7 @@ func (d InstanceData) ForClients() InstanceData {
 	d.RuntimeServerPID = 0
 	d.RuntimeServerStartID = 0
 	d.RuntimeServerSessionID = ""
+	d.RuntimeServerPIDNS = ""
 	d.LimitPromptSent = false
 	d.AgentRuntimeGeneration = 0
 	d.LastLimitWall = nil

@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -196,6 +197,17 @@ func ptyFdServerVerdict(pid int, own ServerIdentity, snap map[int]proctree.Proce
 	for _, key := range indices {
 		holder, ok := m[key]
 		if !ok {
+			continue
+		}
+		// The map was built at the sweep's start; a carrier may be judged
+		// one pass later, after the holder released the index and it was
+		// reallocated to a DIFFERENT server. A cached hit alone cannot
+		// stand as positive foreign evidence — the holder must still hold
+		// this master when the verdict is made, or the slave contributes
+		// nothing (Codex on #7469). One bounded fdinfo read per matched
+		// key, no subprocess; the map itself stays once-per-sweep.
+		held, err := ptyMasterIndices(holder)
+		if err != nil || !slices.Contains(held, key) {
 			continue
 		}
 		switch v := compareHeldServer(snap, holder, own, selfNS); v {

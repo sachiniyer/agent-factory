@@ -18,6 +18,7 @@ func TestRuntimeServerFields_SurviveSerializationAndStayDaemonSide(t *testing.T)
 		RuntimeServerPID:       4242,
 		RuntimeServerStartID:   987654321,
 		RuntimeServerSessionID: "$7",
+		RuntimeServerPIDNS:     "pid:[4026531836]",
 		RuntimeProgram:         "claude",
 	}
 	raw, err := json.Marshal(data)
@@ -29,12 +30,15 @@ func TestRuntimeServerFields_SurviveSerializationAndStayDaemonSide(t *testing.T)
 	require.Equal(t, data.RuntimeServerPID, back.RuntimeServerPID)
 	require.Equal(t, data.RuntimeServerStartID, back.RuntimeServerStartID)
 	require.Equal(t, data.RuntimeServerSessionID, back.RuntimeServerSessionID)
+	require.Equal(t, data.RuntimeServerPIDNS, back.RuntimeServerPIDNS,
+		"the recorded namespace must round-trip — restamping the restoring daemon's would defeat the namespace guards")
 
 	client := data.ForClients()
 	require.Empty(t, client.RuntimeServerSocket)
 	require.Zero(t, client.RuntimeServerPID)
 	require.Zero(t, client.RuntimeServerStartID)
-	require.Empty(t, client.RuntimeServerSessionID,
+	require.Empty(t, client.RuntimeServerSessionID)
+	require.Empty(t, client.RuntimeServerPIDNS,
 		"server identity is daemon-side kill-path evidence — never shipped to clients")
 	require.Equal(t, data.RuntimePID, client.RuntimePID, "the pane-root pair stays visible as before")
 }

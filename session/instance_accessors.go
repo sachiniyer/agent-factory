@@ -617,6 +617,7 @@ func (i *Instance) setRuntimeLaunch(program string, ts *tmux.TmuxSession, spawne
 			i.runtimeServerPID = server.PID
 			i.runtimeServerStartID = server.StartID
 			i.runtimeServerSessionID = server.SessionID
+			i.runtimeServerPIDNS = server.PIDNS
 		}
 	}
 }

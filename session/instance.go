@@ -530,6 +530,7 @@ type Instance struct {
 	runtimeServerPID       int
 	runtimeServerStartID   uint64
 	runtimeServerSessionID string
+	runtimeServerPIDNS     string
 	// captureEvidence is the launch identity a reattach probe could not answer
 	// about (#7123): the retire above still clears runtimePID/runtimeStartID for
 	// every consumer that reads them, but "could not answer" is no evidence of a

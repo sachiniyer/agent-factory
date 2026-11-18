@@ -70,7 +70,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				if ts != nil && idx == 0 && kind == TabKindAgent {
 					ts.SeedPaneRootEvidence(data.RuntimePID, data.RuntimeStartID)
 					ts.SeedServerEvidence(data.RuntimeServerSocket, data.RuntimeServerPID,
-						data.RuntimeServerStartID, data.RuntimeServerSessionID)
+						data.RuntimeServerStartID, data.RuntimeServerSessionID, data.RuntimeServerPIDNS)
 				}
 			}
 			var conversation AgentConversationData
@@ -120,7 +120,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 		if ts != nil {
 			ts.SeedPaneRootEvidence(data.RuntimePID, data.RuntimeStartID)
 			ts.SeedServerEvidence(data.RuntimeServerSocket, data.RuntimeServerPID,
-				data.RuntimeServerStartID, data.RuntimeServerSessionID)
+				data.RuntimeServerStartID, data.RuntimeServerSessionID, data.RuntimeServerPIDNS)
 		}
 	} else {
 		ts = tmux.NewTmuxSession(data.Title, data.Program)

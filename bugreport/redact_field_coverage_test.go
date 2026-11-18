@@ -190,6 +190,7 @@ var verbatimInstanceFields = map[string]string{
 	// user-chosen text (TMUX_TMPDIR, a username) and is collapsed in
 	// redactInstanceData.
 	"RuntimeServerSessionID": "tmux-minted session id ($N), never derived from user text",
+	"RuntimeServerPIDNS":     "kernel pid-namespace inode id (pid:[N]), machine identity, never user text",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupGeneration": "minted cleanup-generation token",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupLifecycle":  "bounded RelocationRecoveryState enum",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.State":             "bounded RelocationRecoveryState enum",

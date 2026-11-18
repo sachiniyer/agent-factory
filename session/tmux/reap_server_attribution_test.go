@@ -176,7 +176,9 @@ func TestPtyFdServerVerdict_OwnersMapBuiltOncePerSweep(t *testing.T) {
 
 	require.Equal(t, serverVerdictOwn, ptyFdServerVerdict(1, own, snap, owners, ""))
 	require.Equal(t, serverVerdictOwn, ptyFdServerVerdict(2, own, snap, owners, ""))
-	require.Equal(t, 1, masterCalls, "the server→pty map is built once per sweep, not per carrier")
+	// 1 map build + 1 liveness re-verify per matched carrier; the map
+	// itself is still built exactly once.
+	require.Equal(t, 3, masterCalls, "the server→pty map is built once per sweep, not per carrier")
 }
 
 func TestParsePaneServerFields_TailOnly(t *testing.T) {

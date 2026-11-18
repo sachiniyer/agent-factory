@@ -241,13 +241,15 @@ func (t *TmuxSession) noteServerIdentity(raw ServerIdentity) {
 // live resolution stamped is newer than the persisted record. A zero record
 // is no anchor: sessions launched before this existed stay undecidable, which
 // is today's verdict.
-func (t *TmuxSession) SeedServerEvidence(socket string, pid int, startID uint64, sessionID string) {
-	id := ServerIdentity{Socket: socket, PID: pid, StartID: startID, SessionID: sessionID}
+func (t *TmuxSession) SeedServerEvidence(socket string, pid int, startID uint64, sessionID, pidns string) {
+	// pidns is the namespace the server pid was RECORDED in, persisted with
+	// the row — never the restoring daemon's namespace, which can differ
+	// when state crosses a container boundary (Codex on #7469). An empty
+	// record leaves the namespace guards inert, exactly like an unrecorded
+	// one — the pid compare then stands on StartID alone.
+	id := ServerIdentity{Socket: socket, PID: pid, StartID: startID, SessionID: sessionID, PIDNS: pidns}
 	if !id.valid() {
 		return
-	}
-	if ns, err := proctree.PIDNamespaceID(); err == nil {
-		id.PIDNS = ns
 	}
 	if t.serverEvidence.Load() == nil {
 		stored := id

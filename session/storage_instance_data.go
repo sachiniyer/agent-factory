@@ -392,6 +392,7 @@ type InstanceData struct {
 	RuntimeServerPID       int    `json:"runtime_server_pid,omitempty"`
 	RuntimeServerStartID   uint64 `json:"runtime_server_start_id,omitempty"`
 	RuntimeServerSessionID string `json:"runtime_server_session_id,omitempty"`
+	RuntimeServerPIDNS     string `json:"runtime_server_pidns,omitempty"`
 	// CaptureRuntimePID/CaptureRuntimeStartID: the RuntimePID pair a reattach
 	// probe could not answer about, kept for conversation capture alone and
 	// re-verified before use (#7123; see keptCaptureEvidence). Additive: an
