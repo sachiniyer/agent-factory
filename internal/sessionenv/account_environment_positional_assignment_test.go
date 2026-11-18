@@ -7,12 +7,19 @@ import (
 )
 
 // scopedProcessTabEnvNames is the denied-name set the production walk uses for a
-// codex sibling process tab: the agent's credential names plus the config dir,
-// with the shell-startup names overlaid exactly as the wrapper tests prepare it
+// codex sibling process tab: AccountIdentityNames (credential, config and
+// late-environment routing pins) plus auth selectors, with the shell-startup
+// names overlaid exactly as the wrapper tests prepare it
 // (TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment /
 // scopedProcessTabAppendNames).
 func scopedProcessTabEnvNames() map[string]struct{} {
 	codex := accountScopedNames("codex", "CODEX_HOME")
+	for _, name := range AccountIdentityNames("codex") {
+		codex[name] = struct{}{}
+	}
+	for _, selector := range AgentAuthSelectors("codex") {
+		codex[selector] = struct{}{}
+	}
 	for name := range accountShellStartupNames {
 		codex[name] = struct{}{}
 	}
@@ -110,6 +117,20 @@ func TestValidateAccountEnvironmentCommand_RefusesPositionalEnvInjectionAssignme
 		"sudo --preserve-env=CODEX_HOME codex",
 		"systemd-run -p PassEnvironment=CODEX_HOME codex",
 		"docker run --name -e CODEX_HOME=/other img",
+
+		// Aliases carrying the same grammars: docker-compose's compose
+		// spellings and run0's systemd-run spellings refuse identically.
+		"docker-compose run -e CODEX_HOME=/other svc codex",
+		"docker-compose --env-file /tmp/e up",
+		"run0 --setenv CODEX_HOME=/other codex",
+		"run0 -p EnvironmentFile=/tmp/e codex",
+		// systemd unquotes and C-unescapes property values: `""` and
+		// `\x5f` both decode a hidden CODEX_HOME — the word carrying the
+		// quote/escape text refuses instead of being decoded.
+		"systemd-run -p 'Environment=CODEX\"\"_HOME=/o' codex",
+		"systemd-run -p 'Environment=\"CODEX\"_HOME=/o' codex",
+		"systemd-run -p 'Environment=CODEX\\x5fHOME=/o' codex",
+		"systemd-run --prop=Environment=CODEX_HOME=/o codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
 		require.Error(t, err, "command %q injects a denied NAME= assignment through an env-injection wrapper", command)
@@ -142,6 +163,17 @@ func TestValidateAccountEnvironmentCommand_RefusesPositionalEnvInjectionAcrossAg
 		{"gemini", "sudo GOOGLE_GENAI_USE_VERTEXAI=1 gemini"},
 		{"gemini", "docker run -e GEMINI_API_KEY=key busybox gemini"},
 		{"gemini", "systemd-run --setenv GEMINI_CLI_HOME=/other gemini"},
+		// The independent review's R3 rows: gemini's routing pins are
+		// identity-bearing (they join the protected set through
+		// AccountIdentityNames' late-environment names/values), so a
+		// command-local or launcher-carried assignment to any of them
+		// refuses — on master these passed the gate.
+		{"gemini", "CODE_ASSIST_ENDPOINT=https://evil gemini"},
+		{"gemini", "sudo CODE_ASSIST_ENDPOINT=https://evil gemini"},
+		{"gemini", "sudo GOOGLE_GEMINI_BASE_URL=https://evil gemini"},
+		{"gemini", "sudo GOOGLE_VERTEX_BASE_URL=https://evil gemini"},
+		{"gemini", "systemd-run --setenv CODE_ASSIST_API_VERSION=v9 gemini"},
+		{"gemini", "docker run -e GOOGLE_APPLICATION_CREDENTIALS=/x busybox gemini"},
 	}
 	for _, test := range cases {
 		account := Account{Agent: test.agent, Name: "work", Dir: "/afhome/accounts/" + test.agent + "/work"}
@@ -192,6 +224,16 @@ func TestValidateAccountEnvironmentCommand_AdmitsLauncherOrdinaryUse(t *testing.
 		"docker container ls -a",
 		"docker compose ps",
 		"docker compose exec svc ls",
+		"docker-compose up",
+		"docker-compose run -e PORT=3000 svc codex",
+		"run0 --user --scope make",
+		"run0 -p Description=x codex",
+		// The identifier boundary keeps common non-protected names out of
+		// the cut, and a leading `~` reads as a home path, not a dynamic
+		// word.
+		"docker run -e NODE_ENV=production app",
+		"sudo RAILS_ENV=production make",
+		"docker run -v ~/.npm:/root/.npm alpine echo hi",
 		"systemd-run codex",
 		"systemd-run --unit=x codex",
 		"systemd-run --property Environment=FOO=1 codex",
@@ -377,11 +419,27 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker kill c1", false},
 		{"docker export c1", false},
 		{"docker wait c1", false},
-		// systemd-run: --pipe is the long form of the already-listed -P;
-		// a literal quoted Environment= value names nothing protected.
+		// systemd-run: --pipe is the long form of the already-listed -P.
+		// A property word still holding quote or backslash text after the
+		// shell's own quote removal is unverifiable — systemd unquotes and
+		// C-unescapes property values — so the quoted Environment= spellings
+		// refuse even where the visible name is ordinary.
 		{"systemd-run --user --pipe make", false},
-		{"systemd-run -p 'Environment=\"FOO=hello world\"' codex", false},
+		{"systemd-run -p 'Environment=\"FOO=hello world\"' codex", true},
 		{"systemd-run -p 'Environment=\"CODEX_HOME=/x y\" FOO=1' codex", true},
+		// The independent review's real-systemd rows: `""`, a `"` mid-name
+		// and the C escape `\x5f` all decode to CODEX_HOME, and getopt's
+		// unambiguous abbreviation `--prop` reaches the same property —
+		// each refuses.
+		{"systemd-run -p 'Environment=CODEX\"\"_HOME=/o' codex", true},
+		{"systemd-run -p 'Environment=\"CODEX\"_HOME=/o' codex", true},
+		{"systemd-run -p 'Environment=CODEX\\x5fHOME=/o' codex", true},
+		{"systemd-run --prop=Environment=CODEX_HOME=/o codex", true},
+		{"systemd-run --prop='Environment=CODEX\"\"_HOME=/o' codex", true},
+		// `'`/`"`/`\` anywhere in a systemd-run word refuses the same way —
+		// even a benign-looking description value — because the property
+		// decode could still produce a protected name.
+		{"systemd-run --description \"it's fine\" make", true},
 		// ANY dynamic word in a launcher command line is unverifiable —
 		// the expansion could produce a protected assignment or an env
 		// spelling the command line cannot show — so even benign dynamic
@@ -501,6 +559,43 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker run --env=\"$V\" busybox codex", true},
 		{"systemd-run --setenv \"$V\" codex", true},
 		{"docker run -e CODEX_HOME=$V busybox codex", true},
+
+		// Aliases shipping the same grammars (R2): the standalone
+		// docker-compose binary carries compose's run/exec -e and
+		// --env-file spellings, and run0 is systemd-run's argv[0]
+		// sudo-mode (systemd 256+). Each lands its grammar's check —
+		// buried inside another command's argv the same.
+		{"docker-compose run -e CODEX_HOME=/other svc codex", true},
+		{"docker-compose exec --env CODEX_HOME=/other svc codex", true},
+		{"docker-compose --env-file /tmp/e up", true},
+		{"docker-compose run -e PORT=3000 svc codex", false},
+		{"docker-compose up", false},
+		{"run0 --setenv CODEX_HOME=/other codex", true},
+		{"run0 -E CODEX_HOME=/other codex", true},
+		{"run0 -p Environment=CODEX_HOME=/other codex", true},
+		{"run0 -p 'Environment=CODEX\\x5fHOME=/o' codex", true},
+		{"run0 --user --scope make", false},
+		{"nohup docker-compose run -e CODEX_HOME=/other svc codex", true},
+		{"nohup run0 --setenv CODEX_HOME=/other codex", true},
+
+		// Identifier boundary (R6): a protected name matches only at the
+		// segment start, after a non-name character, or after a leading
+		// letters-only short-option cluster — so the startup name `ENV`
+		// embedded in NODE_ENV/RAILS_ENV no longer over-refuses the
+		// common spellings, while the cluster-joined forms still do.
+		{"docker run -e NODE_ENV=production app", false},
+		{"sudo RAILS_ENV=production make", false},
+		{"docker run -e MY_CODEX_HOME=x app", false},
+		{"docker run -eENV=/x img", true},
+		{"sudo ENV=/tmp/evil codex", true},
+		{"systemd-run -EENV=/x codex", true},
+
+		// A word-leading `~` is literal for this scan (R7): tilde
+		// expansion yields a home path, never env text — while $VAR,
+		// $(…) and glob words stay dynamic refusals.
+		{"docker run -v ~/.npm:/root/.npm alpine echo hi", false},
+		{"docker run -v ~/data:/data alpine echo hi", false},
+		{"systemd-run -p 'Environment=FOO=1' codex", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)
@@ -524,6 +619,9 @@ func TestApplyAccountEnvironment_RefusesPositionalEnvInjection(t *testing.T) {
 		"docker run --env-file /tmp/e busybox codex",
 		"systemd-run --setenv CODEX_HOME=/other codex",
 		"systemd-run -E CODEX_HOME=/other codex",
+		"docker-compose run -e CODEX_HOME=/other svc codex",
+		"run0 --setenv CODEX_HOME=/other codex",
+		"systemd-run -p 'Environment=CODEX\\x5fHOME=/o' codex",
 	} {
 		_, err := ApplyAccountEnvironment(nil, command, account)
 		require.Error(t, err, "command %q must not replace the sibling account environment", command)

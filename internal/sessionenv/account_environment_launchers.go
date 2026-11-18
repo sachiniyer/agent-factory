@@ -1,20 +1,25 @@
 package sessionenv
 
 import (
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// This file covers three env-injection launchers — sudo, docker and
-// systemd-run — with a deliberately conservative lexical rule instead of a
-// per-option grammar model. Exact grammar modelling kept leaking (each
-// review round surfaced another accepted spelling the option tables
-// misjudged: a hidden docker alias shifting the image boundary, an
-// `=`-joined short-option operand, a consumed operand re-entering as the
-// shadowed command head, a leading dynamic word escaping the tail), so the
-// property here inverts the risk for these three launchers: OVER-refusal is
-// acceptable and UNDER-refusal is not.
+// This file covers the env-injection launchers — sudo, docker (including
+// `docker compose` and the standalone `docker-compose` binary) and
+// systemd-run (including its `run0` argv[0] alias) — with a deliberately
+// conservative lexical rule instead of a per-option grammar model. Exact
+// grammar modelling kept leaking (each review round surfaced another
+// accepted spelling the option tables misjudged: a hidden docker alias
+// shifting the image boundary, an `=`-joined short-option operand, a
+// consumed operand re-entering as the shadowed command head, a leading
+// dynamic word escaping the tail), so the property here inverts the risk
+// for these launchers: OVER-refusal is acceptable and UNDER-refusal is
+// not. The rule is keyed by the binary's grammar, so every name a
+// grammar ships under gets it — `docker-compose` lands docker's check
+// and `run0` lands systemd-run's.
 //
 // The hole (#7565): each launcher runs a child command and can place a
 // NAME=value into that child's environment, re-rooting the account's
@@ -23,27 +28,44 @@ import (
 //
 //   - Any LITERAL argument word that can assign or NAME a protected
 //     variable is refused. After leading dashes are stripped, the word is
-//     cut on `=` and refused when any segment contains a protected name.
-//     That one cut covers every accepted spelling without parsing a single
-//     option: `-eN=v`, `-e N=v`, `-e=N=v`, `-eN`, `--env N=v`, `--env=N=v`,
-//     `-EN=v`, `-E=N=v`, `--setenv N=v`, `--setenv=N=v`, positional
-//     `sudo NAME=value` and `NAME+=`, bare-copy forms like
-//     `--setenv CODEX_HOME` or `-e CODEX_HOME`, and systemd's
-//     `--property=Environment=N=v` / `UnsetEnvironment=N` /
-//     `PassEnvironment=N` chains. Noun-uses pay for the conservatism —
-//     `docker run alpine echo CODEX_HOME=x` is refused even though the
-//     assignment is only argv text — because no lexical cut can separate
-//     argv text from an env operand without modelling the options.
+//     cut on `=` and refused when any segment contains a protected name
+//     at an identifier boundary — at the segment's start, after a
+//     character outside [A-Za-z0-9_], or after a leading letters-only
+//     short-option cluster. That one cut covers every accepted spelling
+//     without parsing a single option: `-eN=v`, `-e N=v`, `-e=N=v`,
+//     `-eN`, `--env N=v`, `--env=N=v`, `-EN=v`, `-E=N=v`, `--setenv
+//     N=v`, `--setenv=N=v`, positional `sudo NAME=value` and `NAME+=`,
+//     bare-copy forms like `--setenv CODEX_HOME` or `-e CODEX_HOME`, and
+//     systemd's `--property=Environment=N=v` / `UnsetEnvironment=N` /
+//     `PassEnvironment=N` chains, abbreviations included
+//     (`--prop=Environment=…` cuts the same segments). The boundary is
+//     what keeps ordinary use admitted: `docker run -e
+//     NODE_ENV=production app` and `sudo RAILS_ENV=production …` embed
+//     `ENV` after `_`, which is not a boundary, so they run — while
+//     `-eENV=`, `-ECODEX_HOME=` and `"A=1 CODEX_HOME=` still refuse.
+//     Noun-uses pay for the conservatism — `docker run alpine echo
+//     CODEX_HOME=x` is refused even though the assignment is only argv
+//     text — because no lexical cut can separate argv text from an env
+//     operand without modelling the options.
 //   - Any DYNAMIC argument word is refused outright. A `$VAR`,
 //     `${VAR}`, `$(…)`, backtick, arithmetic or glob expansion could
 //     produce a protected assignment, an env option spelling, or extra
 //     argv the visible command line cannot show, so its presence makes
 //     the whole launcher command unverifiable wherever it sits — leading
 //     (`sudo "$CMD" -i codex` with CMD=env) or trailing (`docker run
-//     $IMG`). Ordinary dynamic uses pay the same price: `docker run -v
-//     "$PWD:/app"`, `sudo -u "$USER" id` and `docker run -e
-//     PORT="$PORT"` are refused although their expansions would stay
-//     benign.
+//     $IMG`). Ordinary dynamic uses pay the same price: `docker run -e
+//     PORT="$PORT"` is refused although its expansion would stay
+//     benign. A word-leading `~` is the one exception: tilde expansion
+//     yields a home path, never env text, so `-v ~/.npm:/root/.npm`
+//     reads as literal data.
+//   - systemd-run words must be judged as systemd decodes them: a
+//     property operand still holding a quote or a backslash AFTER the
+//     launch shell's own quote removal is refused on sight — systemd
+//     unquotes and C-unescapes property values, so
+//     `Environment=CODEX""_HOME=/o` and `Environment=CODEX\x5fHOME=/o`
+//     both land `CODEX_HOME` in the unit's environment even though the
+//     literal segment hides it. Refusing is simpler than re-implementing
+//     systemd's unquote+unescape.
 //   - An env-file spelling refuses on sight whatever follows:
 //     `--env-file`, compose's `env_file`, `--env-from-file` and systemd's
 //     `EnvironmentFile=` read a file the command line cannot prove, and a
@@ -55,13 +77,14 @@ import (
 //     leaf word like `build` or `history` is never promoted into
 //     shell-builtin dispatch.
 //
-// requireCommand is envCallMutatesAccountEnvironment's rule applied to the
-// launchers' denied spellings: at command position a protected-name word
-// refuses on sight, but as a hypothesis inside another command's argv
-// (`prog sudo CODEX_HOME=/other`) it refuses only once the line could
-// still reach a command word — the same reason `prog env
-// CODEX_HOME=/other` admits env's print mode. A dynamic word and an env
-// file refuse under either rule, like env's own unprovable-word scan.
+// requireCommand is envCallMutatesAccountEnvironment's rule applied to
+// the launchers' denied spellings: at command position a protected-name
+// word refuses on sight, but as a hypothesis inside another command's
+// argv (`prog sudo CODEX_HOME=/other`) it refuses only once the line
+// could still reach a command word — the same reason `prog env
+// CODEX_HOME=/other` admits env's print mode. A dynamic word, a
+// decode-carrying systemd word and an env file refuse under either rule,
+// like env's own unprovable-word scan.
 //
 // The trade-off is deliberate: a harmless `docker run --name -e img`
 // (which consumes `-e` as the container name) or `sudo nice
@@ -73,14 +96,16 @@ import (
 // construction, at the cost of refusing a few benign spellings.
 
 // unwrapEnvInjectionLauncher applies the lexical rule above to the words
-// after a launcher name. It returns the tail the caller judges — the
-// whole argv, every word proven literal — and whether the launcher's own
-// spellings already refuse.
-func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{}, requireCommand bool) ([]*syntax.Word, bool) {
+// after a launcher name. decodes marks the launchers that re-decode
+// quote/escape text in their operands (systemd-run and run0): for them a
+// literal word still carrying `"`, `'` or `\` is unverifiable. It returns
+// the tail the caller judges — the whole argv, every word proven
+// literal — and whether the launcher's own spellings already refuse.
+func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{}, decodes bool, requireCommand bool) ([]*syntax.Word, bool) {
 	denied := false
 	commandish := false
 	for index, word := range words {
-		literal, ok := literalShellWord(word)
+		literal, ok := launcherLiteralWord(word)
 		if !ok {
 			// Any dynamic word could expand into a protected
 			// assignment or env spelling the command line cannot
@@ -88,6 +113,14 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 			return nil, true
 		}
 		if launcherEnvFileSpelling(literal) {
+			return nil, true
+		}
+		if decodes && strings.ContainsAny(literal, "\"'\\") {
+			// systemd-run unquotes and C-unescapes property
+			// values, so `Environment=CODEX""_HOME=/o` and
+			// `Environment=CODEX\x5fHOME=/o` both land
+			// CODEX_HOME. A word still carrying quote or escape
+			// text cannot be judged by the raw-text cut.
 			return nil, true
 		}
 		if launcherWordDenied(literal, names) {
@@ -106,15 +139,15 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 }
 
 func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	return unwrapEnvInjectionLauncher(words, names, requireCommand)
+	return unwrapEnvInjectionLauncher(words, names, false, requireCommand)
 }
 
 func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	return unwrapEnvInjectionLauncher(words, names, requireCommand)
+	return unwrapEnvInjectionLauncher(words, names, true, requireCommand)
 }
 
 func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	tail, unsafe := unwrapEnvInjectionLauncher(words, names, requireCommand)
+	tail, unsafe := unwrapEnvInjectionLauncher(words, names, false, requireCommand)
 	if unsafe || len(tail) == 0 {
 		return nil, unsafe
 	}
@@ -132,28 +165,87 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 	return nil, false
 }
 
+// launcherLiteralWord renders a word to its literal text for the launcher
+// scan, admitting the one failure literalShellWord produces that cannot
+// hide env text: a word-leading `~`. Tilde expansion yields a home path,
+// never an assignment, so the word is re-judged with the leading tilde
+// replaced by a plain character — every other expansion (glob, brace,
+// $'…', a non-Lit part) still fails the walk exactly as before.
+func launcherLiteralWord(word *syntax.Word) (string, bool) {
+	if literal, ok := literalShellWord(word); ok {
+		return literal, true
+	}
+	if len(word.Parts) == 0 {
+		return "", false
+	}
+	first, ok := word.Parts[0].(*syntax.Lit)
+	if !ok || !strings.HasPrefix(first.Value, "~") {
+		return "", false
+	}
+	clone := *word
+	clone.Parts = slices.Clone(word.Parts)
+	lit := *first
+	lit.Value = "x" + first.Value[1:]
+	clone.Parts[0] = &lit
+	return literalShellWord(&clone)
+}
+
 // launcherWordDenied cuts a literal argument word on every `=` — after
-// leading dashes — and refuses when any segment contains a protected
-// name. Containment rather than equality is what makes one cut cover
-// every option spelling: `-eCODEX_HOME=x` reads `eCODEX_HOME`,
-// `--env=CODEX_HOME=x` reads `CODEX_HOME`, `-E=CODEX_HOME` reads
-// `CODEX_HOME`, and `property=Environment=CODEX_HOME=x` lands
-// `CODEX_HOME` as its own segment.
+// leading dashes — and refuses when any segment names a protected
+// variable. That one cut covers every option spelling:
+// `-eCODEX_HOME=x` reads `eCODEX_HOME`, `--env=CODEX_HOME=x` reads
+// `CODEX_HOME`, `-E=CODEX_HOME` reads `CODEX_HOME`, and
+// `property=Environment=CODEX_HOME=x` lands `CODEX_HOME` as its own
+// segment.
 func launcherWordDenied(literal string, names map[string]struct{}) bool {
 	return launcherSegmentsDenied(strings.TrimLeft(literal, "-"), names)
 }
 
 // launcherSegmentsDenied reports whether any `=`-separated segment of
-// text contains a protected name.
+// text names a protected variable at an identifier boundary.
 func launcherSegmentsDenied(text string, names map[string]struct{}) bool {
 	for _, segment := range strings.Split(text, "=") {
 		for name := range names {
-			if strings.Contains(segment, name) {
+			if launcherSegmentNames(segment, name) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// launcherSegmentNames reports whether segment contains name where the
+// match starts at an identifier boundary: the segment's start, after a
+// character outside [A-Za-z0-9_], or after a leading letters-only
+// short-option cluster (`eCODEX_HOME`, `teENV` — the cluster is option
+// text, not a name prefix). `NODE_ENV` and `RAILS_ENV` embed `ENV` after
+// `_`, which is not a boundary, so the ordinary spellings stay admitted.
+func launcherSegmentNames(segment, name string) bool {
+	for i := 0; i+len(name) <= len(segment); i++ {
+		if segment[i:i+len(name)] != name {
+			continue
+		}
+		if i == 0 || !isEnvNameByte(segment[i-1]) || lettersOnly(segment[:i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isEnvNameByte(c byte) bool {
+	return c == '_' ||
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9')
+}
+
+func lettersOnly(text string) bool {
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return false
+		}
+	}
+	return len(text) > 0
 }
 
 // launcherEnvFileSpelling reports whether a literal argument word names
@@ -189,7 +281,7 @@ func launcherSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo
 	switch {
 	case isAccountCommandName(words[0], "sudo"):
 		tail, unsafe = unwrapSudo(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "docker"):
+	case isAccountCommandName(words[0], "docker") || isAccountCommandName(words[0], "docker-compose"):
 		tail, unsafe = unwrapDocker(words[1:], names, memo, true)
 	default:
 		tail, unsafe = unwrapSystemdRun(words[1:], names, memo, true)

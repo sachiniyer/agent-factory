@@ -455,13 +455,20 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "docker"):
+	case isAccountCommandName(words[0], "docker") ||
+		isAccountCommandName(words[0], "docker-compose"):
+		// docker-compose is the standalone binary shipping the same
+		// compose grammar (run/exec -e, --env-file) — the rule is keyed
+		// by the grammar, so the alias lands the same check.
 		var unsafe bool
 		words, unsafe = unwrapDocker(words[1:], names, memo, false)
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "systemd-run"):
+	case isAccountCommandName(words[0], "systemd-run") ||
+		isAccountCommandName(words[0], "run0"):
+		// run0 is systemd-run's argv[0] sudo-mode (systemd 256+) — the
+		// same grammar under a second name.
 		var unsafe bool
 		words, unsafe = unwrapSystemdRun(words[1:], names, memo, false)
 		if unsafe {
@@ -574,7 +581,8 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		return 1, envCallMutatesAccountEnvironment(words[1:], names, true, memo)
 	}
 	if isAccountCommandName(word, "sudo") || isAccountCommandName(word, "docker") ||
-		isAccountCommandName(word, "systemd-run") {
+		isAccountCommandName(word, "docker-compose") || isAccountCommandName(word, "systemd-run") ||
+		isAccountCommandName(word, "run0") {
 		// These launchers inject environment through env spellings this
 		// tail scan reads as inert words (sudo's positional NAME=value,
 		// docker's -e/--env and env files, systemd-run's --setenv and

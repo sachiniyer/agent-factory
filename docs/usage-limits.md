@@ -218,25 +218,33 @@ wrapper script (a `program_overrides` target `af` does not model) has internals
 the command line cannot see, so what it does with the account environment is
 outside what `af` can verify.
 
-Three launchers get a deliberately conservative lexical check rather than the
-passthrough rule, because they inject environment into their child and refusing
-them outright would block ordinary use — `sudo`, `docker` (including `docker
-compose`), and `systemd-run`. For these launchers `af` over-refuses rather than
-under-refuses: every argument word of the launcher's command line is scanned,
-and the command is refused whenever any word could assign or name a protected
-variable — after stripping leading dashes and any `-e`/`-E`/`--env`/`--setenv`
-prefix or `=` joiner, a word that contains `<PROTECTED>=` or equals a protected
-name refuses the command. That covers every injection spelling the launchers
-accept (`sudo CODEX_HOME=/other codex`, `docker run -e CODEX_HOME=/other
-busybox codex`, `systemd-run --setenv CODEX_HOME=/other codex`, and the
-`Environment=`/`UnsetEnvironment=`/`PassEnvironment=` forms of
-`systemd-run -p`) without modelling each launcher's option grammar. Commands
-whose arguments never mention a protected name run as before — `docker compose
+Three launcher grammars get a deliberately conservative lexical check rather
+than the passthrough rule, because they inject environment into their child
+and refusing them outright would block ordinary use — `sudo`, `docker`
+(including `docker compose` and the standalone `docker-compose` binary), and
+`systemd-run` (including its `run0` argv[0] alias). The rule is keyed by the
+grammar, so every name it ships under gets the same check. For these launchers
+`af` over-refuses rather than under-refuses: every argument word of the
+launcher's command line is scanned, and the command is refused whenever any
+word could assign or name a protected variable — after stripping leading
+dashes and any `-e`/`-E`/`--env`/`--setenv` prefix or `=` joiner, a word that
+contains `<PROTECTED>=` or names a protected variable at an identifier
+boundary refuses the command. The boundary means `ENV` embedded after `_`
+does not match, so `docker run -e NODE_ENV=production app` and `sudo
+RAILS_ENV=production …` run — while `-eENV=`, `-ECODEX_HOME=` and
+`PassEnvironment=CODEX_HOME` still refuse. The rule covers every injection
+spelling the launchers accept (`sudo CODEX_HOME=/other codex`, `docker run -e
+CODEX_HOME=/other busybox codex`, `systemd-run --setenv CODEX_HOME=/other
+codex`, and the `Environment=`/`UnsetEnvironment=`/`PassEnvironment=` forms of
+`systemd-run -p`, getopt abbreviations like `--prop=` included) without
+modelling each launcher's option grammar. Commands whose arguments never
+mention a protected name run as before — `docker compose up`, `docker-compose
 up`, `docker build .`, `docker run --rm alpine echo hi`, `sudo apt-get install
--y jq`, `systemd-run --user --scope make`. The trade-off is deliberate: a
-harmless mention in a non-assigning position, such as `docker run alpine echo
-CODEX_HOME=x`, is refused too, because no parse of the visible command line can
-prove the word will not reach the child's environment.
+-y jq`, `systemd-run --user --scope make`, `run0 --user --scope make`. The
+trade-off is deliberate: a harmless mention in a non-assigning position, such
+as `docker run alpine echo CODEX_HOME=x`, is refused too, because no parse of
+the visible command line can prove the word will not reach the child's
+environment.
 
 - **Env files are unverifiable** — `--env-file`, `docker compose`'s `env_file`
   and `--env-from-file` spellings, and `systemd-run`'s `EnvironmentFile=` all
@@ -250,7 +258,14 @@ prove the word will not reach the child's environment.
   sits (`sudo "$CMD" -i codex`, `docker run $IMG`, `docker run -e "$V"`).
   Ordinary dynamic uses pay the same price: `docker run -v "$PWD:/app"` and
   `sudo -u "$USER" id` are refused although their expansions would stay
-  benign.
+  benign. A word-leading `~` is the one exception: it expands only to a home
+  path, so `docker run -v ~/.npm:/root/.npm` reads as ordinary data.
+- **systemd-run words are judged as systemd decodes them** — systemd
+  unquotes and C-unescapes property values, so a `systemd-run`/`run0`
+  argument still carrying a `"`, `'` or `\` after the shell's own quote
+  removal is refused on sight: `-p 'Environment=CODEX""_HOME=/o'` and
+  `-p 'Environment=CODEX\x5fHOME=/o'` both land `CODEX_HOME` in the unit's
+  environment even though the raw text hides it.
 
 A launcher buried inside another command's argv (`nohup sudo
 CODEX_HOME=/other codex`, `docker build env CODEX_HOME=/other codex`) is

@@ -106,8 +106,10 @@ var accountChildTailSuffixVerdictNames = map[string]struct{}{
 	// NAME=value, docker's -e/--env and env files, systemd-run's --setenv and
 	// Environment= — are visible only from the launcher's own suffix, so a
 	// buried form under a modeled wrapper's tail judges here the same way a
-	// buried strace does.
-	"sudo": {}, "docker": {}, "systemd-run": {},
+	// buried strace does. docker-compose ships docker's compose grammar and
+	// run0 ships systemd-run's, so both aliases judge identically.
+	"sudo": {}, "docker": {}, "docker-compose": {}, "systemd-run": {},
+	"run0": {},
 	// Shells KnownShellName recognizes. The opaque-head scan flags a buried
 	// shell only while words follow it, so a bare trailing shell — which a
 	// shadowed wrapper can shift to and exec — is judged at its own suffix,
