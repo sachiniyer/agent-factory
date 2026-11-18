@@ -30,8 +30,9 @@ const (
 	// here too; this is the common delivered-but-unverified resolution.
 	StagedDraftSubmitted
 	// StagedDraftStaged means the bound evidence sits in the live composer —
-	// at or below the pane's last composer-glyph row — so the draft the send
-	// pasted is still unsubmitted in an otherwise readable composer.
+	// the composer region anchored at the pane's last composer-glyph row —
+	// so the draft the send pasted is still unsubmitted in an otherwise
+	// readable composer.
 	StagedDraftStaged
 )
 
@@ -62,7 +63,8 @@ type stagedDraftEvidence struct {
 // same ones stagedReading trusted at the Enter boundary.
 //
 // The check is positional, never textual: evidence above the last composer-
-// glyph row is a submitted echo, evidence inside the composer region is the
+// glyph row is a submitted echo, evidence inside the composer region — the
+// same region boundEvidence searched when the send bound it — is the
 // still-staged draft, and evidence anywhere else — or a frame with no
 // composer at all — is no claim at all. The read runs outside inputMu; a
 // recheck concurrent with an in-flight send sees at worst a one-tick skew
@@ -83,20 +85,26 @@ func (t *TmuxSession) BoundDraftStillStaged() (StagedDraftRead, string) {
 // stagedDraftReading classifies one frame against stashed evidence. The
 // anchor is the pane's LAST composer-glyph row — the live composer repaints
 // its own glyph beneath every transcript echo — so "above the anchor" is
-// submitted, "at or below" is the live draft. The composer check runs first:
-// a send whose echo reached the transcript while its draft also sits in the
-// composer is still staged, and the flag is the honest answer for it.
+// submitted and the composer region it opens is the live draft. The composer
+// check runs first: a send whose echo reached the transcript while its draft
+// also sits in the composer is still staged, and the flag is the honest
+// answer for it.
 func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, string) {
 	rows := paneGridRows(pane)
 	anchor := lastComposerGlyphRow(rows)
 	if anchor < 0 {
 		return StagedDraftUnreadable, "no composer-glyph row is visible"
 	}
-	lower := normalizeDelivery(strings.Join(rows[anchor:], ""))
+	// The staged check searches the composer REGION — the rows boundEvidence
+	// itself searched — never every row below the glyph: the status/footer
+	// line under the composer is not the draft, and a bound tail that appears
+	// only there ("bypass permissions on" under a short "on" send) must not
+	// read staged (Codex #7547).
+	region := normalizeDelivery(strings.Join(composerRegion(rows, anchor), ""))
 	switch {
-	case ev.tail != "" && strings.Contains(lower, ev.tail):
+	case ev.tail != "" && strings.Contains(region, ev.tail):
 		return StagedDraftStaged, "the send's bound text is still in the live composer"
-	case ev.chip != "" && strings.Contains(lower, ev.chip):
+	case ev.chip != "" && strings.Contains(region, ev.chip):
 		return StagedDraftStaged, "the send's bound paste chip is still in the live composer"
 	}
 	upper := normalizeDelivery(strings.Join(rows[:anchor], ""))

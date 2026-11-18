@@ -69,6 +69,12 @@ const (
 // local tmux runtime implements it; off-box runtimes cannot read a sandbox's
 // composer and do not — the daemon's staged-draft watch then never arms for
 // them, which is the honest answer the capability exists to give.
+//
+// The call runs under the instance's observation-settlement fence on the
+// daemon's status poll: an implementation must be bounded (the local read is
+// an atomic load plus one capture-pane subprocess) and must never acquire a
+// session-operation lock — the send path holds those while it waits on this
+// same fence.
 type StagedDraftChecker interface {
 	BoundDraftStillStaged() (StagedDraftRead, string)
 }

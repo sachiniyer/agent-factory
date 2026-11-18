@@ -81,6 +81,17 @@ func TestStagedDraftReading(t *testing.T) {
 			want: StagedDraftGone,
 		},
 		{
+			// The staged check searches the composer region, never every
+			// row below the glyph: a bound tail that appears only in the
+			// status/footer line under the composer is not the draft
+			// (Codex #7547 — a short "on" send must not alias the footer's
+			// "bypass permissions on").
+			name: "a bound tail matching only the footer is gone",
+			pane: claudeInsertPane("❯"),
+			ev:   stagedDraftEvidence{tail: normalizeDelivery("bypass permissions")},
+			want: StagedDraftGone,
+		},
+		{
 			// A user's own typed draft is never flagged as af's: it
 			// carries none of the bound evidence, so the send's watch
 			// ends rather than matching arbitrary composer contents.

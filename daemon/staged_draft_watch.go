@@ -21,14 +21,29 @@ var stagedDraftSettleWindow = 5 * time.Minute
 // stagedDraftWatch tracks one send's bound evidence across polls, keyed by
 // stableSessionKey like the send re-verification watches beside it. attemptAt
 // names the send the evidence belongs to — a newer send supersedes the watch —
-// and since is the first tick the Ready+staged condition held. flagged is the
-// latch: once the attention flag is raised the watch keeps existing only so a
-// later send re-arms it; it never captures or re-raises for the same send, so
-// a user's own dismissal of the flag is honored.
+// and since is the first tick the Ready+staged condition held.
+//
+// closed is the "never captured for again" latch, set by EITHER terminal
+// outcome: the flag landed, or the evidence resolved (a transcript echo above
+// the composer, gone, or never bound). A closed entry is kept, not deleted,
+// precisely so the NEXT Ready+sent-unverified tick for the same attempt skips
+// the capture — a delivered send's durable verdict stays sent-unverified, and
+// without this memory every idle poll would re-capture it forever (#7545
+// review). A newer send's attemptAt mismatch re-arms past it; the sweep drops
+// it when the session dies.
+//
+// due and dueWhy are the deferred flag (#7545 review): the feed runs under the
+// instance's observation-settlement fence, where taking the session op lock is
+// an ABBA deadlock with sendPromptGuarded — that path holds the op lock while
+// it waits on this same fence for automated sends. The feed therefore only
+// RECORDS that the flag is due; the poll raises it after the fence releases,
+// under the opLock→repoStartLock order every other attention write uses.
 type stagedDraftWatch struct {
 	attemptAt time.Time
 	since     time.Time
-	flagged   bool
+	closed    bool
+	due       bool
+	dueWhy    string
 }
 
 // noteStagedDraftEvidence feeds one poll tick through the session's
@@ -37,21 +52,25 @@ type stagedDraftWatch struct {
 // unprovable and reports sent-unverified — and until now nothing noticed when
 // that report left a bound draft sitting in an idle composer indefinitely.
 //
+// It is called INSIDE the instance's observation-settlement fence and so must
+// never acquire the session op lock, the repo start lock, or any lock a send
+// takes before that fence — sendPromptGuarded holds the op lock while it waits
+// on the fence for automated sends, which made an under-fence flag raise an
+// ABBA deadlock (#7545 review). Everything this does under the fence is a leaf
+// lock or lock-free: pausedMu (which the send path never takes), the instance's
+// own field reads, and the checker's read, which spends an atomic load and one
+// bounded capture-pane subprocess — no session mutex. The flag it owes is only
+// RECORDED on the watch; raiseDueStagedDraftFlag lands it after the fence
+// releases.
+//
 // The gate runs BEFORE any pane read, in cost order: only a session the poll
 // itself just settled Ready, whose recorded delivery still says
 // sent-unverified, can hold an unsubmitted bound draft. Ready is also the
 // mid-turn exclusion — resolveIdleLiveness holds Running while the pane shows
 // turn chrome, so text queued behind a working agent (#4622's shape) never
-// reaches the capture below. The recheck itself is the runtime's: it spends
-// one bounded capture only when the send stashed bound evidence, and the
-// verdict ends the watch the moment the evidence is seen submitted (a
-// transcript echo above the composer) or gone — the common
-// delivered-but-unverified case costs a bounded number of captures and then
-// none. Nothing is captured after the flag latches.
-//
-// A blind tick — unreadable pane, failed capture — neither resets the sustain
-// nor resolves the watch: the draft was last proven staged, and the flag
-// fires only on a tick whose verdict IS staged.
+// reaches the capture below. A blind tick — unreadable pane, failed capture —
+// neither resets the sustain nor resolves the watch: the draft was last proven
+// staged, and the flag is marked due only on a tick whose verdict IS staged.
 func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.Instance, as session.AgentServer) {
 	attemptAt, status := instance.LastPromptDelivery()
 	if instance.GetLiveness() != session.LiveReady ||
@@ -66,20 +85,20 @@ func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.
 		m.dropStagedDraftWatch(key)
 		return
 	}
-	// The latch check precedes the capture: a send already flagged costs no
-	// further pane reads — the entry survives only to re-arm if a newer send
-	// supersedes it.
+	// The closed check precedes the capture: an attempt whose flag already
+	// landed — or whose evidence already resolved — is never captured for
+	// again. The entry survives only to re-arm if a newer send supersedes it.
 	m.pausedMu.Lock()
 	entry := m.stagedDraftWatches[key]
-	latched := entry != nil && entry.flagged && entry.attemptAt.Equal(attemptAt)
+	settled := entry != nil && entry.closed && entry.attemptAt.Equal(attemptAt)
 	m.pausedMu.Unlock()
-	if latched {
+	if settled {
 		return
 	}
 	read, why := checker.BoundDraftStillStaged()
 	now := nowFunc()
-	flag := false
 	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
 	switch read {
 	case session.StagedDraftStaged:
 		entry = m.stagedDraftWatches[key]
@@ -87,37 +106,112 @@ func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.
 			entry = &stagedDraftWatch{attemptAt: attemptAt, since: now}
 			m.stagedDraftWatches[key] = entry
 		}
-		if !entry.flagged && now.Sub(entry.since) >= stagedDraftSettleWindow {
-			entry.flagged = true
-			flag = true
+		if !entry.closed && now.Sub(entry.since) >= stagedDraftSettleWindow {
+			entry.due = true
+			entry.dueWhy = why
 		}
 	case session.StagedDraftUnreadable:
 		// See the doc: a blind read keeps an armed watch and its sustain.
 	default:
 		// StagedDraftNoEvidence, StagedDraftGone, StagedDraftSubmitted: this
-		// send's evidence resolved — the watch ends here and this attempt is
-		// never captured for again.
-		delete(m.stagedDraftWatches, key)
+		// send's evidence resolved. Close the entry rather than deleting it —
+		// the recorded verdict stays sent-unverified, so without the memory
+		// every idle poll would re-ask the pane (#7545 review).
+		entry = m.stagedDraftWatches[key]
+		if entry == nil || !entry.attemptAt.Equal(attemptAt) {
+			entry = &stagedDraftWatch{attemptAt: attemptAt}
+			m.stagedDraftWatches[key] = entry
+		}
+		entry.closed = true
+		entry.due = false
+		entry.dueWhy = ""
+	}
+}
+
+// raiseDueStagedDraftFlag lands the attention flag a poll tick recorded while
+// it held the observation-settlement fence. It runs AFTER that fence releases
+// (the defer pair in refreshInstanceStatus orders it: registered before the
+// release, run after it), where taking the session op lock no longer deadlocks
+// an automated send waiting on the fence (#7545 review).
+//
+// The wait for the op lock can outlive everything the under-fence tick saw —
+// a sendPromptGuarded holding it may complete a whole delivery first — so the
+// condition is re-validated under the lock before the flag is written: same
+// watch, same attemptAt, still due and unclosed; the recorded delivery still
+// sent-unverified for that attempt; the session still Ready; the attention
+// row still free. Anything that moved simply clears the due mark — a tick
+// that still qualifies re-marks it.
+func (m *Manager) raiseDueStagedDraftFlag(repoID, key string, instance *session.Instance) {
+	m.pausedMu.Lock()
+	entry := m.stagedDraftWatches[key]
+	if entry == nil || !entry.due {
+		m.pausedMu.Unlock()
+		return
+	}
+	attemptAt, dueWhy := entry.attemptAt, entry.dueWhy
+	m.pausedMu.Unlock()
+
+	// Same opLock→repoStartLock ordering as SetAttention/clearAttentionNow:
+	// the whole-row persist below must not interleave with a handoff's
+	// provisional swap state.
+	opLock := m.opLockFor(daemonInstanceKey(repoID, instance.Title))
+	opLock.Lock()
+	defer opLock.Unlock()
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+
+	m.pausedMu.Lock()
+	entry = m.stagedDraftWatches[key]
+	stillDue := entry != nil && entry.due && !entry.closed && entry.attemptAt.Equal(attemptAt)
+	m.pausedMu.Unlock()
+	nowAttempt, status := instance.LastPromptDelivery()
+	if !stillDue || status != session.PromptSentUnverified || !nowAttempt.Equal(attemptAt) ||
+		instance.GetLiveness() != session.LiveReady || instance.Attention() != nil {
+		m.clearStagedDraftDue(key, attemptAt)
+		return
+	}
+	if !m.raiseStagedDraftAttention(repoID, instance, attemptAt, dueWhy) {
+		// The raise was refused — an agent's own request landed on the row
+		// while we waited, or the persist failed. Clear the due mark so the
+		// next Ready+staged tick re-arms it rather than losing the flag.
+		m.clearStagedDraftDue(key, attemptAt)
+		return
+	}
+	// The flag latched: this send never needs another capture or retry.
+	m.pausedMu.Lock()
+	if e := m.stagedDraftWatches[key]; e != nil && e.attemptAt.Equal(attemptAt) {
+		e.closed = true
+		e.due = false
+		e.dueWhy = ""
 	}
 	m.pausedMu.Unlock()
-	if flag && !m.raiseStagedDraftAttention(repoID, instance, attemptAt, why) {
-		// The raise was refused — an agent's own request holds the row, the
-		// session left a live state under us, or the persist failed. Unlatch so
-		// the next Ready+staged tick retries rather than losing the flag.
-		m.pausedMu.Lock()
-		if e := m.stagedDraftWatches[key]; e != nil && e.attemptAt.Equal(attemptAt) {
-			e.flagged = false
-		}
-		m.pausedMu.Unlock()
+}
+
+// clearStagedDraftDue consumes a due mark whose flush could not land the flag
+// — the condition it re-validates moved while the op lock was waited on, or
+// the raise itself was refused. The next qualifying tick re-marks it, so a
+// refused flag retries on the poll's own cadence.
+func (m *Manager) clearStagedDraftDue(key string, attemptAt time.Time) {
+	m.pausedMu.Lock()
+	if e := m.stagedDraftWatches[key]; e != nil && e.attemptAt.Equal(attemptAt) {
+		e.due = false
+		e.dueWhy = ""
 	}
+	m.pausedMu.Unlock()
 }
 
 // dropStagedDraftWatch ends a send's watch — the gate no longer holds (the
 // session left Ready, a newer send moved the verdict, or the send was never
-// armable). Cheap; called on the gate's fast exit paths.
+// armable). A closed entry is kept: it is the memory that the same attempt
+// must never be captured for again, and a Ready→Running→Ready flap must not
+// re-pay the read it resolved (#7545 review). Cheap; called on the gate's
+// fast exit paths.
 func (m *Manager) dropStagedDraftWatch(key string) {
 	m.pausedMu.Lock()
-	delete(m.stagedDraftWatches, key)
+	if e := m.stagedDraftWatches[key]; e == nil || !e.closed {
+		delete(m.stagedDraftWatches, key)
+	}
 	m.pausedMu.Unlock()
 }
 
@@ -162,7 +256,10 @@ func stagedDraftAttentionReason(attemptAt time.Time) string {
 // raiseStagedDraftAttention sets the session's attention request for a send
 // whose bound draft has outlived the settle window in an idle composer, and
 // persists and publishes it the way every other attention write does. It
-// reports whether the flag actually landed.
+// reports whether the flag actually landed. Callers hold the session's op
+// lock and repo start lock — the ordering daemon/attention.go's own writes
+// use — and this must never run under the observation-settlement fence, where
+// the same op lock is an ABBA deadlock against automated sends (#7545 review).
 //
 // The flag is the whole resolution path by design (#7545, flag-only): the
 // recheck never presses Enter. #4200's remedy Enter is safe only inside its
@@ -175,19 +272,10 @@ func stagedDraftAttentionReason(attemptAt time.Time) string {
 // the two safe resolutions: attach and press Enter to submit the staged
 // draft, or send-prompt, whose pre-clear replaces it.
 func (m *Manager) raiseStagedDraftAttention(repoID string, instance *session.Instance, attemptAt time.Time, why string) bool {
-	// Same opLock→repoStartLock ordering as SetAttention/clearAttentionNow:
-	// the whole-row persist below must not interleave with a handoff's
-	// provisional swap state.
-	opLock := m.opLockFor(daemonInstanceKey(repoID, instance.Title))
-	opLock.Lock()
-	defer opLock.Unlock()
-	repoStartLock := m.startLockForRepo(repoID)
-	repoStartLock.Lock()
-	defer repoStartLock.Unlock()
 	// An attention request already on the row — the agent's own question —
 	// outranks the flag: overwriting its reason would lose what the agent
 	// asked, and the row is already needs-you either way. Refusing leaves the
-	// watch unlatched so a later tick raises ours once the row is free.
+	// watch unclosed so a later tick raises ours once the row is free.
 	if instance.Attention() != nil {
 		return false
 	}

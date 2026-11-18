@@ -701,6 +701,16 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// observation lock. It retries transport I/O retired before return; the
 	// generation below fences daemon-owned side effects if replacement lands after
 	// that final transport check, while the epoch fences Instance mutations.
+	// The staged-draft flag (#7545) MUST be raised after the observation fence
+	// releases: the raise takes the session op lock, the same lock
+	// sendPromptGuarded holds while it waits on this fence for automated sends —
+	// under the fence that acquisition is an ABBA deadlock (Codex #7547).
+	// noteStagedDraftEvidence below therefore only RECORDS a due flag, and this
+	// defer — registered before the fence's own release defer, so LIFO runs it
+	// after release — lands it under the opLock→repoStartLock order every other
+	// attention write uses. On every early return before the fence is taken the
+	// mark simply carries to the next tick.
+	defer func() { m.raiseDueStagedDraftFlag(repoID, key, instance) }()
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
 	defer releaseObservationSettlement()
 	// Same request-start bound as the paused-path feed below: the pane is
