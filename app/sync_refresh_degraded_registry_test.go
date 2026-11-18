@@ -110,7 +110,7 @@ func TestSyncRefreshDegradedRegistryKeepsRegistryRows(t *testing.T) {
 	// install would have wiped — the merge reads the shadow stage 2 just
 	// preserved. Without the fix stage 2 overwrote that shadow, so stage 3
 	// lost the row for as long as the registry stayed unreadable.
-	h.refreshSidebarProjectsFromSnapshot(nil, nil, errors.New("daemon unavailable"))
+	h.refreshSidebarProjectsFromSnapshot(nil, nil, errors.New("daemon unavailable"), h.projectMutationSeq)
 	rows = rowsByRoot()
 	require.Contains(t, rows, repoB,
 		"the failed-snapshot poll merges from a shadow that still carries the registered row")

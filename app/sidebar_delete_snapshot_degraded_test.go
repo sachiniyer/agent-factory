@@ -141,7 +141,7 @@ func TestSidebarDeleteRefusesAfterFailedProjectRefresh(t *testing.T) {
 // ended since. A confirmation built from them states a count nobody observed.
 func TestSidebarDeleteRefusesWhileProjectsPollFails(t *testing.T) {
 	h := newSidebarDeleteHome(t)
-	h.refreshSidebarProjectsFromSnapshot(nil, nil, errors.New("daemon unavailable"))
+	h.refreshSidebarProjectsFromSnapshot(nil, nil, errors.New("daemon unavailable"), h.projectMutationSeq)
 
 	assertSidebarDeleteRefused(t, pressSidebarDelete(t, h))
 }
@@ -164,8 +164,8 @@ func TestSidebarDeleteRefusesAfterFailedRebindConflictRefresh(t *testing.T) {
 // confirmation with the honest split — the refusal never outlives the outage.
 func TestSidebarDeleteProceedsOnceThePollRecovers(t *testing.T) {
 	h := newSidebarDeleteHome(t)
-	h.refreshSidebarProjectsFromSnapshot(nil, nil, errors.New("daemon unavailable"))
-	h.refreshSidebarProjectsFromSnapshot(sidebarDeleteSnapshot(), nil, nil)
+	h.refreshSidebarProjectsFromSnapshot(nil, nil, errors.New("daemon unavailable"), h.projectMutationSeq)
+	h.refreshSidebarProjectsFromSnapshot(sidebarDeleteSnapshot(), nil, nil, h.projectMutationSeq)
 
 	h = pressSidebarDelete(t, h)
 	require.Equal(t, stateConfirm, h.state,

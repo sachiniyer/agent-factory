@@ -417,8 +417,23 @@ type home struct {
 	// only — a definitive refusal or an unverifiable outcome proves nothing —
 	// and cleared when a registry read lands clean and the union states the
 	// truth itself.
-	goneProjectRepoIDs     map[string]bool
-	goneProjectRegistryIDs map[string]bool
+	//
+	// The delete side stores the projectMutationSeq at which the tombstone was
+	// recorded so retirement can tell an observation made after the delete
+	// from an in-flight poll captured before it; the rebind side stores the
+	// row's repo id so a clean read can re-attach the record's provenance to a
+	// stripped session row the recovery would otherwise coalesce to the stale
+	// root (#7522 review).
+	goneProjectRepoIDs     map[string]uint64
+	goneProjectRegistryIDs map[string]string
+	// projectMutationSeq counts the project-registry mutations THIS session
+	// confirmed (deletes, rebinds). A cross-repo snapshot poll captures it
+	// into snapshotFetchedMsg.mutationSeq when its fetch is created — the
+	// same read-start bookkeeping remoteCache.seq applies to the remote task
+	// channel — so a poll that began before a delete cannot retire the
+	// delete's tombstone with the deleted repo's pre-delete sessions (#7522
+	// review).
+	projectMutationSeq uint64
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay

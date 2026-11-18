@@ -72,29 +72,38 @@ func registryBackedRows(rows []overlay.Project) []overlay.Project {
 
 // noteProjectDeleted records that this session's own completed mutation
 // established repoID's deletion — the whole row is gone, live session counts
-// included (a delete archives the project's sessions with it).
+// included (a delete archives the project's sessions with it). The tombstone
+// carries the mutation's sequence so a poll started BEFORE the delete —
+// which can still carry the repo's pre-delete sessions — cannot masquerade
+// as a revival (#7522 review).
 func (m *home) noteProjectDeleted(repoID string) {
 	if repoID == "" {
 		return
 	}
+	m.projectMutationSeq++
 	if m.goneProjectRepoIDs == nil {
-		m.goneProjectRepoIDs = map[string]bool{}
+		m.goneProjectRepoIDs = map[string]uint64{}
 	}
-	m.goneProjectRepoIDs[repoID] = true
+	m.goneProjectRepoIDs[repoID] = m.projectMutationSeq
 }
 
 // noteProjectRebound records that this session's own completed mutation moved
 // the registry record id — the row sheds its stale registry identity (the old
 // root and checkout id), while a row still carrying live session counts keeps
 // them as a session-only row: the move touched the registration, not the repo.
-func (m *home) noteProjectRebound(registryID string) {
+// The row's repoID is retained so a later CLEAN registry read can re-attach
+// the record's provenance to a row an earlier degraded apply already
+// stripped, letting the merge replace it wholesale instead of coalescing the
+// recovered registration onto the stale root (#7522 review).
+func (m *home) noteProjectRebound(registryID, repoID string) {
 	if registryID == "" {
 		return
 	}
+	m.projectMutationSeq++
 	if m.goneProjectRegistryIDs == nil {
-		m.goneProjectRegistryIDs = map[string]bool{}
+		m.goneProjectRegistryIDs = map[string]string{}
 	}
-	m.goneProjectRegistryIDs[registryID] = true
+	m.goneProjectRegistryIDs[registryID] = repoID
 }
 
 // clearGoneProjectRows drops the recorded absences a clean registry read
@@ -115,15 +124,63 @@ func (m *home) clearGoneProjectRows() {
 // merge otherwise keeps. Retiring it the moment fresh session data
 // establishes live work keeps the revived row visible through a later
 // snapshot hiccup (#7522 review).
-func (m *home) retireGoneProjectRowsForLiveSessions(projects []overlay.Project) {
+//
+// observedAtSeq is the projectMutationSeq the poll carrying these rows was
+// created at: it must cover the tombstone's own sequence, or the snapshot's
+// read began BEFORE the deletion and the "live sessions" it reports are the
+// deleted repo's former ones — a pre-delete observation cannot masquerade as
+// a revival (#7522 review).
+func (m *home) retireGoneProjectRowsForLiveSessions(projects []overlay.Project, observedAtSeq uint64) {
 	if len(m.goneProjectRepoIDs) == 0 {
 		return
 	}
 	for _, r := range projects {
-		if r.RepoID != "" && r.SessionCount > 0 && m.goneProjectRepoIDs[r.RepoID] {
+		if r.RepoID == "" || r.SessionCount == 0 {
+			continue
+		}
+		if seq, ok := m.goneProjectRepoIDs[r.RepoID]; ok && observedAtSeq >= seq {
 			delete(m.goneProjectRepoIDs, r.RepoID)
 		}
 	}
+}
+
+// reconcileGoneRebindRows re-attaches a rebound record's provenance to a row
+// an earlier degraded apply already stripped. The strip leaves a session-only
+// row indistinguishable from ordinary session rows, so when the registry then
+// recovers — the record's CURRENT binding in `projects` — the merge would
+// coalesce the registration onto the stale row without replacing its
+// navigable Root. Restoring the tombstoned RegistryID first lets the merge's
+// same-record path replace the row wholesale: fresh root, checkout id, and
+// identity, with the row's live counts grafted back (#7522 review). Runs only
+// under a healthy read (`projects` is authoritative for the record's
+// presence), and only for a record the fresh set still lists.
+func (m *home) reconcileGoneRebindRows(old []overlay.Project, projects []overlay.Project) []overlay.Project {
+	if len(m.goneProjectRegistryIDs) == 0 {
+		return old
+	}
+	freshRegistryIDs := make(map[string]bool, len(projects))
+	for _, row := range projects {
+		if row.RegistryID != "" {
+			freshRegistryIDs[row.RegistryID] = true
+		}
+	}
+	out := make([]overlay.Project, len(old))
+	copy(out, old)
+	for registryID, repoID := range m.goneProjectRegistryIDs {
+		if !freshRegistryIDs[registryID] {
+			continue
+		}
+		for i := range out {
+			if out[i].RegistryID == "" && out[i].RepoID == repoID {
+				// One row claims the provenance — two stripped session rows
+				// for the repo would otherwise each replace the same fresh
+				// row and duplicate it.
+				out[i].RegistryID = registryID
+				break
+			}
+		}
+	}
+	return out
 }
 
 // dropSessionGoneRows removes from a preserved row set the rows THIS session
@@ -152,17 +209,19 @@ func (m *home) dropSessionGoneRows(old []overlay.Project, registryDegraded bool)
 	}
 	kept := make([]overlay.Project, 0, len(old))
 	for _, row := range old {
-		if m.goneProjectRepoIDs[row.RepoID] {
+		if _, gone := m.goneProjectRepoIDs[row.RepoID]; gone {
 			continue
 		}
-		if registryDegraded && row.RegistryID != "" && m.goneProjectRegistryIDs[row.RegistryID] {
-			if row.SessionCount == 0 {
-				continue
+		if registryDegraded && row.RegistryID != "" {
+			if _, gone := m.goneProjectRegistryIDs[row.RegistryID]; gone {
+				if row.SessionCount == 0 {
+					continue
+				}
+				row.RegistryID = ""
+				row.RegistryRoot = ""
+				row.RegistryCheckoutID = ""
+				row.MissingPath = false
 			}
-			row.RegistryID = ""
-			row.RegistryRoot = ""
-			row.RegistryCheckoutID = ""
-			row.MissingPath = false
 		}
 		kept = append(kept, row)
 	}

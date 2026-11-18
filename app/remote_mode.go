@@ -163,6 +163,26 @@ func (c *remoteCache) noteTaskRemoved(k taskRowKey) {
 // poll will read.
 func (c *remoteCache) noteTaskMutationUncertain() { c.seq++ }
 
+// noteProjectRemoved records a project delete the daemon acknowledged: the
+// registry record's repo id. remoteCache.projects is the last-good list every
+// DEGRADED registry poll re-emits into the incoming rows — a record left there
+// after a confirmed delete would keep re-entering the Projects section for the
+// life of the outage (#7522 review). Filtering by the reconciled id matches
+// the identity buildRemoteProjectList rows carry.
+func (c *remoteCache) noteProjectRemoved(repoID string) {
+	if repoID == "" {
+		return
+	}
+	next := make([]config.Project, 0, len(c.projects))
+	for _, p := range c.projects {
+		if config.ReconciledRepoIDForProject(p) == repoID {
+			continue
+		}
+		next = append(next, p)
+	}
+	c.projects = next
+}
+
 // fetchRemoteReads reads the target's registry and tasks concurrently under one
 // deadline of remoteReadTimeout, derived from parent (the model's lifetime
 // context). It touches no model state: both reads write only their own locals

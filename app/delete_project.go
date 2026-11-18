@@ -274,8 +274,12 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 	// The completion CONFIRMED the deletion: the row's registry identity is
 	// dead even where the refresh's read lands degraded and cannot prove the
 	// record's absence. Tombstone it before the refresh, so a preserving merge
-	// cannot resurrect the row from the last-known set (#7522 review).
+	// cannot resurrect the row from the last-known set (#7522 review). In
+	// remote mode the cache the degraded polls re-emit from drops the record
+	// too — the same confirmed-mutation bookkeeping noteTaskRemoved applies
+	// to the task channel (#7522 review).
 	m.noteProjectDeleted(msg.repoID)
+	m.remote.noteProjectRemoved(msg.repoID)
 	m.refreshSidebarProjects()
 	if rescoped {
 		// Re-home focus on the tree (the rail is now empty — a focused pane
