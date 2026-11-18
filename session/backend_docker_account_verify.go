@@ -760,7 +760,7 @@ func (p *dockerProvisioner) verifyAccountRuntimeBoundary() error {
 	findings := []error{verifyConfiguredAccountBoundary(inspected, source, log.WarningLog.Printf)}
 
 	out, err = p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, "cat", "/proc/self/mountinfo")
+		"exec", "--user", "0:0", p.containerID, dockerContainerCat, "/proc/self/mountinfo")
 	if err != nil {
 		// Creating the exec's state is a daemon-side data-root write, so
 		// this failure can be capacity — carry a write-capable class so the

@@ -90,11 +90,31 @@ var credentialMountSharedRoutingNames = map[string]struct{}{
 // would run a program of the image's choosing between af's pins and the
 // agent's exec — a program that can re-set every pinned name. af re-asserts
 // SHELL to /bin/sh unless the operator forwards their own (#7529 R1).
+// PATH joins them too: a repo-chosen PATH resolves a program of the repo's
+// choosing for every PATH-walk af's in-container steps make and for the
+// agent's own bare executable, so af re-asserts the image's own Config.Env
+// PATH — the image's binaries are the documented residual trust on this
+// path — unless the operator forwards their own (#7529 R7).
 var credentialMountReassertedNames = map[string]struct{}{
 	"HOME":            {},
 	"XDG_DATA_HOME":   {},
 	"XDG_CONFIG_HOME": {},
 	"SHELL":           {},
+	"PATH":            {},
+}
+
+// credentialMountProgramLoaderNames are names that choose which CODE the
+// programs af runs in the container load — the dynamic linker's preload and
+// search-path variables. They reach every docker exec step before the
+// agent-side env filter exists, so a repo-supplied value would inject a
+// repository library into af's provisioning steps. They are refused to repo
+// run_args but NOT pinned: an image's own LD_* values are the same trust
+// class as its binaries, and pinning would break images that legitimately
+// need them; the inner filter already keeps them off the agent's env, so
+// the agent itself is covered either way (#7529 R7).
+var credentialMountProgramLoaderNames = map[string]struct{}{
+	"LD_PRELOAD":      {},
+	"LD_LIBRARY_PATH": {},
 }
 
 // credentialMountIdentityEnvNames are the credential-bearing per-agent names
@@ -220,6 +240,7 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 	add(credentialMountSharedCredentialNames)
 	add(credentialMountSharedRoutingNames)
 	add(credentialMountReassertedNames)
+	add(credentialMountProgramLoaderNames)
 	add(credentialMountIdentityEnvNames[agent])
 	add(credentialMountConfigRootNames[agent])
 	add(credentialMountRoutingNames[agent])
@@ -231,8 +252,14 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 // class defends, so "substitute" is only claimed where substitution is the
 // mechanism (#7526 item 4).
 func credentialMountDeniedReason(agent, name string) (string, bool) {
+	if name == "PATH" {
+		return "it chooses which program every PATH-resolved command in the container runs — af's provisioning steps and the agent's own executable — and af re-asserts the image's own PATH after run_args", true
+	}
 	if _, ok := credentialMountReassertedNames[name]; ok {
 		return "af re-asserts it after run_args for the mounted credential", true
+	}
+	if _, ok := credentialMountProgramLoaderNames[name]; ok {
+		return "it loads a repository-chosen library into the programs af runs in the container before the agent-side env filter applies", true
 	}
 	if _, ok := credentialMountSharedCredentialNames[name]; ok {
 		return "it can substitute an identity the operator did not forward", true
@@ -361,6 +388,12 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 		if _, reasserted := credentialMountReassertedNames[name]; reasserted {
 			continue
 		}
+		// The loader names are refused to run_args but never pinned: an
+		// image's own LD_* values are the same trust class as its binaries,
+		// and the inner env filter keeps them off the agent either way.
+		if _, loader := credentialMountProgramLoaderNames[name]; loader {
+			continue
+		}
 		if _, ok := forwarded[name]; ok {
 			continue
 		}
@@ -451,6 +484,23 @@ func dockerRunArgsEnvNames(args []string) []string {
 // failure to inspect returns nil: the warning is best-effort, and the mount
 // path's own guards do not depend on it.
 func (p *dockerProvisioner) dockerImageEnvNames() []string {
+	env := p.dockerImageEnv()
+	names := make([]string, 0, len(env))
+	for _, entry := range env {
+		if name, _, ok := strings.Cut(entry, "="); ok {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// dockerImageEnv runs `docker image inspect` for the session's image and
+// returns its Config.Env as NAME=value entries — the source for the PATH
+// re-assertion (runContainer reads the value) and for dockerImageEnvNames
+// (the warning reads the names). A failure to inspect returns nil: both
+// readers are best-effort layers on top of the run_args refusal, and the
+// mount path's own guards do not depend on them.
+func (p *dockerProvisioner) dockerImageEnv() []string {
 	out, err := p.docker(dockerShortStepTimeout,
 		"image", "inspect", p.image, "--format", "{{json .Config.Env}}")
 	if err != nil {
@@ -460,11 +510,21 @@ func (p *dockerProvisioner) dockerImageEnvNames() []string {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &env); err != nil {
 		return nil
 	}
-	names := make([]string, 0, len(env))
-	for _, entry := range env {
-		if name, _, ok := strings.Cut(entry, "="); ok {
-			names = append(names, name)
+	return env
+}
+
+// credentialMountImagePATH extracts PATH's value from an image's Config.Env
+// entries — the value af re-asserts after run_args on the credential-mount
+// path. Returns "" when the image configures no PATH; runContainer then emits
+// nothing, because with run_args PATH refused the container inherits the
+// image's own PATH (or the runtime's built-in default) anyway — the same
+// trusted source, never a repo-chosen one (#7529 R7).
+func credentialMountImagePATH(imageEnv []string) string {
+	path := ""
+	for _, entry := range imageEnv {
+		if name, value, ok := strings.Cut(entry, "="); ok && name == "PATH" {
+			path = value
 		}
 	}
-	return names
+	return path
 }

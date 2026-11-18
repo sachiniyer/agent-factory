@@ -113,7 +113,8 @@ does not automatically grant that image the built-in agent, GitHub, proxy, or
 CA variables used by local sessions. Only names explicitly listed in the
 global `session_env_passthrough` setting cross this boundary. Docker receives
 each as `-e NAME`, so the value does not appear in the docker command line.
-Container-native `HOME` and `PATH` remain owned by the image. An environment
+On this default boundary the container-native `HOME` and `PATH` remain owned
+by the image; the credential-mount grant below re-asserts both. An environment
 added through `docker.run_args` still has to be built in or named in
 `session_env_passthrough` before the agent pane may inherit it.
 
@@ -233,23 +234,34 @@ user's real home and mounts it only if it exists, so:
     you trust with read access to that agent's credential.
 
     **No classified environment name carries a non-operator value into the
-    agent's exec.** af classifies every environment name that can substitute
-    for, relocate, or route the mounted credential — API keys and tokens,
-    inline-config names like `OPENCODE_CONFIG_CONTENT`, config roots like
-    `CODEX_HOME` and `OPENCODE_CONFIG_DIR`, endpoints and base URLs, proxies
-    and CA bundles, `HOME`/`XDG_*`, `SHELL`, GitHub token and SSH-agent names —
-    for every agent in the mount table above. Three boundaries enforce it:
+    agent's exec, and no repo-chosen source picks a program on the way to it.**
+    af classifies every environment name that can substitute for, relocate, or
+    route the mounted credential — API keys and tokens, inline-config names
+    like `OPENCODE_CONFIG_CONTENT`, config roots like `CODEX_HOME` and
+    `OPENCODE_CONFIG_DIR`, endpoints and base URLs, proxies and CA bundles,
+    `HOME`/`XDG_*`, `SHELL`, GitHub token and SSH-agent names — plus the
+    program-choice names `PATH`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`, for every
+    agent in the mount table above. These boundaries enforce it:
 
     - At `docker run`: `docker.run_args` entries naming one are **refused**
-      before the container starts, and every classified name the operator did
-      not forward is defined **and empty** in the container environment — so
-      the image's own `ENV` and a workspace loader that fills only unset names
-      find it already set to nothing. (Measured: gemini's workspace `.env`
-      supplied `GEMINI_API_KEY` only when the name was unset; defined-and-empty
+      before the container starts — including `PATH`, `LD_PRELOAD`, and
+      `LD_LIBRARY_PATH`, which would otherwise let the repo choose the programs
+      af's in-container steps run and the libraries they load. Every
+      credential-classified name the operator did not forward is defined
+      **and empty** in the container environment — so the image's own `ENV`
+      and a workspace loader that fills only unset names find it already set
+      to nothing. (Measured: gemini's workspace `.env` supplied
+      `GEMINI_API_KEY` only when the name was unset; defined-and-empty
       survived the `.env`.) `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` are
-      re-asserted to the mount's real roots, and `SHELL` to `/bin/sh`, so
-      tmux's `default-shell -c` chain cannot run a repo-chosen program before
-      the agent's exec.
+      re-asserted to the mount's real roots, `SHELL` to `/bin/sh`, and `PATH`
+      to the image's own `Config.Env` `PATH` — so tmux's `default-shell -c`
+      chain, af's own execs, and the agent's bare executable all resolve
+      through the image's binaries, never a repo-added directory.
+    - In af's own `docker exec` steps: every one names `/bin/sh` by absolute
+      path, so the container's `PATH` — whatever it is — cannot hand af a
+      repo-written `sh` to intercept the agent-server launch. Commands
+      *inside* those scripts (`git`, `cat`, `chmod`) resolve through the
+      `PATH` re-asserted above — the image's own binaries.
     - At the exec itself: the pins also reach the in-container agent-server,
       whose pane launch re-asserts each one defined-and-empty **immediately
       before the agent execs** — after tmux's shell hop or a tmux config file
@@ -257,7 +269,10 @@ user's real home and mounts it only if it exists, so:
     - On tmux: every tmux invocation the agent-server runs carries
       `-f /dev/null`, so the image's `/etc/tmux.conf` or a `~/.tmux.conf`
       cannot pick `default-shell`, run hooks, or write session environment
-      either.
+      either. The one residual is an internal fallback that spawns tmux via
+      `systemd-run --scope` without `-f`; it cannot run inside a container —
+      its marker variable is filtered out and the cgroup namespace is
+      private — so it is listed, not relied on.
 
     The operator's escape hatch is unchanged: names listed in the global
     `session_env_passthrough` keep their forwarded value and are never blanked
@@ -282,7 +297,12 @@ user's real home and mounts it only if it exists, so:
 
     - **The image's own binaries, libraries, CA store, and system files** —
       the agent's own code and anything it loads can read the mounted file
-      directly or redirect where its contents are sent.
+      directly or redirect where its contents are sent. This includes the
+      image's `Config.Env` `PATH` (which af re-asserts as the container's
+      `PATH`) and any `LD_PRELOAD`/`LD_LIBRARY_PATH` the image configures —
+      both are refused to `docker.run_args` but left at the image's own
+      values, because an image can already ship any binary or library it
+      wants on those paths.
     - **Workspace configuration, which is file content, not environment** —
       an `opencode.json`, a `.claude/` or `.gemini/` settings file (a
       `settings.json` `env` block included), or a loader that force-loads

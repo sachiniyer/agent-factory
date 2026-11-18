@@ -1062,6 +1062,9 @@ func TestDockerMountAgentCredentials_ProxyTwinRidesRunArgvAndClientEnv(t *testin
 			SessionEnvPassthrough: []string{"HTTPS_PROXY"},
 		},
 		program: tmux.ProgramOpencode,
+		// The normalization is scoped to the credential-mount path (#7529 R8):
+		// the mount fixture is what turns the gate on.
+		credentialMounts: []string{"-v", "/h/cred:/c/cred:ro"},
 	}
 	names := p.containerEnvironmentNames()
 	require.Contains(t, names, "HTTPS_PROXY")

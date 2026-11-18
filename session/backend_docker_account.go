@@ -844,7 +844,7 @@ func (p *dockerProvisioner) prepareAccountUser() error {
 		return nil
 	}
 	out, err := p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, "stat", "-c", "%u:%g", dockerAccountHome)
+		"exec", "--user", "0:0", p.containerID, dockerContainerStat, "-c", "%u:%g", dockerAccountHome)
 	if err != nil {
 		// The owner read writes nothing under the account bind; the only
 		// data-root writes are dockerd's privileged exec bookkeeping —
@@ -860,7 +860,7 @@ func (p *dockerProvisioner) prepareAccountUser() error {
 		shellQuote(dockerAccountRuntimeHome), shellQuote(dockerWorkspaceDir), owner,
 		shellQuote(dockerAccountRuntimeHome), shellQuote(dockerWorkspaceDir))
 	out, err = p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, "sh", "-c", script)
+		"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", script)
 	if err != nil {
 		return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare the account-owned container home and workspace: %s: %w", strings.TrimSpace(string(out)), err), dockerOpRootExec)
 	}
@@ -885,6 +885,6 @@ func (p *dockerProvisioner) sessionExecOptions() []string {
 func (p *dockerProvisioner) execSessionSh(timeout time.Duration, script string) ([]byte, error) {
 	args := []string{"exec"}
 	args = append(args, p.sessionExecOptions()...)
-	args = append(args, p.containerID, "sh", "-c", script)
+	args = append(args, p.containerID, dockerContainerShell, "-c", script)
 	return p.docker(timeout, args...)
 }
