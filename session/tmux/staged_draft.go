@@ -122,6 +122,19 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 	case ev.chip != "" && strings.Contains(region, ev.chip):
 		return StagedDraftStaged, "the send's bound paste chip is still in the live composer"
 	}
+	// A `>`-leading Markdown quote inside a multiline draft normalizes to a
+	// composer glyph row, so the anchor can sit INSIDE the draft with its
+	// earlier lines above — textually the same shape as a fresh composer
+	// under a submitted echo. The staged check above is honest either way
+	// (a tail found below the anchor is in the live draft under both
+	// readings), but the upper-vs-region split below is not: draft text
+	// above the anchor would read as a submitted echo, and a tail split
+	// across the anchor would read as gone — both permanently resolving a
+	// live send. composerAnchorAmbiguous is the #6817 ruling for this
+	// shape: unprovable, never a negative.
+	if composerAnchorAmbiguous(rows, anchor) {
+		return StagedDraftUnreadable, "the last composer glyph may be a quote line inside the draft — the anchor is ambiguous"
+	}
 	upper := normalizeDelivery(strings.Join(rows[:anchor], ""))
 	switch {
 	case ev.tail != "" && strings.Contains(upper, ev.tail):

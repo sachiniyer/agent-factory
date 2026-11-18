@@ -126,6 +126,53 @@ func TestStagedDraftReading(t *testing.T) {
 			want: StagedDraftGone,
 		},
 		{
+			// A `>`-leading Markdown quote inside a multiline draft
+			// normalizes to a composer glyph row, so the anchor can sit
+			// inside the draft with earlier lines above it — the tail is
+			// split across the anchor and neither side holds it. Gone
+			// would permanently close a live send on a guess; blind is
+			// honest (Codex #7547, second round).
+			name: "a quote-ambiguous anchor is unreadable, not gone",
+			pane: strings.Join([]string{
+				"✻ Cogitated for 4m 47s · done 3:53 AM",
+				"❯ first paragraph",
+				"  > final instruction",
+				"────────────────────────────────────────────────────────────────────────────────",
+				"",
+				"  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)",
+			}, "\n"),
+			ev:   stagedDraftEvidence{tail: normalizeDelivery("firstparagraph>finalinstruction")},
+			want: StagedDraftUnreadable,
+		},
+		{
+			// The same ambiguous shape is still honest Staged when the
+			// bound tail sits entirely below the `>` row — under both
+			// readings that text is inside the live draft, so the
+			// ambiguity must not blanket-downgrade the flag.
+			name: "a tail below a quote-ambiguous anchor is still staged",
+			pane: strings.Join([]string{
+				"✻ Cogitated for 4m 47s · done 3:53 AM",
+				"❯ first paragraph",
+				"  > " + stagedTailText,
+				"────────────────────────────────────────────────────────────────────────────────",
+			}, "\n"),
+			ev:   stagedTailEvidence(),
+			want: StagedDraftStaged,
+		},
+		{
+			// An unboxed composer can leave a submitted echo immediately
+			// above the fresh glyph row with no border or output between
+			// — the same shape as a quote continuation. Submitted would
+			// close the watch on a guess, so blind is honest here too.
+			name: "a glyph echo adjacent to the composer is unreadable",
+			pane: strings.Join([]string{
+				"› " + stagedTailText,
+				"›",
+			}, "\n"),
+			ev:   stagedTailEvidence(),
+			want: StagedDraftUnreadable,
+		},
+		{
 			// A user's own typed draft is never flagged as af's: it
 			// carries none of the bound evidence, so the send's watch
 			// ends rather than matching arbitrary composer contents.
