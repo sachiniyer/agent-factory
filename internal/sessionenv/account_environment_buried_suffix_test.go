@@ -84,13 +84,25 @@ func TestWrapperChildTailBuriedSuffixMatchesIonice(t *testing.T) {
 // the buried-suffix scan used to let through (an ordinary tail, a non-account
 // buried name, a trailing shell with no argv, env print mode) — every one now
 // refuses, the same way a tail that buries a mutation refuses.
+//
+// The same wholesale refusal applies to the environment-injecting launchers
+// (sudo/docker/systemd-run): they run a child and apply NAME=... operands to the
+// child's environment, but the tail scan's plain-word branch could not
+// distinguish a positional assignment from a noun-use like `rg
+// OPENAI_API_KEY= .`, so they are listed alongside the argv-passthrough class
+// for the same reason — refused whatever their tail contains.
 func TestListedPassthroughWrapperRefusedWhateverItsTail(t *testing.T) {
 	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
 	for name := range accountShellStartupNames {
 		names[name] = struct{}{}
 	}
 	heads := []string{"perf", "strace", "valgrind", "gdb", "gdb --args", "/usr/bin/perf", "ltrace",
-		"chrt 0", "numactl", "unshare", "prlimit"}
+		"chrt 0", "numactl", "unshare", "prlimit",
+		// Environment-injecting wrappers: refused wholesale at the default
+		// arm. A path form is the same wrapper (matched by basename), so the
+		// /usr/bin spellings land here too.
+		"sudo", "/usr/bin/sudo", "docker", "/usr/bin/docker",
+		"systemd-run", "/usr/bin/systemd-run"}
 	// Tails the old buried-suffix scan let through (benign) and tails it refused
 	// (mutating) alike — a listed wrapper refuses both, whatever its tail contains.
 	tails := []string{
@@ -122,7 +134,10 @@ func TestListedPassthroughWrapperRefusedWhateverItsTail(t *testing.T) {
 	}
 	// The wrapper's own option spells (strace -f, strace -o, strace --, perf stat,
 	// gdb --args) reach the same refusal: the verdict is set by the wrapper head,
-	// not by what follows it.
+	// not by what follows it. The same shape covers one option spell each for
+	// the environment-injecting launchers (sudo/docker/systemd-run): their tail
+	// cannot rescue the wholesale refusal at the head — the full surface is
+	// pinned in TestValidateAccountEnvironmentCommand_RefusesPositionalEnvInjectionAssignment.
 	for _, command := range []string{
 		"strace -f echo unset CODEX_HOME",
 		"strace -o /dev/null echo unset CODEX_HOME",
@@ -133,6 +148,12 @@ func TestListedPassthroughWrapperRefusedWhateverItsTail(t *testing.T) {
 		"strace -p 1234 codex",
 		"strace -- codex",
 		"strace",
+		"sudo --help",
+		"sudo CODEX_HOME=/other codex",
+		"docker run busybox codex",
+		"docker run -e CODEX_HOME=/other busybox codex",
+		"systemd-run --setenv CODEX_HOME=/other codex",
+		"systemd-run codex",
 	} {
 		require.True(t, commandMutatesAccountEnvironment(command, names), "command %q", command)
 	}

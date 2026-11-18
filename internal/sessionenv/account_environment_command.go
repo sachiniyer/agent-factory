@@ -445,9 +445,22 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		// static command-line check cannot enumerate every shape a
 		// shadowed wrapper can shift to (a buried suffix scan was bypassed
 		// twice by Codex), so for the wrappers in this class the check
-		// fails closed whatever their tail contains: the effect of an
+		// fails closed whatever its tail contains: the effect of an
 		// unmodeled wrapper on the account environment is unknown, so the
 		// command is unverifiable rather than clean.
+		//
+		// The same wholesale refusal applies to the environment-injecting
+		// launchers (sudo/docker/systemd-run): they run a child command and
+		// apply a visible NAME=value operand to its environment (sudo's
+		// positional `NAME=value`, docker's `-e`/`--env`, systemd-run's
+		// `--setenv`), but the tail scan's plain-word branch could not
+		// separate that positional assignment from a noun-use like
+		// `rg OPENAI_API_KEY= .`, so the wrapper itself is the
+		// discriminator: admitted here, the wrapper would silently re-root
+		// the agent's credential directory (sudo `CODEX_HOME=/other codex`
+		// applies the replacement root exactly as the refused `env
+		// CODEX_HOME=/other codex` does), so the command is unverifiable
+		// rather than clean for the same reason.
 		if isUnmodeledArgvPassthroughWrapper(words[0]) {
 			return nil, false, true
 		}
@@ -645,10 +658,28 @@ func childTailBuriesMutation(words []*syntax.Word, names map[string]struct{}, me
 // (isAccountCommandName uses filepath.Base), so a path form (/usr/bin/perf)
 // is the same wrapper. The class is open in principle; this names the members
 // the parity test enumerates — the tracing tools (strace/ltrace/perf/valgrind/
-// gdb) and the util-linux argv-passthrough launchers that exec a child and
-// forward argv the same way (chrt/numactl/unshare/prlimit) — mirroring the
+// gdb), the util-linux argv-passthrough launchers that exec a child and
+// forward argv the same way (chrt/numactl/unshare/prlimit), and the
+// environment-injecting launchers (sudo/docker/systemd-run) — mirroring the
 // closed list the strace special-case in unrecognizedWrapperHidesAccountAssignment
 // already keeps.
+//
+// The environment-injecting launchers run a child command and apply a
+// NAME=value operand as the child's environment: `sudo CODEX_HOME=/other
+// codex` sets CODEX_HOME in the exec'd child exactly as the refused `env
+// CODEX_HOME=/other codex` does, and `docker run -e`/`docker exec -e` and
+// `systemd-run --setenv` inject the same NAME=value in option spelling. The
+// tail scan judged a dash-prefixed option value whose left side names a
+// denied variable (e.g. `--env=CODEX_HOME=/other`), but a plain-word
+// positional `NAME=value` ahead of the child command fell to the early
+// non-dash return and was treated as inert data — so `sudo
+// CODEX_HOME=/other codex` (and `docker run -e CODEX_HOME=/other …`,
+// `systemd-run --setenv CODEX_HOME=/other …`, where the value is a separate
+// word) was ADMITTED while every visible spelling the scan could parse was
+// REFUSED. Listing these wrappers here fails the command closed whatever
+// its tail contains, the same rule already applied to the argv-passthrough
+// class above, so the `+=` form and the separate-word option spellings close
+// with the positional one.
 //
 // peelAccountWrapper's default arm refuses a listed passthrough wrapper
 // whatever its tail contains, rather than pattern-matching a buried suffix.
@@ -672,7 +703,13 @@ func isUnmodeledArgvPassthroughWrapper(word *syntax.Word) bool {
 	}
 	switch filepath.Base(value) {
 	case "strace", "ltrace", "perf", "valgrind", "gdb",
-		"chrt", "numactl", "unshare", "prlimit":
+		"chrt", "numactl", "unshare", "prlimit",
+		// Environment-injecting launchers: a positional NAME=value, an -e/
+		// --env/--setenv operand, or an attached --opt=NAME=value can all
+		// re-root the child's credential directory, and the tail scan's
+		// plain-word branch cannot tell that shape from a noun-use like
+		// `rg OPENAI_API_KEY= .`, so the wrapper is judged wholesale.
+		"sudo", "docker", "systemd-run":
 		return true
 	}
 	return false

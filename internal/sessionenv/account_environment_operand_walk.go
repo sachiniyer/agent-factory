@@ -101,6 +101,19 @@ var accountChildTailSuffixVerdictNames = map[string]struct{}{
 	// unrecognizedWrapperHidesAccountAssignment, so a buried strace can begin a
 	// verdict only when judged from strace's own suffix.
 	"strace": {},
+	// Environment-injecting launchers refused wholesale by
+	// isUnmodeledArgvPassthroughWrapper (sudo/docker/systemd-run) for the same
+	// reason: they run a child command and apply a NAME=... operand to its
+	// environment (`sudo CODEX_HOME=/other codex`, `docker run -e`,
+	// `systemd-run --setenv`), but the tail scan's plain-word branch could not
+	// distinguish a positional assignment from a noun-use like
+	// `rg OPENAI_API_KEY= .`, so the wrapper is judged wherever its name begins
+	// a suffix of a modelled wrapper's returned child tail — a buried
+	// `nohup echo sudo CODEX_HOME=/other codex` re-roots the agent exactly as a
+	// head `sudo CODEX_HOME=/other codex` does. Listed alongside strace so the
+	// per-suffix scan judges them at the buried position the main unwrap loop
+	// cannot reach once the surrounding `echo`/`rg` head reads as inert.
+	"sudo": {}, "docker": {}, "systemd-run": {},
 	// Shells KnownShellName recognizes. The opaque-head scan flags a buried
 	// shell only while words follow it, so a bare trailing shell — which a
 	// shadowed wrapper can shift to and exec — is judged at its own suffix,
