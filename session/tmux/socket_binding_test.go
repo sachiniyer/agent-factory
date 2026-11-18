@@ -207,6 +207,18 @@ func TestSameSocketPath(t *testing.T) {
 		"a missing directory under a symlinked one")
 	require.False(t, sameSocketPath(filepath.Join(real, "s"), filepath.Join(real, "t")), "another socket in the same directory")
 	require.False(t, sameSocketPath(filepath.Join(real, "s"), filepath.Join(root, "s")), "the same name in another directory")
+
+	// ".." after a symlink is the symlink TARGET's parent (Codex on #7537):
+	// with child -> real/inner, root/child/../s is real/s, not root/s. Lexical
+	// cleaning first would rule a bound owner out.
+	require.NoError(t, os.Mkdir(filepath.Join(real, "inner"), 0o700))
+	child := filepath.Join(root, "child")
+	require.NoError(t, os.Symlink(filepath.Join(real, "inner"), child))
+	dotdot := child + "/../s"
+	require.True(t, sameSocketPath(dotdot, filepath.Join(real, "s")), "a .. after a symlink resolves through it")
+	require.False(t, sameSocketPath(dotdot, filepath.Join(root, "s")), "and is not the lexically cleaned path")
+	require.True(t, sameSocketPath(child+"/../gone/s", filepath.Join(real, "gone", "s")),
+		"the same, below a directory that no longer exists")
 }
 
 // The real binding read, against this process's own listener: bound to its

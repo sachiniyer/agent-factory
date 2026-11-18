@@ -45,12 +45,14 @@ func TestParseNetUnixListeners(t *testing.T) {
 
 // A relative bound path resolves against the working directory, which is read
 // once and only when needed; an unreadable one makes the whole read fail.
+// Nothing is lexically cleaned: "/tmp/a/../s" names a different socket from
+// "/tmp/s" when a is a symlink (Codex on #7537).
 func TestResolveListenerPaths(t *testing.T) {
 	reads := 0
 	cwd := func() (string, bool) { reads++; return "/home/u/proj", true }
-	got, err := resolveListenerPaths([]string{"/tmp/a/../s", "./r.sock", "x/y"}, cwd)
+	got, err := resolveListenerPaths([]string{"/tmp/a/../s", "./r.sock", "x/../y"}, cwd)
 	require.NoError(t, err)
-	require.Equal(t, []string{"/tmp/s", "/home/u/proj/r.sock", "/home/u/proj/x/y"}, got)
+	require.Equal(t, []string{"/tmp/a/../s", "/home/u/proj/./r.sock", "/home/u/proj/x/../y"}, got)
 	require.Equal(t, 1, reads)
 
 	reads = 0

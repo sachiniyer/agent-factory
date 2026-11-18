@@ -60,34 +60,53 @@ func readTmuxServerSocketBinding(pid int, socketPath string) (socketBinding, str
 // /tmp/... and /private/tmp/... agree on darwin even after the socket file, or
 // its directory, is gone. Two paths whose directories both still exist and are
 // the same directory (a bind mount, say) also agree.
+//
+// Nothing is cleaned lexically before symlinks are resolved. The kernel keeps a
+// bound address as the binder spelled it, and a ".." after a symlink names the
+// symlink target's parent: /tmp/base/link/../s, with link pointing at
+// /tmp/base/real/child, is /tmp/base/real/s, not /tmp/base/s (Codex on #7537).
 func sameSocketPath(a, b string) bool {
 	if canonicalSocketPath(a) == canonicalSocketPath(b) {
 		return true
 	}
-	if filepath.Base(a) != filepath.Base(b) {
+	dirA, baseA := splitSocketPath(a)
+	dirB, baseB := splitSocketPath(b)
+	if baseA != baseB {
 		return false
 	}
-	da, errA := os.Stat(filepath.Dir(a))
-	db, errB := os.Stat(filepath.Dir(b))
+	// os.Stat lets the kernel walk each spelling, symlinks and ".." included.
+	da, errA := os.Stat(dirA)
+	db, errB := os.Stat(dirB)
 	return errA == nil && errB == nil && os.SameFile(da, db)
 }
 
-// canonicalSocketPath resolves the deepest existing ancestor of p and keeps the
-// rest as written.
-func canonicalSocketPath(p string) string {
-	p = filepath.Clean(p)
-	rest := ""
-	for dir := p; ; {
-		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-			return filepath.Join(resolved, rest)
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return p
-		}
-		rest = filepath.Join(filepath.Base(dir), rest)
-		dir = parent
+// splitSocketPath splits p at its last separator, without cleaning it.
+func splitSocketPath(p string) (dir, base string) {
+	i := strings.LastIndexByte(p, '/')
+	if i < 0 {
+		return ".", p
 	}
+	if i == 0 {
+		return "/", p[1:]
+	}
+	return p[:i], p[i+1:]
+}
+
+// canonicalSocketPath resolves the longest prefix of p's components that
+// exists, symlinks and ".." walked the way the kernel walks them
+// (filepath.EvalSymlinks), and appends the components past it as written.
+func canonicalSocketPath(p string) string {
+	parts := strings.Split(p, "/")
+	for i := len(parts); i > 0; i-- {
+		prefix := strings.Join(parts[:i], "/")
+		if prefix == "" {
+			prefix = "/"
+		}
+		if resolved, err := filepath.EvalSymlinks(prefix); err == nil {
+			return filepath.Join(append([]string{resolved}, parts[i:]...)...)
+		}
+	}
+	return filepath.Clean(p)
 }
 
 // possibleSocketOwners is the socket-absent refusal's list of who could still

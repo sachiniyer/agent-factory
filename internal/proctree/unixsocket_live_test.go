@@ -114,7 +114,7 @@ func TestUnixListenerPaths_ARelativeSocketResolvesAgainstTheServersWorkingDirect
 
 	paths, err := UnixListenerPaths(server)
 	require.NoError(t, err)
-	require.Equal(t, []string{filepath.Join(dir, "r")}, paths)
+	require.Equal(t, []string{dir + "/./r"}, paths, "the bound spelling, prefixed with the working directory and not cleaned")
 }
 
 // Only listeners count: this process's own listener is reported, and the

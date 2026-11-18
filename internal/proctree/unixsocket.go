@@ -16,8 +16,11 @@ import (
 // after the socket file is unlinked. That is what lets the socket-absent probe
 // ask which tmux server is bound to a missing socket, rather than signalling
 // every server. A path bound relative to the process's working directory comes
-// back resolved against its current one, which is where the process itself
-// would rebind it.
+// back prefixed with its current one, which is where the process itself would
+// rebind it. Paths are returned as the kernel spelled them, never lexically
+// cleaned: a ".." after a symlink names the symlink target's parent, and
+// cleaning would turn it into a different socket. Compare them only after
+// resolving symlinks.
 //
 // Only listening sockets count: a tmux server's accepted connections carry its
 // path too, but the listener is the socket it recreates. Abstract-namespace
@@ -46,7 +49,8 @@ func UnixListenerPaths(pid int) ([]string, error) {
 var errNoWorkingDir = errors.New("a socket is bound to a relative path and the process's working directory cannot be read")
 
 // resolveListenerPaths makes every relative path absolute against the working
-// directory cwd reports, read at most once and only when needed.
+// directory cwd reports, read at most once and only when needed. It joins by
+// concatenation and cleans nothing (see UnixListenerPaths).
 func resolveListenerPaths(paths []string, cwd func() (string, bool)) ([]string, error) {
 	out := make([]string, 0, len(paths))
 	dir, dirRead := "", false
@@ -59,9 +63,9 @@ func resolveListenerPaths(paths []string, cwd func() (string, bool)) ([]string, 
 				}
 				dir, dirRead = d, true
 			}
-			p = filepath.Join(dir, p)
+			p = strings.TrimSuffix(dir, "/") + "/" + p
 		}
-		out = append(out, filepath.Clean(p))
+		out = append(out, p)
 	}
 	return out, nil
 }
