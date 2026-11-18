@@ -458,11 +458,25 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 // there is nothing left to clear, which is the correct no-op.
 func clearClosedTmuxRefs(i *Instance, closed []closedTab) {
 	for _, c := range closed {
-		for _, tab := range i.Tabs {
+		for idx, tab := range i.Tabs {
 			if tab.ID == c.id && tab.tmux == c.ts {
 				if tab.tmux != nil {
 					tab.tmux = nil
 					i.touchLocked()
+					// #7469 R1a: unbinding the agent session must not leave
+					// a retired server record in the row fields — the
+					// spawn boundary that raised it may never re-stamp, and
+					// the stale (socket, server pid) would then persist for
+					// a restarted daemon's sweep to read the replacement's
+					// own survivors foreign. The live cell is unaffected —
+					// the closing ts stays reachable through closed[].
+					if idx == 0 && c.ts.ServerEvidenceRetired() {
+						i.runtimeServerSocket = ""
+						i.runtimeServerPID = 0
+						i.runtimeServerStartID = 0
+						i.runtimeServerSessionID = ""
+						i.runtimeServerPIDNS = ""
+					}
 				}
 				break
 			}

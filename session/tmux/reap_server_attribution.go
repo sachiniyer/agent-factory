@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"net"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -201,6 +202,19 @@ func sameRecordedSocket(envSocket, recordedSocket string) (same, comparable bool
 // bounds — a package var so the deadline test can stage a compare that never
 // answers.
 var socketCompareWalk = func(envSocket, recordedSocket string) (same, comparable bool) {
+	// tmux renders control and non-UTF-8 bytes in format output as \NNN
+	// octal text — #{socket_path} prints a raw 0x01 as the four characters
+	// \001 — while a carrier's TMUX env carries the raw bytes. A RECORDED
+	// path containing a backslash may therefore be the escaped rendering of
+	// a different real name, and a literal backslash in a genuine name can
+	// never be told apart from one (#7469 R5a). Decoding it either way
+	// could pronounce an own carrier foreign on a guess, so the literal
+	// spelling may compare only when it answers as a live unix listener —
+	// proof it is the real path. Otherwise the socket is incomparable:
+	// undecidable, never foreign.
+	if strings.ContainsRune(recordedSocket, '\\') && !socketListenerAlive(recordedSocket) {
+		return false, false
+	}
 	want, okA := canonicalSocketPath(recordedSocket)
 	got, okB := canonicalSocketPath(envSocket)
 	if !okA || !okB {
@@ -210,6 +224,28 @@ var socketCompareWalk = func(envSocket, recordedSocket string) (same, comparable
 		return true, true
 	}
 	return false, true
+}
+
+// socketListenerProbeBudget bounds the connect that proves a
+// backslash-bearing recorded socket names a live unix listener (R5a). It
+// runs inside socketCompareWalk, which sameRecordedSocket already holds
+// under the wider socketCompareBudget flight.
+const socketListenerProbeBudget = time.Second
+
+// socketListenerAlive reports whether a unix-socket LISTENER answers a
+// connect at path. Existence is not enough — a stale socket file or the
+// escaped spelling of a different real path both stat as a socket or miss,
+// while only a server actually bound there accepts the dial (#7469 R5a).
+// A plain function, not a package var: sameRecordedSocket's flight may
+// abandon the worker holding it past the deadline, and a staged var
+// restored during that window would race its lazy read.
+func socketListenerAlive(path string) bool {
+	conn, err := net.DialTimeout("unix", path, socketListenerProbeBudget)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // ptyFdServerVerdict attributes the carrier through the pty slaves it holds.

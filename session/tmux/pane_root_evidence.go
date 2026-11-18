@@ -226,12 +226,15 @@ func resolveServerIdentity(id ServerIdentity) ServerIdentity {
 // noteServerIdentity is the stamp every live pane resolution calls: a row
 // that answered its server fields replaces the record — the answer is fresh
 // kernel evidence — while a row that could not keeps whatever stands (a
-// field-less tmux answers "unknown", never "changed").
+// field-less tmux answers "unknown", never "changed"). A landed stamp also
+// clears the spawn-boundary retirement: the record once more names the
+// session's current incarnation (#7469 R1a).
 func (t *TmuxSession) noteServerIdentity(raw ServerIdentity) {
 	id := resolveServerIdentity(raw)
 	if id.valid() {
 		stored := id
 		t.serverEvidence.Store(&stored)
+		t.serverEvidenceRetired.Store(false)
 	}
 }
 
@@ -244,8 +247,23 @@ func (t *TmuxSession) noteServerIdentity(raw ServerIdentity) {
 // survivors foreign — named, left alive, while teardown deletes the
 // worktree under them. Absent is undecidable, and undecidable keeps today's
 // verdict — the safe direction either way.
+//
+// The retirement is keyed to "a new incarnation can exist" — the
+// new-session issue inside start(), not to Start's success (R1a): a spawn
+// that then fails still retires it. The retired marker stays raised until
+// a stamp or seed lands so the persisted row can write absent too.
 func (t *TmuxSession) RetireServerIdentity() {
 	t.serverEvidence.Store(nil)
+	t.serverEvidenceRetired.Store(true)
+}
+
+// ServerEvidenceRetired reports whether the spawn-boundary retirement
+// still stands — a new-session was issued and no live stamp or persisted
+// seed has landed since (#7469 R1a). The instance row consults it at
+// marshal time so the previous incarnation's identity is never persisted
+// under the replacement's name.
+func (t *TmuxSession) ServerEvidenceRetired() bool {
+	return t.serverEvidenceRetired.Load()
 }
 
 // SeedServerEvidence primes the recorded server identity from the persisted
@@ -267,6 +285,7 @@ func (t *TmuxSession) SeedServerEvidence(socket string, pid int, startID uint64,
 	if t.serverEvidence.Load() == nil {
 		stored := id
 		t.serverEvidence.Store(&stored)
+		t.serverEvidenceRetired.Store(false)
 	}
 }
 

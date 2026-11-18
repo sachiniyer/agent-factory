@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
@@ -209,17 +211,35 @@ func TestVanishedSessionSweep_StaleRecordCannotExcludeAProvenSurvivor(t *testing
 }
 
 // #7469 R1/R3: an own verdict NEVER promotes. A carrier that reads own
-// against the recorded server — same socket, same server pid — but that
-// today's evidence rules refuse is refused exactly as before: the gate still
-// blocks, nothing is marked, the carrier stays alive.
+// against the recorded server — same socket, same server pid, same session
+// index — but that today's evidence rules refuse is refused exactly as
+// before: the gate still blocks, nothing is marked, the carrier stays
+// alive. The fixture's verdict is asserted OWN first — a tuple whose
+// session index missed the record would read undecidable and the refusal
+// assertion would be vacuous (R3b).
 func TestVanishedSessionSweep_OwnServerCarrierKeepsTodaysRefusal(t *testing.T) {
 	name := "af_own_server"
 	home := t.TempDir()
 	gen := name + "-gen"
 	own := recordedOwnServer(t)
 
+	// Isolate the env channel: the carrier must not inherit a real pty a
+	// dev box's own tmux server masters, or the pty channel could speak
+	// foreign over the env's own.
+	oldSlaves := ptySlaveIndices
+	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) { return nil, nil }
+	t.Cleanup(func() { ptySlaveIndices = oldSlaves })
+
 	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0],
-		"TMUX="+own.Socket+","+strconv.Itoa(own.PID)+",3")
+		"TMUX="+own.Socket+","+strconv.Itoa(own.PID)+",7")
+
+	environ, err := proctree.Environ(carrier.PID)
+	require.NoError(t, err)
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, serverVerdictOwn,
+		carrierServerVerdict(carrier, environ, own, snap, &serverPtyOwners{}, ""),
+		"the fixture must read OWN — an undecidable verdict makes the refusal assertion vacuous")
 
 	marked, _, err := markedOrphanProcesses(
 		[]proctree.Process{carrier}, name, home, fixtureCohort(gen),
@@ -228,6 +248,78 @@ func TestVanishedSessionSweep_OwnServerCarrierKeepsTodaysRefusal(t *testing.T) {
 		"an own verdict is not evidence — the gate still refuses a member it cannot prove")
 	require.Empty(t, marked, "own never promotes a refused carrier into the reap set")
 	require.True(t, proctree.AliveSame(carrier))
+}
+
+// #7469 R1a: retirement is keyed to "a new incarnation can exist" — the
+// new-session issue inside start() — never to Start's success. A respawn
+// that issues new-session and then fails leaves NO server evidence: a
+// stale (socket, old server pid) surviving the failure would judge the
+// replacement's own survivors foreign — named, left alive, worktree
+// deleted under them. This goes red if the retire moves back to the
+// success path: with it removed, the seeded record outlives the failed
+// spawn.
+func TestStartFailedAfterNewSession_RetiresServerIdentity(t *testing.T) {
+	forceNewSessionEnvMarkers(t, false)
+	ts := NewTmuxSessionWithDeps("retire-on-failed-spawn", "sh",
+		answeredFailurePtyFactory{t: t, waitErr: errors.New("new-session refused the request")},
+		cmd_test.MockCmdExec{
+			RunFunc:    func(*exec.Cmd) error { return errors.New("session not found") },
+			OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, nil },
+		})
+	ts.SeedServerEvidence("/tmp/tmux-1001/af", 1111, 987654321, "$7", "pid:[4026531836]")
+	_, ok := ts.ServerEvidence()
+	require.True(t, ok, "the seed stamps the previous incarnation's record")
+
+	require.Error(t, ts.Start(t.TempDir()),
+		"the staged launch command fails AFTER new-session issued")
+	_, ok = ts.ServerEvidence()
+	require.False(t, ok,
+		"a spawn that issues new-session retires the record even when Start then fails — absent is undecidable")
+	require.True(t, ts.ServerEvidenceRetired(),
+		"the retired marker stays raised so the row writes absent until a stamp or seed lands")
+}
+
+// #7469 R1a/R3: an UNPROVEN carrier that reads OWN through the env channel
+// still reaps at tier 2 — the outcome the stale-record bug inverts: under
+// a stale (socket, old pid) record the same carrier reads foreign — named,
+// left alive, worktree deleted under it — while a retired (absent) record
+// reads undecidable and tier 2's AgentExe admission stands. The verdict is
+// asserted own first so the outcome can never drift vacuous.
+func TestVanishedSessionSweep_OwnServerCarrierStillReapedAtTier2(t *testing.T) {
+	name := "af_own_tier2"
+	home := t.TempDir()
+	gen := name + "-gen"
+	own := recordedOwnServer(t)
+
+	// Isolate the env channel: the carrier must not inherit a real pty a
+	// dev box's own tmux server masters, or the pty channel could speak
+	// over the env's own.
+	oldSlaves := ptySlaveIndices
+	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) { return nil, nil }
+	t.Cleanup(func() { ptySlaveIndices = oldSlaves })
+
+	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen,
+		agentNamedBinary(t, os.Args[0]),
+		"TMUX="+own.Socket+","+strconv.Itoa(own.PID)+",7")
+
+	environ, err := proctree.Environ(carrier.PID)
+	require.NoError(t, err)
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, serverVerdictOwn,
+		carrierServerVerdict(carrier, environ, own, snap, &serverPtyOwners{}, ""),
+		"the fixture must read OWN — a foreign or undecidable verdict would make the outcome vacuous")
+
+	marked, _, err := markedOrphanProcesses(
+		[]proctree.Process{carrier}, name, home, fixtureCohort(gen),
+		cohortMembership{
+			Root:      proctree.Process{PID: carrier.PPID, StartID: 1},
+			AgentExe:  "claude",
+			OwnServer: own,
+		}, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, []proctree.Process{carrier}, marked,
+		"an unproven own-server carrier keeps its tier-2 admission — own never demotes either")
 }
 
 // #3699 pinned: the re-hosted claude keeps converging. A claude-comm carrier
@@ -332,14 +424,23 @@ func TestVanishedSessionSweep_RealTmuxForeignServerCarrier(t *testing.T) {
 	require.Equal(t, 1, carrier.PPID,
 		"the carrier must be init-reparented — the detached shape #7469 reports")
 
-	// The attribution channels themselves, on real evidence: the carrier's
-	// env tuple names a socket that is not the recorded one, and its held
-	// slave is mastered by a server pid that is not the recorded one.
+	// The attribution channels themselves, on real evidence — asserted
+	// INDEPENDENTLY so the claim stays honest: the carrier's env tuple
+	// names a socket that is not the recorded one, AND its held slave is
+	// mastered by a server pid that is not the recorded one.
 	environ, err := proctree.Environ(carrier.PID)
 	require.NoError(t, err)
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
 	owners := &serverPtyOwners{}
+	tmuxEnv, hasTmux := processEnvValue(environ, tmuxEnvVar)
+	require.True(t, hasTmux, "the detached carrier still holds its pane's TMUX tuple")
+	require.Equal(t, serverVerdictForeign,
+		tmuxEnvServerVerdict(tmuxEnv, own, own.PIDNS),
+		"env channel: a foreign socket in TMUX")
+	require.Equal(t, serverVerdictForeign,
+		ptyFdServerVerdict(carrier.PID, own, snap, owners, own.PIDNS),
+		"pty channel: the carrier's slave is mastered by the foreign server")
 	require.Equal(t, serverVerdictForeign,
 		carrierServerVerdict(carrier, environ, own, snap, owners, own.PIDNS),
 		"real evidence attributes the carrier to the foreign server")

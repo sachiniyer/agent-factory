@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -224,4 +225,32 @@ func TestSameRecordedSocket_AHungCompareIsUndecidable(t *testing.T) {
 	own := ServerIdentity{Socket: sock, PID: 4242, StartID: 1, SessionID: "$7"}
 	require.Equal(t, serverVerdictUndecidable,
 		tmuxEnvServerVerdict(sock+",4242,3", own, ""))
+}
+
+// #7469 R5a: tmux renders control and non-UTF-8 bytes in #{socket_path} as
+// \NNN octal text while the carrier's TMUX env holds the raw bytes — so a
+// recorded socket containing a backslash may be a RENDERING of a different
+// real path, and a literal backslash cannot be told apart from one. Such a
+// record is incomparable — undecidable, never foreign — unless the literal
+// spelling itself answers as a live unix listener.
+func TestCarrierServerVerdict_EscapedRecordedSocketIsIncomparable(t *testing.T) {
+	dir := t.TempDir()
+	realSock := filepath.Join(dir, "so\x01ck")  // byte 0x01 — what TMUX holds raw
+	recorded := filepath.Join(dir, "so\\001ck") // tmux's \NNN rendering of it
+	own := ServerIdentity{Socket: recorded, PID: 4242, StartID: 1, SessionID: "$7"}
+
+	got := tmuxEnvServerVerdict(realSock+",4242,7", own, "")
+	require.Equal(t, serverVerdictUndecidable, got,
+		"an escaped recorded socket whose literal spelling answers no listener is incomparable — never foreign")
+
+	// A literal backslash path that DOES answer as a live listener is the
+	// real path — the compare proceeds on it verbatim.
+	litSock := filepath.Join(dir, "lit\\eral.sock")
+	lc, err := net.Listen("unix", litSock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lc.Close() })
+	own2 := ServerIdentity{Socket: litSock, PID: 4242, StartID: 1, SessionID: "$7"}
+	require.Equal(t, serverVerdictOwn,
+		tmuxEnvServerVerdict(litSock+",4242,7", own2, ""),
+		"a backslash spelling backed by the live listener compares as the literal truth")
 }

@@ -438,6 +438,15 @@ type TmuxSession struct {
 	// before the re-stamp, in memory and on the row (R1): the cell never
 	// names an incarnation older than the session's current one.
 	serverEvidence atomic.Pointer[ServerIdentity]
+	// serverEvidenceRetired marks that a spawn boundary retired the record
+	// and nothing has re-stamped since (#7469 R1a). The retirement is keyed
+	// to "a new incarnation can exist" — the new-session issue inside
+	// start() — never to Start's success: a respawn that issues new-session
+	// and then fails readiness or exits leaves this true, which is how the
+	// persisted row learns to write ABSENT rather than the previous
+	// incarnation's (socket, server pid). Cleared by the next live stamp or
+	// restore seed.
+	serverEvidenceRetired atomic.Bool
 	// provenNoPane records that a Start attempt PROVED this name had no tmux
 	// session and then returned before running new-session, so nothing can be
 	// running behind it. Guarded by provenMu; read through ProvenNoPane.

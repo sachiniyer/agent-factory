@@ -88,6 +88,24 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
 	data.archivePushCompleted = i.archivePushCompleted
 
+	// #7469 R1a: the persisted server record retires keyed to "a new
+	// incarnation can exist" — the new-session issue inside start() — never
+	// to Start's success. A respawn that issued new-session and then failed
+	// readiness or exited leaves the bound session's retirement raised: the
+	// row must persist ABSENT here rather than the previous incarnation's
+	// (socket, server pid), which would read the replacement's own
+	// survivors foreign — left alive while teardown deletes the worktree
+	// under them. A bound session that never retired keeps the standing
+	// fields; an unbound row (archived, killed, remote) keeps whatever the
+	// last write left for a restart's re-seed.
+	if ts := i.tmuxLocked(); ts != nil && ts.ServerEvidenceRetired() {
+		data.RuntimeServerSocket = ""
+		data.RuntimeServerPID = 0
+		data.RuntimeServerStartID = 0
+		data.RuntimeServerSessionID = ""
+		data.RuntimeServerPIDNS = ""
+	}
+
 	if i.backend != nil {
 		data.BackendType = i.backend.Type()
 		// Project the per-kind tab verdict rather than leaving clients to infer one
