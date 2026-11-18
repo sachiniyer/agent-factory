@@ -152,10 +152,9 @@ func TestTmuxProvedSessionAbsentCorroboratesWithTheSessionListing(t *testing.T) 
 // removed answers ENOENT to every client, but SIGUSR1 — tmux's documented
 // recreate-socket signal — is the recovery, so the strict probe signals the
 // live server, watches the socket reappear, and gets the REAL answer rather
-// than reporting unknown forever. The pin restricts the signal to the test's
-// own private server: without it the probe would SIGUSR1 every same-uid tmux
-// server on the host, which is the correct behaviour in production but not
-// something a test should do to a developer's sessions.
+// than reporting unknown forever. The server is bound to the unlinked path, so
+// it is the one candidate signalled (#7533). The pin keeps the probe's reads to
+// the test's own private server rather than every same-uid server on the host.
 func TestProbeSessionStrictRevivesAnOrphanedSocket(t *testing.T) {
 	testguard.IsolateTmux(t)
 
@@ -181,8 +180,10 @@ func TestProbeSessionStrictRevivesAnOrphanedSocket(t *testing.T) {
 // The other half of the same mechanism: a socket NO live server claims is a
 // determinate empty, even while unrelated tmux servers run for this uid — the
 // `tmux -L`-user case that used to report unknown forever. The neighbour
-// server is real (it must be signalable, or the probe honestly stays unknown);
-// it lives on its own named socket inside the same private dir.
+// server is real: its listening socket is read and found bound to its own named
+// socket inside the same private dir, so it is ruled out without a signal
+// (#7533). A neighbour whose sockets could not be read would honestly leave the
+// probe unknown.
 func TestProbeSessionStrictConfirmsAbsenceWhenNoServerClaimsTheSocket(t *testing.T) {
 	testguard.IsolateTmux(t)
 
