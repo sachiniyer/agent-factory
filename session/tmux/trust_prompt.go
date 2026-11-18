@@ -36,9 +36,19 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	switch DetectAgentFromCommand(t.programCmd()) {
 	case ProgramClaude:
 		// Every Claude clause reads this one capture as visible text: stripped
-		// once, here, of every escape capture-pane -e emits (#7271).
-		screen := visibleTextOf(content)
+		// once, here, of every escape capture-pane -e emits (#7271). A whole
+		// composer drawn last on it, in any mode and with any draft, reads as
+		// the empty composer of its kind, so its draft rows are never a
+		// dialog's (claudeScreenOf, #7464).
+		screen := claudeScreenOf(content)
 		if claudeTrustPromptPresent(screen) {
+			// A composer's closing rule under the dialog's footer: the dialog
+			// is in a draft whose prompt the pane is too short to show. Hold,
+			// and send nothing (#7464).
+			if claudeComposerRuleUnderDialog(screen) {
+				t.refuseClaudeDialogInADraft()
+				return true
+			}
 			// NOT a bare Enter. Claude Code 2.1.257 made "No, exit" the
 			// preselected option of the folder-trust dialog, so the Enter this
 			// branch used to send chose to QUIT the agent (#3579).

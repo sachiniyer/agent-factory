@@ -350,7 +350,7 @@ func (t *TmuxSession) rejectClaudeMCPServers() bool {
 	// Look again before the one key: the frame af decided on must still be the
 	// complete picker (#7170 review, P3-1), as declineClaudeMCPServer re-reads
 	// before its Enter.
-	if content, err := t.CapturePaneContent(); err != nil || claudeMCPServersPickerOf(visibleTextOf(content)) != claudeMCPServersComplete {
+	if content, err := t.CapturePaneContent(); err != nil || claudeMCPServersPickerOf(claudeScreenOf(content)) != claudeMCPServersComplete {
 		log.InfoLog.Printf("session %q: the %s picker was not on screen when af re-read the pane before its Esc (read error: %v); sending nothing",
 			t.sanitizedName, claudeMCPServersDialogName, err)
 		return true
@@ -375,7 +375,7 @@ func (t *TmuxSession) rejectClaudeMCPServers() bool {
 		switch {
 		case err != nil:
 			readErr = err
-		case claudeMCPServersPickerOf(visibleTextOf(content)) == claudeMCPServersNone:
+		case claudeMCPServersPickerOf(claudeScreenOf(content)) == claudeMCPServersNone:
 			log.InfoLog.Printf("session %q: rejected every server on the %s picker with Esc; %s",
 				t.sanitizedName, claudeMCPServersDialogName, claudeMCPServersRemedy)
 			return true

@@ -332,7 +332,7 @@ func (t *TmuxSession) declineClaudeMCPServer(dialog claudeMCPServerDialog) bool 
 			t.sanitizedName, claudeMCPServerDialogName, claudeMCPServerDeclineLabel, err)
 		return true
 	}
-	confirmed := claudeMCPServerDialogOf(visibleTextOf(content))
+	confirmed := claudeMCPServerDialogOf(claudeScreenOf(content))
 	if confirmed.verdict != claudeMCPServerComplete || confirmed.selected != claudeMCPServerDeclineLabel {
 		log.InfoLog.Printf("session %q: the %s dialog changed before af confirmed it (now %q selected); not confirming this frame",
 			t.sanitizedName, claudeMCPServerDialogName, confirmed.selected)

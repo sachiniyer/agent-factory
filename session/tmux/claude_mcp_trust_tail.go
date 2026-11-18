@@ -289,9 +289,11 @@ func claudeMCPTrustDraftRow(lines []string, rows []claudeTrustRow, start, last i
 // there is chrome such as a branch named "new", not the modal being painted.
 //
 // Nothing else places a row under a composer. A rule with no prompt row above
-// it is a rule; the modal's own option rows above a rule are not a prompt; and
-// a composer holding a multi-line draft is not read here, because rows between
-// a prompt and a rule can be the modal's.
+// it is a rule, and the modal's own option rows above a rule are not a prompt.
+// A whole composer drawn last reaches this as those three lines whatever its
+// draft holds, since the gate reads it as the empty composer of its kind
+// (claudeComposersCanonical, #7464); one read as painted, with a multi-line
+// draft, is not read here.
 //
 // One spelling is never excused: "New", exactly as the modal paints its first
 // row. On a pane 6 columns wide that row is the whole of the modal's first

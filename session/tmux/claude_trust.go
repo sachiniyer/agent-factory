@@ -737,13 +737,13 @@ type trustPicker struct {
 }
 
 // claudeFolderTrustPicker is Claude Code's folder-trust dialog. Each read is
-// of one capture, stripped once; a capture that is already visible text strips
-// to itself.
+// of one capture, read as every Claude clause reads it (claudeScreenOf); a
+// capture that is already such a screen reads to itself.
 var claudeFolderTrustPicker = trustPicker{
 	name:        claudeFolderTrustDialogName,
 	affirmative: claudeTrustAffirmativeLabel,
 	read: func(content string) (claudeFolderTrustDialog, error) {
-		screen := visibleTextOf(content)
+		screen := claudeScreenOf(content)
 		switch claudeFolderTrustDialogOf(screen) {
 		case claudeFolderTrustComplete:
 			return parseClaudeFolderTrustDialog(screen)

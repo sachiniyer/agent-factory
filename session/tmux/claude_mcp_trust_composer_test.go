@@ -14,8 +14,8 @@ import (
 
 const composerRule = "────────────────"
 
-// A composer excuses the rows it explains: the later rows of its own draft,
-// and one word on the row straight under it, which is the agent's status row.
+// A composer excuses the rows it explains: the rows of its own draft, and one
+// word on the row straight under it, which is the agent's status row.
 func TestCheckAndHandleTrustPrompt_ComposerDraftRowsAreNotTheOldMCPModal(t *testing.T) {
 	for _, tt := range []struct{ name, content string }{
 		// R1: a status row under the composer that reads "new".
@@ -30,6 +30,14 @@ func TestCheckAndHandleTrustPrompt_ComposerDraftRowsAreNotTheOldMCPModal(t *test
 		{"a boxed draft whose last row is new", "╭───────────────────╮\n│ > make the branch │\n│   new             │\n╰───────────────────╯\n"},
 		{"a draft holding the whole preamble row", composerRule + "\n❯ Explain this:\n  New MCP server found.\n" + composerRule + "\n"},
 		{"a draft holding the preamble and the question", composerRule + "\n❯ Explain this:\n  New MCP server found.\n  Do you trust this new MCP server?\n" + composerRule + "\n"},
+		// #7464: a composer drawn last explains every row of its own draft, the
+		// modal's option rows among them, and a row under it that reads new is
+		// its status row whatever its draft holds. Claude Code paints the modal
+		// in place of the composer, never inside it.
+		{"the word new under a composer that holds a draft", composerRule + "\n❯ fix it\n  please\n" + composerRule + "\n  new"},
+		{"a draft of the modal's words, then a row that reads new", composerRule + "\n❯ Explain this:\n  New MCP server found.\n  Do you trust this new MCP server?\n" + composerRule + "\n  new\n"},
+		{"a draft that reaches the option rows", composerRule + "\n❯ Explain this:\n  New MCP server found.\n  Do you trust this new MCP server?\n  1. Yes\n" + composerRule},
+		{"a draft that reaches an option's ordinal, wrapped at 6 columns", composerRule + "\n❯ Explain this:\n  New\n  MCP\n  server\n  found.\n  Do you\n  trust\n  this\n  new\n  MCP\n  server?\n    1.\n" + composerRule},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			handled, cmds := pollStaticPane(t, tt.content, 4)
@@ -62,8 +70,6 @@ func TestCheckAndHandleTrustPrompt_ComposerRowsDoNotUnholdTheOldMCPModal(t *test
 		{"a modal prefix above a rule and a row that reads new, no composer", "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes\n  2. No\n" + composerRule + "\n  new"},
 		{"the preamble above a rule and a row that reads new", "New MCP server found.\n" + composerRule + "\n  new"},
 		{"the modal's first row, New, straight under a composer", composerRule + "\n❯ \n" + composerRule + "\nNew"},
-		{"the word new under a composer that holds a draft", composerRule + "\n❯ fix it\n  please\n" + composerRule + "\n  new"},
-		{"a draft of the modal's words, then a row that reads new", composerRule + "\n❯ Explain this:\n  New MCP server found.\n  Do you trust this new MCP server?\n" + composerRule + "\n  new\n"},
 		{"the word new as the last row, no composer", "● Switched to branch\n  new\n"},
 		{"the word new under a composer, a blank row between", composerRule + "\n❯ \n" + composerRule + "\n\n  new"},
 		{"two of the modal's words under a composer", composerRule + "\n❯ \n" + composerRule + "\n  New MCP"},
@@ -73,8 +79,6 @@ func TestCheckAndHandleTrustPrompt_ComposerRowsDoNotUnholdTheOldMCPModal(t *test
 		{"a boxed prompt, rows with no borders, the box's bottom", "╭────────────────╮\n│ > hi           │\nNew MCP server\nfound. Do you\n╰────────────────╯"},
 		{"a prompt row with no rule above it", "❯ Explain this:\n  New MCP server\n  found. Do you\n" + composerRule},
 		{"a draft with no closing rule", composerRule + "\n❯ Explain this:\n  New MCP server\n  found. Do you"},
-		{"a draft that reaches the option rows", composerRule + "\n❯ Explain this:\n  New MCP server found.\n  Do you trust this new MCP server?\n  1. Yes\n" + composerRule},
-		{"a draft that reaches an option's ordinal, wrapped at 6 columns", composerRule + "\n❯ Explain this:\n  New\n  MCP\n  server\n  found.\n  Do you\n  trust\n  this\n  new\n  MCP\n  server?\n    1.\n" + composerRule},
 		{"a framed modal between a prompt row and a rule", composerRule + "\n❯ run me\n╭────────────────────╮\n│ New MCP server     │\n" + composerRule},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
