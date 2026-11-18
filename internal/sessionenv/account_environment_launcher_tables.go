@@ -32,7 +32,7 @@ var sudoLongOptions = map[string]bool{
 // sudoShortFlags are sudo's no-operand short options; sudoShortValueFlags
 // are the ones that take an operand (attached in the cluster or as the next
 // word). `-h` is neither: its host operand is optional and attached-only.
-const sudoShortFlags = "ABbEHikKNnPsSve"
+const sudoShortFlags = "ABbEHikKlNnPsSVve"
 const sudoShortValueFlags = "CDgpRrTtUu"
 
 var systemdRunLongOptions = map[string]bool{
@@ -111,7 +111,12 @@ func dockerOptionStep(words []*syntax.Word, i int, spec dockerOptionSpec, names 
 		switch {
 		case strings.IndexByte(spec.shortFlags, c) >= 0:
 		case c == 'e' && strings.IndexByte(spec.shortValues, 'e') >= 0:
-			operand := cluster[j+1:]
+			// pflag's `-n=1234` short-option syntax: an `=` right after the
+			// letter is the separator, not part of the operand, so
+			// `-e=CODEX_HOME=/x` must judge `CODEX_HOME=/x`. An emptied
+			// operand (`-e=`) falls to the separate-word step — the
+			// conservative read of a spelling docker itself rejects.
+			operand := strings.TrimPrefix(cluster[j+1:], "=")
 			if operand != "" {
 				if accountEnvironmentOperandDenied(operand, names) {
 					if !requireCommand {
@@ -164,9 +169,9 @@ func dockerEnvSpellingStep(words []*syntax.Word, i int, names map[string]struct{
 	for j := 0; j < len(cluster); j++ {
 		c := cluster[j]
 		switch {
-		case strings.IndexByte("diPqtT", c) >= 0:
+		case strings.IndexByte(dockerInertLeafSpec.shortFlags, c) >= 0:
 		case c == 'e':
-			operand := cluster[j+1:]
+			operand := strings.TrimPrefix(cluster[j+1:], "=")
 			if operand != "" {
 				if accountEnvironmentOperandDenied(operand, names) {
 					return 0, true
@@ -246,12 +251,24 @@ func dockerEnvNameDenied(name string, names map[string]struct{}, requireCommand 
 	return false
 }
 
+// dockerInertLeafSpec is the short-cluster union dockerEnvSpellingStep
+// reads for non-launching leaves, reused by dockerDynamicEnvName so a
+// dynamic `-e`-sigil there names the same operand.
+var dockerInertLeafSpec = dockerOptionSpec{
+	shortFlags:  "diPqtT",
+	shortValues: "e",
+}
+
 // dockerDynamicEnvName reads a non-literal word whose literal prefix still
-// pins it to an env-assign spelling — `--env=PORT="$PORT"` or
-// `-ePORT="$PORT"` — and returns the assigned variable name. A dynamic
-// env-file spelling is not recognized here and stays unprovable, refusing
-// through the caller's default path like any other unreadable word.
-func dockerDynamicEnvName(word *syntax.Word) (string, bool) {
+// pins it to an env-assign spelling — `--env=PORT="$PORT"`, `-ePORT="$PORT"`,
+// or `-te=PORT="$PORT"` — and returns the assigned variable name. The sigil
+// before the word's first `=` is a pflag short cluster: an `=` right after
+// the `e` letter is pflag's separator, so the operand's name opens `rest`,
+// while a nonempty cluster remainder is the operand's NAME itself
+// (`-ePORT=`). A dynamic env-file spelling is not recognized here and stays
+// unprovable, refusing through the caller's default path like any other
+// unreadable word.
+func dockerDynamicEnvName(word *syntax.Word, spec dockerOptionSpec) (string, bool) {
 	prefix := launcherLiteralPrefix(word)
 	eq := strings.Index(prefix, "=")
 	if eq < 0 {
@@ -265,8 +282,28 @@ func dockerDynamicEnvName(word *syntax.Word) (string, bool) {
 			return "", false
 		}
 		name, _, _ = strings.Cut(rest, "=")
-	case strings.HasPrefix(sigil, "-e"):
-		name = sigil[2:]
+	case strings.HasPrefix(sigil, "-"):
+		cluster := sigil[1:]
+		for j := 0; j < len(cluster); j++ {
+			c := cluster[j]
+			switch {
+			case strings.IndexByte(spec.shortFlags, c) >= 0:
+			case c == 'e' && strings.IndexByte(spec.shortValues, 'e') >= 0:
+				if operand := cluster[j+1:]; operand != "" {
+					name = operand
+				} else {
+					name, _, _ = strings.Cut(rest, "=")
+				}
+			default:
+				// Another value letter takes the cluster's rest as its
+				// own operand, and an unknown letter leaves the word
+				// unprovable — either way it is not an env spelling.
+				return "", false
+			}
+			if name != "" {
+				break
+			}
+		}
 	default:
 		return "", false
 	}

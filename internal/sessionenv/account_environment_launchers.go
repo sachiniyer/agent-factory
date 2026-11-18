@@ -312,7 +312,12 @@ func systemdRunClusterStep(words []*syntax.Word, names map[string]struct{}, memo
 		switch {
 		case strings.IndexByte(systemdRunShortFlags, c) >= 0:
 		case c == 'E' || c == 'p':
-			operand := cluster[i+1:]
+			// An `=` right after the letter is the option's separator on
+			// any parser that honors it (getopt hands systemd-run `=N=v`,
+			// which it rejects — but a shadowed or pflag-styled run would
+			// read `N=v`), so judge the stripped operand; an emptied
+			// operand falls to the separate-word step.
+			operand := strings.TrimPrefix(cluster[i+1:], "=")
 			if operand == "" {
 				if c == 'E' {
 					return systemdRunEnvOperandStep(words, names, requireCommand, denied)
@@ -397,11 +402,12 @@ func systemdRunEnvOperandStep(words []*syntax.Word, names map[string]struct{}, r
 
 // systemdRunDynamicEnvName reads a non-literal systemd-run word whose
 // literal prefix still pins it to an env option — `--setenv=PORT="$PORT"`,
-// `-EPORT="$PORT"`, `--property=Environment=PORT="$V"`. envSpelling is true
-// when the prefix proves such an option, and denied reports whether its
-// visible name already runs afoul of the denied-name cut; an unclosed quote
-// or a `*property` value that denies makes denied true so the caller can
-// refuse rather than consume an unreadable tail.
+// `-EPORT="$PORT"`, `-tE=PORT="$PORT"`, `--property=Environment=PORT="$V"`.
+// envSpelling is true when the prefix proves such an option, and denied
+// reports whether its visible name already runs afoul of the denied-name
+// cut or its operand can no longer be proven (an env-family property with a
+// dynamic value expands into unprovable fragments), so the caller refuses
+// rather than consumes an unreadable tail.
 func systemdRunDynamicEnvName(word *syntax.Word, names map[string]struct{}) (envSpelling, denied bool) {
 	prefix := launcherLiteralPrefix(word)
 	eq := strings.Index(prefix, "=")
@@ -409,29 +415,81 @@ func systemdRunDynamicEnvName(word *syntax.Word, names map[string]struct{}) (env
 		return false, false
 	}
 	sigil, rest := prefix[:eq], prefix[eq+1:]
-	var name string
 	switch {
 	case strings.HasPrefix(sigil, "--"):
 		resolved, _, known := resolveLongOption(sigil[2:], systemdRunLongOptions)
 		if !known {
 			return false, false
 		}
-		if resolved == "setenv" {
-			name, _, _ = strings.Cut(rest, "=")
-		} else if strings.HasSuffix(resolved, "property") {
-			return true, systemdRunPropertyOperandDenied(rest, names)
-		} else {
-			return false, false
+		switch {
+		case resolved == "setenv":
+			name, _, _ := strings.Cut(rest, "=")
+			if !validName(name) {
+				return false, false
+			}
+			return true, accountEnvironmentOperandDenied(name, names)
+		case strings.HasSuffix(resolved, "property"):
+			return true, systemdRunDynamicPropertyDenied(rest)
 		}
-	case strings.HasPrefix(sigil, "-E"):
-		name = sigil[2:]
-	default:
 		return false, false
+	case strings.HasPrefix(sigil, "-"):
+		cluster := sigil[1:]
+		for i := 0; i < len(cluster); i++ {
+			c := cluster[i]
+			switch {
+			case strings.IndexByte(systemdRunShortFlags, c) >= 0:
+			case c == 'E' || c == 'p':
+				operand := cluster[i+1:]
+				if operand == "" {
+					// `-E=`/`-p=`: the cut `=` was the separator after
+					// the letter, so the operand opens `rest`.
+					operand = rest
+				} else {
+					// The cut `=` was inside the operand (`-EN=v`,
+					// `-pName=v`): reattach it so the operand reads as
+					// the launcher sees it.
+					operand += "=" + rest
+				}
+				operand = strings.TrimPrefix(operand, "=")
+				if c == 'E' {
+					name, _, _ := strings.Cut(operand, "=")
+					if !validName(name) {
+						return false, false
+					}
+					return true, accountEnvironmentOperandDenied(name, names)
+				}
+				return true, systemdRunDynamicPropertyDenied(operand)
+			default:
+				// Another value letter takes the cluster's rest as its
+				// own operand; an unknown letter leaves the word
+				// unprovable. Either way it is not an env spelling.
+				return false, false
+			}
+		}
 	}
-	if !validName(name) {
-		return false, false
+	return false, false
+}
+
+// systemdRunDynamicPropertyDenied judges a `-p`/`--property` operand whose
+// value is only partly literal. Its property name is always literal — it
+// sits before the operand's own first `=`, which the caller's prefix cut
+// guarantees — but a dynamic Environment= value can expand into extra
+// fragments the word does not show, and a dynamic EnvironmentFile= or
+// UnsetEnvironment= operand is unprovable the same way, so the env-family
+// properties refuse while any other property is inert to the child's
+// environment.
+func systemdRunDynamicPropertyDenied(operand string) bool {
+	property, _, hasValue := strings.Cut(operand, "=")
+	switch {
+	case !hasValue:
+		// A bare property name with a dynamic tail cannot be read.
+		return true
+	case strings.EqualFold(property, "Environment"),
+		strings.EqualFold(property, "EnvironmentFile"),
+		strings.EqualFold(property, "UnsetEnvironment"):
+		return true
 	}
-	return true, accountEnvironmentOperandDenied(name, names)
+	return false
 }
 
 // systemdRunPropertyOperandDenied judges a `-p`/`--property` NAME=VALUE
@@ -563,7 +621,7 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 		}
 		literal, ok := literalShellWord(words[i])
 		if !ok {
-			if name, envSpelling := dockerDynamicEnvName(words[i]); envSpelling {
+			if name, envSpelling := dockerDynamicEnvName(words[i], dockerGlobalOptions); envSpelling {
 				if dockerEnvNameDenied(name, names, requireCommand, &denied) {
 					return run.done(nil, true)
 				}
@@ -598,7 +656,7 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 			for i < len(words) {
 				literal, ok := literalShellWord(words[i])
 				if !ok {
-					if name, envSpelling := dockerDynamicEnvName(words[i]); envSpelling {
+					if name, envSpelling := dockerDynamicEnvName(words[i], dockerComposeGlobalOptions); envSpelling {
 						if dockerEnvNameDenied(name, names, requireCommand, &denied) {
 							return run.done(nil, true)
 						}
@@ -640,7 +698,7 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 			}
 			literal, ok := literalShellWord(words[i])
 			if !ok {
-				if name, envSpelling := dockerDynamicEnvName(words[i]); envSpelling {
+				if name, envSpelling := dockerDynamicEnvName(words[i], spec); envSpelling {
 					if dockerEnvNameDenied(name, names, requireCommand, &denied) {
 						return run.done(nil, true)
 					}
@@ -685,10 +743,20 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 		}
 		literal, ok := literalShellWord(words[i])
 		if !ok {
-			// A non-launching leaf's operands are inert data, so a dynamic
-			// word is skipped exactly like the unrecognized tail scan —
-			// `docker logs "$CONTAINER"` admits — while the words after it
-			// may still open an env invocation.
+			// A dynamic env spelling still names its target from the
+			// literal prefix — `--env=CODEX_HOME=$V` on a service create
+			// injects the same way the literal form does — while any other
+			// non-literal operand of a non-launching leaf is inert data,
+			// skipped exactly like the unrecognized tail scan (`docker
+			// logs "$CONTAINER"` admits). The words after it may still
+			// open an env invocation.
+			if name, envSpelling := dockerDynamicEnvName(words[i], dockerInertLeafSpec); envSpelling {
+				if dockerEnvNameDenied(name, names, false, nil) {
+					return run.done(nil, true)
+				}
+				i++
+				continue
+			}
 			if memo.xargsItemFollows(words[i+1:]) ||
 				envCallMutatesAccountEnvironment(words[i+1:], names, true, memo) {
 				return run.done(nil, true)

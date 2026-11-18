@@ -384,6 +384,57 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker logs \"$CONTAINER\"", false},
 		{"docker compose exec -it svc ls", false},
 		{"docker compose run -it svc echo hi", false},
+
+		// pflag's `-n=1234` short-option syntax: an `=` right after the
+		// `-e` letter is the separator, not part of the operand, so every
+		// spelling — `-eN=v`, `-e N=v`, `-e=N=v`, `-e=N`, clusters whose
+		// last letter takes the next word or an `=`-attached operand —
+		// parses to the same name.
+		{"docker run -e=CODEX_HOME=/other busybox codex", true},
+		{"docker run -e=PORT=3000 busybox codex", false},
+		{"docker run -e=CODEX_HOME busybox codex", true},
+		{"docker run -e=PORT busybox codex", false},
+		{"docker run -ite CODEX_HOME=/other busybox codex", true},
+		{"docker run -ite PORT=3000 busybox codex", false},
+		{"docker run -ie=CODEX_HOME=/other busybox codex", true},
+		{"docker run -ie=PORT=3000 busybox codex", false},
+		{"docker exec -e=CODEX_HOME=/other c1 codex", true},
+		{"docker compose run -e=CODEX_HOME=/other svc codex", true},
+		{"docker compose exec -e=PORT=3000 svc codex", false},
+		{"docker service create -e=CODEX_HOME=/other img", true},
+		// The same spellings with a dynamic value name their target from
+		// the literal prefix, clustered sigils included.
+		{"docker run -e=CODEX_HOME=\"$V\" busybox codex", true},
+		{"docker run -e=PORT=\"$P\" busybox codex", false},
+		{"docker run -tePORT=\"$P\" busybox codex", false},
+		{"docker run -te=CODEX_HOME=\"$V\" busybox codex", true},
+		{"docker service create --env=CODEX_HOME=$V img", true},
+		// systemd-run's `-E` gets the same normalization — `-E N=v`,
+		// `-EN=v`, `-E=N=v`, `--setenv N=v`, `--setenv=N=v` and the bare
+		// `-E=NAME` copy all reach the same name — and `-p=` hands its
+		// property operand the same cut.
+		{"systemd-run -E=CODEX_HOME=/other codex", true},
+		{"systemd-run -E=PORT=3000 codex", false},
+		{"systemd-run -E=CODEX_HOME codex", true},
+		{"systemd-run -tE=CODEX_HOME=/other codex", true},
+		{"systemd-run -tE=PORT=3000 codex", false},
+		{"systemd-run -EPORT=\"$P\" codex", false},
+		{"systemd-run -E=PORT=\"$P\" codex", false},
+		{"systemd-run -E=CODEX_HOME=\"$V\" codex", true},
+		{"systemd-run -tE=CODEX_HOME=\"$V\" codex", true},
+		{"systemd-run -p=Environment=CODEX_HOME=/x codex", true},
+		{"systemd-run -p=Description=x codex", false},
+		// An env-family property whose value is dynamic can expand into
+		// fragments the word does not show, so it refuses; a non-env
+		// property's dynamic value is inert to the child's environment.
+		{"systemd-run --property=Environment=PORT=$P codex", true},
+		{"systemd-run --property=Description=$P codex", false},
+		// sudo's -l and -V are no-operand flags; -l's command word is
+		// positional and the assignment region ahead of it is unchanged.
+		{"sudo -l", false},
+		{"sudo -l codex", false},
+		{"sudo -V", false},
+		{"sudo -l CODEX_HOME=/x codex", true},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)
