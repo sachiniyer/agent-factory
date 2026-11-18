@@ -171,6 +171,14 @@ var agentNames = map[string]map[string]struct{}{
 		// mode signal, not a credential. Google Cloud's credentials are behind
 		// them in conditionalAgentNames (#2462).
 		"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
+		// The endpoint names are here for the SAME reason ANTHROPIC_BASE_URL
+		// is on claude's: they are the operator's documented override for
+		// where the CLI sends its credential, and the credential-mount
+		// boundary's pin or re-assert must be allowlisted to reach the
+		// agent's exec environment at all (#7531 — a name the filter strips
+		// is a name gemini's workspace .env loader can restore).
+		"CODE_ASSIST_ENDPOINT", "CODE_ASSIST_API_VERSION",
+		"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL",
 	),
 	"amp": nameSet("AMP_API_KEY", "AMP_HOME"),
 	"aider": nameSet(
@@ -436,6 +444,11 @@ func ImportedCredentialNames() []string {
 			set[name] = struct{}{}
 		}
 	}
+	for _, names := range accountLateEnvironmentValues {
+		for name := range names {
+			set[name] = struct{}{}
+		}
+	}
 	for name := range accountShellStartupNames {
 		set[name] = struct{}{}
 	}
@@ -653,6 +666,20 @@ func AgentAllowlistNames(agent string) []string {
 	set := agentNames[agent]
 	out := make([]string, 0, len(set))
 	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// CommonAllowlistNames returns every name in the common allowlist — the
+// shared boundary names admitted for every agent before per-agent or
+// passthrough names are considered, sorted. Surfaces that must classify the
+// whole reachable surface (the credential-mount completeness pin) enumerate
+// it rather than keep a copy: the copy is what rots (#7531).
+func CommonAllowlistNames() []string {
+	out := make([]string, 0, len(commonNames))
+	for name := range commonNames {
 		out = append(out, name)
 	}
 	sort.Strings(out)

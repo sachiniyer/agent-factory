@@ -711,6 +711,14 @@ func TestAccountIdentityNames_IncludeTheNamesTheShimPins(t *testing.T) {
 					"or restore path would leave it free", name, agent)
 		}
 	}
+	for agent, values := range accountLateEnvironmentValues {
+		names := AccountIdentityNames(agent)
+		for name := range values {
+			require.Contains(t, names, name,
+				"%s is valued-filled locally for %s but absent from the shared identity list, so a container "+
+					"or restore path would leave it free for run_args or an image ENV to claim", name, agent)
+		}
+	}
 }
 
 // TestApplyAccount_RefusesGeminiWhileACloudModeIsActive: gemini's two selectors
@@ -905,5 +913,63 @@ func TestApplyAccountEnvironment_AdmitsZshOnlyAsThePinnedGeneratedLaunch(t *test
 		require.NoError(t, err, command)
 		_, ok := envValue(scoped, "ZDOTDIR")
 		require.False(t, ok, "%q launches no zsh and must neither pin nor keep ZDOTDIR", command)
+	}
+}
+
+// TestApplyAccount_PinsGeminiRoutingNames is the account-path half of the
+// #7531 endpoint boundary: gemini's `.env` loader can claim an endpoint or
+// API-version selector after the scope is applied and route the ACCOUNT's
+// token, so the falsy-safe routing names are installed DEFINED AND EMPTY —
+// the ambient copy is dropped whether it came from the operator or from a
+// repo-influenced container environment.
+func TestApplyAccount_PinsGeminiRoutingNames(t *testing.T) {
+	scoped, err := ApplyAccount(
+		[]string{
+			"GOOGLE_GEMINI_BASE_URL=https://repo-endpoint.invalid",
+			"CODE_ASSIST_API_VERSION=v9",
+			"PATH=/usr/bin",
+		}, "",
+		Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"})
+	require.NoError(t, err)
+	for _, name := range []string{
+		"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "CODE_ASSIST_API_VERSION",
+	} {
+		value, present := envValue(scoped, name)
+		require.True(t, present, "%s must be installed defined — an absent name is the `.env` loader's to claim", name)
+		require.Empty(t, value,
+			"%s must hold a defined-EMPTY pin: falsy reads fall back to the first-party default, and the repo endpoint must not survive", name)
+	}
+}
+
+// TestApplyAccount_FillsFirstPartyEndpoint is the same defense for the one
+// routing name an empty pin cannot hold: gemini's nullish-coalescing read of
+// CODE_ASSIST_ENDPOINT treats defined-empty as a real endpoint, so the
+// ambient copy is dropped and the first-party default is installed —
+// working for gemini, defined for the `.env` loader (#7531).
+func TestApplyAccount_FillsFirstPartyEndpoint(t *testing.T) {
+	for _, ambient := range [][]string{
+		{"PATH=/usr/bin"},
+		{"PATH=/usr/bin", "CODE_ASSIST_ENDPOINT=https://repo-endpoint.invalid"},
+	} {
+		scoped, err := ApplyAccount(ambient, "",
+			Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"})
+		require.NoError(t, err)
+		value, present := envValue(scoped, "CODE_ASSIST_ENDPOINT")
+		require.True(t, present, "the endpoint must be installed defined — an absent name is the `.env` loader's to claim")
+		require.Equal(t, "https://cloudcode-pa.googleapis.com", value,
+			"the ambient endpoint must not survive: on the container path it is repo-influenced, and an empty one is a real — broken — endpoint")
+	}
+}
+
+// TestAccountLateEnvironmentValues_StayOffTheEmptyPinTables: a name in the
+// valued-fill table must not also sit in the empty-pin table — the pin wins
+// positionally and the endpoint arrives defined-and-broken.
+func TestAccountLateEnvironmentValues_StayOffTheEmptyPinTables(t *testing.T) {
+	for agent, values := range accountLateEnvironmentValues {
+		for name := range values {
+			_, pinned := accountLateEnvironmentNames[agent][name]
+			require.False(t, pinned,
+				"%s takes a defined VALUE for %s — an empty pin is the broken form this table exists to avoid", name, agent)
+		}
 	}
 }

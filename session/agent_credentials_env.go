@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -19,30 +20,58 @@ import (
 // defined-and-empty after run_args, and the provisioning warning names the ones
 // the image or run_args had actually set.
 //
-// Three classes of name are classified per mountable agent, then denied to
-// repo run_args and pinned empty for non-operator sources:
+// Names are classified per mountable agent, then denied to repo run_args and
+// pinned empty for non-operator sources, in these classes:
 //
 //   - identity: a credential that substitutes for or outranks the mounted
 //     file — API keys and tokens, inline-config-content names, cloud-mode
 //     auth selectors, and the conditional cloud-credential groups they unlock.
 //   - config-root: a name that relocates where the agent reads its credential
 //     or config — CODEX_HOME, CLAUDE_CONFIG_DIR, OPENCODE_CONFIG{,_DIR} — plus
-//     the HOME/XDG names af re-asserts to real values rather than blanking.
+//     the names af re-asserts to real values rather than blanking (HOME/XDG
+//     roots, the path-valued git config roots, the program-selector
+//     defaults, SHELL, PATH), and the shared
+//     names that relocate credential-bearing state (the GnuPG home, the
+//     runtime dir sockets resolve under).
 //   - routing: a name that changes WHERE the agent sends the credential —
 //     base URLs and endpoints, proxies, and CA bundles / trust roots.
+//   - program-choice: a name that selects a program af's tools or the agent
+//     run in the container — the askpass and GIT_SSH commands git spawns to
+//     answer credential prompts, the editor/pager programs, and the tmux
+//     names that select a server af execs into. The selector precedence
+//     groups (credentialMountSelectorGroups) are claimed as groups:
+//     forwarding one member exempts every member of its group.
+//   - pane-boundary: a name af or tmux stamps at the pane boundary — af's
+//     session markers (AF_SESSION, AF_SESSION_GEN, AF_HOME) and tmux's own
+//     TMUX/TMUX_PANE. Refused to run_args like the rest but NEVER pinned:
+//     a defined-empty pin is re-asserted at the exec shim after tmux
+//     installed the real values, erasing them.
+//   - late-loaded: a name the agent's own loader can restore from a
+//     repository file after af's boundary runs. gemini walks up from the
+//     workspace applying <dir>/.gemini/.env and <dir>/.env fill-if-unset —
+//     the falsy-safe endpoint names are pinned defined-and-empty like the
+//     rest of the denied set, while CODE_ASSIST_ENDPOINT is read with a
+//     nullish coalesce that treats empty as a real endpoint, so af re-asserts
+//     its first-party default instead. The pins only bite because the names
+//     are allowlisted: a name the agent-server's exec filter strips is unset
+//     to the loader, so every pinned or re-asserted name must also sit in a
+//     set the filter admits.
 //
-// The shared credential and routing sets apply to every rostered agent: they
-// are common-allowlist names (internal/sessionenv/sessionenv.go), so they are
-// reachable for every agent, and a GitHub token or a corporate proxy name set
-// by an image is a credential or a route exactly as much as a per-agent name.
+// The shared credential, routing, config-root, program-choice, and af-state
+// sets apply to every rostered agent: they are common-allowlist names
+// (internal/sessionenv/sessionenv.go), so they are reachable for every
+// agent, and a GitHub token or a corporate proxy name set by an image is a
+// credential or a route exactly as much as a per-agent name.
 //
 // Every name in a mountable agent's reachable surface — its per-agent
-// allowlist, its conditional groups, and the shared common names above — must
-// land in exactly one of: denied (classified), kept (deliberately allowed,
-// recorded with the reason), or unreachable (absent from the surface). The
-// roster-iterating test in backend_docker_credentials_validate_test.go pins
-// that completeness, so a newly mountable agent cannot arrive without a
-// refused set — the hand-maintained-table failure this replaces (#7526 item 5).
+// allowlist, its conditional groups, the shared common names above, and the
+// agent's late-loaded names — must land in exactly one of: denied
+// (classified), kept (deliberately allowed, recorded with the reason), or
+// unreachable (absent from the surface). The roster-iterating test in
+// backend_docker_credentials_validate_test.go pins that completeness, so a
+// newly mountable agent or common-allowlist name cannot arrive without a
+// classification — the hand-maintained-table failure this replaces
+// (#7526 item 5, #7531).
 
 // credentialMountSharedCredentialNames are common-allowlist names that carry
 // an identity for tools the agent runs — not the mounted file's own format,
@@ -56,6 +85,12 @@ var credentialMountSharedCredentialNames = map[string]struct{}{
 	"GITHUB_ENTERPRISE_TOKEN": {},
 	"SSH_AUTH_SOCK":           {},
 	"SSH_AGENT_PID":           {},
+	// GPG_AGENT_INFO points gpg and its agents at an agent socket — the same
+	// identity-substitution mechanism as SSH_AUTH_SOCK.
+	"GPG_AGENT_INFO": {},
+	// AF_DAEMON_TOKEN is af's own credential for the daemon API; a repo- or
+	// image-supplied value is an identity af would present.
+	"AF_DAEMON_TOKEN": {},
 }
 
 // credentialMountSharedRoutingNames are common-allowlist names that change
@@ -78,6 +113,15 @@ var credentialMountSharedRoutingNames = map[string]struct{}{
 	"REQUESTS_CA_BUNDLE":  {},
 	"CURL_CA_BUNDLE":      {},
 	"GH_CONFIG_DIR":       {},
+	// GH_HOST selects the host gh sends API requests — and any forwarded
+	// GH_TOKEN — to. A repo-chosen host receives the credential (#7531).
+	"GH_HOST": {},
+	// DBUS_SESSION_BUS_ADDRESS routes keyring requests to a chosen bus —
+	// the secret store several agents keep session material under.
+	"DBUS_SESSION_BUS_ADDRESS": {},
+	// AF_DAEMON_URL selects the daemon af's own API calls go to; paired with
+	// a repo-chosen AF_DAEMON_TOKEN it is a complete route for af's identity.
+	"AF_DAEMON_URL": {},
 }
 
 // credentialMountReassertedNames are config-root names af does not blank but
@@ -99,8 +143,176 @@ var credentialMountReassertedNames = map[string]struct{}{
 	"HOME":            {},
 	"XDG_DATA_HOME":   {},
 	"XDG_CONFIG_HOME": {},
-	"SHELL":           {},
-	"PATH":            {},
+	// XDG_CACHE_HOME/XDG_STATE_HOME are the remaining XDG roots: re-asserted
+	// to the session home's defaults like their siblings so a repo cannot
+	// relocate where the agent's cache and state land (#7531).
+	"XDG_CACHE_HOME": {},
+	"XDG_STATE_HOME": {},
+	// GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM relocate git's config files — a
+	// repo-chosen file can name a credential helper, proxy, or trust root.
+	// They take REAL values rather than empty pins because a path-valued
+	// name must keep the program WORKING, not just neutral: measured on git
+	// 2.43, `GIT_CONFIG_GLOBAL=` makes `git config --global` fail writing to
+	// an empty path and `/dev/null` fails the write with EACCES, so af
+	// re-asserts each to the location git would consult under the
+	// boundary's own roots (#7531).
+	"GIT_CONFIG_GLOBAL": {},
+	"GIT_CONFIG_SYSTEM": {},
+	"SHELL":             {},
+	"PATH":              {},
+}
+
+// credentialMountSharedConfigRootNames are common-allowlist names that
+// relocate where a tool reads credential-bearing state and pin empty
+// safely: gpg's keyring root and the runtime directory agent/keyring
+// sockets are discovered under fall back to their defaults when empty, and
+// GIT_CONFIG_NOSYSTEM is a boolean where empty is the same as unset. The
+// path-valued git config roots are in credentialMountReassertedNames
+// instead — an empty path breaks the program, not just neutralizes it.
+var credentialMountSharedConfigRootNames = map[string]struct{}{
+	"GIT_CONFIG_NOSYSTEM": {},
+	"GNUPGHOME":           {},
+	"XDG_RUNTIME_DIR":     {},
+}
+
+// credentialMountSharedProgramEntries are common-allowlist names that select
+// a PROGRAM af's tools or the agent run inside the container — the same
+// class as SHELL/PATH. git spawns the askpass and GIT_SSH commands to answer
+// credential prompts, so a repo-chosen value runs a repository binary that
+// receives the credential question; EDITOR/VISUAL/PAGER run whenever a tool
+// opens one. They take REAL re-asserted values rather than empty pins
+// because a program-selector name must keep the program WORKING: measured
+// on git 2.43, `GIT_SSH_COMMAND=` is treated as the executable choice and
+// every SSH transport fails `cannot run : No such file or directory`, which
+// breaks af's own cloneWorkspace for ssh origins (#7531). The values:
+//   - GIT_SSH/GIT_SSH_COMMAND re-assert git's own default `ssh`, resolved
+//     through the re-asserted image PATH — the image's binaries are the
+//     declared residual trust here.
+//   - GIT_ASKPASS/SSH_ASKPASS re-assert /bin/false: a program that fails
+//     every prompt immediately. It does not suppress prompting — with no
+//     usable askpass git falls back to the tty prompt exactly as it does
+//     for an empty name — but the pane HAS a tty (tmux), and /bin/false
+//     keeps a repository-supplied askpass binary from being the program
+//     that answers.
+//   - EDITOR/VISUAL re-assert /bin/false so an interactive `git commit`
+//     fails clearly instead of silently accepting the template via
+//     `sh -c ""`.
+//   - PAGER re-asserts /bin/cat: under the pane's tty git auto-pages, and
+//     an empty PAGER runs `sh -c ""`, which exits 0 and swallows the
+//     output entirely.
+var credentialMountSharedProgramEntries = map[string]string{
+	"GIT_SSH":         "ssh",
+	"GIT_SSH_COMMAND": "ssh",
+	"GIT_ASKPASS":     "/bin/false",
+	"SSH_ASKPASS":     "/bin/false",
+	"EDITOR":          "/bin/false",
+	"VISUAL":          "/bin/false",
+	"PAGER":           "/bin/cat",
+}
+
+// credentialMountSelectorGroups pairs the program-selector names whose
+// consumers consult them as a precedence ladder: git runs GIT_SSH_COMMAND
+// before GIT_SSH (an askpass client reads GIT_ASKPASS before SSH_ASKPASS),
+// and the editors claude and codex shell out to read VISUAL before EDITOR.
+// Forwarding ANY member through session_env_passthrough exempts the WHOLE
+// group from the re-assert — the operator's choice must win whichever name
+// a tool reads. Measured on git 2.43 why per-name exemption is not enough:
+// forwarding GIT_SSH=/op-ssh while GIT_SSH_COMMAND=ssh is re-asserted
+// leaves the re-asserted name ahead in precedence, so the operator's
+// program never runs; forwarding EDITOR=vim while VISUAL=/bin/false is
+// re-asserted hides the operator's editor behind the sibling. The
+// unforwarded member still cannot keep an image value — the twin
+// forwarding in credentialMountSelectorForwarding reseats it to the
+// operator's forwarded value in the SIBLING's own grammar, so every name
+// in the group resolves to the same operator program (#7531).
+var credentialMountSelectorGroups = [][2]string{
+	{"GIT_SSH", "GIT_SSH_COMMAND"},
+	{"GIT_ASKPASS", "SSH_ASKPASS"},
+	{"EDITOR", "VISUAL"},
+}
+
+// credentialMountSelectorReseat re-expresses a forwarded member's value in
+// the SIBLING's own grammar — a verbatim copy is only faithful between
+// names a consumer reads the same way (#7531):
+//   - GIT_SSH_COMMAND is a shell COMMAND LINE git parses and runs through
+//     the shell, while GIT_SSH is a program path exec'd directly. A path
+//     with whitespace, quotes, or shell metacharacters lands verbatim as
+//     several words — measured on git 2.43, GIT_SSH='/op dir/op-ssh'
+//     copied raw fails `/op: not found` and the operator's program never
+//     runs. The sibling value is therefore shell-quoted (' -> '"'"') —
+//     measured byte-identical to running the path under GIT_SSH alone.
+//   - GIT_SSH is a program path: a command line cannot be expressed as
+//     one. When the forwarded command is not already a single bare word
+//     (shellquote.Quote leaves a bare path unchanged), no faithful
+//     translation exists, so the sibling keeps af's own working default —
+//     git's own `ssh` — which can never name a repository program and
+//     sits behind the forwarded command in precedence anyway.
+//   - The askpass and editor pairs are same-grammar (a program path or
+//     command each consumer reads identically), so the sibling takes the
+//     value verbatim.
+func credentialMountSelectorReseat(sibling, value string) string {
+	switch sibling {
+	case "GIT_SSH_COMMAND":
+		return shellquote.Quote(value)
+	case "GIT_SSH":
+		if shellquote.Quote(value) == value {
+			return value
+		}
+		return credentialMountSharedProgramEntries["GIT_SSH"]
+	}
+	return value
+}
+
+// credentialMountSharedAFStateNames are af's own state and control-plane
+// names in the common allowlist that are NOT stamped at the pane boundary:
+// af's home directory and auto-update toggle arrive ambiently through the
+// process environment, and TMUX_TMPDIR is a client-side socket-directory
+// selector carried to preserve a non-default server af was launched from.
+// A repo- or image-supplied value relocates af's state directory or points
+// a tmux client's socket discovery at a directory the image controls —
+// none of which a non-operator source may choose on the path that mounts
+// the operator's credential. af's own in-container programs take their
+// configuration from argv, not the container environment, so pinning them
+// defined-and-empty leaves af unaffected. (Names tmux or af themselves
+// stamp at the pane boundary are deliberately NOT here — see
+// credentialMountPaneBoundaryNames.)
+var credentialMountSharedAFStateNames = map[string]struct{}{
+	"AGENT_FACTORY_HOME":        {},
+	"AGENT_FACTORY_AUTO_UPDATE": {},
+	"TMUX_TMPDIR":               {},
+}
+
+// credentialMountPaneBoundaryNames are the names the pane boundary itself
+// installs — by af or by tmux — with values no repository source may
+// choose and no af mechanism may erase:
+//   - AF_SESSION/AF_SESSION_GEN/AF_HOME are af's OWN trusted session
+//     markers, the names sessionEnvFlags (session/tmux/envmarker.go)
+//     stamps into every pane environment with per-session values:
+//     the session name, its generation, and af's home provenance.
+//   - TMUX and TMUX_PANE are stamped by the tmux server for every pane:
+//     the server socket identity and the pane's %N id. Claude Code's tmux
+//     detection reads TMUX, and af's own in-pane commands read it too —
+//     currentTmuxName (api/sessions_identity.go) resolves the session a
+//     `--self` invocation belongs to from it.
+//
+// They are refused to repository run_args like every classified name — a
+// repo-supplied marker falsifies membership, and a repo-supplied TMUX
+// points in-pane tools at a server the repo controls — but they are NEVER
+// pinned: a defined-empty pin is carried by --session-env-empty and
+// re-asserted at the exec shim AFTER tmux installed the real values,
+// erasing them. markedOrphanProcesses (session/tmux/reap_membership.go)
+// proves ownership by the markers: a child orphaned inside the container
+// can no longer be attributed, discovered, or reaped, and blanked TMUX
+// names make in-pane `--self` report "not running inside a tmux session"
+// (#7531). These values come from af and tmux, not a repo source, and
+// reach the agent through the boundary itself — the boundary only has to
+// NOT erase them.
+var credentialMountPaneBoundaryNames = map[string]struct{}{
+	"AF_SESSION":     {},
+	"AF_SESSION_GEN": {},
+	"AF_HOME":        {},
+	"TMUX":           {},
+	"TMUX_PANE":      {},
 }
 
 // credentialMountProgramLoaderNames are names that choose which CODE the
@@ -187,6 +399,75 @@ var credentialMountRoutingNames = map[string]map[string]struct{}{
 		"OPENAI_BASE_URL":       {},
 		"AZURE_OPENAI_ENDPOINT": {},
 	},
+	tmux.ProgramGemini: {
+		// gemini's endpoint names are per-agent allowlisted so the pins
+		// reach the exec environment, and late-loaded besides: the CLI
+		// walks up from the workspace applying <dir>/.gemini/.env and
+		// <dir>/.env fill-if-unset (measured in
+		// internal/sessionenv/account.go), so a checked-in .env can name
+		// the base URL the session's OAuth traffic goes to unless the
+		// name is already defined. Each is read through a truthy/|| check
+		// in gemini-cli, so a defined-empty pin falls back to the compiled
+		// default while the .env loader treats the name as claimed (#7531).
+		// GOOGLE_GEMINI_BASE_URL truthy also flips getAuthTypeFromEnv to
+		// GATEWAY — one more reason the pin must be empty, not a
+		// first-party value.
+		"GOOGLE_GEMINI_BASE_URL":  {},
+		"GOOGLE_VERTEX_BASE_URL":  {},
+		"CODE_ASSIST_API_VERSION": {},
+	},
+}
+
+// credentialMountFirstPartyNames are late-loaded endpoint names af cannot
+// pin empty because the agent treats an empty value as REAL configuration:
+// gemini reads CODE_ASSIST_ENDPOINT with a nullish coalesce
+// (process.env[NAME] ?? compiled default), so a defined-empty value becomes
+// the endpoint and every Code Assist call fails. Instead af re-asserts the
+// name to its first-party default — the same constant the CLI compiles in —
+// after run_args, so the .env loader sees a defined name, a repo value is
+// dominated by Docker's last-wins rule, and an operator's own value still
+// wins through session_env_passthrough (#7531).
+var credentialMountFirstPartyNames = map[string]map[string]string{
+	tmux.ProgramGemini: {
+		// gemini-cli's compiled Code Assist endpoint
+		// (packages/core/src/code_assist/server.ts).
+		"CODE_ASSIST_ENDPOINT": "https://cloudcode-pa.googleapis.com",
+	},
+}
+
+// credentialMountSharedKeptNames records the COMMON-allowlist names
+// deliberately left unclassified — reviewed names that neither bear nor
+// route the mounted credential, for every agent: display and locale
+// metadata, terminal capabilities, temp paths, commit authorship, and the
+// names whose only effect rides on a denied sibling (GIT_SSH_VARIANT only
+// modulates how git parses GIT_SSH_COMMAND, which is denied; GH_REPO scopes
+// gh's resource, while its endpoint names are denied). The completeness pin
+// walks the common allowlist and uses this to tell "reviewed and kept" from
+// "forgotten", the same job credentialMountKeptNames does per agent (#7531).
+var credentialMountSharedKeptNames = map[string]struct{}{
+	// Identity display and locale — no credential or route.
+	"USER": {}, "LOGNAME": {},
+	"LANG": {}, "LANGUAGE": {}, "TZ": {},
+	// Terminal capability metadata — display, not a credential or route.
+	"TERM": {}, "COLORTERM": {}, "TERMINFO": {}, "TERMINFO_DIRS": {},
+	"NO_COLOR": {}, "CLICOLOR": {}, "CLICOLOR_FORCE": {}, "FORCE_COLOR": {},
+	// Temp-directory hints — a scratch path, not a credential root or route.
+	"TMPDIR": {}, "TMP": {}, "TEMP": {},
+	// PWD is a working-directory hint set by shells, not a lookup root the
+	// credential resolution reads.
+	"PWD": {},
+	// pinentry's tty hint — display, not a socket or credential.
+	"GPG_TTY": {},
+	// Commit authorship metadata — attribution, not authentication or
+	// routing.
+	"GIT_AUTHOR_NAME": {}, "GIT_AUTHOR_EMAIL": {},
+	"GIT_COMMITTER_NAME": {}, "GIT_COMMITTER_EMAIL": {},
+	// Selects the repository gh operates on — a resource scope, not the
+	// endpoint the token is sent to (GH_HOST is denied).
+	"GH_REPO": {},
+	// Only modulates how git parses GIT_SSH_COMMAND, which is denied —
+	// alone it chooses no program.
+	"GIT_SSH_VARIANT": {},
 }
 
 // credentialMountKeptNames records, per mountable agent, the allowlisted names
@@ -239,11 +520,20 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 	addList(sessionenv.AgentConditionalNames(agent))
 	add(credentialMountSharedCredentialNames)
 	add(credentialMountSharedRoutingNames)
+	add(credentialMountSharedConfigRootNames)
+	for name := range credentialMountSharedProgramEntries {
+		denied[name] = struct{}{}
+	}
+	add(credentialMountSharedAFStateNames)
+	add(credentialMountPaneBoundaryNames)
 	add(credentialMountReassertedNames)
 	add(credentialMountProgramLoaderNames)
 	add(credentialMountIdentityEnvNames[agent])
 	add(credentialMountConfigRootNames[agent])
 	add(credentialMountRoutingNames[agent])
+	for name := range credentialMountFirstPartyNames[agent] {
+		denied[name] = struct{}{}
+	}
 	return denied
 }
 
@@ -267,6 +557,18 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	if _, ok := credentialMountSharedRoutingNames[name]; ok {
 		return "it changes where the agent sends the mounted credential", true
 	}
+	if _, ok := credentialMountSharedConfigRootNames[name]; ok {
+		return "it can redirect where the agent reads credential-bearing state", true
+	}
+	if _, ok := credentialMountSharedProgramEntries[name]; ok {
+		return "it chooses which program af's tools or the agent run in the container, and af re-asserts a working default after run_args", true
+	}
+	if _, ok := credentialMountSharedAFStateNames[name]; ok {
+		return "it relocates af's own state or falsifies af's session and tool selection", true
+	}
+	if _, ok := credentialMountPaneBoundaryNames[name]; ok {
+		return "it falsifies af's session membership or pane identity — the real value is stamped at the pane boundary", true
+	}
 	if _, ok := credentialMountIdentityEnvNames[agent][name]; ok {
 		return "it can substitute the credential af mounts read-only", true
 	}
@@ -275,6 +577,9 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	}
 	if _, ok := credentialMountRoutingNames[agent][name]; ok {
 		return "it changes where the agent sends the mounted credential", true
+	}
+	if _, ok := credentialMountFirstPartyNames[agent][name]; ok {
+		return "af re-asserts the agent's first-party endpoint after run_args so the agent's .env loader sees a defined name", true
 	}
 	if configVar, ok := sessionenv.SupportsAccounts(agent); ok && configVar == name {
 		return "it can redirect where the agent reads the mounted credential", true
@@ -307,24 +612,28 @@ var credentialMountProxyCasePairs = [][2]string{
 	{"NO_PROXY", "no_proxy"},
 }
 
-// credentialMountProxyTwinForwarding normalizes a proxy pair so the
-// unforwarded spelling cannot keep an image-supplied value: every spelling is
-// in the inner filter's always-admitted set, so exempting a twin from the pin
-// without reseating it would leave the image's proxy reachable by clients that
-// prefer that spelling (Python's getproxies prefers a set lowercase name over
-// an uppercase one). For each pair the operator claimed through
-// session_env_passthrough, the first forwarded-and-host-set spelling supplies
-// the value V; every other spelling of the pair is emitted `-e NAME` and the
-// docker client environment synthesizes `NAME=V`, so both spellings resolve to
-// the operator's value. A pair member that is itself forwarded AND set keeps
-// its own approved value. When no forwarded spelling is set on the host the
-// pair contributes nothing — the "claimed a name they do not set" semantics
-// already lets the image's values stand for names the operator forwarded empty.
+// credentialMountTwinForwarding normalizes a name pair (proxy case
+// spellings, or a program-selector precedence group) so the unforwarded
+// spelling cannot keep an image-supplied value: every spelling is in the
+// inner filter's always-admitted set, so exempting a twin from the pin or
+// re-assert without reseating it would leave the image's value reachable
+// by clients that prefer that spelling (Python's getproxies prefers a set
+// lowercase name over an uppercase one; git consults GIT_SSH_COMMAND
+// before GIT_SSH). For each pair the operator claimed through
+// session_env_passthrough, the first forwarded-and-host-set spelling
+// supplies the value V; every other spelling of the pair is emitted
+// `-e NAME` and the docker client environment synthesizes `NAME=V`, so
+// both spellings resolve to the operator's value. A pair member that is
+// itself forwarded AND set keeps its own approved value. When no
+// forwarded spelling is set on the host the pair contributes nothing —
+// the "claimed a name they do not set" semantics already lets the image's
+// values stand for names the operator forwarded empty.
 //
-// names is the extra `-e NAME` set for docker run; synth is `NAME=V` entries
-// appended to the docker client's filtered environment, which is where a bare
-// `-e NAME` resolves its value — values therefore never appear in argv.
-func credentialMountProxyTwinForwarding(passthrough []string, environ []string) (names, synth []string) {
+// names is the extra `-e NAME` set for docker run; synth is `NAME=V`
+// entries appended to the docker client's filtered environment, which is
+// where a bare `-e NAME` resolves its value — values therefore never
+// appear in argv.
+func credentialMountTwinForwarding(pairs [][2]string, passthrough []string, environ []string) (names, synth []string) {
 	forwarded := make(map[string]struct{}, len(passthrough))
 	for _, name := range passthrough {
 		forwarded[name] = struct{}{}
@@ -335,7 +644,7 @@ func credentialMountProxyTwinForwarding(passthrough []string, environ []string) 
 			host[name] = value
 		}
 	}
-	for _, pair := range credentialMountProxyCasePairs {
+	for _, pair := range pairs {
 		var value string
 		claimed := false
 		for _, s := range pair {
@@ -361,6 +670,29 @@ func credentialMountProxyTwinForwarding(passthrough []string, environ []string) 
 		}
 	}
 	return names, synth
+}
+
+// credentialMountSelectorForwarding is credentialMountTwinForwarding for
+// the selector groups with each sibling's synthesized value re-expressed
+// in the sibling's own grammar (credentialMountSelectorReseat) — a path
+// copied verbatim into a command-line slot would split on the operator's
+// whitespace and run nothing.
+func credentialMountSelectorForwarding(passthrough []string, environ []string) (names, synth []string) {
+	names, synth = credentialMountTwinForwarding(credentialMountSelectorGroups, passthrough, environ)
+	for i, entry := range synth {
+		name, value, _ := strings.Cut(entry, "=")
+		synth[i] = name + "=" + credentialMountSelectorReseat(name, value)
+	}
+	return names, synth
+}
+
+// credentialMountGroupForwarding applies the twin forwarding to every
+// pair table — proxy case spellings and selector precedence groups share
+// the same claim semantics (#7531).
+func credentialMountGroupForwarding(passthrough []string, environ []string) (names, synth []string) {
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs, passthrough, environ)
+	n, s := credentialMountSelectorForwarding(passthrough, environ)
+	return append(names, n...), append(synth, s...)
 }
 
 // credentialMountPinnedNames returns the classified names af pins
@@ -394,6 +726,23 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 		if _, loader := credentialMountProgramLoaderNames[name]; loader {
 			continue
 		}
+		// The first-party names take their real default value, not an empty
+		// pin: the agents that read them treat defined-empty as a real
+		// endpoint rather than falling back. The shared program selectors
+		// re-assert a working default for the same reason — defined-empty
+		// names the empty string as the program and breaks the tool.
+		if _, firstParty := credentialMountFirstPartyNames[agent][name]; firstParty {
+			continue
+		}
+		if _, program := credentialMountSharedProgramEntries[name]; program {
+			continue
+		}
+		// Pane-boundary names are af's and tmux's own values, stamped at
+		// the pane boundary — an empty pin would erase them at the exec
+		// shim after tmux installed them (#7531).
+		if _, marker := credentialMountPaneBoundaryNames[name]; marker {
+			continue
+		}
 		if _, ok := forwarded[name]; ok {
 			continue
 		}
@@ -403,19 +752,24 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 	return out
 }
 
-// credentialMountBlankedWarning reports once per credential-mount session the
-// classified names that were actually set by the image or by docker.run_args
-// and that af pinned empty. The values are never inspected or printed — names
-// only. An unset variable can always be blanked silently; these are the ones a
-// working setup may have depended on, so each gets named with the remedy:
-// forward it in the global session_env_passthrough.
+// credentialMountOverriddenWarning reports once per credential-mount
+// session the classified names that were actually set by the image or by
+// docker.run_args and that af OVERRODE — pinned defined-and-empty or
+// re-asserted to a value. The values are never inspected or printed —
+// names only. An unset variable can always be blanked silently; these are
+// the ones a working setup may have depended on, so each gets named with
+// the remedy: forward it in the global session_env_passthrough. The
+// session-shaping re-asserts every credential-mount session emits
+// unconditionally (HOME, the XDG roots, SHELL, and PATH — which re-asserts
+// the image's own value) are not in `overridden` and stay out of this
+// notice.
 //
-// Blanked names run_args carried are reported even though the run_args
+// Overridden names run_args carried are reported even though the run_args
 // validator refuses classified entries — the warning is the migration's
-// notice layer and stays honest if a future flag spelling reaches the pin.
-func credentialMountBlankedWarning(imageEnv, runArgs []string, pinned []string) []string {
-	blanked := make(map[string]struct{}, len(pinned))
-	for _, name := range pinned {
+// notice layer and stays honest if a future flag spelling reaches one.
+func credentialMountOverriddenWarning(imageEnv, runArgs []string, overridden []string) []string {
+	blanked := make(map[string]struct{}, len(overridden))
+	for _, name := range overridden {
 		blanked[name] = struct{}{}
 	}
 	seen := make(map[string]struct{})
@@ -479,27 +833,118 @@ func dockerRunArgsEnvNames(args []string) []string {
 	return names
 }
 
-// dockerImageEnvNames runs `docker image inspect` for the session's image and
-// returns the names in its Config.Env — for the blanked-name warning only. A
-// failure to inspect returns nil: the warning is best-effort, and the mount
-// path's own guards do not depend on it.
-func (p *dockerProvisioner) dockerImageEnvNames() []string {
-	env := p.dockerImageEnv()
-	names := make([]string, 0, len(env))
-	for _, entry := range env {
-		if name, _, ok := strings.Cut(entry, "="); ok {
-			names = append(names, name)
+// credentialMountReassertValues returns the re-assert value map after the
+// operator's claims: the agent's first-party endpoint names plus the
+// shared program-selector defaults, minus every name the operator
+// forwarded — and, because selector names form precedence groups, minus
+// every member of a group the operator CLAIMED. The claim test is the same
+// one the reseat uses — a member forwarded AND set in the daemon
+// environment — because an exemption keyed on forwarding alone would drop
+// the sibling's re-assert while the reseat (which needs a host value)
+// emitted nothing, leaving an image-supplied sibling in precedence over
+// the operator's claim (#7531). environ is the daemon environment
+// (os.Environ at the call sites, a fixture in tests).
+func credentialMountReassertValues(agent string, passthrough []string, environ []string) map[string]string {
+	forwarded := make(map[string]struct{}, len(passthrough))
+	for _, name := range passthrough {
+		forwarded[name] = struct{}{}
+	}
+	host := make(map[string]string, len(environ))
+	for _, entry := range environ {
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			host[name] = value
 		}
 	}
-	return names
+	for _, pair := range credentialMountSelectorGroups {
+		for _, s := range pair {
+			if _, fwd := forwarded[s]; !fwd {
+				continue
+			}
+			if _, set := host[s]; set {
+				forwarded[pair[0]] = struct{}{}
+				forwarded[pair[1]] = struct{}{}
+			}
+		}
+	}
+	values := make(map[string]string, len(credentialMountSharedProgramEntries)+len(credentialMountFirstPartyNames[agent]))
+	for name, value := range credentialMountSharedProgramEntries {
+		values[name] = value
+	}
+	for name, value := range credentialMountFirstPartyNames[agent] {
+		values[name] = value
+	}
+	for name := range forwarded {
+		delete(values, name)
+	}
+	return values
 }
 
-// dockerImageEnv runs `docker image inspect` for the session's image and
-// returns its Config.Env as NAME=value entries — the source for the PATH
-// re-assertion (runContainer reads the value) and for dockerImageEnvNames
-// (the warning reads the names). A failure to inspect returns nil: both
-// readers are best-effort layers on top of the run_args refusal, and the
-// mount path's own guards do not depend on them.
+// credentialMountReassertNames returns the sorted names af re-asserts —
+// the keys of credentialMountReassertValues.
+func credentialMountReassertNames(agent string, passthrough []string, environ []string) []string {
+	values := credentialMountReassertValues(agent, passthrough, environ)
+	out := make([]string, 0, len(values))
+	for name := range values {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// credentialMountReassertEntries returns the sorted NAME=value re-asserts
+// runContainer emits after run_args: the names af cannot pin empty because
+// a defined empty value is itself a real (broken) configuration. The
+// re-assert stays UNCONDITIONAL over non-operator sources — the repo picks
+// the image, so an image's ENV is a repo source by construction, exactly
+// like docker.run_args. Only the operator's own passthrough claim exempts
+// a name (#7531).
+func credentialMountReassertEntries(agent string, passthrough []string, environ []string) []string {
+	values := credentialMountReassertValues(agent, passthrough, environ)
+	out := make([]string, 0, len(values))
+	for name, value := range values {
+		out = append(out, name+"="+value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// dockerContainerImageEnv reads the Config.Env of the image the container
+// ACTUALLY runs: the image reference resolved off the created container,
+// then inspected — not whatever p.image's tag inspected as before docker
+// run, which may have pulled a newer image or never existed locally (#7531).
+// The bool reports whether the environment could be read; the blanked-name
+// warning degrades to run_args names and says so when it could not.
+func (p *dockerProvisioner) dockerContainerImageEnv() ([]string, bool) {
+	ref, err := p.docker(dockerShortStepTimeout,
+		"inspect", p.containerID, "--format", "{{.Image}}")
+	if err != nil {
+		return nil, false
+	}
+	image := strings.TrimSpace(string(ref))
+	if image == "" {
+		return nil, false
+	}
+	out, err := p.docker(dockerShortStepTimeout,
+		"image", "inspect", image, "--format", "{{json .Config.Env}}")
+	if err != nil {
+		return nil, false
+	}
+	var env []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &env); err != nil {
+		return nil, false
+	}
+	return env, true
+}
+
+// dockerImageEnv runs `docker image inspect` for the session's CONFIGURED
+// image and returns its Config.Env as NAME=value entries — the source for
+// the PATH re-assertion, which must be computed before docker run fixes the
+// argv. A failure to inspect returns nil: it is a best-effort layer on top
+// of the run_args refusal, and the mount path's own guards do not depend on
+// it. The blanked-name warning deliberately does NOT use this: it reads the
+// image the container actually runs through dockerContainerImageEnv, because
+// a pre-run tag inspect can resolve to a different (or no) image than the
+// one docker run pulls (#7531).
 func (p *dockerProvisioner) dockerImageEnv() []string {
 	out, err := p.docker(dockerShortStepTimeout,
 		"image", "inspect", p.image, "--format", "{{json .Config.Env}}")

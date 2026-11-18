@@ -551,10 +551,11 @@ func TestDockerCredentialRunArgs_PerAgentDeniedTablesStayInsideTheAllowlist(t *t
 }
 
 // TestDockerCredentialRunArgs_PerAgentAllowlistIsClassified is part two of the
-// cross-map pin, now over the WHOLE mount roster (#7526 item 5): every name in
-// a mountable agent's reachable surface — its per-agent allowlist plus the
-// conditional cloud groups a selector unlocks — must be classified either as
-// denied on this path or as deliberately-kept deployment config. Without this
+// cross-map pin, now over the WHOLE mount roster (#7526 item 5, #7531): every
+// name in a mountable agent's reachable surface — its per-agent allowlist, the
+// conditional cloud groups a selector unlocks, AND the common allowlist every
+// agent shares — must be classified either as denied on this path or as
+// deliberately-kept deployment config. Without this
 // the denied list rots silently — a credential added to agentNames later
 // would keep passing through unopposed the way OPENCODE_CONFIG_CONTENT did
 // before #4454's fix — while the per-name refusal tests stayed green because
@@ -564,17 +565,19 @@ func TestDockerCredentialRunArgs_PerAgentAllowlistIsClassified(t *testing.T) {
 		denied := credentialMountDeniedNames(agent)
 		require.NotEmpty(t, denied,
 			"agent %q: every mountable agent must have a non-empty denied set (the shared names alone guarantee it)", agent)
-		reachable := sortedNamesToSet(append(
+		reachable := sortedNamesToSet(append(append(
 			sessionenv.AgentAllowlistNames(agent),
-			sessionenv.AgentConditionalNames(agent)...))
+			sessionenv.AgentConditionalNames(agent)...),
+			sessionenv.CommonAllowlistNames()...))
 		for name := range reachable {
 			_, isDenied := denied[name]
 			_, isKept := credentialMountKeptNames[agent][name]
-			require.Truef(t, isDenied || isKept,
+			_, isSharedKept := credentialMountSharedKeptNames[name]
+			require.Truef(t, isDenied || isKept || isSharedKept,
 				"agent %q: %s is reachable for the agent but classified neither as refused nor as kept deployment config; "+
 					"an unclassified credential or route passes through unopposed",
 				agent, name)
-			require.Falsef(t, isDenied && isKept,
+			require.Falsef(t, isDenied && (isKept || isSharedKept),
 				"agent %q: %s is classified both as denied and as kept", agent, name)
 		}
 	}
@@ -1009,19 +1012,19 @@ func TestCredentialMountProxyTwinForwarding_NormalizesToForwardedValue(t *testin
 	}
 
 	// Uppercase forwarded alone: the lowercase twin is emitted and normalized.
-	names, synth := credentialMountProxyTwinForwarding([]string{"HTTPS_PROXY"}, environ)
+	names, synth := credentialMountTwinForwarding(credentialMountProxyCasePairs, []string{"HTTPS_PROXY"}, environ)
 	require.Equal(t, []string{"https_proxy"}, names)
 	require.Equal(t, []string{"https_proxy=http://operator-proxy:8080"}, synth,
 		"the twin resolves to the forwarded spelling's value, never the image's")
 
 	// Lowercase forwarded alone: the uppercase twin is emitted and normalized.
-	names, synth = credentialMountProxyTwinForwarding([]string{"http_proxy"}, environ)
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs, []string{"http_proxy"}, environ)
 	require.Equal(t, []string{"HTTP_PROXY"}, names)
 	require.Equal(t, []string{"HTTP_PROXY=http://host-lowercase:3128"}, synth)
 
 	// Both spellings forwarded and set: each keeps its own approved value —
 	// nothing to normalize.
-	names, synth = credentialMountProxyTwinForwarding(
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs,
 		[]string{"http_proxy", "HTTP_PROXY"},
 		[]string{"http_proxy=http://host-lowercase:3128", "HTTP_PROXY=http://host-upper:3128"})
 	require.Empty(t, names)
@@ -1029,7 +1032,7 @@ func TestCredentialMountProxyTwinForwarding_NormalizesToForwardedValue(t *testin
 
 	// Both forwarded but only the lowercase spelling set on the host: the
 	// unset member still takes the operator's value rather than the image's.
-	names, synth = credentialMountProxyTwinForwarding(
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs,
 		[]string{"http_proxy", "HTTP_PROXY"},
 		[]string{"http_proxy=http://host-lowercase:3128"})
 	require.Equal(t, []string{"HTTP_PROXY"}, names)
@@ -1037,14 +1040,14 @@ func TestCredentialMountProxyTwinForwarding_NormalizesToForwardedValue(t *testin
 
 	// A host-set but unforwarded twin is still normalized to the forwarded
 	// value: the operator's claim on the pair is the forwarded spelling.
-	names, synth = credentialMountProxyTwinForwarding([]string{"HTTPS_PROXY"},
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs, []string{"HTTPS_PROXY"},
 		append(environ, "https_proxy=http://host-twin:8080"))
 	require.Equal(t, []string{"https_proxy"}, names)
 	require.Equal(t, []string{"https_proxy=http://operator-proxy:8080"}, synth)
 
 	// Forwarded but unset on the host claims nothing — the "operator named a
 	// name they do not set" semantics already lets the image stand.
-	names, synth = credentialMountProxyTwinForwarding([]string{"NO_PROXY"}, environ)
+	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs, []string{"NO_PROXY"}, environ)
 	require.Empty(t, names)
 	require.Empty(t, synth)
 }
@@ -1079,11 +1082,11 @@ func TestDockerMountAgentCredentials_ProxyTwinRidesRunArgvAndClientEnv(t *testin
 	require.NotContains(t, p.dockerEnvironment(), "https_proxy=http://operator-proxy:8080")
 }
 
-// TestCredentialMountBlankedWarning_NamesOnly pins the migration warning's
+// TestCredentialMountOverriddenWarning_NamesOnly pins the migration warning's
 // contract: it names each blanked name the image or run_args actually set —
 // once, sorted — and never echoes a value, so a credential the image carried
 // cannot leak into the log it warns about.
-func TestCredentialMountBlankedWarning_NamesOnly(t *testing.T) {
+func TestCredentialMountOverriddenWarning_NamesOnly(t *testing.T) {
 	pinned := credentialMountPinnedNames(tmux.ProgramOpencode, nil)
 	imageEnv := []string{
 		"HTTPS_PROXY=https://user:pass@proxy.corp.example:8080",
@@ -1092,7 +1095,7 @@ func TestCredentialMountBlankedWarning_NamesOnly(t *testing.T) {
 		"OPENCODE_CONFIG_DIR", // name without a value
 	}
 	runArgs := []string{"-e", "SSL_CERT_FILE=/etc/ssl/evil.pem", "-e", "TZ=UTC"}
-	names := credentialMountBlankedWarning(imageEnv, runArgs, pinned)
+	names := credentialMountOverriddenWarning(imageEnv, runArgs, pinned)
 	require.Equal(t, []string{"HTTPS_PROXY", "OPENAI_API_KEY", "OPENCODE_CONFIG_DIR", "SSL_CERT_FILE"}, names)
 	joined := strings.Join(names, ",")
 	for _, secret := range []string{"proxy.corp.example", "sk-live-looking-value", "evil.pem"} {

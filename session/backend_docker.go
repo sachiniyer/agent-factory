@@ -350,11 +350,6 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		// needs it forwarded through session_env_passthrough.
 		if len(p.credentialMounts) > 0 {
 			p.credentialEnvPins = credentialMountPinnedNames(p.agentName(), p.spec.SessionEnvPassthrough)
-			if blanked := credentialMountBlankedWarning(p.dockerImageEnvNames(), runArgs, p.credentialEnvPins); len(blanked) > 0 {
-				log.WarningLog.Printf(
-					"backend=docker: docker.mount_agent_credentials blanked %d env name(s) the image or docker.run_args had set for agent %q: %s — forward any the session needs through the global session_env_passthrough",
-					len(blanked), p.agentName(), strings.Join(blanked, ", "))
-			}
 		}
 	}
 	res, err := p.provision()
@@ -362,6 +357,46 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
 	return res, nil
+}
+
+// warnBlankedCredentialNames emits the once-per-session migration warning
+// for the classified names the image or docker.run_args had actually set
+// and af overrode — pinned empty or re-asserted to a value; names only,
+// values never inspected (#7526, #7531). It runs immediately after the
+// container exists, BEFORE the dependent steps (trust, clone, agent-server):
+// the image side must describe the image the container ACTUALLY runs —
+// resolved off the created container, not whatever the configured tag
+// inspected as before `docker run` pulled or updated it — and an
+// overridden name a later step depended on (a proxy or private CA the
+// clone needs) would make provisioning fail first, so the session most in
+// need of the passthrough remedy would never see it (#7531). When that
+// inspect fails, say so and warn over run_args names alone; the overrides
+// are already in argv either way.
+func (p *dockerProvisioner) warnBlankedCredentialNames() {
+	if len(p.credentialMounts) == 0 {
+		return
+	}
+	imageEnv, ok := p.dockerContainerImageEnv()
+	if !ok {
+		log.WarningLog.Printf(
+			"backend=docker: docker.mount_agent_credentials could not inspect the environment of the image the container runs — the overridden-env warning covers docker.run_args names only")
+	}
+	// Every name af overrode on this session: the defined-empty pins, the
+	// re-asserted git config roots, and the re-asserted selector/endpoint
+	// names — all post-exemption, so a name the operator claimed through
+	// session_env_passthrough is not reported as overridden (#7531).
+	overridden := append(slices.Clone(p.credentialEnvPins),
+		credentialMountReassertNames(p.agentName(), p.spec.SessionEnvPassthrough, os.Environ())...)
+	for _, name := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"} {
+		if !slices.Contains(p.spec.SessionEnvPassthrough, name) {
+			overridden = append(overridden, name)
+		}
+	}
+	if named := credentialMountOverriddenWarning(imageEnv, p.runArgs, overridden); len(named) > 0 {
+		log.WarningLog.Printf(
+			"backend=docker: docker.mount_agent_credentials overrode %d env name(s) the image or docker.run_args had set for agent %q (pinned empty or re-asserted): %s — forward any the session needs through the global session_env_passthrough",
+			len(named), p.agentName(), strings.Join(named, ", "))
+	}
 }
 
 // dockerProvisioner holds the state of one container provisioning so its steps
@@ -481,6 +516,11 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.runContainer(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
+	// Warn NOW, while the only thing that exists is the created container:
+	// a blanked name a dependent step needs (proxy/CA for the clone) makes
+	// that step fail, and the error path reaps without ever reaching a
+	// post-provision warning (#7531).
+	p.warnBlankedCredentialNames()
 	// The account boundary, verified against the RUNNING container before anything
 	// touches it (#3598). The lexical run_args guard reads strings and cannot see a
 	// symlink in the repository-selected image; this reads what Docker configured
@@ -638,6 +678,8 @@ func (p *dockerProvisioner) runContainer() error {
 			"-e", "HOME="+home,
 			"-e", "XDG_DATA_HOME="+home+"/.local/share",
 			"-e", "XDG_CONFIG_HOME="+home+"/.config",
+			"-e", "XDG_CACHE_HOME="+home+"/.cache",
+			"-e", "XDG_STATE_HOME="+home+"/.local/state",
 		)
 		// tmux runs each pane command as $default-shell -c …, and default-shell
 		// comes from SHELL in the client environment. A repo-chosen SHELL (image
@@ -666,6 +708,33 @@ func (p *dockerProvisioner) runContainer() error {
 			if imagePATH := credentialMountImagePATH(p.dockerImageEnv()); imagePATH != "" {
 				args = append(args, "-e", "PATH="+imagePATH)
 			}
+		}
+		// GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM relocate git's config files —
+		// a repo-chosen file can set a credential helper, proxy, or trust
+		// root. Defined-empty is not neutral for a path-valued name:
+		// measured on git 2.43, `git config --global` fails writing to an
+		// empty path and /dev/null fails with EACCES, so af re-asserts each
+		// to the location git would consult under the boundary's own roots —
+		// defined (no late loader can claim it) and working (#7531).
+		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_GLOBAL") {
+			args = append(args, "-e", "GIT_CONFIG_GLOBAL="+home+"/.gitconfig")
+		}
+		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_SYSTEM") {
+			args = append(args, "-e", "GIT_CONFIG_SYSTEM=/etc/gitconfig")
+		}
+		// Value re-asserts for the names an empty pin would break: late-loaded
+		// endpoint names whose agent treats defined-empty as a real value
+		// rather than falling back to its default (gemini reads
+		// CODE_ASSIST_ENDPOINT with a nullish coalesce), and the shared
+		// program-selector names where empty literally names "" as the
+		// program (measured: `GIT_SSH_COMMAND=` fails every SSH transport
+		// `cannot run : No such file or directory`, which would break
+		// cloneWorkspace for ssh origins). Re-asserted after run_args, the
+		// .env loader sees a defined name and a repo value is dominated by
+		// last-wins (#7531). Operator-forwarded names keep the operator's
+		// value.
+		for _, entry := range credentialMountReassertEntries(p.agentName(), p.spec.SessionEnvPassthrough, os.Environ()) {
+			args = append(args, "-e", entry)
 		}
 	}
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
@@ -708,7 +777,7 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 	// contract, and an account or plain session's env stays byte-identical
 	// to before (#7529 R8).
 	if len(p.credentialMounts) > 0 {
-		twins, _ := credentialMountProxyTwinForwarding(p.spec.SessionEnvPassthrough, os.Environ())
+		twins, _ := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, os.Environ())
 		if len(twins) > 0 {
 			names = append(names, twins...)
 			sort.Strings(names)
@@ -749,7 +818,7 @@ func (p *dockerProvisioner) dockerEnvironment() []string {
 	if len(p.credentialMounts) == 0 {
 		return env
 	}
-	_, synth := credentialMountProxyTwinForwarding(p.spec.SessionEnvPassthrough, os.Environ())
+	_, synth := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, os.Environ())
 	return append(env, synth...)
 }
 

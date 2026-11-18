@@ -239,9 +239,15 @@ user's real home and mounts it only if it exists, so:
     route the mounted credential — API keys and tokens, inline-config names
     like `OPENCODE_CONFIG_CONTENT`, config roots like `CODEX_HOME` and
     `OPENCODE_CONFIG_DIR`, endpoints and base URLs, proxies and CA bundles,
-    `HOME`/`XDG_*`, `SHELL`, GitHub token and SSH-agent names — plus the
-    program-choice names `PATH`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`, for every
-    agent in the mount table above. These boundaries enforce it:
+    `HOME`/`XDG_*`, `SHELL`, GitHub token and SSH-agent names, `GH_HOST`,
+    `DBUS_SESSION_BUS_ADDRESS`, gpg's keyring and agent names, git's config
+    roots and credential-answer programs (`GIT_CONFIG_*`, `GIT_SSH*`/
+    `GIT_ASKPASS`/`SSH_ASKPASS`), editor/pager names, af's own state and tmux
+    names (`AF_*`, `AGENT_FACTORY_*`, `TMUX*`), and the endpoint names an
+    agent's own `.env` loader can restore after the boundary (gemini's
+    `CODE_ASSIST_*` and `GOOGLE_*_BASE_URL`) — plus the program-choice names
+    `PATH`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`, for every agent in the mount
+    table above. These boundaries enforce it:
 
     - At `docker run`: `docker.run_args` entries naming one are **refused**
       before the container starts — including `PATH`, `LD_PRELOAD`, and
@@ -252,11 +258,25 @@ user's real home and mounts it only if it exists, so:
       and a workspace loader that fills only unset names find it already set
       to nothing. (Measured: gemini's workspace `.env` supplied
       `GEMINI_API_KEY` only when the name was unset; defined-and-empty
-      survived the `.env`.) `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` are
-      re-asserted to the mount's real roots, `SHELL` to `/bin/sh`, and `PATH`
-      to the image's own `Config.Env` `PATH` — so tmux's `default-shell -c`
-      chain, af's own execs, and the agent's bare executable all resolve
-      through the image's binaries, never a repo-added directory.
+      survived the `.env`.) `HOME` and the `XDG_*` roots are re-asserted to
+      the mount's real roots, `SHELL` to `/bin/sh`, `PATH` to the image's own
+      `Config.Env` `PATH`, `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to the
+      locations git would consult under the boundary's own roots (an empty
+      pin there is not neutral — it breaks `git config --global`), the
+      program-selector names to working defaults — `GIT_SSH`/`GIT_SSH_COMMAND`
+      to `ssh` (empty literally names `""` as the executable and every SSH
+      transport fails), `GIT_ASKPASS`/`SSH_ASKPASS`/`EDITOR`/`VISUAL` to
+      `/bin/false` (a program that fails every call — git then falls back
+      to the tty prompt as it does for an unset askpass, but no
+      repository-supplied binary ever answers one), and
+      `PAGER` to `/bin/cat` — and, for
+      gemini, whose `.env` loader fills only unset names but treats a
+      defined-empty endpoint as real — `CODE_ASSIST_ENDPOINT` to its
+      first-party default — so tmux's `default-shell -c` chain, af's own
+      execs, the agent's bare executable, and the agent's endpoint choice
+      all resolve through first-party values, never a repo-added one. Every
+      pinned or re-asserted name is one the agent-server's exec filter
+      admits, so the boundary survives the hop to the agent process itself.
     - In af's own `docker exec` steps: every one names `/bin/sh` by absolute
       path, so the container's `PATH` — whatever it is — cannot hand af a
       repo-written `sh` to intercept the agent-server launch. Commands
@@ -274,22 +294,64 @@ user's real home and mounts it only if it exists, so:
       its marker variable is filtered out and the cgroup namespace is
       private — so it is listed, not relied on.
 
+    Two name sets are handled differently from the pins:
+
+    - **Pane-boundary names are refused but never blanked.** `AF_SESSION`,
+      `AF_SESSION_GEN`, `AF_HOME`, `TMUX`, and `TMUX_PANE` are stamped by af
+      and by tmux at the pane boundary — a defined-empty pin would be
+      re-asserted at the exec shim AFTER tmux installed the real values,
+      erasing the session-membership markers the reaper attributes children
+      by and the pane identity in-pane tools read (`--self`,
+      Claude Code's tmux detection). They are refused to `docker.run_args`
+      like every classified name — a repo value would falsify membership —
+      and simply left alone.
+    - **Selector precedence groups are claimed as groups.** Forwarding any
+      member of `GIT_SSH`/`GIT_SSH_COMMAND`, `GIT_ASKPASS`/`SSH_ASKPASS`, or
+      `EDITOR`/`VISUAL` through `session_env_passthrough` — when that member
+      is set in the daemon environment — exempts the whole group from the
+      re-assert, and the unforwarded member is reseated to the operator's
+      forwarded value **in the sibling's own grammar**: `GIT_SSH` is a
+      program path while `GIT_SSH_COMMAND` is a shell command line, so the
+      path is shell-quoted on its way into the command slot, and a command
+      line that cannot be expressed as a path leaves `GIT_SSH` at af's
+      `ssh` default. A re-asserted sibling would sit ahead in precedence
+      and silently win, while an image-supplied sibling would route around
+      the operator's program — and a forwarded-but-unset member claims
+      nothing, so its sibling keeps the working re-assert. The same shape
+      as the proxy case pairs (`HTTP/HTTPS/ALL/NO_PROXY`, either case),
+      where the unforwarded twin is set to the forwarded spelling's value
+      because a defined-empty twin would cancel it in clients that read
+      both.
+
     The operator's escape hatch is unchanged: names listed in the global
     `session_env_passthrough` keep their forwarded value and are never blanked
-    or refused for the operator's own use — and forwarding either spelling of a
-    proxy pair (`HTTP/HTTPS/ALL/NO_PROXY`, either case) claims both: the
-    unforwarded twin is set to the forwarded spelling's value rather than
-    blanked, since a defined-empty twin would cancel the forwarded value in
-    clients that read both spellings while an image-supplied twin would route
-    around the operator's proxy entirely.
+    or refused for the operator's own use.
 
     **Migration.** If a working setup legitimately carried one of these names —
     a corporate `HTTPS_PROXY`, a private CA bundle, a private-cloud
-    `OPENAI_BASE_URL` — af now blanks it and logs a **WARNING once per
-    session** naming each blanked variable (names only, never values) with the
-    remedy: forward the name through `session_env_passthrough`. A repo-set
-    `docker.run_args` entry for one is refused outright with the same remedy in
-    the error.
+    `OPENAI_BASE_URL` — af now overrides it and logs a **WARNING once per
+    session** naming each overridden variable (names only, never values),
+    whether it was pinned empty or re-asserted to a safe value — an image
+    `EDITOR=vim` becoming `/bin/false` is named, not silent. The warning
+    fires the moment the container exists — before the clone, git, and
+    agent-server steps that an overridden name could break — so a session
+    whose provisioning fails on a blanked proxy or CA still logs the
+    remedy. The image side is read off the image the container actually
+    runs — resolved after `docker run` — not the configured tag's pre-run
+    metadata, which may name a different image than the one that just
+    pulled; if it cannot be inspected, the warning says so and covers
+    `docker.run_args` names only. A repo-set `docker.run_args` entry for
+    one is refused outright with the same remedy in the error. The
+    unconditionally session-shaped names (the mount's `HOME`, the `XDG_*`
+    roots, `SHELL`, and `PATH` — which re-asserts the image's own value)
+    are part of the mount contract itself and not warned.
+
+    One caveat on the git config roots: `GIT_CONFIG_GLOBAL` points git at
+    `<session home>/.gitconfig`, which also makes git skip its
+    `$XDG_CONFIG_HOME/git/config` fallback — and `/etc/gitconfig` is where
+    a `prefix=/usr` git reads, not necessarily where a `prefix=/usr/local`
+    or `brew`-installed git reads, so an image's own git configuration may
+    be ignored on this path.
 
     **What still trusts the image and the repo.** The pins cover the
     *environment boundary only*, and only the classified names. The repo chose
@@ -335,7 +397,13 @@ only needs the workspace tooling:
 - **`dd`** — used to stream the live PTY (present in both busybox and coreutils).
 - **`cat`** — reads the agent-server's startup banner, and, for an
   account-scoped session, the container's own `/proc/1/mountinfo` when af
-  verifies the account boundary (#3598).
+  verifies the account boundary (#3598). On a credential-mount session it
+  is also the re-asserted `PAGER` (as `/bin/cat`).
+- **`false`** — on a credential-mount session, `/bin/false` is the
+  re-asserted value for the askpass and editor selectors (`GIT_ASKPASS`,
+  `SSH_ASKPASS`, `EDITOR`, `VISUAL`). Both `false` and `cat` degrade
+  gracefully if absent: git reports the program missing rather than
+  silently running anything else.
 - **`stat`**, **`mkdir`**, **`chown`**, **`find`** and **`id`** — af probes the container's
   default user and prepares a writable HOME and `/workspace` for that uid, so a
   BYO image that sets a non-root `USER` directive (a common hardening practice)
