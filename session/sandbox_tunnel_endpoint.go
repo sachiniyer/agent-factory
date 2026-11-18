@@ -59,13 +59,16 @@ import (
 //     spawn (verifyTunnelPeer). No credential is sent to an endpoint that is
 //     not provably af's own ssh child.
 //
-// The directory is verified ONCE, on the opened object, and that fd is held
-// for the process's life: everything af creates under tunnels/ — generation
+// The directory is verified on the opened object, and that fd is held for
+// the process's life: everything af creates under tunnels/ — generation
 // dirs, their .lock files — is created relative to it (mkdirat/openat, then
 // fstat), never by re-resolving the path (#7503). A same-uid process that
-// swaps tunnels/ afterwards cannot redirect af's files. And a generation dir
+// swaps tunnels/ afterwards cannot redirect af's files. A generation dir
 // deleted mid-life is re-established under the held fd rather than served
-// from a dead cache entry.
+// from a dead cache entry; and when tunnels/ ITSELF is unlinked the held fd
+// goes dead (nlink 0), so the next spawn re-verifies the path end-to-end
+// before anything lands in it — a foreign tunnels/ swapped in for the old
+// one is refused by the same checks as the first verify (#7511).
 //
 // There is deliberately no TCP fallback: a transport that cannot do a unix
 // forward fails the provision loudly, naming the transport, rather than
@@ -149,14 +152,43 @@ func defaultTunnelGenerationDir() (string, error) {
 	}
 	// Every caller gets a LIVE generation dir, not the cached name: a dir
 	// deleted while the daemon runs is re-established under the held root fd
-	// rather than served from a stale cache entry (#7503). Cheap when nothing
-	// is wrong — one fstatat per spawn.
+	// rather than served from a stale cache entry (#7503), and a root that
+	// was unlinked entirely is re-verified so its re-establish can land
+	// (#7511). Cheap when nothing is wrong — one fstat + one fstatat per call.
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if err := e.ensureRootLocked(home); err != nil {
+		return "", err
+	}
 	if err := e.ensureLocked(); err != nil {
 		return "", err
 	}
 	return e.dir, nil
+}
+
+// ensureRootLocked re-verifies the held root when it has been unlinked — a
+// `rm -rf tunnels/` deletes the very directory the held fd names, and
+// nothing can be created under an unlinked inode, so the generation's
+// re-establish would fail "no such file or directory" until restart (#7511).
+// The re-verify re-opens the path and re-proves tunnels/ (creating it 0700
+// when nothing is there): a swapped-in foreign tunnels/ is refused by the
+// same checks as first verify. The generation's name is kept, so socket
+// paths minted against it stay valid across the recovery. Callers hold e.mu.
+func (e *tunnelGenDirEntry) ensureRootLocked(home string) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(int(e.root.dir.Fd()), &st); err == nil && st.Nlink != 0 {
+		return nil
+	}
+	// nlink == 0 (or an fstat failure): the held fd names a dead inode.
+	// Re-verify rather than fail — the dead fd is released only after a
+	// replacement verifies, so a failed verify never worsens the state.
+	root, err := verifyTunnelSocketRoot(home)
+	if err != nil {
+		return err
+	}
+	_ = e.root.dir.Close()
+	e.root = root
+	return nil
 }
 
 // currentTunnelHome resolves this process's canonical AF home FRESH on every
@@ -361,10 +393,41 @@ func (e *tunnelGenDirEntry) takeLockLocked() error {
 		_ = lock.Close()
 		return fmt.Errorf("cannot lock the tunnel generation directory %q: %w", e.dir, err)
 	}
+	// Prove the lock af now holds IS the .lock this dir names: fstat the held
+	// fd and fstatat the name under the dir fd, and require the same
+	// (dev, inode). A replacement dir whose lock file af did not create is
+	// refused rather than adopted, and a .lock swapped between openat and
+	// here can never be what guards the generation (#7511).
+	if err := heldLockIsTheNamedFile(genFd, lock); err != nil {
+		_ = lock.Close()
+		return fmt.Errorf("the tunnel generation lock in %q is unprovable: %w", e.dir, err)
+	}
 	if e.lock != nil {
 		_ = e.lock.Close()
 	}
 	e.lock = lock
+	return nil
+}
+
+// heldLockIsTheNamedFile proves the open lock fd IS the file dirfd names
+// .lock — identical (dev, inode) on both sides (#7511). The sweep and the
+// generation's own liveness read the PATH's .lock, so a held lock that is
+// some other inode would guard nothing the dir can name: the dir could be
+// swept while af believed it locked, or a foreign lock adopted as af's own.
+// Both sides are queried on opened objects (fstat / fstatat under the dir
+// fd), never a re-resolved path.
+func heldLockIsTheNamedFile(dirfd int, lock *os.File) error {
+	var lst, dst unix.Stat_t
+	if err := unix.Fstat(int(lock.Fd()), &lst); err != nil {
+		return fmt.Errorf("cannot stat the held lock: %w", err)
+	}
+	if err := unix.Fstatat(dirfd, tunnelGenLockName, &dst, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("cannot stat %q inside the generation directory: %w", tunnelGenLockName, err)
+	}
+	if lst.Dev != dst.Dev || lst.Ino != dst.Ino {
+		return fmt.Errorf("the held lock is not the %q the directory names — the entry was replaced "+
+			"under the proof; refusing to guard a directory af cannot name", tunnelGenLockName)
+	}
 	return nil
 }
 
@@ -446,30 +509,36 @@ func (p *sandboxProvisioner) publishTunnelLeader(t *tunnelChild) {
 }
 
 // verifyTunnelPeer is the endpoint's per-connection proof (#7495): the kernel
-// names the pid that accepted this unix-socket connection, and af writes
-// nothing until that pid is shown to be — or to descend from — THIS tunnel
+// names a pid for the unix-socket connection's peer, and af writes nothing
+// until that pid is shown to be — or to descend from — THIS tunnel
 // generation's own spawn. Descent is the rule rather than group membership
 // because a documented sandbox.ssh wrapper (sshpass, `setsid`, `script -c`)
 // puts its ssh in a fresh process group or session: the ssh is still provably
 // af's own spawn, and a group-equality check would refuse it.
 //
-// The honest shape of the proof (#7503): only the leader carries an
+// The honest shape of the proof (#7503, #7511): only the leader carries an
 // af-minted identity — the (pid, startID) pair stamped at publish. The
-// acceptor is a pid the KERNEL reports, and every intermediate link is a
-// bare pid read from the process table. The walk still gives each link two
-// cheap orderings an impostor cannot satisfy: a parent cannot have started
-// after its child, so each ancestor's StartID must be no later than its
-// descendant's; and every link's PPID is re-read after the walk, so a
-// reparent that landed mid-check is caught rather than adopted. The walk
-// ends at init — an acceptor reparented off the spawn's chain cannot prove
-// the spawn started it, and is refused.
+// acceptor pid the kernel reports is the listen()-time pid: SO_PEERCRED can
+// still name it after the real acceptor exits, so it is a hint about who the
+// peer WAS, never proof the named process is still alive — that is why the
+// anchor is the stamped (pid, startID) pair rather than the pid alone. A
+// leader that exited is refused by the liveness check; a reused pid is
+// refused by the stamp's equality. Every intermediate link is a bare pid
+// read from the process table, and the only evidence a link carries is the
+// PPID re-read after the walk — a chain that moved mid-check is caught
+// rather than adopted. StartID itself is used for EQUALITY ONLY, never
+// arithmetic: proctree documents it as an identity stamp, and on darwin it
+// is wall-clock p_starttime — ordering on it could refuse af's own transport
+// after a backwards clock step (#7511). The walk ends at init — an acceptor
+// reparented off the spawn's chain cannot prove the spawn started it, and
+// is refused.
 //
 // That is same-uid defence in depth, deliberately: the verified 0700
 // directory keeps other accounts from placing a listener at all, and the
 // peer proof keeps a same-uid process from answering in the forward's place.
 // A foreign listener can forge neither the pid the kernel reports nor a
-// consistently-ordered ancestry; a refusal is a tunnel failure, never a
-// request sent to the wrong endpoint.
+// stable ancestry; a refusal is a tunnel failure, never a request sent to
+// the wrong endpoint.
 //
 // The leader comes from an atomic snapshot — never from a lock a caller can
 // hold (see tunnelLeaderRef).
@@ -502,16 +571,19 @@ func (p *sandboxProvisioner) verifyTunnelPeer(conn *net.UnixConn) error {
 	for cur, depth := pid, 0; depth < 64 && cur > 1; depth++ {
 		if cur == leader.pid {
 			if len(chain) == 0 {
-				return nil // the acceptor IS the spawn — nothing to order
+				// Depth 0: the kernel's pid IS the published leader, and the
+				// stamp check above already proved that pid is the SAME live
+				// process af spawned — the strongest admission the proof
+				// makes. Honest limitation (#7511): the kernel's pid is the
+				// listen()-time pid, so a leader that exited while its socket
+				// fd survived in a descendant still reports it — and is
+				// REFUSED by the liveness check above, never trusted on the
+				// stale pid. There is no ancestry walk to corroborate at
+				// depth 0; the stamped (pid, StartID) equality is the proof.
+				return nil
 			}
-			// The anchor must predate its claimed child, and every link's
-			// PPID is re-read: a chain that moved while we walked it is no
-			// proof of anything (#7503).
-			if lp.StartID > chain[len(chain)-1].StartID {
-				return fmt.Errorf("the tunnel's ssh child (pid %d) started AFTER the process claiming "+
-					"descent from it — an impossible ancestry is no proof af started this listener",
-					leader.pid)
-			}
+			// Every link's PPID is re-read: a chain that moved while we
+			// walked it is no proof of anything (#7503).
 			for _, rec := range chain {
 				now, rerr := proctreeLookup(rec.PID)
 				if rerr != nil {
@@ -527,10 +599,6 @@ func (p *sandboxProvisioner) verifyTunnelPeer(conn *net.UnixConn) error {
 		pr, err := proctreeLookup(cur)
 		if err != nil {
 			return fmt.Errorf("cannot trace the acceptor's ancestry (pid %d): %w", cur, err)
-		}
-		if len(chain) > 0 && pr.StartID > chain[len(chain)-1].StartID {
-			return fmt.Errorf("the acceptor's ancestor (pid %d) started AFTER its claimed child — "+
-				"an impossible ancestry is no proof af started this listener", cur)
 		}
 		chain = append(chain, pr)
 		if pr.PPID <= 1 || pr.PPID == cur {

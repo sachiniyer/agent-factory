@@ -57,11 +57,31 @@ func (p *sandboxProvisioner) tunnelEndpoint(token string) *AgentServerEndpoint {
 	sockPath := p.socketPath
 	p.reapMu.Unlock()
 	return &AgentServerEndpoint{
-		URL:        tunnelEndpointURL,
-		SocketPath: sockPath,
-		Token:      token,
-		VerifyPeer: p.verifyTunnelPeer,
+		URL:          tunnelEndpointURL,
+		SocketPath:   sockPath,
+		Token:        token,
+		VerifyPeer:   p.verifyTunnelPeer,
+		EndpointGone: p.noteEndpointGone,
 	}
+}
+
+// noteEndpointGone is the endpoint's re-dial trigger for a socket that
+// vanished while its tunnel generation lives (#7511): the supervisor re-dials
+// only on tunnel death, so a dial that found no file at the socket path is
+// what must recycle the transport — kill the current generation and the
+// supervisor re-dials it into the re-established dir. The socket is
+// re-checked first: a dial that raced a respawn whose file already landed
+// must not kill the newborn.
+func (p *sandboxProvisioner) noteEndpointGone() {
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if p.tunnel == nil || p.socketPath == "" {
+		return // already re-dialing, or no endpoint was ever minted
+	}
+	if _, err := os.Lstat(p.socketPath); err == nil {
+		return // the path exists again — leave the fresh generation alone
+	}
+	killTunnel(p.tunnel) // child.done fires; the supervisor re-dials
 }
 
 // tunnelEndpointURL is the placeholder authority a tunnel endpoint's URL

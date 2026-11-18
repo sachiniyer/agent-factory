@@ -2,11 +2,14 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // The remoteAgentClient half of the remote agent-server transport: the
@@ -43,6 +46,13 @@ type AgentServerEndpoint struct {
 	// nothing credential-bearing is ever sent to an endpoint that is not
 	// provably af's own forward.
 	VerifyPeer func(conn *net.UnixConn) error
+	// EndpointGone, when set, is called once per dial whose unix connect
+	// failed with ENOENT — the socket file the tunnel bound is missing while
+	// its generation lives on. The sandbox tunnel fills it with the re-dial
+	// trigger: the generation's dir (and socket) was deleted under a live
+	// ssh, and the supervisor's re-dial only fires on tunnel death, so the
+	// missing file is what must recycle the transport (#7511).
+	EndpointGone func()
 }
 
 // remoteAgentClient is the transport to ONE `af agent-server`: a token-bearing
@@ -85,9 +95,18 @@ func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentCli
 		// or misattributed response (#7495).
 		socketPath := ep.SocketPath
 		verify := ep.VerifyPeer
+		gone := ep.EndpointGone
 		dial = func(ctx context.Context, _, _ string) (net.Conn, error) {
 			conn, err := dialer.DialContext(ctx, "unix", socketPath)
 			if err != nil {
+				// A missing socket file on a live generation means the dir
+				// was deleted mid-life: the supervisor re-dials only on
+				// tunnel death, so the dial is what must recycle the
+				// transport (#7511). Any other error is the operator's own
+				// network state to see.
+				if errors.Is(err, unix.ENOENT) && gone != nil {
+					gone()
+				}
 				return nil, err
 			}
 			if verify != nil {
