@@ -65,11 +65,12 @@ func TestTmuxSocketClaimedDecisionTable(t *testing.T) {
 		owner      = 9005 // a server bound to the missing socket
 		owner2     = 9006
 		gone       = 9007 // a server that exited while its sockets were read
+		tableOwner = 9008 // an owner found only in the socket table
 	)
 	bindings := map[int]socketBinding{
 		elsewhere: socketBindingElsewhere, elsewhere2: socketBindingElsewhere,
 		unresolved: socketBindingUnresolved, owner: socketBindingBound, owner2: socketBindingBound,
-		gone: socketBindingGone,
+		gone: socketBindingGone, tableOwner: socketBindingBoundByTable,
 	}
 	for _, tc := range []struct {
 		name        string
@@ -90,6 +91,7 @@ func TestTmuxSocketClaimedDecisionTable(t *testing.T) {
 		{name: "a server proved gone mid-read: disproved, unclaimed at once", pids: []int{gone, elsewhere}},
 		{name: "a server proved gone beside an unresolved one: claimed", pids: []int{gone, unresolved}, wantClaimed: true},
 		{name: "the owner leaves it absent beside a gone server: unclaimed", pids: []int{gone, owner}, wantSignal: []int{owner}, watches: true},
+		{name: "an owner found only in the socket table is signalled", pids: []int{elsewhere, tableOwner}, recreatedBy: tableOwner, wantClaimed: true, wantSignal: []int{tableOwner}, watches: true},
 		{name: "the owner recreates the socket: claimed", pids: []int{elsewhere, owner}, recreatedBy: owner, wantClaimed: true, wantSignal: []int{owner}, watches: true},
 		{name: "the owner leaves it absent: unclaimed", pids: []int{elsewhere, owner}, wantSignal: []int{owner}, watches: true},
 		{name: "owner plus an unresolved server, socket left absent: claimed", pids: []int{owner, unresolved}, wantClaimed: true, wantSignal: []int{owner}, watches: true},
@@ -103,7 +105,7 @@ func TestTmuxSocketClaimedDecisionTable(t *testing.T) {
 			if tc.socketThere {
 				require.NoError(t, os.WriteFile(socket, nil, 0o600))
 			}
-			pinServerIdentityForTest(t, elsewhere, elsewhere2, unresolved, owner, owner2, gone)
+			pinServerIdentityForTest(t, elsewhere, elsewhere2, unresolved, owner, owner2, gone, tableOwner)
 			pinSocketBindingForTest(t, func(pid int, path string) (socketBinding, string) {
 				require.Equal(t, socket, path)
 				b, ok := bindings[pid]
@@ -111,7 +113,7 @@ func TestTmuxSocketClaimedDecisionTable(t *testing.T) {
 				if b == socketBindingElsewhere {
 					return b, "/elsewhere/" + strconv.Itoa(pid)
 				}
-				if b == socketBindingBound {
+				if b == socketBindingBound || b == socketBindingBoundByTable {
 					return b, path
 				}
 				return b, ""
@@ -148,13 +150,15 @@ func TestTmuxSocketClaimedDecisionTable(t *testing.T) {
 // the code that asked (#7533; #4678 and #6581 both lacked this for attribution).
 // So is each rule-out, with the paths the server is bound to instead (#7541).
 func TestTmuxSocketClaimedLogsEachSignal(t *testing.T) {
-	const owner, elsewhere, gone = 9101, 9102, 9103
+	const owner, elsewhere, gone, tableOwner = 9101, 9102, 9103, 9104
 	socket := filepath.Join(t.TempDir(), "default")
-	pinServerIdentityForTest(t, owner, elsewhere, gone)
+	pinServerIdentityForTest(t, owner, elsewhere, gone, tableOwner)
 	pinSocketBindingForTest(t, func(pid int, path string) (socketBinding, string) {
 		switch pid {
 		case owner:
 			return socketBindingBound, path
+		case tableOwner:
+			return socketBindingBoundByTable, path
 		case gone:
 			return socketBindingGone, ""
 		}
@@ -165,7 +169,7 @@ func TestTmuxSocketClaimedLogsEachSignal(t *testing.T) {
 	info := &logtest.Buffer{}
 	aflog.CaptureOutput(t, aflog.InfoLog, "INFO:", info)
 
-	tmuxSocketClaimed(socket, []int{elsewhere, gone, owner})
+	tmuxSocketClaimed(socket, []int{elsewhere, gone, owner, tableOwner})
 
 	var lines []string
 	for _, line := range strings.Split(info.String(), "\n") {
@@ -173,16 +177,18 @@ func TestTmuxSocketClaimedLogsEachSignal(t *testing.T) {
 			lines = append(lines, line)
 		}
 	}
-	require.Len(t, lines, 1, "one line per SIGUSR1, and none for a server not signalled: %q", info.String())
-	require.Contains(t, lines[0], "SIGUSR1 to tmux server pid 9101, which is bound to "+socket)
+	require.Len(t, lines, 2, "one line per SIGUSR1, and none for a server not signalled: %q", info.String())
+	require.Contains(t, lines[0], "SIGUSR1 to tmux server pid 9101, which is bound to "+socket+" per its own socket")
+	require.Contains(t, lines[1], "SIGUSR1 to tmux server pid 9104, which is bound to "+socket+" per the /proc/<pid>/net/unix table",
+		"the log names which source found the owner (#7536)")
 	require.Contains(t, lines[0], "tmux socket "+socket+" is missing")
 	require.Contains(t, lines[0], "asked by ")
 	require.Contains(t, lines[0], "TestTmuxSocketClaimedLogsEachSignal", "the caller is the code that asked, not the probe")
 
 	logged := info.String()
-	require.Contains(t, logged, "tmux server pid 9102 is bound to /elsewhere/a, /elsewhere/b instead, so it is ruled out and not signalled")
+	require.Contains(t, logged, "tmux server pid 9102 is bound to /elsewhere/a, /elsewhere/b instead, per its own sockets read one by one, so it is ruled out and not signalled")
 	require.Contains(t, logged, "tmux server pid 9103 exited while its sockets were read, so it is ruled out and not signalled")
-	require.Equal(t, 3, strings.Count(logged, "asked by TestTmuxSocketClaimedLogsEachSignal")+
+	require.Equal(t, 4, strings.Count(logged, "asked by TestTmuxSocketClaimedLogsEachSignal")+
 		strings.Count(logged, "asked by github.com/sachiniyer/agent-factory/session/tmux.TestTmuxSocketClaimedLogsEachSignal"),
 		"every line names the caller")
 }
@@ -190,8 +196,8 @@ func TestTmuxSocketClaimedLogsEachSignal(t *testing.T) {
 // The refusal names every candidate the probe could not rule out, and only
 // those, split into identified servers and candidates it may not signal.
 func TestPossibleSocketOwners(t *testing.T) {
-	const notServer, elsewhere, unresolved, owner, gone = 9201, 9202, 9203, 9204, 9205
-	pinServerIdentityForTest(t, elsewhere, unresolved, owner, gone)
+	const notServer, elsewhere, unresolved, owner, gone, tableOwner = 9201, 9202, 9203, 9204, 9205, 9206
+	pinServerIdentityForTest(t, elsewhere, unresolved, owner, gone, tableOwner)
 	pinSocketBindingForTest(t, func(pid int, path string) (socketBinding, string) {
 		switch pid {
 		case elsewhere:
@@ -200,12 +206,14 @@ func TestPossibleSocketOwners(t *testing.T) {
 			return socketBindingBound, path
 		case gone:
 			return socketBindingGone, ""
+		case tableOwner:
+			return socketBindingBoundByTable, path
 		default:
 			return socketBindingUnresolved, ""
 		}
 	})
-	servers, unidentified := possibleSocketOwners("/tmp/tmux-1000/default", []int{0, notServer, elsewhere, unresolved, owner, gone})
-	require.Equal(t, []int{unresolved, owner}, servers)
+	servers, unidentified := possibleSocketOwners("/tmp/tmux-1000/default", []int{0, notServer, elsewhere, unresolved, owner, gone, tableOwner})
+	require.Equal(t, []int{unresolved, owner, tableOwner}, servers)
 	require.Equal(t, []int{0, notServer}, unidentified)
 	servers, unidentified = possibleSocketOwners("/tmp/tmux-1000/default", []int{elsewhere, gone})
 	require.Empty(t, servers)
@@ -336,6 +344,59 @@ func TestServerPIDExited(t *testing.T) {
 	require.True(t, serverPIDExited(reaped.ProcessState.Pid()), "a reaped pid names no process")
 	require.False(t, serverPIDExited(os.Getpid()), "a live process is not gone")
 	require.False(t, serverPIDExited(1), "init is not gone, whether or not this uid may signal it")
+}
+
+// The socket table is a fallback for a POSITIVE match only (#7536). When the
+// per-socket read cannot answer, a table row bound to the missing path finds
+// the owner. A table with no such row rules nothing out: the server stays
+// unresolved. When the per-socket read does answer, the table is never asked.
+func TestReadTmuxServerSocketBindingUsesTheTableOnlyForAMatch(t *testing.T) {
+	const target = "/tmp/tmux-1000/default"
+	unreadable := errors.New("sock_diag: protocol not supported")
+	pin := func(t *testing.T, perSocket func(int) ([]string, error), table func(int) ([]string, error)) {
+		t.Helper()
+		prevPer, prevTable, prevExited := listenerPathsOf, listenerPathsByTableOf, serverPIDExited
+		listenerPathsOf, listenerPathsByTableOf = perSocket, table
+		serverPIDExited = func(int) bool { return false }
+		t.Cleanup(func() { listenerPathsOf, listenerPathsByTableOf, serverPIDExited = prevPer, prevTable, prevExited })
+	}
+	failing := func(int) ([]string, error) { return nil, unreadable }
+	tableSays := func(paths ...string) func(int) ([]string, error) {
+		return func(int) ([]string, error) { return paths, nil }
+	}
+	neverAsked := func(t *testing.T) func(int) ([]string, error) {
+		return func(int) ([]string, error) {
+			t.Error("the table was asked although the per-socket read answered")
+			return nil, nil
+		}
+	}
+
+	t.Run("per-socket unreadable, the table shows the owner: bound, by the table", func(t *testing.T) {
+		pin(t, failing, tableSays("/tmp/other", target))
+		b, p := readTmuxServerSocketBinding(4242, target)
+		require.Equal(t, socketBindingBoundByTable, b)
+		require.Equal(t, target, p)
+	})
+	t.Run("per-socket unreadable, the table shows another socket: unresolved, never elsewhere", func(t *testing.T) {
+		pin(t, failing, tableSays("/tmp/other"))
+		b, _ := readTmuxServerSocketBinding(4242, target)
+		require.Equal(t, socketBindingUnresolved, b)
+	})
+	t.Run("per-socket unreadable, the table unreadable too: unresolved", func(t *testing.T) {
+		pin(t, failing, failing)
+		b, _ := readTmuxServerSocketBinding(4242, target)
+		require.Equal(t, socketBindingUnresolved, b)
+	})
+	t.Run("per-socket answers another socket: elsewhere, the table never asked", func(t *testing.T) {
+		pin(t, tableSays("/tmp/other"), neverAsked(t))
+		b, _ := readTmuxServerSocketBinding(4242, target)
+		require.Equal(t, socketBindingElsewhere, b)
+	})
+	t.Run("per-socket answers the owner: bound, the table never asked", func(t *testing.T) {
+		pin(t, tableSays(target), neverAsked(t))
+		b, _ := readTmuxServerSocketBinding(4242, target)
+		require.Equal(t, socketBindingBound, b)
+	})
 }
 
 // gone needs the independent lookup to agree: a failed or empty read of a pid
