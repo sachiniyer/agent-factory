@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -612,6 +613,16 @@ func (p *dockerProvisioner) runContainer() error {
 			"-e", "XDG_DATA_HOME="+home+"/.local/share",
 			"-e", "XDG_CONFIG_HOME="+home+"/.config",
 		)
+		// tmux runs each pane command as $default-shell -c …, and default-shell
+		// comes from SHELL in the client environment. A repo-chosen SHELL (image
+		// ENV, or docker.run_args, which the validator now refuses) would run a
+		// program of the repo's choosing between af's pins and the agent's exec —
+		// a program that can re-set every pinned name (#7529 R1). The same
+		// last-wins -e pins SHELL to POSIX sh unless the operator forwards their
+		// own through session_env_passthrough.
+		if !slices.Contains(p.spec.SessionEnvPassthrough, "SHELL") {
+			args = append(args, "-e", "SHELL=/bin/sh")
+		}
 	}
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
@@ -698,6 +709,19 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 		p.credentialEnvPins...)
 	for _, name := range agentServerEnvNames {
 		args = append(args, "--session-env", name)
+	}
+	// The pins are also carried as --session-env-empty so the pane's exec shim
+	// re-asserts them defined-and-empty at the last boundary before the agent
+	// execs — after tmux's default-shell and anything else that could re-set a
+	// name between docker run's env and the exec (#7529 R1). --no-tmux-config
+	// closes the same hole on the file side: the image's /etc/tmux.conf or a
+	// ~/.tmux.conf could pick default-shell itself, or write session
+	// environment with set-environment -g.
+	for _, name := range p.credentialEnvPins {
+		args = append(args, "--session-env-empty", name)
+	}
+	if len(p.credentialMounts) > 0 {
+		args = append(args, "--no-tmux-config")
 	}
 	if branch := strings.TrimSpace(p.spec.Branch); branch != "" {
 		args = append(args, "--branch", branch)

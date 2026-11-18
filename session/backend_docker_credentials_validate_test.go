@@ -426,6 +426,7 @@ func TestDockerCredentialRunArgs_RefusesRoutingNamesPerAgent(t *testing.T) {
 		{tmux.ProgramOpencode, "XDG_DATA_HOME"},
 		{tmux.ProgramAmp, "XDG_CONFIG_HOME"},
 		{tmux.ProgramCodex, "HOME"},
+		{tmux.ProgramClaude, "SHELL"},
 		{tmux.ProgramClaude, "GH_CONFIG_DIR"},
 		{tmux.ProgramGemini, "GH_TOKEN"},
 		{tmux.ProgramOpencode, "SSH_AUTH_SOCK"},
@@ -953,14 +954,44 @@ func TestCredentialMountPinnedNames_Classification(t *testing.T) {
 	} {
 		require.Contains(t, pinned, name, "classified name %s must be pinned", name)
 	}
-	for _, name := range []string{"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "AZURE_OPENAI_API_VERSION", "AMP_HOME"} {
+	for _, name := range []string{"HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "SHELL", "AZURE_OPENAI_API_VERSION", "AMP_HOME"} {
 		require.NotContains(t, pinned, name, "reasserted/kept name %s must not be pinned", name)
 	}
 	withForward := credentialMountPinnedNames(tmux.ProgramOpencode, []string{"HTTPS_PROXY", "OPENAI_BASE_URL"})
 	require.NotContains(t, withForward, "HTTPS_PROXY")
+	require.NotContains(t, withForward, "https_proxy")
 	require.NotContains(t, withForward, "OPENAI_BASE_URL")
 	require.True(t, sort.StringsAreSorted(withForward), "pins must be sorted for a deterministic argv")
 	require.Len(t, sortedNamesToSet(withForward), len(withForward), "pins must be duplicate-free")
+}
+
+// TestCredentialMountPinnedNames_ProxyCaseTwinExemptsBoth is R2's regression
+// pin: programs disagree on which proxy spelling wins, and some treat a
+// defined-empty twin as an explicit "no proxy" that cancels the other case —
+// forwarding EITHER spelling of a pair must therefore exempt BOTH from the
+// empty pin, or the pin on the twin silently cancels the operator's proxy
+// (#7529 R2).
+func TestCredentialMountPinnedNames_ProxyCaseTwinExemptsBoth(t *testing.T) {
+	for _, pair := range credentialMountProxyCasePairs {
+		for _, spelling := range pair {
+			twin := pair[0]
+			if twin == spelling {
+				twin = pair[1]
+			}
+			pinned := credentialMountPinnedNames(tmux.ProgramOpencode, []string{spelling})
+			require.NotContainsf(t, pinned, spelling,
+				"forwarded %s must not be pinned", spelling)
+			require.NotContainsf(t, pinned, twin,
+				"forwarding %s must also exempt its twin %s", spelling, twin)
+		}
+	}
+	// An unrelated forwarded name leaves all eight proxy spellings pinned.
+	pinned := sortedNamesToSet(credentialMountPinnedNames(tmux.ProgramOpencode, []string{"OPERATOR_THING"}))
+	for _, pair := range credentialMountProxyCasePairs {
+		for _, spelling := range pair {
+			require.Contains(t, pinned, spelling, "unforwarded proxy name %s must stay pinned", spelling)
+		}
+	}
 }
 
 // TestCredentialMountBlankedWarning_NamesOnly pins the migration warning's
@@ -1029,6 +1060,77 @@ func TestDockerMountAgentCredentials_SessionEnvCarriesPins(t *testing.T) {
 		require.GreaterOrEqualf(t, strings.Count(cmd, name), 2,
 			"pin/forwarded name %s must appear in the extras list and the --session-env args: %s", name, cmd)
 	}
+}
+
+// TestDockerMountAgentCredentials_AgentServerCarriesEmptyPinsAndNoTmuxConfig
+// pins R1's in-container half: the pins also ride --session-env-empty, so the
+// pane's exec shim re-asserts them defined-and-empty at the last boundary
+// before the agent execs — after tmux's default-shell (-c chain) or anything
+// else that could re-set a name between docker run's env and the exec. And
+// --no-tmux-config carries -f /dev/null into every tmux call, so the image's
+// /etc/tmux.conf or a ~/.tmux.conf cannot pick default-shell itself or write
+// session environment (#7529 R1).
+func TestDockerMountAgentCredentials_AgentServerCarriesEmptyPinsAndNoTmuxConfig(t *testing.T) {
+	p := &dockerProvisioner{
+		spec: ProvisionSpec{
+			Title:   "pin-test",
+			Program: tmux.ProgramOpencode,
+		},
+		program:           tmux.ProgramOpencode,
+		credentialEnvPins: []string{"HTTPS_PROXY", "OPENAI_API_KEY"},
+		credentialMounts:  []string{"-v", "/h/.config/opencode/auth.json:/cred:ro"},
+	}
+	cmd, err := p.agentServerCommand()
+	require.NoError(t, err)
+	for _, name := range p.credentialEnvPins {
+		require.Containsf(t, cmd, "--session-env-empty "+name,
+			"pin %s must ride --session-env-empty for the exec shim: %s", name, cmd)
+	}
+	require.Contains(t, cmd, "--no-tmux-config",
+		"a credential-mount session's agent-server must skip image tmux config files: %s", cmd)
+
+	// No credential mounts → neither flag: the property boundary is the mount.
+	p.credentialMounts = nil
+	p.credentialEnvPins = nil
+	cmd, err = p.agentServerCommand()
+	require.NoError(t, err)
+	require.NotContains(t, cmd, "--session-env-empty")
+	require.NotContains(t, cmd, "--no-tmux-config")
+}
+
+// TestDockerMountAgentCredentials_ShellReassertedAfterRunArgs pins R1's
+// program-choice fix: tmux runs every pane command as $default-shell -c … and
+// default-shell comes from SHELL in the client environment, so a repo-chosen
+// SHELL (image ENV, or a docker.run_args entry the validator now refuses)
+// would run a program of the repo's choosing between af's pins and the
+// agent's exec — a program that can re-set every pinned name (#7529 R1). The
+// run argv re-asserts SHELL=/bin/sh after run_args, unless the operator
+// forwards their own SHELL through session_env_passthrough.
+func TestDockerMountAgentCredentials_ShellReassertedAfterRunArgs(t *testing.T) {
+	runCalled, _, runArgv := provisionDockerCredentialGrant(t, tmux.ProgramClaude,
+		[]string{"-e", "TZ=UTC"})
+	require.True(t, runCalled, "harmless run_args must still reach docker run")
+	runArgsIdx := indexIn(runArgv, "TZ=UTC")
+	require.Greater(t, runArgsIdx, 0, "the run_args marker was not in the argv: %v", runArgv)
+	shellIdx := indexIn(runArgv, "SHELL=/bin/sh")
+	require.Greaterf(t, shellIdx, runArgsIdx,
+		"SHELL=/bin/sh must be re-asserted after run_args so Docker's last-wins rule dominates an image-supplied SHELL: %v", runArgv)
+	require.Equal(t, -1, envPinIndex(runArgv, "SHELL"), "SHELL takes the re-asserted value, never a blank pin")
+
+	// A repo run_args entry naming SHELL is refused before docker run.
+	runCalled, err, _ := provisionDockerCredentialGrant(t, tmux.ProgramClaude,
+		[]string{"-e", "SHELL=/repo/evil.sh"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SHELL")
+	require.False(t, runCalled, "a run_args SHELL must refuse before docker run")
+
+	// An operator-forwarded SHELL is the operator's own claim on the name: the
+	// re-assertion steps aside so their value survives.
+	runCalled, _, runArgv = provisionDockerCredentialGrantPassthrough(t, tmux.ProgramClaude,
+		[]string{"-e", "TZ=UTC"}, []string{"SHELL"})
+	require.True(t, runCalled, "harmless run_args must still reach docker run")
+	require.Equal(t, -1, indexIn(runArgv, "SHELL=/bin/sh"),
+		"an operator-forwarded SHELL must not be re-asserted over: %v", runArgv)
 }
 
 // indexIn returns the index of the first arg containing sub, or -1.

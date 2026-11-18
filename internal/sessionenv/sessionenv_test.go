@@ -644,7 +644,7 @@ func TestDockerRepoSelectedImageDoesNotReceiveBuiltInCredentials(t *testing.T) {
 }
 
 func TestWrapCommandNeverRendersEnvironmentValues(t *testing.T) {
-	wrapped, err := WrapCommand("/opt/af binary", "codex", []string{"CUSTOM_PROVIDER_TOKEN"}, "codex --model 'a b'")
+	wrapped, err := WrapCommand("/opt/af binary", "codex", []string{"CUSTOM_PROVIDER_TOKEN"}, nil, "codex --model 'a b'")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -232,21 +232,39 @@ user's real home and mounts it only if it exists, so:
     blocked, so containment is **partial by design**. Turn it on only for images
     you trust with read access to that agent's credential.
 
-    **The environment cannot carry a credential the operator did not forward.**
-    af classifies every name that can substitute for, relocate, or route the
-    mounted credential — API keys and tokens, inline-config names like
-    `OPENCODE_CONFIG_CONTENT`, config roots like `CODEX_HOME` and
-    `OPENCODE_CONFIG_DIR`, endpoints and base URLs, proxies and CA bundles,
-    `HOME`/`XDG_*`, GitHub token and SSH-agent names — for every agent in the
-    mount table above. `docker.run_args` entries naming one are **refused**
-    before `docker run`; the same names the operator did not forward are then
-    defined **and empty** in the container environment, so the image's own
-    `ENV`, a workspace `.env` loader, or any other late source finds the name
-    already set to nothing. `HOME`, `XDG_DATA_HOME`, and `XDG_CONFIG_HOME` are
-    re-asserted to the mount's real roots rather than emptied. The operator's
-    escape hatch is unchanged: names listed in the global
+    **No classified environment name carries a non-operator value into the
+    agent's exec.** af classifies every environment name that can substitute
+    for, relocate, or route the mounted credential — API keys and tokens,
+    inline-config names like `OPENCODE_CONFIG_CONTENT`, config roots like
+    `CODEX_HOME` and `OPENCODE_CONFIG_DIR`, endpoints and base URLs, proxies
+    and CA bundles, `HOME`/`XDG_*`, `SHELL`, GitHub token and SSH-agent names —
+    for every agent in the mount table above. Three boundaries enforce it:
+
+    - At `docker run`: `docker.run_args` entries naming one are **refused**
+      before the container starts, and every classified name the operator did
+      not forward is defined **and empty** in the container environment — so
+      the image's own `ENV` and a workspace loader that fills only unset names
+      find it already set to nothing. (Measured: gemini's workspace `.env`
+      supplied `GEMINI_API_KEY` only when the name was unset; defined-and-empty
+      survived the `.env`.) `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` are
+      re-asserted to the mount's real roots, and `SHELL` to `/bin/sh`, so
+      tmux's `default-shell -c` chain cannot run a repo-chosen program before
+      the agent's exec.
+    - At the exec itself: the pins also reach the in-container agent-server,
+      whose pane launch re-asserts each one defined-and-empty **immediately
+      before the agent execs** — after tmux's shell hop or a tmux config file
+      could have re-set one.
+    - On tmux: every tmux invocation the agent-server runs carries
+      `-f /dev/null`, so the image's `/etc/tmux.conf` or a `~/.tmux.conf`
+      cannot pick `default-shell`, run hooks, or write session environment
+      either.
+
+    The operator's escape hatch is unchanged: names listed in the global
     `session_env_passthrough` keep their forwarded value and are never blanked
-    or refused for the operator's own use.
+    or refused for the operator's own use — and forwarding either spelling of a
+    proxy pair (`HTTP/HTTPS/ALL/NO_PROXY`, either case) exempts both, since a
+    defined-empty twin would cancel the forwarded value in clients that read
+    both spellings.
 
     **Migration.** If a working setup legitimately carried one of these names —
     a corporate `HTTPS_PROXY`, a private CA bundle, a private-cloud
@@ -257,14 +275,30 @@ user's real home and mounts it only if it exists, so:
     the error.
 
     **What still trusts the image and the repo.** The pins cover the
-    *environment* only. The repo chose the image: its agent binary, its CA
-    store, and its config files can read the mounted file directly, and an
-    agent's own workspace configuration (an `.env` file the CLI force-loads, an
-    `opencode.json` in the repo, a settings file that sets a provider or key)
-    can configure where the agent sends what it read — those are file content,
-    not environment, and af does not audit them. Turn the grant on only for
-    images and repositories you trust to that degree; the credential is what
-    they get.
+    *environment boundary only*, and only the classified names. The repo chose
+    the image, so the following hops remain trusted:
+
+    - **The image's own binaries, libraries, CA store, and system files** —
+      the agent's own code and anything it loads can read the mounted file
+      directly or redirect where its contents are sent.
+    - **Workspace configuration, which is file content, not environment** —
+      an `opencode.json`, a `.claude/` or `.gemini/` settings file (a
+      `settings.json` `env` block included), or a loader that force-loads
+      rather than fill-if-unset can configure where the agent sends what it
+      read; af does not audit them, and not every agent's config surface has
+      been measured.
+    - **af-answered folder-trust prompts.** af answers the folder/workspace
+      trust prompts Claude, Codex, and Gemini ask before treating a
+      directory's own settings as authoritative — the workspace is told
+      trusted, so anything those settings then do is inside the same
+      image/repo trust this grant already requires.
+    - **Env names the classification does not cover.** A name that neither
+      substitutes, relocates, nor routes the credential is allowed through;
+      the per-agent reachable surface is pinned by test, but a name an agent
+      adds upstream is discovered on review, not by construction.
+
+    Turn the grant on only for images and repositories you trust to that
+    degree; the credential is what they get.
 
 ### Image requirements (bring-your-own image)
 

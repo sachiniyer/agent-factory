@@ -473,6 +473,108 @@ func TestAgentServerExecInvocationDoesNotCompareSymlinkSpelling(t *testing.T) {
 	}
 }
 
+// The credential-mount empty pins are re-applied after filtering, immediately
+// before exec — the applyAccountScope shape at the last boundary af controls.
+// tmux's default-shell (-c chain) or a tmux config file could have re-set a
+// pinned name between docker run's env and this process; the re-application
+// discards that value so the agent can only read the name defined-and-empty
+// (#7529 R1).
+func TestExecInvocationReappliesEmptyPinsAtExec(t *testing.T) {
+	t.Setenv("AF_PIN_TEST", "attacker-value")
+	pathDir := t.TempDir()
+	writeExecutableFixture(t, pathDir, "codex")
+	t.Setenv("PATH", pathDir)
+	wantErr := errors.New("stop before exec")
+	var gotEnvironment []string
+	previous := processExec
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnvironment = append([]string(nil), environ...)
+		return wantErr
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	// [agent, extrasCount, extras..., pinsCount, pins..., command]
+	err := execInvocation([]string{"codex", "1", "AF_PIN_TEST", "1", "AF_PIN_TEST", "codex"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
+	}
+	if !slices.Contains(gotEnvironment, "AF_PIN_TEST=") {
+		t.Fatalf("the pin must reach exec defined-and-empty: %v", gotEnvironment)
+	}
+	if slices.Contains(gotEnvironment, "AF_PIN_TEST=attacker-value") {
+		t.Fatal("a value re-set between docker run and the exec survived the pin")
+	}
+}
+
+// A pin that is not even in the process environment is still emitted
+// defined-and-empty: the re-apply ADDS the name, it does not merely blank an
+// existing one — otherwise a name an intervening program deleted would reach
+// the agent as unset, which fill-if-unset workspace loaders treat differently
+// from defined-empty (#7529 R1).
+func TestExecInvocationAddsAnAbsentPinDefinedEmpty(t *testing.T) {
+	pathDir := t.TempDir()
+	writeExecutableFixture(t, pathDir, "codex")
+	t.Setenv("PATH", pathDir)
+	wantErr := errors.New("stop before exec")
+	var gotEnvironment []string
+	previous := processExec
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnvironment = append([]string(nil), environ...)
+		return wantErr
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	err := execInvocation([]string{"codex", "0", "1", "AF_PIN_ABSENT_TEST", "codex"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
+	}
+	if !slices.Contains(gotEnvironment, "AF_PIN_ABSENT_TEST=") {
+		t.Fatalf("an absent pin must be added defined-and-empty: %v", gotEnvironment)
+	}
+}
+
+// The pins section is length-checked exactly like the extras section: a tail
+// that does not describe exactly pinsCount names plus the command is refused
+// rather than interpreted (#7529 R1).
+func TestExecInvocationRejectsMalformedPinsSection(t *testing.T) {
+	for _, args := range [][]string{
+		{"codex", "0", "2", "ONLY_ONE", "cmd"},            // count overstates the tail
+		{"codex", "0", "0", "EXTRA", "cmd"},               // zero pins but an extra arg
+		{"codex", "0", "not-a-number", "cmd"},             // a non-numeric count
+		{"codex", "0", "1", "NOT A NAME!!", "cmd"},        // an unnormalizable pin name
+		{"codex", "1", "X", "2", "A", "cmd", "cmd2", "x"}, // trailing unaccounted arg
+	} {
+		if err := execInvocation(args); err == nil {
+			t.Fatalf("execInvocation(%v) = nil, want a refusal", args)
+		}
+	}
+}
+
+// The wrapped argv keeps the pins section out entirely when there are no pins,
+// so a pane command written by this af is still readable by an older shim — and
+// when pins exist the section is exactly count + names before the command.
+func TestWrapCommandPinsSectionLayout(t *testing.T) {
+	wrapped, err := WrapCommand("/opt/af", "codex", []string{"EXTRA_A"}, []string{"PIN_B"}, "run it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"EXTRA_A", "PIN_B", "run it"} {
+		if !strings.Contains(wrapped, want) {
+			t.Fatalf("wrapped command missing %q: %s", want, wrapped)
+		}
+	}
+	if strings.Index(wrapped, "PIN_B") > strings.Index(wrapped, "run it") {
+		t.Fatalf("pins must precede the command: %s", wrapped)
+	}
+	plain, err := WrapCommand("/opt/af", "codex", []string{"EXTRA_A"}, nil, "run it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "PIN_B") {
+		t.Fatalf("a nil pins list must not produce a pins section: %s", plain)
+	}
+}
+
 // #5328 review: pane options outlive the incarnation that wrote them, so a
 // respawned pane can carry the PREVIOUS run's @af_pane_pid stamp. The only
 // state teardown cannot survive is a LIVE pane hiding a replacement root

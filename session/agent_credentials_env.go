@@ -85,10 +85,16 @@ var credentialMountSharedRoutingNames = map[string]struct{}{
 // post-run_args HOME/XDG block). They are still refused to repo run_args —
 // the assertion is a pin, and a repo's own value is exactly what it exists to
 // dominate — they just produce a corrected value rather than an empty one.
+// SHELL joins them: tmux runs every pane command as $default-shell -c … and
+// default-shell comes from the client environment, so a repo-chosen SHELL
+// would run a program of the image's choosing between af's pins and the
+// agent's exec — a program that can re-set every pinned name. af re-asserts
+// SHELL to /bin/sh unless the operator forwards their own (#7529 R1).
 var credentialMountReassertedNames = map[string]struct{}{
 	"HOME":            {},
 	"XDG_DATA_HOME":   {},
 	"XDG_CONFIG_HOME": {},
+	"SHELL":           {},
 }
 
 // credentialMountIdentityEnvNames are the credential-bearing per-agent names
@@ -260,6 +266,20 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	return "", false
 }
 
+// credentialMountProxyCasePairs pairs each proxy variable's upper- and
+// lower-case spellings. Programs disagree on which spelling wins — and some
+// treat a defined-empty sibling as an explicit "no proxy" that cancels the
+// other spelling (measured: Python's getproxies and reqwest both let an empty
+// lowercase twin override a forwarded uppercase value). Forwarding either
+// spelling therefore exempts BOTH from the empty pin; pinning the twin of a
+// forwarded name could silently cancel the operator's proxy (#7529 R2).
+var credentialMountProxyCasePairs = [][2]string{
+	{"HTTP_PROXY", "http_proxy"},
+	{"HTTPS_PROXY", "https_proxy"},
+	{"ALL_PROXY", "all_proxy"},
+	{"NO_PROXY", "no_proxy"},
+}
+
 // credentialMountPinnedNames returns the classified names af pins
 // defined-and-empty on the credential-mount path: the denied set minus the
 // reasserted names (which take real values instead) and minus names the
@@ -270,6 +290,15 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 	forwarded := make(map[string]struct{}, len(passthrough))
 	for _, name := range passthrough {
 		forwarded[name] = struct{}{}
+	}
+	for _, pair := range credentialMountProxyCasePairs {
+		if _, ok := forwarded[pair[0]]; ok {
+			forwarded[pair[1]] = struct{}{}
+			continue
+		}
+		if _, ok := forwarded[pair[1]]; ok {
+			forwarded[pair[0]] = struct{}{}
+		}
 	}
 	out := make([]string, 0)
 	for name := range credentialMountDeniedNames(agent) {
