@@ -477,6 +477,7 @@ func (m *Manager) RefreshStatuses() {
 	m.sweepPausedPollState()
 	m.sweepTaskRunTurnWatches()
 	m.sweepUnverifiedSendWatches()
+	m.sweepStagedDraftWatches()
 
 	// Worktree presence first, on its own bounded fan-out (#5102): it is a
 	// filesystem probe, not a tmux one, and running it inline here would let one
@@ -890,6 +891,16 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			settlementCheckpoint = true
 		}
 	}
+
+	// The staged-draft recheck (#7545) reads this tick's SETTLED liveness, so
+	// it feeds after the resolution above: a row the poll just found Ready
+	// with a send still recorded sent-unverified may hold its bound draft in
+	// the idle composer, and the watch flags it for attention once the staged
+	// reading has been sustained. A mid-turn Running never reaches it — that
+	// is the #4622 exclusion. It is fed only here, never on the paused path:
+	// its verdict needs its own bounded capture, and a user's attach must not
+	// share the pane with a daemon probe.
+	m.noteStagedDraftEvidence(repoID, key, instance, as)
 
 	// The run-marker flip is durable on its own: a held gate releasing on a
 	// Ready→Ready observation moves no liveness, and with on_complete=keep

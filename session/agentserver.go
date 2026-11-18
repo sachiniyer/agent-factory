@@ -50,6 +50,40 @@ type PromptDeliveryReporter interface {
 	SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error)
 }
 
+// StagedDraftRead is the closed verdict of the staged-draft recheck (#7545) —
+// where a sent-unverified send's bound composer evidence sits in the pane now.
+// It is an alias of the tmux-layer type so the read can cross the runtime
+// boundary without a second vocabulary.
+type StagedDraftRead = tmux.StagedDraftRead
+
+const (
+	StagedDraftNoEvidence = tmux.StagedDraftNoEvidence
+	StagedDraftUnreadable = tmux.StagedDraftUnreadable
+	StagedDraftGone       = tmux.StagedDraftGone
+	StagedDraftSubmitted  = tmux.StagedDraftSubmitted
+	StagedDraftStaged     = tmux.StagedDraftStaged
+)
+
+// StagedDraftChecker is the additive capability a runtime implements when it
+// can re-read where the last send's bound composer evidence sits (#7545). The
+// local tmux runtime implements it; off-box runtimes cannot read a sandbox's
+// composer and do not — the daemon's staged-draft watch then never arms for
+// them, which is the honest answer the capability exists to give.
+type StagedDraftChecker interface {
+	BoundDraftStillStaged() (StagedDraftRead, string)
+}
+
+// BoundDraftStillStaged asks a runtime where the last send's bound composer
+// evidence sits. A runtime without the capability reports
+// StagedDraftNoEvidence — never a negative about the draft itself, just the
+// honest "there is nothing bound to check".
+func BoundDraftStillStaged(server AgentServer) (StagedDraftRead, string) {
+	if checker, ok := server.(StagedDraftChecker); ok {
+		return checker.BoundDraftStillStaged()
+	}
+	return StagedDraftNoEvidence, "the runtime cannot read bound composer evidence"
+}
+
 // SendPromptWithStatus uses a runtime's observation when available. A legacy
 // runtime that only implements SendPrompt is honest uncertainty, not delivery:
 // nil error proves the command completed, not that the pane received the text.

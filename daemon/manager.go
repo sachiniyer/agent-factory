@@ -626,6 +626,11 @@ type Manager struct {
 	// re-verifying ambiguous account-swap notice verdicts — one per committed
 	// swap, keyed by stableSessionKey like unverifiedSendWatches (#6767).
 	pendingSwapNoticeWatches map[string]*pendingSwapNoticeWatch
+	// stagedDraftWatches holds the poll-fed staged-draft watches (#7545): one
+	// per session whose last send still reads sent-unverified and whose bound
+	// composer evidence is being re-checked while the agent sits Ready.
+	// Keyed by stableSessionKey; guarded by pausedMu.
+	stagedDraftWatches map[string]*stagedDraftWatch
 	// rateIndexer is the bounded rollout-store reader the account-limit proof
 	// reconcile refreshes per walled account (#6776 1d). Its per-file memo is
 	// the reason an every-45s cadence is cheap: an unchanged file costs zero

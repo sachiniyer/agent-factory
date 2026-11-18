@@ -376,6 +376,20 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 		boundaryText = normalizeDelivery(xansi.Strip(boundary))
 		bound = probe.boundEvidence(boundaryText, boundaryGrid)
 	}
+	// Stash this attempt's bound evidence for the daemon's staged-draft
+	// recheck (#7545). A send that reports sent-unverified may have left its
+	// draft staged in an idle composer, and only evidence bound to THIS send
+	// may later flag it — never a text match on arbitrary composer contents.
+	// Stored on every attempt: a redelivery's own binding replaces it, and a
+	// send that bound nothing records that too, so the recheck never matches
+	// evidence against the wrong delivery.
+	{
+		ev := &stagedDraftEvidence{chip: bound.chipText}
+		if bound.tail {
+			ev.tail = probe.completion
+		}
+		t.stagedDraft.Store(ev)
+	}
 	// Observed-absent is excluded only when the boundary cannot bind the
 	// completed draft: the absent frame is pre-Enter evidence, and the boundary
 	// is the pane as of the submit — if the remainder drained into the gap, the

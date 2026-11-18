@@ -347,6 +347,13 @@ type promptDeliveryStatusBackend interface {
 	SendPromptCommandWithStatus(instance *Instance, prompt string) (PromptDeliveryStatus, error)
 }
 
+// stagedDraftBackend is the additive staged-draft recheck capability used by
+// the local agent-server (#7545): it answers where the last send's bound
+// composer evidence sits now. Backends without it report StagedDraftNoEvidence.
+type stagedDraftBackend interface {
+	BoundDraftStillStaged(instance *Instance) (StagedDraftRead, string)
+}
+
 // AgentSwapPlan is the immutable boundary between handoff preflight and runtime
 // replacement. Its fields are intentionally private: only a Backend can produce
 // a plan, and callers can only hand that same value back to SwapAgent. That makes
