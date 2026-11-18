@@ -20,6 +20,12 @@ import (
 func spawnMarkedCarrier(t *testing.T, name, home, gen string, extraEnv ...string) proctree.Process {
 	t.Helper()
 	cmd := exec.Command("sleep", "300")
+	// stdio pinned to /dev/null: an inherited pty would make the carrier hold
+	// a REAL tmux pane's slave and turn "undecidable" fixtures foreign.
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = devNull.Close() })
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = devNull, devNull, devNull
 	cmd.Env = append(os.Environ(),
 		EnvMarkerSession+"="+name,
 		EnvMarkerHome+"="+home,
