@@ -137,3 +137,118 @@ func TestTargetCopyReasonKeepsItsNamedNonRegularRefusal(t *testing.T) {
 	require.Equal(t, "the new account holds something other than a plain file where the conversation belongs",
 		c.targetCopyReason())
 }
+
+// The non-plain-file name is only the typed non-regular refusal's: a refused
+// open that saw nothing — the mode-000 file's EACCES — is a look that did
+// not happen, on either account, and never evidence about the copies. The
+// judgement must not claim what it could not see (#7539 review R1 — the
+// first form of the fix named every failed target open, undoing #7389's
+// site-2 mapping of lookup failures to the could-not-look clause).
+func TestTargetCopyReasonAFailedOpenIsUnlooked(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a mode-000 file")
+	}
+	for _, side := range []string{"target", "source"} {
+		t.Run(side, func(t *testing.T) {
+			src, dst := t.TempDir(), t.TempDir()
+			rel := filepath.Join("projects", "-repo", carryTestID+".jsonl")
+			writeCarryFile(t, src, rel, "{}\n")
+			writeCarryFile(t, dst, rel, "{}\n")
+			unreadable := filepath.Join(dst, rel)
+			if side == "source" {
+				unreadable = filepath.Join(src, rel)
+			}
+			require.NoError(t, os.Chmod(unreadable, 0o000))
+			t.Cleanup(func() { _ = os.Chmod(unreadable, 0o600) })
+
+			c := &conversationCarry{
+				agent:      tmux.ProgramClaude,
+				srcRoot:    ambientCarryRoot(src),
+				dstRoot:    ambientCarryRoot(dst),
+				transcript: rel,
+			}
+			require.Equal(t, carryUnlookedReason, c.targetCopyReason(),
+				"a refused open that is not the typed non-regular refusal is a look that did not happen")
+		})
+	}
+}
+
+// A refused link is a look that saw and named what is there: the symlink
+// keeps its own name rather than reading as non-regular or unlooked (#7539
+// review R1).
+func TestTargetCopyReasonALinkedTargetKeepsItsSymlinkName(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	rel := filepath.Join("projects", "-repo", carryTestID+".jsonl")
+	writeCarryFile(t, src, rel, "{}\n")
+	impostor := writeCarryFile(t, dst, "impostor.jsonl", "{}\n")
+	dstPath := filepath.Join(dst, rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(dstPath), 0o700))
+	require.NoError(t, os.Symlink(impostor, dstPath))
+
+	c := &conversationCarry{
+		agent:      tmux.ProgramClaude,
+		srcRoot:    ambientCarryRoot(src),
+		dstRoot:    ambientCarryRoot(dst),
+		transcript: rel,
+	}
+	require.Equal(t, symlinkCarryReason(dstPath), c.targetCopyReason(),
+		"a refused link keeps its own name — the lookup saw what is there")
+}
+
+// The other-spelling check opens the target copy once for its stat, then the
+// comparison opens it a second time. A copy swapped for a symlink between
+// the two opens is a look that did not happen — af could not check — never
+// the duplicated-copy refusal a finished comparison gives (#7539 review R3:
+// on the unreverted code the second open's refusal propagated as nil, which
+// the caller read as "does not extend" and reported another copy held).
+func TestClaudeTargetReasonACopySwappedOnTheComparesOpenIsUnchecked(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	rel := filepath.Join("projects", "-repo", carryTestID+".jsonl")
+	writeCarryFile(t, src, rel, "{}\n")
+	otherRel := filepath.Join("projects", "-other", carryTestID+".jsonl")
+	otherPath := writeCarryFile(t, dst, otherRel, "{}\n{}\n")
+	now := time.Now()
+	setModTime(t, otherPath, now)
+	setModTime(t, filepath.Join(src, rel), now.Add(time.Minute)) // the carried copy is newer, so the compare runs
+
+	// judgeClaudeTarget's first open of the copy succeeds; the stand-in swaps
+	// it out exactly when the comparison's openat — the second of that path —
+	// is about to run.
+	var opens int
+	var swapErr error
+	standIn := func(op, path string) {
+		if op != "openat" || path != otherPath {
+			return
+		}
+		opens++
+		if opens != 2 {
+			return
+		}
+		impostor := filepath.Join(dst, "impostor.jsonl")
+		if swapErr = os.WriteFile(impostor, []byte("{}\n"), 0o600); swapErr != nil {
+			return
+		}
+		if swapErr = os.Remove(otherPath); swapErr != nil {
+			return
+		}
+		swapErr = os.Symlink(impostor, otherPath)
+	}
+	prev := carryLookupStandIn.Load()
+	carryLookupStandIn.Store(&standIn)
+	t.Cleanup(func() { carryLookupStandIn.Store(prev) })
+
+	c := &conversationCarry{
+		agent:          tmux.ProgramClaude,
+		srcRoot:        ambientCarryRoot(src),
+		dstRoot:        ambientCarryRoot(dst),
+		dstHome:        dst,
+		transcript:     rel,
+		id:             carryTestID,
+		claudeProjects: []string{"projects/-repo", "projects/-other"},
+	}
+	reason := c.claudeTargetReason()
+	require.NoError(t, swapErr, "the second-open swap ran")
+	require.Equal(t, 2, opens, "the comparison opened the copy a second time")
+	require.Equal(t, carryTargetUncheckedReason, reason,
+		"a copy refused on the compare's open is a look that did not happen, never duplicated evidence")
+}

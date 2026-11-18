@@ -97,20 +97,22 @@ func TestPaced_ReportsTheAnswer(t *testing.T) {
 // openPath's seam is loaded in ReadFileWith's caller (#7539): a flight that
 // began under one seam stats its files with it even after a test installs
 // another — an abandoned flight must never run a later test's stand-in. The
-// first seam blocks until the test has swapped in a second, so whichever stat
-// the work's call runs is decided after the swap: the flight's own.
+// work is held before its stat call until a second seam is installed, so
+// whichever stat the call runs is decided after the swap: a load at the call
+// site would see the second seam, and the test is red on it (#7539 review R2
+// — the earlier form swapped only once the first seam was already inside the
+// stat, which a call-site load survives too and could never fail).
 func TestPaced_KeepsTheRegularFileStatItBeganWith(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "a.jsonl")
 	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
 
-	release := make(chan struct{})
+	release, started := make(chan struct{}), make(chan struct{})
 	var firstCalls, secondCalls atomic.Int64
-	restoreOriginal := SetRegularFileStatForTest(func(f *os.File) (os.FileInfo, error) {
+	restoreFirst := SetRegularFileStatForTest(func(f *os.File) (os.FileInfo, error) {
 		firstCalls.Add(1)
-		<-release
 		return f.Stat()
 	})
-	defer restoreOriginal()
+	defer restoreFirst()
 
 	type answer struct {
 		info os.FileInfo
@@ -119,6 +121,8 @@ func TestPaced_KeepsTheRegularFileStatItBeganWith(t *testing.T) {
 	answered := make(chan answer, 1)
 	go func() {
 		info, err := Paced("question", t.Name(), func(step func(), stat RegularStatFunc) (os.FileInfo, error) {
+			close(started)
+			<-release
 			file, err := os.Open(path)
 			if err != nil {
 				return nil, err
@@ -129,19 +133,18 @@ func TestPaced_KeepsTheRegularFileStatItBeganWith(t *testing.T) {
 		})
 		answered <- answer{info, err}
 	}()
-	require.Eventually(t, func() bool { return firstCalls.Load() == 1 }, 5*time.Second, time.Millisecond,
-		"the flight is inside its stat before the seam is swapped")
-
-	restoreSecond := SetRegularFileStatForTest(func(f *os.File) (os.FileInfo, error) {
+	<-started
+	restoreSecond := SetRegularFileStatForTest(func(*os.File) (os.FileInfo, error) {
 		secondCalls.Add(1)
-		return f.Stat()
+		return nil, errors.New("a stat installed after the flight began ran inside it")
 	})
 	defer restoreSecond()
 	close(release)
 
 	a := <-answered
-	require.NoError(t, a.err)
+	require.NoError(t, a.err, "the flight stats with the seam it began with: %v", a.err)
 	require.True(t, a.info.Mode().IsRegular())
+	require.Equal(t, int64(1), firstCalls.Load())
 	require.Equal(t, int64(0), secondCalls.Load(),
 		"a flight never sees a seam installed after it began")
 }

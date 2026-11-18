@@ -144,6 +144,21 @@ func carryFailureAt(reason string, err error) error {
 	return carryFailure(reason, err)
 }
 
+// carryTargetOpenRefusalAt is the refusal a failed open of the new account's
+// copy produces when the look itself named what sits at the path: a refused
+// link keeps its symlink name — carryFailureAt words it — and the guarded
+// open's typed non-regular refusal keeps "the new account holds something
+// other than a plain file where the conversation belongs". named reports
+// false for every other failure: an open, stat or read that saw nothing is a
+// look that did not happen, never evidence about the copy (#7539 review R1).
+func carryTargetOpenRefusalAt(err error) (refusal error, named bool) {
+	var nonRegular *fsprobe.NonRegularError
+	if errors.As(err, &nonRegular) || carrySymlinkPath(err) != "" {
+		return carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err), true
+	}
+	return nil, false
+}
+
 // carryFailureReason returns the notice-safe clause describing err.
 func carryFailureReason(err error) string {
 	var carryErr *carryError
@@ -508,7 +523,10 @@ func carryFileAt(srcDir, dstDir *os.File, name string, role carryFileRole) (carr
 	case errors.Is(err, fs.ErrNotExist):
 		dst = nil
 	default:
-		return carryFileOutcome{}, carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)
+		if refusal, named := carryTargetOpenRefusalAt(err); named {
+			return carryFileOutcome{}, refusal
+		}
+		return carryFileOutcome{}, carryFailureAt("the new account's copy of the conversation could not be opened safely", err)
 	}
 
 	verdict, err := judgeCarryFile(carryPace{}, src, srcInfo, dst, dstInfo, role)
