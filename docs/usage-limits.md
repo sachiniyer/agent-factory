@@ -218,6 +218,38 @@ wrapper script (a `program_overrides` target `af` does not model) has internals
 the command line cannot see, so what it does with the account environment is
 outside what `af` can verify.
 
+Three launchers get grammar-aware checks rather than the passthrough rule,
+because they inject environment only on specific spellings and refusing them
+outright would block ordinary use — `sudo`, `docker` (including `docker
+compose`), and `systemd-run`. Each is refused only when its visible command
+line assigns, or might assign, a protected variable:
+
+- **`sudo`** — a positional `NAME=value` or `NAME+=value` word between sudo's
+  own options and the command (`sudo CODEX_HOME=/other codex`). `-E` and
+  `--preserve-env` are admitted: they pass through the caller's environment,
+  which `af` has already scoped to the selected account, so they can carry a
+  pinned value but never a new one.
+- **`docker`** — `run`/`create`/`exec` and `docker compose run`/`exec` carry
+  `-e`/`--env` in every spelling (attached `-eNAME=v`, `--env=NAME=v`, or a
+  separate word, including a bare `-e NAME`, which copies the caller's value),
+  plus the env-removal spellings `docker compose exec` adds. Any other docker
+  subcommand — `docker compose up`, `docker build .`, `docker ps` — is
+  admitted, with the same env spellings still refused wherever they appear.
+- **`systemd-run`** — `--setenv=NAME=v`, `--setenv NAME=v`, `-E NAME=v`, and
+  `-ENAME=v`, plus the `Environment=`/`EnvironmentFile=`/`UnsetEnvironment=`
+  forms of `-p`/`--property`.
+- **Env files are unverifiable** — `--env-file`, `docker compose`'s top-level
+  `--env-file` (the interpolation file), `docker compose run
+  --env-from-file`, and `systemd-run`'s `EnvironmentFile=` all name a file
+  whose contents the command line cannot prove. They are refused even when
+  the file would be safe: `af` cannot read it to know whether it assigns a
+  protected name.
+
+A launcher buried inside another command's argv (`nohup sudo
+CODEX_HOME=/other codex`, `prog docker run -e CODEX_HOME=/other img`) is
+judged the same way the bare command is, once its own parse reaches a child
+command it could inject into.
+
 ### Docker and backend boundaries
 
 Account selection supports local and Docker sessions, and ssh sessions on a host in
