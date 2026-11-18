@@ -93,12 +93,13 @@ func dockerOptionStep(words []*syntax.Word, i int, spec dockerOptionSpec, names 
 		}
 		requiresArg, known := spec.longs[name]
 		if !known {
-			// An unknown long option is inert: docker's parser is pflag,
-			// which never abbreviates and never reads the next word as an
-			// operand of a name it does not know — it errors on the word
-			// itself. Consuming it as one word keeps option sets on other
-			// docker versions from regressing the command.
-			return i + 1, false
+			// An unknown long option on a launching leaf is unverifiable:
+			// docker's pflag never abbreviates, but hidden aliases and
+			// version additions are real options whose operand would shift
+			// the image boundary (`--net host` mistaken for the image).
+			// docker rejects an unknown flag itself, so refusing matches
+			// the command's real fate.
+			return 0, true
 		}
 		if !requiresArg || attached {
 			return i + 1, false
@@ -418,6 +419,10 @@ var dockerRunCreateOptions = dockerOptionSpec{
 		"memory-reservation": true, "memory-swap": true,
 		"memory-swappiness": true, "mount": true, "name": true,
 		"network": true, "network-alias": true, "oom-score-adj": true,
+		// Hidden aliases docker/cli's opts.go registers alongside the
+		// recommended spellings (docker 29.4.0): each still consumes an
+		// operand, so omitting one shifts the image boundary.
+		"net": true, "net-alias": true, "dns-opt": true,
 		"pid": true, "pids-limit": true, "platform": true, "publish": true,
 		"pull": true, "restart": true, "runtime": true, "security-opt": true,
 		"shm-size": true, "stop-signal": true, "stop-timeout": true,

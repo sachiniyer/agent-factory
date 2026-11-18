@@ -325,13 +325,13 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// Option-grammar edges. sudo's operand consumption and getopt_long
 		// prefix resolution are the real binary's (same-arity ambiguous
 		// prefixes resolve the way strace's measured --da does); docker's
-		// pflag never abbreviates and never reads the next word for a name
-		// it does not know, so an unknown long option is one inert word
-		// while an unknown SHORT-cluster letter can hide `-e` and fails
-		// closed.
+		// pflag never abbreviates, but a long option the launching leaf's
+		// table does not know is unverifiable — its operand could shift
+		// the image boundary — so it fails closed, and an unknown
+		// SHORT-cluster letter can hide `-e` and fails closed the same way.
 		{"docker run --name -e img", false},
 		{"docker run --name -e CODEX_HOME=/other img", false},
-		{"docker run --bogus img", false},
+		{"docker run --bogus img", true},
 		{"docker run --net host img", false},
 		{"docker run -x img", true},
 		{"sudo --bogus cmd", true},
@@ -435,6 +435,26 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"sudo -l codex", false},
 		{"sudo -V", false},
 		{"sudo -l CODEX_HOME=/x codex", true},
+
+		// docker/cli registers hidden operand-taking aliases (docker
+		// 29.4.0): `--net` for `--network`, `--net-alias` for
+		// `--network-alias`, `--dns-opt` for `--dns-option`. Each must
+		// consume its operand so the image boundary lands on the image.
+		{"docker run --net host --env=CODEX_HOME=/other alpine codex", true},
+		{"docker run --net-alias a1 --env=CODEX_HOME=/other alpine codex", true},
+		{"docker run --dns-opt ndots:1 --env=CODEX_HOME=/other alpine codex", true},
+		{"docker run --net host alpine codex", false},
+		{"docker run --net-alias a1 alpine codex", false},
+		{"docker run --dns-opt ndots:1 alpine codex", false},
+
+		// A non-launching leaf's operands get the ordinary mutation scan
+		// any unrecognized command's argv gets: a shadowed docker exec'ing
+		// the tail lands on the env invocation or the buried launcher the
+		// same way it does for `prog env CODEX_HOME=/other codex`.
+		{"docker build env CODEX_HOME=/other codex", true},
+		{"docker logs c1 env CODEX_HOME=/other codex", true},
+		{"docker build sudo CODEX_HOME=/other codex", true},
+		{"docker compose run svc env CODEX_HOME=/other codex", true},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)

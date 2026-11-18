@@ -736,7 +736,14 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 	// satisfied and only the denied-name cut applies. The leaf stays docker
 	// grammar and is never promoted into shell-command dispatch: `docker
 	// history alpine` or `docker kill c1` would otherwise re-enter the walk
-	// as the history/kill builtins and refuse ordinary docker verbs.
+	// as the history/kill builtins and refuse ordinary docker verbs. But
+	// from the leaf on, the words get the ordinary mutation scan every
+	// unrecognized command's argv gets — a repo-local or PATH-shadowed
+	// docker can discard the leaf and exec `env CODEX_HOME=/x codex` or a
+	// buried launcher straight out of the tail.
+	if wrapperTailHidesAccountAssignment(words[i-1:], false, names, memo) {
+		return run.done(nil, true)
+	}
 	for i < len(words) {
 		if cached, seen := run.visit(words[i:], requireCommand); seen {
 			return run.done(cached.words, cached.unsafe)
