@@ -437,17 +437,19 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "sudo"):
-		// sudo's env injection is positional: `VAR=value` words sit between
-		// its options and the command word, which is exactly where
-		// unwrapSudo walks. The returned tail is the command the launcher
-		// runs; like docker's and systemd-run's tails below, its argv gets
-		// the same inert scan every unrecognized command's argv gets —
-		// plus the launcher arm in wrapperTailWordHidesAccountAssignment —
-		// rather than the buried-suffix scan, which would judge operand
-		// words like the `.` in `docker build .` as possible exec
-		// boundaries and refuse ordinary use. requireCommand is false
-		// here: at command position a denied env spelling refuses on
-		// sight, the same contract the env command itself keeps.
+		// The env-injection launchers — sudo, docker and systemd-run —
+		// get the conservative lexical scan of
+		// account_environment_launchers.go: any argument word that could
+		// assign or name a protected variable refuses, env-file
+		// spellings refuse on sight, and the surviving tail is the whole
+		// argv, so every word still gets the same inert scan every
+		// unrecognized command's argv gets — plus the launcher arm in
+		// wrapperTailWordHidesAccountAssignment — rather than the
+		// buried-suffix scan, which would judge operand words like the
+		// `.` in `docker build .` as possible exec boundaries and
+		// refuse ordinary use. requireCommand is false here: at command
+		// position a denied env spelling refuses on sight, the same
+		// contract the env command itself keeps.
 		var unsafe bool
 		words, unsafe = unwrapSudo(words[1:], names, memo, false)
 		if unsafe {
@@ -573,10 +575,11 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 	}
 	if isAccountCommandName(word, "sudo") || isAccountCommandName(word, "docker") ||
 		isAccountCommandName(word, "systemd-run") {
-		// These launchers inject environment through their own option and
-		// operand grammar (sudo's positional NAME=value, docker's -e/--env
-		// and env files, systemd-run's --setenv and Environment=), which
-		// this tail scan reads as inert words. Judge the suffix at the
+		// These launchers inject environment through env spellings this
+		// tail scan reads as inert words (sudo's positional NAME=value,
+		// docker's -e/--env and env files, systemd-run's --setenv and
+		// Environment=), so each gets the conservative lexical scan of
+		// account_environment_launchers.go. Judge the suffix at the
 		// launcher's own position with env's requireCommand rule — the
 		// launcher is only a hypothesis here, so `prog sudo
 		// CODEX_HOME=/other` stays admitted the way `prog env

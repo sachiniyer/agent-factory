@@ -31,10 +31,12 @@ func scopedProcessTabEnvNames() map[string]struct{} {
 // CODEX_HOME=/other busybox codex` and `systemd-run --setenv CODEX_HOME=/other
 // codex` (the separate-word value spellings) were ADMITTED while the
 // `--env=CODEX_HOME=/other` attached form and `env CODEX_HOME=/other codex`
-// were REFUSED (#7565). The launchers are now modeled in peelAccountWrapper:
-// each walks its own option grammar to the child boundary and refuses only
-// when a spelling assigns, or might assign, a denied name — so the same
-// launchers stay admitted for every ordinary use.
+// were REFUSED (#7565). The launchers are now gated in peelAccountWrapper by
+// a deliberately conservative lexical rule: every argument word is cut on
+// `=` after stripping dashes, any segment containing a protected name
+// refuses, env-file spellings refuse on sight, and the surviving tail gets
+// the ordinary mutation scan — so ordinary uses stay admitted while every
+// env-injection spelling fails closed.
 func TestValidateAccountEnvironmentCommand_RefusesPositionalEnvInjectionAssignment(t *testing.T) {
 	for _, command := range []string{
 		// sudo: positional `NAME=value` ahead of the child (and every option
@@ -94,6 +96,20 @@ func TestValidateAccountEnvironmentCommand_RefusesPositionalEnvInjectionAssignme
 		"systemd-run --property 'Environment=FOO=1 CODEX_HOME=/other' codex",
 		"systemd-run -p EnvironmentFile=/tmp/e codex",
 		"systemd-run --property=UnsetEnvironment=CODEX_HOME codex",
+
+		// Deliberate over-approximation: the gate refuses whenever ANY
+		// argument word could assign or name a protected variable, so a
+		// word that merely NAMES one in a benign position refuses too —
+		// `echo`'s argv text, `nice`'s nonexistent program, sudo's
+		// `--`-terminated command, the already-scoped --preserve-env and
+		// PassEnvironment lists, and -e consumed as --name's operand all
+		// read `CODEX_HOME` and fail closed. Documented in the PR body.
+		"docker run alpine echo CODEX_HOME=/x",
+		"sudo nice CODEX_HOME=/other codex",
+		"sudo -- CODEX_HOME=/other codex",
+		"sudo --preserve-env=CODEX_HOME codex",
+		"systemd-run -p PassEnvironment=CODEX_HOME codex",
+		"docker run --name -e CODEX_HOME=/other img",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
 		require.Error(t, err, "command %q injects a denied NAME= assignment through an env-injection wrapper", command)
@@ -159,15 +175,12 @@ func TestValidateAccountEnvironmentCommand_AdmitsLauncherOrdinaryUse(t *testing.
 		"systemd-run --setenv PORT=3000 codex",
 		// sudo -E and --preserve-env propagate af's already-scoped values —
 		// a denied name on the list carries the pinned value, never a new
-		// one, so they are admitted. sudo's env_reset is sudo's own
-		// semantics, not an assignment on the command line.
+		// one. The lexical rule still refuses `--preserve-env=CODEX_HOME`
+		// (it names a protected variable — see the over-approximation note
+		// on the refuse table) while `-E` and the bare or PATH list stay
+		// admitted.
 		"sudo -E codex",
-		"sudo --preserve-env=CODEX_HOME codex",
 		"sudo --preserve-env=PATH codex",
-		// `--` ends sudo's option and assignment regions together: the word
-		// after it is the command itself (sudo execs the literal
-		// "CODEX_HOME=/other", which fails), not an env assignment.
-		"sudo -- CODEX_HOME=/other codex",
 		// Value options consume their operand — `CODEX_HOME=/other` inside
 		// -u/-n positions is option data, not an env assignment.
 		"sudo -u root apt-get update",
@@ -181,7 +194,6 @@ func TestValidateAccountEnvironmentCommand_AdmitsLauncherOrdinaryUse(t *testing.
 		"docker compose exec svc ls",
 		"systemd-run codex",
 		"systemd-run --unit=x codex",
-		"systemd-run -p PassEnvironment=CODEX_HOME codex",
 		"systemd-run --property Environment=FOO=1 codex",
 		"nohup docker run --rm alpine echo hi",
 		"nice systemd-run --user --scope make",
@@ -270,12 +282,14 @@ func TestCommandMutatesAccountEnvironment_PositionalEnvInjection(t *testing.T) {
 	}
 }
 
-// TestCommandMutatesAccountEnvironment_LauncherGrammarEdges pins the option-
-// grammar details the launcher models commit to: env words nested inside a
-// launcher's child argv, the operand-consumption and unknown-option rules of
-// each launcher's real parser, and the requireCommand asymmetry (a denied
-// env spelling in a hypothetical suffix refuses only once the launcher's own
-// parse reaches a command — env's rule, applied to the launcher names).
+// TestCommandMutatesAccountEnvironment_LauncherGrammarEdges pins the lexical
+// rule the launcher gate commits to: env words nested inside a launcher's
+// child argv, every spelling Codex's review named, the deliberate
+// over-refusals the rule accepts (a word that merely NAMES a protected
+// variable refuses wherever it sits), and the requireCommand asymmetry
+// (a denied env spelling in a hypothetical suffix refuses only once the
+// line could still reach a command word — env's rule, applied to the
+// launcher names).
 func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 	names := scopedProcessTabEnvNames()
 	cases := []struct {
@@ -306,9 +320,11 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"sudo env CODEX_HOME=/other codex", true},
 		{"systemd-run env CODEX_HOME=/other codex", true},
 		{"sudo bash", true},
-		// …while a non-env head is just a program: nice execs
-		// "CODEX_HOME=/other" and fails, so nothing injects.
-		{"sudo nice CODEX_HOME=/other codex", false},
+		// …while a non-env head is just a program. nice would exec
+		// "CODEX_HOME=/other" and fail, so semantically nothing injects —
+		// but the word still NAMES a protected variable and the lexical
+		// rule refuses it. Over-refusal is the accepted trade-off.
+		{"sudo nice CODEX_HOME=/other codex", true},
 
 		// The launcher arm in the unrecognized tail scan (requireCommand):
 		// the same denied spellings refuse once a command follows, and a
@@ -322,30 +338,27 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"prog docker run -e CODEX_HOME=/other", false},
 		{"prog systemd-run --setenv CODEX_HOME=/other", false},
 
-		// Option-grammar edges. sudo's operand consumption and getopt_long
-		// prefix resolution are the real binary's (same-arity ambiguous
-		// prefixes resolve the way strace's measured --da does); docker's
-		// pflag never abbreviates, but a long option the launching leaf's
-		// table does not know is unverifiable — its operand could shift
-		// the image boundary — so it fails closed, and an unknown
-		// SHORT-cluster letter can hide `-e` and fails closed the same way.
+		// Option-shape edges under the lexical rule: no option table
+		// exists anymore, so option-looking words are inert text unless
+		// they name a protected variable — `--bogus`, `-x` and a bare
+		// `-u` are ordinary words here and the launcher's own binary
+		// rejects them after validation.
 		{"docker run --name -e img", false},
-		{"docker run --name -e CODEX_HOME=/other img", false},
-		{"docker run --bogus img", true},
+		{"docker run --bogus img", false},
 		{"docker run --net host img", false},
-		{"docker run -x img", true},
-		{"sudo --bogus cmd", true},
+		{"docker run -x img", false},
+		{"sudo --bogus cmd", false},
 		{"sudo -hlocalhost cmd", false},
 		{"sudo --us root id", false},
-		{"sudo -u", true},
-		{"docker compose run -e", true},
+		{"sudo -u", false},
+		{"docker compose run -e", false},
 		{"systemd-run --set CODEX_HOME=/other x", true},
-		// --entrypoint's operand is a container-config value: judged as a
-		// possible command head (sh+argv is unproven, matching the same
-		// words in an unrecognized tail), while an attached
+		// --entrypoint's operand is a container-config value: `sh` + argv
+		// is unproven under the ordinary tail scan, matching the same
+		// words in an unrecognized tail, while an attached
 		// --entrypoint=sudo is one argv word a shadowed exec cannot split.
 		{"docker compose run --entrypoint sh svc -c 'x'", true},
-		{"docker run --entrypoint=sudo img CODEX_HOME=/other", false},
+		{"docker run --entrypoint=sudo img CODEX_HOME=/other", true},
 		// A bare env NAME that is not denied is docker's "copy the caller's
 		// value" spelling — admitted.
 		{"docker run -e FOO img", false},
@@ -425,10 +438,11 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"systemd-run -p=Environment=CODEX_HOME=/x codex", true},
 		{"systemd-run -p=Description=x codex", false},
 		// An env-family property whose value is dynamic can expand into
-		// fragments the word does not show, so it refuses; a non-env
-		// property's dynamic value is inert to the child's environment.
+		// fragments the word does not show, so it refuses; under the
+		// lexical rule ANY dynamic --property operand is unreadable
+		// NAME=VALUE text and refuses the same way.
 		{"systemd-run --property=Environment=PORT=$P codex", true},
-		{"systemd-run --property=Description=$P codex", false},
+		{"systemd-run --property=Description=$P codex", true},
 		// sudo's -l and -V are no-operand flags; -l's command word is
 		// positional and the assignment region ahead of it is unchanged.
 		{"sudo -l", false},
@@ -466,6 +480,25 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// the word, it is not more cluster letters.
 		{"docker run -t=false alpine echo hi", false},
 		{"docker run -it=true alpine echo hi", false},
+
+		// Dynamic words: a word that cannot word-split is inert data —
+		// `alpine:"$TAG"` can only ever expand to one argument and a
+		// double-quoted `-v` operand the same, so both admit exactly as
+		// the ordinary tail scan admits them.
+		{"docker run -v \"$PWD:/app\" alpine echo hi", false},
+		{"docker run --rm alpine:\"$TAG\" echo hi", false},
+		{"sudo -u \"$USER\" id", false},
+		{"docker build $CTX", false},
+		// …while a word that CAN split on an injectable tail could carry
+		// `-e CODEX_HOME=x` inside it and refuses, an env option's own
+		// unreadable operand refuses under any leaf, and a protected
+		// name proven by the literal prefix still refuses.
+		{"docker run $IMG alpine echo hi", true},
+		{"sudo -u $USER id", true},
+		{"docker run -e \"$V\" busybox codex", true},
+		{"docker run --env=\"$V\" busybox codex", true},
+		{"systemd-run --setenv \"$V\" codex", true},
+		{"docker run -e CODEX_HOME=$V busybox codex", true},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)

@@ -6,786 +6,388 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// This file models three env-injection launchers — sudo, docker and
-// systemd-run — precisely enough that the account-environment guard refuses
-// them only when the visible command line assigns, or might assign, a name
-// the account scope protects. The guard's property is narrowness: a launcher
-// that injects environment into its child is refused on that spelling and
-// any other use runs exactly as it did before the launcher was modeled, so
-// `sudo apt-get install -y jq`, `docker compose up` and
-// `systemd-run --user --scope make` stay admitted while `sudo
-// CODEX_HOME=/other codex`, `docker run -e CODEX_HOME=/other busybox codex`
-// and `systemd-run --setenv CODEX_HOME=/other codex` refuse.
+// This file covers three env-injection launchers — sudo, docker and
+// systemd-run — with a deliberately conservative lexical rule instead of a
+// per-option grammar model. Exact grammar modelling kept leaking (each
+// review round surfaced another accepted spelling the option tables
+// misjudged: a hidden docker alias shifting the image boundary, an
+// `=`-joined short-option operand, a consumed operand re-entering as the
+// shadowed command head), so the property here inverts the risk for these
+// three launchers: OVER-refusal is acceptable and UNDER-refusal is not.
 //
 // The hole (#7565): each launcher runs a child command and can place a
 // NAME=value into that child's environment, re-rooting the account's
-// credential directory. The unrecognized-wrapper tail scan treated a
-// positional `NAME=value` as inert data, and the three launcher names were
-// not modeled at all, so every spelling passed. Listing them as
-// argv-passthrough wrappers (refused wholesale) closed the hole but refused
-// every `docker compose up` and `sudo apt-get install`, a user-facing
-// regression.
+// credential directory, and the unrecognized-wrapper tail scan treated a
+// positional `NAME=value` as inert data. The rule that now applies:
 //
-// Each unwrapX below walks the launcher's own option region and stops at the
-// boundary where child argv begins, the way the util-linux unwraps do:
+//   - Any argument word that can assign or NAME a protected variable is
+//     refused. After leading dashes are stripped, the word is cut on `=`
+//     and refused when any segment contains a protected name. That one
+//     cut covers every accepted spelling without parsing a single option:
+//     `-eN=v`, `-e N=v`, `-e=N=v`, `-eN`, `--env N=v`, `--env=N=v`,
+//     `-EN=v`, `-E=N=v`, `--setenv N=v`, `--setenv=N=v`, positional
+//     `sudo NAME=value` and `NAME+=`, bare-copy forms like
+//     `--setenv CODEX_HOME` or `-e CODEX_HOME`, and systemd's
+//     `--property=Environment=N=v` / `UnsetEnvironment=N` /
+//     `PassEnvironment=N` chains. Noun-uses pay for the conservatism —
+//     `docker run alpine echo CODEX_HOME=x` is refused even though the
+//     assignment is only argv text — because no lexical cut can separate
+//     argv text from an env operand without modelling the options.
+//   - An env-file spelling refuses on sight whatever follows:
+//     `--env-file`, compose's `env_file`, `--env-from-file` and systemd's
+//     `EnvironmentFile=` read a file the command line cannot prove, and a
+//     bare `Environment=` clears the unit's pins outright.
+//   - A dynamic word is judged by its literal prefix: `PORT="$PORT"`
+//     proves an allowed name and consumes; `CODEX_HOME=$V` refuses on the
+//     prefix alone; an env spelling whose operand is unreadable
+//     (`--env=$V`, `-e $V`, `--setenv $V`, `-pEnvironment=$V`) is
+//     unprovable and refuses. Any other dynamic word refuses only where
+//     it could still expand into env text the scan cannot see — a word
+//     able to word-split inside sudo/systemd-run's argv or inside a
+//     docker leaf that injects environment (run/create/exec — the
+//     container exec included — and compose run/exec). Everywhere else it
+//     is inert data, exactly as the ordinary tail scan treats it.
+//   - Whatever survives returns the WHOLE tail, so the ordinary mutation
+//     scan every unrecognized command's argv gets still runs over it —
+//     a buried `env`, `nohup` or nested launcher inside `sudo …`,
+//     `docker …` or `systemd-run …` keeps its coverage, and a leaf word
+//     like `build` or `history` is never promoted into shell-builtin
+//     dispatch.
 //
-//   - A word carrying the launcher's env-injection spelling is refused when
-//     its operand names a denied variable (or names one the operand grammar
-//     normalizes to, e.g. `NAME+=`), and refused outright when it hands the
-//     launcher a value the command line cannot prove (an env file).
-//   - Every other option is consumed by arity from the launcher's real
-//     option table; an unknown, ambiguous or unprovable option word fails
-//     closed because it can shift the boundary to hide an env operand.
-//   - A value-taking option's separate operand stays a command-head
-//     candidate for the shadowed reading (wrapperOperandTailMutates), the
-//     convention the nice/timeout/ionice unwraps established — a PATH-
-//     shadowed or repo-local binary can discard a different count and exec
-//     at a different boundary.
-//   - The returned tail is the command head plus its argv. The argv gets
-//     the ordinary inert tail scan — not the buried-suffix scan — because
-//     a `.` or `up` there is the child's own operand (`docker build .`),
-//     not a shadowed executable boundary.
+// requireCommand is envCallMutatesAccountEnvironment's rule applied to
+// the launchers' denied spellings: at command position a protected-name
+// word refuses on sight, but as a hypothesis inside another command's
+// argv (`prog sudo CODEX_HOME=/other`) it refuses only once the line
+// could still reach a command word — the same reason `prog env
+// CODEX_HOME=/other` admits env's print mode. An env file and an
+// unprovable env operand refuse under either rule, like env's own scan.
+//
+// The trade-off is deliberate: a harmless `docker run --name -e img`
+// (which consumes `-e` as the container name) or `sudo nice
+// CODEX_HOME=/x` (where `nice` fails to exec a word that is not a
+// program) refuses because a word still NAMES a protected variable, and
+// `sudo --preserve-env=CODEX_HOME` refuses although it only propagates
+// the already-scoped value. That is the price of deleting the option
+// tables: every refusal Codex's grammar review produced is covered by
+// construction, at the cost of refusing a few benign spellings.
 
-// unwrapSudo walks sudo's option and environment-assignment region: getopt
-// permutation lets sudo's options and the positional `VAR=value` words
-// interleave freely until the command word, and `--` ends both regions at
-// once (verified on sudo 1.9.15p5 — `sudo -- FOO=bar env` tries to exec a
-// program named "FOO=bar" and fails, so the post-`--` word is the command,
-// not an assignment).
-//
-// sudo applies a pre-command word containing `=` to the child's environment
-// under a deliberately loose rule — even `FOO-BAR=x`, which is not a valid
-// shell name, lands in the environment verbatim. Every such word is judged
-// by accountEnvironmentOperandDenied, which cuts at the first `=` and
-// strips a trailing `+`, so `CODEX_HOME+=/other` is refused whether the
-// real sudo applies it verbatim or a shadowed sudo reads it as bash's
-// append-assignment. An assignment-shaped word whose name is not denied
-// (`PORT=3000`) is consumed as sudo's env text exactly as sudo does.
-//
-// `-E` and `--preserve-env[=LIST]` carry no injection of their own: they
-// propagate the caller's environment — which af has already scoped to the
-// selected account — so a denied name in the preserve list only hands the
-// child the same pinned value it would see anyway. sudo's env_reset is
-// sudo's own semantics, not an assignment on the command line, and is out
-// of this check's contract.
-// requireCommand is envCallMutatesAccountEnvironment's rule applied to the
-// launchers' own denied spellings: at command position (the peel arms) a
-// denied env spelling refuses on sight, but inside an unrecognized
-// wrapper's tail the launcher is only a hypothesis — the words might be
-// argv text — so a denied spelling refuses only when the launcher's own
-// parse still reaches a command it could inject into. `prog sudo
-// CODEX_HOME=/other` admits the same way `prog env CODEX_HOME=/other`
-// does: with no command after it, even the real binary only errors.
-// Unverifiable words (a dynamic option, an unreadable operand, an env file)
-// refuse under either rule, exactly as env's own scan does.
-func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	run := memo.optionRun("sudo")
+// unwrapEnvInjectionLauncher applies the lexical rule above to the words
+// after a launcher name. strict marks command lines whose env-injection
+// surface reaches a child a word-split could still hide: always true for
+// sudo and systemd-run (every word after them is candidate env text), and
+// true for docker only when the leaf injects environment — a docker leaf
+// that cannot launch with env keeps a dynamic word inert because the
+// returned tail still gets the ordinary scan. It returns the tail the
+// caller judges and whether the launcher's own spellings already refuse.
+func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{}, strict bool, requireCommand bool) ([]*syntax.Word, bool) {
 	denied := false
-	for len(words) > 0 {
-		if cached, seen := run.visit(words, requireCommand); seen {
-			return run.done(cached.words, cached.unsafe)
-		}
-		literal, ok := literalShellWord(words[0])
+	commandish := false
+	envOperand := false
+	tail := -1
+	for index, word := range words {
+		literal, ok := literalShellWord(word)
 		if !ok {
-			// A non-literal word can still name its assignment target when the
-			// `NAME=` text is literal (`CODEX_HOME=$V`); only the value is
-			// dynamic, so judging the name stays exact.
-			if name, assignment := shellWordAssignmentName(words[0]); assignment {
-				if accountEnvironmentOperandDenied(name, names) {
-					if !requireCommand {
-						return run.done(nil, true)
-					}
-					denied = true
-				}
-				words = words[1:]
-				continue
-			}
-			// Anything else could be an option, an env assignment, or the
-			// command word — and could word-split into several.
-			return run.done(nil, true)
-		}
-		switch {
-		case literal == "--":
-			return run.done(words[1:], requireCommand && denied && len(words) > 1)
-		case strings.HasPrefix(literal, "-") && literal != "-":
-			next, unsafe := sudoOptionWordStep(words, names, memo)
-			if unsafe {
-				return run.done(nil, true)
-			}
-			words = words[next:]
-		case strings.Contains(literal, "="):
-			if accountEnvironmentOperandDenied(literal, names) {
+			switch verdict := launcherDynamicVerdict(word, names); {
+			case verdict == launcherDenied:
 				if !requireCommand {
-					return run.done(nil, true)
+					return nil, true
 				}
 				denied = true
-			}
-			words = words[1:]
-		default:
-			return run.done(words, requireCommand && denied)
-		}
-	}
-	return run.done(nil, false)
-}
-
-// sudoOptionWordStep consumes one literal dash-word of sudo's option region
-// and returns the index it stops at, or unsafe.
-func sudoOptionWordStep(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) (int, bool) {
-	literal, _ := literalShellWord(words[0])
-	if strings.HasPrefix(literal, "--") {
-		name, _, attached := strings.Cut(literal[2:], "=")
-		resolved, requiresArg, known := resolveLongOption(name, sudoLongOptions)
-		if !known {
-			return 0, true
-		}
-		// --preserve-env's list is optional and only ever attached; a
-		// separate word after it is the command, never the list.
-		if resolved == "preserve-env" || !requiresArg || attached {
-			return 1, false
-		}
-		return launcherSeparateOperandStep(words, 0, names, memo)
-	}
-	cluster := literal[1:]
-	for i := 0; i < len(cluster); i++ {
-		switch {
-		case strings.IndexByte(sudoShortFlags, cluster[i]) >= 0:
-		case cluster[i] == 'h':
-			// -h takes its host operand only attached (getopt `h::`); a
-			// bare trailing -h is --help, a flag.
-			if i+1 < len(cluster) {
-				return 1, false
-			}
-		case strings.IndexByte(sudoShortValueFlags, cluster[i]) >= 0:
-			if i+1 < len(cluster) {
-				// The operand rides inside this word (-uroot); the
-				// boundary cannot move past it.
-				return 1, false
-			}
-			return launcherSeparateOperandStep(words, 0, names, memo)
-		default:
-			return 0, true
-		}
-	}
-	return 1, false
-}
-
-// launcherSeparateOperandStep consumes an option's separate-word operand at
-// words[i+1]: provably one argv word (a double-quoted scalar is; an
-// unquoted expansion can word-split and shift the child boundary), and
-// judged as a possible command head for the shadowed reading, the
-// convention unwrapIonice set. It returns the next index to read.
-func launcherSeparateOperandStep(words []*syntax.Word, i int, names map[string]struct{}, memo operandTailMemo) (int, bool) {
-	if i+1 >= len(words) {
-		return 0, true
-	}
-	if _, literal := literalShellWord(words[i+1]); !literal &&
-		!isSimpleQuotedParameterWord(words[i+1]) {
-		return 0, true
-	}
-	if wrapperOperandTailMutates(words[i+1:], names, memo) {
-		return 0, true
-	}
-	return i + 2, false
-}
-
-// unwrapSystemdRun walks systemd-run's option region to its COMMAND word.
-// The env-injection spellings are `-E`/`--setenv` (NAME[=VALUE], attached or
-// separate — a bare NAME copies the caller's value, so a denied name there
-// is the same re-root) and `-p`/`--property` (NAME=VALUE unit properties,
-// among which `Environment=` builds the child's environment wholesale,
-// `EnvironmentFile=` reads a file the command line cannot prove, and
-// `UnsetEnvironment=` can drop a pin). `PassEnvironment=` is admitted: it
-// copies the caller's values, which are the ones af scoped.
-//
-// A separate-word env or property operand must be literal to judge —
-// `$V` can spell anything — while an ordinary option operand only needs to
-// be provably one word. Every other word is consumed by the systemd 255
-// table; systemd-run's getopt_long resolves unambiguous abbreviations, so
-// `--setenv`'s own `-E` spelling exists in long form too (`--set=...`
-// resolves to setenv).
-func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	run := memo.optionRun("systemd-run")
-	denied := false
-	for len(words) > 0 {
-		if cached, seen := run.visit(words, requireCommand); seen {
-			return run.done(cached.words, cached.unsafe)
-		}
-		literal, ok := literalShellWord(words[0])
-		if !ok {
-			if envSpelling, deniedEnv := systemdRunDynamicEnvName(words[0], names); envSpelling {
-				if deniedEnv {
-					if !requireCommand {
-						return run.done(nil, true)
-					}
-					denied = true
-				}
-				words = words[1:]
-				continue
-			}
-			return run.done(nil, true)
-		}
-		switch {
-		case literal == "--":
-			return run.done(words[1:], requireCommand && denied && len(words) > 1)
-		case strings.HasPrefix(literal, "--"):
-			next, unsafe := systemdRunLongOptionStep(words, names, memo, requireCommand, &denied)
-			if unsafe {
-				return run.done(nil, true)
-			}
-			words = words[next:]
-		case strings.HasPrefix(literal, "-") && literal != "-":
-			next, unsafe := systemdRunClusterStep(words, names, memo, requireCommand, &denied)
-			if unsafe {
-				return run.done(nil, true)
-			}
-			words = words[next:]
-		default:
-			return run.done(words, requireCommand && denied)
-		}
-	}
-	return run.done(nil, false)
-}
-
-func systemdRunLongOptionStep(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, denied *bool) (int, bool) {
-	literal, _ := literalShellWord(words[0])
-	name, value, attached := strings.Cut(literal[2:], "=")
-	resolved, requiresArg, known := resolveLongOption(name, systemdRunLongOptions)
-	if !known {
-		return 0, true
-	}
-	operand := value
-	switch {
-	case resolved == "setenv":
-		if !attached {
-			return systemdRunEnvOperandStep(words, names, memo, requireCommand, denied)
-		}
-		if accountEnvironmentOperandDenied(operand, names) {
-			if !requireCommand {
-				return 0, true
-			}
-			*denied = true
-		}
-		return 1, false
-	case strings.HasSuffix(resolved, "property"):
-		if !attached {
-			if len(words) < 2 {
-				return 0, true
-			}
-			var ok bool
-			operand, ok = literalShellWord(words[1])
-			if !ok {
-				return 0, true
-			}
-			if systemdRunPropertyOperandDenied(operand, names) {
-				if !requireCommand {
-					return 0, true
-				}
-				*denied = true
-			}
-			if wrapperOperandTailMutates(words[1:], names, memo) {
-				return 0, true
-			}
-			return 2, false
-		}
-		if systemdRunPropertyOperandDenied(operand, names) {
-			if !requireCommand {
-				return 0, true
-			}
-			*denied = true
-		}
-		return 1, false
-	case requiresArg:
-		if attached {
-			return 1, false
-		}
-		return launcherSeparateOperandStep(words, 0, names, memo)
-	default:
-		return 1, false
-	}
-}
-
-func systemdRunClusterStep(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, denied *bool) (int, bool) {
-	literal, _ := literalShellWord(words[0])
-	cluster := literal[1:]
-	for i := 0; i < len(cluster); i++ {
-		c := cluster[i]
-		switch {
-		case strings.IndexByte(systemdRunShortFlags, c) >= 0:
-		case c == 'E' || c == 'p':
-			// An `=` right after the letter is the option's separator on
-			// any parser that honors it (getopt hands systemd-run `=N=v`,
-			// which it rejects — but a shadowed or pflag-styled run would
-			// read `N=v`), so judge the stripped operand; an emptied
-			// operand falls to the separate-word step.
-			operand := strings.TrimPrefix(cluster[i+1:], "=")
-			if operand == "" {
-				if c == 'E' {
-					return systemdRunEnvOperandStep(words, names, memo, requireCommand, denied)
-				}
-				if len(words) < 2 {
-					return 0, true
-				}
-				var ok bool
-				operand, ok = literalShellWord(words[1])
-				if !ok {
-					return 0, true
-				}
-				if systemdRunPropertyOperandDenied(operand, names) {
-					if !requireCommand {
-						return 0, true
-					}
-					*denied = true
-				}
-				if wrapperOperandTailMutates(words[1:], names, memo) {
-					return 0, true
-				}
-				return 2, false
-			}
-			if c == 'E' {
-				if accountEnvironmentOperandDenied(operand, names) {
-					if !requireCommand {
-						return 0, true
-					}
-					*denied = true
-				}
-			} else if systemdRunPropertyOperandDenied(operand, names) {
-				if !requireCommand {
-					return 0, true
-				}
-				*denied = true
-			}
-			return 1, false
-		case strings.IndexByte(systemdRunShortValueFlags, c) >= 0:
-			if i+1 < len(cluster) {
-				return 1, false
-			}
-			return launcherSeparateOperandStep(words, 0, names, memo)
-		default:
-			return 0, true
-		}
-	}
-	return 1, false
-}
-
-// systemdRunEnvOperandStep judges -E's or --setenv's separate-word operand:
-// `NAME` (copy the caller's value) and `NAME=value` both run through the
-// shared denied-name cut, and the consumed operand stays a command-head
-// candidate for the shadowed reading — a run that discards it can exec the
-// `env`/`sudo` spelling one word later. Under requireCommand a denial is
-// deferred to the caller's command-boundary check rather than refusing here.
-func systemdRunEnvOperandStep(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, denied *bool) (int, bool) {
-	if len(words) < 2 {
-		return 0, true
-	}
-	operand, ok := literalShellWord(words[1])
-	if !ok {
-		// Same rule as sudo's region and docker's env operand: a literal
-		// `NAME=` prefix pins the target (`PORT="$PORT"`), so only a word
-		// that cannot name its variable stays unprovable.
-		if name, assignment := shellWordAssignmentName(words[1]); assignment {
-			if accountEnvironmentOperandDenied(name, names) {
-				if !requireCommand {
-					return 0, true
-				}
-				*denied = true
-			}
-			return 2, false
-		}
-		return 0, true
-	}
-	if accountEnvironmentOperandDenied(operand, names) {
-		if !requireCommand {
-			return 0, true
-		}
-		*denied = true
-	}
-	if wrapperOperandTailMutates(words[1:], names, memo) {
-		return 0, true
-	}
-	return 2, false
-}
-
-// systemdRunDynamicEnvName reads a non-literal systemd-run word whose
-// literal prefix still pins it to an env option — `--setenv=PORT="$PORT"`,
-// `-EPORT="$PORT"`, `-tE=PORT="$PORT"`, `--property=Environment=PORT="$V"`.
-// envSpelling is true when the prefix proves such an option, and denied
-// reports whether its visible name already runs afoul of the denied-name
-// cut or its operand can no longer be proven (an env-family property with a
-// dynamic value expands into unprovable fragments), so the caller refuses
-// rather than consumes an unreadable tail.
-func systemdRunDynamicEnvName(word *syntax.Word, names map[string]struct{}) (envSpelling, denied bool) {
-	prefix := launcherLiteralPrefix(word)
-	eq := strings.Index(prefix, "=")
-	if eq < 0 {
-		return false, false
-	}
-	sigil, rest := prefix[:eq], prefix[eq+1:]
-	switch {
-	case strings.HasPrefix(sigil, "--"):
-		resolved, _, known := resolveLongOption(sigil[2:], systemdRunLongOptions)
-		if !known {
-			return false, false
-		}
-		switch {
-		case resolved == "setenv":
-			name, _, _ := strings.Cut(rest, "=")
-			if !validName(name) {
-				return false, false
-			}
-			return true, accountEnvironmentOperandDenied(name, names)
-		case strings.HasSuffix(resolved, "property"):
-			return true, systemdRunDynamicPropertyDenied(rest)
-		}
-		return false, false
-	case strings.HasPrefix(sigil, "-"):
-		cluster := sigil[1:]
-		for i := 0; i < len(cluster); i++ {
-			c := cluster[i]
-			switch {
-			case strings.IndexByte(systemdRunShortFlags, c) >= 0:
-			case c == 'E' || c == 'p':
-				operand := cluster[i+1:]
-				if operand == "" {
-					// `-E=`/`-p=`: the cut `=` was the separator after
-					// the letter, so the operand opens `rest`.
-					operand = rest
-				} else {
-					// The cut `=` was inside the operand (`-EN=v`,
-					// `-pName=v`): reattach it so the operand reads as
-					// the launcher sees it.
-					operand += "=" + rest
-				}
-				operand = strings.TrimPrefix(operand, "=")
-				if c == 'E' {
-					name, _, _ := strings.Cut(operand, "=")
-					if !validName(name) {
-						return false, false
-					}
-					return true, accountEnvironmentOperandDenied(name, names)
-				}
-				return true, systemdRunDynamicPropertyDenied(operand)
+			case verdict == launcherConsume:
+				// A proven `NAME=` target — `PORT="$PORT"` is inert env
+				// text even in `-e`'s operand slot.
+			case verdict == launcherUnprovable, envOperand,
+				strict && launcherWordCanSplit(word):
+				// An env spelling with an unreadable operand, an
+				// operand word after `-e`/`-E`/`--env`/`--setenv`/`-p`
+				// that cannot prove its name, or — on a launcher's
+				// injectable tail — a word able to split into env text
+				// the scan cannot see.
+				return nil, true
 			default:
-				// Another value letter takes the cluster's rest as its
-				// own operand; an unknown letter leaves the word
-				// unprovable. Either way it is not an env spelling.
-				return false, false
+				// launcherOpaque elsewhere: inert data, though in a
+				// launcher tail it may still be the command word the
+				// line reaches.
+				if index > 0 {
+					commandish = true
+				}
+			}
+			envOperand = false
+			continue
+		}
+		if tail < 0 {
+			// The returned tail opens on the first literal word: a
+			// leading dynamic word was judged by this scan already, and
+			// as a command head it would only fail closed on the
+			// unprovable-name check.
+			tail = index
+		}
+		if launcherEnvFileSpelling(literal) {
+			return nil, true
+		}
+		if launcherWordDenied(literal, names) {
+			if !requireCommand {
+				return nil, true
+			}
+			denied = true
+			envOperand = false
+			continue
+		}
+		if index > 0 && !strings.HasPrefix(literal, "-") && !strings.Contains(literal, "=") {
+			commandish = true
+		}
+		envOperand = launcherEnvOperandWord(literal)
+	}
+	if tail < 0 {
+		return nil, false
+	}
+	return words[tail:], requireCommand && denied && commandish
+}
+
+func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	return unwrapEnvInjectionLauncher(words, names, true, requireCommand)
+}
+
+func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	return unwrapEnvInjectionLauncher(words, names, true, requireCommand)
+}
+
+func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	tail, unsafe := unwrapEnvInjectionLauncher(words, names, dockerLeafInjectsEnv(words), requireCommand)
+	if unsafe || len(tail) == 0 {
+		return nil, unsafe
+	}
+	// docker's first argument is a subcommand leaf, not the pane's child
+	// executable — `docker exec` is not the exec builtin and `docker
+	// history` is not the history builtin — so unlike sudo and
+	// systemd-run's tails it is never promoted into command dispatch.
+	// The leaf and its operands get the ordinary mutation scan every
+	// unrecognized command's argv gets (a shadowed docker execs at `env`
+	// or a buried launcher just as a shadowed `prog` does), then nothing
+	// is left for the caller to judge.
+	if wrapperTailHidesAccountAssignment(tail, false, names, memo) {
+		return nil, true
+	}
+	return nil, false
+}
+
+// launcherWordDenied cuts a literal argument word on every `=` — after
+// leading dashes — and refuses when any segment contains a protected
+// name. Containment rather than equality is what makes one cut cover
+// every option spelling: `-eCODEX_HOME=x` reads `eCODEX_HOME`,
+// `--env=CODEX_HOME=x` reads `CODEX_HOME`, `-E=CODEX_HOME` reads
+// `CODEX_HOME`, and `property=Environment=CODEX_HOME=x` lands
+// `CODEX_HOME` as its own segment.
+func launcherWordDenied(literal string, names map[string]struct{}) bool {
+	return launcherSegmentsDenied(strings.TrimLeft(literal, "-"), names)
+}
+
+// launcherSegmentsDenied reports whether any `=`-separated segment of
+// text contains a protected name.
+func launcherSegmentsDenied(text string, names map[string]struct{}) bool {
+	for _, segment := range strings.Split(text, "=") {
+		for name := range names {
+			if strings.Contains(segment, name) {
+				return true
 			}
 		}
 	}
-	return false, false
+	return false
 }
 
-// systemdRunDynamicPropertyDenied judges a `-p`/`--property` operand whose
-// value is only partly literal. Its property name is always literal — it
-// sits before the operand's own first `=`, which the caller's prefix cut
-// guarantees — but a dynamic Environment= value can expand into extra
-// fragments the word does not show, and a dynamic EnvironmentFile= or
-// UnsetEnvironment= operand is unprovable the same way, so the env-family
-// properties refuse while any other property is inert to the child's
-// environment.
-func systemdRunDynamicPropertyDenied(operand string) bool {
-	property, _, hasValue := strings.Cut(operand, "=")
-	switch {
-	case !hasValue:
-		// A bare property name with a dynamic tail cannot be read.
+// launcherEnvFileSpelling reports whether a literal argument word names
+// an env file or clears the environment — both refuse regardless of the
+// denied-name cut because their effect is not readable from the command
+// line.
+func launcherEnvFileSpelling(literal string) bool {
+	word := strings.TrimLeft(literal, "-")
+	return word == "env-file" || strings.HasPrefix(word, "env-file=") ||
+		word == "env_file" || strings.HasPrefix(word, "env_file=") ||
+		word == "env-from-file" || strings.HasPrefix(word, "env-from-file=") ||
+		strings.Contains(word, "EnvironmentFile") ||
+		strings.HasSuffix(word, "Environment=")
+}
+
+// launcherEnvOperandWord reports whether a literal word ends in a
+// position whose NEXT word is an env operand: a bare `-e`, `-E`, `--env`,
+// `--setenv`, `-p`/`--property` (the systemd property operand is NAME=
+// text too), a `--` long form that matches exactly, or a single-dash
+// cluster ending in `e`, `E` or `p` (`-ite X`, `-tE X`, `-tp X`), where
+// getopt/pflag hands the next word to that option. The word the mark
+// applies to is judged by the denied-name cut or the dynamic-operand
+// rules, so over-marking is harmless — an ordinary operand word simply
+// gets the same scan it would anywhere else.
+func launcherEnvOperandWord(literal string) bool {
+	if !strings.HasPrefix(literal, "-") || literal == "-" {
+		return false
+	}
+	word := strings.TrimLeft(literal, "-")
+	if launcherEnvOperandToken(word) {
 		return true
-	case strings.EqualFold(property, "Environment"),
-		strings.EqualFold(property, "EnvironmentFile"),
-		strings.EqualFold(property, "UnsetEnvironment"):
+	}
+	if strings.HasPrefix(literal, "--") {
+		return false
+	}
+	return strings.HasSuffix(word, "e") || strings.HasSuffix(word, "E") ||
+		strings.HasSuffix(word, "p")
+}
+
+func launcherEnvOperandToken(word string) bool {
+	switch word {
+	case "e", "E", "env", "setenv", "env-add", "env-rm", "p", "property":
 		return true
 	}
 	return false
 }
 
-// systemdRunPropertyOperandDenied judges a `-p`/`--property` NAME=VALUE
-// operand by the property it sets. `Environment=` composes the child's
-// whole environment from space-separated (possibly quoted) NAME=value
-// entries — every fragment must be an assignment to an allowed name.
-// `EnvironmentFile=` reads a file this command line cannot prove, so any
-// use is unverifiable. `UnsetEnvironment=` removes names — a denied name
-// there drops the pin. `PassEnvironment=` copies the caller's values, which
-// are the ones af already scoped, so it is admitted. systemd matches unit
-// property names case-insensitively, so the property is matched by
-// EqualFold.
-func systemdRunPropertyOperandDenied(operand string, names map[string]struct{}) bool {
-	property, value, ok := strings.Cut(operand, "=")
-	if !ok {
-		return true
+// launcherDynamicVerdict is the verdict a non-literal argument word gets:
+// denied when its literal prefix already names a protected variable,
+// unprovable when the prefix spells an env option whose operand the
+// expansion hides (`--env=$V`, `-e$V`, `--setenv=$V`, `-pEnvironment=$V`),
+// consume when the prefix proves an ordinary `NAME=` target, and opaque
+// when no `=` pin exists at all — the caller then decides from position
+// and word-split potential.
+const (
+	launcherConsume = iota
+	launcherDenied
+	launcherUnprovable
+	launcherOpaque
+)
+
+func launcherDynamicVerdict(word *syntax.Word, names map[string]struct{}) int {
+	prefix := launcherLiteralPrefix(word)
+	if launcherSegmentsDenied(strings.TrimLeft(prefix, "-"), names) {
+		return launcherDenied
 	}
-	switch {
-	case strings.EqualFold(property, "Environment"):
-		fragments, closed := systemdEnvironmentFragments(value)
-		if !closed || len(fragments) == 0 {
-			// An unclosed quote leaves hidden text unprovable; an empty
-			// `Environment=` clears the unit's environment — the pins go
-			// with it either way.
-			return true
+	if strings.IndexByte(prefix, '=') < 0 {
+		if launcherEnvOperandToken(strings.TrimLeft(prefix, "-")) {
+			return launcherUnprovable
 		}
-		for _, fragment := range fragments {
-			name, _, assignment := strings.Cut(fragment, "=")
-			if !assignment || accountEnvironmentOperandDenied(name, names) {
-				return true
-			}
-		}
-		return false
-	case strings.EqualFold(property, "EnvironmentFile"):
-		return true
-	case strings.EqualFold(property, "UnsetEnvironment"):
-		names2, closed := systemdEnvironmentFragments(value)
-		if !closed {
-			return true
-		}
-		for _, name := range names2 {
-			if accountEnvironmentOperandDenied(name, names) {
-				return true
-			}
-		}
-		return false
-	default:
-		return false
+		return launcherOpaque
 	}
+	segments := strings.Split(strings.TrimLeft(prefix, "-"), "=")
+	for len(segments) > 0 && segments[len(segments)-1] == "" {
+		segments = segments[:len(segments)-1]
+	}
+	if len(segments) == 0 {
+		return launcherUnprovable
+	}
+	// An earlier segment that is a property sigil leaves a dynamic
+	// NAME=VALUE operand unreadable (`--property=$V`,
+	// `-pEnvironment=$V`); an env-assign sigil's name simply opens the
+	// last segment (`--env=PORT=$V` proves PORT), so only the
+	// env-property family fails closed here.
+	for _, segment := range segments[:len(segments)-1] {
+		if launcherPropertySegment(segment) {
+			return launcherUnprovable
+		}
+	}
+	last := segments[len(segments)-1]
+	if launcherEnvOperandToken(last) ||
+		strings.Contains(last, "Environment") ||
+		strings.HasSuffix(last, "e") || strings.HasSuffix(last, "E") ||
+		strings.HasSuffix(last, "p") {
+		return launcherUnprovable
+	}
+	return launcherConsume
 }
 
-// systemdEnvironmentFragments splits a systemd Environment= value into
-// NAME=value fragments the way systemd does: whitespace separates
-// assignments, but double or single quotes protect whitespace inside one
-// assignment (`Environment="FOO=hello world"` is one fragment) and a
-// backslash escapes the next rune. The quote characters themselves are
-// stripped, matching the value the unit file would store.
-func systemdEnvironmentFragments(value string) ([]string, bool) {
-	var fragments []string
-	var cur strings.Builder
-	var quote rune
-	escaped := false
-	flush := func() {
-		if cur.Len() > 0 {
-			fragments = append(fragments, cur.String())
-			cur.Reset()
-		}
+func launcherPropertySegment(segment string) bool {
+	switch segment {
+	case "p", "property", "path-property", "timer-property", "socket-property":
+		return true
 	}
-	for _, r := range value {
-		switch {
-		case escaped:
-			cur.WriteRune(r)
-			escaped = false
-		case r == '\\':
-			escaped = true
-		case quote != 0:
-			if r == quote {
-				quote = 0
-			} else {
-				cur.WriteRune(r)
-			}
-		case r == '"' || r == '\'':
-			quote = r
-		case r == ' ' || r == '\t':
-			flush()
-		default:
-			cur.WriteRune(r)
-		}
-	}
-	flush()
-	return fragments, quote == 0 && !escaped
+	return strings.Contains(segment, "Environment")
 }
 
-// unwrapDocker walks docker's command line to the point where child argv
-// begins. docker's layout is `docker [globals] [group] LEAF [leaf options]
-// [boundary] [child argv]`:
-//
-//   - Env injection lives on the leaf commands that place a child inside a
-//     container: run/create/exec carry `-e`/`--env` (attached `-eNAME=v` or
-//     `--env=NAME=v`, or a separate word — a bare `-e NAME` copies the
-//     caller's value, so a denied name there is the same re-root) and
-//     `--env-file PATH` (compose run's `--env-from-file`, and the compose
-//     `--env-add`/`--env-rm` spellings, are the same class). An env file is
-//     a value the command line cannot prove, so any env-file spelling
-//     refuses — the gate cannot read the file to know whether it assigns a
-//     protected name.
-//   - `docker compose` is special-cased before generic groups because its
-//     own global `--env-file` (an interpolation source) sits between
-//     `compose` and the subcommand.
-//   - For run/create/exec — and compose run/exec — the leaf's option region
-//     is walked with the leaf's real table (docker's parser is pflag: no
-//     abbreviations), so a `-e` inside `--name`'s operand is never
-//     misjudged and the first non-option word (image, container or
-//     service) is the boundary where child argv begins.
-//   - Every other subcommand keeps its arguments inert — `docker compose
-//     up`, `docker build .`, `docker ps` — except that the same env
-//     spellings are refused wherever they appear before `--`, because a
-//     build, service create or compose run spelling that reaches a docker
-//     new enough to honor it would still inject. A `-e` in such a tail
-//     that is not denied changes nothing real (the leaf rejects it), so it
-//     is consumed silently.
-func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	run := memo.optionRun("docker")
-	denied := false
-	i := 0
-	for i < len(words) {
-		if cached, seen := run.visit(words[i:], requireCommand); seen {
-			return run.done(cached.words, cached.unsafe)
-		}
-		literal, ok := literalShellWord(words[i])
+// launcherLiteralPrefix returns the concatenated literal text of a word's
+// leading literal parts — `PORT=` in `PORT="$PORT"`, or `--env=PORT=` in
+// `--env=PORT="$PORT"` — stopping at the first dynamic part.
+func launcherLiteralPrefix(word *syntax.Word) string {
+	var b strings.Builder
+	for _, part := range word.Parts {
+		lit, ok := part.(*syntax.Lit)
 		if !ok {
-			if name, envSpelling := dockerDynamicEnvName(words[i], dockerGlobalOptions); envSpelling {
-				if dockerEnvNameDenied(name, names, requireCommand, &denied) {
-					return run.done(nil, true)
-				}
-				i++
-				continue
-			}
-			return run.done(nil, true)
-		}
-		if literal == "--" {
-			i++
 			break
 		}
-		if !strings.HasPrefix(literal, "-") || literal == "-" {
-			break
-		}
-		next, unsafe := dockerOptionStep(words, i, dockerGlobalOptions, names, memo, requireCommand, &denied)
-		if unsafe {
-			return run.done(nil, true)
-		}
-		i = next
+		b.WriteString(lit.Value)
 	}
-	group := ""
-	if i < len(words) {
-		literal, ok := literalShellWord(words[i])
-		if !ok {
-			return run.done(nil, true)
-		}
-		switch {
-		case literal == "compose":
-			group = "compose"
-			i++
-			for i < len(words) {
-				literal, ok := literalShellWord(words[i])
-				if !ok {
-					if name, envSpelling := dockerDynamicEnvName(words[i], dockerComposeGlobalOptions); envSpelling {
-						if dockerEnvNameDenied(name, names, requireCommand, &denied) {
-							return run.done(nil, true)
-						}
-						i++
-						continue
-					}
-					return run.done(nil, true)
-				}
-				if literal == "--" {
-					i++
-					break
-				}
-				if !strings.HasPrefix(literal, "-") || literal == "-" {
-					break
-				}
-				next, unsafe := dockerOptionStep(words, i, dockerComposeGlobalOptions, names, memo, requireCommand, &denied)
-				if unsafe {
-					return run.done(nil, true)
-				}
-				i = next
-			}
-		case dockerManagementGroup(literal):
-			group = literal
-			i++
+	return b.String()
+}
+
+// launcherWordCanSplit reports whether a word can still expand into more
+// than one argv word: an unquoted parameter expansion, command
+// substitution, arithmetic expansion or glob is the only shape that can
+// smuggle env option text past the lexical scan (`docker run $V` where V
+// spells `-e CODEX_HOME=x`). A double-quoted expansion pins one word, so
+// `docker run -v "$PWD:/app"` and `alpine:"$TAG"` stay inert data.
+func launcherWordCanSplit(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		switch part.(type) {
+		case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ExtGlob:
+			return true
 		}
 	}
-	if i >= len(words) {
-		return run.done(nil, false)
-	}
-	leaf, ok := literalShellWord(words[i])
-	if !ok {
-		return run.done(nil, true)
-	}
-	i++
-	if spec, passthrough := dockerPassthroughLeaf(group, leaf); passthrough {
-		for i < len(words) {
-			if cached, seen := run.visit(words[i:], requireCommand); seen {
-				return run.done(cached.words, cached.unsafe)
-			}
-			literal, ok := literalShellWord(words[i])
-			if !ok {
-				if name, envSpelling := dockerDynamicEnvName(words[i], spec); envSpelling {
-					if dockerEnvNameDenied(name, names, requireCommand, &denied) {
-						return run.done(nil, true)
-					}
-					i++
-					continue
-				}
-				return run.done(nil, true)
-			}
-			if literal == "--" {
-				if i+1 < len(words) {
-					// After `--` the first word is still the image name —
-					// consume it as well; child argv begins one word later.
-					return run.done(words[i+2:], requireCommand && denied)
-				}
-				return run.done(nil, false)
-			}
-			if !strings.HasPrefix(literal, "-") || literal == "-" {
-				// The image, container or service word is docker config,
-				// not the child executable — consume it inside docker's
-				// grammar so a `docker run --rm bash` image never re-enters
-				// the walk as an unproven shell. Only the words after it
-				// (the container's COMMAND ARG…) form the returned tail.
-				return run.done(words[i+1:], requireCommand && denied)
-			}
-			next, unsafe := dockerOptionStep(words, i, spec, names, memo, requireCommand, &denied)
-			if unsafe {
-				return run.done(nil, true)
-			}
-			i = next
-		}
-		return run.done(nil, false)
-	}
-	// Every other subcommand: the leaf itself is the command the launcher
-	// runs, so an env spelling refuses on sight — requireCommand is already
-	// satisfied and only the denied-name cut applies. The leaf stays docker
-	// grammar and is never promoted into shell-command dispatch: `docker
-	// history alpine` or `docker kill c1` would otherwise re-enter the walk
-	// as the history/kill builtins and refuse ordinary docker verbs. But
-	// from the leaf on, the words get the ordinary mutation scan every
-	// unrecognized command's argv gets — a repo-local or PATH-shadowed
-	// docker can discard the leaf and exec `env CODEX_HOME=/x codex` or a
-	// buried launcher straight out of the tail.
-	if wrapperTailHidesAccountAssignment(words[i-1:], false, names, memo) {
-		return run.done(nil, true)
-	}
-	for i < len(words) {
-		if cached, seen := run.visit(words[i:], requireCommand); seen {
-			return run.done(cached.words, cached.unsafe)
-		}
-		literal, ok := literalShellWord(words[i])
-		if !ok {
-			// A dynamic env spelling still names its target from the
-			// literal prefix — `--env=CODEX_HOME=$V` on a service create
-			// injects the same way the literal form does — while any other
-			// non-literal operand of a non-launching leaf is inert data,
-			// skipped exactly like the unrecognized tail scan (`docker
-			// logs "$CONTAINER"` admits). The words after it may still
-			// open an env invocation.
-			if name, envSpelling := dockerDynamicEnvName(words[i], dockerInertLeafSpec); envSpelling {
-				if dockerEnvNameDenied(name, names, false, nil) {
-					return run.done(nil, true)
-				}
-				i++
-				continue
-			}
-			if memo.xargsItemFollows(words[i+1:]) ||
-				envCallMutatesAccountEnvironment(words[i+1:], names, true, memo) {
-				return run.done(nil, true)
-			}
-			i++
+	return false
+}
+
+// dockerLeafInjectsEnv reports whether the leaf of this docker command
+// line can place environment into a child: `run`/`create`/`exec` at top
+// level or under `docker container`, and `run`/`exec` under `docker
+// compose`. The leaf is read from the first non-dash literal words —
+// `compose` and the management groups hand the leaf slot to the next
+// word — and a command line with no provable leaf is treated as
+// launching, so a dynamic word that can word-split never gets the inert
+// treatment on an unproven leaf.
+func dockerLeafInjectsEnv(words []*syntax.Word) bool {
+	var first, second string
+	found := 0
+	for _, word := range words {
+		literal, ok := literalShellWord(word)
+		if !ok || strings.HasPrefix(literal, "-") {
 			continue
 		}
-		if literal == "--" {
+		if found == 0 {
+			first = literal
+		} else {
+			second = literal
+		}
+		if found++; found == 2 {
 			break
 		}
-		next, unsafe := dockerEnvSpellingStep(words, i, names, memo)
-		if unsafe {
-			return run.done(nil, true)
-		}
-		i = next
 	}
-	return run.done(nil, false)
+	if found == 0 {
+		return true
+	}
+	group, leaf := "", first
+	switch {
+	case leaf == "compose":
+		group, leaf = "compose", second
+	case dockerManagementGroup(leaf):
+		group, leaf = leaf, second
+	}
+	switch {
+	case group == "compose":
+		return leaf == "run" || leaf == "exec"
+	case group == "":
+		return leaf == "run" || leaf == "create" || leaf == "exec"
+	default:
+		return group == "container" &&
+			(leaf == "run" || leaf == "create" || leaf == "exec")
+	}
+}
+
+// dockerManagementGroup names docker's subcommand groups — the word whose
+// NEXT word is the real leaf (`docker container exec`, `docker image
+// build`).
+func dockerManagementGroup(word string) bool {
+	switch word {
+	case "builder", "buildx", "checkpoint", "config", "container", "context",
+		"image", "manifest", "model", "network", "node", "plugin", "scout",
+		"secret", "service", "stack", "swarm", "system", "trust", "volume":
+		return true
+	}
+	return false
 }
 
 // launcherSuffixMutates judges a launcher word found in an unrecognized
