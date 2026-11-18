@@ -391,12 +391,12 @@ func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationD
 // copies diverge. The open runs inside the flight's bound, so a planted FIFO
 // is answered within the bound rather than wedging the flight's work
 // goroutine in openat forever and latching its registry entry against every
-// later ask (#7383).
+// later ask (#7383). The open and the stat each get their own pace step
+// (OpenRegularPaced): the flight's bound is per syscall, so a filesystem
+// where each answers inside the bound but together exceed it still answers
+// rather than timing out into an unverified verdict (#7527 review).
 func openClaudeTranscript(p carryPace, path string) (*os.File, os.FileInfo, error) {
-	p.at("open", path)
-	file, info, err := fsprobe.OpenRegular(path)
-	p.at("fstat", path)
-	return file, info, err
+	return fsprobe.OpenRegularPaced(path, func(op string) { p.at(op, path) })
 }
 
 // claudeTranscriptExtends reports whether the transcript longer begins with

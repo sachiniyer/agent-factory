@@ -21,12 +21,20 @@ func (e *NonRegularError) Error() string {
 	return fmt.Sprintf("%s is not a regular file (%s)", e.Path, e.Mode.Type())
 }
 
+// regularFileStat is the fstat RegularFileInfo runs — a seam so a test can
+// stand in for a responsive-but-slow filesystem whose stat answers inside the
+// bound, just not instantly (#7527 review: the stat and the open each get
+// their own pace step, and a test proving that boundary needs to make the
+// stat itself take measurable time).
+var regularFileStat = newSeam((*os.File).Stat)
+
 // RegularFileInfo stats the file a guarded open produced and refuses a
 // non-regular descriptor with *NonRegularError, closing file on any failure.
 // It is the check every guarded open shares: OpenRegular after open(2), and
 // the descriptor-relative opens that stat their own file (openCarryFileAt).
 func RegularFileInfo(file *os.File, name string) (os.FileInfo, error) {
-	info, err := file.Stat()
+	stat := regularFileStat.load() // in the caller: a stuck flight never sees the seam
+	info, err := stat(file)
 	if err != nil {
 		_ = file.Close()
 		return nil, err

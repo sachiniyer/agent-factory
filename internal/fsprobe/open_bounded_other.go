@@ -13,9 +13,27 @@ import (
 // targets is unix-only: a named pipe on these platforms is not a
 // filesystem-path FIFO that blocks open, so the unguarded open is safe here.
 func OpenRegular(path string) (*os.File, os.FileInfo, error) {
+	return openRegular(path, nil)
+}
+
+// OpenRegularPaced is OpenRegular under a paced flight's bound: step is called
+// with the op name ("open" then "fstat") immediately before each syscall, so
+// the flight's per-syscall bound restarts between the open and the stat rather
+// than covering both under the open's window (#7527 review).
+func OpenRegularPaced(path string, step func(op string)) (*os.File, os.FileInfo, error) {
+	return openRegular(path, step)
+}
+
+func openRegular(path string, step func(op string)) (*os.File, os.FileInfo, error) {
+	if step != nil {
+		step("open")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
+	}
+	if step != nil {
+		step("fstat")
 	}
 	info, err := RegularFileInfo(file, path)
 	if err != nil {

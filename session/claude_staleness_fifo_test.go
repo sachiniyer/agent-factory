@@ -365,3 +365,54 @@ func TestStatClaudeCopy_AFIFOAtTheCopyPathIsALookThatDidNotHappen(t *testing.T) 
 	require.True(t, carryLookupUnlooked(err),
 		"the FIFO is a look that did not happen — locateClaude refuses unverified, never duplicated")
 }
+
+// TestClaudeTranscriptExtends_OpenAndStatEachHoldTheirOwnBound pins the
+// #7527-review pacing property: the staleness flight's bound is per SYSCALL,
+// so a responsive mount where the open answers inside the bound and the
+// fstat answers inside the bound — together exceeding it — must still
+// answer. OpenRegularPaced restarts the bound at the fstat step; keep the
+// marks outside the shared open instead and both syscalls share the open's
+// window, which times the flight out into an unverified verdict.
+func TestClaudeTranscriptExtends_OpenAndStatEachHoldTheirOwnBound(t *testing.T) {
+	clock := fsprobe.NewManualClock(time.Now())
+	t.Cleanup(fsprobe.SetFlightClockForTest(clock))
+	t.Cleanup(fsprobe.SetProbeTimeoutForTest(fifoPatrolBound))
+
+	dir := t.TempDir()
+	longPath := filepath.Join(dir, "longer.jsonl")
+	shortPath := filepath.Join(dir, "shorter.jsonl")
+	require.NoError(t, os.WriteFile(shortPath, []byte("{\"base\":1}\n"), 0o600))
+	require.NoError(t, os.WriteFile(longPath, []byte("{\"base\":1}\n{}\n"), 0o600))
+	longer := claudeTranscript{dir: dir, name: "longer.jsonl"}
+	shorter := claudeTranscript{dir: dir, name: "shorter.jsonl"}
+
+	// A responsive-but-slow mount: every open costs three quarters of the
+	// bound at its mark, and every fstat the same at the syscall itself —
+	// together one and a half bounds per transcript.
+	stall := 3 * fifoPatrolBound / 4
+	prev := carryLookupStandIn.Load()
+	standIn := func(op, path string) {
+		if op == "open" && (path == longPath || path == shortPath) {
+			clock.Advance(stall)
+		}
+	}
+	carryLookupStandIn.Store(&standIn)
+	t.Cleanup(func() { carryLookupStandIn.Store(prev) })
+	t.Cleanup(fsprobe.SetRegularFileStatForTest(func(f *os.File) (os.FileInfo, error) {
+		if f.Name() == longPath || f.Name() == shortPath {
+			clock.Advance(stall)
+			// The timer fires inside Advance, but its channel is buffered —
+			// the waiter must be scheduled to read it before this syscall
+			// returns and the next step refreshes lastStep. Hold the stat a
+			// moment in real time: a flight whose fstat outlived the bound
+			// still in progress is the timeout case being discriminated.
+			time.Sleep(100 * time.Millisecond)
+		}
+		return f.Stat()
+	}))
+
+	extends, err := requireClaudeTranscriptExtendsWithinBound(t, longer, shorter)
+	require.NoError(t, err,
+		"open and fstat each answered inside their own bound window — the flight must answer, not time out: %v", err)
+	require.True(t, extends, "the longer transcript still extends the shorter")
+}
