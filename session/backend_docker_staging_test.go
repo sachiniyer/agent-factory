@@ -942,8 +942,13 @@ func TestDockerStagingDirRestoredReap(t *testing.T) {
 		EngineID:    "staging-test-engine",
 		StagingDir:  filepath.Base(staged),
 	}}
-	_, teardown, err := restoreRuntimeCleanupWithAccount("restored", "docker", data, restoredAccount{})
+	backend, teardown, err := restoreRuntimeCleanupWithAccount("restored", "docker", data, restoredAccount{})
 	require.NoError(t, err)
+	// The record the restored backend persists must keep the staging name —
+	// a session surviving a second restart can then reach the dir again.
+	require.Equal(t, filepath.Base(staged),
+		backend.(*dockerBackend).cleanup.StagingDir,
+		"the re-persisted cleanup handle must keep the staging dir name")
 	require.NoError(t, teardown())
 	_, err = os.Stat(staged)
 	assert.True(t, os.IsNotExist(err), "the restored teardown must remove the recorded staging dir")

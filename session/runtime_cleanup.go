@@ -352,6 +352,10 @@ func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCl
 			cleanup: &DockerRuntimeCleanupData{
 				ContainerID: p.containerID,
 				EngineID:    p.engineID,
+				// Re-persist the staging name so a session surviving a second
+				// restart can still reach its staged-payload dir for teardown;
+				// the field stores the base name, never the path.
+				StagingDir: dockerStagingRecordName(p.stagingDir),
 			},
 		}, teardown, nil
 	case "ssh":
