@@ -31,6 +31,9 @@ func stagingTestEnv(t *testing.T) string {
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
+	old := dockerStagingInContainer
+	dockerStagingInContainer = func() bool { return false }
+	t.Cleanup(func() { dockerStagingInContainer = old })
 	return home
 }
 
@@ -111,7 +114,7 @@ func stagingDockerAnswers(t *testing.T, calls *[][]string, engineName string, ro
 				if mountAnswer != nil {
 					return mountAnswer(joined)
 				}
-				return writeGuardTableAnswer("/usr/local/bin", "/etc"), nil
+				return probeAnswer(args), nil
 			case strings.Contains(joined, "cat "+dockerBannerPath):
 				return []byte(`{"addr":":8000","token":"t","title":"staging"}` + "\n" + remoteProcAlive + "\n"), nil
 			}
@@ -786,6 +789,9 @@ func TestDockerStagingColonHomeUsesTheCpFallback(t *testing.T) {
 	t.Setenv("DOCKER_HOST", fakeUnixDockerSocket(t))
 	t.Setenv("DOCKER_CONTEXT", "")
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
+	old := dockerStagingInContainer
+	dockerStagingInContainer = func() bool { return false }
+	t.Cleanup(func() { dockerStagingInContainer = old })
 
 	var calls [][]string
 	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
@@ -808,6 +814,64 @@ func TestDockerStagingColonHomeUsesTheCpFallback(t *testing.T) {
 	for _, m := range stagingBindVolumes(run) {
 		assert.NotContains(t, m, home, "a colon-bearing source must not reach a -v spec: %q", m)
 	}
+}
+
+// TestDockerStagingContainerizedAfFallsBackToCp: a unix socket mounted into
+// af's own container is the HOST's dockerd — the staging dir lives in af's
+// container filesystem where dockerd cannot see it, and a missing -v source
+// is created as a directory rather than refused. The bind path must not be
+// selected; the payload goes through the guarded cp fallback instead.
+func TestDockerStagingContainerizedAfFallsBackToCp(t *testing.T) {
+	stagingTestEnv(t)
+	old := dockerStagingInContainer
+	dockerStagingInContainer = func() bool { return true }
+	defer func() { dockerStagingInContainer = old }()
+
+	var calls [][]string
+	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+
+	p := &dockerProvisioner{
+		image: "img:latest",
+		afBin: stagingBinarySource(t),
+		spec:  ProvisionSpec{Title: "incontainer", CloneURL: "file:///repo"},
+	}
+	_, err := p.provision()
+	require.NoError(t, err, "calls=%v", calls)
+
+	assert.False(t, p.payloadViaBinds, "a containerized daemon's staging dir is invisible to host dockerd")
+	run := findDockerCall(calls, "run")
+	require.NotNil(t, run, "calls=%v", calls)
+	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
+	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
+	require.NotNil(t, findDockerCall(calls, "exec", "/proc/self/mountinfo"),
+		"the mount-table guard still gates the cp; calls=%v", calls)
+}
+
+// TestDockerStagingProxiedEndpointFallsBackToCp: a tcp:// loopback endpoint
+// passes the non-account locality gate (reachable) but carries no proof the
+// daemon is on this host — `ssh -L 2375:host:2375` makes a remote engine
+// answer on 127.0.0.1 while resolving binds on the remote host. Without
+// dockerEndpointOnThisHost, the bind path is skipped for the cp fallback.
+func TestDockerStagingProxiedEndpointFallsBackToCp(t *testing.T) {
+	stagingTestEnv(t)
+	t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+
+	var calls [][]string
+	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+
+	p := &dockerProvisioner{
+		image: "img:latest",
+		afBin: stagingBinarySource(t),
+		spec:  ProvisionSpec{Title: "proxied", CloneURL: "file:///repo"},
+	}
+	_, err := p.provision()
+	require.NoError(t, err, "calls=%v", calls)
+
+	assert.False(t, p.payloadViaBinds, "a tcp endpoint carries no on-this-host proof")
+	run := findDockerCall(calls, "run")
+	require.NotNil(t, run, "calls=%v", calls)
+	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
+	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
 }
 
 // TestDockerStagingRetryAbortKeepsTheContainer: when the sharing-refused run

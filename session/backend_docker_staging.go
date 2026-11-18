@@ -48,6 +48,28 @@ var dockerStagingSharedRoots = []string{"/Users", "/Volumes", "/private", "/tmp"
 // package var so tests can exercise the macOS boundary on any host.
 var dockerStagingGOOS = runtime.GOOS
 
+// dockerStagingInContainer reports whether af itself runs inside a container —
+// the marker files every docker-run (/.dockerenv) and podman/k8s
+// (/run/.containerenv) container gets, then PID 1's cgroup for runtimes that
+// create neither. A containerized af behind a mounted socket talks to the
+// HOST's dockerd, which cannot see af's container-local staging dir. A var so
+// tests can pin the boundary.
+var dockerStagingInContainer = func() bool {
+	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(marker); err == nil {
+			return true
+		}
+	}
+	if data, err := os.ReadFile("/proc/1/cgroup"); err == nil {
+		for _, token := range []string{"docker", "kubepods", "containerd", "libpod"} {
+			if strings.Contains(string(data), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // preparePayloadDelivery stages the payload af owns into a per-session dir
 // under the AF home and chooses the delivery mechanism: read-only binds
 // appended last in `docker run` — no cp and no chmod — wherever a bind
@@ -73,7 +95,7 @@ func (p *dockerProvisioner) preparePayloadDelivery() {
 	case p.stagedAfPath == "":
 		// Staging failed — the whole pre-#7577 cp+chmod path runs behind the guard.
 	case !p.stagingShareable(p.stagingDir):
-		log.InfoLog.Printf("docker runtime: staging dir %s is outside the engine's shared file roots; delivering af's payload via `docker cp` after the mount-table check", p.stagingDir)
+		log.InfoLog.Printf("docker runtime: staging dir %s is not visible to the engine host as af sees it (shared-root, endpoint, or containerized-daemon check); delivering af's payload via `docker cp` after the mount-table check", p.stagingDir)
 	case strings.ContainsAny(p.stagingDir, ":,"):
 		// dockerAccountMount's rule: ':' splits a -v spec's fields and ',' splits
 		// --mount's. The staged files still carry the right modes, so the guarded
@@ -221,20 +243,32 @@ func (p *dockerProvisioner) stagingMounts() []string {
 }
 
 // stagingShareable reports whether dir can reach a container through a bind on
-// this engine. The boundary is the client platform, not the engine name:
-// dockerd cannot run on macOS natively, so EVERY engine reachable from a macOS
-// client — Docker Desktop, colima, OrbStack, a podman machine — mounts through
-// a VM file-sharing layer, and a source outside the shared roots is a hard
-// failure rather than a mount. The shared-roots list covers the defaults all
-// of them share (/Users, /Volumes, /private — /tmp itself resolves beneath
-// /private, so the comparison walks symlink-resolved real paths); an engine
-// configured with extra shares simply takes the cp fallback, which is always
-// correct. On Linux a local bind works wherever dockerd can read the path,
-// and the staging root is the daemon-owned AF home, which a rootless dockerd
-// (the daemon's own user) reads by construction. A Windows daemon cannot
+// this engine. Docker resolves a bind source on the DAEMON host, so the staged
+// files reach the container only when dockerd sees the same path af wrote:
+// the endpoint must carry the dockerEndpointOnThisHost proof (a tcp://
+// loopback endpoint can be an `ssh -L` forward to a remote engine), and af
+// itself must not be containerized — a unix socket mounted into af's
+// container is the HOST's dockerd, while the staging dir lives in af's own
+// container filesystem, where the run either fails or — per Docker's own
+// bind-mount contract — a missing source is created as a directory, leaving
+// an empty dir over /usr/local/bin/af. Neither outcome reaches the
+// sharing-retry, so the answer must be the always-correct cp fallback.
+//
+// On macOS the boundary is the VM file-sharing layer, not the engine name:
+// dockerd cannot run natively there, so EVERY reachable engine — Docker
+// Desktop, colima, OrbStack, a podman machine — mounts through it, and a
+// source outside the shared roots is a hard failure rather than a mount. The
+// shared-roots list covers the defaults all of them share (/Users, /Volumes,
+// /private — /tmp itself resolves beneath /private, so the comparison walks
+// symlink-resolved real paths); an engine configured with extra shares simply
+// takes the cp fallback, which is always correct. A Windows daemon cannot
 // produce an af binary a Linux container can exec either way, so the bind
 // path is no worse than the cp it replaces there.
 func (p *dockerProvisioner) stagingShareable(dir string) bool {
+	endpoint, _, err := p.dockerEngineEndpoint()
+	if err != nil || !dockerEndpointOnThisHost(endpoint) || dockerStagingInContainer() {
+		return false
+	}
 	if dockerStagingGOOS != "darwin" {
 		return true
 	}
@@ -302,15 +336,14 @@ func parseMountEntries(mountinfo string) ([]mountEntry, error) {
 		if len(fields) < 7 {
 			return nil, fmt.Errorf("unparseable mountinfo line %q", line)
 		}
-		// Check the decoded-but-uncleaned point: path.Clean would collapse a
-		// "//" prefix before it could be refused, and a backslash in the raw
-		// field is a legitimately-escaped byte in a real path. "//" and "\"
-		// in the DECODED value are never in a real mountinfo mount point (the
-		// kernel octal-escapes special bytes), so a table carrying one is
-		// hostile or corrupt — refuse it rather than prefix-match a cleaned
-		// path that lost the signal.
+		// Check the decoded-but-uncleaned point before path.Clean can
+		// collapse a "//" prefix: a mount point must be '/' followed by
+		// anything but '/' or '\'. Both shapes are never in a real mountinfo
+		// (the kernel octal-escapes special bytes), so a table carrying one
+		// is hostile or corrupt — refuse it rather than prefix-match a
+		// cleaned path that lost the signal.
 		mp := unescapeMountinfo(fields[4])
-		if !strings.HasPrefix(mp, "/") || strings.HasPrefix(mp, "//") || strings.ContainsRune(mp, '\\') {
+		if len(mp) == 0 || mp[0] != '/' || (len(mp) > 1 && (mp[1] == '/' || mp[1] == '\\')) || strings.ContainsRune(mp, '\\') {
 			return nil, fmt.Errorf("unparseable mountinfo mount point %q", fields[4])
 		}
 		mp = path.Clean(mp)
