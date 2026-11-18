@@ -283,7 +283,9 @@ func accountProtectedPath(target string) string {
 // validateAccountDockerRunArgs refuses repo-controlled sources that Docker can
 // apply after af has selected the account. Environment files are opaque to af,
 // so none are accepted in account mode; direct environment options are refused
-// only when they can choose another identity or authentication mode.
+// only when they can choose another identity or authentication mode — or which
+// program af's in-container provisioning execs resolve (#7563 R2, the #7529
+// R7 program-choice refusal extended to account sessions).
 func validateAccountDockerRunArgs(args []string, agent string) error {
 	denied := accountDockerDeniedNames(agent)
 	checkEnv := func(value string) error {
@@ -292,6 +294,11 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because it can override the selected identity",
 				name, agent)
+		}
+		if reason, refused := accountDockerProgramChoiceReason(name); refused {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s",
+				name, agent, reason)
 		}
 		return nil
 	}
@@ -457,6 +464,30 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 		}
 	}
 	return nil
+}
+
+// accountDockerProgramChoiceReason returns the because-clause for the env
+// names a repo-controlled docker.run_args entry may not set on the account
+// path: the names that choose which program — or which loaded code — af
+// runs IN the container. PATH resolves every bare command in af's root
+// provisioning execs (the mount-table probe's mkdir and cat, the chown
+// itself) and the agent's own executable, so `-e PATH=/workspace/.x:…`
+// would put repository binaries in front of all of them; the
+// dynamic-linker names inject a repository library into those programs
+// before any agent-side env filter exists. They are the same class #7529
+// R7 refuses on the credential-mount path, kept out of
+// accountDockerDeniedNames on purpose: that set also filters the
+// operator's session_env_passthrough claims, and the operator stays free
+// to forward their own PATH — the image-PATH re-assertion is skipped for
+// a name the operator claimed (#7563 R2).
+func accountDockerProgramChoiceReason(name string) (string, bool) {
+	if name == "PATH" {
+		return "it chooses which program every PATH-resolved command in the container runs — af's account provisioning execs and the agent's own executable — and af re-asserts the image's own PATH after run_args", true
+	}
+	if _, ok := credentialMountProgramLoaderNames[name]; ok {
+		return "it loads a repository-chosen library into the programs af runs in the container", true
+	}
+	return "", false
 }
 
 // rawEnvironmentValue returns the untrimmed value environ gives name, or "" when
