@@ -105,7 +105,27 @@ func exeTextVnode(pid int, exePath string) (dev uint64, ino uint64, ok bool) {
 	for i := 0; i < regionScanBound; i++ {
 		n, err := procInfoRaw(procInfoCallPIDInfo, pid, procPIDRegionPathInfo2, addr,
 			unsafe.Pointer(&buf[0]), procRegionWithPathInfoSize)
-		if err != nil || n < procRegionWithPathInfoSize {
+		if err != nil {
+			// EINVAL is the kernel's end-of-walk signal: once the cursor
+			// advances past the final vnode-backed mapping,
+			// fill_procregioninfo_onlymappedvnodes returns 0 and
+			// proc_pidregionpathinfo2 converts that 0 to EINVAL (xnu
+			// bsd/kern/proc_info.c). The consensus must exhaust the map
+			// rather than return on its first match, so EVERY ordinary
+			// walk reaches this on its final step — fold whatever it
+			// collected (empty collapses to the honest "foreign"
+			// answer inside collectTextVnode, exactly the fail-closed
+			// direction) instead of failing closed on the kernel's own
+			// "no more regions" report. Any other errno is a genuine
+			// read failure (ESRCH for a gone process, EACCES/EPERM for
+			// an uninspectable one) — fail closed, the same direction
+			// as before.
+			if err != syscall.EINVAL {
+				return 0, 0, false
+			}
+			return collectTextVnode(matches)
+		}
+		if n < procRegionWithPathInfoSize {
 			return 0, 0, false
 		}
 		regionEnd := binary.NativeEndian.Uint64(buf[regionPriAddressOff:]) +

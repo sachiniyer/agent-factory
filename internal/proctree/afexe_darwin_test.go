@@ -151,14 +151,21 @@ func TestExeAttestsAFRefusesAMmapSpoofOfTheTextVnode(t *testing.T) {
 	// after the test stages the name swap, so the mmap reads the af build,
 	// not the sleeper. The gate file is the deterministic handshake: the
 	// sleeper waits for it before the mmap, the test creates it after the
-	// mv has landed.
+	// mv has landed. The ready file is the POSITIVE witness the mmap
+	// landed: the helper writes it after the Syscall6 returns, so a `!ok`
+	// from exeIdentity is the consensus failing closed on the two distinct
+	// inodes, NOT the helper having died at exit 11/12 with the poison
+	// never staged — without that witness the Eventually below would pass
+	// for the wrong reason whenever the mmap failed.
 	gate := filepath.Join(dir, "gate")
+	ready := filepath.Join(dir, "ready")
 	const mmapAddr = "0x200000"
 	proc := exec.Command(carrier, "300")
 	proc.Env = append(os.Environ(),
 		sleeper.MmapPathEnv+"="+carrier,
 		sleeper.MmapAddrEnv+"="+mmapAddr,
-		sleeper.MmapGateEnv+"="+gate)
+		sleeper.MmapGateEnv+"="+gate,
+		sleeper.MmapReadyEnv+"="+ready)
 	require.NoError(t, proc.Start())
 	t.Cleanup(func() {
 		_ = os.Remove(gate)
@@ -189,6 +196,26 @@ func TestExeAttestsAFRefusesAMmapSpoofOfTheTextVnode(t *testing.T) {
 	// inodes naming the exe path — the foreign text vnode (high, PROT_EXEC)
 	// and the af inode the carrier mapped under the name (low, PROT_READ).
 	require.NoError(t, os.WriteFile(gate, []byte("go"), 0o644))
+
+	// POSITIVE readiness witness before any `!ok` is accepted: the helper
+	// writes the ready file only after the mmap Syscall6 returns, so its
+	// presence proves the poison is staged (the carrier is alive AND has a
+	// vnode-backed region at 0x200000 naming Q). Without this a failed
+	// mmap — exit 11/12 — would make exeIdentity return !ok for the
+	// process being gone, and the Eventually below would pass silently on
+	// a broken fixture.
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(ready)
+		return err == nil
+	}, 5*time.Second, 20*time.Millisecond,
+		"the mmap must land (helper writes ready after Syscall6) before the consensus is read")
+
+	// The helper must still be alive — the mmap did not exit 11/12. A
+	// dead helper would make every `!ok` below a process-gone artifact
+	// rather than the consensus failing closed on the staged poison.
+	if proc.Process.Signal(syscall.Signal(0)) != nil {
+		t.Fatal("the carrier died instead of staging the mmap — the poison was never staged")
+	}
 
 	// Wait for the mmap to land so the walk sees both. The signature of
 	// the poison is that exeIdentity stops answering: the consensus

@@ -46,9 +46,10 @@ func TestFractionalSecondsExit(t *testing.T) {
 // here rather than a downstream test that mysteriously skips the mmap.
 func TestSourceNamesTheExportedMmapEnvVars(t *testing.T) {
 	for name, env := range map[string]string{
-		"MmapPathEnv": MmapPathEnv,
-		"MmapAddrEnv": MmapAddrEnv,
-		"MmapGateEnv": MmapGateEnv,
+		"MmapPathEnv":  MmapPathEnv,
+		"MmapAddrEnv":  MmapAddrEnv,
+		"MmapGateEnv":  MmapGateEnv,
+		"MmapReadyEnv": MmapReadyEnv,
 	} {
 		require.True(t, strings.Contains(source, `"`+env+`"`),
 			"source must name %s (%q) — the directive is a no-op without it", name, env)

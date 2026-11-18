@@ -48,6 +48,7 @@ import (
 const mmapPathEnv = "PROCTREE_SLEEPER_MMAP_PATH"
 const mmapAddrEnv = "PROCTREE_SLEEPER_MMAP_ADDR"
 const mmapGateEnv = "PROCTREE_SLEEPER_MMAP_GATE"
+const mmapReadyEnv = "PROCTREE_SLEEPER_MMAP_READY"
 const mmapSize = 4096
 
 func main() {
@@ -58,7 +59,7 @@ func main() {
 		}
 	}
 	if p := os.Getenv(mmapPathEnv); p != "" {
-		mmapAt(p, os.Getenv(mmapAddrEnv), os.Getenv(mmapGateEnv))
+		mmapAt(p, os.Getenv(mmapAddrEnv), os.Getenv(mmapGateEnv), os.Getenv(mmapReadyEnv))
 	}
 	time.Sleep(time.Duration(secs * float64(time.Second)))
 }
@@ -67,8 +68,12 @@ func main() {
 // as a Go integer literal, so "0x200000" works), waiting for gatePath to
 // appear first when the caller needs the test to stage a name swap before
 // the mmap reads the swapped-to file. A failed mmap exits nonzero so a
-// test that mis-stages fails loudly rather than sleeping silently.
-func mmapAt(path, addrStr, gatePath string) {
+// test that mis-stages fails loudly rather than sleeping silently. When
+// readyPath is set, the helper writes a one-byte file at it AFTER the mmap
+// lands — the positive readiness witness a test waits on so a !ok from
+// the attestation walk is the consensus failing closed, not the helper
+// having died at exit 11/12 with the mmap never staged.
+func mmapAt(path, addrStr, gatePath, readyPath string) {
 	if gatePath != "" {
 		for {
 			if _, err := os.Stat(gatePath); err == nil {
@@ -88,6 +93,9 @@ func mmapAt(path, addrStr, gatePath string) {
 	if errno != 0 {
 		os.Exit(12)
 	}
+	if readyPath != "" {
+		_ = os.WriteFile(readyPath, []byte("1"), 0o644)
+	}
 }
 `
 
@@ -97,9 +105,10 @@ func mmapAt(path, addrStr, gatePath string) {
 // strings. Every consumer that does not set them gets the plain-sleep
 // behavior the package always had.
 const (
-	MmapPathEnv = "PROCTREE_SLEEPER_MMAP_PATH"
-	MmapAddrEnv = "PROCTREE_SLEEPER_MMAP_ADDR"
-	MmapGateEnv = "PROCTREE_SLEEPER_MMAP_GATE"
+	MmapPathEnv  = "PROCTREE_SLEEPER_MMAP_PATH"
+	MmapAddrEnv  = "PROCTREE_SLEEPER_MMAP_ADDR"
+	MmapGateEnv  = "PROCTREE_SLEEPER_MMAP_GATE"
+	MmapReadyEnv = "PROCTREE_SLEEPER_MMAP_READY"
 )
 
 var (
