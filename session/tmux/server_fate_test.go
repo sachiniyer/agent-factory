@@ -63,12 +63,14 @@ func fateCases() []fateCase {
 			contains: "the tmux server it was created on (pid 111) no longer answers (no server running on /tmp/af-tmux-1/tmux-1000/default): the server exited",
 		},
 		{
-			name: "the socket is gone: the server exited",
+			// ENOENT is not proof of an exit: a live server whose socket was
+			// removed keeps running (#2875), so this must not claim one.
+			name: "the socket is missing: the server is unreachable, not proven exited",
 			serverErr: func(t *testing.T) error {
 				return tmuxExitOneError(t, "error connecting to /tmp/af-tmux-1/tmux-1000/default (No such file or directory)")
 			},
-			want:     serverFateNoServer,
-			contains: "no longer answers (error connecting to /tmp/af-tmux-1/tmux-1000/default (No such file or directory))",
+			want:     serverFateUnreachable,
+			contains: "the tmux server it was created on (pid 111) is unreachable: its socket is missing (error connecting to /tmp/af-tmux-1/tmux-1000/default (No such file or directory)), so the server exited, or its socket was removed while it keeps running",
 		},
 		{
 			name: "a different server answers: the server was replaced", serverPID: "222", want: serverFateReplaced,
@@ -90,6 +92,10 @@ func TestServerFateSince(t *testing.T) {
 			report := session.serverFateSince("111")
 			require.Equal(t, tc.want, report.fate)
 			require.Contains(t, report.clause(), tc.contains)
+			if tc.want == serverFateUnreachable {
+				require.NotContains(t, report.clause(), "no longer answers",
+					"a missing socket does not show that nothing is listening")
+			}
 		})
 	}
 

@@ -26,10 +26,17 @@ const (
 	// serverFateSameServer: the server the session was created on still
 	// answers, so only the session's own pane exited.
 	serverFateSameServer
-	// serverFateNoServer: nothing answers on the socket. The server exited — or
-	// the session was its only one, and tmux retired it (exit-empty) when the
-	// pane's exit closed that session. tmux cannot tell those apart afterwards.
+	// serverFateNoServer: the socket is there and nothing listens on it
+	// (ECONNREFUSED). The server exited — or the session was its only one, and
+	// tmux retired it (exit-empty) when the pane's exit closed that session.
+	// tmux cannot tell those apart afterwards.
 	serverFateNoServer
+	// serverFateUnreachable: the socket file is missing (ENOENT). That does NOT
+	// show the server exited: a live server whose socket was removed keeps its
+	// sessions while every client gets ENOENT (#2875). Proving which needs the
+	// SIGUSR1 probe NoServerRunning runs, which a diagnostic must not, so this
+	// reports the server unreachable and names both possibilities.
+	serverFateUnreachable
 	// serverFateReplaced: a DIFFERENT server answers, so the one the session was
 	// created on exited and another took its socket.
 	serverFateReplaced
@@ -42,7 +49,8 @@ type serverFateReport struct {
 	createdPID string
 	// nowPID is the pid of the server answering now, for serverFateReplaced.
 	nowPID string
-	// diagnostic is tmux's own words for serverFateNoServer.
+	// diagnostic is tmux's own words for serverFateNoServer and
+	// serverFateUnreachable.
 	diagnostic string
 }
 
@@ -54,6 +62,8 @@ func (r serverFateReport) clause() string {
 		return fmt.Sprintf("the tmux server it was created on (pid %s) is still running, so only the session's own pane exited", r.createdPID)
 	case serverFateNoServer:
 		return fmt.Sprintf("the tmux server it was created on (pid %s) no longer answers (%s): the server exited, or this was its only session and tmux retired it when the pane exited", r.createdPID, r.diagnostic)
+	case serverFateUnreachable:
+		return fmt.Sprintf("the tmux server it was created on (pid %s) is unreachable: its socket is missing (%s), so the server exited, or its socket was removed while it keeps running", r.createdPID, r.diagnostic)
 	case serverFateReplaced:
 		return fmt.Sprintf("the tmux server it was created on (pid %s) is gone: a different tmux server (pid %s) now answers on its socket", r.createdPID, r.nowPID)
 	default:
@@ -68,7 +78,8 @@ func (r serverFateReport) clause() string {
 // It deliberately classifies tmux's no-server answers itself instead of going
 // through NoServerRunning: on a missing socket that would run the socket-absent
 // SIGUSR1 probe against every tmux server this uid runs, which is not a cost a
-// diagnostic may impose. A missing socket is reported as what tmux said.
+// diagnostic may impose. A missing socket is reported as unreachable, never as
+// an exit it cannot prove.
 func (t *TmuxSession) serverFateSince(createdPID string) serverFateReport {
 	report := serverFateReport{createdPID: createdPID}
 	if createdPID == "" {
@@ -82,10 +93,18 @@ func (t *TmuxSession) serverFateSince(createdPID string) serverFateReport {
 			return report
 		}
 		diagnostic, exitOne := tmuxExitOneDiagnostic(err)
-		if exitOne && classifyNoServerDiagnostic(diagnostic) != notANoServerDiagnostic {
-			report.fate = serverFateNoServer
-			report.diagnostic = diagnostic
+		if !exitOne {
+			return report
 		}
+		switch classifyNoServerDiagnostic(diagnostic) {
+		case serverRefusedConnection:
+			report.fate = serverFateNoServer
+		case socketAbsent:
+			report.fate = serverFateUnreachable
+		default:
+			return report
+		}
+		report.diagnostic = diagnostic
 		return report
 	}
 	nowPID := strings.TrimSpace(string(out))
@@ -138,7 +157,7 @@ func (t *TmuxSession) vanishedBeforeAttachError(report serverFateReport, err err
 	case serverFateSameServer:
 		return fmt.Errorf("tmux session %s vanished before attach; %s: the pane program exited immediately after launch — check that it runs and accepts its flags (program: %q): %w",
 			t.sanitizedName, report.clause(), program, err)
-	case serverFateNoServer:
+	case serverFateNoServer, serverFateUnreachable:
 		return fmt.Errorf("tmux session %s vanished before attach; %s — if the pane exited, check that its program runs and accepts its flags (program: %q): %w",
 			t.sanitizedName, report.clause(), program, err)
 	case serverFateReplaced:
