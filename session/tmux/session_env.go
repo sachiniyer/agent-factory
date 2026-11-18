@@ -70,6 +70,21 @@ func (t *TmuxSession) SetEnvPassthrough(names []string) error {
 	return nil
 }
 
+// SetEnvEmpty replaces the names the pane's exec shim re-asserts
+// defined-and-empty immediately before the agent execs — the credential-mount
+// env pins an outer runtime delivered (#7529 R1). Call it before Start or
+// Restore, alongside SetEnvPassthrough; sibling tabs take the same list.
+func (t *TmuxSession) SetEnvEmpty(names []string) error {
+	normalized, err := sessionenv.NormalizeExtraNames(names)
+	if err != nil {
+		return err
+	}
+	t.programMu.Lock()
+	t.envEmpty = normalized
+	t.programMu.Unlock()
+	return nil
+}
+
 // SetInstanceID records the instance id the next Start stamps into the session
 // environment as AF_INSTANCE_ID (#6258). Call it before Start; it only labels
 // the session and cannot affect the pane.
@@ -201,7 +216,7 @@ func (t *TmuxSession) SetLaunchProgram(program string, proof sessionenv.AccountL
 // reason SetLaunchProgram writes them in one: Start used to read program through
 // its own lock and the declaration through another, so a rewrite landing between
 // them paired an old command with a new declaration.
-func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras []string, account, accountAgent string, accountEnvironmentOnly bool, accountLoginEnv []string) {
+func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras, envEmpty []string, account, accountAgent string, accountEnvironmentOnly bool, accountLoginEnv []string) {
 	t.programMu.RLock()
 	defer t.programMu.RUnlock()
 	return t.program, sessionenv.AccountLaunchProof{
@@ -209,6 +224,7 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 			GeneratedArgs:     append([]string(nil), t.generatedArgs...),
 		},
 		append([]string(nil), t.envPassthrough...),
+		append([]string(nil), t.envEmpty...),
 		t.account,
 		t.accountAgent,
 		t.accountEnvironmentOnly,
@@ -237,7 +253,7 @@ func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (wrapped string, 
 }
 
 func (t *TmuxSession) prepareLaunchEnvironmentMinting(workDir string) (string, []string, []string, []string, string, error) {
-	program, proof, extra, account, accountAgent, accountEnvironmentOnly, loginEnv := t.launchSnapshot()
+	program, proof, extra, envEmpty, account, accountAgent, accountEnvironmentOnly, loginEnv := t.launchSnapshot()
 	source := os.Environ()
 	// Two different questions, two classifiers: the credential GRANT is bound
 	// to the shared predicate (only an operator-attributable executable may
@@ -298,7 +314,7 @@ func (t *TmuxSession) prepareLaunchEnvironmentMinting(workDir string) (string, [
 			proof: proof, environmentOnly: accountEnvironmentOnly,
 		})
 	} else {
-		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, program)
+		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, envEmpty, program)
 	}
 	if err != nil {
 		return "", nil, nil, nil, "", err
@@ -401,7 +417,7 @@ func (t *TmuxSession) refreshRestoredAccountEnvironment() (err error) {
 			t.commitCapabilities(false) // a refresh launches no pane: only the per-pane capability is kept
 		}
 	}()
-	_, _, _, account, accountAgent, _, _ := t.launchSnapshot()
+	_, _, _, _, account, accountAgent, _, _ := t.launchSnapshot()
 	if account == "" {
 		return nil
 	}

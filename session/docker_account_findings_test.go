@@ -306,7 +306,7 @@ func TestDockerAccount_ReprovisionRefusesResolvedAgentDrift(t *testing.T) {
 
 	err := i.reprovisionRemote()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "codex account")
+	require.Contains(t, err.Error(), "belongs to the codex agent")
 	require.Contains(t, err.Error(), "opencode")
 	require.False(t, dockerCalled, "agent drift must refuse before reaping or provisioning")
 }

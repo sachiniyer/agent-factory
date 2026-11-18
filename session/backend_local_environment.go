@@ -60,6 +60,16 @@ func (i *Instance) freezeEnvPassthrough(names []string) (release func()) {
 	return func() { i.frozenEnvPassthrough.Store(prev) }
 }
 
+// sessionEnvEmptyForInstance returns the credential-mount pins an outer
+// runtime's agent-server flags delivered — the names every pane's exec shim
+// re-asserts defined-and-empty before the agent execs (#7529 R1). Nil for
+// local sessions, which carry no outer runtime's pins.
+func sessionEnvEmptyForInstance(i *Instance) []string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return append([]string(nil), i.sessionEnvEmpty...)
+}
+
 // refreshSessionEnvironment reapplies a session's environment declarations to
 // its agent pane. The account's namespace is the one the selection was made in,
 // never re-derived from the launch command: a program_overrides edit after the
@@ -75,6 +85,9 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	}
 	if err := tmuxSession.SetEnvPassthrough(passthrough); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
+	}
+	if err := tmuxSession.SetEnvEmpty(sessionEnvEmptyForInstance(i)); err != nil {
+		return fmt.Errorf("invalid session environment empty-pin names: %w", err)
 	}
 	refreshSessionIdentity(i, tmuxSession)
 	i.envResolvedTmux.Store(tmuxSession)
@@ -176,6 +189,9 @@ func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
 	}
 	if err := tab.tmux.SetEnvPassthrough(passthrough); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
+	}
+	if err := tab.tmux.SetEnvEmpty(sessionEnvEmptyForInstance(i)); err != nil {
+		return fmt.Errorf("invalid session environment empty-pin names: %w", err)
 	}
 	i.mu.RLock()
 	account := i.Account

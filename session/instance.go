@@ -762,6 +762,10 @@ type Instance struct {
 	// outer runtime's agent-server flags. Local sessions normally source the
 	// same setting from global config during Provision.
 	sessionEnvPassthrough []string
+	// sessionEnvEmpty is the credential-mount pin list an outer runtime's
+	// agent-server flags delivered: names the pane's exec shim re-asserts
+	// defined-and-empty immediately before the agent execs (#7529 R1).
+	sessionEnvEmpty []string
 	// sandboxCreds mints and revokes this session's callback credential (#3068).
 	// Held here because the RUNTIME's lifetime drives it: provisioning a
 	// replacement mints, and reaping a runtime revokes. Set at construction for a

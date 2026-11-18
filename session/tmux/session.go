@@ -308,6 +308,11 @@ type TmuxSession struct {
 	// environment allowlist. It is protected by programMu because a start reads
 	// it alongside program and sibling tabs copy both launch settings.
 	envPassthrough []string
+	// envEmpty is the credential-mount pin list an outer runtime's agent-server
+	// flags delivered: names the pane's exec shim re-asserts defined-and-empty
+	// immediately before the agent execs, after tmux's default-shell or a config
+	// file could re-set them (#7529 R1). Guarded by programMu with envPassthrough.
+	envEmpty []string
 	// instanceID is the stable id of the instance whose agent this session runs,
 	// stamped into the session environment at new-session as AF_INSTANCE_ID
 	// (#6258). Guarded by programMu with the other launch settings. Empty for
@@ -869,10 +874,12 @@ func newTmuxSession(sanitizedName string, program string, ptyFactory PtyFactory,
 func (t *TmuxSession) NewSiblingSession(sanitizedName, program string) *TmuxSession {
 	t.programMu.RLock()
 	extra := append([]string(nil), t.envPassthrough...)
+	envEmpty := append([]string(nil), t.envEmpty...)
 	account, accountAgent := t.account, t.accountAgent
 	t.programMu.RUnlock()
 	sibling := newTmuxSession(sanitizedName, program, t.ptyFactory, t.cmdExec)
 	_ = sibling.SetEnvPassthrough(extra)
+	_ = sibling.SetEnvEmpty(envEmpty)
 	sibling.SetAccountEnvironmentForAgent(accountAgent, account)
 	return sibling
 }
@@ -883,10 +890,12 @@ func (t *TmuxSession) NewSiblingSession(sanitizedName, program string) *TmuxSess
 func (t *TmuxSession) NewShellSiblingSession(sanitizedName, shell string) (*TmuxSession, error) {
 	t.programMu.RLock()
 	extra := append([]string(nil), t.envPassthrough...)
+	envEmpty := append([]string(nil), t.envEmpty...)
 	account, accountAgent := t.account, t.accountAgent
 	t.programMu.RUnlock()
 	sibling := newTmuxSession(sanitizedName, shell, t.ptyFactory, t.cmdExec)
 	_ = sibling.SetEnvPassthrough(extra)
+	_ = sibling.SetEnvEmpty(envEmpty)
 	if err := sibling.SetAccountShellEnvironmentForAgent(accountAgent, account); err != nil {
 		return nil, err
 	}

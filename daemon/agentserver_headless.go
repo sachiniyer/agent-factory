@@ -20,6 +20,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
@@ -231,6 +232,16 @@ type AgentServerOptions struct {
 	// SessionEnvPassthrough carries exact operator-approved variable names from
 	// the outer runtime. Values remain in this host's environment.
 	SessionEnvPassthrough []string
+	// SessionEnvEmpty carries the credential-mount pins: names the pane's exec
+	// shim re-asserts defined-and-empty at the last boundary before the agent
+	// execs, so nothing between the container's env and that exec can re-set
+	// them (#7529 R1).
+	SessionEnvEmpty []string
+	// NoTmuxConfig makes every tmux invocation this server runs skip the system
+	// and user config files (-f /dev/null): inside a container the image's
+	// /etc/tmux.conf or a ~/.tmux.conf could otherwise pick default-shell or
+	// write session environment before the agent's exec (#7529 R1).
+	NoTmuxConfig bool
 	// Branch is the exact branch the daemon named for this session (#5571 W2.4).
 	// Empty derives it from this host's own branch_prefix, as before.
 	Branch string
@@ -301,6 +312,12 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		config.InstallAgentPolicy(policy)
 	}
 
+	// Set before any session work: from here on every tmux invocation this
+	// process runs skips the repo/image's config files (#7529 R1).
+	if opts.NoTmuxConfig {
+		tmux.SetNoConfigFiles(true)
+	}
+
 	// LoadConfig honors cors_allowed_origins/default_program for a configured
 	// host; a sandbox with no config file falls back to defaults.
 	cfg, err := config.LoadConfig()
@@ -369,6 +386,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		// pins it against the sandbox's own program_overrides.
 		ProgramResolved:       opts.ProgramResolved && resolvedProgram != "",
 		SessionEnvPassthrough: opts.SessionEnvPassthrough,
+		SessionEnvEmpty:       opts.SessionEnvEmpty,
 		// The outer daemon hands the callback pair to this process's environment
 		// through the provisioner's env file; a sandbox provisioned WITHOUT one
 		// (mint refused, or remote forwarding off) can never serve an af verb —

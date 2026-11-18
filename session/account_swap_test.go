@@ -176,7 +176,7 @@ func TestValidateAccountSwapCommittedRetryUsesRecordedNamespace(t *testing.T) {
 	require.NoError(t, err)
 	drifted.SetTmuxSession(tmux.NewTmuxSession(drifted.Title, tmux.ProgramGemini))
 	err = drifted.ValidateAccountSwap("work")
-	require.ErrorContains(t, err, "is a codex account",
+	require.ErrorContains(t, err, "belongs to the codex agent",
 		"the retry must consult the recorded codex registry, not the flipped resolution's gemini")
 	require.ErrorContains(t, err, "runs gemini",
 		"the drift refusal names the launch the pane evidence now produces")

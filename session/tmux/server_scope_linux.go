@@ -241,7 +241,7 @@ func secureExistingServerLog(path string) error {
 func tmuxServerRunning() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), serverProbeTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "tmux", "show-options", "-gv", "exit-empty").Run() == nil
+	return exec.CommandContext(ctx, "tmux", tmuxArgv("show-options", "-gv", "exit-empty")...).Run() == nil
 }
 
 func tmuxSupportsNoStart() (bool, error) {
@@ -253,7 +253,7 @@ func tmuxSupportsNoStart() (bool, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxVersionProbeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "-V").Output()
+	out, err := exec.CommandContext(ctx, "tmux", tmuxArgv("-V")...).Output()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return false, fmt.Errorf("tmux -V timed out after %s: %w", tmuxVersionProbeTimeout, ctxErr)
@@ -380,7 +380,7 @@ func runDedicatedServer() error {
 	_, _ = fmt.Fprintf(writer, "%s af tmux server starting in foreground\n", time.Now().Format(time.RFC3339))
 
 	unit := os.Getenv(dedicatedServerUnitEnv)
-	cmd := exec.Command("tmux", "-D")
+	cmd := exec.Command("tmux", tmuxArgv("-D")...)
 	cmd.Env = withoutEnvironment(withoutEnvironment(os.Environ(), dedicatedServerLogEnv), dedicatedServerUnitEnv)
 	cmd.Stdout = writer
 	cmd.Stderr = writer
@@ -422,7 +422,7 @@ func recordServerDeath(home, unit string, started time.Time, runErr error) {
 
 func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd, bool) {
 	if !systemdunit.RunningDaemonProcess() {
-		return exec.Command("tmux", args...), false
+		return exec.Command("tmux", tmuxArgv(args...)...), false
 	}
 	if home, configured := configuredDaemonServerHome(); configured {
 		serverReady := serverErr == nil || tmuxServerRunning()
@@ -430,10 +430,10 @@ func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd
 			supportsNoStart, probeErr := tmuxSupportsNoStart()
 			if probeErr != nil {
 				log.WarningLog.Printf("tmux -V probe failed: %v; using -N no-autostart client", probeErr)
-				return exec.Command("tmux", append([]string{"-N"}, args...)...), false
+				return exec.Command("tmux", tmuxArgv(append([]string{"-N"}, args...)...)...), false
 			}
 			if supportsNoStart {
-				return exec.Command("tmux", append([]string{"-N"}, args...)...), false
+				return exec.Command("tmux", tmuxArgv(append([]string{"-N"}, args...)...)...), false
 			}
 			noStartWarningOnce.Do(func() {
 				log.WarningLog.Printf("tmux client lacks a verified -N no-autostart flag; using a per-session systemd scope compatibility fallback")

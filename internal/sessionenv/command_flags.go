@@ -683,6 +683,20 @@ func agentServerProgram(args []string) (string, bool) {
 			idx += 2
 			continue
 		}
+		// --session-env-empty names a credential-mount pin the pane's exec shim
+		// re-asserts defined-and-empty at the last boundary before the agent
+		// execs, and --no-tmux-config carries -f /dev/null into every tmux call
+		// so the image's config files cannot pick programs or write session
+		// environment (#7529 R1). Both are generated only for the
+		// credential-mount path and are still names/booleans, never commands.
+		if args[idx] == "--session-env-empty" && idx+1 < len(args) && validName(args[idx+1]) {
+			idx += 2
+			continue
+		}
+		if args[idx] == "--no-tmux-config" {
+			idx++
+			continue
+		}
 		if args[idx] != "--session-env" || idx+1 >= len(args) || !validName(args[idx+1]) {
 			return "", false
 		}

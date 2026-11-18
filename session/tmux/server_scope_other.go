@@ -14,5 +14,5 @@ func HandleDedicatedServerExec() {}
 // existing direct tmux launch on Darwin (and other non-Linux platforms) rather
 // than invoking a Linux-only service-manager command (#2176, #1931).
 func newTmuxServerCommandAfterEnsure(_ error, args ...string) (*exec.Cmd, bool) {
-	return exec.Command("tmux", args...), false
+	return exec.Command("tmux", tmuxArgv(args...)...), false
 }

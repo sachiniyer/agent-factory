@@ -19,9 +19,13 @@ var processExec = syscall.Exec
 
 // WrapCommand builds the shell command handed to tmux. It contains only the af
 // executable path, the selected agent, explicit variable NAMES, and the
-// original pane command; environment values never enter argv.
-func WrapCommand(executable, agent string, extras []string, command string) (string, error) {
-	return wrapCommand(executable, agent, extras, command)
+// original pane command; environment values never enter argv. pins is the
+// credential-mount empty-pin list: names the exec shim re-asserts
+// defined-and-empty immediately before exec, after tmux's default-shell or a
+// tmux config file could have re-set them (#7529 R1). It is nil for every
+// launch that carries no outer runtime's pins.
+func WrapCommand(executable, agent string, extras, pins []string, command string) (string, error) {
+	return wrapCommand(executable, agent, extras, pins, command)
 }
 
 // WrapAccountCommand builds the pane command for an account-scoped agent launch.
@@ -102,13 +106,28 @@ func WrapAgentServerAccountCommand(executable, accountAgent string, extras, agen
 	return strings.Join(quoted, " "), nil
 }
 
-func wrapCommand(executable, agent string, extras []string, command string) (string, error) {
+// wrapCommand writes the shim invocation. argv is
+// [executable, ExecMarker, agent, extrasCount, extras..., pinsCount, pins..., command]
+// with the pins section omitted entirely when empty — the trailing command then
+// sits where launches by an older af left it, and a shim reading either layout
+// tells them apart by length alone (a pins section is always followed by at
+// least its count and the command, so a one-element tail is always a bare
+// command and a longer tail always begins with a count).
+func wrapCommand(executable, agent string, extras, pins []string, command string) (string, error) {
 	normalized, err := NormalizeExtraNames(extras)
+	if err != nil {
+		return "", err
+	}
+	normalizedPins, err := NormalizeExtraNames(pins)
 	if err != nil {
 		return "", err
 	}
 	args := []string{executable, ExecMarker, agent, strconv.Itoa(len(normalized))}
 	args = append(args, normalized...)
+	if len(normalizedPins) > 0 {
+		args = append(args, strconv.Itoa(len(normalizedPins)))
+		args = append(args, normalizedPins...)
+	}
 	args = append(args, command)
 	quoted := make([]string, len(args))
 	for idx, arg := range args {
@@ -234,15 +253,32 @@ func execInvocation(args []string) error {
 		return fmt.Errorf("malformed internal session environment invocation")
 	}
 	// The exact total: a length that merely fits leaves room for an unaccounted
-	// argument, and this argv is what the boundary's whole claim rests on.
-	if len(args) != 2+count+1 {
+	// argument, and this argv is what the boundary's whole claim rests on. Two
+	// layouts exist: [agent, count, extras..., command] from an older af, and
+	// [agent, count, extras..., pinsCount, pins..., command] with the
+	// credential-mount pins section (#7529 R1). A one-element tail is always a
+	// bare command; a longer tail always opens with a count. An OLD shim
+	// handed the new layout fails its length check and refuses — fail-closed.
+	if len(args) <= 2+count {
 		return fmt.Errorf("malformed internal session environment invocation")
+	}
+	rest := args[2+count:]
+	var pins []string
+	if len(rest) > 1 {
+		pinsCount, perr := strconv.Atoi(rest[0])
+		if perr != nil || pinsCount < 0 || len(rest) != pinsCount+2 {
+			return fmt.Errorf("malformed internal session environment invocation")
+		}
+		pins, err = NormalizeExtraNames(rest[1 : 1+pinsCount])
+		if err != nil {
+			return err
+		}
 	}
 	extras, err := NormalizeExtraNames(args[2 : 2+count])
 	if err != nil {
 		return err
 	}
-	command := args[len(args)-1]
+	command := rest[len(rest)-1]
 	filterAgent := agent
 	if GrantAgentForCommand(command, os.Environ(), paneWorkingDirectory()) != agent {
 		// The argv protocol names an agent, but it is not authority by itself: a
@@ -252,12 +288,45 @@ func execInvocation(args []string) error {
 		filterAgent = ""
 	}
 	environ := FilterForCommand(os.Environ(), filterAgent, command, extras)
+	// The pins are re-applied HERE, after filtering and immediately before
+	// exec — the same shape applyAccountScope gives the account boundary. The
+	// container env already holds them defined-and-empty, but tmux's
+	// default-shell (-c chain) and anything else that ran between docker run
+	// and this process could have re-set one; the last point where af still
+	// controls the environment is where the pin belongs (#7529 R1).
+	environ = reapplyEmptyPins(environ, pins)
 	// tmux runs shell-command through the system shell, not the user's login
 	// shell. Keep that POSIX contract: program overrides and injected commands
 	// commonly use assignment prefixes, redirects, and quoting that fish/tcsh
 	// interpret differently.
 	shell := "/bin/sh"
 	return processExec(shell, []string{shell, "-c", command}, environ)
+}
+
+// reapplyEmptyPins forces each pin name defined-and-empty in the child
+// environment, discarding whatever value an intervening program installed.
+// The name is replaced rather than appended beside its old value so a getenv
+// can only read the empty one.
+func reapplyEmptyPins(environ, pins []string) []string {
+	if len(pins) == 0 {
+		return environ
+	}
+	pinned := make(map[string]struct{}, len(pins))
+	for _, name := range pins {
+		pinned[name] = struct{}{}
+	}
+	out := make([]string, 0, len(environ)+len(pins))
+	for _, entry := range environ {
+		name, _, _ := strings.Cut(entry, "=")
+		if _, ok := pinned[name]; name != "" && ok {
+			continue
+		}
+		out = append(out, entry)
+	}
+	for _, name := range pins {
+		out = append(out, name+"=")
+	}
+	return out
 }
 
 // stampPaneRootPid records the pane's identity bundle in pane-scoped user

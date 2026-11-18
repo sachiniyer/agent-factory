@@ -514,6 +514,9 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 		if err := tab.tmux.SetEnvPassthrough(passthrough); err != nil {
 			return fmt.Errorf("restore account swap environment for tab %q: %w", tab.Name, err)
 		}
+		if err := tab.tmux.SetEnvEmpty(sessionEnvEmptyForInstance(i)); err != nil {
+			return fmt.Errorf("restore account swap empty-pin names for tab %q: %w", tab.Name, err)
+		}
 		if err := setTabAccountEnvironment(tab, agent, account); err != nil {
 			return fmt.Errorf("restore account swap environment for tab %q: %w", tab.Name, err)
 		}

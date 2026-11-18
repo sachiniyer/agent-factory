@@ -113,7 +113,8 @@ does not automatically grant that image the built-in agent, GitHub, proxy, or
 CA variables used by local sessions. Only names explicitly listed in the
 global `session_env_passthrough` setting cross this boundary. Docker receives
 each as `-e NAME`, so the value does not appear in the docker command line.
-Container-native `HOME` and `PATH` remain owned by the image. An environment
+On this default boundary the container-native `HOME` and `PATH` remain owned
+by the image; the credential-mount grant below re-asserts both. An environment
 added through `docker.run_args` still has to be built in or named in
 `session_env_passthrough` before the agent pane may inherit it.
 
@@ -231,6 +232,95 @@ user's real home and mounts it only if it exists, so:
     named exception to the boundary, not a relaxation of it: everything else stays
     blocked, so containment is **partial by design**. Turn it on only for images
     you trust with read access to that agent's credential.
+
+    **No classified environment name carries a non-operator value into the
+    agent's exec, and no repo-chosen source picks a program on the way to it.**
+    af classifies every environment name that can substitute for, relocate, or
+    route the mounted credential — API keys and tokens, inline-config names
+    like `OPENCODE_CONFIG_CONTENT`, config roots like `CODEX_HOME` and
+    `OPENCODE_CONFIG_DIR`, endpoints and base URLs, proxies and CA bundles,
+    `HOME`/`XDG_*`, `SHELL`, GitHub token and SSH-agent names — plus the
+    program-choice names `PATH`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`, for every
+    agent in the mount table above. These boundaries enforce it:
+
+    - At `docker run`: `docker.run_args` entries naming one are **refused**
+      before the container starts — including `PATH`, `LD_PRELOAD`, and
+      `LD_LIBRARY_PATH`, which would otherwise let the repo choose the programs
+      af's in-container steps run and the libraries they load. Every
+      credential-classified name the operator did not forward is defined
+      **and empty** in the container environment — so the image's own `ENV`
+      and a workspace loader that fills only unset names find it already set
+      to nothing. (Measured: gemini's workspace `.env` supplied
+      `GEMINI_API_KEY` only when the name was unset; defined-and-empty
+      survived the `.env`.) `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` are
+      re-asserted to the mount's real roots, `SHELL` to `/bin/sh`, and `PATH`
+      to the image's own `Config.Env` `PATH` — so tmux's `default-shell -c`
+      chain, af's own execs, and the agent's bare executable all resolve
+      through the image's binaries, never a repo-added directory.
+    - In af's own `docker exec` steps: every one names `/bin/sh` by absolute
+      path, so the container's `PATH` — whatever it is — cannot hand af a
+      repo-written `sh` to intercept the agent-server launch. Commands
+      *inside* those scripts (`git`, `cat`, `chmod`) resolve through the
+      `PATH` re-asserted above — the image's own binaries.
+    - At the exec itself: the pins also reach the in-container agent-server,
+      whose pane launch re-asserts each one defined-and-empty **immediately
+      before the agent execs** — after tmux's shell hop or a tmux config file
+      could have re-set one.
+    - On tmux: every tmux invocation the agent-server runs carries
+      `-f /dev/null`, so the image's `/etc/tmux.conf` or a `~/.tmux.conf`
+      cannot pick `default-shell`, run hooks, or write session environment
+      either. The one residual is an internal fallback that spawns tmux via
+      `systemd-run --scope` without `-f`; it cannot run inside a container —
+      its marker variable is filtered out and the cgroup namespace is
+      private — so it is listed, not relied on.
+
+    The operator's escape hatch is unchanged: names listed in the global
+    `session_env_passthrough` keep their forwarded value and are never blanked
+    or refused for the operator's own use — and forwarding either spelling of a
+    proxy pair (`HTTP/HTTPS/ALL/NO_PROXY`, either case) claims both: the
+    unforwarded twin is set to the forwarded spelling's value rather than
+    blanked, since a defined-empty twin would cancel the forwarded value in
+    clients that read both spellings while an image-supplied twin would route
+    around the operator's proxy entirely.
+
+    **Migration.** If a working setup legitimately carried one of these names —
+    a corporate `HTTPS_PROXY`, a private CA bundle, a private-cloud
+    `OPENAI_BASE_URL` — af now blanks it and logs a **WARNING once per
+    session** naming each blanked variable (names only, never values) with the
+    remedy: forward the name through `session_env_passthrough`. A repo-set
+    `docker.run_args` entry for one is refused outright with the same remedy in
+    the error.
+
+    **What still trusts the image and the repo.** The pins cover the
+    *environment boundary only*, and only the classified names. The repo chose
+    the image, so the following hops remain trusted:
+
+    - **The image's own binaries, libraries, CA store, and system files** —
+      the agent's own code and anything it loads can read the mounted file
+      directly or redirect where its contents are sent. This includes the
+      image's `Config.Env` `PATH` (which af re-asserts as the container's
+      `PATH`) and any `LD_PRELOAD`/`LD_LIBRARY_PATH` the image configures —
+      both are refused to `docker.run_args` but left at the image's own
+      values, because an image can already ship any binary or library it
+      wants on those paths.
+    - **Workspace configuration, which is file content, not environment** —
+      an `opencode.json`, a `.claude/` or `.gemini/` settings file (a
+      `settings.json` `env` block included), or a loader that force-loads
+      rather than fill-if-unset can configure where the agent sends what it
+      read; af does not audit them, and not every agent's config surface has
+      been measured.
+    - **af-answered folder-trust prompts.** af answers the folder/workspace
+      trust prompts Claude, Codex, and Gemini ask before treating a
+      directory's own settings as authoritative — the workspace is told
+      trusted, so anything those settings then do is inside the same
+      image/repo trust this grant already requires.
+    - **Env names the classification does not cover.** A name that neither
+      substitutes, relocates, nor routes the credential is allowed through;
+      the per-agent reachable surface is pinned by test, but a name an agent
+      adds upstream is discovered on review, not by construction.
+
+    Turn the grant on only for images and repositories you trust to that
+    degree; the credential is what they get.
 
 ### Image requirements (bring-your-own image)
 

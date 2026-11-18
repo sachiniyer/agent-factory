@@ -517,11 +517,13 @@ af agent-server [flags]
 | `--adopt-worktree` | `string` | Bind this existing linked worktree instead of creating one (set by the provisioning daemon when it reattaches an archived workspace) |
 | `--branch` | `string` | Exact git branch for the workspace's worktree (default: derived from branch_prefix and the title) |
 | `--listen` | `string` | HTTP TCP bind address (host:port); :0 lets the kernel pick a free port (default `127.0.0.1:0`) |
+| `--no-tmux-config` |  | Run every tmux invocation with -f /dev/null so the image's /etc/tmux.conf or a ~/.tmux.conf cannot pick programs or write session environment between af's env pins and the agent's exec |
 | `--policy-file` | `string` | Operator policy file written by the provisioning daemon; when set, this server reads no config from the host's af home |
 | `--program` | `string` | Agent program to run (default: the configured default_program) |
 | `--program-resolved` |  | Treat --program as an already-resolved runtime command |
 | `--repo` | `string` | Repository path the workspace runs against (default: current directory) |
 | `--session-env` | `stringSlice` | Additional exact environment variable name an agent may inherit (repeatable) |
+| `--session-env-empty` | `stringSlice` | Environment variable name the pane's exec shim re-asserts defined-and-empty immediately before the agent execs (repeatable; set by the provisioning daemon's credential-mount env pins) |
 | `--title` | `string` | Session title for the workspace (required) |
 
 **Global flags**

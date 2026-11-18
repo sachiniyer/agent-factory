@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"sync/atomic"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -98,13 +99,37 @@ var ErrTmuxTimeout = errors.New("tmux command timed out")
 // (#5295 review).
 var ErrTmuxServerNoAnswer = errors.New("tmux server did not answer the pre-spawn has-session probe")
 
+// noTmuxConfigFiles, when set, makes every tmux invocation this process builds
+// carry -f /dev/null: inside a container the image's /etc/tmux.conf or a user's
+// ~/.tmux.conf could choose programs (default-shell, hooks, run-shell) or write
+// session environment (set-environment -g) between af's credential-mount env
+// pins and the agent's exec. `af agent-server` sets it under --no-tmux-config,
+// which the docker credential-mount path emits (#7529 R1).
+var noTmuxConfigFiles atomic.Bool
+
+// SetNoConfigFiles makes every subsequent tmux invocation skip the system and
+// user config files. The agent-server calls it once, before any session work;
+// inside a serving process it never resets.
+func SetNoConfigFiles(v bool) { noTmuxConfigFiles.Store(v) }
+
+// tmuxArgv returns the argv for a tmux invocation, prepending -f /dev/null
+// when config files are skipped. -f is a client flag: it takes effect only
+// when the call starts the server — exactly when /etc/tmux.conf or ~/.tmux.conf
+// would otherwise be read — and is ignored by calls against a running server.
+func tmuxArgv(args ...string) []string {
+	if !noTmuxConfigFiles.Load() {
+		return args
+	}
+	return append([]string{"-f", "/dev/null"}, args...)
+}
+
 // boundedTmuxCommand builds a tmux command bound to ctx. It runs in its own
 // process group so the deadline tears down the whole tree — tmux plus any child
 // that inherited the capture pipe — rather than SIGKILLing only the tmux client
 // and orphaning a child that still holds the fd (exec.CommandContext's default
 // Cancel kills just the direct process; #610/#769/#856 precedent).
 func boundedTmuxCommand(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "tmux", args...)
+	cmd := exec.CommandContext(ctx, "tmux", tmuxArgv(args...)...)
 	execgroup.Lead(cmd)
 	cmd.WaitDelay = tmuxWaitDelay
 	return cmd

@@ -181,6 +181,11 @@ type InstanceOptions struct {
 	// outer agent-server. Ordinary daemon/local callers leave it empty and read
 	// the current global session_env_passthrough config on each launch.
 	SessionEnvPassthrough []string
+	// SessionEnvEmpty carries the credential-mount pins an outer runtime's
+	// agent-server flags delivered: names the pane's exec shim re-asserts
+	// defined-and-empty immediately before the agent execs, after tmux's
+	// default-shell or anything else that could re-set them (#7529 R1).
+	SessionEnvEmpty []string
 	// ProvisionSessionEnvPassthrough carries a current global-config snapshot to
 	// the runtime factory for this create only. It is deliberately not retained
 	// on the Instance: a removed global grant must disappear from later respawns,
@@ -681,6 +686,11 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
 	opts.SessionEnvPassthrough = normalizedSessionEnv
+	normalizedSessionEnvEmpty, err := sessionenv.NormalizeExtraNames(opts.SessionEnvEmpty)
+	if err != nil {
+		return nil, fmt.Errorf("invalid session environment empty-pin names: %w", err)
+	}
+	opts.SessionEnvEmpty = normalizedSessionEnvEmpty
 	normalizedProvisionEnv, err := sessionenv.NormalizeExtraNames(opts.ProvisionSessionEnvPassthrough)
 	if err != nil {
 		return nil, fmt.Errorf("invalid provisioning session environment pass-through: %w", err)
@@ -879,6 +889,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		UpdatedAt:             t,
 		preResolvedProgram:    resolvedProgramMarker(opts),
 		sessionEnvPassthrough: normalizedSessionEnv,
+		sessionEnvEmpty:       normalizedSessionEnvEmpty,
 		inPlace:               opts.InPlace,
 		branchPrefix:          branchPrefix,
 		branchPrefixResolved:  opts.BranchPrefix != nil,

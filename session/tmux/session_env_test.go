@@ -48,7 +48,7 @@ func forceSessionEnvExecutable(t *testing.T, path string) {
 
 func wrappedProgramForTest(t *testing.T, executable, program string) string {
 	t.Helper()
-	wrapped, err := sessionenv.WrapCommand(executable, sessionenv.AgentForCommand(program), nil, program)
+	wrapped, err := sessionenv.WrapCommand(executable, sessionenv.AgentForCommand(program), nil, nil, program)
 	if err != nil {
 		t.Fatal(err)
 	}

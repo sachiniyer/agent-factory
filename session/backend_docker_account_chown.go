@@ -212,7 +212,7 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 		return nil
 	}
 	out, err := p.docker(dockerShortStepTimeout,
-		"exec", p.containerID, "sh", "-c", `echo "$(id -u):$(id -g)"`)
+		"exec", p.containerID, dockerContainerShell, "-c", `echo "$(id -u):$(id -g)"`)
 	if err != nil {
 		// The id probe is a read-only exec — the only data-root writes are
 		// dockerd's privileged exec bookkeeping, never an unprivileged
@@ -283,7 +283,7 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 		steps = append(steps, fmt.Sprintf("chown -h %s %s", owner, shellQuote(realWorkspace)))
 	}
 	out, err = p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, "sh", "-c", strings.Join(steps, " && "))
+		"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", strings.Join(steps, " && "))
 	if err != nil {
 		return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare a writable HOME and workspace for the image's default user %s: %s: %w",
 			owner, strings.TrimSpace(string(out)), err), dockerOpRootExec)
@@ -322,7 +322,7 @@ func unchownableHome(realHome string) error {
 // made. An unreadable table is an error: callers must not chown without it.
 func (p *dockerProvisioner) readMountTable(home, workspace string) (realHome, realWorkspace, mountinfo string, err error) {
 	out, err := p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, "sh", "-c",
+		"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c",
 		`mkdir -p -- "$1" "$2" && cd -- "$1" && pwd -P && cd -- "$2" && pwd -P && cat /proc/self/mountinfo`,
 		"sh", home, workspace)
 	if err != nil {
@@ -341,7 +341,7 @@ func (p *dockerProvisioner) readMountTable(home, workspace string) (realHome, re
 // unparseable answer is an error the caller must refuse to chown over.
 func (p *dockerProvisioner) readMountTableFor(dir string) (realDir, mountinfo string, err error) {
 	out, err := p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, "sh", "-c",
+		"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c",
 		`mkdir -p -- "$1" && cd -- "$1" && pwd -P && cat /proc/self/mountinfo`,
 		"sh", dir)
 	if err != nil {

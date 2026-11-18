@@ -659,6 +659,27 @@ func AgentAllowlistNames(agent string) []string {
 	return out
 }
 
+// AgentConditionalNames returns every name in the agent's conditional
+// cloud-credential groups — the names a selector unlocks, not the selectors
+// themselves. Container provisioners neutralizing an image environment need
+// the members, not just the keys: a selector pinned empty keeps the group out
+// of the filter's allowlist, but a repo-controlled source naming a member
+// directly is refused on its own merit (#7526).
+func AgentConditionalNames(agent string) []string {
+	set := make(map[string]struct{})
+	for _, group := range conditionalAgentNames[agent] {
+		for name := range group.names {
+			set[name] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // AgentAuthSelectors returns the conditional authentication-mode selectors for
 // one agent. Container provisioners use this narrower list when neutralizing an
 // image environment: another agent's selector cannot affect the selected CLI.
