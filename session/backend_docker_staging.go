@@ -130,7 +130,7 @@ func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 		return "", fmt.Errorf("backend=docker: cannot name the session staging dir: %w", err)
 	}
 	dir := filepath.Join(afHome, dockerStagingDirName, Slugify(p.spec.Title)+"-"+hex.EncodeToString(suffix[:]))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := config.MkdirAllUnderAFHome(dir, 0o700); err != nil {
 		return "", fmt.Errorf("backend=docker: cannot create the session staging dir %s: %w", dir, err)
 	}
 	return dir, nil

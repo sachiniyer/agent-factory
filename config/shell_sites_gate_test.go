@@ -246,6 +246,14 @@ var shellSiteRegistry = map[string][]classifiedSite{
 			"script is a fixed const and the mounted path arrives as the $1 positional parameter, never " +
 			"spliced into the script text (#7563 R6)",
 	}},
+	"session/backend_docker_staging.go:(*dockerProvisioner).verifyWriteTargets": {{
+		class: afAuthored,
+		note: "the cp-fallback mount-table + leaf-symlink probe (#7577 item 2) — the same " +
+			"`cd -- \"$N\" && pwd -P && cat /proc/self/mountinfo` shape readMountTable carries, plus a " +
+			"`test -L` tail. Both destination parents and both leaf paths are af constants " +
+			"(/usr/local/bin, /tmp, the two payload paths) arriving as $1..$4 positional parameters, " +
+			"never spliced into the script text; no operator value reaches this shell",
+	}},
 
 	"session/host_program.go:(hostProgramProber).probePath": {{
 		class: afAuthored,
