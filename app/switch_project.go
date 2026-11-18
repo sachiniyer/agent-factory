@@ -483,9 +483,19 @@ func (m *home) refreshSidebarProjects() {
 
 // refreshSidebarProjectsResolving is refreshSidebarProjects with extra paths
 // resolved in the same phase as its registry read (the rebind reply's follow).
+//
+// A failed snapshot fetch takes the poll's error path (#7180), and so does a
+// LANDED snapshot whose registry read degraded: the fresh list then holds only
+// live session rows (the registry union is empty), and installing it wholesale
+// would drop every registered project with no live sessions — a read that
+// cannot prove absence — and overwrite the merge shadow a later failed-snapshot
+// poll reads from. The merge preserves the registry-backed rows instead, while
+// the landed session snapshot still replaces the session half at once, so the
+// synchronous path's "show that action's result at once" is preserved.
+// TestSyncRefreshDegradedRegistryKeepsRegistryRows pins this funnel.
 func (m *home) refreshSidebarProjectsResolving(extra []string) {
 	projects, registryDegraded, snapshotErr := m.buildProjectListWithSnapshotStatusResolving(extra)
-	if snapshotErr != nil {
+	if snapshotErr != nil || registryDegraded {
 		m.applySidebarProjects(projects, registryDegraded, snapshotErr)
 		return
 	}
