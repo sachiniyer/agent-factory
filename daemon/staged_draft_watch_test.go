@@ -290,6 +290,8 @@ func TestStagedDraftWatchNeverClobbersAnAttentionRequest(t *testing.T) {
 	require.Equal(t, "the agent's own question", reason, "the flag must not overwrite what the agent asked")
 	require.Equal(t, 0, checker.captureCount(),
 		"no capture is spent while another attention request owns the row")
+	require.Nil(t, stagedDraftWatchEntry(manager, key),
+		"and nothing is marked due while the row is owned — the tick after it frees re-arms")
 
 	_, cleared := inst.ClearAttention(time.Time{})
 	require.True(t, cleared)
@@ -397,28 +399,38 @@ func TestStagedDraftFlagNeverBlocksUnderTheObservationFence(t *testing.T) {
 	require.True(t, entry.due, "the under-fence feed only records that the flag is due")
 	require.False(t, inst.HasAttention(), "nothing may be raised under the fence")
 
-	// The deferred raise queues behind the send's whole guarded section —
-	// flagging a condition the send is about to change would be a lie — so it
-	// only completes after the send lets the op lock go.
+	// The deferred raise no longer queues behind the send at all: the op lock
+	// is TryLock'd, so the contended flush RETURNS at once — the due mark
+	// stays, owed to a later tick — instead of parking the poll behind the
+	// send's whole guarded section.
 	flushDone := make(chan struct{})
 	go func() {
 		manager.raiseDueStagedDraftFlag(repoID, key, inst)
 		close(flushDone)
 	}()
+	select {
+	case <-flushDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the deferred raise must return on contention, not block behind the send")
+	}
+	require.True(t, entry.due, "a contended flush keeps the due mark for a later tick")
+	require.False(t, inst.HasAttention())
+
 	close(releaseSend)
 	select {
 	case <-sendDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the automated send stayed blocked after the fence was free")
 	}
-	select {
-	case <-flushDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the deferred flag raise stayed blocked after the op lock was free")
-	}
+
+	// The send superseded the due mark: its own attempt record moved the
+	// verdict, so the next tick drops the open watch rather than flagging a
+	// send that is no longer sent-unverified.
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
 	require.False(t, inst.HasAttention(),
-		"the send superseded the due mark — re-validation must refuse to flag it")
-	require.False(t, entry.due, "a refused due mark is consumed")
+		"the send superseded the due mark — a moved verdict must never flag")
+	require.Nil(t, stagedDraftWatchEntry(manager, key),
+		"a send whose verdict moved off sent-unverified retires its open watch")
 
 	// And the deferred raise is still the working path: re-qualify and the
 	// flag lands on the next tick.
@@ -431,6 +443,54 @@ func TestStagedDraftFlagNeverBlocksUnderTheObservationFence(t *testing.T) {
 	feedStagedDraftTick(manager, repoID, key, inst, checker)
 	require.True(t, inst.HasAttention(), "the deferred raise lands the flag after the race")
 	require.Contains(t, inst.Attention().Reason, "still unsubmitted in the composer")
+}
+
+// The two refusal classes, pinned separately: contention (the op lock is
+// busy) KEEPS the due mark — the flag is still owed, so a later tick lands
+// it — while a raise refused because the condition it re-validates moved
+// CONSUMES the mark: a newer attempt, a delivered verdict, a Running turn,
+// or another attention request owning the row each mean this due mark is
+// stale, and the next qualifying tick re-marks from the state that is true
+// then (#7547).
+func TestStagedDraftFlushConsumesTheDueMarkWhenTheConditionMoved(t *testing.T) {
+	for name, move := range map[string]func(t *testing.T, inst *session.Instance, attemptAt time.Time){
+		"a newer attempt supersedes the send": func(t *testing.T, inst *session.Instance, _ time.Time) {
+			require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, time.Now()))
+		},
+		"the verdict moved to delivered": func(t *testing.T, inst *session.Instance, _ time.Time) {
+			require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, time.Now()))
+		},
+		"the session went back to Running": func(t *testing.T, inst *session.Instance, _ time.Time) {
+			require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveRunning)))
+		},
+		"another attention request owns the row": func(t *testing.T, inst *session.Instance, attemptAt time.Time) {
+			_, err := inst.SetAttention("the agent's own question", attemptAt)
+			require.NoError(t, err)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			attemptAt := time.Now().Add(-time.Minute)
+			manager, repoID, _, inst := stagedDraftFixture(t, attemptAt)
+			key := stagedDraftKey(repoID, inst)
+			manager.pausedMu.Lock()
+			manager.stagedDraftWatches[key] = &stagedDraftWatch{
+				attemptAt: attemptAt, since: attemptAt, due: true, dueWhy: "test"}
+			manager.pausedMu.Unlock()
+
+			move(t, inst, attemptAt)
+			manager.raiseDueStagedDraftFlag(repoID, key, inst)
+
+			entry := stagedDraftWatchEntry(manager, key)
+			require.NotNil(t, entry, "the watch itself stays — only the stale due mark is consumed")
+			require.False(t, entry.due, "a state-change refusal consumes the due mark")
+			if name == "another attention request owns the row" {
+				require.Equal(t, "the agent's own question", inst.Attention().Reason,
+					"the flag must never overwrite what the agent asked")
+			} else {
+				require.False(t, inst.HasAttention(), "a moved condition must not flag")
+			}
+		})
+	}
 }
 
 // The deferred flush must never block the poll on the op lock: on contention
