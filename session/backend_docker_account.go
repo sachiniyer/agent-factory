@@ -296,7 +296,7 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 		}
 		if reason, refused := accountDockerProgramChoiceReason(name); refused {
 			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s",
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: set it in the image's ENV instead, or have the operator forward it through session_env_passthrough",
 				name, agent, reason)
 		}
 		return nil

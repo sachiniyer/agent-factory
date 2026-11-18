@@ -334,11 +334,17 @@ func TestDockerAccountRunArgs_ProgramChoiceReasonNamesTheMechanism(t *testing.T)
 	err := validateAccountDockerRunArgs([]string{"-e", "PATH=/workspace/.x"}, "codex")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "which program", "PATH's refusal must name the program-choosing mechanism")
+	// #7571 review R9: the refusal must name the remedy too — the image's
+	// ENV can carry the value the repo wanted, or the operator can forward
+	// their own through session_env_passthrough.
+	require.Contains(t, err.Error(), "image's ENV", "PATH's refusal must name the image-ENV remedy")
+	require.Contains(t, err.Error(), "session_env_passthrough", "PATH's refusal must name the operator's passthrough remedy")
 
 	for _, name := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH"} {
 		err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, "codex")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "library", "%s's refusal must name the library-injection mechanism", name)
+		require.Contains(t, err.Error(), "session_env_passthrough", "%s's refusal must name the remedy too", name)
 	}
 }
 

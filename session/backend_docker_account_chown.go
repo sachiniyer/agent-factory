@@ -268,9 +268,16 @@ func (p *dockerProvisioner) reportSkippedMount(s skippedMount, owner string) err
 	if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
 		probe += ": " + trimmed
 	}
+	// The mount named here is the CONTAINER path mountinfo reports — the
+	// mount table cannot recover a host source, so the remedy is phrased per
+	// origin: a host bind can be chowned on the host or dropped from
+	// docker.run_args, while a named or image volume has no run_args entry
+	// and no host path — its content must be made writable (a helper
+	// container chown, or ownership fixed in the image) or the mount
+	// dropped (#7571 review R9).
 	return dockerStepErr(fmt.Errorf(
-		"backend=docker: refusing to prepare the docker session %s %s: it is inside the mount %s, which af must not chown or create through — and the session's user %s cannot write it as mounted (%s), so the clone and the agent's own writes would only fail with \"Permission denied\" later; make the mounted directory writable by %s — e.g. chown its source to that user where it lives — or remove the mount from docker.run_args",
-		s.kind, s.real, s.mp, owner, probe, owner), dockerOpLocal)
+		"backend=docker: refusing to prepare the docker session %s %s: it is inside the mount %s, which af must not chown or create through — and the session's user %s cannot write it as mounted (%s), so the clone and the agent's own writes would only fail with \"Permission denied\" later; make the mounted directory writable by %s — the remedy depends on where the mount came from: for a host bind, chown the mounted host directory to that user or remove the bind from docker.run_args; for a named or image volume, chown the volume's content to that user (for example `docker run --rm -v <volume>:/d alpine chown -R %s /d`) or fix ownership in the image; or drop the mount",
+		s.kind, s.real, s.mp, owner, probe, owner, owner), dockerOpLocal)
 }
 
 // prepareNonAccountUser mirrors prepareAccountUser for a session with no
