@@ -126,6 +126,16 @@ func (d InstanceData) WithoutIdleEvidence() InstanceData {
 	return d
 }
 
+// LastPromptDelivery returns the durable prompt-send evidence the daemon's
+// staged-draft watch gates on (#7545): the last attempt's instant and its
+// recorded delivery status. A zero time means no send is on record — nothing
+// the watch could ever bind to.
+func (i *Instance) LastPromptDelivery() (time.Time, PromptDeliveryStatus) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.lastPromptAttemptAt, i.lastPromptDeliveryStatus
+}
+
 // RecordPromptAttempt stores the observation made by an actual prompt send.
 // attemptedAt must be captured before delivery begins, so a pane observation
 // racing the send can still be ordered after it. Invalid local values normalize

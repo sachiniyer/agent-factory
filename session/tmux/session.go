@@ -417,6 +417,16 @@ type TmuxSession struct {
 	// text is not enough to claim that a prior delivery was stranded (#2225).
 	// Protected by inputMu; it never gates delivery.
 	lastPastedTail string
+	// stagedDraft is the bound evidence of the most recent submit attempt —
+	// the strings the Enter-boundary frame proved this send introduced
+	// (boundEvidence) — kept so the daemon's staged-draft recheck (#7545) can
+	// ask whether that same evidence still sits in an idle composer's live
+	// draft. It is a Pointer so the status poll reads it without inputMu: a
+	// recheck concurrent with a send sees at worst a one-tick skew the next
+	// poll corrects, never a deadlock on the send path. Memory-only (#7545
+	// decision): a daemon restart forgets sends it did not watch rather than
+	// putting prompt-derived text on a durable row.
+	stagedDraft atomic.Pointer[stagedDraftEvidence]
 	// paneRootEvidence is the most recently resolved (pid, StartID) pane-root
 	// identity — stamped by PaneRootProcess at every launch and reattach
 	// boundary that proves a root stands behind the name. If the session then

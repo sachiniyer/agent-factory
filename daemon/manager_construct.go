@@ -163,6 +163,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		taskRunTurnWatches:        make(map[string]*taskRunTurnWatchEntry),
 		unverifiedSendWatches:     make(map[string]map[string]*unverifiedSendWatch),
 		pendingSwapNoticeWatches:  make(map[string]*pendingSwapNoticeWatch),
+		stagedDraftWatches:        make(map[string]*stagedDraftWatch),
 		instanceOpLocks:           make(map[string]*sync.Mutex),
 		pausedPolls:               make(map[string]map[string]time.Time),
 		taskRunProbeDue:           make(map[string]time.Time),

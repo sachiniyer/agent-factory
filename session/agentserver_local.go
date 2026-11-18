@@ -355,6 +355,17 @@ func (s *localAgentServer) SendPrompt(prompt string) error {
 	return err
 }
 
+// BoundDraftStillStaged forwards the staged-draft recheck (#7545) to the
+// backend when it can read bound composer evidence — the local tmux backend
+// can; anything else reports StagedDraftNoEvidence so the daemon's watch
+// never arms on an answer it cannot make.
+func (s *localAgentServer) BoundDraftStillStaged() (StagedDraftRead, string) {
+	if checker, ok := s.inst.currentBackend().(stagedDraftBackend); ok {
+		return checker.BoundDraftStillStaged(s.inst)
+	}
+	return StagedDraftNoEvidence, "the backend cannot read bound composer evidence"
+}
+
 func (s *localAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error) {
 	// Adoption, counted before the write (#3865). SendPrompt above routes through
 	// here, so this is the one bump for both.

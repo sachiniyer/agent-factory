@@ -50,6 +50,35 @@ type PromptDeliveryReporter interface {
 	SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error)
 }
 
+// StagedDraftRead is the closed verdict of the staged-draft recheck (#7545) —
+// where a sent-unverified send's bound composer evidence sits in the pane now.
+// It is an alias of the tmux-layer type so the read can cross the runtime
+// boundary without a second vocabulary.
+type StagedDraftRead = tmux.StagedDraftRead
+
+const (
+	StagedDraftNoEvidence = tmux.StagedDraftNoEvidence
+	StagedDraftUnreadable = tmux.StagedDraftUnreadable
+	StagedDraftGone       = tmux.StagedDraftGone
+	StagedDraftSubmitted  = tmux.StagedDraftSubmitted
+	StagedDraftStaged     = tmux.StagedDraftStaged
+)
+
+// StagedDraftChecker is the additive capability a runtime implements when it
+// can re-read where the last send's bound composer evidence sits (#7545). The
+// local tmux runtime implements it; off-box runtimes cannot read a sandbox's
+// composer and do not — the daemon's staged-draft watch then never arms for
+// them, which is the honest answer the capability exists to give.
+//
+// The call runs under the instance's observation-settlement fence on the
+// daemon's status poll: an implementation must be bounded (the local read is
+// an atomic load plus one capture-pane subprocess) and must never acquire a
+// session-operation lock — the send path holds those while it waits on this
+// same fence.
+type StagedDraftChecker interface {
+	BoundDraftStillStaged() (StagedDraftRead, string)
+}
+
 // SendPromptWithStatus uses a runtime's observation when available. A legacy
 // runtime that only implements SendPrompt is honest uncertainty, not delivery:
 // nil error proves the command completed, not that the pane received the text.

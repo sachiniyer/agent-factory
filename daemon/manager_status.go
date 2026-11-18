@@ -477,6 +477,7 @@ func (m *Manager) RefreshStatuses() {
 	m.sweepPausedPollState()
 	m.sweepTaskRunTurnWatches()
 	m.sweepUnverifiedSendWatches()
+	m.sweepStagedDraftWatches()
 
 	// Worktree presence first, on its own bounded fan-out (#5102): it is a
 	// filesystem probe, not a tmux one, and running it inline here would let one
@@ -700,6 +701,18 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// observation lock. It retries transport I/O retired before return; the
 	// generation below fences daemon-owned side effects if replacement lands after
 	// that final transport check, while the epoch fences Instance mutations.
+	// The staged-draft flag (#7545) is raised after the observation fence
+	// releases — lock-order hygiene, not deadlock prevention: the raise
+	// TryLocks the session op lock and the repo start lock, so even under
+	// the fence it could not park the sweep behind a sendPromptGuarded that
+	// holds the op lock while it waits on this fence — it would just fail
+	// the TryLock and keep the due mark (Codex #7547). noteStagedDraftEvidence
+	// below therefore only RECORDS a due flag, and this defer — registered
+	// before the fence's own release defer, so LIFO runs it after release —
+	// lands it under the opLock→repoStartLock order every other attention
+	// write uses. On every early return before the fence is taken the mark
+	// simply carries to the next tick.
+	defer func() { m.raiseDueStagedDraftFlag(repoID, key, instance) }()
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
 	defer releaseObservationSettlement()
 	// Same request-start bound as the paused-path feed below: the pane is
@@ -890,6 +903,16 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			settlementCheckpoint = true
 		}
 	}
+
+	// The staged-draft recheck (#7545) reads this tick's SETTLED liveness, so
+	// it feeds after the resolution above: a row the poll just found Ready
+	// with a send still recorded sent-unverified may hold its bound draft in
+	// the idle composer, and the watch flags it for attention once the staged
+	// reading has been sustained. A mid-turn Running never reaches it — that
+	// is the #4622 exclusion. It is fed only here, never on the paused path:
+	// its verdict needs its own bounded capture, and a user's attach must not
+	// share the pane with a daemon probe.
+	m.noteStagedDraftEvidence(repoID, key, instance, as)
 
 	// The run-marker flip is durable on its own: a held gate releasing on a
 	// Ready→Ready observation moves no liveness, and with on_complete=keep
