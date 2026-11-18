@@ -104,7 +104,23 @@ func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(accountDir, ".config"), 0o700); err != nil {
 		t.Fatalf("seed account config dir: %v", err)
 	}
-	writeFile(t, filepath.Join(accountDir, ".config", "settings.json"), "LEGIT\n", 0o600)
+	// 0644 so the (possibly non-root) test process can still read it after
+	// the account dir is re-owned to 65534:65534 — account resolution runs
+	// host-side in this process.
+	writeFile(t, filepath.Join(accountDir, ".config", "settings.json"), "LEGIT\n", 0o644)
+	// The fixture's directories must stay traversable by the test process
+	// once they change owner: the runtime-boundary verify walks the account
+	// directory HOST-side (verifyAccountDeviceResidue) before
+	// prepareAccountUser runs, and a 0700 directory owned by 65534 would
+	// fail that walk for a non-root test uid — ending the test at the
+	// boundary verify, never at the chown guard. Mode 0755 keeps the owner
+	// distinct (the probe's signal) while leaving read+traversal open to
+	// every uid.
+	for _, d := range []string{accountDir, filepath.Join(accountDir, ".config")} {
+		if err := os.Chmod(d, 0o755); err != nil {
+			t.Fatalf("chmod fixture dir %s: %v", d, err)
+		}
+	}
 	// Make the account directory owned by a non-root uid so the in-container
 	// stat probe reports that uid and the chown of /workspace would re-own
 	// the operator's root:root host directory to it (the bug).
@@ -121,6 +137,19 @@ func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fixture chown of the account dir through a root container failed: %v\n%s", err, out)
 	}
+	// Restore ownership to the test uid the same way, so t.TempDir cleanup
+	// can remove the fixture — a non-root process cannot unlink inside a
+	// directory owned by someone else.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if out, err := exec.CommandContext(ctx, "docker", "run", "--rm",
+			"-v", accountDir+":/af-account-fixture",
+			baseImage, "chown", "-R",
+			fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()), "/af-account-fixture").CombinedOutput(); err != nil {
+			t.Logf("cleanup: restoring fixture ownership failed (TempDir removal may fail): %v\n%s", err, out)
+		}
+	})
 	// A bind source resolves on the DAEMON host: when the engine is not local
 	// the chown landed somewhere this test cannot see, and the owner check
 	// below would measure nothing. Verify the fixture actually took before
@@ -218,15 +247,14 @@ func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 
 	if err != nil {
 		// Under the R6 contract, the provision refuses at the chown-guard
-		// step: /workspace is inside a host bind the daemon's inspect record
-		// confirms, and the account user (uid 65534) cannot write a
+		// step: /workspace sits inside a mount af must not chown or create
+		// through, and the account user (uid 65534) cannot write the
 		// root:root directory that was NOT re-owned. The session's ERROR
-		// must name the mount, its host source, and the remedy — the
-		// operator should never be handed a bare clone "Permission denied"
-		// to debug.
-		for _, want := range []string{hostWorkspace, "/workspace", "bind", "chown"} {
+		// must name the mount and the remedy — the operator should never be
+		// handed a bare clone "Permission denied" to debug.
+		for _, want := range []string{"/workspace", "writable", "docker.run_args"} {
 			if !strings.Contains(err.Error(), want) {
-				t.Fatalf("an unwritable host bind must refuse with %q named in the error; got: %v", want, err)
+				t.Fatalf("an unwritable mount must refuse with %q named in the error; got: %v", want, err)
 			}
 		}
 		t.Logf("provision refused at the chown guard, naming the mount and the remedy: %v", err)
