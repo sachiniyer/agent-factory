@@ -41,13 +41,18 @@ var pacedFlights = struct {
 //
 // work owns everything it opens for its whole run, so a file it opened stays
 // open across the steps that read it; it must close all of it before it
-// returns, since an abandoned flight returns after its caller has gone. As
+// returns, since an abandoned flight returns after its caller has gone. stat
+// is the regularFileStat seam loaded before the flight's goroutine starts, as
+// openPath's is loaded in ReadFileWith's caller (#7539): a flight that
+// outlives its test stats files with the seam it began with. As
 // with Bounded, question and key name what work decides and about what, only
 // a caller asking the same question of the same key joins a flight, and an
 // answer of a type other than T is an error, never a panic.
-func Paced[T any](question, key string, work func(step func()) (T, error)) (T, error) {
+func Paced[T any](question, key string, work func(step func(), stat RegularStatFunc) (T, error)) (T, error) {
 	var zero T
-	got, err := runPaced(question+"\x00"+key, question, key, func(step func()) (any, error) { return work(step) })
+	got, err := runPaced(question+"\x00"+key, question, key, func(step func(), stat RegularStatFunc) (any, error) {
+		return work(step, stat)
+	})
 	if err != nil {
 		return zero, err
 	}
@@ -58,7 +63,7 @@ func Paced[T any](question, key string, work func(step func()) (T, error)) (T, e
 	return answer, nil
 }
 
-func runPaced(id, question, key string, work func(step func()) (any, error)) (any, error) {
+func runPaced(id, question, key string, work func(step func(), stat RegularStatFunc) (any, error)) (any, error) {
 	pacedFlights.Lock()
 	if active := pacedFlights.byKey[id]; active != nil {
 		if active.timedOut {
@@ -70,11 +75,12 @@ func runPaced(id, question, key string, work func(step func()) (any, error)) (an
 		return waitPaced(id, question, key, active)
 	}
 	flight := &pacedFlight{done: make(chan struct{}), clock: flightClocks.load()}
+	stat := regularFileStat.load()
 	flight.lastStep.Store(flight.clock.Now().UnixNano())
 	pacedFlights.byKey[id] = flight
 	pacedFlights.Unlock()
 	go func() {
-		res, err := work(func() { flight.lastStep.Store(flight.clock.Now().UnixNano()) })
+		res, err := work(func() { flight.lastStep.Store(flight.clock.Now().UnixNano()) }, stat)
 		pacedFlights.Lock()
 		flight.res, flight.err = res, err
 		if pacedFlights.byKey[id] == flight {

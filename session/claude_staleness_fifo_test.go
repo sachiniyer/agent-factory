@@ -125,7 +125,7 @@ func TestOpenClaudeTranscript_RefusesAFIFOWithoutWedging(t *testing.T) {
 	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
 	unblockFifoOnCleanup(t, fifo)
 
-	file, info, err := requireOpenClaudeTranscriptWithinBound(t, pacedCarryWalk(nil), fifo)
+	file, info, err := requireOpenClaudeTranscriptWithinBound(t, pacedCarryWalk(nil, nil), fifo)
 	require.Error(t, err, "a FIFO at the transcript path is refused")
 	require.ErrorContains(t, err, "not a regular file", "the refusal names the non-regular file")
 	var nonRegular *fsprobe.NonRegularError
@@ -149,7 +149,7 @@ func TestOpenClaudeTranscript_RefusesALeafSymlinkWithoutFollowing(t *testing.T) 
 	link := filepath.Join(dir, "transcript.jsonl")
 	require.NoError(t, os.Symlink(target, link))
 
-	file, _, err := requireOpenClaudeTranscriptWithinBound(t, pacedCarryWalk(nil), link)
+	file, _, err := requireOpenClaudeTranscriptWithinBound(t, pacedCarryWalk(nil, nil), link)
 	require.Error(t, err, "O_NOFOLLOW refuses a symlink at the leaf")
 	require.ErrorIs(t, err, syscall.ELOOP, "the open fails with ELOOP the way O_NOFOLLOW specifies")
 	require.Nil(t, file, "the symlink must not be followed into the target")
@@ -165,7 +165,7 @@ func TestOpenClaudeTranscript_OpensARegularFile(t *testing.T) {
 	path := filepath.Join(dir, "transcript.jsonl")
 	require.NoError(t, os.WriteFile(path, []byte("{\"base\":1}\n"), 0o600))
 
-	file, info, err := requireOpenClaudeTranscriptWithinBound(t, pacedCarryWalk(nil), path)
+	file, info, err := requireOpenClaudeTranscriptWithinBound(t, pacedCarryWalk(nil, nil), path)
 	require.NoError(t, err)
 	require.NotNil(t, file)
 	defer file.Close()
@@ -196,8 +196,8 @@ func TestClaudeTranscriptExtends_AFIFOAtTheLongerPathDoesNotWedgTheFlight(t *tes
 
 	// First call: the FIFO is answered within the bound, as a look that did
 	// not happen — the guarded open refuses the non-regular file with
-	// *fsprobe.NonRegularError, and unlookedOnly propagates it, so the verdict
-	// is unverified, never that the copies diverge (#7527).
+	// *fsprobe.NonRegularError, and the comparison propagates it, so the
+	// verdict is unverified, never that the copies diverge (#7527, #7539).
 	extends, err := requireClaudeTranscriptExtendsWithinBound(t, longer, shorter)
 	require.False(t, errors.Is(err, fsprobe.ErrProbeTimedOut),
 		"a FIFO at the open path must not time the flight out (it is answered within the bound): %v", err)

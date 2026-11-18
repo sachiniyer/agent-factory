@@ -9,9 +9,12 @@ import (
 // production OpenRegular, or a test's stand-in for a wedged mount (#7221
 // review R4). OpenRegular is the same guarded open every sibling open inside
 // a bounded flight carries, so a FIFO or symlink planted at the path is
-// answered within the bound rather than wedging the flight's goroutine.
-var openPath = newSeam(func(path string) (*os.File, error) {
-	file, _, err := OpenRegular(path)
+// answered within the bound rather than wedging the flight's goroutine. The
+// regularFileStat seam is handed in too: ReadFileWith loads it in the caller,
+// so a flight that outlives its test stats with the seam it began with
+// (#7539).
+var openPath = newSeam(func(path string, stat RegularStatFunc) (*os.File, error) {
+	file, _, err := OpenRegular(path, stat)
 	return file, err
 })
 
@@ -36,11 +39,12 @@ var readFileFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 // closes the file when read returns, which for an abandoned flight is after
 // the caller has gone.
 func ReadFileWith(path string, read func(*os.File) (any, error)) (any, error) {
-	open := openPath.load() // in the caller, as ReadDir's
+	open := openPath.load()        // in the caller, as ReadDir's
+	stat := regularFileStat.load() // loaded with it, before the flight starts (#7539)
 	return runBounded(path, readFileFlights, "file read",
 		"the filesystem did not answer the read",
 		func() (any, error) {
-			file, err := open(path)
+			file, err := open(path, stat)
 			if err != nil {
 				return nil, err
 			}

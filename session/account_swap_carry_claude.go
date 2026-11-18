@@ -96,8 +96,8 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 // runs in a paced flight (#7383).
 func statClaudeCopy(root carryRoot, project, id string) (*claudeCopy, error) {
 	rel := filepath.Join(project, id+".jsonl")
-	return fsprobe.Paced("Claude transcript copy lookup", root.key()+"\x00"+rel, func(step func()) (*claudeCopy, error) {
-		file, info, err := openCarryArtifact(pacedCarryWalk(step), root, rel)
+	return fsprobe.Paced("Claude transcript copy lookup", root.key()+"\x00"+rel, func(step func(), stat fsprobe.RegularStatFunc) (*claudeCopy, error) {
+		file, info, err := openCarryArtifact(pacedCarryWalk(step, stat), root, rel)
 		if err != nil {
 			return nil, err
 		}
@@ -150,16 +150,17 @@ func liveClaudeCopy(root carryRoot, id string, copies []claudeCopy) (string, str
 
 // claudeCopyExtends reports whether the file at longer, beneath longRoot,
 // begins with every byte of the file at shorter, beneath shortRoot: the
-// longer one is the shorter one with turns appended. A file that is not there,
-// or is not a plain file, extends nothing; one file under two names extends
-// itself. The comparison runs in a paced flight whose bound is per read
-// (#7383), and err is a lookup in it that did not answer, or failed: then af
-// could not tell.
+// longer one is the shorter one with turns appended. Only two opened regular
+// files answer the question: an open refused on either — absent, a link, not
+// a plain file — is a look that did not happen, never evidence the copies
+// diverge (#7539). One file under two names extends itself. The comparison
+// runs in a paced flight whose bound is per read (#7383), and err is a lookup
+// in it that did not answer, or failed: then af could not tell.
 func claudeCopyExtends(longRoot carryRoot, longer string, shortRoot carryRoot, shorter string) (bool, error) {
 	return fsprobe.Paced("Claude transcript copy comparison",
 		longRoot.key()+"\x00"+longer+"\x00"+shortRoot.key()+"\x00"+shorter,
-		func(step func()) (bool, error) {
-			return claudeCopyExtendsWith(pacedCarryWalk(step), longRoot, longer, shortRoot, shorter)
+		func(step func(), stat fsprobe.RegularStatFunc) (bool, error) {
+			return claudeCopyExtendsWith(pacedCarryWalk(step, stat), longRoot, longer, shortRoot, shorter)
 		})
 }
 
@@ -167,12 +168,12 @@ func claudeCopyExtends(longRoot carryRoot, longer string, shortRoot carryRoot, s
 func claudeCopyExtendsWith(p carryPace, longRoot carryRoot, longer string, shortRoot carryRoot, shorter string) (bool, error) {
 	long, longInfo, err := openCarryArtifact(p, longRoot, longer)
 	if err != nil {
-		return false, unlookedOnly(err)
+		return false, err
 	}
 	defer long.Close()
 	short, shortInfo, err := openCarryArtifact(p, shortRoot, shorter)
 	if err != nil {
-		return false, unlookedOnly(err)
+		return false, err
 	}
 	defer short.Close()
 	if os.SameFile(longInfo, shortInfo) {
@@ -183,19 +184,9 @@ func claudeCopyExtendsWith(p carryPace, longRoot carryRoot, longer string, short
 	}
 	same, err := carryPrefixMatches(p, long, short, shortInfo.Size())
 	if err != nil {
-		return false, unlookedOnly(err)
+		return false, err
 	}
 	return same, nil
-}
-
-// unlookedOnly is err when it is a look that did not happen
-// (carryLookupUnlooked — a timeout, a failed syscall, or the guarded open's
-// non-regular refusal, #7527), and nil for an answer such as absence.
-func unlookedOnly(err error) error {
-	if carryLookupUnlooked(err) {
-		return err
-	}
-	return nil
 }
 
 // claudeTargetReason refuses a carry whose new account already holds the
@@ -213,7 +204,9 @@ func (c *conversationCarry) claudeTargetReason() string {
 		id: c.id, projects: append([]string(nil), c.claudeProjects...)}
 	reason, err := fsprobe.Paced("Claude target copy lookup",
 		in.srcRoot.key()+"\x00"+in.dstRoot.key()+"\x00"+in.transcript+"\x00"+strings.Join(in.projects, "\x00"),
-		func(step func()) (string, error) { return judgeClaudeTarget(pacedCarryWalk(step), in), nil })
+		func(step func(), stat fsprobe.RegularStatFunc) (string, error) {
+			return judgeClaudeTarget(pacedCarryWalk(step, stat), in), nil
+		})
 	if err != nil {
 		return carryTargetUncheckedReason
 	}

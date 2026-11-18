@@ -429,12 +429,15 @@ func scanCodexRolloutForPrompt(file *os.File, path, prompt string, fromOffset, l
 var codexRolloutOpenStandIn atomic.Pointer[func(string) (*os.File, error)]
 
 // codexRolloutBoundedOpen is the open a bounded rollout read runs inside its
-// bound.
+// bound. The regularFileStat seam is loaded here, in the caller, before the
+// read's flight starts, as openPath's seam is loaded in ReadFileWith's caller
+// (#7539): a flight that outlives its test stats with the seam it began with.
 func codexRolloutBoundedOpen() func(string) (*os.File, error) {
 	if open := codexRolloutOpenStandIn.Load(); open != nil {
 		return *open
 	}
-	return openCodexRollout
+	stat := fsprobe.RegularStat()
+	return func(path string) (*os.File, error) { return openCodexRollout(path, stat) }
 }
 
 // openCodexRollout opens a Codex rollout — fsprobe.OpenRegular, the one
@@ -443,8 +446,8 @@ func codexRolloutBoundedOpen() func(string) (*os.File, error) {
 // there from hanging it, and a non-regular file swapped in after the listing
 // is refused with *fsprobe.NonRegularError; all are no-ops on the regular
 // file a real rollout is.
-func openCodexRollout(path string) (*os.File, error) {
-	file, _, err := fsprobe.OpenRegular(path)
+func openCodexRollout(path string, stat fsprobe.RegularStatFunc) (*os.File, error) {
+	file, _, err := fsprobe.OpenRegular(path, stat)
 	if err != nil {
 		return nil, fmt.Errorf("open Codex rollout %s: %w", path, err)
 	}

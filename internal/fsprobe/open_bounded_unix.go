@@ -16,8 +16,8 @@ import (
 // rather than wedging the flight's work goroutine in openat forever and
 // latching its registry entry against every later ask (#7383). The flags are
 // no-ops on the regular file a real transcript is.
-func OpenRegular(path string) (*os.File, os.FileInfo, error) {
-	return openRegular(path, nil)
+func OpenRegular(path string, stat RegularStatFunc) (*os.File, os.FileInfo, error) {
+	return openRegular(path, nil, stat)
 }
 
 // OpenRegularPaced is OpenRegular under a paced flight's bound: step is called
@@ -25,12 +25,13 @@ func OpenRegular(path string) (*os.File, os.FileInfo, error) {
 // the flight's per-syscall bound restarts between the open and the stat rather
 // than covering both under the open's window (#7527 review — a filesystem
 // where each answers inside the bound but together exceed it must still
-// answer, never time out into an unverified verdict).
-func OpenRegularPaced(path string, step func(op string)) (*os.File, os.FileInfo, error) {
-	return openRegular(path, step)
+// answer, never time out into an unverified verdict). stat is the
+// RegularStatFunc the flight was handed when it began (#7539).
+func OpenRegularPaced(path string, step func(op string), stat RegularStatFunc) (*os.File, os.FileInfo, error) {
+	return openRegular(path, step, stat)
 }
 
-func openRegular(path string, step func(op string)) (*os.File, os.FileInfo, error) {
+func openRegular(path string, step func(op string), stat RegularStatFunc) (*os.File, os.FileInfo, error) {
 	if step != nil {
 		step("open")
 	}
@@ -41,7 +42,7 @@ func openRegular(path string, step func(op string)) (*os.File, os.FileInfo, erro
 	if step != nil {
 		step("fstat")
 	}
-	info, err := RegularFileInfo(file, path)
+	info, err := RegularFileInfo(file, path, stat)
 	if err != nil {
 		return nil, nil, err
 	}

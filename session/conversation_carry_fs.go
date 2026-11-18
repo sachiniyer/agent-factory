@@ -60,12 +60,19 @@ var carryLookupStandIn atomic.Pointer[func(op, path string)]
 type carryPace struct {
 	step    func()
 	standIn *func(op, path string)
-	loaded  bool
+	// stat is the regularFileStat seam the flight was handed when it began —
+	// loaded before the flight's goroutine started, so a flight that outlives
+	// its test stats with the seam it began with (#7539). The zero pace's nil
+	// stat loads the seam where openCarryFileAt runs, which for an unpaced
+	// walk is the caller's own goroutine.
+	stat   fsprobe.RegularStatFunc
+	loaded bool
 }
 
-// pacedCarryWalk is the pace of a walk that reports each syscall to step.
-func pacedCarryWalk(step func()) carryPace {
-	return carryPace{step: step, standIn: carryLookupStandIn.Load(), loaded: true}
+// pacedCarryWalk is the pace of a walk that reports each syscall to step and
+// stats regular files through the flight's stat.
+func pacedCarryWalk(step func(), stat fsprobe.RegularStatFunc) carryPace {
+	return carryPace{step: step, standIn: carryLookupStandIn.Load(), stat: stat, loaded: true}
 }
 
 // at marks op on path, before the syscall.
@@ -135,6 +142,21 @@ func carryFailureAt(reason string, err error) error {
 		return carryFailure(symlinkCarryReason(path), err)
 	}
 	return carryFailure(reason, err)
+}
+
+// carryTargetOpenRefusalAt is the refusal a failed open of the new account's
+// copy produces when the look itself named what sits at the path: a refused
+// link keeps its symlink name — carryFailureAt words it — and the guarded
+// open's typed non-regular refusal keeps "the new account holds something
+// other than a plain file where the conversation belongs". named reports
+// false for every other failure: an open, stat or read that saw nothing is a
+// look that did not happen, never evidence about the copy (#7539 review R1).
+func carryTargetOpenRefusalAt(err error) (refusal error, named bool) {
+	var nonRegular *fsprobe.NonRegularError
+	if errors.As(err, &nonRegular) || carrySymlinkPath(err) != "" {
+		return carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err), true
+	}
+	return nil, false
 }
 
 // carryFailureReason returns the notice-safe clause describing err.
@@ -321,7 +343,7 @@ func openCarryFileAt(p carryPace, dir *os.File, name string) (*os.File, os.FileI
 		return nil, nil, err
 	}
 	p.at("fstat", file.Name())
-	info, err := fsprobe.RegularFileInfo(file, file.Name())
+	info, err := fsprobe.RegularFileInfo(file, file.Name(), p.stat)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -501,7 +523,10 @@ func carryFileAt(srcDir, dstDir *os.File, name string, role carryFileRole) (carr
 	case errors.Is(err, fs.ErrNotExist):
 		dst = nil
 	default:
-		return carryFileOutcome{}, carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)
+		if refusal, named := carryTargetOpenRefusalAt(err); named {
+			return carryFileOutcome{}, refusal
+		}
+		return carryFileOutcome{}, carryFailureAt("the new account's copy of the conversation could not be opened safely", err)
 	}
 
 	verdict, err := judgeCarryFile(carryPace{}, src, srcInfo, dst, dstInfo, role)

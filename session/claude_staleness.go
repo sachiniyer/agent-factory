@@ -394,13 +394,16 @@ func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationD
 // later ask (#7383). The open and the stat each get their own pace step
 // (OpenRegularPaced): the flight's bound is per syscall, so a filesystem
 // where each answers inside the bound but together exceed it still answers
-// rather than timing out into an unverified verdict (#7527 review).
+// rather than timing out into an unverified verdict (#7527 review). The fstat
+// runs through the seam the flight was handed when it began (#7539).
 func openClaudeTranscript(p carryPace, path string) (*os.File, os.FileInfo, error) {
-	return fsprobe.OpenRegularPaced(path, func(op string) { p.at(op, path) })
+	return fsprobe.OpenRegularPaced(path, func(op string) { p.at(op, path) }, p.stat)
 }
 
 // claudeTranscriptExtends reports whether the transcript longer begins with
-// every byte of shorter. One that is not there extends nothing. The
+// every byte of shorter. Only two opened regular files answer the question:
+// an open refused on either — absent, a link, not a plain file — is a look
+// that did not happen, never evidence the copies diverge (#7539). The
 // comparison runs in a paced flight whose bound is per read (#7383), and err
 // is a lookup in it that did not answer, or failed: then af could not tell.
 // Each transcript is opened the way openCarryFileAt opens a carried copy:
@@ -411,28 +414,29 @@ func openClaudeTranscript(p carryPace, path string) (*os.File, os.FileInfo, erro
 // its siblings carry).
 func claudeTranscriptExtends(longer, shorter claudeTranscript) (bool, error) {
 	longPath, shortPath := filepath.Join(longer.dir, longer.name), filepath.Join(shorter.dir, shorter.name)
-	return fsprobe.Paced("Claude transcript comparison", longPath+"\x00"+shortPath, func(step func()) (bool, error) {
-		p := pacedCarryWalk(step)
-		long, longInfo, err := openClaudeTranscript(p, longPath)
-		if err != nil {
-			return false, unlookedOnly(err)
-		}
-		defer long.Close()
-		short, shortInfo, err := openClaudeTranscript(p, shortPath)
-		if err != nil {
-			return false, unlookedOnly(err)
-		}
-		defer short.Close()
-		if longInfo.Size() < shortInfo.Size() {
-			return false, nil
-		}
-		if os.SameFile(longInfo, shortInfo) {
-			return true, nil
-		}
-		same, err := carryPrefixMatches(p, long, short, shortInfo.Size())
-		if err != nil {
-			return false, unlookedOnly(err)
-		}
-		return same, nil
-	})
+	return fsprobe.Paced("Claude transcript comparison", longPath+"\x00"+shortPath,
+		func(step func(), stat fsprobe.RegularStatFunc) (bool, error) {
+			p := pacedCarryWalk(step, stat)
+			long, longInfo, err := openClaudeTranscript(p, longPath)
+			if err != nil {
+				return false, err
+			}
+			defer long.Close()
+			short, shortInfo, err := openClaudeTranscript(p, shortPath)
+			if err != nil {
+				return false, err
+			}
+			defer short.Close()
+			if longInfo.Size() < shortInfo.Size() {
+				return false, nil
+			}
+			if os.SameFile(longInfo, shortInfo) {
+				return true, nil
+			}
+			same, err := carryPrefixMatches(p, long, short, shortInfo.Size())
+			if err != nil {
+				return false, err
+			}
+			return same, nil
+		})
 }

@@ -35,9 +35,9 @@ import (
 	"sort"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/quota"
 )
 
@@ -553,18 +553,11 @@ func scanTail(path string, size, watermark, window int64) (fileClaim, bool, int6
 	if lo < 0 {
 		lo = 0
 	}
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	file, info, err := fsprobe.OpenRegular(path, fsprobe.RegularStat())
 	if err != nil {
 		return fileClaim{}, false, 0, fmt.Errorf("open rollout %s: %w", path, err)
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return fileClaim{}, false, 0, fmt.Errorf("inspect opened rollout %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return fileClaim{}, false, 0, fmt.Errorf("read rollout %s: not a regular file (%s)", path, info.Mode().Type())
-	}
 	buf := make([]byte, size-lo)
 	read, err := file.ReadAt(buf, lo)
 	if err != nil && err != io.EOF {

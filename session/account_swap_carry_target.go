@@ -35,21 +35,24 @@ func (c *conversationCarry) targetReason() string {
 // into a diverging one, say — is left for the copy to find.
 //
 // The judgement opens and reads both accounts' homes, so it runs in a paced
-// flight whose bound is per syscall: one that does not answer, or a lookup in
-// it that fails, refuses as unverified (#7383).
+// flight whose bound is per syscall: one that does not answer refuses as
+// unverified (#7383). It classifies its own failures: only a look that saw
+// what sits at the path keeps a name — "the new account holds something
+// other than a plain file where the conversation belongs", or a refused
+// link's own — and every other failed open, stat or read, on either account,
+// is the could-not-look clause itself, never evidence about the copies
+// (#7389's site-2 mapping, #7539 review R1).
 func (c *conversationCarry) targetCopyReason() string {
 	srcRoot, dstRoot, rel := c.srcRoot, c.dstRoot, c.transcript
 	judged, err := fsprobe.Paced("carry target-copy judgement", srcRoot.key()+"\x00"+dstRoot.key()+"\x00"+rel,
-		func(step func()) (targetCopyJudgement, error) {
-			return judgeTargetCopy(pacedCarryWalk(step), srcRoot, dstRoot, rel), nil
+		func(step func(), stat fsprobe.RegularStatFunc) (targetCopyJudgement, error) {
+			return judgeTargetCopy(pacedCarryWalk(step, stat), srcRoot, dstRoot, rel), nil
 		})
 	switch {
 	case err != nil:
 		return carryUnlookedReason
 	case judged.refusal == nil:
 		return ""
-	case carryLookupUnlooked(judged.refusal):
-		return carryUnlookedReason
 	}
 	return c.copyRefusal(judged.refusal)
 }
@@ -60,14 +63,23 @@ type targetCopyJudgement struct {
 }
 
 // judgeTargetCopy is the copy's decision on rel in srcRoot and dstRoot, made
-// from the two open files without writing anything.
+// from the two open files without writing anything. Only a look that saw
+// what it judged keeps a name: a refused link, on either account, and the
+// guarded open's typed non-regular refusal at the target. Every other failed
+// open, stat or read — the source's open among them — and a comparison the
+// prefix read could not finish is a look that did not happen: its refusal is
+// the could-not-look clause itself, never evidence about the copies (#7389's
+// site-2 mapping, #7539 review R1).
 func judgeTargetCopy(p carryPace, srcRoot, dstRoot carryRoot, rel string) targetCopyJudgement {
 	src, srcInfo, err := openCarryArtifact(p, srcRoot, rel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		src = nil
 	case err != nil:
-		return targetCopyJudgement{carryFailureAt("the conversation could not be read safely from the previous account", err)}
+		if path := carrySymlinkPath(err); path != "" {
+			return targetCopyJudgement{carryFailure(symlinkCarryReason(path), err)}
+		}
+		return targetCopyJudgement{carryFailure(carryUnlookedReason, err)}
 	default:
 		defer src.Close()
 	}
@@ -76,11 +88,22 @@ func judgeTargetCopy(p carryPace, srcRoot, dstRoot carryRoot, rel string) target
 	case errors.Is(err, fs.ErrNotExist):
 		dst = nil
 	case err != nil:
-		return targetCopyJudgement{carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)}
+		if refusal, named := carryTargetOpenRefusalAt(err); named {
+			return targetCopyJudgement{refusal}
+		}
+		return targetCopyJudgement{carryFailure(carryUnlookedReason, err)}
 	default:
 		defer dst.Close()
 	}
 	if _, err := judgeCarryFile(p, src, srcInfo, dst, dstInfo, carryNewTranscript); err != nil {
+		var carryErr *carryError
+		inner := err
+		if errors.As(err, &carryErr) {
+			inner = carryErr.err
+		}
+		if carryLookupUnlooked(inner) {
+			return targetCopyJudgement{carryFailure(carryUnlookedReason, err)}
+		}
 		return targetCopyJudgement{err}
 	}
 	return targetCopyJudgement{}

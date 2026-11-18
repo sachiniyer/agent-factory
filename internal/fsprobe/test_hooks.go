@@ -54,9 +54,11 @@ func SetLstatForTest(f func(string) (os.FileInfo, error)) func() {
 
 // SetOpenForTest overrides the open ReadFileWith runs inside its bounded
 // flight, so a test can stand in for a file on a wedged mount (#7221 review
-// R4). Callers must restore the original via the returned function.
+// R4). Callers must restore the original via the returned function. The
+// stand-in replaces open and stat together, so the flight's loaded
+// RegularStatFunc is ignored.
 func SetOpenForTest(f func(string) (*os.File, error)) func() {
-	return openPath.replace(f)
+	return openPath.replace(func(path string, _ RegularStatFunc) (*os.File, error) { return f(path) })
 }
 
 // SetRegularFileStatForTest overrides the fstat RegularFileInfo runs on the
