@@ -244,6 +244,94 @@ var accountLateEnvironmentValues = map[string]map[string]string{
 	},
 }
 
+// accountLoaderFilledNames is the THIRD account name class: names the agent's
+// own dotenv loader fills when they are unset, which are NOT identity names —
+// they are the operator's deployment configuration. gemini walks up from the
+// workspace applying <dir>/.gemini/.env and <dir>/.env fill-if-unset, so an
+// unset name is the repository's to claim; but an operator-forwarded value is
+// the operator's own claim and must survive (#7555).
+//
+// The rule is keep-if-set, decided ONLY where the forwarded value actually
+// lives: applyAccount keeps a name already present in its (already filtered)
+// input environment — every filter upstream admits exactly the names the
+// operator forwarded — and installs the name DEFINED-AND-EMPTY when it is
+// absent, so the .env loader finds it claimed. This is the crucial difference
+// from accountLateEnvironmentNames: those are pinned unconditionally because
+// an ambient value can only be a competing identity, while a loader-filled
+// value may be deliberate operator config.
+//
+// The six names below are the complete set gemini 0.42.0's reads take from
+// the environment, measured on @google/gemini-cli 0.42.0:
+//
+//   - CLOUD_SHELL and GEMINI_CLI_USE_COMPUTE_ADC select the auth source
+//     (getAuthTypeFromEnv: `CLOUD_SHELL === "true" || GEMINI_CLI_USE_COMPUTE_ADC
+//     === "true"`). Both fail a === "true" compare on empty, so a defined-empty
+//     pin holds the default source; a forwarded true moves the session's auth
+//     OFF the account onto Compute ADC — honoured as the operator's stated
+//     choice, consistent with the credential-mount path's treatment (#7555
+//     decision 7).
+//   - GCE_METADATA_IP and GCE_METADATA_HOST are the two environment links of
+//     the metadata endpoint (getBaseUrl: `GCE_METADATA_IP || GCE_METADATA_HOST
+//     || <compiled fallback>`). Empty is falsy on each and falls through to the
+//     compiled 169.254.169.254 constant — which is NOT an env read, so there
+//     is no third link to pin (HOST_ADDRESS is a module constant in the same
+//     gcp-metadata file, deliberately absent).
+//   - GIT_CONFIG_COUNT and GIT_CONFIG_PARAMETERS inject git configuration
+//     through the environment: strtoul("") is 0 with no error, and a count of
+//     0 renders the whole unbounded GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* family
+//     inert, so pinning the count kills the family without enumerating it;
+//     empty GIT_CONFIG_PARAMETERS parses to zero -c pairs. GIT_CONFIG is
+//     deliberately absent: git treats defined-empty as a real config-file
+//     path and fails, so it is documented, not pinned.
+//
+// No other agent has entries: nothing else has a measured dotenv fill channel
+// reading these names, and claude/codex keep GIT_CONFIG_* in docker.run_args
+// for their safe.directory workaround — a name af does not pin must not be
+// refused to them (#7555).
+var accountLoaderFilledNames = map[string]map[string]struct{}{
+	"gemini": nameSet(
+		"CLOUD_SHELL", "GEMINI_CLI_USE_COMPUTE_ADC",
+		"GCE_METADATA_IP", "GCE_METADATA_HOST",
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+	),
+}
+
+// AccountLoaderFilledNames lists, sorted, the keep-if-set names for one agent:
+// the names an account session defines empty only when the operator did not
+// forward a value. Provisioners use the same classification as ApplyAccount so
+// a remote/container launch cannot drift from the local shim's boundary — the
+// names ride --session-env for pane admission, and the sandbox identity file
+// emits them conditionally for forwarded names.
+func AccountLoaderFilledNames(agent string) []string {
+	names := accountLoaderFilledNames[agent]
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// omitAccountLoaderFilledNames drops every keep-if-set entry from an env list.
+// ResolveAccountEnvironment uses it for the tmux -e half: those names are
+// decided only at the hop where the forwarded value lives, so no NAME= stamp
+// here can beat an imported value (#7555).
+func omitAccountLoaderFilledNames(agent string, entries []string) []string {
+	loader := accountLoaderFilledNames[agent]
+	if len(loader) == 0 {
+		return entries
+	}
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name, _, ok := strings.Cut(entry, "=")
+		if _, isLoader := loader[name]; ok && isLoader {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // accountLaunchProvenAgents answers a DIFFERENT question from accountConfigVars,
 // and the two must not be collapsed.
 //
@@ -559,7 +647,13 @@ func applyAccount(env []string, command string, account Account, validateCommand
 		filled = append(filled, name+"="+value)
 	}
 	sort.Strings(filled)
-	out := make([]string, 0, len(env)+len(pinned)+len(filled)+1)
+	// Keep-if-set is claimed by PRESENCE alone: this env arrives already
+	// filtered, and no accountLoaderFilledNames name is on any allowlist — so a
+	// name still present is exactly one the operator forwarded. An absent one
+	// gets the defined-empty pin below.
+	loader := accountLoaderFilledNames[account.Agent]
+	seen := make(map[string]struct{}, len(loader))
+	out := make([]string, 0, len(env)+len(pinned)+len(filled)+len(loader)+1)
 	for _, kv := range env {
 		name, _, found := strings.Cut(kv, "=")
 		if !found {
@@ -567,6 +661,9 @@ func applyAccount(env []string, command string, account Account, validateCommand
 		}
 		if _, drop := denied[name]; drop {
 			continue
+		}
+		if _, isLoader := loader[name]; isLoader {
+			seen[name] = struct{}{}
 		}
 		out = append(out, kv)
 	}
@@ -585,6 +682,20 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	// first-party endpoint rather than an empty one it would use literally.
 	for _, entry := range filled {
 		out = append(out, entry)
+	}
+	// KEEP-IF-SET for the loader-filled class: a name absent from the filtered
+	// env is one no operator claim reached, so it is installed defined-and-empty
+	// to hold the `.env` loader off; a name present — the operator's forwarded
+	// claim — was already kept in the pass-through above.
+	loaderPins := make([]string, 0, len(loader))
+	for name := range loader {
+		if _, ok := seen[name]; !ok {
+			loaderPins = append(loaderPins, name)
+		}
+	}
+	sort.Strings(loaderPins)
+	for _, name := range loaderPins {
+		out = append(out, name+"=")
 	}
 	// Appended last so it wins over any ambient copy that survived, though the
 	// removal above means there should not be one.

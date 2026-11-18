@@ -557,6 +557,16 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 		extras = append(extras, name)
 	}
 	if _, _, ok := w.accountEnv(); ok {
+		// The keep-if-set names are named to the pane's --session-env admission
+		// so the decided value — a forwarded one kept, or the pin — survives the
+		// inner filter to the agent. They deliberately do NOT join extras:
+		// extras is the wrap's admission channel, and admitting an unforwarded
+		// name there would carry remote-ambient state into
+		// ScopeAgentServerAccount looking like the operator's claim — presence
+		// in the filtered env must mean "forwarded" (#7555).
+		for _, name := range sessionenv.AccountLoaderFilledNames(w.spec.Account.Agent) {
+			args = append(args, "--session-env", name)
+		}
 		// To the agent-server's own environment only — not --session-env, so the
 		// pane never inherits it.
 		extras = append(extras, AccountScopeAgentEnv)

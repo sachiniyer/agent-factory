@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -809,24 +808,6 @@ func (p *dockerProvisioner) runContainer() error {
 	}
 	p.containerID = id
 	return nil
-}
-
-func (p *dockerProvisioner) containerEnvironmentNames() []string {
-	names := sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
-	// A forwarded proxy spelling claims its case twin too: emit the twin so the
-	// image's value for it cannot survive (the twin resolves to the forwarded
-	// value through dockerEnvironment's synthesized entries). Scoped to the
-	// credential-mount path — the normalization is part of the pins'
-	// contract, and an account or plain session's forwarded env-name list
-	// stays byte-identical to before (#7529 R8).
-	if len(p.credentialMounts) > 0 {
-		twins, _ := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, os.Environ())
-		if len(twins) > 0 {
-			names = append(names, twins...)
-			sort.Strings(names)
-		}
-	}
-	return names
 }
 
 // docker runs `docker <args...>` with a timeout and returns its combined output.

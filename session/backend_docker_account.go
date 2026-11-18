@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -287,11 +288,32 @@ func accountProtectedPath(target string) string {
 // R7 program-choice refusal extended to account sessions).
 func validateAccountDockerRunArgs(args []string, agent string) error {
 	denied := accountDockerDeniedNames(agent)
+	// The keep-if-set names the account boundary pins at exec are refused to
+	// run_args for the agent that pins them: a repo -e NAME=… appended after a
+	// forwarded -e NAME is last-wins, which would turn a repository value into
+	// a "claim" — so session_env_passthrough is the only channel they take.
+	// Agents that pin nothing keep their run_args: the GIT_CONFIG_* entries
+	// claude and codex use for their safe.directory workaround are refused
+	// only where the pin exists to defend (#7555). The indexed-pair prefixes
+	// join the refusal wherever a count can activate them — a forwarded
+	// GIT_CONFIG_COUNT would otherwise animate repository-supplied pairs.
+	loaderDenied := sessionenv.AccountLoaderFilledNames(agent)
+	pairGuard := slices.Contains(loaderDenied, "GIT_CONFIG_COUNT")
 	checkEnv := func(value string) error {
 		name, _, _ := strings.Cut(value, "=")
 		if _, refused := denied[name]; refused {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because it can override the selected identity",
+				name, agent)
+		}
+		if slices.Contains(loaderDenied, name) {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because af pins it defined-empty at the exec boundary unless the operator forwarded it — forward it through session_env_passthrough instead",
+				name, agent)
+		}
+		if pairGuard && (strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_")) {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because a forwarded GIT_CONFIG_COUNT would activate repository-supplied git config — forward the pair through session_env_passthrough instead",
 				name, agent)
 		}
 		if reason, refused := accountDockerProgramChoiceReason(name); refused {

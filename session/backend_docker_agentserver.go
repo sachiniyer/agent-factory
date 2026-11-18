@@ -74,6 +74,17 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 		agentServerEnvNames = append(agentServerEnvNames,
 			credentialMountReassertNames(p.agentName(), p.spec.SessionEnvPassthrough, os.Environ())...)
 	}
+	if p.spec.Account.Dir != "" {
+		// The keep-if-set names must be NAMED for the inner pane's filter or the
+		// decided value never reaches the agent: a forwarded value arrives via
+		// passthrough, but an unforwarded name's defined-empty pin — installed by
+		// ScopeAgentServerAccount into the server env — is dropped by
+		// FilterForCommand unless it is an admitted name (#7555's R6). They ride
+		// --session-env, never --session-env-empty: a re-asserted empty pin at
+		// the last hop would blank the forwarded value they exist to keep.
+		agentServerEnvNames = append(agentServerEnvNames,
+			sessionenv.AccountLoaderFilledNames(p.spec.Account.Agent)...)
+	}
 	for _, name := range agentServerEnvNames {
 		args = append(args, "--session-env", name)
 	}
