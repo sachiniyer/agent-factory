@@ -765,10 +765,8 @@ func TestStagedDraftPollTickNeverBlocksBehindAnOpLockSend(t *testing.T) {
 		t.Fatal("the post-send poll tick blocked")
 	}
 	require.False(t, inst.HasAttention(), "the send superseded the due mark — no flag for a stale send")
-	entry = stagedDraftWatchEntry(manager, key)
-	require.NotNil(t, entry, "a delivered send's watch is disarmed, kept for its blind budget")
-	require.True(t, entry.since.IsZero(), "the disarmed watch's sustain window is cleared")
-	require.False(t, entry.due, "the disarmed watch owes no flag")
+	require.Nil(t, stagedDraftWatchEntry(manager, key),
+		"a send whose verdict moved off sent-unverified retires its open watch")
 
 	// And the deferred raise is still the working path through the real tick:
 	// re-qualify and the flag lands once the op lock is free.

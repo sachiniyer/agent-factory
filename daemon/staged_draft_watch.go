@@ -86,8 +86,20 @@ type stagedDraftWatch struct {
 // staged, and the flag is marked due only on a tick whose verdict IS staged.
 func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.Instance, as session.AgentServer) {
 	attemptAt, status := instance.LastPromptDelivery()
-	if instance.GetLiveness() != session.LiveReady ||
-		status != session.PromptSentUnverified || attemptAt.IsZero() {
+	if status != session.PromptSentUnverified || attemptAt.IsZero() {
+		// The attempt left sent-unverified — delivered, not-delivered, or a
+		// newer send superseded it. Its watch retires outright, blind budget
+		// included: the budget may survive only for the SAME still-
+		// unverified attempt, never past a verdict change (Codex #7547,
+		// sixth round).
+		m.retireStagedDraftWatch(key)
+		return
+	}
+	if instance.GetLiveness() != session.LiveReady {
+		// A still-unverified attempt out of Ready — a flap, not a
+		// resolution. The armed state resets so nothing owed carries over,
+		// but the blind budget it already spent must not re-arm at zero
+		// when the pane comes back (Codex #7547, fifth round).
 		m.dropStagedDraftWatch(key)
 		return
 	}
@@ -265,16 +277,27 @@ func (m *Manager) clearStagedDraftDue(key string, attemptAt time.Time) {
 	m.pausedMu.Unlock()
 }
 
-// dropStagedDraftWatch disarms a send's watch — the gate no longer holds
-// (the session left Ready, a newer send moved the verdict, or the send was
-// never armable). The entry is KEPT, not deleted, for two kinds of memory
-// it carries (#7545 review, #7547 independent review): a closed latch so a
-// delivered send's durable verdict is never captured for again, and the
-// blind budget already spent — a Ready→Running→Ready flap or an attention
-// owner alternating ticks must not re-spend 300 captures by resetting the
-// count. The armed state alone is reset: since reopens on the next provable
-// staged read, due clears, and a newer send's attemptAt mismatch still
-// re-arms fresh like every other watch state.
+// retireStagedDraftWatch ends a send's watch outright — its verdict moved
+// off sent-unverified, so nothing about the attempt may be carried forward,
+// blind budget included (#7547 independent review, sixth round). The closed
+// latch a kept entry provides is irrelevant here: this path means the
+// recorded verdict itself changed, so the gate never feeds this attempt
+// again — and a newer send's attemptAt never matches it.
+func (m *Manager) retireStagedDraftWatch(key string) {
+	m.pausedMu.Lock()
+	delete(m.stagedDraftWatches, key)
+	m.pausedMu.Unlock()
+}
+
+// dropStagedDraftWatch disarms a send's watch while its attempt is still
+// sent-unverified — the session left Ready mid-watch, or the backend cannot
+// read bound evidence. The entry is KEPT, not deleted, for the blind budget
+// it already spent (#7547 independent review): a Ready→Running→Ready flap
+// must not re-spend 300 captures by resetting the count. The armed state
+// alone resets — since reopens on the next provable staged read, due clears
+// — and a newer send's attemptAt mismatch still re-arms fresh like every
+// other watch state. A verdict change is a retirement, not a drop: see
+// retireStagedDraftWatch.
 func (m *Manager) dropStagedDraftWatch(key string) {
 	m.pausedMu.Lock()
 	if e := m.stagedDraftWatches[key]; e != nil && !e.closed {
