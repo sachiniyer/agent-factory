@@ -1004,8 +1004,24 @@ func fakeAccountBoundaryDockerResponse(args []string, accountDir string) ([]byte
 	if args[0] == "inspect" {
 		return []byte(cleanInspect(accountDir)), nil
 	}
-	if args[0] == "exec" && strings.HasSuffix(strings.Join(args, " "), "/proc/self/mountinfo") {
-		return []byte(cleanMountinfoFor(accountDir)), nil
+	if args[0] == "exec" {
+		joined := strings.Join(args, " ")
+		// prepareAccountUser reads the container mount table before
+		// chowning /af-home and /workspace, mirroring prepareNonAccountUser's
+		// #5424 guard. Its script is the two-argument readMountTable form
+		// (cd -- "$1" && pwd -P && cd -- "$2" && pwd -P), whose joined args
+		// end with the shell's positional home/workspace, not with
+		// /proc/self/mountinfo — so the cat-mountinfo suffix check below
+		// cannot match it. The unique `cd -- "$2" && pwd -P` clause
+		// (readMountTableFor never has a "$2") identifies the call, and the
+		// answer is readMountTable's expected form:
+		// <resolved HOME>\n<resolved workspace>\n<mountinfo>.
+		if strings.Contains(joined, `cd -- "$2" && pwd -P`) {
+			return []byte(dockerAccountRuntimeHome + "\n" + dockerWorkspaceDir + "\n" + cleanMountinfoFor(accountDir)), nil
+		}
+		if strings.HasSuffix(joined, "/proc/self/mountinfo") {
+			return []byte(cleanMountinfoFor(accountDir)), nil
+		}
 	}
 	return nil, nil
 }

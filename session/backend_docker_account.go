@@ -282,7 +282,9 @@ func accountProtectedPath(target string) string {
 // validateAccountDockerRunArgs refuses repo-controlled sources that Docker can
 // apply after af has selected the account. Environment files are opaque to af,
 // so none are accepted in account mode; direct environment options are refused
-// only when they can choose another identity or authentication mode.
+// only when they can choose another identity or authentication mode — or which
+// program af's in-container provisioning execs resolve (#7563 R2, the #7529
+// R7 program-choice refusal extended to account sessions).
 func validateAccountDockerRunArgs(args []string, agent string) error {
 	denied := accountDockerDeniedNames(agent)
 	checkEnv := func(value string) error {
@@ -291,6 +293,11 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because it can override the selected identity",
 				name, agent)
+		}
+		if reason, refused := accountDockerProgramChoiceReason(name); refused {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: set it in the image's ENV instead, or have the operator forward it through session_env_passthrough",
+				name, agent, reason)
 		}
 		return nil
 	}
@@ -456,6 +463,30 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 		}
 	}
 	return nil
+}
+
+// accountDockerProgramChoiceReason returns the because-clause for the env
+// names a repo-controlled docker.run_args entry may not set on the account
+// path: the names that choose which program — or which loaded code — af
+// runs IN the container. PATH resolves every bare command in af's root
+// provisioning execs (the mount-table probe's mkdir and cat, the chown
+// itself) and the agent's own executable, so `-e PATH=/workspace/.x:…`
+// would put repository binaries in front of all of them; the
+// dynamic-linker names inject a repository library into those programs
+// before any agent-side env filter exists. They are the same class #7529
+// R7 refuses on the credential-mount path, kept out of
+// accountDockerDeniedNames on purpose: that set also filters the
+// operator's session_env_passthrough claims, and the operator stays free
+// to forward their own PATH — the image-PATH re-assertion is skipped for
+// a name the operator claimed (#7563 R2).
+func accountDockerProgramChoiceReason(name string) (string, bool) {
+	if name == "PATH" {
+		return "it chooses which program every PATH-resolved command in the container runs — af's account provisioning execs and the agent's own executable — and af re-asserts the image's own PATH after run_args", true
+	}
+	if _, ok := credentialMountProgramLoaderNames[name]; ok {
+		return "it loads a repository-chosen library into the programs af runs in the container", true
+	}
+	return "", false
 }
 
 // rawEnvironmentValue returns the untrimmed value environ gives name, or "" when
@@ -839,6 +870,18 @@ func (p *dockerProvisioner) prepareContainerUser() error {
 // Rootful Docker reports the host af uid; rootless Docker commonly reports 0,
 // which maps back to the invoking host user. Either way writes through the bind
 // mount retain the ownership local account sessions need.
+//
+// repo-controlled docker.run_args may bind-mount a host directory at /workspace
+// (accountProtectedPath does not cover it — only /af-account and /af-home),
+// and an image may declare a VOLUME there or a --volumes-from donor may leave
+// one. The chown must never run on such a mount: on a rootful engine it would
+// re-own the operator's host directory inode through the bind. The same
+// contract prepareNonAccountUser already applies (the #5424 guard) is applied
+// here — the container's own kernel mount table is read at chown time, and a
+// target whose enclosing mount is not the container's root filesystem is
+// skipped with a warning rather than chowned. An unreadable or unparseable
+// mount table fails closed: the chown is refused, never guessed, mirroring the
+// non-account path's posture.
 func (p *dockerProvisioner) prepareAccountUser() error {
 	if p.spec.Account.Dir == "" {
 		return nil
@@ -867,13 +910,46 @@ func (p *dockerProvisioner) prepareAccountUser() error {
 		// af failed to read the engine's answer — nothing reached a writer.
 		return dockerStepErr(fmt.Errorf("backend=docker: cannot identify the mounted account owner: %w", err), dockerOpLocal)
 	}
-	script := fmt.Sprintf("mkdir -p %s %s && chown %s %s %s",
-		shellQuote(dockerAccountRuntimeHome), shellQuote(dockerWorkspaceDir), owner,
-		shellQuote(dockerAccountRuntimeHome), shellQuote(dockerWorkspaceDir))
-	out, err = p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", script)
+	// The chown must never cross into a mount point, however it was created
+	// (-v, --mount, --volumes-from, --tmpfs, an image VOLUME): through a host
+	// bind it would re-own the operator's files on a rootful engine, exactly
+	// the hazard prepareNonAccountUser's #5424 guard exists for. So the set
+	// of mounts is read from the container's own kernel mount table at chown
+	// time, not parsed from docker run arguments; and if that table cannot
+	// be read or trusted the chown is refused, not guessed.
+	home, workspace := p.sessionHome(), dockerWorkspaceDir
+	realHome, realWorkspace, mounts, err := p.readMountTable(home, workspace)
 	if err != nil {
-		return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare the account-owned container home and workspace: %s: %w", strings.TrimSpace(string(out)), err), dockerOpRootExec)
+		return err
+	}
+	points, err := parseMountPoints(mounts)
+	if err != nil {
+		return dockerStepErr(fmt.Errorf("backend=docker: refusing to chown the account session HOME and workspace for the account owner %s: the container mount table is unusable: %w", owner, err), dockerOpLocal)
+	}
+	// Only a directory whose containing mount is the container's own root
+	// filesystem is af's to re-own. One AT or BENEATH any other mount — a
+	// host bind, a named volume, an image VOLUME, a tmpfs (including via a
+	// symlinked HOME, which the resolved path above sees through) — is
+	// never chowned or created through, no matter what backs it. A skipped
+	// target the session's user cannot write refuses here with the mount
+	// and the remedy named, rather than surfacing later as the clone's
+	// "Permission denied" (#7563 R6).
+	steps := []string{fmt.Sprintf("mkdir -p %s %s", shellQuote(home), shellQuote(workspace))}
+	err = p.prepareWithMountGuard(steps, points, owner, []chownGuardTarget{
+		{kind: "HOME", real: realHome, chown: fmt.Sprintf("chown -h %s %s", owner, shellQuote(realHome))},
+		{kind: "workspace", real: realWorkspace, chown: fmt.Sprintf("chown -h %s %s", owner, shellQuote(realWorkspace))},
+	}, func(steps []string) error {
+		out, err := p.docker(dockerShortStepTimeout,
+			"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", strings.Join(steps, " && "))
+		if err != nil {
+			return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare the account-owned container home and workspace: %s: %w", strings.TrimSpace(string(out)), err), dockerOpRootExec)
+		}
+		return nil
+	}, func(s skippedMount) error {
+		return p.reportSkippedMount(s, owner)
+	})
+	if err != nil {
+		return err
 	}
 	p.containerUser = owner
 	return nil
