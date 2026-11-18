@@ -276,7 +276,15 @@ func resolveServerIdentity(id ServerIdentity, budget time.Duration) ServerIdenti
 func (t *TmuxSession) noteServerIdentity(raw ServerIdentity, budget time.Duration) {
 	id := raw
 	if cur := t.serverEvidence.Load(); cur != nil &&
-		cur.Socket == raw.Socket && cur.PID == raw.PID && cur.SessionID == raw.SessionID {
+		cur.Socket == raw.Socket && cur.PID == raw.PID && cur.SessionID == raw.SessionID &&
+		(cur.StartID != 0 || cur.PIDNS != "") {
+		// An unchanged tuple carries the standing record's proof forward —
+		// but only a PROOF is paid once. An unproven standing record (the
+		// deadline won, or the pid genuinely could not be shown bound)
+		// re-proves on this stamp's remaining budget: a transiently slow
+		// first proof must not pin undecidable forever, and an honestly
+		// unprovable one re-pays a bounded read per stamp — never a signal,
+		// never a fresh timeout (Codex on #7581).
 		id.StartID, id.PIDNS = cur.StartID, cur.PIDNS
 	} else {
 		id = resolveServerIdentity(raw, budget)

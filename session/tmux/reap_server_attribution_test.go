@@ -465,6 +465,36 @@ func TestNoteServerIdentity_CarriesTheProofForward(t *testing.T) {
 	require.Equal(t, 2, calls, "a changed record re-proves")
 }
 
+// An UNPROVEN standing record is not the proof being paid once — it is the
+// proof never landing. The next stamp of the same tuple re-proves on its
+// own remaining budget, so a transiently slow first read does not pin
+// undecidable forever (Codex on #7581).
+func TestNoteServerIdentity_UnprovenRecordReproves(t *testing.T) {
+	ts := &TmuxSession{}
+	calls := 0
+	oldBinding := tmuxServerSocketBinding
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		calls++
+		if calls == 1 {
+			return socketBindingElsewhere, "/bound/elsewhere"
+		}
+		return socketBindingBound, "/bound/here"
+	}
+	t.Cleanup(func() { tmuxServerSocketBinding = oldBinding })
+
+	raw := ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid(), SessionID: "$7"}
+	ts.noteServerIdentity(raw, tmuxCommandTimeout)
+	first, ok := ts.ServerEvidence()
+	require.True(t, ok)
+	require.Empty(t, first.PIDNS, "the first stamp could not prove the pid")
+
+	ts.noteServerIdentity(raw, tmuxCommandTimeout)
+	require.Equal(t, 2, calls, "an unproven record re-proves rather than carrying forward")
+	second, _ := ts.ServerEvidence()
+	ns, _ := proctree.PIDNamespaceID()
+	require.Equal(t, ns, second.PIDNS, "the retried stamp lands the proof")
+}
+
 // #7581 item 1 (verdict): a record whose pid the stamp could not prove in
 // this namespace produces EXACTLY master's verdict — every pid compare
 // undecidable, identical to an absent record. The socket compare still
@@ -660,10 +690,14 @@ func TestReadPaneRow_SocketReadSpendsTheRowsRemainingBudget(t *testing.T) {
 	}
 	t.Cleanup(func() { readSocketPIDWithin = oldRead })
 
+	// The executor indirection lets the spent-budget half swap the answer
+	// AFTER the session holds it — MockCmdExec is a value; a reassigned
+	// field would never reach the stored copy (Codex on #7581).
+	answer := func(c *exec.Cmd) ([]byte, error) {
+		return []byte("5555|0||||||4242|$7\n"), nil
+	}
 	ex := cmd_test.MockCmdExec{
-		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
-			return []byte("5555|0||||||4242|$7\n"), nil
-		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return answer(c) },
 		RunFunc: func(c *exec.Cmd) error {
 			return fmt.Errorf("unexpected tmux run %q", strings.Join(c.Args, " "))
 		},
@@ -687,7 +721,7 @@ func TestReadPaneRow_SocketReadSpendsTheRowsRemainingBudget(t *testing.T) {
 	// serverSocketPIDWithin gets an already-expired context and leaves the
 	// record incomplete.
 	reads = nil
-	ex.OutputFunc = func(c *exec.Cmd) ([]byte, error) {
+	answer = func(c *exec.Cmd) ([]byte, error) {
 		time.Sleep(220 * time.Millisecond)
 		return []byte("5555|0||||||4242|$7\n"), nil
 	}
