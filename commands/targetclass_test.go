@@ -18,7 +18,7 @@ import (
 // refusing it, or being client-local by design, instead of defaulting to
 // answering about this machine.
 var verbTargetClass = map[string]string{
-	"af": classRouted, // the TUI itself: W9.7
+	"af": classRouted, // the TUI itself: W9.7; `af --daemon` refuses in-verb (RunE) — it starts the daemon process on this machine
 
 	"af sessions archive":          classRouted,
 	"af sessions attach":           classRouted,

@@ -29,6 +29,14 @@ import (
 var (
 	runLaunchApp               = app.Run
 	launchEnsureDaemonForTasks = ensureDaemonForTasks
+	// runDaemon / runDaemonForUpgrade are the daemon entrypoints the `--daemon`
+	// branch of root's RunE reaches, behind a package-level seam for the same
+	// reason runLaunchApp is: a test exercising that branch must not bind the
+	// real control/HTTP sockets and start a daemon on the host. The two are
+	// the daemon package's exported entrypoints, so production calls through
+	// the vars harmlessly.
+	runDaemon           = daemon.RunDaemon
+	runDaemonForUpgrade = daemon.RunDaemonForUpgrade
 	// version is supplied by root main.go so release -ldflags keep stamping
 	// main.version. The fallback only covers direct package tests.
 	version     = "dev"
@@ -74,6 +82,30 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			defer log.Close()
 
 			if daemonFlag {
+				// `af --daemon` starts the daemon process on THIS machine — no
+				// daemon API stands in for it — so under a remote target
+				// (--daemon-url / AF_DAEMON_URL / a saved target) it must refuse
+				// rather than silently spawn a local daemon on the wrong machine
+				// (W9.4). The bare TUI form of this same verb is classRouted, so
+				// the central guard does not refuse it; this is the matching
+				// in-verb refusal for the --daemon form, the way `af config set
+				// --project …` refuses inside the routed `af config set`.
+				//
+				// The internal `--upgrade-transaction` recovery invocation is
+				// exempt: the recovery actor's StartCandidate execs `af --daemon
+				// --upgrade-transaction <id>` on the daemon host, and the child
+				// inherits a pass-through env that may carry a target the operator
+				// of THIS machine happened to export. Refusing there would break
+				// an in-flight upgrade on the very host the target is about; the
+				// candidate is a supervisor-driven local action, not an operator
+				// misreading a flag. An operator never sets --upgrade-transaction
+				// (see rootflags.go), so the exemption is not user-reachable.
+				if upgradeTransactionFlag == "" {
+					if err := requireLocalTarget("af --daemon",
+						"starts the daemon process on this machine"); err != nil {
+						return err
+					}
+				}
 				cfg, err := config.LoadConfig()
 				if err != nil {
 					return err
@@ -91,9 +123,9 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 					return configagent.BuildSpawnRequest(configagent.Options{Mode: configagent.ModeChange})
 				})
 				if upgradeTransactionFlag != "" {
-					err = daemon.RunDaemonForUpgrade(cfg, upgradeTransactionFlag)
+					err = runDaemonForUpgrade(cfg, upgradeTransactionFlag)
 				} else {
-					err = daemon.RunDaemon(cfg)
+					err = runDaemon(cfg)
 				}
 				if err != nil {
 					log.ErrorLog.Printf("failed to start daemon %v", err)
