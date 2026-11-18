@@ -769,6 +769,26 @@ func (m *home) closeProjectPicker() {
 	m.state = stateDefault
 }
 
+// closeProjectPickerIfOpen tears the project picker down when an async mutation
+// completes with it open. The overlay builds its row list once at open time
+// (pre-selecting the active project), and nothing on the add/delete/rebind
+// completion paths rebuilds it, so a project a mutation just removed would
+// remain a selectable row; Enter would then re-commit a switch into the deleted
+// project, reviving the zombie active scope the #4741 rescope had just cleared.
+// A subsequent Ctrl+P rebuilds rows from the refreshed list at open time —
+// exactly as the rebind flow's "the refreshed list is where the user sees what
+// happened" convention prescribes. Used by handleProjectDeleted to mirror the
+// rebind flow, which closes the picker on every owned async outcome. The delete
+// flow carries no ownership token (the rebind flow does), so a delete dispatched
+// from one picker closes one reopened mid-flight; the race rebuilds from the
+// still-current registry and dismisses rather than re-enters, so it is a
+// transient dismissal rather than the correctness hazard the close prevents.
+func (m *home) closeProjectPickerIfOpen() {
+	if m.state == stateSwitchProject && m.projectPickerOverlay != nil {
+		m.closeProjectPicker()
+	}
+}
+
 // resolveSwitchProjectConfig is the incoming project's config read, a seam so
 // tests can stand in a config that cannot be read in time.
 var resolveSwitchProjectConfig = config.ResolveConfigForRepo
