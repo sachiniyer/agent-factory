@@ -765,12 +765,13 @@ func TestPrepareNonAccountUser_PrunesReadOnlyAndNamedVolumesUnderHome(t *testing
 	assert.NotContains(t, joined, "chown -R")
 }
 
-// nonRootChownScenarioStub drives prepareNonAccountUser with the R6
-// writability answers: the container mount table lists sc.mountPoints, and
-// the `test -w` probe af runs as the session's user on a mount it declines
-// to re-own reports sc.writable. There is no mount-type answer — the guard
-// never asks one; mountinfo cannot say what backs a mount and af never
-// chowns through one.
+// nonRootChownScenarioStub drives prepareNonAccountUser: the container mount
+// table lists sc.mountPoints. The `test -w` answer is retained so a
+// regression that runs the account path's writability probe on the
+// non-account path is visible in the recorded calls — master never issued
+// that exec, and the tests below assert none is made. There is no
+// mount-type answer — the guard never asks one; mountinfo cannot say what
+// backs a mount and af never chowns through one.
 func nonRootChownScenarioStub(calls *[][]string, sc accountChownScenario) func(context.Context, []string, ...string) ([]byte, error) {
 	return func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		*calls = append(*calls, append([]string(nil), args...))
@@ -817,31 +818,71 @@ func TestPrepareNonAccountUser_AnyWorkspaceMountIsSkipped(t *testing.T) {
 	requireNoRootChownOn(t, calls, dockerWorkspaceDir)
 }
 
-// The R6 error contract on the non-account path: a mount at /workspace the
-// image's USER cannot write refuses at prepare, naming the mount and the
-// remedy — not a later clone "Permission denied".
-func TestPrepareNonAccountUser_UnwritableMountRefusesNamingTheMount(t *testing.T) {
+// #7571 review R8: the non-account path makes exactly master's docker calls
+// and returns master's result for every mount table — a mount at /workspace
+// the image's USER cannot write still warns and proceeds (master's only
+// signal is the warning; the writability probe and the refusal are the
+// account path's alone). A refusal here is the regression: master logged
+// and returned nil, so a probe-backed refusal is a NEW create-time failure.
+func TestPrepareNonAccountUser_UnwritableMountWarnsAndProceeds(t *testing.T) {
+	var warnings bytes.Buffer
+	log.CaptureOutput(t, log.WarningLog, "", &warnings)
 	var calls [][]string
 	t.Cleanup(SetDockerExecForTest(nonRootChownScenarioStub(&calls, accountChownScenario{
 		mountPoints: []string{dockerWorkspaceDir},
-		writable:    false,
+		writable:    false, // must not matter: the non-account path never probes
 	})))
 	p := &dockerProvisioner{containerID: "cid"}
-	err := p.prepareNonAccountUser()
-	require.Error(t, err)
-	for _, want := range []string{dockerWorkspaceDir, dockerNonRootImageUser, "writable", "docker.run_args"} {
-		assert.Containsf(t, err.Error(), want, "the refusal must name %q; err=%v", want, err)
+	require.NoError(t, p.prepareNonAccountUser(),
+		"an unwritable mount at /workspace must still proceed on the non-account path, exactly as on master")
+	for _, call := range calls {
+		assert.NotContains(t, strings.Join(call, " "), "test -w",
+			"the non-account path must not run the writability probe — master never did; call=%v", call)
 	}
 	requireNoRootChownOn(t, calls, dockerWorkspaceDir)
+	assert.Contains(t, warnings.String(), "not chowning it",
+		"the master's warning still reports the skipped chown; warnings=%q", warnings.String())
+	require.Equal(t, dockerNonRootImageUser, p.containerUser)
 }
 
-// #7571 review (Codex P2): the writability probe for a mounted target must
-// run AFTER the permitted ancestor chowns — a /workspace symlinked to
-// /root/workspace under a root-owned 0700 /root is unwritable to the image's
-// USER until the recursive HOME chown has re-owned /root, which is exactly
-// the session master's guard allowed to work. Ordering the probe after the
-// chown exec keeps that session working.
-func TestPrepareNonAccountUser_MountedDescendantIsProbedAfterAncestorChown(t *testing.T) {
+// The master-parity property stated in #7571 review R8, pinned as a call
+// count: prepareNonAccountUser issues master's three docker execs — the
+// `id -u` user probe, the mount-table read, and the mkdir+chown step — and
+// no fourth exec, whatever the mount table holds. Any extra exec (the
+// writability probe, an inspect) is a call master did not make.
+func TestPrepareNonAccountUser_MakesExactlyMastersDockerCalls(t *testing.T) {
+	for name, sc := range map[string]accountChownScenario{
+		"no mounts":            {},
+		"writable mount":       {mountPoints: []string{dockerWorkspaceDir}, writable: true},
+		"unwritable mount":     {mountPoints: []string{dockerWorkspaceDir}, writable: false},
+		"mount under home":     {mountPoints: []string{dockerContainerHome + "/cache"}},
+		"mounts at both":       {mountPoints: []string{dockerContainerHome, dockerWorkspaceDir}},
+		"unparseable-adjacent": {mountPoints: []string{"/var/lib/data"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls [][]string
+			t.Cleanup(SetDockerExecForTest(nonRootChownScenarioStub(&calls, sc)))
+			p := &dockerProvisioner{containerID: "cid"}
+			require.NoError(t, p.prepareNonAccountUser())
+			var execs [][]string
+			for _, call := range calls {
+				if len(call) > 0 && call[0] == "exec" {
+					execs = append(execs, call)
+				}
+			}
+			require.Len(t, execs, 3,
+				"prepareNonAccountUser must make exactly master's three docker execs (id probe, mount table, mkdir+chown); execs=%v", execs)
+		})
+	}
+}
+
+// #7571 review P2's ordering scenario as the non-account path still resolves
+// it on master: /workspace is a symlink to /root/workspace, which is a
+// mount; /root is rootfs, so the recursive HOME chown prunes the mount point
+// and re-owns /root itself — after which a user-writable bind mounted there
+// is traversable by the image's USER. The mounted workspace chown is skipped
+// with master's warning and NO writability probe or refusal runs.
+func TestPrepareNonAccountUser_MountedDescendantWarnsAndProceeds(t *testing.T) {
 	var warnings bytes.Buffer
 	log.CaptureOutput(t, log.WarningLog, "", &warnings)
 	var calls [][]string
@@ -857,39 +898,25 @@ func TestPrepareNonAccountUser_MountedDescendantIsProbedAfterAncestorChown(t *te
 		case strings.Contains(joined, "id -u"):
 			return []byte(dockerNonRootImageUser + "\n"), nil
 		case isMountTableExec(args):
-			// /workspace is a symlink to /root/workspace, which is itself a
-			// mount; /root is rootfs and is re-owned by the recursive chown.
 			return []byte(dockerContainerHome + "\n" + dockerContainerHome + "/workspace\n" +
 				mountinfoLine(1, "/", "overlay") + "\n" +
 				mountinfoLine(2, dockerContainerHome+"/workspace", "ext4") + "\n"), nil
-		case strings.Contains(joined, "test -w"):
-			// By the time the probe runs the stub's chown has "succeeded", so
-			// /root is traversable: the mounted dir is writable.
-			return nil, nil
 		default:
 			return nil, nil
 		}
 	}))
 	p := &dockerProvisioner{containerID: "cid"}
 	require.NoError(t, p.prepareNonAccountUser(),
-		"a user-writable mount beneath a HOME af just re-owned must keep working, as on master")
-	requireNoRootChownOn(t, calls, dockerContainerHome+"/workspace")
-	// The HOME chown exec must land before the writability probe. (The
-	// ancestor re-own is the prune form here, since the mount sits under
-	// HOME.)
-	chownIdx, probeIdx := -1, -1
-	for i, call := range calls {
-		joined := strings.Join(call, " ")
-		if chownIdx < 0 && strings.Contains(joined, "--user 0:0") && strings.Contains(joined, "chown") {
-			chownIdx = i
-		}
-		if strings.Contains(joined, "test -w") {
-			probeIdx = i
-		}
+		"a user-writable mount beneath a HOME af just re-owned keeps working, exactly as on master")
+	for _, call := range calls {
+		assert.NotContains(t, strings.Join(call, " "), "test -w",
+			"the non-account path must not run the writability probe — master never did; call=%v", call)
 	}
-	require.NotEqual(t, -1, chownIdx, "the HOME chown exec must run")
-	require.NotEqual(t, -1, probeIdx, "the writability probe must run for the mounted workspace")
-	assert.Less(t, chownIdx, probeIdx,
-		"the ancestor chown must execute before the mounted descendant is probed; calls=%v", calls)
+	requireNoRootChownOn(t, calls, dockerContainerHome+"/workspace")
+	// The recursive HOME chown still ran as a single root exec, with the
+	// mount under HOME named as a find -path prune entry.
+	joined := strings.Join(findExecCall(calls, "--user 0:0", "-prune"), " ")
+	assert.Contains(t, joined, "-path "+shellQuote(dockerContainerHome+"/workspace"),
+		"the mounted descendant must be a prune entry of the HOME chown; script=%v", joined)
 	assert.Contains(t, warnings.String(), "not chowning it")
 }

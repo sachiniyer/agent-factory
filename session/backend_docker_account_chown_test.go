@@ -951,3 +951,61 @@ func TestRootScriptChowns_CatchesOperandPositions(t *testing.T) {
 		})
 	}
 }
+
+// #7571 review P2, pinned on the account path where the probe runs: the
+// writability probe for a mounted target must run AFTER the permitted
+// ancestor chowns — a /workspace symlinked to /af-home/workspace under a
+// root-owned /af-home is unwritable to the account user until the HOME
+// chown has re-owned /af-home, which is exactly the session the ordering
+// keeps working. The probe running first would refuse a mount the just-
+// re-owned ancestor makes traversable.
+func TestPrepareAccountUser_MountedDescendantIsProbedAfterAncestorChown(t *testing.T) {
+	var warnings bytes.Buffer
+	log.CaptureOutput(t, log.WarningLog, "", &warnings)
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) == 0 {
+			return nil, nil
+		}
+		joined := strings.Join(args, " ")
+		switch {
+		case args[0] != "exec":
+			return nil, nil
+		case strings.Contains(joined, "stat -c %u:%g"):
+			return []byte(accountProbeOwner + "\n"), nil
+		case isAccountReadMountTableExec(args):
+			// /workspace is a symlink to /af-home/workspace, which is itself
+			// a mount; /af-home is rootfs and is re-owned by the HOME chown.
+			return []byte(dockerAccountRuntimeHome + "\n" + dockerAccountRuntimeHome + "/workspace\n" +
+				mountinfoLine(1, "/", "overlay") + "\n" +
+				mountinfoLine(2, dockerAccountRuntimeHome+"/workspace", "ext4") + "\n"), nil
+		case strings.Contains(joined, "test -w"):
+			// By the time the probe runs the stub's chown has "succeeded",
+			// so /af-home is traversable: the mounted dir is writable.
+			return nil, nil
+		default:
+			return nil, nil
+		}
+	}))
+	p := newAccountChownProvisioner(t)
+	require.NoError(t, p.prepareAccountUser(),
+		"a user-writable mount beneath a HOME af just re-owned must keep working")
+	requireNoRootChownOn(t, calls, dockerAccountRuntimeHome+"/workspace")
+	// The HOME chown exec must land before the writability probe.
+	chownIdx, probeIdx := -1, -1
+	for i, call := range calls {
+		joined := strings.Join(call, " ")
+		if chownIdx < 0 && strings.Contains(joined, "--user 0:0") && strings.Contains(joined, "chown") {
+			chownIdx = i
+		}
+		if strings.Contains(joined, "test -w") {
+			probeIdx = i
+		}
+	}
+	require.NotEqual(t, -1, chownIdx, "the HOME chown exec must run")
+	require.NotEqual(t, -1, probeIdx, "the writability probe must run for the mounted workspace")
+	assert.Less(t, chownIdx, probeIdx,
+		"the ancestor chown must execute before the mounted descendant is probed; calls=%v", calls)
+	assert.Contains(t, warnings.String(), "not chowning it")
+}

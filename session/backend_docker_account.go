@@ -945,6 +945,8 @@ func (p *dockerProvisioner) prepareAccountUser() error {
 			return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare the account-owned container home and workspace: %s: %w", strings.TrimSpace(string(out)), err), dockerOpRootExec)
 		}
 		return nil
+	}, func(s skippedMount) error {
+		return p.reportSkippedMount(s, owner)
 	})
 	if err != nil {
 		return err

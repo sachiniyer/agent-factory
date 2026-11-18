@@ -206,13 +206,14 @@ type skippedMount struct {
 // mountinfo cannot say what backs a mount (a host bind and a docker-managed
 // volume look identical there, and a "volume" can itself be bind-backed via
 // local-driver options), so only "/" is safe to write through. After the
-// permitted steps have EXECUTED — the ordering matters: a descendant mount's
-// writability probe must see the ancestors af just re-owned, e.g. a
-// root-owned 0700 HOME that a user-writable workspace bind sits beneath —
-// each skipped target is reported: a mount the session's user can already
-// write keeps the guard's warning, and one it cannot refuses with the mount
-// and the remedy named (#7563 R6).
-func (p *dockerProvisioner) prepareWithMountGuard(steps []string, points []string, owner string, targets []chownGuardTarget, execSteps func([]string) error) error {
+// permitted steps have EXECUTED — the ordering matters for the account
+// path's writability probe: a descendant mount's probe must see the
+// ancestors af just re-owned, e.g. a root-owned 0700 HOME that a
+// user-writable workspace bind sits beneath — each skipped target is handed
+// to onSkipped: the account path probes writability and refuses a mount the
+// session's user cannot write, while the non-account path keeps master's
+// warn-and-proceed behavior exactly (#7563 R6, #7571 review).
+func (p *dockerProvisioner) prepareWithMountGuard(steps []string, points []string, owner string, targets []chownGuardTarget, execSteps func([]string) error, onSkipped func(skippedMount) error) error {
 	var skipped []skippedMount
 	for _, target := range targets {
 		if mp := enclosingMount(points, target.real); mp == "/" {
@@ -225,21 +226,31 @@ func (p *dockerProvisioner) prepareWithMountGuard(steps []string, points []strin
 		return err
 	}
 	for _, s := range skipped {
-		if err := p.reportSkippedMount(s, owner); err != nil {
+		if err := onSkipped(s); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// reportSkippedMount reports a chown target af declined because it sits
-// inside the mount mp — no matter what backs the mount, af never chowns or
-// creates through it. When the session's user can already write the mounted
-// directory the skip costs the session nothing and the guard's warning
-// stands; when the user cannot — or the `test` probe cannot settle it —
-// provisioning refuses, naming the mount and the remedy, so the session's
-// ERROR is actionable rather than a later clone's bare "Permission denied"
-// (#7563 R6).
+// warnSkippedMount logs the skip of a chown target af declined because it
+// sits inside the mount mp — the same warning the non-account guard has
+// logged since #5424, and the warning the account path still logs when its
+// probe finds the mounted directory already writable by the session's user.
+func warnSkippedMount(s skippedMount, owner string) {
+	log.WarningLog.Printf("docker session %s %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure it is writable by that user", s.kind, s.real, s.mp, owner)
+}
+
+// reportSkippedMount is the ACCOUNT path's handler for a chown target af
+// declined because it sits inside the mount mp — no matter what backs the
+// mount, af never chowns or creates through it. When the session's user can
+// already write the mounted directory the skip costs the session nothing
+// and the guard's warning stands; when the user cannot — or the `test`
+// probe cannot settle it — provisioning refuses, naming the mount and the
+// remedy, so the session's ERROR is actionable rather than a later clone's
+// bare "Permission denied" (#7563 R6). The non-account path does not run
+// this: it keeps master's warn-and-proceed behavior (warnSkippedMount) for
+// every skipped mount (#7571 review R8).
 //
 // The probe is `test`, a /bin/sh builtin, run as the session's own user — no
 // PATH-resolved program decides the verdict. It runs after the rootfs
@@ -250,7 +261,7 @@ func (p *dockerProvisioner) reportSkippedMount(s skippedMount, owner string) err
 		"exec", "--user", owner, p.containerID, dockerContainerShell, "-c",
 		`test -w "$1" && test -x "$1"`, "sh", s.real)
 	if err == nil {
-		log.WarningLog.Printf("docker session %s %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure it is writable by that user", s.kind, s.real, s.mp, owner)
+		warnSkippedMount(s, owner)
 		return nil
 	}
 	probe := fmt.Sprintf("%v", err)
@@ -359,9 +370,9 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	// host bind, a named volume, an image VOLUME, a tmpfs (including via a
 	// symlinked HOME, which the resolved path above sees through) — is
 	// never chowned or created through, no matter what backs it. A skipped
-	// target the session's user cannot write refuses here with the mount
-	// and the remedy named, rather than surfacing later as the clone's
-	// "Permission denied" (#7563 R6).
+	// target warns and provisioning proceeds, exactly as on master — no
+	// writability probe and no refusal run on the non-account path
+	// (#7571 review R8).
 	err = p.prepareWithMountGuard(steps, points, owner, []chownGuardTarget{
 		{kind: "HOME", real: realHome, chown: chownRecursiveScript(realHome, owner, mountPointsUnder(points, realHome))},
 		{kind: "workspace", real: realWorkspace, chown: fmt.Sprintf("chown -h %s %s", owner, shellQuote(realWorkspace))},
@@ -372,6 +383,12 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 			return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare a writable HOME and workspace for the image's default user %s: %s: %w",
 				owner, strings.TrimSpace(string(out)), err), dockerOpRootExec)
 		}
+		return nil
+	}, func(s skippedMount) error {
+		// The non-account path behaves exactly as on master for every mount
+		// table: a skipped chown warns and provisioning proceeds — no
+		// writability probe, no refusal (#7571 review R8).
+		warnSkippedMount(s, owner)
 		return nil
 	})
 	if err != nil {
