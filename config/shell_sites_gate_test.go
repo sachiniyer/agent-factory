@@ -201,12 +201,12 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "vscodeStartGateScript, a const in the same file; the binary and its args arrive as \"$@\" " +
 			"positional parameters, never spliced into the script text",
 	}},
-	"session/backend_docker.go:(*dockerProvisioner).startAgentServer": {{
+	"session/backend_docker_agentserver.go:(*dockerProvisioner).startAgentServer": {{
 		class: afAuthored,
 		note: "af's own `af agent-server …` line. The operator's program is embedded, but shell-QUOTED as a " +
 			"--program argument; it reaches a shell only later, in the container, through the pane path above.",
 	}},
-	"session/backend_docker.go:(*dockerProvisioner).readBanner": {{
+	"session/backend_docker_agentserver.go:(*dockerProvisioner).readBanner": {{
 		class: afAuthored,
 		note: "the banner poll script — `cat <banner>; kill -0 $(cat <pidfile>)` — composed from af " +
 			"constants only; the operator's program name never reaches it",
