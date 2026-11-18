@@ -176,6 +176,19 @@ func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
 // outside a repo would see; switchProject is the only other writer to those
 // fields, so a re-scope here is the symmetric recovery for an in-session
 // action that removed the active identity from under the TUI.
+//
+// On every completion that may have landed (success, committed warning, or an
+// outcome the daemon may have applied with only the reply lost #4824) it ALSO
+// invalidates the retained project picker. The overlay builds its row list
+// once at open time and nothing here rebuilds it, so the just-deleted project
+// would remain a selectable row; Enter would re-commit a switch into the
+// deleted project and revive the zombie active scope the rescope cleared.
+// Retained includes a picker hidden behind its own D-launched delete
+// confirmation (stateConfirm): the invalidation fires whatever the model's
+// state so the confirmation's cancel cannot restore the stale rows. A
+// definitive refusal leaves the picker open: nothing reached the daemon, so
+// the project is still registered and its rows are accurate. This mirrors the
+// rebind flow, which closes the picker on every owned async outcome.
 func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) {
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committedWarning {
@@ -185,6 +198,16 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 		// checks it before deleting again.
 		if mutationOutcomeUnknown(msg.err) {
 			m.refreshSidebarProjects()
+			// The delete may have landed with only the reply lost, so an open
+			// picker's rows are stale in exactly the way the success path's
+			// are: the deleted project would remain a selectable row, and
+			// Enter would re-commit a switch into a project the daemon may
+			// have removed. Tear it down so the user re-opens (Ctrl+P) to see
+			// the refreshed list, mirroring the rebind flow's "outcome
+			// unknown" handling. A definitive refusal (the fall-through return
+			// below) leaves the picker open: nothing reached the daemon, so
+			// the project is still there and its rows are not stale.
+			m.invalidateProjectPicker()
 			return m, m.handleError(mutationOutcomeError(
 				fmt.Sprintf("deleting project '%s'", msg.name), "the projects list", msg.err))
 		}
@@ -292,6 +315,25 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 			m.syncFocus()
 		}
 	}
+	// Invalidate the retained project picker now that the delete has
+	// completed. The overlay builds its row list once at open time
+	// (pre-selecting the active project) and nothing here rebuilds it, so the
+	// deleted project would remain a selectable row; Enter would then run the
+	// normal switch flow (repoContextForSelection still resolves — delete
+	// leaves the git repo on disk in local mode, and remote mode fabricates a
+	// context from the row without a registry re-check) and re-commit a
+	// switch into the project just deleted, reviving the zombie active scope
+	// the rescope above cleared. "Retained" covers a picker hidden behind its
+	// own D-launched delete confirmation (stateConfirm) too: the
+	// confirmation's OnCancel restores stateSwitchProject, and without the
+	// invalidation it would re-show the stale rows (#7525 review).
+	// Mirroring the rebind flow, which closes the picker on every owned async
+	// outcome, the delete tears the stale picker down; a subsequent Ctrl+P —
+	// or that confirmation's cancel — rebuilds rows from the refreshed list
+	// at open time. Runs after the rescope/refresh/focus block so those run
+	// against a fully-loaded model, then the close re-homes state/focus to
+	// default.
+	m.invalidateProjectPicker()
 	success := m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.killed))
 	if committedWarning {
 		return m, tea.Batch(success, m.handleError(msg.err))

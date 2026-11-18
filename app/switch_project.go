@@ -629,7 +629,25 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount}, m.projectPickerOverlay.SnapshotDegraded())
 			if m.state == stateConfirm && m.confirmationOverlay != nil {
-				m.confirmationOverlay.OnCancel = func() { m.state = stateSwitchProject }
+				// Cancel returns to the picker underneath — while it IS still
+				// the picker this dialog opened over. A delete completing
+				// while the confirmation is open invalidates the retained
+				// overlay (invalidateProjectPicker): its rows were captured
+				// before that delete and cannot be shown again. The pointer
+				// check is how cancel tells its own picker from one the
+				// completion tore down; an invalidated one is replaced by a
+				// fresh build — the same fetch Ctrl+P performs — so Esc still
+				// returns to a picker, just one whose rows postdate the delete,
+				// never the captured set that could re-enter the deleted
+				// project.
+				picker := m.projectPickerOverlay
+				m.confirmationOverlay.OnCancel = func() {
+					if m.projectPickerOverlay == picker {
+						m.state = stateSwitchProject
+					} else {
+						m.showProjectPickerOverlay()
+					}
+				}
 			}
 			return model, cmd
 		}
@@ -767,6 +785,42 @@ func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
 func (m *home) closeProjectPicker() {
 	m.projectPickerOverlay = nil
 	m.state = stateDefault
+}
+
+// invalidateProjectPicker drops the retained project-picker overlay when an
+// async delete completes. The overlay builds its row list once at open time
+// (pre-selecting the active project), and nothing on the add/delete/rebind
+// completion paths rebuilds it, so a project a mutation just removed would
+// remain a selectable row; Enter would then re-commit a switch into the deleted
+// project, reviving the zombie active scope the #4741 rescope had just cleared.
+//
+// "Retained" is broader than "open": a picker launched `D` stays live
+// underneath its own delete confirmation (stateConfirm) so cancel can return
+// to it — a state-scoped close would skip it there, and the confirmation's
+// OnCancel would restore stateSwitchProject over the stale rows (#7525
+// review). The overlay is therefore dropped whatever the model's state; the
+// state reset fires only when the picker was the visible overlay, leaving a
+// confirmation or any other view sitting over it alone. What replaces it — if
+// anything — is not decided here: an open picker's user re-opens with Ctrl+P,
+// and a cancelled picker-confirmation rebuilds through its OnCancel, both
+// landing on rows built after the delete — exactly as the rebind flow's "the
+// refreshed list is where the user sees what happened" convention prescribes.
+//
+// Used by handleProjectDeleted to mirror the rebind flow, which closes the
+// picker on every owned async outcome. The delete flow carries no ownership
+// token (the rebind flow does), so a delete dispatched from one picker
+// invalidates one reopened mid-flight; the race rebuilds from the
+// still-current registry and dismisses rather than re-enters, so it is a
+// transient dismissal rather than the correctness hazard the invalidation
+// prevents.
+func (m *home) invalidateProjectPicker() {
+	if m.projectPickerOverlay == nil {
+		return
+	}
+	m.projectPickerOverlay = nil
+	if m.state == stateSwitchProject {
+		m.state = stateDefault
+	}
 }
 
 // resolveSwitchProjectConfig is the incoming project's config read, a seam so
