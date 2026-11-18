@@ -95,12 +95,27 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 	if anchor < 0 {
 		return StagedDraftUnreadable, "no composer-glyph row is visible"
 	}
-	// The staged check searches the composer REGION — the rows boundEvidence
-	// itself searched — never every row below the glyph: the status/footer
-	// line under the composer is not the draft, and a bound tail that appears
-	// only there ("bypass permissions on" under a short "on" send) must not
-	// read staged (Codex #7547).
-	region := normalizeDelivery(strings.Join(composerRegion(rows, anchor), ""))
+	// The staged check searches the composer region — never every row below
+	// the glyph: the status/footer line under the composer is not the draft,
+	// and a bound tail that appears only there ("bypass permissions on"
+	// under a short "on" send) must not read staged (Codex #7547). But
+	// composerRegion also stops at the first content row after an interior
+	// blank, and a draft that wraps past a blank line is textually the same
+	// shape as a footer — so the frame's own border makes the call, exactly
+	// the way draftClosedByFrame judges it for ComposerDraftPresent: a hard
+	// border below the stranded content proves it interior (a multiline
+	// draft's tail must not read Gone and close the watch), no border proves
+	// it the footer.
+	regionEnd := anchor + len(composerRegion(rows, anchor))
+	if draftClosedByFrame(rows, anchor) {
+		for k := regionEnd; k < len(rows); k++ {
+			if composerHardBorder(rows[k]) {
+				break
+			}
+			regionEnd = k + 1
+		}
+	}
+	region := normalizeDelivery(strings.Join(rows[anchor:regionEnd], ""))
 	switch {
 	case ev.tail != "" && strings.Contains(region, ev.tail):
 		return StagedDraftStaged, "the send's bound text is still in the live composer"

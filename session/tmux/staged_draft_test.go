@@ -92,6 +92,40 @@ func TestStagedDraftReading(t *testing.T) {
 			want: StagedDraftGone,
 		},
 		{
+			// composerRegion stops at the first content row after an
+			// interior blank, so a multiline draft's tail read Gone and
+			// closed the watch for good (Codex #7547). The frame's own
+			// border proves the stranded row interior — the tail still
+			// reads staged.
+			name: "a bound tail below an interior blank is still staged",
+			pane: strings.Join([]string{
+				"✻ Cogitated for 4m 47s · done 3:53 AM",
+				"❯ first paragraph",
+				"",
+				"  final instruction",
+				"────────────────────────────────────────────────────────────────────────────────",
+				"",
+				"  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)",
+			}, "\n"),
+			ev:   stagedDraftEvidence{tail: normalizeDelivery("firstparagraphfinalinstruction")},
+			want: StagedDraftStaged,
+		},
+		{
+			// The same stranded-content shape WITHOUT a border closing
+			// the frame below it is the footer, not the draft — the
+			// border judgment is what keeps the interior-blank fix from
+			// reopening the footer leak.
+			name: "content past an unbordered blank is still the footer",
+			pane: strings.Join([]string{
+				"✻ Cogitated for 4m 47s · done 3:53 AM",
+				"❯",
+				"",
+				"  " + stagedTailText,
+			}, "\n"),
+			ev:   stagedTailEvidence(),
+			want: StagedDraftGone,
+		},
+		{
 			// A user's own typed draft is never flagged as af's: it
 			// carries none of the bound evidence, so the send's watch
 			// ends rather than matching arbitrary composer contents.
