@@ -123,6 +123,11 @@ func (p *dockerProvisioner) reap() error {
 		return nil
 	}
 	reapErr := fmt.Errorf("backend=docker: `docker rm -f %s` failed: %s: %w", p.shortID(), strings.TrimSpace(string(out)), err)
+	if strings.Contains(string(out), "No such container") {
+		// An answered "No such container" proves the container gone — the same
+		// certainty a successful rm gives — so the staging dir releases too.
+		p.clearStagingDir()
+	}
 	// The #914 guard: classify a TIMEOUT only when err != nil AND the ctx deadline
 	// tripped, so a bare exec.ErrWaitDelay that dockerExec already normalized to
 	// success (err == nil) never reaches here.
