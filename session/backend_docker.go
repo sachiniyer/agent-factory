@@ -356,18 +356,21 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
-	p.warnBlankedCredentialNames()
 	return res, nil
 }
 
 // warnBlankedCredentialNames emits the once-per-session migration warning
 // for the classified names the image or docker.run_args had actually set —
-// names only, values never inspected (#7526). It runs after the container
-// exists because the image side of the warning must describe the image the
-// container ACTUALLY runs — resolved off the created container — not
-// whatever the configured tag inspected as before `docker run` pulled or
-// updated it (#7531). When that inspect fails, say so and warn over run_args
-// names alone; the pins are already in argv either way.
+// names only, values never inspected (#7526). It runs immediately after the
+// container exists, BEFORE the dependent steps (trust, clone, agent-server):
+// the image side must describe the image the container ACTUALLY runs —
+// resolved off the created container, not whatever the configured tag
+// inspected as before `docker run` pulled or updated it — and a blanked
+// name a later step depended on (a proxy or private CA the clone needs)
+// would make provisioning fail first, so the session most in need of the
+// passthrough remedy would never see it (#7531). When that inspect fails,
+// say so and warn over run_args names alone; the pins are already in argv
+// either way.
 func (p *dockerProvisioner) warnBlankedCredentialNames() {
 	if len(p.credentialMounts) == 0 {
 		return
@@ -501,6 +504,11 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.runContainer(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
+	// Warn NOW, while the only thing that exists is the created container:
+	// a blanked name a dependent step needs (proxy/CA for the clone) makes
+	// that step fail, and the error path reaps without ever reaching a
+	// post-provision warning (#7531).
+	p.warnBlankedCredentialNames()
 	// The account boundary, verified against the RUNNING container before anything
 	// touches it (#3598). The lexical run_args guard reads strings and cannot see a
 	// symlink in the repository-selected image; this reads what Docker configured
@@ -702,14 +710,18 @@ func (p *dockerProvisioner) runContainer() error {
 		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_SYSTEM") {
 			args = append(args, "-e", "GIT_CONFIG_SYSTEM=/etc/gitconfig")
 		}
-		// Late-loaded endpoint names whose agent treats defined-empty as a
-		// real value rather than falling back to its default (gemini reads
-		// CODE_ASSIST_ENDPOINT with a nullish coalesce): pinning them empty
-		// would break the endpoint, so af re-asserts the first-party default
-		// after run_args — the .env loader sees a defined name and a repo
-		// value is dominated by last-wins (#7531). Operator-forwarded names
-		// keep the operator's value.
-		for _, entry := range credentialMountFirstPartyEntries(p.agentName(), p.spec.SessionEnvPassthrough) {
+		// Value re-asserts for the names an empty pin would break: late-loaded
+		// endpoint names whose agent treats defined-empty as a real value
+		// rather than falling back to its default (gemini reads
+		// CODE_ASSIST_ENDPOINT with a nullish coalesce), and the shared
+		// program-selector names where empty literally names "" as the
+		// program (measured: `GIT_SSH_COMMAND=` fails every SSH transport
+		// `cannot run : No such file or directory`, which would break
+		// cloneWorkspace for ssh origins). Re-asserted after run_args, the
+		// .env loader sees a defined name and a repo value is dominated by
+		// last-wins (#7531). Operator-forwarded names keep the operator's
+		// value.
+		for _, entry := range credentialMountReassertEntries(p.agentName(), p.spec.SessionEnvPassthrough) {
 			args = append(args, "-e", entry)
 		}
 	}

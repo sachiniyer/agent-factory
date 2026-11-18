@@ -444,6 +444,11 @@ func ImportedCredentialNames() []string {
 			set[name] = struct{}{}
 		}
 	}
+	for _, names := range accountLateEnvironmentValues {
+		for name := range names {
+			set[name] = struct{}{}
+		}
+	}
 	for name := range accountShellStartupNames {
 		set[name] = struct{}{}
 	}

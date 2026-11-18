@@ -3,11 +3,13 @@ package session
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -247,4 +249,117 @@ func TestWarnBlankedCredentialNames_SaysWhenImageEnvUnreadable(t *testing.T) {
 		"an unreadable image environment must be logged, not silently skipped")
 	require.Contains(t, out, "NODE_EXTRA_CA_CERTS",
 		"the warning still names what run_args set even when the image side cannot be read")
+}
+
+// TestRunContainer_ReassertsProgramSelectors is the second half of the
+// "re-asserted name keeps the program WORKING" property (#7531 review): the
+// shared program-selector names are emitted with real working values after
+// run_args, never as empty pins — measured on git 2.43, a defined-empty
+// GIT_SSH_COMMAND names "" as the executable and every SSH transport fails
+// `cannot run : No such file or directory`, which would break af's own
+// cloneWorkspace for ssh origins.
+func TestRunContainer_ReassertsProgramSelectors(t *testing.T) {
+	runCalled, _, runArgv := provisionDockerCredentialGrant(t, tmux.ProgramGemini,
+		[]string{"--add-host", "repo.internal:10.0.0.1"})
+	require.True(t, runCalled)
+
+	// The contract is literal, not table-derived: these are the working
+	// values the boundary must emit — `ssh` restores git's own default via
+	// the re-asserted image PATH, /bin/false is a working program that never
+	// answers a prompt, /bin/cat keeps tty paging readable.
+	want := map[string]string{
+		"GIT_SSH":         "ssh",
+		"GIT_SSH_COMMAND": "ssh",
+		"GIT_ASKPASS":     "/bin/false",
+		"SSH_ASKPASS":     "/bin/false",
+		"EDITOR":          "/bin/false",
+		"VISUAL":          "/bin/false",
+		"PAGER":           "/bin/cat",
+	}
+	for name, value := range want {
+		entry := name + "=" + value
+		idx := indexIn(runArgv, entry)
+		require.Greaterf(t, idx, 0,
+			"%s must be re-asserted to a working value (%q), not pinned empty — git runs a defined-empty selector literally", name, entry)
+		require.Equal(t, "-e", runArgv[idx-1], "%s must be a -e emission", entry)
+		require.Greater(t, idx, indexIn(runArgv, "--add-host"),
+			"%s must land after run_args so last-wins dominates a repo-supplied value", entry)
+	}
+	joined := strings.Join(runArgv, "\x00")
+	for name := range want {
+		require.NotContains(t, joined, "-e\x00"+name+"=\x00",
+			"%s pinned defined-and-empty is the broken form this test exists to forbid", name)
+	}
+}
+
+// TestRunContainer_OperatorForwardKeepsProgramSelector: an operator who
+// forwards a program-selector name through session_env_passthrough keeps
+// their own value — af must not re-assert over it.
+func TestRunContainer_OperatorForwardKeepsProgramSelector(t *testing.T) {
+	runCalled, _, runArgv := provisionDockerCredentialGrantPassthrough(t, tmux.ProgramGemini,
+		nil, []string{"GIT_SSH_COMMAND"})
+	require.True(t, runCalled)
+	require.Equal(t, -1, indexIn(runArgv, "GIT_SSH_COMMAND="+credentialMountSharedProgramEntries["GIT_SSH_COMMAND"]),
+		"an operator-forwarded selector keeps the operator's value — the re-assert must not override it")
+}
+
+// TestProvision_WarnsBeforeDependentStepFails is the review finding on the
+// warning's position: a blanked name a dependent step needed (a proxy or CA
+// for the clone) makes THAT step fail, and the error path reaps the
+// container — so the warning must fire immediately after the container
+// exists, before any dependent step can take the session down. Here the
+// step after container creation fails and the warning still names the
+// image-supplied name.
+func TestProvision_WarnsBeforeDependentStepFails(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	t.Setenv("DOCKER_CONTEXT", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCredFile(t, filepath.Join(home, ".gemini/oauth_creds.json"))
+	_ = forceCredentialMountMode(t)
+	cfg := config.DefaultConfig()
+	cfg.DockerMountAgentCredentials = true
+	require.NoError(t, config.SaveConfig(cfg))
+
+	repoRoot := initTempGitRepo(t)
+	writeInRepoConfig(t, repoRoot, map[string]any{
+		"backend": "docker",
+		"docker":  map[string]any{"image": "example.invalid/agent:latest"},
+	})
+
+	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
+	t.Cleanup(SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af")))
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "info":
+			return []byte("credential-test-engine\n"), nil
+		case len(args) > 0 && args[0] == "run":
+			return []byte(dockerCreatedID + "\n"), nil
+		case len(args) > 0 && args[0] == "inspect":
+			return []byte("sha256:resolved\n"), nil
+		case len(args) > 1 && args[0] == "image" && args[1] == "inspect":
+			return []byte(`["HTTPS_PROXY=http://corp-proxy:8080"]`), nil
+		case len(args) > 0 && (args[0] == "rm" || args[0] == "stop" || args[0] == "kill"):
+			return nil, nil // the failure-path reap may clean up freely
+		default:
+			// Every dependent step after container creation fails here —
+			// the warning must already have fired by then.
+			return nil, fmt.Errorf("dependent step failed: %v", args)
+		}
+	}))
+
+	buf := captureWarningLog(t)
+	_, err := (dockerRuntime{}).Provision(ProvisionSpec{
+		RepoRoot: repoRoot,
+		Title:    "warn-order",
+		Program:  tmux.ProgramGemini,
+		CloneURL: "file:///fixture.git",
+	})
+	require.Error(t, err, "this fixture's dependent steps must fail — the test proves the warning precedes them")
+	out := buf.String()
+	require.Contains(t, out, "HTTPS_PROXY",
+		"the blanked-name warning must fire before the dependent step that the blanked name broke")
+	require.Contains(t, out, "session_env_passthrough",
+		"the warning must still carry its operator remedy")
 }

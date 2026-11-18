@@ -262,7 +262,12 @@ user's real home and mounts it only if it exists, so:
       the mount's real roots, `SHELL` to `/bin/sh`, `PATH` to the image's own
       `Config.Env` `PATH`, `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to the
       locations git would consult under the boundary's own roots (an empty
-      pin there is not neutral — it breaks `git config --global`), and — for
+      pin there is not neutral — it breaks `git config --global`), the
+      program-selector names to working defaults — `GIT_SSH`/`GIT_SSH_COMMAND`
+      to `ssh` (empty literally names `""` as the executable and every SSH
+      transport fails), `GIT_ASKPASS`/`SSH_ASKPASS`/`EDITOR`/`VISUAL` to
+      `/bin/false` (a working program that never answers a prompt), and
+      `PAGER` to `/bin/cat` — and, for
       gemini, whose `.env` loader fills only unset names but treats a
       defined-empty endpoint as real — `CODE_ASSIST_ENDPOINT` to its
       first-party default — so tmux's `default-shell -c` chain, af's own
@@ -300,12 +305,15 @@ user's real home and mounts it only if it exists, so:
     a corporate `HTTPS_PROXY`, a private CA bundle, a private-cloud
     `OPENAI_BASE_URL` — af now blanks it and logs a **WARNING once per
     session** naming each blanked variable (names only, never values) with the
-    remedy: forward the name through `session_env_passthrough`. The image side
-    of that warning is read off the image the container actually runs —
-    resolved after `docker run` — not the configured tag's pre-run metadata,
-    which may name a different image than the one that just pulled; if it
-    cannot be inspected, the warning says so and covers `docker.run_args`
-    names only. A repo-set `docker.run_args` entry for one is refused outright
+    remedy: forward the name through `session_env_passthrough`. The warning
+    fires the moment the container exists — before the clone, git, and
+    agent-server steps that a blanked name could break — so a session whose
+    provisioning fails on a blanked proxy or CA still logs the remedy. The
+    image side is read off the image the container actually runs — resolved
+    after `docker run` — not the configured tag's pre-run metadata, which
+    may name a different image than the one that just pulled; if it cannot
+    be inspected, the warning says so and covers `docker.run_args` names
+    only. A repo-set `docker.run_args` entry for one is refused outright
     with the same remedy in the error.
 
     **What still trusts the image and the repo.** The pins cover the

@@ -213,10 +213,35 @@ var accountCredentialNames = map[string]map[string]struct{}{
 // so this brings the local shim's boundary into line with the container's rather
 // than inventing a shape.
 var accountLateEnvironmentNames = map[string]map[string]struct{}{
+	// The three routing names join the identity pins for the same late-source
+	// reason: a repository `.env` can claim an endpoint or API-version selector
+	// after the boundary and route the ACCOUNT's token wherever it says.
+	// Pinning them defined-and-empty is falsy-safe for all three — gemini reads
+	// each through a falsy check that falls back to the first-party default —
+	// and it is unconditional for a reason beyond the `.env` hole: on the
+	// account-bound CONTAINER path the ambient environment is repo-influenced
+	// (the chosen image's ENV, docker.run_args), so a keep-what-is-set rule
+	// cannot tell the operator's gateway from the repository's (#7531).
 	"gemini": nameSet(
 		"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
 		"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
+		"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL",
+		"CODE_ASSIST_API_VERSION",
 	),
+}
+
+// accountLateEnvironmentValues is the same late-source defense for the ONE
+// routing name an empty pin cannot hold: gemini reads CODE_ASSIST_ENDPOINT
+// through a nullish coalesce, so defined-and-empty is a real — broken —
+// endpoint rather than a fallback. It is dropped from the ambient
+// environment (the same unconditional treatment: an image or run_args value
+// on the account-bound container path is repo-controlled) and installed
+// with the first-party default, so the `.env` loader finds the name defined
+// AND the endpoint actually works (#7531).
+var accountLateEnvironmentValues = map[string]map[string]string{
+	"gemini": {
+		"CODE_ASSIST_ENDPOINT": "https://cloudcode-pa.googleapis.com",
+	},
 }
 
 // accountLaunchProvenAgents answers a DIFFERENT question from accountConfigVars,
@@ -359,6 +384,9 @@ func AccountIdentityNames(agent string) []string {
 	}
 	denied := accountScopedNames(agent, configVar)
 	for name := range accountLateEnvironmentNames[agent] {
+		denied[name] = struct{}{}
+	}
+	for name := range accountLateEnvironmentValues[agent] {
 		denied[name] = struct{}{}
 	}
 	out := make([]string, 0, len(denied))
@@ -525,7 +553,13 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	for _, name := range pinned {
 		denied[name] = struct{}{}
 	}
-	out := make([]string, 0, len(env)+len(pinned)+1)
+	filled := make([]string, 0, len(accountLateEnvironmentValues[account.Agent]))
+	for name, value := range accountLateEnvironmentValues[account.Agent] {
+		denied[name] = struct{}{}
+		filled = append(filled, name+"="+value)
+	}
+	sort.Strings(filled)
+	out := make([]string, 0, len(env)+len(pinned)+len(filled)+1)
 	for _, kv := range env {
 		name, _, found := strings.Cut(kv, "=")
 		if !found {
@@ -545,6 +579,12 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	// what the session actually authenticates with.
 	for _, name := range pinned {
 		out = append(out, name+"=")
+	}
+	// DEFINED AND VALUED for the name an empty pin would break: the `.env`
+	// loader sees a defined name it cannot claim, and the agent sees the
+	// first-party endpoint rather than an empty one it would use literally.
+	for _, entry := range filled {
+		out = append(out, entry)
 	}
 	// Appended last so it wins over any ambient copy that survived, though the
 	// removal above means there should not be one.
@@ -593,7 +633,15 @@ var accountNonCredentialNames = map[string]map[string]struct{}{
 	// a cloud mode on AFTER that refusal has had its look, and a session that
 	// silently moved onto Vertex is not the operator's deployment choice being
 	// respected (#3609 review).
+	// The four routing names are classified kept for the taxonomy — they carry
+	// no identity of their own — but they are NOT passed through: each sits in
+	// accountLateEnvironmentNames or accountLateEnvironmentValues, so the
+	// ambient copy is dropped and the name is installed defined (empty for the
+	// falsy-safe reads, the first-party endpoint for CODE_ASSIST_ENDPOINT).
+	// A repository `.env` finds every one already set (#7531).
 	"gemini": nameSet(
 		"GEMINI_CLI_HOME", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
+		"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL",
+		"CODE_ASSIST_ENDPOINT", "CODE_ASSIST_API_VERSION",
 	),
 }

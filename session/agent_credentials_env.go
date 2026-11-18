@@ -28,7 +28,8 @@ import (
 //   - config-root: a name that relocates where the agent reads its credential
 //     or config — CODEX_HOME, CLAUDE_CONFIG_DIR, OPENCODE_CONFIG{,_DIR} — plus
 //     the names af re-asserts to real values rather than blanking (HOME/XDG
-//     roots, the path-valued git config roots, SHELL, PATH), and the shared
+//     roots, the path-valued git config roots, the program-selector
+//     defaults, SHELL, PATH), and the shared
 //     names that relocate credential-bearing state (the GnuPG home, the
 //     runtime dir sockets resolve under).
 //   - routing: a name that changes WHERE the agent sends the credential —
@@ -166,21 +167,36 @@ var credentialMountSharedConfigRootNames = map[string]struct{}{
 	"XDG_RUNTIME_DIR":     {},
 }
 
-// credentialMountSharedProgramNames are common-allowlist names that select a
-// PROGRAM af's tools or the agent run inside the container — the same class
-// as SHELL/PATH. git spawns the askpass and GIT_SSH commands to answer
+// credentialMountSharedProgramEntries are common-allowlist names that select
+// a PROGRAM af's tools or the agent run inside the container — the same
+// class as SHELL/PATH. git spawns the askpass and GIT_SSH commands to answer
 // credential prompts, so a repo-chosen value runs a repository binary that
 // receives the credential question; EDITOR/VISUAL/PAGER run whenever a tool
-// opens one. They are pinned defined-and-empty: an unset askpass or editor
-// falls back to the tool's own default, which no repository file reaches.
-var credentialMountSharedProgramNames = map[string]struct{}{
-	"GIT_SSH":         {},
-	"GIT_SSH_COMMAND": {},
-	"GIT_ASKPASS":     {},
-	"SSH_ASKPASS":     {},
-	"EDITOR":          {},
-	"VISUAL":          {},
-	"PAGER":           {},
+// opens one. They take REAL re-asserted values rather than empty pins
+// because a program-selector name must keep the program WORKING: measured
+// on git 2.43, `GIT_SSH_COMMAND=` is treated as the executable choice and
+// every SSH transport fails `cannot run : No such file or directory`, which
+// breaks af's own cloneWorkspace for ssh origins (#7531). The values:
+//   - GIT_SSH/GIT_SSH_COMMAND re-assert git's own default `ssh`, resolved
+//     through the re-asserted image PATH — the image's binaries are the
+//     declared residual trust here.
+//   - GIT_ASKPASS/SSH_ASKPASS re-assert /bin/false: a working program that
+//     never answers — an empty name is not a safe fallback when the pane
+//     HAS a tty (tmux) and an unset askpass would prompt on it.
+//   - EDITOR/VISUAL re-assert /bin/false so an interactive `git commit`
+//     fails clearly instead of silently accepting the template via
+//     `sh -c ""`.
+//   - PAGER re-asserts /bin/cat: under the pane's tty git auto-pages, and
+//     an empty PAGER runs `sh -c ""`, which exits 0 and swallows the
+//     output entirely.
+var credentialMountSharedProgramEntries = map[string]string{
+	"GIT_SSH":         "ssh",
+	"GIT_SSH_COMMAND": "ssh",
+	"GIT_ASKPASS":     "/bin/false",
+	"SSH_ASKPASS":     "/bin/false",
+	"EDITOR":          "/bin/false",
+	"VISUAL":          "/bin/false",
+	"PAGER":           "/bin/cat",
 }
 
 // credentialMountSharedAFStateNames are af's own state and control-plane
@@ -410,7 +426,9 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 	add(credentialMountSharedCredentialNames)
 	add(credentialMountSharedRoutingNames)
 	add(credentialMountSharedConfigRootNames)
-	add(credentialMountSharedProgramNames)
+	for name := range credentialMountSharedProgramEntries {
+		denied[name] = struct{}{}
+	}
 	add(credentialMountSharedAFStateNames)
 	add(credentialMountReassertedNames)
 	add(credentialMountProgramLoaderNames)
@@ -446,8 +464,8 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	if _, ok := credentialMountSharedConfigRootNames[name]; ok {
 		return "it can redirect where the agent reads credential-bearing state", true
 	}
-	if _, ok := credentialMountSharedProgramNames[name]; ok {
-		return "it chooses which program af's tools or the agent run in the container", true
+	if _, ok := credentialMountSharedProgramEntries[name]; ok {
+		return "it chooses which program af's tools or the agent run in the container, and af re-asserts a working default after run_args", true
 	}
 	if _, ok := credentialMountSharedAFStateNames[name]; ok {
 		return "it relocates af's own state or falsifies af's session and tool selection", true
@@ -584,8 +602,13 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 		}
 		// The first-party names take their real default value, not an empty
 		// pin: the agents that read them treat defined-empty as a real
-		// endpoint rather than falling back.
+		// endpoint rather than falling back. The shared program selectors
+		// re-assert a working default for the same reason — defined-empty
+		// names the empty string as the program and breaks the tool.
 		if _, firstParty := credentialMountFirstPartyNames[agent][name]; firstParty {
+			continue
+		}
+		if _, program := credentialMountSharedProgramEntries[name]; program {
 			continue
 		}
 		if _, ok := forwarded[name]; ok {
@@ -673,18 +696,26 @@ func dockerRunArgsEnvNames(args []string) []string {
 	return names
 }
 
-// credentialMountFirstPartyEntries returns the sorted NAME=value re-asserts
-// runContainer emits after run_args for the agent's first-party endpoint
-// names — the names af cannot pin empty because the agent reads a defined
-// empty value as real configuration. A name the operator forwards is
-// skipped: their forwarded -e NAME already carries their approved value.
-func credentialMountFirstPartyEntries(agent string, passthrough []string) []string {
+// credentialMountReassertEntries returns the sorted NAME=value re-asserts
+// runContainer emits after run_args: the agent's first-party endpoint
+// names plus the shared program-selector defaults — the names af cannot
+// pin empty because a defined empty value is itself a real (broken)
+// configuration. A name the operator forwards is skipped: their forwarded
+// -e NAME already carries their approved value.
+func credentialMountReassertEntries(agent string, passthrough []string) []string {
 	forwarded := make(map[string]struct{}, len(passthrough))
 	for _, name := range passthrough {
 		forwarded[name] = struct{}{}
 	}
-	out := make([]string, 0, len(credentialMountFirstPartyNames[agent]))
+	values := make(map[string]string, len(credentialMountSharedProgramEntries)+len(credentialMountFirstPartyNames[agent]))
+	for name, value := range credentialMountSharedProgramEntries {
+		values[name] = value
+	}
 	for name, value := range credentialMountFirstPartyNames[agent] {
+		values[name] = value
+	}
+	out := make([]string, 0, len(values))
+	for name, value := range values {
 		if _, ok := forwarded[name]; ok {
 			continue
 		}
