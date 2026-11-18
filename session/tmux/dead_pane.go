@@ -195,6 +195,12 @@ func (t *TmuxSession) readPaneRow(budget time.Duration) (paneRow, error) {
 	if row.pid <= 0 {
 		return paneRow{}, fmt.Errorf("unexpected pane pid output %q", string(output))
 	}
+	// The pane query answered — stamp the server it answered from (#7469)
+	// here, while the row is in hand: callers that return early because the
+	// root is already gone or uninspectable would otherwise leave a stale
+	// record standing, and a replacement server's own survivors would then
+	// be judged foreign against the old identity (Codex on #7469).
+	t.noteServerIdentity(row.server)
 	return row, nil
 }
 
@@ -239,9 +245,6 @@ func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
 	// vanished-session sweep can admit only what the recorded root's kernel
 	// session still leads — never an env-marker scan's unverifiable finds.
 	t.reconcilePaneRootEvidence(paneRootAnswer{resolved: proc})
-	// And beside it the server the pane answered from (#7469): the sweep
-	// judges a detached marked carrier against this identity.
-	t.noteServerIdentity(row.server)
 	return proc, nil
 }
 

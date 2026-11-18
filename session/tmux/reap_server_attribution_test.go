@@ -46,6 +46,15 @@ func TestCarrierServerVerdict_ForeignSocketInTmuxEnv(t *testing.T) {
 	got = tmuxEnvServerVerdict(foreignSock+",notapid,3", own, "pidns:test")
 	require.Equal(t, serverVerdictUndecidable, got,
 		"a malformed tuple cannot be trusted as foreign evidence")
+
+	// A socket path that itself CONTAINS a comma — tmux writes the path
+	// verbatim — is still genuine evidence: the tuple is anchored on its
+	// last two fields, never on a three-field count.
+	commaSock := filepath.Join(t.TempDir(), "user,tmux.sock")
+	require.NoError(t, os.WriteFile(commaSock, nil, 0o600))
+	got = tmuxEnvServerVerdict(commaSock+",9999,3", own, "pidns:test")
+	require.Equal(t, serverVerdictForeign, got,
+		"a comma inside the socket path must not break the tuple parse")
 }
 
 func TestCarrierServerVerdict_SameSocketDifferentServerPid(t *testing.T) {

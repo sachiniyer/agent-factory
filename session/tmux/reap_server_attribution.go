@@ -94,19 +94,16 @@ func carrierServerVerdict(p proctree.Process, environ []string, own ServerIdenti
 // not parse cleanly, or whose socket cannot be compared certainly, is
 // undecidable — never foreign on a malformed claim.
 func tmuxEnvServerVerdict(tmuxEnv string, own ServerIdentity, selfNS string) serverVerdict {
-	parts := strings.Split(tmuxEnv, ",")
-	if len(parts) != 3 {
+	socket, serverPID, sessionIdx, ok := parseTmuxEnvTuple(tmuxEnv)
+	if !ok {
+		// A tuple that is not genuine tmux output proves nothing in either
+		// direction: tmux always writes a numeric server pid, so a
+		// malformed one means the env was fabricated or corrupted and its
+		// socket claim cannot be trusted as positive foreign evidence
+		// (Codex on #7469).
 		return serverVerdictUndecidable
 	}
-	// A tuple that is not genuine tmux output proves nothing in either
-	// direction: tmux always writes a numeric server pid, so a malformed
-	// one means the env was fabricated or corrupted and its socket claim
-	// cannot be trusted as positive foreign evidence (Codex on #7469).
-	serverPID, err := strconv.Atoi(parts[1])
-	if err != nil || serverPID <= 0 {
-		return serverVerdictUndecidable
-	}
-	same, comparable := sameRecordedSocket(parts[0], own.Socket)
+	same, comparable := sameRecordedSocket(socket, own.Socket)
 	if !comparable {
 		return serverVerdictUndecidable
 	}
@@ -130,10 +127,33 @@ func tmuxEnvServerVerdict(tmuxEnv string, own ServerIdentity, selfNS string) ser
 	// foreign to this cohort but NOT to the server, which is the boundary
 	// this verdict draws. Undecidable: the generation markers are the
 	// incarnation authority, not this field.
-	if own.SessionID != "" && "$"+parts[2] != own.SessionID {
+	if own.SessionID != "" && "$"+sessionIdx != own.SessionID {
 		return serverVerdictUndecidable
 	}
 	return serverVerdictOwn
+}
+
+// parseTmuxEnvTuple reads "socket,pid,idx" anchored on its LAST two commas —
+// tmux writes the socket path verbatim, commas included (environ.c), so the
+// shape is fixed only at the tail. ok is false for anything that cannot be
+// genuine tmux output: too few fields, an empty socket, or a non-numeric
+// server pid.
+func parseTmuxEnvTuple(tmuxEnv string) (socket string, serverPID int, sessionIdx string, ok bool) {
+	i := strings.LastIndex(tmuxEnv, ",")
+	if i < 0 {
+		return "", 0, "", false
+	}
+	rest := tmuxEnv[:i]
+	j := strings.LastIndex(rest, ",")
+	if j < 0 {
+		return "", 0, "", false
+	}
+	socket = rest[:j]
+	pid, err := strconv.Atoi(rest[j+1:])
+	if err != nil || pid <= 0 || socket == "" {
+		return "", 0, "", false
+	}
+	return socket, pid, tmuxEnv[i+1:], true
 }
 
 // sameRecordedSocket compares the carrier's env socket spelling against the
@@ -263,13 +283,12 @@ func (o *serverPtyOwners) forSnapshot(snap map[int]proctree.Process) map[proctre
 // server holds.
 func serverVerdictReason(environ []string, own ServerIdentity) string {
 	tmuxEnv, _ := processEnvValue(environ, tmuxEnvVar)
-	parts := strings.Split(tmuxEnv, ",")
-	if len(parts) == 3 {
-		if same, comparable := sameRecordedSocket(parts[0], own.Socket); comparable && !same {
-			return "TMUX environment (socket " + parts[0] + ")"
+	if socket, serverPID, _, ok := parseTmuxEnvTuple(tmuxEnv); ok {
+		if same, comparable := sameRecordedSocket(socket, own.Socket); comparable && !same {
+			return "TMUX environment (socket " + socket + ")"
 		}
-		if serverPID, err := strconv.Atoi(parts[1]); err == nil && serverPID != own.PID {
-			return "TMUX environment (server pid " + parts[1] + ")"
+		if serverPID != own.PID {
+			return "TMUX environment (server pid " + strconv.Itoa(serverPID) + ")"
 		}
 	}
 	return "pty descriptors"
