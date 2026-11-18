@@ -134,6 +134,27 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 		}
 	}
 	region := normalizeDelivery(strings.Join(rows[anchor:regionEnd], ""))
+	// The region's end is proven only when a boundary marker closed it — a
+	// border row, or the blank-gap rule composerRegion itself applies. When
+	// the rows below the anchor are contiguous content to the pane's last
+	// row, nothing separated the composer from a footer glued to it
+	// (codexWarningPane's blankBeforeFooter=false shape), and the literal
+	// text comparisons below would weigh footer text against the bound
+	// tail. Master's own ruling for that shape withholds rather than
+	// resolves (stillChipComposer's "not only the bound chip"), so the
+	// recheck reads it Unreadable — never Gone, which would close a live
+	// watch on a genuinely staged draft (Codex #7547). The chip's Contains
+	// match is unaffected: a status line cannot hold this payload's bound
+	// paste chip.
+	regionBounded := true
+	if regionEnd == len(rows) {
+		for j := anchor + 1; j < regionEnd; j++ {
+			if normalizeDelivery(rows[j]) != "" {
+				regionBounded = false
+				break
+			}
+		}
+	}
 	// The composer's text after its prompt glyph. A payload short enough to
 	// be its own bound tail must EQUAL it — "yes" sent must not read staged
 	// inside a user's "they established" (Codex #7547 independent review).
@@ -141,7 +162,7 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 	// send is a suffix match: user text appended after the paste breaks it,
 	// exactly the way an edit breaks the short-payload equality.
 	composerText := stagedComposerText(region)
-	tailStaged := ev.tail != "" &&
+	tailStaged := ev.tail != "" && regionBounded &&
 		(ev.tailWhole && composerText == ev.tail || !ev.tailWhole && strings.HasSuffix(composerText, ev.tail))
 	chipStaged := ev.chip != "" && strings.Contains(region, ev.chip)
 	ambiguous := stagedAnchorAmbiguous(rows, anchor)
@@ -199,6 +220,9 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 		return StagedDraftSubmitted, "the send's bound text reads as a submitted echo"
 	case ev.chip != "" && chipEchoes > ev.chipEcho:
 		return StagedDraftSubmitted, "the send's bound paste chip reads as a submitted echo"
+	}
+	if !regionBounded {
+		return StagedDraftUnreadable, "the composer's end is not bounded — a footer may sit inside the region"
 	}
 	return StagedDraftGone, "the send's bound evidence is nowhere in the frame"
 }

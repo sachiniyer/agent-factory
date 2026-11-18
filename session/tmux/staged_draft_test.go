@@ -66,6 +66,26 @@ func TestStagedDraftReading(t *testing.T) {
 			want: StagedDraftStaged,
 		},
 		{
+			// A footer glued to the composer with no blank row between is
+			// composer content as far as the region can tell, so the
+			// literal tail comparisons are unprovable — master's own
+			// ruling withholds there too (stillChipComposer). Unreadable,
+			// never Gone: Gone would close a live watch on a genuinely
+			// staged draft (Codex #7547).
+			name: "whole tail with a footer glued to the composer",
+			pane: codexWarningPane("› continue", false),
+			ev:   stagedDraftEvidence{tail: "continue", tailWhole: true},
+			want: StagedDraftUnreadable,
+		},
+		{
+			// The same shape with a blank row before the footer bounds
+			// the region — the literal tail may compare.
+			name: "whole tail staged above a blank-gap footer",
+			pane: codexWarningPane("› continue", true),
+			ev:   stagedDraftEvidence{tail: "continue", tailWhole: true},
+			want: StagedDraftStaged,
+		},
+		{
 			// The common delivered-but-unverified resolution: the bound
 			// evidence is a transcript echo above the composer, so the
 			// watch ends — the Captain's named case.
