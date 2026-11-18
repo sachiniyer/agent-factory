@@ -141,20 +141,26 @@ func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.
 			entry.dueWhy = why
 		}
 	case session.StagedDraftUnreadable:
-		// A blind read keeps an armed watch and its sustain — but its
-		// capture budget is bounded (stagedDraftMaxBlindReads): a pane
-		// unjudgeable for longer than the settle window's own length retires
-		// the attempt rather than capturing per poll forever.
+		// A blind read keeps an armed watch and its sustain — but a due
+		// mark it carries is stale: the raise revalidates the attempt and
+		// liveness, not the pane, so a draft cleared between polls followed
+		// by a redraw would flush a flag for evidence that is no longer
+		// staged. The pending raise waits for a CURRENT staged verdict —
+		// the window itself survives the blind tick (Codex #7547, fifth
+		// round). And the capture budget stays bounded
+		// (stagedDraftMaxBlindReads): a pane unjudgeable for longer than
+		// the settle window's own length retires the attempt rather than
+		// capturing per poll forever.
 		entry = m.stagedDraftWatches[key]
 		if entry == nil || !entry.attemptAt.Equal(attemptAt) {
 			entry = &stagedDraftWatch{attemptAt: attemptAt}
 			m.stagedDraftWatches[key] = entry
 		}
+		entry.due = false
+		entry.dueWhy = ""
 		entry.blind++
 		if entry.blind > stagedDraftMaxBlindReads {
 			entry.closed = true
-			entry.due = false
-			entry.dueWhy = ""
 		}
 	default:
 		// StagedDraftNoEvidence, StagedDraftGone, StagedDraftSubmitted: this

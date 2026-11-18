@@ -588,6 +588,37 @@ func TestStagedDraftWatchDropKeepsTheSpentBlindBudget(t *testing.T) {
 	require.True(t, entry.closed, "the blind budget survives a flap — a flapping pane cannot re-spend it")
 }
 
+// A due mark a staged verdict armed must not survive a blind read: the raise
+// revalidates the attempt and liveness, not the pane, so a draft cleared
+// between polls plus a redraw or failed capture would flush a flag for
+// evidence that is no longer staged. The unreadable tick disarms the pending
+// raise — and keeps the sustain window — so only a fresh staged verdict
+// re-arms it (Codex #7547, fifth round).
+func TestStagedDraftUnreadableDisarmsAPendingDueMark(t *testing.T) {
+	attemptAt := time.Now().Add(-time.Minute)
+	manager, repoID, _, inst := stagedDraftFixture(t, attemptAt)
+	key := stagedDraftKey(repoID, inst)
+	since := time.Now().Add(-2 * stagedDraftSettleWindow)
+	manager.pausedMu.Lock()
+	manager.stagedDraftWatches[key] = &stagedDraftWatch{
+		attemptAt: attemptAt, since: since, due: true, dueWhy: "test"}
+	manager.pausedMu.Unlock()
+	checker := &fakeStagedChecker{reads: []session.StagedDraftRead{
+		session.StagedDraftUnreadable, session.StagedDraftStaged}}
+
+	manager.noteStagedDraftEvidence(repoID, key, inst, checker)
+	entry := stagedDraftWatchEntry(manager, key)
+	require.False(t, entry.due, "a blind read disarms the stale due mark")
+	require.Equal(t, since, entry.since, "the sustain window survives the blind tick")
+
+	// A fresh staged verdict re-arms it — since survived, the window is met
+	// on this read — and the deferred flush lands it.
+	manager.noteStagedDraftEvidence(repoID, key, inst, checker)
+	require.True(t, stagedDraftWatchEntry(manager, key).due, "a fresh staged verdict re-arms the flag")
+	manager.raiseDueStagedDraftFlag(repoID, key, inst)
+	require.True(t, inst.HasAttention(), "the re-armed due mark lands on the flush")
+}
+
 // A blind read that precedes the first staged verdict must not count toward
 // the sustain: the window opens on the first PROVABLE staged read, so a send
 // rechecked once during a redraw and once staged still waits the full window
