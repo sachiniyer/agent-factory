@@ -234,17 +234,45 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 
 // validateCredentialDockerRunArgs refuses repo-controlled docker.run_args that
 // could redirect the agent's credential lookup away from the read-only file af
-// has mounted. docker.run_args is repository-controlled and checked in
-// (config/manifest.go marks the `docker` table sourceRepoOnly) and appended
-// AFTER the credential mount with no later env af emits to dominate it — so a
-// repo entry setting the agent's credential-root environment variable
-// (CODEX_HOME for codex, CLAUDE_CONFIG_DIR for claude, GEMINI_CLI_HOME for
-// gemini) flows unopposed into the container, survives the agent-server's env
-// filter because those names are BUILT-IN per-agent names
-// (internal/sessionenv/sessionenv.go), and reaches the agent process, which
-// then reads its credential from the redirected path instead of af's mounted
-// file. The mounted credential is never read; the session starts
-// unauthenticated while af's provisioning log reports the mount as installed.
+// has mounted, or substitute that credential outright with a repo-supplied one.
+// docker.run_args is repository-controlled and checked in (config/manifest.go
+// marks the `docker` table sourceRepoOnly) and appended AFTER the credential
+// mount with no later env af emits to dominate it — so a repo entry setting an
+// identity-bearing environment variable for the agent flows unopposed into the
+// container, survives the agent-server's env filter because those names are
+// BUILT-IN per-agent names (internal/sessionenv/sessionenv.go), and reaches the
+// agent process, which then uses a credential the repo supplied instead of af's
+// mounted file. The mounted credential is never read; the session authenticates
+// as the attacker while af's provisioning log still reports the mount.
+//
+// Two shapes of identity-bearing env name have to be refused on this path:
+//
+//   - For the agents whose config-root variable relocates credential lookup —
+//     codex (CODEX_HOME), claude (CLAUDE_CONFIG_DIR), gemini (GEMINI_CLI_HOME) —
+//     the variable points the CLI at a different credential file. This is the
+//     redirect #4454 wrote this guard against.
+//   - For the agents whose config-root variable was MEASURED not to relocate
+//     — amp and opencode (internal/sessionenv/account.go records the reason
+//     each is out) — #4454 made the guard a no-op on the belief that "no
+//     environment entry can defeat their mount". That belief was false. Both
+//     agents have credential-bearing per-agent env names that survive every
+//     af env filter and reach the agent process: opencode's
+//     OPENCODE_CONFIG_CONTENT is a built-in per-agent name that opencode
+//     merges over the persisted auth.json, and the inline config overrides
+//     both the provider endpoint (baseURL) and the API key (apiKey) the CLI
+//     uses — measured to send the session's traffic to a fake provider
+//     endpoint authenticated with an attacker key while the mounted file was
+//     ignored; OPENCODE_CONFIG / OPENCODE_CONFIG_DIR relocate config lookup to
+//     a repo-chosen path; and the provider-key names (OPENAI_API_KEY,
+//     ANTHROPIC_API_KEY, …) are ambient API keys that outrank a stored
+//     credential, the same reason codex refuses OPENAI_API_KEY. amp's
+//     AMP_API_KEY is the documented credential route native to amp
+//     (docs/backends.md names it in `session_env_passthrough`), so a
+//     repo-supplied value beats the mounted secrets.json the same way. The
+//     credential-bearing names for these agents are listed in
+//     credentialMountDeniedEnvNames; credentialMountDeniedNames returns the
+//     account-scope denied set when the agent has one and falls through to
+//     that list otherwise, so the credential-mount guard covers BOTH shapes.
 //
 // The same lexical guard the account path has had since #3400, applied to the
 // credential-mount path (#2194): refuse -e/--env/--env-file setting any of the
@@ -262,19 +290,12 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 // mount the credential path's safety rests on. The account guard blocks those
 // for its own nested-path reason, which does not apply to a single-file mount.
 //
-// The denied set is accountDockerDeniedNames(agent): the agent's identity env
-// names (AccountIdentityNames) plus its cloud-mode auth selectors
-// (AgentAuthSelectors). It is empty for the agents on the credential-mount
-// feature whose config-root variable does NOT relocate credential lookup —
-// amp, opencode and devin (internal/sessionenv/account.go records the measured
-// reason each is out) — and this guard is a no-op for them. For those agents,
-// the redirect risk via generic XDG variables (XDG_DATA_HOME for opencode,
-// XDG_CONFIG_HOME for amp) is closed instead by runContainer re-asserting those
-// variables after run_args when credential mounts are installed. Refusing
-// --env-file for an empty denied set would be over-refusal, so the empty set
-// returns early.
+// devin remains a no-op: its per-agent allowlist is empty
+// (internal/sessionenv/sessionenv.go), so no credential-bearing DEVI_* name
+// can reach the devin process to substitute its config-file credential, and
+// `--env-file` could only carry names the agent never reads.
 func validateCredentialDockerRunArgs(args []string, agent string) error {
-	denied := accountDockerDeniedNames(agent)
+	denied := credentialMountDeniedNames(agent)
 	if len(denied) == 0 {
 		return nil
 	}
@@ -329,6 +350,100 @@ func validateCredentialDockerRunArgs(args []string, agent string) error {
 		}
 	}
 	return nil
+}
+
+// credentialMountDeniedNames returns the set of environment variable names a
+// repo-controlled docker.run_args entry cannot set on the credential-mount
+// path. It is the source of validateCredentialDockerRunArgs's refused set.
+//
+// For an agent whose account-scope identity classification is non-empty — codex,
+// claude, gemini — that classification IS the credential-mount standard:
+// accountDockerDeniedNames returns the agent's identity env names
+// (AccountIdentityNames) plus its cloud-mode auth selectors (AgentAuthSelectors),
+// so the credential-mount guard and the account run-args guard cannot drift on
+// what counts as an identity name for these agents.
+//
+// For an agent whose account-scope classification is empty — amp, opencode,
+// devin — #4454 made the validator a no-op on the belief that "no environment
+// entry can defeat their mount". That belief was false for amp and opencode:
+// their per-agent allowlists (agentNames["opencode"], agentNames["amp"] in
+// internal/sessionenv/sessionenv.go) include credential-bearing names that
+// survive every af env filter and reach the agent process, where they
+// substitute the credential af mounts read-only. credentialMountDeniedEnvNames
+// lists those names for the two agents; the empty map lookup for devin returns
+// nil, so the validator no-ops for it as before — devin's per-agent allowlist
+// is empty, so no credential-bearing env name can reach its process.
+func credentialMountDeniedNames(agent string) map[string]struct{} {
+	if denied := accountDockerDeniedNames(agent); len(denied) != 0 {
+		return denied
+	}
+	return credentialMountDeniedEnvNames[agent]
+}
+
+// credentialMountDeniedEnvNames lists the credential-bearing per-agent env
+// names for the agents on the credential-mount feature whose account-scope
+// identity classification is empty (amp, opencode). validateCredentialDockerRunArgs
+// refuses a repo-controlled docker.run_args entry that sets any of them, the
+// same way it refuses setting the agent's identity names for codex/claude/gemini.
+//
+// Each entry is, by construction, a built-in per-agent allowlisted name for the
+// agent — a name in agentNames[agent] — so it is one af actually passes through
+// the env filter to the agent process; refusing a name the agent never reads
+// would mark the threat model as broader than it is. The two cross-map pins in
+// session/backend_docker_credentials_validate_test.go enforce that, and that
+// every credential-bearing name in agentNames[agent] is classified either as
+// denied here or as deliberately kept deployment config (mirroring the account
+// path's accountCredentialNames / accountNonCredentialNames split).
+//
+// Endpoint/routing/version variables for opencode (OPENAI_API_BASE,
+// OPENAI_BASE_URL, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION) and
+// AMP_HOME for amp are deliberately NOT denied here: they are the operator's
+// deployment configuration rather than an identity (the account path's
+// accountNonCredentialNames records the same distinction for
+// ANTHROPIC_BASE_URL against claude), and denying them would break a
+// legitimate proxied setup without scoping the credential af mounts. A
+// repo-supplied endpoint that only redirects an authenticated session is a
+// separate concern from substituting the credential itself, and is out of
+// scope for this guard.
+var credentialMountDeniedEnvNames = map[string]map[string]struct{}{
+	tmux.ProgramOpencode: {
+		// Inline config and config-root names. OPENCODE_CONFIG_CONTENT is a
+		// built-in per-agent env name that opencode merges over the persisted
+		// auth.json; the inline config overrides both the provider endpoint
+		// (baseURL) and the API key (apiKey) the CLI uses — measured on the
+		// installed opencode CLI to send the session's traffic to an
+		// attacker-controlled endpoint authenticated with an attacker key,
+		// bypassing the mounted file entirely. OPENCODE_CONFIG /
+		// OPENCODE_CONFIG_DIR relocate config lookup to a repo-chosen path.
+		"OPENCODE_CONFIG":         {},
+		"OPENCODE_CONFIG_DIR":     {},
+		"OPENCODE_CONFIG_CONTENT": {},
+		// Ambient provider API keys. opencode reads these over the persisted
+		// credential without inline config selecting one — the same reason
+		// codex refuses OPENAI_API_KEY on this path; opencode must not differ,
+		// since OPENAI_API_KEY is also a built-in per-agent name for it.
+		"OPENAI_API_KEY":       {},
+		"ANTHROPIC_API_KEY":    {},
+		"GEMINI_API_KEY":       {},
+		"GOOGLE_API_KEY":       {},
+		"AZURE_OPENAI_API_KEY": {},
+		"OPENROUTER_API_KEY":   {},
+		"DEEPSEEK_API_KEY":     {},
+		"GROQ_API_KEY":         {},
+		"MISTRAL_API_KEY":      {},
+		"COHERE_API_KEY":       {},
+		"XAI_API_KEY":          {},
+	},
+	tmux.ProgramAmp: {
+		// AMP_API_KEY is the documented credential route native to amp
+		// (docs/backends.md: name AMP_API_KEY in session_env_passthrough when
+		// amp's native keyring is on, so no key file exists). A repo-supplied
+		// value beats the mounted secrets.json the same way. AMP_HOME is the
+		// install dir, not a credential root
+		// (internal/sessionenv/account.go records the measurement), so it is
+		// deliberately left through.
+		"AMP_API_KEY": {},
+	},
 }
 
 // dockerAccountHome is where an account's directory is mounted inside the

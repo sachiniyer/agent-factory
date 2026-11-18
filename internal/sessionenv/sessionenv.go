@@ -634,6 +634,31 @@ func GuardedSelectors() []string {
 	return out
 }
 
+// AgentAllowlistNames returns the built-in per-agent allowlisted environment
+// variable names for the agent — every name in agentNames[agent], sorted. These
+// are the names Filter passes through the env boundary for the agent without an
+// explicit entry in `session_env_passthrough`, regardless of whether the agent
+// supports accounts.
+//
+// Cross-package boundary tests use this to pin that every name a classification
+// denies (e.g. the credential-mount run_args guard's denied set on the empty
+// account-scope agents) is actually a name the agent reads through the boundary,
+// and that every credential-bearing name in the allowlist is classified one way
+// or the other. A classification that refuses a name the agent never reads would
+// mark the threat model as broader than it is and risk over-refusal against
+// legitimate operator use; a credential that the allowlist grows one day but the
+// classification does not would pass through unopposed, the same way
+// OPENCODE_CONFIG_CONTENT did before #4454's oversight was closed.
+func AgentAllowlistNames(agent string) []string {
+	set := agentNames[agent]
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // AgentAuthSelectors returns the conditional authentication-mode selectors for
 // one agent. Container provisioners use this narrower list when neutralizing an
 // image environment: another agent's selector cannot affect the selected CLI.

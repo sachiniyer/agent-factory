@@ -204,7 +204,7 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	// item 3).
 	captured, captureErr := captureSessionProcessTrees(t.cmdExec, t.sanitizedName, "")
 	leaked := captured.Procs
-	protected := reapProtectedSet(captured.Snapshot, leaked)
+	protected := reapProtectedSet(captured.Snapshot, leaked, nil)
 
 	// Bounded by tmuxCommandTimeout (#1917), through the run so the deadline counts
 	// itself: an unbounded kill-session against a wedged server blocks
@@ -324,13 +324,13 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 		// succeeding, not a leak. The requester is skipped by the reaper itself
 		// while its registration holds — never waited on, never signalled.
 		if waitForProcesses {
-			processes.remaining = reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait, protected)
+			processes.remaining = reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait, protected, nil)
 		} else {
 			// Capture the test seam and waits before launching the goroutine.
 			done, name := t.closeReapDone, t.sanitizedName
 			grace, term := reapGraceWait, reapTermWait
 			go func() {
-				reapSessionProcesses(reapOnRequest, name, leaked, grace, term, protected)
+				reapSessionProcesses(reapOnRequest, name, leaked, grace, term, protected, nil)
 				if done != nil {
 					done()
 				}
