@@ -589,6 +589,9 @@ tried to carry the conversation and why it could not, when:
   shares with its parent lives in the parent's rollout, which af does
   not carry, so the new account starts fresh rather than resume a fork
   whose lineage it cannot resolve;
+- af could not look at the conversation's file on either home within
+  the bound (an unavailable or slow mount), so the new account starts
+  fresh rather than carry the conversation af could not verify;
 - a replacement already launched on the carried conversation stopped before it
   was confirmed working.
 
