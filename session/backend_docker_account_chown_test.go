@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"testing"
 
@@ -130,32 +131,154 @@ func rootExecScripts(calls [][]string) []string {
 	return scripts
 }
 
-// rootScriptChowns reports whether a shell snippet runs a chown command that
-// takes target as an operand — in ANY position, so the unguarded mutant
-// `chown -h <owner> '/af-home' '/workspace'` is caught even though /workspace
-// follows another operand rather than the owner (#7563 R5). The snippet is
-// split into commands on the &&, ||, ; and | boundaries af's scripts join
-// on; within a command a bare `chown` word starts operand collection, which
-// runs to the command's end or to find(1)'s -exec terminator `+`. Shell
-// quote wrapping is stripped before comparing, so a quoted and a bare
-// operand spell the same path. A target named only as find's -path argument
-// (a prune entry) is NOT a chown operand and does not match.
+// pathWithinTarget reports whether root is the target path itself or one of
+// its ancestors — the direction #7571 review R10 requires: a recursive chown
+// or a find traversal rooted at an ANCESTOR reaches the target, so the
+// oracle must flag operands like `chown -R <o> '/'` and start points like
+// `find '/workspace' …`, not only the target spelled verbatim.
+func pathWithinTarget(target, root string) bool {
+	target, root = path.Clean(target), path.Clean(root)
+	if root == "/" {
+		return strings.HasPrefix(target, "/")
+	}
+	return target == root || strings.HasPrefix(target, root+"/")
+}
+
+// commandBasename returns the program a command word names, quote-stripped
+// and reduced to its basename — /bin/chown and /usr/bin/chown are chown as
+// surely as the bare name (#7571 review R10).
+func commandBasename(word string) string {
+	return path.Base(strings.Trim(word, `'"`))
+}
+
+// unFindPattern reverses findLiteralPattern's metacharacter escapes so a
+// -path prune entry compares literally with the target.
+func unFindPattern(p string) string {
+	return strings.NewReplacer(`\\`, `\`, `\*`, `*`, `\?`, `?`, `\[`, `[`, `\]`, `]`).Replace(p)
+}
+
+// chownFieldsHit reports whether the fields following a chown program name
+// take target as an operand — or an ancestor of it when the command is
+// recursive (`-R`, bundled `-…R…`, or `--recursive`), since only then does
+// an ancestor operand reach the target (#7571 review R10). A non-recursive
+// `chown -h <o> '/af-home'` does NOT chown /af-home/workspace, and the
+// oracle says so. Operand collection ends at find's -exec terminator (`+`
+// or the `\` remnant of `\;`).
+func chownFieldsHit(fields []string, target string) bool {
+	end := len(fields)
+	for i, f := range fields {
+		if f == "+" || f == `\` || f == `\;` {
+			end = i
+			break
+		}
+	}
+	fields = fields[:end]
+	recursive := false
+	for _, f := range fields {
+		if f == "--recursive" || (strings.HasPrefix(f, "-") && !strings.HasPrefix(f, "--") && strings.Contains(f, "R")) {
+			recursive = true
+		}
+	}
+	for _, f := range fields {
+		if strings.HasPrefix(f, "-") {
+			continue
+		}
+		operand := path.Clean(strings.Trim(f, `'"`))
+		if operand == target || (recursive && pathWithinTarget(target, operand)) {
+			return true
+		}
+	}
+	return false
+}
+
+// findStartPoints returns the path operands of a find command — the fields
+// after `find` up to the first expression token (an option, `!`, `,` or a
+// parenthesis, possibly backslash-escaped). A target inside any of them is
+// a chown victim when the command runs -exec chown.
+func findStartPoints(fields []string) []string {
+	var starts []string
+	for _, f := range fields {
+		if c := f[0]; c == '-' || c == '(' || c == ')' || c == '!' || c == ',' || c == '\\' {
+			break
+		}
+		starts = append(starts, strings.Trim(f, `'"`))
+	}
+	return starts
+}
+
+// findPrunePaths returns the unescaped -path arguments of a find command —
+// the prune entries. A target at or beneath one is cut out of the traversal
+// before -exec ever sees it, so it is not chowned.
+func findPrunePaths(fields []string) []string {
+	var prunes []string
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "-path" {
+			prunes = append(prunes, unFindPattern(strings.Trim(fields[i+1], `'"`)))
+			i++
+		}
+	}
+	return prunes
+}
+
+// findChownHits reports whether a find command chowns the target: it must
+// carry `-exec chown`, and then either a literal -exec operand names the
+// target (same operand rule as a direct chown) or a start point is the
+// target-or-ancestor while no -path prune entry covers it.
+func findChownHits(fields []string, target string) bool {
+	execIdx := -1
+	for i, f := range fields {
+		if f == "-exec" && i+1 < len(fields) && commandBasename(fields[i+1]) == "chown" {
+			execIdx = i
+			break
+		}
+	}
+	if execIdx < 0 {
+		return false
+	}
+	if chownFieldsHit(fields[execIdx+2:], target) {
+		return true
+	}
+	for _, p := range findPrunePaths(fields) {
+		if pathWithinTarget(target, p) {
+			return false
+		}
+	}
+	for _, s := range findStartPoints(fields) {
+		if pathWithinTarget(target, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// rootScriptChowns reports whether a shell snippet runs a chown that reaches
+// target: ANY chown program matched by basename (bare `chown`, `/bin/chown`,
+// …), and either an operand equal to the target — in ANY position, so the
+// unguarded mutant `chown -h <owner> '/af-home' '/workspace'` is caught even
+// though /workspace follows another operand rather than the owner (#7563
+// R5) — or a RECURSIVE chown operand that is one of the target's ancestors
+// (`chown -R <o> '/'`), or a `find … -exec chown` whose start point is the
+// target-or-ancestor unless a -path prune entry covers it (#7571 review
+// R10). The snippet is split into commands on the &&, ||, ; and | boundaries
+// af's scripts join on; shell quote wrapping is stripped before comparing,
+// so a quoted and a bare operand spell the same path. A target named only as
+// find's -path argument (a prune entry) is NOT a chown operand and does not
+// match.
 func rootScriptChowns(script, target string) bool {
 	commands := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n", "|", "\n").Replace(script)
 	for _, command := range strings.Split(commands, "\n") {
-		inChown := false
-		for _, field := range strings.Fields(command) {
-			if inChown {
-				if field == "+" {
-					inChown = false
-					continue
-				}
-				if strings.Trim(field, `'"`) == target {
-					return true
-				}
+		fields := strings.Fields(command)
+		if len(fields) == 0 {
+			continue
+		}
+		switch commandBasename(fields[0]) {
+		case "chown":
+			if chownFieldsHit(fields[1:], target) {
+				return true
 			}
-			if field == "chown" {
-				inChown = true
+		case "find":
+			if findChownHits(fields[1:], target) {
+				return true
 			}
 		}
 	}
@@ -728,10 +851,13 @@ func TestPrepareAccountUser_SkippedChown_NoWarningForKeptPath(t *testing.T) {
 }
 
 // TestRootScriptChowns_CatchesOperandPositions pins the detector the #7563
-// R5 assertions run on: /workspace flagged as an operand of a chown command
-// wherever it sits — directly after the owner, after another operand, or
-// inside find's -exec — while a /workspace that is only find's -path prune
-// argument or mkdir's operand is not a chown operand and must not trip it.
+// R5 assertions run on: /workspace flagged wherever a chown can reach it —
+// directly after the owner, after another operand, inside find's -exec,
+// spelled with a path-qualified chown, via a recursive ancestor operand, or
+// via a find start point at the target-or-ancestor (#7571 review R10) —
+// while a /workspace that is only find's -path prune argument, mkdir's
+// operand, beneath a pruned mount, or inside a non-recursive ancestor
+// operand is not a chown of /workspace and must not trip it.
 func TestRootScriptChowns_CatchesOperandPositions(t *testing.T) {
 	owner := accountProbeOwner
 	for name, tc := range map[string]struct {
@@ -770,6 +896,52 @@ func TestRootScriptChowns_CatchesOperandPositions(t *testing.T) {
 		},
 		"workspace only as mkdir operand": {
 			script: "mkdir -p " + shellQuote(dockerWorkspaceDir),
+			want:   false,
+		},
+		// ---- #7571 review R10: basename match + ancestor-aware reach ----
+		"path-qualified chown still counts": {
+			script: "/bin/chown -h " + owner + " " + shellQuote(dockerWorkspaceDir),
+			want:   true,
+		},
+		"recursive chown of the filesystem root reaches it": {
+			script: "chown -R -h " + owner + " '/'",
+			want:   true,
+		},
+		"recursive chown of an ancestor reaches it": {
+			// '/' is /workspace's only ancestor; the --recursive spelling
+			// counts too.
+			script: "chown --recursive " + owner + " '/'",
+			want:   true,
+		},
+		"non-recursive ancestor operand does not reach it": {
+			// chown -h on '/' touches '/' alone — /workspace is unaffected.
+			script: "chown -h " + owner + " '/'",
+			want:   false,
+		},
+		"recursive chown of a sibling does not reach it": {
+			script: "chown -R -h " + owner + " " + shellQuote(dockerAccountRuntimeHome),
+			want:   false,
+		},
+		"find start point at the target reaches it": {
+			script: "find " + shellQuote(dockerWorkspaceDir) + " -exec chown -h " + owner + " {} +",
+			want:   true,
+		},
+		"find start point at an ancestor reaches it": {
+			script: "find '/' -exec chown -h " + owner + " {} +",
+			want:   true,
+		},
+		"find start point pruned at the target does not": {
+			// The guard's own shape: the mount point under HOME is a -path
+			// prune entry, so the traversal never chowns it.
+			script: "find '/root' \\( -path " + shellQuote(dockerWorkspaceDir) + " \\) -prune -o -exec chown -h " + owner + " {} +",
+			want:   false,
+		},
+		"find start point pruned at a mount ancestor does not": {
+			script: "find '/' \\( -path '/workspace' \\) -prune -o -exec chown -h " + owner + " {} +",
+			want:   false,
+		},
+		"find without -exec chown does not": {
+			script: "find " + shellQuote(dockerWorkspaceDir) + " -name '*.tmp'",
 			want:   false,
 		},
 	} {
