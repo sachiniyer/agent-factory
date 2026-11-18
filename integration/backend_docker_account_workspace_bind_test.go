@@ -68,18 +68,10 @@ func TestDockerBackendAccountWorkspaceBindNotReowned(t *testing.T) {
 	if daemonRootless(t) {
 		t.Skip("this proof requires a rootful docker engine (daemon as root); the daemon reports name=rootless in SecurityOptions")
 	}
-	// The fixture itself needs CAP_CHOWN on the host: the account dir is
-	// re-owned to a non-root uid (65534:65534) below so the in-container stat
-	// probe reports a uid different from the host workspace's owner, which
-	// is what lets the assertion tell "skipped (fixed)" from "re-owned
-	// (bug)". That chown requires a root host process, so a non-root client
-	// — even against a rootful daemon, which the daemon check above did NOT
-	// skip — cannot stand the fixture up and must skip here. This is a
-	// fixture constraint, not the daemon-rootlessness proxy the check above
-	// replaced.
-	if os.Geteuid() != 0 {
-		t.Skipf("this proof's fixture needs CAP_CHOWN on the host (to re-own the account dir to nobody); current euid=%d", os.Geteuid())
-	}
+	// No host-root check here: the account-dir fixture chown below runs
+	// through a root container on the same daemon, so the test only needs
+	// what it skipped on above — a reachable rootful engine — plus the
+	// bind-source visibility check after the fixture runs.
 
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
