@@ -361,6 +361,11 @@ func (d InstanceData) ForClients() InstanceData {
 	d.LimitWallRuntimeGen = 0
 	d.CaptureRuntimePID = 0
 	d.CaptureRuntimeStartID = 0
+	d.RuntimeServerSocket = ""
+	d.RuntimeServerPID = 0
+	d.RuntimeServerStartID = 0
+	d.RuntimeServerSessionID = ""
+	d.RuntimeServerPIDNS = ""
 	d.LimitPromptSent = false
 	d.AgentRuntimeGeneration = 0
 	d.LastLimitWall = nil

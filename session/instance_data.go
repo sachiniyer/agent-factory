@@ -60,6 +60,11 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		RuntimeProgram:           i.runtimeProgram,
 		RuntimePID:               i.runtimePID,
 		RuntimeStartID:           i.runtimeStartID,
+		RuntimeServerSocket:      i.runtimeServerSocket,
+		RuntimeServerPID:         i.runtimeServerPID,
+		RuntimeServerStartID:     i.runtimeServerStartID,
+		RuntimeServerSessionID:   i.runtimeServerSessionID,
+		RuntimeServerPIDNS:       i.runtimeServerPIDNS,
 		CaptureRuntimePID:        i.captureEvidence.pid,
 		CaptureRuntimeStartID:    i.captureEvidence.startID,
 		AgentRuntimeGeneration:   i.agentRuntimeGeneration,
@@ -82,6 +87,24 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	data.IdleReason = IdleReasonFor(data)
 	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
 	data.archivePushCompleted = i.archivePushCompleted
+
+	// #7469 R1a: the persisted server record retires keyed to "a new
+	// incarnation can exist" — the new-session issue inside start() — never
+	// to Start's success. A respawn that issued new-session and then failed
+	// readiness or exited leaves the bound session's retirement raised: the
+	// row must persist ABSENT here rather than the previous incarnation's
+	// (socket, server pid), which would read the replacement's own
+	// survivors foreign — left alive while teardown deletes the worktree
+	// under them. A bound session that never retired keeps the standing
+	// fields; an unbound row (archived, killed, remote) keeps whatever the
+	// last write left for a restart's re-seed.
+	if ts := i.tmuxLocked(); ts != nil && ts.ServerEvidenceRetired() {
+		data.RuntimeServerSocket = ""
+		data.RuntimeServerPID = 0
+		data.RuntimeServerStartID = 0
+		data.RuntimeServerSessionID = ""
+		data.RuntimeServerPIDNS = ""
+	}
 
 	if i.backend != nil {
 		data.BackendType = i.backend.Type()
@@ -362,68 +385,6 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	return noteHostLayout(data)
 }
 
-// RestoreRelocationRecoveryOriginals reverses the rollback-safe ownership and
-// lifecycle projection made by ForStorage before a current reader interprets a
-// recovery record. Normal instance loading and daemon ghost cleanup share this
-// boundary so neither can read compatibility fields as deletion authority.
-func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, error) {
-	recovery := data.Worktree.RelocationRecovery
-	if recovery == nil {
-		return data, nil
-	}
-	recoveryClone := *recovery
-	data.Worktree.RelocationRecovery = &recoveryClone
-	recovery = &recoveryClone
-	// First, so the shape check below never mistakes a real stall projected
-	// through the worktree-missing fence for the bare fence itself.
-	if err := restoreMissingFencedState(recovery); err != nil {
-		return InstanceData{}, err
-	}
-	state, err := runtimeRelocationRecoveryState(recovery)
-	if err != nil {
-		return InstanceData{}, err
-	}
-	originalExternal := recovery.OriginalExternalWorktree
-	originalBranch := recovery.OriginalBranchCreatedByUs
-	originalStartup := recovery.OriginalStartupStateUnknown
-	if recovery.CleanupLifecycle != "" {
-		originalExternal = recovery.CleanupOriginalExternalWorktree
-		originalBranch = recovery.CleanupOriginalBranchCreatedByUs
-		originalStartup = recovery.CleanupOriginalStartupStateUnknown
-	}
-	if originalExternal == nil || originalBranch == nil || originalStartup == nil {
-		return InstanceData{}, fmt.Errorf("rollback safety metadata is missing")
-	}
-	data.Worktree.ExternalWorktree = *originalExternal
-	branchCreatedByUs := *originalBranch
-	data.Worktree.BranchCreatedByUs = &branchCreatedByUs
-	data.StartupStateUnknown = *originalStartup
-
-	// Return a canonical current-reader record. Ghost checkpoint writers persist
-	// this row directly, so leaving the previous release's safe ownership values
-	// in Original* would make the next ForStorage projection forget the real owner.
-	recovery.State = state
-	recovery.CleanupLifecycle = ""
-	recovery.OriginalExternalWorktree = cloneBoolPointer(originalExternal)
-	recovery.OriginalBranchCreatedByUs = cloneBoolPointer(originalBranch)
-	recovery.OriginalStartupStateUnknown = cloneBoolPointer(originalStartup)
-	recovery.CleanupOriginalExternalWorktree = nil
-	recovery.CleanupOriginalBranchCreatedByUs = nil
-	recovery.CleanupOriginalStartupStateUnknown = nil
-	// The worktree-missing rollback projection is not a relocation record; with
-	// the ownership values restored above, it reads back as the flag it stands
-	// for (#5102). An older binary that rewrote the row dropped the flag and its
-	// reason but kept this record, which is why the shape, not Missing, decides.
-	if isWorktreeMissingRollbackFence(recovery) {
-		data.Worktree.RelocationRecovery = nil
-		data.Worktree.Missing = true
-		if data.Worktree.MissingReason == "" {
-			data.Worktree.MissingReason = WorktreeMissingDeletedReason(data.Worktree.WorktreePath)
-		}
-	}
-	return data, nil
-}
-
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
 	return FromInstanceDataWithContext(data, nil)
@@ -562,6 +523,11 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		runtimeProgram:           data.RuntimeProgram,
 		runtimePID:               data.RuntimePID,
 		runtimeStartID:           data.RuntimeStartID,
+		runtimeServerSocket:      data.RuntimeServerSocket,
+		runtimeServerPID:         data.RuntimeServerPID,
+		runtimeServerStartID:     data.RuntimeServerStartID,
+		runtimeServerSessionID:   data.RuntimeServerSessionID,
+		runtimeServerPIDNS:       data.RuntimeServerPIDNS,
 		captureEvidence:          keptCaptureEvidenceFromData(data),
 		Account:                  data.Account,
 		Host:                     data.Host,

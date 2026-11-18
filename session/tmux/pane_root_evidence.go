@@ -204,3 +204,98 @@ func (t *TmuxSession) PaneRootEvidence() (pid int, startID uint64, ok bool) {
 	}
 	return 0, 0, false
 }
+
+// resolveServerIdentity fills the kernel fields a pane row cannot carry —
+// the server process's StartID and the pid namespace this process writes to —
+// so the record survives a daemon restart and a recycled server pid (#7469).
+// A lookup failure degrades the record (socket and pid still compare), never
+// discards it.
+func resolveServerIdentity(id ServerIdentity) ServerIdentity {
+	if !id.valid() {
+		return ServerIdentity{}
+	}
+	if p, err := proctree.Lookup(id.PID); err == nil {
+		id.StartID = p.StartID
+	}
+	if ns, err := proctree.PIDNamespaceID(); err == nil {
+		id.PIDNS = ns
+	}
+	return id
+}
+
+// noteServerIdentity is the stamp every live pane resolution calls: a row
+// that answered its server fields replaces the record — the answer is fresh
+// kernel evidence — while a row that could not keeps whatever stands (a
+// field-less tmux answers "unknown", never "changed"). A landed stamp also
+// clears the spawn-boundary retirement: the record once more names the
+// session's current incarnation (#7469 R1a).
+func (t *TmuxSession) noteServerIdentity(raw ServerIdentity) {
+	id := resolveServerIdentity(raw)
+	if id.valid() {
+		stored := id
+		t.serverEvidence.Store(&stored)
+		t.serverEvidenceRetired.Store(false)
+	}
+}
+
+// RetireServerIdentity drops the recorded tmux-server identity when the
+// incarnation it describes is retired — every spawn boundary (#7469 R1). A
+// record must never predate the session's CURRENT incarnation: if the
+// post-spawn pane resolution cannot restamp (a timeout, an instantly-dead
+// pane, an empty reply), keeping the previous launch's record would let a
+// stale (socket, old server pid) judge the replacement server's own
+// survivors foreign — named, left alive, while teardown deletes the
+// worktree under them. Absent is undecidable, and undecidable keeps today's
+// verdict — the safe direction either way.
+//
+// The retirement is keyed to "a new incarnation can exist" — the
+// new-session issue inside start(), not to Start's success (R1a): a spawn
+// that then fails still retires it. The retired marker stays raised until
+// a stamp or seed lands so the persisted row can write absent too.
+func (t *TmuxSession) RetireServerIdentity() {
+	t.serverEvidence.Store(nil)
+	t.serverEvidenceRetired.Store(true)
+}
+
+// ServerEvidenceRetired reports whether the spawn-boundary retirement
+// still stands — a new-session was issued and no live stamp or persisted
+// seed has landed since (#7469 R1a). The instance row consults it at
+// marshal time so the previous incarnation's identity is never persisted
+// under the replacement's name.
+func (t *TmuxSession) ServerEvidenceRetired() bool {
+	return t.serverEvidenceRetired.Load()
+}
+
+// SeedServerEvidence primes the recorded server identity from the persisted
+// launch fields on restore, the server-side counterpart of
+// SeedPaneRootEvidence (#7469). A seed fills only an EMPTY cell — anything a
+// live resolution stamped is newer than the persisted record. A zero record
+// is no anchor: sessions launched before this existed stay undecidable, which
+// is today's verdict.
+func (t *TmuxSession) SeedServerEvidence(socket string, pid int, startID uint64, sessionID, pidns string) {
+	// pidns is the namespace the server pid was RECORDED in, persisted with
+	// the row — never the restoring daemon's namespace, which can differ
+	// when state crosses a container boundary (Codex on #7469). An empty
+	// record leaves the namespace guards inert, exactly like an unrecorded
+	// one — the pid compare then stands on StartID alone.
+	id := ServerIdentity{Socket: socket, PID: pid, StartID: startID, SessionID: sessionID, PIDNS: pidns}
+	if !id.valid() {
+		return
+	}
+	if t.serverEvidence.Load() == nil {
+		stored := id
+		t.serverEvidence.Store(&stored)
+		t.serverEvidenceRetired.Store(false)
+	}
+}
+
+// ServerEvidence reports the tmux-server identity the vanished-session sweep
+// judges detached carriers against (#7469) — a session launched before the
+// record existed, or one whose pane never answered its server fields, has
+// none and every carrier verdict degrades to undecidable.
+func (t *TmuxSession) ServerEvidence() (ServerIdentity, bool) {
+	if id := t.serverEvidence.Load(); id != nil {
+		return *id, true
+	}
+	return ServerIdentity{}, false
+}

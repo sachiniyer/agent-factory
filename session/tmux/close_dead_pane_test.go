@@ -1136,7 +1136,9 @@ func TestStartHeldPaneStampsItsRootPid(t *testing.T) {
 		}
 		lastErr = nil
 		fields = strings.Split(strings.TrimSpace(string(out)), "|")
-		if len(fields) != 7 {
+		// paneRowFormat appends fields (the server identity rides the tail,
+		// #7469): read the stable prefix positions, not the count.
+		if len(fields) < 7 {
 			return false
 		}
 		// pane-died fires when the server collects the exit status, not on

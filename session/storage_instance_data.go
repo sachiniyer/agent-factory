@@ -379,6 +379,20 @@ type InstanceData struct {
 	// records predating the evidence.
 	RuntimePID     int    `json:"runtime_pid,omitempty"`
 	RuntimeStartID uint64 `json:"runtime_start_id,omitempty"`
+	// RuntimeServer* record the tmux server the session's pane belonged to at
+	// the last launch boundary (#7469): the socket the server answered on, the
+	// server's process instance (pid + kernel start stamp, defeating pid
+	// reuse), and the tmux session id. The vanished-session sweep attributes a
+	// detached marked carrier to a server through its TMUX environment and
+	// held ptys, and judges the attribution against this record — provably
+	// another server is foreign, refused and named, never signalled. Zero on
+	// records written before the evidence existed. Daemon-side identity, so
+	// ForClients withholds it.
+	RuntimeServerSocket    string `json:"runtime_server_socket,omitempty"`
+	RuntimeServerPID       int    `json:"runtime_server_pid,omitempty"`
+	RuntimeServerStartID   uint64 `json:"runtime_server_start_id,omitempty"`
+	RuntimeServerSessionID string `json:"runtime_server_session_id,omitempty"`
+	RuntimeServerPIDNS     string `json:"runtime_server_pidns,omitempty"`
 	// CaptureRuntimePID/CaptureRuntimeStartID: the RuntimePID pair a reattach
 	// probe could not answer about, kept for conversation capture alone and
 	// re-verified before use (#7123; see keptCaptureEvidence). Additive: an

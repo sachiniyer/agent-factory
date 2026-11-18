@@ -24,6 +24,14 @@ import (
 type SessionSnapshot struct {
 	taken    time.Time
 	sessions map[string]*snapshotSession
+	// serverPID + serverSocket are the server's own (pid, socket_path)
+	// answer, read ONCE per snapshot — the corroborated socket #7469 R5
+	// needs, shared across the whole restore batch instead of one
+	// display-message per session (Codex on #7469). Zero when the read
+	// could not answer; every stamped record then stays incomplete —
+	// undecidable, never wrong.
+	serverPID    int
+	serverSocket string
 }
 
 type snapshotSession struct {
@@ -42,9 +50,12 @@ const snapshotMaxAge = 10 * time.Second
 // five parts is dropped rather than misread.
 const snapshotRowFormat = "#{session_name}\t#{session_id}\t#{pid}\t#{session_created}\t" + paneRowFormat
 
-// CaptureSessionSnapshot lists every pane on the server in one tmux call. Any
-// failure (no server, a timeout) returns an error and the caller simply does not
-// prime: restore then behaves exactly as it did before the snapshot existed.
+// CaptureSessionSnapshot lists every pane on the server in one tmux call, then
+// reads the server's (pid, socket_path) pair in one more — the single-value
+// corroboration every pane row's server stamp shares (#7469 R5). Any listing
+// failure (no server, a timeout) returns an error and the caller simply does
+// not prime: restore then behaves exactly as it did before the snapshot
+// existed. A socket read that fails leaves the pair empty, never a guess.
 func CaptureSessionSnapshot() (*SessionSnapshot, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
@@ -52,7 +63,31 @@ func CaptureSessionSnapshot() (*SessionSnapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list tmux panes: %w", err)
 	}
-	return parseSessionSnapshot(string(out), time.Now()), nil
+	snap := parseSessionSnapshot(string(out), time.Now())
+	// The socket is server-global, so any session in the listing targets the
+	// read; with no sessions listed there is nothing to stamp anyway.
+	for name := range snap.sessions {
+		ctx, cancel := tmuxTimeoutContext()
+		reply, err := outputTmuxBoundedWith(ctx, cmd.MakeExecutor(),
+			"display-message", "-p", "-t", ExactTarget(name), "#{pid} #{socket_path}")
+		cancel()
+		if err == nil {
+			snap.serverPID, snap.serverSocket, _ = parseServerSocketReply(string(reply))
+		}
+		break
+	}
+	return snap, nil
+}
+
+// serverSocketPID answers the (pid, socket_path) the snapshot's server
+// reported — the shared corroborated read every restore-batch stamp reuses.
+// An unread snapshot answers "could not read": the record it would complete
+// stays incomplete — undecidable, never wrong.
+func (s *SessionSnapshot) serverSocketPID() (int, string, error) {
+	if s == nil || s.serverPID <= 0 || s.serverSocket == "" {
+		return 0, "", fmt.Errorf("snapshot carries no server socket answer")
+	}
+	return s.serverPID, s.serverSocket, nil
 }
 
 func parseSessionSnapshot(out string, taken time.Time) *SessionSnapshot {
@@ -67,8 +102,10 @@ func parseSessionSnapshot(out string, taken time.Time) *SessionSnapshot {
 			sess = &snapshotSession{gen: tmuxGeneration{sessionID: parts[1], serverPID: parts[2], created: parts[3]}}
 			s.sessions[parts[0]] = sess
 		}
-		// A pane row never contains whitespace (paneRowFormat is built so), which
-		// is what the per-session path's strings.Fields relied on too.
+		// A pane row's fields carry no whitespace — every field is numeric,
+		// a pty name or a predicate digit now that the free-form socket path
+		// is no longer a row field (#7469 R5). Whitespace anywhere marks a
+		// malformed row.
 		if row := strings.TrimSpace(parts[4]); row != "" && !strings.ContainsAny(row, " \t") {
 			sess.rows = append(sess.rows, row)
 		}

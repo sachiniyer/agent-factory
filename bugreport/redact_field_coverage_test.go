@@ -185,6 +185,12 @@ var verbatimInstanceFields = map[string]string{
 	// the same way — so it gets the identical scrubDiagnostic pass rather than
 	// a blank, and the same end-to-end test proves it (#5295).
 	"LostRestoreWait.Error": "af-authored environmental-wait diagnostic, sanitized by scrubDiagnostic in redactInstanceData alongside LostRestoreFailure.Error — it is the only record of why restore is waiting on the environment — see TestRedactInstancesJSONScrubsLostRestoreFailureError (#5295)",
+	// tmux mints the session id ($N) when it creates the session — a bounded
+	// machine token, never user text. The socket path beside it CAN carry
+	// user-chosen text (TMUX_TMPDIR, a username) and is collapsed in
+	// redactInstanceData.
+	"RuntimeServerSessionID": "tmux-minted session id ($N), never derived from user text",
+	"RuntimeServerPIDNS":     "kernel pid-namespace inode id (pid:[N]), machine identity, never user text",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupGeneration": "minted cleanup-generation token",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupLifecycle":  "bounded RelocationRecoveryState enum",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.State":             "bounded RelocationRecoveryState enum",

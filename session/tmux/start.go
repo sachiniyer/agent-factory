@@ -97,7 +97,11 @@ func (t *TmuxSession) Start(workDir string) error {
 		// 4597265491). The supersede clears the stale pair first, so even a
 		// re-stamp that cannot answer retires it: keeping an anchor whose
 		// StartID predates the actual root would lower tier 2's
-		// no-earlier-than bound onto the wrong incarnation.
+		// no-earlier-than bound onto the wrong incarnation. The server
+		// identity retired inside start() at the new-session issue (#7469
+		// R1a), keyed to "a new incarnation can exist" rather than to this
+		// success path: a spawn that fails after new-session leaves the
+		// record absent, never stale — so this path only re-stamps.
 		t.reconcilePaneRootEvidence(paneRootAnswer{supersede: true})
 		if _, rootErr := t.PaneRootProcess(); rootErr != nil {
 			log.InfoLog.Printf("tmux session %s: could not record pane-root identity at spawn: %v", t.sanitizedName, rootErr)
@@ -311,6 +315,17 @@ func (t *TmuxSession) start(workDir string) error {
 	// The gate above proved no session behind the name; the pane process
 	// starts inside this call (#7147).
 	t.setSpawnedAt(time.Now())
+	// new-session ISSUING is the server record's retirement boundary —
+	// "a new incarnation can exist", never Start's success (#7469 R1a).
+	// From here on a replacement server may answer the same socket: if the
+	// spawn then fails readiness or exits, the previous incarnation's
+	// (socket, server pid) must already be absent from memory and from the
+	// row the next persistence writes, or a detached own helper carrying
+	// the REPLACEMENT's TMUX tuple reads foreign — named, left alive, while
+	// teardown deletes the worktree under it. Absent is undecidable, which
+	// keeps today's verdict either way; a stamp or seed clears the retired
+	// marker when fresh evidence lands.
+	t.RetireServerIdentity()
 	ptmx, commandDone, err := startPtyTracked(t.ptyFactory, cmd)
 	if err != nil {
 		if systemdScoped {

@@ -382,12 +382,17 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	preMarkerCaptureErrs := make(map[string]error, len(prefixed))
 	preMarkerPaneSIDs := make(map[string]map[int]bool, len(prefixed))
 	preMarkerPrograms := make(map[string]map[int]string, len(prefixed))
+	// The server identity each capture carried (#7469): the sweep judges a
+	// detached marked carrier against it — provably another server is
+	// foreign, refused and named, never signalled.
+	preMarkerServers := make(map[string]ServerIdentity, len(prefixed))
 	preMarkerGenerations := make(map[string]orphanGenerationSet, len(prefixed))
 	for _, match := range prefixed {
 		preMarkerCapture, captureErr := captureSessionProcessTrees(cmdExec, match, "")
 		preMarkerProcesses[match], preMarkerCaptureErrs[match] = preMarkerCapture.Procs, captureErr
 		preMarkerPaneSIDs[match] = preMarkerCapture.PaneSIDs
 		preMarkerPrograms[match] = preMarkerCapture.RecordedPrograms
+		preMarkerServers[match] = preMarkerCapture.Server
 		// Retain the generation while the captured pane tree is still alive.
 		// Waiting until a vanished-session recovery begins may be too late to
 		// read its immutable environment, especially when a helper starts after
@@ -434,6 +439,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 					cohortMembership{
 						PaneSIDs:         preMarkerPaneSIDs[match],
 						RecordedPrograms: preMarkerPrograms[match],
+						OwnServer:        preMarkerServers[match],
 					}, false); reapErr != nil {
 					return fmt.Errorf("tmux session %s vanished during ownership lookup, but its process cleanup is incomplete: %w",
 						match, reapErr)
@@ -524,6 +530,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 				markerCandidates:   preMarkerProcesses[match],
 				markerPaneSIDs:     preMarkerPaneSIDs[match],
 				recordedPrograms:   preMarkerPrograms[match],
+				ownServer:          preMarkerServers[match],
 				markerCaptureError: preMarkerCaptureErrs[match],
 				captureError:       captureErr,
 				generations:        preMarkerGenerations[match],
@@ -653,11 +660,15 @@ func survivingProcessesError(match string, remaining []proctree.Process, protect
 var reapOnRequestProcesses = reapSessionProcesses
 
 type vanishedSessionRecovery struct {
-	match              string
-	verifiedProcesses  []proctree.Process
-	markerCandidates   []proctree.Process
-	markerPaneSIDs     map[int]bool
-	recordedPrograms   map[int]string
+	match             string
+	verifiedProcesses []proctree.Process
+	markerCandidates  []proctree.Process
+	markerPaneSIDs    map[int]bool
+	recordedPrograms  map[int]string
+	// ownServer is the tmux-server identity the marker capture read from
+	// the session's pane rows (#7469) — the record the sweep attributes a
+	// detached carrier against.
+	ownServer          ServerIdentity
 	markerCaptureError error
 	captureError       error
 	generations        orphanGenerationSet
@@ -679,6 +690,7 @@ func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome s
 		cohortMembership{
 			PaneSIDs:         recovery.markerPaneSIDs,
 			RecordedPrograms: recovery.recordedPrograms,
+			OwnServer:        recovery.ownServer,
 		}, false)
 }
 
@@ -721,6 +733,12 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		proven[p.PID] = p.StartID
 	}
 	membership.Proven = proven
+	// The pty-index → server map is built once per SWEEP (#7469): every
+	// attribution pass below shares it, so the kernel's fd/fdinfo reads
+	// happen at most once per positively-identified tmux server.
+	if membership.owners == nil {
+		membership.owners = &serverPtyOwners{}
+	}
 	if membership.Root.PID == 0 {
 		// Anchor tier 2 on a recorded pane root when the caller did not carry
 		// one in: a SID the pane evidence names whose leader pair the recorded
