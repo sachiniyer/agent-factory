@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -257,4 +258,130 @@ func TestCarrierServerVerdict_EscapedRecordedSocketIsIncomparable(t *testing.T) 
 	require.Equal(t, serverVerdictOwn,
 		tmuxEnvServerVerdict(litSock+",4242,7", own2, ""),
 		"a backslash spelling backed by the live listener compares as the literal truth")
+}
+
+// #7581 item 1: the recorded pid is comparable only after the per-socket
+// reader proves THIS pid, in THIS namespace, holds a listener bound to the
+// recorded socket — a tmux server in another pid namespace makes the number
+// fiction here. The proof is read-only: listener inspection via
+// tmuxServerSocketBinding, never tmuxSocketClaimed or a SIGUSR1.
+func TestResolveServerIdentity_UnprovenPidKeepsNoNamespaceClaim(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "af.sock")
+	require.NoError(t, os.WriteFile(sock, nil, 0o600))
+
+	signals := 0
+	oldSignal, oldBinding := tmuxServerSignal, tmuxServerSocketBinding
+	tmuxServerSignal = func(int, syscall.Signal) error { signals++; return nil }
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		return socketBindingElsewhere, "/bound/elsewhere"
+	}
+	t.Cleanup(func() { tmuxServerSignal, tmuxServerSocketBinding = oldSignal, oldBinding })
+
+	id := resolveServerIdentity(ServerIdentity{Socket: sock, PID: 4242, SessionID: "$7"})
+	require.True(t, id.valid(), "an unproven record still carries socket+pid for naming")
+	require.Zero(t, id.StartID, "an unproven pid must not borrow a local process's StartID")
+	require.Empty(t, id.PIDNS, "an unproven pid carries no namespace claim")
+	require.Zero(t, signals, "the namespace proof is read-only — it never signals a server")
+
+	// And every pid-derived compare on that record is undecidable — the
+	// number could name nothing here, or a different process entirely.
+	require.Equal(t, serverVerdictUndecidable,
+		tmuxEnvServerVerdict(sock+",9999,3", id, "pidns:test"),
+		"same socket + different pid: undecidable when the recorded pid is unproven")
+	require.Equal(t, serverVerdictUndecidable,
+		compareHeldServer(map[int]proctree.Process{4242: {PID: 4242, StartID: 1}}, 4242, id, "pidns:test"),
+		"a live holder equal to the recorded number: still undecidable when unproven")
+}
+
+// The proven side: the per-socket reader reporting this pid bound to the
+// recorded socket fills the kernel fields — the local StartID and the
+// namespace the proof ran in.
+func TestResolveServerIdentity_ProvenPidStampsThisNamespace(t *testing.T) {
+	oldBinding := tmuxServerSocketBinding
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		return socketBindingBound, "/bound/here"
+	}
+	t.Cleanup(func() { tmuxServerSocketBinding = oldBinding })
+
+	id := resolveServerIdentity(ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid()})
+	require.NotZero(t, id.StartID, "a proven pid stamps its local instance identity")
+	ns, _ := proctree.PIDNamespaceID()
+	require.Equal(t, ns, id.PIDNS, "PIDNS records the namespace the proof ran in")
+
+	require.Equal(t, serverVerdictForeign,
+		tmuxEnvServerVerdict("/tmp/af.sock,9999,3", id, ns),
+		"a proven pid restores the env channel's foreign answer")
+	require.Equal(t, serverVerdictOwn,
+		compareHeldServer(map[int]proctree.Process{id.PID: {PID: id.PID, StartID: id.StartID}},
+			id.PID, id, ns),
+		"a proven pid restores the pty channel's own answer")
+}
+
+// The namespace proof is read-only against the REAL reader too: a pid the
+// kernel shows no listener for is simply unproven — nothing is ever
+// signalled to find out.
+func TestResolveServerIdentity_NamespaceProofNeverSignals(t *testing.T) {
+	signals := 0
+	oldSignal := tmuxServerSignal
+	tmuxServerSignal = func(int, syscall.Signal) error { signals++; return nil }
+	t.Cleanup(func() { tmuxServerSignal = oldSignal })
+
+	sock := filepath.Join(t.TempDir(), "af.sock")
+	_ = resolveServerIdentity(ServerIdentity{Socket: sock, PID: os.Getpid()})
+	require.Zero(t, signals, "tmuxServerSocketBinding reads listeners; it must never signal")
+}
+
+// The proof is paid once per record, not per stamp: a resolution naming the
+// same (socket, pid, session) carries the standing record's proof fields
+// forward instead of re-reading the server's listeners.
+func TestNoteServerIdentity_CarriesTheProofForward(t *testing.T) {
+	ts := &TmuxSession{}
+	calls := 0
+	oldBinding := tmuxServerSocketBinding
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		calls++
+		return socketBindingBound, "/bound"
+	}
+	t.Cleanup(func() { tmuxServerSocketBinding = oldBinding })
+
+	raw := ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid(), SessionID: "$7"}
+	ts.noteServerIdentity(raw)
+	require.Equal(t, 1, calls)
+	first, ok := ts.ServerEvidence()
+	require.True(t, ok)
+	require.NotZero(t, first.PIDNS)
+
+	ts.noteServerIdentity(raw)
+	require.Equal(t, 1, calls, "an unchanged tuple reuses the standing proof")
+	second, _ := ts.ServerEvidence()
+	require.Equal(t, first, second)
+
+	ts.noteServerIdentity(ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid(), SessionID: "$8"})
+	require.Equal(t, 2, calls, "a changed record re-proves")
+}
+
+// #7581 item 1 (verdict): a record whose pid the stamp could not prove in
+// this namespace produces EXACTLY master's verdict — every pid compare
+// undecidable, identical to an absent record. The socket compare still
+// speaks: a foreign socket is still foreign — the proof gates the PID.
+func TestCarrierServerVerdict_UnprovenPidEqualsNoRecord(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "af.sock")
+	require.NoError(t, os.WriteFile(sock, nil, 0o600))
+	unproven := ServerIdentity{Socket: sock, PID: 4242, StartID: 9, SessionID: "$7"} // PIDNS ""
+
+	for _, tmuxEnv := range []string{sock + ",9999,3", sock + ",4242,7"} {
+		require.Equal(t, serverVerdictUndecidable,
+			tmuxEnvServerVerdict(tmuxEnv, unproven, "pidns:test"),
+			"env %q: an unproven recorded pid is undecidable — never foreign or own", tmuxEnv)
+		require.Equal(t, serverVerdictUndecidable,
+			tmuxEnvServerVerdict(tmuxEnv, ServerIdentity{}, "pidns:test"),
+			"env %q: no record answers identically — that is master's verdict", tmuxEnv)
+	}
+	other := filepath.Join(dir, "other.sock")
+	require.NoError(t, os.WriteFile(other, nil, 0o600))
+	require.Equal(t, serverVerdictForeign,
+		tmuxEnvServerVerdict(other+",9999,3", unproven, "pidns:test"),
+		"a different socket still proves foreign — the proof gates the pid, never the socket")
 }

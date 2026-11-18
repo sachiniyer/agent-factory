@@ -206,19 +206,29 @@ func (t *TmuxSession) PaneRootEvidence() (pid int, startID uint64, ok bool) {
 }
 
 // resolveServerIdentity fills the kernel fields a pane row cannot carry —
-// the server process's StartID and the pid namespace this process writes to —
+// the server process's StartID and the pid namespace the pid was PROVEN in —
 // so the record survives a daemon restart and a recycled server pid (#7469).
-// A lookup failure degrades the record (socket and pid still compare), never
-// discards it.
+// The proof (#7581 item 1): the per-socket reader must show THIS pid holding
+// a listener bound to the recorded socket (#7537/#7543) — read-only, never
+// tmuxSocketClaimed or SIGUSR1. #{pid} names the server in ITS pid
+// namespace; a server living in another one makes the number fiction here —
+// it can name a different process entirely — so a stamp that cannot prove
+// the pid leaves StartID and PIDNS empty and every pid-derived compare is
+// undecidable. Socket and PID still ride the record: the socket compare no
+// namespace can break, and the pid still names the verdict's reason.
 func resolveServerIdentity(id ServerIdentity) ServerIdentity {
 	if !id.valid() {
 		return ServerIdentity{}
 	}
-	if p, err := proctree.Lookup(id.PID); err == nil {
-		id.StartID = p.StartID
-	}
-	if ns, err := proctree.PIDNamespaceID(); err == nil {
-		id.PIDNS = ns
+	id.StartID, id.PIDNS = 0, ""
+	switch binding, _ := tmuxServerSocketBinding(id.PID, id.Socket); binding {
+	case socketBindingBound, socketBindingBoundByTable:
+		if p, err := proctree.Lookup(id.PID); err == nil {
+			id.StartID = p.StartID
+		}
+		if ns, err := proctree.PIDNamespaceID(); err == nil {
+			id.PIDNS = ns
+		}
 	}
 	return id
 }
@@ -228,9 +238,17 @@ func resolveServerIdentity(id ServerIdentity) ServerIdentity {
 // kernel evidence — while a row that could not keeps whatever stands (a
 // field-less tmux answers "unknown", never "changed"). A landed stamp also
 // clears the spawn-boundary retirement: the record once more names the
-// session's current incarnation (#7469 R1a).
+// session's current incarnation (#7469 R1a). A stamp naming the SAME
+// (socket, pid, session) carries the standing record's proof fields forward
+// — the namespace proof is paid once per record, not once per row (#7581).
 func (t *TmuxSession) noteServerIdentity(raw ServerIdentity) {
-	id := resolveServerIdentity(raw)
+	id := raw
+	if cur := t.serverEvidence.Load(); cur != nil &&
+		cur.Socket == raw.Socket && cur.PID == raw.PID && cur.SessionID == raw.SessionID {
+		id.StartID, id.PIDNS = cur.StartID, cur.PIDNS
+	} else {
+		id = resolveServerIdentity(raw)
+	}
 	if id.valid() {
 		stored := id
 		t.serverEvidence.Store(&stored)

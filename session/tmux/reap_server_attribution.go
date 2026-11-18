@@ -14,10 +14,11 @@ import (
 // ServerIdentity records which tmux server a session's pane was last resolved
 // against (#7469): the socket the server answered on, the server's (pid,
 // StartID) process instance, the session's $N id, and the pid-namespace the
-// record was made in. The vanished-session sweep compares a detached marked
-// carrier against exactly this: a carrier whose last tmux server is provably
-// NOT this one is descended from a foreign server, which #7469 forbids
-// signalling.
+// pid was PROVEN in (#7581 item 1 — empty when the stamp could not prove it,
+// which leaves every pid-derived compare undecidable). The vanished-session
+// sweep compares a detached marked carrier against exactly this: a carrier
+// whose last tmux server is provably NOT this one is descended from a
+// foreign server, which #7469 forbids signalling.
 //
 // Socket is stored as #{socket_path} reported it — canonicalization happens
 // at compare time, against the carrier's own spelling, so a path that only
@@ -37,6 +38,20 @@ type ServerIdentity struct {
 // existed, stamps tmux could not answer — yields undecidable everywhere,
 // which is today's verdict.
 func (id ServerIdentity) valid() bool { return id.Socket != "" && id.PID > 0 }
+
+// pidProvenHere reports whether the recorded PID may be compared against
+// pids in THIS pid namespace (#7581 item 1). At stamp time the per-socket
+// reader had to show the pid holding a listener bound to the recorded
+// socket; PIDNS then records the namespace that proof was made in — never
+// merely the recorder's own. A record without it — a tmux server living in
+// another pid namespace, or a stamp the reader could not establish — leaves
+// every pid-derived compare undecidable: the number may name nothing here,
+// or a different process entirely, and neither is positive evidence. A
+// record persisted before the proof existed keeps its recorded namespace
+// and compares exactly as it did then.
+func (id ServerIdentity) pidProvenHere(selfNS string) bool {
+	return id.PIDNS != "" && selfNS != "" && id.PIDNS == selfNS
+}
 
 // serverVerdict is what the attribution channels learned about one carrier:
 // the tmux server it last belonged to is our recorded one (own), provably a
@@ -113,10 +128,12 @@ func tmuxEnvServerVerdict(tmuxEnv string, own ServerIdentity, selfNS string) ser
 	if !same {
 		return serverVerdictForeign
 	}
-	// The pid number the env records names the server in the writer's pid
-	// namespace — meaningful to compare only when the record and this sweep
-	// agree on which namespace that is.
-	if own.PIDNS != "" && selfNS != "" && own.PIDNS != selfNS {
+	// The pid the env names the server by may be compared only when the
+	// record's stamp proved that pid holds the recorded socket in THIS
+	// namespace (#7581 item 1). Without the proof — a foreign-namespace
+	// server, a stamp the reader could not establish — the number could be
+	// anything here, so the whole pid arm is undecidable, never foreign.
+	if !own.pidProvenHere(selfNS) {
 		return serverVerdictUndecidable
 	}
 	if serverPID != own.PID {
@@ -297,7 +314,10 @@ func ptyFdServerVerdict(pid int, own ServerIdentity, snap map[int]proctree.Proce
 // the recorded StartID gates it where recorded; and a pid-namespace mismatch
 // makes the numeric compare meaningless, never foreign.
 func compareHeldServer(snap map[int]proctree.Process, holder int, own ServerIdentity, selfNS string) serverVerdict {
-	if own.PIDNS != "" && selfNS != "" && own.PIDNS != selfNS {
+	// holder is a pid in THIS namespace's table — comparing it to a
+	// recorded pid the stamp never proved here would be comparing numbers
+	// from different namespaces: fiction, never evidence (#7581 item 1).
+	if !own.pidProvenHere(selfNS) {
 		return serverVerdictUndecidable
 	}
 	if holder != own.PID {
@@ -364,13 +384,13 @@ func (o *serverPtyOwners) forSnapshot(snap map[int]proctree.Process) map[proctre
 // the warning a swept carrier leaves in the log (#7469): the TMUX env's
 // socket naming another server, or a pty slave whose master a different live
 // server holds.
-func serverVerdictReason(environ []string, own ServerIdentity) string {
+func serverVerdictReason(environ []string, own ServerIdentity, selfNS string) string {
 	tmuxEnv, _ := processEnvValue(environ, tmuxEnvVar)
 	if socket, serverPID, _, ok := parseTmuxEnvTuple(tmuxEnv); ok {
 		if same, comparable := sameRecordedSocket(socket, own.Socket); comparable && !same {
 			return "TMUX environment (socket " + socket + ")"
 		}
-		if serverPID != own.PID {
+		if own.pidProvenHere(selfNS) && serverPID != own.PID {
 			return "TMUX environment (server pid " + strconv.Itoa(serverPID) + ")"
 		}
 	}

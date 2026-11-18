@@ -72,7 +72,12 @@ func recordedOwnServer(t *testing.T) ServerIdentity {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "af-tmux.sock")
 	require.NoError(t, os.WriteFile(sock, nil, 0o600))
-	return ServerIdentity{Socket: sock, PID: 4242, StartID: 987654321, SessionID: "$7"}
+	// PIDNS carries the real pid namespace — the shape a record has after
+	// the stamp proved the pid holds the socket HERE (#7581 item 1). A
+	// fixture without it would be an unproven record and every pid-derived
+	// compare would read undecidable.
+	ns, _ := proctree.PIDNamespaceID()
+	return ServerIdentity{Socket: sock, PID: 4242, StartID: 987654321, SessionID: "$7", PIDNS: ns}
 }
 
 // #7469 acceptance: a DETACHED carrier whose TMUX env names a server that is
@@ -238,7 +243,7 @@ func TestVanishedSessionSweep_OwnServerCarrierKeepsTodaysRefusal(t *testing.T) {
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
 	require.Equal(t, serverVerdictOwn,
-		carrierServerVerdict(carrier, environ, own, snap, &serverPtyOwners{}, ""),
+		carrierServerVerdict(carrier, environ, own, snap, &serverPtyOwners{}, own.PIDNS),
 		"the fixture must read OWN — an undecidable verdict makes the refusal assertion vacuous")
 
 	marked, _, err := markedOrphanProcesses(
@@ -307,7 +312,7 @@ func TestVanishedSessionSweep_OwnServerCarrierStillReapedAtTier2(t *testing.T) {
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
 	require.Equal(t, serverVerdictOwn,
-		carrierServerVerdict(carrier, environ, own, snap, &serverPtyOwners{}, ""),
+		carrierServerVerdict(carrier, environ, own, snap, &serverPtyOwners{}, own.PIDNS),
 		"the fixture must read OWN — a foreign or undecidable verdict would make the outcome vacuous")
 
 	marked, _, err := markedOrphanProcesses(
@@ -320,6 +325,52 @@ func TestVanishedSessionSweep_OwnServerCarrierStillReapedAtTier2(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []proctree.Process{carrier}, marked,
 		"an unproven own-server carrier keeps its tier-2 admission — own never demotes either")
+}
+
+// #7581 item 1 (outcome): a carrier judged against a record whose pid was
+// never proven in this namespace keeps master's verdict EXACTLY — the same
+// admit-or-refuse answer an absent record produces. This is the only
+// direction the namespace gate can move a verdict toward signalling: a
+// cross-namespace pid mismatch was never a positive foreign proof, so the
+// carrier goes back to whatever today's rules give it.
+func TestVanishedSessionSweep_UnprovenPidKeepsMastersVerdict(t *testing.T) {
+	name := "af_unproven_ns"
+	home := t.TempDir()
+	gen := name + "-gen"
+
+	sock := filepath.Join(t.TempDir(), "af-tmux.sock")
+	require.NoError(t, os.WriteFile(sock, nil, 0o600))
+	unproven := ServerIdentity{Socket: sock, PID: 4242, StartID: 9, SessionID: "$7"} // PIDNS ""
+
+	// The carrier's env names the recorded socket but a DIFFERENT server
+	// pid — foreign under a proven record, undecidable under an unproven
+	// one. Isolate the pty channel so the env arm is what speaks.
+	oldSlaves := ptySlaveIndices
+	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) { return nil, nil }
+	t.Cleanup(func() { ptySlaveIndices = oldSlaves })
+	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen,
+		agentNamedBinary(t, os.Args[0]), "TMUX="+sock+",9999,3")
+
+	membership := cohortMembership{
+		Root:     proctree.Process{PID: carrier.PPID, StartID: 1},
+		AgentExe: "claude",
+	}
+	withRecord, _, errWith := markedOrphanProcesses(
+		[]proctree.Process{carrier}, name, home, fixtureCohort(gen),
+		cohortMembership{
+			Root:      membership.Root,
+			AgentExe:  membership.AgentExe,
+			OwnServer: unproven,
+		}, nil, nil)
+	withoutRecord, _, errWithout := markedOrphanProcesses(
+		[]proctree.Process{carrier}, name, home, fixtureCohort(gen), membership, nil, nil)
+	require.Equal(t, errWithout != nil, errWith != nil,
+		"the unproven record must answer exactly like no record at all")
+	require.Equal(t, withoutRecord, withRecord,
+		"master's verdict for this carrier is the tier-2 admit — the unproven record must not change it")
+	require.Equal(t, []proctree.Process{carrier}, withRecord,
+		"master's verdict: the agent-identical carrier is admitted and reaped")
+	require.True(t, proctree.AliveSame(carrier), "the sweep only marks in a fixture")
 }
 
 // #3699 pinned: the re-hosted claude keeps converging. A claude-comm carrier

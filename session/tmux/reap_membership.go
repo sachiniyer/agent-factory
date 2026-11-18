@@ -488,7 +488,7 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				// #7469 closes).
 				log.WarningLog.Printf("captured live pid %d marks session %s but its %s places it on a foreign tmux server — "+
 					"proven foreign: refused, LEFT ALIVE, never signalled, and not blocking cleanup (#7469)",
-					process.PID, sanitizedName, serverVerdictReason(environ, membership.OwnServer))
+					process.PID, sanitizedName, serverVerdictReason(environ, membership.OwnServer, selfNS))
 				continue
 			}
 			// No proof and no foreign evidence: a MEMBERSHIP verdict only —
