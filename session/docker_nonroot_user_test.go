@@ -846,10 +846,11 @@ func TestPrepareNonAccountUser_UnwritableMountWarnsAndProceeds(t *testing.T) {
 }
 
 // The master-parity property stated in #7571 review R8, pinned as a call
-// count: prepareNonAccountUser issues master's three docker execs — the
-// `id -u` user probe, the mount-table read, and the mkdir+chown step — and
-// no fourth exec, whatever the mount table holds. Any extra exec (the
-// writability probe, an inspect) is a call master did not make.
+// count: prepareNonAccountUser issues master's three docker calls — the
+// `id -u` user probe exec, the mount-table read exec, and the mkdir+chown
+// exec — and no fourth call of any kind, whatever the mount table holds.
+// Any extra docker call (the writability probe, a `docker inspect`) is one
+// master did not make.
 func TestPrepareNonAccountUser_MakesExactlyMastersDockerCalls(t *testing.T) {
 	for name, sc := range map[string]accountChownScenario{
 		"no mounts":            {},
@@ -864,14 +865,12 @@ func TestPrepareNonAccountUser_MakesExactlyMastersDockerCalls(t *testing.T) {
 			t.Cleanup(SetDockerExecForTest(nonRootChownScenarioStub(&calls, sc)))
 			p := &dockerProvisioner{containerID: "cid"}
 			require.NoError(t, p.prepareNonAccountUser())
-			var execs [][]string
+			require.Len(t, calls, 3,
+				"prepareNonAccountUser must make exactly master's three docker calls (id probe, mount table, mkdir+chown); calls=%v", calls)
 			for _, call := range calls {
-				if len(call) > 0 && call[0] == "exec" {
-					execs = append(execs, call)
-				}
+				require.Equal(t, "exec", call[0],
+					"master makes only exec calls — no inspect, no probe; call=%v", call)
 			}
-			require.Len(t, execs, 3,
-				"prepareNonAccountUser must make exactly master's three docker execs (id probe, mount table, mkdir+chown); execs=%v", execs)
 		})
 	}
 }
