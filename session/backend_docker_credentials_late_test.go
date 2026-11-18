@@ -635,7 +635,8 @@ func TestRunContainer_BlanksPaneBoundaryNamesForExecChildren(t *testing.T) {
 // falsy-safe on @google/gemini-cli 0.42.0: the auth source is
 // CLOUD_SHELL === "true" || GEMINI_CLI_USE_COMPUTE_ADC === "true", the
 // metadata endpoint is GCE_METADATA_IP || GCE_METADATA_HOST ||
-// HOST_ADDRESS, and git treats GIT_CONFIG_COUNT="" as count 0 — making
+// HOST_ADDRESS (a compiled constant — not an env read, so nothing to
+// pin), and git treats GIT_CONFIG_COUNT="" as count 0 — making
 // every indexed GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* pair inert — and an
 // empty GIT_CONFIG_PARAMETERS as zero -c pairs.
 func TestCredentialMount_LoaderFilledNamesArePinnedEmpty(t *testing.T) {
@@ -656,7 +657,7 @@ func TestCredentialMount_LoaderFilledNamesArePinnedEmpty(t *testing.T) {
 	geminiPins := credentialMountPinnedNames(tmux.ProgramGemini, nil)
 	for _, name := range []string{
 		"GEMINI_CLI_USE_COMPUTE_ADC", "CLOUD_SHELL",
-		"GCE_METADATA_HOST", "GCE_METADATA_IP", "HOST_ADDRESS",
+		"GCE_METADATA_HOST", "GCE_METADATA_IP",
 	} {
 		require.Contains(t, geminiPins, name,
 			"%s must be pinned empty for gemini — a chain link left unset is the one a .env claims", name)
@@ -687,30 +688,6 @@ func TestDockerCredentialRunArgs_RefusesGitConfigPairs(t *testing.T) {
 		require.Contains(t, err.Error(), name)
 		require.Contains(t, err.Error(), "session_env_passthrough", "the refusal must name the operator remedy")
 	}
-}
-
-// TestDockerAccountRunArgs_RefusesGitEnvConfig applies the same family
-// refusal on the account path: the git environment-config names are not
-// identity (the passthrough filter must keep them) but are still never the
-// repository's — a run_args count activates pairs any repo source supplies
-// for af's own provisioning git runs.
-func TestDockerAccountRunArgs_RefusesGitEnvConfig(t *testing.T) {
-	for _, name := range []string{
-		"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
-		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_4", "GIT_CONFIG_VALUE_4",
-	} {
-		err := validateAccountDockerRunArgs([]string{"-e", name + "=x"}, "gemini")
-		require.Errorf(t, err, "%s in account-session run_args must be refused — git env config is af's or the operator's, not the repo's", name)
-		require.Contains(t, err.Error(), name)
-	}
-	// But the operator's own forward is honored: the passthrough filter
-	// keeps git env config names — they are not identity.
-	got := filterAccountPassthrough(
-		[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GEMINI_API_KEY"}, "gemini")
-	require.Contains(t, got, "GIT_CONFIG_COUNT", "a forwarded count is the operator's claim, not an identity to strip")
-	require.Contains(t, got, "GIT_CONFIG_KEY_0")
-	require.Contains(t, got, "GIT_CONFIG_VALUE_0")
-	require.NotContains(t, got, "GEMINI_API_KEY", "an identity name is still filtered")
 }
 
 // TestProvision_RefusesPaneBoundaryPassthrough is #7544's no-silent-override

@@ -38,17 +38,6 @@ func filterAccountPassthrough(names []string, agent string) []string {
 	return out
 }
 
-// accountDockerGitEnvName is the git environment-config family an account
-// session refuses from docker.run_args: the names ApplyAccount pins
-// keep-if-set (so an operator-forwarded value survives) and the indexed
-// pairs a forwarded or repo-set count would activate (#7544).
-func accountDockerGitEnvName(name string) bool {
-	if name == "GIT_CONFIG_COUNT" || name == "GIT_CONFIG_PARAMETERS" {
-		return true
-	}
-	return strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_")
-}
-
 // dockerMountFields splits a --mount value into fields the way Docker does.
 // Docker reads the value as a single CSV record, so a quoted field such as
 // `"dst=/af-account"` names the same mount target a bare one does while a plain
@@ -301,18 +290,6 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 		if _, refused := denied[name]; refused {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because it can override the selected identity",
-				name, agent)
-		}
-		// The git environment-config family is not identity, so it is not in
-		// denied — but it is still never the repository's to supply: a repo
-		// GIT_CONFIG_COUNT activates pairs from any repo source (run_args or
-		// the chosen image's ENV) inside every git run the session and af's
-		// own provisioning steps make, and injected git config is code
-		// execution (core.hooksPath). The family stays af's pinned default
-		// or the operator's own through session_env_passthrough (#7544).
-		if accountDockerGitEnvName(name) {
-			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because git environment config stays af's or the operator's own — forward it through session_env_passthrough",
 				name, agent)
 		}
 		return nil

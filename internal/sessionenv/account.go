@@ -227,33 +227,7 @@ var accountLateEnvironmentNames = map[string]map[string]struct{}{
 		"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
 		"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL",
 		"CODE_ASSIST_API_VERSION",
-		// The identity-source names pin EVERY member of the reads that
-		// choose them: getAuthTypeFromEnv is CLOUD_SHELL === "true" ||
-		// GEMINI_CLI_USE_COMPUTE_ADC === "true", and the metadata host is
-		// GCE_METADATA_IP || GCE_METADATA_HOST || HOST_ADDRESS — pinning
-		// only the second link of a chain leaves the first for a `.env` to
-		// claim (measured on @google/gemini-cli 0.42.0; every read is
-		// falsy-safe empty, and HOST_ADDRESS is a compiled fallback there —
-		// pinned for the versions that read it from env) (#7544).
-		"GEMINI_CLI_USE_COMPUTE_ADC", "CLOUD_SHELL",
-		"GCE_METADATA_HOST", "GCE_METADATA_IP", "HOST_ADDRESS",
 	),
-}
-
-// accountLoaderFilledNames are names an agent's own dotenv loader fills
-// when unset that are NOT identity: gemini's `.env` can put git
-// configuration into every git run the session makes, and injected git
-// config is code execution (core.hooksPath) inside the account boundary.
-// They are pinned by a different rule than the identity names above: an
-// unconditional pin would silently drop an operator-forwarded
-// GIT_CONFIG_COUNT and its pairs on every backend — they are deployment
-// config, not identity — so the claim test is the one the credential-mount
-// pins use. A name defined in the filtered env stays (a value present
-// there can only be the operator's own — repository sources cannot reach
-// it); only an absent name is installed defined-and-empty so the `.env`
-// loader finds it claimed (#7544 review R1).
-var accountLoaderFilledNames = map[string]map[string]struct{}{
-	"gemini": nameSet("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"),
 }
 
 // accountLateEnvironmentValues is the same late-source defense for the ONE
@@ -423,23 +397,6 @@ func AccountIdentityNames(agent string) []string {
 	return out
 }
 
-// AccountLoaderFilledNames lists the non-identity names an agent's own
-// dotenv loader fills when unset — pinned defined-and-empty by
-// ApplyAccount and the remote scrub UNLESS the operator forwarded the
-// name and the daemon environment sets it, the same claim test the
-// credential-mount pins use. Unlike AccountIdentityNames these are
-// deployment configuration (git env config), so an unconditional pin
-// would silently drop an operator's forwarded value (#7544).
-func AccountLoaderFilledNames(agent string) []string {
-	names := accountLoaderFilledNames[agent]
-	out := make([]string, 0, len(names))
-	for name := range names {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // accountPinnedEmptyNames is the sorted set ApplyAccount installs as empty
 // values, never the config variable itself — that one is injected with the
 // account directory, and an empty copy of it would erase the selection this
@@ -603,13 +560,11 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	}
 	sort.Strings(filled)
 	out := make([]string, 0, len(env)+len(pinned)+len(filled)+1)
-	present := make(map[string]struct{}, len(env))
 	for _, kv := range env {
 		name, _, found := strings.Cut(kv, "=")
 		if !found {
 			continue
 		}
-		present[name] = struct{}{}
 		if _, drop := denied[name]; drop {
 			continue
 		}
@@ -630,16 +585,6 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	// first-party endpoint rather than an empty one it would use literally.
 	for _, entry := range filled {
 		out = append(out, entry)
-	}
-	// Non-identity loader-filled names pin ONLY when the env does not
-	// already define them: a defined value survived the filter, so it can
-	// only be the operator's own (a forwarded GIT_CONFIG_COUNT and its
-	// pairs stay whole); an absent name is the only one a late `.env`
-	// could still claim, so it is installed defined-and-empty (#7544).
-	for name := range accountLoaderFilledNames[account.Agent] {
-		if _, ok := present[name]; !ok {
-			out = append(out, name+"=")
-		}
 	}
 	// Appended last so it wins over any ambient copy that survived, though the
 	// removal above means there should not be one.

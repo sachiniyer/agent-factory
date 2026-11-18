@@ -33,13 +33,12 @@ var credentialMountLoaderFilledNames = map[string]map[string]struct{}{
 		// The metadata host is GCE_METADATA_IP || GCE_METADATA_HOST ||
 		// HOST_ADDRESS — pinning only the second link leaves IP free for
 		// the .env to retarget the endpoint the ADC probe and token fetch
-		// dial; empty is falsy on every link and falls back to the
-		// compiled metadata.google.internal. HOST_ADDRESS is a compiled
-		// constant in 0.42.0 — pinned for the versions that read it from
-		// env, falsy-safe either way.
+		// dial; empty is falsy on either env link and falls back to
+		// HOST_ADDRESS, which is gcp-metadata's compiled constant
+		// 169.254.169.254 — a module constant, not an env read, so there is
+		// no third link for a .env to claim and nothing more to pin.
 		"GCE_METADATA_HOST": {},
 		"GCE_METADATA_IP":   {},
-		"HOST_ADDRESS":      {},
 	},
 }
 

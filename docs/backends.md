@@ -287,9 +287,9 @@ user's real home and mounts it only if it exists, so:
       the auth source is `CLOUD_SHELL === "true" || GEMINI_CLI_USE_COMPUTE_ADC === "true"`
       (each compare fails on empty, so the default source stands), the
       metadata endpoint is `GCE_METADATA_IP || GCE_METADATA_HOST || HOST_ADDRESS`
-      (empty is falsy on every link and falls back to the compiled
-      `metadata.google.internal`; `HOST_ADDRESS` is a compiled constant in
-      0.42.0, pinned for the versions that read it from env), and the git
+      (empty is falsy on either env link and falls back to `HOST_ADDRESS`,
+      gcp-metadata's compiled constant `169.254.169.254` — a module
+      constant, not an env read, so there is no third link to pin), and the git
       environment-config names `GIT_CONFIG_COUNT` and
       `GIT_CONFIG_PARAMETERS` (git parses `""` as count 0 — making every
       indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pair inert — and as
@@ -419,18 +419,19 @@ user's real home and mounts it only if it exists, so:
       gemini's `.env`, which fills only names that are unset — is either
       pinned or named here: the identity-source names — both selectors the
       auth-source read consults (`CLOUD_SHELL`, `GEMINI_CLI_USE_COMPUTE_ADC`)
-      and every link of the metadata-endpoint chain (`GCE_METADATA_IP`,
-      `GCE_METADATA_HOST`, `HOST_ADDRESS`) — and the git environment-config
-      names (`GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS` — pinning the
+      and every env link of the metadata-endpoint chain (`GCE_METADATA_IP`,
+      `GCE_METADATA_HOST`; the chain's third link is `HOST_ADDRESS`,
+      gcp-metadata's compiled constant `169.254.169.254`, not an env read)
+      — and the git environment-config names (`GIT_CONFIG_COUNT`,
+      `GIT_CONFIG_PARAMETERS` — pinning the
       count makes the whole indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`
       family inert) are pinned defined-and-empty as described above;
       `GIT_CONFIG` alone stays unpinned because git reads a defined-empty
       value as a real config file path and `git config` would break, so it
       is documented instead — a loader can still claim it. For an
       operator-forwarded `GIT_CONFIG_COUNT`, the indexed pairs it activates
-      are refused to `docker.run_args` on both the credential-mount and
-      account paths (`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` are never the
-      repository's to supply) — the operator's own pairs ride
+      are refused to `docker.run_args` (`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`
+      are never the repository's to supply) — the operator's own pairs ride
       `session_env_passthrough`; the image's `Config.Env` pairs remain a
       repo source the environment boundary cannot enumerate, part of the
       image trust above.

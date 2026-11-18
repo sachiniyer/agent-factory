@@ -359,7 +359,7 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	for _, name := range spec.SessionEnvPassthrough {
 		if _, ok := credentialMountPaneBoundaryNames[name]; ok {
 			return ProvisionResult{}, fmt.Errorf(
-				"backend=docker: session_env_passthrough cannot forward %s — af and tmux stamp that name at the pane boundary and runContainer blanks it on every docker session; remove it from session_env_passthrough", name)
+				"backend=docker: session_env_passthrough cannot forward %s — af and tmux stamp that name at the pane boundary, so the forwarded value would be blanked on every docker session; remove %s from session_env_passthrough", name, name)
 		}
 	}
 	res, err := p.provision()

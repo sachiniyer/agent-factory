@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -590,22 +589,6 @@ func (w *sandboxWorkspace) accountPinnedNames() []string {
 	}
 	add(sessionenv.AccountIdentityNames(agent))
 	add(sessionenv.AgentAuthSelectors(agent))
-	// Non-identity loader-filled names pin only when the operator did not
-	// claim them — forwarded through session_env_passthrough AND set in the
-	// daemon's environment, the same claim test the credential-mount pins
-	// use — so a forwarded GIT_CONFIG_COUNT and its pairs reach the remote
-	// session rather than being scrubbed empty (#7544).
-	for _, name := range sessionenv.AccountLoaderFilledNames(agent) {
-		if slices.Contains(w.spec.SessionEnvPassthrough, name) {
-			if _, set := os.LookupEnv(name); set {
-				continue
-			}
-		}
-		if !seen[name] {
-			seen[name] = true
-			names = append(names, name)
-		}
-	}
 	sort.Strings(names)
 	return names
 }
