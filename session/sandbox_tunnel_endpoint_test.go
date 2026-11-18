@@ -639,7 +639,10 @@ func TestTunnelSocketPathRefusesAClosingBracket(t *testing.T) {
 // Everything af creates under tunnels/ is created relative to the VERIFIED
 // root's held fd — a swapped-in directory at the path cannot redirect af's
 // writes into whatever replaced it (#7503). The decoy planted at the path
-// stays empty; the real files land inside the moved-aside verified dir.
+// stays empty; the real files land inside the moved-aside verified dir. This
+// pins the establish layer: defaultTunnelGenerationDir's own staleness check
+// would notice the (dev, inode) mismatch and re-verify the path instead —
+// either way the decoy is never trusted because the name matches (#7511).
 func TestTunnelCreateStaysRelativeToTheVerifiedFd(t *testing.T) {
 	home := t.TempDir()
 	root, err := verifyTunnelSocketRoot(home)
@@ -883,7 +886,8 @@ func TestTunnelGenRootIsReverifiedAfterUnlink(t *testing.T) {
 	_ = lf.Close()
 
 	// A FOREIGN tunnels/ swapped in for the unlinked one is refused — the
-	// same checks as the first verify, never trusted because the name matches.
+	// same checks as the first verify, never trusted because the name
+	// matches — and the failure names the remedy that always works.
 	require.NoError(t, os.RemoveAll(rootPath))
 	require.NoError(t, os.Mkdir(rootPath, 0o755))
 	require.NoError(t, os.Chmod(rootPath, 0o755), "pin the mode past umask")
@@ -891,12 +895,24 @@ func TestTunnelGenRootIsReverifiedAfterUnlink(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "0700",
 		"a foreign tunnels/ swapped under the dead fd is refused, not adopted")
+	assert.Contains(t, err.Error(), "restarting af",
+		"an unverifiable replacement names the restart remedy")
 
-	// And once the intruder is gone the next call heals — create + re-verify.
+	// A replacement that DOES verify — own-uid, 0700, real directory — is
+	// adopted rather than name-trusted: af re-proves it end-to-end exactly
+	// like a first verify, then keeps working.
 	require.NoError(t, os.RemoveAll(rootPath))
+	require.NoError(t, os.Mkdir(rootPath, 0o700))
+	require.NoError(t, os.Chmod(rootPath, 0o700), "pin the mode past umask")
 	dir3, err := defaultTunnelGenerationDir()
 	require.NoError(t, err)
 	assert.Equal(t, dir, dir3)
+
+	// And once the replacement is gone the next call heals — create + verify.
+	require.NoError(t, os.RemoveAll(rootPath))
+	dir4, err := defaultTunnelGenerationDir()
+	require.NoError(t, err)
+	assert.Equal(t, dir, dir4)
 }
 
 // The generation's lock is provably the dir's own .lock — the same (dev,

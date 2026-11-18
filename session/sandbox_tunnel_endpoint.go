@@ -65,10 +65,12 @@ import (
 // fstat), never by re-resolving the path (#7503). A same-uid process that
 // swaps tunnels/ afterwards cannot redirect af's files. A generation dir
 // deleted mid-life is re-established under the held fd rather than served
-// from a dead cache entry; and when tunnels/ ITSELF is unlinked the held fd
-// goes dead (nlink 0), so the next spawn re-verifies the path end-to-end
-// before anything lands in it — a foreign tunnels/ swapped in for the old
-// one is refused by the same checks as the first verify (#7511).
+// from a dead cache entry; and when tunnels/ ITSELF is unlinked or replaced
+// the held fd stops naming the path — proven by comparing the fd's
+// (dev, inode) with a fresh lstat, portable where the dead inode's own
+// metadata is not — so the next spawn re-verifies the path end-to-end before
+// anything lands in it: a foreign tunnels/ swapped in for the old one is
+// refused by the same checks as the first verify (#7511).
 //
 // There is deliberately no TCP fallback: a transport that cannot do a unix
 // forward fails the provision loudly, naming the transport, rather than
@@ -166,29 +168,62 @@ func defaultTunnelGenerationDir() (string, error) {
 	return e.dir, nil
 }
 
-// ensureRootLocked re-verifies the held root when it has been unlinked — a
-// `rm -rf tunnels/` deletes the very directory the held fd names, and
-// nothing can be created under an unlinked inode, so the generation's
-// re-establish would fail "no such file or directory" until restart (#7511).
-// The re-verify re-opens the path and re-proves tunnels/ (creating it 0700
-// when nothing is there): a swapped-in foreign tunnels/ is refused by the
-// same checks as first verify. The generation's name is kept, so socket
-// paths minted against it stay valid across the recovery. Callers hold e.mu.
+// ensureRootLocked re-verifies the held root when it no longer names its
+// path — a `rm -rf tunnels/` (or a rename+replace) leaves the held fd
+// pointing at a dead inode, and nothing can be created under it, so the
+// generation's re-establish would fail "no such file or directory" until
+// restart (#7511). The re-verify re-opens the path and re-proves tunnels/
+// (creating it 0700 when nothing is there): a swapped-in foreign tunnels/
+// is refused by the same checks as first verify, and a path that cannot be
+// re-proven fails with the restart remedy. The generation's name is kept, so
+// socket paths minted against it stay valid across the recovery. Callers
+// hold e.mu.
 func (e *tunnelGenDirEntry) ensureRootLocked(home string) error {
-	var st unix.Stat_t
-	if err := unix.Fstat(int(e.root.dir.Fd()), &st); err == nil && st.Nlink != 0 {
-		return nil
-	}
-	// nlink == 0 (or an fstat failure): the held fd names a dead inode.
-	// Re-verify rather than fail — the dead fd is released only after a
-	// replacement verifies, so a failed verify never worsens the state.
-	root, err := verifyTunnelSocketRoot(home)
+	live, err := e.rootLive()
 	if err != nil {
 		return err
+	}
+	if live {
+		return nil
+	}
+	// Stale: the dead fd is released only after a replacement verifies, so a
+	// failed re-verify never worsens the state.
+	root, err := verifyTunnelSocketRoot(home)
+	if err != nil {
+		return fmt.Errorf("the tunnel socket directory %q is gone and could not be re-verified: %w "+
+			"— restarting af re-establishes it", e.root.path, err)
 	}
 	_ = e.root.dir.Close()
 	e.root = root
 	return nil
+}
+
+// rootLive reports whether the held root fd still names the directory at its
+// path — same (dev, inode) as a fresh no-follow lstat. The dead fd's own
+// metadata is never consulted: an unlinked directory's st_nlink is not
+// portable evidence (APFS does not report 0, which is exactly how the first
+// version of this check let a dead fd through on darwin). The PATH's view is
+// uniform on Linux and darwin — the name is gone (ENOENT/ENOTDIR), names a
+// non-directory, or names a different inode (#7511).
+func (e *tunnelGenDirEntry) rootLive() (bool, error) {
+	if e.root == nil || e.root.dir == nil {
+		return false, nil
+	}
+	var held unix.Stat_t
+	if err := unix.Fstat(int(e.root.dir.Fd()), &held); err != nil {
+		return false, nil // a dead fd is stale by definition
+	}
+	var now unix.Stat_t
+	if err := unix.Lstat(e.root.path, &now); err != nil {
+		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
+			return false, nil
+		}
+		return false, err // an unreadable path is a real failure, not staleness
+	}
+	if now.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return false, nil // a non-directory took the path — the dir is gone either way
+	}
+	return held.Dev == now.Dev && held.Ino == now.Ino, nil
 }
 
 // currentTunnelHome resolves this process's canonical AF home FRESH on every
