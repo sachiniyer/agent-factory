@@ -105,8 +105,10 @@ func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.
 	}
 	checker, ok := as.(session.StagedDraftChecker)
 	if !ok {
-		// A runtime that cannot read bound composer evidence — the off-box
-		// backends of v1 — can never arm the watch.
+		// A runtime that cannot read bound composer evidence — a dead or
+		// exotic backend — can never arm the watch. The off-box runtimes
+		// DO implement it since #7546: remoteAgentServer ferries the
+		// sandbox's own checker over the wire.
 		m.dropStagedDraftWatch(key)
 		return
 	}

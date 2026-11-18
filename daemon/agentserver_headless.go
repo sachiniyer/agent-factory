@@ -540,6 +540,10 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	mux.HandleFunc("/v1/agent/preview", rpcHandler(hs.Preview))
 	mux.HandleFunc("/v1/agent/alive", rpcHandler(hs.Alive))
 	mux.HandleFunc("/v1/agent/send-prompt", rpcHandler(hs.SendPrompt))
+	// The #7545 staged-draft recheck, ferried for the daemon's watch (#7546).
+	// Internal like the rest of /v1/agent/* — daemon-to-agent-server only,
+	// same token gate as send-prompt, never a public API surface.
+	mux.HandleFunc("/v1/agent/bound-draft-still-staged", rpcHandler(hs.BoundDraftStillStaged))
 	// Compatibility tripwire for older daemons. The behavior is gone, but an
 	// old caller gets migration guidance instead of a successful no-op.
 	mux.HandleFunc("/v1/agent/tap-enter", rpcHandler(hs.RemovedAutoYes))
@@ -836,6 +840,24 @@ func (hs *headlessServer) SendPrompt(req agentSendPromptRequest, resp *agentSend
 	}
 	resp.OK = true
 	resp.Status = status
+	return nil
+}
+
+// agentBoundDraftStillStagedResponse carries only the closed enum: the
+// daemon phrases each verdict itself, so the wire can never carry text the
+// attention flag or logs might repeat (#7546 — no prompt-derived content
+// crosses this route; none crosses any route beyond the send that already
+// delivered it).
+type agentBoundDraftStillStagedResponse struct {
+	Read session.StagedDraftRead `json:"read"`
+}
+
+// BoundDraftStillStaged asks the in-sandbox session where the last send's
+// bound composer evidence sits — the same session.StagedDraftChecker read the
+// daemon's watch runs locally, answered on the side that owns the pane.
+func (hs *headlessServer) BoundDraftStillStaged(_ struct{}, resp *agentBoundDraftStillStagedResponse) error {
+	read, _ := session.BoundDraftStillStaged(hs.as)
+	resp.Read = read
 	return nil
 }
 
