@@ -143,6 +143,14 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			t.refuseClaudeMCPServers("the pane shows its footer under its \"Enable selected\" row, but not the picker whole (a pane too short scrolls its header off, one too narrow wraps its footer)")
 			return true
 		}
+		// The multi-server picker while Claude Code paints it, read from its
+		// header down (#7504): under a composer an earlier Claude left above
+		// it, with a row only begun, or with its header or a server name
+		// wrapped. The grammar above declined each one. Asked last too: it
+		// only turns a clear pane into a hold.
+		if claudeMCPServersPaintingOf(screen) {
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//
