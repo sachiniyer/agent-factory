@@ -188,9 +188,13 @@ func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 	// the liveness marker — the banner path alone also appears inside
 	// startAgentServer's redirect script.
 	failingSteps := map[string]func(args []string) bool{
-		"docker run":         func(args []string) bool { return args[0] == "run" },
-		"configureGit":       func(args []string) bool { return args[0] == "exec" && containsArg(args, "user.email") },
-		"cloneWorkspace":     func(args []string) bool { return args[0] == "exec" && containsArg(args, "git clone") },
+		"docker run":     func(args []string) bool { return args[0] == "run" },
+		"configureGit":   func(args []string) bool { return args[0] == "exec" && containsArg(args, "user.email") },
+		"cloneWorkspace": func(args []string) bool { return args[0] == "exec" && containsArg(args, "git clone") },
+		// copyAfBinary/copyPolicy deliver through the read-only staging
+		// binds when the payload stages; this fake's afBin path does not
+		// exist, so staging fails and the provisioner takes the un-staged
+		// cp+chmod fallback — the steps these entries fail still fire.
 		"copyAfBinary cp":    func(args []string) bool { return args[0] == "cp" },
 		"copyAfBinary chmod": func(args []string) bool { return args[0] == "exec" && containsArg(args, "chmod") },
 		"startAgentServer":   func(args []string) bool { return args[0] == "exec" && exactArg(args, "-d") },
@@ -216,6 +220,12 @@ func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 				func(args []string) ([]byte, error) {
 					if failing(args) {
 						return []byte("Error response from daemon: no space left on device\n"), fmt.Errorf("exit status 125")
+					}
+					if args[0] == "exec" && containsArg(args, "/proc/self/mountinfo") {
+						// The cp fallback's write-target guard reads the
+						// table before cp runs (#7577); a rootfs-only answer
+						// lets the targeted step be the one that fails.
+						return mountTableAnswer(), nil
 					}
 					if args[0] == "run" {
 						return []byte(dockerCreatedID + "\n"), nil
@@ -945,6 +955,11 @@ func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 				case args[0] == "inspect":
 					return []byte(`{"Config":{"User":"1000"},"HostConfig":{"UsernsMode":""},` +
 						`"Mounts":[{"Type":"bind","Source":"/var/lib/docker/wt","Destination":"/workspace"}]}`), nil
+				case args[0] == "exec" && containsArg(args, "/proc/self/mountinfo"):
+					// The cp fallback's write-target guard reads the
+					// table before cp runs (#7577); a rootfs-only answer
+					// lets the banner read be the step under test.
+					return mountTableAnswer(), nil
 				case args[0] == "exec":
 					return []byte("\n"), nil
 				}
@@ -1184,7 +1199,8 @@ func TestDockerOpWriteRoots_IncludesNonAccountHome(t *testing.T) {
 // only be borrowed by a bind covering the binary, never by an unrelated bind
 // at the home or workspace the chmod never touched; symmetrically, a bind at
 // /usr/local/bin that a chmod failure DID write through is now recognized
-// (#5424 review).
+// (#5424 review). The un-staged cp fallback is the only path that still runs
+// the chmod (#7577).
 func TestDockerOpWriteRoots_ChmodIsAfBinaryPath(t *testing.T) {
 	for _, p := range []*dockerProvisioner{
 		{spec: ProvisionSpec{Title: "non-account"}},

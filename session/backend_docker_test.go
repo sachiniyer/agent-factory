@@ -111,6 +111,12 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 				// BYO image, the path every shipped/tested image takes.
 				return []byte("0:0\n"), nil
 			}
+			if strings.Contains(joined, "/proc/self/mountinfo") {
+				// The cp fallback's write-target guard reads the table in
+				// readMountTable's two-dir form (#7577); a rootfs-only
+				// answer lets the provision reach cp.
+				return mountTableAnswer(), nil
+			}
 			// readBanner polls via `sh -c 'cat <banner>; kill -0 <pid> && …'` —
 			// the banner JSON plus the alive marker is a live server's answer.
 			if strings.Contains(joined, "cat "+dockerBannerPath) {

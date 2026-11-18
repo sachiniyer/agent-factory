@@ -462,6 +462,15 @@ type dockerProvisioner struct {
 	reapMu  sync.Mutex
 	reaped  bool
 	reapErr error
+
+	// Staged payload delivery (#7577 item 2): stagingDir is the af-owned
+	// per-session dir (removed on reap) holding the payload files;
+	// stagedAfPath/stagedPolicyPath are its members; payloadViaBinds marks
+	// the bind-delivery decision (see preparePayloadDelivery).
+	stagingDir       string
+	stagedAfPath     string
+	stagedPolicyPath string
+	payloadViaBinds  bool
 }
 
 // provision runs the full container lifecycle and returns the wiring a docker
@@ -522,7 +531,11 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.ensureThrowawayEngineRecorded(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 	}
-	if err := p.runContainer(); err != nil {
+	// Deliver af's own payload through read-only binds appended last in
+	// `docker run` — no cp, no root chmod for a run_args mount to redirect
+	// onto the host (#7577 item 2).
+	p.preparePayloadDelivery()
+	if err := p.runPayloadContainer(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
 	// Warn NOW, while the only thing that exists is the created container:
@@ -551,11 +564,8 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.configureGit(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
-	if err := p.copyAfBinary(); err != nil {
-		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
-	}
-	if err := p.copyPolicy(); err != nil {
-		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
+	if err := p.deliverPayload(); err != nil {
+		return ProvisionResult{}, err
 	}
 	if err := p.startAgentServer(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
@@ -779,6 +789,11 @@ func (p *dockerProvisioner) runContainer() error {
 			args = append(args, "-e", entry)
 		}
 	}
+	// The staged payload binds go LAST in argv — after run_args and every -e
+	// pin — so af's own files come from an af-owned read-only source nothing
+	// repo-controlled can precede (#7577 item 2). A run_args mount claiming
+	// the same destination is a docker-level duplicate error.
+	args = append(args, p.stagingMounts()...)
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
 	out, err := p.docker(dockerProvisionStepTimeout, args...)
@@ -794,6 +809,9 @@ func (p *dockerProvisioner) runContainer() error {
 		// exiting zero.
 		if id := parseCreatedContainerID(out); id != "" {
 			p.containerID = id
+		}
+		if derr := dockerDuplicateMountError(string(out), err); derr != nil {
+			return derr
 		}
 		// The data-root capacity evidence joins at the provision() boundary,
 		// shared with every other provisioning step (#5382).

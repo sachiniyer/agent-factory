@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -72,6 +73,15 @@ func (p *dockerProvisioner) reap() error {
 	defer p.reapMu.Unlock()
 	if p.reaped {
 		return p.reapErr
+	}
+	// The staged payload dir is af-owned and safe to remove however the run
+	// went — provision-failure reaps (container never ran), normal teardown,
+	// and the early-return path all clear it here so it never lingers.
+	if p.stagingDir != "" {
+		if err := os.RemoveAll(p.stagingDir); err != nil {
+			log.WarningLog.Printf("docker runtime: removing the staging dir %s failed: %v", p.stagingDir, err)
+		}
+		p.stagingDir = ""
 	}
 	if p.containerID == "" {
 		p.reaped = true
