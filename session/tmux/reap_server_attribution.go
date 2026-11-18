@@ -179,8 +179,12 @@ func sameRecordedSocket(envSocket, recordedSocket string) (same, comparable bool
 	}
 	type verdict struct{ same, comparable bool }
 	done := make(chan verdict, 1)
+	// The walk is captured on THIS goroutine: an abandoned worker must
+	// never read the package var lazily — a test restoring it after the
+	// deadline would race that read.
+	walk := socketCompareWalk
 	go func() {
-		s, c := socketCompareWalk(envSocket, recordedSocket)
+		s, c := walk(envSocket, recordedSocket)
 		done <- verdict{s, c}
 	}()
 	timer := time.NewTimer(socketCompareBudget)

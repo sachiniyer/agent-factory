@@ -86,8 +86,12 @@ func ptyFdIndices(pid int, classify func(path string, viType int32, rdev uint32)
 		err     error
 	}
 	done := make(chan result, 1)
+	// The walk is captured on THIS goroutine: an abandoned worker must
+	// never read the package var lazily — a test restoring it after the
+	// deadline would race that read.
+	walk := ptyFdWalk
 	go func() {
-		indices, err := ptyFdWalk(pid, classify)
+		indices, err := walk(pid, classify)
 		done <- result{indices, err}
 	}()
 	timer := time.NewTimer(ptyFdReadBudget)
