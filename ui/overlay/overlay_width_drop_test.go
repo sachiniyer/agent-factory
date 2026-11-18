@@ -474,22 +474,280 @@ func TestPlaceOverlayClipsARowWhoseMeasuresCoincidentallyAgree(t *testing.T) {
 }
 
 // The hyperlink detector's coverage must not drift from the parser's. A terminator
-// the parser discounts in the width but this pattern fails to recognise is a link
-// the compositor never closes — which is how the C1 ST form was missed.
+// the parser discounts in the width but this scan fails to recognise is a link
+// the compositor never closes — which is how the C1 ST form was missed, and how
+// the bare-ESC form (any ESC ends an OSC string) was missed after it (#7560).
 func TestOSC8DetectionCoversEveryFormTheParserDiscounts(t *testing.T) {
 	for _, form := range []struct{ name, opener string }{
 		{"7-bit ST", "\x1b]8;;https://example.com\x1b\\"},
 		{"BEL", "\x1b]8;;https://example.com\a"},
 		{"C1 ST", "\x1b]8;;https://example.com\u009c"},
+		// Any ESC terminates an OSC string, so the bare-ESC form is the fourth
+		// terminator the parser discounts — the one #7560 missed. It ends with a
+		// CSI introducer so the row still measures four visible cells.
+		{"bare ESC", "\x1b]8;;https://example.com\x1b[31m"},
 	} {
 		row := form.opener + "LINK"
 		// The parser discounts it: the row is four visible cells.
 		if got := lineWidth(row); got != 4 {
 			t.Fatalf("%s: lineWidth = %d, want 4 (precondition: the parser discounts this form)", form.name, got)
 		}
-		// So the detector must see the open link and close it.
-		if closeSequences(row) == "" {
-			t.Fatalf("%s: an opened hyperlink was not detected, so the compositor would never close it", form.name)
+		// So the detector must see the open link and emit its OSC 8 closer.
+		// Asserting the closer byte-for-byte, not just "non-empty", because the
+		// bare-ESC row above also carries an SGR whose own reset would make a
+		// bare non-empty check pass without the link ever being closed.
+		got := closeSequences(row)
+		if !strings.Contains(got, "\x1b]8;;\x1b\\") {
+			t.Fatalf("%s: an opened hyperlink was not detected, so the compositor would never close it; "+
+				"closeSequences(%q) = %q", form.name, row, got)
+		}
+	}
+}
+
+// The pinned coverage test above is the unit-level assertion; this is the
+// end-to-end one for the bare-ESC form that pin used to miss. A bare-ESC-
+// terminated OSC 8 opener flows into PlaceOverlay as the modal's foreground —
+// the path an agent-supplied attention reason or task name takes into the
+// alarm banner / sidebar — and before the fix the scan did not see the form,
+// so closeSequences emitted no closer and the composite carried the opener
+// alone. A real terminal (tmux 3.5a opens the link at the bare ESC) then held
+// the link open across the rest of the row, every following row, and each
+// subsequent frame until an explicit OSC 8 closer arrived — the whole UI
+// surface clickable to the attacker's URI. Every URI the composite emits must
+// be paired with a closer.
+func TestPlaceOverlayClosesABareEscTerminatedHyperlinkAcrossTheFrame(t *testing.T) {
+	const cols, rows = 40, 4
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+	// The bare-ESC opener followed by a CSI: the spelling that measures the same
+	// as the ST form (both are discounted to the four visible cells "LINK") AND
+	// the spelling the exploit needs (tmux opens the link at the bare ESC,
+	// \x1b[0m does not clear it). "second" makes the foreground wider than the
+	// hyperlink row so the modal is genuinely composited, not the whole frame.
+	fg := "\x1b]8;;https://evil.example\x1b[31mLINK\nsecond"
+
+	out := PlaceOverlay(0, 0, fg, bg, false)
+
+	const closer = "\x1b]8;;\x1b\\"
+	opens, closes := strings.Count(out, "https://evil.example"), strings.Count(out, closer)
+	if opens != closes {
+		t.Fatalf("every opened hyperlink must be closed in the composite; opens=%d closes=%d "+
+			"(the bare-ESC form used to slip past the scan, leaving the opener with no closer); got %q",
+			opens, closes, out)
+	}
+	if opens == 0 {
+		t.Fatalf("precondition: the opener must survive in the composite; got %q", out)
+	}
+	// And the terminal would see no unterminated OSC: a scanner looking for an
+	// OSC introducer with no ST/BEL after it must find none, since the closer
+	// supplies the ST.
+	if hasUnterminatedOSC(out) {
+		t.Fatalf("the composite must not leave an OSC introducer unterminated; got %q", out)
+	}
+}
+
+// The bare-ESC form used to be invisible to the scan, so a pane preview that
+// opened such a link on a row ABOVE the modal left the bgOsc8Open carry empty —
+// the modal band then emitted no OSC 8 guard before its blank margin, and the
+// link stayed active across the modal cells. The scanner makes the carry
+// non-empty, so the modal row must open with the guard closer, exactly as it
+// does for the ST form in TestPlaceOverlayClosesBackdropStateOnModalRows — and
+// the reopen below the band must be the NORMALISED ST form, never the
+// dangling-ESC spelling the backdrop carried in.
+func TestPlaceOverlayEmitsBackdropGuardForABareEscHyperlink(t *testing.T) {
+	// The pane preview opens a bare-ESC link on row 0 (no closer on that row),
+	// the modal occupies row 1, and row 2 is plain content the reopen path
+	// re-emits the carried opener before. Only the OSC 8 introducer is on row 0
+	// (no SGR), so the modal row opens with the OSC guard alone — no leading
+	// SGR reset — which is what lets the assertion read the guard as a prefix.
+	bg := "\x1b]8;;https://evil.example\x1bAAAA\nBBBB\nCCCC"
+	out := strings.Split(PlaceOverlay(0, 1, "MM", bg, false), "\n")
+	if len(out) != 3 {
+		t.Fatalf("expected 3 rows, got %d: %q", len(out), out)
+	}
+	const guard = "\x1b]8;;\x1b\\"
+	if !strings.HasPrefix(out[1], guard) {
+		t.Fatalf("the modal row must open with the OSC 8 guard so the bare-ESC link opened above "+
+			"does not cover the modal cells; got %q, want prefix %q", out[1], guard)
+	}
+	const normalized = "\x1b]8;;https://evil.example\x1b\\"
+	if !strings.HasPrefix(out[2], normalized) {
+		t.Fatalf("the row below the band must reopen with the NORMALISED ST form, not the "+
+			"dangling-ESC spelling; got %q, want prefix %q", out[2], normalized)
+	}
+}
+
+// A bare ESC that terminates one OSC 8 sequence and simultaneously introduces
+// the next (as in "\x1b]8;;\x1b]8;;uri\x1b\\") is a closer followed by an opener
+// for a real terminal, but Go's non-overlapping FindAllStringSubmatch consumed
+// the shared ESC as the first match's terminator and resumed after it, so the
+// second opener was missed and the link stayed open across the frame (Codex
+// review on #7569). The scanner reconsiders the terminating ESC as the next
+// sequence's introducer, so the second opener is seen and closed.
+func TestCloseSequencesSeesOpenerAfterSharedEsc(t *testing.T) {
+	// First sequence is a closer (empty URI), terminated by a bare ESC that also
+	// opens the second sequence (uri), which an ST then terminates — an opener.
+	row := "\x1b]8;;\x1b]8;;https://evil.example\x1b\\"
+	got := closeSequences(row)
+	if !strings.Contains(got, "\x1b]8;;\x1b\\") {
+		t.Fatalf("a shared-ESC opener must be detected so its link is closed; "+
+			"closeSequences(%q) = %q", row, got)
+	}
+}
+
+// A malformed OSC 8 whose parameter field runs into an ESC (as in
+// "\x1b]8;foo\x1b[31m;FAKE \x1b[0m") is ended by the terminal at that ESC and
+// never opens a hyperlink, but a parameter field that crossed the ESC would let
+// a later ESC be treated as the terminator — manufacturing an opener the
+// terminal never made, replayed across rows (Codex review on #7569). The
+// parameter field stops at every byte that ends an OSC, so no opener is
+// detected, no closer emitted, and nothing carried.
+func TestCloseSequencesIgnoresMalformedParamFieldEndedByEsc(t *testing.T) {
+	row := "\x1b]8;foo\x1b[31m;FAKE \x1b[0m"
+	if got := closeSequences(row); strings.Contains(got, "\x1b]8;;\x1b\\") {
+		t.Fatalf("a malformed OSC ended in its parameter field must not be read as "+
+			"an opener; closeSequences(%q) = %q", row, got)
+	}
+	if _, carry := backdropOpen(row, nil, ""); carry != "" {
+		t.Fatalf("the same malformed sequence must never be carried for re-emission; got %q", carry)
+	}
+}
+
+// CAN (0x18) and SUB (0x1A) don't terminate an OSC — they CANCEL it. A pane row
+// like "\x1b]8;foo\x18bar;https://evil\x1b[0m" is read by a terminal as an
+// aborted command followed by plain text and an SGR: no link ever opens. A
+// scanner that crossed the cancellation byte would treat the later ESC as the
+// terminator and manufacture the attacker-chosen link — worse than detecting
+// nothing, because backdropOpen would then REPLAY it below a modal as a real
+// opener the original stream never contained (Codex review on #7569, fourth
+// finding). Both bytes must end the sequence in both fields.
+func TestCancelledOsc8IsNotReadAsAnOpener(t *testing.T) {
+	for _, tc := range []struct{ name, row string }{
+		{"CAN in parameter field", "\x1b]8;foo\x18bar;https://evil.example \x1b[0m"},
+		{"SUB in parameter field", "\x1b]8;foo\x1abar;https://evil.example \x1b[0m"},
+		{"CAN in URI field", "\x1b]8;;https://evil.example\x18 \x1b[0m"},
+		{"SUB in URI field", "\x1b]8;;https://evil.example\x1a \x1b[0m"},
+		// With a real terminator AFTER the cancelled content, a field class
+		// that crosses CAN/SUB manufactures the link the terminal aborted —
+		// closer emitted now, opener replayed below any modal.
+		{"CAN then ST", "\x1b]8;foo\x18bar;https://evil.example\x1b\\"},
+		{"SUB then BEL", "\x1b]8;;https://evil.example\x1a\a"},
+	} {
+		if got := closeSequences(tc.row); strings.Contains(got, "\x1b]8;;\x1b\\") {
+			t.Fatalf("%s: a cancelled OSC must not be read as an opener; "+
+				"closeSequences(%q) = %q", tc.name, tc.row, got)
+		}
+		if _, carry := backdropOpen(tc.row, nil, ""); carry != "" {
+			t.Fatalf("%s: a cancelled OSC must never be carried for re-emission; got %q",
+				tc.name, carry)
+		}
+	}
+}
+
+// A cancellation byte ends only the sequence it lands in: output after it is
+// read normally, so a VALID opener later in the row is still detected.
+func TestScanContinuesAfterACancelledSequence(t *testing.T) {
+	row := "\x1b]8;;cancelled\x18" + "text" + "\x1b]8;;https://real.example\a"
+	got := closeSequences(row)
+	if !strings.Contains(got, "\x1b]8;;\x1b\\") {
+		t.Fatalf("a real opener after a cancelled sequence must still be detected; "+
+			"closeSequences(%q) = %q", row, got)
+	}
+}
+
+// The carry bgOsc8Open is re-emitted verbatim below a modal, so it must end in
+// a real terminator. A bare-ESC match ends in a dangling ESC a terminal would
+// dispatch as the next escape's start — eating the first byte of the row it
+// precedes (Codex review on #7569). Normalisation appends the backslash that
+// turns it into ST rather than rebuilding from the URI, so a parameter field
+// like id= — the identifier associating cells with their link — survives the
+// trip, where an "\x1b]8;;<uri>\x1b\\" rebuild would silently drop it.
+func TestBackdropOpenNormalisesBareEscCarryToSt(t *testing.T) {
+	_, carry := backdropOpen("\x1b]8;;https://evil.example\x1bAAAA", nil, "")
+	const want = "\x1b]8;;https://evil.example\x1b\\"
+	if carry != want {
+		t.Fatalf("a bare-ESC opener must be carried as its ST form so the dangling "+
+			"ESC doesn't eat the next character on re-emit; got %q, want %q",
+			carry, want)
+	}
+}
+
+// The parameter field, not just the URI, must survive normalisation: an opener
+// carried with "id=7" re-emitted without it would associate the reopened cells
+// with no link at all on terminals that honour the identifier.
+func TestBackdropOpenPreservesParametersInNormalisedCarry(t *testing.T) {
+	_, carry := backdropOpen("\x1b]8;id=7;https://evil.example\x1bAAAA", nil, "")
+	const want = "\x1b]8;id=7;https://evil.example\x1b\\"
+	if carry != want {
+		t.Fatalf("the normalised carry must keep the parameter field, not rebuild "+
+			"from the URI alone; got %q, want %q", carry, want)
+	}
+}
+
+// scanOSC8 against the terminal-state-machine truth for each sequence shape:
+// every terminator ends the string (and a bare ESC is reconsidered as the next
+// introducer), CAN/SUB cancel it, and an incomplete sequence — no terminator,
+// or no ';' before the terminator — is no sequence at all.
+func TestScanOSC8ReadsLikeATerminal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  string
+		want []string // the URI field of each sequence found, in order
+	}{
+		{"ST form", "\x1b]8;;https://a\x1b\\", []string{"https://a"}},
+		{"BEL form", "\x1b]8;;https://a\a", []string{"https://a"}},
+		{"C1 ST form", "\x1b]8;;https://a\u009c", []string{"https://a"}},
+		{"bare ESC form", "x\x1b]8;;https://a\x1b[0m", []string{"https://a"}},
+		{"closer", "\x1b]8;;\x1b\\", []string{""}},
+		{"shared ESC closer then opener", "\x1b]8;;\x1b]8;;https://a\x1b\\",
+			[]string{"", "https://a"}},
+		{"opener then closer", "\x1b]8;;https://a\x07\x1b]8;;\x1b\\",
+			[]string{"https://a", ""}},
+		{"parameters preserved", "\x1b]8;id=9;https://a\x1b\\", []string{"https://a"}},
+		{"URI may contain ';'", "\x1b]8;;https://a;b\x1b\\", []string{"https://a;b"}},
+		{"parameters ended by ESC", "\x1b]8;foo\x1b[31m;FAKE\x1b[0m", nil},
+		{"CAN in parameters", "\x1b]8;foo\x18bar;https://a\x1b\\", nil},
+		{"SUB in parameters", "\x1b]8;foo\x1abar;https://a\x1b\\", nil},
+		{"CAN in URI", "\x1b]8;;https://a\x18\x1b\\", nil},
+		{"SUB in URI", "\x1b]8;;https://a\x1a\x1b\\", nil},
+		{"unterminated", "\x1b]8;;https://a", nil},
+		{"unterminated parameters", "\x1b]8;foo", nil},
+		{"no URI separator", "\x1b]8;foo\x1b\\", nil},
+		{"opener after a cancelled sequence", "\x1b]8;;dead\x18\x1b]8;;https://a\x07",
+			[]string{"https://a"}},
+		{"not OSC 8", "\x1b]52;c;aGk=\x1b\\", nil},
+		{"plain text", "no escapes here", nil},
+	} {
+		var got []string
+		for _, s := range scanOSC8(tc.row) {
+			got = append(got, s.uri)
+		}
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: scanOSC8(%q) found %d sequences %v, want %d %v",
+				tc.name, tc.row, len(got), got, len(tc.want), tc.want)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("%s: scanOSC8(%q)[%d].uri = %q, want %q",
+					tc.name, tc.row, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+// The carried raw sequence must end in the same terminator class the terminal
+// saw — and only a bare ESC needs the appended backslash that turns it into ST;
+// ST/BEL/C1 ST forms are already terminated and carry verbatim.
+func TestScanOSC8RawSpansEndInTheirTerminator(t *testing.T) {
+	for _, tc := range []struct{ name, row, raw string }{
+		{"ST", "\x1b]8;;u\x1b\\x", "\x1b]8;;u\x1b\\"},
+		{"BEL", "\x1b]8;;u\ax", "\x1b]8;;u\a"},
+		{"C1 ST", "\x1b]8;;u\u009cx", "\x1b]8;;u\u009c"},
+		{"bare ESC", "\x1b]8;;u\x1bx", "\x1b]8;;u\x1b"},
+	} {
+		seqs := scanOSC8(tc.row)
+		if len(seqs) != 1 || seqs[0].raw != tc.raw {
+			t.Fatalf("%s: scanOSC8(%q) raw = %+v, want one sequence ending %q",
+				tc.name, tc.row, seqs, tc.raw)
 		}
 	}
 }
