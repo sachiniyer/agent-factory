@@ -153,8 +153,17 @@ func widestLine(lines []string) int {
 	return widest
 }
 
-// osc8Regex matches an OSC 8 hyperlink introducer with any terminator xansi.Strip
-// recognises — ST (ESC backslash), BEL, and the C1 ST (U+009C).
+// osc8Regex matches an OSC 8 hyperlink introducer with any terminator the x/ansi
+// parser recognises — ST (ESC backslash), BEL, the C1 ST (U+009C), and a bare ESC.
+// The bare ESC is a terminator the DEC state machine honours: any ESC ends an
+// OSC string (the parser dispatches OscStringState to EscapeState on 0x1B), so
+// "\x1b]8;;uri\x1b" is ALREADY an open link at the bare ESC for a real terminal,
+// and the parser discounts it in the width exactly as it does the ST form when
+// the byte after the ESC is a CSI introducer. Omitting it left the compositor
+// never emitting the closer for that form, so an agent-supplied bare-ESC opener
+// kept the whole terminal surface clickable to its URI across rows and frames
+// (tmux 3.5a opens the link at the bare ESC and holds it open across cells, SGR
+// resets, and redraws until an explicit OSC 8 closer arrives).
 //
 // Its coverage is PINNED to the parser's by a test rather than left to drift: a
 // terminator the parser discounts in the width but this pattern does not recognise
@@ -162,13 +171,19 @@ func widestLine(lines []string) int {
 // INTRODUCER (U+009D), which xansi.Strip does not handle either. The capture is the URI: a hyperlink is OPENED by a
 // sequence carrying one and CLOSED by the same sequence with it empty.
 //
+// The bare-ESC alternative is ordered LAST in the alternation so a real ST still
+// consumes its backslash (\x1b\\ is tried before \x1b); without that ordering an
+// ST immediately followed by more would match only the ESC and leak the '\'. The
+// URI class already excludes \x1b, so the capture stops before any terminator,
+// bare ESC included.
+//
 // Written as a raw literal with \x1b and \x07 as REGEX escapes rather than as
 // literal control bytes. Embedding a real BEL trips CodeQL's
 // go/suspicious-character-in-regex, which exists because a bell in a pattern is
 // far more often a mistyped \A or [[:alpha:]] than an intended 0x07 — and the one
 // place it is genuinely intended is exactly this, an OSC terminator. Spelling it
 // as an escape says so, to the query and to the next reader.
-var osc8Regex = regexp.MustCompile(`\x1b\]8;[^;]*;([^\x1b\x07\x{9c}]*)(?:\x1b\\|\x07|\x{9c})`)
+var osc8Regex = regexp.MustCompile(`\x1b\]8;[^;]*;([^\x1b\x07\x{9c}]*)(?:\x1b\\|\x07|\x{9c}|\x1b)`)
 
 // closeSequences returns what must be emitted after line so that whatever follows
 // it — a background segment, or the end of the frame — starts clean.

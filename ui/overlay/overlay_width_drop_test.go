@@ -475,21 +475,102 @@ func TestPlaceOverlayClipsARowWhoseMeasuresCoincidentallyAgree(t *testing.T) {
 
 // The hyperlink detector's coverage must not drift from the parser's. A terminator
 // the parser discounts in the width but this pattern fails to recognise is a link
-// the compositor never closes — which is how the C1 ST form was missed.
+// the compositor never closes — which is how the C1 ST form was missed, and how
+// the bare-ESC form (terminated by any ESC, not just ST/BEL/C1 ST) was missed too.
 func TestOSC8DetectionCoversEveryFormTheParserDiscounts(t *testing.T) {
 	for _, form := range []struct{ name, opener string }{
 		{"7-bit ST", "\x1b]8;;https://example.com\x1b\\"},
 		{"BEL", "\x1b]8;;https://example.com\a"},
 		{"C1 ST", "\x1b]8;;https://example.com\u009c"},
+		// The bare-ESC form is the fourth terminator the x/ansi parser
+		// discounts: any ESC ends an OSC string. The opener ends with a CSI
+		// introducer after the bare ESC so the row measures the same as the
+		// ST form — the parser discounts the whole sequence, leaving "LINK"
+		// = four visible cells. With a printable byte after the bare ESC the
+		// parser would swallow it as an EscDispatch and the measure would
+		// diverge; that divergence is a separate property, not the form the
+		// exploit needs (the exploit's bare ESC is followed by a CSI).
+		{"bare ESC", "\x1b]8;;https://example.com\x1b[31m"},
 	} {
 		row := form.opener + "LINK"
 		// The parser discounts it: the row is four visible cells.
 		if got := lineWidth(row); got != 4 {
 			t.Fatalf("%s: lineWidth = %d, want 4 (precondition: the parser discounts this form)", form.name, got)
 		}
-		// So the detector must see the open link and close it.
-		if closeSequences(row) == "" {
-			t.Fatalf("%s: an opened hyperlink was not detected, so the compositor would never close it", form.name)
+		// So the detector must see the open link and emit its OSC 8 closer.
+		// Asserting the closer byte-for-byte, not just "non-empty", because the
+		// bare-ESC row above also carries an SGR whose own reset would make a
+		// bare non-empty check pass without the link ever being closed.
+		got := closeSequences(row)
+		if !strings.Contains(got, "\x1b]8;;\x1b\\") {
+			t.Fatalf("%s: an opened hyperlink was not detected, so the compositor would never close it; "+
+				"closeSequences(%q) = %q", form.name, row, got)
 		}
+	}
+}
+
+// The pinned coverage test above is the unit-level assertion; this is the
+// end-to-end one for the bare-ESC form that pin used to miss. A bare-ESC-
+// terminated OSC 8 opener flows into PlaceOverlay as the modal's foreground —
+// the path an agent-supplied attention reason or task name takes into the
+// alarm banner / sidebar — and before the fix osc8Regex did not match the form,
+// so closeSequences emitted no closer and the composite carried the opener
+// alone. A real terminal (tmux 3.5a opens the link at the bare ESC) then held
+// the link open across the rest of the row, every following row, and each
+// subsequent frame until an explicit OSC 8 closer arrived — the whole UI
+// surface clickable to the attacker's URI. Every URI the composite emits must
+// be paired with a closer.
+func TestPlaceOverlayClosesABareEscTerminatedHyperlinkAcrossTheFrame(t *testing.T) {
+	const cols, rows = 40, 4
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+	// The bare-ESC opener followed by a CSI: the spelling that measures the same
+	// as the ST form (both are discounted to the four visible cells "LINK") AND
+	// the spelling the exploit needs (tmux opens the link at the bare ESC,
+	// \x1b[0m does not clear it). "second" makes the foreground wider than the
+	// hyperlink row so the modal is genuinely composited, not the whole frame.
+	fg := "\x1b]8;;https://evil.example\x1b[31mLINK\nsecond"
+
+	out := PlaceOverlay(0, 0, fg, bg, false)
+
+	const closer = "\x1b]8;;\x1b\\"
+	opens, closes := strings.Count(out, "https://evil.example"), strings.Count(out, closer)
+	if opens != closes {
+		t.Fatalf("every opened hyperlink must be closed in the composite; opens=%d closes=%d "+
+			"(the bare-ESC form used to slip past osc8Regex, leaving the opener with no closer); got %q",
+			opens, closes, out)
+	}
+	if opens == 0 {
+		t.Fatalf("precondition: the opener must survive in the composite; got %q", out)
+	}
+	// And the terminal would see no unterminated OSC: a scanner looking for an
+	// OSC introducer with no ST/BEL after it must find none, since the closer
+	// supplies the ST.
+	if hasUnterminatedOSC(out) {
+		t.Fatalf("the composite must not leave an OSC introducer unterminated; got %q", out)
+	}
+}
+
+// The bare-ESC form used to be invisible to osc8Regex, so a pane preview that
+// opened such a link on a row ABOVE the modal left backdropOpen's bgOsc8Open
+// carry empty — the modal band then emitted no OSC 8 guard before its blank
+// margin, and the link stayed active across the modal cells (the band's frames
+// were clickable to the pane's URI). The regex fix makes the carry non-empty,
+// so the modal row must open with the guard closer, exactly as it does for the
+// ST form in TestPlaceOverlayClosesBackdropStateOnModalRows.
+func TestPlaceOverlayEmitsBackdropGuardForABareEscHyperlink(t *testing.T) {
+	// The pane preview opens a bare-ESC link on row 0 (no closer on that row),
+	// the modal occupies row 1, and row 2 is plain content the reopen path
+	// re-emits the carried opener before. Only the OSC 8 introducer is on row 0
+	// (no SGR), so the modal row opens with the OSC guard alone — no leading
+	// SGR reset — which is what lets the assertion read the guard as a prefix.
+	bg := "\x1b]8;;https://evil.example\x1bAAAA\nBBBB\nCCCC"
+	out := strings.Split(PlaceOverlay(0, 1, "MM", bg, false), "\n")
+	if len(out) != 3 {
+		t.Fatalf("expected 3 rows, got %d: %q", len(out), out)
+	}
+	const guard = "\x1b]8;;\x1b\\"
+	if !strings.HasPrefix(out[1], guard) {
+		t.Fatalf("the modal row must open with the OSC 8 guard so the bare-ESC link opened above "+
+			"does not cover the modal cells; got %q, want prefix %q", out[1], guard)
 	}
 }
