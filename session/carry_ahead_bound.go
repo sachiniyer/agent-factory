@@ -33,7 +33,10 @@ func (r carryRoot) key() string {
 // carryLookupUnlooked reports whether err, from a lookup in an account's
 // home, is a look that did not happen: one that did not answer within its
 // bound, or a syscall that failed for a reason other than absence. A refused
-// symbolic link, and a file that is not a regular file, are answers.
+// symbolic link is an answer — the lookup saw and named what is there. A file
+// the guarded open refuses as not regular gave up none of its bytes, so the
+// look at them did not happen: like a timeout it is unverified, never
+// evidence the copy does or does not hold the conversation (#7527).
 func carryLookupUnlooked(err error) bool {
 	switch {
 	case err == nil:
@@ -42,6 +45,10 @@ func carryLookupUnlooked(err error) bool {
 		return true
 	case carrySymlinkPath(err) != "", pathutil.IsAbsent(err):
 		return false
+	}
+	var nonRegular *fsprobe.NonRegularError
+	if errors.As(err, &nonRegular) {
+		return true
 	}
 	var pathErr *os.PathError
 	return errors.As(err, &pathErr)

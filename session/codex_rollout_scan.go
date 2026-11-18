@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unicode"
 
@@ -438,26 +437,16 @@ func codexRolloutBoundedOpen() func(string) (*os.File, error) {
 	return openCodexRollout
 }
 
-// openCodexRollout opens a Codex rollout. O_NOFOLLOW rejects a symlink planted
-// at the leaf, and O_NONBLOCK keeps a FIFO planted there from hanging it; both
-// are no-ops on the regular file a real rollout is.
+// openCodexRollout opens a Codex rollout — fsprobe.OpenRegular, the one
+// guarded open every bounded filesystem caller shares (#7527). O_NOFOLLOW
+// rejects a symlink planted at the leaf, O_NONBLOCK keeps a FIFO planted
+// there from hanging it, and a non-regular file swapped in after the listing
+// is refused with *fsprobe.NonRegularError; all are no-ops on the regular
+// file a real rollout is.
 func openCodexRollout(path string) (*os.File, error) {
-	file, err := os.OpenFile(
-		path,
-		os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,
-		0,
-	)
+	file, _, err := fsprobe.OpenRegular(path)
 	if err != nil {
 		return nil, fmt.Errorf("open Codex rollout %s: %w", path, err)
-	}
-	info, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return nil, fmt.Errorf("inspect opened Codex rollout %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		file.Close()
-		return nil, fmt.Errorf("read Codex rollout %s: not a regular file (%s)", path, info.Mode().Type())
 	}
 	return file, nil
 }

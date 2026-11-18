@@ -1,11 +1,9 @@
 package session
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
@@ -384,32 +382,21 @@ func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationD
 }
 
 // openClaudeTranscript opens the transcript at path for the staleness
-// comparison's paced flight. O_NOFOLLOW rejects a symlink planted at the leaf,
-// O_NONBLOCK keeps a FIFO planted there from hanging the open, and a
-// regular-file check on the opened descriptor refuses a non-regular file
-// swapped in after the listing's lstat — the same stat-then-open hazards
-// every sibling open inside a bounded flight guards (openCarryFileAt,
-// openCodexRollout). The open runs inside the flight's bound, so a planted
-// FIFO is answered as a non-regular refusal within the bound rather than
-// wedging the flight's work goroutine in openat forever and latching its
-// registry entry against every later ask (#7383).
+// comparison's paced flight. The open is fsprobe.OpenRegular — the one guarded
+// open every bounded filesystem caller shares (#7527): O_NOFOLLOW rejects a
+// symlink planted at the leaf, O_NONBLOCK keeps a FIFO planted there from
+// hanging the open, and a non-regular file swapped in after the listing's
+// lstat is refused with *fsprobe.NonRegularError. That refusal is a look that
+// did not happen (carryLookupUnlooked), so the verdict is never that the
+// copies diverge. The open runs inside the flight's bound, so a planted FIFO
+// is answered within the bound rather than wedging the flight's work
+// goroutine in openat forever and latching its registry entry against every
+// later ask (#7383).
 func openClaudeTranscript(p carryPace, path string) (*os.File, os.FileInfo, error) {
 	p.at("open", path)
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, nil, err
-	}
+	file, info, err := fsprobe.OpenRegular(path)
 	p.at("fstat", path)
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return nil, nil, err
-	}
-	if !info.Mode().IsRegular() {
-		_ = file.Close()
-		return nil, nil, fmt.Errorf("%s is not a regular file (%s)", path, info.Mode().Type())
-	}
-	return file, info, nil
+	return file, info, err
 }
 
 // claudeTranscriptExtends reports whether the transcript longer begins with
