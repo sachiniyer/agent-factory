@@ -251,7 +251,7 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		// session itself just deleted or rebound are proven absent by the
 		// mutations, though — the merge must not resurrect them (#7522 review).
 		m.projectPickerOverlay.SetRebindConflict(text,
-			overlay.MergePreservingSessionRows(m.dropSessionGoneRows(m.projectPickerOverlay.Projects()), fresh, degraded))
+			overlay.MergePreservingSessionRows(m.dropSessionGoneRows(m.projectPickerOverlay.Projects(), degraded), fresh, degraded))
 		return m, nil
 	}
 	if degraded {
@@ -264,7 +264,7 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		// flag preserves each record whose absence was never established, and
 		// the merge grafts a same-repo session row onto the stale identity.
 		m.projectPickerOverlay.SetRebindConflict(text,
-			overlay.MergePreservingSessionRows(m.dropSessionGoneRows(registryBackedRows(m.projectPickerOverlay.Projects())), fresh, true))
+			overlay.MergePreservingSessionRows(m.dropSessionGoneRows(registryBackedRows(m.projectPickerOverlay.Projects()), true), fresh, true))
 		return m, nil
 	}
 	m.projectPickerOverlay.SetRebindConflict(text, fresh)

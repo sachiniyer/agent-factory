@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -119,4 +120,87 @@ func TestRebindUnderDegradedRegistryDropsTheStaleBinding(t *testing.T) {
 		assert.NotEqual(t, "chk_old", r.CheckoutID,
 			"the pane row must not keep the stale checkout id: %v", r)
 	}
+}
+
+// hasSidebarRow reports whether the merge shadow currently holds a row for the
+// given repo id — the merge's preserve source between snapshots.
+func hasSidebarRow(h *home, repoID string) bool {
+	for _, r := range h.sidebarProjects {
+		if r.RepoID == repoID {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRebindUnderHealthyRegistryReplacesTheStaleBindingRoot is the regression for
+// Codex P2 4608778532 on #7522: a rebind that SUCCEEDS, then a sync refresh whose
+// session fetch FAILS while the registry read is HEALTHY. The healthy read
+// carries the record's new binding, but the pre-fix rebind tombstone stripped
+// the old row's registry identity before the merge, so MergePreservingSessionRows
+// treated it as a session-only row and coalesceReboundRows grafted the fresh
+// registration onto it without updating its navigable Root — the sidebar kept
+// selecting the prior, potentially-removed worktree until a session snapshot
+// succeeded. The tombstone must apply only while the registry cannot establish
+// the binding; a healthy read replaces the row through the merge instead.
+func TestRebindUnderHealthyRegistryReplacesTheStaleBindingRoot(t *testing.T) {
+	h := armGoneRowMergeHome(t, []overlay.Project{
+		{Name: "moved", Root: "/repos/moved-old", RepoID: "repo-moved",
+			RegistryID: "prj_moved", RegistryRoot: "/repos/moved-old",
+			RegistryCheckoutID: "chk_old", SessionCount: 3, InPlaceCount: 1},
+	})
+	// The confirmed rebind tombstoned the record; the registry read is HEALTHY
+	// and carries the new binding, but the session snapshot failed.
+	h.noteProjectRebound("prj_moved")
+	fresh := []overlay.Project{
+		{Name: "moved", Root: "/repos/moved-new", RepoID: "repo-moved",
+			RegistryID: "prj_moved", RegistryRoot: "/repos/moved-new",
+			RegistryCheckoutID: "chk_new", SessionCount: 0},
+	}
+	h.applySidebarProjects(fresh, false, errors.New("session fetch failed"))
+
+	var row *overlay.Project
+	for i := range h.sidebarProjects {
+		if h.sidebarProjects[i].RepoID == "repo-moved" {
+			row = &h.sidebarProjects[i]
+		}
+	}
+	require.NotNil(t, row, "the rebound repo's row survives the failed session fetch")
+	assert.Equal(t, "/repos/moved-new", row.Root,
+		"a healthy registry read replaces the stale binding's root — the pre-fix tombstone stripped provenance and left the old worktree selectable")
+	assert.Equal(t, "prj_moved", row.RegistryID,
+		"the healthy merge keeps the registration's durable identity")
+	assert.Equal(t, "chk_new", row.RegistryCheckoutID,
+		"the healthy merge replaces the stale checkout id")
+	assert.Equal(t, 3, row.SessionCount,
+		"the failed snapshot's last-known counts carry onto the fresh row")
+}
+
+// TestDeleteTombstoneRetiresWhenLiveSessionsReturn is the regression for Codex
+// P2 4608778541 on #7522: a delete tombstone, otherwise cleared only by a
+// healthy registry read, would survive a STILL-degraded registry and filter a
+// revived repo's row on the next failed snapshot. Restoring an archived session
+// or creating a new session for the deleted repo legitimately reintroduces its
+// row under a degraded registry; a landed snapshot that reports live work must
+// retire the tombstone so the revived row survives a later snapshot hiccup.
+func TestDeleteTombstoneRetiresWhenLiveSessionsReturn(t *testing.T) {
+	h := armGoneRowMergeHome(t, nil)
+	h.noteProjectDeleted("repo-doomed")
+
+	// A landed session snapshot under the STILL-degraded registry reports live
+	// work in the deleted repo — the session data establishes the project is
+	// live again, and retires the deletion tombstone.
+	revived := []overlay.Project{
+		{Name: "doomed", Root: "/repos/doomed", RepoID: "repo-doomed", SessionCount: 1},
+	}
+	h.applySidebarProjects(revived, true, nil)
+	require.True(t, hasSidebarRow(h, "repo-doomed"),
+		"the revived repo's row appears on the landed snapshot")
+
+	// A subsequent FAILED snapshot must not drop the revived row — the
+	// tombstone was retired by the live session observation, so the preserving
+	// merge keeps the last-known row.
+	h.applySidebarProjects(nil, true, errors.New("daemon unavailable"))
+	assert.True(t, hasSidebarRow(h, "repo-doomed"),
+		"a retired tombstone must not filter the revived row on a later failed snapshot")
 }

@@ -520,11 +520,20 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 			// Old session rows are stale duplicates of the fresh live ones;
 			// only registry-backed rows have absence left unproven.
 			old = registryBackedRows(old)
+			// A landed snapshot that reports live work for a tombstoned repo
+			// retires that repo's deletion tombstone: the session data itself
+			// establishes the project is live again, and leaving the tombstone
+			// in place would drop the revived row on the next failed snapshot
+			// (#7522 review).
+			m.retireGoneProjectRowsForLiveSessions(projects)
 		}
 		// Rows this session itself just deleted or rebound ARE proven absent —
 		// the session performed the mutations — so the merge's "cannot prove
-		// absence" reasoning never applies to them (#7522 review).
-		old = m.dropSessionGoneRows(old)
+		// absence" reasoning never applies to them (#7522 review). The rebind
+		// tombstone applies only while the registry read cannot establish the
+		// record's current binding; a healthy read replaces the row through
+		// the merge instead.
+		old = m.dropSessionGoneRows(old, registryDegraded)
 		projects = overlay.MergePreservingSessionRows(old, projects, registryDegraded)
 	}
 	if !registryDegraded {

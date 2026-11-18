@@ -105,6 +105,27 @@ func (m *home) clearGoneProjectRows() {
 	m.goneProjectRegistryIDs = nil
 }
 
+// retireGoneProjectRowsForLiveSessions drops the deletion tombstone for any
+// repo a just-landed session snapshot reports live work in. A delete's
+// tombstone is otherwise cleared only by a healthy registry read, so a
+// restored or newly-created session that legitimately reintroduces a deleted
+// project's row under a STILL-degraded registry would survive the landing
+// snapshot (its fresh session row lands) but vanish on the next failed one —
+// the never-retired tombstone would filter the last-known row the preserving
+// merge otherwise keeps. Retiring it the moment fresh session data
+// establishes live work keeps the revived row visible through a later
+// snapshot hiccup (#7522 review).
+func (m *home) retireGoneProjectRowsForLiveSessions(projects []overlay.Project) {
+	if len(m.goneProjectRepoIDs) == 0 {
+		return
+	}
+	for _, r := range projects {
+		if r.RepoID != "" && r.SessionCount > 0 && m.goneProjectRepoIDs[r.RepoID] {
+			delete(m.goneProjectRepoIDs, r.RepoID)
+		}
+	}
+}
+
 // dropSessionGoneRows removes from a preserved row set the rows THIS session
 // itself established as gone (#7522 review). A degraded-registry merge
 // preserves a last-known row because the failed read cannot prove its absence
@@ -114,7 +135,18 @@ func (m *home) clearGoneProjectRows() {
 // record's row sheds only the stale registry identity, keeping live session
 // counts as a session-only row — and a sessionless rebound row drops, the way
 // the merge already treats a registry row whose record proves gone.
-func (m *home) dropSessionGoneRows(old []overlay.Project) []overlay.Project {
+//
+// The rebind tombstone sheds a row's stale registry identity only when the
+// registry read CANNOT establish the record's current binding (registryDegraded):
+// a HEALTHY read carries the fresh row whose Root replaces the old one through
+// the merge, and stripping provenance first would leave coalesceReboundRows
+// grafting the registration onto the old row without updating its navigable
+// Root — the sidebar would keep selecting the prior, possibly-removed worktree
+// until a session snapshot succeeded. The delete tombstone applies either
+// way: a deleted project's stale session-only row has sessions the daemon
+// archived, so a healthy read that no longer lists the record does not
+// exonerate its last-known counts.
+func (m *home) dropSessionGoneRows(old []overlay.Project, registryDegraded bool) []overlay.Project {
 	if len(m.goneProjectRepoIDs) == 0 && len(m.goneProjectRegistryIDs) == 0 {
 		return old
 	}
@@ -123,7 +155,7 @@ func (m *home) dropSessionGoneRows(old []overlay.Project) []overlay.Project {
 		if m.goneProjectRepoIDs[row.RepoID] {
 			continue
 		}
-		if row.RegistryID != "" && m.goneProjectRegistryIDs[row.RegistryID] {
+		if registryDegraded && row.RegistryID != "" && m.goneProjectRegistryIDs[row.RegistryID] {
 			if row.SessionCount == 0 {
 				continue
 			}
