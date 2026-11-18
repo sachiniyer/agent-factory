@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -656,7 +657,16 @@ func (p *dockerProvisioner) runContainer() error {
 }
 
 func (p *dockerProvisioner) containerEnvironmentNames() []string {
-	return sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
+	names := sessionenv.DockerForwardNames(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
+	// A forwarded proxy spelling claims its case twin too: emit the twin so the
+	// image's value for it cannot survive (the twin resolves to the forwarded
+	// value through dockerEnvironment's synthesized entries).
+	twins, _ := credentialMountProxyTwinForwarding(p.spec.SessionEnvPassthrough, os.Environ())
+	if len(twins) > 0 {
+		names = append(names, twins...)
+		sort.Strings(names)
+	}
+	return names
 }
 
 // startAgentServer launches `af agent-server` headless in the container,
@@ -850,7 +860,13 @@ func (p *dockerProvisioner) agentName() string {
 }
 
 func (p *dockerProvisioner) dockerEnvironment() []string {
-	return sessionenv.DockerCLIEnvironment(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
+	env := sessionenv.DockerCLIEnvironment(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
+	// The bare `-e NAME` emitted for a normalized proxy twin resolves here:
+	// synthesize NAME=<forwarded spelling's host value>. The twin is not in the
+	// client's allowlist unless the operator forwarded it, so the synthesized
+	// entry is the only one that name can resolve to.
+	_, synth := credentialMountProxyTwinForwarding(p.spec.SessionEnvPassthrough, os.Environ())
+	return append(env, synth...)
 }
 
 // execSh runs a `sh -c <script>` inside the container as root (0:0). It is the

@@ -280,6 +280,62 @@ var credentialMountProxyCasePairs = [][2]string{
 	{"NO_PROXY", "no_proxy"},
 }
 
+// credentialMountProxyTwinForwarding normalizes a proxy pair so the
+// unforwarded spelling cannot keep an image-supplied value: every spelling is
+// in the inner filter's always-admitted set, so exempting a twin from the pin
+// without reseating it would leave the image's proxy reachable by clients that
+// prefer that spelling (Python's getproxies prefers a set lowercase name over
+// an uppercase one). For each pair the operator claimed through
+// session_env_passthrough, the first forwarded-and-host-set spelling supplies
+// the value V; every other spelling of the pair is emitted `-e NAME` and the
+// docker client environment synthesizes `NAME=V`, so both spellings resolve to
+// the operator's value. A pair member that is itself forwarded AND set keeps
+// its own approved value. When no forwarded spelling is set on the host the
+// pair contributes nothing — the "claimed a name they do not set" semantics
+// already lets the image's values stand for names the operator forwarded empty.
+//
+// names is the extra `-e NAME` set for docker run; synth is `NAME=V` entries
+// appended to the docker client's filtered environment, which is where a bare
+// `-e NAME` resolves its value — values therefore never appear in argv.
+func credentialMountProxyTwinForwarding(passthrough []string, environ []string) (names, synth []string) {
+	forwarded := make(map[string]struct{}, len(passthrough))
+	for _, name := range passthrough {
+		forwarded[name] = struct{}{}
+	}
+	host := make(map[string]string, len(environ))
+	for _, entry := range environ {
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			host[name] = value
+		}
+	}
+	for _, pair := range credentialMountProxyCasePairs {
+		var value string
+		claimed := false
+		for _, s := range pair {
+			if _, ok := forwarded[s]; !ok {
+				continue
+			}
+			if v, set := host[s]; set {
+				value, claimed = v, true
+				break
+			}
+		}
+		if !claimed {
+			continue
+		}
+		for _, s := range pair {
+			_, fwd := forwarded[s]
+			_, set := host[s]
+			if fwd && set {
+				continue
+			}
+			names = append(names, s)
+			synth = append(synth, s+"="+value)
+		}
+	}
+	return names, synth
+}
+
 // credentialMountPinnedNames returns the classified names af pins
 // defined-and-empty on the credential-mount path: the denied set minus the
 // reasserted names (which take real values instead) and minus names the

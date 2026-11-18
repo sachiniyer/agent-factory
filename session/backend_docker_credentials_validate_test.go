@@ -994,6 +994,88 @@ func TestCredentialMountPinnedNames_ProxyCaseTwinExemptsBoth(t *testing.T) {
 	}
 }
 
+// TestCredentialMountProxyTwinForwarding_NormalizesToForwardedValue pins the
+// P2 half of R2: exempting a proxy twin from the empty pin cannot leave an
+// image-supplied value alive, because every spelling rides the inner filter's
+// always-admitted set. Forwarding one spelling must emit the twin and resolve
+// it to the operator-forwarded value — the bare `-e NAME` picks up the
+// synthesized NAME=V the docker client environment carries, so the value never
+// enters argv.
+func TestCredentialMountProxyTwinForwarding_NormalizesToForwardedValue(t *testing.T) {
+	environ := []string{
+		"HTTPS_PROXY=http://operator-proxy:8080",
+		"http_proxy=http://host-lowercase:3128",
+		"UNRELATED=1",
+	}
+
+	// Uppercase forwarded alone: the lowercase twin is emitted and normalized.
+	names, synth := credentialMountProxyTwinForwarding([]string{"HTTPS_PROXY"}, environ)
+	require.Equal(t, []string{"https_proxy"}, names)
+	require.Equal(t, []string{"https_proxy=http://operator-proxy:8080"}, synth,
+		"the twin resolves to the forwarded spelling's value, never the image's")
+
+	// Lowercase forwarded alone: the uppercase twin is emitted and normalized.
+	names, synth = credentialMountProxyTwinForwarding([]string{"http_proxy"}, environ)
+	require.Equal(t, []string{"HTTP_PROXY"}, names)
+	require.Equal(t, []string{"HTTP_PROXY=http://host-lowercase:3128"}, synth)
+
+	// Both spellings forwarded and set: each keeps its own approved value —
+	// nothing to normalize.
+	names, synth = credentialMountProxyTwinForwarding(
+		[]string{"http_proxy", "HTTP_PROXY"},
+		[]string{"http_proxy=http://host-lowercase:3128", "HTTP_PROXY=http://host-upper:3128"})
+	require.Empty(t, names)
+	require.Empty(t, synth)
+
+	// Both forwarded but only the lowercase spelling set on the host: the
+	// unset member still takes the operator's value rather than the image's.
+	names, synth = credentialMountProxyTwinForwarding(
+		[]string{"http_proxy", "HTTP_PROXY"},
+		[]string{"http_proxy=http://host-lowercase:3128"})
+	require.Equal(t, []string{"HTTP_PROXY"}, names)
+	require.Equal(t, []string{"HTTP_PROXY=http://host-lowercase:3128"}, synth)
+
+	// A host-set but unforwarded twin is still normalized to the forwarded
+	// value: the operator's claim on the pair is the forwarded spelling.
+	names, synth = credentialMountProxyTwinForwarding([]string{"HTTPS_PROXY"},
+		append(environ, "https_proxy=http://host-twin:8080"))
+	require.Equal(t, []string{"https_proxy"}, names)
+	require.Equal(t, []string{"https_proxy=http://operator-proxy:8080"}, synth)
+
+	// Forwarded but unset on the host claims nothing — the "operator named a
+	// name they do not set" semantics already lets the image stand.
+	names, synth = credentialMountProxyTwinForwarding([]string{"NO_PROXY"}, environ)
+	require.Empty(t, names)
+	require.Empty(t, synth)
+}
+
+// TestDockerMountAgentCredentials_ProxyTwinRidesRunArgvAndClientEnv pins the
+// two emission halves end-to-end: the twin's bare `-e NAME` lands in the run
+// argv (name only — the value stays out of argv) and the client environment
+// carries the synthesized NAME=<forwarded value> that resolves it.
+func TestDockerMountAgentCredentials_ProxyTwinRidesRunArgvAndClientEnv(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://operator-proxy:8080")
+	p := &dockerProvisioner{
+		spec: ProvisionSpec{
+			Title:                 "proxy-twin-test",
+			Program:               tmux.ProgramOpencode,
+			SessionEnvPassthrough: []string{"HTTPS_PROXY"},
+		},
+		program: tmux.ProgramOpencode,
+	}
+	names := p.containerEnvironmentNames()
+	require.Contains(t, names, "HTTPS_PROXY")
+	require.Contains(t, names, "https_proxy",
+		"the unforwarded twin must be emitted so the image's value cannot stand")
+	env := p.dockerEnvironment()
+	require.Contains(t, env, "https_proxy=http://operator-proxy:8080",
+		"the client env must resolve the twin to the forwarded value")
+	// And without the passthrough, neither the emission nor the synthesis.
+	p.spec.SessionEnvPassthrough = nil
+	require.NotContains(t, p.containerEnvironmentNames(), "https_proxy")
+	require.NotContains(t, p.dockerEnvironment(), "https_proxy=http://operator-proxy:8080")
+}
+
 // TestCredentialMountBlankedWarning_NamesOnly pins the migration warning's
 // contract: it names each blanked name the image or run_args actually set —
 // once, sorted — and never echoes a value, so a credential the image carried

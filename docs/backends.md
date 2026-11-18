@@ -262,9 +262,11 @@ user's real home and mounts it only if it exists, so:
     The operator's escape hatch is unchanged: names listed in the global
     `session_env_passthrough` keep their forwarded value and are never blanked
     or refused for the operator's own use — and forwarding either spelling of a
-    proxy pair (`HTTP/HTTPS/ALL/NO_PROXY`, either case) exempts both, since a
-    defined-empty twin would cancel the forwarded value in clients that read
-    both spellings.
+    proxy pair (`HTTP/HTTPS/ALL/NO_PROXY`, either case) claims both: the
+    unforwarded twin is set to the forwarded spelling's value rather than
+    blanked, since a defined-empty twin would cancel the forwarded value in
+    clients that read both spellings while an image-supplied twin would route
+    around the operator's proxy entirely.
 
     **Migration.** If a working setup legitimately carried one of these names —
     a corporate `HTTPS_PROXY`, a private CA bundle, a private-cloud
