@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Local-only command guard (#3661).
@@ -61,4 +62,47 @@ func targetLabel() string {
 		return "the remote daemon at " + url
 	}
 	return "the configured remote daemon"
+}
+
+// requireLocalDaemonStart is the `af --daemon` variant of the local-only guard
+// (#7558): `af --daemon` starts the daemon process on THIS machine, and no
+// daemon API stands in for it. It refuses ONLY a remote target named
+// explicitly on this invocation — the --daemon-url flag or AF_DAEMON_URL —
+// because that is an operator standing here saying which daemon they mean;
+// silently serving a local daemon anyway is the wrong-machine answer W9.4
+// exists to prevent.
+//
+// A SAVED target never refuses `af --daemon`: the daemon is always local and
+// a saved target is a client preference, not a directive typed at this
+// process, so the start logs one INFO line naming it and proceeds. That split
+// is what keeps every supervisor-owned launch working in a home that happens
+// to hold a saved target — the autostart unit's `ExecStart=<path> --daemon`
+// (daemon/autostart.go), rollback's startPreviousDaemon and the committed
+// handoff's startArmedDaemonUnderOwner (daemon/upgrade_recovery.go,
+// daemon/upgrade_forward.go) all spawn `af --daemon` with neither the flag
+// nor the variable, so they meet no refusal either way.
+//
+// Source is read through ResolveTargetInfo — the same resolver `af target
+// show` reports — rather than by re-reading the flag and env separately, so
+// "explicit" here means exactly what the client means by flag-or-env.
+func requireLocalDaemonStart() error {
+	info := apiclient.ResolveTargetInfo()
+	switch info.Source {
+	case apiclient.TargetFlag, apiclient.TargetEnv:
+		return fmt.Errorf("af --daemon is local-only: it starts the daemon process on this machine "+
+			"and cannot act on the remote daemon at %s; "+
+			"unset --daemon-url/AF_DAEMON_URL to start this host's daemon, "+
+			"or run af --daemon on the daemon host", info.URL)
+	case apiclient.TargetSaved:
+		if info.Err != nil {
+			// A saved target that fails closed still fails CLIENTS closed,
+			// but a daemon start has no wrong host to act on — warn and
+			// proceed so a corrupt client-target.json cannot wedge the
+			// supervisor's restart of a daemon it never aimed at.
+			log.WarningLog.Printf("af --daemon ignores the saved remote target, which failed to load: %v", info.Err)
+		} else if info.URL != "" {
+			log.InfoLog.Printf("af --daemon ignores saved remote target %s: a saved target is a client preference; the daemon it starts is always this machine's", info.URL)
+		}
+	}
+	return nil
 }

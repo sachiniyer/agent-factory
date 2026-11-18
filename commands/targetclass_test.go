@@ -18,6 +18,9 @@ import (
 // refusing it, or being client-local by design, instead of defaulting to
 // answering about this machine.
 var verbTargetClass = map[string]string{
+	// `af --daemon` refuses an EXPLICIT target (--daemon-url/AF_DAEMON_URL)
+	// in-verb, since the daemon it starts is always this machine's; a saved
+	// target is logged and ignored, never refused (requireLocalDaemonStart).
 	"af": classRouted, // the TUI itself: W9.7
 
 	"af sessions archive":          classRouted,
