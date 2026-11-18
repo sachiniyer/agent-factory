@@ -288,6 +288,36 @@ func TestStagedDraftReading(t *testing.T) {
 			want: StagedDraftStaged,
 		},
 		{
+			// The boundary's text occurring twice cannot anchor the
+			// completeness proof: either copy could be the boundary's
+			// own line, the other a post-boundary echo of it whose true
+			// boundary already evicted — the capture cannot tell which.
+			// Unreadable, never Staged (#7546's exactly-once mark).
+			name: "a duplicated boundary mark makes the completeness proof unreadable",
+			pane: strings.Join([]string{
+				"Cogitated for 4m 47s",
+				"some intervening output",
+				"Cogitated for 4m 47s",
+				"❯ continue",
+			}, "\n"),
+			ev:   stagedDraftEvidence{tail: "continue", tailWhole: true, boundaryMark: "Cogitatedfor4m47s"},
+			want: StagedDraftUnreadable,
+		},
+		{
+			// The chip twin: the same repeated mark leaves a staged
+			// paste chip's completeness unprovable too — the boundary's
+			// own line is ambiguous between the two copies.
+			name: "a duplicated boundary mark makes a staged chip unreadable",
+			pane: strings.Join([]string{
+				"Cogitated for 4m 47s",
+				"some intervening output",
+				"Cogitated for 4m 47s",
+				"❯ " + claudeChip,
+			}, "\n"),
+			ev:   stagedDraftEvidence{chip: normalizeDelivery(claudeChip), boundaryMark: "Cogitatedfor4m47s"},
+			want: StagedDraftUnreadable,
+		},
+		{
 			// A grown echo resolves Submitted even from deep in the
 			// scrollback — the count rose past the boundary's baseline,
 			// which needs no completeness proof.

@@ -71,9 +71,11 @@ const (
 // each kind were already visible above the composer at the boundary — the
 // baseline a transcript must beat to prove THIS send echoed. boundaryMark is
 // the normalized tail of that same above-anchor transcript — the boundary's
-// line: every post-boundary row is newer than it, so while it survives in a
-// scrollback-inclusive recheck nothing printed since the boundary can be
-// missing (tmux evicts oldest-first). Only bound strings are ever stored,
+// line: every post-boundary row is newer than it, so while it survives
+// EXACTLY ONCE in a scrollback-inclusive recheck nothing printed since the
+// boundary can be missing (tmux evicts oldest-first); a repeated mark cannot
+// tell the boundary's line from a later echo of it (#7546). Only bound
+// strings are ever stored,
 // and only while their send is the latest.
 //
 // The strings alone do not make a draft af's, and the recheck never lets
@@ -217,11 +219,14 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 	// sat above the send's composer: tmux history evicts oldest-first, so
 	// every post-boundary row is newer than it — while it survives in the
 	// scrollback-inclusive capture, nothing since the boundary is missing.
-	// A boundary with no transcript above it needs no mark: reaching the
-	// -S bound's start — fewer rows above the anchor than the bound —
-	// already shows the whole post-boundary output.
+	// The mark must occur EXACTLY once (#7546): a repeated mark can't say
+	// which occurrence is the boundary's own line — the other could be a
+	// post-boundary echo whose true boundary already evicted. A boundary
+	// with no transcript above it needs no mark: reaching the -S bound's
+	// start — fewer rows above the anchor than the bound — already shows
+	// the whole post-boundary output.
 	boundaryReached := ev.boundaryMark == "" && len(upperRows) < stagedDraftHistoryBound ||
-		ev.boundaryMark != "" && strings.Contains(upper, ev.boundaryMark)
+		ev.boundaryMark != "" && strings.Count(upper, ev.boundaryMark) == 1
 	switch {
 	case tailStaged:
 		switch {
