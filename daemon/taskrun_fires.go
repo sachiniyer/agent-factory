@@ -75,6 +75,11 @@ type taskFireMarker struct {
 	Title        string    `json:"title,omitempty"`
 	InstanceID   string    `json:"instance_id,omitempty"`
 	WorktreePath string    `json:"worktree_path,omitempty"`
+	// HeldInstanceID is the persisted row a reconcile held this fire on
+	// (#7518), bound the first time it holds. A held row that later disappears
+	// (its kill completed and deleted the record) consumes the fire instead of
+	// letting the next look deliver it again.
+	HeldInstanceID string `json:"held_instance_id,omitempty"`
 }
 
 // daemonDrainingPredicate is what daemonDrainingFn asks. runDaemon installs
@@ -282,9 +287,10 @@ func isShutdownAbortErr(err error) bool {
 // at-or-after the marker's intent — the proof that a surviving marker is stale,
 // which happens when a run completed but its marker removal was lost (or, on a
 // fresh fire, when an older aborted run's discharge never made it onto disk).
-// Two statuses are deliberately NOT residue: an "aborted:" status is the
-// marker's own interrupted signal, and a reconcile failure records that the
-// outcome could not be established — the intent is still owed in both cases.
+// Three statuses are deliberately NOT residue: an "aborted:" status is the
+// marker's own interrupted signal, a reconcile failure records that the
+// outcome could not be established, and a "held:" status records a fire
+// waiting on its session's restore (#7518) — the intent is still owed in each.
 func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 	return t.LastRunAt != nil &&
 		!t.LastRunAt.Before(fire.IntendedAt) &&
@@ -296,19 +302,24 @@ func taskFireResidue(t *task.Task, fire *taskFireMarker) bool {
 		t.LastRunStatus != "" &&
 		!strings.HasPrefix(t.LastRunStatus, notArmedPrefix) &&
 		!strings.HasPrefix(t.LastRunStatus, taskStatusAbortedPrefix) &&
+		!strings.HasPrefix(t.LastRunStatus, taskStatusHeldPrefix) &&
 		!strings.Contains(t.LastRunStatus, errTaskFireReconcile.Error())
 }
 
 // reconcilePendingTaskFire decides what a surviving marker still owes.
 // Returned done=true means the occurrence is fully consumed and RunTask must
 // return without delivering; done=false means the fire is still owed and the
-// caller proceeds to a fresh delivery. The order matters:
+// caller proceeds to a fresh delivery. An error carrying
+// errTaskFireRuntimeUnknown holds the fire: neither, until a later reconcile can
+// tell. The order matters:
 //
 //  1. A persisted row the interrupted create already committed (matched by the
 //     bound instance id, then by task-association created at-or-after the
 //     recorded intent) IS the fire's product — adopt it, never duplicate it.
 //     The persisted row also implies the prompt was already sent: the create
-//     path submits it before appending the record.
+//     path submits it before appending the record. A row whose prompted runtime
+//     is proven gone is not its product, and the fire delivers fresh; a Lost row
+//     whose agent may still be running it holds the fire instead.
 //  2. A foreign row owning the title, its derived branch, or its worktree path
 //     means the leftover identity is not ours to touch — leave it and deliver
 //     fresh under a new suffix.
@@ -345,6 +356,10 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		return false, fmt.Errorf("%w: listing persisted sessions: %v", errTaskFireReconcile, err)
 	}
 
+	// held is the first matched Lost row whose agent nothing proves gone. It is
+	// reported only after every row was seen: another matched row that is this
+	// fire's settled product still wins.
+	var held *session.InstanceData
 	for i := range rows {
 		data := &rows[i]
 		matched := fire.InstanceID != "" && data.ID == fire.InstanceID
@@ -367,15 +382,55 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		// that never landed. The row stays — its interrupted work is kept —
 		// while the fire falls through to a fresh delivery, and the leftover
 		// path below already declines to reap an identity this row still owns.
-		if data.TaskRunInterrupted {
+		//
+		// Only a respawn proves that (#7518): tmux confirmed the agent's
+		// session absent before af started the replacement. An interrupt
+		// stamped by a reattach whose identity could not be verified, an
+		// adopted restart, or an off-box relaunch says nothing about the
+		// prompted process, which may still be running. Such a row is read
+		// like any other below: adopted when live, held while Lost.
+		if data.TaskRunInterrupted && data.TaskRunInterruptedByRespawn {
 			continue
 		}
 		// An adopted tombstone or uncertain row is already owned by the retained-
 		// failure machinery — the fire is consumed, not restarted underneath it.
+		// That classification outranks any liveness the row also carries: an
+		// uncertain row is kept precisely because its runtime may be alive.
 		status := "started"
 		switch {
 		case data.UserKilled || data.StartupStateUnknown:
 			status = taskStatusAbortedShutdown
+		case data.Liveness == session.LiveLost && (data.TaskRunActive || data.TaskRunInterrupted):
+			// A Lost row whose run did not finish was prompted, and Lost alone
+			// cannot say whether that agent still runs (#7518). The loader parks
+			// a row Lost whether tmux confirmed its agent's session absent or
+			// could not verify the socket under a possibly-live server, and in
+			// the second case the agent may be working on this very prompt. So
+			// the occurrence delivers fresh only when the loader proved the agent
+			// gone (LostAgentGone), the respawn arm's policy one step earlier. That
+			// proof covers an interrupted run too: tmux confirmed the session
+			// absent, so every process it ran is gone, whatever an earlier
+			// unverified reattach could not prove.
+			if data.LostAgentGone {
+				continue
+			}
+			// Otherwise it is held while something is still settling the row:
+			// nothing delivers, the marker stays, and the restore decides it. A
+			// rebind leaves a live row to adopt, and a respawn proves the agent
+			// gone and delivers fresh. Only a local row's restore can prove that,
+			// so only a local row is held: the loader's own split, under which
+			// every non-sandbox row loads on the local backend. No sandbox path
+			// raises either proof, so a sandbox hold could only ever end in
+			// adoption, and a row nothing will settle (lost-restore gave up, or
+			// never retries it) would hold forever. Both are adopted now, as they
+			// always were: the occurrence is not run a second time.
+			if !session.IsSandboxBackendType(data.BackendType) && taskFireRowSettles(repo.ID, data) {
+				if held == nil {
+					held = data
+				}
+				continue
+			}
+			log.WarningLog.Printf("task %s: adopting Lost session %q as the interrupted fire's product: nothing that could prove its agent stopped is settling it, so the occurrence is not delivered again", t.ID, data.Title)
 		case data.Liveness == session.LiveLimitReached:
 			status = TaskStatusLimitParked
 		}
@@ -386,6 +441,23 @@ func reconcilePendingTaskFire(t *task.Task, fire *taskFireMarker) (bool, error) 
 		clearTaskFire(t.ID)
 		log.InfoLog.Printf("task %s: adopted session %q persisted by an interrupted cron fire", t.ID, data.Title)
 		return true, nil
+	}
+	if held == nil && heldRowRemoved(fire, rows) {
+		// This fire was held on a row that has since disappeared: its kill
+		// completed and deleted the record. The agent the occurrence went to was
+		// running when it was held, and the user removed it, so the occurrence
+		// is consumed here, never delivered again by the next look.
+		now := time.Now()
+		if _, uerr := task.UpdateTaskStatus(t.ID, &now, taskStatusAbortedHeldSessionRemoved); uerr != nil {
+			return false, fmt.Errorf("%w: recording the consumed held run: %v", errTaskFireReconcile, uerr)
+		}
+		clearTaskFire(t.ID)
+		log.WarningLog.Printf("task %s: the session this fire was held on (%s) was removed; the occurrence is consumed, not delivered again", t.ID, fire.HeldInstanceID)
+		return true, nil
+	}
+	if held != nil {
+		bindHeldRow(t.ID, fire, held.ID)
+		return false, &taskFireHeld{session: held.Title}
 	}
 
 	if fire.Title == "" {
@@ -735,9 +807,7 @@ func replayPendingTaskFires() {
 		wg.Add(1)
 		go func(m *taskFireMarker) {
 			defer wg.Done()
-			if err := runTaskDelivery(m.TaskID, task.ProjectExpectation{}, m); err != nil {
-				log.WarningLog.Printf("replay of interrupted cron fire for task %s failed: %v", m.TaskID, err)
-			}
+			replayTaskFire(m)
 		}(marker)
 	}
 	wg.Wait()

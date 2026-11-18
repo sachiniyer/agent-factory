@@ -118,6 +118,19 @@ type InstanceData struct {
 	// row that reloads INERT drops it on load instead: no automatic retry can
 	// reach that row, so the record would report an armed retry forever.
 	LostRestoreWait *LostRestoreWait `json:"lost_restore_wait,omitempty"`
+	// LostAgentGone records that the loader parked this row Lost after tmux
+	// confirmed the AGENT's own session absent and the respawn was then refused:
+	// its worktree was gone (tmux.ErrSpawnDirMissing), or the replacement for a
+	// refused conversation could not be made durable (ErrReplacementNotDurable).
+	// The process the row's prompt went to is proven gone. Every other Lost
+	// leaves it false, because nothing proves that: a socket that could not be
+	// verified under a possibly-live server, a sibling tab's refusal beside a
+	// reattached agent, a provisional sandbox Lost, a poll's observation. Written
+	// only while Liveness is LiveLost; leaving Lost drops it. The daemon's pending
+	// cron fire reconcile reads it (#7518): only a proven-gone agent lets the
+	// occurrence deliver fresh. omitempty + additive: an older record decodes to
+	// false, which holds the fire rather than deliver it twice.
+	LostAgentGone bool `json:"lost_agent_gone,omitempty"`
 	// Unreachable projects a live remote-probe outage (#5571 W1.3): the
 	// daemon's observation stopped being answered at Since, and Error is the
 	// last transport failure — collapsed, bounded, and token-redacted before it
@@ -170,6 +183,18 @@ type InstanceData struct {
 	// indistinguishable from a normally-ended run (the pre-fix reading).
 	TaskRunInterrupted   bool      `json:"task_run_interrupted,omitempty"`
 	TaskRunInterruptedAt time.Time `json:"task_run_interrupted_at,omitzero"` // #6223 re-arm window
+	// TaskRunInterruptedByRespawn records that the interrupt came from a
+	// respawn: tmux confirmed the agent's session absent before af started its
+	// replacement, so the process the prompt went to is proven gone. Every other
+	// interrupt leaves it false: a reattach whose pane identity could not be
+	// verified (a timed-out query, or no recorded pid), an adopted restart, an
+	// off-box relaunch or re-provision. Those prove nothing about the prompted
+	// process. Only the daemon's pending cron fire reconcile reads it (#7518): a
+	// TaskRunInterrupted row delivers its occurrence fresh only with this set.
+	// Written only alongside TaskRunInterrupted. omitempty + additive: an older
+	// record decodes to false, unknown, which adopts a live row rather than run
+	// the occurrence twice.
+	TaskRunInterruptedByRespawn bool `json:"task_run_interrupted_by_respawn,omitempty"`
 	// TaskRunFailurePending records that the run ended failed (initial prompt
 	// proven undelivered, #5278) and the task's errored status has not yet been
 	// acknowledged as written (#5646). omitempty + additive: an older record

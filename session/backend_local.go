@@ -347,7 +347,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// lost-restore loop can Recover it — which needs this exact
 			// persisted binding to respawn the same name (#5172).
 			preserveAgentHandle = retainsInertInstance(err) || restoreDeferred(err)
-			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
+			// Marked as the agent's own, so the loader can tell what it proves.
+			setupErr = fmt.Errorf("failed to restore existing session: %w", &agentRestoreRefusal{err})
 			return setupErr
 		}
 		if restoreResult == tmux.RestoreRespawned {
@@ -373,8 +374,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// The same verdict the recover path stamps (#4222): a load-time
 			// respawn is a replacement process, so a task run still in flight on
 			// this row ends interrupted rather than finished by the fresh agent's
-			// first idle tick.
-			i.markAgentRuntimeReplaced(true)
+			// first idle tick. A respawn: tmux confirmed the agent's session
+			// absent before this branch ran.
+			i.markAgentRespawned()
 		} else {
 			// A tmux name surviving across daemon downtime does not prove that it
 			// still names the process AF launched: an operator can remove and recreate

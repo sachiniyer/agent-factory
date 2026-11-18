@@ -482,8 +482,10 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// A respawn produced a replacement process: the run-end classifier at
 		// ConfirmLive reads this verdict to interrupt a still-in-flight task
 		// run rather than let the fresh agent's first idle edge complete it
-		// (#4222).
-		i.markAgentRuntimeReplaced(true)
+		// (#4222). A respawn proves the prompted process gone: Restore took this
+		// branch only after tmux confirmed the session absent, and an account
+		// swap's fresh start only after its pane was stopped.
+		i.markAgentRespawned()
 		// The fresh pane committed after a refused resume: retire the dead id
 		// and park the pre-spawn baseline so the next deferred arm can record
 		// this runtime's rollout instead of fencing on the stale record

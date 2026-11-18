@@ -350,10 +350,16 @@ func (i *Instance) setStatusLocked(s Status) {
 // trivially; LiveArchived also passes through, because archive is the row
 // leaving service under its own stop-everything teardown, not an observation
 // that could be lying about the stale pane.
+// The loader's proof that the agent is gone (lostAgentGone) describes one Lost
+// episode, so it survives only a Lost-to-Lost write: leaving Lost ends it, and
+// a later Lost reached from anywhere else cannot inherit it.
 // Callers hold i.mu.
 func (i *Instance) assignLivenessLocked(l Liveness) {
 	if i.rebuildTeardownPending && l != LiveLost && l != LiveArchived {
 		l = LiveLost
+	}
+	if l != LiveLost || i.liveness != LiveLost {
+		i.lostAgentGone = false
 	}
 	i.liveness = l
 }

@@ -145,6 +145,11 @@ type Instance struct {
 	// failure was environmental, so an automatic retry is still armed behind a
 	// capped backoff instead of the terminal budget being spent (#5295).
 	lostRestoreWait LostRestoreWait
+	// lostAgentGone is LostAgentGone's in-memory half: the loader's deferral
+	// sets it when the agent's own restore found its tmux session confirmed
+	// absent (deferToLostRestore), and assignLivenessLocked drops it whenever
+	// the row is not Lost on both sides of a write. Guarded by mu.
+	lostAgentGone bool
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
 	// task-spawned session and flips false — once, permanently — when the AGENT
@@ -208,6 +213,14 @@ type Instance struct {
 	// a verified reattach leaves the run to the agent that still owns its
 	// prompt (#4222).
 	agentRuntimeReplaced bool
+	// agentRespawned narrows a positive agentRuntimeReplaced to the one kind
+	// of replacement that proves the process its prompt went to is gone: a
+	// respawn, which tmux only takes after confirming the agent's session absent
+	// (or after af itself stopped the pane and waited for its exit). A reattach
+	// whose identity could not be verified, an adopted restart, a handoff or an
+	// off-box relaunch all leave it false: the prompted process may still be
+	// running. Every replacement verdict resets it (#7518).
+	agentRespawned bool
 	// taskRunInterrupted records that this session's task run ended
 	// interrupted — the runtime that owned its prompt was replaced without a
 	// replay (#4222). It is what tells "the marker cleared" apart from "the
@@ -216,9 +229,14 @@ type Instance struct {
 	// process's lifetime: a session has exactly one run, and an interrupted
 	// end is a fact about it that never un-happens. In-memory only; a restart
 	// leaves no poll able to capture the active half of the edge.
-	taskRunInterrupted   bool
-	agentReplacedAt      time.Time // when the replacement was launched (#6231)
-	taskRunInterruptedAt time.Time // bounds the re-arm window (#6223); persisted
+	taskRunInterrupted bool
+	// taskRunInterruptedByRespawn records that the interrupt came from a
+	// respawn (agentRespawned), so the prompted process is proven gone. It is
+	// persisted as TaskRunInterruptedByRespawn, and only while the run reads
+	// interrupted (#7518).
+	taskRunInterruptedByRespawn bool
+	agentReplacedAt             time.Time // when the replacement was launched (#6231)
+	taskRunInterruptedAt        time.Time // bounds the re-arm window (#6223); persisted
 	// taskRunInterruptedStamp is the one-shot twin of taskRunInterrupted for
 	// the daemon's status write: set when a restore's ConfirmLive performs the
 	// interrupt, consumed once by noteRuntimeReplaced so the owning task's

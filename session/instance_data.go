@@ -42,6 +42,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		SetupHookFailed:          i.setupHookFailed,
 		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
 		LostRestoreWait:          cloneLostRestoreWait(i.lostRestoreWait),
+		LostAgentGone:            i.liveness == LiveLost && i.lostAgentGone,
 		RebuildTeardownPending:   i.rebuildTeardownPending,
 		Unreachable:              i.unreachableDataLocked(),
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
@@ -193,6 +194,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// run has already spent its active marker, and the interruption is exactly
 	// the fact startup reconcile needs after a restart (#4222 review).
 	data.TaskRunInterrupted = i.taskRunInterrupted
+	data.TaskRunInterruptedByRespawn = i.taskRunInterrupted && i.taskRunInterruptedByRespawn
 	data.TaskRunInterruptedAt = i.taskRunInterruptedAt
 	data.TaskRunFailurePending = i.taskRunFailurePending
 	data.BacklogItem = i.BacklogItem
@@ -523,12 +525,13 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
-		taskRunActive:        data.TaskRunActive,
-		BacklogItem:          data.BacklogItem,
-		taskRunInterrupted:   data.TaskRunInterrupted && !data.TaskRunActive,
-		taskRunInterruptedAt: data.TaskRunInterruptedAt,
-		taskRunIdleEdgeHeld:  runGateActiveInData(data) && data.TaskRunIdleEdgeHeld,
-		taskRunTurnGateHeld:  runGateActiveInData(data) && data.TaskRunTurnGateHeld,
+		taskRunActive:               data.TaskRunActive,
+		BacklogItem:                 data.BacklogItem,
+		taskRunInterrupted:          data.TaskRunInterrupted && !data.TaskRunActive,
+		taskRunInterruptedByRespawn: data.TaskRunInterrupted && !data.TaskRunActive && data.TaskRunInterruptedByRespawn,
+		taskRunInterruptedAt:        data.TaskRunInterruptedAt,
+		taskRunIdleEdgeHeld:         runGateActiveInData(data) && data.TaskRunIdleEdgeHeld,
+		taskRunTurnGateHeld:         runGateActiveInData(data) && data.TaskRunTurnGateHeld,
 		// Gate on the run still being in flight, mirroring the write side and
 		// the held flag: a finished run's stale observation cannot release the
 		// next run's delivery window.
@@ -542,6 +545,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		setupHookFailed:          data.SetupHookFailed,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
 		lostRestoreWait:          lostRestoreWaitFromData(data.LostRestoreWait),
+		lostAgentGone:            liveness == LiveLost && data.LostAgentGone,
 		rebuildTeardownPending:   data.RebuildTeardownPending,
 		unreachableSince:         unreachableSinceFromData(data.Unreachable),
 		unreachableErr:           unreachableErrFromData(data.Unreachable),
@@ -973,20 +977,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 			return inertReturn(), nil
 		}
 		if restoreDeferred(err) {
-			// The tmux session is gone and its persisted worktree is missing:
-			// the spawn-dir seam refused a respawn that tmux would have
-			// silently placed in the server's cwd (#5172). Load the row Lost
-			// (started, so SaveInstances keeps the record and
-			// lostSessionWantsRestore admits it) instead of dropping it — the
-			// daemon's lost-restore loop owns the rebuild-then-respawn path,
-			// and it can only reach a row that materialized.
-			instance.mu.Lock()
-			instance.assignLivenessLocked(LiveLost)
-			instance.started = true
-			instance.dropAttentionIfStoppedLocked()
-			instance.touchLocked()
-			instance.mu.Unlock()
-			return instance, nil
+			return instance.deferToLostRestore(err), nil
 		}
 		return nil, err
 	}

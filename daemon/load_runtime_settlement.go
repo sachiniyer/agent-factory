@@ -6,7 +6,9 @@ import (
 )
 
 // persistLoadRuntimeReplacements makes a load-time respawn's timestamp and any
-// agent evidence clear durable before the restored map becomes authoritative.
+// agent evidence clear durable before the restored map becomes authoritative,
+// and with them a deferred row's Lost verdict: the boot replay of a pending
+// cron fire reads instances.json, and must read what the loader decided (#7518).
 // A failed write is returned as an owed settlement so the live daemon retries it every poll;
 // abandoning the newly spawned process would be worse than retaining it with a
 // loudly tracked metadata gap.

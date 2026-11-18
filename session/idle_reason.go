@@ -431,8 +431,9 @@ func (i *Instance) ClearIdleEvidence() bool {
 }
 
 // markLoadRuntimeReplaced records that Start(false) created a replacement
-// process, retired an unverified reattachment's persisted runtime command, or
-// recorded a process tab's observed exit (#4506 review). The daemon loader
+// process, retired an unverified reattachment's persisted runtime command,
+// recorded a process tab's observed exit (#4506 review), or deferred the row to
+// the lost-restore loop with its Lost verdict (#7518). The daemon loader
 // consumes this after FromInstanceData returns so the timestamp, evidence
 // clear or exit stamp is checkpointed before the row is installed. Marking a
 // sibling replacement does not clear agent evidence.
@@ -472,6 +473,7 @@ func (i *Instance) markAgentRuntimeReplaced(replaced bool) {
 // proves a claim's emission can be what a sighting shows (#6972, Codex).
 func (i *Instance) markAgentRuntimeReplacedLocked(replaced bool) {
 	i.agentRuntimeReplaced = replaced
+	i.agentRespawned = false
 	// Remember WHEN, so an interruption's boundary is the launch, not the later
 	// settle edge: an agent already mid-turn at ConfirmLive started after this (#6231).
 	if replaced {
@@ -480,6 +482,26 @@ func (i *Instance) markAgentRuntimeReplacedLocked(replaced bool) {
 		i.retireLimitWallShadowOnRuntimeReplaceLocked()
 	} else {
 		i.agentReplacedAt = time.Time{}
+	}
+}
+
+// markAgentRespawned is markAgentRuntimeReplaced(true) for a respawn, the
+// replacement that proves the prompted process gone (agentRespawned). Only the
+// local backend's respawn branches call it: on load and on Recover, each taken
+// after tmux confirmed the agent's session absent, or after af stopped the pane
+// and waited for its exit.
+func (i *Instance) markAgentRespawned() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.markAgentRuntimeReplacedLocked(true)
+	i.agentRespawned = true
+	// A run already ended interrupted, by a replacement that proved nothing (an
+	// unverified reattach, or a record from before the proof existed), never
+	// reaches an interrupt edge again: its run is no longer active. It is owed
+	// the proof now. tmux confirmed this session absent, so every process it
+	// ran is gone, the one the prompt went to included (Codex on #7524).
+	if i.taskRunInterrupted {
+		i.taskRunInterruptedByRespawn = true
 	}
 }
 
@@ -578,6 +600,7 @@ func (i *Instance) ResumeInterruptedTaskRunAtEpoch(observedAt time.Time, observe
 	}
 	i.taskRunActive = true
 	i.taskRunInterrupted = false
+	i.taskRunInterruptedByRespawn = false
 	i.taskRunInterruptedAt = time.Time{}
 	i.taskRunIdleEdgeHeld = true
 	i.taskRunPromptAttemptAt = time.Time{}
