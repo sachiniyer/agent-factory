@@ -42,6 +42,20 @@ func (f *fakeStagedChecker) captureCount() int {
 	return f.calls
 }
 
+// stagedReadingBackend scripts the staged-draft verdict through the real
+// forwarding path — localAgentServer asserts stagedDraftBackend on the
+// current backend and calls it — so a refreshInstanceStatus-level test
+// drives the same `as` the production poll reads, not a stand-in handed in
+// from outside.
+type stagedReadingBackend struct {
+	readyFakeBackend
+	checker *fakeStagedChecker
+}
+
+func (b stagedReadingBackend) BoundDraftStillStaged(*session.Instance) (session.StagedDraftRead, string) {
+	return b.checker.BoundDraftStillStaged()
+}
+
 // stagedDraftFixture registers a Ready session whose last send was recorded
 // sent-unverified at attemptAt — the #7545 arming condition.
 func stagedDraftFixture(t *testing.T, attemptAt time.Time) (*Manager, string, string, *session.Instance) {
@@ -252,8 +266,9 @@ func TestStagedDraftWatchSustainResetsAcrossRunning(t *testing.T) {
 }
 
 // An agent's own attention request holds the row: the flag refuses to
-// clobber it and stays unclosed so a later tick retries — and does, the
-// moment the row frees.
+// clobber it — and while the row is owned the feed spends neither a capture
+// nor a due mark on it (#7547 independent review). Once the row frees the
+// watch arms normally and the flag lands after the sustain.
 func TestStagedDraftWatchNeverClobbersAnAttentionRequest(t *testing.T) {
 	base := time.Now()
 	now := base
@@ -273,15 +288,16 @@ func TestStagedDraftWatchNeverClobbersAnAttentionRequest(t *testing.T) {
 
 	reason := inst.Attention().Reason
 	require.Equal(t, "the agent's own question", reason, "the flag must not overwrite what the agent asked")
-	entry := stagedDraftWatchEntry(manager, key)
-	require.NotNil(t, entry)
-	require.False(t, entry.closed, "a refused flag stays open so the row frees it can retry")
-	require.False(t, entry.due, "the refused due mark is consumed — the next tick re-marks it")
+	require.Equal(t, 0, checker.captureCount(),
+		"no capture is spent while another attention request owns the row")
 
 	_, cleared := inst.ClearAttention(time.Time{})
 	require.True(t, cleared)
 	feedStagedDraftTick(manager, repoID, key, inst, checker)
-	require.True(t, inst.HasAttention(), "the flag lands on the tick after the row frees")
+	require.False(t, inst.HasAttention(), "the sustain only accrues on ticks that actually read the pane")
+	now = base.Add(2*stagedDraftSettleWindow + time.Second)
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	require.True(t, inst.HasAttention(), "the flag lands once the row is free and the sustain holds")
 	require.Contains(t, inst.Attention().Reason, "still unsubmitted in the composer")
 }
 
@@ -414,6 +430,173 @@ func TestStagedDraftFlagNeverBlocksUnderTheObservationFence(t *testing.T) {
 	manager.pausedMu.Unlock()
 	feedStagedDraftTick(manager, repoID, key, inst, checker)
 	require.True(t, inst.HasAttention(), "the deferred raise lands the flag after the race")
+	require.Contains(t, inst.Attention().Reason, "still unsubmitted in the composer")
+}
+
+// The deferred flush must never block the poll on the op lock: on contention
+// it keeps the due mark for a later tick — the same TryLock rule
+// settlement.go's poll-side write follows (#7547 independent review).
+func TestStagedDraftFlushKeepsTheDueMarkUnderOpLockContention(t *testing.T) {
+	attemptAt := time.Now().Add(-time.Minute)
+	manager, repoID, _, inst := stagedDraftFixture(t, attemptAt)
+	key := stagedDraftKey(repoID, inst)
+	manager.pausedMu.Lock()
+	manager.stagedDraftWatches[key] = &stagedDraftWatch{
+		attemptAt: attemptAt, since: time.Now().Add(-2 * stagedDraftSettleWindow), due: true, dueWhy: "test"}
+	manager.pausedMu.Unlock()
+
+	opLock := manager.opLockFor(daemonInstanceKey(repoID, inst.Title))
+	opLock.Lock()
+	flushDone := make(chan struct{})
+	go func() {
+		manager.raiseDueStagedDraftFlag(repoID, key, inst)
+		close(flushDone)
+	}()
+	select {
+	case <-flushDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the deferred flush blocked on the contended op lock")
+	}
+	opLock.Unlock()
+	entry := stagedDraftWatchEntry(manager, key)
+	require.True(t, entry.due, "a contended flush keeps the due mark for a later tick")
+	require.False(t, inst.HasAttention(), "nothing may be raised while the op lock is contended")
+
+	// The next flush — the lock now free — lands the retained due mark.
+	manager.raiseDueStagedDraftFlag(repoID, key, inst)
+	require.True(t, inst.HasAttention(), "the kept due mark lands on the next uncontended flush")
+}
+
+// Blind reads are never a negative — but they are not free either: a pane
+// unjudgeable for stagedDraftMaxBlindReads consecutive ticks retires the
+// attempt's watch rather than capturing per poll forever (#7547 independent
+// review).
+func TestStagedDraftWatchRetiresAfterBoundBlindReads(t *testing.T) {
+	manager, repoID, _, inst := stagedDraftFixture(t, time.Now().Add(-time.Minute))
+	checker := &fakeStagedChecker{reads: []session.StagedDraftRead{session.StagedDraftUnreadable}}
+	key := stagedDraftKey(repoID, inst)
+
+	for i := 0; i < stagedDraftMaxBlindReads; i++ {
+		feedStagedDraftTick(manager, repoID, key, inst, checker)
+	}
+	entry := stagedDraftWatchEntry(manager, key)
+	require.NotNil(t, entry)
+	require.False(t, entry.closed, "the budget is not yet exhausted")
+
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	require.True(t, stagedDraftWatchEntry(manager, key).closed, "the blind budget retires the attempt")
+
+	calls := checker.captureCount()
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	require.Equal(t, calls, checker.captureCount(), "a retired attempt is never captured for again")
+	require.False(t, inst.HasAttention())
+
+	// A newer send re-arms a fresh watch — the retired attempt's budget does
+	// not follow it.
+	second := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, second))
+	checker.reads = []session.StagedDraftRead{session.StagedDraftStaged}
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	entry = stagedDraftWatchEntry(manager, key)
+	require.NotNil(t, entry)
+	require.True(t, entry.attemptAt.Equal(second), "the newer send owns the watch")
+	require.Zero(t, entry.blind, "a provable read leaves no blind streak")
+	require.False(t, entry.closed)
+}
+
+// The same deadlock, proven through the real poll tick rather than the
+// feed's entry points (the test above exercises those directly): with an
+// automated send parked between the session op lock and the observation
+// fence, refreshInstanceStatus must still complete — the under-fence feed
+// only records the flag, and the deferred flush TryLocks rather than
+// parking the sweep behind the send (#7547 independent review). Moving the
+// deferred-raise defer below the fence's release — the regression this
+// guards — makes the poll tick deadlock again and this test goes red.
+func TestStagedDraftPollTickNeverBlocksBehindAnOpLockSend(t *testing.T) {
+	attemptAt := time.Now().Add(-time.Minute)
+	checker := &fakeStagedChecker{reads: []session.StagedDraftRead{session.StagedDraftStaged}}
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "worker",
+		stagedReadingBackend{readyFakeBackend{session.NewFakeBackend()}, checker}, true, session.Ready)
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, attemptAt))
+	key := stagedDraftKey(repoID, inst)
+	manager.pausedMu.Lock()
+	manager.stagedDraftWatches[key] = &stagedDraftWatch{
+		attemptAt: attemptAt, since: time.Now().Add(-2 * stagedDraftSettleWindow)}
+	manager.pausedMu.Unlock()
+
+	// The automated send takes the session op lock, then parks at the hook
+	// before it can take the observation fence — the deadlock's own order.
+	reachedOpLock := make(chan struct{})
+	releaseSend := make(chan struct{})
+	originalHook := testHookTaskPromptBeforeObservationFence
+	var once sync.Once
+	testHookTaskPromptBeforeObservationFence = func() {
+		once.Do(func() { close(reachedOpLock); <-releaseSend })
+	}
+	t.Cleanup(func() { testHookTaskPromptBeforeObservationFence = originalHook })
+	sendDone := make(chan error, 1)
+	go func() {
+		_, err := manager.SendPromptWithStatus(SendPromptRequest{
+			Title: inst.Title, RepoID: repoID, Prompt: "a task send", TaskOrigin: true})
+		sendDone <- err
+	}()
+	select {
+	case <-reachedOpLock:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the automated send never reached its observation fence")
+	}
+
+	// The real poll tick must complete while the send holds the op lock: the
+	// feed records the due flag under the fence, and the deferred flush
+	// TryLocks rather than blocking the sweep.
+	pollDone := make(chan struct{})
+	go func() {
+		manager.refreshInstanceStatus(repoID, inst)
+		close(pollDone)
+	}()
+	select {
+	case <-pollDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the poll tick blocked on the send's op lock — the deferred flag must not block")
+	}
+	entry := stagedDraftWatchEntry(manager, key)
+	require.NotNil(t, entry)
+	require.True(t, entry.due, "the contended flush keeps the due mark for a later tick")
+	require.False(t, inst.HasAttention(), "nothing may be raised while the op lock is contended")
+
+	close(releaseSend)
+	select {
+	case <-sendDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the automated send stayed blocked after the fence was free")
+	}
+
+	// The send superseded the due mark's attempt: the next poll tick drops
+	// the open watch rather than flagging a stale send.
+	pollDone = make(chan struct{})
+	go func() {
+		manager.refreshInstanceStatus(repoID, inst)
+		close(pollDone)
+	}()
+	select {
+	case <-pollDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the post-send poll tick blocked")
+	}
+	require.False(t, inst.HasAttention(), "the send superseded the due mark — no flag for a stale send")
+	require.Nil(t, stagedDraftWatchEntry(manager, key), "a delivered send's open watch is dropped")
+
+	// And the deferred raise is still the working path through the real tick:
+	// re-qualify and the flag lands once the op lock is free.
+	second := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, second))
+	manager.pausedMu.Lock()
+	manager.stagedDraftWatches[key] = &stagedDraftWatch{
+		attemptAt: second, since: time.Now().Add(-2 * stagedDraftSettleWindow)}
+	manager.pausedMu.Unlock()
+	manager.refreshInstanceStatus(repoID, inst)
+	require.True(t, inst.HasAttention(), "the deferred raise lands the flag through the real poll tick")
 	require.Contains(t, inst.Attention().Reason, "still unsubmitted in the composer")
 }
 

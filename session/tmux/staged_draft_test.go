@@ -182,16 +182,69 @@ func TestStagedDraftReading(t *testing.T) {
 			want: StagedDraftGone,
 		},
 		{
-			// Echo above AND draft staged — the send submitted one copy
-			// and another still sits in the composer: still staged wins.
-			name: "staged beats submitted when both reads are present",
+			// Echo above AND matching draft in the composer — the send
+			// provably landed (a NEW echo since the boundary), so the
+			// composer copy is the user's recall or retype, never af's to
+			// flag (Codex #7547 independent review: submitted demotes the
+			// composer match).
+			name: "a bound tail that also echoes above the anchor is submitted",
 			pane: strings.Join([]string{
 				"❯ " + stagedTailText,
 				"✻ done",
 				"❯ " + stagedTailText,
 			}, "\n"),
 			ev:   stagedTailEvidence(),
-			want: StagedDraftStaged,
+			want: StagedDraftSubmitted,
+		},
+		{
+			// The review's interleaving: af's send submitted but recorded
+			// sent-unverified, the turn ran, then the user retyped the
+			// prompt with an edit. The composer copy is theirs — a
+			// whole-payload tail must EQUAL the text after the glyph, so
+			// the edit breaks the match outright.
+			name: "a user retyping the sent text with an edit is gone",
+			pane: claudeInsertPane("❯ continue, but skip docs"),
+			ev:   stagedDraftEvidence{tail: "continue", tailWhole: true},
+			want: StagedDraftGone,
+		},
+		{
+			// And the recall twin: the user up-arrowed the submitted
+			// prompt back into the composer verbatim. The new echo above
+			// the anchor proves the send landed; the matching composer
+			// text is unattributable, never af's still-staged draft.
+			name: "a user's up-arrow recall of the submitted prompt is submitted",
+			pane: strings.Join([]string{
+				"❯ continue",
+				"✻ done",
+				"❯ continue",
+			}, "\n"),
+			ev:   stagedDraftEvidence{tail: "continue", tailWhole: true},
+			want: StagedDraftSubmitted,
+		},
+		{
+			// A payload of 32 runes or fewer binds its whole text as the
+			// tail (submit.go: it IS the completion). Contained is not
+			// enough — "yes" sent must not read staged inside a user's
+			// "they established".
+			name: "a short payload matches only as the whole composer text",
+			pane: claudeInsertPane("❯ they established"),
+			ev:   stagedDraftEvidence{tail: "yes", tailWhole: true},
+			want: StagedDraftGone,
+		},
+		{
+			// An identical echo that predates the send — the same prompt
+			// went in before (#1146's limit-resume resend) — leaves the
+			// composer copy attributable to the user's recall of THAT
+			// echo. Unprovable either way: blind, never a negative and
+			// never a false flag.
+			name: "a pre-existing identical echo makes the composer match unreadable",
+			pane: strings.Join([]string{
+				"❯ " + stagedTailText,
+				"✻ done",
+				"❯ " + stagedTailText,
+			}, "\n"),
+			ev:   stagedDraftEvidence{tail: normalizeDelivery(stagedTailText), tailEcho: 1},
+			want: StagedDraftUnreadable,
 		},
 		{
 			// A frame with no composer-glyph row at all — a dialog or a

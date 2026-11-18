@@ -18,10 +18,22 @@ import (
 // tests can compress it.
 var stagedDraftSettleWindow = 5 * time.Minute
 
+// stagedDraftMaxBlindReads bounds one attempt's blind-read budget (#7547
+// independent review): StagedDraftUnreadable keeps an armed watch and its
+// sustain — deliberately, since a dialog or mid-redraw frame is never a
+// negative — but every blind tick still costs a capture-pane. A pane that
+// stays unjudgeable for about the settle window's own length (~5 minutes at
+// the default 1s poll) cannot be the flag's evidence either way, so the
+// attempt retires rather than paying a capture per poll forever. The count
+// is consecutive blind reads, not elapsed time: it resets on any provable
+// verdict, and a newer send re-arms past it like every other watch state.
+const stagedDraftMaxBlindReads = 300
+
 // stagedDraftWatch tracks one send's bound evidence across polls, keyed by
 // stableSessionKey like the send re-verification watches beside it. attemptAt
 // names the send the evidence belongs to — a newer send supersedes the watch —
-// and since is the first tick the Ready+staged condition held.
+// and since is the first tick the Ready+staged condition held. blind counts
+// consecutive Unreadable verdicts against the bound above.
 //
 // closed is the "never captured for again" latch, set by EITHER terminal
 // outcome: the flag landed, or the evidence resolved (a transcript echo above
@@ -41,6 +53,7 @@ var stagedDraftSettleWindow = 5 * time.Minute
 type stagedDraftWatch struct {
 	attemptAt time.Time
 	since     time.Time
+	blind     int
 	closed    bool
 	due       bool
 	dueWhy    string
@@ -95,6 +108,14 @@ func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.
 	if settled {
 		return
 	}
+	// Another attention request owns the row — an agent's own question. The
+	// flag could not land while it stands (raiseStagedDraftAttention refuses
+	// to clobber it), so neither a capture nor a due mark is spent here: the
+	// watch keeps whatever it has armed, and the tick after the row frees
+	// takes the read again (#7547 independent review).
+	if instance.Attention() != nil {
+		return
+	}
 	read, why := checker.BoundDraftStillStaged()
 	now := nowFunc()
 	m.pausedMu.Lock()
@@ -106,12 +127,27 @@ func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.
 			entry = &stagedDraftWatch{attemptAt: attemptAt, since: now}
 			m.stagedDraftWatches[key] = entry
 		}
+		entry.blind = 0
 		if !entry.closed && now.Sub(entry.since) >= stagedDraftSettleWindow {
 			entry.due = true
 			entry.dueWhy = why
 		}
 	case session.StagedDraftUnreadable:
-		// See the doc: a blind read keeps an armed watch and its sustain.
+		// A blind read keeps an armed watch and its sustain — but its
+		// capture budget is bounded (stagedDraftMaxBlindReads): a pane
+		// unjudgeable for longer than the settle window's own length retires
+		// the attempt rather than capturing per poll forever.
+		entry = m.stagedDraftWatches[key]
+		if entry == nil || !entry.attemptAt.Equal(attemptAt) {
+			entry = &stagedDraftWatch{attemptAt: attemptAt}
+			m.stagedDraftWatches[key] = entry
+		}
+		entry.blind++
+		if entry.blind > stagedDraftMaxBlindReads {
+			entry.closed = true
+			entry.due = false
+			entry.dueWhy = ""
+		}
 	default:
 		// StagedDraftNoEvidence, StagedDraftGone, StagedDraftSubmitted: this
 		// send's evidence resolved. Close the entry rather than deleting it —
@@ -134,13 +170,15 @@ func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.
 // release, run after it), where taking the session op lock no longer deadlocks
 // an automated send waiting on the fence (#7545 review).
 //
-// The wait for the op lock can outlive everything the under-fence tick saw —
-// a sendPromptGuarded holding it may complete a whole delivery first — so the
-// condition is re-validated under the lock before the flag is written: same
-// watch, same attemptAt, still due and unclosed; the recorded delivery still
+// Between the under-fence tick and this flush the condition it saw can move —
+// a sendPromptGuarded holding the op lock may complete a whole delivery — so
+// the flag is re-validated under the lock before it is written: same watch,
+// same attemptAt, still due and unclosed; the recorded delivery still
 // sent-unverified for that attempt; the session still Ready; the attention
 // row still free. Anything that moved simply clears the due mark — a tick
-// that still qualifies re-marks it.
+// that still qualifies re-marks it. And the flush itself never blocks the
+// poll: the op lock is TryLock'd, so contention keeps the due mark for the
+// next tick rather than parking every session's sweep behind one operation.
 func (m *Manager) raiseDueStagedDraftFlag(repoID, key string, instance *session.Instance) {
 	m.pausedMu.Lock()
 	entry := m.stagedDraftWatches[key]
@@ -153,9 +191,16 @@ func (m *Manager) raiseDueStagedDraftFlag(repoID, key string, instance *session.
 
 	// Same opLock→repoStartLock ordering as SetAttention/clearAttentionNow:
 	// the whole-row persist below must not interleave with a handoff's
-	// provisional swap state.
+	// provisional swap state. TryLock, never Lock (#7547 independent
+	// review): this runs on the poll goroutine, and a kill, archive, or
+	// handoff holding the op lock would stall every session's tick behind
+	// it — settlement.go's rule for the same class of poll-side write. The
+	// due mark STAYS on contention: the flag is still owed, and the next
+	// poll's deferred flush retries while the condition holds.
 	opLock := m.opLockFor(daemonInstanceKey(repoID, instance.Title))
-	opLock.Lock()
+	if !opLock.TryLock() {
+		return
+	}
 	defer opLock.Unlock()
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()

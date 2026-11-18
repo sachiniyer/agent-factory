@@ -385,8 +385,29 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 	// evidence against the wrong delivery.
 	{
 		ev := &stagedDraftEvidence{chip: bound.chipText}
-		if bound.tail {
-			ev.tail = probe.completion
+		if bound.tail || bound.chip {
+			// Echo baselines for the later recheck (#7547 independent
+			// review): identical text already visible ABOVE the boundary's
+			// composer predates this send, so only a count that GROWS past
+			// it proves the send itself echoed — the recheck demotes a
+			// composer match to Submitted or Unreadable otherwise. Counted
+			// on the same physical-grid frame the binding was judged on;
+			// a glyph-less boundary counts its whole frame.
+			brows := paneGridRows(xansi.Strip(boundaryGrid))
+			banchor := lastComposerGlyphRow(brows)
+			bupperRows := brows
+			if banchor >= 0 {
+				bupperRows = brows[:banchor]
+			}
+			bupper := normalizeDelivery(strings.Join(bupperRows, ""))
+			if bound.tail {
+				ev.tail = probe.completion
+				ev.tailWhole = probe.completion == probe.payload
+				ev.tailEcho = strings.Count(bupper, probe.completion)
+			}
+			if bound.chip {
+				ev.chipEcho = strings.Count(bupper, bound.chipText)
+			}
 		}
 		t.stagedDraft.Store(ev)
 	}

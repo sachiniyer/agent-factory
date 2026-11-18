@@ -38,18 +38,28 @@ const (
 
 // stagedDraftEvidence is the provable residue of one submit attempt, kept on
 // the TmuxSession so the daemon's staged-draft recheck can ask about it later
-// (#7545). Each string is one of the two evidence kinds boundEvidence may bind
-// to this delivery — the payload's normalized completion tail, or the bound
-// paste chip's own normalized text — and an empty field means that kind did
-// not bind. Only bound strings are ever stored, and only while their send is
-// the latest: nothing here is a text match on arbitrary composer contents,
-// which is what keeps a user's own typed draft — even an identical one — from
-// ever flagging as af's. Memory-only by design (#7545 decision): a daemon
+// (#7545). tail and chip are the two evidence kinds boundEvidence may bind to
+// a delivery. tailWhole records that the bound tail IS the whole normalized
+// payload (32 runes or fewer), and tailEcho/chipEcho count how many copies of
+// each kind were already visible above the composer at the boundary — the
+// baseline a transcript must beat to prove THIS send echoed. Only bound
+// strings are ever stored, and only while their send is the latest.
+//
+// The strings alone do not make a draft af's, and the recheck never lets
+// them: Staged is answered only for a frame af's still-unsubmitted paste
+// ALONE explains — a whole-payload tail must equal the composer text, not be
+// contained in it, and any identical echo visible above the anchor demotes
+// the read, because a user retyping or up-arrow-recalling the very text the
+// transcript shows produces the same composer contents (Codex #7547
+// independent review). Memory-only by design (#7545 decision): a daemon
 // restart forgets sends it did not watch, rather than putting prompt-derived
 // content on a durable row.
 type stagedDraftEvidence struct {
-	tail string
-	chip string
+	tail      string
+	tailWhole bool
+	tailEcho  int
+	chip      string
+	chipEcho  int
 }
 
 // BoundDraftStillStaged reports where the last send's bound evidence sits in
@@ -62,10 +72,13 @@ type stagedDraftEvidence struct {
 // physical grid rows — because the composer geometry helpers it feeds are the
 // same ones stagedReading trusted at the Enter boundary.
 //
-// The check is positional, never textual: evidence above the last composer-
-// glyph row is a submitted echo, evidence inside the composer region — the
-// same region boundEvidence searched when the send bound it — is the
-// still-staged draft, and evidence anywhere else — or a frame with no
+// The check is positional and baseline-bound, never a bare text match:
+// evidence inside the composer region — the same region boundEvidence
+// searched when the send bound it — is the still-staged draft ONLY when no
+// echo above the anchor can also explain it (a grown echo is the send's own
+// submission, a pre-existing one makes the composer copy unattributable —
+// Codex #7547 independent review); evidence above the last composer-glyph
+// row alone is a submitted echo; evidence nowhere — or a frame with no
 // composer at all — is no claim at all. The read runs outside inputMu; a
 // recheck concurrent with an in-flight send sees at worst a one-tick skew
 // (old evidence against a mid-send frame), which the next poll's verdict
@@ -84,11 +97,16 @@ func (t *TmuxSession) BoundDraftStillStaged() (StagedDraftRead, string) {
 
 // stagedDraftReading classifies one frame against stashed evidence. The
 // anchor is the pane's LAST composer-glyph row — the live composer repaints
-// its own glyph beneath every transcript echo — so "above the anchor" is
-// submitted and the composer region it opens is the live draft. The composer
-// check runs first: a send whose echo reached the transcript while its draft
-// also sits in the composer is still staged, and the flag is the honest
-// answer for it.
+// its own glyph beneath every transcript echo — so "above the anchor" is the
+// transcript and the composer region it opens is the live draft.
+//
+// A composer-region match is Staged only when af's still-unsubmitted paste
+// ALONE explains it (Codex #7547 independent review): the send's own text
+// echoing above the anchor too, or an identical echo that predates the send,
+// means the composer copy could be the user's — up-arrow re-issues verbatim
+// what the transcript shows, so echo evidence demotes the match to
+// Submitted (the echo grew since the boundary: this send provably landed) or
+// Unreadable (it predates the send, or the anchor itself is ambiguous).
 func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, string) {
 	rows := paneGridRows(pane)
 	anchor := lastComposerGlyphRow(rows)
@@ -116,30 +134,70 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 		}
 	}
 	region := normalizeDelivery(strings.Join(rows[anchor:regionEnd], ""))
-	switch {
-	case ev.tail != "" && strings.Contains(region, ev.tail):
-		return StagedDraftStaged, "the send's bound text is still in the live composer"
-	case ev.chip != "" && strings.Contains(region, ev.chip):
-		return StagedDraftStaged, "the send's bound paste chip is still in the live composer"
+	// The composer's text after its prompt glyph. A payload short enough to
+	// be its own bound tail must EQUAL it — "yes" sent must not read staged
+	// inside a user's "they established" (Codex #7547 independent review).
+	// A longer payload's bound tail is its END, so the same claim for a long
+	// send is a suffix match: user text appended after the paste breaks it,
+	// exactly the way an edit breaks the short-payload equality.
+	composerText := afterComposerGlyph(region)
+	tailStaged := ev.tail != "" &&
+		(ev.tailWhole && composerText == ev.tail || !ev.tailWhole && strings.HasSuffix(composerText, ev.tail))
+	chipStaged := ev.chip != "" && strings.Contains(region, ev.chip)
+	ambiguous := composerAnchorAmbiguous(rows, anchor)
+	upper := normalizeDelivery(strings.Join(rows[:anchor], ""))
+	tailEchoes, chipEchoes := 0, 0
+	if ev.tail != "" {
+		tailEchoes = strings.Count(upper, ev.tail)
 	}
-	// A `>`-leading Markdown quote inside a multiline draft normalizes to a
-	// composer glyph row, so the anchor can sit INSIDE the draft with its
-	// earlier lines above — textually the same shape as a fresh composer
-	// under a submitted echo. The staged check above is honest either way
-	// (a tail found below the anchor is in the live draft under both
-	// readings), but the upper-vs-region split below is not: draft text
-	// above the anchor would read as a submitted echo, and a tail split
-	// across the anchor would read as gone — both permanently resolving a
-	// live send. composerAnchorAmbiguous is the #6817 ruling for this
-	// shape: unprovable, never a negative.
-	if composerAnchorAmbiguous(rows, anchor) {
+	if ev.chip != "" {
+		chipEchoes = strings.Count(upper, ev.chip)
+	}
+	switch {
+	case tailStaged:
+		switch {
+		case ambiguous && (tailEchoes > 0 || ev.tailEcho > 0):
+			// A `>`-leading quote inside a multiline draft reads as the
+			// composer glyph (#6817's ambiguity): the rows above the anchor
+			// could be draft text, so the echo count cannot be trusted to
+			// decide between submitted and staged.
+			return StagedDraftUnreadable, "the last composer glyph may be a quote line inside the draft — the anchor is ambiguous"
+		case tailEchoes > ev.tailEcho:
+			// The transcript gained a copy of this send's text since the
+			// boundary: the send landed, and the matching composer copy is
+			// the user's — a recall or a retype — never af's to flag.
+			return StagedDraftSubmitted, "the send's bound text echoed into the transcript since the boundary"
+		case tailEchoes > 0 || ev.tailEcho > 0:
+			// An identical echo predates the send (or one scrolled off
+			// since it bound): the composer match could be the user's own
+			// recall of it. Unprovable either way — never a negative.
+			return StagedDraftUnreadable, "an identical echo predates the send — the composer copy may be the user's own recall"
+		default:
+			return StagedDraftStaged, "the send's bound text is still in the live composer"
+		}
+	case chipStaged:
+		switch {
+		case ambiguous && (chipEchoes > 0 || ev.chipEcho > 0):
+			return StagedDraftUnreadable, "the last composer glyph may be a quote line inside the draft — the anchor is ambiguous"
+		case chipEchoes > ev.chipEcho:
+			return StagedDraftSubmitted, "the send's bound paste chip echoed into the transcript since the boundary"
+		case chipEchoes > 0 || ev.chipEcho > 0:
+			return StagedDraftUnreadable, "an identical chip echo predates the send — the composer copy may be the user's own recall"
+		default:
+			return StagedDraftStaged, "the send's bound paste chip is still in the live composer"
+		}
+	}
+	// No provable staged match. With a trustworthy anchor the send may still
+	// have landed without leaving a draft: an echo count that grew since the
+	// boundary is this send's transcript. With an ambiguous anchor the
+	// "upper" rows may be draft text, so even that is unprovable.
+	if ambiguous {
 		return StagedDraftUnreadable, "the last composer glyph may be a quote line inside the draft — the anchor is ambiguous"
 	}
-	upper := normalizeDelivery(strings.Join(rows[:anchor], ""))
 	switch {
-	case ev.tail != "" && strings.Contains(upper, ev.tail):
+	case ev.tail != "" && tailEchoes > ev.tailEcho:
 		return StagedDraftSubmitted, "the send's bound text reads as a submitted echo"
-	case ev.chip != "" && strings.Contains(upper, ev.chip):
+	case ev.chip != "" && chipEchoes > ev.chipEcho:
 		return StagedDraftSubmitted, "the send's bound paste chip reads as a submitted echo"
 	}
 	return StagedDraftGone, "the send's bound evidence is nowhere in the frame"

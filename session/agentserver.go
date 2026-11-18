@@ -79,17 +79,6 @@ type StagedDraftChecker interface {
 	BoundDraftStillStaged() (StagedDraftRead, string)
 }
 
-// BoundDraftStillStaged asks a runtime where the last send's bound composer
-// evidence sits. A runtime without the capability reports
-// StagedDraftNoEvidence — never a negative about the draft itself, just the
-// honest "there is nothing bound to check".
-func BoundDraftStillStaged(server AgentServer) (StagedDraftRead, string) {
-	if checker, ok := server.(StagedDraftChecker); ok {
-		return checker.BoundDraftStillStaged()
-	}
-	return StagedDraftNoEvidence, "the runtime cannot read bound composer evidence"
-}
-
 // SendPromptWithStatus uses a runtime's observation when available. A legacy
 // runtime that only implements SendPrompt is honest uncertainty, not delivery:
 // nil error proves the command completed, not that the pane received the text.
