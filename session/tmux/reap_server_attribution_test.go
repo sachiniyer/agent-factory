@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/stretchr/testify/require"
@@ -192,4 +193,35 @@ func TestParsePaneServerFields_TailOnly(t *testing.T) {
 	require.Zero(t, parsePaneServerFields([]string{"1", "0"}).PID, "legacy rows carry no record")
 	require.Zero(t, parsePaneServerFields([]string{"1", "0", "", "0", "0", "/dev/pts/0", "1", "abc", "$7"}).PID,
 		"a non-numeric server pid makes the whole record absent")
+}
+
+// #7469 (Codex): a socket compare parked on a hung mount must answer
+// "could not compare" in bounded wall-clock time — undecidable, never
+// foreign. The staged walk blocks until released, exactly what
+// EvalSymlinks or the same-dir Stat does on a dead NFS/SMB/FUSE mount.
+func TestSameRecordedSocket_AHungCompareIsUndecidable(t *testing.T) {
+	oldWalk, oldBudget := socketCompareWalk, socketCompareBudget
+	release := make(chan struct{})
+	socketCompareBudget = 100 * time.Millisecond
+	socketCompareWalk = func(envSocket, recordedSocket string) (bool, bool) {
+		<-release
+		return true, true
+	}
+	t.Cleanup(func() {
+		socketCompareWalk, socketCompareBudget = oldWalk, oldBudget
+		close(release)
+	})
+
+	sock := filepath.Join(t.TempDir(), "s")
+	start := time.Now()
+	same, comparable := sameRecordedSocket(sock, sock)
+	require.False(t, comparable, "an unanswered compare is incomparable — undecidable, never foreign")
+	require.False(t, same)
+	require.Less(t, time.Since(start), 5*time.Second)
+
+	// And at verdict level the same shape stays undecidable — an own-
+	// looking carrier whose socket cannot be compared is never foreign.
+	own := ServerIdentity{Socket: sock, PID: 4242, StartID: 1, SessionID: "$7"}
+	require.Equal(t, serverVerdictUndecidable,
+		tmuxEnvServerVerdict(sock+",4242,3", own, ""))
 }

@@ -263,19 +263,24 @@ func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
 func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, error) {
 	// A restore pass primes one server-wide listing (#6423): a session that is in
 	// it answers from there, in place of its own list-panes.
-	if rows, ok := currentSnapshot().paneRows(t.sanitizedName); ok {
-		holds, err := paneRowsHoldRoot(rows, pid, startID)
-		if err == nil && holds {
-			// The same confirmed match the list-panes path stamps below —
-			// the funnel takes the verdict, not the transport (#7484
-			// item 3).
-			t.reconcilePaneRootEvidence(paneRootAnswer{
-				resolved: proctree.Process{PID: pid, StartID: startID},
-			})
-			t.noteServerIdentity(corroboratedServerSocket(
-				serverFromPaneRows(rows), t.serverSocketPID))
+	if snap := currentSnapshot(); snap != nil {
+		if rows, ok := snap.paneRows(t.sanitizedName); ok {
+			holds, err := paneRowsHoldRoot(rows, pid, startID)
+			if err == nil && holds {
+				// The same confirmed match the list-panes path stamps
+				// below — the funnel takes the verdict, not the transport
+				// (#7484 item 3). The socket corroboration comes from the
+				// snapshot's own once-per-capture read, so the restore
+				// batch spends zero subprocesses per session (Codex on
+				// #7469).
+				t.reconcilePaneRootEvidence(paneRootAnswer{
+					resolved: proctree.Process{PID: pid, StartID: startID},
+				})
+				t.noteServerIdentity(corroboratedServerSocket(
+					serverFromPaneRows(rows), snap.serverSocketPID))
+			}
+			return holds, err
 		}
-		return holds, err
 	}
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()

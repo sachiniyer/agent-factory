@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
@@ -157,15 +158,45 @@ func parseTmuxEnvTuple(tmuxEnv string) (socket string, serverPID int, sessionIdx
 	return socket, pid, tmuxEnv[i+1:], true
 }
 
+// socketCompareBudget bounds one carrier-vs-record socket comparison. The
+// compare walks the filesystem — EvalSymlinks, Readlink, a same-dir Stat —
+// and any of those can park on a hung NFS, SMB or FUSE mount when a
+// carrier's env names a socket on remote storage (Codex on #7469). The
+// verdict is computed per candidate in the sweep's critical path, so an
+// unbounded compare there can stall a teardown for good: an expired budget
+// answers "could not compare" — undecidable, never foreign.
+var socketCompareBudget = 2 * time.Second
+
 // sameRecordedSocket compares the carrier's env socket spelling against the
 // recorded one the way the socket-binding code does (#7533): canonicalized
 // kernel-walk equality or the same-directory fallback. comparable is false
-// when either side cannot be made certain — a relative path, a symlink loop —
+// when either side cannot be made certain — a relative path, a symlink loop,
+// or a filesystem read that could not answer inside socketCompareBudget —
 // and nothing may be ruled out from it.
 func sameRecordedSocket(envSocket, recordedSocket string) (same, comparable bool) {
 	if !filepath.IsAbs(envSocket) || !filepath.IsAbs(recordedSocket) {
 		return false, false
 	}
+	type verdict struct{ same, comparable bool }
+	done := make(chan verdict, 1)
+	go func() {
+		s, c := socketCompareWalk(envSocket, recordedSocket)
+		done <- verdict{s, c}
+	}()
+	timer := time.NewTimer(socketCompareBudget)
+	defer timer.Stop()
+	select {
+	case v := <-done:
+		return v.same, v.comparable
+	case <-timer.C:
+		return false, false
+	}
+}
+
+// socketCompareWalk is the unbounded filesystem walk sameRecordedSocket
+// bounds — a package var so the deadline test can stage a compare that never
+// answers.
+var socketCompareWalk = func(envSocket, recordedSocket string) (same, comparable bool) {
 	want, okA := canonicalSocketPath(recordedSocket)
 	got, okB := canonicalSocketPath(envSocket)
 	if !okA || !okB {
