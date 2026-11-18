@@ -245,6 +245,38 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	_, found = dockerEnvArg(runArgs, "HTTP_PROXY")
 	require.False(t, found,
 		"a forwarded-but-unset ordinary name emits no -e — the image's value survives untouched")
+
+	// Byte-identity for the agents without loader-filled names: on a claude
+	// account session GIT_CONFIG_COUNT is not pinned, so a forwarded-but-unset
+	// pair name is just an ordinary forward — no -e, the image's value fills,
+	// exactly as on master.
+	t.Run("claude account keeps master's contract for pair names", func(t *testing.T) {
+		f := newDockerAccountFixture(t, "", "claude", nil)
+		// DefaultConfig auto-detects a host-installed claude into a
+		// ProgramOverrides path — which the account proof rightly refuses —
+		// and the saved file merges over the defaults, so absence cannot
+		// remove it. The behavior under test is agent-class, not resolution:
+		// pin the bare name so the test is hermetic with claude installed.
+		cfg := config.DefaultConfig()
+		cfg.ProgramOverrides = map[string]string{"claude": "claude"}
+		require.NoError(t, config.SaveConfig(cfg))
+		t.Setenv("GIT_CONFIG_KEY_0", "")
+		require.NoError(t, os.Unsetenv("GIT_CONFIG_KEY_0"))
+		var claudeArgs []string
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "run" {
+				claudeArgs = append([]string(nil), args...)
+				return nil, fmt.Errorf("stop after docker run")
+			}
+			return fakeLocalDockerResponse(args)
+		}))
+
+		_, _ = createDockerAccountSession(f, "claude", []string{"GIT_CONFIG_KEY_0"})
+		require.NotEmpty(t, claudeArgs, "the claude account create never reached docker run")
+		_, found := dockerEnvArg(claudeArgs, "GIT_CONFIG_KEY_0")
+		require.False(t, found,
+			"claude pins no GIT_CONFIG_* name — a forwarded-but-unset pair emits no -e, master's behavior")
+	})
 }
 
 // #7555: gemini's keep-if-set names — and the indexed git-config pair prefixes

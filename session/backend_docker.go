@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -791,58 +790,6 @@ func (p *dockerProvisioner) runContainer() error {
 	}
 	p.containerID = id
 	return nil
-}
-
-func (p *dockerProvisioner) containerEnvironmentNames() []string {
-	source := os.Environ()
-	names := sessionenv.DockerForwardNames(source, p.agentName(), p.spec.SessionEnvPassthrough)
-	// A forwarded proxy spelling claims its case twin too: emit the twin so the
-	// image's value for it cannot survive (the twin resolves to the forwarded
-	// value through dockerEnvironment's synthesized entries). Scoped to the
-	// credential-mount path — the normalization is part of the pins'
-	// contract, and an account or plain session's env stays byte-identical
-	// to before (#7529 R8).
-	if len(p.credentialMounts) > 0 {
-		twins, _ := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, source)
-		if len(twins) > 0 {
-			names = append(names, twins...)
-			sort.Strings(names)
-		}
-	}
-	if p.spec.Account.Dir != "" {
-		// A loader-filled name the operator forwarded but did not set must
-		// still blank the image's value for it: -e admits the name through the
-		// wrap's passthrough extras, and an image ENV value that survived would
-		// reach ScopeAgentServerAccount reading exactly like the operator's
-		// claim (#7555). The indexed pair names get the same treatment because
-		// a forwarded GIT_CONFIG_COUNT animates whatever GIT_CONFIG_KEY_* or
-		// GIT_CONFIG_VALUE_* the image declared (#7582 review). Every other
-		// forwarded name keeps master's contract: unset in the daemon env means
-		// no -e at all, so the image's own value stands — blanking those would
-		// eat legitimate image-supplied values like proxy or locale settings.
-		present := make(map[string]struct{}, len(source))
-		for _, entry := range source {
-			if name, _, ok := strings.Cut(entry, "="); ok {
-				present[name] = struct{}{}
-			}
-		}
-		loaderNames := make(map[string]struct{})
-		for _, name := range sessionenv.AccountLoaderFilledNames(p.spec.Account.Agent) {
-			loaderNames[name] = struct{}{}
-		}
-		for _, name := range p.spec.SessionEnvPassthrough {
-			if _, ok := present[name]; ok {
-				continue
-			}
-			if _, loader := loaderNames[name]; !loader &&
-				!strings.HasPrefix(name, "GIT_CONFIG_KEY_") &&
-				!strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
-				continue
-			}
-			names = append(names, name+"=")
-		}
-	}
-	return names
 }
 
 // docker runs `docker <args...>` with a timeout and returns its combined output.
