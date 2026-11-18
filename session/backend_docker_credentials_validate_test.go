@@ -551,10 +551,11 @@ func TestDockerCredentialRunArgs_PerAgentDeniedTablesStayInsideTheAllowlist(t *t
 }
 
 // TestDockerCredentialRunArgs_PerAgentAllowlistIsClassified is part two of the
-// cross-map pin, now over the WHOLE mount roster (#7526 item 5): every name in
-// a mountable agent's reachable surface — its per-agent allowlist plus the
-// conditional cloud groups a selector unlocks — must be classified either as
-// denied on this path or as deliberately-kept deployment config. Without this
+// cross-map pin, now over the WHOLE mount roster (#7526 item 5, #7531): every
+// name in a mountable agent's reachable surface — its per-agent allowlist, the
+// conditional cloud groups a selector unlocks, AND the common allowlist every
+// agent shares — must be classified either as denied on this path or as
+// deliberately-kept deployment config. Without this
 // the denied list rots silently — a credential added to agentNames later
 // would keep passing through unopposed the way OPENCODE_CONFIG_CONTENT did
 // before #4454's fix — while the per-name refusal tests stayed green because
@@ -564,17 +565,19 @@ func TestDockerCredentialRunArgs_PerAgentAllowlistIsClassified(t *testing.T) {
 		denied := credentialMountDeniedNames(agent)
 		require.NotEmpty(t, denied,
 			"agent %q: every mountable agent must have a non-empty denied set (the shared names alone guarantee it)", agent)
-		reachable := sortedNamesToSet(append(
+		reachable := sortedNamesToSet(append(append(
 			sessionenv.AgentAllowlistNames(agent),
-			sessionenv.AgentConditionalNames(agent)...))
+			sessionenv.AgentConditionalNames(agent)...),
+			sessionenv.CommonAllowlistNames()...))
 		for name := range reachable {
 			_, isDenied := denied[name]
 			_, isKept := credentialMountKeptNames[agent][name]
-			require.Truef(t, isDenied || isKept,
+			_, isSharedKept := credentialMountSharedKeptNames[name]
+			require.Truef(t, isDenied || isKept || isSharedKept,
 				"agent %q: %s is reachable for the agent but classified neither as refused nor as kept deployment config; "+
 					"an unclassified credential or route passes through unopposed",
 				agent, name)
-			require.Falsef(t, isDenied && isKept,
+			require.Falsef(t, isDenied && (isKept || isSharedKept),
 				"agent %q: %s is classified both as denied and as kept", agent, name)
 		}
 	}

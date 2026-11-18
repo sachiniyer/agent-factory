@@ -239,9 +239,15 @@ user's real home and mounts it only if it exists, so:
     route the mounted credential — API keys and tokens, inline-config names
     like `OPENCODE_CONFIG_CONTENT`, config roots like `CODEX_HOME` and
     `OPENCODE_CONFIG_DIR`, endpoints and base URLs, proxies and CA bundles,
-    `HOME`/`XDG_*`, `SHELL`, GitHub token and SSH-agent names — plus the
-    program-choice names `PATH`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`, for every
-    agent in the mount table above. These boundaries enforce it:
+    `HOME`/`XDG_*`, `SHELL`, GitHub token and SSH-agent names, `GH_HOST`,
+    `DBUS_SESSION_BUS_ADDRESS`, gpg's keyring and agent names, git's config
+    roots and credential-answer programs (`GIT_CONFIG_*`, `GIT_SSH*`/
+    `GIT_ASKPASS`/`SSH_ASKPASS`), editor/pager names, af's own state and tmux
+    names (`AF_*`, `AGENT_FACTORY_*`, `TMUX*`), and the endpoint names an
+    agent's own `.env` loader can restore after the boundary (gemini's
+    `CODE_ASSIST_*` and `GOOGLE_*_BASE_URL`) — plus the program-choice names
+    `PATH`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`, for every agent in the mount
+    table above. These boundaries enforce it:
 
     - At `docker run`: `docker.run_args` entries naming one are **refused**
       before the container starts — including `PATH`, `LD_PRELOAD`, and
@@ -252,11 +258,14 @@ user's real home and mounts it only if it exists, so:
       and a workspace loader that fills only unset names find it already set
       to nothing. (Measured: gemini's workspace `.env` supplied
       `GEMINI_API_KEY` only when the name was unset; defined-and-empty
-      survived the `.env`.) `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` are
-      re-asserted to the mount's real roots, `SHELL` to `/bin/sh`, and `PATH`
-      to the image's own `Config.Env` `PATH` — so tmux's `default-shell -c`
-      chain, af's own execs, and the agent's bare executable all resolve
-      through the image's binaries, never a repo-added directory.
+      survived the `.env`.) `HOME` and the `XDG_*` roots are re-asserted to
+      the mount's real roots, `SHELL` to `/bin/sh`, `PATH` to the image's own
+      `Config.Env` `PATH`, and — for gemini, whose `.env` loader fills only
+      unset names but treats a defined-empty endpoint as real —
+      `CODE_ASSIST_ENDPOINT` to its first-party default — so tmux's
+      `default-shell -c` chain, af's own execs, the agent's bare executable,
+      and the agent's endpoint choice all resolve through first-party
+      values, never a repo-added one.
     - In af's own `docker exec` steps: every one names `/bin/sh` by absolute
       path, so the container's `PATH` — whatever it is — cannot hand af a
       repo-written `sh` to intercept the agent-server launch. Commands
@@ -287,9 +296,13 @@ user's real home and mounts it only if it exists, so:
     a corporate `HTTPS_PROXY`, a private CA bundle, a private-cloud
     `OPENAI_BASE_URL` — af now blanks it and logs a **WARNING once per
     session** naming each blanked variable (names only, never values) with the
-    remedy: forward the name through `session_env_passthrough`. A repo-set
-    `docker.run_args` entry for one is refused outright with the same remedy in
-    the error.
+    remedy: forward the name through `session_env_passthrough`. The image side
+    of that warning is read off the image the container actually runs —
+    resolved after `docker run` — not the configured tag's pre-run metadata,
+    which may name a different image than the one that just pulled; if it
+    cannot be inspected, the warning says so and covers `docker.run_args`
+    names only. A repo-set `docker.run_args` entry for one is refused outright
+    with the same remedy in the error.
 
     **What still trusts the image and the repo.** The pins cover the
     *environment boundary only*, and only the classified names. The repo chose

@@ -350,18 +350,38 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		// needs it forwarded through session_env_passthrough.
 		if len(p.credentialMounts) > 0 {
 			p.credentialEnvPins = credentialMountPinnedNames(p.agentName(), p.spec.SessionEnvPassthrough)
-			if blanked := credentialMountBlankedWarning(p.dockerImageEnvNames(), runArgs, p.credentialEnvPins); len(blanked) > 0 {
-				log.WarningLog.Printf(
-					"backend=docker: docker.mount_agent_credentials blanked %d env name(s) the image or docker.run_args had set for agent %q: %s — forward any the session needs through the global session_env_passthrough",
-					len(blanked), p.agentName(), strings.Join(blanked, ", "))
-			}
 		}
 	}
 	res, err := p.provision()
 	if err != nil {
 		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
+	p.warnBlankedCredentialNames()
 	return res, nil
+}
+
+// warnBlankedCredentialNames emits the once-per-session migration warning
+// for the classified names the image or docker.run_args had actually set —
+// names only, values never inspected (#7526). It runs after the container
+// exists because the image side of the warning must describe the image the
+// container ACTUALLY runs — resolved off the created container — not
+// whatever the configured tag inspected as before `docker run` pulled or
+// updated it (#7531). When that inspect fails, say so and warn over run_args
+// names alone; the pins are already in argv either way.
+func (p *dockerProvisioner) warnBlankedCredentialNames() {
+	if len(p.credentialMounts) == 0 {
+		return
+	}
+	imageEnv, ok := p.dockerContainerImageEnv()
+	if !ok {
+		log.WarningLog.Printf(
+			"backend=docker: docker.mount_agent_credentials could not inspect the environment of the image the container runs — the blanked-env warning covers docker.run_args names only")
+	}
+	if blanked := credentialMountBlankedWarning(imageEnv, p.runArgs, p.credentialEnvPins); len(blanked) > 0 {
+		log.WarningLog.Printf(
+			"backend=docker: docker.mount_agent_credentials blanked %d env name(s) the image or docker.run_args had set for agent %q: %s — forward any the session needs through the global session_env_passthrough",
+			len(blanked), p.agentName(), strings.Join(blanked, ", "))
+	}
 }
 
 // dockerProvisioner holds the state of one container provisioning so its steps
@@ -638,6 +658,8 @@ func (p *dockerProvisioner) runContainer() error {
 			"-e", "HOME="+home,
 			"-e", "XDG_DATA_HOME="+home+"/.local/share",
 			"-e", "XDG_CONFIG_HOME="+home+"/.config",
+			"-e", "XDG_CACHE_HOME="+home+"/.cache",
+			"-e", "XDG_STATE_HOME="+home+"/.local/state",
 		)
 		// tmux runs each pane command as $default-shell -c …, and default-shell
 		// comes from SHELL in the client environment. A repo-chosen SHELL (image
@@ -666,6 +688,16 @@ func (p *dockerProvisioner) runContainer() error {
 			if imagePATH := credentialMountImagePATH(p.dockerImageEnv()); imagePATH != "" {
 				args = append(args, "-e", "PATH="+imagePATH)
 			}
+		}
+		// Late-loaded endpoint names whose agent treats defined-empty as a
+		// real value rather than falling back to its default (gemini reads
+		// CODE_ASSIST_ENDPOINT with a nullish coalesce): pinning them empty
+		// would break the endpoint, so af re-asserts the first-party default
+		// after run_args — the .env loader sees a defined name and a repo
+		// value is dominated by last-wins (#7531). Operator-forwarded names
+		// keep the operator's value.
+		for _, entry := range credentialMountFirstPartyEntries(p.agentName(), p.spec.SessionEnvPassthrough) {
+			args = append(args, "-e", entry)
 		}
 	}
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")

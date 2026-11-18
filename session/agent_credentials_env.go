@@ -19,30 +19,48 @@ import (
 // defined-and-empty after run_args, and the provisioning warning names the ones
 // the image or run_args had actually set.
 //
-// Three classes of name are classified per mountable agent, then denied to
-// repo run_args and pinned empty for non-operator sources:
+// Names are classified per mountable agent, then denied to repo run_args and
+// pinned empty for non-operator sources, in these classes:
 //
 //   - identity: a credential that substitutes for or outranks the mounted
 //     file — API keys and tokens, inline-config-content names, cloud-mode
 //     auth selectors, and the conditional cloud-credential groups they unlock.
 //   - config-root: a name that relocates where the agent reads its credential
 //     or config — CODEX_HOME, CLAUDE_CONFIG_DIR, OPENCODE_CONFIG{,_DIR} — plus
-//     the HOME/XDG names af re-asserts to real values rather than blanking.
+//     the HOME/XDG names af re-asserts to real values rather than blanking,
+//     and the shared names that relocate credential-bearing state (git's
+//     config files, the GnuPG home, the runtime dir sockets resolve under,
+//     af's own home).
 //   - routing: a name that changes WHERE the agent sends the credential —
 //     base URLs and endpoints, proxies, and CA bundles / trust roots.
+//   - program-choice: a name that selects a program af's tools or the agent
+//     run in the container — the askpass and GIT_SSH commands git spawns to
+//     answer credential prompts, the editor/pager programs, and the tmux
+//     names that select a server af execs into.
+//   - late-loaded: a name the agent's own loader can restore from a
+//     repository file after af's boundary runs. gemini walks up from the
+//     workspace applying <dir>/.gemini/.env and <dir>/.env fill-if-unset, so
+//     names af never passes are still reachable inside the container: the
+//     falsy-safe endpoint names are pinned defined-and-empty like the rest
+//     of the denied set, while CODE_ASSIST_ENDPOINT is read with a nullish
+//     coalesce that treats empty as a real endpoint, so af re-asserts its
+//     first-party default instead.
 //
-// The shared credential and routing sets apply to every rostered agent: they
-// are common-allowlist names (internal/sessionenv/sessionenv.go), so they are
-// reachable for every agent, and a GitHub token or a corporate proxy name set
-// by an image is a credential or a route exactly as much as a per-agent name.
+// The shared credential, routing, config-root, program-choice, and af-state
+// sets apply to every rostered agent: they are common-allowlist names
+// (internal/sessionenv/sessionenv.go), so they are reachable for every
+// agent, and a GitHub token or a corporate proxy name set by an image is a
+// credential or a route exactly as much as a per-agent name.
 //
 // Every name in a mountable agent's reachable surface — its per-agent
-// allowlist, its conditional groups, and the shared common names above — must
-// land in exactly one of: denied (classified), kept (deliberately allowed,
-// recorded with the reason), or unreachable (absent from the surface). The
-// roster-iterating test in backend_docker_credentials_validate_test.go pins
-// that completeness, so a newly mountable agent cannot arrive without a
-// refused set — the hand-maintained-table failure this replaces (#7526 item 5).
+// allowlist, its conditional groups, the shared common names above, and the
+// agent's late-loaded names — must land in exactly one of: denied
+// (classified), kept (deliberately allowed, recorded with the reason), or
+// unreachable (absent from the surface). The roster-iterating test in
+// backend_docker_credentials_validate_test.go pins that completeness, so a
+// newly mountable agent or common-allowlist name cannot arrive without a
+// classification — the hand-maintained-table failure this replaces
+// (#7526 item 5, #7531).
 
 // credentialMountSharedCredentialNames are common-allowlist names that carry
 // an identity for tools the agent runs — not the mounted file's own format,
@@ -56,6 +74,12 @@ var credentialMountSharedCredentialNames = map[string]struct{}{
 	"GITHUB_ENTERPRISE_TOKEN": {},
 	"SSH_AUTH_SOCK":           {},
 	"SSH_AGENT_PID":           {},
+	// GPG_AGENT_INFO points gpg and its agents at an agent socket — the same
+	// identity-substitution mechanism as SSH_AUTH_SOCK.
+	"GPG_AGENT_INFO": {},
+	// AF_DAEMON_TOKEN is af's own credential for the daemon API; a repo- or
+	// image-supplied value is an identity af would present.
+	"AF_DAEMON_TOKEN": {},
 }
 
 // credentialMountSharedRoutingNames are common-allowlist names that change
@@ -78,6 +102,15 @@ var credentialMountSharedRoutingNames = map[string]struct{}{
 	"REQUESTS_CA_BUNDLE":  {},
 	"CURL_CA_BUNDLE":      {},
 	"GH_CONFIG_DIR":       {},
+	// GH_HOST selects the host gh sends API requests — and any forwarded
+	// GH_TOKEN — to. A repo-chosen host receives the credential (#7531).
+	"GH_HOST": {},
+	// DBUS_SESSION_BUS_ADDRESS routes keyring requests to a chosen bus —
+	// the secret store several agents keep session material under.
+	"DBUS_SESSION_BUS_ADDRESS": {},
+	// AF_DAEMON_URL selects the daemon af's own API calls go to; paired with
+	// a repo-chosen AF_DAEMON_TOKEN it is a complete route for af's identity.
+	"AF_DAEMON_URL": {},
 }
 
 // credentialMountReassertedNames are config-root names af does not blank but
@@ -99,8 +132,65 @@ var credentialMountReassertedNames = map[string]struct{}{
 	"HOME":            {},
 	"XDG_DATA_HOME":   {},
 	"XDG_CONFIG_HOME": {},
-	"SHELL":           {},
-	"PATH":            {},
+	// XDG_CACHE_HOME/XDG_STATE_HOME are the remaining XDG roots: re-asserted
+	// to the session home's defaults like their siblings so a repo cannot
+	// relocate where the agent's cache and state land (#7531).
+	"XDG_CACHE_HOME": {},
+	"XDG_STATE_HOME": {},
+	"SHELL":          {},
+	"PATH":           {},
+}
+
+// credentialMountSharedConfigRootNames are common-allowlist names that
+// relocate where a tool reads credential-bearing state: git's config files
+// (which can set credential.helper, http.* endpoints, and sslCAInfo),
+// gpg's keyring root, and the runtime directory agent/keyring sockets are
+// discovered under. A repo-chosen value redirects the lookup somewhere the
+// repo writes.
+var credentialMountSharedConfigRootNames = map[string]struct{}{
+	"GIT_CONFIG_GLOBAL":   {},
+	"GIT_CONFIG_SYSTEM":   {},
+	"GIT_CONFIG_NOSYSTEM": {},
+	"GNUPGHOME":           {},
+	"XDG_RUNTIME_DIR":     {},
+}
+
+// credentialMountSharedProgramNames are common-allowlist names that select a
+// PROGRAM af's tools or the agent run inside the container — the same class
+// as SHELL/PATH. git spawns the askpass and GIT_SSH commands to answer
+// credential prompts, so a repo-chosen value runs a repository binary that
+// receives the credential question; EDITOR/VISUAL/PAGER run whenever a tool
+// opens one. They are pinned defined-and-empty: an unset askpass or editor
+// falls back to the tool's own default, which no repository file reaches.
+var credentialMountSharedProgramNames = map[string]struct{}{
+	"GIT_SSH":         {},
+	"GIT_SSH_COMMAND": {},
+	"GIT_ASKPASS":     {},
+	"SSH_ASKPASS":     {},
+	"EDITOR":          {},
+	"VISUAL":          {},
+	"PAGER":           {},
+}
+
+// credentialMountSharedAFStateNames are af's own state and control-plane
+// names in the common allowlist: af's home and session markers, its
+// auto-update toggle, and the tmux names that select which server af's
+// in-container client execs into. A repo- or image-supplied value relocates
+// af's state directory, falsifies session membership, or points af's tmux
+// calls at a server the image controls — none of which a non-operator source
+// may choose on the path that mounts the operator's credential. af's own
+// in-container programs take their configuration from argv, not the
+// container environment, so pinning them defined-and-empty leaves af
+// unaffected.
+var credentialMountSharedAFStateNames = map[string]struct{}{
+	"AF_HOME":                   {},
+	"AGENT_FACTORY_HOME":        {},
+	"AGENT_FACTORY_AUTO_UPDATE": {},
+	"AF_SESSION":                {},
+	"AF_SESSION_GEN":            {},
+	"TMUX":                      {},
+	"TMUX_PANE":                 {},
+	"TMUX_TMPDIR":               {},
 }
 
 // credentialMountProgramLoaderNames are names that choose which CODE the
@@ -189,6 +279,86 @@ var credentialMountRoutingNames = map[string]map[string]struct{}{
 	},
 }
 
+// credentialMountLateRoutingNames are routing names the agent's OWN late
+// loader can restore from a repository file after af's environment boundary
+// runs — so they are reachable for the agent even though af's filter never
+// passes them (they are not in any per-agent allowlist, by design: passing
+// them through is exactly what a repository abuses). gemini walks up from
+// the workspace applying <dir>/.gemini/.env and <dir>/.env fill-if-unset —
+// measured in internal/sessionenv/account.go — so a checked-in .env can name
+// the base URL the session's OAuth traffic goes to unless the name is
+// already defined. af pins them defined-and-empty like the rest of the
+// denied set: gemini-cli reads each through a truthy check
+// (if (process.env[NAME]) / envBaseUrl || default), so an empty string is
+// the same as unset for its own endpoint selection while the .env loader
+// treats the defined name as claimed (#7531).
+var credentialMountLateRoutingNames = map[string]map[string]struct{}{
+	tmux.ProgramGemini: {
+		// API-key / gateway mode base URL. A truthy value also flips
+		// getAuthTypeFromEnv to GATEWAY, which is why the pin is empty
+		// rather than a first-party value: defining the real default
+		// would change auth detection for operators who never set it.
+		"GOOGLE_GEMINI_BASE_URL": {},
+		// Vertex AI base URL — same truthy read, falsy-safe empty.
+		"GOOGLE_VERTEX_BASE_URL": {},
+		// Code Assist API version selector: read with || so empty falls
+		// back to the compiled default.
+		"CODE_ASSIST_API_VERSION": {},
+	},
+}
+
+// credentialMountFirstPartyNames are late-loaded endpoint names af cannot
+// pin empty because the agent treats an empty value as REAL configuration:
+// gemini reads CODE_ASSIST_ENDPOINT with a nullish coalesce
+// (process.env[NAME] ?? compiled default), so a defined-empty value becomes
+// the endpoint and every Code Assist call fails. Instead af re-asserts the
+// name to its first-party default — the same constant the CLI compiles in —
+// after run_args, so the .env loader sees a defined name, a repo value is
+// dominated by Docker's last-wins rule, and an operator's own value still
+// wins through session_env_passthrough (#7531).
+var credentialMountFirstPartyNames = map[string]map[string]string{
+	tmux.ProgramGemini: {
+		// gemini-cli's compiled Code Assist endpoint
+		// (packages/core/src/code_assist/server.ts).
+		"CODE_ASSIST_ENDPOINT": "https://cloudcode-pa.googleapis.com",
+	},
+}
+
+// credentialMountSharedKeptNames records the COMMON-allowlist names
+// deliberately left unclassified — reviewed names that neither bear nor
+// route the mounted credential, for every agent: display and locale
+// metadata, terminal capabilities, temp paths, commit authorship, and the
+// names whose only effect rides on a denied sibling (GIT_SSH_VARIANT only
+// modulates how git parses GIT_SSH_COMMAND, which is denied; GH_REPO scopes
+// gh's resource, while its endpoint names are denied). The completeness pin
+// walks the common allowlist and uses this to tell "reviewed and kept" from
+// "forgotten", the same job credentialMountKeptNames does per agent (#7531).
+var credentialMountSharedKeptNames = map[string]struct{}{
+	// Identity display and locale — no credential or route.
+	"USER": {}, "LOGNAME": {},
+	"LANG": {}, "LANGUAGE": {}, "TZ": {},
+	// Terminal capability metadata — display, not a credential or route.
+	"TERM": {}, "COLORTERM": {}, "TERMINFO": {}, "TERMINFO_DIRS": {},
+	"NO_COLOR": {}, "CLICOLOR": {}, "CLICOLOR_FORCE": {}, "FORCE_COLOR": {},
+	// Temp-directory hints — a scratch path, not a credential root or route.
+	"TMPDIR": {}, "TMP": {}, "TEMP": {},
+	// PWD is a working-directory hint set by shells, not a lookup root the
+	// credential resolution reads.
+	"PWD": {},
+	// pinentry's tty hint — display, not a socket or credential.
+	"GPG_TTY": {},
+	// Commit authorship metadata — attribution, not authentication or
+	// routing.
+	"GIT_AUTHOR_NAME": {}, "GIT_AUTHOR_EMAIL": {},
+	"GIT_COMMITTER_NAME": {}, "GIT_COMMITTER_EMAIL": {},
+	// Selects the repository gh operates on — a resource scope, not the
+	// endpoint the token is sent to (GH_HOST is denied).
+	"GH_REPO": {},
+	// Only modulates how git parses GIT_SSH_COMMAND, which is denied —
+	// alone it chooses no program.
+	"GIT_SSH_VARIANT": {},
+}
+
 // credentialMountKeptNames records, per mountable agent, the allowlisted names
 // deliberately left unclassified — reviewed deployment configuration that
 // neither bears nor routes the mounted credential. The completeness pin uses
@@ -239,11 +409,18 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 	addList(sessionenv.AgentConditionalNames(agent))
 	add(credentialMountSharedCredentialNames)
 	add(credentialMountSharedRoutingNames)
+	add(credentialMountSharedConfigRootNames)
+	add(credentialMountSharedProgramNames)
+	add(credentialMountSharedAFStateNames)
 	add(credentialMountReassertedNames)
 	add(credentialMountProgramLoaderNames)
 	add(credentialMountIdentityEnvNames[agent])
 	add(credentialMountConfigRootNames[agent])
 	add(credentialMountRoutingNames[agent])
+	add(credentialMountLateRoutingNames[agent])
+	for name := range credentialMountFirstPartyNames[agent] {
+		denied[name] = struct{}{}
+	}
 	return denied
 }
 
@@ -267,6 +444,15 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	if _, ok := credentialMountSharedRoutingNames[name]; ok {
 		return "it changes where the agent sends the mounted credential", true
 	}
+	if _, ok := credentialMountSharedConfigRootNames[name]; ok {
+		return "it can redirect where the agent reads credential-bearing state", true
+	}
+	if _, ok := credentialMountSharedProgramNames[name]; ok {
+		return "it chooses which program af's tools or the agent run in the container", true
+	}
+	if _, ok := credentialMountSharedAFStateNames[name]; ok {
+		return "it relocates af's own state or falsifies af's session and tool selection", true
+	}
 	if _, ok := credentialMountIdentityEnvNames[agent][name]; ok {
 		return "it can substitute the credential af mounts read-only", true
 	}
@@ -275,6 +461,12 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	}
 	if _, ok := credentialMountRoutingNames[agent][name]; ok {
 		return "it changes where the agent sends the mounted credential", true
+	}
+	if _, ok := credentialMountLateRoutingNames[agent][name]; ok {
+		return "it changes where the agent sends the mounted credential, and the agent's own .env loader can restore it after af's boundary", true
+	}
+	if _, ok := credentialMountFirstPartyNames[agent][name]; ok {
+		return "af re-asserts the agent's first-party endpoint after run_args so the agent's .env loader sees a defined name", true
 	}
 	if configVar, ok := sessionenv.SupportsAccounts(agent); ok && configVar == name {
 		return "it can redirect where the agent reads the mounted credential", true
@@ -394,6 +586,12 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 		if _, loader := credentialMountProgramLoaderNames[name]; loader {
 			continue
 		}
+		// The first-party names take their real default value, not an empty
+		// pin: the agents that read them treat defined-empty as a real
+		// endpoint rather than falling back.
+		if _, firstParty := credentialMountFirstPartyNames[agent][name]; firstParty {
+			continue
+		}
 		if _, ok := forwarded[name]; ok {
 			continue
 		}
@@ -479,27 +677,64 @@ func dockerRunArgsEnvNames(args []string) []string {
 	return names
 }
 
-// dockerImageEnvNames runs `docker image inspect` for the session's image and
-// returns the names in its Config.Env — for the blanked-name warning only. A
-// failure to inspect returns nil: the warning is best-effort, and the mount
-// path's own guards do not depend on it.
-func (p *dockerProvisioner) dockerImageEnvNames() []string {
-	env := p.dockerImageEnv()
-	names := make([]string, 0, len(env))
-	for _, entry := range env {
-		if name, _, ok := strings.Cut(entry, "="); ok {
-			names = append(names, name)
-		}
+// credentialMountFirstPartyEntries returns the sorted NAME=value re-asserts
+// runContainer emits after run_args for the agent's first-party endpoint
+// names — the names af cannot pin empty because the agent reads a defined
+// empty value as real configuration. A name the operator forwards is
+// skipped: their forwarded -e NAME already carries their approved value.
+func credentialMountFirstPartyEntries(agent string, passthrough []string) []string {
+	forwarded := make(map[string]struct{}, len(passthrough))
+	for _, name := range passthrough {
+		forwarded[name] = struct{}{}
 	}
-	return names
+	out := make([]string, 0, len(credentialMountFirstPartyNames[agent]))
+	for name, value := range credentialMountFirstPartyNames[agent] {
+		if _, ok := forwarded[name]; ok {
+			continue
+		}
+		out = append(out, name+"="+value)
+	}
+	sort.Strings(out)
+	return out
 }
 
-// dockerImageEnv runs `docker image inspect` for the session's image and
-// returns its Config.Env as NAME=value entries — the source for the PATH
-// re-assertion (runContainer reads the value) and for dockerImageEnvNames
-// (the warning reads the names). A failure to inspect returns nil: both
-// readers are best-effort layers on top of the run_args refusal, and the
-// mount path's own guards do not depend on them.
+// dockerContainerImageEnv reads the Config.Env of the image the container
+// ACTUALLY runs: the image reference resolved off the created container,
+// then inspected — not whatever p.image's tag inspected as before docker
+// run, which may have pulled a newer image or never existed locally (#7531).
+// The bool reports whether the environment could be read; the blanked-name
+// warning degrades to run_args names and says so when it could not.
+func (p *dockerProvisioner) dockerContainerImageEnv() ([]string, bool) {
+	ref, err := p.docker(dockerShortStepTimeout,
+		"inspect", p.containerID, "--format", "{{.Image}}")
+	if err != nil {
+		return nil, false
+	}
+	image := strings.TrimSpace(string(ref))
+	if image == "" {
+		return nil, false
+	}
+	out, err := p.docker(dockerShortStepTimeout,
+		"image", "inspect", image, "--format", "{{json .Config.Env}}")
+	if err != nil {
+		return nil, false
+	}
+	var env []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &env); err != nil {
+		return nil, false
+	}
+	return env, true
+}
+
+// dockerImageEnv runs `docker image inspect` for the session's CONFIGURED
+// image and returns its Config.Env as NAME=value entries — the source for
+// the PATH re-assertion, which must be computed before docker run fixes the
+// argv. A failure to inspect returns nil: it is a best-effort layer on top
+// of the run_args refusal, and the mount path's own guards do not depend on
+// it. The blanked-name warning deliberately does NOT use this: it reads the
+// image the container actually runs through dockerContainerImageEnv, because
+// a pre-run tag inspect can resolve to a different (or no) image than the
+// one docker run pulls (#7531).
 func (p *dockerProvisioner) dockerImageEnv() []string {
 	out, err := p.docker(dockerShortStepTimeout,
 		"image", "inspect", p.image, "--format", "{{json .Config.Env}}")

@@ -659,6 +659,20 @@ func AgentAllowlistNames(agent string) []string {
 	return out
 }
 
+// CommonAllowlistNames returns every name in the common allowlist — the
+// shared boundary names admitted for every agent before per-agent or
+// passthrough names are considered, sorted. Surfaces that must classify the
+// whole reachable surface (the credential-mount completeness pin) enumerate
+// it rather than keep a copy: the copy is what rots (#7531).
+func CommonAllowlistNames() []string {
+	out := make([]string, 0, len(commonNames))
+	for name := range commonNames {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // AgentConditionalNames returns every name in the agent's conditional
 // cloud-credential groups — the names a selector unlocks, not the selectors
 // themselves. Container provisioners neutralizing an image environment need
