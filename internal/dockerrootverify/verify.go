@@ -257,7 +257,14 @@ func checkWriteDest(spec string, points []string) string {
 func resolveVerified(p string, points []string, depth int) (resolved string, missingFrom string, err error) {
 	resolved = "/"
 	for _, c := range strings.Split(p, "/") {
-		if c == "" || c == "." {
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			// Kernel order: ".." steps off the RESOLVED prefix, never the
+			// lexical one — a symlink earlier in the chain moves where the
+			// parent lookup lands (#7607 review).
+			resolved = path.Dir(resolved)
 			continue
 		}
 		cand := path.Join(resolved, c)
@@ -283,7 +290,11 @@ func resolveVerified(p string, points []string, depth int) (resolved string, mis
 			return "", "", fmt.Errorf("cannot read the link %s: %w", cand, rerr)
 		}
 		if !path.IsAbs(tgt) {
-			tgt = path.Join(path.Dir(cand), tgt)
+			// Append the raw target to the link's own directory without
+			// lexical cleaning: the walk must meet each ".." in kernel
+			// order — a ".." past a symlink component lands on the
+			// resolved prefix's parent, which cleaning would erase.
+			tgt = resolved + "/" + tgt
 		}
 		hop, hmiss, herr := resolveVerified(tgt, points, depth+1)
 		if herr != nil {

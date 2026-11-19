@@ -38,7 +38,7 @@ func dockerNonAccountProvisionFixture(t *testing.T, image string) string {
 		"docker":  map[string]any{"image": image},
 	})
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
-	t.Cleanup(SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af")))
+	t.Cleanup(SetDockerSelfBinaryForTest(stagingBinarySource(t)))
 	return repo
 }
 
@@ -281,10 +281,13 @@ func TestDockerProvision_NonAccount_NonRootImage_Provisions(t *testing.T) {
 	require.Contains(t, strings.Join(gitClone, " "), shellQuote(dockerWorkspaceDir),
 		"cloneWorkspace clones into /workspace; call=%v", gitClone)
 
-	// chmod of the copied `af` binary runs as root (0:0): docker cp lands the
-	// binary root-owned, and a non-root user cannot chmod a root-owned file.
-	chmod := findExecCall(calls, "--user 0:0", "chmod +x")
-	require.NotNil(t, chmod, "copyAfBinary's chmod must run as root; calls=%v", calls)
+	// The in-container verifier exec runs as root (0:0): no chmod exec exists
+	// anymore — delivery is a bind or a cp of a mode-pinned temp file, and a
+	// pre-verification chmod would be an unverified image program (#7607).
+	verify := findExecCall(calls, "--user 0:0", "__docker-root-verify")
+	require.NotNil(t, verify, "the root-exec verifier must run as root; calls=%v", calls)
+	require.Nil(t, findExecCall(calls, "-c", "chmod "),
+		"no image-program chmod may run; calls=%v", calls)
 
 	// The detached agent-server runs as the image's default user with HOME=/root
 	// (the same writable security context that wrote the banner), not as root
@@ -318,10 +321,11 @@ func TestDockerProvision_NonAccount_NonRootImage_Provisions(t *testing.T) {
 //     the operator set via run_args (docker exec -e wins over the container's
 //     configured env) — the second regression this early return prevents.
 //
-// The one exec that still carries --user is execSh's `chmod +x` of the copied
-// `af` binary: docker cp lands it root-owned so only root can chmod it, which
-// non-root images require — and on a root-default image running as 0:0 is the
-// same user the image default resolves to anyway.
+// The execs that still carry --user are the root-exec verifier and the
+// mount-table read (0:0): the verifier must see the container's real mount
+// table, and the chmod the cp path used to run no longer exists — delivery
+// is a bind or a cp of a mode-pinned temp file, and a pre-verification
+// chmod would be an unverified image program (#7607 review).
 func TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged(t *testing.T) {
 	repo := dockerNonAccountProvisionFixture(t, "rootdefault/image:latest")
 	var calls [][]string
@@ -334,7 +338,6 @@ func TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged(t *testing.T) {
 	})
 	require.NoError(t, err, "a non-account session on a root-default image must provision; calls=%v", calls)
 
-	var sawChmod bool
 	for _, call := range calls {
 		if len(call) == 0 || call[0] != "exec" {
 			continue
@@ -347,12 +350,8 @@ func TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged(t *testing.T) {
 			"a root-default image must not be chown-prepared — a run_args bind mount at /root or /workspace would re-own host files; call=%v", call)
 		require.NotContainsf(t, joined, "mkdir",
 			"a root-default image must not be chown-prepared — the clone creates /workspace itself, as before; call=%v", call)
-		if strings.Contains(joined, "chmod +x") {
-			sawChmod = true
-			require.Containsf(t, joined, "--user 0:0",
-				"execSh's chmod must run as root — docker cp lands the binary root-owned; call=%v", call)
-			continue
-		}
+		require.NotContainsf(t, joined, "chmod",
+			"no chmod exec exists — delivery is a bind or a mode-pinned cp, and a pre-verification chmod would be an unverified image program (#7607); call=%v", call)
 		for _, arg := range call {
 			require.NotEqualf(t, "--user", arg,
 				"a root-default image must exec as the image's default user, not a forced uid (master behavior); call=%v", call)
@@ -362,7 +361,6 @@ func TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged(t *testing.T) {
 				"a root-default image must not force HOME — a run_args HOME must survive; call=%v", call)
 		}
 	}
-	require.True(t, sawChmod, "copyAfBinary's chmod must still run; calls=%v", calls)
 }
 
 // TestPrepareNonAccountUser_RootDefaultSkipsPreparation pins the unit contract

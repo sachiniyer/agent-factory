@@ -91,27 +91,24 @@ func (p *dockerProvisioner) copyAfBinary() error {
 	}
 	source := p.stagedAfPath
 	if source == "" {
-		source = p.afBin
+		// No staged copy exists — cp the daemon's own binary through a 0755
+		// host temp file so `docker cp` carries an exec'able mode verbatim.
+		// An in-container chmod here would exec an image program as root
+		// before the verifier cleared it (#7607 review).
+		data, err := os.ReadFile(p.afBin)
+		if err != nil {
+			return dockerStepErr(fmt.Errorf("backend=docker: cannot read the af binary %s for container delivery: %w", p.afBin, err), dockerOpLocal)
+		}
+		tmp, err := stageModeCopy(data, 0o755)
+		if err != nil {
+			return dockerStepErr(err, dockerOpLocal)
+		}
+		defer os.Remove(tmp)
+		source = tmp
 	}
 	out, err := p.docker(dockerShortStepTimeout, "cp", source, p.containerID+":"+dockerAfBinaryPath)
 	if err != nil {
 		return fmt.Errorf("backend=docker: copying the af binary into the container failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	if p.stagedAfPath != "" {
-		// The staged copy carries 0755 and cp preserves mode — no chmod.
-		return nil
-	}
-	if out, err := p.execSh(dockerShortStepTimeout, "chmod +x "+shellQuote(dockerAfBinaryPath)); err != nil {
-		// execSh runs as --user 0:0 unconditionally (docker cp lands the
-		// binary root-owned, so only root can chmod it), so the failure is a
-		// root exec regardless of session kind. It is given its own class
-		// (dockerOpChmod) rather than dockerOpRootExec because its single
-		// write root is /usr/local/bin/af — not the home/workspace/account
-		// paths the prepare steps' root execs write — so a chmod failure's
-		// capacity verdict may only be borrowed by a bind covering the
-		// binary, never by an unrelated bind at the home or workspace
-		// (#5424 review).
-		return dockerStepErr(fmt.Errorf("backend=docker: chmod on the copied af binary failed: %s: %w", strings.TrimSpace(string(out)), err), dockerOpChmod)
 	}
 	return nil
 }
@@ -143,23 +140,40 @@ func (p *dockerProvisioner) copyPolicy() error {
 		}
 		return nil
 	}
-	tmp, err := os.CreateTemp("", "af-policy-*.json")
+	tmp, err := stageModeCopy(p.spec.AgentPolicy, 0o644)
 	if err != nil {
-		return dockerStepErr(fmt.Errorf("backend=docker: staging the operator policy failed: %w", err), dockerOpLocal)
+		return dockerStepErr(err, dockerOpLocal)
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(p.spec.AgentPolicy); err != nil {
-		_ = tmp.Close()
-		return dockerStepErr(fmt.Errorf("backend=docker: staging the operator policy failed: %w", err), dockerOpLocal)
-	}
-	if err := tmp.Close(); err != nil {
-		return dockerStepErr(fmt.Errorf("backend=docker: staging the operator policy failed: %w", err), dockerOpLocal)
-	}
-	if out, err := p.docker(dockerShortStepTimeout, "cp", tmp.Name(), p.containerID+":"+dockerPolicyPath); err != nil {
+	defer os.Remove(tmp)
+	if out, err := p.docker(dockerShortStepTimeout, "cp", tmp, p.containerID+":"+dockerPolicyPath); err != nil {
 		return fmt.Errorf("backend=docker: copying the operator policy into the container failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	if out, err := p.execSh(dockerShortStepTimeout, "chmod 644 "+shellQuote(dockerPolicyPath)); err != nil {
-		return dockerStepErr(fmt.Errorf("backend=docker: chmod on the operator policy failed: %s: %w", strings.TrimSpace(string(out)), err), dockerOpChmod)
-	}
 	return nil
+}
+
+// stageModeCopy writes data to a temp file under an exact mode and returns
+// its path: `docker cp` preserves the source mode, so the in-container file
+// lands at mode without an in-container chmod — which on the cp path would
+// be an unverified image program exec'd as root (#7607 review). The caller
+// removes the temp file.
+func stageModeCopy(data []byte, mode os.FileMode) (string, error) {
+	tmp, err := os.CreateTemp("", "af-payload-*")
+	if err != nil {
+		return "", fmt.Errorf("backend=docker: staging the container payload failed: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("backend=docker: staging the container payload failed: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("backend=docker: staging the container payload failed: %w", err)
+	}
+	// CreateTemp applies umask — pin the mode the delivery contract means.
+	if err := os.Chmod(tmp.Name(), mode); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("backend=docker: staging the container payload failed: %w", err)
+	}
+	return tmp.Name(), nil
 }

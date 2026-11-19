@@ -48,6 +48,16 @@ func stagingBinarySource(t *testing.T) string {
 	return p
 }
 
+// forceCpFallback makes staging fail so provision takes the un-staged cp
+// path: the staging root lives under the AF home, which this makes
+// unwritable. afBin must still be a real file — the fallback reads it into a
+// 0755 temp copy so no in-container chmod runs before verification (#7607).
+func forceCpFallback(t *testing.T, afHome string) {
+	t.Helper()
+	require.NoError(t, os.Chmod(afHome, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(afHome, 0o700) })
+}
+
 // stagingDockerAnswers installs a fake docker CLI that records every call into
 // calls. `info` answers the {{json .}} snapshot with engineName (and a
 // rootless SecurityOptions marker when rootless) and any other format with a
@@ -418,18 +428,21 @@ func TestDockerStagingSharingFailureRetriesOnceWithCp(t *testing.T) {
 		"the retried provision delivers via cp; calls=%v", calls)
 }
 
-// TestDockerStagingFallbackChmodsTheUnstagedPayload: when staging itself
-// fails — no staged files at all — the pre-#7577 path runs whole: cp of the
-// daemon binary and the root chmod that makes it exec'able, still behind the
-// mount-table guard.
-func TestDockerStagingFallbackChmodsTheUnstagedPayload(t *testing.T) {
-	stagingTestEnv(t)
+// TestDockerStagingFallbackCopiesTheUnstagedPayload: when staging itself
+// fails — no staged files at all — the fallback still delivers the daemon's
+// own binary by cp, sourced through a 0755 host temp file so `docker cp`
+// carries an exec'able mode with NO in-container chmod: on the cp path that
+// chmod would be an image program exec'd as root before the verifier cleared
+// it (#7607 review).
+func TestDockerStagingFallbackCopiesTheUnstagedPayload(t *testing.T) {
+	home := stagingTestEnv(t)
 	var calls [][]string
 	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+	forceCpFallback(t, home)
 
 	p := &dockerProvisioner{
 		image: "img:latest",
-		afBin: filepath.Join(t.TempDir(), "missing-af"),
+		afBin: stagingBinarySource(t),
 		spec:  ProvisionSpec{Title: "unstaged", CloneURL: "file:///repo"},
 	}
 	_, err := p.provision()
@@ -437,9 +450,10 @@ func TestDockerStagingFallbackChmodsTheUnstagedPayload(t *testing.T) {
 
 	cp := findDockerCall(calls, "cp", dockerAfBinaryPath)
 	require.NotNil(t, cp, "the fallback must still docker cp; calls=%v", calls)
-	require.Equal(t, p.afBin, cp[1], "the unstaged fallback cp's the daemon's own binary")
-	require.NotNil(t, findDockerCall(calls, "exec", "chmod +x"),
-		"an unstaged cp lands root-owned — the chmod is required; calls=%v", calls)
+	require.NotEqual(t, p.afBin, cp[1],
+		"the fallback cp's a 0755 temp copy, never afBin's own mode: %v", cp)
+	require.Nil(t, findDockerCall(calls, "exec", "-c", "chmod "),
+		"no image-program chmod may run before verification; calls=%v", calls)
 	require.NotNil(t, findDockerCall(calls, "inspect"),
 		"the write-target guard inspects the mounts ahead of the fallback cp too; calls=%v", calls)
 	require.NotNil(t, findDockerCall(calls, "exec", "__docker-root-verify"),

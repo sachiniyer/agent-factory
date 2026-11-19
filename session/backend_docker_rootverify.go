@@ -90,16 +90,29 @@ func (p *dockerProvisioner) verifyRootExecPrograms() (dockerRootVerifyOutcome, e
 		dockerrootverify.Arg, dockerrootverify.Protocol}
 	argv = append(argv, checks...)
 	out, err := p.docker(dockerShortStepTimeout, argv...)
-	var fails []string
+	var refusals, delivery []string
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "FAIL") {
-			fails = append(fails, line)
+		if !strings.HasPrefix(line, "FAIL") {
+			continue
+		}
+		// prog/write/mountinfo verdicts are mount-security refusals. A
+		// size or file verdict is a delivery miss — the staged bind
+		// arrived empty or wrong-sized, which the one-shot cp retry was
+		// built for — never a mount to refuse (#7607 review).
+		switch {
+		case strings.HasPrefix(line, "FAIL prog "), strings.HasPrefix(line, "FAIL write "), strings.HasPrefix(line, "FAIL mountinfo"):
+			refusals = append(refusals, line)
+		default:
+			delivery = append(delivery, line)
 		}
 	}
-	if len(fails) > 0 {
+	if len(refusals) > 0 {
 		return dockerRootVerifyRefused, fmt.Errorf(
 			"backend=docker: refusing to run root commands in the container: a docker.run_args mount can supply a program af runs as root, or sit where af must write — the kernel mount table says:\n%s\nremove the mount covering the named path, or move it elsewhere",
-			strings.Join(fails, "\n"))
+			strings.Join(refusals, "\n"))
+	}
+	if len(delivery) > 0 {
+		return dockerRootVerifyUndelivered, fmt.Errorf("the staged af payload did not arrive intact: %s", strings.Join(delivery, "; "))
 	}
 	if err != nil {
 		log.WarningLog.Printf("docker runtime: root-exec verification could not run in container %s (%v): %s", p.shortID(), err, strings.TrimSpace(string(out)))

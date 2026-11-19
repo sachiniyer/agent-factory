@@ -155,7 +155,10 @@ func (p *dockerProvisioner) runPayloadContainer() error {
 			return nil
 		}
 	default:
-		return nil // cp delivery stays its own step after the boundary checks
+		// cp delivery is its own step in provisionSteps — placed BEFORE the
+		// first root-exec step so the verifier clears every image program
+		// before any of them run (#7607 review).
+		return nil
 	}
 }
 
@@ -177,10 +180,10 @@ func (p *dockerProvisioner) retryRunWithCpDelivery(cause string) error {
 	}
 	p.payloadViaBinds = false
 	p.resetForRunRetry()
-	if err := p.runContainer(); err != nil {
-		return err
-	}
-	return p.deliverPayload()
+	// The container is re-run; cp delivery itself stays the provisionSteps
+	// step so warnBlankedCredentialNames still fires first, and so the step's
+	// own error classification (daemon-write vs session-exec) applies (#7607).
+	return p.runContainer()
 }
 
 // stagingDestinations returns the in-container paths af's payload claims:

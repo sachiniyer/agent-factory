@@ -105,16 +105,14 @@ const (
 	// prepareNonAccountUser) carry: their mkdir+chown writes the session
 	// home/account mounts and /workspace.
 	dockerOpRootExec
-	// dockerOpChmod is the root exec copyAfBinary uses to chmod the copied
-	// `af` binary at /usr/local/bin/af. It is a root exec like
-	// dockerOpRootExec, but its single write root is /usr/local/bin/af —
-	// not the home/workspace/account paths the prepare steps write — so a
-	// chmod failure's capacity verdict may only be borrowed by a bind
-	// covering the binary path, never by an unrelated bind at the home or
-	// workspace that the chmod never touched (#5424 review). Only the
-	// un-staged cp fallback still emits it: a staged copy already carries
-	// the mode the container needs, and the bind path copies nothing at all
-	// (#7577).
+	// dockerOpChmod was the root exec copyAfBinary used to chmod the copied
+	// `af` binary at /usr/local/bin/af — a root exec whose single write root
+	// is the binary path, so its capacity verdict could only be borrowed by
+	// a bind covering that path (#5424 review). No step emits it anymore:
+	// delivery is a bind or a cp of a mode-pinned temp file, and an
+	// in-container chmod would be an unverified image program running as
+	// root (#7607 review). The class stays so an error wrapped with it
+	// still classifies consistently.
 	dockerOpChmod
 	// dockerOpSessionExec is a `docker exec` run as the session's user —
 	// the account owner's uid:gid when a session mounts an account, else

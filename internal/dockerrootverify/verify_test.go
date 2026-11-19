@@ -293,6 +293,76 @@ func TestRootfsProperty(t *testing.T) {
 			check:  func(m []string) string { return checkWriteDest("/etc/conf/file", m) },
 			want:   "OK write /etc/conf/file",
 		},
+		{
+			// Codex review, #7607 P1 — kernel order, validated against
+			// realpath(3) in a real container: "../victim" is resolved
+			// against the link's RESOLVED directory (/x/d1 through the
+			// /x/abs hop), never the lexical one.
+			name: "prog: a relative hop resolves from the link's resolved dir",
+			fs: fakeFS{
+				"/x":        {'d', "", false},
+				"/x/abs":    {'l', "/x/d1", false},
+				"/x/d1":     {'d', "", false},
+				"/x/d1/y":   {'l', "../victim", false},
+				"/x/victim": {'f', "", true},
+			},
+			mounts: []string{"/"},
+			check:  func(m []string) string { return checkProgram("/x/abs/y", m) },
+			want:   "OK prog /x/abs/y -> /x/victim",
+		},
+		{
+			// Codex review, #7607 P1 — the divergence case: ".." in a hop
+			// target cancels a component that is ITSELF a symlink. Kernel
+			// order lands on the link's resolved parent (/deep/b); lexical
+			// cleaning would erase "/x/sub" and land on /x/b — where a
+			// mount could wait unseen.
+			name: "prog: .. in a hop target steps off the resolved prefix",
+			fs: fakeFS{
+				"/x":        {'d', "", false},
+				"/x/a":      {'l', "sub/../b", false},
+				"/x/sub":    {'l', "/deep/dir", false},
+				"/deep":     {'d', "", false},
+				"/deep/dir": {'d', "", false},
+				"/deep/b":   {'f', "", true},
+				"/x/b":      {'f', "", true},
+			},
+			mounts: []string{"/"},
+			check:  func(m []string) string { return checkProgram("/x/a", m) },
+			want:   "OK prog /x/a -> /deep/b",
+		},
+		{
+			// .. inside the SPEC itself is walked the same way — through
+			// the resolved prefix, not lexically cleaned.
+			name: "prog: .. in the spec walks the resolved prefix",
+			fs: fakeFS{
+				"/x":      {'d', "", false},
+				"/x/d1":   {'l', "/real/d", false},
+				"/real":   {'d', "", false},
+				"/real/d": {'d', "", false},
+				"/real/v": {'f', "", true},
+			},
+			mounts: []string{"/"},
+			check:  func(m []string) string { return checkProgram("/x/d1/../v", m) },
+			want:   "OK prog /x/d1/../v -> /real/v",
+		},
+		{
+			// The hop's TARGET transits a mount even when ".." escapes back
+			// onto the rootfs: kernel order resolves /x/a -> /mnt/b, but
+			// the mount at /mnt/real supplied a component of the hop and
+			// the property refuses every hop component off "/".
+			name: "prog: a hop target transiting a mount refuses",
+			fs: fakeFS{
+				"/x":        {'d', "", false},
+				"/x/a":      {'l', "sub/../b", false},
+				"/x/sub":    {'l', "/mnt/real", false},
+				"/mnt":      {'d', "", false},
+				"/mnt/real": {'d', "", false},
+				"/mnt/b":    {'f', "", true},
+			},
+			mounts: []string{"/", "/mnt/real"},
+			check:  func(m []string) string { return checkProgram("/x/a", m) },
+			want:   "FAIL prog /x/a",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

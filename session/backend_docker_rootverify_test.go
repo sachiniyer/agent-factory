@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -92,7 +91,7 @@ func TestDockerWriteGuardRefusesConfiguredMounts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stagingTestEnv(t)
+			home := stagingTestEnv(t)
 			var calls [][]string
 			oldI := dockerInspectAnswer
 			dockerInspectAnswer = func(string) ([]byte, error) {
@@ -105,9 +104,10 @@ func TestDockerWriteGuardRefusesConfiguredMounts(t *testing.T) {
 			if tt.policy {
 				spec.AgentPolicy = []byte(`{"hooks":{}}`)
 			}
+			forceCpFallback(t, home) // staging fails → the cp fallback runs
 			p := &dockerProvisioner{
 				image: "img:latest",
-				afBin: filepath.Join(t.TempDir(), "missing-af"), // staging fails → the cp fallback runs
+				afBin: stagingBinarySource(t),
 				spec:  spec,
 			}
 			_, err := p.provision()
@@ -170,7 +170,7 @@ func TestDockerWriteGuardAllowsRootfs(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			stagingTestEnv(t)
+			home := stagingTestEnv(t)
 			var calls [][]string
 			oldI := dockerInspectAnswer
 			dockerInspectAnswer = func(string) ([]byte, error) {
@@ -178,6 +178,7 @@ func TestDockerWriteGuardAllowsRootfs(t *testing.T) {
 			}
 			defer func() { dockerInspectAnswer = oldI }()
 			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+			forceCpFallback(t, home)
 
 			spec := ProvisionSpec{Title: "allowed", CloneURL: "file:///repo"}
 			if tt.policy {
@@ -185,7 +186,7 @@ func TestDockerWriteGuardAllowsRootfs(t *testing.T) {
 			}
 			p := &dockerProvisioner{
 				image: "img:latest",
-				afBin: filepath.Join(t.TempDir(), "missing-af"),
+				afBin: stagingBinarySource(t),
 				spec:  spec,
 			}
 			_, err := p.provision()
@@ -229,7 +230,7 @@ func TestDockerVerifierRefusesResolvedMounts(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			stagingTestEnv(t)
+			home := stagingTestEnv(t)
 			oldI := dockerInspectAnswer
 			dockerInspectAnswer = func(string) ([]byte, error) {
 				return inspectMountsDoc(t, tt.mounts, nil), nil
@@ -242,10 +243,11 @@ func TestDockerVerifierRefusesResolvedMounts(t *testing.T) {
 			defer func() { dockerRootVerifyAnswer = oldV }()
 			var calls [][]string
 			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+			forceCpFallback(t, home)
 
 			p := &dockerProvisioner{
 				image: "img:latest",
-				afBin: filepath.Join(t.TempDir(), "missing-af"),
+				afBin: stagingBinarySource(t),
 				spec:  ProvisionSpec{Title: "resolved", CloneURL: "file:///repo"},
 			}
 			_, err := p.provision()
@@ -274,16 +276,17 @@ func TestDockerWriteGuardUnreadableMountsRefuses(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			stagingTestEnv(t)
+			home := stagingTestEnv(t)
 			var calls [][]string
 			oldI := dockerInspectAnswer
 			dockerInspectAnswer = tt.inspect
 			defer func() { dockerInspectAnswer = oldI }()
 			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+			forceCpFallback(t, home)
 
 			p := &dockerProvisioner{
 				image: "img:latest",
-				afBin: filepath.Join(t.TempDir(), "missing-af"),
+				afBin: stagingBinarySource(t),
 				spec:  ProvisionSpec{Title: "closed", CloneURL: "file:///repo"},
 			}
 			_, err := p.provision()
@@ -452,10 +455,11 @@ func TestDockerRootVerifyExecFailureKeepsSessionExecClass(t *testing.T) {
 			}
 			return nil, nil
 		})
-	stagingTestEnv(t)
+	home := stagingTestEnv(t)
+	forceCpFallback(t, home)
 	p := &dockerProvisioner{
 		image: "img:latest",
-		afBin: filepath.Join(t.TempDir(), "missing-af"),
+		afBin: stagingBinarySource(t),
 		spec:  ProvisionSpec{Title: "verify-enospc", CloneURL: "file:///repo"},
 	}
 	_, err := p.provision()

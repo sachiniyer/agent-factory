@@ -48,7 +48,7 @@ func provisionDockerCapturingRun(t *testing.T, program string) []string {
 		"docker":  map[string]any{"image": "example.invalid/agent:latest"},
 	})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
-	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+	defer SetDockerSelfBinaryForTest(stagingBinarySource(t))()
 
 	var runArgs []string
 	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {

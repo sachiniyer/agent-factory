@@ -83,7 +83,7 @@ func provisionDockerCredentialGrantImageEnv(t *testing.T, program string, runArg
 
 	envJSON := "[" + strings.Join(quoteEnvEntries(imageEnv), ",") + "]"
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
-	t.Cleanup(SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af")))
+	t.Cleanup(SetDockerSelfBinaryForTest(stagingBinarySource(t)))
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "info" {
 			return []byte("credential-test-engine\n"), nil

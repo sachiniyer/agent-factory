@@ -71,11 +71,11 @@ func markedSandboxHome(t *testing.T) string {
 	return home
 }
 
-func engineRecordProvisioner(home string) *dockerProvisioner {
+func engineRecordProvisioner(t *testing.T, home string) *dockerProvisioner {
 	return &dockerProvisioner{
 		spec:   ProvisionSpec{Title: "engine-record", CloneURL: "file:///repo"},
 		image:  "image:latest",
-		afBin:  "/tmp/test-af",
+		afBin:  stagingBinarySource(t),
 		homeID: home,
 	}
 }
@@ -85,6 +85,7 @@ func engineRecordProvisioner(home string) *dockerProvisioner {
 func TestDockerProvisionRecordsTheEngineBeforeTheContainer(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
 	t.Setenv("DOCKER_CONTEXT", "")
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	home := markedSandboxHome(t)
 	const engineID = "engine-7447-a"
 	var recordedAtRun []string
@@ -93,7 +94,7 @@ func TestDockerProvisionRecordsTheEngineBeforeTheContainer(t *testing.T) {
 		recordedAtRun, readErr = throwawaysandbox.ReadRecordedEngines(home)
 	})()
 
-	_, err := engineRecordProvisioner(home).provision()
+	_, err := engineRecordProvisioner(t, home).provision()
 	require.NoError(t, err)
 
 	require.NoError(t, readErr, "the engine must be recorded before docker run creates the container")
@@ -112,7 +113,7 @@ func TestDockerProvisionRefusesWhenTheEngineCannotBeRecorded(t *testing.T) {
 	ran := false
 	defer engineRecordDocker(t, "engine-7447-a", func() { ran = true })()
 
-	_, err := engineRecordProvisioner(markedSandboxHome(t)).provision()
+	_, err := engineRecordProvisioner(t, markedSandboxHome(t)).provision()
 
 	require.ErrorIs(t, err, errThrowawayEngineUnrecorded)
 	assert.False(t, ran, "no container may be created when its engine cannot be recorded")
@@ -123,10 +124,11 @@ func TestDockerProvisionRefusesWhenTheEngineCannotBeRecorded(t *testing.T) {
 func TestDockerProvisionRecordsNothingOutsideAMarkedHome(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
 	t.Setenv("DOCKER_CONTEXT", "")
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	home := t.TempDir()
 	defer engineRecordDocker(t, "engine-7447-a", nil)()
 
-	_, err := engineRecordProvisioner(home).provision()
+	_, err := engineRecordProvisioner(t, home).provision()
 	require.NoError(t, err)
 
 	_, statErr := os.Stat(throwawaysandbox.RecordedEnginesPath(home))

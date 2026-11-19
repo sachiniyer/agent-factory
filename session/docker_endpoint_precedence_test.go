@@ -432,7 +432,7 @@ func TestDockerProvision_RefusesConflictingDockerHostAndContext(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
-	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+	defer SetDockerSelfBinaryForTest(stagingBinarySource(t))()
 
 	cli := &fakeDockerContextCLI{}
 	runCalled := false

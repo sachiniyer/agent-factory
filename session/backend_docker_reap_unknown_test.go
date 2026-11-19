@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -49,7 +48,7 @@ func TestDockerProvisionFailureSurfacesUnknownReap(t *testing.T) {
 		"docker":  map[string]any{"image": "img:latest"},
 	})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
-	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+	defer SetDockerSelfBinaryForTest(stagingBinarySource(t))()
 	withShortDockerReapTimeout(t, 50*time.Millisecond)
 
 	provisionErr := errors.New("permission denied")
@@ -61,6 +60,12 @@ func TestDockerProvisionFailureSurfacesUnknownReap(t *testing.T) {
 		case "run":
 			return dockerRunOrProbeAnswer(args)
 		case "exec":
+			if containsArg(args, "__docker-root-verify") {
+				// Delivery verification passes; a POST-delivery exec is
+				// the failure this test drives — a delivery-path retry
+				// would reap the first container and muddy the count.
+				return []byte("OK\n"), nil
+			}
 			return nil, provisionErr
 		case "rm":
 			reapCalls.Add(1)

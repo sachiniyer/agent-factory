@@ -371,16 +371,13 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // warnBlankedCredentialNames emits the once-per-session migration warning
 // for the classified names the image or docker.run_args had actually set
 // and af overrode — pinned empty or re-asserted to a value; names only,
-// values never inspected (#7526, #7531). It runs immediately after the
-// container exists, BEFORE the dependent steps (trust, clone, agent-server):
-// the image side must describe the image the container ACTUALLY runs —
-// resolved off the created container, not whatever the configured tag
-// inspected as before `docker run` pulled or updated it — and an
-// overridden name a later step depended on (a proxy or private CA the
-// clone needs) would make provisioning fail first, so the session most in
-// need of the passthrough remedy would never see it (#7531). When that
-// inspect fails, say so and warn over run_args names alone; the overrides
-// are already in argv either way.
+// values never inspected (#7526, #7531). It runs before the dependent
+// steps: the image side must describe the image the container ACTUALLY
+// runs — resolved off the created container, not the configured tag — and
+// an overridden name a later step depended on (a proxy or CA the clone
+// needs) would make provisioning fail first, so the session most in need
+// of the passthrough remedy would never see it (#7531). When that inspect
+// fails, say so and warn over run_args names alone.
 func (p *dockerProvisioner) warnBlankedCredentialNames() {
 	if len(p.credentialMounts) == 0 {
 		return
@@ -470,8 +467,8 @@ type dockerProvisioner struct {
 	stagedAfPath     string
 	stagedPolicyPath string
 	payloadViaBinds  bool
-	// payloadDelivered: a cp delivery already completed inside the run-retry,
-	// so the later deliverPayload step does not re-copy and re-verify (#7577).
+	// payloadDelivered: the run-retry already cp-delivered, so the later
+	// deliverPayload step does not re-copy and re-verify (#7577).
 	payloadDelivered bool
 }
 
@@ -541,9 +538,15 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	}
 	// Warn NOW, while the only thing that exists is the created container:
 	// a blanked name a dependent step needs (proxy/CA for the clone) makes
-	// that step fail, and the error path reaps without ever reaching a
-	// post-provision warning (#7531).
+	// that step fail and the reap never reaches a later warning (#7531).
 	p.warnBlankedCredentialNames()
+	// Every step below execs image programs as root — on a root-default image
+	// that is literally the mount hijack the verifier exists to refuse — so
+	// cp delivery + verification run first (#7607 review). deliverPayload
+	// no-ops on the bind path and after a retry that already delivered.
+	if err := p.deliverPayload(); err != nil {
+		return ProvisionResult{}, err
+	}
 	// The account boundary, verified against the RUNNING container before anything
 	// touches it (#3598). The lexical run_args guard reads strings and cannot see a
 	// symlink in the repository-selected image; this reads what Docker configured
@@ -564,9 +567,6 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	}
 	if err := p.configureGit(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
-	}
-	if err := p.deliverPayload(); err != nil {
-		return ProvisionResult{}, err
 	}
 	if err := p.startAgentServer(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)

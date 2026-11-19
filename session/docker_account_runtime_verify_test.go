@@ -940,7 +940,7 @@ func TestAccountRuntimeVerify_RefusalReapsTheContainer(t *testing.T) {
 		},
 	})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
-	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+	defer SetDockerSelfBinaryForTest(stagingBinarySource(t))()
 
 	var calls [][]string
 	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
@@ -980,11 +980,17 @@ func TestAccountRuntimeVerify_RefusalReapsTheContainer(t *testing.T) {
 	require.Truef(t, sawDockerRm(calls, dockerCreatedID),
 		"the refused container must be reaped, not left running with the account mounted; docker calls=%v", calls)
 
-	// And the refusal reaches the operator BEFORE anything used the account: no
-	// clone, no binary copy, no agent-server.
+	// And the refusal reaches the operator BEFORE anything used the account:
+	// no clone, no agent-server. af's own binary may already be cp'd — the cp
+	// path delivers and verifies before the boundary check so the check's own
+	// root execs run on verified programs (#7607 review) — but no workload
+	// exec may follow a refusal.
 	for _, call := range calls {
-		assert.NotEqual(t, "cp", call[0], "a refused session must not have had the af binary copied into it")
+		assert.NotContains(t, strings.Join(call, " "), "git clone",
+			"a refused session must not clone: %v", call)
 	}
+	require.Nil(t, findDockerCall(calls, "exec", "-d"),
+		"the agent-server must never start on a refused session; calls=%v", calls)
 }
 
 // fakeAccountBoundaryDockerResponse answers the runtime boundary verification
