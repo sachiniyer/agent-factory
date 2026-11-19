@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -910,6 +911,89 @@ func TestThrowawayWatchdogSettleObservesADeadlineLandedDuringAStuckOwnerLookup(t
 	case <-fire:
 	default:
 		t.Fatal("a deadline that landed during the owner read was not observed at settle")
+	}
+}
+
+// TestThrowawayWatchdogSettleLooksOnceMoreAtAnAlreadyDeadOwner pins R2 of
+// #7620: an owner that was ALREADY dead when the stop began is observed by
+// one last look at settle — bounded and never joined — even when no owner
+// read is in flight (here the check interval is so long no tick ever ran).
+// On master the settle path only consumed a decision already made; with no
+// read pending it resolved "never will" and the dead owner went unseen.
+func TestThrowawayWatchdogSettleLooksOnceMoreAtAnAlreadyDeadOwner(t *testing.T) {
+	oldLookup, oldScope, oldInterval, oldNow := throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval, throwawayNowFn
+	throwawayScopeIDsFn = func() (string, string) { return "", "" }
+	throwawayLookupFn = func(int) (proctree.Process, error) {
+		return proctree.Process{}, proctree.ErrProcessExited
+	}
+	throwawayCheckInterval = time.Hour
+	throwawayNowFn = func() time.Time { return time.Unix(1_000_000, 0) }
+	defer func() {
+		throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval, throwawayNowFn = oldLookup, oldScope, oldInterval, oldNow
+	}()
+	m := &throwawaysandbox.Marker{
+		Version: 1, CreatedUnix: 1_000_000, MaxLifetimeSeconds: 3600,
+		OwnerPID: 42, OwnerStartID: 7,
+	}
+	fire := make(chan struct{})
+	settle := armThrowawayWatchdog(m, fire)
+	settle()
+	select {
+	case <-fire:
+	default:
+		t.Fatal("an owner already dead at settle was not observed; the last look never ran")
+	}
+}
+
+// TestThrowawayWatchdogSettleObservesAPendingOwnerReadThatAnswersInsideTheBound
+// pins the other half of R2: a read already in flight at settle gets the bound
+// to answer, and an answer inside it is still a real expiry. On master the
+// stop path only consumed a completed read — one that landed a beat later
+// resolved to "never will" and the dead owner went unseen.
+func TestThrowawayWatchdogSettleObservesAPendingOwnerReadThatAnswersInsideTheBound(t *testing.T) {
+	oldLookup, oldScope, oldInterval, oldNow := throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval, throwawayNowFn
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	throwawayScopeIDsFn = func() (string, string) { return "", "" }
+	throwawayLookupFn = func(int) (proctree.Process, error) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-release
+		return proctree.Process{}, proctree.ErrProcessExited
+	}
+	throwawayCheckInterval = 10 * time.Millisecond
+	throwawayNowFn = func() time.Time { return time.Unix(1_000_000, 0) }
+	defer func() {
+		releaseOnce.Do(func() { close(release) })
+		throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval, throwawayNowFn = oldLookup, oldScope, oldInterval, oldNow
+	}()
+	m := &throwawaysandbox.Marker{
+		Version: 1, CreatedUnix: 1_000_000, MaxLifetimeSeconds: 3600,
+		OwnerPID: 42, OwnerStartID: 7,
+	}
+	fire := make(chan struct{})
+	settle := armThrowawayWatchdog(m, fire)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the owner lookup never ran")
+	}
+	// The read answers a beat after settle begins — inside the last-look bound,
+	// past the point where a completed-read check would already have moved on.
+	time.AfterFunc(50*time.Millisecond, func() { releaseOnce.Do(func() { close(release) }) })
+	begin := time.Now()
+	settle()
+	if elapsed := time.Since(begin); elapsed > 2*time.Second {
+		t.Fatalf("settle joined on the owner read for %s", elapsed)
+	}
+	select {
+	case <-fire:
+	default:
+		t.Fatal("a pending owner read that answered inside the bound was discarded as 'never will'")
 	}
 }
 

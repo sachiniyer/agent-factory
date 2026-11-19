@@ -128,16 +128,17 @@ func TestRunDaemonThrowawayExpiryIsObservedWhenItRacesTheStop(t *testing.T) {
 	// without exercising the race.
 	const drainHold = 1500 * time.Millisecond
 	drainEntered := make(chan struct{})
+	mutationDone := make(chan struct{})
 	require.True(t, manager.launchBackgroundMutation(func(stop <-chan struct{}) {
 		<-stop
 		close(drainEntered)
 		// Hold the drain open for the full drainHold after the drain entered
 		// stopAndWait, so the watchdog's fire is guaranteed to land mid-drain.
 		time.Sleep(drainHold)
+		close(mutationDone)
 	}), "the background mutation that holds the drain was not admitted")
 
 	// Stop the daemon; the drain starts once the Shutdown RPC is received.
-	asked := time.Now()
 	go func() {
 		var resp ShutdownResponse
 		_ = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
@@ -162,10 +163,14 @@ func TestRunDaemonThrowawayExpiryIsObservedWhenItRacesTheStop(t *testing.T) {
 	}
 
 	// Sanity: the drain really was held past the kill (the fire was mid-drain,
-	// not before the select). The stop began at `asked`; the daemon exits
-	// after the drain join releases at ~drainHold. Allow slack for scheduling.
-	require.GreaterOrEqual(t, time.Since(asked), drainHold-300*time.Millisecond,
-		"the drain was not held open; the racing fire did not land mid-drain")
+	// not before the select). The writer's hold ends only after drainHold of
+	// sleep; a daemon that exited after it proves the join waited it out —
+	// synchronization, not a wall-clock bound on the whole stop.
+	select {
+	case <-mutationDone:
+	default:
+		t.Fatal("the daemon exited before the drain's writer finished; the racing fire did not land mid-drain")
+	}
 	// Sanity: the watchdog really fired before exit.
 	require.Contains(t, info.String(), "declared owner pid",
 		"the watchdog never fired; the racing-fire test did not exercise the bug")
