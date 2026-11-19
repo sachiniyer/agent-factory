@@ -533,35 +533,56 @@ func TestCommittedSwapRelaunchStartsOnItsIDWhenTheStoreCannotBeNamed(t *testing.
 
 // #7602 review: the retried listing has no bound of its own — it gets what is
 // left of the first look's deadline, so a store that errs only after most of
-// the bound cannot make the relaunch's two judges cost two bounds. A listing
-// that refused after three quarters of the bound leaves the retry a quarter;
-// the pair ends inside the one bound a single look was allowed, and the blind
-// verdict is the answer the timed-out listing would itself have made.
+// the bound cannot make the relaunch's two judges cost two bounds. The look's
+// cost is declared on the test's flight clock, never measured against the
+// runner's scheduler (the wall-clock assertion this replaces flaked on a
+// loaded darwin runner, cca335650's red Test (macOS)): the look's listings
+// err — never time out, whose answer would latch and hide a second look —
+// after sharing most of the bound between them, however many spellings the
+// platform gives the worktree (a darwin /var tempdir's /private/var spelling
+// lists twice). The retry's own listing then stays out past the shared
+// deadline while its flight's bound is nowhere near spent, so only the
+// re-judge's timer on the same clock can cut it.
 func TestCommittedSwapRelaunchRejudgesInsideTheFirstLooksBound(t *testing.T) {
-	inst, target, _, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
 	inst.SetAccountSwapReplacementPanesStartedForTest(true)
 	inst.pendingAccountSwap.MissionDeliveryStatus = PromptDelivered
 	const bound = 800 * time.Millisecond
 	t.Cleanup(fsprobe.SetProbeTimeoutForTest(bound))
+	clock := wedgeFlightClock(t)
+	heldListing := make(chan struct{})
+	t.Cleanup(func() { close(heldListing) })
+	projects, _ := claudeProjectSpellings(worktree)
+	require.NotEmpty(t, projects)
+	spellings := int32(len(projects))
+	perListing := (bound - 150*time.Millisecond) / time.Duration(spellings)
 	var calls atomic.Int32
 	t.Cleanup(fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
-		if strings.HasPrefix(dir, target) {
-			calls.Add(1)
-			time.Sleep(bound - 150*time.Millisecond) // errs only after most of the bound
+		if !strings.HasPrefix(dir, target) {
+			return os.ReadDir(dir)
+		}
+		if calls.Add(1) <= spellings {
+			// The first look's listings each answer inside their own bound
+			// after spending the look's shared budget between them, so the
+			// retry's remainder is declared on the clock, not measured.
+			clock.Advance(perListing)
 			return nil, os.ErrPermission
 		}
-		return os.ReadDir(dir)
+		// The retried listing stays out past the shared deadline: a
+		// re-judge armed with a fresh bound instead of the look's
+		// remainder would wait on this listing forever, which is the
+		// fail-first withinBound names.
+		clock.Advance(200 * time.Millisecond)
+		<-heldListing
+		return nil, os.ErrPermission
 	}))
 
-	started := time.Now()
-	plan := relaunchPlan(t, inst)
-	elapsed := time.Since(started)
+	plan := withinBound(t, func() *accountSwapLaunchPlan { return relaunchPlan(t, inst) })
 	match := resumeArg.FindStringSubmatch(plan.program)
 	require.NotNil(t, match, "the record's proof resumes the committed conversation: %s", plan.program)
 	require.Equal(t, committed, match[1])
-	require.GreaterOrEqual(t, calls.Load(), int32(2), "the retried listing ran")
-	require.Less(t, elapsed, bound*5/4,
-		"the two judges shared the first look's bound: %v for a %v bound", elapsed, bound)
+	require.Equal(t, spellings+1, calls.Load(),
+		"the retry ran its first listing and the shared deadline cut it")
 	require.Equal(t, blindCommittedResumeReason,
 		inst.ToInstanceData().PendingAccountSwap.ResumeUnverifiedReason,
 		"the retry cut at the shared deadline is a blind verdict")

@@ -140,3 +140,28 @@ func TestBounded_TheBoundRunsOnTheInstalledClock(t *testing.T) {
 	require.True(t, errors.Is(err, ErrProbeTimedOut), "a probe still out at the declared bound is the non-answer: %v", err)
 	require.True(t, errors.Is(err, context.DeadlineExceeded))
 }
+
+// A timer armed for a deadline its clock already passed fires at once, on
+// the wall clock and the manual clock alike: a caller that shares one
+// deadline across flights can arm its cut timer only after the look's cost
+// was declared, and must still get the non-answer rather than a timer that
+// never fires (#7613 review).
+func TestFlightTimer_APassedDeadlineFiresAtOnce(t *testing.T) {
+	check := func(t *testing.T) {
+		t.Helper()
+		ch, stop := FlightTimer(FlightNow().Add(-time.Minute))
+		defer stop()
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Fatal("a timer armed for a deadline already passed never fired")
+		}
+	}
+
+	t.Run("wall clock", check)
+	t.Run("manual clock", func(t *testing.T) {
+		clock := NewManualClock(time.Now())
+		t.Cleanup(SetFlightClockForTest(clock))
+		check(t)
+	})
+}

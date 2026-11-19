@@ -389,7 +389,7 @@ func otherClaudeStores(primary string) []string {
 // wait.
 func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationData) resumeDecline {
 	workDir := i.GetWorktreePath()
-	lookStarted := time.Now()
+	lookStarted := fsprobe.FlightNow()
 	verdict, spellings := i.judgeRecordedClaude(program, workDir, conv.ID)
 	nameable := verdict == recordedClaudeBlind && spellings > 0
 	if nameable {

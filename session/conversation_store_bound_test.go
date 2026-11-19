@@ -139,7 +139,16 @@ func TestRecordedClaudeDeclineRetriesInsideItsBound(t *testing.T) {
 // The retried listing has no bound of its own — it gets what is left of the
 // first look's deadline (#7602's shape, #7600): a store that errs only after
 // most of the bound cannot make the restore's two judges cost two bounds. The
-// blind verdict that remains names the resume unverified, never a fresh id.
+// look's cost is declared on the test's flight clock, never measured against
+// the runner's scheduler (the wall-clock assertion this replaces flaked on a
+// loaded darwin runner, cca335650's red Test (macOS)): the look's listings
+// err — never time out, whose answer would latch and hide a second look —
+// after sharing most of the look's whole allowance between them, however
+// many spellings the platform gives the worktree (a darwin /var tempdir's
+// /private/var spelling lists twice). The retry's own listing then stays out
+// past the shared deadline while its flight's bound is nowhere near spent,
+// so only the re-judge's timer on the same clock can cut it. The blind
+// verdict that remains names the resume unverified, never a fresh id.
 func TestRecordedClaudeDeclineRejudgesInsideTheFirstLooksBound(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
@@ -147,25 +156,42 @@ func TestRecordedClaudeDeclineRejudgesInsideTheFirstLooksBound(t *testing.T) {
 	inst := claudeRestoreInstance(t, workDir, carryTestID)
 	const bound = 800 * time.Millisecond
 	t.Cleanup(fsprobe.SetProbeTimeoutForTest(bound))
+	clock := wedgeFlightClock(t)
+	heldListing := make(chan struct{})
+	t.Cleanup(func() { close(heldListing) })
+	projects, _ := claudeProjectSpellings(workDir)
+	require.NotEmpty(t, projects)
+	spellings := int32(len(projects))
+	perListing := (bound*time.Duration(spellings) - 150*time.Millisecond) / time.Duration(spellings)
 	var calls atomic.Int32
 	t.Cleanup(fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
-		if strings.HasPrefix(dir, configDir) {
-			calls.Add(1)
-			time.Sleep(bound - 150*time.Millisecond) // errs only after most of the bound
+		if !strings.HasPrefix(dir, configDir) {
+			return os.ReadDir(dir)
+		}
+		if calls.Add(1) <= spellings {
+			// The first look's listings each answer inside their own bound
+			// after spending the look's shared budget between them, so the
+			// retry's remainder is declared on the clock, not measured.
+			clock.Advance(perListing)
 			return nil, os.ErrPermission
 		}
-		return os.ReadDir(dir)
+		// The retried listing stays out past the shared deadline: a
+		// re-judge armed with a fresh bound instead of the look's
+		// remainder would wait on this listing forever.
+		clock.Advance(200 * time.Millisecond)
+		<-heldListing
+		return nil, os.ErrPermission
 	}))
 
-	started := time.Now()
-	program, ok, decline := prepareExactResumeConversation(inst, "claude")
-	elapsed := time.Since(started)
-	require.True(t, ok, "a still-blind verdict resumes the recorded id as before: %s", program)
-	require.Equal(t, "claude --resume "+carryTestID, program)
-	require.GreaterOrEqual(t, calls.Load(), int32(3), "the retried listing ran")
-	require.Less(t, elapsed, bound*9/4,
-		"the two judges shared one look's bound — two spellings — : %v for a %v flight bound", elapsed, bound)
-	require.Equal(t, blindResumeUnverifiedReason, decline.notice,
+	got := withinBound(t, func() exactResumeAnswer {
+		program, ok, decline := prepareExactResumeConversation(inst, "claude")
+		return exactResumeAnswer{program, ok, decline}
+	})
+	require.True(t, got.ok, "a still-blind verdict resumes the recorded id as before: %s", got.program)
+	require.Equal(t, "claude --resume "+carryTestID, got.program)
+	require.Equal(t, spellings+1, calls.Load(),
+		"the retry ran its first listing and the shared deadline cut it")
+	require.Equal(t, blindResumeUnverifiedReason, got.decline.notice,
 		"the retry cut at the shared deadline names the resume unverified")
 }
 
