@@ -192,27 +192,50 @@ func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launche
 	return verdict
 }
 
-// normalizeNamedLiteral removes the quoting a downstream shell removes:
-// quote characters disappear (`co""dex` → `codex`) and a backslash
-// escape resolves to its char (`co\dex` → `codex`, `CODEX\_HOME` →
-// `CODEX_HOME`). The piece rule checks this form alongside the raw
-// literal so an escape cannot hide a name the shell would expose.
+// normalizeNamedLiteral applies POSIX sh escape rules (XCU 2.2.1) to a
+// literal, the way a downstream shell's re-parse resolves it: quote
+// characters toggle quoting state and vanish; a backslash-newline pair
+// is a line continuation — BOTH characters are removed before
+// tokenizing; outside single quotes any other backslash-X resolves to X,
+// except inside double quotes where only $ ` " \ and newline are
+// escapable (any other `\` stays literal, as does one inside single
+// quotes). The piece rule checks this form alongside the raw literal so
+// an escape cannot hide a name the shell would expose.
 func normalizeNamedLiteral(text string) string {
-	if !strings.ContainsAny(text, `'"`+"`\\") {
+	if !strings.ContainsAny(text, "'\"`\\") {
 		return text
 	}
 	var out strings.Builder
 	out.Grow(len(text))
+	inSingle := false
+	inDouble := false
 	for i := 0; i < len(text); i++ {
-		c := text[i]
-		switch c {
-		case '\\':
-			i++
-			if i < len(text) {
+		switch c := text[i]; {
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+		case c == '`' && !inSingle:
+			// A backtick vanishes like the other quote characters;
+			// literals carrying one refuse before reaching here.
+		case c == '\\' && !inSingle && i+1 < len(text):
+			next := text[i+1]
+			switch {
+			case next == '\n':
+				// Line continuation: both characters removed.
+				i++
+			case !inDouble || next == '$' || next == '`' ||
+				next == '"' || next == '\\':
+				// Escapable here — the backslash resolves.
+				i++
 				out.WriteByte(text[i])
+			default:
+				// Inside double quotes before any other char the
+				// backslash stays literal.
+				out.WriteByte('\\')
+				out.WriteByte(next)
+				i++
 			}
-		case '\'', '"', '`':
-			// Quote characters vanish under word joining.
 		default:
 			out.WriteByte(c)
 		}
