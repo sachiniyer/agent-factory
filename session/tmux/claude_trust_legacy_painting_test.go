@@ -54,7 +54,10 @@ func legacyOptionRows(rows []string) (first, last int) {
 // character after its leading chrome. It leaves out each step whose last row
 // already reads as a No label the grammar knows ("2. No" reads as "No"), and
 // stops before the last option row's label is whole. The grammar answers those
-// steps, before the dialog is whole, which is #7584's second part.
+// steps, before the dialog is whole, which is #7584's second part. It also
+// leaves out a step whose last row reads as a composer's draft line
+// (claudeComposerPromptText): "❯ 1", the ordinal before its dot, is a draft of
+// "1" as much as a cursor row begun, and the reader holds no draft.
 func legacyPaintSteps(rows []string) []string {
 	first, last := legacyOptionRows(rows)
 	question := claudeSquash(claudeLegacyTrustQuestion)
@@ -73,6 +76,9 @@ func legacyPaintSteps(rows []string) []string {
 				break
 			}
 			if _, no := claudeLegacyOptionKinds(claudeTrustRowOf(string(row[:c])).label); no && k > first {
+				continue
+			}
+			if draft, prompt := claudeComposerPromptText(string(row[:c]), false); prompt && draft != "" {
 				continue
 			}
 			frames = append(frames, strings.Join(append(append([]string(nil), rows[:k]...), string(row[:c])), "\n"))
@@ -142,15 +148,55 @@ func TestIssue7584WholeLegacyDialogIsStillAnswered(t *testing.T) {
 	}
 }
 
+// legacyQuotingDrafts are composer drafts that quote the legacy dialog's
+// question and options: both options on the prompt row, as the inline picker
+// paints them and as a user types them, the stacked block typed on one row, and
+// the question and block over several rows.
+var legacyQuotingDrafts = map[string][]string{
+	"Yes No":                        {"Yes No"},
+	"Yes 2. No":                     {"Yes 2. No"},
+	"Yes, proceed No, exit":         {"Yes, proceed No, exit"},
+	"the block on one row":          {"1. Yes, proceed 2. No, exit"},
+	"the question and its options":  {"Do you trust the files in this folder? Yes No"},
+	"the question over the options": {"Do you trust the files in this folder?", "1. Yes, proceed", "2. No, exit"},
+	"the options alone":             {"Yes, proceed", "No, exit"},
+}
+
 // TestIssue7584SettledScreensAreLeftAlone: the screens a create meets once a
 // dialog is gone, or that a working agent shows, read as before.
 //   - Each paint step of the legacy dialog, quoted above a composer drawn
 //     last, reads clear and gets no key: a working agent frames its composer
 //     with rules, so the reader declines a question with one below it.
+//   - A user's draft quoting the question and its options, under the question
+//     quoted above it, reads clear and gets no key: in every composer mode,
+//     ruled and boxed, and with no frame at all where the draft puts both
+//     options on the prompt row. The dialog never paints a draft line
+//     (#7594's CI run, TestCheckAndHandleTrustPrompt_YesNoComposerDraftIsNotTheLegacyPicker).
 //   - The idle composer Claude Code shows once its dialog is answered reads
 //     clear.
 //   - The real reworded dialog (testdata, #7575) is still answered.
 func TestIssue7584SettledScreensAreLeftAlone(t *testing.T) {
+	for _, lead := range []string{
+		"Do you trust the files in this folder?",
+		"I was asked: \"Do you trust the files in this folder?\"\nDo you trust the files in this folder?",
+	} {
+		for name, draft := range legacyQuotingDrafts {
+			for _, prompt := range composerModePrompts {
+				for _, boxed := range []bool{false, true} {
+					requireClearWithoutAKey(t, lead+"\n"+strings.Join(drawnComposer(40, prompt, draft, boxed), "\n"),
+						fmt.Sprintf("a draft quoting %s under %q, boxed %v", name, prompt, boxed))
+				}
+			}
+			// Unframed, only under prose: with the question the pane's first
+			// content, "❯ Yes No" is the inline picker itself, which master
+			// answers (TestCheckAndHandleTrustPrompt_RealLegacyFolderTrustDialogStillFiresEnter).
+			if strings.HasPrefix(lead, "I was asked") && len(draft) == 1 && strings.Contains(draft[0], "No") {
+				requireClearWithoutAKey(t, lead+"\n"+claudeTrustSelectionGlyph+" "+draft[0],
+					fmt.Sprintf("an unframed draft putting both options on the prompt row: %s", name))
+			}
+		}
+	}
+
 	for _, width := range []int{20, 40, 80} {
 		rule := strings.Repeat("─", width)
 		composers := map[string]string{

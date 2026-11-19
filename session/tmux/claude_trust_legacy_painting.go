@@ -5,16 +5,15 @@ import "strings"
 // claudeLegacyTrustOptionBlocks are the legacy dialog's option blocks as the
 // pane reads them from the cursor row down: squashed, lower-cased, and with or
 // without the ordinal before each label, since claudeTrustRowOf drops "N. "
-// once the label follows it. They pair each Yes label the grammar knows with
-// each No label.
+// once the label follows it. Each pairs a Yes label with the No label the
+// dialog paints with it: "Yes" with "No", "Yes, proceed" with "No, exit". A
+// whole short pair is then never read as a long one begun.
 var claudeLegacyTrustOptionBlocks = func() []string {
 	var blocks []string
-	for _, yes := range claudeLegacyYesLabels {
-		for _, no := range claudeLegacyNoLabels {
-			for _, first := range []string{"", "1. "} {
-				for _, second := range []string{"", "2. "} {
-					blocks = append(blocks, claudeSquash(first+yes+" "+second+no))
-				}
+	for _, pair := range [][2]string{{"yes", "no"}, {"yes, proceed", "no, exit"}} {
+		for _, first := range []string{"", "1. "} {
+			for _, second := range []string{"", "2. "} {
+				blocks = append(blocks, claudeSquash(first+pair[0]+" "+second+pair[1]))
 			}
 		}
 	}
@@ -46,9 +45,14 @@ var claudeLegacyTrustOptionBlocks = func() []string {
 //   - from the head's first row down, there is no frame rule. A working agent
 //     frames its composer with rules, plain or boxed, so a question it quotes
 //     has one below it;
-//   - below the head there is exactly one ❯ row, the dialog's cursor, and
-//     everything from it to the end of the pane is an option block begun but
-//     not yet whole. A whole block is for the grammar, which answers it or
+//   - below the head there is exactly one ❯ row, the dialog's cursor, and it
+//     is no composer's draft line. #7575's composer reading
+//     (claudeComposerPromptText) reads a ❯ prompt row whose text begins no
+//     option as a composer's prompt, and its text as a draft, such as both
+//     options on the glyph's row ("❯ Yes No"). The dialog never paints that,
+//     so a pane with one is a user's draft under a quoted question;
+//   - everything from the cursor row to the end of the pane is an option
+//     block begun but not yet whole. A whole block is for the grammar, which answers it or
 //     reads it as a draft (claudeLegacyProseAboveQuestion), and a block
 //     followed by more rows is for the readers before this one.
 //
@@ -76,6 +80,10 @@ func claudeLegacyTrustPaintingOf(screen visibleText) bool {
 		cursor = content
 	}
 	if cursor < 0 {
+		return false
+	}
+	line := pane.lines[pane.index[cursor]]
+	if draft, prompt := claudeComposerPromptText(line, claudeComposerBordered(line)); prompt && draft != "" {
 		return false
 	}
 	painted := strings.ToLower(pane.text[pane.starts[cursor]:])
