@@ -1096,6 +1096,11 @@ func TestDockerStagingEnclosingRunArgsMountRefused(t *testing.T) {
 			}
 			assert.Contains(t, err.Error(), tt.want)
 			assert.Contains(t, err.Error(), "run_args")
+			// A preflight config refusal must classify local so environmental
+			// evidence (a full data root's ENOSPC) cannot borrow it.
+			var se *dockerStepError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, dockerOpLocal, se.op)
 			require.Nil(t, findDockerCall(calls, "run"), "no container may be started; calls=%v", calls)
 			// The staged dir the refusal left behind still reaps cleanly.
 			require.Error(t, p.reapProvisionFailure(err))

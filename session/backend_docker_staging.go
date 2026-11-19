@@ -125,7 +125,11 @@ func (p *dockerProvisioner) preparePayloadDelivery() {
 // one-shot cp retry.
 func (p *dockerProvisioner) runPayloadContainer() error {
 	if err := p.refuseEnclosingRunArgsMounts(); err != nil {
-		return err
+		// A preflight configuration refusal — no docker run happened, so the
+		// engine wrote nothing. Classifying it local keeps a full data root's
+		// ENOSPC evidence off a permanently invalid config, which the restore
+		// classifier would otherwise retry forever.
+		return dockerStepErr(err, dockerOpLocal)
 	}
 	err := p.runContainer()
 	switch {
