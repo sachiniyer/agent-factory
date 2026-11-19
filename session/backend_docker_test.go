@@ -97,7 +97,7 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 		case "info":
 			return []byte(engineID + "\n"), nil
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "cp":
 			return nil, nil
 		case "port":
@@ -123,7 +123,7 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 			}
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected docker command: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	})()
 
@@ -356,7 +356,7 @@ func TestBackendUnusableReason_DockerFailsClosedOnProbeError(t *testing.T) {
 		if len(args) >= 2 && args[0] == "context" && args[1] == "inspect" {
 			return []byte("no context"), fmt.Errorf("context store corrupted")
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	}))
 	cfg := &config.ResolvedConfig{Docker: &config.DockerConfig{Image: "my-runtime:latest"}}
 

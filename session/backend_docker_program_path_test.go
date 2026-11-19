@@ -198,7 +198,7 @@ func TestDockerExecProgramsUseAbsoluteShell(t *testing.T) {
 		require.Greaterf(t, idIdx, 0, "exec call missing the container id: %v", call)
 		require.Lessf(t, idIdx+1, len(call), "exec call names no program after the container id: %v", call)
 		require.Containsf(t,
-			append([]string{dockerContainerShell, dockerContainerCat}, dockerContainerStatPaths...),
+			append([]string{dockerContainerShell, dockerContainerCat, dockerAfBinaryPath}, dockerContainerStatPaths...),
 			call[idIdx+1],
 			"the exec's program must be an absolute path, never a PATH-resolved name: %v", call)
 	}
@@ -416,7 +416,7 @@ func TestPrepareAccountUser_BusyBoxStatLocation(t *testing.T) {
 	var statCalls []string
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) == 0 || args[0] != "exec" {
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 		joined := strings.Join(args, " ")
 		// Order matters: "/usr/bin/stat" contains "/bin/stat" as a substring.

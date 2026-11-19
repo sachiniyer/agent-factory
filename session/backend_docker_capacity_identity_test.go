@@ -31,7 +31,7 @@ func TestProvisionFailure_DataRootNamespaceGate(t *testing.T) {
 		if args[0] == "run" {
 			return []byte("Error response from daemon: no space left on device\n"), fmt.Errorf("exit status 125")
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	}
 
 	t.Run("tcp loopback endpoint is not namespace proof", func(t *testing.T) {

@@ -72,7 +72,7 @@ func dockerExecStub(t *testing.T, infoIDs []string, psOutput string, removed *[]
 			*removed = append(*removed, args[len(args)-1])
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	})
 }
@@ -110,7 +110,7 @@ func TestSweepScopesQueryToHome(t *testing.T) {
 			psArgs = append([]string(nil), args...)
 			return []byte(""), nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	})()
 
@@ -212,7 +212,7 @@ func TestReapHomeContainersRemovesOnlyProvenContainers(t *testing.T) {
 			removed = append(removed, args[len(args)-1])
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	})()
 
@@ -248,7 +248,7 @@ func homeReapDocker(t *testing.T, listing string, listErr error, removed *[]stri
 			*removed = append(*removed, args[len(args)-1])
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	})
 }

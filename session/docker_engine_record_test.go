@@ -56,7 +56,7 @@ func engineRecordDocker(t *testing.T, engineID string, atRun func()) func() {
 			}
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected docker command: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	})
 }
