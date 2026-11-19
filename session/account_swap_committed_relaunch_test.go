@@ -5,12 +5,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -254,4 +257,115 @@ func TestCommittedSwapRelaunchResumesBesideAnUnattributableConversation(t *testi
 	require.NotNil(t, match, "a filed conversation is resumed: %s", plan.program)
 	require.Equal(t, committed, match[1])
 	require.NotRegexp(t, sessionIDArg, plan.program, "--session-id on a filed id never boots")
+}
+
+// #7596: a committed relaunch whose transcript-store verdict is blind never
+// plans a command that cannot boot on the id the record says the first launch
+// filed. A second --session-id on a filed id never boots; --resume exits only
+// where nothing was filed. A store af can name but not list is judged again —
+// a still-wedged listing's latched flight answers the retry at once, inside
+// the bound the first judge already spent — and where the listing stays blind
+// the record's say-so decides: ReplacementPanesStarted means the first launch
+// ran on --session-id and filed the id, so --resume is the blind answer that
+// boots, and the record and the notice name it.
+func TestCommittedSwapRelaunchResumesBlindOnTheRecordsSaySo(t *testing.T) {
+	for _, filed := range []bool{true, false} {
+		name := "transcript filed"
+		if !filed {
+			name = "transcript absent"
+		}
+		t.Run(name, func(t *testing.T) {
+			inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+			if filed {
+				fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Minute))
+			}
+			inst.SetAccountSwapReplacementPanesStartedForTest(true)
+			wedgeStoreListing(t, target)
+
+			plan := withinBound(t, func() *accountSwapLaunchPlan { return relaunchPlan(t, inst) })
+			require.NotRegexp(t, sessionIDArg, plan.program,
+				"--session-id never boots on the id the record says the first launch filed: %s", plan.program)
+			match := resumeArg.FindStringSubmatch(plan.program)
+			require.NotNil(t, match, "the record's say-so resumes the committed conversation: %s", plan.program)
+			require.Equal(t, committed, match[1])
+			require.Equal(t, committed, plan.conversation.ID)
+			pending := inst.ToInstanceData().PendingAccountSwap
+			require.Equal(t, committed, pending.ConversationID,
+				"the record keeps the committed conversation the re-launch resumes")
+			require.Equal(t, blindCommittedResumeReason, pending.CarryFallback,
+				"the record says why the re-launch resumed without a listing's proof")
+			require.Equal(t, blindCommittedResumeReason, inst.PendingAccountSwapConversation().CarryFailure,
+				"the swap's answer and the notice report it")
+		})
+	}
+}
+
+// A nameable store whose listing did not answer is judged again inside the
+// same look (#7596): a listing that answers on the retry is a look that
+// happened, and the filed conversation resumes by its proof, not the record's
+// say-so — so no blind reason reaches the record.
+func TestCommittedSwapRelaunchJudgesAgainAfterTheListingAnswers(t *testing.T) {
+	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Minute))
+	inst.SetAccountSwapReplacementPanesStartedForTest(true)
+	fallback := inst.ToInstanceData().PendingAccountSwap.CarryFallback
+	var failed sync.Map // each project dir's first listing refuses, as a blip does
+	t.Cleanup(fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
+		if strings.HasPrefix(dir, target) {
+			if _, seen := failed.LoadOrStore(dir, struct{}{}); !seen {
+				return nil, os.ErrPermission
+			}
+		}
+		return os.ReadDir(dir)
+	}))
+
+	plan := relaunchPlan(t, inst)
+	require.NotRegexp(t, sessionIDArg, plan.program, plan.program)
+	match := resumeArg.FindStringSubmatch(plan.program)
+	require.NotNil(t, match, "the retried listing reads the filed transcript: %s", plan.program)
+	require.Equal(t, committed, match[1])
+	pending := inst.ToInstanceData().PendingAccountSwap
+	require.Equal(t, committed, pending.ConversationID)
+	require.Equal(t, fallback, pending.CarryFallback,
+		"a listing that answered leaves the record's account of it alone: the resume is proved")
+}
+
+// A record that shows the first launch never ran describes no filing (#7596):
+// starting on the committed id boots, exactly as the first launch would have —
+// the one case a blind verdict may still start on it.
+func TestCommittedSwapRelaunchStartsOnItsIDWhenNoFirstLaunchRan(t *testing.T) {
+	inst, target, _, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	require.False(t, inst.ToInstanceData().PendingAccountSwap.ReplacementPanesStarted,
+		"precondition: the committed record shows the panes never started")
+	wedgeStoreListing(t, target)
+
+	plan := withinBound(t, func() *accountSwapLaunchPlan { return relaunchPlan(t, inst) })
+	require.NotRegexp(t, resumeArg, plan.program,
+		"nothing is filed where nothing launched: %s", plan.program)
+	match := sessionIDArg.FindStringSubmatch(plan.program)
+	require.NotNil(t, match, "as the first launch did: %s", plan.program)
+	require.Equal(t, committed, match[1])
+	require.NotEqual(t, blindCommittedResumeReason,
+		inst.ToInstanceData().PendingAccountSwap.CarryFallback,
+		"a start on the committed id is no blind resume")
+}
+
+// A store af cannot even name says nothing about the id: the re-launch starts
+// on it, as the first launch did (#7596). The committed record's target is
+// registered while the record lives, so the seam is reached the way a
+// deregistered target leaves it — the record names an account the registry no
+// longer holds.
+func TestCommittedSwapRelaunchStartsOnItsIDWhenTheStoreCannotBeNamed(t *testing.T) {
+	inst, _, worktree, committed := committedFreshClaudeSwap(t)
+	inst.Account = "ghost"
+	inst.pendingAccountSwap.To = "ghost"
+	inst.SetAccountSwapReplacementPanesStartedForTest(true)
+
+	launch, conversation, reminted, blindResumed := inst.committedConversationLaunch("claude", worktree, "ghost", committed)
+	require.False(t, reminted)
+	require.False(t, blindResumed, "a store af cannot name is no blind resume: nothing is known of the id")
+	require.Equal(t, committed, conversation.ID)
+	match := sessionIDArg.FindStringSubmatch(launch)
+	require.NotNil(t, match, "as the first launch did: %s", launch)
+	require.Equal(t, committed, match[1])
 }

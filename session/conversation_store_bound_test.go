@@ -45,6 +45,21 @@ func wedgeStoreListings(t *testing.T, root string) {
 	})
 }
 
+// wedgeStoreListing is the store-listing half of launchDirWedge: a directory
+// listing under root holds the test's flight clock out past the probe bound
+// and then waits until the test ends, the way a transcript store on a wedged
+// mount does. Its bound is the clock, never a shrunken probeTimeout, so every
+// other flight in the test answers whenever its work finishes (#7593's fix,
+// applied to the listing seam the committed re-launch judges, #7596).
+func wedgeStoreListing(t *testing.T, root string) {
+	t.Helper()
+	wait := launchDirWedge(t, root)
+	t.Cleanup(fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
+		wait(dir)
+		return os.ReadDir(dir)
+	}))
+}
+
 // withinBound runs judge and fails the test if it is still running after a
 // bound far beyond fsprobe's: a stalled listing would hold it forever.
 func withinBound[T any](t *testing.T, judge func() T) T {

@@ -267,13 +267,15 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		return refuse(err)
 	}
 	// reminted reports that a committed replacement's recorded conversation id
-	// was replaced by a fresh one, which the record takes below.
-	var reminted bool
+	// was replaced by a fresh one, and blindResumed that a blind store verdict
+	// left the re-launch resuming it on the record's say-so; the record takes
+	// either below.
+	var reminted, blindResumed bool
 	if carry == nil {
 		if pending != nil && pending.To == name && pending.ConversationID != "" {
 			// A re-launch of a committed replacement: its id may already name a
 			// transcript in the target account's store (#7214).
-			launchProgram, conversation, reminted = i.committedConversationLaunch(
+			launchProgram, conversation, reminted, blindResumed = i.committedConversationLaunch(
 				resolvedProgram, workDir, name, pending.ConversationID)
 		} else {
 			launchProgram, conversation = planLaunchConversation(newSessionID(), resolvedProgram)
@@ -448,6 +450,15 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		i.pendingAccountSwapUnwritten = true
 		refreshMission, missionFrom = live.Manual, live.From
 		i.touchLocked()
+	} else if live := i.pendingAccountSwap; blindResumed && live != nil && live.To == name && live.CarriedConversationID == "" &&
+		live.ConversationID == conversation.ID {
+		// The record keeps the committed id the re-launch resumes and says why
+		// the launch resumes it without a listing's proof: the API answer and
+		// the notice report CarryFallback (#7596). The mission is not refreshed:
+		// it was rendered for the conversation this resume keeps.
+		live.CarryFallback = blindCommittedResumeReason
+		i.pendingAccountSwapUnwritten = true
+		i.touchLocked()
 	}
 	i.mu.Unlock()
 	if replaced != "" {
@@ -458,6 +469,10 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 			// no longer runs (demotePendingAccountSwapCarry's case).
 			i.refreshPendingManualAccountSwapMission(missionFrom, name)
 		}
+	}
+	if blindResumed {
+		log.WarningLog.Printf("account swap for %q re-launches its replacement resuming committed conversation %s, because %s",
+			i.Title, conversation.ID, blindCommittedResumeReason)
 	}
 	// The pane and the API response say why; af's log must too (#7152). A
 	// re-plan after a failed copy is the copy's own refusal, logged there.
