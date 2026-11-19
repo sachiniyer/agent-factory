@@ -449,6 +449,23 @@ func TestProjectUnion_DoesNotReprobeASlowRootAgentKeyOnTheLoop(t *testing.T) {
 	require.NoError(t, os.Mkdir(key, 0o755))
 	h.appConfig.RootAgents[key] = config.RootAgentConfig{}
 
+	// Every read also opens the key's Git probe — a non-repo directory whose
+	// "not a repository" verdict resolveProjectPaths deliberately never
+	// caches, so the probe re-opens on every read. One that misses its window
+	// falls back to a bounded stat of the key as the absence check
+	// (probeProjectPath): a mount lookup this test does not assert about,
+	// whose firing depends on how fast Git happens to be that day (#7612).
+	// Answer it at once so the count reads the key's spelling resolves alone —
+	// the cache, not the probe, is the property under test.
+	repoProbe := projectPathRepoProbe
+	projectPathRepoProbe = func(ctx context.Context, path string) (*config.RepoContext, error) {
+		if onStalledMount([]string{key}, path) {
+			return nil, config.ErrNotGitRepository
+		}
+		return repoProbe(ctx, path)
+	}
+	t.Cleanup(func() { projectPathRepoProbe = repoProbe })
+
 	var loop sync.WaitGroup
 	t.Cleanup(loop.Wait)
 	lookups := mountForUnionTest(t, []string{key}, unionBound, unionBound*6/10)
