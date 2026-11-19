@@ -468,12 +468,51 @@ func (p *dockerProvisioner) deliverPayload() error {
 	return nil
 }
 
+// dockerStagingEngineFileName is the marker provisioning writes inside each
+// staging dir naming the engine identity (`docker info` .ID) the provision
+// resolved before staging — the same engine `docker run` targets. The orphan
+// sweep (#7590) may only reclaim a dir on the engine that created it: a dir
+// with no marker, a malformed one, or one naming a different engine is kept,
+// because a container binding it could still exist where the current listing
+// cannot see it.
+const dockerStagingEngineFileName = "engine-id"
+
+// dockerStagingHomeFileName records the af.home label spelling the container
+// will be stamped with (p.homeID, resolved once in provision and stamped by
+// runArgs) beside the staged payload. The sweep's `docker ps` filter matches
+// the label lexically, so an AGENT_FACTORY_HOME that reached the same real
+// directory through a different path spelling — a symlinked component, a
+// trailing slash — leaves a binding container invisible to the listing. A dir
+// whose recorded spelling differs from the sweep's filter value is kept:
+// "not listed" under one spelling proves nothing about the other (Codex on
+// #7616).
+const dockerStagingHomeFileName = "home-id"
+
+// dockerStagingGenerationFileName records the daemon generation that minted
+// the staging dir: the basename of this process's own generation dir under
+// <home>/tunnels (the #7495 machinery — one d<pid>-<rand> dir per daemon
+// generation, its .lock flock held for the process's life). The sweep's
+// candidacy rule is proven by that lock, never by a slug snapshot a
+// provision can outrun: a dir whose recorded generation's lock is still
+// held was minted by a LIVE af process — this daemon, or a predecessor
+// mid-upgrade — and is never a candidate, however it came to be enumerated.
+// Only a generation whose lock provably freed (or whose dir the lock-gated
+// generation sweep already removed) may proceed to the other proofs.
+const dockerStagingGenerationFileName = "generation-id"
+
 // dockerStagingDir is the per-session staging root beneath the AF home: mode
 // 0700, unique per provision, removed on reap. The unique suffix keeps two
 // projects that share a session title from colliding, and makes a leftover
 // directory identifiable rather than ambiguous. The leaf is created with an
 // EXCLUSIVE os.Mkdir: a pre-existing leaf is collision or residue, so a fresh
 // suffix is tried rather than silently sharing or reusing a directory.
+//
+// The identity markers are best-effort: provisionSteps resolves p.engineID
+// before staging begins, and provision resolves p.homeID before the
+// provisioner exists, so the writes name the engine and home-label spelling
+// the container carries. A failed write degrades the dir to "unrecorded" —
+// the sweep keeps it — rather than failing a provision whose payload staging
+// would have succeeded.
 func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 	afHome, err := config.GetConfigDir()
 	if err != nil {
@@ -492,6 +531,7 @@ func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 		err := os.Mkdir(dir, 0o700)
 		switch {
 		case err == nil:
+			p.recordStagingIdentity(dir)
 			return dir, nil
 		case os.IsExist(err):
 			continue
@@ -500,6 +540,33 @@ func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("backend=docker: cannot create the session staging dir under %s: every candidate name already exists", root)
+}
+
+// recordStagingIdentity writes the generation, engine and home markers
+// beside the staged payload. An empty engineID — a caller that staged before
+// the engine was resolved — or an empty homeID — a provision whose af.home
+// label could not be resolved and was omitted — records nothing for that
+// half, which the sweep reads as unrecorded and keeps. A home spelling
+// containing a newline or NUL cannot round-trip the marker format either, so
+// it is likewise left unrecorded. A generation that cannot be established —
+// the tunnels root unverifiable — is left unrecorded the same way rather
+// than failing a provision whose payload staging would have succeeded.
+func (p *dockerProvisioner) recordStagingIdentity(dir string) {
+	if genDir, err := tunnelGenerationDir(); err != nil {
+		log.WarningLog.Printf("docker runtime: cannot resolve this daemon's generation dir for staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)
+	} else if err := os.WriteFile(filepath.Join(dir, dockerStagingGenerationFileName), []byte(filepath.Base(genDir)+"\n"), 0o600); err != nil {
+		log.WarningLog.Printf("docker runtime: cannot record the daemon generation beside staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)
+	}
+	if p.engineID != "" {
+		if err := os.WriteFile(filepath.Join(dir, dockerStagingEngineFileName), []byte(p.engineID+"\n"), 0o600); err != nil {
+			log.WarningLog.Printf("docker runtime: cannot record the engine identity beside staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)
+		}
+	}
+	if p.homeID != "" && !strings.ContainsAny(p.homeID, "\n\r\x00") {
+		if err := os.WriteFile(filepath.Join(dir, dockerStagingHomeFileName), []byte(p.homeID+"\n"), 0o600); err != nil {
+			log.WarningLog.Printf("docker runtime: cannot record the home label beside staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)
+		}
+	}
 }
 
 // stageContainerPayload copies every file af owns into the staging dir with the

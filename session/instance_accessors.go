@@ -969,3 +969,30 @@ func (i *Instance) AddWebTabForTest(name, url string) {
 	i.Tabs = append(i.Tabs, &Tab{ID: newTabID(), Name: name, Kind: TabKindWeb, URL: url})
 	i.touchLocked()
 }
+
+// DockerStagingDirClaim returns the docker-staging dir base name this
+// session's cleanup record still owns — the <slug>-<hex> leaf under
+// <AF home>/docker-staging that teardown removes on reap (#7577 item 2, the
+// #7590 keep set). "" on a non-docker backend, a backend carrying no cleanup
+// handle, or a restored handle whose recorded name failed the ownership shape
+// — in each case no teardown will reach the dir, so the staging sweep treats
+// the name as unclaimed.
+func (i *Instance) DockerStagingDirClaim() string {
+	// i.mu must span the backend read AND runtimeCleanupData's cleanup-pointer
+	// copy: resetRemoteRuntime and clearDischargedRuntimeCleanup nil
+	// b.cleanup under the same write lock, so currentBackend's snapshot alone
+	// leaves the copy racing the clear (ToInstanceData does the same pair
+	// under i.mu). A "" read after the clear is also the right answer — the
+	// discharge follows a confirmed reap, so the dir is already unowned.
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	provider, ok := i.backend.(runtimeCleanupProvider)
+	if !ok {
+		return ""
+	}
+	data := provider.runtimeCleanupData()
+	if data == nil || data.Docker == nil {
+		return ""
+	}
+	return data.Docker.StagingDir
+}

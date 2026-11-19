@@ -265,22 +265,22 @@ func localSetupPayloadSessionDir(sessionID string) (string, bool) {
 	return filepath.Join(home, setupStagingRootName, sessionID), true
 }
 
-// openVerifiedStagingRoot opens the af-setup root for confined removals, and
-// only when it is a REAL directory: Lstat must say dir (a symlinked root — an
-// operator moved af-setup to a data disk or shared it between two homes —
-// would have every removal under it empty the shared TARGET, taking other
-// homes' payloads with it), and the opened handle must name the same inode
-// the check approved (os.SameFile), closing the swap window between the
-// check and the first removal. A symlinked AF home path itself stays
-// allowed; only this one entry is checked.
+// openVerifiedStagingRoot opens the named staging root (<home>/<rootName>)
+// for confined removals, and only when it is a REAL directory: Lstat must say
+// dir (a symlinked root — an operator moved the staging root to a data disk
+// or shared it between two homes — would have every removal under it empty
+// the shared TARGET, taking other homes' payloads with it), and the opened
+// handle must name the same inode the check approved (os.SameFile), closing
+// the swap window between the check and the first removal. A symlinked AF
+// home path itself stays allowed; only this one entry is checked.
 //
 // Returns (nil, root, nil) when the entry is missing — the common
 // nothing-staged case — and (nil, root, errNotRealDir) when it exists but is
 // not usable, so the caller's refusal log can name the real path either way.
 var errNotRealDir = errors.New("not a real directory")
 
-func openVerifiedStagingRoot(home string) (*os.Root, string, error) {
-	root := filepath.Join(home, setupStagingRootName)
+func openVerifiedStagingRoot(home, rootName string) (*os.Root, string, error) {
+	root := filepath.Join(home, rootName)
 	info, err := os.Lstat(root)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -402,7 +402,7 @@ func DiscardLocalSetupPayload(title, sessionID string) {
 		return
 	}
 	home := filepath.Dir(filepath.Dir(dir))
-	root, rootPath, err := openVerifiedStagingRoot(home)
+	root, rootPath, err := openVerifiedStagingRoot(home, setupStagingRootName)
 	switch {
 	case errors.Is(err, errNotRealDir):
 		// Staging refuses to write under a linked root, so the usual case
