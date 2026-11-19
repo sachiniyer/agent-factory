@@ -31,6 +31,19 @@ var sweepStaleTunnelSocketDirs = session.SweepStaleTunnelSocketDirs
 // consumes. Package-level so tests can stub the filesystem work.
 var sweepStaleSetupPayloads = session.SweepStaleSetupPayloads
 
+// sweepOrphanedStagingDirs removes docker-staging/<slug>-<hex> dirs no live
+// session record claims, once no container on this engine can still bind them
+// (#7590). It runs in the same deferred pass and under the same
+// skipped-repos gate — its keep sets are built in the same breath as the
+// container sweep's protected slugs — but deliberately AFTER the
+// createSweepMu admission barrier is released: a dir a mid-pass provision
+// minted (a restore's reprovision, a lazily registered row — paths the
+// barrier never covered) is kept by its recorded generation's held lock, not
+// by the snapshot, so the pass's filesystem reads and removals never hold
+// create admission with no deadline (#7616 R1/R3). Package-level so tests
+// can stub the docker and filesystem work.
+var sweepOrphanedStagingDirs = session.SweepOrphanedStagingDirs
+
 // stopSandboxTunnels stops every live sandbox tunnel this daemon spawned.
 // Registered as a RunDaemon defer at manager construction so every exit path —
 // SIGTERM, the Shutdown RPC, an early warm-up return — runs it. A session's own
@@ -138,16 +151,24 @@ func sweepStartupOrphanSandboxTunnels() {
 // that take m.mu alone — holding m.mu through external Docker work would stall
 // the whole daemon on an unavailable engine. The slug collection is inlined
 // because a factored helper would acquire m.mu itself.
+//
+// The staging-dir sweep does NOT ride the barrier: its candidacy is proven
+// by each candidate's recorded generation lock — which covers every mint
+// path, not only the creates the barrier admits (#7616 R1) — so it runs
+// after createSweepMu is released, keeping its reads and removals off the
+// admission path entirely (#7616 R3). The container sweep cannot move out
+// the same way: its protected set is only as fresh as the snapshot, which
+// is exactly what the barrier exists to keep coherent.
 func runDeferredOrphanSweepIfReady(manager *Manager) {
 	homeID, err := configDirForReap()
 	if err != nil {
 		return
 	}
 	manager.createSweepMu.Lock()
-	defer manager.createSweepMu.Unlock()
 	manager.mu.Lock()
 	if !manager.deferredOrphanSweepArmed || len(manager.skippedRepos) > 0 {
 		manager.mu.Unlock()
+		manager.createSweepMu.Unlock()
 		return
 	}
 	manager.deferredOrphanSweepArmed = false
@@ -158,9 +179,19 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 	// exactly when it is not.
 	titles := make([]string, 0, len(manager.instances)+len(manager.pendingCreates))
 	keepIDs := make(map[string]bool, len(manager.instances)+len(manager.pendingCreates))
+	keepStaging := make(map[string]bool)
 	for _, inst := range manager.instances {
 		titles = append(titles, inst.Title)
 		keepIDs[inst.ID] = true
+		// The docker-staging keep set is per NAME, not per slug: a tombstoned
+		// row still owns its <slug>-<hex> dir through the teardown handle,
+		// while a slug alone cannot name which of two same-title provisions
+		// staged it. Rows whose cleanup carries no staging claim contribute
+		// nothing — a dir they never recorded is the orphan this pass exists
+		// to reclaim.
+		if name := inst.DockerStagingDirClaim(); name != "" {
+			keepStaging[name] = true
+		}
 	}
 	for key, pending := range manager.pendingCreates {
 		keepIDs[pending.ID] = true
@@ -177,6 +208,18 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 	manager.mu.Unlock()
 	sweepOrphanContainers(homeID, slugs)
 	sweepStaleSetupPayloads(keepIDs)
+	manager.createSweepMu.Unlock()
+	// The staging sweep runs AFTER the admission barrier is released: a dir
+	// minted mid-pass — by a restore's reprovision, a lazily registered row,
+	// handoff or move, none of which take createSweepMu — is kept by its
+	// recorded generation's held lock, proven at decision time rather than
+	// assumed by the earlier snapshot (#7616 R1). So the pass needs nothing
+	// the barrier gives it, and its filesystem reads, Docker calls and
+	// removals must never hold create admission with no deadline (#7616 R3).
+	// It still runs after the container sweep, so a same-slug orphan
+	// container is already gone when it lists — a dir whose binder was just
+	// reaped is reclaimed in the same pass (#7590).
+	sweepOrphanedStagingDirs(homeID, keepStaging, slugs)
 }
 
 // launchDeferredOrphanSweepIfReady starts the deferred orphan sweep on a

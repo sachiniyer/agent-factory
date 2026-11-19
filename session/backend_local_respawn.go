@@ -305,6 +305,10 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 						err, rebuildErr, freshRebuildRefusal(decline)),
 				}
 			}
+			if decline.notice != "" {
+				log.WarningLog.Printf("session %q: resuming its recorded conversation %s without verifying it first, because %s",
+					i.Title, i.resumableConversation().ID, decline.notice)
+			}
 			if freshErr := gw.RebuildFreshFromRecordedBase(); freshErr != nil {
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
@@ -465,6 +469,13 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	}
 	reattachedVerified := false
 	if restoreResult == tmux.RestoreRespawned {
+		// A blind resume's notice names only a resume that happened: a reattach
+		// to a live pane keeps its own conversation, so the plan's notice is
+		// carried to this branch rather than logged at plan time (#7609 review).
+		if refusal.notice != "" {
+			log.WarningLog.Printf("session %q: resumed its recorded conversation %s without verifying it first, because %s",
+				i.Title, i.resumableConversation().ID, refusal.notice)
+		}
 		// RuntimeProgram holds the clean base command that was actually launched,
 		// not the pane-fallback base an account swap's proof may have been
 		// declared against (that base carries af's own injected flags, and
@@ -786,6 +797,7 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 		switch {
 		case ok:
 			program = rewritten
+			refusal.notice = decline.notice
 		case decline.startsOnRecorded:
 			// The recorded id holds no transcript: start Claude on it (#7215).
 			program = rewritten
@@ -830,6 +842,10 @@ type resumeRefusal struct {
 	// spawn does not commit (stageReplacementConversation); zero when the
 	// agent's launch names none (planReplacementConversation).
 	replacement AgentConversationData
+	// notice names a blind resume the plan still launches (resumeDecline's
+	// notice): the caller logs it only once a respawn actually resumes — a
+	// reattach to a live pane resumes nothing (#7609 review).
+	notice string
 }
 
 // exactResumeRefusal turns prepareExactResumeConversation's decline into the

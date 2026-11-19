@@ -211,7 +211,7 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "the banner poll script — `cat <banner>; kill -0 $(cat <pidfile>)` — composed from af " +
 			"constants only; the operator's program name never reaches it",
 	}},
-	"session/backend_docker.go:(*dockerProvisioner).execSh": {{
+	"session/backend_docker_env.go:(*dockerProvisioner).execSh": {{
 		class: afAuthored, note: "af's container setup scripts (chmod, mkdir), composed with shellQuote",
 	}},
 	"session/backend_docker_account.go:(*dockerProvisioner).execSessionSh": {{

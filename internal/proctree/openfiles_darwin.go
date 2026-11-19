@@ -103,6 +103,16 @@ func listProcFds(pid int) ([][]byte, error) {
 	return nil, errProcFdPathFailed
 }
 
+// fdClosedSinceListing reports whether a per-fd proc_pidfdinfo failure means
+// the descriptor closed between listProcFds and the query — a benign race the
+// caller treats as a smaller open set, never as a failed read. Every per-fd
+// walk over a live process's fd table (vnode paths, sockets, pipes, ptys)
+// skips such an fd; a live test that queries the same table applies the same
+// rule.
+func fdClosedSinceListing(err error) bool {
+	return errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.ENOENT)
+}
+
 // procFdPath resolves one vnode fd to its absolute path. gone covers the fd
 // having been closed between listing and resolution; !ok covers real
 // failures so a partially-read descriptor set never looks like an empty one.
@@ -111,7 +121,7 @@ func procFdPath(pid, fd int) (path string, ok bool, gone bool) {
 	n, err := procInfoRaw(procInfoCallPIDFDInfo, pid, procPIDFdVnodePathInfo,
 		uint64(fd), unsafe.Pointer(&buf[0]), int32(len(buf)))
 	if err != nil {
-		if errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ESRCH) {
+		if fdClosedSinceListing(err) || errors.Is(err, syscall.ESRCH) {
 			return "", false, true
 		}
 		return "", false, false

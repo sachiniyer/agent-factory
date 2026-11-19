@@ -46,6 +46,11 @@ type resumeDecline struct {
 	// instead of resuming it: the store listed cleanly and holds no transcript
 	// for it (recordedClaudeDecline). The id stays the record.
 	startsOnRecorded bool
+	// notice names a launch that proceeds on a look that says nothing about
+	// the id — a blind resume, which may exit at launch if the transcript is
+	// absent (#7600). It is its own channel, never reason: reason refuses and
+	// its readers render a refusal, where a resume keeps the earlier turns.
+	notice string
 }
 
 func declineResume(reason string) resumeDecline { return resumeDecline{reason: reason} }

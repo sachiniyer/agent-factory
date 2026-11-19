@@ -21,7 +21,7 @@ const staleCommittedConversationReason = "the conversation the replacement start
 // — that the notice and the log render after "because", and it names only the
 // store's non-answer: never a claim that a listing af could not read proved
 // the transcript (#7602 review).
-const blindCommittedResumeReason = "its transcript store could not be listed"
+const blindCommittedResumeReason = blindResumeUnverifiedReason
 
 // committedConversationLaunch plans the re-launch of a committed replacement on
 // the fresh conversation id its commit recorded (#7214). The first launch
@@ -70,7 +70,7 @@ func (i *Instance) committedConversationLaunch(program, workDir, account, id str
 		return launch, conversation, false, false, false
 	}
 	lookStarted := fsprobe.FlightNow()
-	verdict := i.judgeRecordedClaude(program, workDir, id)
+	verdict, _ := i.judgeRecordedClaude(program, workDir, id)
 	nameable := verdict == recordedClaudeBlind && i.claudeStoreNameable(program, workDir)
 	if nameable {
 		verdict = i.rejudgeRecordedClaude(program, workDir, id, lookStarted.Add(fsprobe.ProbeBound()))
@@ -145,7 +145,10 @@ func (i *Instance) rejudgeRecordedClaude(program, workDir, id string, deadline t
 		return recordedClaudeBlind
 	}
 	done := make(chan recordedClaudeVerdict, 1)
-	go func() { done <- i.judgeRecordedClaude(program, workDir, id) }()
+	go func() {
+		verdict, _ := i.judgeRecordedClaude(program, workDir, id)
+		done <- verdict
+	}()
 	timer, stop := fsprobe.FlightTimer(deadline)
 	defer stop()
 	select {

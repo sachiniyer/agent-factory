@@ -99,6 +99,7 @@ func cloneAccountSwapData(data *AccountSwapData) *AccountSwapData {
 	}
 	copy := *data
 	copy.OriginalStartupStateUnknown = cloneBoolPointer(data.OriginalStartupStateUnknown)
+	copy.CrossAgent = cloneBoolPointer(data.CrossAgent)
 	return &copy
 }
 

@@ -256,17 +256,62 @@ func warnSkippedMount(s skippedMount, owner string) {
 // PATH-resolved program decides the verdict. It runs after the rootfs
 // chowns, so a just-re-owned ancestor (a root-owned 0700 HOME, say) is
 // already traversable when a mount beneath it is checked.
+//
+// The shell does not report its verdict through the exit status: a bare
+// docker CLI exit 1 cannot tell `test`'s false verdict apart from an
+// exec-create or API-phase failure that never ran the shell — a full data
+// root that cannot create dockerd's exec bookkeeping fails the CLI with
+// exit 1 exactly so — and classifying that infrastructure failure
+// dockerOpLocal would reproduce the lost-restore misclassification the op
+// class exists to prevent (#7630 review). So the script prints a distinct
+// sentinel on stdout — af-probe:ok when the test passes, af-probe:denied
+// when it fails — and exits 0 either way; only the sentinel proves the
+// in-container shell ran and reached the verdict it reports.
+//
+// The outcomes then classify so provision()'s capacity probe attaches
+// dockerRootFSFullEvidence only when the failure could have been a
+// data-root write (not a local refusal):
+//   - af-probe:denied on a clean exec is `test`'s false verdict — the
+//     directory is not writable by the session's user — af's own refusal,
+//     never a filesystem verdict, so it carries dockerOpLocal, the only
+//     class provision() excludes from the capacity evidence.
+//   - af-probe:ok on a clean exec takes the same path a bare exit-0
+//     verdict did before: the mounted directory is already writable, the
+//     skip costs the session nothing, and the guard's warning stands.
+//   - every other outcome is docker/exec infrastructure, never the
+//     verdict: no sentinel, an unexpected or contradictory one, ANY
+//     non-zero exit (even beside a sentinel — printing one is the script's
+//     exit-0 path, so a sentinel next to a non-zero exit is contradictory
+//     evidence, not proof), a transport error, or a poll deadline. `test`
+//     is a shell builtin writing nothing container-side, so the only
+//     data-root writes anyone made were dockerd's privileged exec
+//     bookkeeping — the same read-only-exec shape the sibling id -u /
+//     stat -c %u:%g probes already classify dockerOpDaemonWrite. Treating
+//     the infra shape the same way keeps a full-data-root ENOSPC, which
+//     fails the probe by failing the exec bookkeeping, on
+//     dockerOpDaemonWrite so provision() joins the typed-errno evidence
+//     the lost-restore classifier waits on.
 func (p *dockerProvisioner) reportSkippedMount(s skippedMount, owner string) error {
 	out, err := p.docker(dockerShortStepTimeout,
 		"exec", "--user", owner, p.containerID, dockerContainerShell, "-c",
-		`test -w "$1" && test -x "$1"`, "sh", s.real)
-	if err == nil {
+		skippedMountProbeScript, "sh", s.real)
+	verdict := skippedMountProbeOutcome(out, err)
+	if verdict == skippedMountProbeWritable {
 		warnSkippedMount(s, owner)
 		return nil
 	}
-	probe := fmt.Sprintf("%v", err)
-	if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
-		probe += ": " + trimmed
+	// probe is the diagnostic the refusal's "(%s)" clause prints: the
+	// exec's error plus whatever the combined output held — and for a
+	// denied verdict, where err is nil, the sentinel itself.
+	probe := strings.TrimSpace(string(out))
+	if err != nil {
+		if probe == "" {
+			probe = fmt.Sprintf("%v", err)
+		} else {
+			probe = fmt.Sprintf("%v: %s", err, probe)
+		}
+	} else if probe == "" {
+		probe = "the probe returned no verdict"
 	}
 	// The mount named here is the CONTAINER path mountinfo reports — the
 	// mount table cannot recover a host source, so the remedy is phrased per
@@ -275,9 +320,78 @@ func (p *dockerProvisioner) reportSkippedMount(s skippedMount, owner string) err
 	// and no host path — its content must be made writable (a helper
 	// container chown, or ownership fixed in the image) or the mount
 	// dropped (#7571 review R9).
+	op := dockerOpDaemonWrite
+	if verdict == skippedMountProbeDenied {
+		op = dockerOpLocal
+	}
 	return dockerStepErr(fmt.Errorf(
 		"backend=docker: refusing to prepare the docker session %s %s: it is inside the mount %s, which af must not chown or create through — and the session's user %s cannot write it as mounted (%s), so the clone and the agent's own writes would only fail with \"Permission denied\" later; make the mounted directory writable by %s — the remedy depends on where the mount came from: for a host bind, chown the mounted host directory to that user or remove the bind from docker.run_args; for a named or image volume, chown the volume's content to that user (for example `docker run --rm -v <volume>:/d alpine chown -R %s /d`) or fix ownership in the image; or drop the mount",
-		s.kind, s.real, s.mp, owner, probe, owner, owner), dockerOpLocal)
+		s.kind, s.real, s.mp, owner, probe, owner, owner), op)
+}
+
+// skippedMountSentinelOK and skippedMountSentinelDenied are the sentinels
+// the writability probe's shell prints on stdout — the only evidence the
+// in-container `test` ran and which verdict it reached. `echo` is a /bin/sh
+// builtin like `test`, so printing them asks nothing new of the image.
+const (
+	skippedMountSentinelOK     = "af-probe:ok"
+	skippedMountSentinelDenied = "af-probe:denied"
+)
+
+// skippedMountProbeScript is reportSkippedMount's writability probe: the
+// session's user tests the mounted directory and the shell prints the
+// verdict's sentinel, exiting 0 either way — the verdict rides the output,
+// not the exit status, because a bare docker CLI exit 1 cannot tell
+// `test`'s false verdict from an exec-create/API-phase failure that never
+// ran the shell (a full data root fails the exec bookkeeping the same way).
+const skippedMountProbeScript = `if test -w "$1" && test -x "$1"; then echo ` +
+	skippedMountSentinelOK + `; else echo ` + skippedMountSentinelDenied + `; fi`
+
+// skippedMountProbeVerdict is the skipped-mount probe's provable outcome.
+type skippedMountProbeVerdict int
+
+const (
+	// skippedMountProbeInfra is every outcome where the shell's verdict was
+	// not proven — docker/exec infrastructure, never `test`'s answer.
+	skippedMountProbeInfra skippedMountProbeVerdict = iota
+	// skippedMountProbeWritable means the probe printed af-probe:ok on a
+	// clean exec: the mounted directory is writable by the session's user.
+	skippedMountProbeWritable
+	// skippedMountProbeDenied means the probe printed af-probe:denied on a
+	// clean exec: `test`'s false verdict — af's own refusal.
+	skippedMountProbeDenied
+)
+
+// skippedMountProbeOutcome reads the probe's provable verdict out of a
+// finished exec: a clean (exit 0) exec whose combined output carries
+// exactly one sentinel line. A non-zero exit, a transport error or a
+// deadline is infrastructure regardless of what the output holds — the
+// sentinel marks the script's own exit-0 path, so a sentinel-shaped line
+// next to a non-zero exit means the exec was cut or that text came from
+// elsewhere, and proves nothing. No sentinel, or both, proves nothing
+// either: daemon noise in the merged stdout/stderr stream is ignored per
+// line, but the sentinel itself must appear as a whole line.
+func skippedMountProbeOutcome(out []byte, err error) skippedMountProbeVerdict {
+	if err != nil {
+		return skippedMountProbeInfra
+	}
+	var sawOK, sawDenied bool
+	for _, line := range strings.Split(string(out), "\n") {
+		switch strings.TrimSpace(line) {
+		case skippedMountSentinelOK:
+			sawOK = true
+		case skippedMountSentinelDenied:
+			sawDenied = true
+		}
+	}
+	switch {
+	case sawDenied && !sawOK:
+		return skippedMountProbeDenied
+	case sawOK && !sawDenied:
+		return skippedMountProbeWritable
+	default:
+		return skippedMountProbeInfra
+	}
 }
 
 // prepareNonAccountUser mirrors prepareAccountUser for a session with no

@@ -54,7 +54,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -79,6 +78,11 @@ var (
 // throwawayKillTimeout bounds each tmux kill-server during teardown so a
 // wedged server cannot stall the unwind.
 const throwawayKillTimeout = 3 * time.Second
+
+// throwawayOwnerSettleBound caps the watchdog's one last owner look at stop
+// (#7620 R2): long enough for a healthy kern.proc read, short enough that a
+// wedged one still resolves the decision as "never will" quickly.
+var throwawayOwnerSettleBound = 500 * time.Millisecond
 
 // The startup sweep runs inside daemon startup, so the EXPENSIVE half is
 // bounded: throwawaySweepMaxHomes caps how many teardowns one start will
@@ -191,86 +195,6 @@ func recordThrowawayDaemon(home string) {
 	rec := throwawaysandbox.RecordedPID{PID: cur.PID, StartID: cur.StartID, BootID: boot, NSID: ns}
 	if err := throwawaysandbox.WriteRecordedPID(home, rec); err != nil {
 		log.WarningLog.Printf("throwaway sandbox daemon could not record its pid in %s: %v", home, err)
-	}
-}
-
-// armThrowawayWatchdog starts the sandbox's self-enforcement: fire closes
-// when the marker's deadline passes or, when an owner was declared, the
-// owner is proven dead. The returned func stops the watcher without firing.
-// An already-expired marker fires immediately — a sandbox discovered past
-// its deadline does not get a second start.
-func armThrowawayWatchdog(m *throwawaysandbox.Marker, fire chan<- struct{}) func() {
-	stop := make(chan struct{})
-	var once sync.Once
-	expire := func(reason string) {
-		once.Do(func() {
-			log.InfoLog.Printf("throwaway sandbox (kind %s): %s; ending the daemon and tearing the sandbox down", m.Kind, reason)
-			close(fire)
-		})
-	}
-	go func() {
-		wait := m.Deadline().Sub(throwawayNowFn())
-		if wait <= 0 {
-			expire(fmt.Sprintf("creation deadline passed %s ago", (-wait).Round(time.Second)))
-			return
-		}
-		deadline := time.NewTimer(wait)
-		defer deadline.Stop()
-		var ownerC <-chan time.Time
-		var ownerTick *time.Ticker
-		if m.OwnerPID > 0 {
-			ownerTick = time.NewTicker(throwawayCheckInterval)
-			defer ownerTick.Stop()
-			ownerC = ownerTick.C
-		}
-		for {
-			select {
-			case <-stop:
-				return
-			case <-deadline.C:
-				expire(fmt.Sprintf("reached its %ds lifetime", m.MaxLifetimeSeconds))
-				return
-			case <-ownerC:
-				if throwawayOwnerDead(m) {
-					expire(fmt.Sprintf("declared owner pid %d is gone", m.OwnerPID))
-					return
-				}
-			}
-		}
-	}()
-	return func() { close(stop) }
-}
-
-// throwawayOwnerDead reports whether the marker's declared owner is PROVEN
-// gone. The verdicts mirror the orphan-sweep stamp logic: a process the code
-// cannot look at, a pid in another namespace, or an unreadable scope is
-// "unknown", and unknown is never dead.
-func throwawayOwnerDead(m *throwawaysandbox.Marker) bool {
-	if m.OwnerPID <= 0 {
-		return false
-	}
-	curBoot, curNs := throwawayScopeIDsFn()
-	// A stamp from another pid namespace names a number space this process
-	// cannot read — the owner may be alive there.
-	if m.OwnerNsID != "" && curNs != "" && m.OwnerNsID != curNs {
-		return false
-	}
-	// Different boots are proof of death only when both ids are the kernel's
-	// strong UUID; the pidns fallback can disagree across a shared namespace.
-	if m.OwnerBootID != "" && curBoot != "" && m.OwnerBootID != curBoot &&
-		!proctree.BootIDIsFallback(m.OwnerBootID) && !proctree.BootIDIsFallback(curBoot) {
-		return true
-	}
-	cur, err := throwawayLookupFn(m.OwnerPID)
-	switch {
-	case errors.Is(err, proctree.ErrProcessExited), errors.Is(err, os.ErrNotExist), errors.Is(err, syscall.ESRCH):
-		return true
-	case err != nil:
-		return false // could not look is not dead
-	case m.OwnerStartID != 0 && cur.StartID != m.OwnerStartID:
-		return true
-	default:
-		return false
 	}
 }
 

@@ -21,6 +21,28 @@ type AccountSwapData struct {
 	// agent) and on records written before the field existed, where recovery
 	// falls back to the old derivation.
 	AccountAgent string `json:"account_agent,omitempty"`
+	// CrossAgent is the frozen admission verdict on whether the swap changes
+	// the agent — pinned at commit beside AccountAgent and Program so the
+	// recorded mission's RE-render (a /clear re-mint, a carry demotion)
+	// threads the same #4778 CrossAgent the daemon's commit-time build does
+	// rather than re-deriving it post-commit from CurrentAgentName(). At
+	// refresh time the live identity may already answer the INCOMING runtime
+	// the checkpoint installed (a committed codex->claude swap that re-plans
+	// its committed Claude conversation after a /clear has the new agent
+	// bound) or be empty after teardown, so a re-derivation either collapses
+	// From == To onto Render's same-agent branch — and lies a carry was
+	// attempted across the agent boundary (agent-handoff D2) — or falls off
+	// the same-agent gate (From == ""). It is a pointer because the field's
+	// PRESENCE is the verdict's provenance (#7632 review R1): a recorded
+	// false — the same-agent commit whose account namespace drifted off the
+	// outgoing agent — must read as a recorded verdict, which a
+	// bool+omitempty pair cannot tell from a record older than the field.
+	// Nil only on records written before the field existed: refresh derives
+	// their branch from the recovered From vs AccountAgent comparison
+	// ManualAccountSwapProgram ran at commit — which agrees with admission's
+	// HandoffTargetIsCurrent refusal for every record the field could have
+	// been written for — and never lets one narrate a carry attempt.
+	CrossAgent *bool `json:"cross_agent,omitempty"`
 	// Program is the incoming launch command frozen at commit — the resolved
 	// base before conversation injection. A committed cross-agent swap can be
 	// recovered after the identity checkpoint but before the replacement

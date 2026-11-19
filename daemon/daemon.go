@@ -211,9 +211,25 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// throwaway home's daemon may never start again. The teardown reads the
 	// marker and the recorded pids and signals processes; it writes nothing in
 	// the home, so a concurrent abandoned writer there cannot disturb it.
-	throwawayExpired := false
+	//
+	// Every expiry gate decides from the channel's state at the moment it
+	// runs, never a copy taken earlier (#7620): the watchdog CLOSES
+	// throwawayExpireCh, so a non-blocking read is exact and repeatable, and
+	// each gate first calls settleThrowaway — which stops the watchdog and
+	// waits out its last decision — so the read is also FINAL: fired, or
+	// never will. A fire that lost a co-ready select or landed mid-drain is
+	// still observed by the gates below.
 	throwawayExpireCh := make(chan struct{})
+	throwawayFired := func() bool {
+		select {
+		case <-throwawayExpireCh:
+			return true
+		default:
+			return false
+		}
+	}
 	var throwawayHome string
+	settleThrowaway := func() {}
 	endThrowaway := func() {}
 	if homeDir, homeErr := config.GetConfigDir(); homeErr == nil {
 		throwawayHome = homeDir
@@ -221,11 +237,13 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 			registerThrowawaySandbox(homeDir)
 			recordThrowawayDaemon(homeDir)
 			stopWatch := armThrowawayWatchdog(marker, throwawayExpireCh)
+			var settleOnce sync.Once
+			settleThrowaway = func() { settleOnce.Do(stopWatch) }
 			var endOnce sync.Once
 			endThrowaway = func() {
 				endOnce.Do(func() {
-					stopWatch()
-					if throwawayExpired {
+					settleThrowaway()
+					if throwawayFired() {
 						throwawayTeardownFn(homeDir, marker)
 					}
 				})
@@ -443,7 +461,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// flow.
 	reapExpiredThrowawayContainers := throwawayHomeContainerReapFn
 	teardown.add("expired throwaway sandbox containers", func() {
-		if throwawayExpired {
+		settleThrowaway()
+		if throwawayFired() {
 			reapExpiredThrowawayContainers(throwawayHome)
 		}
 	})
@@ -587,7 +606,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		log.InfoLog.Printf("received shutdown request via control socket during instance restore; exiting")
 		return fatalAcceptShutdownErr()
 	case <-throwawayExpireCh:
-		throwawayExpired = true
 		return nil
 	}
 	// Upgrade candidates deliberately park before the orphan sweep. Preserve the
@@ -610,7 +628,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 			log.InfoLog.Printf("received shutdown request during upgrade probation; exiting")
 			return fatalAcceptShutdownErr()
 		case <-throwawayExpireCh:
-			throwawayExpired = true
 			return nil
 		}
 	}
@@ -761,10 +778,15 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	case <-upgradeExitCh:
 		log.InfoLog.Printf("quiescing for a daemon-owned upgrade hand-off")
 	case <-throwawayExpireCh:
-		throwawayExpired = true
 	}
 
 	joined := drainDaemon(manager, watchers, closeHTTP, closeControl, &controlClosed, stopCh, wg)
+
+	// Settle the expiry decision before any gate reads it (#7620): the fire
+	// a stop won against in the select, or one that closed mid-drain, is
+	// observable below; a deadline still short of the watchdog's arm when it
+	// settles is "never will" here and the next marked start's sweep owns it.
+	settleThrowaway()
 
 	if homeGone {
 		// Skip the final save: the home directory was deleted out from under
@@ -773,7 +795,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		// state the deletion was meant to remove.
 		return nil
 	}
-	if throwawayExpired {
+	if throwawayFired() {
 		// Same skip, for the same reason: the unwind-time teardown is about
 		// to empty this sandbox, so persisting live-session state into it
 		// would only be restored by a daemon that expires on the same marker.

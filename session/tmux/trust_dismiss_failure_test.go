@@ -52,7 +52,7 @@ func TestCheckAndHandleTrustPrompt_FailedDismissalStillReportsDialog(t *testing.
 		program string
 		content string
 	}{
-		{"claude folder trust", ProgramClaude, "Do you trust the files in this folder?\n❯ Yes  No"},
+		{"claude folder trust", ProgramClaude, "Do you trust the files in this folder?\n❯ Yes  No\n\n" + legacyTrustFooter},
 		{"codex directory trust", ProgramCodex, codexDirectoryTrustDialog},
 		{"aider doc trust", ProgramAider, aiderDocTrustDialog},
 	}

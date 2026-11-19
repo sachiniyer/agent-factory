@@ -637,6 +637,16 @@ Gemini's authentication off the selected account onto the host's Compute ADC
 entirely, and a `GIT_CONFIG_*` forward lets the operator — not the repository
 — supply git config into the session.
 
+Gemini's first-party endpoint overrides (`CODE_ASSIST_ENDPOINT`,
+`CODE_ASSIST_API_VERSION`, `GOOGLE_GEMINI_BASE_URL`,
+`GOOGLE_VERTEX_BASE_URL`) are pinned on an account-scoped session too, but
+**unconditionally** rather than keep-if-set: the three names gemini reads with
+falsy checks are installed defined-and-empty (gemini then falls back to the
+first-party default), while `CODE_ASSIST_ENDPOINT` — which gemini reads with a
+nullish coalesce that would treat defined-empty as a real — broken —
+endpoint — is dropped from the ambient environment and installed with that
+default instead.
+
 Where the keep-if-set test is evaluated is where the value lives, and that
 differs per backend:
 

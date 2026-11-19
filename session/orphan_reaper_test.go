@@ -47,6 +47,43 @@ func TestRunContainerOmitsHomeLabelWhenUnknown(t *testing.T) {
 	}
 }
 
+// TestRunContainerLabelsWinOverRunArgs is the Codex P2 on #7616: a run_args
+// `--label af.session=`/`af.home=` must never relabel the container — Docker
+// gives the last --label for a key precedence, so af emits its ownership
+// labels after p.runArgs and a repo value is dead on arrival.
+func TestRunContainerLabelsWinOverRunArgs(t *testing.T) {
+	var runArgs []string
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "run" {
+			runArgs = append([]string(nil), args...)
+		}
+		return nil, fmt.Errorf("stop after capturing docker run")
+	})()
+
+	p := &dockerProvisioner{
+		image:   "img:latest",
+		spec:    ProvisionSpec{Title: "my session"},
+		homeID:  "/home/af",
+		runArgs: []string{"--label", "af.session=foreign", "--label", "af.home=/elsewhere", "--network", "host"},
+	}
+	_ = p.runContainer()
+
+	sessionIdx := slices.Index(runArgs, "af.session=my-session")
+	homeIdx := slices.Index(runArgs, "af.home=/home/af")
+	require.NotEqual(t, -1, sessionIdx, "the af.session label must be emitted")
+	require.NotEqual(t, -1, homeIdx, "the af.home label must be emitted")
+	for i, a := range runArgs[sessionIdx+1:] {
+		require.NotContains(t, a, "af.session=", "arg %d: no competing af.session value may follow af's", sessionIdx+1+i)
+	}
+	for i, a := range runArgs[homeIdx+1:] {
+		require.NotContains(t, a, "af.home=", "arg %d: no competing af.home value may follow af's", homeIdx+1+i)
+	}
+	lastUser := slices.Index(runArgs, "--network")
+	require.NotEqual(t, -1, lastUser)
+	assert.Greater(t, sessionIdx, lastUser, "af's session label must come after run_args to win")
+	assert.Greater(t, homeIdx, lastUser, "af's home label must come after run_args to win")
+}
+
 // dockerExecStub builds a fake docker CLI for sweep tests: `info` returns an
 // engine id (per call, so a changed id can force an engine mismatch), `ps` returns
 // the given "<id>\t<slug>" lines, `rm` records the removed id. `context inspect`

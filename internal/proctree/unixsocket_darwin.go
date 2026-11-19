@@ -35,7 +35,7 @@ func unixSockets(pid int) ([]UnixSocket, error) {
 		n, err := procInfoRaw(procInfoCallPIDFDInfo, pid, procPIDFdSocketInfo,
 			uint64(fd), unsafe.Pointer(&buf[0]), int32(len(buf)))
 		if err != nil {
-			if errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.ENOENT) {
+			if fdClosedSinceListing(err) {
 				continue // closed since the listing: no longer held
 			}
 			if errors.Is(err, syscall.ESRCH) {

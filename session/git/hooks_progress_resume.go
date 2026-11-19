@@ -29,6 +29,7 @@ func waitForHookEntryRecoveryOutcome(ctx context.Context, p *hookProgress, index
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	var lastStateError, lastProbeError string
+	var probeOutage bool
 	for {
 		state, stateErr := p.entryState(index)
 		if stateErr != nil {
@@ -43,13 +44,21 @@ func waitForHookEntryRecoveryOutcome(ctx context.Context, p *hookProgress, index
 			}
 			live, probeErr := runningHookPrefixesForResume(p.Prefix)
 			if probeErr != nil {
-				if message := probeErr.Error(); message != lastProbeError {
+				// One warning per probe outage EPISODE, matching the adoption
+				// loop: the probe can transiently fail for a second reason
+				// mid-outage, and keying on the message re-warned every time
+				// the text flip-flopped (#4217). A changed reason goes to info.
+				if !probeOutage {
 					log.WarningLog.Printf("waiting to prove post-worktree hook entry %d claimant state: %v", index, probeErr)
-					lastProbeError = message
+					probeOutage = true
+				} else if message := probeErr.Error(); message != lastProbeError {
+					log.InfoLog.Printf("post-worktree hook entry %d claimant probe still failing: %v", index, probeErr)
 				}
+				lastProbeError = probeErr.Error()
 			} else {
-				if lastProbeError != "" {
+				if probeOutage {
 					log.InfoLog.Printf("post-worktree hook entry %d claimant probe recovered", index)
+					probeOutage = false
 					lastProbeError = ""
 				}
 				if len(live) == 0 {

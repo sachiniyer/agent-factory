@@ -44,6 +44,11 @@ import (
 //     (remoteClient == nil). The daemon's handoff-recovery gate (#5634) calls
 //     it to refuse retrying a mission on a client-less row before a readiness
 //     wait would burn against the deadRemoteAgentServer sentinel.
+//   - DockerStagingDirClaim — reads i.backend under i.mu.RLock so the backend
+//     lookup AND runtimeCleanupData's cleanup-pointer copy share the lock the
+//     cleanup writers (resetRemoteRuntime, clearDischargedRuntimeCleanup)
+//     take; currentBackend's shorter span would leave the copy racing the
+//     clear (Codex on #7616). The #7590 sweep's keep set.
 //
 // owesNoRuntimeTeardownLocked is deliberately NOT in this allowlist: it takes the
 // backend pointer its caller already read under i.mu as an argument and never
@@ -73,6 +78,7 @@ var backendReadersUnderLock = map[string]bool{
 	"FromInstanceDataWithContext":   true, // the same constructor body; FromInstanceData delegates to it (#6446)
 	"ReattachSandbox":               true,
 	"RemoteRuntimeUnbound":          true,
+	"DockerStagingDirClaim":         true,
 }
 
 // TestBackendFieldIsOnlyReadUnderLock is a source-level guard for #2096/#2165.

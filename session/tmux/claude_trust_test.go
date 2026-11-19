@@ -596,7 +596,7 @@ func TestCheckAndHandleTrustPrompt_UnreadableClaudeFolderTrustDialogIsRefused(t 
 func TestCheckAndHandleTrustPrompt_NonFolderClaudeGatesKeepTheEnterTap(t *testing.T) {
 	for _, tt := range []struct{ name, content string }{
 		{"MCP server trust", "New MCP server found. Do you trust this new MCP server?\n❯ 1. Yes\n  2. No\nEnter to confirm"},
-		{"legacy folder-trust wording", "Do you trust the files in this folder?\n❯ Yes  No"},
+		{"legacy folder-trust wording", "Do you trust the files in this folder?\n❯ Yes  No\n\n" + legacyTrustFooter},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			handled, cmds := runTrustPromptCheck(t, ProgramClaude, tt.content)
@@ -1040,12 +1040,14 @@ func TestCheckAndHandleTrustPrompt_QuotedLegacyFolderTrustDialogInjectsNothing(t
 }
 
 // The same guard from the other side: a pane showing the REAL legacy dialog —
-// the picker row last, nothing painted below it — still fires Enter, so the
-// guard does not stop af answering a genuine launch gate. The legacy dialog's
-// affirmative option's preselection is "Yes", so a bare Enter accepts it, the
-// same way the MCP branch taps Enter on Claude Code's MCP preselection.
+// the picker, then its footer last, nothing painted below it — still fires
+// Enter, so the guard does not stop af answering a genuine launch gate. The
+// legacy dialog's affirmative option's preselection is "Yes", so a bare Enter
+// accepts it, the same way the MCP branch taps Enter on Claude Code's MCP
+// preselection. Every build that paints the dialog paints that footer last
+// (#7584), and af answers only once it is whole.
 func TestCheckAndHandleTrustPrompt_RealLegacyFolderTrustDialogStillFiresEnter(t *testing.T) {
-	legacyModal := "Do you trust the files in this folder?\n❯ Yes  No"
+	legacyModal := "Do you trust the files in this folder?\n❯ Yes  No\n\n" + legacyTrustFooter
 
 	for _, tt := range []struct{ name, content string }{
 		{"legacy modal with Yes preselected, picker last", legacyModal},
@@ -1054,7 +1056,7 @@ func TestCheckAndHandleTrustPrompt_RealLegacyFolderTrustDialogStillFiresEnter(t 
 			// option ("❯ 1. Yes  2. No"); claudeTrustRowOf strips the ordinal so
 			// the row reduces to "Yes  2. No" and the picker check still fires.
 			name:    "legacy modal with numeric ordinal on the selected row",
-			content: "Do you trust the files in this folder?\n❯ 1. Yes  2. No",
+			content: "Do you trust the files in this folder?\n❯ 1. Yes  2. No\n\n" + legacyTrustFooter,
 		},
 		{
 			// The legacy modal may render inside a box frame; the box-drawing
@@ -1064,7 +1066,8 @@ func TestCheckAndHandleTrustPrompt_RealLegacyFolderTrustDialogStillFiresEnter(t 
 			content: "╭────────────────────────────────────╮\n" +
 				"│ Do you trust the files in this folder?│\n" +
 				"│ ❯ Yes  No                            │\n" +
-				"╰────────────────────────────────────╯\n",
+				"╰────────────────────────────────────╯\n" +
+				"   " + legacyTrustFooter + "\n",
 		},
 		{
 			// The legacy picker may stack its options on separate rows, with
@@ -1073,11 +1076,11 @@ func TestCheckAndHandleTrustPrompt_RealLegacyFolderTrustDialogStillFiresEnter(t 
 			// Claude trust shape, so the dismissal must recognise it too —
 			// otherwise readiness succeeds but DismissTrustPrompt treats the
 			// pane as dialog-free and delivers the initial prompt into the
-			// live modal. The No row is the last non-blank content; the row
-			// immediately above it is the selected Yes row, so the picker
-			// check fires.
+			// live modal. The No row is the last option row, with the
+			// selected Yes row immediately above it, and the footer below
+			// them is the last content, so the picker check fires.
 			name:    "legacy modal with options stacked on separate rows",
-			content: "Do you trust the files in this folder?\n❯ 1. Yes\n  2. No",
+			content: "Do you trust the files in this folder?\n❯ 1. Yes\n  2. No\n\n" + legacyTrustFooter,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

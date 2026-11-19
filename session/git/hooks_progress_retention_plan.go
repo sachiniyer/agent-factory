@@ -132,6 +132,11 @@ func collectHookProgressCandidatesLocked(dir string, now time.Time, owners map[s
 	return candidates, nil
 }
 
+// runningHookPrefixesForPrune is the retention pass's hook-liveness oracle,
+// split from runningHookPrefixesForResume only so a test can give each caller
+// its own deterministic answers.
+var runningHookPrefixesForPrune = systemdunit.RunningHookPrefixes
+
 func probeHookProgressCandidates(candidates []keptProgress) (map[string]bool, error) {
 	prefixes := make([]string, 0, len(candidates))
 	seen := make(map[string]bool)
@@ -145,7 +150,7 @@ func probeHookProgressCandidates(candidates []keptProgress) (map[string]bool, er
 	if len(prefixes) == 0 {
 		return running, nil
 	}
-	live, err := systemdunit.RunningHookPrefixes(prefixes...)
+	live, err := runningHookPrefixesForPrune(prefixes...)
 	if err != nil {
 		return nil, err
 	}

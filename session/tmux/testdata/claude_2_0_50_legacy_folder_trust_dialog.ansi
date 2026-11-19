@@ -1,0 +1,15 @@
+
+[38;5;220m────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;5;220mDo you trust the files in this folder?
+
+[0m [1m/home/u/proj                
+
+[0m Claude Code may read, write, or execute files contained in this directory.
+ This can pose security risks, so only use files from trusted sources.
+
+ [38;5;246mLearn more (​https://code.claude.com/docs/en/security​)
+
+[39m [38;5;153m❯[39m [2m[38;5;153m1. [0m[38;5;153mYes, proceed
+[39m   [2m2. [0mNo, exit
+
+ [38;5;246mEnter to confirm · Esc to exit
