@@ -45,7 +45,7 @@ const (
 // no options yet, a Yes row whose No row is not painted, or the whole option
 // block with its footer not yet painted or only begun — is partial, as is a
 // complete one whose cursor is not on Yes. Every build that paints this dialog
-// paints its footer last (claudeLegacyTrustFooters, #7584), so a dialog without
+// paints its footer last (claudeTrustFooters, #7584), so a dialog without
 // its whole footer is one still being painted. A region holding any row the
 // dialog never paints is not the dialog: a ❯ row that is not an option (a
 // composer draft), a frame rule between the question and the options (another
@@ -115,7 +115,7 @@ func claudeLegacyTrustDialogOf(screen visibleText) claudeLegacyTrustVerdict {
 			case row.blank || rule:
 				phase = afterOptions
 			case claudeTrustIsFooter(row.label):
-				phase, footerWhole = afterFooter, claudeLegacyTrustFooterWhole(row.label)
+				phase, footerWhole = afterFooter, claudeTrustFooterWhole(row.label)
 				continue
 			case !claudeLegacyOptionRow(row.label):
 				return claudeLegacyTrustNone
@@ -124,7 +124,7 @@ func claudeLegacyTrustDialogOf(screen visibleText) claudeLegacyTrustVerdict {
 			switch {
 			case row.blank || rule:
 			case claudeTrustIsFooter(row.label):
-				phase, footerWhole = afterFooter, claudeLegacyTrustFooterWhole(row.label)
+				phase, footerWhole = afterFooter, claudeTrustFooterWhole(row.label)
 			default:
 				return claudeLegacyTrustNone
 			}
@@ -175,18 +175,23 @@ func claudeLegacyTrustDialogOf(screen visibleText) claudeLegacyTrustVerdict {
 	return claudeLegacyTrustPartial
 }
 
-// claudeLegacyTrustFooters are the footers Claude Code paints under the legacy
-// dialog. Every build af supports that paints the dialog, 2.0.25 through
-// 2.1.19, paints one of them as its last row: "Esc to exit" through 2.0.62, and
-// "Esc to cancel" from 2.0.63 (#7584). The one other text that row takes,
-// "Press Ctrl-C again to exit" while an exit key press is pending, is a row
-// this grammar does not read as the dialog's.
-var claudeLegacyTrustFooters = []string{claudeLegacyTrustFooter, claudeFolderTrustFooter}
+// claudeTrustFooters are the footers Claude Code paints under its folder-trust
+// dialog, the legacy wording and the reworded one alike. Every build af
+// supports paints one of them as the dialog's last row (#7584, #7618):
+//   - 2.0.25 through 2.1.19 draw every arm of the dialog with one component,
+//     the legacy and the reworded wording included, and paint "Esc to exit"
+//     through 2.0.62 and "Esc to cancel" from 2.0.63;
+//   - from 2.1.20 the dialog is the reworded one, and its footer is "Esc to
+//     cancel".
+//
+// The one other text that row takes, "Press Ctrl-C again to exit" while an
+// exit key press is pending, is a row neither grammar reads as the dialog's.
+var claudeTrustFooters = []string{claudeLegacyTrustFooter, claudeFolderTrustFooter}
 
-// claudeLegacyTrustFooterWhole reports whether a footer row is a whole
-// claudeLegacyTrustFooters entry rather than one still being painted.
-func claudeLegacyTrustFooterWhole(label string) bool {
-	return slices.Contains(claudeLegacyTrustFooters, strings.Join(strings.Fields(label), " "))
+// claudeTrustFooterWhole reports whether a footer row is a whole
+// claudeTrustFooters entry rather than one still being painted.
+func claudeTrustFooterWhole(label string) bool {
+	return slices.Contains(claudeTrustFooters, strings.Join(strings.Fields(label), " "))
 }
 
 // claudeLegacyProseAboveQuestion reports whether any non-blank row is painted
