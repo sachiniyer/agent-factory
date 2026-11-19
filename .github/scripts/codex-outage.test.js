@@ -805,6 +805,55 @@ test('#4629: a real 4xx answer is not retried, and still degrades to a marked re
   }
 });
 
+// #7605: the read tonight's incident lost is the /commits/ read behind a
+// Completed summary row — one lazy-generation 422 degraded the whole sweep.
+// This fixture puts a commit into the scan's commit set so /commits/ runs.
+const commitRowFixture = (route, args = []) => {
+  if (args.includes('--method')) return { id: 42, html_url: 'https://example.com/record' };
+  if (route === 'graphql') return { data: { repository: { pullRequest: { timelineItems: {
+    pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } } };
+  if (route.includes('/issues/3932/comments')) return [];
+  if (route.includes('/pulls?')) return [{ number: 6544, created_at: t(0), updated_at: t(9),
+    merged_at: t(8), head: { sha: head } }];
+  if (route.includes('/issues/6544/comments')) return [comment(2, limits[1]),
+    summaryArtifact([summaryRow(4, { commit: head.slice(0, 7) })])];
+  if (route.includes('/pulls/6544/reviews')) return [comment(3,
+    "### 💡 Codex Review\n\nDidn't find any major issues.",
+    { id: 3606, commit_id: head, submitted_at: t(3) })];
+  if (route.includes('/pulls/6544/comments')) return [];
+  if (route.includes('/commits/')) return { sha: head, commit: { committer: { date: t(1) } } };
+  throw new Error(`unstubbed route ${route}`);
+};
+
+test('#7605: GitHub\'s lazy-generation 422 retries on the transport schedule; other 422s stay verdicts', async () => {
+  for (const [name, stderr, failures, attempts, bodyMatch] of [
+    // The incident's shape: one 422, then an answer — the sweep completes.
+    ['a generation 422 that answers on retry',
+      'gh: The request is taking too long to generate. (HTTP 422)', 1, 2, /availability — recovered/],
+    // A 422 naming no transient cause stays a verdict — no retry, and the
+    // record still marks itself incomplete rather than posing as a clean read.
+    ['a validation 422', 'gh: Validation Failed (HTTP 422)', Infinity, 1, /incomplete/i],
+    // A generation 422 that outlives its bounded retries degrades the same way.
+    ['a generation 422 that outlives its retries',
+      'gh: The request is taking too long to generate. (HTTP 422)', Infinity, 4, /incomplete/i],
+  ]) {
+    let failing = failures;
+    const { calls, writes, execFileSync } = fakeGh((route, args) => {
+      if (failing && route.includes('/commits/')) { failing -= 1; throw ghFailure(stderr); }
+      return commitRowFixture(route, args);
+    });
+    const sleeps = [];
+    const api = createGhApi({ execFileSync, sleep: async ms => { sleeps.push(ms); },
+      delays: [0, 0, 0], log: () => {} });
+    await sweep(api, 'owner/repo', t(10));
+    assert.equal(callCount(calls, '/commits/'), attempts, name);
+    assert.equal(writes.length, 1, name);
+    assert.match(writes[0], bodyMatch, name);
+    assert.deepEqual(sleeps, Array(attempts - 1).fill(0),
+      `${name}: retries take the transport schedule, not the ≥60s rate-limit floor`);
+  }
+});
+
 test('#4629: a record-create POST replays only a rate-limit refusal, never an ambiguous failure', async () => {
   for (const [name, failPost, attempts, matches] of [
     ['a 5xx answer', () => { throw ghFailure('gh: Server Error (HTTP 502)'); }, 1, /502/],
