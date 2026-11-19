@@ -425,6 +425,16 @@ function isGhRateLimit(error) {
   return false;
 }
 
+// GitHub computes expensive commit/diff representations lazily; a read that
+// lands mid-generation answers 422 "taking too long to generate" — a transient
+// timeout in the transport class, not a verdict on the read (#7605). The
+// message names it, not the status: every other 422 (a validation failure)
+// stays a verdict.
+function isGhGenerationTimeout(error) {
+  return ghHttpStatus(error) === 422 &&
+    /taking too long to generate/i.test(ghFailureText(error));
+}
+
 function isRetryableGhFailure(error, method) {
   // The record-create POST is the one non-idempotent call. Only a rate-limit
   // refusal is a definitive "nothing was created" worth replaying — the gate's
@@ -438,8 +448,9 @@ function isRetryableGhFailure(error, method) {
   // (empty or cut mid-payload — the SyntaxError JSON.parse throws). Safe to
   // replay for reads and the idempotent PATCH.
   if (status === null) return true;
-  // Any other answered 4xx is a verdict, not a flap.
-  return status >= 500 || status === 408 || isGhRateLimit(error);
+  // Any other answered 4xx is a verdict, not a flap — except the
+  // lazy-generation 422, which retries on the transport schedule (#7605).
+  return status >= 500 || status === 408 || isGhRateLimit(error) || isGhGenerationTimeout(error);
 }
 
 // The sweep's gh-backed route helper. execFileSync and sleep are injectable so
