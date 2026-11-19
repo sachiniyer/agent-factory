@@ -701,6 +701,45 @@ func accountScopeSeed(agent string) map[string][]byte {
 	}
 }
 
+// accountStageSeed is the non-credential seed for a STAGED swap scope: the
+// provision-time accountScopeSeed plus, for the agents that DISCOVER af's
+// guidance under the account's config root, the af-managed skill file itself.
+//
+// The rotation replaces the whole live directory with this staged one, and the
+// in-sandbox swap build resolves its skill target unscoped — into the OUTGOING
+// live scope, which the rotation then renames to account.prev and deletes
+// (#7368). The staged scope is therefore the only place the guidance can
+// survive from, exactly as a local swap lands it under the incoming account's
+// directory. The tar path comes from the same skills-base functions the
+// launch's own write resolves through, so a staged scope and a scoped local
+// launch cannot disagree on the shape; and it rides the credential archive
+// rather than a later pass, so a declared sandbox_agent_config file landing
+// afterward can still win — the precedence the marker guard already gives a
+// user's own file. Only the discovery seams take one: claude's guidance rides
+// --plugin-dir outside the scope, and the remaining agents are not
+// account-scopable. The consent check is the same global_agent_skills gate
+// the launch's write honors, asked again here on the daemon.
+func accountStageSeed(agent string) map[string][]byte {
+	seed := accountScopeSeed(agent)
+	var base func(string) string
+	switch agent {
+	case tmux.ProgramCodex:
+		base = codexSkillsBase
+	case tmux.ProgramGemini:
+		base = geminiSkillsBase
+	default:
+		return seed
+	}
+	if globalAgentSkillsConsent() != globalSkillGranted {
+		return seed
+	}
+	if seed == nil {
+		seed = map[string][]byte{}
+	}
+	seed[filepath.ToSlash(filepath.Join(base(""), afSkillDirName, "SKILL.md"))] = []byte(afSkillDoc)
+	return seed
+}
+
 // AccountScopeAgentEnv names the variable the launch's identity file sets for an
 // account-scoped sandbox: the agent whose account the synced scope belongs to. The
 // in-sandbox agent-server reads it to know it must prove executable attribution

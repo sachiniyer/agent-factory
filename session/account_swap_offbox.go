@@ -226,6 +226,9 @@ func (w *sandboxWorkspace) PrevAccountDir() string { return w.AccountDir() + acc
 // stageAccountNext copies the incoming account's credential files into the staging
 // directory, the way syncAccountIn fills the live scope, and returns their
 // versions — the baseline the account's own later write-backs are judged against.
+// The staged scope is what the rotation moves into place, so it must also carry
+// the af-managed guidance file the incoming agent will look for in the scope it
+// lands in (accountStageSeed, #7368).
 // An existing staging directory is replaced, so a failed earlier attempt leaves
 // nothing behind to be mistaken for this one.
 func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessionenv.Account) (map[string]string, []string, error) {
@@ -238,7 +241,7 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 	} else if !apply {
 		return nil, nil, fmt.Errorf("account %q cannot be staged: this session carries no synced account", acct.Name)
 	}
-	archive, versions, err := buildAccountArchive(acct.Dir, accountCredentialRel[acct.Agent], accountScopeSeed(acct.Agent))
+	archive, versions, err := buildAccountArchive(acct.Dir, accountCredentialRel[acct.Agent], accountStageSeed(acct.Agent))
 	if err != nil {
 		return nil, nil, err
 	}
