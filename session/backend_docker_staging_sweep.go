@@ -49,6 +49,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"golang.org/x/sys/unix"
 
@@ -397,7 +398,7 @@ func resolveDockerContextPin(env []string) (string, error) {
 		return "", fmt.Errorf("`docker context inspect` could not name the resolved context: %w", err)
 	}
 	name := strings.TrimSpace(string(out))
-	if name == "" || strings.ContainsAny(name, "\n\r\x00") {
+	if name == "" || strings.IndexFunc(name, unicode.IsSpace) >= 0 || strings.ContainsRune(name, '\x00') {
 		return "", fmt.Errorf("`docker context inspect` returned a malformed context name %q", name)
 	}
 	return name, nil

@@ -572,6 +572,55 @@ func TestStagingSweepPinsOneSelector(t *testing.T) {
 	})
 }
 
+// TestResolveDockerContextPin: the selector already in the env short-circuits
+// without a call; a bare env resolves the current context's own name once;
+// an inspect failure or a malformed answer errors the resolution — callers
+// fail closed (Unlisted pass / refused provision), never unpinned.
+func TestResolveDockerContextPin(t *testing.T) {
+	t.Run("env selector short-circuits", func(t *testing.T) {
+		calls := 0
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, _ ...string) ([]byte, error) {
+			calls++
+			return nil, fmt.Errorf("no docker call may run when the env selects")
+		}))
+		for _, env := range [][]string{
+			{"DOCKER_HOST=unix:///var/run/docker.sock"},
+			{"DOCKER_HOST= "},
+			{"DOCKER_CONTEXT=work"},
+		} {
+			pin, err := resolveDockerContextPin(env)
+			require.NoError(t, err)
+			assert.Empty(t, pin)
+		}
+		assert.Zero(t, calls)
+	})
+
+	t.Run("bare env resolves the name once", func(t *testing.T) {
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+			require.Equal(t, []string{"context", "inspect", "--format", dockerContextNameFormat}, args)
+			return []byte("workctx\n"), nil
+		}))
+		pin, err := resolveDockerContextPin(nil)
+		require.NoError(t, err)
+		assert.Equal(t, "workctx", pin)
+	})
+
+	t.Run("failures and malformed names error", func(t *testing.T) {
+		for _, answer := range [][]byte{[]byte(""), []byte("a\nb\n"), []byte("with space\n")} {
+			t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, _ ...string) ([]byte, error) {
+				return answer, nil
+			}))
+			_, err := resolveDockerContextPin(nil)
+			assert.Error(t, err, "answer %q must not resolve", answer)
+		}
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, _ ...string) ([]byte, error) {
+			return nil, fmt.Errorf("docker daemon unreachable")
+		}))
+		_, err := resolveDockerContextPin(nil)
+		assert.Error(t, err)
+	})
+}
+
 // TestProvisionPinsSelectorBeforeEngineRead is the Codex-on-#7616 property:
 // the provision resolves the docker CLI's selector ONCE, materializes it as
 // DOCKER_CONTEXT, and only then reads the engine identity and runs the
