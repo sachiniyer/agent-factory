@@ -1144,6 +1144,17 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch '/usr/bin/pw[s]h -enc x'`, true},
 		{`ssh host '/usr/bin/pwsh -enc x'`, true},
 		{`watch '/usr/bin/pwsh -File x.ps1'`, false},
+		// Brace expansion runs before globbing on
+		// downstreams that do it — each `{a,b}`
+		// alternative is checked, `{x..y}` ranges
+		// over-approximate to `*`, and a comma-less
+		// group is literal like the real expansion.
+		{`watch 'bash -c "env -i /x/co{de,}x"'`, true},
+		{`watch 'co{d,c}ex'`, true},
+		{`watch 'co{a..z}ex'`, true},
+		{`watch 'pw{sh,} -enc x'`, true},
+		{`watch 'echo {a,b}'`, false},
+		{`watch 'echo co{ab}x'`, false},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state

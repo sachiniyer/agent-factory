@@ -80,9 +80,8 @@ func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{
 	if piece == "" {
 		return false
 	}
-	glob := strings.ContainsAny(piece, "*?[")
 	for name := range names {
-		if pieceCouldName(piece, name, glob) {
+		if pieceCouldName(piece, name) {
 			return true
 		}
 	}
@@ -93,7 +92,7 @@ func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{
 		if _, kept := preserved[configVar]; kept {
 			continue
 		}
-		if pieceCouldName(piece, agent, glob) {
+		if pieceCouldName(piece, agent) {
 			return true
 		}
 	}
@@ -102,14 +101,109 @@ func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{
 
 // pieceCouldName reports whether a piece could resolve to name — the
 // identifier-boundary check, the path basename, and (when the piece
-// carries glob syntax) the over-approximated pattern match on both.
+// carries glob syntax) the over-approximated pattern match on both —
+// under every `{a,b}` brace alternative: brace expansion runs before
+// globbing on downstreams that do it, so `co{de,}x` can land `codex`.
 // Agent names and launcher names share this helper so the two lookups
 // cannot diverge.
-func pieceCouldName(piece, name string, glob bool) bool {
-	return textNamesIdentifierBoundary(piece, name) ||
-		filepath.Base(piece) == name ||
-		(glob && (globOverMatch(piece, name) ||
-			globOverMatch(filepath.Base(piece), name)))
+func pieceCouldName(piece, name string) bool {
+	for _, variant := range namedPieceVariants(piece) {
+		if textNamesIdentifierBoundary(variant, name) ||
+			filepath.Base(variant) == name {
+			return true
+		}
+		// The variant carries the glob flag — a `{x..y}` range
+		// over-approximates to `*`, which the original piece never
+		// spelled.
+		if strings.ContainsAny(variant, "*?[") &&
+			(globOverMatch(variant, name) ||
+				globOverMatch(filepath.Base(variant), name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// namedVariantCap bounds one piece's brace alternatives — past it the
+// unexpanded remainder is checked as text, which still catches a name
+// at a piece boundary.
+const namedVariantCap = 64
+
+// namedPieceVariants expands `{a,b}` brace alternatives — downstream
+// shells that do brace expansion run it before globbing. A `{x..y}`
+// range over-approximates to `*` (every element is one run); a brace
+// group with no top-level comma or range is literal in the real
+// expansion and stays one variant.
+func namedPieceVariants(piece string) []string {
+	variants := []string{piece}
+	for i := 0; i < len(variants) && len(variants) < namedVariantCap; i++ {
+		v := variants[i]
+		open := strings.IndexByte(v, '{')
+		if open < 0 {
+			continue
+		}
+		close := namedBraceEnd(v, open)
+		if close < 0 {
+			continue
+		}
+		content := v[open+1 : close]
+		var alts []string
+		if strings.Contains(content, "..") {
+			alts = []string{"*"}
+		} else if top := splitNamedBraceAlts(content); len(top) > 1 {
+			alts = top
+		} else {
+			continue
+		}
+		variants[i] = v[:open] + alts[0] + v[close+1:]
+		for _, alt := range alts[1:] {
+			if len(variants) >= namedVariantCap {
+				variants = append(variants, v)
+				break
+			}
+			variants = append(variants, v[:open]+alt+v[close+1:])
+		}
+	}
+	return variants
+}
+
+// namedBraceEnd returns the index of the `}` matching the `{` at i,
+// nesting-aware, or -1.
+func namedBraceEnd(s string, i int) int {
+	depth := 0
+	for j := i; j < len(s); j++ {
+		switch s[j] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return j
+			}
+		}
+	}
+	return -1
+}
+
+// splitNamedBraceAlts splits a brace group's content on top-level
+// commas — commas inside nested groups are not alternatives here.
+func splitNamedBraceAlts(s string) []string {
+	var alts []string
+	depth, start := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				alts = append(alts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(alts, s[start:])
 }
 
 // globOverMatch reports whether pattern — POSIX pathname expansion
@@ -121,9 +215,14 @@ func pieceCouldName(piece, name string, glob bool) bool {
 // read could be the name. `co[[:alpha:]]ex` therefore matches codex.
 func globOverMatch(pattern, name string) bool {
 	for i := 0; i < len(pattern); i++ {
-		if pattern[i] == '[' && globBracketEnd(pattern, i) < 0 {
+		if pattern[i] != '[' {
+			continue
+		}
+		end := globBracketEnd(pattern, i)
+		if end < 0 {
 			return true
 		}
+		i = end // a [ inside a closed expression is content, not a start
 	}
 	memo := map[[2]int]bool{}
 	var match func(i, j int) bool
@@ -267,9 +366,8 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 // pwsh, and `/usr/bin/pw[s]h` glob-matches it.
 func namedLauncherNameOf(text string) (string, bool) {
 	for _, form := range [2]string{text, normalizeNamedLiteral(text)} {
-		glob := strings.ContainsAny(form, "*?[")
 		for name := range accountNamedLauncherNames {
-			if pieceCouldName(form, name, glob) {
+			if pieceCouldName(form, name) {
 				return name, true
 			}
 		}

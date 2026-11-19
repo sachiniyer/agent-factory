@@ -486,7 +486,11 @@ will not reach the child's environment.
     pathname expansion happens at run time — `co[d]ex` or
     `co[[:alpha:]]ex` can resolve to the codex on disk (the match
     over-approximates: any `[…]` is one character, `?` one, `*` a
-    run, an unterminated `[` refuses), while `*.log` still admits;
+    run, an unterminated `[` refuses), while `*.log` still admits —
+    and brace expansion, which runs before globbing on downstreams
+    that do it, is checked per alternative: `co{de,}x` reads as
+    `codex`, a `{x..y}` range over-approximates to `*`, and a
+    comma-less `co{ab}x` stays literal as bash would keep it;
   - a word does not literalize (a substitution or expansion in the
     argv itself) or its literal carries `$` or backtick text — a name
     the text cannot see could be constructed at run time (`pwsh -c
