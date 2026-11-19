@@ -478,6 +478,7 @@ func (m *Manager) RefreshStatuses() {
 	m.sweepTaskRunTurnWatches()
 	m.sweepUnverifiedSendWatches()
 	m.sweepStagedDraftWatches()
+	m.sweepDialogHolds()
 
 	// Worktree presence first, on its own bounded fan-out (#5102): it is a
 	// filesystem probe, not a tmux one, and running it inline here would let one
@@ -713,6 +714,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// write uses. On every early return before the fence is taken the mark
 	// simply carries to the next tick.
 	defer func() { m.raiseDueStagedDraftFlag(repoID, key, instance) }()
+	// The held-dialog notice (#7635) is flagged the same way and for the same
+	// reason: recorded under the fence, written after it releases.
+	defer func() { m.raiseDueDialogHold(repoID, key, instance) }()
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
 	defer releaseObservationSettlement()
 	// Same request-start bound as the paused-path feed below: the pane is
@@ -816,6 +820,10 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// The answer retires the outage flag under the same generation gate: a stale
 	// predecessor success must not un-mark an outage a successor runtime earned.
 	instance.ClearUnreachableAtObservation(observationGeneration)
+	// A trust gate holding a launch dialog on an unchanged pane says so on the
+	// observation (#7635). Record it; no hold on a later observation withdraws
+	// the flag this path raised.
+	m.noteDialogHold(key, instance, obs.DialogHold)
 
 	// AFFIRMATIVE liveness evidence for this tick, decided in ONE place and only
 	// where the poll actually learned something (#1917 round 7).

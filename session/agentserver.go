@@ -322,6 +322,10 @@ type Observation struct {
 	// sandbox that predates the wire field included, which keeps the legacy
 	// (answer-on-churn) behavior there.
 	Reflow bool
+	// DialogHold is set while the agent's trust gate holds a launch dialog it
+	// will not answer on a pane unchanged past the settle time (#7635). Nil
+	// means no settled hold, or a backend or sandbox that cannot report one.
+	DialogHold *DialogHold
 }
 
 // PTYSubscription is one subscriber's read side of a session's PTY stream

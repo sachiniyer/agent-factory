@@ -411,6 +411,14 @@ type TmuxSession struct {
 	// with inputMu would deadlock the dismissal it exists to describe.
 	dialogInputMu sync.Mutex
 	dialogInput   dialogKeystroke
+	// dialogKeysSentCount counts every key noteDialogKeystroke has recorded on this
+	// TmuxSession. It only grows, so two reads that differ prove af pressed a
+	// key between them (#7635). Guarded by dialogInputMu.
+	dialogKeysSentCount uint64
+	// dialogHold times a dialog the trust gate holds on an unchanged pane, and
+	// carries the notice once the hold has settled (#7635). It has its own
+	// leaf lock, so reading the notice never waits on inputMu.
+	dialogHold dialogHoldRecorder
 	// lastPastedTail is the normalized distinctive tail of the most recent
 	// payload paste that tmux accepted. The next submit may use it only as
 	// provenance for the cleared-composer diagnostic: matching arbitrary pane

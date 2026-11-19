@@ -631,6 +631,13 @@ type Manager struct {
 	// composer evidence is being re-checked while the agent sits Ready.
 	// Keyed by stableSessionKey; guarded by pausedMu.
 	stagedDraftWatches map[string]*stagedDraftWatch
+	// dialogHolds is the poll's memory of sessions whose trust gate holds a
+	// launch dialog on an unchanged pane (#7635): the hold it has flagged for
+	// attention and the request it raised, so a hold is flagged once and only
+	// its own request is cleared. Keyed by stableSessionKey; guarded by
+	// dialogHoldMu, a leaf.
+	dialogHoldMu sync.Mutex
+	dialogHolds  map[string]*dialogHoldEntry
 	// rateIndexer is the bounded rollout-store reader the account-limit proof
 	// reconcile refreshes per walled account (#6776 1d). Its per-file memo is
 	// the reason an every-45s cadence is cheap: an unchanged file costs zero

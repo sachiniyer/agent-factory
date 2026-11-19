@@ -225,6 +225,9 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 		// A sandbox that predates the field reports no resize attribution —
 		// absent resolves to false, the legacy churn-is-work behavior (#7434).
 		Reflow: resp.Reflow,
+		// A sandbox that predates the field reports no hold, and nothing is
+		// raised for it (#7635).
+		DialogHold: cloneDialogHold(resp.DialogHold),
 	}, nil
 }
 
@@ -869,6 +872,9 @@ type agentSnapshotResp struct {
 	// contract already meant — a resize is never attributed, so churn keeps
 	// answering attention exactly as it did before the field existed.
 	Reflow bool `json:"reflow,omitempty"`
+	// DialogHold is the sandbox gate's settled hold (#7635). Optional and
+	// additive: a server that predates it omits it, which reads as no hold.
+	DialogHold *DialogHold `json:"dialog_hold,omitempty"`
 	// Conversation is the conversation identity the server has for the agent, once
 	// it has one (#5571 W7.2).
 	Conversation *AgentConversationData `json:"conversation,omitempty"`
