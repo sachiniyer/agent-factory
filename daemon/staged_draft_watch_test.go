@@ -56,15 +56,25 @@ func (b stagedReadingBackend) BoundDraftStillStaged(*session.Instance) (session.
 	return b.checker.BoundDraftStillStaged()
 }
 
-// stagedDraftFixture registers a Ready session whose last send was recorded
-// sent-unverified at attemptAt — the #7545 arming condition.
-func stagedDraftFixture(t *testing.T, attemptAt time.Time) (*Manager, string, string, *session.Instance) {
+// stagedDraftFixtureWithStatus registers a Ready session whose last send was
+// recorded as status at attemptAt — the #7545 arming condition generalized to
+// either unproven verdict (sent-unverified, or could-not-confirm when the pane
+// was not observable at the send at all per #6819 — the same contract as
+// reverifiableSendStatus in send_confirm.go).
+func stagedDraftFixtureWithStatus(t *testing.T, status session.PromptDeliveryStatus, attemptAt time.Time) (*Manager, string, string, *session.Instance) {
 	t.Helper()
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerStarted(t, manager, repoID, repoPath, "worker",
 		readyFakeBackend{FakeBackend: session.NewFakeBackend()}, true, session.Ready)
-	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, attemptAt))
+	require.True(t, inst.RecordPromptAttempt(status, attemptAt))
 	return manager, repoID, repoPath, inst
+}
+
+// stagedDraftFixture registers a Ready session whose last send was recorded
+// sent-unverified at attemptAt — the #7545 arming condition.
+func stagedDraftFixture(t *testing.T, attemptAt time.Time) (*Manager, string, string, *session.Instance) {
+	t.Helper()
+	return stagedDraftFixtureWithStatus(t, session.PromptSentUnverified, attemptAt)
 }
 
 func stagedDraftKey(repoID string, inst *session.Instance) string {
@@ -127,6 +137,49 @@ func TestStagedDraftWatchFlagsSustainedStagedIdle(t *testing.T) {
 }
 
 const stagedTailFixtureText = "the end of the staged prompt"
+
+// A could-not-confirm send is equally unproven (#6819): when its draft is
+// provably still staged in an idle composer the watch arms and flags exactly
+// as for sent-unverified, so a cron/automated send whose draft is stranded
+// cannot sit unnoticed indefinitely. The arming gate used to retire the watch
+// outright for could-not-confirm (silently falling under the != check), and
+// the raise-time revalidation used to clear the due mark — so the flag could
+// never land. This is the contract reverifiableSendStatus already states for
+// the sibling re-verification watch in send_confirm.go.
+func TestStagedDraftWatchArmsForCouldNotConfirmAndFlags(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	now := base
+	prev := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = prev })
+
+	manager, repoID, _, inst := stagedDraftFixtureWithStatus(t, session.PromptCouldNotConfirm, base.Add(-time.Minute))
+	checker := &fakeStagedChecker{reads: []session.StagedDraftRead{session.StagedDraftStaged}}
+	key := stagedDraftKey(repoID, inst)
+
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	require.False(t, inst.HasAttention(), "one staged tick must not flag before the settle window")
+	require.Equal(t, 1, checker.captureCount(),
+		"a could-not-confirm send arms the watch on the first staged read, not retire")
+
+	now = base.Add(stagedDraftSettleWindow - time.Second)
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	require.False(t, inst.HasAttention(), "the sustain must be unbroken across the whole window")
+
+	now = base.Add(stagedDraftSettleWindow + time.Second)
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	require.True(t, inst.HasAttention(),
+		"sustained Ready+staged past the window flags attention for could-not-confirm")
+	reason := inst.Attention().Reason
+	require.Contains(t, reason, "still unsubmitted in the composer")
+	require.NotContains(t, reason, stagedTailFixtureText, "no prompt text may leave the pane")
+	require.True(t, stagedDraftWatchEntry(manager, key).closed, "a landed flag closes the send's watch")
+
+	calls := checker.captureCount()
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	feedStagedDraftTick(manager, repoID, key, inst, checker)
+	require.Equal(t, calls, checker.captureCount(), "a latched could-not-confirm send is never rechecked")
+}
 
 // The Captain's named case: a delivered send's echo above the composer ends
 // the watch — the common sent-unverified resolution costs a bounded number
@@ -423,14 +476,25 @@ func TestStagedDraftFlagNeverBlocksUnderTheObservationFence(t *testing.T) {
 		t.Fatal("the automated send stayed blocked after the fence was free")
 	}
 
-	// The send superseded the due mark: its own attempt record moved the
-	// verdict, so the next tick drops the open watch rather than flagging a
-	// send that is no longer sent-unverified.
+	// The send recorded could-not-confirm — the FakeBackend reports
+	// could-not-confirm, an unproven verdict, not a settled one (#6819). Its
+	// attempt record supersedes the OLD due mark (this attempt's window just
+	// opened, so nothing is due yet), and the watch RE-ARMS against the new
+	// attempt rather than retiring: a stranded could-not-confirm draft is
+	// exactly what the flag exists to catch. A send that recorded a settled
+	// verdict (delivered, not-delivered) would retire here; could-not-confirm
+	// does not.
+	newAttempt, newStatus := inst.LastPromptDelivery()
+	require.Equal(t, session.PromptCouldNotConfirm, newStatus,
+		"the FakeBackend reports could-not-confirm for a send without the status backend")
+	require.True(t, newAttempt.After(attemptAt), "the send recorded a newer attempt")
 	feedStagedDraftTick(manager, repoID, key, inst, checker)
 	require.False(t, inst.HasAttention(),
-		"the send superseded the due mark — a moved verdict must never flag")
-	require.Nil(t, stagedDraftWatchEntry(manager, key),
-		"a send whose verdict moved off sent-unverified retires its open watch")
+		"the send superseded the due mark — a fresh attempt's window must not flag")
+	entry = stagedDraftWatchEntry(manager, key)
+	require.NotNil(t, entry, "a could-not-confirm send re-arms the watch, not retires it")
+	require.True(t, entry.attemptAt.Equal(newAttempt), "the watch belongs to the send's new attempt")
+	require.False(t, entry.due, "the new attempt's window just opened — nothing is due yet")
 
 	// And the deferred raise is still the working path: re-qualify and the
 	// flag lands on the next tick.
@@ -752,8 +816,17 @@ func TestStagedDraftPollTickNeverBlocksBehindAnOpLockSend(t *testing.T) {
 		t.Fatal("the automated send stayed blocked after the fence was free")
 	}
 
-	// The send superseded the due mark's attempt: the next poll tick drops
-	// the open watch rather than flagging a stale send.
+	// The send recorded could-not-confirm (the FakeBackend reports
+	// could-not-confirm), an unproven verdict, so the next poll tick RE-ARMS
+	// the watch against the new attempt rather than retiring it: the OLD due
+	// mark is gone (the new attempt's window just opened), and a flag would
+	// need a fresh sustained-staged window against this send. A send that
+	// recorded a settled verdict would retire here; could-not-confirm does
+	// not (#6819).
+	newAttempt, newStatus := inst.LastPromptDelivery()
+	require.Equal(t, session.PromptCouldNotConfirm, newStatus,
+		"the FakeBackend reports could-not-confirm for a send without the status backend")
+	require.True(t, newAttempt.After(attemptAt), "the send recorded a newer attempt")
 	pollDone = make(chan struct{})
 	go func() {
 		manager.refreshInstanceStatus(repoID, inst)
@@ -764,9 +837,11 @@ func TestStagedDraftPollTickNeverBlocksBehindAnOpLockSend(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the post-send poll tick blocked")
 	}
-	require.False(t, inst.HasAttention(), "the send superseded the due mark — no flag for a stale send")
-	require.Nil(t, stagedDraftWatchEntry(manager, key),
-		"a send whose verdict moved off sent-unverified retires its open watch")
+	require.False(t, inst.HasAttention(), "the send superseded the due mark — a fresh attempt's window must not flag")
+	entry = stagedDraftWatchEntry(manager, key)
+	require.NotNil(t, entry, "a could-not-confirm send re-arms the watch, not retires it")
+	require.True(t, entry.attemptAt.Equal(newAttempt), "the watch belongs to the send's new attempt")
+	require.False(t, entry.due, "the new attempt's window just opened — nothing is due yet")
 
 	// And the deferred raise is still the working path through the real tick:
 	// re-qualify and the flag lands once the op lock is free.
