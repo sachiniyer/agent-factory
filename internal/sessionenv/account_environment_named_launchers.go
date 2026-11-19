@@ -173,10 +173,11 @@ func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launche
 	if strings.ContainsAny(literal, "$`") {
 		return namedWordVerdict{refuse: true}
 	}
-	// The literal and its shell-normalized form are both judged: a
-	// downstream shell removes quoting — `co""dex` is `codex` — and
-	// backslash escapes — `co\dex` is `codex` — so the piece rule sees
-	// both the text and what the text becomes.
+	// The literal and its normalized form are both judged: a
+	// downstream shell removes quoting at every depth — `co""dex`
+	// and `co\\\\dex` are both `codex` — so the piece rule sees
+	// both the text and the flat-normalized over-approximation of
+	// what the text becomes.
 	if namedLauncherTextRefuses(literal, names, preserved) {
 		return namedWordVerdict{refuse: true}
 	}
@@ -192,52 +193,41 @@ func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launche
 	return verdict
 }
 
-// normalizeNamedLiteral applies POSIX sh escape rules (XCU 2.2.1) to a
-// literal, the way a downstream shell's re-parse resolves it: quote
-// characters toggle quoting state and vanish; a backslash-newline pair
-// is a line continuation — BOTH characters are removed before
-// tokenizing; outside single quotes any other backslash-X resolves to X,
-// except inside double quotes where only $ ` " \ and newline are
-// escapable (any other `\` stays literal, as does one inside single
-// quotes). The piece rule checks this form alongside the raw literal so
-// an escape cannot hide a name the shell would expose.
+// normalizeNamedLiteral removes the quoting a downstream shell strips
+// at ANY depth, in one flat pass: every run of backslashes goes, a line
+// break (LF or CRLF) right after a run goes with it — sh's line
+// continuation — and every quote character goes. The result is an
+// over-approximation of POSIX escape resolution (XCU 2.2.1), closed
+// under nesting: quoting quoted again reduces to the same text with no
+// recursion and no fixpoint loop. Exact one-level resolution is
+// depth-sensitive — inside double quotes `\\` is a literal backslash a
+// deeper re-parse would still consume — so an escape can hide a name at
+// a depth the exact rule misses; deleting the escapes themselves makes
+// `co\\\\dex`, `co\\dex` and `co\dex` all read `codex`. Whitespace is
+// kept, so `echo co dex` still admits.
 func normalizeNamedLiteral(text string) string {
 	if !strings.ContainsAny(text, "'\"`\\") {
 		return text
 	}
 	var out strings.Builder
 	out.Grow(len(text))
-	inSingle := false
-	inDouble := false
 	for i := 0; i < len(text); i++ {
-		switch c := text[i]; {
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-		case c == '`' && !inSingle:
-			// A backtick vanishes like the other quote characters;
-			// literals carrying one refuse before reaching here.
-		case c == '\\' && !inSingle && i+1 < len(text):
-			next := text[i+1]
-			switch {
-			case next == '\n':
-				// Line continuation: both characters removed.
-				i++
-			case !inDouble || next == '$' || next == '`' ||
-				next == '"' || next == '\\':
-				// Escapable here — the backslash resolves.
-				i++
-				out.WriteByte(text[i])
-			default:
-				// Inside double quotes before any other char the
-				// backslash stays literal.
-				out.WriteByte('\\')
-				out.WriteByte(next)
+		switch text[i] {
+		case '\\':
+			for i < len(text) && text[i] == '\\' {
 				i++
 			}
+			switch {
+			case i < len(text) && text[i] == '\n':
+				i++
+			case i+1 < len(text) && text[i] == '\r' && text[i+1] == '\n':
+				i += 2
+			}
+			i-- // the loop's i++ lands past the run (and any line break)
+		case '\'', '"', '`':
+			// Quote characters vanish at every depth.
 		default:
-			out.WriteByte(c)
+			out.WriteByte(text[i])
 		}
 	}
 	return out.String()

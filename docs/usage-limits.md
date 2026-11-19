@@ -476,11 +476,12 @@ will not reach the child's environment.
     `;` split sees the second command's words), ssh's `-o
     'RemoteCommand=co""dex'` and `watch 'export CODEX_\HOME=/o;
     co\dex'` all refuse, whichever options precede them — each literal
-    is checked raw AND shell-normalized per POSIX XCU 2.2.1 (quote
-    state tracked; `\<newline>` is a line continuation — both removed
-    before tokenizing; `\X`→`X` outside single quotes, and inside
-    double quotes only before `$` `` ` `` `"` `\` and newline), so
-    `co""dex`, `co\dex` and `co\<newline>dex` all check as `codex`;
+    is checked raw AND normalized: one flat pass deletes every
+    backslash run (plus a line break — LF or CRLF — right after it,
+    sh's line continuation) and every quote character, an
+    over-approximation of POSIX escapes closed under nesting, so
+    `co""dex`, `co\dex`, `co\<newline>dex` and `co\\\\dex` — quoting
+    quoted again at any depth — all check as `codex`;
   - a word does not literalize (a substitution or expansion in the
     argv itself) or its literal carries `$` or backtick text — a name
     the text cannot see could be constructed at run time (`pwsh -c

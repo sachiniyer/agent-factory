@@ -1079,20 +1079,29 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`tmux new-window 'vim CODEX\_HOME.md'`, true},
 		{`watch $'codex'`, true},
 		{`ssh host $"codex"`, true},
-		// Codex round 7 — POSIX XCU 2.2.1 escapes, exactly: a
-		// backslash-newline pair is a line continuation (both
-		// characters removed before tokenizing), so `co\<LF>dex`
-		// normalizes to `codex`. The CRLF variant lands the same
-		// verdict — the parser folds CRLF to LF inside the quotes, so
-		// the literal is `co\<LF>dex` again. `co\\<LF>dex` admits
-		// (the escaped backslash resolves, the newline stays a piece
-		// boundary), and a backslash inside single-quoted text is
-		// literal POSIX — `co\dex` there is not `codex`.
+		// Codex round 7 — escapes normalize by the flat
+		// over-approximation, closed under nesting: every backslash
+		// run goes, plus a line break (LF or CRLF) right after it,
+		// and every quote char — so `co\<LF>dex` and `co\\<LF>dex`
+		// both read `codex`, quoting quoted again flattens the same
+		// way, and a backslash inside single quotes still goes
+		// (over-approximation, not exact POSIX). Whitespace stays —
+		// `echo co dex` admits.
 		{"watch 'co\\\ndex'", true},
 		{"watch 'CO\\DEX_HO\\ME=/o x'", true},
 		{"watch 'co\\\r\ndex'", true},
-		{"watch 'co\\\\\ndex'", false},
-		{`watch "'co\\dex'"`, false},
+		{"watch 'co\\\\\ndex'", true},
+		{`watch "'co\\dex'"`, true},
+		{`watch 'echo co dex'`, false},
+		{`watch 'echo a\b file'`, false},
+		// Codex round 8 / the nested-payload P1 — two- and
+		// three-level nested quoting: one flat pass removes every
+		// backslash run and quote at any depth, so the buried
+		// `codex` surfaces without recursion.
+		{`watch 'sh -c "export CODEX_\\HOME=/o; co\\dex"'`, true},
+		{`watch 'sh -c "bash -c co\\\\dex"'`, true},
+		{`watch 'sh -c "bash -c co\\\\\\\\dex"'`, true},
+		{`watch 'sh -c "bash -c \"sh -c co\\\\\\\\dex\""'`, true},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state
