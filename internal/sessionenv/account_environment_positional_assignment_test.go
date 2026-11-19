@@ -734,9 +734,25 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"systemctl --user set-environment PORT=3000", false},
 		{"systemctl --user status sshd", false},
 		{"systemctl --user list-units", false},
+		// A writer with no explicit name list refuses: nameless
+		// import-environment bulk-imports the caller's WHOLE environment
+		// — this account's pins included — into the manager another
+		// account's systemd-run inherits, and a nameless set/unset can't
+		// be proven to name only safe variables (Codex P1, bulk import).
+		{"systemctl --user import-environment", true},
+		{"systemctl --user unset-environment", true},
+		{"systemctl --user set-environment", true},
+		{"systemctl --user import-environment FOO", false},
 		{"dbus-update-activation-environment CODEX_HOME=/o", true},
 		{"dbus-update-activation-environment --systemd CODEX_HOME", true},
 		{"dbus-update-activation-environment DISPLAY WAYLAND_DISPLAY", false},
+		// --all copies the caller's entire environment into the shared
+		// activation block; an operand-less call carries no name list to
+		// verify (Codex P1, bulk import).
+		{"dbus-update-activation-environment --all", true},
+		{"dbus-update-activation-environment --all --systemd", true},
+		{"dbus-update-activation-environment", true},
+		{"dbus-update-activation-environment --systemd", true},
 		{"nohup systemctl --user set-environment CODEX_HOME=/o", true},
 		{"prog systemctl --user set-environment CODEX_HOME=/o", true},
 		{"prog dbus-update-activation-environment CODEX_HOME=/o", true},
@@ -777,10 +793,30 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"sudo -u postgres psql", false},
 		{"sudo -E codex", false},
 		{"sudo bash -lc 'codex'", true},
+		// The preserve/scope flags count only inside the launcher's own
+		// option region — before its command word, before `--`, and not
+		// consumed as another option's operand. `-E` past that region is
+		// the COMMAND's flag and sudo still resets (Codex P1); the same
+		// boundary applies to systemd-run's --scope.
+		{"sudo make -E codex", true},
+		{"sudo codex -E", true},
+		{"sudo -p -E codex", true},
+		// `-p` consumes PROMPT as its operand, so the following -E is
+		// sudo's own preserve flag again — admitted.
+		{"sudo -p PROMPT -E codex", false},
+		{"sudo -- -E codex", true},
+		{"sudo -E -- codex", false},
+		{"sudo -u root -E codex", false},
+		{"sudo -E make", false},
 		{"systemd-run --user --pty codex", true},
 		{"systemd-run --user --pty make", false},
 		{"systemd-run --scope codex", false},
 		{"systemd-run --user --scope make", false},
+		{"systemd-run codex --scope", true},
+		{"systemd-run make --scope codex", true},
+		{"systemd-run --scope --pty codex", false},
+		{"systemd-run --unit u --scope codex", false},
+		{"systemd-run -p Description=x --scope codex", false},
 		{"run0 codex", true},
 		{"run0 -p Description=x codex", true},
 		{"run0 -u postgres psql", false},
@@ -792,7 +828,17 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"su - codex", true},
 		{"su -l -c 'codex' work", true},
 		{"su -l -c 'psql' postgres", false},
-		{"su -lp -c 'codex' work", false},
+		// util-linux su's precedence makes the login form WIN over
+		// -m/-p/--preserve-environment ("ignoring --preserve-environment"),
+		// so a preservation request never cancels the reset — and su's
+		// getopt permutes options ahead of the USER operand, so `-l`
+		// counts even after the user name (Codex P1, su precedence).
+		{"su -lp -c 'codex' work", true},
+		{"su -l -p -c 'codex' work", true},
+		{"su -m -l -c 'codex' work", true},
+		{"su alice -l codex", true},
+		{"su -m -c 'codex' work", false},
+		{"su -p -c 'codex' work", false},
 		{"bwrap --clearenv codex", true},
 		{"bwrap --clearenv make", false},
 		{"prog sudo codex", true},

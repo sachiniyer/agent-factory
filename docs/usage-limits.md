@@ -278,7 +278,14 @@ will not reach the child's environment.
   refuses with no command word needed — `systemctl --user set-environment
   CODEX_HOME=/o` and `dbus-update-activation-environment CODEX_HOME=/o`
   refuse, while `systemctl --user set-environment PORT=3000` and
-  `systemctl --user status sshd` run.
+  `systemctl --user status sshd` run. A write with no explicit name list
+  refuses outright: a bare `import-environment` bulk-imports the caller's
+  entire environment — pins included — into the shared manager, and
+  `dbus-update-activation-environment --all` is the same bulk copy, so
+  `systemctl --user import-environment` and
+  `dbus-update-activation-environment --all` refuse while
+  `systemctl --user import-environment FOO` and
+  `dbus-update-activation-environment DISPLAY` run.
 - **Environment-resetting launchers refuse only when they deliver an
   agent** — a launcher that drops the pane's environment would unpick the
   account's pins silently, so when the reset environment's tail reaches an
@@ -291,7 +298,13 @@ will not reach the child's environment.
   non-resetting forms (`sudo -E codex`, `systemd-run --scope codex`, `su
   -c 'codex' work`, `bwrap codex`) and containers, whose environment is
   image-defined rather than a reset of the pane's (`docker run busybox
-  codex`).
+  codex`). A preservation flag counts only as the launcher's own option —
+  before its command word, before `--`, and not consumed as another
+  option's operand — so `sudo make -E codex`, `sudo -p -E codex` and
+  `systemd-run codex --scope` all still reset and refuse, while `sudo -p
+  PROMPT -E codex` preserves and admits. And su follows util-linux's
+  actual precedence: its login form wins over `-p`/`--preserve-environment`,
+  so `su -lp -c 'codex' work` and `su -l -p -c 'codex' work` refuse.
 
 A launcher buried inside another command's argv (`nohup sudo
 CODEX_HOME=/other codex`, `docker build env CODEX_HOME=/other codex`) is

@@ -223,7 +223,9 @@ func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTai
 // inherits the service manager's environment rather than the caller's —
 // the pane's pins never reach it — so a tail reaching an agent program
 // refuses. `--scope` wraps the caller's process context and keeps its
-// environment.
+// environment — but only counted in systemd-run's own option region:
+// `systemd-run codex --scope` hands `--scope` to codex, and the unit still
+// resets (Codex P1 on this head).
 func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, serviceOnly bool) ([]*syntax.Word, bool) {
 	if unwrapEnvInjectionLauncher(words, names, true, requireCommand) {
 		return nil, true
@@ -231,7 +233,7 @@ func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo oper
 	if shadowedLiteralChildTailMutates(words, names, memo) {
 		return nil, true
 	}
-	if serviceOnly || !literalWordPresent(words, "--scope") {
+	if serviceOnly || !slices.Contains(launcherOwnOptionLiterals(words, systemdRunOperandOptions), "--scope") {
 		if tailReachesResetAgentProgram(words, nil, false) {
 			return nil, true
 		}
@@ -315,11 +317,19 @@ func unwrapScript(words []*syntax.Word, names map[string]struct{}, memo operandT
 // `unset-environment` word, the command writes the service manager's
 // environment — a launcher's own environment source — so the lexical cut
 // applies to every word (the write is the effect; no command word need
-// follow). Any other systemctl command line gets the ordinary argv scan.
+// follow). A writer with no explicit name list refuses outright:
+// `import-environment` with no names bulk-imports the CALLER's entire
+// environment — this account's pins included — into a manager another
+// account's `systemd-run codex` later inherits, and a nameless
+// set/unset can't be proven to name only safe variables (Codex P1 on
+// this head). Any other systemctl command line gets the ordinary argv
+// scan.
 func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if systemctlWritesEnvironment(words) &&
-		unwrapEnvInjectionLauncher(words, names, false, false) {
-		return nil, true
+	if writer := systemctlEnvironmentWriterIndex(words); writer >= 0 {
+		if !nonDashLiteralPresent(words[writer+1:]) ||
+			unwrapEnvInjectionLauncher(words, names, false, false) {
+			return nil, true
+		}
 	}
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
@@ -331,15 +341,72 @@ func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]str
 // dbus-update-activation-environment: every operand is a name or a
 // NAME=value written into the dbus activation (and, with --systemd, user
 // service manager) environment — the same write, so the lexical cut
-// applies unconditionally.
+// applies unconditionally. `--all` copies the caller's ENTIRE
+// environment — pins included — into the shared activation block, and an
+// operand-less call carries no explicit name list to verify: both refuse
+// (Codex P1 on this head).
 func unwrapDbusUpdateActivationEnvironment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, false) {
+	if literalWordPresent(words, "--all") || !nonDashLiteralPresent(words) ||
+		unwrapEnvInjectionLauncher(words, names, false, false) {
 		return nil, true
 	}
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
 	return nil, false
+}
+
+// launcherOwnOptionLiterals yields the literal words inside the
+// launcher's own option region — the words its option parser can still
+// see. The region ends at the command word (the first literal word that
+// is not a dash option, not a NAME=value environment prefix and not
+// consumed as an option's operand) and at `--`. operandOptions consumes
+// each listed option's separate-word operand so an operand word is never
+// yielded as a flag; anything unrecognized is treated as a NO-operand
+// option, so a missing entry can only end the region early — hiding a
+// later preserve/scope flag and over-refusing — never hide the command
+// word, which would let a flag the CHILD owns count as the launcher's
+// own (`sudo make -E`, `sudo -p -E`, `systemd-run codex --scope`: Codex
+// P1 on this head).
+var sudoOperandOptions = map[string]bool{
+	"-u": true, "-U": true, "-g": true, "-h": true, "-p": true,
+	"-C": true, "-c": true, "-D": true, "-R": true, "-r": true,
+	"-T": true, "-t": true,
+	"--user": true, "--other-user": true, "--group": true,
+	"--host": true, "--prompt": true, "--chdir": true, "--role": true,
+	"--type": true, "--close-from": true, "--login-timeout": true,
+}
+
+var systemdRunOperandOptions = map[string]bool{
+	"-p": true, "--property": true, "-E": true, "--setenv": true,
+	"--unit": true, "--description": true, "--uid": true, "--gid": true,
+	"--nice": true, "--working-directory": true, "--service-type": true,
+	"--slice": true, "--job-mode": true,
+	"--after": true, "--before": true, "--wants": true, "--requires": true,
+	"--conflicts": true, "--binds-to": true, "--part-of": true,
+	"--requisite": true, "--upholds": true, "--trigger": true,
+	"--on-active": true, "--on-boot": true, "--on-startup": true,
+	"--on-unit-active": true, "--on-unit-inactive": true, "--on-calendar": true,
+	"--timer-property": true, "--path-property": true, "--socket-property": true,
+}
+
+func launcherOwnOptionLiterals(words []*syntax.Word, operandOptions map[string]bool) []string {
+	var flags []string
+	for i := 0; i < len(words); i++ {
+		literal, ok := launcherLiteralWord(words[i])
+		if !ok || literal == "--" {
+			return flags
+		}
+		if operandOptions[literal] {
+			i++
+			continue
+		}
+		if !strings.HasPrefix(literal, "-") && !strings.Contains(literal, "=") {
+			return flags
+		}
+		flags = append(flags, literal)
+	}
+	return flags
 }
 
 // literalWordPresent reports whether words contains the exact literal
@@ -353,16 +420,28 @@ func literalWordPresent(words []*syntax.Word, want string) bool {
 	return false
 }
 
-// systemctlWritesEnvironment reports whether the argv names a
-// manager-environment write subcommand.
-func systemctlWritesEnvironment(words []*syntax.Word) bool {
-	for _, word := range words {
+// systemctlEnvironmentWriterIndex returns the index of the argv's first
+// manager-environment write subcommand, or -1.
+func systemctlEnvironmentWriterIndex(words []*syntax.Word) int {
+	for i, word := range words {
 		literal, ok := launcherLiteralWord(word)
 		if !ok {
 			continue
 		}
 		switch literal {
 		case "set-environment", "import-environment", "unset-environment":
+			return i
+		}
+	}
+	return -1
+}
+
+// nonDashLiteralPresent reports whether words holds at least one literal
+// non-dash word — an explicit operand (a NAME or NAME=value list) rather
+// than an option.
+func nonDashLiteralPresent(words []*syntax.Word) bool {
+	for _, word := range words {
+		if literal, ok := launcherLiteralWord(word); ok && !strings.HasPrefix(literal, "-") {
 			return true
 		}
 	}
@@ -371,16 +450,15 @@ func systemctlWritesEnvironment(words []*syntax.Word) bool {
 
 // sudoPreservesEnvironment reports sudo's env-preservation state:
 // preserveAll for `-E` or a bare `--preserve-env`, else the name list of
-// `--preserve-env=LIST` words. `-E` inside a short-option cluster
-// (`sudo -vE`) is not split — the invocation reads as a reset and
-// over-refuses, the safe direction.
+// `--preserve-env=LIST` words. Only words in sudo's own option region
+// count: `-E` after the command word (`sudo make -E`) or after `--` is
+// the COMMAND's flag, not sudo's, and `sudo -p -E` consumes `-E` as the
+// -p operand — every one of those still resets (Codex P1 on this head).
+// `-E` inside a short-option cluster (`sudo -vE`) is not split — the
+// invocation reads as a reset and over-refuses, the safe direction.
 func sudoPreservesEnvironment(words []*syntax.Word) (map[string]struct{}, bool) {
 	var preserved map[string]struct{}
-	for _, word := range words {
-		literal, ok := launcherLiteralWord(word)
-		if !ok {
-			continue
-		}
+	for _, literal := range launcherOwnOptionLiterals(words, sudoOperandOptions) {
 		if literal == "-E" || literal == "--preserve-env" {
 			return nil, true
 		}
@@ -397,24 +475,27 @@ func sudoPreservesEnvironment(words []*syntax.Word) (map[string]struct{}, bool) 
 }
 
 // suResetsEnvironment reports whether the invocation asks for a login
-// environment (`-`, `-l`, `--login`) without `-p`/`--preserve-environment`
-// keeping the caller's.
+// environment (`-`, `-l`, `--login`, or `l` inside a single-dash cluster
+// like `-lp`). util-linux su's precedence makes the login form WIN over
+// -m/-p/--preserve-environment (it prints "ignoring --preserve-environment"),
+// so a preservation request never cancels the reset — and su's getopt
+// permutes options ahead of the USER operand, so the flag counts wherever
+// it sits in the argv (Codex P1 on this head).
 func suResetsEnvironment(words []*syntax.Word) bool {
-	login := false
-	preserve := false
 	for _, word := range words {
 		literal, ok := launcherLiteralWord(word)
 		if !ok {
 			continue
 		}
-		switch literal {
-		case "-", "-l", "--login":
-			login = true
-		case "-p", "--preserve-environment":
-			preserve = true
+		if literal == "-" || literal == "--login" {
+			return true
+		}
+		if strings.HasPrefix(literal, "-") && !strings.HasPrefix(literal, "--") &&
+			strings.Contains(literal[1:], "l") {
+			return true
 		}
 	}
-	return login && !preserve
+	return false
 }
 
 // tailReachesResetAgentProgram reports whether a literal word in words
