@@ -306,7 +306,7 @@ func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailM
 			return nil, true
 		}
 		for _, payload := range payloads {
-			if payloadReachesAgentProgram(payload) {
+			if payloadReachesAgentProgram(payload, nil) {
 				return nil, true
 			}
 		}
@@ -350,7 +350,10 @@ func isRunnerCommandOption(opt string) bool {
 // `-cx`, and unambiguous long abbreviations (`--comm x`, `--sess=x`).
 // An unrecognized long option could abbreviate an operand-carrying
 // option the walk doesn't know — its following literal word is a payload
-// candidate too.
+// candidate too. `--` does NOT end the scan: it can itself be an option
+// operand (`script -O --` names the logfile `--` — Codex P1 on this
+// head), and even a real terminator's tail is handed to the shell that
+// decodes `-c` itself, so payload spellings are collected anywhere.
 func runnerPayloads(words []*syntax.Word) []string {
 	var payloads []string
 	for i := 0; i < len(words); i++ {
@@ -359,7 +362,7 @@ func runnerPayloads(words []*syntax.Word) []string {
 			continue
 		}
 		if literal == "--" {
-			return payloads
+			continue
 		}
 		if literal == "-c" {
 			if i+1 < len(words) {
@@ -410,7 +413,10 @@ func runnerPayloads(words []*syntax.Word) []string {
 // payloadReachesAgentProgram parses a `-c` script the way the shell will
 // and applies the reset arm's agent scan to every command's decoded
 // words — `co""dex` reaches `codex` the same as a bare spelling.
-func payloadReachesAgentProgram(script string) bool {
+// preserved carries the outer launcher's preserved-name set so
+// `sudo --preserve-env=CODEX_HOME su -c 'codex'` does not misjudge a
+// still-pinned agent as reset.
+func payloadReachesAgentProgram(script string, preserved map[string]struct{}) bool {
 	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
 		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(script), "")
 		if err != nil {
@@ -418,7 +424,7 @@ func payloadReachesAgentProgram(script string) bool {
 		}
 		reaches := false
 		syntax.Walk(file, func(node syntax.Node) bool {
-			if call, ok := node.(*syntax.CallExpr); ok && tailReachesResetAgentProgram(call.Args, nil, false) {
+			if call, ok := node.(*syntax.CallExpr); ok && tailReachesResetAgentProgram(call.Args, preserved, false) {
 				reaches = true
 				return false
 			}
@@ -702,6 +708,15 @@ func suResetsEnvironment(words []*syntax.Word) bool {
 	return false
 }
 
+// commandRunnerPrograms name the launchers whose argv can carry a shell
+// payload — their `-c` operand decodes AFTER an outer launcher's reset
+// dropped the pane's pins, so `sudo su -c 'co""dex' root` reaches codex
+// even though `co""dex` isn't a literal agent word in sudo's tail (Codex
+// P2 on this head).
+var commandRunnerPrograms = map[string]struct{}{
+	"su": {}, "runuser": {}, "script": {},
+}
+
 // tailReachesResetAgentProgram reports whether a literal word in words
 // names an account-capable agent program at an identifier boundary while
 // the invocation does not preserve that agent's identity variable. The
@@ -709,12 +724,17 @@ func suResetsEnvironment(words []*syntax.Word) bool {
 // can pin), so `sudo -u root codex`, `sudo -u root bash -lc codex` and
 // `su -l -c 'codex' u` all reach it, while `sudo -u postgres psql` does
 // not. A non-literal word is skipped — the lexical scan already refused
-// the command for carrying it.
+// the command for carrying it. A command-runner word nests the shell
+// payload under the SAME reset, so the first one's `-c` operand is
+// decoded and scanned for agent names too — runnerPayloads already
+// sweeps the whole suffix, so one descent covers every later payload
+// spelling without a quadratic per-runner rescan.
 func tailReachesResetAgentProgram(words []*syntax.Word, preserved map[string]struct{}, preserveAll bool) bool {
 	if preserveAll {
 		return false
 	}
-	for _, word := range words {
+	runnerSeen := false
+	for i, word := range words {
 		literal, ok := launcherLiteralWord(word)
 		if !ok {
 			continue
@@ -725,6 +745,20 @@ func tailReachesResetAgentProgram(words []*syntax.Word, preserved map[string]str
 			}
 			if launcherSegmentNames(literal, agent, false) {
 				return true
+			}
+		}
+		if runnerSeen {
+			continue
+		}
+		for runner := range commandRunnerPrograms {
+			if launcherSegmentNames(literal, runner, false) {
+				runnerSeen = true
+				for _, payload := range runnerPayloads(words[i+1:]) {
+					if payloadReachesAgentProgram(payload, preserved) {
+						return true
+					}
+				}
+				break
 			}
 		}
 	}

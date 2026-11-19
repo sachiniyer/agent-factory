@@ -956,6 +956,23 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// runuser ships su's payload options and login reset.
 		{"runuser -l -c 'co\"\"dex' root", true},
 		{"runuser -c 'co\"\"dex' work", false},
+		// A runner nested INSIDE a resetting launcher's tail carries the
+		// reset into its decoded payload — `co""dex` lands as `codex`
+		// under sudo's env_reset even though sudo's own argv never
+		// spells the agent name literally (Codex P2).
+		{"sudo su -c 'co\"\"dex' root", true},
+		{"sudo script -q -c 'co\"\"dex' /dev/null", true},
+		{"sudo runuser -c 'co\"\"dex' root", true},
+		{"sudo su -c 'make' root", false},
+		{"sudo -E su -c 'co\"\"dex' root", false},
+		// `--` is not a payload-scan boundary: it can BE an option
+		// operand — `script -O --` names the logfile `--` — so the real
+		// `-c` hides behind it, and even a true terminator's tail is
+		// handed to a shell that decodes `-c` itself (Codex P1).
+		{"script -q -O -- -c 'export CODEX_\"\"HOME=/other; codex'", true},
+		{"su -- work -c 'env CODEX_\"\"HOME=/o x'", true},
+		{"script -- typescript", false},
+		{"su -- work", false},
 		// No login flag means the caller's environment survives — a bare
 		// agent name in the decoded payload stays admitted.
 		{"su -c 'co\"\"dex' work", false},

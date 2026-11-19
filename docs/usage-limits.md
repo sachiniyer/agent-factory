@@ -334,10 +334,20 @@ will not reach the child's environment.
   `su -l --session-command 'co""dex' root` refuse, while
   `script -q /dev/null`, `script -c 'make' /tmp/build.log` and
   `su -c 'co""dex' work` (no login flag — the caller's environment
-  survives) run. Interactive shells themselves stay refused wherever
-  they appear — `shellCommandIsUnproven` already covers `sh`/`bash`/
-  `zsh`/`dash`/`ksh`/`fish`/... at command position — so their `-c`
-  operands need no separate scan.
+  survives) run. `--` does not bound the payload scan — it can be an
+  option's operand (`script -O --` names the logfile `--`), and a real
+  terminator's tail is handed to a shell that decodes `-c` itself — so
+  `script -q -O -- -c 'export CODEX_""HOME=/other; codex'` and `su --
+  work -c 'env CODEX_""HOME=/o x'` refuse while `script -- typescript`
+  and `su -- work` run. A runner nested inside a resetting launcher's
+  tail carries the reset into its decoded payload —
+  `sudo su -c 'co""dex' root` and `sudo script -q -c 'co""dex'
+  /dev/null` refuse because the child lands `codex` under env_reset,
+  while `sudo -E su -c 'co""dex' root` (the pins are preserved) and
+  `sudo su -c 'make' root` run. Interactive shells themselves stay
+  refused wherever they appear — `shellCommandIsUnproven` already
+  covers `sh`/`bash`/`zsh`/`dash`/`ksh`/`fish`/... at command position
+  — so their `-c` operands need no separate scan.
 
 A launcher buried inside another command's argv (`nohup sudo
 CODEX_HOME=/other codex`, `docker build env CODEX_HOME=/other codex`) is
