@@ -279,3 +279,71 @@ func TestCodexCaptureScanDoesNotStallOnAWedgedStore(t *testing.T) {
 	})
 	require.ErrorIs(t, err, fsprobe.ErrProbeTimedOut, "the scan reports that it could not look, never an empty store")
 }
+
+// A blind resume's warning names only a resume that happened (#7609 review):
+// Recover plans the resume before it knows whether tmux reattaches to a
+// surviving pane — which resumes nothing — or respawns one, so the notice must
+// wait for the respawn. The reattach half is
+// TestRecover_UnverifiedReattachClearsRuntimeProgram's same-name fixture.
+func TestRecover_BlindResumeNoticeWaitsForRespawn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		alive    func(agentName, shellName string) map[string]bool
+		respawns bool
+	}{
+		{
+			name:     "a reattach to a surviving pane resumes nothing",
+			alive:    func(a, s string) map[string]bool { return map[string]bool{a: true, s: true} },
+			respawns: false,
+		},
+		{
+			name:     "a respawned pane resumed the recorded conversation",
+			alive:    func(a, s string) map[string]bool { return map[string]bool{} },
+			respawns: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log.Initialize(false)
+			defer log.Close()
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			configDir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+			const agentName = "af_recover_blind_resume"
+			shellName := agentName + tmuxTabSeparator + shellTabName
+			var newSessions int
+			var spawns []string
+			restored := lostInstanceForRecover(t, agentName, shellName,
+				recordingExec(tc.alive(agentName, shellName), &newSessions, &spawns))
+			restored.SetResumeRecordedConversation(AgentConversationData{
+				Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected,
+			})
+
+			// Every store listing errs, so the resume is planned blind.
+			t.Cleanup(fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
+				if strings.HasPrefix(dir, configDir) {
+					return nil, os.ErrPermission
+				}
+				return os.ReadDir(dir)
+			}))
+			var warned logtest.Buffer // a retried listing may still log on its goroutine
+			prev := log.WarningLog.Writer()
+			log.WarningLog.SetOutput(&warned)
+			t.Cleanup(func() { log.WarningLog.SetOutput(prev) })
+
+			require.NoError(t, restored.Recover())
+
+			if !tc.respawns {
+				require.Zero(t, newSessions, "the fixture reattaches to the surviving pane")
+				require.NotContains(t, warned.String(), "without verifying it first",
+					"no pane resumed, so the blind-resume notice must not have been logged")
+				return
+			}
+			require.Greater(t, newSessions, 0, "the fixture must respawn the missing pane")
+			require.Contains(t, strings.Join(spawns, "\n"), "--resume "+carryTestID,
+				"the respawned pane launched the recorded conversation's resume")
+			require.Contains(t, warned.String(), "without verifying it first, because "+blindResumeUnverifiedReason,
+				"a respawn that resumed blind is named")
+		})
+	}
+}
