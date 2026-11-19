@@ -462,6 +462,14 @@ type dockerProvisioner struct {
 	reapMu  sync.Mutex
 	reaped  bool
 	reapErr error
+
+	// Staged payload delivery (#7577 item 2): stagingDir is the af-owned
+	// per-session dir (removed on reap) holding stagedAfPath/stagedPolicyPath;
+	// payloadViaBinds marks the bind-delivery decision (preparePayloadDelivery).
+	stagingDir       string
+	stagedAfPath     string
+	stagedPolicyPath string
+	payloadViaBinds  bool
 }
 
 // provision runs the full container lifecycle and returns the wiring a docker
@@ -522,7 +530,10 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.ensureThrowawayEngineRecorded(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
 	}
-	if err := p.runContainer(); err != nil {
+	// Deliver af's own payload through read-only binds appended last in
+	// `docker run` — no cp/chmod for a run_args mount to redirect (#7577 item 2).
+	p.preparePayloadDelivery()
+	if err := p.runPayloadContainer(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
 	}
 	// Warn NOW, while the only thing that exists is the created container:
@@ -551,11 +562,8 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.configureGit(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
-	if err := p.copyAfBinary(); err != nil {
-		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
-	}
-	if err := p.copyPolicy(); err != nil {
-		return ProvisionResult{}, dockerStepErr(err, dockerOpDaemonWrite)
+	if err := p.deliverPayload(); err != nil {
+		return ProvisionResult{}, err
 	}
 	if err := p.startAgentServer(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
@@ -598,6 +606,8 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 			cleanup: &DockerRuntimeCleanupData{
 				ContainerID: p.containerID,
 				EngineID:    p.engineID,
+				// Base name only: restore re-roots it under the staging root.
+				StagingDir: dockerStagingRecordName(p.stagingDir),
 			},
 		},
 		Endpoint: endpoint,
@@ -779,6 +789,10 @@ func (p *dockerProvisioner) runContainer() error {
 			args = append(args, "-e", entry)
 		}
 	}
+	// The staged payload binds go LAST in argv — after run_args and every -e
+	// pin — so af's files come from an af-owned read-only source nothing
+	// repo-controlled can precede (#7577 item 2).
+	args = append(args, p.stagingMounts()...)
 	args = append(args, "--entrypoint", "sleep", p.image, "2147483647")
 
 	out, err := p.docker(dockerProvisionStepTimeout, args...)
@@ -788,12 +802,16 @@ func (p *dockerProvisioner) runContainer() error {
 		// nonexistent device/volume/network, `--gpus all` on a GPU-less host. The
 		// container is then left behind in `created` state. Capture the id off the
 		// combined output even on this error path and store it so the
-		// provision-failure reap in Provision (guarded on p.containerID != "") removes
-		// it instead of leaking it (#2008). This is the exec started-vs-succeeded
-		// rule: gate cleanup on the container having been CREATED, not on `docker run`
-		// exiting zero.
+		// provision-failure reap in Provision removes it instead of leaking it
+		// (#2008): gate cleanup on the container having been CREATED, not on
+		// `docker run` exiting zero.
 		if id := parseCreatedContainerID(out); id != "" {
 			p.containerID = id
+		}
+		if derr := dockerDuplicateMountError(string(out), err); derr != nil {
+			return derr
+		} else if rerr := dockerReadOnlyMountpointError(string(out), err); rerr != nil {
+			return rerr
 		}
 		// The data-root capacity evidence joins at the provision() boundary,
 		// shared with every other provisioning step (#5382).
