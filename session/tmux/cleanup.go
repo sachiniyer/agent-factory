@@ -388,7 +388,10 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	preMarkerServers := make(map[string]ServerIdentity, len(prefixed))
 	preMarkerGenerations := make(map[string]orphanGenerationSet, len(prefixed))
 	for _, match := range prefixed {
-		preMarkerCapture, captureErr := captureSessionProcessTrees(cmdExec, match, "")
+		// The pre-marker capture is the sole consumer of the server record
+		// — wantServer=true (#7581 item 4): it alone pays the corroborated
+		// socket read and the namespace proof.
+		preMarkerCapture, captureErr := captureSessionProcessTrees(cmdExec, match, "", true)
 		preMarkerProcesses[match], preMarkerCaptureErrs[match] = preMarkerCapture.Procs, captureErr
 		preMarkerPaneSIDs[match] = preMarkerCapture.PaneSIDs
 		preMarkerPrograms[match] = preMarkerCapture.RecordedPrograms
@@ -502,7 +505,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	var incompleteCaptures error
 	var killErr error
 	for _, match := range matches {
-		captured, captureErr := captureSessionProcessTrees(cmdExec, match, "")
+		captured, captureErr := captureSessionProcessTrees(cmdExec, match, "", false)
 		leaked := captured.Procs
 		// Each match's protection comes from ITS OWN capture's snapshot, taken
 		// before that match's kill: a pane process dying on a kill reparents a

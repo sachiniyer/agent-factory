@@ -30,6 +30,15 @@ func PtySlaveIndices(pid int) ([]PtyIndex, error) {
 	return ptySlaveIndices(pid)
 }
 
+// PtyFdIndex pairs a pty-master identity with the descriptor the holder
+// keeps it on — the record a cached ownership map re-verifies through
+// (#7581 item 2). Fd is the read-time descriptor number; a closed or
+// reused descriptor fails the re-verify and contributes nothing.
+type PtyFdIndex struct {
+	PtyIndex
+	Fd int
+}
+
 // PtyMasterIndices returns the pseudo-terminal MASTER identities pid holds
 // open: the tty-index of each ptmx fd (linux fdinfo) or each /dev/ptmx
 // vnode's rdev minor (darwin), qualified by the terminal instance exactly
@@ -39,7 +48,34 @@ func PtySlaveIndices(pid int) ([]PtyIndex, error) {
 //
 // Same contract as PtySlaveIndices: an error is "could not see".
 func PtyMasterIndices(pid int) ([]PtyIndex, error) {
-	return ptyMasterIndices(pid)
+	fds, err := ptyMasterFdIndices(pid)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PtyIndex, len(fds))
+	for i, fi := range fds {
+		out[i] = fi.PtyIndex
+	}
+	return out, nil
+}
+
+// PtyMasterFdIndices is PtyMasterIndices carrying the descriptor number of
+// each master — what the sweep's ownership map stores so a later verdict
+// can re-verify exactly the recorded fd instead of re-walking the holder's
+// whole fd table (#7581 item 2).
+func PtyMasterFdIndices(pid int) ([]PtyFdIndex, error) {
+	return ptyMasterFdIndices(pid)
+}
+
+// PtyMasterFdIndex re-verifies ONE recorded descriptor: the pty-master
+// identity pid's fd currently holds, with ok reporting the read answered
+// AND the fd is still a ptmx master. A descriptor that closed, was reused
+// for another kind of file, or whose table cannot be read answers false —
+// the caller treats it as "the cached claim proved nothing": undecidable,
+// never foreign (#7581 item 2). One fdinfo file (linux) or one vnode
+// decode (darwin) — never a walk of the holder's table.
+func PtyMasterFdIndex(pid, fd int) (PtyIndex, bool) {
+	return ptyMasterFdIndex(pid, fd)
 }
 
 // ptySlaveIndexFromPath parses a /dev/pts/N link target (linux) or a

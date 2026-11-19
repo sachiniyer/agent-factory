@@ -82,6 +82,10 @@ func ptySlaveIndices(int) ([]PtyIndex, error) {
 	return nil, ErrUnsupportedPlatform
 }
 
-func ptyMasterIndices(int) ([]PtyIndex, error) {
+func ptyMasterFdIndices(int) ([]PtyFdIndex, error) {
 	return nil, ErrUnsupportedPlatform
+}
+
+func ptyMasterFdIndex(int, int) (PtyIndex, bool) {
+	return PtyIndex{}, false
 }

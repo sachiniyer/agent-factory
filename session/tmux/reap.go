@@ -100,7 +100,7 @@ func SessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) []proctree.
 // for a session that is live on the recorded one and arm a kill off the
 // fall-through.
 func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]proctree.Process, error) {
-	captured, err := captureSessionProcessTrees(cmdExec, sanitizedName, "")
+	captured, err := captureSessionProcessTrees(cmdExec, sanitizedName, "", false)
 	return captured.Procs, err
 }
 
@@ -111,14 +111,18 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 // pane capture that follows must read the SAME server or a live session reads
 // as vanished. An empty socket is the ambient form.
 func CaptureSessionProcessTreesOnSocket(cmdExec cmd.Executor, sanitizedName, socket string) ([]proctree.Process, error) {
-	captured, err := captureSessionProcessTrees(cmdExec, sanitizedName, socket)
+	captured, err := captureSessionProcessTrees(cmdExec, sanitizedName, socket, false)
 	return captured.Procs, err
 }
 
 // captureSessionProcessTrees is the capture-internal form: it returns the
 // whole paneCapture so a caller about to kill can compute protection from the
-// SAME snapshot the process list came from (#7435 item 3).
-func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket string) (paneCapture, error) {
+// SAME snapshot the process list came from (#7435 item 3). wantServer says
+// the caller STORES the captured Server record — only the pre-marker sweep
+// does, for the vanished-session verdict; every other capture path discards
+// it, so only then does the capture pay the #{pid} #{socket_path} round
+// trip and the namespace proof it enables (#7581 item 4).
+func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket string, wantServer bool) (paneCapture, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
@@ -157,22 +161,29 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName, socket stri
 	// The rows carry only the numeric server fields — the socket path is
 	// free-form text and is never a listing field (#7469 R5) — so the
 	// capture completes the identity from the server's own single-value
-	// answer on the SAME pinned socket, corroborated by its pid. A read
-	// that fails leaves the record incomplete: undecidable, never wrong.
-	if captured.Server.PID > 0 {
+	// answer on the SAME pinned socket, corroborated by its pid, but ONLY
+	// when the caller stores the record (#7581 item 4). The read spends
+	// what is left of the capture's own deadline — one bounded read, never
+	// a fresh one stacked after it — and a read that fails leaves the
+	// record incomplete: undecidable, never wrong.
+	deadline, _ := ctx.Deadline()
+	if wantServer && captured.Server.PID > 0 {
 		captured.Server = resolveServerIdentity(corroboratedServerSocket(captured.Server,
 			func() (int, string, error) {
-				return serverSocketPIDFor(cmdExec, socket, sanitizedName)
-			}))
+				return serverSocketPIDForWithin(cmdExec, socket, sanitizedName, time.Until(deadline))
+			}), time.Until(deadline))
 	}
 	return captured, perr
 }
 
-// serverSocketPIDFor is the capture path's corroborated (pid, socket_path)
-// read — the free-function counterpart of TmuxSession.serverSocketPID,
-// pinned to the same socket the listing came from (#7469 R5).
-func serverSocketPIDFor(cmdExec cmd.Executor, socket, sanitizedName string) (int, string, error) {
-	ctx, cancel := tmuxTimeoutContext()
+// serverSocketPIDForWithin is the capture path's corroborated
+// (pid, socket_path) read — the free-function counterpart of
+// TmuxSession.serverSocketPIDWithin, pinned to the same socket the listing
+// came from and bounded by what the listing's deadline had left
+// (#7469 R5, #7581 item 4). A var seam so a test observes the remainder
+// actually passed, not only the answer.
+var serverSocketPIDForWithin = func(cmdExec cmd.Executor, socket, sanitizedName string, budget time.Duration) (int, string, error) {
+	ctx, cancel := tmuxTimeoutContextWithin(budget)
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec, socketTmuxArgs(socket,
 		"display-message", "-p", "-t", ExactTarget(sanitizedName), "#{pid} #{socket_path}")...)

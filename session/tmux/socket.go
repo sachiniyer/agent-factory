@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SocketPath returns the absolute filesystem path of the tmux server socket this
@@ -44,7 +45,7 @@ func (t *TmuxSession) SocketPath(ctx context.Context) (string, error) {
 	return path, nil
 }
 
-// serverSocketPID answers the server's (pid, socket_path) pair as ONE
+// serverSocketPIDWithin answers the server's (pid, socket_path) pair as ONE
 // display-message value — the single-value socket read #7469 R5 requires:
 // the socket path is free-form text, so it rides no multi-row listing where
 // an embedded newline would print raw and change the row count. The pid
@@ -52,9 +53,12 @@ func (t *TmuxSession) SocketPath(ctx context.Context) (string, error) {
 // pane row answered for: a session respawned onto another server between
 // the two reads must never pair one server's socket with another's pid.
 // The pid fields are compared by the caller; any answer that does not parse
-// is "could not read" — an incomplete record, never a wrong one.
-func (t *TmuxSession) serverSocketPID() (pid int, socket string, err error) {
-	ctx, cancel := tmuxTimeoutContext()
+// is "could not read" — an incomplete record, never a wrong one. The read
+// is bounded by what the caller's own deadline has left — a row read's
+// socket corroboration spends only what the row already had left, never a
+// fresh deadline stacked after it (#7581 item 4).
+func (t *TmuxSession) serverSocketPIDWithin(budget time.Duration) (pid int, socket string, err error) {
+	ctx, cancel := tmuxTimeoutContextWithin(budget)
 	defer cancel()
 	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t",
 		ExactTarget(t.sanitizedName), "#{pid} #{socket_path}")
@@ -63,6 +67,12 @@ func (t *TmuxSession) serverSocketPID() (pid int, socket string, err error) {
 	}
 	return parseServerSocketReply(string(output))
 }
+
+// readSocketPIDWithin is the bounded-read path's corroborated socket read —
+// readPaneRow and PaneRootProcessMatches call it with what the read's own
+// deadline had LEFT (#7581 item 4). A var seam so a test observes the
+// remainder actually passed, not only the answer.
+var readSocketPIDWithin = (*TmuxSession).serverSocketPIDWithin
 
 // parseServerSocketReply reads "pid socket_path": the pid is the first
 // field, the socket is EVERYTHING after the first space — verbatim,

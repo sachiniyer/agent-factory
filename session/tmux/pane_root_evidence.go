@@ -3,7 +3,9 @@ package tmux
 import (
 	"errors"
 	"os"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
@@ -205,22 +207,163 @@ func (t *TmuxSession) PaneRootEvidence() (pid int, startID uint64, ok bool) {
 	return 0, 0, false
 }
 
+// serverProofKey scopes a shared namespace proof to what it reads: the
+// recorded server pid and socket.
+type serverProofKey struct {
+	pid    int
+	socket string
+}
+
+// serverProofFlight is ONE shared proof for a (pid, socket) pair. An
+// unproven record re-proves on its next stamp's budget, and a binding walk
+// wedged on a dead mount must never accumulate a blocked worker per retry —
+// every waiter bounds its own wait; the shared worker publishes its answer
+// once (Codex on #7581 — the socketCompareFlight shape, applied to the
+// proof). The record IS the bound: nothing a waiter leaves behind.
+// deadline is the leader's start plus ITS budget: the one proof deadline a
+// key pays, so a restore batch stamping the same server session after
+// session does not serialize a fresh bound per session (Codex on #7581).
+type serverProofFlight struct {
+	done     chan struct{}
+	deadline time.Time
+	startID  uint64
+	ns       string
+	bound    bool
+}
+
+type serverProofFlightSet struct {
+	mu       sync.Mutex
+	inFlight map[serverProofKey]*serverProofFlight
+}
+
+var serverProofFlights = serverProofFlightSet{inFlight: map[serverProofKey]*serverProofFlight{}}
+
+func (s *serverProofFlightSet) begin(key serverProofKey, budget time.Duration) (f *serverProofFlight, leader bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if f, ok := s.inFlight[key]; ok {
+		return f, false
+	}
+	f = &serverProofFlight{done: make(chan struct{}), deadline: time.Now().Add(budget)}
+	s.inFlight[key] = f
+	return f, true
+}
+
+func (s *serverProofFlightSet) finish(key serverProofKey, f *serverProofFlight) {
+	s.mu.Lock()
+	delete(s.inFlight, key)
+	s.mu.Unlock()
+	close(f.done)
+}
+
+// inFlightCount is the test seam for the memory bound: under a wedged
+// proof it stays 1 however many stamps expire against it, and reaches 0
+// once the read lands.
+func (s *serverProofFlightSet) inFlightCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.inFlight)
+}
+
 // resolveServerIdentity fills the kernel fields a pane row cannot carry —
-// the server process's StartID and the pid namespace this process writes to —
+// the server process's StartID and the pid namespace the pid was PROVEN in —
 // so the record survives a daemon restart and a recycled server pid (#7469).
-// A lookup failure degrades the record (socket and pid still compare), never
-// discards it.
-func resolveServerIdentity(id ServerIdentity) ServerIdentity {
+// The proof (#7581 item 1): the per-socket reader must show THIS pid holding
+// a listener bound to the recorded socket (#7537/#7543) — read-only, never
+// tmuxSocketClaimed or SIGUSR1. #{pid} names the server in ITS pid
+// namespace; a server living in another one makes the number fiction here —
+// it can name a different process entirely — so a stamp that cannot prove
+// the pid leaves StartID and PIDNS empty and every pid-derived compare is
+// undecidable. Socket and PID still ride the record: the socket compare no
+// namespace can break, and the pid still names the verdict's reason.
+//
+// serverProcLookup is the proctree.Lookup the proof worker reads — a
+// package var so a test can stage a mid-read pid recycle; captured before
+// the worker starts, exactly like the binding seam.
+var serverProcLookup = proctree.Lookup
+
+func resolveServerIdentity(id ServerIdentity, budget time.Duration) ServerIdentity {
 	if !id.valid() {
 		return ServerIdentity{}
 	}
-	if p, err := proctree.Lookup(id.PID); err == nil {
-		id.StartID = p.StartID
+	id.StartID, id.PIDNS = 0, ""
+	// The proof's kernel reads run INSIDE what the caller's deadline has
+	// left (Codex on #7581): a proof that does not finish in time is
+	// unproven — undecidable — never a stamp that blocked the bounded read
+	// it rode in on. The seams are captured on the LEADER's goroutine, so a
+	// worker abandoned past the deadline touches no package state a test
+	// may already have restored (the #7550 flight race).
+	key := serverProofKey{pid: id.PID, socket: id.Socket}
+	f, leader := serverProofFlights.begin(key, budget)
+	if leader {
+		bind := tmuxServerSocketBinding
+		lookup := serverProcLookup
+		go func() {
+			defer serverProofFlights.finish(key, f)
+			// The binding proves the pid AT READ TIME — a server restart
+			// can recycle it while the walk runs, so the instance must
+			// agree before and after: a StartID read from the replacement
+			// stamped beside the dead server's binding is worse than none
+			// (Codex on #7581).
+			before, beforeErr := lookup(id.PID)
+			binding, _ := bind(id.PID, id.Socket)
+			if binding != socketBindingBound && binding != socketBindingBoundByTable {
+				return
+			}
+			after, afterErr := lookup(id.PID)
+			if beforeErr != nil || afterErr != nil || before.StartID != after.StartID {
+				return
+			}
+			f.bound = true
+			f.startID = after.StartID
+			if ns, err := proctree.PIDNamespaceID(); err == nil {
+				f.ns = ns
+			}
+		}()
 	}
-	if ns, err := proctree.PIDNamespaceID(); err == nil {
-		id.PIDNS = ns
+	// A published answer is free however the deadline fell — take it
+	// before the wait is priced at all.
+	select {
+	case <-f.done:
+		if f.bound && (f.startID != 0 || f.ns != "") {
+			id.StartID, id.PIDNS = f.startID, f.ns
+			id.provenHere = true
+		}
+		return id
+	default:
+	}
+	// Every stamp bounds its own wait — and the key pays at most the ONE
+	// deadline the flight was born with: a joiner past that point returns
+	// unproven at once instead of serializing a second bound (Codex on
+	// #7581).
+	wait := budget
+	if until := time.Until(f.deadline); until < wait {
+		wait = until
+	}
+	ctx, cancel := tmuxTimeoutContextWithin(wait)
+	defer cancel()
+	select {
+	case <-f.done:
+		if f.bound && (f.startID != 0 || f.ns != "") {
+			id.StartID, id.PIDNS = f.startID, f.ns
+			id.provenHere = true
+		}
+	case <-ctx.Done():
 	}
 	return id
+}
+
+// processInstanceAlive reports whether pid is still the SAME process a
+// proven record was stamped for. A server restart can recycle the recorded
+// pid (same socket, same session name — $0 after a restart): carrying the
+// dead instance's StartID forward would then judge the replacement
+// server's own pty holders foreign and leave teardown running beneath them
+// (Codex on #7581). A record that cannot match its live instance is
+// re-proven on the stamp's budget instead — the same synchronous Lookup
+// the pty walks pay for their flight keys.
+func processInstanceAlive(pid int, startID uint64) bool {
+	p, err := proctree.Lookup(pid)
+	return err == nil && p.StartID == startID
 }
 
 // noteServerIdentity is the stamp every live pane resolution calls: a row
@@ -228,9 +371,34 @@ func resolveServerIdentity(id ServerIdentity) ServerIdentity {
 // kernel evidence — while a row that could not keeps whatever stands (a
 // field-less tmux answers "unknown", never "changed"). A landed stamp also
 // clears the spawn-boundary retirement: the record once more names the
-// session's current incarnation (#7469 R1a).
-func (t *TmuxSession) noteServerIdentity(raw ServerIdentity) {
-	id := resolveServerIdentity(raw)
+// session's current incarnation (#7469 R1a). A stamp naming the SAME
+// (socket, pid, session) carries the standing record's proof fields forward
+// only while that proof was made in THIS process and the recorded pid is
+// still that same instance — the namespace proof is paid once per record,
+// not once per row (#7581).
+// budget bounds the namespace proof's kernel reads to what the calling
+// read's deadline has left — a proof that outruns it is simply unproven
+// (#7581, Codex).
+func (t *TmuxSession) noteServerIdentity(raw ServerIdentity, budget time.Duration) {
+	id := raw
+	if cur := t.serverEvidence.Load(); cur != nil &&
+		cur.Socket == raw.Socket && cur.PID == raw.PID && cur.SessionID == raw.SessionID &&
+		cur.provenHere && processInstanceAlive(cur.PID, cur.StartID) {
+		// An unchanged tuple carries the standing record's proof forward —
+		// but only a PROOF THIS PROCESS MADE on the SAME live instance is
+		// paid once. A seeded record never qualifies: the row can claim a
+		// namespace and a StartID, never the proof itself (Codex on #7581).
+		// An unproven standing record (the deadline won, or the pid
+		// genuinely could not be shown bound) re-proves on this stamp's
+		// remaining budget: a transiently slow first proof must not pin
+		// undecidable forever, and an honestly unprovable one re-pays a
+		// bounded read per stamp — never a signal, never a fresh timeout.
+		// A proven record whose pid was recycled re-proves too — the
+		// standing StartID belongs to the dead instance.
+		id.StartID, id.PIDNS, id.provenHere = cur.StartID, cur.PIDNS, true
+	} else {
+		id = resolveServerIdentity(raw, budget)
+	}
 	if id.valid() {
 		stored := id
 		t.serverEvidence.Store(&stored)
@@ -271,7 +439,11 @@ func (t *TmuxSession) ServerEvidenceRetired() bool {
 // SeedPaneRootEvidence (#7469). A seed fills only an EMPTY cell — anything a
 // live resolution stamped is newer than the persisted record. A zero record
 // is no anchor: sessions launched before this existed stay undecidable, which
-// is today's verdict.
+// is today's verdict. The seed is a CLAIM, never a proof: provenHere stays
+// unset, so the first live stamp of the same tuple re-proves within its
+// budget rather than carrying the row's fields forward unverified — a
+// #7550-era row can persist PIDNS=self beside another process's StartID
+// (Codex on #7581).
 func (t *TmuxSession) SeedServerEvidence(socket string, pid int, startID uint64, sessionID, pidns string) {
 	// pidns is the namespace the server pid was RECORDED in, persisted with
 	// the row — never the restoring daemon's namespace, which can differ

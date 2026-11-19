@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 )
 
@@ -53,14 +54,14 @@ func ptySlaveIndices(pid int) ([]PtyIndex, error) {
 	return indices, nil
 }
 
-// ptyMasterIndices scans /proc/<pid>/fdinfo for tty-index lines — the field
-// only ptmx master fds carry, so every hit is one held pty pair. fdinfo is
-// the same owner-readable class as fd, so a directory failure shares the
-// "could not see" contract; a single fdinfo file that vanished mid-walk is a
-// smaller open set, not a failure. The dev half of each identity comes from
-// the same fd the index did, so a master can never borrow another instance's
-// qualifier.
-func ptyMasterIndices(pid int) ([]PtyIndex, error) {
+// ptyMasterFdIndices scans /proc/<pid>/fdinfo for tty-index lines — the
+// field only ptmx master fds carry, so every hit is one held pty pair
+// paired with its descriptor number. fdinfo is the same owner-readable
+// class as fd, so a directory failure shares the "could not see" contract;
+// a single fdinfo file that vanished mid-walk is a smaller open set, not a
+// failure. The dev half of each identity comes from the same fd the index
+// did, so a master can never borrow another instance's qualifier.
+func ptyMasterFdIndices(pid int) ([]PtyFdIndex, error) {
 	dir := fmt.Sprintf("/proc/%d/fdinfo", pid)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -69,16 +70,19 @@ func ptyMasterIndices(pid int) ([]PtyIndex, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", dir, err)
 	}
-	var indices []PtyIndex
+	var indices []PtyFdIndex
 	for _, entry := range entries {
-		body, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		fd, err := strconv.Atoi(entry.Name())
 		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
+			continue
+		}
+		idx, ok, err := ptyMasterIndexAt(pid, fd)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // the fd closed between listing and read
+		}
+		if err != nil {
 			return nil, fmt.Errorf("read %s/%s: %w", dir, entry.Name(), err)
 		}
-		idx, ok := ptyMasterIndexFromFdinfo(string(body))
 		if !ok {
 			continue
 		}
@@ -89,9 +93,37 @@ func ptyMasterIndices(pid int) ([]PtyIndex, error) {
 			}
 			return nil, fmt.Errorf("devpts lookup for fd %s of pid %d: %w", entry.Name(), pid, err)
 		}
-		indices = append(indices, PtyIndex{Dev: dev, Index: idx})
+		indices = append(indices, PtyFdIndex{PtyIndex: PtyIndex{Dev: dev, Index: idx}, Fd: fd})
 	}
 	return indices, nil
+}
+
+// ptyMasterFdIndex answers the tty-index of ONE descriptor — the single-fd
+// re-verify behind the sweep's ownership claims (#7581 item 2). ok is
+// false for any failure to see the fd and for an fd that is not a ptmx
+// master: the caller treats both as "proved nothing", never as evidence.
+func ptyMasterFdIndex(pid, fd int) (PtyIndex, bool) {
+	idx, ok, err := ptyMasterIndexAt(pid, fd)
+	if err != nil || !ok {
+		return PtyIndex{}, false
+	}
+	dev, err := ptyMasterDev(pid, idx)
+	if err != nil {
+		return PtyIndex{}, false
+	}
+	return PtyIndex{Dev: dev, Index: idx}, true
+}
+
+// ptyMasterIndexAt reads one /proc/<pid>/fdinfo/<fd> body for its
+// tty-index — the field only a ptmx master fd carries. ok is false when
+// the fd holds no tty-index; err is the filesystem read's own failure.
+func ptyMasterIndexAt(pid, fd int) (idx int, ok bool, err error) {
+	body, err := os.ReadFile(fmt.Sprintf("/proc/%d/fdinfo/%d", pid, fd))
+	if err != nil {
+		return 0, false, err
+	}
+	idx, ok = ptyMasterIndexFromFdinfo(string(body))
+	return idx, ok, nil
 }
 
 // ptySlaveDev answers which terminal instance a held slave descriptor belongs
