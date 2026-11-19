@@ -148,3 +148,45 @@ func TestPaced_KeepsTheRegularFileStatItBeganWith(t *testing.T) {
 	require.Equal(t, int64(0), secondCalls.Load(),
 		"a flight never sees a seam installed after it began")
 }
+
+// A step is stored as the offset the flight's clock had run when work
+// reported it, not a wall stamp: the step's instant is rebuilt against the
+// flight's start, which keeps the monotonic reading the clock carries in
+// production, so a wall-clock step in either direction mid-flight can
+// neither lengthen nor shorten the wait for the next step (#7403). The
+// manual clock's start is the flight's start — nothing advanced it before
+// the flight began — so the stored value, read as that offset, rebuilds
+// the instant the step ran. A UnixNano wall stamp rebuilds an instant
+// decades out.
+func TestPaced_AStepIsStoredAsAnOffsetOnTheFlightsClock(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	clock := NewManualClock(start)
+	restoreClock := SetFlightClockForTest(clock)
+	restoreTimeout := SetProbeTimeoutForTest(time.Minute)
+	defer func() {
+		restoreTimeout()
+		restoreClock()
+	}()
+
+	stepped, release := make(chan struct{}), make(chan struct{})
+	go func() {
+		_, _ = Paced("question", t.Name(), func(step func(), _ RegularStatFunc) (int, error) {
+			clock.Advance(20 * time.Millisecond)
+			step()
+			close(stepped)
+			<-release
+			return 0, nil
+		})
+	}()
+	<-stepped
+	pacedFlights.Lock()
+	flight := pacedFlights.byKey["question\x00"+t.Name()]
+	pacedFlights.Unlock()
+	require.NotNil(t, flight, "the flight is registered before its work runs")
+	close(release)
+	awaitPacedFlightsGone(t)
+
+	require.Equal(t, start.Add(20*time.Millisecond),
+		start.Add(time.Duration(flight.lastStep.Load())),
+		"the stored step, read as an offset from the flight's start on its clock, rebuilds the instant the step ran")
+}

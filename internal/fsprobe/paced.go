@@ -15,12 +15,20 @@ type pacedFlight struct {
 	res      any
 	err      error
 	timedOut bool // guarded by pacedFlights
-	// lastStep is when work last reported a step, in Unix nanoseconds on the
-	// flight's clock.
+	// lastStep is when work last reported a step, as the offset since the
+	// flight began on its clock. An atomic can hold the offset but not the
+	// instant, and a time.Unix rebuild of a stored stamp would carry no
+	// monotonic reading — the bound would run on the wall clock, where a
+	// step back during a stall lengthens the wait by the step (#7403).
+	// Rebuilt against started, the instant keeps whatever monotonic reading
+	// the clock has.
 	lastStep atomic.Int64
-	// clock is the time source the bound runs on, loaded when the flight
-	// begins (#7456).
-	clock flightClock
+	// clock is the time source the bound runs on, and started when the
+	// flight began on it — both fixed when the flight begins (#7456). The
+	// flight's start is its first step, which lastStep's zero value already
+	// records.
+	clock   flightClock
+	started time.Time
 }
 
 // pacedFlights is Paced's registry, keyed by question and key.
@@ -76,11 +84,13 @@ func runPaced(id, question, key string, work func(step func(), stat RegularStatF
 	}
 	flight := &pacedFlight{done: make(chan struct{}), clock: flightClocks.load()}
 	stat := regularFileStat.load()
-	flight.lastStep.Store(flight.clock.Now().UnixNano())
+	flight.started = flight.clock.Now()
 	pacedFlights.byKey[id] = flight
 	pacedFlights.Unlock()
 	go func() {
-		res, err := work(func() { flight.lastStep.Store(flight.clock.Now().UnixNano()) }, stat)
+		res, err := work(func() {
+			flight.lastStep.Store(int64(flight.clock.Now().Sub(flight.started)))
+		}, stat)
 		pacedFlights.Lock()
 		flight.res, flight.err = res, err
 		if pacedFlights.byKey[id] == flight {
@@ -99,17 +109,23 @@ func waitPaced(id, question, key string, flight *pacedFlight) (any, error) {
 	// The bound is measured from the flight's last step, so the deadline is
 	// the absolute instant lastStep + timeout: arming a fixed instant can't
 	// overshoot however the work's steps and advances interleave with the
-	// arm (#7456). Each staleness read takes the clock before lastStep so a
-	// step that lands mid-read makes the flight look fresher, never staler.
-	timer := flight.clock.NewTimer(time.Unix(0, flight.lastStep.Load()).Add(timeout))
+	// arm (#7456). lastStep is an offset from started, so the instant it
+	// rebuilds keeps the monotonic reading started carries — a time.Unix
+	// rebuild would drop it and put the wait back on the wall clock (#7403).
+	// Each staleness read takes the clock before lastStep so a step that
+	// lands mid-read makes the flight look fresher, never staler.
+	lastStepAt := func() time.Time {
+		return flight.started.Add(time.Duration(flight.lastStep.Load()))
+	}
+	timer := flight.clock.NewTimer(lastStepAt().Add(timeout))
 	defer timer.Stop()
 	for {
 		select {
 		case <-flight.done:
 			return flight.res, flight.err
 		case <-timer.C():
-			if since := flight.clock.Now().Sub(time.Unix(0, flight.lastStep.Load())); since < timeout {
-				timer.Reset(time.Unix(0, flight.lastStep.Load()).Add(timeout))
+			if since := flight.clock.Now().Sub(lastStepAt()); since < timeout {
+				timer.Reset(lastStepAt().Add(timeout))
 				continue
 			}
 			pacedFlights.Lock()
