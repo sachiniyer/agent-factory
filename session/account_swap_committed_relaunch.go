@@ -21,7 +21,7 @@ const staleCommittedConversationReason = "the conversation the replacement start
 // — that the notice and the log render after "because", and it names only the
 // store's non-answer: never a claim that a listing af could not read proved
 // the transcript (#7602 review).
-const blindCommittedResumeReason = "its transcript store could not be listed"
+const blindCommittedResumeReason = blindResumeUnverifiedReason
 
 // committedConversationLaunch plans the re-launch of a committed replacement on
 // the fresh conversation id its commit recorded (#7214). The first launch

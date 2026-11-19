@@ -305,6 +305,10 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 						err, rebuildErr, freshRebuildRefusal(decline)),
 				}
 			}
+			if decline.notice != "" {
+				log.WarningLog.Printf("session %q: resuming its recorded conversation %s without verifying it first, because %s",
+					i.Title, i.resumableConversation().ID, decline.notice)
+			}
 			if freshErr := gw.RebuildFreshFromRecordedBase(); freshErr != nil {
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
@@ -786,6 +790,10 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 		switch {
 		case ok:
 			program = rewritten
+			if decline.notice != "" {
+				log.WarningLog.Printf("session %q: resuming its recorded conversation %s without verifying it first, because %s",
+					i.Title, i.resumableConversation().ID, decline.notice)
+			}
 		case decline.startsOnRecorded:
 			// The recorded id holds no transcript: start Claude on it (#7215).
 			program = rewritten

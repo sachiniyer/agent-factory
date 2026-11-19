@@ -289,6 +289,10 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// Logged only if this restore actually re-spawns: a reattach to a
 			// live pane resumes nothing, so a refusal there is not news (#7101).
 			var refused tmux.ExactResumeRefusal
+			if resumed && refusal.notice != "" {
+				log.WarningLog.Printf("session %q: resuming its recorded conversation %s without verifying it first, because %s",
+					i.Title, i.resumableConversation().ID, refusal.notice)
+			}
 			if !resumed {
 				r := i.exactResumeRefusal(refusal)
 				refused = r.ExactResumeRefusal

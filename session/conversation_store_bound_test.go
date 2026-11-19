@@ -5,12 +5,15 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -97,6 +100,113 @@ func TestRestoreGuardDoesNotStallOnAWedgedClaudeStore(t *testing.T) {
 	require.True(t, got.ok, "a store af could not look at says nothing about the id: the restore resumes it as before")
 	require.Equal(t, "claude --resume "+carryTestID, got.program)
 	require.False(t, got.decline.retiresRecord(inst.AgentConversation()), "nothing is retired on a look that did not happen")
+	require.Equal(t, blindResumeUnverifiedReason, got.decline.notice,
+		"the resume is named as never verified, on its own channel (#7600)")
+	require.Empty(t, got.decline.reason, "a blind resume is no refusal")
+}
+
+// A blind verdict on a nameable store gets one more look inside the first
+// look's deadline (#7600): a listing that only blipped — its error unlatched —
+// answers on the retry, and the restore resumes verified, carrying no notice.
+func TestRecordedClaudeDeclineRetriesInsideItsBound(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	workDir, recorded, _ := claudeRestoreWorktree(t)
+	writeCarryFile(t, configDir, filepath.Join(recorded, carryTestID+".jsonl"), "{}\n")
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+	var failed sync.Map // each project dir's first listing refuses, as a blip does
+	var calls atomic.Int32
+	t.Cleanup(fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
+		if strings.HasPrefix(dir, configDir) {
+			calls.Add(1)
+			if _, seen := failed.LoadOrStore(dir, struct{}{}); !seen {
+				return nil, os.ErrPermission
+			}
+		}
+		return os.ReadDir(dir)
+	}))
+
+	program, ok, decline := prepareExactResumeConversation(inst, "claude")
+	require.True(t, ok, "the retried listing reads the filed transcript")
+	require.Equal(t, "claude --resume "+carryTestID, program)
+	// The two spellings blipped in the first look, so a verdict that read the
+	// transcript asked again — without the retry the answer is blind here too.
+	require.GreaterOrEqual(t, calls.Load(), int32(3), "the blipped verdict looked again")
+	require.Empty(t, decline.notice, "a proved resume carries no blind-resume notice")
+	require.Empty(t, decline.reason, "a proved resume is no refusal")
+}
+
+// The retried listing has no bound of its own — it gets what is left of the
+// first look's deadline (#7602's shape, #7600): a store that errs only after
+// most of the bound cannot make the restore's two judges cost two bounds. The
+// blind verdict that remains names the resume unverified, never a fresh id.
+func TestRecordedClaudeDeclineRejudgesInsideTheFirstLooksBound(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	workDir, _, _ := claudeRestoreWorktree(t)
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+	const bound = 800 * time.Millisecond
+	t.Cleanup(fsprobe.SetProbeTimeoutForTest(bound))
+	var calls atomic.Int32
+	t.Cleanup(fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
+		if strings.HasPrefix(dir, configDir) {
+			calls.Add(1)
+			time.Sleep(bound - 150*time.Millisecond) // errs only after most of the bound
+			return nil, os.ErrPermission
+		}
+		return os.ReadDir(dir)
+	}))
+
+	started := time.Now()
+	program, ok, decline := prepareExactResumeConversation(inst, "claude")
+	elapsed := time.Since(started)
+	require.True(t, ok, "a still-blind verdict resumes the recorded id as before: %s", program)
+	require.Equal(t, "claude --resume "+carryTestID, program)
+	require.GreaterOrEqual(t, calls.Load(), int32(3), "the retried listing ran")
+	require.Less(t, elapsed, bound*9/4,
+		"the two judges shared one look's bound — two spellings — : %v for a %v flight bound", elapsed, bound)
+	require.Equal(t, blindResumeUnverifiedReason, decline.notice,
+		"the retry cut at the shared deadline names the resume unverified")
+}
+
+// A store af cannot even name says nothing at all: the resume proceeds as it
+// always has, and the notice says its store could not be named — never "could
+// not be listed", which would claim a look that never happened (#7600).
+func TestRecordedClaudeDeclineNamesAnUnnameableStore(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	workDir, _, _ := claudeRestoreWorktree(t)
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+	inst.Account = "ghost" // a deregistered account leaves the store unnameable
+
+	program, ok, decline := prepareExactResumeConversation(inst, "claude")
+	require.True(t, ok, "a store af cannot name still resumes as before: %s", program)
+	require.Equal(t, "claude --resume "+carryTestID, program)
+	require.Equal(t, blindUnnameableResumeReason, decline.notice)
+	require.Empty(t, decline.reason, "an unnameable store is no refusal")
+}
+
+// A pinned first launch's blind resume is named the way a restore's is
+// (#7600): the launch still lands --resume, and the notice says af could not
+// verify it first.
+func TestPinnedLaunchNamesABlindResume(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	workDir, _, _ := claudeRestoreWorktree(t)
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+	inst.Tabs = []*Tab{{}}
+	inst.SetResumeRecordedConversation(AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected})
+	wedgeStoreListings(t, configDir)
+	var warned logtest.Buffer // a retried flight may still log on its goroutine
+	prev := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warned)
+	t.Cleanup(func() { log.WarningLog.SetOutput(prev) })
+
+	program, _, startedOn := planCreateConversation(inst, "claude", "0e0e0e0e-1111-4222-8333-444444444444")
+	require.False(t, startedOn, "a blind store's resume is no start on the id")
+	require.Equal(t, "claude --resume "+carryTestID, program,
+		"a store af could not look at resumes the pinned conversation as before")
+	require.Contains(t, warned.String(), "without verifying it first, because "+blindResumeUnverifiedReason,
+		"the launch's log names the blind resume")
 }
 
 // codexRestoreInstance is a Codex session whose agent tab recorded id, in a
