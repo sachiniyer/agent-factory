@@ -253,8 +253,10 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace env CODEX_HOME codex", true},
 		// A shell word in an unmodeled wrapper's tail is judged by the same
 		// shellCommandIsUnproven rule the modeled path applies at command
-		// position, so a literal -c script is refused even inside the quotes —
-		// `strace sh -c '...'` execs exactly what `nice sh -c '...'` does.
+		// position — #7604 decodes the literal -c script, so a mutating
+		// payload refuses even inside the quotes while a clean one would
+		// admit — `strace sh -c '...'` execs exactly what `nice sh -c '...'`
+		// does.
 		{"strace sh -c 'unset CODEX_HOME; codex'", true},
 		{"strace sh -c 'export CODEX_HOME=/x; codex'", true},
 		{"strace bash -c 'CODEX_HOME=/x codex'", true},
@@ -364,7 +366,7 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"unrecognized --setenv=CODEX_HOME=/other codex", true},
 	}
 	for _, test := range cases {
-		got := commandMutatesAccountEnvironment(test.command, codex)
+		got := !accountEnvironmentGateProven(test.command, codex, accountEnvironmentMaxPayloadDepth)
 		require.Equal(t, test.want, got, "command %q", test.command)
 	}
 }
@@ -449,7 +451,7 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 		{"xargs --version echo hi", false},
 		{"xargs --help env codex", false},
 	} {
-		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, codex),
+		require.Equal(t, test.want, !accountEnvironmentGateProven(test.command, codex, accountEnvironmentMaxPayloadDepth),
 			"command %q", test.command)
 	}
 }

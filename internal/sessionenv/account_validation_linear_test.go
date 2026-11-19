@@ -105,12 +105,14 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		// #4978: the xargs input walk follows the chain through env and
 		// strace and scans nested xargs option regions; every scan is
 		// memoized per position (Codex on #4980: `-a xargs -a …` rescanned
-		// the rest of the argv per xargs word, 5.96s at 8,000 words). The
-		// xargs child-tail scan (#5034 parity with nohup/taskset) runs too,
+		// the rest of the argv per xargs word, 5.96s at 8,000 words; `-E`
+		// keeps the same operand-eats-the-next-word shape now that `-a`
+		// refuses outright). The xargs child-tail scan (#5034 parity with
+		// nohup/taskset) runs too,
 		// so the long nested chains below whose verdict positions the input
 		// walk does not pre-cache fail closed past shadowedChildJudgementLimit
 		// instead of staying admitted.
-		{"xargs -I{} echo xargs -a … /tmp/f codex", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" xargs -a", n) + " /tmp/f codex" }, false},
+		{"xargs -I{} echo xargs -E … /tmp/f codex", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" xargs -E", n) + " /tmp/f codex" }, false},
 		{"xargs strace -f xargs strace -f … echo x", func(n int) string { return strings.Repeat("xargs strace -f ", n) + "echo x" }, true},
 		{"xargs env A=1 strace xargs … echo x", func(n int) string { return strings.Repeat("xargs env A=1 strace ", n) + "echo x" }, true},
 		{"xargs strace --fol … echo x", func(n int) string { return "xargs strace" + strings.Repeat(" --fol", n) + " echo x" }, true},
@@ -129,6 +131,17 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		// child tail holds more than shadowedChildJudgementLimit verdict words, so
 		// this nesting fails closed past the budget instead of staying admitted.
 		{"taskset -c 1 taskset -c 1 … x", func(n int) string { return strings.Repeat("taskset -c 1 ", n) + "x" }, true},
+		// #7604 (independent-review P2): the -c payload pre-pass collects
+		// each runner family's union once per call and dedupes strings, so
+		// a run of `sh -c` invocations behind another launcher or plain
+		// argv words stays linear instead of rescanning the tail per head.
+		// Each later `sh` is itself a candidate (a literal after the first
+		// -c cluster whose role — another shell's payload versus an inert
+		// positional — the gate cannot prove), and a bare shell command is
+		// unproven, so the run refuses; the property pinned is that it
+		// refuses in linear time.
+		{"su -c x (sh -c make)…", func(n int) string { return "su -c x" + strings.Repeat(" sh -c make", n) }, true},
+		{"env (sh -c make)…", func(n int) string { return "env" + strings.Repeat(" sh -c make", n) }, true},
 	}
 	for _, family := range families {
 		t.Run(family.name, func(t *testing.T) {
@@ -158,7 +171,7 @@ func TestFileHasProvenShellWorkIsLinear(t *testing.T) {
 	work := func(n int) int {
 		command := "echo" + strings.Repeat(" /bin/bash", n)
 		return countLiteralShellWordCalls(t, 100*n, func() {
-			require.False(t, commandFeedsProvenShell(command))
+			require.False(t, commandFeedsProvenShell(command, accountEnvironmentMaxPayloadDepth))
 		})
 	}
 	smallWork, largeWork := work(1000), work(4000)

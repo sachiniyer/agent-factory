@@ -45,7 +45,7 @@ func TestCommandFeedsProvenShell_BashOnlyFeeds(t *testing.T) {
 		"echo 'export CODEX_HOME=/other' > >(/bin/bash --noprofile --norc -i)",
 		"/bin/bash --noprofile --norc -i < <(cat ./repo-script)",
 	} {
-		require.True(t, commandFeedsProvenShell(command), command)
+		require.True(t, commandFeedsProvenShell(command, accountEnvironmentMaxPayloadDepth), command)
 	}
 }
 

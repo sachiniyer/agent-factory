@@ -30,17 +30,20 @@ func TestValidateAccountEnvironmentCommand_RefusesXargsMarkerInCommandSlot(t *te
 		require.Error(t, err, "command %q must not replace the sibling account environment", command)
 		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
 	}
-	// A plain substitution into an ordinary argument stays accepted. So does
-	// the report's first shape: xargs never substitutes its own COMMAND word
-	// (GNU xargs 4.9: `printf 'env\n' | xargs -I{} {} A` tries to execute a
-	// literal `{}`), so `{}` there is a fixed program name like any other.
+	// A plain substitution into an ordinary argument stays accepted.
 	for _, command := range []string{
 		"xargs -I{} echo {}",
 		"xargs -I{} env codex {}",
-		"xargs -I{} {} CODEX_HOME=/x codex",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, account), "command %q", command)
 	}
+	// xargs never substitutes its own COMMAND word (GNU xargs 4.9:
+	// `printf 'env\n' | xargs -I{} {} A` executes a literal `{}`), so the
+	// marker slot is a program literally named `{}` — an unrecognized
+	// command whose tail is judged as on master: #7589's item-2 rule
+	// moved to #7603, and a NAME=value word in an unmodelled tail admits.
+	require.NoError(t, ValidateAccountEnvironmentCommand("xargs -I{} {} CODEX_HOME=/x codex", account),
+		"command %q is judged as on master: an unmodelled command's NAME= argv admits")
 }
 
 func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
@@ -112,7 +115,9 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 		{"xargs -I{}", false},
 		{"xargs -I{} xargs -I[] echo []", false},
 		// xargs's own COMMAND word is never substituted, so the marker there
-		// is a literal program name. Codex on #4979.
+		// is a literal program name (Codex on #4979) — an unrecognized
+		// command whose NAME= argv is judged as on master (item 2 moved
+		// to #7603), so it admits.
 		{"xargs -I{} {} CODEX_HOME=/x codex", false},
 		{"xargs -I{} {}", false},
 		{"xargs -i {} echo hi", false},

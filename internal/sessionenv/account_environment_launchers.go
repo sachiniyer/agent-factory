@@ -8,12 +8,15 @@ import (
 )
 
 // This file covers the env-injection launchers — sudo, docker (including
-// `docker compose` and the standalone `docker-compose` binary) and
-// systemd-run (including its `run0` argv[0] alias) — with a deliberately
-// conservative lexical rule instead of a per-option grammar model. Exact
-// grammar modelling kept leaking (each review round surfaced another
-// accepted spelling the option tables misjudged: a hidden docker alias
-// shifting the image boundary, an `=`-joined short-option operand, a
+// `docker compose` and the standalone `docker-compose` binary, and the
+// CLI-compatible podman and nerdctl), systemd-run (including its `run0`
+// argv[0] alias), bwrap, su and script — plus the environment-source
+// writers systemctl (set-environment/import-environment/
+// unset-environment) and dbus-update-activation-environment — with a
+// deliberately conservative lexical rule instead of a per-option grammar
+// model. Exact grammar modelling kept leaking (each review round surfaced
+// another accepted spelling the option tables misjudged: a hidden docker
+// alias shifting the image boundary, an `=`-joined short-option operand, a
 // consumed operand re-entering as the shadowed command head, a leading
 // dynamic word escaping the tail), so the property here inverts the risk
 // for these launchers: OVER-refusal is acceptable and UNDER-refusal is
@@ -86,6 +89,43 @@ import (
 //     exec builtin and `docker history` is not the history builtin — and
 //     neither path promotes a tail word into shell-builtin dispatch.
 //
+// Two further properties from #7589:
+//
+//   - Environment-source WRITERS get the same lexical cut as an
+//     assignment: `systemctl … set-environment|import-environment|
+//     unset-environment` and `dbus-update-activation-environment` write a
+//     name into the user service manager's (or dbus activation)
+//     environment, where a later `systemd-run --user` unit inherits it —
+//     in a different tab, at a different time. The write itself is the
+//     visible command, so a protected name anywhere in its argv refuses
+//     with no command-word-follows requirement. `systemctl` without one
+//     of those subcommand words gets the ordinary argv scan.
+//   - An environment-RESETTING launcher refuses when its tail reaches an
+//     account-capable agent program: sudo without `-E`/`--preserve-env`
+//     (env_reset strips the pins — `sudo codex` and `sudo -u root codex`
+//     are the same reset), systemd-run outside `--scope` (a transient
+//     unit gets the manager's environment, not the caller's), run0
+//     always (it is service-mode by construction), `su -`/`-l`/`--login`
+//     (a login environment), and `bwrap --clearenv`. The agent resolves
+//     the target identity's default credential root in every case — the
+//     same outcome `env -i codex` is refused for. The reach check names
+//     the account-capable agent programs (the accountConfigVars roster:
+//     claude/codex/gemini) at an identifier boundary inside any literal
+//     word, so `sudo -u root bash -lc codex` and `su -l -c 'codex' u`
+//     refuse too. Ordinary administration stays admitted: `sudo -u
+//     postgres psql`, `systemd-run --user --pty make`, `run0 uptime`,
+//     `su -c 'make' user` (plain su preserves the environment), and
+//     env-preserving forms — `sudo -E codex`, `sudo --preserve-env
+//     codex`, `systemd-run --scope codex`. The price is named in the PR:
+//     `sudo --preserve-env=CODEX_HOME codex` is refused by the lexical
+//     cut before the reset arm even reads the preserve list (the word
+//     still NAMES a protected variable), `sudo -vE codex` (a bundled -E
+//     the flag scan does not split), `sudo -u codex make` (a user account
+//     literally named codex), and `docker run img codex` /
+//     `podman run img codex` — a container's environment is image-defined
+//     rather than a reset of the pane's, so containers are deliberately
+//     outside the reset arm.
+//
 // requireCommand is envCallMutatesAccountEnvironment's rule applied to
 // the launchers' denied spellings: at command position a protected-name
 // word refuses on sight, but as a hypothesis inside another command's
@@ -121,7 +161,7 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 			// show — unverifiable, refused wherever it sits.
 			return true
 		}
-		if launcherEnvFileSpelling(literal) {
+		if launcherEnvFileSpelling(literal) || launcherArgFileSpelling(literal) {
 			return true
 		}
 		if decodes && strings.ContainsAny(literal, "\"'\\") {
@@ -165,15 +205,38 @@ func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTai
 	if shadowedLiteralChildTailMutates(words, names, memo) {
 		return nil, true
 	}
+	// env_reset is sudo's default: the child runs with a minimal target-user
+	// environment, so an agent reached through sudo loses its pinned
+	// account root exactly as under `env -i` — `sudo codex` and `sudo -u
+	// root codex` are the same reset. `-E`/`--preserve-env` keep the
+	// caller's environment (and `--preserve-env=LIST` keeps the listed
+	// names), so those forms are not resets.
+	preserved, preserveAll := sudoPreservesEnvironment(words)
+	if tailReachesResetAgentProgram(words, names, preserved, preserveAll, sudoOperandOptions, sudoFlags) {
+		return nil, true
+	}
 	return nil, false
 }
 
-func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+// unwrapSystemdRun judges `systemd-run`; serviceOnly marks its run0 alias,
+// which always spawns a transient service unit. Without `--scope` the unit
+// inherits the service manager's environment rather than the caller's —
+// the pane's pins never reach it — so a tail reaching an agent program
+// refuses. `--scope` wraps the caller's process context and keeps its
+// environment — but only counted in systemd-run's own option region:
+// `systemd-run codex --scope` hands `--scope` to codex, and the unit still
+// resets (Codex P1 on this head).
+func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, serviceOnly bool) ([]*syntax.Word, bool) {
 	if unwrapEnvInjectionLauncher(words, names, true, requireCommand) {
 		return nil, true
 	}
 	if shadowedLiteralChildTailMutates(words, names, memo) {
 		return nil, true
+	}
+	if serviceOnly || !slices.Contains(launcherOwnOptionLiterals(words, systemdRunOperandOptions, systemdRunFlags), "--scope") {
+		if tailReachesResetAgentProgram(words, names, nil, false, systemdRunOperandOptions, systemdRunFlags) {
+			return nil, true
+		}
 	}
 	return nil, false
 }
@@ -189,11 +252,174 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 	// The leaf and its operands get the ordinary mutation scan every
 	// unrecognized command's argv gets (a shadowed docker execs at `env`
 	// or a buried launcher just as a shadowed `prog` does), then nothing
-	// is left for the caller to judge.
+	// is left for the caller to judge. podman and nerdctl share docker's
+	// CLI grammar and take this arm too; a container's environment is
+	// image-defined, not a reset of the pane's, so they get no reset arm.
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
 	return nil, false
+}
+
+// unwrapBwrap judges bubblewrap. Its tail IS the sandboxed command, so the
+// tail gets the same per-position child-tail judgement sudo's does.
+// `--clearenv` empties the child's environment — a reset that refuses when
+// the tail reaches an agent program; `--setenv`/`--unsetenv` spellings are
+// covered by the lexical cut.
+func unwrapBwrap(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+		return nil, true
+	}
+	for _, word := range words {
+		if literal, ok := launcherLiteralWord(word); ok && bwrapHiddenInputWord(literal) {
+			return nil, true
+		}
+	}
+	if shadowedLiteralChildTailMutates(words, names, memo) {
+		return nil, true
+	}
+	if literalWordPresent(words, "--clearenv") &&
+		tailReachesResetAgentProgram(words, names, nil, false, nil, nil) {
+		return nil, true
+	}
+	return nil, false
+}
+
+// launcherOwnOptionLiterals yields the literal words inside the
+// launcher's own option region — the words its option parser can still
+// see. The region ends at the command word (the first literal word that
+// is not a dash option, not a NAME=value environment prefix and not
+// consumed as an option's operand), at `--`, and — per the Codex P1 on
+// this head — at ANY option word the scan can't classify with certainty:
+// a clustered operand spelling (`sudo -uroot`), a getopt_long
+// abbreviation (`--us` for --user, `--pro` for --prompt), or an unknown
+// option can consume a following preserve/scope flag as its operand, so
+// past that word nothing is provably the launcher's own and parsing
+// stops — the launcher then reads as resetting (flags already yielded
+// are still provably its own). A dash word joined to its operand by `=`
+// (`--setenv=X`, `--prompt=x`) is provably complete — its next word is a
+// fresh option position — so it is yielded and scanning continues.
+var sudoOperandOptions = map[string]bool{
+	"-u": true, "-U": true, "-g": true, "-h": true, "-p": true,
+	"-C": true, "-c": true, "-D": true, "-R": true, "-r": true,
+	"-T": true, "-t": true,
+	"--user": true, "--other-user": true, "--group": true,
+	"--host": true, "--prompt": true, "--chdir": true, "--role": true,
+	"--type": true, "--close-from": true, "--login-timeout": true,
+	"--login-class": true,
+}
+
+var systemdRunOperandOptions = map[string]bool{
+	"-p": true, "--property": true, "-E": true, "--setenv": true,
+	"--unit": true, "--description": true, "--uid": true, "--gid": true,
+	"--nice": true, "--working-directory": true, "--service-type": true,
+	"--slice": true, "--job-mode": true,
+	"--after": true, "--before": true, "--wants": true, "--requires": true,
+	"--conflicts": true, "--binds-to": true, "--part-of": true,
+	"--requisite": true, "--upholds": true, "--trigger": true,
+	"--on-active": true, "--on-boot": true, "--on-startup": true,
+	"--on-unit-active": true, "--on-unit-inactive": true, "--on-calendar": true,
+	"--timer-property": true, "--path-property": true, "--socket-property": true,
+}
+
+// The launcher's KNOWN no-operand option words: anything not here, not an
+// operand option and not `=`-joined ends the trusted region — a clustered
+// operand (`-uroot`), an abbreviation (`--us`, `--pro`) or an unknown
+// spelling could carry a separate-word operand, so nothing after it is
+// provably an option position (Codex P1 on this head). `-E` and
+// `--preserve-env*` are listed so the preserve scan sees them.
+var sudoFlags = map[string]bool{
+	"-A": true, "-b": true, "-B": true, "-e": true, "-E": true,
+	"-H": true, "-i": true, "-K": true, "-k": true, "-l": true,
+	"-L": true, "-n": true, "-P": true, "-S": true, "-s": true,
+	"-V": true, "-v": true,
+	"--askpass": true, "--background": true, "--bell": true,
+	"--edit": true, "--help": true, "--list": true, "--login": true,
+	"--non-interactive": true, "--preserve-env": true,
+	"--preserve-groups": true, "--remove-timestamp": true,
+	"--reset-timestamp": true, "--set-home": true, "--shell": true,
+	"--stdin": true, "--validate": true, "--version": true,
+}
+
+var systemdRunFlags = map[string]bool{
+	"--scope": true, "--pty": true, "-P": true, "--pipe": true,
+	"--system": true, "--user": true, "--global": true,
+	"--collect": true, "--wait": true, "--remain-after-exit": true,
+	"-r": true, "--same-dir": true, "-q": true, "--quiet": true,
+	"--no-block": true, "--no-ask-password": true, "--runtime": true,
+	"--send-sighup": true, "--on-clock-change": true,
+	"--on-timezone-change": true, "--ignore-dependencies": true,
+	"--path": true, "--socket": true, "--timer": true,
+	"--expand-environment": true, "-h": true, "--help": true,
+	"-V": true, "--version": true,
+}
+
+// launcherOwnOptionLiterals yields the literal option words the launcher's
+// own option parser can still see, stopping at the command word, at `--`,
+// and at the first option word it can't classify with certainty.
+func launcherOwnOptionLiterals(words []*syntax.Word, operandOptions map[string]bool, knownFlags map[string]bool) []string {
+	var flags []string
+	for i := 0; i < len(words); i++ {
+		literal, ok := launcherLiteralWord(words[i])
+		if !ok || literal == "--" {
+			return flags
+		}
+		if operandOptions[literal] {
+			i++ // consume the operand word — never a flag
+			continue
+		}
+		if !strings.HasPrefix(literal, "-") {
+			if strings.Contains(literal, "=") {
+				continue // NAME=value environment prefix
+			}
+			return flags // command word
+		}
+		// An `=`-joined operand (`--prompt=x`, `--setenv=X`) is provably
+		// complete; a known no-operand flag is provably bare.
+		if strings.Contains(literal, "=") || knownFlags[literal] {
+			flags = append(flags, literal)
+			continue
+		}
+		return flags // unrecognized option word — stop parsing
+	}
+	return flags
+}
+
+// literalWordPresent reports whether words contains the exact literal
+// word want.
+func literalWordPresent(words []*syntax.Word, want string) bool {
+	for _, word := range words {
+		if literal, ok := launcherLiteralWord(word); ok && literal == want {
+			return true
+		}
+	}
+	return false
+}
+
+// sudoPreservesEnvironment reports sudo's env-preservation state:
+// preserveAll for `-E` or a bare `--preserve-env`, else the name list of
+// `--preserve-env=LIST` words. Only words in sudo's own option region
+// count: `-E` after the command word (`sudo make -E`) or after `--` is
+// the COMMAND's flag, not sudo's, and `sudo -p -E` consumes `-E` as the
+// -p operand — every one of those still resets (Codex P1 on this head).
+// `-E` inside a short-option cluster (`sudo -vE`) is not split — the
+// invocation reads as a reset and over-refuses, the safe direction.
+func sudoPreservesEnvironment(words []*syntax.Word) (map[string]struct{}, bool) {
+	var preserved map[string]struct{}
+	for _, literal := range launcherOwnOptionLiterals(words, sudoOperandOptions, sudoFlags) {
+		if literal == "-E" || literal == "--preserve-env" {
+			return nil, true
+		}
+		if rhs, found := strings.CutPrefix(literal, "--preserve-env="); found {
+			if preserved == nil {
+				preserved = map[string]struct{}{}
+			}
+			for _, name := range strings.Split(rhs, ",") {
+				preserved[name] = struct{}{}
+			}
+		}
+	}
+	return preserved, false
 }
 
 // launcherLiteralWord renders a word to its literal text for the launcher
@@ -295,6 +521,84 @@ func lettersOnly(text string) bool {
 	return len(text) > 0
 }
 
+// isAccountLauncherName reports whether word names one of the launchers
+// or environment-source writers whose tails get the lexical judgement —
+// the same list peelAccountWrapper's launcher arms and
+// launcherSuffixMutates dispatch on.
+func isAccountLauncherName(word *syntax.Word) bool {
+	for _, name := range []string{
+		"sudo", "docker", "docker-compose", "podman", "nerdctl",
+		"systemd-run", "run0", "bwrap", "su", "runuser", "script",
+		"systemctl", "dbus-update-activation-environment",
+	} {
+		if isAccountCommandName(word, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// A literal word in an unrecognized command's tail is classified by what a
+// protected name inside it can DO:
+const (
+	// wordProtectedNone — the word names no protected variable.
+	wordProtectedNone = iota
+	// wordProtectedAssign — the word carries `NAME=<nonempty>` (the name
+	// ends its `=` segment and non-empty text follows), the spelling an
+	// env option or a `-c` script uses to place an assignment.
+	wordProtectedAssign
+	// wordProtectedName — the word only names the variable: a bare
+	// `CODEX_HOME` (an option's separate operand, `FOO=CODEX_HOME`'s
+	// value) or the trailing-empty `NAME=` a grep pattern types.
+	wordProtectedName
+)
+
+// unrecognizedWordProtectedKind classifies a literal word by what a
+// protected name inside it can DO: a protected name at an identifier
+// boundary that ENDS its `=` segment and is followed by more text assigns
+// the variable; any other boundary match only names it. The env-source
+// writer arms use it — `systemctl`, `dbus-update-activation-environment`
+// and their aliases refuse any literal word that names a protected
+// variable this way (a writer's operand IS the environment write). The
+// second result is the name that matched.
+func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) (int, string) {
+	kind := wordProtectedNone
+	matched := ""
+	text := strings.TrimLeft(literal, "-")
+	optionCluster := strings.HasPrefix(literal, "-")
+	segments := strings.Split(text, "=")
+	offset := 0
+	for index, segment := range segments {
+		offset += len(segment) + 1
+		cluster := optionCluster && index == 0
+		for name := range names {
+			if !launcherSegmentNames(segment, name, cluster) {
+				continue
+			}
+			if index < len(segments)-1 && text[offset:] != "" &&
+				segmentEndsWithProtectedName(segment, name, cluster) {
+				return wordProtectedAssign, name
+			}
+			kind = wordProtectedName
+			matched = name
+		}
+	}
+	return kind, matched
+}
+
+// segmentEndsWithProtectedName reports whether name both matches segment
+// at an identifier boundary and reaches its end — the condition that makes
+// a following `=` the name's own assignment joiner rather than a later
+// option's.
+func segmentEndsWithProtectedName(segment, name string, optionCluster bool) bool {
+	if !strings.HasSuffix(segment, name) {
+		return false
+	}
+	i := len(segment) - len(name)
+	return i == 0 || !isEnvNameByte(segment[i-1]) ||
+		(optionCluster && lettersOnly(segment[:i]))
+}
+
 // launcherEnvFileSpelling reports whether a literal argument word names
 // an env file or clears the environment — both refuse regardless of the
 // denied-name cut because their effect is not readable from the command
@@ -306,6 +610,45 @@ func launcherEnvFileSpelling(literal string) bool {
 		word == "env-from-file" || strings.HasPrefix(word, "env-from-file=") ||
 		strings.Contains(word, "EnvironmentFile") ||
 		strings.HasSuffix(word, "Environment=")
+}
+
+// launcherArgFileSpelling reports whether a literal word spells a flag
+// that loads the child's ARGUMENTS from a file or file descriptor —
+// `bwrap --args 3` reads its real argv off fd 3, `xargs --arg-file`
+// (its own `-a` is refused in unwrapXargs's grammar) reads items from a
+// file — so the visible command line cannot show what runs and the
+// command is unverifiable (Codex P1 on this head). The word must spell
+// an option — a leading dash — so a bare `args` operand stays admitted.
+func launcherArgFileSpelling(literal string) bool {
+	if !strings.HasPrefix(literal, "-") {
+		return false
+	}
+	name, _, _ := strings.Cut(strings.TrimLeft(literal, "-"), "=")
+	switch name {
+	case "args", "argv", "arg-file", "args-fd":
+		return true
+	}
+	return false
+}
+
+// bwrapHiddenInputWord reports whether a literal word spells one of
+// bwrap's flags whose OPERAND is a file descriptor the child reads:
+// --args's argv plus the file-style injectors (--file/--bind-data/
+// --ro-bind-data/--symlink/--seccomp/--add-seccomp-fd). Their content is
+// outside the visible command line, so the invocation is unverifiable
+// (Codex P1 on this head). Scoped to bwrap's arm — other launchers'
+// `--file` flags read build files, not child argv.
+func bwrapHiddenInputWord(literal string) bool {
+	if !strings.HasPrefix(literal, "-") {
+		return false
+	}
+	name, _, _ := strings.Cut(strings.TrimLeft(literal, "-"), "=")
+	switch name {
+	case "file", "bind-data", "ro-bind-data", "symlink",
+		"seccomp", "add-seccomp-fd":
+		return true
+	}
+	return false
 }
 
 // launcherSuffixMutates judges a launcher word found in an unrecognized
@@ -327,10 +670,23 @@ func launcherSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo
 	switch {
 	case isAccountCommandName(words[0], "sudo"):
 		_, unsafe = unwrapSudo(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "docker") || isAccountCommandName(words[0], "docker-compose"):
+	case isAccountCommandName(words[0], "docker") || isAccountCommandName(words[0], "docker-compose") ||
+		isAccountCommandName(words[0], "podman") || isAccountCommandName(words[0], "nerdctl"):
 		_, unsafe = unwrapDocker(words[1:], names, memo, true)
-	default:
-		_, unsafe = unwrapSystemdRun(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "systemd-run"):
+		_, unsafe = unwrapSystemdRun(words[1:], names, memo, true, false)
+	case isAccountCommandName(words[0], "run0"):
+		_, unsafe = unwrapSystemdRun(words[1:], names, memo, true, true)
+	case isAccountCommandName(words[0], "bwrap"):
+		_, unsafe = unwrapBwrap(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "su") || isAccountCommandName(words[0], "runuser"):
+		_, unsafe = unwrapSu(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "script"):
+		_, unsafe = unwrapScript(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "systemctl"):
+		_, unsafe = unwrapSystemctlEnvironmentWriter(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "dbus-update-activation-environment"):
+		_, unsafe = unwrapDbusUpdateActivationEnvironment(words[1:], names, memo, true)
 	}
 	return unsafe
 }

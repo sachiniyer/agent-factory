@@ -380,8 +380,11 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 		"cd /tmp && codex",
 		"npm run dev",
 		// [[ ]] string-comparison operators do NOT evaluate operands as
-		// arithmetic, so a command substitution in them is plain data.
-		"[[ $(echo CODEX_HOME=1) == \"CODEX_HOME=1\" ]]; codex",
+		// arithmetic, so a command substitution in them is plain data,
+		// and a protected name in the right operand is too — an
+		// unrecognized command's argv is judged exactly as on master
+		// (#7589's item-2 rule moved to #7603).
+		"[[ $(echo CODEX_HOME=1) == \"CODEX_HOME\" ]]; codex",
 		"[[ $(echo hi) != \"bye\" ]]; codex",
 		// [[ ]] numeric operators with numeric-literal operands stay allowed.
 		"[[ 0 -eq 0 ]]; codex",
