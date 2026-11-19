@@ -42,6 +42,12 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"the ❯ glyph only", question + "❯\n", claudeFolderTrustPartial},
 		{"the options, no footer yet", question + options, claudeFolderTrustPartial},
 		{"the footer cut short", question + options + "\nEnter to con\n", claudeFolderTrustPartial},
+		// #7618: a footer row is whole only as a whole claudeTrustFooters entry.
+		{"the footer begun", question + options + "\nEnter to confirm\n", claudeFolderTrustPartial},
+		{"the footer one word short", question + options + "\nEnter to confirm · Esc to\n", claudeFolderTrustPartial},
+		{"the footer one character short", question + options + "\nEnter to confirm · Esc to cance\n", claudeFolderTrustPartial},
+		{"the footer begun below the closed box", "╭──────────╮\n│ Is this a project you created or one you trust? │\n│ │\n│ ❯ 1. No, exit │\n│   2. Yes, I trust this folder │\n│ │\n╰──────────╯\n   Enter to confirm · Esc\n", claudeFolderTrustPartial},
+		{"the footer begun inside the box", "╭──────────╮\n│ Is this a project you created or one you trust? │\n│ │\n│ ❯ No, exit │\n│   Yes, I trust this folder │\n│ │\n│ Enter to confirm · │\n", claudeFolderTrustPartial},
 		{"the question quoted with prose below and no composer", "The docs ask: \"Is this a project you created or one you trust?\"\nHere is a summary.\n", claudeFolderTrustPartial},
 
 		// Partial too: a repaint after af's own Down caught half done, with the

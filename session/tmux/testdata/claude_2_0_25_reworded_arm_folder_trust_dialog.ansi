@@ -1,0 +1,19 @@
+[38;5;220m╭──────────────────────────────────────────────────────────────────────────────╮
+│[39m                                                                              [38;5;220m│
+│[39m [1m[38;5;220mAccessing workspace:[0m                                                         [38;5;220m│
+│[39m                                                                              [38;5;220m│
+│[39m [1m/home/u/proj                       [0m                                          [38;5;220m│
+│[39m                                                                              [38;5;220m│
+│[39m Quick safety check: Is this a project you created or one you trust? (Like    [38;5;220m│
+│[39m your own code, a well-known open source project, or work from your team). If [38;5;220m│
+│[39m  not, take a moment to review what's in this folder first.                   [38;5;220m│
+│[39m                                                                              [38;5;220m│
+│[39m Claude Code'll be able to read, edit, and execute files here.                [38;5;220m│
+│[39m                                                                              [38;5;220m│
+│[39m [2mSecurity guide ( [4mhttps://docs.claude.com/s/claude-code-security[0;2m )[0m            [38;5;220m│
+│[39m                                                                              [38;5;220m│
+│[39m [38;5;153m❯[39m [2m[38;5;153m1. [0m[38;5;153mYes, I trust this folder[39m                                                [38;5;220m│
+│[39m   [2m2. [0mNo, exit                                                                [38;5;220m│
+│[39m                                                                              [38;5;220m│
+╰──────────────────────────────────────────────────────────────────────────────╯
+[39m   [2mEnter to confirm · Esc to exit

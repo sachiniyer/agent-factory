@@ -87,7 +87,8 @@ const (
 //	option block  one unbroken run of rows holding the "Yes, I trust this
 //	              folder" row, begun by the first option row below the body
 //	closing frame optional, a frame rule directly above the footer
-//	footer        "Enter to confirm…", then only blank rows and frame chrome
+//	footer        a whole claudeTrustFooters row, then only blank rows and
+//	              frame chrome
 //
 // A ❯ row above the question is no part of that: a launch modal owns the pane
 // from the top. But it is no composer BELOW the dialog either, so it does not
@@ -95,7 +96,9 @@ const (
 //
 // Partial is a proper prefix of that. Claude Code paints top-down, so a capture
 // can hold the question and body with no options yet, some options, or all of
-// them with no footer — its last row possibly cut short mid-paint.
+// them with no footer or with a footer row not yet whole — its last row
+// possibly cut short mid-paint. Every build paints the footer as the dialog's
+// last row (claudeTrustFooters), so only a whole one ends the paint (#7618).
 //
 // Unreadable is the whole dialog with a row af reads by wrapped: the question,
 // the affirmative label or the footer. Claude Code's renderer wraps its own
@@ -244,6 +247,13 @@ func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, las
 	}
 	if wrapped || !label || !whole {
 		return claudeFolderTrustUnreadable
+	}
+	if !claudeTrustFooterWhole(rows[footer].label) {
+		// The footer is the dialog's last row, and it is painted last. A
+		// footer row that is not yet a whole footer is the dialog still being
+		// painted: hold, and answer the frame that shows it whole (#7618), as
+		// the legacy dialog does (#7584).
+		return claudeFolderTrustPartial
 	}
 	return claudeFolderTrustComplete
 }
