@@ -208,10 +208,14 @@ func armThrowawayWatchdog(m *throwawaysandbox.Marker, fire chan struct{}) func()
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	var once sync.Once
+	// Directions are the contract (#7620 review): the watchdog's end can
+	// only close fire, the settle func's end can only read it.
+	fireOut := (chan<- struct{})(fire)
+	fireIn := (<-chan struct{})(fire)
 	expire := func(reason string) {
 		once.Do(func() {
 			log.InfoLog.Printf("throwaway sandbox (kind %s): %s; ending the daemon and tearing the sandbox down", m.Kind, reason)
-			close(fire)
+			close(fireOut)
 		})
 	}
 	// Every function var this goroutine (or a lookup worker it spawns) reads
@@ -293,7 +297,7 @@ func armThrowawayWatchdog(m *throwawaysandbox.Marker, fire chan struct{}) func()
 		// inside an owner read, so it always answers stop promptly.
 		select {
 		case <-done:
-		case <-fire:
+		case <-fireIn:
 		}
 	}
 }
