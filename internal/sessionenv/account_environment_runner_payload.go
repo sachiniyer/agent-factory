@@ -215,14 +215,23 @@ func suResetsEnvironment(words []*syntax.Word) bool {
 // P2 on this head).
 var commandRunnerPrograms = map[string]struct{}{
 	"su": {}, "runuser": {}, "script": {},
-	// The shells decode `-c` payloads too (#7604): under a resetting
-	// launcher the payload's decoded command word is agent reach — `sudo
-	// sh -c 'codex'` resets the pins and runs the agent — so the reach
-	// scan judges it. Startup-file shells are included here because the
-	// decode only answers reach, never admission; whether their `-c` is
-	// itself provable is shellDashCCommandProven's question.
-	"ash": {}, "bash": {}, "csh": {}, "dash": {}, "fish": {},
-	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
+	// #7603's named command-string runners — a non-shell program whose
+	// argv hands a command line to a shell or a remote environment. Each
+	// has its own payload grammar in runnerPayloadCandidates.
+	"watch": {}, "ssh": {}, "tmux": {}, "nix-shell": {}, "nix": {},
+	"distrobox": {}, "toolbox": {}, "pwsh": {}, "nu": {},
+}
+
+// commandRunnerProgram reports whether base names a command-string runner —
+// a table entry or a shell, matched by what the program IS (the r-/versioned
+// classifier — #7603), so `rbash -c 'codex'` and `bash5 -c 'codex'` decode
+// for reach exactly the way `bash -c 'codex'` does.
+func commandRunnerProgram(base string) bool {
+	if _, ok := commandRunnerPrograms[base]; ok {
+		return true
+	}
+	_, ok := shellBaseName(base)
+	return ok
 }
 
 // resetPeelableWrappers name the words whose argv contains the real
@@ -316,11 +325,29 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 		}
 		return ambiguousResetTailAgentReach(rest, names, preserved)
 	}
+	if _, ok := shellBaseName(base); ok {
+		for _, payload := range runnerPayloadCandidates(base, rest) {
+			if payloadReachesAgentProgram(payload, names, preserved) {
+				return true
+			}
+		}
+		return ambiguousResetTailAgentReach(rest, names, preserved)
+	}
 	switch base {
 	case "sudo":
 		return tailReachesResetAgentProgram(rest, names, preserved, false, sudoOperandOptions, sudoFlags)
 	case "systemd-run", "run0":
 		return tailReachesResetAgentProgram(rest, names, preserved, false, systemdRunOperandOptions, systemdRunFlags)
+	case "pkexec":
+		return tailReachesResetAgentProgram(rest, names, preserved, false, pkexecOperandOptions, pkexecFlags)
+	case "doas":
+		return tailReachesResetAgentProgram(rest, names, preserved, false, doasOperandOptions, doasFlags)
+	case "setpriv":
+		return tailReachesResetAgentProgram(rest, names, preserved, false, setprivOperandOptions, setprivFlags)
+	case "flatpak-spawn":
+		return tailReachesResetAgentProgram(rest, names, preserved, false, flatpakSpawnOperandOptions, flatpakSpawnFlags)
+	case "machinectl":
+		return tailReachesResetAgentProgram(rest, names, preserved, false, machinectlOperandOptions, machinectlFlags)
 	case "bwrap", "systemctl", "dbus-update-activation-environment":
 		return tailReachesResetAgentProgram(rest, names, preserved, false, nil, nil)
 	}
@@ -345,7 +372,7 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 		if idx := strings.LastIndexByte(base, '/'); idx >= 0 {
 			base = base[idx+1:]
 		}
-		if _, ok := commandRunnerPrograms[base]; ok {
+		if commandRunnerProgram(base) {
 			for _, payload := range runnerPayloadCandidates(base, words[i+1:]) {
 				if payloadReachesAgentProgram(payload, names, preserved) {
 					return true
@@ -362,8 +389,28 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 // operand to -c — `sh -ce 'x'` runs `x`, not `e` — so a shell word hands its
 // tail to shellDashCPayloadCandidates (Codex P1 on this head).
 func runnerPayloadCandidates(base string, words []*syntax.Word) []string {
-	if KnownShellName(base) {
+	if _, ok := shellBaseName(base); ok {
 		return shellDashCPayloadCandidates(words)
+	}
+	switch base {
+	case "watch":
+		return watchPayloads(words)
+	case "ssh":
+		return sshPayloads(words)
+	case "tmux":
+		return tmuxPayloads(words)
+	case "nix-shell":
+		return nixShellPayloads(words)
+	case "nix":
+		return nixPayloads(words)
+	case "distrobox":
+		return distroboxPayloads(words)
+	case "toolbox":
+		return toolboxPayloads(words)
+	case "pwsh":
+		return pwshNuPayloads(words)
+	case "nu":
+		return nuPayloads(words)
 	}
 	return runnerPayloads(words)
 }

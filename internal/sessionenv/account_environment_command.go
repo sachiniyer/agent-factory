@@ -275,40 +275,44 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 }
 
 func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}, tainted map[string]struct{}, memo operandTailMemo) bool {
-	if _, literal := literalShellWord(words[0]); !literal {
+	head, literal := literalShellWord(words[0])
+	if !literal {
 		// A dynamic command name can resolve to env or a same-shell builtin such
 		// as unset/export, so its effect on the selected identity is unprovable.
 		return true
 	}
+	// The head is literalized once — this dispatch runs on every tail position
+	// a peel lands on, and literalShellWord is the walk's work unit.
+	bare := !strings.Contains(head, "/")
+	base := filepath.Base(head)
 	switch {
-	case isAccountCommandName(words[0], "env"):
+	case base == "env":
 		return envCallMutatesAccountEnvironment(words[1:], names, false, memo)
-	case isBareName(words[0], "unset"):
+	case bare && head == "unset":
 		return unsetMutatesAccountEnvironment(words[1:], names)
-	case isBareName(words[0], "set"):
+	case bare && head == "set":
 		return setMutatesAccountEnvironment(words[1:])
-	case isBareName(words[0], "hash"):
+	case bare && head == "hash":
 		return hashMutatesAccountEnvironment(words[1:])
-	case isAccountDeclarationBuiltin(words[0]):
+	case bare && accountDeclarationBuiltinName(head):
 		return declarationMutatesAccountEnvironment(words[1:], names)
-	case isBareName(words[0], "read"):
+	case bare && head == "read":
 		return readMutatesAccountEnvironment(words[1:], names)
-	case isBareName(words[0], "getopts"):
+	case bare && head == "getopts":
 		return getoptsMutatesAccountEnvironment(words[1:], names)
-	case isBareName(words[0], "printf"):
+	case bare && head == "printf":
 		return printfMutatesAccountEnvironment(words[1:], names)
-	case isBareName(words[0], "let"):
+	case bare && head == "let":
 		return letMutatesAccountEnvironment(words[1:], names, tainted)
-	case isBareName(words[0], "mapfile"), isBareName(words[0], "readarray"):
+	case bare && (head == "mapfile" || head == "readarray"):
 		return arrayReadMutatesAccountEnvironment(words[1:], names)
-	case isBareName(words[0], "wait"):
+	case bare && head == "wait":
 		return waitMutatesAccountEnvironment(words[1:], names)
-	case isBareName(words[0], "test"), isBareName(words[0], "["):
+	case bare && (head == "test" || head == "["):
 		return variableTestMutatesAccountEnvironment(words[1:])
-	case isBareName(words[0], "eval"), isBareName(words[0], "."),
-		isBareName(words[0], "source"), isBareName(words[0], "trap"),
-		isBareName(words[0], "alias"), isBareName(words[0], "fc"),
-		isBareName(words[0], "history"), isBareName(words[0], "enable"):
+	case bare && (head == "eval" || head == "." || head == "source" ||
+		head == "trap" || head == "alias" || head == "fc" ||
+		head == "history" || head == "enable"):
 		// These builtins execute or schedule another shell program in the same
 		// environment, define commands that do, or load/replay unparsed history.
 		// Proving their effects would require a second parser pass with runtime
@@ -354,8 +358,17 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}, memo 
 // (next, peeled, unsafe): when peeled, the walk continues with next; otherwise
 // next and unsafe are unwrapAccountCommand's result.
 func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool, bool) {
+	// The head is literalized once — this dispatch runs on every tail
+	// position a peel lands on, and literalShellWord is the walk's work
+	// unit (#4966): a name list would cost one word visit per case.
+	head, headLiteral := literalShellWord(words[0])
+	bare := headLiteral && !strings.Contains(head, "/")
+	base := ""
+	if headLiteral {
+		base = filepath.Base(head)
+	}
 	switch {
-	case isBareName(words[0], "exec"):
+	case bare && head == "exec":
 		words = words[1:]
 		if len(words) > 0 {
 			option, literal := literalShellWord(words[0])
@@ -381,13 +394,13 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 			}
 			words = words[1:]
 		}
-	case isBareName(words[0], "command"):
+	case bare && head == "command":
 		var unsafe bool
 		words, unsafe = unwrapCommandBuiltin(words[1:])
 		if unsafe {
 			return nil, false, true
 		}
-	case isBareName(words[0], "builtin"):
+	case bare && head == "builtin":
 		words = words[1:]
 		if len(words) > 0 && wordEquals(words[0], "--") {
 			words = words[1:]
@@ -397,55 +410,55 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 				return nil, false, true
 			}
 		}
-	case isAccountCommandName(words[0], "nohup"):
+	case base == "nohup":
 		var unsafe bool
 		words, unsafe = unwrapNohup(words[1:])
 		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "nice"):
+	case base == "nice":
 		var unsafe bool
 		words, unsafe = unwrapNice(words[1:], names, memo)
 		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "timeout"):
+	case base == "timeout":
 		var unsafe bool
 		words, unsafe = unwrapTimeout(words[1:], names, memo)
 		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "setsid"):
+	case base == "setsid":
 		var unsafe bool
 		words, unsafe = unwrapSetsid(words[1:], names, memo)
 		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "stdbuf"):
+	case base == "stdbuf":
 		var unsafe bool
 		words, unsafe = unwrapStdbuf(words[1:], names, memo)
 		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "ionice"):
+	case base == "ionice":
 		var unsafe bool
 		words, unsafe = unwrapIonice(words[1:], names, memo)
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "taskset"):
+	case base == "taskset":
 		var unsafe bool
 		words, unsafe = unwrapTaskset(words[1:], names, memo)
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "xargs"):
+	case base == "xargs":
 		var unsafe bool
 		words, unsafe = unwrapXargs(words[1:], names, memo)
 		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "sudo"):
+	case base == "sudo":
 		// The env-injection launchers and environment-source writers —
 		// sudo, docker (+compose/podman/nerdctl), systemd-run/run0,
 		// bwrap, su, script, systemctl's environment subcommands and
@@ -468,8 +481,8 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "docker") ||
-		isAccountCommandName(words[0], "docker-compose"):
+	case base == "docker" ||
+		base == "docker-compose":
 		// docker-compose is the standalone binary shipping the same
 		// compose grammar (run/exec -e, --env-file) — the rule is keyed
 		// by the grammar, so the alias lands the same check.
@@ -478,13 +491,13 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "systemd-run"):
+	case base == "systemd-run":
 		var unsafe bool
 		words, unsafe = unwrapSystemdRun(words[1:], names, memo, false, false)
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "run0"):
+	case base == "run0":
 		// run0 is systemd-run's argv[0] sudo-mode (systemd 256+) — the
 		// same grammar under a second name, but always a service unit, so
 		// its environment always resets.
@@ -493,8 +506,8 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "podman") ||
-		isAccountCommandName(words[0], "nerdctl"):
+	case base == "podman" ||
+		base == "nerdctl":
 		// podman and nerdctl ship the docker CLI grammar (run/exec -e,
 		// --env-file) — the rule is keyed by the grammar, so they take
 		// docker's arm.
@@ -503,31 +516,122 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "bwrap"):
+	case base == "bwrap":
 		var unsafe bool
 		words, unsafe = unwrapBwrap(words[1:], names, memo, false)
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "su") || isAccountCommandName(words[0], "runuser"):
+	case base == "su" || base == "runuser":
 		var unsafe bool
 		words, unsafe = unwrapSu(words[1:], names, memo, false)
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "script"):
+	case base == "script":
 		var unsafe bool
 		words, unsafe = unwrapScript(words[1:], names, memo, false)
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "systemctl"):
+	case base == "systemctl":
 		var unsafe bool
 		words, unsafe = unwrapSystemctlEnvironmentWriter(words[1:], names, memo, false)
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "dbus-update-activation-environment"):
+	case base == "pkexec":
+		var unsafe bool
+		words, unsafe = unwrapPkexec(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "doas":
+		var unsafe bool
+		words, unsafe = unwrapDoas(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "setpriv":
+		var unsafe bool
+		words, unsafe = unwrapSetpriv(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "machinectl":
+		var unsafe bool
+		words, unsafe = unwrapMachinectl(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "nix-shell":
+		var unsafe bool
+		words, unsafe = unwrapNixShell(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "nix":
+		var unsafe bool
+		words, unsafe = unwrapNix(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "flatpak-spawn":
+		var unsafe bool
+		words, unsafe = unwrapFlatpakSpawn(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "ssh":
+		var unsafe bool
+		words, unsafe = unwrapSSH(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "tmux":
+		var unsafe bool
+		words, unsafe = unwrapTmux(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "distrobox":
+		var unsafe bool
+		words, unsafe = unwrapDistrobox(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "toolbox":
+		var unsafe bool
+		words, unsafe = unwrapToolbox(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "watch":
+		var unsafe bool
+		words, unsafe = unwrapWatch(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "pwsh":
+		var unsafe bool
+		words, unsafe = unwrapPwshNu(words[1:], names, memo, false, pwshCommandOperandOptions, pwshEncodedOperandOptions)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "nu":
+		var unsafe bool
+		words, unsafe = unwrapPwshNu(words[1:], names, memo, false, nuCommandOperandOptions, nil)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "busctl" ||
+		base == "gdbus":
+		var unsafe bool
+		words, unsafe = unwrapBusctl(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "dbus-update-activation-environment":
 		var unsafe bool
 		words, unsafe = unwrapDbusUpdateActivationEnvironment(words[1:], names, memo, false)
 		if unsafe {

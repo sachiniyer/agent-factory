@@ -79,6 +79,11 @@ func accountChildTailSuffixStartsVerdict(word *syntax.Word) bool {
 	if _, verdict := accountChildTailSuffixVerdictNames[filepath.Base(value)]; verdict {
 		return true
 	}
+	if _, verdict := shellBaseName(filepath.Base(value)); verdict {
+		// Shells match by what the program IS — an r- or versioned name
+		// (rbash, bash5, zsh-5.9) begins the same suffix verdict.
+		return true
+	}
 	_, verdict := accountChildTailSuffixBuiltinVerdictNames[value]
 	return verdict
 }
@@ -118,12 +123,17 @@ var accountChildTailSuffixVerdictNames = map[string]struct{}{
 	// source (the user service manager / dbus activation environment), so a
 	// buried form judges at its own suffix the same way.
 	"systemctl": {}, "dbus-update-activation-environment": {},
-	// Shells KnownShellName recognizes. The opaque-head scan flags a buried
-	// shell only while words follow it, so a bare trailing shell — which a
-	// shadowed wrapper can shift to and exec — is judged at its own suffix,
-	// where shellCommandIsUnproven sees it as the head and refuses it.
-	"ash": {}, "bash": {}, "csh": {}, "dash": {}, "fish": {},
-	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
+	// #7603's named launchers — a buried form judges at its own suffix the
+	// same way a buried sudo does: pkexec/doas/ssh and friends are
+	// reset-class, watch/tmux/nix-shell carry command strings, and
+	// busctl/tmux-setenv are environment writers.
+	"pkexec": {}, "doas": {}, "setpriv": {}, "machinectl": {},
+	"nix-shell": {}, "nix": {}, "flatpak-spawn": {}, "ssh": {},
+	"tmux": {}, "distrobox": {}, "toolbox": {}, "watch": {},
+	"pwsh": {}, "nu": {}, "busctl": {}, "gdbus": {},
+	// Shells are matched separately by shellBaseName above — the r- and
+	// versioned names (rbash, bash5, zsh-5.9) begin the same verdict the
+	// exact spellings do.
 }
 
 // accountChildTailSuffixBuiltinVerdictNames lists the builtins a per-suffix

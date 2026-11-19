@@ -405,6 +405,68 @@ will not reach the child's environment.
   login shell has no extra input the gate cannot see). A bare `sh`,
   `bash` or `zsh` invocation stays
   refused as before — only the exact `/bin/sh -i` tab form is proven.
+- **The named launchers are modelled by name** — `pkexec`, `doas`,
+  `setpriv`, `machinectl`, `nix-shell`, `nix`, `flatpak-spawn`, `ssh`,
+  `tmux`, `distrobox`, `toolbox`, `watch`, `pwsh`, `nu`, `busctl` and
+  `gdbus` each get the same lexical rule the earlier launchers keep,
+  classified by which of three shapes their command line takes:
+  - *Reset-class* — `pkexec`, `doas`, `setpriv --reset-env`,
+    `machinectl shell`/`login`, `nix-shell --pure`, `nix develop`/`nix
+    shell` with `-i`/`--ignore-environment`, every `flatpak-spawn`
+    (each spawn gets the sandboxed environment), `ssh` (the remote
+    command runs under the host's own environment), `tmux`'s
+    pane-creating subcommands and their aliases (`new-session`/`new`,
+    `new-window`/`neww`, `split-window`/`splitw`, `respawn-pane`/
+    `respawnp`, `respawn-window`/`respawnw` — a pane runs under the
+    tmux SERVER's environment, never the pane's), and
+    `toolbox`/`distrobox`'s `enter`/`run` forms. Each refuses only
+    when its reset reaches the selected account's own agent as the
+    program — the A′ rule `sudo codex` already keeps — so `pkexec
+    codex`, `ssh localhost codex`, `tmux new-window codex`,
+    `nix-shell --pure --run codex` and `flatpak-spawn --clear-env
+    codex` refuse, while `pkexec ls`, `ssh host make`, `tmux
+    new-window htop`, `machinectl login host` and `distrobox enter x`
+    run. A denied env spelling in the launcher's own argv refuses the
+    same way (`flatpak-spawn --env=CODEX_HOME=/o make`), and a buried
+    form still judges at its own suffix (`prog pkexec codex`,
+    `sudo -E pkexec codex` — the buried reset survives sudo's -E).
+  - *Command-string runners* — `nix-shell --run`/`--command`, `nix -c`
+    on the develop/shell subcommands, `ssh`'s remote command, every
+    tmux pane command string, `distrobox -e`, `toolbox -e`, and
+    `watch`'s argv (which `watch` joins and hands to `sh -c`) are
+    payloads the gate re-judges as command lines: `ssh localhost
+    'CODEX_HOME=/o codex'`, `tmux respawn-pane -k 'CODEX_HOME=/o
+    codex'`, `distrobox enter x -e 'CODEX_HOME=/o codex'` and `watch
+    'export CODEX_HOME=/o; codex'` refuse, while `watch -n 5 'kubectl
+    get pods'`, `nix-shell -p hello --run hello` and `ssh localhost
+    'make -j4'` run. `pwsh` and `nu` are NOT POSIX-decoded — the gate
+    cannot parse their payload grammar, so the approved rule refuses
+    the `-c`/`-Command`/`--commands`/`-e` operand only when its text
+    names a protected variable or the account's agent at identifier
+    boundaries (`pwsh -c '$env:CODEX_HOME="/o"; codex'`, `nu -c
+    'codex'` refuse), and admits it otherwise (`pwsh -c Get-Process`,
+    `nu -c 'ls'`). Encoded-command spellings (`pwsh -enc`,
+    `--EncodedCommand`) carry unreadable text and refuse, as do the
+    interactive/script-file forms (`pwsh script.ps1`, `nu script.nu`)
+    — the `sh script.sh` class.
+  - *Environment writers* — `busctl`/`gdbus`'s `SetEnvironment` call
+    and `tmux setenv`/`set-environment` write a launcher's own
+    environment source (the systemd user manager and the tmux server's
+    global environment respectively), so a protected NAME or
+    `NAME=value` operand there refuses — `busctl --user call …
+    SetEnvironment as 1 CODEX_HOME=/o`, `gdbus call … SetEnvironment
+    CODEX_HOME=/o` and `tmux setenv -g CODEX_HOME /o` refuse — while
+    non-protected names and ordinary calls run (`tmux setenv -g FOO
+    /o`, `busctl --user get-property org.a /x org.a.Name`).
+- **Shell names match what the program IS** — `KnownShellName`
+  recognizes a shell by its program, not its spelling: the `r`-prefix
+  restricted variants (`rbash`, `rksh`, `rzsh`, `rsh`) and versioned
+  names (`bash5`, `bash-5.2`, `ksh93`, `zsh-5.9`) land the same `-c`
+  decode and the same provability rules their base shell keeps — so
+  `rbash -c 'export CODEX_HOME=/o; codex'` and `bash5 -c
+  'export CODEX_HOME=/o; codex'` refuse, `rbash -c 'make'` and
+  `bash-5.2 -c 'make'` run, and `zsh-5.9 -c 'make'` still refuses the
+  way `zsh` does (its `-c` reads zshenv).
 - **Hidden inputs refuse** — a flag that loads arguments or
   environment from a file or file descriptor puts the real command
   outside the VISIBLE command line, so `bwrap --args 3`, bwrap's
@@ -432,9 +494,15 @@ a`, `make CODEX_HOME=1 install`, `prog --setenv CODEX_HOME /o codex`,
 `rg CODEX_HOME internal/ session/`, `grep -rn OPENAI_API_KEY src docs`,
 `git log -S CODEX_HOME -- internal`, `gh issue list --search CODEX_HOME`,
 `make ENV=prod test` and `grep PS1 .bashrc .zshrc` all run, exactly as on
-master. Closing that gap — protected-name words inside commands the gate
-does not model — is #7603's job, planned against a common-command corpus
-pinned to master's verdicts.
+master. The launchers the gate models are the ones named above — every
+other environment-changing program (`schroot`, `chroot`, `jexec`,
+`nsenter`, `firejail`, `containerd`/`ctr`, `kubectl exec`, `vagrant`,
+`mosh`, `direnv exec`, `guix shell`, and any launcher new enough to
+ship a grammar `af` has not written down) is still read only by the
+unrecognized-tail scan, and a protected name inside its argv stays
+inert data. Closing that residual gap is deliberately a name-at-a-time
+job: each launcher's grammar is modelled explicitly rather than
+guessed.
 
 ### Docker and backend boundaries
 

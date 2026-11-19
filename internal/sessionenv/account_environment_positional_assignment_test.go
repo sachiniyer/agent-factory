@@ -1207,6 +1207,130 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"su -l -c -c 'co\"\"dex' root", true},
 		{"script -O -c 'env CODEX_HOME=/o codex'", true},
 		{"script -c -c 'echo hi' out.log", false},
+
+		// #7603 — the named launchers. The reset-class programs refuse
+		// only when their reset reaches the selected account's agent
+		// (the A′ rule sudo codex already keeps); ordinary invocations
+		// stay admitted.
+		{"pkexec codex", true},
+		{"pkexec ls", false},
+		{"doas codex", true},
+		{"doas make install", false},
+		{"setpriv --reset-env codex", true},
+		{"setpriv --reuid 1000 ls", false},
+		{"machinectl shell me@.host /usr/bin/codex", true},
+		{"machinectl shell host /bin/bash -c make", false},
+		{"machinectl login host", false},
+		{"machinectl shell me@.host /usr/bin/make", false},
+		{"nix-shell --pure --run codex", true},
+		{"nix-shell --pure --run 'make'", false},
+		{"nix-shell -p hello --run hello", false},
+		{"nix-shell --run 'CODEX_HOME=/o codex'", true},
+		{"nix-shell --run 'export CODEX_HOME=/o; codex'", true},
+		{"nix-shell --run 'make'", false},
+		{"nix develop -i -c codex", true},
+		{"nix develop -i -c make", false},
+		{"nix develop -c make", false},
+		{"nix develop --ignore-environment -c codex", true},
+		{"flatpak-spawn codex", true},
+		{"flatpak-spawn make", false},
+		{"flatpak-spawn --clear-env codex", true},
+		{"flatpak-spawn --env=CODEX_HOME=/o make", true},
+		// ssh's remote command is the spawn: a bare agent name there is
+		// reset reach, and a mutating one is a payload the gate judges.
+		{"ssh localhost codex", true},
+		{"ssh host make", false},
+		{"ssh localhost 'CODEX_HOME=/o codex'", true},
+		{"ssh localhost 'make -j4'", false},
+		{"ssh -p 2222 host make", false},
+		// Every pane-creating subcommand and its alias: a pane runs under
+		// the tmux server's environment (reset-class), so an agent spawn
+		// or a denied env spelling in its command string refuses.
+		{"tmux new-window codex", true},
+		{"tmux neww codex", true},
+		{"tmux split-window codex", true},
+		{"tmux splitw codex", true},
+		{"tmux respawn-pane -k codex", true},
+		{"tmux respawn-window -k codex", true},
+		{"tmux new-session codex", true},
+		{"tmux new-window htop", false},
+		{"tmux split-window -h", false},
+		{"tmux new-window 'CODEX_HOME=/o codex'", true},
+		{"tmux respawn-pane -k 'CODEX_HOME=/o codex'", true},
+		{"tmux new-window 'make -j4'", false},
+		// toolbox/distrobox enter a container's environment (reset) and
+		// distrobox's -e spelling carries a command string.
+		{"distrobox enter x", false},
+		{"distrobox enter x -e 'CODEX_HOME=/o codex'", true},
+		{"distrobox enter x -e 'make'", false},
+		{"toolbox enter x", false},
+		{"toolbox run codex", true},
+		{"toolbox run make", false},
+		// watch hands every argv word, joined, to `sh -c` — a
+		// command-string runner, and the joined payload gets the full
+		// gate.
+		{"watch ls", false},
+		{"watch -n 5 'kubectl get pods'", false},
+		{"watch 'export CODEX_HOME=/o; codex'", true},
+		{"watch 'CODEX_HOME=/o codex'", true},
+		{"watch 'make -j4'", false},
+		// pwsh and nu are not POSIX-decoded (approved scope answer): the
+		// -c operand's TEXT refuses only when it names a protected
+		// variable or the account's agent at identifier boundaries;
+		// anything else admits. Encoded and script/interactive forms
+		// stay refused — the gate cannot read their input.
+		{"pwsh -c Get-Process", false},
+		{"pwsh -Command 'Get-Process'", false},
+		{"pwsh -c '$env:CODEX_HOME=\"/o\"; codex'", true},
+		{"pwsh -c 'codex'", true},
+		{"pwsh -com 'codex'", true},
+		{"pwsh -enc 'aGVsbG8='", true},
+		{"pwsh -c 'echo $HOME'", false},
+		{"pwsh script.ps1", true},
+		{"pwsh", true},
+		{"pwsh -NoProfile", true},
+		{"pwsh -NonInteractive", true},
+		{"pwsh -Version", false},
+		{"nu -c 'ls'", false},
+		{"nu -c '$env.CODEX_HOME = \"/o\"; codex'", true},
+		{"nu -c 'codex'", true},
+		{"nu -e 'codex'", true},
+		{"nu script.nu", true},
+		{"nu", true},
+		{"nu --stdin", true},
+		{"nu --version", false},
+		// The environment-source writers: busctl/gdbus's SetEnvironment
+		// call and tmux's setenv/set-environment write a launcher's own
+		// environment — a denied NAME or NAME=value operand refuses.
+		{"busctl --user call org.a /x org.freedesktop.DBus.Properties SetEnvironment as 1 CODEX_HOME=/o", true},
+		{"busctl --user call org.a /x org.freedesktop.DBus.Properties SetEnvironment as 1 FOO=/o", false},
+		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment CODEX_HOME=/o", true},
+		{"busctl --user call org.a /x org.freedesktop.systemd1.Manager.SetEnvironment as 1 CODEX_HOME=/o", true},
+		{"busctl --user get-property org.a /x org.a.Name", false},
+		{"tmux setenv -g CODEX_HOME /o", true},
+		{"tmux set-environment -g CODEX_HOME /o", true},
+		{"tmux setenv -g FOO /o", false},
+		{"tmux showenv -g", false},
+		// A reset-class launcher buried behind a wrapper still judges at
+		// its own suffix — sudo -E preserves but the buried pkexec resets.
+		{"sudo -E pkexec codex", true},
+		{"sudo -E doas codex", true},
+		{"prog pkexec codex", true},
+		{"prog pkexec ls", false},
+		{"prog ssh host make", false},
+		{"prog ssh host codex", true},
+		// The shell-name classifier recognizes what the program IS: an
+		// r- or versioned name lands the same decode — rbash decodes
+		// bash's -c grammar, bash5 the same, and a mutating payload
+		// under either refuses.
+		{"rbash -c 'export CODEX_HOME=/o; codex'", true},
+		{"rbash -c 'make'", false},
+		{"rksh -c 'make'", false},
+		{"bash5 -c 'make'", false},
+		{"bash5 -c 'export CODEX_HOME=/o; codex'", true},
+		{"bash-5.2 -c 'make'", false},
+		{"zsh-5.9 -c 'make'", true},
+		{"rzsh -c 'make'", true},
 	}
 	for _, test := range cases {
 		// The row verdicts are the gate's, not the bare mutation walk's:

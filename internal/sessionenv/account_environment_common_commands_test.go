@@ -228,6 +228,20 @@ func TestValidateAccountEnvironmentCommand_CommonCommandsMatchMaster(t *testing.
 		{"bash -o keyword -c 'x'", true},
 		{"sudo sh -c 'codex'", true},
 		{"x sh -c 'unset CODEX_HOME'", true},
+		// #7603: the named launchers' ordinary forms admit — these rows
+		// assert the issue's intent (each modelled grammar's common use),
+		// and master admitted most of them already.
+		{"ssh host make", false},
+		{"tmux new-window htop", false},
+		{"tmux split-window -h", false},
+		{"watch ls", false},
+		{"watch -n 5 'kubectl get pods'", false},
+		{"nix-shell -p hello --run hello", false},
+		{"pkexec ls", false},
+		{"doas make install", false},
+		{"pwsh -c Get-Process", false},
+		{"flatpak-spawn make", false},
+		{"distrobox enter x", false},
 	} {
 		err := ValidateAccountEnvironmentCommand(test.command, scopedProcessTabAccount())
 		require.Equal(t, test.want, err != nil, "command %q differs from its pinned verdict", test.command)

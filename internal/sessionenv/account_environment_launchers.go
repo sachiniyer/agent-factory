@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -524,18 +525,29 @@ func lettersOnly(text string) bool {
 // isAccountLauncherName reports whether word names one of the launchers
 // or environment-source writers whose tails get the lexical judgement —
 // the same list peelAccountWrapper's launcher arms and
-// launcherSuffixMutates dispatch on.
+// launcherSuffixMutates dispatch on. The name set sits in a map because
+// this check runs on every literal tail word and literalShellWord is the
+// walk's work unit: a name list would cost one word visit per entry.
+var accountLauncherNames = map[string]struct{}{
+	"sudo": {}, "docker": {}, "docker-compose": {}, "podman": {},
+	"nerdctl": {}, "systemd-run": {}, "run0": {}, "bwrap": {},
+	"su": {}, "runuser": {}, "script": {},
+	"systemctl": {}, "dbus-update-activation-environment": {},
+	// #7603's named launchers — reset-class programs, command-string
+	// runners and environment writers modelled by name.
+	"pkexec": {}, "doas": {}, "setpriv": {}, "machinectl": {},
+	"nix-shell": {}, "nix": {}, "flatpak-spawn": {}, "ssh": {},
+	"tmux": {}, "distrobox": {}, "toolbox": {},
+	"watch": {}, "pwsh": {}, "nu": {}, "busctl": {}, "gdbus": {},
+}
+
 func isAccountLauncherName(word *syntax.Word) bool {
-	for _, name := range []string{
-		"sudo", "docker", "docker-compose", "podman", "nerdctl",
-		"systemd-run", "run0", "bwrap", "su", "runuser", "script",
-		"systemctl", "dbus-update-activation-environment",
-	} {
-		if isAccountCommandName(word, name) {
-			return true
-		}
+	literal, ok := literalShellWord(word)
+	if !ok {
+		return false
 	}
-	return false
+	_, ok = accountLauncherNames[filepath.Base(literal)]
+	return ok
 }
 
 // A literal word in an unrecognized command's tail is classified by what a
@@ -687,6 +699,37 @@ func launcherSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo
 		_, unsafe = unwrapSystemctlEnvironmentWriter(words[1:], names, memo, true)
 	case isAccountCommandName(words[0], "dbus-update-activation-environment"):
 		_, unsafe = unwrapDbusUpdateActivationEnvironment(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "pkexec"):
+		_, unsafe = unwrapPkexec(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "doas"):
+		_, unsafe = unwrapDoas(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "setpriv"):
+		_, unsafe = unwrapSetpriv(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "machinectl"):
+		_, unsafe = unwrapMachinectl(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "nix-shell"):
+		_, unsafe = unwrapNixShell(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "nix"):
+		_, unsafe = unwrapNix(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "flatpak-spawn"):
+		_, unsafe = unwrapFlatpakSpawn(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "ssh"):
+		_, unsafe = unwrapSSH(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "tmux"):
+		_, unsafe = unwrapTmux(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "distrobox"):
+		_, unsafe = unwrapDistrobox(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "toolbox"):
+		_, unsafe = unwrapToolbox(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "watch"):
+		_, unsafe = unwrapWatch(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "pwsh"):
+		_, unsafe = unwrapPwshNu(words[1:], names, memo, true, pwshCommandOperandOptions, pwshEncodedOperandOptions)
+	case isAccountCommandName(words[0], "nu"):
+		_, unsafe = unwrapPwshNu(words[1:], names, memo, true, nuCommandOperandOptions, nil)
+	case isAccountCommandName(words[0], "busctl") ||
+		isAccountCommandName(words[0], "gdbus"):
+		_, unsafe = unwrapBusctl(words[1:], names, memo, true)
 	}
 	return unsafe
 }

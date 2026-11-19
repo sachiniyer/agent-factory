@@ -128,31 +128,19 @@ func filePayloadVerdict(file *syntax.File, names map[string]struct{}, depth int)
 func callRunnerPayloadCandidates(args []*syntax.Word) []string {
 	var candidates []string
 	seen := make(map[string]struct{})
-	shellDone, runnerDone := false, false
-	for i := 0; i < len(args) && !(shellDone && runnerDone); i++ {
+	done := make(map[string]bool)
+	for i := 0; i < len(args); i++ {
 		literal, ok := launcherLiteralWord(args[i])
 		if !ok {
 			continue
 		}
 		base := filepath.Base(literal)
-		if _, ok := commandRunnerPrograms[base]; !ok {
+		family, ok := runnerPayloadFamily(base)
+		if !ok || done[family] {
 			continue
 		}
-		var next []string
-		if KnownShellName(base) {
-			if shellDone {
-				continue
-			}
-			shellDone = true
-			next = shellDashCPayloadCandidates(args[i+1:])
-		} else {
-			if runnerDone {
-				continue
-			}
-			runnerDone = true
-			next = runnerPayloads(args[i+1:])
-		}
-		for _, payload := range next {
+		done[family] = true
+		for _, payload := range runnerPayloadCandidates(base, args[i+1:]) {
 			if _, dup := seen[payload]; !dup {
 				seen[payload] = struct{}{}
 				candidates = append(candidates, payload)
@@ -160,4 +148,23 @@ func callRunnerPayloadCandidates(args []*syntax.Word) []string {
 		}
 	}
 	return candidates
+}
+
+// runnerPayloadFamily reports the payload-collector family an argv word
+// belongs to — one collector runs per family per call, and the first head's
+// tail scan already covers every later head of the same family (the second
+// independent-review P2 on #7604's head). pwsh and nu are absent: their
+// payload grammar is not parsed — the launcher arm's boundary-name scan
+// judges their -c operand instead (approved rule on #7603).
+func runnerPayloadFamily(base string) (string, bool) {
+	if _, ok := shellBaseName(base); ok {
+		return "shell", true
+	}
+	switch base {
+	case "su", "runuser", "script":
+		return "runner", true
+	case "watch", "ssh", "tmux", "nix-shell", "nix", "distrobox", "toolbox":
+		return base, true
+	}
+	return "", false
 }
