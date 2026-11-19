@@ -850,6 +850,35 @@ func TestDockerStagingContainerizedAfFallsBackToCp(t *testing.T) {
 		"the mount-table guard still gates the cp; calls=%v", calls)
 }
 
+// TestDockerStagingVolumesFromFallsBackToCp: --volumes-from inherits the
+// donor's mounts at the donor's own container paths, which af cannot enumerate
+// pre-flight — a donor binding a host dir over /etc would turn af's staged
+// policy bind into a root-owned af-policy.json stub in that host dir. Inherited
+// mounts select cp delivery, where the mount-table guard reads the donor's
+// real mounts inside the container.
+func TestDockerStagingVolumesFromFallsBackToCp(t *testing.T) {
+	stagingTestEnv(t)
+	var calls [][]string
+	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+
+	p := &dockerProvisioner{
+		image:   "img:latest",
+		afBin:   stagingBinarySource(t),
+		runArgs: []string{"--volumes-from", "donor"},
+		spec:    ProvisionSpec{Title: "donor", CloneURL: "file:///repo", AgentPolicy: []byte(`{"hooks":{}}`)},
+	}
+	_, err := p.provision()
+	require.NoError(t, err, "calls=%v", calls)
+
+	assert.False(t, p.payloadViaBinds, "--volumes-from destinations cannot be enumerated for the enclosing-mount guard")
+	run := findDockerCall(calls, "run")
+	require.NotNil(t, run, "calls=%v", calls)
+	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
+	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
+	require.NotNil(t, findDockerCall(calls, "exec", "/proc/self/mountinfo"),
+		"the mount-table guard still gates the cp; calls=%v", calls)
+}
+
 // TestDockerStagingProxiedEndpointFallsBackToCp: a tcp:// loopback endpoint
 // passes the non-account locality gate (reachable) but carries no proof the
 // daemon is on this host — `ssh -L 2375:host:2375` makes a remote engine

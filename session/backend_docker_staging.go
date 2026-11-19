@@ -101,6 +101,14 @@ func (p *dockerProvisioner) preparePayloadDelivery() {
 		// --mount's. The staged files still carry the right modes, so the guarded
 		// cp fallback needs no bind at all.
 		log.InfoLog.Printf("docker runtime: staging dir %s contains ':' or ',', which a bind-mount spec cannot encode; delivering af's payload via `docker cp` after the mount-table check", p.stagingDir)
+	case runArgsInheritMounts(p.runArgs):
+		// --volumes-from inherits the donor's mounts at the donor's own
+		// container paths — destinations af cannot enumerate pre-flight. A
+		// donor binding a host dir over an af destination would turn the staged
+		// file bind into a root-owned stub in that host dir, so inherited
+		// mounts take cp delivery, where verifyWriteTargets reads the donor's
+		// real mounts inside the created container rather than guessing.
+		log.InfoLog.Printf("docker runtime: docker.run_args inherits mounts via --volumes-from, whose destinations af cannot enumerate; delivering af's payload via `docker cp` after the mount-table check")
 	default:
 		p.payloadViaBinds = true
 	}
@@ -260,6 +268,19 @@ func volumeSpecDest(spec string) string {
 		return fields[1]
 	}
 	return fields[0]
+}
+
+// runArgsInheritMounts reports whether run_args carries --volumes-from in
+// either spelling. The single-dash form is not the option — pflag reads it as
+// -v carrying the value "olumes-from" — so only the double-dash spellings
+// count here.
+func runArgsInheritMounts(runArgs []string) bool {
+	for _, a := range runArgs {
+		if a == "--volumes-from" || strings.HasPrefix(a, "--volumes-from=") {
+			return true
+		}
+	}
+	return false
 }
 
 // refuseEnclosingRunArgsMounts refuses — before the container starts — any
