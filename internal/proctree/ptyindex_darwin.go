@@ -298,7 +298,7 @@ var ptyFdWalk = func(pid int, classify func(path string, viType int32, rdev uint
 		}
 		path, viType, rdev, err := ptyFdVnode(pid, fd)
 		if err != nil {
-			if errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.ENOENT) {
+			if fdClosedSinceListing(err) {
 				continue // closed since the listing
 			}
 			if errors.Is(err, syscall.ESRCH) {
