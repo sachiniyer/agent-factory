@@ -7,8 +7,10 @@
 // command keeps master's verdict. The unrecognized-launcher rule that
 // moved these rows left (#7603) is deliberately absent, so a builtin-
 // spelled word, a search path spelled `.` or a NAME= token in an
-// unmodelled tail reads as it always has. Each row's verdict was
-// harvested from the gate at the PR's merge-base.
+// unmodelled tail reads as it always has. Rows up to `declare -x FOO=1`
+// carry verdicts harvested from the gate at that PR's merge-base; the
+// #7604 section after them asserts the issue's sh -c/bash -c intent —
+// ordinary command strings ADMIT — since master's verdict was refusal.
 package sessionenv
 
 import (
@@ -184,8 +186,50 @@ func TestValidateAccountEnvironmentCommand_CommonCommandsMatchMaster(t *testing.
 		{"unset FOO", false},
 		{"export PORT=3000", false},
 		{"declare -x FOO=1", false},
+		// #7604: sh -c/bash -c command strings are decoded and judged by
+		// the same gate, so the ordinary ones admit — these rows assert the
+		// issue's intent, not master's verdict (master refused all of them).
+		{"bash -c make", false},
+		{"bash -c 'make'", false},
+		{"sh -c \"npm test\"", false},
+		{"sh -c 'make && make test'", false},
+		{"sh -c 'grep -rn x .'", false},
+		{"sh -c 'echo hi'", false},
+		{"bash -c 'git status'", false},
+		{"sh -c \"npm install && npm test\"", false},
+		{"dash -c 'make'", false},
+		{"sh -ec 'make'", false},
+		{"bash -ec make", false},
+		{"sh -xc 'make'", false},
+		{"sh -xc \"go build ./...\"", false},
+		{"bash -eux -c 'make'", false},
+		{"bash -euo pipefail -c \"npm test\"", false},
+		{"sh -c 'make' arg0 arg1", false},
+		{"sh -c 'codex'", false},
+		{"nice sh -c 'make'", false},
+		{"sudo -E sh -c 'codex'", false},
+		{"sudo bash -c 'make'", false},
+		// …and the refusal the decode keeps: undecodable payloads, script
+		// files, startup-file spellings, mutating payloads, reset reach.
+		{"sh -c 'unset CODEX_HOME; codex'", true},
+		{"sh -c 'export CODEX_HOME=/o; x'", true},
+		{"sh -c 'sudo codex'", true},
+		{"sh -c \"$x\"", true},
+		{"sh -c", true},
+		{"sh script.sh", true},
+		{"sh -i", true},
+		{"bash -kc \"CODEX_HOME=/o codex\"", true},
+		{"bash --foo -c 'make'", true},
+		{"bash -ce 'unset CODEX_HOME; codex'", true},
+		{"sh -s", true},
+		{"zsh -c 'make'", true},
+		{"fish -c 'make'", true},
+		{"bash --norc -c 'make'", true},
+		{"bash -o keyword -c 'x'", true},
+		{"sudo sh -c 'codex'", true},
+		{"x sh -c 'unset CODEX_HOME'", true},
 	} {
 		err := ValidateAccountEnvironmentCommand(test.command, scopedProcessTabAccount())
-		require.Equal(t, test.want, err != nil, "command %q differs from master's verdict", test.command)
+		require.Equal(t, test.want, err != nil, "command %q differs from its pinned verdict", test.command)
 	}
 }

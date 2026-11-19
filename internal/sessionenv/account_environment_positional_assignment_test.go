@@ -864,6 +864,119 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"script -qc 'co\"\"dex' /dev/null", false},
 		{"script -q /dev/null", false},
 		{"script -c 'make' /tmp/build.log", false},
+		// #7604 — a shell's -c payload is a command string the gate can
+		// read, so it is decoded and re-judged instead of refused outright:
+		// clean payloads admit, mutating ones refuse the way the bare line
+		// does, and undecodable shapes (dynamic payload, script file,
+		// interactive/login/stdin, unmodelled option) keep the refusal.
+		{"sh -c 'make'", false},
+		{"bash -c 'npm test'", false},
+		{"dash -c 'make'", false},
+		{"sh -c 'unset CODEX_HOME; codex'", true},
+		{"sh -c 'export CODEX_HOME=/o; x'", true},
+		{"bash -c 'CODEX_HOME=/o codex'", true},
+		{"sh -c 'env CODEX_HOME=/o codex'", true},
+		{"sh -c 'co\"\"dex'", false},
+		{"sh -c 'sudo CODEX_HOME=/o codex'", true},
+		{"sh -c 'sudo codex'", true},
+		{"sh -c 'docker run -e CODEX_HOME=/o img'", true},
+		{"sh -c \"$x\"", true},
+		{"sh -c", true},
+		{"sh script.sh", true},
+		{"sh -i", true},
+		{"bash -lc 'make'", false},
+		{"bash -ic 'x'", true},
+		{"sh -s", true},
+		{"sh -o vi -c 'make'", true},
+		{"bash --norc -c 'make'", true},
+		{"zsh -c 'make'", true},
+		{"fish -c 'make'", true},
+		{"csh -c 'make'", true},
+		{"ksh -c 'make'", false},
+		{"mksh -c 'make'", false},
+		{"ash -c 'make'", false},
+		{"sh -ec 'make'", false},
+		{"sh -cfoo", true},
+		{"bash -eux -c 'make'", false},
+		{"bash -euo pipefail -c 'make'", false},
+		{"bash -ec 'make'", false},
+		{"sh -xc 'make'", false},
+		{"sh -c 'make' arg0 arg1", false},
+		{"sh -c 'x' 'CODEX_HOME=/o'", true},
+		{"prog sh -c 'make'", false},
+		{"prog sh -c 'unset CODEX_HOME'", true},
+		{"nice sh -c 'codex'", false},
+		{"sh -c 'sh -c \"make\"'", false},
+		{"sh -c 'sh -c \"unset CODEX_HOME\"'", true},
+		// -c takes no attached operand in this family — `bash -ce 'x'`
+		// keeps e as an option and runs x — so the word after a -c
+		// cluster is the payload, and every following literal is a
+		// candidate (Codex P1). -k's keyword mode and -o keyword change
+		// what an assignment word does — undecodable, refused (Codex P1).
+		{"bash -ce 'unset CODEX_HOME; codex'", true},
+		{"dash -ce 'export CODEX_HOME=/o; x'", true},
+		{"bash -k -c 'codex CODEX_HOME=/other'", true},
+		{"bash -kc 'CODEX_HOME=/o codex'", true},
+		{"bash -o keyword -c 'make'", true},
+		{"bash -okeyword -c 'x'", true},
+		{"bash --rcfile /tmp/x -c 'make'", true},
+		{"bash -O extglob -c 'make'", true},
+		{"bash --foo -c 'make'", true},
+		// A decoded payload is judged by every top-level check, not a
+		// subset: the stdin-feed and hidden-input rules reach inside
+		// the command string, and an outer feed reaches a proven shell
+		// the payload decodes (Codex P1).
+		{"sh -c '/bin/sh -i' < ./repo-script", true},
+		{"sh -c '/bin/sh -i < ./repo-script'", true},
+		{"sh -c 'xargs -a secrets'", true},
+		{"sh -c 'sh -c \"/bin/sh -i\"' < f", true},
+		{"su -c '/bin/sh -i' work < f", true},
+		{"sh -c 'make' < f", false},
+		// Every word that can be the executed shell has every word
+		// after its -c cluster judged — a preceding runner-named word
+		// cannot hide the shell's payload behind its own grammar
+		// (independent-review P1): under su's getopt '-ce' would read
+		// as an attached operand, but for the shell it is -c -e with
+		// the string after the cluster.
+		{"env -u su sh -ce 'unset CODEX_HOME; codex'", true},
+		{"env -u script bash -c -e 'export CODEX_HOME=/o; codex'", true},
+		{"env -u runuser sh -ce 'export CODEX_HOME=/o; codex'", true},
+		{"env -C script sh -ce 'export CODEX_HOME=/o; codex'", true},
+		// Bash takes -o's name from the NEXT argv word, never the
+		// cluster's trailing letters (verified on real bash — second
+		// independent-review P1): '-oe keyword' keeps e as an option
+		// and reads keyword as the set-option name.
+		{"bash -c -oe keyword 'codex CODEX_HOME=/o'", true},
+		{"bash -coe keyword 'codex CODEX_HOME=/o'", true},
+		{"bash -c -ox keyword 'codex CODEX_HOME=/o'", true},
+		{"bash -c -oe pipefail 'make'", false},
+		// -o names come from an allowlist of `set -o` names known not
+		// to change where commands come from or how assignments behave —
+		// anything else is undecodable and refuses (Codex P1 on this
+		// head): keyword is only one of the refused names.
+		{"bash -o nounset -c 'make'", false},
+		{"bash -o vi -c 'make'", true},
+		{"bash -c -o emacs 'make'", true},
+		{"sh -o posix -c 'make'", true},
+		{"bash -o allexport -c 'make'", true},
+		{"bash -o noexec -c 'make'", false},
+		// ksh -E reads ENV/kshrc the way zsh reads zshenv — an input
+		// channel the gate cannot model (P3).
+		{"ksh -E -c 'make'", true},
+		{"bash -E -c 'make'", true},
+		// Under a resetting launcher the decoded payload's command word is
+		// agent reach — `sudo sh -c 'codex'` is the same reset+reach shape
+		// as `sudo su -c 'codex'` — while a preserving form stays admitted.
+		{"sudo sh -c 'codex'", true},
+		{"sudo sh -c 'co\"\"dex'", true},
+		{"sudo sh -ce 'co\"\"dex'", true},
+		{"sudo bash -c 'codex'", true},
+		{"sudo sh -c 'make'", false},
+		{"sudo -E sh -c 'codex'", false},
+		{"systemd-run --user --pty sh -c 'codex'", true},
+		{"systemd-run --scope sh -c 'codex'", false},
+		{"bwrap --clearenv sh -c 'codex'", true},
+		{"bwrap sh -c 'codex'", false},
 
 		// #7589 item 1b — the environment-reset arm (approved option A′):
 		// a resetting launcher refuses only when its tail reaches an
@@ -1096,7 +1209,11 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"script -c -c 'echo hi' out.log", false},
 	}
 	for _, test := range cases {
-		got := commandMutatesAccountEnvironment(test.command, names)
+		// The row verdicts are the gate's, not the bare mutation walk's:
+		// payload judgement lives at the shared entry point now, so an
+		// unproven command (`want: true`) is exactly what
+		// accountEnvironmentGateProven cannot prove.
+		got := !accountEnvironmentGateProven(test.command, names, accountEnvironmentMaxPayloadDepth)
 		require.Equal(t, test.want, got, "command %q", test.command)
 	}
 }

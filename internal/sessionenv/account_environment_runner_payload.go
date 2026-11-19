@@ -16,11 +16,6 @@ import (
 // the payload's DECODED words get the agent-reach check too.
 func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
 	payloads := runnerPayloads(words)
-	for _, payload := range payloads {
-		if commandMutatesAccountEnvironment(payload, names) {
-			return nil, true
-		}
-	}
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}
@@ -44,18 +39,15 @@ func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailM
 	return nil, false
 }
 
-// unwrapCommandRunner judges command-string runners — sh, bash, zsh,
-// dash, ksh, script and their kin — whose `-c`/`--command` operand is a
-// script the child decodes (`script -q -c 'export CODEX_""HOME=/other;
-// codex'` exports the pin after the child's shell removed the quotes —
-// Codex P1 on this head). Every payload candidate is re-judged as a
-// command line; the rest of the argv gets the ordinary scans.
+// unwrapCommandRunner judges command-string runners — script, whose
+// `-c`/`--command` operand is a script the child decodes
+// (`script -q -c 'export CODEX_""HOME=/other; codex'` exports the pin
+// after the child's shell removed the quotes — Codex P1 on this head).
+// The payload itself is gated once at the top level by
+// decodedShellPayloadUnproven, which applies every check including the
+// stdin-feed one this position cannot see (Codex P1 on this head); the
+// rest of the argv gets the ordinary scans.
 func unwrapCommandRunner(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	for _, payload := range runnerPayloads(words) {
-		if commandMutatesAccountEnvironment(payload, names) {
-			return nil, true
-		}
-	}
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}
@@ -223,6 +215,14 @@ func suResetsEnvironment(words []*syntax.Word) bool {
 // P2 on this head).
 var commandRunnerPrograms = map[string]struct{}{
 	"su": {}, "runuser": {}, "script": {},
+	// The shells decode `-c` payloads too (#7604): under a resetting
+	// launcher the payload's decoded command word is agent reach — `sudo
+	// sh -c 'codex'` resets the pins and runs the agent — so the reach
+	// scan judges it. Startup-file shells are included here because the
+	// decode only answers reach, never admission; whether their `-c` is
+	// itself provable is shellDashCCommandProven's question.
+	"ash": {}, "bash": {}, "csh": {}, "dash": {}, "fish": {},
+	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
 }
 
 // resetPeelableWrappers name the words whose argv contains the real
@@ -309,7 +309,7 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 		return ambiguousResetTailAgentReach(rest, names, preserved)
 	}
 	if _, ok := commandRunnerPrograms[base]; ok {
-		for _, payload := range runnerPayloads(rest) {
+		for _, payload := range runnerPayloadCandidates(base, rest) {
 			if payloadReachesAgentProgram(payload, names, preserved) {
 				return true
 			}
@@ -346,7 +346,7 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 			base = base[idx+1:]
 		}
 		if _, ok := commandRunnerPrograms[base]; ok {
-			for _, payload := range runnerPayloads(words[i+1:]) {
+			for _, payload := range runnerPayloadCandidates(base, words[i+1:]) {
 				if payloadReachesAgentProgram(payload, names, preserved) {
 					return true
 				}
@@ -354,6 +354,18 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 		}
 	}
 	return false
+}
+
+// runnerPayloadCandidates picks the payload collector for a command-string
+// runner: su/runuser/script take util-linux's getopt spellings (runnerPayloads
+// reads attached `-cX` and `--command` forms), while the shells attach no
+// operand to -c — `sh -ce 'x'` runs `x`, not `e` — so a shell word hands its
+// tail to shellDashCPayloadCandidates (Codex P1 on this head).
+func runnerPayloadCandidates(base string, words []*syntax.Word) []string {
+	if KnownShellName(base) {
+		return shellDashCPayloadCandidates(words)
+	}
+	return runnerPayloads(words)
 }
 
 // wordNamesResetAgent reports whether literal's final path component is

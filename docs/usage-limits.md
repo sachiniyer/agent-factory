@@ -371,10 +371,40 @@ will not reach the child's environment.
   `sudo script -q -c 'co""dex' /dev/null` refuse because the child
   lands `codex` under env_reset, while `sudo -E su -c 'co""dex' root`
   (the pins are preserved) and `sudo su -c 'make' root` run.
-  Interactive shells themselves stay refused wherever they appear —
-  `shellCommandIsUnproven` already covers `sh`/`bash`/`zsh`/`dash`/
-  `ksh`/`fish`/... at command position — so their `-c` operands need
-  no separate scan.
+- **`sh -c`/`bash -c` payloads get the same treatment** — a shell's
+  command string is not hidden input: it is a command line the gate
+  can read, so `sh`, `dash`, `ash`, `bash`, `ksh` and `mksh` decode
+  every `-c` spelling (`-c x`, clustered `-exc`, `-euo pipefail -c`)
+  and re-judge it with every check the gate applies to a command line —
+  `bash -c 'make'`, `sh -c "npm test"` and `sh -c 'make' arg0 arg1` run,
+  `sh -c 'unset CODEX_HOME; codex'` refuses the way the bare line does,
+  `sh -c 'xargs -a secrets'` refuses for the same hidden input, `sh -c
+  '/bin/sh -i < ./script'` and `sh -c '/bin/sh -i' < ./script` refuse
+  for the same shell-fed-stdin, and the reset check reaches a decoded
+  agent there too (`sudo sh -c 'codex'` refuses, `sudo -E sh -c
+  'codex'` runs). EVERY word that can be the executed shell is decoded
+  this way — a `su`/`runuser`/`script`/`env` word in front does not
+  hide a later shell's `-c` behind that runner's own option grammar
+  (`env -u su sh -ce 'unset CODEX_HOME; codex'` refuses). Refusal stays for what the
+  gate cannot decode: a dynamic or unparseable payload (`sh -c "$x"`),
+  a missing operand (`sh -c`), a script-file form (`sh script.sh`),
+  an interactive/stdin spelling (`sh -i`, `sh -s`), an option letter it
+  cannot model or one that changes what an assignment word does (`-k`,
+  any `--long` option, `-O`), `-o` naming anything outside an
+  allowlist of `set -o` names known not to change where commands come
+  from or how assignments behave (`errexit`, `nounset`, `pipefail`,
+  `xtrace`, `noglob`, `noclobber` and similar are fine; `keyword`, the
+  `vi`/`emacs` input modes, `posix` and any other name refuse) — and
+  bash reads the `-o` name from the NEXT argv word, so `-o vi`, `-oe
+  keyword` and `-c -ox keyword` all refuse — and shells
+  whose `-c` still reads a startup file (`zsh`, `csh`, `tcsh`, `fish`
+  read zshenv/.cshrc/config.fish even for `-c`, and ksh's `-E` reads
+  ENV/kshrc the same way — bash's BASH_ENV and ksh's ENV name a file
+  only through the environment, which is the
+  gate's stated limit; `-l` stays admitted since a non-interactive `-c`
+  login shell has no extra input the gate cannot see). A bare `sh`,
+  `bash` or `zsh` invocation stays
+  refused as before — only the exact `/bin/sh -i` tab form is proven.
 - **Hidden inputs refuse** — a flag that loads arguments or
   environment from a file or file descriptor puts the real command
   outside the VISIBLE command line, so `bwrap --args 3`, bwrap's

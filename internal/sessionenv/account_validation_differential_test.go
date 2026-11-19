@@ -285,7 +285,7 @@ func accountValidationVerdict(command string) byte {
 		}
 	}
 	feeds := 0
-	if commandFeedsProvenShell(command) {
+	if commandFeedsProvenShell(command, accountEnvironmentMaxPayloadDepth) {
 		feeds = 1
 	}
 	return byte('A' + class*2 + feeds)

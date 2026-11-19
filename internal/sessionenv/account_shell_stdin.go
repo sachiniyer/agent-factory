@@ -27,7 +27,7 @@ import (
 // (`sort <data`, `git log | head`), and output redirections do not count
 // unless they target descriptor 0, so `make >build.log; /bin/sh -i` stays
 // admitted.
-func commandFeedsProvenShell(command string) bool {
+func commandFeedsProvenShell(command string, depth int) bool {
 	if command == "" {
 		return false
 	}
@@ -39,14 +39,22 @@ func commandFeedsProvenShell(command string) bool {
 			// that was not read.
 			return true
 		}
-		if fileHasProvenShell(file) && fileCanFeedStdin(file) {
+		if fileHasProvenShell(file, depth) && fileCanFeedStdin(file) {
 			return true
 		}
 	}
 	return false
 }
 
-func fileHasProvenShell(file *syntax.File) bool {
+// fileHasProvenShell reports whether the file reaches a proven shell —
+// directly (`/bin/sh -i` in any argv suffix) or through a `-c` command
+// string, because a shell inside a payload still reads THIS file's
+// stdin: `sh -c '/bin/sh -i' < ./script` feeds the decoded shell the
+// same text a bare `/bin/sh -i < ./script` does (Codex P1 on this head).
+// depth is the remaining payload-decode budget; at zero this check stops
+// looking inside payloads — harmless, because the gate's own depth bound
+// refuses the whole command at the same level.
+func fileHasProvenShell(file *syntax.File, depth int) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if call, ok := node.(*syntax.CallExpr); ok {
@@ -56,10 +64,39 @@ func fileHasProvenShell(file *syntax.File) bool {
 					break
 				}
 			}
+			if !found && depth > 0 {
+				// One collection per call — a later runner head's
+				// candidates are already inside the first head's tail
+				// (callRunnerPayloadCandidates), which keeps this scan
+				// linear in argv length.
+				for _, payload := range callRunnerPayloadCandidates(call.Args) {
+					if payloadHoldsProvenShell(payload, depth-1) {
+						found = true
+						break
+					}
+				}
+			}
 		}
 		return !found
 	})
 	return found
+}
+
+// payloadHoldsProvenShell reports whether a decoded `-c` command string
+// contains an argv suffix spelling a proven shell. A payload neither
+// variant can parse is skipped — the gate's own judgement of that string
+// already refuses it, so answering "no shell" here cannot admit anything.
+func payloadHoldsProvenShell(script string, depth int) bool {
+	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
+		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(script), "")
+		if err != nil {
+			continue
+		}
+		if fileHasProvenShell(file, depth) {
+			return true
+		}
+	}
+	return false
 }
 
 // fileCanFeedStdin is bounded by what can reach descriptor 0: an input

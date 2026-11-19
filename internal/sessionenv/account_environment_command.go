@@ -674,9 +674,10 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		// A shell in the wrapper's tail gets the same verdict a bare
 		// shell command gets: `strace sh -c 'unset CODEX_HOME; codex'`
 		// execs the literal script the modeled path already refuses
-		// under `nice sh -c ...`. Only the trusted account-shell form
-		// proves out. A trailing shell name with no argv (echo sh,
-		// strace -p 1 sh) has nothing to judge and stays allowed.
+		// under `nice sh -c ...`, while `strace sh -c 'make'` is the
+		// decodable payload #7604 admits either way. A trailing shell
+		// name with no argv (echo sh, strace -p 1 sh) has nothing to
+		// judge and stays allowed.
 		return 1, len(words) > 1 && KnownShellName(filepath.Base(literal)) &&
 			shellCommandIsUnproven(words)
 	}
