@@ -39,13 +39,25 @@ func TestClaudeLegacyTrustDialogOf(t *testing.T) {
 		content string
 		want    claudeLegacyTrustVerdict
 	}{
-		// Answerable: the whole grammar is present, cursor on Yes.
-		{"inline picker", q + "\n❯ Yes  No", claudeLegacyTrustAnswerable},
-		{"inline picker with ordinals", q + "\n❯ 1. Yes  2. No", claudeLegacyTrustAnswerable},
-		{"stacked picker", q + "\n❯ 1. Yes\n  2. No", claudeLegacyTrustAnswerable},
+		// Answerable: the whole grammar is present, its whole footer last,
+		// cursor on Yes.
+		{"inline picker", q + "\n❯ Yes  No\n\n" + legacyTrustFooter, claudeLegacyTrustAnswerable},
+		{"inline picker with ordinals", q + "\n❯ 1. Yes  2. No\n\n" + legacyTrustFooter, claudeLegacyTrustAnswerable},
+		{"stacked picker", q + "\n❯ 1. Yes\n  2. No\n\n" + legacyTrustFooter, claudeLegacyTrustAnswerable},
 		{"boxed layout with labelled options and footer last", legacyTrustBoxed, claudeLegacyTrustAnswerable},
+		// 2.0.63 through 2.1.19 paint the reworded dialog's footer under it.
+		{"stacked picker under the other footer", q + "\n❯ 1. Yes, proceed\n  2. No, exit\n\n" + rewordedTrustFooter, claudeLegacyTrustAnswerable},
 
 		// Partial: a proper prefix of the grammar — hold, send nothing.
+		// #7584: every build paints the footer last, so the whole option
+		// block with no footer yet, or its footer only begun, is still
+		// being painted.
+		{"inline picker, no footer yet", q + "\n❯ Yes  No", claudeLegacyTrustPartial},
+		{"inline picker with ordinals, no footer yet", q + "\n❯ 1. Yes  2. No", claudeLegacyTrustPartial},
+		{"stacked picker, no footer yet", q + "\n❯ 1. Yes\n  2. No", claudeLegacyTrustPartial},
+		{"stacked picker, the blank row above its footer", q + "\n❯ 1. Yes, proceed\n  2. No, exit\n\n", claudeLegacyTrustPartial},
+		{"stacked picker, its footer begun", q + "\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm", claudeLegacyTrustPartial},
+		{"stacked picker, its footer cut short", q + "\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to e", claudeLegacyTrustPartial},
 		{"question only", q + "\n\n\n", claudeLegacyTrustPartial},
 		{"question and body, no options yet", q + "\n\n/home/user/project\n", claudeLegacyTrustPartial},
 		// Codex P1 (claude_trust.go:680): stacked Yes painted, No not yet.

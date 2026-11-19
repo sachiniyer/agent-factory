@@ -32,9 +32,15 @@ func TestClaudeTrustPromptPresent(t *testing.T) {
 Here is a summary of what I changed in the repo...`
 
 	// Old folder-trust wording (kept for older Claude Code builds). The picker
-	// row "❯ Yes  No" is the LAST non-blank line, so a live dialog is accepted.
+	// row "❯ Yes  No" and then its footer, the LAST non-blank line, so a live
+	// dialog is accepted. Every build that paints it paints that footer last,
+	// so the same picker with no footer yet is one still being painted
+	// (#7584): the gate holds it, and it is not yet a dialog to answer.
 	oldDialog := `Do you trust the files in this folder?
-❯ Yes  No`
+❯ Yes  No
+
+Enter to confirm · Esc to exit`
+	oldDialogFooterUnpainted := "Do you trust the files in this folder?\n❯ Yes  No"
 
 	// The old wording quoted above the agent's composer — the shape every live
 	// pane has. The picker row is NOT last, so a quoted phrase must be refused
@@ -89,6 +95,7 @@ Here is a summary of what I changed in the repo...`
 		{"reworded full dialog", rewordedDialog, true},
 		{"reworded phrase without dialog marker", rewordedMention, false},
 		{"old folder-trust wording", oldDialog, true},
+		{"old folder-trust wording, its footer not yet painted", oldDialogFooterUnpainted, false},
 		{"old folder-trust wording quoted above composer", oldDialogQuotedAboveComposer, false},
 		{"old folder-trust wording in agent prose", oldDialogProse, false},
 		{"old folder-trust wording picker not last", oldDialogPickerNotLast, false},

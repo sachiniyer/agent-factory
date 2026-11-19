@@ -27,7 +27,7 @@ func legacyPaintedDialogs(width int) map[string][]string {
 			"  Claude Code may read files in this folder.", "",
 			"  ❯ 1. Yes, proceed", "    2. No, exit", "", "  "+legacyTrustFooter),
 		"in a box, its footer below it": boxed,
-		"short labels, no body":         {"Do you trust the files in this folder?", "❯ 1. Yes", "  2. No"},
+		"short labels, no body":         {"Do you trust the files in this folder?", "❯ 1. Yes", "  2. No", "", legacyTrustFooter},
 	}
 }
 
