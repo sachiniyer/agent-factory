@@ -4,14 +4,17 @@ package git
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -93,6 +96,13 @@ func TestHookProgressRetireDoesNotWaitForPublisher(t *testing.T) {
 	}
 }
 
+// The outage episode must be logged once no matter how many DIFFERENT failure
+// messages it contains. The sighted flake (#4217, run 44530803803): a scripted
+// systemctl outage answered by the manager oracle overlapped one real argv
+// refusal from the launcher oracle, so the probe's messages went outage →
+// unreadable argv → outage and the message-keyed dedup warned three times.
+// This test scripts exactly that sequence — deterministic on every platform
+// because the probe is stubbed rather than shimmed through the environment.
 func TestHookProgressProbeOutageLogsOnceAndRecovers(t *testing.T) {
 	fastHookAdoptionPoll(t)
 	claimDaemonProcess(t)
@@ -105,14 +115,24 @@ func TestHookProgressProbeOutageLogsOnceAndRecovers(t *testing.T) {
 	if _, err := newHookProgress(hookRun{repoPath: g.repoPath, worktreePath: g.worktreePath, scopeSessionID: "owner"}, nil, "af-hook-owner", "test"); err != nil {
 		t.Fatal(err)
 	}
-	counter := filepath.Join(t.TempDir(), "probes")
-	installSurvivorSystemctl(t, fmt.Sprintf(`n=0
-if [ -f %q ]; then read -r n < %q; fi
-n=$((n + 1))
-printf '%%s\n' "$n" > %q
-if [ "$n" -le 20 ]; then echo 'manager unavailable' >&2; exit 1; fi
-exit 0
-`, counter, counter, counter))
+	outage := errors.New("systemctl --user list-units: exit status 1: manager unavailable")
+	unreadable := fmt.Errorf("cannot rule out a hook launcher under af-hook-owner: %w",
+		&proctree.ArgvUnreadableError{PID: 4242, Err: proctree.ErrNoArgv, OwnedByUs: true})
+	var probes atomic.Int32
+	originalProbe := runningHookPrefixesForResume
+	runningHookPrefixesForResume = func(...string) ([]string, error) {
+		switch n := probes.Add(1); {
+		case n <= 4:
+			return nil, outage
+		case n <= 10:
+			return nil, unreadable
+		case n <= 20:
+			return nil, outage
+		default:
+			return nil, nil
+		}
+	}
+	t.Cleanup(func() { runningHookPrefixesForResume = originalProbe })
 	var warnings, infos bytes.Buffer
 	warningWriter, infoWriter := log.WarningLog.Writer(), log.InfoLog.Writer()
 	log.WarningLog.SetOutput(&warnings)
@@ -134,11 +154,19 @@ exit 0
 	if got := strings.Count(warnings.String(), "waiting to resume post-worktree hooks"); got != 1 {
 		t.Errorf("outage warnings = %d, want 1: %s", got, warnings.String())
 	}
+	if strings.Contains(warnings.String(), "cannot rule out a hook launcher") {
+		t.Errorf("the mid-outage argv failure became a second warning: %s", warnings.String())
+	}
+	if got := strings.Count(infos.String(), "hook scope probe still failing"); got != 2 {
+		t.Errorf("changed mid-episode reasons demoted to info = %d, want 2: %s", got, infos.String())
+	}
+	if !strings.Contains(infos.String(), "cannot rule out a hook launcher") {
+		t.Errorf("the changed reason never reached the log at all: %s", infos.String())
+	}
 	if got := strings.Count(infos.String(), "hook scope probe recovered"); got != 1 {
 		t.Errorf("recovery messages = %d, want 1: %s", got, infos.String())
 	}
-	raw, err := os.ReadFile(counter)
-	if err != nil || strings.TrimSpace(string(raw)) != "21" {
-		t.Errorf("probe count = %q, err %v, want 21", raw, err)
+	if n := probes.Load(); n < 21 {
+		t.Errorf("watcher stopped probing at %d, want the full outage observed (>= 21)", n)
 	}
 }

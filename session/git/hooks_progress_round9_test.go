@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,7 +75,19 @@ func TestHookProgressRetiredActiveOwnerReclaimed(t *testing.T) {
 	for _, kind := range []string{"retired", "live", "scope", "lease", "young", "missing-exit"} {
 		t.Run(kind, func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-			installScopeShim(t)
+			// Protection claims belong to the probe's ANSWER, not to whether the
+			// launcher/manager oracle happened to reach systemctl: a transient
+			// argv refusal on a loaded runner used to keep "scope live" from
+			// being seen, flipping protected kinds to reclaimed (#4217).
+			var scopeLive atomic.Bool
+			originalProbe := runningHookPrefixesForPrune
+			runningHookPrefixesForPrune = func(...string) ([]string, error) {
+				if scopeLive.Load() {
+					return []string{"af-hook-owner"}, nil
+				}
+				return nil, nil
+			}
+			t.Cleanup(func() { runningHookPrefixesForPrune = originalProbe })
 			if err := config.SaveRepoInstances("test", json.RawMessage(`[{"id":"owner"}]`)); err != nil {
 				t.Fatal(err)
 			}
@@ -106,7 +119,7 @@ func TestHookProgressRetiredActiveOwnerReclaimed(t *testing.T) {
 				path = retired
 			}
 			if kind == "scope" {
-				installSurvivorSystemctl(t, "echo 'af-hook-owner-test-0.scope loaded active running Hook'\nexit 0\n")
+				scopeLive.Store(true)
 			}
 			now := time.Now().Add(time.Minute)
 			if kind == "live" {
@@ -133,7 +146,7 @@ func TestHookProgressRetiredActiveOwnerReclaimed(t *testing.T) {
 					}
 				}
 				if kind == "scope" {
-					installSurvivorSystemctl(t, "exit 0\n")
+					scopeLive.Store(false)
 				}
 				pruneHookProgress(dir, time.Now().Add(time.Minute))
 				if _, err := os.Stat(path); !os.IsNotExist(err) {
