@@ -726,7 +726,7 @@ func provisionDockerCredentialGrantPassthrough(t *testing.T, program string, run
 	writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": dockerCfg})
 
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
-	t.Cleanup(SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af")))
+	t.Cleanup(SetDockerSelfBinaryForTest(stagingBinarySource(t)))
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "info" {
 			return []byte("credential-test-engine\n"), nil
@@ -1389,7 +1389,7 @@ func TestDockerMountAgentCredentials_DefaultOffIgnoresRunArgs(t *testing.T) {
 		"docker":  map[string]any{"image": "example.invalid/agent:latest", "run_args": []string{"-e", "CODEX_HOME=/nonexistent"}},
 	})
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
-	t.Cleanup(SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af")))
+	t.Cleanup(SetDockerSelfBinaryForTest(stagingBinarySource(t)))
 	runCalled := false
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "info" {

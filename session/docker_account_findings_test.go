@@ -42,7 +42,7 @@ func newDockerAccountFixture(t *testing.T, home, agent string, runArgs []string)
 	}
 	writeInRepoConfig(t, repo, map[string]any{"backend": "docker", "docker": dockerConfig})
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
-	t.Cleanup(SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af")))
+	t.Cleanup(SetDockerSelfBinaryForTest(stagingBinarySource(t)))
 	return dockerAccountFixture{repo: repo, accountDir: accountDir}
 }
 
@@ -466,7 +466,7 @@ func TestDockerAccount_AgentServerRunsAsTheAccountOwner(t *testing.T) {
 		}
 		switch args[0] {
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "cp", "rm":
 			return nil, nil
 		case "port":
@@ -482,7 +482,7 @@ func TestDockerAccount_AgentServerRunsAsTheAccountOwner(t *testing.T) {
 				return nil, nil
 			}
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	}))
 
@@ -550,7 +550,7 @@ func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
 		}
 		switch args[0] {
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "cp", "rm":
 			return nil, nil
 		case "exec":
@@ -568,7 +568,7 @@ func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
 				return nil, nil
 			}
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	}))
 
@@ -629,7 +629,7 @@ func TestDockerAccount_ReadBannerRunsAsTheImageDefaultUser(t *testing.T) {
 	runGit(t, repo, "remote", "add", "origin", "https://example.invalid/fixture.git")
 	writeInRepoConfig(t, repo, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
-	t.Cleanup(SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af")))
+	t.Cleanup(SetDockerSelfBinaryForTest(stagingBinarySource(t)))
 
 	var calls [][]string
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
@@ -638,7 +638,7 @@ func TestDockerAccount_ReadBannerRunsAsTheImageDefaultUser(t *testing.T) {
 		case "info":
 			return []byte("non-account-engine\n"), nil
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "cp", "rm":
 			return nil, nil
 		case "port":
@@ -658,7 +658,7 @@ func TestDockerAccount_ReadBannerRunsAsTheImageDefaultUser(t *testing.T) {
 			}
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	}))
 

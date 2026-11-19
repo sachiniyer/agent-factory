@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -59,7 +58,7 @@ func TestDockerProvision_CreateThenFail_ReapsContainer(t *testing.T) {
 	// Cheap hermetic preconditions so Provision reaches runContainer: docker "found"
 	// on PATH and a stub `af` binary to copy in. Neither is executed under the fake.
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
-	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+	defer SetDockerSelfBinaryForTest(stagingBinarySource(t))()
 
 	var calls [][]string
 	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
@@ -88,6 +87,7 @@ func TestDockerProvision_CreateThenFail_ReapsContainer(t *testing.T) {
 func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
 	t.Setenv("DOCKER_CONTEXT", "")
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	const engineID = "engine-that-created-container"
 	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) == 0 {
@@ -97,7 +97,7 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 		case "info":
 			return []byte(engineID + "\n"), nil
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "cp":
 			return nil, nil
 		case "port":
@@ -123,14 +123,14 @@ func TestDockerProvisionPersistsEngineIdentityForCleanup(t *testing.T) {
 			}
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected docker command: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	})()
 
 	p := &dockerProvisioner{
 		spec:  ProvisionSpec{Title: "engine-bound", CloneURL: "file:///repo"},
 		image: "image:latest",
-		afBin: "/tmp/test-af",
+		afBin: stagingBinarySource(t),
 	}
 	result, err := p.provision()
 	require.NoError(t, err)
@@ -288,7 +288,7 @@ func TestDockerProvision_NonAccountRefusesRemoteDockerEngine(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
-	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+	defer SetDockerSelfBinaryForTest(stagingBinarySource(t))()
 
 	runCalled := false
 	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
@@ -356,7 +356,7 @@ func TestBackendUnusableReason_DockerFailsClosedOnProbeError(t *testing.T) {
 		if len(args) >= 2 && args[0] == "context" && args[1] == "inspect" {
 			return []byte("no context"), fmt.Errorf("context store corrupted")
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	}))
 	cfg := &config.ResolvedConfig{Docker: &config.DockerConfig{Image: "my-runtime:latest"}}
 

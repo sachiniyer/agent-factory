@@ -33,7 +33,7 @@ func TestDockerEnvironmentDoesNotTrustRepoSelectedImageWithResolvedCredentials(t
 		},
 	})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
-	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+	defer SetDockerSelfBinaryForTest(stagingBinarySource(t))()
 
 	var runArgs []string
 	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {

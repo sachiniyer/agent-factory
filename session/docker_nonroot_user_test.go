@@ -38,7 +38,7 @@ func dockerNonAccountProvisionFixture(t *testing.T, image string) string {
 		"docker":  map[string]any{"image": image},
 	})
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
-	t.Cleanup(SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af")))
+	t.Cleanup(SetDockerSelfBinaryForTest(stagingBinarySource(t)))
 	return repo
 }
 
@@ -60,7 +60,7 @@ func fakeNonRootImageDockerAnswers(t *testing.T, calls *[][]string, imageUser st
 		case "info":
 			return []byte("non-root-image-engine\n"), nil
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "cp", "rm":
 			return nil, nil
 		case "port":
@@ -77,7 +77,7 @@ func fakeNonRootImageDockerAnswers(t *testing.T, calls *[][]string, imageUser st
 			}
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	}
 }
@@ -105,26 +105,63 @@ func mountTableAnswer(mountPoints ...string) []byte {
 	return []byte(dockerContainerHome + "\n" + dockerWorkspaceDir + "\n" + mountinfoFor(mountPoints...))
 }
 
-// writeGuardAnswerRaw is the fake container's answer to verifyWriteTargets'
-// read — the same exec is distinguishable by the leafSymlinkMarker in its
-// script. Each resolved dir is NUL-framed exactly as the shell's printf emits
-// it, then the mount table.
-func writeGuardAnswerRaw(dirA, dirB, mountinfo string) []byte {
-	return []byte(dirA + "\n\x00" + dirB + "\n\x00" + mountinfo)
-}
-
-func writeGuardAnswer(dirA, dirB string, mountPoints ...string) []byte {
-	return writeGuardAnswerRaw(dirA, dirB, mountinfoFor(mountPoints...))
-}
-
-// probeAnswer answers whichever in-container read a provision-path fake saw:
-// the write-target guard's NUL-framed parents (its script carries
-// leafSymlinkMarker) or the chown guard's newline-framed readMountTable.
+// probeAnswer answers the in-container mount-table read a provision-path
+// fake saw — the chown guard's newline-framed readMountTable.
 func probeAnswer(args []string, mountPoints ...string) []byte {
-	if strings.Contains(strings.Join(args, " "), leafSymlinkMarker) {
-		return writeGuardAnswer("/usr/local/bin", "/etc", mountPoints...)
-	}
 	return mountTableAnswer(mountPoints...)
+}
+
+// dockerUnexpectedCall is the strict fakes' fallthrough: the cp path's
+// `docker inspect` mount guard and the staged binary's `__docker-root-verify`
+// exec are ordinary calls every provision makes, so even a fake that errors
+// on anything unexpected answers them — while still failing on a call the
+// suite genuinely did not anticipate.
+func dockerUnexpectedCall(args []string) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("unexpected empty docker argv")
+	}
+	switch args[0] {
+	case "inspect":
+		return []byte(`{"Mounts":[],"HostConfig":{"Tmpfs":{}}}` + "\n"), nil
+	case "run":
+		if containsArg(args, "--rm") {
+			return dockerProbeRunAnswer(args), nil
+		}
+	case "cp":
+		return nil, nil
+	case "exec":
+		if strings.Contains(strings.Join(args, " "), "__docker-root-verify") {
+			return []byte("OK\n"), nil
+		}
+	}
+	return nil, fmt.Errorf("unexpected docker call: %v", args)
+}
+
+// dockerRunOrProbeAnswer answers a `docker run`: the in-image resolution
+// probe (a `--rm` one-shot) gets the NUL-framed probe shape, every other run
+// the created container id.
+func dockerRunOrProbeAnswer(args []string) ([]byte, error) {
+	if containsArg(args, "--rm") {
+		return dockerProbeRunAnswer(args), nil
+	}
+	return []byte(dockerCreatedID + "\n"), nil
+}
+
+// dockerProbeRunAnswer renders the in-image destination probe's default
+// NUL-framed answer: the two af parents resolved plainly, the empty
+// leaf-marker field, then each mount destination resolved to itself.
+func dockerProbeRunAnswer(args []string) []byte {
+	var b strings.Builder
+	b.WriteString("/usr/local/bin\n\x00/etc\n\x00\x00")
+	for i, a := range args {
+		if a == "-c" && i+2 < len(args) {
+			for _, d := range args[i+7:] {
+				b.WriteString(d + "\n\x00")
+			}
+			break
+		}
+	}
+	return []byte(b.String())
 }
 
 func isMountTableExec(args []string) bool {
@@ -244,10 +281,13 @@ func TestDockerProvision_NonAccount_NonRootImage_Provisions(t *testing.T) {
 	require.Contains(t, strings.Join(gitClone, " "), shellQuote(dockerWorkspaceDir),
 		"cloneWorkspace clones into /workspace; call=%v", gitClone)
 
-	// chmod of the copied `af` binary runs as root (0:0): docker cp lands the
-	// binary root-owned, and a non-root user cannot chmod a root-owned file.
-	chmod := findExecCall(calls, "--user 0:0", "chmod +x")
-	require.NotNil(t, chmod, "copyAfBinary's chmod must run as root; calls=%v", calls)
+	// The in-container verifier exec runs as root (0:0): no chmod exec exists
+	// anymore — delivery is a bind or a cp of a mode-pinned temp file, and a
+	// pre-verification chmod would be an unverified image program (#7607).
+	verify := findExecCall(calls, "--user 0:0", "__docker-root-verify")
+	require.NotNil(t, verify, "the root-exec verifier must run as root; calls=%v", calls)
+	require.Nil(t, findExecCall(calls, "-c", "chmod "),
+		"no image-program chmod may run; calls=%v", calls)
 
 	// The detached agent-server runs as the image's default user with HOME=/root
 	// (the same writable security context that wrote the banner), not as root
@@ -281,10 +321,11 @@ func TestDockerProvision_NonAccount_NonRootImage_Provisions(t *testing.T) {
 //     the operator set via run_args (docker exec -e wins over the container's
 //     configured env) — the second regression this early return prevents.
 //
-// The one exec that still carries --user is execSh's `chmod +x` of the copied
-// `af` binary: docker cp lands it root-owned so only root can chmod it, which
-// non-root images require — and on a root-default image running as 0:0 is the
-// same user the image default resolves to anyway.
+// The execs that still carry --user are the root-exec verifier and the
+// mount-table read (0:0): the verifier must see the container's real mount
+// table, and the chmod the cp path used to run no longer exists — delivery
+// is a bind or a cp of a mode-pinned temp file, and a pre-verification
+// chmod would be an unverified image program (#7607 review).
 func TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged(t *testing.T) {
 	repo := dockerNonAccountProvisionFixture(t, "rootdefault/image:latest")
 	var calls [][]string
@@ -297,22 +338,20 @@ func TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged(t *testing.T) {
 	})
 	require.NoError(t, err, "a non-account session on a root-default image must provision; calls=%v", calls)
 
-	var sawChmod bool
 	for _, call := range calls {
 		if len(call) == 0 || call[0] != "exec" {
 			continue
 		}
 		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "__docker-root-verify") {
+			continue // prog= entries name verification targets, not commands run
+		}
 		require.NotContainsf(t, joined, "chown",
 			"a root-default image must not be chown-prepared — a run_args bind mount at /root or /workspace would re-own host files; call=%v", call)
 		require.NotContainsf(t, joined, "mkdir",
 			"a root-default image must not be chown-prepared — the clone creates /workspace itself, as before; call=%v", call)
-		if strings.Contains(joined, "chmod +x") {
-			sawChmod = true
-			require.Containsf(t, joined, "--user 0:0",
-				"execSh's chmod must run as root — docker cp lands the binary root-owned; call=%v", call)
-			continue
-		}
+		require.NotContainsf(t, joined, "chmod",
+			"no chmod exec exists — delivery is a bind or a mode-pinned cp, and a pre-verification chmod would be an unverified image program (#7607); call=%v", call)
 		for _, arg := range call {
 			require.NotEqualf(t, "--user", arg,
 				"a root-default image must exec as the image's default user, not a forced uid (master behavior); call=%v", call)
@@ -322,7 +361,6 @@ func TestDockerProvision_NonAccount_RootDefaultImage_IsUnchanged(t *testing.T) {
 				"a root-default image must not force HOME — a run_args HOME must survive; call=%v", call)
 		}
 	}
-	require.True(t, sawChmod, "copyAfBinary's chmod must still run; calls=%v", calls)
 }
 
 // TestPrepareNonAccountUser_RootDefaultSkipsPreparation pins the unit contract
@@ -372,7 +410,7 @@ func TestDockerProvision_NonAccount_ProbeFailure_RefusesCreate(t *testing.T) {
 		case "info":
 			return []byte("broken-image-engine\n"), nil
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "rm":
 			return []byte(dockerCreatedID + "\n"), nil
 		case "exec":
@@ -380,12 +418,12 @@ func TestDockerProvision_NonAccount_ProbeFailure_RefusesCreate(t *testing.T) {
 			if strings.Contains(joined, "id -u") {
 				return []byte("docker: no such container\n"), probeErr
 			}
-			if strings.Contains(joined, "chown") {
+			if strings.Contains(joined, "chown") && !strings.Contains(joined, "__docker-root-verify") {
 				sawChown = true
 			}
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	}))
 
@@ -445,7 +483,7 @@ func TestPrepareNonAccountUser_OwnerParseIsLocal(t *testing.T) {
 		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
 			return []byte("not-a-uid-gid\n"), nil
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})()
 	p := &dockerProvisioner{containerID: "cid"}
 	err := p.prepareNonAccountUser()
@@ -467,7 +505,7 @@ func TestPrepareNonAccountUser_OwnerReadCarriesDaemonWriteClass(t *testing.T) {
 		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "id -u") {
 			return nil, fmt.Errorf("exit status 127") // the image has no id
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})()
 	p := &dockerProvisioner{containerID: "cid"}
 	err := p.prepareNonAccountUser()

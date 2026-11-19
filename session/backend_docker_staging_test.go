@@ -48,17 +48,14 @@ func stagingBinarySource(t *testing.T) string {
 	return p
 }
 
-// writeGuardTableAnswer renders verifyWriteTargets' NUL-framed answer: the
-// resolved parent of each write destination (pwd -P's trailing newline kept,
-// then the shell's '\0'), then a mountinfo whose "/" is overlay and whose
-// extra mounts are (mountPoint, fstype) pairs.
-func writeGuardTableAnswer(realA, realB string, mounts ...[2]string) []byte {
-	var b strings.Builder
-	b.WriteString(mountinfoLine(1, "/", "overlay") + "\n")
-	for i, m := range mounts {
-		b.WriteString(mountinfoLine(10+i, m[0], m[1]) + "\n")
-	}
-	return writeGuardAnswerRaw(realA, realB, b.String())
+// forceCpFallback makes staging fail so provision takes the un-staged cp
+// path: the staging root lives under the AF home, which this makes
+// unwritable. afBin must still be a real file — the fallback reads it into a
+// 0755 temp copy so no in-container chmod runs before verification (#7607).
+func forceCpFallback(t *testing.T, afHome string) {
+	t.Helper()
+	require.NoError(t, os.Chmod(afHome, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(afHome, 0o700) })
 }
 
 // stagingDockerAnswers installs a fake docker CLI that records every call into
@@ -125,16 +122,29 @@ func stagingDockerAnswers(t *testing.T, calls *[][]string, engineName string, ro
 			return nil, nil
 		case "port":
 			return []byte("127.0.0.1:49152\n"), nil
+		case "inspect":
+			if dockerInspectAnswer != nil {
+				return dockerInspectAnswer(joined)
+			}
+			return []byte(`{"Mounts":[],"HostConfig":{"Tmpfs":{}}}` + "\n"), nil
 		case "exec":
 			switch {
 			case strings.Contains(joined, "id -u"):
 				return []byte("0:0\n"), nil
-			case strings.Contains(joined, "wc -c"):
-				// The post-create delivery check: staged files delivered.
-				return nil, nil
+			case strings.Contains(joined, "__docker-root-verify"):
+				if dockerRootVerifyAnswer != nil {
+					return dockerRootVerifyAnswer(joined)
+				}
+				return []byte("OK\n"), nil
 			case strings.Contains(joined, "/proc/self/mountinfo"):
 				if mountAnswer != nil {
 					return mountAnswer(joined)
+				}
+				// probe adaptation: master's verifyWriteTargets exec is
+				// NUL-framed (pwd -P, printf '\0'); the newline-framed
+				// readMountTable execs keep probeAnswer's shape.
+				if strings.Contains(joined, "printf") {
+					return writeGuardTableAnswer("/usr/local/bin", "/etc"), nil
 				}
 				return probeAnswer(args), nil
 			case strings.Contains(joined, "cat "+dockerBannerPath):
@@ -149,6 +159,15 @@ func stagingDockerAnswers(t *testing.T, calls *[][]string, engineName string, ro
 // dockerStagingProbeAnswer overrides the probe `docker run --rm` answer when
 // non-nil — tests use it to feed symlinked parents or a failing probe.
 var dockerStagingProbeAnswer func(joined string) ([]byte, error)
+
+// dockerInspectAnswer overrides the `docker inspect` answer when non-nil —
+// the cp path's write-target guard reads the daemon-configured mounts from it.
+var dockerInspectAnswer func(joined string) ([]byte, error)
+
+// dockerRootVerifyAnswer overrides the staged binary's `__docker-root-verify`
+// exec answer when non-nil — a nil hook answers one bare OK line, an error
+// return means the staged binary never ran (undelivered payload).
+var dockerRootVerifyAnswer func(joined string) ([]byte, error)
 
 // findDockerCall returns the recorded docker call whose argv starts with
 // subcommand and whose joined argv contains every needle, or nil.
@@ -262,7 +281,7 @@ func TestDockerStagingBindsDeliverThePayload(t *testing.T) {
 	// The cp fallback never ran: no `docker cp`, and no chmod exec — the
 	// staged modes are what the container serves.
 	require.Nil(t, findDockerCall(calls, "cp"), "the bind path must not cp; calls=%v", calls)
-	require.Nil(t, findDockerCall(calls, "exec", "chmod"), "the bind path must not chmod; calls=%v", calls)
+	require.Nil(t, findDockerCall(calls, "exec", "-c", "chmod"), "the bind path must not chmod; calls=%v", calls)
 
 	// Modes are staged exactly: 0755 for the binary, 0644 for the policy.
 	afStaged := strings.SplitN(afMount, ":", 2)[0]
@@ -362,12 +381,15 @@ func TestDockerStagingDesktopUnshareableFallsBackToCp(t *testing.T) {
 	require.NotNil(t, cp, "the fallback must still docker cp; calls=%v", calls)
 	require.True(t, strings.HasPrefix(cp[1], filepath.Join(home, dockerStagingDirName)),
 		"cp must source the staged file, not afBin directly: %v", cp)
-	require.Nil(t, findDockerCall(calls, "exec", "chmod"),
+	require.Nil(t, findDockerCall(calls, "exec", "-c", "chmod"),
 		"a staged-source cp preserves mode — no chmod; calls=%v", calls)
 
-	// The mount-table guard ran before the cp.
-	require.NotNil(t, findDockerCall(calls, "exec", "/proc/self/mountinfo"),
-		"the write-target guard must read the mount table first; calls=%v", calls)
+	// The write-target guard read the daemon's own mount list before the cp,
+	// and the copied binary's verifier re-proved it on the kernel table.
+	require.NotNil(t, findDockerCall(calls, "inspect"),
+		"the write-target guard must inspect the container's mounts first; calls=%v", calls)
+	require.NotNil(t, findDockerCall(calls, "exec", "__docker-root-verify"),
+		"the copied binary's root-exec verification must run before the policy write; calls=%v", calls)
 }
 
 // TestDockerStagingSharingFailureRetriesOnceWithCp: when `docker run` still
@@ -412,262 +434,21 @@ func TestDockerStagingSharingFailureRetriesOnceWithCp(t *testing.T) {
 		"the retried provision delivers via cp; calls=%v", calls)
 }
 
-// TestDockerWriteGuardRefusesHostMounts is option A's fallback check: on the
-// cp path, a write target enclosed by — or covering — ANY mount other than the
-// container rootfs is refused with an actionable error, and no cp runs. tmpfs
-// rows are refused on purpose: a host tmpfs bind (-v /dev/shm:/dst) reports the
-// same fstype as a private --tmpfs, so the check cannot tell them apart — and
-// a write through the host bind escapes the container.
-func TestDockerWriteGuardRefusesHostMounts(t *testing.T) {
-	tests := []struct {
-		name        string
-		realA       string
-		realB       string
-		mounts      [][2]string
-		wantRefused string
-		policy      bool
-	}{
-		{
-			name:        "bind over the af directory",
-			realA:       "/usr/local/bin",
-			realB:       "/usr/local/bin",
-			mounts:      [][2]string{{"/usr/local/bin", "ext4"}},
-			wantRefused: dockerAfBinaryPath,
-		},
-		{
-			name:        "bind at the af file itself",
-			realA:       "/usr/local/bin",
-			realB:       "/usr/local/bin",
-			mounts:      [][2]string{{"/usr/local/bin/af", "ext4"}},
-			wantRefused: dockerAfBinaryPath,
-		},
-		{
-			name:        "bind over the policy directory",
-			realA:       "/usr/local/bin",
-			realB:       "/etc",
-			mounts:      [][2]string{{"/etc", "ext4"}},
-			wantRefused: dockerPolicyPath,
-			policy:      true,
-		},
-		{
-			name:        "symlinked parent resolving onto a bind",
-			realA:       "/mnt/host-bin",
-			realB:       "/usr/local/bin",
-			mounts:      [][2]string{{"/mnt/host-bin", "ext4"}},
-			wantRefused: dockerAfBinaryPath,
-		},
-		{
-			name:        "mount beneath a directory destination",
-			realA:       "/usr/local/bin",
-			realB:       "/usr/local/bin",
-			mounts:      [][2]string{{"/usr/local/bin/af/inner", "nfs"}},
-			wantRefused: dockerAfBinaryPath,
-		},
-		{
-			name:        "host tmpfs bind over the af directory",
-			realA:       "/usr/local/bin",
-			realB:       "/usr/local/bin",
-			mounts:      [][2]string{{"/usr/local/bin", "tmpfs"}},
-			wantRefused: dockerAfBinaryPath,
-		},
-		{
-			name:        "tmpfs bind at the af file itself",
-			realA:       "/usr/local/bin",
-			realB:       "/usr/local/bin",
-			mounts:      [][2]string{{"/usr/local/bin/af", "tmpfs"}},
-			wantRefused: dockerAfBinaryPath,
-		},
-		{
-			name:        "tmpfs mount over the policy directory",
-			realA:       "/usr/local/bin",
-			realB:       "/etc",
-			mounts:      [][2]string{{"/etc", "tmpfs"}},
-			wantRefused: dockerPolicyPath,
-			policy:      true,
-		},
-		{
-			name:        "tmpfs mount beneath a directory destination",
-			realA:       "/usr/local/bin",
-			realB:       "/usr/local/bin",
-			mounts:      [][2]string{{"/usr/local/bin/af/inner", "tmpfs"}},
-			wantRefused: dockerAfBinaryPath,
-		},
-		{
-			name:  "resolved parent with a trailing space is judged byte-exactly",
-			realA: "/usr/local/bin ",
-			realB: "/usr/local/bin",
-			// A mount over "/usr/local/bin " covers "/usr/local/bin /af" — a
-			// TrimSpace'd read would judge "/usr/local/bin/af" and miss it.
-			mounts:      [][2]string{{"/usr/local/bin ", "tmpfs"}},
-			wantRefused: dockerAfBinaryPath,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stagingTestEnv(t)
-			var calls [][]string
-			answer := writeGuardTableAnswer(tt.realA, tt.realB, tt.mounts...)
-			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false,
-				func(string) ([]byte, error) { return answer, nil }, nil))
-
-			spec := ProvisionSpec{Title: "guarded", CloneURL: "file:///repo"}
-			if tt.policy {
-				spec.AgentPolicy = []byte(`{"hooks":{}}`)
-			}
-			p := &dockerProvisioner{
-				image: "img:latest",
-				afBin: filepath.Join(t.TempDir(), "missing-af"), // staging fails → the cp fallback runs
-				spec:  spec,
-			}
-			_, err := p.provision()
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "refusing to write "+tt.wantRefused,
-				"the refusal must name the destination: %v", err)
-			assert.Contains(t, err.Error(), "run_args",
-				"the refusal must tell the operator where the mount came from: %v", err)
-			require.Nil(t, findDockerCall(calls, "cp"),
-				"a refused target must not be written; calls=%v", calls)
-		})
-	}
-}
-
-// TestDockerWriteGuardAllowsRootfs pins the allowed case: every write target
-// resolves under "/" itself. The second row is the --tmpfs /tmp preservation
-// the policy path exists for: a private tmpfs over /tmp is a common hardening
-// flag, and with the policy at /etc nothing af writes lands beneath it, so the
-// fallback still delivers.
-func TestDockerWriteGuardAllowsRootfs(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		realA  string
-		mounts [][2]string
-		policy bool
-	}{
-		{name: "plain rootfs"},
-		{name: "a private tmpfs over /tmp elsewhere is irrelevant", mounts: [][2]string{{"/tmp", "tmpfs"}}, policy: true},
-		{
-			name:  "a trailing-spaced sibling is not under the unspaced mount",
-			realA: "/usr/local/bin ",
-			// "/usr/local/bin/af" is under this mount; "/usr/local/bin /af"
-			// is not — judging the resolved path byte-exactly is what lets
-			// the write proceed.
-			mounts: [][2]string{{"/usr/local/bin", "tmpfs"}},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			stagingTestEnv(t)
-			var calls [][]string
-			realA, realB := tt.realA, "/usr/local/bin"
-			if realA == "" {
-				realA = "/usr/local/bin"
-			}
-			if tt.policy {
-				realB = "/etc"
-			}
-			answer := writeGuardTableAnswer(realA, realB, tt.mounts...)
-			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false,
-				func(string) ([]byte, error) { return answer, nil }, nil))
-
-			spec := ProvisionSpec{Title: "allowed", CloneURL: "file:///repo"}
-			if tt.policy {
-				spec.AgentPolicy = []byte(`{"hooks":{}}`)
-			}
-			p := &dockerProvisioner{
-				image: "img:latest",
-				afBin: filepath.Join(t.TempDir(), "missing-af"),
-				spec:  spec,
-			}
-			_, err := p.provision()
-			require.NoError(t, err, "calls=%v", calls)
-			require.NotNil(t, findDockerCall(calls, "cp"),
-				"an allowed target must reach the cp; calls=%v", calls)
-		})
-	}
-}
-
-// TestDockerWriteGuardRefusesSymlinkLeaf: a destination whose final component
-// is a symlink is refused — `docker cp` follows it off the checked path.
-func TestDockerWriteGuardRefusesSymlinkLeaf(t *testing.T) {
-	stagingTestEnv(t)
-	var calls [][]string
-	answer := append(writeGuardTableAnswer("/usr/local/bin", "/usr/local/bin"),
-		[]byte(leafSymlinkMarker+dockerAfBinaryPath+"\n")...)
-	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false,
-		func(string) ([]byte, error) { return answer, nil }, nil))
-
-	p := &dockerProvisioner{
-		image: "img:latest",
-		afBin: filepath.Join(t.TempDir(), "missing-af"),
-		spec:  ProvisionSpec{Title: "symlink", CloneURL: "file:///repo"},
-	}
-	_, err := p.provision()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "symbolic link")
-	assert.Contains(t, err.Error(), dockerAfBinaryPath)
-	require.Nil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
-}
-
-// TestDockerWriteGuardUnreadableTableRefuses: the check is fail-closed — an
-// exec failure or an answer it cannot parse refuses the write rather than
-// hoping the destination is safe.
-func TestDockerWriteGuardUnreadableTableRefuses(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		answer func(string) ([]byte, error)
-	}{
-		{name: "exec fails", answer: func(string) ([]byte, error) {
-			return nil, fmt.Errorf("exit status 1")
-		}},
-		{name: "unparseable answer", answer: func(string) ([]byte, error) {
-			return []byte("not a mount table\n"), nil
-		}},
-		{name: "double-slash mount point in the table", answer: func(string) ([]byte, error) {
-			// "//host" is not a shape a kernel mountinfo emits; the parser
-			// must refuse it rather than prefix-match the cleaned "/host".
-			return writeGuardTableAnswer("/usr/local/bin", "/usr/local/bin",
-				[2]string{"//host", "ext4"}), nil
-		}},
-		{name: "resolved parent with a leading space refuses as non-absolute", answer: func(string) ([]byte, error) {
-			return writeGuardTableAnswer(" /usr/local/bin", "/usr/local/bin"), nil
-		}},
-		{name: "empty resolved parent", answer: func(string) ([]byte, error) {
-			return writeGuardTableAnswer("", "/usr/local/bin"), nil
-		}},
-		{name: "missing NUL framing", answer: func(string) ([]byte, error) {
-			// The old newline-delimited shape has no NUL fields to split on.
-			return mountTableAnswer(), nil
-		}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			stagingTestEnv(t)
-			var calls [][]string
-			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, tt.answer, nil))
-
-			p := &dockerProvisioner{
-				image: "img:latest",
-				afBin: filepath.Join(t.TempDir(), "missing-af"),
-				spec:  ProvisionSpec{Title: "closed", CloneURL: "file:///repo"},
-			}
-			_, err := p.provision()
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "mount table")
-			require.Nil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
-		})
-	}
-}
-
-// TestDockerStagingFallbackChmodsTheUnstagedPayload: when staging itself
-// fails — no staged files at all — the pre-#7577 path runs whole: cp of the
-// daemon binary and the root chmod that makes it exec'able, still behind the
-// mount-table guard.
-func TestDockerStagingFallbackChmodsTheUnstagedPayload(t *testing.T) {
-	stagingTestEnv(t)
+// TestDockerStagingFallbackCopiesTheUnstagedPayload: when staging itself
+// fails — no staged files at all — the fallback still delivers the daemon's
+// own binary by cp, sourced through a 0755 host temp file so `docker cp`
+// carries an exec'able mode with NO in-container chmod: on the cp path that
+// chmod would be an image program exec'd as root before the verifier cleared
+// it (#7607 review).
+func TestDockerStagingFallbackCopiesTheUnstagedPayload(t *testing.T) {
+	home := stagingTestEnv(t)
 	var calls [][]string
 	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+	forceCpFallback(t, home)
 
 	p := &dockerProvisioner{
 		image: "img:latest",
-		afBin: filepath.Join(t.TempDir(), "missing-af"),
+		afBin: stagingBinarySource(t),
 		spec:  ProvisionSpec{Title: "unstaged", CloneURL: "file:///repo"},
 	}
 	_, err := p.provision()
@@ -675,11 +456,14 @@ func TestDockerStagingFallbackChmodsTheUnstagedPayload(t *testing.T) {
 
 	cp := findDockerCall(calls, "cp", dockerAfBinaryPath)
 	require.NotNil(t, cp, "the fallback must still docker cp; calls=%v", calls)
-	require.Equal(t, p.afBin, cp[1], "the unstaged fallback cp's the daemon's own binary")
-	require.NotNil(t, findDockerCall(calls, "exec", "chmod +x"),
-		"an unstaged cp lands root-owned — the chmod is required; calls=%v", calls)
-	require.NotNil(t, findDockerCall(calls, "exec", "/proc/self/mountinfo"),
-		"the mount-table guard runs ahead of the fallback cp too; calls=%v", calls)
+	require.NotEqual(t, p.afBin, cp[1],
+		"the fallback cp's a 0755 temp copy, never afBin's own mode: %v", cp)
+	require.Nil(t, findDockerCall(calls, "exec", "-c", "chmod "),
+		"no image-program chmod may run before verification; calls=%v", calls)
+	require.NotNil(t, findDockerCall(calls, "inspect"),
+		"the write-target guard inspects the mounts ahead of the fallback cp too; calls=%v", calls)
+	require.NotNil(t, findDockerCall(calls, "exec", "__docker-root-verify"),
+		"the copied binary's verification runs before the policy write; calls=%v", calls)
 }
 
 // TestDockerStagingDirRemovedOnReap: the staging dir is af-owned scratch; it
@@ -833,8 +617,8 @@ func TestDockerStagingColonHomeUsesTheCpFallback(t *testing.T) {
 	assert.False(t, p.payloadViaBinds, "a ':' or ',' staging path cannot use binds")
 	require.NotNil(t, findDockerCall(calls, "cp"),
 		"the unencodable path must fall back to cp; calls=%v", calls)
-	require.NotNil(t, findDockerCall(calls, "exec", "/proc/self/mountinfo"),
-		"the mount-table guard still gates the cp; calls=%v", calls)
+	require.NotNil(t, findDockerCall(calls, "inspect"),
+		"the write-target guard still gates the cp; calls=%v", calls)
 	run := findDockerCall(calls, "run", "-d")
 	require.NotNil(t, run, "calls=%v", calls)
 	for _, m := range stagingBindVolumes(run) {
@@ -869,8 +653,8 @@ func TestDockerStagingContainerizedAfFallsBackToCp(t *testing.T) {
 	require.NotNil(t, run, "calls=%v", calls)
 	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
 	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
-	require.NotNil(t, findDockerCall(calls, "exec", "/proc/self/mountinfo"),
-		"the mount-table guard still gates the cp; calls=%v", calls)
+	require.NotNil(t, findDockerCall(calls, "inspect"),
+		"the write-target guard still gates the cp; calls=%v", calls)
 }
 
 // TestDockerStagingVolumesFromFallsBackToCp: --volumes-from inherits the
@@ -898,63 +682,8 @@ func TestDockerStagingVolumesFromFallsBackToCp(t *testing.T) {
 	require.NotNil(t, run, "calls=%v", calls)
 	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
 	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
-	require.NotNil(t, findDockerCall(calls, "exec", "/proc/self/mountinfo"),
-		"the mount-table guard still gates the cp; calls=%v", calls)
-}
-
-// TestDockerStagingExecScriptsPinPATH: a plain session's run_args may set
-// `-e PATH=/evil:…`, and docker exec inherits the container's configured env —
-// every in-container script this PR adds must pin PATH before naming any
-// external program, so a repo-controlled directory cannot supply the `cat`,
-// `wc` or `tr` a root exec runs.
-func TestDockerStagingExecScriptsPinPATH(t *testing.T) {
-	const pinned = "export PATH=/usr/sbin:/usr/bin:/sbin:/bin"
-	scriptAfterC := func(args []string) string {
-		t.Helper()
-		for i, a := range args {
-			if a == "-c" && i+1 < len(args) {
-				return args[i+1]
-			}
-		}
-		return ""
-	}
-	t.Run("mount-table read", func(t *testing.T) {
-		stagingTestEnv(t)
-		old := dockerStagingInContainer
-		dockerStagingInContainer = func() bool { return true }
-		defer func() { dockerStagingInContainer = old }()
-		var calls [][]string
-		t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
-		p := &dockerProvisioner{
-			image:   "img:latest",
-			afBin:   stagingBinarySource(t),
-			runArgs: []string{"-e", "PATH=/evil/nowhere"},
-			spec:    ProvisionSpec{Title: "path", CloneURL: "file:///repo"},
-		}
-		_, err := p.provision()
-		require.NoError(t, err, "calls=%v", calls)
-		exec := findDockerCall(calls, "exec", "/proc/self/mountinfo")
-		require.NotNil(t, exec, "calls=%v", calls)
-		assert.Contains(t, scriptAfterC(exec), pinned,
-			"the mount-table read must pin PATH before cat runs")
-	})
-	t.Run("delivery check", func(t *testing.T) {
-		stagingTestEnv(t)
-		var calls [][]string
-		t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
-		p := &dockerProvisioner{
-			image:   "img:latest",
-			afBin:   stagingBinarySource(t),
-			runArgs: []string{"-e", "PATH=/evil/nowhere"},
-			spec:    ProvisionSpec{Title: "path", CloneURL: "file:///repo"},
-		}
-		_, err := p.provision()
-		require.NoError(t, err, "calls=%v", calls)
-		exec := findDockerCall(calls, "exec", "wc -c")
-		require.NotNil(t, exec, "calls=%v", calls)
-		assert.Contains(t, scriptAfterC(exec), pinned,
-			"the delivery check must pin PATH before wc/tr run")
-	})
+	require.NotNil(t, findDockerCall(calls, "inspect"),
+		"the write-target guard still gates the cp; calls=%v", calls)
 }
 
 // TestDockerStagingProxiedEndpointFallsBackToCp: a tcp:// loopback endpoint
@@ -1260,6 +989,7 @@ func TestDockerStagingProbeFailureFallsBackToCp(t *testing.T) {
 func TestDockerStagingDeliveryConfirmFailsBackToCp(t *testing.T) {
 	stagingTestEnv(t)
 	var calls [][]string
+	verifyCalls := 0
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		joined := strings.Join(args, " ")
@@ -1267,17 +997,23 @@ func TestDockerStagingDeliveryConfirmFailsBackToCp(t *testing.T) {
 		case "info":
 			return []byte("confirm-engine\n"), nil
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "cp", "rm":
 			return nil, nil
 		case "port":
 			return []byte("127.0.0.1:49152\n"), nil
+		case "inspect":
+			return []byte(`{"Mounts":[],"HostConfig":{"Tmpfs":{}}}` + "\n"), nil
 		case "exec":
 			switch {
-			case strings.Contains(joined, "wc -c"):
+			case strings.Contains(joined, "__docker-root-verify"):
 				// Delivery check: the staged af did not arrive as a
-				// regular file of the staged size.
-				return []byte(""), fmt.Errorf("exit status 1")
+				// runnable binary — no verdicts at all means undelivered.
+				verifyCalls++
+				if verifyCalls == 1 {
+					return []byte(""), fmt.Errorf("exit status 1")
+				}
+				return []byte("OK\n"), nil
 			case strings.Contains(joined, "id -u"):
 				return []byte("0:0\n"), nil
 			case strings.Contains(joined, "/proc/self/mountinfo"):
@@ -1416,4 +1152,22 @@ func TestDockerReadOnlyMountpointErrorRewritten(t *testing.T) {
 	assert.Contains(t, err.Error(), dockerAfBinaryPath)
 	assert.Contains(t, err.Error(), "run_args")
 	assert.Nil(t, dockerReadOnlyMountpointError("docker: some other failure", nil))
+}
+
+// writeGuardAnswerRaw renders master's NUL-framed verifyWriteTargets answer:
+// each resolved destination parent (pwd -P's trailing newline kept), then
+// the shell's '\0' separators, then the mountinfo body.
+func writeGuardAnswerRaw(dirA, dirB, mountinfo string) []byte {
+	return []byte(dirA + "\n\x00" + dirB + "\n\x00" + mountinfo)
+}
+
+// writeGuardTableAnswer wraps writeGuardAnswerRaw with a mount table whose
+// "/" is overlay plus (mountPoint, fstype) extra mounts.
+func writeGuardTableAnswer(realA, realB string, mounts ...[2]string) []byte {
+	var b strings.Builder
+	b.WriteString(mountinfoLine(1, "/", "overlay") + "\n")
+	for i, m := range mounts {
+		b.WriteString(mountinfoLine(10+i, m[0], m[1]) + "\n")
+	}
+	return writeGuardAnswerRaw(realA, realB, b.String())
 }

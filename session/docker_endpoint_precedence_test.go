@@ -94,7 +94,7 @@ func (f *fakeDockerContextCLI) dial(environ []string) (string, error) {
 
 func (f *fakeDockerContextCLI) exec(_ context.Context, environ []string, args ...string) ([]byte, error) {
 	if len(args) < 4 || args[0] != "context" || args[1] != "inspect" || args[2] != "--format" || args[3] != dockerEndpointFormat {
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	}
 	f.inspects = append(f.inspects, append([]string(nil), args...))
 	refs := args[4:]
@@ -432,7 +432,7 @@ func TestDockerProvision_RefusesConflictingDockerHostAndContext(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
 	writeInRepoConfig(t, repoRoot, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
 	defer SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil })()
-	defer SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af"))()
+	defer SetDockerSelfBinaryForTest(stagingBinarySource(t))()
 
 	cli := &fakeDockerContextCLI{}
 	runCalled := false
