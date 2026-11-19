@@ -305,7 +305,9 @@ var socketCompareWalk = func(envSocket, recordedSocket string) (same, comparable
 		return true, true
 	}
 	// The env spelling is the side a deleted component may have aliased; the
-	// recorded socket is af's own record of where the server bound — literal.
+	// recorded socket is af's own record of where the server bound — af's
+	// servers launch bare, so tmux realpath'd the socket's base dir at bind
+	// and the record is literal.
 	if !certainSocketMismatch(got, want) {
 		return false, false
 	}

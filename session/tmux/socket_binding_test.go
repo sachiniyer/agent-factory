@@ -319,9 +319,11 @@ func TestBindingAgainst(t *testing.T) {
 
 		// #7562: a deleted component on the CLIENT spelling may have been an
 		// alias of the bound path — uncertain. A deleted component on the
-		// BOUND path never is: the kernel recorded the resolved path at bind
-		// time, so it is literal, and a certain client spelling rules the
-		// server out on it.
+		// BOUND path never is: af's servers launch bare and tmux realpaths a
+		// bare socket's base dir at bind, so the recorded path is literal,
+		// and a certain client spelling rules the server out on it. A
+		// verbatim-bound -S or $TMUX server is the accepted residual —
+		// Elsewhere, exactly as on master.
 		{"a deleted link component on the target", linkdir + "/s", []string{realdir + "/s"}, socketBindingUnresolved},
 		{"a deleted link component on the bound path stays literal", realdir + "/s", []string{linkdir + "/s"}, socketBindingElsewhere},
 		{"deleted aliases that may have pointed at each other", linkdir + "/s", []string{linkdir2 + "/s"}, socketBindingUnresolved},
@@ -601,4 +603,47 @@ func TestSocketAbsentProbeKeepsAnOwnerBehindADeletedLink(t *testing.T) {
 		"the live server may own the socket through the deleted alias: an uncertain comparison never answers unclaimed")
 	servers, _ := possibleSocketOwners(aliasSock, []int{server})
 	require.Equal(t, []int{server}, servers, "the server behind the deleted alias is a possible owner, never ruled out")
+}
+
+// #7562, the mirrored shape: the SERVER, not the client, was bound through
+// the deleted alias. A -S server is bound verbatim — tmux realpaths only a
+// bare or -L socket's base dir — so its recorded path still names the link
+// after the socket file is unlinked and the link removed. The client's
+// spelling through the real dir is certain, so the comparison is a certain
+// mismatch and the server reads Elsewhere, exactly as on master. That is
+// the accepted residual: no spelling can reach that server any more, and
+// SIGUSR1 recreates the socket only at the recorded path, which the deleted
+// link can no longer resolve.
+func TestSocketAbsentProbeRulesOutAServerBoundThroughADeletedLink(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := os.Getenv("TMUX_TMPDIR")
+	real := filepath.Join(dir, "realdir")
+	require.NoError(t, os.Mkdir(real, 0o700))
+	link := filepath.Join(dir, "linkdir")
+	require.NoError(t, os.Symlink(real, link))
+	aliasSock := filepath.Join(link, "sock")
+	server, _ := socketServer(t, aliasSock)
+	t.Cleanup(PinServerProbeForTest(server))
+	t.Cleanup(func() {
+		// socketServer's own cleanup addresses the server through its
+		// recorded path, which the deleted link no longer resolves — kill
+		// it by pid while it is still positively a tmux server instead.
+		if proctree.IsTmuxServer(server) {
+			_ = syscall.Kill(server, syscall.SIGKILL)
+		}
+	})
+
+	realSock := filepath.Join(real, "sock")
+	require.NoError(t, os.Remove(realSock), "the socket file the alias's target holds is unlinked")
+	require.NoError(t, os.Remove(link), "the alias the server bound through is deleted")
+
+	_, err := exec.Command("tmux", "-S", realSock, "-f", "/dev/null", "ls").Output()
+	require.Error(t, err)
+	diagnostic, exitOne := tmuxExitOneDiagnostic(err)
+	require.True(t, exitOne, "fixture: tmux exits 1 on the real-dir spelling: %v", err)
+	require.Equal(t, socketAbsent, classifyNoServerDiagnostic(diagnostic), "fixture: %q", diagnostic)
+	require.True(t, NoServerRunning(err),
+		"a verbatim-bound server's recorded path stays literal through the deleted link: a certain mismatch rules it out, as on master")
+	servers, _ := possibleSocketOwners(realSock, []int{server})
+	require.Empty(t, servers, "no spelling reaches that server and SIGUSR1 cannot recreate its socket: provably elsewhere")
 }

@@ -121,8 +121,14 @@ var serverPIDExited = func(pid int) bool {
 // (#7533): a symlink loop, or a client spelling truncated at a deleted or
 // unclassifiable component that may have been an alias reaching this
 // server's bound path, leaves the server unresolved (#7562). A bound path
-// needs no such benefit: the kernel recorded it resolved, so its own
-// missing components are deleted real directories, never aliases.
+// needs no such benefit: the kernel keeps the spelling bind() was given
+// verbatim (internal/proctree/unixsocket.go), and af launches its servers
+// bare, so tmux realpaths the socket's base dir before binding — a missing
+// component in an af server's recorded path is a deleted real directory,
+// never an alias. A server bound verbatim — through tmux -S, or reached
+// through $TMUX — may carry a deleted alias in its path; treating it as
+// literal is an accepted residual, and it reads Elsewhere exactly as on
+// master.
 func bindingAgainst(socketPath string, paths []string) (socketBinding, string) {
 	want, ok := canonicalSocketPath(socketPath)
 	if !ok {
@@ -256,16 +262,25 @@ func (w socketPathWalk) certain() bool {
 // (got) it already compares unequal to — the only comparison that may rule
 // a live server out (#7533, #7562).
 //
-// got's path is literal even where its own walk truncated: the kernel
-// records the resolved path at bind time, so a missing component in a bound
-// path is a deleted real directory, never an alias. Only want's truncation
-// can hide an alias, and only through rest[0]: if it was a symlink to any
-// dir D, the spelling resolves to resolve(D + "/" + tail), which can land
-// only on a path ending in the tail's last component — a link inside the
-// hidden tree redirects to a path still ending in that name, and a link AT
-// that last component is the residual certain() already accepts. So want
-// can name got only when got's basename equals the tail's last component;
-// on any other unequal pair the mismatch is provable, and a non-plain tail
+// got's path is literal even where its own walk truncated. The kernel
+// keeps the spelling bind() was given verbatim — getsockname,
+// /proc/net/unix and sock_diag all return it unresolved — and af launches
+// its servers bare, so tmux realpaths the socket's base dir before binding
+// (server_scope_linux.go, server_scope_other.go): a missing component in
+// an af server's recorded path is a deleted real directory, never an
+// alias. A server bound verbatim — through tmux -S, or reached through
+// $TMUX — may carry a deleted alias in its path; treating it as literal
+// is the accepted residual alongside the last-component link below, and it
+// reads Elsewhere exactly as on master.
+//
+// Only want's truncation can hide an alias, and only through rest[0]: if
+// it was a symlink to any dir D, the spelling resolves to
+// resolve(D + "/" + tail), which can land only on a path ending in the
+// tail's last component — a link inside the hidden tree redirects to a
+// path still ending in that name, and a link AT that last component is
+// the residual certain() already accepts. So want can name got only when
+// got's basename equals the tail's last component; on any other unequal
+// pair the mismatch is provable, and a non-plain tail
 // ("", ".", "..") is unbounded, hence uncertain.
 func certainSocketMismatch(want, got socketPathWalk) bool {
 	if want.certain() {
