@@ -69,7 +69,7 @@ func (i *Instance) committedConversationLaunch(program, workDir, account, id str
 	if !i.recordNamesAccount(account) {
 		return launch, conversation, false, false, false
 	}
-	lookStarted := time.Now()
+	lookStarted := fsprobe.FlightNow()
 	verdict := i.judgeRecordedClaude(program, workDir, id)
 	nameable := verdict == recordedClaudeBlind && i.claudeStoreNameable(program, workDir)
 	if nameable {
@@ -141,18 +141,17 @@ func (i *Instance) committedConversationFiled(account, id string) bool {
 // bounds — the re-launch just does not wait for them, the way fsprobe leaves
 // any flight that outruns its deadline.
 func (i *Instance) rejudgeRecordedClaude(program, workDir, id string, deadline time.Time) recordedClaudeVerdict {
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
+	if !deadline.After(fsprobe.FlightNow()) {
 		return recordedClaudeBlind
 	}
 	done := make(chan recordedClaudeVerdict, 1)
 	go func() { done <- i.judgeRecordedClaude(program, workDir, id) }()
-	timer := time.NewTimer(remaining)
-	defer timer.Stop()
+	timer, stop := fsprobe.FlightTimer(deadline)
+	defer stop()
 	select {
 	case verdict := <-done:
 		return verdict
-	case <-timer.C:
+	case <-timer:
 		return recordedClaudeBlind
 	}
 }

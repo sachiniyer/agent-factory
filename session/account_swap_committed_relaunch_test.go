@@ -536,32 +536,47 @@ func TestCommittedSwapRelaunchStartsOnItsIDWhenTheStoreCannotBeNamed(t *testing.
 // the bound cannot make the relaunch's two judges cost two bounds. A listing
 // that refused after three quarters of the bound leaves the retry a quarter;
 // the pair ends inside the one bound a single look was allowed, and the blind
-// verdict is the answer the timed-out listing would itself have made.
+// verdict is the answer the timed-out listing would itself have made. The
+// shares are declared on the test's flight clock, never measured against the
+// runner's scheduler (the wall-clock assertion this replaces flaked on a
+// loaded darwin runner, cca335650's red Test (macOS)).
 func TestCommittedSwapRelaunchRejudgesInsideTheFirstLooksBound(t *testing.T) {
 	inst, target, _, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
 	inst.SetAccountSwapReplacementPanesStartedForTest(true)
 	inst.pendingAccountSwap.MissionDeliveryStatus = PromptDelivered
 	const bound = 800 * time.Millisecond
 	t.Cleanup(fsprobe.SetProbeTimeoutForTest(bound))
+	clock := wedgeFlightClock(t)
+	secondListingHeld := make(chan struct{})
+	t.Cleanup(func() { close(secondListingHeld) })
 	var calls atomic.Int32
 	t.Cleanup(fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
-		if strings.HasPrefix(dir, target) {
-			calls.Add(1)
-			time.Sleep(bound - 150*time.Millisecond) // errs only after most of the bound
+		if !strings.HasPrefix(dir, target) {
+			return os.ReadDir(dir)
+		}
+		if calls.Add(1) == 1 {
+			// The first look spends most of its bound before it answers,
+			// all on the flight clock: what the retry has left is declared
+			// here, so the shared deadline is a fact, not a race.
+			clock.Advance(bound - 150*time.Millisecond)
 			return nil, os.ErrPermission
 		}
-		return os.ReadDir(dir)
+		// The retried listing stays out past the shared deadline while its
+		// own bound is nowhere near spent: the re-judge's timer on the same
+		// clock is the only thing that can cut it. A re-judge armed with a
+		// fresh bound instead would wait on this listing forever — which is
+		// the fail-first withinBound names.
+		clock.Advance(200 * time.Millisecond)
+		<-secondListingHeld
+		return nil, os.ErrPermission
 	}))
 
-	started := time.Now()
-	plan := relaunchPlan(t, inst)
-	elapsed := time.Since(started)
+	plan := withinBound(t, func() *accountSwapLaunchPlan { return relaunchPlan(t, inst) })
 	match := resumeArg.FindStringSubmatch(plan.program)
 	require.NotNil(t, match, "the record's proof resumes the committed conversation: %s", plan.program)
 	require.Equal(t, committed, match[1])
-	require.GreaterOrEqual(t, calls.Load(), int32(2), "the retried listing ran")
-	require.Less(t, elapsed, bound*5/4,
-		"the two judges shared the first look's bound: %v for a %v bound", elapsed, bound)
+	require.Equal(t, int32(2), calls.Load(),
+		"the retry ran and its answer never landed — the shared deadline cut it")
 	require.Equal(t, blindCommittedResumeReason,
 		inst.ToInstanceData().PendingAccountSwap.ResumeUnverifiedReason,
 		"the retry cut at the shared deadline is a blind verdict")

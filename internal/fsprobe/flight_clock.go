@@ -49,6 +49,22 @@ func (t wallFlightTimer) Reset(deadline time.Time) bool {
 // production.
 var flightClocks = newSeam[flightClock](wallFlightClock{})
 
+// FlightNow reports the time on the clock every bounded flight's bound runs
+// on. A caller that bounds a retry across flights — an earlier look and its
+// retry sharing one deadline — measures that deadline on this clock, so the
+// look's declared cost comes out of the retry's share on the same scale the
+// flights' own bounds use (#7596's bound test).
+func FlightNow() time.Time { return flightClocks.load().Now() }
+
+// FlightTimer arms a timer for deadline on the clock every bounded flight's
+// bound runs on, returning its channel and a stop. Its deadline is an
+// absolute instant like a flight's, so arming after the clock has passed it
+// fires at once rather than overshooting (#7596's bound test).
+func FlightTimer(deadline time.Time) (<-chan time.Time, func()) {
+	timer := flightClocks.load().NewTimer(deadline)
+	return timer.C(), func() { timer.Stop() }
+}
+
 // ManualClock is the test flightClock SetFlightClockForTest installs: its
 // time passes only when Advance moves it, and a timer fires when Advance
 // carries now to or past its deadline. A stand-in for a slow mount declares
