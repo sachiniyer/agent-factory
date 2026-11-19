@@ -230,7 +230,15 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 	if !supported {
 		return nil
 	}
+	// The gate protects every name whose value can select an identity —
+	// AccountIdentityNames covers the credential and config names plus the
+	// agent's late-environment pins (a repository `.env` or an inherited
+	// routing name could re-point the selected account through those, e.g.
+	// gemini's CODE_ASSIST_ENDPOINT / GOOGLE_*_BASE_URL).
 	overrideNames := accountScopedNames(account.Agent, configVar)
+	for _, name := range AccountIdentityNames(account.Agent) {
+		overrideNames[name] = struct{}{}
+	}
 	for _, selector := range AgentAuthSelectors(account.Agent) {
 		overrideNames[selector] = struct{}{}
 	}

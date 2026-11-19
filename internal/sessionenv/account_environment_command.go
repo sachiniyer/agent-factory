@@ -436,6 +436,46 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		if unsafe || childTailBuriesMutation(words, names, memo) {
 			return nil, false, true
 		}
+	case isAccountCommandName(words[0], "sudo"):
+		// The env-injection launchers — sudo, docker and systemd-run —
+		// get the conservative lexical scan of
+		// account_environment_launchers.go: any argument word that could
+		// assign or name a protected variable refuses, env-file
+		// spellings refuse on sight, and the surviving tail is judged
+		// in place before it returns — a shadowed launcher can exec at
+		// any tail word, so sudo and systemd-run's tails get the
+		// per-position child-tail judgement rather than re-entering
+		// wrapper peeling at command position (where `command -v`
+		// could discard a later `env` as query operands) and rather
+		// than the buried-suffix scan, which would judge operand words
+		// like the `.` in `docker build .` as exec boundaries and
+		// refuse ordinary use. requireCommand is false here: at command
+		// position a denied env spelling refuses on sight, the same
+		// contract the env command itself keeps.
+		var unsafe bool
+		words, unsafe = unwrapSudo(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "docker") ||
+		isAccountCommandName(words[0], "docker-compose"):
+		// docker-compose is the standalone binary shipping the same
+		// compose grammar (run/exec -e, --env-file) — the rule is keyed
+		// by the grammar, so the alias lands the same check.
+		var unsafe bool
+		words, unsafe = unwrapDocker(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "systemd-run") ||
+		isAccountCommandName(words[0], "run0"):
+		// run0 is systemd-run's argv[0] sudo-mode (systemd 256+) — the
+		// same grammar under a second name.
+		var unsafe bool
+		words, unsafe = unwrapSystemdRun(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
 	default:
 		// An unmodeled argv-passthrough wrapper (strace/perf/valgrind/
 		// gdb --args/chrt/numactl/unshare/prlimit/...) runs a child
@@ -541,6 +581,23 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
 		// print mode, which overrides nothing — allowed.
 		return 1, envCallMutatesAccountEnvironment(words[1:], names, true, memo)
+	}
+	if isAccountCommandName(word, "sudo") || isAccountCommandName(word, "docker") ||
+		isAccountCommandName(word, "docker-compose") || isAccountCommandName(word, "systemd-run") ||
+		isAccountCommandName(word, "run0") {
+		// These launchers inject environment through env spellings this
+		// tail scan reads as inert words (sudo's positional NAME=value,
+		// docker's -e/--env and env files, systemd-run's --setenv and
+		// Environment=), so each gets the conservative lexical scan of
+		// account_environment_launchers.go. Judge the suffix at the
+		// launcher's own position with env's requireCommand rule — the
+		// launcher is only a hypothesis here, so `prog sudo
+		// CODEX_HOME=/other` stays admitted the way `prog env
+		// CODEX_HOME=/other` does, while `prog sudo CODEX_HOME=/other
+		// codex` refuses the way the bare command does. A suffix whose
+		// env spellings are absent or allowed answers clean and the scan
+		// continues past it.
+		return 1, launcherSuffixMutates(words, names, memo)
 	}
 	literal, ok := literalShellWord(word)
 	if !ok && strace && stracePrefixMutates(word, names) {
