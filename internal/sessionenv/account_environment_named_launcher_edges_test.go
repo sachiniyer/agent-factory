@@ -1155,6 +1155,19 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch 'pw{sh,} -enc x'`, true},
 		{`watch 'echo {a,b}'`, false},
 		{`watch 'echo co{ab}x'`, false},
+		// Consecutive and nested groups expand fully —
+		// `co{d,x}{e,y}x` reaches `codex`; a group nested
+		// inside a literal or unterminated one still
+		// expands; expansion cut by the variant cap is
+		// unprovable and fails closed.
+		{`watch 'bash -c "env -i /x/co{d,x}{e,y}x"'`, true},
+		{`watch 'co{d,x}{e,y}x'`, true},
+		{`watch 'x{ab}c{o,}dex'`, true},
+		{`watch 'a{co{de,}x}'`, true},
+		{`watch 'x{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}'`, true},
+		{`watch 'x{c{d,}e'`, false},
+		{`watch 'a{co{d,e}x}'`, false},
+		{`watch 'echo a{bc{d,e}f'`, false},
 		// EVERY name a piece spells applies its own
 		// rule — a benign first name never masks a
 		// later one's hidden input. `sudo` is not

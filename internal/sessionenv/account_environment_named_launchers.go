@@ -108,7 +108,14 @@ func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{
 // Agent names and launcher names share this helper so the two lookups
 // cannot diverge.
 func pieceCouldName(piece, name string) bool {
-	for _, variant := range namedPieceVariants(piece) {
+	variants, finished := namedPieceVariants(piece)
+	if !finished {
+		// The alternatives did not finish inside the bound, so
+		// whether some variant spells the name is unprovable —
+		// treated as able to.
+		return true
+	}
+	for _, variant := range variants {
 		if textNamesIdentifierBoundary(variant, name) ||
 			filepath.Base(variant) == name {
 			return true
@@ -125,47 +132,68 @@ func pieceCouldName(piece, name string) bool {
 	return false
 }
 
-// namedVariantCap bounds one piece's brace alternatives — past it the
-// unexpanded remainder is checked as text, which still catches a name
-// at a piece boundary.
+// namedVariantCap bounds one piece's brace alternatives — expansion
+// that cannot finish inside it leaves the piece unprovable.
 const namedVariantCap = 64
 
 // namedPieceVariants expands `{a,b}` brace alternatives — downstream
 // shells that do brace expansion run it before globbing. A `{x..y}`
 // range over-approximates to `*` (every element is one run); a brace
 // group with no top-level comma or range is literal in the real
-// expansion and stays one variant.
-func namedPieceVariants(piece string) []string {
+// expansion and stays one variant. Every variant is expanded to
+// completion — consecutive groups like `co{d,x}{e,y}x` revisit the
+// replaced slot until no alternative remains — and the second return
+// is false when the variant cap cuts expansion short.
+func namedPieceVariants(piece string) ([]string, bool) {
 	variants := []string{piece}
-	for i := 0; i < len(variants) && len(variants) < namedVariantCap; i++ {
+	for i := 0; i < len(variants); i++ {
 		v := variants[i]
-		open := strings.IndexByte(v, '{')
-		if open < 0 {
-			continue
-		}
-		close := namedBraceEnd(v, open)
-		if close < 0 {
-			continue
-		}
-		content := v[open+1 : close]
-		var alts []string
-		if strings.Contains(content, "..") {
-			alts = []string{"*"}
-		} else if top := splitNamedBraceAlts(content); len(top) > 1 {
-			alts = top
-		} else {
-			continue
-		}
-		variants[i] = v[:open] + alts[0] + v[close+1:]
-		for _, alt := range alts[1:] {
-			if len(variants) >= namedVariantCap {
-				variants = append(variants, v)
+		at, expanded := 0, false
+		for at < len(v) {
+			open := strings.IndexByte(v[at:], '{')
+			if open < 0 {
 				break
 			}
-			variants = append(variants, v[:open]+alt+v[close+1:])
+			open += at
+			close := namedBraceEnd(v, open)
+			if close < 0 {
+				// Unterminated `{` is literal, but a group
+				// nested inside it can still expand.
+				at = open + 1
+				continue
+			}
+			content := v[open+1 : close]
+			var alts []string
+			if strings.Contains(content, "..") {
+				alts = []string{"*"}
+			} else if top := splitNamedBraceAlts(content); len(top) > 1 {
+				alts = top
+			}
+			if alts == nil {
+				// A comma-less group is literal in the real
+				// expansion, but groups nested inside it are
+				// not — descend past the `{` only.
+				at = open + 1
+				continue
+			}
+			variants[i] = v[:open] + alts[0] + v[close+1:]
+			for _, alt := range alts[1:] {
+				if len(variants) >= namedVariantCap {
+					return variants, false
+				}
+				variants = append(variants, v[:open]+alt+v[close+1:])
+			}
+			expanded = true
+			break
 		}
+		if !expanded {
+			continue
+		}
+		// The replaced variant may still carry a group — re-examine
+		// it before advancing so the first alternative expands too.
+		i--
 	}
-	return variants
+	return variants, true
 }
 
 // namedBraceEnd returns the index of the `}` matching the `{` at i,
