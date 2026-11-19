@@ -129,7 +129,7 @@ func TestDrainStandsWatchersDownBeforeItCanHang(t *testing.T) {
 			close(hung)
 			<-release
 			return nil
-		}, &controlClosed, make(chan struct{}), &workers, 0)
+		}, &controlClosed, make(chan struct{}), &workers)
 	}()
 	t.Cleanup(func() {
 		close(release)

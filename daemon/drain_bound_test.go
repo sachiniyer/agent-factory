@@ -50,7 +50,7 @@ func runDrain(t *testing.T, limit time.Duration, manager *Manager, closeHTTP, cl
 	done := make(chan bool, 1)
 	start := time.Now()
 	go func() {
-		done <- drainDaemon(manager, nil, closeHTTP, closeControl, &controlClosed, make(chan struct{}), workers, 0)
+		done <- drainDaemon(manager, nil, closeHTTP, closeControl, &controlClosed, make(chan struct{}), workers)
 	}()
 	select {
 	case joined = <-done:

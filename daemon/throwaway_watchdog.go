@@ -43,6 +43,7 @@ func armThrowawayWatchdog(m *throwawaysandbox.Marker, fire chan struct{}) func()
 	// package var a test may already have restored (#7620).
 	now, checkInterval := throwawayNowFn, throwawayCheckInterval
 	scopeIDs, ownerLookup := throwawayScopeIDsFn, throwawayLookupFn
+	settleBound := throwawayOwnerSettleBound
 	go func() {
 		defer close(done)
 		wait := m.Deadline().Sub(now())
@@ -99,7 +100,7 @@ func armThrowawayWatchdog(m *throwawaysandbox.Marker, fire chan struct{}) func()
 							expire(fmt.Sprintf("declared owner pid %d is gone", m.OwnerPID))
 							return
 						}
-					case <-time.After(throwawayOwnerSettleBound):
+					case <-time.After(settleBound):
 					}
 				}
 				// A deadline that landed during the last look is still an

@@ -79,12 +79,6 @@ var (
 // wedged server cannot stall the unwind.
 const throwawayKillTimeout = 3 * time.Second
 
-// throwawayTeardownBound is the marked-home teardown's known worst case:
-// KillEscalating's grace and term wait for the member processes, plus one
-// bounded tmux kill-server. A marked daemon reserves it inside the stop
-// deadline by shrinking the drain (#7620 item 4).
-var throwawayTeardownBound = throwawayReapGrace + throwawayReapTermWait + throwawayKillTimeout
-
 // throwawayOwnerSettleBound caps the watchdog's one last owner look at stop
 // (#7620 R2): long enough for a healthy kern.proc read, short enough that a
 // wedged one still resolves the decision as "never will" quickly.
