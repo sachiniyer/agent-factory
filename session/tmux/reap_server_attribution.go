@@ -249,8 +249,9 @@ func (s *socketCompareFlightSet) inFlightCount() int {
 // recorded one the way the socket-binding code does (#7533): canonicalized
 // kernel-walk equality or the same-directory fallback. comparable is false
 // when either side cannot be made certain — a relative path, a symlink loop,
-// or a filesystem read that could not answer inside socketCompareBudget —
-// and nothing may be ruled out from it.
+// a walk truncated at a component that may have been an alias of the other
+// (#7562), or a filesystem read that could not answer inside
+// socketCompareBudget — and nothing may be ruled out from it.
 func sameRecordedSocket(envSocket, recordedSocket string) (same, comparable bool) {
 	if !filepath.IsAbs(envSocket) || !filepath.IsAbs(recordedSocket) {
 		return false, false
@@ -278,7 +279,9 @@ func sameRecordedSocket(envSocket, recordedSocket string) (same, comparable bool
 
 // socketCompareWalk is the unbounded filesystem walk sameRecordedSocket
 // bounds — a package var so the deadline test can stage a compare that never
-// answers.
+// answers. comparable is false unless the pair PROVABLY agrees or provably
+// differs: a walk truncated at a component that may have been an alias of
+// the other spelling proves neither (#7562).
 var socketCompareWalk = func(envSocket, recordedSocket string) (same, comparable bool) {
 	// tmux renders control and non-UTF-8 bytes in format output as \NNN
 	// octal text — #{socket_path} prints a raw 0x01 as the four characters
@@ -298,8 +301,15 @@ var socketCompareWalk = func(envSocket, recordedSocket string) (same, comparable
 	if !okA || !okB {
 		return false, false
 	}
-	if got == want || sameSocketDir(envSocket, recordedSocket) {
+	if got.path == want.path || sameSocketDir(envSocket, recordedSocket) {
 		return true, true
+	}
+	// The env spelling is the side a deleted component may have aliased; the
+	// recorded socket is af's own record of where the server bound — af's
+	// servers launch bare, so tmux realpath'd the socket's base dir at bind
+	// and the record is literal.
+	if !certainSocketMismatch(got, want) {
+		return false, false
 	}
 	return false, true
 }
