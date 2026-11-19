@@ -11,12 +11,17 @@ import (
 // afModulePath is the Go module path a kernel-attested executable must carry
 // in its build info to count as an agent-factory binary (#7491). Any build of
 // this repo — the installed af, a source-built agent-factory, a test binary —
-// carries it. This is a guard against RENAMING, not proof of identity: a
-// foreign executable renamed to "af" fails because rename cannot rewrite the
-// bytes, but the path is chosen at build time — a binary purpose-built with
-// our module in its go.mod carries it too (#7494 item 3). That residual cost
-// floor — building or borrowing a real af binary — is the one #7484's design
-// already accepts; every cheaper forgery (rename, argv, comm) now blocks.
+// carries it; so does a binary purpose-built with our module in its go.mod,
+// because the path is chosen at build time (#7494 item 3).
+//
+// The model, so the residual doesn't keep being filed as a security gap
+// (#7561): this check guards against argv, rename and pid-reuse MISTAKES —
+// the ways a daemon claim lands on the wrong process — never against a
+// forger. A cross-uid process is always unverified (the kernel refuses the
+// read, EPERM), and a same-uid adversary is out of scope: it can attest by
+// exec'ing a real af build, and a forged positive grants that uid nothing
+// it cannot already do — no credential, socket trust or privilege, only a
+// reaper's classification of its own subtree.
 const afModulePath = "github.com/sachiniyer/agent-factory"
 
 // exeAttestBudget bounds the whole attestation — the kernel exe read, the
@@ -27,9 +32,14 @@ const afModulePath = "github.com/sachiniyer/agent-factory"
 var exeAttestBudget = 2 * time.Second
 
 // ExeAttestsAF reports whether p's kernel-attested executable is a build of
-// this repo's agent-factory module — the af-daemon identity a process cannot
-// write (#7491 item 1). argv alone still protects a claimant from signals;
-// this is what a claim needs before it may also authorize a cleanup verdict:
+// this repo's agent-factory module — the af-daemon identity a bare claim
+// cannot fake (#7491 item 1). argv alone still protects a claimant from
+// signals; this is what a claim needs before it may also authorize a cleanup
+// verdict. Its scope is mistakes, not a forger (#7561): argv, rename and
+// pid-reuse are what it settles; a cross-uid process is always unverified
+// (EPERM); and a same-uid process that exec'd a real af build attests
+// honestly — out of scope, since the verdict grants that uid nothing it
+// could not already do.
 //
 //   - the executable is opened on its INODE, not re-resolved by path:
 //     /proc/<pid>/exe opens the running image even after the name is

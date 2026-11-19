@@ -13,8 +13,10 @@ import (
 // The PROTECTED SET: which pids in a captured tree a reap must never signal,
 // and the ancestry classifier that places them. The verdict each protected
 // pid carries is two-dimensional: every exclusion spares the process from
-// signals, but only a POSITIVE placement — identity a carrier cannot write —
-// may also keep the close it spared it from going Unknown (#7491 item 1).
+// signals, but only a POSITIVE placement — identity a bare claim cannot
+// fake — may also keep the close it spared it from going Unknown (#7491 item
+// 1; a same-uid process attesting by exec'ing a real af build is out of
+// scope — the verdict grants it nothing it cannot already do, #7561).
 
 // protectedVerdict is why a protected pid is excluded, and whether the
 // placement is POSITIVE — proven foreign: excluded, named, and NOT a
@@ -299,7 +301,9 @@ const (
 	afDaemonNot afDaemonVerdict = iota
 	// afDaemonIs is the VERIFIED verdict: argv claims the daemon AND the
 	// kernel-attested executable is an af build. Only this verdict may
-	// authorize a cleanup — it is the one a process cannot write (#7491).
+	// authorize a cleanup — it is the one a bare claim cannot fake (#7491;
+	// a same-uid exec of a real af build attests honestly, out of scope
+	// per #7561).
 	afDaemonIs
 	// afDaemonUnverified is the CLAIMED verdict: argv names an af daemon
 	// but the kernel executable does not attest it. Still never signalled
