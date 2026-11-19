@@ -29,6 +29,12 @@ type ServerIdentity struct {
 	StartID   uint64
 	SessionID string
 	PIDNS     string
+	// provenHere marks kernel fields a proof in THIS process established —
+	// set only by resolveServerIdentity inside this package, so a record
+	// seeded from a persisted row can never carry it: the row can claim a
+	// namespace and a StartID, but it cannot claim the proof (Codex on
+	// #7581). noteServerIdentity's carry-forward requires it.
+	provenHere bool
 }
 
 // valid reports whether the identity can compare a carrier at all. Socket and

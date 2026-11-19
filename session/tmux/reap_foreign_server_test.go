@@ -490,6 +490,14 @@ func TestVanishedSessionSweep_RealTmuxForeignServerCarrier(t *testing.T) {
 	require.NoError(t, err)
 	own := resolveServerIdentity(ServerIdentity{Socket: ownSock, PID: ownPID}, tmuxCommandTimeout)
 	require.True(t, own.valid(), "a real server answers with a complete identity")
+	// The stamp must PROVE the recorded pid on the live socket — the real
+	// per-socket binding read, on this OS (#7581 R1). If it silently fails
+	// here, every record is unproven, every pid compare is undecidable,
+	// and #7550's foreign-sparing is OFF with the rest of CI green.
+	selfNS, err := proctree.PIDNamespaceID()
+	require.NoError(t, err)
+	require.True(t, own.pidProvenHere(selfNS),
+		"a live-server stamp is pidProvenHere — the proof ran on this OS's real listener read")
 
 	// The FOREIGN server — the user's own tmux started inside a pane, the
 	// #7469 shape. Its pane exports the AF markers and spawns a carrier in a
@@ -526,13 +534,13 @@ func TestVanishedSessionSweep_RealTmuxForeignServerCarrier(t *testing.T) {
 	tmuxEnv, hasTmux := processEnvValue(environ, tmuxEnvVar)
 	require.True(t, hasTmux, "the detached carrier still holds its pane's TMUX tuple")
 	require.Equal(t, serverVerdictForeign,
-		tmuxEnvServerVerdict(tmuxEnv, own, own.PIDNS),
+		tmuxEnvServerVerdict(tmuxEnv, own, selfNS),
 		"env channel: a foreign socket in TMUX")
 	require.Equal(t, serverVerdictForeign,
-		ptyFdServerVerdict(carrier.PID, own, snap, owners, own.PIDNS),
+		ptyFdServerVerdict(carrier.PID, own, snap, owners, selfNS),
 		"pty channel: the carrier's slave is mastered by the foreign server")
 	require.Equal(t, serverVerdictForeign,
-		carrierServerVerdict(carrier, environ, own, snap, owners, own.PIDNS),
+		carrierServerVerdict(carrier, environ, own, snap, owners, selfNS),
 		"real evidence attributes the carrier to the foreign server")
 
 	// And the outcome: the carrier is excluded and alive while a proven

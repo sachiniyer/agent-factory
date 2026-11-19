@@ -458,13 +458,112 @@ func TestResolveServerIdentity_WedgedProofSharesOneWorker(t *testing.T) {
 		"the wedged proof holds exactly one flight")
 
 	// Once the walk lands, the next stamp pays a fresh flight that answers
-	// at once — the record proves.
+	// at once — the record proves. The landed worker unpublishes first: a
+	// stamp catching the spent flight's tail reads the key's ONE deadline
+	// as already paid and returns unproven on the spot (Codex on #7581).
 	releaseRead()
+	require.Eventually(t, func() bool {
+		return serverProofFlights.inFlightCount() == 0
+	}, 5*time.Second, time.Millisecond, "the landed worker unpublishes its key")
 	got := resolveServerIdentity(id, 2*time.Second)
 	ns, _ := proctree.PIDNamespaceID()
 	require.Equal(t, ns, got.PIDNS, "the landed proof reaches the next stamp")
 	require.Equal(t, 0, serverProofFlights.inFlightCount(),
 		"a finished flight drops its key")
+}
+
+// The key pays ONE deadline total (Codex on #7581): a stamp joining a
+// flight whose deadline is already spent returns unproven at once — a
+// restore batch stamping the same server session after session must not
+// serialize a fresh bound per session.
+func TestResolveServerIdentity_JoinsPayNoSecondDeadline(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRead := func() { releaseOnce.Do(func() { close(release) }) }
+	oldBinding := tmuxServerSocketBinding
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		<-release
+		return socketBindingBound, "/bound/here"
+	}
+	t.Cleanup(func() {
+		tmuxServerSocketBinding = oldBinding
+		releaseRead()
+		require.Eventually(t, func() bool {
+			return serverProofFlights.inFlightCount() == 0
+		}, 5*time.Second, time.Millisecond, "released flights must drain")
+	})
+
+	sock := filepath.Join(t.TempDir(), "af.sock")
+	id := ServerIdentity{Socket: sock, PID: os.Getpid()}
+	start := time.Now()
+	first := resolveServerIdentity(id, 300*time.Millisecond)
+	require.Empty(t, first.PIDNS, "the leader pays its deadline and is unproven")
+
+	join := time.Now()
+	second := resolveServerIdentity(id, 300*time.Millisecond)
+	require.Empty(t, second.PIDNS)
+	require.Less(t, time.Since(join), 150*time.Millisecond,
+		"a stamp past the key's ONE deadline does not pay a second one")
+	require.Less(t, time.Since(start), 500*time.Millisecond,
+		"two stamps on one key cost one deadline, not two")
+}
+
+// The binding proves the pid AT READ TIME: the instance must agree before
+// and after the walk, or a server restart recycled the recorded pid
+// mid-proof — and the replacement's StartID must never stamp beside the
+// dead server's binding (Codex on #7581).
+func TestResolveServerIdentity_RecycledMidProofIsUnproven(t *testing.T) {
+	oldBinding, oldLookup := tmuxServerSocketBinding, serverProcLookup
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		return socketBindingBound, "/bound/here"
+	}
+	var lookups atomic.Int64
+	serverProcLookup = func(pid int) (proctree.Process, error) {
+		if lookups.Add(1) == 1 {
+			return proctree.Process{PID: pid, StartID: 111}, nil // the dead server
+		}
+		return proctree.Process{PID: pid, StartID: 222}, nil // its replacement
+	}
+	t.Cleanup(func() {
+		tmuxServerSocketBinding, serverProcLookup = oldBinding, oldLookup
+	})
+
+	id := resolveServerIdentity(ServerIdentity{Socket: "/tmp/af.sock", PID: 4242}, tmuxCommandTimeout)
+	require.Equal(t, int64(2), lookups.Load(), "the instance is read on both sides of the binding")
+	require.Zero(t, id.StartID, "a pid recycled mid-proof stamps no StartID")
+	require.Empty(t, id.PIDNS, "a pid recycled mid-proof claims no namespace")
+}
+
+// A seeded record carries a persisted CLAIM, never a this-process proof:
+// the first live stamp of the same tuple re-proves within its budget —
+// carry-forward is for proofs THIS process made, and a #7550-era row can
+// persist PIDNS=self beside another process's StartID (Codex on #7581).
+func TestNoteServerIdentity_SeededRecordReproves(t *testing.T) {
+	ts := &TmuxSession{}
+	calls := 0
+	oldBinding := tmuxServerSocketBinding
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		calls++
+		return socketBindingBound, "/bound/here"
+	}
+	t.Cleanup(func() { tmuxServerSocketBinding = oldBinding })
+
+	ns, _ := proctree.PIDNamespaceID()
+	p, err := proctree.Lookup(os.Getpid())
+	require.NoError(t, err)
+	ts.SeedServerEvidence("/tmp/af.sock", os.Getpid(), p.StartID+99, "$7", ns)
+
+	raw := ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid(), SessionID: "$7"}
+	ts.noteServerIdentity(raw, tmuxCommandTimeout)
+	require.Equal(t, 1, calls, "a seeded tuple re-proves — the row's claim is no this-process proof")
+	got, ok := ts.ServerEvidence()
+	require.True(t, ok)
+	require.Equal(t, p.StartID, got.StartID, "the stamp's own proof replaces the seeded StartID")
+	require.Equal(t, ns, got.PIDNS)
+
+	// And the landed this-process proof now carries forward — paid once.
+	ts.noteServerIdentity(raw, tmuxCommandTimeout)
+	require.Equal(t, 1, calls, "the landed proof carries forward")
 }
 
 // The namespace proof is read-only against the REAL reader too: a pid the
@@ -559,10 +658,11 @@ func TestNoteServerIdentity_RecycledInstanceReproves(t *testing.T) {
 	}
 	t.Cleanup(func() { tmuxServerSocketBinding = oldBinding })
 
-	// The standing proof belongs to a DEAD instance of this pid.
+	// The standing proof belongs to a DEAD instance of this pid —
+	// provenHere set, as a this-process proof would have left it.
 	dead := &ServerIdentity{
 		Socket: "/tmp/af.sock", PID: os.Getpid(), SessionID: "$7",
-		StartID: p.StartID + 1, PIDNS: ns,
+		StartID: p.StartID + 1, PIDNS: ns, provenHere: true,
 	}
 	ts.serverEvidence.Store(dead)
 
