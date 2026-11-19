@@ -37,7 +37,7 @@ func SweepStaleSetupPayloads(keep map[string]bool) {
 	// homes) — deleting "stale" entries under the link would empty the shared
 	// TARGET, taking other homes' payloads with it. Enumeration and removal
 	// then stay confined to the verified directory through the opened handle.
-	root, rootPath, err := openVerifiedStagingRoot(home)
+	root, rootPath, err := openVerifiedStagingRoot(home, setupStagingRootName)
 	switch {
 	case err != nil:
 		log.WarningLog.Printf("setup payload sweep: refusing to run: %s: %v", rootPath, err)

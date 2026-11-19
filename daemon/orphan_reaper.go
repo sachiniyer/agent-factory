@@ -31,6 +31,15 @@ var sweepStaleTunnelSocketDirs = session.SweepStaleTunnelSocketDirs
 // consumes. Package-level so tests can stub the filesystem work.
 var sweepStaleSetupPayloads = session.SweepStaleSetupPayloads
 
+// sweepOrphanedStagingDirs removes docker-staging/<slug>-<hex> dirs no live
+// session record claims, once no container on this engine can still bind them
+// (#7590). It runs in the same deferred pass, under the same createSweepMu
+// admission barrier and skipped-repos gate: its keep sets are built in the
+// same breath as the container sweep's protected slugs, so a dir a mid-create
+// session just staged is protected by its slug exactly as its container would
+// be. Package-level so tests can stub the docker and filesystem work.
+var sweepOrphanedStagingDirs = session.SweepOrphanedStagingDirs
+
 // stopSandboxTunnels stops every live sandbox tunnel this daemon spawned.
 // Registered as a RunDaemon defer at manager construction so every exit path —
 // SIGTERM, the Shutdown RPC, an early warm-up return — runs it. A session's own
@@ -158,9 +167,19 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 	// exactly when it is not.
 	titles := make([]string, 0, len(manager.instances)+len(manager.pendingCreates))
 	keepIDs := make(map[string]bool, len(manager.instances)+len(manager.pendingCreates))
+	keepStaging := make(map[string]bool)
 	for _, inst := range manager.instances {
 		titles = append(titles, inst.Title)
 		keepIDs[inst.ID] = true
+		// The docker-staging keep set is per NAME, not per slug: a tombstoned
+		// row still owns its <slug>-<hex> dir through the teardown handle,
+		// while a slug alone cannot name which of two same-title provisions
+		// staged it. Rows whose cleanup carries no staging claim contribute
+		// nothing — a dir they never recorded is the orphan this pass exists
+		// to reclaim.
+		if name := inst.DockerStagingDirClaim(); name != "" {
+			keepStaging[name] = true
+		}
 	}
 	for key, pending := range manager.pendingCreates {
 		keepIDs[pending.ID] = true
@@ -176,6 +195,11 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 	log.InfoLog.Printf("orphan sweep: running the deferred destructive pass; every skipped repo's instances.json now parses AND its rows re-materialize, so the protected set is complete.")
 	manager.mu.Unlock()
 	sweepOrphanContainers(homeID, slugs)
+	// Order matters: the container sweep runs FIRST so a same-slug orphan
+	// container is already gone when the staging sweep lists — a dir whose
+	// binder was just reaped is reclaimed in the same pass instead of waiting
+	// out a spared cycle (#7590).
+	sweepOrphanedStagingDirs(homeID, keepStaging, slugs)
 	sweepStaleSetupPayloads(keepIDs)
 }
 
