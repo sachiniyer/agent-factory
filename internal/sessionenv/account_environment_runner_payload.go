@@ -24,7 +24,7 @@ func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailM
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo, nil, false) {
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
 	if suResetsEnvironment(words) {
@@ -59,7 +59,7 @@ func unwrapCommandRunner(words []*syntax.Word, names map[string]struct{}, memo o
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo, nil, false) {
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
 	return nil, false

@@ -36,7 +36,7 @@ func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]str
 	if writer >= 0 && !allLiteralEnvNames(words[writer+1:]) {
 		return nil, true
 	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo, nil, false) {
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
 	return nil, false
@@ -76,7 +76,7 @@ func unwrapDbusUpdateActivationEnvironment(words []*syntax.Word, names map[strin
 		// spells.
 		return nil, true
 	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo, nil, false) {
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
 	return nil, false

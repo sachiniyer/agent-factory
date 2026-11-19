@@ -142,7 +142,7 @@ func TestValidateAccountEnvironmentCommand_RefusesPositionalEnvInjectionAssignme
 		"systemctl --user unset-environment CODEX_HOME",
 		"dbus-update-activation-environment CODEX_HOME=/o",
 		"dbus-update-activation-environment --systemd CODEX_HOME",
-		// …and the additional launcher grammars item 2 named: podman/
+		// …and the additional launcher grammars #7589 named: podman/
 		// nerdctl's docker spellings, bwrap's --setenv/--unsetenv, su's
 		// -c payload, script's -c script word — plus buried forms under
 		// modeled wrappers and hypothetical suffixes.
@@ -297,10 +297,10 @@ func TestValidateAccountEnvironmentCommand_AdmitsLauncherOrdinaryUse(t *testing.
 		"systemd-run --setenv PORT=3000 make",
 		"run0 make",
 		"run0 -p Description=x make",
-		// The new item-2 launchers: a container's own environment is not
-		// a pane reset, su without the login dash preserves the caller's
-		// environment, bwrap without --clearenv does too, and a non-
-		// environment systemctl command writes nothing.
+		// The newly modelled launchers: a container's own environment
+		// is not a pane reset, su without the login dash preserves the
+		// caller's environment, bwrap without --clearenv does too, and
+		// a non-environment systemctl command writes nothing.
 		"podman run -e PORT=3000 img codex",
 		"nerdctl run img",
 		"bwrap codex",
@@ -836,7 +836,7 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"prog systemctl --user set-environment CODEX_HOME=/o", true},
 		{"prog dbus-update-activation-environment CODEX_HOME=/o", true},
 
-		// #7589 item 2 — more launchers, judged by the same lexical cut:
+		// #7589's wider launcher set, judged by the same lexical cut:
 		// podman/nerdctl ship docker's grammar (-e/--env/env-file), bwrap
 		// carries --setenv NAME VALUE and --clearenv, su carries -c
 		// script payloads and the login reset, and script's -c payload is
@@ -1018,65 +1018,54 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"prog su -l -c 'codex' work", true},
 		{"docker run busybox codex", false},
 
-		// #7589 item 2's narrowed name-word rule for unrecognized
-		// launcher tails: `NAME=<nonempty>` refuses once a command-
-		// capable word follows it; a bare name (including `NAME=` with an
-		// empty tail) refuses only when a VALUE word follows AND a
-		// command-capable word follows that — the `bwrap --setenv NAME
-		// VALUE` shape. A name that only names stays admitted, and a
-		// denied spelling with nothing after it admits the way env's
-		// print mode does.
-		{"prog CODEX_HOME=/o codex", true},
-		// A bare name after a NON-option head is a search-pattern shape —
-		// no dash option precedes it, so the operand rule doesn't fire.
+		// An unrecognized command's tail is judged exactly as on master:
+		// #7589's item-2 (protected-name words in unmodelled tails) moved
+		// to #7603, so a `prog …` line carrying a protected NAME, a
+		// NAME=value word, or a builtin-spelled word admits the way it
+		// always has — the walk reads them as inert data.
+		{"prog CODEX_HOME=/o codex", false},
 		{"prog CODEX_HOME /o codex", false},
 		{"prog CODEX_HOME=/o", false},
 		{"prog CODEX_HOME /o", false},
 		{"prog CODEX_HOME", false},
-		{"prog bwrap --setenv CODEX_HOME /o codex", true},
-		// Under the launcher-suffix hypothesis `/o` is already the
-		// command word (bwrap's --setenv takes NAME VALUE COMMAND), so
-		// the denied name reaches a command and refuses — unlike the
-		// item-2 bare-name rule above, which needs a value AND a later
-		// command word.
-		{"prog bwrap --setenv CODEX_HOME /o", true},
-		{"echo CODEX_HOME=/x a", true},
+		{"prog -e CODEX_HOME /o codex", false},
+		{"prog --setenv CODEX_HOME /o codex", false},
+		{"prog --setenv CODEX_HOME /o", false},
+		{"prog eval 'export CODEX_\"\"HOME=/other; codex'", false},
+		{"prog unset CODEX_HOME", false},
+		{"prog docker eval 'export CODEX_\"\"HOME=/other; codex'", false},
+		{"prog -e CODEX_HOME $(z) x", false},
+		{"prog --env-file f codex", false},
+		{"echo CODEX_HOME=/x a", false},
 		{"echo CODEX_HOME", false},
 		{"rg CODEX_HOME src/", false},
 		{"grep -r CLAUDE_CONFIG_DIR .", false},
-		// Independent review R4: a bare protected name is a re-root only
-		// as the NAME operand of an env-setting option — a dash option
-		// directly before AND a non-dash value directly after. A search
-		// pattern followed by paths or more options is inert data.
 		{"rg CODEX_HOME internal/ session/", false},
 		{"grep -rn OPENAI_API_KEY src docs", false},
 		{"git grep CODEX_HOME -- '*.go'", false},
-		{"grep -rn CODEX_HOME --include=*.go .", false},
 		{"rg CODEX_HOME -t go", false},
 		{"git log -S CODEX_HOME -- internal", false},
 		{"gh issue list --search CODEX_HOME", false},
-		// Short shell-startup names are ordinary tool variables outside
-		// a launcher — `ENV=prod` is a make variable, `ENV`/`PS1` bare
-		// words are search patterns.
 		{"make ENV=prod test", false},
 		{"rg ENV Makefile scripts", false},
 		{"grep PS1 .bashrc .zshrc", false},
-		// The option-operand shape still refuses: a lone option (-x or
-		// --xxx) directly before the name and a non-dash value after.
-		{"prog -e CODEX_HOME /o codex", true},
-		{"prog --setenv CODEX_HOME /o codex", true},
-		{"prog --setenv CODEX_HOME /o", true},
-		// A cluster (-rn) is not one option; a lone short flag still
-		// counts (accepted over-refusal — `-r`/`-n` before a bare name
-		// reads as an operand-carrying option on an unknown command).
+		{"make CODEX_HOME=1 install", false},
 		{"grep -rn CODEX_HOME dir", false},
-		{"grep -r CODEX_HOME dir", true},
-		{"grep -n CODEX_HOME file", true},
-		// The [[ ]] compare's `]]` is an ordinary argv word to the POSIX
-		// parse, so a literal `NAME=<nonempty>` right operand trips the
-		// rule — the accepted over-refusal the arithmetic/cmdsubst admit
-		// table now documents.
-		{"[[ $(echo CODEX_HOME=1) == \"CODEX_HOME=1\" ]]; codex", true},
+		{"grep -r CODEX_HOME dir", false},
+		{"grep -n CODEX_HOME file", false},
+		{"[[ $(echo CODEX_HOME=1) == \"CODEX_HOME=1\" ]]; codex", false},
+		// Two master refusals survive in unmodelled tails for reasons
+		// that are NOT item-2 judgements: a buried MODELLED launcher
+		// (bwrap was newly modelled this PR; docker was already) gets
+		// its own arm — `prog bwrap --setenv CODEX_HOME /o` is an
+		// intended item-1 refusal — and an unprovable word lets the
+		// trailing `.` sit at env's hypothesized command position,
+		// where master's unconditional source-builtin refusal fires.
+		{"prog bwrap --setenv CODEX_HOME /o codex", true},
+		{"prog bwrap --setenv CODEX_HOME /o", true},
+		{"prog docker compose exec -e CODEX_HOME=/o svc x", true},
+		{"grep -rn CODEX_HOME --include=*.go .", true},
+		{"prog docker compose run -e PORT=3000 svc codex", false},
 
 		// Hidden-input flags refuse outright — argv or environment read
 		// from a file or fd is outside the VISIBLE command line (Codex
@@ -1105,20 +1094,6 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"su -l -c -c 'co\"\"dex' root", true},
 		{"script -O -c 'env CODEX_HOME=/o codex'", true},
 		{"script -c -c 'echo hi' out.log", false},
-		// The tail memo keys on (word, strace, builtins): a launcher
-		// arm's scan caches its suffix verdicts WITHOUT the buried-
-		// builtin judgement, and the enclosing unrecognized tail must
-		// not reuse them — the `eval` payload's protected export still
-		// executes under the shadowed-wrapper dispatch (Codex P2).
-		{"prog eval 'export CODEX_\"\"HOME=/other; codex'", true},
-		{"prog docker eval 'export CODEX_\"\"HOME=/other; codex'", true},
-		{"prog unset CODEX_HOME", true},
-		// `exec` is a dispatching-builtin name, so under the shadowed-
-		// prog reading it can BE prog's builtin — a protected export
-		// behind it still refuses even inside a docker-compose tail;
-		// `run` is no builtin, so the ordinary form admits.
-		{"prog docker compose exec -e CODEX_HOME=/o svc x", true},
-		{"prog docker compose run -e PORT=3000 svc codex", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)

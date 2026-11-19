@@ -255,7 +255,7 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 	// is left for the caller to judge. podman and nerdctl share docker's
 	// CLI grammar and take this arm too; a container's environment is
 	// image-defined, not a reset of the pane's, so they get no reset arm.
-	if wrapperTailHidesAccountAssignment(words, false, names, memo, nil, false) {
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
 	return nil, false
@@ -553,12 +553,14 @@ const (
 	wordProtectedName
 )
 
-// unrecognizedWordProtectedKind classifies a literal word by the rule in
-// wrapperTailWordHidesAccountAssignment: a protected name at an
-// identifier boundary that ENDS its `=` segment and is followed by more
-// text assigns the variable; any other boundary match only names it. The
-// second result is the name that matched, so the tail judge can give the
-// shell-startup names (ENV, PS1, BASH_ENV…) their own verdict class.
+// unrecognizedWordProtectedKind classifies a literal word by what a
+// protected name inside it can DO: a protected name at an identifier
+// boundary that ENDS its `=` segment and is followed by more text assigns
+// the variable; any other boundary match only names it. The env-source
+// writer arms use it — `systemctl`, `dbus-update-activation-environment`
+// and their aliases refuse any literal word that names a protected
+// variable this way (a writer's operand IS the environment write). The
+// second result is the name that matched.
 func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) (int, string) {
 	kind := wordProtectedNone
 	matched := ""

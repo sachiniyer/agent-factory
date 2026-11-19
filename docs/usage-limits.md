@@ -390,19 +390,21 @@ will not reach the child's environment.
 A launcher buried inside another command's argv (`nohup sudo
 CODEX_HOME=/other codex`, `docker build env CODEX_HOME=/other codex`) is
 judged the same way the bare command is: the ordinary mutation scan runs over
-the launcher's whole tail, so a buried `env`, `nohup`, or nested launcher still
-refuses. And a command `af` does not model at all gets the same lexical cut in
-its tail, narrowed so ordinary prose stays admitted: a literal
-`NAME=<nonempty>` word refuses once a command-capable word follows it
-(`prog CODEX_HOME=/o codex`), and a bare protected name refuses only as the
-NAME operand of an env-setting option — a dash option directly before it AND
-a non-dash value directly after (`prog --setenv CODEX_HOME /o codex`,
-`prog -e CODEX_HOME /o codex`). A name that only names is inert data, and a
-search pattern stays admitted however many paths or options follow — `rg
-CODEX_HOME src/`, `grep -r CLAUDE_CONFIG_DIR .`, `rg OPENAI_API_KEY= .`,
-`grep -rn CODEX_HOME --include=*.go .`, `git log -S CODEX_HOME -- internal`,
-`gh issue list --search CODEX_HOME`, `make ENV=prod test` and `grep PS1
-.bashrc .zshrc` all run.
+the launcher's whole tail, so a buried `env`, `nohup`, or modelled launcher
+still refuses (`prog sudo CODEX_HOME=/other codex`, `prog bwrap --setenv
+CODEX_HOME /o codex`, `prog systemctl --user set-environment CODEX_HOME=/o`).
+A command `af` does not model at all is judged exactly as it always has been —
+the walk that has always scanned its tail for nested `env` invocations,
+unprovable words, option-carried assignments and shell forms, and nothing
+more. A protected NAME, a `NAME=value` token or a builtin-spelled word in
+such a tail is inert data: `prog CODEX_HOME=/o codex`, `echo CODEX_HOME=/x
+a`, `make CODEX_HOME=1 install`, `prog --setenv CODEX_HOME /o codex`,
+`rg CODEX_HOME internal/ session/`, `grep -rn OPENAI_API_KEY src docs`,
+`git log -S CODEX_HOME -- internal`, `gh issue list --search CODEX_HOME`,
+`make ENV=prod test` and `grep PS1 .bashrc .zshrc` all run, exactly as on
+master. Closing that gap — protected-name words inside commands the gate
+does not model — is #7603's job, planned against a common-command corpus
+pinned to master's verdicts.
 
 ### Docker and backend boundaries
 
