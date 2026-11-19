@@ -90,7 +90,39 @@ func TestIssue7585QuestionPaintedWithNoTitleHolds(t *testing.T) {
 //   - Each step of the sentence's paint, quoted above a composer drawn last,
 //     reads clear and gets no key: a working agent frames its composer with
 //     rules, so the reader declines a sentence with one below it.
+//   - A user's draft quoting the sentence, typed one character at a time
+//     until the question is whole, reads clear and gets no key: in every
+//     composer mode, ruled and boxed, and with no frame at all, the sentence
+//     on the prompt row or on a line of the draft below it. Once the question
+//     is whole, claudeFolderTrustDialogOf reads it, as on master.
 func TestIssue7585SettledScreensAreLeftAlone(t *testing.T) {
+	sentence := "Quick safety check: Is this a project you created or one you trust?"
+	for name, draft := range map[string][]string{
+		"the sentence":                 {sentence},
+		"a line, then the sentence":    {"explain this:", sentence},
+		"the title, then the sentence": {"Accessing workspace:", sentence},
+	} {
+		last := len(draft) - 1
+		for c := 1; c <= len(draft[last]); c++ {
+			if strings.Contains(claudeSquash(draft[last][:c]), claudeSquash(claudeFolderTrustQuestion)) {
+				break
+			}
+			typed := append(append([]string(nil), draft[:last]...), draft[last][:c])
+			for _, prompt := range composerModePrompts {
+				for _, boxed := range []bool{false, true} {
+					requireClearWithoutAKey(t, "I was shown this:\n\n"+strings.Join(drawnComposer(80, prompt, typed, boxed), "\n"),
+						fmt.Sprintf("a draft of %s typed to %d, under %q, boxed %v", name, c, prompt, boxed))
+				}
+				unframed := prompt + typed[0]
+				for _, row := range typed[1:] {
+					unframed += "\n  " + row
+				}
+				requireClearWithoutAKey(t, "I was shown this:\n"+unframed,
+					fmt.Sprintf("an unframed draft of %s typed to %d, under %q", name, c, prompt))
+			}
+		}
+	}
+
 	for _, name := range []string{rewordedDialogFixture, rewordedDialogNoLinkFixture} {
 		handled, cmds := pollStaticPane(t, readTrustFixture(t, name), 4)
 		require.True(t, handled, "the real reworded dialog is in the way: %s", name)

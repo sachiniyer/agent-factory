@@ -32,7 +32,12 @@ var claudeFolderTrustSentenceSquashed = claudeSquash(claudeFolderTrustSentence)
 //     is for the readers before this one;
 //   - from that row down, there is no frame rule and no ❯. A working agent
 //     frames its composer with rules, plain or boxed, so a sentence it quotes
-//     has one below it.
+//     has one below it;
+//   - that row is no line of a composer's draft. The dialog paints a blank
+//     row, or its own frame, above the sentence. A draft's lines hang under
+//     its prompt row with nothing between, so a ❯ prompt row holding text
+//     (#7575's claudeComposerPromptText) above the row, with only rows of
+//     text between, makes it a line of that draft.
 //
 // Nothing above that row is asked: a composer that a relaunch in the same
 // pane left there explains only its own rows (#7388).
@@ -62,6 +67,11 @@ func claudeFolderTrustQuestionPaintingOf(screen visibleText) bool {
 	}
 	for i := pane.index[head]; i < len(pane.lines); i++ {
 		if claudeTrustFrameRule(pane.lines[i]) {
+			return false
+		}
+	}
+	for i := pane.index[head] - 1; i >= 0 && !pane.rows[i].blank && !claudeTrustFrameRule(pane.lines[i]); i-- {
+		if draft, prompt := claudeComposerPromptText(pane.lines[i], claudeComposerBordered(pane.lines[i])); prompt && draft != "" {
 			return false
 		}
 	}
