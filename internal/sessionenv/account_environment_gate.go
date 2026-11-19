@@ -92,7 +92,12 @@ func filePayloadVerdict(file *syntax.File, names map[string]struct{}, depth int)
 		if !ok {
 			return true
 		}
-		for _, payload := range callRunnerPayloadCandidates(call.Args) {
+		payloads, undecodable := callRunnerPayloadCandidates(call.Args)
+		if undecodable {
+			verdict = shellPayloadUnproven
+			return false
+		}
+		for _, payload := range payloads {
 			switch {
 			case depth <= 0:
 				verdict = shellPayloadUnproven
@@ -125,7 +130,7 @@ func filePayloadVerdict(file *syntax.File, names map[string]struct{}, depth int)
 // and collecting each family's union once keeps the scan O(argv) rather
 // than O(runners × argv) (independent-review P1/P2 on this head).
 // Candidates are deduped so a repeated string is gated once.
-func callRunnerPayloadCandidates(args []*syntax.Word) []string {
+func callRunnerPayloadCandidates(args []*syntax.Word) ([]string, bool) {
 	var candidates []string
 	seen := make(map[string]struct{})
 	done := make(map[string]bool)
@@ -140,14 +145,18 @@ func callRunnerPayloadCandidates(args []*syntax.Word) []string {
 			continue
 		}
 		done[family] = true
-		for _, payload := range runnerPayloadCandidates(base, args[i+1:]) {
+		payloads, undecodable := runnerPayloadCandidates(base, args[i+1:])
+		if undecodable {
+			return nil, true
+		}
+		for _, payload := range payloads {
 			if _, dup := seen[payload]; !dup {
 				seen[payload] = struct{}{}
 				candidates = append(candidates, payload)
 			}
 		}
 	}
-	return candidates
+	return candidates, false
 }
 
 // runnerPayloadFamily reports the payload-collector family an argv word

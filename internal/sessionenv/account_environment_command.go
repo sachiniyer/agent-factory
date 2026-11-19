@@ -614,20 +614,25 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		}
 	case base == "pwsh":
 		var unsafe bool
-		words, unsafe = unwrapPwshNu(words[1:], names, memo, false, pwshCommandOperandOptions, pwshEncodedOperandOptions)
+		words, unsafe = unwrapPwshNu(words[1:], names, memo, false, pwshOptions, true)
 		if unsafe {
 			return nil, false, true
 		}
 	case base == "nu":
 		var unsafe bool
-		words, unsafe = unwrapPwshNu(words[1:], names, memo, false, nuCommandOperandOptions, nil)
+		words, unsafe = unwrapPwshNu(words[1:], names, memo, false, nuOptions, false)
 		if unsafe {
 			return nil, false, true
 		}
-	case base == "busctl" ||
-		base == "gdbus":
+	case base == "busctl":
 		var unsafe bool
-		words, unsafe = unwrapBusctl(words[1:], names, memo, false)
+		words, unsafe = unwrapBusctl(words[1:], names, memo, false, busctlGrammar, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case base == "gdbus":
+		var unsafe bool
+		words, unsafe = unwrapBusctl(words[1:], names, memo, false, gdbusGrammar, true)
 		if unsafe {
 			return nil, false, true
 		}

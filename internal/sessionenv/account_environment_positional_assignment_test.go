@@ -1331,6 +1331,56 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"bash-5.2 -c 'make'", false},
 		{"zsh-5.9 -c 'make'", true},
 		{"rzsh -c 'make'", true},
+		// The judged payload is exactly what the launcher executes:
+		// watch and ssh JOIN their argv into one command line, so a
+		// mutation spanning two words cannot hide (Codex P1 on this
+		// head).
+		{"watch export 'CODEX_\"\"HOME=/o; codex'", true},
+		{"watch export 'CODEX_HOME=/o; codex'", true},
+		{"watch make -j4", false},
+		{"ssh host export 'CODEX_\"\"HOME=/o; codex'", true},
+		{"ssh host make -j4", false},
+		{"ssh -vv host make", false},
+		{"nix develop -i -c sh -c 'export CODEX_HOME=/o; codex'", true},
+		{"distrobox enter x -- 'export CODEX_HOME=/o; codex'", true},
+		{"tmux neww 'export CODEX_HOME=/o; codex'", true},
+		{"tmux neww make -j4", false},
+		{"sudo machinectl shell host codex", true},
+		{"sudo ssh host codex", true},
+		{"sudo pwsh", true},
+		// Each launcher's option grammar is total: every option has a
+		// stated arity and an option the grammar does not know makes
+		// the invocation undecodable, which means refuse (Codex P1 on
+		// this head). setpriv's group switches are operand-free on the
+		// real tool — only --groups takes a list.
+		{"setpriv --reset-env --keep-groups codex", true},
+		{"setpriv --reset-env --clear-groups codex", true},
+		{"setpriv --reset-env --init-groups codex", true},
+		{"setpriv --reset-env --groups g codex", true},
+		{"setpriv --reset-env --frobnicate ls", true},
+		{"setpriv --reuid=0 ls", false},
+		{"pkexec --frobnicate ls", true},
+		{"doas -nu root codex", true},
+		{"ssh --frobnicate host make", true},
+		{"machinectl --frobnicate shell host x", true},
+		{"flatpak-spawn --env-fd 3 make", true},
+		// pwsh's hidden-input forms refuse even when a -c operand is
+		// also present: -Command - reads commands from stdin and
+		// -NoExit continues interactively after the command (Codex P1
+		// on this head).
+		{"pwsh -Command -", true},
+		{"pwsh -NoExit -Command Get-Date", true},
+		{"pwsh -enc 'aGVsbG8=' -c Get-Process", true},
+		{"pwsh -File x -c Get-Process", true},
+		{"pwsh -NoProfile -c Get-Process", false},
+		{"pwsh -frobnicate -c Get-Process", true},
+		// gdbus parses its operands as GVariant text — an escaped name
+		// decodes before the writer check, and an escape the decoder
+		// does not know refuses (Codex P1 on this head).
+		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment \"['CODEX\\u005fHOME=/o']\"", true},
+		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment \"['CODEX\\x5fHOME=/o']\"", true},
+		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment \"['FOO=/o']\"", false},
+		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment \"['FOO\\q=/o']\"", true},
 	}
 	for _, test := range cases {
 		// The row verdicts are the gate's, not the bare mutation walk's:

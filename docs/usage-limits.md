@@ -458,6 +458,23 @@ will not reach the child's environment.
     CODEX_HOME=/o` and `tmux setenv -g CODEX_HOME /o` refuse — while
     non-protected names and ordinary calls run (`tmux setenv -g FOO
     /o`, `busctl --user get-property org.a /x org.a.Name`).
+
+  The judged payload is always exactly what the launcher executes —
+  `watch` and `ssh` join their argv into one command line, so a
+  mutation spanning two words cannot hide (`watch export
+  'CODEX_""HOME=/o; codex'` decodes the joined `CODEX_HOME=/o` and
+  refuses); `gdbus` call operands are GVariant text, decoded through
+  their escapes before the writer check (`['CODEX\u005fHOME=/o']`
+  still names CODEX_HOME, and an escape the decoder does not know
+  refuses); and pwsh's hidden-input forms (`-File`,
+  `-EncodedCommand`/`-enc` prefixes, `-` stdin, `-Command -`,
+  `-NoExit`) refuse even when a `-c` operand is also present
+  (`pwsh -NoExit -Command Get-Date` still drops to an interactive
+  stdin after the command). Each launcher's option grammar is also
+  total — every option has a stated arity, and an option the grammar
+  does not know makes the invocation undecodable, which means refuse
+  (`ssh --frobnicate host make`, `pkexec --frobnicate ls`,
+  `setpriv --reset-env --frobnicate ls`).
 - **Shell names match what the program IS** — `KnownShellName`
   recognizes a shell by its program, not its spelling: the `r`-prefix
   restricted variants (`rbash`, `rksh`, `rzsh`, `rsh`) and versioned

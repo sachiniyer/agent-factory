@@ -68,8 +68,14 @@ func fileHasProvenShell(file *syntax.File, depth int) bool {
 				// One collection per call — a later runner head's
 				// candidates are already inside the first head's tail
 				// (callRunnerPayloadCandidates), which keeps this scan
-				// linear in argv length.
-				for _, payload := range callRunnerPayloadCandidates(call.Args) {
+				// linear in argv length. An undecodable runner
+				// invocation hides the same input — it counts as fed.
+				payloads, undecodable := callRunnerPayloadCandidates(call.Args)
+				if undecodable {
+					found = true
+					return false
+				}
+				for _, payload := range payloads {
 					if payloadHoldsProvenShell(payload, depth-1) {
 						found = true
 						break

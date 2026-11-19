@@ -318,7 +318,11 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 		return ambiguousResetTailAgentReach(rest, names, preserved)
 	}
 	if _, ok := commandRunnerPrograms[base]; ok {
-		for _, payload := range runnerPayloadCandidates(base, rest) {
+		payloads, undecodable := runnerPayloadCandidates(base, rest)
+		if undecodable {
+			return true
+		}
+		for _, payload := range payloads {
 			if payloadReachesAgentProgram(payload, names, preserved) {
 				return true
 			}
@@ -326,7 +330,11 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 		return ambiguousResetTailAgentReach(rest, names, preserved)
 	}
 	if _, ok := shellBaseName(base); ok {
-		for _, payload := range runnerPayloadCandidates(base, rest) {
+		payloads, undecodable := runnerPayloadCandidates(base, rest)
+		if undecodable {
+			return true
+		}
+		for _, payload := range payloads {
 			if payloadReachesAgentProgram(payload, names, preserved) {
 				return true
 			}
@@ -339,15 +347,15 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 	case "systemd-run", "run0":
 		return tailReachesResetAgentProgram(rest, names, preserved, false, systemdRunOperandOptions, systemdRunFlags)
 	case "pkexec":
-		return tailReachesResetAgentProgram(rest, names, preserved, false, pkexecOperandOptions, pkexecFlags)
+		return namedLauncherResetReach(rest, pkexecGrammar, names, preserved)
 	case "doas":
-		return tailReachesResetAgentProgram(rest, names, preserved, false, doasOperandOptions, doasFlags)
+		return namedLauncherResetReach(rest, doasGrammar, names, preserved)
 	case "setpriv":
-		return tailReachesResetAgentProgram(rest, names, preserved, false, setprivOperandOptions, setprivFlags)
+		return namedLauncherResetReach(rest, setprivGrammar, names, preserved)
 	case "flatpak-spawn":
-		return tailReachesResetAgentProgram(rest, names, preserved, false, flatpakSpawnOperandOptions, flatpakSpawnFlags)
+		return namedLauncherResetReach(rest, flatpakSpawnGrammar, names, preserved)
 	case "machinectl":
-		return tailReachesResetAgentProgram(rest, names, preserved, false, machinectlOperandOptions, machinectlFlags)
+		return machinectlShellLoginReaches(rest, names, preserved)
 	case "bwrap", "systemctl", "dbus-update-activation-environment":
 		return tailReachesResetAgentProgram(rest, names, preserved, false, nil, nil)
 	}
@@ -373,7 +381,11 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 			base = base[idx+1:]
 		}
 		if commandRunnerProgram(base) {
-			for _, payload := range runnerPayloadCandidates(base, words[i+1:]) {
+			payloads, undecodable := runnerPayloadCandidates(base, words[i+1:])
+			if undecodable {
+				return true
+			}
+			for _, payload := range payloads {
 				if payloadReachesAgentProgram(payload, names, preserved) {
 					return true
 				}
@@ -387,10 +399,12 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 // runner: su/runuser/script take util-linux's getopt spellings (runnerPayloads
 // reads attached `-cX` and `--command` forms), while the shells attach no
 // operand to -c — `sh -ce 'x'` runs `x`, not `e` — so a shell word hands its
-// tail to shellDashCPayloadCandidates (Codex P1 on this head).
-func runnerPayloadCandidates(base string, words []*syntax.Word) []string {
+// tail to shellDashCPayloadCandidates (Codex P1 on this head). The named
+// launchers' collectors also report undecodable: an invocation their option
+// grammar cannot read refuses wherever a payload would be judged.
+func runnerPayloadCandidates(base string, words []*syntax.Word) ([]string, bool) {
 	if _, ok := shellBaseName(base); ok {
-		return shellDashCPayloadCandidates(words)
+		return shellDashCPayloadCandidates(words), false
 	}
 	switch base {
 	case "watch":
@@ -412,7 +426,7 @@ func runnerPayloadCandidates(base string, words []*syntax.Word) []string {
 	case "nu":
 		return nuPayloads(words)
 	}
-	return runnerPayloads(words)
+	return runnerPayloads(words), false
 }
 
 // wordNamesResetAgent reports whether literal's final path component is

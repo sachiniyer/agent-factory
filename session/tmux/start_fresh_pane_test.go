@@ -183,6 +183,17 @@ func TestIssue7464NoProductionCodeRespawnsAPane(t *testing.T) {
 	// A Go string literal naming respawn-pane or respawn-window, or any
 	// prefix or alias tmux accepts for them.
 	respawn := regexp.MustCompile(`"respawn-?[pw][a-z-]*"`)
+	// The only tolerated respawn spellings: these exact map-key lines
+	// inside internal/sessionenv's named-launcher grammar table. That
+	// table is data — the gate CLASSIFIES tmux subcommands a user typed
+	// into a sibling pane so it can judge the command the server would
+	// run; the file never execs tmux. Matching is by exact line content,
+	// never by path: a respawn literal added anywhere, including a new
+	// entry in that same map, still fails this guard.
+	classifierEntries := map[string]bool{
+		`"respawn-pane": {}, "respawnp": {},`:   true,
+		`"respawn-window": {}, "respawnw": {},`: true,
+	}
 	var found []string
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -203,6 +214,9 @@ func TestIssue7464NoProductionCodeRespawnsAPane(t *testing.T) {
 			return err
 		}
 		for n, line := range strings.Split(string(src), "\n") {
+			if classifierEntries[strings.TrimSpace(line)] {
+				continue
+			}
 			if respawn.MatchString(line) {
 				found = append(found, fmt.Sprintf("%s:%d: %s", path, n+1, strings.TrimSpace(line)))
 			}
