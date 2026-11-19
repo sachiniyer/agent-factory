@@ -814,10 +814,17 @@ func nonRootChownScenarioStub(calls *[][]string, sc accountChownScenario) func(c
 		case isMountTableExec(args):
 			return probeAnswer(args, sc.mountPoints...), nil
 		case strings.Contains(joined, "test -w"):
-			if sc.writable {
-				return nil, nil
+			// Mirror accountChownScenarioStub so the stubs stay honest
+			// about the probe's contract: the shell prints the verdict
+			// sentinel on stdout and exits 0 either way, so probeErr/
+			// probeOut model only the non-verdict shapes.
+			if sc.probeErr != nil || sc.probeOut != nil {
+				return sc.probeOut, sc.probeErr
 			}
-			return nil, errors.New("exit status 1")
+			if sc.writable {
+				return []byte("af-probe:ok\n"), nil
+			}
+			return []byte("af-probe:denied\n"), nil
 		default:
 			return nil, nil
 		}
