@@ -337,7 +337,7 @@ func (t *TmuxSession) start(workDir string) error {
 		// session. ExistsOrUnknown is safe here: the only action gated on true is a
 		// bounded best-effort kill-session, never a false liveness claim.
 		if t.ExistsOrUnknown() {
-			captured, _ := captureSessionProcessTrees(t.cmdExec, t.sanitizedName, "")
+			captured, _ := captureSessionProcessTrees(t.cmdExec, t.sanitizedName, "", false)
 			leaked := captured.Procs
 			// Protection is decided from the SAME snapshot the capture used —
 			// even a partial one is better than a second, later table: a pane

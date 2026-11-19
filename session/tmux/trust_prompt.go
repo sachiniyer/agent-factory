@@ -169,6 +169,13 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeFolderTrustPaintingOf(screen) {
 			return true
 		}
+		// The legacy folder-trust dialog while Claude Code paints its option
+		// rows (#7584): the cursor row or the No row only begun, which the
+		// grammar above took for a draft or for rows the dialog never paints.
+		// Asked last too: it only turns a clear pane into a hold.
+		if claudeLegacyTrustPaintingOf(screen) {
+			return true
+		}
 		// The reworded folder-trust dialog's question while Claude Code
 		// paints it with no title above it (#7585): a pane too short scrolls
 		// the title off, and nothing above anchored the sentence begun. Asked

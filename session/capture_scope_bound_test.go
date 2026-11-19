@@ -288,10 +288,10 @@ func TestSessionCodexCaptureScopeRecoversOnceTheLaunchDirAnswers(t *testing.T) {
 	held := heldTestInstance(t, own)
 
 	release := make(chan struct{})
-	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
-	t.Cleanup(restoreTimeout)
+	clock := wedgeFlightClock(t)
 	restoreSeam := fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
 		if path == link || strings.HasPrefix(path, link+string(filepath.Separator)) {
+			clock.Advance(wedgeHeldOut)
 			<-release
 		}
 		return filepath.EvalSymlinks(path)
@@ -301,12 +301,11 @@ func TestSessionCodexCaptureScopeRecoversOnceTheLaunchDirAnswers(t *testing.T) {
 	_, err := HeldAgentConversation(tmux.ProgramCodex, held.BindConversationCaptureRuntime(scope))
 	require.True(t, errors.Is(err, errCodexCaptureUndecided), "undecided while it does not answer: %v", err)
 
-	// The mount answers again: the stuck lookup returns and its latch clears.
-	// What follows measures recovery, so it runs under the production bound,
-	// not the one the wedge phase shrank (#7337).
+	// The mount answers again: the stuck lookup returns and its latch clears,
+	// and every later lookup answers whenever its work finishes — the test's
+	// clock does not move on its own (#7456, #7593).
 	close(release)
 	restoreSeam()
-	restoreTimeout()
 	var conv AgentConversationData
 	require.Eventually(t, func() bool {
 		conv, err = HeldAgentConversation(tmux.ProgramCodex, held.BindConversationCaptureRuntime(scope))

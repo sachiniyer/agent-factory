@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -30,10 +31,10 @@ const dockerEngineIDFormat = "{{.ID}}"
 // reapProvisionFailure cleans up a container created by a failed provision. No
 // Instance record exists to carry a future retry, so a reap that does not succeed
 // must remain visible to the caller with both causes and the orphan risk (#2590).
+// reap() runs even when `docker run` refused before naming a container — the
+// staged payload dir still needs clearing, or every failed provision leaks one
+// full copy of the af binary.
 func (p *dockerProvisioner) reapProvisionFailure(provisionErr error) error {
-	if p.containerID == "" {
-		return provisionErr
-	}
 	reapErr := p.reap()
 	if reapErr == nil {
 		return provisionErr
@@ -74,6 +75,13 @@ func (p *dockerProvisioner) reap() error {
 		return p.reapErr
 	}
 	if p.containerID == "" {
+		// No container was ever created — the staged payload dir's only
+		// consumer cannot exist, so it is safe to clear. Every other path
+		// clears it only after `docker rm` succeeds (#7577 item 2 R5): while
+		// the container's fate is unproven — an engine check refusal, a
+		// timeout, an answered error — the directory stays so the cleanup
+		// record's StagingDir still names a real directory a later reap owns.
+		p.clearStagingDir()
 		p.reaped = true
 		return nil
 	}
@@ -105,12 +113,21 @@ func (p *dockerProvisioner) reap() error {
 	}
 	out, err := dockerExec(ctx, p.dockerEnvironment(), "rm", "-f", p.containerID)
 	if err == nil {
+		// The container is confirmed gone — now the staged payload dir may go
+		// too. Clearing it only here keeps the ordering: never before `docker
+		// rm` has succeeded (and never ahead of the engine check above).
+		p.clearStagingDir()
 		p.reaped = true
 		p.reapErr = nil
 		log.InfoLog.Printf("docker runtime: reaped container %s for session %q", p.shortID(), p.spec.Title)
 		return nil
 	}
 	reapErr := fmt.Errorf("backend=docker: `docker rm -f %s` failed: %s: %w", p.shortID(), strings.TrimSpace(string(out)), err)
+	if strings.Contains(string(out), "No such container") {
+		// An answered "No such container" proves the container gone — the same
+		// certainty a successful rm gives — so the staging dir releases too.
+		p.clearStagingDir()
+	}
 	// The #914 guard: classify a TIMEOUT only when err != nil AND the ctx deadline
 	// tripped, so a bare exec.ErrWaitDelay that dockerExec already normalized to
 	// success (err == nil) never reaches here.
@@ -131,6 +148,19 @@ func (p *dockerProvisioner) reap() error {
 	p.reapErr = reapErr
 	log.WarningLog.Printf("%v", reapErr)
 	return reapErr
+}
+
+// clearStagingDir removes the per-session staging dir. Called only once the
+// container it fed is confirmed gone — after `docker rm` succeeds, or when no
+// container was ever created.
+func (p *dockerProvisioner) clearStagingDir() {
+	if p.stagingDir == "" {
+		return
+	}
+	if err := os.RemoveAll(p.stagingDir); err != nil {
+		log.WarningLog.Printf("docker runtime: removing the staging dir %s failed: %v", p.stagingDir, err)
+	}
+	p.stagingDir = ""
 }
 
 // currentEngineID returns the daemon identity that the provisioner's Docker

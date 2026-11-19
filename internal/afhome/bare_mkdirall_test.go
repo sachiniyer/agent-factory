@@ -171,6 +171,8 @@ var auditedMkdir = map[string]struct {
 		"Requires filepath.Dir(path) == parent and validates that parent before creating its immediate child; ENOENT if gone."},
 	"session/git/setup_overlay.go:copyOverlayEntry": {1,
 		"Creates one overlay directory level under the worktree root or under a directory the same walk just created; the parent always exists by then, so ENOENT propagates rather than resurrecting anything."},
+	"session/backend_docker_staging.go:dockerProvisioner.dockerStagingDir": {1,
+		"The exclusive per-session staging leaf, one level under a parent created a line earlier through config.MkdirAllUnderAFHome; EEXIST means collision and a fresh suffix is tried, and a gone parent is ENOENT, not resurrected."},
 }
 
 func TestAuditedMkdirSites(t *testing.T) {

@@ -362,6 +362,32 @@ func TestReapProvenIncarnationKillsTheProbedIdOnAMatch(t *testing.T) {
 	require.Equal(t, 1, rec.killsAtReap, "the captured processes are reaped only after the kill fired")
 }
 
+// #7581 item 4 on the incarnation path: nothing there reads captured.Server
+// — the guarded kill judges the verified (id, pid, created) triple — so the
+// #{pid} #{socket_path} round trip is never issued, even when the pane
+// capture returns carrying a row-derived server identity. On master this
+// exact shape is what made captureVerifiedTrees reach for the dead read.
+func TestReapProvenIncarnationNeverIssuesTheSocketRead(t *testing.T) {
+	srv := newFakeTmuxServer(t, provenEnv())
+	rec := stubIncarnationProcesses(t, srv)
+	prevParse := incarnationPaneProcesses
+	incarnationPaneProcesses = func(rows, name string) (paneCapture, error) {
+		return paneCapture{
+			Procs:  []proctree.Process{{PID: 777001}},
+			Server: ServerIdentity{PID: 4242, SessionID: "$7"},
+		}, nil
+	}
+	t.Cleanup(func() { incarnationPaneProcesses = prevParse })
+
+	got := ReapProvenIncarnation(srv.executor(), "claude", reapProof())
+	require.True(t, got.Stopped, "why: %s", got.Why)
+	require.Equal(t, 1, rec.reapCallCount)
+	for _, issued := range srv.issued() {
+		require.NotContains(t, issued, "socket_path",
+			"nothing on the incarnation path stores the server record, so the read is never issued")
+	}
+}
+
 // The property of #6260's review: the destructive operation runs only if, when the
 // SERVER executes it, the target is still the verified incarnation. A server that
 // is replaced between the client's last check and the kill — and reissues "$7" —

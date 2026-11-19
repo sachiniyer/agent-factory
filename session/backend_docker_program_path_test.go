@@ -433,7 +433,7 @@ func TestPrepareAccountUser_BusyBoxStatLocation(t *testing.T) {
 			// prepareAccountUser reads the container's mount table before
 			// chowning; answer with a plain root filesystem so the chown
 			// of /af-home and /workspace proceeds.
-			return mountTableAnswer(), nil
+			return probeAnswer(args), nil
 		default:
 			return nil, nil
 		}

@@ -1017,6 +1017,12 @@ func fakeAccountBoundaryDockerResponse(args []string, accountDir string) ([]byte
 		// answer is readMountTable's expected form:
 		// <resolved HOME>\n<resolved workspace>\n<mountinfo>.
 		if strings.Contains(joined, `cd -- "$2" && pwd -P`) {
+			// verifyWriteTargets shares the `cd -- "$2" && pwd -P` clause;
+			// leafSymlinkMarker in the script marks it, and its answer is
+			// NUL-framed: <dir>\n\0<dir>\n\0<mountinfo>.
+			if strings.Contains(joined, leafSymlinkMarker) {
+				return writeGuardAnswerRaw("/usr/local/bin", "/etc", cleanMountinfoFor(accountDir)), nil
+			}
 			return []byte(dockerAccountRuntimeHome + "\n" + dockerWorkspaceDir + "\n" + cleanMountinfoFor(accountDir)), nil
 		}
 		if strings.HasSuffix(joined, "/proc/self/mountinfo") {

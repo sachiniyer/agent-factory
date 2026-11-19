@@ -75,14 +75,31 @@ func (p *dockerProvisioner) fetchRestoreBranch(branch string) error {
 	return nil
 }
 
-// copyAfBinary docker cp's the daemon's own `af` binary into the container and
-// makes it executable, so `af agent-server` is runnable inside. The binary must
-// be compatible with the image (matching arch/libc) — a static build runs
-// anywhere; documented in docs/backends.md.
+// copyAfBinary delivers the `af` binary into the container on the cp fallback
+// path — the sessions whose staged binds could not mount (Docker Desktop file
+// sharing) or whose payload could not be staged. When the staged copy exists
+// `docker cp` preserves its 0755 mode and the root chmod is unnecessary; when
+// staging itself failed the pre-#7577 path runs whole — cp of the daemon's own
+// binary plus the chmod that makes it exec'able by the session user. The
+// binary must be compatible with the image (matching arch/libc) — a static
+// build runs anywhere; documented in docs/backends.md.
 func (p *dockerProvisioner) copyAfBinary() error {
-	out, err := p.docker(dockerShortStepTimeout, "cp", p.afBin, p.containerID+":"+dockerAfBinaryPath)
+	if p.payloadViaBinds {
+		// The bind mounts in `docker run` already serve the binary read-only
+		// at dockerAfBinaryPath — nothing to copy.
+		return nil
+	}
+	source := p.stagedAfPath
+	if source == "" {
+		source = p.afBin
+	}
+	out, err := p.docker(dockerShortStepTimeout, "cp", source, p.containerID+":"+dockerAfBinaryPath)
 	if err != nil {
 		return fmt.Errorf("backend=docker: copying the af binary into the container failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	if p.stagedAfPath != "" {
+		// The staged copy carries 0755 and cp preserves mode — no chmod.
+		return nil
 	}
 	if out, err := p.execSh(dockerShortStepTimeout, "chmod +x "+shellQuote(dockerAfBinaryPath)); err != nil {
 		// execSh runs as --user 0:0 unconditionally (docker cp lands the
@@ -100,16 +117,30 @@ func (p *dockerProvisioner) copyAfBinary() error {
 }
 
 // dockerPolicyPath is where the daemon-resolved operator policy lands in the
-// container (#5571 W2.5).
-const dockerPolicyPath = "/tmp/af-policy.json"
+// container (#5571 W2.5). /etc rather than /tmp: the cp fallback's mount-table
+// check refuses any non-rootfs mount covering a write target — a private
+// --tmpfs is indistinguishable from a host tmpfs bind there — and --tmpfs /tmp
+// is a common hardening flag, while a mount over /etc breaks the container's
+// own resolv.conf/hostname/hosts and is correspondingly rare. /etc also exists
+// on every image that can host a container at all.
+const dockerPolicyPath = "/etc/af-policy.json"
 
 // copyPolicy places spec.AgentPolicy in the container for the agent-server to
-// read instead of the image's own config. docker cp lands it root-owned, and a
-// BYO image may run the agent as another uid, so it is made world-readable: the
-// file holds hook commands and program names, no credential, and the container
-// is the session's own.
+// read instead of the image's own config. On the cp fallback path the staged
+// copy's 0644 mode is preserved by `docker cp`, leaving it world-readable for a
+// non-root agent uid exactly as the old chmod made it; when staging failed the
+// pre-#7577 path runs whole — a fresh temp file, cp, and the chmod. The file
+// holds hook commands and program names, no credential, and the container is
+// the session's own.
 func (p *dockerProvisioner) copyPolicy() error {
-	if len(p.spec.AgentPolicy) == 0 {
+	if len(p.spec.AgentPolicy) == 0 || p.payloadViaBinds {
+		return nil
+	}
+	if p.stagedPolicyPath != "" {
+		out, err := p.docker(dockerShortStepTimeout, "cp", p.stagedPolicyPath, p.containerID+":"+dockerPolicyPath)
+		if err != nil {
+			return fmt.Errorf("backend=docker: copying the operator policy into the container failed: %s: %w", strings.TrimSpace(string(out)), err)
+		}
 		return nil
 	}
 	tmp, err := os.CreateTemp("", "af-policy-*.json")

@@ -72,7 +72,12 @@ func recordedOwnServer(t *testing.T) ServerIdentity {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "af-tmux.sock")
 	require.NoError(t, os.WriteFile(sock, nil, 0o600))
-	return ServerIdentity{Socket: sock, PID: 4242, StartID: 987654321, SessionID: "$7"}
+	// PIDNS carries the real pid namespace — the shape a record has after
+	// the stamp proved the pid holds the socket HERE (#7581 item 1). A
+	// fixture without it would be an unproven record and every pid-derived
+	// compare would read undecidable.
+	ns, _ := proctree.PIDNamespaceID()
+	return ServerIdentity{Socket: sock, PID: 4242, StartID: 987654321, SessionID: "$7", PIDNS: ns}
 }
 
 // #7469 acceptance: a DETACHED carrier whose TMUX env names a server that is
@@ -238,7 +243,7 @@ func TestVanishedSessionSweep_OwnServerCarrierKeepsTodaysRefusal(t *testing.T) {
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
 	require.Equal(t, serverVerdictOwn,
-		carrierServerVerdict(carrier, environ, own, snap, &serverPtyOwners{}, ""),
+		carrierServerVerdict(carrier, environ, own, snap, &serverPtyOwners{}, own.PIDNS),
 		"the fixture must read OWN — an undecidable verdict makes the refusal assertion vacuous")
 
 	marked, _, err := markedOrphanProcesses(
@@ -307,7 +312,7 @@ func TestVanishedSessionSweep_OwnServerCarrierStillReapedAtTier2(t *testing.T) {
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
 	require.Equal(t, serverVerdictOwn,
-		carrierServerVerdict(carrier, environ, own, snap, &serverPtyOwners{}, ""),
+		carrierServerVerdict(carrier, environ, own, snap, &serverPtyOwners{}, own.PIDNS),
 		"the fixture must read OWN — a foreign or undecidable verdict would make the outcome vacuous")
 
 	marked, _, err := markedOrphanProcesses(
@@ -320,6 +325,91 @@ func TestVanishedSessionSweep_OwnServerCarrierStillReapedAtTier2(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []proctree.Process{carrier}, marked,
 		"an unproven own-server carrier keeps its tier-2 admission — own never demotes either")
+}
+
+// #7581 item 1 (outcome): a carrier judged against a record whose pid was
+// never proven in this namespace keeps master's verdict EXACTLY — the same
+// admit-or-refuse answer an absent record produces. This is the only
+// direction the namespace gate can move a verdict toward signalling: a
+// cross-namespace pid mismatch was never a positive foreign proof, so the
+// carrier goes back to whatever today's rules give it.
+func TestVanishedSessionSweep_UnprovenPidKeepsMastersVerdict(t *testing.T) {
+	name := "af_unproven_ns"
+	home := t.TempDir()
+	gen := name + "-gen"
+
+	sock := filepath.Join(t.TempDir(), "af-tmux.sock")
+	require.NoError(t, os.WriteFile(sock, nil, 0o600))
+	unproven := ServerIdentity{Socket: sock, PID: 4242, StartID: 9, SessionID: "$7"} // PIDNS ""
+
+	// The carrier's env names the recorded socket but a DIFFERENT server
+	// pid — foreign under a proven record, undecidable under an unproven
+	// one. Isolate the pty channel so the env arm is what speaks.
+	oldSlaves := ptySlaveIndices
+	ptySlaveIndices = func(int) ([]proctree.PtyIndex, error) { return nil, nil }
+	t.Cleanup(func() { ptySlaveIndices = oldSlaves })
+	carrier := spawnOrphanedMarkedCarrier(t, name, home, gen,
+		agentNamedBinary(t, os.Args[0]), "TMUX="+sock+",9999,3")
+
+	membership := cohortMembership{
+		Root:     proctree.Process{PID: carrier.PPID, StartID: 1},
+		AgentExe: "claude",
+	}
+	withRecord, _, errWith := markedOrphanProcesses(
+		[]proctree.Process{carrier}, name, home, fixtureCohort(gen),
+		cohortMembership{
+			Root:      membership.Root,
+			AgentExe:  membership.AgentExe,
+			OwnServer: unproven,
+		}, nil, nil)
+	withoutRecord, _, errWithout := markedOrphanProcesses(
+		[]proctree.Process{carrier}, name, home, fixtureCohort(gen), membership, nil, nil)
+	require.Equal(t, errWithout != nil, errWith != nil,
+		"the unproven record must answer exactly like no record at all")
+	require.Equal(t, withoutRecord, withRecord,
+		"master's verdict for this carrier is the tier-2 admit — the unproven record must not change it")
+	require.Equal(t, []proctree.Process{carrier}, withRecord,
+		"master's verdict: the agent-identical carrier is admitted and reaped")
+	require.True(t, proctree.AliveSame(carrier), "the sweep only marks in a fixture")
+}
+
+// #7581 item 2: the attribution read — the carrier's pty-slave walk the
+// verdict consults — runs ONLY for a candidate the verdict can move. A
+// kernel-proven member admits at the proven arm above it; the sweep must
+// never pay the read for it. Counted per pid so a skipped arm and an
+// attributed one are distinguished, not just totaled.
+func TestVanishedSessionSweep_AttributionRunsOnlyInTheUnprovenBucket(t *testing.T) {
+	name := "af_scoped_attr"
+	home := t.TempDir()
+	gen := name + "-gen"
+	own := recordedOwnServer(t)
+
+	provenCarrier := spawnOrphanedMarkedCarrier(t, name, home, gen, os.Args[0])
+	defaultCarrier := spawnOrphanedMarkedCarrier(t, name, home, gen,
+		agentNamedBinary(t, os.Args[0]))
+
+	slavesRead := make(map[int]int)
+	oldSlaves := ptySlaveIndices
+	ptySlaveIndices = func(pid int) ([]proctree.PtyIndex, error) {
+		slavesRead[pid]++
+		return nil, nil
+	}
+	t.Cleanup(func() { ptySlaveIndices = oldSlaves })
+
+	marked, _, err := markedOrphanProcesses(
+		[]proctree.Process{provenCarrier, defaultCarrier}, name, home, fixtureCohort(gen),
+		cohortMembership{
+			Recorded:  map[int]uint64{provenCarrier.PID: provenCarrier.StartID},
+			Root:      proctree.Process{PID: provenCarrier.PPID, StartID: 1},
+			AgentExe:  "claude",
+			OwnServer: own,
+		}, nil, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []proctree.Process{provenCarrier, defaultCarrier}, marked)
+	require.Zero(t, slavesRead[provenCarrier.PID],
+		"a kernel-proven member is decided above attribution — its pty table is never walked")
+	require.Equal(t, 1, slavesRead[defaultCarrier.PID],
+		"the unproven-bucket carrier pays exactly one attribution read")
 }
 
 // #3699 pinned: the re-hosted claude keeps converging. A claude-comm carrier
@@ -398,8 +488,16 @@ func TestVanishedSessionSweep_RealTmuxForeignServerCarrier(t *testing.T) {
 	require.NoError(t, err, string(out))
 	ownPID, ownSock, err := parseServerSocketReply(string(out))
 	require.NoError(t, err)
-	own := resolveServerIdentity(ServerIdentity{Socket: ownSock, PID: ownPID})
+	own := resolveServerIdentity(ServerIdentity{Socket: ownSock, PID: ownPID}, tmuxCommandTimeout)
 	require.True(t, own.valid(), "a real server answers with a complete identity")
+	// The stamp must PROVE the recorded pid on the live socket — the real
+	// per-socket binding read, on this OS (#7581 R1). If it silently fails
+	// here, every record is unproven, every pid compare is undecidable,
+	// and #7550's foreign-sparing is OFF with the rest of CI green.
+	selfNS, err := proctree.PIDNamespaceID()
+	require.NoError(t, err)
+	require.True(t, own.pidProvenHere(selfNS),
+		"a live-server stamp is pidProvenHere — the proof ran on this OS's real listener read")
 
 	// The FOREIGN server — the user's own tmux started inside a pane, the
 	// #7469 shape. Its pane exports the AF markers and spawns a carrier in a
@@ -428,21 +526,20 @@ func TestVanishedSessionSweep_RealTmuxForeignServerCarrier(t *testing.T) {
 	// INDEPENDENTLY so the claim stays honest: the carrier's env tuple
 	// names a socket that is not the recorded one, AND its held slave is
 	// mastered by a server pid that is not the recorded one.
-	environ, err := proctree.Environ(carrier.PID)
-	require.NoError(t, err)
+	environ := markedEnviron(t, carrier)
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
 	owners := &serverPtyOwners{}
 	tmuxEnv, hasTmux := processEnvValue(environ, tmuxEnvVar)
 	require.True(t, hasTmux, "the detached carrier still holds its pane's TMUX tuple")
 	require.Equal(t, serverVerdictForeign,
-		tmuxEnvServerVerdict(tmuxEnv, own, own.PIDNS),
+		tmuxEnvServerVerdict(tmuxEnv, own, selfNS),
 		"env channel: a foreign socket in TMUX")
 	require.Equal(t, serverVerdictForeign,
-		ptyFdServerVerdict(carrier.PID, own, snap, owners, own.PIDNS),
+		ptyFdServerVerdict(carrier.PID, own, snap, owners, selfNS),
 		"pty channel: the carrier's slave is mastered by the foreign server")
 	require.Equal(t, serverVerdictForeign,
-		carrierServerVerdict(carrier, environ, own, snap, owners, own.PIDNS),
+		carrierServerVerdict(carrier, environ, own, snap, owners, selfNS),
 		"real evidence attributes the carrier to the foreign server")
 
 	// And the outcome: the carrier is excluded and alive while a proven

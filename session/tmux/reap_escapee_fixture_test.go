@@ -237,3 +237,30 @@ func spawnProvenLeaderBehindTmuxParent(t *testing.T, name, home, gen string) (le
 	})
 	return leader, fakeTmux, child
 }
+
+// markedEnviron reads a freshly spawned fixture process's environment with
+// the same bounded retry the sibling carrier fixtures already apply
+// (#7598): a fresh spawn's arg/env pages can sit mid-replacement, and
+// darwin's kern.procargs2 answers EIO there — surfaced as ErrProcessExited
+// even though the process is alive (:70-72 above, #3963). The read retries
+// only while the SAME live instance exists: a pid now dead or recycled
+// means the read will never settle, so that failure is named immediately
+// rather than timed out on.
+func markedEnviron(t *testing.T, p proctree.Process) []string {
+	t.Helper()
+	var lastErr error
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		env, err := proctree.Environ(p.PID)
+		if err == nil {
+			return env
+		}
+		lastErr = err
+		require.True(t, proctree.AliveSame(p),
+			"fixture pid %d genuinely exited — its env read will never settle (last read: %v)", p.PID, lastErr)
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.FailNow(t, "environment unreadable",
+		"fixture pid %d env never became readable in 5s while still alive (last read: %v)", p.PID, lastErr)
+	return nil
+}

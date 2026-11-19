@@ -111,7 +111,10 @@ const (
 	// not the home/workspace/account paths the prepare steps write — so a
 	// chmod failure's capacity verdict may only be borrowed by a bind
 	// covering the binary path, never by an unrelated bind at the home or
-	// workspace that the chmod never touched (#5424 review).
+	// workspace that the chmod never touched (#5424 review). Only the
+	// un-staged cp fallback still emits it: a staged copy already carries
+	// the mode the container needs, and the bind path copies nothing at all
+	// (#7577).
 	dockerOpChmod
 	// dockerOpSessionExec is a `docker exec` run as the session's user —
 	// the account owner's uid:gid when a session mounts an account, else
