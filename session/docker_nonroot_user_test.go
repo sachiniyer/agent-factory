@@ -814,10 +814,16 @@ func nonRootChownScenarioStub(calls *[][]string, sc accountChownScenario) func(c
 		case isMountTableExec(args):
 			return probeAnswer(args, sc.mountPoints...), nil
 		case strings.Contains(joined, "test -w"):
+			if sc.probeErr != nil {
+				return sc.probeOut, sc.probeErr
+			}
 			if sc.writable {
 				return nil, nil
 			}
-			return nil, errors.New("exit status 1")
+			// Model the production error TYPE, not only the %v text —
+			// mirrors accountChownScenarioStub so the stubs stay honest
+			// about what p.docker returns from a non-zero docker exec.
+			return nil, chownProbeTestVerdictErr()
 		default:
 			return nil, nil
 		}

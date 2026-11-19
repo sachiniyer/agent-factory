@@ -1,7 +1,9 @@
 package session
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
 	"path"
 	"strings"
 
@@ -256,6 +258,23 @@ func warnSkippedMount(s skippedMount, owner string) {
 // PATH-resolved program decides the verdict. It runs after the rootfs
 // chowns, so a just-re-owned ancestor (a root-owned 0700 HOME, say) is
 // already traversable when a mount beneath it is checked.
+//
+// The probe has two failure shapes, classified separately so provision()'s
+// capacity probe can attach dockerRootFSFullEvidence only when the failure
+// could have been a data-root write (not a local refusal):
+//   - exit status 1 — `test`'s false verdict (the directory is not writable
+//     by the session's user) — is af's own decision, never a filesystem
+//     verdict, so it carries dockerOpLocal, the only class provision()
+//     excludes from the capacity evidence.
+//   - any other shape (docker CLI exit 125/126/127, a transport error, a
+//     poll deadline) is docker/exec infrastructure. `test` is a shell
+//     builtin writing nothing container-side, so the only data-root writes
+//     anyone made were dockerd's privileged exec bookkeeping — the same
+//     read-only-exec shape the sibling id -u / stat -c %u:%g probes already
+//     classify dockerOpDaemonWrite. Treating the infra shape the same way
+//     keeps a full-data-root ENOSPC, which fails the probe by failing the
+//     exec bookkeeping, on dockerOpDaemonWrite so provision() joins the
+//     typed-errno evidence the lost-restore classifier waits on.
 func (p *dockerProvisioner) reportSkippedMount(s skippedMount, owner string) error {
 	out, err := p.docker(dockerShortStepTimeout,
 		"exec", "--user", owner, p.containerID, dockerContainerShell, "-c",
@@ -277,7 +296,45 @@ func (p *dockerProvisioner) reportSkippedMount(s skippedMount, owner string) err
 	// dropped (#7571 review R9).
 	return dockerStepErr(fmt.Errorf(
 		"backend=docker: refusing to prepare the docker session %s %s: it is inside the mount %s, which af must not chown or create through — and the session's user %s cannot write it as mounted (%s), so the clone and the agent's own writes would only fail with \"Permission denied\" later; make the mounted directory writable by %s — the remedy depends on where the mount came from: for a host bind, chown the mounted host directory to that user or remove the bind from docker.run_args; for a named or image volume, chown the volume's content to that user (for example `docker run --rm -v <volume>:/d alpine chown -R %s /d`) or fix ownership in the image; or drop the mount",
-		s.kind, s.real, s.mp, owner, probe, owner, owner), dockerOpLocal)
+		s.kind, s.real, s.mp, owner, probe, owner, owner), skippedMountProbeClass(err))
+}
+
+// skippedMountProbeClass classifies the reportSkippedMount probe's failure
+// for the evidence boundary at provision(). The probe is a read-only docker
+// exec (`test -w && test -x`, a sh builtin), and its failure has two shapes:
+//
+//   - a real *exec.ExitError with ExitCode 1 is `test`'s false verdict: the
+//     directory is not writable by the session's user. That verdict is af's
+//     own decision ("I refuse to let the clone fail later as Permission
+//     denied"), never a filesystem verdict, so it carries dockerOpLocal —
+//     the only class provision() excludes from dockerRootFSFullEvidence,
+//     preventing a local refusal from borrowing a capacity verdict on a
+//     root that happens to be full.
+//
+//   - any other shape is docker/exec infrastructure. `test` writes nothing
+//     container-side, so the only data-root writes anyone made are
+//     dockerd's privileged exec bookkeeping — exactly what the sibling
+//     read-only exec probes (prepareNonAccountUser's `id -u` probe and
+//     prepareAccountUser's `stat -c %u:%g` probe) classify
+//     dockerOpDaemonWrite, reserving dockerOpRootExec for the subsequent
+//     mkdir+chown. Classifying the infra shape the same way keeps a
+//     data-root ENOSPC that fails the exec bookkeeping on dockerOpDaemonWrite
+//     so provision() can join dockerRootFSFullEvidence: the daemon's lost
+//     errno, which surfaces only as free prose in the refusal's "(%s)"
+//     clause, is re-derived from the engine's data-root filesystem into a
+//     typed PathError the lost-restore classifier's errors.Is chain reads
+//     as environmental instead of charging the structural give-up budget.
+//
+// A plain error fails the errors.As: matching it as the verdict would let an
+// infrastructure failure modeled only by its text (a transport error, a poll
+// deadline) silently land on dockerOpLocal and lose the evidence path, so
+// the verdict branch narrowly requires a real *exec.ExitError with exit 1.
+func skippedMountProbeClass(err error) dockerOpClass {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return dockerOpLocal
+	}
+	return dockerOpDaemonWrite
 }
 
 // prepareNonAccountUser mirrors prepareAccountUser for a session with no
