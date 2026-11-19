@@ -977,16 +977,20 @@ func TestDockerStagingDirRestoredReap(t *testing.T) {
 // before `docker run` with an actionable error naming the entry.
 func TestDockerStagingEnclosingRunArgsMountRefused(t *testing.T) {
 	refused := []struct {
-		name    string
-		runArgs []string
-		want    string
+		name     string
+		runArgs  []string
+		want     string
+		encloses bool
 	}{
-		{"bind over /usr/local/bin", []string{"-v", "/host/dir:/usr/local/bin"}, "-v /host/dir:/usr/local/bin"},
-		{"bind over /etc", []string{"--volume=/host/dir:/etc"}, "/etc"},
-		{"--mount flag", []string{"--mount", "type=bind,source=/h,target=/usr"}, "--mount"},
-		{"tmpfs", []string{"--tmpfs", "/usr/local"}, "/usr/local"},
-		{"root bind", []string{"-v", "/h:/"}, "-v /h:/"},
-		{"exact file dest", []string{"-v", "/h/f:" + dockerAfBinaryPath}, dockerAfBinaryPath},
+		{"bind over /usr/local/bin", []string{"-v", "/host/dir:/usr/local/bin"}, "-v /host/dir:/usr/local/bin", true},
+		{"bind over /etc", []string{"--volume=/host/dir:/etc"}, "/etc", true},
+		{"--mount flag", []string{"--mount", "type=bind,source=/h,target=/usr"}, "--mount", true},
+		{"tmpfs", []string{"--tmpfs", "/usr/local"}, "/usr/local", true},
+		{"root bind", []string{"-v", "/h:/"}, "-v /h:/", true},
+		{"exact file dest", []string{"-v", "/h/f:" + dockerAfBinaryPath}, dockerAfBinaryPath, true},
+		{"attached -v value", []string{"-v/host/dir:/usr/local/bin"}, "/usr/local/bin", true},
+		{"clustered -v", []string{"-dv/host:/etc"}, "-dv/host:/etc", true},
+		{"ambiguous cluster refused", []string{"-xv/host:/usr/local"}, "combined short option", false},
 	}
 	for _, tt := range refused {
 		t.Run("refused/"+tt.name, func(t *testing.T) {
@@ -1001,7 +1005,9 @@ func TestDockerStagingEnclosingRunArgsMountRefused(t *testing.T) {
 			}
 			_, err := p.provision()
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "encloses")
+			if tt.encloses {
+				assert.Contains(t, err.Error(), "encloses")
+			}
 			assert.Contains(t, err.Error(), tt.want)
 			assert.Contains(t, err.Error(), "run_args")
 			require.Nil(t, findDockerCall(calls, "run"), "no container may be started; calls=%v", calls)

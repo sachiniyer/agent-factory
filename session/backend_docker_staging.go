@@ -168,8 +168,10 @@ func (p *dockerProvisioner) stagingDestinations() []string {
 // runArgsMountDestinations extracts (entry, destination) pairs for every
 // mount-shaped run_args token: -v/--volume specs (the second ':'-field, or
 // the only field for an anonymous volume), --mount's target/destination/dst
-// key, and --tmpfs's mount point.
-func runArgsMountDestinations(runArgs []string) [][2]string {
+// key, and --tmpfs's mount point. Attached and combined shorthand spellings
+// (-v/host:/dst, -tv /host:/dst) are walked with the account guard's pflag
+// machinery — an ambiguous cluster is an error rather than a guess.
+func runArgsMountDestinations(runArgs []string) ([][2]string, error) {
 	var out [][2]string
 	for i := 0; i < len(runArgs); i++ {
 		a := runArgs[i]
@@ -205,6 +207,23 @@ func runArgsMountDestinations(runArgs []string) [][2]string {
 			spec = strings.SplitN(a, "=", 2)[1]
 			entry = a
 			isTmpfs = true
+		case len(a) > 2 && a[0] == '-' && a[1] != '-':
+			// An attached value or a combined short option — Docker's pflag
+			// honors a -v inside either. Walk it with the account guard's
+			// cluster machinery, recording each -v's destination; an
+			// ambiguous shape fails closed rather than skipping a mount the
+			// refusal check cannot see.
+			if err := dockerCheckShorthandCluster(a, runArgs, i, "v",
+				func(_ byte, value string) error {
+					if dest := volumeSpecDest(value); dest != "" {
+						out = append(out, [2]string{a, dest})
+					}
+					return nil
+				},
+				"the bind-delivery path", "a -v"); err != nil {
+				return nil, err
+			}
+			continue
 		default:
 			continue
 		}
@@ -223,18 +242,23 @@ func runArgsMountDestinations(runArgs []string) [][2]string {
 		case isTmpfs:
 			dest = spec
 		default:
-			fields := strings.Split(spec, ":")
-			if len(fields) > 1 {
-				dest = fields[1]
-			} else {
-				dest = fields[0]
-			}
+			dest = volumeSpecDest(spec)
 		}
 		if dest != "" {
 			out = append(out, [2]string{entry, dest})
 		}
 	}
-	return out
+	return out, nil
+}
+
+// volumeSpecDest reports the container path a -v spec mounts: the second
+// ':'-field for src:dst[:opts], or the only field for an anonymous volume.
+func volumeSpecDest(spec string) string {
+	fields := strings.Split(spec, ":")
+	if len(fields) > 1 {
+		return fields[1]
+	}
+	return fields[0]
 }
 
 // refuseEnclosingRunArgsMounts refuses — before the container starts — any
@@ -249,7 +273,11 @@ func (p *dockerProvisioner) refuseEnclosingRunArgsMounts() error {
 	if !p.payloadViaBinds {
 		return nil
 	}
-	for _, m := range runArgsMountDestinations(p.runArgs) {
+	mounts, err := runArgsMountDestinations(p.runArgs)
+	if err != nil {
+		return err
+	}
+	for _, m := range mounts {
 		dest := path.Clean("/" + m[1])
 		for _, target := range p.stagingDestinations() {
 			if dest == target || dest == "/" || strings.HasPrefix(target, dest+"/") {
