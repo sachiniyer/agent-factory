@@ -179,3 +179,81 @@ func TestRunDaemonThrowawayExpiryIsObservedWhenItRacesTheStop(t *testing.T) {
 	require.False(t, saved.Load(),
 		"the final save ran and persisted live-session state into the expired sandbox")
 }
+
+// TestRunDaemonMarkedHomeReservesTheThrowawayTeardownInsideTheStop pins item 4
+// of #7620: when the home is marked, the throwaway teardown's known bound is
+// reserved inside the stop deadline — the drain's budget shrinks by it — so
+// the synchronous teardown is never squeezed out by drain work. A background
+// writer that would hold the drain for seconds is abandoned at its floor on a
+// marked home instead of being joined for the drain budget, which the
+// final-save skip makes observable. On master the drain had no reserve and
+// joined the writer before saving.
+func TestRunDaemonMarkedHomeReservesTheThrowawayTeardownInsideTheStop(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	stubContainerSweep(t)
+
+	notDefault, registry := t.TempDir(), t.TempDir()
+	previousDefault := throwawayDefaultHomeFn
+	throwawayDefaultHomeFn = func() (string, error) { return notDefault, nil }
+	previousRegistry := throwawayRegistryDirFn
+	throwawayRegistryDirFn = func() string { return registry }
+	previousInterval := throwawayCheckInterval
+	throwawayCheckInterval = time.Hour
+	t.Cleanup(func() {
+		throwawayDefaultHomeFn, throwawayRegistryDirFn = previousDefault, previousRegistry
+		throwawayCheckInterval = previousInterval
+	})
+
+	// Marked but not expiring: no declared owner, a deadline far off — the
+	// watchdog never fires, so the reserve is observable on the drain alone.
+	require.NoError(t, throwawaysandbox.WriteMarker(home, &throwawaysandbox.Marker{
+		Version: 1, Kind: "test-teardown-reserve",
+		CreatedUnix: time.Now().Unix(), MaxLifetimeSeconds: 3600,
+	}))
+
+	var saved atomic.Bool
+	previousSave := finalSave
+	finalSave = func(*Manager) error { saved.Store(true); return nil }
+	t.Cleanup(func() { finalSave = previousSave })
+
+	// Record so an abandoned exit never ends the test binary.
+	captureExitHoldingHome(t, nil)
+
+	managers := captureManager(t)
+	runExited := startInProcessDaemon(t, nil)
+	var manager *Manager
+	select {
+	case manager = <-managers:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the daemon never reached its instance restore")
+	}
+	waitForDaemonPhase(t, DaemonPhaseReady)
+
+	// The writer blocks on its stop channel and then holds the join open, so
+	// on master drainDaemon waits out its whole budget for it.
+	const mutationHold = 2500 * time.Millisecond
+	require.True(t, manager.launchBackgroundMutation(func(stop <-chan struct{}) {
+		<-stop
+		time.Sleep(mutationHold)
+	}), "the background mutation that holds the drain was not admitted")
+
+	asked := time.Now()
+	go func() {
+		var resp ShutdownResponse
+		_ = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
+	}()
+	select {
+	case <-runExited:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the daemon never exited")
+	}
+
+	// A marked home's drain yields to the reserved teardown bound: the writer
+	// is abandoned at its floor rather than joined, and an abandoned drain
+	// skips the final save. On master the join waited the full mutationHold.
+	require.Less(t, time.Since(asked), mutationHold,
+		"a marked home's drain joined a writer past the reserved teardown bound; the reserve never shrank the drain budget")
+	require.False(t, saved.Load(),
+		"the final save ran though the drain abandoned the writer it was owed")
+}

@@ -55,7 +55,7 @@ func TestDrainAbandonsAWedgedGoroutineAndWritesNothing(t *testing.T) {
 	var joined bool
 	drained := make(chan struct{})
 	go func() {
-		joined = drainDaemon(manager, nil, nil, func() error { return nil }, &controlClosed, make(chan struct{}), &workers)
+		joined = drainDaemon(manager, nil, nil, func() error { return nil }, &controlClosed, make(chan struct{}), &workers, 0)
 		close(drained)
 	}()
 	select {
@@ -81,7 +81,7 @@ func TestDrainReportsACompletedJoin(t *testing.T) {
 	}()
 
 	controlClosed := false
-	require.True(t, drainDaemon(manager, nil, nil, func() error { return nil }, &controlClosed, stopCh, &workers))
+	require.True(t, drainDaemon(manager, nil, nil, func() error { return nil }, &controlClosed, stopCh, &workers, 0))
 }
 
 func TestSkippedOnJoinTimeoutNamesTheOwedRetries(t *testing.T) {

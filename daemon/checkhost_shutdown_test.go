@@ -68,7 +68,7 @@ func TestShutdownCancelsInFlightHostProbesBeforeJoining(t *testing.T) {
 			// uncancelled this is where the 30s went.
 			<-rpcDone
 			return nil
-		}, &controlClosed, stopCh, &workers)
+		}, &controlClosed, stopCh, &workers, 0)
 		close(drained)
 	}()
 	select {
@@ -122,7 +122,7 @@ func TestHostRefreshIsNotJoinedByTheDrainWaitgroup(t *testing.T) {
 	controlClosed := false
 	drained := make(chan struct{})
 	go func() {
-		drainDaemon(manager, nil, nil, func() error { return nil }, &controlClosed, stopCh, &workers)
+		drainDaemon(manager, nil, nil, func() error { return nil }, &controlClosed, stopCh, &workers, 0)
 		close(drained)
 	}()
 	select {

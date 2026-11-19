@@ -229,6 +229,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		}
 	}
 	var throwawayHome string
+	var throwawayReserve time.Duration
 	settleThrowaway := func() {}
 	endThrowaway := func() {}
 	if homeDir, homeErr := config.GetConfigDir(); homeErr == nil {
@@ -236,6 +237,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		if marker, marked := loadThrowawayMarker(homeDir); marked {
 			registerThrowawaySandbox(homeDir)
 			recordThrowawayDaemon(homeDir)
+			// The teardown's known bound is reserved inside the stop
+			// deadline: the drain's budget shrinks by it (#7620 item 4),
+			// so the synchronous teardown below is never squeezed out by
+			// drain work — no goroutine, no abandon path.
+			throwawayReserve = throwawayTeardownBound
 			stopWatch := armThrowawayWatchdog(marker, throwawayExpireCh)
 			var settleOnce sync.Once
 			settleThrowaway = func() { settleOnce.Do(stopWatch) }
@@ -527,7 +533,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		if controlClosed {
 			return
 		}
-		drainPlanes(manager, watchers, closeHTTP, closeControl, &controlClosed, drainDeadline(manager))
+		drainPlanes(manager, watchers, closeHTTP, closeControl, &controlClosed, drainDeadline(manager).Add(-throwawayReserve))
 	}()
 
 	// Stand the startup watcher down BEFORE the HTTP listener starts serving:
@@ -780,7 +786,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	case <-throwawayExpireCh:
 	}
 
-	joined := drainDaemon(manager, watchers, closeHTTP, closeControl, &controlClosed, stopCh, wg)
+	joined := drainDaemon(manager, watchers, closeHTTP, closeControl, &controlClosed, stopCh, wg, throwawayReserve)
 
 	// Settle the expiry decision before any gate reads it (#7620): the fire
 	// a stop won against in the select, or one that closed mid-drain, is

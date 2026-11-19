@@ -126,6 +126,11 @@ func drainDeadline(m *Manager) time.Time {
 // stop restarting and stop counting exits from this instant, not from the
 // deferred teardown that runs only after this drain and the final save
 // (#7392). nil is allowed.
+//
+// reserve is spent work the caller has already promised the stop's tail: a
+// marked throwaway home reserves its teardown's known bound inside the stop
+// deadline here by shrinking the drain's (#7620 item 4), so the synchronous
+// teardown that follows is not squeezed out by the drain's own budget.
 func drainDaemon(
 	m *Manager,
 	watchers *watcherSupervisor,
@@ -134,12 +139,13 @@ func drainDaemon(
 	controlClosed *bool,
 	stopCh chan struct{},
 	wg *sync.WaitGroup,
+	reserve time.Duration,
 ) (joined bool) {
 	// Every step from here to the save draws on one deadline (#7393), measured
 	// from when the stop was requested (#7416). A step that cannot finish in
 	// what is left is abandoned, named in the log, and costs the final save —
 	// never the whole stop.
-	deadline := drainDeadline(m)
+	deadline := drainDeadline(m).Add(-reserve)
 	handlersJoined := drainPlanes(m, watchers, closeHTTP, closeControl, controlClosed, deadline)
 
 	// Stop and join daemon-owned writers too. The lifecycle gate drainPlanes
