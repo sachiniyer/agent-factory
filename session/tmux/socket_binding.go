@@ -117,9 +117,10 @@ var serverPIDExited = func(pid int) bool {
 }
 
 // bindingAgainst classifies a server whose listening sockets are bound to
-// paths against the absent socketPath. A comparison that cannot be made
-// certain (a symlink loop on either side) leaves the server unresolved: only a
-// certain mismatch rules it out.
+// paths against the absent socketPath. Only a CERTAIN mismatch rules it out
+// (#7533): a comparison either side cannot prove — a symlink loop, or a walk
+// truncated at a deleted or unclassifiable component that may have been an
+// alias of the other spelling — leaves the server unresolved (#7562).
 func bindingAgainst(socketPath string, paths []string) (socketBinding, string) {
 	want, ok := canonicalSocketPath(socketPath)
 	if !ok {
@@ -132,8 +133,11 @@ func bindingAgainst(socketPath string, paths []string) (socketBinding, string) {
 			uncertain = true
 			continue
 		}
-		if got == want || sameSocketDir(p, socketPath) {
+		if got.path == want.path || sameSocketDir(p, socketPath) {
 			return socketBindingBound, p
+		}
+		if !certainSocketMismatch(want, got) {
+			uncertain = true
 		}
 	}
 	if uncertain {
@@ -147,7 +151,7 @@ func bindingAgainst(socketPath string, paths []string) (socketBinding, string) {
 func sameSocketPath(a, b string) bool {
 	ca, okA := canonicalSocketPath(a)
 	cb, okB := canonicalSocketPath(b)
-	return (okA && okB && ca == cb) || sameSocketDir(a, b)
+	return (okA && okB && ca.path == cb.path) || sameSocketDir(a, b)
 }
 
 // sameSocketDir reports whether two paths have the same last component in
@@ -181,6 +185,70 @@ func splitSocketPath(p string) (dir, base string) {
 // as the kernel bounds a path walk (Linux MAXSYMLINKS is 40).
 const maxSocketPathLinks = 40
 
+// socketPathWalk is what canonicalSocketPath learned about one spelling
+// (#7562): the spelling it reached, and where it stopped reaching.
+type socketPathWalk struct {
+	// path is the spelling comparisons use: the resolved prefix plus whatever
+	// components the walk could not enter, joined verbatim — never cleaned,
+	// so a "." or ".." the walk could not test cannot make two spellings
+	// converge. Two spellings with the same path name the same socket — the
+	// unwalked parts are spelled identically, so anything hidden under them
+	// lands on both alike.
+	path string
+	// resolved is the longest prefix the filesystem resolved, and rest the
+	// raw components past it — both empty when every component resolved.
+	// rest[0] is the first component the walk could not enter: missing says
+	// it is provably absent (the deleted-component case), and !missing says
+	// it is present but unclassifiable — a search-denied parent or a raced
+	// re-creation — which may still hide a live symlink.
+	resolved string
+	rest     []string
+	missing  bool
+}
+
+// certain reports whether the walk's spelling is one a comparison may TRUST
+// for a mismatch — every component resolved, or the walk stopped only at the
+// socket's own provably-absent basename. The second is the ordinary "socket
+// file is gone" shape, a resolved directory plus a literal name, and it is the
+// probe's own premise: treating it as a possible alias would leave every
+// absent socket undecidable, which is the over-refusal #7562 had to avoid.
+// The residual it accepts is a hand-placed symlink at the socket's own
+// basename — a divergence af's socket paths do not produce.
+func (w socketPathWalk) certain() bool {
+	return len(w.rest) == 0 || (len(w.rest) == 1 && w.missing)
+}
+
+// certainSocketMismatch reports whether two spellings that already compare
+// unequal PROVABLY name different sockets — the only comparison that may rule
+// a server out (#7533, #7562). A mismatch is certain when both walks are
+// certain answers, or when both stopped at the SAME component: rest[0] is then
+// one dentry under one resolved directory, so whatever it is or was it is the
+// same for both spellings, and the plain-name tails it hides decide the
+// comparison literally. Every other unequal pair is uncertain: an unwalked
+// component on either side may have been an alias of the other's.
+func certainSocketMismatch(want, got socketPathWalk) bool {
+	if want.certain() && got.certain() {
+		return true
+	}
+	if len(want.rest) == 0 || len(got.rest) == 0 ||
+		want.resolved != got.resolved || want.rest[0] != got.rest[0] {
+		return false
+	}
+	return plainSocketComponents(want.rest) && plainSocketComponents(got.rest)
+}
+
+// plainSocketComponents reports whether every unwalked component is a plain
+// name the literal tail compare can trust — no "", "." or "..", each of which
+// the kernel walks somewhere the spelling does not say.
+func plainSocketComponents(rest []string) bool {
+	for _, c := range rest {
+		if c == "" || c == "." || c == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // canonicalSocketPath resolves p the way the kernel walks it, so two spellings
 // of one socket compare equal (#7533):
 //
@@ -188,18 +256,24 @@ const maxSocketPathLinks = 40
 //     filepath.EvalSymlinks, which walks symlinks and ".." the way the kernel
 //     does. Nothing is cleaned lexically first: a ".." after a symlink names
 //     the symlink TARGET's parent, so /tmp/base/link/../s, with link pointing
-//     at /tmp/base/real/child, is /tmp/base/real/s (Codex on #7537).
+//     at /tmp/base/real/child, is /tmp/base/real/s (Codex on #7537). One
+//     caveat: EvalSymlinks also cleans a ".." LEXICALLY, so dir/../s would
+//     resolve when dir is deleted — verifiedSocketPrefix rejects that, since
+//     a deleted dir may have been an alias whose ".." lands elsewhere.
 //   - The first component past that prefix may be a symlink whose target is
 //     gone. EvalSymlinks fails on a dangling link, but the kernel still
 //     follows it, so it is followed here: a client that reached the socket
 //     through /tmp/alias.sock -> /tmp/actual.sock names the server bound to
 //     /tmp/actual.sock after that file is unlinked (Codex on #7537).
 //   - Whatever lies past that is kept as written. It cannot be walked: the
-//     kernel would fail there too.
+//     kernel would fail there too — and the component that stopped it may
+//     itself be a deleted alias (#7562), so the answer carries where the walk
+//     ended for the comparison to weigh, not a bare "resolved" flag.
 //
-// false means the walk did not end within maxSocketPathLinks links (a loop):
-// the path names nothing certain, and a comparison with it rules nothing out.
-func canonicalSocketPath(p string) (string, bool) {
+// false means the walk did not end within maxSocketPathLinks links (a loop)
+// or could not place the path at all (a relative spelling): the path names
+// nothing certain, and a comparison with it rules nothing out.
+func canonicalSocketPath(p string) (socketPathWalk, bool) {
 	for range maxSocketPathLinks + 1 {
 		parts := strings.Split(p, "/")
 		resolved, i := "", len(parts)
@@ -209,21 +283,31 @@ func canonicalSocketPath(p string) (string, bool) {
 				prefix = "/"
 			}
 			if r, err := filepath.EvalSymlinks(prefix); err == nil {
+				if !verifiedSocketPrefix(parts, i) {
+					continue
+				}
 				resolved = r
 				break
 			}
 		}
 		if i == 0 {
-			return filepath.Clean(p), true
+			// Not even "/" resolved — a relative spelling, which no
+			// absolute bound path can be placed against.
+			return socketPathWalk{}, false
 		}
 		rest := parts[i:]
 		if len(rest) == 0 {
-			return resolved, true
+			return socketPathWalk{path: resolved, resolved: resolved}, true
 		}
 		dir := strings.TrimSuffix(resolved, "/")
 		target, err := os.Readlink(dir + "/" + rest[0])
 		if err != nil {
-			return filepath.Join(append([]string{resolved}, rest...)...), true
+			return socketPathWalk{
+				path:     dir + "/" + strings.Join(rest, "/"),
+				resolved: resolved,
+				rest:     rest,
+				missing:  errors.Is(err, os.ErrNotExist),
+			}, true
 		}
 		if !filepath.IsAbs(target) {
 			target = dir + "/" + target
@@ -233,7 +317,34 @@ func canonicalSocketPath(p string) (string, bool) {
 			p += "/" + strings.Join(rest[1:], "/")
 		}
 	}
-	return "", false
+	return socketPathWalk{}, false
+}
+
+// verifiedSocketPrefix reports whether parts[:i] is a prefix the kernel could
+// have reached. EvalSymlinks cleans a ".." lexically, so dir/../s resolves
+// even when dir is deleted — an answer the kernel's walk would not give, and
+// a deleted dir may have been an alias whose ".." landed on a different
+// parent (#7562). Each ".." must therefore cancel a component that verifies
+// on its own spelling; un-canceled components were verified by the resolve.
+func verifiedSocketPrefix(parts []string, i int) bool {
+	open := make([]int, 0, i)
+	for j := 0; j < i; j++ {
+		switch parts[j] {
+		case "..":
+			if len(open) == 0 {
+				continue // a ".." at the root cancels nothing
+			}
+			k := open[len(open)-1]
+			open = open[:len(open)-1]
+			if _, err := os.Lstat(strings.Join(parts[:k+1], "/")); err != nil {
+				return false
+			}
+		case "", ".":
+		default:
+			open = append(open, j)
+		}
+	}
+	return true
 }
 
 // possibleSocketOwners is the socket-absent refusal's list of who could still
