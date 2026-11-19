@@ -196,7 +196,7 @@ func TestDockerStagingBindsDeliverThePayload(t *testing.T) {
 	_, err := p.provision()
 	require.NoError(t, err, "calls=%v", calls)
 
-	run := findDockerCall(calls, "run", "--entrypoint")
+	run := findDockerCall(calls, "run", "-d")
 	require.NotNil(t, run, "no docker run call; calls=%v", calls)
 	entryIdx := -1
 	for i, a := range run {
@@ -281,7 +281,7 @@ func TestDockerStagingRootlessStillBinds(t *testing.T) {
 	_, err := p.provision()
 	require.NoError(t, err, "calls=%v", calls)
 
-	run := findDockerCall(calls, "run", "--entrypoint")
+	run := findDockerCall(calls, "run", "-d")
 	require.NotNil(t, run)
 	require.NotEmpty(t, findDockerCall(calls, "run", ":"+dockerAfBinaryPath+":"),
 		"a rootless engine reads the daemon-owned staging dir — the bind path applies; argv=%v", run)
@@ -341,7 +341,7 @@ func TestDockerStagingDesktopUnshareableFallsBackToCp(t *testing.T) {
 	_, err := p.provision()
 	require.NoError(t, err, "calls=%v", calls)
 
-	run := findDockerCall(calls, "run", "--entrypoint")
+	run := findDockerCall(calls, "run", "-d")
 	require.NotNil(t, run)
 	require.Nil(t, findDockerCall(calls, "run", ":"+dockerAfBinaryPath+":"),
 		"an unshareable staging dir must not be bound; argv=%v", run)
@@ -825,7 +825,7 @@ func TestDockerStagingColonHomeUsesTheCpFallback(t *testing.T) {
 		"the unencodable path must fall back to cp; calls=%v", calls)
 	require.NotNil(t, findDockerCall(calls, "exec", "/proc/self/mountinfo"),
 		"the mount-table guard still gates the cp; calls=%v", calls)
-	run := findDockerCall(calls, "run", "--entrypoint")
+	run := findDockerCall(calls, "run", "-d")
 	require.NotNil(t, run, "calls=%v", calls)
 	for _, m := range stagingBindVolumes(run) {
 		assert.NotContains(t, m, home, "a colon-bearing source must not reach a -v spec: %q", m)
@@ -855,7 +855,7 @@ func TestDockerStagingContainerizedAfFallsBackToCp(t *testing.T) {
 	require.NoError(t, err, "calls=%v", calls)
 
 	assert.False(t, p.payloadViaBinds, "a containerized daemon's staging dir is invisible to host dockerd")
-	run := findDockerCall(calls, "run", "--entrypoint")
+	run := findDockerCall(calls, "run", "-d")
 	require.NotNil(t, run, "calls=%v", calls)
 	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
 	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
@@ -884,7 +884,7 @@ func TestDockerStagingVolumesFromFallsBackToCp(t *testing.T) {
 	require.NoError(t, err, "calls=%v", calls)
 
 	assert.False(t, p.payloadViaBinds, "--volumes-from destinations cannot be enumerated for the enclosing-mount guard")
-	run := findDockerCall(calls, "run", "--entrypoint")
+	run := findDockerCall(calls, "run", "-d")
 	require.NotNil(t, run, "calls=%v", calls)
 	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
 	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
@@ -968,7 +968,7 @@ func TestDockerStagingProxiedEndpointFallsBackToCp(t *testing.T) {
 	require.NoError(t, err, "calls=%v", calls)
 
 	assert.False(t, p.payloadViaBinds, "a tcp endpoint carries no on-this-host proof")
-	run := findDockerCall(calls, "run", "--entrypoint")
+	run := findDockerCall(calls, "run", "-d")
 	require.NotNil(t, run, "calls=%v", calls)
 	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
 	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)

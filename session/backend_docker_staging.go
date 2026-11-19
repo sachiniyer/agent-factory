@@ -348,8 +348,13 @@ func (p *dockerProvisioner) probeResolvedDestinations() ([]string, bool, error) 
 		dirB = path.Dir(dsts[1])
 		leafB = dsts[1]
 	}
+	// --entrypoint is required: Docker appends positional args to the image's
+	// own ENTRYPOINT, which would run the image's workload instead of this
+	// probe. The af.session label keeps a timed-out probe reapable — the
+	// wrapper kills only the CLI and --rm needs the container to exit.
 	out, err := p.docker(dockerShortStepTimeout,
-		"run", "--rm", p.image, dockerContainerShell, "-c",
+		"run", "--rm", "--label", dockerSessionLabel+"="+Slugify(p.spec.Title),
+		"--entrypoint", dockerContainerShell, p.image, "-c",
 		`export PATH=/usr/sbin:/usr/bin:/sbin:/bin; cd -- "$1" && pwd -P && printf '\0' && cd -- "$2" && pwd -P && printf '\0' && for f in "$3" "$4"; do if [ -L "$f" ]; then printf '`+leafSymlinkMarker+`%s\n' "$f"; fi; done`,
 		"sh", dirA, dirB, dsts[0], leafB)
 	if err != nil {
