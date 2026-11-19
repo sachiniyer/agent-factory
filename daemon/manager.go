@@ -631,11 +631,11 @@ type Manager struct {
 	// composer evidence is being re-checked while the agent sits Ready.
 	// Keyed by stableSessionKey; guarded by pausedMu.
 	stagedDraftWatches map[string]*stagedDraftWatch
-	// dialogHolds is the poll's memory of sessions whose trust gate holds a
-	// launch dialog on an unchanged pane (#7635): the hold it has flagged for
-	// attention and the request it raised, so a hold is flagged once and only
-	// its own request is cleared. Keyed by stableSessionKey; guarded by
-	// dialogHoldMu, a leaf.
+	// dialogHolds is what one poll owes the next about a session whose trust
+	// gate holds a launch dialog (#7635): a hold to flag, or marks to take
+	// down. What is durable — the request's Origin marker and the flagged
+	// pane's key — lives on the session, not here. Keyed by stableSessionKey;
+	// guarded by dialogHoldMu, a leaf.
 	dialogHoldMu sync.Mutex
 	dialogHolds  map[string]*dialogHoldEntry
 	// rateIndexer is the bounded rollout-store reader the account-limit proof

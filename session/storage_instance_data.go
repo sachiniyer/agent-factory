@@ -489,8 +489,13 @@ type InstanceData struct {
 	// Attention is the agent's own request for the user (`af sessions
 	// attention`). Persisted: a restart does not answer the question the agent
 	// asked.
-	Attention *Attention      `json:"attention,omitempty"`
-	Worktree  GitWorktreeData `json:"worktree"`
+	Attention *Attention `json:"attention,omitempty"`
+	// DialogHoldFlagged is the key of the held launch-dialog pane this session
+	// was last flagged for (#7635). Daemon bookkeeping, persisted so a restart
+	// keeps a dismissal; clients have no use for it. Additive + omitempty: a
+	// record written before the field decodes to "not flagged".
+	DialogHoldFlagged string          `json:"dialog_hold_flagged,omitempty"`
+	Worktree          GitWorktreeData `json:"worktree"`
 	// pr_info was removed; encoding/json ignores the extra key in old records.
 	BackendType string `json:"backend_type,omitempty"`
 	// TabKinds is the daemon's own answer, per tab kind, to "may this session gain

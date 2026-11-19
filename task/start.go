@@ -148,7 +148,7 @@ func (t instanceTrustTarget) CheckAndHandleTrustPrompt() bool {
 
 func (t instanceTrustTarget) TrustPromptHold() string {
 	if hold := t.inst.DialogHold(); hold != nil {
-		return hold.Subject
+		return hold.Subject()
 	}
 	return ""
 }

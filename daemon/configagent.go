@@ -341,7 +341,7 @@ func (t configAgentTrustTarget) CheckAndHandleTrustPrompt() bool {
 // a spent budget's error says what af was waiting on (#7635).
 func (t configAgentTrustTarget) TrustPromptHold() string {
 	if notice, ok := t.ts.DialogHoldNotice(); ok {
-		return notice.Subject
+		return notice.Subject()
 	}
 	return ""
 }

@@ -740,6 +740,8 @@ type Instance struct {
 	rootRecreateContext RootRecreateContext
 
 	attention *Attention
+	// dialogHoldFlagged: see DialogHoldFlagged (dialog_hold.go). Persisted.
+	dialogHoldFlagged string
 
 	// userKilled is the kill-intent tombstone (#1108): set (and persisted)
 	// before an explicit kill's teardown begins, so a record that survives a

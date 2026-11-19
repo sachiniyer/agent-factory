@@ -6,6 +6,10 @@ import (
 	"time"
 )
 
+// AttentionOriginDialogHold marks a request the daemon raised for a launch
+// dialog the trust gate holds (#7635).
+const AttentionOriginDialogHold = "dialog-hold"
+
 // ErrAttentionNotLive rejects an attention request on a session whose agent is
 // not running or waiting: Lost, Dead, Archived, or stopped at a usage limit.
 var ErrAttentionNotLive = errors.New("attention applies only to a live agent")
@@ -27,6 +31,13 @@ const attentionAnswerIdle = 10 * time.Second
 type Attention struct {
 	Reason string    `json:"reason,omitempty"`
 	SetAt  time.Time `json:"set_at"`
+	// Origin says who raised the request when it was not the agent: the daemon
+	// path that owns it, and so the only one that may clear or replace it
+	// without the user. Empty for the agent's own request, and for every
+	// request written before the field existed. It is a fact recorded when the
+	// request is raised; nothing infers it from Reason, and no request that
+	// arrives over the control or sandbox API can set it.
+	Origin string `json:"origin,omitempty"`
 	// SeenIdle records that the agent went idle after it asked, and IdleSince
 	// when. The agent asks while it is still running, so only a Running edge
 	// after a long enough idle spell is the user's answer starting new work. A
@@ -89,6 +100,7 @@ func sameAttention(a, b *Attention) bool {
 		return a == b
 	}
 	return a.Reason == b.Reason &&
+		a.Origin == b.Origin &&
 		a.SetAt.Equal(b.SetAt) &&
 		a.SeenIdle == b.SeenIdle &&
 		a.IdleSince.Equal(b.IdleSince)
@@ -113,13 +125,24 @@ type AttentionUndo struct {
 // the same lock that liveness changes take, so a transition either lands first
 // and is refused here, or lands after and clears the request.
 func (i *Instance) SetAttention(reason string, now time.Time) (AttentionUndo, error) {
+	return i.setAttention(reason, "", now)
+}
+
+// SetOwnedAttention is SetAttention for a request a daemon path raises by
+// itself and owns: origin is recorded on the request, so that path can find
+// its own request again — after a restart included — without reading Reason.
+func (i *Instance) SetOwnedAttention(reason, origin string, now time.Time) (AttentionUndo, error) {
+	return i.setAttention(reason, origin, now)
+}
+
+func (i *Instance) setAttention(reason, origin string, now time.Time) (AttentionUndo, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if attentionStoppedLocked(i) {
 		return AttentionUndo{}, ErrAttentionNotLive
 	}
 	previous := i.attention
-	i.attention = &Attention{Reason: NormalizeAttentionReason(reason), SetAt: now.UTC()}
+	i.attention = &Attention{Reason: NormalizeAttentionReason(reason), SetAt: now.UTC(), Origin: origin}
 	// A request set while the agent already waits at Ready counts the idle spell
 	// it inherits: IdleSince zero reads as long enough, so the next Running edge
 	// clears rather than surviving a full idle/run cycle as stale.

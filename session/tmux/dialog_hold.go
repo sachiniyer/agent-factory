@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -24,16 +25,59 @@ import (
 // its wait.
 const claudeDialogHoldSettle = 10 * time.Second
 
-// DialogHoldNotice says the trust gate has held a dialog it will not answer,
-// on a pane that has not changed for claudeDialogHoldSettle. The gate still
-// holds and still sends no key; the notice only makes the hold visible.
-type DialogHoldNotice struct {
-	// Subject is what af is waiting on, with the pane size when tmux reported
-	// it: "a folder-trust dialog it can't read (pane 60×12)".
-	Subject string
-	// Since is when the pane last changed. One held, unchanged pane keeps one
-	// Since, so a consumer can raise its signal once per hold.
-	Since time.Time
+// DialogHoldKind is what kind of hold the gate is in, from a closed set. The
+// text af shows for a hold is built from the kind and the pane's size and
+// from nothing else, so no pane content and no peer's free text reaches it.
+type DialogHoldKind string
+
+const (
+	// DialogHoldFolderUnreadable: the folder-trust dialog, in a shape af
+	// cannot read as rows — a pane too small wraps or scrolls it.
+	DialogHoldFolderUnreadable DialogHoldKind = "folder-unreadable"
+	// DialogHoldFolderPartial: the folder-trust dialog, not provably whole —
+	// a footer no supported build paints, or one only begun.
+	DialogHoldFolderPartial DialogHoldKind = "folder-partial"
+	// DialogHoldMCPUnreadable and DialogHoldMCPPartial: the same two holds on
+	// one of the MCP server dialogs.
+	DialogHoldMCPUnreadable DialogHoldKind = "mcp-unreadable"
+	DialogHoldMCPPartial    DialogHoldKind = "mcp-partial"
+	// DialogHoldRefused: a dialog af reads whole and still will not answer.
+	DialogHoldRefused DialogHoldKind = "refused"
+	// DialogHoldOther: any other hold, and any kind this build does not know.
+	DialogHoldOther DialogHoldKind = "other"
+)
+
+// dialogHoldSubjects is the whole vocabulary of a hold's subject.
+var dialogHoldSubjects = map[DialogHoldKind]string{
+	DialogHoldFolderUnreadable: "a folder-trust dialog it can't read",
+	DialogHoldFolderPartial:    "a folder-trust dialog it can't prove whole",
+	DialogHoldMCPUnreadable:    "an MCP server dialog it can't read",
+	DialogHoldMCPPartial:       "an MCP server dialog it can't prove whole",
+	DialogHoldRefused:          "a Claude Code dialog it won't answer on its own",
+	DialogHoldOther:            "a Claude Code dialog it can't read",
+}
+
+// KnownDialogHoldKind returns kind when it is one of the set, and
+// DialogHoldOther for anything else — a kind from a newer peer included.
+func KnownDialogHoldKind(kind DialogHoldKind) DialogHoldKind {
+	if _, ok := dialogHoldSubjects[kind]; ok {
+		return kind
+	}
+	return DialogHoldOther
+}
+
+// maxDialogHoldPaneSide bounds a pane dimension af will print.
+const maxDialogHoldPaneSide = 9999
+
+// DialogHoldSubject is what af is waiting on, built from the closed set: the
+// kind's words and, when both dimensions are plausible, the pane size — "a
+// folder-trust dialog it can't read (pane 60×12)".
+func DialogHoldSubject(kind DialogHoldKind, width, height int) string {
+	subject := dialogHoldSubjects[KnownDialogHoldKind(kind)]
+	if width < 1 || height < 1 || width > maxDialogHoldPaneSide || height > maxDialogHoldPaneSide {
+		return subject
+	}
+	return fmt.Sprintf("%s (pane %d×%d)", subject, width, height)
 }
 
 // dialogHoldLiveRemedy is the advice for a session that is still running, so
@@ -41,23 +85,40 @@ type DialogHoldNotice struct {
 // gives its own advice.
 const dialogHoldLiveRemedy = "Widen the pane, or answer it in the session's agent tab."
 
-// dialogHoldReasonLead opens every notice's reason.
-const dialogHoldReasonLead = "af is waiting on "
-
-// Reason is the notice as one line for a live session's attention signal.
-func (n DialogHoldNotice) Reason() string {
-	return dialogHoldReasonLead + n.Subject + ". " + dialogHoldLiveRemedy
+// DialogHoldReason is the hold as one line for a live session's attention
+// signal, built from the same closed set.
+func DialogHoldReason(kind DialogHoldKind, width, height int) string {
+	return "af is waiting on " + DialogHoldSubject(kind, width, height) + ". " + dialogHoldLiveRemedy
 }
 
-// IsDialogHoldReason reports whether reason has the shape Reason writes: its
-// lead, a subject, and the live remedy.
-func IsDialogHoldReason(reason string) bool {
-	subject, ok := strings.CutPrefix(reason, dialogHoldReasonLead)
-	if !ok {
-		return false
-	}
-	subject, ok = strings.CutSuffix(subject, ". "+dialogHoldLiveRemedy)
-	return ok && subject != ""
+// DialogHoldNotice says the trust gate has held a dialog it will not answer,
+// on a pane that has not changed for claudeDialogHoldSettle. The gate still
+// holds and still sends no key; the notice only makes the hold visible.
+type DialogHoldNotice struct {
+	Kind DialogHoldKind
+	// Width and Height are the pane's size, zero when tmux did not report it.
+	Width, Height int
+	// Since is when the pane last changed.
+	Since time.Time
+	// Key names the held pane: its process, and the hash and length of what
+	// it shows. The same pane showing the same bytes has the same key in any
+	// process that computes it, so a consumer that persists it can tell "the
+	// hold I already flagged" from a new one across its own restart.
+	Key string
+}
+
+// Subject is what af is waiting on, with the pane size when known.
+func (n DialogHoldNotice) Subject() string { return DialogHoldSubject(n.Kind, n.Width, n.Height) }
+
+// Reason is the notice as one line for a live session's attention signal.
+func (n DialogHoldNotice) Reason() string { return DialogHoldReason(n.Kind, n.Width, n.Height) }
+
+// dialogHoldKey derives a held pane's key from what the recorder keeps.
+func dialogHoldKey(panePID string, sum [sha256.Size]byte, size int) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\x00%d\x00", panePID, size)
+	h.Write(sum[:])
+	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 // dialogHoldRecorder times one held pane. It keeps a hash and length of the
@@ -114,17 +175,20 @@ func (r *dialogHoldRecorder) bindPane(since time.Time, panePID string) {
 // pane was respawned under an identical-looking capture: the clock restarts at
 // now against the new process, and nothing is raised. It reports whether the
 // notice went up.
-func (r *dialogHoldRecorder) raise(now, since time.Time, panePID, subject string) bool {
+func (r *dialogHoldRecorder) raise(now, since time.Time, pane paneIdentity, kind DialogHoldKind) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.since.Equal(since) || r.notice != nil {
 		return false
 	}
-	if r.panePID != panePID {
-		r.panePID, r.since = panePID, now
+	if r.panePID != pane.pid {
+		r.panePID, r.since = pane.pid, now
 		return false
 	}
-	r.notice = &DialogHoldNotice{Subject: subject, Since: since}
+	r.notice = &DialogHoldNotice{
+		Kind: kind, Width: pane.width, Height: pane.height,
+		Since: since, Key: dialogHoldKey(pane.pid, r.sum, r.size),
+	}
 	return true
 }
 
@@ -173,47 +237,84 @@ func (t *TmuxSession) recordDialogHold(content string, keysBefore uint64, held b
 	// failed read reports an unknown process. That matches only a clock whose
 	// first read failed too, and then the notice carries no size.
 	pane, _ := t.readPaneIdentity()
-	subject := claudeDialogHoldSubject(claudeScreenOf(content)) + pane.sizeNote()
-	if !t.dialogHold.raise(now, since, pane.pid, subject) {
+	kind := claudeDialogHoldKind(claudeScreenOf(content))
+	if !t.dialogHold.raise(now, since, pane, kind) {
 		return
 	}
 	log.WarningLog.Printf(
 		"session %q: af is waiting on %s, unchanged for %s; af holds and sends no key, and the session is flagged so someone can answer it (#7635)",
-		t.sanitizedName, subject, now.Sub(since).Round(time.Second))
+		t.sanitizedName, DialogHoldSubject(kind, pane.width, pane.height), now.Sub(since).Round(time.Second))
 }
 
-// claudeDialogHoldSubject names the held dialog from the gate's own readers.
-// It reads; it decides nothing. The order follows the gate's: a dialog af
-// reads whole but will not answer, then the folder-trust dialog it cannot
-// read, then one it cannot prove whole, then any other hold.
-func claudeDialogHoldSubject(screen visibleText) string {
+// claudeDialogHoldKind names the clause of CheckAndHandleTrustPrompt's Claude
+// branch that held this screen. It asks the gate's own readers in the gate's
+// own order, top to bottom, so the first clause that holds here is the one
+// that held there. It reads; it decides nothing and sends nothing.
+//
+// Keep it in step with that branch: a clause added there belongs here, at the
+// same position. A screen no clause claims reads DialogHoldOther.
+func claudeDialogHoldKind(screen visibleText) DialogHoldKind {
+	// A dialog af reads whole. It reached answerClaudeTrustPrompt and that
+	// still held: a draft's rule under it, a refusal, a key still pending.
 	if claudeTrustPromptPresent(screen) {
-		return "a Claude Code dialog it won't answer on its own"
+		return DialogHoldRefused
+	}
+	if claudeMCPDialogPartiallyRendered(screen) {
+		return DialogHoldMCPPartial
+	}
+	switch claudeMCPServersPickerOf(screen) {
+	case claudeMCPServersPartial:
+		return DialogHoldMCPPartial
+	case claudeMCPServersUnreadable:
+		return DialogHoldMCPUnreadable
+	}
+	switch claudeMCPServerDialogOf(screen).verdict {
+	case claudeMCPServerPartial:
+		return DialogHoldMCPPartial
+	case claudeMCPServerUnreadable:
+		return DialogHoldMCPUnreadable
 	}
 	switch claudeFolderTrustDialogOf(screen) {
-	case claudeFolderTrustUnreadable:
-		return "a folder-trust dialog it can't read"
 	case claudeFolderTrustPartial:
-		return "a folder-trust dialog it can't prove whole"
+		return DialogHoldFolderPartial
+	case claudeFolderTrustUnreadable:
+		return DialogHoldFolderUnreadable
 	}
 	if claudeLegacyTrustDialogOf(screen) == claudeLegacyTrustPartial {
-		return "a folder-trust dialog it can't prove whole"
+		return DialogHoldFolderPartial
 	}
-	return "a Claude Code dialog it can't read"
+	if _, held := claudeMCPTrustTailOf(screen); held {
+		return DialogHoldMCPUnreadable
+	}
+	if claudeMCPTrustPaintingOf(screen) {
+		return DialogHoldMCPPartial
+	}
+	if match, held := claudeLaunchDialogRewrapOf(screen); held {
+		switch match.kind {
+		case claudeLaunchDialogReworded, claudeLaunchDialogLegacy:
+			return DialogHoldFolderUnreadable
+		case claudeLaunchDialogMCPServer:
+			return DialogHoldMCPUnreadable
+		}
+		return DialogHoldOther // words the folder and MCP questions share
+	}
+	if claudeMCPServersTailOf(screen) {
+		return DialogHoldMCPUnreadable
+	}
+	if claudeMCPServersPaintingOf(screen) {
+		return DialogHoldMCPPartial
+	}
+	if claudeFolderTrustPaintingOf(screen) || claudeLegacyTrustPaintingOf(screen) ||
+		claudeFolderTrustQuestionPaintingOf(screen) {
+		return DialogHoldFolderPartial
+	}
+	return DialogHoldOther
 }
 
 // paneIdentity is the pane's process and size, as tmux reports them.
 type paneIdentity struct {
 	pid           string
 	width, height int
-}
-
-// sizeNote is " (pane 60×12)", or nothing when the size is unknown.
-func (p paneIdentity) sizeNote() string {
-	if p.width <= 0 || p.height <= 0 {
-		return ""
-	}
-	return fmt.Sprintf(" (pane %d×%d)", p.width, p.height)
 }
 
 const paneIdentityFormat = "#{pane_pid} #{pane_width} #{pane_height}"

@@ -7,150 +7,126 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// dialogHoldEntry is what the poll remembers about one session's held launch
-// dialog (#7635). Guarded by Manager.dialogHoldMu.
+// The poll's part in surfacing a launch dialog the trust gate holds (#7635).
+//
+// What is durable lives on the session and is persisted with its row:
+//   - the attention request carries Origin = session.AttentionOriginDialogHold.
+//     That marker is the whole of "this path raised it". It is the only thing
+//     recovery, adoption and clearing look at; the request's text is never
+//     read to decide ownership.
+//   - DialogHoldFlagged is the key of the held pane the session was last
+//     flagged for. A hold is flagged once per key, so a dismissed notice is
+//     not raised again for the same pane — in this daemon's life or the next.
+//
+// What is in memory here is only what one poll owes the next.
+
+// dialogHoldEntry is that memory for one session. Guarded by
+// Manager.dialogHoldMu.
 type dialogHoldEntry struct {
-	// due is a hold the poll observed and has not yet flagged; nil when none.
+	// due is a hold observed and not yet flagged; nil when none.
 	due *session.DialogHold
-	// since names the hold this session was last flagged for. One held,
-	// unchanged pane keeps one Since, so a hold is flagged once: a request the
-	// user dismissed is not raised again for the same pane.
-	since time.Time
-	// setAt is the attention request this path owns, the only one it may
-	// clear or replace: the one it raised, or its own notice found on the row
-	// after a restart. Zero when it owns none. It is carried while a newer
-	// hold is due, so that hold's flush replaces the request under the locks
-	// instead of racing an asynchronous clear of it.
-	setAt time.Time
-	// recoveredAt is set on an entry made from a notice found on the row with
-	// no hold observed: the daemon restarted, and the request outlived the
-	// memory of who raised it. Zero otherwise.
-	recoveredAt time.Time
+	// resolveDue says the hold is over and the session still carries its
+	// marks: this path's request, the flagged key, or both.
+	resolveDue bool
+	// seenHold says this daemon has observed a hold on this session. Until
+	// then a no-hold observation is not proof the hold is over: see
+	// dialogHoldRestartGrace.
+	seenHold bool
+	// quietSince is the first no-hold observation of a session that carries
+	// marks this daemon never saw a hold for. Zero otherwise.
+	quietSince time.Time
 }
 
-// dialogHoldRecoveryGrace is how long a notice recovered after a restart may
-// stand with no hold observed before it is cleared. A restarted daemon's own
-// recorder starts its settle clock over, so a pane that is still held reports
-// no hold for that long; clearing at once would blink the flag off and on at
-// every restart. Three settle times covers the recorder and a slow first poll.
-const dialogHoldRecoveryGrace = 30 * time.Second
+// dialogHoldRestartGrace is how long a session's marks stand, with no hold
+// observed, in a daemon that has not seen the hold itself. That is a daemon
+// just restarted: the request and the flagged key came back with the row, and
+// a local gate's recorder starts its settle clock over, so a pane that is
+// still held reports no hold for about that long. Resolving at once would
+// blink the flag at every restart and forget a dismissal. Three settle times
+// covers the recorder and a slow first poll.
+const dialogHoldRestartGrace = 30 * time.Second
 
 // dialogHoldStep is the poll's whole decision about one observation, as a pure
-// function of what it remembered and what it saw. hold is the observation's
-// settled hold, or nil. It returns the entry to keep (nil to forget the
-// session) and, when clear is true, the attention request to clear: the one
-// this path owns, for a hold that has resolved.
-//
-// A hold that CHANGED clears nothing here. The request stays owned in the
-// entry beside the new due hold, and raiseDueDialogHold replaces it under the
-// attention locks. Queuing a clear for it instead would race that flush: the
-// flush could find the old request, take it for the new hold's, and then
-// lose it to the clear.
-func dialogHoldStep(entry *dialogHoldEntry, hold *session.DialogHold) (next *dialogHoldEntry, clearSetAt time.Time, clear bool) {
-	if hold == nil {
-		// Answered, cleared, or the pane changed: the notice is withdrawn.
-		if entry != nil && !entry.setAt.IsZero() {
-			return nil, entry.setAt, true
+// function. entry is what it remembered (the zero value for nothing), hold the
+// observation's normalized hold or nil, flagged and owned the session's
+// durable marks: the key it is flagged for, and whether this path's request is
+// on the row. It returns the entry to keep, and keep=false to forget the
+// session.
+func dialogHoldStep(entry dialogHoldEntry, hold *session.DialogHold, flagged string, owned bool, now time.Time) (next dialogHoldEntry, keep bool) {
+	if hold != nil {
+		next = dialogHoldEntry{seenHold: true}
+		if flagged != hold.Key {
+			due := *hold
+			next.due = &due
 		}
-		return nil, time.Time{}, false
+		// Flagged for this very pane already: raised, or raised and dismissed.
+		return next, true
 	}
-	if entry != nil && !entry.since.IsZero() && entry.since.Equal(hold.Since) {
-		// The hold this session is already flagged for: raise nothing more.
-		kept := *entry
-		kept.due = nil
-		return &kept, time.Time{}, false
+	if flagged == "" && !owned {
+		return dialogHoldEntry{}, false // no hold, no marks: nothing to do
 	}
-	// A hold not flagged yet. Any request this path still owns rides along.
-	due := *hold
-	next = &dialogHoldEntry{due: &due}
-	if entry != nil {
-		next.setAt = entry.setAt
+	// No hold, and marks to take down — once that is known to be true.
+	next = dialogHoldEntry{seenHold: entry.seenHold, quietSince: entry.quietSince}
+	if !next.seenHold {
+		if next.quietSince.IsZero() {
+			next.quietSince = now
+		}
+		if now.Sub(next.quietSince) < dialogHoldRestartGrace {
+			return next, true
+		}
 	}
-	return next, time.Time{}, false
+	next.resolveDue = true
+	return next, true
 }
 
-// noteDialogHold feeds one successful observation to the hold tracker. It only
-// records: the attention write happens in raiseDueDialogHold, after the
-// observation fence releases, the way the staged-draft flag is written. The
-// clear it may queue runs on its own goroutine and is keyed by SetAt, so it
-// removes nothing but the request this path owns.
-func (m *Manager) noteDialogHold(key string, instance *session.Instance, hold *session.DialogHold) {
-	m.dialogHoldMu.Lock()
-	entry := m.dialogHolds[key]
-	if entry == nil && hold == nil {
-		m.dialogHoldMu.Unlock()
-		// The common case: no hold, nothing remembered. One thing can still be
-		// owed: this path's own notice left on the row by a daemon that
-		// restarted before the hold resolved.
-		m.recoverDialogHoldNotice(key, instance)
-		return
-	}
-	if hold == nil && !entry.recoveredAt.IsZero() && nowFunc().Sub(entry.recoveredAt) < dialogHoldRecoveryGrace {
-		m.dialogHoldMu.Unlock()
-		return // a recovered notice waits out the restarted recorder's settle
-	}
-	next, clearSetAt, clear := dialogHoldStep(entry, hold)
-	if next == nil {
-		delete(m.dialogHolds, key)
-	} else {
-		if m.dialogHolds == nil {
-			m.dialogHolds = make(map[string]*dialogHoldEntry)
-		}
-		m.dialogHolds[key] = next
-	}
-	m.dialogHoldMu.Unlock()
-	if clear {
-		m.queueAttentionClear(instance, clearSetAt)
-	}
-}
-
-// recoverDialogHoldNotice takes ownership of a held-dialog notice found on a
-// session the tracker remembers nothing about. The request is persisted with
-// the row and the tracker is not, so after a restart a notice whose dialog was
-// answered meanwhile would otherwise tell the user, for good, to answer a
-// dialog that is gone. Owned again, it is cleared once no hold has been
-// observed for dialogHoldRecoveryGrace, or kept if the hold is reported again.
-//
-// The notice is recognized by its wording, which only this path writes. A
-// request with any other reason is never touched.
-func (m *Manager) recoverDialogHoldNotice(key string, instance *session.Instance) {
-	existing := instance.Attention()
-	if existing == nil || !session.IsDialogHoldReason(existing.Reason) {
-		return
-	}
+// noteDialogHold feeds one successful observation to the tracker. It only
+// records; every write happens in flushDialogHold, after the observation
+// fence releases, the way the staged-draft flag is written. The hold is
+// normalized here whatever its source, so a zero since, a malformed key or an
+// unknown kind never reaches a decision.
+func (m *Manager) noteDialogHold(key string, instance *session.Instance, observed *session.DialogHold) {
+	hold := session.NormalizedDialogHold(observed)
+	flagged, ownedSetAt := instance.DialogHoldFlagged()
 	m.dialogHoldMu.Lock()
 	defer m.dialogHoldMu.Unlock()
-	if m.dialogHolds[key] != nil {
+	entry, remembered := m.dialogHolds[key]
+	if hold == nil && !remembered && flagged == "" && ownedSetAt.IsZero() {
+		return // the common case, without touching the map
+	}
+	var prior dialogHoldEntry
+	if entry != nil {
+		prior = *entry
+	}
+	next, keep := dialogHoldStep(prior, hold, flagged, !ownedSetAt.IsZero(), nowFunc())
+	if !keep {
+		delete(m.dialogHolds, key)
 		return
 	}
 	if m.dialogHolds == nil {
 		m.dialogHolds = make(map[string]*dialogHoldEntry)
 	}
-	m.dialogHolds[key] = &dialogHoldEntry{setAt: existing.SetAt, recoveredAt: nowFunc()}
+	m.dialogHolds[key] = &next
 }
 
-// raiseDueDialogHold flags the session for a hold noteDialogHold recorded as
-// due. It reuses the attention signal and its write path unchanged: the
-// opLock→repoStartLock order, TryLock on both so the serial poll never parks
-// behind a create or a handoff, then persist and publish. On contention the
-// due mark stays and the next poll retries.
-//
-// What is already on the row decides the write, read under those locks:
-//   - nothing: raise the notice.
-//   - the request this path owns, from an earlier hold of this pane: keep it
-//     when the reason is the same, replace it when the reason changed.
-//   - this same notice, unowned (the daemon restarted while the pane stayed
-//     held): adopt it.
-//   - anything else — the agent's own question, a staged-draft flag: leave
-//     it. The due mark stays, and the notice goes up once the row is free.
-func (m *Manager) raiseDueDialogHold(repoID, key string, instance *session.Instance) {
+// flushDialogHold does what noteDialogHold recorded as owed: flag the session
+// for a hold, or take its marks down once the hold is over. It reuses the
+// attention signal and its write path: the opLock→repoStartLock order, TryLock
+// on both so the serial poll never parks behind a create or a handoff, then
+// one persist and one publish. On contention what is owed stays owed and the
+// next poll retries. Nothing here is asynchronous, so no clear can land after
+// a raise.
+func (m *Manager) flushDialogHold(repoID, key string, instance *session.Instance) {
 	m.dialogHoldMu.Lock()
 	entry := m.dialogHolds[key]
-	if entry == nil || entry.due == nil {
+	if entry == nil || (entry.due == nil && !entry.resolveDue) {
 		m.dialogHoldMu.Unlock()
 		return
 	}
-	hold, owned := *entry.due, entry.setAt
+	var hold *session.DialogHold
+	if entry.due != nil {
+		due := *entry.due
+		hold = &due
+	}
 	m.dialogHoldMu.Unlock()
 
 	opLock := m.opLockFor(daemonInstanceKey(repoID, instance.Title))
@@ -164,40 +140,103 @@ func (m *Manager) raiseDueDialogHold(repoID, key string, instance *session.Insta
 	}
 	defer repoStartLock.Unlock()
 
-	reason := session.NormalizeAttentionReason(hold.Reason())
-	existing := instance.Attention()
-	ours := existing != nil && !owned.IsZero() && existing.SetAt.Equal(owned)
-	var setAt time.Time
-	switch {
-	case existing != nil && existing.Reason == reason:
-		setAt = existing.SetAt
-	case existing != nil && !ours:
-		return
-	default:
-		// The row is free, or holds this path's request for an earlier hold
-		// whose reason no longer describes the pane. SetAttention replaces it.
-		previous, err := instance.SetAttention(reason, nowFunc())
-		if err != nil {
-			return // not a live, attention-eligible session; a later poll retries
-		}
-		data := instance.ToInstanceData()
-		if err := persistInstanceData(repoID, data); err != nil {
-			instance.RestoreAttention(previous)
-			m.warn().Printf("session %q: could not persist the held-dialog attention flag: %v", instance.Title, err)
-			return
-		}
-		m.publishEvent(agentproto.EventSessionUpdated, data)
-		if raised := instance.Attention(); raised != nil {
-			setAt = raised.SetAt
-		}
+	var done bool
+	if hold != nil {
+		done = m.raiseDialogHoldLocked(repoID, instance, *hold)
+	} else {
+		done = m.resolveDialogHoldLocked(repoID, instance)
 	}
-
+	if !done {
+		return
+	}
 	m.dialogHoldMu.Lock()
 	defer m.dialogHoldMu.Unlock()
-	// Only if the poll has not moved on meanwhile: the same hold still due.
-	if now := m.dialogHolds[key]; now != nil && now.due != nil && now.due.Since.Equal(hold.Since) {
-		m.dialogHolds[key] = &dialogHoldEntry{since: hold.Since, setAt: setAt}
+	now := m.dialogHolds[key]
+	if now == nil {
+		return
 	}
+	// Settle only what this flush did; the poll may have moved on meanwhile.
+	if hold != nil {
+		if now.due != nil && now.due.Key == hold.Key {
+			now.due = nil
+		}
+	} else if now.resolveDue {
+		delete(m.dialogHolds, key)
+	}
+}
+
+// raiseDialogHoldLocked flags the session for hold. Caller holds the op lock
+// and the repo start lock. It reports whether the hold is dealt with; false
+// leaves it due.
+//
+// What is on the row decides the write:
+//   - nothing: raise the notice, marked as this path's.
+//   - this path's own request, by its Origin marker, from an earlier hold or
+//     an earlier daemon: keep it when its words still describe the pane,
+//     replace it when they do not.
+//   - any other request — the agent's own question, a staged-draft flag, a
+//     request whose text happens to read like a notice: leave it. The hold
+//     stays due and the notice goes up once the row is free.
+func (m *Manager) raiseDialogHoldLocked(repoID string, instance *session.Instance, hold session.DialogHold) bool {
+	if flagged, _ := instance.DialogHoldFlagged(); flagged == hold.Key {
+		return true
+	}
+	reason := session.NormalizeAttentionReason(hold.Reason())
+	existing := instance.Attention()
+	ours := existing != nil && existing.Origin == session.AttentionOriginDialogHold
+	if existing != nil && !ours {
+		return false
+	}
+	var undo session.AttentionUndo
+	wrote := false
+	if !ours || existing.Reason != reason {
+		var err error
+		undo, err = instance.SetOwnedAttention(reason, session.AttentionOriginDialogHold, nowFunc())
+		if err != nil {
+			return false // not a live, attention-eligible session; a later poll retries
+		}
+		wrote = true
+	}
+	previousKey := instance.SetDialogHoldFlagged(hold.Key)
+	data := instance.ToInstanceData()
+	if err := persistInstanceData(repoID, data); err != nil {
+		if wrote {
+			instance.RestoreAttention(undo)
+		}
+		instance.SetDialogHoldFlagged(previousKey)
+		m.warn().Printf("session %q: could not persist the held-dialog attention flag: %v", instance.Title, err)
+		return false
+	}
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	return true
+}
+
+// resolveDialogHoldLocked takes the session's marks down once its hold is
+// over: this path's request, if it is still the one on the row, and the
+// flagged key. Caller holds the op lock and the repo start lock. A request
+// without this path's Origin marker is never cleared, whatever it says.
+func (m *Manager) resolveDialogHoldLocked(repoID string, instance *session.Instance) bool {
+	flagged, ownedSetAt := instance.DialogHoldFlagged()
+	if flagged == "" && ownedSetAt.IsZero() {
+		return true
+	}
+	var undo session.AttentionUndo
+	cleared := false
+	if !ownedSetAt.IsZero() {
+		undo, cleared = instance.ClearAttention(ownedSetAt)
+	}
+	instance.SetDialogHoldFlagged("")
+	data := instance.ToInstanceData()
+	if err := persistInstanceData(repoID, data); err != nil {
+		if cleared {
+			instance.RestoreAttention(undo)
+		}
+		instance.SetDialogHoldFlagged(flagged)
+		m.warn().Printf("session %q: could not clear the held-dialog attention flag: %v", instance.Title, err)
+		return false
+	}
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	return true
 }
 
 // sweepDialogHolds drops entries whose session no longer exists. The poll is

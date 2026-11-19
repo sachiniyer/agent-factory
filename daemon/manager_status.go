@@ -716,7 +716,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	defer func() { m.raiseDueStagedDraftFlag(repoID, key, instance) }()
 	// The held-dialog notice (#7635) is flagged the same way and for the same
 	// reason: recorded under the fence, written after it releases.
-	defer func() { m.raiseDueDialogHold(repoID, key, instance) }()
+	defer func() { m.flushDialogHold(repoID, key, instance) }()
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
 	defer releaseObservationSettlement()
 	// Same request-start bound as the paused-path feed below: the pane is

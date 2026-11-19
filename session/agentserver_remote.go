@@ -227,7 +227,9 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 		Reflow: resp.Reflow,
 		// A sandbox that predates the field reports no hold, and nothing is
 		// raised for it (#7635).
-		DialogHold: cloneDialogHold(resp.DialogHold),
+		// What it does send is normalized here, at the wire: a zero since or
+		// a malformed key is no hold, and no text of the sandbox's is kept.
+		DialogHold: NormalizedDialogHold(resp.DialogHold),
 	}, nil
 }
 
