@@ -339,15 +339,30 @@ will not reach the child's environment.
   terminator's tail is handed to a shell that decodes `-c` itself — so
   `script -q -O -- -c 'export CODEX_""HOME=/other; codex'` and `su --
   work -c 'env CODEX_""HOME=/o x'` refuse while `script -- typescript`
-  and `su -- work` run. A runner nested inside a resetting launcher's
-  tail carries the reset into its decoded payload —
-  `sudo su -c 'co""dex' root` and `sudo script -q -c 'co""dex'
-  /dev/null` refuse because the child lands `codex` under env_reset,
-  while `sudo -E su -c 'co""dex' root` (the pins are preserved) and
-  `sudo su -c 'make' root` run. Interactive shells themselves stay
-  refused wherever they appear — `shellCommandIsUnproven` already
-  covers `sh`/`bash`/`zsh`/`dash`/`ksh`/`fish`/... at command position
-  — so their `-c` operands need no separate scan.
+  and `su -- work` run. Nor does an operand slot: when it is uncertain
+  which `-c` word is the command string — a `-c` can itself be an
+  option's operand — EVERY candidate payload is judged, so
+  `su -c -c 'env CODEX_HOME=/o x' work` refuses. A runner nested
+  inside a resetting launcher's tail carries the reset into its
+  decoded payload — `sudo su -c 'co""dex' root` and
+  `sudo script -q -c 'co""dex' /dev/null` refuse because the child
+  lands `codex` under env_reset, while `sudo -E su -c 'co""dex' root`
+  (the pins are preserved) and `sudo su -c 'make' root` run.
+  Interactive shells themselves stay refused wherever they appear —
+  `shellCommandIsUnproven` already covers `sh`/`bash`/`zsh`/`dash`/
+  `ksh`/`fish`/... at command position — so their `-c` operands need
+  no separate scan.
+- **Hidden inputs refuse** — a flag that loads arguments or
+  environment from a file or file descriptor puts the real command
+  outside the VISIBLE command line, so `bwrap --args 3`, bwrap's
+  file-style injectors (`--file`/`--bind-data`/`--ro-bind-data`/
+  `--symlink`/`--seccomp`/`--add-seccomp-fd`), `--env-file` spellings
+  and `xargs -a`/`--arg-file` all refuse; `docker build --file
+  Dockerfile` reads a build file, not child argv, and runs. The gate
+  judges the visible command line — content inside script files,
+  sourced files or programs it cannot read is out of scope; its job
+  is the obvious, accidental re-root, and a determined user can
+  always write a script file.
 
 A launcher buried inside another command's argv (`nohup sudo
 CODEX_HOME=/other codex`, `docker build env CODEX_HOME=/other codex`) is

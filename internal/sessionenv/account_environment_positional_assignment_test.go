@@ -1014,6 +1014,34 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// rule — the accepted over-refusal the arithmetic/cmdsubst admit
 		// table now documents.
 		{"[[ $(echo CODEX_HOME=1) == \"CODEX_HOME=1\" ]]; codex", true},
+
+		// Hidden-input flags refuse outright — argv or environment read
+		// from a file or fd is outside the VISIBLE command line (Codex
+		// P1). bwrap's file-style injectors are scoped to its arm so
+		// `docker build --file Dockerfile` stays admitted.
+		{"bwrap --args 3 -- true", true},
+		{"bwrap --args=3 --ro-bind / / true", true},
+		{"bwrap --file 3 /etc/hostname true", true},
+		{"bwrap --bind-data 3 /x true", true},
+		{"bwrap --ro-bind-data 3 /x true", true},
+		{"bwrap --symlink 3 /x true", true},
+		{"bwrap --seccomp 3 -- true", true},
+		{"bwrap --bind /a /b true", false},
+		{"prog bwrap --args 3 codex", true},
+		{"docker build --file Dockerfile .", false},
+		{"xargs -a items.txt", true},
+		{"xargs --arg-file items.txt", true},
+		{"xargs --arg-file=items.txt -I{} {}", true},
+		{"xargs -0a items.txt", true},
+		{"xargs -d, -n2 echo", false},
+		// Payload ambiguity: a `-c` that is itself an option operand
+		// does not end the candidate scan — every candidate payload is
+		// judged, so the real command string cannot hide behind a
+		// consumed one (Codex P1).
+		{"su -c -c 'env CODEX_HOME=/o x' work", true},
+		{"su -l -c -c 'co\"\"dex' root", true},
+		{"script -O -c 'env CODEX_HOME=/o codex'", true},
+		{"script -c -c 'echo hi' out.log", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)

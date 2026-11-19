@@ -12,6 +12,15 @@ import (
 // path launches arbitrary user processes, so unrelated configuration such as
 // PORT=3000 remains allowed. Shell decorations do not hide calls from the walk,
 // and an unsupported form of a recognized environment mutator fails closed.
+//
+// The gate's limit: it judges the VISIBLE command line. Content inside
+// script files, sourced files, file-descriptor payloads, or programs it
+// cannot read is out of scope — that is why flags feeding argv or
+// environment from a file (bwrap --args, --env-file, xargs -a, …) refuse
+// outright rather than model what they load. The gate's job is the
+// obvious, accidental re-root: a determined user can always write a
+// script file that re-pins the account, and no command-line check can
+// see inside it.
 func commandMutatesAccountEnvironment(command string, names map[string]struct{}) bool {
 	if command == "" {
 		return false
