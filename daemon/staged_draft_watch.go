@@ -38,11 +38,11 @@ const stagedDraftMaxBlindReads = 300
 // closed is the "never captured for again" latch, set by EITHER terminal
 // outcome: the flag landed, or the evidence resolved (a transcript echo above
 // the composer, gone, or never bound). A closed entry is kept, not deleted,
-// precisely so the NEXT Ready+sent-unverified tick for the same attempt skips
-// the capture — a delivered send's durable verdict stays sent-unverified, and
-// without this memory every idle poll would re-capture it forever (#7545
-// review). A newer send's attemptAt mismatch re-arms past it; the sweep drops
-// it when the session dies.
+// precisely so the NEXT Ready+unproven tick for the same attempt skips the
+// capture — a delivered send's durable verdict stays sent-unverified or
+// could-not-confirm, and without this memory every idle poll would re-capture
+// it forever (#7545 review). A newer send's attemptAt mismatch re-arms past
+// it; the sweep drops it when the session dies.
 //
 // due and dueWhy are the deferred flag (#7545 review): the feed runs under the
 // instance's observation-settlement fence, where taking the session op lock is
@@ -77,8 +77,10 @@ type stagedDraftWatch struct {
 // releases.
 //
 // The gate runs BEFORE any pane read, in cost order: only a session the poll
-// itself just settled Ready, whose recorded delivery still says
-// sent-unverified, can hold an unsubmitted bound draft. Ready is also the
+// itself just settled Ready, whose recorded delivery still reads unproven —
+// sent-unverified, or could-not-confirm when the pane was not observable at
+// the send at all (#6819, same contract as reverifiableSendStatus in
+// send_confirm.go) — can hold an unsubmitted bound draft. Ready is also the
 // mid-turn exclusion — resolveIdleLiveness holds Running while the pane shows
 // turn chrome, so text queued behind a working agent (#4622's shape) never
 // reaches the capture below. A blind tick — unreadable pane, failed capture —
@@ -86,17 +88,18 @@ type stagedDraftWatch struct {
 // staged, and the flag is marked due only on a tick whose verdict IS staged.
 func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.Instance, as session.AgentServer) {
 	attemptAt, status := instance.LastPromptDelivery()
-	if status != session.PromptSentUnverified || attemptAt.IsZero() {
-		// The attempt left sent-unverified — delivered, not-delivered, or a
-		// newer send superseded it. Its watch retires outright, blind budget
-		// included: the budget may survive only for the SAME still-
-		// unverified attempt, never past a verdict change (Codex #7547,
-		// sixth round).
+	if !reverifiableSendStatus(status) || attemptAt.IsZero() {
+		// The attempt's verdict is settled — delivered, not-delivered, or a
+		// newer send superseded it. A sent-unverified or could-not-confirm
+		// verdict is still unproven and stays armed below; anything else
+		// retires the watch outright, blind budget included: the budget may
+		// survive only for the SAME still-unproven attempt, never past a
+		// verdict change (Codex #7547, sixth round).
 		m.retireStagedDraftWatch(key)
 		return
 	}
 	if instance.GetLiveness() != session.LiveReady {
-		// A still-unverified attempt out of Ready — a flap, not a
+		// A still-unproven attempt out of Ready — a flap, not a
 		// resolution. The armed state resets so nothing owed carries over,
 		// but the blind budget it already spent must not re-arm at zero
 		// when the pane comes back (Codex #7547, fifth round).
@@ -179,8 +182,9 @@ func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.
 	default:
 		// StagedDraftNoEvidence, StagedDraftGone, StagedDraftSubmitted: this
 		// send's evidence resolved. Close the entry rather than deleting it —
-		// the recorded verdict stays sent-unverified, so without the memory
-		// every idle poll would re-ask the pane (#7545 review).
+		// the recorded verdict stays unproven (sent-unverified or
+		// could-not-confirm), so without the memory every idle poll would
+		// re-ask the pane (#7545 review).
 		entry = m.stagedDraftWatches[key]
 		if entry == nil || !entry.attemptAt.Equal(attemptAt) {
 			entry = &stagedDraftWatch{attemptAt: attemptAt}
@@ -201,12 +205,13 @@ func (m *Manager) noteStagedDraftEvidence(repoID, key string, instance *session.
 // Between the under-fence tick and this flush the condition it saw can move —
 // a sendPromptGuarded holding the op lock may complete a whole delivery — so
 // the flag is re-validated under the lock before it is written: same watch,
-// same attemptAt, still due and unclosed; the recorded delivery still
-// sent-unverified for that attempt; the session still Ready; the attention
-// row still free. Anything that moved simply clears the due mark — a tick
-// that still qualifies re-marks it. And the flush itself never blocks the
-// poll: the op lock is TryLock'd, so contention keeps the due mark for the
-// next tick rather than parking every session's sweep behind one operation.
+// same attemptAt, still due and unclosed; the recorded delivery still reads
+// unproven (sent-unverified or could-not-confirm) for that attempt; the
+// session still Ready; the attention row still free. Anything that moved
+// simply clears the due mark — a tick that still qualifies re-marks it. And
+// the flush itself never blocks the poll: the op lock is TryLock'd, so
+// contention keeps the due mark for the next tick rather than parking every
+// session's sweep behind one operation.
 func (m *Manager) raiseDueStagedDraftFlag(repoID, key string, instance *session.Instance) {
 	m.pausedMu.Lock()
 	entry := m.stagedDraftWatches[key]
@@ -244,7 +249,7 @@ func (m *Manager) raiseDueStagedDraftFlag(repoID, key string, instance *session.
 	stillDue := entry != nil && entry.due && !entry.closed && entry.attemptAt.Equal(attemptAt)
 	m.pausedMu.Unlock()
 	nowAttempt, status := instance.LastPromptDelivery()
-	if !stillDue || status != session.PromptSentUnverified || !nowAttempt.Equal(attemptAt) ||
+	if !stillDue || !reverifiableSendStatus(status) || !nowAttempt.Equal(attemptAt) ||
 		instance.GetLiveness() != session.LiveReady || instance.Attention() != nil {
 		m.clearStagedDraftDue(key, attemptAt)
 		return
@@ -280,11 +285,12 @@ func (m *Manager) clearStagedDraftDue(key string, attemptAt time.Time) {
 }
 
 // retireStagedDraftWatch ends a send's watch outright — its verdict moved
-// off sent-unverified, so nothing about the attempt may be carried forward,
-// blind budget included (#7547 independent review, sixth round). The closed
-// latch a kept entry provides is irrelevant here: this path means the
-// recorded verdict itself changed, so the gate never feeds this attempt
-// again — and a newer send's attemptAt never matches it.
+// off the unproven set (sent-unverified or could-not-confirm), so nothing
+// about the attempt may be carried forward, blind budget included (#7547
+// independent review, sixth round). The closed latch a kept entry provides is
+// irrelevant here: this path means the recorded verdict itself changed, so
+// the gate never feeds this attempt again — and a newer send's attemptAt
+// never matches it.
 func (m *Manager) retireStagedDraftWatch(key string) {
 	m.pausedMu.Lock()
 	delete(m.stagedDraftWatches, key)
@@ -292,14 +298,14 @@ func (m *Manager) retireStagedDraftWatch(key string) {
 }
 
 // dropStagedDraftWatch disarms a send's watch while its attempt is still
-// sent-unverified — the session left Ready mid-watch, or the backend cannot
-// read bound evidence. The entry is KEPT, not deleted, for the blind budget
-// it already spent (#7547 independent review): a Ready→Running→Ready flap
-// must not re-spend 300 captures by resetting the count. The armed state
-// alone resets — since reopens on the next provable staged read, due clears
-// — and a newer send's attemptAt mismatch still re-arms fresh like every
-// other watch state. A verdict change is a retirement, not a drop: see
-// retireStagedDraftWatch.
+// unproven (sent-unverified or could-not-confirm) — the session left Ready
+// mid-watch, or the backend cannot read bound evidence. The entry is KEPT,
+// not deleted, for the blind budget it already spent (#7547 independent
+// review): a Ready→Running→Ready flap must not re-spend 300 captures by
+// resetting the count. The armed state alone resets — since reopens on the
+// next provable staged read, due clears — and a newer send's attemptAt
+// mismatch still re-arms fresh like every other watch state. A verdict
+// change is a retirement, not a drop: see retireStagedDraftWatch.
 func (m *Manager) dropStagedDraftWatch(key string) {
 	m.pausedMu.Lock()
 	if e := m.stagedDraftWatches[key]; e != nil && !e.closed {
@@ -390,7 +396,7 @@ func (m *Manager) raiseStagedDraftAttention(repoID string, instance *session.Ins
 		return false
 	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
-	m.warn().Printf("session %q: a prompt sent at %s was reported sent-unverified and its bound draft is still staged in the idle composer (%s); flagged for attention (#7545)",
+	m.warn().Printf("session %q: a prompt sent at %s was reported as an unproven delivery (sent-unverified or could-not-confirm) and its bound draft is still staged in the idle composer (%s); flagged for attention (#7545)",
 		instance.Title, attemptAt.UTC().Format(time.RFC3339), why)
 	return true
 }
