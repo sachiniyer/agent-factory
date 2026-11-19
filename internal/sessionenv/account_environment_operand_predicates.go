@@ -403,7 +403,7 @@ func KnownShellName(name string) bool {
 
 func isAccountCommandName(word *syntax.Word, want string) bool {
 	value, literal := literalShellWord(word)
-	return literal && filepath.Base(value) == want
+	return literal && filepath.Base(normalizeNamedLiteral(value)) == want
 }
 
 func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
@@ -481,7 +481,7 @@ func isAccountDeclarationBuiltin(word *syntax.Word) bool {
 	if !ok || strings.Contains(value, "/") {
 		return false
 	}
-	return accountDeclarationBuiltinName(value)
+	return accountDeclarationBuiltinName(normalizeNamedLiteral(value))
 }
 
 func declarationMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
@@ -606,7 +606,12 @@ func isShellIdentifier(s string) bool {
 // accountEnvironmentOperandDeniedWith is the shared rule; subscriptRule false
 // skips only the blanket bracket refusal, never the name/assignment check.
 func accountEnvironmentOperandDeniedWith(value string, names map[string]struct{}, subscriptRule bool) bool {
-	name := value
+	// Judge the operand under the same flat normalization #7603's
+	// launcher rule applies to its pieces — an env-assignment operand a
+	// modelled launcher reads is normalized once here, so strace's raw
+	// -E text, a builtin's name operand, and a free-text option value
+	// all refuse `CODEX\_HOME=/o` spellings the source bytes hide (#7627).
+	name := normalizeNamedLiteral(value)
 	if subscriptRule && strings.IndexByte(name, '[') >= 0 {
 		// Bash evaluates indexed-array subscripts as arithmetic and can assign a
 		// protected variable while resolving an unrelated base name. Proving the

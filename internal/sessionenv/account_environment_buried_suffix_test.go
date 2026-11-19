@@ -161,6 +161,24 @@ func TestUnlistedWrapperVisibleAssignmentRefused(t *testing.T) {
 		"firejail strace --env=CODEX_HOME=/other codex",
 		// A literal --opt=DENIED=value option under an unlisted wrapper is refused.
 		"firejail --setenv=CODEX_HOME=/other codex",
+		// #7627: the same operand spells judged under the flat normalization —
+		// a backslash inside the denied name hides nothing. The unquoted form
+		// strips at literalize; the quoted and double-escaped forms are the
+		// nesting-closed over-approximation.
+		`firejail strace -ECODEX\_HOME=/other codex`,
+		`firejail strace -E 'CODEX\_HOME=/other' codex`,
+		`firejail strace --env='CODEX\_HOME=/other' codex`,
+		// Every operand a modelled launcher reads goes through the same
+		// helper: env assignments AND the exec name.
+		`firejail sudo 'CODEX\_HOME=/other' codex`,
+		`firejail docker run -e 'CODEX\_HOME=/other' img codex`,
+		`firejail systemd-run --setenv 'CODEX\_HOME=/other' make`,
+		`firejail sudo -u root 'co\dex'`,
+		`firejail sudo -u root co\\dex`,
+		// An escaped name that dispatches a modelled arm (env, exec) is
+		// read by the same normalization.
+		`firejail 'e\nv' CODEX_HOME=/other codex`,
+		`firejail 's\t\race' -E CODEX_HOME=/other codex`,
 	} {
 		require.True(t, commandMutatesAccountEnvironment(command, names), "command %q", command)
 	}

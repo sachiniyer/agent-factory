@@ -479,6 +479,11 @@ func launcherLiteralWord(word *syntax.Word) (string, bool) {
 // segment. optionCluster marks a word that began with `-` — the only
 // place a leading letters-only prefix reads as a short-option cluster.
 func launcherWordDenied(literal string, names map[string]struct{}) bool {
+	// The env-assignment operand goes through the same flat
+	// normalization the #7603 piece rule applies — `CODEX\_HOME` the
+	// literal still spells after one shell decode reads as CODEX_HOME
+	// here (#7627).
+	literal = normalizeNamedLiteral(literal)
 	return launcherSegmentsDenied(strings.TrimLeft(literal, "-"), names,
 		strings.HasPrefix(literal, "-"))
 }
@@ -579,7 +584,7 @@ func isAccountLauncherName(word *syntax.Word) bool {
 	if !ok {
 		return false
 	}
-	_, ok = accountLauncherNames[filepath.Base(literal)]
+	_, ok = accountLauncherNames[filepath.Base(normalizeNamedLiteral(literal))]
 	return ok
 }
 
@@ -609,6 +614,7 @@ const (
 func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) (int, string) {
 	kind := wordProtectedNone
 	matched := ""
+	literal = normalizeNamedLiteral(literal)
 	text := strings.TrimLeft(literal, "-")
 	optionCluster := strings.HasPrefix(literal, "-")
 	segments := strings.Split(text, "=")
@@ -649,6 +655,7 @@ func segmentEndsWithProtectedName(segment, name string, optionCluster bool) bool
 // denied-name cut because their effect is not readable from the command
 // line.
 func launcherEnvFileSpelling(literal string) bool {
+	literal = normalizeNamedLiteral(literal)
 	word := strings.TrimLeft(literal, "-")
 	return word == "env-file" || strings.HasPrefix(word, "env-file=") ||
 		word == "env_file" || strings.HasPrefix(word, "env_file=") ||
@@ -665,6 +672,7 @@ func launcherEnvFileSpelling(literal string) bool {
 // command is unverifiable (Codex P1 on this head). The word must spell
 // an option — a leading dash — so a bare `args` operand stays admitted.
 func launcherArgFileSpelling(literal string) bool {
+	literal = normalizeNamedLiteral(literal)
 	if !strings.HasPrefix(literal, "-") {
 		return false
 	}
@@ -684,6 +692,7 @@ func launcherArgFileSpelling(literal string) bool {
 // (Codex P1 on this head). Scoped to bwrap's arm — other launchers'
 // `--file` flags read build files, not child argv.
 func bwrapHiddenInputWord(literal string) bool {
+	literal = normalizeNamedLiteral(literal)
 	if !strings.HasPrefix(literal, "-") {
 		return false
 	}
@@ -736,8 +745,9 @@ func launcherSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo
 		// #7603's named launchers — one literalize, one map lookup, the
 		// closure text rule on the tail.
 		if literal, ok := launcherLiteralWord(words[0]); ok {
-			if _, named := accountNamedLauncherNames[filepath.Base(literal)]; named {
-				_, unsafe = unwrapNamedLauncher(words[1:], names, memo, true, filepath.Base(literal))
+			base := filepath.Base(normalizeNamedLiteral(literal))
+			if _, named := accountNamedLauncherNames[base]; named {
+				_, unsafe = unwrapNamedLauncher(words[1:], names, memo, true, base)
 			}
 		}
 	}

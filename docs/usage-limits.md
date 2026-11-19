@@ -247,7 +247,14 @@ up`, `docker-compose up`, `docker build .`, `docker run --rm alpine echo hi`,
 --scope make`. The trade-off is deliberate: a harmless mention in a
 non-assigning position, such as `docker run alpine echo CODEX_HOME=x`, is
 refused too, because no parse of the visible command line can prove the word
-will not reach the child's environment.
+will not reach the child's environment. Every operand these launchers read —
+an env assignment, an exec name, a denied-name or env-file spelling — is
+judged under the same flat normalization the named-launcher piece rule
+applies (one pass deletes every backslash run plus a following line break and
+every quote character, closed under nesting), so an operand that still spells
+`CODEX\_HOME` or `co\dex` after the shell's own decode is read as the name it
+could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
+`sudo 'co\dex'` refuse).
 
 - **Env files are unverifiable** — inside the launcher arms `af` models,
   `--env-file`, `docker compose`'s `env_file` and `--env-from-file`

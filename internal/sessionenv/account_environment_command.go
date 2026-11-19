@@ -699,7 +699,7 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		// decodable payload #7604 admits either way. A trailing shell
 		// name with no argv (echo sh, strace -p 1 sh) has nothing to
 		// judge and stays allowed.
-		return 1, len(words) > 1 && KnownShellName(filepath.Base(literal)) &&
+		return 1, len(words) > 1 && KnownShellName(filepath.Base(normalizeNamedLiteral(literal))) &&
 			shellCommandIsUnproven(words)
 	}
 	if strace {
@@ -804,7 +804,7 @@ func isUnmodeledArgvPassthroughWrapper(word *syntax.Word) bool {
 	if !literal {
 		return false
 	}
-	switch filepath.Base(value) {
+	switch filepath.Base(normalizeNamedLiteral(value)) {
 	case "strace", "ltrace", "perf", "valgrind", "gdb",
 		"chrt", "numactl", "unshare", "prlimit":
 		return true

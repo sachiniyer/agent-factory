@@ -386,6 +386,10 @@ func tailReachesResetAgentProgram(words []*syntax.Word, names map[string]struct{
 // runner name recurses into its own tail the same way; anything else is
 // a fixed program whose operands are not program positions.
 func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, preserved map[string]struct{}, b *reachBudget) bool {
+	// The program word is an operand the launcher reads — the same
+	// flat normalization the piece rule applies, so an escaped or
+	// quote-carried exec name cannot hide (#7627).
+	literal = normalizeNamedLiteral(literal)
 	if wordNamesResetAgent(literal, names, preserved) {
 		return true
 	}
@@ -457,6 +461,7 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 		if !ok {
 			continue
 		}
+		literal = normalizeNamedLiteral(literal)
 		if wordNamesResetAgent(literal, names, preserved) {
 			return true
 		}
@@ -521,6 +526,7 @@ func runnerPayloadCandidates(base string, words []*syntax.Word) ([]string, bool)
 // `./codex`, while `~/.codex`, `/etc/codex/config.toml`, `codex-proxy`,
 // `claude-squad` and the OTHER agents' names do not.
 func wordNamesResetAgent(literal string, names, preserved map[string]struct{}) bool {
+	literal = normalizeNamedLiteral(literal)
 	for agent, configVar := range accountConfigVars {
 		if _, pinned := names[configVar]; !pinned {
 			continue

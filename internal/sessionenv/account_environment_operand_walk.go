@@ -76,6 +76,10 @@ func accountChildTailSuffixStartsVerdict(word *syntax.Word) bool {
 	if !literal {
 		return true
 	}
+	// The name an exec word spells goes through the same flat
+	// normalization the launcher piece rule applies — `e\xec` still
+	// begins the exec verdict (#7627).
+	value = normalizeNamedLiteral(value)
 	if _, verdict := accountChildTailSuffixVerdictNames[filepath.Base(value)]; verdict {
 		return true
 	}

@@ -763,7 +763,7 @@ func wordEquals(word *syntax.Word, want string) bool {
 
 func wordBaseEquals(word *syntax.Word, want string) bool {
 	value, literal := literalShellWord(word)
-	return literal && strings.EqualFold(filepath.Base(value), want)
+	return literal && strings.EqualFold(filepath.Base(normalizeNamedLiteral(value)), want)
 }
 
 func isTrustedEnvWord(word *syntax.Word) bool {
@@ -778,7 +778,7 @@ func isTrustedEnvWord(word *syntax.Word) bool {
 // Every other path stays untrusted; in particular, a repository's ./env and a
 // user-writable /tmp/env cannot turn an agent-looking argument into a grant.
 func isTrustedEnvExecutable(executable string) bool {
-	switch executable {
+	switch normalizeNamedLiteral(executable) {
 	case "env", "/bin/env", "/usr/bin/env":
 		return true
 	default:
@@ -794,7 +794,7 @@ func isTrustedEnvExecutable(executable string) bool {
 // never to grant a credential, so the overwrite-by-./env threat the strict set
 // closes does not apply.
 func isEnvExecutableByBase(executable string) bool {
-	return strings.EqualFold(filepath.Base(executable), "env")
+	return strings.EqualFold(filepath.Base(normalizeNamedLiteral(executable)), "env")
 }
 
 func literalCommandArgs(words []*syntax.Word) ([]string, bool) {

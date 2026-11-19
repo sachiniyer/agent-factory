@@ -83,7 +83,7 @@ func unwrapDbusUpdateActivationEnvironment(words []*syntax.Word, names map[strin
 }
 
 func isSystemctlEnvironmentWriter(literal string) bool {
-	switch literal {
+	switch normalizeNamedLiteral(literal) {
 	case "set-environment", "import-environment", "unset-environment":
 		return true
 	}
