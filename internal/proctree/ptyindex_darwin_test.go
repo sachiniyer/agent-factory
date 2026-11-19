@@ -87,3 +87,43 @@ func TestPtyFdIndices_ConcurrentWalksShareOneFlight(t *testing.T) {
 	require.Equal(t, 2, ptyFdFlights.inFlightCount(),
 		"a different side never joins the slave flight")
 }
+
+// Codex on #7581: the single-fd re-verify shares one worker per
+// (pid, StartID, fd) — a carrier whose recorded master descriptor now names
+// a file on a dead mount must hold at most one blocked read however many
+// attribution passes re-check it. Each caller still bounds its own wait.
+func TestPtyMasterFdIndex_ConcurrentReadsShareOneFlight(t *testing.T) {
+	oldRead, oldBudget := ptyFdVnodeRead, ptyFdReadBudget
+	release := make(chan struct{})
+	var reads atomic.Int64
+	ptyFdReadBudget = 100 * time.Millisecond
+	ptyFdVnodeRead = func(pid, fd int) (PtyIndex, bool) {
+		reads.Add(1)
+		<-release
+		return PtyIndex{Index: 7}, true
+	}
+	t.Cleanup(func() {
+		ptyFdVnodeRead, ptyFdReadBudget = oldRead, oldBudget
+		close(release) // free the shared worker — the flight publishes, never leaks
+	})
+
+	const waiters = 5
+	var wg sync.WaitGroup
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ptyMasterFdIndex(os.Getpid(), 3) // same instance, same fd → one flight
+		}()
+	}
+	wg.Wait()
+	require.Equal(t, 1, ptyVnodeFlights.inFlightCount(),
+		"the wedged fd read holds exactly ONE flight — no per-waiter state")
+	require.Equal(t, int64(1), reads.Load(),
+		"N carriers on the recorded descriptor share a single vnode read")
+
+	// A different descriptor is different work — its own flight.
+	_, _ = ptyMasterFdIndex(os.Getpid(), 4)
+	require.Equal(t, 2, ptyVnodeFlights.inFlightCount(),
+		"another fd never joins the first flight")
+}

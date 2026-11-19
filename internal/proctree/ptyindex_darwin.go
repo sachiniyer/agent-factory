@@ -85,29 +85,90 @@ func ptyMasterFdIndices(pid int) ([]PtyFdIndex, error) {
 	})
 }
 
+// ptyVnodeKey scopes a shared single-fd decode to what it reads: the
+// process instance — (pid, StartID), so a recycled pid can never join
+// another process's flight — and the descriptor. It serves the master's
+// re-verify only; a wedged vnode read must hold one worker however many
+// carriers check the same recorded fd (Codex on #7581).
+type ptyVnodeKey struct {
+	pid     int
+	startID uint64
+	fd      int
+}
+
+// ptyVnodeFlight is ONE shared single-fd decode — the same flight shape
+// the table walks use, keyed on the descriptor the recorded ownership
+// claims re-verify.
+type ptyVnodeFlight struct {
+	done chan struct{}
+	idx  PtyIndex
+	ok   bool
+}
+
+type ptyVnodeFlightSet struct {
+	mu       sync.Mutex
+	inFlight map[ptyVnodeKey]*ptyVnodeFlight
+}
+
+var ptyVnodeFlights = ptyVnodeFlightSet{inFlight: map[ptyVnodeKey]*ptyVnodeFlight{}}
+
+func (s *ptyVnodeFlightSet) begin(key ptyVnodeKey) (f *ptyVnodeFlight, leader bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if f, ok := s.inFlight[key]; ok {
+		return f, false
+	}
+	f = &ptyVnodeFlight{done: make(chan struct{})}
+	s.inFlight[key] = f
+	return f, true
+}
+
+func (s *ptyVnodeFlightSet) finish(key ptyVnodeKey, f *ptyVnodeFlight) {
+	s.mu.Lock()
+	delete(s.inFlight, key)
+	s.mu.Unlock()
+	close(f.done)
+}
+
+// inFlightCount is the test seam for the memory bound: under a wedged fd
+// read it stays 1 per descriptor however many waiters expire.
+func (s *ptyVnodeFlightSet) inFlightCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.inFlight)
+}
+
 // ptyMasterFdIndex re-verifies ONE recorded descriptor — the single-fd
 // check behind the sweep's ownership claims (#7581 item 2). The decode is
 // the same getattr-prone VNODEPATHINFO the walk performs, so it runs under
-// the same ptyFdReadBudget flight: a wedged read contributes nothing,
-// never a silent "does not hold".
+// the same ptyFdReadBudget flight AND the in-flight set: a wedged read
+// contributes nothing — never a silent "does not hold" — and however many
+// carriers match the same cached ownership entry, the descriptor holds at
+// most one blocked worker (Codex on #7581).
 func ptyMasterFdIndex(pid, fd int) (PtyIndex, bool) {
-	type result struct {
-		idx PtyIndex
-		ok  bool
+	// Key the flight on the process INSTANCE, exactly like the table
+	// walks: a pid recycled between snapshot and read must never share
+	// another instance's worker.
+	var startID uint64
+	if p, err := Lookup(pid); err == nil {
+		startID = p.StartID
 	}
-	done := make(chan result, 1)
-	// The read is captured on THIS goroutine: an abandoned worker must
-	// never read the package var lazily.
-	read := ptyFdVnodeRead
-	go func() {
-		idx, ok := read(pid, fd)
-		done <- result{idx, ok}
-	}()
+	key := ptyVnodeKey{pid: pid, startID: startID, fd: fd}
+	f, leader := ptyVnodeFlights.begin(key)
+	if leader {
+		// The read is captured on THIS goroutine: an abandoned worker
+		// must never read the package var lazily.
+		read := ptyFdVnodeRead
+		go func() {
+			f.idx, f.ok = read(pid, fd)
+			ptyVnodeFlights.finish(key, f)
+		}()
+	}
 	timer := time.NewTimer(ptyFdReadBudget)
 	defer timer.Stop()
 	select {
-	case r := <-done:
-		return r.idx, r.ok
+	case <-f.done:
+		return f.idx, f.ok
 	case <-timer.C:
 		return PtyIndex{}, false
 	}
