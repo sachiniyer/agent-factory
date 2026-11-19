@@ -18,7 +18,7 @@ import (
 // returns the root path plus a helper that mints a staged-payload dir of the
 // shape dockerStagingDir produces (<slug>-<8 lowercase hex>) with the two
 // files stageContainerPayload writes. Tests add the engine marker explicitly
-// via stagingMarkEngine, since the marker is what lets the sweep reclaim.
+// via stagingMarkIdentity, since the marker is what lets the sweep reclaim.
 func stagingSweepTestRoot(t *testing.T) (root string, mk func(name string) string) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -35,11 +35,15 @@ func stagingSweepTestRoot(t *testing.T) (root string, mk func(name string) strin
 	}
 }
 
-// stagingMarkEngine writes the dir's recorded-engine marker, as
-// recordStagingEngine does at provision.
-func stagingMarkEngine(t *testing.T, dir, engineID string) {
+// stagingMarkIdentity writes the dir's recorded identity markers, as
+// recordStagingIdentity does at provision: the resolved engine ID and the
+// af.home label spelling the container will carry. The sweep's homeID
+// argument is the spelling it filters the listing by, so reclaim tests mark
+// the same "/test/home" they pass in.
+func stagingMarkIdentity(t *testing.T, dir, engineID, homeID string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, dockerStagingEngineFileName), []byte(engineID+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, dockerStagingHomeFileName), []byte(homeID+"\n"), 0o600))
 }
 
 // stagingSweepDockerEnv arms the docker seams the sweep consults: a present
@@ -79,7 +83,7 @@ func TestStagingSweepReclaimsOrphanedDir(t *testing.T) {
 	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
 
 	orphan := mk("dead-session-1a2b3c4d")
-	stagingMarkEngine(t, orphan, "engine-1")
+	stagingMarkIdentity(t, orphan, "engine-1", "/test/home")
 	SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	_, err := os.Stat(orphan)
@@ -127,9 +131,9 @@ func TestStagingSweepKeepsContainerBoundSlug(t *testing.T) {
 	stagingSweepDockerEnv(t, []string{"engine-1"}, "cid-1\tbound-sess\n", nil)
 
 	bound := mk("bound-sess-55667788")
-	stagingMarkEngine(t, bound, "engine-1")
+	stagingMarkIdentity(t, bound, "engine-1", "/test/home")
 	unrelated := mk("other-sess-99aabbcc")
-	stagingMarkEngine(t, unrelated, "engine-1")
+	stagingMarkIdentity(t, unrelated, "engine-1", "/test/home")
 	SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	_, err := os.Stat(bound)
@@ -146,7 +150,7 @@ func TestStagingSweepUnlistedWhenListingFails(t *testing.T) {
 	stagingSweepDockerEnv(t, []string{"engine-1"}, "", fmt.Errorf("Cannot connect to the Docker daemon"))
 
 	candidate := mk("maybe-bound-deadbeef")
-	stagingMarkEngine(t, candidate, "engine-1")
+	stagingMarkIdentity(t, candidate, "engine-1", "/test/home")
 	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	assert.True(t, got.Unlisted, "a failed listing is an unproven pass, not an empty one")
@@ -163,7 +167,7 @@ func TestStagingSweepUnlistedWithoutDockerCLI(t *testing.T) {
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "", fmt.Errorf("not found") }))
 
 	candidate := mk("maybe-bound-cafebabe")
-	stagingMarkEngine(t, candidate, "engine-1")
+	stagingMarkIdentity(t, candidate, "engine-1", "/test/home")
 	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	assert.True(t, got.Unlisted)
@@ -180,7 +184,7 @@ func TestStagingSweepUnlistedOnMovedEngine(t *testing.T) {
 	stagingSweepDockerEnv(t, []string{"engine-a", "engine-b"}, "", nil)
 
 	candidate := mk("maybe-bound-0badf00d")
-	stagingMarkEngine(t, candidate, "engine-a")
+	stagingMarkIdentity(t, candidate, "engine-a", "/test/home")
 	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	assert.True(t, got.Unlisted, "a listing that may have come from another engine proves nothing")
@@ -214,7 +218,7 @@ func TestStagingSweepKeepsDifferentEngineDir(t *testing.T) {
 	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
 
 	foreign := mk("other-engine-33cc44dd")
-	stagingMarkEngine(t, foreign, "engine-elsewhere")
+	stagingMarkIdentity(t, foreign, "engine-elsewhere", "/test/home")
 	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	assert.Equal(t, 0, got.Reaped)
@@ -222,27 +226,60 @@ func TestStagingSweepKeepsDifferentEngineDir(t *testing.T) {
 	assert.NoError(t, err, "a dir recorded on a different engine is kept")
 }
 
-// TestStagingSweepKeepsMalformedMarkerDir: a marker that is not one bounded
-// token — torn, tampered, or empty — is unrecorded for the sweep's purposes
-// and keeps the dir.
+// TestStagingSweepKeepsAliasedHomeDir is the Codex P2's alias case: a dir
+// whose marker records a different af.home spelling — a symlinked
+// AGENT_FACTORY_HOME reaching the same real directory — is kept. The label
+// filter is lexical, so a container bound under the other spelling is
+// invisible to this pass's listing.
+func TestStagingSweepKeepsAliasedHomeDir(t *testing.T) {
+	_, mk := stagingSweepTestRoot(t)
+	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
+
+	aliased := mk("old-spelling-2b2b3c4d")
+	stagingMarkIdentity(t, aliased, "engine-1", "/data-link/af")
+	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+	assert.Equal(t, 0, got.Reaped)
+	_, err := os.Stat(aliased)
+	assert.NoError(t, err, "a dir recorded under another home spelling is kept")
+}
+
+// TestStagingSweepKeepsMalformedMarkerDir: a marker that does not hold the
+// shape provisioning writes — torn, tampered, empty, missing — is unrecorded
+// for the sweep's purposes and keeps the dir, whichever half it is.
 func TestStagingSweepKeepsMalformedMarkerDir(t *testing.T) {
 	_, mk := stagingSweepTestRoot(t)
 	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
 
-	for _, tc := range []struct{ name, content string }{
-		{"torn-55ee66ff", "engine-1 extra-words\n"},
-		{"empty-77aa88bb", ""},
-		{"oversize-99bbccdd", strings.Repeat("e", 300) + "\n"},
+	// Each row writes engine-id and home-id; nil leaves the file unwritten.
+	for _, tc := range []struct {
+		name         string
+		engine, home *string
+	}{
+		{"torn-engine-55ee66ff", ptr("engine-1 extra-words\n"), ptr("/test/home\n")},
+		{"empty-engine-77aa88bb", ptr(""), ptr("/test/home\n")},
+		{"oversize-engine-99bbccdd", ptr(strings.Repeat("e", 300) + "\n"), ptr("/test/home\n")},
+		{"no-home-11223344", ptr("engine-1\n"), nil},
+		{"empty-home-55667788", ptr("engine-1\n"), ptr("")},
+		{"multiline-home-99aabbcc", ptr("engine-1\n"), ptr("/test/home\n/evil\n")},
 	} {
 		d := mk(tc.name)
-		require.NoError(t, os.WriteFile(filepath.Join(d, dockerStagingEngineFileName), []byte(tc.content), 0o600))
+		if tc.engine != nil {
+			require.NoError(t, os.WriteFile(filepath.Join(d, dockerStagingEngineFileName), []byte(*tc.engine), 0o600))
+		}
+		if tc.home != nil {
+			require.NoError(t, os.WriteFile(filepath.Join(d, dockerStagingHomeFileName), []byte(*tc.home), 0o600))
+		}
 	}
 	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	assert.Equal(t, 0, got.Reaped)
 	home, err := config.GetConfigDir()
 	require.NoError(t, err)
-	for _, name := range []string{"torn-55ee66ff", "empty-77aa88bb", "oversize-99bbccdd"} {
+	for _, name := range []string{
+		"torn-engine-55ee66ff", "empty-engine-77aa88bb", "oversize-engine-99bbccdd",
+		"no-home-11223344", "empty-home-55667788", "multiline-home-99aabbcc",
+	} {
 		_, err := os.Stat(filepath.Join(home, dockerStagingDirName, name))
 		assert.NoError(t, err, "%s: a malformed marker is kept", name)
 	}
@@ -250,24 +287,34 @@ func TestStagingSweepKeepsMalformedMarkerDir(t *testing.T) {
 
 // TestDockerStagingDirRecordsEngineMarker: provisioning records the resolved
 // engine identity beside the staged payload — the same `docker info` ID the
-// cleanup record carries — so a later sweep can prove it is acting on the
-// engine that created the dir. A provision that staged before the engine was
-// resolved writes nothing, and the dir stays unrecorded (kept).
+// cleanup record carries — and the af.home label spelling the container will
+// carry, so a later sweep can prove it is acting on the engine and under the
+// label spelling that created the dir. A provision that staged before either
+// resolved writes nothing for that half, and the dir stays unrecorded (kept).
 func TestDockerStagingDirRecordsEngineMarker(t *testing.T) {
 	stagingTestEnv(t)
-	p := &dockerProvisioner{spec: ProvisionSpec{Title: "eng sess"}, engineID: "engine-resolved"}
+	p := &dockerProvisioner{
+		spec:     ProvisionSpec{Title: "eng sess"},
+		engineID: "engine-resolved",
+		homeID:   "/test/af-home",
+	}
 	dir, err := p.dockerStagingDir()
 	require.NoError(t, err)
 
 	raw, err := os.ReadFile(filepath.Join(dir, dockerStagingEngineFileName))
 	require.NoError(t, err, "the engine marker must be written beside the staged payload")
 	assert.Equal(t, "engine-resolved\n", string(raw))
+	rawHome, err := os.ReadFile(filepath.Join(dir, dockerStagingHomeFileName))
+	require.NoError(t, err, "the home marker must be written beside the staged payload")
+	assert.Equal(t, "/test/af-home\n", string(rawHome))
 
 	p2 := &dockerProvisioner{spec: ProvisionSpec{Title: "early sess"}}
 	dir2, err := p2.dockerStagingDir()
 	require.NoError(t, err)
 	_, err = os.Stat(filepath.Join(dir2, dockerStagingEngineFileName))
 	assert.True(t, os.IsNotExist(err), "no engine resolved yet: nothing recorded")
+	_, err = os.Stat(filepath.Join(dir2, dockerStagingHomeFileName))
+	assert.True(t, os.IsNotExist(err), "no home label resolved: nothing recorded")
 }
 
 // TestStagingSweepLeavesNonCandidates: names af never mints — a stray
@@ -283,7 +330,7 @@ func TestStagingSweepLeavesNonCandidates(t *testing.T) {
 	require.NoError(t, os.MkdirAll(badSlug, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "loose-file"), []byte("x"), 0o644))
 	orphan := mk("gone-87654321")
-	stagingMarkEngine(t, orphan, "engine-1")
+	stagingMarkIdentity(t, orphan, "engine-1", "/test/home")
 
 	SweepOrphanedStagingDirs("/test/home", nil, nil)
 

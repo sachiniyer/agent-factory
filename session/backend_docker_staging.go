@@ -477,6 +477,17 @@ func (p *dockerProvisioner) deliverPayload() error {
 // cannot see it.
 const dockerStagingEngineFileName = "engine-id"
 
+// dockerStagingHomeFileName records the af.home label spelling the container
+// will be stamped with (p.homeID, resolved once in provision and stamped by
+// runArgs) beside the staged payload. The sweep's `docker ps` filter matches
+// the label lexically, so an AGENT_FACTORY_HOME that reached the same real
+// directory through a different path spelling — a symlinked component, a
+// trailing slash — leaves a binding container invisible to the listing. A dir
+// whose recorded spelling differs from the sweep's filter value is kept:
+// "not listed" under one spelling proves nothing about the other (Codex on
+// #7616).
+const dockerStagingHomeFileName = "home-id"
+
 // dockerStagingDir is the per-session staging root beneath the AF home: mode
 // 0700, unique per provision, removed on reap. The unique suffix keeps two
 // projects that share a session title from colliding, and makes a leftover
@@ -484,10 +495,12 @@ const dockerStagingEngineFileName = "engine-id"
 // EXCLUSIVE os.Mkdir: a pre-existing leaf is collision or residue, so a fresh
 // suffix is tried rather than silently sharing or reusing a directory.
 //
-// The engine marker is best-effort: provisionSteps resolves p.engineID before
-// staging begins, so a write names the engine that will run the container. A
-// failed write degrades the dir to "unrecorded" — the sweep keeps it — rather
-// than failing a provision whose payload staging would have succeeded.
+// The identity markers are best-effort: provisionSteps resolves p.engineID
+// before staging begins, and provision resolves p.homeID before the
+// provisioner exists, so the writes name the engine and home-label spelling
+// the container carries. A failed write degrades the dir to "unrecorded" —
+// the sweep keeps it — rather than failing a provision whose payload staging
+// would have succeeded.
 func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 	afHome, err := config.GetConfigDir()
 	if err != nil {
@@ -506,7 +519,7 @@ func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 		err := os.Mkdir(dir, 0o700)
 		switch {
 		case err == nil:
-			p.recordStagingEngine(dir)
+			p.recordStagingIdentity(dir)
 			return dir, nil
 		case os.IsExist(err):
 			continue
@@ -517,15 +530,23 @@ func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 	return "", fmt.Errorf("backend=docker: cannot create the session staging dir under %s: every candidate name already exists", root)
 }
 
-// recordStagingEngine writes the engine marker beside the staged payload. An
-// empty engineID — a caller that staged before the engine was resolved —
-// records nothing, which the sweep reads as unrecorded and keeps.
-func (p *dockerProvisioner) recordStagingEngine(dir string) {
-	if p.engineID == "" {
-		return
+// recordStagingIdentity writes the engine and home markers beside the staged
+// payload. An empty engineID — a caller that staged before the engine was
+// resolved — or an empty homeID — a provision whose af.home label could not
+// be resolved and was omitted — records nothing for that half, which the
+// sweep reads as unrecorded and keeps. A home spelling containing a newline
+// or NUL cannot round-trip the marker format either, so it is likewise left
+// unrecorded.
+func (p *dockerProvisioner) recordStagingIdentity(dir string) {
+	if p.engineID != "" {
+		if err := os.WriteFile(filepath.Join(dir, dockerStagingEngineFileName), []byte(p.engineID+"\n"), 0o600); err != nil {
+			log.WarningLog.Printf("docker runtime: cannot record the engine identity beside staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, dockerStagingEngineFileName), []byte(p.engineID+"\n"), 0o600); err != nil {
-		log.WarningLog.Printf("docker runtime: cannot record the engine identity beside staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)
+	if p.homeID != "" && !strings.ContainsAny(p.homeID, "\n\r\x00") {
+		if err := os.WriteFile(filepath.Join(dir, dockerStagingHomeFileName), []byte(p.homeID+"\n"), 0o600); err != nil {
+			log.WarningLog.Printf("docker runtime: cannot record the home label beside staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)
+		}
 	}
 }
 

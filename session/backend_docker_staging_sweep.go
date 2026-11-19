@@ -12,12 +12,15 @@
 //   - A dir whose slug belongs to a live or still-provisioning session is
 //     kept — the mid-create window has a staged dir with no record yet, and
 //     `docker run` may not have bound it yet either.
-//   - A dir is removed only on the engine that created it: provisioning
-//     records the resolved `docker info` ID beside the staged payload, and a
-//     candidate whose marker is missing, malformed, or names a different
-//     engine is kept — a container binding it could live where this engine's
-//     listing cannot see it. An unreachable engine proves nothing either:
-//     the whole pass is Unlisted and removes nothing.
+//   - A dir is removed only on the engine that created it, under the home
+//     spelling that created it: provisioning records the resolved `docker
+//     info` ID and the af.home label spelling beside the staged payload, and
+//     a candidate whose markers are missing, malformed, name a different
+//     engine, or name a different af.home spelling is kept — a container
+//     binding it could live where this engine's listing, filtered by this
+//     spelling, cannot see it (a symlinked AGENT_FACTORY_HOME aliases the
+//     same real dir under another label). An unreachable engine proves
+//     nothing either: the whole pass is Unlisted and removes nothing.
 //   - On the recorded (current) engine, a dir is removed only when no
 //     container labelled af.session=<its slug> AND af.home=<this home> exists
 //     in any state. A listed container is the precise "a container that binds
@@ -201,10 +204,11 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 			result.Skipped++
 		case protectedSlugs[c.slug]:
 			result.Skipped++
-		case !stagingEngineMatches(root, c.name, engineID):
-			// Unrecorded, malformed, or different-engine: the current
-			// listing says nothing about whether a container still binds
-			// this dir on the engine that created it — keep it.
+		case !stagingIdentityMatches(root, c.name, engineID, homeID):
+			// Unrecorded, malformed, different engine, or a home-label
+			// spelling this listing's filter cannot see: the listing
+			// says nothing about whether a container still binds this
+			// dir on the engine that created it — keep it.
 			result.Skipped++
 		case containerSlugs[c.slug]:
 			result.Skipped++
@@ -230,14 +234,17 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 	return result
 }
 
-// stagingEngineMatches reports whether the dir's recorded engine identity —
-// the marker recordStagingEngine wrote at creation — names the engine this
-// pass listed. Only then does the listing prove anything about this dir: no
-// marker (a legacy dir, or a provision that staged before the engine
-// resolved), a malformed one, or a different engine each mean a container
-// binding it could live where this listing cannot see. Every non-match logs
-// why the dir is kept.
-func stagingEngineMatches(root *os.Root, name, engineID string) bool {
+// stagingIdentityMatches reports whether the dir's recorded creation
+// identity — the markers recordStagingIdentity wrote — names BOTH the engine
+// this pass listed and the home-label spelling its container filter used.
+// Only then does the listing prove anything about this dir: no marker (a
+// legacy dir, or a provision that staged before the identity resolved), a
+// malformed one, a different engine, or a different af.home spelling each
+// mean a container binding it could live where this listing cannot see (a
+// symlinked AGENT_FACTORY_HOME reaches the same real dir under a spelling the
+// label filter does not match — Codex on #7616). Every non-match logs why
+// the dir is kept.
+func stagingIdentityMatches(root *os.Root, name, engineID, homeID string) bool {
 	raw, err := root.ReadFile(filepath.Join(name, dockerStagingEngineFileName))
 	if err != nil {
 		log.InfoLog.Printf("staging dir sweep: keeping %s: no recorded engine — a container binding it could exist where this listing cannot see (%v)", name, err)
@@ -252,6 +259,24 @@ func stagingEngineMatches(root *os.Root, name, engineID string) bool {
 	}
 	if recorded != engineID {
 		log.InfoLog.Printf("staging dir sweep: keeping %s: created on engine %q, not the listed engine %q — a container binding it could still exist there", name, recorded, engineID)
+		return false
+	}
+	rawHome, err := root.ReadFile(filepath.Join(name, dockerStagingHomeFileName))
+	if err != nil {
+		log.InfoLog.Printf("staging dir sweep: keeping %s: no recorded home label — a container binding it could carry an af.home spelling this filter misses (%v)", name, err)
+		return false
+	}
+	recordedHome := string(rawHome)
+	// The marker format is the label spelling plus one trailing newline;
+	// the label itself is matched lexically, so spaces are legal but a
+	// newline or NUL inside the file is not a value provisioning wrote.
+	recordedHome = strings.TrimSuffix(recordedHome, "\n")
+	if recordedHome == "" || len(recordedHome) > 4096 || strings.ContainsAny(recordedHome, "\n\r\x00") {
+		log.InfoLog.Printf("staging dir sweep: keeping %s: malformed recorded home label %q", name, recordedHome)
+		return false
+	}
+	if recordedHome != homeID {
+		log.InfoLog.Printf("staging dir sweep: keeping %s: created under af.home %q, not the listed home %q — a container binding it could exist under a spelling the filter misses", name, recordedHome, homeID)
 		return false
 	}
 	return true
