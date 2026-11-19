@@ -535,6 +535,29 @@ func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launche
 	return namedLiteralVerdict(literal, last, decode, launcher, names, preserved, b)
 }
 
+// extglobOpeners are the two-byte sequences that open a bash extglob
+// group (and zsh's kshglob forms) — `@(`, `?(`, `*(`, `+(`, `!(`.
+// A word holding one could resolve to the name at run time the way a
+// `*` does, so it counts as dynamic construction rather than waiting
+// for a `bash -O extglob` reading.
+var extglobOpeners = []string{"@(", "?(", "*(", "+(", "!("}
+
+// literalCarriesDynamic reports whether literal holds text that
+// constructs a name the gate cannot see at validation time — `$` or
+// backtick expansion text, or an extglob group a downstream shell
+// enabled could collapse to a denied name.
+func literalCarriesDynamic(literal string) bool {
+	if strings.ContainsAny(literal, "$`") {
+		return true
+	}
+	for _, opener := range extglobOpeners {
+		if strings.Contains(literal, opener) {
+			return true
+		}
+	}
+	return false
+}
+
 // namedLiteralVerdict is the word verdict on already-literal text —
 // the shared core for argv words and the pseudo-words a nested
 // launcher scan splits out of a word's text.
@@ -547,14 +570,25 @@ func namedLiteralVerdict(literal string, last, decode bool, launcher string, nam
 		}
 		literal = decoded
 	}
+	normalized := normalizeNamedLiteral(literal)
+	// Every check runs over every reading of the word — the union
+	// property covers classification, not just the name scans. `-en""c`
+	// reads `-enc` to the downstream shell, so the hidden-input and
+	// payload spellings classify the normalized form alongside the
+	// raw one.
 	verdict := namedWordVerdict{
-		refuse:  literalNamesHiddenInput(literal, launcher),
-		payload: literalSpellsTailPayload(literal, launcher),
+		refuse: literalNamesHiddenInput(literal, launcher) ||
+			literalNamesHiddenInput(normalized, launcher) ||
+			(raw != literal && literalNamesHiddenInput(raw, launcher)),
+		payload: literalSpellsTailPayload(literal, launcher) ||
+			literalSpellsTailPayload(normalized, launcher) ||
+			(raw != literal && literalSpellsTailPayload(raw, launcher)),
 	}
 	if verdict.refuse {
 		return verdict
 	}
-	if strings.ContainsAny(literal, "$`") {
+	if literalCarriesDynamic(literal) || literalCarriesDynamic(normalized) ||
+		(raw != literal && literalCarriesDynamic(raw)) {
 		return namedWordVerdict{refuse: true}
 	}
 	// The literal and its normalized form are both judged: a
@@ -565,8 +599,7 @@ func namedLiteralVerdict(literal string, last, decode bool, launcher string, nam
 	if namedLauncherTextRefuses(literal, names, preserved, b) {
 		return namedWordVerdict{refuse: true}
 	}
-	if normalized := normalizeNamedLiteral(literal); normalized != literal &&
-		namedLauncherTextRefuses(normalized, names, preserved, b) {
+	if normalized != literal && namedLauncherTextRefuses(normalized, names, preserved, b) {
 		return namedWordVerdict{refuse: true}
 	}
 	if raw != literal && namedLauncherTextRefuses(raw, names, preserved, b) {

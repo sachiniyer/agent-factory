@@ -1210,6 +1210,25 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch 'echo [; codex; echo ]'`, true},
 		{`watch 'echo [a[b]]'`, true},
 		{`watch 'echo [FOO=bar]'`, false},
+		// The union covers CLASSIFICATION too: the
+		// hidden-input and payload spellings resolve on
+		// every reading of the word, so `-en""c` classifies
+		// as the `-enc` the downstream shell sees.
+		{`watch pwsh '-en""c' x`, true},
+		{`watch 'pwsh -en""c x'`, true},
+		{`pwsh '-en""c' x`, true},
+		{`pwsh '-e""nc:x' x`, true},
+		{`watch pwsh '-com""mand' 'ls'`, false},
+		// A word holding an extglob opener counts as
+		// dynamic construction — `co@(d)ex` can collapse
+		// to codex wherever a downstream enabled it.
+		{`watch 'bash -O extglob -c "co@(d)ex"'`, true},
+		{`watch 'co@(d)ex'`, true},
+		{`watch 'co?(d)ex'`, true},
+		{`watch 'co*(d)ex'`, true},
+		{`watch 'co+(d)ex'`, true},
+		{`watch 'co!(d)ex'`, true},
+		{`watch 'echo (x)'`, false},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state

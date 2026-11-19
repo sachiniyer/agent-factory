@@ -499,10 +499,12 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
     `codex`, a `{x..y}` range over-approximates to `*`, and a
     comma-less `co{ab}x` stays literal as bash would keep it;
   - a word does not literalize (a substitution or expansion in the
-    argv itself) or its literal carries `$` or backtick text — a name
-    the text cannot see could be constructed at run time (`pwsh -c
-    'echo $HOME'` refuses on the `$`, `$'codex'`/`$"codex"` are
-    dynamic forms — the accepted over-refusal below);
+    argv itself) or its literal carries `$`, backtick or extglob text —
+    a name the text cannot see could be constructed at run time (`pwsh
+    -c 'echo $HOME'` refuses on the `$`, `$'codex'`/`$"codex"` are
+    dynamic forms, and `co@(d)ex`/`co?(d)ex`/`co*(d)ex`/`co+(d)ex`/
+    `co!(d)ex` can collapse to the name wherever a downstream enabled
+    extglob — the accepted over-refusal below);
   - a word spells input the gate cannot see — the per-launcher
     hidden-input table: a descriptor, stdin, or a language it does not
     parse (flatpak-spawn's `--env-fd`, nix's expression flags and
@@ -516,9 +518,11 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
     clap/nix spellings (`-Eexpr`), and a body that also prefixes a
     non-hidden option is ambiguous — the real launcher errors on it,
     so it admits (`-ex` is -ExecutionPolicy, nix `-i` is
-    --ignore-environment) — the same refusal class `sh -s` gets. A
-    command-string flag left with no operand is that same stdin feed
-    (`pwsh -Command`, `nu -c` alone);
+    --ignore-environment) — the same refusal class `sh -s` gets. The
+    classification runs on EVERY reading of the word — `-en""c` is the
+    `-enc` the downstream shell sees — and a command-string flag left
+    with no operand is that same stdin feed (`pwsh -Command`, `nu -c`
+    alone);
 
   Launcher names nest by NAME, not by position: a piece (or word, or a
   field of a nested tail) that spells a modelled launcher's name
