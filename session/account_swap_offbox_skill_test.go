@@ -2,9 +2,11 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,18 +91,15 @@ type scopeSkillFixture struct {
 	skillRel string // the skill's tar-relative name inside a scope
 }
 
-// scopeDiscoveredSkillRel is the path of af's managed skill inside an account
-// scope, mirroring the skills-base function the launch's own write resolves
-// through (codexSkillsBase, geminiSkillsBase).
-func scopeDiscoveredSkillRel(agent string) (string, bool) {
-	switch agent {
-	case tmux.ProgramCodex:
-		return "skills/" + afSkillDirName + "/SKILL.md", true
-	case tmux.ProgramGemini:
-		return ".gemini/skills/" + afSkillDirName + "/SKILL.md", true
-	default:
-		return "", false
-	}
+// swapPolicyBytes renders the policy snapshot an agent-server installs from
+// af-policy.json — the create-or-restore-time global_agent_skills answer the
+// in-sandbox launch acts on (#7644).
+func swapPolicyBytes(t *testing.T, granted bool) []byte {
+	t.Helper()
+	data, err := config.AgentPolicy{Version: config.AgentPolicyVersion,
+		Global: config.PolicyLayer{GlobalAgentSkills: granted}}.Marshal()
+	require.NoError(t, err)
+	return data
 }
 
 func newScopeSkillFixture(t *testing.T, agent string, skillsGranted bool) *scopeSkillFixture {
@@ -135,6 +134,11 @@ func newScopeSkillFixture(t *testing.T, agent string, skillsGranted bool) *scope
 	acct := sessionenv.Account{Agent: agent, Name: "work", Dir: workDir}
 	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{
 		Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target, Program: agent,
+		// The policy snapshot provision ships beside the session — the
+		// create-time global_agent_skills answer the in-sandbox launch acts
+		// on. The swap's staging asks that same snapshot, never the daemon's
+		// live config, so the two sides cannot disagree (#7644).
+		AgentPolicy: swapPolicyBytes(t, skillsGranted),
 	}}
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
@@ -275,6 +279,227 @@ func TestSwapOffBoxAccountRolledBackSwapKeepsTheOutgoingSkill(t *testing.T) {
 			assert.NoDirExists(t, f.w.PrevAccountDir())
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, "work", acct)
+		})
+	}
+}
+
+// runRelaunchSkillEnsure is the in-sandbox relaunch's own skill step: the same
+// ensure the launch's plan build calls, run under the policy snapshot the
+// agent-server installs — the one consent answer this swap's staging must
+// match (#7644). It is installed only after the swap returns: until then this
+// test process speaks for the daemon, which has no policy installed.
+func (f *scopeSkillFixture) runRelaunchSkillEnsure(t *testing.T) {
+	t.Helper()
+	policy, err := config.ParseAgentPolicy(f.w.spec.AgentPolicy)
+	require.NoError(t, err)
+	config.InstallAgentPolicy(policy)
+	t.Cleanup(config.ClearAgentPolicy)
+	target := skillTarget{root: f.w.AccountDir()}
+	switch f.srv.agent {
+	case tmux.ProgramCodex:
+		_, err = ensureCodexSkillDir(target)
+	case tmux.ProgramGemini:
+		_, err = ensureGeminiSkillDir(target)
+	}
+	require.NoError(t, err)
+}
+
+// #7644: the staged scope and the in-sandbox relaunch must act on ONE consent
+// answer — the policy snapshot shipped at create or restore — never the
+// daemon's live config, which a swap does not refresh. Here the operator
+// opted in AFTER the create that shipped a declined snapshot: the staged
+// scope carries no skill, and the relaunch's own write under that same
+// snapshot leaves the live scope without one — both sides answered "no".
+// Staging from the live config (what master does here) writes a skill the
+// relaunch then deletes: the flap the issue names.
+func TestSwapOffBoxAccountStagesWithTheSnapshotConsentFlippedToGranted(t *testing.T) {
+	for _, tc := range scopeSkillAgents {
+		t.Run(tc.agent, func(t *testing.T) {
+			f := newScopeSkillFixture(t, tc.agent, false) // create shipped a declined snapshot
+			// The operator opted in after create: the live config now grants.
+			cfg, err := config.LoadConfig()
+			require.NoError(t, err)
+			cfg.GlobalAgentSkills = true
+			require.NoError(t, config.SaveConfig(cfg))
+
+			_, err = f.inst.SwapOffBoxAccount("alt", false)
+			require.NoError(t, err)
+
+			assert.Empty(t, f.srv.atCall[f.skillRel],
+				"the staged scope follows the snapshot's declined answer, not the live config's grant")
+			assert.NoFileExists(t, f.liveSkill())
+			f.runRelaunchSkillEnsure(t)
+			assert.NoFileExists(t, f.liveSkill(),
+				"the relaunch under the same snapshot writes nothing either — one answer on both sides")
+		})
+	}
+}
+
+// The mirror: consent revoked after the create that shipped a granted
+// snapshot. Staging and the relaunch both act on the snapshot's "yes": the
+// skill lands and stays. On the live config (master), the staged scope gets
+// nothing while the relaunch writes it back — the same flap, reversed.
+func TestSwapOffBoxAccountStagesWithTheSnapshotConsentFlippedToDeclined(t *testing.T) {
+	for _, tc := range scopeSkillAgents {
+		t.Run(tc.agent, func(t *testing.T) {
+			f := newScopeSkillFixture(t, tc.agent, true) // create shipped a granted snapshot
+			f.seedLiveSkill(t)                           // what provision's granted launch left
+			cfg, err := config.LoadConfig()
+			require.NoError(t, err)
+			cfg.GlobalAgentSkills = false // the operator revoked after create
+			require.NoError(t, config.SaveConfig(cfg))
+
+			_, err = f.inst.SwapOffBoxAccount("alt", false)
+			require.NoError(t, err)
+
+			assert.Equal(t, afSkillDoc, f.srv.atCall[f.skillRel],
+				"the staged scope follows the snapshot's granted answer, not the live revocation")
+			f.runRelaunchSkillEnsure(t)
+			got, err := os.ReadFile(f.liveSkill())
+			require.NoError(t, err)
+			assert.Equal(t, afSkillDoc, string(got),
+				"the relaunch under the same snapshot keeps the same skill — one answer on both sides")
+		})
+	}
+}
+
+// A consent answer af cannot establish is UNKNOWN — an unreadable config is
+// not a "no" (#1933) — and on this side of the write it must never count as a
+// "yes" either: the staged scope gets no skill, and the swap says the guidance
+// did not land through the same skip list a refused sandbox_agent_config file
+// rides (#6337's channel, no new surface). This also pins the mutation #7644
+// names: the gate written `!= globalSkillGranted` keeps unknown silent; a gate
+// written `== globalSkillDeclined` would stage the skill on an unreadable
+// answer and fail every variant below.
+func TestSwapOffBoxAccountUnknownConsentStagesNoSkillAndSaysSo(t *testing.T) {
+	variants := []struct {
+		name       string
+		prep       func(t *testing.T, f *scopeSkillFixture)
+		wantReason string // daemon-local text the skip entry's reason must carry
+	}{
+		{"the shipped policy does not parse", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = []byte("{not a policy")
+		}, "the snapshot is not valid JSON"},
+		{"the restored workspace's policy file is gone", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = nil // a spec rebuilt from the row holds no copy
+			f.w.restored = true
+		}, "could not be read on the host"},
+		{"the restored workspace's policy file does not parse", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = nil
+			f.w.restored = true
+			require.NoError(t, os.WriteFile(f.w.PolicyPath(), []byte("{not a policy"), 0o600))
+		}, "the snapshot is not valid JSON"},
+		// A daemon restart onto a newer binary leaves the host's policy file at
+		// the old build's schema — the nightly upgrade case (#7644 R2). A
+		// version or a field this af does not know is named as another af's
+		// snapshot rather than generic damage.
+		{"the snapshot is a version this af does not know", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = []byte(`{"version":2,"global":{"global_agent_skills":true}}`)
+		}, "the snapshot is from another af version"},
+		{"the snapshot carries a field this af does not know", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = []byte(`{"version":1,"surprise":true}`)
+		}, "the snapshot is from another af version"},
+		// The read-back's size bound: an over-limit reply is unknown, never a
+		// truncated policy (#7644 R3). Once through the provisioner's RunLimited
+		// and once through a shell with no bounded-read capability.
+		{"the policy file is over the read bound", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = nil
+			require.NoError(t, os.WriteFile(f.w.PolicyPath(), make([]byte, accountSyncMaxFileBytes+1), 0o600))
+		}, "is larger than the bound af reads it under"},
+		{"the policy file is over the read bound on a shell without RunLimited", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = nil
+			f.w.shell = localShell{} // a sandboxShell with no bounded-read capability
+			require.NoError(t, os.WriteFile(f.w.PolicyPath(), make([]byte, accountSyncMaxFileBytes+1), 0o600))
+		}, "is larger than the bound af reads it under"},
+	}
+	for _, tc := range scopeSkillAgents {
+		t.Run(tc.agent, func(t *testing.T) {
+			for _, v := range variants {
+				t.Run(v.name, func(t *testing.T) {
+					f := newScopeSkillFixture(t, tc.agent, true) // the live config GRANTS
+					v.prep(t, f)
+
+					res, err := f.inst.SwapOffBoxAccount("alt", false)
+					require.NoError(t, err)
+
+					assert.Empty(t, f.srv.atCall[f.skillRel],
+						"an unknown consent answer stages no skill, whatever the live config says")
+					assert.NoFileExists(t, f.liveSkill())
+					require.NotEmpty(t, res.AgentConfigSkipped,
+						"the swap's result says the guidance did not land")
+					var entry string
+					for _, e := range res.AgentConfigSkipped {
+						if strings.Contains(e, f.skillRel) {
+							entry = e
+						}
+					}
+					require.NotEmpty(t, entry, "one skip entry names the skill file that was not staged")
+					assert.Contains(t, entry, tc.agent+":")
+					assert.Contains(t, entry, v.wantReason,
+						"the reason says which kind of unreadable the snapshot was")
+					assert.Equal(t, res.AgentConfigSkipped, f.inst.AgentConfigSkipped(),
+						"the row carries the same skip list the swap result reported")
+				})
+			}
+		})
+	}
+}
+
+// A failed read's reply is host-authored bytes — a FIFO parked where the
+// policy file should be can emit a megabyte of escape codes and newlines, and
+// the skip list's "; "-join would let them forge extra agent:file entries.
+// None of it may reach a skip entry, a row, or a warning (#7644 R1): the
+// entry's reason is fixed daemon-local text, asserted here in its exact form.
+func TestSwapOffBoxAccountUnknownConsentEntryCarriesNoHostBytes(t *testing.T) {
+	for _, tc := range scopeSkillAgents {
+		t.Run(tc.agent, func(t *testing.T) {
+			f := newScopeSkillFixture(t, tc.agent, true)
+			f.w.spec.AgentPolicy = nil // force the host read
+			reply := strings.Repeat("\x1b]8;;forged\x07claude:evil.txt: a forged entry\r\n", 20000) +
+				strings.Repeat("x", accountSyncMaxFileBytes)
+			p := f.inst.currentBackend().(*sshBackend).provisioner
+			p.runCommandFn = func(d time.Duration, script string, in io.Reader, interactive bool) ([]byte, error) {
+				if strings.Contains(script, "af-policy.json") {
+					return []byte(reply), errors.New("exit status 1")
+				}
+				return localShell{}.Run(d, script, in, interactive)
+			}
+
+			res, err := f.inst.SwapOffBoxAccount("alt", false)
+			require.NoError(t, err)
+
+			want := fmt.Sprintf("%s:%s: af could not confirm whether the sandbox's operator policy grants global_agent_skills: %s could not be read on the host",
+				tc.agent, f.skillRel, f.w.PolicyPath())
+			require.Equal(t, []string{want}, res.AgentConfigSkipped,
+				"one fixed daemon-local entry — none of the reply's bytes, newlines, or forged entries landed")
+			assert.Empty(t, f.srv.atCall[f.skillRel])
+			assert.NoFileExists(t, f.liveSkill())
+		})
+	}
+}
+
+// A workspace rebuilt from the session row after a daemon restart keeps no
+// copy of the shipped policy; the swap reads the consent back from the file
+// the agent-server installed it from — the same file a later agent-server
+// restart would re-install — so a reattached session's swap stages with the
+// same answer as anywhere else.
+func TestSwapOffBoxAccountOnARestoredWorkspaceStagesWithTheShippedPolicy(t *testing.T) {
+	for _, tc := range scopeSkillAgents {
+		t.Run(tc.agent, func(t *testing.T) {
+			f := newScopeSkillFixture(t, tc.agent, true)
+			f.w.spec.AgentPolicy = nil // a spec rebuilt from the row holds no copy
+			f.w.restored = true
+			require.NoError(t, os.WriteFile(f.w.PolicyPath(), swapPolicyBytes(t, true), 0o600))
+
+			res, err := f.inst.SwapOffBoxAccount("alt", false)
+			require.NoError(t, err)
+
+			assert.Equal(t, afSkillDoc, f.srv.atCall[f.skillRel],
+				"the policy file provision left beside the session still answers the staging question")
+			got, err := os.ReadFile(f.liveSkill())
+			require.NoError(t, err)
+			assert.Equal(t, afSkillDoc, string(got))
+			assert.Empty(t, res.AgentConfigSkipped)
 		})
 	}
 }
