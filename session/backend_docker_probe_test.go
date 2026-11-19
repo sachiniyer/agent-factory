@@ -154,25 +154,29 @@ func TestDockerDestProbeUnverifiableComponentsFailClosed(t *testing.T) {
 	require.NoError(t, os.Symlink(filepath.Join(fix, "gone-target"), dangling))
 
 	for _, tc := range []struct {
-		name string
-		dest string
+		name      string
+		dest      string
+		needsPerm bool // mode-000 must actually deny — meaningless as root
 	}{
 		// Codex's exact P1 shape: /locked is EACCES, so the probe cannot
 		// prove what /locked/deep IS — a symlink retargeting a mount could
 		// hide inside. Resolved-from-ancestor would let it slip the guard.
-		{"unreadable intermediate directory", filepath.Join(locked, "deep")},
+		{"unreadable intermediate directory", filepath.Join(locked, "deep"), true},
 		// The same, as the destination's own leaf.
-		{"unreadable directory as leaf", locked},
+		{"unreadable directory as leaf", locked, true},
 		// A symlink loop the probe cannot traverse — ELOOP, not ENOENT.
-		{"symlink loop intermediate", filepath.Join(fix, "loop", "deep")},
+		{"symlink loop intermediate", filepath.Join(fix, "loop", "deep"), false},
 		// A dangling link the probe cannot traverse — the component exists
 		// but is not proven absent.
-		{"dangling symlink as leaf", dangling},
+		{"dangling symlink as leaf", dangling, false},
 		// A relative destination cannot shrink — the walk must terminate
 		// rather than loop forever.
-		{"relative destination", "af-nonexistent-relative-7601/subdir"},
+		{"relative destination", "af-nonexistent-relative-7601/subdir", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsPerm && os.Geteuid() == 0 {
+				t.Skip("root reads a mode-000 directory")
+			}
 			_, err := probeDestsThroughRealSh(t, tc.dest)
 			require.Error(t, err, "an unverifiable destination must fail the probe, not resolve from an ancestor")
 			assert.Contains(t, err.Error(), "cannot be resolved inside the image")
@@ -212,6 +216,9 @@ func TestDockerStagingDeepMissingMountDestKeepsBinds(t *testing.T) {
 // probe and takes the guarded cp fallback — it never resolves from an
 // ancestor the probe could not see inside.
 func TestDockerStagingUnverifiableMountDestFallsBackToCp(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 directory")
+	}
 	stagingTestEnv(t)
 	fix, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
