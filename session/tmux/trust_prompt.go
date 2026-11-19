@@ -169,6 +169,13 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeFolderTrustPaintingOf(screen) {
 			return true
 		}
+		// The legacy folder-trust dialog while Claude Code paints its option
+		// rows (#7584): the cursor row or the No row only begun, which the
+		// grammar above took for a draft or for rows the dialog never paints.
+		// Asked last too: it only turns a clear pane into a hold.
+		if claudeLegacyTrustPaintingOf(screen) {
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//
