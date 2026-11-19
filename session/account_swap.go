@@ -384,8 +384,28 @@ func (i *Instance) markAccountSwapReplacementPanesStarted() error {
 	if i.pendingAccountSwap == nil || i.pendingAccountSwap.To != i.Account {
 		return fmt.Errorf("account swap for %q has no committed replacement to mark started", i.Title)
 	}
-	if !i.pendingAccountSwap.ReplacementPanesStarted {
-		i.pendingAccountSwap.ReplacementPanesStarted = true
+	pending := i.pendingAccountSwap
+	// The proof binds to the id these panes launch: a committed id reminted
+	// after an earlier launch does not inherit its started panes (#7596
+	// review). Stamped on every mark, so a re-spawn on the reminted id
+	// upgrades the proof to it.
+	launched := pending.ConversationID
+	if launched == "" {
+		launched = pending.CarriedConversationID
+	}
+	if pending.LaunchedConversationID != launched {
+		pending.LaunchedConversationID = launched
+		// The delivery verdict bound the panes that launched on the id being
+		// replaced: a re-spawn on another id — a committed id reminted after
+		// the launch — has not been delivered to, so the old proof retires
+		// with the id it proved and a blind re-launch cannot --resume the
+		// new, never-entered one (#7602 review).
+		pending.MissionDeliveryStatus = ""
+		pending.MissionDeliveryAttemptAt = time.Time{}
+		i.touchLocked()
+	}
+	if !pending.ReplacementPanesStarted {
+		pending.ReplacementPanesStarted = true
 		i.touchLocked()
 	}
 	return nil

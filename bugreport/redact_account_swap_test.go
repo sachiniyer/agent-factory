@@ -29,14 +29,15 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 		LimitAgent:     "codex",
 		LimitAccount:   "acme-prod",
 		PendingAccountSwap: &session.AccountSwapData{
-			From:                  "acme-prod",
-			To:                    "acme-staging",
-			AccountAgent:          "codex",
-			ConversationID:        "8f466d20-784b-4b02-a916-c80a0f6983e3",
-			CarriedConversationID: "5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
-			CarrySourceAccount:    "acme-legacy",
-			CarryFallback:         `the previous account "acme-legacy" is no longer registered for claude`,
-			MissionDeliveryStatus: session.PromptCouldNotConfirm,
+			From:                   "acme-prod",
+			To:                     "acme-staging",
+			AccountAgent:           "codex",
+			ConversationID:         "8f466d20-784b-4b02-a916-c80a0f6983e3",
+			CarriedConversationID:  "5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+			LaunchedConversationID: "8f466d20-784b-4b02-a916-c80a0f6983e3",
+			CarrySourceAccount:     "acme-legacy",
+			CarryFallback:          `the previous account "acme-legacy" is no longer registered for claude`,
+			MissionDeliveryStatus:  session.PromptCouldNotConfirm,
 		},
 		AccountLimitObservations: []session.AccountLimitObservationData{
 			{Agent: "claude", Account: "acme-prod", ResetAt: reset},
@@ -65,6 +66,9 @@ func TestRedactInstanceDataRedactsAccountSwapLabels(t *testing.T) {
 	}
 	if d.PendingAccountSwap.CarriedConversationID != "" {
 		t.Errorf("carried conversation id not cleared: %q", d.PendingAccountSwap.CarriedConversationID)
+	}
+	if d.PendingAccountSwap.LaunchedConversationID != "" {
+		t.Errorf("launched conversation id not cleared: %q", d.PendingAccountSwap.LaunchedConversationID)
 	}
 	// The structural fields triage actually reads survive, including the agent
 	// enum beside the redacted label — without it the observation list is two

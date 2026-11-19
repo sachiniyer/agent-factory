@@ -46,6 +46,13 @@ const writeSpaceProbeSize = 1 << 20
 // identity probe's deadline — the same "the mount did not answer" class.
 var probeTimeout = newBound(2 * time.Second)
 
+// ProbeBound reports the bound every flight here answers or gives up inside:
+// the deadline a look beginning now carries. A caller that looks twice — a
+// first judgement and a retry of the same seam — may bound the retry by what
+// the first look left of that instant, so the pair costs no more than the one
+// bound a single look was already allowed (#7602 review).
+func ProbeBound() time.Duration { return probeTimeout.load() }
+
 // ErrProbeTimedOut identifies the bounded flight's non-answer: the probe's
 // syscall — the write probe's write/sync/close, or the stat probe's
 // metadata lookup — did not complete inside probeTimeout. It is always

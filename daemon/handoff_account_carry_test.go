@@ -111,6 +111,24 @@ func TestAccountSwapPromptStatesTheConversationOutcome(t *testing.T) {
 		"from the previous account's home, so this is a fresh conversation")
 	require.Contains(t, failed, "\n\ncontinue")
 
+	// #7602 review: a blind resume is no carry failure — the pane keeps its
+	// earlier turns, so the notice says af resumed unverified, never "fresh".
+	resumed := accountSwapPrompt(swap, "", session.HandoffConversation{ResumeUnverified: "its transcript store could not be listed"})
+	require.Contains(t, resumed, "af resumed the conversation it had committed for this session, "+
+		"but could not verify that first, because its transcript store could not be listed.")
+	require.NotContains(t, resumed, "fresh conversation")
+	require.NotContains(t, resumed, "not available to you")
+
+	both := accountSwapPrompt(swap, "", session.HandoffConversation{
+		CarryFailure:     "its rollout is missing from the previous account's home",
+		ResumeUnverified: "its transcript store could not be listed",
+	})
+	require.Contains(t, both, "af tried to carry the previous conversation over, "+
+		"but its rollout is missing from the previous account's home.")
+	require.Contains(t, both, "af resumed the conversation it had committed for this session")
+	require.NotContains(t, both, "so this is a fresh conversation",
+		"a resumed pane is not fresh even where an earlier carry failed")
+
 	manual := &autoAccountSwap{manual: true, agent: tmux.ProgramClaude, to: "personal", mission: "the mission"}
 	require.Contains(t, accountSwapPrompt(manual, "", session.HandoffConversation{Carried: true}), "the mission",
 		"a manual swap's mission already states its conversation outcome")

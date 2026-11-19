@@ -93,6 +93,9 @@ func (m MissionBrief) Render() string {
 	if sameAgent && m.Conversation.Carried {
 		return m.renderCarried()
 	}
+	if sameAgent && strings.TrimSpace(m.Conversation.ResumeUnverified) != "" {
+		return m.renderResumedUnverified()
+	}
 	if sameAgent && m.Work.Empty() && carryFailure == "" {
 		return m.Goal
 	}
@@ -178,6 +181,22 @@ func (m MissionBrief) Render() string {
 func (m MissionBrief) renderCarried() string {
 	notice := "This conversation continues after an account handoff: everything above is still yours to use, " +
 		"and only the account changed. Continue from where you left off."
+	if m.Goal == "" {
+		return notice
+	}
+	return notice + "\n\nThe goal:\n\n" + m.Goal
+}
+
+// renderResumedUnverified is the notice for a same-agent swap whose committed
+// re-launch resumed its conversation without a listing's proof (#7596): the
+// pane keeps its own earlier turns, so the brief says the conversation
+// continues and names only what af knows — the store it could not list —
+// never a claim that a listing it could not read proved the transcript
+// (#7602 review).
+func (m MissionBrief) renderResumedUnverified() string {
+	notice := fmt.Sprintf("This conversation continues after an account handoff: everything above is still yours to use, "+
+		"and only the account changed. af resumed it without verifying the transcript store first, because %s. "+
+		"Continue from where you left off.", strings.TrimSpace(m.Conversation.ResumeUnverified))
 	if m.Goal == "" {
 		return notice
 	}

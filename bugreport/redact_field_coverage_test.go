@@ -106,12 +106,13 @@ var verbatimInstanceFields = map[string]string{
 	// report with `systemctl --user list-units 'af-hook-*'` (#3650).
 	"Worktree.HookScopeUnitPrefix": "systemd unit prefix derived from the minted instance id, or a SHA-256 digest of the worktree path — never the path or any user text (#3650)",
 
-	"IdleReason":                               "bounded IdleReason enum (#3168)",
-	"LastPromptDeliveryStatus":                 "bounded PromptDeliveryStatus enum (#3162)",
-	"HandoffDeliveryStatus":                    "bounded PromptDeliveryStatus enum for mission-scoped retry evidence (#4018)",
-	"PendingAccountSwap.MissionDeliveryStatus": "bounded PromptDeliveryStatus enum tied to a pending handoff mission",
-	"LifecycleAction":                          "bounded LifecycleAction enum (\"archive\"/\"restore\")",
-	"RootRecreateContext":                      "bounded RootRecreateContext enum (#2629)",
+	"IdleReason":                                "bounded IdleReason enum (#3168)",
+	"LastPromptDeliveryStatus":                  "bounded PromptDeliveryStatus enum (#3162)",
+	"HandoffDeliveryStatus":                     "bounded PromptDeliveryStatus enum for mission-scoped retry evidence (#4018)",
+	"PendingAccountSwap.MissionDeliveryStatus":  "bounded PromptDeliveryStatus enum tied to a pending handoff mission",
+	"PendingAccountSwap.ResumeUnverifiedReason": "af-authored constant clause (session's blindCommittedResumeReason), never user text or an account name (#7602 review)",
+	"LifecycleAction":                           "bounded LifecycleAction enum (\"archive\"/\"restore\")",
+	"RootRecreateContext":                       "bounded RootRecreateContext enum (#2629)",
 
 	"ModelChange.Before": "model identifier reported by the agent, not user text",
 	"ModelChange.After":  "model identifier reported by the agent, not user text",
@@ -146,7 +147,8 @@ var verbatimInstanceFields = map[string]string{
 	// Conversation.CarryFailure is NOT here: it can name an unregistered
 	// account the registry scrub cannot find, so redactHandoffAccount marks it
 	// like the pending record's CarryFallback (#6768 review).
-	"Tabs[].Exit.StoppedBy": "bounded TabStoppedBy* constant (#4506)",
+	"Tabs[].Handoffs[].Conversation.ResumeUnverified": "af-authored constant clause (session's blindCommittedResumeReason), never user text or an account name (#7602 review)",
+	"Tabs[].Exit.StoppedBy":                           "bounded TabStoppedBy* constant (#4506)",
 
 	"PendingTabs[].ID":                          "minted tab id (#1738)",
 	"PendingTabs[].Conversation.Agent":          "agent enum name; the resumable ID beside it is cleared",
@@ -157,7 +159,8 @@ var verbatimInstanceFields = map[string]string{
 	"PendingTabs[].Handoffs[].From.Agent":       "outgoing agent enum name; the resumable ID beside it is cleared (#3405)",
 	"PendingTabs[].Handoffs[].From.CaptureKind": "bounded capture-kind enum",
 	// PendingTabs[].Handoffs[].Conversation.CarryFailure: same — redacted.
-	"PendingTabs[].Exit.StoppedBy": "same bounded TabStoppedBy* constant under the staging roster",
+	"PendingTabs[].Handoffs[].Conversation.ResumeUnverified": "same af-authored constant clause under the staging roster",
+	"PendingTabs[].Exit.StoppedBy":                           "same bounded TabStoppedBy* constant under the staging roster",
 
 	"TabKinds[].Kind":   "bounded tab-kind enum",
 	"TabKinds[].Reason": "the daemon's OWN refusal text (#3060), not user input",

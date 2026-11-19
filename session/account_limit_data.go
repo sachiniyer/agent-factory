@@ -57,9 +57,27 @@ type AccountSwapData struct {
 	// the carried conversation. A committed carry whose replacement then has
 	// to be launched again gives up on the resume rather than retrying it
 	// forever: the new account may be unable to run it.
-	CarriedLaunchStarted    bool                 `json:"carried_launch_started,omitempty"`
+	CarriedLaunchStarted bool `json:"carried_launch_started,omitempty"`
+	// LaunchedConversationID binds the replacement's started-panes proof to
+	// the id the panes started on: markAccountSwapReplacementPanesStarted
+	// stamps ConversationID there when they spawn (CarriedConversationID for
+	// a carried swap). It proves the launch ran, never that Claude took an
+	// entry on id — a pane that died before its first prompt filed nothing —
+	// so a committed re-launch's blind store verdict may resume id only when
+	// MissionDeliveryStatus also proves a prompt landed on it
+	// (committedConversationFiled, #7602 review). A committed id reminted
+	// after the launch carries no such proof. Empty on records written
+	// before the field; those keep the as-before start on the id.
+	LaunchedConversationID  string               `json:"launched_conversation_id,omitempty"`
 	ReplacementPanesStarted bool                 `json:"replacement_panes_started,omitempty"`
 	MissionDeliveryStatus   PromptDeliveryStatus `json:"mission_delivery_status,omitempty"`
+	// ResumeUnverifiedReason says why a committed re-launch resumed its id
+	// without the store listing's proof (committedConversationFiled): the
+	// transcript store could not be listed, so the resume is unverified. It
+	// is the pending record's own channel (#7602 review): never
+	// CarryFallback, whose readers render it as a carry failure — a fresh
+	// conversation — where a resume keeps the earlier turns.
+	ResumeUnverifiedReason string `json:"resume_unverified_reason,omitempty"`
 	// MissionDeliveryAttemptAt is the send-attempt instant that produced
 	// MissionDeliveryStatus — the durable boundary the daemon's re-verification
 	// watch binds pane turn evidence to, so a turn the agent began after the
