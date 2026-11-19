@@ -470,7 +470,16 @@ func claudeTrustPromptPresent(screen visibleText) bool {
 	// a project you created or one you trust? … ❯ Yes, I trust this folder /
 	// No, exit … Enter to confirm · Esc to cancel"), read from the trailing
 	// region (claudeFolderTrustDialogOf, #7271).
-	reworded := claudeFolderTrustDialogOf(screen) == claudeFolderTrustComplete
+	folder := claudeFolderTrustDialogOf(screen)
+	if folder == claudeFolderTrustPartial {
+		// The reworded dialog owns the pane's trailing region and is not yet
+		// whole. No clause answers it, whichever other one also reads the
+		// pane: an Enter another clause would tap lands on the dialog's
+		// preselected "No, exit", which quits Claude Code (#7619 review,
+		// R1). CheckAndHandleTrustPrompt holds it as partial.
+		return false
+	}
+	reworded := folder == claudeFolderTrustComplete
 
 	// The older MCP prompt ("New MCP server found. Do you trust this new MCP
 	// server? ❯ 1. Yes … Enter to confirm"): its question, preamble and Yes/No

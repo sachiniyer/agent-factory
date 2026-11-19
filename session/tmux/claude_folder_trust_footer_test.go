@@ -160,3 +160,60 @@ func TestIssue7618RewordedDialogHoldsUntilItsFooterIsWhole(t *testing.T) {
 		}
 	}
 }
+
+// TestIssue7619PartialRewordedDialogIsHeldWhicheverClauseAlsoReadsIt pins the
+// #7619 review's R1. A pane whose reworded dialog reads partial is held, even
+// when another answering clause reads the same pane as its own dialog. The
+// review's frame is the reworded question and body over the older MCP prompt's
+// question, then "❯ No, exit", "Yes, I trust this folder", "Yes" and "No", and
+// a footer begun. The older MCP clause takes any last row that starts "Enter to
+// confirm" for its footer. So once the reworded dialog read partial, the gate
+// fell through to that clause's unaimed Enter, which lands on the preselected
+// "No, exit" and quits Claude Code. Master moved the cursor onto Yes there, or
+// held.
+//
+// The same frame at 40 columns, its question wrapped, reads partial with its
+// footer whole, and master tapped that Enter too. It holds now.
+func TestIssue7619PartialRewordedDialogIsHeldWhicheverClauseAlsoReadsIt(t *testing.T) {
+	const (
+		reworded = "Quick safety check: Is this a project you created or one you trust? (Like your own code, …).\n\n" +
+			"Claude Code'll be able to read, edit, and execute files here.\n\n"
+		mcp     = "New MCP server found in .mcp.json: probe\nDo you trust this new MCP server?\n"
+		options = "❯ No, exit\n  Yes, I trust this folder\n  Yes\n  No\n"
+	)
+	for _, gap := range []string{"", "\n"} {
+		for _, footer := range []string{"Enter to confirm", "Enter to confirm ·", "Enter to confirm · Esc", "Enter to confirm · Esc to"} {
+			content := reworded + mcp + options + gap + footer
+			screen := claudeScreenOf(content)
+			require.True(t, claudeMCPTrustFooterIsLast(screen),
+				"the older MCP clause must read the frame as its own, or this test proves nothing:\n%s", content)
+			require.Equal(t, claudeFolderTrustPartial, claudeFolderTrustDialogOf(screen), "%s", content)
+			require.False(t, claudeTrustPromptPresent(screen),
+				"no clause may answer a pane whose reworded dialog reads partial:\n%s", content)
+			requireHeldWithoutAKey(t, content, fmt.Sprintf("the review's frame, footer painted as far as %q", footer))
+		}
+	}
+
+	rule := strings.Repeat("─", 40)
+	wrapped := strings.Join([]string{
+		rule, "❯ ", rule, "",
+		"Quick safety check: Is this a project",
+		"you created or one you trust? (Like your",
+		"own code, …).",
+		"",
+		"Claude Code'll be able to read, edit,",
+		"and execute files here.",
+		"",
+		"New MCP server found in .mcp.json: probe",
+		"Do you trust this new MCP server?",
+		"❯ No, exit",
+		"  Yes, I trust this folder",
+		"  Yes",
+		"  No",
+		rewordedTrustFooter,
+	}, "\n")
+	screen := claudeScreenOf(wrapped)
+	require.True(t, claudeMCPTrustFooterIsLast(screen), "the older MCP clause must read the frame as its own")
+	require.Equal(t, claudeFolderTrustPartial, claudeFolderTrustDialogOf(screen))
+	requireHeldWithoutAKey(t, wrapped, "the review's frame at 40 columns, its question wrapped, its footer whole")
+}
