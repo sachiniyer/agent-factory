@@ -955,8 +955,9 @@ and maintainer approval are still required exactly as before.
 The live task prompt must run the helper before its no-findings early exit.
 Until this helper lands on master, it skips that command when the file is absent.
 The watch is the only writer; do not run overlapping write sweeps. Transient
-`gh api` failures — transport errors, empty or truncated bodies, 5xx, and
-rate-limit (including secondary) 403s — retry on a bounded backoff; real 4xx
-answers are not retried. A scan that still cannot finish writes a record
-marked incomplete, carrying the last complete episodes, rather than aborting
-or posing as a clean read (#4629).
+`gh api` failures — transport errors, empty or truncated bodies, 5xx,
+rate-limit (including secondary) 403s, and the lazy-generation 422 "taking
+too long to generate" — retry on a bounded backoff; every other 4xx answer
+is a verdict and is not retried. A scan that still cannot finish writes a
+record marked incomplete, carrying the last complete episodes, rather than
+aborting or posing as a clean read (#4629).
