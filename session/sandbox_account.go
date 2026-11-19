@@ -3,8 +3,10 @@ package session
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -788,25 +790,64 @@ func (w *sandboxWorkspace) swapSkillConsent(timeout time.Duration) (globalSkillC
 			}
 		}
 		if err != nil {
-			detail := strings.TrimSpace(string(out))
-			if detail == "" {
-				detail = accountReadBackStderr(err)
+			// The entry's reason is fixed daemon-local text: out is the host's
+			// own reply — unbounded past the limit, arbitrary bytes, and ';'
+			// could forge extra agent:file entries — so no host-authored bytes
+			// may reach a skip entry, a row, or a warning (#7644 R1). The
+			// underlying error still lands in the daemon log, with the bounded
+			// stderr the sibling refusals carry.
+			reason := w.PolicyPath() + " could not be read on the host"
+			switch {
+			case errors.Is(err, ErrOutputOverLimit):
+				reason = w.PolicyPath() + " is larger than the bound af reads it under"
+			case errors.Is(err, context.DeadlineExceeded):
+				reason = w.PolicyPath() + " timed out while being read"
 			}
-			if detail != "" {
-				return globalSkillUnknown, fmt.Errorf("af could not confirm whether the sandbox's operator policy grants global_agent_skills: %s could not be read on the host: %s: %w", w.PolicyPath(), detail, err)
+			if detail := accountReadBackStderr(err); detail != "" {
+				log.WarningLog.Printf("account swap: the consent snapshot could not be read: %v: %s", err, detail)
+			} else {
+				log.WarningLog.Printf("account swap: the consent snapshot could not be read: %v", err)
 			}
-			return globalSkillUnknown, fmt.Errorf("af could not confirm whether the sandbox's operator policy grants global_agent_skills: %s could not be read on the host: %w", w.PolicyPath(), err)
+			return globalSkillUnknown, fmt.Errorf("af could not confirm whether the sandbox's operator policy grants global_agent_skills: %s", reason)
 		}
 		data = out
 	}
 	policy, err := config.ParseAgentPolicy(data)
 	if err != nil {
-		return globalSkillUnknown, fmt.Errorf("af could not confirm whether the sandbox's operator policy grants global_agent_skills: the snapshot is not valid: %w", err)
+		log.WarningLog.Printf("account swap: the consent snapshot could not be used: %v", err)
+		return globalSkillUnknown, fmt.Errorf("af could not confirm whether the sandbox's operator policy grants global_agent_skills: %s", policySnapshotRefusal(data, err))
 	}
 	if policy.Global.GlobalAgentSkills {
 		return globalSkillGranted, nil
 	}
 	return globalSkillDeclined, nil
+}
+
+// policySnapshotRefusal renders the reason a policy snapshot could not be used
+// as the consent answer, in fixed daemon-local words — ParseAgentPolicy's own
+// message embeds the offending bytes (an unknown field's name is file content,
+// and the host writes the file), so it is logged, never carried in a skip
+// entry (#7644 R1). A version or schema this af does not know reads the same
+// way as damage: the likelier story is that the snapshot was written by
+// another af — a daemon restart onto a newer binary leaves the host's file at
+// the old build's schema, the nightly upgrade case — and that is what the
+// entry says (#7644 R2). The strict parse itself is not loosened.
+func policySnapshotRefusal(data []byte, err error) string {
+	var top any
+	if json.Unmarshal(data, &top) != nil {
+		return "the snapshot is not valid JSON"
+	}
+	var probe struct {
+		Version int `json:"version"`
+	}
+	_ = json.Unmarshal(data, &probe)
+	if probe.Version != config.AgentPolicyVersion {
+		return fmt.Sprintf("the snapshot is from another af version (version %d; this af reads %d)", probe.Version, config.AgentPolicyVersion)
+	}
+	if strings.Contains(err.Error(), "unknown field") {
+		return "the snapshot is from another af version"
+	}
+	return "the snapshot is not valid"
 }
 
 // AccountScopeAgentEnv names the variable the launch's identity file sets for an

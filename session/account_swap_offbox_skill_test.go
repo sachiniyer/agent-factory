@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -372,21 +373,44 @@ func TestSwapOffBoxAccountStagesWithTheSnapshotConsentFlippedToDeclined(t *testi
 // answer and fail every variant below.
 func TestSwapOffBoxAccountUnknownConsentStagesNoSkillAndSaysSo(t *testing.T) {
 	variants := []struct {
-		name string
-		prep func(t *testing.T, f *scopeSkillFixture)
+		name       string
+		prep       func(t *testing.T, f *scopeSkillFixture)
+		wantReason string // daemon-local text the skip entry's reason must carry
 	}{
 		{"the shipped policy does not parse", func(t *testing.T, f *scopeSkillFixture) {
 			f.w.spec.AgentPolicy = []byte("{not a policy")
-		}},
+		}, "the snapshot is not valid JSON"},
 		{"the restored workspace's policy file is gone", func(t *testing.T, f *scopeSkillFixture) {
 			f.w.spec.AgentPolicy = nil // a spec rebuilt from the row holds no copy
 			f.w.restored = true
-		}},
+		}, "could not be read on the host"},
 		{"the restored workspace's policy file does not parse", func(t *testing.T, f *scopeSkillFixture) {
 			f.w.spec.AgentPolicy = nil
 			f.w.restored = true
 			require.NoError(t, os.WriteFile(f.w.PolicyPath(), []byte("{not a policy"), 0o600))
-		}},
+		}, "the snapshot is not valid JSON"},
+		// A daemon restart onto a newer binary leaves the host's policy file at
+		// the old build's schema — the nightly upgrade case (#7644 R2). A
+		// version or a field this af does not know is named as another af's
+		// snapshot rather than generic damage.
+		{"the snapshot is a version this af does not know", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = []byte(`{"version":2,"global":{"global_agent_skills":true}}`)
+		}, "the snapshot is from another af version"},
+		{"the snapshot carries a field this af does not know", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = []byte(`{"version":1,"surprise":true}`)
+		}, "the snapshot is from another af version"},
+		// The read-back's size bound: an over-limit reply is unknown, never a
+		// truncated policy (#7644 R3). Once through the provisioner's RunLimited
+		// and once through a shell with no bounded-read capability.
+		{"the policy file is over the read bound", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = nil
+			require.NoError(t, os.WriteFile(f.w.PolicyPath(), make([]byte, accountSyncMaxFileBytes+1), 0o600))
+		}, "is larger than the bound af reads it under"},
+		{"the policy file is over the read bound on a shell without RunLimited", func(t *testing.T, f *scopeSkillFixture) {
+			f.w.spec.AgentPolicy = nil
+			f.w.shell = localShell{} // a sandboxShell with no bounded-read capability
+			require.NoError(t, os.WriteFile(f.w.PolicyPath(), make([]byte, accountSyncMaxFileBytes+1), 0o600))
+		}, "is larger than the bound af reads it under"},
 	}
 	for _, tc := range scopeSkillAgents {
 		t.Run(tc.agent, func(t *testing.T) {
@@ -411,10 +435,45 @@ func TestSwapOffBoxAccountUnknownConsentStagesNoSkillAndSaysSo(t *testing.T) {
 					}
 					require.NotEmpty(t, entry, "one skip entry names the skill file that was not staged")
 					assert.Contains(t, entry, tc.agent+":")
+					assert.Contains(t, entry, v.wantReason,
+						"the reason says which kind of unreadable the snapshot was")
 					assert.Equal(t, res.AgentConfigSkipped, f.inst.AgentConfigSkipped(),
 						"the row carries the same skip list the swap result reported")
 				})
 			}
+		})
+	}
+}
+
+// A failed read's reply is host-authored bytes — a FIFO parked where the
+// policy file should be can emit a megabyte of escape codes and newlines, and
+// the skip list's "; "-join would let them forge extra agent:file entries.
+// None of it may reach a skip entry, a row, or a warning (#7644 R1): the
+// entry's reason is fixed daemon-local text, asserted here in its exact form.
+func TestSwapOffBoxAccountUnknownConsentEntryCarriesNoHostBytes(t *testing.T) {
+	for _, tc := range scopeSkillAgents {
+		t.Run(tc.agent, func(t *testing.T) {
+			f := newScopeSkillFixture(t, tc.agent, true)
+			f.w.spec.AgentPolicy = nil // force the host read
+			reply := strings.Repeat("\x1b]8;;forged\x07claude:evil.txt: a forged entry\r\n", 20000) +
+				strings.Repeat("x", accountSyncMaxFileBytes)
+			p := f.inst.currentBackend().(*sshBackend).provisioner
+			p.runCommandFn = func(d time.Duration, script string, in io.Reader, interactive bool) ([]byte, error) {
+				if strings.Contains(script, "af-policy.json") {
+					return []byte(reply), errors.New("exit status 1")
+				}
+				return localShell{}.Run(d, script, in, interactive)
+			}
+
+			res, err := f.inst.SwapOffBoxAccount("alt", false)
+			require.NoError(t, err)
+
+			want := fmt.Sprintf("%s:%s: af could not confirm whether the sandbox's operator policy grants global_agent_skills: %s could not be read on the host",
+				tc.agent, f.skillRel, f.w.PolicyPath())
+			require.Equal(t, []string{want}, res.AgentConfigSkipped,
+				"one fixed daemon-local entry — none of the reply's bytes, newlines, or forged entries landed")
+			assert.Empty(t, f.srv.atCall[f.skillRel])
+			assert.NoFileExists(t, f.liveSkill())
 		})
 	}
 }
