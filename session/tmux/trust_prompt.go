@@ -176,6 +176,13 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeLegacyTrustPaintingOf(screen) {
 			return true
 		}
+		// The reworded folder-trust dialog's question while Claude Code
+		// paints it with no title above it (#7585): a pane too short scrolls
+		// the title off, and nothing above anchored the sentence begun. Asked
+		// last too: it only turns a clear pane into a hold.
+		if claudeFolderTrustQuestionPaintingOf(screen) {
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//
