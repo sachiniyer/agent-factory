@@ -30,6 +30,15 @@ const accountValidationVerdictsGolden = "testdata/account_validation_verdicts.go
 // accountValidationTokens is the corpus alphabet: the wrappers the walk peels
 // or scans (modeled, unmodeled, and shells), env's option and assignment
 // spellings, denied and allowed names, dynamic words, and trusted shell forms.
+//
+// The escaped spellings (`-ECODEX\_HOME=1`, `--env=CODEX\_HOME=$x`) mirror the
+// unescaped forms already in the alphabet — #5701's strace option walk reused
+// `appendLiteralShellPart`, a part-level reader that copied `*syntax.Lit` bytes
+// verbatim, so a backslash in the denied NAME of an attached strace operand
+// survived the denied-name compare. Anchoring both spellings in the corpus
+// keeps the differential oracle honest: any future regression that takes the
+// strace option walk back to raw `*syntax.Lit` bytes flips the escaped rows'
+// post-fix refusal to admission and fails the golden compare.
 var accountValidationTokens = []string{
 	"echo", "env", "/usr/bin/env", "./env", "strace", "nohup", "nice", "nice -n 5",
 	"timeout 5", "setsid", "stdbuf -o0", "ionice -c 2", "ionice -c", "taskset 1",
@@ -37,6 +46,7 @@ var accountValidationTokens = []string{
 	"sh", "sh -c", "/bin/sh", "/bin/sh -i", "/bin/bash --noprofile --norc -i", "/bin/zsh -f -i",
 	"-u", "-uCODEX_HOME", "--unset=CODEX_HOME", "-i", "-", "--", "-C", "/tmp", "-v", "-S",
 	"-E", "--env", "-ECODEX_HOME=1", "--env=CODEX_HOME=x", "--process-slot-var=CODEX_HOME",
+	"-ECODEX\\_HOME=1", "--env=CODEX\\_HOME=$x",
 	"CODEX_HOME=/x", "FOO=1", "A=$x", "CODEX_HOME=$x", "ZDOTDIR=/z", "BASH_ENV=/e",
 	"CODEX_HOME", "FOO", "a", "x", "codex", `"$y"`, "$(z)", "-p", "123", "-f", "--noprofile",
 }
@@ -97,6 +107,12 @@ func accountValidationCorpus() []string {
 		"CODEX_HOME=/x", "FOO=1", "A=$x", "-u CODEX_HOME", "-u FOO", "-i", "--", "-v",
 		"-C /tmp", "-u env", "-E CODEX_HOME=1", "sh -c 'unset CODEX_HOME'", "/bin/sh -i", `"$y"`,
 		"strace", "echo", "nohup",
+		// Escape-decode shapes (#5701 follow-up to #4523): the same spellings
+		// above with an unquoted backslash inside the denied NAME; the shell
+		// strips it at exec time, so the gate's runtime-argv contract applies
+		// and the escaped spellings refuse under the wrapper heads that
+		// reach the strace option walk.
+		"-ECODEX\\_HOME=1", "-E CODEX\\_HOME=1", "--env=CODEX\\_HOME=$x",
 	}
 	tails := []string{"x", "codex", "", "unset CODEX_HOME", "/bin/sh -i", `"$y"`}
 	for depth := 1; depth <= 12; depth++ {

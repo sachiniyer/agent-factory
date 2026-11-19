@@ -843,8 +843,29 @@ func literalShellWord(word *syntax.Word) (string, bool) {
 }
 
 func appendLiteralShellPart(value *strings.Builder, part syntax.WordPart) bool {
+	return appendLiteralShellPartCtx(value, part, true)
+}
+
+// appendLiteralShellPartCtx decodes one WordPart to its literal text. unquoted
+// holds whether the part sits OUTSIDE any quoting context, so an unquoted
+// *syntax.Lit's backslash escapes are decoded the way the shell will pass
+// them (#4523): `\env` is env, `CODEX\_HOME` is CODEX_HOME, so a word that
+// decides a command name, an option, or an assignment is never judged by raw
+// source bytes. A *syntax.Lit nested inside a DblQuoted keeps its raw bytes
+// here — POSIX double quotes only make \$, \`, \", \\ and \<newline> escapes,
+// so the pre-existing raw copy stays the conservative reader it was; the
+// strace prefix/operand builders that depended on the raw top-level Lit
+// (`-ECODEX\_HOME=/other` -> CODEX_HOME at runtime) get the decode they need
+// without changing what a quoted input passes. An unquoted `\<newline>` line
+// continuation returns false to keep callers' fail-closed stop-at-first-
+// unprovable-part semantics; a trailing backslash (unreachable from a
+// successful parse) is kept as literal text.
+func appendLiteralShellPartCtx(value *strings.Builder, part syntax.WordPart, unquoted bool) bool {
 	switch part := part.(type) {
 	case *syntax.Lit:
+		if unquoted {
+			return appendDecodedLit(value, part.Value)
+		}
 		value.WriteString(part.Value)
 		return true
 	case *syntax.SglQuoted:
@@ -858,7 +879,7 @@ func appendLiteralShellPart(value *strings.Builder, part syntax.WordPart) bool {
 			return false
 		}
 		for _, nested := range part.Parts {
-			if !appendLiteralShellPart(value, nested) {
+			if !appendLiteralShellPartCtx(value, nested, false) {
 				return false
 			}
 		}
@@ -866,4 +887,33 @@ func appendLiteralShellPart(value *strings.Builder, part syntax.WordPart) bool {
 	default:
 		return false
 	}
+}
+
+// appendDecodedLit writes raw to value after removing unquoted backslash
+// escapes the way POSIX does: `\x` emits the literal character x (so
+// `CODEX\_HOME` becomes `CODEX_HOME` at exec time), and `\<newline>` is a
+// line continuation the upper layers cannot prove — return false so a word
+// containing it fails closed rather than being judged by raw source bytes.
+// A trailing backslash is unreachable from a successful parse (a trailing
+// escape continues into the next part) but is kept as literal text for the
+// same defense-in-depth reason literalArgvWord keeps the rule.
+func appendDecodedLit(value *strings.Builder, raw string) bool {
+	for j := 0; j < len(raw); j++ {
+		c := raw[j]
+		if c == '\\' {
+			if j+1 == len(raw) {
+				value.WriteByte('\\')
+				continue
+			}
+			n := raw[j+1]
+			if n == '\n' {
+				return false
+			}
+			value.WriteByte(n)
+			j++
+			continue
+		}
+		value.WriteByte(c)
+	}
+	return true
 }

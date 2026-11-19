@@ -487,3 +487,140 @@ func TestStraceNestedOptionRunsAreLinear(t *testing.T) {
 	require.LessOrEqual(t, large, 4*8000, "each position is judged a bounded number of times")
 	require.LessOrEqual(t, large, 40*small, "32x the words took %d/%d judged words", large, small)
 }
+
+// TestCommandMutatesAccountEnvironment_StraceEnvOperandEscapeDecoded pins the
+// strace -E/--env account-environment gate's escape handling (#4523 invariant
+// extended to the strace option walk in #5701). A word that decides a command
+// name, an option, or an assignment is read the way the shell will pass it,
+// not by its raw source bytes: an unquoted `\x` is `x` at exec time, so a
+// backslash inside the denied NAME of an attached -E/--env operand
+// (`-ECODEX\_HOME=/other`) is the SAME argv word as `-ECODEX_HOME=/other` at
+// runtime — bash strips the escape before strace sees it. The strace option
+// walk reused the part-level `appendLiteralShellPart`, which copied `*syntax.Lit`
+// bytes verbatim, so the raw `CODEX\_HOME` survived the denied-name compare
+// and an un-escaped spelling refused by the gate was ADMITTED when escaped.
+// The fix decodes unquoted backslashes in `appendLiteralShellPart`' Lit case
+// (mirroring `literalArgvWord`), so every strace-path consumer (#5701's
+// `straceOptionStep`/`straceEnvOperandRefused` and `stracePrefixMutates` in
+// the wrapper-tail path) sees the runtime argv, not the source text.
+//
+// Each row below is the escape spelling of an existing `=`-form test case in
+// `TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment` that was
+// already refused (un-escaped); the rows marked with the report's bypass shape
+// were ADMITTED before the fix and pin the post-fix refusal.
+func TestCommandMutatesAccountEnvironment_StraceEnvOperandEscapeDecoded(t *testing.T) {
+	names := accountScopedNames("codex", "CODEX_HOME")
+	for name := range accountShellStartupNames {
+		names[name] = struct{}{}
+	}
+	cases := []struct {
+		command string
+		want    bool
+	}{
+		// The bypass shapes from the report's live reproduction: every
+		// ADMITTED row flips to refused once the gate decodes the backslash.
+		// Attached -E short form under three wrappers that reach the
+		// strace option walk (echo/firejail/proxychains), and the
+		// REMOVAL spelling (`-ECODEX\_HOME=` removes the variable too).
+		{"echo strace -ECODEX\\_HOME=/other codex", true},
+		{"echo strace -ECODEX\\_HOME=$V codex", true},
+		{"echo strace -ECODEX\\_HOME= codex", true},
+		{"firejail strace -ECODEX\\_HOME=/other codex", true},
+		{"proxychains strace -ECODEX\\_HOME=/other codex", true},
+		// Long-option attached form, the only spelling that ADMITTED under
+		// `echo` when the operand carried an expansion (#5033/#5701 used
+		// the part-level reader to decide the literal NAME before `=`
+		// without the value-side fallback that already decoded).
+		{"echo strace --env=CODEX\\_HOME=$V codex", true},
+		{"echo strace --env=CODEX\\_HOME=/other codex", true},
+		{"echo strace --env=CODEX\\_HOME= codex", true},
+		// Short-option cluster form: a backslash inside the same cluster
+		// (`-fECODEX\_HOME=…`) decodes the same way.
+		{"echo strace -fECODEX\\_HOME=/other codex", true},
+		{"echo strace -fECODEX\\_HOME=$V codex", true},
+		{"echo strace -qECODEX\\_HOME=/other codex", true},
+		// Long-option abbreviation form: getopt_long resolves `--en` to
+		// --env, then the operand is judged with the backslash decoded.
+		{"echo strace --en=CODEX\\_HOME=/other codex", true},
+		{"echo strace --en=CODEX\\_HOME=$V codex", true},
+		{"echo strace --e=CODEX\\_HOME=$V codex", true},
+		// The escape anywhere in the NAME decodes the same way: `C\ODEX_HOME`,
+		// `CODEX_H\OME`, `--env=C\ODEX_HOME=…` all reduce to `CODEX_HOME` at
+		// runtime once the shell strips the backslash, so the post-fix gate
+		// compares the decoded name against the denied set and refuses.
+		{"echo strace -EC\\ODEX_HOME=/other codex", true},
+		{"echo strace -ECODEX_H\\OME=/other codex", true},
+		{"echo strace --env=CODEX\\_H\\OME=/other codex", true},
+		// The escape inside a long-form value with a credential name (not
+		// just the config dir) refuses for the same reason.
+		{"echo strace --env=OPENAI\\_API\\_KEY=sk codex", true},
+		{"echo strace -EOPENAI\\_API\\_KEY=sk codex", true},
+		// A nested strace in another strace's child command position is
+		// judged the same way (#5709): the wrapper-tail scan option-walks
+		// the inner strace and decodes its operand.
+		{"echo strace strace -ECODEX\\_HOME=/other codex", true},
+		// Controls: the un-escaped spellings were already refused and stay
+		// refused — the fix is parity, not a new refusal on a previously
+		// admitted shape.
+		{"echo strace -ECODEX_HOME=/other codex", true},
+		{"echo strace -ECODEX_HOME=$V codex", true},
+		{"echo strace --env=CODEX_HOME=$V codex", true},
+		{"echo strace -ECODEX_HOME= codex", true},
+		{"echo strace --env=CODEX_HOME=/other codex", true},
+		// The separate-word shape `-E NAME=value` reaches the operand
+		// through `stracePeekOperand` -> `literalShellWord`, which already
+		// decoded unquoted backslashes (#4523): the escape was already
+		// refused and stays refused.
+		{"echo strace -E CODEX\\_HOME=/other codex", true},
+		{"echo strace -E CODEX\\_HOME=$V codex", true},
+		{"echo strace --env CODEX\\_HOME=/other codex", true},
+		// Narrowness: an escape on a NAME the gate does not own stays
+		// admitted (echo is an opaque non-passthrough wrapper; its
+		// arguments are inert when no env command or modeled option places
+		// the denied NAME in the child).
+		{"echo strace -EPORT\\_X=1 codex", false},
+		{"echo strace --env=PORT\\_X=1 codex", false},
+		{"echo strace -EPORT\\_X=$V codex", false},
+		// A backslash that escapes a NON-IDENTIFIER character inside the
+		// variable name (escapes have no special meaning past the shell
+		// strip) does not produce a value the denied set owns once decoded.
+		{"echo strace -E\\\\HOME=/other codex", false},
+		// Bare strace is refused outright under the unmodeled passthrough
+		// wrapper list, so an escaped operand under bare strace is refused
+		// by the wrapper, not the env operand path — pinning it keeps a
+		// refactor that drops the passthrough list honest.
+		{"strace -ECODEX\\_HOME=/other codex", true},
+		{"strace -fECODEX\\_HOME=/other codex", true},
+	}
+	for _, test := range cases {
+		got := commandMutatesAccountEnvironment(test.command, names)
+		require.Equal(t, test.want, got, "command %q", test.command)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_RefusesStraceEnvOperandEscape runs the
+// end-to-end gate (ValidateAccountEnvironmentCommand) on the bypass shapes the
+// report enumerated. The gate must refuse them through the standard account
+// environment guard message; narrowing keeps non-cooperative wrappers
+// (`firejail`/`proxychains`) under the same scrutiny.
+func TestValidateAccountEnvironmentCommand_RefusesStraceEnvOperandEscape(t *testing.T) {
+	for _, command := range []string{
+		"echo strace -ECODEX\\_HOME=/other codex",
+		"echo strace -ECODEX\\_HOME=$V codex",
+		"echo strace -ECODEX\\_HOME= codex",
+		"echo strace --env=CODEX\\_HOME=/other codex",
+		"echo strace --env=CODEX\\_HOME=$V codex",
+		"firejail strace -ECODEX\\_HOME=/other codex",
+		"proxychains strace -ECODEX\\_HOME=/other codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q must refuse the escaped strace -E/--env operand", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+	// Narrowness: an escaped operand under a non-passthrough wrapper that
+	// names a NAME the account does not own stays allowed.
+	require.NoError(t,
+		ValidateAccountEnvironmentCommand("echo strace -EPORT\\_X=1 codex", scopedProcessTabAccount()),
+		"an escaped operand naming a non-identity variable is ordinary use")
+}
