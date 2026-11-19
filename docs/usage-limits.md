@@ -481,7 +481,10 @@ will not reach the child's environment.
     sh's line continuation) and every quote character, an
     over-approximation of POSIX escapes closed under nesting, so
     `co""dex`, `co\dex`, `co\<newline>dex` and `co\\\\dex` — quoting
-    quoted again at any depth — all check as `codex`;
+    quoted again at any depth — all check as `codex`, and a piece
+    carrying POSIX glob syntax (`*?[`) is matched as a pattern since
+    pathname expansion happens at run time — `co[d]ex` can resolve to
+    the codex on disk, while `*.log` still admits;
   - a word does not literalize (a substitution or expansion in the
     argv itself) or its literal carries `$` or backtick text — a name
     the text cannot see could be constructed at run time (`pwsh -c

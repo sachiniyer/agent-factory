@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -65,13 +66,24 @@ func namedLauncherPieceBreak(c rune) bool {
 // protected variable named at identifier boundaries, or the account's
 // own agent program — boundary text or path basename — with an agent
 // whose config pin survives through `preserved` skipped (a still-pinned
-// agent is not a re-root).
+// agent is not a re-root). A piece carrying POSIX pathname-expansion
+// syntax (XCU 2.13 — `*`, `?`, `[…]`) is matched as a PATTERN too:
+// `co[d]ex` resolves to the codex on disk at run time, so the text
+// alone does not show the name. `!` negation translates to Go's `^`
+// class spelling and the piece's path basename is matched alongside
+// the whole piece; a malformed pattern can only name itself.
 func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{}) bool {
 	if piece == "" {
 		return false
 	}
+	pattern := ""
+	if strings.ContainsAny(piece, "*?[") {
+		pattern = strings.ReplaceAll(piece, "[!", "[^")
+	}
 	for name := range names {
-		if textNamesIdentifierBoundary(piece, name) {
+		if textNamesIdentifierBoundary(piece, name) ||
+			globPieceMatches(pattern, name) ||
+			globPieceMatches(filepath.Base(pattern), name) {
 			return true
 		}
 	}
@@ -82,11 +94,24 @@ func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{
 		if _, kept := preserved[configVar]; kept {
 			continue
 		}
-		if textNamesIdentifierBoundary(piece, agent) || filepath.Base(piece) == agent {
+		if textNamesIdentifierBoundary(piece, agent) || filepath.Base(piece) == agent ||
+			globPieceMatches(pattern, agent) ||
+			globPieceMatches(filepath.Base(pattern), agent) {
 			return true
 		}
 	}
 	return false
+}
+
+// globPieceMatches path.Match-es a glob pattern against a denied name;
+// the empty pattern (no glob syntax in the piece) and malformed
+// patterns never match.
+func globPieceMatches(pattern, name string) bool {
+	if pattern == "" {
+		return false
+	}
+	ok, err := path.Match(pattern, name)
+	return err == nil && ok
 }
 
 // namedWordKey is one word's memoized verdict slot — keyed on the word

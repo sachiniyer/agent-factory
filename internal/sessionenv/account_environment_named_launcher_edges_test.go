@@ -1102,6 +1102,21 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch 'sh -c "bash -c co\\\\dex"'`, true},
 		{`watch 'sh -c "bash -c co\\\\\\\\dex"'`, true},
 		{`watch 'sh -c "bash -c \"sh -c co\\\\\\\\dex\""'`, true},
+		// The P2 glob finding — POSIX pathname expansion
+		// happens at run time, so a piece carrying `*?[`
+		// is matched as a pattern: `co[d]ex` can resolve
+		// to the codex on disk (and `!` negation too).
+		// Ordinary globs that cannot spell a denied name
+		// still admit.
+		{`watch 'env -i /tmp/review-probe/co[d]ex'`, true},
+		{`ssh host 'co?ex -n 1'`, true},
+		{`ssh host 'CODEX_HO[!X]E=/o env'`, true},
+		{`ssh host 'ls *.log'`, false},
+		{`watch 'ls /var/log/*.gz'`, false},
+		{`ssh host 'grep -r x co[d]ey'`, false},
+		// A bare `*` matches every name — the same mere-
+		// mention over-refusal class as `cat codex.md`.
+		{`ssh host 'tar czf - *'`, true},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state
