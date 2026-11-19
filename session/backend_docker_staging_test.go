@@ -101,6 +101,9 @@ func stagingDockerAnswers(t *testing.T, calls *[][]string, engineName string, ro
 			if containsArg(args, "--rm") {
 				// The in-image resolution probe: resolved af parents, the
 				// marker field, then one field per repo mount destination.
+				if dockerStagingProbeArgs != nil {
+					return dockerStagingProbeArgs(args)
+				}
 				if dockerStagingProbeAnswer != nil {
 					return dockerStagingProbeAnswer(joined)
 				}
@@ -149,6 +152,11 @@ func stagingDockerAnswers(t *testing.T, calls *[][]string, engineName string, ro
 // dockerStagingProbeAnswer overrides the probe `docker run --rm` answer when
 // non-nil — tests use it to feed symlinked parents or a failing probe.
 var dockerStagingProbeAnswer func(joined string) ([]byte, error)
+
+// dockerStagingProbeArgs overrides the probe answer with the full argv —
+// tests that execute the probe script in a real /bin/sh need arg boundaries
+// the joined string loses.
+var dockerStagingProbeArgs func(args []string) ([]byte, error)
 
 // findDockerCall returns the recorded docker call whose argv starts with
 // subcommand and whose joined argv contains every needle, or nil.
