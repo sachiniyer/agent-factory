@@ -5,13 +5,25 @@
 // directory (about 49 MB — the af binary plus the policy) that no cleanup
 // handle ever reaches.
 //
-// The pass only ever removes what four proofs leave over:
+// The pass only ever removes what five proofs leave over:
 //
 //   - A dir whose base name a live session record still claims (the record's
 //     StagingDir field) is kept — the teardown handle owns it.
 //   - A dir whose slug belongs to a live or still-provisioning session is
 //     kept — the mid-create window has a staged dir with no record yet, and
 //     `docker run` may not have bound it yet either.
+//   - A dir is a candidate only when the daemon generation that minted it is
+//     provably DEAD: provisioning records this process's generation dir name
+//     (<home>/tunnels/d<pid>-<rand>) beside the payload, and that dir's .lock
+//     is flock'd for the owner's life. A live generation — this daemon, or a
+//     predecessor mid-upgrade — still holds it, so a dir THIS generation is
+//     mid-provisioning (restore, relaunch, handoff, move, a lazily
+//     registered row — every path the create admission barrier does not
+//     cover) is never a candidate, however it came to be enumerated (#7616
+//     R1). The generation sweep removes a dir only once its lock provably
+//     freed, so an absent or lock-free generation dir is the dead generation
+//     #7590 exists to reclaim; anything unproven — no marker, a malformed
+//     name, a lockless dir, an unreadable path — keeps.
 //   - A dir is removed only on the engine that created it, under the home
 //     spelling that created it: provisioning records the resolved `docker
 //     info` ID and the af.home label spelling beside the staged payload, and
@@ -32,10 +44,13 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -99,9 +114,13 @@ func parseStagingDirName(name string) (slug string, ok bool) {
 // proof cannot be scoped without it. claimedNames must name every staging-dir
 // base name a live session record still owns; protectedSlugs every live or
 // still-provisioning session slug. The caller supplies both from the same
-// instance snapshot it protects the container sweep with — under createSweepMu
-// while its skipped-repos set is drained, so neither set is built on a
-// known-incomplete view.
+// instance snapshot it protects the container sweep with — while its
+// skipped-repos set is drained, so neither set is built on a
+// known-incomplete view. The keep sets are defense in depth, not the
+// candidacy proof: what a mid-pass provision minted is kept by the
+// generation marker's held lock, so the pass deliberately runs WITHOUT the
+// create admission barrier and never holds it across a filesystem read or
+// removal (#7616 R3).
 func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[string]bool) StagingSweepResult {
 	var result StagingSweepResult
 	if strings.TrimSpace(homeID) == "" {
@@ -166,8 +185,21 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 		result.Unlisted = true
 		return result
 	}
+	// Pin ONE endpoint for the engine-ID read, the listing, and the ID
+	// re-read (#7616 R2): without an explicit selector each docker call
+	// re-resolves the current context, so a `docker context use` switch
+	// landing between the two ID reads could put the LISTING on a third
+	// engine both reads never saw. Naming the resolved selector on every
+	// call makes the whole pass address one endpoint; a changed engine
+	// behind it is still caught by the before/after ID comparison.
+	selector, err := stagingSweepSelector(env)
+	if err != nil {
+		log.WarningLog.Printf("staging dir sweep: cannot pin the Docker engine selector; skipping this sweep: %v", err)
+		result.Unlisted = true
+		return result
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
-	engineID, err := currentDockerEngineID(ctx, env)
+	engineID, err := currentDockerEngineID(ctx, env, selector...)
 	cancel()
 	if err != nil {
 		log.WarningLog.Printf("staging dir sweep: cannot read the Docker engine identity; skipping this sweep: %v", err)
@@ -175,7 +207,7 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 		return result
 	}
 	result.EngineID = engineID
-	containers, err := listAfContainers(env, homeID)
+	containers, err := listAfContainers(env, homeID, selector...)
 	if err != nil {
 		log.WarningLog.Printf("staging dir sweep: cannot list af containers; skipping this sweep: %v", err)
 		result.Unlisted = true
@@ -189,7 +221,7 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 	// engine being asked — the post-pass re-read reapListedContainers applies
 	// (Codex on #7458). A moved or unreadable engine voids the pass.
 	ctx, cancel = context.WithTimeout(context.Background(), dockerShortStepTimeout)
-	listedOn, err := currentDockerEngineID(ctx, env)
+	listedOn, err := currentDockerEngineID(ctx, env, selector...)
 	cancel()
 	if err != nil || listedOn != engineID {
 		log.WarningLog.Printf("staging dir sweep: the Docker engine changed or could not be read again during this pass (was %q, now %q: %v); it proves nothing about what is left", engineID, listedOn, err)
@@ -234,18 +266,173 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 	return result
 }
 
+// stagingMarkerMax bounds each recorded identity marker: the engine token,
+// the home-label spelling, and the generation dir name are all small
+// single-line values. A marker file bigger than the bound — or anything but
+// a regular file — is not a marker provisioning wrote, and is never opened:
+// the Lstat gate precedes every read so the pass cannot block on a special
+// file (#7616 R3).
+const stagingMarkerMax = 4096
+
+// readStagingMarker reads one marker file through the verified staging root,
+// returning its bytes only when the entry is a regular file of bounded size.
+// Anything else — a missing marker, a directory, a symlink, a special file,
+// an oversized one — is an error the caller reads as unrecorded-and-kept.
+func readStagingMarker(root *os.Root, name, marker string) ([]byte, error) {
+	st, err := root.Lstat(filepath.Join(name, marker))
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("marker %s is not a regular file", marker)
+	}
+	if st.Size() > stagingMarkerMax {
+		return nil, fmt.Errorf("marker %s is too large (%d bytes)", marker, st.Size())
+	}
+	return root.ReadFile(filepath.Join(name, marker))
+}
+
+// stagingGenerationAlive reports whether the daemon generation the marker
+// names — a <home>/tunnels/d<pid>-<rand> dir — is still alive: its .lock
+// held by any process. The lock dies with the holder, which pid reuse cannot
+// fake, so this is a proof, not a guess (the same primitive
+// sweepStaleTunnelSocketDirs uses, #7495):
+//
+//   - lock HELD (flock refused): a live af process — this daemon, or a
+//     predecessor mid-upgrade — owns the generation. Keep the dir.
+//   - lock FREE (flock taken, then released): the generation is provably
+//     dead. Its staging dirs are the orphans this pass exists to reclaim.
+//   - generation dir ABSENT (ENOENT): also dead — the only sanctioned
+//     remover of a generation dir is the lock-gated generation sweep, which
+//     proves the lock free first. A manual `rm -rf tunnels/` under a live
+//     daemon is an operator deleting daemon state, the same exposure class
+//     as deleting the staging dirs themselves; the next mint re-establishes
+//     the entry.
+//   - anything else — no .lock, an unreadable path, a non-directory entry
+//     at the registry or generation name — is unproven and keeps. ENOTDIR is
+//     deliberately NOT treated as absent: a planted file at the name is
+//     tampering the pass cannot disprove.
+func stagingGenerationAlive(gen string) (alive bool, why string) {
+	home, err := currentTunnelHome()
+	if err != nil {
+		return false, "cannot resolve the AF home: " + err.Error()
+	}
+	homeFd, err := unix.Open(home, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false, "cannot open the AF home: " + err.Error()
+	}
+	defer func() { _ = unix.Close(homeFd) }()
+	tunnelsFd, err := unix.Openat(homeFd, tunnelSocketRootName,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, "" // no generation registry at all — nothing named here can be alive
+		}
+		return false, "cannot open the generation registry: " + err.Error()
+	}
+	defer func() { _ = unix.Close(tunnelsFd) }()
+	genFd, err := unix.Openat(tunnelsFd, gen,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, "" // the generation dir is gone — only ever removed after its lock provably freed
+		}
+		return false, "cannot open the recorded generation dir: " + err.Error()
+	}
+	defer func() { _ = unix.Close(genFd) }()
+	// Prove .lock is a regular file BEFORE opening it: an open of a special
+	// file can block, and this probe must never block the pass (#7616 R3).
+	var st unix.Stat_t
+	if err := unix.Fstatat(genFd, tunnelGenLockName, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false, "cannot stat the recorded generation's lock: " + err.Error()
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return false, "the recorded generation's lock is not a regular file"
+	}
+	lockFd, err := unix.Openat(genFd, tunnelGenLockName, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false, "cannot open the recorded generation's lock: " + err.Error()
+	}
+	defer func() { _ = unix.Close(lockFd) }()
+	if err := unix.Flock(lockFd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return true, ""
+		}
+		return false, "cannot probe the recorded generation's lock: " + err.Error()
+	}
+	_ = unix.Flock(lockFd, unix.LOCK_UN)
+	return false, ""
+}
+
+// dockerContextNameFormat selects a context's own name from `docker context
+// inspect` — the selector the pin names so every one of the pass's calls
+// addresses the context the resolution chose, immune to a `docker context
+// use` switch landing mid-pass (#7616 R2).
+const dockerContextNameFormat = "{{.Name}}"
+
+// stagingSweepSelector returns the docker CLI global args that pin every
+// call of the pass to the ONE endpoint the resolution just chose: `-H
+// <DOCKER_HOST>` when that is the CLI's selector, `--context <name>`
+// otherwise — the DOCKER_CONTEXT value when set, else the current context's
+// own name, resolved once through `docker context inspect`. A `-H` value is
+// already the endpoint; a context NAME pins the lookup so a `docker context
+// use` switch mid-pass cannot move the listing to an engine the identity
+// reads never saw (#7616 R2), while the context's TLS material still
+// applies.
+func stagingSweepSelector(env []string) ([]string, error) {
+	if host := strings.TrimSpace(rawEnvironmentValue(env, "DOCKER_HOST")); host != "" {
+		return []string{"-H", host}, nil
+	}
+	if rawCtx := rawEnvironmentValue(env, "DOCKER_CONTEXT"); rawCtx != "" {
+		return []string{"--context", rawCtx}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
+	out, err := dockerExec(ctx, env, "context", "inspect", "--format", dockerContextNameFormat)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("`docker context inspect` could not name the resolved context: %w", err)
+	}
+	name := strings.TrimSpace(string(out))
+	if name == "" || strings.ContainsAny(name, "\n\r\x00") {
+		return nil, fmt.Errorf("`docker context inspect` returned a malformed context name %q", name)
+	}
+	return []string{"--context", name}, nil
+}
+
 // stagingIdentityMatches reports whether the dir's recorded creation
-// identity — the markers recordStagingIdentity wrote — names BOTH the engine
-// this pass listed and the home-label spelling its container filter used.
-// Only then does the listing prove anything about this dir: no marker (a
-// legacy dir, or a provision that staged before the identity resolved), a
-// malformed one, a different engine, or a different af.home spelling each
-// mean a container binding it could live where this listing cannot see (a
-// symlinked AGENT_FACTORY_HOME reaches the same real dir under a spelling the
-// label filter does not match — Codex on #7616). Every non-match logs why
-// the dir is kept.
+// identity — the markers recordStagingIdentity wrote — clears candidacy for
+// this pass: the recorded daemon generation is provably dead, AND the
+// recorded engine is the one this pass listed, AND the recorded home-label
+// spelling is the one its container filter used. Only then do the listing
+// and the keep sets prove anything about this dir: no marker (a legacy dir,
+// or a provision that staged before the identity resolved), a malformed
+// one, a live generation, a different engine, or a different af.home
+// spelling each mean a container binding it could live where this listing
+// cannot see — a dir THIS generation is mid-provisioning is exactly such a
+// case (#7616 R1), and a symlinked AGENT_FACTORY_HOME reaches the same real
+// dir under a spelling the label filter does not match (Codex on #7616).
+// Every non-match logs why the dir is kept.
 func stagingIdentityMatches(root *os.Root, name, engineID, homeID string) bool {
-	raw, err := root.ReadFile(filepath.Join(name, dockerStagingEngineFileName))
+	rawGen, err := readStagingMarker(root, name, dockerStagingGenerationFileName)
+	if err != nil {
+		log.InfoLog.Printf("staging dir sweep: keeping %s: no recorded generation — a dir this daemon may still be provisioning is indistinguishable from an orphan (%v)", name, err)
+		return false
+	}
+	gen := strings.TrimSuffix(string(rawGen), "\n")
+	if !tunnelGenDirRE.MatchString(gen) {
+		log.InfoLog.Printf("staging dir sweep: keeping %s: malformed recorded generation %q", name, gen)
+		return false
+	}
+	alive, why := stagingGenerationAlive(gen)
+	switch {
+	case alive:
+		log.InfoLog.Printf("staging dir sweep: keeping %s: minted by generation %s, whose lock a live af process still holds — its container may not exist yet", name, gen)
+		return false
+	case why != "":
+		log.InfoLog.Printf("staging dir sweep: keeping %s: cannot prove the recorded generation %s is gone (%s)", name, gen, why)
+		return false
+	}
+	raw, err := readStagingMarker(root, name, dockerStagingEngineFileName)
 	if err != nil {
 		log.InfoLog.Printf("staging dir sweep: keeping %s: no recorded engine — a container binding it could exist where this listing cannot see (%v)", name, err)
 		return false
@@ -261,7 +448,7 @@ func stagingIdentityMatches(root *os.Root, name, engineID, homeID string) bool {
 		log.InfoLog.Printf("staging dir sweep: keeping %s: created on engine %q, not the listed engine %q — a container binding it could still exist there", name, recorded, engineID)
 		return false
 	}
-	rawHome, err := root.ReadFile(filepath.Join(name, dockerStagingHomeFileName))
+	rawHome, err := readStagingMarker(root, name, dockerStagingHomeFileName)
 	if err != nil {
 		log.InfoLog.Printf("staging dir sweep: keeping %s: no recorded home label — a container binding it could carry an af.home spelling this filter misses (%v)", name, err)
 		return false

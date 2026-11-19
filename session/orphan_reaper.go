@@ -224,16 +224,18 @@ func reapListedContainers(pass containerReap) OrphanSweepResult {
 }
 
 // listAfContainers lists this home's managed containers (any state) with their
-// af.session slug. The two label filters run engine-scoped under env.
-func listAfContainers(env []string, homeID string) ([]afContainer, error) {
+// af.session slug. The two label filters run engine-scoped under env; pre
+// carries any pinned selector the caller resolved (`-H`/`--context`).
+func listAfContainers(env []string, homeID string, pre ...string) ([]afContainer, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
 	defer cancel()
 	out, err := dockerExec(ctx, env,
-		"ps", "-a",
-		"--filter", "label="+dockerSessionLabel,
-		"--filter", "label="+dockerHomeLabel+"="+homeID,
-		"--format", dockerSweepListFormat,
-	)
+		append(pre,
+			"ps", "-a",
+			"--filter", "label="+dockerSessionLabel,
+			"--filter", "label="+dockerHomeLabel+"="+homeID,
+			"--format", dockerSweepListFormat,
+		)...)
 	if err != nil {
 		return nil, err
 	}

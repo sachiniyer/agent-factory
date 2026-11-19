@@ -33,11 +33,15 @@ var sweepStaleSetupPayloads = session.SweepStaleSetupPayloads
 
 // sweepOrphanedStagingDirs removes docker-staging/<slug>-<hex> dirs no live
 // session record claims, once no container on this engine can still bind them
-// (#7590). It runs in the same deferred pass, under the same createSweepMu
-// admission barrier and skipped-repos gate: its keep sets are built in the
-// same breath as the container sweep's protected slugs, so a dir a mid-create
-// session just staged is protected by its slug exactly as its container would
-// be. Package-level so tests can stub the docker and filesystem work.
+// (#7590). It runs in the same deferred pass and under the same
+// skipped-repos gate — its keep sets are built in the same breath as the
+// container sweep's protected slugs — but deliberately AFTER the
+// createSweepMu admission barrier is released: a dir a mid-pass provision
+// minted (a restore's reprovision, a lazily registered row — paths the
+// barrier never covered) is kept by its recorded generation's held lock, not
+// by the snapshot, so the pass's filesystem reads and removals never hold
+// create admission with no deadline (#7616 R1/R3). Package-level so tests
+// can stub the docker and filesystem work.
 var sweepOrphanedStagingDirs = session.SweepOrphanedStagingDirs
 
 // stopSandboxTunnels stops every live sandbox tunnel this daemon spawned.
@@ -147,16 +151,24 @@ func sweepStartupOrphanSandboxTunnels() {
 // that take m.mu alone — holding m.mu through external Docker work would stall
 // the whole daemon on an unavailable engine. The slug collection is inlined
 // because a factored helper would acquire m.mu itself.
+//
+// The staging-dir sweep does NOT ride the barrier: its candidacy is proven
+// by each candidate's recorded generation lock — which covers every mint
+// path, not only the creates the barrier admits (#7616 R1) — so it runs
+// after createSweepMu is released, keeping its reads and removals off the
+// admission path entirely (#7616 R3). The container sweep cannot move out
+// the same way: its protected set is only as fresh as the snapshot, which
+// is exactly what the barrier exists to keep coherent.
 func runDeferredOrphanSweepIfReady(manager *Manager) {
 	homeID, err := configDirForReap()
 	if err != nil {
 		return
 	}
 	manager.createSweepMu.Lock()
-	defer manager.createSweepMu.Unlock()
 	manager.mu.Lock()
 	if !manager.deferredOrphanSweepArmed || len(manager.skippedRepos) > 0 {
 		manager.mu.Unlock()
+		manager.createSweepMu.Unlock()
 		return
 	}
 	manager.deferredOrphanSweepArmed = false
@@ -195,12 +207,19 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 	log.InfoLog.Printf("orphan sweep: running the deferred destructive pass; every skipped repo's instances.json now parses AND its rows re-materialize, so the protected set is complete.")
 	manager.mu.Unlock()
 	sweepOrphanContainers(homeID, slugs)
-	// Order matters: the container sweep runs FIRST so a same-slug orphan
-	// container is already gone when the staging sweep lists — a dir whose
-	// binder was just reaped is reclaimed in the same pass instead of waiting
-	// out a spared cycle (#7590).
-	sweepOrphanedStagingDirs(homeID, keepStaging, slugs)
 	sweepStaleSetupPayloads(keepIDs)
+	manager.createSweepMu.Unlock()
+	// The staging sweep runs AFTER the admission barrier is released: a dir
+	// minted mid-pass — by a restore's reprovision, a lazily registered row,
+	// handoff or move, none of which take createSweepMu — is kept by its
+	// recorded generation's held lock, proven at decision time rather than
+	// assumed by the earlier snapshot (#7616 R1). So the pass needs nothing
+	// the barrier gives it, and its filesystem reads, Docker calls and
+	// removals must never hold create admission with no deadline (#7616 R3).
+	// It still runs after the container sweep, so a same-slug orphan
+	// container is already gone when it lists — a dir whose binder was just
+	// reaped is reclaimed in the same pass (#7590).
+	sweepOrphanedStagingDirs(homeID, keepStaging, slugs)
 }
 
 // launchDeferredOrphanSweepIfReady starts the deferred orphan sweep on a

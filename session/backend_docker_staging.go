@@ -488,6 +488,18 @@ const dockerStagingEngineFileName = "engine-id"
 // #7616).
 const dockerStagingHomeFileName = "home-id"
 
+// dockerStagingGenerationFileName records the daemon generation that minted
+// the staging dir: the basename of this process's own generation dir under
+// <home>/tunnels (the #7495 machinery — one d<pid>-<rand> dir per daemon
+// generation, its .lock flock held for the process's life). The sweep's
+// candidacy rule is proven by that lock, never by a slug snapshot a
+// provision can outrun: a dir whose recorded generation's lock is still
+// held was minted by a LIVE af process — this daemon, or a predecessor
+// mid-upgrade — and is never a candidate, however it came to be enumerated.
+// Only a generation whose lock provably freed (or whose dir the lock-gated
+// generation sweep already removed) may proceed to the other proofs.
+const dockerStagingGenerationFileName = "generation-id"
+
 // dockerStagingDir is the per-session staging root beneath the AF home: mode
 // 0700, unique per provision, removed on reap. The unique suffix keeps two
 // projects that share a session title from colliding, and makes a leftover
@@ -530,14 +542,21 @@ func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 	return "", fmt.Errorf("backend=docker: cannot create the session staging dir under %s: every candidate name already exists", root)
 }
 
-// recordStagingIdentity writes the engine and home markers beside the staged
-// payload. An empty engineID — a caller that staged before the engine was
-// resolved — or an empty homeID — a provision whose af.home label could not
-// be resolved and was omitted — records nothing for that half, which the
-// sweep reads as unrecorded and keeps. A home spelling containing a newline
-// or NUL cannot round-trip the marker format either, so it is likewise left
-// unrecorded.
+// recordStagingIdentity writes the generation, engine and home markers
+// beside the staged payload. An empty engineID — a caller that staged before
+// the engine was resolved — or an empty homeID — a provision whose af.home
+// label could not be resolved and was omitted — records nothing for that
+// half, which the sweep reads as unrecorded and keeps. A home spelling
+// containing a newline or NUL cannot round-trip the marker format either, so
+// it is likewise left unrecorded. A generation that cannot be established —
+// the tunnels root unverifiable — is left unrecorded the same way rather
+// than failing a provision whose payload staging would have succeeded.
 func (p *dockerProvisioner) recordStagingIdentity(dir string) {
+	if genDir, err := tunnelGenerationDir(); err != nil {
+		log.WarningLog.Printf("docker runtime: cannot resolve this daemon's generation dir for staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)
+	} else if err := os.WriteFile(filepath.Join(dir, dockerStagingGenerationFileName), []byte(filepath.Base(genDir)+"\n"), 0o600); err != nil {
+		log.WarningLog.Printf("docker runtime: cannot record the daemon generation beside staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)
+	}
 	if p.engineID != "" {
 		if err := os.WriteFile(filepath.Join(dir, dockerStagingEngineFileName), []byte(p.engineID+"\n"), 0o600); err != nil {
 			log.WarningLog.Printf("docker runtime: cannot record the engine identity beside staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)

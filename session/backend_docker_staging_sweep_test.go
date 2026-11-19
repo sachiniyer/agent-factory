@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,13 +19,33 @@ import (
 // stagingSweepTestRoot creates a temp AF home with a docker-staging root and
 // returns the root path plus a helper that mints a staged-payload dir of the
 // shape dockerStagingDir produces (<slug>-<8 lowercase hex>) with the two
-// files stageContainerPayload writes. Tests add the engine marker explicitly
-// via stagingMarkIdentity, since the marker is what lets the sweep reclaim.
+// files stageContainerPayload writes. The home's tunnel-generation registry
+// is cleaned up with the test — a test that establishes its own live
+// generation does not leak its held lock into the next test. Tests add the
+// identity markers explicitly via stagingMarkIdentity, since the markers are
+// what lets the sweep reclaim.
 func stagingSweepTestRoot(t *testing.T) (root string, mk func(name string) string) {
 	t.Helper()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	tmp := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
 	home, err := config.GetConfigDir()
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		canonical, cerr := currentTunnelHome()
+		if cerr != nil {
+			return
+		}
+		if ent, ok := tunnelGenDirs.Load(canonical); ok {
+			e := ent.(*tunnelGenDirEntry)
+			if e.lock != nil {
+				_ = e.lock.Close()
+			}
+			if e.root != nil && e.root.dir != nil {
+				_ = e.root.dir.Close()
+			}
+			tunnelGenDirs.Delete(canonical)
+		}
+	})
 	root = filepath.Join(home, dockerStagingDirName)
 	require.NoError(t, os.MkdirAll(root, 0o700))
 	return root, func(name string) string {
@@ -35,15 +57,50 @@ func stagingSweepTestRoot(t *testing.T) (root string, mk func(name string) strin
 	}
 }
 
-// stagingMarkIdentity writes the dir's recorded identity markers, as
-// recordStagingIdentity does at provision: the resolved engine ID and the
-// af.home label spelling the container will carry. The sweep's homeID
-// argument is the spelling it filters the listing by, so reclaim tests mark
-// the same "/test/home" they pass in.
+// stagingDeadGeneration is the generation-id stagingMarkIdentity writes by
+// default: a well-formed name that exists under no test home's tunnels/ —
+// a generation that is provably dead (its dir is gone), which is the only
+// kind a dir must record before the sweep will reclaim it.
+const stagingDeadGeneration = "d999999-dead00"
+
+// stagingMarkIdentity writes the dir's recorded identity markers as
+// recordStagingIdentity does at provision, with a dead generation recorded —
+// the default tests want, since only a dead generation's dirs are
+// sweepable. Tests for live-generation protection write their own marker
+// via stagingMarkIdentityGen.
 func stagingMarkIdentity(t *testing.T, dir, engineID, homeID string) {
 	t.Helper()
+	stagingMarkIdentityGen(t, dir, stagingDeadGeneration, engineID, homeID)
+}
+
+// stagingMarkIdentityGen writes all three identity markers: the generation
+// that minted the dir, the resolved engine ID, and the af.home label
+// spelling the container will carry. The sweep's homeID argument is the
+// spelling it filters the listing by, so reclaim tests mark the same
+// "/test/home" they pass in.
+func stagingMarkIdentityGen(t *testing.T, dir, gen, engineID, homeID string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, dockerStagingGenerationFileName), []byte(gen+"\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, dockerStagingEngineFileName), []byte(engineID+"\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, dockerStagingHomeFileName), []byte(homeID+"\n"), 0o600))
+}
+
+// stagingLiveGeneration stands up a live generation under this test's AF
+// home — a tunnels/d<pid>-<rand> dir whose .lock this process holds open —
+// and returns its basename. A staging dir marked with it is read by the
+// sweep as minted by a live af process: never a candidate, whatever the
+// keep sets say.
+func stagingLiveGeneration(t *testing.T, name string) string {
+	t.Helper()
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	gen := filepath.Join(home, tunnelSocketRootName, name)
+	require.NoError(t, os.MkdirAll(gen, 0o700))
+	lock, err := os.OpenFile(filepath.Join(gen, tunnelGenLockName), os.O_RDWR|os.O_CREATE, 0o600)
+	require.NoError(t, err)
+	require.NoError(t, unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB))
+	t.Cleanup(func() { _ = lock.Close() })
+	return name
 }
 
 // stagingSweepDockerEnv arms the docker seams the sweep consults: a present
@@ -51,15 +108,25 @@ func stagingMarkIdentity(t *testing.T, dir, engineID, homeID string) {
 // in order from `info` (per call, so a changed id can force an engine
 // mismatch), and prints psListing/psErr for `ps` — the <id>\t<slug> rows
 // listAfContainers parses. An empty psListing means no af containers exist.
+// DOCKER_HOST/DOCKER_CONTEXT are scrubbed so the selector the sweep pins is
+// deterministic: the resolved current context's name, which the fake answers
+// as "default". The pinned `-H`/`--context` pair is stripped before
+// dispatch; stagingSweepRecordedArgs keeps it for the pin test.
 func stagingSweepDockerEnv(t *testing.T, engineIDs []string, psListing string, psErr error) {
 	t.Helper()
+	t.Setenv("DOCKER_HOST", "")
+	t.Setenv("DOCKER_CONTEXT", "")
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
 	infoCall := 0
 	cli := &fakeDockerContextCLI{}
 	t.Cleanup(SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
+		args = stripDockerSelector(args)
 		require.NotEmpty(t, args)
 		switch args[0] {
 		case "context":
+			if len(args) == 4 && args[1] == "inspect" && args[2] == "--format" && args[3] == dockerContextNameFormat {
+				return []byte(cli.current(environ) + "\n"), nil
+			}
 			return cli.exec(ctx, environ, args...)
 		case "info":
 			id := engineIDs[min(infoCall, len(engineIDs)-1)]
@@ -71,6 +138,17 @@ func stagingSweepDockerEnv(t *testing.T, engineIDs []string, psListing string, p
 			return nil, fmt.Errorf("unexpected docker call: %v", args)
 		}
 	}))
+}
+
+// stripDockerSelector drops a leading global selector pair the sweep pins on
+// its post-resolution calls (`-H <endpoint>` or `--context <name>`), so the
+// fake dispatches on the subcommand. The unpinned `context inspect` calls
+// the resolution itself makes arrive unchanged.
+func stripDockerSelector(args []string) []string {
+	for len(args) >= 2 && (args[0] == "-H" || args[0] == "--context") {
+		args = args[2:]
+	}
+	return args
 }
 
 // TestStagingSweepReclaimsOrphanedDir is the #7590 property: a staging dir no
@@ -246,24 +324,35 @@ func TestStagingSweepKeepsAliasedHomeDir(t *testing.T) {
 
 // TestStagingSweepKeepsMalformedMarkerDir: a marker that does not hold the
 // shape provisioning writes — torn, tampered, empty, missing — is unrecorded
-// for the sweep's purposes and keeps the dir, whichever half it is.
+// for the sweep's purposes and keeps the dir, whichever marker it is.
 func TestStagingSweepKeepsMalformedMarkerDir(t *testing.T) {
 	_, mk := stagingSweepTestRoot(t)
 	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
 
-	// Each row writes engine-id and home-id; nil leaves the file unwritten.
+	dead := stagingDeadGeneration + "\n"
+	// Each row writes generation-id, engine-id and home-id; nil leaves the
+	// file unwritten. Rows carry valid siblings so the malformed one is what
+	// keeps the dir.
 	for _, tc := range []struct {
-		name         string
-		engine, home *string
+		name              string
+		gen, engine, home *string
 	}{
-		{"torn-engine-55ee66ff", ptr("engine-1 extra-words\n"), ptr("/test/home\n")},
-		{"empty-engine-77aa88bb", ptr(""), ptr("/test/home\n")},
-		{"oversize-engine-99bbccdd", ptr(strings.Repeat("e", 300) + "\n"), ptr("/test/home\n")},
-		{"no-home-11223344", ptr("engine-1\n"), nil},
-		{"empty-home-55667788", ptr("engine-1\n"), ptr("")},
-		{"multiline-home-99aabbcc", ptr("engine-1\n"), ptr("/test/home\n/evil\n")},
+		{"torn-engine-55ee66ff", &dead, ptr("engine-1 extra-words\n"), ptr("/test/home\n")},
+		{"empty-engine-77aa88bb", &dead, ptr(""), ptr("/test/home\n")},
+		{"oversize-engine-99bbccdd", &dead, ptr(strings.Repeat("e", 300) + "\n"), ptr("/test/home\n")},
+		{"no-home-11223344", &dead, ptr("engine-1\n"), nil},
+		{"empty-home-55667788", &dead, ptr("engine-1\n"), ptr("")},
+		{"multiline-home-99aabbcc", &dead, ptr("engine-1\n"), ptr("/test/home\n/evil\n")},
+		{"no-gen-22446688", nil, ptr("engine-1\n"), ptr("/test/home\n")},
+		{"empty-gen-33557799", ptr(""), ptr("engine-1\n"), ptr("/test/home\n")},
+		{"torn-gen-446688aa", ptr("not a gen name\n"), ptr("engine-1\n"), ptr("/test/home\n")},
+		{"multiline-gen-557799bb", ptr("d1-abcdef\nd2-abcdef\n"), ptr("engine-1\n"), ptr("/test/home\n")},
+		{"oversize-gen-6688aacc", ptr(strings.Repeat("d1-abcdef\n", 500)), ptr("engine-1\n"), ptr("/test/home\n")},
 	} {
 		d := mk(tc.name)
+		if tc.gen != nil {
+			require.NoError(t, os.WriteFile(filepath.Join(d, dockerStagingGenerationFileName), []byte(*tc.gen), 0o600))
+		}
 		if tc.engine != nil {
 			require.NoError(t, os.WriteFile(filepath.Join(d, dockerStagingEngineFileName), []byte(*tc.engine), 0o600))
 		}
@@ -279,20 +368,233 @@ func TestStagingSweepKeepsMalformedMarkerDir(t *testing.T) {
 	for _, name := range []string{
 		"torn-engine-55ee66ff", "empty-engine-77aa88bb", "oversize-engine-99bbccdd",
 		"no-home-11223344", "empty-home-55667788", "multiline-home-99aabbcc",
+		"no-gen-22446688", "empty-gen-33557799", "torn-gen-446688aa",
+		"multiline-gen-557799bb", "oversize-gen-6688aacc",
 	} {
 		_, err := os.Stat(filepath.Join(home, dockerStagingDirName, name))
 		assert.NoError(t, err, "%s: a malformed marker is kept", name)
 	}
 }
 
-// TestDockerStagingDirRecordsEngineMarker: provisioning records the resolved
-// engine identity beside the staged payload — the same `docker info` ID the
-// cleanup record carries — and the af.home label spelling the container will
-// carry, so a later sweep can prove it is acting on the engine and under the
-// label spelling that created the dir. A provision that staged before either
-// resolved writes nothing for that half, and the dir stays unrecorded (kept).
+// TestStagingSweepKeepsNonRegularMarkerDir: a marker entry that is not a
+// regular file — a directory planted where the file belongs — is never
+// opened and keeps the dir (the Lstat gate precedes every read, #7616 R3).
+func TestStagingSweepKeepsNonRegularMarkerDir(t *testing.T) {
+	_, mk := stagingSweepTestRoot(t)
+	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
+
+	// generation-id as a directory: unprovable, kept before the engine and
+	// home markers are even consulted.
+	d1 := mk("gen-is-dir-a1b2c3d4")
+	require.NoError(t, os.Mkdir(filepath.Join(d1, dockerStagingGenerationFileName), 0o700))
+	// engine-id as a directory: the generation proves dead, the engine stays
+	// unprovable — still kept.
+	d2 := mk("eng-is-dir-e5f6a7b8")
+	stagingMarkIdentityGen(t, d2, stagingDeadGeneration, "engine-1", "/test/home")
+	require.NoError(t, os.Remove(filepath.Join(d2, dockerStagingEngineFileName)))
+	require.NoError(t, os.Mkdir(filepath.Join(d2, dockerStagingEngineFileName), 0o700))
+
+	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+	assert.Equal(t, 0, got.Reaped)
+	for _, d := range []string{d1, d2} {
+		_, err := os.Stat(d)
+		assert.NoError(t, err, "%s: a non-regular marker is never trusted — keep", d)
+	}
+}
+
+// TestStagingSweepKeepsLiveGenerationDir is the #7616 R1 property: a staging
+// dir minted mid-pass under an UNPROTECTED slug — a restore's reprovision, a
+// lazily registered row, a create whose rename moved it out of the snapshot —
+// is never a candidate while the generation that minted it is alive. The live
+// dir records a generation whose .lock a live af process holds (here: this
+// process, standing in for the daemon or a predecessor mid-upgrade); the dead
+// twin records a generation whose dir is gone. Identical engine and home
+// markers, identical empty keep sets — only the generation differs, and only
+// the dead one is reclaimed.
+func TestStagingSweepKeepsLiveGenerationDir(t *testing.T) {
+	_, mk := stagingSweepTestRoot(t)
+	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
+
+	liveGen := stagingLiveGeneration(t, "d4242-a1b2c3")
+	live := mk("restored-sess-0011aabb")
+	stagingMarkIdentityGen(t, live, liveGen, "engine-1", "/test/home")
+	dead := mk("orphaned-sess-2233ccdd")
+	stagingMarkIdentityGen(t, dead, stagingDeadGeneration, "engine-1", "/test/home")
+
+	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+	_, err := os.Stat(live)
+	assert.NoError(t, err, "a dir a live generation minted is never a candidate — its container may not exist yet")
+	_, err = os.Stat(dead)
+	assert.True(t, os.IsNotExist(err), "the same dir from a provably dead generation is reclaimed")
+	assert.Equal(t, 1, got.Reaped)
+}
+
+// TestStagingSweepKeepsThisGenerationsMintedDir exercises the exact mint
+// path: the generation recordStagingIdentity records is this process's own
+// live generation (the tunnels/ machinery holds its lock), so a dir this
+// daemon JUST staged — mid-pass, under a slug no keep set names — is kept.
+// The slug-snapshot keep set cannot cover provisions still in flight; the
+// generation lock is the proof that does.
+func TestStagingSweepKeepsThisGenerationsMintedDir(t *testing.T) {
+	_, mk := stagingSweepTestRoot(t)
+	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
+
+	genDir, err := tunnelGenerationDir()
+	require.NoError(t, err)
+	minted := mk("midprovision-a1b2c3d4")
+	stagingMarkIdentityGen(t, minted, filepath.Base(genDir), "engine-1", "/test/home")
+
+	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+	assert.Equal(t, 0, got.Reaped)
+	_, err = os.Stat(minted)
+	assert.NoError(t, err, "a dir this daemon generation minted is never a candidate")
+}
+
+// TestStagingSweepKeepsUnprovableGenerationDir: a generation marker that
+// names a real-looking dir whose liveness cannot be proven — no .lock to
+// probe — is unproven rather than dead, and keeps. Only a lock HELD-or-FREE
+// answer (or a generation dir that is gone entirely, which the lock-gated
+// generation sweep alone removes) discharges the proof.
+func TestStagingSweepKeepsUnprovableGenerationDir(t *testing.T) {
+	_, mk := stagingSweepTestRoot(t)
+	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
+
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	// A generation dir with no .lock: its owner's liveness is unprovable.
+	lockless := "d5555-0f0f0f"
+	require.NoError(t, os.MkdirAll(filepath.Join(home, tunnelSocketRootName, lockless), 0o700))
+	unprovable := mk("unprovable-bbccddee")
+	stagingMarkIdentityGen(t, unprovable, lockless, "engine-1", "/test/home")
+
+	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+	assert.Equal(t, 0, got.Reaped)
+	_, err = os.Stat(unprovable)
+	assert.NoError(t, err, "an unprovable generation keeps the dir — dead must be proven, not assumed")
+}
+
+// TestStagingSweepDeadGenerationDirWithFreeLock: a generation dir that still
+// exists but whose .lock is free — its owner exited and the generation sweep
+// has not removed it yet — is a proven-dead generation, so the dir it minted
+// proceeds to the other proofs and reclaims.
+func TestStagingSweepDeadGenerationDirWithFreeLock(t *testing.T) {
+	_, mk := stagingSweepTestRoot(t)
+	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
+
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	dead := "d6666-f6f6f6"
+	require.NoError(t, os.MkdirAll(filepath.Join(home, tunnelSocketRootName, dead), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, tunnelSocketRootName, dead, tunnelGenLockName), nil, 0o600))
+	orphan := mk("dead-gen-ccddee00")
+	stagingMarkIdentityGen(t, orphan, dead, "engine-1", "/test/home")
+
+	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+	assert.Equal(t, 1, got.Reaped)
+	_, err = os.Stat(orphan)
+	assert.True(t, os.IsNotExist(err), "a generation whose lock provably freed is dead — its dirs reclaim")
+}
+
+// TestStagingSweepPinsOneSelector is the #7616 R2 property: once the
+// endpoint resolves, every docker call of the pass — the engine-ID read, the
+// container listing, and the post-pass ID re-read — carries the SAME global
+// selector, so a `docker context use` switch mid-pass cannot move the
+// listing to an engine the identity reads never saw.
+func TestStagingSweepPinsOneSelector(t *testing.T) {
+	// Variant A — DOCKER_HOST set: the pin is `-H <host>` on every call;
+	// resolution needs no inspect at all.
+	t.Run("docker host", func(t *testing.T) {
+		_, mk := stagingSweepTestRoot(t)
+		host := fakeUnixDockerSocket(t)
+		t.Setenv("DOCKER_HOST", host)
+		t.Setenv("DOCKER_CONTEXT", "")
+		var calls [][]string
+		t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+			calls = append(calls, append([]string(nil), args...))
+			rest := stripDockerSelector(args)
+			switch rest[0] {
+			case "info":
+				return []byte("engine-1\n"), nil
+			case "ps":
+				return []byte(""), nil
+			}
+			return nil, fmt.Errorf("unexpected docker call: %v", args)
+		}))
+		orphan := mk("gone-aabbccdd")
+		stagingMarkIdentity(t, orphan, "engine-1", "/test/home")
+
+		got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+		assert.Equal(t, 1, got.Reaped)
+		require.Len(t, calls, 3, "info, ps, and the re-read — three pinned calls")
+		for i, c := range calls {
+			require.GreaterOrEqual(t, len(c), 2, "call %d has no selector", i)
+			assert.Equal(t, "-H", c[0], "call %d must carry the -H pin", i)
+			assert.Equal(t, host, c[1], "call %d must name DOCKER_HOST's endpoint", i)
+		}
+	})
+
+	// Variant B — neither selector set: the two resolution inspects run
+	// unpinned (they ARE the resolution); every call after them carries the
+	// resolved context's own name.
+	t.Run("resolved context", func(t *testing.T) {
+		_, mk := stagingSweepTestRoot(t)
+		t.Setenv("DOCKER_HOST", "")
+		t.Setenv("DOCKER_CONTEXT", "")
+		var calls [][]string
+		cli := &fakeDockerContextCLI{}
+		t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
+		t.Cleanup(SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
+			calls = append(calls, append([]string(nil), args...))
+			rest := stripDockerSelector(args)
+			switch rest[0] {
+			case "context":
+				if len(rest) == 4 && rest[1] == "inspect" && rest[2] == "--format" && rest[3] == dockerContextNameFormat {
+					return []byte(cli.current(environ) + "\n"), nil
+				}
+				return cli.exec(ctx, environ, rest...)
+			case "info":
+				return []byte("engine-1\n"), nil
+			case "ps":
+				return []byte(""), nil
+			}
+			return nil, fmt.Errorf("unexpected docker call: %v", args)
+		}))
+		orphan := mk("gone-11223344")
+		stagingMarkIdentity(t, orphan, "engine-1", "/test/home")
+
+		got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+		assert.Equal(t, 1, got.Reaped)
+		require.Len(t, calls, 5, "endpoint inspect, name inspect, info, ps, re-read")
+		assert.Equal(t, "context", calls[0][0], "the endpoint resolution runs unpinned")
+		assert.Equal(t, "context", calls[1][0], "the name resolution runs unpinned")
+		for i, c := range calls[2:] {
+			require.GreaterOrEqual(t, len(c), 2, "call %d has no selector", i+2)
+			assert.Equal(t, "--context", c[0], "call %d must carry the --context pin", i+2)
+			assert.Equal(t, "default", c[1], "call %d must name the resolved context", i+2)
+		}
+	})
+}
+
+// TestDockerStagingDirRecordsEngineMarker: provisioning records beside the
+// staged payload the resolved engine identity — the same `docker info` ID
+// the cleanup record carries — the af.home label spelling the container will
+// carry, and this daemon's generation dir name, so a later sweep can prove
+// it is acting on the engine, under the label spelling, and past the
+// generation that created the dir. A provision that staged before the engine
+// or home resolved writes nothing for that half, and the dir stays
+// unrecorded (kept); the generation marker is always recorded because the
+// mint itself establishes the generation.
 func TestDockerStagingDirRecordsEngineMarker(t *testing.T) {
-	stagingTestEnv(t)
+	home := stagingTestEnv(t)
+	stubTunnelHome(t, home)
 	p := &dockerProvisioner{
 		spec:     ProvisionSpec{Title: "eng sess"},
 		engineID: "engine-resolved",
@@ -307,6 +609,13 @@ func TestDockerStagingDirRecordsEngineMarker(t *testing.T) {
 	rawHome, err := os.ReadFile(filepath.Join(dir, dockerStagingHomeFileName))
 	require.NoError(t, err, "the home marker must be written beside the staged payload")
 	assert.Equal(t, "/test/af-home\n", string(rawHome))
+	rawGen, err := os.ReadFile(filepath.Join(dir, dockerStagingGenerationFileName))
+	require.NoError(t, err, "the generation marker must be written beside the staged payload")
+	gen := strings.TrimSuffix(string(rawGen), "\n")
+	assert.True(t, tunnelGenDirRE.MatchString(gen), "the marker names a generation dir, got %q", gen)
+	genDir, err := tunnelGenerationDir()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Base(genDir), gen, "the marker names THIS process's live generation")
 
 	p2 := &dockerProvisioner{spec: ProvisionSpec{Title: "early sess"}}
 	dir2, err := p2.dockerStagingDir()

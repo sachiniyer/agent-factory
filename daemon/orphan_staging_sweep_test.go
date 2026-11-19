@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -45,30 +46,18 @@ func (r *stagingSweepRecorder) lastCall() (stagingSweepCall, bool) {
 	return r.calls[len(r.calls)-1], true
 }
 
-// stubSweepOrphanedStagingDirs replaces sweepOrphanedStagingDirs with a
-// recording stub, restoring on cleanup.
-func stubSweepOrphanedStagingDirs(t *testing.T) *stagingSweepRecorder {
-	t.Helper()
-	rec := &stagingSweepRecorder{}
-	prev := sweepOrphanedStagingDirs
-	sweepOrphanedStagingDirs = func(homeID string, claimedNames, slugs map[string]bool) session.StagingSweepResult {
-		rec.record(homeID, claimedNames, slugs)
-		return session.StagingSweepResult{}
-	}
-	t.Cleanup(func() { sweepOrphanedStagingDirs = prev })
-	return rec
-}
-
 // TestDeferredSweep_StagingDirsRunsInSamePass pins the #7590 wiring: the
 // orphaned-staging-dir sweep runs inside the same deferred pass as the
 // container sweep, with the staging-dir keep set built in the same breath as
 // the protected slugs — a record-claimed <slug>-<hex> name reaches the sweep,
 // a bare instance contributes no name, and every live/pending slug is
-// protected.
+// protected. It also pins the #7616 R3 wiring: the sweep runs AFTER the
+// createSweepMu admission barrier is released — its candidacy proof is each
+// candidate's own generation lock, not the snapshot the barrier guards, so
+// its filesystem reads and removals never hold create admission.
 func TestDeferredSweep_StagingDirsRunsInSamePass(t *testing.T) {
 	stubConfigDirForReap(t, "/test/home")
 	stubSweepOrphanContainers(t)
-	rec := stubSweepOrphanedStagingDirs(t)
 	// The deferred pass also runs the af-setup payload sweep — stub it so the
 	// test never touches a real <home>/af-setup on the box it runs on.
 	prevPayload := sweepStaleSetupPayloads
@@ -77,6 +66,22 @@ func TestDeferredSweep_StagingDirsRunsInSamePass(t *testing.T) {
 
 	m := newBareManagerForSweep()
 	m.deferredOrphanSweepArmed = true
+
+	rec := &stagingSweepRecorder{}
+	var sawUnbarriered atomic.Bool
+	prev := sweepOrphanedStagingDirs
+	sweepOrphanedStagingDirs = func(homeID string, claimedNames, slugs map[string]bool) session.StagingSweepResult {
+		// TryLock only succeeds when the barrier is NOT held — the sweep
+		// must run after it is released.
+		if m.createSweepMu.TryLock() {
+			sawUnbarriered.Store(true)
+			m.createSweepMu.Unlock()
+		}
+		rec.record(homeID, claimedNames, slugs)
+		return session.StagingSweepResult{}
+	}
+	t.Cleanup(func() { sweepOrphanedStagingDirs = prev })
+
 	// A record-bearing docker instance claims its staging dir by name; the
 	// claim is what keeps the sweep from reclaiming a tombstoned row's dir.
 	claimed, err := session.FromInstanceData(session.InstanceData{
@@ -97,6 +102,7 @@ func TestDeferredSweep_StagingDirsRunsInSamePass(t *testing.T) {
 
 	runDeferredOrphanSweepIfReady(m)
 
+	assert.True(t, sawUnbarriered.Load(), "the staging sweep must run with createSweepMu already released")
 	require.Equal(t, 1, rec.count(), "the staging sweep must run once inside the deferred pass")
 	call, ok := rec.lastCall()
 	require.True(t, ok)
