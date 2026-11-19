@@ -816,6 +816,103 @@ func TestThrowawayWatchdogStopsCleanly(t *testing.T) {
 	}
 }
 
+// TestThrowawayWatchdogSettleIsFinalWithAnOwnerLookupInFlight pins #7620's
+// settle contract: the returned func waits out the watchdog's LAST decision
+// — a lookup still in flight at the stop resolves as "never will", so a
+// dead-owner answer completing after settle can never close fire. On master
+// the owner check ran inside the select arm, the returned func only closed
+// stop, and the loop finished the read afterward and fired anyway.
+func TestThrowawayWatchdogSettleIsFinalWithAnOwnerLookupInFlight(t *testing.T) {
+	oldLookup, oldScope, oldInterval := throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval
+	started := make(chan struct{})
+	release := make(chan struct{})
+	throwawayScopeIDsFn = func() (string, string) { return "", "" }
+	throwawayLookupFn = func(int) (proctree.Process, error) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-release
+		return proctree.Process{}, proctree.ErrProcessExited
+	}
+	throwawayCheckInterval = 10 * time.Millisecond
+	defer func() {
+		throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval = oldLookup, oldScope, oldInterval
+	}()
+	m := &throwawaysandbox.Marker{
+		Version: 1, CreatedUnix: time.Now().Unix(), MaxLifetimeSeconds: 3600,
+		OwnerPID: 42, OwnerStartID: 7,
+	}
+	fire := make(chan struct{})
+	settle := armThrowawayWatchdog(m, fire)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the owner lookup never ran")
+	}
+	begin := time.Now()
+	settle()
+	if elapsed := time.Since(begin); elapsed > 2*time.Second {
+		t.Fatalf("settle joined on the owner lookup for %s", elapsed)
+	}
+	// The lookup now answers "owner dead" — AFTER settle returned. A final
+	// decision discards it; a non-final one closes fire.
+	close(release)
+	time.Sleep(10 * throwawayCheckInterval)
+	select {
+	case <-fire:
+		t.Fatal("a settled watchdog fired on an owner read that finished after settle")
+	default:
+	}
+}
+
+// TestThrowawayWatchdogSettleObservesADeadlineLandedDuringAStuckOwnerLookup
+// pins the other half of the settle contract: a deadline that landed while
+// the owner read was in flight is an already-made decision, and settle must
+// report it fired. On master the loop sat inside the inline owner read and
+// could not observe the deadline at all while it was blocked.
+func TestThrowawayWatchdogSettleObservesADeadlineLandedDuringAStuckOwnerLookup(t *testing.T) {
+	oldLookup, oldScope, oldInterval, oldNow := throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval, throwawayNowFn
+	started := make(chan struct{})
+	release := make(chan struct{})
+	throwawayScopeIDsFn = func() (string, string) { return "", "" }
+	throwawayLookupFn = func(int) (proctree.Process, error) {
+		close(started)
+		<-release
+		return proctree.Process{}, proctree.ErrProcessExited
+	}
+	throwawayCheckInterval = 10 * time.Millisecond
+	// A fixed clock makes the arm-time wait exactly 1s: a wall-clock
+	// CreatedUnix truncates to the second and could leave less than one
+	// owner-poll interval before the deadline, expiring before the lookup
+	// ever runs (Codex).
+	throwawayNowFn = func() time.Time { return time.Unix(1_000_000, 0) }
+	defer func() {
+		throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval, throwawayNowFn = oldLookup, oldScope, oldInterval, oldNow
+		close(release) // let a still-blocked lookup exit at test end
+	}()
+	m := &throwawaysandbox.Marker{
+		Version: 1, CreatedUnix: 1_000_000, MaxLifetimeSeconds: 1,
+		OwnerPID: 42, OwnerStartID: 7,
+	}
+	fire := make(chan struct{})
+	settle := armThrowawayWatchdog(m, fire)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the owner lookup never ran")
+	}
+	// The deadline (1s) lands while the lookup is still blocked.
+	time.Sleep(1500 * time.Millisecond)
+	settle()
+	select {
+	case <-fire:
+	default:
+		t.Fatal("a deadline that landed during the owner read was not observed at settle")
+	}
+}
+
 // throwawaySeams snapshots every test seam this file pokes so a single defer
 // restores the production wiring. Add new seams here, not ad-hoc.
 type throwawaySeamSet struct {
