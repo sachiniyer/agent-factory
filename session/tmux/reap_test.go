@@ -647,8 +647,7 @@ func spawnMarkedSessionWithEscapee(t *testing.T, name, home string, generation .
 	require.True(t, ok, "helper %d not in process snapshot", pid)
 	t.Cleanup(func() { _ = proctree.Signal(marked, syscall.SIGKILL) })
 	require.Equal(t, marked.PID, marked.SID, "marked helper must have detached before publishing its pid")
-	environ, err := proctree.Environ(marked.PID)
-	require.NoError(t, err)
+	environ := markedEnviron(t, marked)
 	require.Contains(t, environ, EnvMarkerSession+"="+name)
 	if home != "" {
 		require.Contains(t, environ, EnvMarkerHome+"="+home)
@@ -774,8 +773,7 @@ func spawnMarkedSessionWithRehostedChild(t *testing.T, name, home, generation, c
 	host = lookup(awaitPIDFile(t, pidFile))
 	child = lookup(awaitPIDFile(t, pidFile+".child"))
 	for _, p := range []proctree.Process{host, child} {
-		environ, envErr := proctree.Environ(p.PID)
-		require.NoError(t, envErr)
+		environ := markedEnviron(t, p)
 		require.Contains(t, environ, EnvMarkerSession+"="+name,
 			"the re-host pair must carry the session marker")
 	}
@@ -817,8 +815,7 @@ func spawnMarkedProgram(t *testing.T, sessionName, afHome, generation, prog stri
 		return lookupErr == nil && current.PPID != c.Process.Pid
 	}, 5*time.Second, 20*time.Millisecond,
 		"the marked %s must be reparented above the test — a test child is silently excluded, not swept", prog)
-	environ, err := proctree.Environ(marked.PID)
-	require.NoError(t, err)
+	environ := markedEnviron(t, marked)
 	require.Contains(t, environ, EnvMarkerSession+"="+sessionName)
 	t.Cleanup(func() { _ = proctree.Signal(marked, syscall.SIGKILL) })
 	return marked
@@ -881,8 +878,7 @@ func spawnMarkedHostWithWindows(t *testing.T, sessionName, afHome, generation st
 		require.Equal(t, host.PID, child.PPID, "the window must descend from the marked host")
 	}
 	for _, p := range append([]proctree.Process{host}, children...) {
-		environ, envErr := proctree.Environ(p.PID)
-		require.NoError(t, envErr)
+		environ := markedEnviron(t, p)
 		require.Contains(t, environ, EnvMarkerSession+"="+sessionName)
 		t.Cleanup(func() { _ = proctree.Signal(p, syscall.SIGKILL) })
 	}
@@ -921,8 +917,7 @@ func spawnMarkedProcessWithChild(t *testing.T, sessionName, afHome, generation, 
 	child = lookup(pidFile + ".child")
 	require.Equal(t, host.PID, child.PPID, "the re-hosted child must descend from the host shim")
 	for _, p := range []proctree.Process{host, child} {
-		environ, envErr := proctree.Environ(p.PID)
-		require.NoError(t, envErr)
+		environ := markedEnviron(t, p)
 		require.Contains(t, environ, EnvMarkerSession+"="+sessionName)
 	}
 	return host, child

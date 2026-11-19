@@ -428,8 +428,7 @@ func TestVanishedSessionSweep_RealTmuxForeignServerCarrier(t *testing.T) {
 	// INDEPENDENTLY so the claim stays honest: the carrier's env tuple
 	// names a socket that is not the recorded one, AND its held slave is
 	// mastered by a server pid that is not the recorded one.
-	environ, err := proctree.Environ(carrier.PID)
-	require.NoError(t, err)
+	environ := markedEnviron(t, carrier)
 	snap, err := proctree.Snapshot()
 	require.NoError(t, err)
 	owners := &serverPtyOwners{}
