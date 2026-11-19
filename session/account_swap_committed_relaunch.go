@@ -70,7 +70,7 @@ func (i *Instance) committedConversationLaunch(program, workDir, account, id str
 		return launch, conversation, false, false, false
 	}
 	lookStarted := time.Now()
-	verdict := i.judgeRecordedClaude(program, workDir, id)
+	verdict, _ := i.judgeRecordedClaude(program, workDir, id)
 	nameable := verdict == recordedClaudeBlind && i.claudeStoreNameable(program, workDir)
 	if nameable {
 		verdict = i.rejudgeRecordedClaude(program, workDir, id, lookStarted.Add(fsprobe.ProbeBound()))
@@ -146,7 +146,10 @@ func (i *Instance) rejudgeRecordedClaude(program, workDir, id string, deadline t
 		return recordedClaudeBlind
 	}
 	done := make(chan recordedClaudeVerdict, 1)
-	go func() { done <- i.judgeRecordedClaude(program, workDir, id) }()
+	go func() {
+		verdict, _ := i.judgeRecordedClaude(program, workDir, id)
+		done <- verdict
+	}()
 	timer := time.NewTimer(remaining)
 	defer timer.Stop()
 	select {

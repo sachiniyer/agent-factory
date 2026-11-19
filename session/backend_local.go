@@ -269,6 +269,10 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// /af-* slash commands silently vanish post-reboot (#511).
 		// Setting the program on the existing attach path is harmless:
 		// attach-session does not re-exec the program.
+		// resumeNotice holds the blind resume's reason until the restore's
+		// answer is known: a reattach to a live pane resumes nothing, so the
+		// log names it only on the respawn branch (#7609 review).
+		var resumeNotice string
 		if workDir != "" {
 			// A launch-class resolve: this program is what a re-spawn runs. An
 			// unknown project config fails the load instead of arming a re-spawn
@@ -289,9 +293,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// Logged only if this restore actually re-spawns: a reattach to a
 			// live pane resumes nothing, so a refusal there is not news (#7101).
 			var refused tmux.ExactResumeRefusal
-			if resumed && refusal.notice != "" {
-				log.WarningLog.Printf("session %q: resuming its recorded conversation %s without verifying it first, because %s",
-					i.Title, i.resumableConversation().ID, refusal.notice)
+			if resumed {
+				resumeNotice = refusal.notice
 			}
 			if !resumed {
 				r := i.exactResumeRefusal(refusal)
@@ -356,6 +359,10 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			return setupErr
 		}
 		if restoreResult == tmux.RestoreRespawned {
+			if resumeNotice != "" {
+				log.WarningLog.Printf("session %q: resumed its recorded conversation %s without verifying it first, because %s",
+					i.Title, i.resumableConversation().ID, resumeNotice)
+			}
 			if strings.TrimSpace(runtimeProgram) != "" {
 				i.setRuntimeLaunch(runtimeProgram, tmuxSession, tmuxSession.SpawnedAt())
 			}

@@ -229,10 +229,10 @@ const (
 // actually runs (newerConversationIsEvidence). In the user's own checkout, an
 // in-place row or an adopted worktree, a sibling files there too, so it says
 // nothing about this session (#7209 review R1, #7216 review R1).
-func (i *Instance) judgeRecordedClaude(program, workDir, id string) recordedClaudeVerdict {
+func (i *Instance) judgeRecordedClaude(program, workDir, id string) (recordedClaudeVerdict, int) {
 	configDir, launchDir, err := i.claudeStoreFor(program, workDir)
 	if err != nil || strings.TrimSpace(configDir) == "" || strings.TrimSpace(launchDir) == "" {
-		return recordedClaudeBlind
+		return recordedClaudeBlind, 0
 	}
 	projects, complete := claudeProjectSpellings(launchDir)
 	verdict := judgeClaudeRecorded(configDir, projects, launchDir, id, "")
@@ -251,7 +251,7 @@ func (i *Instance) judgeRecordedClaude(program, workDir, id string) recordedClau
 	if !ok {
 		log.ErrorLog.Printf("session %q: recorded claude conversation %s: verdict %d maps to no launch; resuming it", i.Title, id, verdict)
 	}
-	return launch
+	return launch, len(projects)
 }
 
 // recordedClaudeLaunchFor maps each judgeClaudeRecorded verdict to the launch
@@ -390,18 +390,16 @@ func otherClaudeStores(primary string) []string {
 func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationData) resumeDecline {
 	workDir := i.GetWorktreePath()
 	lookStarted := time.Now()
-	verdict := i.judgeRecordedClaude(program, workDir, conv.ID)
-	configDir, launchDir, storeErr := i.claudeStoreFor(program, workDir)
-	nameable := verdict == recordedClaudeBlind && storeErr == nil &&
-		strings.TrimSpace(configDir) != "" && strings.TrimSpace(launchDir) != ""
+	verdict, spellings := i.judgeRecordedClaude(program, workDir, conv.ID)
+	nameable := verdict == recordedClaudeBlind && spellings > 0
 	if nameable {
 		// The retry shares the deadline the first look began with (#7602's
 		// bound, #7600): one look lists each spelling under its own bound
 		// (claudeWorktreeTranscripts), so the pair may spend at most what a
-		// single look of this caller's was always allowed.
-		projects, _ := claudeProjectSpellings(launchDir)
+		// single look of this caller's was always allowed — and the count
+		// comes from the first look, not a second bounded resolution.
 		verdict = i.rejudgeRecordedClaude(program, workDir, conv.ID,
-			lookStarted.Add(fsprobe.ProbeBound()*time.Duration(len(projects))))
+			lookStarted.Add(fsprobe.ProbeBound()*time.Duration(spellings)))
 	}
 	switch verdict {
 	case recordedClaudeStartOn:
