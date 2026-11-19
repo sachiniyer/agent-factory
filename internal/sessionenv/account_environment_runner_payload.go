@@ -414,9 +414,11 @@ func runnerPayloadCandidates(base string, words []*syntax.Word) ([]string, bool)
 	case "tmux":
 		return tmuxPayloads(words)
 	case "nix-shell":
-		return nixShellPayloads(words)
+		payloads, _, undecodable := nixShellPayloads(words)
+		return payloads, undecodable
 	case "nix":
-		return nixPayloads(words)
+		payloads, _, undecodable := nixPayloads(words)
+		return payloads, undecodable
 	case "distrobox":
 		return distroboxPayloads(words)
 	case "toolbox":

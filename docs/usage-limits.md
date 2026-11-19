@@ -470,11 +470,24 @@ will not reach the child's environment.
   `-EncodedCommand`/`-enc` prefixes, `-` stdin, `-Command -`,
   `-NoExit`) refuse even when a `-c` operand is also present
   (`pwsh -NoExit -Command Get-Date` still drops to an interactive
-  stdin after the command). Each launcher's option grammar is also
-  total — every option has a stated arity, and an option the grammar
-  does not know makes the invocation undecodable, which means refuse
-  (`ssh --frobnicate host make`, `pkexec --frobnicate ls`,
-  `setpriv --reset-env --frobnicate ls`).
+  stdin after the command). Where a launcher execs its command argv
+  directly rather than through a shell — tmux's multi-word pane
+  command, `watch --exec`, distrobox's command tail — the payload is
+  judged with argv boundaries preserved (`tmux new-window '/opt/agent
+  tools/codex' --help` still names codex; tmux's single-word command
+  stays the `sh -c` string, and the multi-word form is judged both
+  ways since older tmux joins it). `pwsh -Command` joins its WHOLE
+  remaining argv into the command (`-CommandWithArgs` keeps its
+  single-string operand), and an option operand never swallows the
+  command (`distrobox enter --name x -- codex` still sees codex).
+  Each launcher's option grammar is also total — every option has a
+  stated arity, getopt_long's unique-prefix abbreviations resolve to
+  their option (`setpriv --reset-en codex` is `--reset-env codex`,
+  `nix-shell --pur` is `--pure`), an ambiguous or unknown option
+  makes the invocation undecodable which means refuse (`ssh
+  --frobnicate host make`, `pkexec --frobnicate ls`, `setpriv --re
+  codex`), and classification follows the RESOLVED option so the
+  reset class survives abbreviation and option permutation alike.
 - **Shell names match what the program IS** — `KnownShellName`
   recognizes a shell by its program, not its spelling: the `r`-prefix
   restricted variants (`rbash`, `rksh`, `rzsh`, `rsh`) and versioned

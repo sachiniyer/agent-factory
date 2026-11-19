@@ -1381,6 +1381,45 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment \"['CODEX\\x5fHOME=/o']\"", true},
 		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment \"['FOO=/o']\"", false},
 		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment \"['FOO\\q=/o']\"", true},
+		// Codex round 2 — the same two properties audited per launcher.
+		// Property B: getopt_long unique-prefix abbreviations resolve to
+		// their option (the reset set reads the NORMALIZED name), and an
+		// ambiguous or unknown option refuses.
+		{"setpriv --reset-en codex", true},
+		{"setpriv --reset-e codex", true},
+		{"setpriv codex --reset-env", true}, // util-linux getopt permutes
+		{"setpriv --re codex", true},        // ambiguous prefix -> undecodable
+		{"flatpak-spawn --env-f 3 make", true},
+		{"flatpak-spawn --clear-e codex", true},
+		{"nix-shell --pur --run 'codex'", true},
+		{"nix-shell --p --run 'codex'", true},
+		{"nix develop --ignore-e -c 'codex'", true},
+		{"nix develop -iv -c 'codex'", true}, // -i inside a cluster
+		{"machinectl --frobnicate shell host x", true},
+		// Property A: the judged payload is exactly what runs — argv
+		// boundaries where the launcher execs directly, the whole
+		// remaining tail where it joins, and option operands that never
+		// swallow the command.
+		{"tmux new-window '/opt/agent tools/codex' --help", true},
+		{"tmux new-window env 'CODEX_HOME=/o' codex", true},
+		{"tmux new-window env 'CODEX_\"\"HOME=/o' codex", true},
+		{"tmux new-window make -j4", false},
+		{"distrobox enter --name x -- codex", true},
+		{"distrobox enter -n x -- codex", true},
+		{"distrobox enter --name x 'codex'", true},
+		{"distrobox enter --name x make", false},
+		{"distrobox enter x 'codex'", true},
+		{"pwsh -Command Write-Output '; Set-Item (\"Env:CODEX_\"+\"HOME\") /o; codex'", true},
+		{"pwsh -Command 'echo hi' codex", true},
+		{"pwsh -Command", true},
+		{"pwsh -c 'make' -Command 'codex'", true},
+		{"pwsh -CommandWithArgs 'Get-Process' arg", false},
+		{"nu -c 'make' -c 'codex'", true},
+		{"watch --exec env 'CODEX_HOME=/o' codex", true},
+		{"watch --exec env 'CODEX_\"\"HOME=/o; codex'", true},
+		{"watch --exec codex", false},
+		{"nix develop -i --command=codex", true},
+		{"nix develop -i --comm codex", true}, // ambiguous with --commit-lock-file
 	}
 	for _, test := range cases {
 		// The row verdicts are the gate's, not the bare mutation walk's:

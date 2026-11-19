@@ -51,7 +51,6 @@ var pkexecGrammar = launcherGrammar{
 		"--disable-internal-agent": true, "--keep-cwd": true,
 		"--verbose": true, "--help": true, "--version": true,
 	},
-	stopAfter: 1,
 }
 
 // doas's option grammar: -u/-C/-T/-t take operands; getopt clusters are
@@ -61,13 +60,14 @@ var doasGrammar = launcherGrammar{
 	operand: map[string]bool{"-u": true, "-C": true, "-T": true, "-t": true},
 	flag:    map[string]bool{"-n": true, "-s": true, "-L": true, "-V": true, "-E": true},
 	cluster: true, operandL: "uCTt", flagL: "nsLVE",
-	stopAfter: 1,
 }
 
 // setpriv's option grammar — long options only; --groups takes the group
 // list while --keep-groups/--clear-groups/--init-groups are operand-free
 // flags on the real tool (checked against setpriv --help — a review on
-// this head caught them consuming the command word).
+// this head caught them consuming the command word). util-linux getopt
+// PERMUTES, so `setpriv codex --reset-env` still parses the flag — the
+// grammar has no raw-tail boundary and every `-` word classifies.
 var setprivGrammar = launcherGrammar{
 	operand: map[string]bool{
 		"--reuid": true, "--ruid": true, "--euid": true, "--suid": true,
@@ -83,7 +83,6 @@ var setprivGrammar = launcherGrammar{
 		"--clear-groups": true, "--init-groups": true, "--help": true,
 		"--version": true,
 	},
-	stopAfter: 1,
 }
 
 // flatpak-spawn's option grammar — every spawn is reset-class. --env-fd
@@ -105,7 +104,6 @@ var flatpakSpawnGrammar = launcherGrammar{
 		"--verbose": true, "--debug": true, "--latest-commit": true,
 		"--help": true, "--version": true,
 	},
-	stopAfter: 1,
 }
 
 // ssh's option grammar: operand-taking single letters and the bare flags
@@ -197,6 +195,8 @@ var watchGrammar = launcherGrammar{
 		"--precise": true, "--raw": true, "--no-wrap": true,
 	},
 	cluster: true, operandL: "n", flagL: "dtgpbxecwshv",
+	// procps getopt is '+'-ordered — the first command word ends the
+	// option region, so `watch make -j4` joins -j4 into the payload.
 	stopAfter: 1,
 }
 
@@ -226,7 +226,8 @@ var nixShellGrammar = launcherGrammar{
 // is the reset flag. --option takes a name AND a value.
 var nixDevGrammar = launcherGrammar{
 	operand: map[string]bool{
-		"--expr": true, "--profile": true, "--out-link": true,
+		"--command": true, // arity shadowed by the rest-of-argv boundary scan
+		"--expr":    true, "--profile": true, "--out-link": true,
 		"--phase": true, "--redirect": true, "--inputs-from": true,
 		"--update-input": true, "--override-input": true,
 		"--extra-experimental-features": true, "--installable": true,
@@ -268,6 +269,8 @@ var machinectlGrammar = launcherGrammar{
 		"--help": true, "-h": true, "--version": true,
 	},
 	cluster: true, operandL: "HMplo", flagL: "qansh",
+	// systemd arg parsing is '+'-ordered — after verb+host every word is
+	// the raw remote command (`machinectl shell host bash -c make`).
 	stopAfter: 2,
 }
 
@@ -373,23 +376,28 @@ type scannedOperand struct {
 // clustering — and an option word the grammar does not know, a flag
 // carrying an attached value, a truncated operand, or a non-literal word
 // all make the invocation undecodable. `--` ends the option region;
-// everything after it is positional. Returns the positional literals and
-// the consumed operands in order.
-func launcherArgvScan(words []*syntax.Word, g launcherGrammar) (positionals, operands []scannedOperand, undecodable bool) {
+// everything after it is positional. Returns the positional literals,
+// the consumed operands in order, and `seen` — the NORMALIZED name of
+// every option consumed (the resolved long name, a `-x` cluster letter,
+// or a single-dash table key) so arms classify options by what getopt
+// resolves, never by the raw argv text: `setpriv --reset-en` resolves to
+// --reset-env and `nix develop -iv` sees `-i` inside its cluster.
+func launcherArgvScan(words []*syntax.Word, g launcherGrammar) (positionals, operands []scannedOperand, seen map[string]bool, undecodable bool) {
+	seen = make(map[string]bool)
 	for i := 0; i < len(words); i++ {
 		literal, ok := launcherLiteralWord(words[i])
 		if !ok {
-			return nil, nil, true
+			return nil, nil, nil, true
 		}
 		if literal == "--" {
 			for j := i + 1; j < len(words); j++ {
 				l, ok2 := launcherLiteralWord(words[j])
 				if !ok2 {
-					return nil, nil, true
+					return nil, nil, nil, true
 				}
 				positionals = append(positionals, scannedOperand{literal: l, index: j})
 			}
-			return positionals, operands, false
+			return positionals, operands, seen, false
 		}
 		if !strings.HasPrefix(literal, "-") || literal == "-" {
 			positionals = append(positionals, scannedOperand{literal: literal, index: i})
@@ -397,11 +405,11 @@ func launcherArgvScan(words []*syntax.Word, g launcherGrammar) (positionals, ope
 				for j := i + 1; j < len(words); j++ {
 					l, ok2 := launcherLiteralWord(words[j])
 					if !ok2 {
-						return nil, nil, true
+						return nil, nil, nil, true
 					}
 					positionals = append(positionals, scannedOperand{literal: l, index: j})
 				}
-				return positionals, operands, false
+				return positionals, operands, seen, false
 			}
 			continue
 		}
@@ -410,45 +418,50 @@ func launcherArgvScan(words []*syntax.Word, g launcherGrammar) (positionals, ope
 			resolved, known := resolveLauncherLongOption(name, g)
 			switch {
 			case !known:
-				return nil, nil, true
+				return nil, nil, nil, true
 			case g.payload[resolved]:
+				seen[resolved] = true
 				if hasVal {
 					operands = append(operands, scannedOperand{opt: resolved, literal: val})
 					continue
 				}
 				l, ok2 := launcherOperandAt(words, i+1)
 				if !ok2 {
-					return nil, nil, true
+					return nil, nil, nil, true
 				}
 				operands = append(operands, scannedOperand{opt: resolved, literal: l})
 				i++
 			case g.operand[resolved]:
+				seen[resolved] = true
 				if hasVal {
 					operands = append(operands, scannedOperand{opt: resolved, literal: val})
 					continue
 				}
 				l, ok2 := launcherOperandAt(words, i+1)
 				if !ok2 {
-					return nil, nil, true
+					return nil, nil, nil, true
 				}
 				operands = append(operands, scannedOperand{opt: resolved, literal: l})
 				i++
 			case g.operand2[resolved]:
+				seen[resolved] = true
 				l1, ok1 := launcherOperandAt(words, i+1)
 				l2, ok2 := launcherOperandAt(words, i+2)
 				if !ok1 || !ok2 {
-					return nil, nil, true
+					return nil, nil, nil, true
 				}
 				operands = append(operands,
 					scannedOperand{opt: resolved, literal: l1},
 					scannedOperand{opt: resolved, literal: l2})
 				i += 2
 			case g.optional[resolved]:
+				seen[resolved] = true
 				continue
 			default: // a bare flag
 				if hasVal {
-					return nil, nil, true
+					return nil, nil, nil, true
 				}
+				seen[resolved] = true
 			}
 			continue
 		}
@@ -461,13 +474,15 @@ func launcherArgvScan(words []*syntax.Word, g launcherGrammar) (positionals, ope
 				c := letters[j]
 				switch {
 				case strings.IndexByte(g.flagL, c) >= 0:
+					seen["-"+string(c)] = true
 					continue
 				case strings.IndexByte(g.operandL, c) >= 0 || strings.IndexByte(g.payloadL, c) >= 0:
+					seen["-"+string(c)] = true
 					rest := letters[j+1:]
 					if rest == "" {
 						l, ok2 := launcherOperandAt(words, i+1)
 						if !ok2 {
-							return nil, nil, true
+							return nil, nil, nil, true
 						}
 						operands = append(operands, scannedOperand{opt: "-" + string(c), literal: l})
 						i++
@@ -476,26 +491,28 @@ func launcherArgvScan(words []*syntax.Word, g launcherGrammar) (positionals, ope
 					}
 					j = len(letters)
 				default:
-					return nil, nil, true
+					return nil, nil, nil, true
 				}
 			}
 			continue
 		}
 		if g.operand[literal] || g.payload[literal] {
+			seen[literal] = true
 			l, ok2 := launcherOperandAt(words, i+1)
 			if !ok2 {
-				return nil, nil, true
+				return nil, nil, nil, true
 			}
 			operands = append(operands, scannedOperand{opt: literal, literal: l})
 			i++
 			continue
 		}
 		if g.flag[literal] || g.optional[literal] {
+			seen[literal] = true
 			continue
 		}
-		return nil, nil, true
+		return nil, nil, nil, true
 	}
-	return positionals, operands, false
+	return positionals, operands, seen, false
 }
 
 // launcherOperandAt yields the literal operand a consumed option takes —
@@ -543,6 +560,20 @@ func joinScannedPositionals(positionals []scannedOperand, from int) string {
 	return strings.Join(parts, " ")
 }
 
+// joinExecArgv renders positional literals as a shell string that parses
+// back to EXACTLY that argv — every element single-quoted — for launchers
+// that exec their command argv without a shell (tmux's multi-word pane
+// command, watch --exec, distrobox's command tail). `/opt/agent
+// tools/codex` stays one program word whose final component names the
+// agent, where a space join would repurpose `tools/codex` as an operand.
+func joinExecArgv(positionals []scannedOperand, from int) string {
+	parts := make([]string, 0, len(positionals)-from)
+	for _, p := range positionals[from:] {
+		parts = append(parts, "'"+strings.ReplaceAll(p.literal, "'", `'\''`)+"'")
+	}
+	return strings.Join(parts, " ")
+}
+
 // ---------- pwsh / nu option classification ----------
 
 // pwshNuOptionKind classifies one pwsh/nu option spelling — the gate does
@@ -554,6 +585,7 @@ const (
 	pwshNuFlag    pwshNuOptionKind = iota // bare flag — no operand, no input
 	pwshNuOperand                         // consumes the next word — data, not input
 	pwshNuPayload                         // consumes the next word — the command string
+	pwshNuTail                            // the whole REMAINING argv joins into the command (pwsh -Command)
 	pwshNuHidden                          // reads input the gate cannot see — refuse
 	pwshNuInfo                            // prints information and exits
 )
@@ -563,7 +595,7 @@ const (
 // so classification resolves a word by prefix across this whole table;
 // an ambiguous or unknown prefix makes the invocation undecodable.
 var pwshOptions = map[string]pwshNuOptionKind{
-	"c": pwshNuPayload, "command": pwshNuPayload, "commandwithargs": pwshNuPayload,
+	"c": pwshNuTail, "command": pwshNuTail, "commandwithargs": pwshNuPayload,
 	"encodedcommand": pwshNuHidden, "ec": pwshNuHidden, "e": pwshNuHidden,
 	"file": pwshNuHidden, "f": pwshNuHidden, "psconsolefile": pwshNuHidden,
 	"custompipename": pwshNuHidden, "noexit": pwshNuHidden,
@@ -605,22 +637,22 @@ var nuOptions = map[string]pwshNuOptionKind{
 // command operand was found (the property-A rule on this head: `pwsh
 // -NoExit -Command Get-Date` still drops to an interactive stdin after
 // the command, and `pwsh -Command -` reads the command from stdin).
-// positional marks a bare word before the payload operand — a script
-// file; words after the payload operand are the script's argv and carry
-// no judgement. Returns the payload text ("" when absent or unreadable),
-// whether one was found, a positional-before-payload marker, an info flag
-// marker, and undecodable.
-func pwshNuClassify(words []*syntax.Word, options map[string]pwshNuOptionKind, abbrev bool) (payload string, hasPayload, positional, info, undecodable bool) {
+// positional marks a bare word before the first payload operand — a
+// script file; words after a single-operand payload are the script's
+// argv and carry no judgement. Returns the payload texts (every payload
+// operand — `nu -c a -c b` runs both), a positional-before-payload
+// marker, an info flag marker, and undecodable.
+func pwshNuClassify(words []*syntax.Word, options map[string]pwshNuOptionKind, abbrev bool) (payloads []string, positional, info, undecodable bool) {
 	payloadSeen := false
 	for i := 0; i < len(words); i++ {
 		literal, ok := launcherLiteralWord(words[i])
 		if !ok {
-			return "", false, false, false, true
+			return nil, false, false, true
 		}
 		if literal == "-" {
 			// A bare `-` is pwsh's stdin marker — command input the
 			// gate cannot see.
-			return "", false, false, false, true
+			return nil, false, false, true
 		}
 		if !strings.HasPrefix(literal, "-") {
 			if !payloadSeen {
@@ -632,40 +664,69 @@ func pwshNuClassify(words []*syntax.Word, options map[string]pwshNuOptionKind, a
 		optName, attached, hasAttached := strings.Cut(name, "=")
 		kind, known := pwshNuResolveOption(optName, options, abbrev)
 		if !known {
-			return "", false, false, false, true
+			return nil, false, false, true
 		}
 		switch kind {
 		case pwshNuHidden:
-			return "", false, false, false, true
+			return nil, false, false, true
 		case pwshNuInfo:
 			info = true
 		case pwshNuFlag:
 			if hasAttached {
-				return "", false, false, false, true
+				return nil, false, false, true
 			}
 		case pwshNuOperand:
 			if _, ok2 := launcherOperandAt(words, i+1); !ok2 {
-				return "", false, false, false, true
+				return nil, false, false, true
 			}
 			i++
+		case pwshNuTail:
+			// pwsh's -Command: EVERY word after it joins into the
+			// command — option parsing is over, so `pwsh -Command
+			// Write-Output '; codex'` judges the whole tail, not its
+			// first word. A `-Command=x` spelling is not a form pwsh
+			// accepts — undecodable, which means refuse.
+			if hasAttached {
+				return nil, false, false, true
+			}
+			var tail []string
+			for j := i + 1; j < len(words); j++ {
+				l, ok2 := launcherLiteralWord(words[j])
+				if !ok2 {
+					return nil, false, false, true
+				}
+				tail = append(tail, l)
+			}
+			if len(tail) == 0 {
+				// `-Command` with nothing after it reads the command
+				// from stdin — hidden input.
+				return nil, false, false, true
+			}
+			if len(tail) == 1 && tail[0] == "-" {
+				// `-Command -` reads the command from stdin.
+				return nil, false, false, true
+			}
+			payloads = append(payloads, strings.Join(tail, " "))
+			payloadSeen = true
+			i = len(words)
 		case pwshNuPayload:
 			if hasAttached {
-				payload, hasPayload, payloadSeen = attached, true, true
+				payloads, payloadSeen = append(payloads, attached), true
 				continue
 			}
 			l, ok2 := launcherOperandAt(words, i+1)
 			if !ok2 {
-				return "", false, false, false, true
+				return nil, false, false, true
 			}
 			if l == "-" {
 				// `-Command -` reads the command from stdin.
-				return "", false, false, false, true
+				return nil, false, false, true
 			}
-			payload, hasPayload, payloadSeen = l, true, true
+			payloads, payloadSeen = append(payloads, l), true
 			i++
 		}
 	}
-	return payload, hasPayload, positional, info, false
+	return payloads, positional, info, false
 }
 
 // pwshNuResolveOption resolves a dash-stripped option name against the

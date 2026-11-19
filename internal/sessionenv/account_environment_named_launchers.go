@@ -33,7 +33,7 @@ import (
 // destination joined into the single command line the remote shell
 // reads — the exact payload ssh builds.
 func sshPayloads(words []*syntax.Word) ([]string, bool) {
-	positionals, _, undecodable := launcherArgvScan(words, sshGrammar)
+	positionals, _, _, undecodable := launcherArgvScan(words, sshGrammar)
 	if undecodable {
 		return nil, true
 	}
@@ -48,12 +48,18 @@ func sshPayloads(words []*syntax.Word) ([]string, bool) {
 // builds — `watch export 'CODEX_""HOME=/o; codex'` decodes the export's
 // joined name the same way the child's shell does.
 func watchPayloads(words []*syntax.Word) ([]string, bool) {
-	positionals, _, undecodable := launcherArgvScan(words, watchGrammar)
+	positionals, _, seen, undecodable := launcherArgvScan(words, watchGrammar)
 	if undecodable {
 		return nil, true
 	}
 	if len(positionals) == 0 {
 		return nil, false
+	}
+	if seen["--exec"] {
+		// --exec runs the argv directly, no `sh -c` — preserve argv
+		// boundaries so a program path containing spaces still names
+		// its real final component.
+		return []string{joinExecArgv(positionals, 0)}, false
 	}
 	return []string{joinScannedPositionals(positionals, 0)}, false
 }
@@ -62,7 +68,7 @@ func watchPayloads(words []*syntax.Word) ([]string, bool) {
 // (default-command) operand and, for a pane-creating subcommand, the
 // trailing words joined into the shell command the server runs.
 func tmuxPayloads(words []*syntax.Word) ([]string, bool) {
-	positionals, operands, undecodable := launcherArgvScan(words, tmuxGlobalGrammar)
+	positionals, operands, _, undecodable := launcherArgvScan(words, tmuxGlobalGrammar)
 	if undecodable || len(positionals) == 0 {
 		return nil, undecodable
 	}
@@ -79,12 +85,26 @@ func tmuxPayloads(words []*syntax.Word) ([]string, bool) {
 			payloads = append(payloads, operand.literal)
 		}
 	}
-	panePos, _, undec := launcherArgvScan(words[positionals[0].index+1:], tmuxPaneGrammar)
+	panePos, _, _, undec := launcherArgvScan(words[positionals[0].index+1:], tmuxPaneGrammar)
 	if undec {
 		return nil, true
 	}
-	if len(panePos) > 0 {
-		payloads = append(payloads, joinScannedPositionals(panePos, 0))
+	switch len(panePos) {
+	case 0:
+	case 1:
+		// One command word is the shell command string the server
+		// hands to `sh -c`.
+		payloads = append(payloads, panePos[0].literal)
+	default:
+		// Multiple command words EXECUTE DIRECTLY — tmux runs the
+		// argv without a shell — so the payload is judged twice:
+		// once with argv boundaries preserved (quoted elements —
+		// `/opt/agent tools/codex` names codex), and once joined,
+		// which stays conservative for tmux builds that fall back
+		// to the `sh -c` spelling.
+		payloads = append(payloads,
+			joinExecArgv(panePos, 0),
+			joinScannedPositionals(panePos, 0))
 	}
 	return payloads, false
 }
@@ -97,12 +117,14 @@ func tmuxSubcommandAt(words []*syntax.Word, positionals []scannedOperand) (strin
 	return positionals[0].literal, true
 }
 
-// nixShellPayloads returns nix-shell's command-string candidates: the
-// --run/--command operands in either spelling.
-func nixShellPayloads(words []*syntax.Word) ([]string, bool) {
-	_, operands, undecodable := launcherArgvScan(words, nixShellGrammar)
+// nixShellPayloads returns nix-shell's command-string candidates — the
+// --run/--command operands in either spelling — plus the normalized
+// option set so --pure reads whether getopt resolved it (`--pu`,
+// `--pur`), not how the argv spelled it.
+func nixShellPayloads(words []*syntax.Word) ([]string, map[string]bool, bool) {
+	_, operands, seen, undecodable := launcherArgvScan(words, nixShellGrammar)
 	if undecodable {
-		return nil, true
+		return nil, nil, true
 	}
 	var payloads []string
 	for _, operand := range operands {
@@ -110,26 +132,33 @@ func nixShellPayloads(words []*syntax.Word) ([]string, bool) {
 			payloads = append(payloads, operand.literal)
 		}
 	}
-	return payloads, false
+	return payloads, seen, false
 }
 
-// nixPayloads returns `nix develop`/`nix shell` command candidates: `-c`/
-// `--command` takes the REST of the argv as the command words, joined —
-// `--command=x` carries it attached.
-func nixPayloads(words []*syntax.Word) ([]string, bool) {
-	sawDev := -1
+// sawNixDev returns the index of nix's develop/shell subcommand word, or
+// -1 when the invocation names neither.
+func sawNixDev(words []*syntax.Word) int {
 	for i, word := range words {
 		literal, ok := launcherLiteralWord(word)
 		if !ok {
 			continue
 		}
 		if literal == "develop" || literal == "shell" {
-			sawDev = i
-			break
+			return i
 		}
 	}
+	return -1
+}
+
+// nixPayloads returns `nix develop`/`nix shell` command candidates: `-c`/
+// `--command` takes the REST of the argv as the command words, joined —
+// `--command=x` carries its first word attached. The second return is
+// the normalized option set seen BEFORE the command boundary, so the arm
+// reads `-i` whether it arrives spelled out, clustered, or abbreviated.
+func nixPayloads(words []*syntax.Word) ([]string, map[string]bool, bool) {
+	sawDev := sawNixDev(words)
 	if sawDev < 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	// Find the -c boundary: the option consumes the rest of the argv.
 	for i := sawDev + 1; i < len(words); i++ {
@@ -137,29 +166,40 @@ func nixPayloads(words []*syntax.Word) ([]string, bool) {
 		if !ok {
 			continue
 		}
-		if strings.HasPrefix(literal, "--command=") {
-			if _, _, undec := launcherArgvScan(words[sawDev+1:i], nixDevGrammar); undec {
-				return nil, true
+		if strings.HasPrefix(literal, "--") {
+			if name, val, hasVal := strings.Cut(literal, "="); hasVal {
+				if resolved, known := resolveLauncherLongOption(name, nixDevGrammar); known && resolved == "--command" {
+					_, _, seen, undec := launcherArgvScan(words[sawDev+1:i], nixDevGrammar)
+					if undec {
+						return nil, nil, true
+					}
+					// --command=x runs x plus the remaining argv.
+					tail := append([]string{val}, literalTailWords(words[i+1:])...)
+					if len(tail) < len(words)-i {
+						return nil, nil, true
+					}
+					return []string{strings.Join(tail, " ")}, seen, false
+				}
 			}
-			return []string{literal[len("--command="):]}, false
 		}
 		if literal == "-c" || literal == "--command" || isLauncherLongAbbrev(literal, "--command", nixDevGrammar) {
-			if _, _, undec := launcherArgvScan(words[sawDev+1:i], nixDevGrammar); undec {
-				return nil, true
+			_, _, seen, undec := launcherArgvScan(words[sawDev+1:i], nixDevGrammar)
+			if undec {
+				return nil, nil, true
 			}
 			tail := literalTailWords(words[i+1:])
 			if len(tail) < len(words)-i-1 {
-				return nil, true // a non-literal command word hides the payload
+				return nil, nil, true // a non-literal command word hides the payload
 			}
 			if len(tail) == 0 {
-				return nil, false
+				return nil, seen, false
 			}
-			return []string{strings.Join(tail, " ")}, false
+			return []string{strings.Join(tail, " ")}, seen, false
 		}
 	}
 	// No -c word: the pre-command argv still must decode.
-	_, _, undecodable := launcherArgvScan(words[sawDev+1:], nixDevGrammar)
-	return nil, undecodable
+	_, _, seen, undecodable := launcherArgvScan(words[sawDev+1:], nixDevGrammar)
+	return nil, seen, undecodable
 }
 
 // isLauncherLongAbbrev reports whether word is a unique getopt_long
@@ -188,7 +228,7 @@ func distroboxPayloads(words []*syntax.Word) ([]string, bool) {
 	if sawSub < 0 {
 		return nil, false
 	}
-	positionals, operands, undecodable := launcherArgvScan(words[sawSub+1:], distroboxGrammar)
+	positionals, operands, _, undecodable := launcherArgvScan(words[sawSub+1:], distroboxGrammar)
 	if undecodable {
 		return nil, true
 	}
@@ -198,11 +238,27 @@ func distroboxPayloads(words []*syntax.Word) ([]string, bool) {
 			payloads = append(payloads, operand.literal)
 		}
 	}
-	// The container name is positional[0]; any later positional is a bare
-	// command the container runs — joined the way the container shell
-	// reads it.
-	if len(positionals) > 1 {
-		payloads = append(payloads, joinScannedPositionals(positionals, 1))
+	// The container name is positional[0] — unless --name/-n supplied it
+	// as an option operand, in which case positional[0] already starts
+	// the command (`distrobox enter --name x -- codex` runs codex).
+	named := false
+	for _, operand := range operands {
+		if operand.opt == "-n" || operand.opt == "--name" {
+			named = true
+		}
+	}
+	start := 0
+	if !named {
+		start = 1
+	}
+	if len(positionals) > start {
+		// The command tail is judged both joined and with argv
+		// boundaries preserved — distrobox execs the words as a
+		// command line whose spelling the entrypoint may pass either
+		// way.
+		payloads = append(payloads,
+			joinScannedPositionals(positionals, start),
+			joinExecArgv(positionals, start))
 	}
 	return payloads, false
 }
@@ -225,7 +281,7 @@ func toolboxPayloads(words []*syntax.Word) ([]string, bool) {
 	if sawRun < 0 {
 		return nil, false
 	}
-	positionals, _, undecodable := launcherArgvScan(words[sawRun+1:], toolboxGrammar)
+	positionals, _, _, undecodable := launcherArgvScan(words[sawRun+1:], toolboxGrammar)
 	if undecodable {
 		return nil, true
 	}
@@ -239,11 +295,11 @@ func toolboxPayloads(words []*syntax.Word) ([]string, bool) {
 // decode — an undecodable invocation (encoded spelling, hidden input,
 // unknown option, interactive form) refuses.
 func pwshNuPayloads(words []*syntax.Word) ([]string, bool) {
-	payload, has, positional, info, undecodable := pwshNuClassify(words, pwshOptions, true)
+	payloads, positional, info, undecodable := pwshNuClassify(words, pwshOptions, true)
 	if undecodable || positional {
 		return nil, true
 	}
-	if !has {
+	if len(payloads) == 0 {
 		// An interactive session reads input the gate cannot see —
 		// undecidable under a reset; only a pure info form proves safe.
 		if info {
@@ -251,22 +307,22 @@ func pwshNuPayloads(words []*syntax.Word) ([]string, bool) {
 		}
 		return nil, true
 	}
-	return []string{payload}, false
+	return payloads, false
 }
 
 // nuPayloads mirrors pwshNuPayloads for nu's exact option spellings.
 func nuPayloads(words []*syntax.Word) ([]string, bool) {
-	payload, has, positional, info, undecodable := pwshNuClassify(words, nuOptions, false)
+	payloads, positional, info, undecodable := pwshNuClassify(words, nuOptions, false)
 	if undecodable || positional {
 		return nil, true
 	}
-	if !has {
+	if len(payloads) == 0 {
 		if info {
 			return nil, false
 		}
 		return nil, true
 	}
-	return []string{payload}, false
+	return payloads, false
 }
 
 // literalTailWords renders every literal word in a tail; the returned
@@ -288,7 +344,7 @@ func literalTailWords(words []*syntax.Word) []string {
 // B), otherwise the first positional is the program and gets the reach
 // check.
 func namedLauncherResetReach(words []*syntax.Word, g launcherGrammar, names map[string]struct{}, preserved map[string]struct{}) bool {
-	positionals, _, undecodable := launcherArgvScan(words, g)
+	positionals, _, _, undecodable := launcherArgvScan(words, g)
 	if undecodable {
 		return true
 	}
@@ -329,11 +385,12 @@ func unwrapDoas(words []*syntax.Word, names map[string]struct{}, memo operandTai
 // hidden input source: its operand comes from a descriptor the command
 // line cannot show.
 func unwrapFlatpakSpawn(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	for _, word := range words {
-		if literal, ok := launcherLiteralWord(word); ok &&
-			(literal == "--env-fd" || strings.HasPrefix(literal, "--env-fd=")) {
-			return nil, true
-		}
+	_, _, seen, undecodable := launcherArgvScan(words, flatpakSpawnGrammar)
+	if undecodable || seen["--env-fd"] {
+		// An unknown option undecodes; --env-fd (or its abbreviation)
+		// sources the child environment from a descriptor the command
+		// line cannot show — hidden input.
+		return nil, true
 	}
 	return unwrapAlwaysResetLauncher(words, names, memo, requireCommand, flatpakSpawnGrammar)
 }
@@ -349,11 +406,14 @@ func unwrapSetpriv(words []*syntax.Word, names map[string]struct{}, memo operand
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	positionals, _, undecodable := launcherArgvScan(words, setprivGrammar)
+	positionals, _, seen, undecodable := launcherArgvScan(words, setprivGrammar)
 	if undecodable {
 		return nil, true
 	}
-	if !literalTailHasWord(words, "--reset-env") {
+	// getopt_long accepts unique-prefix abbreviations — --reset-en
+	// resolves to --reset-env and still clears the environment, so the
+	// reset class comes from the normalized option, never the argv text.
+	if !seen["--reset-env"] {
 		return nil, false
 	}
 	if len(positionals) == 0 {
@@ -405,7 +465,7 @@ func unwrapMachinectl(words []*syntax.Word, names map[string]struct{}, memo oper
 // reset-tail recursion so `sudo machinectl shell host codex` reaches the
 // same way `machinectl shell host codex` does.
 func machinectlShellLoginReaches(words []*syntax.Word, names, preserved map[string]struct{}) bool {
-	positionals, _, undecodable := launcherArgvScan(words, machinectlGrammar)
+	positionals, _, _, undecodable := launcherArgvScan(words, machinectlGrammar)
 	if undecodable {
 		return true
 	}
@@ -432,11 +492,13 @@ func unwrapNixShell(words []*syntax.Word, names map[string]struct{}, memo operan
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	payloads, undecodable := nixShellPayloads(words)
+	payloads, seen, undecodable := nixShellPayloads(words)
 	if undecodable {
 		return nil, true
 	}
-	if !literalTailHasWord(words, "--pure") {
+	// --pure abbreviates like any getopt_long option — the reset class
+	// comes from the resolved option set, not the argv text.
+	if !seen["--pure"] {
 		return nil, false
 	}
 	for _, payload := range payloads {
@@ -456,21 +518,13 @@ func unwrapNix(words []*syntax.Word, names map[string]struct{}, memo operandTail
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	payloads, undecodable := nixPayloads(words)
+	payloads, seen, undecodable := nixPayloads(words)
 	if undecodable {
 		return nil, true
 	}
-	resets := false
-	for _, word := range words {
-		literal, ok := launcherLiteralWord(word)
-		if !ok {
-			continue
-		}
-		if literal == "-i" || literal == "--ignore-environment" {
-			resets = true
-		}
-	}
-	if !resets {
+	// -i hides in clusters (-iv) and abbreviates (--ignore-env), so the
+	// reset check reads the normalized option set, never the argv text.
+	if !seen["-i"] && !seen["--ignore-environment"] {
 		return nil, false
 	}
 	for _, payload := range payloads {
@@ -492,7 +546,7 @@ func unwrapTmux(words []*syntax.Word, names map[string]struct{}, memo operandTai
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	positionals, _, undecodable := launcherArgvScan(words, tmuxGlobalGrammar)
+	positionals, _, _, undecodable := launcherArgvScan(words, tmuxGlobalGrammar)
 	if undecodable || len(positionals) == 0 {
 		return nil, undecodable
 	}
@@ -503,7 +557,7 @@ func unwrapTmux(words []*syntax.Word, names map[string]struct{}, memo operandTai
 		// environment — every later pane inherits it. A protected NAME
 		// operand refuses; the value is a positional the gate cannot
 		// scope.
-		pos, _, undec := launcherArgvScan(words[positionals[0].index+1:], tmuxSetenvGrammar)
+		pos, _, _, undec := launcherArgvScan(words[positionals[0].index+1:], tmuxSetenvGrammar)
 		if undec {
 			return nil, true
 		}
@@ -593,7 +647,7 @@ func unwrapWatch(words []*syntax.Word, names map[string]struct{}, memo operandTa
 // the universe does not know makes the invocation undecodable — all
 // refuse.
 func unwrapPwshNu(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, options map[string]pwshNuOptionKind, abbrev bool) ([]*syntax.Word, bool) {
-	payload, has, positional, info, undecodable := pwshNuClassify(words, options, abbrev)
+	payloads, positional, info, undecodable := pwshNuClassify(words, options, abbrev)
 	if undecodable || positional {
 		return nil, true
 	}
@@ -603,13 +657,18 @@ func unwrapPwshNu(words []*syntax.Word, names map[string]struct{}, memo operandT
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	if !has {
+	if len(payloads) == 0 {
 		// No command string: a bare `pwsh`/`nu` is the interactive
 		// session — input the gate cannot see. Only a pure info flag
 		// (-Version/-Help) runs without input.
 		return nil, !info
 	}
-	return nil, pwshNuPayloadNamesBoundary(payload, names)
+	for _, payload := range payloads {
+		if pwshNuPayloadNamesBoundary(payload, names) {
+			return nil, true
+		}
+	}
+	return nil, false
 }
 
 // pwshNuPayloadNamesBoundary reports whether the payload text names a
@@ -665,7 +724,7 @@ func unwrapBusctl(words []*syntax.Word, names map[string]struct{}, memo operandT
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	positionals, operands, undecodable := launcherArgvScan(words, grammar)
+	positionals, operands, _, undecodable := launcherArgvScan(words, grammar)
 	if undecodable || len(positionals) == 0 {
 		return nil, undecodable
 	}
@@ -717,14 +776,4 @@ func unwrapBusctl(words []*syntax.Word, names map[string]struct{}, memo operandT
 		}
 	}
 	return nil, false
-}
-
-// literalTailHasWord reports whether a literal word appears in the tail.
-func literalTailHasWord(words []*syntax.Word, want string) bool {
-	for _, word := range words {
-		if l, ok := launcherLiteralWord(word); ok && l == want {
-			return true
-		}
-	}
-	return false
 }
