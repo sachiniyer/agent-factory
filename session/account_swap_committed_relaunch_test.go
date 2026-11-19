@@ -466,6 +466,42 @@ func TestCommittedSwapRelaunchClearsTheBlindResumeReasonOnARemint(t *testing.T) 
 		"a fresh start must not keep an earlier blind resume's reason")
 }
 
+// A clean listing that finds nothing filed under the committed id proves the
+// transcript the delivered verdict earned on it is gone (#7602 review): the
+// fresh --session-id start retires that verdict, or a crash persisted before
+// the new panes' first prompt leaves LaunchedConversationID beside a
+// PromptDelivered a later blind retry reads as proof — and --resume exits on
+// the absent transcript.
+func TestCommittedSwapRelaunchRetiresDeliveryProofOnACleanStart(t *testing.T) {
+	inst, target, _, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	inst.SetAccountSwapReplacementPanesStartedForTest(true)
+	inst.pendingAccountSwap.MissionDeliveryStatus = PromptDelivered
+	inst.pendingAccountSwap.MissionDeliveryAttemptAt = time.Now()
+
+	plan := relaunchPlan(t, inst)
+	require.NotRegexp(t, resumeArg, plan.program,
+		"nothing is filed under the committed id: %s", plan.program)
+	match := sessionIDArg.FindStringSubmatch(plan.program)
+	require.NotNil(t, match, "as a first launch does: %s", plan.program)
+	require.Equal(t, committed, match[1])
+	pending := inst.ToInstanceData().PendingAccountSwap
+	require.Empty(t, pending.MissionDeliveryStatus,
+		"the clean listing retires the verdict that proved a filing")
+	require.True(t, pending.MissionDeliveryAttemptAt.IsZero())
+
+	// The retired proof stays retired across the mark a respawn makes: the
+	// launched id did not change, so the crash window before the new panes'
+	// first prompt cannot re-arm a blind resume.
+	require.NoError(t, inst.markAccountSwapReplacementPanesStarted())
+	wedgeStoreListing(t, target)
+	plan = withinBound(t, func() *accountSwapLaunchPlan { return relaunchPlan(t, inst) })
+	require.NotRegexp(t, resumeArg, plan.program,
+		"a retired verdict is no proof Claude entered the id: %s", plan.program)
+	match = sessionIDArg.FindStringSubmatch(plan.program)
+	require.NotNil(t, match, "as the first launch did: %s", plan.program)
+	require.Equal(t, committed, match[1])
+}
+
 // A store af cannot even name says nothing about the id: the re-launch starts
 // on it, as the first launch did (#7596). The committed record's target is
 // registered while the record lives, so the seam is reached the way a
@@ -477,9 +513,10 @@ func TestCommittedSwapRelaunchStartsOnItsIDWhenTheStoreCannotBeNamed(t *testing.
 	inst.pendingAccountSwap.To = "ghost"
 	inst.SetAccountSwapReplacementPanesStartedForTest(true)
 
-	launch, conversation, reminted, blindResumed := inst.committedConversationLaunch("claude", worktree, "ghost", committed)
+	launch, conversation, reminted, blindResumed, startOnUnfiled := inst.committedConversationLaunch("claude", worktree, "ghost", committed)
 	require.False(t, reminted)
 	require.False(t, blindResumed, "a store af cannot name is no blind resume: nothing is known of the id")
+	require.False(t, startOnUnfiled, "a blind verdict contradicts no delivery proof")
 	require.Equal(t, committed, conversation.ID)
 	match := sessionIDArg.FindStringSubmatch(launch)
 	require.NotNil(t, match, "as the first launch did: %s", launch)

@@ -54,14 +54,20 @@ const blindCommittedResumeReason = "its transcript store could not be listed"
 // say it. A record whose launch was never delivered to — the usual reason a
 // committed re-launch happens — or whose launched id is another's describes
 // no filing of id, so it starts on id exactly as it did before #7596.
-func (i *Instance) committedConversationLaunch(program, workDir, account, id string) (launch string, conversation AgentConversationData, reminted, blindResumed bool) {
+//
+// startOnUnfiled reports that a CLEAN listing found nothing filed under id —
+// recordedClaudeStartOn — so the caller retires the record's delivered
+// verdict: it proved a filing that no longer exists, and a later blind retry
+// must not read it as proof Claude entered id (#7602 review). A blind start
+// on id reports false — nothing contradicted the proof there.
+func (i *Instance) committedConversationLaunch(program, workDir, account, id string) (launch string, conversation AgentConversationData, reminted, blindResumed, startOnUnfiled bool) {
 	launch, conversation = planLaunchConversation(id, program)
 	if !conversation.HasID() {
 		// Not a Claude launch af names a conversation for.
-		return launch, conversation, false, false
+		return launch, conversation, false, false, false
 	}
 	if !i.recordNamesAccount(account) {
-		return launch, conversation, false, false
+		return launch, conversation, false, false, false
 	}
 	lookStarted := time.Now()
 	verdict := i.judgeRecordedClaude(program, workDir, id)
@@ -72,7 +78,7 @@ func (i *Instance) committedConversationLaunch(program, workDir, account, id str
 	switch verdict {
 	case recordedClaudeAbandoned:
 		launch, conversation = planLaunchConversation(newSessionID(), program)
-		return launch, conversation, conversation.HasID(), false
+		return launch, conversation, conversation.HasID(), false, false
 	case recordedClaudeResume:
 		if resumed, ok := tmux.ResumeProgramWithConversationID(program, tmux.ProgramClaude, id); ok {
 			return resumed, AgentConversationData{
@@ -80,7 +86,7 @@ func (i *Instance) committedConversationLaunch(program, workDir, account, id str
 				ID:          id,
 				CapturedAt:  time.Now(),
 				CaptureKind: ConversationCaptureInjected,
-			}, false, false
+			}, false, false, false
 		}
 	}
 	if verdict == recordedClaudeBlind && nameable && i.committedConversationFiled(account, id) {
@@ -90,12 +96,12 @@ func (i *Instance) committedConversationLaunch(program, workDir, account, id str
 				ID:          id,
 				CapturedAt:  time.Now(),
 				CaptureKind: ConversationCaptureInjected,
-			}, false, true
+			}, false, true, false
 		}
 	}
-	// Nothing filed, or a store af cannot name, or a record that shows no
-	// first launch ran: start on id as before.
-	return launch, conversation, false, false
+	// Nothing filed, or a store af cannot name, or a record that proves no
+	// entry: start on id as before.
+	return launch, conversation, false, false, verdict == recordedClaudeStartOn
 }
 
 // claudeStoreNameable reports whether the store the launch writes its

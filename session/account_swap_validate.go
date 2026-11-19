@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
@@ -267,15 +268,16 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		return refuse(err)
 	}
 	// reminted reports that a committed replacement's recorded conversation id
-	// was replaced by a fresh one, and blindResumed that a blind store verdict
-	// left the re-launch resuming it on the record's say-so; the record takes
-	// either below.
-	var reminted, blindResumed bool
+	// was replaced by a fresh one, blindResumed that a blind store verdict
+	// left the re-launch resuming it on the record's say-so, and
+	// startOnUnfiled that a clean listing found nothing filed under it; the
+	// record takes the matching write below.
+	var reminted, blindResumed, startOnUnfiled bool
 	if carry == nil {
 		if pending != nil && pending.To == name && pending.ConversationID != "" {
 			// A re-launch of a committed replacement: its id may already name a
 			// transcript in the target account's store (#7214).
-			launchProgram, conversation, reminted, blindResumed = i.committedConversationLaunch(
+			launchProgram, conversation, reminted, blindResumed, startOnUnfiled = i.committedConversationLaunch(
 				resolvedProgram, workDir, name, pending.ConversationID)
 		} else {
 			launchProgram, conversation = planLaunchConversation(newSessionID(), resolvedProgram)
@@ -468,6 +470,17 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		live.ResumeUnverifiedReason = blindCommittedResumeReason
 		i.pendingAccountSwapUnwritten = true
 		i.stampHandoffConversationLocked()
+		i.touchLocked()
+	} else if live := i.pendingAccountSwap; startOnUnfiled && live != nil && live.To == name {
+		// A clean listing found nothing filed under the committed id, so the
+		// delivered verdict a previous launch earned on it is stale: the
+		// transcript it proved is gone, and a later blind retry must not
+		// read it as proof Claude entered id — a crash persisted in that
+		// window would otherwise --resume an absent transcript (#7602
+		// review).
+		live.MissionDeliveryStatus = ""
+		live.MissionDeliveryAttemptAt = time.Time{}
+		i.pendingAccountSwapUnwritten = true
 		i.touchLocked()
 	}
 	i.mu.Unlock()
