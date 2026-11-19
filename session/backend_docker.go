@@ -624,14 +624,8 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 func (p *dockerProvisioner) runContainer() error {
 	args := []string{
 		"run", "-d",
-		"--label", dockerSessionLabel + "=" + Slugify(p.spec.Title),
 		"-e", "HOME=" + p.sessionHome(),
 		"-p", "127.0.0.1::" + dockerAgentPort,
-	}
-	// Scope the container to this daemon's AF home for the orphan sweeper (#2194).
-	// Omitted when the home is unknown, so it is simply never sweep-tracked.
-	if p.homeID != "" {
-		args = append(args, "--label", dockerHomeLabel+"="+p.homeID)
 	}
 	for _, name := range p.containerEnvironmentNames() {
 		// Docker looks the value up in the CLI process's filtered environment;
@@ -652,6 +646,20 @@ func (p *dockerProvisioner) runContainer() error {
 	// credential mounts, so an operator's own run_args still come last.
 	args = append(args, p.accountMount...)
 	args = append(args, p.runArgs...)
+	// The ownership labels go AFTER run_args for the same reason the env pins
+	// do: Docker gives the LAST --label for a key precedence, and run_args is
+	// repository-controlled. A repo `--label af.session=`/`af.home=` entry
+	// earlier in argv would otherwise relabel the container so the orphan
+	// sweeps' label filters could not see it — invisible to `docker ps` while
+	// still binding a staging dir whose recorded markers pass the identity
+	// check (Codex on #7616). Emitting them last makes af's claim win.
+	// Scope the container to this daemon's AF home for the orphan sweeper
+	// (#2194). Omitted when the home is unknown, so it is simply never
+	// sweep-tracked.
+	args = append(args, "--label", dockerSessionLabel+"="+Slugify(p.spec.Title))
+	if p.homeID != "" {
+		args = append(args, "--label", dockerHomeLabel+"="+p.homeID)
+	}
 	// The credential-mount env pins go after run_args for the same reason the
 	// account env does: Docker gives the LAST -e for a name precedence, so a
 	// `-e NAME=` here blanks the name whatever set it earlier — the image's own
