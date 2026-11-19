@@ -756,6 +756,26 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"systemctl set-environment FOO=1 --no-block", true},
 		{"systemctl --user import-environment FOO BAR", false},
 		{"systemctl -H host import-environment FOO", false},
+		// An operand option can swallow the writer word ITSELF: the
+		// --property operand `set-environment` is not the subcommand —
+		// the real subcommand `import-environment` then carries no name
+		// list, a bulk import that passed validation because its own
+		// operand word supplied the writer (Codex P1).
+		{"systemctl --user --property set-environment import-environment", true},
+		{"systemctl --property set-environment import-environment", true},
+		{"systemctl --property=set-environment import-environment", true},
+		{"systemctl -p set-environment import-environment", true},
+		// Once the operand is consumed the writer parses correctly — a
+		// named import behind it admits the same as a bare one.
+		{"systemctl -p set-environment import-environment FOO", false},
+		{"systemctl --property set-environment import-environment FOO", false},
+		{"systemctl -p set-environment status sshd", false},
+		// An option spelling the walk can't classify makes the rest of
+		// the line dark: a writer word hiding there could be an operand
+		// or a real bulk write, so it refuses; no writer in the dark
+		// region means an ordinary command line.
+		{"systemctl --frobnicate set-environment FOO", true},
+		{"systemctl --frobnicate status sshd", false},
 		{"dbus-update-activation-environment CODEX_HOME=/o", true},
 		{"dbus-update-activation-environment --systemd CODEX_HOME", true},
 		{"dbus-update-activation-environment DISPLAY WAYLAND_DISPLAY", false},

@@ -323,11 +323,17 @@ func unwrapScript(words []*syntax.Word, names map[string]struct{}, memo operandT
 // into a manager another account's `systemd-run codex` later inherits,
 // and an option word like `-H` consumes the following word as its
 // operand, so `systemctl -H host import-environment` and
-// `systemctl import-environment -H host` carry no name list either
-// (Codex P1s on this head). Any other systemctl command line gets the
-// ordinary argv scan.
+// `systemctl import-environment -H host` carry no name list either — and
+// an operand option can swallow the writer word itself, so
+// `systemctl --property set-environment import-environment` reads as a
+// bulk import the name list can't see (Codex P1s on this head). Any
+// other systemctl command line gets the ordinary argv scan.
 func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if writer := systemctlEnvironmentWriterIndex(words); writer >= 0 {
+	writer, unprovable := systemctlEnvironmentWriterIndex(words)
+	if unprovable {
+		return nil, true
+	}
+	if writer >= 0 {
 		if !allLiteralNames(words[writer+1:]) ||
 			unwrapEnvInjectionLauncher(words, names, false, false) {
 			return nil, true
@@ -471,20 +477,101 @@ func literalWordPresent(words []*syntax.Word, want string) bool {
 	return false
 }
 
-// systemctlEnvironmentWriterIndex returns the index of the argv's first
-// manager-environment write subcommand, or -1.
-func systemctlEnvironmentWriterIndex(words []*syntax.Word) int {
-	for i, word := range words {
-		literal, ok := launcherLiteralWord(word)
+// systemctlOperandOptions consumes a separate-word operand each — the
+// global options (-H/--host, -M/--machine, -p/--property, …) whose
+// operand could otherwise be mistaken for the writer subcommand itself:
+// `systemctl --property set-environment import-environment` is a BULK
+// import, not a named write (Codex P1 on this head).
+var systemctlOperandOptions = map[string]bool{
+	"-H": true, "--host": true, "-M": true, "--machine": true,
+	"-t": true, "--type": true, "-p": true, "--property": true,
+	"-s": true, "--signal": true, "-n": true, "--lines": true,
+	"-o": true, "--output": true, "--state": true, "--job-mode": true,
+	"--kill-whom": true, "--kill-value": true, "--message": true,
+	"--root": true, "--image": true, "--image-policy": true,
+	"--timestamp": true, "--preset-mode": true, "--json": true,
+	"--boot-loader-entry": true, "--boot-menu-entry": true,
+	"--boot-loader-menu": true,
+}
+
+// systemctlFlags — the no-operand option words provably complete on their
+// own. Anything not here, not an operand option and not `=`-joined ends
+// the provable option region.
+var systemctlFlags = map[string]bool{
+	"--user": true, "--system": true, "--global": true,
+	"--no-pager": true, "--no-legend": true, "--no-ask-password": true,
+	"--no-wall": true, "--no-reload": true, "--dry-run": true,
+	"-q": true, "--quiet": true, "--plain": true, "-f": true,
+	"--force": true, "-i": true, "--ignore-inhibitors": true,
+	"--runtime": true, "--now": true, "--wait": true, "--no-block": true,
+	"-r": true, "--recursive": true, "--reverse": true,
+	"--after": true, "--before": true, "--full": true,
+	"-a": true, "--all": true, "--failed": true, "--value": true,
+	"--show-transaction": true, "--defaults": true, "--marked": true,
+	"-h": true, "--help": true, "-V": true, "--version": true,
+	"--firmware-setup": true, "--boot-menu": true, "--read-only": true,
+}
+
+func isSystemctlEnvironmentWriter(literal string) bool {
+	switch literal {
+	case "set-environment", "import-environment", "unset-environment":
+		return true
+	}
+	return false
+}
+
+// systemctlEnvironmentWriterIndex locates the manager-environment write
+// subcommand the provable way: `=`-joined operands and known no-operand
+// flags are complete words, an operand option consumes the next word,
+// `--` ends the option region, and the first non-dash literal is the
+// subcommand. It returns the writer's index, (-1, false) when the
+// subcommand is provably not an env write, and (-1, true) when parsing
+// can't locate the subcommand with certainty AND a writer literal sits
+// somewhere in the unparseable remainder — the swallowed word could be
+// the writer itself, so a write that can't be verified refuses.
+func systemctlEnvironmentWriterIndex(words []*syntax.Word) (int, bool) {
+	for i := 0; i < len(words); i++ {
+		literal, ok := launcherLiteralWord(words[i])
 		if !ok {
-			continue
+			return writerInDarkRegion(words[i+1:])
 		}
-		switch literal {
-		case "set-environment", "import-environment", "unset-environment":
-			return i
+		if literal == "--" {
+			i++
+			if i < len(words) {
+				if l, ok2 := launcherLiteralWord(words[i]); ok2 && isSystemctlEnvironmentWriter(l) {
+					return i, false
+				}
+			}
+			return -1, false
+		}
+		if strings.HasPrefix(literal, "-") {
+			if strings.Contains(literal, "=") || systemctlFlags[literal] {
+				continue
+			}
+			if systemctlOperandOptions[literal] {
+				i++ // the operand — never the subcommand
+				continue
+			}
+			return writerInDarkRegion(words[i+1:])
+		}
+		if isSystemctlEnvironmentWriter(literal) {
+			return i, false
+		}
+		return -1, false
+	}
+	return -1, false
+}
+
+// writerInDarkRegion reports whether a writer subcommand literal sits in
+// a region the option walk couldn't parse — an option operand in disguise
+// or a subcommand position it can't pin down.
+func writerInDarkRegion(words []*syntax.Word) (int, bool) {
+	for _, word := range words {
+		if l, ok := launcherLiteralWord(word); ok && isSystemctlEnvironmentWriter(l) {
+			return -1, true
 		}
 	}
-	return -1
+	return -1, false
 }
 
 // allLiteralNames reports whether words is a non-empty run of literal

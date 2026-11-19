@@ -287,7 +287,12 @@ will not reach the child's environment.
   `systemctl --user import-environment`,
   `systemctl -H host import-environment`,
   `systemctl import-environment -H host` and
-  `dbus-update-activation-environment --all` refuse while
+  `dbus-update-activation-environment --all` refuse. An operand option
+  can swallow the writer word itself — `systemctl --property
+  set-environment import-environment` is a bulk import whose own operand
+  spelled `set-environment` — and an option spelling the gate can't
+  classify makes the rest of the line unverifiable, so a writer word
+  there refuses too (`systemctl --frobnicate set-environment FOO`), while
   `systemctl --user import-environment FOO` and
   `dbus-update-activation-environment DISPLAY` run (dbus's own
   no-operand flags `--systemd`/`--verbose` are provable, so
