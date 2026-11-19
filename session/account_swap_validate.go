@@ -453,11 +453,16 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	} else if live := i.pendingAccountSwap; blindResumed && live != nil && live.To == name && live.CarriedConversationID == "" &&
 		live.ConversationID == conversation.ID {
 		// The record keeps the committed id the re-launch resumes and says why
-		// the launch resumes it without a listing's proof: the API answer and
-		// the notice report CarryFallback (#7596). The mission is not refreshed:
-		// it was rendered for the conversation this resume keeps.
-		live.CarryFallback = blindCommittedResumeReason
+		// the launch resumes it without a listing's proof — on its own
+		// channel, never CarryFallback, whose readers render a carry failure
+		// as a fresh conversation where a resume keeps the earlier turns:
+		// the API answer and the notice report ResumeUnverifiedReason
+		// (#7596, #7602 review), and a manual swap's ledger entry hears it too.
+		// The mission is not refreshed: it was rendered for the conversation
+		// this resume keeps.
+		live.ResumeUnverifiedReason = blindCommittedResumeReason
 		i.pendingAccountSwapUnwritten = true
+		i.stampHandoffConversationLocked()
 		i.touchLocked()
 	}
 	i.mu.Unlock()

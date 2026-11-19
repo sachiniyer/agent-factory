@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,42 +261,66 @@ func TestCommittedSwapRelaunchResumesBesideAnUnattributableConversation(t *testi
 }
 
 // #7596: a committed relaunch whose transcript-store verdict is blind never
-// plans a command that cannot boot on the id the record says the first launch
-// filed. A second --session-id on a filed id never boots; --resume exits only
-// where nothing was filed. A store af can name but not list is judged again —
-// a still-wedged listing's latched flight answers the retry at once, inside
-// the bound the first judge already spent — and where the listing stays blind
-// the record's say-so decides: ReplacementPanesStarted means the first launch
-// ran on --session-id and filed the id, so --resume is the blind answer that
-// boots, and the record and the notice name it.
+// plans a command that cannot boot on the id the record proves the first
+// launch filed. A second --session-id on a filed id never boots; --resume
+// exits only where nothing was filed. A store af can name but not list is
+// judged again — inside what is left of the first look's bound — and where
+// the listing stays blind the record's say-so decides: only a record that
+// PROVES Claude took an entry on the id — the launched panes accepted the
+// swap's prompt, MissionDeliveryStatus == PromptDelivered — resumes it
+// (#7602 review). Panes that started but were never provably delivered to —
+// Claude died before its first entry, the usual reason a committed re-launch
+// happens — filed nothing, so the blind answer is the as-before --session-id.
 func TestCommittedSwapRelaunchResumesBlindOnTheRecordsSaySo(t *testing.T) {
-	for _, filed := range []bool{true, false} {
-		name := "transcript filed"
-		if !filed {
-			name = "transcript absent"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		file      bool
+		delivered bool
+		resume    bool
+	}{
+		{"transcript filed, prompt delivered", true, true, true},
+		{"transcript filed, prompt undelivered", true, false, false},
+		{"transcript absent, prompt delivered", false, true, true},
+		{"transcript absent", false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
-			if filed {
+			if tc.file {
 				fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Minute))
 			}
 			inst.SetAccountSwapReplacementPanesStartedForTest(true)
+			if tc.delivered {
+				inst.pendingAccountSwap.MissionDeliveryStatus = PromptDelivered
+			}
+			fallback := inst.ToInstanceData().PendingAccountSwap.CarryFallback
 			wedgeStoreListing(t, target)
 
 			plan := withinBound(t, func() *accountSwapLaunchPlan { return relaunchPlan(t, inst) })
+			pending := inst.ToInstanceData().PendingAccountSwap
+			require.Equal(t, committed, pending.ConversationID,
+				"the record keeps the committed conversation the re-launch names")
+			require.Equal(t, fallback, pending.CarryFallback,
+				"a blind resume is no carry failure: the record's carry account is untouched")
+			if !tc.resume {
+				require.NotRegexp(t, resumeArg, plan.program,
+					"a record that proves no filing keeps the as-before start: %s", plan.program)
+				match := sessionIDArg.FindStringSubmatch(plan.program)
+				require.NotNil(t, match, "as the first launch did: %s", plan.program)
+				require.Equal(t, committed, match[1])
+				require.Empty(t, pending.ResumeUnverifiedReason, "a start on the committed id is no blind resume")
+				require.Empty(t, inst.PendingAccountSwapConversation().ResumeUnverified)
+				return
+			}
 			require.NotRegexp(t, sessionIDArg, plan.program,
-				"--session-id never boots on the id the record says the first launch filed: %s", plan.program)
+				"--session-id never boots on the id the record proves the first launch filed: %s", plan.program)
 			match := resumeArg.FindStringSubmatch(plan.program)
 			require.NotNil(t, match, "the record's say-so resumes the committed conversation: %s", plan.program)
 			require.Equal(t, committed, match[1])
 			require.Equal(t, committed, plan.conversation.ID)
-			pending := inst.ToInstanceData().PendingAccountSwap
-			require.Equal(t, committed, pending.ConversationID,
-				"the record keeps the committed conversation the re-launch resumes")
-			require.Equal(t, blindCommittedResumeReason, pending.CarryFallback,
+			require.Equal(t, blindCommittedResumeReason, pending.ResumeUnverifiedReason,
 				"the record says why the re-launch resumed without a listing's proof")
-			require.Equal(t, blindCommittedResumeReason, inst.PendingAccountSwapConversation().CarryFailure,
-				"the swap's answer and the notice report it")
+			require.Equal(t, blindCommittedResumeReason, inst.PendingAccountSwapConversation().ResumeUnverified,
+				"the swap's answer and the notice report it on its own channel")
 		})
 	}
 }
@@ -328,6 +353,7 @@ func TestCommittedSwapRelaunchJudgesAgainAfterTheListingAnswers(t *testing.T) {
 	require.Equal(t, committed, pending.ConversationID)
 	require.Equal(t, fallback, pending.CarryFallback,
 		"a listing that answered leaves the record's account of it alone: the resume is proved")
+	require.Empty(t, pending.ResumeUnverifiedReason, "a proved resume carries no blind-resume reason")
 }
 
 // A record that shows the first launch never ran describes no filing (#7596):
@@ -345,8 +371,7 @@ func TestCommittedSwapRelaunchStartsOnItsIDWhenNoFirstLaunchRan(t *testing.T) {
 	match := sessionIDArg.FindStringSubmatch(plan.program)
 	require.NotNil(t, match, "as the first launch did: %s", plan.program)
 	require.Equal(t, committed, match[1])
-	require.NotEqual(t, blindCommittedResumeReason,
-		inst.ToInstanceData().PendingAccountSwap.CarryFallback,
+	require.Empty(t, inst.ToInstanceData().PendingAccountSwap.ResumeUnverifiedReason,
 		"a start on the committed id is no blind resume")
 }
 
@@ -358,6 +383,9 @@ func TestCommittedSwapRelaunchStartsOnItsIDWhenNoFirstLaunchRan(t *testing.T) {
 func TestCommittedSwapRelaunchStartsOnAnIDRemintedAfterTheLaunch(t *testing.T) {
 	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
 	inst.SetAccountSwapReplacementPanesStartedForTest(true)
+	// The record's delivery verdict belongs to the launched id too — only a
+	// proof that binds BOTH may resume, so the reminted id still starts fresh.
+	inst.pendingAccountSwap.MissionDeliveryStatus = PromptDelivered
 	fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Hour))
 	fileClaudeTranscript(t, target, worktree, newerConversationID, time.Now().Add(-time.Minute))
 
@@ -377,8 +405,7 @@ func TestCommittedSwapRelaunchStartsOnAnIDRemintedAfterTheLaunch(t *testing.T) {
 	match := sessionIDArg.FindStringSubmatch(plan.program)
 	require.NotNil(t, match, "as a first launch of it does: %s", plan.program)
 	require.Equal(t, reminted[1], match[1])
-	require.NotEqual(t, blindCommittedResumeReason,
-		inst.ToInstanceData().PendingAccountSwap.CarryFallback,
+	require.Empty(t, inst.ToInstanceData().PendingAccountSwap.ResumeUnverifiedReason,
 		"a start on a never-launched id is no blind resume")
 }
 
@@ -400,4 +427,40 @@ func TestCommittedSwapRelaunchStartsOnItsIDWhenTheStoreCannotBeNamed(t *testing.
 	match := sessionIDArg.FindStringSubmatch(launch)
 	require.NotNil(t, match, "as the first launch did: %s", launch)
 	require.Equal(t, committed, match[1])
+}
+
+// #7602 review: the retried listing has no bound of its own — it gets what is
+// left of the first look's deadline, so a store that errs only after most of
+// the bound cannot make the relaunch's two judges cost two bounds. A listing
+// that refused after three quarters of the bound leaves the retry a quarter;
+// the pair ends inside the one bound a single look was allowed, and the blind
+// verdict is the answer the timed-out listing would itself have made.
+func TestCommittedSwapRelaunchRejudgesInsideTheFirstLooksBound(t *testing.T) {
+	inst, target, _, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	inst.SetAccountSwapReplacementPanesStartedForTest(true)
+	inst.pendingAccountSwap.MissionDeliveryStatus = PromptDelivered
+	const bound = 800 * time.Millisecond
+	t.Cleanup(fsprobe.SetProbeTimeoutForTest(bound))
+	var calls atomic.Int32
+	t.Cleanup(fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
+		if strings.HasPrefix(dir, target) {
+			calls.Add(1)
+			time.Sleep(bound - 150*time.Millisecond) // errs only after most of the bound
+			return nil, os.ErrPermission
+		}
+		return os.ReadDir(dir)
+	}))
+
+	started := time.Now()
+	plan := relaunchPlan(t, inst)
+	elapsed := time.Since(started)
+	match := resumeArg.FindStringSubmatch(plan.program)
+	require.NotNil(t, match, "the record's proof resumes the committed conversation: %s", plan.program)
+	require.Equal(t, committed, match[1])
+	require.GreaterOrEqual(t, calls.Load(), int32(2), "the retried listing ran")
+	require.Less(t, elapsed, bound*5/4,
+		"the two judges shared the first look's bound: %v for a %v bound", elapsed, bound)
+	require.Equal(t, blindCommittedResumeReason,
+		inst.ToInstanceData().PendingAccountSwap.ResumeUnverifiedReason,
+		"the retry cut at the shared deadline is a blind verdict")
 }

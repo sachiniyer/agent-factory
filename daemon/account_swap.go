@@ -619,12 +619,21 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string, conversation sessio
 			"The replacement was explicitly allowed by limit_account_candidates and had no current limit observation. "+
 			"Continue the same task under the new identity.",
 		accountSwapIdentity(swap.agent, swap.from), accountSwapIdentity(swap.accountNamespace(), swap.to))
+	unverified := strings.TrimSpace(conversation.ResumeUnverified)
 	switch failure := strings.TrimSpace(conversation.CarryFailure); {
 	case conversation.Carried:
 		notice += " Your conversation was carried over to the new identity, so everything above is still yours to use."
-	case failure != "":
+	case failure != "" && unverified == "":
 		notice += fmt.Sprintf(" af tried to carry the previous conversation over, but %s, so this is a fresh conversation: "+
 			"the earlier messages are not available to you — only the working tree and its git history are.", failure)
+	case failure != "":
+		// The carry genuinely failed, but the replacement is resuming the
+		// conversation it committed — not a fresh one (#7602 review).
+		notice += fmt.Sprintf(" af tried to carry the previous conversation over, but %s.", failure)
+	}
+	if unverified != "" {
+		notice += fmt.Sprintf(" af resumed the conversation it had committed for this session, "+
+			"but could not verify that first, because %s.", unverified)
 	}
 	if strings.TrimSpace(prompt) == "" {
 		return notice + "\n\ncontinue"

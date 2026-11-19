@@ -35,6 +35,14 @@ func TestPendingSwapRetirementStampsTheLedgerConversation(t *testing.T) {
 			want: HandoffConversation{CarryFailure: "the outgoing account's transcript could not be copied"},
 		},
 		{
+			name: "resumed unverified keeps its own channel",
+			pending: &AccountSwapData{
+				Manual: true, From: "personal", To: "work",
+				ResumeUnverifiedReason: "its transcript store could not be listed",
+			},
+			want: HandoffConversation{ResumeUnverified: "its transcript store could not be listed"},
+		},
+		{
 			name: "cross-agent records no carry",
 			pending: &AccountSwapData{
 				Manual: true, From: "personal", To: "work",
