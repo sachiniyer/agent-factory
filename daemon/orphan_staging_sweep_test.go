@@ -69,6 +69,11 @@ func TestDeferredSweep_StagingDirsRunsInSamePass(t *testing.T) {
 	stubConfigDirForReap(t, "/test/home")
 	stubSweepOrphanContainers(t)
 	rec := stubSweepOrphanedStagingDirs(t)
+	// The deferred pass also runs the af-setup payload sweep — stub it so the
+	// test never touches a real <home>/af-setup on the box it runs on.
+	prevPayload := sweepStaleSetupPayloads
+	sweepStaleSetupPayloads = func(map[string]bool) {}
+	t.Cleanup(func() { sweepStaleSetupPayloads = prevPayload })
 
 	m := newBareManagerForSweep()
 	m.deferredOrphanSweepArmed = true
