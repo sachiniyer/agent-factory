@@ -447,6 +447,11 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		// #7216 review R4).
 		replaced, live.ConversationID = live.ConversationID, conversation.ID
 		live.CarryFallback = staleCommittedConversationReason
+		// A blind-resume reason belongs to the id being replaced: the new
+		// committed conversation must not carry it into the notice or the
+		// ledger, where it would read "resumed" about a fresh start (#7602
+		// review).
+		live.ResumeUnverifiedReason = ""
 		i.pendingAccountSwapUnwritten = true
 		refreshMission, missionFrom = live.Manual, live.From
 		i.touchLocked()

@@ -916,6 +916,12 @@ func (i *Instance) SetAccountSwapReplacementPanesStartedForTest(started bool) {
 	}
 	if pending.ReplacementPanesStarted != started || pending.LaunchedConversationID != launched {
 		pending.ReplacementPanesStarted = started
+		if pending.LaunchedConversationID != launched {
+			// The mark retires the delivery proof the replaced id carried
+			// (#7602 review); the seam models the same write.
+			pending.MissionDeliveryStatus = ""
+			pending.MissionDeliveryAttemptAt = time.Time{}
+		}
 		pending.LaunchedConversationID = launched
 		i.touchLocked()
 	}

@@ -750,6 +750,9 @@ func (i *Instance) demotePendingAccountSwapCarry(account, reason string) error {
 	pending.CarrySourceAccount = ""
 	pending.CarriedLaunchStarted = false
 	pending.CarryFallback = reason
+	// A blind-resume reason belongs to the outcome being demoted: the new
+	// committed conversation must not inherit it (#7602 review).
+	pending.ResumeUnverifiedReason = ""
 	pending.ConversationID = ""
 	if plan.conversation.HasID() {
 		pending.ConversationID = plan.conversation.ID

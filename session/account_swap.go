@@ -395,6 +395,13 @@ func (i *Instance) markAccountSwapReplacementPanesStarted() error {
 	}
 	if pending.LaunchedConversationID != launched {
 		pending.LaunchedConversationID = launched
+		// The delivery verdict bound the panes that launched on the id being
+		// replaced: a re-spawn on another id — a committed id reminted after
+		// the launch — has not been delivered to, so the old proof retires
+		// with the id it proved and a blind re-launch cannot --resume the
+		// new, never-entered one (#7602 review).
+		pending.MissionDeliveryStatus = ""
+		pending.MissionDeliveryAttemptAt = time.Time{}
 		i.touchLocked()
 	}
 	if !pending.ReplacementPanesStarted {

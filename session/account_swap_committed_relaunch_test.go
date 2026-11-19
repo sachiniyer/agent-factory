@@ -409,6 +409,63 @@ func TestCommittedSwapRelaunchStartsOnAnIDRemintedAfterTheLaunch(t *testing.T) {
 		"a start on a never-launched id is no blind resume")
 }
 
+// The delivered verdict bound the panes that launched on the id the proof
+// names — a re-spawn on a reminted id must retire it (#7602 review): the
+// respawn persists the new launched id before the new notice lands, so a
+// crash in that window would otherwise leave LaunchedConversationID bound to
+// the new id beside a PromptDelivered the old one earned, and a blind retry
+// would --resume a never-entered id.
+func TestCommittedSwapRelaunchRetiresDeliveryProofOnARemintedRespawn(t *testing.T) {
+	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	inst.SetAccountSwapReplacementPanesStartedForTest(true)
+	inst.pendingAccountSwap.MissionDeliveryStatus = PromptDelivered
+	inst.pendingAccountSwap.MissionDeliveryAttemptAt = time.Now()
+	fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Hour))
+	fileClaudeTranscript(t, target, worktree, newerConversationID, time.Now().Add(-time.Minute))
+
+	first := relaunchPlan(t, inst)
+	reminted := sessionIDArg.FindStringSubmatch(first.program)
+	require.NotNil(t, reminted, "a stale conversation remints: %s", first.program)
+	require.NotEqual(t, committed, reminted[1])
+
+	require.NoError(t, inst.markAccountSwapReplacementPanesStarted())
+	pending := inst.ToInstanceData().PendingAccountSwap
+	require.Equal(t, reminted[1], pending.LaunchedConversationID)
+	require.Empty(t, pending.MissionDeliveryStatus,
+		"the old id's delivery verdict retires with it")
+	require.True(t, pending.MissionDeliveryAttemptAt.IsZero())
+
+	wedgeStoreListing(t, target)
+	plan := withinBound(t, func() *accountSwapLaunchPlan { return relaunchPlan(t, inst) })
+	require.NotRegexp(t, resumeArg, plan.program,
+		"nothing of the reminted id was entered, let alone filed: %s", plan.program)
+	match := sessionIDArg.FindStringSubmatch(plan.program)
+	require.NotNil(t, match, "as a first launch of it does: %s", plan.program)
+	require.Equal(t, reminted[1], match[1])
+}
+
+// A blind-resume reason describes the id it was recorded for: when a later
+// re-plan remints the committed conversation, the reason must not ride into
+// the fresh start's record — the notice and the manual ledger would read
+// "resumed" about a conversation that just began (#7602 review).
+func TestCommittedSwapRelaunchClearsTheBlindResumeReasonOnARemint(t *testing.T) {
+	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	inst.SetAccountSwapReplacementPanesStartedForTest(true)
+	inst.pendingAccountSwap.ResumeUnverifiedReason = blindCommittedResumeReason
+	fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Hour))
+	fileClaudeTranscript(t, target, worktree, newerConversationID, time.Now().Add(-time.Minute))
+
+	plan := relaunchPlan(t, inst)
+	reminted := sessionIDArg.FindStringSubmatch(plan.program)
+	require.NotNil(t, reminted, "a stale conversation remints: %s", plan.program)
+	pending := inst.ToInstanceData().PendingAccountSwap
+	require.Equal(t, reminted[1], pending.ConversationID)
+	require.Equal(t, staleCommittedConversationReason, pending.CarryFallback,
+		"the record says why the reminted replacement starts fresh")
+	require.Empty(t, pending.ResumeUnverifiedReason,
+		"a fresh start must not keep an earlier blind resume's reason")
+}
+
 // A store af cannot even name says nothing about the id: the re-launch starts
 // on it, as the first launch did (#7596). The committed record's target is
 // registered while the record lives, so the seam is reached the way a
