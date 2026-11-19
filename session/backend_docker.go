@@ -470,9 +470,8 @@ type dockerProvisioner struct {
 	stagedAfPath     string
 	stagedPolicyPath string
 	payloadViaBinds  bool
-	// payloadDelivered marks a cp delivery already completed inside the
-	// run-retry, so the later deliverPayload step does not re-copy and
-	// re-verify (#7577 item 3).
+	// payloadDelivered: a cp delivery already completed inside the run-retry,
+	// so the later deliverPayload step does not re-copy and re-verify (#7577).
 	payloadDelivered bool
 }
 
@@ -889,9 +888,8 @@ func (p *dockerProvisioner) execSh(timeout time.Duration, script string) ([]byte
 
 // execSessionSh runs a script as the session user (no --user when the image
 // default stands, so the user's own env survives). PATH is pinned the same
-// way: provisioning scripts run as a session user who IS root on every
-// documented image, so the run_args `-e PATH` vector the root scripts refuse
-// would otherwise pick their programs (#7577 item 3).
+// way: the session user IS root on every documented image, so the run_args
+// `-e PATH` vector the root scripts refuse would pick its programs (#7577).
 func (p *dockerProvisioner) execSessionSh(timeout time.Duration, script string) ([]byte, error) {
 	args := []string{"exec"}
 	args = append(args, p.sessionExecOptions()...)
