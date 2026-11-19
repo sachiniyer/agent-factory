@@ -466,7 +466,7 @@ func TestDockerAccount_AgentServerRunsAsTheAccountOwner(t *testing.T) {
 		}
 		switch args[0] {
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "cp", "rm":
 			return nil, nil
 		case "port":
@@ -482,7 +482,7 @@ func TestDockerAccount_AgentServerRunsAsTheAccountOwner(t *testing.T) {
 				return nil, nil
 			}
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	}))
 
@@ -550,7 +550,7 @@ func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
 		}
 		switch args[0] {
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "cp", "rm":
 			return nil, nil
 		case "exec":
@@ -568,7 +568,7 @@ func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
 				return nil, nil
 			}
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	}))
 
@@ -638,7 +638,7 @@ func TestDockerAccount_ReadBannerRunsAsTheImageDefaultUser(t *testing.T) {
 		case "info":
 			return []byte("non-account-engine\n"), nil
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "cp", "rm":
 			return nil, nil
 		case "port":
@@ -658,7 +658,7 @@ func TestDockerAccount_ReadBannerRunsAsTheImageDefaultUser(t *testing.T) {
 			}
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	}))
 

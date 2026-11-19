@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"path"
 	"strings"
 	"testing"
@@ -778,7 +777,7 @@ func TestPrepareAccountUser_NoOpForNonAccount(t *testing.T) {
 	var calls [][]string
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	}))
 	p := &dockerProvisioner{
 		spec:        ProvisionSpec{Title: "non-account"},

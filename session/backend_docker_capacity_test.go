@@ -164,7 +164,21 @@ func fakeDockerCapacityProbe(t *testing.T, infoPayload []byte,
 		if args[0] == "exec" && containsArg(args, "id -u") {
 			return []byte("0:0\n"), nil
 		}
-		return dispatch(args)
+		out, err := dispatch(args)
+		// The delivery guard's own calls default to the benign answers when a
+		// case's dispatch leaves them unhandled: no configured mounts, the
+		// destination probe resolving plainly, cp succeeding.
+		if out == nil && err == nil && len(args) > 0 {
+			switch args[0] {
+			case "inspect":
+				return []byte(`{"Mounts":[],"HostConfig":{"Tmpfs":{}}}` + "\n"), nil
+			case "run":
+				if containsArg(args, "--rm") {
+					return dockerProbeRunAnswer(args), nil
+				}
+			}
+		}
+		return out, err
 	}))
 	return calls
 }
@@ -227,8 +241,21 @@ func TestProvisionFailure_JoinsDataRootFullEvidenceEveryStep(t *testing.T) {
 						// lets the targeted step be the one that fails.
 						return probeAnswer(args), nil
 					}
+					if args[0] == "inspect" {
+						// The cp fallback's write-target guard reads the
+						// daemon-configured mounts before cp runs (#7577
+						// item 3); an empty list lets the targeted step be
+						// the one that fails.
+						return []byte(`{"Mounts":[],"HostConfig":{"Tmpfs":{}}}` + "\n"), nil
+					}
+					if args[0] == "exec" && containsArg(args, "__docker-root-verify") {
+						// The copied binary's root-exec verification is an
+						// ordinary step — an OK verdict keeps the flow on
+						// the targeted step.
+						return []byte("OK\n"), nil
+					}
 					if args[0] == "run" {
-						return []byte(dockerCreatedID + "\n"), nil
+						return dockerRunOrProbeAnswer(args)
 					}
 					if args[0] == "exec" && containsArg(args, dockerBannerPath) {
 						return []byte(`{"addr":":8000","token":"t","title":"x"}`), nil
@@ -317,7 +344,7 @@ func TestProvisionFailure_RootlessEngineReadsBavail(t *testing.T) {
 		if args[0] == "run" {
 			return []byte("Error response from daemon: no space left on device\n"), fmt.Errorf("exit status 125")
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	}
 
 	t.Run("rootless engine is probed with the unprivileged answer", func(t *testing.T) {
@@ -377,7 +404,7 @@ func TestProvisionFailure_ProbesFullnessBeforeReap(t *testing.T) {
 			events = append(events, "docker:"+args[0])
 			switch {
 			case args[0] == "run":
-				return []byte(dockerCreatedID + "\n"), nil
+				return dockerRunOrProbeAnswer(args)
 			case args[0] == "exec" && containsArg(args, "git clone"):
 				return []byte("fatal: no space left on device\n"), fmt.Errorf("exit status 128")
 			case args[0] == "rm":
@@ -429,7 +456,7 @@ func TestProvisionFailure_UnprivilegedWriterReadsBavail(t *testing.T) {
 			return []byte("error: could not write config file: No space left on device\n"), fmt.Errorf("exit status 3")
 		}
 		if args[0] == "run" {
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		}
 		return nil, nil
 	}
@@ -816,7 +843,7 @@ func TestProvisionFailure_LocalStepFailureGetsNoEvidence(t *testing.T) {
 		"port output unparsable": func(args []string) ([]byte, error) {
 			switch {
 			case args[0] == "run":
-				return []byte(dockerCreatedID + "\n"), nil
+				return dockerRunOrProbeAnswer(args)
 			case args[0] == "exec" && containsArg(args, dockerBannerPath):
 				return []byte(`{"addr":":8000","token":"t","title":"x"}`), nil
 			case args[0] == "port":
@@ -827,7 +854,7 @@ func TestProvisionFailure_LocalStepFailureGetsNoEvidence(t *testing.T) {
 		"port call fails": func(args []string) ([]byte, error) {
 			switch {
 			case args[0] == "run":
-				return []byte(dockerCreatedID + "\n"), nil
+				return dockerRunOrProbeAnswer(args)
 			case args[0] == "exec" && containsArg(args, dockerBannerPath):
 				return []byte(`{"addr":":8000","token":"t","title":"x"}`), nil
 			case args[0] == "port":
@@ -923,11 +950,11 @@ func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 			func(args []string) ([]byte, error) {
 				switch {
 				case args[0] == "run":
-					return []byte(dockerCreatedID + "\n"), nil
+					return dockerRunOrProbeAnswer(args)
 				case args[0] == "inspect":
 					return []byte(`{"Config":{"User":"1000"},"HostConfig":{"UsernsMode":""},` +
 						`"Mounts":[{"Type":"bind","Source":"/var/lib/docker/wt","Destination":"/workspace"}]}`), nil
-				case args[0] == "exec":
+				case args[0] == "exec" && containsArg(args, dockerBannerPath):
 					return nil, fmt.Errorf("exit status 1")
 				}
 				return nil, nil
@@ -951,7 +978,7 @@ func TestProvisionFailure_BannerTimeoutWriterClass(t *testing.T) {
 			func(args []string) ([]byte, error) {
 				switch {
 				case args[0] == "run":
-					return []byte(dockerCreatedID + "\n"), nil
+					return dockerRunOrProbeAnswer(args)
 				case args[0] == "inspect":
 					return []byte(`{"Config":{"User":"1000"},"HostConfig":{"UsernsMode":""},` +
 						`"Mounts":[{"Type":"bind","Source":"/var/lib/docker/wt","Destination":"/workspace"}]}`), nil
@@ -991,7 +1018,7 @@ func TestAccountRuntimeVerify_ExecFailureCarriesWriteClass(t *testing.T) {
 		case args[0] == "exec":
 			return nil, fmt.Errorf("exit status 1")
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})()
 	p := &dockerProvisioner{
 		spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
@@ -1030,13 +1057,13 @@ func TestAccountRuntimeVerify_ExecFailureNeverBorrowsBavail(t *testing.T) {
 	fakeDockerCapacityProbe(t, info, func(args []string) ([]byte, error) {
 		switch args[0] {
 		case "run":
-			return []byte("cid\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "inspect":
 			return []byte(cleanInspect(dir)), nil
 		case "exec": // the image has no cat — the exec bookkeeping fails
 			return nil, fmt.Errorf("exit status 127")
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})
 	// Bavail==0, Bfree>0 — the reserved-block window, reachable only for an
 	// unprivileged writer. A privileged (daemon) write sees the free blocks.
@@ -1068,7 +1095,7 @@ func TestPrepareAccountUser_OwnerReadCarriesDaemonWriteClass(t *testing.T) {
 		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "stat -c %u:%g") {
 			return nil, fmt.Errorf("exit status 127") // the image has no stat
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})()
 	p := &dockerProvisioner{
 		spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
@@ -1091,7 +1118,7 @@ func TestPrepareAccountUser_OwnerParseIsLocal(t *testing.T) {
 		if args[0] == "exec" && strings.Contains(strings.Join(args, " "), "stat -c %u:%g") {
 			return []byte("not-a-uid-gid\n"), nil
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})()
 	p := &dockerProvisioner{
 		spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
@@ -1127,7 +1154,7 @@ func TestAccountOwnerRead_NeverBorrowsBavail(t *testing.T) {
 	fakeDockerCapacityProbe(t, info, func(args []string) ([]byte, error) {
 		switch {
 		case args[0] == "run":
-			return []byte("cid\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case args[0] == "inspect":
 			return []byte(cleanInspect(dir)), nil
 		case args[0] == "exec" && strings.HasSuffix(strings.Join(args, " "), "/proc/self/mountinfo"):
@@ -1135,7 +1162,7 @@ func TestAccountOwnerRead_NeverBorrowsBavail(t *testing.T) {
 		case args[0] == "exec": // no `stat` in the image — the owner read fails
 			return nil, fmt.Errorf("exit status 127")
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})
 	oldPriv, oldUnpriv := statfsFull, statfsFullUnprivileged
 	statfsFull = func(string) (bool, error) { return false, nil }

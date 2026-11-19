@@ -317,7 +317,7 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 		return nil
 	}
 	out, err := p.docker(dockerShortStepTimeout,
-		"exec", p.containerID, dockerContainerShell, "-c", `echo "$(id -u):$(id -g)"`)
+		"exec", p.containerID, dockerContainerShell, "-c", dockerRootScriptPrefix+`echo "$(id -u):$(id -g)"`)
 	if err != nil {
 		// The id probe is a read-only exec — the only data-root writes are
 		// dockerd's privileged exec bookkeeping, never an unprivileged
@@ -385,7 +385,7 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 		{kind: "workspace", real: realWorkspace, chown: fmt.Sprintf("chown -h %s %s", owner, shellQuote(realWorkspace))},
 	}, func(steps []string) error {
 		out, err := p.docker(dockerShortStepTimeout,
-			"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", strings.Join(steps, " && "))
+			"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", dockerRootScriptPrefix+strings.Join(steps, " && "))
 		if err != nil {
 			return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare a writable HOME and workspace for the image's default user %s: %s: %w",
 				owner, strings.TrimSpace(string(out)), err), dockerOpRootExec)
@@ -436,7 +436,7 @@ func unchownableHome(realHome string) error {
 func (p *dockerProvisioner) readMountTable(home, workspace string) (realHome, realWorkspace, mountinfo string, err error) {
 	out, err := p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c",
-		`mkdir -p -- "$1" "$2" && cd -- "$1" && pwd -P && cd -- "$2" && pwd -P && cat /proc/self/mountinfo`,
+		dockerRootScriptPrefix+`mkdir -p -- "$1" "$2" && cd -- "$1" && pwd -P && cd -- "$2" && pwd -P && cat /proc/self/mountinfo`,
 		"sh", home, workspace)
 	if err != nil {
 		return "", "", "", dockerStepErr(fmt.Errorf("backend=docker: cannot read the container mount table, so the session HOME is not chowned (a chown cannot be proven to stay off host mounts): %s: %w", strings.TrimSpace(string(out)), err), dockerOpRootExec)
@@ -455,7 +455,7 @@ func (p *dockerProvisioner) readMountTable(home, workspace string) (realHome, re
 func (p *dockerProvisioner) readMountTableFor(dir string) (realDir, mountinfo string, err error) {
 	out, err := p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c",
-		`mkdir -p -- "$1" && cd -- "$1" && pwd -P && cat /proc/self/mountinfo`,
+		dockerRootScriptPrefix+`mkdir -p -- "$1" && cd -- "$1" && pwd -P && cat /proc/self/mountinfo`,
 		"sh", dir)
 	if err != nil {
 		return "", "", dockerStepErr(fmt.Errorf("backend=docker: cannot read the container mount table, so %s is not chowned (a chown cannot be proven to stay off host mounts): %s: %w", dir, strings.TrimSpace(string(out)), err), dockerOpRootExec)

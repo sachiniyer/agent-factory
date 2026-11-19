@@ -94,7 +94,7 @@ func (f *fakeDockerContextCLI) dial(environ []string) (string, error) {
 
 func (f *fakeDockerContextCLI) exec(_ context.Context, environ []string, args ...string) ([]byte, error) {
 	if len(args) < 4 || args[0] != "context" || args[1] != "inspect" || args[2] != "--format" || args[3] != dockerEndpointFormat {
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	}
 	f.inspects = append(f.inspects, append([]string(nil), args...))
 	refs := args[4:]

@@ -145,7 +145,10 @@ func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 	// "starting" — startAgentServer writes it in the same instant as the spawn,
 	// and the first poll can legitimately outrun it.
 	pollScript := fmt.Sprintf(
-		"cat %s 2>/dev/null; if [ -f %s ]; then kill -0 \"$(cat %s)\" 2>/dev/null && echo %s || echo %s; else echo %s; fi",
+		// PATH pinned like every other af provisioning script — the session
+		// user this exec runs as is root on every documented image (#7577
+		// item 3).
+		dockerRootScriptPrefix+"cat %s 2>/dev/null; if [ -f %s ]; then kill -0 \"$(cat %s)\" 2>/dev/null && echo %s || echo %s; else echo %s; fi",
 		dockerBannerPath, dockerPidPath, dockerPidPath,
 		remoteProcAlive, remoteProcDead, remoteProcStarting)
 	for {

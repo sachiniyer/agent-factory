@@ -203,7 +203,7 @@ func TestWarnBlankedCredentialNames_ReadsTheImageTheContainerRuns(t *testing.T) 
 		case strings.HasPrefix(joined, "image inspect "):
 			return []byte(`["SSL_CERT_FILE=/tag-only.pem"]`), nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	}))
 
@@ -335,7 +335,7 @@ func TestProvision_WarnsBeforeDependentStepFails(t *testing.T) {
 		case len(args) > 0 && args[0] == "info":
 			return []byte("credential-test-engine\n"), nil
 		case len(args) > 0 && args[0] == "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case len(args) > 0 && args[0] == "inspect":
 			return []byte("sha256:resolved\n"), nil
 		case len(args) > 1 && args[0] == "image" && args[1] == "inspect":
@@ -571,7 +571,7 @@ func TestCredentialMountOverriddenWarning_NamesReassertedToo(t *testing.T) {
 		case len(args) > 1 && args[0] == "image" && args[1] == "inspect":
 			return []byte(`["EDITOR=vim","HTTPS_PROXY=http://corp:8080","TZ=UTC"]`), nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	}))
 	buf := captureWarningLog(t)

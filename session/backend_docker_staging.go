@@ -138,11 +138,24 @@ func (p *dockerProvisioner) runPayloadContainer() error {
 	case err != nil:
 		log.WarningLog.Printf("docker runtime: `docker run` refused the staged binds; retrying once with `docker cp` delivery: %v", err)
 		return p.retryRunWithCpDelivery(fmt.Sprintf("`docker run` refused the staged binds: %v", err))
-	case p.payloadViaBinds && !p.payloadDeliveryConfirmed():
-		log.WarningLog.Printf("docker runtime: the staged binds did not deliver af's payload; retrying once with `docker cp` delivery")
-		return p.retryRunWithCpDelivery("the staged binds did not deliver af's payload")
+	case p.payloadViaBinds:
+		// The same exec that confirms the staged files arrived verifies every
+		// root-exec program against the kernel mount table (#7577 item 3): the
+		// visibility proof can false-positive, so an answer the staged binary
+		// never printed takes the one-shot cp retry — but a FAIL verdict is a
+		// real refusal, not a delivery failure, and no cp re-delivers around it.
+		outcome, verr := p.verifyRootExecPrograms()
+		switch {
+		case outcome == dockerRootVerifyRefused:
+			return dockerStepErr(verr, dockerOpLocal)
+		case outcome == dockerRootVerifyUndelivered:
+			log.WarningLog.Printf("docker runtime: the staged binds did not deliver af's payload (%v); retrying once with `docker cp` delivery", verr)
+			return p.retryRunWithCpDelivery("the staged binds did not deliver af's payload")
+		default:
+			return nil
+		}
 	default:
-		return nil
+		return nil // cp delivery stays its own step after the boundary checks
 	}
 }
 
@@ -164,14 +177,18 @@ func (p *dockerProvisioner) retryRunWithCpDelivery(cause string) error {
 	}
 	p.payloadViaBinds = false
 	p.resetForRunRetry()
-	return p.runContainer()
+	if err := p.runContainer(); err != nil {
+		return err
+	}
+	return p.deliverPayload()
 }
 
-// stagingDestinations returns the in-container paths af's staged payload
-// claims: the af binary always, the policy when one is staged.
+// stagingDestinations returns the in-container paths af's payload claims:
+// the af binary always, the policy whenever one will be delivered — staged
+// or not, since a cp write to /etc needs the same mount check as a bind.
 func (p *dockerProvisioner) stagingDestinations() []string {
 	dsts := []string{dockerAfBinaryPath}
-	if p.stagedPolicyPath != "" {
+	if p.stagedPolicyPath != "" || len(p.spec.AgentPolicy) > 0 {
 		dsts = append(dsts, dockerPolicyPath)
 	}
 	return dsts
@@ -363,15 +380,18 @@ func (p *dockerProvisioner) probeResolvedDestinations(mounts [][2]string) ([]str
 	// wrapper kills only the CLI and --rm needs the container to exit.
 	args := []string{"run", "--rm", "--label", dockerSessionLabel + "=" + Slugify(p.spec.Title),
 		"--entrypoint", dockerContainerShell, p.image, "-c",
-		`export PATH=/usr/sbin:/usr/bin:/sbin:/bin; { cd -- "$1" && pwd -P && printf '\0'; } || exit 3; { cd -- "$2" && pwd -P && printf '\0'; } || exit 3; for f in "$3" "$4"; do if [ -L "$f" ]; then printf '` + leafSymlinkMarker + `%s\n' "$f"; fi; done; printf '\0'; shift 4; for d in "$@"; do if cd -- "$d" 2>/dev/null; then pwd -P; elif cd -- "${d%/*}" 2>/dev/null; then printf '%s/%s\n' "$(cd -- "${d%/*}" && pwd -P)" "${d##*/}"; else printf '%s\n' '` + probeFailMarker + `'; fi; printf '\0'; done`}
+		dockerRootScriptPrefix + `{ cd -- "$1" && pwd -P && printf '\0'; } || exit 3; { cd -- "$2" && pwd -P && printf '\0'; } || exit 3; for f in "$3" "$4"; do if [ -L "$f" ]; then printf '` + leafSymlinkMarker + `%s\n' "$f"; fi; done; printf '\0'; shift 4; for d in "$@"; do if cd -- "$d" 2>/dev/null; then pwd -P; elif cd -- "${d%/*}" 2>/dev/null; then printf '%s/%s\n' "$(cd -- "${d%/*}" && pwd -P)" "${d##*/}"; else printf '%s\n' '` + probeFailMarker + `'; fi; printf '\0'; done`}
 	args = append(args, argv...)
 	out, err := p.docker(dockerShortStepTimeout, args...)
 	if err != nil {
 		return nil, nil, false, err
 	}
 	want := 3 + len(mounts)
-	parts := bytes.SplitN(out, []byte{0}, want)
-	if len(parts) < want {
+	// Every field is NUL-terminated, so the split must produce want fields
+	// plus an empty tail — a short answer is truncated, a longer one smuggles
+	// fields the last mount check would silently absorb.
+	parts := bytes.Split(out, []byte{0})
+	if len(parts) != want+1 || len(parts[want]) != 0 {
 		return nil, nil, false, fmt.Errorf("probe answer not understood: %q", string(out))
 	}
 	resolved := make([]string, 0, len(dsts))
@@ -395,58 +415,36 @@ func (p *dockerProvisioner) probeResolvedDestinations(mounts [][2]string) ([]str
 	return resolved, resMounts, bytes.Contains(parts[2], []byte(leafSymlinkMarker)), nil
 }
 
-// payloadDeliveryConfirmed checks — after create — that the staged files
-// reached their destinations as the staged regular files. A unix:// endpoint
-// can still carry a different filesystem view (an ssh-forwarded socket, a
-// snap Docker with a private /tmp, a lima or colima VM): the visibility proof
-// cannot see those, and a bind source the engine cannot resolve is silently
-// replaced by an empty directory Docker creates at the source path. The check
-// proves the destination is a regular, executable file of the staged size —
-// an empty-dir mount fails `test -f`, a wrong-but-readable source fails the
-// size check — so a delivery miss is caught here rather than surfacing later
-// as a session that dies with no clear cause.
-func (p *dockerProvisioner) payloadDeliveryConfirmed() bool {
-	st, err := os.Stat(p.stagedAfPath)
-	if err != nil || !st.Mode().IsRegular() {
-		return false
-	}
-	policyDest := ""
-	if p.stagedPolicyPath != "" {
-		policyDest = dockerPolicyPath
-	}
-	out, err := p.docker(dockerShortStepTimeout,
-		"exec", p.containerID, dockerContainerShell, "-c",
-		// PATH is pinned before any external name (wc, tr) is looked up: a
-		// run_args `-e PATH=/evil:…` would otherwise choose the program this
-		// root exec runs. What remains — an image binary at the absolute path,
-		// or a run_args bind shadowing it — is the repo-chosen-image trust
-		// #7577 items 1 and 3 address.
-		`export PATH=/usr/sbin:/usr/bin:/sbin:/bin; test -f "$1" && test -x "$1" && [ "$(wc -c < "$1" | tr -d '[:space:]')" = "$2" ] && { [ -z "$3" ] || { test -f "$3" && test -r "$3"; }; }`,
-		"sh", dockerAfBinaryPath, fmt.Sprintf("%d", st.Size()), policyDest)
-	if err != nil {
-		log.WarningLog.Printf("docker runtime: staged-payload delivery check failed in container %s (%v): %s", p.shortID(), err, strings.TrimSpace(string(out)))
-	}
-	return err == nil
-}
-
-// deliverPayload gets af's files into the container. On the bind path there is
-// nothing to write — the mounts already serve them. The cp fallback is the
-// only path that writes into the container at all, so it is the only path
-// verifyWriteTargets must prove stays on the container's own filesystem —
-// a run_args mount at the destination would otherwise carry af's
-// write onto a host path the repo chose (#7577 item 2's exact hole).
+// deliverPayload gets af's files into the container on the cp fallback — the
+// only path that writes into the container at all (the binds already serve
+// them), so the only path the mount guards must keep on the container's own
+// filesystem (#7577 item 2's exact hole). Three layers, in order: the daemon's
+// own `docker inspect` mount list clears the destination before the binary's
+// cp; the just-written binary — reached only through a cleared path — then
+// reads the kernel mount table itself and re-proves its placement plus the
+// policy destination and every root-exec program; and the policy cp runs
+// last, behind the verified answer (#7577 item 3).
 func (p *dockerProvisioner) deliverPayload() error {
-	if !p.payloadViaBinds {
-		if err := p.verifyWriteTargets(); err != nil {
-			return err
-		}
+	if p.payloadViaBinds || p.payloadDelivered {
+		return nil
+	}
+	if err := p.inspectWriteTargetsGuard(); err != nil {
+		return dockerStepErr(err, dockerOpLocal)
 	}
 	if err := p.copyAfBinary(); err != nil {
 		return dockerStepErr(err, dockerOpDaemonWrite)
 	}
+	outcome, verr := p.verifyRootExecPrograms()
+	switch {
+	case outcome == dockerRootVerifyRefused:
+		return dockerStepErr(verr, dockerOpLocal)
+	case outcome != dockerRootVerifyOK:
+		return dockerStepErr(fmt.Errorf("backend=docker: the copied af binary did not run its root-exec verification, so its placement and the mount table are unproven: %w", verr), dockerOpLocal)
+	}
 	if err := p.copyPolicy(); err != nil {
 		return dockerStepErr(err, dockerOpDaemonWrite)
 	}
+	p.payloadDelivered = true
 	return nil
 }
 
@@ -633,82 +631,6 @@ func dockerReadOnlyMountpointError(out string, err error) error {
 		strings.TrimSpace(out), dockerAfBinaryPath, ", "+dockerPolicyPath)
 }
 
-// mountEntry is one mountinfo row's usable slice: the mount point and its
-// filesystem type. The type no longer decides anything — no fstype is an
-// exception to the rootfs rule — but it still names the refused mount in the
-// operator-facing error.
-type mountEntry struct {
-	point  string
-	fstype string
-}
-
-// parseMountEntries parses /proc/self/mountinfo like parseMountPoints but keeps
-// each row's filesystem type: fields after the "-" separator begin with the
-// fstype. Same fail-closed contract — an unparseable line or a table with no
-// root mount is an error, never a partial answer.
-func parseMountEntries(mountinfo string) ([]mountEntry, error) {
-	var entries []mountEntry
-	sawRoot := false
-	seen := map[string]bool{}
-	for _, line := range strings.Split(mountinfo, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 7 {
-			return nil, fmt.Errorf("unparseable mountinfo line %q", line)
-		}
-		// Check the decoded-but-uncleaned point before path.Clean can
-		// collapse a "//" prefix: a mount point must be '/' followed by
-		// anything but '/' or '\'. Both shapes are never in a real mountinfo
-		// (the kernel octal-escapes special bytes), so a table carrying one
-		// is hostile or corrupt — refuse it rather than prefix-match a
-		// cleaned path that lost the signal.
-		mp := unescapeMountinfo(fields[4])
-		if len(mp) == 0 || mp[0] != '/' || (len(mp) > 1 && (mp[1] == '/' || mp[1] == '\\')) || strings.ContainsRune(mp, '\\') {
-			return nil, fmt.Errorf("unparseable mountinfo mount point %q", fields[4])
-		}
-		mp = path.Clean(mp)
-		sep := -1
-		for i := 5; i < len(fields); i++ {
-			if fields[i] == "-" {
-				sep = i
-				break
-			}
-		}
-		if sep < 0 || sep+1 >= len(fields) {
-			return nil, fmt.Errorf("unparseable mountinfo line %q", line)
-		}
-		if mp == "/" {
-			sawRoot = true
-		}
-		if !seen[mp] {
-			seen[mp] = true
-			entries = append(entries, mountEntry{point: mp, fstype: fields[sep+1]})
-		}
-	}
-	if !sawRoot {
-		return nil, fmt.Errorf("mountinfo has no root mount")
-	}
-	return entries, nil
-}
-
-// enclosingMountEntry is enclosingMount with the mount's fstype attached: the
-// longest mount point equal to p or a path prefix of it. "/" with no real
-// mount entry is impossible on a parsed table (parseMountEntries requires the
-// root mount), so a missing entry means p resolves under a mount point the
-// table declared, or under "/" itself.
-func enclosingMountEntry(entries []mountEntry, p string) mountEntry {
-	p = path.Clean(p)
-	best := mountEntry{point: "/", fstype: ""}
-	for _, e := range entries {
-		if (e.point == p || strings.HasPrefix(p, e.point+"/")) && len(e.point) > len(best.point) {
-			best = e
-		}
-	}
-	return best
-}
-
 // leafSymlinkMarker prefixes the lines the write-target probe prints for each
 // destination whose final component is a symlink. A symlinked destination is
 // refused outright: `docker cp` resolves it and writes wherever the target
@@ -719,117 +641,6 @@ const leafSymlinkMarker = "AF-LEAF-SYMLINK "
 // resolved inside the image — the mount relationship then cannot be
 // established and bind delivery yields to the guarded cp fallback.
 const probeFailMarker = "AF-PROBE-FAIL"
-
-// verifyWriteTargets proves every path af is about to `docker cp` into lands on
-// the container's own root filesystem before the cp runs. A bind at the
-// destination or an ancestor would otherwise let the write land on a host path
-// the repo chose (#7577 item 2's exact hole). This runs only on the cp
-// fallback: when the staging binds are used there is no write to guard.
-//
-// One exec resolves both destination parents and reads the container's own
-// /proc/self/mountinfo — the same table shape the chown guard uses — then a
-// `test -L` tail marks any symlinked destination leaf. Three cases get refused:
-// any non-rootfs mount enclosing the resolved destination, any mount below it
-// (cp writes into a destination that is a directory), and a symlinked leaf,
-// whose write escapes the checked path entirely. There is no fstype exception:
-// a private --tmpfs and a host tmpfs bind (-v /dev/shm:/dst) report the same
-// fstype, so allowing tmpfs would read a host bind as safe — a write through
-// one reaches the HOST, not the container.
-//
-// The mount table is read through the container's /bin/sh — image code. That
-// reader is the documented residual: an image can already run anything as
-// root, so a forged table changes nothing about what it can do. A repo's
-// docker.run_args mount, by contrast, cannot hide itself from the kernel's
-// table — the mount the shadow lives on is itself listed.
-func (p *dockerProvisioner) verifyWriteTargets() error {
-	dirA := path.Dir(dockerAfBinaryPath)
-	dirB, leafB := dirA, dockerAfBinaryPath
-	if len(p.spec.AgentPolicy) > 0 {
-		dirB = path.Dir(dockerPolicyPath)
-		leafB = dockerPolicyPath
-	}
-	// The read needs no privilege — mountinfo, cd and test -L on the world-
-	// readable destination parents are answerable by the image's default
-	// user — so it runs without --user like every other session exec. An
-	// image that makes those paths unsearchable refuses the write instead.
-	out, err := p.docker(dockerShortStepTimeout,
-		"exec", p.containerID, dockerContainerShell, "-c",
-		// No mkdir -p: /usr/local/bin and /etc exist on any image that can
-		// host a container at all, and a cd failure is a refused write, the
-		// fail-closed verdict this guard exists to give. Each resolved parent
-		// is framed by a NUL the shell prints itself — a NUL can never sit
-		// inside a path — so a directory name carrying whitespace or a
-		// newline is judged byte-exactly instead of trimmed into a different
-		// path. pwd -P's own trailing newline stays in the field.
-		// PATH is pinned before the only external name (cat) is looked up, so
-		// a run_args `-e PATH=/evil:…` cannot choose the program reading the
-		// mount table for a root exec. What remains — an image binary at the
-		// absolute path, or a run_args bind shadowing it — is the repo-chosen-
-		// image trust #7577 items 1 and 3 address.
-		`export PATH=/usr/sbin:/usr/bin:/sbin:/bin; cd -- "$1" && pwd -P && printf '\0' && cd -- "$2" && pwd -P && printf '\0' && cat /proc/self/mountinfo && for f in "$3" "$4"; do if [ -L "$f" ]; then printf '`+leafSymlinkMarker+`%s\n' "$f"; fi; done`,
-		"sh", dirA, dirB, dockerAfBinaryPath, leafB)
-	if err != nil {
-		return dockerStepErr(fmt.Errorf("backend=docker: cannot read the container mount table, so af's files are not written (a cp must stay on the container's own filesystem): %s: %w", strings.TrimSpace(string(out)), err), dockerOpSessionExec)
-	}
-	parts := bytes.SplitN(out, []byte{0}, 3)
-	if len(parts) < 3 || len(parts[2]) == 0 {
-		return dockerStepErr(fmt.Errorf("backend=docker: the container mount table answer was not understood, so af's files are not written: %q", string(out)), dockerOpLocal)
-	}
-	// Each resolved field must end in exactly the newline pwd -P prints —
-	// remove that one byte and keep the rest verbatim. An empty or
-	// non-absolute field can only be a corrupt or hostile answer; the check
-	// refuses rather than guess a path.
-	realDirs := make([]string, 2)
-	for i, field := range parts[:2] {
-		dir, ok := bytes.CutSuffix(field, []byte("\n"))
-		if !ok || len(dir) == 0 || dir[0] != '/' {
-			return dockerStepErr(fmt.Errorf("backend=docker: the container mount table answer was not understood, so af's files are not written: %q", string(out)), dockerOpLocal)
-		}
-		realDirs[i] = string(dir)
-	}
-	var mountLines []string
-	for _, line := range strings.Split(string(parts[2]), "\n") {
-		if strings.HasPrefix(line, leafSymlinkMarker) {
-			leaf := strings.TrimPrefix(line, leafSymlinkMarker)
-			return dockerStepErr(fmt.Errorf("backend=docker: refusing to write %s: the destination is a symbolic link in the image, so `docker cp` would follow it somewhere the mount-table check cannot prove is the container's own filesystem; use an image whose %s is a real path",
-				leaf, leaf), dockerOpLocal)
-		}
-		mountLines = append(mountLines, line)
-	}
-	entries, err := parseMountEntries(strings.Join(mountLines, "\n"))
-	if err != nil {
-		return dockerStepErr(fmt.Errorf("backend=docker: cannot parse the container mount table, so af's files are not written (a cp must stay on the container's own filesystem): %w", err), dockerOpLocal)
-	}
-	for i, realParent := range realDirs {
-		target := dockerAfBinaryPath
-		if i == 1 {
-			if len(p.spec.AgentPolicy) == 0 {
-				continue
-			}
-			target = dockerPolicyPath
-		}
-		realTarget := path.Join(realParent, path.Base(target))
-		entry := enclosingMountEntry(entries, realTarget)
-		// No fstype exception: the mount table reports a host tmpfs bind
-		// (-v /dev/shm:/dst) exactly as a private --tmpfs, so an exception
-		// for tmpfs would read a host bind as safe. Only a resolution under
-		// "/" itself is the container's own filesystem.
-		if entry.point != "/" {
-			return dockerStepErr(fmt.Errorf("backend=docker: refusing to write %s: it resolves to %s, inside the mount %s (%s) rather than the container's root filesystem — the mount table cannot tell a private tmpfs from a host tmpfs bind, so any non-rootfs mount is refused; a docker.run_args mount there would carry af's write onto the host; remove that mount or move it elsewhere",
-				target, realTarget, entry.point, entry.fstype), dockerOpLocal)
-		}
-		// A directory at the destination makes cp write beneath it, onto
-		// whatever mount owns the matching name. Any mount below the
-		// resolved target could catch that write, tmpfs included.
-		for _, e := range entries {
-			if strings.HasPrefix(e.point, realTarget+"/") {
-				return dockerStepErr(fmt.Errorf("backend=docker: refusing to write %s: the mount %s (%s) sits beneath the destination, where a cp landing inside it would reach the host — a docker.run_args mount there would carry af's write onto the host; remove that mount or move it elsewhere",
-					target, e.point, e.fstype), dockerOpLocal)
-			}
-		}
-	}
-	return nil
-}
 
 // dockerStagingRecordName is the persistable half of the staging path: its
 // base name only. The cleanup record is operator-visible storage, and a full

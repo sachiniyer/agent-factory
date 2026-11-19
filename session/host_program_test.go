@@ -173,7 +173,7 @@ func TestDockerReadBannerFailsFastOnDeadProcess(t *testing.T) {
 		case strings.Contains(joined, "cat "+dockerLogPath):
 			return []byte("af agent-server: not found\n"), nil
 		default:
-			return nil, fmt.Errorf("unexpected docker call: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	})()
 

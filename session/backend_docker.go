@@ -470,6 +470,10 @@ type dockerProvisioner struct {
 	stagedAfPath     string
 	stagedPolicyPath string
 	payloadViaBinds  bool
+	// payloadDelivered marks a cp delivery already completed inside the
+	// run-retry, so the later deliverPayload step does not re-copy and
+	// re-verify (#7577 item 3).
+	payloadDelivered bool
 }
 
 // provision runs the full container lifecycle and returns the wiring a docker
@@ -874,7 +878,24 @@ func (p *dockerProvisioner) dockerEnvironment() []string {
 // is a no-op for a root-default image (its default user IS root) and is the
 // only thing that works for a non-root one.
 func (p *dockerProvisioner) execSh(timeout time.Duration, script string) ([]byte, error) {
-	args := []string{"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", script}
+	// PATH is pinned before the script's first name resolves (#7577 item 3):
+	// a run_args `-e PATH=/evil:…` would otherwise choose the program this
+	// root exec runs. What remains — an image binary at the absolute path,
+	// or a run_args bind shadowing it — is what verifyRootExecPrograms
+	// refuses against the kernel mount table.
+	args := []string{"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", dockerRootScriptPrefix + script}
+	return p.docker(timeout, args...)
+}
+
+// execSessionSh runs a script as the session user (no --user when the image
+// default stands, so the user's own env survives). PATH is pinned the same
+// way: provisioning scripts run as a session user who IS root on every
+// documented image, so the run_args `-e PATH` vector the root scripts refuse
+// would otherwise pick their programs (#7577 item 3).
+func (p *dockerProvisioner) execSessionSh(timeout time.Duration, script string) ([]byte, error) {
+	args := []string{"exec"}
+	args = append(args, p.sessionExecOptions()...)
+	args = append(args, p.containerID, dockerContainerShell, "-c", dockerRootScriptPrefix+script)
 	return p.docker(timeout, args...)
 }
 

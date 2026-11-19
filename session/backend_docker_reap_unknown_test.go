@@ -59,7 +59,7 @@ func TestDockerProvisionFailureSurfacesUnknownReap(t *testing.T) {
 		case "info":
 			return []byte(dockerReapTestEngineID + "\n"), nil
 		case "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case "exec":
 			return nil, provisionErr
 		case "rm":
@@ -69,7 +69,7 @@ func TestDockerProvisionFailureSurfacesUnknownReap(t *testing.T) {
 			// "signal: killed"), not ctx.Err(); reap must add the deadline.
 			return nil, errors.New("signal: killed")
 		default:
-			return nil, fmt.Errorf("unexpected docker command: %v", args)
+			return dockerUnexpectedCall(args)
 		}
 	})()
 

@@ -508,7 +508,7 @@ func TestAccountRuntimeVerify_ReportsEveryFindingNotJustTheFirst(t *testing.T) {
 			return []byte(cleanMountinfoFor(dir) +
 				"2442 2440 8:1 /repo/evil /af-account/.config rw,relatime - ext4 /dev/root rw\n"), nil
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})()
 
 	// The node the daemon already planted, through the account bind, before any
@@ -575,7 +575,7 @@ func TestAccountRuntimeVerify_ReadsTheExecProcessMountNamespace(t *testing.T) {
 			read = append(read, args[len(args)-1])
 			return []byte(cleanMountinfoFor(dir)), nil
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})()
 	p := &dockerProvisioner{
 		spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
@@ -678,7 +678,7 @@ func TestAccountRuntimeVerify_ReadsBothSources(t *testing.T) {
 			return []byte(cleanMountinfoFor(dir) +
 				"2442 2440 8:1 /repo/evil /af-account/.config rw,relatime - ext4 /dev/root rw\n"), nil
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})()
 
 	p := &dockerProvisioner{
@@ -865,7 +865,7 @@ func TestAccountRuntimeVerify_EveryFailedReadRefuses(t *testing.T) {
 					}
 					return []byte(cleanMountinfoFor(dir)), nil
 				}
-				return nil, fmt.Errorf("unexpected docker call: %v", args)
+				return dockerUnexpectedCall(args)
 			})()
 			p := &dockerProvisioner{
 				spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
@@ -888,7 +888,7 @@ func TestAccountRuntimeVerify_WiredCleanContainerPasses(t *testing.T) {
 		case args[len(args)-1] == "/proc/self/mountinfo":
 			return []byte(cleanMountinfoFor(dir)), nil
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})()
 	p := &dockerProvisioner{
 		spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
@@ -951,7 +951,7 @@ func TestAccountRuntimeVerify_RefusalReapsTheContainer(t *testing.T) {
 		case args[0] == "info":
 			return []byte("engine-1\n"), nil
 		case args[0] == "run":
-			return []byte(dockerCreatedID + "\n"), nil
+			return dockerRunOrProbeAnswer(args)
 		case args[0] == "inspect":
 			return []byte(`[{"Mounts":[
 				{"Type":"bind","Source":"` + accountDir + `","Destination":"/af-account","Mode":"z","RW":true},
@@ -963,7 +963,7 @@ func TestAccountRuntimeVerify_RefusalReapsTheContainer(t *testing.T) {
 		case args[0] == "rm":
 			return []byte(dockerCreatedID + "\n"), nil
 		}
-		return nil, fmt.Errorf("unexpected docker call: %v", args)
+		return dockerUnexpectedCall(args)
 	})()
 
 	_, err := dockerRuntime{}.Provision(ProvisionSpec{
@@ -1017,12 +1017,6 @@ func fakeAccountBoundaryDockerResponse(args []string, accountDir string) ([]byte
 		// answer is readMountTable's expected form:
 		// <resolved HOME>\n<resolved workspace>\n<mountinfo>.
 		if strings.Contains(joined, `cd -- "$2" && pwd -P`) {
-			// verifyWriteTargets shares the `cd -- "$2" && pwd -P` clause;
-			// leafSymlinkMarker in the script marks it, and its answer is
-			// NUL-framed: <dir>\n\0<dir>\n\0<mountinfo>.
-			if strings.Contains(joined, leafSymlinkMarker) {
-				return writeGuardAnswerRaw("/usr/local/bin", "/etc", cleanMountinfoFor(accountDir)), nil
-			}
 			return []byte(dockerAccountRuntimeHome + "\n" + dockerWorkspaceDir + "\n" + cleanMountinfoFor(accountDir)), nil
 		}
 		if strings.HasSuffix(joined, "/proc/self/mountinfo") {

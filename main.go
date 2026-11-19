@@ -7,6 +7,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/dockerrootverify"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/watchlifeline"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
@@ -41,6 +42,10 @@ func main() {
 	}
 	sessionenv.HandleInternalExec()
 	sessiontmux.HandleDedicatedServerExec()
+	// The docker backend execs the staged copy of this binary as
+	// `af __docker-root-verify` inside the session container to verify its
+	// root-exec paths against the kernel mount table (#7577 item 3).
+	dockerrootverify.HandleExec()
 	// Consume the internal __upgrade-recovery invocation (the persistent recovery
 	// job execs the preserved previous binary this way) before Cobra, exactly as
 	// the session exec protocol above. An ordinary invocation returns immediately.

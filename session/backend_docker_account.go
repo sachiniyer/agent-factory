@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
@@ -962,7 +961,7 @@ func (p *dockerProvisioner) prepareAccountUser() error {
 		{kind: "workspace", real: realWorkspace, chown: fmt.Sprintf("chown -h %s %s", owner, shellQuote(realWorkspace))},
 	}, func(steps []string) error {
 		out, err := p.docker(dockerShortStepTimeout,
-			"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", strings.Join(steps, " && "))
+			"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", dockerRootScriptPrefix+strings.Join(steps, " && "))
 		if err != nil {
 			return dockerStepErr(fmt.Errorf("backend=docker: cannot prepare the account-owned container home and workspace: %s: %w", strings.TrimSpace(string(out)), err), dockerOpRootExec)
 		}
@@ -989,11 +988,4 @@ func (p *dockerProvisioner) sessionExecOptions() []string {
 		return nil
 	}
 	return []string{"--user", p.containerUser, "-e", "HOME=" + p.sessionHome()}
-}
-
-func (p *dockerProvisioner) execSessionSh(timeout time.Duration, script string) ([]byte, error) {
-	args := []string{"exec"}
-	args = append(args, p.sessionExecOptions()...)
-	args = append(args, p.containerID, dockerContainerShell, "-c", script)
-	return p.docker(timeout, args...)
 }
