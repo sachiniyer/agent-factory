@@ -260,6 +260,14 @@ var shellSiteRegistry = map[string][]classifiedSite{
 			"af destination path, the staged file's size, and the policy destination are af-computed " +
 			"values arriving as $1..$3 positional parameters, never spliced into the script text",
 	}},
+	"session/backend_docker_staging.go:(*dockerProvisioner).probeResolvedDestinations": {{
+		class: afAuthored,
+		note: "the in-image path-resolution probe (#7577 item 2 R1) — a fixed const script; af's " +
+			"destination dirs/leafs arrive as $1..$4 and the operator's run_args mount destinations " +
+			"as $5+ positional parameters, each used only inside double quotes (`cd -- \"$d\"`), " +
+			"never spliced into the script text — a quoted positional is data, not code, so no " +
+			"operator string reaches this shell as syntax",
+	}},
 
 	"session/host_program.go:(hostProgramProber).probePath": {{
 		class: afAuthored,
