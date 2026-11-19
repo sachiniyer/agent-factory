@@ -283,9 +283,10 @@ func TestSameRecordedSocket_AHungCompareIsUndecidable(t *testing.T) {
 
 	// And at verdict level the same shape stays undecidable — an own-
 	// looking carrier whose socket cannot be compared is never foreign.
-	own := ServerIdentity{Socket: sock, PID: 4242, StartID: 1, SessionID: "$7"}
+	// The record is proven so the undecidable IS the incomparable socket.
+	own := ServerIdentity{Socket: sock, PID: 4242, StartID: 1, SessionID: "$7", PIDNS: "pidns:test"}
 	require.Equal(t, serverVerdictUndecidable,
-		tmuxEnvServerVerdict(sock+",4242,3", own, ""))
+		tmuxEnvServerVerdict(sock+",4242,3", own, "pidns:test"))
 }
 
 // #7469 R5a: tmux renders control and non-UTF-8 bytes in #{socket_path} as
@@ -301,9 +302,11 @@ func TestCarrierServerVerdict_EscapedRecordedSocketIsIncomparable(t *testing.T) 
 	dir := testguard.SocketTempDir(t)
 	realSock := filepath.Join(dir, "so\x01ck")  // byte 0x01 — what TMUX holds raw
 	recorded := filepath.Join(dir, "so\\001ck") // tmux's \NNN rendering of it
-	own := ServerIdentity{Socket: recorded, PID: 4242, StartID: 1, SessionID: "$7"}
+	// Proven records (PIDNS set) keep the undecidable pinned to socket
+	// incomparability, never to an unproven pid (#7581 item 1's gate).
+	own := ServerIdentity{Socket: recorded, PID: 4242, StartID: 1, SessionID: "$7", PIDNS: "pidns:test"}
 
-	got := tmuxEnvServerVerdict(realSock+",4242,7", own, "")
+	got := tmuxEnvServerVerdict(realSock+",4242,7", own, "pidns:test")
 	require.Equal(t, serverVerdictUndecidable, got,
 		"an escaped recorded socket whose literal spelling answers no listener is incomparable — never foreign")
 
@@ -313,9 +316,9 @@ func TestCarrierServerVerdict_EscapedRecordedSocketIsIncomparable(t *testing.T) 
 	lc, err := net.Listen("unix", litSock)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = lc.Close() })
-	own2 := ServerIdentity{Socket: litSock, PID: 4242, StartID: 1, SessionID: "$7"}
+	own2 := ServerIdentity{Socket: litSock, PID: 4242, StartID: 1, SessionID: "$7", PIDNS: "pidns:test"}
 	require.Equal(t, serverVerdictOwn,
-		tmuxEnvServerVerdict(litSock+",4242,7", own2, ""),
+		tmuxEnvServerVerdict(litSock+",4242,7", own2, "pidns:test"),
 		"a backslash spelling backed by the live listener compares as the literal truth")
 }
 
