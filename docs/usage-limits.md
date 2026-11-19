@@ -514,10 +514,14 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
     `nu -c` alone);
 
   Launcher names nest by NAME, not by position: a piece (or word, or a
-  field of a nested tail) that IS a modelled launcher's name re-enters
-  that launcher's own rule on the text after it — `watch 'pwsh
+  field of a nested tail) that spells a modelled launcher's name
+  re-enters that launcher's own rule on the text after it — `watch 'pwsh
   -EncodedCommand …'` refuses exactly as a direct `pwsh -EncodedCommand`
-  does, at any depth, inside the same total work bound. The name
+  does, at any depth, inside the same total work bound. A piece can
+  spell several names (`nix-shell` is `nix` at a `-` boundary and
+  `nix-shell` exactly; `*sh` is `pwsh` and `nix-shell` alike) and EVERY
+  match applies its own rule, so `watch '*sh -enc x'` refuses on pwsh's
+  table and `watch sudo pwsh -EncodedCommand x` on pwsh's. The name
   lookup is the same one the agent name gets — the normalized piece's
   path basename with globs over-approximated, so `/usr/bin/pwsh`,
   `./pwsh`, `~/.local/bin/watch` and `/usr/bin/pw[s]h` all read as the

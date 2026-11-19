@@ -2,6 +2,7 @@ package sessionenv
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -350,7 +351,7 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 		if !ok {
 			continue // the verdict above already refused
 		}
-		if nested, named := namedLauncherNameOf(literal); named {
+		for _, nested := range namedLauncherNamesOf(literal) {
 			if namedNestedWordsRefuse(words[i+1:], nested, names, preserved, b) {
 				return true
 			}
@@ -359,20 +360,28 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 	return false
 }
 
-// namedLauncherNameOf reports whether text spells a modelled launcher's
-// name — pieceCouldName on the literal AND its normalized form, the
+// namedLauncherNamesOf collects EVERY modelled launcher name text could
+// spell — pieceCouldName on the literal AND its normalized form, the
 // same lookup the agent name gets: `/usr/bin/pwsh`, `./pwsh`,
 // `~/.local/bin/watch` match on the basename, `pw”sh` normalizes to
-// pwsh, and `/usr/bin/pw[s]h` glob-matches it.
-func namedLauncherNameOf(text string) (string, bool) {
+// pwsh, and `/usr/bin/pw[s]h` glob-matches it. A piece can spell several
+// names — `nix-shell` is nix at a `-` boundary and nix-shell exactly,
+// `*sh` is pwsh and nix-shell alike — and EACH match applies its own
+// rule to the text after the piece, so a benign first name never masks
+// a later one's hidden input.
+func namedLauncherNamesOf(text string) []string {
+	var found []string
 	for _, form := range [2]string{text, normalizeNamedLiteral(text)} {
 		for name := range accountNamedLauncherNames {
+			if slices.Contains(found, name) {
+				continue
+			}
 			if pieceCouldName(form, name) {
-				return name, true
+				found = append(found, name)
 			}
 		}
 	}
-	return "", false
+	return found
 }
 
 // namedNestedWordsRefuse literalizes each remaining word once (the
@@ -428,7 +437,7 @@ func namedNestedFieldsRefuse(fields []string, launcher string, names, preserved 
 		if verdict.refuse {
 			return true
 		}
-		if nested, named := namedLauncherNameOf(field); named {
+		for _, nested := range namedLauncherNamesOf(field) {
 			if namedNestedFieldsRefuse(fields[i+1:], nested, names, preserved, b) {
 				return true
 			}
@@ -576,9 +585,10 @@ func namedLauncherTextRefuses(text string, names, preserved map[string]struct{},
 		if piece != text && namedLauncherPieceRefuses(piece, names, preserved) {
 			return true
 		}
-		if nested, named := namedLauncherNameOf(piece); named &&
-			namedNestedFieldsRefuse(strings.Fields(text[i:]), nested, names, preserved, b) {
-			return true
+		for _, nested := range namedLauncherNamesOf(piece) {
+			if namedNestedFieldsRefuse(strings.Fields(text[i:]), nested, names, preserved, b) {
+				return true
+			}
 		}
 	}
 	return false

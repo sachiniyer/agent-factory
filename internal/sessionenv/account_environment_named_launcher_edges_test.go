@@ -1155,6 +1155,17 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch 'pw{sh,} -enc x'`, true},
 		{`watch 'echo {a,b}'`, false},
 		{`watch 'echo co{ab}x'`, false},
+		// EVERY name a piece spells applies its own
+		// rule — a benign first name never masks a
+		// later one's hidden input. `sudo` is not
+		// modelled (benign); `*sh` names pwsh AND
+		// nix-shell — picking nix-shell alone would
+		// miss pwsh's -enc.
+		{`watch sudo pwsh -EncodedCommand x`, true},
+		{`watch 'sudo pwsh -EncodedCommand x'`, true},
+		{`watch '*sh -enc x'`, true},
+		{`watch 'pw* -enc x'`, true},
+		{`watch 'nix-shell --arg-from-stdin'`, true},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state
