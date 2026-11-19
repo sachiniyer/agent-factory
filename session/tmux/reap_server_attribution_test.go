@@ -94,6 +94,31 @@ func TestCarrierServerVerdict_UnreadableOrMissingEnvIsUndecidable(t *testing.T) 
 	}
 }
 
+// #7562: an env socket spelling that reached its directory through a
+// symlink component that is itself DELETED cannot be pronounced a different
+// socket — the deleted alias may have pointed at ours. Incomparable is
+// undecidable, never foreign: the carrier could be our own server's.
+func TestCarrierServerVerdict_DeletedLinkInEnvSocketIsUndecidable(t *testing.T) {
+	own := ownServerFixture(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	link := filepath.Join(root, "linkdir")
+	require.NoError(t, os.Symlink(filepath.Dir(own.Socket), link))
+	require.NoError(t, os.Remove(link))
+	envSock := filepath.Join(link, filepath.Base(own.Socket))
+
+	require.Equal(t, serverVerdictUndecidable,
+		tmuxEnvServerVerdict(envSock+",9999,3", own, "pidns:test"),
+		"a deleted link component may have aliased our socket — undecidable, never foreign")
+
+	// A genuinely foreign socket in a live directory still answers foreign:
+	// the deleted-component widening must not swallow a certain mismatch.
+	foreignSock := filepath.Join(root, "foreign.sock")
+	require.Equal(t, serverVerdictForeign,
+		tmuxEnvServerVerdict(foreignSock+",9999,3", own, "pidns:test"),
+		"an absent basename in a live dir is a certain answer — still foreign")
+}
+
 func TestCarrierServerVerdict_NamespaceMismatchIsUndecidable(t *testing.T) {
 	own := ownServerFixture(t)
 	got := tmuxEnvServerVerdict(own.Socket+",9999,3", own, "pidns:other")
