@@ -12,29 +12,31 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/throwawaysandbox"
 )
 
-// TestRunDaemonThrowawayExpiryIsObservedWhenItRacesTheStop pins the fix for the
-// flag-loss race in the throwaway-sandbox lifetime enforcement (introduced with
-// the feature in commit 3b6d5504, #6844): the watchdog closing
-// throwawayExpireCh while a concurrent stop vector is already mid-drain never
-// reaches the main select (the stop case won, and the close lands during
-// drainDaemon's join, which can run for drainBudget). Pre-fix, the
-// throwawayExpired boolean was only ever set in the select arm that happened to
-// receive from the channel, so it stayed false and the daemon exited as a fully
-// clean stop — throwawayTeardownFn and the expired-container reap were
-// skipped, and the final save persisted live-session state into the expired
-// home. Post-fix, the channel is re-drained non-blockingly after drainDaemon
-// and inside endThrowaway, so the close is observed on the way out and the
-// whole sandbox dies with the daemon.
+// TestRunDaemonThrowawayExpiryIsObservedWhenItRacesTheStop pins the fix for
+// #7620's lost-expiry race: the watchdog closing throwawayExpireCh while a
+// concurrent stop vector is already mid-drain never reaches the main select
+// (the stop case won, and the close lands during drainDaemon's join, which
+// can run for drainBudget). Pre-fix, a cached throwawayExpired boolean was
+// only ever set in the select arm that happened to receive from the channel,
+// so it stayed false and the daemon exited as a fully clean stop —
+// throwawayTeardownFn and the expired-container reap were skipped, and the
+// final save persisted live-session state into the expired home. Post-fix,
+// every expiry gate reads the channel's state at the moment it decides: the
+// final-save skip, the container reap, and endThrowaway each settle the
+// watchdog and read the closed channel, so the mid-drain fire is observed on
+// the way out and the whole sandbox dies with the daemon.
 //
 // The race is made deterministic: a marked home whose marker declares a live
 // owner process the watchdog polls every 20ms; a background durable-state
 // writer admitted before the stop blocks on its stop channel and then sleeps
 // 1.5s, so drainDaemon's join holds the stop open; the test waits until that
-// stop channel closes (proof the Shutdown RPC was received and the main select
-// already chose shutdownCh) before killing the declared owner, so the
-// watchdog fires mid-drain. The test asserts the drain really was held, the
-// watchdog really fired, and then that the fix's guarantees hold: teardown
-// ran, the container reap ran, and the final save was skipped.
+// stop channel closes — drain entry, a signal the daemon itself emits —
+// before killing the declared owner, so the watchdog fires mid-drain. The
+// test asserts the drain really was held, the watchdog really fired, and
+// then that the fix's guarantees hold: teardown ran, the container reap ran,
+// and the final save was skipped. On master's daemon the drain-entry
+// synchronization makes the test exercise the race every run: the cached
+// flag misses the mid-drain fire and all three guarantees fail.
 func TestRunDaemonThrowawayExpiryIsObservedWhenItRacesTheStop(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
