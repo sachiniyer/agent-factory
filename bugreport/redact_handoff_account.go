@@ -35,6 +35,9 @@ func redactAccountSwapMission(pending *session.AccountSwapData) {
 	// A carried conversation id (#4367) is the same resumable handle, and is
 	// cleared the same way.
 	pending.CarriedConversationID = ""
+	// So is the launched-conversation proof (#7596): it names the id the
+	// replacement's panes started on, which --resume takes verbatim.
+	pending.LaunchedConversationID = ""
 	if pending.Mission != "" {
 		pending.Mission = redactedMarker
 	}
