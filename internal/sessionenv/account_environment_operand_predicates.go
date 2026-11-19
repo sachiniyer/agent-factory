@@ -130,7 +130,7 @@ func envCallMutatesAccountEnvironmentUncached(words []*syntax.Word, names map[st
 	return wrapperOperandTailMutates(scan.command, names, memo)
 }
 
-func shellCommandIsUnproven(words []*syntax.Word) bool {
+func shellCommandIsUnproven(words []*syntax.Word, names map[string]struct{}) bool {
 	if len(words) == 0 {
 		return false
 	}
@@ -138,7 +138,92 @@ func shellCommandIsUnproven(words []*syntax.Word) bool {
 	if !literal || !KnownShellName(filepath.Base(command)) {
 		return false
 	}
-	return !accountShellCommandWordsProven(words)
+	if accountShellCommandWordsProven(words) {
+		return false
+	}
+	// #7604: a `sh -c`/`bash -c` payload is not hidden input — it is a
+	// command string the gate can read, so it is judged by the same gate
+	// recursively instead of refused outright (`su -c` and `script -c`
+	// already judge theirs this way). Refusal stays for what the gate
+	// cannot decode: a dynamic or absent payload, a script file, an
+	// interactive/login/stdin spelling, an unknown option, or a shell
+	// whose -c still reads a startup file.
+	if shellDashCCommandProven(words, names) {
+		return false
+	}
+	return true
+}
+
+// shellDashCCommandProven reports whether words are a shell command-string
+// invocation whose every payload candidate is decodable and judged clean by
+// the gate — `sh -c 'make'` proves out exactly the way `make` does, and
+// `bash -c 'unset CODEX_HOME; x'` refuses the way the bare line does. The
+// head must be a shell with no unconditional startup file in non-interactive
+// -c mode: zsh reads zshenv, csh/tcsh their rc files and fish its config
+// regardless, so they stay unproven. (Bash's BASH_ENV and ksh's ENV name a
+// file only through the environment, which is the gate's stated limit.)
+// Every word must be literal — a dynamic word could hide the option that
+// makes the rest a script name or stdin — and the only admissible option
+// words are -c spellings and flag clusters that cannot read input or take a
+// word operand: i (interactive), l (login), s (stdin), o and O (operand)
+// are inadmissible anywhere, as is any long option. Before the first -c
+// word a non-option literal names a script file, so the invocation is not
+// provable; after it, the remaining words are the payload's positional
+// argv. Every candidate payload runnerPayloads collects is re-judged, so
+// the ambiguity that makes every -c-shaped word a candidate can only
+// over-refuse.
+func shellDashCCommandProven(words []*syntax.Word, names map[string]struct{}) bool {
+	command, _ := literalShellWord(words[0])
+	switch filepath.Base(command) {
+	case "sh", "dash", "ash", "bash", "ksh", "mksh":
+	default:
+		return false
+	}
+	sawPayloadOption := false
+	for _, word := range words[1:] {
+		literal, ok := launcherLiteralWord(word)
+		if !ok {
+			return false
+		}
+		if !strings.HasPrefix(literal, "-") || literal == "-" {
+			if !sawPayloadOption {
+				return false
+			}
+			continue
+		}
+		if literal == "--" {
+			// `sh -- file` runs file as a script; only after -c are the
+			// following words positional argv.
+			if !sawPayloadOption {
+				return false
+			}
+			continue
+		}
+		if strings.HasPrefix(literal, "--") {
+			return false
+		}
+		cluster := literal[1:]
+		if cAt := strings.IndexByte(cluster, 'c'); cAt >= 0 {
+			if strings.ContainsAny(cluster[:cAt], "ilsoO") {
+				return false
+			}
+			sawPayloadOption = true
+			continue
+		}
+		if strings.ContainsAny(cluster, "ilsoO") {
+			return false
+		}
+	}
+	payloads := runnerPayloads(words)
+	if len(payloads) == 0 {
+		return false
+	}
+	for _, payload := range payloads {
+		if commandMutatesAccountEnvironment(payload, names) {
+			return false
+		}
+	}
+	return true
 }
 
 func accountShellCommandWordsProven(words []*syntax.Word) bool {

@@ -223,6 +223,14 @@ func suResetsEnvironment(words []*syntax.Word) bool {
 // P2 on this head).
 var commandRunnerPrograms = map[string]struct{}{
 	"su": {}, "runuser": {}, "script": {},
+	// The shells decode `-c` payloads too (#7604): under a resetting
+	// launcher the payload's decoded command word is agent reach — `sudo
+	// sh -c 'codex'` resets the pins and runs the agent — so the reach
+	// scan judges it. Startup-file shells are included here because the
+	// decode only answers reach, never admission; whether their `-c` is
+	// itself provable is shellDashCCommandProven's question.
+	"ash": {}, "bash": {}, "csh": {}, "dash": {}, "fish": {},
+	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
 }
 
 // resetPeelableWrappers name the words whose argv contains the real

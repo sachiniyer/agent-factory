@@ -371,10 +371,24 @@ will not reach the child's environment.
   `sudo script -q -c 'co""dex' /dev/null` refuse because the child
   lands `codex` under env_reset, while `sudo -E su -c 'co""dex' root`
   (the pins are preserved) and `sudo su -c 'make' root` run.
-  Interactive shells themselves stay refused wherever they appear —
-  `shellCommandIsUnproven` already covers `sh`/`bash`/`zsh`/`dash`/
-  `ksh`/`fish`/... at command position — so their `-c` operands need
-  no separate scan.
+- **`sh -c`/`bash -c` payloads get the same treatment** — a shell's
+  command string is not hidden input: it is a command line the gate
+  can read, so `sh`, `dash`, `ash`, `bash`, `ksh` and `mksh` decode
+  every `-c` spelling (`-c x`, `-cx`, clustered `-exc`, `bash -eux -c`)
+  and re-judge it exactly as they do a runner's — `bash -c 'make'`,
+  `sh -c "npm test"` and `sh -c 'make' arg0 arg1` run, `sh -c 'unset
+  CODEX_HOME; codex'` refuses the way the bare line does, and the
+  reset check reaches a decoded agent there too (`sudo sh -c 'codex'`
+  refuses, `sudo -E sh -c 'codex'` runs). Refusal stays for what the
+  gate cannot decode: a dynamic or unparseable payload (`sh -c "$x"`),
+  a missing operand (`sh -c`), a script-file form (`sh script.sh`),
+  an interactive/login/stdin spelling (`sh -i`, `bash -lc`, `sh -s`),
+  an option it cannot model (any `--long` option, `-o`), and shells
+  whose `-c` still reads a startup file (`zsh`, `csh`, `tcsh`, `fish`
+  read zshenv/.cshrc/config.fish even for `-c` — bash's BASH_ENV and
+  ksh's ENV name a file only through the environment, which is the
+  gate's stated limit). A bare `sh`, `bash` or `zsh` invocation stays
+  refused as before — only the exact `/bin/sh -i` tab form is proven.
 - **Hidden inputs refuse** — a flag that loads arguments or
   environment from a file or file descriptor puts the real command
   outside the VISIBLE command line, so `bwrap --args 3`, bwrap's
