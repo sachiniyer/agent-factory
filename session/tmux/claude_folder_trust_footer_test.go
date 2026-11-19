@@ -161,20 +161,22 @@ func TestIssue7618RewordedDialogHoldsUntilItsFooterIsWhole(t *testing.T) {
 	}
 }
 
-// TestIssue7619PartialRewordedDialogIsHeldWhicheverClauseAlsoReadsIt pins the
-// #7619 review's R1. A pane whose reworded dialog reads partial is held, even
-// when another answering clause reads the same pane as its own dialog. The
-// review's frame is the reworded question and body over the older MCP prompt's
-// question, then "❯ No, exit", "Yes, I trust this folder", "Yes" and "No", and
-// a footer begun. The older MCP clause takes any last row that starts "Enter to
-// confirm" for its footer. So once the reworded dialog read partial, the gate
-// fell through to that clause's unaimed Enter, which lands on the preselected
-// "No, exit" and quits Claude Code. Master moved the cursor onto Yes there, or
-// held.
+// TestIssue7619UnfinishedRewordedDialogIsHeldWhicheverClauseAlsoReadsIt pins
+// the #7619 review's R1. A pane whose reworded dialog reads whole but for its
+// footer row, begun, is held, even when another answering clause reads the
+// same pane as its own dialog. The review's frame is the reworded question and
+// body over the older MCP prompt's question, then "❯ No, exit", "Yes, I trust
+// this folder", "Yes" and "No", and a footer begun. The older MCP clause takes
+// any last row that starts "Enter to confirm" for its footer. So once the
+// reworded dialog read partial, the gate fell through to that clause's unaimed
+// Enter, which lands on the preselected "No, exit" and quits Claude Code.
+// Master moved the cursor onto Yes there, or held.
 //
-// The same frame at 40 columns, its question wrapped, reads partial with its
-// footer whole, and master tapped that Enter too. It holds now.
-func TestIssue7619PartialRewordedDialogIsHeldWhicheverClauseAlsoReadsIt(t *testing.T) {
+// The hold is only for that partial, the one #7618 makes. A live legacy dialog
+// below a composer whose draft quotes the reworded question also reads as a
+// partial reworded region, and master answers it, rightly: that stays so, or
+// the create would stall.
+func TestIssue7619UnfinishedRewordedDialogIsHeldWhicheverClauseAlsoReadsIt(t *testing.T) {
 	const (
 		reworded = "Quick safety check: Is this a project you created or one you trust? (Like your own code, …).\n\n" +
 			"Claude Code'll be able to read, edit, and execute files here.\n\n"
@@ -187,33 +189,27 @@ func TestIssue7619PartialRewordedDialogIsHeldWhicheverClauseAlsoReadsIt(t *testi
 			screen := claudeScreenOf(content)
 			require.True(t, claudeMCPTrustFooterIsLast(screen),
 				"the older MCP clause must read the frame as its own, or this test proves nothing:\n%s", content)
-			require.Equal(t, claudeFolderTrustPartial, claudeFolderTrustDialogOf(screen), "%s", content)
+			_, footerUnfinished := claudeFolderTrustRead(screen)
+			require.True(t, footerUnfinished, "the reworded dialog must read whole but for its footer:\n%s", content)
 			require.False(t, claudeTrustPromptPresent(screen),
-				"no clause may answer a pane whose reworded dialog reads partial:\n%s", content)
+				"no clause may answer a reworded dialog whose footer is not yet whole:\n%s", content)
 			requireHeldWithoutAKey(t, content, fmt.Sprintf("the review's frame, footer painted as far as %q", footer))
 		}
 	}
 
-	rule := strings.Repeat("─", 40)
-	wrapped := strings.Join([]string{
-		rule, "❯ ", rule, "",
-		"Quick safety check: Is this a project",
-		"you created or one you trust? (Like your",
-		"own code, …).",
-		"",
-		"Claude Code'll be able to read, edit,",
-		"and execute files here.",
-		"",
-		"New MCP server found in .mcp.json: probe",
-		"Do you trust this new MCP server?",
-		"❯ No, exit",
-		"  Yes, I trust this folder",
-		"  Yes",
-		"  No",
-		rewordedTrustFooter,
-	}, "\n")
-	screen := claudeScreenOf(wrapped)
-	require.True(t, claudeMCPTrustFooterIsLast(screen), "the older MCP clause must read the frame as its own")
-	require.Equal(t, claudeFolderTrustPartial, claudeFolderTrustDialogOf(screen))
-	requireHeldWithoutAKey(t, wrapped, "the review's frame at 40 columns, its question wrapped, its footer whole")
+	box := "╭────────────────────────────────────╮\n" +
+		"│ ! ls                               │\n" +
+		"│ Quick safety check: Is this a project you created or one you trust? │\n" +
+		"╰────────────────────────────────────╯\n"
+	legacy := "Do you trust the files in this folder?\n\n/home/u/proj\n\n" +
+		"Claude Code may read files in this\nfolder. Reading untrusted files may\nlead Claude Code to behave in\nunexpected ways.\n\n" +
+		"❯ 1. Yes, proceed\n  2. No, exit\n\n" + legacyTrustFooter
+	content := box + legacy
+	verdict, footerUnfinished := claudeFolderTrustRead(claudeScreenOf(content))
+	require.Equal(t, claudeFolderTrustPartial, verdict, "the quote opens a reworded region the legacy rows break")
+	require.False(t, footerUnfinished)
+	handled, cmds := runTrustPromptCheck(t, ProgramClaude, content)
+	require.True(t, handled)
+	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+		"the live legacy dialog under the quoting composer keeps its Enter")
 }

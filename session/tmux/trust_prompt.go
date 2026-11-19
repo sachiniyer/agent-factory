@@ -470,13 +470,14 @@ func claudeTrustPromptPresent(screen visibleText) bool {
 	// a project you created or one you trust? … ❯ Yes, I trust this folder /
 	// No, exit … Enter to confirm · Esc to cancel"), read from the trailing
 	// region (claudeFolderTrustDialogOf, #7271).
-	folder := claudeFolderTrustDialogOf(screen)
-	if folder == claudeFolderTrustPartial {
-		// The reworded dialog owns the pane's trailing region and is not yet
-		// whole. No clause answers it, whichever other one also reads the
-		// pane: an Enter another clause would tap lands on the dialog's
-		// preselected "No, exit", which quits Claude Code (#7619 review,
-		// R1). CheckAndHandleTrustPrompt holds it as partial.
+	folder, footerUnfinished := claudeFolderTrustRead(screen)
+	if footerUnfinished {
+		// The reworded dialog reads whole but for its footer row, begun and
+		// not yet whole (#7618). No clause answers it, whichever other one
+		// also reads the pane: the older MCP clause takes any row that starts
+		// "Enter to confirm" for its footer, and its Enter lands on the
+		// dialog's preselected "No, exit", which quits Claude Code (#7619
+		// review, R1). CheckAndHandleTrustPrompt holds it as partial.
 		return false
 	}
 	reworded := folder == claudeFolderTrustComplete

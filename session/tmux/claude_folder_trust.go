@@ -121,6 +121,16 @@ const (
 // moment after one Ctrl-C (#7275 review). So such a region is partial, and
 // holds without a key.
 func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
+	verdict, _ := claudeFolderTrustRead(screen)
+	return verdict
+}
+
+// claudeFolderTrustRead is claudeFolderTrustDialogOf's verdict, and whether it
+// is partial only because the footer row is not yet whole: a dialog that reads
+// whole but for its footer row, begun, the partial #7618 makes of a frame that
+// read complete before it. claudeTrustPromptPresent lets no clause answer such
+// a pane (#7619 review, R1).
+func claudeFolderTrustRead(screen visibleText) (verdict claudeFolderTrustVerdict, footerUnfinished bool) {
 	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
 	lastPainted, firstCursor := -1, -1
@@ -137,21 +147,23 @@ func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 	if !ok {
 		if claudeFolderTrustHeadless(lines, rows) || claudeFolderTrustFooterOnly(lines, rows) ||
 			claudeFolderTrustTail(lines, rows) {
-			return claudeFolderTrustUnreadable
+			return claudeFolderTrustUnreadable, false
 		}
-		return claudeFolderTrustNone
+		return claudeFolderTrustNone, false
 	}
-	verdict := claudeFolderTrustRegionOf(lines, rows, first, last, lastPainted)
+	verdict = claudeFolderTrustRegionOf(lines, rows, first, last, lastPainted, &footerUnfinished)
 	if firstCursor >= 0 && firstCursor < first && verdict != claudeFolderTrustNone {
 		// A ❯ above the question: no composer below, so hold, never answer.
-		return claudeFolderTrustPartial
+		return claudeFolderTrustPartial, false
 	}
-	return verdict
+	return verdict, footerUnfinished
 }
 
 // claudeFolderTrustRegionOf reads the region the question opens, from rows
-// first to last, through the grammar claudeFolderTrustDialogOf documents.
-func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, last, lastPainted int) claudeFolderTrustVerdict {
+// first to last, through the grammar claudeFolderTrustDialogOf documents. It
+// sets footerUnfinished when it reads the region partial only because its
+// footer row is not yet whole.
+func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, last, lastPainted int, footerUnfinished *bool) claudeFolderTrustVerdict {
 	wrapped := first != last
 	footerRow := func(i int) bool {
 		// A ❯ row is never the footer: it is a draft that reads like one.
@@ -253,6 +265,7 @@ func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, las
 		// footer row that is not yet a whole footer is the dialog still being
 		// painted: hold, and answer the frame that shows it whole (#7618), as
 		// the legacy dialog does (#7584).
+		*footerUnfinished = true
 		return claudeFolderTrustPartial
 	}
 	return claudeFolderTrustComplete
