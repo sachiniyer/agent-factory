@@ -861,8 +861,9 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// pwsh and nu are not POSIX-decoded (approved scope answer): the
 		// -c operand's TEXT refuses only when it names a protected
 		// variable or the account's agent at identifier boundaries;
-		// anything else admits. Encoded and script/interactive forms
-		// stay refused — the gate cannot read their input.
+		// anything else admits. Encoded and interactive/stdin forms
+		// stay refused — the gate cannot read their input — while
+		// script files are the stated limit like `bash ./build.sh`.
 		{"pwsh -c Get-Process", false},
 		{"pwsh -Command 'Get-Process'", false},
 		{"pwsh -c '$env:CODEX_HOME=\"/o\"; codex'", true},
@@ -872,17 +873,22 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// Expansion text is a name the gate cannot see — the accepted
 		// over-refusal the closure rule states in docs/usage-limits.md.
 		{"pwsh -c 'echo $HOME'", true},
-		{"pwsh script.ps1", true},
-		{"pwsh", true},
-		{"pwsh -NoProfile", true},
+		// Script files, the bare REPL and config loads are the stated
+		// file limit — the gate judges the visible command line, and a
+		// file's content is outside it (round 6 decision on the PR).
+		{"pwsh script.ps1", false},
+		{"pwsh", false},
+		{"pwsh -NoProfile", false},
+		// -NonInteractive reads its commands from stdin — the `sh -s`
+		// class, still refused.
 		{"pwsh -NonInteractive", true},
 		{"pwsh -Version", false},
 		{"nu -c 'ls'", false},
 		{"nu -c '$env.CODEX_HOME = \"/o\"; codex'", true},
 		{"nu -c 'codex'", true},
 		{"nu -e 'codex'", true},
-		{"nu script.nu", true},
-		{"nu", true},
+		{"nu script.nu", false},
+		{"nu", false},
 		{"nu --stdin", true},
 		{"nu --version", false},
 		// The environment-source writers: busctl/gdbus's SetEnvironment
@@ -933,7 +939,7 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"tmux neww make -j4", false},
 		{"sudo machinectl shell host codex", true},
 		{"sudo ssh host codex", true},
-		{"sudo pwsh", true},
+		{"sudo pwsh", false},
 		// The verdict no longer depends on parsing a launcher's option
 		// grammar (the third Codex round): every literal word is a
 		// possible command start or environment write, so a word naming
@@ -962,9 +968,11 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"pwsh -Command -", true},
 		{"pwsh -NoExit -Command Get-Date", true},
 		{"pwsh -enc 'aGVsbG8=' -c Get-Process", true},
-		{"pwsh -File x -c Get-Process", true},
+		// -File is the stated file limit — script content is outside
+		// the visible command line.
+		{"pwsh -File x -c Get-Process", false},
 		{"pwsh -NoProfile -c Get-Process", false},
-		{"pwsh -frobnicate -c Get-Process", true},
+		{"pwsh -frobnicate -c Get-Process", false},
 		// gdbus parses its operands as GVariant text — an escaped name
 		// decodes before the writer check, and an escape the decoder
 		// does not know refuses (Codex P1 on this head).
@@ -1023,8 +1031,11 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"ssh localhost -t codex", true},
 		{"tmux list-sessions \\; new-window codex", true},
 		{"tmux list-sessions \\; new-window make", false},
-		{"nu --config /tmp/override.nu -c 'ls'", true},
-		{"nu --env-config /tmp/override.nu -c 'ls'", true},
+		// nu's config-file flags are the stated file limit now (round
+		// 6 decision on the PR); -e stays refused — it drops to the
+		// REPL's stdin after its command.
+		{"nu --config /tmp/override.nu -c 'ls'", false},
+		{"nu --env-config /tmp/override.nu -c 'ls'", false},
 		{"nu -e 'ls'", true},
 		{"nu -c 'ls'", false},
 		// Codex round 4 on the every-reading head — three more
@@ -1038,24 +1049,36 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"ssh -o 'RemoteCommand=ls' host", false},
 		{`ssh -oProxyCommand=co""dex host`, true},
 		{"ssh -o 'LogLevel=INFO' host", false},
-		// tmux's file-backed command input and nix's file/stdin
-		// expression sources refuse the way `sh < f` and `sh -s`
-		// refuse — input the gate cannot read.
-		{"tmux source-file /tmp/account.conf", true},
-		{"tmux source /tmp/account.conf", true},
-		{"tmux -f /tmp/account.conf new-window make", true},
-		{"tmux -f/tmp/account.conf new-window make", true},
-		{"nix-shell --arg-from-file /tmp/f --run hello", true},
+		// tmux's file-backed command input, ssh's -F config, nix's
+		// file-fed expressions and pwsh/nu script paths are the stated
+		// file limit (round 6 decision on the PR) — commands or config
+		// read from a file admit the way `bash ./build.sh` does; the
+		// stdin-fed forms still refuse like `sh -s`.
+		{"tmux source-file /tmp/account.conf", false},
+		{"tmux source /tmp/account.conf", false},
+		{"tmux -f /tmp/account.conf new-window make", false},
+		{"tmux -f/tmp/account.conf new-window make", false},
+		{"ssh -F /tmp/account.conf host make", false},
+		{"ssh -vF /tmp/account.conf host make", false},
+		{"nix-shell --arg-from-file /tmp/f --run hello", false},
 		{"nix-shell --arg-from-stdin --run hello", true},
+		{"pwsh /tmp/account.ps1 -help", false},
 		// Codex round 5 — the closure rule refuses each with no
 		// per-example code: a mutation spanning option boundaries
-		// still names a protected name in one piece, a
+		// still names a protected name in one piece, and a
 		// whitespace-separated option value still carries the
-		// quote-obfuscated agent, and an attached hidden operand
-		// classifies on its own literal.
+		// quote-obfuscated agent.
 		{`watch -n 1 export 'CODEX_""HOME=/o; codex'`, true},
 		{`ssh -o 'RemoteCommand co""dex' host`, true},
-		{"nu --log-level=info --config=/tmp/override.nu -c ls", true},
+		{"nu --log-level=info --config=/tmp/override.nu -c ls", false},
+		// Codex round 6 — pieces normalize the way the downstream
+		// shell does: backslash escapes resolve, so an escaped name
+		// cannot hide; $'...'/$"..." are dynamic text.
+		{`watch 'export CODEX_\HOME=/o; co\dex'`, true},
+		{`ssh host 'co\dex'`, true},
+		{`tmux new-window 'vim CODEX\_HOME.md'`, true},
+		{`watch $'codex'`, true},
+		{`ssh host $"codex"`, true},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state

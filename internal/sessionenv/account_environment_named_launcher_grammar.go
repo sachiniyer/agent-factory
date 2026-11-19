@@ -12,9 +12,13 @@ import "strings"
 // refuses when any piece names one, carries command-substitution or
 // dynamic-expansion text, or spells input the gate cannot see. What this
 // file holds is input-source classification only: which WORDS name a
-// file, a descriptor, stdin or a language the gate does not parse — the
-// same refusal class the gate gives `sh < f` and `sh -s`, applied by
-// word identity rather than by option position.
+// descriptor, stdin or a language the gate does not parse — the same
+// refusal class the gate gives `sh -s`, applied by word identity rather
+// than by option position. Commands and config read from a FILE are the
+// stated limit in docs/usage-limits.md — `ssh -F`, `tmux -f`/
+// `source-file`, a pwsh/nu script path admit the way `bash ./build.sh`
+// does: the gate judges the visible command line, and a file's content
+// is outside it.
 
 // ---------- hidden-input words ----------
 
@@ -26,43 +30,32 @@ import "strings"
 // the gate cannot attribute is already input it cannot see.
 var namedLauncherHiddenWords = map[string][]string{
 	// --env-fd sources the child environment from a descriptor;
-	// --unset-env-fd clears the same way.
+	// --unset-env-fd clears the same way. A descriptor of environment
+	// data is not the file limit — it is an injection vector the pane
+	// cannot see at all.
 	"flatpak-spawn": {"--env-fd", "--unset-env-fd"},
-	// -F sources ssh's options from a config file that can carry
-	// ProxyCommand — a command the gate cannot read. Lowercase -f is
-	// ssh's background flag, not input.
-	"ssh": {"-F"},
-	// tmux -f sources a config file — a file is command input the gate
-	// cannot see (set-environment/new-window lines), and
-	// source-file/source executes commands straight from files. Same
-	// refusal class the gate gives `sh < f` and `sh -s`: file- or
-	// stdin-fed command input is unproven.
-	"tmux": {"-f", "source-file", "source"},
 	// Nix -E/--expr/--arg/--argstr/-I/--include take Nix EXPRESSIONS —
 	// code the gate does not parse, evaluated before the shell starts;
-	// --arg-from-file/--arg-from-stdin read the same input from a file
-	// or stdin.
+	// --arg-from-stdin reads the same input from stdin.
 	"nix-shell": {"-E", "--expr", "--arg", "--argstr", "-I", "--include",
-		"--arg-from-file", "--arg-from-stdin"},
+		"--arg-from-stdin"},
 	"nix": {"-E", "--expr", "--arg", "--argstr", "-I", "--include",
-		"--arg-from-file", "--arg-from-stdin"},
+		"--arg-from-stdin"},
 	// pwsh's hidden forms (case-insensitive — PowerShell resolves
 	// options case-insensitively): -EncodedCommand and its -e/-enc
 	// abbreviations carry base64 the text cannot show, -File and the
 	// console/settings/configuration/pipe-name options read files and
 	// channels, -NoExit/-Interactive/-Login keep or open an interactive
 	// stdin, and a bare `-` is the stdin marker.
-	"pwsh": {"-e", "-ec", "-enc", "-encodedcommand", "-f", "-file",
-		"-psconsolefile", "-custompipename", "-noexit", "-i",
-		"-interactive", "-l", "-login", "-settingsfile",
-		"-configurationname", "-configurationfile", "-"},
+	"pwsh": {"-e", "-ec", "-enc", "-encodedcommand",
+		"-custompipename", "-noexit", "-i", "-interactive", "-l",
+		"-login", "-noninteractive", "-configurationname", "-"},
 	// nu's hidden forms (clap spellings, case-sensitive): the config and
 	// plugin files are evaluated, -e/--execute falls through to the REPL
 	// after its command, and stdin/login/mcp/ide forms all read input
 	// the gate cannot see.
-	"nu": {"-e", "--execute", "--config", "--env-config",
-		"--plugin-config", "--stdin", "-i", "--interactive", "-l",
-		"--login", "-m", "--mcp", "--ide-grep", "--ide-jump",
+	"nu": {"-e", "--execute", "--stdin", "-i", "--interactive",
+		"-l", "--login", "-m", "--mcp", "--ide-grep", "--ide-jump",
 		"--ide-hover", "--ide-complete", "--ide-check", "--ide-ast", "-"},
 }
 
@@ -76,7 +69,7 @@ var namedLauncherHiddenWords = map[string][]string{
 // so only its long names matter for `--` prefix clashes.
 var namedLauncherNonHiddenNames = map[string][]string{
 	"pwsh": {"-c", "-command", "-commandwithargs", "-nologo",
-		"-noprofile", "-noninteractive", "-sta", "-mta",
+		"-noprofile", "-sta", "-mta",
 		"-outputformat", "-inputformat", "-windowstyle",
 		"-executionpolicy", "-workingdirectory",
 		"-experimentalfeature", "-version", "-v", "-help", "-h", "-?"},
@@ -86,12 +79,11 @@ var namedLauncherNonHiddenNames = map[string][]string{
 		"-v", "--version", "-h", "--help"},
 }
 
-// namedLauncherTailPayloadWords lists, per launcher, the option spellings
-// whose operand is the command string. A payload word at the very end of
-// the tail — or followed only by `-` — reads its command from stdin,
-// which is the same hidden input the table above refuses. Payload words
-// WITH a following operand carry their command as text the piece scan
-// already judges.
+// namedLauncherTailPayloadWords lists, per launcher, the option
+// spellings whose operand is the command string. A payload word at the
+// very end of the tail reads its command from stdin, which is the same
+// hidden input the table above refuses. Payload words WITH a following
+// operand carry their command as text the piece scan already judges.
 var namedLauncherTailPayloadWords = map[string][]string{
 	"pwsh": {"-c", "-command", "-commandwithargs"},
 	"nu":   {"-c", "--commands"},
@@ -103,34 +95,6 @@ var namedLauncherTailPayloadWords = map[string][]string{
 // spelling lands the underscore the raw text cannot see.
 var namedLauncherDecodesOperands = map[string]struct{}{
 	"gdbus": {},
-}
-
-// namedLauncherInfoWords lists, per REPL-class launcher, the flag
-// spellings that print and exit without any command input — a tail
-// carrying one never falls to stdin. pwsh resolves unique single-dash
-// prefixes, so a word that uniquely prefixes an info name is one.
-var namedLauncherInfoWords = map[string][]string{
-	"pwsh": {"-version", "-v", "-help", "-h", "-?"},
-	"nu":   {"-v", "--version", "-h", "--help"},
-}
-
-// literalSpellsInfoWord reports whether literal spells an info flag for
-// the launcher — exactly, or as pwsh's unique single-dash prefix.
-func literalSpellsInfoWord(literal, launcher string) bool {
-	name := literal
-	if launcher == "pwsh" {
-		name = strings.ToLower(name)
-	}
-	for _, word := range namedLauncherInfoWords[launcher] {
-		if name == word {
-			return true
-		}
-		if len(name) > 2 && strings.HasPrefix(name, "-") &&
-			!strings.HasPrefix(name, "--") && strings.HasPrefix(word, name) {
-			return true
-		}
-	}
-	return false
 }
 
 // literalNamesHiddenInput reports whether literal spells a hidden-input

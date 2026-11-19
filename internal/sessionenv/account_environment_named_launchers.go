@@ -24,16 +24,19 @@ import (
 //     variable at identifier boundaries — a piece is every argv word
 //     and every piece of a word split on whitespace, `=`, `;`, `&`,
 //     `|`, quotes and parentheses, and an agent name also matches as a
-//     path basename (`'/opt/agent tools/codex'`, `co""dex` once the
-//     shell's quoting is literalized);
+//     path basename (`'/opt/agent tools/codex'`, `co""dex`/`co\dex`
+//     once the shell's quoting and escapes are normalized);
 //   - a word cannot be read (no literal — a substitution or expansion)
 //     or a literal carries command-substitution or parameter-expansion
 //     text ($ or `) — a name the text cannot see could be constructed
 //     at run time;
 //   - a word spells input the gate cannot see — the per-launcher
-//     hidden-input word table: a file, a descriptor, stdin, or a
-//     language it does not parse — the same refusal class `sh < f`
-//     and `sh -s` get.
+//     hidden-input word table: a descriptor, stdin, or a language it
+//     does not parse — the same refusal class `sh -s` gets. Commands
+//     and config read from a FILE are the stated limit in
+//     docs/usage-limits.md (`ssh -F`, `tmux -f`, a pwsh script path
+//     admit the way `bash ./build.sh` does) — the gate judges the
+//     visible command line.
 //
 // Shells keep #7610's exact `-c` judge — this rule only runs on the
 // launchers named in accountNamedLauncherNames. Work is a single linear
@@ -97,11 +100,11 @@ type namedWordKey struct {
 }
 
 // namedWordVerdict is one word's classification under the closure rule:
-// refuse is the word's own verdict; payload and info carry the flag the
-// tail-level rule needs (a payload word with a following operand is a
-// command the text shows; an info flag exits without input).
+// refuse is the word's own verdict; payload marks a command-string
+// option spelling — one left at the tail's end reads its command from
+// stdin.
 type namedWordVerdict struct {
-	refuse, payload, info bool
+	refuse, payload bool
 }
 
 // namedLauncherTailRefuses applies the closure rule to a named
@@ -112,12 +115,6 @@ type namedWordVerdict struct {
 // the memo that is a literalize per position per word — quadratic.
 // Spending the shared budget down charges each call's scan size, so a
 // pathological nesting still fails closed at the bound.
-//
-// The one tail-level clause: a launcher whose option spellings carry the
-// command string (pwsh's -c/-Command, nu's -c/--commands) reads its
-// command from stdin — the REPL, the script file, or the bare `-` —
-// when no payload operand and no info flag appears anywhere in the tail;
-// that stdin input refuses like `sh -s`.
 func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]struct{}, launcher string, b *reachBudget) bool {
 	if b == nil {
 		b = &reachBudget{left: reachWorkLimit, seen: map[string]bool{}, namedWords: map[namedWordKey]namedWordVerdict{}}
@@ -126,10 +123,7 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 		return true
 	}
 	_, decode := namedLauncherDecodesOperands[launcher]
-	_, repl := namedLauncherTailPayloadWords[launcher]
 	memoize := len(preserved) == 0 && b.namedWords != nil
-	payloadSeen := false
-	infoSeen := false
 	last := len(words) - 1
 	for i, word := range words {
 		key := namedWordKey{word: word, launcher: launcher, last: i == last}
@@ -147,27 +141,16 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 		if verdict.refuse {
 			return true
 		}
-		if verdict.payload && i < last {
-			payloadSeen = true
-		}
-		if verdict.info {
-			infoSeen = true
-		}
 	}
-	// A REPL-class launcher's tail with no command operand and no info
-	// flag reads stdin (pwsh/nu run interactively — script-file
-	// positionals are also words that carry no payload flag, so they
-	// land here): input the gate cannot see, refused like `sh -s`.
-	return repl && !payloadSeen && !infoSeen
+	return false
 }
 
 // namedLauncherWordVerdict classifies ONE tail word: no literal →
 // refuse; a hidden-input spelling → refuse; `$` or backtick text →
 // refuse (a name the text cannot see could be constructed); every piece
-// — the literal, its quote-stripped form, and both split on the
+// — the literal and its shell-normalized form, each split on the
 // delimiter set — checked for the agent and protected names; and a
-// payload flag at the tail's end reads stdin. payload marks a
-// command-string option spelling; info marks a print-and-exit flag.
+// payload flag at the tail's end reads stdin.
 func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launcher string, names, preserved map[string]struct{}) namedWordVerdict {
 	literal, ok := launcherLiteralWord(word)
 	if !ok {
@@ -181,11 +164,8 @@ func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launche
 		literal = decoded
 	}
 	verdict := namedWordVerdict{
-		refuse: literalNamesHiddenInput(literal, launcher),
-	}
-	if !verdict.refuse {
-		verdict.payload = literalSpellsTailPayload(literal, launcher)
-		verdict.info = literalSpellsInfoWord(literal, launcher)
+		refuse:  literalNamesHiddenInput(literal, launcher),
+		payload: literalSpellsTailPayload(literal, launcher),
 	}
 	if verdict.refuse {
 		return verdict
@@ -193,14 +173,15 @@ func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launche
 	if strings.ContainsAny(literal, "$`") {
 		return namedWordVerdict{refuse: true}
 	}
-	// The literal and its quote-stripped form are both judged: a
-	// downstream shell concatenates `co""dex` to `codex`, so the
-	// piece rule sees both the text and what the text becomes.
+	// The literal and its shell-normalized form are both judged: a
+	// downstream shell removes quoting — `co""dex` is `codex` — and
+	// backslash escapes — `co\dex` is `codex` — so the piece rule sees
+	// both the text and what the text becomes.
 	if namedLauncherTextRefuses(literal, names, preserved) {
 		return namedWordVerdict{refuse: true}
 	}
-	if unquoted := stripNamedLiteralQuotes(literal); unquoted != literal &&
-		namedLauncherTextRefuses(unquoted, names, preserved) {
+	if normalized := normalizeNamedLiteral(literal); normalized != literal &&
+		namedLauncherTextRefuses(normalized, names, preserved) {
 		return namedWordVerdict{refuse: true}
 	}
 	if last && verdict.payload {
@@ -211,20 +192,32 @@ func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launche
 	return verdict
 }
 
-// stripNamedLiteralQuotes removes quote characters the way a downstream
-// shell's word joining does — `RemoteCommand=co""dex` is
-// `RemoteCommand=codex` once the remote shell parses it.
-func stripNamedLiteralQuotes(text string) string {
-	if !strings.ContainsAny(text, "'\"`") {
+// normalizeNamedLiteral removes the quoting a downstream shell removes:
+// quote characters disappear (`co""dex` → `codex`) and a backslash
+// escape resolves to its char (`co\dex` → `codex`, `CODEX\_HOME` →
+// `CODEX_HOME`). The piece rule checks this form alongside the raw
+// literal so an escape cannot hide a name the shell would expose.
+func normalizeNamedLiteral(text string) string {
+	if !strings.ContainsAny(text, `'"`+"`\\") {
 		return text
 	}
-	return strings.Map(func(c rune) rune {
+	var out strings.Builder
+	out.Grow(len(text))
+	for i := 0; i < len(text); i++ {
+		c := text[i]
 		switch c {
+		case '\\':
+			i++
+			if i < len(text) {
+				out.WriteByte(text[i])
+			}
 		case '\'', '"', '`':
-			return -1
+			// Quote characters vanish under word joining.
+		default:
+			out.WriteByte(c)
 		}
-		return c
-	}, text)
+	}
+	return out.String()
 }
 
 // namedLauncherTextRefuses runs the piece rule over one text — the text

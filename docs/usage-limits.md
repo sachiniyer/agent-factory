@@ -473,29 +473,26 @@ will not reach the child's environment.
     `ssh localhost -p 2222 codex`, `tmux new-window codex`,
     `flatpak-spawn --env=CODEX_HOME=/o make`, `busctl … SetEnvironment
     as 1 CODEX_HOME=/o`, `tmux list-sessions \; new-window codex` (the
-    `;` split sees the second command's words) and ssh's `-o
-    'RemoteCommand=co""dex'` (the quote-stripped form is checked too —
-    the remote shell concatenates it to `codex`) all refuse, whichever
-    options precede them;
+    `;` split sees the second command's words), ssh's `-o
+    'RemoteCommand=co""dex'` and `watch 'export CODEX_\HOME=/o;
+    co\dex'` all refuse, whichever options precede them — each literal
+    is checked raw AND shell-normalized, quotes and backslash escapes
+    removed the way the downstream shell removes them, so `co""dex`
+    and `co\dex` both check as `codex`;
   - a word does not literalize (a substitution or expansion in the
     argv itself) or its literal carries `$` or backtick text — a name
     the text cannot see could be constructed at run time (`pwsh -c
-    'echo $HOME'` refuses on the `$`, the accepted over-refusal
-    below);
+    'echo $HOME'` refuses on the `$`, `$'codex'`/`$"codex"` are
+    dynamic forms — the accepted over-refusal below);
   - a word spells input the gate cannot see — the per-launcher
-    hidden-input table: a file, a descriptor, stdin, or a language it
-    does not parse (ssh's `-F`, flatpak-spawn's `--env-fd`, nix's
-    expression and `--arg-from-*` flags, tmux's `-f`/`source-file`/
-    `source` command files, `pwsh -File`/`-EncodedCommand`/`-enc`
-    prefixes/`-` stdin/`-Command -`/`-NoExit`, nu's
-    `--config`/`--env-config`/`-e`/`--stdin`), matching each spelling's
-    unique-prefix abbreviations too — the same refusal class `sh < f`
-    and `sh -s` get, so file- and stdin-fed command input is one rule
-    across shells and launchers. A command-string flag left with no
-    operand is that same stdin feed (`pwsh -Command`, `nu -c` alone),
-    and a `pwsh`/`nu` tail carrying no command operand and no info
-    flag runs the REPL — `pwsh`,
-    `pwsh -NoExit`, `nu script.nu` refuse.
+    hidden-input table: a descriptor, stdin, or a language it does not
+    parse (flatpak-spawn's `--env-fd`, nix's expression flags and
+    `--arg-from-stdin`, `pwsh -EncodedCommand`/`-enc` prefixes/`-`
+    stdin/`-Command -`/`-NoExit`/`-NonInteractive`, nu's `-e`/
+    `--stdin`), matching each spelling's unique-prefix abbreviations
+    too — the same refusal class `sh -s` gets. A command-string flag
+    left with no operand is that same stdin feed (`pwsh -Command`,
+    `nu -c` alone).
 
   `gdbus` call operands are GVariant text decoded through their
   escapes before the piece check (`['CODEX\u005fHOME=/o']` still names
@@ -517,7 +514,13 @@ will not reach the child's environment.
   162-row master-parity set plus the `ssh host make`, `tmux
   new-window htop`, `watch -n 5 'kubectl get pods'` admits) loses no
   row to the rule; the losses are the accidental-mention rows above,
-  stated here rather than predicted away.
+  stated here rather than predicted away. Commands and config read
+  from a FILE are the stated limit, not a refusal: `ssh -F
+  /tmp/cfg`, `ssh -vF /tmp/cfg`, `tmux -f /tmp/cfg`,
+  `tmux source-file /tmp/cfg`, `pwsh script.ps1`, `nu script.nu`,
+  `nu --config /tmp/override.nu` and `nix-shell --arg-from-file
+  /tmp/f` all admit the way `bash ./build.sh` does — the gate judges
+  the visible command line, and a file's content is outside it.
 - **Shell names match what the program IS** — `KnownShellName`
   recognizes a shell by its program, not its spelling: the `r`-prefix
   restricted variants (`rbash`, `rksh`, `rzsh`, `rsh`) and versioned
