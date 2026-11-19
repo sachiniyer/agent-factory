@@ -3,8 +3,10 @@ package session
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -699,6 +701,153 @@ func accountScopeSeed(agent string) map[string][]byte {
 	return map[string][]byte{
 		".gemini/settings.json": []byte(`{"security":{"auth":{"selectedType":"oauth-personal"}}}` + "\n"),
 	}
+}
+
+// accountStageSeed is the non-credential seed for a STAGED swap scope: the
+// provision-time accountScopeSeed plus, for the agents that DISCOVER af's
+// guidance under the account's config root, the af-managed skill file itself.
+//
+// The rotation replaces the whole live directory with this staged one, and the
+// in-sandbox swap build resolves its skill target unscoped — into the OUTGOING
+// live scope, which the rotation then renames to account.prev and deletes
+// (#7368). The staged scope is therefore the only place the guidance can
+// survive from, exactly as a local swap lands it under the incoming account's
+// directory. The tar path comes from the same skills-base functions the
+// launch's own write resolves through, so a staged scope and a scoped local
+// launch cannot disagree on the shape; and it rides the credential archive
+// rather than a later pass, so a declared sandbox_agent_config file landing
+// afterward can still win — the precedence the marker guard already gives a
+// user's own file. Only the discovery seams take one: claude's guidance rides
+// --plugin-dir outside the scope, and the remaining agents are not
+// account-scopable. The consent check is the same global_agent_skills gate
+// the launch's write honors — asked of the ONE answer this swap acts on, the
+// snapshot the in-sandbox relaunch installs (swapSkillConsent, #7644), never
+// of the daemon's live config, which a swap does not refresh. An answer af
+// cannot establish is unknown, and unknown writes nothing — the same arm an
+// explicit "no" takes.
+func accountStageSeed(agent string, consent globalSkillConsent) map[string][]byte {
+	seed := accountScopeSeed(agent)
+	rel, scoped := scopeDiscoveredSkillRel(agent)
+	if !scoped || consent != globalSkillGranted {
+		return seed
+	}
+	if seed == nil {
+		seed = map[string][]byte{}
+	}
+	seed[rel] = []byte(afSkillDoc)
+	return seed
+}
+
+// scopeDiscoveredSkillRel is the account-scope-relative path of af's managed
+// skill for the agents that DISCOVER guidance under the account's config root
+// — codex under skills/, gemini under .gemini/skills — and false for the rest:
+// claude's guidance rides --plugin-dir outside the scope, and the remaining
+// agents are not account-scopable. The path derives from the same skills-base
+// functions the launch's own write resolves through, so a staged scope and a
+// scoped local launch cannot disagree on the shape.
+func scopeDiscoveredSkillRel(agent string) (string, bool) {
+	var base func(string) string
+	switch agent {
+	case tmux.ProgramCodex:
+		base = codexSkillsBase
+	case tmux.ProgramGemini:
+		base = geminiSkillsBase
+	default:
+		return "", false
+	}
+	return filepath.ToSlash(filepath.Join(base(""), afSkillDirName, "SKILL.md")), true
+}
+
+// swapSkillConsent is this swap's ONE answer to "may af manage the agent's
+// config root?", read from the policy snapshot the in-sandbox agent-server
+// acts under — never from the daemon's live config (#7644). The agent-server
+// installs that snapshot at launch (--policy-file af-policy.json →
+// InstallAgentPolicy → every LoadConfig it makes, including the relaunch this
+// swap is about to run), and a swap does not refresh it, so staging from a
+// fresh daemon-side read could act on a different answer than the relaunch —
+// the flap #7644 names, in both directions.
+//
+// spec.AgentPolicy is the byte-exact copy provision shipped — what the server
+// parsed. A workspace rebuilt from the session row after a daemon restart
+// keeps no copy, so the file the server installed it from is read back over
+// the session's own channel: the same file a later agent-server restart would
+// re-install. An answer af cannot establish is UNKNOWN — on this side of the
+// write it must never count as "yes" (the staged scope gets no skill), and
+// the caller reports the loss in the swap's result rather than a log line
+// alone.
+func (w *sandboxWorkspace) swapSkillConsent(timeout time.Duration) (globalSkillConsent, error) {
+	data := w.spec.AgentPolicy
+	if len(data) == 0 {
+		script := "cat " + shellQuote(w.PolicyPath())
+		var out []byte
+		var err error
+		if ls, ok := w.shell.(limitedShell); ok {
+			out, err = ls.RunLimited(timeout, script, accountSyncMaxFileBytes)
+		} else {
+			out, err = w.shell.Run(timeout, script, nil, false)
+			if err == nil && int64(len(out)) > accountSyncMaxFileBytes {
+				err = ErrOutputOverLimit
+			}
+		}
+		if err != nil {
+			// The entry's reason is fixed daemon-local text: out is the host's
+			// own reply — unbounded past the limit, arbitrary bytes, and ';'
+			// could forge extra agent:file entries — so no host-authored bytes
+			// may reach a skip entry, a row, or a warning (#7644 R1). The
+			// underlying error still lands in the daemon log, with the bounded
+			// stderr the sibling refusals carry.
+			reason := w.PolicyPath() + " could not be read on the host"
+			switch {
+			case errors.Is(err, ErrOutputOverLimit):
+				reason = w.PolicyPath() + " is larger than the bound af reads it under"
+			case errors.Is(err, context.DeadlineExceeded):
+				reason = w.PolicyPath() + " timed out while being read"
+			}
+			if detail := accountReadBackStderr(err); detail != "" {
+				log.WarningLog.Printf("account swap: the consent snapshot could not be read: %v: %s", err, detail)
+			} else {
+				log.WarningLog.Printf("account swap: the consent snapshot could not be read: %v", err)
+			}
+			return globalSkillUnknown, fmt.Errorf("af could not confirm whether the sandbox's operator policy grants global_agent_skills: %s", reason)
+		}
+		data = out
+	}
+	policy, err := config.ParseAgentPolicy(data)
+	if err != nil {
+		log.WarningLog.Printf("account swap: the consent snapshot could not be used: %v", err)
+		return globalSkillUnknown, fmt.Errorf("af could not confirm whether the sandbox's operator policy grants global_agent_skills: %s", policySnapshotRefusal(data, err))
+	}
+	if policy.Global.GlobalAgentSkills {
+		return globalSkillGranted, nil
+	}
+	return globalSkillDeclined, nil
+}
+
+// policySnapshotRefusal renders the reason a policy snapshot could not be used
+// as the consent answer, in fixed daemon-local words — ParseAgentPolicy's own
+// message embeds the offending bytes (an unknown field's name is file content,
+// and the host writes the file), so it is logged, never carried in a skip
+// entry (#7644 R1). A version or schema this af does not know reads the same
+// way as damage: the likelier story is that the snapshot was written by
+// another af — a daemon restart onto a newer binary leaves the host's file at
+// the old build's schema, the nightly upgrade case — and that is what the
+// entry says (#7644 R2). The strict parse itself is not loosened.
+func policySnapshotRefusal(data []byte, err error) string {
+	var top any
+	if json.Unmarshal(data, &top) != nil {
+		return "the snapshot is not valid JSON"
+	}
+	var probe struct {
+		Version int `json:"version"`
+	}
+	_ = json.Unmarshal(data, &probe)
+	if probe.Version != config.AgentPolicyVersion {
+		return fmt.Sprintf("the snapshot is from another af version (version %d; this af reads %d)", probe.Version, config.AgentPolicyVersion)
+	}
+	if strings.Contains(err.Error(), "unknown field") {
+		return "the snapshot is from another af version"
+	}
+	return "the snapshot is not valid"
 }
 
 // AccountScopeAgentEnv names the variable the launch's identity file sets for an

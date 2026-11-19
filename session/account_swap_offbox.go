@@ -226,6 +226,9 @@ func (w *sandboxWorkspace) PrevAccountDir() string { return w.AccountDir() + acc
 // stageAccountNext copies the incoming account's credential files into the staging
 // directory, the way syncAccountIn fills the live scope, and returns their
 // versions — the baseline the account's own later write-backs are judged against.
+// The staged scope is what the rotation moves into place, so it must also carry
+// the af-managed guidance file the incoming agent will look for in the scope it
+// lands in (accountStageSeed, #7368).
 // An existing staging directory is replaced, so a failed earlier attempt leaves
 // nothing behind to be mistaken for this one.
 func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessionenv.Account) (map[string]string, []string, error) {
@@ -238,7 +241,16 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 	} else if !apply {
 		return nil, nil, fmt.Errorf("account %q cannot be staged: this session carries no synced account", acct.Name)
 	}
-	archive, versions, err := buildAccountArchive(acct.Dir, accountCredentialRel[acct.Agent], accountScopeSeed(acct.Agent))
+	// The consent answer that decides the staged scope's af skill is the one
+	// the in-sandbox relaunch will act on — the policy snapshot the
+	// agent-server was launched with, never the daemon's live config, which a
+	// swap does not refresh (#7644). Only a scope-discovered agent has a skill
+	// at stake; for the rest the answer is moot and never resolved.
+	consent, consentErr := globalSkillUnknown, error(nil)
+	if _, scoped := scopeDiscoveredSkillRel(acct.Agent); scoped {
+		consent, consentErr = w.swapSkillConsent(timeout)
+	}
+	archive, versions, err := buildAccountArchive(acct.Dir, accountCredentialRel[acct.Agent], accountStageSeed(acct.Agent, consent))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -259,6 +271,17 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 	skipped, err := w.syncAgentConfigInto(sshProvisionStepTimeout, w.NextAccountDir())
 	if err != nil {
 		return nil, nil, err
+	}
+	if consentErr != nil {
+		// The consent answer could not be established, so the staged scope
+		// holds no af-managed skill — the same kind of "the incoming scope is
+		// missing what af would have placed" a refused sandbox_agent_config
+		// file is, and it rides the same list to the row and the handoff
+		// warning rather than a log line alone (#7644, #6337).
+		rel, _ := scopeDiscoveredSkillRel(acct.Agent)
+		entry := fmt.Sprintf("%s:%s: %v", acct.Agent, rel, consentErr)
+		log.WarningLog.Printf("account swap: staging af's skill skipped: %s", entry)
+		skipped = append(skipped, entry)
 	}
 	return versions, skipped, nil
 }

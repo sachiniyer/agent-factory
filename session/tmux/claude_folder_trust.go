@@ -87,7 +87,8 @@ const (
 //	option block  one unbroken run of rows holding the "Yes, I trust this
 //	              folder" row, begun by the first option row below the body
 //	closing frame optional, a frame rule directly above the footer
-//	footer        "Enter to confirm…", then only blank rows and frame chrome
+//	footer        a whole claudeTrustFooters row, then only blank rows and
+//	              frame chrome
 //
 // A ❯ row above the question is no part of that: a launch modal owns the pane
 // from the top. But it is no composer BELOW the dialog either, so it does not
@@ -95,7 +96,9 @@ const (
 //
 // Partial is a proper prefix of that. Claude Code paints top-down, so a capture
 // can hold the question and body with no options yet, some options, or all of
-// them with no footer — its last row possibly cut short mid-paint.
+// them with no footer or with a footer row not yet whole — its last row
+// possibly cut short mid-paint. Every build paints the footer as the dialog's
+// last row (claudeTrustFooters), so only a whole one ends the paint (#7618).
 //
 // Unreadable is the whole dialog with a row af reads by wrapped: the question,
 // the affirmative label or the footer. Claude Code's renderer wraps its own
@@ -118,6 +121,16 @@ const (
 // moment after one Ctrl-C (#7275 review). So such a region is partial, and
 // holds without a key.
 func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
+	verdict, _ := claudeFolderTrustRead(screen)
+	return verdict
+}
+
+// claudeFolderTrustRead is claudeFolderTrustDialogOf's verdict, and whether it
+// is partial only because the footer row is not yet whole: a dialog that reads
+// whole but for its footer row, begun, the partial #7618 makes of a frame that
+// read complete before it. claudeTrustPromptPresent lets no clause answer such
+// a pane (#7619 review, R1).
+func claudeFolderTrustRead(screen visibleText) (verdict claudeFolderTrustVerdict, footerUnfinished bool) {
 	lines := screen.lines()
 	rows := make([]claudeTrustRow, len(lines))
 	lastPainted, firstCursor := -1, -1
@@ -134,21 +147,23 @@ func claudeFolderTrustDialogOf(screen visibleText) claudeFolderTrustVerdict {
 	if !ok {
 		if claudeFolderTrustHeadless(lines, rows) || claudeFolderTrustFooterOnly(lines, rows) ||
 			claudeFolderTrustTail(lines, rows) {
-			return claudeFolderTrustUnreadable
+			return claudeFolderTrustUnreadable, false
 		}
-		return claudeFolderTrustNone
+		return claudeFolderTrustNone, false
 	}
-	verdict := claudeFolderTrustRegionOf(lines, rows, first, last, lastPainted)
+	verdict = claudeFolderTrustRegionOf(lines, rows, first, last, lastPainted, &footerUnfinished)
 	if firstCursor >= 0 && firstCursor < first && verdict != claudeFolderTrustNone {
 		// A ❯ above the question: no composer below, so hold, never answer.
-		return claudeFolderTrustPartial
+		return claudeFolderTrustPartial, false
 	}
-	return verdict
+	return verdict, footerUnfinished
 }
 
 // claudeFolderTrustRegionOf reads the region the question opens, from rows
-// first to last, through the grammar claudeFolderTrustDialogOf documents.
-func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, last, lastPainted int) claudeFolderTrustVerdict {
+// first to last, through the grammar claudeFolderTrustDialogOf documents. It
+// sets footerUnfinished when it reads the region partial only because its
+// footer row is not yet whole.
+func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, last, lastPainted int, footerUnfinished *bool) claudeFolderTrustVerdict {
 	wrapped := first != last
 	footerRow := func(i int) bool {
 		// A ❯ row is never the footer: it is a draft that reads like one.
@@ -244,6 +259,14 @@ func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, las
 	}
 	if wrapped || !label || !whole {
 		return claudeFolderTrustUnreadable
+	}
+	if !claudeTrustFooterWhole(rows[footer].label) {
+		// The footer is the dialog's last row, and it is painted last. A
+		// footer row that is not yet a whole footer is the dialog still being
+		// painted: hold, and answer the frame that shows it whole (#7618), as
+		// the legacy dialog does (#7584).
+		*footerUnfinished = true
+		return claudeFolderTrustPartial
 	}
 	return claudeFolderTrustComplete
 }

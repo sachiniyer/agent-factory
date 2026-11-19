@@ -81,6 +81,9 @@ func TestCodexAgentConfigSurvivesFreshSwap(t *testing.T) {
 		// Provision records the operator's selection on the spec; the swap
 		// stages it from there, never by re-reading the global config.
 		AgentConfigFiles: []string{"codex:config.toml"},
+		// And the consent snapshot it shipped beside the session — the answer
+		// the swap's staging and the in-sandbox relaunch both act on (#7644).
+		AgentPolicy: swapPolicyBytes(t, false),
 	}}
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
@@ -140,7 +143,10 @@ func TestCodexFreshSwapKeepsAnEmptyProvisionSelection(t *testing.T) {
 	// Provision ran while the global selection was empty: no files on the spec
 	// and restored=false — indistinguishable from a restored workspace before
 	// the restored flag existed, which is the conflation being tested here.
-	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target, Program: tmux.ProgramCodex}}
+	w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{
+		Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target, Program: tmux.ProgramCodex,
+		AgentPolicy: swapPolicyBytes(t, false), // the snapshot provision shipped (#7644)
+	}}
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
 
@@ -214,6 +220,9 @@ func TestCodexAgentConfigSurvivesSwapOnAReattachedSession(t *testing.T) {
 	rw := rp.account
 	require.NotNil(t, rw)
 	require.Empty(t, rw.spec.AgentConfigFiles, "restore repopulates no AgentConfigFiles (#5948)")
+	// The row keeps no copy of the shipped policy either; the file provision
+	// left beside the session is what the swap reads the consent from (#7644).
+	require.NoError(t, os.WriteFile(rw.PolicyPath(), swapPolicyBytes(t, false), 0o600))
 
 	srv := &codexSwapServer{live: rw.AccountDir(), next: rw.NextAccountDir(), scope: rw.AccountDir(), can: true}
 	t.Setenv("CODEX_HOME", rw.AccountDir())
