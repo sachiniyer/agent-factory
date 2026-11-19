@@ -382,16 +382,24 @@ will not reach the child's environment.
   '/bin/sh -i < ./script'` and `sh -c '/bin/sh -i' < ./script` refuse
   for the same shell-fed-stdin, and the reset check reaches a decoded
   agent there too (`sudo sh -c 'codex'` refuses, `sudo -E sh -c
-  'codex'` runs). Refusal stays for what the
+  'codex'` runs). EVERY word that can be the executed shell is decoded
+  this way — a `su`/`runuser`/`script`/`env` word in front does not
+  hide a later shell's `-c` behind that runner's own option grammar
+  (`env -u su sh -ce 'unset CODEX_HOME; codex'` refuses). Refusal stays for what the
   gate cannot decode: a dynamic or unparseable payload (`sh -c "$x"`),
   a missing operand (`sh -c`), a script-file form (`sh script.sh`),
   an interactive/stdin spelling (`sh -i`, `sh -s`), an option letter it
   cannot model or one that changes what an assignment word does (`-k`,
-  `-o keyword`, any `--long` option, `-O`), and shells
+  any `--long` option, `-O`), `-o` naming `keyword` — bash reads the
+  `-o` option's name from the NEXT argv word, so `-o keyword`, `-oe
+  keyword` and `-c -ox keyword` all refuse — and shells
   whose `-c` still reads a startup file (`zsh`, `csh`, `tcsh`, `fish`
-  read zshenv/.cshrc/config.fish even for `-c` — bash's BASH_ENV and
-  ksh's ENV name a file only through the environment, which is the
-  gate's stated limit). A bare `sh`, `bash` or `zsh` invocation stays
+  read zshenv/.cshrc/config.fish even for `-c`, and ksh's `-E` reads
+  ENV/kshrc the same way — bash's BASH_ENV and ksh's ENV name a file
+  only through the environment, which is the
+  gate's stated limit; `-l` stays admitted since a non-interactive `-c`
+  login shell has no extra input the gate cannot see). A bare `sh`,
+  `bash` or `zsh` invocation stays
   refused as before — only the exact `/bin/sh -i` tab form is proven.
 - **Hidden inputs refuse** — a flag that loads arguments or
   environment from a file or file descriptor puts the real command

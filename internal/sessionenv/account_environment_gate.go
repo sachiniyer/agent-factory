@@ -39,13 +39,18 @@ func accountEnvironmentGateProven(command string, names map[string]struct{}, dep
 	if depth <= 0 {
 		return false
 	}
+	// The payload verdict runs first: it is the cheap check (one linear
+	// collection plus a deduped candidate set) and it refuses early the
+	// shapes the mutation walk would spend its shadowed-child budget on —
+	// a later `sh` word is itself a candidate whose bare-shell judgement
+	// is unproven (independent-review P2 on this head).
+	if decodedShellPayloadVerdict(command, names, depth) != shellPayloadClean {
+		return false
+	}
 	if commandMutatesAccountEnvironment(command, names) {
 		return false
 	}
-	if commandFeedsProvenShell(command, depth) {
-		return false
-	}
-	return decodedShellPayloadVerdict(command, names, depth) == shellPayloadClean
+	return !commandFeedsProvenShell(command, depth)
 }
 
 // decodedShellPayloadVerdict reports the first failing check inside any
@@ -109,14 +114,22 @@ func filePayloadVerdict(file *syntax.File, names map[string]struct{}, depth int)
 	return verdict
 }
 
-// callRunnerPayloadCandidates returns the `-c` payload candidates for the
-// FIRST literal argv word naming a command-string runner. Decoding only
-// the first runner head is complete: every later runner head in the same
-// call is itself a word inside this tail's candidate set, and decoding
-// only once keeps a call with N runner words O(N) instead of O(N²) (Codex
-// P2 on this head).
+// callRunnerPayloadCandidates returns the `-c` payload candidates for a
+// call, decoded with EACH runner family's grammar: the first shell-named
+// word contributes the literals after the first `-c` cluster in its tail
+// (every later shell head's set is a subset — its `-c` cluster lies inside
+// the same range), and the first su/runuser/script-named word contributes
+// the getopt payload spellings in its tail. Decoding each family once is
+// complete — a word that merely precedes a runner (`env -u su sh -ce x`)
+// cannot hide the shell's payload behind su's attached-operand reading —
+// and collecting each family's union once keeps the scan O(argv) rather
+// than O(runners × argv) (independent-review P1/P2 on this head).
+// Candidates are deduped so a repeated string is gated once.
 func callRunnerPayloadCandidates(args []*syntax.Word) []string {
-	for i := range args {
+	var candidates []string
+	seen := make(map[string]struct{})
+	shellDone, runnerDone := false, false
+	for i := 0; i < len(args) && !(shellDone && runnerDone); i++ {
 		literal, ok := launcherLiteralWord(args[i])
 		if !ok {
 			continue
@@ -125,7 +138,26 @@ func callRunnerPayloadCandidates(args []*syntax.Word) []string {
 		if _, ok := commandRunnerPrograms[base]; !ok {
 			continue
 		}
-		return runnerPayloadCandidates(base, args[i+1:])
+		var next []string
+		if KnownShellName(base) {
+			if shellDone {
+				continue
+			}
+			shellDone = true
+			next = shellDashCPayloadCandidates(args[i+1:])
+		} else {
+			if runnerDone {
+				continue
+			}
+			runnerDone = true
+			next = runnerPayloads(args[i+1:])
+		}
+		for _, payload := range next {
+			if _, dup := seen[payload]; !dup {
+				seen[payload] = struct{}{}
+				candidates = append(candidates, payload)
+			}
+		}
 	}
-	return nil
+	return candidates
 }

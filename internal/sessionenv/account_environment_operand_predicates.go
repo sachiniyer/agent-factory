@@ -157,14 +157,15 @@ func shellCommandIsUnproven(words []*syntax.Word) bool {
 
 // shellDashCSafeFlagLetters are the single-dash option letters a shell's
 // -c invocation can carry without changing what the gate must decode: no
-// input source (i interactive, s stdin), no operand option the walk does
-// not model (o is modeled below; O/R/T and the rest refuse), and no
-// behavior that changes what an assignment word does (k keyword mode
-// places every following argument word into the command's environment —
-// the Codex P1 on this head). Every letter outside this set makes the
-// whole invocation undecodable: over-refusing a rare flag is the cheap
+// input source (i interactive, s stdin, E — ksh's -E reads ENV/kshrc the
+// way zsh reads zshenv), no operand option the walk does not model (o is
+// modeled below; O/R/T and the rest refuse), and no behavior that
+// changes what an assignment word does (k keyword mode places every
+// following argument word into the command's environment — the Codex P1
+// on this head). Every letter outside this set makes the whole
+// invocation undecodable: over-refusing a rare flag is the cheap
 // direction.
-const shellDashCSafeFlagLetters = "abCEefhIlmnpruvVx"
+const shellDashCSafeFlagLetters = "abCefhlmnpruvVx"
 
 // shellDashCCommandProven reports whether words are a shell command-string
 // invocation whose every payload candidate is decodable and judged clean by
@@ -222,27 +223,23 @@ func shellDashCCommandProven(words []*syntax.Word) bool {
 			case cluster[j] == 'c':
 				sawPayloadOption = true
 			case cluster[j] == 'o':
-				// -o's operand is the rest of the cluster or the next
-				// word. Only `keyword` changes what an assignment word
-				// does — the same mode `set -o keyword` is refused for —
-				// so any other operand is an admissible option name.
-				var operand string
-				switch {
-				case j+1 < len(cluster):
-					operand = cluster[j+1:]
-				case i+1 < len(words):
-					operand, ok = launcherLiteralWord(words[i+1])
-					if !ok {
-						return false
-					}
-					i++
-				default:
+				// Bash takes -o's option name from the NEXT argv word,
+				// never the cluster's trailing letters — `-oe keyword`
+				// keeps e as an option and reads `keyword` as the name
+				// (verified on real bash — independent-review P1 on this
+				// head). Only `keyword` changes what an assignment word
+				// does, the same mode `set -o keyword` is refused for.
+				if i+1 >= len(words) {
+					return false
+				}
+				operand, ok := launcherLiteralWord(words[i+1])
+				if !ok {
 					return false
 				}
 				if operand == "keyword" {
 					return false
 				}
-				j = len(cluster)
+				i++
 			case strings.IndexByte(shellDashCSafeFlagLetters, cluster[j]) < 0:
 				return false
 			}

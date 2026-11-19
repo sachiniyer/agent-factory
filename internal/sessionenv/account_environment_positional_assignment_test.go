@@ -932,6 +932,28 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"sh -c 'sh -c \"/bin/sh -i\"' < f", true},
 		{"su -c '/bin/sh -i' work < f", true},
 		{"sh -c 'make' < f", false},
+		// Every word that can be the executed shell has every word
+		// after its -c cluster judged — a preceding runner-named word
+		// cannot hide the shell's payload behind its own grammar
+		// (independent-review P1): under su's getopt '-ce' would read
+		// as an attached operand, but for the shell it is -c -e with
+		// the string after the cluster.
+		{"env -u su sh -ce 'unset CODEX_HOME; codex'", true},
+		{"env -u script bash -c -e 'export CODEX_HOME=/o; codex'", true},
+		{"env -u runuser sh -ce 'export CODEX_HOME=/o; codex'", true},
+		{"env -C script sh -ce 'export CODEX_HOME=/o; codex'", true},
+		// Bash takes -o's name from the NEXT argv word, never the
+		// cluster's trailing letters (verified on real bash — second
+		// independent-review P1): '-oe keyword' keeps e as an option
+		// and reads keyword as the set-option name.
+		{"bash -c -oe keyword 'codex CODEX_HOME=/o'", true},
+		{"bash -coe keyword 'codex CODEX_HOME=/o'", true},
+		{"bash -c -ox keyword 'codex CODEX_HOME=/o'", true},
+		{"bash -c -oe pipefail 'make'", false},
+		// ksh -E reads ENV/kshrc the way zsh reads zshenv — an input
+		// channel the gate cannot model (P3).
+		{"ksh -E -c 'make'", true},
+		{"bash -E -c 'make'", true},
 		// Under a resetting launcher the decoded payload's command word is
 		// agent reach — `sudo sh -c 'codex'` is the same reset+reach shape
 		// as `sudo su -c 'codex'` — while a preserving form stays admitted.
