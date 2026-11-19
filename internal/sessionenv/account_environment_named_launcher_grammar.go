@@ -107,10 +107,20 @@ var namedLauncherHiddenWords = map[string][]string{
 	// -F sources ssh's options from a config file that can carry
 	// ProxyCommand — a command the gate cannot read.
 	"ssh": {"-F"},
+	// tmux -f sources a config file — a file is command input the gate
+	// cannot see (set-environment/new-window lines), and
+	// source-file/source executes commands straight from files. Same
+	// refusal class the gate gives `sh < f` and `sh -s`: file- or
+	// stdin-fed command input is unproven.
+	"tmux": {"-f", "source-file", "source"},
 	// Nix -E/--expr/--arg/--argstr/-I/--include take Nix EXPRESSIONS —
-	// code the gate does not parse, evaluated before the shell starts.
-	"nix-shell": {"-E", "--expr", "--arg", "--argstr", "-I", "--include"},
-	"nix":       {"-E", "--expr", "--arg", "--argstr", "-I", "--include"},
+	// code the gate does not parse, evaluated before the shell starts;
+	// --arg-from-file/--arg-from-stdin read the same input from a file
+	// or stdin.
+	"nix-shell": {"-E", "--expr", "--arg", "--argstr", "-I", "--include",
+		"--arg-from-file", "--arg-from-stdin"},
+	"nix": {"-E", "--expr", "--arg", "--argstr", "-I", "--include",
+		"--arg-from-file", "--arg-from-stdin"},
 }
 
 // literalNamesHiddenInput reports whether literal spells a hidden-input

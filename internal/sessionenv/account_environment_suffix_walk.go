@@ -75,6 +75,12 @@ type operandTailMemo struct {
 	// straceRuns memoizes strace option-run verdicts per position; see
 	// straceOptionRunRefused.
 	straceRuns map[straceRunKey]straceRunVerdict
+	// reach bounds the every-reading reset-reach work across this whole
+	// validation — shared by pointer like childJudgements, so nested
+	// launcher tails (a tmux inside an ssh inside a watch) draw on one
+	// total budget, not a per-arm one. Spending past it is undecodable,
+	// which means refuse.
+	reach *reachBudget
 }
 
 func newOperandTailMemo() operandTailMemo {
@@ -98,6 +104,7 @@ func newOperandTailMemo() operandTailMemo {
 		xargsMarkerAnywhereMap: map[xargsMarkerKey]bool{},
 		xargsNested:            map[xargsNestedKey]xargsNestedResult{},
 		xargsNestedAny:         map[xargsMarkerKey]bool{},
+		reach:                  &reachBudget{left: reachWorkLimit, seen: map[string]bool{}},
 		literalChildTails:      map[*syntax.Word]bool{},
 		childJudgements:        new(int),
 		straceRunWork:          new(int),

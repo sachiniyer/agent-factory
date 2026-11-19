@@ -27,11 +27,11 @@ func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailM
 		// the user name itself can't be told from a command word, so
 		// the whole tail is a dark region — the same ambiguity the
 		// accepted `su - codex` over-refusal already documents.
-		if ambiguousResetTailAgentReach(words, names, nil) {
+		if ambiguousResetTailAgentReach(words, names, nil, memo.reach) {
 			return nil, true
 		}
 		for _, payload := range payloads {
-			if payloadReachesAgentProgram(payload, names, nil) {
+			if payloadReachesAgentProgram(payload, names, nil, memo.reach) {
 				return nil, true
 			}
 		}
@@ -143,7 +143,44 @@ func runnerPayloads(words []*syntax.Word) []string {
 // program. preserved carries the outer launcher's preserved-name set so
 // `sudo --preserve-env=CODEX_HOME su -c 'codex'` does not misjudge a
 // still-pinned agent as reset.
-func payloadReachesAgentProgram(script string, names, preserved map[string]struct{}) bool {
+// reachWorkLimit is the total literalize-and-parse budget one
+// validation's reset-reach exploration may spend. The every-reading
+// judgement re-enters itself through nested runner words — a named
+// launcher's candidate payloads re-parse and reach another launcher's
+// tail — so the bound is a TOTAL across the recursion, not only the
+// #7610 depth cap: each literalize and each candidate parse spends,
+// each distinct candidate string is judged once through the seen map,
+// and spending past the limit is undecodable, which means refuse.
+const reachWorkLimit = 16384
+
+// reachBudget is the shared work bound for one validation's reset-reach
+// judgements — carried on operandTailMemo so every launcher arm and
+// buried suffix in the same command draws on it.
+type reachBudget struct {
+	left int
+	seen map[string]bool
+}
+
+// spend charges n visits; a false return means the budget is spent and
+// the judgement is undecodable — callers return the refusal.
+func (b *reachBudget) spend(n int) bool {
+	b.left -= n
+	return b.left >= 0
+}
+
+func payloadReachesAgentProgram(script string, names, preserved map[string]struct{}, b *reachBudget) bool {
+	if b == nil {
+		b = &reachBudget{left: reachWorkLimit, seen: map[string]bool{}}
+	}
+	if b.seen[script] {
+		// Judged already in this validation — a candidate that reached
+		// the agent refused then, so re-answering clean is faithful.
+		return false
+	}
+	b.seen[script] = true
+	if !b.spend(len(script)) {
+		return true
+	}
 	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
 		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(script), "")
 		if err != nil {
@@ -155,11 +192,15 @@ func payloadReachesAgentProgram(script string, names, preserved map[string]struc
 			if !ok || len(call.Args) == 0 {
 				return true
 			}
+			if !b.spend(len(call.Args)) {
+				reaches = true
+				return false
+			}
 			literal, ok := launcherLiteralWord(call.Args[0])
 			if !ok {
 				return true // unprovable command word — the mutation scan judges it
 			}
-			if resetProgramWordReachesAgent(literal, call.Args[1:], names, preserved) {
+			if resetProgramWordReachesAgent(literal, call.Args[1:], names, preserved, b) {
 				reaches = true
 				return false
 			}
@@ -268,7 +309,7 @@ var resetPeelableWrappers = map[string]struct{}{
 // counts — `sudo claude` under a codex account is claude's reset, not
 // this account's re-root. A non-literal word is skipped — the lexical
 // scan already refused the command for carrying it.
-func tailReachesResetAgentProgram(words []*syntax.Word, names map[string]struct{}, preserved map[string]struct{}, preserveAll bool, operandOptions, knownFlags map[string]bool) bool {
+func tailReachesResetAgentProgram(words []*syntax.Word, names map[string]struct{}, preserved map[string]struct{}, preserveAll bool, operandOptions, knownFlags map[string]bool, b *reachBudget) bool {
 	if preserveAll {
 		return false
 	}
@@ -286,14 +327,14 @@ func tailReachesResetAgentProgram(words []*syntax.Word, names map[string]struct{
 			case knownFlags[literal] || strings.Contains(literal, "="):
 				// Provably bare flag or `=`-joined operand — keep going.
 			default:
-				return ambiguousResetTailAgentReach(words[i+1:], names, preserved)
+				return ambiguousResetTailAgentReach(words[i+1:], names, preserved, b)
 			}
 			continue
 		}
 		if strings.Contains(literal, "=") {
 			continue // NAME=value environment prefix — never a program
 		}
-		return resetProgramWordReachesAgent(literal, words[i+1:], names, preserved)
+		return resetProgramWordReachesAgent(literal, words[i+1:], names, preserved, b)
 	}
 	return false
 }
@@ -303,7 +344,7 @@ func tailReachesResetAgentProgram(words []*syntax.Word, names map[string]struct{
 // word's final path component reaches outright; a wrapper, launcher or
 // runner name recurses into its own tail the same way; anything else is
 // a fixed program whose operands are not program positions.
-func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, preserved map[string]struct{}) bool {
+func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, preserved map[string]struct{}, b *reachBudget) bool {
 	if wordNamesResetAgent(literal, names, preserved) {
 		return true
 	}
@@ -315,19 +356,22 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 		// The wrapper's argv can't be parsed without its own option
 		// grammar — `chroot /x codex` carries a DIRECTORY operand before
 		// the program — so the whole tail is a dark region.
-		return ambiguousResetTailAgentReach(rest, names, preserved)
+		return ambiguousResetTailAgentReach(rest, names, preserved, b)
 	}
 	if _, ok := commandRunnerPrograms[base]; ok {
+		if !b.spend(len(rest)) {
+			return true
+		}
 		payloads, undecodable := runnerPayloadCandidates(base, rest)
 		if undecodable {
 			return true
 		}
 		for _, payload := range payloads {
-			if payloadReachesAgentProgram(payload, names, preserved) {
+			if payloadReachesAgentProgram(payload, names, preserved, b) {
 				return true
 			}
 		}
-		return ambiguousResetTailAgentReach(rest, names, preserved)
+		return ambiguousResetTailAgentReach(rest, names, preserved, b)
 	}
 	if _, ok := shellBaseName(base); ok {
 		payloads, undecodable := runnerPayloadCandidates(base, rest)
@@ -335,27 +379,27 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 			return true
 		}
 		for _, payload := range payloads {
-			if payloadReachesAgentProgram(payload, names, preserved) {
+			if payloadReachesAgentProgram(payload, names, preserved, b) {
 				return true
 			}
 		}
-		return ambiguousResetTailAgentReach(rest, names, preserved)
+		return ambiguousResetTailAgentReach(rest, names, preserved, b)
 	}
 	switch base {
 	case "sudo":
-		return tailReachesResetAgentProgram(rest, names, preserved, false, sudoOperandOptions, sudoFlags)
+		return tailReachesResetAgentProgram(rest, names, preserved, false, sudoOperandOptions, sudoFlags, b)
 	case "systemd-run", "run0":
-		return tailReachesResetAgentProgram(rest, names, preserved, false, systemdRunOperandOptions, systemdRunFlags)
+		return tailReachesResetAgentProgram(rest, names, preserved, false, systemdRunOperandOptions, systemdRunFlags, b)
 	case "pkexec", "doas", "setpriv", "flatpak-spawn", "ssh", "machinectl",
 		"nix-shell", "nix", "distrobox", "toolbox":
 		// The any-reading judgement: every literal word a possible
 		// command start or write, and the argv-preserved/joined/
 		// shell-carrying candidates judged by the same reach.
-		return namedLauncherResetReach(rest, names, preserved, base)
+		return namedLauncherResetReach(rest, names, preserved, base, b)
 	case "tmux":
-		return tmuxResetReach(rest, names, preserved)
+		return tmuxResetReach(rest, names, preserved, b)
 	case "bwrap", "systemctl", "dbus-update-activation-environment":
-		return tailReachesResetAgentProgram(rest, names, preserved, false, nil, nil)
+		return tailReachesResetAgentProgram(rest, names, preserved, false, nil, nil, b)
 	}
 	return false
 }
@@ -365,8 +409,12 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 // every literal is a candidate program word, so each one's final path
 // component is checked and a command-runner word's decoded payloads are
 // scanned under the same reset.
-func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[string]struct{}) bool {
+func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[string]struct{}, b *reachBudget) bool {
+	done := make(map[string]bool)
 	for i, word := range words {
+		if !b.spend(1) {
+			return true
+		}
 		literal, ok := launcherLiteralWord(word)
 		if !ok {
 			continue
@@ -378,15 +426,27 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 		if idx := strings.LastIndexByte(base, '/'); idx >= 0 {
 			base = base[idx+1:]
 		}
-		if commandRunnerProgram(base) {
-			payloads, undecodable := runnerPayloadCandidates(base, words[i+1:])
-			if undecodable {
+		if !commandRunnerProgram(base) || done[base] {
+			continue
+		}
+		done[base] = true
+		// One collector call per runner family per tail — the first
+		// head's every-reading scan already literalizes the whole
+		// suffix and a later same-name word's tail is covered inside
+		// those candidates' own parses (the same family dedupe
+		// callRunnerPayloadCandidates keeps). Without it N runner
+		// words rescan N tails — the quadratic the every-reading
+		// rule's total work bound removes.
+		if !b.spend(len(words) - i) {
+			return true
+		}
+		payloads, undecodable := runnerPayloadCandidates(base, words[i+1:])
+		if undecodable {
+			return true
+		}
+		for _, payload := range payloads {
+			if payloadReachesAgentProgram(payload, names, preserved, b) {
 				return true
-			}
-			for _, payload := range payloads {
-				if payloadReachesAgentProgram(payload, names, preserved) {
-					return true
-				}
 			}
 		}
 	}

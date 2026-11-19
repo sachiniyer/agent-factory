@@ -1,6 +1,8 @@
 package sessionenv
 
 import (
+	"strings"
+
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -69,6 +71,26 @@ func literalReadingCandidates(literals []string) ([]string, bool) {
 		if literalCarriesShellSyntax(literal) && !push(literal) {
 			return nil, false
 		}
+		// The VALUE part of an attached option is a possible command
+		// start of its own — ssh's `-o` operand `RemoteCommand=co""dex`
+		// executes through the user's shell with the quotes the
+		// whole-word boundary scan sees through. `--opt=VALUE` splits
+		// on the first `=`; a single-dash word's attached value is
+		// every proper suffix after the first option letter
+		// (`-oVALUE`, and `-abVALUE` where `-a` is a flag and `-b`
+		// takes the value — any reading counts).
+		if eq := strings.IndexByte(literal, '='); eq >= 0 {
+			if !push(literal[eq+1:]) {
+				return nil, false
+			}
+		}
+		if strings.HasPrefix(literal, "-") && !strings.HasPrefix(literal, "--") {
+			for i := 2; i < len(literal); i++ {
+				if !push(literal[i:]) {
+					return nil, false
+				}
+			}
+		}
 	}
 	return candidates, true
 }
@@ -116,7 +138,13 @@ func textNamesAgentBoundary(text string, names, preserved map[string]struct{}) b
 // shell-carrying word — gets the reset reach check. It is also the reach
 // half of the outer-launcher walk (`sudo -E pkexec codex` reaches the
 // same judgement under sudo's preserved set).
-func namedLauncherResetReach(words []*syntax.Word, names, preserved map[string]struct{}, launcher string) bool {
+func namedLauncherResetReach(words []*syntax.Word, names, preserved map[string]struct{}, launcher string, b *reachBudget) bool {
+	if b == nil {
+		b = &reachBudget{left: reachWorkLimit, seen: map[string]bool{}}
+	}
+	if !b.spend(len(words)) {
+		return true
+	}
 	literals, ok := launcherTailLiterals(words)
 	if !ok {
 		return true
@@ -132,7 +160,7 @@ func namedLauncherResetReach(words []*syntax.Word, names, preserved map[string]s
 		return true
 	}
 	for _, candidate := range candidates {
-		if payloadReachesAgentProgram(candidate, names, preserved) {
+		if payloadReachesAgentProgram(candidate, names, preserved, b) {
 			return true
 		}
 	}
@@ -184,7 +212,7 @@ func unwrapNamedResetLauncher(words []*syntax.Word, names map[string]struct{}, m
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	return nil, namedLauncherResetReach(words, names, nil, launcher)
+	return nil, namedLauncherResetReach(words, names, nil, launcher, memo.reach)
 }
 
 // unwrapPkexec judges pkexec: always reset-class — the child runs under
@@ -264,20 +292,26 @@ func unwrapTmux(words []*syntax.Word, names map[string]struct{}, memo operandTai
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	return nil, tmuxResetReach(words, names, nil)
+	return nil, tmuxResetReach(words, names, nil, memo.reach)
 }
 
 // tmuxResetReach is the reach half of tmux's any-reading judgement —
 // every `;`-separated command segment judged the same way a named
 // reset-class tail is.
-func tmuxResetReach(words []*syntax.Word, names, preserved map[string]struct{}) bool {
+func tmuxResetReach(words []*syntax.Word, names, preserved map[string]struct{}, b *reachBudget) bool {
+	if b == nil {
+		b = &reachBudget{left: reachWorkLimit, seen: map[string]bool{}}
+	}
+	if !b.spend(len(words)) {
+		return true
+	}
 	literals, ok := launcherTailLiterals(words)
 	if !ok {
 		return true
 	}
 	for segment := range splitTmuxSegments(literals) {
 		for _, literal := range segment {
-			if namedResetLiteralRefuses(literal, names, preserved, nil) {
+			if namedResetLiteralRefuses(literal, names, preserved, namedLauncherHiddenWords["tmux"]) {
 				return true
 			}
 		}
@@ -286,7 +320,7 @@ func tmuxResetReach(words []*syntax.Word, names, preserved map[string]struct{}) 
 			return true
 		}
 		for _, candidate := range candidates {
-			if payloadReachesAgentProgram(candidate, names, preserved) {
+			if payloadReachesAgentProgram(candidate, names, preserved, b) {
 				return true
 			}
 		}

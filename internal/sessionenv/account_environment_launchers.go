@@ -213,7 +213,7 @@ func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTai
 	// caller's environment (and `--preserve-env=LIST` keeps the listed
 	// names), so those forms are not resets.
 	preserved, preserveAll := sudoPreservesEnvironment(words)
-	if tailReachesResetAgentProgram(words, names, preserved, preserveAll, sudoOperandOptions, sudoFlags) {
+	if tailReachesResetAgentProgram(words, names, preserved, preserveAll, sudoOperandOptions, sudoFlags, memo.reach) {
 		return nil, true
 	}
 	return nil, false
@@ -235,7 +235,7 @@ func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo oper
 		return nil, true
 	}
 	if serviceOnly || !slices.Contains(launcherOwnOptionLiterals(words, systemdRunOperandOptions, systemdRunFlags), "--scope") {
-		if tailReachesResetAgentProgram(words, names, nil, false, systemdRunOperandOptions, systemdRunFlags) {
+		if tailReachesResetAgentProgram(words, names, nil, false, systemdRunOperandOptions, systemdRunFlags, memo.reach) {
 			return nil, true
 		}
 	}
@@ -280,7 +280,7 @@ func unwrapBwrap(words []*syntax.Word, names map[string]struct{}, memo operandTa
 		return nil, true
 	}
 	if literalWordPresent(words, "--clearenv") &&
-		tailReachesResetAgentProgram(words, names, nil, false, nil, nil) {
+		tailReachesResetAgentProgram(words, names, nil, false, nil, nil, memo.reach) {
 		return nil, true
 	}
 	return nil, false

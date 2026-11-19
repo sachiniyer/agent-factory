@@ -142,6 +142,16 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		// refuses in linear time.
 		{"su -c x (sh -c make)…", func(n int) string { return "su -c x" + strings.Repeat(" sh -c make", n) }, true},
 		{"env (sh -c make)…", func(n int) string { return "env" + strings.Repeat(" sh -c make", n) }, true},
+		// #7603 round 4: the every-reading reset reach re-enters itself
+		// through nested runner words — a launcher's candidates re-parse
+		// and reach another launcher's tail. The shared reach budget
+		// (one total per validation, deduped candidate strings) refuses
+		// the pathological nesting instead of paying exponential work —
+		// Codex measured 485K visits at six ssh words before the bound.
+		{"ssh … ssh make", func(n int) string { return "ssh " + strings.Repeat("ssh ", n) + "make" }, true},
+		{"tmux (ssh watch nix-shell)… make", func(n int) string {
+			return "tmux " + strings.Repeat("ssh watch nix-shell ", n) + "make"
+		}, true},
 	}
 	for _, family := range families {
 		t.Run(family.name, func(t *testing.T) {

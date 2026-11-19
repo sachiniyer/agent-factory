@@ -486,12 +486,25 @@ will not reach the child's environment.
   `nu --config /tmp/override.nu -c 'ls'` evaluates the file first).
   A word that does not literalize, or spells a hidden-input source
   (a file, a descriptor, a language the gate does not parse — ssh's
-  `-F`, flatpak-spawn's `--env-fd`, nix's expression flags, each
-  matching its unique-prefix abbreviations too) refuses outright.
-  An option spelling the gate does not know is a refusal only through
-  those rules — a bare unknown flag that cannot reach the agent or a
-  protected name under any reading admits (`ssh --frobnicate host
-  make`), the way the real launcher's own error path would.
+  `-F`, flatpak-spawn's `--env-fd`, nix's expression and
+  `--arg-from-*` flags, tmux's `-f`/`source-file`/`source` command
+  files, each matching its unique-prefix abbreviations too) refuses
+  outright — the same refusal class `sh < f` and `sh -s` get, so a
+  file- or stdin-fed command source is one rule across shells and
+  launchers alike. The VALUE part of an attached option is a
+  possible command start too — ssh's `-o 'RemoteCommand=co""dex'`
+  executes through the remote user's shell, so every `NAME=`- and
+  `-oVALUE`-shaped literal contributes its value text to the
+  candidate set. The every-reading exploration shares one total
+  work budget per validation — each literalize and each candidate
+  parse spends, each distinct candidate string judges once — so a
+  pathological nested tail (a tmux inside an ssh inside a watch
+  inside a nix-shell, repeated) refuses inside the budget rather
+  than paying exponential work. An option spelling the gate does
+  not know is a refusal only through those rules — a bare unknown
+  flag that cannot reach the agent or a protected name under any
+  reading admits (`ssh --frobnicate host make`), the way the real
+  launcher's own error path would.
 - **Shell names match what the program IS** — `KnownShellName`
   recognizes a shell by its program, not its spelling: the `r`-prefix
   restricted variants (`rbash`, `rksh`, `rzsh`, `rsh`) and versioned
