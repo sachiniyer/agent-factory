@@ -118,9 +118,11 @@ var serverPIDExited = func(pid int) bool {
 
 // bindingAgainst classifies a server whose listening sockets are bound to
 // paths against the absent socketPath. Only a CERTAIN mismatch rules it out
-// (#7533): a comparison either side cannot prove — a symlink loop, or a walk
-// truncated at a deleted or unclassifiable component that may have been an
-// alias of the other spelling — leaves the server unresolved (#7562).
+// (#7533): a symlink loop, or a client spelling truncated at a deleted or
+// unclassifiable component that may have been an alias reaching this
+// server's bound path, leaves the server unresolved (#7562). A bound path
+// needs no such benefit: the kernel recorded it resolved, so its own
+// missing components are deleted real directories, never aliases.
 func bindingAgainst(socketPath string, paths []string) (socketBinding, string) {
 	want, ok := canonicalSocketPath(socketPath)
 	if !ok {
@@ -185,6 +187,26 @@ func splitSocketPath(p string) (dir, base string) {
 // as the kernel bounds a path walk (Linux MAXSYMLINKS is 40).
 const maxSocketPathLinks = 40
 
+// socketPathStop is why canonicalSocketPath's walk stopped past its resolved
+// prefix — what the first unresolvable component is known to be (#7562).
+type socketPathStop int
+
+const (
+	// walkStopAbsent: rest[0] provably does not exist (ENOENT) — the deleted
+	// component. Whatever it was, an alias included, is unknowable now.
+	walkStopAbsent socketPathStop = iota
+	// walkStopNotLink: rest[0] exists and is provably not a symlink (EINVAL):
+	// the spelling is literal — a file at the basename — or provably broken
+	// when components remain below it. Either way it names at most itself.
+	walkStopNotLink
+	// walkStopNotDir: the resolved prefix ends at a non-directory (ENOTDIR),
+	// so rest[0] cannot exist under it: the spelling is provably broken.
+	walkStopNotDir
+	// walkStopUnknown: rest[0] could not be classified — a search-denied
+	// parent, a raced re-creation, an opaque error. It may still be an alias.
+	walkStopUnknown
+)
+
 // socketPathWalk is what canonicalSocketPath learned about one spelling
 // (#7562): the spelling it reached, and where it stopped reaching.
 type socketPathWalk struct {
@@ -197,44 +219,64 @@ type socketPathWalk struct {
 	path string
 	// resolved is the longest prefix the filesystem resolved, and rest the
 	// raw components past it — both empty when every component resolved.
-	// rest[0] is the first component the walk could not enter: missing says
-	// it is provably absent (the deleted-component case), and !missing says
-	// it is present but unclassifiable — a search-denied parent or a raced
-	// re-creation — which may still hide a live symlink.
+	// rest[0] is the first component the walk could not enter, and stop says
+	// what the walk learned about it.
 	resolved string
 	rest     []string
-	missing  bool
+	stop     socketPathStop
 }
 
 // certain reports whether the walk's spelling is one a comparison may TRUST
-// for a mismatch — every component resolved, or the walk stopped only at the
-// socket's own provably-absent basename. The second is the ordinary "socket
-// file is gone" shape, a resolved directory plus a literal name, and it is the
-// probe's own premise: treating it as a possible alias would leave every
-// absent socket undecidable, which is the over-refusal #7562 had to avoid.
-// The residual it accepts is a hand-placed symlink at the socket's own
-// basename — a divergence af's socket paths do not produce.
+// for a mismatch — it names at most one place:
+//
+//   - every component resolved; or
+//   - the walk stopped only at the socket's own provably-absent basename —
+//     the ordinary "socket file is gone" shape, a resolved directory plus a
+//     literal name, and the probe's own premise: treating it as a possible
+//     alias would leave every absent socket undecidable, the over-refusal
+//     #7562 had to avoid. The residual it accepts is a hand-placed symlink
+//     at the socket's own basename — af's socket paths do not produce one.
+//   - the walk learned the spelling is literal (a non-link at rest[0]) or
+//     provably broken (a non-directory in the middle): nothing hidden.
 func (w socketPathWalk) certain() bool {
-	return len(w.rest) == 0 || (len(w.rest) == 1 && w.missing)
-}
-
-// certainSocketMismatch reports whether two spellings that already compare
-// unequal PROVABLY name different sockets — the only comparison that may rule
-// a server out (#7533, #7562). A mismatch is certain when both walks are
-// certain answers, or when both stopped at the SAME component: rest[0] is then
-// one dentry under one resolved directory, so whatever it is or was it is the
-// same for both spellings, and the plain-name tails it hides decide the
-// comparison literally. Every other unequal pair is uncertain: an unwalked
-// component on either side may have been an alias of the other's.
-func certainSocketMismatch(want, got socketPathWalk) bool {
-	if want.certain() && got.certain() {
+	switch {
+	case len(w.rest) == 0:
+		return true
+	case w.stop == walkStopAbsent && len(w.rest) == 1:
+		return true
+	case w.stop == walkStopNotLink || w.stop == walkStopNotDir:
 		return true
 	}
-	if len(want.rest) == 0 || len(got.rest) == 0 ||
-		want.resolved != got.resolved || want.rest[0] != got.rest[0] {
+	return false
+}
+
+// certainSocketMismatch reports whether the spelling being read for a
+// socket (want — the client's absent socket, or a carrier's env socket)
+// PROVABLY names a different socket than the trusted bound or recorded path
+// (got) it already compares unequal to — the only comparison that may rule
+// a live server out (#7533, #7562).
+//
+// got's path is literal even where its own walk truncated: the kernel
+// records the resolved path at bind time, so a missing component in a bound
+// path is a deleted real directory, never an alias. Only want's truncation
+// can hide an alias, and only through rest[0]: if it was a symlink to any
+// dir D, the spelling resolves to resolve(D + "/" + tail), which can land
+// only on a path ending in the tail's last component — a link inside the
+// hidden tree redirects to a path still ending in that name, and a link AT
+// that last component is the residual certain() already accepts. So want
+// can name got only when got's basename equals the tail's last component;
+// on any other unequal pair the mismatch is provable, and a non-plain tail
+// ("", ".", "..") is unbounded, hence uncertain.
+func certainSocketMismatch(want, got socketPathWalk) bool {
+	if want.certain() {
+		return true
+	}
+	tail := want.rest[1:]
+	if len(tail) == 0 || !plainSocketComponents(tail) {
 		return false
 	}
-	return plainSocketComponents(want.rest) && plainSocketComponents(got.rest)
+	_, boundBase := splitSocketPath(got.path)
+	return boundBase != tail[len(tail)-1]
 }
 
 // plainSocketComponents reports whether every unwalked component is a plain
@@ -306,7 +348,7 @@ func canonicalSocketPath(p string) (socketPathWalk, bool) {
 				path:     dir + "/" + strings.Join(rest, "/"),
 				resolved: resolved,
 				rest:     rest,
-				missing:  errors.Is(err, os.ErrNotExist),
+				stop:     socketPathStopOf(err),
 			}, true
 		}
 		if !filepath.IsAbs(target) {
@@ -345,6 +387,20 @@ func verifiedSocketPrefix(parts []string, i int) bool {
 		}
 	}
 	return true
+}
+
+// socketPathStopOf classifies why a walk could not enter rest[0] (#7562):
+// provably absent, provably not a link, provably unenterable, or unknown.
+func socketPathStopOf(err error) socketPathStop {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return walkStopAbsent
+	case errors.Is(err, syscall.EINVAL):
+		return walkStopNotLink
+	case errors.Is(err, syscall.ENOTDIR):
+		return walkStopNotDir
+	}
+	return walkStopUnknown
 }
 
 // possibleSocketOwners is the socket-absent refusal's list of who could still

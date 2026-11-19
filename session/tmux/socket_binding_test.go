@@ -290,8 +290,11 @@ func TestBindingAgainst(t *testing.T) {
 	require.NoError(t, os.Remove(linkdir))
 	require.NoError(t, os.Remove(linkdir2))
 	gonedir := filepath.Join(root, "gonedir")
+	gonedir2 := filepath.Join(root, "gonedir2")
 	require.NoError(t, os.Mkdir(gonedir, 0o700))
+	require.NoError(t, os.Mkdir(gonedir2, 0o700))
 	require.NoError(t, os.RemoveAll(gonedir))
+	require.NoError(t, os.RemoveAll(gonedir2))
 	// socketdir holds only missing socket files: the common case — a live
 	// directory, an absent socket basename — stays a certain comparison.
 	socketdir := filepath.Join(root, "socketdir")
@@ -314,14 +317,29 @@ func TestBindingAgainst(t *testing.T) {
 		{"a looping bound path beside the owner's", root + "/s", []string{loopA + "/s", root + "/s"}, socketBindingBound},
 		{"a target that loops", loopA + "/s", []string{root + "/s"}, socketBindingUnresolved},
 
-		// #7562: a deleted link component on either side is uncertain —
-		// the deleted alias may have pointed at the other spelling's path.
+		// #7562: a deleted component on the CLIENT spelling may have been an
+		// alias of the bound path — uncertain. A deleted component on the
+		// BOUND path never is: the kernel recorded the resolved path at bind
+		// time, so it is literal, and a certain client spelling rules the
+		// server out on it.
 		{"a deleted link component on the target", linkdir + "/s", []string{realdir + "/s"}, socketBindingUnresolved},
-		{"a deleted link component on the bound path", realdir + "/s", []string{linkdir + "/s"}, socketBindingUnresolved},
+		{"a deleted link component on the bound path stays literal", realdir + "/s", []string{linkdir + "/s"}, socketBindingElsewhere},
 		{"deleted aliases that may have pointed at each other", linkdir + "/s", []string{linkdir2 + "/s"}, socketBindingUnresolved},
 		{"a deleted plain directory on the target", gonedir + "/s", []string{realdir + "/s"}, socketBindingUnresolved},
 		{"an identical truncated spelling still binds", linkdir + "/s", []string{realdir + "/x", linkdir + "/s"}, socketBindingBound},
-		{"a component that exists but cannot be entered", notdir + "/s", []string{realdir + "/s"}, socketBindingUnresolved},
+		{"a component that cannot be entered is a broken spelling", notdir + "/s", []string{realdir + "/s"}, socketBindingElsewhere},
+
+		// The uncertainty is per-comparison: a deleted component could have
+		// aliased the bound path only when the literal tail can still land
+		// on it — the result always ends in the tail's last name. A bound
+		// socket with a different name cannot have been meant, even under
+		// the same deleted dir or a different one — the post-reboot shape,
+		// where every dir the probe sees is gone.
+		{"a bound socket of another name is ruled out under one deleted dir", gonedir + "/default", []string{gonedir + "/mine"}, socketBindingElsewhere},
+		{"a bound socket of another name is ruled out under another deleted dir", gonedir + "/default", []string{gonedir2 + "/mine"}, socketBindingElsewhere},
+		{"a deleted dir with the bound socket's name stays uncertain", gonedir + "/default", []string{gonedir2 + "/default"}, socketBindingUnresolved},
+		{"a deeper hidden tail still resolves to its last name", gonedir + "/sub/s", []string{gonedir2 + "/sub"}, socketBindingElsewhere},
+		{"a deeper hidden tail with a matching name is uncertain", gonedir + "/sub/s", []string{gonedir2 + "/s"}, socketBindingUnresolved},
 
 		// The same deleted component on both spellings is ONE dentry —
 		// whatever it hid lands on both alike, so the tails still decide:

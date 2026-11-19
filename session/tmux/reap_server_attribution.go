@@ -304,7 +304,9 @@ var socketCompareWalk = func(envSocket, recordedSocket string) (same, comparable
 	if got.path == want.path || sameSocketDir(envSocket, recordedSocket) {
 		return true, true
 	}
-	if !certainSocketMismatch(want, got) {
+	// The env spelling is the side a deleted component may have aliased; the
+	// recorded socket is af's own record of where the server bound — literal.
+	if !certainSocketMismatch(got, want) {
 		return false, false
 	}
 	return false, true
