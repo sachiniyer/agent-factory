@@ -143,6 +143,23 @@ func (i *Instance) SelectAccountForHandoff(from, name, target, effectiveAgent st
 	// under changed program_overrides, when neither the pane's (rewritten)
 	// program metadata nor a fresh resolution can still prove it (#4430 review).
 	i.pendingAccountSwap.AccountAgent = effectiveAgent
+	// The cross-agent verdict travels with the same transaction, so a
+	// re-render of the recorded mission after the live identity tiers the
+	// commit-time brief no longer reads — a /clear re-mint
+	// (refreshPendingManualAccountSwapMission) or a carry demotion — threads
+	// the same #4778 CrossAgent the daemon's commit-time build did, instead
+	// of re-deriving it from CurrentAgentName(). At that point the live
+	// identity may already answer the INCOMING runtime the checkpoint
+	// installed (a committed codex->claude swap is bound to claude by then),
+	// or be empty after teardown: the re-derivation would collapse From == To
+	// onto Render's same-agent branch and lie a carry was attempted across
+	// the agent boundary (agent-handoff D2), or fall off the same-agent gate
+	// (From == "" -> "It was being done by another agent"). Pinned at commit,
+	// the verdict is the one fact those tiers cannot move. It is pinned as a
+	// pointer so a recorded false stays distinguishable from a record older
+	// than the field — the verdict's presence IS its provenance (#7632
+	// review R1).
+	i.pendingAccountSwap.CrossAgent = &crossAgent
 	return entry, nil
 }
 
@@ -717,16 +734,26 @@ func accountSwapDataEqual(a, b *AccountSwapData) bool {
 		return a == b
 	}
 	aOriginal, bOriginal := a.OriginalStartupStateUnknown, b.OriginalStartupStateUnknown
+	aCross, bCross := a.CrossAgent, b.CrossAgent
 	aCopy, bCopy := *a, *b
 	aCopy.OriginalStartupStateUnknown = nil
 	bCopy.OriginalStartupStateUnknown = nil
+	aCopy.CrossAgent = nil
+	bCopy.CrossAgent = nil
 	if aCopy != bCopy {
 		return false
 	}
-	if aOriginal == nil || bOriginal == nil {
-		return aOriginal == nil && bOriginal == nil
+	return boolPointerEqual(aOriginal, bOriginal) && boolPointerEqual(aCross, bCross)
+}
+
+// boolPointerEqual compares two optional bools by value: presence is part of
+// the value, so a nil and a recorded false differ — the same contract the
+// fields themselves carry.
+func boolPointerEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
 	}
-	return *aOriginal == *bOriginal
+	return *a == *b
 }
 
 // ParkManualAccountSwapAtLimit attributes a readiness wall to the replacement

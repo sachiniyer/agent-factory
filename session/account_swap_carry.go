@@ -735,63 +735,6 @@ func (i *Instance) pendingAccountSwapClaimsCarry(account string) bool {
 	return pending != nil && pending.To == account && pending.CarriedConversationID != ""
 }
 
-// demotePendingAccountSwapCarry rewrites a committed carry as the fresh
-// conversation the rebuilt plan will actually launch, so the durable record
-// never claims a carried id that did not start.
-func (i *Instance) demotePendingAccountSwapCarry(account, reason string) error {
-	i.mu.Lock()
-	pending := i.pendingAccountSwap
-	plan := i.accountSwapLaunch
-	if pending == nil || pending.To != account || plan == nil || plan.account != account || plan.carry != nil {
-		i.mu.Unlock()
-		return fmt.Errorf("account swap for %q changed while its conversation carry fell back", i.Title)
-	}
-	pending.CarriedConversationID = ""
-	pending.CarrySourceAccount = ""
-	pending.CarriedLaunchStarted = false
-	pending.CarryFallback = reason
-	// A blind-resume reason belongs to the outcome being demoted: the new
-	// committed conversation must not inherit it (#7602 review).
-	pending.ResumeUnverifiedReason = ""
-	pending.ConversationID = ""
-	if plan.conversation.HasID() {
-		pending.ConversationID = plan.conversation.ID
-	}
-	// The record no longer names the committed carry: the respawn makes the
-	// rewrite durable before its spawn, as it does a re-minted id (#7216
-	// review R2), whatever a later re-plan concludes (#7217 review R1).
-	i.pendingAccountSwapUnwritten = true
-	manual, from := pending.Manual, pending.From
-	i.touchLocked()
-	i.mu.Unlock()
-	if manual {
-		i.refreshPendingManualAccountSwapMission(from, account)
-	}
-	return nil
-}
-
-// refreshPendingManualAccountSwapMission re-renders a committed manual
-// mission after its conversation outcome changed. The stored mission was
-// rendered for a carried conversation; delivering it now would tell a fresh
-// agent that its history is intact.
-func (i *Instance) refreshPendingManualAccountSwapMission(from, to string) {
-	var reason string
-	if handoff, ok := i.LastHandoff(); ok {
-		reason = handoff.Reason
-	}
-	brief := i.BuildMissionBrief(i.CurrentAgentName(), "", reason)
-	brief.Conversation = i.PendingAccountSwapConversation()
-	mission := brief.Render()
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	pending := i.pendingAccountSwap
-	if pending == nil || !pending.Manual || pending.From != from || pending.To != to || pending.Mission == mission {
-		return
-	}
-	pending.Mission = mission
-	i.touchLocked()
-}
-
 // carriedCodexRolloutPath is where the capture snapshot must expect the
 // carried rollout, so capture never mistakes it for a newly minted thread.
 func (c *conversationCarry) carriedCodexRolloutPath() string {
