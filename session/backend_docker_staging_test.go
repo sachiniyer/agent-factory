@@ -991,6 +991,8 @@ func TestDockerStagingEnclosingRunArgsMountRefused(t *testing.T) {
 		{"attached -v value", []string{"-v/host/dir:/usr/local/bin"}, "/usr/local/bin", true},
 		{"clustered -v", []string{"-dv/host:/etc"}, "-dv/host:/etc", true},
 		{"ambiguous cluster refused", []string{"-xv/host:/usr/local"}, "combined short option", false},
+		{"--mount quoted csv", []string{"--mount", `type=bind,src=/host/dir,"target=/usr/local/bin"`}, "/usr/local/bin", true},
+		{"--mount uppercase key", []string{"--mount", "type=bind,src=/h,TARGET=/etc"}, "/etc", true},
 	}
 	for _, tt := range refused {
 		t.Run("refused/"+tt.name, func(t *testing.T) {

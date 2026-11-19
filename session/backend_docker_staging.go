@@ -233,9 +233,10 @@ func runArgsMountDestinations(runArgs []string) ([][2]string, error) {
 		dest := ""
 		switch {
 		case isMount:
-			for _, kv := range strings.Split(spec, ",") {
-				k, v, ok := strings.Cut(kv, "=")
-				if ok && (k == "target" || k == "destination" || k == "dst") {
+			// Docker reads --mount as one CSV record with case-folded keys —
+			// the same helpers the account-boundary guard uses.
+			for _, kv := range dockerMountFields(spec) {
+				if v, ok := dockerMountTarget(kv); ok {
 					dest = v
 				}
 			}
