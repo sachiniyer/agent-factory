@@ -303,9 +303,29 @@ func (p *dockerProvisioner) refuseEnclosingRunArgsMounts() error {
 	if err != nil {
 		return err
 	}
+	if len(mounts) == 0 {
+		return nil
+	}
+	targets := p.stagingDestinations()
+	// Lexical judging is not enough: an image may symlink a destination's
+	// parent (/usr/local/bin -> /opt/bin) and a repo bind at /opt/bin would
+	// then receive the mountpoint stub even though /opt/bin never lexically
+	// encloses the af path. Resolve the real parent inside the image with a
+	// throwaway `docker run --rm` probe — only when repo mounts exist, so the
+	// common no-mount case never pays for an extra container. If resolution
+	// cannot be established (no shell, unreadable answer, or a symlinked
+	// leaf), the relationship to repo mounts cannot be established either —
+	// switch to guarded cp delivery rather than guessing.
+	resolved, leafLink, perr := p.probeResolvedDestinations()
+	if perr != nil || leafLink {
+		log.InfoLog.Printf("docker runtime: cannot resolve af's destination paths inside the image (probe=%v leaf-symlink=%v); delivering af's payload via `docker cp` after the mount-table check", perr, leafLink)
+		p.payloadViaBinds = false
+		return nil
+	}
+	targets = append(targets, resolved...)
 	for _, m := range mounts {
 		dest := path.Clean("/" + m[1])
-		for _, target := range p.stagingDestinations() {
+		for _, target := range targets {
 			if dest == target || dest == "/" || strings.HasPrefix(target, dest+"/") {
 				return fmt.Errorf("backend=docker: docker.run_args entry %q mounts at %s, which encloses %s — af must install that path itself, and the engine would create a root-owned stub inside the host source directory so its mount exists; remove that run_args entry or move it to another destination",
 					m[0], m[1], target)
@@ -313,6 +333,41 @@ func (p *dockerProvisioner) refuseEnclosingRunArgsMounts() error {
 		}
 	}
 	return nil
+}
+
+// probeResolvedDestinations runs a throwaway `docker run --rm <image> sh -c …`
+// to resolve each af destination's parent directory to its real in-image path
+// (pwd -P after cd, NUL-framed like verifyWriteTargets) and flags destination
+// leafs that are themselves symlinks. The resolved real file destinations are
+// what runc will actually compute the mountpoints under.
+func (p *dockerProvisioner) probeResolvedDestinations() ([]string, bool, error) {
+	dsts := p.stagingDestinations()
+	dirA := path.Dir(dsts[0])
+	dirB, leafB := dirA, dsts[0]
+	if len(dsts) > 1 {
+		dirB = path.Dir(dsts[1])
+		leafB = dsts[1]
+	}
+	out, err := p.docker(dockerShortStepTimeout,
+		"run", "--rm", p.image, dockerContainerShell, "-c",
+		`export PATH=/usr/sbin:/usr/bin:/sbin:/bin; cd -- "$1" && pwd -P && printf '\0' && cd -- "$2" && pwd -P && printf '\0' && for f in "$3" "$4"; do if [ -L "$f" ]; then printf '`+leafSymlinkMarker+`%s\n' "$f"; fi; done`,
+		"sh", dirA, dirB, dsts[0], leafB)
+	if err != nil {
+		return nil, false, err
+	}
+	parts := bytes.SplitN(out, []byte{0}, 3)
+	if len(parts) < 3 {
+		return nil, false, fmt.Errorf("probe answer not understood: %q", string(out))
+	}
+	resolved := make([]string, 0, len(dsts))
+	for i := 0; i < len(dsts); i++ {
+		dir, ok := bytes.CutSuffix(parts[i], []byte("\n"))
+		if !ok || len(dir) == 0 || dir[0] != '/' {
+			return nil, false, fmt.Errorf("probe answer not understood: %q", string(out))
+		}
+		resolved = append(resolved, string(dir)+"/"+path.Base(dsts[i]))
+	}
+	return resolved, bytes.Contains(parts[2], []byte(leafSymlinkMarker)), nil
 }
 
 // payloadDeliveryConfirmed checks — after create — that the staged files
