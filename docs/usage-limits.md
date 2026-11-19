@@ -292,7 +292,9 @@ will not reach the child's environment.
   set-environment import-environment` is a bulk import whose own operand
   spelled `set-environment` — and an option spelling the gate can't
   classify makes the rest of the line unverifiable, so a writer word
-  there refuses too (`systemctl --frobnicate set-environment FOO`), while
+  there refuses too (`systemctl --frobnicate set-environment FOO`), and a
+  dynamic subcommand can BE the writer — `systemctl --user "$verb"`
+  refuses because `verb=import-environment` is a bulk import — while
   `systemctl --user import-environment FOO` and
   `dbus-update-activation-environment DISPLAY` run (dbus's own
   no-operand flags `--systemd`/`--verbose` are provable, so
@@ -325,7 +327,12 @@ will not reach the child's environment.
   --setenv=FOO=1 --scope codex`) are provable, so they still admit. And
   su follows util-linux's actual precedence: its login form wins over
   `-p`/`--preserve-environment`, so `su -lp -c 'codex' work` and `su -l
-  -p -c 'codex' work` refuse.
+  -p -c 'codex' work` refuse. su's `-c` operand is a script the shell
+  decodes — `co""dex` lands as `codex` — so the payload is re-judged as
+  a command line: a decoded denied write refuses regardless of login
+  (`su -c 'env CODEX_HOME=/o co""dex' work`), and under a login reset
+  the decoded agent name refuses too (`su -l -c 'co""dex' root`), while
+  `su -c 'co""dex' work` keeps the caller's environment and runs.
 
 A launcher buried inside another command's argv (`nohup sudo
 CODEX_HOME=/other codex`, `docker build env CODEX_HOME=/other codex`) is

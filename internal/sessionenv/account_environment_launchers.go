@@ -280,22 +280,92 @@ func unwrapBwrap(words []*syntax.Word, names map[string]struct{}, memo operandTa
 	return nil, false
 }
 
-// unwrapSu judges su. A `-c` script word is data the lexical cut already
-// reads, so the tail gets the argv-position scan docker's does. su
-// preserves the caller's environment EXCEPT for `-`/`-l`/`--login` (and
-// `-p`/`--preserve-environment` overrides even those), so only a login
-// form counts as a reset.
+// unwrapSu judges su. The `-c`/`--command` operand is a SCRIPT the shell
+// decodes — `co""dex` lands as `codex` — so it is re-judged as a command
+// line, not as a data word (Codex P2 on this head). The rest of the tail
+// gets the argv-position scan docker's does. su preserves the caller's
+// environment EXCEPT for `-`/`-l`/`--login` (and `-p`/
+// `--preserve-environment` overrides even those), so only a login form
+// counts as a reset — and under that reset the payload's DECODED words
+// get the agent-reach check too.
 func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	payload, hasPayload := suCommandPayload(words)
+	if hasPayload && commandMutatesAccountEnvironment(payload, names) {
+		return nil, true
+	}
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	if suResetsEnvironment(words) && tailReachesResetAgentProgram(words, nil, false) {
+	if suResetsEnvironment(words) &&
+		(tailReachesResetAgentProgram(words, nil, false) ||
+			(hasPayload && payloadReachesAgentProgram(payload))) {
 		return nil, true
 	}
 	return nil, false
+}
+
+// suCommandPayload returns the script handed to a shell by su's
+// `-c`/`--command` operand, in any spelling getopt accepts: `-c 'x'`,
+// `--command 'x'`, `--command=x`, a clustered `-lc 'x'` or the attached
+// `-cx`. getopt permutes, so the operand sits wherever the option was.
+func suCommandPayload(words []*syntax.Word) (string, bool) {
+	for i := 0; i < len(words); i++ {
+		literal, ok := launcherLiteralWord(words[i])
+		if !ok {
+			continue
+		}
+		if literal == "--" {
+			return "", false
+		}
+		if literal == "-c" || literal == "--command" {
+			if i+1 < len(words) {
+				return launcherLiteralWord(words[i+1])
+			}
+			return "", false
+		}
+		if strings.HasPrefix(literal, "--command=") {
+			return strings.TrimPrefix(literal, "--command="), true
+		}
+		if strings.HasPrefix(literal, "-") && !strings.HasPrefix(literal, "--") {
+			if idx := strings.IndexByte(literal[1:], 'c'); idx >= 0 {
+				if rest := literal[2+idx:]; rest != "" {
+					return rest, true
+				}
+				if i+1 < len(words) {
+					return launcherLiteralWord(words[i+1])
+				}
+				return "", false
+			}
+		}
+	}
+	return "", false
+}
+
+// payloadReachesAgentProgram parses a `-c` script the way the shell will
+// and applies the reset arm's agent scan to every command's decoded
+// words — `co""dex` reaches `codex` the same as a bare spelling.
+func payloadReachesAgentProgram(script string) bool {
+	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
+		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(script), "")
+		if err != nil {
+			return true // can't prove the payload is agent-free — refuse
+		}
+		reaches := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if call, ok := node.(*syntax.CallExpr); ok && tailReachesResetAgentProgram(call.Args, nil, false) {
+				reaches = true
+				return false
+			}
+			return true
+		})
+		if reaches {
+			return true
+		}
+	}
+	return false
 }
 
 // unwrapScript judges util-linux script: `-c`'s payload is a shell script
@@ -533,7 +603,10 @@ func systemctlEnvironmentWriterIndex(words []*syntax.Word) (int, bool) {
 	for i := 0; i < len(words); i++ {
 		literal, ok := launcherLiteralWord(words[i])
 		if !ok {
-			return writerInDarkRegion(words[i+1:])
+			// A non-literal in the option/subcommand region could BE the
+			// writer (`systemctl --user "$verb" CODEX_HOME=/other`):
+			// nothing after it can be verified — refuse the write.
+			return -1, true
 		}
 		if literal == "--" {
 			i++

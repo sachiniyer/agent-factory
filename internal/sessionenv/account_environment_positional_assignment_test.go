@@ -776,6 +776,14 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// region means an ordinary command line.
 		{"systemctl --frobnicate set-environment FOO", true},
 		{"systemctl --frobnicate status sshd", false},
+		// A dynamic word can BE the writer — `verb=import-environment`
+		// would bulk-import the pane environment, and nothing after an
+		// unprovable subcommand can be verified as a name list.
+		{"systemctl --user \"$verb\" CODEX_HOME=/other", true},
+		{"systemctl --user \"$verb\" status", true},
+		// The non-literal only poisons the option/subcommand region:
+		// after a real subcommand the ordinary scan judges the tail.
+		{"systemctl --user status \"$unit\"", false},
 		{"dbus-update-activation-environment CODEX_HOME=/o", true},
 		{"dbus-update-activation-environment --systemd CODEX_HOME", true},
 		{"dbus-update-activation-environment DISPLAY WAYLAND_DISPLAY", false},
@@ -913,6 +921,21 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// `--pres` spells --preserve-environment alone — no login, so
 		// the caller's environment is kept and the tail admits.
 		{"su --pres -c 'codex' work", false},
+		// su's -c operand is a SCRIPT the shell decodes — `co""dex`
+		// lands as `codex` — so the payload is re-judged as a command
+		// line: a decoded denied write refuses regardless of login, and
+		// under a login reset the payload's decoded words get the
+		// agent-reach check too (Codex P2).
+		{"su -l -c 'co\"\"dex' root", true},
+		{"su -l -c 'co\"\"dex'", true},
+		{"su --login -c 'co\"\"dex' root", true},
+		{"su -l -c 'env CODEX_HOME=/o co\"\"dex' work", true},
+		{"su -c 'env CODEX_HOME=/o co\"\"dex' work", true},
+		{"su -lccodex work", true},
+		// No login flag means the caller's environment survives — a bare
+		// agent name in the decoded payload stays admitted.
+		{"su -c 'co\"\"dex' work", false},
+		{"su -c 'codex' work", false},
 		{"bwrap --clearenv codex", true},
 		{"bwrap --clearenv make", false},
 		{"prog sudo codex", true},
