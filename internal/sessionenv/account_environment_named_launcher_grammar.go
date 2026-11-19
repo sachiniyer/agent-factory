@@ -1,10 +1,6 @@
 package sessionenv
 
-import (
-	"strings"
-
-	"mvdan.cc/sh/v3/syntax"
-)
+import "strings"
 
 // This file holds the only per-launcher classification #7603 keeps — and
 // it is NOT an option grammar. The review rule on this head (the sixth
@@ -19,22 +15,6 @@ import (
 // file, a descriptor, stdin or a language the gate does not parse — the
 // same refusal class the gate gives `sh < f` and `sh -s`, applied by
 // word identity rather than by option position.
-
-// launcherTailLiterals renders every tail word as its literal — a word
-// that does not literalize (a substitution, an expansion) is a name the
-// gate cannot see and makes the whole tail undecodable, which means
-// refuse.
-func launcherTailLiterals(words []*syntax.Word) ([]string, bool) {
-	literals := make([]string, 0, len(words))
-	for _, word := range words {
-		literal, ok := launcherLiteralWord(word)
-		if !ok {
-			return nil, false
-		}
-		literals = append(literals, literal)
-	}
-	return literals, true
-}
 
 // ---------- hidden-input words ----------
 
