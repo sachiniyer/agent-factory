@@ -106,3 +106,24 @@ func TestInstanceDialogHoldIsNilWithoutALocalGate(t *testing.T) {
 		t.Fatalf("a backend with no gate of its own reported a hold: %+v", hold)
 	}
 }
+
+// IsDialogHoldReason recognizes exactly the wording Reason writes, which is
+// how a restarted daemon tells its own notice from any other request.
+func TestIsDialogHoldReason(t *testing.T) {
+	own := DialogHold{Subject: "a folder-trust dialog it can't read (pane 60×12)"}.Reason()
+	if !IsDialogHoldReason(own) || !IsDialogHoldReason(NormalizeAttentionReason(own)) {
+		t.Fatalf("its own reason was not recognized: %q", own)
+	}
+	for _, other := range []string{
+		"",
+		"the agent's own question",
+		"af is waiting on your review of the plan",
+		"af is waiting on . Widen the pane, or answer it in the session's agent tab.",
+		"Widen the pane, or answer it in the session's agent tab.",
+		"A prompt sent at Nov 19 12:00 is still unsubmitted in the composer — attach and press Enter, or send a fresh prompt",
+	} {
+		if IsDialogHoldReason(other) {
+			t.Errorf("another request's reason was taken for a held-dialog notice: %q", other)
+		}
+	}
+}

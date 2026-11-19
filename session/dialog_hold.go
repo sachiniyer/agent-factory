@@ -26,6 +26,13 @@ func (h DialogHold) Reason() string {
 	return tmux.DialogHoldNotice{Subject: h.Subject, Since: h.Since}.Reason()
 }
 
+// IsDialogHoldReason reports whether reason is a held-dialog notice, by the
+// wording only DialogHold.Reason writes. The daemon uses it to recognize its
+// own notice on a row after a restart, when it no longer remembers raising it.
+func IsDialogHoldReason(reason string) bool {
+	return tmux.IsDialogHoldReason(reason)
+}
+
 func cloneDialogHold(h *DialogHold) *DialogHold {
 	if h == nil {
 		return nil

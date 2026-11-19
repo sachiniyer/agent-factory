@@ -41,9 +41,23 @@ type DialogHoldNotice struct {
 // gives its own advice.
 const dialogHoldLiveRemedy = "Widen the pane, or answer it in the session's agent tab."
 
+// dialogHoldReasonLead opens every notice's reason.
+const dialogHoldReasonLead = "af is waiting on "
+
 // Reason is the notice as one line for a live session's attention signal.
 func (n DialogHoldNotice) Reason() string {
-	return "af is waiting on " + n.Subject + ". " + dialogHoldLiveRemedy
+	return dialogHoldReasonLead + n.Subject + ". " + dialogHoldLiveRemedy
+}
+
+// IsDialogHoldReason reports whether reason has the shape Reason writes: its
+// lead, a subject, and the live remedy.
+func IsDialogHoldReason(reason string) bool {
+	subject, ok := strings.CutPrefix(reason, dialogHoldReasonLead)
+	if !ok {
+		return false
+	}
+	subject, ok = strings.CutSuffix(subject, ". "+dialogHoldLiveRemedy)
+	return ok && subject != ""
 }
 
 // dialogHoldRecorder times one held pane. It keeps a hash and length of the
