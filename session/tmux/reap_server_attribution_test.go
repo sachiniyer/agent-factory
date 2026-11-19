@@ -540,6 +540,46 @@ func TestNoteServerIdentity_UnprovenRecordReproves(t *testing.T) {
 	require.Equal(t, ns, second.PIDNS, "the retried stamp lands the proof")
 }
 
+// A proven record names ONE process instance: a server restart that
+// recycles the recorded pid (same socket, same session name — $0 after a
+// restart) must not inherit the dead instance's StartID — carrying it
+// forward would judge the replacement server's own pty holders foreign and
+// run teardown beneath them (Codex on #7581).
+func TestNoteServerIdentity_RecycledInstanceReproves(t *testing.T) {
+	ts := &TmuxSession{}
+	p, err := proctree.Lookup(os.Getpid())
+	require.NoError(t, err)
+	ns, _ := proctree.PIDNamespaceID()
+
+	calls := 0
+	oldBinding := tmuxServerSocketBinding
+	tmuxServerSocketBinding = func(int, string) (socketBinding, string) {
+		calls++
+		return socketBindingBound, "/bound/here"
+	}
+	t.Cleanup(func() { tmuxServerSocketBinding = oldBinding })
+
+	// The standing proof belongs to a DEAD instance of this pid.
+	dead := &ServerIdentity{
+		Socket: "/tmp/af.sock", PID: os.Getpid(), SessionID: "$7",
+		StartID: p.StartID + 1, PIDNS: ns,
+	}
+	ts.serverEvidence.Store(dead)
+
+	raw := ServerIdentity{Socket: "/tmp/af.sock", PID: os.Getpid(), SessionID: "$7"}
+	ts.noteServerIdentity(raw, tmuxCommandTimeout)
+	require.Equal(t, 1, calls,
+		"a recycled recorded pid re-proves rather than carrying a dead instance's fields forward")
+	got, ok := ts.ServerEvidence()
+	require.True(t, ok)
+	require.Equal(t, p.StartID, got.StartID, "the live instance's own StartID stands")
+	require.Equal(t, ns, got.PIDNS)
+
+	// Same tuple, same live instance → the proof is still paid once.
+	ts.noteServerIdentity(raw, tmuxCommandTimeout)
+	require.Equal(t, 1, calls, "an unchanged live instance keeps the paid proof")
+}
+
 // #7581 item 1 (verdict): a record whose pid the stamp could not prove in
 // this namespace produces EXACTLY master's verdict — every pid compare
 // undecidable, identical to an absent record. The socket compare still
@@ -583,6 +623,13 @@ func TestSameRecordedSocket_ConcurrentComparesShareOneFlight(t *testing.T) {
 	t.Cleanup(func() {
 		socketCompareWalk, socketCompareBudget = oldWalk, oldBudget
 		close(release) // free the shared worker — the flight publishes, never leaks
+		// Closing release only makes the workers runnable: a finished
+		// flight deletes its key BEFORE closing done, so wait for both
+		// flights to unpublish — the next test shares the /a,/b pair and
+		// must never join a stale flight (Codex on #7581).
+		require.Eventually(t, func() bool {
+			return socketCompareFlights.inFlightCount() == 0
+		}, 5*time.Second, time.Millisecond, "released flights must drain")
 	})
 
 	const waiters = 5

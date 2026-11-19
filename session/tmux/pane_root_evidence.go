@@ -313,6 +313,19 @@ func resolveServerIdentity(id ServerIdentity, budget time.Duration) ServerIdenti
 	return id
 }
 
+// processInstanceAlive reports whether pid is still the SAME process a
+// proven record was stamped for. A server restart can recycle the recorded
+// pid (same socket, same session name — $0 after a restart): carrying the
+// dead instance's StartID forward would then judge the replacement
+// server's own pty holders foreign and leave teardown running beneath them
+// (Codex on #7581). A record that cannot match its live instance is
+// re-proven on the stamp's budget instead — the same synchronous Lookup
+// the pty walks pay for their flight keys.
+func processInstanceAlive(pid int, startID uint64) bool {
+	p, err := proctree.Lookup(pid)
+	return err == nil && p.StartID == startID
+}
+
 // noteServerIdentity is the stamp every live pane resolution calls: a row
 // that answered its server fields replaces the record — the answer is fresh
 // kernel evidence — while a row that could not keeps whatever stands (a
@@ -320,7 +333,8 @@ func resolveServerIdentity(id ServerIdentity, budget time.Duration) ServerIdenti
 // clears the spawn-boundary retirement: the record once more names the
 // session's current incarnation (#7469 R1a). A stamp naming the SAME
 // (socket, pid, session) carries the standing record's proof fields forward
-// — the namespace proof is paid once per record, not once per row (#7581).
+// while the recorded pid is still that same process instance — the
+// namespace proof is paid once per record, not once per row (#7581).
 // budget bounds the namespace proof's kernel reads to what the calling
 // read's deadline has left — a proof that outruns it is simply unproven
 // (#7581, Codex).
@@ -328,14 +342,17 @@ func (t *TmuxSession) noteServerIdentity(raw ServerIdentity, budget time.Duratio
 	id := raw
 	if cur := t.serverEvidence.Load(); cur != nil &&
 		cur.Socket == raw.Socket && cur.PID == raw.PID && cur.SessionID == raw.SessionID &&
-		(cur.StartID != 0 || cur.PIDNS != "") {
+		(cur.StartID != 0 || cur.PIDNS != "") &&
+		processInstanceAlive(cur.PID, cur.StartID) {
 		// An unchanged tuple carries the standing record's proof forward —
-		// but only a PROOF is paid once. An unproven standing record (the
-		// deadline won, or the pid genuinely could not be shown bound)
-		// re-proves on this stamp's remaining budget: a transiently slow
-		// first proof must not pin undecidable forever, and an honestly
-		// unprovable one re-pays a bounded read per stamp — never a signal,
-		// never a fresh timeout (Codex on #7581).
+		// but only a PROOF on the SAME live instance is paid once. An
+		// unproven standing record (the deadline won, or the pid genuinely
+		// could not be shown bound) re-proves on this stamp's remaining
+		// budget: a transiently slow first proof must not pin undecidable
+		// forever, and an honestly unprovable one re-pays a bounded read
+		// per stamp — never a signal, never a fresh timeout. A proven
+		// record whose pid was recycled re-proves too — the standing
+		// StartID belongs to the dead instance (Codex on #7581).
 		id.StartID, id.PIDNS = cur.StartID, cur.PIDNS
 	} else {
 		id = resolveServerIdentity(raw, budget)

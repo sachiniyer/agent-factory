@@ -59,6 +59,13 @@ func TestPtyFdIndices_ConcurrentWalksShareOneFlight(t *testing.T) {
 	t.Cleanup(func() {
 		ptyFdWalk, ptyFdReadBudget = oldWalk, oldBudget
 		close(release) // free the shared workers — published sends never leak
+		// Closing release only makes the workers runnable: a finished
+		// flight deletes its key BEFORE closing done, so wait for the map
+		// to drain — no later test may join a stale flight (Codex on
+		// #7581).
+		require.Eventually(t, func() bool {
+			return ptyFdFlights.inFlightCount() == 0
+		}, 5*time.Second, time.Millisecond, "released flights must drain")
 	})
 
 	const waiters = 5
@@ -105,6 +112,13 @@ func TestPtyMasterFdIndex_ConcurrentReadsShareOneFlight(t *testing.T) {
 	t.Cleanup(func() {
 		ptyFdVnodeRead, ptyFdReadBudget = oldRead, oldBudget
 		close(release) // free the shared worker — the flight publishes, never leaks
+		// Closing release only makes the workers runnable: a finished
+		// flight deletes its key BEFORE closing done, so wait for the map
+		// to drain — no later test may join a stale flight (Codex on
+		// #7581).
+		require.Eventually(t, func() bool {
+			return ptyVnodeFlights.inFlightCount() == 0
+		}, 5*time.Second, time.Millisecond, "released flights must drain")
 	})
 
 	const waiters = 5
