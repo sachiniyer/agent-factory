@@ -105,12 +105,14 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		// #4978: the xargs input walk follows the chain through env and
 		// strace and scans nested xargs option regions; every scan is
 		// memoized per position (Codex on #4980: `-a xargs -a …` rescanned
-		// the rest of the argv per xargs word, 5.96s at 8,000 words). The
-		// xargs child-tail scan (#5034 parity with nohup/taskset) runs too,
+		// the rest of the argv per xargs word, 5.96s at 8,000 words; `-E`
+		// keeps the same operand-eats-the-next-word shape now that `-a`
+		// refuses outright). The xargs child-tail scan (#5034 parity with
+		// nohup/taskset) runs too,
 		// so the long nested chains below whose verdict positions the input
 		// walk does not pre-cache fail closed past shadowedChildJudgementLimit
 		// instead of staying admitted.
-		{"xargs -I{} echo xargs -a … /tmp/f codex", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" xargs -a", n) + " /tmp/f codex" }, false},
+		{"xargs -I{} echo xargs -E … /tmp/f codex", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" xargs -E", n) + " /tmp/f codex" }, false},
 		{"xargs strace -f xargs strace -f … echo x", func(n int) string { return strings.Repeat("xargs strace -f ", n) + "echo x" }, true},
 		{"xargs env A=1 strace xargs … echo x", func(n int) string { return strings.Repeat("xargs env A=1 strace ", n) + "echo x" }, true},
 		{"xargs strace --fol … echo x", func(n int) string { return "xargs strace" + strings.Repeat(" --fol", n) + " echo x" }, true},

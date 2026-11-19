@@ -12,6 +12,15 @@ import (
 // path launches arbitrary user processes, so unrelated configuration such as
 // PORT=3000 remains allowed. Shell decorations do not hide calls from the walk,
 // and an unsupported form of a recognized environment mutator fails closed.
+//
+// The gate's limit: it judges the VISIBLE command line. Content inside
+// script files, sourced files, file-descriptor payloads, or programs it
+// cannot read is out of scope — that is why flags feeding argv or
+// environment from a file (bwrap --args, --env-file, xargs -a, …) refuse
+// outright rather than model what they load. The gate's job is the
+// obvious, accidental re-root: a determined user can always write a
+// script file that re-pins the account, and no command-line check can
+// see inside it.
 func commandMutatesAccountEnvironment(command string, names map[string]struct{}) bool {
 	if command == "" {
 		return false
@@ -437,21 +446,23 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 			return nil, false, true
 		}
 	case isAccountCommandName(words[0], "sudo"):
-		// The env-injection launchers — sudo, docker and systemd-run —
-		// get the conservative lexical scan of
-		// account_environment_launchers.go: any argument word that could
-		// assign or name a protected variable refuses, env-file
-		// spellings refuse on sight, and the surviving tail is judged
-		// in place before it returns — a shadowed launcher can exec at
-		// any tail word, so sudo and systemd-run's tails get the
-		// per-position child-tail judgement rather than re-entering
-		// wrapper peeling at command position (where `command -v`
-		// could discard a later `env` as query operands) and rather
-		// than the buried-suffix scan, which would judge operand words
-		// like the `.` in `docker build .` as exec boundaries and
-		// refuse ordinary use. requireCommand is false here: at command
-		// position a denied env spelling refuses on sight, the same
-		// contract the env command itself keeps.
+		// The env-injection launchers and environment-source writers —
+		// sudo, docker (+compose/podman/nerdctl), systemd-run/run0,
+		// bwrap, su, script, systemctl's environment subcommands and
+		// dbus-update-activation-environment — get the conservative
+		// lexical scan of account_environment_launchers.go: any argument
+		// word that could assign or name a protected variable refuses,
+		// env-file spellings refuse on sight, and the surviving tail is
+		// judged in place before it returns — a shadowed launcher can
+		// exec at any tail word, so sudo, systemd-run and bwrap's tails
+		// get the per-position child-tail judgement rather than
+		// re-entering wrapper peeling at command position (where
+		// `command -v` could discard a later `env` as query operands)
+		// and rather than the buried-suffix scan, which would judge
+		// operand words like the `.` in `docker build .` as exec
+		// boundaries and refuse ordinary use. requireCommand is false
+		// here: at command position a denied env spelling refuses on
+		// sight, the same contract the env command itself keeps.
 		var unsafe bool
 		words, unsafe = unwrapSudo(words[1:], names, memo, false)
 		if unsafe {
@@ -467,12 +478,58 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "systemd-run") ||
-		isAccountCommandName(words[0], "run0"):
-		// run0 is systemd-run's argv[0] sudo-mode (systemd 256+) — the
-		// same grammar under a second name.
+	case isAccountCommandName(words[0], "systemd-run"):
 		var unsafe bool
-		words, unsafe = unwrapSystemdRun(words[1:], names, memo, false)
+		words, unsafe = unwrapSystemdRun(words[1:], names, memo, false, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "run0"):
+		// run0 is systemd-run's argv[0] sudo-mode (systemd 256+) — the
+		// same grammar under a second name, but always a service unit, so
+		// its environment always resets.
+		var unsafe bool
+		words, unsafe = unwrapSystemdRun(words[1:], names, memo, false, true)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "podman") ||
+		isAccountCommandName(words[0], "nerdctl"):
+		// podman and nerdctl ship the docker CLI grammar (run/exec -e,
+		// --env-file) — the rule is keyed by the grammar, so they take
+		// docker's arm.
+		var unsafe bool
+		words, unsafe = unwrapDocker(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "bwrap"):
+		var unsafe bool
+		words, unsafe = unwrapBwrap(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "su") || isAccountCommandName(words[0], "runuser"):
+		var unsafe bool
+		words, unsafe = unwrapSu(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "script"):
+		var unsafe bool
+		words, unsafe = unwrapScript(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "systemctl"):
+		var unsafe bool
+		words, unsafe = unwrapSystemctlEnvironmentWriter(words[1:], names, memo, false)
+		if unsafe {
+			return nil, false, true
+		}
+	case isAccountCommandName(words[0], "dbus-update-activation-environment"):
+		var unsafe bool
+		words, unsafe = unwrapDbusUpdateActivationEnvironment(words[1:], names, memo, false)
 		if unsafe {
 			return nil, false, true
 		}
@@ -582,9 +639,7 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		// print mode, which overrides nothing — allowed.
 		return 1, envCallMutatesAccountEnvironment(words[1:], names, true, memo)
 	}
-	if isAccountCommandName(word, "sudo") || isAccountCommandName(word, "docker") ||
-		isAccountCommandName(word, "docker-compose") || isAccountCommandName(word, "systemd-run") ||
-		isAccountCommandName(word, "run0") {
+	if isAccountLauncherName(word) {
 		// These launchers inject environment through env spellings this
 		// tail scan reads as inert words (sudo's positional NAME=value,
 		// docker's -e/--env and env files, systemd-run's --setenv and

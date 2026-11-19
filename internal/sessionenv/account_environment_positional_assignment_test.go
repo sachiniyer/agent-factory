@@ -131,6 +131,46 @@ func TestValidateAccountEnvironmentCommand_RefusesPositionalEnvInjectionAssignme
 		"systemd-run -p 'Environment=\"CODEX\"_HOME=/o' codex",
 		"systemd-run -p 'Environment=CODEX\\x5fHOME=/o' codex",
 		"systemd-run --prop=Environment=CODEX_HOME=/o codex",
+
+		// #7589 — the launchers' own environment sources: systemctl's
+		// manager-environment subcommands and dbus-update-activation-
+		// environment write a protected name into an environment a later
+		// launcher (or activation) inherits; the write alone refuses.
+		"systemctl --user set-environment CODEX_HOME=/o",
+		"systemctl set-environment CODEX_HOME=/o",
+		"systemctl --user import-environment CODEX_HOME",
+		"systemctl --user unset-environment CODEX_HOME",
+		"dbus-update-activation-environment CODEX_HOME=/o",
+		"dbus-update-activation-environment --systemd CODEX_HOME",
+		// …and the additional launcher grammars #7589 named: podman/
+		// nerdctl's docker spellings, bwrap's --setenv/--unsetenv, su's
+		// -c payload, script's -c script word — plus buried forms under
+		// modeled wrappers and hypothetical suffixes.
+		"podman run -e CODEX_HOME=/o img codex",
+		"nerdctl run --env-file /tmp/e img",
+		"bwrap --setenv CODEX_HOME /o codex",
+		"bwrap --unsetenv CODEX_HOME codex",
+		"su -c 'CODEX_HOME=/o codex'",
+		"script -qc 'env CODEX_HOME=/o codex' /dev/null",
+		"nohup podman run -e CODEX_HOME=/o img codex",
+		"nohup bwrap --setenv CODEX_HOME /o codex",
+		"nohup systemctl --user set-environment CODEX_HOME=/o",
+		// …and the environment-reset arm (approved option A′): a reset
+		// launcher refuses only when its tail reaches an account-capable
+		// agent program. `sudo codex` was admitted before #7589.
+		"sudo codex",
+		"sudo -u root codex",
+		"sudo bash -lc 'codex'",
+		"systemd-run --user --pty codex",
+		"run0 codex",
+		"su -l -c 'codex' work",
+		"bwrap --clearenv codex",
+		// Reach is the own-agent name as the word's final path
+		// component — bare, absolute, or relative (the decoded-payload
+		// `co""dex` rows are in the edge table below).
+		"sudo /usr/bin/codex",
+		"sudo ./codex",
+		"sudo subdir/codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
 		require.Error(t, err, "command %q injects a denied NAME= assignment through an env-injection wrapper", command)
@@ -174,6 +214,15 @@ func TestValidateAccountEnvironmentCommand_RefusesPositionalEnvInjectionAcrossAg
 		{"gemini", "sudo GOOGLE_VERTEX_BASE_URL=https://evil gemini"},
 		{"gemini", "systemd-run --setenv CODE_ASSIST_API_VERSION=v9 gemini"},
 		{"gemini", "docker run -e GOOGLE_APPLICATION_CREDENTIALS=/x busybox gemini"},
+		// #7589: each agent's identity writes to the launchers' own
+		// environment sources and reset arms refuse identically — a
+		// manager-environment write and a reset tail reaching the agent.
+		{"codex", "systemctl --user set-environment CODEX_HOME=/o"},
+		{"codex", "dbus-update-activation-environment CODEX_HOME=/o"},
+		{"claude", "systemctl --user set-environment CLAUDE_CONFIG_DIR=/o"},
+		{"claude", "su -l -c 'claude' work"},
+		{"gemini", "dbus-update-activation-environment GEMINI_CLI_HOME=/o"},
+		{"gemini", "sudo -u root gemini"},
 	}
 	for _, test := range cases {
 		account := Account{Agent: test.agent, Name: "work", Dir: "/afhome/accounts/" + test.agent + "/work"}
@@ -199,20 +248,21 @@ func TestValidateAccountEnvironmentCommand_AdmitsLauncherOrdinaryUse(t *testing.
 		"sudo apt-get install -y jq",
 		"sudo -u nobody ls",
 		"systemd-run --user --scope make",
-		// Env options assigning a name the account scope does not protect.
-		"sudo PORT=3000 codex",
+		// Env options assigning a name the account scope does not protect —
+		// in a container, whose environment is image-defined rather than a
+		// reset of the pane's. (sudo/systemd-run/run0 DO reset the pane
+		// environment, so the same `… PORT=3000 codex` spellings there
+		// refuse under #7589's reset arm — see the refuse table.)
 		"docker run -e PORT=3000 busybox codex",
 		"docker run --env PORT=3000 busybox codex",
 		"docker exec -e PORT=3000 c1 codex",
-		"systemd-run --setenv PORT=3000 codex",
-		// sudo -E and --preserve-env propagate af's already-scoped values —
-		// a denied name on the list carries the pinned value, never a new
-		// one. The lexical rule still refuses `--preserve-env=CODEX_HOME`
-		// (it names a protected variable — see the over-approximation note
-		// on the refuse table) while `-E` and the bare or PATH list stay
-		// admitted.
+		// sudo -E propagates af's already-scoped values, so it is not a
+		// reset and stays admitted; the bare or partial --preserve-env
+		// list leaves the account's own variable unpreserved, which the
+		// reset arm refuses. The lexical rule still refuses
+		// `--preserve-env=CODEX_HOME` outright (it names a protected
+		// variable — see the over-approximation note on the refuse table).
 		"sudo -E codex",
-		"sudo --preserve-env=PATH codex",
 		// Value options consume their operand — `CODEX_HOME=/other` inside
 		// -u/-n positions is option data, not an env assignment.
 		"sudo -u root apt-get update",
@@ -227,18 +277,58 @@ func TestValidateAccountEnvironmentCommand_AdmitsLauncherOrdinaryUse(t *testing.
 		"docker-compose up",
 		"docker-compose run -e PORT=3000 svc codex",
 		"run0 --user --scope make",
-		"run0 -p Description=x codex",
 		// The identifier boundary keeps common non-protected names out of
 		// the cut, and a leading `~` reads as a home path, not a dynamic
 		// word.
 		"docker run -e NODE_ENV=production app",
 		"sudo RAILS_ENV=production make",
 		"docker run -v ~/.npm:/root/.npm alpine echo hi",
-		"systemd-run codex",
-		"systemd-run --unit=x codex",
-		"systemd-run --property Environment=FOO=1 codex",
 		"nohup docker run --rm alpine echo hi",
 		"nice systemd-run --user --scope make",
+		// #7589's reset arm (option A′) refuses only when the reset
+		// environment would deliver an account-capable AGENT program, so
+		// every ordinary non-agent use of the same launchers stays
+		// admitted — including the forms whose env spellings or service
+		// mode change nothing about the verdict.
+		"sudo -u postgres psql",
+		"sudo -u root make",
+		"systemd-run --user --pty make",
+		"systemd-run --scope make",
+		"systemd-run --setenv PORT=3000 make",
+		"run0 make",
+		"run0 -p Description=x make",
+		// The newly modelled launchers: a container's own environment
+		// is not a pane reset, su without the login dash preserves the
+		// caller's environment, bwrap without --clearenv does too, and
+		// a non-environment systemctl command writes nothing.
+		"podman run -e PORT=3000 img codex",
+		"nerdctl run img",
+		"bwrap codex",
+		"bwrap --setenv PORT 3000 codex",
+		"su -c 'codex' work",
+		"su -c 'make' work",
+		"script -c 'make' /tmp/build.log",
+		"systemctl --user status sshd",
+		"systemctl --user set-environment PORT=3000",
+		// Independent review R3: reset-reach inspects PROGRAM positions
+		// only — the account's own agent name as a word's final path
+		// component or a decoded payload's command word. Package names,
+		// config paths, service names and OTHER agents' names are not
+		// reach, and a name in an operand position is not the program.
+		"sudo npm i -g @openai/codex",
+		"sudo chown -R me ~/.codex",
+		"sudo cat /etc/codex/config.toml",
+		"sudo systemctl restart codex-proxy",
+		"systemd-run --user --pty --working-directory=/home/me/src/claude-squad make",
+		"su - postgres -c 'psql codex'",
+		// Another agent's name is not reach for THIS account — `claude`
+		// under a codex account is claude's own reset — and a USER operand
+		// spelled like the agent is option data, not the program.
+		"sudo claude",
+		"sudo -u codex make",
+		// dbus-update-activation-environment's provably no-operand flags
+		// (--systemd, --verbose) skip the name requirement — R5.
+		"dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
 		require.NoError(t, err, "command %q is an ordinary launcher use and must stay admitted", command)
@@ -260,17 +350,23 @@ func TestCommandMutatesAccountEnvironment_PositionalEnvInjection(t *testing.T) {
 	}{
 		// Ordinary uses of a now-modeled launcher admit: the verdict is set
 		// by the env spellings, not by the wrapper HEAD alone, so a benign
-		// tail is allowed.
-		{"sudo codex", false},
+		// tail is allowed. The reset arm (#7589, option A′) refuses only
+		// when the reset environment would deliver an account-capable
+		// agent — `sudo codex` now refuses while `sudo -u postgres psql`
+		// and `sudo -E codex` (the environment is kept, not reset) stay
+		// admitted, and a container carries no reset arm at all.
+		{"sudo codex", true},
 		{"sudo npm run dev", false},
-		{"sudo --preserve-env=PATH codex", false},
+		{"sudo -u postgres psql", false},
+		{"sudo --preserve-env=PATH codex", true},
 		{"sudo -i", false},
 		{"docker ps", false},
 		{"docker build .", false},
 		{"docker run busybox codex", false},
 		{"docker compose up", false},
-		{"systemd-run codex", false},
-		{"systemd-run --unit=x codex", false},
+		{"systemd-run codex", true},
+		{"systemd-run --unit=x codex", true},
+		{"systemd-run --scope codex", false},
 
 		// Env-injection spellings refuse.
 		{"sudo CODEX_HOME=/other codex", true},
@@ -485,16 +581,21 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// `-E=NAME` copy all reach the same name — and `-p=` hands its
 		// property operand the same cut.
 		{"systemd-run -E=CODEX_HOME=/other codex", true},
-		{"systemd-run -E=PORT=3000 codex", false},
+		// A non-denied -E value passes the lexical cut, but without
+		// --scope the unit environment resets — and this tail reaches an
+		// agent, so the #7589 reset arm refuses it.
+		{"systemd-run -E=PORT=3000 codex", true},
 		{"systemd-run -E=CODEX_HOME codex", true},
 		{"systemd-run -tE=CODEX_HOME=/other codex", true},
-		{"systemd-run -tE=PORT=3000 codex", false},
+		{"systemd-run -tE=PORT=3000 codex", true},
 		{"systemd-run -EPORT=\"$P\" codex", true},
 		{"systemd-run -E=PORT=\"$P\" codex", true},
 		{"systemd-run -E=CODEX_HOME=\"$V\" codex", true},
 		{"systemd-run -tE=CODEX_HOME=\"$V\" codex", true},
 		{"systemd-run -p=Environment=CODEX_HOME=/x codex", true},
-		{"systemd-run -p=Description=x codex", false},
+		// Description=x is not an env spelling, but the non-scope reset
+		// still drops the pane's pins before codex runs — the reset arm.
+		{"systemd-run -p=Description=x codex", true},
 		// A dynamic --property operand is unverifiable text under the
 		// lexical rule — env-family or not, it refuses like every other
 		// dynamic word.
@@ -502,9 +603,13 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"systemd-run --property=Description=$P codex", true},
 		// sudo's -l/-V are ordinary dash words to the lexical scan —
 		// admitted because they name nothing protected — and a denied
-		// spelling alongside them still refuses.
+		// spelling alongside them still refuses. `sudo -l codex` is the
+		// accepted over-refusal the reset arm pays for deleting the
+		// option tables: real sudo -l only LISTS the command, but a
+		// dashed word cannot be told from -u, so the codex tail reads as
+		// reset+agent and refuses.
 		{"sudo -l", false},
-		{"sudo -l codex", false},
+		{"sudo -l codex", true},
 		{"sudo -V", false},
 		{"sudo -l CODEX_HOME=/x codex", true},
 
@@ -533,7 +638,9 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// later, the same check docker's -e operand gets.
 		{"systemd-run --setenv env CODEX_HOME=/other codex", true},
 		{"systemd-run -E env CODEX_HOME=/other codex", true},
-		{"systemd-run --setenv PORT codex", false},
+		// A bare non-denied --setenv name is inert under the cut, but the
+		// non-scope reset still drops the pane's pins before codex runs.
+		{"systemd-run --setenv PORT codex", true},
 		// pflag's `-f=true` bool syntax: `=value` after a flag letter ends
 		// the word, it is not more cluster letters.
 		{"docker run -t=false alpine echo hi", false},
@@ -589,10 +696,13 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker run -e NODE_ENV=production app", false},
 		{"sudo RAILS_ENV=production make", false},
 		{"docker run -e ENVIRONMENT=staging app", false},
-		{"systemd-run --setenv ENVIRONMENT=staging codex", false},
+		// A `codex` tail would refuse under the reset arm regardless of
+		// the name, so these boundary controls end in `make` to pin the
+		// identifier-boundary rule itself.
+		{"systemd-run --setenv ENVIRONMENT=staging make", false},
 		{"docker run -e MYENV=1 app", false},
 		{"sudo DEVENV=1 make", false},
-		{"systemd-run --setenv=MYENV=1 codex", false},
+		{"systemd-run --setenv=MYENV=1 make", false},
 		{"docker run -e MY_CODEX_HOME=x app", false},
 		{"docker run -eENV=/x img", true},
 		{"docker run -itENV=x img", true},
@@ -605,7 +715,9 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// $(…) and glob words stay dynamic refusals.
 		{"docker run -v ~/.npm:/root/.npm alpine echo hi", false},
 		{"docker run -v ~/data:/data alpine echo hi", false},
-		{"systemd-run -p 'Environment=FOO=1' codex", false},
+		// `make` keeps this row on the quoted-literal control — a `codex`
+		// tail would refuse under the reset arm regardless.
+		{"systemd-run -p 'Environment=FOO=1' make", false},
 
 		// Query-only and exec wrappers inside a launcher tail (Codex P1
 		// on the lexical head): a shadowed launcher can shift to any tail
@@ -618,16 +730,370 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"sudo builtin command -v env -i codex", true},
 		{"sudo exec env -i codex", true},
 		{"sudo hash env -i codex", true},
-		{"sudo command -v codex", false},
-		{"sudo command -v env codex", false},
-		{"sudo nice codex", false},
-		{"sudo sudo codex", false},
+		// The same tails now refuse under the reset arm too: the gate
+		// cannot tell `command -v` (a builtin sudo cannot exec) from a
+		// real program name, so `codex` in a resetting tail refuses.
+		{"sudo command -v codex", true},
+		{"sudo command -v env codex", true},
+		{"sudo nice codex", true},
+		{"sudo sudo codex", true},
 		{"command sudo CODEX_HOME=/o codex", true},
 		{"builtin exec sudo CODEX_HOME=/o codex", true},
 		{"command -v sudo", false},
 		{"prog sudo command -v env -i codex", true},
 		{"prog run0 command -v env -i codex", true},
-		{"prog sudo command -v codex", false},
+		{"prog sudo command -v codex", true},
+
+		// #7589 item 1a — launchers' own environment sources. systemctl's
+		// set-environment/import-environment/unset-environment write the
+		// user (or system) service manager's environment, which a later
+		// `systemd-run --user --pty codex` inherits in another tab; the
+		// write IS the effect, so a denied name refuses with no command
+		// word needed. dbus-update-activation-environment's operands are
+		// the same write into the activation environment. Any other
+		// systemctl command line gets the ordinary argv scan.
+		{"systemctl --user set-environment CODEX_HOME=/o", true},
+		{"systemctl set-environment CODEX_HOME=/o", true},
+		{"systemctl --user import-environment CODEX_HOME", true},
+		{"systemctl --user unset-environment CODEX_HOME", true},
+		{"systemctl --user set-environment PORT=3000", false},
+		{"systemctl --user status sshd", false},
+		{"systemctl --user list-units", false},
+		// A writer with no explicit name list refuses: nameless
+		// import-environment bulk-imports the caller's WHOLE environment
+		// — this account's pins included — into the manager another
+		// account's systemd-run inherits, and a nameless set/unset can't
+		// be proven to name only safe variables (Codex P1, bulk import).
+		{"systemctl --user import-environment", true},
+		{"systemctl --user unset-environment", true},
+		{"systemctl --user set-environment", true},
+		{"systemctl --user import-environment FOO", false},
+		// The name list must be PROVABLE: every word after the writer
+		// subcommand must be a literal non-dash word, because an option's
+		// operand (`-H host`) is not an import name — a bulk import slips
+		// through when `host` is counted as one (Codex P1). Operand
+		// options before the subcommand leave it nameless too, and a
+		// trailing flag can't be proven not to carry an operand.
+		{"systemctl -H host import-environment", true},
+		{"systemctl import-environment -H host", true},
+		{"systemctl import-environment -H host FOO", true},
+		{"systemctl --host host import-environment", true},
+		{"systemctl set-environment FOO=1 --no-block", true},
+		{"systemctl --user import-environment FOO BAR", false},
+		{"systemctl -H host import-environment FOO", false},
+		// An operand option can swallow the writer word ITSELF: the
+		// --property operand `set-environment` is not the subcommand —
+		// the real subcommand `import-environment` then carries no name
+		// list, a bulk import that passed validation because its own
+		// operand word supplied the writer (Codex P1).
+		{"systemctl --user --property set-environment import-environment", true},
+		{"systemctl --property set-environment import-environment", true},
+		{"systemctl --property=set-environment import-environment", true},
+		{"systemctl -p set-environment import-environment", true},
+		// Once the operand is consumed the writer parses correctly — a
+		// named import behind it admits the same as a bare one.
+		{"systemctl -p set-environment import-environment FOO", false},
+		{"systemctl --property set-environment import-environment FOO", false},
+		{"systemctl -p set-environment status sshd", false},
+		// An option spelling the walk doesn't know can't swallow the
+		// writer check either: the LAST writer literal owns the name
+		// list, so `set-environment` after --frobnicate still writes a
+		// named FOO — while an option that consumed the writer leaves
+		// the real subcommand nameless.
+		{"systemctl --frobnicate set-environment FOO", false},
+		{"systemctl --frobnicate import-environment", true},
+		{"systemctl --frobnicate status sshd", false},
+		// A dynamic word anywhere refuses — it could BE the writer
+		// (`verb=import-environment` bulk-imports the pane environment)
+		// or hide one, even after the `--` terminator (Codex P1).
+		{"systemctl --user \"$verb\" CODEX_HOME=/other", true},
+		{"systemctl --user -- \"$verb\" CODEX_HOME=/other", true},
+		{"systemctl --user \"$verb\" status", true},
+		{"systemctl --user status \"$unit\"", true},
+		{"dbus-update-activation-environment CODEX_HOME=/o", true},
+		{"dbus-update-activation-environment --systemd CODEX_HOME", true},
+		{"dbus-update-activation-environment DISPLAY WAYLAND_DISPLAY", false},
+		// --all copies the caller's entire environment into the shared
+		// activation block; an operand-less call carries no name list to
+		// verify (Codex P1, bulk import). dbus's no-operand flags
+		// (--systemd, --verbose) are provable, so they pass through; any
+		// other dash word can't be proven not to carry an operand.
+		{"dbus-update-activation-environment --all", true},
+		{"dbus-update-activation-environment --all --systemd", true},
+		{"dbus-update-activation-environment", true},
+		{"dbus-update-activation-environment --systemd", true},
+		// Every argv word must be a literal env name — except dbus's own
+		// provably no-operand flags (--systemd, --verbose), which skip
+		// the name requirement, so the standard
+		// `dbus-update-activation-environment --systemd DISPLAY
+		// WAYLAND_DISPLAY` admits. Any other dash word can't be proven
+		// not to carry an operand and still refuses.
+		{"dbus-update-activation-environment --systemd DISPLAY", false},
+		{"dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY", false},
+		{"dbus-update-activation-environment --verbose", true},
+		{"dbus-update-activation-environment --foo DISPLAY", true},
+		{"nohup systemctl --user set-environment CODEX_HOME=/o", true},
+		{"prog systemctl --user set-environment CODEX_HOME=/o", true},
+		{"prog dbus-update-activation-environment CODEX_HOME=/o", true},
+
+		// #7589's wider launcher set, judged by the same lexical cut:
+		// podman/nerdctl ship docker's grammar (-e/--env/env-file), bwrap
+		// carries --setenv NAME VALUE and --clearenv, su carries -c
+		// script payloads and the login reset, and script's -c payload is
+		// a script word the cut reads as data.
+		{"podman run -e CODEX_HOME=/o img codex", true},
+		{"podman run -e CODEX_HOME=/o img", true},
+		{"nerdctl run -e CODEX_HOME=/o img codex", true},
+		{"nerdctl run --env-file /tmp/e img", true},
+		{"podman run -e NODE_ENV=production img", false},
+		{"podman run img", false},
+		{"prog podman run -e CODEX_HOME=/o img", true},
+		{"bwrap --setenv CODEX_HOME /o codex", true},
+		{"bwrap --unsetenv CODEX_HOME codex", true},
+		{"bwrap --setenv PORT 3000 codex", false},
+		{"su -c 'CODEX_HOME=/o codex'", true},
+		{"su -c 'env CODEX_HOME=/o codex'", true},
+		{"su -c 'codex' work", false},
+		{"script -qc 'env CODEX_HOME=/o codex' /dev/null", true},
+		// script's -c payload is a script the child shell decodes, so it
+		// is re-judged as a command line: quotes inside it can't hide a
+		// denied write — `CODEX_""HOME` lands as `CODEX_HOME` (Codex
+		// P1).
+		{"script -q -c 'export CODEX_\"\"HOME=/other; codex' /dev/null", true},
+		{"script -c 'env CODEX_\"\"HOME=/o co\"\"dex' /dev/null", true},
+		{"script -qc 'co\"\"dex' /dev/null", false},
+		{"script -q /dev/null", false},
+		{"script -c 'make' /tmp/build.log", false},
+
+		// #7589 item 1b — the environment-reset arm (approved option A′):
+		// a resetting launcher refuses only when its tail reaches an
+		// account-capable AGENT program (claude/codex/gemini — the roster
+		// af can pin an account for). sudo's env_reset default, a
+		// non-scope systemd-run/run0 unit, su's login dash and bwrap's
+		// --clearenv all drop the pane's pins, so the same spelling that
+		// was admitted before #7589 now refuses once `codex` appears in
+		// it — `sudo codex` included — while non-agent uses stay
+		// admitted. `-E`/`--preserve-env` and su's -p keep the caller's
+		// environment, and `--scope` keeps systemd-run in the caller's
+		// context, so those are not resets.
+		{"sudo -u root codex", true},
+		{"sudo -u postgres psql", false},
+		{"sudo -E codex", false},
+		{"sudo bash -lc 'codex'", true},
+		// The preserve/scope flags count only inside the launcher's own
+		// option region — before its command word, before `--`, and not
+		// consumed as another option's operand. `-E` past that region is
+		// the COMMAND's flag and sudo still resets (Codex P1); the same
+		// boundary applies to systemd-run's --scope. The reset still
+		// admits here because `codex` is make's OPERAND, not the program
+		// the reset delivers — same class as `su - postgres -c 'psql
+		// codex'` (independent review R3).
+		{"sudo make -E codex", false},
+		{"sudo codex -E", true},
+		{"sudo -p -E codex", true},
+		// `-p` consumes PROMPT as its operand, so the following -E is
+		// sudo's own preserve flag again — admitted.
+		{"sudo -p PROMPT -E codex", false},
+		{"sudo -- -E codex", true},
+		{"sudo -E -- codex", false},
+		{"sudo -u root -E codex", false},
+		{"sudo -E make", false},
+		// A preservation flag counts only when PROVABLY sudo's own: a
+		// clustered operand (`-uroot`) or a getopt_long abbreviation
+		// (`--us` = --user, `--pro` = --prompt) can consume a following
+		// -E as its operand, so the first unrecognized option word ends
+		// the trusted region and sudo reads as resetting (Codex P1) —
+		// over-refusing `sudo -uroot -E codex`, which real sudo treats
+		// as preserved. Known no-operand flags and `=`-joined operands
+		// are provable, so `-n -E` and `--user=root -E` still admit.
+		{"sudo -uroot -E codex", true},
+		{"sudo -uroot codex", true},
+		{"sudo --us root -E codex", true},
+		{"sudo --pro -E codex", true},
+		{"sudo -vE codex", true},
+		{"sudo -n -E codex", false},
+		{"sudo -b -E codex", false},
+		{"sudo --user=root -E codex", false},
+		{"sudo --prompt=x -E codex", false},
+		{"sudo --login-class -E codex", true},
+		// systemd-run reads the same way: an `=`-joined operand is
+		// provably complete so --scope after it still counts, but an
+		// abbreviation that could consume --scope ends the region.
+		{"systemd-run --setenv=FOO=1 --scope codex", false},
+		{"systemd-run --unit=u --scope codex", false},
+		{"systemd-run --pro FOO --scope codex", true},
+		{"systemd-run --foo --scope codex", true},
+		{"systemd-run --user --pty codex", true},
+		{"systemd-run --user --pty make", false},
+		{"systemd-run --scope codex", false},
+		{"systemd-run --user --scope make", false},
+		{"systemd-run codex --scope", true},
+		// `--scope` past the command word is make's flag, so the service
+		// reset applies — but `codex` is make's operand, not the
+		// program the reset delivers (independent review R3).
+		{"systemd-run make --scope codex", false},
+		{"systemd-run --scope --pty codex", false},
+		{"systemd-run --unit u --scope codex", false},
+		{"systemd-run -p Description=x --scope codex", false},
+		{"run0 codex", true},
+		{"run0 -p Description=x codex", true},
+		{"run0 -u postgres psql", false},
+		{"run0 --user --scope make", false},
+		// `su - codex` logs in as a USER named codex rather than running
+		// the agent — the accepted over-refusal: a bare login-shell su
+		// cannot tell its USER operand from an agent name without an
+		// option table.
+		{"su - codex", true},
+		{"su -l -c 'codex' work", true},
+		{"su -l -c 'psql' postgres", false},
+		// util-linux su's precedence makes the login form WIN over
+		// -m/-p/--preserve-environment ("ignoring --preserve-environment"),
+		// so a preservation request never cancels the reset — and su's
+		// getopt permutes options ahead of the USER operand, so `-l`
+		// counts even after the user name (Codex P1, su precedence).
+		{"su -lp -c 'codex' work", true},
+		{"su -l -p -c 'codex' work", true},
+		{"su -m -l -c 'codex' work", true},
+		{"su alice -l codex", true},
+		{"su -m -c 'codex' work", false},
+		{"su -p -c 'codex' work", false},
+		// getopt_long accepts unambiguous abbreviations and --login is
+		// su's only long option starting with l, so every --l* prefix
+		// spells login — `su --log` resets just like `--login` (Codex
+		// P2, verified on util-linux: --log clears the child's env).
+		{"su --log -c 'codex' work", true},
+		{"su --lo -c 'codex' work", true},
+		{"su --l -c 'codex' work", true},
+		{"su --logi -p -c 'codex' work", true},
+		// `--pres` spells --preserve-environment alone — no login, so
+		// the caller's environment is kept and the tail admits.
+		{"su --pres -c 'codex' work", false},
+		// su's -c operand is a SCRIPT the shell decodes — `co""dex`
+		// lands as `codex` — so the payload is re-judged as a command
+		// line: a decoded denied write refuses regardless of login, and
+		// under a login reset the payload's decoded words get the
+		// agent-reach check too (Codex P2).
+		{"su -l -c 'co\"\"dex' root", true},
+		{"su -l -c 'co\"\"dex'", true},
+		{"su --login -c 'co\"\"dex' root", true},
+		{"su -l -c 'env CODEX_HOME=/o co\"\"dex' work", true},
+		{"su -c 'env CODEX_HOME=/o co\"\"dex' work", true},
+		{"su -lccodex work", true},
+		// Every payload spelling getopt accepts reaches the re-judge:
+		// --session-command is su's other script operand, and --comm is
+		// its unambiguous --command abbreviation (Codex P2).
+		{"su -l --session-command 'co\"\"dex' root", true},
+		{"su -l --comm 'co\"\"dex' root", true},
+		{"su --session-command 'co\"\"dex' work", false},
+		{"su --comm 'co\"\"dex' work", false},
+		// runuser ships su's payload options and login reset.
+		{"runuser -l -c 'co\"\"dex' root", true},
+		{"runuser -c 'co\"\"dex' work", false},
+		// A runner nested INSIDE a resetting launcher's tail carries the
+		// reset into its decoded payload — `co""dex` lands as `codex`
+		// under sudo's env_reset even though sudo's own argv never
+		// spells the agent name literally (Codex P2).
+		{"sudo su -c 'co\"\"dex' root", true},
+		{"sudo script -q -c 'co\"\"dex' /dev/null", true},
+		{"sudo runuser -c 'co\"\"dex' root", true},
+		{"sudo su -c 'make' root", false},
+		{"sudo -E su -c 'co\"\"dex' root", false},
+		// `--` is not a payload-scan boundary: it can BE an option
+		// operand — `script -O --` names the logfile `--` — so the real
+		// `-c` hides behind it, and even a true terminator's tail is
+		// handed to a shell that decodes `-c` itself (Codex P1).
+		{"script -q -O -- -c 'export CODEX_\"\"HOME=/other; codex'", true},
+		{"su -- work -c 'env CODEX_\"\"HOME=/o x'", true},
+		{"script -- typescript", false},
+		{"su -- work", false},
+		// No login flag means the caller's environment survives — a bare
+		// agent name in the decoded payload stays admitted.
+		{"su -c 'co\"\"dex' work", false},
+		{"su -c 'codex' work", false},
+		{"bwrap --clearenv codex", true},
+		{"bwrap --clearenv make", false},
+		{"prog sudo codex", true},
+		{"prog sudo -E codex", false},
+		{"prog bwrap --clearenv codex", true},
+		{"prog su -l -c 'codex' work", true},
+		{"docker run busybox codex", false},
+
+		// An unrecognized command's tail is judged exactly as on master:
+		// #7589's item-2 (protected-name words in unmodelled tails) moved
+		// to #7603, so a `prog …` line carrying a protected NAME, a
+		// NAME=value word, or a builtin-spelled word admits the way it
+		// always has — the walk reads them as inert data.
+		{"prog CODEX_HOME=/o codex", false},
+		{"prog CODEX_HOME /o codex", false},
+		{"prog CODEX_HOME=/o", false},
+		{"prog CODEX_HOME /o", false},
+		{"prog CODEX_HOME", false},
+		{"prog -e CODEX_HOME /o codex", false},
+		{"prog --setenv CODEX_HOME /o codex", false},
+		{"prog --setenv CODEX_HOME /o", false},
+		{"prog eval 'export CODEX_\"\"HOME=/other; codex'", false},
+		{"prog unset CODEX_HOME", false},
+		{"prog docker eval 'export CODEX_\"\"HOME=/other; codex'", false},
+		{"prog -e CODEX_HOME $(z) x", false},
+		{"prog --env-file f codex", false},
+		{"echo CODEX_HOME=/x a", false},
+		{"echo CODEX_HOME", false},
+		{"rg CODEX_HOME src/", false},
+		{"grep -r CLAUDE_CONFIG_DIR .", false},
+		{"rg CODEX_HOME internal/ session/", false},
+		{"grep -rn OPENAI_API_KEY src docs", false},
+		{"git grep CODEX_HOME -- '*.go'", false},
+		{"rg CODEX_HOME -t go", false},
+		{"git log -S CODEX_HOME -- internal", false},
+		{"gh issue list --search CODEX_HOME", false},
+		{"make ENV=prod test", false},
+		{"rg ENV Makefile scripts", false},
+		{"grep PS1 .bashrc .zshrc", false},
+		{"make CODEX_HOME=1 install", false},
+		{"grep -rn CODEX_HOME dir", false},
+		{"grep -r CODEX_HOME dir", false},
+		{"grep -n CODEX_HOME file", false},
+		{"[[ $(echo CODEX_HOME=1) == \"CODEX_HOME=1\" ]]; codex", false},
+		// Two master refusals survive in unmodelled tails for reasons
+		// that are NOT item-2 judgements: a buried MODELLED launcher
+		// (bwrap was newly modelled this PR; docker was already) gets
+		// its own arm — `prog bwrap --setenv CODEX_HOME /o` is an
+		// intended item-1 refusal — and an unprovable word lets the
+		// trailing `.` sit at env's hypothesized command position,
+		// where master's unconditional source-builtin refusal fires.
+		{"prog bwrap --setenv CODEX_HOME /o codex", true},
+		{"prog bwrap --setenv CODEX_HOME /o", true},
+		{"prog docker compose exec -e CODEX_HOME=/o svc x", true},
+		{"grep -rn CODEX_HOME --include=*.go .", true},
+		{"prog docker compose run -e PORT=3000 svc codex", false},
+
+		// Hidden-input flags refuse outright — argv or environment read
+		// from a file or fd is outside the VISIBLE command line (Codex
+		// P1). bwrap's file-style injectors are scoped to its arm so
+		// `docker build --file Dockerfile` stays admitted.
+		{"bwrap --args 3 -- true", true},
+		{"bwrap --args=3 --ro-bind / / true", true},
+		{"bwrap --file 3 /etc/hostname true", true},
+		{"bwrap --bind-data 3 /x true", true},
+		{"bwrap --ro-bind-data 3 /x true", true},
+		{"bwrap --symlink 3 /x true", true},
+		{"bwrap --seccomp 3 -- true", true},
+		{"bwrap --bind /a /b true", false},
+		{"prog bwrap --args 3 codex", true},
+		{"docker build --file Dockerfile .", false},
+		{"xargs -a items.txt", true},
+		{"xargs --arg-file items.txt", true},
+		{"xargs --arg-file=items.txt -I{} {}", true},
+		{"xargs -0a items.txt", true},
+		{"xargs -d, -n2 echo", false},
+		// Payload ambiguity: a `-c` that is itself an option operand
+		// does not end the candidate scan — every candidate payload is
+		// judged, so the real command string cannot hide behind a
+		// consumed one (Codex P1).
+		{"su -c -c 'env CODEX_HOME=/o x' work", true},
+		{"su -l -c -c 'co\"\"dex' root", true},
+		{"script -O -c 'env CODEX_HOME=/o codex'", true},
+		{"script -c -c 'echo hi' out.log", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)
@@ -654,6 +1120,17 @@ func TestApplyAccountEnvironment_RefusesPositionalEnvInjection(t *testing.T) {
 		"docker-compose run -e CODEX_HOME=/other svc codex",
 		"run0 --setenv CODEX_HOME=/other codex",
 		"systemd-run -p 'Environment=CODEX\\x5fHOME=/o' codex",
+		// #7589's launchers' own environment sources and reset arm.
+		"systemctl --user set-environment CODEX_HOME=/o",
+		"dbus-update-activation-environment CODEX_HOME=/o",
+		"podman run -e CODEX_HOME=/o img codex",
+		"bwrap --setenv CODEX_HOME /o codex",
+		"bwrap --clearenv codex",
+		"script -qc 'env CODEX_HOME=/o codex' /dev/null",
+		"su -l -c 'codex' work",
+		"sudo codex",
+		"systemd-run --user --pty codex",
+		"run0 codex",
 	} {
 		_, err := ApplyAccountEnvironment(nil, command, account)
 		require.Error(t, err, "command %q must not replace the sibling account environment", command)

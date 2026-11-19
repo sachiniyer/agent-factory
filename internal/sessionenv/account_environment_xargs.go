@@ -87,7 +87,11 @@ options:
 					marker, markerKnown = "{}", true
 				}
 				words = words[1:]
-			case "arg-file", "delimiter", "max-args", "max-procs", "max-chars":
+			case "arg-file":
+				// Items come from a file the command line cannot
+				// show — the child argv is unverifiable (Codex P1).
+				return run.done(nil, true)
+			case "delimiter", "max-args", "max-procs", "max-chars":
 				arg := value
 				if !attached {
 					if len(words) < 2 {
@@ -151,7 +155,11 @@ options:
 						marker, markerKnown = "{}", true
 					}
 					idx = len(flags)
-				case 'a', 'd', 'E', 'I', 'L', 'n', 'P', 's':
+				case 'a':
+					// -a/--arg-file reads items from a file —
+					// unverifiable, same as the long spelling.
+					return run.done(nil, true)
+				case 'd', 'E', 'I', 'L', 'n', 'P', 's':
 					var arg string
 					var argLiteral bool
 					if idx+1 < len(flags) {

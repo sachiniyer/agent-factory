@@ -107,9 +107,17 @@ var accountChildTailSuffixVerdictNames = map[string]struct{}{
 	// Environment= — are visible only from the launcher's own suffix, so a
 	// buried form under a modeled wrapper's tail judges here the same way a
 	// buried strace does. docker-compose ships docker's compose grammar and
-	// run0 ships systemd-run's, so both aliases judge identically.
+	// run0 ships systemd-run's, so both aliases judge identically. podman
+	// and nerdctl ship docker's CLI grammar, and bwrap/su/script get the
+	// same lexical judgement for their own env spellings.
 	"sudo": {}, "docker": {}, "docker-compose": {}, "systemd-run": {},
-	"run0": {},
+	"run0": {}, "podman": {}, "nerdctl": {}, "bwrap": {}, "su": {},
+	"runuser": {}, "script": {},
+	// systemctl's set-environment/import-environment/unset-environment and
+	// dbus-update-activation-environment WRITE a launcher's own environment
+	// source (the user service manager / dbus activation environment), so a
+	// buried form judges at its own suffix the same way.
+	"systemctl": {}, "dbus-update-activation-environment": {},
 	// Shells KnownShellName recognizes. The opaque-head scan flags a buried
 	// shell only while words follow it, so a bare trailing shell — which a
 	// shadowed wrapper can shift to and exec — is judged at its own suffix,
