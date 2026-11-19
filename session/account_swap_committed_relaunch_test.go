@@ -477,6 +477,10 @@ func TestCommittedSwapRelaunchRetiresDeliveryProofOnACleanStart(t *testing.T) {
 	inst.SetAccountSwapReplacementPanesStartedForTest(true)
 	inst.pendingAccountSwap.MissionDeliveryStatus = PromptDelivered
 	inst.pendingAccountSwap.MissionDeliveryAttemptAt = time.Now()
+	// A blind-resume plan persisted before its spawn failed leaves the
+	// reason behind; the clean start retires it too, or the notice and the
+	// ledger claim a resume of the missing transcript (#7602 review).
+	inst.pendingAccountSwap.ResumeUnverifiedReason = blindCommittedResumeReason
 
 	plan := relaunchPlan(t, inst)
 	require.NotRegexp(t, resumeArg, plan.program,
@@ -488,6 +492,10 @@ func TestCommittedSwapRelaunchRetiresDeliveryProofOnACleanStart(t *testing.T) {
 	require.Empty(t, pending.MissionDeliveryStatus,
 		"the clean listing retires the verdict that proved a filing")
 	require.True(t, pending.MissionDeliveryAttemptAt.IsZero())
+	require.Empty(t, pending.ResumeUnverifiedReason,
+		"a fresh start on the id must not keep a persisted resume's reason")
+	require.Empty(t, inst.PendingAccountSwapConversation().ResumeUnverified,
+		"the recorded outcome says a fresh start, not a resume")
 
 	// The retired proof stays retired across the mark a respawn makes: the
 	// launched id did not change, so the crash window before the new panes'

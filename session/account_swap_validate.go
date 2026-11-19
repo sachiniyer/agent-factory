@@ -477,10 +477,14 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		// transcript it proved is gone, and a later blind retry must not
 		// read it as proof Claude entered id — a crash persisted in that
 		// window would otherwise --resume an absent transcript (#7602
-		// review).
+		// review). A blind-resume reason a persisted plan left behind retires
+		// with it: the fresh start on id must not tell the notice or the
+		// ledger it resumed the missing transcript (#7602 review).
 		live.MissionDeliveryStatus = ""
 		live.MissionDeliveryAttemptAt = time.Time{}
+		live.ResumeUnverifiedReason = ""
 		i.pendingAccountSwapUnwritten = true
+		i.stampHandoffConversationLocked()
 		i.touchLocked()
 	}
 	i.mu.Unlock()
