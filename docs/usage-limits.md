@@ -523,8 +523,16 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
     `-enc` the downstream shell sees — a glob- or brace-carrying body
     classifies by what pathname expansion could produce (`-EncodedComman
     [d]` can land `-EncodedCommand`; `-ex[ec]` cannot land a hidden
-    spelling and admits) — and a command-string flag left with no
-    operand is that same stdin feed (`pwsh -Command`, `nu -c` alone);
+    spelling and admits). The glob judgement covers the produced word's
+    whole option shape, not just its body: an atom that could produce
+    the prefix is part of the run (`[-]EncodedCommand` can land
+    `-EncodedCommand`, `?EncodedCommand` and `*nc*` likewise, and a
+    `[-]` before `E` can land `-EE` — nix's `-E` with the operand
+    attached), a `:`/`=` the production spells cuts the body, and a
+    produced prefix run is judged at its own length (`-[-]xpr` lands
+    `--xpr`, which nix does not resolve to `-expr`) — and a
+    command-string flag left with no operand is that same stdin feed
+    (`pwsh -Command`, `nu -c` alone);
 
   A launcher that hands its tail argv to a shell as ONE joined string
   (watch by default, ssh's remote command, tmux's and machinectl's

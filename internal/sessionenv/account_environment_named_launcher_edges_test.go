@@ -1267,6 +1267,26 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch 'pwsh -h[elp]'`, false},
 		{`watch 'nix -j[0-9] make'`, false},
 		{`watch 'pwsh -CommandWithArg[s] x'`, false},
+		// The glob-generated-option P2: a bracket atom can
+		// produce the OPTION PREFIX itself, so the produced
+		// word is judged on the run it lands — `[-]` before a
+		// body supplies a leading `-`, `?` can too, and a `*`
+		// in the lead produces prefix, body and separator
+		// inside one atom. Non-pwsh launchers keep the run's
+		// shape: `[-]` before `E` can land `-EE` — a `-E` with
+		// its operand attached — while `x` before it lands
+		// `-x?pr`, a short spelling that names no hidden option.
+		{`watch 'pwsh -EncodedComman[d] BASE64'`, true},
+		{`watch 'pwsh -[-]EncodedCommand x'`, true},
+		{`watch 'pwsh -[-]enc:x'`, true},
+		{`watch 'pwsh ?EncodedCommand x'`, true},
+		{`watch 'pwsh *nc* x'`, true},
+		{`watch 'pwsh –EncodedComman[d] x'`, true},
+		{`watch 'nix -[-]E x'`, true},
+		{`watch 'nix -x[-]pr make'`, false},
+		{`watch 'nix --[e]xpr x'`, true},
+		{`watch 'pwsh -e[x] x'`, true},
+		{`watch 'pwsh -Encod[e]P x'`, true},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state

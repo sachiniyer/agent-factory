@@ -107,6 +107,19 @@ func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 		{command: "env --unset=PATH codex"},
 		{command: "env -i codex"},
 		{command: "env -C /workspace codex"},
+		// Positive grant classification uses the exact decoded
+		// spelling only — `e\"nv` decodes to `e"nv`, which is not
+		// env, so the operator's OPENAI_API_KEY must not ride along
+		// (#7627's normalization feeds REFUSAL checks only, never a
+		// trust decision).
+		{command: `e\"nv codex`},
+		{command: `e\"\nv codex`},
+		{command: `e\\nv codex`},
+		// …while a decode that really spells env keeps its grant —
+		// `\n` and `\v` quote their letter, and quotes concatenate.
+		{command: `e\nv codex`, want: "codex"},
+		{command: `e\n"v" codex`, want: "codex"},
+		{command: `e"nv" codex`, want: "codex"},
 	} {
 		if got := credentialAgentForCommand(test.command); got != test.want {
 			t.Errorf("credentialAgentForCommand(%q) = %q, want %q", test.command, got, test.want)

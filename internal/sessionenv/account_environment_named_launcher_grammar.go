@@ -3,6 +3,7 @@ package sessionenv
 import (
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // This file holds the only per-launcher classification #7603 keeps — and
@@ -193,6 +194,13 @@ func literalNamesHiddenInput(literal, launcher string, b *reachBudget) bool {
 	if literal == "-" {
 		return slices.Contains(hidden, "-") // the stdin marker
 	}
+	if strings.ContainsAny(literal, "*?[{") {
+		// A metachar-carrying word resolves AT the launcher: pathname
+		// expansion runs before the launcher sees argv, so the option
+		// name is whatever the produced word spells — a bracket atom
+		// producing a dash is part of the prefix run the same way.
+		return globLiteralSpellsOption(literal, launcher, hidden, true, b)
+	}
 	body, ok := optionWordBody(literal, launcher)
 	if !ok {
 		return false
@@ -203,14 +211,6 @@ func literalNamesHiddenInput(literal, launcher string, b *reachBudget) bool {
 	// optionWordBody.
 	wordAttach := launcher != "pwsh" &&
 		strings.HasPrefix(literal, "-") && !strings.HasPrefix(literal, "--")
-	if strings.ContainsAny(body, "*?[{") {
-		// A glob- or brace-carrying body resolves AT the launcher:
-		// pathname expansion runs before the launcher sees argv, so
-		// the option name is whatever the produced word spells. Any
-		// producible hidden spelling counts, and a metachar body is
-		// never an exact or plain-prefix spelling itself.
-		return globBodyNamesHidden(body, launcher, hidden, wordAttach, b)
-	}
 	ambiguous := false
 	for _, known := range namedLauncherNonHiddenNames[launcher] {
 		knownBody := optionTableBody(known, launcher)
@@ -246,41 +246,224 @@ func literalNamesHiddenInput(literal, launcher string, b *reachBudget) bool {
 	return false
 }
 
-// globBodyNamesHidden reports whether a glob- or brace-carrying option
-// body could produce a spelling the launcher resolves as hidden input —
-// the expansion runs before the launcher sees argv, so any producible
-// spelling counts: a full hidden name, a prefix the launcher would
-// complete (one no visible option also claims — `e[x]` could make `ex`
-// for -ExecutionPolicy, which resolves visible), or a single-dash
-// hidden option carrying its operand attached. An unfinished brace
-// expansion is unprovable — it could spell hidden input.
-func globBodyNamesHidden(body, launcher string, hidden []string, wordAttach bool, b *reachBudget) bool {
-	variants, finished := namedPieceVariants(body, b)
+// globLiteralSpellsOption reports whether a metachar-carrying literal
+// could produce an option spelling from words — pathname expansion runs
+// before the launcher sees argv, so the produced word is what resolves.
+// The produced word's option shape is read the way optionWordBody reads
+// it: a leading run of prefix characters, a body cut at the first `:`
+// or `=`, then the body resolved against the table (exact, or a prefix
+// the launcher completes — skipped when respectVisible holds and a
+// visible option claims the same prefix). Every reading of the literal
+// that could land there counts: `[-]EncodedCommand` can produce
+// `-EncodedCommand`, the atom `[-]` supplying the prefix. An unfinished
+// brace expansion is unprovable — the word could spell the option.
+func globLiteralSpellsOption(literal, launcher string, words []string, respectVisible bool, b *reachBudget) bool {
+	cand := literal
+	if launcher == "pwsh" {
+		cand = strings.ToLower(cand)
+	}
+	variants, finished := namedPieceVariants(cand, b)
 	if !finished {
 		return true
 	}
+	prefixes := "-"
+	if launcher == "pwsh" {
+		prefixes = pwshOptionPrefixRunes
+	}
 	for _, v := range variants {
-		for _, word := range hidden {
-			hb := optionTableBody(word, launcher)
-			if hb == "" {
+		if slices.Contains(words, "-") && globOverMatch(v, "-", b) {
+			return true // a produced `-` is the stdin marker
+		}
+		for _, reading := range optionBodyReadings(v, prefixes, b) {
+			body := reading.pattern
+			if body == "" {
 				continue
 			}
-			if globOverMatch(v, hb, b) {
-				return true
-			}
-			for k := 1; k < len(hb); k++ {
-				cand := hb[:k]
-				if globOverMatch(v, cand, b) && !bodySpellsVisiblePrefix(cand, launcher) {
+			maxJ := patternMaxLen(body, b)
+			for _, word := range words {
+				hb := optionTableBody(word, launcher)
+				if hb == "" {
+					continue
+				}
+				if reading.dashes == 0 {
+					// A `*` in the leading run could produce the
+					// option whole — prefix, body and operand
+					// separator — inside its own expansion, so
+					// the spelling carries its prefix here.
+					for _, s := range optionSpellings(word, launcher) {
+						if globOverMatch(body, s, b) ||
+							globCouldCarryPrefix(body, s+":", b) ||
+							globCouldCarryPrefix(body, s+"=", b) ||
+							(launcher != "pwsh" && singleDashOption(word) &&
+								globCouldCarryPrefix(body, s, b)) {
+							return true
+						}
+						pl := len(s) - len(hb)
+						for j := 1; j < len(hb); j++ {
+							if respectVisible && bodySpellsVisiblePrefix(hb[:j], launcher) {
+								continue
+							}
+							cand := s[:pl+j]
+							if globOverMatch(body, cand, b) ||
+								globCouldCarryPrefix(body, cand+":", b) ||
+								globCouldCarryPrefix(body, cand+"=", b) {
+								return true
+							}
+						}
+					}
+					continue
+				}
+				// Non-pwsh launchers keep the produced prefix's
+				// own shape: a `-` run resolves short options
+				// (operand attaches in-word), a `--` run resolves
+				// long options, and `---` is no option at all.
+				if launcher != "pwsh" && reading.dashes != len(word)-len(hb) {
+					continue
+				}
+				if globOverMatch(body, hb, b) {
 					return true
 				}
-			}
-			if wordAttach && singleDashOption(word) &&
-				globCouldCarryPrefix(v, hb, b) {
-				return true
+				for j := 1; j < len(hb) && (maxJ < 0 || j <= maxJ); j++ {
+					candBody := hb[:j]
+					if respectVisible && bodySpellsVisiblePrefix(candBody, launcher) {
+						continue
+					}
+					if globOverMatch(body, candBody, b) {
+						return true
+					}
+				}
+				if launcher != "pwsh" && reading.dashes == 1 &&
+					singleDashOption(word) && globCouldCarryPrefix(body, hb, b) {
+					return true
+				}
 			}
 		}
 	}
 	return false
+}
+
+// globAtomStarts returns the byte offsets where each glob atom of v
+// begins (and v's end) — an atom is a `?`, `*`, a closed bracket
+// expression, a `\x` escape pair, or one literal rune.
+func globAtomStarts(v string, b *reachBudget) []int {
+	var starts []int
+	for i := 0; i < len(v); {
+		starts = append(starts, i)
+		switch v[i] {
+		case '[':
+			if end := globBracketEnd(v, i, b); end >= 0 {
+				i = end + 1
+				continue
+			}
+		case '\\':
+			i++
+		}
+		_, size := utf8.DecodeRuneInString(v[i:])
+		i += size
+	}
+	return append(starts, len(v))
+}
+
+// atomCouldProduce reports whether the atom at [start:end) could
+// produce any character of chars — `?`, `[…]` and `*` over-approximate
+// to any character, `\x` produces x, and a literal byte produces only
+// itself.
+func atomCouldProduce(v string, start, end int, chars string) bool {
+	s := v[start:end]
+	switch {
+	case len(s) == 1:
+		switch s[0] {
+		case '?', '[', '*':
+			return true
+		default:
+			return strings.ContainsRune(chars, rune(s[0]))
+		}
+	case s[0] == '\\':
+		r, _ := utf8.DecodeRuneInString(s[1:])
+		return strings.ContainsRune(chars, r)
+	case s[0] == '[':
+		return true
+	default:
+		r, _ := utf8.DecodeRuneInString(s)
+		return strings.ContainsRune(chars, r)
+	}
+}
+
+// optionBodyReading is one possible option-body pattern the produced
+// word could spell. dashes is the count of leading atoms consumed as
+// the option's prefix run — the produced word's `-`/`/`/dash run —
+// so non-pwsh launchers can keep `-x` and `--x` spellings apart.
+// dashes == 0 marks a `*`-inclusion reading: a `*` atom in the leading
+// run could produce the prefix inside its own expansion, so the
+// pattern is matched against the whole spelling.
+type optionBodyReading struct {
+	pattern string
+	dashes  int
+}
+
+// optionBodyReadings enumerates what the produced word's option body
+// could spell. The produced word's leading run of prefix characters is
+// whatever its leading atoms spell — a literal prefix char, or any
+// atom that could produce one (`[-]` can land `-`), so each such
+// boundary gives a body reading carrying the prefix run's length. The
+// produced body then ends at the first `:` or `=` the production
+// spells — every atom that could produce one of those cuts another
+// reading. Boundary 0 is skipped: a produced word whose first atom
+// produces no prefix char is no option. A `*` in the leading run could
+// hold the prefix and more inside itself, so each `*` position yields
+// a spelling-reading of its own.
+func optionBodyReadings(v, prefixes string, b *reachBudget) []optionBodyReading {
+	starts := globAtomStarts(v, b)
+	k := 0
+	for k+1 < len(starts) && atomCouldProduce(v, starts[k], starts[k+1], prefixes) {
+		k++
+	}
+	var readings []optionBodyReading
+	for i := 0; i < k; i++ {
+		if v[starts[i]] == '*' {
+			readings = append(readings, optionBodyReading{pattern: v[starts[i]:]})
+		}
+	}
+	for boundary := 1; boundary <= k && boundary+1 <= len(starts); boundary++ {
+		body := v[starts[boundary]:]
+		readings = append(readings, optionBodyReading{pattern: body, dashes: boundary})
+		for i := boundary; i+1 < len(starts); i++ {
+			if atomCouldProduce(v, starts[i], starts[i+1], ":=") {
+				readings = append(readings, optionBodyReading{
+					pattern: body[:starts[i]-starts[boundary]],
+					dashes:  boundary,
+				})
+			}
+		}
+	}
+	return readings
+}
+
+// optionSpellings yields the spellings a produced word can carry for
+// one table word: pwsh's parser takes `-`, `/` and the Unicode dashes
+// and resolves case-insensitively, so each body is spelled on every
+// prefix; every other launcher's word already carries its prefix
+// shape (`-E` and `--expr` are different spellings, not one body).
+func optionSpellings(word, launcher string) []string {
+	if launcher != "pwsh" {
+		return []string{word}
+	}
+	body := optionTableBody(word, launcher)
+	out := make([]string, 0, 5)
+	for _, p := range pwshOptionPrefixRunes {
+		out = append(out, string(p)+body)
+	}
+	return out
+}
+
+// patternMaxLen is the longest string a glob pattern can produce, or
+// -1 when a `*` makes it unbounded — every non-`*` atom produces
+// exactly one character.
+func patternMaxLen(pattern string, b *reachBudget) int {
+	if strings.ContainsRune(pattern, '*') {
+		return -1
+	}
+	return len(globAtomStarts(pattern, b)) - 1
 }
 
 // bodySpellsVisiblePrefix reports whether cand is a prefix of a
@@ -302,25 +485,12 @@ func bodySpellsVisiblePrefix(cand, launcher string) bool {
 // brace-carrying body classifies by what it could produce: a payload
 // name or a prefix of one.
 func literalSpellsTailPayload(literal, launcher string, b *reachBudget) bool {
+	if strings.ContainsAny(literal, "*?[{") {
+		return globLiteralSpellsOption(literal, launcher,
+			namedLauncherTailPayloadWords[launcher], false, b)
+	}
 	body, ok := optionWordBody(literal, launcher)
 	if !ok {
-		return false
-	}
-	if strings.ContainsAny(body, "*?[{") {
-		variants, finished := namedPieceVariants(body, b)
-		if !finished {
-			return true
-		}
-		for _, v := range variants {
-			for _, word := range namedLauncherTailPayloadWords[launcher] {
-				payloadBody := optionTableBody(word, launcher)
-				for k := len(payloadBody); k >= 1; k-- {
-					if globOverMatch(v, payloadBody[:k], b) {
-						return true
-					}
-				}
-			}
-		}
 		return false
 	}
 	for _, word := range namedLauncherTailPayloadWords[launcher] {
