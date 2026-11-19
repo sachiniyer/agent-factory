@@ -483,8 +483,10 @@ will not reach the child's environment.
     `co""dex`, `co\dex`, `co\<newline>dex` and `co\\\\dex` — quoting
     quoted again at any depth — all check as `codex`, and a piece
     carrying POSIX glob syntax (`*?[`) is matched as a pattern since
-    pathname expansion happens at run time — `co[d]ex` can resolve to
-    the codex on disk, while `*.log` still admits;
+    pathname expansion happens at run time — `co[d]ex` or
+    `co[[:alpha:]]ex` can resolve to the codex on disk (the match
+    over-approximates: any `[…]` is one character, `?` one, `*` a
+    run, an unterminated `[` refuses), while `*.log` still admits;
   - a word does not literalize (a substitution or expansion in the
     argv itself) or its literal carries `$` or backtick text — a name
     the text cannot see could be constructed at run time (`pwsh -c
@@ -498,7 +500,13 @@ will not reach the child's environment.
     `--stdin`), matching each spelling's unique-prefix abbreviations
     too — the same refusal class `sh -s` gets. A command-string flag
     left with no operand is that same stdin feed (`pwsh -Command`,
-    `nu -c` alone).
+    `nu -c` alone);
+
+  Launcher names nest by NAME, not by position: a piece (or word, or a
+  field of a nested tail) that IS a modelled launcher's name re-enters
+  that launcher's own rule on the text after it — `watch 'pwsh
+  -EncodedCommand …'` refuses exactly as a direct `pwsh -EncodedCommand`
+  does, at any depth, inside the same total work bound.
 
   `gdbus` call operands are GVariant text decoded through their
   escapes before the piece check (`['CODEX\u005fHOME=/o']` still names

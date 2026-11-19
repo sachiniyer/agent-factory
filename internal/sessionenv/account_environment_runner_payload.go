@@ -159,11 +159,50 @@ const reachWorkLimit = 16384
 // closure rule's per-word verdicts: a buried launcher's suffix
 // judgements rescan the same tail words (ssh … ssh make), and without
 // the memo each rescan pays a literalize per position per word —
-// quadratic.
+// quadratic. wordLiterals memoizes the literalize itself so a nested
+// launcher scan over the same words never re-pays it, and
+// namedLiterals memoizes per-text verdicts for the pseudo-words nested
+// scans split out of already-literal text.
 type reachBudget struct {
-	left       int
-	seen       map[string]bool
-	namedWords map[namedWordKey]namedWordVerdict
+	left          int
+	seen          map[string]bool
+	namedWords    map[namedWordKey]namedWordVerdict
+	namedLiterals map[namedLiteralKey]namedWordVerdict
+	wordLiterals  map[*syntax.Word]wordLiteral
+}
+
+// wordLiteral is a word's memoized literalize result — text and whether
+// literalizing succeeded.
+type wordLiteral struct {
+	text string
+	ok   bool
+}
+
+// newReachBudget builds the shared bound with every memo map live.
+func newReachBudget() *reachBudget {
+	return &reachBudget{
+		left:          reachWorkLimit,
+		seen:          map[string]bool{},
+		namedWords:    map[namedWordKey]namedWordVerdict{},
+		namedLiterals: map[namedLiteralKey]namedWordVerdict{},
+		wordLiterals:  map[*syntax.Word]wordLiteral{},
+	}
+}
+
+// literalWordBudgeted literalizes a word once per validation — the
+// nested-launcher scans and the suffix walks revisit the same word
+// nodes, and literalizing is the counted work the linear test bounds.
+func literalWordBudgeted(word *syntax.Word, b *reachBudget) (string, bool) {
+	if b != nil && b.wordLiterals != nil {
+		if lit, seen := b.wordLiterals[word]; seen {
+			return lit.text, lit.ok
+		}
+	}
+	lit, ok := launcherLiteralWord(word)
+	if b != nil && b.wordLiterals != nil {
+		b.wordLiterals[word] = wordLiteral{text: lit, ok: ok}
+	}
+	return lit, ok
 }
 
 // spend charges n visits; a false return means the budget is spent and
@@ -175,7 +214,7 @@ func (b *reachBudget) spend(n int) bool {
 
 func payloadReachesAgentProgram(script string, names, preserved map[string]struct{}, b *reachBudget) bool {
 	if b == nil {
-		b = &reachBudget{left: reachWorkLimit, seen: map[string]bool{}, namedWords: map[namedWordKey]namedWordVerdict{}}
+		b = newReachBudget()
 	}
 	if b.seen[script] {
 		// Judged already in this validation — a candidate that reached

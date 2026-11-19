@@ -1,7 +1,6 @@
 package sessionenv
 
 import (
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -55,6 +54,12 @@ import (
 // the boundaries a launcher's own parsing can place a command or name
 // at: whitespace, `=`, `;`, `&`, `|`, quotes and parentheses.
 func namedLauncherPieceBreak(c rune) bool {
+	return c < 128 && namedPieceBreakByte(byte(c))
+}
+
+// namedPieceBreakByte is the same delimiter set at byte level, for the
+// offset scan in namedLauncherTextRefuses.
+func namedPieceBreakByte(c byte) bool {
 	switch c {
 	case ' ', '\t', '\n', '\r', '=', ';', '&', '|', '\'', '"', '`', '(', ')':
 		return true
@@ -69,21 +74,17 @@ func namedLauncherPieceBreak(c rune) bool {
 // agent is not a re-root). A piece carrying POSIX pathname-expansion
 // syntax (XCU 2.13 — `*`, `?`, `[…]`) is matched as a PATTERN too:
 // `co[d]ex` resolves to the codex on disk at run time, so the text
-// alone does not show the name. `!` negation translates to Go's `^`
-// class spelling and the piece's path basename is matched alongside
-// the whole piece; a malformed pattern can only name itself.
+// alone does not show the name. The whole piece and its path basename
+// are both matched.
 func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{}) bool {
 	if piece == "" {
 		return false
 	}
-	pattern := ""
-	if strings.ContainsAny(piece, "*?[") {
-		pattern = strings.ReplaceAll(piece, "[!", "[^")
-	}
+	glob := strings.ContainsAny(piece, "*?[")
+	base := filepath.Base(piece)
 	for name := range names {
 		if textNamesIdentifierBoundary(piece, name) ||
-			globPieceMatches(pattern, name) ||
-			globPieceMatches(filepath.Base(pattern), name) {
+			(glob && (globOverMatch(piece, name) || globOverMatch(base, name))) {
 			return true
 		}
 	}
@@ -94,24 +95,92 @@ func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{
 		if _, kept := preserved[configVar]; kept {
 			continue
 		}
-		if textNamesIdentifierBoundary(piece, agent) || filepath.Base(piece) == agent ||
-			globPieceMatches(pattern, agent) ||
-			globPieceMatches(filepath.Base(pattern), agent) {
+		if textNamesIdentifierBoundary(piece, agent) || base == agent ||
+			(glob && (globOverMatch(piece, agent) || globOverMatch(base, agent))) {
 			return true
 		}
 	}
 	return false
 }
 
-// globPieceMatches path.Match-es a glob pattern against a denied name;
-// the empty pattern (no glob syntax in the piece) and malformed
-// patterns never match.
-func globPieceMatches(pattern, name string) bool {
-	if pattern == "" {
-		return false
+// globOverMatch reports whether pattern — POSIX pathname expansion
+// (XCU 2.13) OVER-APPROXIMATED, never path.Match semantics — could
+// match name: `?` and every bracket expression `[…]` (classes, ranges
+// and negation alike — the content is not read) each match ONE
+// character, `*` matches any run, and `\<c>` matches its literal. An
+// unterminated `[` matches everything: a pattern the matcher cannot
+// read could be the name. `co[[:alpha:]]ex` therefore matches codex.
+func globOverMatch(pattern, name string) bool {
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] == '[' && globBracketEnd(pattern, i) < 0 {
+			return true
+		}
 	}
-	ok, err := path.Match(pattern, name)
-	return err == nil && ok
+	memo := map[[2]int]bool{}
+	var match func(i, j int) bool
+	match = func(i, j int) bool {
+		key := [2]int{i, j}
+		if res, ok := memo[key]; ok {
+			return res
+		}
+		var res bool
+		switch {
+		case i == len(pattern):
+			res = j == len(name)
+		case pattern[i] == '*':
+			res = match(i+1, j) || (j < len(name) && match(i, j+1))
+		case j == len(name):
+			res = false
+		case pattern[i] == '?' || pattern[i] == '[':
+			next := i + 1
+			if pattern[i] == '[' {
+				next = globBracketEnd(pattern, i) + 1
+			}
+			res = match(next, j+1)
+		case pattern[i] == '\\' && i+1 < len(pattern):
+			res = pattern[i+1] == name[j] && match(i+2, j+1)
+		default:
+			res = pattern[i] == name[j] && match(i+1, j+1)
+		}
+		memo[key] = res
+		return res
+	}
+	return match(0, 0)
+}
+
+// globBracketEnd returns the index of the `]` closing the bracket
+// expression that opens at i (pattern[i] == '['), or -1 when none
+// does. A leading `!` or `^` is negation, so a `]` right after it —
+// or as the very first character — is literal. A POSIX `[[:class:]]`,
+// `[[.coll.]]` or `[[=equiv=]]` inside is skipped whole so its `]`
+// does not close the expression.
+func globBracketEnd(pattern string, i int) int {
+	j := i + 1
+	if j < len(pattern) && (pattern[j] == '!' || pattern[j] == '^') {
+		j++
+	}
+	if j < len(pattern) && pattern[j] == ']' {
+		j++
+	}
+	for j < len(pattern) {
+		if pattern[j] == '[' && j+1 < len(pattern) &&
+			(pattern[j+1] == ':' || pattern[j+1] == '.' || pattern[j+1] == '=') {
+			k := j + 2
+			for k+1 < len(pattern) && !(pattern[k] == pattern[j+1] && pattern[k+1] == ']') {
+				k++
+			}
+			if k+1 >= len(pattern) {
+				return -1
+			}
+			j = k + 2
+			continue
+		}
+		if pattern[j] == ']' {
+			return j
+		}
+		j++
+	}
+	return -1
 }
 
 // namedWordKey is one word's memoized verdict slot — keyed on the word
@@ -134,15 +203,18 @@ type namedWordVerdict struct {
 
 // namedLauncherTailRefuses applies the closure rule to a named
 // launcher's tail words — one pass, each word judged once by
-// namedLauncherWordVerdict. Verdicts are memoized per word on the shared
-// reach budget when preserved is empty: a buried launcher's suffix
-// judgements rescan the same tail words (ssh … ssh make), and without
-// the memo that is a literalize per position per word — quadratic.
-// Spending the shared budget down charges each call's scan size, so a
-// pathological nesting still fails closed at the bound.
+// namedLauncherWordVerdict, and a word that IS a modelled launcher's
+// name re-enters that launcher's rule on the words after it (nesting
+// by name — `watch pwsh -enc x` gets pwsh's hidden-input spellings).
+// Verdicts are memoized per word on the shared reach budget when
+// preserved is empty: a buried launcher's suffix judgements rescan
+// the same tail words (ssh … ssh make), and without the memo that is
+// a literalize per position per word — quadratic. Spending the shared
+// budget down charges each call's scan size, so a pathological
+// nesting still fails closed at the bound.
 func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]struct{}, launcher string, b *reachBudget) bool {
 	if b == nil {
-		b = &reachBudget{left: reachWorkLimit, seen: map[string]bool{}, namedWords: map[namedWordKey]namedWordVerdict{}}
+		b = newReachBudget()
 	}
 	if !b.spend(len(words)) {
 		return true
@@ -158,7 +230,7 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 			verdict, seen = b.namedWords[key]
 		}
 		if !seen {
-			verdict = namedLauncherWordVerdict(word, i == last, decode, launcher, names, preserved)
+			verdict = namedLauncherWordVerdict(word, i == last, decode, launcher, names, preserved, b)
 			if memoize {
 				b.namedWords[key] = verdict
 			}
@@ -166,8 +238,104 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 		if verdict.refuse {
 			return true
 		}
+		literal, ok := literalWordBudgeted(word, b)
+		if !ok {
+			continue // the verdict above already refused
+		}
+		if nested, named := namedLauncherNameOf(literal); named {
+			if namedNestedWordsRefuse(words[i+1:], nested, names, preserved, b) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// namedLauncherNameOf reports whether text spells a modelled launcher's
+// name, checking the normalized form too — `pw”sh` reads as pwsh to a
+// downstream shell.
+func namedLauncherNameOf(text string) (string, bool) {
+	if _, named := accountNamedLauncherNames[text]; named {
+		return text, true
+	}
+	if flat := normalizeNamedLiteral(text); flat != text {
+		if _, named := accountNamedLauncherNames[flat]; named {
+			return flat, true
+		}
+	}
+	return "", false
+}
+
+// namedNestedWordsRefuse literalizes each remaining word once (the
+// shared memo — literalizing is the counted work) and applies the
+// nested launcher's rule to them as pseudo-words.
+func namedNestedWordsRefuse(words []*syntax.Word, launcher string, names, preserved map[string]struct{}, b *reachBudget) bool {
+	if b == nil {
+		b = newReachBudget()
+	}
+	if !b.spend(len(words)) {
+		return true
+	}
+	fields := make([]string, 0, len(words))
+	for _, word := range words {
+		literal, ok := literalWordBudgeted(word, b)
+		if !ok {
+			return true // an unreadable tail word is hidden input
+		}
+		fields = append(fields, literal)
+	}
+	return namedNestedFieldsRefuse(fields, launcher, names, preserved, b)
+}
+
+// namedNestedFieldsRefuse applies launcher's own rule to pseudo-words —
+// text fields, not argv: a nested launcher inside a word's text (or a
+// quoted command string) has no argv to preserve. Each field gets the
+// same literal verdict a word gets, a field that is another modelled
+// launcher's name recurses on the fields after it, and the shared
+// budget bounds the nesting.
+func namedNestedFieldsRefuse(fields []string, launcher string, names, preserved map[string]struct{}, b *reachBudget) bool {
+	if b == nil {
+		b = newReachBudget()
+	}
+	if !b.spend(len(fields)) {
+		return true
+	}
+	_, decode := namedLauncherDecodesOperands[launcher]
+	memoize := len(preserved) == 0 && b.namedLiterals != nil
+	last := len(fields) - 1
+	for i, field := range fields {
+		var verdict namedWordVerdict
+		seen := false
+		key := namedLiteralKey{literal: field, launcher: launcher, last: i == last, decode: decode}
+		if memoize {
+			verdict, seen = b.namedLiterals[key]
+		}
+		if !seen {
+			verdict = namedLiteralVerdict(field, i == last, decode, launcher, names, preserved, b)
+			if memoize {
+				b.namedLiterals[key] = verdict
+			}
+		}
+		if verdict.refuse {
+			return true
+		}
+		if nested, named := namedLauncherNameOf(field); named {
+			if namedNestedFieldsRefuse(fields[i+1:], nested, names, preserved, b) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// namedLiteralKey is one pseudo-word's memoized verdict slot — the
+// same shape as namedWordKey, keyed on text because nested scans
+// produce fields, not word nodes.
+type namedLiteralKey struct {
+	literal  string
+	launcher string
+	last     bool
+	decode   bool
 }
 
 // namedLauncherWordVerdict classifies ONE tail word: no literal →
@@ -176,11 +344,18 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 // — the literal and its shell-normalized form, each split on the
 // delimiter set — checked for the agent and protected names; and a
 // payload flag at the tail's end reads stdin.
-func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launcher string, names, preserved map[string]struct{}) namedWordVerdict {
-	literal, ok := launcherLiteralWord(word)
+func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launcher string, names, preserved map[string]struct{}, b *reachBudget) namedWordVerdict {
+	literal, ok := literalWordBudgeted(word, b)
 	if !ok {
 		return namedWordVerdict{refuse: true}
 	}
+	return namedLiteralVerdict(literal, last, decode, launcher, names, preserved, b)
+}
+
+// namedLiteralVerdict is the word verdict on already-literal text —
+// the shared core for argv words and the pseudo-words a nested
+// launcher scan splits out of a word's text.
+func namedLiteralVerdict(literal string, last, decode bool, launcher string, names, preserved map[string]struct{}, b *reachBudget) namedWordVerdict {
 	if decode {
 		decoded, decOK := gvariantDecode(literal)
 		if !decOK {
@@ -203,11 +378,11 @@ func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launche
 	// and `co\\\\dex` are both `codex` — so the piece rule sees
 	// both the text and the flat-normalized over-approximation of
 	// what the text becomes.
-	if namedLauncherTextRefuses(literal, names, preserved) {
+	if namedLauncherTextRefuses(literal, names, preserved, b) {
 		return namedWordVerdict{refuse: true}
 	}
 	if normalized := normalizeNamedLiteral(literal); normalized != literal &&
-		namedLauncherTextRefuses(normalized, names, preserved) {
+		namedLauncherTextRefuses(normalized, names, preserved, b) {
 		return namedWordVerdict{refuse: true}
 	}
 	if last && verdict.payload {
@@ -259,13 +434,41 @@ func normalizeNamedLiteral(text string) string {
 }
 
 // namedLauncherTextRefuses runs the piece rule over one text — the text
-// itself plus every piece split on the delimiter set.
-func namedLauncherTextRefuses(text string, names, preserved map[string]struct{}) bool {
+// itself plus every piece split on the delimiter set. A piece that IS
+// a modelled launcher's name re-enters that launcher's rule on the
+// text after it (nesting by name — `pwsh -EncodedCommand` inside a
+// watch string gets pwsh's hidden-input spellings), recursively,
+// inside the shared budget.
+func namedLauncherTextRefuses(text string, names, preserved map[string]struct{}, b *reachBudget) bool {
 	if namedLauncherPieceRefuses(text, names, preserved) {
 		return true
 	}
-	for _, piece := range strings.FieldsFunc(text, namedLauncherPieceBreak) {
+	for i := 0; i < len(text); {
+		for i < len(text) && namedPieceBreakByte(text[i]) {
+			i++
+		}
+		start := i
+		for i < len(text) && !namedPieceBreakByte(text[i]) {
+			if text[i] == '[' {
+				// A bracket expression's content is not a piece
+				// boundary — `['FOO=/o']` is one glob atom, not the
+				// fragments `=` would split it into.
+				if end := globBracketEnd(text, i); end >= 0 {
+					i = end + 1
+					continue
+				}
+			}
+			i++
+		}
+		piece := text[start:i]
+		if piece == "" {
+			break
+		}
 		if piece != text && namedLauncherPieceRefuses(piece, names, preserved) {
+			return true
+		}
+		if nested, named := namedLauncherNameOf(piece); named &&
+			namedNestedFieldsRefuse(strings.Fields(text[i:]), nested, names, preserved, b) {
 			return true
 		}
 	}

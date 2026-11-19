@@ -118,7 +118,7 @@ func newOperandTailMemo() operandTailMemo {
 		xargsNested:            map[xargsNestedKey]xargsNestedResult{},
 		xargsNestedAny:         map[xargsMarkerKey]bool{},
 		envWords:               map[*syntax.Word]envWordBits{},
-		reach:                  &reachBudget{left: reachWorkLimit, seen: map[string]bool{}, namedWords: map[namedWordKey]namedWordVerdict{}},
+		reach:                  newReachBudget(),
 		literalChildTails:      map[*syntax.Word]bool{},
 		childJudgements:        new(int),
 		straceRunWork:          new(int),

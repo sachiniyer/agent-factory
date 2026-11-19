@@ -1105,18 +1105,35 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// The P2 glob finding — POSIX pathname expansion
 		// happens at run time, so a piece carrying `*?[`
 		// is matched as a pattern: `co[d]ex` can resolve
-		// to the codex on disk (and `!` negation too).
-		// Ordinary globs that cannot spell a denied name
-		// still admit.
+		// to the codex on disk. The matcher over-
+		// approximates — any `[…]` is one character, `?`
+		// one, `*` a run, an unterminated `[` refuses —
+		// so POSIX classes, ranges and `!` negation all
+		// cover. Ordinary globs that cannot spell a
+		// denied name still admit.
 		{`watch 'env -i /tmp/review-probe/co[d]ex'`, true},
+		{`watch 'env -i /x/co[[:alpha:]]ex'`, true},
 		{`ssh host 'co?ex -n 1'`, true},
 		{`ssh host 'CODEX_HO[!X]E=/o env'`, true},
+		{`ssh host 'co[dex'`, true},
 		{`ssh host 'ls *.log'`, false},
 		{`watch 'ls /var/log/*.gz'`, false},
 		{`ssh host 'grep -r x co[d]ey'`, false},
 		// A bare `*` matches every name — the same mere-
 		// mention over-refusal class as `cat codex.md`.
 		{`ssh host 'tar czf - *'`, true},
+		// Nesting by name — a modelled launcher found as
+		// a piece (or word, or field of a nested tail)
+		// re-enters ITS rule on the text after it, so
+		// pwsh's hidden-input spellings refuse wherever
+		// pwsh surfaces, at any depth. File-backed forms
+		// stay the stated limit through nesting too.
+		{`watch 'pwsh -EncodedCommand ZQBjAGgAbwA='`, true},
+		{`watch pwsh -enc x`, true},
+		{`watch 'ssh pwsh -EncodedCommand x'`, true},
+		{`watch 'bash -c "pwsh -enc x"'`, true},
+		{`watch 'pwsh -File x.ps1'`, false},
+		{`watch 'echo pwsh is a shell'`, false},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state
