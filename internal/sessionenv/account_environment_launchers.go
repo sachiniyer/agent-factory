@@ -8,12 +8,15 @@ import (
 )
 
 // This file covers the env-injection launchers — sudo, docker (including
-// `docker compose` and the standalone `docker-compose` binary) and
-// systemd-run (including its `run0` argv[0] alias) — with a deliberately
-// conservative lexical rule instead of a per-option grammar model. Exact
-// grammar modelling kept leaking (each review round surfaced another
-// accepted spelling the option tables misjudged: a hidden docker alias
-// shifting the image boundary, an `=`-joined short-option operand, a
+// `docker compose` and the standalone `docker-compose` binary, and the
+// CLI-compatible podman and nerdctl), systemd-run (including its `run0`
+// argv[0] alias), bwrap, su and script — plus the environment-source
+// writers systemctl (set-environment/import-environment/
+// unset-environment) and dbus-update-activation-environment — with a
+// deliberately conservative lexical rule instead of a per-option grammar
+// model. Exact grammar modelling kept leaking (each review round surfaced
+// another accepted spelling the option tables misjudged: a hidden docker
+// alias shifting the image boundary, an `=`-joined short-option operand, a
 // consumed operand re-entering as the shadowed command head, a leading
 // dynamic word escaping the tail), so the property here inverts the risk
 // for these launchers: OVER-refusal is acceptable and UNDER-refusal is
@@ -85,6 +88,43 @@ import (
 //     config, not the pane's child executable — `docker exec` is not the
 //     exec builtin and `docker history` is not the history builtin — and
 //     neither path promotes a tail word into shell-builtin dispatch.
+//
+// Two further properties from #7589:
+//
+//   - Environment-source WRITERS get the same lexical cut as an
+//     assignment: `systemctl … set-environment|import-environment|
+//     unset-environment` and `dbus-update-activation-environment` write a
+//     name into the user service manager's (or dbus activation)
+//     environment, where a later `systemd-run --user` unit inherits it —
+//     in a different tab, at a different time. The write itself is the
+//     visible command, so a protected name anywhere in its argv refuses
+//     with no command-word-follows requirement. `systemctl` without one
+//     of those subcommand words gets the ordinary argv scan.
+//   - An environment-RESETTING launcher refuses when its tail reaches an
+//     account-capable agent program: sudo without `-E`/`--preserve-env`
+//     (env_reset strips the pins — `sudo codex` and `sudo -u root codex`
+//     are the same reset), systemd-run outside `--scope` (a transient
+//     unit gets the manager's environment, not the caller's), run0
+//     always (it is service-mode by construction), `su -`/`-l`/`--login`
+//     (a login environment), and `bwrap --clearenv`. The agent resolves
+//     the target identity's default credential root in every case — the
+//     same outcome `env -i codex` is refused for. The reach check names
+//     the account-capable agent programs (the accountConfigVars roster:
+//     claude/codex/gemini) at an identifier boundary inside any literal
+//     word, so `sudo -u root bash -lc codex` and `su -l -c 'codex' u`
+//     refuse too. Ordinary administration stays admitted: `sudo -u
+//     postgres psql`, `systemd-run --user --pty make`, `run0 uptime`,
+//     `su -c 'make' user` (plain su preserves the environment), and
+//     env-preserving forms — `sudo -E codex`, `sudo --preserve-env
+//     codex`, `systemd-run --scope codex`. The price is named in the PR:
+//     `sudo --preserve-env=CODEX_HOME codex` is refused by the lexical
+//     cut before the reset arm even reads the preserve list (the word
+//     still NAMES a protected variable), `sudo -vE codex` (a bundled -E
+//     the flag scan does not split), `sudo -u codex make` (a user account
+//     literally named codex), and `docker run img codex` /
+//     `podman run img codex` — a container's environment is image-defined
+//     rather than a reset of the pane's, so containers are deliberately
+//     outside the reset arm.
 //
 // requireCommand is envCallMutatesAccountEnvironment's rule applied to
 // the launchers' denied spellings: at command position a protected-name
@@ -165,15 +205,36 @@ func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTai
 	if shadowedLiteralChildTailMutates(words, names, memo) {
 		return nil, true
 	}
+	// env_reset is sudo's default: the child runs with a minimal target-user
+	// environment, so an agent reached through sudo loses its pinned
+	// account root exactly as under `env -i` — `sudo codex` and `sudo -u
+	// root codex` are the same reset. `-E`/`--preserve-env` keep the
+	// caller's environment (and `--preserve-env=LIST` keeps the listed
+	// names), so those forms are not resets.
+	preserved, preserveAll := sudoPreservesEnvironment(words)
+	if tailReachesResetAgentProgram(words, preserved, preserveAll) {
+		return nil, true
+	}
 	return nil, false
 }
 
-func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+// unwrapSystemdRun judges `systemd-run`; serviceOnly marks its run0 alias,
+// which always spawns a transient service unit. Without `--scope` the unit
+// inherits the service manager's environment rather than the caller's —
+// the pane's pins never reach it — so a tail reaching an agent program
+// refuses. `--scope` wraps the caller's process context and keeps its
+// environment.
+func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, serviceOnly bool) ([]*syntax.Word, bool) {
 	if unwrapEnvInjectionLauncher(words, names, true, requireCommand) {
 		return nil, true
 	}
 	if shadowedLiteralChildTailMutates(words, names, memo) {
 		return nil, true
+	}
+	if serviceOnly || !literalWordPresent(words, "--scope") {
+		if tailReachesResetAgentProgram(words, nil, false) {
+			return nil, true
+		}
 	}
 	return nil, false
 }
@@ -189,11 +250,200 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 	// The leaf and its operands get the ordinary mutation scan every
 	// unrecognized command's argv gets (a shadowed docker execs at `env`
 	// or a buried launcher just as a shadowed `prog` does), then nothing
-	// is left for the caller to judge.
+	// is left for the caller to judge. podman and nerdctl share docker's
+	// CLI grammar and take this arm too; a container's environment is
+	// image-defined, not a reset of the pane's, so they get no reset arm.
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
 	return nil, false
+}
+
+// unwrapBwrap judges bubblewrap. Its tail IS the sandboxed command, so the
+// tail gets the same per-position child-tail judgement sudo's does.
+// `--clearenv` empties the child's environment — a reset that refuses when
+// the tail reaches an agent program; `--setenv`/`--unsetenv` spellings are
+// covered by the lexical cut.
+func unwrapBwrap(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+		return nil, true
+	}
+	if shadowedLiteralChildTailMutates(words, names, memo) {
+		return nil, true
+	}
+	if literalWordPresent(words, "--clearenv") &&
+		tailReachesResetAgentProgram(words, nil, false) {
+		return nil, true
+	}
+	return nil, false
+}
+
+// unwrapSu judges su. A `-c` script word is data the lexical cut already
+// reads, so the tail gets the argv-position scan docker's does. su
+// preserves the caller's environment EXCEPT for `-`/`-l`/`--login` (and
+// `-p`/`--preserve-environment` overrides even those), so only a login
+// form counts as a reset.
+func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+		return nil, true
+	}
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
+		return nil, true
+	}
+	if suResetsEnvironment(words) && tailReachesResetAgentProgram(words, nil, false) {
+		return nil, true
+	}
+	return nil, false
+}
+
+// unwrapScript judges util-linux script: `-c`'s payload is a shell script
+// read as data by the lexical cut, and the remaining argv is output files
+// — the argv-position scan covers both a shadowed script's exec and a
+// buried verdict word.
+func unwrapScript(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+		return nil, true
+	}
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
+		return nil, true
+	}
+	return nil, false
+}
+
+// unwrapSystemctlEnvironmentWriter judges systemctl: when its argv
+// carries a literal `set-environment`, `import-environment` or
+// `unset-environment` word, the command writes the service manager's
+// environment — a launcher's own environment source — so the lexical cut
+// applies to every word (the write is the effect; no command word need
+// follow). Any other systemctl command line gets the ordinary argv scan.
+func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	if systemctlWritesEnvironment(words) &&
+		unwrapEnvInjectionLauncher(words, names, false, false) {
+		return nil, true
+	}
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
+		return nil, true
+	}
+	return nil, false
+}
+
+// unwrapDbusUpdateActivationEnvironment judges
+// dbus-update-activation-environment: every operand is a name or a
+// NAME=value written into the dbus activation (and, with --systemd, user
+// service manager) environment — the same write, so the lexical cut
+// applies unconditionally.
+func unwrapDbusUpdateActivationEnvironment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	if unwrapEnvInjectionLauncher(words, names, false, false) {
+		return nil, true
+	}
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
+		return nil, true
+	}
+	return nil, false
+}
+
+// literalWordPresent reports whether words contains the exact literal
+// word want.
+func literalWordPresent(words []*syntax.Word, want string) bool {
+	for _, word := range words {
+		if literal, ok := launcherLiteralWord(word); ok && literal == want {
+			return true
+		}
+	}
+	return false
+}
+
+// systemctlWritesEnvironment reports whether the argv names a
+// manager-environment write subcommand.
+func systemctlWritesEnvironment(words []*syntax.Word) bool {
+	for _, word := range words {
+		literal, ok := launcherLiteralWord(word)
+		if !ok {
+			continue
+		}
+		switch literal {
+		case "set-environment", "import-environment", "unset-environment":
+			return true
+		}
+	}
+	return false
+}
+
+// sudoPreservesEnvironment reports sudo's env-preservation state:
+// preserveAll for `-E` or a bare `--preserve-env`, else the name list of
+// `--preserve-env=LIST` words. `-E` inside a short-option cluster
+// (`sudo -vE`) is not split — the invocation reads as a reset and
+// over-refuses, the safe direction.
+func sudoPreservesEnvironment(words []*syntax.Word) (map[string]struct{}, bool) {
+	var preserved map[string]struct{}
+	for _, word := range words {
+		literal, ok := launcherLiteralWord(word)
+		if !ok {
+			continue
+		}
+		if literal == "-E" || literal == "--preserve-env" {
+			return nil, true
+		}
+		if rhs, found := strings.CutPrefix(literal, "--preserve-env="); found {
+			if preserved == nil {
+				preserved = map[string]struct{}{}
+			}
+			for _, name := range strings.Split(rhs, ",") {
+				preserved[name] = struct{}{}
+			}
+		}
+	}
+	return preserved, false
+}
+
+// suResetsEnvironment reports whether the invocation asks for a login
+// environment (`-`, `-l`, `--login`) without `-p`/`--preserve-environment`
+// keeping the caller's.
+func suResetsEnvironment(words []*syntax.Word) bool {
+	login := false
+	preserve := false
+	for _, word := range words {
+		literal, ok := launcherLiteralWord(word)
+		if !ok {
+			continue
+		}
+		switch literal {
+		case "-", "-l", "--login":
+			login = true
+		case "-p", "--preserve-environment":
+			preserve = true
+		}
+	}
+	return login && !preserve
+}
+
+// tailReachesResetAgentProgram reports whether a literal word in words
+// names an account-capable agent program at an identifier boundary while
+// the invocation does not preserve that agent's identity variable. The
+// roster is accountConfigVars (claude/codex/gemini — the only agents af
+// can pin), so `sudo -u root codex`, `sudo -u root bash -lc codex` and
+// `su -l -c 'codex' u` all reach it, while `sudo -u postgres psql` does
+// not. A non-literal word is skipped — the lexical scan already refused
+// the command for carrying it.
+func tailReachesResetAgentProgram(words []*syntax.Word, preserved map[string]struct{}, preserveAll bool) bool {
+	if preserveAll {
+		return false
+	}
+	for _, word := range words {
+		literal, ok := launcherLiteralWord(word)
+		if !ok {
+			continue
+		}
+		for agent, configVar := range accountConfigVars {
+			if _, kept := preserved[configVar]; kept {
+				continue
+			}
+			if launcherSegmentNames(literal, agent, false) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // launcherLiteralWord renders a word to its literal text for the launcher
@@ -295,6 +545,78 @@ func lettersOnly(text string) bool {
 	return len(text) > 0
 }
 
+// isAccountLauncherName reports whether word names one of the launchers
+// or environment-source writers whose tails get the lexical judgement —
+// the same list peelAccountWrapper's launcher arms and
+// launcherSuffixMutates dispatch on.
+func isAccountLauncherName(word *syntax.Word) bool {
+	for _, name := range []string{
+		"sudo", "docker", "docker-compose", "podman", "nerdctl",
+		"systemd-run", "run0", "bwrap", "su", "script",
+		"systemctl", "dbus-update-activation-environment",
+	} {
+		if isAccountCommandName(word, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// A literal word in an unrecognized command's tail is classified by what a
+// protected name inside it can DO:
+const (
+	// wordProtectedNone — the word names no protected variable.
+	wordProtectedNone = iota
+	// wordProtectedAssign — the word carries `NAME=<nonempty>` (the name
+	// ends its `=` segment and non-empty text follows), the spelling an
+	// env option or a `-c` script uses to place an assignment.
+	wordProtectedAssign
+	// wordProtectedName — the word only names the variable: a bare
+	// `CODEX_HOME` (an option's separate operand, `FOO=CODEX_HOME`'s
+	// value) or the trailing-empty `NAME=` a grep pattern types.
+	wordProtectedName
+)
+
+// unrecognizedWordProtectedKind classifies a literal word by the rule in
+// wrapperTailWordHidesAccountAssignment: a protected name at an
+// identifier boundary that ENDS its `=` segment and is followed by more
+// text assigns the variable; any other boundary match only names it.
+func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) int {
+	kind := wordProtectedNone
+	text := strings.TrimLeft(literal, "-")
+	optionCluster := strings.HasPrefix(literal, "-")
+	segments := strings.Split(text, "=")
+	offset := 0
+	for index, segment := range segments {
+		offset += len(segment) + 1
+		cluster := optionCluster && index == 0
+		for name := range names {
+			if !launcherSegmentNames(segment, name, cluster) {
+				continue
+			}
+			if index < len(segments)-1 && text[offset:] != "" &&
+				segmentEndsWithProtectedName(segment, name, cluster) {
+				return wordProtectedAssign
+			}
+			kind = wordProtectedName
+		}
+	}
+	return kind
+}
+
+// segmentEndsWithProtectedName reports whether name both matches segment
+// at an identifier boundary and reaches its end — the condition that makes
+// a following `=` the name's own assignment joiner rather than a later
+// option's.
+func segmentEndsWithProtectedName(segment, name string, optionCluster bool) bool {
+	if !strings.HasSuffix(segment, name) {
+		return false
+	}
+	i := len(segment) - len(name)
+	return i == 0 || !isEnvNameByte(segment[i-1]) ||
+		(optionCluster && lettersOnly(segment[:i]))
+}
+
 // launcherEnvFileSpelling reports whether a literal argument word names
 // an env file or clears the environment — both refuse regardless of the
 // denied-name cut because their effect is not readable from the command
@@ -327,10 +649,23 @@ func launcherSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo
 	switch {
 	case isAccountCommandName(words[0], "sudo"):
 		_, unsafe = unwrapSudo(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "docker") || isAccountCommandName(words[0], "docker-compose"):
+	case isAccountCommandName(words[0], "docker") || isAccountCommandName(words[0], "docker-compose") ||
+		isAccountCommandName(words[0], "podman") || isAccountCommandName(words[0], "nerdctl"):
 		_, unsafe = unwrapDocker(words[1:], names, memo, true)
-	default:
-		_, unsafe = unwrapSystemdRun(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "systemd-run"):
+		_, unsafe = unwrapSystemdRun(words[1:], names, memo, true, false)
+	case isAccountCommandName(words[0], "run0"):
+		_, unsafe = unwrapSystemdRun(words[1:], names, memo, true, true)
+	case isAccountCommandName(words[0], "bwrap"):
+		_, unsafe = unwrapBwrap(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "su"):
+		_, unsafe = unwrapSu(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "script"):
+		_, unsafe = unwrapScript(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "systemctl"):
+		_, unsafe = unwrapSystemctlEnvironmentWriter(words[1:], names, memo, true)
+	case isAccountCommandName(words[0], "dbus-update-activation-environment"):
+		_, unsafe = unwrapDbusUpdateActivationEnvironment(words[1:], names, memo, true)
 	}
 	return unsafe
 }

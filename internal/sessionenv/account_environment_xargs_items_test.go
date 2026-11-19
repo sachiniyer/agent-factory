@@ -30,17 +30,22 @@ func TestValidateAccountEnvironmentCommand_RefusesXargsMarkerInCommandSlot(t *te
 		require.Error(t, err, "command %q must not replace the sibling account environment", command)
 		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
 	}
-	// A plain substitution into an ordinary argument stays accepted. So does
-	// the report's first shape: xargs never substitutes its own COMMAND word
-	// (GNU xargs 4.9: `printf 'env\n' | xargs -I{} {} A` tries to execute a
-	// literal `{}`), so `{}` there is a fixed program name like any other.
+	// A plain substitution into an ordinary argument stays accepted.
 	for _, command := range []string{
 		"xargs -I{} echo {}",
 		"xargs -I{} env codex {}",
-		"xargs -I{} {} CODEX_HOME=/x codex",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, account), "command %q", command)
 	}
+	// xargs never substitutes its own COMMAND word (GNU xargs 4.9:
+	// `printf 'env\n' | xargs -I{} {} A` executes a literal `{}`), but
+	// the gate cannot prove a program literally named `{}` is not an
+	// env-like launcher: #7589's item-2 rule refuses `NAME=<nonempty>`
+	// followed by a command-capable word in any unrecognized tail, and
+	// this argv is exactly that shape.
+	err := ValidateAccountEnvironmentCommand("xargs -I{} {} CODEX_HOME=/x codex", account)
+	require.Error(t, err, "command %q names a protected variable ahead of a command word in an unrecognized tail")
+	require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
 }
 
 func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
@@ -112,8 +117,11 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 		{"xargs -I{}", false},
 		{"xargs -I{} xargs -I[] echo []", false},
 		// xargs's own COMMAND word is never substituted, so the marker there
-		// is a literal program name. Codex on #4979.
-		{"xargs -I{} {} CODEX_HOME=/x codex", false},
+		// is a literal program name (Codex on #4979) — but a literal `{}`
+		// program slot still reads as an unrecognized launcher to #7589's
+		// item-2 rule, and `NAME=<nonempty>` followed by a command word
+		// refuses.
+		{"xargs -I{} {} CODEX_HOME=/x codex", true},
 		{"xargs -I{} {}", false},
 		{"xargs -i {} echo hi", false},
 		{"xargs -I{} /usr/bin/{} echo", false},

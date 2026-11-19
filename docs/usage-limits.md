@@ -218,11 +218,12 @@ wrapper script (a `program_overrides` target `af` does not model) has internals
 the command line cannot see, so what it does with the account environment is
 outside what `af` can verify.
 
-Three launcher grammars get a deliberately conservative lexical check rather
+Launcher grammars get a deliberately conservative lexical check rather
 than the passthrough rule, because they inject environment into their child
 and refusing them outright would block ordinary use — `sudo`, `docker`
-(including `docker compose` and the standalone `docker-compose` binary), and
-`systemd-run` (including its `run0` argv[0] alias). The rule is keyed by the
+(including `docker compose` and the standalone `docker-compose` binary, plus
+the CLI-compatible `podman` and `nerdctl`), `systemd-run` (including its
+`run0` argv[0] alias), `bwrap`, `su` and `script`. The rule is keyed by the
 grammar, so every name it ships under gets the same check. For these launchers
 `af` over-refuses rather than under-refuses: every argument word of the
 launcher's command line is scanned, and the command is refused whenever any
@@ -235,16 +236,18 @@ RAILS_ENV=production …` run — while `-eENV=`, `-ECODEX_HOME=` and
 `PassEnvironment=CODEX_HOME` still refuse. The rule covers every injection
 spelling the launchers accept (`sudo CODEX_HOME=/other codex`, `docker run -e
 CODEX_HOME=/other busybox codex`, `systemd-run --setenv CODEX_HOME=/other
-codex`, and the `Environment=`/`UnsetEnvironment=`/`PassEnvironment=` forms of
-`systemd-run -p`, getopt abbreviations like `--prop=` included) without
-modelling each launcher's option grammar. Commands whose arguments never
-mention a protected name run as before — `docker compose up`, `docker-compose
-up`, `docker build .`, `docker run --rm alpine echo hi`, `sudo apt-get install
--y jq`, `systemd-run --user --scope make`, `run0 --user --scope make`. The
-trade-off is deliberate: a harmless mention in a non-assigning position, such
-as `docker run alpine echo CODEX_HOME=x`, is refused too, because no parse of
-the visible command line can prove the word will not reach the child's
-environment.
+codex`, `podman run -e CODEX_HOME=/other img codex`, `bwrap --setenv
+CODEX_HOME /other codex`, `su -c 'CODEX_HOME=/other codex'`, `script -qc 'env
+CODEX_HOME=/other codex' /dev/null`, and the `Environment=`/`UnsetEnvironment=`/
+`PassEnvironment=` forms of `systemd-run -p`, getopt abbreviations like
+`--prop=` included) without modelling each launcher's option grammar. Commands
+whose arguments never mention a protected name run as before — `docker compose
+up`, `docker-compose up`, `docker build .`, `docker run --rm alpine echo hi`,
+`sudo apt-get install -y jq`, `systemd-run --user --scope make`, `run0 --user
+--scope make`. The trade-off is deliberate: a harmless mention in a
+non-assigning position, such as `docker run alpine echo CODEX_HOME=x`, is
+refused too, because no parse of the visible command line can prove the word
+will not reach the child's environment.
 
 - **Env files are unverifiable** — `--env-file`, `docker compose`'s `env_file`
   and `--env-from-file` spellings, and `systemd-run`'s `EnvironmentFile=` all
@@ -266,12 +269,41 @@ environment.
   removal is refused on sight: `-p 'Environment=CODEX""_HOME=/o'` and
   `-p 'Environment=CODEX\x5fHOME=/o'` both land `CODEX_HOME` in the unit's
   environment even though the raw text hides it.
+- **The launchers' own environment sources are gated too** — `systemctl`'s
+  `set-environment`/`import-environment`/`unset-environment` subcommands and
+  `dbus-update-activation-environment` write a name into the service
+  manager's (or dbus activation) environment, which a later `systemd-run
+  --user` unit or activated program inherits in another tab. The write is
+  the effect itself, so a protected name in one of these command lines
+  refuses with no command word needed — `systemctl --user set-environment
+  CODEX_HOME=/o` and `dbus-update-activation-environment CODEX_HOME=/o`
+  refuse, while `systemctl --user set-environment PORT=3000` and
+  `systemctl --user status sshd` run.
+- **Environment-resetting launchers refuse only when they deliver an
+  agent** — a launcher that drops the pane's environment would unpick the
+  account's pins silently, so when the reset environment's tail reaches an
+  account-capable agent program (`claude`/`codex`/`gemini`) the command
+  refuses: `sudo codex`, `sudo -u root codex`, `systemd-run --user --pty
+  codex`, `run0 codex`, `su -l -c 'codex'` and `bwrap --clearenv codex`.
+  `sudo codex` was admitted before this change — the behavior change is
+  intentional. Non-agent uses stay admitted (`sudo -u postgres psql`,
+  `systemd-run --user --pty make`, `run0 -p Description=x make`), as do the
+  non-resetting forms (`sudo -E codex`, `systemd-run --scope codex`, `su
+  -c 'codex' work`, `bwrap codex`) and containers, whose environment is
+  image-defined rather than a reset of the pane's (`docker run busybox
+  codex`).
 
 A launcher buried inside another command's argv (`nohup sudo
 CODEX_HOME=/other codex`, `docker build env CODEX_HOME=/other codex`) is
 judged the same way the bare command is: the ordinary mutation scan runs over
 the launcher's whole tail, so a buried `env`, `nohup`, or nested launcher still
-refuses.
+refuses. And a command `af` does not model at all gets the same lexical cut in
+its tail, narrowed so ordinary prose stays admitted: a literal
+`NAME=<nonempty>` word refuses once a command-capable word follows it
+(`prog CODEX_HOME=/o codex`), a bare protected name refuses only when a value
+word follows AND a command word follows that value (`prog --setenv CODEX_HOME
+/o codex`), and a name that only names is inert data — `rg CODEX_HOME src/`,
+`grep -r CLAUDE_CONFIG_DIR .` and `rg OPENAI_API_KEY= .` all run.
 
 ### Docker and backend boundaries
 
