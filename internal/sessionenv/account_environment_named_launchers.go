@@ -1,8 +1,6 @@
 package sessionenv
 
 import (
-	"strings"
-
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -10,535 +8,255 @@ import (
 // command-string runners and environment writers whose grammars the gate
 // knows by name. Anything still unmodelled is judged exactly as master and
 // named in the gate's stated limit (docs/usage-limits.md) — there is no
-// generic scan over arbitrary commands. The option tables and the shared
-// closed-grammar scanner live in
-// account_environment_named_launcher_grammar.go; two properties govern
-// every arm here (the review on this head):
+// generic scan over arbitrary commands.
 //
-//   - the judged payload is EXACTLY what the launcher executes — watch's
-//     argv joined into the one `sh -c` string it builds, a GVariant `as`
-//     operand decoded through its escapes, pwsh's hidden-input forms
-//     refused even when a -c operand is also present;
-//   - each launcher's option grammar is total — an option the grammar
-//     does not know makes the invocation undecodable, which means refuse.
-
-// ---------- payload collectors ----------
+// The review rule on this head (the third Codex round) is that the
+// verdict must not depend on parsing a launcher's options: option tables
+// keep losing to the next unmodelled spelling, so they were removed.
+// Instead EVERY reading of a launcher's tail is judged:
 //
-// Each collector returns the command-string candidates a launcher hands
-// to a shell or a remote environment and whether the invocation decoded
-// under the launcher's closed option grammar. An undecodable invocation
-// refuses wherever a candidate would be judged.
+//   - every literal word is a possible start of the command — a word
+//     whose final path component or identifier-boundary text names the
+//     account's agent refuses, and a word spelling a protected name
+//     refuses as a possible environment write;
+//   - a word carrying shell syntax is a possible command string of its
+//     own, and is judged by the full gate / the reset reach;
+//   - the whole tail is judged twice — argv-preserved (each literal
+//     quoted, so `'/opt/agent tools/codex' --help` still names codex)
+//     and joined the way joiners build their `sh -c` string;
+//   - tmux's `;`-separated command sequence is judged per segment;
+//   - a word that does not literalize, or spells a hidden-input source
+//     (a file, a descriptor, a language the gate does not parse),
+//     refuses outright.
+//
+// It admits only when no reading can refuse — the corpus ADMIT rows
+// carry neither the agent's name nor a protected name in any reading,
+// so they pass without option tables. Work stays linear: one pass over
+// the literals, a bounded candidate set, and the existing gate for each
+// candidate.
 
-// sshPayloads returns ssh's remote-command candidate: the words after the
-// destination joined into the single command line the remote shell
-// reads — the exact payload ssh builds.
-func sshPayloads(words []*syntax.Word) ([]string, bool) {
-	positionals, _, _, undecodable := launcherArgvScan(words, sshGrammar)
-	if undecodable {
-		return nil, true
+// namedLauncherCandidateCap bounds the command-string candidates a tail
+// produces: more shell-carrying words than this cannot be proven inside
+// the gate's linear budget, so the tail refuses.
+const namedLauncherCandidateCap = 64
+
+// ---------- shared readings ----------
+
+// literalReadingCandidates collects the command-string candidates a
+// literal tail can execute: the argv-preserved spelling (every literal
+// quoted — direct exec), the joined spelling (what `sh -c` receives
+// when the launcher joins), and each literal that carries shell syntax
+// of its own. The second return is ok — false means more candidates
+// than the linear budget allows, which refuses.
+func literalReadingCandidates(literals []string) ([]string, bool) {
+	candidates := make([]string, 0, 4)
+	seen := make(map[string]bool)
+	push := func(candidate string) bool {
+		if candidate == "" || seen[candidate] {
+			return true
+		}
+		if len(candidates) >= namedLauncherCandidateCap {
+			return false
+		}
+		seen[candidate] = true
+		candidates = append(candidates, candidate)
+		return true
 	}
-	if len(positionals) < 2 {
+	if !push(quoteTailLiterals(literals)) || !push(joinTailLiterals(literals)) {
 		return nil, false
 	}
-	return []string{joinScannedPositionals(positionals, 1)}, false
+	for _, literal := range literals {
+		if literalCarriesShellSyntax(literal) && !push(literal) {
+			return nil, false
+		}
+	}
+	return candidates, true
 }
 
-// watchPayloads returns watch's command-string candidate: every word
-// after the option region joined into the one `sh -c` string watch
-// builds — `watch export 'CODEX_""HOME=/o; codex'` decodes the export's
-// joined name the same way the child's shell does.
-func watchPayloads(words []*syntax.Word) ([]string, bool) {
-	positionals, _, seen, undecodable := launcherArgvScan(words, watchGrammar)
-	if undecodable {
-		return nil, true
+// namedResetLiteralRefuses applies the per-word reading every named
+// launcher shares: the word as a possible program (its final path
+// component or boundary text naming the account's agent, honouring
+// `preserved` the way the reach check does — a `sudo -E` tail that
+// keeps the config pin does not re-root), a possible protected-name
+// write, and a possible hidden-input source.
+func namedResetLiteralRefuses(literal string, names, preserved map[string]struct{}, hidden []string) bool {
+	if wordNamesResetAgent(literal, names, preserved) {
+		return true
 	}
-	if len(positionals) == 0 {
-		return nil, false
+	if textNamesAgentBoundary(literal, names, preserved) {
+		return true
 	}
-	if seen["--exec"] {
-		// --exec runs the argv directly, no `sh -c` — preserve argv
-		// boundaries so a program path containing spaces still names
-		// its real final component.
-		return []string{joinExecArgv(positionals, 0)}, false
+	if launcherSegmentsDenied(literal, names, false) {
+		return true
 	}
-	return []string{joinScannedPositionals(positionals, 0)}, false
+	return literalNamesHiddenInput(literal, hidden)
 }
 
-// tmuxPayloads returns tmux's command-string candidates: the global `-c`
-// (default-command) operand and, for a pane-creating subcommand, the
-// trailing words joined into the shell command the server runs.
-func tmuxPayloads(words []*syntax.Word) ([]string, bool) {
-	positionals, operands, _, undecodable := launcherArgvScan(words, tmuxGlobalGrammar)
-	if undecodable || len(positionals) == 0 {
-		return nil, undecodable
+// textNamesAgentBoundary reports whether text names the account's agent
+// at an identifier boundary — the same rule pwsh/nu payloads use —
+// skipping an agent whose config pin survives through `preserved`.
+func textNamesAgentBoundary(text string, names, preserved map[string]struct{}) bool {
+	for agent, configVar := range accountConfigVars {
+		if _, pinned := names[configVar]; !pinned {
+			continue
+		}
+		if _, kept := preserved[configVar]; kept {
+			continue
+		}
+		if textNamesIdentifierBoundary(text, agent) {
+			return true
+		}
 	}
-	sub, ok := tmuxSubcommandAt(words, positionals)
+	return false
+}
+
+// namedLauncherResetReach judges a reset-class launcher's tail under
+// every reading: each literal word refuses by the shared per-word rule,
+// and every command-string candidate — argv-preserved, joined, and each
+// shell-carrying word — gets the reset reach check. It is also the reach
+// half of the outer-launcher walk (`sudo -E pkexec codex` reaches the
+// same judgement under sudo's preserved set).
+func namedLauncherResetReach(words []*syntax.Word, names, preserved map[string]struct{}, launcher string) bool {
+	literals, ok := launcherTailLiterals(words)
+	if !ok {
+		return true
+	}
+	hidden := namedLauncherHiddenWords[launcher]
+	for _, literal := range literals {
+		if namedResetLiteralRefuses(literal, names, preserved, hidden) {
+			return true
+		}
+	}
+	candidates, ok := literalReadingCandidates(literals)
+	if !ok {
+		return true
+	}
+	for _, candidate := range candidates {
+		if payloadReachesAgentProgram(candidate, names, preserved) {
+			return true
+		}
+	}
+	return false
+}
+
+// namedRunnerTailPayloads returns the command-string candidates a
+// command-string runner's tail can execute — the same any-reading set —
+// for the runner payload path. tmux's `;`-separated commands are
+// collected per segment so the `;` separator itself is never a
+// candidate. Undecodable propagates a refusal.
+func namedRunnerTailPayloads(words []*syntax.Word, launcher string) ([]string, bool) {
+	literals, ok := launcherTailLiterals(words)
 	if !ok {
 		return nil, true
 	}
-	if _, pane := tmuxPaneCreatingSubcommands[sub]; !pane {
-		return nil, false
+	if launcher != "tmux" {
+		candidates, ok := literalReadingCandidates(literals)
+		return candidates, !ok
 	}
-	var payloads []string
-	for _, operand := range operands {
-		if operand.opt == "-c" {
-			payloads = append(payloads, operand.literal)
+	var all []string
+	seen := make(map[string]bool)
+	for segment := range splitTmuxSegments(literals) {
+		candidates, candOK := literalReadingCandidates(segment)
+		if !candOK {
+			return nil, true
 		}
-	}
-	panePos, _, _, undec := launcherArgvScan(words[positionals[0].index+1:], tmuxPaneGrammar)
-	if undec {
-		return nil, true
-	}
-	switch len(panePos) {
-	case 0:
-	case 1:
-		// One command word is the shell command string the server
-		// hands to `sh -c`.
-		payloads = append(payloads, panePos[0].literal)
-	default:
-		// Multiple command words EXECUTE DIRECTLY — tmux runs the
-		// argv without a shell — so the payload is judged twice:
-		// once with argv boundaries preserved (quoted elements —
-		// `/opt/agent tools/codex` names codex), and once joined,
-		// which stays conservative for tmux builds that fall back
-		// to the `sh -c` spelling.
-		payloads = append(payloads,
-			joinExecArgv(panePos, 0),
-			joinScannedPositionals(panePos, 0))
-	}
-	return payloads, false
-}
-
-// tmuxSubcommandAt yields the subcommand word — the first positional.
-func tmuxSubcommandAt(words []*syntax.Word, positionals []scannedOperand) (string, bool) {
-	if len(positionals) == 0 {
-		return "", false
-	}
-	return positionals[0].literal, true
-}
-
-// nixShellPayloads returns nix-shell's command-string candidates — the
-// --run/--command operands in either spelling — plus the normalized
-// option set so --pure reads whether getopt resolved it (`--pu`,
-// `--pur`), not how the argv spelled it.
-func nixShellPayloads(words []*syntax.Word) ([]string, map[string]bool, bool) {
-	_, operands, seen, undecodable := launcherArgvScan(words, nixShellGrammar)
-	if undecodable {
-		return nil, nil, true
-	}
-	var payloads []string
-	for _, operand := range operands {
-		if operand.opt == "--run" || operand.opt == "--command" {
-			payloads = append(payloads, operand.literal)
-		}
-	}
-	return payloads, seen, false
-}
-
-// sawNixDev returns the index of nix's develop/shell subcommand word, or
-// -1 when the invocation names neither.
-func sawNixDev(words []*syntax.Word) int {
-	for i, word := range words {
-		literal, ok := launcherLiteralWord(word)
-		if !ok {
-			continue
-		}
-		if literal == "develop" || literal == "shell" {
-			return i
-		}
-	}
-	return -1
-}
-
-// nixPayloads returns `nix develop`/`nix shell` command candidates: `-c`/
-// `--command` takes the REST of the argv as the command words, joined —
-// `--command=x` carries its first word attached. The second return is
-// the normalized option set seen BEFORE the command boundary, so the arm
-// reads `-i` whether it arrives spelled out, clustered, or abbreviated.
-func nixPayloads(words []*syntax.Word) ([]string, map[string]bool, bool) {
-	sawDev := sawNixDev(words)
-	if sawDev < 0 {
-		return nil, nil, false
-	}
-	// Find the -c boundary: the option consumes the rest of the argv.
-	for i := sawDev + 1; i < len(words); i++ {
-		literal, ok := launcherLiteralWord(words[i])
-		if !ok {
-			continue
-		}
-		if strings.HasPrefix(literal, "--") {
-			if name, val, hasVal := strings.Cut(literal, "="); hasVal {
-				if resolved, known := resolveLauncherLongOption(name, nixDevGrammar); known && resolved == "--command" {
-					_, _, seen, undec := launcherArgvScan(words[sawDev+1:i], nixDevGrammar)
-					if undec {
-						return nil, nil, true
-					}
-					// --command=x runs x plus the remaining argv.
-					tail := append([]string{val}, literalTailWords(words[i+1:])...)
-					if len(tail) < len(words)-i {
-						return nil, nil, true
-					}
-					return []string{strings.Join(tail, " ")}, seen, false
-				}
+		for _, candidate := range candidates {
+			if !seen[candidate] {
+				seen[candidate] = true
+				all = append(all, candidate)
 			}
 		}
-		if literal == "-c" || literal == "--command" || isLauncherLongAbbrev(literal, "--command", nixDevGrammar) {
-			_, _, seen, undec := launcherArgvScan(words[sawDev+1:i], nixDevGrammar)
-			if undec {
-				return nil, nil, true
-			}
-			tail := literalTailWords(words[i+1:])
-			if len(tail) < len(words)-i-1 {
-				return nil, nil, true // a non-literal command word hides the payload
-			}
-			if len(tail) == 0 {
-				return nil, seen, false
-			}
-			return []string{strings.Join(tail, " ")}, seen, false
-		}
 	}
-	// No -c word: the pre-command argv still must decode.
-	_, _, seen, undecodable := launcherArgvScan(words[sawDev+1:], nixDevGrammar)
-	return nil, seen, undecodable
-}
-
-// isLauncherLongAbbrev reports whether word is a unique getopt_long
-// abbreviation of want inside the grammar — nix accepts `--comm` for
-// --command.
-func isLauncherLongAbbrev(word, want string, g launcherGrammar) bool {
-	resolved, known := resolveLauncherLongOption(word, g)
-	return known && resolved == want
-}
-
-// distroboxPayloads returns distrobox enter/run command-string
-// candidates: the -e/--command operands and the post-`--`/positional
-// command words joined.
-func distroboxPayloads(words []*syntax.Word) ([]string, bool) {
-	sawSub := -1
-	for i, word := range words {
-		literal, ok := launcherLiteralWord(word)
-		if !ok {
-			continue
-		}
-		if literal == "enter" || literal == "run" || literal == "create" {
-			sawSub = i
-			break
-		}
-	}
-	if sawSub < 0 {
-		return nil, false
-	}
-	positionals, operands, _, undecodable := launcherArgvScan(words[sawSub+1:], distroboxGrammar)
-	if undecodable {
-		return nil, true
-	}
-	var payloads []string
-	for _, operand := range operands {
-		if distroboxGrammar.payload[operand.opt] {
-			payloads = append(payloads, operand.literal)
-		}
-	}
-	// The container name is positional[0] — unless --name/-n supplied it
-	// as an option operand, in which case positional[0] already starts
-	// the command (`distrobox enter --name x -- codex` runs codex).
-	named := false
-	for _, operand := range operands {
-		if operand.opt == "-n" || operand.opt == "--name" {
-			named = true
-		}
-	}
-	start := 0
-	if !named {
-		start = 1
-	}
-	if len(positionals) > start {
-		// The command tail is judged both joined and with argv
-		// boundaries preserved — distrobox execs the words as a
-		// command line whose spelling the entrypoint may pass either
-		// way.
-		payloads = append(payloads,
-			joinScannedPositionals(positionals, start),
-			joinExecArgv(positionals, start))
-	}
-	return payloads, false
-}
-
-// toolboxPayloads returns `toolbox run` command candidates: the trailing
-// words after run's options, joined into the command line the container
-// executes.
-func toolboxPayloads(words []*syntax.Word) ([]string, bool) {
-	sawRun := -1
-	for i, word := range words {
-		literal, ok := launcherLiteralWord(word)
-		if !ok {
-			continue
-		}
-		if literal == "run" {
-			sawRun = i
-			break
-		}
-	}
-	if sawRun < 0 {
-		return nil, false
-	}
-	positionals, _, _, undecodable := launcherArgvScan(words[sawRun+1:], toolboxGrammar)
-	if undecodable {
-		return nil, true
-	}
-	if len(positionals) == 0 {
-		return nil, false
-	}
-	return []string{joinScannedPositionals(positionals, 0)}, false
-}
-
-// pwshNuPayloads returns the pwsh command-string operand for the reach
-// decode — an undecodable invocation (encoded spelling, hidden input,
-// unknown option, interactive form) refuses.
-func pwshNuPayloads(words []*syntax.Word) ([]string, bool) {
-	payloads, positional, info, undecodable := pwshNuClassify(words, pwshOptions, true)
-	if undecodable || positional {
-		return nil, true
-	}
-	if len(payloads) == 0 {
-		// An interactive session reads input the gate cannot see —
-		// undecidable under a reset; only a pure info form proves safe.
-		if info {
-			return nil, false
-		}
-		return nil, true
-	}
-	return payloads, false
-}
-
-// nuPayloads mirrors pwshNuPayloads for nu's exact option spellings.
-func nuPayloads(words []*syntax.Word) ([]string, bool) {
-	payloads, positional, info, undecodable := pwshNuClassify(words, nuOptions, false)
-	if undecodable || positional {
-		return nil, true
-	}
-	if len(payloads) == 0 {
-		if info {
-			return nil, false
-		}
-		return nil, true
-	}
-	return payloads, false
-}
-
-// literalTailWords renders every literal word in a tail; the returned
-// length tells the caller whether any word was non-literal.
-func literalTailWords(words []*syntax.Word) []string {
-	var out []string
-	for _, word := range words {
-		if l, ok := launcherLiteralWord(word); ok {
-			out = append(out, l)
-		}
-	}
-	return out
+	return all, false
 }
 
 // ---------- launcher arms ----------
 
-// namedLauncherResetReach judges a reset-class launcher's tail under its
-// closed grammar: an undecodable invocation refuses outright (property
-// B), otherwise the first positional is the program and gets the reach
-// check.
-func namedLauncherResetReach(words []*syntax.Word, g launcherGrammar, names map[string]struct{}, preserved map[string]struct{}) bool {
-	positionals, _, _, undecodable := launcherArgvScan(words, g)
-	if undecodable {
-		return true
-	}
-	if len(positionals) == 0 {
-		return false
-	}
-	return resetProgramWordReachesAgent(positionals[0].literal, words[positionals[0].index+1:], names, preserved)
-}
-
-// unwrapAlwaysResetLauncher judges a launcher whose child's environment
-// is never the pane's — pkexec, doas, flatpak-spawn, ssh, the tmux pane
-// creators, toolbox/distrobox. The generic env-injection and hidden-tail
-// scans run first, then the reset arm's reach check under the
-// launcher's closed option grammar.
-func unwrapAlwaysResetLauncher(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, grammar launcherGrammar) ([]*syntax.Word, bool) {
+// unwrapNamedResetLauncher judges a reset-class launcher — pkexec, doas,
+// setpriv, flatpak-spawn, ssh, machinectl, nix-shell, nix, distrobox,
+// toolbox, and tmux's pane creators — under the any-reading rule. The
+// generic env-injection and hidden-tail scans run first; then every
+// literal word and command-string candidate gets the reach check.
+func unwrapNamedResetLauncher(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, launcher string) ([]*syntax.Word, bool) {
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	return nil, namedLauncherResetReach(words, grammar, names, nil)
+	return nil, namedLauncherResetReach(words, names, nil, launcher)
 }
 
-// unwrapPkexec judges pkexec: always reset-class, program is the first
-// positional.
+// unwrapPkexec judges pkexec: always reset-class — the child runs under
+// a polkit-checked environment, never the pane's.
 func unwrapPkexec(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	return unwrapAlwaysResetLauncher(words, names, memo, requireCommand, pkexecGrammar)
+	return unwrapNamedResetLauncher(words, names, memo, requireCommand, "pkexec")
 }
 
 // unwrapDoas judges doas: always reset-class.
 func unwrapDoas(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	return unwrapAlwaysResetLauncher(words, names, memo, requireCommand, doasGrammar)
+	return unwrapNamedResetLauncher(words, names, memo, requireCommand, "doas")
+}
+
+// unwrapSetpriv judges setpriv. --reset-env makes it reset-class; under
+// the any-reading rule the arm does not need to prove the flag — a
+// program or payload word that reaches the agent refuses either way,
+// which covers --reset-env and every spelling of it.
+func unwrapSetpriv(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	return unwrapNamedResetLauncher(words, names, memo, requireCommand, "setpriv")
 }
 
 // unwrapFlatpakSpawn judges flatpak-spawn: every spawn is reset-class —
-// the child runs in the sandbox's environment either way. --env-fd is a
-// hidden input source: its operand comes from a descriptor the command
-// line cannot show.
+// the child runs in the sandbox's environment either way.
 func unwrapFlatpakSpawn(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	_, _, seen, undecodable := launcherArgvScan(words, flatpakSpawnGrammar)
-	if undecodable || seen["--env-fd"] {
-		// An unknown option undecodes; --env-fd (or its abbreviation)
-		// sources the child environment from a descriptor the command
-		// line cannot show — hidden input.
-		return nil, true
-	}
-	return unwrapAlwaysResetLauncher(words, names, memo, requireCommand, flatpakSpawnGrammar)
-}
-
-// unwrapSetpriv judges setpriv: reset-class only under --reset-env — the
-// other forms keep the caller's environment, so the plain argv scans
-// apply. The option grammar decodes either way (an unknown option still
-// makes the invocation undecidable).
-func unwrapSetpriv(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
-		return nil, true
-	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
-		return nil, true
-	}
-	positionals, _, seen, undecodable := launcherArgvScan(words, setprivGrammar)
-	if undecodable {
-		return nil, true
-	}
-	// getopt_long accepts unique-prefix abbreviations — --reset-en
-	// resolves to --reset-env and still clears the environment, so the
-	// reset class comes from the normalized option, never the argv text.
-	if !seen["--reset-env"] {
-		return nil, false
-	}
-	if len(positionals) == 0 {
-		return nil, false
-	}
-	return nil, resetProgramWordReachesAgent(positionals[0].literal, words[positionals[0].index+1:], names, nil)
+	return unwrapNamedResetLauncher(words, names, memo, requireCommand, "flatpak-spawn")
 }
 
 // unwrapSSH judges ssh: the remote environment is never the pane's, so it
-// is always reset-class. The remote command is every word after the
-// destination joined — the exact payload ssh builds — and an option the
-// grammar does not know makes the invocation undecodable.
+// is always reset-class — every word a possible start of the remote
+// command, the tail joined the way the remote shell reads it.
 func unwrapSSH(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
-		return nil, true
-	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
-		return nil, true
-	}
-	payloads, undecodable := sshPayloads(words)
-	if undecodable {
-		return nil, true
-	}
-	for _, payload := range payloads {
-		if payloadReachesAgentProgram(payload, names, nil) {
-			return nil, true
-		}
-	}
-	return nil, false
+	return unwrapNamedResetLauncher(words, names, memo, requireCommand, "ssh")
 }
 
-// unwrapMachinectl judges machinectl shell/login: they run in the
-// container's environment — reset-class — and shell's trailing words are
-// the remote command line, judged by the same joined-payload reach ssh
-// uses.
+// unwrapMachinectl judges machinectl: shell/login run the remote command
+// under the container's environment — reset-class.
 func unwrapMachinectl(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
-		return nil, true
-	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
-		return nil, true
-	}
-	return nil, machinectlShellLoginReaches(words, names, nil)
+	return unwrapNamedResetLauncher(words, names, memo, requireCommand, "machinectl")
 }
 
-// machinectlShellLoginReaches applies the reach check to machinectl
-// shell/login's remote command — the joined words after the host
-// operand — under its closed grammar. Shared by the launcher arm and the
-// reset-tail recursion so `sudo machinectl shell host codex` reaches the
-// same way `machinectl shell host codex` does.
-func machinectlShellLoginReaches(words []*syntax.Word, names, preserved map[string]struct{}) bool {
-	positionals, _, _, undecodable := launcherArgvScan(words, machinectlGrammar)
-	if undecodable {
-		return true
-	}
-	if len(positionals) < 2 {
-		return false
-	}
-	if positionals[0].literal != "shell" && positionals[0].literal != "login" {
-		return false
-	}
-	payload := joinScannedPositionals(positionals, 2)
-	if payload == "" {
-		return false
-	}
-	return payloadReachesAgentProgram(payload, names, preserved)
-}
-
-// unwrapNixShell judges nix-shell: --pure resets (the reach check then
-// applies to the --run/--command payloads), and every payload candidate
-// is gated at the top level like the other runners.
+// unwrapNixShell judges nix-shell: --pure drops the caller's environment
+// (reset-class under the any-reading rule — the reach check needs no
+// flag proof), and --run/--command carry a command string.
 func unwrapNixShell(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
-		return nil, true
-	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
-		return nil, true
-	}
-	payloads, seen, undecodable := nixShellPayloads(words)
-	if undecodable {
-		return nil, true
-	}
-	// --pure abbreviates like any getopt_long option — the reset class
-	// comes from the resolved option set, not the argv text.
-	if !seen["--pure"] {
-		return nil, false
-	}
-	for _, payload := range payloads {
-		if payloadReachesAgentProgram(payload, names, nil) {
-			return nil, true
-		}
-	}
-	return nil, false
+	return unwrapNamedResetLauncher(words, names, memo, requireCommand, "nix-shell")
 }
 
-// unwrapNix judges `nix develop`/`nix shell`: -i/--ignore-environment
-// resets, and the -c/--command words are the payload.
+// unwrapNix judges `nix`: the develop/shell -i form resets and -c
+// carries the command — reset-class under the same reading.
 func unwrapNix(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
-		return nil, true
-	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
-		return nil, true
-	}
-	payloads, seen, undecodable := nixPayloads(words)
-	if undecodable {
-		return nil, true
-	}
-	// -i hides in clusters (-iv) and abbreviates (--ignore-env), so the
-	// reset check reads the normalized option set, never the argv text.
-	if !seen["-i"] && !seen["--ignore-environment"] {
-		return nil, false
-	}
-	for _, payload := range payloads {
-		if payloadReachesAgentProgram(payload, names, nil) {
-			return nil, true
-		}
-	}
-	return nil, false
+	return unwrapNamedResetLauncher(words, names, memo, requireCommand, "nix")
 }
 
-// unwrapTmux judges tmux: a pane-creating subcommand runs its shell
-// command under the tmux server's environment (reset-class, with the
-// -e env spelling judged by the generic scan), and setenv/set-environment
-// WRITES the server's environment — the writer rule of issue item 3.
+// unwrapDistrobox judges distrobox enter/run: the container's
+// environment is not the pane's — reset-class.
+func unwrapDistrobox(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	return unwrapNamedResetLauncher(words, names, memo, requireCommand, "distrobox")
+}
+
+// unwrapToolbox judges toolbox: enter/run run in the container's
+// environment — reset-class.
+func unwrapToolbox(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	return unwrapNamedResetLauncher(words, names, memo, requireCommand, "toolbox")
+}
+
+// unwrapTmux judges tmux: its argv is a command SEQUENCE — `;`-literal
+// words separate commands (`tmux list-sessions \; new-window codex`
+// still runs codex), so every segment between `;` words gets the
+// any-reading judgement: a pane-creating word makes the segment's
+// command reset-class, setenv/set-environment literals write the
+// server's environment through the shared protected-name check, and a
+// word naming the agent anywhere in the sequence refuses.
 func unwrapTmux(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
@@ -546,106 +264,68 @@ func unwrapTmux(words []*syntax.Word, names map[string]struct{}, memo operandTai
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	positionals, _, _, undecodable := launcherArgvScan(words, tmuxGlobalGrammar)
-	if undecodable || len(positionals) == 0 {
-		return nil, undecodable
-	}
-	sub := positionals[0].literal
-	switch sub {
-	case "setenv", "set-environment", "set-env":
-		// tmux setenv -g NAME VALUE writes the server's global
-		// environment — every later pane inherits it. A protected NAME
-		// operand refuses; the value is a positional the gate cannot
-		// scope.
-		pos, _, _, undec := launcherArgvScan(words[positionals[0].index+1:], tmuxSetenvGrammar)
-		if undec {
-			return nil, true
-		}
-		for _, p := range pos {
-			if launcherSegmentsDenied(p.literal, names, false) {
-				return nil, true
-			}
-		}
-		return nil, false
-	default:
-		if _, pane := tmuxPaneCreatingSubcommands[sub]; !pane {
-			return nil, false
-		}
-		payloads, undec := tmuxPayloads(words)
-		if undec {
-			return nil, true
-		}
-		for _, payload := range payloads {
-			if payloadReachesAgentProgram(payload, names, nil) {
-				return nil, true
-			}
-		}
-		return nil, false
-	}
+	return nil, tmuxResetReach(words, names, nil)
 }
 
-// unwrapDistrobox judges distrobox enter/run: the container's environment
-// is not the pane's — reset-class — and the -e / post-`--` command
-// strings get the payload reach.
-func unwrapDistrobox(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
-		return nil, true
+// tmuxResetReach is the reach half of tmux's any-reading judgement —
+// every `;`-separated command segment judged the same way a named
+// reset-class tail is.
+func tmuxResetReach(words []*syntax.Word, names, preserved map[string]struct{}) bool {
+	literals, ok := launcherTailLiterals(words)
+	if !ok {
+		return true
 	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
-		return nil, true
-	}
-	payloads, undecodable := distroboxPayloads(words)
-	if undecodable {
-		return nil, true
-	}
-	for _, payload := range payloads {
-		if payloadReachesAgentProgram(payload, names, nil) {
-			return nil, true
+	for segment := range splitTmuxSegments(literals) {
+		for _, literal := range segment {
+			if namedResetLiteralRefuses(literal, names, preserved, nil) {
+				return true
+			}
+		}
+		candidates, candOK := literalReadingCandidates(segment)
+		if !candOK {
+			return true
+		}
+		for _, candidate := range candidates {
+			if payloadReachesAgentProgram(candidate, names, preserved) {
+				return true
+			}
 		}
 	}
-	return nil, false
+	return false
 }
 
-// unwrapToolbox judges toolbox: `enter` is reset-class with no command
-// string, `run` carries trailing command words under the container's
-// environment.
-func unwrapToolbox(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
-		return nil, true
-	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
-		return nil, true
-	}
-	payloads, undecodable := toolboxPayloads(words)
-	if undecodable {
-		return nil, true
-	}
-	for _, payload := range payloads {
-		if payloadReachesAgentProgram(payload, names, nil) {
-			return nil, true
+// splitTmuxSegments yields the argv literal runs between `;` words —
+// each run is one command in tmux's command sequence.
+func splitTmuxSegments(literals []string) func(func([]string) bool) {
+	return func(yield func([]string) bool) {
+		start := 0
+		for i, literal := range literals {
+			if literal == ";" || literal == "\\;" {
+				if !yield(literals[start:i]) {
+					return
+				}
+				start = i + 1
+			}
 		}
+		yield(literals[start:])
 	}
-	return nil, false
 }
 
 // unwrapWatch judges watch: it keeps the pane's environment (no reset)
 // but hands its argv, joined, to `sh -c` — a command-string runner whose
-// payload candidates the top-level gate decodes.
+// any-reading candidates the top-level gate judges.
 func unwrapWatch(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
 	return unwrapCommandRunner(words, names, memo, requireCommand)
 }
 
 // unwrapPwshNu judges pwsh and nu — runners whose payload grammar the
-// gate does NOT parse (approved rule on #7603): the -c/-Command/--commands
-// operand's TEXT refuses when it names a protected variable or the
-// account's agent at identifier boundaries (`pwsh -c 'echo CODEX_HOME'`
-// and `pwsh -c 'codex'` refuse), and admits otherwise (`pwsh -c
-// Get-Process` runs). The option grammar is total: an encoded-command
-// spelling carries unreadable text, the hidden-input forms (-File,
-// -EncodedCommand/-enc prefixes, `-` stdin, `-Command -`, -NoExit,
-// -Interactive) refuse even when a -c operand is present, and an option
-// the universe does not know makes the invocation undecodable — all
-// refuse.
+// gate does NOT parse (approved rule on #7603): the option universe
+// classifies input sources — hidden input (-File, -EncodedCommand/-enc
+// prefixes, `-` stdin, `-Command -`, -NoExit, interactive forms,
+// nu's --config/-e REPL forms) refuses, a script-file positional
+// refuses, a pure info flag admits — and the joined tail text refuses
+// when it names a protected variable or the account's agent at
+// identifier boundaries.
 func unwrapPwshNu(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, options map[string]pwshNuOptionKind, abbrev bool) ([]*syntax.Word, bool) {
 	payloads, positional, info, undecodable := pwshNuClassify(words, options, abbrev)
 	if undecodable || positional {
@@ -657,11 +337,21 @@ func unwrapPwshNu(words []*syntax.Word, names map[string]struct{}, memo operandT
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
+	literals, ok := launcherTailLiterals(words)
+	if !ok {
+		return nil, true
+	}
 	if len(payloads) == 0 {
 		// No command string: a bare `pwsh`/`nu` is the interactive
 		// session — input the gate cannot see. Only a pure info flag
 		// (-Version/-Help) runs without input.
 		return nil, !info
+	}
+	// The joined tail is the text the runner could hand to its command
+	// parser — the boundary rule scans it once, covering every payload
+	// operand and pwsh -Command's whole remaining argv.
+	if pwshNuPayloadNamesBoundary(joinTailLiterals(literals), names) {
+		return nil, true
 	}
 	for _, payload := range payloads {
 		if pwshNuPayloadNamesBoundary(payload, names) {
@@ -711,68 +401,47 @@ func textNamesIdentifierBoundary(text, name string) bool {
 	return false
 }
 
-// unwrapBusctl judges busctl and gdbus: a call/set-property verb naming a
-// SetEnvironment-family method plus a protected-name argument writes the
-// service manager's environment — the writer rule of issue item 3.
-// gdbus parses its operands as GVariant text, so each operand is decoded
-// through its escapes before the name check — an escape the decoder does
-// not know makes the operand undecodable, which means refuse.
-func unwrapBusctl(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, grammar launcherGrammar, decode bool) ([]*syntax.Word, bool) {
+// pwshNuPayloads/nuPayloads collect the runner payload path's candidates —
+// the classified payload operands, with undecodable propagating the refusal.
+func pwshNuPayloads(words []*syntax.Word) ([]string, bool) {
+	payloads, _, _, undecodable := pwshNuClassify(words, pwshOptions, true)
+	return payloads, undecodable
+}
+
+func nuPayloads(words []*syntax.Word) ([]string, bool) {
+	payloads, _, _, undecodable := pwshNuClassify(words, nuOptions, false)
+	return payloads, undecodable
+}
+
+// unwrapBusctl judges busctl and gdbus: a call/set-property verb naming
+// a SetEnvironment-family method plus a protected-name argument writes
+// the service manager's environment — the writer rule of issue item 3.
+// Under the any-reading rule every literal is a possible argument to
+// that write, so the protected-name check runs per literal; gdbus
+// parses its operands as GVariant text, so each literal is decoded
+// through its escapes first — an escape the decoder does not know
+// makes the invocation undecodable, which means refuse.
+func unwrapBusctl(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, decode bool) ([]*syntax.Word, bool) {
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	positionals, operands, _, undecodable := launcherArgvScan(words, grammar)
-	if undecodable || len(positionals) == 0 {
-		return nil, undecodable
+	literals, ok := launcherTailLiterals(words)
+	if !ok {
+		return nil, true
 	}
-	verb := positionals[0].literal
-	if verb != "call" && verb != "set-property" {
-		return nil, false
-	}
-	method := verb == "set-property"
-	for _, operand := range operands {
-		// gdbus's -m/--method operand carries the method name — the
-		// writer check lands on the last `.` segment
-		// (`org.a.SetEnvironment` spells SetEnvironment).
-		if operand.opt == "-m" || operand.opt == "--method" {
-			methodName := operand.literal
-			if i := strings.LastIndexByte(methodName, '.'); i >= 0 {
-				methodName = methodName[i+1:]
-			}
-			if _, write := dbusEnvironmentWriteMethods[methodName]; write {
-				method = true
-			}
-		}
-	}
-	for _, p := range positionals[1:] {
-		// A call word may spell the method qualified — busctl's
-		// interface.member shape — so the writer check lands on the
-		// last `.` segment.
-		methodName := p.literal
-		if i := strings.LastIndexByte(methodName, '.'); i >= 0 {
-			methodName = methodName[i+1:]
-		}
-		if _, write := dbusEnvironmentWriteMethods[methodName]; write {
-			method = true
-			continue
-		}
-		if !method {
-			continue
-		}
-		if launcherSegmentsDenied(p.literal, names, false) {
-			return nil, true
-		}
+	for _, literal := range literals {
 		if decode {
-			decoded, ok := gvariantDecode(p.literal)
-			if !ok {
+			decoded, decOK := gvariantDecode(literal)
+			if !decOK {
 				return nil, true
 			}
-			if launcherSegmentsDenied(decoded, names, false) {
-				return nil, true
-			}
+			literal = decoded
+		}
+		if launcherSegmentsDenied(literal, names, false) {
+			return nil, true
 		}
 	}
 	return nil, false

@@ -1348,21 +1348,26 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"sudo machinectl shell host codex", true},
 		{"sudo ssh host codex", true},
 		{"sudo pwsh", true},
-		// Each launcher's option grammar is total: every option has a
-		// stated arity and an option the grammar does not know makes
-		// the invocation undecodable, which means refuse (Codex P1 on
-		// this head). setpriv's group switches are operand-free on the
-		// real tool — only --groups takes a list.
+		// The verdict no longer depends on parsing a launcher's option
+		// grammar (the third Codex round): every literal word is a
+		// possible command start or environment write, so a word naming
+		// the agent or a protected name refuses no matter which option
+		// spelling precedes it — setpriv's group switches, permuted
+		// positionals and abbreviations alike. An option the gate does
+		// not know is a refusal only when it could carry input (the
+		// hidden-input table) — a bare unknown flag that cannot reach
+		// the agent under any reading admits, the way the real
+		// launcher's own error path would.
 		{"setpriv --reset-env --keep-groups codex", true},
 		{"setpriv --reset-env --clear-groups codex", true},
 		{"setpriv --reset-env --init-groups codex", true},
 		{"setpriv --reset-env --groups g codex", true},
-		{"setpriv --reset-env --frobnicate ls", true},
+		{"setpriv --reset-env --frobnicate ls", false},
 		{"setpriv --reuid=0 ls", false},
-		{"pkexec --frobnicate ls", true},
+		{"pkexec --frobnicate ls", false},
 		{"doas -nu root codex", true},
-		{"ssh --frobnicate host make", true},
-		{"machinectl --frobnicate shell host x", true},
+		{"ssh --frobnicate host make", false},
+		{"machinectl --frobnicate shell host x", false},
 		{"flatpak-spawn --env-fd 3 make", true},
 		// pwsh's hidden-input forms refuse even when a -c operand is
 		// also present: -Command - reads commands from stdin and
@@ -1381,21 +1386,21 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment \"['CODEX\\x5fHOME=/o']\"", true},
 		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment \"['FOO=/o']\"", false},
 		{"gdbus call --session -d org.a -o /x -m org.a.SetEnvironment \"['FOO\\q=/o']\"", true},
-		// Codex round 2 — the same two properties audited per launcher.
-		// Property B: getopt_long unique-prefix abbreviations resolve to
-		// their option (the reset set reads the NORMALIZED name), and an
-		// ambiguous or unknown option refuses.
+		// Codex round 2's option-spelling cases, re-pinned under the
+		// reading rule: every abbreviation, permutation and cluster
+		// still refuses because a literal in the tail names the agent —
+		// not because the option resolved.
 		{"setpriv --reset-en codex", true},
 		{"setpriv --reset-e codex", true},
 		{"setpriv codex --reset-env", true}, // util-linux getopt permutes
-		{"setpriv --re codex", true},        // ambiguous prefix -> undecodable
+		{"setpriv --re codex", true},        // ambiguous prefix — codex still named
 		{"flatpak-spawn --env-f 3 make", true},
 		{"flatpak-spawn --clear-e codex", true},
 		{"nix-shell --pur --run 'codex'", true},
 		{"nix-shell --p --run 'codex'", true},
 		{"nix develop --ignore-e -c 'codex'", true},
-		{"nix develop -iv -c 'codex'", true}, // -i inside a cluster
-		{"machinectl --frobnicate shell host x", true},
+		{"nix develop -iv -c 'codex'", true},
+		{"machinectl --frobnicate shell host x", false},
 		// Property A: the judged payload is exactly what runs — argv
 		// boundaries where the launcher execs directly, the whole
 		// remaining tail where it joins, and option operands that never
@@ -1419,7 +1424,30 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"watch --exec env 'CODEX_\"\"HOME=/o; codex'", true},
 		{"watch --exec codex", false},
 		{"nix develop -i --command=codex", true},
-		{"nix develop -i --comm codex", true}, // ambiguous with --commit-lock-file
+		{"nix develop -i --comm codex", true},
+		// Codex round 3 — every one a launcher-option misparse under
+		// the old grammar model, each now refused by the reading rule
+		// with no per-example special case: a literal names the agent
+		// (argv boundaries preserved for direct exec, the joined tail
+		// for joiners), the tmux `;` sequence checks every segment,
+		// and nu's config/execute words are hidden input.
+		{"toolbox run '/opt/agent tools/codex' --help", true},
+		{"nix shell -i -c '/opt/agent tools/codex' --help", true},
+		{"ssh localhost -p 2222 codex", true},
+		{"ssh localhost -t codex", true},
+		{"tmux list-sessions \\; new-window codex", true},
+		{"tmux list-sessions \\; new-window make", false},
+		{"nu --config /tmp/override.nu -c 'ls'", true},
+		{"nu --env-config /tmp/override.nu -c 'ls'", true},
+		{"nu -e 'ls'", true},
+		{"nu -c 'ls'", false},
+		{"pwsh -com 'Get-Process'", true}, // ambiguous with -CommandWithArgs -> undecodable
+		{"pwsh -comm 'Get-Process'", true},
+		{"pwsh -comma 'Get-Process'", true},
+		{"pwsh -command 'Get-Process'", false},
+		{"pwsh -commandw 'Get-Process' a", false},
+		{"tmux split-window -h 'make -j4'", false},
+		{"tmux new-session -d make", false},
 	}
 	for _, test := range cases {
 		// The row verdicts are the gate's, not the bare mutation walk's:

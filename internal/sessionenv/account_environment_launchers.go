@@ -728,9 +728,9 @@ func launcherSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo
 	case isAccountCommandName(words[0], "nu"):
 		_, unsafe = unwrapPwshNu(words[1:], names, memo, true, nuOptions, false)
 	case isAccountCommandName(words[0], "busctl"):
-		_, unsafe = unwrapBusctl(words[1:], names, memo, true, busctlGrammar, false)
+		_, unsafe = unwrapBusctl(words[1:], names, memo, true, false)
 	case isAccountCommandName(words[0], "gdbus"):
-		_, unsafe = unwrapBusctl(words[1:], names, memo, true, gdbusGrammar, true)
+		_, unsafe = unwrapBusctl(words[1:], names, memo, true, true)
 	}
 	return unsafe
 }

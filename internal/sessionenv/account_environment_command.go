@@ -626,13 +626,13 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		}
 	case base == "busctl":
 		var unsafe bool
-		words, unsafe = unwrapBusctl(words[1:], names, memo, false, busctlGrammar, false)
+		words, unsafe = unwrapBusctl(words[1:], names, memo, false, false)
 		if unsafe {
 			return nil, false, true
 		}
 	case base == "gdbus":
 		var unsafe bool
-		words, unsafe = unwrapBusctl(words[1:], names, memo, false, gdbusGrammar, true)
+		words, unsafe = unwrapBusctl(words[1:], names, memo, false, true)
 		if unsafe {
 			return nil, false, true
 		}

@@ -346,16 +346,14 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 		return tailReachesResetAgentProgram(rest, names, preserved, false, sudoOperandOptions, sudoFlags)
 	case "systemd-run", "run0":
 		return tailReachesResetAgentProgram(rest, names, preserved, false, systemdRunOperandOptions, systemdRunFlags)
-	case "pkexec":
-		return namedLauncherResetReach(rest, pkexecGrammar, names, preserved)
-	case "doas":
-		return namedLauncherResetReach(rest, doasGrammar, names, preserved)
-	case "setpriv":
-		return namedLauncherResetReach(rest, setprivGrammar, names, preserved)
-	case "flatpak-spawn":
-		return namedLauncherResetReach(rest, flatpakSpawnGrammar, names, preserved)
-	case "machinectl":
-		return machinectlShellLoginReaches(rest, names, preserved)
+	case "pkexec", "doas", "setpriv", "flatpak-spawn", "ssh", "machinectl",
+		"nix-shell", "nix", "distrobox", "toolbox":
+		// The any-reading judgement: every literal word a possible
+		// command start or write, and the argv-preserved/joined/
+		// shell-carrying candidates judged by the same reach.
+		return namedLauncherResetReach(rest, names, preserved, base)
+	case "tmux":
+		return tmuxResetReach(rest, names, preserved)
 	case "bwrap", "systemctl", "dbus-update-activation-environment":
 		return tailReachesResetAgentProgram(rest, names, preserved, false, nil, nil)
 	}
@@ -399,30 +397,17 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 // runner: su/runuser/script take util-linux's getopt spellings (runnerPayloads
 // reads attached `-cX` and `--command` forms), while the shells attach no
 // operand to -c — `sh -ce 'x'` runs `x`, not `e` — so a shell word hands its
-// tail to shellDashCPayloadCandidates (Codex P1 on this head). The named
-// launchers' collectors also report undecodable: an invocation their option
-// grammar cannot read refuses wherever a payload would be judged.
+// tail to shellDashCPayloadCandidates (Codex P1 on this head). The #7603 named
+// launchers take the any-reading collector — every command-string shape the
+// tail can carry — and pwsh/nu keep their input-source classifier. A
+// collector's undecodable mark refuses wherever a payload would be judged.
 func runnerPayloadCandidates(base string, words []*syntax.Word) ([]string, bool) {
 	if _, ok := shellBaseName(base); ok {
 		return shellDashCPayloadCandidates(words), false
 	}
 	switch base {
-	case "watch":
-		return watchPayloads(words)
-	case "ssh":
-		return sshPayloads(words)
-	case "tmux":
-		return tmuxPayloads(words)
-	case "nix-shell":
-		payloads, _, undecodable := nixShellPayloads(words)
-		return payloads, undecodable
-	case "nix":
-		payloads, _, undecodable := nixPayloads(words)
-		return payloads, undecodable
-	case "distrobox":
-		return distroboxPayloads(words)
-	case "toolbox":
-		return toolboxPayloads(words)
+	case "watch", "ssh", "tmux", "nix-shell", "nix", "distrobox", "toolbox":
+		return namedRunnerTailPayloads(words, base)
 	case "pwsh":
 		return pwshNuPayloads(words)
 	case "nu":
