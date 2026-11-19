@@ -23,26 +23,26 @@ import (
 // that does not answer within the bound is "could not look": the resolved
 // candidate is dropped and only the recorded spelling is returned.
 
-// wedgeLaunchDirEvalSymlinks makes every symlink resolution block until the
-// test ends, the way a wedged launch-dir mount does, and bounds af's
-// resolution at 50ms. A test that needs the real resolver for setup must do
-// that setup before calling this helper.
+// wedgeLaunchDirEvalSymlinks makes every symlink resolution hold the test's
+// flight clock out past the bound and then block until the test ends, the
+// way a wedged launch-dir mount does. A test that needs the real resolver
+// for setup must do that setup before calling this helper.
 func wedgeLaunchDirEvalSymlinks(t *testing.T) {
 	t.Helper()
 	release := make(chan struct{})
 	var once sync.Once
+	clock := wedgeFlightClock(t)
 	restore := fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
+		clock.Advance(wedgeHeldOut)
 		<-release
 		return path, nil
 	})
-	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
 	t.Cleanup(func() {
 		once.Do(func() { close(release) })
 		// Let any flight still blocked in the resolver finish before the real
 		// resolver comes back.
 		time.Sleep(50 * time.Millisecond)
 		restore()
-		restoreTimeout()
 	})
 }
 
@@ -215,9 +215,10 @@ func TestClaudeTranscriptOwnershipIsUnknownWhenAnAncestorDoesNotResolve(t *testi
 	restore()
 
 	release := make(chan struct{})
-	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	clock := wedgeFlightClock(t)
 	restore = fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
 		if path == foreign {
+			clock.Advance(wedgeHeldOut)
 			<-release
 		}
 		return filepath.EvalSymlinks(path)
@@ -225,10 +226,9 @@ func TestClaudeTranscriptOwnershipIsUnknownWhenAnAncestorDoesNotResolve(t *testi
 	t.Cleanup(func() {
 		close(release)
 		// Let the flight still blocked in the seam finish before the real
-		// resolver and the bound come back.
+		// resolver and the clock come back.
 		time.Sleep(50 * time.Millisecond)
 		restore()
-		restoreTimeout()
 	})
 	got := withinBound(t, func() claudeOwnership { return claudeTranscriptOwnership(transcript, launchDir) })
 	require.Equal(t, claudeOwnershipUnknown, got, "an ancestor that did not answer within the bound is unknown ownership")

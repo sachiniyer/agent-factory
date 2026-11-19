@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,24 +31,62 @@ import (
 // there", and never a reason to start on the id or start fresh.
 
 // launchDirWedge returns the block a seam calls with the path it probes: one
-// at or under root waits until the test ends, the way a launch dir on a wedged
-// mount does, and any other path answers. It bounds af's probes at 50ms.
+// at or under root holds the test's flight clock out past the probe bound and
+// then waits until the test ends, the way a launch dir on a wedged mount
+// does, and any other path answers. Its bound is the clock, never a shrunken
+// probeTimeout: the wedged flight times out because the wedge spends a whole
+// bound on it, and every other flight in the test answers whenever its work
+// finishes, since nothing moves the clock while it runs (#7456). A bound
+// shrunk for the whole test reaches flights the wedge does not mean to
+// wedge — the transcript-store listing among them — whose work a loaded
+// runner can stretch past it, reading a slow but answering lookup as a look
+// that did not happen (#7593).
 func launchDirWedge(t *testing.T, root string) func(string) {
 	t.Helper()
 	release := make(chan struct{})
-	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	clock := wedgeFlightClock(t)
 	t.Cleanup(func() {
 		close(release)
-		// Let every flight still blocked in a seam finish before the bound
-		// comes back.
+		// Let every flight still blocked in a seam finish before the real
+		// clock comes back.
 		time.Sleep(50 * time.Millisecond)
-		restoreTimeout()
 	})
 	return func(path string) {
 		if path == root || strings.HasPrefix(path, root+string(filepath.Separator)) {
+			clock.Advance(wedgeHeldOut)
 			<-release
 		}
 	}
+}
+
+// wedgeHeldOut is how far a wedged lookup moves the flight clock before it
+// holds: well past af's probe bound, so the flight's deadline is spent
+// whatever the bound is left at.
+const wedgeHeldOut = time.Hour
+
+// wedgeFlightClocks is each test's manual flight clock while its launch-dir
+// wedges hold it. Every wedge in a test shares the one clock, so a second
+// wedge's seam spends the bound on the clock its flights' timers run on
+// rather than installing one those timers never see.
+var wedgeFlightClocks sync.Map // *testing.T → *fsprobe.ManualClock
+
+// wedgeFlightClock returns the test's shared manual flight clock, installed
+// under fsprobe's seam on first use and restored at cleanup. A flight's
+// deadline is a fixed instant on it, so a lookup a seam holds out times out
+// by declaration, never by racing the runner's scheduler against the bound.
+func wedgeFlightClock(t *testing.T) *fsprobe.ManualClock {
+	t.Helper()
+	if clock, ok := wedgeFlightClocks.Load(t); ok {
+		return clock.(*fsprobe.ManualClock)
+	}
+	clock := fsprobe.NewManualClock(time.Now())
+	wedgeFlightClocks.Store(t, clock)
+	restore := fsprobe.SetFlightClockForTest(clock)
+	t.Cleanup(func() {
+		wedgeFlightClocks.Delete(t)
+		restore()
+	})
+	return clock
 }
 
 // wedgeLaunchDirResolution wedges every symlink resolution of root or a path
@@ -215,6 +254,31 @@ func TestCommittedSwapRelaunchDoesNotStallOnAWedgedLaunchDir(t *testing.T) {
 	pending := inst.ToInstanceData().PendingAccountSwap
 	require.Equal(t, committed, pending.ConversationID, "the record keeps the committed conversation")
 	require.Equal(t, fallback, pending.CarryFallback, "a resumed conversation leaves the record's account of it alone")
+}
+
+// #7593: a wedge's bound is the wedged seam's, not the test's. The transcript
+// store is a mount af looks at too — a listing that answers, just slowly, is
+// a look that happened, never a wedged one. Under a probeTimeout shrunk for
+// the whole test the listing's flight timed out beside the launch dir's, the
+// committed re-launch judged its id blind and kept --session-id. The wedge
+// spends its own bound on the flight clock, so this listing answers whenever
+// its 75ms of work finishes and the verdict reads it.
+func TestCommittedSwapRelaunchReadsASlowStoreListing(t *testing.T) {
+	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	elsewhere := t.TempDir()
+	fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Hour))
+	setModTime(t, writeCarryFile(t, target, claudeTranscriptRel(worktree, newerConversationID), claudeRecordLine(t, elsewhere)), time.Now().Add(-time.Minute))
+	wedgeLaunchDirResolution(t, worktree)
+	t.Cleanup(fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
+		time.Sleep(75 * time.Millisecond)
+		return os.ReadDir(dir)
+	}))
+
+	plan := withinBound(t, func() *accountSwapLaunchPlan { return relaunchPlan(t, inst) })
+	require.NotRegexp(t, sessionIDArg, plan.program, "a slow listing is a look that happened: %s", plan.program)
+	match := resumeArg.FindStringSubmatch(plan.program)
+	require.NotNil(t, match, "the re-launch resumes the committed conversation: %s", plan.program)
+	require.Equal(t, committed, match[1])
 }
 
 // lostInstanceInWedgeableWorktree is a Lost instance ready for Recover, with a
