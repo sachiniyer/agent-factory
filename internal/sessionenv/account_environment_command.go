@@ -593,11 +593,22 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 // words[0]. Every position the scan steps on gets the scan's answer: the scan
 // from there follows the same steps to the same end.
 func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) bool {
-	// commandishAfter[i] records whether any word from words[i+1:] can sit
+	// commandishAt(i) reports whether any word from words[i+1:] can sit
 	// where a command word goes — the per-position companion the
-	// protected-name word rule needs ("a command word follows"), computed
-	// once so the scan stays linear.
-	commandishAfter := tailCommandishAfter(words)
+	// protected-name word rule needs ("a command word follows"). The
+	// backing table is built LAZILY on the first protected-name word: a
+	// nested scan that hits the verdict cache at its first position pays
+	// O(1), not O(len) for a table it never reads — `echo env echo env …`
+	// rebuilt it once per nested env word, quadratic in time and allocated
+	// bytes (Codex P2 on this head).
+	original := words
+	var commandishAfter []bool
+	commandishAt := func(i int) bool {
+		if commandishAfter == nil {
+			commandishAfter = tailCommandishAfter(original)
+		}
+		return commandishAfter[len(original)-len(words)+i]
+	}
 	var chain []*syntax.Word
 	answer := false
 	for len(words) > 0 {
@@ -606,13 +617,12 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 			break
 		}
 		chain = append(chain, words[0])
-		width, hides := wrapperTailWordHidesAccountAssignment(words, strace, names, memo, commandishAfter)
+		width, hides := wrapperTailWordHidesAccountAssignment(words, strace, names, memo, commandishAt)
 		if hides {
 			answer = true
 			break
 		}
 		words = words[width:]
-		commandishAfter = commandishAfter[width:]
 	}
 	for _, word := range chain {
 		memo.wrapperTails[wrapperTailKey{word: word, strace: strace}] = answer
@@ -643,10 +653,10 @@ func tailWordCommandish(word *syntax.Word) bool {
 }
 
 // wrapperTailWordHidesAccountAssignment judges the tail word at words[0] and
-// reports how many words it consumed. commandishAfter is the per-position
-// "a command word still follows" table the caller precomputed for the
-// scan's words slice.
-func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo, commandishAfter []bool) (int, bool) {
+// reports how many words it consumed. commandishAt(i) is the caller's lazy
+// per-position "a command word still follows" accessor over the scan's
+// words slice.
+func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo, commandishAt func(int) bool) (int, bool) {
 	word := words[0]
 	if isAccountCommandName(word, "strace") && straceOptionRunRefused(words[1:], names, false, memo) {
 		// A strace in an unrecognized wrapper's — or another strace's — child
@@ -704,11 +714,11 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 	// data: `rg CODEX_HOME src/` and `grep -r CLAUDE_CONFIG_DIR .` stay
 	// admitted, and the boundary keeps `NODE_ENV` from matching `ENV`.
 	if kind := unrecognizedWordProtectedKind(literal, names); kind == wordProtectedAssign {
-		if commandishAfter[0] {
+		if commandishAt(0) {
 			return 1, true
 		}
 	} else if kind == wordProtectedName {
-		if len(words) > 1 && len(commandishAfter) > 1 && commandishAfter[1] {
+		if len(words) > 1 && commandishAt(1) {
 			return 1, true
 		}
 	}

@@ -480,18 +480,23 @@ func sudoPreservesEnvironment(words []*syntax.Word) (map[string]struct{}, bool) 
 // -m/-p/--preserve-environment (it prints "ignoring --preserve-environment"),
 // so a preservation request never cancels the reset — and su's getopt
 // permutes options ahead of the USER operand, so the flag counts wherever
-// it sits in the argv (Codex P1 on this head).
+// it sits in the argv (Codex P1 on this head). getopt_long also accepts
+// unambiguous abbreviations, and `--login` is su's only long option
+// starting with l, so `--l`, `--lo`, `--log`, … all spell it (Codex P2).
 func suResetsEnvironment(words []*syntax.Word) bool {
 	for _, word := range words {
 		literal, ok := launcherLiteralWord(word)
 		if !ok {
 			continue
 		}
-		if literal == "-" || literal == "--login" {
+		if literal == "-" {
 			return true
 		}
 		if strings.HasPrefix(literal, "-") && !strings.HasPrefix(literal, "--") &&
 			strings.Contains(literal[1:], "l") {
+			return true
+		}
+		if len(literal) > 2 && strings.HasPrefix("--login", literal) {
 			return true
 		}
 	}

@@ -839,6 +839,17 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"su alice -l codex", true},
 		{"su -m -c 'codex' work", false},
 		{"su -p -c 'codex' work", false},
+		// getopt_long accepts unambiguous abbreviations and --login is
+		// su's only long option starting with l, so every --l* prefix
+		// spells login — `su --log` resets just like `--login` (Codex
+		// P2, verified on util-linux: --log clears the child's env).
+		{"su --log -c 'codex' work", true},
+		{"su --lo -c 'codex' work", true},
+		{"su --l -c 'codex' work", true},
+		{"su --logi -p -c 'codex' work", true},
+		// `--pres` spells --preserve-environment alone — no login, so
+		// the caller's environment is kept and the tail admits.
+		{"su --pres -c 'codex' work", false},
 		{"bwrap --clearenv codex", true},
 		{"bwrap --clearenv make", false},
 		{"prog sudo codex", true},
