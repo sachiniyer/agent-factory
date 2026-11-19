@@ -214,7 +214,7 @@ var shellSiteRegistry = map[string][]classifiedSite{
 	"session/backend_docker.go:(*dockerProvisioner).execSh": {{
 		class: afAuthored, note: "af's container setup scripts (chmod, mkdir), composed with shellQuote",
 	}},
-	"session/backend_docker_account.go:(*dockerProvisioner).execSessionSh": {{
+	"session/backend_docker.go:(*dockerProvisioner).execSessionSh": {{
 		class: afAuthored, note: "the same, run as the session's container user",
 	}},
 	"session/backend_docker_account.go:(*dockerProvisioner).prepareAccountUser": {
