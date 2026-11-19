@@ -62,24 +62,29 @@ func isAccountReadMountTableExec(args []string) bool {
 // mount and af never chowns through one — so the scenario has no answer for
 // it.
 //
-// probeErr, when non-nil, is the error the writability probe returns verbatim
-// — used to drive an INFRASTRUCTURE-failure shape (docker CLI exit
-// 125/126/127, a transport error) that the reportSkippedMount probe must
-// classify dockerOpDaemonWrite rather than dockerOpLocal, so provision() can
-// join dockerRootFSFullEvidence. When probeErr is nil, the writable field
-// drives the verdict shape: true returns success (the mounted dir is
-// writable), false returns a genuine *exec.ExitError with ExitCode 1 (`test`'s
-// false verdict) matching the production error TYPE p.docker returns from a
-// non-zero docker exec exit.
+// The probe's shell reports its verdict through a distinct sentinel on
+// stdout and exits 0 either way: `test`'s false verdict no longer travels
+// as a bare exit 1, because the Docker CLI also exits 1 when its
+// exec-create/API phase fails before the shell ever starts (a full data
+// root failing dockerd's exec bookkeeping produces exactly that shape), so
+// an unmarked exit 1 cannot prove the verdict ran. The writable field
+// drives the two verdict shapes: true prints af-probe:ok (the mounted dir
+// is writable), false prints af-probe:denied (`test`'s false verdict) —
+// the same sentinel strings the production script emits.
 //
-// probeOut, when probeErr is non-nil, is the combined-output byte slice
-// returned alongside the error. Production's cmd.CombinedOutput captures the
-// docker CLI's merged stdout/stderr into `out` and leaves the returned
-// *exec.ExitError's Stderr nil; reportSkippedMount attaches `out` to the
-// refusal via the "(%s)" clause. Mirror the contract so the daemon's errno
-// text surfaces as prose even though the typed errno travels only by way of
-// the op class (the *exec.ExitError's Stderr is intentionally NOT set so the
-// stub stays faithful to production, where CombinedOutput leaves it nil).
+// probeErr and probeOut override the verdict shapes to drive the
+// NON-verdict outcomes reportSkippedMount must classify
+// dockerOpDaemonWrite rather than dockerOpLocal, so provision() can join
+// dockerRootFSFullEvidence: a docker CLI exit with no sentinel
+// (125/126/127, or the ambiguous bare exit 1), a transport error, a poll
+// deadline, or clean-exit output carrying no verdict. Production's
+// cmd.CombinedOutput captures the docker CLI's merged stdout/stderr into
+// `out` and leaves the returned *exec.ExitError's Stderr nil;
+// reportSkippedMount attaches `out` to the refusal via the "(%s)" clause.
+// Mirror the contract so the daemon's errno text surfaces as prose even
+// though the typed errno travels only by way of the op class (the
+// *exec.ExitError's Stderr is intentionally NOT set so the stub stays
+// faithful to production, where CombinedOutput leaves it nil).
 type accountChownScenario struct {
 	mountPoints []string
 	writable    bool
@@ -93,11 +98,12 @@ type accountChownScenario struct {
 // N" Run produces (empty for a bare exit), mirroring production, where
 // cmd.CombinedOutput ships the merged stdout/stderr as the returned byte
 // slice and leaves *exec.ExitError.Stderr nil — the test case's prose is
-// delivered alongside via accountChownScenario.probeOut, not via Stderr. The
-// chown guard's `test -w` stub used to model only the error's %v TEXT
-// (errors.New("exit status 1")); once reportSkippedMount branches on the
-// error TYPE (skippedMountProbeClass), the stub must model the type too,
-// mirroring baseTmuxAbsentExitErr in tab_persist_test.go.
+// delivered alongside via accountChownScenario.probeOut, not via Stderr. In
+// the skipped-mount probe's stub these model only the NON-verdict docker
+// CLI exits — 125/126/127, and a bare exit 1, which the exec-create/API
+// phase produces before the shell starts as readily as `test`'s old false
+// verdict did — never a real verdict, which now travels as a stdout
+// sentinel on a clean exit.
 func dockerExecExitErr(code int) *exec.ExitError {
 	err := exec.Command(shForSessionTests, "-c", fmt.Sprintf("exit %d", code)).Run()
 	var exitErr *exec.ExitError
@@ -109,16 +115,6 @@ func dockerExecExitErr(code int) *exec.ExitError {
 	// *exec.ExitError with the requested code rather than panicking on a nil
 	// ProcessState.
 	return &exec.ExitError{}
-}
-
-// chownProbeTestVerdictErr is the genuine *exec.ExitError a `test -w &&
-// test -x` probe returns when the directory is not writable by the session's
-// user — the production shape skippedMountProbeClass matches as the verdict
-// (ExitCode 1) and classifies dockerOpLocal. Use it instead of a plain
-// errors.New("exit status 1") so the stub faithfully models the production
-// error TYPE, not only its text.
-func chownProbeTestVerdictErr() error {
-	return dockerExecExitErr(1)
 }
 
 // accountChownScenarioStub answers the account owner stat probe, the
@@ -141,25 +137,25 @@ func accountChownScenarioStub(calls *[][]string, owner string, scenario accountC
 			return accountMountTableAnswer(scenario.mountPoints...), nil
 		case strings.Contains(joined, "test -w"):
 			// The writability probe af runs as the session's user when a
-			// chown target sits inside a mount it must not re-own. A
-			// probeErr models a non-verdict failure shape (docker CLI
-			// exit 125/126/127, a transport error) the guard must classify
-			// as docker/exec infrastructure, not the `test` verdict. probeOut
-			// ships the daemon-supplied stdout/stderr CombinedOutput would
-			// have returned alongside — `test` writes nothing container-side
+			// chown target sits inside a mount it must not re-own. Its
+			// shell prints the verdict sentinel on stdout and exits 0
+			// either way, so probeErr/probeOut model only the NON-verdict
+			// shapes (a docker CLI exit — 125/126/127 or the ambiguous
+			// bare exit 1 — a transport error, or output carrying no
+			// sentinel) the guard must classify as docker/exec
+			// infrastructure, never `test`'s verdict. probeOut ships the
+			// daemon-supplied stdout/stderr CombinedOutput would have
+			// returned alongside — `test` writes nothing container-side
 			// and the docker CLI's combined output carries the daemon's
 			// diagnostic, which reportSkippedMount attaches to the refusal
 			// via the "(%s)" clause.
-			if scenario.probeErr != nil {
+			if scenario.probeErr != nil || scenario.probeOut != nil {
 				return scenario.probeOut, scenario.probeErr
 			}
 			if scenario.writable {
-				return nil, nil
+				return []byte("af-probe:ok\n"), nil
 			}
-			// The verdict shape is a real *exec.ExitError with ExitCode 1
-			// — the production TYPE the classifier branches on, not the
-			// bare %v text a plain errors.New("exit status 1") models.
-			return nil, chownProbeTestVerdictErr()
+			return []byte("af-probe:denied\n"), nil
 		default:
 			return nil, nil
 		}
@@ -742,6 +738,10 @@ func TestPrepareAccountUser_Differential_SkipsWorkspaceChownLikeNonAccount(t *te
 					// mountinfo should also report a /workspace mount so the
 					// guard skips its chown.
 					return probeAnswer(args, dockerWorkspaceDir), nil
+				case strings.Contains(joined, "test -w"):
+					// Only the account path probes; the mounted dir is
+					// writable, reported through the probe's ok sentinel.
+					return []byte("af-probe:ok\n"), nil
 				}
 				return nil, nil
 			}
@@ -820,35 +820,48 @@ func TestPrepareAccountUser_UnwritableMountRefusesNamingTheMount(t *testing.T) {
 	assert.Empty(t, p.containerUser, "a refused provisioning must not switch the exec user")
 }
 
-// TestPrepareAccountUser_SkippedMountProbeClassSplitsByExitCode pins the
-// classification reportSkippedMount makes on its `test -w && test -x` probe
-// failure: the genuine `test` false verdict (ExitCode 1) is af's own
-// decision — dockerOpLocal, the only class provision() excludes from
-// dockerRootFSFullEvidence so a local refusal does not borrow a capacity
-// verdict on a coincidentally-full root — while any other shape (docker CLI
-// exit 125/126/127, a transport error) is docker/exec infrastructure that
-// wrote nothing container-side, so it carries dockerOpDaemonWrite and
-// provision() may join the typed-errno evidence a full data root hit loses
-// into prose. #7571 added reportSkippedMount pinning only exit status 1, so
-// an infrastructure failure (the bug: a provably read-only exec whose
-// dockerd can't bookkeep it on a full data root) inherited the verdict's
-// dockerOpLocal and lost the evidence path. The sibling read-only exec
-// probes (prepareNonAccountUser's id -u and prepareAccountUser's stat -c
-// %u:%g) already classify the same infra shape dockerOpDaemonWrite; this
-// pins that the skipped-mount probe does too. The verdict case mirrors
-// TestPrepareAccountUser_UnwritableMountRefusesNamingTheMount but uses a
-// real *exec.ExitError{ExitCode 1} straight, so the differential is visible
-// here and not only by reading the sibling test.
-func TestPrepareAccountUser_SkippedMountProbeClassSplitsByExitCode(t *testing.T) {
+// TestPrepareAccountUser_SkippedMountProbeClassSplitsBySentinel pins the
+// classification reportSkippedMount makes on its `test -w && test -x`
+// probe's outcome: the writability verdict is dockerOpLocal ONLY when the
+// in-container shell proves it ran and reached that verdict by printing
+// af-probe:denied on a clean (exit 0) exec — af's own decision, the only
+// class provision() excludes from dockerRootFSFullEvidence so a local
+// refusal does not borrow a capacity verdict on a coincidentally-full root.
+// Every other outcome is docker/exec infrastructure that wrote nothing
+// container-side, so it carries dockerOpDaemonWrite and provision() may
+// join the typed-errno evidence a full data root hit loses into prose:
+// a docker CLI exit with NO sentinel — a bare exit 1 included, because the
+// exec-create/API phase fails with exit 1 before the shell ever starts when
+// a full data root cannot create the exec bookkeeping, which is precisely
+// the misclassification #7626 reports — plus CLI exits 125/126/127, a
+// transport error, and even a clean exit whose output carries no verdict.
+// #7571 added reportSkippedMount pinning only exit status 1, so an
+// infrastructure failure (a provably read-only exec whose dockerd can't
+// bookkeep it on a full data root) inherited the verdict's dockerOpLocal
+// and lost the evidence path; the sibling read-only exec probes
+// (prepareNonAccountUser's id -u and prepareAccountUser's stat -c %u:%g)
+// already classify the same infra shape dockerOpDaemonWrite. The denied
+// case mirrors TestPrepareAccountUser_UnwritableMountRefusesNamingTheMount
+// but asserts the sentinel the verdict now travels on.
+func TestPrepareAccountUser_SkippedMountProbeClassSplitsBySentinel(t *testing.T) {
 	for name, tc := range map[string]struct {
+		writable  bool
 		probeErr  error
 		probeOut  []byte
 		wantOp    dockerOpClass
 		wantProse string
 	}{
-		"exit 1 is the test verdict — local, evidence suppressed": {
-			probeErr:  chownProbeTestVerdictErr(),
+		"af-probe:denied sentinel is the test verdict — local, evidence suppressed": {
 			wantOp:    dockerOpLocal,
+			wantProse: "af-probe:denied",
+		},
+		"docker CLI exit 1 with no sentinel is infrastructure — daemon-write": {
+			// The Codex P1: a bare exit 1 cannot prove `test` ran — the
+			// exec-create/API phase fails the same way before the shell
+			// starts, e.g. when a full data root cannot create the exec
+			// bookkeeping. Only the sentinel is the verdict.
+			probeErr:  dockerExecExitErr(1),
+			wantOp:    dockerOpDaemonWrite,
 			wantProse: "exit status 1",
 		},
 		"exit 125 with daemon ENOSPC stderr is infrastructure — daemon-write": {
@@ -874,21 +887,38 @@ func TestPrepareAccountUser_SkippedMountProbeClassSplitsByExitCode(t *testing.T)
 			wantOp:    dockerOpDaemonWrite,
 			wantProse: "no such file or directory",
 		},
+		"clean exit with no sentinel is unproven — daemon-write": {
+			// The exec returned 0 but the shell never printed a verdict —
+			// noise alone proves nothing about the mount.
+			probeOut:  []byte("docker: daemon warning: something odd\n"),
+			wantOp:    dockerOpDaemonWrite,
+			wantProse: "daemon warning",
+		},
+		"a sentinel-shaped line beside a non-zero exit is still infrastructure — daemon-write": {
+			// The script exits 0 after printing, so a sentinel paired with
+			// a non-zero exit means the exec was cut or that text came from
+			// elsewhere — contradictory evidence, never the verdict.
+			probeErr:  dockerExecExitErr(2),
+			probeOut:  []byte("af-probe:denied\n"),
+			wantOp:    dockerOpDaemonWrite,
+			wantProse: "af-probe:denied",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var calls [][]string
 			t.Cleanup(SetDockerExecForTest(accountChownScenarioStub(&calls, accountProbeOwner, accountChownScenario{
 				mountPoints: []string{dockerWorkspaceDir},
+				writable:    tc.writable,
 				probeErr:    tc.probeErr,
 				probeOut:    tc.probeOut,
 			})))
 			p := newAccountChownProvisioner(t)
 			err := p.prepareAccountUser()
-			require.Error(t, err, "a failed probe must still refuse, not proceed on unknown writability")
+			require.Error(t, err, "a failed or unproven probe must still refuse, not proceed on unknown writability")
 			var se *dockerStepError
 			require.True(t, errors.As(err, &se), "the refusal must carry an operation class; err=%v", err)
 			assert.Equalf(t, tc.wantOp, se.op,
-				"the probe class must split verdict (%v) from infrastructure (%v); err=%v",
+				"the probe class must split the proven verdict (%v) from infrastructure (%v); err=%v",
 				dockerOpLocal, dockerOpDaemonWrite, err)
 			// The classification changes the evidence path at provision(),
 			// not the message the operator reads — the refusal still names
@@ -913,7 +943,7 @@ func TestPrepareAccountUser_SkippedMountProbeClassSplitsByExitCode(t *testing.T)
 			// op-class assertion above proves provision() can attach the
 			// typed errno the classifier reads.
 			assert.Containsf(t, err.Error(), tc.wantProse,
-				"the probe failure's text must surface as prose in the refusal; err=%v", err)
+				"the probe outcome's text must surface as prose in the refusal; err=%v", err)
 			requireNoRootChownOn(t, calls, dockerWorkspaceDir)
 			assert.Empty(t, p.containerUser, "a refused provisioning must not switch the exec user")
 		})
@@ -1155,8 +1185,9 @@ func TestPrepareAccountUser_MountedDescendantIsProbedAfterAncestorChown(t *testi
 				mountinfoLine(2, dockerAccountRuntimeHome+"/workspace", "ext4") + "\n"), nil
 		case strings.Contains(joined, "test -w"):
 			// By the time the probe runs the stub's chown has "succeeded",
-			// so /af-home is traversable: the mounted dir is writable.
-			return nil, nil
+			// so /af-home is traversable: the mounted dir is writable,
+			// reported through the probe's ok sentinel.
+			return []byte("af-probe:ok\n"), nil
 		default:
 			return nil, nil
 		}
