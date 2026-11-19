@@ -119,7 +119,14 @@ func TestHookProgressTerminalOwnersPermitUnfinishedReclamation(t *testing.T) {
 	for _, owner := range []string{"absent", "archived", "tombstoned", "active"} {
 		t.Run(owner, func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-			installScopeShim(t)
+			// Reclamation must be decided by the owner row, not by whether the
+			// liveness oracle happened to answer. A transient refusal from the
+			// launcher scan — a same-user process mid-execve on a loaded runner
+			// — is the failure this test sighted keeping the journal (#4217),
+			// so the probe is stubbed to "nothing live".
+			originalProbe := runningHookPrefixesForPrune
+			runningHookPrefixesForPrune = func(...string) ([]string, error) { return nil, nil }
+			t.Cleanup(func() { runningHookPrefixesForPrune = originalProbe })
 			rows := `[]`
 			switch owner {
 			case "archived":

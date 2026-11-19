@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -56,6 +55,7 @@ func (g *GitWorktree) startHookProgressAdoption(worktreePath, sessionID string, 
 	}
 	interval := hookAdoptionPollInterval
 	prefixes := g.hookScopePrefixes()
+	probe := runningHookPrefixesForResume
 	repoPath := g.repoPath
 	branchName := g.branchName
 	go func() {
@@ -82,37 +82,56 @@ func (g *GitWorktree) startHookProgressAdoption(worktreePath, sessionID string, 
 		if err != nil {
 			return
 		}
+		// Each warning is issued once per outage EPISODE — the span from a
+		// probe's first failure until it next succeeds — not once per distinct
+		// error message. The probe can transiently fail for a second reason
+		// mid-outage (an unreadable argv beside an unreachable manager, #4217),
+		// and keying on the message re-warned every time the text flip-flopped.
+		// A changed reason inside an episode is demoted to an info line so it is
+		// never invisible, but it can never re-warn.
+		var probeOutage, identityOutage bool
 		var lastProbeError, lastIdentityError string
 		for {
 			if ctx.Err() != nil {
 				return
 			}
-			live, probeErr := systemdunit.RunningHookPrefixes(prefixes...)
+			live, probeErr := probe(prefixes...)
 			if probeErr != nil {
-				if message := probeErr.Error(); message != lastProbeError {
+				if !probeOutage {
 					log.WarningLog.Printf("waiting to resume post-worktree hooks for %s: %v", p.Worktree, probeErr)
-					lastProbeError = message
+					probeOutage = true
+				} else if message := probeErr.Error(); message != lastProbeError {
+					log.InfoLog.Printf("hook scope probe still failing for %s: %v", p.Worktree, probeErr)
 				}
-			} else if lastProbeError != "" {
+				lastProbeError = probeErr.Error()
+			} else if probeOutage {
 				log.InfoLog.Printf("hook scope probe recovered for %s", p.Worktree)
+				probeOutage = false
 				lastProbeError = ""
 			}
 			if probeErr == nil && len(live) == 0 {
 				err := verifyHookResumeWorktree(ctx, repoPath, p.Worktree, branchName, p.WorktreeIdentity)
 				if err == nil {
-					if lastIdentityError != "" {
+					if identityOutage {
 						log.InfoLog.Printf("hook worktree verification recovered for %s", p.Worktree)
 					}
 					break
 				}
-				if message := err.Error(); message != lastIdentityError {
+				// Same episode rule for the verification half: the first
+				// failure names the episode's one warning; later failures with
+				// different text — including a positive mismatch — are reported
+				// at info rather than re-warned.
+				if !identityOutage {
 					if errors.Is(err, errWorktreeIdentityMismatch) {
 						log.WarningLog.Printf("cannot resume post-worktree hooks for %s: %v; keeping hook completion pending for worktree recovery", p.Worktree, err)
 					} else {
 						log.WarningLog.Printf("waiting to verify post-worktree hooks for %s: %v", p.Worktree, err)
 					}
-					lastIdentityError = message
+					identityOutage = true
+				} else if message := err.Error(); message != lastIdentityError {
+					log.InfoLog.Printf("hook worktree verification still failing for %s: %v", p.Worktree, err)
 				}
+				lastIdentityError = err.Error()
 			}
 			select {
 			case <-ctx.Done():

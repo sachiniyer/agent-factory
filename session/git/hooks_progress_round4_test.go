@@ -3,11 +3,12 @@
 package git
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,14 +125,23 @@ func TestHookProgressPruneFinalProbeIsBatched(t *testing.T) {
 		path, _ := hookProgressPath(p.Worktree)
 		paths = append(paths, path)
 	}
-	counter := filepath.Join(t.TempDir(), "first")
-	calls := installSurvivorSystemctl(t, fmt.Sprintf("if [ -f %q ]; then echo unavailable >&2; exit 1; fi\ntouch %q\nexit 0\n", counter, counter))
-	pruneHookProgress(filepath.Dir(paths[0]), time.Now().Add(15*24*time.Hour))
-	raw, err := os.ReadFile(calls)
-	if err != nil {
-		t.Fatal(err)
+	// The claim under test is that prune consults the liveness oracle ONCE for
+	// all candidates and once for the final re-check — never once per journal.
+	// Stub the oracle itself rather than counting shimmed systemctl calls: a
+	// launcher scan that transiently refuses an unrelated same-user process
+	// (#4217) used to keep the manager oracle from running at all, which this
+	// test read as a missing shim log — an ordering flake, not a verdict.
+	var probes atomic.Int32
+	originalProbe := runningHookPrefixesForPrune
+	runningHookPrefixesForPrune = func(...string) ([]string, error) {
+		if probes.Add(1) == 1 {
+			return nil, nil
+		}
+		return nil, errors.New("manager unavailable")
 	}
-	if n := strings.Count(string(raw), "list-units"); n != 2 {
+	t.Cleanup(func() { runningHookPrefixesForPrune = originalProbe })
+	pruneHookProgress(filepath.Dir(paths[0]), time.Now().Add(15*24*time.Hour))
+	if n := probes.Load(); n != 2 {
 		t.Errorf("prune used %d manager probes for 25 candidates, want 2", n)
 	}
 	for _, path := range paths {
