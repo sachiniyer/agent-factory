@@ -185,7 +185,8 @@ func TestExactResumeAbandonsAConversationLeftAfterACdThroughASymlinkedSubdirecto
 		claudeRecordLine(t, filepath.Join(workDir, "ext"))), past.Add(time.Minute))
 	inst := claudeRestoreInstance(t, workDir, carryTestID)
 
-	require.Equal(t, recordedClaudeAbandoned, inst.judgeRecordedClaude("claude", workDir, carryTestID))
+	verdict, _ := inst.judgeRecordedClaude("claude", workDir, carryTestID)
+	require.Equal(t, recordedClaudeAbandoned, verdict)
 	rewritten, ok, decline := prepareExactResumeConversation(inst, "claude")
 	require.False(t, ok)
 	require.Equal(t, "claude", rewritten, "a refused resume launches fresh")

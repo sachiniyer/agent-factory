@@ -73,7 +73,8 @@ func TestClaudeRestoreResumesWhenAGoneLaunchDirHadASymlink(t *testing.T) {
 			setModTime(t, writeCarryFile(t, configDir, filepath.Join(recordedProject, newerConversationID+".jsonl"), line), now.Add(-time.Hour))
 			setModTime(t, writeCarryFile(t, configDir, filepath.Join(kernelProject, carryTestID+".jsonl"), line+line), now.Add(-30*time.Minute))
 			inst := claudeRestoreInstance(t, workDir, carryTestID)
-			require.Equal(t, recordedClaudeResume, inst.judgeRecordedClaude("claude", workDir, carryTestID), "precondition: the newest copy is current")
+			verdict, _ := inst.judgeRecordedClaude("claude", workDir, carryTestID)
+			require.Equal(t, recordedClaudeResume, verdict, "precondition: the newest copy is current")
 
 			gone()
 			projects, complete := claudeProjectSpellings(workDir)

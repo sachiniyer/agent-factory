@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
@@ -189,6 +190,15 @@ func claudeCarryStaleness(configDir string, projects []string, launchDir, transc
 const unfiledRecordedClaudeReason = "its store holds no transcript for it " +
 	"(Claude files a conversation only on its first entry, and deletes old ones), so Claude starts on that id instead of resuming it"
 
+// blindResumeUnverifiedReason is why a launch resumed a recorded id without a
+// listing's verdict — the store af could name would not answer — and
+// blindUnnameableResumeReason the same when af cannot even name the store.
+// Each is a clause, as the other decline reasons are; neither is a refusal —
+// the launch still resumes the recorded id, and the notice says it was not
+// verified (#7596, #7600).
+const blindResumeUnverifiedReason = "its transcript store could not be listed"
+const blindUnnameableResumeReason = "its transcript store could not be named"
+
 // recordedClaudeVerdict is judgeRecordedClaude's answer about launching a
 // recorded Claude id.
 type recordedClaudeVerdict int
@@ -219,10 +229,10 @@ const (
 // actually runs (newerConversationIsEvidence). In the user's own checkout, an
 // in-place row or an adopted worktree, a sibling files there too, so it says
 // nothing about this session (#7209 review R1, #7216 review R1).
-func (i *Instance) judgeRecordedClaude(program, workDir, id string) recordedClaudeVerdict {
+func (i *Instance) judgeRecordedClaude(program, workDir, id string) (recordedClaudeVerdict, int) {
 	configDir, launchDir, err := i.claudeStoreFor(program, workDir)
 	if err != nil || strings.TrimSpace(configDir) == "" || strings.TrimSpace(launchDir) == "" {
-		return recordedClaudeBlind
+		return recordedClaudeBlind, 0
 	}
 	projects, complete := claudeProjectSpellings(launchDir)
 	verdict := judgeClaudeRecorded(configDir, projects, launchDir, id, "")
@@ -241,7 +251,7 @@ func (i *Instance) judgeRecordedClaude(program, workDir, id string) recordedClau
 	if !ok {
 		log.ErrorLog.Printf("session %q: recorded claude conversation %s: verdict %d maps to no launch; resuming it", i.Title, id, verdict)
 	}
-	return launch
+	return launch, len(projects)
 }
 
 // recordedClaudeLaunchFor maps each judgeClaudeRecorded verdict to the launch
@@ -370,13 +380,40 @@ func otherClaudeStores(primary string) []string {
 // recordedClaudeDecline is judgeRecordedClaude for a restore: an id to start on
 // is a startsOnRecorded decline that keeps the record, an abandoned one is
 // refused as #7206's restore guard refuses it, and a blind look resumes the
-// recorded id as a restore always has.
+// recorded id as a restore always has — with a notice on the decline that
+// says the resume was never verified (#7600). A blind verdict on a store af
+// can name gets one more look, bounded by the deadline the first look began
+// with (#7602's shared bound): the two judges together cost no more than what
+// a single look of this caller's was always allowed, and a listing that only
+// erred slowly answers inside it where the first look's whole bound could not
+// wait.
 func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationData) resumeDecline {
-	switch i.judgeRecordedClaude(program, i.GetWorktreePath(), conv.ID) {
+	workDir := i.GetWorktreePath()
+	lookStarted := fsprobe.FlightNow()
+	verdict, spellings := i.judgeRecordedClaude(program, workDir, conv.ID)
+	nameable := verdict == recordedClaudeBlind && spellings > 0
+	if nameable {
+		// The retry shares the deadline the first look began with (#7602's
+		// bound, #7600): one look lists each spelling under its own bound
+		// (claudeWorktreeTranscripts), so the pair may spend at most what a
+		// single look of this caller's was always allowed — and the count
+		// comes from the first look, not a second bounded resolution.
+		verdict = i.rejudgeRecordedClaude(program, workDir, conv.ID,
+			lookStarted.Add(fsprobe.ProbeBound()*time.Duration(spellings)))
+	}
+	switch verdict {
 	case recordedClaudeStartOn:
 		return resumeDecline{reason: unfiledRecordedClaudeReason, startsOnRecorded: true}
 	case recordedClaudeAbandoned:
 		return declineResume(staleCarryReason)
+	case recordedClaudeBlind:
+		// A resume af could not verify still resumes — the launch command is
+		// today's, and a store that says nothing about the id refuses nothing
+		// (#7600): the notice names it rather than planning a silent fresh id.
+		if nameable {
+			return resumeDecline{notice: blindResumeUnverifiedReason}
+		}
+		return resumeDecline{notice: blindUnnameableResumeReason}
 	}
 	return resumeDecline{}
 }

@@ -457,6 +457,9 @@ func planCreateConversation(i *Instance, program, freshID string) (launch string
 						i.Title, carried.ID, decline.reason)
 					launch, conversation := planLaunchConversation(freshID, program)
 					return launch, conversation, false
+				case decline.notice != "":
+					log.WarningLog.Printf("session %q: resuming its recorded claude conversation %s on first launch without verifying it first, because %s",
+						i.Title, carried.ID, decline.notice)
 				}
 			}
 			return rewritten, carried, false
@@ -596,7 +599,7 @@ func prepareExactResumeConversation(i *Instance, program string) (string, bool, 
 	if decline.reason != "" {
 		return program, false, decline
 	}
-	return rewritten, true, resumeDecline{}
+	return rewritten, true, decline
 }
 
 // resumableConversation is the conversation a restore would resume: the
