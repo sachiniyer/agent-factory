@@ -278,14 +278,20 @@ will not reach the child's environment.
   refuses with no command word needed — `systemctl --user set-environment
   CODEX_HOME=/o` and `dbus-update-activation-environment CODEX_HOME=/o`
   refuse, while `systemctl --user set-environment PORT=3000` and
-  `systemctl --user status sshd` run. A write with no explicit name list
-  refuses outright: a bare `import-environment` bulk-imports the caller's
+  `systemctl --user status sshd` run. A write counts as bulk — and
+  refuses — unless every word after the subcommand is provably a name: a
+  bare `import-environment` bulk-imports the caller's
   entire environment — pins included — into the shared manager, and
-  `dbus-update-activation-environment --all` is the same bulk copy, so
-  `systemctl --user import-environment` and
+  `dbus-update-activation-environment --all` is the same bulk copy, while
+  an option's operand is not an import name — so
+  `systemctl --user import-environment`,
+  `systemctl -H host import-environment`,
+  `systemctl import-environment -H host` and
   `dbus-update-activation-environment --all` refuse while
   `systemctl --user import-environment FOO` and
-  `dbus-update-activation-environment DISPLAY` run.
+  `dbus-update-activation-environment DISPLAY` run (dbus's own
+  no-operand flags `--systemd`/`--verbose` are provable, so
+  `dbus-update-activation-environment --systemd DISPLAY` still runs).
 - **Environment-resetting launchers refuse only when they deliver an
   agent** — a launcher that drops the pane's environment would unpick the
   account's pins silently, so when the reset environment's tail reaches an
@@ -302,9 +308,19 @@ will not reach the child's environment.
   before its command word, before `--`, and not consumed as another
   option's operand — so `sudo make -E codex`, `sudo -p -E codex` and
   `systemd-run codex --scope` all still reset and refuse, while `sudo -p
-  PROMPT -E codex` preserves and admits. And su follows util-linux's
-  actual precedence: its login form wins over `-p`/`--preserve-environment`,
-  so `su -lp -c 'codex' work` and `su -l -p -c 'codex' work` refuse.
+  PROMPT -E codex` preserves and admits. Option parsing is trusted only
+  where it is provable: a clustered operand (`sudo -uroot`), a
+  getopt_long abbreviation (`--us` for `--user`, `--pro` for `--prompt`)
+  or any unknown option can consume a following flag as its operand, so
+  the first unrecognized option word ends the trusted region and the
+  launcher reads as resetting — `sudo -uroot -E codex` and `sudo --pro -E
+  codex` refuse even though real sudo parses `-E`/`--prompt`'s operand
+  differently. Known no-operand flags (`sudo -n -E codex`) and
+  `=`-joined operands (`sudo --user=root -E codex`, `systemd-run
+  --setenv=FOO=1 --scope codex`) are provable, so they still admit. And
+  su follows util-linux's actual precedence: its login form wins over
+  `-p`/`--preserve-environment`, so `su -lp -c 'codex' work` and `su -l
+  -p -c 'codex' work` refuse.
 
 A launcher buried inside another command's argv (`nohup sudo
 CODEX_HOME=/other codex`, `docker build env CODEX_HOME=/other codex`) is

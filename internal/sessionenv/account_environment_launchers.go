@@ -233,7 +233,7 @@ func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo oper
 	if shadowedLiteralChildTailMutates(words, names, memo) {
 		return nil, true
 	}
-	if serviceOnly || !slices.Contains(launcherOwnOptionLiterals(words, systemdRunOperandOptions), "--scope") {
+	if serviceOnly || !slices.Contains(launcherOwnOptionLiterals(words, systemdRunOperandOptions, systemdRunFlags), "--scope") {
 		if tailReachesResetAgentProgram(words, nil, false) {
 			return nil, true
 		}
@@ -317,16 +317,18 @@ func unwrapScript(words []*syntax.Word, names map[string]struct{}, memo operandT
 // `unset-environment` word, the command writes the service manager's
 // environment — a launcher's own environment source — so the lexical cut
 // applies to every word (the write is the effect; no command word need
-// follow). A writer with no explicit name list refuses outright:
-// `import-environment` with no names bulk-imports the CALLER's entire
-// environment — this account's pins included — into a manager another
-// account's `systemd-run codex` later inherits, and a nameless
-// set/unset can't be proven to name only safe variables (Codex P1 on
-// this head). Any other systemctl command line gets the ordinary argv
-// scan.
+// follow). The write counts as BULK — and refuses — unless every word
+// after the subcommand is provably a NAME: a bare `import-environment`
+// copies the caller's WHOLE environment — this account's pins included —
+// into a manager another account's `systemd-run codex` later inherits,
+// and an option word like `-H` consumes the following word as its
+// operand, so `systemctl -H host import-environment` and
+// `systemctl import-environment -H host` carry no name list either
+// (Codex P1s on this head). Any other systemctl command line gets the
+// ordinary argv scan.
 func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
 	if writer := systemctlEnvironmentWriterIndex(words); writer >= 0 {
-		if !nonDashLiteralPresent(words[writer+1:]) ||
+		if !allLiteralNames(words[writer+1:]) ||
 			unwrapEnvInjectionLauncher(words, names, false, false) {
 			return nil, true
 		}
@@ -341,12 +343,14 @@ func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]str
 // dbus-update-activation-environment: every operand is a name or a
 // NAME=value written into the dbus activation (and, with --systemd, user
 // service manager) environment — the same write, so the lexical cut
-// applies unconditionally. `--all` copies the caller's ENTIRE
-// environment — pins included — into the shared activation block, and an
-// operand-less call carries no explicit name list to verify: both refuse
-// (Codex P1 on this head).
+// applies unconditionally. The write counts as BULK unless every argv
+// word is provably a NAME or one of dbus's own no-operand flags
+// (--systemd, --verbose): `--all` copies the caller's ENTIRE environment
+// — pins included — into the shared activation block, an operand-less
+// call has no name list to verify, and any other dash word can't be
+// proven not to carry an operand (Codex P1s on this head).
 func unwrapDbusUpdateActivationEnvironment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if literalWordPresent(words, "--all") || !nonDashLiteralPresent(words) ||
+	if !dbusWriteProvablyNamed(words) ||
 		unwrapEnvInjectionLauncher(words, names, false, false) {
 		return nil, true
 	}
@@ -360,14 +364,16 @@ func unwrapDbusUpdateActivationEnvironment(words []*syntax.Word, names map[strin
 // launcher's own option region — the words its option parser can still
 // see. The region ends at the command word (the first literal word that
 // is not a dash option, not a NAME=value environment prefix and not
-// consumed as an option's operand) and at `--`. operandOptions consumes
-// each listed option's separate-word operand so an operand word is never
-// yielded as a flag; anything unrecognized is treated as a NO-operand
-// option, so a missing entry can only end the region early — hiding a
-// later preserve/scope flag and over-refusing — never hide the command
-// word, which would let a flag the CHILD owns count as the launcher's
-// own (`sudo make -E`, `sudo -p -E`, `systemd-run codex --scope`: Codex
-// P1 on this head).
+// consumed as an option's operand), at `--`, and — per the Codex P1 on
+// this head — at ANY option word the scan can't classify with certainty:
+// a clustered operand spelling (`sudo -uroot`), a getopt_long
+// abbreviation (`--us` for --user, `--pro` for --prompt), or an unknown
+// option can consume a following preserve/scope flag as its operand, so
+// past that word nothing is provably the launcher's own and parsing
+// stops — the launcher then reads as resetting (flags already yielded
+// are still provably its own). A dash word joined to its operand by `=`
+// (`--setenv=X`, `--prompt=x`) is provably complete — its next word is a
+// fresh option position — so it is yielded and scanning continues.
 var sudoOperandOptions = map[string]bool{
 	"-u": true, "-U": true, "-g": true, "-h": true, "-p": true,
 	"-C": true, "-c": true, "-D": true, "-R": true, "-r": true,
@@ -391,7 +397,42 @@ var systemdRunOperandOptions = map[string]bool{
 	"--timer-property": true, "--path-property": true, "--socket-property": true,
 }
 
-func launcherOwnOptionLiterals(words []*syntax.Word, operandOptions map[string]bool) []string {
+// The launcher's KNOWN no-operand option words: anything not here, not an
+// operand option and not `=`-joined ends the trusted region — a clustered
+// operand (`-uroot`), an abbreviation (`--us`, `--pro`) or an unknown
+// spelling could carry a separate-word operand, so nothing after it is
+// provably an option position (Codex P1 on this head). `-E` and
+// `--preserve-env*` are listed so the preserve scan sees them.
+var sudoFlags = map[string]bool{
+	"-A": true, "-b": true, "-B": true, "-e": true, "-E": true,
+	"-H": true, "-i": true, "-K": true, "-k": true, "-l": true,
+	"-L": true, "-n": true, "-P": true, "-S": true, "-s": true,
+	"-V": true, "-v": true,
+	"--askpass": true, "--background": true, "--bell": true,
+	"--edit": true, "--help": true, "--list": true, "--login": true,
+	"--non-interactive": true, "--preserve-env": true,
+	"--preserve-groups": true, "--remove-timestamp": true,
+	"--reset-timestamp": true, "--set-home": true, "--shell": true,
+	"--stdin": true, "--validate": true, "--version": true,
+}
+
+var systemdRunFlags = map[string]bool{
+	"--scope": true, "--pty": true, "-P": true, "--pipe": true,
+	"--system": true, "--user": true, "--global": true,
+	"--collect": true, "--wait": true, "--remain-after-exit": true,
+	"-r": true, "--same-dir": true, "-q": true, "--quiet": true,
+	"--no-block": true, "--no-ask-password": true, "--runtime": true,
+	"--send-sighup": true, "--on-clock-change": true,
+	"--on-timezone-change": true, "--ignore-dependencies": true,
+	"--path": true, "--socket": true, "--timer": true,
+	"--expand-environment": true, "-h": true, "--help": true,
+	"-V": true, "--version": true,
+}
+
+// launcherOwnOptionLiterals yields the literal option words the launcher's
+// own option parser can still see, stopping at the command word, at `--`,
+// and at the first option word it can't classify with certainty.
+func launcherOwnOptionLiterals(words []*syntax.Word, operandOptions map[string]bool, knownFlags map[string]bool) []string {
 	var flags []string
 	for i := 0; i < len(words); i++ {
 		literal, ok := launcherLiteralWord(words[i])
@@ -399,13 +440,22 @@ func launcherOwnOptionLiterals(words []*syntax.Word, operandOptions map[string]b
 			return flags
 		}
 		if operandOptions[literal] {
-			i++
+			i++ // consume the operand word — never a flag
 			continue
 		}
-		if !strings.HasPrefix(literal, "-") && !strings.Contains(literal, "=") {
-			return flags
+		if !strings.HasPrefix(literal, "-") {
+			if strings.Contains(literal, "=") {
+				continue // NAME=value environment prefix
+			}
+			return flags // command word
 		}
-		flags = append(flags, literal)
+		// An `=`-joined operand (`--prompt=x`, `--setenv=X`) is provably
+		// complete; a known no-operand flag is provably bare.
+		if strings.Contains(literal, "=") || knownFlags[literal] {
+			flags = append(flags, literal)
+			continue
+		}
+		return flags // unrecognized option word — stop parsing
 	}
 	return flags
 }
@@ -437,16 +487,43 @@ func systemctlEnvironmentWriterIndex(words []*syntax.Word) int {
 	return -1
 }
 
-// nonDashLiteralPresent reports whether words holds at least one literal
-// non-dash word — an explicit operand (a NAME or NAME=value list) rather
-// than an option.
-func nonDashLiteralPresent(words []*syntax.Word) bool {
+// allLiteralNames reports whether words is a non-empty run of literal
+// non-dash words — a provable NAME list for an env-source write. Any dash
+// word or non-literal makes the list unprovable (the word could be an
+// option, or an option's operand posing as a name).
+func allLiteralNames(words []*syntax.Word) bool {
+	if len(words) == 0 {
+		return false
+	}
 	for _, word := range words {
-		if literal, ok := launcherLiteralWord(word); ok && !strings.HasPrefix(literal, "-") {
-			return true
+		literal, ok := launcherLiteralWord(word)
+		if !ok || strings.HasPrefix(literal, "-") {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+// dbusWriteProvablyNamed applies the same provable-name rule to dbus's
+// whole argv: every word must be a NAME, or one of dbus's documented
+// no-operand flags (--systemd, --verbose). `--all`, an unknown spelling,
+// or no names at all make the write unprovable — it refuses.
+func dbusWriteProvablyNamed(words []*syntax.Word) bool {
+	named := false
+	for _, word := range words {
+		literal, ok := launcherLiteralWord(word)
+		if !ok {
+			return false
+		}
+		if strings.HasPrefix(literal, "-") {
+			if literal != "--systemd" && literal != "--verbose" {
+				return false
+			}
+			continue
+		}
+		named = true
+	}
+	return named
 }
 
 // sudoPreservesEnvironment reports sudo's env-preservation state:
@@ -459,7 +536,7 @@ func nonDashLiteralPresent(words []*syntax.Word) bool {
 // invocation reads as a reset and over-refuses, the safe direction.
 func sudoPreservesEnvironment(words []*syntax.Word) (map[string]struct{}, bool) {
 	var preserved map[string]struct{}
-	for _, literal := range launcherOwnOptionLiterals(words, sudoOperandOptions) {
+	for _, literal := range launcherOwnOptionLiterals(words, sudoOperandOptions, sudoFlags) {
 		if literal == "-E" || literal == "--preserve-env" {
 			return nil, true
 		}

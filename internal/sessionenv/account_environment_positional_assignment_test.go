@@ -743,16 +743,34 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"systemctl --user unset-environment", true},
 		{"systemctl --user set-environment", true},
 		{"systemctl --user import-environment FOO", false},
+		// The name list must be PROVABLE: every word after the writer
+		// subcommand must be a literal non-dash word, because an option's
+		// operand (`-H host`) is not an import name — a bulk import slips
+		// through when `host` is counted as one (Codex P1). Operand
+		// options before the subcommand leave it nameless too, and a
+		// trailing flag can't be proven not to carry an operand.
+		{"systemctl -H host import-environment", true},
+		{"systemctl import-environment -H host", true},
+		{"systemctl import-environment -H host FOO", true},
+		{"systemctl --host host import-environment", true},
+		{"systemctl set-environment FOO=1 --no-block", true},
+		{"systemctl --user import-environment FOO BAR", false},
+		{"systemctl -H host import-environment FOO", false},
 		{"dbus-update-activation-environment CODEX_HOME=/o", true},
 		{"dbus-update-activation-environment --systemd CODEX_HOME", true},
 		{"dbus-update-activation-environment DISPLAY WAYLAND_DISPLAY", false},
 		// --all copies the caller's entire environment into the shared
 		// activation block; an operand-less call carries no name list to
-		// verify (Codex P1, bulk import).
+		// verify (Codex P1, bulk import). dbus's no-operand flags
+		// (--systemd, --verbose) are provable, so they pass through; any
+		// other dash word can't be proven not to carry an operand.
 		{"dbus-update-activation-environment --all", true},
 		{"dbus-update-activation-environment --all --systemd", true},
 		{"dbus-update-activation-environment", true},
 		{"dbus-update-activation-environment --systemd", true},
+		{"dbus-update-activation-environment --systemd DISPLAY", false},
+		{"dbus-update-activation-environment --verbose", true},
+		{"dbus-update-activation-environment --foo DISPLAY", true},
 		{"nohup systemctl --user set-environment CODEX_HOME=/o", true},
 		{"prog systemctl --user set-environment CODEX_HOME=/o", true},
 		{"prog dbus-update-activation-environment CODEX_HOME=/o", true},
@@ -808,6 +826,31 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"sudo -E -- codex", false},
 		{"sudo -u root -E codex", false},
 		{"sudo -E make", false},
+		// A preservation flag counts only when PROVABLY sudo's own: a
+		// clustered operand (`-uroot`) or a getopt_long abbreviation
+		// (`--us` = --user, `--pro` = --prompt) can consume a following
+		// -E as its operand, so the first unrecognized option word ends
+		// the trusted region and sudo reads as resetting (Codex P1) —
+		// over-refusing `sudo -uroot -E codex`, which real sudo treats
+		// as preserved. Known no-operand flags and `=`-joined operands
+		// are provable, so `-n -E` and `--user=root -E` still admit.
+		{"sudo -uroot -E codex", true},
+		{"sudo -uroot codex", true},
+		{"sudo --us root -E codex", true},
+		{"sudo --pro -E codex", true},
+		{"sudo -vE codex", true},
+		{"sudo -n -E codex", false},
+		{"sudo -b -E codex", false},
+		{"sudo --user=root -E codex", false},
+		{"sudo --prompt=x -E codex", false},
+		{"sudo --login-class -E codex", true},
+		// systemd-run reads the same way: an `=`-joined operand is
+		// provably complete so --scope after it still counts, but an
+		// abbreviation that could consume --scope ends the region.
+		{"systemd-run --setenv=FOO=1 --scope codex", false},
+		{"systemd-run --unit=u --scope codex", false},
+		{"systemd-run --pro FOO --scope codex", true},
+		{"systemd-run --foo --scope codex", true},
 		{"systemd-run --user --pty codex", true},
 		{"systemd-run --user --pty make", false},
 		{"systemd-run --scope codex", false},
