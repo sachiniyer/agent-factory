@@ -5,21 +5,25 @@
 // directory (about 49 MB — the af binary plus the policy) that no cleanup
 // handle ever reaches.
 //
-// The pass only ever removes what three proofs leave over:
+// The pass only ever removes what four proofs leave over:
 //
 //   - A dir whose base name a live session record still claims (the record's
 //     StagingDir field) is kept — the teardown handle owns it.
 //   - A dir whose slug belongs to a live or still-provisioning session is
 //     kept — the mid-create window has a staged dir with no record yet, and
 //     `docker run` may not have bound it yet either.
-//   - A dir is removed only when no container labelled af.session=<its slug>
-//     AND af.home=<this home> exists in any state. A listed container is the
-//     precise "a container that binds it might still exist" answer: same slug
-//     is the only label a binding container can carry, and a stopped
-//     container still holds the bind across a restart. When the listing
-//     cannot be made — no docker CLI, an unresolvable selector, a failed ps,
-//     an engine that moved mid-pass — the pass proved nothing and removes
-//     nothing.
+//   - A dir is removed only on the engine that created it: provisioning
+//     records the resolved `docker info` ID beside the staged payload, and a
+//     candidate whose marker is missing, malformed, or names a different
+//     engine is kept — a container binding it could live where this engine's
+//     listing cannot see it. An unreachable engine proves nothing either:
+//     the whole pass is Unlisted and removes nothing.
+//   - On the recorded (current) engine, a dir is removed only when no
+//     container labelled af.session=<its slug> AND af.home=<this home> exists
+//     in any state. A listed container is the precise "a container that binds
+//     it might still exist" answer: same slug is the only label a binding
+//     container can carry, and a stopped container still holds the bind
+//     across a restart.
 package session
 
 import (
@@ -197,6 +201,11 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 			result.Skipped++
 		case protectedSlugs[c.slug]:
 			result.Skipped++
+		case !stagingEngineMatches(root, c.name, engineID):
+			// Unrecorded, malformed, or different-engine: the current
+			// listing says nothing about whether a container still binds
+			// this dir on the engine that created it — keep it.
+			result.Skipped++
 		case containerSlugs[c.slug]:
 			result.Skipped++
 		default:
@@ -219,4 +228,31 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 			result.Listed, result.Reaped, result.Skipped, result.Errors)
 	}
 	return result
+}
+
+// stagingEngineMatches reports whether the dir's recorded engine identity —
+// the marker recordStagingEngine wrote at creation — names the engine this
+// pass listed. Only then does the listing prove anything about this dir: no
+// marker (a legacy dir, or a provision that staged before the engine
+// resolved), a malformed one, or a different engine each mean a container
+// binding it could live where this listing cannot see. Every non-match logs
+// why the dir is kept.
+func stagingEngineMatches(root *os.Root, name, engineID string) bool {
+	raw, err := root.ReadFile(filepath.Join(name, dockerStagingEngineFileName))
+	if err != nil {
+		log.InfoLog.Printf("staging dir sweep: keeping %s: no recorded engine — a container binding it could exist where this listing cannot see (%v)", name, err)
+		return false
+	}
+	recorded := strings.TrimSpace(string(raw))
+	// The same shape currentDockerEngineID enforces on a live answer: one
+	// field, bounded length. A torn or tampered marker fails here and keeps.
+	if recorded == "" || len(recorded) > 256 || len(strings.Fields(recorded)) != 1 {
+		log.InfoLog.Printf("staging dir sweep: keeping %s: malformed recorded engine %q", name, recorded)
+		return false
+	}
+	if recorded != engineID {
+		log.InfoLog.Printf("staging dir sweep: keeping %s: created on engine %q, not the listed engine %q — a container binding it could still exist there", name, recorded, engineID)
+		return false
+	}
+	return true
 }

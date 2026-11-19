@@ -468,12 +468,26 @@ func (p *dockerProvisioner) deliverPayload() error {
 	return nil
 }
 
+// dockerStagingEngineFileName is the marker provisioning writes inside each
+// staging dir naming the engine identity (`docker info` .ID) the provision
+// resolved before staging — the same engine `docker run` targets. The orphan
+// sweep (#7590) may only reclaim a dir on the engine that created it: a dir
+// with no marker, a malformed one, or one naming a different engine is kept,
+// because a container binding it could still exist where the current listing
+// cannot see it.
+const dockerStagingEngineFileName = "engine-id"
+
 // dockerStagingDir is the per-session staging root beneath the AF home: mode
 // 0700, unique per provision, removed on reap. The unique suffix keeps two
 // projects that share a session title from colliding, and makes a leftover
 // directory identifiable rather than ambiguous. The leaf is created with an
 // EXCLUSIVE os.Mkdir: a pre-existing leaf is collision or residue, so a fresh
 // suffix is tried rather than silently sharing or reusing a directory.
+//
+// The engine marker is best-effort: provisionSteps resolves p.engineID before
+// staging begins, so a write names the engine that will run the container. A
+// failed write degrades the dir to "unrecorded" — the sweep keeps it — rather
+// than failing a provision whose payload staging would have succeeded.
 func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 	afHome, err := config.GetConfigDir()
 	if err != nil {
@@ -492,6 +506,7 @@ func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 		err := os.Mkdir(dir, 0o700)
 		switch {
 		case err == nil:
+			p.recordStagingEngine(dir)
 			return dir, nil
 		case os.IsExist(err):
 			continue
@@ -500,6 +515,18 @@ func (p *dockerProvisioner) dockerStagingDir() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("backend=docker: cannot create the session staging dir under %s: every candidate name already exists", root)
+}
+
+// recordStagingEngine writes the engine marker beside the staged payload. An
+// empty engineID — a caller that staged before the engine was resolved —
+// records nothing, which the sweep reads as unrecorded and keeps.
+func (p *dockerProvisioner) recordStagingEngine(dir string) {
+	if p.engineID == "" {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, dockerStagingEngineFileName), []byte(p.engineID+"\n"), 0o600); err != nil {
+		log.WarningLog.Printf("docker runtime: cannot record the engine identity beside staging dir %s; the orphan sweep will keep it as unrecorded: %v", dir, err)
+	}
 }
 
 // stageContainerPayload copies every file af owns into the staging dir with the

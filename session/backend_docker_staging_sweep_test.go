@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,7 +17,8 @@ import (
 // stagingSweepTestRoot creates a temp AF home with a docker-staging root and
 // returns the root path plus a helper that mints a staged-payload dir of the
 // shape dockerStagingDir produces (<slug>-<8 lowercase hex>) with the two
-// files stageContainerPayload writes.
+// files stageContainerPayload writes. Tests add the engine marker explicitly
+// via stagingMarkEngine, since the marker is what lets the sweep reclaim.
 func stagingSweepTestRoot(t *testing.T) (root string, mk func(name string) string) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
@@ -31,6 +33,13 @@ func stagingSweepTestRoot(t *testing.T) (root string, mk func(name string) strin
 		require.NoError(t, os.WriteFile(filepath.Join(d, "af-policy.json"), []byte("{}"), 0o644))
 		return d
 	}
+}
+
+// stagingMarkEngine writes the dir's recorded-engine marker, as
+// recordStagingEngine does at provision.
+func stagingMarkEngine(t *testing.T, dir, engineID string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, dockerStagingEngineFileName), []byte(engineID+"\n"), 0o600))
 }
 
 // stagingSweepDockerEnv arms the docker seams the sweep consults: a present
@@ -61,14 +70,16 @@ func stagingSweepDockerEnv(t *testing.T, engineIDs []string, psListing string, p
 }
 
 // TestStagingSweepReclaimsOrphanedDir is the #7590 property: a staging dir no
-// live session record names — and no same-slug container exists to bind it —
-// is reclaimed, contents and all. It is the exit a daemon killed between
-// staging and the first persisted record leaves behind.
+// live session record names — recorded on this engine, and no same-slug
+// container exists to bind it — is reclaimed, contents and all. It is the
+// exit a daemon killed between staging and the first persisted record leaves
+// behind.
 func TestStagingSweepReclaimsOrphanedDir(t *testing.T) {
 	root, mk := stagingSweepTestRoot(t)
 	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
 
 	orphan := mk("dead-session-1a2b3c4d")
+	stagingMarkEngine(t, orphan, "engine-1")
 	SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	_, err := os.Stat(orphan)
@@ -116,7 +127,9 @@ func TestStagingSweepKeepsContainerBoundSlug(t *testing.T) {
 	stagingSweepDockerEnv(t, []string{"engine-1"}, "cid-1\tbound-sess\n", nil)
 
 	bound := mk("bound-sess-55667788")
+	stagingMarkEngine(t, bound, "engine-1")
 	unrelated := mk("other-sess-99aabbcc")
+	stagingMarkEngine(t, unrelated, "engine-1")
 	SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	_, err := os.Stat(bound)
@@ -133,6 +146,7 @@ func TestStagingSweepUnlistedWhenListingFails(t *testing.T) {
 	stagingSweepDockerEnv(t, []string{"engine-1"}, "", fmt.Errorf("Cannot connect to the Docker daemon"))
 
 	candidate := mk("maybe-bound-deadbeef")
+	stagingMarkEngine(t, candidate, "engine-1")
 	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	assert.True(t, got.Unlisted, "a failed listing is an unproven pass, not an empty one")
@@ -149,6 +163,7 @@ func TestStagingSweepUnlistedWithoutDockerCLI(t *testing.T) {
 	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "", fmt.Errorf("not found") }))
 
 	candidate := mk("maybe-bound-cafebabe")
+	stagingMarkEngine(t, candidate, "engine-1")
 	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	assert.True(t, got.Unlisted)
@@ -165,12 +180,94 @@ func TestStagingSweepUnlistedOnMovedEngine(t *testing.T) {
 	stagingSweepDockerEnv(t, []string{"engine-a", "engine-b"}, "", nil)
 
 	candidate := mk("maybe-bound-0badf00d")
+	stagingMarkEngine(t, candidate, "engine-a")
 	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 	assert.True(t, got.Unlisted, "a listing that may have come from another engine proves nothing")
 	assert.Empty(t, got.EngineID)
 	_, err := os.Stat(candidate)
 	assert.NoError(t, err)
+}
+
+// TestStagingSweepKeepsUnrecordedDir is the Codex P1's deletion direction: a
+// dir with no engine marker — a legacy dir from before the marker existed,
+// or a provision that staged before the engine resolved — is kept, because
+// the current engine's "not found" says nothing about another engine's
+// containers.
+func TestStagingSweepKeepsUnrecordedDir(t *testing.T) {
+	_, mk := stagingSweepTestRoot(t)
+	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
+
+	legacy := mk("old-attempt-11aa22bb")
+	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+	assert.Equal(t, 0, got.Reaped)
+	_, err := os.Stat(legacy)
+	assert.NoError(t, err, "an unrecorded staging dir is kept, not swept")
+}
+
+// TestStagingSweepKeepsDifferentEngineDir: a dir whose marker names another
+// engine is kept — the listing only proves the CURRENT engine's containers,
+// and a container binding it could still exist where it was created.
+func TestStagingSweepKeepsDifferentEngineDir(t *testing.T) {
+	_, mk := stagingSweepTestRoot(t)
+	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
+
+	foreign := mk("other-engine-33cc44dd")
+	stagingMarkEngine(t, foreign, "engine-elsewhere")
+	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+	assert.Equal(t, 0, got.Reaped)
+	_, err := os.Stat(foreign)
+	assert.NoError(t, err, "a dir recorded on a different engine is kept")
+}
+
+// TestStagingSweepKeepsMalformedMarkerDir: a marker that is not one bounded
+// token — torn, tampered, or empty — is unrecorded for the sweep's purposes
+// and keeps the dir.
+func TestStagingSweepKeepsMalformedMarkerDir(t *testing.T) {
+	_, mk := stagingSweepTestRoot(t)
+	stagingSweepDockerEnv(t, []string{"engine-1"}, "", nil)
+
+	for _, tc := range []struct{ name, content string }{
+		{"torn-55ee66ff", "engine-1 extra-words\n"},
+		{"empty-77aa88bb", ""},
+		{"oversize-99bbccdd", strings.Repeat("e", 300) + "\n"},
+	} {
+		d := mk(tc.name)
+		require.NoError(t, os.WriteFile(filepath.Join(d, dockerStagingEngineFileName), []byte(tc.content), 0o600))
+	}
+	got := SweepOrphanedStagingDirs("/test/home", nil, nil)
+
+	assert.Equal(t, 0, got.Reaped)
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	for _, name := range []string{"torn-55ee66ff", "empty-77aa88bb", "oversize-99bbccdd"} {
+		_, err := os.Stat(filepath.Join(home, dockerStagingDirName, name))
+		assert.NoError(t, err, "%s: a malformed marker is kept", name)
+	}
+}
+
+// TestDockerStagingDirRecordsEngineMarker: provisioning records the resolved
+// engine identity beside the staged payload — the same `docker info` ID the
+// cleanup record carries — so a later sweep can prove it is acting on the
+// engine that created the dir. A provision that staged before the engine was
+// resolved writes nothing, and the dir stays unrecorded (kept).
+func TestDockerStagingDirRecordsEngineMarker(t *testing.T) {
+	stagingTestEnv(t)
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "eng sess"}, engineID: "engine-resolved"}
+	dir, err := p.dockerStagingDir()
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(filepath.Join(dir, dockerStagingEngineFileName))
+	require.NoError(t, err, "the engine marker must be written beside the staged payload")
+	assert.Equal(t, "engine-resolved\n", string(raw))
+
+	p2 := &dockerProvisioner{spec: ProvisionSpec{Title: "early sess"}}
+	dir2, err := p2.dockerStagingDir()
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(dir2, dockerStagingEngineFileName))
+	assert.True(t, os.IsNotExist(err), "no engine resolved yet: nothing recorded")
 }
 
 // TestStagingSweepLeavesNonCandidates: names af never mints — a stray
@@ -186,6 +283,7 @@ func TestStagingSweepLeavesNonCandidates(t *testing.T) {
 	require.NoError(t, os.MkdirAll(badSlug, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "loose-file"), []byte("x"), 0o644))
 	orphan := mk("gone-87654321")
+	stagingMarkEngine(t, orphan, "engine-1")
 
 	SweepOrphanedStagingDirs("/test/home", nil, nil)
 
