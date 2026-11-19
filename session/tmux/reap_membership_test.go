@@ -464,10 +464,11 @@ func TestAFDaemonClassOnDarwinUsesTheKernelTaskNameForLaunchd(t *testing.T) {
 const afDaemonSleepEnv = "AF_TEST_AFDAEMON_SLEEP"
 
 // #7491 item 1 — the claim and the attestation are different verdicts. A
-// daemon placement that authorizes a close must rest on identity the
-// carrier cannot write: argv CLAIMS, and a process can write argv
+// daemon placement that authorizes a close must rest on identity a bare
+// claim cannot fake: argv CLAIMS, and a process can write argv
 // (`exec -a af … --daemon`), while the kernel-attested executable's Go
-// build info either names this module or does not.
+// build info either names this module or does not. A same-uid process can
+// still attest by exec'ing a real af build — out of scope (#7561).
 //
 //   - VERIFIED: the test binary itself — a real af-module build — running
 //     af-daemon argv attests at whatever path it was built to (the #7484

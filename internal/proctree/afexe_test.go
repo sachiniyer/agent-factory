@@ -17,8 +17,8 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 )
 
-// The verdict afDaemonClass may place on rests on identity the carrier
-// cannot write: this test binary is itself a real af-module build, so it
+// The verdict afDaemonClass may place on rests on identity a bare claim
+// cannot fake: this test binary is itself a real af-module build, so it
 // attests at whatever path it was compiled to (#7491).
 func TestExeAttestsAFVerifiesThisBinaryAtItsPath(t *testing.T) {
 	self, err := Lookup(os.Getpid())
