@@ -262,6 +262,22 @@ func splitNamedBraceAlts(s string) []string {
 // unterminated `[` matches everything: a pattern the matcher cannot
 // read could be the name. `co[[:alpha:]]ex` therefore matches codex.
 func globOverMatch(pattern, name string, b *reachBudget) bool {
+	return globMatchCore(pattern, name, false, b)
+}
+
+// globCouldCarryPrefix reports whether pattern could produce a string
+// that STARTS WITH prefix — the word glob expansion produces then
+// carries its operand attached, the way a single-dash hidden option
+// takes `-Eexpr`. Any leftover pattern atom produces some (possibly
+// empty) suffix, so exhausting the name mid-pattern is a match.
+func globCouldCarryPrefix(pattern, prefix string, b *reachBudget) bool {
+	return globMatchCore(pattern, prefix, true, b)
+}
+
+// globMatchCore is the shared over-approximating matcher behind
+// globOverMatch and globCouldCarryPrefix; prefixMode accepts the match
+// when the name runs out with pattern atoms still to consume.
+func globMatchCore(pattern, name string, prefixMode bool, b *reachBudget) bool {
 	for i := 0; i < len(pattern); i++ {
 		if pattern[i] != '[' {
 			continue
@@ -292,7 +308,7 @@ func globOverMatch(pattern, name string, b *reachBudget) bool {
 		case pattern[i] == '*':
 			res = match(i+1, j) || (j < len(name) && match(i, j+1))
 		case j == len(name):
-			res = false
+			res = prefixMode
 		case pattern[i] == '?' || pattern[i] == '[':
 			next := i + 1
 			if pattern[i] == '[' {
@@ -596,12 +612,12 @@ func namedLiteralVerdict(literal string, last, decode bool, launcher string, nam
 	// payload spellings classify the normalized form alongside the
 	// raw one.
 	verdict := namedWordVerdict{
-		refuse: literalNamesHiddenInput(literal, launcher) ||
-			literalNamesHiddenInput(normalized, launcher) ||
-			(raw != literal && literalNamesHiddenInput(raw, launcher)),
-		payload: literalSpellsTailPayload(literal, launcher) ||
-			literalSpellsTailPayload(normalized, launcher) ||
-			(raw != literal && literalSpellsTailPayload(raw, launcher)),
+		refuse: literalNamesHiddenInput(literal, launcher, b) ||
+			literalNamesHiddenInput(normalized, launcher, b) ||
+			(raw != literal && literalNamesHiddenInput(raw, launcher, b)),
+		payload: literalSpellsTailPayload(literal, launcher, b) ||
+			literalSpellsTailPayload(normalized, launcher, b) ||
+			(raw != literal && literalSpellsTailPayload(raw, launcher, b)),
 	}
 	if verdict.refuse {
 		return verdict

@@ -188,7 +188,7 @@ func singleDashOption(word string) bool {
 // launcher — it errors — so only a hidden-only prefix refuses. For
 // single-dash hidden spellings the operand attaches in-word (`-Eexpr`),
 // which for pwsh goes through the `:` cut instead.
-func literalNamesHiddenInput(literal, launcher string) bool {
+func literalNamesHiddenInput(literal, launcher string, b *reachBudget) bool {
 	hidden := namedLauncherHiddenWords[launcher]
 	if literal == "-" {
 		return slices.Contains(hidden, "-") // the stdin marker
@@ -203,6 +203,14 @@ func literalNamesHiddenInput(literal, launcher string) bool {
 	// optionWordBody.
 	wordAttach := launcher != "pwsh" &&
 		strings.HasPrefix(literal, "-") && !strings.HasPrefix(literal, "--")
+	if strings.ContainsAny(body, "*?[{") {
+		// A glob- or brace-carrying body resolves AT the launcher:
+		// pathname expansion runs before the launcher sees argv, so
+		// the option name is whatever the produced word spells. Any
+		// producible hidden spelling counts, and a metachar body is
+		// never an exact or plain-prefix spelling itself.
+		return globBodyNamesHidden(body, launcher, hidden, wordAttach, b)
+	}
 	ambiguous := false
 	for _, known := range namedLauncherNonHiddenNames[launcher] {
 		knownBody := optionTableBody(known, launcher)
@@ -238,13 +246,81 @@ func literalNamesHiddenInput(literal, launcher string) bool {
 	return false
 }
 
+// globBodyNamesHidden reports whether a glob- or brace-carrying option
+// body could produce a spelling the launcher resolves as hidden input —
+// the expansion runs before the launcher sees argv, so any producible
+// spelling counts: a full hidden name, a prefix the launcher would
+// complete (one no visible option also claims — `e[x]` could make `ex`
+// for -ExecutionPolicy, which resolves visible), or a single-dash
+// hidden option carrying its operand attached. An unfinished brace
+// expansion is unprovable — it could spell hidden input.
+func globBodyNamesHidden(body, launcher string, hidden []string, wordAttach bool, b *reachBudget) bool {
+	variants, finished := namedPieceVariants(body, b)
+	if !finished {
+		return true
+	}
+	for _, v := range variants {
+		for _, word := range hidden {
+			hb := optionTableBody(word, launcher)
+			if hb == "" {
+				continue
+			}
+			if globOverMatch(v, hb, b) {
+				return true
+			}
+			for k := 1; k < len(hb); k++ {
+				cand := hb[:k]
+				if globOverMatch(v, cand, b) && !bodySpellsVisiblePrefix(cand, launcher) {
+					return true
+				}
+			}
+			if wordAttach && singleDashOption(word) &&
+				globCouldCarryPrefix(v, hb, b) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bodySpellsVisiblePrefix reports whether cand is a prefix of a
+// documented non-hidden option name for the launcher — the same
+// ambiguity the plain-body check resolves by admitting.
+func bodySpellsVisiblePrefix(cand, launcher string) bool {
+	for _, known := range namedLauncherNonHiddenNames[launcher] {
+		if strings.HasPrefix(optionTableBody(known, launcher), cand) {
+			return true
+		}
+	}
+	return false
+}
+
 // literalSpellsTailPayload reports whether literal spells a payload
 // (command-string) option word for the launcher — the same canonical
 // body form the hidden-input check uses, so `–c`, `/Command` and
-// `-com` resolve like the plain spelling does.
-func literalSpellsTailPayload(literal, launcher string) bool {
+// `-com` resolve like the plain spelling does. A glob- or
+// brace-carrying body classifies by what it could produce: a payload
+// name or a prefix of one.
+func literalSpellsTailPayload(literal, launcher string, b *reachBudget) bool {
 	body, ok := optionWordBody(literal, launcher)
 	if !ok {
+		return false
+	}
+	if strings.ContainsAny(body, "*?[{") {
+		variants, finished := namedPieceVariants(body, b)
+		if !finished {
+			return true
+		}
+		for _, v := range variants {
+			for _, word := range namedLauncherTailPayloadWords[launcher] {
+				payloadBody := optionTableBody(word, launcher)
+				for k := len(payloadBody); k >= 1; k-- {
+					if globOverMatch(v, payloadBody[:k], b) {
+						return true
+					}
+				}
+			}
+		}
 		return false
 	}
 	for _, word := range namedLauncherTailPayloadWords[launcher] {

@@ -520,9 +520,11 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
     so it admits (`-ex` is -ExecutionPolicy, nix `-i` is
     --ignore-environment) — the same refusal class `sh -s` gets. The
     classification runs on EVERY reading of the word — `-en""c` is the
-    `-enc` the downstream shell sees — and a command-string flag left
-    with no operand is that same stdin feed (`pwsh -Command`, `nu -c`
-    alone);
+    `-enc` the downstream shell sees — a glob- or brace-carrying body
+    classifies by what pathname expansion could produce (`-EncodedComman
+    [d]` can land `-EncodedCommand`; `-ex[ec]` cannot land a hidden
+    spelling and admits) — and a command-string flag left with no
+    operand is that same stdin feed (`pwsh -Command`, `nu -c` alone);
 
   A launcher that hands its tail argv to a shell as ONE joined string
   (watch by default, ssh's remote command, tmux's and machinectl's

@@ -1247,6 +1247,26 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch pwsh '-Command' x`, false},
 		{`watch '-enc' x`, false},
 		{`ssh host 'echo hi there'`, false},
+		// An option body carrying glob or brace syntax
+		// classifies by what pathname expansion could
+		// produce — a hidden name, a prefix the launcher
+		// completes, or a single-dash hidden option with
+		// its operand attached.
+		{`watch 'pwsh -EncodedComman[d] x'`, true},
+		{`watch 'pwsh -EncodedComm*'`, true},
+		{`watch 'pwsh -enc[abc] x'`, true},
+		{`watch 'pwsh -e[nc] x'`, true},
+		{`watch 'pwsh -en{,co}dedcommand x'`, true},
+		{`watch 'pwsh -EncodedComm?nd x'`, true},
+		{`watch 'pwsh -Comman[d]'`, true},
+		{`watch 'nix -E[x] foo'`, true},
+		{`watch 'nix --exp[r] x'`, true},
+		{`watch 'nix --arg-from-stdi[n]'`, true},
+		{`watch 'nu --stdi[n]'`, true},
+		{`watch 'pwsh -ex[ec] x'`, false},
+		{`watch 'pwsh -h[elp]'`, false},
+		{`watch 'nix -j[0-9] make'`, false},
+		{`watch 'pwsh -CommandWithArg[s] x'`, false},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state
