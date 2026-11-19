@@ -57,7 +57,15 @@ type AccountSwapData struct {
 	// the carried conversation. A committed carry whose replacement then has
 	// to be launched again gives up on the resume rather than retrying it
 	// forever: the new account may be unable to run it.
-	CarriedLaunchStarted    bool                 `json:"carried_launch_started,omitempty"`
+	CarriedLaunchStarted bool `json:"carried_launch_started,omitempty"`
+	// LaunchedConversationID binds the replacement's started-panes proof to
+	// the id the panes started on: markAccountSwapReplacementPanesStarted
+	// stamps ConversationID there when they spawn (CarriedConversationID for
+	// a carried swap). A committed re-launch's blind store verdict may resume
+	// only that id — a committed id reminted after the launch carries no such
+	// proof (#7596 review). Empty on records written before the field; those
+	// keep the as-before start on the id.
+	LaunchedConversationID  string               `json:"launched_conversation_id,omitempty"`
 	ReplacementPanesStarted bool                 `json:"replacement_panes_started,omitempty"`
 	MissionDeliveryStatus   PromptDeliveryStatus `json:"mission_delivery_status,omitempty"`
 	// MissionDeliveryAttemptAt is the send-attempt instant that produced

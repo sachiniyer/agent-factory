@@ -350,6 +350,38 @@ func TestCommittedSwapRelaunchStartsOnItsIDWhenNoFirstLaunchRan(t *testing.T) {
 		"a start on the committed id is no blind resume")
 }
 
+// The started-panes proof binds the id the panes started on, not the record's
+// current one (#7596 review): a committed id reminted for staleness after the
+// first launch has never itself launched — a later blind retry must not
+// --resume it, for nothing of it is filed; it starts on its id, where a real
+// first launch would file it.
+func TestCommittedSwapRelaunchStartsOnAnIDRemintedAfterTheLaunch(t *testing.T) {
+	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	inst.SetAccountSwapReplacementPanesStartedForTest(true)
+	fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Hour))
+	fileClaudeTranscript(t, target, worktree, newerConversationID, time.Now().Add(-time.Minute))
+
+	first := relaunchPlan(t, inst)
+	reminted := sessionIDArg.FindStringSubmatch(first.program)
+	require.NotNil(t, reminted, "a stale conversation remints: %s", first.program)
+	require.NotEqual(t, committed, reminted[1])
+	pending := inst.ToInstanceData().PendingAccountSwap
+	require.Equal(t, reminted[1], pending.ConversationID)
+	require.Equal(t, committed, pending.LaunchedConversationID,
+		"precondition: the launch proof still names the id the panes started on")
+
+	wedgeStoreListing(t, target)
+	plan := withinBound(t, func() *accountSwapLaunchPlan { return relaunchPlan(t, inst) })
+	require.NotRegexp(t, resumeArg, plan.program,
+		"nothing of the reminted id was ever filed: --resume exits at launch (%s)", plan.program)
+	match := sessionIDArg.FindStringSubmatch(plan.program)
+	require.NotNil(t, match, "as a first launch of it does: %s", plan.program)
+	require.Equal(t, reminted[1], match[1])
+	require.NotEqual(t, blindCommittedResumeReason,
+		inst.ToInstanceData().PendingAccountSwap.CarryFallback,
+		"a start on a never-launched id is no blind resume")
+}
+
 // A store af cannot even name says nothing about the id: the re-launch starts
 // on it, as the first launch did (#7596). The committed record's target is
 // registered while the record lives, so the seam is reached the way a

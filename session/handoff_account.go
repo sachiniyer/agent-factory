@@ -899,8 +899,24 @@ func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time,
 func (i *Instance) SetAccountSwapReplacementPanesStartedForTest(started bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.pendingAccountSwap != nil && i.pendingAccountSwap.ReplacementPanesStarted != started {
-		i.pendingAccountSwap.ReplacementPanesStarted = started
+	pending := i.pendingAccountSwap
+	if pending == nil {
+		return
+	}
+	// The started flag and the launched-id proof move together the way
+	// markAccountSwapReplacementPanesStarted writes them: seeding started
+	// panes claims the recorded conversation launched; unseeding claims none
+	// did (#7596).
+	launched := ""
+	if started {
+		launched = pending.ConversationID
+		if launched == "" {
+			launched = pending.CarriedConversationID
+		}
+	}
+	if pending.ReplacementPanesStarted != started || pending.LaunchedConversationID != launched {
+		pending.ReplacementPanesStarted = started
+		pending.LaunchedConversationID = launched
 		i.touchLocked()
 	}
 }

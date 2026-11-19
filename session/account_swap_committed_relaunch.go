@@ -44,11 +44,12 @@ const blindCommittedResumeReason = "its transcript store could not be listed, " 
 // listing is judged again — a still-wedged mount's timed-out flights are
 // latched, so the retry answers at once inside the bound the first judge
 // already spent, and only a store that recovered pays a fresh bound — and if
-// the listing stays blind the record decides: it says the first launch ran
-// (ReplacementPanesStarted), so id's transcript is filed and --resume is the
-// blind answer that boots, where a second --session-id id never boots;
+// the listing stays blind the record decides: it proves the first launch ran
+// on id (LaunchedConversationID), so id's transcript is filed and --resume is
+// the blind answer that boots, where a second --session-id id never boots;
 // blindResumed reports this so the record and the notice can say it. A record
-// whose panes never started describes no filing, so it, too, starts on id.
+// whose launched id is another's — a remint that never launched, or panes
+// that never started — describes no filing of id, so it, too, starts on id.
 func (i *Instance) committedConversationLaunch(program, workDir, account, id string) (launch string, conversation AgentConversationData, reminted, blindResumed bool) {
 	launch, conversation = planLaunchConversation(id, program)
 	if !conversation.HasID() {
@@ -77,7 +78,7 @@ func (i *Instance) committedConversationLaunch(program, workDir, account, id str
 			}, false, false
 		}
 	}
-	if verdict == recordedClaudeBlind && nameable && i.replacementPanesStarted(account) {
+	if verdict == recordedClaudeBlind && nameable && i.committedConversationLaunched(account, id) {
 		if resumed, ok := tmux.ResumeProgramWithConversationID(program, tmux.ProgramClaude, id); ok {
 			return resumed, AgentConversationData{
 				Agent:       tmux.ProgramClaude,
@@ -101,14 +102,17 @@ func (i *Instance) claudeStoreNameable(program, workDir string) bool {
 	return err == nil && strings.TrimSpace(configDir) != "" && strings.TrimSpace(launchDir) != ""
 }
 
-// replacementPanesStarted reports whether the committed swap's durable record
-// says the replacement's panes were started — the first launch ran, so the
-// committed id's transcript is filed wherever the store kept it.
-func (i *Instance) replacementPanesStarted(account string) bool {
+// committedConversationLaunched reports whether the committed swap's durable
+// record proves the replacement's panes started on id — the launch proof a
+// blind re-launch may act on (#7596). A record whose panes never started, or
+// whose conversation was reminted after the launch, proves no filing of id:
+// the proof binds the id that launched (LaunchedConversationID), never a
+// committed id minted in its place (#7596 review).
+func (i *Instance) committedConversationLaunched(account, id string) bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	pending := i.pendingAccountSwap
-	return pending != nil && pending.To == account && pending.ReplacementPanesStarted
+	return pending != nil && pending.To == account && pending.LaunchedConversationID == id
 }
 
 // recordNamesAccount reports whether the record's account is account: the
