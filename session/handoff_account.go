@@ -143,6 +143,20 @@ func (i *Instance) SelectAccountForHandoff(from, name, target, effectiveAgent st
 	// under changed program_overrides, when neither the pane's (rewritten)
 	// program metadata nor a fresh resolution can still prove it (#4430 review).
 	i.pendingAccountSwap.AccountAgent = effectiveAgent
+	// The cross-agent verdict travels with the same transaction, so a
+	// re-render of the recorded mission after the live identity tiers the
+	// commit-time brief no longer reads — a /clear re-mint
+	// (refreshPendingManualAccountSwapMission) or a carry demotion — threads
+	// the same #4778 CrossAgent the daemon's commit-time build did, instead
+	// of re-deriving it from CurrentAgentName(). At that point the live
+	// identity may already answer the INCOMING runtime the checkpoint
+	// installed (a committed codex->claude swap is bound to claude by then),
+	// or be empty after teardown: the re-derivation would collapse From == To
+	// onto Render's same-agent branch and lie a carry was attempted across
+	// the agent boundary (agent-handoff D2), or fall off the same-agent gate
+	// (From == "" -> "It was being done by another agent"). Pinned at commit,
+	// the verdict is the one fact those tiers cannot move.
+	i.pendingAccountSwap.CrossAgent = crossAgent
 	return entry, nil
 }
 
