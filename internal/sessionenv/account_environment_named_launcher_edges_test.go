@@ -1134,6 +1134,16 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch 'bash -c "pwsh -enc x"'`, true},
 		{`watch 'pwsh -File x.ps1'`, false},
 		{`watch 'echo pwsh is a shell'`, false},
+		// Path-qualified launcher names — the name lookup
+		// matches on the normalized piece's basename with
+		// globs over-approximated, the same helper the
+		// agent name uses: `/usr/bin/pwsh`, `./pwsh` and
+		// `/usr/bin/pw[s]h` all read as pwsh.
+		{`watch '/usr/bin/pwsh -EncodedCommand x'`, true},
+		{`watch './pwsh -enc x'`, true},
+		{`watch '/usr/bin/pw[s]h -enc x'`, true},
+		{`ssh host '/usr/bin/pwsh -enc x'`, true},
+		{`watch '/usr/bin/pwsh -File x.ps1'`, false},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state

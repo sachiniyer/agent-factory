@@ -506,7 +506,11 @@ will not reach the child's environment.
   field of a nested tail) that IS a modelled launcher's name re-enters
   that launcher's own rule on the text after it — `watch 'pwsh
   -EncodedCommand …'` refuses exactly as a direct `pwsh -EncodedCommand`
-  does, at any depth, inside the same total work bound.
+  does, at any depth, inside the same total work bound. The name
+  lookup is the same one the agent name gets — the normalized piece's
+  path basename with globs over-approximated, so `/usr/bin/pwsh`,
+  `./pwsh`, `~/.local/bin/watch` and `/usr/bin/pw[s]h` all read as the
+  launcher.
 
   `gdbus` call operands are GVariant text decoded through their
   escapes before the piece check (`['CODEX\u005fHOME=/o']` still names

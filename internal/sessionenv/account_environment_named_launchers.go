@@ -81,10 +81,8 @@ func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{
 		return false
 	}
 	glob := strings.ContainsAny(piece, "*?[")
-	base := filepath.Base(piece)
 	for name := range names {
-		if textNamesIdentifierBoundary(piece, name) ||
-			(glob && (globOverMatch(piece, name) || globOverMatch(base, name))) {
+		if pieceCouldName(piece, name, glob) {
 			return true
 		}
 	}
@@ -95,12 +93,23 @@ func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{
 		if _, kept := preserved[configVar]; kept {
 			continue
 		}
-		if textNamesIdentifierBoundary(piece, agent) || base == agent ||
-			(glob && (globOverMatch(piece, agent) || globOverMatch(base, agent))) {
+		if pieceCouldName(piece, agent, glob) {
 			return true
 		}
 	}
 	return false
+}
+
+// pieceCouldName reports whether a piece could resolve to name — the
+// identifier-boundary check, the path basename, and (when the piece
+// carries glob syntax) the over-approximated pattern match on both.
+// Agent names and launcher names share this helper so the two lookups
+// cannot diverge.
+func pieceCouldName(piece, name string, glob bool) bool {
+	return textNamesIdentifierBoundary(piece, name) ||
+		filepath.Base(piece) == name ||
+		(glob && (globOverMatch(piece, name) ||
+			globOverMatch(filepath.Base(piece), name)))
 }
 
 // globOverMatch reports whether pattern — POSIX pathname expansion
@@ -252,15 +261,17 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 }
 
 // namedLauncherNameOf reports whether text spells a modelled launcher's
-// name, checking the normalized form too — `pw”sh` reads as pwsh to a
-// downstream shell.
+// name — pieceCouldName on the literal AND its normalized form, the
+// same lookup the agent name gets: `/usr/bin/pwsh`, `./pwsh`,
+// `~/.local/bin/watch` match on the basename, `pw”sh` normalizes to
+// pwsh, and `/usr/bin/pw[s]h` glob-matches it.
 func namedLauncherNameOf(text string) (string, bool) {
-	if _, named := accountNamedLauncherNames[text]; named {
-		return text, true
-	}
-	if flat := normalizeNamedLiteral(text); flat != text {
-		if _, named := accountNamedLauncherNames[flat]; named {
-			return flat, true
+	for _, form := range [2]string{text, normalizeNamedLiteral(text)} {
+		glob := strings.ContainsAny(form, "*?[")
+		for name := range accountNamedLauncherNames {
+			if pieceCouldName(form, name, glob) {
+				return name, true
+			}
 		}
 	}
 	return "", false
