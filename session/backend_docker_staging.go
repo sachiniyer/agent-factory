@@ -315,10 +315,11 @@ func (p *dockerProvisioner) refuseEnclosingRunArgsMounts() error {
 	// every repo mount's destination inside the image, and both sides are
 	// judged on the resolved paths. It only runs when repo mounts exist, so
 	// the common no-mount case never pays for an extra container. If
-	// resolution cannot be established (no shell, unreadable answer, a
-	// symlinked af leaf, or an unresolvable mount dest), the relationship to
-	// repo mounts cannot be established either — switch to guarded cp
-	// delivery rather than guessing.
+	// resolution cannot be established (no shell, an answer the frame
+	// cannot parse, a component the probe cannot verify — #7601 — or a
+	// symlinked af leaf), the relationship to repo mounts cannot be
+	// established either — switch to guarded cp delivery rather than
+	// guessing.
 	resolved, resMounts, leafLink, perr := p.probeResolvedDestinations(mounts)
 	if perr != nil || leafLink {
 		log.InfoLog.Printf("docker runtime: cannot resolve af's destination paths inside the image (probe=%v leaf-symlink=%v); delivering af's payload via `docker cp` after the mount-table check", perr, leafLink)
@@ -341,10 +342,14 @@ func (p *dockerProvisioner) refuseEnclosingRunArgsMounts() error {
 
 // probeResolvedDestinations runs a throwaway `docker run --rm <image> sh -c …`
 // resolving inside the image: each af destination's parent directory AND every
-// repo mount's destination (full `cd` resolution, falling back to parent+leaf
-// for not-yet-existing leaves and file destinations). Returns the resolved af
-// file destinations and the resolved mount destinations in mount order, plus
-// whether an af destination leaf is itself a symlink.
+// repo mount's destination. A destination that exists resolves by full `cd`;
+// a missing one resolves from its deepest existing ancestor with the
+// unresolved tail appended — but only past components the probe proves absent
+// or non-directory; anything unverifiable fails the destination instead
+// (#7601). Each destination resolves independently of the previous one's cwd.
+// Returns the resolved af file destinations and the resolved mount
+// destinations in mount order, plus whether an af destination leaf is itself
+// a symlink.
 func (p *dockerProvisioner) probeResolvedDestinations(mounts [][2]string) ([]string, []string, bool, error) {
 	dsts := p.stagingDestinations()
 	dirA := path.Dir(dsts[0])
@@ -363,7 +368,20 @@ func (p *dockerProvisioner) probeResolvedDestinations(mounts [][2]string) ([]str
 	// wrapper kills only the CLI and --rm needs the container to exit.
 	args := []string{"run", "--rm", "--label", dockerSessionLabel + "=" + Slugify(p.spec.Title),
 		"--entrypoint", dockerContainerShell, p.image, "-c",
-		`export PATH=/usr/sbin:/usr/bin:/sbin:/bin; { cd -- "$1" && pwd -P && printf '\0'; } || exit 3; { cd -- "$2" && pwd -P && printf '\0'; } || exit 3; for f in "$3" "$4"; do if [ -L "$f" ]; then printf '` + leafSymlinkMarker + `%s\n' "$f"; fi; done; printf '\0'; shift 4; for d in "$@"; do if cd -- "$d" 2>/dev/null; then pwd -P; elif cd -- "${d%/*}" 2>/dev/null; then printf '%s/%s\n' "$(cd -- "${d%/*}" && pwd -P)" "${d##*/}"; else printf '%s\n' '` + probeFailMarker + `'; fi; printf '\0'; done`}
+		// A destination that does not exist is resolved from its DEEPEST
+		// existing ancestor (#7601): probe walks up one component at a time
+		// until a cd succeeds, accumulating the stripped components, then
+		// answers ancestor-pwd + '/' + the unresolved tail. The walk may
+		// step up only past a component it PROVES absent or non-directory:
+		// a failed cd with no -e and no -L is ENOENT, and a failed cd on a
+		// non-directory is ENOTDIR. Anything else — an inaccessible
+		// directory (EACCES/EPERM), a symlink the probe cannot traverse
+		// (ELOOP or a dangling link), an I/O error — is unverifiable: a
+		// component af cannot see could be a symlink retargeting the mount
+		// onto an af destination, so the walk stops with AF-PROBE-FAIL and
+		// the guarded cp fallback stands. A probe that cannot shrink (a
+		// relative destination) fails the same way instead of looping.
+		`export PATH=/usr/sbin:/usr/bin:/sbin:/bin; { cd -- "$1" && pwd -P && printf '\0'; } || exit 3; { cd -- "$2" && pwd -P && printf '\0'; } || exit 3; for f in "$3" "$4"; do if [ -L "$f" ]; then printf '` + leafSymlinkMarker + `%s\n' "$f"; fi; done; printf '\0'; shift 4; for d in "$@"; do probe="$d"; rest=; while :; do if cd -- "$probe" 2>/dev/null; then if [ -n "$rest" ]; then printf '%s/%s\n' "$(pwd -P)" "$rest"; else pwd -P; fi; break; elif [ -L "$probe" ] || [ -d "$probe" ]; then printf '%s\n' '` + probeFailMarker + `'; break; fi; rest="${probe##*/}${rest:+/$rest}"; case "$probe" in */*) probe="${probe%/*}"; [ -n "$probe" ] || probe=/ ;; *) printf '%s\n' '` + probeFailMarker + `'; break ;; esac; done; printf '\0'; done`}
 	args = append(args, argv...)
 	out, err := p.docker(dockerShortStepTimeout, args...)
 	if err != nil {
@@ -715,9 +733,11 @@ func enclosingMountEntry(entries []mountEntry, p string) mountEntry {
 // points, which the resolved-parent + mount-table check cannot bound.
 const leafSymlinkMarker = "AF-LEAF-SYMLINK "
 
-// probeFailMarker is emitted for a repo mount destination that cannot be
-// resolved inside the image — the mount relationship then cannot be
-// established and bind delivery yields to the guarded cp fallback.
+// probeFailMarker is emitted for a repo mount destination the probe cannot
+// prove: a component it cannot inspect (an inaccessible directory, a symlink
+// it cannot traverse, an I/O error) or one that cannot shrink. The mount
+// relationship then cannot be established and bind delivery yields to the
+// guarded cp fallback.
 const probeFailMarker = "AF-PROBE-FAIL"
 
 // verifyWriteTargets proves every path af is about to `docker cp` into lands on
