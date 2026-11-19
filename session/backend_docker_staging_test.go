@@ -158,6 +158,19 @@ var dockerStagingProbeAnswer func(joined string) ([]byte, error)
 // the joined string loses.
 var dockerStagingProbeArgs func(args []string) ([]byte, error)
 
+// findSessionRunCall returns the `docker run -d` call that created the
+// session container — an exact-arg match on -d, so the --rm resolution probe
+// (whose -c script text may contain a literal ` -d `) cannot be mistaken for
+// it.
+func findSessionRunCall(calls [][]string) []string {
+	for _, call := range calls {
+		if len(call) > 1 && call[0] == "run" && exactArg(call, "-d") {
+			return call
+		}
+	}
+	return nil
+}
+
 // findDockerCall returns the recorded docker call whose argv starts with
 // subcommand and whose joined argv contains every needle, or nil.
 func findDockerCall(calls [][]string, subcommand string, needles ...string) []string {
@@ -214,7 +227,7 @@ func TestDockerStagingBindsDeliverThePayload(t *testing.T) {
 	_, err := p.provision()
 	require.NoError(t, err, "calls=%v", calls)
 
-	run := findDockerCall(calls, "run", "-d")
+	run := findSessionRunCall(calls)
 	require.NotNil(t, run, "no docker run call; calls=%v", calls)
 	entryIdx := -1
 	for i, a := range run {
@@ -299,7 +312,7 @@ func TestDockerStagingRootlessStillBinds(t *testing.T) {
 	_, err := p.provision()
 	require.NoError(t, err, "calls=%v", calls)
 
-	run := findDockerCall(calls, "run", "-d")
+	run := findSessionRunCall(calls)
 	require.NotNil(t, run)
 	require.NotEmpty(t, findDockerCall(calls, "run", ":"+dockerAfBinaryPath+":"),
 		"a rootless engine reads the daemon-owned staging dir — the bind path applies; argv=%v", run)
@@ -359,7 +372,7 @@ func TestDockerStagingDesktopUnshareableFallsBackToCp(t *testing.T) {
 	_, err := p.provision()
 	require.NoError(t, err, "calls=%v", calls)
 
-	run := findDockerCall(calls, "run", "-d")
+	run := findSessionRunCall(calls)
 	require.NotNil(t, run)
 	require.Nil(t, findDockerCall(calls, "run", ":"+dockerAfBinaryPath+":"),
 		"an unshareable staging dir must not be bound; argv=%v", run)
@@ -843,7 +856,7 @@ func TestDockerStagingColonHomeUsesTheCpFallback(t *testing.T) {
 		"the unencodable path must fall back to cp; calls=%v", calls)
 	require.NotNil(t, findDockerCall(calls, "exec", "/proc/self/mountinfo"),
 		"the mount-table guard still gates the cp; calls=%v", calls)
-	run := findDockerCall(calls, "run", "-d")
+	run := findSessionRunCall(calls)
 	require.NotNil(t, run, "calls=%v", calls)
 	for _, m := range stagingBindVolumes(run) {
 		assert.NotContains(t, m, home, "a colon-bearing source must not reach a -v spec: %q", m)
@@ -873,7 +886,7 @@ func TestDockerStagingContainerizedAfFallsBackToCp(t *testing.T) {
 	require.NoError(t, err, "calls=%v", calls)
 
 	assert.False(t, p.payloadViaBinds, "a containerized daemon's staging dir is invisible to host dockerd")
-	run := findDockerCall(calls, "run", "-d")
+	run := findSessionRunCall(calls)
 	require.NotNil(t, run, "calls=%v", calls)
 	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
 	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
@@ -902,7 +915,7 @@ func TestDockerStagingVolumesFromFallsBackToCp(t *testing.T) {
 	require.NoError(t, err, "calls=%v", calls)
 
 	assert.False(t, p.payloadViaBinds, "--volumes-from destinations cannot be enumerated for the enclosing-mount guard")
-	run := findDockerCall(calls, "run", "-d")
+	run := findSessionRunCall(calls)
 	require.NotNil(t, run, "calls=%v", calls)
 	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
 	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
@@ -986,7 +999,7 @@ func TestDockerStagingProxiedEndpointFallsBackToCp(t *testing.T) {
 	require.NoError(t, err, "calls=%v", calls)
 
 	assert.False(t, p.payloadViaBinds, "a tcp endpoint carries no on-this-host proof")
-	run := findDockerCall(calls, "run", "-d")
+	run := findSessionRunCall(calls)
 	require.NotNil(t, run, "calls=%v", calls)
 	assert.Empty(t, stagingBindVolumes(run), "no staged binds may reach the run argv: %v", run)
 	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
@@ -1132,7 +1145,7 @@ func TestDockerStagingEnclosingRunArgsMountRefused(t *testing.T) {
 			var se *dockerStepError
 			require.ErrorAs(t, err, &se)
 			assert.Equal(t, dockerOpLocal, se.op)
-			require.Nil(t, findDockerCall(calls, "run", "-d"), "no session container may be started; calls=%v", calls)
+			require.Nil(t, findSessionRunCall(calls), "no session container may be started; calls=%v", calls)
 			// The staged dir the refusal left behind still reaps cleanly.
 			require.Error(t, p.reapProvisionFailure(err))
 			entries, rerr := os.ReadDir(filepath.Join(home, dockerStagingDirName))
@@ -1190,7 +1203,7 @@ func TestDockerStagingSymlinkedParentMountRefused(t *testing.T) {
 	assert.Contains(t, err.Error(), "encloses")
 	assert.Contains(t, err.Error(), "/opt/bin/af",
 		"the refusal must name the RESOLVED af destination")
-	require.Nil(t, findDockerCall(calls, "run", "-d"), "calls=%v", calls)
+	require.Nil(t, findSessionRunCall(calls), "calls=%v", calls)
 }
 
 // TestDockerStagingMountDestSymlinkRefused is the inverse case: the image
@@ -1215,7 +1228,7 @@ func TestDockerStagingMountDestSymlinkRefused(t *testing.T) {
 	_, err := p.provision()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "encloses")
-	require.Nil(t, findDockerCall(calls, "run", "-d"), "calls=%v", calls)
+	require.Nil(t, findSessionRunCall(calls), "calls=%v", calls)
 }
 
 // TestDockerStagingProbeFailureFallsBackToCp: when the in-image resolution
@@ -1249,7 +1262,7 @@ func TestDockerStagingProbeFailureFallsBackToCp(t *testing.T) {
 			_, err := p.provision()
 			require.NoError(t, err, "calls=%v", calls)
 			assert.False(t, p.payloadViaBinds, "unresolvable destinations must not use binds")
-			run := findDockerCall(calls, "run", "-d")
+			run := findSessionRunCall(calls)
 			require.NotNil(t, run, "calls=%v", calls)
 			for _, m := range stagingBindVolumes(run) {
 				assert.NotContains(t, m, p.stagingDir,

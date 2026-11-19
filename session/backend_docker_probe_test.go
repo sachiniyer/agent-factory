@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,11 +29,15 @@ import (
 // probeScriptThroughRealSh answers a `docker run --rm … -c <script>` call by
 // executing the script in the host's /bin/sh with the same positional args
 // production passes. The fixture tree stands in for the image's filesystem.
+// The deadline keeps a script that cannot terminate (a relative destination
+// the walk cannot shrink, say) from hanging the test instead of failing it.
 func probeScriptThroughRealSh(t *testing.T, args []string) ([]byte, error) {
 	t.Helper()
 	for i, a := range args {
 		if a == "-c" && i+2 < len(args) {
-			cmd := exec.Command("/bin/sh", append([]string{"-c", args[i+1]}, args[i+2:]...)...)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/bin/sh", append([]string{"-c", args[i+1]}, args[i+2:]...)...)
 			return cmd.Output()
 		}
 	}
@@ -72,6 +77,8 @@ func TestDockerDestProbeResolvesFromDeepestExistingAncestor(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(fix, "exists"), 0755))
 	require.NoError(t, os.Symlink(filepath.Join(fix, "opt", "real"), filepath.Join(fix, "link")))
 
+	require.NoError(t, os.WriteFile(filepath.Join(fix, "file"), []byte("x"), 0644))
+
 	res, err := probeDestsThroughRealSh(t,
 		// /home/dev exists; .cache/pip is missing two levels deep.
 		filepath.Join(fix, "home", "dev", ".cache", "pip"),
@@ -81,17 +88,22 @@ func TestDockerDestProbeResolvesFromDeepestExistingAncestor(t *testing.T) {
 		// Nothing under this exists at all — the ancestor is the fixture
 		// root, so the dest resolves to itself.
 		filepath.Join(fix, "a", "b", "c"),
+		// A non-directory mid component is ENOTDIR — proven "not a dir" —
+		// so the walk may step up past it.
+		filepath.Join(fix, "file", "miss"),
 		// A fully present destination resolves itself (control).
 		filepath.Join(fix, "exists"),
 	)
 	require.NoError(t, err)
-	require.Len(t, res, 4)
+	require.Len(t, res, 5)
 	assert.Equal(t, filepath.Join(fix, "home", "dev", ".cache", "pip"), res[0],
 		"the unresolved tail is appended to the deepest existing ancestor")
 	assert.Equal(t, filepath.Join(fix, "opt", "real", "deep", "miss"), res[1],
 		"the ancestor is resolved with pwd -P — symlink hops land on the target")
 	assert.Equal(t, filepath.Join(fix, "a", "b", "c"), res[2])
-	assert.Equal(t, filepath.Join(fix, "exists"), res[3])
+	assert.Equal(t, filepath.Join(fix, "file", "miss"), res[3],
+		"a regular file mid-path is a proven non-directory — the walk steps up")
+	assert.Equal(t, filepath.Join(fix, "exists"), res[4])
 }
 
 // TestDockerDestProbeResolvesEachDestinationIndependently pins the second
@@ -123,6 +135,51 @@ func TestDockerDestProbeResolvesEachDestinationIndependently(t *testing.T) {
 	assert.Equal(t, filepath.Join(fix, "gone"), res[2])
 }
 
+// TestDockerDestProbeUnverifiableComponentsFailClosed pins the fail-closed
+// half of #7601's rule: the walk may step up only past a component it PROVES
+// absent or non-directory. An inaccessible directory (EACCES), a symlink the
+// probe cannot traverse (ELOOP/dangling), and a destination that cannot
+// shrink (a relative path) are all unverifiable — the probe fails them, and
+// the provisioner takes the guarded cp fallback rather than resolving from an
+// ancestor it cannot see inside.
+func TestDockerDestProbeUnverifiableComponentsFailClosed(t *testing.T) {
+	fix, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	locked := filepath.Join(fix, "locked")
+	require.NoError(t, os.MkdirAll(locked, 0755))
+	require.NoError(t, os.Chmod(locked, 0000))
+	t.Cleanup(func() { os.Chmod(locked, 0755) })
+	require.NoError(t, os.Symlink(filepath.Join(fix, "loop"), filepath.Join(fix, "loop")))
+	dangling := filepath.Join(fix, "dangling")
+	require.NoError(t, os.Symlink(filepath.Join(fix, "gone-target"), dangling))
+
+	for _, tc := range []struct {
+		name string
+		dest string
+	}{
+		// Codex's exact P1 shape: /locked is EACCES, so the probe cannot
+		// prove what /locked/deep IS — a symlink retargeting a mount could
+		// hide inside. Resolved-from-ancestor would let it slip the guard.
+		{"unreadable intermediate directory", filepath.Join(locked, "deep")},
+		// The same, as the destination's own leaf.
+		{"unreadable directory as leaf", locked},
+		// A symlink loop the probe cannot traverse — ELOOP, not ENOENT.
+		{"symlink loop intermediate", filepath.Join(fix, "loop", "deep")},
+		// A dangling link the probe cannot traverse — the component exists
+		// but is not proven absent.
+		{"dangling symlink as leaf", dangling},
+		// A relative destination cannot shrink — the walk must terminate
+		// rather than loop forever.
+		{"relative destination", "af-nonexistent-relative-7601/subdir"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := probeDestsThroughRealSh(t, tc.dest)
+			require.Error(t, err, "an unverifiable destination must fail the probe, not resolve from an ancestor")
+			assert.Contains(t, err.Error(), "cannot be resolved inside the image")
+		})
+	}
+}
+
 // TestDockerStagingDeepMissingMountDestKeepsBinds is the behavior consequence
 // at provision level: a run_args mount whose destination the old probe could
 // not resolve silently selected cp delivery. Resolved from the deepest
@@ -147,4 +204,37 @@ func TestDockerStagingDeepMissingMountDestKeepsBinds(t *testing.T) {
 	assert.True(t, p.payloadViaBinds,
 		"a dest resolvable from its deepest ancestor no longer selects the cp fallback")
 	require.NotNil(t, findDockerCall(calls, "run", "--rm"), "the resolution probe ran: calls=%v", calls)
+}
+
+// TestDockerStagingUnverifiableMountDestFallsBackToCp is the fail-closed half
+// at provision level: a run_args mount whose destination sits under a
+// component the probe cannot inspect (here an unreadable directory) fails the
+// probe and takes the guarded cp fallback — it never resolves from an
+// ancestor the probe could not see inside.
+func TestDockerStagingUnverifiableMountDestFallsBackToCp(t *testing.T) {
+	stagingTestEnv(t)
+	fix, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	locked := filepath.Join(fix, "locked")
+	require.NoError(t, os.MkdirAll(locked, 0755))
+	require.NoError(t, os.Chmod(locked, 0000))
+	t.Cleanup(func() { os.Chmod(locked, 0755) })
+	var calls [][]string
+	old := dockerStagingProbeArgs
+	dockerStagingProbeArgs = func(args []string) ([]byte, error) {
+		return probeScriptThroughRealSh(t, args)
+	}
+	defer func() { dockerStagingProbeArgs = old }()
+	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+	p := &dockerProvisioner{
+		image:   "img:latest",
+		afBin:   stagingBinarySource(t),
+		runArgs: []string{"-v", "/host/src:" + filepath.Join(locked, "deep")},
+		spec:    ProvisionSpec{Title: "unv", CloneURL: "file:///repo"},
+	}
+	_, err = p.provision()
+	require.NoError(t, err, "calls=%v", calls)
+	assert.False(t, p.payloadViaBinds,
+		"an unverifiable destination yields binds to the guarded cp fallback")
+	require.NotNil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
 }
