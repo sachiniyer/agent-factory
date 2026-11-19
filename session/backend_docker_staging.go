@@ -332,7 +332,12 @@ func (p *dockerProvisioner) payloadDeliveryConfirmed() bool {
 	}
 	out, err := p.docker(dockerShortStepTimeout,
 		"exec", p.containerID, dockerContainerShell, "-c",
-		`test -f "$1" && test -x "$1" && [ "$(wc -c < "$1" | tr -d '[:space:]')" = "$2" ] && { [ -z "$3" ] || { test -f "$3" && test -r "$3"; }; }`,
+		// PATH is pinned before any external name (wc, tr) is looked up: a
+		// run_args `-e PATH=/evil:…` would otherwise choose the program this
+		// root exec runs. What remains — an image binary at the absolute path,
+		// or a run_args bind shadowing it — is the repo-chosen-image trust
+		// #7577 items 1 and 3 address.
+		`export PATH=/usr/sbin:/usr/bin:/sbin:/bin; test -f "$1" && test -x "$1" && [ "$(wc -c < "$1" | tr -d '[:space:]')" = "$2" ] && { [ -z "$3" ] || { test -f "$3" && test -r "$3"; }; }`,
 		"sh", dockerAfBinaryPath, fmt.Sprintf("%d", st.Size()), policyDest)
 	if err != nil {
 		log.WarningLog.Printf("docker runtime: staged-payload delivery check failed in container %s (%v): %s", p.shortID(), err, strings.TrimSpace(string(out)))
@@ -667,7 +672,12 @@ func (p *dockerProvisioner) verifyWriteTargets() error {
 		// inside a path — so a directory name carrying whitespace or a
 		// newline is judged byte-exactly instead of trimmed into a different
 		// path. pwd -P's own trailing newline stays in the field.
-		`cd -- "$1" && pwd -P && printf '\0' && cd -- "$2" && pwd -P && printf '\0' && cat /proc/self/mountinfo && for f in "$3" "$4"; do if [ -L "$f" ]; then printf '`+leafSymlinkMarker+`%s\n' "$f"; fi; done`,
+		// PATH is pinned before the only external name (cat) is looked up, so
+		// a run_args `-e PATH=/evil:…` cannot choose the program reading the
+		// mount table for a root exec. What remains — an image binary at the
+		// absolute path, or a run_args bind shadowing it — is the repo-chosen-
+		// image trust #7577 items 1 and 3 address.
+		`export PATH=/usr/sbin:/usr/bin:/sbin:/bin; cd -- "$1" && pwd -P && printf '\0' && cd -- "$2" && pwd -P && printf '\0' && cat /proc/self/mountinfo && for f in "$3" "$4"; do if [ -L "$f" ]; then printf '`+leafSymlinkMarker+`%s\n' "$f"; fi; done`,
 		"sh", dirA, dirB, dockerAfBinaryPath, leafB)
 	if err != nil {
 		return dockerStepErr(fmt.Errorf("backend=docker: cannot read the container mount table, so af's files are not written (a cp must stay on the container's own filesystem): %s: %w", strings.TrimSpace(string(out)), err), dockerOpSessionExec)

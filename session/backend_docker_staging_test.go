@@ -879,6 +879,61 @@ func TestDockerStagingVolumesFromFallsBackToCp(t *testing.T) {
 		"the mount-table guard still gates the cp; calls=%v", calls)
 }
 
+// TestDockerStagingExecScriptsPinPATH: a plain session's run_args may set
+// `-e PATH=/evil:…`, and docker exec inherits the container's configured env —
+// every in-container script this PR adds must pin PATH before naming any
+// external program, so a repo-controlled directory cannot supply the `cat`,
+// `wc` or `tr` a root exec runs.
+func TestDockerStagingExecScriptsPinPATH(t *testing.T) {
+	const pinned = "export PATH=/usr/sbin:/usr/bin:/sbin:/bin"
+	scriptAfterC := func(args []string) string {
+		t.Helper()
+		for i, a := range args {
+			if a == "-c" && i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+		return ""
+	}
+	t.Run("mount-table read", func(t *testing.T) {
+		stagingTestEnv(t)
+		old := dockerStagingInContainer
+		dockerStagingInContainer = func() bool { return true }
+		defer func() { dockerStagingInContainer = old }()
+		var calls [][]string
+		t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+		p := &dockerProvisioner{
+			image:   "img:latest",
+			afBin:   stagingBinarySource(t),
+			runArgs: []string{"-e", "PATH=/evil/nowhere"},
+			spec:    ProvisionSpec{Title: "path", CloneURL: "file:///repo"},
+		}
+		_, err := p.provision()
+		require.NoError(t, err, "calls=%v", calls)
+		exec := findDockerCall(calls, "exec", "/proc/self/mountinfo")
+		require.NotNil(t, exec, "calls=%v", calls)
+		assert.Contains(t, scriptAfterC(exec), pinned,
+			"the mount-table read must pin PATH before cat runs")
+	})
+	t.Run("delivery check", func(t *testing.T) {
+		stagingTestEnv(t)
+		var calls [][]string
+		t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+		p := &dockerProvisioner{
+			image:   "img:latest",
+			afBin:   stagingBinarySource(t),
+			runArgs: []string{"-e", "PATH=/evil/nowhere"},
+			spec:    ProvisionSpec{Title: "path", CloneURL: "file:///repo"},
+		}
+		_, err := p.provision()
+		require.NoError(t, err, "calls=%v", calls)
+		exec := findDockerCall(calls, "exec", "wc -c")
+		require.NotNil(t, exec, "calls=%v", calls)
+		assert.Contains(t, scriptAfterC(exec), pinned,
+			"the delivery check must pin PATH before wc/tr run")
+	})
+}
+
 // TestDockerStagingProxiedEndpointFallsBackToCp: a tcp:// loopback endpoint
 // passes the non-account locality gate (reachable) but carries no proof the
 // daemon is on this host — `ssh -L 2375:host:2375` makes a remote engine
