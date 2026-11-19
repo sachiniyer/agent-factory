@@ -77,12 +77,13 @@ func namedPieceBreakByte(c byte) bool {
 // `co[d]ex` resolves to the codex on disk at run time, so the text
 // alone does not show the name. The whole piece and its path basename
 // are both matched.
-func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{}) bool {
+func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{}, b *reachBudget) bool {
 	if piece == "" {
 		return false
 	}
+	variants, finished := namedPieceVariants(piece, b)
 	for name := range names {
-		if pieceCouldName(piece, name) {
+		if pieceVariantsCouldName(variants, finished, name, b) {
 			return true
 		}
 	}
@@ -93,7 +94,7 @@ func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{
 		if _, kept := preserved[configVar]; kept {
 			continue
 		}
-		if pieceCouldName(piece, agent) {
+		if pieceVariantsCouldName(variants, finished, agent, b) {
 			return true
 		}
 	}
@@ -107,12 +108,18 @@ func namedLauncherPieceRefuses(piece string, names, preserved map[string]struct{
 // globbing on downstreams that do it, so `co{de,}x` can land `codex`.
 // Agent names and launcher names share this helper so the two lookups
 // cannot diverge.
-func pieceCouldName(piece, name string) bool {
-	variants, finished := namedPieceVariants(piece)
+func pieceCouldName(piece, name string, b *reachBudget) bool {
+	variants, finished := namedPieceVariants(piece, b)
+	return pieceVariantsCouldName(variants, finished, name, b)
+}
+
+// pieceVariantsCouldName is the per-name half of pieceCouldName with
+// the piece's brace alternatives computed once and shared — a denied
+// set or a launcher table checks every name against the same variants
+// rather than re-expanding per lookup. An unfinished expansion is
+// unprovable and treated as able to spell the name.
+func pieceVariantsCouldName(variants []string, finished bool, name string, b *reachBudget) bool {
 	if !finished {
-		// The alternatives did not finish inside the bound, so
-		// whether some variant spells the name is unprovable —
-		// treated as able to.
 		return true
 	}
 	for _, variant := range variants {
@@ -124,8 +131,8 @@ func pieceCouldName(piece, name string) bool {
 		// over-approximates to `*`, which the original piece never
 		// spelled.
 		if strings.ContainsAny(variant, "*?[") &&
-			(globOverMatch(variant, name) ||
-				globOverMatch(filepath.Base(variant), name)) {
+			(globOverMatch(variant, name, b) ||
+				globOverMatch(filepath.Base(variant), name, b)) {
 			return true
 		}
 	}
@@ -143,13 +150,25 @@ const namedVariantCap = 64
 // expansion and stays one variant. Every variant is expanded to
 // completion — consecutive groups like `co{d,x}{e,y}x` revisit the
 // replaced slot until no alternative remains — and the second return
-// is false when the variant cap cuts expansion short.
-func namedPieceVariants(piece string) ([]string, bool) {
+// is false when the variant cap or the shared budget cuts expansion
+// short: every character the scans examine is charged to b, so nested
+// groups cannot run quadratic outside the bound.
+func namedPieceVariants(piece string, b *reachBudget) ([]string, bool) {
+	if b == nil {
+		b = newReachBudget()
+	}
 	variants := []string{piece}
 	for i := 0; i < len(variants); i++ {
 		v := variants[i]
 		at, expanded := 0, false
 		for at < len(v) {
+			// Every character-level pass — the `{` search, the
+			// matching-`}` scan, the alternatives split — is O(remaining
+			// text) and is charged to the shared budget, so nested
+			// groups cannot run quadratic outside the bound.
+			if !b.spend(len(v) - at) {
+				return variants, false
+			}
 			open := strings.IndexByte(v[at:], '{')
 			if open < 0 {
 				break
@@ -242,12 +261,12 @@ func splitNamedBraceAlts(s string) []string {
 // character, `*` matches any run, and `\<c>` matches its literal. An
 // unterminated `[` matches everything: a pattern the matcher cannot
 // read could be the name. `co[[:alpha:]]ex` therefore matches codex.
-func globOverMatch(pattern, name string) bool {
+func globOverMatch(pattern, name string, b *reachBudget) bool {
 	for i := 0; i < len(pattern); i++ {
 		if pattern[i] != '[' {
 			continue
 		}
-		end := globBracketEnd(pattern, i)
+		end := globBracketEnd(pattern, i, b)
 		if end < 0 {
 			return true
 		}
@@ -260,6 +279,12 @@ func globOverMatch(pattern, name string) bool {
 		if res, ok := memo[key]; ok {
 			return res
 		}
+		if !b.spend(1) {
+			// The match could not finish inside the bound —
+			// unprovable, so the pattern could be the name.
+			memo[key] = true
+			return true
+		}
 		var res bool
 		switch {
 		case i == len(pattern):
@@ -271,7 +296,14 @@ func globOverMatch(pattern, name string) bool {
 		case pattern[i] == '?' || pattern[i] == '[':
 			next := i + 1
 			if pattern[i] == '[' {
-				next = globBracketEnd(pattern, i) + 1
+				end := globBracketEnd(pattern, i, b)
+				if end < 0 {
+					// Unreadable or unterminated — the atom
+					// could be any character run.
+					res = true
+					break
+				}
+				next = end + 1
 			}
 			res = match(next, j+1)
 		case pattern[i] == '\\' && i+1 < len(pattern):
@@ -287,11 +319,12 @@ func globOverMatch(pattern, name string) bool {
 
 // globBracketEnd returns the index of the `]` closing the bracket
 // expression that opens at i (pattern[i] == '['), or -1 when none
-// does. A leading `!` or `^` is negation, so a `]` right after it —
-// or as the very first character — is literal. A POSIX `[[:class:]]`,
-// `[[.coll.]]` or `[[=equiv=]]` inside is skipped whole so its `]`
-// does not close the expression.
-func globBracketEnd(pattern string, i int) int {
+// does — or when the shared budget runs out mid-scan, which fails
+// closed the same way. A leading `!` or `^` is negation, so a `]`
+// right after it — or as the very first character — is literal. A
+// POSIX `[[:class:]]`, `[[.coll.]]` or `[[=equiv=]]` inside is skipped
+// whole so its `]` does not close the expression.
+func globBracketEnd(pattern string, i int, b *reachBudget) int {
 	j := i + 1
 	if j < len(pattern) && (pattern[j] == '!' || pattern[j] == '^') {
 		j++
@@ -300,6 +333,9 @@ func globBracketEnd(pattern string, i int) int {
 		j++
 	}
 	for j < len(pattern) {
+		if !b.spend(1) {
+			return -1
+		}
 		if pattern[j] == '[' && j+1 < len(pattern) &&
 			(pattern[j+1] == ':' || pattern[j+1] == '.' || pattern[j+1] == '=') {
 			k := j + 2
@@ -379,7 +415,7 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 		if !ok {
 			continue // the verdict above already refused
 		}
-		for _, nested := range namedLauncherNamesOf(literal) {
+		for _, nested := range namedLauncherNamesOf(literal, b) {
 			if namedNestedWordsRefuse(words[i+1:], nested, names, preserved, b) {
 				return true
 			}
@@ -397,14 +433,15 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 // `*sh` is pwsh and nix-shell alike — and EACH match applies its own
 // rule to the text after the piece, so a benign first name never masks
 // a later one's hidden input.
-func namedLauncherNamesOf(text string) []string {
+func namedLauncherNamesOf(text string, b *reachBudget) []string {
 	var found []string
 	for _, form := range [2]string{text, normalizeNamedLiteral(text)} {
+		variants, finished := namedPieceVariants(form, b)
 		for name := range accountNamedLauncherNames {
 			if slices.Contains(found, name) {
 				continue
 			}
-			if pieceCouldName(form, name) {
+			if pieceVariantsCouldName(variants, finished, name, b) {
 				found = append(found, name)
 			}
 		}
@@ -465,7 +502,7 @@ func namedNestedFieldsRefuse(fields []string, launcher string, names, preserved 
 		if verdict.refuse {
 			return true
 		}
-		for _, nested := range namedLauncherNamesOf(field) {
+		for _, nested := range namedLauncherNamesOf(field, b) {
 			if namedNestedFieldsRefuse(fields[i+1:], nested, names, preserved, b) {
 				return true
 			}
@@ -502,6 +539,7 @@ func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launche
 // the shared core for argv words and the pseudo-words a nested
 // launcher scan splits out of a word's text.
 func namedLiteralVerdict(literal string, last, decode bool, launcher string, names, preserved map[string]struct{}, b *reachBudget) namedWordVerdict {
+	raw := literal
 	if decode {
 		decoded, decOK := gvariantDecode(literal)
 		if !decOK {
@@ -529,6 +567,12 @@ func namedLiteralVerdict(literal string, last, decode bool, launcher string, nam
 	}
 	if normalized := normalizeNamedLiteral(literal); normalized != literal &&
 		namedLauncherTextRefuses(normalized, names, preserved, b) {
+		return namedWordVerdict{refuse: true}
+	}
+	if raw != literal && namedLauncherTextRefuses(raw, names, preserved, b) {
+		// The decoded reading is added to the raw text's, never
+		// substituted for it — a boundary the raw text shows is still
+		// a boundary to refuse on.
 		return namedWordVerdict{refuse: true}
 	}
 	if last && verdict.payload {
@@ -586,36 +630,60 @@ func normalizeNamedLiteral(text string) string {
 // watch string gets pwsh's hidden-input spellings), recursively,
 // inside the shared budget.
 func namedLauncherTextRefuses(text string, names, preserved map[string]struct{}, b *reachBudget) bool {
-	if namedLauncherPieceRefuses(text, names, preserved) {
-		return true
+	if b == nil {
+		b = newReachBudget()
 	}
-	for i := 0; i < len(text); {
-		for i < len(text) && namedPieceBreakByte(text[i]) {
-			i++
-		}
-		start := i
-		for i < len(text) && !namedPieceBreakByte(text[i]) {
-			if text[i] == '[' {
-				// A bracket expression's content is not a piece
-				// boundary — `['FOO=/o']` is one glob atom, not the
-				// fragments `=` would split it into.
-				if end := globBracketEnd(text, i); end >= 0 {
-					i = end + 1
-					continue
-				}
-			}
-			i++
-		}
-		piece := text[start:i]
-		if piece == "" {
-			break
-		}
-		if piece != text && namedLauncherPieceRefuses(piece, names, preserved) {
+	// The plain reading and every collapsed reading are judged as a
+	// UNION — a reading never replaces the text it came from, so no
+	// reading can hide a name another shows. A bracket expression is
+	// one glob atom to the piece reading, but its interior is plain
+	// text too: `[; pwsh -enc x ;]` carries the launcher the atom skip
+	// would otherwise eat. Every closed atom's interior is queued as
+	// its own span — iteratively, so pathological nesting burns the
+	// shared budget rather than the stack.
+	spans := []string{text}
+	for len(spans) > 0 {
+		s := spans[len(spans)-1]
+		spans = spans[:len(spans)-1]
+		if !b.spend(len(s) + 1) {
 			return true
 		}
-		for _, nested := range namedLauncherNamesOf(piece) {
-			if namedNestedFieldsRefuse(strings.Fields(text[i:]), nested, names, preserved, b) {
+		if namedLauncherPieceRefuses(s, names, preserved, b) {
+			return true
+		}
+		for i := 0; i < len(s); {
+			for i < len(s) && namedPieceBreakByte(s[i]) {
+				i++
+			}
+			start := i
+			for i < len(s) && !namedPieceBreakByte(s[i]) {
+				if s[i] == '[' {
+					if end := globBracketEnd(s, i, b); end >= 0 {
+						// The glob reading keeps `[…]` as one
+						// atom inside this piece — `['FOO=/o']`
+						// is not split on `=` — and the plain
+						// reading judges the interior on its
+						// own span.
+						spans = append(spans, s[i+1:end])
+						i = end + 1
+						continue
+					} else if b.left < 0 {
+						return true // the scan ran out of budget
+					}
+				}
+				i++
+			}
+			piece := s[start:i]
+			if piece == "" {
+				break
+			}
+			if piece != s && namedLauncherPieceRefuses(piece, names, preserved, b) {
 				return true
+			}
+			for _, nested := range namedLauncherNamesOf(piece, b) {
+				if namedNestedFieldsRefuse(strings.Fields(s[i:]), nested, names, preserved, b) {
+					return true
+				}
 			}
 		}
 	}

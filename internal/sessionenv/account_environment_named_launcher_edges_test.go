@@ -1179,6 +1179,37 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch '*sh -enc x'`, true},
 		{`watch 'pw* -enc x'`, true},
 		{`watch 'nix-shell --arg-from-stdin'`, true},
+		// pwsh's own switch parser accepts `-`, `/` and the
+		// Unicode dashes U+2013/U+2014/U+2015, and resolves
+		// abbreviations case-insensitively — every prefix
+		// spelling of a hidden-input option refuses.
+		{`pwsh --EncodedCommand x`, true},
+		{`pwsh /EncodedCommand x`, true},
+		{"pwsh –EncodedCommand x", true},
+		{"pwsh —EncodedCommand x", true},
+		{"pwsh ―EncodedCommand x", true},
+		{`pwsh /ENC x`, true},
+		{`pwsh -EncodedArguments x`, true},
+		{`pwsh -ea x`, true},
+		{`pwsh -EncodedCommand:x`, true},
+		{`watch 'pwsh --EncodedCommand x'`, true},
+		{`watch 'pwsh /EncodedCommand x'`, true},
+		{`pwsh -Command 'Get-ChildItem'`, false},
+		{`pwsh -NoProfile -c 'ls'`, false},
+		{`pwsh -File x.ps1`, false},
+		{`pwsh /tmp/x.ps1`, false},
+		// Readings are a UNION: a glob-bracket atom keeps
+		// its interior on the plain reading too, so `[;
+		// pwsh -enc x ;]` cannot hide the launcher the
+		// atom skip would eat. A valid nested atom whose
+		// interior reads as an unterminated `[` (`[a[b]]`)
+		// is the stated over-refusal.
+		{`watch 'echo [; pwsh -EncodedCommand x; echo ]'`, true},
+		{`watch 'echo [; pwsh -enc x; echo ]'`, true},
+		{`watch 'x[;env -i codex;]y'`, true},
+		{`watch 'echo [; codex; echo ]'`, true},
+		{`watch 'echo [a[b]]'`, true},
+		{`watch 'echo [FOO=bar]'`, false},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state

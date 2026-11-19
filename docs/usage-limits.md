@@ -506,12 +506,19 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
   - a word spells input the gate cannot see — the per-launcher
     hidden-input table: a descriptor, stdin, or a language it does not
     parse (flatpak-spawn's `--env-fd`, nix's expression flags and
-    `--arg-from-stdin`, `pwsh -EncodedCommand`/`-enc` prefixes/`-`
-    stdin/`-Command -`/`-NoExit`/`-NonInteractive`, nu's `-e`/
-    `--stdin`), matching each spelling's unique-prefix abbreviations
-    too — the same refusal class `sh -s` gets. A command-string flag
-    left with no operand is that same stdin feed (`pwsh -Command`,
-    `nu -c` alone);
+    `--arg-from-stdin`, `pwsh -EncodedCommand`/`-EncodedArguments`,
+    nu's `-e`/`--stdin`), resolved the way the launcher resolves it —
+    the leading run of option prefixes goes (`-`, `--`, and for pwsh
+    `/`, `–`, `—`, `―` too), a `:`/`=` operand attachment is cut,
+    pwsh's body reads case-insensitively, and a body that IS a hidden
+    name or its unique prefix refuses (`/ENC`, `–EncodedCommand`,
+    `-ea`); a single-dash word attaches its operand in-word for
+    clap/nix spellings (`-Eexpr`), and a body that also prefixes a
+    non-hidden option is ambiguous — the real launcher errors on it,
+    so it admits (`-ex` is -ExecutionPolicy, nix `-i` is
+    --ignore-environment) — the same refusal class `sh -s` gets. A
+    command-string flag left with no operand is that same stdin feed
+    (`pwsh -Command`, `nu -c` alone);
 
   Launcher names nest by NAME, not by position: a piece (or word, or a
   field of a nested tail) that spells a modelled launcher's name
@@ -528,13 +535,22 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
   launcher.
 
   `gdbus` call operands are GVariant text decoded through their
-  escapes before the piece check (`['CODEX\u005fHOME=/o']` still names
-  CODEX_HOME, and an escape the decoder does not know refuses). Work
-  is one linear pass — each word literalizes once, each piece checks
-  once — and nested launchers share one total budget with per-word
-  verdicts memoized, so a pathological tail (a tmux inside an ssh
-  inside a watch inside a nix-shell, repeated) refuses inside the
-  budget rather than paying quadratic work; spending past the budget
+  escapes alongside the raw check (`['CODEX\u005fHOME=/o']` still
+  names CODEX_HOME, and an escape the decoder does not know refuses).
+  Every collapsed reading is ADDED to the plain reading, never
+  substituted for it: a glob-bracket `[…]` is one atom to the piece
+  reading while its interior is judged as plain text on its own span,
+  so `[; pwsh -EncodedCommand x ;]` cannot hide the launcher the atom
+  would otherwise eat — at the cost of the stated over-refusal that a
+  valid nested atom like `[a[b]]` reads its interior as an
+  unterminated `[` and refuses. Work is one linear pass — each word
+  literalizes once, each piece checks once — and nested launchers
+  share one total budget with per-word verdicts memoized; the
+  character-level scans (brace alternatives, bracket matching, glob
+  atoms, interior spans) charge to that same budget, so a
+  pathological tail or nested pattern (a tmux inside an ssh inside a
+  watch inside a nix-shell, or `[[[[…` repeated) refuses inside the
+  bound rather than paying quadratic work; spending past the budget
   refuses. An option spelling the gate does not know is just text:
   `ssh --frobnicate host make` admits, the way the real launcher's
   own error path would.

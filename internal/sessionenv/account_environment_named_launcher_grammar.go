@@ -1,6 +1,9 @@
 package sessionenv
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // This file holds the only per-launcher classification #7603 keeps — and
 // it is NOT an option grammar. The review rule on this head (the sixth
@@ -42,12 +45,14 @@ var namedLauncherHiddenWords = map[string][]string{
 	"nix": {"-E", "--expr", "--arg", "--argstr", "-I", "--include",
 		"--arg-from-stdin"},
 	// pwsh's hidden forms (case-insensitive — PowerShell resolves
-	// options case-insensitively): -EncodedCommand and its -e/-enc
-	// abbreviations carry base64 the text cannot show, -File and the
-	// console/settings/configuration/pipe-name options read files and
-	// channels, -NoExit/-Interactive/-Login keep or open an interactive
-	// stdin, and a bare `-` is the stdin marker.
-	"pwsh": {"-e", "-ec", "-enc", "-encodedcommand",
+	// options case-insensitively, on any of its option prefixes: `-`,
+	// `/` and the Unicode dashes U+2013/U+2014/U+2015): -EncodedCommand
+	// and -EncodedArguments and their -e/-enc/-ea abbreviations carry
+	// base64 the text cannot show, the console/settings/configuration/
+	// pipe-name options read channels, -NoExit/-Interactive/-Login keep
+	// or open an interactive stdin, and a bare `-` is the stdin marker.
+	"pwsh": {"-e", "-ec", "-enc", "-encodedcommand", "-ea",
+		"-encodedarguments",
 		"-custompipename", "-noexit", "-i", "-interactive", "-l",
 		"-login", "-noninteractive", "-configurationname", "-"},
 	// nu's hidden forms (clap spellings, case-sensitive): the config and
@@ -77,6 +82,19 @@ var namedLauncherNonHiddenNames = map[string][]string{
 		"--threads", "-t", "--testbin", "--error-style",
 		"--no-config-file", "-n", "--no-std-lib", "--no-history",
 		"-v", "--version", "-h", "--help"},
+	// nix/nix-shell's documented non-hidden spellings — `-i` is
+	// --ignore-environment, a visible flag, so an `i` body resolves to
+	// it rather than abbreviating --include; `-c`/`--command` and the
+	// rest are visible options the prefix check must not call hidden.
+	"nix": {"-i", "--ignore-environment", "-c", "--command",
+		"-k", "--keep", "-u", "--unset", "--impure", "--profile",
+		"--installable", "-f", "--file", "-L", "--print-build-logs",
+		"-j", "--cores", "--offline", "--refresh", "--version",
+		"-v", "--verbose", "-h", "--help", "--show-trace"},
+	"nix-shell": {"--pure", "-p", "--packages", "--run",
+		"--command", "-j", "--cores", "--exclude",
+		"--show-trace", "--repair", "-q", "--quiet", "-v",
+		"--verbose", "-h", "--help", "--version", "-A", "--attr"},
 }
 
 // namedLauncherTailPayloadWords lists, per launcher, the option
@@ -97,44 +115,109 @@ var namedLauncherDecodesOperands = map[string]struct{}{
 	"gdbus": {},
 }
 
-// literalNamesHiddenInput reports whether literal spells a hidden-input
-// word for the launcher: the word itself, a `--x=value` attachment, a
-// clustered `-Xvalue` spelling, or a prefix-abbreviated spelling
-// (`--env-f` is `--env-fd`; pwsh's `-en` is -EncodedCommand). A prefix
-// that also spells a non-hidden name is ambiguous in the real launcher —
-// it errors — so only a hidden-only prefix refuses.
-func literalNamesHiddenInput(literal, launcher string) bool {
-	name := literal
+// pwshOptionPrefixRunes is the leading-run set PowerShell's own switch
+// parser accepts before an option name: `-`, `/`, and the Unicode
+// dashes U+2013, U+2014 and U+2015. Every other modelled launcher takes
+// `-` only.
+const pwshOptionPrefixRunes = "-/–—―"
+
+// optionWordBody canonicalizes an option spelling to the body the
+// launcher resolves: the leading run of option-prefix characters goes
+// (`--`, `/`, `–` all collapse to the same body), a `:` or `=` operand
+// attachment is cut, and pwsh's body is lowered because its option
+// resolution is case-insensitive. ok is false when the word carries no
+// option prefix at all — `/tmp/x.ps1` and `-` are not option spellings.
+func optionWordBody(literal, launcher string) (body string, ok bool) {
+	prefixes := "-"
 	if launcher == "pwsh" {
-		name = strings.ToLower(name)
+		prefixes = pwshOptionPrefixRunes
 	}
+	body = strings.TrimLeft(literal, prefixes)
+	if body == literal || body == "" {
+		return "", false
+	}
+	if cut := strings.IndexAny(body, ":="); cut >= 0 {
+		body = body[:cut]
+	}
+	if launcher == "pwsh" {
+		body = strings.ToLower(body)
+	}
+	return body, body != ""
+}
+
+// optionTableBody canonicalizes a table spelling the same way an argv
+// word is canonicalized — strip the leading dash run, lower for pwsh —
+// so words in every prefix form resolve against the stored names.
+func optionTableBody(word, launcher string) string {
+	body := strings.TrimLeft(word, "-")
+	if launcher == "pwsh" {
+		body = strings.ToLower(body)
+	}
+	return body
+}
+
+// singleDashOption reports whether a table spelling is a single-dash
+// form — clap and nix-style parsers take the operand attached inside
+// the word (`-Eexpr`, `-Ipath`, `-mfoo`). pwsh is excluded: its operand
+// attaches through `:` instead, which optionWordBody already cuts.
+func singleDashOption(word string) bool {
+	return strings.HasPrefix(word, "-") && !strings.HasPrefix(word, "--")
+}
+
+// literalNamesHiddenInput reports whether literal spells a hidden-input
+// word for the launcher. After stripping its leading run of option
+// prefixes the body is an option spelling when it IS a hidden name
+// (exact, including pwsh's documented `-e`/`-ec`/`-enc`/`-ea`/`-i`/`-l`
+// aliases), or a case-insensitive non-empty PREFIX of one — pwsh's `-en`
+// is -EncodedCommand and `-encodedarg` is -EncodedArguments on any dash.
+// A body that also prefixes a non-hidden name is ambiguous in the real
+// launcher — it errors — so only a hidden-only prefix refuses. For
+// single-dash hidden spellings the operand attaches in-word (`-Eexpr`),
+// which for pwsh goes through the `:` cut instead.
+func literalNamesHiddenInput(literal, launcher string) bool {
 	hidden := namedLauncherHiddenWords[launcher]
-	// pwsh resolves unique single-dash prefixes, so a word that spells a
-	// non-hidden option (`-ex` for -ExecutionPolicy) is that option, not
-	// an attached operand of the hidden name it starts with (`-e`).
-	nonHiddenPrefix := false
+	if literal == "-" {
+		return slices.Contains(hidden, "-") // the stdin marker
+	}
+	body, ok := optionWordBody(literal, launcher)
+	if !ok {
+		return false
+	}
+	// The word's own prefix shape decides whether an operand can attach
+	// in-word: a single dash does (`-Eexpr`); `--`, `/` and the Unicode
+	// dashes do not. pwsh's attachment is the `:` cut, handled in
+	// optionWordBody.
+	wordAttach := launcher != "pwsh" &&
+		strings.HasPrefix(literal, "-") && !strings.HasPrefix(literal, "--")
+	ambiguous := false
 	for _, known := range namedLauncherNonHiddenNames[launcher] {
-		if strings.HasPrefix(known, name) || known == name {
-			nonHiddenPrefix = true
-			break
+		knownBody := optionTableBody(known, launcher)
+		if body == knownBody {
+			return false // the body IS a non-hidden option
+		}
+		if strings.HasPrefix(knownBody, body) {
+			ambiguous = true
 		}
 	}
 	for _, word := range hidden {
-		if name == word || strings.HasPrefix(name, word+"=") {
-			return true
-		}
-		if !nonHiddenPrefix && len(word) >= 2 && !strings.HasPrefix(word, "--") &&
-			strings.HasPrefix(name, word) && len(name) > len(word) {
-			// A single-dash word attaches its operand: `-Fcfg`, `-f/path`.
-			// (A bare `-` word is the stdin marker only by itself.)
-			return true
-		}
-	}
-	for _, word := range hidden {
-		if len(name) <= 2 || !strings.HasPrefix(name, "-") || !strings.HasPrefix(word, name) {
+		hiddenBody := optionTableBody(word, launcher)
+		if hiddenBody == "" {
 			continue
 		}
-		if !nonHiddenPrefix {
+		if body == hiddenBody {
+			return true
+		}
+		if strings.HasPrefix(hiddenBody, body) {
+			if !ambiguous {
+				return true
+			}
+			continue
+		}
+		// `-xVALUE` — the operand attaches in-word, but only when the
+		// WORD itself was single-dash: `--env-config` is a long option,
+		// not `-e` carrying `nv-config`.
+		if wordAttach && singleDashOption(word) &&
+			len(body) > len(hiddenBody) && strings.HasPrefix(body, hiddenBody) {
 			return true
 		}
 	}
@@ -142,19 +225,17 @@ func literalNamesHiddenInput(literal, launcher string) bool {
 }
 
 // literalSpellsTailPayload reports whether literal spells a payload
-// (command-string) option word for the launcher — exactly, or as pwsh's
-// single-dash unique-prefix abbreviation of one.
+// (command-string) option word for the launcher — the same canonical
+// body form the hidden-input check uses, so `–c`, `/Command` and
+// `-com` resolve like the plain spelling does.
 func literalSpellsTailPayload(literal, launcher string) bool {
-	name := literal
-	if launcher == "pwsh" {
-		name = strings.ToLower(name)
+	body, ok := optionWordBody(literal, launcher)
+	if !ok {
+		return false
 	}
 	for _, word := range namedLauncherTailPayloadWords[launcher] {
-		if name == word {
-			return true
-		}
-		if len(name) > 2 && strings.HasPrefix(name, "-") &&
-			!strings.HasPrefix(name, "--") && strings.HasPrefix(word, name) {
+		payloadBody := optionTableBody(word, launcher)
+		if body == payloadBody || strings.HasPrefix(payloadBody, body) {
 			return true
 		}
 	}
