@@ -592,10 +592,14 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 // and --env=var=val) is refused — a wrapper's own options can place the
 // mutation without any env word.
 //
-// The scan is memoized per (position, strace): the verdict at a tail word
-// depends only on the words from there on, so the tail of a wrapper nested in
-// another wrapper's tail — `echo env env … env x` — is scanned once, not once
-// per enclosing env word (#4966).
+// The scan is memoized per (position, strace, builtins): the verdict at a
+// tail word depends only on the words from there on, so the tail of a
+// wrapper nested in another wrapper's tail — `echo env env … env x` — is
+// scanned once, not once per enclosing env word (#4966). builtins is part
+// of the key: a launcher arm's scan (builtins=false) caches a verdict the
+// enclosing unrecognized-tail scan (builtins=true) must NOT reuse, or
+// `prog docker eval 'export CODEX_""HOME=/o; codex'` would bypass the
+// buried-builtin judgement (Codex P2 on this head).
 func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	strace := isAccountCommandName(words[0], "strace")
 	if strace && straceOptionsRefused(words[1:], names, memo) {
@@ -634,7 +638,7 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 	var chain []*syntax.Word
 	answer := false
 	for len(words) > 0 {
-		if cached, seen := memo.wrapperTails[wrapperTailKey{word: words[0], strace: strace}]; seen {
+		if cached, seen := memo.wrapperTails[wrapperTailKey{word: words[0], strace: strace, builtins: builtins}]; seen {
 			answer = cached
 			break
 		}
@@ -651,7 +655,7 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 		words = words[width:]
 	}
 	for _, word := range chain {
-		memo.wrapperTails[wrapperTailKey{word: word, strace: strace}] = answer
+		memo.wrapperTails[wrapperTailKey{word: word, strace: strace, builtins: builtins}] = answer
 	}
 	return answer
 }

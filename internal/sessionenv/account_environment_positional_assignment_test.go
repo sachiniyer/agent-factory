@@ -1105,6 +1105,20 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"su -l -c -c 'co\"\"dex' root", true},
 		{"script -O -c 'env CODEX_HOME=/o codex'", true},
 		{"script -c -c 'echo hi' out.log", false},
+		// The tail memo keys on (word, strace, builtins): a launcher
+		// arm's scan caches its suffix verdicts WITHOUT the buried-
+		// builtin judgement, and the enclosing unrecognized tail must
+		// not reuse them — the `eval` payload's protected export still
+		// executes under the shadowed-wrapper dispatch (Codex P2).
+		{"prog eval 'export CODEX_\"\"HOME=/other; codex'", true},
+		{"prog docker eval 'export CODEX_\"\"HOME=/other; codex'", true},
+		{"prog unset CODEX_HOME", true},
+		// `exec` is a dispatching-builtin name, so under the shadowed-
+		// prog reading it can BE prog's builtin — a protected export
+		// behind it still refuses even inside a docker-compose tail;
+		// `run` is no builtin, so the ordinary form admits.
+		{"prog docker compose exec -e CODEX_HOME=/o svc x", true},
+		{"prog docker compose run -e PORT=3000 svc codex", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, names)

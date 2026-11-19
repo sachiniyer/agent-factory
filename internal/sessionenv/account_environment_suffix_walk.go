@@ -131,8 +131,9 @@ type envScanSummary struct {
 }
 
 type wrapperTailKey struct {
-	word   *syntax.Word
-	strace bool
+	word     *syntax.Word
+	strace   bool
+	builtins bool
 }
 
 // envArgvWord literalizes one env operand the way env itself parses it: a
