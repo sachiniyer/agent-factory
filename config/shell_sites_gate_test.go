@@ -316,6 +316,8 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		{class: notAShell, note: "\"-c\" in namedLauncherNonHiddenNames — pwsh's -Command spelling, matched as " +
 			"text for option-name classification; no shell is invoked"},
 		{class: notAShell, note: "\"-c\" in namedLauncherNonHiddenNames — nu's -c spelling, matched as text"},
+		{class: notAShell, note: "\"-c\" in namedLauncherNonHiddenNames — nix's -c/--command spelling, " +
+			"matched as text for option-name classification; no shell is invoked"},
 		{class: notAShell, note: "\"-c\" in namedLauncherTailPayloadWords — pwsh's -Command spelling, matched as " +
 			"text so a payload flag ending the tail reads as stdin-fed"},
 		{class: notAShell, note: "\"-c\" in namedLauncherTailPayloadWords — nu's -c spelling, matched as text"},
