@@ -160,7 +160,7 @@ func TestFileHasProvenShellWorkIsLinear(t *testing.T) {
 	work := func(n int) int {
 		command := "echo" + strings.Repeat(" /bin/bash", n)
 		return countLiteralShellWordCalls(t, 100*n, func() {
-			require.False(t, commandFeedsProvenShell(command))
+			require.False(t, commandFeedsProvenShell(command, accountEnvironmentMaxPayloadDepth))
 		})
 	}
 	smallWork, largeWork := work(1000), work(4000)

@@ -366,7 +366,7 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"unrecognized --setenv=CODEX_HOME=/other codex", true},
 	}
 	for _, test := range cases {
-		got := commandMutatesAccountEnvironment(test.command, codex)
+		got := !accountEnvironmentGateProven(test.command, codex, accountEnvironmentMaxPayloadDepth)
 		require.Equal(t, test.want, got, "command %q", test.command)
 	}
 }
@@ -451,7 +451,7 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 		{"xargs --version echo hi", false},
 		{"xargs --help env codex", false},
 	} {
-		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, codex),
+		require.Equal(t, test.want, !accountEnvironmentGateProven(test.command, codex, accountEnvironmentMaxPayloadDepth),
 			"command %q", test.command)
 	}
 }

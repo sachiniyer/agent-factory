@@ -16,11 +16,6 @@ import (
 // the payload's DECODED words get the agent-reach check too.
 func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
 	payloads := runnerPayloads(words)
-	for _, payload := range payloads {
-		if commandMutatesAccountEnvironment(payload, names) {
-			return nil, true
-		}
-	}
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}
@@ -44,18 +39,15 @@ func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailM
 	return nil, false
 }
 
-// unwrapCommandRunner judges command-string runners — sh, bash, zsh,
-// dash, ksh, script and their kin — whose `-c`/`--command` operand is a
-// script the child decodes (`script -q -c 'export CODEX_""HOME=/other;
-// codex'` exports the pin after the child's shell removed the quotes —
-// Codex P1 on this head). Every payload candidate is re-judged as a
-// command line; the rest of the argv gets the ordinary scans.
+// unwrapCommandRunner judges command-string runners — script, whose
+// `-c`/`--command` operand is a script the child decodes
+// (`script -q -c 'export CODEX_""HOME=/other; codex'` exports the pin
+// after the child's shell removed the quotes — Codex P1 on this head).
+// The payload itself is gated once at the top level by
+// decodedShellPayloadUnproven, which applies every check including the
+// stdin-feed one this position cannot see (Codex P1 on this head); the
+// rest of the argv gets the ordinary scans.
 func unwrapCommandRunner(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	for _, payload := range runnerPayloads(words) {
-		if commandMutatesAccountEnvironment(payload, names) {
-			return nil, true
-		}
-	}
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}

@@ -314,7 +314,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 		// Proving their effects would require a second parser pass with runtime
 		// expansion, so a scoped sibling refuses them.
 		return true
-	case shellCommandIsUnproven(words, names):
+	case shellCommandIsUnproven(words):
 		return true
 	default:
 		return false
@@ -679,7 +679,7 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		// name with no argv (echo sh, strace -p 1 sh) has nothing to
 		// judge and stays allowed.
 		return 1, len(words) > 1 && KnownShellName(filepath.Base(literal)) &&
-			shellCommandIsUnproven(words, names)
+			shellCommandIsUnproven(words)
 	}
 	if strace {
 		switch {

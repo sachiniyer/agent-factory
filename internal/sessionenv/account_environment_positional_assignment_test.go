@@ -922,6 +922,16 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"bash --rcfile /tmp/x -c 'make'", true},
 		{"bash -O extglob -c 'make'", true},
 		{"bash --foo -c 'make'", true},
+		// A decoded payload is judged by every top-level check, not a
+		// subset: the stdin-feed and hidden-input rules reach inside
+		// the command string, and an outer feed reaches a proven shell
+		// the payload decodes (Codex P1).
+		{"sh -c '/bin/sh -i' < ./repo-script", true},
+		{"sh -c '/bin/sh -i < ./repo-script'", true},
+		{"sh -c 'xargs -a secrets'", true},
+		{"sh -c 'sh -c \"/bin/sh -i\"' < f", true},
+		{"su -c '/bin/sh -i' work < f", true},
+		{"sh -c 'make' < f", false},
 		// Under a resetting launcher the decoded payload's command word is
 		// agent reach — `sudo sh -c 'codex'` is the same reset+reach shape
 		// as `sudo su -c 'codex'` — while a preserving form stays admitted.
@@ -1167,7 +1177,11 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"script -c -c 'echo hi' out.log", false},
 	}
 	for _, test := range cases {
-		got := commandMutatesAccountEnvironment(test.command, names)
+		// The row verdicts are the gate's, not the bare mutation walk's:
+		// payload judgement lives at the shared entry point now, so an
+		// unproven command (`want: true`) is exactly what
+		// accountEnvironmentGateProven cannot prove.
+		got := !accountEnvironmentGateProven(test.command, names, accountEnvironmentMaxPayloadDepth)
 		require.Equal(t, test.want, got, "command %q", test.command)
 	}
 }

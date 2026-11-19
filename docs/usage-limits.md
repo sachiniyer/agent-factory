@@ -374,12 +374,15 @@ will not reach the child's environment.
 - **`sh -c`/`bash -c` payloads get the same treatment** — a shell's
   command string is not hidden input: it is a command line the gate
   can read, so `sh`, `dash`, `ash`, `bash`, `ksh` and `mksh` decode
-  every `-c` spelling (`-c x`, `-cx`, clustered `-exc`, `bash -eux -c`)
-  and re-judge it exactly as they do a runner's — `bash -c 'make'`,
-  `sh -c "npm test"` and `sh -c 'make' arg0 arg1` run, `sh -c 'unset
-  CODEX_HOME; codex'` refuses the way the bare line does, and the
-  reset check reaches a decoded agent there too (`sudo sh -c 'codex'`
-  refuses, `sudo -E sh -c 'codex'` runs). Refusal stays for what the
+  every `-c` spelling (`-c x`, clustered `-exc`, `-euo pipefail -c`)
+  and re-judge it with every check the gate applies to a command line —
+  `bash -c 'make'`, `sh -c "npm test"` and `sh -c 'make' arg0 arg1` run,
+  `sh -c 'unset CODEX_HOME; codex'` refuses the way the bare line does,
+  `sh -c 'xargs -a secrets'` refuses for the same hidden input, `sh -c
+  '/bin/sh -i < ./script'` and `sh -c '/bin/sh -i' < ./script` refuse
+  for the same shell-fed-stdin, and the reset check reaches a decoded
+  agent there too (`sudo sh -c 'codex'` refuses, `sudo -E sh -c
+  'codex'` runs). Refusal stays for what the
   gate cannot decode: a dynamic or unparseable payload (`sh -c "$x"`),
   a missing operand (`sh -c`), a script-file form (`sh script.sh`),
   an interactive/stdin spelling (`sh -i`, `sh -s`), an option letter it

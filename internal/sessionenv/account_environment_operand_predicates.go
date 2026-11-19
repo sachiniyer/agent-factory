@@ -130,7 +130,7 @@ func envCallMutatesAccountEnvironmentUncached(words []*syntax.Word, names map[st
 	return wrapperOperandTailMutates(scan.command, names, memo)
 }
 
-func shellCommandIsUnproven(words []*syntax.Word, names map[string]struct{}) bool {
+func shellCommandIsUnproven(words []*syntax.Word) bool {
 	if len(words) == 0 {
 		return false
 	}
@@ -142,13 +142,14 @@ func shellCommandIsUnproven(words []*syntax.Word, names map[string]struct{}) boo
 		return false
 	}
 	// #7604: a `sh -c`/`bash -c` payload is not hidden input — it is a
-	// command string the gate can read, so it is judged by the same gate
-	// recursively instead of refused outright (`su -c` and `script -c`
-	// already judge theirs this way). Refusal stays for what the gate
-	// cannot decode: a dynamic or absent payload, a script file, an
-	// interactive/login/stdin spelling, an unknown option, or a shell
-	// whose -c still reads a startup file.
-	if shellDashCCommandProven(words, names) {
+	// command string the gate can read, so every candidate payload is
+	// judged by the top-level gate recursively instead of refused
+	// outright (decodedShellPayloadUnproven does that, position-blind).
+	// What is left here is the INVOCATION's provability: a dynamic or
+	// absent payload word, a script file, an interactive/stdin spelling,
+	// an unmodelled option letter, or a shell whose -c still reads a
+	// startup file all stay unproven.
+	if shellDashCCommandProven(words) {
 		return false
 	}
 	return true
@@ -185,7 +186,7 @@ const shellDashCSafeFlagLetters = "abCEefhIlmnpruvVx"
 // every literal word after a -c cluster is a candidate payload, and each
 // one is re-judged: the ambiguity can only over-refuse positional argv
 // that happen to look mutating.
-func shellDashCCommandProven(words []*syntax.Word, names map[string]struct{}) bool {
+func shellDashCCommandProven(words []*syntax.Word) bool {
 	command, _ := literalShellWord(words[0])
 	switch filepath.Base(command) {
 	case "sh", "dash", "ash", "bash", "ksh", "mksh":
@@ -247,16 +248,10 @@ func shellDashCCommandProven(words []*syntax.Word, names map[string]struct{}) bo
 			}
 		}
 	}
-	payloads := shellDashCPayloadCandidates(words)
-	if len(payloads) == 0 {
-		return false
-	}
-	for _, payload := range payloads {
-		if commandMutatesAccountEnvironment(payload, names) {
-			return false
-		}
-	}
-	return true
+	// A -c invocation with no operand word after its -c cluster has no
+	// command string to prove — `sh -c` errors, `sh -cx` is -c -x still
+	// missing its string — so it stays unproven.
+	return len(shellDashCPayloadCandidates(words)) > 0
 }
 
 // shellDashCPayloadCandidates collects the words that can be a shell's -c
@@ -265,22 +260,24 @@ func shellDashCCommandProven(words []*syntax.Word, names map[string]struct{}) bo
 // operand word after it — `bash -ce 'x'` runs `x` with -e set, not the
 // letter e. Which of the following words is the string depends on option
 // operands the scan can misplace (`-o` consumes one), so every literal
-// word after a -c cluster is a candidate and each is judged.
+// word after the FIRST -c cluster is a candidate — each is judged, and
+// collecting the suffix once keeps the scan linear in argv length.
 func shellDashCPayloadCandidates(words []*syntax.Word) []string {
 	var candidates []string
-	for i, word := range words {
+	seenC := false
+	for _, word := range words {
 		literal, ok := launcherLiteralWord(word)
-		if !ok || literal == "-" || literal == "--" ||
-			!strings.HasPrefix(literal, "-") || strings.HasPrefix(literal, "--") {
+		if !ok {
 			continue
 		}
-		if !strings.ContainsRune(literal[1:], 'c') {
+		if seenC {
+			candidates = append(candidates, literal)
 			continue
 		}
-		for _, rest := range words[i+1:] {
-			if l, ok := launcherLiteralWord(rest); ok {
-				candidates = append(candidates, l)
-			}
+		if literal != "-" && literal != "--" &&
+			strings.HasPrefix(literal, "-") && !strings.HasPrefix(literal, "--") &&
+			strings.ContainsRune(literal[1:], 'c') {
+			seenC = true
 		}
 	}
 	return candidates

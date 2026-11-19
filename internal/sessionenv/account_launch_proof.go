@@ -267,12 +267,33 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 			"account %q cannot scope sibling environment for agent %q: its command sets an identity or shell-startup variable itself, which can override the account directory",
 			account.Name, account.Agent)
 	}
-	if commandFeedsProvenShell(command) {
+	if commandFeedsProvenShell(command, accountEnvironmentMaxPayloadDepth) {
 		return accountCommandValidationErrorf(
 			"account %q cannot scope sibling environment for agent %q: its command gives an interactive shell input "+
 				"other than the terminal (a pipe, input redirection, here-document, or coprocess), and that shell would "+
 				"run the supplied text as commands, which can override the account directory; start the shell without "+
 				"redirecting its input",
+			account.Name, account.Agent)
+	}
+	switch decodedShellPayloadVerdict(command, overrideNames, accountEnvironmentMaxPayloadDepth) {
+	case shellPayloadMutates:
+		return accountCommandValidationErrorf(
+			"account %q cannot scope sibling environment for agent %q: its command decodes a `-c` command "+
+				"string that sets an identity or shell-startup variable itself, which can override the "+
+				"account directory",
+			account.Name, account.Agent)
+	case shellPayloadFeeds:
+		return accountCommandValidationErrorf(
+			"account %q cannot scope sibling environment for agent %q: its command decodes a `-c` command "+
+				"string that gives an interactive shell input other than the terminal (a pipe, input "+
+				"redirection, here-document, or coprocess), and that shell would run the supplied text "+
+				"as commands, which can override the account directory",
+			account.Name, account.Agent)
+	case shellPayloadUnproven:
+		return accountCommandValidationErrorf(
+			"account %q cannot scope sibling environment for agent %q: its command carries a `-c` command "+
+				"string af cannot prove — nested past the decode bound, or one the gate cannot read; run "+
+				"the payload's contents directly or without the option that hides them",
 			account.Name, account.Agent)
 	}
 	return nil

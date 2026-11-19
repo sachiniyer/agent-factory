@@ -74,7 +74,7 @@ func TestCommandMutatesAccountEnvironment_ReadsWordsAsTheShellPassesThem(t *test
 		{"brace without a separator", `echo {}`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, names), "command %q", test.command)
+			require.Equal(t, test.want, !accountEnvironmentGateProven(test.command, names, accountEnvironmentMaxPayloadDepth), "command %q", test.command)
 		})
 	}
 }
