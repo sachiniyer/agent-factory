@@ -167,6 +167,22 @@ func shellCommandIsUnproven(words []*syntax.Word) bool {
 // direction.
 const shellDashCSafeFlagLetters = "abCefhlmnpruvVx"
 
+// shellDashOSafeOptionNames is the allowlist of `set -o` names a decoded
+// -c invocation may carry: every one changes error or execution flow — none
+// changes where the shell reads commands or what an assignment word does.
+// Any other -o name — keyword (assignments), the line-editing and expansion
+// modes (emacs, vi, histexpand, braceexpand, interactive-comments), posix,
+// privileged, allexport, history, or a name a future shell adds — makes the
+// invocation undecodable and refuses, the same rule the safe-letter set
+// above applies to single letters (Codex P1 on this head).
+var shellDashOSafeOptionNames = map[string]struct{}{
+	"errexit": {}, "errtrace": {}, "functrace": {}, "hashall": {},
+	"ignoreeof": {}, "monitor": {}, "noclobber": {}, "noexec": {},
+	"noglob": {}, "nolog": {}, "notify": {}, "nounset": {},
+	"onecmd": {}, "physical": {}, "pipefail": {}, "verbose": {},
+	"xtrace": {},
+}
+
 // shellDashCCommandProven reports whether words are a shell command-string
 // invocation whose every payload candidate is decodable and judged clean by
 // the gate — `sh -c 'make'` proves out exactly the way `make` does, and
@@ -227,8 +243,11 @@ func shellDashCCommandProven(words []*syntax.Word) bool {
 				// never the cluster's trailing letters — `-oe keyword`
 				// keeps e as an option and reads `keyword` as the name
 				// (verified on real bash — independent-review P1 on this
-				// head). Only `keyword` changes what an assignment word
-				// does, the same mode `set -o keyword` is refused for.
+				// head). The name must be on the allowlist of `set -o`
+				// names known not to change where commands come from or
+				// how assignments behave; any other — keyword, an
+				// input-source or expansion mode, or a name a future
+				// shell adds — is undecodable and refuses.
 				if i+1 >= len(words) {
 					return false
 				}
@@ -236,7 +255,7 @@ func shellDashCCommandProven(words []*syntax.Word) bool {
 				if !ok {
 					return false
 				}
-				if operand == "keyword" {
+				if _, ok := shellDashOSafeOptionNames[operand]; !ok {
 					return false
 				}
 				i++

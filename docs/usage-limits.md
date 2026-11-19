@@ -390,8 +390,12 @@ will not reach the child's environment.
   a missing operand (`sh -c`), a script-file form (`sh script.sh`),
   an interactive/stdin spelling (`sh -i`, `sh -s`), an option letter it
   cannot model or one that changes what an assignment word does (`-k`,
-  any `--long` option, `-O`), `-o` naming `keyword` — bash reads the
-  `-o` option's name from the NEXT argv word, so `-o keyword`, `-oe
+  any `--long` option, `-O`), `-o` naming anything outside an
+  allowlist of `set -o` names known not to change where commands come
+  from or how assignments behave (`errexit`, `nounset`, `pipefail`,
+  `xtrace`, `noglob`, `noclobber` and similar are fine; `keyword`, the
+  `vi`/`emacs` input modes, `posix` and any other name refuse) — and
+  bash reads the `-o` name from the NEXT argv word, so `-o vi`, `-oe
   keyword` and `-c -ox keyword` all refuse — and shells
   whose `-c` still reads a startup file (`zsh`, `csh`, `tcsh`, `fish`
   read zshenv/.cshrc/config.fish even for `-c`, and ksh's `-E` reads

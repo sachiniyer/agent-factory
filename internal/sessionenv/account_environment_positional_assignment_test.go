@@ -887,7 +887,7 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"bash -lc 'make'", false},
 		{"bash -ic 'x'", true},
 		{"sh -s", true},
-		{"sh -o vi -c 'make'", false},
+		{"sh -o vi -c 'make'", true},
 		{"bash --norc -c 'make'", true},
 		{"zsh -c 'make'", true},
 		{"fish -c 'make'", true},
@@ -950,6 +950,16 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"bash -coe keyword 'codex CODEX_HOME=/o'", true},
 		{"bash -c -ox keyword 'codex CODEX_HOME=/o'", true},
 		{"bash -c -oe pipefail 'make'", false},
+		// -o names come from an allowlist of `set -o` names known not
+		// to change where commands come from or how assignments behave —
+		// anything else is undecodable and refuses (Codex P1 on this
+		// head): keyword is only one of the refused names.
+		{"bash -o nounset -c 'make'", false},
+		{"bash -o vi -c 'make'", true},
+		{"bash -c -o emacs 'make'", true},
+		{"sh -o posix -c 'make'", true},
+		{"bash -o allexport -c 'make'", true},
+		{"bash -o noexec -c 'make'", false},
 		// ksh -E reads ENV/kshrc the way zsh reads zshenv — an input
 		// channel the gate cannot model (P3).
 		{"ksh -E -c 'make'", true},
