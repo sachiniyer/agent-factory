@@ -99,12 +99,22 @@ func stagingDockerAnswers(t *testing.T, calls *[][]string, engineName string, ro
 			return []byte("staging-test-engine\n"), nil
 		case "run":
 			if containsArg(args, "--rm") {
-				// The in-image parent-resolution probe: answer the resolved
-				// parents verbatim unless a test overrides them.
+				// The in-image resolution probe: resolved af parents, the
+				// marker field, then one field per repo mount destination.
 				if dockerStagingProbeAnswer != nil {
 					return dockerStagingProbeAnswer(joined)
 				}
-				return []byte("/usr/local/bin\n\x00/etc\n\x00"), nil
+				var b strings.Builder
+				b.WriteString("/usr/local/bin\n\x00/etc\n\x00\x00")
+				for i, a := range args {
+					if a == "-c" && i+2 < len(args) {
+						for _, d := range args[i+7:] {
+							b.WriteString(d + "\n\x00")
+						}
+						break
+					}
+				}
+				return []byte(b.String()), nil
 			}
 			runCount++
 			if runHook != nil {
@@ -1157,7 +1167,7 @@ func TestDockerStagingSymlinkedParentMountRefused(t *testing.T) {
 	var calls [][]string
 	old := dockerStagingProbeAnswer
 	dockerStagingProbeAnswer = func(string) ([]byte, error) {
-		return []byte("/opt/bin\n\x00/etc\n\x00"), nil
+		return []byte("/opt/bin\n\x00/etc\n\x00\x00/opt/bin\n\x00"), nil
 	}
 	defer func() { dockerStagingProbeAnswer = old }()
 	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
@@ -1175,6 +1185,31 @@ func TestDockerStagingSymlinkedParentMountRefused(t *testing.T) {
 	require.Nil(t, findDockerCall(calls, "run", "-d"), "calls=%v", calls)
 }
 
+// TestDockerStagingMountDestSymlinkRefused is the inverse case: the image
+// symlinks /opt -> /usr/local, so a repo mount at /opt/bin effectively lands
+// at /usr/local/bin — enclosing the resolved af destination. The probe
+// resolves the repo mount's own destination and the refusal names it.
+func TestDockerStagingMountDestSymlinkRefused(t *testing.T) {
+	stagingTestEnv(t)
+	var calls [][]string
+	old := dockerStagingProbeAnswer
+	dockerStagingProbeAnswer = func(string) ([]byte, error) {
+		return []byte("/usr/local/bin\n\x00/etc\n\x00\x00/usr/local/bin\n\x00"), nil
+	}
+	defer func() { dockerStagingProbeAnswer = old }()
+	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+	p := &dockerProvisioner{
+		image:   "img:latest",
+		afBin:   stagingBinarySource(t),
+		runArgs: []string{"-v", "/host/dir:/opt/bin"},
+		spec:    ProvisionSpec{Title: "lnk2", CloneURL: "file:///repo"},
+	}
+	_, err := p.provision()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "encloses")
+	require.Nil(t, findDockerCall(calls, "run", "-d"), "calls=%v", calls)
+}
+
 // TestDockerStagingProbeFailureFallsBackToCp: when the in-image resolution
 // cannot be established (probe error, unreadable answer, or a symlinked
 // destination leaf), the relationship to repo mounts cannot be established —
@@ -1187,7 +1222,7 @@ func TestDockerStagingProbeFailureFallsBackToCp(t *testing.T) {
 		{"probe error", func(string) ([]byte, error) { return nil, errors.New("no shell in image") }},
 		{"garbage answer", func(string) ([]byte, error) { return []byte("???"), nil }},
 		{"symlinked leaf", func(string) ([]byte, error) {
-			return []byte("/usr/local/bin\n\x00/etc\n\x00" + leafSymlinkMarker + "/usr/local/bin/af\n"), nil
+			return []byte("/usr/local/bin\n\x00/etc\n\x00" + leafSymlinkMarker + "/usr/local/bin/af\n\x00/data\n\x00"), nil
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
