@@ -408,8 +408,9 @@ will not reach the child's environment.
 - **The named launchers are modelled by name** — `pkexec`, `doas`,
   `setpriv`, `machinectl`, `nix-shell`, `nix`, `flatpak-spawn`, `ssh`,
   `tmux`, `distrobox`, `toolbox`, `watch`, `pwsh`, `nu`, `busctl` and
-  `gdbus` each get the same lexical rule the earlier launchers keep,
-  classified by which of three shapes their command line takes:
+  `gdbus` are the launchers whose tails one grammar-free text rule
+  judges. The names matter because each can re-root the account's
+  environment or carry a command the pane cannot see, in three shapes:
   - *Reset-class* — `pkexec`, `doas`, `setpriv --reset-env`,
     `machinectl shell`/`login`, `nix-shell --pure`, `nix develop`/`nix
     shell` with `-i`/`--ignore-environment`, every `flatpak-spawn`
@@ -460,51 +461,63 @@ will not reach the child's environment.
     calls run (`tmux setenv -g FOO /o`, `busctl --user get-property
     org.a /x org.a.Name`).
 
-  The verdict for a named launcher does not depend on parsing its
-  option grammar — option tables keep losing to the next unmodelled
-  spelling, so the gate refuses when ANY reading of the tail could
-  reach the agent under a reset or write a protected name: every
-  literal word is a possible start of the command (`ssh localhost -p
-  2222 codex` and `ssh localhost -t codex` refuse on the `codex` word,
-  whichever option arities precede it); the tail is judged
-  argv-preserved — each literal quoted, so a direct exec's
-  `'/opt/agent tools/codex' --help` still names codex in `tmux
-  new-window`, `toolbox run` and `nix shell -i -c` alike — and joined
-  the way `sh -c` joiners (`watch`, `ssh`, `nix -c`) build their
-  command string, so a mutation spanning two words cannot hide
-  (`watch export 'CODEX_""HOME=/o; codex'` decodes the joined
-  `CODEX_HOME=/o` and refuses). tmux's `;`-separated command sequence
-  is judged per segment (`tmux list-sessions \; new-window codex`
-  refuses on the second command), `gdbus` call operands are GVariant
-  text decoded through their escapes before the writer check
-  (`['CODEX\u005fHOME=/o']` still names CODEX_HOME, and an escape the
-  decoder does not know refuses), and pwsh's hidden-input forms
-  (`-File`, `-EncodedCommand`/`-enc` prefixes, `-` stdin, `-Command
-  -`, `-NoExit`, nu's `--config`/`--env-config`/`-e` forms) refuse
-  even when a `-c` operand is also present (`pwsh -NoExit -Command
-  Get-Date` still drops to an interactive stdin after the command,
-  `nu --config /tmp/override.nu -c 'ls'` evaluates the file first).
-  A word that does not literalize, or spells a hidden-input source
-  (a file, a descriptor, a language the gate does not parse — ssh's
-  `-F`, flatpak-spawn's `--env-fd`, nix's expression and
-  `--arg-from-*` flags, tmux's `-f`/`source-file`/`source` command
-  files, each matching its unique-prefix abbreviations too) refuses
-  outright — the same refusal class `sh < f` and `sh -s` get, so a
-  file- or stdin-fed command source is one rule across shells and
-  launchers alike. The VALUE part of an attached option is a
-  possible command start too — ssh's `-o 'RemoteCommand=co""dex'`
-  executes through the remote user's shell, so every `NAME=`- and
-  `-oVALUE`-shaped literal contributes its value text to the
-  candidate set. The every-reading exploration shares one total
-  work budget per validation — each literalize and each candidate
-  parse spends, each distinct candidate string judges once — so a
-  pathological nested tail (a tmux inside an ssh inside a watch
-  inside a nix-shell, repeated) refuses inside the budget rather
-  than paying exponential work. An option spelling the gate does
-  not know is a refusal only through those rules — a bare unknown
-  flag that cannot reach the agent or a protected name under any
-  reading admits (`ssh --frobnicate host make`), the way the real
-  launcher's own error path would.
+  The verdict for a named launcher is a grammar-free text rule — the
+  gate never parses a launcher's options, so no finding of the form
+  "option X's position, arity or value hides the command" can exist.
+  For the whole tail, refuse when ANY of these holds:
+
+  - a literal piece names the account's agent or a protected variable
+    at identifier boundaries — a piece is every argv word and every
+    piece of a word split on whitespace, `=`, `;`, `&`, `|`, quotes
+    and parentheses, and the agent also matches as a path basename.
+    `ssh localhost -p 2222 codex`, `tmux new-window codex`,
+    `flatpak-spawn --env=CODEX_HOME=/o make`, `busctl … SetEnvironment
+    as 1 CODEX_HOME=/o`, `tmux list-sessions \; new-window codex` (the
+    `;` split sees the second command's words) and ssh's `-o
+    'RemoteCommand=co""dex'` (the quote-stripped form is checked too —
+    the remote shell concatenates it to `codex`) all refuse, whichever
+    options precede them;
+  - a word does not literalize (a substitution or expansion in the
+    argv itself) or its literal carries `$` or backtick text — a name
+    the text cannot see could be constructed at run time (`pwsh -c
+    'echo $HOME'` refuses on the `$`, the accepted over-refusal
+    below);
+  - a word spells input the gate cannot see — the per-launcher
+    hidden-input table: a file, a descriptor, stdin, or a language it
+    does not parse (ssh's `-F`, flatpak-spawn's `--env-fd`, nix's
+    expression and `--arg-from-*` flags, tmux's `-f`/`source-file`/
+    `source` command files, `pwsh -File`/`-EncodedCommand`/`-enc`
+    prefixes/`-` stdin/`-Command -`/`-NoExit`, nu's
+    `--config`/`--env-config`/`-e`/`--stdin`), matching each spelling's
+    unique-prefix abbreviations too — the same refusal class `sh < f`
+    and `sh -s` get, so file- and stdin-fed command input is one rule
+    across shells and launchers. A command-string flag left with no
+    operand is that same stdin feed (`pwsh -Command`, `nu -c` alone),
+    and a `pwsh`/`nu` tail carrying no command operand and no info
+    flag runs the REPL — `pwsh`,
+    `pwsh -NoExit`, `nu script.nu` refuse.
+
+  `gdbus` call operands are GVariant text decoded through their
+  escapes before the piece check (`['CODEX\u005fHOME=/o']` still names
+  CODEX_HOME, and an escape the decoder does not know refuses). Work
+  is one linear pass — each word literalizes once, each piece checks
+  once — and nested launchers share one total budget with per-word
+  verdicts memoized, so a pathological tail (a tmux inside an ssh
+  inside a watch inside a nix-shell, repeated) refuses inside the
+  budget rather than paying quadratic work; spending past the budget
+  refuses. An option spelling the gate does not know is just text:
+  `ssh --frobnicate host make` admits, the way the real launcher's
+  own error path would.
+
+  The accepted cost is measured, not hidden: the rule refuses tails
+  that merely MENTION a denied name — `ssh host 'cat
+  notes/codex.md'`, `tmux new-window 'vim codex.md'` and `watch
+  --exec codex` name codex at a boundary, and a `$HOME` in a pwsh
+  command string is expansion text. The ordinary-usage corpus (the
+  162-row master-parity set plus the `ssh host make`, `tmux
+  new-window htop`, `watch -n 5 'kubectl get pods'` admits) loses no
+  row to the rule; the losses are the accidental-mention rows above,
+  stated here rather than predicted away.
 - **Shell names match what the program IS** — `KnownShellName`
   recognizes a shell by its program, not its spelling: the `r`-prefix
   restricted variants (`rbash`, `rksh`, `rzsh`, `rsh`) and versioned

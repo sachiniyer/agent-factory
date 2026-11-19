@@ -151,37 +151,59 @@ import (
 // literal word still carrying `"`, `'` or `\` is unverifiable. It returns
 // whether the command line refuses on the launcher's own spellings; the
 // caller still owes every surviving word the tail judgement.
-func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{}, decodes bool, requireCommand bool) bool {
+func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{}, decodes bool, requireCommand bool, memo operandTailMemo) bool {
 	denied := false
 	commandish := false
 	for index, word := range words {
-		literal, ok := launcherLiteralWord(word)
-		if !ok {
-			// Any dynamic word could expand into a protected
-			// assignment or env spelling the command line cannot
-			// show — unverifiable, refused wherever it sits.
+		// The per-word classification is position-independent, so it is
+		// memoized: a buried launcher's suffix judgements each rescan
+		// the same tail words (ssh … ssh make), and without the memo
+		// that is a literalize per position per word — quadratic. The
+		// decodes variant (systemd-run) judges quote/escape text, so it
+		// always reads the literal itself.
+		var bits envWordBits
+		seen := false
+		if !decodes {
+			if cached, ok := memo.envWords[word]; ok {
+				bits, seen = cached, true
+			}
+		}
+		if !seen {
+			literal, ok := launcherLiteralWord(word)
+			if !ok {
+				// Any dynamic word could expand into a protected
+				// assignment or env spelling the command line cannot
+				// show — unverifiable, refused wherever it sits.
+				return true
+			}
+			if decodes && strings.ContainsAny(literal, "\"'\\") {
+				// systemd-run unquotes and C-unescapes property
+				// values, so `Environment=CODEX""_HOME=/o` and
+				// `Environment=CODEX\x5fHOME=/o` both land
+				// CODEX_HOME. A word still carrying quote or escape
+				// text cannot be judged by the raw-text cut.
+				return true
+			}
+			bits = envWordBits{
+				hidden: launcherEnvFileSpelling(literal) || launcherArgFileSpelling(literal),
+				denied: launcherWordDenied(literal, names),
+				plain:  !strings.HasPrefix(literal, "-") && !strings.Contains(literal, "="),
+			}
+			if !decodes {
+				memo.envWords[word] = bits
+			}
+		}
+		if bits.hidden {
 			return true
 		}
-		if launcherEnvFileSpelling(literal) || launcherArgFileSpelling(literal) {
-			return true
-		}
-		if decodes && strings.ContainsAny(literal, "\"'\\") {
-			// systemd-run unquotes and C-unescapes property
-			// values, so `Environment=CODEX""_HOME=/o` and
-			// `Environment=CODEX\x5fHOME=/o` both land
-			// CODEX_HOME. A word still carrying quote or escape
-			// text cannot be judged by the raw-text cut.
-			return true
-		}
-		if launcherWordDenied(literal, names) {
+		if bits.denied {
 			if !requireCommand {
 				return true
 			}
 			denied = true
 			continue
 		}
-		if index > 0 && !strings.HasPrefix(literal, "-") &&
-			!strings.Contains(literal, "=") {
+		if index > 0 && bits.plain {
 			commandish = true
 		}
 	}
@@ -200,7 +222,7 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 // fails closed at the shared budget instead of running quadratic (Codex
 // P2 on this head).
 func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand, memo) {
 		return nil, true
 	}
 	if shadowedLiteralChildTailMutates(words, names, memo) {
@@ -228,7 +250,7 @@ func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTai
 // `systemd-run codex --scope` hands `--scope` to codex, and the unit still
 // resets (Codex P1 on this head).
 func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool, serviceOnly bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, true, requireCommand) {
+	if unwrapEnvInjectionLauncher(words, names, true, requireCommand, memo) {
 		return nil, true
 	}
 	if shadowedLiteralChildTailMutates(words, names, memo) {
@@ -243,7 +265,7 @@ func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo oper
 }
 
 func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand, memo) {
 		return nil, true
 	}
 	// docker's first argument is a subcommand leaf, not the pane's child
@@ -268,7 +290,7 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 // the tail reaches an agent program; `--setenv`/`--unsetenv` spellings are
 // covered by the lexical cut.
 func unwrapBwrap(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand, memo) {
 		return nil, true
 	}
 	for _, word := range words {
@@ -541,6 +563,17 @@ var accountLauncherNames = map[string]struct{}{
 	"watch": {}, "pwsh": {}, "nu": {}, "busctl": {}, "gdbus": {},
 }
 
+// accountNamedLauncherNames is the #7603 subset of accountLauncherNames
+// — the launchers whose tails get the closure text rule. The name is
+// what selects the rule and its hidden-input table; a word in any of
+// these launcher's tails never has its option structure consulted.
+var accountNamedLauncherNames = map[string]struct{}{
+	"pkexec": {}, "doas": {}, "setpriv": {}, "machinectl": {},
+	"nix-shell": {}, "nix": {}, "flatpak-spawn": {}, "ssh": {},
+	"tmux": {}, "distrobox": {}, "toolbox": {},
+	"watch": {}, "pwsh": {}, "nu": {}, "busctl": {}, "gdbus": {},
+}
+
 func isAccountLauncherName(word *syntax.Word) bool {
 	literal, ok := literalShellWord(word)
 	if !ok {
@@ -699,38 +732,14 @@ func launcherSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo
 		_, unsafe = unwrapSystemctlEnvironmentWriter(words[1:], names, memo, true)
 	case isAccountCommandName(words[0], "dbus-update-activation-environment"):
 		_, unsafe = unwrapDbusUpdateActivationEnvironment(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "pkexec"):
-		_, unsafe = unwrapPkexec(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "doas"):
-		_, unsafe = unwrapDoas(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "setpriv"):
-		_, unsafe = unwrapSetpriv(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "machinectl"):
-		_, unsafe = unwrapMachinectl(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "nix-shell"):
-		_, unsafe = unwrapNixShell(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "nix"):
-		_, unsafe = unwrapNix(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "flatpak-spawn"):
-		_, unsafe = unwrapFlatpakSpawn(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "ssh"):
-		_, unsafe = unwrapSSH(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "tmux"):
-		_, unsafe = unwrapTmux(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "distrobox"):
-		_, unsafe = unwrapDistrobox(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "toolbox"):
-		_, unsafe = unwrapToolbox(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "watch"):
-		_, unsafe = unwrapWatch(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "pwsh"):
-		_, unsafe = unwrapPwshNu(words[1:], names, memo, true, pwshOptions, true)
-	case isAccountCommandName(words[0], "nu"):
-		_, unsafe = unwrapPwshNu(words[1:], names, memo, true, nuOptions, false)
-	case isAccountCommandName(words[0], "busctl"):
-		_, unsafe = unwrapBusctl(words[1:], names, memo, true, false)
-	case isAccountCommandName(words[0], "gdbus"):
-		_, unsafe = unwrapBusctl(words[1:], names, memo, true, true)
+	default:
+		// #7603's named launchers — one literalize, one map lookup, the
+		// closure text rule on the tail.
+		if literal, ok := launcherLiteralWord(words[0]); ok {
+			if _, named := accountNamedLauncherNames[filepath.Base(literal)]; named {
+				_, unsafe = unwrapNamedLauncher(words[1:], names, memo, true, filepath.Base(literal))
+			}
+		}
 	}
 	return unsafe
 }

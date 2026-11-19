@@ -16,7 +16,7 @@ import (
 // the payload's DECODED words get the agent-reach check too.
 func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
 	payloads := runnerPayloads(words)
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand, memo) {
 		return nil, true
 	}
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
@@ -48,7 +48,7 @@ func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailM
 // stdin-feed one this position cannot see (Codex P1 on this head); the
 // rest of the argv gets the ordinary scans.
 func unwrapCommandRunner(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand, memo) {
 		return nil, true
 	}
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
@@ -144,21 +144,26 @@ func runnerPayloads(words []*syntax.Word) []string {
 // `sudo --preserve-env=CODEX_HOME su -c 'codex'` does not misjudge a
 // still-pinned agent as reset.
 // reachWorkLimit is the total literalize-and-parse budget one
-// validation's reset-reach exploration may spend. The every-reading
-// judgement re-enters itself through nested runner words — a named
-// launcher's candidate payloads re-parse and reach another launcher's
+// validation's reset-reach exploration may spend. The reset-reach
+// judgement re-enters itself through nested launcher words — a named
+// launcher's tail words re-enter the walk and reach another launcher's
 // tail — so the bound is a TOTAL across the recursion, not only the
-// #7610 depth cap: each literalize and each candidate parse spends,
-// each distinct candidate string is judged once through the seen map,
-// and spending past the limit is undecodable, which means refuse.
+// #7610 depth cap: each literalize and each tail scan spends, each
+// named-launcher word verdict is memoized once in the shared map, and
+// spending past the limit is undecodable, which means refuse.
 const reachWorkLimit = 16384
 
 // reachBudget is the shared work bound for one validation's reset-reach
 // judgements — carried on operandTailMemo so every launcher arm and
-// buried suffix in the same command draws on it.
+// buried suffix in the same command draws on it. namedWords memoizes the
+// closure rule's per-word verdicts: a buried launcher's suffix
+// judgements rescan the same tail words (ssh … ssh make), and without
+// the memo each rescan pays a literalize per position per word —
+// quadratic.
 type reachBudget struct {
-	left int
-	seen map[string]bool
+	left       int
+	seen       map[string]bool
+	namedWords map[namedWordKey]namedWordVerdict
 }
 
 // spend charges n visits; a false return means the budget is spent and
@@ -170,7 +175,7 @@ func (b *reachBudget) spend(n int) bool {
 
 func payloadReachesAgentProgram(script string, names, preserved map[string]struct{}, b *reachBudget) bool {
 	if b == nil {
-		b = &reachBudget{left: reachWorkLimit, seen: map[string]bool{}}
+		b = &reachBudget{left: reachWorkLimit, seen: map[string]bool{}, namedWords: map[namedWordKey]namedWordVerdict{}}
 	}
 	if b.seen[script] {
 		// Judged already in this validation — a candidate that reached
@@ -253,14 +258,11 @@ func suResetsEnvironment(words []*syntax.Word) bool {
 // payload — their `-c` operand decodes AFTER an outer launcher's reset
 // dropped the pane's pins, so `sudo su -c 'co""dex' root` reaches codex
 // even though `co""dex` isn't a literal agent word in sudo's tail (Codex
-// P2 on this head).
+// P2 on this head). #7603's named launchers are absent: their tails get
+// the closure text rule — every piece judged by name — rather than a
+// payload location.
 var commandRunnerPrograms = map[string]struct{}{
 	"su": {}, "runuser": {}, "script": {},
-	// #7603's named command-string runners — a non-shell program whose
-	// argv hands a command line to a shell or a remote environment. Each
-	// has its own payload grammar in runnerPayloadCandidates.
-	"watch": {}, "ssh": {}, "tmux": {}, "nix-shell": {}, "nix": {},
-	"distrobox": {}, "toolbox": {}, "pwsh": {}, "nu": {},
 }
 
 // commandRunnerProgram reports whether base names a command-string runner —
@@ -390,16 +392,13 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 		return tailReachesResetAgentProgram(rest, names, preserved, false, sudoOperandOptions, sudoFlags, b)
 	case "systemd-run", "run0":
 		return tailReachesResetAgentProgram(rest, names, preserved, false, systemdRunOperandOptions, systemdRunFlags, b)
-	case "pkexec", "doas", "setpriv", "flatpak-spawn", "ssh", "machinectl",
-		"nix-shell", "nix", "distrobox", "toolbox":
-		// The any-reading judgement: every literal word a possible
-		// command start or write, and the argv-preserved/joined/
-		// shell-carrying candidates judged by the same reach.
-		return namedLauncherResetReach(rest, names, preserved, base, b)
-	case "tmux":
-		return tmuxResetReach(rest, names, preserved, b)
 	case "bwrap", "systemctl", "dbus-update-activation-environment":
 		return tailReachesResetAgentProgram(rest, names, preserved, false, nil, nil, b)
+	}
+	if _, ok := accountNamedLauncherNames[base]; ok {
+		// The closure rule: every piece of the named launcher's tail is
+		// judged by name — no payload location, no option grammar.
+		return namedLauncherTailRefuses(rest, names, preserved, base, b)
 	}
 	return false
 }
@@ -426,17 +425,26 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 		if idx := strings.LastIndexByte(base, '/'); idx >= 0 {
 			base = base[idx+1:]
 		}
+		if _, named := accountNamedLauncherNames[base]; named && !done["named:"+base] {
+			done["named:"+base] = true
+			// A named launcher's tail gets the closure text rule — its
+			// whole suffix judged once per family, never re-scanned per
+			// later word.
+			if namedLauncherTailRefuses(words[i+1:], names, preserved, base, b) {
+				return true
+			}
+		}
 		if !commandRunnerProgram(base) || done[base] {
 			continue
 		}
 		done[base] = true
 		// One collector call per runner family per tail — the first
-		// head's every-reading scan already literalizes the whole
+		// head's scan already literalizes the whole
 		// suffix and a later same-name word's tail is covered inside
 		// those candidates' own parses (the same family dedupe
 		// callRunnerPayloadCandidates keeps). Without it N runner
-		// words rescan N tails — the quadratic the every-reading
-		// rule's total work bound removes.
+		// words rescan N tails — the quadratic the shared reach
+		// budget's memoization removes.
 		if !b.spend(len(words) - i) {
 			return true
 		}
@@ -457,21 +465,13 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 // runner: su/runuser/script take util-linux's getopt spellings (runnerPayloads
 // reads attached `-cX` and `--command` forms), while the shells attach no
 // operand to -c — `sh -ce 'x'` runs `x`, not `e` — so a shell word hands its
-// tail to shellDashCPayloadCandidates (Codex P1 on this head). The #7603 named
-// launchers take the any-reading collector — every command-string shape the
-// tail can carry — and pwsh/nu keep their input-source classifier. A
-// collector's undecodable mark refuses wherever a payload would be judged.
+// tail to shellDashCPayloadCandidates (Codex P1 on this head). The #7603
+// named launchers are absent: their tails get the closure text rule, not a
+// payload location. A collector's undecodable mark refuses wherever a
+// payload would be judged.
 func runnerPayloadCandidates(base string, words []*syntax.Word) ([]string, bool) {
 	if _, ok := shellBaseName(base); ok {
 		return shellDashCPayloadCandidates(words), false
-	}
-	switch base {
-	case "watch", "ssh", "tmux", "nix-shell", "nix", "distrobox", "toolbox":
-		return namedRunnerTailPayloads(words, base)
-	case "pwsh":
-		return pwshNuPayloads(words)
-	case "nu":
-		return nuPayloads(words)
 	}
 	return runnerPayloads(words), false
 }

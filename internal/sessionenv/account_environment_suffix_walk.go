@@ -75,12 +75,25 @@ type operandTailMemo struct {
 	// straceRuns memoizes strace option-run verdicts per position; see
 	// straceOptionRunRefused.
 	straceRuns map[straceRunKey]straceRunVerdict
-	// reach bounds the every-reading reset-reach work across this whole
+	// envWords: unwrapEnvInjectionLauncher's per-word verdicts — a word's
+	// hidden/denied/plain classification is position-independent, so each
+	// word classifies once and every later suffix judgement reuses it.
+	envWords map[*syntax.Word]envWordBits
+	// reach bounds the reset-reach exploration work across this whole
 	// validation — shared by pointer like childJudgements, so nested
 	// launcher tails (a tmux inside an ssh inside a watch) draw on one
 	// total budget, not a per-arm one. Spending past it is undecodable,
 	// which means refuse.
 	reach *reachBudget
+}
+
+// envWordBits is one word's env-injection classification — the pieces of
+// unwrapEnvInjectionLauncher's scan that are position-independent:
+// hidden (an env-file/arg-file spelling), denied (a protected-name
+// segment), plain (a bare word — the commandish marker the
+// requireCommand rule needs).
+type envWordBits struct {
+	hidden, denied, plain bool
 }
 
 func newOperandTailMemo() operandTailMemo {
@@ -104,7 +117,8 @@ func newOperandTailMemo() operandTailMemo {
 		xargsMarkerAnywhereMap: map[xargsMarkerKey]bool{},
 		xargsNested:            map[xargsNestedKey]xargsNestedResult{},
 		xargsNestedAny:         map[xargsMarkerKey]bool{},
-		reach:                  &reachBudget{left: reachWorkLimit, seen: map[string]bool{}},
+		envWords:               map[*syntax.Word]envWordBits{},
+		reach:                  &reachBudget{left: reachWorkLimit, seen: map[string]bool{}, namedWords: map[namedWordKey]namedWordVerdict{}},
 		literalChildTails:      map[*syntax.Word]bool{},
 		childJudgements:        new(int),
 		straceRunWork:          new(int),

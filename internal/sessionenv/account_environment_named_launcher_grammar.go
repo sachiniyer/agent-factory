@@ -6,40 +6,22 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// This file holds the small classification tables #7603's named
-// launchers still need — and ONLY those. The review rule on this head
-// (the third Codex round) is that the verdict must not depend on
-// parsing a launcher's option grammar: the gate refuses when ANY
-// reading of the tail could reach the account's agent under a reset or
-// write a protected name, so option arity tables were removed. What
-// remains is input-source classification (a word whose operand is input
-// the gate cannot see is a refusal, never a parse) and the launchers'
-// own verb/name tables.
-
-// tmux's pane-creating subcommands and their documented aliases (scope
-// answer on #7603). Pane commands run under the tmux SERVER's
-// environment, never the pane's, so they are reset-class. The #7464
-// respawn guard exempts these two map-literal lines by exact content —
-// a respawn string anywhere else still fails the guard.
-var tmuxPaneCreatingSubcommands = map[string]struct{}{
-	"new-session": {}, "new": {},
-	"new-window": {}, "neww": {},
-	"split-window": {}, "splitw": {},
-	"respawn-pane": {}, "respawnp": {},
-	"respawn-window": {}, "respawnw": {},
-}
-
-// busctl/gdbus call words that WRITE a service manager's environment —
-// the writer class of issue #7603 item 3.
-var dbusEnvironmentWriteMethods = map[string]struct{}{
-	"SetEnvironment": {}, "UnsetEnvironment": {},
-	"ImportEnvironment": {}, "SetEnvironmentVariable": {},
-}
-
-// ---------- shared tail readings ----------
+// This file holds the only per-launcher classification #7603 keeps — and
+// it is NOT an option grammar. The review rule on this head (the sixth
+// Codex round, decision on the PR) is that a modelled launcher's verdict
+// never asks where its command starts: every literal piece of the tail —
+// each argv word and every piece split on whitespace, `=`, `;`, `&`,
+// `|`, quotes and parentheses — is checked for the account's agent
+// program or a protected variable at identifier boundaries, and the tail
+// refuses when any piece names one, carries command-substitution or
+// dynamic-expansion text, or spells input the gate cannot see. What this
+// file holds is input-source classification only: which WORDS name a
+// file, a descriptor, stdin or a language the gate does not parse — the
+// same refusal class the gate gives `sh < f` and `sh -s`, applied by
+// word identity rather than by option position.
 
 // launcherTailLiterals renders every tail word as its literal — a word
-// that does not literalize (a substitution, an expansion) is input the
+// that does not literalize (a substitution, an expansion) is a name the
 // gate cannot see and makes the whole tail undecodable, which means
 // refuse.
 func launcherTailLiterals(words []*syntax.Word) ([]string, bool) {
@@ -54,58 +36,21 @@ func launcherTailLiterals(words []*syntax.Word) ([]string, bool) {
 	return literals, true
 }
 
-// joinTailLiterals renders literals joined with single spaces — the
-// command string a joining launcher (watch, ssh, tmux's one-word pane
-// command, nix -c) hands to `sh -c`.
-func joinTailLiterals(literals []string) string {
-	return strings.Join(literals, " ")
-}
-
-// quoteTailLiterals renders literals as a shell string that parses back
-// to EXACTLY that argv — every element single-quoted — for launchers
-// that exec their command argv without a shell. `/opt/agent
-// tools/codex` stays one program word whose final component names the
-// agent, where a space join would repurpose `tools/codex` as an
-// operand.
-func quoteTailLiterals(literals []string) string {
-	parts := make([]string, 0, len(literals))
-	for _, literal := range literals {
-		parts = append(parts, "'"+strings.ReplaceAll(literal, "'", `'\''`)+"'")
-	}
-	return strings.Join(parts, " ")
-}
-
-// literalCarriesShellSyntax reports whether a literal can bind two
-// program texts into one word or carry command syntax of its own —
-// anything outside the plain program-word alphabet `[A-Za-z0-9_./:+-]`.
-// Such a word is a candidate command string in its own right (`ssh host
-// 'a; codex'`, `tmux new-window 'CODEX_HOME=/o codex'`).
-func literalCarriesShellSyntax(literal string) bool {
-	for i := 0; i < len(literal); i++ {
-		c := literal[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '_' || c == '.' || c == '/' || c == ':' || c == '+' || c == '-':
-		default:
-			return true
-		}
-	}
-	return false
-}
-
 // ---------- hidden-input words ----------
 
 // namedLauncherHiddenWords lists, per launcher, the option spellings
-// whose operand is input the gate cannot see — a file, a descriptor, or
-// a language it does not parse. This is not an option grammar: a hidden
-// word refuses in every reading, and long names also match their
-// getopt_long unique-prefix abbreviations (`--env-f` is `--env-fd`).
+// whose operand is input the gate cannot see — a file, a descriptor,
+// stdin, or a language it does not parse. It is classification, not an
+// option grammar: the word refuses wherever it sits, attached or bare,
+// and abbreviation forms are covered by literalNamesHiddenInput — a word
+// the gate cannot attribute is already input it cannot see.
 var namedLauncherHiddenWords = map[string][]string{
 	// --env-fd sources the child environment from a descriptor;
 	// --unset-env-fd clears the same way.
 	"flatpak-spawn": {"--env-fd", "--unset-env-fd"},
 	// -F sources ssh's options from a config file that can carry
-	// ProxyCommand — a command the gate cannot read.
+	// ProxyCommand — a command the gate cannot read. Lowercase -f is
+	// ssh's background flag, not input.
 	"ssh": {"-F"},
 	// tmux -f sources a config file — a file is command input the gate
 	// cannot see (set-environment/new-window lines), and
@@ -121,228 +66,155 @@ var namedLauncherHiddenWords = map[string][]string{
 		"--arg-from-file", "--arg-from-stdin"},
 	"nix": {"-E", "--expr", "--arg", "--argstr", "-I", "--include",
 		"--arg-from-file", "--arg-from-stdin"},
+	// pwsh's hidden forms (case-insensitive — PowerShell resolves
+	// options case-insensitively): -EncodedCommand and its -e/-enc
+	// abbreviations carry base64 the text cannot show, -File and the
+	// console/settings/configuration/pipe-name options read files and
+	// channels, -NoExit/-Interactive/-Login keep or open an interactive
+	// stdin, and a bare `-` is the stdin marker.
+	"pwsh": {"-e", "-ec", "-enc", "-encodedcommand", "-f", "-file",
+		"-psconsolefile", "-custompipename", "-noexit", "-i",
+		"-interactive", "-l", "-login", "-settingsfile",
+		"-configurationname", "-configurationfile", "-"},
+	// nu's hidden forms (clap spellings, case-sensitive): the config and
+	// plugin files are evaluated, -e/--execute falls through to the REPL
+	// after its command, and stdin/login/mcp/ide forms all read input
+	// the gate cannot see.
+	"nu": {"-e", "--execute", "--config", "--env-config",
+		"--plugin-config", "--stdin", "-i", "--interactive", "-l",
+		"--login", "-m", "--mcp", "--ide-grep", "--ide-jump",
+		"--ide-hover", "--ide-complete", "--ide-check", "--ide-ast", "-"},
 }
 
-// literalNamesHiddenInput reports whether literal spells a hidden-input
-// word for the launcher: the word itself, a `--x=value` attachment, a
-// clustered `-Xvalue` spelling, or a unique-prefix abbreviation of a
-// `--` entry.
-func literalNamesHiddenInput(literal string, hidden []string) bool {
-	for _, word := range hidden {
-		if literal == word {
-			return true
-		}
-		if strings.HasPrefix(literal, word+"=") {
-			return true
-		}
-		if !strings.HasPrefix(word, "--") && strings.HasPrefix(literal, word) && len(literal) > len(word) {
-			// A single-dash word attaches its operand: `-Fcfg`.
-			return true
-		}
+// namedLauncherNonHiddenNames lists, per launcher that needs it, the
+// option names a hidden-word abbreviation must NOT be attributed to: a
+// `-` word that prefixes only hidden names refuses, but one that also
+// prefixes a visible option is ambiguous in the real launcher — it
+// errors, which carries no hidden input. pwsh resolves unique
+// single-dash prefixes (`-com` is -Command, `-enc` is -EncodedCommand),
+// so it needs the full non-hidden set; nu's clap does no abbreviation,
+// so only its long names matter for `--` prefix clashes.
+var namedLauncherNonHiddenNames = map[string][]string{
+	"pwsh": {"-c", "-command", "-commandwithargs", "-nologo",
+		"-noprofile", "-noninteractive", "-sta", "-mta",
+		"-outputformat", "-inputformat", "-windowstyle",
+		"-executionpolicy", "-workingdirectory",
+		"-experimentalfeature", "-version", "-v", "-help", "-h", "-?"},
+	"nu": {"-c", "--commands", "--log-level", "--log-target",
+		"--threads", "-t", "--testbin", "--error-style",
+		"--no-config-file", "-n", "--no-std-lib", "--no-history",
+		"-v", "--version", "-h", "--help"},
+}
+
+// namedLauncherTailPayloadWords lists, per launcher, the option spellings
+// whose operand is the command string. A payload word at the very end of
+// the tail — or followed only by `-` — reads its command from stdin,
+// which is the same hidden input the table above refuses. Payload words
+// WITH a following operand carry their command as text the piece scan
+// already judges.
+var namedLauncherTailPayloadWords = map[string][]string{
+	"pwsh": {"-c", "-command", "-commandwithargs"},
+	"nu":   {"-c", "--commands"},
+}
+
+// namedLauncherDecodesOperands names the launchers whose operand text is
+// an encoded format the gate decodes before the piece scan — gdbus
+// parses its call operands as GVariant text, so a `CODEX\u005fHOME`
+// spelling lands the underscore the raw text cannot see.
+var namedLauncherDecodesOperands = map[string]struct{}{
+	"gdbus": {},
+}
+
+// namedLauncherInfoWords lists, per REPL-class launcher, the flag
+// spellings that print and exit without any command input — a tail
+// carrying one never falls to stdin. pwsh resolves unique single-dash
+// prefixes, so a word that uniquely prefixes an info name is one.
+var namedLauncherInfoWords = map[string][]string{
+	"pwsh": {"-version", "-v", "-help", "-h", "-?"},
+	"nu":   {"-v", "--version", "-h", "--help"},
+}
+
+// literalSpellsInfoWord reports whether literal spells an info flag for
+// the launcher — exactly, or as pwsh's unique single-dash prefix.
+func literalSpellsInfoWord(literal, launcher string) bool {
+	name := literal
+	if launcher == "pwsh" {
+		name = strings.ToLower(name)
 	}
-	// Long-option unique-prefix abbreviations: a `--` word that prefixes
-	// a hidden entry may spell it (`--env-f` -> `--env-fd`). A prefix
-	// cannot be attributed without the launcher's full table, so any
-	// prefix match at all refuses: an operand the gate cannot attribute
-	// is already input it cannot see.
-	for _, word := range hidden {
-		if strings.HasPrefix(word, literal) && strings.HasPrefix(literal, "--") && len(literal) > 2 {
+	for _, word := range namedLauncherInfoWords[launcher] {
+		if name == word {
+			return true
+		}
+		if len(name) > 2 && strings.HasPrefix(name, "-") &&
+			!strings.HasPrefix(name, "--") && strings.HasPrefix(word, name) {
 			return true
 		}
 	}
 	return false
 }
 
-// ---------- pwsh / nu option classification ----------
-
-// pwshNuOptionKind classifies one pwsh/nu option spelling — the gate does
-// not parse their payload grammar, so each option maps to what it does to
-// the input stream rather than to a flag/operand arity alone.
-type pwshNuOptionKind int
-
-const (
-	pwshNuFlag    pwshNuOptionKind = iota // bare flag — no operand, no input
-	pwshNuOperand                         // consumes the next word — data, not input
-	pwshNuPayload                         // consumes the next word — the command string
-	pwshNuTail                            // the whole REMAINING argv joins into the command (pwsh -Command)
-	pwshNuHidden                          // reads input the gate cannot see — refuse
-	pwshNuInfo                            // prints information and exits
-)
-
-// pwsh's option universe (dash-stripped, lowercase). pwsh accepts unique
-// single-dash prefixes — `-com` is -Command, `-enc` is -EncodedCommand —
-// so classification resolves a word by prefix across this whole table;
-// an ambiguous or unknown prefix makes the invocation undecodable.
-// Settings/console/configuration files and the named-pipe forms are
-// hidden input: they load files or channels whose content executes.
-var pwshOptions = map[string]pwshNuOptionKind{
-	"c": pwshNuTail, "command": pwshNuTail, "commandwithargs": pwshNuPayload,
-	"encodedcommand": pwshNuHidden, "ec": pwshNuHidden, "e": pwshNuHidden,
-	"file": pwshNuHidden, "f": pwshNuHidden, "psconsolefile": pwshNuHidden,
-	"custompipename": pwshNuHidden, "noexit": pwshNuHidden,
-	"interactive": pwshNuHidden, "i": pwshNuHidden, "login": pwshNuHidden,
-	"settingsfile": pwshNuHidden, "configurationname": pwshNuHidden,
-	"configurationfile": pwshNuHidden,
-	"nologo":            pwshNuFlag, "noprofile": pwshNuFlag, "noninteractive": pwshNuFlag,
-	"sta": pwshNuFlag, "mta": pwshNuFlag,
-	"outputformat": pwshNuOperand, "inputformat": pwshNuOperand,
-	"windowstyle": pwshNuOperand, "executionpolicy": pwshNuOperand,
-	"workingdirectory": pwshNuOperand, "experimentalfeature": pwshNuOperand,
-	"version": pwshNuInfo, "v": pwshNuInfo, "help": pwshNuInfo,
-	"h": pwshNuInfo, "?": pwshNuInfo,
-}
-
-// nu's option universe — clap spellings, exact match only: -c/--commands
-// takes a bounded command string; --config/--env-config/--plugin-config
-// load files that are parsed and evaluated, -e/--execute falls through
-// to the REPL after its command, and the ide/mcp/stdin forms all read
-// input the gate cannot see.
-var nuOptions = map[string]pwshNuOptionKind{
-	"c": pwshNuPayload, "commands": pwshNuPayload,
-	"e": pwshNuHidden, "execute": pwshNuHidden,
-	"config": pwshNuHidden, "env-config": pwshNuHidden,
-	"plugin-config": pwshNuHidden,
-	"log-level":     pwshNuOperand, "log-target": pwshNuOperand,
-	"threads": pwshNuOperand, "t": pwshNuOperand,
-	"testbin": pwshNuOperand, "error-style": pwshNuOperand,
-	"stdin": pwshNuHidden, "i": pwshNuHidden, "interactive": pwshNuHidden,
-	"l": pwshNuHidden, "login": pwshNuHidden, "m": pwshNuHidden,
-	"mcp": pwshNuHidden, "ide-grep": pwshNuHidden, "ide-jump": pwshNuHidden,
-	"ide-hover": pwshNuHidden, "ide-complete": pwshNuHidden,
-	"ide-check": pwshNuHidden, "ide-ast": pwshNuHidden,
-	"no-config-file": pwshNuFlag, "n": pwshNuFlag, "no-std-lib": pwshNuFlag,
-	"no-history": pwshNuFlag,
-	"v":          pwshNuInfo, "version": pwshNuInfo, "h": pwshNuInfo, "help": pwshNuInfo,
-}
-
-// pwshNuClassify walks pwsh/nu argv under its option universe: EVERY `-`
-// word must classify — payload operand, plain operand, flag, hidden
-// input, or info — and hidden input refuses regardless of whether a
-// command operand was found (`pwsh -NoExit -Command Get-Date` still
-// drops to an interactive stdin, `pwsh -Command -` reads stdin, and
-// `nu --config f -c ls` evaluates f first). positional marks a bare word
-// before the first payload operand — a script file; words after a
-// single-operand payload are the script's argv and carry no judgement.
-// Returns the payload texts (every payload operand — `nu -c a -c b` runs
-// both), a positional-before-payload marker, an info flag marker, and
-// undecodable.
-func pwshNuClassify(words []*syntax.Word, options map[string]pwshNuOptionKind, abbrev bool) (payloads []string, positional, info, undecodable bool) {
-	payloadSeen := false
-	for i := 0; i < len(words); i++ {
-		literal, ok := launcherLiteralWord(words[i])
-		if !ok {
-			return nil, false, false, true
+// literalNamesHiddenInput reports whether literal spells a hidden-input
+// word for the launcher: the word itself, a `--x=value` attachment, a
+// clustered `-Xvalue` spelling, or a prefix-abbreviated spelling
+// (`--env-f` is `--env-fd`; pwsh's `-en` is -EncodedCommand). A prefix
+// that also spells a non-hidden name is ambiguous in the real launcher —
+// it errors — so only a hidden-only prefix refuses.
+func literalNamesHiddenInput(literal, launcher string) bool {
+	name := literal
+	if launcher == "pwsh" {
+		name = strings.ToLower(name)
+	}
+	hidden := namedLauncherHiddenWords[launcher]
+	// pwsh resolves unique single-dash prefixes, so a word that spells a
+	// non-hidden option (`-ex` for -ExecutionPolicy) is that option, not
+	// an attached operand of the hidden name it starts with (`-e`).
+	nonHiddenPrefix := false
+	for _, known := range namedLauncherNonHiddenNames[launcher] {
+		if strings.HasPrefix(known, name) || known == name {
+			nonHiddenPrefix = true
+			break
 		}
-		if literal == "-" {
-			// A bare `-` is pwsh's stdin marker — command input the
-			// gate cannot see.
-			return nil, false, false, true
+	}
+	for _, word := range hidden {
+		if name == word || strings.HasPrefix(name, word+"=") {
+			return true
 		}
-		if !strings.HasPrefix(literal, "-") {
-			if !payloadSeen {
-				positional = true
-			}
+		if !nonHiddenPrefix && len(word) >= 2 && !strings.HasPrefix(word, "--") &&
+			strings.HasPrefix(name, word) && len(name) > len(word) {
+			// A single-dash word attaches its operand: `-Fcfg`, `-f/path`.
+			// (A bare `-` word is the stdin marker only by itself.)
+			return true
+		}
+	}
+	for _, word := range hidden {
+		if len(name) <= 2 || !strings.HasPrefix(name, "-") || !strings.HasPrefix(word, name) {
 			continue
 		}
-		name := strings.ToLower(strings.TrimLeft(literal, "-"))
-		optName, attached, hasAttached := strings.Cut(name, "=")
-		kind, known := pwshNuResolveOption(optName, options, abbrev)
-		if !known {
-			return nil, false, false, true
-		}
-		switch kind {
-		case pwshNuHidden:
-			return nil, false, false, true
-		case pwshNuInfo:
-			info = true
-		case pwshNuFlag:
-			if hasAttached {
-				return nil, false, false, true
-			}
-		case pwshNuOperand:
-			if _, ok2 := launcherOperandAt(words, i+1); !ok2 {
-				return nil, false, false, true
-			}
-			i++
-		case pwshNuTail:
-			// pwsh's -Command: EVERY word after it joins into the
-			// command — option parsing is over, so `pwsh -Command
-			// Write-Output '; codex'` judges the whole tail, not its
-			// first word. A `-Command=x` spelling is not a form pwsh
-			// accepts — undecodable, which means refuse.
-			if hasAttached {
-				return nil, false, false, true
-			}
-			var tail []string
-			for j := i + 1; j < len(words); j++ {
-				l, ok2 := launcherLiteralWord(words[j])
-				if !ok2 {
-					return nil, false, false, true
-				}
-				tail = append(tail, l)
-			}
-			if len(tail) == 0 {
-				// `-Command` with nothing after it reads the command
-				// from stdin — hidden input.
-				return nil, false, false, true
-			}
-			if len(tail) == 1 && tail[0] == "-" {
-				// `-Command -` reads the command from stdin.
-				return nil, false, false, true
-			}
-			payloads = append(payloads, strings.Join(tail, " "))
-			payloadSeen = true
-			i = len(words)
-		case pwshNuPayload:
-			if hasAttached {
-				payloads, payloadSeen = append(payloads, attached), true
-				continue
-			}
-			l, ok2 := launcherOperandAt(words, i+1)
-			if !ok2 {
-				return nil, false, false, true
-			}
-			if l == "-" {
-				// `-Command -` reads the command from stdin.
-				return nil, false, false, true
-			}
-			payloads, payloadSeen = append(payloads, l), true
-			i++
+		if !nonHiddenPrefix {
+			return true
 		}
 	}
-	return payloads, positional, info, false
+	return false
 }
 
-// launcherOperandAt yields the literal operand a consumed option takes —
-// a non-literal or missing operand makes the invocation undecodable.
-func launcherOperandAt(words []*syntax.Word, i int) (string, bool) {
-	if i >= len(words) {
-		return "", false
+// literalSpellsTailPayload reports whether literal spells a payload
+// (command-string) option word for the launcher — exactly, or as pwsh's
+// single-dash unique-prefix abbreviation of one.
+func literalSpellsTailPayload(literal, launcher string) bool {
+	name := literal
+	if launcher == "pwsh" {
+		name = strings.ToLower(name)
 	}
-	return launcherLiteralWord(words[i])
-}
-
-// pwshNuResolveOption resolves a dash-stripped option name against the
-// table — exact match, or pwsh's unique single-dash prefix abbreviation.
-func pwshNuResolveOption(name string, options map[string]pwshNuOptionKind, abbrev bool) (pwshNuOptionKind, bool) {
-	if kind, ok := options[name]; ok {
-		return kind, true
-	}
-	if !abbrev || len(name) < 2 {
-		return pwshNuFlag, false
-	}
-	matches := 0
-	var found pwshNuOptionKind
-	for opt, kind := range options {
-		if len(opt) > len(name) && strings.HasPrefix(opt, name) {
-			matches++
-			found = kind
+	for _, word := range namedLauncherTailPayloadWords[launcher] {
+		if name == word {
+			return true
+		}
+		if len(name) > 2 && strings.HasPrefix(name, "-") &&
+			!strings.HasPrefix(name, "--") && strings.HasPrefix(word, name) {
+			return true
 		}
 	}
-	if matches == 1 {
-		return found, true
-	}
-	return pwshNuFlag, false
+	return false
 }
 
 // ---------- GVariant text decoding ----------

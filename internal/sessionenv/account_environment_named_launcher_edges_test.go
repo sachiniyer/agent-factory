@@ -869,7 +869,9 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"pwsh -c 'codex'", true},
 		{"pwsh -com 'codex'", true},
 		{"pwsh -enc 'aGVsbG8='", true},
-		{"pwsh -c 'echo $HOME'", false},
+		// Expansion text is a name the gate cannot see — the accepted
+		// over-refusal the closure rule states in docs/usage-limits.md.
+		{"pwsh -c 'echo $HOME'", true},
 		{"pwsh script.ps1", true},
 		{"pwsh", true},
 		{"pwsh -NoProfile", true},
@@ -1006,7 +1008,7 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"nu -c 'make' -c 'codex'", true},
 		{"watch --exec env 'CODEX_HOME=/o' codex", true},
 		{"watch --exec env 'CODEX_\"\"HOME=/o; codex'", true},
-		{"watch --exec codex", false},
+		{"watch --exec codex", true},
 		{"nix develop -i --command=codex", true},
 		{"nix develop -i --comm codex", true},
 		// Codex round 3 — every one a launcher-option misparse under
@@ -1045,13 +1047,32 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"tmux -f/tmp/account.conf new-window make", true},
 		{"nix-shell --arg-from-file /tmp/f --run hello", true},
 		{"nix-shell --arg-from-stdin --run hello", true},
+		// Codex round 5 — the closure rule refuses each with no
+		// per-example code: a mutation spanning option boundaries
+		// still names a protected name in one piece, a
+		// whitespace-separated option value still carries the
+		// quote-obfuscated agent, and an attached hidden operand
+		// classifies on its own literal.
+		{`watch -n 1 export 'CODEX_""HOME=/o; codex'`, true},
+		{`ssh -o 'RemoteCommand co""dex' host`, true},
+		{"nu --log-level=info --config=/tmp/override.nu -c ls", true},
+		// The accepted over-refusal, measured: a tail that merely
+		// MENTIONS the agent or a protected name at a piece boundary
+		// refuses even though nothing reaches it — the docs state
+		// this class in usage-limits.md rather than hiding it.
+		{"ssh host 'cat notes/codex.md'", true},
+		{"tmux new-window 'vim codex.md'", true},
+		{"ssh host 'cat notes/make.md'", false},
 		// Small nested chains still admit when nothing reaches the
 		// agent — the budget only refuses the pathological tail.
 		{"ssh ssh make", false},
 		{"ssh ssh ssh ssh make", false},
-		{"pwsh -com 'Get-Process'", true}, // ambiguous with -CommandWithArgs -> undecodable
-		{"pwsh -comm 'Get-Process'", true},
-		{"pwsh -comma 'Get-Process'", true},
+		// -com/-comm/-comma abbreviate -Command/-CommandWithArgs —
+		// ambiguous in real pwsh, and both readings carry the command
+		// as text the piece rule sees, so they admit.
+		{"pwsh -com 'Get-Process'", false},
+		{"pwsh -comm 'Get-Process'", false},
+		{"pwsh -comma 'Get-Process'", false},
 		{"pwsh -command 'Get-Process'", false},
 		{"pwsh -commandw 'Get-Process' a", false},
 		{"tmux split-window -h 'make -j4'", false},

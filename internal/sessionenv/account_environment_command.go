@@ -540,99 +540,11 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		if unsafe {
 			return nil, false, true
 		}
-	case base == "pkexec":
+	case func() bool { _, named := accountNamedLauncherNames[base]; return named }():
+		// #7603's named launchers — the name selects the closure text
+		// rule on the tail; option structure is never consulted.
 		var unsafe bool
-		words, unsafe = unwrapPkexec(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "doas":
-		var unsafe bool
-		words, unsafe = unwrapDoas(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "setpriv":
-		var unsafe bool
-		words, unsafe = unwrapSetpriv(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "machinectl":
-		var unsafe bool
-		words, unsafe = unwrapMachinectl(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "nix-shell":
-		var unsafe bool
-		words, unsafe = unwrapNixShell(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "nix":
-		var unsafe bool
-		words, unsafe = unwrapNix(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "flatpak-spawn":
-		var unsafe bool
-		words, unsafe = unwrapFlatpakSpawn(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "ssh":
-		var unsafe bool
-		words, unsafe = unwrapSSH(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "tmux":
-		var unsafe bool
-		words, unsafe = unwrapTmux(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "distrobox":
-		var unsafe bool
-		words, unsafe = unwrapDistrobox(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "toolbox":
-		var unsafe bool
-		words, unsafe = unwrapToolbox(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "watch":
-		var unsafe bool
-		words, unsafe = unwrapWatch(words[1:], names, memo, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "pwsh":
-		var unsafe bool
-		words, unsafe = unwrapPwshNu(words[1:], names, memo, false, pwshOptions, true)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "nu":
-		var unsafe bool
-		words, unsafe = unwrapPwshNu(words[1:], names, memo, false, nuOptions, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "busctl":
-		var unsafe bool
-		words, unsafe = unwrapBusctl(words[1:], names, memo, false, false)
-		if unsafe {
-			return nil, false, true
-		}
-	case base == "gdbus":
-		var unsafe bool
-		words, unsafe = unwrapBusctl(words[1:], names, memo, false, true)
+		words, unsafe = unwrapNamedLauncher(words[1:], names, memo, false, base)
 		if unsafe {
 			return nil, false, true
 		}

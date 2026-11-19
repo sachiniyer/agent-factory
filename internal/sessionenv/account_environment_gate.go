@@ -172,8 +172,9 @@ func runnerPayloadFamily(base string) (string, bool) {
 	switch base {
 	case "su", "runuser", "script":
 		return "runner", true
-	case "watch", "ssh", "tmux", "nix-shell", "nix", "distrobox", "toolbox":
-		return base, true
 	}
+	// #7603's named launchers are absent: their tails get the closure
+	// text rule in the mutation walk's launcher arm — there is no payload
+	// to locate.
 	return "", false
 }
