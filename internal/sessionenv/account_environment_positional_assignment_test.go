@@ -579,15 +579,25 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"nohup run0 --setenv CODEX_HOME=/other codex", true},
 
 		// Identifier boundary (R6): a protected name matches only at the
-		// segment start, after a non-name character, or after a leading
-		// letters-only short-option cluster — so the startup name `ENV`
-		// embedded in NODE_ENV/RAILS_ENV no longer over-refuses the
-		// common spellings, while the cluster-joined forms still do.
+		// segment start, after a non-name character, or — in a dashed
+		// word's first segment — after a leading letters-only
+		// short-option cluster; and it must end the segment or be
+		// followed by a non-name byte — so the startup name `ENV`
+		// embedded in NODE_ENV/RAILS_ENV/ENVIRONMENT/MYENV no longer
+		// over-refuses the common spellings, while the cluster-joined
+		// forms still do.
 		{"docker run -e NODE_ENV=production app", false},
 		{"sudo RAILS_ENV=production make", false},
+		{"docker run -e ENVIRONMENT=staging app", false},
+		{"systemd-run --setenv ENVIRONMENT=staging codex", false},
+		{"docker run -e MYENV=1 app", false},
+		{"sudo DEVENV=1 make", false},
+		{"systemd-run --setenv=MYENV=1 codex", false},
 		{"docker run -e MY_CODEX_HOME=x app", false},
 		{"docker run -eENV=/x img", true},
+		{"docker run -itENV=x img", true},
 		{"sudo ENV=/tmp/evil codex", true},
+		{"sudo CODEX_HOME+=/tmp/evil codex", true},
 		{"systemd-run -EENV=/x codex", true},
 
 		// A word-leading `~` is literal for this scan (R7): tilde

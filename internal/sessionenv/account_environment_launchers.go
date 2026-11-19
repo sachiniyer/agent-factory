@@ -39,10 +39,12 @@ import (
 //     systemd's `--property=Environment=N=v` / `UnsetEnvironment=N` /
 //     `PassEnvironment=N` chains, abbreviations included
 //     (`--prop=Environment=…` cuts the same segments). The boundary is
-//     what keeps ordinary use admitted: `docker run -e
-//     NODE_ENV=production app` and `sudo RAILS_ENV=production …` embed
-//     `ENV` after `_`, which is not a boundary, so they run — while
-//     `-eENV=`, `-ECODEX_HOME=` and `"A=1 CODEX_HOME=` still refuse.
+//     what keeps ordinary use admitted — on both sides: `docker run -e
+//     NODE_ENV=production app`, `sudo RAILS_ENV=production …` and
+//     `docker run -e ENVIRONMENT=staging app` embed `ENV` next to a name
+//     byte, and `MYENV=1`/`DEVENV=1` are bare words whose `MY`/`DEV`
+//     prefix is no option cluster, so they run — while `-eENV=`,
+//     `-itENV=`, `-ECODEX_HOME=` and `"A=1 CODEX_HOME=` still refuse.
 //     Noun-uses pay for the conservatism — `docker run alpine echo
 //     CODEX_HOME=x` is refused even though the assignment is only argv
 //     text — because no lexical cut can separate argv text from an env
@@ -225,17 +227,23 @@ func launcherLiteralWord(word *syntax.Word) (string, bool) {
 // `-eCODEX_HOME=x` reads `eCODEX_HOME`, `--env=CODEX_HOME=x` reads
 // `CODEX_HOME`, `-E=CODEX_HOME` reads `CODEX_HOME`, and
 // `property=Environment=CODEX_HOME=x` lands `CODEX_HOME` as its own
-// segment.
+// segment. optionCluster marks a word that began with `-` — the only
+// place a leading letters-only prefix reads as a short-option cluster.
 func launcherWordDenied(literal string, names map[string]struct{}) bool {
-	return launcherSegmentsDenied(strings.TrimLeft(literal, "-"), names)
+	return launcherSegmentsDenied(strings.TrimLeft(literal, "-"), names,
+		strings.HasPrefix(literal, "-"))
 }
 
 // launcherSegmentsDenied reports whether any `=`-separated segment of
-// text names a protected variable at an identifier boundary.
-func launcherSegmentsDenied(text string, names map[string]struct{}) bool {
-	for _, segment := range strings.Split(text, "=") {
+// text names a protected variable at an identifier boundary. The
+// short-option-cluster reading applies only to the first segment — the
+// option text itself; a later segment is a VALUE (`--setenv=MYENV=1`
+// sets MYENV, so `ENV` inside it is still only a suffix of another name).
+func launcherSegmentsDenied(text string, names map[string]struct{}, optionCluster bool) bool {
+	for index, segment := range strings.Split(text, "=") {
+		cluster := optionCluster && index == 0
 		for name := range names {
-			if launcherSegmentNames(segment, name) {
+			if launcherSegmentNames(segment, name, cluster) {
 				return true
 			}
 		}
@@ -243,18 +251,28 @@ func launcherSegmentsDenied(text string, names map[string]struct{}) bool {
 	return false
 }
 
-// launcherSegmentNames reports whether segment contains name where the
-// match starts at an identifier boundary: the segment's start, after a
-// character outside [A-Za-z0-9_], or after a leading letters-only
-// short-option cluster (`eCODEX_HOME`, `teENV` — the cluster is option
-// text, not a name prefix). `NODE_ENV` and `RAILS_ENV` embed `ENV` after
-// `_`, which is not a boundary, so the ordinary spellings stay admitted.
-func launcherSegmentNames(segment, name string) bool {
+// launcherSegmentNames reports whether segment contains name at an
+// identifier boundary ON BOTH SIDES. On the left: the segment's start,
+// after a character outside [A-Za-z0-9_], or — only when the word began
+// with a dash — after a leading letters-only short-option cluster
+// (`-eENV`, `-itENV`: the cluster is option text, not a name prefix, so
+// `-eENV=x` still refuses while the same letters in the bare word
+// `MYENV=1` or `DEVENV=1` name a different variable). On the right: the
+// name must end the segment or be followed by a character outside
+// [A-Za-z0-9_] (the `=` and `+=` cut and every punctuation form), since
+// `ENVIRONMENT=staging` names ENVIRONMENT, not ENV. `NODE_ENV` and
+// `RAILS_ENV` embed `ENV` after `_`, which is not a boundary, so the
+// ordinary spellings stay admitted.
+func launcherSegmentNames(segment, name string, optionCluster bool) bool {
 	for i := 0; i+len(name) <= len(segment); i++ {
 		if segment[i:i+len(name)] != name {
 			continue
 		}
-		if i == 0 || !isEnvNameByte(segment[i-1]) || lettersOnly(segment[:i]) {
+		if i+len(name) < len(segment) && isEnvNameByte(segment[i+len(name)]) {
+			continue
+		}
+		if i == 0 || !isEnvNameByte(segment[i-1]) ||
+			(optionCluster && lettersOnly(segment[:i])) {
 			return true
 		}
 	}
