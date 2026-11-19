@@ -17,11 +17,12 @@ import (
 //
 // From 2.1.20 the dialog is the reworded one, and these builds paint it as
 // they ship:
-//   - 2.1.20 writes its footer as one string;
+//   - 2.1.20 writes its footer as one string, as every build through 2.1.97
+//     does;
 //   - 2.1.113 builds it from key hints, as every build from 2.1.98 does;
-//   - 2.1.200 is the next code shape, through 2.1.241;
-//   - 2.1.323, 2.1.327 and 2.1.328 put "No, exit" first, as every build from
-//     2.1.242 does.
+//   - 2.1.200 writes those hints as JSX, as 2.1.186 through 2.1.241 do;
+//   - 2.1.323, 2.1.327 and 2.1.328 put "No, exit" first, with the cursor on
+//     it.
 //
 // 2.0.25 through 2.1.19 paint it only in one arm of the trust_folder_dialog_copy
 // experiment, which the server hands out. The "reworded_arm" captures are
@@ -29,20 +30,23 @@ import (
 // "control" to "variant_normalize_action", in a scratch copy. 2.0.25 draws the
 // dialog in a round box with its footer below it, and 2.0.25 and 2.0.50 paint
 // "Esc to exit".
+//
+// key is the key af answers each one with: Enter when Claude Code painted the
+// cursor on "Yes, I trust this folder", and Down when it painted it on "No,
+// exit".
 var rewordedDialogFixtures = []struct {
-	name, footer string
-	keys         []string
+	name, footer, key string
 }{
-	{"claude_2_0_25_reworded_arm_folder_trust_dialog.ansi", legacyTrustFooter, []string{"Enter"}},
-	{"claude_2_0_50_reworded_arm_folder_trust_dialog.ansi", legacyTrustFooter, []string{"Enter"}},
-	{"claude_2_1_19_reworded_arm_folder_trust_dialog.ansi", rewordedTrustFooter, []string{"Enter"}},
-	{"claude_2_1_20_folder_trust_dialog.ansi", rewordedTrustFooter, []string{"Enter"}},
-	{"claude_2_1_113_folder_trust_dialog.ansi", rewordedTrustFooter, []string{"Enter"}},
-	{"claude_2_1_200_folder_trust_dialog.ansi", rewordedTrustFooter, []string{"Enter"}},
-	{rewordedDialogNoLinkFixture, rewordedTrustFooter, []string{"Down"}},
-	{rewordedDialogFixture, rewordedTrustFooter, []string{"Down"}},
-	{rewordedDialogOnYesFixture, rewordedTrustFooter, []string{"Enter"}},
-	{"claude_2_1_328_folder_trust_dialog.ansi", rewordedTrustFooter, []string{"Down"}},
+	{"claude_2_0_25_reworded_arm_folder_trust_dialog.ansi", legacyTrustFooter, "Enter"},
+	{"claude_2_0_50_reworded_arm_folder_trust_dialog.ansi", legacyTrustFooter, "Enter"},
+	{"claude_2_1_19_reworded_arm_folder_trust_dialog.ansi", rewordedTrustFooter, "Enter"},
+	{"claude_2_1_20_folder_trust_dialog.ansi", rewordedTrustFooter, "Enter"},
+	{"claude_2_1_113_folder_trust_dialog.ansi", rewordedTrustFooter, "Enter"},
+	{"claude_2_1_200_folder_trust_dialog.ansi", rewordedTrustFooter, "Enter"},
+	{rewordedDialogNoLinkFixture, rewordedTrustFooter, "Down"},
+	{rewordedDialogFixture, rewordedTrustFooter, "Down"},
+	{rewordedDialogOnYesFixture, rewordedTrustFooter, "Enter"},
+	{"claude_2_1_328_folder_trust_dialog.ansi", rewordedTrustFooter, "Down"},
 }
 
 // rewordedFooterSteps is a dialog painted from the frame its option block is
@@ -102,10 +106,21 @@ func TestIssue7618RealRewordedDialogsEndWithTheirFooterAndAreAnswered(t *testing
 			require.Equal(t, claudeFolderTrustComplete, claudeFolderTrustDialogOf(screen),
 				"the real dialog must read whole")
 
+			// The pane never changes, so a confirmed dialog never closes and
+			// af confirms it again on each later poll. Every key it sends is
+			// the one key, and it moves the cursor only once: it confirms
+			// nothing it has not seen land.
 			handled, cmds := pollStaticPane(t, content, 4)
 			require.True(t, handled, "the real dialog is in the way until it is answered")
-			require.Equal(t, fixture.keys, injectedKeyNames(sentKeystrokes(cmds)),
-				"af must move onto %q, or confirm it once the cursor is there", claudeTrustYesLabel)
+			keys := injectedKeyNames(sentKeystrokes(cmds))
+			require.NotEmpty(t, keys, "the real dialog must be answered")
+			for _, key := range keys {
+				require.Equal(t, fixture.key, key,
+					"af must move onto %q, or confirm it once the cursor is there; sent %v", claudeTrustYesLabel, keys)
+			}
+			if fixture.key == "Down" {
+				require.Len(t, keys, 1, "af moves the cursor once and waits for the repaint; sent %v", keys)
+			}
 		})
 	}
 }
