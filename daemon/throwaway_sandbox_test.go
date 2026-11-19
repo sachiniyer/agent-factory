@@ -873,7 +873,7 @@ func TestThrowawayWatchdogSettleIsFinalWithAnOwnerLookupInFlight(t *testing.T) {
 // report it fired. On master the loop sat inside the inline owner read and
 // could not observe the deadline at all while it was blocked.
 func TestThrowawayWatchdogSettleObservesADeadlineLandedDuringAStuckOwnerLookup(t *testing.T) {
-	oldLookup, oldScope, oldInterval := throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval
+	oldLookup, oldScope, oldInterval, oldNow := throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval, throwawayNowFn
 	started := make(chan struct{})
 	release := make(chan struct{})
 	throwawayScopeIDsFn = func() (string, string) { return "", "" }
@@ -883,12 +883,17 @@ func TestThrowawayWatchdogSettleObservesADeadlineLandedDuringAStuckOwnerLookup(t
 		return proctree.Process{}, proctree.ErrProcessExited
 	}
 	throwawayCheckInterval = 10 * time.Millisecond
+	// A fixed clock makes the arm-time wait exactly 1s: a wall-clock
+	// CreatedUnix truncates to the second and could leave less than one
+	// owner-poll interval before the deadline, expiring before the lookup
+	// ever runs (Codex).
+	throwawayNowFn = func() time.Time { return time.Unix(1_000_000, 0) }
 	defer func() {
-		throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval = oldLookup, oldScope, oldInterval
+		throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval, throwawayNowFn = oldLookup, oldScope, oldInterval, oldNow
 		close(release) // let a still-blocked lookup exit at test end
 	}()
 	m := &throwawaysandbox.Marker{
-		Version: 1, CreatedUnix: time.Now().Unix(), MaxLifetimeSeconds: 1,
+		Version: 1, CreatedUnix: 1_000_000, MaxLifetimeSeconds: 1,
 		OwnerPID: 42, OwnerStartID: 7,
 	}
 	fire := make(chan struct{})
