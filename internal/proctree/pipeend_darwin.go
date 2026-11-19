@@ -51,7 +51,7 @@ func holdsPipeEnd(pid int, ends []PipeEnd) (bool, error) {
 			uint64(fd), unsafe.Pointer(&buf[0]), int32(len(buf)))
 		if err != nil {
 			switch {
-			case errors.Is(err, syscall.EBADF), errors.Is(err, syscall.ENOENT):
+			case fdClosedSinceListing(err):
 				continue
 			case errors.Is(err, syscall.ESRCH):
 				return false, ErrProcessExited

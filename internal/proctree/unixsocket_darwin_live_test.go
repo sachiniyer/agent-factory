@@ -17,7 +17,10 @@ import (
 // every socket descriptor of the server this logs the raw socket_fdinfo fields
 // the decoder reads, then requires the listener to decode to the server's own
 // path. A refused decode fails with the bytes the kernel wrote, so a layout is
-// fixed from those rather than from a transcription.
+// fixed from those rather than from a transcription. A socket that closes
+// between the listing and its query is skipped under the unixSockets walk's
+// own EBADF/ENOENT rule (#4217): it was held, and its loss is not a failed
+// read.
 func TestSocketFdInfoOfARealTmuxServer(t *testing.T) {
 	dir := privateSocketDir(t)
 	sock := filepath.Join(dir, "s")
@@ -36,6 +39,9 @@ func TestSocketFdInfoOfARealTmuxServer(t *testing.T) {
 		var buf [socketFdInfoSize]byte
 		n, err := procInfoRaw(procInfoCallPIDFDInfo, server, procPIDFdSocketInfo,
 			uint64(fd), unsafe.Pointer(&buf[0]), int32(len(buf)))
+		if fdClosedSinceListing(err) {
+			continue // the unixSockets walk's own rule: closed since the listing
+		}
 		require.NoError(t, err, "proc_pidfdinfo(PROC_PIDFDSOCKETINFO) for fd %d", fd)
 		dump := socketFdInfoDump(buf[:])
 		t.Logf("server pid %d fd %d: the kernel wrote %d bytes\n%s", server, fd, n, dump)
