@@ -34,14 +34,17 @@ FAKE_BIN_DIR="$HOME/sandbox/bin"
 mkdir -p "$FAKE_BIN_DIR"
 rm -f "$TRUST_LOG"
 
-# Phase 1 paints the old-wording folder-trust dialog (claudeTrustPromptPresent
-# matches it verbatim) and blocks until a line answers it. Phase 2 renders a
+# Phase 1 paints the old-wording folder-trust dialog, its footer last as every
+# build that paints it does (claudeTrustPromptPresent answers it only once that
+# footer is whole, #7584), and blocks until a line answers it. Phase 2 renders a
 # "❯" composer (the claude readiness glyph) and echoes every delivered line so
 # the pane shows the mission after delivery.
 cat > "$FAKE_BIN_DIR/claude" <<EOF
 #!/usr/bin/env bash
 printf 'Do you trust the files in this folder?\n'
 printf '\xe2\x9d\xaf Yes  No\n'
+printf '\n'
+printf 'Enter to confirm \xc2\xb7 Esc to exit\n'
 IFS= read -r answer
 printf 'dialog-answer:%s:end\n' "\$answer" >> '$TRUST_LOG'
 printf '\n\xe2\x9d\xaf composer ready\n'

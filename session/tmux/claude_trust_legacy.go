@@ -38,16 +38,20 @@ const (
 //	option block    one unbroken run of option rows — a Yes and a No option,
 //	                inline ("❯ Yes  No") or stacked ("❯ 1. Yes" / "2. No")
 //	closing frame   optional, only after the option block
-//	footer          optional "Enter to confirm…", only after the option block
+//	footer          "Enter to confirm…", only after the option block
 //
-// A region with the whole grammar and the cursor on Yes is answerable. A region
-// that is a proper prefix of it — question and body with no options yet, or a
-// Yes row whose No row is not painted — is partial, as is a complete one whose
-// cursor is not on Yes. A region holding any row the dialog never paints is not
-// the dialog: a ❯ row that is not an option (a composer draft), a frame rule
-// between the question and the options (another box — the composer's), content
-// below the option block other than its frame and footer. A question quoted
-// inside prose is not a whole row, so it never opens a region at all.
+// A region with the whole grammar, its whole footer last and the cursor on Yes
+// is answerable. A region that is a proper prefix of it — question and body with
+// no options yet, a Yes row whose No row is not painted, or the whole option
+// block with its footer not yet painted or only begun — is partial, as is a
+// complete one whose cursor is not on Yes. Every build that paints this dialog
+// paints its footer last (claudeLegacyTrustFooters, #7584), so a dialog without
+// its whole footer is one still being painted. A region holding any row the
+// dialog never paints is not the dialog: a ❯ row that is not an option (a
+// composer draft), a frame rule between the question and the options (another
+// box — the composer's), content below the option block other than its frame
+// and footer. A question quoted inside prose is not a whole row, so it never
+// opens a region at all.
 //
 // The inline "❯ Yes  No" option row is the one shape a working composer's draft
 // can reproduce verbatim: the composer's prompt glyph is the same ❯ the picker
@@ -87,7 +91,7 @@ func claudeLegacyTrustDialogOf(screen visibleText) claudeLegacyTrustVerdict {
 		afterFooter
 	)
 	phase := inBody
-	var selected, yesSelected, hasNo bool
+	var selected, yesSelected, hasNo, footerWhole bool
 	var optionRows int
 	var inlinePairBlock bool
 	for i := question + 1; i < len(rows); i++ {
@@ -111,7 +115,7 @@ func claudeLegacyTrustDialogOf(screen visibleText) claudeLegacyTrustVerdict {
 			case row.blank || rule:
 				phase = afterOptions
 			case claudeTrustIsFooter(row.label):
-				phase = afterFooter
+				phase, footerWhole = afterFooter, claudeLegacyTrustFooterWhole(row.label)
 				continue
 			case !claudeLegacyOptionRow(row.label):
 				return claudeLegacyTrustNone
@@ -120,7 +124,7 @@ func claudeLegacyTrustDialogOf(screen visibleText) claudeLegacyTrustVerdict {
 			switch {
 			case row.blank || rule:
 			case claudeTrustIsFooter(row.label):
-				phase = afterFooter
+				phase, footerWhole = afterFooter, claudeLegacyTrustFooterWhole(row.label)
 			default:
 				return claudeLegacyTrustNone
 			}
@@ -160,9 +164,29 @@ func claudeLegacyTrustDialogOf(screen visibleText) claudeLegacyTrustVerdict {
 		if inlinePairBlock && claudeLegacyProseAboveQuestion(rows, question) {
 			return claudeLegacyTrustNone
 		}
+		// The footer is painted last, below the options. Until it is whole
+		// the dialog is still being painted: hold, and answer it on the
+		// frame that shows it whole (#7584).
+		if !footerWhole {
+			return claudeLegacyTrustPartial
+		}
 		return claudeLegacyTrustAnswerable
 	}
 	return claudeLegacyTrustPartial
+}
+
+// claudeLegacyTrustFooters are the footers Claude Code paints under the legacy
+// dialog. Every build af supports that paints the dialog, 2.0.25 through
+// 2.1.19, paints one of them as its last row: "Esc to exit" through 2.0.62, and
+// "Esc to cancel" from 2.0.63 (#7584). The one other text that row takes,
+// "Press Ctrl-C again to exit" while an exit key press is pending, is a row
+// this grammar does not read as the dialog's.
+var claudeLegacyTrustFooters = []string{claudeLegacyTrustFooter, claudeFolderTrustFooter}
+
+// claudeLegacyTrustFooterWhole reports whether a footer row is a whole
+// claudeLegacyTrustFooters entry rather than one still being painted.
+func claudeLegacyTrustFooterWhole(label string) bool {
+	return slices.Contains(claudeLegacyTrustFooters, strings.Join(strings.Fields(label), " "))
 }
 
 // claudeLegacyProseAboveQuestion reports whether any non-blank row is painted
