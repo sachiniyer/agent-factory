@@ -278,27 +278,23 @@ will not reach the child's environment.
   refuses with no command word needed — `systemctl --user set-environment
   CODEX_HOME=/o` and `dbus-update-activation-environment CODEX_HOME=/o`
   refuse, while `systemctl --user set-environment PORT=3000` and
-  `systemctl --user status sshd` run. A write counts as bulk — and
-  refuses — unless every word after the subcommand is provably a name: a
-  bare `import-environment` bulk-imports the caller's
-  entire environment — pins included — into the shared manager, and
-  `dbus-update-activation-environment --all` is the same bulk copy, while
-  an option's operand is not an import name — so
-  `systemctl --user import-environment`,
-  `systemctl -H host import-environment`,
-  `systemctl import-environment -H host` and
-  `dbus-update-activation-environment --all` refuse. An operand option
-  can swallow the writer word itself — `systemctl --property
-  set-environment import-environment` is a bulk import whose own operand
-  spelled `set-environment` — and an option spelling the gate can't
-  classify makes the rest of the line unverifiable, so a writer word
-  there refuses too (`systemctl --frobnicate set-environment FOO`), and a
-  dynamic subcommand can BE the writer — `systemctl --user "$verb"`
-  refuses because `verb=import-environment` is a bulk import — while
-  `systemctl --user import-environment FOO` and
-  `dbus-update-activation-environment DISPLAY` run (dbus's own
-  no-operand flags `--systemd`/`--verbose` are provable, so
-  `dbus-update-activation-environment --systemd DISPLAY` still runs).
+  `systemctl --user status sshd` run. The rule is deliberately lexical —
+  no option grammar: systemctl's option space is wide enough that every
+  grammar spelling was bypassed (operand before the writer, operand
+  after it, the writer itself swallowed as an operand, a writer after
+  `--`, a dynamic subcommand). So ANY non-literal word refuses, ANY
+  literal word naming a protected variable at an identifier boundary
+  refuses, and the LAST `set-environment`/`import-environment`/
+  `unset-environment` literal — the real subcommand — must be followed
+  by a non-empty run of plain env names: `systemctl --user
+  import-environment` and `systemctl --property set-environment
+  import-environment` (the operand spelled the first writer word; the
+  real import has no names) bulk-import the caller's whole environment
+  into the shared manager, so they refuse, while `systemctl --user
+  import-environment FOO` runs. `dbus-update-activation-environment` is
+  the writer itself, so every argv word must be a literal env name —
+  `--all` bulk-imports everything and refuses along with `--systemd
+  DISPLAY`, while `dbus-update-activation-environment DISPLAY` runs.
 - **Environment-resetting launchers refuse only when they deliver an
   agent** — a launcher that drops the pane's environment would unpick the
   account's pins silently, so when the reset environment's tail reaches an
@@ -327,12 +323,21 @@ will not reach the child's environment.
   --setenv=FOO=1 --scope codex`) are provable, so they still admit. And
   su follows util-linux's actual precedence: its login form wins over
   `-p`/`--preserve-environment`, so `su -lp -c 'codex' work` and `su -l
-  -p -c 'codex' work` refuse. su's `-c` operand is a script the shell
-  decodes — `co""dex` lands as `codex` — so the payload is re-judged as
-  a command line: a decoded denied write refuses regardless of login
-  (`su -c 'env CODEX_HOME=/o co""dex' work`), and under a login reset
-  the decoded agent name refuses too (`su -l -c 'co""dex' root`), while
-  `su -c 'co""dex' work` keeps the caller's environment and runs.
+  -p -c 'codex' work` refuse.
+- **Command-string runners decode their `-c` payloads** — the
+  `-c`/`--command`/`--session-command` operand of `su`, `runuser` and
+  `script` is a script the child shell decodes, so every spelling
+  getopt accepts — separate word, `=`-joined, clustered `-lc`, attached
+  `-cx`, unambiguous abbreviations like `--comm` — is re-judged as a
+  command line. `co""dex` lands as `codex`, so
+  `script -q -c 'export CODEX_""HOME=/other; codex' /dev/null` and
+  `su -l --session-command 'co""dex' root` refuse, while
+  `script -q /dev/null`, `script -c 'make' /tmp/build.log` and
+  `su -c 'co""dex' work` (no login flag — the caller's environment
+  survives) run. Interactive shells themselves stay refused wherever
+  they appear — `shellCommandIsUnproven` already covers `sh`/`bash`/
+  `zsh`/`dash`/`ksh`/`fish`/... at command position — so their `-c`
+  operands need no separate scan.
 
 A launcher buried inside another command's argv (`nohup sudo
 CODEX_HOME=/other codex`, `docker build env CODEX_HOME=/other codex`) is

@@ -112,7 +112,7 @@ var accountChildTailSuffixVerdictNames = map[string]struct{}{
 	// same lexical judgement for their own env spellings.
 	"sudo": {}, "docker": {}, "docker-compose": {}, "systemd-run": {},
 	"run0": {}, "podman": {}, "nerdctl": {}, "bwrap": {}, "su": {},
-	"script": {},
+	"runuser": {}, "script": {},
 	// systemctl's set-environment/import-environment/unset-environment and
 	// dbus-update-activation-environment WRITE a launcher's own environment
 	// source (the user service manager / dbus activation environment), so a

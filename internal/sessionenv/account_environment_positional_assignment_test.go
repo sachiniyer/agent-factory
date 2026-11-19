@@ -770,20 +770,21 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"systemctl -p set-environment import-environment FOO", false},
 		{"systemctl --property set-environment import-environment FOO", false},
 		{"systemctl -p set-environment status sshd", false},
-		// An option spelling the walk can't classify makes the rest of
-		// the line dark: a writer word hiding there could be an operand
-		// or a real bulk write, so it refuses; no writer in the dark
-		// region means an ordinary command line.
-		{"systemctl --frobnicate set-environment FOO", true},
+		// An option spelling the walk doesn't know can't swallow the
+		// writer check either: the LAST writer literal owns the name
+		// list, so `set-environment` after --frobnicate still writes a
+		// named FOO — while an option that consumed the writer leaves
+		// the real subcommand nameless.
+		{"systemctl --frobnicate set-environment FOO", false},
+		{"systemctl --frobnicate import-environment", true},
 		{"systemctl --frobnicate status sshd", false},
-		// A dynamic word can BE the writer — `verb=import-environment`
-		// would bulk-import the pane environment, and nothing after an
-		// unprovable subcommand can be verified as a name list.
+		// A dynamic word anywhere refuses — it could BE the writer
+		// (`verb=import-environment` bulk-imports the pane environment)
+		// or hide one, even after the `--` terminator (Codex P1).
 		{"systemctl --user \"$verb\" CODEX_HOME=/other", true},
+		{"systemctl --user -- \"$verb\" CODEX_HOME=/other", true},
 		{"systemctl --user \"$verb\" status", true},
-		// The non-literal only poisons the option/subcommand region:
-		// after a real subcommand the ordinary scan judges the tail.
-		{"systemctl --user status \"$unit\"", false},
+		{"systemctl --user status \"$unit\"", true},
 		{"dbus-update-activation-environment CODEX_HOME=/o", true},
 		{"dbus-update-activation-environment --systemd CODEX_HOME", true},
 		{"dbus-update-activation-environment DISPLAY WAYLAND_DISPLAY", false},
@@ -796,7 +797,12 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"dbus-update-activation-environment --all --systemd", true},
 		{"dbus-update-activation-environment", true},
 		{"dbus-update-activation-environment --systemd", true},
-		{"dbus-update-activation-environment --systemd DISPLAY", false},
+		// Every argv word must be a literal env name — no flag grammar:
+		// --systemd IS documented no-operand, but an option spelling is
+		// grammar the lexical rule does not model, so even the known
+		// flag with a safe name refuses rather than risk an operand
+		// posing as a name.
+		{"dbus-update-activation-environment --systemd DISPLAY", true},
 		{"dbus-update-activation-environment --verbose", true},
 		{"dbus-update-activation-environment --foo DISPLAY", true},
 		{"nohup systemctl --user set-environment CODEX_HOME=/o", true},
@@ -822,6 +828,14 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"su -c 'env CODEX_HOME=/o codex'", true},
 		{"su -c 'codex' work", false},
 		{"script -qc 'env CODEX_HOME=/o codex' /dev/null", true},
+		// script's -c payload is a script the child shell decodes, so it
+		// is re-judged as a command line: quotes inside it can't hide a
+		// denied write — `CODEX_""HOME` lands as `CODEX_HOME` (Codex
+		// P1).
+		{"script -q -c 'export CODEX_\"\"HOME=/other; codex' /dev/null", true},
+		{"script -c 'env CODEX_\"\"HOME=/o co\"\"dex' /dev/null", true},
+		{"script -qc 'co\"\"dex' /dev/null", false},
+		{"script -q /dev/null", false},
 		{"script -c 'make' /tmp/build.log", false},
 
 		// #7589 item 1b — the environment-reset arm (approved option A′):
@@ -932,6 +946,16 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"su -l -c 'env CODEX_HOME=/o co\"\"dex' work", true},
 		{"su -c 'env CODEX_HOME=/o co\"\"dex' work", true},
 		{"su -lccodex work", true},
+		// Every payload spelling getopt accepts reaches the re-judge:
+		// --session-command is su's other script operand, and --comm is
+		// its unambiguous --command abbreviation (Codex P2).
+		{"su -l --session-command 'co\"\"dex' root", true},
+		{"su -l --comm 'co\"\"dex' root", true},
+		{"su --session-command 'co\"\"dex' work", false},
+		{"su --comm 'co\"\"dex' work", false},
+		// runuser ships su's payload options and login reset.
+		{"runuser -l -c 'co\"\"dex' root", true},
+		{"runuser -c 'co\"\"dex' work", false},
 		// No login flag means the caller's environment survives — a bare
 		// agent name in the decoded payload stays admitted.
 		{"su -c 'co\"\"dex' work", false},

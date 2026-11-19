@@ -280,18 +280,20 @@ func unwrapBwrap(words []*syntax.Word, names map[string]struct{}, memo operandTa
 	return nil, false
 }
 
-// unwrapSu judges su. The `-c`/`--command` operand is a SCRIPT the shell
-// decodes — `co""dex` lands as `codex` — so it is re-judged as a command
-// line, not as a data word (Codex P2 on this head). The rest of the tail
-// gets the argv-position scan docker's does. su preserves the caller's
-// environment EXCEPT for `-`/`-l`/`--login` (and `-p`/
-// `--preserve-environment` overrides even those), so only a login form
-// counts as a reset — and under that reset the payload's DECODED words
-// get the agent-reach check too.
+// unwrapSu judges su and runuser. Their `-c`/`--command`/`--session-
+// command` operand is a SCRIPT the child shell decodes — `co""dex` lands
+// as `codex` — so every payload candidate is re-judged as a command line
+// (Codex P2 on this head). The rest of the tail gets the argv-position
+// scan docker's does. su preserves the caller's environment EXCEPT for
+// `-`/`-l`/`--login` (and `-p`/`--preserve-environment` overrides even
+// those), so only a login form counts as a reset — and under that reset
+// the payload's DECODED words get the agent-reach check too.
 func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	payload, hasPayload := suCommandPayload(words)
-	if hasPayload && commandMutatesAccountEnvironment(payload, names) {
-		return nil, true
+	payloads := runnerPayloads(words)
+	for _, payload := range payloads {
+		if commandMutatesAccountEnvironment(payload, names) {
+			return nil, true
+		}
 	}
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
@@ -299,49 +301,110 @@ func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailM
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
-	if suResetsEnvironment(words) &&
-		(tailReachesResetAgentProgram(words, nil, false) ||
-			(hasPayload && payloadReachesAgentProgram(payload))) {
+	if suResetsEnvironment(words) {
+		if tailReachesResetAgentProgram(words, nil, false) {
+			return nil, true
+		}
+		for _, payload := range payloads {
+			if payloadReachesAgentProgram(payload) {
+				return nil, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// unwrapCommandRunner judges command-string runners — sh, bash, zsh,
+// dash, ksh, script and their kin — whose `-c`/`--command` operand is a
+// script the child decodes (`script -q -c 'export CODEX_""HOME=/other;
+// codex'` exports the pin after the child's shell removed the quotes —
+// Codex P1 on this head). Every payload candidate is re-judged as a
+// command line; the rest of the argv gets the ordinary scans.
+func unwrapCommandRunner(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
+	for _, payload := range runnerPayloads(words) {
+		if commandMutatesAccountEnvironment(payload, names) {
+			return nil, true
+		}
+	}
+	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
+		return nil, true
+	}
+	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
 	}
 	return nil, false
 }
 
-// suCommandPayload returns the script handed to a shell by su's
-// `-c`/`--command` operand, in any spelling getopt accepts: `-c 'x'`,
-// `--command 'x'`, `--command=x`, a clustered `-lc 'x'` or the attached
-// `-cx`. getopt permutes, so the operand sits wherever the option was.
-func suCommandPayload(words []*syntax.Word) (string, bool) {
+// isRunnerCommandOption reports whether a long-option word names a
+// script-carrying operand: `-c`/`--command`/`--session-command` or an
+// unambiguous getopt_long abbreviation of one (`--comm`, `--sess` —
+// anything that is a non-empty prefix of a payload option).
+func isRunnerCommandOption(opt string) bool {
+	return len(opt) > 2 && (strings.HasPrefix("--command", opt) ||
+		strings.HasPrefix("--session-command", opt))
+}
+
+// runnerPayloads collects the script operands a command-string runner
+// hands to a shell, in every spelling: `-c x`, `--command x`,
+// `--command=x`, `--session-command x`, a clustered `-lc x`, the attached
+// `-cx`, and unambiguous long abbreviations (`--comm x`, `--sess=x`).
+// An unrecognized long option could abbreviate an operand-carrying
+// option the walk doesn't know — its following literal word is a payload
+// candidate too.
+func runnerPayloads(words []*syntax.Word) []string {
+	var payloads []string
 	for i := 0; i < len(words); i++ {
 		literal, ok := launcherLiteralWord(words[i])
 		if !ok {
 			continue
 		}
 		if literal == "--" {
-			return "", false
+			return payloads
 		}
-		if literal == "-c" || literal == "--command" {
+		if literal == "-c" {
 			if i+1 < len(words) {
-				return launcherLiteralWord(words[i+1])
+				if l, ok2 := launcherLiteralWord(words[i+1]); ok2 {
+					payloads = append(payloads, l)
+				}
+				i++
 			}
-			return "", false
+			continue
 		}
-		if strings.HasPrefix(literal, "--command=") {
-			return strings.TrimPrefix(literal, "--command="), true
+		if strings.HasPrefix(literal, "--") {
+			opt, val, hasVal := strings.Cut(literal, "=")
+			if isRunnerCommandOption(opt) {
+				if hasVal {
+					payloads = append(payloads, val)
+				} else if i+1 < len(words) {
+					if l, ok2 := launcherLiteralWord(words[i+1]); ok2 {
+						payloads = append(payloads, l)
+					}
+					i++
+				}
+				continue
+			}
+			// Unknown long option — its operand (if it takes one) could
+			// be a script: judge the next literal word as a payload.
+			if i+1 < len(words) {
+				if l, ok2 := launcherLiteralWord(words[i+1]); ok2 {
+					payloads = append(payloads, l)
+				}
+			}
+			continue
 		}
-		if strings.HasPrefix(literal, "-") && !strings.HasPrefix(literal, "--") {
+		if strings.HasPrefix(literal, "-") && len(literal) > 1 {
 			if idx := strings.IndexByte(literal[1:], 'c'); idx >= 0 {
 				if rest := literal[2+idx:]; rest != "" {
-					return rest, true
+					payloads = append(payloads, rest)
+				} else if i+1 < len(words) {
+					if l, ok2 := launcherLiteralWord(words[i+1]); ok2 {
+						payloads = append(payloads, l)
+					}
 				}
-				if i+1 < len(words) {
-					return launcherLiteralWord(words[i+1])
-				}
-				return "", false
 			}
 		}
 	}
-	return "", false
+	return payloads
 }
 
 // payloadReachesAgentProgram parses a `-c` script the way the shell will
@@ -369,45 +432,41 @@ func payloadReachesAgentProgram(script string) bool {
 }
 
 // unwrapScript judges util-linux script: `-c`'s payload is a shell script
-// read as data by the lexical cut, and the remaining argv is output files
-// — the argv-position scan covers both a shadowed script's exec and a
-// buried verdict word.
+// the child decodes, so it delegates to the command-runner judgment and
+// the remaining argv (output files) gets the argv-position scan.
 func unwrapScript(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
-		return nil, true
-	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
-		return nil, true
-	}
-	return nil, false
+	return unwrapCommandRunner(words, names, memo, requireCommand)
 }
 
-// unwrapSystemctlEnvironmentWriter judges systemctl: when its argv
-// carries a literal `set-environment`, `import-environment` or
-// `unset-environment` word, the command writes the service manager's
-// environment — a launcher's own environment source — so the lexical cut
-// applies to every word (the write is the effect; no command word need
-// follow). The write counts as BULK — and refuses — unless every word
-// after the subcommand is provably a NAME: a bare `import-environment`
-// copies the caller's WHOLE environment — this account's pins included —
-// into a manager another account's `systemd-run codex` later inherits,
-// and an option word like `-H` consumes the following word as its
-// operand, so `systemctl -H host import-environment` and
-// `systemctl import-environment -H host` carry no name list either — and
-// an operand option can swallow the writer word itself, so
-// `systemctl --property set-environment import-environment` reads as a
-// bulk import the name list can't see (Codex P1s on this head). Any
-// other systemctl command line gets the ordinary argv scan.
+// unwrapSystemctlEnvironmentWriter judges systemctl by a lexical rule —
+// deliberately NO option grammar: systemctl's option space is wide and
+// every option-grammar spelling this arm tried was bypassed (operand
+// before the writer, operand after it, the writer itself swallowed as an
+// operand, a writer hidden after `--`, a dynamic subcommand). So: ANY
+// non-literal word refuses (a dynamic word could BE the writer or hide
+// one), ANY literal word naming a protected variable at an identifier
+// boundary refuses, and the LAST `set-environment`/`import-environment`/
+// `unset-environment` literal — the real subcommand, since earlier ones
+// can only sit inside option operands — must be followed by a non-empty
+// run of plain env names, else the write is bulk or unprovable and
+// refuses. The name-list rule makes every swallowed-writer spelling
+// land the same verdict: what survives the write's own tail is checked.
 func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	writer, unprovable := systemctlEnvironmentWriterIndex(words)
-	if unprovable {
-		return nil, true
-	}
-	if writer >= 0 {
-		if !allLiteralNames(words[writer+1:]) ||
-			unwrapEnvInjectionLauncher(words, names, false, false) {
+	writer := -1
+	for i, word := range words {
+		literal, ok := launcherLiteralWord(word)
+		if !ok {
 			return nil, true
 		}
+		if unrecognizedWordProtectedKind(literal, names) != wordProtectedNone {
+			return nil, true
+		}
+		if isSystemctlEnvironmentWriter(literal) {
+			writer = i
+		}
+	}
+	if writer >= 0 && !allLiteralEnvNames(words[writer+1:]) {
+		return nil, true
 	}
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
@@ -416,19 +475,21 @@ func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]str
 }
 
 // unwrapDbusUpdateActivationEnvironment judges
-// dbus-update-activation-environment: every operand is a name or a
-// NAME=value written into the dbus activation (and, with --systemd, user
-// service manager) environment — the same write, so the lexical cut
-// applies unconditionally. The write counts as BULK unless every argv
-// word is provably a NAME or one of dbus's own no-operand flags
-// (--systemd, --verbose): `--all` copies the caller's ENTIRE environment
-// — pins included — into the shared activation block, an operand-less
-// call has no name list to verify, and any other dash word can't be
-// proven not to carry an operand (Codex P1s on this head).
+// dbus-update-activation-environment by the same lexical rule: the
+// command IS the writer, so every argv word must be a literal env name
+// that isn't protected — `--all` bulk-imports the caller's ENTIRE
+// environment into the shared activation block, a flag spelling can't
+// be proven not to carry an operand, and an operand-less call has no
+// name list to verify.
 func unwrapDbusUpdateActivationEnvironment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if !dbusWriteProvablyNamed(words) ||
-		unwrapEnvInjectionLauncher(words, names, false, false) {
+	if !allLiteralEnvNames(words) {
 		return nil, true
+	}
+	for _, word := range words {
+		literal, _ := launcherLiteralWord(word)
+		if unrecognizedWordProtectedKind(literal, names) != wordProtectedNone {
+			return nil, true
+		}
 	}
 	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
 		return nil, true
@@ -547,41 +608,6 @@ func literalWordPresent(words []*syntax.Word, want string) bool {
 	return false
 }
 
-// systemctlOperandOptions consumes a separate-word operand each — the
-// global options (-H/--host, -M/--machine, -p/--property, …) whose
-// operand could otherwise be mistaken for the writer subcommand itself:
-// `systemctl --property set-environment import-environment` is a BULK
-// import, not a named write (Codex P1 on this head).
-var systemctlOperandOptions = map[string]bool{
-	"-H": true, "--host": true, "-M": true, "--machine": true,
-	"-t": true, "--type": true, "-p": true, "--property": true,
-	"-s": true, "--signal": true, "-n": true, "--lines": true,
-	"-o": true, "--output": true, "--state": true, "--job-mode": true,
-	"--kill-whom": true, "--kill-value": true, "--message": true,
-	"--root": true, "--image": true, "--image-policy": true,
-	"--timestamp": true, "--preset-mode": true, "--json": true,
-	"--boot-loader-entry": true, "--boot-menu-entry": true,
-	"--boot-loader-menu": true,
-}
-
-// systemctlFlags — the no-operand option words provably complete on their
-// own. Anything not here, not an operand option and not `=`-joined ends
-// the provable option region.
-var systemctlFlags = map[string]bool{
-	"--user": true, "--system": true, "--global": true,
-	"--no-pager": true, "--no-legend": true, "--no-ask-password": true,
-	"--no-wall": true, "--no-reload": true, "--dry-run": true,
-	"-q": true, "--quiet": true, "--plain": true, "-f": true,
-	"--force": true, "-i": true, "--ignore-inhibitors": true,
-	"--runtime": true, "--now": true, "--wait": true, "--no-block": true,
-	"-r": true, "--recursive": true, "--reverse": true,
-	"--after": true, "--before": true, "--full": true,
-	"-a": true, "--all": true, "--failed": true, "--value": true,
-	"--show-transaction": true, "--defaults": true, "--marked": true,
-	"-h": true, "--help": true, "-V": true, "--version": true,
-	"--firmware-setup": true, "--boot-menu": true, "--read-only": true,
-}
-
 func isSystemctlEnvironmentWriter(literal string) bool {
 	switch literal {
 	case "set-environment", "import-environment", "unset-environment":
@@ -590,100 +616,35 @@ func isSystemctlEnvironmentWriter(literal string) bool {
 	return false
 }
 
-// systemctlEnvironmentWriterIndex locates the manager-environment write
-// subcommand the provable way: `=`-joined operands and known no-operand
-// flags are complete words, an operand option consumes the next word,
-// `--` ends the option region, and the first non-dash literal is the
-// subcommand. It returns the writer's index, (-1, false) when the
-// subcommand is provably not an env write, and (-1, true) when parsing
-// can't locate the subcommand with certainty AND a writer literal sits
-// somewhere in the unparseable remainder — the swallowed word could be
-// the writer itself, so a write that can't be verified refuses.
-func systemctlEnvironmentWriterIndex(words []*syntax.Word) (int, bool) {
-	for i := 0; i < len(words); i++ {
-		literal, ok := launcherLiteralWord(words[i])
-		if !ok {
-			// A non-literal in the option/subcommand region could BE the
-			// writer (`systemctl --user "$verb" CODEX_HOME=/other`):
-			// nothing after it can be verified — refuse the write.
-			return -1, true
-		}
-		if literal == "--" {
-			i++
-			if i < len(words) {
-				if l, ok2 := launcherLiteralWord(words[i]); ok2 && isSystemctlEnvironmentWriter(l) {
-					return i, false
-				}
-			}
-			return -1, false
-		}
-		if strings.HasPrefix(literal, "-") {
-			if strings.Contains(literal, "=") || systemctlFlags[literal] {
-				continue
-			}
-			if systemctlOperandOptions[literal] {
-				i++ // the operand — never the subcommand
-				continue
-			}
-			return writerInDarkRegion(words[i+1:])
-		}
-		if isSystemctlEnvironmentWriter(literal) {
-			return i, false
-		}
-		return -1, false
-	}
-	return -1, false
-}
-
-// writerInDarkRegion reports whether a writer subcommand literal sits in
-// a region the option walk couldn't parse — an option operand in disguise
-// or a subcommand position it can't pin down.
-func writerInDarkRegion(words []*syntax.Word) (int, bool) {
-	for _, word := range words {
-		if l, ok := launcherLiteralWord(word); ok && isSystemctlEnvironmentWriter(l) {
-			return -1, true
-		}
-	}
-	return -1, false
-}
-
-// allLiteralNames reports whether words is a non-empty run of literal
-// non-dash words — a provable NAME list for an env-source write. Any dash
-// word or non-literal makes the list unprovable (the word could be an
-// option, or an option's operand posing as a name).
-func allLiteralNames(words []*syntax.Word) bool {
-	if len(words) == 0 {
+// isLiteralEnvName reports whether a literal word is a plain environment
+// NAME or NAME=value — the only operand shape an env-source write can
+// carry. An option word, a non-identifier or a value-bearing name fails.
+func isLiteralEnvName(literal string) bool {
+	name, _, _ := strings.Cut(literal, "=")
+	if name == "" || (name[0] >= '0' && name[0] <= '9') {
 		return false
 	}
-	for _, word := range words {
-		literal, ok := launcherLiteralWord(word)
-		if !ok || strings.HasPrefix(literal, "-") {
+	for i := 0; i < len(name); i++ {
+		if !isEnvNameByte(name[i]) {
 			return false
 		}
 	}
 	return true
 }
 
-// dbusWriteProvablyNamed applies the same provable-name rule to dbus's
-// whole argv: every word must be a NAME, or one of dbus's documented
-// no-operand flags (--systemd, --verbose). `--all`, an unknown spelling,
-// or no names at all make the write unprovable — it refuses.
-func dbusWriteProvablyNamed(words []*syntax.Word) bool {
-	named := false
+// allLiteralEnvNames reports whether words is a non-empty run of literal
+// env names — a provable NAME list for an env-source write.
+func allLiteralEnvNames(words []*syntax.Word) bool {
+	if len(words) == 0 {
+		return false
+	}
 	for _, word := range words {
 		literal, ok := launcherLiteralWord(word)
-		if !ok {
+		if !ok || !isLiteralEnvName(literal) {
 			return false
 		}
-		if strings.HasPrefix(literal, "-") {
-			if literal != "--systemd" && literal != "--verbose" {
-				return false
-			}
-			continue
-		}
-		named = true
 	}
-	return named
+	return true
 }
 
 // sudoPreservesEnvironment reports sudo's env-preservation state:
@@ -876,7 +837,7 @@ func lettersOnly(text string) bool {
 func isAccountLauncherName(word *syntax.Word) bool {
 	for _, name := range []string{
 		"sudo", "docker", "docker-compose", "podman", "nerdctl",
-		"systemd-run", "run0", "bwrap", "su", "script",
+		"systemd-run", "run0", "bwrap", "su", "runuser", "script",
 		"systemctl", "dbus-update-activation-environment",
 	} {
 		if isAccountCommandName(word, name) {
@@ -982,7 +943,7 @@ func launcherSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo
 		_, unsafe = unwrapSystemdRun(words[1:], names, memo, true, true)
 	case isAccountCommandName(words[0], "bwrap"):
 		_, unsafe = unwrapBwrap(words[1:], names, memo, true)
-	case isAccountCommandName(words[0], "su"):
+	case isAccountCommandName(words[0], "su") || isAccountCommandName(words[0], "runuser"):
 		_, unsafe = unwrapSu(words[1:], names, memo, true)
 	case isAccountCommandName(words[0], "script"):
 		_, unsafe = unwrapScript(words[1:], names, memo, true)

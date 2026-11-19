@@ -500,7 +500,7 @@ func peelAccountWrapper(words []*syntax.Word, names map[string]struct{}, memo op
 		if unsafe {
 			return nil, false, true
 		}
-	case isAccountCommandName(words[0], "su"):
+	case isAccountCommandName(words[0], "su") || isAccountCommandName(words[0], "runuser"):
 		var unsafe bool
 		words, unsafe = unwrapSu(words[1:], names, memo, false)
 		if unsafe {
