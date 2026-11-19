@@ -32,14 +32,17 @@ type AccountSwapData struct {
 	// bound) or be empty after teardown, so a re-derivation either collapses
 	// From == To onto Render's same-agent branch — and lies a carry was
 	// attempted across the agent boundary (agent-handoff D2) — or falls off
-	// the same-agent gate (From == ""). Empty (false) on records written
-	// before the field existed; refresh falls back to the same
-	// HandoffTargetIsCurrent effectively-derives derivation
-	// ManualAccountSwapProgram applied at commit — the recovered From vs
-	// AccountAgent — which agrees with admission for every record the field
-	// could have been written for, so the OR keeps new records honest
-	// against the program_overrides From == To shape the field exists for.
-	CrossAgent bool `json:"cross_agent,omitempty"`
+	// the same-agent gate (From == ""). It is a pointer because the field's
+	// PRESENCE is the verdict's provenance (#7632 review R1): a recorded
+	// false — the same-agent commit whose account namespace drifted off the
+	// outgoing agent — must read as a recorded verdict, which a
+	// bool+omitempty pair cannot tell from a record older than the field.
+	// Nil only on records written before the field existed: refresh derives
+	// their branch from the recovered From vs AccountAgent comparison
+	// ManualAccountSwapProgram ran at commit — which agrees with admission's
+	// HandoffTargetIsCurrent refusal for every record the field could have
+	// been written for — and never lets one narrate a carry attempt.
+	CrossAgent *bool `json:"cross_agent,omitempty"`
 	// Program is the incoming launch command frozen at commit — the resolved
 	// base before conversation injection. A committed cross-agent swap can be
 	// recovered after the identity checkpoint but before the replacement

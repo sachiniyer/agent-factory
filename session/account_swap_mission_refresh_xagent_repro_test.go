@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,9 +38,10 @@ import (
 // pendingAccountSwap mimics a committed manual cross-agent swap from outgoing
 // to incoming, with its trailing handoff ledger entry naming outgoing as the
 // OUTGOING agent. mission is the pre-refresh stored mission; id is the fresh
-// conversation id the commit recorded; oldRecord reports whether the durable
-// CrossAgent field is set, simulating a record written before the fix.
-func committedXAgentManualPendingSwap(t *testing.T, outgoing, incoming, id, mission string, oldRecord bool) *Instance {
+// conversation id the commit recorded; verdict is the durable cross-agent
+// verdict the commit pinned — nil for a record written before the field, a
+// pointer because presence IS the verdict's provenance (#7632 review R1).
+func committedXAgentManualPendingSwap(t *testing.T, outgoing, incoming, id, mission string, verdict *bool) *Instance {
 	t.Helper()
 	inst := accountSwapTestInstanceWithProgram(outgoing)
 	inst.mu.Lock()
@@ -52,9 +54,7 @@ func committedXAgentManualPendingSwap(t *testing.T, outgoing, incoming, id, miss
 		Program:        incoming,
 		ConversationID: id,
 		CarryFallback:  staleCommittedConversationReason,
-	}
-	if !oldRecord {
-		inst.pendingAccountSwap.CrossAgent = true
+		CrossAgent:     cloneBoolPointer(verdict),
 	}
 	if len(inst.Tabs) > 0 {
 		inst.Tabs[0].Handoffs = append(inst.Tabs[0].Handoffs, AgentHandoff{
@@ -96,7 +96,7 @@ func assertCrossAgentMission(t *testing.T, mission, outgoing string) {
 // attempts.
 func TestRefreshPendingManualAccountSwapMission_CrossAgentRendersCrossAgentBranch(t *testing.T) {
 	inst := committedXAgentManualPendingSwap(t, tmux.ProgramCodex, tmux.ProgramClaude,
-		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", false)
+		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", boolPtrForTest(true))
 	_, before := inst.PendingManualAccountSwap()
 
 	inst.refreshPendingManualAccountSwapMission("old", "work")
@@ -110,18 +110,18 @@ func TestRefreshPendingManualAccountSwapMission_CrossAgentRendersCrossAgentBranc
 
 // Regression guard: a same-agent manual swap's refresh must keep Render on the
 // same-agent carry-failure branch. The fix changes the refresh's identity
-// derivation but its result for a same-agent record is From == To == the
-// recorded agent with CrossAgent unset, so the sameAgent gate still routes the
+// derivation but its result for a RECORDED same-agent verdict is From == To ==
+// the recorded agent, so the sameAgent gate still routes the
 // fresh-conversation-after-an-account-handoff framing as before (the original
 // same-agent mission refresh test pins the same text through the respawn path
 // in account_swap_carry_test.go::TestRespawnForAccountSwapDemotesACarryThatCanNoLongerLand).
 func TestRefreshPendingManualAccountSwapMission_SameAgentPreservesCarryFailureBranch(t *testing.T) {
 	inst := committedXAgentManualPendingSwap(t, tmux.ProgramClaude, tmux.ProgramClaude,
-		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", true)
+		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", boolPtrForTest(false))
 	// The ledger records the same-agent outgoing agent (claude), so the
-	// refresh's recovered From == To == "claude" with CrossAgent unset: the
-	// same three facts the buggy refresh already produced for a same-agent
-	// swap, now from the durable record.
+	// refresh's recovered From == To == "claude" under the recorded
+	// same-agent verdict: the same three facts the buggy refresh already
+	// produced for a same-agent swap, now from the durable record.
 	inst.mu.Lock()
 	if len(inst.Tabs) > 0 && len(inst.Tabs[0].Handoffs) > 0 {
 		inst.Tabs[0].Handoffs[len(inst.Tabs[0].Handoffs)-1].To = tmux.ProgramClaude
@@ -148,8 +148,8 @@ func TestRefreshPendingManualAccountSwapMission_SameAgentPreservesCarryFailureBr
 // reached.
 func TestRefreshPendingManualAccountSwapMission_LegacyCrossAgentRecordDerivesCrossAgent(t *testing.T) {
 	inst := committedXAgentManualPendingSwap(t, tmux.ProgramCodex, tmux.ProgramClaude,
-		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", true)
-	require.False(t, inst.pendingAccountSwap.CrossAgent,
+		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", nil)
+	require.Nil(t, inst.pendingAccountSwap.CrossAgent,
 		"precondition: a legacy record carries no durable CrossAgent field")
 
 	inst.refreshPendingManualAccountSwapMission("old", "work")
@@ -163,11 +163,11 @@ func TestRefreshPendingManualAccountSwapMission_LegacyCrossAgentRecordDerivesCro
 // another agent" branch, because CurrentAgentName() answered "" and Render's
 // same-agent gate requires From != "". With the fix, From is recovered from
 // the handoff ledger (which survives teardown) so it equals To (the recorded
-// namespace), and the same-agent branch is rendered as it would be when the
-// live identity was still present.
+// same-agent verdict routes To to From), and the same-agent branch is
+// rendered as it would be when the live identity was still present.
 func TestRefreshPendingManualAccountSwapMission_LiveIdentityEmptyRendersFromLedger(t *testing.T) {
 	inst := committedXAgentManualPendingSwap(t, tmux.ProgramClaude, tmux.ProgramClaude,
-		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", true)
+		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", boolPtrForTest(false))
 	// Simulate the teardown the daemon sees at re-plan time: no live tmux
 	// binding, no runtime record, no configured enum matters — the resolver
 	// answers "" for every tier, exactly as it does for an off-box session
@@ -257,8 +257,9 @@ func TestRefreshPendingManualAccountSwapMission_CrossAgentRemintIntegration(t *t
 	require.Empty(t, pending.CarriedConversationID, "precondition: a cross-agent swap carries nothing")
 	require.Equal(t, tmux.ProgramClaude, pending.AccountAgent,
 		"precondition: the committed incoming namespace is pinned on the durable record")
-	require.True(t, pending.CrossAgent,
+	require.NotNil(t, pending.CrossAgent,
 		"precondition: the committed cross-agent verdict is pinned on the durable record")
+	require.True(t, *pending.CrossAgent)
 	require.Equal(t, tmux.ProgramCodex, func() string {
 		h, ok := inst.LastHandoff()
 		require.True(t, ok)
@@ -294,26 +295,224 @@ func TestRefreshPendingManualAccountSwapMission_CrossAgentRemintIntegration(t *t
 
 // Canary: with the durable CrossAgent field absent (legacy record) and the
 // recovered From equal to the recovered To for what is in fact a same-agent
-// swap, the OR-derivation keeps SameAgent rather than fabricating a
-// cross-agent verdict. The HandoffTargetIsCurrent frame agrees — for every
-// record the field could have been written for, the recovered From vs
-// AccountAgent comparison cannot be inverted.
+// swap, the name-derivation keeps SameAgent rather than fabricating a
+// cross-agent verdict — and because the record admits no recorded verdict at
+// all, the refresh never narrates a carry attempt (#7632 review R2): it
+// renders the neutral wording true under either verdict. The
+// HandoffTargetIsCurrent frame agrees — for every record the field could
+// have been written for, the recovered From vs AccountAgent comparison
+// cannot be inverted.
 func TestRefreshPendingManualAccountSwapMission_LegacySameAgentRecordStaysSameAgent(t *testing.T) {
 	inst := committedXAgentManualPendingSwap(t, tmux.ProgramClaude, tmux.ProgramClaude,
-		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", true)
+		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", nil)
 	inst.mu.Lock()
 	if len(inst.Tabs) > 0 && len(inst.Tabs[0].Handoffs) > 0 {
 		inst.Tabs[0].Handoffs[len(inst.Tabs[0].Handoffs)-1].To = tmux.ProgramClaude
 	}
 	inst.mu.Unlock()
-	require.False(t, inst.pendingAccountSwap.CrossAgent,
+	require.Nil(t, inst.pendingAccountSwap.CrossAgent,
 		"precondition: a legacy record carries no durable CrossAgent field")
+	// The branch carries real work, so the brief narrates the
+	// fresh-conversation clause instead of collapsing to the bare goal.
+	repo := initTempGitRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "scratch.txt"), []byte("wip"), 0o644))
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
 
 	inst.refreshPendingManualAccountSwapMission("old", "work")
 
 	_, after := inst.PendingManualAccountSwap()
-	require.Contains(t, after, "af tried to carry the previous conversation over to the new account, but",
-		"the OR-derivation does not invent a cross-agent verdict for a same-agent legacy record")
+	require.Contains(t, after, "The previous conversation is not available to you",
+		"a legacy record renders the neutral fresh-conversation wording")
+	require.NotContains(t, after, "af tried to carry",
+		"a legacy record with no recorded verdict never asserts a carry attempt")
 	require.NotContains(t, after, "It was being done by",
-		"a same-agent legacy record never collapses onto the cross-agent branch")
+		"a same-agent-derived legacy record never collapses onto the cross-agent branch")
+}
+
+// recordedCrossAgent marshals the pending record the commit produced and
+// reads its durable cross_agent verdict. The field's presence IS the verdict's
+// provenance: a persisted false answers "the commit recorded same-agent",
+// while the absent key answers "this record predates the field" — a
+// bool+omitempty pair cannot distinguish the two (#7632 review R1).
+func recordedCrossAgent(t *testing.T, inst *Instance) (present, verdict bool) {
+	t.Helper()
+	pending := inst.ToInstanceData().PendingAccountSwap
+	require.NotNil(t, pending)
+	serialized, err := json.Marshal(pending)
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(serialized, &fields))
+	raw, ok := fields["cross_agent"]
+	if !ok {
+		return false, false
+	}
+	recorded, ok := raw.(bool)
+	require.True(t, ok, "the durable cross_agent field must serialize a bool")
+	return true, recorded
+}
+
+// The R1 review finding on #7632: a RECORDED same-agent verdict whose labels
+// legitimately differ. Through the real commit path — the namespace-drift
+// shape of TestSelectAccountForHandoff_SameAgentKeepsProgramDespiteNamespaceDrift —
+// a session running codex (the configured claude override's launch) commits an
+// account-only swap into "work" inside the gemini namespace the override now
+// resolves to. The ledger's From.Agent is codex, the record's AccountAgent is
+// gemini, and admission's verdict is same-agent. The name-comparison fallback
+// mistook the recorded false for a legacy record and flipped it cross-agent
+// merely because the names differ — and with the fallback removed entirely,
+// From == codex vs To == gemini would still split the labels onto the
+// cross-agent branch. The recorded verdict ALONE picks the branch: a
+// same-agent commit renders same-agent wording whatever the two labels are.
+func TestRefreshPendingManualAccountSwapMission_RecordedSameAgentVerdictRendersSameAgent(t *testing.T) {
+	inst := accountSwapTestInstance(tmux.ProgramClaude)
+	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("swap", tmux.ProgramCodex))}
+
+	_, err := inst.SelectAccountForHandoff("", "work", tmux.ProgramCodex, tmux.ProgramGemini, false,
+		HandoffReasonManual, "", "old mission")
+	require.NoError(t, err)
+	pending := inst.ToInstanceData().PendingAccountSwap
+	require.NotNil(t, pending)
+	require.Equal(t, tmux.ProgramGemini, pending.AccountAgent,
+		"precondition: the committed namespace is gemini while the outgoing agent is codex")
+	h, ok := inst.LastHandoff()
+	require.True(t, ok)
+	require.Equal(t, tmux.ProgramCodex, h.From.Agent,
+		"precondition: the durability ledger recorded codex as the OUTGOING agent")
+	present, verdict := recordedCrossAgent(t, inst)
+	require.True(t, present,
+		"the commit must record the verdict, not just the value — a persisted false proves the field was written")
+	require.False(t, verdict, "admission committed a same-agent verdict")
+
+	// The outcome that triggers a refresh — a committed id re-minted or a
+	// carry demoted — explains the fresh start on the durable record.
+	inst.mu.Lock()
+	inst.pendingAccountSwap.CarryFallback = staleCommittedConversationReason
+	inst.mu.Unlock()
+
+	inst.refreshPendingManualAccountSwapMission("", "work")
+
+	_, after := inst.PendingManualAccountSwap()
+	require.Contains(t, after, "This is a fresh conversation after an account handoff.",
+		"a recorded same-agent verdict renders the same-agent fresh-conversation framing")
+	require.Contains(t, after, "af tried to carry the previous conversation over to the new account, but",
+		"the carry-failure clause is truthful against a recorded same-agent verdict")
+	require.NotContains(t, after, "It was being done by",
+		"a recorded same-agent verdict must not render the cross-agent attribution")
+}
+
+// The recorded cross-agent half of the verdict contract: a commit whose
+// admission judged the swap cross-agent renders the cross-agent attribution —
+// never the same-agent carry claim — even though the record's CarryFallback
+// names why its replacement starts fresh.
+func TestRefreshPendingManualAccountSwapMission_RecordedCrossAgentVerdictRendersCrossAgent(t *testing.T) {
+	inst := accountSwapTestInstance(tmux.ProgramClaude)
+	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("swap", tmux.ProgramCodex))}
+
+	_, err := inst.SelectAccountForHandoff("", "work", tmux.ProgramClaude, tmux.ProgramClaude, true,
+		HandoffReasonManual, "", "old mission")
+	require.NoError(t, err)
+	present, verdict := recordedCrossAgent(t, inst)
+	require.True(t, present,
+		"the commit must record the verdict, not just the value")
+	require.True(t, verdict, "admission committed a cross-agent verdict")
+
+	inst.mu.Lock()
+	inst.pendingAccountSwap.CarryFallback = staleCommittedConversationReason
+	inst.mu.Unlock()
+
+	inst.refreshPendingManualAccountSwapMission("", "work")
+
+	_, after := inst.PendingManualAccountSwap()
+	assertCrossAgentMission(t, after, tmux.ProgramCodex)
+}
+
+// demotePendingAccountSwapCarry is the refresh's other caller (the review's
+// R3): a committed carry that can no longer land is rewritten on the record
+// before the respawn, and the stored mission is re-rendered. The same
+// recorded-verdict rules apply there: a recorded same-agent verdict narrates
+// the demoted carry's own reason — the carry was really attempted — where the
+// buggy refresh collapsed the drifted-labels record onto the cross-agent
+// attribution and dropped the reason entirely.
+func TestDemotePendingAccountSwapCarry_RecordedSameAgentVerdictRendersSameAgent(t *testing.T) {
+	inst := accountSwapTestInstance(tmux.ProgramClaude)
+	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("swap", tmux.ProgramCodex))}
+
+	_, err := inst.SelectAccountForHandoff("", "work", tmux.ProgramCodex, tmux.ProgramGemini, false,
+		HandoffReasonManual, "", "old mission")
+	require.NoError(t, err)
+	inst.mu.Lock()
+	inst.pendingAccountSwap.CarriedConversationID = "f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c"
+	inst.accountSwapLaunch = &accountSwapLaunchPlan{
+		account:      "work",
+		conversation: AgentConversationData{Agent: tmux.ProgramCodex, ID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"},
+	}
+	inst.mu.Unlock()
+
+	require.NoError(t, inst.demotePendingAccountSwapCarry("work", "the transcript copy could not complete"))
+
+	_, after := inst.PendingManualAccountSwap()
+	require.Contains(t, after, "af tried to carry the previous conversation over to the new account, but the transcript copy could not complete",
+		"a recorded same-agent verdict narrates the demoted carry's own reason")
+	require.NotContains(t, after, "It was being done by",
+		"a recorded same-agent verdict must not render the cross-agent attribution")
+}
+
+// A demoted carry on a recorded cross-agent record keeps the cross-agent
+// attribution: the refresh there must never narrate a carry a cross-agent
+// swap never attempted, whatever the record's CarryFallback says.
+func TestDemotePendingAccountSwapCarry_RecordedCrossAgentVerdictRendersCrossAgent(t *testing.T) {
+	inst := committedXAgentManualPendingSwap(t, tmux.ProgramCodex, tmux.ProgramClaude,
+		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", boolPtrForTest(true))
+	inst.mu.Lock()
+	inst.pendingAccountSwap.CarriedConversationID = "f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c"
+	inst.accountSwapLaunch = &accountSwapLaunchPlan{
+		account:      "work",
+		conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"},
+	}
+	inst.mu.Unlock()
+
+	require.NoError(t, inst.demotePendingAccountSwapCarry("work", "the transcript copy could not complete"))
+
+	_, after := inst.PendingManualAccountSwap()
+	assertCrossAgentMission(t, after, tmux.ProgramCodex)
+}
+
+// The R2 review finding: a record written before the verdict field admits no
+// recorded verdict, so the refresh cannot know the swap was ever same-agent —
+// and must never narrate a carry attempt on a guess. Even where the
+// name-derivation lands same-agent, a legacy record renders the neutral
+// wording true under either verdict: "the previous conversation is not
+// available to you", with no carry claim.
+func TestDemotePendingAccountSwapCarry_LegacyRecordNeverAssertsCarry(t *testing.T) {
+	inst := committedXAgentManualPendingSwap(t, tmux.ProgramClaude, tmux.ProgramClaude,
+		"f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c", "old mission", nil)
+	inst.mu.Lock()
+	if len(inst.Tabs) > 0 && len(inst.Tabs[0].Handoffs) > 0 {
+		inst.Tabs[0].Handoffs[len(inst.Tabs[0].Handoffs)-1].To = tmux.ProgramClaude
+	}
+	inst.pendingAccountSwap.CarriedConversationID = "f1d2c3b4-a5e6-4f7a-8b9c-0d1e2f3a4b5c"
+	inst.accountSwapLaunch = &accountSwapLaunchPlan{
+		account:      "work",
+		conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"},
+	}
+	inst.mu.Unlock()
+	// The branch carries real work, so the brief narrates the
+	// fresh-conversation clause instead of collapsing to the bare goal.
+	repo := initTempGitRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "scratch.txt"), []byte("wip"), 0o644))
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, repo, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	require.NoError(t, inst.demotePendingAccountSwapCarry("work", "the transcript copy could not complete"))
+
+	_, after := inst.PendingManualAccountSwap()
+	require.Contains(t, after, "The previous conversation is not available to you",
+		"a legacy record renders the neutral fresh-conversation wording")
+	require.NotContains(t, after, "af tried to carry",
+		"a legacy record with no recorded verdict never asserts a carry attempt")
+	require.NotContains(t, after, "It was being done by",
+		"a same-agent-derived legacy record does not collapse onto the cross-agent attribution")
 }
