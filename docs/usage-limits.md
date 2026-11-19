@@ -249,11 +249,13 @@ non-assigning position, such as `docker run alpine echo CODEX_HOME=x`, is
 refused too, because no parse of the visible command line can prove the word
 will not reach the child's environment.
 
-- **Env files are unverifiable** — `--env-file`, `docker compose`'s `env_file`
-  and `--env-from-file` spellings, and `systemd-run`'s `EnvironmentFile=` all
-  name a file whose contents the command line cannot prove. They are refused
-  even when the file would be safe: `af` cannot read it to know whether it
-  assigns a protected name.
+- **Env files are unverifiable** — inside the launcher arms `af` models,
+  `--env-file`, `docker compose`'s `env_file` and `--env-from-file`
+  spellings, and `systemd-run`'s `EnvironmentFile=` all name a file whose
+  contents the command line cannot prove. They are refused even when the
+  file would be safe: `af` cannot read it to know whether it assigns a
+  protected name. An env-file flag under a command `af` does not model is
+  not refused on this basis — it is just another argument word there.
 - **Any dynamic word refuses** — a `$VAR`, `${VAR}`, `$(…)`, backtick,
   arithmetic or glob expansion anywhere in the launcher's command line could
   produce a protected assignment or an env spelling the visible command line
@@ -292,26 +294,47 @@ will not reach the child's environment.
   real import has no names) bulk-import the caller's whole environment
   into the shared manager, so they refuse, while `systemctl --user
   import-environment FOO` runs. `dbus-update-activation-environment` is
-  the writer itself, so every argv word must be a literal env name —
-  `--all` bulk-imports everything and refuses along with `--systemd
-  DISPLAY`, while `dbus-update-activation-environment DISPLAY` runs.
-- **Environment-resetting launchers refuse only when they deliver an
-  agent** — a launcher that drops the pane's environment would unpick the
-  account's pins silently, so when the reset environment's tail reaches an
-  account-capable agent program (`claude`/`codex`/`gemini`) the command
-  refuses: `sudo codex`, `sudo -u root codex`, `systemd-run --user --pty
-  codex`, `run0 codex`, `su -l -c 'codex'` and `bwrap --clearenv codex`.
-  `sudo codex` was admitted before this change — the behavior change is
-  intentional. Non-agent uses stay admitted (`sudo -u postgres psql`,
-  `systemd-run --user --pty make`, `run0 -p Description=x make`), as do the
-  non-resetting forms (`sudo -E codex`, `systemd-run --scope codex`, `su
-  -c 'codex' work`, `bwrap codex`) and containers, whose environment is
-  image-defined rather than a reset of the pane's (`docker run busybox
-  codex`). A preservation flag counts only as the launcher's own option —
+  the writer itself, so every argv word must be a literal env name or a
+  known no-operand flag — `--all` bulk-imports everything and refuses,
+  while `dbus-update-activation-environment --systemd DISPLAY
+  WAYLAND_DISPLAY` (the standard session form) and
+  `dbus-update-activation-environment --verbose DISPLAY` run.
+- **Environment-resetting launchers refuse only when they deliver THIS
+  account's agent as the program** — a launcher that drops the pane's
+  environment would unpick the account's pins silently, so when the reset
+  environment's tail carries the account's own agent name in a word that
+  can be the PROGRAM, the command refuses. "Program" means the tail's
+  command word — the first literal that is not a provable option or
+  option operand — or the decoded command word of a `-c` payload:
+  `sudo codex`, `sudo /usr/bin/codex`, `sudo ./codex`, `sudo -u root
+  codex`, `systemd-run --user --pty codex`, `run0 codex`, `su -l -c
+  'codex'` and `bwrap --clearenv codex` all refuse (`codex` must be the
+  word's FINAL path component). `sudo codex` was admitted before this
+  change — the behavior change is intentional. A word that merely
+  mentions the agent's name outside program position is not reach:
+  `sudo npm i -g @openai/codex`, `sudo chown -R me ~/.codex`, `sudo cat
+  /etc/codex/config.toml`, `sudo systemctl restart codex-proxy`,
+  `systemd-run --user --pty --working-directory=/home/me/src/claude-squad
+  make` and `su - postgres -c 'psql codex'` all run — package names,
+  config paths, service names and tool operands are not the program, and
+  ANOTHER agent's name is not reach for this account (`sudo claude`
+  under a codex account runs). Non-agent uses stay admitted (`sudo -u
+  postgres psql`, `systemd-run --user --pty make`, `run0 -p
+  Description=x make`), as do the non-resetting forms (`sudo -E codex`,
+  `systemd-run --scope codex`, `su -c 'codex' work`, `bwrap codex`) and
+  containers, whose environment is image-defined rather than a reset of
+  the pane's (`docker run busybox codex`). When the option walk can't
+  prove which word is the command, every later literal is a candidate
+  program word — the same dark-region cut, applied at program positions
+  only — and a nested `su`/`runuser`/`script` payload inherits the reset
+  (`sudo su -c 'codex' root` refuses). A preservation flag counts only
+  as the launcher's own option —
   before its command word, before `--`, and not consumed as another
-  option's operand — so `sudo make -E codex`, `sudo -p -E codex` and
-  `systemd-run codex --scope` all still reset and refuse, while `sudo -p
-  PROMPT -E codex` preserves and admits. Option parsing is trusted only
+  option's operand — so `sudo -p -E codex` and `systemd-run codex
+  --scope` still reset and refuse, while `sudo -p PROMPT -E codex`
+  preserves and admits. `sudo make -E codex` runs: `make` is the
+  program, so `-E` and `codex` are its operands — a `-E` inside a make
+  recipe is a hidden-input channel, out of the gate's scope. Option parsing is trusted only
   where it is provable: a clustered operand (`sudo -uroot`), a
   getopt_long abbreviation (`--us` for `--user`, `--pro` for `--prompt`)
   or any unknown option can consume a following flag as its operand, so
@@ -371,10 +394,15 @@ the launcher's whole tail, so a buried `env`, `nohup`, or nested launcher still
 refuses. And a command `af` does not model at all gets the same lexical cut in
 its tail, narrowed so ordinary prose stays admitted: a literal
 `NAME=<nonempty>` word refuses once a command-capable word follows it
-(`prog CODEX_HOME=/o codex`), a bare protected name refuses only when a value
-word follows AND a command word follows that value (`prog --setenv CODEX_HOME
-/o codex`), and a name that only names is inert data — `rg CODEX_HOME src/`,
-`grep -r CLAUDE_CONFIG_DIR .` and `rg OPENAI_API_KEY= .` all run.
+(`prog CODEX_HOME=/o codex`), and a bare protected name refuses only as the
+NAME operand of an env-setting option — a dash option directly before it AND
+a non-dash value directly after (`prog --setenv CODEX_HOME /o codex`,
+`prog -e CODEX_HOME /o codex`). A name that only names is inert data, and a
+search pattern stays admitted however many paths or options follow — `rg
+CODEX_HOME src/`, `grep -r CLAUDE_CONFIG_DIR .`, `rg OPENAI_API_KEY= .`,
+`grep -rn CODEX_HOME --include=*.go .`, `git log -S CODEX_HOME -- internal`,
+`gh issue list --search CODEX_HOME`, `make ENV=prod test` and `grep PS1
+.bashrc .zshrc` all run.
 
 ### Docker and backend boundaries
 

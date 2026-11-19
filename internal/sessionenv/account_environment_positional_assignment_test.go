@@ -165,6 +165,12 @@ func TestValidateAccountEnvironmentCommand_RefusesPositionalEnvInjectionAssignme
 		"run0 codex",
 		"su -l -c 'codex' work",
 		"bwrap --clearenv codex",
+		// Reach is the own-agent name as the word's final path
+		// component — bare, absolute, or relative (the decoded-payload
+		// `co""dex` rows are in the edge table below).
+		"sudo /usr/bin/codex",
+		"sudo ./codex",
+		"sudo subdir/codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
 		require.Error(t, err, "command %q injects a denied NAME= assignment through an env-injection wrapper", command)
@@ -304,6 +310,25 @@ func TestValidateAccountEnvironmentCommand_AdmitsLauncherOrdinaryUse(t *testing.
 		"script -c 'make' /tmp/build.log",
 		"systemctl --user status sshd",
 		"systemctl --user set-environment PORT=3000",
+		// Independent review R3: reset-reach inspects PROGRAM positions
+		// only — the account's own agent name as a word's final path
+		// component or a decoded payload's command word. Package names,
+		// config paths, service names and OTHER agents' names are not
+		// reach, and a name in an operand position is not the program.
+		"sudo npm i -g @openai/codex",
+		"sudo chown -R me ~/.codex",
+		"sudo cat /etc/codex/config.toml",
+		"sudo systemctl restart codex-proxy",
+		"systemd-run --user --pty --working-directory=/home/me/src/claude-squad make",
+		"su - postgres -c 'psql codex'",
+		// Another agent's name is not reach for THIS account — `claude`
+		// under a codex account is claude's own reset — and a USER operand
+		// spelled like the agent is option data, not the program.
+		"sudo claude",
+		"sudo -u codex make",
+		// dbus-update-activation-environment's provably no-operand flags
+		// (--systemd, --verbose) skip the name requirement — R5.
+		"dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
 		require.NoError(t, err, "command %q is an ordinary launcher use and must stay admitted", command)
@@ -797,12 +822,14 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"dbus-update-activation-environment --all --systemd", true},
 		{"dbus-update-activation-environment", true},
 		{"dbus-update-activation-environment --systemd", true},
-		// Every argv word must be a literal env name — no flag grammar:
-		// --systemd IS documented no-operand, but an option spelling is
-		// grammar the lexical rule does not model, so even the known
-		// flag with a safe name refuses rather than risk an operand
-		// posing as a name.
-		{"dbus-update-activation-environment --systemd DISPLAY", true},
+		// Every argv word must be a literal env name — except dbus's own
+		// provably no-operand flags (--systemd, --verbose), which skip
+		// the name requirement, so the standard
+		// `dbus-update-activation-environment --systemd DISPLAY
+		// WAYLAND_DISPLAY` admits. Any other dash word can't be proven
+		// not to carry an operand and still refuses.
+		{"dbus-update-activation-environment --systemd DISPLAY", false},
+		{"dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY", false},
 		{"dbus-update-activation-environment --verbose", true},
 		{"dbus-update-activation-environment --foo DISPLAY", true},
 		{"nohup systemctl --user set-environment CODEX_HOME=/o", true},
@@ -857,8 +884,11 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// option region — before its command word, before `--`, and not
 		// consumed as another option's operand. `-E` past that region is
 		// the COMMAND's flag and sudo still resets (Codex P1); the same
-		// boundary applies to systemd-run's --scope.
-		{"sudo make -E codex", true},
+		// boundary applies to systemd-run's --scope. The reset still
+		// admits here because `codex` is make's OPERAND, not the program
+		// the reset delivers — same class as `su - postgres -c 'psql
+		// codex'` (independent review R3).
+		{"sudo make -E codex", false},
 		{"sudo codex -E", true},
 		{"sudo -p -E codex", true},
 		// `-p` consumes PROMPT as its operand, so the following -E is
@@ -898,7 +928,10 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"systemd-run --scope codex", false},
 		{"systemd-run --user --scope make", false},
 		{"systemd-run codex --scope", true},
-		{"systemd-run make --scope codex", true},
+		// `--scope` past the command word is make's flag, so the service
+		// reset applies — but `codex` is make's operand, not the
+		// program the reset delivers (independent review R3).
+		{"systemd-run make --scope codex", false},
 		{"systemd-run --scope --pty codex", false},
 		{"systemd-run --unit u --scope codex", false},
 		{"systemd-run -p Description=x --scope codex", false},
@@ -994,7 +1027,9 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// denied spelling with nothing after it admits the way env's
 		// print mode does.
 		{"prog CODEX_HOME=/o codex", true},
-		{"prog CODEX_HOME /o codex", true},
+		// A bare name after a NON-option head is a search-pattern shape —
+		// no dash option precedes it, so the operand rule doesn't fire.
+		{"prog CODEX_HOME /o codex", false},
 		{"prog CODEX_HOME=/o", false},
 		{"prog CODEX_HOME /o", false},
 		{"prog CODEX_HOME", false},
@@ -1009,6 +1044,34 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"echo CODEX_HOME", false},
 		{"rg CODEX_HOME src/", false},
 		{"grep -r CLAUDE_CONFIG_DIR .", false},
+		// Independent review R4: a bare protected name is a re-root only
+		// as the NAME operand of an env-setting option — a dash option
+		// directly before AND a non-dash value directly after. A search
+		// pattern followed by paths or more options is inert data.
+		{"rg CODEX_HOME internal/ session/", false},
+		{"grep -rn OPENAI_API_KEY src docs", false},
+		{"git grep CODEX_HOME -- '*.go'", false},
+		{"grep -rn CODEX_HOME --include=*.go .", false},
+		{"rg CODEX_HOME -t go", false},
+		{"git log -S CODEX_HOME -- internal", false},
+		{"gh issue list --search CODEX_HOME", false},
+		// Short shell-startup names are ordinary tool variables outside
+		// a launcher — `ENV=prod` is a make variable, `ENV`/`PS1` bare
+		// words are search patterns.
+		{"make ENV=prod test", false},
+		{"rg ENV Makefile scripts", false},
+		{"grep PS1 .bashrc .zshrc", false},
+		// The option-operand shape still refuses: a lone option (-x or
+		// --xxx) directly before the name and a non-dash value after.
+		{"prog -e CODEX_HOME /o codex", true},
+		{"prog --setenv CODEX_HOME /o codex", true},
+		{"prog --setenv CODEX_HOME /o", true},
+		// A cluster (-rn) is not one option; a lone short flag still
+		// counts (accepted over-refusal — `-r`/`-n` before a bare name
+		// reads as an operand-carrying option on an unknown command).
+		{"grep -rn CODEX_HOME dir", false},
+		{"grep -r CODEX_HOME dir", true},
+		{"grep -n CODEX_HOME file", true},
 		// The [[ ]] compare's `]]` is an ordinary argv word to the POSIX
 		// parse, so a literal `NAME=<nonempty>` right operand trips the
 		// rule — the accepted over-refusal the arithmetic/cmdsubst admit

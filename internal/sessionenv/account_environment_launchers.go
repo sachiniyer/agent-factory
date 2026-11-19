@@ -212,7 +212,7 @@ func unwrapSudo(words []*syntax.Word, names map[string]struct{}, memo operandTai
 	// caller's environment (and `--preserve-env=LIST` keeps the listed
 	// names), so those forms are not resets.
 	preserved, preserveAll := sudoPreservesEnvironment(words)
-	if tailReachesResetAgentProgram(words, preserved, preserveAll) {
+	if tailReachesResetAgentProgram(words, names, preserved, preserveAll, sudoOperandOptions, sudoFlags) {
 		return nil, true
 	}
 	return nil, false
@@ -234,7 +234,7 @@ func unwrapSystemdRun(words []*syntax.Word, names map[string]struct{}, memo oper
 		return nil, true
 	}
 	if serviceOnly || !slices.Contains(launcherOwnOptionLiterals(words, systemdRunOperandOptions, systemdRunFlags), "--scope") {
-		if tailReachesResetAgentProgram(words, nil, false) {
+		if tailReachesResetAgentProgram(words, names, nil, false, systemdRunOperandOptions, systemdRunFlags) {
 			return nil, true
 		}
 	}
@@ -255,7 +255,7 @@ func unwrapDocker(words []*syntax.Word, names map[string]struct{}, memo operandT
 	// is left for the caller to judge. podman and nerdctl share docker's
 	// CLI grammar and take this arm too; a container's environment is
 	// image-defined, not a reset of the pane's, so they get no reset arm.
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
+	if wrapperTailHidesAccountAssignment(words, false, names, memo, nil, false) {
 		return nil, true
 	}
 	return nil, false
@@ -279,7 +279,7 @@ func unwrapBwrap(words []*syntax.Word, names map[string]struct{}, memo operandTa
 		return nil, true
 	}
 	if literalWordPresent(words, "--clearenv") &&
-		tailReachesResetAgentProgram(words, nil, false) {
+		tailReachesResetAgentProgram(words, names, nil, false, nil, nil) {
 		return nil, true
 	}
 	return nil, false
@@ -556,9 +556,12 @@ const (
 // unrecognizedWordProtectedKind classifies a literal word by the rule in
 // wrapperTailWordHidesAccountAssignment: a protected name at an
 // identifier boundary that ENDS its `=` segment and is followed by more
-// text assigns the variable; any other boundary match only names it.
-func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) int {
+// text assigns the variable; any other boundary match only names it. The
+// second result is the name that matched, so the tail judge can give the
+// shell-startup names (ENV, PS1, BASH_ENV…) their own verdict class.
+func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) (int, string) {
 	kind := wordProtectedNone
+	matched := ""
 	text := strings.TrimLeft(literal, "-")
 	optionCluster := strings.HasPrefix(literal, "-")
 	segments := strings.Split(text, "=")
@@ -572,12 +575,13 @@ func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) in
 			}
 			if index < len(segments)-1 && text[offset:] != "" &&
 				segmentEndsWithProtectedName(segment, name, cluster) {
-				return wordProtectedAssign
+				return wordProtectedAssign, name
 			}
 			kind = wordProtectedName
+			matched = name
 		}
 	}
-	return kind
+	return kind, matched
 }
 
 // segmentEndsWithProtectedName reports whether name both matches segment

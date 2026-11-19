@@ -24,15 +24,19 @@ func unwrapSu(words []*syntax.Word, names map[string]struct{}, memo operandTailM
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
+	if wrapperTailHidesAccountAssignment(words, false, names, memo, nil, false) {
 		return nil, true
 	}
 	if suResetsEnvironment(words) {
-		if tailReachesResetAgentProgram(words, nil, false) {
+		// su's getopt permutes options ahead of the USER operand and
+		// the user name itself can't be told from a command word, so
+		// the whole tail is a dark region — the same ambiguity the
+		// accepted `su - codex` over-refusal already documents.
+		if ambiguousResetTailAgentReach(words, names, nil) {
 			return nil, true
 		}
 		for _, payload := range payloads {
-			if payloadReachesAgentProgram(payload, nil) {
+			if payloadReachesAgentProgram(payload, names, nil) {
 				return nil, true
 			}
 		}
@@ -55,7 +59,7 @@ func unwrapCommandRunner(words []*syntax.Word, names map[string]struct{}, memo o
 	if unwrapEnvInjectionLauncher(words, names, false, requireCommand) {
 		return nil, true
 	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
+	if wrapperTailHidesAccountAssignment(words, false, names, memo, nil, false) {
 		return nil, true
 	}
 	return nil, false
@@ -141,12 +145,13 @@ func runnerPayloads(words []*syntax.Word) []string {
 }
 
 // payloadReachesAgentProgram parses a `-c` script the way the shell will
-// and applies the reset arm's agent scan to every command's decoded
-// words — `co""dex` reaches `codex` the same as a bare spelling.
-// preserved carries the outer launcher's preserved-name set so
+// and applies the reset arm's agent scan to every call's decoded COMMAND
+// word — `co""dex` reaches `codex` the same as a bare spelling, while
+// `psql codex` does not because `codex` is psql's operand, not the
+// program. preserved carries the outer launcher's preserved-name set so
 // `sudo --preserve-env=CODEX_HOME su -c 'codex'` does not misjudge a
 // still-pinned agent as reset.
-func payloadReachesAgentProgram(script string, preserved map[string]struct{}) bool {
+func payloadReachesAgentProgram(script string, names, preserved map[string]struct{}) bool {
 	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
 		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(script), "")
 		if err != nil {
@@ -154,7 +159,15 @@ func payloadReachesAgentProgram(script string, preserved map[string]struct{}) bo
 		}
 		reaches := false
 		syntax.Walk(file, func(node syntax.Node) bool {
-			if call, ok := node.(*syntax.CallExpr); ok && tailReachesResetAgentProgram(call.Args, preserved, false) {
+			call, ok := node.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			literal, ok := launcherLiteralWord(call.Args[0])
+			if !ok {
+				return true // unprovable command word — the mutation scan judges it
+			}
+			if resetProgramWordReachesAgent(literal, call.Args[1:], names, preserved) {
 				reaches = true
 				return false
 			}
@@ -212,49 +225,152 @@ var commandRunnerPrograms = map[string]struct{}{
 	"su": {}, "runuser": {}, "script": {},
 }
 
-// tailReachesResetAgentProgram reports whether a literal word in words
-// names an account-capable agent program at an identifier boundary while
-// the invocation does not preserve that agent's identity variable. The
-// roster is accountConfigVars (claude/codex/gemini — the only agents af
-// can pin), so `sudo -u root codex`, `sudo -u root bash -lc codex` and
-// `su -l -c 'codex' u` all reach it, while `sudo -u postgres psql` does
-// not. A non-literal word is skipped — the lexical scan already refused
-// the command for carrying it. A command-runner word nests the shell
-// payload under the SAME reset, so the first one's `-c` operand is
-// decoded and scanned for agent names too — runnerPayloads already
-// sweeps the whole suffix, so one descent covers every later payload
-// spelling without a quadratic per-runner rescan.
-func tailReachesResetAgentProgram(words []*syntax.Word, preserved map[string]struct{}, preserveAll bool) bool {
+// resetPeelableWrappers name the words whose argv contains the real
+// program position somewhere the gate can't locate without that tool's
+// option grammar — argument wrappers exec their tail (`timeout 5
+// codex`, `taskset 0x1 codex`, `chroot /x codex` all carry an operand
+// BEFORE the program), and the dispatching shell builtins do the same
+// inside a decoded `-c` payload (in outer argv, where sudo cannot exec
+// a builtin, the same recursion merely over-refuses — the safe
+// direction). Their whole tail is a dark region, so they get the
+// ambiguous scan. The container CLIs are absent: a docker operand is a
+// subcommand or image name, never the pane's program — and further
+// exec-wrappers the gate does not model are #7603 territory.
+var resetPeelableWrappers = map[string]struct{}{
+	"env": {}, "nice": {}, "nohup": {}, "timeout": {}, "setsid": {},
+	"stdbuf": {}, "ionice": {}, "taskset": {}, "strace": {}, "xargs": {},
+	"chroot": {}, "doas": {}, "setpriv": {}, "nsenter": {}, "unshare": {},
+	"chrt": {}, "numactl": {}, "firejail": {}, "watch": {}, "time": {},
+	"exec": {}, "command": {}, "builtin": {}, "eval": {},
+}
+
+// tailReachesResetAgentProgram reports whether the account's OWN agent
+// program sits at a PROGRAM position of a resetting launcher's tail —
+// the "reach" narrowing from the b531f5e00 review. The program word is
+// the first literal that is not a provable option word, a provable
+// option's operand or a NAME=value environment prefix: `sudo -u root
+// codex` reaches codex, while `sudo npm i -g @openai/codex` does not —
+// npm's package operand is not a program. Once an option word can't be
+// classified the region is dark — a following word could be its operand
+// OR the command — so every later non-dash literal is a candidate.
+// Names that merely contain the agent's name are not reach either: the
+// agent must be the word's FINAL path component (`codex`,
+// `/usr/bin/codex`, `./codex`), and only the account's own agent
+// counts — `sudo claude` under a codex account is claude's reset, not
+// this account's re-root. A non-literal word is skipped — the lexical
+// scan already refused the command for carrying it.
+func tailReachesResetAgentProgram(words []*syntax.Word, names map[string]struct{}, preserved map[string]struct{}, preserveAll bool, operandOptions, knownFlags map[string]bool) bool {
 	if preserveAll {
 		return false
 	}
-	runnerSeen := false
+	for i := 0; i < len(words); i++ {
+		literal, ok := launcherLiteralWord(words[i])
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(literal, "-") {
+			switch {
+			case literal == "--":
+				// The first word after `--` is still the command.
+			case operandOptions[literal]:
+				i++ // a provable option operand — never the program
+			case knownFlags[literal] || strings.Contains(literal, "="):
+				// Provably bare flag or `=`-joined operand — keep going.
+			default:
+				return ambiguousResetTailAgentReach(words[i+1:], names, preserved)
+			}
+			continue
+		}
+		if strings.Contains(literal, "=") {
+			continue // NAME=value environment prefix — never a program
+		}
+		return resetProgramWordReachesAgent(literal, words[i+1:], names, preserved)
+	}
+	return false
+}
+
+// resetProgramWordReachesAgent applies the reach check to one resolved
+// PROGRAM word and the argv after it: the account's agent name as the
+// word's final path component reaches outright; a wrapper, launcher or
+// runner name recurses into its own tail the same way; anything else is
+// a fixed program whose operands are not program positions.
+func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, preserved map[string]struct{}) bool {
+	if wordNamesResetAgent(literal, names, preserved) {
+		return true
+	}
+	base := literal
+	if i := strings.LastIndexByte(base, '/'); i >= 0 {
+		base = base[i+1:]
+	}
+	if _, ok := resetPeelableWrappers[base]; ok {
+		// The wrapper's argv can't be parsed without its own option
+		// grammar — `chroot /x codex` carries a DIRECTORY operand before
+		// the program — so the whole tail is a dark region.
+		return ambiguousResetTailAgentReach(rest, names, preserved)
+	}
+	if _, ok := commandRunnerPrograms[base]; ok {
+		for _, payload := range runnerPayloads(rest) {
+			if payloadReachesAgentProgram(payload, names, preserved) {
+				return true
+			}
+		}
+		return ambiguousResetTailAgentReach(rest, names, preserved)
+	}
+	switch base {
+	case "sudo":
+		return tailReachesResetAgentProgram(rest, names, preserved, false, sudoOperandOptions, sudoFlags)
+	case "systemd-run", "run0":
+		return tailReachesResetAgentProgram(rest, names, preserved, false, systemdRunOperandOptions, systemdRunFlags)
+	case "bwrap", "systemctl", "dbus-update-activation-environment":
+		return tailReachesResetAgentProgram(rest, names, preserved, false, nil, nil)
+	}
+	return false
+}
+
+// ambiguousResetTailAgentReach is the dark-region half of the reach
+// check: when the option walk cannot prove which word is the command,
+// every literal is a candidate program word, so each one's final path
+// component is checked and a command-runner word's decoded payloads are
+// scanned under the same reset.
+func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[string]struct{}) bool {
 	for i, word := range words {
 		literal, ok := launcherLiteralWord(word)
 		if !ok {
 			continue
 		}
-		for agent, configVar := range accountConfigVars {
-			if _, kept := preserved[configVar]; kept {
-				continue
-			}
-			if launcherSegmentNames(literal, agent, false) {
-				return true
+		if wordNamesResetAgent(literal, names, preserved) {
+			return true
+		}
+		base := literal
+		if idx := strings.LastIndexByte(base, '/'); idx >= 0 {
+			base = base[idx+1:]
+		}
+		if _, ok := commandRunnerPrograms[base]; ok {
+			for _, payload := range runnerPayloads(words[i+1:]) {
+				if payloadReachesAgentProgram(payload, names, preserved) {
+					return true
+				}
 			}
 		}
-		if runnerSeen {
+	}
+	return false
+}
+
+// wordNamesResetAgent reports whether literal's final path component is
+// THIS account's agent program — the agent whose config variable the
+// denied set pins — so `codex` matches `codex`, `/usr/bin/codex` and
+// `./codex`, while `~/.codex`, `/etc/codex/config.toml`, `codex-proxy`,
+// `claude-squad` and the OTHER agents' names do not.
+func wordNamesResetAgent(literal string, names, preserved map[string]struct{}) bool {
+	for agent, configVar := range accountConfigVars {
+		if _, pinned := names[configVar]; !pinned {
 			continue
 		}
-		for runner := range commandRunnerPrograms {
-			if launcherSegmentNames(literal, runner, false) {
-				runnerSeen = true
-				for _, payload := range runnerPayloads(words[i+1:]) {
-					if payloadReachesAgentProgram(payload, preserved) {
-						return true
-					}
-				}
-				break
-			}
+		if _, kept := preserved[configVar]; kept {
+			continue
+		}
+		if literal == agent || strings.HasSuffix(literal, "/"+agent) {
+			return true
 		}
 	}
 	return false

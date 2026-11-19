@@ -26,7 +26,7 @@ func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]str
 		if !ok {
 			return nil, true
 		}
-		if unrecognizedWordProtectedKind(literal, names) != wordProtectedNone {
+		if kind, _ := unrecognizedWordProtectedKind(literal, names); kind != wordProtectedNone {
 			return nil, true
 		}
 		if isSystemctlEnvironmentWriter(literal) {
@@ -36,7 +36,7 @@ func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]str
 	if writer >= 0 && !allLiteralEnvNames(words[writer+1:]) {
 		return nil, true
 	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
+	if wrapperTailHidesAccountAssignment(words, false, names, memo, nil, false) {
 		return nil, true
 	}
 	return nil, false
@@ -46,20 +46,37 @@ func unwrapSystemctlEnvironmentWriter(words []*syntax.Word, names map[string]str
 // dbus-update-activation-environment by the same lexical rule: the
 // command IS the writer, so every argv word must be a literal env name
 // that isn't protected — `--all` bulk-imports the caller's ENTIRE
-// environment into the shared activation block, a flag spelling can't
-// be proven not to carry an operand, and an operand-less call has no
-// name list to verify.
+// environment into the shared activation block, and an operand-less
+// call has no name list to verify. dbus's own no-operand flags
+// (--systemd, --verbose) are provably bare, so they sit beside the
+// name list without defeating it — `dbus-update-activation-environment
+// --systemd DISPLAY WAYLAND_DISPLAY` is the standard call and admits —
+// while any other dash word can't be proven not to carry an operand.
 func unwrapDbusUpdateActivationEnvironment(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo, requireCommand bool) ([]*syntax.Word, bool) {
-	if !allLiteralEnvNames(words) {
-		return nil, true
-	}
+	namesSeen := false
 	for _, word := range words {
-		literal, _ := launcherLiteralWord(word)
-		if unrecognizedWordProtectedKind(literal, names) != wordProtectedNone {
+		literal, ok := launcherLiteralWord(word)
+		if !ok {
 			return nil, true
 		}
+		if literal == "--systemd" || literal == "--verbose" {
+			continue // dbus's own provably no-operand flags
+		}
+		if !isLiteralEnvName(literal) {
+			return nil, true
+		}
+		if kind, _ := unrecognizedWordProtectedKind(literal, names); kind != wordProtectedNone {
+			return nil, true
+		}
+		namesSeen = true
 	}
-	if wrapperTailHidesAccountAssignment(words, false, names, memo) {
+	if !namesSeen {
+		// No name list left after the flags — the call updates the
+		// whole activation environment, the same bulk write `--all`
+		// spells.
+		return nil, true
+	}
+	if wrapperTailHidesAccountAssignment(words, false, names, memo, nil, false) {
 		return nil, true
 	}
 	return nil, false

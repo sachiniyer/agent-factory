@@ -306,9 +306,15 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	case isBareName(words[0], "test"), isBareName(words[0], "["):
 		return variableTestMutatesAccountEnvironment(words[1:])
 	case isBareName(words[0], "eval"), isBareName(words[0], "."),
-		isBareName(words[0], "source"), isBareName(words[0], "trap"),
-		isBareName(words[0], "alias"), isBareName(words[0], "fc"),
-		isBareName(words[0], "history"), isBareName(words[0], "enable"):
+		isBareName(words[0], "source"):
+		// These run another program string — an effect spelled only when
+		// an operand follows, so a bare `.` or `eval` in a tail operand is
+		// inert: `grep -rn CODEX_HOME --include=*.go .` searches `.`, it
+		// does not source it.
+		return len(words) > 1
+	case isBareName(words[0], "trap"), isBareName(words[0], "alias"),
+		isBareName(words[0], "fc"), isBareName(words[0], "history"),
+		isBareName(words[0], "enable"):
 		// These builtins execute or schedule another shell program in the same
 		// environment, define commands that do, or load/replay unparsed history.
 		// Proving their effects would require a second parser pass with runtime
@@ -595,13 +601,20 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 	if strace && straceOptionsRefused(words[1:], names, memo) {
 		return true
 	}
-	return wrapperTailHidesAccountAssignment(words[1:], strace, names, memo)
+	return wrapperTailHidesAccountAssignment(words[1:], strace, names, memo, words[0], true)
 }
 
 // wrapperTailHidesAccountAssignment scans an unrecognized wrapper's tail from
 // words[0]. Every position the scan steps on gets the scan's answer: the scan
-// from there follows the same steps to the same end.
-func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) bool {
+// from there follows the same steps to the same end. head is the word that
+// directly precedes words[0] in the original argv — the wrapper's own command
+// word, or nil when words already starts at the command word — so the
+// bare-name rule sees a dash-option head (`prog -e CODEX_HOME /o`).
+// builtins selects the buried-builtin suffix judgement — only an
+// unrecognized command's tail gets it: a launcher arm's tail is the
+// launcher's own grammar, where `exec`/`command` are subcommand words
+// (docker compose exec), not shell builtins.
+func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo, head *syntax.Word, builtins bool) bool {
 	// commandishAt(i) reports whether any word from words[i+1:] can sit
 	// where a command word goes — the per-position companion the
 	// protected-name word rule needs ("a command word follows"). The
@@ -626,7 +639,11 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 			break
 		}
 		chain = append(chain, words[0])
-		width, hides := wrapperTailWordHidesAccountAssignment(words, strace, names, memo, commandishAt)
+		prev := head
+		if idx := len(original) - len(words); idx > 0 {
+			prev = original[idx-1]
+		}
+		width, hides := wrapperTailWordHidesAccountAssignment(words, strace, names, memo, commandishAt, prev, builtins)
 		if hides {
 			answer = true
 			break
@@ -661,11 +678,42 @@ func tailWordCommandish(word *syntax.Word) bool {
 	return !strings.HasPrefix(literal, "-") && !strings.Contains(literal, "=")
 }
 
+// tailWordIsDashOption reports whether word is a literal word spelling
+// ONE dash option — `-x` or `--xxx` — the "a dash option directly before
+// it" half of the bare-name rule. A cluster like `grep -rn` is several
+// options, not an operand-carrying env option, so a search pattern after
+// it admits; `--` is a terminator, never an option.
+func tailWordIsDashOption(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	literal, ok := literalShellWord(word)
+	if !ok {
+		return false
+	}
+	if strings.HasPrefix(literal, "--") {
+		return len(literal) > 2
+	}
+	return len(literal) == 2 && literal[0] == '-'
+}
+
+// tailWordIsPlainValue reports whether word can be the VALUE operand —
+// the "a non-dash value directly after it" half of the bare-name rule.
+// A literal dash-led word cannot; a non-literal word can expand to one,
+// so it counts in the refusing direction.
+func tailWordIsPlainValue(word *syntax.Word) bool {
+	literal, ok := literalShellWord(word)
+	return !ok || !strings.HasPrefix(literal, "-")
+}
+
 // wrapperTailWordHidesAccountAssignment judges the tail word at words[0] and
 // reports how many words it consumed. commandishAt(i) is the caller's lazy
 // per-position "a command word still follows" accessor over the scan's
-// words slice.
-func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo, commandishAt func(int) bool) (int, bool) {
+// words slice; prev is the word directly before words[0] — an earlier tail
+// word, the caller's head word, or nil — the bare-name rule needs it to
+// recognize the env-option operand shape. builtins selects the
+// buried-builtin suffix judgement described on the caller.
+func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo, commandishAt func(int) bool, prev *syntax.Word, builtins bool) (int, bool) {
 	word := words[0]
 	if isAccountCommandName(word, "strace") && straceOptionRunRefused(words[1:], names, false, memo) {
 		// A strace in an unrecognized wrapper's — or another strace's — child
@@ -712,24 +760,45 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 	}
 	// A literal word that NAMES a protected variable in a command the gate
 	// does not model: under an argv-passthrough hypothesis (bwrap's
-	// `--setenv NAME VALUE`, su's `-c` script word, an unknown `-e`) the
-	// word can land the variable in a child's environment, so the word
-	// refuses once the line can still reach a command word — #7589's item
-	// 2. `NAME=<nonempty>` at an identifier boundary refuses when a
-	// command-capable word follows it; a bare name (including `NAME=`
-	// with an empty tail, the `rg 'OPENAI_API_KEY='` shape) refuses only
-	// when a VALUE word follows AND a command-capable word follows that —
-	// `--setenv CODEX_HOME /o codex`. A name that only names is inert
-	// data: `rg CODEX_HOME src/` and `grep -r CLAUDE_CONFIG_DIR .` stay
-	// admitted, and the boundary keeps `NODE_ENV` from matching `ENV`.
-	if kind := unrecognizedWordProtectedKind(literal, names); kind == wordProtectedAssign {
-		if commandishAt(0) {
+	// `--setenv NAME VALUE`, an unknown `-e`) the word can land the
+	// variable in a child's environment — #7589's item 2. A bare name
+	// (including `NAME=` with an empty tail) is a re-root ONLY as the
+	// NAME operand of an env-setting option: a dash option directly
+	// before it AND a non-dash value directly after it — `--setenv
+	// CODEX_HOME /o`. A search pattern followed by paths or more options
+	// is inert data: `rg CODEX_HOME internal/ session/`, `grep -rn
+	// CODEX_HOME --include=*.go .` and `git log -S CODEX_HOME --
+	// internal` admit. `NAME=<nonempty>` still refuses when a
+	// command-capable word follows it — except for the shell-startup
+	// names (ENV, PS1, BASH_ENV…), whose argv assignments are ordinary
+	// tool variables, not an environment a child shell reads: `make
+	// ENV=prod test` admits. The boundary keeps `NODE_ENV` from
+	// matching `ENV`.
+	if kind, protected := unrecognizedWordProtectedKind(literal, names); kind == wordProtectedAssign {
+		if _, startup := accountShellStartupNames[protected]; !startup && commandishAt(0) {
 			return 1, true
 		}
 	} else if kind == wordProtectedName {
-		if len(words) > 1 && commandishAt(1) {
+		if strings.Contains(literal, "=") {
+			// `NAME=` with an empty tail — an erasing assignment or a
+			// search pattern (`grep -E 'CODEX_HOME=' file`): keeps the
+			// value-then-command shape, which the option-operand rule
+			// below replaces only for the truly bare `NAME` word.
+			if len(words) > 1 && commandishAt(1) {
+				return 1, true
+			}
+		} else if len(words) > 1 && tailWordIsDashOption(prev) && tailWordIsPlainValue(words[1]) {
 			return 1, true
 		}
+	}
+	if _, verdict := accountChildTailSuffixBuiltinVerdictNames[literal]; builtins && verdict {
+		// A word spelling a same-shell builtin can begin a real mutation
+		// under the shadowed-wrapper reading — a `shift; "$@"` payload's
+		// shell runs `unset`/`export`/`eval` where no such binary exists
+		// to exec. Judge the suffix as a command the same way a
+		// recognized wrapper's child tail does (nice x unset CODEX_HOME
+		// and x unset CODEX_HOME are the same payload).
+		return 1, judgeShadowedChildSuffix(words, names, memo)
 	}
 	if !strings.HasPrefix(literal, "-") {
 		// A shell in the wrapper's tail gets the same verdict a bare
