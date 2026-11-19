@@ -956,9 +956,9 @@ The live task prompt must run the helper before its no-findings early exit.
 Until this helper lands on master, it skips that command when the file is absent.
 The watch is the only writer; do not run overlapping write sweeps. Transient
 `gh api` failures — transport errors, empty or truncated bodies, 5xx,
-rate-limit (including secondary) 403s, the lazy-generation 422 "taking
-too long to generate", and 408 request-timeout — retry on a bounded
-backoff; every other 4xx answer is a verdict and is not retried. A scan
+rate-limit (including secondary) 403s and 429s, the lazy-generation 422
+"taking too long to generate", and 408 request-timeout — retry on a
+bounded backoff; every other 4xx answer is a verdict and is not retried. A scan
 that still cannot finish writes a record marked incomplete, carrying the
 last complete episodes, rather than aborting or posing as a clean read
 (#4629).
