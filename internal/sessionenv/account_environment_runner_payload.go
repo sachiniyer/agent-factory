@@ -317,7 +317,7 @@ func resetProgramWordReachesAgent(literal string, rest []*syntax.Word, names, pr
 		return ambiguousResetTailAgentReach(rest, names, preserved)
 	}
 	if _, ok := commandRunnerPrograms[base]; ok {
-		for _, payload := range runnerPayloads(rest) {
+		for _, payload := range runnerPayloadCandidates(base, rest) {
 			if payloadReachesAgentProgram(payload, names, preserved) {
 				return true
 			}
@@ -354,7 +354,7 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 			base = base[idx+1:]
 		}
 		if _, ok := commandRunnerPrograms[base]; ok {
-			for _, payload := range runnerPayloads(words[i+1:]) {
+			for _, payload := range runnerPayloadCandidates(base, words[i+1:]) {
 				if payloadReachesAgentProgram(payload, names, preserved) {
 					return true
 				}
@@ -362,6 +362,18 @@ func ambiguousResetTailAgentReach(words []*syntax.Word, names, preserved map[str
 		}
 	}
 	return false
+}
+
+// runnerPayloadCandidates picks the payload collector for a command-string
+// runner: su/runuser/script take util-linux's getopt spellings (runnerPayloads
+// reads attached `-cX` and `--command` forms), while the shells attach no
+// operand to -c — `sh -ce 'x'` runs `x`, not `e` — so a shell word hands its
+// tail to shellDashCPayloadCandidates (Codex P1 on this head).
+func runnerPayloadCandidates(base string, words []*syntax.Word) []string {
+	if KnownShellName(base) {
+		return shellDashCPayloadCandidates(words)
+	}
+	return runnerPayloads(words)
 }
 
 // wordNamesResetAgent reports whether literal's final path component is

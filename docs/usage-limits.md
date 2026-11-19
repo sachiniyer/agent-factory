@@ -382,8 +382,9 @@ will not reach the child's environment.
   refuses, `sudo -E sh -c 'codex'` runs). Refusal stays for what the
   gate cannot decode: a dynamic or unparseable payload (`sh -c "$x"`),
   a missing operand (`sh -c`), a script-file form (`sh script.sh`),
-  an interactive/login/stdin spelling (`sh -i`, `bash -lc`, `sh -s`),
-  an option it cannot model (any `--long` option, `-o`), and shells
+  an interactive/stdin spelling (`sh -i`, `sh -s`), an option letter it
+  cannot model or one that changes what an assignment word does (`-k`,
+  `-o keyword`, any `--long` option, `-O`), and shells
   whose `-c` still reads a startup file (`zsh`, `csh`, `tcsh`, `fish`
   read zshenv/.cshrc/config.fish even for `-c` — bash's BASH_ENV and
   ksh's ENV name a file only through the environment, which is the

@@ -884,10 +884,10 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"sh -c", true},
 		{"sh script.sh", true},
 		{"sh -i", true},
-		{"bash -lc 'make'", true},
+		{"bash -lc 'make'", false},
 		{"bash -ic 'x'", true},
 		{"sh -s", true},
-		{"sh -o vi -c 'make'", true},
+		{"sh -o vi -c 'make'", false},
 		{"bash --norc -c 'make'", true},
 		{"zsh -c 'make'", true},
 		{"fish -c 'make'", true},
@@ -896,20 +896,38 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"mksh -c 'make'", false},
 		{"ash -c 'make'", false},
 		{"sh -ec 'make'", false},
-		{"sh -cfoo", false},
+		{"sh -cfoo", true},
 		{"bash -eux -c 'make'", false},
+		{"bash -euo pipefail -c 'make'", false},
+		{"bash -ec 'make'", false},
+		{"sh -xc 'make'", false},
 		{"sh -c 'make' arg0 arg1", false},
-		{"sh -c 'x' 'CODEX_HOME=/o'", false},
+		{"sh -c 'x' 'CODEX_HOME=/o'", true},
 		{"prog sh -c 'make'", false},
 		{"prog sh -c 'unset CODEX_HOME'", true},
 		{"nice sh -c 'codex'", false},
 		{"sh -c 'sh -c \"make\"'", false},
 		{"sh -c 'sh -c \"unset CODEX_HOME\"'", true},
+		// -c takes no attached operand in this family — `bash -ce 'x'`
+		// keeps e as an option and runs x — so the word after a -c
+		// cluster is the payload, and every following literal is a
+		// candidate (Codex P1). -k's keyword mode and -o keyword change
+		// what an assignment word does — undecodable, refused (Codex P1).
+		{"bash -ce 'unset CODEX_HOME; codex'", true},
+		{"dash -ce 'export CODEX_HOME=/o; x'", true},
+		{"bash -k -c 'codex CODEX_HOME=/other'", true},
+		{"bash -kc 'CODEX_HOME=/o codex'", true},
+		{"bash -o keyword -c 'make'", true},
+		{"bash -okeyword -c 'x'", true},
+		{"bash --rcfile /tmp/x -c 'make'", true},
+		{"bash -O extglob -c 'make'", true},
+		{"bash --foo -c 'make'", true},
 		// Under a resetting launcher the decoded payload's command word is
 		// agent reach — `sudo sh -c 'codex'` is the same reset+reach shape
 		// as `sudo su -c 'codex'` — while a preserving form stays admitted.
 		{"sudo sh -c 'codex'", true},
 		{"sudo sh -c 'co\"\"dex'", true},
+		{"sudo sh -ce 'co\"\"dex'", true},
 		{"sudo bash -c 'codex'", true},
 		{"sudo sh -c 'make'", false},
 		{"sudo -E sh -c 'codex'", false},

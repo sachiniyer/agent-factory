@@ -154,6 +154,17 @@ func shellCommandIsUnproven(words []*syntax.Word, names map[string]struct{}) boo
 	return true
 }
 
+// shellDashCSafeFlagLetters are the single-dash option letters a shell's
+// -c invocation can carry without changing what the gate must decode: no
+// input source (i interactive, s stdin), no operand option the walk does
+// not model (o is modeled below; O/R/T and the rest refuse), and no
+// behavior that changes what an assignment word does (k keyword mode
+// places every following argument word into the command's environment —
+// the Codex P1 on this head). Every letter outside this set makes the
+// whole invocation undecodable: over-refusing a rare flag is the cheap
+// direction.
+const shellDashCSafeFlagLetters = "abCEefhIlmnpruvVx"
+
 // shellDashCCommandProven reports whether words are a shell command-string
 // invocation whose every payload candidate is decodable and judged clean by
 // the gate — `sh -c 'make'` proves out exactly the way `make` does, and
@@ -161,17 +172,19 @@ func shellCommandIsUnproven(words []*syntax.Word, names map[string]struct{}) boo
 // head must be a shell with no unconditional startup file in non-interactive
 // -c mode: zsh reads zshenv, csh/tcsh their rc files and fish its config
 // regardless, so they stay unproven. (Bash's BASH_ENV and ksh's ENV name a
-// file only through the environment, which is the gate's stated limit.)
-// Every word must be literal — a dynamic word could hide the option that
-// makes the rest a script name or stdin — and the only admissible option
-// words are -c spellings and flag clusters that cannot read input or take a
-// word operand: i (interactive), l (login), s (stdin), o and O (operand)
-// are inadmissible anywhere, as is any long option. Before the first -c
-// word a non-option literal names a script file, so the invocation is not
-// provable; after it, the remaining words are the payload's positional
-// argv. Every candidate payload runnerPayloads collects is re-judged, so
-// the ambiguity that makes every -c-shaped word a candidate can only
-// over-refuse.
+// file only through the environment, which is the gate's stated limit; a
+// login `-l` sources the user's own startup files, the same responsibility
+// the docs already place outside this check.) Every word must be literal —
+// a dynamic word could hide the option that makes the rest a script name or
+// stdin — and every option letter must be admissible: a safe flag, `c`, or
+// `o` whose operand (the cluster's rest or the next word) is not `keyword`.
+// A non-option word before the first -c cluster names a script file, so
+// the invocation is not provable; `--` and `-` are admissible only after a
+// -c cluster too. `-c` itself takes no attached operand in this family —
+// `bash -ce 'x'` keeps `e` as an option and reads `x` as the string — so
+// every literal word after a -c cluster is a candidate payload, and each
+// one is re-judged: the ambiguity can only over-refuse positional argv
+// that happen to look mutating.
 func shellDashCCommandProven(words []*syntax.Word, names map[string]struct{}) bool {
 	command, _ := literalShellWord(words[0])
 	switch filepath.Base(command) {
@@ -180,8 +193,8 @@ func shellDashCCommandProven(words []*syntax.Word, names map[string]struct{}) bo
 		return false
 	}
 	sawPayloadOption := false
-	for _, word := range words[1:] {
-		literal, ok := launcherLiteralWord(word)
+	for i := 1; i < len(words); i++ {
+		literal, ok := launcherLiteralWord(words[i])
 		if !ok {
 			return false
 		}
@@ -203,18 +216,38 @@ func shellDashCCommandProven(words []*syntax.Word, names map[string]struct{}) bo
 			return false
 		}
 		cluster := literal[1:]
-		if cAt := strings.IndexByte(cluster, 'c'); cAt >= 0 {
-			if strings.ContainsAny(cluster[:cAt], "ilsoO") {
+		for j := 0; j < len(cluster); j++ {
+			switch {
+			case cluster[j] == 'c':
+				sawPayloadOption = true
+			case cluster[j] == 'o':
+				// -o's operand is the rest of the cluster or the next
+				// word. Only `keyword` changes what an assignment word
+				// does — the same mode `set -o keyword` is refused for —
+				// so any other operand is an admissible option name.
+				var operand string
+				switch {
+				case j+1 < len(cluster):
+					operand = cluster[j+1:]
+				case i+1 < len(words):
+					operand, ok = launcherLiteralWord(words[i+1])
+					if !ok {
+						return false
+					}
+					i++
+				default:
+					return false
+				}
+				if operand == "keyword" {
+					return false
+				}
+				j = len(cluster)
+			case strings.IndexByte(shellDashCSafeFlagLetters, cluster[j]) < 0:
 				return false
 			}
-			sawPayloadOption = true
-			continue
-		}
-		if strings.ContainsAny(cluster, "ilsoO") {
-			return false
 		}
 	}
-	payloads := runnerPayloads(words)
+	payloads := shellDashCPayloadCandidates(words)
 	if len(payloads) == 0 {
 		return false
 	}
@@ -224,6 +257,33 @@ func shellDashCCommandProven(words []*syntax.Word, names map[string]struct{}) bo
 		}
 	}
 	return true
+}
+
+// shellDashCPayloadCandidates collects the words that can be a shell's -c
+// command string. Unlike su/script's getopt, the shells attach no operand
+// to -c: every letter in a -c cluster is an option, and the string is an
+// operand word after it — `bash -ce 'x'` runs `x` with -e set, not the
+// letter e. Which of the following words is the string depends on option
+// operands the scan can misplace (`-o` consumes one), so every literal
+// word after a -c cluster is a candidate and each is judged.
+func shellDashCPayloadCandidates(words []*syntax.Word) []string {
+	var candidates []string
+	for i, word := range words {
+		literal, ok := launcherLiteralWord(word)
+		if !ok || literal == "-" || literal == "--" ||
+			!strings.HasPrefix(literal, "-") || strings.HasPrefix(literal, "--") {
+			continue
+		}
+		if !strings.ContainsRune(literal[1:], 'c') {
+			continue
+		}
+		for _, rest := range words[i+1:] {
+			if l, ok := launcherLiteralWord(rest); ok {
+				candidates = append(candidates, l)
+			}
+		}
+	}
+	return candidates
 }
 
 func accountShellCommandWordsProven(words []*syntax.Word) bool {
