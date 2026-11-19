@@ -2,9 +2,11 @@
 // root-exec verification (#7577 item 3). The daemon execs the staged af binary
 // as `af __docker-root-verify v1 <checks>` inside the session container, and
 // this process judges — against the container's own /proc/self/mountinfo, read
-// in-process with no shell — that every program af will run as root resolves
-// through the container's real symlinks to a path whose covering mount is the
-// root filesystem. A docker.run_args mount can place a repo-chosen program at
+// in-process with no shell — one property: every program af will run as root,
+// resolved through the container's real symlinks with all mounts applied,
+// walks to a path whose every component — and every symlink hop's target —
+// sits on a mount whose covering mount is the root filesystem. A
+// docker.run_args mount can place a repo-chosen program at
 // any of those paths (a bind at /bin/cat lands on /bin/busybox and supplies
 // every BusyBox applet at once), but it cannot hide from the kernel's mount
 // table, and it cannot substitute this verifier, which arrives on af's own
@@ -17,16 +19,20 @@
 //	             bytes — the staged binary's identity.
 //	file=<path>  <path> must be a readable regular file — the staged policy.
 //	prog=<spec>  <spec> is an absolute exec target, or a bare name found on
-//	             the pinned PATH the root scripts use; either way its
-//	             resolved path's covering mount must be "/". A program absent
+//	             the pinned PATH the root scripts use; either way the path is
+//	             walked component by component and every materialized
+//	             component — and every symlink hop's target — must sit on a
+//	             mount whose covering mount is "/". A program absent
 //	             everywhere reports ABSENT, not FAIL — a missing program is
 //	             the caller's own pre-existing error path, and nothing this
 //	             check is asked to keep off a mount.
 //	write=<path> a destination af is about to `docker cp` into: the leaf
 //	             must not be a symlink (cp resolves it wherever it points),
-//	             the resolved destination's covering mount must be "/", and
-//	             no mount may sit beneath it, where a cp writing through a
-//	             directory destination would land.
+//	             the same component walk applies to the destination, and no
+//	             mount may sit beneath it, where a cp writing through a
+//	             directory destination would land. An absent tail is
+//	             allowed — it is created beneath the deepest verified
+//	             ancestor.
 //
 // Each check prints one verdict line to stdout — `OK`, `ABSENT`, or `FAIL`
 // followed by the detail — so the daemon can name the covering mount in its
@@ -35,6 +41,7 @@
 package dockerrootverify
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -167,16 +174,31 @@ func checkReadableFile(spec string) string {
 	return "OK file " + spec
 }
 
+// The filesystem seams the component walk reads — plain os calls in
+// production, swapped for a fixture filesystem by the package's tests.
+var (
+	fsLstat    = os.Lstat
+	fsReadlink = os.Readlink
+	fsStat     = os.Stat
+)
+
+// resolveDepthCap mirrors the kernel's ELOOP ceiling: a link chain that long
+// is unresolvable, never "probably rootfs".
+const resolveDepthCap = 40
+
 // checkProgram resolves one program af runs as root — an absolute exec target
-// or a bare name the pinned-PATH scripts use — and requires its resolved
-// path's covering mount to be the root filesystem.
+// or a bare name the pinned-PATH scripts use — and applies the one property
+// this verification exists to state: every component on the resolved path,
+// and every symlink hop's target, sits on a mount whose covering mount is
+// "/". Anything that cannot be resolved or verified fails closed; a program
+// simply not there reports ABSENT — the caller's own pre-existing error path.
 func checkProgram(spec string, points []string) string {
 	candidate := spec
 	if !strings.HasPrefix(spec, "/") {
 		found := ""
 		for _, dir := range PinnedPathDirs {
 			p := path.Join(dir, spec)
-			if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
+			if st, err := fsStat(p); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
 				found = p
 				break
 			}
@@ -186,46 +208,95 @@ func checkProgram(spec string, points []string) string {
 		}
 		candidate = found
 	}
-	res, err := filepath.EvalSymlinks(candidate)
-	if err != nil {
-		return "ABSENT prog " + spec + ": " + err.Error()
+	res, missing, err := resolveVerified(candidate, points, 0)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("FAIL prog %s: %v", spec, err)
+	case missing != "":
+		return fmt.Sprintf("ABSENT prog %s: %s does not exist", spec, missing)
+	default:
+		return fmt.Sprintf("OK prog %s -> %s", spec, res)
 	}
-	return mountVerdict("prog", spec, res, points)
 }
 
-// checkWriteDest judges a path af is about to `docker cp` into: the leaf must
-// not be a symlink (cp resolves it wherever it points), the resolved
-// destination's covering mount must be the root filesystem, and no mount may
-// sit beneath the destination, where a cp writing through a directory would
-// land.
+// checkWriteDest judges a path af is about to `docker cp` into under the same
+// property: the leaf must not be a symlink (cp resolves it wherever it
+// points), every materialized component and hop target must sit on the root
+// filesystem, and no mount may sit beneath the destination, where a cp
+// writing through a directory would land. A missing tail is allowed — it is
+// created beneath the deepest verified ancestor, which the walk has already
+// proven to be rootfs.
 func checkWriteDest(spec string, points []string) string {
-	if st, err := os.Lstat(spec); err == nil && st.Mode()&os.ModeSymlink != 0 {
+	if st, err := fsLstat(spec); err == nil && st.Mode()&os.ModeSymlink != 0 {
 		return "FAIL write " + spec + ": the destination leaf is a symlink"
 	}
-	dir := path.Dir(spec)
-	resDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return "FAIL write " + spec + ": cannot resolve " + dir + ": " + err.Error()
+	res, missing, err := resolveVerified(spec, points, 0)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("FAIL write %s: %v", spec, err)
+	case missing != "":
+		return fmt.Sprintf("OK write %s -> %s (absent tail, created on the rootfs)", spec, res)
 	}
-	res := path.Join(resDir, path.Base(spec))
 	for _, mp := range points {
 		if strings.HasPrefix(mp, res+"/") {
 			return fmt.Sprintf("FAIL write %s -> %s: the mount %s sits beneath the destination", spec, res, mp)
 		}
 	}
-	return mountVerdict("write", spec, res, points)
+	return fmt.Sprintf("OK write %s -> %s", spec, res)
 }
 
-// mountVerdict reports the covering-mount verdict for a resolved path: OK
-// when the deepest mount point enclosing it is "/", FAIL naming the mount
-// otherwise — a FAIL is af's "a docker.run_args mount can supply this"
-// refusal.
-func mountVerdict(kind, spec, resolved string, points []string) string {
-	mp := enclosingMount(points, resolved)
-	if mp == "/" {
-		return fmt.Sprintf("OK %s %s -> %s", kind, spec, resolved)
+// resolveVerified walks an absolute path component by component and applies
+// the property: each materialized component's covering mount must be "/", and
+// each symlink hop's target is itself walked from the root — a hop landing on
+// a mount, or one that cannot be resolved at all, fails closed. It returns
+// the fully resolved path; or, when a component does not exist, the deepest
+// verified ancestor plus missingFrom naming the first absent materialized
+// path (everything beneath it is created on that ancestor's filesystem). An
+// error means the path could not be resolved or verified — the caller turns
+// it into FAIL, never "assume rootfs".
+func resolveVerified(p string, points []string, depth int) (resolved string, missingFrom string, err error) {
+	resolved = "/"
+	for _, c := range strings.Split(p, "/") {
+		if c == "" || c == "." {
+			continue
+		}
+		cand := path.Join(resolved, c)
+		if mp := enclosingMount(points, cand); mp != "/" {
+			return "", "", fmt.Errorf("%s is covered by the mount %s", cand, mp)
+		}
+		st, lerr := fsLstat(cand)
+		if lerr != nil {
+			if errors.Is(lerr, os.ErrNotExist) {
+				return resolved, cand, nil
+			}
+			return "", "", fmt.Errorf("cannot resolve %s: %w", cand, lerr)
+		}
+		if st.Mode()&os.ModeSymlink == 0 {
+			resolved = cand
+			continue
+		}
+		if depth >= resolveDepthCap {
+			return "", "", fmt.Errorf("the link chain through %s exceeds %d hops", cand, resolveDepthCap)
+		}
+		tgt, rerr := fsReadlink(cand)
+		if rerr != nil {
+			return "", "", fmt.Errorf("cannot read the link %s: %w", cand, rerr)
+		}
+		if !path.IsAbs(tgt) {
+			tgt = path.Join(path.Dir(cand), tgt)
+		}
+		hop, hmiss, herr := resolveVerified(tgt, points, depth+1)
+		if herr != nil {
+			return "", "", fmt.Errorf("the link %s -> %s: %w", cand, tgt, herr)
+		}
+		if hmiss != "" {
+			// A dangling hop: the verified ancestor it stopped at is the
+			// deepest proven component — report its first absent point.
+			return hop, hmiss, nil
+		}
+		resolved = hop
 	}
-	return fmt.Sprintf("FAIL %s %s -> %s: covered by the mount %s", kind, spec, resolved, mp)
+	return resolved, "", nil
 }
 
 // enclosingMount is the longest mount point equal to p or a path prefix of it

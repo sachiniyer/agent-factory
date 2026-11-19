@@ -380,7 +380,7 @@ func (p *dockerProvisioner) probeResolvedDestinations(mounts [][2]string) ([]str
 	// wrapper kills only the CLI and --rm needs the container to exit.
 	args := []string{"run", "--rm", "--label", dockerSessionLabel + "=" + Slugify(p.spec.Title),
 		"--entrypoint", dockerContainerShell, p.image, "-c",
-		dockerRootScriptPrefix + `{ cd -- "$1" && pwd -P && printf '\0'; } || exit 3; { cd -- "$2" && pwd -P && printf '\0'; } || exit 3; for f in "$3" "$4"; do if [ -L "$f" ]; then printf '` + leafSymlinkMarker + `%s\n' "$f"; fi; done; printf '\0'; shift 4; for d in "$@"; do if cd -- "$d" 2>/dev/null; then pwd -P; elif cd -- "${d%/*}" 2>/dev/null; then printf '%s/%s\n' "$(cd -- "${d%/*}" && pwd -P)" "${d##*/}"; else printf '%s\n' '` + probeFailMarker + `'; fi; printf '\0'; done`}
+		dockerRootScriptPrefix + `{ cd -- "$1" && pwd -P && printf '\0'; } || exit 3; { cd -- "$2" && pwd -P && printf '\0'; } || exit 3; for f in "$3" "$4"; do if [ -L "$f" ]; then printf '` + leafSymlinkMarker + `%s\n' "$f"; fi; done; printf '\0'; shift 4; for d in "$@"; do r="$d"; until cd -- "$r" 2>/dev/null; do r="${r%/*}"; [ -z "$r" ] && r="/"; done; printf '%s%s\n' "$(pwd -P)" "${d#"$r"}"; printf '\0'; done`}
 	args = append(args, argv...)
 	out, err := p.docker(dockerShortStepTimeout, args...)
 	if err != nil {
@@ -439,7 +439,11 @@ func (p *dockerProvisioner) deliverPayload() error {
 	case outcome == dockerRootVerifyRefused:
 		return dockerStepErr(verr, dockerOpLocal)
 	case outcome != dockerRootVerifyOK:
-		return dockerStepErr(fmt.Errorf("backend=docker: the copied af binary did not run its root-exec verification, so its placement and the mount table are unproven: %w", verr), dockerOpLocal)
+		// An exec that could not run is a session-exec failure — a full
+		// docker data root can refuse exec-state creation, and that ENOSPC
+		// must reach the capacity-evidence classifier, not the structural
+		// retry budget a local refusal consumes (#7607 review).
+		return dockerStepErr(fmt.Errorf("backend=docker: the copied af binary did not run its root-exec verification, so its placement and the mount table are unproven: %w", verr), dockerOpSessionExec)
 	}
 	if err := p.copyPolicy(); err != nil {
 		return dockerStepErr(err, dockerOpDaemonWrite)

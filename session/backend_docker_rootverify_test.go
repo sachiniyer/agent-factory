@@ -1,16 +1,20 @@
 // #7577 item 3's guard-and-verify tests: every program af runs as root in the
-// container — resolved through the container's own symlinks — must sit on the
-// root filesystem, judged by the staged binary's kernel mount-table read; and
-// on the cp path every destination af writes must stay on the container's own
-// filesystem. The fail-closed cases (unreadable inspect, an unanswerable
-// probe) refuse rather than guess.
+// container — resolved inside the running container, component and hop alike
+// — must sit on the root filesystem, judged by the staged binary's kernel
+// mount-table read; and on the cp path every destination af writes must stay
+// on the container's own filesystem. The host-side guard is a lexical
+// failfast; the fail-closed cases (unreadable inspect) refuse rather than
+// guess.
 package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -39,33 +43,17 @@ func inspectMountsDoc(t *testing.T, dests, tmpfs []string) []byte {
 	return doc
 }
 
-// rootGuardProbe renders the in-image destination probe's NUL-framed answer:
-// the resolved parents of the two af write destinations, the (empty)
-// leaf-marker field, then one resolved destination per configured mount.
-func rootGuardProbe(resA, resB string, resolvedMounts ...string) func(string) ([]byte, error) {
-	return func(string) ([]byte, error) {
-		var b strings.Builder
-		b.WriteString(resA + "\n\x00" + resB + "\n\x00\x00")
-		for _, d := range resolvedMounts {
-			b.WriteString(d + "\n\x00")
-		}
-		return []byte(b.String()), nil
-	}
-}
-
-// TestDockerWriteGuardRefusesConfiguredMounts is the cp path's pre-write
-// check: a daemon-configured mount whose destination encloses — or sits
-// beneath — a resolved af write target is refused with an actionable error,
-// and no cp runs. Every configured destination is judged in both spellings —
-// the configured path and the probe's in-image resolution — because Docker
-// resolves a bind at a symlinked destination onto its real target.
+// TestDockerWriteGuardRefusesConfiguredMounts is the cp path's lexical
+// failfast: a daemon-configured mount whose destination encloses an af write
+// target on its literal spelling is refused before any cp — the same verdict
+// the in-container verifier gives the resolved path, earlier and cheaper.
+// Resolution itself is never judged here: only the trusted verifier inside
+// the running container sees the mounts as applied.
 func TestDockerWriteGuardRefusesConfiguredMounts(t *testing.T) {
 	tests := []struct {
 		name        string
 		mounts      []string // .Mounts destinations
 		tmpfs       []string // .HostConfig.Tmpfs keys
-		resA        string   // probe-resolved af parent (default /usr/local/bin)
-		resolved    []string // probe-resolved mount dests (default: configured)
 		wantRefused string
 		policy      bool
 	}{
@@ -86,8 +74,8 @@ func TestDockerWriteGuardRefusesConfiguredMounts(t *testing.T) {
 			policy:      true,
 		},
 		{
-			name:        "mount beneath a directory destination",
-			mounts:      []string{"/usr/local/bin/af/inner"},
+			name:        "the whole container root",
+			mounts:      []string{"/"},
 			wantRefused: dockerAfBinaryPath,
 		},
 		{
@@ -101,26 +89,6 @@ func TestDockerWriteGuardRefusesConfiguredMounts(t *testing.T) {
 			wantRefused: dockerPolicyPath,
 			policy:      true,
 		},
-		{
-			name:        "a symlinked configured dest resolves over the af directory",
-			mounts:      []string{"/img/link"},
-			resolved:    []string{"/usr/local/bin"},
-			wantRefused: dockerAfBinaryPath,
-		},
-		{
-			name:        "the af parent itself resolves onto a configured bind",
-			mounts:      []string{"/mnt/host-bin"},
-			resA:        "/mnt/host-bin",
-			wantRefused: dockerAfBinaryPath,
-		},
-		{
-			name:   "resolved parent with a trailing space is judged byte-exactly",
-			mounts: []string{"/usr/local/bin "},
-			resA:   "/usr/local/bin ",
-			// A mount over "/usr/local/bin " covers "/usr/local/bin /af" — a
-			// TrimSpace'd read would judge "/usr/local/bin/af" and miss it.
-			wantRefused: dockerAfBinaryPath,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -131,19 +99,6 @@ func TestDockerWriteGuardRefusesConfiguredMounts(t *testing.T) {
 				return inspectMountsDoc(t, tt.mounts, tt.tmpfs), nil
 			}
 			defer func() { dockerInspectAnswer = oldI }()
-			if tt.resA != "" || tt.resolved != nil {
-				resA := tt.resA
-				if resA == "" {
-					resA = "/usr/local/bin"
-				}
-				resolved := tt.resolved
-				if resolved == nil {
-					resolved = append(append([]string{}, tt.mounts...), tt.tmpfs...)
-				}
-				old := dockerStagingProbeAnswer
-				dockerStagingProbeAnswer = rootGuardProbe(resA, "/etc", resolved...)
-				defer func() { dockerStagingProbeAnswer = old }()
-			}
 			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
 
 			spec := ProvisionSpec{Title: "guarded", CloneURL: "file:///repo"}
@@ -168,27 +123,50 @@ func TestDockerWriteGuardRefusesConfiguredMounts(t *testing.T) {
 }
 
 // TestDockerWriteGuardAllowsRootfs pins the allowed case: no configured mount
-// touches a resolved af write target. The second row is the --tmpfs /tmp
-// preservation the /etc policy path exists for: a private tmpfs over /tmp is a
-// common hardening flag, and with the policy at /etc nothing af writes lands
-// beneath it, so the fallback still delivers.
+// lexically encloses an af write target. Anything subtler — a mount that
+// changes a resolved path, a destination with absent parents, a mount
+// beneath the file itself — is deliberately left to the in-container
+// verifier, which walks the real filesystem after all mounts are applied;
+// the guard only stops the plainly hopeless writes before cp.
 func TestDockerWriteGuardAllowsRootfs(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		mounts []string
 		tmpfs  []string
-		resA   string
 		policy bool
 	}{
 		{name: "plain rootfs"},
 		{name: "a private tmpfs over /tmp elsewhere is irrelevant", tmpfs: []string{"/tmp"}, policy: true},
 		{
-			name:   "a trailing-spaced sibling is not under the unspaced mount",
-			mounts: []string{"/usr/local/bin"},
-			resA:   "/usr/local/bin ",
-			// "/usr/local/bin/af" is under this mount; "/usr/local/bin /af"
-			// is not — judging the resolved path byte-exactly is what lets
-			// the write proceed.
+			name:   "a sibling mount under the destination parent is allowed",
+			mounts: []string{"/etc/ssl"},
+			policy: true,
+		},
+		{
+			name:   "a trailing-spaced mount is a different destination",
+			mounts: []string{"/usr/local/bin "},
+		},
+		{
+			name:   "a mount beneath the destination file covers nothing",
+			mounts: []string{"/usr/local/bin/af/inner"},
+		},
+		{
+			// #7607 review: a credential bind's destination parents may be
+			// absent from the image — nothing for the lexical guard to
+			// refuse, and the verifier resolves the tail in-container.
+			name:   "a credential mount with absent parents is allowed",
+			mounts: []string{"/root/.codex/auth.json"},
+		},
+		{
+			// Resolved-path judgment is the verifier's: mounts that only a
+			// post-mounts resolution can expose pass the guard and are
+			// judged by the verdict exec (default fake answer: all OK).
+			name:   "the account bind is not exempt",
+			mounts: []string{dockerAccountHome},
+		},
+		{
+			name:   "a mount that could retarget an intermediate link",
+			mounts: []string{"/opt"},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -199,11 +177,6 @@ func TestDockerWriteGuardAllowsRootfs(t *testing.T) {
 				return inspectMountsDoc(t, tt.mounts, tt.tmpfs), nil
 			}
 			defer func() { dockerInspectAnswer = oldI }()
-			if tt.resA != "" {
-				old := dockerStagingProbeAnswer
-				dockerStagingProbeAnswer = rootGuardProbe(tt.resA, "/etc", tt.mounts...)
-				defer func() { dockerStagingProbeAnswer = old }()
-			}
 			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
 
 			spec := ProvisionSpec{Title: "allowed", CloneURL: "file:///repo"}
@@ -223,56 +196,81 @@ func TestDockerWriteGuardAllowsRootfs(t *testing.T) {
 	}
 }
 
-// TestDockerWriteGuardRefusesSymlinkLeaf: a destination whose final component
-// is a symlink is refused — `docker cp` follows it off the checked path.
-func TestDockerWriteGuardRefusesSymlinkLeaf(t *testing.T) {
-	stagingTestEnv(t)
-	var calls [][]string
-	oldI := dockerInspectAnswer
-	dockerInspectAnswer = func(string) ([]byte, error) {
-		return inspectMountsDoc(t, []string{"/opt/elsewhere"}, nil), nil
-	}
-	defer func() { dockerInspectAnswer = oldI }()
-	old := dockerStagingProbeAnswer
-	dockerStagingProbeAnswer = func(string) ([]byte, error) {
-		return []byte("/usr/local/bin\n\x00/etc\n\x00" + leafSymlinkMarker + dockerAfBinaryPath + "\n\x00/opt/elsewhere\n\x00"), nil
-	}
-	defer func() { dockerStagingProbeAnswer = old }()
-	t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
+// TestDockerVerifierRefusesResolvedMounts is the property's authority row:
+// mounts whose destinations do not lexically enclose an af write target —
+// but resolve onto one inside the running container, after every bind is
+// applied — are caught by the staged binary's verifier and refused. One row
+// per #7607-review shape: the account bind an image alias lands an af write
+// inside (P1), and the intermediate symlink hop a mount retargets (P1);
+// plus the symlink destination leaf `docker cp` would follow. The
+// internal/dockerrootverify package's table tests pin the verdicts
+// themselves; this file pins that a FAIL verdict refuses the provision.
+func TestDockerVerifierRefusesResolvedMounts(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		mounts  []string
+		verdict string
+	}{
+		{
+			name:   "the destination resolves onto the account bind",
+			mounts: []string{dockerAccountHome},
+			verdict: "FAIL write " + dockerAfBinaryPath + ": the link /usr/local/bin -> " +
+				dockerAccountHome + "/bin: " + dockerAccountHome + " is covered by the mount " + dockerAccountHome,
+		},
+		{
+			name:   "a mount retargets an intermediate symlink hop",
+			mounts: []string{"/opt"},
+			verdict: "FAIL write " + dockerAfBinaryPath +
+				": the link /usr/local/bin -> /opt/link: /opt is covered by the mount /opt",
+		},
+		{
+			name:    "the destination leaf is a symlink in the image",
+			verdict: "FAIL write " + dockerAfBinaryPath + ": the destination leaf is a symlink",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stagingTestEnv(t)
+			oldI := dockerInspectAnswer
+			dockerInspectAnswer = func(string) ([]byte, error) {
+				return inspectMountsDoc(t, tt.mounts, nil), nil
+			}
+			defer func() { dockerInspectAnswer = oldI }()
+			oldV := dockerRootVerifyAnswer
+			dockerRootVerifyAnswer = func(string) ([]byte, error) {
+				return []byte(tt.verdict + "\n"), nil
+			}
+			defer func() { dockerRootVerifyAnswer = oldV }()
+			var calls [][]string
+			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
 
-	p := &dockerProvisioner{
-		image: "img:latest",
-		afBin: filepath.Join(t.TempDir(), "missing-af"),
-		spec:  ProvisionSpec{Title: "symlink", CloneURL: "file:///repo"},
+			p := &dockerProvisioner{
+				image: "img:latest",
+				afBin: filepath.Join(t.TempDir(), "missing-af"),
+				spec:  ProvisionSpec{Title: "resolved", CloneURL: "file:///repo"},
+			}
+			_, err := p.provision()
+			require.Error(t, err, "calls=%v", calls)
+			assert.Contains(t, err.Error(), "refusing to run root commands",
+				"a FAIL verdict must refuse the provision: %v", err)
+			require.Nil(t, findDockerCall(calls, "cp", dockerPolicyPath),
+				"the refusal precedes the policy cp; calls=%v", calls)
+		})
 	}
-	_, err := p.provision()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "symlink")
-	assert.Contains(t, err.Error(), dockerAfBinaryPath)
-	require.Nil(t, findDockerCall(calls, "cp"), "calls=%v", calls)
 }
 
 // TestDockerWriteGuardUnreadableMountsRefuses: the guard is fail-closed — an
-// inspect failure, output it cannot parse, or a resolution probe that cannot
-// answer refuses the write rather than hoping the destination is safe.
+// inspect failure or output it cannot parse refuses the write rather than
+// hoping the destination is safe.
 func TestDockerWriteGuardUnreadableMountsRefuses(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		inspect func(string) ([]byte, error)
-		probe   func(string) ([]byte, error)
 	}{
 		{name: "inspect fails", inspect: func(string) ([]byte, error) {
 			return nil, fmt.Errorf("exit status 1")
 		}},
 		{name: "unparseable inspect answer", inspect: func(string) ([]byte, error) {
 			return []byte("not a container description\n"), nil
-		}},
-		{name: "resolution probe fails", probe: func(string) ([]byte, error) {
-			// A mount is configured, so the probe must answer — its failure
-			// means the destinations' real paths are unproven.
-			return nil, fmt.Errorf("exit status 1")
-		}, inspect: func(string) ([]byte, error) {
-			return []byte(`{"Mounts":[{"Type":"bind","Source":"/h","Destination":"/opt/x"}],"HostConfig":{"Tmpfs":{}}}` + "\n"), nil
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -281,9 +279,6 @@ func TestDockerWriteGuardUnreadableMountsRefuses(t *testing.T) {
 			oldI := dockerInspectAnswer
 			dockerInspectAnswer = tt.inspect
 			defer func() { dockerInspectAnswer = oldI }()
-			oldP := dockerStagingProbeAnswer
-			dockerStagingProbeAnswer = tt.probe
-			defer func() { dockerStagingProbeAnswer = oldP }()
 			t.Cleanup(stagingDockerAnswers(t, &calls, "moby", false, nil, nil))
 
 			p := &dockerProvisioner{
@@ -424,4 +419,47 @@ func TestDockerRootVerifyUndeliveredRetriesCp(t *testing.T) {
 		"the retry must not carry the undelivered binds; argv=%v", runs[1])
 	require.NotNil(t, findDockerCall(calls, "cp"),
 		"the retried provision delivers via cp; calls=%v", calls)
+}
+
+// TestDockerRootVerifyExecFailureKeepsSessionExecClass is the #7607-review
+// P2: a verifier exec that cannot run on the cp path — a full docker data
+// root refusing exec-state creation — is a session-exec failure, so its
+// ENOSPC reaches the capacity classifier as errno evidence instead of
+// consuming the structural retry budget a local refusal would.
+func TestDockerRootVerifyExecFailureKeepsSessionExecClass(t *testing.T) {
+	host, herr := os.Hostname()
+	require.NoError(t, herr)
+	stubPeerDataRoot(t, 0, "8:1", peerTableOn("8:1"), peerTableOn("8:1"), nil)
+	old1, old2 := statfsFull, statfsFullUnprivileged
+	statfsFull = func(string) (bool, error) { return true, nil }
+	statfsFullUnprivileged = func(string) (bool, error) { return true, nil }
+	defer func() { statfsFull, statfsFullUnprivileged = old1, old2 }()
+	old3 := sameFilesystem
+	sameFilesystem = func(string, string) bool { return true }
+	defer func() { sameFilesystem = old3 }()
+	oldV := dockerRootVerifyAnswer
+	dockerRootVerifyAnswer = func(string) ([]byte, error) {
+		return []byte("exec: Cannot run program: no space left on device\n"), fmt.Errorf("exit status 1")
+	}
+	defer func() { dockerRootVerifyAnswer = oldV }()
+	fakeDockerCapacityProbe(t, dockerInfoAnswer(t, "/var/lib/docker", host, false),
+		func(args []string) ([]byte, error) {
+			switch {
+			case args[0] == "run":
+				return dockerRunOrProbeAnswer(args)
+			case args[0] == "exec" && containsArg(args, "__docker-root-verify"):
+				return dockerRootVerifyAnswer(strings.Join(args, " "))
+			}
+			return nil, nil
+		})
+	stagingTestEnv(t)
+	p := &dockerProvisioner{
+		image: "img:latest",
+		afBin: filepath.Join(t.TempDir(), "missing-af"),
+		spec:  ProvisionSpec{Title: "verify-enospc", CloneURL: "file:///repo"},
+	}
+	_, err := p.provision()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, syscall.ENOSPC),
+		"the verify exec's ENOSPC must classify as a session-exec failure: %v", err)
 }

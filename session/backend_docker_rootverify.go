@@ -1,14 +1,16 @@
 package session
 
 // The host-side half of the docker backend's root-exec verification (#7577
-// item 3, plan option B: mountinfo-verified exec paths). Every program af
-// runs as root inside the container must resolve — through the container's
-// own symlinks — to a path whose covering mount is the root filesystem. A
-// docker.run_args mount at /bin/cat lands on /bin/busybox and supplies every
-// applet af execs at once, but it cannot hide from the kernel's mount table,
-// and it cannot substitute the staged af binary that reads it: the staged
-// binary is af's own trusted executor, delivered by item 2's read-only binds
-// or by a mount-checked cp.
+// item 3, plan option B: mountinfo-verified exec paths). The property is
+// single: every program af runs as root inside the container is resolved
+// INSIDE the running container — all mounts applied — component by
+// component, and each materialized component plus every symlink hop's
+// target must sit on a mount whose covering mount is "/"; anything that
+// cannot be resolved or verified fails closed. A docker.run_args mount at
+// /bin/cat lands on /bin/busybox and supplies every applet af execs at once,
+// but it cannot hide from the kernel's mount table, and it cannot substitute
+// the staged af binary that reads it: the staged binary is af's own trusted
+// executor, delivered by item 2's read-only binds or by a mount-checked cp.
 //
 // The verification is one `docker exec` of the staged binary as
 // `af __docker-root-verify v1 <checks>`, run right after the payload lands and
@@ -153,13 +155,16 @@ func (p *dockerProvisioner) payloadSize() int64 {
 
 // inspectWriteTargetsGuard is the cp path's pre-write mount check: every
 // filesystem the daemon installed for the container — run_args binds,
-// volumes, tmpfs mounts, volumes-from donors — is read from `docker inspect`,
-// resolved through the image's symlinks by the destination probe, and refused
-// when it encloses a resolved af destination. inspect is the daemon's own
-// word, so this read cannot be forged by anything mounted inside the
-// container; what it cannot see — a mount or symlink the image's entrypoint
-// made after create — is the documented image-code residual the verifier's
-// post-cp self-check bounds.
+// volumes, tmpfs mounts, volumes-from donors — is read from `docker inspect`
+// and refused when a mount destination LEXICALLY encloses an af destination.
+// It is a failfast, not the authority: resolution is judged only by the
+// in-container verifier, which walks every component and symlink hop after
+// all mounts are applied — an image symlink that hops through a mount's own
+// content, or a destination whose parents the image lacks, is invisible to
+// any host-side reading of the pristine image (#7607 review). inspect is the
+// daemon's own word, so this read cannot be forged by anything mounted inside
+// the container; the verifier then proves the resolved truth before any root
+// script runs.
 func (p *dockerProvisioner) inspectWriteTargetsGuard() error {
 	out, err := p.docker(dockerShortStepTimeout, "inspect", "--format", "{{json .}}", p.containerID)
 	if err != nil {
@@ -171,34 +176,23 @@ func (p *dockerProvisioner) inspectWriteTargetsGuard() error {
 		return fmt.Errorf("backend=docker: cannot read the container's mounts, so af's files are not written (a cp must stay on the container's own filesystem): `docker inspect` output could not be read as JSON (%s): %w",
 			boundedOutputExcerpt(out), err)
 	}
-	dests := configuredMountPaths(inspected)
+	// Every mount the daemon configured is judged — the account bind at
+	// dockerAccountHome included. (configuredMountPaths intentionally skips
+	// the account bind — it serves the boundary check, where the bind itself
+	// is expected; here it is just another place af must not write.)
+	var dests []string
+	for _, m := range inspected.Mounts {
+		dests = append(dests, m.Destination)
+	}
 	for mp := range inspected.HostConfig.Tmpfs {
 		dests = append(dests, mp)
 	}
-	if len(dests) == 0 {
-		return nil
-	}
-	mounts := make([][2]string, 0, len(dests))
 	for _, d := range dests {
-		mounts = append(mounts, [2]string{d, d})
-	}
-	resolved, resMounts, leafLink, perr := p.probeResolvedDestinations(mounts)
-	switch {
-	case perr != nil:
-		return fmt.Errorf("backend=docker: cannot resolve af's destination paths inside the image (%v), so af's files are not written (a cp must stay on the container's own filesystem)", perr)
-	case leafLink:
-		return fmt.Errorf("backend=docker: refusing to write %s: the destination leaf is a symlink in the image, and `docker cp` would follow it wherever it points", p.stagingDestinations()[0])
-	}
-	dsts := p.stagingDestinations()
-	for i, d := range dests {
-		for _, dest := range []string{path.Clean("/" + d), resMounts[i]} {
-			for j, t := range resolved {
-				covers := dest == t || dest == "/" || strings.HasPrefix(t, dest+"/")
-				beneath := strings.HasPrefix(dest, path.Dir(t)+"/")
-				if covers || beneath {
-					return fmt.Errorf("backend=docker: refusing to write %s (resolves to %s): the mount %s resolves to %s, which encloses it or sits beneath its directory — a cp landing inside it would reach the host; remove that docker.run_args mount or move it elsewhere",
-						dsts[j], t, d, dest)
-				}
+		dest := path.Clean("/" + d)
+		for _, t := range p.stagingDestinations() {
+			if dest == t || dest == "/" || strings.HasPrefix(t, dest+"/") {
+				return fmt.Errorf("backend=docker: refusing to write %s: the mount %s encloses the destination, and a cp landing inside it would reach the host; remove that docker.run_args mount or move it elsewhere",
+					t, d)
 			}
 		}
 	}
