@@ -189,17 +189,20 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 	// re-read (#7616 R2): without an explicit selector each docker call
 	// re-resolves the current context, so a `docker context use` switch
 	// landing between the two ID reads could put the LISTING on a third
-	// engine both reads never saw. Naming the resolved selector on every
-	// call makes the whole pass address one endpoint; a changed engine
+	// engine both reads never saw. Materializing the resolved selector into
+	// the env makes the whole pass address one endpoint; a changed engine
 	// behind it is still caught by the before/after ID comparison.
-	selector, err := stagingSweepSelector(env)
+	pin, err := resolveDockerContextPin(env)
 	if err != nil {
 		log.WarningLog.Printf("staging dir sweep: cannot pin the Docker engine selector; skipping this sweep: %v", err)
 		result.Unlisted = true
 		return result
 	}
+	if pin != "" {
+		env = append(env, "DOCKER_CONTEXT="+pin)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
-	engineID, err := currentDockerEngineID(ctx, env, selector...)
+	engineID, err := currentDockerEngineID(ctx, env)
 	cancel()
 	if err != nil {
 		log.WarningLog.Printf("staging dir sweep: cannot read the Docker engine identity; skipping this sweep: %v", err)
@@ -207,7 +210,7 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 		return result
 	}
 	result.EngineID = engineID
-	containers, err := listAfContainers(env, homeID, selector...)
+	containers, err := listAfContainers(env, homeID)
 	if err != nil {
 		log.WarningLog.Printf("staging dir sweep: cannot list af containers; skipping this sweep: %v", err)
 		result.Unlisted = true
@@ -221,7 +224,7 @@ func SweepOrphanedStagingDirs(homeID string, claimedNames, protectedSlugs map[st
 	// engine being asked — the post-pass re-read reapListedContainers applies
 	// (Codex on #7458). A moved or unreadable engine voids the pass.
 	ctx, cancel = context.WithTimeout(context.Background(), dockerShortStepTimeout)
-	listedOn, err := currentDockerEngineID(ctx, env, selector...)
+	listedOn, err := currentDockerEngineID(ctx, env)
 	cancel()
 	if err != nil || listedOn != engineID {
 		log.WarningLog.Printf("staging dir sweep: the Docker engine changed or could not be read again during this pass (was %q, now %q: %v); it proves nothing about what is left", engineID, listedOn, err)
@@ -365,38 +368,39 @@ func stagingGenerationAlive(gen string) (alive bool, why string) {
 }
 
 // dockerContextNameFormat selects a context's own name from `docker context
-// inspect` — the selector the pin names so every one of the pass's calls
-// addresses the context the resolution chose, immune to a `docker context
-// use` switch landing mid-pass (#7616 R2).
+// inspect` — the selector the pin materializes so every later call addresses
+// the context the resolution chose, immune to a `docker context use` switch
+// landing mid-pass (#7616 R2).
 const dockerContextNameFormat = "{{.Name}}"
 
-// stagingSweepSelector returns the docker CLI global args that pin every
-// call of the pass to the ONE endpoint the resolution just chose: `-H
-// <DOCKER_HOST>` when that is the CLI's selector, `--context <name>`
-// otherwise — the DOCKER_CONTEXT value when set, else the current context's
-// own name, resolved once through `docker context inspect`. A `-H` value is
-// already the endpoint; a context NAME pins the lookup so a `docker context
-// use` switch mid-pass cannot move the listing to an engine the identity
-// reads never saw (#7616 R2), while the context's TLS material still
-// applies.
-func stagingSweepSelector(env []string) ([]string, error) {
-	if host := strings.TrimSpace(rawEnvironmentValue(env, "DOCKER_HOST")); host != "" {
-		return []string{"-H", host}, nil
-	}
-	if rawCtx := rawEnvironmentValue(env, "DOCKER_CONTEXT"); rawCtx != "" {
-		return []string{"--context", rawCtx}, nil
+// resolveDockerContextPin reports the context name that pins the docker
+// CLI's selector: an empty string when the env already carries a selector
+// (DOCKER_HOST or DOCKER_CONTEXT — both outrank a `docker context use`
+// switch, so the calls are pinned already), else the current context's own
+// name, read once through `docker context inspect`. Appending the answer as
+// DOCKER_CONTEXT=<name> makes every later call address the context the
+// resolution chose: the CLI treats the env var exactly like `--context`,
+// and a `docker context use` landing afterwards can no longer move the
+// calls to an engine the resolution never saw. Both the sweep's
+// ID-read/listing/re-read sequence (#7616 R2) and the provision's
+// ID-read/run sequence (Codex on #7616) pin their calls this way — through
+// the environment rather than argv, since DockerCLIEnvironment already
+// forwards DOCKER_CONTEXT.
+func resolveDockerContextPin(env []string) (string, error) {
+	if rawEnvironmentValue(env, "DOCKER_HOST") != "" || rawEnvironmentValue(env, "DOCKER_CONTEXT") != "" {
+		return "", nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), dockerShortStepTimeout)
 	out, err := dockerExec(ctx, env, "context", "inspect", "--format", dockerContextNameFormat)
 	cancel()
 	if err != nil {
-		return nil, fmt.Errorf("`docker context inspect` could not name the resolved context: %w", err)
+		return "", fmt.Errorf("`docker context inspect` could not name the resolved context: %w", err)
 	}
 	name := strings.TrimSpace(string(out))
 	if name == "" || strings.ContainsAny(name, "\n\r\x00") {
-		return nil, fmt.Errorf("`docker context inspect` returned a malformed context name %q", name)
+		return "", fmt.Errorf("`docker context inspect` returned a malformed context name %q", name)
 	}
-	return []string{"--context", name}, nil
+	return name, nil
 }
 
 // stagingIdentityMatches reports whether the dir's recorded creation

@@ -14,7 +14,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The docker container runtime (#1592 Phase 4 PR4) — the first-class sandboxed
@@ -451,6 +450,16 @@ type dockerProvisioner struct {
 	containerID        string
 	engineID           string
 	verifyEngineOnReap bool
+	// dockerContextPin is the provision's pinned docker CLI selector, resolved
+	// once in provisionSteps and materialized into dockerEnvironment as
+	// DOCKER_CONTEXT — covering the engine-ID read, `docker run`, and every
+	// exec/cp after — so a `docker context use` switch mid-provision cannot
+	// put the container on a different engine than engineID and the staging
+	// dir's engine-id marker record (Codex on #7616). Empty when the env
+	// already carries a selector (DOCKER_HOST/DOCKER_CONTEXT outrank a
+	// context switch on their own) and on non-provision paths (reap,
+	// teardown), which re-resolve the current context exactly as before.
+	dockerContextPin string
 
 	// reap memoizes across the repeated Kill retries and the Kill-vs-provision-
 	// failure race, but only for a reap that COMPLETED: reaped latches on success
@@ -505,6 +514,21 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 }
 
 func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
+	// Pin every provision-time docker call to the ONE selector resolution
+	// chose: without an explicit selector each call re-resolves the current
+	// context, so a `docker context use` switch landing between the
+	// engine-ID read below and `docker run` would put the container on a
+	// different engine than p.engineID — and the staging dir's engine-id
+	// marker — records (Codex on #7616). The pin materializes into
+	// dockerEnvironment FIRST so the locality gates below judge the endpoint
+	// that will actually serve, the identity read names the consuming
+	// engine, and `docker run` targets it. A selector that cannot even be
+	// named fails the provision like any other unresolvable endpoint.
+	if pin, err := resolveDockerContextPin(p.dockerEnvironment()); err != nil {
+		return ProvisionResult{}, dockerStepErr(fmt.Errorf("backend=docker: cannot pin the Docker engine selector before creating a container: %w", err), dockerOpLocal)
+	} else {
+		p.dockerContextPin = pin
+	}
 	if p.spec.Account.Dir != "" {
 		if err := p.ensureAccountDockerEngineLocal(); err != nil {
 			return ProvisionResult{}, dockerStepErr(err, dockerOpLocal)
@@ -834,63 +858,6 @@ func (p *dockerProvisioner) runContainer() error {
 	}
 	p.containerID = id
 	return nil
-}
-
-// docker runs `docker <args...>` with a timeout and returns its combined output.
-func (p *dockerProvisioner) docker(timeout time.Duration, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return dockerExec(ctx, p.dockerEnvironment(), args...)
-}
-
-func (p *dockerProvisioner) agentName() string {
-	// The grant predicate, not the identity classifier: the credential mounts
-	// and run_args validation this feeds install operator material, so the
-	// agent name must be one af can attribute to the operator. The remote
-	// variant is the honest one here — the executable resolves on the image's
-	// filesystem, which the host cannot stat; the container's clone lives at
-	// dockerWorkspaceDir, so an absolute program path inside it resolves to
-	// repository content and earns no grant (#5265).
-	agent := sessionenv.GrantAgentForRemoteCommand(p.program, dockerWorkspaceDir)
-	if agent == "" && strings.TrimSpace(p.program) == "" {
-		return tmux.ProgramClaude
-	}
-	return agent
-}
-
-func (p *dockerProvisioner) dockerEnvironment() []string {
-	env := sessionenv.DockerCLIEnvironment(os.Environ(), p.agentName(), p.spec.SessionEnvPassthrough)
-	// The bare `-e NAME` emitted for a normalized proxy twin resolves here:
-	// synthesize NAME=<forwarded spelling's host value>. The twin is not in the
-	// client's allowlist unless the operator forwarded it, so the synthesized
-	// entry is the only one that name can resolve to. Same credential-mount
-	// scope as containerEnvironmentNames (#7529 R8).
-	if len(p.credentialMounts) == 0 {
-		return env
-	}
-	_, synth := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, os.Environ())
-	return append(env, synth...)
-}
-
-// execSh runs a `sh -c <script>` inside the container as root (0:0). It is the
-// provisioning step that operates on root-owned container state — `docker cp`
-// lands the `af` binary owned by root, and `chmod +x` on it must run as root
-// regardless of the image's default USER. A non-root default USER (a common
-// hardening practice on BYO images) cannot chmod a root-owned file, so gating
-// the root override on account sessions left the non-account chmod failing with
-// "Operation not permitted" on any such image. Running as 0:0 unconditionally
-// is a no-op for a root-default image (its default user IS root) and is the
-// only thing that works for a non-root one.
-func (p *dockerProvisioner) execSh(timeout time.Duration, script string) ([]byte, error) {
-	args := []string{"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", script}
-	return p.docker(timeout, args...)
-}
-
-func (p *dockerProvisioner) shortID() string {
-	if len(p.containerID) > 12 {
-		return p.containerID[:12]
-	}
-	return p.containerID
 }
 
 // parseCreatedContainerID extracts the container id `docker run -d` prints to

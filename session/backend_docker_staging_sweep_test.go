@@ -110,8 +110,7 @@ func stagingLiveGeneration(t *testing.T, name string) string {
 // listAfContainers parses. An empty psListing means no af containers exist.
 // DOCKER_HOST/DOCKER_CONTEXT are scrubbed so the selector the sweep pins is
 // deterministic: the resolved current context's name, which the fake answers
-// as "default". The pinned `-H`/`--context` pair is stripped before
-// dispatch; stagingSweepRecordedArgs keeps it for the pin test.
+// as "default" and materializes into DOCKER_CONTEXT in the passed environ.
 func stagingSweepDockerEnv(t *testing.T, engineIDs []string, psListing string, psErr error) {
 	t.Helper()
 	t.Setenv("DOCKER_HOST", "")
@@ -120,7 +119,6 @@ func stagingSweepDockerEnv(t *testing.T, engineIDs []string, psListing string, p
 	infoCall := 0
 	cli := &fakeDockerContextCLI{}
 	t.Cleanup(SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
-		args = stripDockerSelector(args)
 		require.NotEmpty(t, args)
 		switch args[0] {
 		case "context":
@@ -138,17 +136,6 @@ func stagingSweepDockerEnv(t *testing.T, engineIDs []string, psListing string, p
 			return nil, fmt.Errorf("unexpected docker call: %v", args)
 		}
 	}))
-}
-
-// stripDockerSelector drops a leading global selector pair the sweep pins on
-// its post-resolution calls (`-H <endpoint>` or `--context <name>`), so the
-// fake dispatches on the subcommand. The unpinned `context inspect` calls
-// the resolution itself makes arrive unchanged.
-func stripDockerSelector(args []string) []string {
-	for len(args) >= 2 && (args[0] == "-H" || args[0] == "--context") {
-		args = args[2:]
-	}
-	return args
 }
 
 // TestStagingSweepReclaimsOrphanedDir is the #7590 property: a staging dir no
@@ -502,23 +489,26 @@ func TestStagingSweepDeadGenerationDirWithFreeLock(t *testing.T) {
 
 // TestStagingSweepPinsOneSelector is the #7616 R2 property: once the
 // endpoint resolves, every docker call of the pass — the engine-ID read, the
-// container listing, and the post-pass ID re-read — carries the SAME global
-// selector, so a `docker context use` switch mid-pass cannot move the
-// listing to an engine the identity reads never saw.
+// container listing, and the post-pass ID re-read — runs under ONE selector,
+// so a `docker context use` switch mid-pass cannot move the listing to an
+// engine the identity reads never saw. The pin is materialized into the
+// environ (DOCKER_HOST/DOCKER_CONTEXT — the variables the CLI itself reads),
+// so argv stays bare while the endpoint cannot drift.
 func TestStagingSweepPinsOneSelector(t *testing.T) {
-	// Variant A — DOCKER_HOST set: the pin is `-H <host>` on every call;
-	// resolution needs no inspect at all.
+	// Variant A — DOCKER_HOST set: it already pins the CLI on every call;
+	// the resolution adds nothing (and needs no name inspect at all).
 	t.Run("docker host", func(t *testing.T) {
 		_, mk := stagingSweepTestRoot(t)
 		host := fakeUnixDockerSocket(t)
 		t.Setenv("DOCKER_HOST", host)
 		t.Setenv("DOCKER_CONTEXT", "")
 		var calls [][]string
+		var envs [][]string
 		t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
-		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, environ []string, args ...string) ([]byte, error) {
 			calls = append(calls, append([]string(nil), args...))
-			rest := stripDockerSelector(args)
-			switch rest[0] {
+			envs = append(envs, append([]string(nil), environ...))
+			switch args[0] {
 			case "info":
 				return []byte("engine-1\n"), nil
 			case "ps":
@@ -532,33 +522,32 @@ func TestStagingSweepPinsOneSelector(t *testing.T) {
 		got := SweepOrphanedStagingDirs("/test/home", nil, nil)
 
 		assert.Equal(t, 1, got.Reaped)
-		require.Len(t, calls, 3, "info, ps, and the re-read — three pinned calls")
-		for i, c := range calls {
-			require.GreaterOrEqual(t, len(c), 2, "call %d has no selector", i)
-			assert.Equal(t, "-H", c[0], "call %d must carry the -H pin", i)
-			assert.Equal(t, host, c[1], "call %d must name DOCKER_HOST's endpoint", i)
+		require.Len(t, calls, 3, "info, ps, and the re-read — three calls on the pinned endpoint")
+		for i, e := range envs {
+			assert.Equal(t, host, rawEnvironmentValue(e, "DOCKER_HOST"), "call %d must carry DOCKER_HOST's pin", i)
 		}
 	})
 
 	// Variant B — neither selector set: the two resolution inspects run
 	// unpinned (they ARE the resolution); every call after them carries the
-	// resolved context's own name.
+	// resolved context's own name materialized as DOCKER_CONTEXT.
 	t.Run("resolved context", func(t *testing.T) {
 		_, mk := stagingSweepTestRoot(t)
 		t.Setenv("DOCKER_HOST", "")
 		t.Setenv("DOCKER_CONTEXT", "")
 		var calls [][]string
+		var envs [][]string
 		cli := &fakeDockerContextCLI{}
 		t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
 		t.Cleanup(SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
 			calls = append(calls, append([]string(nil), args...))
-			rest := stripDockerSelector(args)
-			switch rest[0] {
+			envs = append(envs, append([]string(nil), environ...))
+			switch args[0] {
 			case "context":
-				if len(rest) == 4 && rest[1] == "inspect" && rest[2] == "--format" && rest[3] == dockerContextNameFormat {
+				if len(args) == 4 && args[1] == "inspect" && args[2] == "--format" && args[3] == dockerContextNameFormat {
 					return []byte(cli.current(environ) + "\n"), nil
 				}
-				return cli.exec(ctx, environ, rest...)
+				return cli.exec(ctx, environ, args...)
 			case "info":
 				return []byte("engine-1\n"), nil
 			case "ps":
@@ -574,13 +563,68 @@ func TestStagingSweepPinsOneSelector(t *testing.T) {
 		assert.Equal(t, 1, got.Reaped)
 		require.Len(t, calls, 5, "endpoint inspect, name inspect, info, ps, re-read")
 		assert.Equal(t, "context", calls[0][0], "the endpoint resolution runs unpinned")
+		assert.Equal(t, "", rawEnvironmentValue(envs[0], "DOCKER_CONTEXT"), "the endpoint inspect is itself the resolution")
 		assert.Equal(t, "context", calls[1][0], "the name resolution runs unpinned")
-		for i, c := range calls[2:] {
-			require.GreaterOrEqual(t, len(c), 2, "call %d has no selector", i+2)
-			assert.Equal(t, "--context", c[0], "call %d must carry the --context pin", i+2)
-			assert.Equal(t, "default", c[1], "call %d must name the resolved context", i+2)
+		assert.Equal(t, "", rawEnvironmentValue(envs[1], "DOCKER_CONTEXT"), "the name inspect is itself the resolution")
+		for i, e := range envs[2:] {
+			assert.Equal(t, "default", rawEnvironmentValue(e, "DOCKER_CONTEXT"), "call %d must carry the resolved context pin", i+2)
 		}
 	})
+}
+
+// TestProvisionPinsSelectorBeforeEngineRead is the Codex-on-#7616 property:
+// the provision resolves the docker CLI's selector ONCE, materializes it as
+// DOCKER_CONTEXT, and only then reads the engine identity and runs the
+// container — so a `docker context use` switch mid-provision cannot put the
+// container on an engine the staging dir's engine-id marker never recorded.
+// The pass's own resolution calls are the only unpinned ones.
+func TestProvisionPinsSelectorBeforeEngineRead(t *testing.T) {
+	stagingTestEnv(t)
+	t.Setenv("DOCKER_HOST", "")
+	t.Setenv("DOCKER_CONTEXT", "")
+	var calls [][]string
+	var envs [][]string
+	cli := &fakeDockerContextCLI{}
+	t.Cleanup(SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		envs = append(envs, append([]string(nil), environ...))
+		switch {
+		case len(args) == 4 && args[0] == "context" && args[1] == "inspect" && args[2] == "--format" && args[3] == dockerContextNameFormat:
+			return []byte(cli.current(environ) + "\n"), nil
+		case len(args) > 0 && args[0] == "context":
+			return cli.exec(ctx, environ, args...)
+		case len(args) > 0 && args[0] == "info":
+			return []byte("engine-1\n"), nil
+		}
+		return nil, fmt.Errorf("stopping the provision here: %v", args)
+	}))
+
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "pin sess"}}
+	_, err := p.provisionSteps()
+	require.Error(t, err, "the stubbed later step must stop the provision")
+
+	require.GreaterOrEqual(t, len(calls), 2, "the pin resolution and at least one pinned call must run")
+	assert.Equal(t, []string{"context", "inspect", "--format", dockerContextNameFormat}, calls[0],
+		"the context-name resolution must be the FIRST docker call — the pin precedes every call it pins")
+	assert.Equal(t, "", rawEnvironmentValue(envs[0], "DOCKER_CONTEXT"), "the resolution call itself runs unpinned")
+	for i := 1; i < len(calls); i++ {
+		assert.Equal(t, "default", rawEnvironmentValue(envs[i], "DOCKER_CONTEXT"),
+			"call %d (%v) must run under the materialized pin", i, calls[i])
+	}
+}
+
+// TestProvisionerDockerEnvironmentSkipsPinWhenSelectorSet: the pin is empty —
+// dockerEnvironment materializes nothing — when the env already selects
+// (DOCKER_HOST or DOCKER_CONTEXT outrank a context switch on their own), and
+// on paths that never provisioned (a restored reaper reads the operator's
+// live selector by design).
+func TestProvisionerDockerEnvironmentSkipsPinWhenSelectorSet(t *testing.T) {
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "unpinned"}}
+	assert.NotContains(t, p.dockerEnvironment(), "DOCKER_CONTEXT=ctx",
+		"an unset pin must not materialize")
+	p.dockerContextPin = "ctx"
+	assert.Equal(t, "ctx", rawEnvironmentValue(p.dockerEnvironment(), "DOCKER_CONTEXT"),
+		"a resolved pin materializes into every provision-time call's env")
 }
 
 // TestDockerStagingDirRecordsEngineMarker: provisioning records beside the

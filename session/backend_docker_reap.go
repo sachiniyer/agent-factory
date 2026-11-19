@@ -179,8 +179,8 @@ func (p *dockerProvisioner) currentEngineID(timeout time.Duration) (string, erro
 // `docker info` is no exception — it is a docker CLI call like any other, and
 // leaving it on the ambient environment would be a hole in the boundary that
 // happens to be on the reap path rather than the run path.
-func currentDockerEngineID(ctx context.Context, environ []string, pre ...string) (string, error) {
-	out, err := dockerExec(ctx, environ, append(pre, "info", "--format", dockerEngineIDFormat)...)
+func currentDockerEngineID(ctx context.Context, environ []string) (string, error) {
+	out, err := dockerExec(ctx, environ, "info", "--format", dockerEngineIDFormat)
 	if err != nil {
 		return "", fmt.Errorf("`docker info` could not report the engine identity: %w", err)
 	}
