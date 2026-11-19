@@ -393,7 +393,9 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 		return true
 	}
 	_, decode := namedLauncherDecodesOperands[launcher]
+	_, joiner := namedLauncherShellJoins[launcher]
 	memoize := len(preserved) == 0 && b.namedWords != nil
+	var tailFields []string
 	last := len(words) - 1
 	for i, word := range words {
 		key := namedWordKey{word: word, launcher: launcher, last: i == last}
@@ -415,11 +417,20 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 		if !ok {
 			continue // the verdict above already refused
 		}
+		if joiner {
+			// The downstream shell re-splits the joined tail, so
+			// the re-split words are a reading of their own —
+			// collected here and judged below.
+			tailFields = append(tailFields, strings.Fields(literal)...)
+		}
 		for _, nested := range namedLauncherNamesOf(literal, b) {
-			if namedNestedWordsRefuse(words[i+1:], nested, names, preserved, b) {
+			if namedNestedWordsRefuse(words[i+1:], nested, names, preserved, joiner, b) {
 				return true
 			}
 		}
+	}
+	if joiner && namedNestedFieldsRefuse(tailFields, launcher, names, preserved, b) {
+		return true
 	}
 	return false
 }
@@ -451,8 +462,12 @@ func namedLauncherNamesOf(text string, b *reachBudget) []string {
 
 // namedNestedWordsRefuse literalizes each remaining word once (the
 // shared memo — literalizing is the counted work) and applies the
-// nested launcher's rule to them as pseudo-words.
-func namedNestedWordsRefuse(words []*syntax.Word, launcher string, names, preserved map[string]struct{}, b *reachBudget) bool {
+// nested launcher's rule to them as pseudo-words. resplit is the
+// OUTER launcher's join property: when the outer launcher hands its
+// argv to a shell as one joined string, each literal re-splits into
+// fields — one argv word carrying an option and its operand
+// (`pwsh '-enc x'` under watch) is two words to the downstream shell.
+func namedNestedWordsRefuse(words []*syntax.Word, launcher string, names, preserved map[string]struct{}, resplit bool, b *reachBudget) bool {
 	if b == nil {
 		b = newReachBudget()
 	}
@@ -465,7 +480,11 @@ func namedNestedWordsRefuse(words []*syntax.Word, launcher string, names, preser
 		if !ok {
 			return true // an unreadable tail word is hidden input
 		}
-		fields = append(fields, literal)
+		if resplit {
+			fields = append(fields, strings.Fields(literal)...)
+		} else {
+			fields = append(fields, literal)
+		}
 	}
 	return namedNestedFieldsRefuse(fields, launcher, names, preserved, b)
 }

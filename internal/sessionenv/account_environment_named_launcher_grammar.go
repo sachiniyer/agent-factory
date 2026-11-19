@@ -115,6 +115,20 @@ var namedLauncherDecodesOperands = map[string]struct{}{
 	"gdbus": {},
 }
 
+// namedLauncherShellJoins names the launchers that hand their tail argv
+// to a shell as ONE joined string — watch runs its command through
+// `sh -c` by default, ssh joins the remote command for the remote
+// shell, and tmux's and machinectl's command arguments are a shell
+// command line. The downstream shell re-splits the joined text into
+// words, so the re-split words are a required reading of the tail:
+// every per-word check (hidden-input spellings, payload
+// classification, name scans) runs over them, never only over the
+// preserved argv fields — `watch pwsh '-enc x'` is `pwsh -enc x` to
+// the shell, not one option word to pwsh.
+var namedLauncherShellJoins = map[string]struct{}{
+	"watch": {}, "ssh": {}, "tmux": {}, "machinectl": {},
+}
+
 // pwshOptionPrefixRunes is the leading-run set PowerShell's own switch
 // parser accepts before an option name: `-`, `/`, and the Unicode
 // dashes U+2013, U+2014 and U+2015. Every other modelled launcher takes

@@ -1229,6 +1229,24 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch 'co+(d)ex'`, true},
 		{`watch 'co!(d)ex'`, true},
 		{`watch 'echo (x)'`, false},
+		// A launcher that hands its argv to a shell as ONE
+		// joined string (watch by default, ssh's remote
+		// command, tmux's and machinectl's command lines)
+		// is also judged on the re-split words: an option
+		// and its operand sharing one argv word are two
+		// words to the downstream shell, and a nested name
+		// triggers across argv boundaries the same way.
+		{`watch pwsh '-EncodedCommand x'`, true},
+		{`watch pwsh '-enc x'`, true},
+		{`watch pwsh '-ea x'`, true},
+		{`watch 'sudo pwsh' '-enc x'`, true},
+		{`watch ssh 'host pwsh' '-enc x'`, true},
+		{`watch 'nix-shell' '--arg-from-stdin'`, true},
+		{`watch pwsh '-Command'`, true},
+		{`watch pwsh '-en' 'c x'`, true},
+		{`watch pwsh '-Command' x`, false},
+		{`watch '-enc' x`, false},
+		{`ssh host 'echo hi there'`, false},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state

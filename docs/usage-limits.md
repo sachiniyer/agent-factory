@@ -524,6 +524,14 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
     with no operand is that same stdin feed (`pwsh -Command`, `nu -c`
     alone);
 
+  A launcher that hands its tail argv to a shell as ONE joined string
+  (watch by default, ssh's remote command, tmux's and machinectl's
+  command lines) is judged on the re-split words too, never only on the
+  preserved argv fields — `watch pwsh '-enc x'` is `pwsh -enc x` to the
+  downstream shell, so an option and its operand sharing one argv word
+  classify separately, and a nested name triggers across argv
+  boundaries.
+
   Launcher names nest by NAME, not by position: a piece (or word, or a
   field of a nested tail) that spells a modelled launcher's name
   re-enters that launcher's own rule on the text after it — `watch 'pwsh
