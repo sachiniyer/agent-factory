@@ -1287,6 +1287,36 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch 'nix --[e]xpr x'`, true},
 		{`watch 'pwsh -e[x] x'`, true},
 		{`watch 'pwsh -Encod[e]P x'`, true},
+		// The downstream shell's re-split also delimits on
+		// operator characters — a redirect or pipe boundary
+		// ends the option word exactly like whitespace, so
+		// -EncodedCommand</dev/null is the hidden option plus
+		// its redirect, not one benign word. Ordinary pipes,
+		// redirects and digit-before-redirect forms admit.
+		{`watch 'pwsh -EncodedCommand</dev/null'`, true},
+		{`watch 'pwsh -enc|cat'`, true},
+		{`watch 'pwsh -enc;ls'`, true},
+		{`watch 'pwsh -enc 2>/dev/null'`, true},
+		{`watch 'pwsh -enc&>/dev/null'`, true},
+		{`watch 'pwsh (-enc)'`, true},
+		{`watch 'ls | head'`, false},
+		{`watch 'date; uptime'`, false},
+		{`watch 'make 2>&1'`, false},
+		{`ssh host 'ls -l <file'`, false},
+		// tmux expands its own #… formats before the shell it
+		// hands the command to runs — #{l:CODEX_}HOME builds a
+		// protected name inside tmux's own language, the same
+		// dynamic construction $ and backticks are for sh. ## is
+		// a literal # and a #-punctuation pair is just text.
+		{`tmux run-shell '#{l:CODEX_}HOME'`, true},
+		{`tmux run-shell '#{pane_id}'`, true},
+		{`tmux new-window 'echo #S'`, true},
+		{`tmux run-shell 'echo #(x)'`, true},
+		{`tmux new-window 'echo #['`, true},
+		{`tmux run-shell 'echo ##x'`, false},
+		{`tmux run-shell 'echo #!x'`, false},
+		{`tmux run-shell 'echo # x'`, false},
+		{`watch 'echo #{x}'`, false},
 		// The accepted over-refusal, measured: a tail that merely
 		// MENTIONS the agent or a protected name at a piece boundary
 		// refuses even though nothing reaches it — the docs state

@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -437,7 +439,7 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 			// The downstream shell re-splits the joined tail, so
 			// the re-split words are a reading of their own —
 			// collected here and judged below.
-			tailFields = append(tailFields, strings.Fields(literal)...)
+			tailFields = append(tailFields, shellJoinFields(literal)...)
 		}
 		for _, nested := range namedLauncherNamesOf(literal, b) {
 			if namedNestedWordsRefuse(words[i+1:], nested, names, preserved, joiner, b) {
@@ -449,6 +451,21 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 		return true
 	}
 	return false
+}
+
+// shellJoinFields re-splits a shell-carried joined string the way the
+// downstream shell splits it: whitespace and every operator character
+// — < > | ; & ( ) — delimits words, so an option and its redirect
+// (`-EncodedCommand</dev/null`) classify as the two words sh runs.
+// Redirect targets and digits-before-redirect (`2>`, `&>`, `>>`) need
+// no grammar — splitting on the characters alone over-approximates
+// safely. Quoting and escapes are not re-parsed in this reading: each
+// field's own verdict judges its raw AND normalized forms, so
+// `-enc\<x` still lands `-enc` through the normalized form.
+func shellJoinFields(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune("<>|;&()", r)
+	})
 }
 
 // namedLauncherNamesOf collects EVERY modelled launcher name text could
@@ -593,6 +610,35 @@ func literalCarriesDynamic(literal string) bool {
 	return false
 }
 
+// tmuxFormatCarriesDynamic reports whether text holds a tmux format
+// expansion — tmux substitutes its own #… sequences before the shell
+// it hands the command to ever runs (run-shell, if-shell, new-window,
+// split-window, respawn-*, display-popup, pipe-pane and the -c/-F
+// command strings all take formats), so a # followed by a format
+// opener — {, ( or [ — or by a format letter constructs text the gate
+// cannot see at validation time: the same refusal class $ and
+// backticks are for sh. ## spells a literal # and is not dynamic.
+// Formats are never evaluated — the marker alone refuses.
+func tmuxFormatCarriesDynamic(literal string) bool {
+	for i := 0; i+1 < len(literal); i++ {
+		if literal[i] != '#' {
+			continue
+		}
+		if literal[i+1] == '#' {
+			i++ // ## spells one literal # — it is not re-paired
+			continue
+		}
+		switch literal[i+1] {
+		case '{', '(', '[':
+			return true
+		}
+		if r, _ := utf8.DecodeRuneInString(literal[i+1:]); unicode.IsLetter(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // namedLiteralVerdict is the word verdict on already-literal text —
 // the shared core for argv words and the pseudo-words a nested
 // launcher scan splits out of a word's text.
@@ -624,6 +670,11 @@ func namedLiteralVerdict(literal string, last, decode bool, launcher string, nam
 	}
 	if literalCarriesDynamic(literal) || literalCarriesDynamic(normalized) ||
 		(raw != literal && literalCarriesDynamic(raw)) {
+		return namedWordVerdict{refuse: true}
+	}
+	if launcher == "tmux" &&
+		(tmuxFormatCarriesDynamic(literal) || tmuxFormatCarriesDynamic(normalized) ||
+			(raw != literal && tmuxFormatCarriesDynamic(raw))) {
 		return namedWordVerdict{refuse: true}
 	}
 	// The literal and its normalized form are both judged: a

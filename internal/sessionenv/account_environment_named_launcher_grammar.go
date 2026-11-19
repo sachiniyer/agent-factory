@@ -274,12 +274,19 @@ func globLiteralSpellsOption(literal, launcher string, words []string, respectVi
 		if slices.Contains(words, "-") && globOverMatch(v, "-", b) {
 			return true // a produced `-` is the stdin marker
 		}
-		for _, reading := range optionBodyReadings(v, prefixes, b) {
+		readings, finished := optionBodyReadings(v, prefixes, b)
+		if !finished {
+			return true // budget spent generating readings — fail closed
+		}
+		for _, reading := range readings {
 			body := reading.pattern
 			if body == "" {
 				continue
 			}
-			maxJ := patternMaxLen(body, b)
+			maxJ, ok := patternMaxLen(body, b)
+			if !ok {
+				return true
+			}
 			for _, word := range words {
 				hb := optionTableBody(word, launcher)
 				if hb == "" {
@@ -344,10 +351,15 @@ func globLiteralSpellsOption(literal, launcher string, words []string, respectVi
 
 // globAtomStarts returns the byte offsets where each glob atom of v
 // begins (and v's end) — an atom is a `?`, `*`, a closed bracket
-// expression, a `\x` escape pair, or one literal rune.
-func globAtomStarts(v string, b *reachBudget) []int {
+// expression, a `\x` escape pair, or one literal rune. Every atom
+// scanned charges the shared budget; an unfinished scan reports
+// finished=false and its caller fails closed.
+func globAtomStarts(v string, b *reachBudget) ([]int, bool) {
 	var starts []int
 	for i := 0; i < len(v); {
+		if !b.spend(1) {
+			return nil, false
+		}
 		starts = append(starts, i)
 		switch v[i] {
 		case '[':
@@ -361,7 +373,7 @@ func globAtomStarts(v string, b *reachBudget) []int {
 		_, size := utf8.DecodeRuneInString(v[i:])
 		i += size
 	}
-	return append(starts, len(v))
+	return append(starts, len(v)), true
 }
 
 // atomCouldProduce reports whether the atom at [start:end) could
@@ -412,8 +424,25 @@ type optionBodyReading struct {
 // produces no prefix char is no option. A `*` in the leading run could
 // hold the prefix and more inside itself, so each `*` position yields
 // a spelling-reading of its own.
-func optionBodyReadings(v, prefixes string, b *reachBudget) []optionBodyReading {
-	starts := globAtomStarts(v, b)
+// optionBodyReadings enumerates what the produced word's option body
+// could spell. The produced word's leading run of prefix characters is
+// whatever its leading atoms spell — a literal prefix char, or any
+// atom that could produce one (`[-]` can land `-`), so each such
+// boundary gives a body reading carrying the prefix run's length. The
+// produced body then ends at the first `:` or `=` the production
+// spells — every atom that could produce one of those cuts another
+// reading. Boundary 0 is skipped: a produced word whose first atom
+// produces no prefix char is no option. A `*` in the leading run could
+// hold the prefix and more inside itself, so each `*` position yields
+// a spelling-reading of its own. Reading generation and every atom it
+// scans charge the shared budget — N `?` atoms make O(N²) cut
+// positions, and running the budget out reports finished=false so the
+// caller fails closed.
+func optionBodyReadings(v, prefixes string, b *reachBudget) ([]optionBodyReading, bool) {
+	starts, ok := globAtomStarts(v, b)
+	if !ok {
+		return nil, false
+	}
 	k := 0
 	for k+1 < len(starts) && atomCouldProduce(v, starts[k], starts[k+1], prefixes) {
 		k++
@@ -428,6 +457,9 @@ func optionBodyReadings(v, prefixes string, b *reachBudget) []optionBodyReading 
 		body := v[starts[boundary]:]
 		readings = append(readings, optionBodyReading{pattern: body, dashes: boundary})
 		for i := boundary; i+1 < len(starts); i++ {
+			if !b.spend(1) {
+				return nil, false
+			}
 			if atomCouldProduce(v, starts[i], starts[i+1], ":=") {
 				readings = append(readings, optionBodyReading{
 					pattern: body[:starts[i]-starts[boundary]],
@@ -436,7 +468,7 @@ func optionBodyReadings(v, prefixes string, b *reachBudget) []optionBodyReading 
 			}
 		}
 	}
-	return readings
+	return readings, true
 }
 
 // optionSpellings yields the spellings a produced word can carry for
@@ -459,11 +491,12 @@ func optionSpellings(word, launcher string) []string {
 // patternMaxLen is the longest string a glob pattern can produce, or
 // -1 when a `*` makes it unbounded — every non-`*` atom produces
 // exactly one character.
-func patternMaxLen(pattern string, b *reachBudget) int {
+func patternMaxLen(pattern string, b *reachBudget) (int, bool) {
 	if strings.ContainsRune(pattern, '*') {
-		return -1
+		return -1, true
 	}
-	return len(globAtomStarts(pattern, b)) - 1
+	starts, ok := globAtomStarts(pattern, b)
+	return len(starts) - 1, ok
 }
 
 // bodySpellsVisiblePrefix reports whether cand is a prefix of a

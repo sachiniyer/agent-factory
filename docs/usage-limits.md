@@ -539,8 +539,18 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
   command lines) is judged on the re-split words too, never only on the
   preserved argv fields — `watch pwsh '-enc x'` is `pwsh -enc x` to the
   downstream shell, so an option and its operand sharing one argv word
-  classify separately, and a nested name triggers across argv
-  boundaries.
+  classify separately, a nested name triggers across argv boundaries,
+  and operator characters delimit words exactly as whitespace does —
+  `pwsh -EncodedCommand</dev/null` is the hidden option plus its
+  redirect, and `pwsh -enc|cat` the option plus a pipe;
+
+  tmux expands its own #… format sequences in the command text before
+  the shell it hands the command to ever runs, so in a tmux reading a
+  `#` that opens a format — followed by `{`, `(`, `[` or a format
+  letter — counts as the dynamic construction `$` and backticks are for
+  sh and refuses (`tmux run-shell '#{l:CODEX_}HOME'` builds a protected
+  name inside tmux's own language); `##` spells a literal `#` and a
+  `#`-punctuation pair is plain text;
 
   Launcher names nest by NAME, not by position: a piece (or word, or a
   field of a nested tail) that spells a modelled launcher's name
