@@ -375,6 +375,7 @@ var sudoOperandOptions = map[string]bool{
 	"--user": true, "--other-user": true, "--group": true,
 	"--host": true, "--prompt": true, "--chdir": true, "--role": true,
 	"--type": true, "--close-from": true, "--login-timeout": true,
+	"--login-class": true,
 }
 
 var systemdRunOperandOptions = map[string]bool{
