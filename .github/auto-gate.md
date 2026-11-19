@@ -955,10 +955,14 @@ and maintainer approval are still required exactly as before.
 The live task prompt must run the helper before its no-findings early exit.
 Until this helper lands on master, it skips that command when the file is absent.
 The watch is the only writer; do not run overlapping write sweeps. Transient
-`gh api` failures — transport errors, empty or truncated bodies, 5xx,
-rate-limit (including secondary) 403s and 429s, the lazy-generation 422
-"taking too long to generate", and 408 request-timeout — retry on a
-bounded backoff; every other 4xx answer is a verdict and is not retried. A scan
-that still cannot finish writes a record marked incomplete, carrying the
-last complete episodes, rather than aborting or posing as a clean read
-(#4629).
+`gh api` failures on reads and the idempotent PATCH — transport errors,
+empty or truncated bodies, 5xx, rate-limit (including secondary) 403s and
+429s, the lazy-generation 422 "taking too long to generate", and 408
+request-timeout — retry on a bounded backoff; every other 4xx answer is
+a verdict and is not retried. The one non-idempotent call, the
+record-create POST, is narrower: only a definitive rate-limit refusal is
+retried, since a 5xx (or transport failure) can report a committed create
+and replaying it would duplicate the record; any other POST failure exits
+and the next hourly run creates the record. A scan that still cannot
+finish writes a record marked incomplete, carrying the last complete
+episodes, rather than aborting or posing as a clean read (#4629).
