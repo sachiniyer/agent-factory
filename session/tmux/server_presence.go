@@ -238,38 +238,11 @@ func PinServerProbeForTest(pids ...int) (restore func()) {
 // for owning an unlinked socket.
 //
 // It answers a deliberately BROAD question — "could any live server own an
-// unlinked socket?" — and a process becomes a candidate on anything short
-// of conclusive evidence that it is not one. Which candidate is bound to
-// THIS socket is tmuxSocketClaimed's question, answered from each server's
-// own listening sockets (#7533). The asymmetry is chosen: a false "yes"
-// here costs that per-server read; a false "no" lets reset delete
-// worktrees out from under a live agent.
-//
-// The task name is a fast path that ADMITS, never drops. tmux retitles its
-// server to "<name>: server", but the spelling the kernel keeps is a
-// moving target — the 15-byte truncation, and tmux 3.5a's own cut at the
-// title's last space, which can leave a renamed server titled nothing but
-// "mediumtmux:" — so no title a comm can carry is evidence against a
-// server either. The one exception is tmux's own client title: "<name>:
-// client" is affirmative evidence the process is a client.
-//
-// Everything the title cannot rule on is decided by the process's
-// executable IDENTITY: the inode the kernel attests it is running
-// (/proc/<pid>/exe on Linux, the text vnode proc_info reports on darwin),
-// compared to the tmux binary af itself execs. That is the identity an
-// argv[0] rename, `exec -a`, a symlink or a hardlink cannot change, so a
-// server running the tmux binary is a candidate whatever its argv[0]
-// spelling or task title. A refused read (EACCES/EPERM) leaves the
-// identity unproven — still a candidate; ENOENT/ESRCH means the process is
-// gone — never one. What is merely admitted and cannot be identified
-// stays an unprobed possible owner, degrading the answer to "claimed"
-// (unknown) and refusing destructive cleanup, while proctree.IsTmuxServer
-// keeps deciding who is signalled.
-//
-// The documented limit: a renamed COPY of the tmux binary is a different
-// inode, so the exe read cannot reach it — only the title fast path can,
-// and a copy whose title lost the ": server" suffix to truncation is the
-// one shape still missed (#7689).
+// unlinked socket?" — by task name alone. Which candidate is bound to THIS
+// socket is tmuxSocketClaimed's question, answered from each server's own
+// listening sockets (#7533). The asymmetry is chosen: a false "yes" here costs
+// that per-server read; a false "no" lets reset delete worktrees out from under
+// a live agent.
 //
 // A process table we cannot read reports TRUE, for the same reason: an
 // unreadable table is not evidence of absence.
@@ -282,51 +255,18 @@ func liveTmuxServerPIDs() []int {
 		return []int{0}
 	}
 	uid := os.Getuid()
-	ref, hasRef := afTmuxExeImage()
 	var pids []int
 	for pid, p := range snap {
+		if !isTmuxServerComm(p.Comm) {
+			continue
+		}
 		if owner, ok := proctree.UID(pid); ok && owner != uid {
 			continue
 		}
-		switch {
-		case isTmuxServerComm(p.Comm):
-			// Title fast path: a comm that spells a server title is a
-			// candidate whatever its executable turns out to be.
-			pids = append(pids, pid)
-		case isTmuxClientComm(p.Comm):
-			// tmux's own client title is conclusive: not a server.
-		case !hasRef:
-			// No reference image — the exe route cannot run, and nothing
-			// else a comm can spell is evidence either way.
-		default:
-			switch proctree.ExeMatchesImage(pid, ref) {
-			case proctree.ExeMatchSame, proctree.ExeMatchUnknown:
-				pids = append(pids, pid)
-			}
-		}
+		pids = append(pids, pid)
 	}
 	sort.Ints(pids)
 	return pids
-}
-
-// afTmuxExeImage resolves the tmux binary af itself execs —
-// exec.Command("tmux", …) resolves it through PATH — to the (dev, ino)
-// the kernel's exe records carry for a process running it. It is resolved
-// per sweep rather than cached: a tmux replaced on disk between probes is
-// a new inode, and a stale reference would refuse the very binary it
-// should admit. An unresolvable reference disables the exe route for the
-// sweep — the title fast path still applies — rather than turning an
-// unreadable reference into evidence against every process.
-func afTmuxExeImage() (proctree.ExeImage, bool) {
-	path, err := exec.LookPath("tmux")
-	if err != nil {
-		return proctree.ExeImage{}, false
-	}
-	img, err := proctree.ExeImageOf(path)
-	if err != nil {
-		return proctree.ExeImage{}, false
-	}
-	return img, true
 }
 
 // ListSessionNames returns the name of every session on the tmux server, or an
@@ -656,31 +596,8 @@ func pidNoun(pids []string) string {
 // and every tmux process is named "tmux" (measured, #4678). This is only the
 // coarse prefilter for "could a server be alive"; proctree.IsTmuxServer decides
 // who is actually signalled.
-//
-// comm alone cannot carry every title: the kernel keeps 15 bytes of the
-// task name, and tmux builds the title as "<name>: server (<socket>)" —
-// truncated at the last space on 3.4+/3.5a, so the suffix survives only
-// for the shortest basenames. What this fast path cannot see is decided
-// by executable identity in liveTmuxServerPIDs; no comm a process carries
-// is evidence against a server.
 func isTmuxServerComm(comm string) bool {
 	return comm == "tmux" || strings.HasSuffix(comm, ": server")
-}
-
-// isTmuxClientComm reports whether a kernel task name is tmux's own client
-// title, "<name>: client" — the one piece of CONCLUSIVE evidence a task
-// name can carry that a process is not a server. tmux writes it itself in
-// proc_start("client"), renamed argv[0] included ("bx: client", measured on
-// tmux 3.4). The check exists because executable identity alone cannot
-// rule a client out: a client's exe is the same tmux binary the server
-// runs, so without this every attached client would read as a possible
-// socket owner and the probe would refuse while any session is merely
-// attached. A client title tmux's truncation has already cut past
-// (e.g. "mediumtmux: client" → "mediumtmux:") no longer spells the
-// verdict and is left for the exe route — ambiguous stays a candidate,
-// the documented safe direction.
-func isTmuxClientComm(comm string) bool {
-	return strings.HasSuffix(comm, ": client")
 }
 
 // absentTmuxSocketPath extracts the socket path from tmux's ENOENT diagnostic
@@ -749,7 +666,7 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 			continue
 		}
 		if !tmuxServerIdentified(pid) {
-			// The pid passed the liveTmuxServerPIDs candidacy filter but
+			// The pid passed the liveTmuxServerPIDs comm prefilter but
 			// could not be positively identified as a server (proctree.
 			// IsTmuxServer is strict: an unreadable command line, a
 			// darwin foreground `tmux -D`, or a same-uid client all fail).
@@ -826,7 +743,7 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 			// A prefilter-passing pid was skipped as not positively a
 			// server. It could be the live owner of this unlinked socket
 			// (a darwin `tmux -D` foreground server, a sidUnknown daemon,
-			// or a client the candidacy filter admitted). Socket absence
+			// or a client the comm prefilter admitted). Socket absence
 			// after signalling the *other* servers does not disprove it,
 			// so the safe direction — the one the doc comment and the
 			// module's "a failed read is not an empty result" invariant

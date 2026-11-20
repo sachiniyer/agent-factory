@@ -6,13 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
-	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 )
 
 // listFailureTmuxOnPath puts a `tmux` earlier on PATH whose `ls` fails with the
@@ -556,16 +554,6 @@ func TestOnlyServerProcessesCountAsALiveServer(t *testing.T) {
 		// keeping the answer "claimed" so reset refuses.
 		{"bx: server", true},
 		{"foo: server", true},
-		// The kernel keeps 15 bytes of task name and tmux 3.5a then cuts the
-		// title at its last space, so a renamed server's title can end at a
-		// bare colon or hold no suffix at all — shapes no suffix predicate
-		// can see. Executable identity, asked in liveTmuxServerPIDs, is what
-		// admits them now; the fast path alone never does.
-		{"mediumtmux:", false},     // "mediumtmux: server (...)" space-cut to the bare colon
-		{"mediumtmux: ser", false}, // "mediumtmux: server" cut mid-suffix
-		{"verylongtmuxnam", false}, // "verylongtmuxname: server" past the suffix
-		{"gnome-terminal-", false}, // an ordinary long name, not a title
-		{"notmux: serverX", false}, // the suffix is strict, not a prefix
 		// The fallback for builds/platforms that do not retitle. Exact only.
 		{"tmux", true},
 		// The one that made this a bug: a client is not a server.
@@ -586,92 +574,6 @@ func TestOnlyServerProcessesCountAsALiveServer(t *testing.T) {
 			}
 		})
 	}
-}
-
-// spawnNamedSleeper runs the sleeper fixture under a copy named as given,
-// keeps it alive for the test, and returns its pid. The sleeper sleeps for
-// argv[1] seconds — or 300 when argv[1] is not a number — so its argv tail is
-// free to be a tmux invocation, a number, or anything else.
-func spawnNamedSleeper(t *testing.T, binPath string, args ...string) int {
-	t.Helper()
-	c := exec.Command(binPath, args...)
-	if err := c.Start(); err != nil {
-		t.Fatalf("start sleeper %s: %v", binPath, err)
-	}
-	t.Cleanup(func() {
-		_ = c.Process.Kill()
-		_, _ = c.Process.Wait()
-	})
-	return c.Process.Pid
-}
-
-// #7689: candidacy comes from executable identity, not from spelling a
-// title. A process running the tmux binary af execs is a candidate
-// whatever its argv[0] or task name; the title fast path only ADMITS, and
-// the exe read can reject only conclusively — a different inode — or keep
-// the process when the read is refused. Every argv tail stays a candidate
-// for a tmux-exe process: a server's argv is its client's verbatim, so no
-// tail spelling can rule one out — and none is even consulted now.
-func TestLiveServerPrefilterDecidesByExecutableIdentity(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("the retitle spellings the prefilter works around are Linux shapes")
-	}
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skipf("the exe comparison needs the tmux binary af would run: %v", err)
-	}
-	dir := t.TempDir()
-
-	// Live same-uid processes on FOREIGN executables whose comms spell the
-	// shapes that used to keep them candidates — a 15-byte title lookalike,
-	// a space-truncated bare-colon title, an ordinary long name. The exe
-	// read now rules each out conclusively: the inode is the sleeper's, not
-	// tmux's. (Filenames may carry ':' and ' ', so the comm spellings are
-	// real file names.)
-	titleLookalike := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "verylongtmuxnam")), "300")
-	bareColon := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "mediumtmux:")), "300")
-	plainLong := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "gnome-terminal-")), "300")
-	// The title fast path still admits: a comm that spells a server title
-	// is a candidate whatever its executable turns out to be — admitting
-	// too much is the prefilter's own safe direction, proctree.IsTmuxServer
-	// decides who is signalled.
-	serverTitled := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "zz: server")), "300")
-	// tmux's own client title is the one conclusive comm: dropped before
-	// the exe read, which could only answer Same anyway — a client's exe
-	// IS the tmux binary.
-	clientTitled := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "fake: client")), "300")
-
-	pids := liveTmuxServerPIDs()
-	for _, tc := range []struct {
-		name string
-		pid  int
-		want bool
-	}{
-		{"15-byte title lookalike on a foreign exe is ruled out", titleLookalike, false},
-		{"space-truncated bare-colon title on a foreign exe is ruled out", bareColon, false},
-		{"ordinary long name is ruled out", plainLong, false},
-		{"server title admits even on a foreign exe", serverTitled, true},
-		{"client title is conclusive and drops", clientTitled, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := containsInt(pids, tc.pid); got != tc.want {
-				t.Errorf("liveTmuxServerPIDs() contains %d = %v, want %v", tc.pid, got, tc.want)
-			}
-		})
-	}
-}
-
-func containsInt(haystack []int, needle int) bool {
-	for _, v := range haystack {
-		if v == needle {
-			return true
-		}
-	}
-	return false
 }
 
 // #7647: a socket spelling that reaches its socket through a directory that

@@ -293,51 +293,24 @@ func TestProbeSessionStrictNamesTheDiagnosticItCouldNotClassify(t *testing.T) {
 //
 // Linux tmux builds its kernel task name from getprogname(), which is argv[0],
 // so a server started as `exec -a foo tmux` — or a copy/symlink named
-// otherwise — is titled `<name>: server` until the kernel and tmux truncate
-// it (measured on tmux 3.4, documented in internal/proctree/tmuxidentity.go,
-// #7242). The old exact-match prefilter (`comm == "tmux: server" || comm ==
-// "tmux"`) dropped that shape at the entry point, so the owner never became
-// a candidate, the socket-absent probe answered a determinate "unclaimed"
-// (NoServerRunning == true) while the server and its panes were alive, and
-// `af reset`'s destructive cleanup proceeded against a still-running server
-// — the exact destruction class the socket-absent probe exists to prevent
-// (#2875).
+// otherwise — is titled `<name>: server` (measured on tmux 3.4, documented in
+// internal/proctree/tmuxidentity.go, #7242). The old exact-match prefilter
+// (`comm == "tmux: server" || comm == "tmux"`) dropped that shape at the
+// entry point, so the owner never became a candidate, the socket-absent probe
+// answered a determinate "unclaimed" (NoServerRunning == true) while the
+// server and its panes were alive, and `af reset`'s destructive cleanup
+// proceeded against a still-running server — the exact destruction class the
+// socket-absent probe exists to prevent (#2875).
 //
-// The fix admits by executable identity: a process running the tmux binary
-// af itself execs is a candidate whatever its argv[0] or task title, so the
-// server is a candidate under every retitle spelling any tmux version
-// produces — the title checks stay only as a fast path that admits.
-// Once admitted, the renamed server fails proctree.IsTmuxServer (its argv[0]
-// basename is not "tmux") and is remembered as an unprobed possible owner,
-// so tmuxSocketClaimed answers "claimed" (unknown) and NoServerRunning
-// returns false — reset refuses.
-//
-// The servers below run the tmux binary itself under a rewritten argv[0]
-// (`exec -a`): the one rename an inode comparison cannot distinguish. The
-// documented limit is a renamed COPY — a different inode — which only the
-// title fast path can still admit (see liveTmuxServerPIDs).
+// The fix admits the `: server` suffix. Once admitted, the renamed server
+// fails proctree.IsTmuxServer (its argv[0] basename is not "tmux") and is
+// remembered as an unprobed possible owner, so tmuxSocketClaimed answers
+// "claimed" (unknown) and NoServerRunning returns false — reset refuses.
 //
 // Linux-only: tmux cannot retitle on darwin, so a server started under a
 // renamed binary there is titled after the exec'd file name (no `: server`
 // suffix), a separate shape this fix does not address.
 func TestProbeStrictRefusesWhenARenamedLiveServerOwnsTheUnlinkedSocket(t *testing.T) {
-	for _, serverName := range []string{
-		"bx",               // the suffix survives whole
-		"mediumtmux",       // 10-char basename: tmux 3.5a's last-space cut leaves "mediumtmux:"
-		"tmuxsessionx",     // 12-char basename: same space-truncated band, deeper in it
-		"verylongtmuxname", // truncation keeps only the name prefix
-	} {
-		t.Run(serverName, func(t *testing.T) {
-			renamedServerBlocksSocketAbsentProbe(t, serverName)
-		})
-	}
-}
-
-// renamedServerBlocksSocketAbsentProbe stages a tmux server under a renamed
-// argv[0] on a private -S socket, unlinks the socket, and requires the whole
-// probe chain to refuse the determinate empty.
-func renamedServerBlocksSocketAbsentProbe(t *testing.T, serverName string) {
-	t.Helper()
 	if runtime.GOOS != "linux" {
 		// The `<name>: server` task name is a Linux prctl measurement; tmux
 		// cannot retitle on darwin, where this test's premise does not hold.
@@ -345,28 +318,29 @@ func renamedServerBlocksSocketAbsentProbe(t *testing.T, serverName string) {
 	}
 	testguard.IsolateTmux(t)
 
-	// The server runs the tmux binary af itself execs, under a rewritten
-	// argv[0] — `exec -a <name>` semantics, which is what tmux's
-	// getprogname() title reports. The executable inode stays the binary's
-	// own, which is the identity the candidacy check compares.
+	// A copy of the tmux binary named otherwise. The server it forks retitles
+	// to `bx: server`; `exec -a foo tmux` would title it the same way, but a
+	// copy is what a user actually has on disk.
 	tmuxPath, err := exec.LookPath("tmux")
 	require.NoError(t, err)
+	src, err := os.ReadFile(tmuxPath)
+	require.NoError(t, err)
+	renamed := filepath.Join(t.TempDir(), "bx")
+	require.NoError(t, os.WriteFile(renamed, src, 0o755))
 
 	// Start a server on a private -S socket with a long-lived pane. The server
-	// daemonises and retitles to `<serverName>: server (<socket>)`, which the
-	// kernel's 15-byte comm ceiling and tmux's own last-space cut shorten to
-	// whatever spelling this tmux build keeps.
+	// daemonises and retitles to `bx: server`.
 	socket := testguard.SocketPath(t, "repro.sock")
-	launch := exec.Command(tmuxPath, "-S", socket, "new-session", "-d",
-		"-s", "af_renamed_owner", "sleep 300")
-	launch.Args[0] = serverName // exec -a <serverName>: same binary, renamed argv[0]
-	out, err := launch.CombinedOutput()
+	out, err := exec.Command(renamed, "-S", socket, "new-session", "-d",
+		"-s", "af_renamed_owner", "sleep 300").CombinedOutput()
 	require.NoError(t, err, "renamed tmux new-session: %s", out)
-	// Kill through the socket while it still exists, registered before
-	// anything that can fail below so a failing assertion cannot leak the
-	// server or its sleep pane. The pid cleanup stays for after the socket
-	// is unlinked, where -S can no longer reach it.
-	t.Cleanup(func() { _ = exec.Command(tmuxPath, "-S", socket, "kill-server").Run() })
+	// Registered before anything that can fail below, so a failing assertion
+	// cannot leak the server or its `sleep 300` pane. The socket still exists
+	// here, so a -S kill-server reaches it; once the test unlinks the socket,
+	// the pid-based cleanup below is the fallback that still lands.
+	t.Cleanup(func() {
+		_ = exec.Command(renamed, "-S", socket, "kill-server").Run()
+	})
 
 	// The server pid, from a plain `tmux` client on the same socket: a client
 	// reaches whichever server owns the socket, regardless of the client
@@ -381,20 +355,21 @@ func renamedServerBlocksSocketAbsentProbe(t *testing.T, serverName string) {
 		_ = syscall.Kill(serverPID, syscall.SIGTERM)
 	})
 
-	// The outcome the fix owes, under the fail-safe property: the live
-	// renamed server must be a live-server CANDIDATE under whatever comm the
-	// kernel keeps of its retitle — the test does not pin the truncated
-	// spelling, which differs across tmux builds and name lengths. Waiting
-	// for candidacy rather than the comm itself also covers retitle timing:
-	// the rename lands inside proc_start a moment after the daemonising
-	// fork. liveTmuxServerPIDs reads the real process table by design — the
-	// bug is in this function, so it is not pinned; membership, not
-	// equality, so an unrelated same-uid server on a shared host cannot
-	// change the result.
+	// The measured renamed-server task name (#7242). Retitling happens inside
+	// proc_start a moment after the daemonising fork, so wait for it.
 	require.Eventually(t, func() bool {
-		return containsInt(liveTmuxServerPIDs(), serverPID)
-	}, 15*time.Second, 20*time.Millisecond,
-		"the renamed server (%s) must become a live-server candidate", serverName)
+		p, lookupErr := proctree.Lookup(serverPID)
+		return lookupErr == nil && p.Comm == "bx: server"
+	}, 5*time.Second, 10*time.Millisecond,
+		"the renamed server must retitle to `bx: server`")
+
+	// Direct regression for the prefilter the fix broadens: the renamed server
+	// is now a live-server CANDIDATE. liveTmuxServerPIDs reads the real
+	// process table by design — the bug is in this function, so it is not
+	// pinned. Membership, not equality, so an unrelated same-uid server on a
+	// shared host cannot change the result.
+	require.Contains(t, liveTmuxServerPIDs(), serverPID,
+		"the prefilter must admit a renamed tmux server (`bx: server`) as a live candidate")
 
 	// The socket-absent precondition the probe exists for (#2875): the server
 	// keeps running, every client gets ENOENT.
