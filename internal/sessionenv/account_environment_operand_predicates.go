@@ -351,49 +351,15 @@ var shellBaseNames = map[string]struct{}{
 	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
 }
 
-// shellBaseName reports the shell a program name IS — the exact spellings
-// plus the r-prefixed restricted variants (`rbash`, `rksh`, `rsh` — a
-// restricted shell is still a shell) and versioned names (`bash5`,
-// `bash-5.2`, `ksh93`, `zsh-5.9`): the gate's shell judgements key on what
-// the program is, not on a fixed list of spellings (Codex on #7603).
+// shellBaseName reports the shell a program name IS — the exact
+// spellings only. Master's own name list is exact (`bash5`, `zsh-5.9`,
+// `rbash` are not shells to it), so this list is exact too: anything
+// the name list does not cover reads as master reads it.
 func shellBaseName(name string) (string, bool) {
 	if _, ok := shellBaseNames[name]; ok {
 		return name, true
 	}
-	rest := name
-	if len(rest) > 1 && rest[0] == 'r' {
-		if _, ok := shellBaseNames[rest[1:]]; ok {
-			return rest[1:], true
-		}
-		rest = rest[1:] // a versioned restricted variant — rbash5
-	}
-	for shell := range shellBaseNames {
-		suffix, ok := strings.CutPrefix(rest, shell)
-		if !ok || suffix == "" {
-			continue
-		}
-		if shellVersionSuffix(strings.TrimPrefix(suffix, "-")) {
-			return shell, true
-		}
-	}
 	return "", false
-}
-
-// shellVersionSuffix reports whether suffix is a shell version string —
-// `5`, `5.2`, `93u` — starting with a digit and built of version
-// characters.
-func shellVersionSuffix(suffix string) bool {
-	if suffix == "" || suffix[0] < '0' || suffix[0] > '9' {
-		return false
-	}
-	for i := 0; i < len(suffix); i++ {
-		c := suffix[i]
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' ||
-			c >= 'A' && c <= 'Z' || c == '.' || c == '_' || c == '+' || c == '-') {
-			return false
-		}
-	}
-	return true
 }
 
 func KnownShellName(name string) bool {

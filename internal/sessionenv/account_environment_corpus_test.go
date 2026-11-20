@@ -10,20 +10,21 @@ import (
 )
 
 // corpusCommonMasterTSV is the common-command acceptance corpus the
-// independent review of this head recorded: 472 everyday developer
-// commands plus the review's R1–R4 rows, each with the verdict master
-// 6153cdfc2 returned for it. The verdict columns are the five checks the
-// review harness ran: env (ValidateAccountEnvironmentCommand on the
-// codex account), envcl (the same on a claude account), acct
-// (ValidateAccountCommand), cred (credentialAgentForCommand) and grant
-// (GrantAgentForRemoteCommand).
+// independent review of this head recorded: everyday developer commands
+// plus the first review's and the narrow re-review's R1–R7 rows —
+// exact-spelling protected names, carried shell names, operand `$`
+// text, newline boundaries, versioned shell spellings and brace-word
+// budget rows — each with the verdict master 6153cdfc2 returned for
+// it. The verdict columns are the five checks the review harness ran:
+// env (ValidateAccountEnvironmentCommand on the codex account), envcl
+// (the same on a claude account), acct (ValidateAccountCommand), cred
+// (credentialAgentForCommand) and grant (GrantAgentForRemoteCommand).
 //
 // This is a parity oracle, not a wish list: every row must read on this
 // code exactly as it read on master. The only differences this PR
 // permits are rows whose tail literally names the account's agent or a
-// protected variable — the over-refusal this PR states — plus the one
-// documented exception in corpusAllowedDiffs, where master's own sh -c
-// judge refuses the same carried text.
+// protected variable, or that use a named launcher's hidden-input
+// option — the over-refusal this PR states.
 const corpusCommonMasterTSV = "testdata/corpus_common_master.tsv"
 
 // corpusAccounts matches the review harness's two validation accounts.
@@ -33,32 +34,10 @@ var (
 )
 
 // corpusAllowedDiffs lists the rows permitted to differ from master,
-// each with the reason. `tmux new-window 'cd ~/src && $EDITOR .'` keeps
-// its refusal: master's own `sh -c 'cd ~/src && $EDITOR .'` refuses the
-// same text — a `$` word at a command position is a constructed name —
-// so the launcher's carried shell text keeps that rule exactly.
-//
-// The remaining rows are the shell-nesting property: a shell name
-// (sh, bash, dash, zsh — the shells master's own payload and input
-// rules model) at a command position in a joiner's carried text
-// applies master's own judges to the joined string. Each row below
-// refuses only because master refuses the direct equivalent — `sh
-// build.sh`, `bash run.sh` and `x | sh` all refuse when typed
-// directly. The admit rows beside them (`watch 'sh -c "echo hi"'`,
-// `watch 'echo hi | bash -c "echo hi"'`, `watch 'a | shell'`) are the
-// parity half: carried text master's judges call proven or un-fed
-// admits exactly as the direct form does.
-var corpusAllowedDiffs = map[string]string{
-	"tmux new-window 'cd ~/src && $EDITOR .'": "REFUSE stands: master's `sh -c 'cd ~/src && $EDITOR .'` refuses the same command-position `$` text",
-	"tmux new-window 'ls; bash'":              "REFUSE stands: carried `bash` applies master's own shell rule; `ls; bash` refuses as the direct command does",
-	"watch 'sh build.sh'":                     "REFUSE stands: carried `sh build.sh` refuses exactly as master's direct `sh build.sh` does",
-	"watch 'x | sh'":                          "REFUSE stands: carried `x | sh` refuses exactly as master's direct `x | sh` does",
-	"watch 'make && bash run.sh'":             "REFUSE stands: carried `bash run.sh` refuses exactly as master's direct `bash run.sh` does",
-	"watch 'printf B64 | base64 -d | sh'":     "REFUSE stands: carried `| sh` refuses exactly as master's direct `printf B64 | base64 -d | sh` does",
-	"watch 'echo hi | sh -s'":                 "REFUSE stands: carried `| sh -s` refuses exactly as master's direct `echo hi | sh -s` does",
-	"ssh host 'sh build.sh'":                  "REFUSE stands: carried `sh build.sh` refuses exactly as master's direct `sh build.sh` does",
-	"ssh host 'bash run.sh'":                  "REFUSE stands: carried `bash run.sh` refuses exactly as master's direct `bash run.sh` does",
-}
+// each with the reason — the stated over-refusal of this PR: a launcher
+// tail that literally names the agent or a protected variable, or a
+// named hidden-input option. Empty today: no corpus row carries one.
+var corpusAllowedDiffs = map[string]string{}
 
 // corpusVerdict folds an error verdict to the admit/REFUSE strings the
 // recorded table uses.
@@ -93,7 +72,11 @@ func TestAccountEnvironmentCorpusParity(t *testing.T) {
 		}
 		parts := strings.SplitN(line, "\t", 2)
 		require.Len(t, parts, 2, "corpus row missing tab: %q", line)
-		rows = append(rows, row{n: len(rows) + 1, cmd: parts[0], expect: parts[1]})
+		// The review harness encodes a literal newline as <LF> so a
+		// command stays one TSV row.
+		rows = append(rows, row{n: len(rows) + 1,
+			cmd:    strings.ReplaceAll(parts[0], "<LF>", "\n"),
+			expect: parts[1]})
 	}
 	require.NoError(t, sc.Err())
 	require.NotEmpty(t, rows)

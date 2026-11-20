@@ -489,10 +489,17 @@ func launcherLiteralWord(word *syntax.Word) (string, bool) {
 // segment. optionCluster marks a word that began with `-` — the only
 // place a leading letters-only prefix reads as a short-option cluster.
 func launcherWordDenied(literal string, names map[string]struct{}) bool {
-	// The env-assignment operand goes through the same flat
-	// normalization the #7603 piece rule applies — `CODEX\_HOME` the
-	// literal still spells after one shell decode reads as CODEX_HOME
-	// here (#7627).
+	// The denied mark reads the exact spelling AND its flat
+	// normalization — never the normalized one alone: the quote or
+	// backslash that gives a name its identifier boundary is itself a
+	// boundary in the exact text (`x\CODEX_HOME` still refuses), while
+	// normalization adds the forms the decode produces (`CODEX\_HOME`
+	// the literal still spells after one shell decode reads as
+	// CODEX_HOME here — #7627).
+	if launcherSegmentsDenied(strings.TrimLeft(literal, "-"), names,
+		strings.HasPrefix(literal, "-")) {
+		return true
+	}
 	literal = normalizeNamedLiteral(literal)
 	return launcherSegmentsDenied(strings.TrimLeft(literal, "-"), names,
 		strings.HasPrefix(literal, "-"))
@@ -635,9 +642,26 @@ const (
 // variable this way (a writer's operand IS the environment write). The
 // second result is the name that matched.
 func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) (int, string) {
+	// Exact spelling first, then the normalized one — a mark is the
+	// union of the two readings, never the normalized alone (#7617
+	// re-review R1): a `\` or quote inside the word is itself an
+	// identifier boundary.
+	if kind, matched := wordSegmentsProtectedKind(literal, names); kind == wordProtectedAssign {
+		return kind, matched
+	} else if kind != wordProtectedNone {
+		if k, m := wordSegmentsProtectedKind(normalizeNamedLiteral(literal), names); k != wordProtectedNone {
+			return k, m
+		}
+		return kind, matched
+	}
+	return wordSegmentsProtectedKind(normalizeNamedLiteral(literal), names)
+}
+
+// wordSegmentsProtectedKind runs the protected-name classification
+// over one spelling's `=` segments.
+func wordSegmentsProtectedKind(literal string, names map[string]struct{}) (int, string) {
 	kind := wordProtectedNone
 	matched := ""
-	literal = normalizeNamedLiteral(literal)
 	text := strings.TrimLeft(literal, "-")
 	optionCluster := strings.HasPrefix(literal, "-")
 	segments := strings.Split(text, "=")

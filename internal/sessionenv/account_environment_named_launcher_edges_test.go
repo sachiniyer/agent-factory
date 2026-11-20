@@ -874,9 +874,9 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// cannot see — master admits `sh -c 'echo $HOME'`, so the
 		// carried text matches it exactly.
 		{"pwsh -c 'echo $HOME'", false},
-		// A `$` word at a command position is a constructed name —
-		// master's `sh -c 'cd x && $EDITOR .'` refuses the same text.
-		{"pwsh -c 'cd x && $EDITOR .'", true},
+		// A `$` word anywhere in carried text names nothing the gate
+		// can see — the runtime-construction limit stated in #7641.
+		{"pwsh -c 'cd x && $EDITOR .'", false},
 		// Script files, the bare REPL and config loads are the stated
 		// file limit — the gate judges the visible command line, and a
 		// file's content is outside it (round 6 decision on the PR).
@@ -915,18 +915,18 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"prog pkexec ls", false},
 		{"prog ssh host make", false},
 		{"prog ssh host codex", true},
-		// The shell-name classifier recognizes what the program IS: an
-		// r- or versioned name lands the same decode — rbash decodes
-		// bash's -c grammar, bash5 the same, and a mutating payload
-		// under either refuses.
-		{"rbash -c 'export CODEX_HOME=/o; codex'", true},
+		// The shell-name list is master's own — exact spellings only,
+		// so r- and versioned names are not shells to the gate: an
+		// unrecognized program's operands stay its own argv, exactly
+		// as master reads `rbash x` or `zsh-5.9 -c 'make'`.
+		{"rbash -c 'export CODEX_HOME=/o; codex'", false},
 		{"rbash -c 'make'", false},
 		{"rksh -c 'make'", false},
 		{"bash5 -c 'make'", false},
-		{"bash5 -c 'export CODEX_HOME=/o; codex'", true},
+		{"bash5 -c 'export CODEX_HOME=/o; codex'", false},
 		{"bash-5.2 -c 'make'", false},
-		{"zsh-5.9 -c 'make'", true},
-		{"rzsh -c 'make'", true},
+		{"zsh-5.9 -c 'make'", false},
+		{"rzsh -c 'make'", false},
 		// The judged payload is exactly what the launcher executes:
 		// watch and ssh JOIN their argv into one command line, so a
 		// mutation spanning two words cannot hide (Codex P1 on this
@@ -941,33 +941,27 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"distrobox enter x -- 'export CODEX_HOME=/o; codex'", true},
 		{"tmux neww 'export CODEX_HOME=/o; codex'", true},
 		{"tmux neww make -j4", false},
-		// Nesting by name, round 13: a shell name at a command
-		// position in a joiner's carried text applies master's OWN
-		// rule for that shell to the joined string — `| sh` feeds
-		// exactly as the direct command does, `sh build.sh` reads an
-		// unproven script operand, and `sh -s`/a redirect keeps its
-		// stdin. Every refuse here matches master's direct form.
-		{"watch 'printf B64 | base64 -d | sh'", true},
-		{"watch 'x | sh'", true},
-		{"watch 'x | /bin/sh'", true},
-		{"watch 'make | sh'", true},
-		{"watch 'sh build.sh'", true},
-		{"watch 'bash ./build.sh'", true},
-		{"watch 'sh -s'", true},
-		{"watch 'echo hi | sh -s'", true},
-		{"watch 'x | sh -n'", true},
+		// Carried shell text is a stated limit (#7641): a bare shell
+		// name or shell construct in a joiner's carried text names
+		// nothing literal, so these read exactly as master reads
+		// them — admitted. Only a literal agent or protected name
+		// inside the same text still refuses.
+		{"watch 'printf B64 | base64 -d | sh'", false},
+		{"watch 'x | sh'", false},
+		{"watch 'x | /bin/sh'", false},
+		{"watch 'make | sh'", false},
+		{"watch 'sh build.sh'", false},
+		{"watch 'bash ./build.sh'", false},
+		{"watch 'sh -s'", false},
+		{"watch 'echo hi | sh -s'", false},
+		{"watch 'x | sh -n'", false},
 		{"watch 'x | sh -c \"export CODEX_HOME=/o; codex\"'", true},
 		{"watch 'x | bash -c \"export CODEX_HOME=/o; codex\"'", true},
-		{"watch 'sh < build.sh'", true},
-		{"watch 'make && bash run.sh'", true},
-		{"ssh host 'sh build.sh'", true},
-		{"ssh host 'bash run.sh'", true},
-		{"tmux new-window 'ls; bash'", true},
-		// …and the parity half: master's judges call these proven or
-		// un-fed, so they admit exactly as their direct forms do —
-		// `sh -c` argv is proven, `| bash -c` is not fed stdin the
-		// shell reads, and shell-adjacent spellings are not shell
-		// names.
+		{"watch 'sh < build.sh'", false},
+		{"watch 'make && bash run.sh'", false},
+		{"ssh host 'sh build.sh'", false},
+		{"ssh host 'bash run.sh'", false},
+		{"tmux new-window 'ls; bash'", false},
 		{"watch 'sh -c \"echo hi\"'", false},
 		{"watch 'x | sh -c \"echo hi\"'", false},
 		{"watch 'echo hi | sh -c \"echo hi\"'", false},
@@ -984,14 +978,15 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"docker run --rm -it ubuntu bash", false},
 		{"docker exec -it app sh", false},
 		{"kubectl exec -it web -- sh", false},
-		// A newline is a command boundary exactly as `;` is: the
-		// carried text after one re-enters at command position.
-		{"watch \"true\nsh build.sh\"", true},
-		{"watch \"true\nx | sh\"", true},
+		// A newline is just a delimiter to the literal rule: text
+		// after one still gets its pieces checked, so a protected
+		// name on the next line refuses and nothing else changes.
+		{"watch \"true\nsh build.sh\"", false},
+		{"watch \"true\nx | sh\"", false},
 		{"watch \"a\nsh -c 'export CODEX_HOME=/o; codex'\"", true},
 		{"watch \"a\nb\"", false},
 		{"watch \"a\nCODEX_HOME=/o x\"", true},
-		{"watch 'true; x | sh'", true},
+		{"watch 'true; x | sh'", false},
 		{"sudo machinectl shell host codex", true},
 		{"sudo ssh host codex", true},
 		{"sudo pwsh", false},
@@ -1276,15 +1271,15 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`pwsh '-en""c' x`, true},
 		{`pwsh '-e""nc:x' x`, true},
 		{`watch pwsh '-com""mand' 'ls'`, false},
-		// A word holding an extglob opener counts as
-		// dynamic construction — `co@(d)ex` can collapse
-		// to codex wherever a downstream enabled it.
-		{`watch 'bash -O extglob -c "co@(d)ex"'`, true},
-		{`watch 'co@(d)ex'`, true},
-		{`watch 'co?(d)ex'`, true},
-		{`watch 'co*(d)ex'`, true},
-		{`watch 'co+(d)ex'`, true},
-		{`watch 'co!(d)ex'`, true},
+		// An extglob opener is runtime construction the gate no
+		// longer reads (the #7641 limit): `co@(d)ex` shows no
+		// literal name, so it reads as master's admit does.
+		{`watch 'bash -O extglob -c "co@(d)ex"'`, false},
+		{`watch 'co@(d)ex'`, false},
+		{`watch 'co?(d)ex'`, false},
+		{`watch 'co*(d)ex'`, false},
+		{`watch 'co+(d)ex'`, false},
+		{`watch 'co!(d)ex'`, false},
 		{`watch 'echo (x)'`, false},
 		// A launcher that hands its argv to a shell as ONE
 		// joined string (watch by default, ssh's remote

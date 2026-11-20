@@ -500,18 +500,15 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
     do it, is checked per alternative: `co{de,}x` reads as `codex`,
     a `{x..y}` range over-approximates to the `[x-y]` atom, and a
     comma-less `co{ab}x` stays literal as bash would keep it;
-  - a word does not literalize (a substitution or expansion in the
-    argv itself), its literal carries extglob text, or — in a
-    launcher's carried shell string — a `$`/backtick piece sits at a
-    command position: a name the text cannot see could be
-    constructed at run time and run as the command (`tmux new-window
-    'cd ~/src && $EDITOR .'` refuses on `$EDITOR` exactly as
-    master's own `sh -c 'cd ~/src && $EDITOR .'` does; an operand
-    `echo $HOME` admits, matching `sh -c 'echo $HOME'`).
-    `$'codex'`/`$"codex"` are dynamic forms, and
-    `co@(d)ex`/`co?(d)ex`/`co*(d)ex`/`co+(d)ex`/`co!(d)ex` can
-    collapse to the name wherever a downstream enabled extglob — the
-    accepted over-refusal below;
+  - a word does not literalize — a substitution or expansion in the
+    argv itself (`sudo "$CMD" -i codex` hides its program the same
+    way master hides it). Text the gate CAN read is judged on what
+    it literally spells: a `$`, backtick, `$'…'`/`$"…'` or extglob
+    opener inside a modelled launcher's carried text constructs a
+    name only at run time, which is the stated #7641 limit rather
+    than a refusal — `tmux new-window 'cd ~/src && $EDITOR .'` and
+    `watch 'printf B64 | base64 -d | sh'` admit exactly as master
+    admits them;
   - a word spells input the gate cannot see — the per-launcher
     hidden-input table: a descriptor, stdin, or a language it does not
     parse (flatpak-spawn's `--env-fd`, nix's expression flags and
@@ -565,23 +562,6 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
   `~/.local/bin/watch` and `/usr/bin/pw[s]h` all read as the launcher —
   while a bare `*`/`?` spells no launcher name, the way master reads it.
 
-  Shell names nest the same way, by master's own rule: `sh`, `bash`,
-  `dash`, `zsh` and the versioned and restricted forms at a command
-  position in a joiner's carried text re-apply the gate's own payload,
-  environment-mutation and shell-feed judges to the whole joined
-  string — `watch 'printf B64 | base64 -d | sh'`, `ssh host 'sh
-  build.sh'` and `watch 'make && bash run.sh'` refuse exactly as their
-  direct forms do, while `watch 'sh -c "echo hi"'` and `watch 'echo hi
-  | bash -c "echo hi"'` admit because the direct forms' argv is proven
-  or un-fed. The rule reads only carried text: a shell name preserved
-  as a launcher's own argv (`docker run --rm -it ubuntu bash`,
-  `docker exec -it app sh`) stays that launcher's operand, matching
-  master's admit. Command position in carried text tracks what the
-  downstream shell tracks — start, `;`, `&`, `|`, `(`, `)`, a
-  backtick, and a newline all re-open the command word, so
-  `watch "a\nb"` runs as master does and `watch "true\nsh build.sh"`
-  refuses.
-
   `gdbus` call operands are GVariant text decoded through their
   escapes alongside the raw check (`['CODEX\u005fHOME=/o']` still
   names CODEX_HOME, and an escape the decoder does not know refuses).
@@ -604,10 +584,8 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
   The accepted cost is measured, not hidden: the rule refuses tails
   that merely MENTION a denied name — `ssh host 'cat
   notes/codex.md'`, `tmux new-window 'vim codex.md'` and `watch
-  --exec codex` name codex at a boundary, and a `$`-word at a
-  command position in a carried shell string is a constructed name
-  the text cannot see. The ordinary-usage corpus (the
-  162-row master-parity set plus the `ssh host make`, `tmux
+  --exec codex` name codex at a boundary. The ordinary-usage corpus
+  (the 162-row master-parity set plus the `ssh host make`, `tmux
   new-window htop`, `watch -n 5 'kubectl get pods'` admits) loses no
   row to the rule; the losses are the accidental-mention rows above,
   stated here rather than predicted away. Commands and config read
@@ -617,15 +595,14 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
   `nu --config /tmp/override.nu` and `nix-shell --arg-from-file
   /tmp/f` all admit the way `bash ./build.sh` does — the gate judges
   the visible command line, and a file's content is outside it.
-- **Shell names match what the program IS** — `KnownShellName`
-  recognizes a shell by its program, not its spelling: the `r`-prefix
-  restricted variants (`rbash`, `rksh`, `rzsh`, `rsh`) and versioned
-  names (`bash5`, `bash-5.2`, `ksh93`, `zsh-5.9`) land the same `-c`
-  decode and the same provability rules their base shell keeps — so
-  `rbash -c 'export CODEX_HOME=/o; codex'` and `bash5 -c
-  'export CODEX_HOME=/o; codex'` refuse, `rbash -c 'make'` and
-  `bash-5.2 -c 'make'` run, and `zsh-5.9 -c 'make'` still refuses the
-  way `zsh` does (its `-c` reads zshenv).
+- **Shell names are master's own list** — `KnownShellName` matches
+  the exact spellings master models (`sh`, `bash`, `dash`, `zsh`
+  and the POSIX/csh/fish family), so a restricted or versioned
+  spelling the list does not cover (`rbash`, `bash5`, `zsh-5.9`,
+  `ksh93`) reads as an ordinary program exactly as master reads it:
+  `rbash -c 'export CODEX_HOME=/o; codex'` and `zsh-5.9 -c 'make'`
+  keep master's verdicts, and `bash -c 'export CODEX_HOME=/o; codex'`
+  still refuses on master's own `-c` rule.
 - **Hidden inputs refuse** — a flag that loads arguments or
   environment from a file or file descriptor puts the real command
   outside the VISIBLE command line, so `bwrap --args 3`, bwrap's
