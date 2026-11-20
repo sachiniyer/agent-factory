@@ -434,6 +434,17 @@ type home struct {
 	// delete's tombstone with the deleted repo's pre-delete sessions (#7522
 	// review).
 	projectMutationSeq uint64
+	// pendingSnapshotFetchSeqs tracks the projectMutationSeq each in-flight
+	// off-loop snapshot fetch (the background poll, and a rebind conflict's
+	// snapshot) captured when its goroutine was created. A delete's tombstone
+	// may be cleared by a clean read only once no fetch that began before it
+	// can still land: a poll started before the delete can still carry the
+	// deleted repo's pre-delete session rows, and the tombstone is the
+	// admission filter for them — so the delete's own synchronous clean
+	// refresh must retain it while such a poll is in flight (#7522 review).
+	// Written on the loop at fetch creation and at the message that retires
+	// it, so it never races an off-loop read.
+	pendingSnapshotFetchSeqs map[uint64]int
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay

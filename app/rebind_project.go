@@ -184,6 +184,11 @@ var rebindConflictRefreshTimeout = 10 * time.Second
 func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 	fetch := allReposSnapshotFetcher
 	mutationSeq := m.projectMutationSeq // the mutation count this fetch starts from
+	// A conflict rebuild's fetch is an off-loop snapshot poll just like the
+	// background one: a delete that completes while it is in flight must keep
+	// its tombstone until this fetch lands, or this poll's pre-delete rows
+	// re-enter the deleted repo (#7522 review).
+	m.noteSnapshotFetchStarted(mutationSeq)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), rebindConflictRefreshTimeout)
 		defer cancel()
@@ -212,6 +217,11 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 // A picker closed or swapped in between keeps nothing of this reply; the form
 // it re-arms would name a root nobody is waiting on.
 func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.Model, tea.Cmd) {
+	// The conflict fetch is no longer in flight: retire it before the sidebar
+	// refresh, so the tombstone clear in applySidebarProjects below gates on
+	// the landing poll's own observedAtSeq and any OTHER in-flight fetch, not
+	// on this one (#7522 review).
+	m.noteSnapshotFetchLanded(msg.mutationSeq)
 	// The conflict-time reply's skipped set applies with its rows (#6986): a
 	// successful fetch rewrites the retained set, a failed one leaves it.
 	if msg.fetchErr == nil {

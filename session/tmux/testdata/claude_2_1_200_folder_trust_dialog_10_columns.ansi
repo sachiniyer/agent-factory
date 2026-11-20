@@ -1,0 +1,59 @@
+ Quick
+ safety
+ check:
+ Is this
+ a
+ project
+ you
+ created
+ or one
+ you
+ trust?
+ (Like
+ your own
+ code, a
+ well-kn
+ own open
+ source
+ project,
+ or work
+ from
+ your
+ team).
+ If not,
+ take a
+ moment
+ to
+ review
+ what's
+ in this
+ folder
+ first.
+
+ Claude
+ Code'll
+ be able
+ to read,
+ edit,
+ and
+ execute
+ files
+ here.
+
+ [38;5;246mSecurity
+[39m [38;5;246mguide
+
+[39m [38;5;153m❯[39m [38;5;246m1.[38;5;153mYes,
+[39m     [38;5;153mI
+[39m     [38;5;153mtrust
+[39m     [38;5;153mthis
+[39m     [38;5;153mfold
+[39m     [38;5;153mer
+[39m   [38;5;246m2.[39mNo,
+     exit
+
+ [38;5;246mEnter[39m [38;5;246mto
+[39m [38;5;246mconfirm
+[39m [38;5;246m·[39m [38;5;246mEsc
+[39m [38;5;246mto
+[39m [38;5;246mcancel

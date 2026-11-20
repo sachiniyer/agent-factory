@@ -365,7 +365,10 @@ func TestAccountLoaderNamesKeepIfSetAtThePane(t *testing.T) {
 	t.Setenv("GIT_CONFIG_VALUE_0", "/work")
 	// Unforwarded loader names must be genuinely absent from the client env:
 	// an ambient value is exactly what the claim test must not mistake.
-	for _, name := range []string{"CLOUD_SHELL", "GCE_METADATA_IP", "GCE_METADATA_HOST", "GIT_CONFIG_PARAMETERS", "GEMINI_CLI_USE_COMPUTE_ADC"} {
+	for _, name := range []string{
+		"CLOUD_SHELL", "GCE_METADATA_IP", "GCE_METADATA_HOST", "GIT_CONFIG_PARAMETERS", "GEMINI_CLI_USE_COMPUTE_ADC",
+		"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION",
+	} {
 		_ = os.Unsetenv(name)
 	}
 

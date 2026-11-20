@@ -271,10 +271,12 @@ user's real home and mounts it only if it exists, so:
       repository-supplied binary ever answers one), and
       `PAGER` to `/bin/cat` — and, for
       gemini, whose `.env` loader fills only unset names but treats a
-      defined-empty endpoint as real — `CODE_ASSIST_ENDPOINT` to its
-      first-party default — so tmux's `default-shell -c` chain, af's own
-      execs, the agent's bare executable, and the agent's endpoint choice
-      all resolve through first-party values, never a repo-added one.
+      defined-empty endpoint as real — `CODE_ASSIST_ENDPOINT` and (the
+      bundled-transport read `GOOGLE_CLOUD_UNIVERSE_DOMAIN`, which
+      becomes the telemetry dial host) to their first-party defaults —
+      so tmux's `default-shell -c` chain, af's own execs, the agent's
+      bare executable, and the agent's endpoint choice all resolve
+      through first-party values, never a repo-added one.
       The names an agent's own dotenv loader can fill are pinned for the
       same reason the endpoint names are: gemini walks up from the
       workspace applying `<dir>/.gemini/.env` and `<dir>/.env`
@@ -283,20 +285,32 @@ user's real home and mounts it only if it exists, so:
       read is falsy-safe, and a class counts as pinned only when **every
       name the agent's read consults** is pinned — a chain
       `A || B || default` leaves `A` free for the `.env` to claim if only
-      `B` is held. The full 0.42.0 reads, pinned link by link:
+      `B` is held. The full 0.42.0 reads, pinned link by link
+      (including the library code the CLI bundles, which a source-tree
+      measurement of the CLI alone misses):
       the auth source is `CLOUD_SHELL === "true" || GEMINI_CLI_USE_COMPUTE_ADC === "true"`
       (each compare fails on empty, so the default source stands), the
       metadata endpoint is `GCE_METADATA_IP || GCE_METADATA_HOST || HOST_ADDRESS`
       (empty is falsy on either env link and falls back to `HOST_ADDRESS`,
       gcp-metadata's compiled constant `169.254.169.254` — a module
-      constant, not an env read, so there is no third link to pin), and the git
+      constant, not an env read, so there is no third link to pin), the git
       environment-config names `GIT_CONFIG_COUNT` and
       `GIT_CONFIG_PARAMETERS` (git parses `""` as count 0 — making every
       indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pair inert — and as
-      zero `-c` pairs) — so the loader finds them claimed and the agent's
-      own read falls back to the safe default. Every
-      pinned or re-asserted name is one the agent-server's exec filter
-      admits, so the boundary survives the hop to the agent process itself.
+      zero `-c` pairs), and the bundled `gcp-metadata` /
+      `google-auth-library` reads `DEBUG_AUTH`, `DETECT_GCP_RETRIES`, and
+      `METADATA_SERVER_DETECTION` (none routes the credential; an empty
+      value is inert — debug off, detection defaults — but the names are
+      dotenv-fillable, so af pins them to keep a `.env` from claiming
+      them) — and the bundled-transport `GOOGLE_CLOUD_UNIVERSE_DOMAIN`
+      read (`... ?? process.env["GOOGLE_CLOUD_UNIVERSE_DOMAIN"] ??
+      "googleapis.com"`, which becomes `logging.<domain>`) is re-asserted
+      to `googleapis.com` rather than pinned empty, because its nullish
+      `??` treats `""` as the real dial host — so the loader finds them
+      all claimed and the agent's own read falls back to the safe
+      default. Every pinned or re-asserted name is one the agent-server's
+      exec filter admits, so the boundary survives the hop to the agent
+      process itself.
     - In af's own `docker exec` steps: every one names `/bin/sh` by absolute
       path, so the container's `PATH` — whatever it is — cannot hand af a
       repo-written `sh` to intercept the agent-server launch. Commands
@@ -417,15 +431,26 @@ user's real home and mounts it only if it exists, so:
       adds upstream is discovered on review, not by construction. Every
       class of name an agent's own dotenv loader could fill — measured on
       gemini's `.env`, which fills only names that are unset — is either
-      pinned or named here: the identity-source names — both selectors the
+      pinned or named here, including the library code the CLI bundles
+      (`@google-cloud/logging`, `googleapis-common`, `gcp-metadata`,
+      `google-auth-library`): the identity-source names — both selectors the
       auth-source read consults (`CLOUD_SHELL`, `GEMINI_CLI_USE_COMPUTE_ADC`)
       and every env link of the metadata-endpoint chain (`GCE_METADATA_IP`,
       `GCE_METADATA_HOST`; the chain's third link is `HOST_ADDRESS`,
       gcp-metadata's compiled constant `169.254.169.254`, not an env read)
-      — and the git environment-config names (`GIT_CONFIG_COUNT`,
+      — the git environment-config names (`GIT_CONFIG_COUNT`,
       `GIT_CONFIG_PARAMETERS` — pinning the
       count makes the whole indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`
-      family inert) are pinned defined-and-empty as described above;
+      family inert), and the bundled `gcp-metadata`/`google-auth-library`
+      reads `DEBUG_AUTH`, `DETECT_GCP_RETRIES`, and
+      `METADATA_SERVER_DETECTION` (none routes the credential; an empty
+      value is inert, but each is dotenv-fillable, so af pins it
+      defined-and-empty) are pinned defined-and-empty as described above;
+      the bundled-transport `GOOGLE_CLOUD_UNIVERSE_DOMAIN` read — which
+      retargets the credential-bearing telemetry dial host
+      (`logging.<domain>`) and uses a nullish `??` that treats `""` as the
+      real host — is re-asserted to its first-party default
+      (`googleapis.com`) instead;
       `GIT_CONFIG` alone stays unpinned because git reads a defined-empty
       value as a real config file path and `git config` would break, so it
       is documented instead — a loader can still claim it. For an

@@ -348,6 +348,13 @@ func claudeDialogHoldKind(screen visibleText) DialogHoldKind {
 		claudeFolderTrustQuestionPaintingOf(screen) {
 		return DialogHoldFolderPartial
 	}
+	switch claudeLaunchDialogRemnantOf(screen) {
+	case claudeLaunchDialogRemnantUnderGuide, claudeLaunchDialogRemnantFooterTail:
+		return DialogHoldFolderUnreadable
+	case claudeLaunchDialogRemnantPendingExit:
+		// A footer row no supported build paints as the dialog's own.
+		return DialogHoldFolderPartial
+	}
 	return DialogHoldOther
 }
 

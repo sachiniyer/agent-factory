@@ -169,7 +169,11 @@ func TestAgentServerLoaderNames_DroppedAtTheWrapPinnedAtTheAgent(t *testing.T) {
 		if v, _ := envValue(agentEnv, "GIT_CONFIG_COUNT"); v != "1" {
 			t.Errorf("GIT_CONFIG_COUNT = %q at the agent: the forwarded value is the operator's own claim", v)
 		}
-		for _, name := range []string{"CLOUD_SHELL", "GCE_METADATA_IP", "GCE_METADATA_HOST", "GIT_CONFIG_PARAMETERS", "GEMINI_CLI_USE_COMPUTE_ADC"} {
+		for _, name := range []string{
+			"CLOUD_SHELL", "GCE_METADATA_IP", "GCE_METADATA_HOST", "GIT_CONFIG_PARAMETERS",
+			"GEMINI_CLI_USE_COMPUTE_ADC",
+			"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION",
+		} {
 			v, ok := envValue(agentEnv, name)
 			require.True(t, ok && v == "", "%s: unforwarded names stay pinned empty at the agent", name)
 		}

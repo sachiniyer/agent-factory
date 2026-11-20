@@ -56,6 +56,13 @@ func TestDockerCredentialRunArgs_RefusesLateLoadedEndpointNames(t *testing.T) {
 		require.Contains(t, err.Error(), name, "the refusal must name the variable the operator has to remove")
 		require.Contains(t, err.Error(), "session_env_passthrough", "the refusal must name the operator remedy")
 	}
+	// GOOGLE_CLOUD_UNIVERSE_DOMAIN is read only by bundled library code, but
+	// it retargets the credential-bearing telemetry dial host, so repo
+	// run_args setting it is refused on the same terms as the endpoint names.
+	err := validateCredentialDockerRunArgs([]string{"-e", "GOOGLE_CLOUD_UNIVERSE_DOMAIN=evil.example.com"}, tmux.ProgramGemini)
+	require.Errorf(t, err, "gemini: repo run_args setting GOOGLE_CLOUD_UNIVERSE_DOMAIN must be refused — it retargets the telemetry dial host")
+	require.Contains(t, err.Error(), "GOOGLE_CLOUD_UNIVERSE_DOMAIN")
+	require.Contains(t, err.Error(), "session_env_passthrough")
 }
 
 // TestCredentialMountEndpointPinsReachTheAgent is the reachability half of
@@ -68,6 +75,7 @@ func TestDockerCredentialRunArgs_RefusesLateLoadedEndpointNames(t *testing.T) {
 func TestCredentialMountEndpointPinsReachTheAgent(t *testing.T) {
 	source := []string{
 		"CODE_ASSIST_ENDPOINT=" + credentialMountFirstPartyNames[tmux.ProgramGemini]["CODE_ASSIST_ENDPOINT"],
+		"GOOGLE_CLOUD_UNIVERSE_DOMAIN=" + credentialMountFirstPartyNames[tmux.ProgramGemini]["GOOGLE_CLOUD_UNIVERSE_DOMAIN"],
 		"GOOGLE_GEMINI_BASE_URL=",
 		"GOOGLE_VERTEX_BASE_URL=",
 		"CODE_ASSIST_API_VERSION=",
@@ -83,6 +91,18 @@ func TestCredentialMountEndpointPinsReachTheAgent(t *testing.T) {
 		require.Containsf(t, got, entry,
 			"gemini: the exec filter must carry %q through to the agent — a stripped name is unset to the .env loader", entry)
 	}
+	// The universe domain is re-asserted to a VALUE, never pinned empty: the
+	// bundled-transport ?? read would treat "" as the dial host `logging.`,
+	// so an empty pin breaks telemetry while a repo `.env` still cannot claim
+	// the name (it is refused to run_args and dominated by the re-assert).
+	pins := credentialMountPinnedNames(tmux.ProgramGemini, nil)
+	require.NotContains(t, pins, "GOOGLE_CLOUD_UNIVERSE_DOMAIN",
+		"the universe domain takes a first-party re-assert, not an empty pin")
+	_, denied := credentialMountDeniedNames(tmux.ProgramGemini)["GOOGLE_CLOUD_UNIVERSE_DOMAIN"]
+	require.True(t, denied, "GOOGLE_CLOUD_UNIVERSE_DOMAIN must be refused to repository run_args")
+	reasserts := credentialMountReassertEntries(tmux.ProgramGemini, nil, nil)
+	require.Contains(t, reasserts, "GOOGLE_CLOUD_UNIVERSE_DOMAIN=googleapis.com",
+		"the first-party re-assert must carry the compiled default onto docker run")
 }
 
 // TestCredentialMountDeniedReason_EndpointClasses covers the refusal's
@@ -103,35 +123,44 @@ func TestCredentialMountDeniedReason_EndpointClasses(t *testing.T) {
 
 // TestRunContainer_ReassertsFirstPartyEndpointAndPinsLateNames is the
 // end-to-end argv pin for item 1: on a gemini credential-mount session the
-// `docker run` argv carries the first-party endpoint re-assert AFTER
-// run_args (so a repo entry — even one that escaped the lexical guard —
-// cannot dominate it), and the falsy-safe late routing names pinned
-// defined-and-empty so the .env loader sees them as claimed.
+// `docker run` argv carries the first-party re-asserts AFTER run_args (so a
+// repo entry — even one that escaped the lexical guard — cannot dominate
+// them), and the falsy-safe late routing names pinned defined-and-empty so
+// the .env loader sees them as claimed.
 func TestRunContainer_ReassertsFirstPartyEndpointAndPinsLateNames(t *testing.T) {
 	runCalled, _, runArgv := provisionDockerCredentialGrant(t, tmux.ProgramGemini,
 		[]string{"--add-host", "repo-host:127.0.0.1"})
 	require.True(t, runCalled, "the provisioner must reach docker run")
 
-	reassertAt := -1
-	pinFor := map[string]int{}
 	addHostAt := -1
+	reassertFor := map[string]int{}
+	pinFor := map[string]int{}
+	reasserts := []string{
+		"CODE_ASSIST_ENDPOINT=https://cloudcode-pa.googleapis.com",
+		"GOOGLE_CLOUD_UNIVERSE_DOMAIN=googleapis.com",
+	}
+	pins := []string{"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "CODE_ASSIST_API_VERSION"}
 	for i, arg := range runArgv {
 		if arg == "--add-host" {
 			addHostAt = i
 		}
-		if arg == "CODE_ASSIST_ENDPOINT=https://cloudcode-pa.googleapis.com" {
-			reassertAt = i
+		for _, entry := range reasserts {
+			if arg == entry {
+				reassertFor[entry] = i
+			}
 		}
-		for _, name := range []string{"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "CODE_ASSIST_API_VERSION"} {
+		for _, name := range pins {
 			if arg == name+"=" {
 				pinFor[name] = i
 			}
 		}
 	}
 	require.NotEqual(t, -1, addHostAt, "the run_args entry must appear in argv")
-	require.Greater(t, reassertAt, addHostAt,
-		"the first-party endpoint re-assert must come after run_args so Docker's last-wins rule dominates a repo value")
-	for _, name := range []string{"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "CODE_ASSIST_API_VERSION"} {
+	for _, entry := range reasserts {
+		require.Greater(t, reassertFor[entry], addHostAt,
+			"the %s re-assert must come after run_args so Docker's last-wins rule dominates a repo value", entry)
+	}
+	for _, name := range pins {
 		require.Greater(t, pinFor[name], addHostAt,
 			"the %s pin must come after run_args so a repo value cannot dominate it", name)
 	}
@@ -658,6 +687,7 @@ func TestCredentialMount_LoaderFilledNamesArePinnedEmpty(t *testing.T) {
 	for _, name := range []string{
 		"GEMINI_CLI_USE_COMPUTE_ADC", "CLOUD_SHELL",
 		"GCE_METADATA_HOST", "GCE_METADATA_IP",
+		"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION",
 	} {
 		require.Contains(t, geminiPins, name,
 			"%s must be pinned empty for gemini — a chain link left unset is the one a .env claims", name)

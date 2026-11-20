@@ -724,22 +724,29 @@ func TestApplyAccount_LoaderFilledNamesAreKeepIfSet(t *testing.T) {
 	}
 }
 
-// #7555 changed EXACTLY the six gemini loader names: a forwarded one is kept,
-// an unforwarded one is pinned defined-empty. Every other decision ApplyAccount
-// makes is unchanged, and this table is the byte-level proof — claude, codex,
-// and every gemini identity-class name produce the output they always did,
-// with and without forwards. Each want is master's literal output; the six
-// `NAME=` additions land only where the new class says they do.
+// #7555 pinned EXACTLY the gemini loader names: a forwarded one is kept, an
+// unforwarded one is pinned defined-empty. The #7544 / #7582 review added
+// three bundled-library reads (DEBUG_AUTH, DETECT_GCP_RETRIES,
+// METADATA_SERVER_DETECTION) to the same keep-if-set class and re-asserted
+// GOOGLE_CLOUD_UNIVERSE_DOMAIN to its first-party default. Every other
+// decision ApplyAccount makes is unchanged, and this table is the
+// byte-level proof — claude, codex, and every gemini identity-class name
+// produce the output they always did, with and without forwards. Each want
+// is master's literal output; the `NAME=` additions land only where the new
+// classes say they do.
 func TestApplyAccount_LeavesTheNonLoaderPathsByteIdentical(t *testing.T) {
 	geminiPins := []string{
 		"CODE_ASSIST_API_VERSION=", "GEMINI_API_KEY=", "GOOGLE_API_KEY=",
 		"GOOGLE_APPLICATION_CREDENTIALS=", "GOOGLE_GEMINI_BASE_URL=",
 		"GOOGLE_GENAI_USE_GCA=", "GOOGLE_GENAI_USE_VERTEXAI=",
 		"GOOGLE_VERTEX_BASE_URL=", "CODE_ASSIST_ENDPOINT=https://cloudcode-pa.googleapis.com",
+		"GOOGLE_CLOUD_UNIVERSE_DOMAIN=googleapis.com",
 	}
 	geminiLoaderPins := []string{
-		"CLOUD_SHELL=", "GCE_METADATA_HOST=", "GCE_METADATA_IP=",
+		"CLOUD_SHELL=", "DEBUG_AUTH=", "DETECT_GCP_RETRIES=",
+		"GCE_METADATA_HOST=", "GCE_METADATA_IP=",
 		"GEMINI_CLI_USE_COMPUTE_ADC=", "GIT_CONFIG_COUNT=", "GIT_CONFIG_PARAMETERS=",
+		"METADATA_SERVER_DETECTION=",
 	}
 	tests := []struct {
 		name    string
@@ -787,8 +794,10 @@ func TestApplyAccount_LeavesTheNonLoaderPathsByteIdentical(t *testing.T) {
 			want: append(append(append([]string{
 				"PATH=/bin", "GIT_CONFIG_COUNT=1", "GCE_METADATA_IP=10.0.0.1",
 			}, geminiPins...),
-				"CLOUD_SHELL=", "GCE_METADATA_HOST=",
-				"GEMINI_CLI_USE_COMPUTE_ADC=", "GIT_CONFIG_PARAMETERS="),
+				"CLOUD_SHELL=", "DEBUG_AUTH=", "DETECT_GCP_RETRIES=",
+				"GCE_METADATA_HOST=",
+				"GEMINI_CLI_USE_COMPUTE_ADC=", "GIT_CONFIG_PARAMETERS=",
+				"METADATA_SERVER_DETECTION="),
 				"GEMINI_CLI_HOME=/d"),
 		},
 	}
@@ -807,9 +816,12 @@ func TestApplyAccount_LeavesTheNonLoaderPathsByteIdentical(t *testing.T) {
 // (#7555 decision: verify it, because the whole keep-if-set model rests on it).
 // The names reach their claim only through the explicit passthrough extras.
 func TestAccountLoaderFilledNames_ReachTheClaimOnlyAsExtras(t *testing.T) {
-	six := AccountLoaderFilledNames("gemini")
-	require.Len(t, six, 6, "the measured set is exactly the six names of #7555")
-	for _, name := range six {
+	names := AccountLoaderFilledNames("gemini")
+	require.Len(t, names, 9,
+		"the measured set is exactly the nine names of #7555 plus the three "+
+			"bundled-library reads the #7544 / #7582 review added (DEBUG_AUTH, "+
+			"DETECT_GCP_RETRIES, METADATA_SERVER_DETECTION)")
+	for _, name := range names {
 		for _, agent := range AccountAgents() {
 			filtered := FilterForCommand([]string{name + "=repo-set"}, agent, agent, nil)
 			_, present := envValue(filtered, name)
@@ -1137,24 +1149,40 @@ func TestApplyAccount_PinsGeminiRoutingNames(t *testing.T) {
 	}
 }
 
-// TestApplyAccount_FillsFirstPartyEndpoint is the same defense for the one
-// routing name an empty pin cannot hold: gemini's nullish-coalescing read of
-// CODE_ASSIST_ENDPOINT treats defined-empty as a real endpoint, so the
-// ambient copy is dropped and the first-party default is installed —
-// working for gemini, defined for the `.env` loader (#7531).
+// TestApplyAccount_FillsFirstPartyEndpoint is the same defense for the
+// routing names an empty pin cannot hold: gemini's nullish-coalescing read of
+// CODE_ASSIST_ENDPOINT treats defined-empty as a real endpoint, and the
+// bundled-transport read of GOOGLE_CLOUD_UNIVERSE_DOMAIN (@google-cloud/logging,
+// googleapis-common — not gemini-cli's own source) treats defined-empty as the
+// dial host `logging.`. Each ambient copy is dropped and the first-party
+// default is installed — working for gemini, defined for the `.env` loader
+// (#7531; GOOGLE_CLOUD_UNIVERSE_DOMAIN added in #7544 / #7582 review).
 func TestApplyAccount_FillsFirstPartyEndpoint(t *testing.T) {
-	for _, ambient := range [][]string{
-		{"PATH=/usr/bin"},
-		{"PATH=/usr/bin", "CODE_ASSIST_ENDPOINT=https://repo-endpoint.invalid"},
-	} {
-		scoped, err := ApplyAccount(ambient, "",
-			Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"})
-		require.NoError(t, err)
-		value, present := envValue(scoped, "CODE_ASSIST_ENDPOINT")
-		require.True(t, present, "the endpoint must be installed defined — an absent name is the `.env` loader's to claim")
-		require.Equal(t, "https://cloudcode-pa.googleapis.com", value,
-			"the ambient endpoint must not survive: on the container path it is repo-influenced, and an empty one is a real — broken — endpoint")
+	for name, want := range accountLateEnvironmentValues["gemini"] {
+		for _, ambient := range [][]string{
+			{"PATH=/usr/bin"},
+			{"PATH=/usr/bin", name + "=https://repo-endpoint.invalid"},
+		} {
+			scoped, err := ApplyAccount(ambient, "",
+				Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"})
+			require.NoError(t, err)
+			value, present := envValue(scoped, name)
+			require.True(t, present,
+				"%s must be installed defined — an absent name is the `.env` loader's to claim", name)
+			require.Equal(t, want, value,
+				"%s: the ambient value must not survive: on the container path it is repo-influenced, "+
+					"and an empty one is a real — broken — value rather than a fallback", name)
+		}
 	}
+	// The universe domain is read only by bundled library code, and the
+	// re-assert must reach the agent-server's exec environment, so it sits
+	// on gemini's allowlist like CODE_ASSIST_ENDPOINT — and the completeness
+	// taxonomy lists it as a non-credential — rather than riding the
+	// passthrough extras the keep-if-set loader names use.
+	require.Contains(t, AgentAllowlistNames("gemini"), "GOOGLE_CLOUD_UNIVERSE_DOMAIN",
+		"the re-assert value must be allowlisted to reach the agent's exec environment")
+	require.Contains(t, accountNonCredentialNames["gemini"], "GOOGLE_CLOUD_UNIVERSE_DOMAIN",
+		"the allowlisted name must be classified as a non-credential for the taxonomy")
 }
 
 // TestAccountLateEnvironmentValues_StayOffTheEmptyPinTables: a name in the

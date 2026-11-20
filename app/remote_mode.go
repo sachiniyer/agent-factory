@@ -89,19 +89,24 @@ type remoteCache struct {
 	seq uint64
 }
 
-// apply installs one poll's reads. The project registry always applies; the
-// task list applies only when no task mutation was acknowledged since the poll
-// began (readSeq is the seq captured at its start).
+// apply installs one poll's reads. Both the project registry and the task list
+// apply only when no mutation was acknowledged since the poll began (readSeq
+// is the seq captured at its start): a pre-mutation poll can still carry a
+// deleted project's registry record or a deleted task's row, and applying
+// either would resurrect what an acknowledged mutation removed. A project
+// delete that bumped c.seq therefore keeps a poll that began before it from
+// re-poisoning the registry channel noteProjectRemoved just cleaned
+// (#7522 review); the task channel has always had the same protection.
 func (c *remoteCache) apply(r *remoteReads, readSeq uint64) {
 	if r == nil {
 		return
 	}
+	if readSeq != c.seq {
+		return // older than an acknowledged mutation: keep the newer cache
+	}
 	c.projectsErr = r.projectsErr
 	if r.projectsErr == nil {
 		c.projects, c.projectsLoaded = r.projects, true
-	}
-	if readSeq != c.seq {
-		return // older than an acknowledged mutation: keep the newer cache
 	}
 	c.tasksErr = r.tasksErr
 	if r.tasksErr == nil {
@@ -169,10 +174,19 @@ func (c *remoteCache) noteTaskMutationUncertain() { c.seq++ }
 // after a confirmed delete would keep re-entering the Projects section for the
 // life of the outage (#7522 review). Filtering by the reconciled id matches
 // the identity buildRemoteProjectList rows carry.
+//
+// It also bumps c.seq, so a poll that began BEFORE the delete — whose reads
+// still list the deleted record — cannot re-poison the cache through apply:
+// the project channel is gated under readSeq != c.seq exactly like the task
+// channel, and bumping c.seq alone would change nothing without that gate
+// (#7522 review). apply runs before the repoID guard in the snapshot handler,
+// so the bump is what keeps even a poll for a repo switched away from
+// re-poisoning the registry this delete just cleaned.
 func (c *remoteCache) noteProjectRemoved(repoID string) {
 	if repoID == "" {
 		return
 	}
+	c.seq++
 	next := make([]config.Project, 0, len(c.projects))
 	for _, p := range c.projects {
 		if config.ReconciledRepoIDForProject(p) == repoID {

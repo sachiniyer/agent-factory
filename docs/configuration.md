@@ -221,7 +221,7 @@ The built-in allowlist keeps the pieces sessions need:
   `CODEX_SQLITE_HOME`, and its CA path; Gemini gets Gemini/Google API keys, its
   first-party endpoint overrides (`CODE_ASSIST_ENDPOINT`,
   `CODE_ASSIST_API_VERSION`, `GOOGLE_GEMINI_BASE_URL`,
-  `GOOGLE_VERTEX_BASE_URL`), and
+  `GOOGLE_VERTEX_BASE_URL`, `GOOGLE_CLOUD_UNIVERSE_DOMAIN`), and
   gets Google Cloud's credentials (`GOOGLE_APPLICATION_CREDENTIALS`,
   `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`) only when one of its own cloud
   modes is selected by `GOOGLE_GENAI_USE_VERTEXAI` or `GOOGLE_GENAI_USE_GCA`, on
