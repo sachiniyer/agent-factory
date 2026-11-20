@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -644,4 +645,40 @@ func claudeFolderTrustFooterRead(rows []claudeTrustRow, footer int) (whole, ok b
 		labels = append(labels, rows[i].label)
 	}
 	return false, strings.Join(labels, " ") == claudeFolderTrustFooter
+}
+
+// claudeFolderTrustUnreadablePicker says which folder-trust dialog a pane
+// claudeFolderTrustDialogOf reads as unreadable is showing, and why af refuses
+// it, so the refusal line describes the pane and not the other dialog (#7346,
+// R3). The legacy dialog reaches that verdict through
+// claudeFolderTrustHeadless since #7343.
+func claudeFolderTrustUnreadablePicker(screen visibleText) (trustPicker, error) {
+	pane := claudeLaunchDialogPaneOf(screen)
+	legacy := strings.Contains(pane.text, claudeLegacyTrustQuestionSquashed) ||
+		strings.Contains(pane.text, claudeSquash(claudeLegacyTrustProceedLabel)) ||
+		strings.HasSuffix(pane.text, claudeSquash(claudeLegacyTrustFooter))
+	pair := false
+	for _, row := range pane.rows {
+		if claudeLegacyInlinePair(strings.Fields(strings.ToLower(row.label))) {
+			// The inline pair is the legacy dialog's own option row: the
+			// reworded dialog never paints one, so a pane showing it is the
+			// legacy dialog even under the newer "Esc to cancel" footer
+			// (#7661 review, R4; #7661 Codex review).
+			pair = true
+		}
+	}
+	if !(legacy || pair) || strings.Contains(pane.text, claudeSquash(claudeTrustAffirmativeLabel)) {
+		return claudeFolderTrustPicker, claudeFolderTrustUnreadableWhy(screen)
+	}
+	picker := trustPicker{name: claudeLegacyFolderTrustDialogName, affirmative: claudeLegacyTrustProceedLabel}
+	if pair {
+		// The row the pane shows is the pair's "Yes", not the stacked form's
+		// "Yes, proceed" (#7661 review, R4).
+		picker.affirmative = claudeLegacyInlineYesLabel
+	}
+	if strings.Contains(pane.text, claudeLegacyTrustQuestionSquashed) {
+		return picker, fmt.Errorf("its question is on screen, but its rows do not read as a dialog af may answer: "+
+			"the cursor is not on %q, or the pane is too narrow for its rows", picker.affirmative)
+	}
+	return picker, errClaudeFolderTrustQuestionOffScreen
 }

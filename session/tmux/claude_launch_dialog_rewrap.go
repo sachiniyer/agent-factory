@@ -61,6 +61,10 @@ const (
 type claudeLaunchDialogMatch struct {
 	kind claudeLaunchDialogKind
 	saw  string
+	// pair: the option block's affirmative was read through the legacy
+	// dialog's single-row inline picker, so the row the pane shows is "Yes"
+	// rather than the stacked form's "Yes, proceed" (#7661 review, R4).
+	pair bool
 }
 
 func (m claudeLaunchDialogMatch) name() string {
@@ -79,6 +83,12 @@ func (m claudeLaunchDialogMatch) name() string {
 func (m claudeLaunchDialogMatch) aim() string {
 	switch m.kind {
 	case claudeLaunchDialogLegacy:
+		if m.pair {
+			// The inline pair's affirmative is the row's "Yes", not the
+			// stacked form's "Yes, proceed": name the row the pane shows
+			// (#7661 review, R4).
+			return fmt.Sprintf("%q", claudeLegacyInlineYesLabel)
+		}
 		return fmt.Sprintf("%q", claudeLegacyTrustProceedLabel)
 	case claudeLaunchDialogEither:
 		return "an option it has not seen painted"
@@ -105,11 +115,36 @@ func claudeSquash(s string) string {
 }
 
 // The folder-trust dialogs' option labels and footers, squashed.
+//
+// The claudeLaunchDialogLabel constants name the slice indices
+// claudeFolderTrustOptionsRead classifies a block by, so the classifier does
+// not read its own slice layout by raw number.
+const (
+	claudeLaunchDialogLabelAffirmative = iota
+	claudeLaunchDialogLabelLegacyProceed
+	claudeLaunchDialogLabelExit
+	// claudeLaunchDialogLabelInlineYesNo: the legacy dialog's single-row inline
+	// picker "Yes  No" (claudeLegacyInlinePairText), squashed "YesNo". The
+	// inline pair IS the legacy dialog's affirmative — the cursor sits on its
+	// Yes — and a pane too narrow for the question to fit one row leaves the
+	// pair on its own row above the footer, so the re-wrap tail reader has to
+	// consume it as the legacy affirmative (#7349's gap, fixed alongside
+	// #7584's deferral).
+	claudeLaunchDialogLabelInlineYesNo
+	// claudeLaunchDialogLabelInlineYesNoOrdinal: the same pair with the No
+	// option's ordinal, "Yes  2. No" (claudeLegacyInlineOrdinalPairText),
+	// squashed "Yes2.No". trimClaudeTrustOrdinal drops only the LEADING "1.",
+	// so the mid-row "2." stays in the label.
+	claudeLaunchDialogLabelInlineYesNoOrdinal
+)
+
 var (
 	claudeLaunchDialogLabels = []string{
 		claudeSquash(claudeTrustAffirmativeLabel),
 		claudeSquash(claudeLegacyTrustProceedLabel),
 		claudeSquash(claudeFolderTrustExitLabel),
+		claudeSquash(claudeLegacyInlinePairText),
+		claudeSquash(claudeLegacyInlineOrdinalPairText),
 	}
 	claudeLaunchDialogFooters = []string{
 		claudeSquash(claudeFolderTrustFooter),
@@ -124,7 +159,18 @@ var (
 // claudeLaunchDialogOptions is one dialog's option labels and footers,
 // squashed, as claudeLaunchDialogTail reads them up from the footer.
 type claudeLaunchDialogOptions struct {
-	labels  []string
+	labels []string
+	// pair is how many of labels, counted from the end, are the dialog's
+	// single-row inline option rows ("Yes  No" / "Yes  2. No"). Each of those
+	// IS the dialog's whole option block — the cursor's ❯ sits on it and
+	// nothing the dialog paints stacks above or below it — so the reader
+	// accepts one only as the block's lowest label, directly over the footer.
+	// Read as one more label on top of a block that already has its
+	// affirmative, the block grows upward into rows af must keep holding as
+	// the dialog's body — the reading replaced master's, which is the one
+	// thing a re-wrap reading may never do (#7453; #7661 review, R1). For the
+	// same reason the top of a pane never cuts one.
+	pair    int
 	footers []string
 	// read names the dialog that the labels read show, given which of them were
 	// read (indices into labels) and which footer closed them. It also says
@@ -137,17 +183,34 @@ type claudeLaunchDialogOptions struct {
 // order. The folder-trust dialogs come first, read exactly as before the MCP
 // dialog joined them (#7364), so a pane they hold is held the same way.
 var claudeLaunchDialogOptionSets = []claudeLaunchDialogOptions{
-	{labels: claudeLaunchDialogLabels, footers: claudeLaunchDialogFooters, read: claudeFolderTrustOptionsRead},
+	{labels: claudeLaunchDialogLabels, pair: 2, footers: claudeLaunchDialogFooters, read: claudeFolderTrustOptionsRead},
 	{labels: claudeMCPServerLabelsSquashed, footers: []string{claudeMCPServerFooterSquashed}, read: claudeMCPServerOptionsRead},
 }
 
 // claudeFolderTrustOptionsRead: the block counts once it holds an affirmative
-// label, and "Yes, proceed" or the legacy footer alone names the legacy dialog.
+// label, and "Yes, proceed", the inline pair, or the legacy footer alone names
+// the legacy dialog.
+//
+// The legacy dialog paints its affirmative either as the stacked "Yes, proceed"
+// row or the single-row inline picker "Yes  No" / "Yes  2. No"
+// (claudeLegacyInlinePair, claudeLegacyInlinePairText). Either is the
+// legacy affirmative: read-once labels for both produce the same
+// (claudeLaunchDialogLegacy, true) verdict a stacked "Yes, proceed" does, so
+// the re-wrap tail reader holds the picker over the footer at any pane width
+// the way it holds the stacked form (#7349's gap, fixed alongside #7584's
+// deferral).
 func claudeFolderTrustOptionsRead(read []int, footer int) (claudeLaunchDialogKind, bool) {
 	var affirmative, proceed bool
 	for _, i := range read {
-		affirmative = affirmative || i == 0 || i == 1
-		proceed = proceed || i == 1
+		switch i {
+		case claudeLaunchDialogLabelAffirmative:
+			affirmative = true
+		case claudeLaunchDialogLabelLegacyProceed,
+			claudeLaunchDialogLabelInlineYesNo,
+			claudeLaunchDialogLabelInlineYesNoOrdinal:
+			// The legacy affirmative: stacked "Yes, proceed" or the inline pair.
+			affirmative, proceed = true, true
+		}
 	}
 	if proceed || (footer == 1 && !affirmative) {
 		return claudeLaunchDialogLegacy, affirmative
@@ -368,7 +431,23 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 	for at > 0 {
 		matched := false
 		for i, label := range options.labels {
+			if len(read) > 0 && i >= len(options.labels)-options.pair {
+				// An inline pair is the dialog's whole option block, not
+				// one more label on top of it: accepted only directly over
+				// the footer, so the block never grows upward into rows
+				// the stacked labels leave for the dialog's body (#7661
+				// review, R1).
+				continue
+			}
 			if !strings.HasSuffix(pane.text[:at], label) {
+				continue
+			}
+			if i >= len(options.labels)-options.pair && claudeLaunchDialogBoxedSpan(pane, at-len(label), at) {
+				// A pair drafted inside a composer's box is the draft's
+				// text, not the dialog's option row: the box's side borders
+				// survive on the raw rows even though claudeTrustRowOf reads
+				// past them, and no folder-trust dialog ever paints between
+				// them (#7661 Codex review).
 				continue
 			}
 			at -= len(label)
@@ -401,6 +480,8 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 	}
 
 	match := claudeLaunchDialogMatch{kind: kind}
+	// A pair label can only be the block's lowest, read first.
+	match.pair = len(read) > 0 && read[0] >= len(options.labels)-options.pair
 	switch {
 	case at == 0 && labels > 0:
 		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
@@ -408,7 +489,7 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 		}
 		match.saw = "only its option rows and " + shown
 		return match, true
-	case at > 0 && claudeLaunchDialogLabelTail(pane.text[:at], options.labels):
+	case at > 0 && claudeLaunchDialogLabelTail(pane.text[:at], options.labels[:len(options.labels)-options.pair]):
 		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
 			return claudeLaunchDialogMatch{}, false
 		}
@@ -802,14 +883,37 @@ func claudeLaunchDialogPainting(pane claudeLaunchDialogPane) (claudeLaunchDialog
 			// The question ends inside a row, or sits on one row.
 			continue
 		}
-		if claudeLaunchDialogComposerBelow(pane, below) ||
+		if claudeLaunchDialogComposerBelow(pane, first, below) ||
 			claudeMCPTrustDraftRow(pane.lines, pane.rows, pane.index[first], pane.index[len(pane.index)-1]) {
 			continue
 		}
 		match.saw = "its question wrapped onto several rows"
+		for i := pane.index[first]; i < len(pane.lines); i++ {
+			if claudeLegacyInlinePair(strings.Fields(strings.ToLower(pane.rows[i].label))) {
+				// The dialog's option row is the inline pair: name its "Yes",
+				// not the stacked form's "Yes, proceed" (#7661 review, R4).
+				match.pair = true
+			}
+		}
 		return match, true
 	}
 	return claudeLaunchDialogMatch{}, false
+}
+
+// claudeLaunchDialogBoxedSpan reports whether the text span [from, to) sits on
+// a row the pane drew between a composer's box borders.
+func claudeLaunchDialogBoxedSpan(pane claudeLaunchDialogPane, from, to int) bool {
+	for content := 0; content < len(pane.starts); content++ {
+		start := pane.starts[content]
+		end := len(pane.text)
+		if content+1 < len(pane.starts) {
+			end = pane.starts[content+1]
+		}
+		if start < to && end > from && claudeTrustBordered(pane.lines[pane.index[content]]) {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeLaunchDialogRowText(pane claudeLaunchDialogPane, content int) string {
@@ -823,41 +927,6 @@ func claudeLaunchDialogRowText(pane claudeLaunchDialogPane, content int) string 
 func claudeLaunchDialogAnySelected(pane claudeLaunchDialogPane, from, to int) bool {
 	for content := from; content < to; content++ {
 		if pane.rows[pane.index[content]].selected {
-			return true
-		}
-	}
-	return false
-}
-
-// claudeLaunchDialogComposerBelow reports whether a row from content row from
-// down shows a working agent rather than the legacy dialog: a plain rule, a ❯
-// row that does not begin one of the dialog's options, or the boxed composer's
-// "> " row.
-func claudeLaunchDialogComposerBelow(pane claudeLaunchDialogPane, from int) bool {
-	firstLine := len(pane.lines)
-	if from < len(pane.index) {
-		firstLine = pane.index[from]
-	}
-	for i := firstLine; i < len(pane.lines); i++ {
-		if claudeComposerRule(pane.lines[i]) {
-			return true
-		}
-	}
-	for content := from; content < len(pane.starts); content++ {
-		i := pane.index[content]
-		row := pane.rows[i]
-		if !row.selected {
-			if i > 0 && claudeTrustFrameRule(pane.lines[i-1]) && claudeLaunchDialogPromptRow(pane, i) {
-				return true
-			}
-			continue
-		}
-		text := claudeLaunchDialogRowText(pane, content)
-		option := claudeMCPTrustOrdinalWord(text)
-		for _, label := range []string{claudeSquash(claudeLegacyTrustProceedLabel), claudeSquash(claudeFolderTrustExitLabel), "Yes", "No"} {
-			option = option || (text != "" && strings.HasPrefix(label, text))
-		}
-		if !option {
 			return true
 		}
 	}
@@ -887,25 +956,4 @@ func (t *TmuxSession) refuseClaudeLaunchDialog(match claudeLaunchDialogMatch) {
 		"refusing to answer the %s dialog for session %q: the pane shows %s (a pane too short scrolls the dialog's top off, and one too narrow wraps its rows); "+
 			"af will not press a key it cannot aim at %s; make the pane larger, or answer the dialog in the session",
 		match.name(), t.sanitizedName, match.saw, match.aim())
-}
-
-// claudeFolderTrustUnreadablePicker says which folder-trust dialog a pane
-// claudeFolderTrustDialogOf reads as unreadable is showing, and why af refuses
-// it, so the refusal line describes the pane and not the other dialog (#7346,
-// R3). The legacy dialog reaches that verdict through
-// claudeFolderTrustHeadless since #7343.
-func claudeFolderTrustUnreadablePicker(screen visibleText) (trustPicker, error) {
-	pane := claudeLaunchDialogPaneOf(screen)
-	legacy := strings.Contains(pane.text, claudeLegacyTrustQuestionSquashed) ||
-		strings.Contains(pane.text, claudeSquash(claudeLegacyTrustProceedLabel)) ||
-		strings.HasSuffix(pane.text, claudeSquash(claudeLegacyTrustFooter))
-	if !legacy || strings.Contains(pane.text, claudeSquash(claudeTrustAffirmativeLabel)) {
-		return claudeFolderTrustPicker, claudeFolderTrustUnreadableWhy(screen)
-	}
-	picker := trustPicker{name: claudeLegacyFolderTrustDialogName, affirmative: claudeLegacyTrustProceedLabel}
-	if strings.Contains(pane.text, claudeLegacyTrustQuestionSquashed) {
-		return picker, fmt.Errorf("its question is on screen, but its rows do not read as a dialog af may answer: "+
-			"the cursor is not on %q, or the pane is too narrow for its rows", claudeLegacyTrustProceedLabel)
-	}
-	return picker, errClaudeFolderTrustQuestionOffScreen
 }
