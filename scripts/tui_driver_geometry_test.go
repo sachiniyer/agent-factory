@@ -104,13 +104,12 @@ func runDriverProbe(t *testing.T, env []string, script string) (string, error) {
 	return string(out), err
 }
 
-// The geometry model after sourcing must equal the live window, and an
-// export-time pin must survive intact for af_boot.
+// The geometry model after sourcing must equal the live window for every
+// dimension the caller left unset; a dimension set before sourcing is an
+// explicit choice — a launch pin — and is never rewritten.
 func TestTuiDriverGeometryModelFollowsLiveWindow(t *testing.T) {
 	probe := `source "$DRIVER" &&
-  printf 'model=%sx%s pinned=%sx%s\n' \
-    "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" \
-    "${_AF_DRIVER_PINNED_COLS-}" "${_AF_DRIVER_PINNED_ROWS-}"`
+  printf 'model=%sx%s\n' "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS"`
 
 	t.Run("syncs to the live window on source (#7669)", func(t *testing.T) {
 		env, _ := driverProbeEnv(t, "80x24", nil)
@@ -118,8 +117,7 @@ func TestTuiDriverGeometryModelFollowsLiveWindow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("probe failed: %v\n%s", err, out)
 		}
-		want := "model=80x24 pinned=x"
-		if strings.TrimSpace(out) != want {
+		if want := "model=80x24"; strings.TrimSpace(out) != want {
 			t.Fatalf("a fresh shell against a live 80x24 session must model 80x24, got %q (want %q)", out, want)
 		}
 	})
@@ -130,13 +128,12 @@ func TestTuiDriverGeometryModelFollowsLiveWindow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("probe failed: %v\n%s", err, out)
 		}
-		want := "model=100x30 pinned=x"
-		if strings.TrimSpace(out) != want {
+		if want := "model=100x30"; strings.TrimSpace(out) != want {
 			t.Fatalf("no live session must leave the 100x30 defaults, got %q (want %q)", out, want)
 		}
 	})
 
-	t.Run("a launch pin stays a launch pin — the model still tells the truth", func(t *testing.T) {
+	t.Run("an explicit size is never rewritten — it chooses model and launch", func(t *testing.T) {
 		env, _ := driverProbeEnv(t, "80x24", map[string]string{
 			"AF_DRIVER_COLS": "120",
 			"AF_DRIVER_ROWS": "40",
@@ -145,9 +142,21 @@ func TestTuiDriverGeometryModelFollowsLiveWindow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("probe failed: %v\n%s", err, out)
 		}
-		want := "model=80x24 pinned=120x40"
-		if strings.TrimSpace(out) != want {
-			t.Fatalf("a live 80x24 window beats an exported 120x40 pin in the model, got %q (want %q)", out, want)
+		if want := "model=120x40"; strings.TrimSpace(out) != want {
+			t.Fatalf("an exported 120x40 pin must survive the live-window sync, got %q (want %q)", out, want)
+		}
+	})
+
+	t.Run("only the unset dimension syncs — a partial pin keeps its half", func(t *testing.T) {
+		env, _ := driverProbeEnv(t, "80x24", map[string]string{
+			"AF_DRIVER_COLS": "120",
+		})
+		out, err := runDriverProbe(t, env, probe)
+		if err != nil {
+			t.Fatalf("probe failed: %v\n%s", err, out)
+		}
+		if want := "model=120x24"; strings.TrimSpace(out) != want {
+			t.Fatalf("pinned COLS=120 must hold while unset ROWS tracks live 24, got %q (want %q)", out, want)
 		}
 	})
 }
@@ -173,8 +182,8 @@ func TestTuiDriverGeometrySeesResizeFromALaterShell(t *testing.T) {
 	}
 }
 
-// An export-time pin chooses the LAUNCH size even while the model tracks
-// the live window: record-demo.sh's export → source → af_boot shape.
+// An export-time pin chooses the LAUNCH size too: record-demo.sh's
+// export → source → af_boot shape, proven by the stub tmux's call log.
 func TestTuiDriverLaunchPinChoosesBootGeometry(t *testing.T) {
 	env, tmuxLog := driverProbeEnv(t, "80x24", map[string]string{
 		"AF_DRIVER_COLS": "120",

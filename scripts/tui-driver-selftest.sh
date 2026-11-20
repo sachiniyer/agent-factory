@@ -327,28 +327,37 @@ _expect_resize_rejected() {
 # shell fell back to the 100x30 launch defaults even when the real `drive`
 # session sat at 80x24, so _af_rail_title_avail sized a rail the TUI was
 # not drawing and every _af_row_re helper false-timed-out on a healthy
-# screen. Each case runs in a subshell: a private tmux server under
-# TMUX_TMPDIR is that subshell's OWN (never the sandbox's), and unsetting
-# TMUX keeps a caller's attach pointer from redirecting the bare `tmux`
-# calls the driver makes.
+# screen.
+#
+# Each case runs its whole driver contact inside an inner `bash` — the
+# `docker exec` shape itself — so AF_DRIVER_*/TMUX_TMPDIR mutations stay
+# out of this file's subshells (a subshell assignment would make every
+# later read here look stale to shellcheck). A private tmux server under
+# TMUX_TMPDIR is the case's OWN, never the sandbox's; `unset TMUX` keeps a
+# caller's attach pointer from redirecting the bare `tmux` calls the driver
+# makes, and the driver never exports its COLS/ROWS, so a real `docker
+# exec` shell inherits none — every inner script unsets both to reproduce
+# that env.
 
 # A fresh shell sourcing the driver against a live 80x24 session must model
 # 80x24 — the same display-message read af_resize verifies its resize with.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_geometry_syncs_from_live_window() (
     probe="$(mktemp -d)"
-    TMUX_TMPDIR="$probe"; export TMUX_TMPDIR
-    unset TMUX
-    tmux new-session -d -s drive -x 80 -y 24 'sleep 300' || return 1
-    trap 'tmux kill-server 2>/dev/null || :; rm -rf "$probe"' EXIT
-    [ "$(tmux display-message -p -t drive '#{window_width}x#{window_height}')" = "80x24" ] || {
-        _af_fail 'premise: the private session is not live at 80x24'; return 1; }
-    # shellcheck source=scripts/tui-driver.sh
-    source "$SELF_DIR/tui-driver.sh"
-    if [ "$AF_DRIVER_COLS" != 80 ] || [ "$AF_DRIVER_ROWS" != 24 ]; then
-        _af_fail "a fresh shell modeled ${AF_DRIVER_COLS}x${AF_DRIVER_ROWS}; the live window is 80x24"
-        return 1
-    fi
+    trap 'rm -rf "$probe"' EXIT
+    cat > "$probe/inner.sh" <<'INNER'
+        export TMUX_TMPDIR="$PROBE"
+        unset TMUX AF_DRIVER_COLS AF_DRIVER_ROWS
+        tmux new-session -d -s drive -x 80 -y 24 'sleep 300' || exit 1
+        trap 'tmux kill-server 2>/dev/null || :' EXIT
+        [ "$(tmux display-message -p -t drive '#{window_width}x#{window_height}')" = "80x24" ] || {
+            printf 'premise: the private session is not live at 80x24\n' >&2; exit 1; }
+        source "$DRIVER"
+        [ "$AF_DRIVER_COLS" = 80 ] && [ "$AF_DRIVER_ROWS" = 24 ] || {
+            printf 'a fresh shell modeled %sx%s; the live window is 80x24\n' \
+                "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" >&2; exit 1; }
+INNER
+    PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" bash "$probe/inner.sh"
 )
 
 # With no driver session the launch defaults stand — the sync must not
@@ -357,45 +366,42 @@ _expect_geometry_syncs_from_live_window() (
 _expect_geometry_defaults_without_session() (
     probe="$(mktemp -d)"
     trap 'rm -rf "$probe"' EXIT
-    TMUX_TMPDIR="$probe"; export TMUX_TMPDIR
-    unset TMUX
-    # shellcheck source=scripts/tui-driver.sh
-    source "$SELF_DIR/tui-driver.sh"
-    if [ "$AF_DRIVER_COLS" != 100 ] || [ "$AF_DRIVER_ROWS" != 30 ]; then
-        _af_fail "no live session must keep the 100x30 defaults, modeled ${AF_DRIVER_COLS}x${AF_DRIVER_ROWS}"
-        return 1
-    fi
+    cat > "$probe/inner.sh" <<'INNER'
+        export TMUX_TMPDIR="$PROBE"   # no server on it → no driver session
+        unset TMUX AF_DRIVER_COLS AF_DRIVER_ROWS
+        source "$DRIVER"
+        [ "$AF_DRIVER_COLS" = 100 ] && [ "$AF_DRIVER_ROWS" = 30 ] || {
+            printf 'no live session must keep the 100x30 defaults, modeled %sx%s\n' \
+                "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" >&2; exit 1; }
+INNER
+    PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" bash "$probe/inner.sh"
 )
 
 # A size an earlier shell's af_resize left behind is the live size the next
-# `docker exec` must model — the exact failure from #7669.
+# `docker exec` must model — the exact failure from #7669. The nested
+# `bash -c` inherits no unexported AF_DRIVER_* — it IS the later shell.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_geometry_follows_resize_across_shells() (
     probe="$(mktemp -d)"
-    TMUX_TMPDIR="$probe"; export TMUX_TMPDIR
-    unset TMUX
-    tmux new-session -d -s drive -x 80 -y 24 'sleep 300' || return 1
-    trap 'tmux kill-server 2>/dev/null || :; rm -rf "$probe"' EXIT
-    # shellcheck source=scripts/tui-driver.sh
-    source "$SELF_DIR/tui-driver.sh"
-    af_resize 60 15 || return 1
-    (
-        # shellcheck source=scripts/tui-driver.sh
-        source "$SELF_DIR/tui-driver.sh"
-        [ "$AF_DRIVER_COLS" = 60 ] && [ "$AF_DRIVER_ROWS" = 15 ]
-    ) || {
-        _af_fail 'a later shell did not model the resized 60x15 window'
-        return 1
-    }
+    trap 'rm -rf "$probe"' EXIT
+    cat > "$probe/inner.sh" <<'INNER'
+        export TMUX_TMPDIR="$PROBE"
+        unset TMUX AF_DRIVER_COLS AF_DRIVER_ROWS
+        tmux new-session -d -s drive -x 80 -y 24 'sleep 300' || exit 1
+        trap 'tmux kill-server 2>/dev/null || :' EXIT
+        source "$DRIVER" || exit 1
+        af_resize 60 15 || exit 1
+        bash -c 'source "$1"; [ "$AF_DRIVER_COLS" = 60 ] && [ "$AF_DRIVER_ROWS" = 15 ]' _ "$DRIVER" || {
+            printf 'a later shell did not model the resized 60x15 window\n' >&2; exit 1; }
+INNER
+    PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" bash "$probe/inner.sh"
 )
 
-# An export-time pin still chooses the LAUNCH size while the model tracks
-# the live window — record-demo.sh's export → source → af_boot shape. The
-# inner bash IS the fresh `docker exec` shell: its stub tmux logs every
-# call, display-message reports whatever size new-session/resize-window
-# last recorded, and capture-pane prints af_boot's three gate markers.
-# Driver-config vars reach it through the env — assigning them inside a
-# subshell here would make every later read in this file look stale.
+# An export-time pin is the caller's geometry choice — it survives the
+# live-window sync as BOTH the model and the launch size (record-demo.sh's
+# export → source → af_boot shape). The stub tmux inside logs every call,
+# display-message reports whatever size new-session/resize-window last
+# recorded, and capture-pane prints af_boot's three gate markers.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_geometry_launch_pin_wins_boot() (
     probe="$(mktemp -d)"
@@ -422,9 +428,9 @@ _expect_geometry_launch_pin_wins_boot() (
             return 0
         }
         source "$DRIVER"
-        # The model must describe the live 80x24 window, not the pin.
-        [ "$AF_DRIVER_COLS" = 80 ] && [ "$AF_DRIVER_ROWS" = 24 ] || {
-            printf 'model %sx%s, live is 80x24\n' \
+        # The pin is the caller's explicit size — the sync must not touch it.
+        [ "$AF_DRIVER_COLS" = 120 ] && [ "$AF_DRIVER_ROWS" = 40 ] || {
+            printf 'live sync rewrote the pin: model %sx%s, want 120x40\n' \
                 "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" >&2; exit 1; }
         af_boot || exit 1
         [ "$AF_DRIVER_COLS" = 120 ] && [ "$AF_DRIVER_ROWS" = 40 ] || {

@@ -32,13 +32,13 @@
 # Configuration (override via environment before sourcing / calling af_boot).
 # ----------------------------------------------------------------------------
 : "${AF_DRIVER_SESSION:=drive}"                 # tmux session the TUI runs in
-# An AF_DRIVER_COLS/ROWS exported BEFORE sourcing is an af_boot launch pin
-# (the documented way to pick the TUI's geometry — record-demo.sh relies on
-# it): saved here, before the defaults land, because the live-window sync
-# below rewrites the model vars and the pin must still choose the launch
-# size (#7669).
-_AF_DRIVER_PINNED_COLS="${AF_DRIVER_COLS-}"
-_AF_DRIVER_PINNED_ROWS="${AF_DRIVER_ROWS-}"
+# An AF_DRIVER_COLS/ROWS set BEFORE sourcing is an explicit geometry
+# choice — an af_boot launch pin AND the model value: the live-window sync
+# below fills only what the caller left unset, so the explicit value is
+# never rewritten (#7669). Recorded before the defaults land, since a bare
+# `+x` test cannot tell "unset" from "defaulted" later.
+_AF_DRIVER_PINNED_COLS="${AF_DRIVER_COLS+x}"
+_AF_DRIVER_PINNED_ROWS="${AF_DRIVER_ROWS+x}"
 : "${AF_DRIVER_COLS:=100}"                       # launch width
 : "${AF_DRIVER_ROWS:=30}"                        # launch height
 : "${AF_DRIVER_REPO:=$HOME/sandbox/mock-repo}"   # cwd the TUI launches in
@@ -84,34 +84,27 @@ export AGENT_FACTORY_HOME
 export AGENT_FACTORY_AUTO_UPDATE
 
 # ----------------------------------------------------------------------------
-# Geometry model — always the LIVE window while the driver session exists.
+# Geometry model — the LIVE window for every dimension left unset (#7669).
 # ----------------------------------------------------------------------------
 # Each `docker exec` of a multi-phase scenario is a FRESH shell: left at the
 # launch defaults, AF_DRIVER_COLS/ROWS model a rail the TUI is not drawing —
 # _af_rail_title_avail sizes the wrong title cell, every _af_row_re pattern
 # mismatches, and helpers like af_new_instance false-time-out on a healthy
-# screen (#7669). Sync the model at source time with the same display-message
-# read af_resize verifies its resize with, so the geometry also tracks a
-# size an earlier shell's af_resize left behind. The sync cannot lose a
-# launch size: an export-time pin lives in _AF_DRIVER_PINNED_* above and
-# af_boot still launches at it — the model always describes the window that
-# is actually there.
+# screen. Sync each unset dimension from the live driver window at source
+# time with the same display-message read af_resize verifies its resize
+# with, so a later shell also tracks the size an earlier shell's af_resize
+# left behind. A dimension the caller set is never touched — an explicit
+# value chooses the model AND the launch size.
 _af_live_geometry="$(tmux display-message -p -t "$AF_DRIVER_SESSION" \
     '#{window_width}x#{window_height}' 2>/dev/null || true)"
 case "$_af_live_geometry" in
     ''|*x*x*|*[!0-9x]*) : ;;                    # not a <int>x<int> — keep the model
     [0-9]*x[0-9]*)
-        AF_DRIVER_COLS="${_af_live_geometry%x*}"
-        AF_DRIVER_ROWS="${_af_live_geometry#*x}"
+        [ -z "$_AF_DRIVER_PINNED_COLS" ] && AF_DRIVER_COLS="${_af_live_geometry%x*}"
+        [ -z "$_AF_DRIVER_PINNED_ROWS" ] && AF_DRIVER_ROWS="${_af_live_geometry#*x}"
         ;;
 esac
-unset _af_live_geometry
-# What sourcing left in the model vars. af_boot compares the current value
-# against this to tell "caller never picked a launch size" (defer to the
-# export-time pin) from "caller reassigned it since source" (the nearer
-# intent wins).
-_AF_DRIVER_MODEL_COLS="$AF_DRIVER_COLS"
-_AF_DRIVER_MODEL_ROWS="$AF_DRIVER_ROWS"
+unset _af_live_geometry _AF_DRIVER_PINNED_COLS _AF_DRIVER_PINNED_ROWS
 
 # ----------------------------------------------------------------------------
 # Low-level plumbing.
@@ -730,20 +723,12 @@ af_boot() {
     # Fresh driver session. Kill ONLY our own named session — never the
     # server (the container hosts the daemon's sessions too).
     tmux kill-session -t "$AF_DRIVER_SESSION" 2>/dev/null || true
-    # Launch size (#7669): a var still holding its source-time value defers
-    # to an export-time pin — the live-window sync put the CURRENT geometry
-    # in the model vars, not the caller's launch intent. A var reassigned
-    # since source (env-prefix or plain assignment) is the nearer intent
-    # and wins.
-    local boot_cols="$AF_DRIVER_COLS" boot_rows="$AF_DRIVER_ROWS"
-    [ "$boot_cols" = "$_AF_DRIVER_MODEL_COLS" ] && boot_cols="${_AF_DRIVER_PINNED_COLS:-$boot_cols}"
-    [ "$boot_rows" = "$_AF_DRIVER_MODEL_ROWS" ] && boot_rows="${_AF_DRIVER_PINNED_ROWS:-$boot_rows}"
-    tmux new-session -d -s "$AF_DRIVER_SESSION" -x "$boot_cols" -y "$boot_rows"
+    tmux new-session -d -s "$AF_DRIVER_SESSION" -x "$AF_DRIVER_COLS" -y "$AF_DRIVER_ROWS"
     # A detached session ignores -x/-y under `window-size latest`; pin it so the
     # TUI reads the requested geometry on startup (#1174 item 2). Honors any
     # AF_DRIVER_COLS/ROWS override set before af_boot, including tiny sizes.
     # af_resize verifies the geometry took, so a bad size fails the boot loudly.
-    af_resize "$boot_cols" "$boot_rows" || return 1
+    af_resize "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" || return 1
 
     af_send_literal "cd $AF_DRIVER_REPO && ${AF_DRIVER_LAUNCH_ENV:+$AF_DRIVER_LAUNCH_ENV }$bin"
     af_send Enter
