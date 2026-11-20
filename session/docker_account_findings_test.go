@@ -197,7 +197,7 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 		"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS",
 		"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION",
 		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
-		"HTTP_PROXY", "GCE_METADATA_HOST",
+		"HTTP_PROXY", "GCE_METADATA_HOST", "GIT_SSH_COMMAND",
 	} {
 		t.Setenv(name, "")
 		require.NoError(t, os.Unsetenv(name))
@@ -214,7 +214,8 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	_, _ = createDockerAccountSession(f, "gemini",
 		[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 			"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS", "HTTP_PROXY",
-			"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION"})
+			"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION",
+			"GIT_SSH_COMMAND"})
 	require.NotEmpty(t, runArgs, "the account create never reached docker run")
 
 	// Forwarded+set: bare -e NAME, so docker resolves the operator's value.
@@ -227,11 +228,13 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	// loader names and the indexed pair names a forwarded count animates.
 	// An image ENV value surviving the extras admission would read as the
 	// operator's claim at the scope hop, so defined-empty is the honest
-	// "forwarded but nothing arrived" answer.
+	// "forwarded but nothing arrived" answer. HTTP_PROXY is keep-if-set for
+	// gemini since #7662 — the image's repo-chosen proxy must not claim the
+	// credential transport's routing.
 	for _, name := range []string{
 		"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS",
 		"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION",
-		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "HTTP_PROXY",
 	} {
 		assignment, found = dockerEnvArg(runArgs, name)
 		require.True(t, found, "%s: a forwarded-but-unset name must still blank the image value", name)
@@ -242,10 +245,11 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	_, found = dockerEnvArg(runArgs, "GCE_METADATA_HOST")
 	require.False(t, found, "an unforwarded loader name is never stamped: the scope pin decides it")
 
-	// Every other forwarded-but-unset name keeps master's contract: no -e of
-	// any form, so the image's own ENV value for it stands. HTTP_PROXY is the
-	// shape of a legitimate image-supplied fill that must not be blanked.
-	_, found = dockerEnvArg(runArgs, "HTTP_PROXY")
+	// Every forwarded-but-unset name that is NOT loader-classified keeps
+	// master's contract: no -e of any form, so the image's own ENV value for
+	// it stands. GIT_SSH_COMMAND is not a bundle read — it is the shape of a
+	// legitimate image-supplied fill that must not be blanked.
+	_, found = dockerEnvArg(runArgs, "GIT_SSH_COMMAND")
 	require.False(t, found,
 		"a forwarded-but-unset ordinary name emits no -e — the image's value survives untouched")
 

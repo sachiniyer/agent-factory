@@ -250,8 +250,21 @@ var agentNames = map[string]map[string]struct{}{
 // application-default credential file and the project/location that scope it.
 // Shared by both selector entries below rather than written twice, so the two
 // modes can never drift into granting different things.
+//
+// The #7662 bundle audit added the chain twins google-auth-library reads
+// alongside the originals — a selector-active operator who sets the
+// lowercase or alternate spellings must have them reach the CLI too, since
+// the bundled google-auth-library project chain consults every link
+// (GCLOUD_PROJECT || GOOGLE_CLOUD_PROJECT || gcloud_project ||
+// google_cloud_project, and GOOGLE_APPLICATION_CREDENTIALS ||
+// google_application_credentials). GOOGLE_CLOUD_PROJECT_ID and
+// GOOGLE_CLOUD_QUOTA_PROJECT are the same class: the project fallback and
+// the X-Goog-User-Project quota override sent with the credential.
 var geminiCloudNames = nameSet(
-	"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
+	"GOOGLE_APPLICATION_CREDENTIALS", "google_application_credentials",
+	"GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "gcloud_project", "google_cloud_project",
+	"GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_CLOUD_QUOTA_PROJECT",
+	"GOOGLE_CLOUD_LOCATION",
 )
 
 type conditionalNames struct {
@@ -461,6 +474,17 @@ func ImportedCredentialNames() []string {
 	}
 	for _, names := range accountLoaderFilledNames {
 		for name := range names {
+			// Names the COMMON ambient allowlist also admits (the generic
+			// proxy spellings, GITHUB_TOKEN) are plausible hand-set
+			// update-environment entries — routing config an operator
+			// legitimately leaves in the stored option, not credential
+			// residue the expansion could have planted. The strip's job is
+			// removing residue, so the common-admitted members keep their
+			// place in the operator's option; GITHUB_TOKEN is still dropped
+			// through the explicit credential list below (#7662).
+			if _, ambient := commonNames[name]; ambient {
+				continue
+			}
 			set[name] = struct{}{}
 		}
 	}

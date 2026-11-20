@@ -728,25 +728,35 @@ func TestApplyAccount_LoaderFilledNamesAreKeepIfSet(t *testing.T) {
 // unforwarded one is pinned defined-empty. The #7544 / #7582 review added
 // three bundled-library reads (DEBUG_AUTH, DETECT_GCP_RETRIES,
 // METADATA_SERVER_DETECTION) to the same keep-if-set class and re-asserted
-// GOOGLE_CLOUD_UNIVERSE_DOMAIN to its first-party default. Every other
-// decision ApplyAccount makes is unchanged, and this table is the
-// byte-level proof — claude, codex, and every gemini identity-class name
-// produce the output they always did, with and without forwards. Each want
-// is master's literal output; the `NAME=` additions land only where the new
-// classes say they do.
+// GOOGLE_CLOUD_UNIVERSE_DOMAIN to its first-party default. #7662's artifact
+// derivation grew the loader class to the whole measured .env-fillable
+// surface and added the identity pins (the lowercase credential twin and
+// GEMINI_DEFAULT_AUTH_TYPE) plus the remaining ??-family reasserts — the
+// identity/value pins are still listed literally below, while the loader
+// pin LIST derives from the table because its membership is the artifact's
+// to pin (TestGeminiBundleEnvReads_ClassificationsLand); what this test
+// still proves byte-for-byte is WHERE the additions land — defined-empty,
+// after the valued fills, before the injected root — and that every
+// non-loader decision is unchanged.
 func TestApplyAccount_LeavesTheNonLoaderPathsByteIdentical(t *testing.T) {
 	geminiPins := []string{
-		"CODE_ASSIST_API_VERSION=", "GEMINI_API_KEY=", "GOOGLE_API_KEY=",
-		"GOOGLE_APPLICATION_CREDENTIALS=", "GOOGLE_GEMINI_BASE_URL=",
+		"CODE_ASSIST_API_VERSION=", "GEMINI_API_KEY=", "GEMINI_DEFAULT_AUTH_TYPE=",
+		"GOOGLE_API_KEY=", "GOOGLE_APPLICATION_CREDENTIALS=", "GOOGLE_GEMINI_BASE_URL=",
 		"GOOGLE_GENAI_USE_GCA=", "GOOGLE_GENAI_USE_VERTEXAI=",
-		"GOOGLE_VERTEX_BASE_URL=", "CODE_ASSIST_ENDPOINT=https://cloudcode-pa.googleapis.com",
-		"GOOGLE_CLOUD_UNIVERSE_DOMAIN=googleapis.com",
+		"GOOGLE_VERTEX_BASE_URL=", "google_application_credentials=",
 	}
-	geminiLoaderPins := []string{
-		"CLOUD_SHELL=", "DEBUG_AUTH=", "DETECT_GCP_RETRIES=",
-		"GCE_METADATA_HOST=", "GCE_METADATA_IP=",
-		"GEMINI_CLI_USE_COMPUTE_ADC=", "GIT_CONFIG_COUNT=", "GIT_CONFIG_PARAMETERS=",
-		"METADATA_SERVER_DETECTION=",
+	geminiValues := []string{
+		"CODE_ASSIST_ENDPOINT=https://cloudcode-pa.googleapis.com",
+		"GEMINI_SANDBOX_IMAGE=us-docker.pkg.dev/gemini-code-dev/gemini-cli/sandbox:0.42.0",
+		"GOOGLE_CLOUD_UNIVERSE_DOMAIN=googleapis.com",
+		"GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION=true",
+		"SEATBELT_PROFILE=permissive-open",
+	}
+	// Every keep-if-set name absent from the input is installed defined-empty,
+	// sorted — the list derives from the table; the placement is what's proven.
+	geminiLoaderPins := make([]string, 0)
+	for _, name := range AccountLoaderFilledNames("gemini") {
+		geminiLoaderPins = append(geminiLoaderPins, name+"=")
 	}
 	tests := []struct {
 		name    string
@@ -785,19 +795,27 @@ func TestApplyAccount_LeavesTheNonLoaderPathsByteIdentical(t *testing.T) {
 				"GEMINI_API_KEY=ambient", "GOOGLE_APPLICATION_CREDENTIALS=/sa.json",
 				"CODE_ASSIST_ENDPOINT=https://repo.example", "PATH=/bin",
 			},
-			want: append(append(append([]string{"PATH=/bin"}, geminiPins...), geminiLoaderPins...), "GEMINI_CLI_HOME=/d"),
+			want: append(append(append(append([]string{"PATH=/bin"}, geminiPins...), geminiValues...), geminiLoaderPins...), "GEMINI_CLI_HOME=/d"),
 		},
 		{
 			name:    "gemini keeps only the forwarded loader names",
 			account: Account{Agent: "gemini", Name: "work", Dir: "/d"},
 			env:     []string{"PATH=/bin", "GIT_CONFIG_COUNT=1", "GCE_METADATA_IP=10.0.0.1"},
-			want: append(append(append([]string{
+			want: append(append(append(append([]string{
 				"PATH=/bin", "GIT_CONFIG_COUNT=1", "GCE_METADATA_IP=10.0.0.1",
-			}, geminiPins...),
-				"CLOUD_SHELL=", "DEBUG_AUTH=", "DETECT_GCP_RETRIES=",
-				"GCE_METADATA_HOST=",
-				"GEMINI_CLI_USE_COMPUTE_ADC=", "GIT_CONFIG_PARAMETERS=",
-				"METADATA_SERVER_DETECTION="),
+			}, geminiPins...), geminiValues...),
+				// The forwarded pair is kept in place; every OTHER loader
+				// name pins empty — reconstruct the sorted list minus the two.
+				func() []string {
+					out := make([]string, 0, len(geminiLoaderPins))
+					for _, pin := range geminiLoaderPins {
+						if pin == "GIT_CONFIG_COUNT=" || pin == "GCE_METADATA_IP=" {
+							continue
+						}
+						out = append(out, pin)
+					}
+					return out
+				}()...),
 				"GEMINI_CLI_HOME=/d"),
 		},
 	}
@@ -810,27 +828,50 @@ func TestApplyAccount_LeavesTheNonLoaderPathsByteIdentical(t *testing.T) {
 	}
 }
 
-// The claim test is presence-in-the-filtered-env, so NO loader name may be
-// admitted by any ordinary allowlist — a repository .env's value riding the
-// common or per-agent list would read exactly like the operator's forward
-// (#7555 decision: verify it, because the whole keep-if-set model rests on it).
-// The names reach their claim only through the explicit passthrough extras.
+// The claim test is presence-in-the-filtered-env. A loader name no ordinary
+// allowlist admits reaches its claim ONLY through the explicit passthrough
+// extras — a .env's value riding the per-agent list would read exactly like
+// the operator's forward (#7555 decision: verify it, because the whole
+// keep-if-set model rests on it).
+//
+// The #7662 bundle audit added names the COMMON ambient allowlist DOES admit
+// — the generic proxy spellings and GITHUB_TOKEN. For those the invariant is
+// maintained one hop earlier: ambient admission is fine where the ambient
+// environment is the operator's own (the local pane path), and on the
+// repo-influenced agent-server hop dropUnforwardedAccountLoaderNames removes
+// every copy the wrap did not forward — so presence at ScopeAgentServerAccount
+// still means "forwarded" for the whole class. The assertions below pin both
+// halves: unadmitted names keep the strict extras-only claim, and
+// ambient-admitted names prove the wrap drop restores it.
 func TestAccountLoaderFilledNames_ReachTheClaimOnlyAsExtras(t *testing.T) {
 	names := AccountLoaderFilledNames("gemini")
-	require.Len(t, names, 9,
-		"the measured set is exactly the nine names of #7555 plus the three "+
-			"bundled-library reads the #7544 / #7582 review added (DEBUG_AUTH, "+
-			"DETECT_GCP_RETRIES, METADATA_SERVER_DETECTION)")
+	require.NotEmpty(t, names,
+		"the measured set derives from gemini_bundle_env.go's keep-if-set entries")
 	for _, name := range names {
-		for _, agent := range AccountAgents() {
-			filtered := FilterForCommand([]string{name + "=repo-set"}, agent, agent, nil)
+		filtered := FilterForCommand([]string{name + "=repo-set"}, "gemini", "gemini", nil)
+		_, ambientAdmitted := envValue(filtered, name)
+		if !ambientAdmitted {
+			for _, agent := range AccountAgents() {
+				filtered := FilterForCommand([]string{name + "=repo-set"}, agent, agent, nil)
+				_, present := envValue(filtered, name)
+				require.False(t, present,
+					"%s is admitted for %s without an extra: a repository value would read as the operator's claim", name, agent)
+			}
+			filtered := FilterForCommand([]string{name + "=forwarded"}, "", "", nil)
 			_, present := envValue(filtered, name)
+			require.False(t, present, "%s must not be admitted by the common allowlist alone", name)
+		} else {
+			// Ambient-admitted: the wrap's explicit drop is what keeps an
+			// unforwarded image/ambient value from reading as the claim.
+			dropped := dropUnforwardedAccountLoaderNames(filtered, "gemini", nil)
+			_, present := envValue(dropped, name)
 			require.False(t, present,
-				"%s is admitted for %s without an extra: a repository value would read as the operator's claim", name, agent)
+				"%s is ambient-admitted and unforwarded: the wrap must drop it before the scope", name)
+			kept := dropUnforwardedAccountLoaderNames(filtered, "gemini", []string{name})
+			_, present = envValue(kept, name)
+			require.True(t, present,
+				"%s is ambient-admitted AND forwarded: the wrap must keep the operator's claim", name)
 		}
-		filtered := FilterForCommand([]string{name + "=forwarded"}, "", "", nil)
-		_, present := envValue(filtered, name)
-		require.False(t, present, "%s must not be admitted by the common allowlist alone", name)
 		admitted := FilterForCommand([]string{name + "=forwarded"}, "gemini", "gemini", []string{name})
 		require.Contains(t, admitted, name+"=forwarded", "%s must be reachable through the passthrough extras", name)
 	}
@@ -841,7 +882,13 @@ func TestAccountLoaderFilledNames_ReachTheClaimOnlyAsExtras(t *testing.T) {
 // value — #7555's R1 exactly. And they join ImportedCredentialNames, because a
 // forwarded git-config or auth-source value is credential-class material whose
 // stale tmux update-environment copy must be dropped like any other.
+//
+// The ambient-admitted exception (#7662): names the COMMON allowlist carries —
+// the generic proxy spellings — are plausible hand-set update-environment
+// entries, not expansion residue, so the strip deliberately leaves them (the
+// same carve-out SSH_AUTH_SOCK already enjoys).
 func TestAccountLoaderFilledNames_NeverJoinTheIdentitySet(t *testing.T) {
+	imported := ImportedCredentialNames()
 	for _, name := range AccountLoaderFilledNames("gemini") {
 		require.NotContains(t, AccountIdentityNames("gemini"), name,
 			"%s must stay keep-if-set — identity names are pinned unconditionally", name)
@@ -849,9 +896,20 @@ func TestAccountLoaderFilledNames_NeverJoinTheIdentitySet(t *testing.T) {
 		require.False(t, inLate, "%s must stay keep-if-set — late-environment names are pinned unconditionally", name)
 		_, inValues := accountLateEnvironmentValues["gemini"][name]
 		require.False(t, inValues, "%s is keep-if-set, not a valued fill", name)
-		require.Contains(t, ImportedCredentialNames(), name,
+		if _, ambient := commonNames[name]; ambient {
+			if name != "GITHUB_TOKEN" {
+				require.NotContains(t, imported, name,
+					"%s is plausible hand-set operator config — the stored-option strip must leave it", name)
+			}
+			continue
+		}
+		require.Contains(t, imported, name,
 			"%s can carry forwarded credential-class material; its stale tmux import must be dropped", name)
 	}
+	// The one ambient-admitted loader name that IS credential residue stays
+	// stripped — through the explicit GH-token list, not the loader loop.
+	require.Contains(t, imported, "GITHUB_TOKEN",
+		"a stale stored GITHUB_TOKEN is credential residue; the strip still drops it")
 }
 
 // ResolveAccountEnvironment feeds tmux's new-session -e, which WINS over the

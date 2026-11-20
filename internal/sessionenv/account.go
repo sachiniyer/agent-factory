@@ -158,8 +158,13 @@ var accountCredentialNames = map[string]map[string]struct{}{
 	// no selector anywhere. So it is an identity for this agent whatever admitted
 	// it, and accountLateEnvironmentNames is what keeps a late source from putting
 	// it back (#3609 review).
+	// google_application_credentials is the lowercase twin the #7662 bundle
+	// audit found behind the uppercase name: google-auth-library reads
+	// GOOGLE_APPLICATION_CREDENTIALS || google_application_credentials, so
+	// it substitutes for the account directory exactly as its twin does.
 	"gemini": nameSet(
-		"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
+		"GEMINI_API_KEY", "GOOGLE_API_KEY",
+		"GOOGLE_APPLICATION_CREDENTIALS", "google_application_credentials",
 	),
 }
 
@@ -222,12 +227,15 @@ var accountLateEnvironmentNames = map[string]map[string]struct{}{
 	// account-bound CONTAINER path the ambient environment is repo-influenced
 	// (the chosen image's ENV, docker.run_args), so a keep-what-is-set rule
 	// cannot tell the operator's gateway from the repository's (#7531).
-	"gemini": nameSet(
-		"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
-		"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
-		"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL",
-		"CODE_ASSIST_API_VERSION",
-	),
+	//
+	// The set is DERIVED from the measured bundle artifact
+	// (gemini_bundle_env.go, @google/gemini-cli 0.42.0): every entry whose
+	// account class is pin — the identities and auth selectors above, the
+	// endpoint/API-version routing names, the lowercase
+	// google_application_credentials twin, and GEMINI_DEFAULT_AUTH_TYPE
+	// (#7662). A bundle-read classification can no longer drift from this
+	// table.
+	"gemini": geminiBundleAccountPins(),
 }
 
 // accountLateEnvironmentValues is the same late-source defense for the
@@ -254,10 +262,12 @@ var accountLateEnvironmentNames = map[string]map[string]struct{}{
 //     first-party default `googleapis.com` holds the `.env` off AND keeps
 //     telemetry working — the same shape as CODE_ASSIST_ENDPOINT.
 var accountLateEnvironmentValues = map[string]map[string]string{
-	"gemini": {
-		"CODE_ASSIST_ENDPOINT":         "https://cloudcode-pa.googleapis.com",
-		"GOOGLE_CLOUD_UNIVERSE_DOMAIN": "googleapis.com",
-	},
+	// Derived from the measured bundle artifact: every entry whose account
+	// class is reassert — CODE_ASSIST_ENDPOINT, GOOGLE_CLOUD_UNIVERSE_DOMAIN
+	// (#7544/#7582), and the #7662 additions GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION,
+	// GEMINI_SANDBOX_IMAGE, and SEATBELT_PROFILE, each a ??-family read whose
+	// defined-empty value is real and broken.
+	"gemini": geminiBundleAccountReasserts(),
 }
 
 // accountLoaderFilledNames is the THIRD account name class: names the agent's
@@ -276,62 +286,54 @@ var accountLateEnvironmentValues = map[string]map[string]string{
 // an ambient value can only be a competing identity, while a loader-filled
 // value may be deliberate operator config.
 //
-// The names below are the complete set gemini 0.42.0's reads take from
-// the environment, measured on @google/gemini-cli 0.42.0 INCLUDING the
-// library code the CLI bundles (@google-cloud/logging, googleapis-common,
-// google-auth-library, gcp-metadata): a measurement of the CLI's own
-// source tree alone misses the bundled-library reads, so the original
-// #7555 table omitted names the `.env` loader can claim even though the
-// CLI honors them.
+// WHICH names belong here is not a prose claim: the gemini set is derived
+// from the measured bundle artifact in gemini_bundle_env.go — every
+// environment read @google/gemini-cli 0.42.0 performs, its own source AND
+// the libraries it bundles (@grpc/grpc-js, google-auth-library,
+// gcp-metadata, @google-cloud/logging, googleapis-common, the npm-config
+// proxy helper), classified per path and pinned by TestGeminiBundleEnvReads_*.
+// A source-tree measurement of the CLI alone cannot see the bundled-library
+// reads — the #7555 table's own prose-completeness claim was falsified twice
+// that way (#7655's GOOGLE_CLOUD_UNIVERSE_DOMAIN; the #7659 review's grpc
+// proxy/trust-root names, lowercase credential twin, and four-link project
+// chain) — so completeness lives in the checked artifact, not in this
+// comment. The keep-if-set class covers, among others: the full proxy
+// surface (grpc_proxy, no_grpc_proxy, HTTP_PROXY/HTTPS_PROXY/NO_PROXY/
+// ALL_PROXY and their lowercase twins, the npm_config_* pair), the
+// credential-transport trust roots (GRPC_DEFAULT_SSL_ROOTS_FILE_PATH,
+// GRPC_SSL_CIPHER_SUITES, GOOGLE_API_CERTIFICATE_CONFIG), the project and
+// quota chains (GCLOUD_PROJECT/GOOGLE_CLOUD_PROJECT and their lowercase
+// twins, GOOGLE_CLOUD_PROJECT_ID, GOOGLE_CLOUD_QUOTA_PROJECT,
+// GOOGLE_CLOUD_LOCATION), the auth-source and metadata-endpoint reads
+// (CLOUD_SHELL, GEMINI_CLI_USE_COMPUTE_ADC, GCE_METADATA_IP,
+// GCE_METADATA_HOST), GEMINI_CLI_CUSTOM_HEADERS, and GITHUB_TOKEN.
 //
-//   - CLOUD_SHELL and GEMINI_CLI_USE_COMPUTE_ADC select the auth source
-//     (getAuthTypeFromEnv: `CLOUD_SHELL === "true" || GEMINI_CLI_USE_COMPUTE_ADC
-//     === "true"`). Both fail a === "true" compare on empty, so a defined-empty
-//     pin holds the default source; a forwarded true moves the session's auth
-//     OFF the account onto Compute ADC — honoured as the operator's stated
-//     choice, consistent with the credential-mount path's treatment (#7555
-//     decision 7).
-//   - GCE_METADATA_IP and GCE_METADATA_HOST are the two environment links of
-//     the metadata endpoint (getBaseUrl: `GCE_METADATA_IP || GCE_METADATA_HOST
-//     || <compiled fallback>`). Empty is falsy on each and falls through to the
-//     compiled 169.254.169.254 constant — which is NOT an env read, so there is
-//     no third link to pin (HOST_ADDRESS is a module constant in the same
-//     gcp-metadata file, deliberately absent).
-//   - GIT_CONFIG_COUNT and GIT_CONFIG_PARAMETERS inject git configuration
-//     through the environment: strtoul("") is 0 with no error, and a count of
-//     0 renders the whole unbounded GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* family
-//     inert, so pinning the count kills the family without enumerating it;
-//     empty GIT_CONFIG_PARAMETERS parses to zero -c pairs. GIT_CONFIG is
-//     deliberately absent: git treats defined-empty as a real config-file
-//     path and fails, so it is documented, not pinned.
-//   - DEBUG_AUTH, DETECT_GCP_RETRIES, and METADATA_SERVER_DETECTION are read
-//     by the bundled gcp-metadata / google-auth-library transports inside
-//     @google/gemini-cli 0.42.0, not gemini-cli's own source. None routes the
-//     credential — DEBUG_AUTH only gates credential-bearing debug logging,
-//     and the two gcp-metadata names shape GCP-metadata detection — but each
-//     is dotenv-fillable and was unclaimed by af, so a workspace `.env` could
-//     set DEBUG_AUTH to log the session's OAuth material or shift detection.
-//     The keep-if-set empty pin claims each for af (the `.env` loader finds
-//     it defined) while an operator's forwarded value still survives. An
-//     empty value is inert here — debug is off on `""`, and detection falls
-//     to its compiled default rather than dialing a repo-chosen host — so the
-//     defense holds without breaking telemetry. GOOGLE_CLOUD_UNIVERSE_DOMAIN
-//     is read by the SAME bundled transports but is NOT in this table: its
-//     nullish-`??` read makes defined-empty a real (broken) value AND it
-//     routes the credential, so it is re-asserted to its first-party default
-//     in accountLateEnvironmentValues instead of pinned empty.
+// Two names join the derived set by hand: GIT_CONFIG_COUNT and
+// GIT_CONFIG_PARAMETERS are af's own shared-git defense rather than bundle
+// reads — strtoul("") is 0 with no error, so a pinned count renders the
+// whole unbounded GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* family inert, and
+// empty GIT_CONFIG_PARAMETERS parses to zero -c pairs. GIT_CONFIG is
+// deliberately absent everywhere: git treats defined-empty as a real
+// config-file path and fails, so it is documented, not pinned.
 //
 // No other agent has entries: nothing else has a measured dotenv fill channel
 // reading these names, and claude/codex keep GIT_CONFIG_* in docker.run_args
 // for their safe.directory workaround — a name af does not pin must not be
 // refused to them (#7555).
 var accountLoaderFilledNames = map[string]map[string]struct{}{
-	"gemini": nameSet(
-		"CLOUD_SHELL", "GEMINI_CLI_USE_COMPUTE_ADC",
-		"GCE_METADATA_IP", "GCE_METADATA_HOST",
-		"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
-		"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION",
-	),
+	// The gemini set is DERIVED from the measured bundle artifact
+	// (gemini_bundle_env.go, @google/gemini-cli 0.42.0): every entry whose
+	// account class is keep-if-set — the auth-source selectors, the proxy
+	// and trust-root names, the project-selection chain twins, the sandbox
+	// and channel selectors (#7662) — plus GIT_CONFIG_COUNT /
+	// GIT_CONFIG_PARAMETERS, which are af's own shared-git defense rather
+	// than bundle reads and so live outside the artifact.
+	"gemini": func() map[string]struct{} {
+		names := geminiBundleAccountKeepIfSet()
+		names["GIT_CONFIG_COUNT"] = struct{}{}
+		names["GIT_CONFIG_PARAMETERS"] = struct{}{}
+		return names
+	}(),
 }
 
 // AccountLoaderFilledNames lists, sorted, the keep-if-set names for one agent:
@@ -347,6 +349,20 @@ func AccountLoaderFilledNames(agent string) []string {
 		out = append(out, name)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// AccountEnvironmentValues is the accountLateEnvironmentValues content for
+// one agent: the late-loaded names an empty pin cannot hold, mapped to the
+// first-party default each is re-asserted with. Provisioners writing the
+// account environment file themselves (the sandbox identity file) must emit
+// the VALUE, not `NAME=` — these reads treat defined-empty as a real broken
+// value, the exact failure the class exists to prevent (#7531).
+func AccountEnvironmentValues(agent string) map[string]string {
+	out := make(map[string]string, len(accountLateEnvironmentValues[agent]))
+	for name, value := range accountLateEnvironmentValues[agent] {
+		out[name] = value
+	}
 	return out
 }
 
@@ -686,9 +702,14 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	}
 	sort.Strings(filled)
 	// Keep-if-set is claimed by PRESENCE alone: this env arrives already
-	// filtered, and no accountLoaderFilledNames name is on any allowlist — so a
-	// name still present is exactly one the operator forwarded. An absent one
-	// gets the defined-empty pin below.
+	// filtered, and the path it arrived on decided what presence means — on
+	// the local pane the ambient env is the operator's own (a tmux-imported
+	// value IS the claim), while the repo-influenced account-bound
+	// agent-server hop runs dropUnforwardedAccountLoaderNames first so only
+	// explicitly forwarded names can still be present (#7662: common
+	// allowlist members like the proxy spellings and GITHUB_TOKEN otherwise
+	// survive FilterForCommand on image/ambient values and read as claims).
+	// An absent one gets the defined-empty pin below.
 	loader := accountLoaderFilledNames[account.Agent]
 	seen := make(map[string]struct{}, len(loader))
 	out := make([]string, 0, len(env)+len(pinned)+len(filled)+len(loader)+1)
@@ -739,6 +760,49 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	// removal above means there should not be one.
 	out = append(out, configVar+"="+account.Dir)
 	return out, nil
+}
+
+// dropUnforwardedAccountLoaderNames removes every keep-if-set name the wrap
+// did NOT forward as a passthrough extra, so a name still present at
+// ScopeAgentServerAccount is exactly one the operator forwarded.
+//
+// applyAccount claims keep-if-set names by PRESENCE in its already-filtered
+// input, and for most loader names presence can only be a forward: no
+// allowlist admits them, so FilterForCommand already deleted the ambient or
+// image-supplied copy. But the #7662 bundle audit added loader names the
+// COMMON ambient allowlist admits — the generic proxy spellings and
+// GITHUB_TOKEN — whose ambient/image copies survive FilterForCommand and
+// would read to applyAccount exactly like the operator's claim. On the
+// account-bound agent-server hop the ambient environment is repo-influenced
+// (the image's ENV, docker.run_args), so presence there must mean
+// "forwarded": the wrap drops every unforwarded loader name before the
+// scope runs, which is precisely what the extras list names.
+//
+// The local pane path needs no drop: a pane's ambient environment is the
+// operator's own imported environment, not repo-influenced state, so
+// presence there is already the operator's claim.
+func dropUnforwardedAccountLoaderNames(environ []string, accountAgent string, extras []string) []string {
+	loader, ok := accountLoaderFilledNames[accountAgent]
+	if !ok {
+		return environ
+	}
+	forwarded := make(map[string]struct{}, len(extras))
+	for _, name := range extras {
+		forwarded[name] = struct{}{}
+	}
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		name, _, found := strings.Cut(entry, "=")
+		if found {
+			if _, isLoader := loader[name]; isLoader {
+				if _, kept := forwarded[name]; !kept {
+					continue
+				}
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // accountScopedNames is every variable removed from an account-scoped session:

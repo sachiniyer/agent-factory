@@ -555,8 +555,25 @@ func writeFileAtomic0600(path string, data []byte) error {
 // the 0600 identity file the launch shell sources — the docker backend's shape.
 func (w *sandboxWorkspace) accountScrubEnv() string {
 	var b strings.Builder
+	// The valued names take their first-party default, not `NAME=`: they are
+	// `??`-family reads that treat defined-empty as a real broken value, so
+	// blanking them here would break the agent exactly the way the class
+	// exists to prevent (#7531, #7662 — the remote file must say what
+	// ApplyAccount would install).
+	valued := sessionenv.AccountEnvironmentValues(w.spec.Account.Agent)
 	for _, name := range w.accountPinnedNames() {
+		if _, isValued := valued[name]; isValued {
+			continue
+		}
 		b.WriteString(name + "=\n")
+	}
+	valuedNames := make([]string, 0, len(valued))
+	for name := range valued {
+		valuedNames = append(valuedNames, name)
+	}
+	sort.Strings(valuedNames)
+	for _, name := range valuedNames {
+		b.WriteString(name + "=" + shellQuote(valued[name]) + "\n")
 	}
 	// The keep-if-set names are decided in the remote launch shell, where the
 	// forwarded value actually lives: a name the operator forwarded keeps

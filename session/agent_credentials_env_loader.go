@@ -23,40 +23,14 @@ import (
 // A || B || default leaves A free for the .env to claim if only B is
 // held (#7544).
 var credentialMountLoaderFilledNames = map[string]map[string]struct{}{
-	tmux.ProgramGemini: {
-		// getAuthTypeFromEnv is CLOUD_SHELL === "true" ||
-		// GEMINI_CLI_USE_COMPUTE_ADC === "true" — the auth source is
-		// pinned only when both selectors are; a defined-empty value fails
-		// each compare and the default source stands.
-		"GEMINI_CLI_USE_COMPUTE_ADC": {},
-		"CLOUD_SHELL":                {},
-		// The metadata host is GCE_METADATA_IP || GCE_METADATA_HOST ||
-		// HOST_ADDRESS — pinning only the second link leaves IP free for
-		// the .env to retarget the endpoint the ADC probe and token fetch
-		// dial; empty is falsy on either env link and falls back to
-		// HOST_ADDRESS, which is gcp-metadata's compiled constant
-		// 169.254.169.254 — a module constant, not an env read, so there is
-		// no third link for a .env to claim and nothing more to pin.
-		"GCE_METADATA_HOST": {},
-		"GCE_METADATA_IP":   {},
-		// DEBUG_AUTH, DETECT_GCP_RETRIES, and METADATA_SERVER_DETECTION are
-		// read by the bundled gcp-metadata / google-auth-library transports
-		// inside @google/gemini-cli 0.42.0, not gemini-cli's own source —
-		// so a source-tree measurement of the CLI misses them. None routes
-		// the credential, but each is dotenv-fillable and af left it
-		// unclaimed, so a .env setting DEBUG_AUTH would log the session's
-		// OAuth material. A defined-empty pin claims each for af (the .env
-		// loader finds it defined) and is inert: debug is off on "", and
-		// the gcp-metadata reads fall to their compiled defaults rather
-		// than dialing a repo-chosen host. An operator's forwarded value
-		// still survives (keep-if-set). GOOGLE_CLOUD_UNIVERSE_DOMAIN — the
-		// sibling bundled-transport read that DOES route the credential and
-		// reads through a nullish ?? — is re-asserted to its first-party
-		// default in credentialMountFirstPartyNames, not pinned empty here.
-		"DEBUG_AUTH":                {},
-		"DETECT_GCP_RETRIES":        {},
-		"METADATA_SERVER_DETECTION": {},
-	},
+	// The gemini set is DERIVED from the measured bundle artifact
+	// (internal/sessionenv/gemini_bundle_env.go, @google/gemini-cli
+	// 0.42.0): every entry whose account class is keep-if-set — the
+	// auth-source selectors, the metadata-endpoint pair, the gRPC proxy
+	// and trust-root names the #7659 review found (R1), the project-id
+	// chain twins (R2), and the rest of the .env-fillable surface (#7662).
+	// Completeness lives in that artifact and its tests, not here.
+	tmux.ProgramGemini: geminiBundleLoaderFilled(),
 }
 
 // credentialMountSharedGitEnvNames inject git configuration into every git

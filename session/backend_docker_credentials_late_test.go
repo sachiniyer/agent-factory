@@ -121,6 +121,40 @@ func TestCredentialMountDeniedReason_EndpointClasses(t *testing.T) {
 	}
 }
 
+// TestGeminiBundleArtifact_MountClassesLand is the mount-path half of the
+// #7662 landing check — the account-path half lives beside the artifact in
+// internal/sessionenv. Every artifact entry's mount class must reach the
+// table that delivers it: pin names are refused to run_args AND emitted
+// defined-and-empty (denial without the pin would leave the .env loader's
+// claim), reassert names carry the measured first-party value, shared
+// names are claimed by the agent-agnostic boundary tables rather than the
+// artifact-derived sets, and denied-no-pin names are exactly the
+// pane-boundary set a pin must never erase.
+func TestGeminiBundleArtifact_MountClassesLand(t *testing.T) {
+	denied := credentialMountDeniedNames(tmux.ProgramGemini)
+	pinned := sortedNamesToSet(credentialMountPinnedNames(tmux.ProgramGemini, nil))
+	for _, r := range sessionenv.GeminiBundleEnvReads {
+		switch r.Mount {
+		case sessionenv.GeminiBundleEnvPin:
+			require.Containsf(t, denied, r.Name,
+				"%s is pin-classified but not refused to repo run_args", r.Name)
+			require.Containsf(t, pinned, r.Name,
+				"%s is pin-classified but reaches no defined-empty pin — the .env loader could claim it", r.Name)
+		case sessionenv.GeminiBundleEnvReassert:
+			require.Equalf(t, r.Value, credentialMountFirstPartyNames[tmux.ProgramGemini][r.Name],
+				"%s: artifact and mount table disagree on the re-asserted value", r.Name)
+		case sessionenv.GeminiBundleEnvShared:
+			require.Containsf(t, denied, r.Name,
+				"%s is shared-boundary but no boundary table claims it", r.Name)
+			require.NotContainsf(t, pinned, r.Name,
+				"%s is shared-boundary — it re-asserts a real value, an empty pin would erase it", r.Name)
+		case sessionenv.GeminiBundleEnvNoPin:
+			require.Containsf(t, credentialMountPaneBoundaryNames, r.Name,
+				"%s is denied-no-pin — it must be the pane-boundary set a pin would erase", r.Name)
+		}
+	}
+}
+
 // TestRunContainer_ReassertsFirstPartyEndpointAndPinsLateNames is the
 // end-to-end argv pin for item 1: on a gemini credential-mount session the
 // `docker run` argv carries the first-party re-asserts AFTER run_args (so a

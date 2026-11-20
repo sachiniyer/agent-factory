@@ -445,14 +445,12 @@ var credentialMountRoutingNames = map[string]map[string]struct{}{
 // by Docker's last-wins, and an operator's value still wins via passthrough
 // (#7531; GOOGLE_CLOUD_UNIVERSE_DOMAIN added in #7544 / #7582 review).
 var credentialMountFirstPartyNames = map[string]map[string]string{
-	tmux.ProgramGemini: {
-		// gemini-cli's compiled Code Assist endpoint
-		// (packages/core/src/code_assist/server.ts).
-		"CODE_ASSIST_ENDPOINT": "https://cloudcode-pa.googleapis.com",
-		// Bundled @google-cloud/logging `??` read whose result is the
-		// telemetry dial host — a repo .env retargets the credential.
-		"GOOGLE_CLOUD_UNIVERSE_DOMAIN": "googleapis.com",
-	},
+	// Derived from the measured bundle artifact: every gemini entry whose
+	// mount class is reassert — CODE_ASSIST_ENDPOINT and
+	// GOOGLE_CLOUD_UNIVERSE_DOMAIN (#7531, #7544 / #7582 review) plus the
+	// #7662 ??-family reads (GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION,
+	// GEMINI_SANDBOX_IMAGE, SEATBELT_PROFILE).
+	tmux.ProgramGemini: geminiBundleFirstPartyReasserts(),
 }
 
 // credentialMountSharedKeptNames records the COMMON-allowlist names
