@@ -914,14 +914,31 @@ func claudeLaunchDialogComposerBelow(pane claudeLaunchDialogPane, from int) bool
 		}
 		text := claudeLaunchDialogRowText(pane, content)
 		option := claudeMCPTrustOrdinalWord(text)
+		// The inline pair labels (claudeLegacyInlinePair,
+		// claudeLegacyInlineOrdinalPair) also match a boxed composer's ❯
+		// draft that quotes "1. Yes  2. No" (squashed "Yes2.No"):
+		// claudeComposersCanonical leaves such a composer on screen, since its
+		// prompt could be a dialog's option, so accept those labels only when
+		// this row is not a boxed composer's prompt — its opening frame edge
+		// sits above it (a closing edge alone is a stale frame above a live
+		// dialog, which still holds). Detecting the composer stops the live
+		// composer row being read as the dialog's option (#7661 review).
+		acceptInlinePair := !(i > 0 && claudeTrustFrameRule(pane.lines[i-1]) &&
+			!claudeTrustFrameClosingRule(pane.lines[i-1]))
 		for _, label := range []string{
 			claudeSquash(claudeLegacyTrustProceedLabel),
 			claudeSquash(claudeFolderTrustExitLabel),
 			"Yes", "No",
-			claudeSquash(claudeLegacyInlinePairText),
-			claudeSquash(claudeLegacyInlineOrdinalPairText),
 		} {
 			option = option || (text != "" && strings.HasPrefix(label, text))
+		}
+		if acceptInlinePair {
+			for _, label := range []string{
+				claudeSquash(claudeLegacyInlinePairText),
+				claudeSquash(claudeLegacyInlineOrdinalPairText),
+			} {
+				option = option || (text != "" && strings.HasPrefix(label, text))
+			}
 		}
 		if !option {
 			return true

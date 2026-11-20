@@ -308,6 +308,31 @@ func TestCheckAndHandleTrustPrompt_InlinePairComposerDraftStaysClear(t *testing.
 	}
 }
 
+// TestCheckAndHandleTrustPrompt_InlinePairOrdinalComposerDraftUnderWrappedQuestionStaysClear
+// pins the wrapped-question branch (claudeLaunchDialogPainting via
+// claudeLaunchDialogComposerBelow) against a boxed composer whose ❯ draft
+// quotes the inline pair with its No ordinal ("1. Yes  2. No"). claudeComposersCanonical
+// leaves such a composer on screen — its prompt could be a dialog's option — so the
+// squashed draft "Yes2.No" matched the inline-pair label this matcher accepts and
+// the live composer row read as the dialog's option, holding a working agent (#7661
+// review). The composer under the wrapped question must keep reading clear.
+func TestCheckAndHandleTrustPrompt_InlinePairOrdinalComposerDraftUnderWrappedQuestionStaysClear(t *testing.T) {
+	wrapped := "Do you trust the\nfiles in this\nfolder?"
+	for _, boxed := range []bool{true} {
+		for _, prompt := range []string{"❯ ", "❯\u00a0"} {
+			for _, draft := range []string{"1. Yes  2. No", "Yes  No"} {
+				composer := drawnComposer(40, prompt, []string{draft}, boxed)
+				content := wrapped + "\n" + strings.Join(composer, "\n")
+				handled, cmds := pollStaticPane(t, content, 4)
+				require.Falsef(t, handled,
+					"a boxed composer draft %q under a wrapped question is not the legacy picker:\n%s", draft, content)
+				require.Emptyf(t, sentKeystrokes(cmds),
+					"no key may reach a working composer; got %v", cmds)
+			}
+		}
+	}
+}
+
 // TestCheckAndHandleTrustPrompt_InlinePairQuotedAboveAComposerStaysClear
 // pins the larger #7584 guarantee with the inline pair: a draft quoting the
 // pair (or the dialog's question + pair, or the block on one row) drawn
