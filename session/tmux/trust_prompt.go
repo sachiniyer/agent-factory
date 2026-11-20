@@ -188,6 +188,15 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() (held bool) {
 		if claudeFolderTrustQuestionPaintingOf(screen) {
 			return true
 		}
+		// A folder-trust dialog, reworded or legacy, that a pane shows only a
+		// remnant of (#7618): its guide row, what a pane too narrow or too
+		// short leaves of its option rows, and its footer; or the dialog with
+		// an exit notice where its footer was. Asked last of all: it only
+		// turns a clear pane into a hold.
+		if remnant := claudeLaunchDialogRemnantOf(screen); remnant != claudeLaunchDialogRemnantNone {
+			t.refuseClaudeLaunchDialogRemnant(remnant)
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//

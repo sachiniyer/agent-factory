@@ -1,0 +1,59 @@
+ code, a
+ well-known
+ open source
+ project, or
+ work from
+ your team).
+ If not, take
+ a moment to
+ review what's
+ in this
+ folder first.
+
+ Claude
+ Code'll be
+ able to read,
+ edit, and
+ execute files
+ here.
+
+ [1m[38;5;220m⚠[0m [1m[38;5;220mThis[0m [1m[38;5;220mfolder
+[0m [1m[38;5;220mpre-approves
+[0m [1m[38;5;220m3[0m [1m[38;5;220mtool
+[0m [1m[38;5;220mpermissions
+[0m [1m[38;5;220min[0m [1m[38;5;220m.claude/se
+[0m [1m[38;5;220mttings.json:
+[0m   Bash(ls:*),
+ Bash(git
+ status), and
+ Read
+ [1m[38;5;220m⚠[0m [1m[38;5;220mThis[0m [1m[38;5;220mfolder
+[0m [1m[38;5;220madds[0m [1m[38;5;220m2
+[0m [1m[38;5;220mdirectories
+[0m [1m[38;5;220mto[0m [1m[38;5;220mthe
+[0m [1m[38;5;220mworkspace[0m [1m[38;5;220min
+[0m [1m[38;5;220m.claude/setti
+[0m [1m[38;5;220mngs.json:
+
+[0m /tmp/extra-a
+ and
+ /tmp/extra-b
+ [38;5;246mThese[39m [38;5;246mwill
+[39m [38;5;246mapply[39m [38;5;246mwithout
+[39m [38;5;246masking.[39m [38;5;246mOnly
+[39m [38;5;246mproceed[39m [38;5;246mif
+[39m [38;5;246myou[39m [38;5;246mtrust
+[39m [38;5;246mthis[39m [38;5;246mconfigur
+[39m [38;5;246mation.
+
+[39m [38;5;246mSecurity
+[39m [38;5;246mguide
+
+[39m [38;5;153m❯[39m [38;5;246m1.[38;5;153mYes,[39m [38;5;153mI
+[39m     [38;5;153mtrust[39m [38;5;153mthis
+[39m     [38;5;153mfolder
+[39m   [38;5;246m2.[39m No, exit
+
+ [38;5;246mEnter[39m [38;5;246mto
+[39m [38;5;246mconfirm[39m [38;5;246m·[39m [38;5;246mEsc
+[39m [38;5;246mto[39m [38;5;246mcancel
