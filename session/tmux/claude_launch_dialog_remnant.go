@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -17,12 +18,12 @@ import (
 //     question, the body and the footer still re-wrap cleanly around them. So
 //     no reader found an option label above the footer, and Claude Code
 //     2.1.328 on a pane of six to nine rows, which paints the cursor's
-//     "No, exit" row alone, read the same way (claudeLaunchDialogUnderGuide).
+//     "No, exit" row alone, read the same way (claudeLaunchDialogUnderGuideOf).
 //   - After one Ctrl-C the dialog's footer row reads "Press Ctrl-C again to
 //     exit" for a moment. The reworded grammar holds that row
 //     (claudeFolderTrustBroken); the legacy grammar read it as a row the
 //     dialog never paints, and the pane as no dialog
-//     (claudeLaunchDialogPendingExit).
+//     (claudeLaunchDialogPendingExitOf).
 //   - A pane too small for anything but the end of the dialog's footer shows
 //     "· Esc" over "to" over "cancel" and nothing else
 //     (claudeLaunchDialogFooterTail).
@@ -78,22 +79,59 @@ var claudeLaunchDialogOptionBlocks = []string{
 	claudeSquash("1. " + claudeLegacyTrustProceedLabel + " 2. " + claudeFolderTrustExitLabel),
 }
 
-// claudeLaunchDialogRemnantOf reports a folder-trust dialog the pane shows a
-// remnant of, in any of the shapes above.
-func claudeLaunchDialogRemnantOf(screen visibleText) claudeLaunchDialogRemnantKind {
-	if claudeLaunchDialogUnderGuide(screen) {
-		return claudeLaunchDialogRemnantUnderGuide
-	}
-	if claudeLaunchDialogPendingExit(screen) {
-		return claudeLaunchDialogRemnantPendingExit
-	}
-	if claudeLaunchDialogFooterTail(screen) {
-		return claudeLaunchDialogRemnantFooterTail
-	}
-	return claudeLaunchDialogRemnantNone
+// claudeLaunchDialogRemnant is what the remnant reader saw.
+type claudeLaunchDialogRemnant struct {
+	kind claudeLaunchDialogRemnantKind
+	// folder: the pane proves the dialog is the folder-trust one. It shows
+	// the dialog's guide row or the end of it, a footer only that dialog
+	// paints ("Esc to exit"), or, behind an exit notice, rows a folder-trust
+	// reader reads. Without one of those the pane shows only what the MCP
+	// server dialog paints too: its footer is the reworded folder-trust
+	// footer word for word (claudeMCPServerFooter), and a few characters of an
+	// option row name no dialog. af holds either way; it names the dialog
+	// only when the pane does (#7663).
+	folder bool
 }
 
-// claudeLaunchDialogUnderGuide reports a pane whose content ends with the
+// claudeLaunchDialogRemnantOf reports a launch dialog the pane shows a remnant
+// of, in any of the shapes above.
+func claudeLaunchDialogRemnantOf(screen visibleText) claudeLaunchDialogRemnantKind {
+	return claudeLaunchDialogRemnantRead(screen).kind
+}
+
+// claudeLaunchDialogRemnantRead is claudeLaunchDialogRemnantOf with whether
+// the pane proves which dialog it shows.
+//
+// The pane is split into rows once, and each reading reads those rows (#7663).
+func claudeLaunchDialogRemnantRead(screen visibleText) claudeLaunchDialogRemnant {
+	pane := claudeLaunchDialogPaneOf(screen)
+	if held, guided := claudeLaunchDialogUnderGuideOf(pane); held {
+		return claudeLaunchDialogRemnant{claudeLaunchDialogRemnantUnderGuide, guided || claudeLaunchDialogLegacyFooterLast(pane)}
+	}
+	if held, folder := claudeLaunchDialogPendingExitOf(pane); held {
+		return claudeLaunchDialogRemnant{claudeLaunchDialogRemnantPendingExit, folder}
+	}
+	if claudeLaunchDialogFooterTail(pane) {
+		return claudeLaunchDialogRemnant{claudeLaunchDialogRemnantFooterTail, claudeLaunchDialogLegacyFooterLast(pane)}
+	}
+	return claudeLaunchDialogRemnant{}
+}
+
+// claudeLaunchDialogLegacyFooterLast reports whether the pane's text ends
+// with the footer only the folder-trust dialog paints, "Esc to exit", read
+// back as far as the pane shows it and for three words at least.
+func claudeLaunchDialogLegacyFooterLast(pane claudeLaunchDialogPane) bool {
+	text := pane.text
+	footer := claudeSquash(claudeLegacyTrustFooter)
+	if len(text) > len(footer) {
+		text = text[len(text)-len(footer):]
+	}
+	words := strings.Fields(claudeLegacyTrustFooter)
+	least := strings.Join(words[len(words)-claudeLaunchDialogFooterTailMinWords:], "")
+	return len(text) >= len(least) && strings.HasSuffix(footer, text)
+}
+
+// claudeLaunchDialogUnderGuideOf reports a pane whose content ends with the
 // bottom of a folder-trust dialog as a pane too narrow or too short for its
 // option rows leaves it. Read with every space and break removed
 // (claudeSquash), from some row down to the last content the pane's text is
@@ -123,8 +161,16 @@ func claudeLaunchDialogRemnantOf(screen visibleText) claudeLaunchDialogRemnantKi
 // composer is the last thing in its pane, so a dialog quoted above one has the
 // composer's rows after its footer, and a plain rule from the guide row down,
 // which only a composer draws, keeps the pane clear.
-func claudeLaunchDialogUnderGuide(screen visibleText) bool {
-	pane := claudeLaunchDialogPaneOf(screen)
+//
+// guided is whether the dialog's guide row, or the end of it, is on the pane.
+// Only the folder-trust dialog paints that row.
+//
+// Its work is linear in the pane (#7663). Each row above the footer costs a
+// prefix comparison; the option characters are compared only when they are no
+// longer than an option block; a bracketed URL's end is looked up in an index
+// built once; and the first guide row whose option characters read decides
+// the rule check for every row above it.
+func claudeLaunchDialogUnderGuideOf(pane claudeLaunchDialogPane) (held, guided bool) {
 	end := -1
 	for _, footer := range claudeLaunchDialogFooters {
 		if strings.HasSuffix(pane.text, footer) {
@@ -132,12 +178,15 @@ func claudeLaunchDialogUnderGuide(screen visibleText) bool {
 		}
 	}
 	if end <= 0 {
-		return false
+		return false, false
 	}
 	footerRow, ok := pane.rowStart(end)
-	if !ok || claudeLaunchDialogAnySelected(pane, footerRow, len(pane.starts)) || claudeLaunchDialogBoxClosesLast(screen) {
-		return false
+	if !ok || claudeLaunchDialogAnySelected(pane, footerRow, len(pane.starts)) ||
+		claudeLaunchDialogFooterInClosedBox(pane, footerRow) {
+		return false, false
 	}
+	var closes []int // offsets of every ")" before the footer, built on first use
+	closesBuilt := false
 	for guide := footerRow - 1; guide >= 0; guide-- {
 		if pane.rows[pane.index[guide]].selected {
 			continue
@@ -148,35 +197,47 @@ func claudeLaunchDialogUnderGuide(screen visibleText) bool {
 			if !ok {
 				continue
 			}
-			if rest, bracketed := strings.CutPrefix(options, "("); bracketed {
-				_, after, closed := strings.Cut(rest, ")")
-				if !closed {
+			if strings.HasPrefix(options, "(") {
+				if !closesBuilt {
+					closesBuilt = true
+					for at := 0; at < end; at++ {
+						if pane.text[at] == ')' {
+							closes = append(closes, at)
+						}
+					}
+				}
+				from := pane.starts[guide] + len(row) + 1
+				next := sort.SearchInts(closes, from)
+				if next == len(closes) {
 					continue
 				}
-				options = after
+				options = pane.text[closes[next]+1 : end]
 			}
-			if claudeLaunchDialogOptionsRemnant(options) && !claudeLaunchDialogRuleFrom(pane, pane.index[guide]) {
-				return true
+			if !claudeLaunchDialogOptionsRemnant(options) {
+				continue
 			}
+			// A plain rule from this row down is one from every row above
+			// it down too, and from the top of the pane: no reading is left.
+			return !claudeLaunchDialogRuleFrom(pane, pane.index[guide]), true
 		}
 	}
 	// No whole guide row: the option rows are the first content the pane
 	// shows, or the end of the guide row the top of the pane cut is.
 	if claudeLaunchDialogRuleFrom(pane, 0) {
-		return false
+		return false, false
 	}
 	head := strings.ReplaceAll(pane.text[:end], "\u200b", "")
 	if claudeLaunchDialogOptionsRemnant(head) {
-		return true
+		return true, false
 	}
 	for _, row := range claudeLaunchDialogGuideRowsWhole {
 		for cut := 1; cut < len(row); cut++ {
 			if options, ok := strings.CutPrefix(head, row[cut:]); ok && claudeLaunchDialogOptionsRemnant(options) {
-				return true
+				return true, true
 			}
 		}
 	}
-	return false
+	return false, false
 }
 
 // claudeLaunchDialogOptionsRemnant reports whether text is what a pane leaves
@@ -187,7 +248,9 @@ func claudeLaunchDialogOptionsRemnant(text string) bool {
 		return false
 	}
 	for _, block := range claudeLaunchDialogOptionBlocks {
-		if claudeCharactersOf(text, block) {
+		// A block is ASCII, so text longer than it in bytes holds a
+		// character the block lacks or more of one than it has.
+		if len(text) <= len(block) && claudeCharactersOf(text, block) {
 			return true
 		}
 	}
@@ -239,31 +302,48 @@ func claudeLaunchDialogFooterEnd(text string) bool {
 // The whole footer alone reads this way too, on the rows a narrow pane wraps
 // it onto. No ❯ row and no plain rule may be on the pane: a working agent's
 // composer paints both, and a pane that shows a composer shows more than this.
-// Nor may a box's bottom edge be the last thing painted
-// (claudeLaunchDialogBoxClosesLast).
-func claudeLaunchDialogFooterTail(screen visibleText) bool {
-	pane := claudeLaunchDialogPaneOf(screen)
-	if !claudeLaunchDialogFooterEnd(pane.text) || claudeLaunchDialogBoxClosesLast(screen) ||
+// Nor may the footer sit inside a box that closes under it
+// (claudeLaunchDialogFooterInClosedBox).
+func claudeLaunchDialogFooterTail(pane claudeLaunchDialogPane) bool {
+	if !claudeLaunchDialogFooterEnd(pane.text) || claudeLaunchDialogFooterInClosedBox(pane, 0) ||
 		claudeLaunchDialogAnySelected(pane, 0, len(pane.starts)) || claudeLaunchDialogRuleFrom(pane, 0) {
 		return false
 	}
 	return true
 }
 
-// claudeLaunchDialogBoxClosesLast reports whether the last painted line of the
-// pane is a box's bottom edge. No build paints its footer inside a box: 2.0.25,
-// the one that boxes the dialog, paints the footer under the box
-// (testdata/claude_2_0_25_legacy_folder_trust_dialog.ansi). A footer with a
-// box closing under it is text in a boxed composer's draft whose prompt row
-// has scrolled off, and a hold for a quoted draft is #7648's to decide.
-func claudeLaunchDialogBoxClosesLast(screen visibleText) bool {
-	lines := screen.lines()
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) != "" {
-			return claudeTrustFrameClosingRule(lines[i])
+// claudeLaunchDialogFooterInClosedBox reports whether the footer that begins
+// on content row footerRow sits inside a box that closes under it: the last
+// painted line of the pane is a box's bottom edge, and every line from the
+// footer's first down to that edge carries the box's sides.
+//
+// No build paints its footer inside a box: 2.0.25, the one that boxes the
+// dialog, paints the footer under the box
+// (testdata/claude_2_0_25_legacy_folder_trust_dialog.ansi). A footer inside a
+// box that closes under it is text in a boxed composer's draft whose prompt
+// row has scrolled off, and a hold for a quoted draft is #7648's to decide.
+//
+// A bottom edge alone excuses nothing (#7663): a footer whose own rows carry
+// no sides is not in the box that edge closes, and the pane still shows the
+// dialog's remnant above a stray edge.
+func claudeLaunchDialogFooterInClosedBox(pane claudeLaunchDialogPane, footerRow int) bool {
+	if footerRow >= len(pane.index) {
+		return false
+	}
+	edge := len(pane.lines) - 1
+	for edge >= 0 && strings.TrimSpace(pane.lines[edge]) == "" {
+		edge--
+	}
+	first := pane.index[footerRow]
+	if edge <= first || !claudeTrustFrameClosingRule(pane.lines[edge]) {
+		return false
+	}
+	for i := first; i < edge; i++ {
+		if !claudeTrustBordered(pane.lines[i]) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // claudeLaunchDialogPendingExitMaxKey bounds the key name in "Press <key>
@@ -271,7 +351,11 @@ func claudeLaunchDialogBoxClosesLast(screen visibleText) bool {
 // paints.
 const claudeLaunchDialogPendingExitMaxKey = 12
 
-// claudeLaunchDialogPendingExit reports a folder-trust dialog whose footer row
+// claudeLaunchDialogPendingExitMaxNotice is the longest notice the reader
+// accepts, squashed: "Press", the longest key, "againtoexit".
+const claudeLaunchDialogPendingExitMaxNotice = len("Press") + claudeLaunchDialogPendingExitMaxKey + len("againtoexit")
+
+// claudeLaunchDialogPendingExitOf reports a folder-trust dialog whose footer row
 // reads "Press <key> again to exit": one exit key was pressed in the pane, and
 // Claude Code shows the notice where the footer was until the press times out
 // (#7275 review).
@@ -280,7 +364,7 @@ const claudeLaunchDialogPendingExitMaxKey = 12
 // several. The pane with those rows read as a whole footer, each of the two
 // the dialogs paint in turn, must then be one a folder-trust reader that reads
 // a dialog to the bottom of the pane answers or holds: the legacy grammar,
-// the re-wrap matcher, the headless readers, or claudeLaunchDialogUnderGuide.
+// the re-wrap matcher, the headless readers, or claudeLaunchDialogUnderGuideOf.
 // So the notice proves nothing alone, and every guard those readers keep
 // against a quoted dialog applies here unchanged.
 //
@@ -290,38 +374,41 @@ const claudeLaunchDialogPendingExitMaxKey = 12
 // except the bottom edge of its own box, which holds no prompt row. So a
 // notice straight under a composer's closing line is the composer's, and the
 // pane stays clear.
-func claudeLaunchDialogPendingExit(screen visibleText) bool {
-	lines := screen.lines()
-	rows := make([]claudeTrustRow, len(lines))
-	last := -1
-	for i, line := range lines {
-		rows[i] = claudeTrustRowOf(line)
-		if !rows[i].blank {
-			last = i
-		}
+//
+// folder is whether the rows above the notice prove the dialog is the
+// folder-trust one.
+//
+// It reads up from the pane's last row for the notice, and stops once the rows
+// read are longer than any notice it accepts
+// (claudeLaunchDialogPendingExitMaxNotice): rows above only make the text
+// longer. So the walk is bounded by the notice, and the reading is linear in
+// the pane (#7663).
+func claudeLaunchDialogPendingExitOf(pane claudeLaunchDialogPane) (held, folder bool) {
+	lines, rows := pane.lines, pane.rows
+	if len(pane.index) == 0 {
+		return false, false
 	}
-	if last < 0 {
-		return false
-	}
+	last := pane.index[len(pane.index)-1]
+	notice := ""
 	for first := last; first >= 0 && !rows[first].blank && !rows[first].selected; first-- {
-		var notice strings.Builder
-		for i := first; i <= last; i++ {
-			notice.WriteString(claudeSquash(rows[i].label))
+		notice = claudeSquash(rows[first].label) + notice
+		if len(notice) > claudeLaunchDialogPendingExitMaxNotice {
+			return false, false
 		}
-		if !claudeLaunchDialogPendingExitNotice(notice.String()) {
+		if !claudeLaunchDialogPendingExitNotice(notice) {
 			continue
 		}
 		if claudeLaunchDialogNoticeUnderComposer(lines, rows, first) || !claudeLaunchDialogPaintedAbove(rows, first) {
-			return false
+			return false, false
 		}
 		for _, footer := range claudeTrustFooters {
-			if claudeFolderTrustReadToBottom(claudeLaunchDialogFooterInPlace(lines, first, last, footer)) {
-				return true
+			if held, folder := claudeFolderTrustReadToBottom(claudeLaunchDialogFooterInPlace(pane, first, last, footer)); held {
+				return true, folder
 			}
 		}
-		return false
+		return false, false
 	}
-	return false
+	return false, false
 }
 
 // claudeLaunchDialogPaintedAbove reports whether any row above line i is
@@ -376,16 +463,42 @@ func claudeLaunchDialogNoticeUnderComposer(lines []string, rows []claudeTrustRow
 
 // claudeLaunchDialogFooterInPlace is the pane with lines first to last, the
 // pending-exit notice, read as footer: the footer on the notice's first line,
-// at that line's indent, and the notice's other lines blank.
-func claudeLaunchDialogFooterInPlace(lines []string, first, last int, footer string) visibleText {
-	swapped := make([]string, len(lines))
-	copy(swapped, lines)
-	indent := lines[first][:len(lines[first])-len(strings.TrimLeft(lines[first], " "))]
-	swapped[first] = indent + footer
-	for i := first + 1; i <= last; i++ {
-		swapped[i] = ""
+// at that line's indent, and the notice's other lines blank. It returns that
+// screen and its rows, which are the pane's own down to the notice: only the
+// notice's lines are read again.
+func claudeLaunchDialogFooterInPlace(pane claudeLaunchDialogPane, first, last int, footer string) (visibleText, claudeLaunchDialogPane) {
+	swapped := claudeLaunchDialogPane{
+		lines: make([]string, len(pane.lines)),
+		rows:  make([]claudeTrustRow, len(pane.rows)),
 	}
-	return visibleText(strings.Join(swapped, "\n"))
+	copy(swapped.lines, pane.lines)
+	copy(swapped.rows, pane.rows)
+	line := pane.lines[first]
+	swapped.lines[first] = line[:len(line)-len(strings.TrimLeft(line, " "))] + footer
+	for i := first + 1; i <= last; i++ {
+		swapped.lines[i] = ""
+	}
+	for i := first; i <= last; i++ {
+		swapped.rows[i] = claudeTrustRowOf(swapped.lines[i])
+	}
+	// The content rows above the notice, then the lines just read.
+	above := sort.SearchInts(pane.index, first)
+	swapped.starts = append(swapped.starts, pane.starts[:above]...)
+	swapped.index = append(swapped.index, pane.index[:above]...)
+	text := pane.text
+	if above < len(pane.starts) {
+		text = text[:pane.starts[above]]
+	}
+	for i := first; i <= last; i++ {
+		if swapped.rows[i].blank {
+			continue
+		}
+		swapped.starts = append(swapped.starts, len(text))
+		swapped.index = append(swapped.index, i)
+		text += claudeSquash(swapped.rows[i].label)
+	}
+	swapped.text = text
+	return visibleText(strings.Join(swapped.lines, "\n")), swapped
 }
 
 // claudeFolderTrustReadToBottom reports whether a folder-trust reader that
@@ -393,42 +506,50 @@ func claudeLaunchDialogFooterInPlace(lines []string, first, last int, footer str
 // legacy grammar, the reworded dialog with its question scrolled off
 // (claudeFolderTrustHeadless and its siblings, which claudeFolderTrustDialogOf
 // reports as unreadable when no question is on screen), the re-wrap matcher on
-// a folder-trust dialog, or claudeLaunchDialogUnderGuide.
+// a folder-trust dialog, or claudeLaunchDialogUnderGuideOf.
 //
 // The reworded grammar's own region is left out on purpose. It already holds
 // a pending-exit notice under its options, so no such pane reaches this
 // reader; and it reads a footer below a composer as a dialog row painted after
 // the composer, which the notice in a composer's status row would become.
-func claudeFolderTrustReadToBottom(screen visibleText) bool {
+//
+// pane is screen's rows (claudeLaunchDialogPaneOf), which the caller has.
+// folder is whether what it read proves the dialog is the folder-trust one.
+// Every reader but the last reads rows only that dialog paints. The last,
+// claudeLaunchDialogUnderGuideOf, proves it by the guide row alone: the footer
+// on this screen is one the caller put there.
+func claudeFolderTrustReadToBottom(screen visibleText, pane claudeLaunchDialogPane) (held, folder bool) {
 	if claudeLegacyTrustDialogOf(screen) != claudeLegacyTrustNone {
-		return true
+		return true, true
 	}
-	lines := screen.lines()
-	rows := make([]claudeTrustRow, len(lines))
-	for i, line := range lines {
-		rows[i] = claudeTrustRowOf(line)
-	}
-	if _, _, question := claudeFolderTrustQuestionRows(rows); !question &&
+	if _, _, question := claudeFolderTrustQuestionRows(pane.rows); !question &&
 		claudeFolderTrustDialogOf(screen) == claudeFolderTrustUnreadable {
-		return true
+		return true, true
 	}
 	if match, held := claudeLaunchDialogRewrapOf(screen); held &&
 		(match.kind == claudeLaunchDialogReworded || match.kind == claudeLaunchDialogLegacy) {
-		return true
+		return true, true
 	}
-	return claudeLaunchDialogUnderGuide(screen)
+	return claudeLaunchDialogUnderGuideOf(pane)
 }
 
 // refuseClaudeLaunchDialogRemnant reports, once per dialog rather than once
-// per poll, a folder-trust dialog the remnant reader holds on.
-func (t *TmuxSession) refuseClaudeLaunchDialogRemnant(kind claudeLaunchDialogRemnantKind) {
+// per poll, a dialog the remnant reader holds on. It names the folder-trust
+// dialog only when the pane proves it is that one, and the launch gate's
+// dialogs otherwise.
+func (t *TmuxSession) refuseClaudeLaunchDialogRemnant(remnant claudeLaunchDialogRemnant) {
 	if t.claudeTrust.refusalLogged {
 		return
 	}
 	t.claudeTrust.refusalLogged = true
-	saw := "what a pane too narrow or too short leaves of its option rows, between its guide row and its footer"
+	name := claudeLaunchGateDialogName
+	saw := "what a pane too narrow or too short leaves of a dialog's option rows, over its footer"
+	if remnant.folder {
+		name = claudeFolderTrustDialogName
+		saw = "what a pane too narrow or too short leaves of its option rows, between its guide row and its footer"
+	}
 	remedy := "make the pane larger, or answer the dialog in the session"
-	switch kind {
+	switch remnant.kind {
 	case claudeLaunchDialogRemnantFooterTail:
 		saw = "nothing but the end of its footer"
 	case claudeLaunchDialogRemnantPendingExit:
@@ -437,5 +558,5 @@ func (t *TmuxSession) refuseClaudeLaunchDialogRemnant(kind claudeLaunchDialogRem
 	}
 	log.ErrorLog.Printf(
 		"refusing to answer the %s dialog for session %q: the pane shows %s; af will not press a key it cannot aim; %s",
-		claudeFolderTrustDialogName, t.sanitizedName, saw, remedy)
+		name, t.sanitizedName, saw, remedy)
 }
