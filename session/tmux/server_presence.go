@@ -571,6 +571,23 @@ func pidNoun(pids []string) string {
 // "a server is running", refuses the reset, and points `kill -USR1` at a process
 // that cannot recreate a server socket (Codex on #2956).
 //
+// The `: server` suffix, not the exact "tmux: server" string, admits a server
+// tmux started under a RENAMED argv[0]. On Linux tmux builds its task title
+// from getprogname(), which is argv[0], so `exec -a foo tmux` and a copy or
+// symlink named otherwise are titled `foo: server` (measured on tmux 3.4,
+// #7242, and documented in internal/proctree/tmuxidentity.go). An exact
+// "tmux: server" test dropped such a server at the entry point: its owner
+// never became a candidate, every enumerated one was ruled out, and the
+// socket-absent probe answered a determinate "unclaimed" (NoServerRunning
+// returned true) while the server and its panes were alive — so `af reset`'s
+// destructive cleanup proceeded against a still-running server, the exact
+// destruction class the socket-absent probe exists to prevent (#2875). The
+// suffix never matches a client: clients are "<name>: client". A non-tmux
+// process that happens to title itself "x: server" costs one per-server read
+// and then, because proctree.IsTmuxServer fails it, is remembered as an
+// unprobed possible owner — degrading the answer to "claimed" (unknown) and
+// REFUSING destructive cleanup, the prefilter's own declared safe direction.
+//
 // The bare "tmux" fallback is for builds and platforms that do not retitle. It
 // is EXACT, never a prefix, for the reason above: a prefix is what swallowed
 // the client.
@@ -580,7 +597,7 @@ func pidNoun(pids []string) string {
 // coarse prefilter for "could a server be alive"; proctree.IsTmuxServer decides
 // who is actually signalled.
 func isTmuxServerComm(comm string) bool {
-	return comm == "tmux: server" || comm == "tmux"
+	return comm == "tmux" || strings.HasSuffix(comm, ": server")
 }
 
 // absentTmuxSocketPath extracts the socket path from tmux's ENOENT diagnostic
