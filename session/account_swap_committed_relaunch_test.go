@@ -587,3 +587,61 @@ func TestCommittedSwapRelaunchRejudgesInsideTheFirstLooksBound(t *testing.T) {
 		inst.ToInstanceData().PendingAccountSwap.ResumeUnverifiedReason,
 		"the retry cut at the shared deadline is a blind verdict")
 }
+
+// #7602 review of #7596: the re-judge's select for a verdict against the
+// shared deadline must resolve the both-ready race — a verdict already
+// buffered in done when the deadline timer fires — deterministically in favor
+// of the answer, the way config/resolve.go, session/tmux/start.go, and
+// fsprobe's own waitForFlight do. Go's select chooses uniformly at random
+// among ready cases, so the plain two-arm select rejudgeRecordedClaude used
+// flipped a completed look's verdict to recordedClaudeBlind about half the
+// time the deadline fired as the verdict landed, which made the committed
+// re-launch blind---resume an id a clean look just proved unfiled (or resume a
+// thread the user abandoned). The verdict channel and the deadline timer here
+// are constructed directly so the both-ready state is arranged by the test,
+// not by the runner's scheduler: constructing it through rejudgeRecordedClaude
+// itself is not deterministic, because the re-judge's goroutine advances the
+// flight clock (and so fires the timer) inside its listing seam before it
+// deposits the verdict, so the timer is always ready before done.
+func TestRejudgeVerdictAtDeadlineHonorsACompletedVerdictRacingItsDeadline(t *testing.T) {
+	const runs = 200
+	// Every non-blind verdict a re-judge can return races the deadline this
+	// way; cover them all so the guard does not silently pass on a verdict
+	// the select's uniform-random pick never happened to reach.
+	verdicts := []recordedClaudeVerdict{
+		recordedClaudeResume,
+		recordedClaudeStartOn,
+		recordedClaudeAbandoned,
+	}
+	for n := 0; n < runs; n++ {
+		verdict := verdicts[n%len(verdicts)]
+		done := make(chan recordedClaudeVerdict, 1)
+		timer := make(chan time.Time, 1)
+		done <- verdict     // the re-judge's second look already answered
+		timer <- time.Now() // and the shared deadline already fired
+		require.Equal(t, verdict, rejudgeVerdictAtDeadline(done, timer),
+			"iteration %d: a verdict buffered when the deadline fires is honored, not blind", n)
+	}
+}
+
+// A second look still unanswered at the shared deadline is no look at all: its
+// verdict is the blind verdict its own timed-out listing would have made. The
+// deadline arm must not wait for a verdict that has not landed — only one
+// already buffered at the deadline is honored.
+func TestRejudgeVerdictAtDeadlineIsBlindWhenUnansweredAtDeadline(t *testing.T) {
+	done := make(chan recordedClaudeVerdict, 1)
+	timer := make(chan time.Time, 1)
+	timer <- time.Now()
+	require.Equal(t, recordedClaudeBlind, rejudgeVerdictAtDeadline(done, timer),
+		"a look still unanswered at the shared deadline is blind")
+}
+
+// A verdict that lands before the deadline is taken at once: the deadline has
+// not fired, so the select's done arm is the only ready one.
+func TestRejudgeVerdictAtDeadlineHonorsAVerdictThatLandsBeforeDeadline(t *testing.T) {
+	done := make(chan recordedClaudeVerdict, 1)
+	timer := make(chan time.Time, 1)
+	done <- recordedClaudeStartOn
+	require.Equal(t, recordedClaudeStartOn, rejudgeVerdictAtDeadline(done, timer),
+		"a verdict that lands before the deadline takes the launch's verdict")
+}
