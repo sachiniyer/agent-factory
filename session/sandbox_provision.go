@@ -7,14 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/unixurl"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -681,43 +679,29 @@ func (w *sandboxWorkspace) IdentityEnvPath() string { return w.SessionDir + "/" 
 // warnDiscardedAccountEnvNames reads the names-only report the identity
 // file's detection block wrote from the remote login environment and names
 // each remotely-set name the account boundary discarded, once, with the
-// same remedy the credential-mount path prints (#7668). Names only — the
-// file carries no values by construction, and a missing or unreadable
-// report just means nothing was discarded.
+// same remedy the credential-mount path prints (#7668). The report lives
+// where the sandbox can write, so the read-back is bounded (4 KB cap) and
+// only a name in the set af computed for THIS launch may reach the log —
+// a planted file can echo nothing else; the env file's `rm -f` already
+// made the report reflect this launch alone.
 func (w *sandboxWorkspace) warnDiscardedAccountEnvNames(timeout time.Duration) {
-	if _, _, ok := w.accountEnv(); !ok {
+	agent := w.spec.Account.Agent
+	discarded := discardSetForWarning(agent, w.spec.SessionEnvPassthrough)
+	if _, _, ok := w.accountEnv(); !ok || len(discarded) == 0 {
 		return
 	}
-	out, err := w.shell.Run(timeout, "cat "+shellQuote(w.DiscardedEnvReportPath()), nil, false)
+	out, err := w.shell.Run(timeout,
+		"head -c 4096 "+shellQuote(w.DiscardedEnvReportPath())+" 2>/dev/null", nil, false)
 	if err != nil {
 		return
 	}
 	var names []string
 	for _, name := range strings.Fields(string(out)) {
-		if envNameShaped(name) {
+		if _, member := discarded[name]; member {
 			names = append(names, name)
 		}
 	}
-	sort.Strings(names)
-	if len(names) > 0 {
-		log.WarningLog.Printf(
-			"backend=sandbox: account-scoped session discarded %d env name(s) the remote login environment had set for agent %q: %s — forward any the session needs through the global session_env_passthrough",
-			len(names), w.spec.Account.Agent, strings.Join(names, ", "))
-	}
-}
-
-// envNameShaped rejects report fields that cannot be environment names, so
-// a tampered or partial report cannot inject arbitrary text into the
-// warning (#7668 — names only ever reach the log).
-func envNameShaped(name string) bool {
-	for i, r := range name {
-		ok := r == '_' || '0' <= r && r <= '9' && i > 0 ||
-			'A' <= r && r <= 'Z' || 'a' <= r && r <= 'z'
-		if !ok {
-			return false
-		}
-	}
-	return name != ""
+	logDiscardedAccountEnvNames("sandbox", agent, "the remote login environment", names)
 }
 
 // DiscardedEnvReportPath is the names-only report accountScrubEnv's

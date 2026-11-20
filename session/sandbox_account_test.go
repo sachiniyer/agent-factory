@@ -627,7 +627,10 @@ func TestAccountScrubEnv_DiscardedReportIsNamesOnlyAndPrePin(t *testing.T) {
 			SessionEnvPassthrough: []string{"HTTPS_PROXY"}}}
 	scrub := w.accountScrubEnv()
 
-	// Structural: the detection block precedes the first pin it probes for.
+	// Structural: the detection block precedes the first pin it probes for,
+	// and clears any previous report before probing.
+	require.Less(t, strings.Index(scrub, "rm -f "), strings.Index(scrub, "${HTTP_PROXY+x}"),
+		"the report's rm precedes every probe — each launch reports its own launch")
 	require.Less(t, strings.Index(scrub, "${HTTP_PROXY+x}"), strings.Index(scrub, "\nHTTP_PROXY="),
 		"a ${NAME+x} probe must run before the pin — after it the answer is always 'set'")
 	require.Contains(t, scrub, "af-discarded-env.names")
@@ -642,6 +645,7 @@ func TestAccountScrubEnv_DiscardedReportIsNamesOnlyAndPrePin(t *testing.T) {
 		"HTTP_PROXY=" + secretProxy,
 		"GOOGLE_CLOUD_PROJECT=" + secretProject,
 		"HTTPS_PROXY=http://corp:3128", // forwarded → claimed, not a discard
+		"https_proxy=http://low:3128",  // unforwarded twin → reseated to $HTTPS_PROXY
 	}
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
@@ -653,8 +657,105 @@ func TestAccountScrubEnv_DiscardedReportIsNamesOnlyAndPrePin(t *testing.T) {
 	require.Contains(t, names, "GOOGLE_CLOUD_PROJECT")
 	require.NotContains(t, names, "HTTPS_PROXY",
 		"a forwarded name is claimed — never reported as discarded")
+	require.NotContains(t, names, "https_proxy",
+		"reseated to the forwarded twin's remote value — an operator value arrives")
 	for _, sentinel := range []string{secretProxy, secretProject} {
 		require.NotContains(t, string(report), sentinel,
 			"the report is names-only: a value must never reach it")
 	}
+}
+
+// A report left over from the session dir's previous life — or planted as a
+// symlink into something a credential read would follow — must never leak
+// into a later launch's notice: the env file's `rm -f` removes it before
+// probing, and a launch that drops nothing leaves no file at all (#7668
+// R3).
+func TestAccountScrubEnv_StaleOrSymlinkReportIsRemoved(t *testing.T) {
+	acct := writeAccount(t, "gemini", "gemini-cred")
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.txt")
+	require.NoError(t, os.WriteFile(victim, []byte("untouched"), 0o600))
+	reportPath := filepath.Join(dir, discardedEnvReportName)
+	require.NoError(t, os.Symlink(victim, reportPath))
+
+	w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: dir, program: "gemini",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
+	envFile := filepath.Join(dir, "af-identity.env")
+	require.NoError(t, os.WriteFile(envFile, []byte(w.accountScrubEnv()), 0o600))
+
+	// Nothing in this remote login environment is a discard, so the rm must
+	// be the only thing that touches the path: the symlink — and through it
+	// the victim — is gone or harmless, and no report exists afterwards.
+	cmd := exec.Command("sh", "-c", "set -a && . "+shellQuote(envFile)+" && set +a")
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	data, rerr := os.ReadFile(victim)
+	require.NoError(t, rerr)
+	require.Equal(t, "untouched", string(data), "the write must never go through a planted symlink")
+	_, statErr := os.Lstat(reportPath)
+	require.True(t, os.IsNotExist(statErr), "a launch with no discards leaves no report — stale content can never re-warn")
+}
+
+// The daemon-side read-back is the hostile half of R3: the report lives in
+// the session dir the sandbox can write, so anything in it that is not in
+// af's own per-launch discard set must never reach the log — token-shaped
+// fields, config-root names, forwarded names, or an oversized dump — and
+// removing the read-back must leave this test failing.
+func TestWarnDiscardedAccountEnvNames_ReportReadBackTrustsOnlyAfSet(t *testing.T) {
+	acct := writeAccount(t, "gemini", "gemini-cred")
+	dir := t.TempDir()
+	report := "ghp_FAKEtoken123 sk_live_abc123 hunter2 AKIAIOSFODNN7EXAMPLE " +
+		"GEMINI_CLI_HOME HTTPS_PROXY HTTP_PROXY " + strings.Repeat("X", 300000)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, discardedEnvReportName), []byte(report), 0o600))
+
+	w := &sandboxWorkspace{shell: localShell{}, SessionDir: dir, program: "gemini",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target,
+			SessionEnvPassthrough: []string{"HTTPS_PROXY"}}}
+	buf := captureWarningLog(t)
+	w.warnDiscardedAccountEnvNames(time.Minute)
+	out := buf.String()
+
+	require.Contains(t, out, "HTTP_PROXY",
+		"a report field that IS in af's computed set still warns — the read-back must run")
+	for _, foreign := range []string{
+		"ghp_FAKEtoken123", "sk_live_abc123", "hunter2", "AKIAIOSFODNN7EXAMPLE",
+		"GEMINI_CLI_HOME", "HTTPS_PROXY",
+	} {
+		require.NotContains(t, out, foreign,
+			"only names in this launch's computed set may reach the log")
+	}
+	require.Less(t, len(out), 8192, "the read-back is bounded: an oversized report cannot flood the log")
+}
+
+// The notice is scoped to gemini account sessions (#7668): a claude scope's
+// identity file carries no detection block and its launch warns nothing.
+func TestAccountScrubEnv_NoDetectionBlockForNonGemini(t *testing.T) {
+	acct := writeAccount(t, "claude", testSecretA)
+	w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "claude",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
+	require.NotContains(t, w.accountScrubEnv(), "af-discarded-env",
+		"the remote detection block is emitted for gemini account sessions only")
+}
+
+// The read-back is WIRED, not just callable: startAgentServer emits the
+// notice from the report the remote env file's detection block wrote.
+// Removing the call must fail this test — the launch itself can fail (no
+// af binary exists under localShell) and the warning still fires, exactly
+// like the mount path's warn-before-dependent-steps placement.
+func TestStartAgentServer_WarnsFromTheDiscardedReport(t *testing.T) {
+	acct := writeAccount(t, "gemini", "gemini-cred")
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, discardedEnvReportName),
+		[]byte("HTTP_PROXY GEMINI_API_KEY"), 0o600))
+	w := &sandboxWorkspace{shell: localShell{}, SessionDir: dir, tokenRef: "ref", agentServerToken: "tok", program: "gemini",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
+
+	buf := captureWarningLog(t)
+	_ = w.startAgentServer(time.Second) // the launch fails without an af binary; the notice must still fire
+	out := buf.String()
+	require.Contains(t, out, "HTTP_PROXY")
+	require.Contains(t, out, "account sessions always ignore",
+		"pinned names are named without the remedy that cannot restore them")
+	require.Contains(t, out, "GEMINI_API_KEY")
 }

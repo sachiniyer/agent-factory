@@ -562,14 +562,35 @@ func (w *sandboxWorkspace) accountScrubEnv() string {
 	// true — and it writes names only, never a value: a value could be a
 	// credential or an internal proxy address. The launch step reads the
 	// report back and names the names to the operator with the remedy.
-	discarded := sessionenv.AccountDiscardedEnvNames(w.spec.Account.Agent, w.spec.SessionEnvPassthrough)
-	if len(discarded) > 0 {
-		b.WriteString("( _af_dropped=\n")
-		for _, name := range discarded {
-			b.WriteString("[ -n \"${" + name + "+x}\" ] && _af_dropped=\"$_af_dropped " + name + "\"\n")
+	// `rm -f` first makes the report reflect THIS launch alone: it clears a
+	// stale file from the dir's previous life and a planted symlink alike
+	// (rm removes the link itself before `>` would follow it).
+	if discarded := sessionenv.AccountDiscardedEnvNames(w.spec.Account.Agent, w.spec.SessionEnvPassthrough); len(discarded) > 0 && w.spec.Account.Agent == discardedWarningAgent {
+		report := shellQuote(w.DiscardedEnvReportPath())
+		b.WriteString("( rm -f " + report + "; _af_dropped=\n")
+		// The twin claim the scrub below performs: an unforwarded proxy
+		// spelling whose case twin is forwarded is reseated to the twin's
+		// remote value, so its own value being replaced is only a discard
+		// when the twin has no remote value to deliver.
+		twins := make(map[string]string, 2*len(sessionenv.ProxyEnvCasePairs))
+		for _, pair := range sessionenv.ProxyEnvCasePairs {
+			twins[pair[0]] = pair[1]
+			twins[pair[1]] = pair[0]
 		}
-		b.WriteString("[ -n \"$_af_dropped\" ] && printf '%s\\n' \"$_af_dropped\" > " +
-			shellQuote(w.DiscardedEnvReportPath()) + "\n)\n")
+		forwarded := make(map[string]struct{}, len(w.spec.SessionEnvPassthrough))
+		for _, name := range w.spec.SessionEnvPassthrough {
+			forwarded[name] = struct{}{}
+		}
+		for _, name := range discarded {
+			probe := "[ -n \"${" + name + "+x}\" ]"
+			if twin, isPair := twins[name]; isPair {
+				if _, twinForwarded := forwarded[twin]; twinForwarded {
+					probe += " && [ ! -n \"$" + twin + "\" ]"
+				}
+			}
+			b.WriteString(probe + " && _af_dropped=\"$_af_dropped " + name + "\"\n")
+		}
+		b.WriteString("[ -n \"$_af_dropped\" ] && printf '%s\\n' \"$_af_dropped\" > " + report + "\n)\n")
 	}
 	// The valued names take their first-party default, not `NAME=`: they are
 	// `??`-family reads that treat defined-empty as a real broken value, so

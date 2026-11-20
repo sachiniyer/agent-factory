@@ -417,24 +417,39 @@ func (p *dockerProvisioner) warnBlankedCredentialNames() {
 
 // warnDiscardedAccountEnvNames is the account-scoped half of the same
 // notice (#7668): names the image's ENV or docker.run_args actually set
-// that the account boundary discards — the identity pins and fills plus
-// every keep-if-set name the operator did not forward — reported once,
-// names only, with the same remedy the mount path gives. Forwarded
-// keep-if-set names are the claim channel working, never a discard.
+// that THIS launch's pipeline will not deliver — the identity pins and
+// fills plus every keep-if-set name the operator did not forward — minus
+// the proxy case twins reseated to a forwarded sibling's value (the
+// operator's own value still arrives). Reported once, names only, with
+// the same remedy the mount path gives. The caller already printed the
+// inspect-failure line, which says run_args coverage alone is partial.
 func (p *dockerProvisioner) warnDiscardedAccountEnvNames(imageEnv []string, inspected bool) {
+	_ = inspected // the caller's single inspect-failure line covers the account case too
 	if p.spec.Account.Dir == "" {
 		return
 	}
-	if !inspected {
-		log.WarningLog.Printf(
-			"backend=docker: could not inspect the environment of the image the container runs — the discarded-env warning covers docker.run_args names only")
+	agent := p.spec.Account.Agent
+	discarded := discardSetForWarning(agent, p.spec.SessionEnvPassthrough)
+	if len(discarded) == 0 {
+		return
 	}
-	discarded := sessionenv.AccountDiscardedEnvNames(p.spec.Account.Agent, p.spec.SessionEnvPassthrough)
-	if named := credentialMountOverriddenWarning(imageEnv, p.runArgs, discarded); len(named) > 0 {
-		log.WarningLog.Printf(
-			"backend=docker: account-scoped session discarded %d env name(s) the image or docker.run_args had set for agent %q: %s — forward any the session needs through the global session_env_passthrough",
-			len(named), p.spec.Account.Agent, strings.Join(named, ", "))
+	var set []string
+	for name := range discarded {
+		set = append(set, name)
 	}
+	named := credentialMountOverriddenWarning(imageEnv, p.runArgs, set)
+	var kept []string
+	for _, name := range named {
+		// An unforwarded proxy spelling whose case twin was forwarded
+		// reseats to the twin's daemon-env value at the boundary — an
+		// operator value is delivered, so it is not a discard.
+		if sib, twin := sessionenv.ProxyEnvCaseTwin(name); twin &&
+			slices.Contains(p.spec.SessionEnvPassthrough, sib) && os.Getenv(sib) != "" {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	logDiscardedAccountEnvNames("docker", agent, "the image or docker.run_args", kept)
 }
 
 // dockerProvisioner holds the state of one container provisioning so its steps
