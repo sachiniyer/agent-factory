@@ -6,6 +6,7 @@ package session
 // can set, and the refusal's because-clause for every classified name.
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -23,40 +24,14 @@ import (
 // A || B || default leaves A free for the .env to claim if only B is
 // held (#7544).
 var credentialMountLoaderFilledNames = map[string]map[string]struct{}{
-	tmux.ProgramGemini: {
-		// getAuthTypeFromEnv is CLOUD_SHELL === "true" ||
-		// GEMINI_CLI_USE_COMPUTE_ADC === "true" — the auth source is
-		// pinned only when both selectors are; a defined-empty value fails
-		// each compare and the default source stands.
-		"GEMINI_CLI_USE_COMPUTE_ADC": {},
-		"CLOUD_SHELL":                {},
-		// The metadata host is GCE_METADATA_IP || GCE_METADATA_HOST ||
-		// HOST_ADDRESS — pinning only the second link leaves IP free for
-		// the .env to retarget the endpoint the ADC probe and token fetch
-		// dial; empty is falsy on either env link and falls back to
-		// HOST_ADDRESS, which is gcp-metadata's compiled constant
-		// 169.254.169.254 — a module constant, not an env read, so there is
-		// no third link for a .env to claim and nothing more to pin.
-		"GCE_METADATA_HOST": {},
-		"GCE_METADATA_IP":   {},
-		// DEBUG_AUTH, DETECT_GCP_RETRIES, and METADATA_SERVER_DETECTION are
-		// read by the bundled gcp-metadata / google-auth-library transports
-		// inside @google/gemini-cli 0.42.0, not gemini-cli's own source —
-		// so a source-tree measurement of the CLI misses them. None routes
-		// the credential, but each is dotenv-fillable and af left it
-		// unclaimed, so a .env setting DEBUG_AUTH would log the session's
-		// OAuth material. A defined-empty pin claims each for af (the .env
-		// loader finds it defined) and is inert: debug is off on "", and
-		// the gcp-metadata reads fall to their compiled defaults rather
-		// than dialing a repo-chosen host. An operator's forwarded value
-		// still survives (keep-if-set). GOOGLE_CLOUD_UNIVERSE_DOMAIN — the
-		// sibling bundled-transport read that DOES route the credential and
-		// reads through a nullish ?? — is re-asserted to its first-party
-		// default in credentialMountFirstPartyNames, not pinned empty here.
-		"DEBUG_AUTH":                {},
-		"DETECT_GCP_RETRIES":        {},
-		"METADATA_SERVER_DETECTION": {},
-	},
+	// The gemini set is DERIVED from the measured bundle artifact
+	// (internal/sessionenv/gemini_bundle_env.go, @google/gemini-cli
+	// 0.42.0): every entry whose account class is keep-if-set — the
+	// auth-source selectors, the metadata-endpoint pair, the gRPC proxy
+	// and trust-root names the #7659 review found (R1), the project-id
+	// chain twins (R2), and the rest of the .env-fillable surface (#7662).
+	// Completeness lives in that artifact and its tests, not here.
+	tmux.ProgramGemini: geminiBundleLoaderFilled(),
 }
 
 // credentialMountSharedGitEnvNames inject git configuration into every git
@@ -144,4 +119,61 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// accountLoaderBlankEntries returns the `-e NAME=` entries a docker account
+// session emits for loader-filled names the operator forwarded but did not
+// set: -e admits the name through the wrap's passthrough extras, and an
+// image ENV value that survived would reach ScopeAgentServerAccount reading
+// exactly like the operator's claim (#7555). The indexed pair names get the
+// same treatment because a forwarded GIT_CONFIG_COUNT animates whatever
+// GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* the image declared (#7582 review).
+// Every other forwarded name keeps master's contract: unset in the daemon
+// env means no -e at all, so the image's own value stands — blanking those
+// would eat legitimate image-supplied values like locale settings.
+//
+// On gemini the proxy spellings are loader-filled keep-if-set names now
+// (#7665), so a forwarded-but-unset HTTPS_PROXY does emit the blanking -e
+// and the image's proxy cannot reach the credential-bearing transport —
+// with one exception: a forwarded-but-unset proxy spelling whose case twin
+// is forwarded AND host-set reseats to the twin's value instead, because a
+// `NAME=` here reaches applyAccount indistinguishable from an explicit
+// empty and a lowercase-preferring reader would then disable the
+// operator's proxy (Codex P2 on a46bdbf91). A genuinely explicit empty —
+// the operator exported `NAME=` themselves — is "set" and keeps the
+// ordinary contract above. An unforwarded sibling's value is never af's to
+// copy.
+func accountLoaderBlankEntries(agent string, passthrough, source []string) []string {
+	values := make(map[string]string, len(source))
+	for _, entry := range source {
+		if name, v, ok := strings.Cut(entry, "="); ok {
+			values[name] = v
+		}
+	}
+	loaderNames := make(map[string]struct{})
+	for _, name := range sessionenv.AccountLoaderFilledNames(agent) {
+		loaderNames[name] = struct{}{}
+	}
+	var out []string
+	for _, name := range passthrough {
+		if _, set := values[name]; set {
+			continue
+		}
+		_, loader := loaderNames[name]
+		pair := len(loaderNames) > 0 &&
+			(strings.HasPrefix(name, "GIT_CONFIG_KEY_") ||
+				strings.HasPrefix(name, "GIT_CONFIG_VALUE_"))
+		if !loader && !pair {
+			continue
+		}
+		if sib, twin := sessionenv.ProxyEnvCaseTwin(name); twin &&
+			slices.Contains(passthrough, sib) {
+			if v, set := values[sib]; set {
+				out = append(out, name+"="+v)
+				continue
+			}
+		}
+		out = append(out, name+"=")
+	}
+	return out
 }

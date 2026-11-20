@@ -445,14 +445,14 @@ var credentialMountRoutingNames = map[string]map[string]struct{}{
 // by Docker's last-wins, and an operator's value still wins via passthrough
 // (#7531; GOOGLE_CLOUD_UNIVERSE_DOMAIN added in #7544 / #7582 review).
 var credentialMountFirstPartyNames = map[string]map[string]string{
-	tmux.ProgramGemini: {
-		// gemini-cli's compiled Code Assist endpoint
-		// (packages/core/src/code_assist/server.ts).
-		"CODE_ASSIST_ENDPOINT": "https://cloudcode-pa.googleapis.com",
-		// Bundled @google-cloud/logging `??` read whose result is the
-		// telemetry dial host — a repo .env retargets the credential.
-		"GOOGLE_CLOUD_UNIVERSE_DOMAIN": "googleapis.com",
-	},
+	// Derived from the measured bundle artifact: every gemini entry whose
+	// mount class is reassert — exactly CODE_ASSIST_ENDPOINT and
+	// GOOGLE_CLOUD_UNIVERSE_DOMAIN (#7531, #7544 / #7582 review). The #7665
+	// review narrowed the claim: no re-assert may weaken an
+	// operator-forwarded value or carry a version-specific constant, so
+	// GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION, GEMINI_SANDBOX_IMAGE, and
+	// SEATBELT_PROFILE leave scope as artifact waivers.
+	tmux.ProgramGemini: geminiBundleFirstPartyReasserts(),
 }
 
 // credentialMountSharedKeptNames records the COMMON-allowlist names
@@ -566,12 +566,7 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 // lowercase twin override a forwarded uppercase value). Forwarding either
 // spelling therefore exempts BOTH from the empty pin; pinning the twin of a
 // forwarded name could silently cancel the operator's proxy (#7529 R2).
-var credentialMountProxyCasePairs = [][2]string{
-	{"HTTP_PROXY", "http_proxy"},
-	{"HTTPS_PROXY", "https_proxy"},
-	{"ALL_PROXY", "all_proxy"},
-	{"NO_PROXY", "no_proxy"},
-}
+var credentialMountProxyCasePairs = sessionenv.ProxyEnvCasePairs
 
 // credentialMountTwinForwarding normalizes a name pair (proxy case
 // spellings, or a program-selector precedence group) so the unforwarded
@@ -945,9 +940,10 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 	// A forwarded proxy spelling claims its case twin too: emit the twin so the
 	// image's value for it cannot survive (the twin resolves to the forwarded
 	// value through dockerEnvironment's synthesized entries). Scoped to the
-	// credential-mount path — the normalization is part of the pins'
-	// contract, and an account or plain session's env stays byte-identical
-	// to before (#7529 R8).
+	// credential-mount path — on the account path the same rule lands at the
+	// account boundary instead, where applyAccount reseats the absent twin to
+	// the forwarded spelling's value (#7665), and a plain session's env stays
+	// byte-identical to before (#7529 R8).
 	if len(p.credentialMounts) > 0 {
 		twins, _ := credentialMountGroupForwarding(p.spec.SessionEnvPassthrough, source)
 		if len(twins) > 0 {
@@ -956,44 +952,8 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 		}
 	}
 	if p.spec.Account.Dir != "" {
-		// A loader-filled name the operator forwarded but did not set must
-		// still blank the image's value for it: -e admits the name through the
-		// wrap's passthrough extras, and an image ENV value that survived would
-		// reach ScopeAgentServerAccount reading exactly like the operator's
-		// claim (#7555). The indexed pair names get the same treatment because
-		// a forwarded GIT_CONFIG_COUNT animates whatever GIT_CONFIG_KEY_* or
-		// GIT_CONFIG_VALUE_* the image declared (#7582 review). Every other
-		// forwarded name keeps master's contract: unset in the daemon env means
-		// no -e at all, so the image's own value stands — blanking those would
-		// eat legitimate image-supplied values like proxy or locale settings.
-		present := make(map[string]struct{}, len(source))
-		for _, entry := range source {
-			if name, _, ok := strings.Cut(entry, "="); ok {
-				present[name] = struct{}{}
-			}
-		}
-		loaderNames := make(map[string]struct{})
-		for _, name := range sessionenv.AccountLoaderFilledNames(p.spec.Account.Agent) {
-			loaderNames[name] = struct{}{}
-		}
-		for _, name := range p.spec.SessionEnvPassthrough {
-			if _, ok := present[name]; ok {
-				continue
-			}
-			// The pair prefixes only matter where a forwarded GIT_CONFIG_COUNT
-			// is itself pinned keep-if-set — the agents with loader-filled
-			// names. On claude/codex account sessions master's contract stands:
-			// a forwarded-but-unset pair name emits no -e and the image's value
-			// fills, exactly as before (#7582 review).
-			_, loader := loaderNames[name]
-			pair := len(loaderNames) > 0 &&
-				(strings.HasPrefix(name, "GIT_CONFIG_KEY_") ||
-					strings.HasPrefix(name, "GIT_CONFIG_VALUE_"))
-			if !loader && !pair {
-				continue
-			}
-			names = append(names, name+"=")
-		}
+		names = append(names,
+			accountLoaderBlankEntries(p.spec.Account.Agent, p.spec.SessionEnvPassthrough, source)...)
 	}
 	return names
 }

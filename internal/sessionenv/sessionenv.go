@@ -250,8 +250,19 @@ var agentNames = map[string]map[string]struct{}{
 // application-default credential file and the project/location that scope it.
 // Shared by both selector entries below rather than written twice, so the two
 // modes can never drift into granting different things.
+//
+// The group is deliberately master's membership: the #7665 round-2 review
+// (R9) rejected widening it — the chain twins google-auth-library reads
+// (GCLOUD_PROJECT, the lowercase spellings, google_application_credentials,
+// GOOGLE_CLOUD_PROJECT_ID, GOOGLE_CLOUD_QUOTA_PROJECT) would have admitted
+// six ambient names master filtered on any plain session with the selector
+// forwarded, changing a Vertex user's project and quota header. Those names
+// are claimed by the loader/pin classes instead, where a forward still
+// reaches the agent through session_env_passthrough.
 var geminiCloudNames = nameSet(
-	"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	"GOOGLE_CLOUD_PROJECT",
+	"GOOGLE_CLOUD_LOCATION",
 )
 
 type conditionalNames struct {
@@ -435,6 +446,28 @@ func ImportNamesForCommand(source []string, agent, command string, extras []stri
 //
 // The set is derived from the name tables rather than listed, so a newly
 // rostered agent or cloud-mode group is covered without being remembered here.
+//
+// importedCredentialExemptNames below subtracts the names the round-2
+// #7665 review ruled out (R8): each is plausible operator-managed
+// deployment configuration — a project, credential-config root, proxy or
+// trust-root spelling, or a selector — so deleting it from the stored
+// option on every agent's launch would strip a hand-set value, the same
+// reasoning the common-admitted exemption inside the function applies.
+// The exempt set keeps this list equal to master's.
+var importedCredentialExemptNames = nameSet(
+	"grpc_proxy", "no_grpc_proxy",
+	"CLOUDSDK_CONFIG",
+	"GCLOUD_PROJECT", "gcloud_project", "google_cloud_project",
+	"google_application_credentials",
+	"GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_CLOUD_QUOTA_PROJECT",
+	"GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", "GRPC_SSL_CIPHER_SUITES",
+	"GOOGLE_API_CERTIFICATE_CONFIG",
+	"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
+	"GEMINI_TELEMETRY_USE_CLI_AUTH",
+	"GEMINI_DEFAULT_AUTH_TYPE",
+	"OTLP_GOOGLE_CLOUD_PROJECT", "_GEMINI_USER_GCP_PROJECT",
+)
+
 func ImportedCredentialNames() []string {
 	set := make(map[string]struct{})
 	for _, names := range agentNames {
@@ -461,6 +494,17 @@ func ImportedCredentialNames() []string {
 	}
 	for _, names := range accountLoaderFilledNames {
 		for name := range names {
+			// Names the COMMON ambient allowlist also admits (the generic
+			// proxy spellings, GITHUB_TOKEN) are plausible hand-set
+			// update-environment entries — routing config an operator
+			// legitimately leaves in the stored option, not credential
+			// residue the expansion could have planted. The strip's job is
+			// removing residue, so the common-admitted members keep their
+			// place in the operator's option; GITHUB_TOKEN is still dropped
+			// through the explicit credential list below (#7662).
+			if _, ambient := commonNames[name]; ambient {
+				continue
+			}
 			set[name] = struct{}{}
 		}
 	}
@@ -475,6 +519,18 @@ func ImportedCredentialNames() []string {
 		"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
 	} {
 		set[name] = struct{}{}
+	}
+	// The #7665 round-2 review (R8): the strip set must equal master's — a
+	// name added here deletes it from every agent's tmux
+	// update-environment, and each of these is plausible operator-managed
+	// deployment configuration (a project name, a credential-config root,
+	// a proxy or trust-root spelling) an operator can legitimately keep in
+	// the stored option, exactly the reasoning the common-admitted
+	// exemption above already applies. They are still pinned into the
+	// gemini panes af launches; the strip just does not touch the
+	// operator's stored option for them.
+	for name := range importedCredentialExemptNames {
+		delete(set, name)
 	}
 	out := make([]string, 0, len(set))
 	for name := range set {

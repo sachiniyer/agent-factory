@@ -555,8 +555,25 @@ func writeFileAtomic0600(path string, data []byte) error {
 // the 0600 identity file the launch shell sources — the docker backend's shape.
 func (w *sandboxWorkspace) accountScrubEnv() string {
 	var b strings.Builder
+	// The valued names take their first-party default, not `NAME=`: they are
+	// `??`-family reads that treat defined-empty as a real broken value, so
+	// blanking them here would break the agent exactly the way the class
+	// exists to prevent (#7531, #7662 — the remote file must say what
+	// ApplyAccount would install).
+	valued := sessionenv.AccountEnvironmentValues(w.spec.Account.Agent)
 	for _, name := range w.accountPinnedNames() {
+		if _, isValued := valued[name]; isValued {
+			continue
+		}
 		b.WriteString(name + "=\n")
+	}
+	valuedNames := make([]string, 0, len(valued))
+	for name := range valued {
+		valuedNames = append(valuedNames, name)
+	}
+	sort.Strings(valuedNames)
+	for _, name := range valuedNames {
+		b.WriteString(name + "=" + shellQuote(valued[name]) + "\n")
 	}
 	// The keep-if-set names are decided in the remote launch shell, where the
 	// forwarded value actually lives: a name the operator forwarded keeps
@@ -568,12 +585,44 @@ func (w *sandboxWorkspace) accountScrubEnv() string {
 	for _, name := range w.spec.SessionEnvPassthrough {
 		passthrough[name] = struct{}{}
 	}
+	// A forwarded proxy spelling claims its case twin too, exactly as
+	// applyAccount does on the local/docker paths (#7665): the twin is
+	// reseated to the forwarded spelling's value — after every loader line,
+	// so the expansion sees the kept value — rather than pinned empty where
+	// a lowercase-preferring reader would lose the operator's proxy.
+	twinOf := make(map[string]string, 2*len(sessionenv.ProxyEnvCasePairs))
+	for _, pair := range sessionenv.ProxyEnvCasePairs {
+		twinOf[pair[0]] = pair[1]
+		twinOf[pair[1]] = pair[0]
+	}
+	var reseat []string
 	for _, name := range sessionenv.AccountLoaderFilledNames(w.spec.Account.Agent) {
 		if _, forwarded := passthrough[name]; forwarded {
+			// A forwarded proxy spelling whose twin is also forwarded
+			// reseats to the twin's remote value rather than blanking —
+			// `NAME=` would reach applyAccount as an explicit empty and a
+			// lowercase-preferring reader would lose the operator's proxy
+			// (the docker-path fix's remote twin). A remote-defined twin —
+			// including a deliberate empty — is kept untouched.
+			if twin, isPair := twinOf[name]; isPair {
+				if _, twinForwarded := passthrough[twin]; twinForwarded {
+					b.WriteString("[ -n \"${" + name + "+x}\" ] || " + name + "=\"$" + twin + "\"\n")
+					continue
+				}
+			}
 			b.WriteString("[ -n \"${" + name + "+x}\" ] || " + name + "=\n")
-		} else {
-			b.WriteString(name + "=\n")
+			continue
 		}
+		if twin, isPair := twinOf[name]; isPair {
+			if _, twinForwarded := passthrough[twin]; twinForwarded {
+				reseat = append(reseat, name+"=\"$"+twin+"\"\n")
+				continue
+			}
+		}
+		b.WriteString(name + "=\n")
+	}
+	for _, line := range reseat {
+		b.WriteString(line)
 	}
 	return b.String()
 }

@@ -779,8 +779,12 @@ func TestImportedCredentialNamesCoversTheExpansionUniverse(t *testing.T) {
 	for _, name := range ImportedCredentialNames() {
 		set[name] = struct{}{}
 	}
+	exempt := importedCredentialExemptNames
 	for agent, names := range agentNames {
 		for name := range names {
+			if _, skip := exempt[name]; skip {
+				continue
+			}
 			if _, ok := set[name]; !ok {
 				t.Errorf("ImportedCredentialNames() omits %s agent name %s", agent, name)
 			}
@@ -789,6 +793,9 @@ func TestImportedCredentialNamesCoversTheExpansionUniverse(t *testing.T) {
 	for agent, groups := range conditionalAgentNames {
 		for _, group := range groups {
 			for name := range group.names {
+				if _, skip := exempt[name]; skip {
+					continue
+				}
 				if _, ok := set[name]; !ok {
 					t.Errorf("ImportedCredentialNames() omits %s conditional name %s", agent, name)
 				}
@@ -797,6 +804,9 @@ func TestImportedCredentialNamesCoversTheExpansionUniverse(t *testing.T) {
 	}
 	for agent, names := range accountLateEnvironmentNames {
 		for name := range names {
+			if _, skip := exempt[name]; skip {
+				continue
+			}
 			if _, ok := set[name]; !ok {
 				t.Errorf("ImportedCredentialNames() omits %s late-environment name %s", agent, name)
 			}
@@ -805,6 +815,11 @@ func TestImportedCredentialNamesCoversTheExpansionUniverse(t *testing.T) {
 	for name := range accountShellStartupNames {
 		if _, ok := set[name]; !ok {
 			t.Errorf("ImportedCredentialNames() omits shell startup hook %s", name)
+		}
+	}
+	for name := range exempt {
+		if _, ok := set[name]; ok {
+			t.Errorf("ImportedCredentialNames() strips plausible operator config %s (R8)", name)
 		}
 	}
 	for _, name := range []string{

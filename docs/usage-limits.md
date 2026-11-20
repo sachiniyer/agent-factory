@@ -487,38 +487,72 @@ replacement also excludes Docker and every off-box session; see
 
 **Environment names the agent's own loader can fill.** Gemini's `.env` loader
 walks up from the workspace and fills only names that are unset — so on an
-account-scoped gemini session, the names a checked-in `.env` could use to
-redirect the account's identity are pinned by af at the agent boundary:
-`CLOUD_SHELL`, `GEMINI_CLI_USE_COMPUTE_ADC`, `GCE_METADATA_IP`,
-`GCE_METADATA_HOST`, `GIT_CONFIG_COUNT`, and `GIT_CONFIG_PARAMETERS` (the
-CLI's own reads), and the bundled `gcp-metadata`/`google-auth-library`
-reads `DEBUG_AUTH`, `DETECT_GCP_RETRIES`, and `METADATA_SERVER_DETECTION`
-(read by library code the CLI ships, not gemini-cli's own source — a
-source-tree measurement of the CLI alone misses them; none routes the
-credential, but each is dotenv-fillable, so af pins it to keep a `.env`
-from claiming it). The pin
-is **keep-if-set**: a name the operator forwards through the global
-`session_env_passthrough` carries the operator's own value — that is the
-claim af exists to deliver — while a name the operator did not forward is
-installed defined-and-empty, so neither a workspace `.env` nor a repo- or
-image-supplied value can claim it. A forward is a real choice, not decoration:
-forwarding `CLOUD_SHELL` or `GEMINI_CLI_USE_COMPUTE_ADC` set true moves
-Gemini's authentication off the selected account onto the host's Compute ADC
-entirely, and a `GIT_CONFIG_*` forward lets the operator — not the repository
-— supply git config into the session.
+account-scoped gemini session, every name a checked-in `.env` could use to
+substitute, relocate, or route the mounted account's credential is claimed by
+af at the agent boundary. The claimed surface is not a prose list — prose
+completeness was falsified twice by reads that live in the libraries gemini
+bundles rather than its own source (#7655, the #7659 review). It is the
+checked artifact in `internal/sessionenv/gemini_bundle_env.go`: every
+environment read measured in `@google/gemini-cli@0.42.0` — the CLI's own
+reads plus `@grpc/grpc-js`, `google-auth-library`, `gcp-metadata`,
+`googleapis-common`, and `@google-cloud/logging` — classified on both
+defended paths or waived with a one-line reason, and pinned by test so a
+read that appears or disappears with a CLI version is a reviewed edit.
 
-Gemini's first-party endpoint overrides (`CODE_ASSIST_ENDPOINT`,
-`CODE_ASSIST_API_VERSION`, `GOOGLE_GEMINI_BASE_URL`,
-`GOOGLE_VERTEX_BASE_URL`, and the bundled-transport read
-`GOOGLE_CLOUD_UNIVERSE_DOMAIN`) are pinned on an account-scoped session too, but
-**unconditionally** rather than keep-if-set: the three names gemini reads with
-falsy checks are installed defined-and-empty (gemini then falls back to the
-first-party default), while `CODE_ASSIST_ENDPOINT` and
-`GOOGLE_CLOUD_UNIVERSE_DOMAIN` — which gemini and its bundled transports
-read with a nullish coalesce that would treat defined-empty as a real —
-broken — value (an endpoint, or the telemetry dial host
-`logging.<domain>`) — are dropped from the ambient environment and installed
-with that default instead.
+The largest class is **keep-if-set** — deployment configuration an operator
+may legitimately forward: the full proxy surface (`grpc_proxy`,
+`no_grpc_proxy`, `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`/`ALL_PROXY` and their
+lowercase twins — a present spelling claims its case twin with the same
+value rather than pinning it), the credential-transport trust roots
+(`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, `GRPC_SSL_CIPHER_SUITES`,
+`GOOGLE_API_CERTIFICATE_CONFIG`), the project and quota chains
+(`GCLOUD_PROJECT`/`GOOGLE_CLOUD_PROJECT` and their lowercase twins,
+`GOOGLE_CLOUD_PROJECT_ID`, `GOOGLE_CLOUD_QUOTA_PROJECT`,
+`OTLP_GOOGLE_CLOUD_PROJECT`, `_GEMINI_USER_GCP_PROJECT`), the auth-source,
+credential-config and metadata-endpoint reads (`CLOUD_SHELL`,
+`GEMINI_CLI_USE_COMPUTE_ADC`, `CLOUDSDK_CONFIG`,
+`GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES`, `GCE_METADATA_IP`,
+`GCE_METADATA_HOST`, `GEMINI_TELEMETRY_USE_CLI_AUTH`), the
+bundled detection reads (`DEBUG_AUTH`, `DETECT_GCP_RETRIES`,
+`METADATA_SERVER_DETECTION`), and af's own git-config defense
+(`GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`). A name the operator forwards
+through the global `session_env_passthrough` carries the operator's own
+value — that is the claim af exists to deliver — while a name the operator
+did not forward is installed defined-and-empty, so neither a workspace
+`.env` nor a repo- or image-supplied value can claim it. A forward is a
+real choice, not decoration: forwarding `CLOUD_SHELL` or
+`GEMINI_CLI_USE_COMPUTE_ADC` set true moves Gemini's authentication off the
+selected account onto the host's Compute ADC entirely, and a `GIT_CONFIG_*`
+forward lets the operator — not the repository — supply git config into the
+session. `GOOGLE_CLOUD_LOCATION` is not in this list: it is admitted
+through the conditional cloud-credential group only when the operator
+forwards `GOOGLE_GENAI_USE_VERTEXAI`/`GOOGLE_GENAI_USE_GCA`, exactly as
+before.
+
+Two smaller classes are claimed **unconditionally**, because an ambient
+value on the account-bound path is repo-influenced (the chosen image's ENV,
+`docker.run_args`) and can only compete with the mounted account — never a
+legitimate operator claim:
+
+- **Defined-and-empty pins** — the credential and auth-selector names whose
+  reads fall back safely on empty: `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
+  `GOOGLE_APPLICATION_CREDENTIALS` and its lowercase twin
+  `google_application_credentials` (google-auth-library's second link),
+  `GEMINI_DEFAULT_AUTH_TYPE`, the endpoint and API-version selectors
+  (`GOOGLE_GEMINI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`,
+  `CODE_ASSIST_API_VERSION`), and the cloud-mode selectors
+  (`GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_GENAI_USE_GCA`).
+- **First-party re-asserts** — names read through a nullish `??` that treats
+  defined-empty as a real, broken value: `CODE_ASSIST_ENDPOINT` and
+  `GOOGLE_CLOUD_UNIVERSE_DOMAIN` are installed with their first-party
+  defaults (`https://cloudcode-pa.googleapis.com`, `googleapis.com`). No
+  other name is re-asserted: a re-assert may never replace an
+  operator-forwarded value with a weaker or version-specific one, so
+  `SEATBELT_PROFILE`, `GEMINI_SANDBOX_IMAGE`, and
+  `GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION` are deliberately unclaimed —
+  they select a process wrapper or transport flag, not a proxy, trust
+  root, credential or project, so a forwarded or `.env` value reaches the
+  agent exactly as it does for any unclassified name.
 
 Where the keep-if-set test is evaluated is where the value lives, and that
 differs per backend:
@@ -531,16 +565,40 @@ differs per backend:
   indexed-pair name (`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`, which a forwarded
   count would activate) is emitted `-e NAME=` so an image `ENV` value cannot
   reach the agent as if it were the claim; then at the agent's own exec filter
-  the names still unset are pinned empty. Any other forwarded-but-unset name
+  any loader name that still arrives unforwarded is dropped before scoping and
+  pinned empty — an image `ENV` value for one is repo-influenced, not a claim.
+  Any other forwarded-but-unset name
   keeps the ordinary contract — no `-e`, so the image's own value stands.
-  `docker.run_args` entries naming any of the nine — or the indexed
+  `docker.run_args` entries naming a classified name — or the indexed
   `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pairs — are refused: forward the
   pairs through `session_env_passthrough` instead.
 - **SSH and sandbox** — in the remote launch shell, evaluated against the
   *remote* environment, because that is where a forwarded value lives. A name
   set remotely — including defined-empty — keeps its remote value; a forwarded
   name unset remotely is set empty there; an unforwarded name is pinned empty
-  unconditionally.
+  unconditionally. Re-asserted names are installed with their first-party
+  value, not an empty pin — a remote `NAME=` on a `??` read would define the
+  broken value the re-assert exists to avoid.
+
+What an account-scoped gemini session now ignores, and how to get each
+back when you meant it: a `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`,
+`GOOGLE_CLOUD_PROJECT_ID`, `GOOGLE_CLOUD_QUOTA_PROJECT`,
+`OTLP_GOOGLE_CLOUD_PROJECT`, `_GEMINI_USER_GCP_PROJECT`, or their lowercase
+twins set in the workspace `.env` — **including the account's own
+`~/.gemini/.env`** — no longer retargets the project the mounted
+credential bills against; name it in `session_env_passthrough` when a
+Workspace-licensed login genuinely needs it. The same holds for a
+`.env`-supplied `grpc_proxy`/`no_grpc_proxy` or any proxy spelling the
+shell did not already carry, the trust-root paths
+(`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, `GRPC_SSL_CIPHER_SUITES`,
+`GOOGLE_API_CERTIFICATE_CONFIG`), the credential-config root
+`CLOUDSDK_CONFIG`, the metadata endpoint pair `GCE_METADATA_IP` /
+`GCE_METADATA_HOST`, the executable-credential gate
+`GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES`, and
+`GEMINI_TELEMETRY_USE_CLI_AUTH`: forward through
+`session_env_passthrough`. On the credential-mount path the same names —
+plus the pinned credential and endpoint selectors — are refused when they
+appear in `docker.run_args`; the remedy is identical.
 
 `GIT_CONFIG` itself is deliberately not pinned: git reads a defined-empty
 value as a real config-file path and `git config` would break. On claude and
