@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
-	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 )
 
@@ -557,11 +556,12 @@ func TestOnlyServerProcessesCountAsALiveServer(t *testing.T) {
 		// keeping the answer "claimed" so reset refuses.
 		{"bx: server", true},
 		{"foo: server", true},
-		// The kernel keeps 15 bytes of task name, so a title longer than
-		// that is truncated — first inside the suffix, then past it entirely.
-		// Neither shape carries a comm a suffix predicate can see; the
-		// corroborated sibling isTruncatedTmuxServerTitle is what admits
-		// them, and its own test pins that admission.
+		// The kernel keeps 15 bytes of task name and tmux 3.5a then cuts the
+		// title at its last space, so a renamed server's title can end at a
+		// bare colon or hold no suffix at all — shapes no suffix predicate
+		// can see. Executable identity, asked in liveTmuxServerPIDs, is what
+		// admits them now; the fast path alone never does.
+		{"mediumtmux:", false},     // "mediumtmux: server (...)" space-cut to the bare colon
 		{"mediumtmux: ser", false}, // "mediumtmux: server" cut mid-suffix
 		{"verylongtmuxnam", false}, // "verylongtmuxname: server" past the suffix
 		{"gnome-terminal-", false}, // an ordinary long name, not a title
@@ -605,105 +605,63 @@ func spawnNamedSleeper(t *testing.T, binPath string, args ...string) int {
 	return c.Process.Pid
 }
 
-// #7689: the kernel keeps 15 bytes of task name, so a renamed server's
-// "<name>: server" title can carry no suffix at all. The fail-safe rule is
-// that a candidate is rejected only on conclusive evidence: a comm that is
-// not the truncation of its own argv[0]'s title proves the process is not a
-// retitled server — and that is all. argv tails are never conclusive: a
-// server's argv is its client's verbatim, so every spelling tmux's grammar
-// accepts (`start-server\; new-session`, quoting, aliases, option order) is
-// one a server keeps — a tail this predicate cannot classify stays a
-// candidate, which is the whole point of degrading to "claimed".
-func TestTruncatedServerTitlePrefilter(t *testing.T) {
+// #7689: candidacy comes from executable identity, not from spelling a
+// title. A process running the tmux binary af execs is a candidate
+// whatever its argv[0] or task name; the title fast path only ADMITS, and
+// the exe read can reject only conclusively — a different inode — or keep
+// the process when the read is refused. Every argv tail stays a candidate
+// for a tmux-exe process: a server's argv is its client's verbatim, so no
+// tail spelling can rule one out — and none is even consulted now.
+func TestLiveServerPrefilterDecidesByExecutableIdentity(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("the 15-byte comm ceiling and the retitle it cuts are Linux shapes")
+		t.Skip("the retitle spellings the prefilter works around are Linux shapes")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skipf("the exe comparison needs the tmux binary af would run: %v", err)
 	}
 	dir := t.TempDir()
 
-	// Three live same-uid processes named past the comm ceiling. Their
-	// kernel comms are all "verylongtmuxnam" — the first 15 bytes of each
-	// file name — and the truncated title of each argv[0] is the same, so
-	// each could be a retitled server. The tails deliberately span spellings
-	// no fixed grammar would all accept: a `;` command separator, a quoted
-	// session name, and a tail that is not a tmux invocation at all.
-	sepPID := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "verylongtmuxname")),
-		"-S", filepath.Join(dir, "s.sock"), "start-server;", "new-session", "-d")
-	quotedPID := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "verylongtmuxname2")),
-		"new-session", "-d", "-s", "af 'quoted session'")
-	weirdPID := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "verylongtmuxname3")),
-		"--definitely-not-tmux", "whatever")
-	// A name in the 8–14 band, where a partial ": server" survives
-	// truncation. The sleeper is not tmux and does not retitle, so the test
-	// supplies the comm a real server's prctl would have kept.
-	partialPID := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "mediumtmux")), "300")
-	// A twelve-character name, for the client's truncated title —
-	// "verylongname: c" — which is conclusive evidence of not-a-server.
-	clientPID := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "verylongname")), "300")
+	// Live same-uid processes on FOREIGN executables whose comms spell the
+	// shapes that used to keep them candidates — a 15-byte title lookalike,
+	// a space-truncated bare-colon title, an ordinary long name. The exe
+	// read now rules each out conclusively: the inode is the sleeper's, not
+	// tmux's. (Filenames may carry ':' and ' ', so the comm spellings are
+	// real file names.)
+	titleLookalike := spawnNamedSleeper(t,
+		sleeper.Named(t, filepath.Join(dir, "verylongtmuxnam")), "300")
+	bareColon := spawnNamedSleeper(t,
+		sleeper.Named(t, filepath.Join(dir, "mediumtmux:")), "300")
+	plainLong := spawnNamedSleeper(t,
+		sleeper.Named(t, filepath.Join(dir, "gnome-terminal-")), "300")
+	// The title fast path still admits: a comm that spells a server title
+	// is a candidate whatever its executable turns out to be — admitting
+	// too much is the prefilter's own safe direction, proctree.IsTmuxServer
+	// decides who is signalled.
+	serverTitled := spawnNamedSleeper(t,
+		sleeper.Named(t, filepath.Join(dir, "zz: server")), "300")
+	// tmux's own client title is the one conclusive comm: dropped before
+	// the exe read, which could only answer Same anyway — a client's exe
+	// IS the tmux binary.
+	clientTitled := spawnNamedSleeper(t,
+		sleeper.Named(t, filepath.Join(dir, "fake: client")), "300")
 
-	// A just-forked process can sit in the fork/exec window with an empty
-	// cmdline, which the predicate reads as "unreadable — admit". Wait for
-	// the real argv before asserting on it.
-	for _, pid := range []int{sepPID, quotedPID, weirdPID, partialPID, clientPID} {
-		deadline := time.Now().Add(5 * time.Second)
-		for len(proctree.Argv(pid)) == 0 {
-			if time.Now().After(deadline) {
-				t.Fatalf("sleeper %d's argv never became readable", pid)
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	// A zombie: its argv is provably unreadable — the admit-safe direction
-	// the prefilter declares for evidence it cannot get.
-	zombieCmd := exec.Command(sleeper.Named(t, filepath.Join(dir, "verylongtmuxname4")), "0.05")
-	if err := zombieCmd.Start(); err != nil {
-		t.Fatalf("start zombie sleeper: %v", err)
-	}
-	t.Cleanup(func() { _, _ = zombieCmd.Process.Wait() })
-	zombiePID := zombieCmd.Process.Pid
-	deadline := time.Now().Add(5 * time.Second)
-	for len(proctree.Argv(zombiePID)) != 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("zombie sleeper never reached the unreadable-argv state")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
+	pids := liveTmuxServerPIDs()
 	for _, tc := range []struct {
 		name string
-		p    proctree.Process
+		pid  int
 		want bool
 	}{
-		// Every argv tail stays a candidate: only the comm-versus-title
-		// comparison is conclusive, and each of these matches.
-		{"separator tail", proctree.Process{PID: sepPID, Comm: "verylongtmuxnam"}, true},
-		{"quoted tail", proctree.Process{PID: quotedPID, Comm: "verylongtmuxnam"}, true},
-		{"unrecognized tail", proctree.Process{PID: weirdPID, Comm: "verylongtmuxnam"}, true},
-		{"partial suffix band admits on comm alone", proctree.Process{PID: partialPID, Comm: "mediumtmux: ser"}, true},
-		{"unreadable argv admits", proctree.Process{PID: zombiePID, Comm: "verylongtmuxnam"}, true},
-		// Conclusive rejections.
-		{"comm is not the truncated title of this argv0", proctree.Process{PID: sepPID, Comm: "verylongtmuxnaX"}, false},
-		{"a client's truncated title is conclusive", proctree.Process{PID: clientPID, Comm: "verylongname: c"}, false},
-		{"kernel thread is never a retitled userspace server", proctree.Process{PID: sepPID, Comm: "verylongtmuxnam", KernelThread: true}, false},
-		{"comm under the ceiling is not this predicate's question", proctree.Process{PID: sepPID, Comm: "mediumtmux: se"}, false},
+		{"15-byte title lookalike on a foreign exe is ruled out", titleLookalike, false},
+		{"space-truncated bare-colon title on a foreign exe is ruled out", bareColon, false},
+		{"ordinary long name is ruled out", plainLong, false},
+		{"server title admits even on a foreign exe", serverTitled, true},
+		{"client title is conclusive and drops", clientTitled, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isTruncatedTmuxServerTitle(tc.p); got != tc.want {
-				t.Errorf("isTruncatedTmuxServerTitle(%+v) = %v, want %v", tc.p, got, tc.want)
+			if got := containsInt(pids, tc.pid); got != tc.want {
+				t.Errorf("liveTmuxServerPIDs() contains %d = %v, want %v", tc.pid, got, tc.want)
 			}
 		})
-	}
-
-	// The prefilter as the probe calls it: every one of the ceiling-named
-	// sleepers is a candidate — identical comms, and no tail rules one out.
-	if pids := liveTmuxServerPIDs(); !containsInt(pids, sepPID) ||
-		!containsInt(pids, quotedPID) || !containsInt(pids, weirdPID) {
-		t.Errorf("liveTmuxServerPIDs() = %v, want it to contain %d, %d and %d",
-			pids, sepPID, quotedPID, weirdPID)
 	}
 }
 
