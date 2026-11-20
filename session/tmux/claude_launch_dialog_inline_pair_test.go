@@ -194,22 +194,35 @@ func TestCheckAndHandleTrustPrompt_InlinePairFooterPaintingHolds(t *testing.T) {
 // claudeFolderTrustOptionsRead.
 func TestCheckAndHandleTrustPrompt_InlinePairRefusalNamesTheLegacyDialog(t *testing.T) {
 	for _, v := range inlineVariants {
-		t.Run(v.name, func(t *testing.T) {
-			_, _, errLog := captureTrustPromptLogs(t)
-			content := "Claude Code may read files in this folder.\n\n" +
-				strings.Join(legacyInlinePairOptionBlock(v.ordinal), "\n") + "\n\n" + legacyTrustFooter
-			handled, cmds := pollStaticPane(t, content, 4)
-			require.True(t, handled)
-			require.Empty(t, sentKeystrokes(cmds),
-				"af never answers a dialog it cannot read whole; got %v", cmds)
-			logged := errLog.String()
-			require.Equal(t, 1, strings.Count(logged, "refusing to answer"),
-				"got:\n%s", logged)
-			require.Contains(t, logged, "refusing to answer the "+legacyTrustDialogName+" dialog",
-				"the inline pair is the legacy dialog's affine — name it as such")
-			require.NotContains(t, logged, "the question is not on screen",
-				"the whole dialog scrolls the question off, that is not this case")
-		})
+		picker := strings.Join(legacyInlinePairOptionBlock(v.ordinal), "\n")
+		for _, tt := range []struct{ name, content string }{
+			{
+				"the pair over the footer",
+				"Claude Code may read files in this folder.\n\n" + picker + "\n\n" + legacyTrustFooter,
+			},
+			{
+				"the pair under the wrapped question",
+				"Do you trust the\nfiles in this\nfolder?\n" + picker + "\n" + legacyTrustFooter,
+			},
+		} {
+			t.Run(v.name+"/"+tt.name, func(t *testing.T) {
+				_, _, errLog := captureTrustPromptLogs(t)
+				handled, cmds := pollStaticPane(t, tt.content, 4)
+				require.True(t, handled)
+				require.Empty(t, sentKeystrokes(cmds),
+					"af never answers a dialog it cannot read whole; got %v", cmds)
+				logged := errLog.String()
+				require.Equal(t, 1, strings.Count(logged, "refusing to answer"),
+					"got:\n%s", logged)
+				require.Contains(t, logged, "refusing to answer the "+legacyTrustDialogName+" dialog",
+					"the inline pair is the legacy dialog's affine — name it as such")
+				require.Contains(t, logged, `cannot aim at "Yes"`,
+					"the row the pane shows is the pair's \"Yes\", not the stacked form's "+
+						"\"Yes, proceed\" (#7661 review, R4)")
+				require.NotContains(t, logged, "the question is not on screen",
+					"the whole dialog scrolls the question off, that is not this case")
+			})
+		}
 	}
 }
 
@@ -329,6 +342,96 @@ func TestCheckAndHandleTrustPrompt_InlinePairOrdinalComposerDraftUnderWrappedQue
 				require.Emptyf(t, sentKeystrokes(cmds),
 					"no key may reach a working composer; got %v", cmds)
 			}
+		}
+	}
+}
+
+// TestCheckAndHandleTrustPrompt_InlinePairAboveARealOptionBlockStillHolds pins
+// the property #7661's review required for R1: the inline pair may ADD a
+// reading, never replace one — every pane the stacked labels' re-wrap reading
+// holds is still held. Each frame stacks rows that squash to the pair above a
+// real, complete option block and its footer; on master the block's rows
+// above it are left unreadable, and the pane holds "under rows af cannot read
+// as the dialog's question". Reading the pair as one more label on top of
+// that block let the block grow upward, so a ❯ inside the pair failed the
+// cursor check, a prompt or rule above the pair explained the pane, and a
+// bare "No" above a rule read as a cut label — and every one of these frames
+// read CLEAR.
+func TestCheckAndHandleTrustPrompt_InlinePairAboveARealOptionBlockStillHolds(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			"the pair split over two rows above the legacy block",
+			"Yes\n❯ No\n❯ 1. Yes, proceed\n  2. No, exit\nEnter to confirm · Esc to exit",
+		},
+		{
+			"a selected prompt row and the pair above the reworded block",
+			"❯ claude\nYes  No\n❯ 1. Yes, I trust this folder\n  2. No, exit\nEnter to confirm · Esc to cancel",
+		},
+		{
+			"a bare No over a rule above the reworded block",
+			"No\n────────────────────────────────────────\n❯ 1. Yes, I trust this folder\n  2. No, exit\n\nEnter to confirm · Esc to cancel",
+		},
+		{
+			"the pair wrapped at 12 columns above the legacy block",
+			"  1. Yes\n❯ 2. No\n❯ 1. Yes,\nproceed\n2. No, exit\nEnter to\nconfirm ·\nEsc to exit",
+		},
+		{
+			"the ordinal pair mid-paint above the legacy block",
+			"❯ claude\n1. Yes  2. No\n❯ 1. Yes, proceed\n  2. No, exit\nEnter to confirm",
+		},
+		{
+			"the pair split over two rows above the reworded block's own rows",
+			"Yes\n❯ No\n  No, exit\n❯ Yes, I trust this folder\n\nEnter to confirm · Esc to cancel",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.True(t, handled,
+				"the pair may add a reading, never replace one: this pane holds on master as "+
+					"an unreadable dialog and must still hold (#7661 review, R1):\n%s", tt.content)
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may reach a dialog af cannot read; got %v", cmds)
+		})
+	}
+}
+
+// TestCheckAndHandleTrustPrompt_InlinePairUnframedComposerDraftUnderWrappedQuoteStaysClear
+// pins the second #7661 review finding on claudeLaunchDialogComposerBelow:
+// agent output above the legacy question makes the question a quote, not the
+// dialog's own — the anchor claudeLegacyProseAboveQuestion gives the one-row
+// grammar, extended here to the wrapped-question branch. An unframed composer
+// draft quoting the inline pair under that wrapped quote must keep reading
+// clear: claudeComposersCanonical cannot remove the draft (its prompt reads
+// as a dialog option) and claudeMCPTrustDraftRow cannot name it without a
+// closing frame, so without the prose anchor the live composer row read as
+// the dialog's option and held a working agent. The boxed twin, including a
+// box that pads a row above its prompt, is covered too.
+func TestCheckAndHandleTrustPrompt_InlinePairUnframedComposerDraftUnderWrappedQuoteStaysClear(t *testing.T) {
+	for _, v := range inlineVariants {
+		picker := strings.Join(legacyInlinePairOptionBlock(v.ordinal), "\n")
+		for _, tt := range []struct{ name, content string }{
+			{
+				"unframed under a wrapped quote",
+				"agent output above the quote\nDo you trust the\nfiles in this\nfolder?\n" + picker + "\n",
+			},
+			{
+				"unframed under a wrapped quote, with more output below",
+				"agent output above the quote\nDo you trust the\nfiles in this\nfolder?\n" + picker + "\nmore agent output\n",
+			},
+			{
+				"boxed with a pad row under its top edge",
+				"Do you trust the\nfiles in this\nfolder?\n╭────────────────────╮\n│                    │\n" +
+					fmt.Sprintf("│ %-18s │", picker) + "\n╰────────────────────╯\n",
+			},
+		} {
+			t.Run(v.name+"/"+tt.name, func(t *testing.T) {
+				handled, cmds := pollStaticPane(t, tt.content, 4)
+				require.False(t, handled,
+					"a composer draft quoting the pair under a quoted question is not the legacy "+
+						"picker (#7661 Codex review):\n%s", tt.content)
+				require.Empty(t, sentKeystrokes(cmds),
+					"no key may reach a working composer; got %v", cmds)
+			})
 		}
 	}
 }

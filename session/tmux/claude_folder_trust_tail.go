@@ -23,19 +23,12 @@ const (
 	// trimmer drops only the LEADING "N." so the mid-row "2." stays in the
 	// label (and survives a squash as "Yes2.No").
 	claudeLegacyInlineOrdinalPairText = "Yes  2. No"
-)
 
-// claudeLegacyInlinePairLabels are the legacy dialog's inline option rows
-// (claudeLegacyInlinePairText and claudeLegacyInlineOrdinalPairText) as
-// words — the per-row token form claudeFolderTrustTail matches against. The
-// leading ordinal is gone after claudeTrustRowOf, and an ordinal kept on the
-// No option ("2.") is stripped by claudeFolderTrustTail's
-// claudeMCPTrustOrdinalWord skip, so both inline shapes reduce to the same
-// two words: ["Yes", "No"].
-var claudeLegacyInlinePairLabels = [][]string{
-	strings.Fields(claudeLegacyInlinePairText),
-	strings.Fields(claudeLegacyInlineOrdinalPairText),
-}
+	// claudeLegacyInlineYesLabel is the affirmative option the inline pair
+	// paints, for the refusal line that names the row the pane shows (#7661
+	// review, R4).
+	claudeLegacyInlineYesLabel = "Yes"
+)
 
 // claudeFolderTrustTailLabels are the option rows the folder-trust dialogs
 // paint, as words: the reworded dialog's two, the legacy dialog's "Yes,
@@ -44,14 +37,13 @@ var claudeLegacyInlinePairLabels = [][]string{
 // so a pane whose question has scrolled off and whose option row also wraps
 // does not read clear the way the stacked form never does — the words of
 // the pair are the same at any width, and the ordinal on the No option is
-// stripped before reaching the reader, so the two inline forms share the one
-// ["Yes", "No"] entry.
+// stripped by the claudeMCPTrustOrdinalWord skip before the words reach this
+// reader, so the two inline forms share the one ["Yes", "No"] entry.
 var claudeFolderTrustTailLabels = [][]string{
 	strings.Fields(claudeTrustAffirmativeLabel),
 	strings.Fields(claudeFolderTrustExitLabel),
 	strings.Fields(claudeLegacyTrustProceedLabel),
 	strings.Fields(claudeLegacyInlinePairText),
-	strings.Fields(claudeLegacyInlineOrdinalPairText),
 }
 
 // claudeFolderTrustTailFooters are the footers those dialogs paint, as words.
