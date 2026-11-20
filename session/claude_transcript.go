@@ -274,7 +274,10 @@ func (i *Instance) ClaudeRunTranscriptDirs() (string, []string, error) {
 // resolves the ambient dir.
 func (i *Instance) claudeStoreFor(program, workDir string) (string, string, error) {
 	configDir, launchDir, err := claudeTranscriptLaunchContext(program, workDir)
-	if account := strings.TrimSpace(i.Account); account != "" {
+	i.mu.RLock()
+	account := strings.TrimSpace(i.Account)
+	i.mu.RUnlock()
+	if account != "" {
 		home, herr := config.GetConfigDir()
 		if herr != nil {
 			return "", "", herr

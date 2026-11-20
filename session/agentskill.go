@@ -495,7 +495,10 @@ func resolveSkillTarget(i *Instance, program string) skillTarget {
 	if i == nil {
 		return skillTarget{}
 	}
-	return resolveSkillTargetForAccount(program, i.AccountAgent(), strings.TrimSpace(i.Account), i.GetWorktreePath())
+	i.mu.RLock()
+	account := strings.TrimSpace(i.Account)
+	i.mu.RUnlock()
+	return resolveSkillTargetForAccount(program, i.AccountAgent(), account, i.GetWorktreePath())
 }
 
 // resolveSkillTargetForAccount is resolveSkillTarget for an account this session
