@@ -37,8 +37,27 @@ var (
 // its refusal: master's own `sh -c 'cd ~/src && $EDITOR .'` refuses the
 // same text — a `$` word at a command position is a constructed name —
 // so the launcher's carried shell text keeps that rule exactly.
+//
+// The remaining rows are the shell-nesting property: a shell name
+// (sh, bash, dash, zsh — the shells master's own payload and input
+// rules model) at a command position in a joiner's carried text
+// applies master's own judges to the joined string. Each row below
+// refuses only because master refuses the direct equivalent — `sh
+// build.sh`, `bash run.sh` and `x | sh` all refuse when typed
+// directly. The admit rows beside them (`watch 'sh -c "echo hi"'`,
+// `watch 'echo hi | bash -c "echo hi"'`, `watch 'a | shell'`) are the
+// parity half: carried text master's judges call proven or un-fed
+// admits exactly as the direct form does.
 var corpusAllowedDiffs = map[string]string{
 	"tmux new-window 'cd ~/src && $EDITOR .'": "REFUSE stands: master's `sh -c 'cd ~/src && $EDITOR .'` refuses the same command-position `$` text",
+	"tmux new-window 'ls; bash'":              "REFUSE stands: carried `bash` applies master's own shell rule; `ls; bash` refuses as the direct command does",
+	"watch 'sh build.sh'":                     "REFUSE stands: carried `sh build.sh` refuses exactly as master's direct `sh build.sh` does",
+	"watch 'x | sh'":                          "REFUSE stands: carried `x | sh` refuses exactly as master's direct `x | sh` does",
+	"watch 'make && bash run.sh'":             "REFUSE stands: carried `bash run.sh` refuses exactly as master's direct `bash run.sh` does",
+	"watch 'printf B64 | base64 -d | sh'":     "REFUSE stands: carried `| sh` refuses exactly as master's direct `printf B64 | base64 -d | sh` does",
+	"watch 'echo hi | sh -s'":                 "REFUSE stands: carried `| sh -s` refuses exactly as master's direct `echo hi | sh -s` does",
+	"ssh host 'sh build.sh'":                  "REFUSE stands: carried `sh build.sh` refuses exactly as master's direct `sh build.sh` does",
+	"ssh host 'bash run.sh'":                  "REFUSE stands: carried `bash run.sh` refuses exactly as master's direct `bash run.sh` does",
 }
 
 // corpusVerdict folds an error verdict to the admit/REFUSE strings the

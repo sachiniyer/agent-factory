@@ -565,6 +565,23 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
   `~/.local/bin/watch` and `/usr/bin/pw[s]h` all read as the launcher —
   while a bare `*`/`?` spells no launcher name, the way master reads it.
 
+  Shell names nest the same way, by master's own rule: `sh`, `bash`,
+  `dash`, `zsh` and the versioned and restricted forms at a command
+  position in a joiner's carried text re-apply the gate's own payload,
+  environment-mutation and shell-feed judges to the whole joined
+  string — `watch 'printf B64 | base64 -d | sh'`, `ssh host 'sh
+  build.sh'` and `watch 'make && bash run.sh'` refuse exactly as their
+  direct forms do, while `watch 'sh -c "echo hi"'` and `watch 'echo hi
+  | bash -c "echo hi"'` admit because the direct forms' argv is proven
+  or un-fed. The rule reads only carried text: a shell name preserved
+  as a launcher's own argv (`docker run --rm -it ubuntu bash`,
+  `docker exec -it app sh`) stays that launcher's operand, matching
+  master's admit. Command position in carried text tracks what the
+  downstream shell tracks — start, `;`, `&`, `|`, `(`, `)`, a
+  backtick, and a newline all re-open the command word, so
+  `watch "a\nb"` runs as master does and `watch "true\nsh build.sh"`
+  refuses.
+
   `gdbus` call operands are GVariant text decoded through their
   escapes alongside the raw check (`['CODEX\u005fHOME=/o']` still
   names CODEX_HOME, and an escape the decoder does not know refuses).

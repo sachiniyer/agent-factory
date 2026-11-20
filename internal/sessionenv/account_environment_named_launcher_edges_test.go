@@ -941,6 +941,57 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"distrobox enter x -- 'export CODEX_HOME=/o; codex'", true},
 		{"tmux neww 'export CODEX_HOME=/o; codex'", true},
 		{"tmux neww make -j4", false},
+		// Nesting by name, round 13: a shell name at a command
+		// position in a joiner's carried text applies master's OWN
+		// rule for that shell to the joined string — `| sh` feeds
+		// exactly as the direct command does, `sh build.sh` reads an
+		// unproven script operand, and `sh -s`/a redirect keeps its
+		// stdin. Every refuse here matches master's direct form.
+		{"watch 'printf B64 | base64 -d | sh'", true},
+		{"watch 'x | sh'", true},
+		{"watch 'x | /bin/sh'", true},
+		{"watch 'make | sh'", true},
+		{"watch 'sh build.sh'", true},
+		{"watch 'bash ./build.sh'", true},
+		{"watch 'sh -s'", true},
+		{"watch 'echo hi | sh -s'", true},
+		{"watch 'x | sh -n'", true},
+		{"watch 'x | sh -c \"export CODEX_HOME=/o; codex\"'", true},
+		{"watch 'x | bash -c \"export CODEX_HOME=/o; codex\"'", true},
+		{"watch 'sh < build.sh'", true},
+		{"watch 'make && bash run.sh'", true},
+		{"ssh host 'sh build.sh'", true},
+		{"ssh host 'bash run.sh'", true},
+		{"tmux new-window 'ls; bash'", true},
+		// …and the parity half: master's judges call these proven or
+		// un-fed, so they admit exactly as their direct forms do —
+		// `sh -c` argv is proven, `| bash -c` is not fed stdin the
+		// shell reads, and shell-adjacent spellings are not shell
+		// names.
+		{"watch 'sh -c \"echo hi\"'", false},
+		{"watch 'x | sh -c \"echo hi\"'", false},
+		{"watch 'echo hi | sh -c \"echo hi\"'", false},
+		{"watch 'bash -c \"make test\"'", false},
+		{"watch 'echo hi | bash -c \"echo hi\"'", false},
+		{"watch 'x | pwsh -c \"echo hi\"'", false},
+		{"watch 'echo shell.sh'", false},
+		{"watch 'a | shell'", false},
+		{"watch 'echo sh'", false},
+		{"watch 'a | bashful'", false},
+		// Preserved argv is not carried text — docker/kubectl exec
+		// their operand directly, so a shell name there stays docker
+		// config, matching master's admit on the same rows.
+		{"docker run --rm -it ubuntu bash", false},
+		{"docker exec -it app sh", false},
+		{"kubectl exec -it web -- sh", false},
+		// A newline is a command boundary exactly as `;` is: the
+		// carried text after one re-enters at command position.
+		{"watch \"true\nsh build.sh\"", true},
+		{"watch \"true\nx | sh\"", true},
+		{"watch \"a\nsh -c 'export CODEX_HOME=/o; codex'\"", true},
+		{"watch \"a\nb\"", false},
+		{"watch \"a\nCODEX_HOME=/o x\"", true},
+		{"watch 'true; x | sh'", true},
 		{"sudo machinectl shell host codex", true},
 		{"sudo ssh host codex", true},
 		{"sudo pwsh", false},

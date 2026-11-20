@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -139,6 +140,27 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 	_, decode := namedLauncherDecodesOperands[launcher]
 	_, joiner := namedLauncherShellJoins[launcher]
 	memoize := len(preserved) == 0 && b.namedWords != nil
+	// A joiner's words land in the downstream shell as ONE string —
+	// build it first so a shell name in any word's text judges the
+	// text the shell actually gets, not the word in isolation.
+	var joinedText string
+	var literals []string
+	if joiner {
+		var joined strings.Builder
+		literals = make([]string, len(words))
+		for i, word := range words {
+			literal, ok := literalWordBudgeted(word, b)
+			if !ok {
+				continue // the word verdict below refuses anyway
+			}
+			literals[i] = literal
+			if joined.Len() > 0 {
+				joined.WriteByte(' ')
+			}
+			joined.WriteString(literal)
+		}
+		joinedText = joined.String()
+	}
 	var tailFields []joinField
 	last := len(words) - 1
 	for i, word := range words {
@@ -149,7 +171,7 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 			verdict, seen = b.namedWords[key]
 		}
 		if !seen {
-			verdict = namedLauncherWordVerdict(word, i == last, decode, launcher, names, preserved, b)
+			verdict = namedLauncherWordVerdict(word, i == last, decode, launcher, names, preserved, joinedText, b)
 			if memoize {
 				b.namedWords[key] = verdict
 			}
@@ -157,15 +179,19 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 		if verdict.refuse {
 			return true
 		}
-		literal, ok := literalWordBudgeted(word, b)
-		if !ok {
-			continue // the verdict above already refused
-		}
+		literal := ""
 		if joiner {
+			literal = literals[i]
 			// The downstream shell re-splits the joined tail, so
 			// the re-split words are a reading of their own —
 			// collected here and judged below.
 			tailFields = append(tailFields, shellJoinFields(literal)...)
+		} else {
+			var ok bool
+			literal, ok = literalWordBudgeted(word, b)
+			if !ok {
+				continue // the verdict above already refused
+			}
 		}
 		for _, nested := range namedLauncherNamesOf(literal, b) {
 			if namedNestedWordsRefuse(words[i+1:], nested, names, preserved, joiner, b) {
@@ -179,7 +205,7 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 			// word — `watch '$x'` runs `sh -c '$x'`.
 			tailFields[0].cmd = true
 		}
-		if namedNestedFieldsRefuse(tailFields, launcher, names, preserved, b) {
+		if namedNestedFieldsRefuse(tailFields, launcher, names, preserved, joinedText, b) {
 			return true
 		}
 	}
@@ -190,22 +216,27 @@ func namedLauncherTailRefuses(words []*syntax.Word, names, preserved map[string]
 // command-position flag its delimiter earned: cmd marks the field a
 // downstream shell reads as a command word — the first field, or one
 // whose preceding delimiter run holds a command operator (`;`, `&`,
-// `|`, `(`, `)`, a backtick). Redirect operators (`<`, `>`) and plain
-// whitespace do not start a command, so `2>$f` reads as operand fields.
+// `|`, `(`, `)`, a backtick, a newline — a line break ends a command
+// exactly as `;` does). Redirect operators (`<`, `>`) and plain
+// whitespace do not start a command, so `2>$f` reads as operand
+// fields. carried marks the field shell-carried — master's own shell
+// rule applies to names inside it (`a | sh` feeds the shell the pipe
+// produces); a preserved argv word is not carried.
 type joinField struct {
-	text string
-	cmd  bool
+	text    string
+	cmd     bool
+	carried bool
 }
 
 // shellJoinFields re-splits a shell-carried joined string the way the
 // downstream shell splits it: whitespace and every operator character
-// — < > | ; & ( ) — delimits words, so an option and its redirect
-// (`-EncodedCommand</dev/null`) classify as the two words sh runs.
-// Redirect targets and digits-before-redirect (`2>`, `&>`, `>>`) need
-// no grammar — splitting on the characters alone over-approximates
-// safely. Quoting and escapes are not re-parsed in this reading: each
-// field's own verdict judges its raw AND normalized forms, so
-// `-enc\<x` still lands `-enc` through the normalized form.
+// — < > | ; & ( ) and the newline — delimits words, so an option and
+// its redirect (`-EncodedCommand</dev/null`) classify as the two words
+// sh runs. Redirect targets and digits-before-redirect (`2>`, `&>`,
+// `>>`) need no grammar — splitting on the characters alone
+// over-approximates safely. Quoting and escapes are not re-parsed in
+// this reading: each field's own verdict judges its raw AND normalized
+// forms, so `-enc\<x` still lands `-enc` through the normalized form.
 func shellJoinFields(s string) []joinField {
 	var fields []joinField
 	for i := 0; i < len(s); {
@@ -222,8 +253,9 @@ func shellJoinFields(s string) []joinField {
 			continue
 		}
 		fields = append(fields, joinField{
-			text: s[start:i],
-			cmd:  strings.ContainsAny(delim, ";&|()`"),
+			text:    s[start:i],
+			cmd:     strings.ContainsAny(delim, ";&|()`\n"),
+			carried: true,
 		})
 	}
 	return fields
@@ -279,18 +311,23 @@ func namedNestedWordsRefuse(words []*syntax.Word, launcher string, names, preser
 		return true
 	}
 	fields := make([]joinField, 0, len(words))
+	var joined strings.Builder
 	for _, word := range words {
 		literal, ok := literalWordBudgeted(word, b)
 		if !ok {
 			return true // an unreadable tail word is hidden input
 		}
+		if joined.Len() > 0 {
+			joined.WriteByte(' ')
+		}
+		joined.WriteString(literal)
 		if resplit {
 			fields = append(fields, shellJoinFields(literal)...)
 		} else {
 			fields = append(fields, joinField{text: literal})
 		}
 	}
-	return namedNestedFieldsRefuse(fields, launcher, names, preserved, b)
+	return namedNestedFieldsRefuse(fields, launcher, names, preserved, joined.String(), b)
 }
 
 // namedNestedFieldsRefuse applies launcher's own rule to pseudo-words —
@@ -301,8 +338,13 @@ func namedNestedWordsRefuse(words []*syntax.Word, launcher string, names, preser
 // budget bounds the nesting. A field's own cmd flag (a command
 // operator in its delimiter run), an operator inside the previous
 // field, and an assignment the previous field opened all carry the
-// downstream command position into the per-field verdict.
-func namedNestedFieldsRefuse(fields []joinField, launcher string, names, preserved map[string]struct{}, b *reachBudget) bool {
+// downstream command position into the per-field verdict. A field
+// that is a shell's name at a command position applies master's own
+// rule for that shell to the carried text — a pipeline ending `| sh`
+// reads exactly as master's `sh` does. joined is that text: the one
+// string the downstream shell parses, preserved so master's parse
+// sees the delimiters the fields lost.
+func namedNestedFieldsRefuse(fields []joinField, launcher string, names, preserved map[string]struct{}, joined string, b *reachBudget) bool {
 	if b == nil {
 		b = newReachBudget()
 	}
@@ -318,17 +360,20 @@ func namedNestedFieldsRefuse(fields []joinField, launcher string, names, preserv
 		prevOp, prevAssign = false, false
 		var verdict namedWordVerdict
 		seen := false
-		key := namedLiteralKey{literal: field.text, launcher: launcher, last: i == last, decode: decode, atCmd: atCmd}
+		key := namedLiteralKey{literal: field.text, launcher: launcher, last: i == last, decode: decode, atCmd: atCmd, carried: field.carried, carriedText: joined}
 		if memoize {
 			verdict, seen = b.namedLiterals[key]
 		}
 		if !seen {
-			verdict = namedLiteralVerdict(field.text, i == last, decode, launcher, names, preserved, atCmd, b)
+			verdict = namedLiteralVerdict(field.text, i == last, decode, launcher, names, preserved, atCmd, field.carried, joined, b)
 			if memoize {
 				b.namedLiterals[key] = verdict
 			}
 		}
 		if verdict.refuse {
+			return true
+		}
+		if atCmd && field.carried && pieceIsNamedShell(field.text) && namedShellTextRefuses(joined, names, b) {
 			return true
 		}
 		if atCmd && isAssignField(field.text) {
@@ -340,7 +385,7 @@ func namedNestedFieldsRefuse(fields []joinField, launcher string, names, preserv
 			prevOp = true
 		}
 		for _, nested := range namedLauncherNamesOf(field.text, b) {
-			if namedNestedFieldsRefuse(fields[i+1:], nested, names, preserved, b) {
+			if namedNestedFieldsRefuse(fields[i+1:], nested, names, preserved, joined, b) {
 				return true
 			}
 		}
@@ -439,11 +484,13 @@ func globEnvSkeleton(v string, b *reachBudget) string {
 // produce fields, not word nodes. atCmd keys the field's command
 // position — a `$`-carrying field refuses only there.
 type namedLiteralKey struct {
-	literal  string
-	launcher string
-	last     bool
-	decode   bool
-	atCmd    bool
+	literal     string
+	launcher    string
+	last        bool
+	decode      bool
+	atCmd       bool
+	carried     bool
+	carriedText string
 }
 
 // namedLauncherWordVerdict classifies ONE tail word: no literal →
@@ -454,12 +501,16 @@ type namedLiteralKey struct {
 // constructed); and a payload flag at the tail's end reads stdin. A
 // preserved argv word's downstream position is unknowable — any slot
 // could be the command — so its text enters at command position.
-func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launcher string, names, preserved map[string]struct{}, b *reachBudget) namedWordVerdict {
+func namedLauncherWordVerdict(word *syntax.Word, last bool, decode bool, launcher string, names, preserved map[string]struct{}, joinedText string, b *reachBudget) namedWordVerdict {
 	literal, ok := literalWordBudgeted(word, b)
 	if !ok {
 		return namedWordVerdict{refuse: true}
 	}
-	return namedLiteralVerdict(literal, last, decode, launcher, names, preserved, true, b)
+	// A joiner hands its tail argv to a downstream shell as one
+	// string — the word's text is shell-carried, so a shell name in
+	// its pieces applies master's rule for that shell to joinedText.
+	_, carried := namedLauncherShellJoins[launcher]
+	return namedLiteralVerdict(literal, last, decode, launcher, names, preserved, true, carried, joinedText, b)
 }
 
 // extglobOpeners are the two-byte sequences that open a bash extglob
@@ -489,7 +540,11 @@ func literalCarriesDynamic(literal string) bool {
 // launcher scan splits out of a word's text. atCmd is the text's
 // command position downstream: a preserved argv word could sit in any
 // slot, a re-split field carries the flag its delimiter run earned.
-func namedLiteralVerdict(literal string, last, decode bool, launcher string, names, preserved map[string]struct{}, atCmd bool, b *reachBudget) namedWordVerdict {
+// carried marks the text shell-carried — a joiner's argv word, a
+// re-split field, or nested text — where a shell name at a command
+// position applies master's own rule for that shell to carriedText,
+// the one string the downstream shell parses.
+func namedLiteralVerdict(literal string, last, decode bool, launcher string, names, preserved map[string]struct{}, atCmd, carried bool, carriedText string, b *reachBudget) namedWordVerdict {
 	raw := literal
 	if decode {
 		decoded, decOK := gvariantDecode(literal)
@@ -524,13 +579,13 @@ func namedLiteralVerdict(literal string, last, decode bool, launcher string, nam
 	// and `co\\\\dex` are both `codex` — so the piece rule sees
 	// both the text and the flat-normalized over-approximation of
 	// what the text becomes.
-	if namedLauncherTextRefuses(literal, atCmd, names, preserved, b) {
+	if namedLauncherTextRefuses(literal, atCmd, carried, carriedText, names, preserved, b) {
 		return namedWordVerdict{refuse: true}
 	}
-	if normalized != literal && namedLauncherTextRefuses(normalized, atCmd, names, preserved, b) {
+	if normalized != literal && namedLauncherTextRefuses(normalized, atCmd, carried, carriedText, names, preserved, b) {
 		return namedWordVerdict{refuse: true}
 	}
-	if raw != literal && namedLauncherTextRefuses(raw, atCmd, names, preserved, b) {
+	if raw != literal && namedLauncherTextRefuses(raw, atCmd, carried, carriedText, names, preserved, b) {
 		// The decoded reading is added to the raw text's, never
 		// substituted for it — a boundary the raw text shows is still
 		// a boundary to refuse on.
@@ -590,8 +645,9 @@ func normalizeNamedLiteral(text string) string {
 // command position: a `[FOO=x]` atom could produce text a downstream
 // reading runs, so the conservative slot applies.
 type namedSpan struct {
-	text  string
-	atCmd bool
+	text     string
+	atCmd    bool
+	interior bool
 }
 
 // namedLauncherTextRefuses runs the piece rule over one text — the text
@@ -605,8 +661,12 @@ type namedSpan struct {
 // `echo $HOME` denies it), so the scan tracks the slot: start and
 // every command operator put the next piece at the command word, a
 // `NAME=` prefix yields it one piece later, and anything else reads
-// operands.
-func namedLauncherTextRefuses(text string, atCmd bool, names, preserved map[string]struct{}, b *reachBudget) bool {
+// operands. carried marks the text shell-carried — a joiner's argv
+// word or nested text — where a shell name at a command position
+// applies master's own rule for that shell to carriedText, the whole
+// string the downstream shell parses (never the piece's own text —
+// `sh` inside `sh -c "echo hi"` is proven, while `sh` alone is not).
+func namedLauncherTextRefuses(text string, atCmd, carried bool, carriedText string, names, preserved map[string]struct{}, b *reachBudget) bool {
 	if b == nil {
 		b = newReachBudget()
 	}
@@ -617,7 +677,10 @@ func namedLauncherTextRefuses(text string, atCmd bool, names, preserved map[stri
 	// text too: `[; pwsh -enc x ;]` carries the launcher the atom skip
 	// would otherwise eat. Every closed atom's interior is queued as
 	// its own span — iteratively, so pathological nesting burns the
-	// shared budget rather than the stack.
+	// shared budget rather than the stack. An interior span is a glob
+	// atom's character class, not command text — `[sh]` matches `s` or
+	// `h`, it does not run `sh` — so the shell rule reads only the
+	// text the atom belongs to, not the interior.
 	spans := []namedSpan{{text: text, atCmd: atCmd}}
 	for len(spans) > 0 {
 		cur := spans[len(spans)-1]
@@ -640,7 +703,7 @@ func namedLauncherTextRefuses(text string, atCmd bool, names, preserved map[stri
 						// is not split on `=` — and the plain
 						// reading judges the interior on its
 						// own span.
-						spans = append(spans, namedSpan{text: s[i+1 : end], atCmd: true})
+						spans = append(spans, namedSpan{text: s[i+1 : end], atCmd: true, interior: true})
 						i = end + 1
 						continue
 					} else if b.left < 0 {
@@ -655,7 +718,7 @@ func namedLauncherTextRefuses(text string, atCmd bool, names, preserved map[stri
 						// (`co{d,;}ex` still spells codex) — and
 						// its interior is plain text the union
 						// reading judges on its own span.
-						spans = append(spans, namedSpan{text: s[i+1 : end], atCmd: true})
+						spans = append(spans, namedSpan{text: s[i+1 : end], atCmd: true, interior: true})
 						i = end + 1
 						continue
 					}
@@ -675,12 +738,15 @@ func namedLauncherTextRefuses(text string, atCmd bool, names, preserved map[stri
 			if namedLauncherPieceRefuses(piece, names, preserved, b) {
 				return true
 			}
+			if pos && carried && !cur.interior && pieceIsNamedShell(piece) && namedShellTextRefuses(carriedText, names, b) {
+				return true
+			}
 			for _, nested := range namedLauncherNamesOf(piece, b) {
 				var tail []joinField
 				for _, f := range strings.Fields(s[i:]) {
-					tail = append(tail, joinField{text: f})
+					tail = append(tail, joinField{text: f, carried: true})
 				}
-				if namedNestedFieldsRefuse(tail, nested, names, preserved, b) {
+				if namedNestedFieldsRefuse(tail, nested, names, preserved, s[i:], b) {
 					return true
 				}
 			}
@@ -695,7 +761,7 @@ func namedLauncherTextRefuses(text string, atCmd bool, names, preserved map[stri
 			}
 			breakAfter := s[i:j]
 			switch {
-			case strings.ContainsAny(breakAfter, ";&|()`"):
+			case strings.ContainsAny(breakAfter, ";&|()`\n"):
 				atCmd, value = true, false
 			case pos && pieceCouldBeAssignment(piece, b) && breakAfter == "=":
 				// `NAME=` — the next piece is the assigned value;
@@ -717,6 +783,29 @@ func namedLauncherTextRefuses(text string, atCmd bool, names, preserved map[stri
 		}
 	}
 	return false
+}
+
+// pieceIsNamedShell reports whether piece names one of master's
+// modelled shells — `sh`, `bash`, `dash`, `zsh` and the versioned and
+// restricted forms shellBaseName covers. `filepath`/`command` argv
+// reads the basename the way the shell does; quoting is judged by the
+// piece's own readings before this call.
+func pieceIsNamedShell(piece string) bool {
+	_, ok := shellBaseName(filepath.Base(piece))
+	return ok
+}
+
+// namedShellTextRefuses runs master's own account-environment judges —
+// payload verdict, environment mutation and shell-feed checks — over
+// the carried text a shell name stands in. The text is judged whole
+// because master's judges are position-blind: a `| sh` anywhere in it
+// feeds the shell exactly as the direct form does. Budget exhaustion
+// fails closed like every other scan here.
+func namedShellTextRefuses(text string, names map[string]struct{}, b *reachBudget) bool {
+	if !b.spend(len(text)) {
+		return true
+	}
+	return !accountEnvironmentGateProven(text, names, accountEnvironmentMaxPayloadDepth)
 }
 
 // unwrapNamedLauncher judges every #7603-named launcher under the one
