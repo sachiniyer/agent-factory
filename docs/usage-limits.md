@@ -925,6 +925,10 @@ The new account starts a fresh conversation instead, and its brief says af
 tried to carry the conversation and why it could not, when:
 
 - the file is missing, or reached through a symbolic link;
+- the conversation's file in the previous account's home exists but
+  is empty, so a non-empty copy already in the new account's home
+  cannot be vouched for, and the new account starts fresh rather than
+  resume it unverified;
 - the new account already holds a different version of it, including a
   copy under the other spelling of a symlinked worktree's path that is newer
   than the carried one or that the carried one does not extend (af's log names
