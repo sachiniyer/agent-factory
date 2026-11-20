@@ -281,3 +281,109 @@ func (t *TmuxSession) refuseClaudeDialogInADraft() {
 			"af will not press Enter, because that would submit the draft; make the pane taller, or answer the dialog in the session",
 		claudeLaunchGateDialogName, t.sanitizedName)
 }
+
+// claudeLaunchDialogComposerBelow reports whether a row from content row from
+// down shows a working agent rather than the legacy dialog: a plain rule, a ❯
+// row that does not begin one of the dialog's options, or the boxed composer's
+// "> " row.
+//
+// The dialog's options are its stacked labels, the bare "Yes"/"No" words a
+// pane too narrow for the inline pair itself wraps onto two rows, AND the
+// inline pair "Yes  No" / "Yes  2. No" (claudeLegacyInlinePairText,
+// claudeLegacyInlineOrdinalPairText). When the pair fits on one row at the
+// pane's width the cursor row squashes to "YesNo" / "Yes2.No", which begins
+// none of the stacked labels or the bare words — so a pane that wraps the
+// legacy question (the wrapped-question branch of this matcher) and paints
+// the inline pair on one row had its real cursor row read as a composer
+// draft and read clear (the #3579-class failure the trust gate exists to
+// close). Recognizing the inline pair's squashed form on the cursor row
+// stops that misclassification; the trailing-region anchor is the one the
+// stacked labels already trust (this runs only under the wrapped legacy
+// question), so a composer draft quoting the pair in prose — the case
+// TestCheckAndHandleTrustPrompt_YesNoComposerDraftIsNotTheLegacyPicker and
+// the #7584 quote/draft tests pin — keeps reading clear, since the question
+// fits one row there and claudeLaunchDialogPainting skips on `below-first <
+// 2`.
+func claudeLaunchDialogComposerBelow(pane claudeLaunchDialogPane, first, from int) bool {
+	firstLine := len(pane.lines)
+	if from < len(pane.index) {
+		firstLine = pane.index[from]
+	}
+	for i := firstLine; i < len(pane.lines); i++ {
+		if claudeComposerRule(pane.lines[i]) {
+			return true
+		}
+	}
+	// A launch modal owns a fresh pane from the top: the question's first row
+	// is the first non-blank row, a frame edge reduced to blank the only thing
+	// above it. Non-blank rows above it mean the question is output being
+	// quoted — the same anchor claudeLegacyProseAboveQuestion gives the
+	// one-row grammar — and a live composer's draft always sits below agent
+	// output. A ❯ row whose text is the inline pair is the one dialog-option
+	// shape a single composer draft row can reproduce verbatim, so under a
+	// quoted question it keeps reading as the composer's, not the dialog's
+	// (#7661 Codex review: the guard tested only the one-row question).
+	proseAbove := false
+	if first < len(pane.index) {
+		for i := 0; i < pane.index[first]; i++ {
+			if !pane.rows[i].blank {
+				proseAbove = true
+				break
+			}
+		}
+	}
+	for content := from; content < len(pane.starts); content++ {
+		i := pane.index[content]
+		row := pane.rows[i]
+		if !row.selected {
+			if i > 0 && claudeTrustFrameRule(pane.lines[i-1]) && claudeLaunchDialogPromptRow(pane, i) {
+				return true
+			}
+			continue
+		}
+		text := claudeLaunchDialogRowText(pane, content)
+		option := claudeMCPTrustOrdinalWord(text)
+		// The inline pair labels (claudeLegacyInlinePair,
+		// claudeLegacyInlineOrdinalPair) also match a composer's ❯ draft that
+		// quotes "Yes  No" or "1. Yes  2. No" (squashed "YesNo"/"Yes2.No"):
+		// claudeComposersCanonical leaves such a composer on screen, since its
+		// prompt could be a dialog's option, so accept those labels only when
+		// this row is not a composer's prompt — boxed: its opening frame edge
+		// sits above it, past any blank rows the box pads with (a closing edge
+		// alone is a stale frame above a live dialog, which still holds); and
+		// unframed: the question above it is quoted, not the dialog's own
+		// (#7661 review, #7661 Codex review). Detecting the composer stops the
+		// live composer row being read as the dialog's option.
+		edge := i - 1
+		for edge >= 0 && pane.rows[edge].blank && claudeTrustBordered(pane.lines[edge]) {
+			edge--
+		}
+		// The row itself paints between a box's side borders when the draft
+		// quotes more than the prompt — the pair and the question and footer
+		// it mocks up — so the opening edge is not always the next row up
+		// (#7661 Codex review).
+		boxed := claudeTrustBordered(pane.lines[i]) ||
+			(edge >= 0 && claudeTrustFrameRule(pane.lines[edge]) &&
+				!claudeTrustFrameClosingRule(pane.lines[edge]))
+		acceptInlinePair := !boxed && !proseAbove
+		for _, label := range []string{
+			claudeSquash(claudeLegacyTrustProceedLabel),
+			claudeSquash(claudeFolderTrustExitLabel),
+			"Yes", "No",
+		} {
+			option = option || (text != "" && strings.HasPrefix(label, text))
+		}
+		if acceptInlinePair {
+			for _, label := range []string{
+				claudeSquash(claudeLegacyInlinePairText),
+				claudeSquash(claudeLegacyInlineOrdinalPairText),
+			} {
+				option = option || (text != "" && strings.HasPrefix(label, text))
+			}
+		}
+		if !option {
+			return true
+		}
+	}
+	return false
+}

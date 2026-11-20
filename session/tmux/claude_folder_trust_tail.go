@@ -5,21 +5,53 @@ import (
 	"strings"
 )
 
-// claudeFolderTrustTailLabels are the option rows the folder-trust dialogs
-// paint, as words: the reworded dialog's two, and the legacy dialog's "Yes,
-// proceed" (its exit row is the reworded dialog's too).
-var claudeFolderTrustTailLabels = [][]string{
-	strings.Fields(claudeTrustAffirmativeLabel),
-	strings.Fields(claudeFolderTrustExitLabel),
-	strings.Fields(claudeLegacyTrustProceedLabel),
-}
-
 // claudeLegacyTrustProceedLabel is the legacy folder-trust dialog's affirmative
 // row, and claudeLegacyTrustFooter its footer.
 const (
 	claudeLegacyTrustProceedLabel = "Yes, proceed"
 	claudeLegacyTrustFooter       = "Enter to confirm · Esc to exit"
+
+	// claudeLegacyInlinePairText is the legacy dialog's single-row inline option
+	// row, the picker shape claudeLegacyInlinePair matches at full width
+	// (session/tmux/claude_trust_legacy.go). The leading "1." ordinal is
+	// stripped by trimClaudeTrustOrdinal before the row's label reaches the
+	// readers that consume these texts, so this constant carries only the
+	// part after it: "Yes  No".
+	claudeLegacyInlinePairText = "Yes  No"
+	// claudeLegacyInlineOrdinalPairText is the same row with the No option's
+	// own ordinal still on it: "Yes  2. No". claudeTrustRowOf's ordinal
+	// trimmer drops only the LEADING "N." so the mid-row "2." stays in the
+	// label (and survives a squash as "Yes2.No").
+	claudeLegacyInlineOrdinalPairText = "Yes  2. No"
+
+	// claudeLegacyInlineYesLabel is the affirmative option the inline pair
+	// paints, for the refusal line that names the row the pane shows (#7661
+	// review, R4).
+	claudeLegacyInlineYesLabel = "Yes"
 )
+
+// claudeFolderTrustInlinePairLabel is the legacy dialog's inline pair as
+// words. It is the one tail label that can be drafted inside a composer's box:
+// every other label was already read from bordered rows the way it reads from
+// bare ones, so only the pair may not be assembled from boxed words (Codex
+// review).
+var claudeFolderTrustInlinePairLabel = strings.Fields(claudeLegacyInlinePairText)
+
+// claudeFolderTrustTailLabels are the option rows the folder-trust dialogs
+// paint, as words: the reworded dialog's two, the legacy dialog's "Yes,
+// proceed" (its exit row is the reworded dialog's too), and the legacy
+// dialog's inline pair ("Yes  No" or "Yes  2. No"). The inline pair was added
+// so a pane whose question has scrolled off and whose option row also wraps
+// does not read clear the way the stacked form never does — the words of
+// the pair are the same at any width, and the ordinal on the No option is
+// stripped by the claudeMCPTrustOrdinalWord skip before the words reach this
+// reader, so the two inline forms share the one ["Yes", "No"] entry.
+var claudeFolderTrustTailLabels = [][]string{
+	strings.Fields(claudeTrustAffirmativeLabel),
+	strings.Fields(claudeFolderTrustExitLabel),
+	strings.Fields(claudeLegacyTrustProceedLabel),
+	claudeFolderTrustInlinePairLabel,
+}
 
 // claudeFolderTrustTailFooters are the footers those dialogs paint, as words.
 var claudeFolderTrustTailFooters = [][]string{
@@ -48,8 +80,9 @@ var claudeFolderTrustTailFooters = [][]string{
 // claudeFolderTrustUnreadable: hold, send nothing, say why once.
 func claudeFolderTrustTail(lines []string, rows []claudeTrustRow) bool {
 	type word struct {
-		text string
-		row  int
+		text  string
+		row   int
+		boxed bool
 	}
 	var words []word
 	cursors := map[int]bool{} // index into words where a ❯ row begins
@@ -63,15 +96,26 @@ func claudeFolderTrustTail(lines []string, rows []claudeTrustRow) bool {
 		if row.selected {
 			cursors[len(words)] = true
 		}
+		boxed := claudeTrustBordered(lines[i])
 		for _, text := range strings.Fields(row.label) {
 			if !claudeMCPTrustOrdinalWord(text) {
-				words = append(words, word{text, i})
+				words = append(words, word{text, i, boxed})
 			}
 		}
 	}
 	texts := make([]string, len(words))
 	for i, w := range words {
 		texts[i] = w.text
+	}
+	// boxedSpan reports whether any word in the span was painted between a
+	// box's side borders: a composer's frame, never a folder-trust dialog's.
+	boxedSpan := func(span []word) bool {
+		for _, w := range span {
+			if w.boxed {
+				return true
+			}
+		}
+		return false
 	}
 
 	end := -1
@@ -93,6 +137,9 @@ func claudeFolderTrustTail(lines []string, rows []claudeTrustRow) bool {
 		matched := false
 		for _, label := range claudeFolderTrustTailLabels {
 			if n := at - len(label); n >= 0 && slices.Equal(texts[n:at], label) {
+				if slices.Equal(label, claudeFolderTrustInlinePairLabel) && boxedSpan(words[n:at]) {
+					continue
+				}
 				at, matched = n, true
 				starts[n] = true
 				break
@@ -104,6 +151,9 @@ func claudeFolderTrustTail(lines []string, rows []claudeTrustRow) bool {
 		cut := false
 		for _, label := range claudeFolderTrustTailLabels {
 			if at < len(label) && slices.Equal(texts[:at], label[len(label)-at:]) {
+				if slices.Equal(label, claudeFolderTrustInlinePairLabel) && boxedSpan(words[:at]) {
+					continue
+				}
 				cut = true
 			}
 		}
