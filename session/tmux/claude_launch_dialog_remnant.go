@@ -7,7 +7,7 @@ import (
 )
 
 // The remnant reader (#7618 item 2). A settled folder-trust dialog, the
-// reworded one or the legacy one, could still read clear in two ways every
+// reworded one or the legacy one, could still read clear in three shapes every
 // reader before this one missed, and a clear pane is one the create types its
 // prompt into:
 //
@@ -54,6 +54,20 @@ const (
 // the words.
 var claudeLaunchDialogGuideRows = []string{"Securityguide", "Learnmore"}
 
+// claudeLaunchDialogGuideRowsWhole are those rows as a build paints them
+// whole, squashed: the words alone, and the words with each URL a build has
+// printed after them (2.0.25's and 2.0.50's; 2.0.50 pads its URL with
+// zero-width spaces, which the reader drops).
+var claudeLaunchDialogGuideRowsWhole = func() []string {
+	var rows []string
+	for _, row := range claudeLaunchDialogGuideRows {
+		rows = append(rows, row,
+			row+"(https://docs.claude.com/s/claude-code-security)",
+			row+"(https://code.claude.com/docs/en/security)")
+	}
+	return rows
+}()
+
 // claudeLaunchDialogOptionBlocks are the option blocks those dialogs paint,
 // squashed, ordinals included: affirmative first (every build through
 // 2.1.2xx, and the legacy wording), and "No, exit" first (2.1.257 and 2.1.258,
@@ -65,7 +79,7 @@ var claudeLaunchDialogOptionBlocks = []string{
 }
 
 // claudeLaunchDialogRemnantOf reports a folder-trust dialog the pane shows a
-// remnant of, in either of the two shapes above.
+// remnant of, in any of the shapes above.
 func claudeLaunchDialogRemnantOf(screen visibleText) claudeLaunchDialogRemnantKind {
 	if claudeLaunchDialogUnderGuide(screen) {
 		return claudeLaunchDialogRemnantUnderGuide
@@ -96,10 +110,12 @@ func claudeLaunchDialogRemnantOf(screen visibleText) claudeLaunchDialogRemnantKi
 //	footer      a whole folder-trust footer, beginning a row, the last
 //	            content, and no ❯ row
 //
-// The guide row may be missing only when the option rows are the first thing
-// the pane shows: the 2.0.25 dialog at five columns paints a character a row,
-// and 60 rows do not reach up to its guide row. Then the pane's whole text is
-// the option characters and the footer.
+// The guide row may be missing, or cut by the top of the pane, only when
+// nothing is above it: the 2.0.25 dialog at five columns paints a character a
+// row, and 60 rows do not reach up to its guide row. Then the pane's whole
+// text is the end of a guide row as a build paints it whole
+// (claudeLaunchDialogGuideRowsWhole), if any of it shows, the option
+// characters, and the footer.
 //
 // Both ends are the dialog's own rows, whole, and nothing between them is
 // anything else, so a transcript that only mentions "Security guide" does not
@@ -144,8 +160,23 @@ func claudeLaunchDialogUnderGuide(screen visibleText) bool {
 			}
 		}
 	}
-	// No guide row: the option rows are the first content the pane shows.
-	return claudeLaunchDialogOptionsRemnant(pane.text[:end]) && !claudeLaunchDialogRuleFrom(pane, 0)
+	// No whole guide row: the option rows are the first content the pane
+	// shows, or the end of the guide row the top of the pane cut is.
+	if claudeLaunchDialogRuleFrom(pane, 0) {
+		return false
+	}
+	head := strings.ReplaceAll(pane.text[:end], "\u200b", "")
+	if claudeLaunchDialogOptionsRemnant(head) {
+		return true
+	}
+	for _, row := range claudeLaunchDialogGuideRowsWhole {
+		for cut := 1; cut < len(row); cut++ {
+			if options, ok := strings.CutPrefix(head, row[cut:]); ok && claudeLaunchDialogOptionsRemnant(options) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // claudeLaunchDialogOptionsRemnant reports whether text is what a pane leaves
@@ -181,26 +212,27 @@ func claudeCharactersOf(part, whole string) bool {
 
 // claudeLaunchDialogFooterTailMinWords is the least of a footer's end af reads
 // as that footer: its last three words, "Esc to cancel" or "Esc to exit".
-// Fewer ("to cancel", "cancel", "el") are words any text ends with.
+// Less ("to cancel", "cancel", "el") is how any text may end.
 const claudeLaunchDialogFooterTailMinWords = 3
 
-// claudeLaunchDialogFooterTails are the ends of the folder-trust footers a
-// pane too small for the whole footer shows, squashed: each footer from one
-// of its words on, down to its last claudeLaunchDialogFooterTailMinWords.
-var claudeLaunchDialogFooterTails = func() map[string]bool {
-	tails := map[string]bool{}
+// claudeLaunchDialogFooterEnd reports whether text, squashed, is the end of a
+// folder-trust footer: the footer from some character on, a narrow pane
+// breaking it inside a word as readily as between two, and at least its last
+// claudeLaunchDialogFooterTailMinWords words.
+func claudeLaunchDialogFooterEnd(text string) bool {
 	for _, footer := range claudeTrustFooters {
 		words := strings.Fields(footer)
-		for from := 0; from+claudeLaunchDialogFooterTailMinWords <= len(words); from++ {
-			tails[strings.Join(words[from:], "")] = true
+		least := strings.Join(words[len(words)-claudeLaunchDialogFooterTailMinWords:], "")
+		if len(text) >= len(least) && strings.HasSuffix(claudeSquash(footer), text) {
+			return true
 		}
 	}
-	return tails
-}()
+	return false
+}
 
 // claudeLaunchDialogFooterTail reports a pane that shows nothing but the end
-// of a folder-trust footer: every word on it, top to bottom, is the footer's
-// own, from one of its words to its last, on any number of rows. Claude Code
+// of a folder-trust footer: its text, top to bottom, is the footer's own, from
+// some character of it to its last, on any number of rows. Claude Code
 // keeps the bottom of a dialog on a pane too small for it, so a pane of two to
 // four rows and a few columns shows "· Esc" over "to" over "cancel".
 //
@@ -209,7 +241,7 @@ var claudeLaunchDialogFooterTails = func() map[string]bool {
 // composer paints both, and a pane that shows a composer shows more than this.
 func claudeLaunchDialogFooterTail(screen visibleText) bool {
 	pane := claudeLaunchDialogPaneOf(screen)
-	if !claudeLaunchDialogFooterTails[pane.text] ||
+	if !claudeLaunchDialogFooterEnd(pane.text) ||
 		claudeLaunchDialogAnySelected(pane, 0, len(pane.starts)) || claudeLaunchDialogRuleFrom(pane, 0) {
 		return false
 	}

@@ -27,6 +27,7 @@ var remnantNarrowFixtures = []string{
 	"claude_2_1_323_folder_trust_dialog_8_columns.ansi",
 	"claude_2_1_327_folder_trust_dialog_4_columns.ansi",
 	"claude_2_1_328_folder_trust_dialog_4_columns.ansi",
+	"claude_2_1_329_folder_trust_dialog_4_columns.ansi",
 }
 
 // remnantShortFixtures are settled real 2.1.328 dialogs on panes of 6 to 9
@@ -70,6 +71,10 @@ func TestIssue7618ShortPaneDialogNeverReadsClear(t *testing.T) {
 		content := readTrustFixture(t, name)
 		requireRemnantHold(t, name, content)
 	}
+	// A pane whose top cuts the guide row: its last word, then the option
+	// rows as 12 columns leave them, then the footer.
+	requireRemnantHold(t, "a cut guide row",
+		" guide\n\n  1.Yes, I\n ❯  trust th\n    folder\n  2. No, exi\n\n Enter to\n confirm ·\n Esc to\n cancel")
 }
 
 func TestIssue7618FooterTailNeverReadsClear(t *testing.T) {
@@ -81,6 +86,7 @@ func TestIssue7618FooterTailNeverReadsClear(t *testing.T) {
 		" Esc to\n cancel",
 		" · Esc\n to\n cancel",
 		" confirm · Esc to exit",
+		" rm ·\n Esc\n to\n can\n cel",
 	} {
 		requireRemnantHold(t, "footer tail", content)
 	}
@@ -134,6 +140,11 @@ func TestIssue7618RemnantReaderLeavesNonDialogPanesClear(t *testing.T) {
 		{"a real idle composer", idle},
 		{"a real idle composer at 10 columns", narrowIdle},
 		{"a real composer after a declined MCP dialog", composer},
+		{"a real 2.1.329 composer showing the exit notice", readTrustFixture(t, "claude_2_1_329_idle_composer_exit_notice_80x24.ansi")},
+		{"a real 2.1.329 composer showing the exit notice at 12 columns", readTrustFixture(t, "claude_2_1_329_idle_composer_exit_notice_12x24.ansi")},
+		{"a real 2.0.50 composer showing the exit notice", readTrustFixture(t, "claude_2_0_50_idle_composer_exit_notice_80x24.ansi")},
+		{"the dialog's bottom quoted above a real composer showing the exit notice",
+			quoted + readTrustFixture(t, "claude_2_1_329_idle_composer_exit_notice_80x24.ansi")},
 		{"Security guide in scrollback above a real composer", "● See the Security guide\n\n  Security guide\n\n" + idle},
 		{"Learn more in scrollback above a real composer", "  Learn more\n\n" + idle},
 		{"the dialog's bottom quoted above a real composer", quoted + idle},
@@ -150,6 +161,7 @@ func TestIssue7618RemnantReaderLeavesNonDialogPanesClear(t *testing.T) {
 		{"the footer's last two words", " to\n cancel"},
 		{"the footer's last word", " cancel"},
 		{"a cut word of the footer", " el"},
+		{"the footer cut inside its third word from the end", " sc\n to\n can\n cel"},
 		{"Esc to cancel under a prompt row", "❯ Esc to cancel"},
 		{"Esc to cancel between a composer's rules", composerRule + "\nEsc to cancel\n" + composerRule},
 		{"a guide row and footer with nothing between", "Security guide\n\nEnter to confirm · Esc to cancel"},
