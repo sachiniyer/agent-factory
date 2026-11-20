@@ -120,6 +120,12 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	lifetime := m.ctx
 	remoteSeq := m.remote.seq           // the task-mutation count this poll starts from
 	mutationSeq := m.projectMutationSeq // the project-mutation count likewise (#7522)
+	// Record the fetch as in flight on the loop, before the goroutine runs: a
+	// poll started here can still land after a delete that bumps
+	// projectMutationSeq past this seq, and a tombstone recorded by that delete
+	// must outlive the delete's own synchronous clean refresh to filter this
+	// poll's pre-delete session rows (#7522 review).
+	m.noteSnapshotFetchStarted(mutationSeq)
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
 	registryGen := m.registryViewGen

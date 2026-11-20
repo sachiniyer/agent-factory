@@ -108,10 +108,73 @@ func (m *home) noteProjectRebound(registryID, repoID string) {
 
 // clearGoneProjectRows drops the recorded absences a clean registry read
 // renders true on its own — the union then states the truth itself, and a
-// lingering tombstone would filter a row a re-registration revived.
-func (m *home) clearGoneProjectRows() {
-	m.goneProjectRepoIDs = nil
+// lingering tombstone would filter a row a re-registration revived — except
+// a delete tombstone a pre-mutation fetch still in flight could re-introduce
+// the deleted repo's pre-delete session rows for; that one stays as the
+// admission filter until the fetch lands (#7522 review).
+//
+// observedAtSeq is the clean read's own observation point. The on-loop sync
+// refresh passes the current projectMutationSeq, which postdates every
+// tombstone, so the seq comparison alone would clear them all exactly as the
+// pre-fix code did; the in-flight gate is what retains a tombstone while a
+// poll that began before the delete can still land. A landing poll passes the
+// seq its fetch captured: a pre-mutation poll never covers the tombstone it
+// predates, so its own observation retains the tombstone too.
+func (m *home) clearGoneProjectRows(observedAtSeq uint64) {
+	for repoID, seq := range m.goneProjectRepoIDs {
+		if observedAtSeq >= seq && !m.preMutationSnapshotFetchInFlight(seq) {
+			delete(m.goneProjectRepoIDs, repoID)
+		}
+	}
+	// A rebind tombstone's admission-filter role is only under a DEGRADED
+	// registry read (dropSessionGoneRows' rebind branch); a clean read replaces
+	// the row through the merge, and the shadow it installs carries the new
+	// binding, so a later degraded poll cannot re-emit the stale one. Clear
+	// wholesale.
 	m.goneProjectRegistryIDs = nil
+}
+
+// noteSnapshotFetchStarted records that an off-loop snapshot fetch carrying
+// mutationSeq is in flight. Paired with noteSnapshotFetchLanded on the
+// message that retires it; both run on the event loop, so the set never races
+// an off-loop read (#7522 review).
+func (m *home) noteSnapshotFetchStarted(mutationSeq uint64) {
+	if m.pendingSnapshotFetchSeqs == nil {
+		m.pendingSnapshotFetchSeqs = map[uint64]int{}
+	}
+	m.pendingSnapshotFetchSeqs[mutationSeq]++
+}
+
+// noteSnapshotFetchLanded retires an in-flight fetch: its observation is now
+// resolved through applySidebarProjects (observedAtSeq), so it can no longer
+// re-introduce a tombstoned repo's pre-delete rows. Tolerant of a seq that
+// was never started — a test can construct the message directly.
+func (m *home) noteSnapshotFetchLanded(mutationSeq uint64) {
+	if m.pendingSnapshotFetchSeqs == nil {
+		return
+	}
+	if c := m.pendingSnapshotFetchSeqs[mutationSeq]; c > 0 {
+		if c == 1 {
+			delete(m.pendingSnapshotFetchSeqs, mutationSeq)
+		} else {
+			m.pendingSnapshotFetchSeqs[mutationSeq] = c - 1
+		}
+	}
+}
+
+// preMutationSnapshotFetchInFlight reports whether an off-loop snapshot fetch
+// that began before the tombstone at tombstoneSeq is still in flight. Such a
+// poll captured a projectMutationSeq below the tombstone's, so its snapshot
+// read the registry and sessions BEFORE the delete and can still land
+// carrying the deleted repo's pre-delete session rows — the tombstone must
+// stay to filter them (#7522 review).
+func (m *home) preMutationSnapshotFetchInFlight(tombstoneSeq uint64) bool {
+	for seq := range m.pendingSnapshotFetchSeqs {
+		if seq < tombstoneSeq {
+			return true
+		}
+	}
+	return false
 }
 
 // retireGoneProjectRowsForLiveSessions drops the deletion tombstone for any
