@@ -367,7 +367,7 @@ func claudeLaunchDialogComposerBelow(pane claudeLaunchDialogPane, first, from in
 		boxed := (claudeTrustBordered(pane.lines[i]) && claudeTrustComposerBoxHas(pane.lines, pane.rows, i)) ||
 			(edge >= 0 && claudeTrustFrameRule(pane.lines[edge]) &&
 				!claudeTrustFrameClosingRule(pane.lines[edge]) &&
-				claudeTrustBoxPromptRow(pane.lines, pane.rows, edge) >= 0)
+				claudeTrustComposerBoxProven(pane.lines, pane.rows, edge))
 		acceptInlinePair := !boxed && !proseAbove
 		for _, label := range []string{
 			claudeSquash(claudeLegacyTrustProceedLabel),

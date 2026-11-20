@@ -30,6 +30,15 @@ const (
 	claudeLegacyInlineYesLabel = "Yes"
 )
 
+// claudeFolderTrustInlinePairLabel is the legacy dialog's inline pair as
+// words. It is the one tail label that can be drafted inside a composer's
+// box: every other label was already read from bordered rows the way it reads
+// from bare ones, so only the pair may not be assembled from words inside a
+// box that proves itself a composer's (claudeTrustComposerBoxHas — a prompt
+// row or a ❯ row inside it; the dialog's own frame has the same side borders,
+// so a border alone proves nothing, #7666, Codex review).
+var claudeFolderTrustInlinePairLabel = strings.Fields(claudeLegacyInlinePairText)
+
 // claudeFolderTrustTailLabels are the option rows the folder-trust dialogs
 // paint, as words: the reworded dialog's two, the legacy dialog's "Yes,
 // proceed" (its exit row is the reworded dialog's too), and the legacy
@@ -43,7 +52,7 @@ var claudeFolderTrustTailLabels = [][]string{
 	strings.Fields(claudeTrustAffirmativeLabel),
 	strings.Fields(claudeFolderTrustExitLabel),
 	strings.Fields(claudeLegacyTrustProceedLabel),
-	strings.Fields(claudeLegacyInlinePairText),
+	claudeFolderTrustInlinePairLabel,
 }
 
 // claudeFolderTrustTailFooters are the footers those dialogs paint, as words.
@@ -73,8 +82,9 @@ var claudeFolderTrustTailFooters = [][]string{
 // claudeFolderTrustUnreadable: hold, send nothing, say why once.
 func claudeFolderTrustTail(lines []string, rows []claudeTrustRow) bool {
 	type word struct {
-		text string
-		row  int
+		text  string
+		row   int
+		boxed bool
 	}
 	var words []word
 	cursors := map[int]bool{} // index into words where a ❯ row begins
@@ -88,15 +98,27 @@ func claudeFolderTrustTail(lines []string, rows []claudeTrustRow) bool {
 		if row.selected {
 			cursors[len(words)] = true
 		}
+		boxed := claudeTrustComposerBoxHas(lines, rows, i)
 		for _, text := range strings.Fields(row.label) {
 			if !claudeMCPTrustOrdinalWord(text) {
-				words = append(words, word{text, i})
+				words = append(words, word{text, i, boxed})
 			}
 		}
 	}
 	texts := make([]string, len(words))
 	for i, w := range words {
 		texts[i] = w.text
+	}
+	// boxedSpan reports whether any word in the span was painted inside a box
+	// that proves itself a composer's: a draft's rows, never the dialog's own
+	// frame (#7666).
+	boxedSpan := func(span []word) bool {
+		for _, w := range span {
+			if w.boxed {
+				return true
+			}
+		}
+		return false
 	}
 
 	end := -1
@@ -118,6 +140,9 @@ func claudeFolderTrustTail(lines []string, rows []claudeTrustRow) bool {
 		matched := false
 		for _, label := range claudeFolderTrustTailLabels {
 			if n := at - len(label); n >= 0 && slices.Equal(texts[n:at], label) {
+				if slices.Equal(label, claudeFolderTrustInlinePairLabel) && boxedSpan(words[n:at]) {
+					continue
+				}
 				at, matched = n, true
 				starts[n] = true
 				break
@@ -129,6 +154,9 @@ func claudeFolderTrustTail(lines []string, rows []claudeTrustRow) bool {
 		cut := false
 		for _, label := range claudeFolderTrustTailLabels {
 			if at < len(label) && slices.Equal(texts[:at], label[len(label)-at:]) {
+				if slices.Equal(label, claudeFolderTrustInlinePairLabel) && boxedSpan(words[:at]) {
+					continue
+				}
 				cut = true
 			}
 		}
