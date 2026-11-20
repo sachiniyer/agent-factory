@@ -309,6 +309,7 @@ func TestDockerAnsweredTransportFailure(t *testing.T) {
 	}{
 		{name: "daemon down unix socket", out: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", want: true},
 		{name: "daemon down tcp host", out: "Cannot connect to the Docker daemon at tcp://10.0.0.1:2376. Is the docker daemon running?", want: true},
+		{name: "daemon down docker 29+ banner", out: "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory", want: true},
 		{name: "socket permission denied", out: "Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: dial unix /var/run/docker.sock: connect: permission denied", want: true},
 		{name: "unresolvable pinned context", out: `context "missing": context not found`, want: true},
 		{name: "no such container is a real answer", out: "Error: No such container: deadbeefcafe0000", want: false},
@@ -339,6 +340,7 @@ func TestDockerReapDaemonUnreachableIsWorkspaceStateUnknown(t *testing.T) {
 		out  string
 	}{
 		{name: "daemon down", out: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"},
+		{name: "daemon down docker 29+ banner", out: "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory"},
 		{name: "socket permission denied", out: "Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: dial unix /var/run/docker.sock: connect: permission denied"},
 		{name: "unresolvable context", out: `context "missing": context not found`},
 	}

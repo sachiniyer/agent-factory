@@ -193,8 +193,16 @@ func dockerAnsweredTransportFailure(out []byte) bool {
 	s := string(out)
 	// The CLI's canonical "daemon unreachable" banner, emitted for a down or
 	// restarting dockerd, a refused/bad DOCKER_HOST, or a TLS mismatch — every
-	// form opens with "Cannot connect to the Docker daemon".
+	// pre-29 form opens with "Cannot connect to the Docker daemon".
 	if strings.Contains(s, "Cannot connect to the Docker daemon") {
+		return true
+	}
+	// Docker 29+ reworded the same client-side connection failure
+	// (moby/moby@67596f0, surfacing as moby/moby#52641): "failed to connect to
+	// the docker API at unix:///var/run/docker.sock; check if the path is
+	// correct and if the daemon is running: …". It is the same transport
+	// failure — the rm never reached an engine — under the new spelling.
+	if strings.Contains(s, "failed to connect to the docker API") {
 		return true
 	}
 	// A socket/endpoint permission denial, e.g. "Got permission denied while
