@@ -490,7 +490,13 @@ walks up from the workspace and fills only names that are unset — so on an
 account-scoped gemini session, the names a checked-in `.env` could use to
 redirect the account's identity are pinned by af at the agent boundary:
 `CLOUD_SHELL`, `GEMINI_CLI_USE_COMPUTE_ADC`, `GCE_METADATA_IP`,
-`GCE_METADATA_HOST`, `GIT_CONFIG_COUNT`, and `GIT_CONFIG_PARAMETERS`. The pin
+`GCE_METADATA_HOST`, `GIT_CONFIG_COUNT`, and `GIT_CONFIG_PARAMETERS` (the
+CLI's own reads), and the bundled `gcp-metadata`/`google-auth-library`
+reads `DEBUG_AUTH`, `DETECT_GCP_RETRIES`, and `METADATA_SERVER_DETECTION`
+(read by library code the CLI ships, not gemini-cli's own source — a
+source-tree measurement of the CLI alone misses them; none routes the
+credential, but each is dotenv-fillable, so af pins it to keep a `.env`
+from claiming it). The pin
 is **keep-if-set**: a name the operator forwards through the global
 `session_env_passthrough` carries the operator's own value — that is the
 claim af exists to deliver — while a name the operator did not forward is
@@ -503,13 +509,16 @@ entirely, and a `GIT_CONFIG_*` forward lets the operator — not the repository
 
 Gemini's first-party endpoint overrides (`CODE_ASSIST_ENDPOINT`,
 `CODE_ASSIST_API_VERSION`, `GOOGLE_GEMINI_BASE_URL`,
-`GOOGLE_VERTEX_BASE_URL`) are pinned on an account-scoped session too, but
+`GOOGLE_VERTEX_BASE_URL`, and the bundled-transport read
+`GOOGLE_CLOUD_UNIVERSE_DOMAIN`) are pinned on an account-scoped session too, but
 **unconditionally** rather than keep-if-set: the three names gemini reads with
 falsy checks are installed defined-and-empty (gemini then falls back to the
-first-party default), while `CODE_ASSIST_ENDPOINT` — which gemini reads with a
-nullish coalesce that would treat defined-empty as a real — broken —
-endpoint — is dropped from the ambient environment and installed with that
-default instead.
+first-party default), while `CODE_ASSIST_ENDPOINT` and
+`GOOGLE_CLOUD_UNIVERSE_DOMAIN` — which gemini and its bundled transports
+read with a nullish coalesce that would treat defined-empty as a real —
+broken — value (an endpoint, or the telemetry dial host
+`logging.<domain>`) — are dropped from the ambient environment and installed
+with that default instead.
 
 Where the keep-if-set test is evaluated is where the value lives, and that
 differs per backend:
@@ -524,7 +533,7 @@ differs per backend:
   reach the agent as if it were the claim; then at the agent's own exec filter
   the names still unset are pinned empty. Any other forwarded-but-unset name
   keeps the ordinary contract — no `-e`, so the image's own value stands.
-  `docker.run_args` entries naming any of the six — or the indexed
+  `docker.run_args` entries naming any of the nine — or the indexed
   `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pairs — are refused: forward the
   pairs through `session_env_passthrough` instead.
 - **SSH and sandbox** — in the remote launch shell, evaluated against the

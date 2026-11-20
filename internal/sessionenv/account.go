@@ -230,17 +230,33 @@ var accountLateEnvironmentNames = map[string]map[string]struct{}{
 	),
 }
 
-// accountLateEnvironmentValues is the same late-source defense for the ONE
-// routing name an empty pin cannot hold: gemini reads CODE_ASSIST_ENDPOINT
-// through a nullish coalesce, so defined-and-empty is a real — broken —
-// endpoint rather than a fallback. It is dropped from the ambient
-// environment (the same unconditional treatment: an image or run_args value
-// on the account-bound container path is repo-controlled) and installed
-// with the first-party default, so the `.env` loader finds the name defined
-// AND the endpoint actually works (#7531).
+// accountLateEnvironmentValues is the same late-source defense for the
+// routing names an empty pin cannot hold: each is read through a nullish
+// coalesce that treats defined-and-empty as a real — broken — value rather
+// than a fallback. The name is dropped from the ambient environment (the
+// same unconditional treatment: an image or run_args value on the
+// account-bound container path is repo-controlled) and installed with the
+// first-party default, so the `.env` loader finds the name defined AND the
+// value actually works (#7531).
+//
+//   - CODE_ASSIST_ENDPOINT is gemini-cli's own Code Assist endpoint, read
+//     through `??`; an empty pin becomes the endpoint and every call fails.
+//   - GOOGLE_CLOUD_UNIVERSE_DOMAIN is read ONLY by library code bundled into
+//     the CLI (@google-cloud/logging's LoggingServiceV2Client and
+//     googleapis-common's request builder, in @google/gemini-cli 0.42.0), not
+//     gemini-cli's own source — so a source-tree measurement of the CLI
+//     cannot find it. The read is `... ?? process.env["GOOGLE_CLOUD_UNIVERSE_DOMAIN"]
+//     ?? "googleapis.com"`, and the result becomes the dial host
+//     (`logging.<universe_domain>`). It is dotenv-fillable and unclaimed by
+//     af, so a workspace `.env` retargets every GCP-telemetry
+//     credential-bearing request to `logging.<attacker>`. An empty pin is
+//     non-nullish and yields `logging.` (no such host); re-asserting the
+//     first-party default `googleapis.com` holds the `.env` off AND keeps
+//     telemetry working — the same shape as CODE_ASSIST_ENDPOINT.
 var accountLateEnvironmentValues = map[string]map[string]string{
 	"gemini": {
-		"CODE_ASSIST_ENDPOINT": "https://cloudcode-pa.googleapis.com",
+		"CODE_ASSIST_ENDPOINT":         "https://cloudcode-pa.googleapis.com",
+		"GOOGLE_CLOUD_UNIVERSE_DOMAIN": "googleapis.com",
 	},
 }
 
@@ -260,8 +276,13 @@ var accountLateEnvironmentValues = map[string]map[string]string{
 // an ambient value can only be a competing identity, while a loader-filled
 // value may be deliberate operator config.
 //
-// The six names below are the complete set gemini 0.42.0's reads take from
-// the environment, measured on @google/gemini-cli 0.42.0:
+// The names below are the complete set gemini 0.42.0's reads take from
+// the environment, measured on @google/gemini-cli 0.42.0 INCLUDING the
+// library code the CLI bundles (@google-cloud/logging, googleapis-common,
+// google-auth-library, gcp-metadata): a measurement of the CLI's own
+// source tree alone misses the bundled-library reads, so the original
+// #7555 table omitted names the `.env` loader can claim even though the
+// CLI honors them.
 //
 //   - CLOUD_SHELL and GEMINI_CLI_USE_COMPUTE_ADC select the auth source
 //     (getAuthTypeFromEnv: `CLOUD_SHELL === "true" || GEMINI_CLI_USE_COMPUTE_ADC
@@ -273,8 +294,8 @@ var accountLateEnvironmentValues = map[string]map[string]string{
 //   - GCE_METADATA_IP and GCE_METADATA_HOST are the two environment links of
 //     the metadata endpoint (getBaseUrl: `GCE_METADATA_IP || GCE_METADATA_HOST
 //     || <compiled fallback>`). Empty is falsy on each and falls through to the
-//     compiled 169.254.169.254 constant — which is NOT an env read, so there
-//     is no third link to pin (HOST_ADDRESS is a module constant in the same
+//     compiled 169.254.169.254 constant — which is NOT an env read, so there is
+//     no third link to pin (HOST_ADDRESS is a module constant in the same
 //     gcp-metadata file, deliberately absent).
 //   - GIT_CONFIG_COUNT and GIT_CONFIG_PARAMETERS inject git configuration
 //     through the environment: strtoul("") is 0 with no error, and a count of
@@ -283,6 +304,22 @@ var accountLateEnvironmentValues = map[string]map[string]string{
 //     empty GIT_CONFIG_PARAMETERS parses to zero -c pairs. GIT_CONFIG is
 //     deliberately absent: git treats defined-empty as a real config-file
 //     path and fails, so it is documented, not pinned.
+//   - DEBUG_AUTH, DETECT_GCP_RETRIES, and METADATA_SERVER_DETECTION are read
+//     by the bundled gcp-metadata / google-auth-library transports inside
+//     @google/gemini-cli 0.42.0, not gemini-cli's own source. None routes the
+//     credential — DEBUG_AUTH only gates credential-bearing debug logging,
+//     and the two gcp-metadata names shape GCP-metadata detection — but each
+//     is dotenv-fillable and was unclaimed by af, so a workspace `.env` could
+//     set DEBUG_AUTH to log the session's OAuth material or shift detection.
+//     The keep-if-set empty pin claims each for af (the `.env` loader finds
+//     it defined) while an operator's forwarded value still survives. An
+//     empty value is inert here — debug is off on `""`, and detection falls
+//     to its compiled default rather than dialing a repo-chosen host — so the
+//     defense holds without breaking telemetry. GOOGLE_CLOUD_UNIVERSE_DOMAIN
+//     is read by the SAME bundled transports but is NOT in this table: its
+//     nullish-`??` read makes defined-empty a real (broken) value AND it
+//     routes the credential, so it is re-asserted to its first-party default
+//     in accountLateEnvironmentValues instead of pinned empty.
 //
 // No other agent has entries: nothing else has a measured dotenv fill channel
 // reading these names, and claude/codex keep GIT_CONFIG_* in docker.run_args
@@ -293,6 +330,7 @@ var accountLoaderFilledNames = map[string]map[string]struct{}{
 		"CLOUD_SHELL", "GEMINI_CLI_USE_COMPUTE_ADC",
 		"GCE_METADATA_IP", "GCE_METADATA_HOST",
 		"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+		"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION",
 	),
 }
 
@@ -744,15 +782,17 @@ var accountNonCredentialNames = map[string]map[string]struct{}{
 	// a cloud mode on AFTER that refusal has had its look, and a session that
 	// silently moved onto Vertex is not the operator's deployment choice being
 	// respected (#3609 review).
-	// The four routing names are classified kept for the taxonomy — they carry
+	// The routing names are classified kept for the taxonomy — they carry
 	// no identity of their own — but they are NOT passed through: each sits in
 	// accountLateEnvironmentNames or accountLateEnvironmentValues, so the
 	// ambient copy is dropped and the name is installed defined (empty for the
-	// falsy-safe reads, the first-party endpoint for CODE_ASSIST_ENDPOINT).
-	// A repository `.env` finds every one already set (#7531).
+	// falsy-safe reads, the first-party default for CODE_ASSIST_ENDPOINT and
+	// GOOGLE_CLOUD_UNIVERSE_DOMAIN). A repository `.env` finds every one
+	// already set (#7531, #7544 / #7582 review for GOOGLE_CLOUD_UNIVERSE_DOMAIN).
 	"gemini": nameSet(
 		"GEMINI_CLI_HOME", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
 		"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL",
 		"CODE_ASSIST_ENDPOINT", "CODE_ASSIST_API_VERSION",
+		"GOOGLE_CLOUD_UNIVERSE_DOMAIN",
 	),
 }

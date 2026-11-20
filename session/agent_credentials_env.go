@@ -436,20 +436,22 @@ var credentialMountRoutingNames = map[string]map[string]struct{}{
 	},
 }
 
-// credentialMountFirstPartyNames are late-loaded endpoint names af cannot
-// pin empty because the agent treats an empty value as REAL configuration:
-// gemini reads CODE_ASSIST_ENDPOINT with a nullish coalesce
-// (process.env[NAME] ?? compiled default), so a defined-empty value becomes
-// the endpoint and every Code Assist call fails. Instead af re-asserts the
-// name to its first-party default — the same constant the CLI compiles in —
-// after run_args, so the .env loader sees a defined name, a repo value is
-// dominated by Docker's last-wins rule, and an operator's own value still
-// wins through session_env_passthrough (#7531).
+// credentialMountFirstPartyNames are late-loaded names af cannot pin empty
+// because the agent treats an empty value as REAL configuration: gemini and
+// its bundled transports read each through a nullish `??` (process.env[NAME]
+// ?? compiled default), so a defined-empty value becomes the endpoint/host
+// and the call fails. af re-asserts each to its first-party default after
+// run_args — the .env loader sees a defined name, a repo value is dominated
+// by Docker's last-wins, and an operator's value still wins via passthrough
+// (#7531; GOOGLE_CLOUD_UNIVERSE_DOMAIN added in #7544 / #7582 review).
 var credentialMountFirstPartyNames = map[string]map[string]string{
 	tmux.ProgramGemini: {
 		// gemini-cli's compiled Code Assist endpoint
 		// (packages/core/src/code_assist/server.ts).
 		"CODE_ASSIST_ENDPOINT": "https://cloudcode-pa.googleapis.com",
+		// Bundled @google-cloud/logging `??` read whose result is the
+		// telemetry dial host — a repo .env retargets the credential.
+		"GOOGLE_CLOUD_UNIVERSE_DOMAIN": "googleapis.com",
 	},
 }
 

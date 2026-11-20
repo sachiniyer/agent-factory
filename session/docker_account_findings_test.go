@@ -195,6 +195,7 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	// set on CI runners. t.Setenv registers the restore, os.Unsetenv removes.
 	for _, name := range []string{
 		"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS",
+		"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION",
 		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 		"HTTP_PROXY", "GCE_METADATA_HOST",
 	} {
@@ -212,7 +213,8 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 
 	_, _ = createDockerAccountSession(f, "gemini",
 		[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
-			"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS", "HTTP_PROXY"})
+			"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS", "HTTP_PROXY",
+			"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION"})
 	require.NotEmpty(t, runArgs, "the account create never reached docker run")
 
 	// Forwarded+set: bare -e NAME, so docker resolves the operator's value.
@@ -221,13 +223,14 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	require.Equal(t, "GIT_CONFIG_COUNT", assignment,
 		"bare -e NAME: docker imports the daemon's value, dominating the image's ENV")
 
-	// Forwarded but NOT set: -e NAME= blanks the image's value — for the six
+	// Forwarded but NOT set: -e NAME= blanks the image's value — for the
 	// loader names and the indexed pair names a forwarded count animates.
 	// An image ENV value surviving the extras admission would read as the
 	// operator's claim at the scope hop, so defined-empty is the honest
 	// "forwarded but nothing arrived" answer.
 	for _, name := range []string{
 		"CLOUD_SHELL", "GIT_CONFIG_PARAMETERS",
+		"DEBUG_AUTH", "DETECT_GCP_RETRIES", "METADATA_SERVER_DETECTION",
 		"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 	} {
 		assignment, found = dockerEnvArg(runArgs, name)
@@ -298,6 +301,9 @@ func TestDockerAccount_RefusesLoaderFilledRunArgsWhereThePinExists(t *testing.T)
 		{"-e", "GIT_CONFIG_PARAMETERS=core.x=y"},
 		{"-e", "GIT_CONFIG_KEY_0=safe.directory"},
 		{"-e", "GIT_CONFIG_VALUE_0=/work"},
+		{"-e", "DEBUG_AUTH=true"},
+		{"-e", "DETECT_GCP_RETRIES=5"},
+		{"-e", "METADATA_SERVER_DETECTION=none"},
 		{"--env=GIT_CONFIG_PARAMETERS=core.x=y"},
 		{"-e=GIT_CONFIG_KEY_0=safe.directory"},
 	} {
