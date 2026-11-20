@@ -333,11 +333,19 @@ _expect_resize_rejected() {
 # `docker exec` shape itself — so AF_DRIVER_*/TMUX_TMPDIR mutations stay
 # out of this file's subshells (a subshell assignment would make every
 # later read here look stale to shellcheck). A private tmux server under
-# TMUX_TMPDIR is the case's OWN, never the sandbox's; `unset TMUX` keeps a
-# caller's attach pointer from redirecting the bare `tmux` calls the driver
-# makes, and the driver never exports its COLS/ROWS, so a real `docker
-# exec` shell inherits none — every inner script unsets both to reproduce
-# that env.
+# TMUX_TMPDIR is the case's OWN, never the sandbox's.
+#
+# A fresh `docker exec` shell carries none of the driver's env knobs, so
+# each inner script must start from the driver's OWN DEFAULTS for all of
+# them — unset every env-overridable `:=` tui-driver.sh reads (the
+# AF_DRIVER_*/AGENT_FACTORY_* config block and the internal _AF_* regex
+# knobs) plus the caller's TMUX attach pointer. A partial unset was the
+# #7693 bug: a host-exported AF_DRIVER_SESSION=perf-drive survived into
+# the inner shells, so the live-window sync and af_resize queried a
+# session that does not exist on the probe server and the cases failed on
+# a fixture the host steered. Every invocation below therefore also
+# exports a bogus AF_DRIVER_SESSION=perf-drive — the pin proving a host
+# export cannot steer the fixture.
 
 # A fresh shell sourcing the driver against a live 80x24 session must model
 # 80x24 — the same display-message read af_resize verifies its resize with.
@@ -347,7 +355,19 @@ _expect_geometry_syncs_from_live_window() (
     trap 'rm -rf "$probe"' EXIT
     cat > "$probe/inner.sh" <<'INNER'
         export TMUX_TMPDIR="$PROBE"
-        unset TMUX AF_DRIVER_COLS AF_DRIVER_ROWS
+        # Start from the driver's OWN defaults for every env-overridable `:=`
+        # it reads — no host export may steer the fixture (#7693).
+        unset TMUX \
+            AF_DRIVER_SESSION AF_DRIVER_COLS AF_DRIVER_ROWS AF_DRIVER_REPO \
+            AGENT_FACTORY_HOME AGENT_FACTORY_AUTO_UPDATE \
+            AF_DRIVER_BIN AF_DRIVER_BIN_WAIT AF_DRIVER_LAUNCH_ENV \
+            AF_DRIVER_TIMEOUT AF_DRIVER_POLL AF_DRIVER_KEY_SETTLE_POLLS \
+            AF_DRIVER_DETACH_KEY AF_DRIVER_STATE_DIR \
+            AF_DRIVER_SEND_LINE_ATTEMPTS AF_DRIVER_HELP_SEEN \
+            _AF_PANE_BORDER_FS _AF_RAIL_MARKER _AF_CONFIG_HINT \
+            _AF_TASKS_RUN_HINT _AF_TASKS_TEXT_STOP_HINT _AF_TASKS_LIST_TITLE \
+            _AF_TASKS_EDIT_TITLE _AF_TASKS_FOOTER \
+            _AF_TASKS_FRAME_TOP _AF_TASKS_FRAME_BOTTOM
         tmux new-session -d -s drive -x 80 -y 24 'sleep 300' || exit 1
         trap 'tmux kill-server 2>/dev/null || :' EXIT
         [ "$(tmux display-message -p -t drive '#{window_width}x#{window_height}')" = "80x24" ] || {
@@ -357,7 +377,8 @@ _expect_geometry_syncs_from_live_window() (
             printf 'a fresh shell modeled %sx%s; the live window is 80x24\n' \
                 "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" >&2; exit 1; }
 INNER
-    PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" bash "$probe/inner.sh"
+    PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" \
+        AF_DRIVER_SESSION=perf-drive bash "$probe/inner.sh"
 )
 
 # With no driver session the launch defaults stand — the sync must not
@@ -368,13 +389,26 @@ _expect_geometry_defaults_without_session() (
     trap 'rm -rf "$probe"' EXIT
     cat > "$probe/inner.sh" <<'INNER'
         export TMUX_TMPDIR="$PROBE"   # no server on it → no driver session
-        unset TMUX AF_DRIVER_COLS AF_DRIVER_ROWS
+        # Start from the driver's OWN defaults for every env-overridable `:=`
+        # it reads — no host export may steer the fixture (#7693).
+        unset TMUX \
+            AF_DRIVER_SESSION AF_DRIVER_COLS AF_DRIVER_ROWS AF_DRIVER_REPO \
+            AGENT_FACTORY_HOME AGENT_FACTORY_AUTO_UPDATE \
+            AF_DRIVER_BIN AF_DRIVER_BIN_WAIT AF_DRIVER_LAUNCH_ENV \
+            AF_DRIVER_TIMEOUT AF_DRIVER_POLL AF_DRIVER_KEY_SETTLE_POLLS \
+            AF_DRIVER_DETACH_KEY AF_DRIVER_STATE_DIR \
+            AF_DRIVER_SEND_LINE_ATTEMPTS AF_DRIVER_HELP_SEEN \
+            _AF_PANE_BORDER_FS _AF_RAIL_MARKER _AF_CONFIG_HINT \
+            _AF_TASKS_RUN_HINT _AF_TASKS_TEXT_STOP_HINT _AF_TASKS_LIST_TITLE \
+            _AF_TASKS_EDIT_TITLE _AF_TASKS_FOOTER \
+            _AF_TASKS_FRAME_TOP _AF_TASKS_FRAME_BOTTOM
         source "$DRIVER"
         [ "$AF_DRIVER_COLS" = 100 ] && [ "$AF_DRIVER_ROWS" = 30 ] || {
             printf 'no live session must keep the 100x30 defaults, modeled %sx%s\n' \
                 "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" >&2; exit 1; }
 INNER
-    PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" bash "$probe/inner.sh"
+    PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" \
+        AF_DRIVER_SESSION=perf-drive bash "$probe/inner.sh"
 )
 
 # A size an earlier shell's af_resize left behind is the live size the next
@@ -386,7 +420,19 @@ _expect_geometry_follows_resize_across_shells() (
     trap 'rm -rf "$probe"' EXIT
     cat > "$probe/inner.sh" <<'INNER'
         export TMUX_TMPDIR="$PROBE"
-        unset TMUX AF_DRIVER_COLS AF_DRIVER_ROWS
+        # Start from the driver's OWN defaults for every env-overridable `:=`
+        # it reads — no host export may steer the fixture (#7693).
+        unset TMUX \
+            AF_DRIVER_SESSION AF_DRIVER_COLS AF_DRIVER_ROWS AF_DRIVER_REPO \
+            AGENT_FACTORY_HOME AGENT_FACTORY_AUTO_UPDATE \
+            AF_DRIVER_BIN AF_DRIVER_BIN_WAIT AF_DRIVER_LAUNCH_ENV \
+            AF_DRIVER_TIMEOUT AF_DRIVER_POLL AF_DRIVER_KEY_SETTLE_POLLS \
+            AF_DRIVER_DETACH_KEY AF_DRIVER_STATE_DIR \
+            AF_DRIVER_SEND_LINE_ATTEMPTS AF_DRIVER_HELP_SEEN \
+            _AF_PANE_BORDER_FS _AF_RAIL_MARKER _AF_CONFIG_HINT \
+            _AF_TASKS_RUN_HINT _AF_TASKS_TEXT_STOP_HINT _AF_TASKS_LIST_TITLE \
+            _AF_TASKS_EDIT_TITLE _AF_TASKS_FOOTER \
+            _AF_TASKS_FRAME_TOP _AF_TASKS_FRAME_BOTTOM
         tmux new-session -d -s drive -x 80 -y 24 'sleep 300' || exit 1
         trap 'tmux kill-server 2>/dev/null || :' EXIT
         source "$DRIVER" || exit 1
@@ -394,7 +440,8 @@ _expect_geometry_follows_resize_across_shells() (
         bash -c 'source "$1"; [ "$AF_DRIVER_COLS" = 60 ] && [ "$AF_DRIVER_ROWS" = 15 ]' _ "$DRIVER" || {
             printf 'a later shell did not model the resized 60x15 window\n' >&2; exit 1; }
 INNER
-    PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" bash "$probe/inner.sh"
+    PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" \
+        AF_DRIVER_SESSION=perf-drive bash "$probe/inner.sh"
 )
 
 # An export-time pin is the caller's geometry choice — it survives the
@@ -415,6 +462,27 @@ _expect_geometry_launch_pin_wins_boot() (
     printf '#!/bin/sh\nexit 0\n' > "$probe/af-stub"
     chmod 755 "$probe/af-stub"
     cat > "$probe/inner.sh" <<'INNER'
+        # Start from the driver's OWN defaults for every env-overridable `:=`
+        # it reads — no host export may steer the fixture (#7693).
+        unset TMUX \
+            AF_DRIVER_SESSION AF_DRIVER_COLS AF_DRIVER_ROWS AF_DRIVER_REPO \
+            AGENT_FACTORY_HOME AGENT_FACTORY_AUTO_UPDATE \
+            AF_DRIVER_BIN AF_DRIVER_BIN_WAIT AF_DRIVER_LAUNCH_ENV \
+            AF_DRIVER_TIMEOUT AF_DRIVER_POLL AF_DRIVER_KEY_SETTLE_POLLS \
+            AF_DRIVER_DETACH_KEY AF_DRIVER_STATE_DIR \
+            AF_DRIVER_SEND_LINE_ATTEMPTS AF_DRIVER_HELP_SEEN \
+            _AF_PANE_BORDER_FS _AF_RAIL_MARKER _AF_CONFIG_HINT \
+            _AF_TASKS_RUN_HINT _AF_TASKS_TEXT_STOP_HINT _AF_TASKS_LIST_TITLE \
+            _AF_TASKS_EDIT_TITLE _AF_TASKS_FOOTER \
+            _AF_TASKS_FRAME_TOP _AF_TASKS_FRAME_BOTTOM
+        # This case's declared inputs, set inside the shell that sources the
+        # driver — the COLS/ROWS pin exactly the way record-demo.sh exports
+        # it, the rest keeping af_boot's state and stub inside $PROBE.
+        export AF_DRIVER_COLS=120 AF_DRIVER_ROWS=40
+        AGENT_FACTORY_HOME="$PROBE/home"
+        AF_DRIVER_STATE_DIR="$PROBE/state"
+        AF_DRIVER_BIN="$PROBE/af-stub"
+        AF_DRIVER_BIN_WAIT=5
         tmux() {
             printf '%s\n' "$*" >> "$PROBE/tmux.log"
             local c="" r=""
@@ -445,9 +513,7 @@ _expect_geometry_launch_pin_wins_boot() (
                 "$AF_DRIVER_COLS" "$AF_DRIVER_ROWS" >&2; exit 1; }
 INNER
     if ! PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" \
-        AF_DRIVER_COLS=120 AF_DRIVER_ROWS=40 \
-        AGENT_FACTORY_HOME="$probe/home" AF_DRIVER_STATE_DIR="$probe/state" \
-        AF_DRIVER_BIN="$probe/af-stub" AF_DRIVER_BIN_WAIT=5 bash "$probe/inner.sh"; then
+        AF_DRIVER_SESSION=perf-drive bash "$probe/inner.sh"; then
         cat "$probe/tmux.log" >&2 2>/dev/null || true
         return 1
     fi
