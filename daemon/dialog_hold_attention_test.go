@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 const (
 	holdKeyA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	holdKeyB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	holdKeyC = "cccccccccccccccccccccccccccccccc"
 
 	heldDialogReason = "af is waiting on a folder-trust dialog it can't read (pane 60×12). Widen the pane, or answer it in the session's agent tab."
 )
@@ -107,14 +109,17 @@ func TestIssue7635HeldDialogRaisesAttentionOnceWithItsReason(t *testing.T) {
 
 // #7635: the flag goes when the hold resolves — an observation with no hold.
 func TestIssue7635ResolvedHoldClearsItsOwnAttention(t *testing.T) {
-	manager, repoID, key, inst, _ := dialogHoldFixture(t)
+	manager, repoID, key, inst, advance := dialogHoldFixture(t)
 	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
 	require.True(t, inst.HasAttention())
 
 	feedDialogHold(manager, repoID, key, inst, nil)
 	require.False(t, inst.HasAttention(), "answered, cleared, or changed: the flag this path raised is withdrawn")
 	require.Empty(t, flaggedKey(inst), "and the pane is no longer flagged")
-	require.False(t, rememberedDialogHold(manager, key), "a resolved hold leaves nothing behind")
+	require.True(t, rememberedDialogHold(manager, key), "the raise bound still runs (#7648)")
+	advance(10 * time.Second) // the raise interval
+	feedDialogHold(manager, repoID, key, inst, nil)
+	require.False(t, rememberedDialogHold(manager, key), "a resolved hold leaves nothing behind once the bound lapses")
 }
 
 // #7635, attention ownership: this path clears only the request it raised. A
@@ -155,8 +160,10 @@ func TestIssue7635HeldDialogNeverClobbersAnAttentionRequest(t *testing.T) {
 	require.Equal(t, heldDialogReason, raised.Reason)
 }
 
-// #7635: a user's dismissal sticks. The same held pane is not raised again;
-// a pane that changed and settled into a hold again is a new one.
+// #7635: a user's dismissal sticks. The same held pane is not raised again,
+// and the hold a dismissal earns keeps a different key from talking around it
+// for its interval (#7648); a pane that changed and settled into a hold again
+// past it is a new one.
 func TestIssue7635DismissedHeldDialogIsNotRaisedAgain(t *testing.T) {
 	manager, repoID, key, inst, advance := dialogHoldFixture(t)
 	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
@@ -171,6 +178,9 @@ func TestIssue7635DismissedHeldDialogIsNotRaisedAgain(t *testing.T) {
 	}
 
 	advance(time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyB))
+	require.False(t, inst.HasAttention(), "a new key inside the dismissal's hold does not talk around it")
+	advance(30 * time.Second) // the dismissal's hold: three settle times
 	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyB))
 	require.True(t, inst.HasAttention(), "a pane that changed and settled again is a new hold")
 }
@@ -198,9 +208,14 @@ func TestIssue7635DismissalSurvivesADaemonRestart(t *testing.T) {
 		advance(time.Second)
 	}
 
-	// The hold resolving ends the dismissal with it: a later hold is new.
+	// The hold resolving ends the dismissal with it — but the hold a
+	// dismissal earns runs out its interval (#7648), so the same dialog
+	// re-held inside it is not raised until the bound has passed.
 	feedDialogHold(manager, repoID, key, inst, nil)
 	require.Empty(t, flaggedKey(inst))
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
+	require.False(t, inst.HasAttention(), "inside the dismissal's hold the same key does not re-raise")
+	advance(30 * time.Second) // the dismissal's hold: three settle times
 	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
 	require.True(t, inst.HasAttention(), "the same dialog on a later occasion is a new hold")
 }
@@ -348,14 +363,14 @@ func TestIssue7635ChangedHeldDialogKeepsOrReplacesItsOwnRequest(t *testing.T) {
 	first := inst.Attention()
 	require.NotNil(t, first)
 
-	advance(time.Second)
+	advance(10 * time.Second) // the raise interval (#7648)
 	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyB))
 	kept := inst.Attention()
 	require.NotNil(t, kept)
 	require.True(t, kept.SetAt.Equal(first.SetAt), "the same words: the request already on the row flags the new hold")
 	require.Equal(t, holdKeyB, flaggedKey(inst))
 
-	advance(time.Second)
+	advance(10 * time.Second)
 	narrower := heldDialog(holdKeyA)
 	narrower.Width = 41
 	feedDialogHold(manager, repoID, key, inst, narrower)
@@ -368,6 +383,90 @@ func TestIssue7635ChangedHeldDialogKeepsOrReplacesItsOwnRequest(t *testing.T) {
 	feedDialogHold(manager, repoID, key, inst, nil)
 	require.False(t, inst.HasAttention())
 	require.Zero(t, queued, "nothing this path does is asynchronous")
+}
+
+// #7648 item 3: raises for one session are rate-bounded, whatever keys a
+// peer sends. A sandbox that reports a fresh, validly shaped hold key on
+// every poll gets at most one raise per settle window — one persist and one
+// publish per 10s instead of per poll — and the session stays flagged for the
+// pane that was actually raised, not for the peer's latest key.
+func TestIssue7648FreshKeyEveryPollRaisesAtMostOncePerInterval(t *testing.T) {
+	manager, repoID, key, inst, advance := dialogHoldFixture(t)
+
+	seen := map[string]bool{}
+	raises := 0
+	const polls = 35
+	for i := 0; i < polls; i++ {
+		feedDialogHold(manager, repoID, key, inst, heldDialog(fmt.Sprintf("%032x", i)))
+		if flagged := flaggedKey(inst); flagged != "" && !seen[flagged] {
+			seen[flagged] = true
+			raises++
+		}
+		advance(time.Second)
+	}
+	// Raises land at polls 0, 10, 20 and 30: one per 10s raise interval.
+	require.LessOrEqual(t, raises, 4, "one raise per settle window whatever keys a peer sends")
+	require.Equal(t, fmt.Sprintf("%032x", 30), flaggedKey(inst),
+		"the flagged pane is the last one raised, not the peer's latest key")
+}
+
+// #7648 item 3: a dismissal holds for at least a minimum interval — three
+// settle times — even when a peer sends a new, validly shaped key on every
+// poll. The suppression runs from the first poll that saw the notice gone.
+func TestIssue7648DismissalSuppressesFreshKeysForTheHold(t *testing.T) {
+	manager, repoID, key, inst, advance := dialogHoldFixture(t)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
+	require.True(t, inst.HasAttention())
+	_, cleared := inst.ClearAttention(time.Time{})
+	require.True(t, cleared)
+
+	// One fresh key per poll: none raises while the dismissal's hold runs.
+	var lastKey string
+	for i := 0; i < 30; i++ {
+		advance(time.Second)
+		lastKey = fmt.Sprintf("%032x", i+1)
+		feedDialogHold(manager, repoID, key, inst, heldDialog(lastKey))
+		require.False(t, inst.HasAttention(), "poll %d: a dismissal suppresses fresh keys for the hold", i)
+		require.Equal(t, holdKeyA, flaggedKey(inst), "and the session stays flagged for the dismissed pane")
+	}
+
+	advance(time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(lastKey))
+	require.True(t, inst.HasAttention(), "a genuinely different pane is surfaced once the hold has run")
+	require.Equal(t, lastKey, flaggedKey(inst))
+}
+
+// #7648 review: a raise ends the bound the dismissal before it earned, so a
+// dismissal made on the new notice gets its own full hold — not the scraps of
+// the one before.
+func TestIssue7648DismissalAfterAReraiseGetsItsOwnHold(t *testing.T) {
+	manager, repoID, key, inst, advance := dialogHoldFixture(t)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
+	_, cleared := inst.ClearAttention(time.Time{})
+	require.True(t, cleared)
+
+	// The dismissal is seen once, then its hold runs out under the churn.
+	advance(time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
+	advance(30 * time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyB))
+	require.True(t, inst.HasAttention())
+	require.Equal(t, holdKeyB, flaggedKey(inst))
+
+	// Dismissed before the next poll: its hold runs the full interval, not
+	// what was left of the first one's.
+	_, cleared = inst.ClearAttention(time.Time{})
+	require.True(t, cleared)
+	advance(time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyC))
+	require.False(t, inst.HasAttention(), "the second dismissal is its own hold, not the first's scraps")
+	advance(29 * time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyC))
+	require.False(t, inst.HasAttention(), "still inside the second dismissal's hold")
+	advance(time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyC))
+	require.True(t, inst.HasAttention(), "a genuinely different pane is surfaced once the hold has run")
+	require.Equal(t, holdKeyC, flaggedKey(inst))
 }
 
 // #7635 review R3: a peer's `since` decides nothing. A dismissed notice is not
@@ -501,8 +600,19 @@ func TestDialogHoldStep(t *testing.T) {
 	next, _ = dialogHoldStep(next, hold, holdKeyA, false, at)
 	require.Nil(t, next.due, "nor after its notice was dismissed")
 
+	// #7648: inside the dismissal's hold a different key raises nothing —
+	// while the flagged mark stands, and after it comes down.
+	suppressed, _ := dialogHoldStep(next, heldDialog(holdKeyB), holdKeyA, false, at)
+	require.Nil(t, suppressed.due, "the dismissal's hold covers a fresh key")
+	marksGone, keep := dialogHoldStep(next, nil, "", false, at.Add(5*time.Second))
+	require.True(t, keep, "the bound is remembered once the marks are down")
+	suppressed, _ = dialogHoldStep(marksGone, heldDialog(holdKeyB), "", false, at.Add(10*time.Second))
+	require.Nil(t, suppressed.due, "and still covers the fresh key")
+	free, _ := dialogHoldStep(marksGone, heldDialog(holdKeyB), "", false, at.Add(31*time.Second))
+	require.NotNil(t, free.due, "until the hold — three settle times — has run")
+
 	changed, _ := dialogHoldStep(next, heldDialog(holdKeyB), holdKeyA, true, at)
-	require.NotNil(t, changed.due, "another pane is due")
+	require.NotNil(t, changed.due, "a request live on the row is no dismissal")
 	require.False(t, changed.resolveDue, "and nothing is taken down for it here")
 
 	// A hold this daemon saw resolves at once.

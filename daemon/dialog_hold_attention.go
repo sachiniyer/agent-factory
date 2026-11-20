@@ -18,7 +18,10 @@ import (
 //     flagged for. A hold is flagged once per key, so a dismissed notice is
 //     not raised again for the same pane — in this daemon's life or the next.
 //
-// What is in memory here is only what one poll owes the next.
+// What is in memory here is what one poll owes the next, and the bound that
+// makes a peer churning hold keys cost one write per interval instead of one
+// per poll (#7648). Both are per runtime: a replacement starts a fresh
+// budget, the way a dismissal belongs to the pane it was made on.
 
 // dialogHoldEntry is that memory for one session. Guarded by
 // Manager.dialogHoldMu.
@@ -35,6 +38,15 @@ type dialogHoldEntry struct {
 	// quietSince is the first no-hold observation of a session that carries
 	// marks this daemon never saw a hold for. Zero otherwise.
 	quietSince time.Time
+	// raisedAt is when this daemon last completed a raise for this session:
+	// the bound on raises is one per dialogHoldRaiseInterval, whatever keys
+	// a peer sends.
+	raisedAt time.Time
+	// dismissedAt is when a flagged session was first seen without this
+	// path's request on the row — the notice was dismissed, or replaced by
+	// someone else's. A hold under another key does not raise until
+	// dialogHoldDismissalHold has passed from then.
+	dismissedAt time.Time
 	// observed is the runtime whose observation left due or resolveDue owed.
 	// What one pane's observation owes is never paid on another: a flush that
 	// finds the runtime replaced meanwhile drops it.
@@ -50,6 +62,50 @@ type dialogHoldEntry struct {
 // covers the recorder and a slow first poll.
 const dialogHoldRestartGrace = 30 * time.Second
 
+// dialogHoldRaiseInterval bounds raises for one session to at most one per
+// settle time, whatever keys a peer sends (#7648): a sandbox whose agent
+// server reports a new, validly shaped hold key on every poll costs one row
+// persist and one publish per interval, not per poll.
+const dialogHoldRaiseInterval = 10 * time.Second
+
+// dialogHoldDismissalHold is how long a dismissal suppresses raises for keys
+// the session is not flagged for: three settle times, the margin
+// dialogHoldRestartGrace takes. A dismissal already sticks for the same key
+// for the life of the held pane; this keeps a peer that mints a new key per
+// poll — or flaps its hold off and back on to take the flag down — from
+// talking around it.
+const dialogHoldDismissalHold = 3 * dialogHoldRaiseInterval
+
+// suppresses reports whether the entry's bounds still hold at now: a raise
+// inside the raise interval, or a dismissal inside its hold. The same check
+// keeps an entry remembered until the bound lapses — dropping it the moment
+// the marks come down would let a flapping peer spend it again at once.
+func (e dialogHoldEntry) suppresses(now time.Time) bool {
+	return (!e.raisedAt.IsZero() && now.Sub(e.raisedAt) < dialogHoldRaiseInterval) ||
+		(!e.dismissedAt.IsZero() && now.Sub(e.dismissedAt) < dialogHoldDismissalHold)
+}
+
+// noteDismissal applies what the observation's marks say about a dismissal. A
+// flagged key with none of this path's request on the row means the notice
+// was dismissed or replaced by someone else's: the hold it earns runs from
+// when that was first seen, so a restarted daemon or a peer that re-asks
+// every poll cannot roll the window. A live request is no dismissal — and a
+// raise that lands after one ends its bound, so a later dismissal's interval
+// is not shortened by it.
+func (e dialogHoldEntry) noteDismissal(flagged string, owned bool, now time.Time) dialogHoldEntry {
+	if flagged == "" {
+		return e // a bound outlives the marks it was earned on
+	}
+	if !owned {
+		if e.dismissedAt.IsZero() {
+			e.dismissedAt = now
+		}
+		return e
+	}
+	e.dismissedAt = time.Time{}
+	return e
+}
+
 // dialogHoldStep is the poll's whole decision about one observation, as a pure
 // function. entry is what it remembered (the zero value for nothing), hold the
 // observation's normalized hold or nil, flagged and owned the session's
@@ -58,19 +114,36 @@ const dialogHoldRestartGrace = 30 * time.Second
 // session.
 func dialogHoldStep(entry dialogHoldEntry, hold *session.DialogHold, flagged string, owned bool, now time.Time) (next dialogHoldEntry, keep bool) {
 	if hold != nil {
-		next = dialogHoldEntry{seenHold: true}
-		if flagged != hold.Key {
-			due := *hold
-			next.due = &due
+		next = dialogHoldEntry{
+			seenHold: true, raisedAt: entry.raisedAt, dismissedAt: entry.dismissedAt,
+		}.noteDismissal(flagged, owned, now)
+		if flagged == hold.Key {
+			// Flagged for this very pane already: raised, or raised and dismissed.
+			return next, true
 		}
-		// Flagged for this very pane already: raised, or raised and dismissed.
+		if next.suppresses(now) {
+			return next, true // bounded: too soon after a raise or a dismissal
+		}
+		due := *hold
+		next.due = &due
 		return next, true
 	}
 	if flagged == "" && !owned {
+		if entry.suppresses(now) {
+			// The hold and its marks are gone, but a bound this session
+			// earned still runs: keep it until it lapses, or a peer that
+			// flaps the hold off and back on spends it again each poll.
+			return dialogHoldEntry{seenHold: entry.seenHold, raisedAt: entry.raisedAt, dismissedAt: entry.dismissedAt}, true
+		}
 		return dialogHoldEntry{}, false // no hold, no marks: nothing to do
 	}
 	// No hold, and marks to take down — once that is known to be true.
-	next = dialogHoldEntry{seenHold: entry.seenHold, quietSince: entry.quietSince}
+	next = dialogHoldEntry{
+		seenHold:    entry.seenHold,
+		quietSince:  entry.quietSince,
+		raisedAt:    entry.raisedAt,
+		dismissedAt: entry.dismissedAt,
+	}.noteDismissal(flagged, owned, now)
 	if !next.seenHold {
 		if next.quietSince.IsZero() {
 			next.quietSince = now
@@ -104,6 +177,12 @@ func (m *Manager) noteDialogHold(key string, instance *session.Instance, generat
 	var prior dialogHoldEntry
 	if entry != nil {
 		prior = *entry
+		if prior.observed != generation {
+			// The runtime these bounds were earned on was replaced: a
+			// dismissal belongs to the pane it was made on, and a raise on a
+			// retired pane does not spend the replacement's interval.
+			prior.raisedAt, prior.dismissedAt = time.Time{}, time.Time{}
+		}
 	}
 	next, keep := dialogHoldStep(prior, hold, flagged, !ownedSetAt.IsZero(), nowFunc())
 	if !keep {
@@ -180,11 +259,18 @@ func (m *Manager) flushDialogHold(repoID, key string, instance *session.Instance
 	}
 	// Settle only what this flush did; the poll may have moved on meanwhile.
 	if hold != nil {
+		// A raise that lands ends the bound the dismissal before it earned:
+		// the next dismissal's hold runs its own full interval from when it
+		// is first seen, not the scraps of this one.
+		now.raisedAt, now.dismissedAt = nowFunc(), time.Time{}
 		if now.due != nil && now.due.Key == hold.Key {
 			now.due = nil
 		}
 	} else if now.resolveDue {
-		delete(m.dialogHolds, key)
+		now.due, now.resolveDue = nil, false
+		if !now.suppresses(nowFunc()) {
+			delete(m.dialogHolds, key)
+		}
 	}
 }
 
