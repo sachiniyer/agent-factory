@@ -415,43 +415,6 @@ func (p *dockerProvisioner) warnBlankedCredentialNames() {
 	}
 }
 
-// warnDiscardedAccountEnvNames is the account-scoped half of the same
-// notice (#7668): names the image's ENV or docker.run_args actually set
-// that THIS launch's pipeline will not deliver — the identity pins and
-// fills plus every keep-if-set name the operator did not forward — minus
-// the proxy case twins reseated to a forwarded sibling's value (the
-// operator's own value still arrives). Reported once, names only, with
-// the same remedy the mount path gives. The caller already printed the
-// inspect-failure line, which says run_args coverage alone is partial.
-func (p *dockerProvisioner) warnDiscardedAccountEnvNames(imageEnv []string, inspected bool) {
-	_ = inspected // the caller's single inspect-failure line covers the account case too
-	if p.spec.Account.Dir == "" {
-		return
-	}
-	agent := p.spec.Account.Agent
-	discarded := discardSetForWarning(agent, p.spec.SessionEnvPassthrough)
-	if len(discarded) == 0 {
-		return
-	}
-	var set []string
-	for name := range discarded {
-		set = append(set, name)
-	}
-	named := credentialMountOverriddenWarning(imageEnv, p.runArgs, set)
-	var kept []string
-	for _, name := range named {
-		// An unforwarded proxy spelling whose case twin was forwarded
-		// reseats to the twin's daemon-env value at the boundary — an
-		// operator value is delivered, so it is not a discard.
-		if sib, twin := sessionenv.ProxyEnvCaseTwin(name); twin &&
-			slices.Contains(p.spec.SessionEnvPassthrough, sib) && os.Getenv(sib) != "" {
-			continue
-		}
-		kept = append(kept, name)
-	}
-	logDiscardedAccountEnvNames("docker", agent, "the image or docker.run_args", kept)
-}
-
 // dockerProvisioner holds the state of one container provisioning so its steps
 // (run/clone/cp/exec/port) and its reap closure share the container ID.
 type dockerProvisioner struct {
