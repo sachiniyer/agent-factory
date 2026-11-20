@@ -199,9 +199,9 @@ func TestRedactInstancesFallbackRedactsPushMode(t *testing.T) {
 
 // TestRedactInstancesFallbackRedactsAllNewFields is the comprehensive guard: a
 // single record that fails the typed decode and carries every field the #5571
-// workstream, #5189, #5105, and #5459 added typed redactions for. Each field
-// uses a distinct sentinel so a surviving value pinpoints exactly which key
-// leaked. Negative controls (worktree_path, title, path) are redacted too,
+// workstream, #5189, #5105, #5459, and #7469 added typed redactions for. Each
+// field uses a distinct sentinel so a surviving value pinpoints exactly which
+// key leaked. Negative controls (worktree_path, title, path) are redacted too,
 // proving the fallback arm itself ran and the leak was the missing-key set.
 func TestRedactInstancesFallbackRedactsAllNewFields(t *testing.T) {
 	r := &redactor{}
@@ -231,7 +231,9 @@ func TestRedactInstancesFallbackRedactsAllNewFields(t *testing.T) {
 		},
 		"tabs": [
 			{"id": "tab-1", "push_mode": "ZZPUSHMODEZZ"}
-		]
+		],
+		"runtime_server_socket": "/tmp/ZZSOCKETDIRZZ/ZZSOCKETLANEZZ/af",
+		"runtime_server_pid": 1234
 	}]`)
 	out := string(r.redactInstancesJSON(raw))
 	// Every sentinel that should be redacted — the new fields plus the
@@ -244,9 +246,10 @@ func TestRedactInstancesFallbackRedactsAllNewFields(t *testing.T) {
 		"ZZWTZZ", // worktree_path, a negative control already in the map
 		"ZZMISSREASONZZ",
 		"ZZPUSHMODEZZ",
-		"ZZTITLEZZ", // title, a negative control already in the map
-		"ZZPATHZZ",  // path, a negative control already in the map
-		"ZZREPOZZ",  // repo_path, a negative control already in the map
+		"ZZTITLEZZ",                       // title, a negative control already in the map
+		"ZZPATHZZ",                        // path, a negative control already in the map
+		"ZZREPOZZ",                        // repo_path, a negative control already in the map
+		"ZZSOCKETDIRZZ", "ZZSOCKETLANEZZ", // runtime_server_socket (#7469)
 	} {
 		if strings.Contains(out, leak) {
 			t.Errorf("fallback path leaked %q:\n%s", leak, out)
@@ -255,9 +258,11 @@ func TestRedactInstancesFallbackRedactsAllNewFields(t *testing.T) {
 	// Structural fields outside the dropped objects survive the fallback walk.
 	// branch/head inside prune_intent do NOT survive: prune_intent is dropped
 	// wholesale (the same trade runtime_cleanup and attention make), so the
-	// per-field layout inside it is not relied on on a shape this path could not
-	// parse.
-	for _, keep := range []string{"leg-1", "feature/test", "tab-1"} {
+	// per-field layout inside a record this path could not parse is not relied
+	// on. The runtime_server_pid stays — it is a structural key collapsePathField
+	// does not touch on the typed path, so it survives here too.
+	for _, keep := range []string{"leg-1", "feature/test", "tab-1", "1234",
+		`"runtime_server_socket"`} {
 		if !strings.Contains(out, keep) {
 			t.Errorf("fallback dropped safe structural field %q:\n%s", keep, out)
 		}
@@ -265,5 +270,57 @@ func TestRedactInstancesFallbackRedactsAllNewFields(t *testing.T) {
 	// The redaction marker is present.
 	if !strings.Contains(out, redactedMarker) {
 		t.Errorf("expected redaction markers on the fallback path:\n%s", out)
+	}
+}
+
+// TestRedactInstancesFallbackRedactsRuntimeServerSocket is the #7469 fallback
+// guard for the tmux server socket path. redactInstanceData collapses
+// RuntimeServerSocket via collapsePathField — the path sits under TMUX_TMPDIR
+// and can carry a username and a lane scratch dir, user-chosen text the residual
+// text scrub cannot reach on an arbitrary /tmp path (it matches only registered
+// roots and $HOME, not /tmp or TMPDIR text). A record that fails the typed decode
+// (here `status` is a string) must still have the socket redacted on the generic
+// path — before runtime_server_socket was mirrored into sensitiveJSONKeys the
+// value leaked verbatim into a publicly shared bundle while title beside it was
+// blanked, strictly less private than the accepted record collapsePathField
+// collapses to [redacted].
+func TestRedactInstancesFallbackRedactsRuntimeServerSocket(t *testing.T) {
+	r := &redactor{}
+	raw := json.RawMessage(`[{
+		"id": "leg-1",
+		"status": "legacy-string-status",
+		"title": "ZZTITLEZZ",
+		"runtime_server_socket": "/tmp/ZZTMPTMPDIRZZ/laneZZ/af",
+		"runtime_server_pid": 1234,
+		"runtime_server_session_id": "$1"
+	}]`)
+	out := string(r.redactInstancesJSON(raw))
+	// Every user-chosen component of the socket path must be gone: the TMUX_TMPDIR
+	// segment, the username-bearing lane scratch dir, and the basename.
+	for _, leak := range []string{"ZZTMPTMPDIRZZ", "laneZZ"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("fallback path leaked %q from runtime_server_socket:\n%s", leak, out)
+		}
+	}
+	// The runtime_server_socket key survives (with a redacted value) so triage
+	// still sees the row recorded a server socket.
+	if !strings.Contains(out, `"runtime_server_socket"`) {
+		t.Errorf("fallback dropped the runtime_server_socket key — the marker should keep it for triage:\n%s", out)
+	}
+	if !strings.Contains(out, redactedMarker) {
+		t.Errorf("expected the redaction marker on the fallback path:\n%s", out)
+	}
+	// The pid/StartID pair and tmux's machine-minted session id stay verbatim on
+	// the typed path (they are structural keys collapsePathField does not touch),
+	// so they survive here too — only the socket scalar is blanked.
+	if !strings.Contains(out, "1234") || !strings.Contains(out, "$1") {
+		t.Errorf("fallback dropped safe structural runtime fields:\n%s", out)
+	}
+	// title is redacted (negative control proving the fallback arm ran).
+	if strings.Contains(out, "ZZTITLEZZ") {
+		t.Errorf("fallback path leaked the title sentinel:\n%s", out)
+	}
+	if !strings.Contains(out, "leg-1") || !strings.Contains(out, "legacy-string-status") {
+		t.Errorf("fallback dropped safe structural fields:\n%s", out)
 	}
 }

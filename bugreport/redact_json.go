@@ -330,6 +330,17 @@ var sensitiveJSONKeys = map[string]bool{
 	// wholesale — on a shape it could not parse it cannot distinguish the two
 	// enum words from a hand-edited string.
 	"push_mode": true,
+	// runtime_server_socket is the tmux server socket path redactInstanceData
+	// collapses via collapsePathField (#7469): it sits under TMUX_TMPDIR and
+	// can carry a username and a lane scratch dir — user-chosen text the
+	// residual text scrub cannot reach on an arbitrary /tmp path (the scrub
+	// matches only registered roots and $HOME, not /tmp or TMPDIR text). It
+	// takes Path's trade: the pid/StartID pair and tmux's machine-minted
+	// session id beside it are structural keys absent from this map, so they
+	// survive here exactly as they survive verbatim on the typed path; only
+	// the socket scalar is blanked, the same whole-value treatment path and
+	// path_bytes give the other collapsePathField-collapsed scalars.
+	"runtime_server_socket": true,
 }
 
 // redactUnknownJSON recursively rebuilds a decoded JSON value, blanking any
