@@ -105,11 +105,36 @@ func claudeSquash(s string) string {
 }
 
 // The folder-trust dialogs' option labels and footers, squashed.
+//
+// The claudeLaunchDialogLabel constants name the slice indices
+// claudeFolderTrustOptionsRead classifies a block by, so the classifier does
+// not read its own slice layout by raw number.
+const (
+	claudeLaunchDialogLabelAffirmative = iota
+	claudeLaunchDialogLabelLegacyProceed
+	claudeLaunchDialogLabelExit
+	// claudeLaunchDialogLabelInlineYesNo: the legacy dialog's single-row inline
+	// picker "Yes  No" (claudeLegacyInlinePairText), squashed "YesNo". The
+	// inline pair IS the legacy dialog's affirmative — the cursor sits on its
+	// Yes — and a pane too narrow for the question to fit one row leaves the
+	// pair on its own row above the footer, so the re-wrap tail reader has to
+	// consume it as the legacy affirmative (#7349's gap, fixed alongside
+	// #7584's deferral).
+	claudeLaunchDialogLabelInlineYesNo
+	// claudeLaunchDialogLabelInlineYesNoOrdinal: the same pair with the No
+	// option's ordinal, "Yes  2. No" (claudeLegacyInlineOrdinalPairText),
+	// squashed "Yes2.No". trimClaudeTrustOrdinal drops only the LEADING "1.",
+	// so the mid-row "2." stays in the label.
+	claudeLaunchDialogLabelInlineYesNoOrdinal
+)
+
 var (
 	claudeLaunchDialogLabels = []string{
 		claudeSquash(claudeTrustAffirmativeLabel),
 		claudeSquash(claudeLegacyTrustProceedLabel),
 		claudeSquash(claudeFolderTrustExitLabel),
+		claudeSquash(claudeLegacyInlinePairText),
+		claudeSquash(claudeLegacyInlineOrdinalPairText),
 	}
 	claudeLaunchDialogFooters = []string{
 		claudeSquash(claudeFolderTrustFooter),
@@ -142,12 +167,29 @@ var claudeLaunchDialogOptionSets = []claudeLaunchDialogOptions{
 }
 
 // claudeFolderTrustOptionsRead: the block counts once it holds an affirmative
-// label, and "Yes, proceed" or the legacy footer alone names the legacy dialog.
+// label, and "Yes, proceed", the inline pair, or the legacy footer alone names
+// the legacy dialog.
+//
+// The legacy dialog paints its affirmative either as the stacked "Yes, proceed"
+// row or the single-row inline picker "Yes  No" / "Yes  2. No"
+// (claudeLegacyInlinePair, claudeLegacyInlinePairText). Either is the
+// legacy affirmative: read-once labels for both produce the same
+// (claudeLaunchDialogLegacy, true) verdict a stacked "Yes, proceed" does, so
+// the re-wrap tail reader holds the picker over the footer at any pane width
+// the way it holds the stacked form (#7349's gap, fixed alongside #7584's
+// deferral).
 func claudeFolderTrustOptionsRead(read []int, footer int) (claudeLaunchDialogKind, bool) {
 	var affirmative, proceed bool
 	for _, i := range read {
-		affirmative = affirmative || i == 0 || i == 1
-		proceed = proceed || i == 1
+		switch i {
+		case claudeLaunchDialogLabelAffirmative:
+			affirmative = true
+		case claudeLaunchDialogLabelLegacyProceed,
+			claudeLaunchDialogLabelInlineYesNo,
+			claudeLaunchDialogLabelInlineYesNoOrdinal:
+			// The legacy affirmative: stacked "Yes, proceed" or the inline pair.
+			affirmative, proceed = true, true
+		}
 	}
 	if proceed || (footer == 1 && !affirmative) {
 		return claudeLaunchDialogLegacy, affirmative
@@ -833,6 +875,24 @@ func claudeLaunchDialogAnySelected(pane claudeLaunchDialogPane, from, to int) bo
 // down shows a working agent rather than the legacy dialog: a plain rule, a ❯
 // row that does not begin one of the dialog's options, or the boxed composer's
 // "> " row.
+//
+// The dialog's options are its stacked labels, the bare "Yes"/"No" words a
+// pane too narrow for the inline pair itself wraps onto two rows, AND the
+// inline pair "Yes  No" / "Yes  2. No" (claudeLegacyInlinePairText,
+// claudeLegacyInlineOrdinalPairText). When the pair fits on one row at the
+// pane's width the cursor row squashes to "YesNo" / "Yes2.No", which begins
+// none of the stacked labels or the bare words — so a pane that wraps the
+// legacy question (the wrapped-question branch of this matcher) and paints
+// the inline pair on one row had its real cursor row read as a composer
+// draft and read clear (the #3579-class failure the trust gate exists to
+// close). Recognizing the inline pair's squashed form on the cursor row
+// stops that misclassification; the trailing-region anchor is the one the
+// stacked labels already trust (this runs only under the wrapped legacy
+// question), so a composer draft quoting the pair in prose — the case
+// TestCheckAndHandleTrustPrompt_YesNoComposerDraftIsNotTheLegacyPicker and
+// the #7584 quote/draft tests pin — keeps reading clear, since the question
+// fits one row there and claudeLaunchDialogPainting skips on `below-first <
+// 2`.
 func claudeLaunchDialogComposerBelow(pane claudeLaunchDialogPane, from int) bool {
 	firstLine := len(pane.lines)
 	if from < len(pane.index) {
@@ -854,7 +914,13 @@ func claudeLaunchDialogComposerBelow(pane claudeLaunchDialogPane, from int) bool
 		}
 		text := claudeLaunchDialogRowText(pane, content)
 		option := claudeMCPTrustOrdinalWord(text)
-		for _, label := range []string{claudeSquash(claudeLegacyTrustProceedLabel), claudeSquash(claudeFolderTrustExitLabel), "Yes", "No"} {
+		for _, label := range []string{
+			claudeSquash(claudeLegacyTrustProceedLabel),
+			claudeSquash(claudeFolderTrustExitLabel),
+			"Yes", "No",
+			claudeSquash(claudeLegacyInlinePairText),
+			claudeSquash(claudeLegacyInlineOrdinalPairText),
+		} {
 			option = option || (text != "" && strings.HasPrefix(label, text))
 		}
 		if !option {

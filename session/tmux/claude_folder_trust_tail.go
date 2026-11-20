@@ -5,21 +5,54 @@ import (
 	"strings"
 )
 
-// claudeFolderTrustTailLabels are the option rows the folder-trust dialogs
-// paint, as words: the reworded dialog's two, and the legacy dialog's "Yes,
-// proceed" (its exit row is the reworded dialog's too).
-var claudeFolderTrustTailLabels = [][]string{
-	strings.Fields(claudeTrustAffirmativeLabel),
-	strings.Fields(claudeFolderTrustExitLabel),
-	strings.Fields(claudeLegacyTrustProceedLabel),
-}
-
 // claudeLegacyTrustProceedLabel is the legacy folder-trust dialog's affirmative
 // row, and claudeLegacyTrustFooter its footer.
 const (
 	claudeLegacyTrustProceedLabel = "Yes, proceed"
 	claudeLegacyTrustFooter       = "Enter to confirm · Esc to exit"
+
+	// claudeLegacyInlinePairText is the legacy dialog's single-row inline option
+	// row, the picker shape claudeLegacyInlinePair matches at full width
+	// (session/tmux/claude_trust_legacy.go). The leading "1." ordinal is
+	// stripped by trimClaudeTrustOrdinal before the row's label reaches the
+	// readers that consume these texts, so this constant carries only the
+	// part after it: "Yes  No".
+	claudeLegacyInlinePairText = "Yes  No"
+	// claudeLegacyInlineOrdinalPairText is the same row with the No option's
+	// own ordinal still on it: "Yes  2. No". claudeTrustRowOf's ordinal
+	// trimmer drops only the LEADING "N." so the mid-row "2." stays in the
+	// label (and survives a squash as "Yes2.No").
+	claudeLegacyInlineOrdinalPairText = "Yes  2. No"
 )
+
+// claudeLegacyInlinePairLabels are the legacy dialog's inline option rows
+// (claudeLegacyInlinePairText and claudeLegacyInlineOrdinalPairText) as
+// words — the per-row token form claudeFolderTrustTail matches against. The
+// leading ordinal is gone after claudeTrustRowOf, and an ordinal kept on the
+// No option ("2.") is stripped by claudeFolderTrustTail's
+// claudeMCPTrustOrdinalWord skip, so both inline shapes reduce to the same
+// two words: ["Yes", "No"].
+var claudeLegacyInlinePairLabels = [][]string{
+	strings.Fields(claudeLegacyInlinePairText),
+	strings.Fields(claudeLegacyInlineOrdinalPairText),
+}
+
+// claudeFolderTrustTailLabels are the option rows the folder-trust dialogs
+// paint, as words: the reworded dialog's two, the legacy dialog's "Yes,
+// proceed" (its exit row is the reworded dialog's too), and the legacy
+// dialog's inline pair ("Yes  No" or "Yes  2. No"). The inline pair was added
+// so a pane whose question has scrolled off and whose option row also wraps
+// does not read clear the way the stacked form never does — the words of
+// the pair are the same at any width, and the ordinal on the No option is
+// stripped before reaching the reader, so the two inline forms share the one
+// ["Yes", "No"] entry.
+var claudeFolderTrustTailLabels = [][]string{
+	strings.Fields(claudeTrustAffirmativeLabel),
+	strings.Fields(claudeFolderTrustExitLabel),
+	strings.Fields(claudeLegacyTrustProceedLabel),
+	strings.Fields(claudeLegacyInlinePairText),
+	strings.Fields(claudeLegacyInlineOrdinalPairText),
+}
 
 // claudeFolderTrustTailFooters are the footers those dialogs paint, as words.
 var claudeFolderTrustTailFooters = [][]string{
