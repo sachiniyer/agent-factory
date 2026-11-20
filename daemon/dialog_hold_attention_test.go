@@ -15,6 +15,7 @@ import (
 const (
 	holdKeyA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	holdKeyB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	holdKeyC = "cccccccccccccccccccccccccccccccc"
 
 	heldDialogReason = "af is waiting on a folder-trust dialog it can't read (pane 60×12). Widen the pane, or answer it in the session's agent tab."
 )
@@ -433,6 +434,39 @@ func TestIssue7648DismissalSuppressesFreshKeysForTheHold(t *testing.T) {
 	feedDialogHold(manager, repoID, key, inst, heldDialog(lastKey))
 	require.True(t, inst.HasAttention(), "a genuinely different pane is surfaced once the hold has run")
 	require.Equal(t, lastKey, flaggedKey(inst))
+}
+
+// #7648 review: a raise ends the bound the dismissal before it earned, so a
+// dismissal made on the new notice gets its own full hold — not the scraps of
+// the one before.
+func TestIssue7648DismissalAfterAReraiseGetsItsOwnHold(t *testing.T) {
+	manager, repoID, key, inst, advance := dialogHoldFixture(t)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
+	_, cleared := inst.ClearAttention(time.Time{})
+	require.True(t, cleared)
+
+	// The dismissal is seen once, then its hold runs out under the churn.
+	advance(time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
+	advance(30 * time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyB))
+	require.True(t, inst.HasAttention())
+	require.Equal(t, holdKeyB, flaggedKey(inst))
+
+	// Dismissed before the next poll: its hold runs the full interval, not
+	// what was left of the first one's.
+	_, cleared = inst.ClearAttention(time.Time{})
+	require.True(t, cleared)
+	advance(time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyC))
+	require.False(t, inst.HasAttention(), "the second dismissal is its own hold, not the first's scraps")
+	advance(29 * time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyC))
+	require.False(t, inst.HasAttention(), "still inside the second dismissal's hold")
+	advance(time.Second)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyC))
+	require.True(t, inst.HasAttention(), "a genuinely different pane is surfaced once the hold has run")
+	require.Equal(t, holdKeyC, flaggedKey(inst))
 }
 
 // #7635 review R3: a peer's `since` decides nothing. A dismissed notice is not

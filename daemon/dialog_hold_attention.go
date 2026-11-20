@@ -259,7 +259,10 @@ func (m *Manager) flushDialogHold(repoID, key string, instance *session.Instance
 	}
 	// Settle only what this flush did; the poll may have moved on meanwhile.
 	if hold != nil {
-		now.raisedAt = nowFunc()
+		// A raise that lands ends the bound the dismissal before it earned:
+		// the next dismissal's hold runs its own full interval from when it
+		// is first seen, not the scraps of this one.
+		now.raisedAt, now.dismissedAt = nowFunc(), time.Time{}
 		if now.due != nil && now.due.Key == hold.Key {
 			now.due = nil
 		}
