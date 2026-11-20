@@ -167,6 +167,7 @@ func TestIssue7618RemnantReaderLeavesNonDialogPanesClear(t *testing.T) {
 		{"the footer's end in a boxed draft whose prompt row scrolled off", "│   Esc to       │\n│   cancel       │\n╰────────────────╯"},
 		{"a guide row, an option row and the footer in a boxed draft whose prompt row scrolled off",
 			"│   Security guide                     │\n│   ❯ No, exit                         │\n│   Enter to confirm · Esc to cancel   │\n╰──────────────────────────────────────╯"},
+		{"the footer's end in a boxed draft, closed, over a second edge", "│ Esc to │\n│ cancel │\n╰────────╯\n╰────────╯"},
 		{"a guide row and footer with nothing between", "Security guide\n\nEnter to confirm · Esc to cancel"},
 		{"a guide row, other text, and the footer", "Security guide\n\nSee the docs\n\nEnter to confirm · Esc to cancel"},
 		{"a guide row, an option remnant, and a row below the footer", "Security guide\n\n❯ No, exit\n\nEnter to confirm · Esc to cancel\n? for shortcuts"},
@@ -180,8 +181,61 @@ func TestIssue7618RemnantReaderLeavesNonDialogPanesClear(t *testing.T) {
 func TestClaudeDialogHoldKindNamesARemnant(t *testing.T) {
 	require.Equal(t, DialogHoldFolderUnreadable,
 		claudeDialogHoldKind(claudeScreenOf(readTrustFixture(t, "claude_2_1_328_folder_trust_dialog_80x6.ansi"))))
-	require.Equal(t, DialogHoldFolderUnreadable,
-		claudeDialogHoldKind(claudeScreenOf(readTrustFixture(t, "claude_2_1_328_folder_trust_dialog_10x4.ansi"))))
 	require.Equal(t, DialogHoldFolderPartial, claudeDialogHoldKind(claudeScreenOf(
 		pendingExit(t, readTrustFixture(t, "claude_2_1_19_legacy_folder_trust_dialog.ansi"), "Press Ctrl-C again to exit"))))
+}
+
+// #7663 item 3: the notice names the folder-trust dialog only when the pane
+// proves it is that one. The MCP server dialog's footer is the reworded
+// folder-trust footer word for word, so the end of it names no dialog.
+func TestIssue7663RemnantNamesOnlyWhatThePaneProves(t *testing.T) {
+	for _, tt := range []struct {
+		name, content string
+		want          DialogHoldKind
+	}{
+		{"the end of the footer two dialogs share", " · Esc to\n cancel", DialogHoldOther},
+		{"a real 2.1.328 pane of that footer's end", readTrustFixture(t, "claude_2_1_328_folder_trust_dialog_10x4.ansi"), DialogHoldOther},
+		{"a real 2.1.200 pane of that footer's end", readTrustFixture(t, "claude_2_1_200_folder_trust_dialog_14x3.ansi"), DialogHoldOther},
+		{"the end of the footer only the folder dialog paints", " · Esc to\n exit", DialogHoldFolderUnreadable},
+		{"option characters over the shared footer, no guide row", " N\n Y\n Enter to confirm · Esc to cancel", DialogHoldOther},
+		{"option characters over the folder dialog's own footer", " 2. No, exi\n Enter to confirm · Esc to exit", DialogHoldFolderUnreadable},
+		{"a guide row above the option remnant", "Security guide\n\n❯ No, exit\n\nEnter to confirm · Esc to cancel", DialogHoldFolderUnreadable},
+		{"a cut guide row above the option remnant",
+			" guide\n\n  1.Yes, I\n ❯  trust th\n    folder\n  2. No, exi\n\n Enter to\n confirm ·\n Esc to\n cancel", DialogHoldFolderUnreadable},
+		{"option characters over an exit notice, no guide row", " 2. No, exi\n\n Press Ctrl-C again to exit", DialogHoldOther},
+		{"a guide row and option remnant over an exit notice", "Security guide\n\n 2. No, exi\n\n Press Ctrl-C again to exit", DialogHoldFolderPartial},
+		{"a legacy dialog over an exit notice",
+			pendingExit(t, readTrustFixture(t, "claude_2_1_19_legacy_folder_trust_dialog.ansi"), "Press Ctrl-C again to exit"), DialogHoldFolderPartial},
+	} {
+		requireRemnantHold(t, tt.name, tt.content)
+		require.Equal(t, tt.want, claudeDialogHoldKind(claudeScreenOf(tt.content)), tt.name)
+	}
+}
+
+// #7663 item 2: a box's bottom edge excuses a footer only when the footer's
+// own rows are inside that box. A lone edge under a remnant is not a draft.
+func TestIssue7663LoneBoxEdgeUnderARemnantStillHolds(t *testing.T) {
+	narrow := strings.TrimRight(readTrustFixture(t, "claude_2_1_113_folder_trust_dialog_10_columns.ansi"), "\n")
+	for name, content := range map[string]string{
+		"a guide row, option row and footer over a lone edge":  "Security guide\n❯ No, exit\nEnter to confirm · Esc to cancel\n╰──────╯",
+		"the footer's end over a lone edge":                    " Esc\n to\n can\n cel\n╰───╯",
+		"a real 2.1.113 dialog at 10 columns over a lone edge": narrow + "\n╰────────╯",
+		"a footer whose last row alone carries box sides":      " · Esc to\n│ cancel │\n╰────────╯",
+	} {
+		requireRemnantHold(t, name, content)
+	}
+}
+
+// #7663 item 1 bounds the pending-exit reading by the longest notice it
+// accepts. These pin the bound's two sides: the notice wrapped a character a
+// row still reads, and a key longer than the bound, or rows above the notice
+// with no blank between, do not.
+func TestIssue7663PendingExitReadsNoFartherThanANotice(t *testing.T) {
+	dialog := "Learn more\n\n❯ 1. Yes, proceed\n  2. No, exit\n\n"
+	requireRemnantHold(t, "the notice a character a row", dialog+strings.Join(strings.Split("PressCtrl-Cagaintoexit", ""), "\n"))
+	requireRemnantHold(t, "the longest key", dialog+"Press Ctrl-Shift-X again to exit")
+	requireRemnantClear(t, "a key past the bound", dialog+"Press Ctrl-Shift-C1 again to exit")
+	rows := strings.Repeat("x\n", 4000)
+	requireRemnantClear(t, "unbroken rows above the notice", rows+"Press Ctrl-C again to exit")
+	requireRemnantClear(t, "unbroken rows and no notice", rows+"x")
 }

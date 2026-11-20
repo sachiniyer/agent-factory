@@ -193,7 +193,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() (held bool) {
 		// short leaves of its option rows, and its footer; or the dialog with
 		// an exit notice where its footer was. Asked last of all: it only
 		// turns a clear pane into a hold.
-		if remnant := claudeLaunchDialogRemnantOf(screen); remnant != claudeLaunchDialogRemnantNone {
+		if remnant := claudeLaunchDialogRemnantRead(screen); remnant.kind != claudeLaunchDialogRemnantNone {
 			t.refuseClaudeLaunchDialogRemnant(remnant)
 			return true
 		}

@@ -348,12 +348,17 @@ func claudeDialogHoldKind(screen visibleText) DialogHoldKind {
 		claudeFolderTrustQuestionPaintingOf(screen) {
 		return DialogHoldFolderPartial
 	}
-	switch claudeLaunchDialogRemnantOf(screen) {
-	case claudeLaunchDialogRemnantUnderGuide, claudeLaunchDialogRemnantFooterTail:
-		return DialogHoldFolderUnreadable
-	case claudeLaunchDialogRemnantPendingExit:
-		// A footer row no supported build paints as the dialog's own.
-		return DialogHoldFolderPartial
+	// A remnant names the folder-trust dialog only when the pane proves it is
+	// that one. The end of a footer the MCP server dialog paints too falls
+	// through to the generic subject (#7663).
+	if remnant := claudeLaunchDialogRemnantRead(screen); remnant.folder {
+		switch remnant.kind {
+		case claudeLaunchDialogRemnantUnderGuide, claudeLaunchDialogRemnantFooterTail:
+			return DialogHoldFolderUnreadable
+		case claudeLaunchDialogRemnantPendingExit:
+			// A footer row no supported build paints as the dialog's own.
+			return DialogHoldFolderPartial
+		}
 	}
 	return DialogHoldOther
 }
