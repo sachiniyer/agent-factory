@@ -137,9 +137,11 @@ func (i *Instance) committedConversationFiled(account, id string) bool {
 // store whose listing errs slowly — an EIO after most of the bound — cannot
 // make the re-launch wait twice. A second look still unanswered at the shared
 // deadline is no look at all: its verdict is the blind verdict its own
-// timed-out listing would have made. Its flights still finish under their own
-// bounds — the re-launch just does not wait for them, the way fsprobe leaves
-// any flight that outruns its deadline.
+// timed-out listing would have made; a verdict that has already landed by then
+// is answered, so the both-ready race the deadline and the verdict run is
+// resolved in favor of the answer (rejudgeVerdictAtDeadline). Its flights
+// still finish under their own bounds — the re-launch just does not wait for
+// them, the way fsprobe leaves any flight that outruns its deadline.
 func (i *Instance) rejudgeRecordedClaude(program, workDir, id string, deadline time.Time) recordedClaudeVerdict {
 	if !deadline.After(fsprobe.FlightNow()) {
 		return recordedClaudeBlind
@@ -151,11 +153,33 @@ func (i *Instance) rejudgeRecordedClaude(program, workDir, id string, deadline t
 	}()
 	timer, stop := fsprobe.FlightTimer(deadline)
 	defer stop()
+	return rejudgeVerdictAtDeadline(done, timer)
+}
+
+// rejudgeVerdictAtDeadline resolves the re-judge's select for a verdict
+// against the shared deadline, settling the both-ready race deterministically
+// in favor of the answer the way the rest of the repo does (#7602 review of
+// #7596). Go's select chooses uniformly at random among ready cases, so a
+// plain two-arm select racing <-done against <-timer flips a verdict already
+// buffered in done to recordedClaudeBlind about half the times the deadline
+// fires as the verdict lands — a verdict in hand is not "still unanswered," so
+// the deadline arm re-reads done non-blockingly before falling back to blind,
+// matching config/resolve.go's "a completed read is an answer even if its
+// caller's deadline became ready at the same instant" and
+// session/tmux/start.go's deterministic prefer-answer, and the answer-first
+// outcome fsprobe's own waitForFlight reaches through its registry re-check.
+// Only a look whose verdict has not landed by the deadline is blind.
+func rejudgeVerdictAtDeadline(done <-chan recordedClaudeVerdict, timer <-chan time.Time) recordedClaudeVerdict {
 	select {
 	case verdict := <-done:
 		return verdict
 	case <-timer:
-		return recordedClaudeBlind
+		select {
+		case verdict := <-done:
+			return verdict
+		default:
+			return recordedClaudeBlind
+		}
 	}
 }
 
