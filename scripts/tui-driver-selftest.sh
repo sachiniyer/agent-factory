@@ -407,6 +407,13 @@ _expect_geometry_launch_pin_wins_boot() (
     probe="$(mktemp -d)"
     trap 'rm -rf "$probe"' EXIT
     printf '80x24\n' > "$probe/size"          # the live window a fresh shell sees
+    # The stub af binary stands in for AF_DRIVER_BIN — af_boot's -x check is
+    # all it must satisfy (the stub tmux swallows the launch line). A file the
+    # case owns is host-agnostic: /bin/true is Linux-only (absent on macOS,
+    # the #7671 break), and a missing path also burned af_boot's whole build
+    # grace — AF_DRIVER_BIN_WAIT bounds that to seconds.
+    printf '#!/bin/sh\nexit 0\n' > "$probe/af-stub"
+    chmod 755 "$probe/af-stub"
     cat > "$probe/inner.sh" <<'INNER'
         tmux() {
             printf '%s\n' "$*" >> "$PROBE/tmux.log"
@@ -440,7 +447,7 @@ INNER
     if ! PROBE="$probe" DRIVER="$SELF_DIR/tui-driver.sh" \
         AF_DRIVER_COLS=120 AF_DRIVER_ROWS=40 \
         AGENT_FACTORY_HOME="$probe/home" AF_DRIVER_STATE_DIR="$probe/state" \
-        AF_DRIVER_BIN=/bin/true bash "$probe/inner.sh"; then
+        AF_DRIVER_BIN="$probe/af-stub" AF_DRIVER_BIN_WAIT=5 bash "$probe/inner.sh"; then
         cat "$probe/tmux.log" >&2 2>/dev/null || true
         return 1
     fi
