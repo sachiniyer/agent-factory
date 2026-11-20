@@ -40,9 +40,14 @@ type acctSwapServer struct {
 	loseResponse, loseBefore error
 	afterRotate              func()
 	statusErr                error
-	rec                      accountSwapRecorder
-	calls                    int
-	atCall                   struct{ live, next string }
+	// wrapAnswered wraps an error the swap itself returned (an agent-server
+	// answer, not a lost transport) as *agentAnsweredError, the way the real
+	// remote transport does, so swapOutcomeIndeterminate resolves it on the
+	// marker rather than treating it as a lost call.
+	wrapAnswered bool
+	rec          accountSwapRecorder
+	calls        int
+	atCall       struct{ live, next string }
 }
 
 func (s *acctSwapServer) CanSwapAccount() (bool, error) { return s.can, s.canErr }
@@ -65,6 +70,9 @@ func (s *acctSwapServer) SwapAccountInPlace() (string, error) {
 	prog, err := s.rec.run(s.swap)
 	if err == nil && s.loseResponse != nil {
 		return "", s.loseResponse
+	}
+	if err != nil && s.wrapAnswered {
+		return "", &agentAnsweredError{err: err}
 	}
 	return prog, err
 }

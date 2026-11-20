@@ -696,18 +696,23 @@ func newScopeRotation(agent string) (*scopeRotation, error) {
 	return r, nil
 }
 
+// scopeRename is the rename syscall the rotation and its undo use; os.Rename by
+// default, and a seam for tests that must inject a rename failure (the
+// double-failure arm of rotate that has to carry the indeterminate marker).
+var scopeRename = os.Rename
+
 // rotate moves the live scope aside and the staged one into place. It runs with
 // the old agent confirmed stopped.
 func (r *scopeRotation) rotate() error {
 	if err := os.RemoveAll(r.prev); err != nil {
 		return fmt.Errorf("clearing %s: %w", r.prev, err)
 	}
-	if err := os.Rename(r.live, r.prev); err != nil {
+	if err := scopeRename(r.live, r.prev); err != nil {
 		return fmt.Errorf("moving the outgoing account aside: %w", err)
 	}
-	if err := os.Rename(r.next, r.live); err != nil {
-		if rbErr := os.Rename(r.prev, r.live); rbErr != nil {
-			return fmt.Errorf("moving the incoming account into place: %w (and the outgoing one could not be restored: %v)", err, rbErr)
+	if err := scopeRename(r.next, r.live); err != nil {
+		if rbErr := scopeRename(r.prev, r.live); rbErr != nil {
+			return fmt.Errorf("moving the incoming account into place: %w (and the outgoing one could not be restored: %v; %s)", err, rbErr, accountScopeIndeterminate)
 		}
 		return fmt.Errorf("moving the incoming account into place: %w", err)
 	}
@@ -724,10 +729,10 @@ func (r *scopeRotation) restore() error {
 	if err := os.RemoveAll(r.next); err != nil {
 		return err
 	}
-	if err := os.Rename(r.live, r.next); err != nil {
+	if err := scopeRename(r.live, r.next); err != nil {
 		return err
 	}
-	if err := os.Rename(r.prev, r.live); err != nil {
+	if err := scopeRename(r.prev, r.live); err != nil {
 		return err
 	}
 	r.rotated = false
