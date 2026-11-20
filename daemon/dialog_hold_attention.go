@@ -35,6 +35,10 @@ type dialogHoldEntry struct {
 	// quietSince is the first no-hold observation of a session that carries
 	// marks this daemon never saw a hold for. Zero otherwise.
 	quietSince time.Time
+	// observed is the runtime whose observation left due or resolveDue owed.
+	// What one pane's observation owes is never paid on another: a flush that
+	// finds the runtime replaced meanwhile drops it.
+	observed session.AgentObservationGeneration
 }
 
 // dialogHoldRestartGrace is how long a session's marks stand, with no hold
@@ -84,7 +88,11 @@ func dialogHoldStep(entry dialogHoldEntry, hold *session.DialogHold, flagged str
 // fence releases, the way the staged-draft flag is written. The hold is
 // normalized here whatever its source, so a zero since, a malformed key or an
 // unknown kind never reaches a decision.
-func (m *Manager) noteDialogHold(key string, instance *session.Instance, observed *session.DialogHold) {
+//
+// generation names the runtime the observation came from. It is kept with
+// whatever the observation leaves owed, so the flush can refuse to pay it on a
+// runtime that replaced this one.
+func (m *Manager) noteDialogHold(key string, instance *session.Instance, generation session.AgentObservationGeneration, observed *session.DialogHold) {
 	hold := session.NormalizedDialogHold(observed)
 	flagged, ownedSetAt := instance.DialogHoldFlagged()
 	m.dialogHoldMu.Lock()
@@ -105,6 +113,7 @@ func (m *Manager) noteDialogHold(key string, instance *session.Instance, observe
 	if m.dialogHolds == nil {
 		m.dialogHolds = make(map[string]*dialogHoldEntry)
 	}
+	next.observed = generation
 	m.dialogHolds[key] = &next
 }
 
@@ -127,6 +136,7 @@ func (m *Manager) flushDialogHold(repoID, key string, instance *session.Instance
 		due := *entry.due
 		hold = &due
 	}
+	observed := entry.observed
 	m.dialogHoldMu.Unlock()
 
 	opLock := m.opLockFor(daemonInstanceKey(repoID, instance.Title))
@@ -140,11 +150,20 @@ func (m *Manager) flushDialogHold(repoID, key string, instance *session.Instance
 	}
 	defer repoStartLock.Unlock()
 
-	var done bool
-	if hold != nil {
-		done = m.raiseDialogHoldLocked(repoID, instance, *hold)
-	} else {
-		done = m.resolveDialogHoldLocked(repoID, instance)
+	// Inside the attention locks, which a handoff and every other runtime
+	// replacement also take: is this still the runtime that was observed? If
+	// not, what its pane owed is void. The flush also runs on polls that noted
+	// nothing — a failed snapshot returns before the note — so without this a
+	// hold left due by lock contention would be raised on the replacement,
+	// for a dialog on a pane that no longer exists.
+	stale := !instance.AgentObservationCurrent(observed)
+	done := stale
+	if !stale {
+		if hold != nil {
+			done = m.raiseDialogHoldLocked(repoID, instance, *hold)
+		} else {
+			done = m.resolveDialogHoldLocked(repoID, instance)
+		}
 	}
 	if !done {
 		return
@@ -152,7 +171,11 @@ func (m *Manager) flushDialogHold(repoID, key string, instance *session.Instance
 	m.dialogHoldMu.Lock()
 	defer m.dialogHoldMu.Unlock()
 	now := m.dialogHolds[key]
-	if now == nil {
+	if now == nil || now.observed != observed {
+		return // a newer observation has replaced what this flush read
+	}
+	if stale {
+		delete(m.dialogHolds, key) // the next observation of the new runtime starts over
 		return
 	}
 	// Settle only what this flush did; the poll may have moved on meanwhile.

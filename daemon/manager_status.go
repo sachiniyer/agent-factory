@@ -823,7 +823,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// A trust gate holding a launch dialog on an unchanged pane says so on the
 	// observation (#7635). Record it; no hold on a later observation withdraws
 	// the flag this path raised.
-	m.noteDialogHold(key, instance, obs.DialogHold)
+	m.noteDialogHold(key, instance, observationGeneration, obs.DialogHold)
 
 	// AFFIRMATIVE liveness evidence for this tick, decided in ONE place and only
 	// where the poll actually learned something (#1917 round 7).

@@ -37,10 +37,18 @@ func dialogHoldFixture(t *testing.T) (manager *Manager, repoID, key string, inst
 // under the instance's observation-settlement fence, and the write happens
 // after the fence releases.
 func feedDialogHold(manager *Manager, repoID, key string, inst *session.Instance, hold *session.DialogHold) {
-	release := inst.HoldAgentObservationSettlement()
-	manager.noteDialogHold(key, inst, hold)
-	release()
+	noteDialogHoldOnly(manager, key, inst, hold)
 	manager.flushDialogHold(repoID, key, inst)
+}
+
+// noteDialogHoldOnly is the first half of a poll: a snapshot of the session's
+// current runtime, and the note of what it observed. A poll whose snapshot
+// fails runs only the second half, the flush.
+func noteDialogHoldOnly(manager *Manager, key string, inst *session.Instance, hold *session.DialogHold) {
+	release := inst.HoldAgentObservationSettlement()
+	defer release()
+	_, _, generation, _, _, _ := inst.SnapshotAgent()
+	manager.noteDialogHold(key, inst, generation, hold)
 }
 
 // restartDaemonMemory drops what the tracker holds in memory, which is all a
@@ -418,6 +426,46 @@ func TestIssue7635HeldDialogFlagWaitsOutLockContention(t *testing.T) {
 	require.True(t, inst.HasAttention(), "a contended resolve clears nothing yet")
 	feedDialogHold(manager, repoID, key, inst, nil)
 	require.False(t, inst.HasAttention(), "and lands on the next free poll")
+}
+
+// What one pane's observation leaves owed is never paid on another. A hold's
+// flush loses the op lock to a handoff, the handoff replaces the runtime, and
+// the replacement's first snapshot fails — so that poll notes nothing and
+// still runs the flush. The retired pane's notice must not go up on the
+// replacement.
+func TestIssue7635DueHoldIsNotRaisedOnAReplacedRuntime(t *testing.T) {
+	manager, repoID, key, inst, _ := dialogHoldFixture(t)
+
+	opLock := manager.opLockFor(daemonInstanceKey(repoID, inst.Title))
+	opLock.Lock() // the handoff holds it across the swap
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
+	require.False(t, inst.HasAttention())
+	require.True(t, rememberedDialogHold(manager, key), "the hold is owed")
+	inst.ClearIdleEvidence() // the runtime is replaced
+	opLock.Unlock()
+
+	for i := 0; i < 3; i++ { // polls whose snapshot failed: the flush alone
+		manager.flushDialogHold(repoID, key, inst)
+		require.False(t, inst.HasAttention(), "the retired pane's notice was raised on its replacement")
+		require.Empty(t, flaggedKey(inst))
+	}
+	require.False(t, rememberedDialogHold(manager, key), "what the retired pane owed is dropped")
+
+	// The replacement's own hold is flagged as any other.
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyB))
+	require.True(t, inst.HasAttention())
+	require.Equal(t, holdKeyB, flaggedKey(inst))
+
+	// The same for marks owed a take-down: a resolve left owed is not run
+	// against a runtime that replaced the one observed.
+	opLock.Lock()
+	feedDialogHold(manager, repoID, key, inst, nil)
+	inst.ClearIdleEvidence()
+	_, err := inst.SetOwnedAttention("the replacement's own notice", session.AttentionOriginDialogHold, nowFunc())
+	require.NoError(t, err)
+	opLock.Unlock()
+	manager.flushDialogHold(repoID, key, inst)
+	require.True(t, inst.HasAttention(), "a resolve owed by the retired runtime cleared the replacement's notice")
 }
 
 // The sweep forgets sessions the daemon no longer tracks.
