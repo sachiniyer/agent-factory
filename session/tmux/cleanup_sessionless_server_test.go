@@ -320,7 +320,7 @@ func TestProbeSessionStrictNamesTheDiagnosticItCouldNotClassify(t *testing.T) {
 func TestProbeStrictRefusesWhenARenamedLiveServerOwnsTheUnlinkedSocket(t *testing.T) {
 	for _, serverName := range []string{
 		"bx",               // the suffix survives whole
-		"mediumtmux",       // truncation keeps "mediumtmux: ser"
+		"mediumtmuxname",   // 14-char basename: the title keeps "mediumtmuxname:" at the 15-byte ceiling
 		"verylongtmuxname", // truncation keeps only the name prefix
 	} {
 		t.Run(serverName, func(t *testing.T) {
