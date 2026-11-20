@@ -63,8 +63,10 @@ exit 0
 
 // driverProbeEnv builds the hermetic environment for a bash probe that
 // sources the real tui-driver.sh: the fake tmux first on PATH, all driver
-// state under t.TempDir(), and AF_DRIVER_BIN pointed at a real executable
-// so af_boot's readiness check passes instantly.
+// state under t.TempDir(), and AF_DRIVER_BIN pointed at a stub executable
+// the test writes itself so af_boot's readiness check passes instantly.
+// AF_DRIVER_BIN_WAIT stays low: the stub is local and synchronous, so a
+// broken pin must fail in seconds rather than burn the whole build grace.
 func driverProbeEnv(t *testing.T, liveSize string, pins map[string]string) (env []string, tmuxLog string) {
 	t.Helper()
 	tmp := t.TempDir()
@@ -75,6 +77,15 @@ func driverProbeEnv(t *testing.T, liveSize string, pins map[string]string) (env 
 	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(tuiDriverFakeTmux), 0755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}
+	// af_boot's only contact with AF_DRIVER_BIN is its -x readiness check
+	// (the fake tmux swallows the launch line), so a stub the test owns is
+	// enough — and it is hermetic on every host. /bin/true is Linux-only;
+	// on the macOS job (#7671) the missing path also burned af_boot's full
+	// build grace before the check failed.
+	afStub := filepath.Join(binDir, "af-stub")
+	if err := os.WriteFile(afStub, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("write af stub: %v", err)
+	}
 	tmuxLog = filepath.Join(tmp, "tmux.log")
 	env = []string{
 		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
@@ -83,7 +94,8 @@ func driverProbeEnv(t *testing.T, liveSize string, pins map[string]string) (env 
 		"FAKE_TMUX_LOG=" + tmuxLog,
 		"FAKE_TMUX_SIZE_FILE=" + filepath.Join(tmp, "live-size"),
 		"FAKE_TMUX_SIZE=" + liveSize,
-		"AF_DRIVER_BIN=/bin/true",
+		"AF_DRIVER_BIN=" + afStub,
+		"AF_DRIVER_BIN_WAIT=5",
 		"AF_DRIVER_STATE_DIR=" + filepath.Join(tmp, "driver-state"),
 		"AGENT_FACTORY_HOME=" + filepath.Join(tmp, "af-home"),
 	}

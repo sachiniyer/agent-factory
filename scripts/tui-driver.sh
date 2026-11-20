@@ -44,6 +44,12 @@ _AF_DRIVER_PINNED_ROWS="${AF_DRIVER_ROWS+x}"
 : "${AF_DRIVER_REPO:=$HOME/sandbox/mock-repo}"   # cwd the TUI launches in
 : "${AGENT_FACTORY_HOME:=$HOME/sandbox/home}"    # sandbox AF home
 : "${AF_DRIVER_BIN:=}"                            # af path ("" → auto-resolve)
+# Seconds af_boot waits for a missing/non-executable binary before failing —
+# the container's on-boot `go build` grace, so it must cover a cold build. A
+# scenario that pins a stub AF_DRIVER_BIN lowers it so a broken path fails in
+# seconds, not the whole grace (#7671 burned all 180s on the macOS job, where
+# /bin/true does not exist).
+: "${AF_DRIVER_BIN_WAIT:=180}"
 # Environment assignments prefixed to the af launch, e.g.
 # AF_DRIVER_LAUNCH_ENV="AF_DAEMON_URL=http://127.0.0.1:8899". Empty by default,
 # so every existing scenario launches exactly the command it did before. It is a
@@ -708,7 +714,7 @@ af_boot() {
     local bin; bin="$(_af_resolve_bin)"
 
     # Wait for the container's on-boot `go build` to finish.
-    local deadline; deadline=$(( $(_af_now) + 180 ))
+    local deadline; deadline=$(( $(_af_now) + AF_DRIVER_BIN_WAIT ))
     while [ ! -x "$bin" ]; do
         if [ "$(_af_now)" -ge "$deadline" ]; then
             _af_fail "af binary not found/executable at '$bin'"; return 1
