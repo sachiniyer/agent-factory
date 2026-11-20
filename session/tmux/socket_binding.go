@@ -418,6 +418,27 @@ func socketPathStopOf(err error) socketPathStop {
 	return walkStopUnknown
 }
 
+// missingSocketDir names the directory chain the walk could not enter — from
+// the resolved prefix down to the socket's basename — when the component
+// that stopped it is provably absent and stands before the basename. That is
+// the deleted-directory shape whose uncertainty recreating the chain
+// discharges (#7647): every component between the prefix and the basename
+// then exists, so the next walk reaches the absent basename — the certain
+// arm — and a server bound elsewhere is ruled out. The discharge is safe
+// only after each candidate is cleared through its own bound socket: the
+// deleted component may have been a link to a live server's dir (#7562).
+// "" means the walk did not stop at a deleted non-final component, so
+// recreating a directory cannot help — a missing basename is already
+// certain, and anything else is unknowable or provably broken rather than
+// deleted.
+func missingSocketDir(socketPath string) string {
+	w, ok := canonicalSocketPath(socketPath)
+	if !ok || w.stop != walkStopAbsent || len(w.rest) < 2 {
+		return ""
+	}
+	return strings.TrimSuffix(w.resolved, "/") + "/" + strings.Join(w.rest[:len(w.rest)-1], "/")
+}
+
 // possibleSocketOwners is the socket-absent refusal's list of who could still
 // own socketPath: every candidate the probe could not rule out, read the way
 // the probe reads them but with nothing sent. servers are positively

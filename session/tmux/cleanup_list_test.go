@@ -559,3 +559,60 @@ func TestOnlyServerProcessesCountAsALiveServer(t *testing.T) {
 		})
 	}
 }
+
+// #7647: a socket spelling that reaches its socket through a directory that
+// has itself been deleted — the post-reboot or /tmp-cleaned stale-$TMUX
+// shape — stays undecidable against a same-basename server, so signalling
+// cannot clear the refusal. The refusal names the action that CAN — but a
+// deleted component may have been a link to where a candidate is actually
+// bound (#7562's own shape), and recreating it as a plain directory would
+// make the spelling resolve and wrongly rule af's own server out. So the
+// advice names the check FIRST — each candidate's sessions, through its own
+// bound socket, against af's session names — then both branches: a
+// candidate holding af's sessions IS af's server (stop it, or restore the
+// link); only when none does is recreating the directory safe.
+func TestSocketAbsentRefusalNamesTheDeletedDirectory(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(root, "tmux-1000")
+	sock := filepath.Join(gone, "default")
+	bound := filepath.Join(root, "tmux-real", "default")
+
+	pinPossibleOwnerServers(t, 4242)
+	t.Cleanup(PinServerProbeForTest(4242))
+	// The candidate's actual bound socket, as the kernel reports it — the
+	// -S spelling the check must name, never the missing one.
+	prev := listenerPathsOf
+	listenerPathsOf = func(int) ([]string, error) { return []string{bound}, nil }
+	t.Cleanup(func() { listenerPathsOf = prev })
+	listFailureTmuxOnPath(t, filepath.Join(t.TempDir(), "touched"),
+		"error connecting to "+sock+" (No such file or directory)", 1)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	err = CleanupSessions(cmd.MakeExecutor())
+	if err == nil {
+		t.Fatal("CleanupSessions returned nil while a server may own the missing socket")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		gone,               // the deleted directory is named
+		"link",             // the deleted component may have been a link
+		"pid 4242",         // the candidate the check names
+		"tmux -S " + bound, // through its own bound socket…
+		"list-sessions",    // …list its sessions
+		"`af_`",            // compared with af's session names
+		"stop that server", // af's server found: stop it,
+		"restore the link", // or restore the link
+		"mkdir -p " + gone, // otherwise recreating it
+		"safe",             // is safe
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, want the refusal to contain %q", msg, want)
+		}
+	}
+	if strings.Index(msg, "list-sessions") > strings.Index(msg, "mkdir") {
+		t.Errorf("error = %q, want the check named before the recreate advice", msg)
+	}
+}

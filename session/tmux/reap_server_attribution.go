@@ -129,6 +129,13 @@ func tmuxEnvServerVerdict(tmuxEnv string, own ServerIdentity, selfNS string) ser
 	}
 	same, comparable := sameRecordedSocket(socket, own.Socket)
 	if !comparable {
+		// The spellings cannot rule each other in or out, but the env still
+		// names its server by pid — a pid the record proved in THIS
+		// namespace and that is not the recorded pid is positive per-process
+		// proof that the carrier's server is a different process (#7647).
+		if own.pidProvenHere(selfNS) && serverPID != own.PID {
+			return serverVerdictForeign
+		}
 		return serverVerdictUndecidable
 	}
 	if !same {

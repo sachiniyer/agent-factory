@@ -353,12 +353,22 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// Name only who could still own the socket: a server bound to some
 			// other socket was ruled out, and signalling it recovers nothing.
 			// Only identified servers are offered a signal (#7541).
-			servers, unidentified := possibleSocketOwners(absentTmuxSocketPath(diagnostic), tmuxServerProcessPIDs())
+			socketPath := absentTmuxSocketPath(diagnostic)
+			servers, unidentified := possibleSocketOwners(socketPath, tmuxServerProcessPIDs())
+			advice := recreateSocketAdvice(servers, unidentified)
+			if dir := missingSocketDir(socketPath); dir != "" {
+				// The uncertainty a signal cannot clear: a deleted directory
+				// is what leaves the comparison undecidable (#7647). Naming
+				// the discharge is not enough — the deleted component may
+				// have been a link to a live server's dir (#7562), so the
+				// clause names the check that makes recreating it safe.
+				advice += ". " + deletedSocketDirAdvice(dir, servers, unidentified)
+			}
 			return fmt.Errorf("could not list tmux sessions%s, but %s. A server whose socket is removed "+
 				"(a /tmp cleaner will do it) keeps running with its sessions alive, so the missing socket "+
 				"does not prove there are none. Refusing to sweep: no tmux session was killed. %s: %w",
 				tmuxDiagnosticSuffix(err), describeSocketOwners(servers, unidentified),
-				recreateSocketAdvice(servers, unidentified), err)
+				advice, err)
 		}
 		return fmt.Errorf("could not list tmux sessions%s; refusing to sweep with the session set "+
 			"unknown — no tmux session was killed: %w", tmuxDiagnosticSuffix(err), err)

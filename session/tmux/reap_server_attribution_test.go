@@ -96,8 +96,11 @@ func TestCarrierServerVerdict_UnreadableOrMissingEnvIsUndecidable(t *testing.T) 
 
 // #7562: an env socket spelling that reached its directory through a
 // symlink component that is itself DELETED cannot be pronounced a different
-// socket — the deleted alias may have pointed at ours. Incomparable is
-// undecidable, never foreign: the carrier could be our own server's.
+// socket — the deleted alias may have pointed at ours. When the env's pid
+// cannot disprove that either — the recorded pid itself, or a record whose
+// pid was never proven here — incomparable stays undecidable, never foreign:
+// the carrier could be our own server's. A proven pid that is NOT the
+// recorded one decides it instead (#7647).
 func TestCarrierServerVerdict_DeletedLinkInEnvSocketIsUndecidable(t *testing.T) {
 	own := ownServerFixture(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -108,8 +111,8 @@ func TestCarrierServerVerdict_DeletedLinkInEnvSocketIsUndecidable(t *testing.T) 
 	envSock := filepath.Join(link, filepath.Base(own.Socket))
 
 	require.Equal(t, serverVerdictUndecidable,
-		tmuxEnvServerVerdict(envSock+",9999,3", own, "pidns:test"),
-		"a deleted link component may have aliased our socket — undecidable, never foreign")
+		tmuxEnvServerVerdict(envSock+",4242,3", own, "pidns:test"),
+		"a deleted link component may have aliased our socket and the env pid cannot disprove it — undecidable, never foreign")
 
 	// A genuinely foreign socket in a live directory still answers foreign:
 	// the deleted-component widening must not swallow a certain mismatch.
@@ -947,4 +950,51 @@ func TestReadPaneRow_SocketReadSpendsTheRowsRemainingBudget(t *testing.T) {
 	require.Len(t, reads, 1)
 	require.LessOrEqual(t, reads[0], time.Duration(0),
 		"a spent budget reaches the socket read as spent — no fresh timeout buys it back")
+}
+
+// #7647: a deleted directory in the env socket may have aliased the recorded
+// socket, so the spelling compare cannot rule (#7562) — but the env's pid is
+// per-process evidence of its own. A pid the record proved in THIS
+// namespace, and that is not the recorded pid, is positive proof the
+// carrier's server is a different process: foreign, never undecidable.
+func TestCarrierServerVerdict_IncomparableSocketWithProvenPidMismatchIsForeign(t *testing.T) {
+	own := ownServerFixture(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	gonedir := filepath.Join(root, "gonedir")
+	require.NoError(t, os.Mkdir(gonedir, 0o700))
+	require.NoError(t, os.RemoveAll(gonedir))
+	// The env socket names the recorded basename under the deleted dir: the
+	// compare cannot rule it out — the deleted dir may have aliased ours.
+	envSock := filepath.Join(gonedir, filepath.Base(own.Socket))
+
+	got := tmuxEnvServerVerdict(envSock+",9999,3", own, "pidns:test")
+	require.Equal(t, serverVerdictForeign, got,
+		"the env names a server pid that is provably not the recorded server — a different process is foreign")
+}
+
+// The same shape with the recorded pid is the pin the other way: a matching
+// pid disproves nothing — a stale env from an earlier generation claims the
+// same number — so the deleted alias keeps the verdict undecidable, never
+// foreign.
+func TestCarrierServerVerdict_IncomparableSocketWithMatchingPidStaysUndecidable(t *testing.T) {
+	own := ownServerFixture(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	gonedir := filepath.Join(root, "gonedir")
+	require.NoError(t, os.Mkdir(gonedir, 0o700))
+	require.NoError(t, os.RemoveAll(gonedir))
+	envSock := filepath.Join(gonedir, filepath.Base(own.Socket))
+
+	require.Equal(t, serverVerdictUndecidable,
+		tmuxEnvServerVerdict(envSock+",4242,3", own, "pidns:test"),
+		"a matching pid cannot disprove the deleted alias — undecidable, never foreign")
+
+	// And a record whose pid was never proven in this namespace compares no
+	// pids at all: the number may name nothing here.
+	unproven := own
+	unproven.PIDNS = ""
+	require.Equal(t, serverVerdictUndecidable,
+		tmuxEnvServerVerdict(envSock+",9999,3", unproven, "pidns:test"),
+		"an unproven record can compare no pids — undecidable, never foreign")
 }
