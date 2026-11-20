@@ -682,8 +682,9 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 			shellCommandIsUnproven(words)
 	}
 	if strace {
+		normalized := escapeQuoteNormalizedSpelling(literal)
 		switch {
-		case literal == "-E" || straceEnvLongName(literal):
+		case literal == "-E" || straceEnvLongNameReading(literal):
 			// strace's env option takes var[=val] as a separate word and
 			// injects or REMOVES the variable in the traced child's
 			// environment — the same mutation the env arm refuses, in
@@ -694,6 +695,13 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 			}
 			value, ok := literalShellWord(words[1])
 			return 2, !ok || accountEnvironmentOperandDenied(value, names)
+		case normalized != literal &&
+			(normalized == "-E" || straceEnvLongNameReading(normalized)):
+			// The env option shows only on the normalized spelling — a
+			// hidden mark. Refusing the word itself, rather than treating
+			// the next word as its operand, keeps master's option width so
+			// the reading can only add a refusal (#7627).
+			return 1, true
 		case strings.HasPrefix(literal, "--") && strings.Contains(literal, "="):
 			name, operand, _ := strings.Cut(literal, "=")
 			if straceEnvLongName(name) {
@@ -704,7 +712,15 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 			// (`-fECODEX_HOME=/o`), but an option that takes an operand
 			// consumes the REST of the cluster (`-oECODEX_HOME=x` is -o with
 			// that file name), so read it with strace's real option table.
-			if operand, isEnv := straceClusterEnvOperand(literal[1:]); isEnv {
+			operand, isEnv := straceClusterEnvOperand(literal[1:])
+			if !isEnv && normalized != literal {
+				if _, hidden := straceClusterEnvOperand(normalized[1:]); hidden {
+					// Same hidden mark as the normalized -E/--env spelling:
+					// refuse rather than judge an operand by a changed width.
+					return 1, true
+				}
+			}
+			if isEnv {
 				if operand != "" {
 					return 1, accountEnvironmentOperandDenied(operand, names)
 				}
@@ -826,6 +842,19 @@ func stracePrefixMutates(word *syntax.Word, names map[string]struct{}) bool {
 // strace. Three or more characters are treated as --env (fail closed — `--e`
 // would be ambiguous to getopt, and refusing it costs nothing real).
 func straceEnvLongName(word string) bool {
+	if straceEnvLongNameReading(word) {
+		return true
+	}
+	// Second reading on the normalized spelling (#7627): `--e\nv` and
+	// `--e'nv'` spell --env once a downstream decode removes the escape
+	// or quote.
+	if normalized := escapeQuoteNormalizedSpelling(word); normalized != word {
+		return straceEnvLongNameReading(normalized)
+	}
+	return false
+}
+
+func straceEnvLongNameReading(word string) bool {
 	return len(word) >= 3 && strings.HasPrefix("--env", word)
 }
 

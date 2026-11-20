@@ -10,9 +10,72 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/envcommand"
 )
 
+// accountEnvironmentNameDenied reports whether name marks a denied variable.
+// The mark is computed on the name's exact spelling OR its escape- and
+// quote-normalized spelling, never on one alone (#7627): an operand word's
+// literal text can still carry backslash escapes or quote bytes (`CODEX\_HOME`
+// inside a quoted word, `x\CODEX_HOME` unquoted), so each reading is checked —
+// the exact one refuses `x\CODEX_HOME` whose boundary shows on the raw text,
+// and the normalized one refuses the `CODEX\_HOME` a downstream decode would
+// turn back into the protected name.
 func accountEnvironmentNameDenied(name string, names map[string]struct{}) bool {
-	_, denied := names[name]
-	return denied
+	if _, denied := names[name]; denied {
+		return true
+	}
+	if normalized := escapeQuoteNormalizedSpelling(name); normalized != name {
+		_, denied := names[normalized]
+		return denied
+	}
+	return false
+}
+
+// escapeQuoteNormalizedSpelling removes the quoting and escape text a
+// downstream decode can strip at ANY depth, in one flat pass: every run of
+// backslashes goes, a line break (LF or CRLF) right after a run goes with it —
+// the line-continuation form — and every quote character goes. The result is
+// an over-approximation of POSIX escape resolution (XCU 2.2.1), closed under
+// nesting: quoting quoted again reduces to the same text with no recursion
+// and no fixpoint loop. Exact one-level resolution is depth-sensitive —
+// inside double quotes `\\` is a literal backslash a deeper re-parse would
+// still consume — so an escape can hide a name at a depth the exact rule
+// misses; deleting the escapes themselves makes `co\\\\dex`, `co\\dex` and
+// `co\dex` all read `codex`. It is used only as a second reading under a
+// denied/hidden mark — a reading never replaces the text it came from, so no
+// reading can hide a name another shows.
+func escapeQuoteNormalizedSpelling(text string) string {
+	if !strings.ContainsAny(text, "'\"`\\") {
+		return text
+	}
+	var out strings.Builder
+	out.Grow(len(text))
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '\\':
+			for i < len(text) && text[i] == '\\' {
+				i++
+			}
+			switch {
+			case i < len(text) && text[i] == '\n':
+				i++
+			case i+1 < len(text) && text[i] == '\r' && text[i+1] == '\n':
+				i += 2
+			}
+			i-- // the loop's i++ lands past the run (and any line break)
+		case '\'', '"', '`':
+			// Quote characters vanish at every depth.
+		default:
+			out.WriteByte(text[i])
+		}
+	}
+	return out.String()
+}
+
+// mayNormalizeSpelling reports whether text carries a character the
+// normalized reading can remove — a quote or a backslash. A word without
+// one reads identically under both spellings, so its second reading is
+// skipped outright and the word costs what it cost before the union.
+func mayNormalizeSpelling(text string) bool {
+	return strings.ContainsAny(text, "'\"`\\")
 }
 
 func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {

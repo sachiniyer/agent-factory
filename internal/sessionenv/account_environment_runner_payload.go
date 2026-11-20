@@ -384,6 +384,12 @@ func wordNamesResetAgent(literal string, names, preserved map[string]struct{}) b
 		if literal == agent || strings.HasSuffix(literal, "/"+agent) {
 			return true
 		}
+		// Second reading on the normalized spelling (#7627): an
+		// escaped path component spells the same agent basename.
+		if normalized := escapeQuoteNormalizedSpelling(literal); normalized != literal &&
+			(normalized == agent || strings.HasSuffix(normalized, "/"+agent)) {
+			return true
+		}
 	}
 	return false
 }
