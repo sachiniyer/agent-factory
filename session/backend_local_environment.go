@@ -2,6 +2,9 @@ package session
 
 import (
 	"fmt"
+	"os"
+	"sort"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -232,4 +235,48 @@ func applyWorktreeEnvironment(i *Instance, worktree *git.GitWorktree, passthroug
 	}
 	i.envResolvedWorktree.Store(worktree)
 	return nil
+}
+
+// warnDiscardedLocalAccountEnvNames is the local half of the account-path
+// notice the credential-mount path emits on docker (#7668): names the
+// operator's environment — the daemon's own, which is what the pane's
+// environment inherits before the account pins apply — actually set and the
+// account boundary discards, named once at session create, names only, with
+// the same remedy. The daemon environment IS the operator shell's
+// environment, so unlike the remote path no report file is needed; a
+// forwarded keep-if-set name is the claim channel working, never a discard.
+func warnDiscardedLocalAccountEnvNames(i *Instance) {
+	i.mu.RLock()
+	account := i.Account
+	agent := i.accountNamespaceLocked()
+	i.mu.RUnlock()
+	if account == "" {
+		return
+	}
+	passthrough, err := SessionEnvPassthroughForInstance(i)
+	if err != nil {
+		// Provision already surfaced a config read failure; the warning must
+		// never be the thing that fails a create.
+		return
+	}
+	discarded := sessionenv.AccountDiscardedEnvNames(agent, passthrough)
+	if len(discarded) == 0 {
+		return
+	}
+	present := make(map[string]struct{})
+	for _, entry := range os.Environ() {
+		present[strings.SplitN(entry, "=", 2)[0]] = struct{}{}
+	}
+	var named []string
+	for _, name := range discarded {
+		if _, ok := present[name]; ok {
+			named = append(named, name)
+		}
+	}
+	sort.Strings(named)
+	if len(named) > 0 {
+		log.WarningLog.Printf(
+			"backend=local: account-scoped session discarded %d env name(s) the environment had set for agent %q: %s — forward any the session needs through the global session_env_passthrough",
+			len(named), agent, strings.Join(named, ", "))
+	}
 }

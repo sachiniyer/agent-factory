@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1304,4 +1305,42 @@ func TestApplyAccount_ProxyCaseTwinReseat(t *testing.T) {
 		require.Contains(t, got, upper+"=")
 		require.Contains(t, got, lower+"=")
 	}
+}
+
+// TestAccountDiscardedEnvNames is the #7668 warning's name source: the
+// complete set of environment names the account boundary neutralizes for
+// the agent — identity pins and fills, routing selectors, and every
+// keep-if-set name the operator did not forward — sorted, deduplicated,
+// names only (the warning never inspects a value). The injected config
+// root is af's own write, never a discard, and a forwarded name is the
+// claim channel working, so neither may appear.
+func TestAccountDiscardedEnvNames(t *testing.T) {
+	got := AccountDiscardedEnvNames("gemini", []string{"HTTPS_PROXY"})
+	require.NotEmpty(t, got)
+	require.True(t, sort.StringsAreSorted(got))
+	seen := make(map[string]int, len(got))
+	for _, name := range got {
+		seen[name]++
+		require.Equal(t, 1, seen[name], "names must be deduplicated: %q", name)
+	}
+	for _, want := range []string{
+		"google_application_credentials",
+		"GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT",
+		"GEMINI_DEFAULT_AUTH_TYPE", "CLOUDSDK_CONFIG", "GEMINI_API_KEY",
+		"http_proxy", "HTTP_PROXY", "grpc_proxy",
+		"GCE_METADATA_HOST", "OTLP_GOOGLE_CLOUD_PROJECT",
+	} {
+		require.Contains(t, got, want)
+	}
+	require.NotContains(t, got, "GEMINI_CLI_HOME",
+		"the account config root is injected, never discarded")
+	require.NotContains(t, got, "HTTPS_PROXY",
+		"a forwarded keep-if-set name is claimed, never discarded")
+	require.NotContains(t, got, "PATH", "admitted ambient names are not discards")
+	// A forwarded name leaves the set entirely; the discard set for a
+	// non-account agent is empty.
+	got = AccountDiscardedEnvNames("gemini", []string{"http_proxy", "HTTP_PROXY"})
+	require.NotContains(t, got, "http_proxy")
+	require.NotContains(t, got, "HTTP_PROXY")
+	require.Empty(t, AccountDiscardedEnvNames("aider", nil))
 }

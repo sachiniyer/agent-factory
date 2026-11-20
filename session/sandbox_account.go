@@ -555,6 +555,22 @@ func writeFileAtomic0600(path string, data []byte) error {
 // the 0600 identity file the launch shell sources — the docker backend's shape.
 func (w *sandboxWorkspace) accountScrubEnv() string {
 	var b strings.Builder
+	// #7668: the once-per-session notice the credential-mount path emits on
+	// the daemon must run HERE for a remote session, because the remote
+	// login environment is invisible to the daemon. The detection has to
+	// precede every pin below — `${NAME+x}` after a `NAME=` line is always
+	// true — and it writes names only, never a value: a value could be a
+	// credential or an internal proxy address. The launch step reads the
+	// report back and names the names to the operator with the remedy.
+	discarded := sessionenv.AccountDiscardedEnvNames(w.spec.Account.Agent, w.spec.SessionEnvPassthrough)
+	if len(discarded) > 0 {
+		b.WriteString("( _af_dropped=\n")
+		for _, name := range discarded {
+			b.WriteString("[ -n \"${" + name + "+x}\" ] && _af_dropped=\"$_af_dropped " + name + "\"\n")
+		}
+		b.WriteString("[ -n \"$_af_dropped\" ] && printf '%s\\n' \"$_af_dropped\" > " +
+			shellQuote(w.DiscardedEnvReportPath()) + "\n)\n")
+	}
 	// The valued names take their first-party default, not `NAME=`: they are
 	// `??`-family reads that treat defined-empty as a real broken value, so
 	// blanking them here would break the agent exactly the way the class

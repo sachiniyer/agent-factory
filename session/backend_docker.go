@@ -380,14 +380,22 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // need of the passthrough remedy would never see it (#7531). When that
 // inspect fails, say so and warn over run_args names alone; the overrides
 // are already in argv either way.
+//
+// The account-scoped half runs the same shape on the same spot: a value
+// the image or run_args set for a name the account boundary discards is
+// named to the operator, names only, with the identical remedy (#7668).
 func (p *dockerProvisioner) warnBlankedCredentialNames() {
-	if len(p.credentialMounts) == 0 {
+	if len(p.credentialMounts) == 0 && p.spec.Account.Dir == "" {
 		return
 	}
 	imageEnv, ok := p.dockerContainerImageEnv()
 	if !ok {
 		log.WarningLog.Printf(
-			"backend=docker: docker.mount_agent_credentials could not inspect the environment of the image the container runs — the overridden-env warning covers docker.run_args names only")
+			"backend=docker: could not inspect the environment of the image the container runs — the overridden-env warning covers docker.run_args names only")
+	}
+	if len(p.credentialMounts) == 0 {
+		p.warnDiscardedAccountEnvNames(imageEnv, ok)
+		return
 	}
 	// Every name af overrode on this session: the defined-empty pins, the
 	// re-asserted git config roots, and the re-asserted selector/endpoint
@@ -404,6 +412,28 @@ func (p *dockerProvisioner) warnBlankedCredentialNames() {
 		log.WarningLog.Printf(
 			"backend=docker: docker.mount_agent_credentials overrode %d env name(s) the image or docker.run_args had set for agent %q (pinned empty or re-asserted): %s — forward any the session needs through the global session_env_passthrough",
 			len(named), p.agentName(), strings.Join(named, ", "))
+	}
+}
+
+// warnDiscardedAccountEnvNames is the account-scoped half of the same
+// notice (#7668): names the image's ENV or docker.run_args actually set
+// that the account boundary discards — the identity pins and fills plus
+// every keep-if-set name the operator did not forward — reported once,
+// names only, with the same remedy the mount path gives. Forwarded
+// keep-if-set names are the claim channel working, never a discard.
+func (p *dockerProvisioner) warnDiscardedAccountEnvNames(imageEnv []string, inspected bool) {
+	if p.spec.Account.Dir == "" {
+		return
+	}
+	if !inspected {
+		log.WarningLog.Printf(
+			"backend=docker: could not inspect the environment of the image the container runs — the discarded-env warning covers docker.run_args names only")
+	}
+	discarded := sessionenv.AccountDiscardedEnvNames(p.spec.Account.Agent, p.spec.SessionEnvPassthrough)
+	if named := credentialMountOverriddenWarning(imageEnv, p.runArgs, discarded); len(named) > 0 {
+		log.WarningLog.Printf(
+			"backend=docker: account-scoped session discarded %d env name(s) the image or docker.run_args had set for agent %q: %s — forward any the session needs through the global session_env_passthrough",
+			len(named), p.spec.Account.Agent, strings.Join(named, ", "))
 	}
 }
 

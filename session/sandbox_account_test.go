@@ -287,7 +287,9 @@ func TestAgentServerLaunchScriptCarriesTheGuardBetweenIdentityAndStart(t *testin
 		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target}}
 	_ = w.startAgentServer(time.Second)
 	require.NotEmpty(t, sh.scripts)
-	script := sh.scripts[len(sh.scripts)-1]
+	// scripts[0] is the launch; a discarded-env report read-back (#7668)
+	// can follow it as a second command on the same shell.
+	script := sh.scripts[0]
 	identity := strings.Index(script, "af-identity.env")
 	guard := strings.Index(script, "account scope is not in place")
 	start := strings.Index(script, "nohup")
@@ -358,7 +360,8 @@ func TestAccountScrubEnv_LoaderNamesAreConditionalOnPassthrough(t *testing.T) {
 		} else {
 			require.Contains(t, scrub, "\n"+name+"=\n",
 				"an unforwarded name is remote ambient state: pinned unconditionally")
-			require.NotContains(t, scrub, "${"+name+"+x}")
+			require.NotContains(t, scrub, "${"+name+"+x}\" ] || ",
+				"an unforwarded name must never get the ||-conditional (the #7668 detection probe's &&-form is not a pin decision)")
 		}
 	}
 	// Identity pins stay unconditional — a forwarded value can never resurrect one.
@@ -605,4 +608,53 @@ func TestAccountScrubEnv_ForwardedTwinReseatsToSibling(t *testing.T) {
 		"the twin must not take the forwarded-but-unset blank")
 	require.Contains(t, scrub, "[ -n \"${http_proxy+x}\" ] || http_proxy=\n",
 		"a twin whose sibling was never forwarded still takes the ordinary keep-if-set line")
+}
+
+// The #7668 detection block is the remote half of the mount path's
+// overridden-env notice, run where only the remote shell can see the
+// operator's login environment: it must evaluate BEFORE the pins it
+// precedes (a `${NAME+x}` probe after `NAME=` is always true), and its
+// report carries names only — a discarded value can be a credential or an
+// internal proxy address, so it must never reach a file the daemon reads
+// back.
+func TestAccountScrubEnv_DiscardedReportIsNamesOnlyAndPrePin(t *testing.T) {
+	acct := writeAccount(t, "gemini", "gemini-cred")
+	const secretProxy = "http://s3cr3t.corp.internal:8888"
+	const secretProject = "s3cr3t-internal-proj-do-not-log"
+	dir := t.TempDir()
+	w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: dir, program: "gemini",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target,
+			SessionEnvPassthrough: []string{"HTTPS_PROXY"}}}
+	scrub := w.accountScrubEnv()
+
+	// Structural: the detection block precedes the first pin it probes for.
+	require.Less(t, strings.Index(scrub, "${HTTP_PROXY+x}"), strings.Index(scrub, "\nHTTP_PROXY="),
+		"a ${NAME+x} probe must run before the pin — after it the answer is always 'set'")
+	require.Contains(t, scrub, "af-discarded-env.names")
+
+	// Executable: run the env file the way the launch shell sources it,
+	// against a remote login environment holding sentinel values.
+	envFile := filepath.Join(dir, "af-identity.env")
+	require.NoError(t, os.WriteFile(envFile, []byte(scrub), 0o600))
+	cmd := exec.Command("sh", "-c", "set -a && . "+shellQuote(envFile)+" && set +a")
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"HTTP_PROXY=" + secretProxy,
+		"GOOGLE_CLOUD_PROJECT=" + secretProject,
+		"HTTPS_PROXY=http://corp:3128", // forwarded → claimed, not a discard
+	}
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	report, err := os.ReadFile(filepath.Join(dir, discardedEnvReportName))
+	require.NoError(t, err)
+	names := strings.Fields(string(report))
+	require.Contains(t, names, "HTTP_PROXY")
+	require.Contains(t, names, "GOOGLE_CLOUD_PROJECT")
+	require.NotContains(t, names, "HTTPS_PROXY",
+		"a forwarded name is claimed — never reported as discarded")
+	for _, sentinel := range []string{secretProxy, secretProject} {
+		require.NotContains(t, string(report), sentinel,
+			"the report is names-only: a value must never reach it")
+	}
 }

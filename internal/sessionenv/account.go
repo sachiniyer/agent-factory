@@ -396,6 +396,50 @@ func AccountEnvironmentValues(agent string) map[string]string {
 	return out
 }
 
+// AccountDiscardedEnvNames is the sorted set of names an account-scoped
+// session neutralizes when a source (the daemon environment, an image's
+// ENV, a remote login environment) presents them: every identity name —
+// credential variables, late-environment pins, and the first-party-value
+// fills — plus the cloud selectors, plus every keep-if-set name the
+// operator did NOT forward through session_env_passthrough. A forwarded
+// keep-if-set name is the claim channel doing its job, not a discard, so
+// it stays out. The config root is also out: the account injects it, never
+// discards it.
+//
+// Provisioners use the set for the once-per-session notice #7668 asks the
+// account path to share with the credential-mount path: a value a source
+// legitimately set that af drops is named to the operator — names only,
+// never values — with the forward-them-through-passthrough remedy.
+func AccountDiscardedEnvNames(agent string, passthrough []string) []string {
+	configVar, ok := SupportsAccounts(agent)
+	if !ok {
+		return nil
+	}
+	set := accountScopedNames(agent, configVar)
+	delete(set, configVar) // injected with the account directory, never discarded
+	for name := range accountLateEnvironmentNames[agent] {
+		set[name] = struct{}{}
+	}
+	for name := range accountLateEnvironmentValues[agent] {
+		set[name] = struct{}{}
+	}
+	for _, name := range AgentAuthSelectors(agent) {
+		set[name] = struct{}{}
+	}
+	forwarded := nameSet(passthrough...)
+	for name := range accountLoaderFilledNames[agent] {
+		if _, keep := forwarded[name]; !keep {
+			set[name] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // omitAccountLoaderFilledNames drops every keep-if-set entry from an env list.
 // ResolveAccountEnvironment uses it for the tmux -e half: those names are
 // decided only at the hop where the forwarded value lives, so no NAME= stamp
