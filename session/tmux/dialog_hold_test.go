@@ -29,7 +29,8 @@ const (
 // between polls.
 type dialogHoldPane struct {
 	content string
-	// identity is tmux's answer to paneIdentityFormat: "pid width height".
+	// identity is tmux's answer to paneIdentityFormat: "pid width height
+	// session_created".
 	identity string
 	keys     []string
 }
@@ -69,7 +70,7 @@ func raisedLines(log string) int {
 // gate goes on holding and sends no key throughout.
 func TestIssue7635HeldUnreadableDialogIsSurfacedOnceWithItsReason(t *testing.T) {
 	_, warnings, _ := captureTrustPromptLogs(t)
-	pane := &dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12"}
+	pane := &dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12 1763553600"}
 	session, advance := dialogHoldSession(t, pane)
 	start := claudeTrustNow()
 
@@ -107,7 +108,7 @@ func TestIssue7635HeldUnreadableDialogIsSurfacedOnceWithItsReason(t *testing.T) 
 // #7635: the settle time is measured from the pane's last change. A held pane
 // that changes, and is still held, starts over.
 func TestIssue7635HeldPaneThatChangesRestartsTheClock(t *testing.T) {
-	pane := &dialogHoldPane{content: heldUnreadableDialog, identity: "4242 43 12"}
+	pane := &dialogHoldPane{content: heldUnreadableDialog, identity: "4242 43 12 1763553600"}
 	session, advance := dialogHoldSession(t, pane)
 
 	require.True(t, session.CheckAndHandleTrustPrompt())
@@ -116,7 +117,7 @@ func TestIssue7635HeldPaneThatChangesRestartsTheClock(t *testing.T) {
 
 	// The pane is narrowed one second before the bound: a new capture.
 	advance(time.Second)
-	pane.content, pane.identity = heldUnreadableDialogRewrapped, "4242 41 12"
+	pane.content, pane.identity = heldUnreadableDialogRewrapped, "4242 41 12 1763553600"
 	changedAt := claudeTrustNow()
 	require.True(t, session.CheckAndHandleTrustPrompt())
 	_, raised := session.DialogHoldNotice()
@@ -147,7 +148,7 @@ func TestIssue7635HeldPaneThatChangesRestartsTheClock(t *testing.T) {
 // by hand and the pane reads clear.
 func TestIssue7635ResolvedHoldClearsTheNotice(t *testing.T) {
 	_, warnings, _ := captureTrustPromptLogs(t)
-	pane := &dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12"}
+	pane := &dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12 1763553600"}
 	session, advance := dialogHoldSession(t, pane)
 
 	require.True(t, session.CheckAndHandleTrustPrompt())
@@ -179,7 +180,7 @@ func TestIssue7635ResolvedHoldClearsTheNotice(t *testing.T) {
 // stays the same. A poll in which af pressed a key is progress, not a hold.
 func TestIssue7635AnsweredPaneNeverRaisesTheNotice(t *testing.T) {
 	_, warnings, _ := captureTrustPromptLogs(t)
-	pane := &dialogHoldPane{content: answeredLegacyDialog, identity: "4242 80 24"}
+	pane := &dialogHoldPane{content: answeredLegacyDialog, identity: "4242 80 24 1763553600"}
 	session, advance := dialogHoldSession(t, pane)
 
 	for i := 0; i < 5; i++ {
@@ -205,12 +206,12 @@ func TestIssue7635AnsweredPaneNeverRaisesTheNotice(t *testing.T) {
 // #7635: the clock belongs to the pane process it started against. A pane
 // respawned under an identical capture does not inherit it.
 func TestIssue7635RespawnedPaneDoesNotInheritTheClock(t *testing.T) {
-	pane := &dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12"}
+	pane := &dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12 1763553600"}
 	session, advance := dialogHoldSession(t, pane)
 
 	require.True(t, session.CheckAndHandleTrustPrompt())
 	advance(claudeDialogHoldSettle)
-	pane.identity = "5151 60 12" // a new pane process, the same bytes on screen
+	pane.identity = "5151 60 12 1763553900" // a new pane process, the same bytes on screen
 	respawnSeenAt := claudeTrustNow()
 	require.True(t, session.CheckAndHandleTrustPrompt())
 	_, raised := session.DialogHoldNotice()
@@ -222,15 +223,39 @@ func TestIssue7635RespawnedPaneDoesNotInheritTheClock(t *testing.T) {
 	require.True(t, raised)
 	require.True(t, notice.Since.Equal(respawnSeenAt))
 
-	// tmux not answering for the size leaves the reason without one.
-	fresh := &dialogHoldPane{content: heldUnreadableDialog, identity: "garbage"}
-	other, advanceOther := dialogHoldSession(t, fresh)
-	require.True(t, other.CheckAndHandleTrustPrompt())
-	advanceOther(claudeDialogHoldSettle)
-	require.True(t, other.CheckAndHandleTrustPrompt())
-	notice, raised = other.DialogHoldNotice()
-	require.True(t, raised)
-	require.Equal(t, "a folder-trust dialog it can't read", notice.Subject())
+}
+
+// #7635 re-review R1: a pane af cannot identify is never flagged. With no
+// incarnation there is no key that names a pane, and a key that names none
+// could match any later one. The hold is surfaced once tmux answers, after a
+// full settle against the pane it then names.
+func TestIssue7635UnidentifiedPaneRaisesNoNotice(t *testing.T) {
+	_, warnings, _ := captureTrustPromptLogs(t)
+	for _, unreadable := range []string{"garbage", "", "0 0 0", "4242 60 12", "4242 sixty 12 1763553600"} {
+		pane := &dialogHoldPane{content: heldUnreadableDialog, identity: unreadable}
+		session, advance := dialogHoldSession(t, pane)
+		for i := 0; i < 4; i++ {
+			require.True(t, session.CheckAndHandleTrustPrompt(), "the gate holds whatever tmux says about the pane")
+			_, raised := session.DialogHoldNotice()
+			require.False(t, raised, "identity %q: an unidentified pane is not flagged", unreadable)
+			advance(claudeDialogHoldSettle)
+		}
+		require.Zero(t, raisedLines(warnings.String()))
+
+		pane.identity = "4242 60 12 1763553600"
+		identifiedAt := claudeTrustNow()
+		require.True(t, session.CheckAndHandleTrustPrompt())
+		_, raised := session.DialogHoldNotice()
+		require.False(t, raised, "the settle runs again from when the pane was identified")
+		advance(claudeDialogHoldSettle)
+		require.True(t, session.CheckAndHandleTrustPrompt())
+		notice, raised := session.DialogHoldNotice()
+		require.True(t, raised)
+		require.True(t, notice.Since.Equal(identifiedAt))
+		require.Regexp(t, "^[0-9a-f]{32}$", notice.Key)
+		require.Empty(t, pane.keys)
+		warnings.Reset()
+	}
 }
 
 // The recorder alone, with no pane: what it keeps, and when it raises.
@@ -246,7 +271,7 @@ func TestDialogHoldRecorder(t *testing.T) {
 	require.True(t, started)
 	require.False(t, raised)
 	require.True(t, since.Equal(at))
-	r.bindPane(since, "10")
+	r.bindPane(since, "10@c")
 
 	since, started, _ = r.observe(at.Add(5*time.Second), sumA, 1)
 	require.False(t, started, "the same capture keeps its clock")
@@ -256,9 +281,10 @@ func TestDialogHoldRecorder(t *testing.T) {
 	since, started, _ = r.observe(at.Add(6*time.Second), sumA, 2)
 	require.True(t, started)
 	require.True(t, since.Equal(at.Add(6*time.Second)))
-	r.bindPane(since, "10")
-	r.bindPane(at, "99") // a clock that no longer runs binds nothing
-	pane10, pane11 := paneIdentity{pid: "10", width: 60, height: 12}, paneIdentity{pid: "11", width: 60, height: 12}
+	r.bindPane(since, "10@c")
+	r.bindPane(at, "99@c") // a clock that no longer runs binds nothing
+	pane10 := paneIdentity{pid: "10", created: "c", width: 60, height: 12}
+	pane11 := paneIdentity{pid: "11", created: "c", width: 60, height: 12}
 	require.False(t, r.raise(at.Add(20*time.Second), at, pane10, DialogHoldOther), "a clock that was restarted cannot raise")
 
 	require.True(t, r.raise(at.Add(20*time.Second), since, pane10, DialogHoldFolderUnreadable))
@@ -266,7 +292,7 @@ func TestDialogHoldRecorder(t *testing.T) {
 	require.True(t, raised)
 	require.Equal(t, DialogHoldNotice{
 		Kind: DialogHoldFolderUnreadable, Width: 60, Height: 12, Since: since,
-		Key: dialogHoldKey("10", sumA, 2),
+		Key: dialogHoldKey("10@c", sumA, 2),
 	}, notice)
 	require.False(t, r.raise(at.Add(21*time.Second), since, pane10, DialogHoldOther), "one hold raises once")
 	_, _, raised = r.observe(at.Add(22*time.Second), sumA, 2)
@@ -280,7 +306,7 @@ func TestDialogHoldRecorder(t *testing.T) {
 	require.False(t, raised)
 
 	// Another pane process under the same capture restarts the clock.
-	r.bindPane(since, "10")
+	r.bindPane(since, "10@c")
 	require.False(t, r.raise(at.Add(45*time.Second), since, pane11, DialogHoldOther))
 	since, started, _ = r.observe(at.Add(46*time.Second), sumB, 2)
 	require.False(t, started)
@@ -290,8 +316,22 @@ func TestDialogHoldRecorder(t *testing.T) {
 	r.clear()
 	_, raised = r.current()
 	require.False(t, raised)
-	_, started, _ = r.observe(at.Add(61*time.Second), sumB, 2)
+	since, started, _ = r.observe(at.Add(61*time.Second), sumB, 2)
 	require.True(t, started, "a cleared recorder remembers no capture")
+
+	// An unknown incarnation raises nothing and binds nothing, however often.
+	for _, unknown := range []paneIdentity{{}, {pid: "10"}, {created: "c"}} {
+		require.Empty(t, unknown.incarnation())
+		require.False(t, r.raise(at.Add(80*time.Second), since, unknown, DialogHoldOther))
+	}
+	_, started, raised = r.observe(at.Add(81*time.Second), sumB, 2)
+	require.False(t, started, "an unidentified pane does not restart the clock")
+	require.False(t, raised)
+	// Once known it binds, with a clock restarted from that moment.
+	require.False(t, r.raise(at.Add(82*time.Second), since, pane10, DialogHoldOther))
+	since, _, _ = r.observe(at.Add(83*time.Second), sumB, 2)
+	require.True(t, since.Equal(at.Add(82*time.Second)))
+	require.True(t, r.raise(at.Add(93*time.Second), since, pane10, DialogHoldOther))
 }
 
 // heldMCPServerDialog is a frame the gate holds at its MCP-server clause, as
@@ -374,13 +414,17 @@ func TestIssue7635HoldKeyIsStableForTheSamePane(t *testing.T) {
 		return notice.Key
 	}
 	// Two TmuxSession values on the same pane: before and after a restart.
-	before := raisedKey(&dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12"})
-	after := raisedKey(&dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12"})
+	before := raisedKey(&dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12 1763553600"})
+	after := raisedKey(&dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12 1763553600"})
 	require.Equal(t, before, after, "the same pane showing the same bytes keeps its key")
 	require.Regexp(t, "^[0-9a-f]{32}$", before)
 
-	require.NotEqual(t, before, raisedKey(&dialogHoldPane{content: heldUnreadableDialog, identity: "5151 60 12"}),
+	require.NotEqual(t, before, raisedKey(&dialogHoldPane{content: heldUnreadableDialog, identity: "5151 60 12 1763553600"}),
 		"another pane process is another hold")
-	require.NotEqual(t, before, raisedKey(&dialogHoldPane{content: heldUnreadableDialogRewrapped, identity: "4242 60 12"}),
+	// Re-review R1: the same process id in a pane started again — a sandbox
+	// re-provisioned into a fresh PID namespace — is another incarnation.
+	require.NotEqual(t, before, raisedKey(&dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12 1763557200"}),
+		"the same pid in a tmux session created at another time is another hold")
+	require.NotEqual(t, before, raisedKey(&dialogHoldPane{content: heldUnreadableDialogRewrapped, identity: "4242 60 12 1763553600"}),
 		"a pane showing something else is another hold")
 }

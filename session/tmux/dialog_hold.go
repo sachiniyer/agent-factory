@@ -100,10 +100,14 @@ type DialogHoldNotice struct {
 	Width, Height int
 	// Since is when the pane last changed.
 	Since time.Time
-	// Key names the held pane: its process, and the hash and length of what
+	// Key names the held pane: its incarnation — the pane's process and the
+	// moment its tmux session was created — and the hash and length of what
 	// it shows. The same pane showing the same bytes has the same key in any
 	// process that computes it, so a consumer that persists it can tell "the
-	// hold I already flagged" from a new one across its own restart.
+	// hold I already flagged" from a new one across its own restart. A pane
+	// started again, in this namespace or a fresh one where process ids
+	// repeat, has another creation time and so another key. A notice is only
+	// raised with the incarnation known, so the key is never empty.
 	Key string
 }
 
@@ -113,27 +117,28 @@ func (n DialogHoldNotice) Subject() string { return DialogHoldSubject(n.Kind, n.
 // Reason is the notice as one line for a live session's attention signal.
 func (n DialogHoldNotice) Reason() string { return DialogHoldReason(n.Kind, n.Width, n.Height) }
 
-// dialogHoldKey derives a held pane's key from what the recorder keeps.
-func dialogHoldKey(panePID string, sum [sha256.Size]byte, size int) string {
+// dialogHoldKey derives a held pane's key from its incarnation and what the
+// recorder keeps of its capture.
+func dialogHoldKey(incarnation string, sum [sha256.Size]byte, size int) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%d\x00", panePID, size)
+	fmt.Fprintf(h, "%s\x00%d\x00", incarnation, size)
 	h.Write(sum[:])
 	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 // dialogHoldRecorder times one held pane. It keeps a hash and length of the
-// last held capture, never the capture, and the pane process the clock was
-// started against, so a respawned pane cannot inherit it.
+// last held capture, never the capture, and the pane incarnation the clock
+// was started against, so a respawned pane cannot inherit it.
 //
 // mu is a leaf: every method takes it for a few assignments and returns. No
 // tmux call and no gate decision runs under it.
 type dialogHoldRecorder struct {
-	mu      sync.Mutex
-	sum     [sha256.Size]byte
-	size    int
-	panePID string
-	since   time.Time
-	notice  *DialogHoldNotice
+	mu     sync.Mutex
+	sum    [sha256.Size]byte
+	size   int
+	pane   string // the incarnation the clock is bound to; "" while unknown
+	since  time.Time
+	notice *DialogHoldNotice
 }
 
 // clear forgets the hold: the pane read clear, af sent a key, or a new pane
@@ -141,7 +146,7 @@ type dialogHoldRecorder struct {
 func (r *dialogHoldRecorder) clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sum, r.size, r.panePID = [sha256.Size]byte{}, 0, ""
+	r.sum, r.size, r.pane = [sha256.Size]byte{}, 0, ""
 	r.since, r.notice = time.Time{}, nil
 }
 
@@ -153,41 +158,44 @@ func (r *dialogHoldRecorder) observe(now time.Time, sum [sha256.Size]byte, size 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.since.IsZero() || r.sum != sum || r.size != size {
-		r.sum, r.size, r.panePID = sum, size, ""
+		r.sum, r.size, r.pane = sum, size, ""
 		r.since, r.notice = now, nil
 		return now, true, false
 	}
 	return r.since, false, r.notice != nil
 }
 
-// bindPane records the pane process a clock started at since runs against. A
-// clock restarted meanwhile is left alone.
-func (r *dialogHoldRecorder) bindPane(since time.Time, panePID string) {
+// bindPane records the pane incarnation a clock started at since runs
+// against. A clock restarted meanwhile is left alone.
+func (r *dialogHoldRecorder) bindPane(since time.Time, incarnation string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.since.Equal(since) {
-		r.panePID = panePID
+		r.pane = incarnation
 	}
 }
 
-// raise publishes the notice for the clock started at since, if panePID is
-// still the process that clock was bound to. A different process means the
-// pane was respawned under an identical-looking capture: the clock restarts at
-// now against the new process, and nothing is raised. It reports whether the
-// notice went up.
+// raise publishes the notice for the clock started at since, if pane is still
+// the incarnation that clock was bound to. A different one means the pane was
+// respawned under an identical-looking capture, or was never identified when
+// the clock started: the clock restarts at now against this incarnation, and
+// nothing is raised. An unknown incarnation raises nothing and binds nothing,
+// so no notice ever carries a key that does not name a pane. It reports
+// whether the notice went up.
 func (r *dialogHoldRecorder) raise(now, since time.Time, pane paneIdentity, kind DialogHoldKind) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.since.Equal(since) || r.notice != nil {
+	incarnation := pane.incarnation()
+	if !r.since.Equal(since) || r.notice != nil || incarnation == "" {
 		return false
 	}
-	if r.panePID != pane.pid {
-		r.panePID, r.since = pane.pid, now
+	if r.pane != incarnation {
+		r.pane, r.since = incarnation, now
 		return false
 	}
 	r.notice = &DialogHoldNotice{
 		Kind: kind, Width: pane.width, Height: pane.height,
-		Since: since, Key: dialogHoldKey(pane.pid, r.sum, r.size),
+		Since: since, Key: dialogHoldKey(incarnation, r.sum, r.size),
 	}
 	return true
 }
@@ -226,16 +234,16 @@ func (t *TmuxSession) recordDialogHold(content string, keysBefore uint64, held b
 	since, started, raised := t.dialogHold.observe(now, sha256.Sum256([]byte(content)), len(content))
 	if started {
 		pane, _ := t.readPaneIdentity()
-		t.dialogHold.bindPane(since, pane.pid)
+		t.dialogHold.bindPane(since, pane.incarnation())
 		return
 	}
 	if raised || now.Sub(since) < claudeDialogHoldSettle {
 		return
 	}
-	// The pane is read again here, once per hold: its process must still be
-	// the one the clock started against, and its size goes in the notice. A
-	// failed read reports an unknown process. That matches only a clock whose
-	// first read failed too, and then the notice carries no size.
+	// The pane is read again here: its incarnation must still be the one the
+	// clock started against, and its size goes in the notice. A failed read
+	// leaves the incarnation unknown, and an unknown pane is never flagged:
+	// the next poll reads again.
 	pane, _ := t.readPaneIdentity()
 	kind := claudeDialogHoldKind(claudeScreenOf(content))
 	if !t.dialogHold.raise(now, since, pane, kind) {
@@ -311,16 +319,30 @@ func claudeDialogHoldKind(screen visibleText) DialogHoldKind {
 	return DialogHoldOther
 }
 
-// paneIdentity is the pane's process and size, as tmux reports them.
+// paneIdentity is the pane's process, size, and its tmux session's creation
+// time, as tmux reports them.
 type paneIdentity struct {
 	pid           string
+	created       string
 	width, height int
 }
 
-const paneIdentityFormat = "#{pane_pid} #{pane_width} #{pane_height}"
+// incarnation names this run of the pane: its process and the moment its tmux
+// session was created. A process id alone can recur — a re-provisioned
+// sandbox starts a fresh PID namespace — and the creation time cannot recur
+// with it. It is "" unless both are known.
+func (p paneIdentity) incarnation() string {
+	if p.pid == "" || p.created == "" {
+		return ""
+	}
+	return p.pid + "@" + p.created
+}
 
-// readPaneIdentity asks tmux for the pane's process id and size. On any
-// failure it returns the zero identity: an unknown process and no size.
+const paneIdentityFormat = "#{pane_pid} #{pane_width} #{pane_height} #{session_created}"
+
+// readPaneIdentity asks tmux for the pane's process id, size and session
+// creation time. On any failure it returns the zero identity: an unknown
+// incarnation and no size.
 func (t *TmuxSession) readPaneIdentity() (paneIdentity, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
@@ -329,13 +351,13 @@ func (t *TmuxSession) readPaneIdentity() (paneIdentity, error) {
 		return paneIdentity{}, err
 	}
 	fields := strings.Fields(string(output))
-	if len(fields) != 3 {
+	if len(fields) != 4 {
 		return paneIdentity{}, fmt.Errorf("unexpected pane identity %q", string(output))
 	}
 	var p paneIdentity
 	if _, err := fmt.Sscanf(fields[1]+" "+fields[2], "%d %d", &p.width, &p.height); err != nil {
 		return paneIdentity{}, fmt.Errorf("unexpected pane size %q", string(output))
 	}
-	p.pid = fields[0]
+	p.pid, p.created = fields[0], fields[3]
 	return p, nil
 }

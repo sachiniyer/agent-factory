@@ -229,7 +229,7 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 		// raised for it (#7635).
 		// What it does send is normalized here, at the wire: a zero since or
 		// a malformed key is no hold, and no text of the sandbox's is kept.
-		DialogHold: NormalizedDialogHold(resp.DialogHold),
+		DialogHold: decodeWireDialogHold(resp.DialogHold),
 	}, nil
 }
 
@@ -876,7 +876,11 @@ type agentSnapshotResp struct {
 	Reflow bool `json:"reflow,omitempty"`
 	// DialogHold is the sandbox gate's settled hold (#7635). Optional and
 	// additive: a server that predates it omits it, which reads as no hold.
-	DialogHold *DialogHold `json:"dialog_hold,omitempty"`
+	//
+	// Kept raw and decoded on its own (decodeWireDialogHold): a notice that
+	// does not decode — a wrong type today, a changed shape from a newer
+	// server tomorrow — must read as no hold, never fail the frame around it.
+	DialogHold json.RawMessage `json:"dialog_hold,omitempty"`
 	// Conversation is the conversation identity the server has for the agent, once
 	// it has one (#5571 W7.2).
 	Conversation *AgentConversationData `json:"conversation,omitempty"`

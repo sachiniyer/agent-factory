@@ -197,6 +197,45 @@ func TestIssue7635DismissalSurvivesADaemonRestart(t *testing.T) {
 	require.True(t, inst.HasAttention(), "the same dialog on a later occasion is a new hold")
 }
 
+// #7635 re-review R1: the flagged key never outlives its pane. A flagged
+// session is lost and comes back in a new runtime while the daemon also
+// restarts — a sandbox re-provisioned across the nightly upgrade. Its new pane
+// shows the same dialog, and here even derives the same key, the collision the
+// review described. It is a new hold and gets its notice: the key was dropped
+// when the session was lost.
+func TestIssue7635NewPaneAfterALostRuntimeIsFlaggedAgain(t *testing.T) {
+	manager, repoID, key, inst, advance := dialogHoldFixture(t)
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
+	first := inst.Attention()
+	require.NotNil(t, first)
+	require.Equal(t, holdKeyA, flaggedKey(inst))
+
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveLost)))
+	require.False(t, inst.HasAttention(), "a lost session has no agent to answer")
+	require.Empty(t, flaggedKey(inst), "and no pane left to be flagged for")
+
+	restartDaemonMemory(manager)
+	inst.SetStatusForTest(session.Ready) // recovered into a new runtime
+	advance(time.Minute)
+	for i := 0; i < 10; i++ { // the new pane's dialog settling
+		feedDialogHold(manager, repoID, key, inst, nil)
+		advance(time.Second)
+	}
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
+	raised := inst.Attention()
+	require.NotNil(t, raised, "the new pane's hold is surfaced, same key or not")
+	require.Equal(t, heldDialogReason, raised.Reason)
+	require.False(t, raised.SetAt.Equal(first.SetAt))
+
+	// A dismissal does not cross a replaced runtime either.
+	_, cleared := inst.ClearAttention(time.Time{})
+	require.True(t, cleared)
+	require.Equal(t, holdKeyA, flaggedKey(inst))
+	inst.ClearIdleEvidence() // the runtime is replaced
+	feedDialogHold(manager, repoID, key, inst, heldDialog(holdKeyA))
+	require.True(t, inst.HasAttention(), "a dismissal belongs to the pane it was made on")
+}
+
 // #7635 review R1: a request with af's exact notice wording that the daemon
 // did not raise is never adopted and never cleared — not on a quiet session,
 // not when a hold is reported under it, not after the hold resolves. It is

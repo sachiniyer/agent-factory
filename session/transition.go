@@ -349,6 +349,13 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	if ev.kind == tkCommitHandoff {
 		i.attention = nil
 	}
+	// The key of a flagged held-dialog pane names one pane incarnation
+	// (#7635). Every edge that retires that pane or starts another drops it,
+	// so a later pane can never be taken for one already flagged.
+	switch ev.kind {
+	case tkCommitHandoff, tkCommitArchive, tkBeginRestore:
+		i.dialogHoldFlagged = ""
+	}
 	// tkCommitArchive is the single commit edge every archive route converges
 	// on — local worktree relocation and remote branch-push alike — so it is the
 	// one place the durable archive timestamp can be stamped without a second

@@ -255,6 +255,7 @@ func (i *Instance) AttentionAnsweredByWork(epoch uint64) (time.Time, bool) {
 func (i *Instance) dropAttentionIfStoppedLocked() {
 	if attentionStoppedLocked(i) {
 		i.attention = nil
+		i.dialogHoldFlagged = "" // the pane it named is gone with the runtime
 	}
 }
 
@@ -265,8 +266,9 @@ func (i *Instance) dropAttentionIfStoppedLocked() {
 func (i *Instance) SettleAttentionAfterReattach() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.attention != nil && attentionStoppedLocked(i) {
+	if (i.attention != nil || i.dialogHoldFlagged != "") && attentionStoppedLocked(i) {
 		i.attention = nil
+		i.dialogHoldFlagged = ""
 		i.touchLocked()
 	}
 }

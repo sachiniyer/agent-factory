@@ -40,7 +40,7 @@ const testHoldKey = "0123456789abcdef0123456789abcdef"
 func TestIssue7635RemoteSnapshotCarriesTheDialogHold(t *testing.T) {
 	since := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	want := DialogHold{Kind: tmux.DialogHoldFolderUnreadable, Width: 60, Height: 12, Since: since, Key: testHoldKey}
-	obs := snapshotFrom(t, agentSnapshotResp{Content: "held", DialogHold: &want})
+	obs := snapshotFrom(t, map[string]any{"content": "held", "captured": true, "dialog_hold": want})
 	if obs.DialogHold == nil || *obs.DialogHold != want {
 		t.Fatalf("remote snapshot dropped the dialog hold: %+v", obs.DialogHold)
 	}
@@ -86,9 +86,16 @@ func TestIssue7635OldDaemonIgnoresTheDialogHoldField(t *testing.T) {
 	}
 	yes := true
 	hold := DialogHold{Kind: tmux.DialogHoldFolderUnreadable, Since: time.Now().UTC(), Key: testHoldKey}
-	raw, err := json.Marshal(agentSnapshotResp{Updated: true, Content: "held", Captured: &yes, DialogHold: &hold})
+	wire, err := json.Marshal(hold)
+	if err != nil {
+		t.Fatalf("marshal hold: %v", err)
+	}
+	raw, err := json.Marshal(agentSnapshotResp{Updated: true, Content: "held", Captured: &yes, DialogHold: wire})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"dialog_hold":{`) {
+		t.Fatalf("the response does not carry the field this test is about: %s", raw)
 	}
 	var old oldAgentSnapshotResp
 	if err := json.Unmarshal(raw, &old); err != nil {
@@ -158,6 +165,127 @@ func TestIssue7635WireDialogHoldIsNormalized(t *testing.T) {
 			}
 		}
 	})
+}
+
+// #7635 re-review R2: a dialog_hold that does not decode reads as no hold and
+// never fails the frame around it. Every other field of the snapshot is read
+// exactly as if the field were absent, so the poll keeps its observation and
+// counts no unanswerable probe.
+func TestIssue7635WrongTypedDialogHoldNeverFailsTheSnapshot(t *testing.T) {
+	since := "2026-11-19T12:00:00Z"
+	for name, field := range map[string]any{
+		"since as a number":   map[string]any{"kind": "folder-unreadable", "since": 5, "key": testHoldKey},
+		"since as free text":  map[string]any{"kind": "folder-unreadable", "since": "yesterday", "key": testHoldKey},
+		"since as an object":  map[string]any{"kind": "folder-unreadable", "since": map[string]any{}, "key": testHoldKey},
+		"kind as a number":    map[string]any{"kind": 7, "since": since, "key": testHoldKey},
+		"kind as an array":    map[string]any{"kind": []string{"folder-unreadable"}, "since": since, "key": testHoldKey},
+		"width as a string":   map[string]any{"kind": "folder-unreadable", "width": "60", "height": 12, "since": since, "key": testHoldKey},
+		"height as a float":   map[string]any{"kind": "folder-unreadable", "width": 60, "height": 12.5, "since": since, "key": testHoldKey},
+		"key as a number":     map[string]any{"kind": "folder-unreadable", "since": since, "key": 123456789},
+		"the field a string":  "held",
+		"the field a number":  42,
+		"the field an array":  []any{map[string]any{"kind": "folder-unreadable", "since": since, "key": testHoldKey}},
+		"the field a boolean": true,
+		"the field null":      nil,
+	} {
+		obs := snapshotFrom(t, map[string]any{
+			"updated": true, "has_prompt": true, "content": "the frame around it", "captured": true,
+			"dialog_hold": field,
+		})
+		if obs.DialogHold != nil {
+			t.Errorf("%s was taken for a hold: %+v", name, obs.DialogHold)
+		}
+		if !obs.Updated || !obs.HasPrompt || obs.Content != "the frame around it" || !obs.Captured {
+			t.Errorf("%s cost the frame around it: %+v", name, obs)
+		}
+	}
+}
+
+// #7635 re-review R1: the flagged key names one pane incarnation and never
+// outlives it. Every edge at which the session's runtime is lost, replaced or
+// started again drops it, so a later pane that happens to derive the same key
+// is a new hold and gets its notice.
+func TestIssue7635FlaggedKeyNeverOutlivesItsPane(t *testing.T) {
+	flagged := func(t *testing.T) *Instance {
+		t.Helper()
+		inst := newDialogHoldTestInstance(t)
+		if _, err := inst.SetOwnedAttention("held", AttentionOriginDialogHold, time.Now()); err != nil {
+			t.Fatalf("SetOwnedAttention: %v", err)
+		}
+		inst.SetDialogHoldFlagged(testHoldKey)
+		return inst
+	}
+	key := func(inst *Instance) string {
+		k, _ := inst.DialogHoldFlagged()
+		return k
+	}
+
+	t.Run("a live session keeps it", func(t *testing.T) {
+		inst := flagged(t)
+		if err := inst.Transition(ObserveLiveness(LiveRunning)); err != nil {
+			t.Fatalf("Transition: %v", err)
+		}
+		if err := inst.Transition(ObserveLiveness(LiveReady)); err != nil {
+			t.Fatalf("Transition: %v", err)
+		}
+		if got := key(inst); got != testHoldKey {
+			t.Fatalf("a session that stayed live lost its flagged key: %q", got)
+		}
+	})
+
+	t.Run("lost", func(t *testing.T) {
+		inst := flagged(t)
+		if err := inst.Transition(ObserveLiveness(LiveLost)); err != nil {
+			t.Fatalf("Transition: %v", err)
+		}
+		if got := key(inst); got != "" {
+			t.Fatalf("a Lost session still names a pane it no longer has: %q", got)
+		}
+		if row := inst.ToInstanceData(); row.DialogHoldFlagged != "" {
+			t.Fatalf("and would persist it: %q", row.DialogHoldFlagged)
+		}
+	})
+
+	t.Run("runtime replaced", func(t *testing.T) {
+		inst := flagged(t)
+		if !inst.ClearIdleEvidence() {
+			t.Fatal("retiring a flagged key is a change the caller must persist")
+		}
+		if got := key(inst); got != "" {
+			t.Fatalf("a replaced runtime inherited its predecessor's flagged key: %q", got)
+		}
+	})
+
+	t.Run("a reattach that did not bring the row back", func(t *testing.T) {
+		inst := flagged(t)
+		provisionallyLost(inst) // the sandbox loader's provisional Lost: the marks ride it
+		if got := key(inst); got != testHoldKey {
+			t.Fatalf("the provisional Lost dropped the key before the reattach was tried: %q", got)
+		}
+		inst.SettleAttentionAfterReattach()
+		if got := key(inst); got != "" {
+			t.Fatalf("a row that stayed Lost kept its flagged key: %q", got)
+		}
+	})
+
+	t.Run("a stopped row read from disk", func(t *testing.T) {
+		inst := flagged(t)
+		provisionallyLost(inst)
+		inst.mu.Lock()
+		inst.dropAttentionIfStoppedLocked()
+		inst.mu.Unlock()
+		if got := key(inst); got != "" {
+			t.Fatalf("a stopped row loaded with a flagged key: %q", got)
+		}
+	})
+}
+
+// provisionallyLost sets Lost the way the loaders do: assigned directly, with
+// no liveness edge, so whatever rides the row is still on it afterwards.
+func provisionallyLost(inst *Instance) {
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	inst.assignLivenessLocked(LiveLost)
 }
 
 // A local backend with no pane, and a backend whose gate runs elsewhere,

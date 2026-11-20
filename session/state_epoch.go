@@ -75,6 +75,11 @@ func (i *Instance) noteStateChangeLocked(lv Liveness, op InFlightOp, resetAt tim
 	i.runtimeEvidenceGeneration.Add(1)
 	if i.liveness != lv {
 		i.noteAttentionLivenessLocked()
+		// A flagged held-dialog pane does not outlive the runtime that showed
+		// it (#7635): a session that stops being live has lost that pane.
+		if attentionStoppedLocked(i) {
+			i.dialogHoldFlagged = ""
+		}
 	}
 	i.touchLocked()
 }

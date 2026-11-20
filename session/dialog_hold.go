@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -57,6 +58,21 @@ func NormalizedDialogHold(h *DialogHold) *DialogHold {
 		n.Width, n.Height = h.Width, h.Height
 	}
 	return &n
+}
+
+// decodeWireDialogHold reads a sandbox's dialog_hold off the snapshot
+// response. The field is optional and additive, so nothing about it may cost
+// the frame it rides on: absent, null, the wrong JSON type anywhere inside it,
+// or values NormalizedDialogHold rejects all read as no hold.
+func decodeWireDialogHold(raw json.RawMessage) *DialogHold {
+	if len(raw) == 0 {
+		return nil
+	}
+	var h DialogHold
+	if err := json.Unmarshal(raw, &h); err != nil {
+		return nil
+	}
+	return NormalizedDialogHold(&h)
 }
 
 func validDialogHoldKey(key string) bool {
