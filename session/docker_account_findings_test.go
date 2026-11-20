@@ -286,6 +286,45 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	})
 }
 
+// Codex P2 on a46bdbf91: a forwarded-but-unset proxy spelling whose case
+// twin is forwarded AND host-set must reseat to the twin's value — a
+// `NAME=` blank would reach applyAccount indistinguishable from an explicit
+// empty, and a lowercase-preferring reader would then disable the
+// operator's proxy.
+func TestDockerAccount_ForwardedUnsetProxyTwinReseatsToSiblingValue(t *testing.T) {
+	f := newDockerAccountFixture(t, "", "gemini", nil)
+	t.Setenv("HTTPS_PROXY", "http://corp:3128")
+	for _, name := range []string{"https_proxy", "HTTP_PROXY", "http_proxy"} {
+		t.Setenv(name, "")
+		require.NoError(t, os.Unsetenv(name))
+	}
+	var runArgs []string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "run" {
+			runArgs = append([]string(nil), args...)
+			return nil, fmt.Errorf("stop after docker run")
+		}
+		return fakeLocalDockerResponse(args)
+	}))
+
+	_, _ = createDockerAccountSession(f, "gemini",
+		[]string{"HTTPS_PROXY", "https_proxy", "http_proxy"})
+	require.NotEmpty(t, runArgs, "the account create never reached docker run")
+
+	assignment, found := dockerEnvArg(runArgs, "HTTPS_PROXY")
+	require.True(t, found)
+	require.Equal(t, "HTTPS_PROXY", assignment,
+		"forwarded+set rides bare -e so docker resolves the operator's value")
+	assignment, found = dockerEnvArg(runArgs, "https_proxy")
+	require.True(t, found)
+	require.Equal(t, "https_proxy=http://corp:3128", assignment,
+		"the forwarded-but-unset twin reseats to its sibling's value, not a blank")
+	assignment, found = dockerEnvArg(runArgs, "http_proxy")
+	require.True(t, found)
+	require.Equal(t, "http_proxy=", assignment,
+		"a twin whose sibling was never forwarded still blanks the image value — an unforwarded sibling's value is not af's to copy")
+}
+
 // #7555: gemini's keep-if-set names — and the indexed git-config pair prefixes
 // a forwarded GIT_CONFIG_COUNT would animate — are refused to docker.run_args.
 // A repo `-e NAME=…` appended after af's `-e NAME` is last-wins at docker run,

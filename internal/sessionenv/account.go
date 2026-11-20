@@ -353,6 +353,19 @@ var ProxyEnvCasePairs = [][2]string{
 	{"NO_PROXY", "no_proxy"},
 }
 
+// ProxyEnvCaseTwin returns the opposite-case spelling of a proxy name.
+func ProxyEnvCaseTwin(name string) (string, bool) {
+	for _, pr := range ProxyEnvCasePairs {
+		if pr[0] == name {
+			return pr[1], true
+		}
+		if pr[1] == name {
+			return pr[0], true
+		}
+	}
+	return "", false
+}
+
 // AccountLoaderFilledNames lists, sorted, the keep-if-set names for one agent:
 // the names an account session defines empty only when the operator did not
 // forward a value. Provisioners use the same classification as ApplyAccount so

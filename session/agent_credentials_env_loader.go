@@ -6,6 +6,7 @@ package session
 // can set, and the refusal's because-clause for every classified name.
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -118,4 +119,61 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// accountLoaderBlankEntries returns the `-e NAME=` entries a docker account
+// session emits for loader-filled names the operator forwarded but did not
+// set: -e admits the name through the wrap's passthrough extras, and an
+// image ENV value that survived would reach ScopeAgentServerAccount reading
+// exactly like the operator's claim (#7555). The indexed pair names get the
+// same treatment because a forwarded GIT_CONFIG_COUNT animates whatever
+// GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* the image declared (#7582 review).
+// Every other forwarded name keeps master's contract: unset in the daemon
+// env means no -e at all, so the image's own value stands — blanking those
+// would eat legitimate image-supplied values like locale settings.
+//
+// On gemini the proxy spellings are loader-filled keep-if-set names now
+// (#7665), so a forwarded-but-unset HTTPS_PROXY does emit the blanking -e
+// and the image's proxy cannot reach the credential-bearing transport —
+// with one exception: a forwarded-but-unset proxy spelling whose case twin
+// is forwarded AND host-set reseats to the twin's value instead, because a
+// `NAME=` here reaches applyAccount indistinguishable from an explicit
+// empty and a lowercase-preferring reader would then disable the
+// operator's proxy (Codex P2 on a46bdbf91). A genuinely explicit empty —
+// the operator exported `NAME=` themselves — is "set" and keeps the
+// ordinary contract above. An unforwarded sibling's value is never af's to
+// copy.
+func accountLoaderBlankEntries(agent string, passthrough, source []string) []string {
+	values := make(map[string]string, len(source))
+	for _, entry := range source {
+		if name, v, ok := strings.Cut(entry, "="); ok {
+			values[name] = v
+		}
+	}
+	loaderNames := make(map[string]struct{})
+	for _, name := range sessionenv.AccountLoaderFilledNames(agent) {
+		loaderNames[name] = struct{}{}
+	}
+	var out []string
+	for _, name := range passthrough {
+		if _, set := values[name]; set {
+			continue
+		}
+		_, loader := loaderNames[name]
+		pair := len(loaderNames) > 0 &&
+			(strings.HasPrefix(name, "GIT_CONFIG_KEY_") ||
+				strings.HasPrefix(name, "GIT_CONFIG_VALUE_"))
+		if !loader && !pair {
+			continue
+		}
+		if sib, twin := sessionenv.ProxyEnvCaseTwin(name); twin &&
+			slices.Contains(passthrough, sib) {
+			if v, set := values[sib]; set {
+				out = append(out, name+"="+v)
+				continue
+			}
+		}
+		out = append(out, name+"=")
+	}
+	return out
 }

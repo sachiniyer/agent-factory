@@ -952,48 +952,8 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 		}
 	}
 	if p.spec.Account.Dir != "" {
-		// A loader-filled name the operator forwarded but did not set must
-		// still blank the image's value for it: -e admits the name through the
-		// wrap's passthrough extras, and an image ENV value that survived would
-		// reach ScopeAgentServerAccount reading exactly like the operator's
-		// claim (#7555). The indexed pair names get the same treatment because
-		// a forwarded GIT_CONFIG_COUNT animates whatever GIT_CONFIG_KEY_* or
-		// GIT_CONFIG_VALUE_* the image declared (#7582 review). Every other
-		// forwarded name keeps master's contract: unset in the daemon env means
-		// no -e at all, so the image's own value stands — blanking those would
-		// eat legitimate image-supplied values like locale settings. On gemini
-		// that class no longer includes the proxy spellings: they are
-		// loader-filled keep-if-set names now (#7665), so a forwarded-but-unset
-		// HTTPS_PROXY does emit the blanking -e and the image's proxy cannot
-		// reach the credential-bearing transport.
-		present := make(map[string]struct{}, len(source))
-		for _, entry := range source {
-			if name, _, ok := strings.Cut(entry, "="); ok {
-				present[name] = struct{}{}
-			}
-		}
-		loaderNames := make(map[string]struct{})
-		for _, name := range sessionenv.AccountLoaderFilledNames(p.spec.Account.Agent) {
-			loaderNames[name] = struct{}{}
-		}
-		for _, name := range p.spec.SessionEnvPassthrough {
-			if _, ok := present[name]; ok {
-				continue
-			}
-			// The pair prefixes only matter where a forwarded GIT_CONFIG_COUNT
-			// is itself pinned keep-if-set — the agents with loader-filled
-			// names. On claude/codex account sessions master's contract stands:
-			// a forwarded-but-unset pair name emits no -e and the image's value
-			// fills, exactly as before (#7582 review).
-			_, loader := loaderNames[name]
-			pair := len(loaderNames) > 0 &&
-				(strings.HasPrefix(name, "GIT_CONFIG_KEY_") ||
-					strings.HasPrefix(name, "GIT_CONFIG_VALUE_"))
-			if !loader && !pair {
-				continue
-			}
-			names = append(names, name+"=")
-		}
+		names = append(names,
+			accountLoaderBlankEntries(p.spec.Account.Agent, p.spec.SessionEnvPassthrough, source)...)
 	}
 	return names
 }
