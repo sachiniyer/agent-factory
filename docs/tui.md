@@ -130,7 +130,8 @@ For a named long-running command or a web preview with a URL/port, use
   binding remains accepted and opens the creation form with the backend field focused;
   it does not force a remote backend.
 - **`a`** archives the selected live session as the default done action, behind
-  a confirmation — on an archived, Lost, or Dead row it does nothing. **`r`**
+  a confirmation — on an archived, Lost, or Dead row it answers with a notice
+  pointing at `r` rather than archiving. **`r`**
   restores an archived, Lost, or Dead session. **`D`** permanently kills a
   session, removing only the worktrees and branches af owns — user-owned
   resources stay; uncommitted or unmerged work in af-owned resources may be lost.
