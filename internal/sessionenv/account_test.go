@@ -115,6 +115,14 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 		"readonly OPENAI_API_KEY=other; make",
 		"read CODEX_HOME </dev/null; make",
 		"printf -v CODEX_HOME other; make",
+		// bash's printf parses every `-v` and applies the LAST: a benign first
+		// pair must not mask a later `-v <denied>` that retargets the assignment
+		// (#9a4df452 follow-up — last `-v` wins).
+		"printf -v A -v CODEX_HOME '%s' /other; make",
+		"printf -v A -v BASH_ENV '%s' /tmp/evil; make",
+		"printf -v a -v CODEX_HOME x; make",
+		"command printf -v a -v CODEX_HOME x; codex",
+		"bash -c 'printf -v A -v CODEX_HOME %s /other; codex'",
 		"eval 'unset CODEX_HOME'; make",
 		"alias run='OPENAI_API_KEY=other codex'; run",
 		"exec -c env HOME=$HOME codex",
