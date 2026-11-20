@@ -559,3 +559,36 @@ func TestOnlyServerProcessesCountAsALiveServer(t *testing.T) {
 		})
 	}
 }
+
+// #7647: a socket spelling that reaches its socket through a directory that
+// has itself been deleted — the post-reboot or /tmp-cleaned stale-$TMUX
+// shape — stays undecidable against a same-basename server, so signalling
+// cannot clear the refusal. The refusal must name the action that CAN:
+// recreating the deleted directory makes the spelling comparable again, and
+// the next run rules a server bound elsewhere out.
+func TestSocketAbsentRefusalNamesTheDeletedDirectory(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(root, "tmux-1000")
+	sock := filepath.Join(gone, "default")
+
+	pinPossibleOwnerServers(t, 4242)
+	t.Cleanup(PinServerProbeForTest(4242))
+	listFailureTmuxOnPath(t, filepath.Join(t.TempDir(), "touched"),
+		"error connecting to "+sock+" (No such file or directory)", 1)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	err = CleanupSessions(cmd.MakeExecutor())
+	if err == nil {
+		t.Fatal("CleanupSessions returned nil while a server may own the missing socket")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, gone) {
+		t.Errorf("error = %q, want the refusal to name the deleted directory %s", msg, gone)
+	}
+	if !strings.Contains(msg, "mkdir") {
+		t.Errorf("error = %q, want the refusal to say the directory can be recreated", msg)
+	}
+}
