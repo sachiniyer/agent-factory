@@ -251,19 +251,17 @@ var agentNames = map[string]map[string]struct{}{
 // Shared by both selector entries below rather than written twice, so the two
 // modes can never drift into granting different things.
 //
-// The #7662 bundle audit added the chain twins google-auth-library reads
-// alongside the originals — a selector-active operator who sets the
-// lowercase or alternate spellings must have them reach the CLI too, since
-// the bundled google-auth-library project chain consults every link
-// (GCLOUD_PROJECT || GOOGLE_CLOUD_PROJECT || gcloud_project ||
-// google_cloud_project, and GOOGLE_APPLICATION_CREDENTIALS ||
-// google_application_credentials). GOOGLE_CLOUD_PROJECT_ID and
-// GOOGLE_CLOUD_QUOTA_PROJECT are the same class: the project fallback and
-// the X-Goog-User-Project quota override sent with the credential.
+// The group is deliberately master's membership: the #7665 round-2 review
+// (R9) rejected widening it — the chain twins google-auth-library reads
+// (GCLOUD_PROJECT, the lowercase spellings, google_application_credentials,
+// GOOGLE_CLOUD_PROJECT_ID, GOOGLE_CLOUD_QUOTA_PROJECT) would have admitted
+// six ambient names master filtered on any plain session with the selector
+// forwarded, changing a Vertex user's project and quota header. Those names
+// are claimed by the loader/pin classes instead, where a forward still
+// reaches the agent through session_env_passthrough.
 var geminiCloudNames = nameSet(
-	"GOOGLE_APPLICATION_CREDENTIALS", "google_application_credentials",
-	"GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "gcloud_project", "google_cloud_project",
-	"GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_CLOUD_QUOTA_PROJECT",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	"GOOGLE_CLOUD_PROJECT",
 	"GOOGLE_CLOUD_LOCATION",
 )
 
@@ -448,6 +446,28 @@ func ImportNamesForCommand(source []string, agent, command string, extras []stri
 //
 // The set is derived from the name tables rather than listed, so a newly
 // rostered agent or cloud-mode group is covered without being remembered here.
+//
+// importedCredentialExemptNames below subtracts the names the round-2
+// #7665 review ruled out (R8): each is plausible operator-managed
+// deployment configuration — a project, credential-config root, proxy or
+// trust-root spelling, or a selector — so deleting it from the stored
+// option on every agent's launch would strip a hand-set value, the same
+// reasoning the common-admitted exemption inside the function applies.
+// The exempt set keeps this list equal to master's.
+var importedCredentialExemptNames = nameSet(
+	"grpc_proxy", "no_grpc_proxy",
+	"CLOUDSDK_CONFIG",
+	"GCLOUD_PROJECT", "gcloud_project", "google_cloud_project",
+	"google_application_credentials",
+	"GOOGLE_CLOUD_PROJECT_ID", "GOOGLE_CLOUD_QUOTA_PROJECT",
+	"GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", "GRPC_SSL_CIPHER_SUITES",
+	"GOOGLE_API_CERTIFICATE_CONFIG",
+	"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
+	"GEMINI_TELEMETRY_USE_CLI_AUTH",
+	"GEMINI_DEFAULT_AUTH_TYPE",
+	"OTLP_GOOGLE_CLOUD_PROJECT", "_GEMINI_USER_GCP_PROJECT",
+)
+
 func ImportedCredentialNames() []string {
 	set := make(map[string]struct{})
 	for _, names := range agentNames {
@@ -499,6 +519,18 @@ func ImportedCredentialNames() []string {
 		"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
 	} {
 		set[name] = struct{}{}
+	}
+	// The #7665 round-2 review (R8): the strip set must equal master's — a
+	// name added here deletes it from every agent's tmux
+	// update-environment, and each of these is plausible operator-managed
+	// deployment configuration (a project name, a credential-config root,
+	// a proxy or trust-root spelling) an operator can legitimately keep in
+	// the stored option, exactly the reasoning the common-admitted
+	// exemption above already applies. They are still pinned into the
+	// gemini panes af launches; the strip just does not touch the
+	// operator's stored option for them.
+	for name := range importedCredentialExemptNames {
+		delete(set, name)
 	}
 	out := make([]string, 0, len(set))
 	for name := range set {

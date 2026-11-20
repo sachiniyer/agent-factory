@@ -512,7 +512,7 @@ value rather than pinning it), the credential-transport trust roots
 credential-config and metadata-endpoint reads (`CLOUD_SHELL`,
 `GEMINI_CLI_USE_COMPUTE_ADC`, `CLOUDSDK_CONFIG`,
 `GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES`, `GCE_METADATA_IP`,
-`GCE_METADATA_HOST`, `GEMINI_TELEMETRY_USE_CLI_AUTH`), `GITHUB_TOKEN`, the
+`GCE_METADATA_HOST`, `GEMINI_TELEMETRY_USE_CLI_AUTH`), the
 bundled detection reads (`DEBUG_AUTH`, `DETECT_GCP_RETRIES`,
 `METADATA_SERVER_DETECTION`), and af's own git-config defense
 (`GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`). A name the operator forwards

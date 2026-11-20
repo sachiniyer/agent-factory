@@ -901,6 +901,15 @@ func TestAccountLoaderFilledNames_NeverJoinTheIdentitySet(t *testing.T) {
 			}
 			continue
 		}
+		// R8: plausible operator-managed deployment configuration (a
+		// project, credential-config root, proxy or trust-root spelling) is
+		// exempt for the same reason — the strip set stays equal to
+		// master's.
+		if _, exempt := importedCredentialExemptNames[name]; exempt {
+			require.NotContains(t, imported, name,
+				"%s is plausible hand-set operator config — the stored-option strip must leave it (R8)", name)
+			continue
+		}
 		require.Contains(t, imported, name,
 			"%s can carry forwarded credential-class material; its stale tmux import must be dropped", name)
 	}

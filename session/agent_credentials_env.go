@@ -961,7 +961,11 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 		// GIT_CONFIG_VALUE_* the image declared (#7582 review). Every other
 		// forwarded name keeps master's contract: unset in the daemon env means
 		// no -e at all, so the image's own value stands — blanking those would
-		// eat legitimate image-supplied values like proxy or locale settings.
+		// eat legitimate image-supplied values like locale settings. On gemini
+		// that class no longer includes the proxy spellings: they are
+		// loader-filled keep-if-set names now (#7665), so a forwarded-but-unset
+		// HTTPS_PROXY does emit the blanking -e and the image's proxy cannot
+		// reach the credential-bearing transport.
 		present := make(map[string]struct{}, len(source))
 		for _, entry := range source {
 			if name, _, ok := strings.Cut(entry, "="); ok {

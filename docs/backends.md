@@ -315,6 +315,19 @@ user's real home and mounts it only if it exists, so:
       default. Every pinned or re-asserted name is one the agent-server's
       exec filter admits, so the boundary survives the hop to the agent
       process itself.
+
+      On an **account-scoped** gemini session the same classified names are
+      keep-if-set rather than refused: an operator forward through
+      `session_env_passthrough` keeps its value, and anything the operator
+      did not forward is discarded — pinned defined-and-empty at the pane
+      and dropped at the exec filter — so a workspace `.env`, an image
+      `ENV`, or a remote login environment cannot claim the proxy, trust
+      roots, credential or project of a credential-bearing request.
+      `docs/usage-limits.md` names each discarded value (the project/quota
+      chain and lowercase twins, the proxy spellings, the trust-root paths,
+      `CLOUDSDK_CONFIG`, the metadata endpoints, the executable-credential
+      gate, the telemetry auth selector) and the remedy for every one is
+      the same: name it in `session_env_passthrough`.
     - In af's own `docker exec` steps: every one names `/bin/sh` by absolute
       path, so the container's `PATH` — whatever it is — cannot hand af a
       repo-written `sh` to intercept the agent-server launch. Commands

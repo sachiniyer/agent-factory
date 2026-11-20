@@ -244,8 +244,9 @@ var GeminiBundleEnvReads = []GeminiBundleEnvRead{
 	// ── Claimed by the shared / allowlist tables ───────────────────────
 	// Pre-existing holds owned by the agent-agnostic sets — recorded so the
 	// enumeration is complete without moving the claim.
-	{Name: "GITHUB_TOKEN", Mount: GeminiBundleEnvPin, Account: GeminiBundleEnvKeepIfSet,
-		Read: `process.env["GITHUB_TOKEN"] — the bundled gh extension's Authorization header; denied+pinned on the mount path by credentialMountSharedCredentialNames, keep-if-set on the account path since #7555`},
+	{Name: "GITHUB_TOKEN", Mount: GeminiBundleEnvWaived, Account: GeminiBundleEnvWaived,
+		Read:   `process.env["GITHUB_TOKEN"] — the bundled gh extension's Authorization header`,
+		Reason: `outside the four selectors — it chooses nothing about the request carrying the Google credential (#7665 R10); master's holds stand: shared-credential denial+pin on the mount path, ambient-admitted on the account path`},
 	{Name: "HOME", Mount: GeminiBundleEnvShared, Account: GeminiBundleEnvKept,
 		Read: `credential/config root for ~/.gemini, ~/.config/gcloud; the mount path re-asserts it to the session home`},
 	{Name: "PATH", Mount: GeminiBundleEnvShared, Account: GeminiBundleEnvKept,
