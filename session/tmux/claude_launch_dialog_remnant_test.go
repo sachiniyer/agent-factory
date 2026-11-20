@@ -167,6 +167,7 @@ func TestIssue7618RemnantReaderLeavesNonDialogPanesClear(t *testing.T) {
 		{"the footer's end in a boxed draft whose prompt row scrolled off", "│   Esc to       │\n│   cancel       │\n╰────────────────╯"},
 		{"a guide row, an option row and the footer in a boxed draft whose prompt row scrolled off",
 			"│   Security guide                     │\n│   ❯ No, exit                         │\n│   Enter to confirm · Esc to cancel   │\n╰──────────────────────────────────────╯"},
+		{"the footer's end in a boxed draft, closed, over a second edge", "│ Esc to │\n│ cancel │\n╰────────╯\n╰────────╯"},
 		{"a guide row and footer with nothing between", "Security guide\n\nEnter to confirm · Esc to cancel"},
 		{"a guide row, other text, and the footer", "Security guide\n\nSee the docs\n\nEnter to confirm · Esc to cancel"},
 		{"a guide row, an option remnant, and a row below the footer", "Security guide\n\n❯ No, exit\n\nEnter to confirm · Esc to cancel\n? for shortcuts"},

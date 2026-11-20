@@ -313,9 +313,11 @@ func claudeLaunchDialogFooterTail(pane claudeLaunchDialogPane) bool {
 }
 
 // claudeLaunchDialogFooterInClosedBox reports whether the footer that begins
-// on content row footerRow sits inside a box that closes under it: the last
-// painted line of the pane is a box's bottom edge, and every line from the
-// footer's first down to that edge carries the box's sides.
+// on content row footerRow, the pane's last content, sits inside a box that
+// closes under it: every line from the footer's first carries a box's sides,
+// down to a bottom edge, with all of the footer above that edge. The pane's
+// last painted line must be a bottom edge too, as #7652 asked, so this only
+// ever excuses less than that did.
 //
 // No build paints its footer inside a box: 2.0.25, the one that boxes the
 // dialog, paints the footer under the box
@@ -330,20 +332,22 @@ func claudeLaunchDialogFooterInClosedBox(pane claudeLaunchDialogPane, footerRow 
 	if footerRow >= len(pane.index) {
 		return false
 	}
-	edge := len(pane.lines) - 1
-	for edge >= 0 && strings.TrimSpace(pane.lines[edge]) == "" {
-		edge--
+	last := len(pane.lines) - 1
+	for last >= 0 && strings.TrimSpace(pane.lines[last]) == "" {
+		last--
 	}
-	first := pane.index[footerRow]
-	if edge <= first || !claudeTrustFrameClosingRule(pane.lines[edge]) {
+	if last < 0 || !claudeTrustFrameClosingRule(pane.lines[last]) {
 		return false
 	}
-	for i := first; i < edge; i++ {
-		if !claudeTrustBordered(pane.lines[i]) {
+	edge := pane.index[footerRow]
+	for edge < last && !claudeTrustFrameClosingRule(pane.lines[edge]) {
+		if !claudeTrustBordered(pane.lines[edge]) {
 			return false
 		}
+		edge++
 	}
-	return true
+	// The footer's last row is above the edge that closes its box.
+	return edge > pane.index[footerRow] && pane.index[len(pane.index)-1] < edge
 }
 
 // claudeLaunchDialogPendingExitMaxKey bounds the key name in "Press <key>
