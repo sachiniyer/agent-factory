@@ -140,6 +140,25 @@ func (p *dockerProvisioner) reap() error {
 		log.WarningLog.Printf("%v", reapErr)
 		return reapErr
 	}
+	// The "answer" was a TRANSPORT FAILURE — the daemon was unreachable (down or
+	// restarting, the socket/endpoint was refused, access was denied, or a pinned
+	// DOCKER_CONTEXT could not be resolved) — so the `docker rm -f` never reached an
+	// engine and the container's fate is unknown. This is the same state-unknown
+	// class as the deadline above: do NOT latch, so the daemon's kill-retry re-runs
+	// the rm once Docker access is restored instead of orphaning a container behind
+	// a deleted row. Without this guard a dockerd blip during a Kill would latch as
+	// a known-state teardown, the row would be deleted, and the (still-running)
+	// container would outlive its only in-process handle (#2063-review omission).
+	//
+	// "No such container" is excluded because it is the OPPOSITE case — an answered
+	// error that PROVES the container gone (handled above for the staging dir, and
+	// falling through to the known-state latch below). A real daemon answer — "Error
+	// response from daemon: …" — does not match and still latches known-state.
+	if !strings.Contains(string(out), "No such container") && dockerAnsweredTransportFailure(out) {
+		reapErr = fmt.Errorf("%w: %w", ErrWorkspaceStateUnknown, reapErr)
+		log.WarningLog.Printf("%v", reapErr)
+		return reapErr
+	}
 	// docker ANSWERED with an error: the reap completed and TOLD us something, so it
 	// latches as a KNOWN-state error and the row may be deleted, per the documented
 	// deleteSessionRecord contract. Latching also stops retries from re-running a
@@ -148,6 +167,51 @@ func (p *dockerProvisioner) reap() error {
 	p.reapErr = reapErr
 	log.WarningLog.Printf("%v", reapErr)
 	return reapErr
+}
+
+// dockerAnsweredTransportFailure reports whether out is a docker CLI failure that
+// proves a `docker rm -f` never reached the daemon and so never acted on the
+// container. The daemon was unreachable (down or restarting, the endpoint was
+// refused, or DOCKER_HOST named a bad host), access to its socket/endpoint was
+// denied, or the pinned DOCKER_CONTEXT could not be resolved.
+//
+// The CLI still exits non-zero WITHOUT tripping the reap's deadline for any of
+// these, so — exactly like a timeout, and unlike a real answer — the container's
+// fate is unknown: it must NOT latch, and the reap must re-run once Docker access
+// is restored. Mapping a transport failure onto the known-state latch (the
+// #2063-review answer taxonomy's lone omission) deleted the row while the
+// container lived and left no in-process handle to retry it.
+//
+// This is the counterpart of the in-reap "No such container" match: that is the
+// ONE answered error that PROVES the container gone (so the staging dir releases
+// and the outcome latches known-state); this is an answer that proves the rm
+// never ran. A genuine daemon response — "Error response from daemon: …" —
+// matches neither and still latches as a known-state teardown per the
+// deleteSessionRecord contract. Callers exclude "No such container" themselves
+// so the two opposite classes stay disjoint.
+func dockerAnsweredTransportFailure(out []byte) bool {
+	s := string(out)
+	// The CLI's canonical "daemon unreachable" banner, emitted for a down or
+	// restarting dockerd, a refused/bad DOCKER_HOST, or a TLS mismatch — every
+	// form opens with "Cannot connect to the Docker daemon".
+	if strings.Contains(s, "Cannot connect to the Docker daemon") {
+		return true
+	}
+	// A socket/endpoint permission denial, e.g. "Got permission denied while
+	// trying to connect to the Docker daemon socket at unix:///var/run/docker.sock:
+	// …". A bare "permission denied" alone is too broad: a real daemon answer may
+	// carry it for a container operation, so require the docker-daemon or socket
+	// context that marks the failure as transport rather than an answer.
+	if strings.Contains(s, "permission denied") &&
+		(strings.Contains(s, "Docker daemon") || strings.Contains(s, "docker.sock")) {
+		return true
+	}
+	// An unresolvable pinned DOCKER_CONTEXT ("context \"foo\": context not found")
+	// — the CLI could not name an engine to dial at all.
+	if strings.Contains(s, "context not found") {
+		return true
+	}
+	return false
 }
 
 // clearStagingDir removes the per-session staging dir. Called only once the

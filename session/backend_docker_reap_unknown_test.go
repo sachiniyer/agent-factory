@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -290,5 +291,237 @@ func TestDockerReapTimeoutThenSuccessClears(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&calls); n != after {
 		t.Fatalf("a completed reap must not re-run `docker rm -f` (the Kill-retry collapse the latch exists for); ran %d more times", n-after)
+	}
+}
+
+// TestDockerAnsweredTransportFailure pins the matcher that classifies a
+// `docker rm -f` failure as a transport failure (daemon never reached) rather
+// than a daemon answer. The reap's answer taxonomy hinges on this predicate,
+// so a docker CLI wording change that silently escapes it would regress the
+// fix exactly the way the original omission did. Matched strings are the
+// transports the bug reclassifies; the non-matched ones guard the opposite
+// polarity (a real answer must still latch known-state).
+func TestDockerAnsweredTransportFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{name: "daemon down unix socket", out: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", want: true},
+		{name: "daemon down tcp host", out: "Cannot connect to the Docker daemon at tcp://10.0.0.1:2376. Is the docker daemon running?", want: true},
+		{name: "socket permission denied", out: "Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: dial unix /var/run/docker.sock: connect: permission denied", want: true},
+		{name: "unresolvable pinned context", out: `context "missing": context not found`, want: true},
+		{name: "no such container is a real answer", out: "Error: No such container: deadbeefcafe0000", want: false},
+		{name: "real daemon answer", out: "Error response from daemon: removal of container deadbeefcafe0000 is already in progress", want: false},
+		{name: "bare permission denied is not transport", out: "rm: permission denied", want: false},
+		{name: "empty output", out: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dockerAnsweredTransportFailure([]byte(tc.out)); got != tc.want {
+				t.Fatalf("dockerAnsweredTransportFailure(%q) = %v, want %v", tc.out, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDockerReapDaemonUnreachableIsWorkspaceStateUnknown is the #2063-review
+// omission a dockerd blip exposes: a `docker rm -f` the CLI fails because the
+// daemon is UNREACHABLE (down/restarting, socket access denied, an unresolvable
+// pinned DOCKER_CONTEXT) is a non-deadline "answer" the buggy latch classified
+// as a KNOWN-state teardown — so the row was deleted while the container lived
+// and no in-process handle remained to retry it. It must, like a timeout, wrap
+// ErrWorkspaceStateUnknown so TeardownStateUnknown keeps the row, and it must
+// NOT latch so the daemon's kill-retry can re-run the rm.
+func TestDockerReapDaemonUnreachableIsWorkspaceStateUnknown(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+	}{
+		{name: "daemon down", out: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"},
+		{name: "socket permission denied", out: "Got permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: dial unix /var/run/docker.sock: connect: permission denied"},
+		{name: "unresolvable context", out: `context "missing": context not found`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withShortDockerReapTimeout(t, 5*time.Second) // never reached; the fake answers instantly
+			restore := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+				if len(args) > 0 && args[0] == "info" {
+					return []byte(dockerReapTestEngineID + "\n"), nil
+				}
+				return []byte(tc.out), errors.New("exit status 1")
+			})
+			defer restore()
+
+			p := &dockerProvisioner{spec: ProvisionSpec{Title: "unreachable"}, containerID: "deadbeefcafe0000", engineID: dockerReapTestEngineID}
+			err := p.reap()
+			if err == nil {
+				t.Fatal("a transport-failing `docker rm -f` must return an error, got nil")
+			}
+			if !errors.Is(err, ErrWorkspaceStateUnknown) {
+				t.Fatalf("a daemon-unreachable reap must wrap ErrWorkspaceStateUnknown so the row is retained; got a plain error: %v", err)
+			}
+			if !TeardownStateUnknown(err) {
+				t.Fatalf("TeardownStateUnknown must be true for a daemon-unreachable reap so KillSession/deleteSessionRecord RETAIN the row; got false for: %v", err)
+			}
+			if p.reaped {
+				t.Fatalf("a daemon-unreachable reap must NOT latch so the kill-retry can re-run `docker rm -f` once Docker access is restored; p.reaped was true")
+			}
+		})
+	}
+}
+
+// TestDockerReapDaemonUnreachableIsReRunnable is the no-latch contract for a
+// transport failure, mirroring TestDockerReapTimeoutIsReRunnable: the daemon's
+// finishUserKill re-invokes reap() on every poll for a retained record, so a
+// transport failure that latched would make the second call return a stale
+// error and never re-run `docker rm -f` — the row gets deleted and the
+// container is orphaned. A second reap while docker is still unreachable must
+// (i) actually re-attempt the rm and (ii) keep returning the unknown sentinel.
+func TestDockerReapDaemonUnreachableIsReRunnable(t *testing.T) {
+	withShortDockerReapTimeout(t, 5*time.Second) // never reached; the fake answers instantly
+	var calls int32
+	restore := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
+		atomic.AddInt32(&calls, 1)
+		return []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"), errors.New("exit status 1")
+	})
+	defer restore()
+
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "unreachable"}, containerID: "deadbeefcafe0000", engineID: dockerReapTestEngineID}
+
+	first := reapWithin(t, p, 10*time.Second)
+	if !errors.Is(first, ErrWorkspaceStateUnknown) {
+		t.Fatalf("first daemon-unreachable reap must wrap ErrWorkspaceStateUnknown, got %v", first)
+	}
+	if p.reaped {
+		t.Fatalf("first daemon-unreachable reap must NOT latch, got p.reaped=true")
+	}
+
+	second := reapWithin(t, p, 10*time.Second)
+	if second == nil {
+		t.Fatal("second reap after a transport failure returned nil — the latch skipped the retry, so the row " +
+			"would be deleted and the container orphaned")
+	}
+	if !errors.Is(second, ErrWorkspaceStateUnknown) {
+		t.Fatalf("a second reap while docker is still unreachable must keep returning ErrWorkspaceStateUnknown, got %v", second)
+	}
+	if !TeardownStateUnknown(second) {
+		t.Fatalf("the retained row depends on TeardownStateUnknown staying true across retries, got false for: %v", second)
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 {
+		t.Fatalf("a daemon-unreachable reap must actually re-attempt `docker rm -f` on the next call; dockerExec ran %d times, want >= 2", n)
+	}
+}
+
+// TestDockerReapDaemonUnreachableThenSuccessClears completes the retry
+// contract, mirroring TestDockerReapTimeoutThenSuccessClears: once Docker
+// access is restored, a reap after a prior transport failure actually reaps
+// the container and returns nil so the row is finally deleted rather than
+// retained forever — and a further reap stays latched at nil. The call-count
+// assertion is what distinguishes a real re-attempt from a latched nil.
+func TestDockerReapDaemonUnreachableThenSuccessClears(t *testing.T) {
+	withShortDockerReapTimeout(t, 5*time.Second)
+	var down atomic.Bool
+	var calls int32
+	down.Store(true)
+	restore := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
+		atomic.AddInt32(&calls, 1)
+		if down.Load() {
+			return []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"), errors.New("exit status 1")
+		}
+		return []byte("deadbeefcafe0000\n"), nil
+	})
+	defer restore()
+
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "recovers"}, containerID: "deadbeefcafe0000", engineID: dockerReapTestEngineID}
+
+	if err := reapWithin(t, p, 10*time.Second); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("first (unreachable) reap must be unknown, got %v", err)
+	}
+	if p.reaped {
+		t.Fatalf("first (unreachable) reap must NOT latch so docker recovery can retry, got p.reaped=true")
+	}
+	down.Store(false) // docker recovers
+	if err := reapWithin(t, p, 10*time.Second); err != nil {
+		t.Fatalf("after docker recovers, the retry must reap and return nil so the row is deleted, got %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n < 2 {
+		t.Fatalf("the post-recovery reap must actually re-run `docker rm -f`, not return a stale latched result; "+
+			"dockerExec ran %d times, want >= 2 (a latched result would leave the container leaked)", n)
+	}
+	// Now that a reap COMPLETED, it latches: no further docker command, still nil.
+	after := atomic.LoadInt32(&calls)
+	if err := reapWithin(t, p, 10*time.Second); err != nil {
+		t.Fatalf("a completed reap must latch nil, got %v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n != after {
+		t.Fatalf("a completed reap must not re-run `docker rm -f` (the Kill-retry collapse the latch exists for); ran %d more times", n-after)
+	}
+}
+
+// TestDockerReapDaemonUnreachableRetainsStagingDir guards the staging-dir
+// invariant the bug report rests on: while the container's fate is unproven,
+// the staging directory stays on disk so the cleanup record's StagingDir still
+// names a real directory a later reap owns. A transport failure must not clear
+// it (only a success or a "No such container" answer does), or a later reap
+// would find the binding missing for a container that was never removed.
+func TestDockerReapDaemonUnreachableRetainsStagingDir(t *testing.T) {
+	staging := t.TempDir()
+	restore := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
+		return []byte("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"), errors.New("exit status 1")
+	})
+	defer restore()
+
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "unreachable"}, containerID: "deadbeefcafe0000", engineID: dockerReapTestEngineID, stagingDir: staging}
+	if err := p.reap(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("expected ErrWorkspaceStateUnknown, got %v", err)
+	}
+	if p.stagingDir == "" {
+		t.Fatalf("a daemon-unreachable reap must NOT clear the staging dir — the container may still exist and a later reap still owns it")
+	}
+	if _, err := os.Stat(staging); err != nil {
+		t.Fatalf("the staging dir must still be on disk after a daemon-unreachable reap: %v", err)
+	}
+}
+
+// TestDockerReapRealDaemonAnswerStaysKnown locks the polarity on the OTHER side
+// of the fix: a `docker rm -f` the daemon ANSWERED with a real error (it is up
+// and reported a problem) is NOT a transport failure and must still latch as a
+// KNOWN-state teardown whose row may be deleted. Without this guard the
+// transport-failure matcher could over-match a genuine answer and wedge the
+// record forever — the inverse of the bug, and exactly the regression the
+// "No such container" polarity test (TestDockerReapReportedErrorStaysKnown)
+// pins for that one answered error.
+func TestDockerReapRealDaemonAnswerStaysKnown(t *testing.T) {
+	restore := SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return []byte(dockerReapTestEngineID + "\n"), nil
+		}
+		return []byte("Error response from daemon: removal of container deadbeefcafe0000 is already in progress"), errors.New("exit status 1")
+	})
+	defer restore()
+
+	p := &dockerProvisioner{spec: ProvisionSpec{Title: "answered"}, containerID: "deadbeefcafe0000", engineID: dockerReapTestEngineID}
+	err := p.reap()
+	if err == nil {
+		t.Fatal("a failed `docker rm -f` must return an error")
+	}
+	if errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("a real daemon ANSWER must NOT be classified unknown — only a transport failure is; mapping it to unknown would wedge the row forever: %v", err)
+	}
+	if TeardownStateUnknown(err) {
+		t.Fatalf("TeardownStateUnknown must be false for a real daemon answer so the row may be deleted: %v", err)
+	}
+	if !p.reaped {
+		t.Fatalf("a real daemon answer must latch known-state so the kill-retry collapses (the contract the latch exists for); got p.reaped=false")
 	}
 }
