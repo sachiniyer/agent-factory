@@ -541,10 +541,26 @@ func TestOnlyServerProcessesCountAsALiveServer(t *testing.T) {
 		want bool
 	}{
 		{"tmux: server", true},
+		// A server tmux started under a RENAMED argv[0]: `exec -a foo tmux`, or
+		// a copy/symlink named otherwise. On Linux its kernel task name is
+		// "<name>: server" (measured on tmux 3.4, #7242, and documented in
+		// internal/proctree/tmuxidentity.go). Before the suffix fix this shape
+		// was dropped at the prefilter, the owner never became a candidate, and
+		// the socket-absent probe answered a determinate "unclaimed" while the
+		// server and its panes were alive — licensing `af reset`'s destructive
+		// cleanup against a still-running server (#2875). Admitting it is the
+		// prefilter's own safe direction: it fails proctree.IsTmuxServer (argv[0]
+		// basename != "tmux") and is remembered as an unprobed possible owner,
+		// keeping the answer "claimed" so reset refuses.
+		{"bx: server", true},
+		{"foo: server", true},
 		// The fallback for builds/platforms that do not retitle. Exact only.
 		{"tmux", true},
 		// The one that made this a bug: a client is not a server.
 		{"tmux: client", false},
+		// A renamed client is still not a server: the ": server" suffix is the
+		// server's title, never a client's ("<name>: client").
+		{"bx: client", false},
 		// Neighbours a prefix match would also have swallowed.
 		{"tmuxinator", false},
 		{"tmux-mem-cpu-load", false},

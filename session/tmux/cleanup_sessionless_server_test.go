@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -284,6 +286,102 @@ func TestProbeSessionStrictNamesTheDiagnosticItCouldNotClassify(t *testing.T) {
 	require.False(t, known, "a listing that did not answer either leaves the session unknown")
 	require.ErrorContains(t, err, "Permission denied",
 		"the refusal must name what tmux said, not only its exit status")
+}
+
+// TestProbeStrictRefusesWhenARenamedLiveServerOwnsTheUnlinkedSocket is the
+// end-to-end regression for the liveTmuxServerPIDs prefilter (#2875/#7242).
+//
+// Linux tmux builds its kernel task name from getprogname(), which is argv[0],
+// so a server started as `exec -a foo tmux` — or a copy/symlink named
+// otherwise — is titled `<name>: server` (measured on tmux 3.4, documented in
+// internal/proctree/tmuxidentity.go, #7242). The old exact-match prefilter
+// (`comm == "tmux: server" || comm == "tmux"`) dropped that shape at the
+// entry point, so the owner never became a candidate, the socket-absent probe
+// answered a determinate "unclaimed" (NoServerRunning == true) while the
+// server and its panes were alive, and `af reset`'s destructive cleanup
+// proceeded against a still-running server — the exact destruction class the
+// socket-absent probe exists to prevent (#2875).
+//
+// The fix admits the `: server` suffix. Once admitted, the renamed server
+// fails proctree.IsTmuxServer (its argv[0] basename is not "tmux") and is
+// remembered as an unprobed possible owner, so tmuxSocketClaimed answers
+// "claimed" (unknown) and NoServerRunning returns false — reset refuses.
+//
+// Linux-only: tmux cannot retitle on darwin, so a server started under a
+// renamed binary there is titled after the exec'd file name (no `: server`
+// suffix), a separate shape this fix does not address.
+func TestProbeStrictRefusesWhenARenamedLiveServerOwnsTheUnlinkedSocket(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		// The `<name>: server` task name is a Linux prctl measurement; tmux
+		// cannot retitle on darwin, where this test's premise does not hold.
+		t.Skip("renamed-server task name is a Linux prctl shape")
+	}
+	testguard.IsolateTmux(t)
+
+	// A copy of the tmux binary named otherwise. The server it forks retitles
+	// to `bx: server`; `exec -a foo tmux` would title it the same way, but a
+	// copy is what a user actually has on disk.
+	tmuxPath, err := exec.LookPath("tmux")
+	require.NoError(t, err)
+	src, err := os.ReadFile(tmuxPath)
+	require.NoError(t, err)
+	renamed := filepath.Join(t.TempDir(), "bx")
+	require.NoError(t, os.WriteFile(renamed, src, 0o755))
+
+	// Start a server on a private -S socket with a long-lived pane. The server
+	// daemonises and retitles to `bx: server`.
+	socket := filepath.Join(t.TempDir(), "repro.sock")
+	out, err := exec.Command(renamed, "-S", socket, "new-session", "-d",
+		"-s", "af_renamed_owner", "sleep 300").CombinedOutput()
+	require.NoError(t, err, "renamed tmux new-session: %s", out)
+
+	// The server pid, from a plain `tmux` client on the same socket: a client
+	// reaches whichever server owns the socket, regardless of the client
+	// binary's name.
+	out, err = exec.Command("tmux", "-S", socket, "display-message",
+		"-p", "#{pid}").CombinedOutput()
+	require.NoError(t, err, "tmux display-message against the renamed server: %s", out)
+	serverPID, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	require.NoError(t, err, "renamed server pid must parse: %q", out)
+	t.Cleanup(func() {
+		// The socket is unlinked below; kill by pid, not `tmux -S kill-server`.
+		_ = syscall.Kill(serverPID, syscall.SIGTERM)
+	})
+
+	// The measured renamed-server task name (#7242). Retitling happens inside
+	// proc_start a moment after the daemonising fork, so wait for it.
+	require.Eventually(t, func() bool {
+		p, lookupErr := proctree.Lookup(serverPID)
+		return lookupErr == nil && p.Comm == "bx: server"
+	}, 5*time.Second, 10*time.Millisecond,
+		"the renamed server must retitle to `bx: server`")
+
+	// Direct regression for the prefilter the fix broadens: the renamed server
+	// is now a live-server CANDIDATE. liveTmuxServerPIDs reads the real
+	// process table by design — the bug is in this function, so it is not
+	// pinned. Membership, not equality, so an unrelated same-uid server on a
+	// shared host cannot change the result.
+	require.Contains(t, liveTmuxServerPIDs(), serverPID,
+		"the prefilter must admit a renamed tmux server (`bx: server`) as a live candidate")
+
+	// The socket-absent precondition the probe exists for (#2875): the server
+	// keeps running, every client gets ENOENT.
+	require.NoError(t, os.Remove(socket), "unlink the server's socket while it lives")
+
+	_, err = exec.Command("tmux", "-S", socket, "ls").Output()
+	require.Error(t, err, "tmux ls on the unlinked socket must fail")
+	diag, ok := tmuxExitOneDiagnostic(err)
+	require.True(t, ok, "tmux ls on the unlinked socket must exit 1 with a diagnostic")
+	require.Equal(t, socketAbsent, classifyNoServerDiagnostic(diag),
+		"the diagnostic must be the ENOENT/socket-absent one the probe disambiguates")
+
+	// The whole point: a live renamed server forbids a determinate-empty
+	// answer. NoServerRunning MUST be false so CleanupSessions (`af reset`)
+	// refuses rather than proceeding to destroy worktrees, prune branches,
+	// and erase session records out from under a live server.
+	require.False(t, NoServerRunning(err),
+		"a live tmux server whose socket was unlinked must NOT be reported as no-server "+
+			"(a determinate empty would license reset's destructive cleanup against it)")
 }
 
 // tmuxExitOneError builds a genuine *exec.ExitError carrying diagnostic on
