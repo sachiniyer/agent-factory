@@ -89,6 +89,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// write back — and writing its whole-list view back is exactly the clobber
 		// the single-writer model retires (#959/#960).
 		detachTraceMark("snapshotFetchedMsg-handler-entry")
+		// The poll whose fetch was started in fetchSnapshotCmd is no longer in
+		// flight the moment its message reaches the loop: retire it from the
+		// in-flight set BEFORE any sidebar refresh, so the landing poll's own
+		// observedAtSeq (not a stale "still in flight" entry) is what gates the
+		// tombstone clear in applySidebarProjects (#7522 review).
+		m.noteSnapshotFetchLanded(msg.mutationSeq)
 		// Drop a snapshot fetched for a repo we have since switched away from
 		// (#1461): applying its old-repo sessions/tasks would bleed the previous
 		// project into the new view. Still re-arm the pacing tick so polling of

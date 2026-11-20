@@ -458,7 +458,13 @@ func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded b
 	m.projects.SetProjects(m.projectRows(projects))
 	m.projects.SetDegraded(registryDegraded)
 	if !registryDegraded {
-		m.clearGoneProjectRows()
+		// The on-loop sync refresh is by construction post-mutation — its fetch
+		// began after any tombstone was recorded — so the current sequence is
+		// its observation point. The seq comparison alone would clear every
+		// tombstone; the in-flight gate retains any a pre-mutation poll still
+		// in flight could re-introduce the deleted repo's pre-delete rows for
+		// (#7522 review).
+		m.clearGoneProjectRows(m.projectMutationSeq)
 	}
 	m.syncProjectsHint()
 }
@@ -558,8 +564,13 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 	}
 	if !registryDegraded {
 		// A clean registry read states the truth itself; the recorded absences
-		// have nothing left to defend and would filter re-registrations.
-		m.clearGoneProjectRows()
+		// have nothing left to defend and would filter re-registrations — once
+		// the landing poll's own observation covers the tombstone AND no
+		// pre-mutation fetch is still in flight. A poll that began before the
+		// delete carries the deleted repo's pre-delete rows and never covers the
+		// tombstone it predates; its tombstone stays to filter that landing
+		// (#7522 review).
+		m.clearGoneProjectRows(observedAtSeq)
 	}
 	changed := m.projects.SetProjects(m.projectRows(projects))
 	m.sidebarProjects = projects
