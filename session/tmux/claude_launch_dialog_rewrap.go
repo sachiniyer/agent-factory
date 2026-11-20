@@ -901,7 +901,9 @@ func claudeLaunchDialogPainting(pane claudeLaunchDialogPane) (claudeLaunchDialog
 }
 
 // claudeLaunchDialogBoxedSpan reports whether the text span [from, to) sits on
-// a row the pane drew between a composer's box borders.
+// a row inside a box that proves itself a composer's (claudeTrustComposerBoxHas):
+// a bordered row alone is not enough — a dialog's own frame has the same side
+// borders (#7666).
 func claudeLaunchDialogBoxedSpan(pane claudeLaunchDialogPane, from, to int) bool {
 	for content := 0; content < len(pane.starts); content++ {
 		start := pane.starts[content]
@@ -909,8 +911,25 @@ func claudeLaunchDialogBoxedSpan(pane claudeLaunchDialogPane, from, to int) bool
 		if content+1 < len(pane.starts) {
 			end = pane.starts[content+1]
 		}
-		if start < to && end > from && claudeTrustBordered(pane.lines[pane.index[content]]) {
+		line := pane.index[content]
+		if start < to && end > from && claudeTrustBordered(pane.lines[line]) &&
+			claudeTrustComposerBoxHas(pane.lines, pane.rows, line) {
 			return true
+		}
+	}
+	return false
+}
+
+// claudeTrustComposerBoxHas reports whether line i sits inside a box that
+// proves itself a composer's: the side borders over it reach a top edge whose
+// first content row inside is a composer prompt row (claudeTrustBoxPromptRow).
+// A box that cannot prove that — a dialog's own frame, or one whose top
+// scrolled off — is not a composer's, and rows it holds still read as the
+// dialog's (#7666).
+func claudeTrustComposerBoxHas(lines []string, rows []claudeTrustRow, i int) bool {
+	for top := i - 1; top >= 0; top-- {
+		if !claudeTrustBordered(lines[top]) {
+			return claudeTrustBoxPromptRow(lines, rows, top) >= 0
 		}
 	}
 	return false

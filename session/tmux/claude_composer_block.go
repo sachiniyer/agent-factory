@@ -358,13 +358,16 @@ func claudeLaunchDialogComposerBelow(pane claudeLaunchDialogPane, first, from in
 		for edge >= 0 && pane.rows[edge].blank && claudeTrustBordered(pane.lines[edge]) {
 			edge--
 		}
-		// The row itself paints between a box's side borders when the draft
-		// quotes more than the prompt — the pair and the question and footer
-		// it mocks up — so the opening edge is not always the next row up
-		// (#7661 Codex review).
-		boxed := claudeTrustBordered(pane.lines[i]) ||
+		// A bordered row is a draft's only when the box proves itself a
+		// composer's by what is inside it — a prompt row — because a dialog's
+		// own frame has the same side borders: the row itself paints between
+		// the borders when the draft quotes more than the prompt (#7666,
+		// #7661 Codex review), and a bare opening edge above means no more
+		// than the dialog's own top edge does.
+		boxed := (claudeTrustBordered(pane.lines[i]) && claudeTrustComposerBoxHas(pane.lines, pane.rows, i)) ||
 			(edge >= 0 && claudeTrustFrameRule(pane.lines[edge]) &&
-				!claudeTrustFrameClosingRule(pane.lines[edge]))
+				!claudeTrustFrameClosingRule(pane.lines[edge]) &&
+				claudeTrustBoxPromptRow(pane.lines, pane.rows, edge) >= 0)
 		acceptInlinePair := !boxed && !proseAbove
 		for _, label := range []string{
 			claudeSquash(claudeLegacyTrustProceedLabel),
