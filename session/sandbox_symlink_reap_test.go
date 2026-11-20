@@ -1,6 +1,8 @@
 package session
 
 import (
+	"bufio"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -52,8 +54,10 @@ func localRunCommandFn() func(time.Duration, string, io.Reader, bool) ([]byte, e
 // startAgentServerLikeProcess starts a long-lived `sleep` process whose
 // /proc/<pid>/cmdline argv[0] is set to argv0 — faithfully simulating what
 // os.Executable() produces for the re-exec'd agent-server (the kernel resolves
-// the executable path and exec sets that resolved path as argv[0]). The process
-// is reaped on test completion if still alive.
+// the executable path and exec sets that resolved path as argv[0]). It returns
+// only once the child's exec has provably completed — its cmdline already
+// carries argv0 — so an identity probe that follows can never read the pre-exec
+// window. The process is reaped on test completion if still alive.
 func startAgentServerLikeProcess(t *testing.T, argv0 string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(sleeper.Path(t), "30")
@@ -65,7 +69,83 @@ func startAgentServerLikeProcess(t *testing.T, argv0 string) *exec.Cmd {
 			_, _ = cmd.Process.Wait()
 		}
 	})
+	waitForArgv0(t, cmd.Process.Pid, argv0)
 	return cmd
+}
+
+// waitForArgv0 polls the identity-kill's own matches_session predicate until it
+// reports a match — i.e. until the child's exec has completed and its cmdline
+// carries argv[0] == argv0. A kill script that runs inside the fork→exec window
+// reads the pre-exec cmdline instead, gets a definite mismatch, and takes the
+// "the PID is now someone else's" exit-0 branch: it signals nothing, and a test
+// blocked on the child hangs for the child's whole lifetime. Bounded so a child
+// that never execs fails here rather than downstream and ambiguously.
+func waitForArgv0(t *testing.T, pid int, argv0 string) {
+	t.Helper()
+	probe := remotePIDIdentityFuncs(strconv.Itoa(pid), argv0, "") + `matches_session`
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := exec.Command("sh", "-c", probe).Run(); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pid %d never showed argv[0] %q — the identity-kill would exit 0 without signalling", pid, argv0)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// trapReadyLine is the line a startTrappedShell child prints immediately after
+// its `trap` builtin has executed.
+const trapReadyLine = "af-test-trap-ready"
+
+// startTrappedShell starts `sh -c` that installs termTrap as its TERM handler,
+// prints trapReadyLine, then idles — and does not return until that line has
+// been read. The line is the child's proof that both race windows an immediate
+// signal used to hit are closed: exec has completed (so the kill script's
+// argv[0] identity probe will match) and the TERM handler is installed (so the
+// signal lands on the trap, not on SIGTERM's default action — which is to die).
+// Before this handshake the tests below lost both races on a loaded runner: a
+// TERM delivered before `trap` executed killed sh outright ("signal:
+// terminated"), and a probe inside the fork→exec window read a cmdline that was
+// not yet argv0, so the script took its not-our-PID exit-0 branch and signalled
+// nothing at all. The wait is bounded so a child that never reports fails here
+// with a clear message.
+func startTrappedShell(t *testing.T, argv0, termTrap string) *exec.Cmd {
+	t.Helper()
+	proc := exec.Command("/bin/sh", "-c",
+		"trap "+termTrap+" TERM; echo "+trapReadyLine+"; while :; do sleep 0.1; done")
+	proc.Args[0] = argv0
+	stdout, err := proc.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, proc.Start())
+	t.Cleanup(func() {
+		if proc.ProcessState == nil {
+			_ = proc.Process.Kill()
+			_, _ = proc.Process.Wait()
+		}
+	})
+
+	ready := make(chan error, 1)
+	go func() {
+		line, rerr := bufio.NewReader(stdout).ReadString('\n')
+		switch {
+		case rerr != nil:
+			ready <- fmt.Errorf("readiness read: %w", rerr)
+		case line != trapReadyLine+"\n":
+			ready <- fmt.Errorf("unexpected readiness line %q", line)
+		default:
+			ready <- nil
+		}
+	}()
+	select {
+	case rerr := <-ready:
+		require.NoError(t, rerr,
+			"the child must print %q once `trap` has run — the proof its TERM handler is installed", trapReadyLine)
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the child never printed %q within 10s — its TERM handler cannot be proven installed", trapReadyLine)
+	}
+	return proc
 }
 
 // pidAlive reports whether pid is a running (non-zombie) process. It sends signal
@@ -317,16 +397,20 @@ func TestSandboxReapScriptExpectedUsesResolvedSessionDir(t *testing.T) {
 
 // W1.7: a SIGTERM the agent-server takes ~1s to honour must not be escalated to
 // SIGKILL after 0.3s — the process should exit on its own terms.
+//
+// The child signals readiness after installing its trap (startTrappedShell): a
+// SIGTERM sent before `trap` has executed takes the default action and kills sh
+// outright (the 2026-11-20 flake), and an identity probe run before exec
+// completes reads a cmdline that is not yet argv[0], so the script exits 0
+// without ever signalling (the 2026-11-03 flake). The kill script may run only
+// once both are proven.
 func TestRemotePIDIdentityKillScriptGivesSlowSIGTERMTimeToTakeEffect(t *testing.T) {
 	resolvedAfPath := filepath.Join(testguard.CanonicalTempDir(t), "session", "af")
 	require.NoError(t, os.MkdirAll(filepath.Dir(resolvedAfPath), 0o755))
 
-	proc := exec.Command("/bin/sh", "-c", `trap 'sleep 1; exit 0' TERM; while :; do sleep 0.1; done`)
-	proc.Args[0] = resolvedAfPath
-	require.NoError(t, proc.Start())
+	proc := startTrappedShell(t, resolvedAfPath, "'sleep 1; exit 0'")
 	waited := make(chan error, 1)
 	go func() { waited <- proc.Wait() }() // reap promptly so the exit is not a zombie
-	t.Cleanup(func() { _ = proc.Process.Kill() })
 	require.True(t, pidAlive(proc.Process.Pid))
 
 	out, err := exec.Command("sh", "-c", remotePIDIdentityKillScript(strconv.Itoa(proc.Process.Pid), resolvedAfPath, "")).CombinedOutput()
@@ -346,15 +430,10 @@ func TestRemotePIDIdentityKillScriptGivesSlowSIGTERMTimeToTakeEffect(t *testing.
 func TestRemotePIDIdentityKillScriptEscalatesToKillWhenTermIgnored(t *testing.T) {
 	afPath := filepath.Join(testguard.CanonicalTempDir(t), "session", "af")
 	require.NoError(t, os.MkdirAll(filepath.Dir(afPath), 0o755))
-	cmd := exec.Command("sh", "-c", `trap '' TERM; while :; do sleep 0.2; done`)
-	cmd.Args[0] = afPath
-	require.NoError(t, cmd.Start())
-	t.Cleanup(func() {
-		if cmd.ProcessState == nil {
-			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
-		}
-	})
+	// Without the readiness handshake a TERM landing before `trap ''` executed
+	// would kill the child by default action — and the "died by signal"
+	// assertion would pass on the un-escalated signal, proving nothing.
+	cmd := startTrappedShell(t, afPath, "''")
 	pid := cmd.Process.Pid
 	require.True(t, pidAlive(pid), "premise: the process must be alive")
 
@@ -362,7 +441,10 @@ func TestRemotePIDIdentityKillScriptEscalatesToKillWhenTermIgnored(t *testing.T)
 	go func() { waited <- cmd.Wait() }()
 	out, err := exec.Command("sh", "-c", remotePIDIdentityKillScript(strconv.Itoa(pid), afPath, "")).CombinedOutput()
 	require.NoError(t, err, "a SIGTERM-ignoring server is killed and confirmed gone: %s", out)
-	require.Error(t, <-waited, "the process must have died by signal")
+	werr := <-waited
+	require.Error(t, werr, "the process must have died by signal")
+	assert.EqualError(t, werr, "signal: killed",
+		"its installed TERM trap ignores the first signal, so death by signal can only be the escalated SIGKILL")
 }
 
 // A restart records the PID it launched on the HOST before af learns it. When the
