@@ -377,27 +377,20 @@ func renamedServerBlocksSocketAbsentProbe(t *testing.T, serverName string) {
 		_ = syscall.Kill(serverPID, syscall.SIGTERM)
 	})
 
-	// The measured renamed-server task name (#7242), cut at the kernel's
-	// 15-byte ceiling for names longer than seven characters. Retitling
-	// happens inside proc_start a moment after the daemonising fork, so wait
-	// for it.
-	wantComm := serverName + ": server"
-	if len(wantComm) > linuxTaskCommLen {
-		wantComm = wantComm[:linuxTaskCommLen]
-	}
+	// The outcome the fix owes, under the fail-safe property: the live
+	// renamed server must be a live-server CANDIDATE under whatever comm the
+	// kernel keeps of its retitle — the test does not pin the truncated
+	// spelling, which differs across tmux builds and name lengths. Waiting
+	// for candidacy rather than the comm itself also covers retitle timing:
+	// the rename lands inside proc_start a moment after the daemonising
+	// fork. liveTmuxServerPIDs reads the real process table by design — the
+	// bug is in this function, so it is not pinned; membership, not
+	// equality, so an unrelated same-uid server on a shared host cannot
+	// change the result.
 	require.Eventually(t, func() bool {
-		p, lookupErr := proctree.Lookup(serverPID)
-		return lookupErr == nil && p.Comm == wantComm
-	}, 5*time.Second, 10*time.Millisecond,
-		"the renamed server must retitle to %q", wantComm)
-
-	// Direct regression for the prefilter the fix broadens: the renamed server
-	// is now a live-server CANDIDATE. liveTmuxServerPIDs reads the real
-	// process table by design — the bug is in this function, so it is not
-	// pinned. Membership, not equality, so an unrelated same-uid server on a
-	// shared host cannot change the result.
-	require.Contains(t, liveTmuxServerPIDs(), serverPID,
-		"the prefilter must admit a renamed tmux server (%q) as a live candidate", wantComm)
+		return containsInt(liveTmuxServerPIDs(), serverPID)
+	}, 15*time.Second, 20*time.Millisecond,
+		"the renamed server (%s) must become a live-server candidate", serverName)
 
 	// The socket-absent precondition the probe exists for (#2875): the server
 	// keeps running, every client gets ENOENT.
