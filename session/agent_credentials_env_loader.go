@@ -39,6 +39,23 @@ var credentialMountLoaderFilledNames = map[string]map[string]struct{}{
 		// no third link for a .env to claim and nothing more to pin.
 		"GCE_METADATA_HOST": {},
 		"GCE_METADATA_IP":   {},
+		// DEBUG_AUTH, DETECT_GCP_RETRIES, and METADATA_SERVER_DETECTION are
+		// read by the bundled gcp-metadata / google-auth-library transports
+		// inside @google/gemini-cli 0.42.0, not gemini-cli's own source —
+		// so a source-tree measurement of the CLI misses them. None routes
+		// the credential, but each is dotenv-fillable and af left it
+		// unclaimed, so a .env setting DEBUG_AUTH would log the session's
+		// OAuth material. A defined-empty pin claims each for af (the .env
+		// loader finds it defined) and is inert: debug is off on "", and
+		// the gcp-metadata reads fall to their compiled defaults rather
+		// than dialing a repo-chosen host. An operator's forwarded value
+		// still survives (keep-if-set). GOOGLE_CLOUD_UNIVERSE_DOMAIN — the
+		// sibling bundled-transport read that DOES route the credential and
+		// reads through a nullish ?? — is re-asserted to its first-party
+		// default in credentialMountFirstPartyNames, not pinned empty here.
+		"DEBUG_AUTH":                {},
+		"DETECT_GCP_RETRIES":        {},
+		"METADATA_SERVER_DETECTION": {},
 	},
 }
 

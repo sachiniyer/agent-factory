@@ -179,6 +179,16 @@ var agentNames = map[string]map[string]struct{}{
 		// is a name gemini's workspace .env loader can restore).
 		"CODE_ASSIST_ENDPOINT", "CODE_ASSIST_API_VERSION",
 		"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL",
+		// GOOGLE_CLOUD_UNIVERSE_DOMAIN is read only by library code bundled
+		// into the CLI (@google-cloud/logging's LoggingServiceV2Client and
+		// googleapis-common's request builder), not gemini-cli's own source,
+		// but it changes where those transports send the session's
+		// credential — `logging.<universe_domain>` — so it joins the endpoint
+		// names for the same reason: the boundary's first-party re-assert
+		// (to `googleapis.com`) must be allowlisted to reach the agent's exec
+		// environment, or the agent-server filter strips it and gemini's .env
+		// loader restores a repo-chosen domain (#7544 / #7582 review).
+		"GOOGLE_CLOUD_UNIVERSE_DOMAIN",
 	),
 	"amp": nameSet("AMP_API_KEY", "AMP_HOME"),
 	"aider": nameSet(
