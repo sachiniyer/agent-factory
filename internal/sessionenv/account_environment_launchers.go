@@ -187,8 +187,10 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 		// show (#7627) — but it does not take the word out of the
 		// commandish check above: on master such a word was not denied
 		// at all, so it still counts toward the command position the
-		// requireCommand rule needs.
-		if launcherWordDenied(literal, names) {
+		// requireCommand rule needs. It only runs on a word that can
+		// normalize at all; a clean word reads identically under both
+		// spellings and costs what it cost before the union.
+		if mayNormalizeSpelling(literal) && launcherWordDenied(literal, names) {
 			if !requireCommand {
 				return true
 			}
@@ -491,8 +493,11 @@ func launcherWordDeniedExact(literal string, names map[string]struct{}) bool {
 func launcherSegmentsDenied(text string, names map[string]struct{}, optionCluster bool) bool {
 	for index, segment := range strings.Split(text, "=") {
 		cluster := optionCluster && index == 0
+		// The second reading is computed once per segment, not once per
+		// (segment, name) pair (#7627's cost rule).
+		normalized := escapeQuoteNormalizedSpelling(segment)
 		for name := range names {
-			if launcherSegmentNames(segment, name, cluster) {
+			if launcherSegmentNames(segment, normalized, name, cluster) {
 				return true
 			}
 		}
@@ -526,17 +531,15 @@ func launcherSegmentsDeniedReading(text string, names map[string]struct{}, optio
 // `ENVIRONMENT=staging` names ENVIRONMENT, not ENV. `NODE_ENV` and
 // `RAILS_ENV` embed `ENV` after `_`, which is not a boundary, so the
 // ordinary spellings stay admitted.
-func launcherSegmentNames(segment, name string, optionCluster bool) bool {
-	if launcherSegmentNamesReading(segment, name, optionCluster) {
-		return true
-	}
-	// Second reading on the escape- and quote-normalized spelling
-	// (#7627): `CODEX\_HOME` holds no boundary match on its raw bytes but
-	// names the variable once a downstream decode removes the escape.
-	if normalized := escapeQuoteNormalizedSpelling(segment); normalized != segment {
-		return launcherSegmentNamesReading(normalized, name, optionCluster)
-	}
-	return false
+//
+// The mark is the union of both readings (#7627): the exact spelling, and
+// the escape- and quote-normalized spelling the caller passes in —
+// `CODEX\_HOME` holds no boundary match on its raw bytes but names the
+// variable once a downstream decode removes the escape.
+func launcherSegmentNames(segment, normalized, name string, optionCluster bool) bool {
+	return launcherSegmentNamesReading(segment, name, optionCluster) ||
+		(normalized != segment &&
+			launcherSegmentNamesReading(normalized, name, optionCluster))
 }
 
 func launcherSegmentNamesReading(segment, name string, optionCluster bool) bool {
@@ -621,12 +624,13 @@ func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) (i
 	for index, segment := range segments {
 		offset += len(segment) + 1
 		cluster := optionCluster && index == 0
+		normalized := escapeQuoteNormalizedSpelling(segment)
 		for name := range names {
-			if !launcherSegmentNames(segment, name, cluster) {
+			if !launcherSegmentNames(segment, normalized, name, cluster) {
 				continue
 			}
 			if index < len(segments)-1 && text[offset:] != "" &&
-				segmentEndsWithProtectedName(segment, name, cluster) {
+				segmentEndsWithProtectedName(segment, normalized, name, cluster) {
 				return wordProtectedAssign, name
 			}
 			kind = wordProtectedName
@@ -639,17 +643,13 @@ func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) (i
 // segmentEndsWithProtectedName reports whether name both matches segment
 // at an identifier boundary and reaches its end — the condition that makes
 // a following `=` the name's own assignment joiner rather than a later
-// option's.
-func segmentEndsWithProtectedName(segment, name string, optionCluster bool) bool {
-	if segmentEndsWithProtectedNameReading(segment, name, optionCluster) {
-		return true
-	}
-	// Same second reading as launcherSegmentNames (#7627): the
-	// assignment joiner only counts once an escaped name is normalized.
-	if normalized := escapeQuoteNormalizedSpelling(segment); normalized != segment {
-		return segmentEndsWithProtectedNameReading(normalized, name, optionCluster)
-	}
-	return false
+// option's. Same union as launcherSegmentNames (#7627): the normalized
+// spelling is the caller's, and the assignment joiner only counts once an
+// escaped name is normalized.
+func segmentEndsWithProtectedName(segment, normalized, name string, optionCluster bool) bool {
+	return segmentEndsWithProtectedNameReading(segment, name, optionCluster) ||
+		(normalized != segment &&
+			segmentEndsWithProtectedNameReading(normalized, name, optionCluster))
 }
 
 func segmentEndsWithProtectedNameReading(segment, name string, optionCluster bool) bool {

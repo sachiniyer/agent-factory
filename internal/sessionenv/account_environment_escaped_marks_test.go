@@ -38,6 +38,29 @@ func TestAccountEnvironmentEscapedMarkRefuses(t *testing.T) {
 		{"echo strace -ECODEX\\_HOME=/other codex", true, false},
 		{"x strace -ECODEX\\_HOME=/o prog", true, false},
 
+		// The independent review's R1: an escaped dash spells the option
+		// strace's raw-byte reader could not see — `\-…` was taken as the
+		// traced command. An option word is recognized on the exact OR
+		// normalized spelling, and a word whose normalized text begins
+		// with `-` is never the traced command.
+		{"echo strace \\-ECODEX_HOME=/other codex", true, false},
+		{"echo strace \\-E CODEX_HOME=/other codex", true, false},
+		{"echo strace \\--env CODEX_HOME=/other codex", true, false},
+		{"echo strace \\-fECODEX_HOME=/o codex", true, false},
+		{"echo strace -f \\-ECODEX_HOME=/o codex", true, false},
+		{"echo strace '-f' \\-ECODEX_HOME=/o codex", true, false},
+		{"firejail strace \\-ECODEX_HOME=/o codex", true, false},
+		{"prog strace \\-ECODEX_HOME=/o codex", true, false},
+		{"make strace \\-ECODEX_HOME=/o codex", true, false},
+		{"ssh host strace \\-ECODEX_HOME=/o codex", true, false},
+		{"watch strace \\-ECODEX_HOME=/o codex", true, false},
+
+		// A literal quote byte inside the option word is the same hidden
+		// mark: the normalized spelling shows the env option the raw one
+		// cannot.
+		{"echo strace \\'-E CODEX_HOME=/o codex", true, false},
+		{"echo strace \\'--env CODEX_HOME=/o codex", true, false},
+
 		// The final review's R5: env's operands never got the escaped
 		// reading at all.
 		{"env 'CODEX\\_HOME=/o' prog", true, false},
@@ -94,6 +117,17 @@ func TestAccountEnvironmentEscapedMarkRefuses(t *testing.T) {
 		{"sudo 'cla\\ude'", false, true},
 		{"sudo 'ANTHROPIC\\_API_KEY=/o' prog", false, true},
 		{"sudo 'ANTHROPIC\\_AUTH_TOKEN=x' prog", false, true},
+
+		// The neighbours stay admitted: a normalized word that does not
+		// open with a dash is still the traced command, and an escaped
+		// dash that spells a recognized non-env option (or the option
+		// terminator, or an env option whose operand names nothing) is
+		// the same word the shell was always going to pass.
+		{"echo strace x\\-E codex", false, false},
+		{"echo strace \\-o /tmp/log codex", false, false},
+		{"echo strace \\-p 1234 codex", false, false},
+		{"echo strace \\-- codex", false, false},
+		{"echo strace \\'-E FOO=1 codex", false, false},
 	} {
 		codexErr := ValidateAccountEnvironmentCommand(test.command, scopedProcessTabAccount())
 		require.Equal(t, test.refuseCodex, codexErr != nil,

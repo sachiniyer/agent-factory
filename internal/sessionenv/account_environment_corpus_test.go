@@ -22,11 +22,12 @@ import (
 //
 // This is a parity oracle, not a wish list: every row must read on this code
 // exactly as it read on master. The only differences this PR permits are
-// rows whose text literally names a protected variable or the account's
-// agent behind an escape or a quote (`env 'CODEX\_HOME=/o' prog`,
-// `bwrap "--clea'renv" codex`) — the over-refusal this fix states. Those are
-// listed in corpusAllowedDiffs, and each may differ only by the env column
-// flipping admit→REFUSE.
+// rows whose text literally names a protected variable, the account's
+// agent, or a hidden-input/env option spelling behind an escape or a quote
+// (`env 'CODEX\_HOME=/o' prog`, `bwrap "--clea'renv" codex`,
+// `echo strace \-ECODEX_HOME=/o codex`) — the over-refusal this fix
+// states. Those are listed in corpusAllowedDiffs, and each may differ only
+// by the env and/or envcl column flipping admit→REFUSE.
 const corpusCommonMasterTSV = "testdata/corpus_common_master.tsv"
 
 // corpusAccounts matches the review harness's two validation accounts.
@@ -37,10 +38,11 @@ var (
 
 // corpusAllowedDiffs lists the rows permitted to differ from master, each
 // with the reason — the stated over-refusal of this PR: the command's text
-// literally names a protected variable or the account's agent behind a
-// backslash escape or a quote, which the exact-OR-normalized mark now
-// refuses (#7627). Every entry must differ ONLY by the env column
-// admit→REFUSE.
+// literally names a protected variable, the account's agent, or a hidden
+// option spelling behind a backslash escape or a quote, which the
+// exact-OR-normalized mark now refuses (#7627). Every entry must differ
+// ONLY by the env and/or envcl column admit→REFUSE — a codex-only name
+// flips env alone, a name both accounts deny flips both.
 var corpusAllowedDiffs = map[string]string{
 	"env 'CODEX\\_HOME=/o' prog":                  "escaped protected name in env's assignment operand",
 	"env -u 'CODEX\\_HOME' prog":                  "escaped protected name in env's -u operand",
@@ -59,6 +61,36 @@ var corpusAllowedDiffs = map[string]string{
 	"env 'CODEX_HOM\\E=/o' prog":                  "escaped last letter of the protected name",
 	"env 'CODEX_HOME\\==/o' prog":                 "escape before the assignment joiner",
 	"env 'C\\ODEX_HOME=/o' prog":                  "escape inside the protected name's first half",
+
+	// The independent review's R1: an escaped dash hides the strace
+	// option itself — `\-…` read as the traced command on master's
+	// raw-byte option walk.
+	"echo strace \\-ECODEX_HOME=/other codex":     "escaped dash spells strace's -E option; master refuses the unquoted twin",
+	"echo strace \\-E CODEX_HOME=/other codex":    "escaped dash spells strace's -E option; master refuses the unquoted twin",
+	"echo strace \\--env CODEX_HOME=/other codex": "escaped dash spells strace's --env option; master refuses the unquoted twin",
+	"echo strace \\-fECODEX_HOME=/o codex":        "escaped dash spells strace's -E cluster; master refuses the unquoted twin",
+	"echo strace -f \\-ECODEX_HOME=/o codex":      "escaped dash spells strace's -E cluster; master refuses the unquoted twin",
+	"echo strace '-f' \\-ECODEX_HOME=/o codex":    "escaped dash spells strace's -E cluster; master refuses the unquoted twin",
+	"firejail strace \\-ECODEX_HOME=/o codex":     "escaped dash spells strace's -E option; master refuses the unquoted twin",
+	"prog strace \\-ECODEX_HOME=/o codex":         "escaped dash spells strace's -E option; master refuses the unquoted twin",
+	"make strace \\-ECODEX_HOME=/o codex":         "escaped dash spells strace's -E option; master refuses the unquoted twin",
+	"ssh host strace \\-ECODEX_HOME=/o codex":     "escaped dash spells strace's -E option; master refuses the unquoted twin",
+	"watch strace \\-ECODEX_HOME=/o codex":        "escaped dash spells strace's -E option; master refuses the unquoted twin",
+	"echo strace \\'-E CODEX_HOME=/o codex":       "literal quote byte hides strace's -E option; master refuses the unquoted twin",
+	"echo strace \\'--env CODEX_HOME=/o codex":    "literal quote byte hides strace's --env option; master refuses the unquoted twin",
+
+	// The review's R2: the shared name predicate's union also reaches the
+	// any-command --opt=VALUE rule, the builtin writers (export, unset,
+	// read, printf -v) and xargs — each row's unquoted twin already
+	// refuses on master, so the reach is stated rather than narrowed.
+	"git log --grep='\"ENV\"'":                      "master refuses the unquoted twin",
+	"npm run build --env='\"ENV\"'":                 "master refuses the unquoted twin",
+	"git --preserve-env=\\\\CODEX_HOME - nice":      "master refuses the unquoted twin",
+	"export 'CODEX\\_HOME=/o'":                      "master refuses the unquoted twin",
+	"unset 'CODEX\\_HOME'":                          "master refuses the unquoted twin",
+	"read 'CODEX\\_HOME'":                           "master refuses the unquoted twin",
+	"printf -v 'CODEX\\_HOME' x":                    "master refuses the unquoted twin",
+	"xargs --process-slot-var='CODEX\\_HOME' codex": "master refuses the unquoted twin",
 }
 
 // corpusVerdict folds an error verdict to the admit/REFUSE strings the
@@ -83,22 +115,31 @@ func corpusRowVerdicts(cmd string) string {
 }
 
 // corpusDiffersOnlyEnvRefuse reports whether got differs from want ONLY by
-// the env column flipping admit→REFUSE — the single over-refusal direction
-// corpusAllowedDiffs permits.
+// the env and/or envcl columns flipping admit→REFUSE — the single
+// over-refusal direction corpusAllowedDiffs permits. A name both accounts
+// deny (a shell-startup name like ENV) flips the two columns together; a
+// codex-only name flips env alone.
 func corpusDiffersOnlyEnvRefuse(want, got string) bool {
 	wc, gc := strings.Split(want, "\t"), strings.Split(got, "\t")
 	if len(wc) != len(gc) || len(wc) != 5 {
 		return false
 	}
-	if wc[0] != "admit" || gc[0] != "REFUSE" {
-		return false
+	flipped := false
+	for i := 0; i < 2; i++ {
+		switch {
+		case wc[i] == gc[i]:
+		case wc[i] == "admit" && gc[i] == "REFUSE":
+			flipped = true
+		default:
+			return false
+		}
 	}
-	for i := 1; i < len(wc); i++ {
+	for i := 2; i < len(wc); i++ {
 		if wc[i] != gc[i] {
 			return false
 		}
 	}
-	return true
+	return flipped
 }
 
 // TestAccountEnvironmentCorpusParity re-runs every corpus row and

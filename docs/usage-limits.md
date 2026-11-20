@@ -249,6 +249,34 @@ non-assigning position, such as `docker run alpine echo CODEX_HOME=x`, is
 refused too, because no parse of the visible command line can prove the word
 will not reach the child's environment.
 
+- **Quoted and escaped spellings are judged on both readings** — each
+  operand mark (an assignment, `-e`/`--env`, `-u`/`--unset`, `--setenv`,
+  `-E`, an env-file/arg-file name, `--clearenv`, the reset reach's agent
+  name) is computed on the word's exact spelling AND on an escape- and
+  quote-normalized spelling — backslash runs, line continuations and
+  quote characters removed in one flat pass — never on the normalized
+  one alone. `env 'CODEX\_HOME=/o' prog`, `sudo 'co\dex'` and
+  `bwrap "--clea'renv" codex` refuse the way their unquoted twins
+  already did. The normalized reading only adds refusals: every positive
+  decision (dispatch identity, the command word, credential and grant
+  classification) stays on the exact spelling, and a word holding no
+  quote or backslash costs what it always cost. Because the mark lives
+  in the shared protected-name predicate, the union also reaches the
+  any-command `--opt=VALUE` check, the builtin writers (`export`,
+  `unset`, `read`, `printf -v`) and `xargs`'s `--process-slot-var`:
+  `git log --grep='"ENV"'`, `export 'CODEX\_HOME=/o'` and
+  `xargs --process-slot-var='CODEX\_HOME' codex` refuse too, each
+  exactly as its unquoted twin already did. One caution on what this is:
+  inside single quotes the shell does NOT decode backslashes — the
+  literal text stays, and the refusal on those rows is a stated
+  over-refusal. The spelling the runtime genuinely decodes is the
+  unquoted escape: `\-E` reaches `strace`'s getopt as `-E`, so the
+  option-word check there reads the exact OR normalized spelling and
+  never treats a word whose normalized text opens with `-` as the
+  traced command — `strace \-ECODEX_HOME=/o`, `strace \--env
+  CODEX_HOME=/o` and `strace -f \-ECODEX_HOME=/o` refuse while
+  `strace \-o /tmp/log prog` runs.
+
 - **Env files are unverifiable** — inside the launcher arms `af` models,
   `--env-file`, `docker compose`'s `env_file` and `--env-from-file`
   spellings, and `systemd-run`'s `EnvironmentFile=` all name a file whose

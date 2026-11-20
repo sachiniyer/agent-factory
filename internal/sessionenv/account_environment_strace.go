@@ -115,7 +115,16 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 		return end(refuseLeadingExpansion, true)
 	}
 	if !strings.HasPrefix(text, "-") {
-		return end(false, true) // the traced command starts here
+		// Second reading (#7627): a word whose escape- and quote-normalized
+		// spelling opens with a dash is an option the decode reveals — never
+		// the traced command — so it is judged on the spelling the option
+		// table reads, the way a name already is.
+		if normalized := escapeQuoteNormalizedSpelling(text); normalized != text &&
+			strings.HasPrefix(normalized, "-") {
+			text = normalized
+		} else {
+			return end(false, true) // the traced command starts here
+		}
 	}
 	if text == "--" && complete {
 		return end(false, i+1 < len(words))

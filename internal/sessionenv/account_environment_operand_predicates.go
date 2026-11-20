@@ -70,6 +70,14 @@ func escapeQuoteNormalizedSpelling(text string) string {
 	return out.String()
 }
 
+// mayNormalizeSpelling reports whether text carries a character the
+// normalized reading can remove — a quote or a backslash. A word without
+// one reads identically under both spellings, so its second reading is
+// skipped outright and the word costs what it cost before the union.
+func mayNormalizeSpelling(text string) bool {
+	return strings.ContainsAny(text, "'\"`\\")
+}
+
 func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
 	for idx := 0; idx < len(words); idx++ {
 		option, literal := literalShellWord(words[idx])
