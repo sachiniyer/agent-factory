@@ -135,7 +135,7 @@ func claudeLaunchDialogUnderGuide(screen visibleText) bool {
 		return false
 	}
 	footerRow, ok := pane.rowStart(end)
-	if !ok || claudeLaunchDialogAnySelected(pane, footerRow, len(pane.starts)) {
+	if !ok || claudeLaunchDialogAnySelected(pane, footerRow, len(pane.starts)) || claudeLaunchDialogBoxClosesLast(screen) {
 		return false
 	}
 	for guide := footerRow - 1; guide >= 0; guide-- {
@@ -239,13 +239,31 @@ func claudeLaunchDialogFooterEnd(text string) bool {
 // The whole footer alone reads this way too, on the rows a narrow pane wraps
 // it onto. No ❯ row and no plain rule may be on the pane: a working agent's
 // composer paints both, and a pane that shows a composer shows more than this.
+// Nor may a box's bottom edge be the last thing painted
+// (claudeLaunchDialogBoxClosesLast).
 func claudeLaunchDialogFooterTail(screen visibleText) bool {
 	pane := claudeLaunchDialogPaneOf(screen)
-	if !claudeLaunchDialogFooterEnd(pane.text) ||
+	if !claudeLaunchDialogFooterEnd(pane.text) || claudeLaunchDialogBoxClosesLast(screen) ||
 		claudeLaunchDialogAnySelected(pane, 0, len(pane.starts)) || claudeLaunchDialogRuleFrom(pane, 0) {
 		return false
 	}
 	return true
+}
+
+// claudeLaunchDialogBoxClosesLast reports whether the last painted line of the
+// pane is a box's bottom edge. No build paints its footer inside a box: 2.0.25,
+// the one that boxes the dialog, paints the footer under the box
+// (testdata/claude_2_0_25_legacy_folder_trust_dialog.ansi). A footer with a
+// box closing under it is text in a boxed composer's draft whose prompt row
+// has scrolled off, and a hold for a quoted draft is #7648's to decide.
+func claudeLaunchDialogBoxClosesLast(screen visibleText) bool {
+	lines := screen.lines()
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return claudeTrustFrameClosingRule(lines[i])
+		}
+	}
+	return false
 }
 
 // claudeLaunchDialogPendingExitMaxKey bounds the key name in "Press <key>
