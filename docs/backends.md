@@ -271,9 +271,10 @@ user's real home and mounts it only if it exists, so:
       repository-supplied binary ever answers one), and
       `PAGER` to `/bin/cat` — and, for
       gemini, whose `.env` loader fills only unset names but treats a
-      defined-empty endpoint as real — `CODE_ASSIST_ENDPOINT` and (the
-      bundled-transport read `GOOGLE_CLOUD_UNIVERSE_DOMAIN`, which
-      becomes the telemetry dial host) to their first-party defaults —
+      defined-empty endpoint as real — `CODE_ASSIST_ENDPOINT` and the
+      bundled-transport read `GOOGLE_CLOUD_UNIVERSE_DOMAIN` (which
+      becomes the telemetry dial host) to their first-party defaults,
+      alongside the other `??`-family reads the artifact measures —
       so tmux's `default-shell -c` chain, af's own execs, the agent's
       bare executable, and the agent's endpoint choice all resolve
       through first-party values, never a repo-added one.
@@ -285,32 +286,48 @@ user's real home and mounts it only if it exists, so:
       read is falsy-safe, and a class counts as pinned only when **every
       name the agent's read consults** is pinned — a chain
       `A || B || default` leaves `A` free for the `.env` to claim if only
-      `B` is held. The full 0.42.0 reads, pinned link by link
-      (including the library code the CLI bundles, which a source-tree
-      measurement of the CLI alone misses):
-      the auth source is `CLOUD_SHELL === "true" || GEMINI_CLI_USE_COMPUTE_ADC === "true"`
+      `B` is held.
+      **The claimed set is the checked artifact, not this list.** The
+      measured reads — every `process.env` read in
+      `@google/gemini-cli@0.42.0`, the CLI's own source and the libraries
+      it bundles, which a source-tree measurement of the CLI alone misses
+      — live in `internal/sessionenv/gemini_bundle_env.go`, classified
+      per path and pinned by test. Illustrative links: the auth source is
+      `CLOUD_SHELL === "true" || GEMINI_CLI_USE_COMPUTE_ADC === "true"`
       (each compare fails on empty, so the default source stands), the
-      metadata endpoint is `GCE_METADATA_IP || GCE_METADATA_HOST || HOST_ADDRESS`
-      (empty is falsy on either env link and falls back to `HOST_ADDRESS`,
+      grpc-js proxy chain is `grpc_proxy || https_proxy || http_proxy`
+      with `no_grpc_proxy || no_proxy` as the bypass and
+      `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` feeding the transport's
+      `createSecureContext`, the metadata endpoint is
+      `GCE_METADATA_IP || GCE_METADATA_HOST || HOST_ADDRESS` (empty is
+      falsy on either env link and falls back to `HOST_ADDRESS`,
       gcp-metadata's compiled constant `169.254.169.254` — a module
-      constant, not an env read, so there is no third link to pin), the git
+      constant, not an env read, so there is no third link to pin), the
+      credential file is
+      `GOOGLE_APPLICATION_CREDENTIALS || google_application_credentials`,
+      the project is the four-link `GCLOUD_PROJECT || GOOGLE_CLOUD_PROJECT
+      || gcloud_project || google_cloud_project`, and the git
       environment-config names `GIT_CONFIG_COUNT` and
       `GIT_CONFIG_PARAMETERS` (git parses `""` as count 0 — making every
       indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pair inert — and as
-      zero `-c` pairs), and the bundled `gcp-metadata` /
-      `google-auth-library` reads `DEBUG_AUTH`, `DETECT_GCP_RETRIES`, and
-      `METADATA_SERVER_DETECTION` (none routes the credential; an empty
-      value is inert — debug off, detection defaults — but the names are
-      dotenv-fillable, so af pins them to keep a `.env` from claiming
-      them) — and the bundled-transport `GOOGLE_CLOUD_UNIVERSE_DOMAIN`
-      read (`... ?? process.env["GOOGLE_CLOUD_UNIVERSE_DOMAIN"] ??
-      "googleapis.com"`, which becomes `logging.<domain>`) is re-asserted
-      to `googleapis.com` rather than pinned empty, because its nullish
-      `??` treats `""` as the real dial host — so the loader finds them
-      all claimed and the agent's own read falls back to the safe
+      zero `-c` pairs) — so the loader finds every link claimed and the
+      agent's own read falls back to the safe
       default. Every pinned or re-asserted name is one the agent-server's
       exec filter admits, so the boundary survives the hop to the agent
       process itself.
+
+      On an **account-scoped** gemini session the same classified names are
+      keep-if-set rather than refused: an operator forward through
+      `session_env_passthrough` keeps its value, and anything the operator
+      did not forward is discarded — pinned defined-and-empty at the pane
+      and dropped at the exec filter — so a workspace `.env`, an image
+      `ENV`, or a remote login environment cannot claim the proxy, trust
+      roots, credential or project of a credential-bearing request.
+      `docs/usage-limits.md` names each discarded value (the project/quota
+      chain and lowercase twins, the proxy spellings, the trust-root paths,
+      `CLOUDSDK_CONFIG`, the metadata endpoints, the executable-credential
+      gate, the telemetry auth selector) and the remedy for every one is
+      the same: name it in `session_env_passthrough`.
     - In af's own `docker exec` steps: every one names `/bin/sh` by absolute
       path, so the container's `PATH` — whatever it is — cannot hand af a
       repo-written `sh` to intercept the agent-server launch. Commands
@@ -428,29 +445,15 @@ user's real home and mounts it only if it exists, so:
     - **Env names the classification does not cover.** A name that neither
       substitutes, relocates, nor routes the credential is allowed through;
       the per-agent reachable surface is pinned by test, but a name an agent
-      adds upstream is discovered on review, not by construction. Every
-      class of name an agent's own dotenv loader could fill — measured on
-      gemini's `.env`, which fills only names that are unset — is either
-      pinned or named here, including the library code the CLI bundles
-      (`@google-cloud/logging`, `googleapis-common`, `gcp-metadata`,
-      `google-auth-library`): the identity-source names — both selectors the
-      auth-source read consults (`CLOUD_SHELL`, `GEMINI_CLI_USE_COMPUTE_ADC`)
-      and every env link of the metadata-endpoint chain (`GCE_METADATA_IP`,
-      `GCE_METADATA_HOST`; the chain's third link is `HOST_ADDRESS`,
-      gcp-metadata's compiled constant `169.254.169.254`, not an env read)
-      — the git environment-config names (`GIT_CONFIG_COUNT`,
-      `GIT_CONFIG_PARAMETERS` — pinning the
-      count makes the whole indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`
-      family inert), and the bundled `gcp-metadata`/`google-auth-library`
-      reads `DEBUG_AUTH`, `DETECT_GCP_RETRIES`, and
-      `METADATA_SERVER_DETECTION` (none routes the credential; an empty
-      value is inert, but each is dotenv-fillable, so af pins it
-      defined-and-empty) are pinned defined-and-empty as described above;
-      the bundled-transport `GOOGLE_CLOUD_UNIVERSE_DOMAIN` read — which
-      retargets the credential-bearing telemetry dial host
-      (`logging.<domain>`) and uses a nullish `??` that treats `""` as the
-      real host — is re-asserted to its first-party default
-      (`googleapis.com`) instead;
+      adds upstream is discovered on review, not by construction. For
+      gemini the completeness claim is a checked artifact rather than this
+      paragraph: `internal/sessionenv/gemini_bundle_env.go` records every
+      environment read measured in `@google/gemini-cli@0.42.0`, the CLI's
+      own source and the library code it bundles (`@grpc/grpc-js`,
+      `google-auth-library`, `gcp-metadata`, `googleapis-common`,
+      `@google-cloud/logging`), each classified on both defended paths or
+      waived with a one-line reason — a read that appears or disappears
+      with a CLI version is a reviewed edit there, pinned by test.
       `GIT_CONFIG` alone stays unpinned because git reads a defined-empty
       value as a real config file path and `git config` would break, so it
       is documented instead — a loader can still claim it. For an

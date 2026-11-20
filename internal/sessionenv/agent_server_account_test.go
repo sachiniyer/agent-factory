@@ -119,6 +119,11 @@ func TestAgentServerAccountExecRefusesWhenItCannotScope(t *testing.T) {
 // absent name is installed defined-empty there. The inner pane's --session-env
 // admission (the names AccountLoaderFilledNames lists) is what carries the
 // decided value to the agent; naming them on that channel is the fix for R6.
+//
+// #7662 widened the loader set with names the COMMON ambient allowlist admits
+// (the generic proxy spellings, GITHUB_TOKEN): the filter alone no longer drops
+// their ambient copies, so the wrap runs dropUnforwardedAccountLoaderNames —
+// the same step execAgentServer runs between the two calls composed below.
 func TestAgentServerLoaderNames_DroppedAtTheWrapPinnedAtTheAgent(t *testing.T) {
 	loader := AccountLoaderFilledNames("gemini")
 	// repoSet is the container-env shape image ENV / docker.run_args produce:
@@ -145,9 +150,10 @@ func TestAgentServerLoaderNames_DroppedAtTheWrapPinnedAtTheAgent(t *testing.T) {
 
 	t.Run("unforwarded: image values die at the wrap, pins reach the agent", func(t *testing.T) {
 		wrapped := FilterForCommand(repoSet(), "gemini", "gemini", nil)
+		wrapped = dropUnforwardedAccountLoaderNames(wrapped, "gemini", nil)
 		for _, name := range loader {
 			_, present := envValue(wrapped, name)
-			require.False(t, present, "%s survived the wrap filter: presence there would read as the operator's claim", name)
+			require.False(t, present, "%s survived the wrap: presence at the scope would read as the operator's claim", name)
 		}
 		scoped, err := ScopeAgentServerAccount(wrapped, "gemini", "gemini")
 		require.NoError(t, err)
@@ -159,6 +165,7 @@ func TestAgentServerLoaderNames_DroppedAtTheWrapPinnedAtTheAgent(t *testing.T) {
 		passthrough := []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"}
 		env := append(repoSet("GIT_CONFIG_COUNT"), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/w")
 		wrapped := FilterForCommand(env, "gemini", "gemini", passthrough)
+		wrapped = dropUnforwardedAccountLoaderNames(wrapped, "gemini", passthrough)
 		if v, _ := envValue(wrapped, "GIT_CONFIG_COUNT"); v != "1" {
 			t.Fatalf("premise: the forwarded value must survive the wrap filter, got %q", v)
 		}

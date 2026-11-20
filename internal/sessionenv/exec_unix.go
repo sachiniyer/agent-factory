@@ -508,6 +508,13 @@ func execAgentServer(args []string, accountAgent string) error {
 	agent := credentialAgentForCommand(program)
 	environ := FilterForCommand(os.Environ(), agent, program, extras)
 	if accountAgent != "" {
+		// The filter's allowlists already dropped every loader name they do
+		// not admit; names that ALSO ride the common ambient allowlist (the
+		// generic proxy spellings, GITHUB_TOKEN) survive on image/ambient
+		// values and would read to the scope as the operator's claim. Drop
+		// every loader name the wrap did not forward so presence at the
+		// scope means "forwarded" for the whole class (#7662).
+		environ = dropUnforwardedAccountLoaderNames(environ, accountAgent, extras)
 		scoped, err := ScopeAgentServerAccount(environ, accountAgent, program)
 		if err != nil {
 			return err
