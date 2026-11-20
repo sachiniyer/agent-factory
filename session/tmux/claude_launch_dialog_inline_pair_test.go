@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -437,57 +438,149 @@ func TestCheckAndHandleTrustPrompt_InlinePairUnframedComposerDraftUnderWrappedQu
 }
 
 // TestCheckAndHandleTrustPrompt_InlinePairBoxedDraftWithFooterStaysClear pins
-// the tail readers against the same boxed-draft case as the re-wrap matchers:
-// a composer whose draft quotes the pair AND the footer inside its box is a
-// working agent, not the dialog's tail (claudeFolderTrustTail) nor its
-// option block (claudeLaunchDialogTailOver). claudeTrustRowOf reads past the
-// box's side borders, so the words matched every label — and the pair is a
-// label only where it could be the dialog's, which is never between a box's
-// sides (#7661 Codex review: the screen held forever on the tail reader's
-// unreadable verdict before the re-wrap composer guard could run).
+// the box test the pair's readers share (#7666): a bordered pair row is a
+// draft's only when the box proves itself a composer's by what is inside it —
+// a prompt row, the same arbiter claudeTrustBoxPromptRow gives the rule test.
+// A box whose first content row is a composer prompt clears; a box that
+// cannot prove that — the dialog's own frame, a fake dialog drafted whole, a
+// frameless tail — holds, because side borders alone never made a composer
+// (the dialog's own frame has them too: #7666).
 func TestCheckAndHandleTrustPrompt_InlinePairBoxedDraftWithFooterStaysClear(t *testing.T) {
 	for _, v := range inlineVariants {
 		picker := legacyInlinePairOptionBlock(v.ordinal)[0]
-		for _, tt := range []struct{ name, content string }{
-			{
-				"the pair and the whole footer inside the box",
-				"╭──────────────────────────────────╮\n" +
-					fmt.Sprintf("│ %-32s │", picker) + "\n" +
-					"│ Enter to confirm · Esc to exit   │\n" +
-					"╰──────────────────────────────────╯\n",
-			},
-			{
-				"the whole fake dialog inside the box",
-				"╭───────────────────────────────────────╮\n" +
-					"│ Do you trust the files in this        │\n" +
-					"│ folder?                               │\n" +
-					fmt.Sprintf("│ %-37s │", picker) + "\n" +
-					"│ Enter to confirm · Esc to exit        │\n" +
-					"╰───────────────────────────────────────╯\n",
-			},
-			{
-				"the pair and the footer's start inside the box",
-				"╭──────────────────╮\n" +
-					fmt.Sprintf("│ %-16s │", picker) + "\n" +
-					"│ Enter to confirm │\n" +
-					"╰──────────────────╯\n",
-			},
-			{
-				"the pair and footer scrolled to the box's interior",
-				fmt.Sprintf("│ %-29s │", picker) + "\n" +
-					"│ Enter to confirm · Esc to exit │\n" +
-					"╰────────────────────────────────╯\n",
-			},
-		} {
-			t.Run(v.name+"/"+tt.name, func(t *testing.T) {
-				handled, cmds := pollStaticPane(t, tt.content, 4)
+		for _, prompt := range []string{">", "!", "#"} {
+			content := "╭──────────────────────────────────╮\n" +
+				fmt.Sprintf("│ %-32s │", prompt+" draft") + "\n" +
+				fmt.Sprintf("│ %-32s │", picker) + "\n" +
+				"│ Enter to confirm · Esc to exit   │\n" +
+				"╰──────────────────────────────────╯\n"
+			t.Run(v.name+"/"+prompt+" prompt row proves the box", func(t *testing.T) {
+				handled, cmds := pollStaticPane(t, content, 4)
 				require.False(t, handled,
-					"a boxed composer draft quoting the pair is not the legacy picker "+
-						"(#7661 Codex review):\n%s", tt.content)
+					"a composer-proven box's draft quoting the pair is not the legacy picker "+
+						"(#7666):\n%s", content)
 				require.Empty(t, sentKeystrokes(cmds),
 					"no key may reach a working composer; got %v", cmds)
 			})
 		}
+	}
+}
+
+// TestCheckAndHandleTrustPrompt_InlinePairBoxedDialogHolds pins #7666's hold:
+// the legacy inline-pair dialog painted inside its own box — the layout the
+// 2.0.25 capture and TestCheckAndHandleTrustPrompt_RealLegacyFolderTrustDialog
+// StillFiresEnter model — holds the same as the unframed dialog, at every
+// width the issue names. The same rows unboxed hold the same way; only the
+// box's side borders differ.
+func TestCheckAndHandleTrustPrompt_InlinePairBoxedDialogHolds(t *testing.T) {
+	for _, v := range inlineVariants {
+		picker := legacyInlinePairOptionBlock(v.ordinal)[0]
+		for width := 12; width <= 40; width++ {
+			body := []string{"Do you trust the files in this", "folder?", "", "/home/u/proj", "", picker, ""}
+			var inside []string
+			for _, row := range body {
+				for _, w := range wrapAtSpaces(row, width-4) {
+					inside = append(inside, w)
+				}
+			}
+			var rows []string
+			rows = append(rows, "╭"+strings.Repeat("─", width-2)+"╮")
+			for _, w := range inside {
+				rows = append(rows, "│ "+w+strings.Repeat(" ", max(0, width-4-utf8.RuneCountInString(w)))+" │")
+			}
+			rows = append(rows, "╰"+strings.Repeat("─", width-2)+"╯")
+			rows = append(rows, wrapAtSpaces(legacyTrustFooter, width)...)
+			content := strings.Join(rows, "\n")
+			t.Run(fmt.Sprintf("%s/%d columns", v.name, width), func(t *testing.T) {
+				handled, cmds := pollStaticPane(t, content, 4)
+				require.True(t, handled,
+					"the boxed legacy inline dialog holds like the unframed one (#7666):\n%s", content)
+				require.Empty(t, sentKeystrokes(cmds),
+					"a dialog af cannot read whole gets no key; got %v", cmds)
+			})
+		}
+	}
+}
+
+// TestCheckAndHandleTrustPrompt_InlinePairBoxedAmbiguousHolds pins the other
+// half of the property: a box that can prove neither the dialog nor the
+// composer — a whole fake dialog drafted inside, or a stale frame's tail — is
+// held as the dialog's, not cleared as a draft's (#7666). A "❯ Yes  No" row
+// alone inside a box is no such case: the bare ❯ row is itself a composer
+// prompt, so claudeComposersCanonical already reads that box as a composer
+// drawn last — it stays clear, exactly as on master. The ordinal pair is not
+// a composer prompt (claudeComposerPromptIsAnOption), so the same box around
+// "❯ 1. Yes  2. No" stays painted and holds.
+func TestCheckAndHandleTrustPrompt_InlinePairBoxedAmbiguousHolds(t *testing.T) {
+	for _, v := range inlineVariants {
+		picker := legacyInlinePairOptionBlock(v.ordinal)[0]
+		t.Run(v.name+"/the whole fake dialog inside the box", func(t *testing.T) {
+			content := "╭───────────────────────────────────────╮\n" +
+				"│ Do you trust the files in this        │\n" +
+				"│ folder?                               │\n" +
+				fmt.Sprintf("│ %-37s │", picker) + "\n" +
+				"│ Enter to confirm · Esc to exit        │\n" +
+				"╰───────────────────────────────────────╯\n"
+			handled, cmds := pollStaticPane(t, content, 4)
+			require.True(t, handled,
+				"a box whose first content row is the dialog's question is the dialog's, "+
+					"not a draft's (#7666):\n%s", content)
+			require.Empty(t, sentKeystrokes(cmds),
+				"a dialog af cannot read whole gets no key; got %v", cmds)
+		})
+		t.Run(v.name+"/the pair and footer scrolled to the box's interior", func(t *testing.T) {
+			content := fmt.Sprintf("│ %-32s │", picker) + "\n" +
+				"│ Enter to confirm · Esc to exit   │\n" +
+				"╰──────────────────────────────────╯\n"
+			handled, cmds := pollStaticPane(t, content, 4)
+			require.True(t, handled,
+				"a stale frame's tail holding the pair reads as the dialog's, not a draft's "+
+					"(#7666):\n%s", content)
+			require.Empty(t, sentKeystrokes(cmds),
+				"a dialog af cannot read whole gets no key; got %v", cmds)
+		})
+	}
+}
+
+// TestCheckAndHandleTrustPrompt_InlinePairBareRowUnderOpenBoxHolds pins the
+// R1 review finding: a bare row under an open box is not "inside" anything.
+// The ❯-first proof marks the open box above a composer's, but the pair row
+// itself has no side borders, so the tail must still read it — the head's
+// "inside a composer's box" has to imply master's "on a bordered row" or the
+// proof becomes a hold→clear lever (#7667 review). Master and the head both
+// hold this pane as the dialog's unreadable tail.
+func TestCheckAndHandleTrustPrompt_InlinePairBareRowUnderOpenBoxHolds(t *testing.T) {
+	content := "╭────────────────────────────╮\n" +
+		"│ ❯ 1. Yes, proceed          │\n" +
+		"Yes  No\n" +
+		"  2. No, exit\n" +
+		"  Enter to confirm · Esc to exit\n"
+	handled, cmds := pollStaticPane(t, content, 4)
+	require.True(t, handled,
+		"a bare pair row under an open ❯-first box keeps the tail's dialog hold "+
+			"(#7667 review):\n%s", content)
+	require.Empty(t, sentKeystrokes(cmds),
+		"a dialog af cannot read whole gets no key; got %v", cmds)
+}
+
+// TestCheckAndHandleTrustPrompt_InlinePairSelectedBoxFirstRowStaysClear pins
+// the ❯ half of claudeTrustComposerBoxProven: a box whose first content row
+// is a selected ❯ row proves itself a composer's — the draft's own option
+// marker — because the dialog's frame always opens with its question first
+// (#7666, Codex review). Both pair forms inside that box stay clear; the
+// plain "❯ Yes  No" row is a composer prompt outright, so its box is also
+// canonicalized away.
+func TestCheckAndHandleTrustPrompt_InlinePairSelectedBoxFirstRowStaysClear(t *testing.T) {
+	for _, v := range inlineVariants {
+		picker := legacyInlinePairOptionBlock(v.ordinal)[0]
+		content := "╭──────────────────────────────────╮\n" +
+			fmt.Sprintf("│ %-32s │", picker) + "\n" +
+			"│ Enter to confirm · Esc to exit   │\n" +
+			"╰──────────────────────────────────╯\n"
+		t.Run(v.name+"/a ❯ row opens the box", func(t *testing.T) {
+			requireClearWithoutAKey(t, content,
+				"a box whose first content row is a ❯ proves a composer's")
+		})
 	}
 }
 

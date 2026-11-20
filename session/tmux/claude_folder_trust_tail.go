@@ -31,10 +31,13 @@ const (
 )
 
 // claudeFolderTrustInlinePairLabel is the legacy dialog's inline pair as
-// words. It is the one tail label that can be drafted inside a composer's box:
-// every other label was already read from bordered rows the way it reads from
-// bare ones, so only the pair may not be assembled from boxed words (Codex
-// review).
+// words. It is the one tail label that can be drafted inside a composer's
+// box: every other label was already read from bordered rows the way it reads
+// from bare ones, so only the pair may not be assembled from words on a
+// bordered row inside a box that proves itself a composer's
+// (claudeTrustBordered && claudeTrustComposerBoxHas — a prompt row or a ❯
+// row inside it; the dialog's own frame has the same side borders, so a
+// border alone proves nothing, #7666, Codex review).
 var claudeFolderTrustInlinePairLabel = strings.Fields(claudeLegacyInlinePairText)
 
 // claudeFolderTrustTailLabels are the option rows the folder-trust dialogs
@@ -96,7 +99,7 @@ func claudeFolderTrustTail(lines []string, rows []claudeTrustRow) bool {
 		if row.selected {
 			cursors[len(words)] = true
 		}
-		boxed := claudeTrustBordered(lines[i])
+		boxed := claudeTrustBordered(lines[i]) && claudeTrustComposerBoxHas(lines, rows, i)
 		for _, text := range strings.Fields(row.label) {
 			if !claudeMCPTrustOrdinalWord(text) {
 				words = append(words, word{text, i, boxed})
@@ -107,8 +110,10 @@ func claudeFolderTrustTail(lines []string, rows []claudeTrustRow) bool {
 	for i, w := range words {
 		texts[i] = w.text
 	}
-	// boxedSpan reports whether any word in the span was painted between a
-	// box's side borders: a composer's frame, never a folder-trust dialog's.
+	// boxedSpan reports whether any word in the span was painted on a
+	// bordered row inside a box that proves itself a composer's: a draft's
+	// rows, never the dialog's own frame, and never a bare row that merely
+	// sits below an open box (#7666).
 	boxedSpan := func(span []word) bool {
 		for _, w := range span {
 			if w.boxed {
