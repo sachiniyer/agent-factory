@@ -606,42 +606,49 @@ func spawnNamedSleeper(t *testing.T, binPath string, args ...string) int {
 }
 
 // #7689: the kernel keeps 15 bytes of task name, so a renamed server's
-// "<name>: server" title can carry no suffix at all. Once the argv[0]
-// basename alone fills the comm, the truncated name is indistinguishable from
-// any other long-named process, and the corroboration moves to the
-// non-truncated side — an argv tmux's own parser accepted, plus the
-// control-socket filesystem listener every tmux server keeps bound even after
-// its socket file is unlinked. The sleeper stands in for both sides of the
-// boundary: its name fills the comm exactly as the truncated title would,
-// and its argv is free to be a tmux invocation or not.
+// "<name>: server" title can carry no suffix at all. The fail-safe rule is
+// that a candidate is rejected only on conclusive evidence: a comm that is
+// not the truncation of its own argv[0]'s title proves the process is not a
+// retitled server — and that is all. argv tails are never conclusive: a
+// server's argv is its client's verbatim, so every spelling tmux's grammar
+// accepts (`start-server\; new-session`, quoting, aliases, option order) is
+// one a server keeps — a tail this predicate cannot classify stays a
+// candidate, which is the whole point of degrading to "claimed".
 func TestTruncatedServerTitlePrefilter(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the 15-byte comm ceiling and the retitle it cuts are Linux shapes")
 	}
 	dir := t.TempDir()
 
-	// A live same-uid process named past the comm ceiling, argv a tmux client
-	// invocation — the shape a renamed server presents once the suffix is
-	// gone. The kernel comm of the binary is "verylongtmuxnam", identical to
-	// the truncation of "verylongtmuxname: server".
-	tmuxArgvPID := spawnNamedSleeper(t,
+	// Three live same-uid processes named past the comm ceiling. Their
+	// kernel comms are all "verylongtmuxnam" — the first 15 bytes of each
+	// file name — and the truncated title of each argv[0] is the same, so
+	// each could be a retitled server. The tails deliberately span spellings
+	// no fixed grammar would all accept: a `;` command separator, a quoted
+	// session name, and a tail that is not a tmux invocation at all.
+	sepPID := spawnNamedSleeper(t,
 		sleeper.Named(t, filepath.Join(dir, "verylongtmuxname")),
-		"-S", filepath.Join(dir, "s.sock"), "new-session", "-d")
-	// The same comm length, an argv no tmux parser accepts — every long-named
-	// daemon's shape (xdg-document-portal, chrome_crashpad_handler, ...).
-	dullPID := spawnNamedSleeper(t,
-		sleeper.Named(t, filepath.Join(dir, "verylongtmuxname2")), "300")
-	// Basename in the 8–14 band: a partial ": server" survives truncation, so
-	// the comm itself is evidence and the listener is never consulted. The
-	// sleeper is not tmux and does not retitle, so the test supplies the comm
-	// a real server's prctl would have kept.
+		"-S", filepath.Join(dir, "s.sock"), "start-server;", "new-session", "-d")
+	quotedPID := spawnNamedSleeper(t,
+		sleeper.Named(t, filepath.Join(dir, "verylongtmuxname2")),
+		"new-session", "-d", "-s", "af 'quoted session'")
+	weirdPID := spawnNamedSleeper(t,
+		sleeper.Named(t, filepath.Join(dir, "verylongtmuxname3")),
+		"--definitely-not-tmux", "whatever")
+	// A name in the 8–14 band, where a partial ": server" survives
+	// truncation. The sleeper is not tmux and does not retitle, so the test
+	// supplies the comm a real server's prctl would have kept.
 	partialPID := spawnNamedSleeper(t,
 		sleeper.Named(t, filepath.Join(dir, "mediumtmux")), "300")
+	// A twelve-character name, for the client's truncated title —
+	// "verylongname: c" — which is conclusive evidence of not-a-server.
+	clientPID := spawnNamedSleeper(t,
+		sleeper.Named(t, filepath.Join(dir, "verylongname")), "300")
 
 	// A just-forked process can sit in the fork/exec window with an empty
 	// cmdline, which the predicate reads as "unreadable — admit". Wait for
 	// the real argv before asserting on it.
-	for _, pid := range []int{tmuxArgvPID, dullPID, partialPID} {
+	for _, pid := range []int{sepPID, quotedPID, weirdPID, partialPID, clientPID} {
 		deadline := time.Now().Add(5 * time.Second)
 		for len(proctree.Argv(pid)) == 0 {
 			if time.Now().After(deadline) {
@@ -652,7 +659,7 @@ func TestTruncatedServerTitlePrefilter(t *testing.T) {
 	}
 	// A zombie: its argv is provably unreadable — the admit-safe direction
 	// the prefilter declares for evidence it cannot get.
-	zombieCmd := exec.Command(sleeper.Named(t, filepath.Join(dir, "verylongtmuxname3")), "0.05")
+	zombieCmd := exec.Command(sleeper.Named(t, filepath.Join(dir, "verylongtmuxname4")), "0.05")
 	if err := zombieCmd.Start(); err != nil {
 		t.Fatalf("start zombie sleeper: %v", err)
 	}
@@ -666,74 +673,37 @@ func TestTruncatedServerTitlePrefilter(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	withListeners := func(t *testing.T, paths []string, err error) {
-		t.Helper()
-		prev := listenerPathsOf
-		listenerPathsOf = func(int) ([]string, error) { return paths, err }
-		t.Cleanup(func() { listenerPathsOf = prev })
+	for _, tc := range []struct {
+		name string
+		p    proctree.Process
+		want bool
+	}{
+		// Every argv tail stays a candidate: only the comm-versus-title
+		// comparison is conclusive, and each of these matches.
+		{"separator tail", proctree.Process{PID: sepPID, Comm: "verylongtmuxnam"}, true},
+		{"quoted tail", proctree.Process{PID: quotedPID, Comm: "verylongtmuxnam"}, true},
+		{"unrecognized tail", proctree.Process{PID: weirdPID, Comm: "verylongtmuxnam"}, true},
+		{"partial suffix band admits on comm alone", proctree.Process{PID: partialPID, Comm: "mediumtmux: ser"}, true},
+		{"unreadable argv admits", proctree.Process{PID: zombiePID, Comm: "verylongtmuxnam"}, true},
+		// Conclusive rejections.
+		{"comm is not the truncated title of this argv0", proctree.Process{PID: sepPID, Comm: "verylongtmuxnaX"}, false},
+		{"a client's truncated title is conclusive", proctree.Process{PID: clientPID, Comm: "verylongname: c"}, false},
+		{"kernel thread is never a retitled userspace server", proctree.Process{PID: sepPID, Comm: "verylongtmuxnam", KernelThread: true}, false},
+		{"comm under the ceiling is not this predicate's question", proctree.Process{PID: sepPID, Comm: "mediumtmux: se"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTruncatedTmuxServerTitle(tc.p); got != tc.want {
+				t.Errorf("isTruncatedTmuxServerTitle(%+v) = %v, want %v", tc.p, got, tc.want)
+			}
+		})
 	}
-	t.Run("long name, tmux argv, listener held", func(t *testing.T) {
-		withListeners(t, []string{filepath.Join(dir, "s.sock")}, nil)
-		if !isTruncatedTmuxServerTitle(proctree.Process{PID: tmuxArgvPID, Comm: "verylongtmuxnam"}) {
-			t.Error("a ceiling-length comm corroborated by a tmux argv and a held listener must admit")
-		}
-	})
-	t.Run("long name, tmux argv, no listener", func(t *testing.T) {
-		withListeners(t, nil, nil)
-		if isTruncatedTmuxServerTitle(proctree.Process{PID: tmuxArgvPID, Comm: "verylongtmuxnam"}) {
-			t.Error("a complete read with no listener rules the process out — a server always holds its control socket")
-		}
-	})
-	t.Run("long name, tmux argv, listener unreadable", func(t *testing.T) {
-		withListeners(t, nil, errors.New("netlink denied"))
-		if !isTruncatedTmuxServerTitle(proctree.Process{PID: tmuxArgvPID, Comm: "verylongtmuxnam"}) {
-			t.Error("an unreadable socket table cannot rule the process out — admit, the safe direction")
-		}
-	})
-	t.Run("long name, non-tmux argv, listener held", func(t *testing.T) {
-		withListeners(t, []string{"/tmp/ice"}, nil)
-		if isTruncatedTmuxServerTitle(proctree.Process{PID: dullPID, Comm: "verylongtmuxnam"}) {
-			t.Error("an argv tmux's parser rejects cannot have forked a server, listener or not")
-		}
-	})
-	t.Run("comm is not the truncated title of this argv0", func(t *testing.T) {
-		withListeners(t, []string{"/tmp/ice"}, nil)
-		if isTruncatedTmuxServerTitle(proctree.Process{PID: tmuxArgvPID, Comm: "verylongtmuxnaX"}) {
-			t.Error("a comm that is not the truncation of basename(argv0)+\": server\" is not a tmux title")
-		}
-	})
-	t.Run("partial suffix band admits on comm alone", func(t *testing.T) {
-		withListeners(t, nil, errors.New("must not be consulted"))
-		if !isTruncatedTmuxServerTitle(proctree.Process{PID: partialPID, Comm: "mediumtmux: ser"}) {
-			t.Error("a surviving partial \": server\" is evidence by itself")
-		}
-	})
-	t.Run("kernel thread is never a retitled userspace server", func(t *testing.T) {
-		withListeners(t, []string{"/tmp/ice"}, nil)
-		if isTruncatedTmuxServerTitle(proctree.Process{PID: tmuxArgvPID, Comm: "verylongtmuxnam", KernelThread: true}) {
-			t.Error("a kernel thread has no userspace argv to corroborate")
-		}
-	})
-	t.Run("comm under the ceiling is not this predicate's question", func(t *testing.T) {
-		withListeners(t, nil, nil)
-		if isTruncatedTmuxServerTitle(proctree.Process{PID: tmuxArgvPID, Comm: "mediumtmux: se"}) {
-			t.Error("a comm shorter than the ceiling carries its full title already")
-		}
-	})
-	t.Run("unreadable argv admits", func(t *testing.T) {
-		withListeners(t, nil, nil)
-		if !isTruncatedTmuxServerTitle(proctree.Process{PID: zombiePID, Comm: "verylongtmuxnam"}) {
-			t.Error("a userspace argv that cannot be read proves nothing either way — admit")
-		}
-	})
 
-	// The prefilter as the probe calls it: the tmux-argv sleeper is a
-	// candidate, the dull twin is not — identical comms, different evidence.
-	withListeners(t, []string{"/tmp/tmux.sock"}, nil)
-	if pids := liveTmuxServerPIDs(); !containsInt(pids, tmuxArgvPID) {
-		t.Errorf("liveTmuxServerPIDs() = %v, want it to contain the corroborated %d", pids, tmuxArgvPID)
-	} else if containsInt(pids, dullPID) {
-		t.Errorf("liveTmuxServerPIDs() = %v, must not contain the non-tmux-argv %d", pids, dullPID)
+	// The prefilter as the probe calls it: every one of the ceiling-named
+	// sleepers is a candidate — identical comms, and no tail rules one out.
+	if pids := liveTmuxServerPIDs(); !containsInt(pids, sepPID) ||
+		!containsInt(pids, quotedPID) || !containsInt(pids, weirdPID) {
+		t.Errorf("liveTmuxServerPIDs() = %v, want it to contain %d, %d and %d",
+			pids, sepPID, quotedPID, weirdPID)
 	}
 }
 
@@ -744,76 +714,6 @@ func containsInt(haystack []int, needle int) bool {
 		}
 	}
 	return false
-}
-
-// tmuxClientArgs is the truncated-title corroboration's view of "this argv
-// could have launched tmux": options are bundled single letters with a few
-// value-takers, never long options, and the first non-option word must reach
-// the command table by name, alias, or prefix — the grammar a server's argv
-// necessarily satisfies, since it is its client's argv verbatim.
-func TestTmuxClientArgs(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		args []string
-		want bool
-	}{
-		{"bare command", []string{"new-session", "-d"}, true},
-		{"socket option then command", []string{"-S", "/tmp/s", "new-session", "-d", "-s", "af_x"}, true},
-		{"options only is an implicit new-session", []string{"-S", "/tmp/s"}, true},
-		{"bundled flags", []string{"-2u", "new"}, true},
-		{"config then command", []string{"-f", "/etc/tmux.conf", "attach"}, true},
-		{"command prefix", []string{"new-s"}, true},
-		{"alias", []string{"lsw"}, true},
-		{"end of options then command", []string{"--", "new-session"}, true},
-		{"end of options alone", []string{"--"}, true},
-		{"unknown short flag still option-shaped", []string{"-x9"}, true},
-		{"a long option is not tmux grammar", []string{"--session=gnome"}, false},
-		{"a long option anywhere rejects", []string{"-u", "--watch", "ls"}, false},
-		{"dash inside a bundle rejects", []string{"-monitor-self", "/x"}, false},
-		{"a word the table cannot reach", []string{"serve"}, false},
-		{"two free words", []string{"pg", "push"}, false},
-		{"a bare number", []string{"300"}, false},
-		{"dangling value option", []string{"-S"}, false},
-		{"value option inside a bundle", []string{"-Lsock", "list-sessions"}, true},
-		{"uppercase word is not a command", []string{"AWS_SSM_START_SESSION_RESPONSE"}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tmuxClientArgs(tc.args); got != tc.want {
-				t.Errorf("tmuxClientArgs(%v) = %v, want %v", tc.args, got, tc.want)
-			}
-		})
-	}
-}
-
-// The command table itself: names, aliases, and the unambiguous-prefix
-// shorthand tmux accepts, plus the words that must NOT reach it — every wrong
-// acceptance only buys a refusal, but every wrong rejection drops a live
-// server from candidacy.
-func TestTmuxCommandWord(t *testing.T) {
-	for _, tc := range []struct {
-		word string
-		want bool
-	}{
-		{"new-session", true},
-		{"new", true},
-		{"new-s", true},
-		{"n", true},
-		{"ls", true},
-		{"lsw", true},
-		{"resizep", true},
-		{"attach", true},
-		{"serve", false},
-		{"pg", false},
-		{"300", false},
-		{"gnome", false},
-		{"", false},
-	} {
-		t.Run(tc.word, func(t *testing.T) {
-			if got := tmuxCommandWord(tc.word); got != tc.want {
-				t.Errorf("tmuxCommandWord(%q) = %v, want %v", tc.word, got, tc.want)
-			}
-		})
-	}
 }
 
 // #7647: a socket spelling that reaches its socket through a directory that

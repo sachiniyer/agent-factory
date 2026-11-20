@@ -241,11 +241,12 @@ func PinServerProbeForTest(pids ...int) (restore func()) {
 //
 // It answers a deliberately BROAD question — "could any live server own an
 // unlinked socket?" — by task name, corroborated where the kernel truncated
-// it by the non-truncated evidence (argv grammar and held listeners). Which
-// candidate is bound to THIS socket is tmuxSocketClaimed's question, answered
-// from each server's own listening sockets (#7533). The asymmetry is chosen:
-// a false "yes" here costs that per-server read; a false "no" lets reset
-// delete worktrees out from under a live agent.
+// it by the one conclusive piece of non-truncated evidence (the title its
+// own argv[0] would have produced). Which candidate is bound to THIS socket
+// is tmuxSocketClaimed's question, answered from each server's own
+// listening sockets (#7533). The asymmetry is chosen: a false "yes" here
+// costs that per-server read; a false "no" lets reset delete worktrees out
+// from under a live agent.
 //
 // A process table we cannot read reports TRUE, for the same reason: an
 // unreadable table is not evidence of absence.
@@ -622,27 +623,30 @@ const linuxTaskCommLen = 15
 // cut entirely, leaving `verylongtmuxna` — so the suffix predicate can
 // never see those titles (Codex on #7689).
 //
-// While part of the suffix survives (basenames of eight to fourteen), the
-// comm is real evidence: it must equal the truncation of
-// "<basename(argv[0])>: server", a shape an ordinary process never takes —
-// its comm is only its own name, which is shorter than the ceiling. Once
-// the basename alone fills the comm, that comparison degenerates: every
-// long-named daemon matches it alike, so the remaining evidence is the
-// non-truncated side. The argv must still be a client invocation tmux's own
-// parser accepted (a server's argv is its client's, verbatim), and the
-// process must hold its control socket's filesystem listener — bound even
-// after the socket file is unlinked (#7533). A bare argv skips the shape
-// check: `tmux` alone is an implicit new-session, so only the listener is
-// left to speak. Only Linux retitles the task name — darwin's comm stays
-// the exec'd file name, where this comparison would admit every file named
-// past its ceiling.
+// The corroborating evidence is the process's own command line, which the
+// kernel does NOT truncate: the pid is a candidate exactly when its comm
+// equals the truncation of "<basename(argv[0])>: server". For a basename of
+// eight to fourteen that equality is discriminating — an ordinary process's
+// comm is only its own name, which is shorter than the ceiling. At fifteen
+// or more it degenerates — the title is cut entirely inside the basename,
+// so the check matches every same-named process — and that is accepted,
+// deliberately. A candidate is rejected only on conclusive evidence that it
+// is not a retitled server: a comm that is not this argv[0]'s truncated
+// title is one (a client's "<name>: client" can never equal it, and a client
+// with a long name truncates to the same comm, staying a candidate — the
+// fail-safe answer). Teaching the filter tmux's argv grammar instead never
+// converges: every separator spelling, quoting, alias, and option ordering a
+// client accepts is one its server then keeps verbatim. What is merely
+// admitted and cannot be identified degrades the answer to "claimed"
+// (unknown), refusing destructive cleanup — the prefilter's own declared
+// safe direction — while proctree.IsTmuxServer keeps deciding who is
+// signalled.
 //
-// The unreadable states resolve in the prefilter's own safe direction: a
-// kernel thread has provably no argv (its comm is the kernel's own, never a
-// tmux title), while an argv or a socket table that cannot be read is
-// admitted — a merely-admitted pid that proctree.IsTmuxServer cannot
-// identify is remembered as an unprobed possible owner, degrading the
-// answer to "claimed" (unknown), which refuses destructive cleanup.
+// Only Linux retitles the task name — darwin's comm stays the exec'd file
+// name, where this comparison would admit every file named past its
+// ceiling. Kernel threads are skipped outright: a kernel thread has no
+// userspace argv to corroborate, and its comm is never a tmux title. An
+// argv that cannot be read admits — unreadable is not evidence of absence.
 func isTruncatedTmuxServerTitle(p proctree.Process) bool {
 	if runtime.GOOS != "linux" || len(p.Comm) < linuxTaskCommLen || p.KernelThread {
 		return false
@@ -651,129 +655,11 @@ func isTruncatedTmuxServerTitle(p proctree.Process) bool {
 	if len(argv) == 0 {
 		return true
 	}
-	base := filepath.Base(argv[0])
-	title := base + ": server"
+	title := filepath.Base(argv[0]) + ": server"
 	if len(title) > linuxTaskCommLen {
 		title = title[:linuxTaskCommLen]
 	}
-	if p.Comm != title {
-		return false
-	}
-	if len(base) < linuxTaskCommLen {
-		return true
-	}
-	if len(argv) > 1 && !tmuxClientArgs(argv[1:]) {
-		return false
-	}
-	paths, err := listenerPathsOf(p.PID)
-	return err != nil || len(paths) > 0
-}
-
-// tmuxClientArgs reports whether args — a command line's tail after argv[0] —
-// is a client invocation tmux's option parser would accept and a server could
-// have been forked from. Client options are bundled single letters (-2u),
-// plus a few that take a value (-c -e -f -L -S -T, the last in its bundle
-// taking the next arg); tmux has no long options, so a `--flag` arg is one
-// its parser rejected — as is a value letter left dangling or a word the
-// command table cannot reach. An options-only tail (`tmux -S sock`) is an
-// implicit new-session and counts. Flag letters themselves are accepted
-// loosely — a version-newer flag only ever costs an admission, while
-// rejecting one a real client passed would drop its server.
-func tmuxClientArgs(args []string) bool {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
-			i++
-			return i == len(args) || tmuxCommandWord(args[i])
-		}
-		if len(a) < 2 || a[0] != '-' {
-			return tmuxCommandWord(a)
-		}
-		if a[1] == '-' {
-			return false
-		}
-		for j := 1; j < len(a); j++ {
-			if !isASCIIAlphanumeric(a[j]) {
-				return false
-			}
-			if strings.IndexByte("cefLST", a[j]) >= 0 {
-				if j == len(a)-1 {
-					i++
-					if i >= len(args) {
-						return false
-					}
-				}
-				break
-			}
-		}
-	}
-	return true
-}
-
-func isASCIIAlphanumeric(c byte) bool {
-	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
-}
-
-// tmuxCommandWord reports whether word could be the command tmux's parser
-// reached — a command name, an alias, or a prefix of either, which tmux
-// accepts when unambiguous. The loose match is the prefilter's own safe
-// direction: an arg list this accepts wrongly only buys a refusal, while one
-// it rejects would drop a live server from candidacy.
-func tmuxCommandWord(word string) bool {
-	if word == "" {
-		return false
-	}
-	for _, cmd := range tmuxClientCommands {
-		if strings.HasPrefix(cmd, word) {
-			return true
-		}
-	}
-	for _, alias := range tmuxClientAliases {
-		if word == alias || strings.HasPrefix(alias, word) {
-			return true
-		}
-	}
-	return false
-}
-
-// tmuxClientCommands is the tmux command table the client parser reaches for
-// [command [flags]] — the names a server-creating invocation's argv[1:] can
-// end its options with, checked as prefixes since tmux accepts unambiguous
-// abbreviations. Aliases are separate: `lsw` is not a prefix of
-// "list-windows".
-var tmuxClientCommands = []string{
-	"attach-session", "bind-key", "break-pane", "capture-pane",
-	"choose-buffer", "choose-client", "choose-session", "choose-tree",
-	"choose-window", "clear-history", "clock-mode", "command-prompt",
-	"confirm-before", "copy-mode", "customize-mode", "detach-client",
-	"display-menu", "display-message", "display-panes", "display-popup",
-	"find-window", "has-session", "if-shell", "join-pane", "kill-pane",
-	"kill-server", "kill-session", "kill-window", "last-pane", "last-window",
-	"link-window", "list-buffers", "list-clients", "list-commands",
-	"list-keys", "list-panes", "list-sessions", "list-windows", "load-buffer",
-	"lock-client", "lock-server", "lock-session", "move-pane", "move-window",
-	"new-session", "new-window", "next-layout", "next-window", "paste-buffer",
-	"pipe-pane", "previous-layout", "previous-window", "refresh-client",
-	"rename-session", "rename-window", "resize-pane", "resize-window",
-	"respawn-pane", "respawn-window", "rotate-window", "run-shell",
-	"save-buffer", "select-layout", "select-pane", "select-window",
-	"send-keys", "send-prefix", "set-buffer", "set-environment", "set-hook",
-	"set-option", "show-buffer", "show-environment", "show-hooks",
-	"show-messages", "show-options", "show-window-options", "source-file",
-	"split-window", "start-server", "suspend-client", "swap-pane",
-	"swap-window", "switch-client", "unbind-key", "unlink-window", "wait-for",
-}
-
-// tmuxClientAliases is tmux's command-alias table, which the parser resolves
-// before prefix-matching the names above.
-var tmuxClientAliases = []string{
-	"attach", "detach", "has", "joinp", "killp", "killw", "lastl", "lastp",
-	"linkw", "loadb", "lsb", "lsc", "lscm", "lsk", "lsp", "lsw", "movep",
-	"movew", "new", "neww", "next", "nextl", "pasteb", "pipep", "prev",
-	"prevl", "refresh", "rename", "renamew", "resizep", "resizew", "respawnp",
-	"respawnw", "rotatew", "selectl", "selectp", "selectw", "send", "set",
-	"setb", "show", "showb", "showenv", "showmsgs", "showw", "source",
-	"splitw", "suspendc", "swapp", "swapw", "switchc", "unlinkw",
+	return p.Comm == title
 }
 
 // absentTmuxSocketPath extracts the socket path from tmux's ENOENT diagnostic

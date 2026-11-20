@@ -305,13 +305,14 @@ func TestProbeSessionStrictNamesTheDiagnosticItCouldNotClassify(t *testing.T) {
 // The fix admits the `: server` suffix and its truncations: the kernel keeps
 // 15 bytes of task name, so the title is whole only for a basename of seven
 // characters or fewer — at eight to fourteen a partial suffix survives, and
-// at fifteen or more the comm is only the name's prefix, indistinguishable
-// from any other long-named process until the non-truncated evidence (the
-// argv tmux's own parser accepted, the control-socket listener every server
-// holds) corroborates it. Once admitted, the renamed server fails
-// proctree.IsTmuxServer (its argv[0] basename is not "tmux") and is
-// remembered as an unprobed possible owner, so tmuxSocketClaimed answers
-// "claimed" (unknown) and NoServerRunning returns false — reset refuses.
+// at fifteen or more the comm is only the name's prefix. The truncated form
+// is admitted when it equals the truncation of "<basename(argv[0])>: server"
+// — the one conclusive test a prefilter can run, since a server's argv is
+// its client's verbatim and no tail spelling can rule a server out. Once
+// admitted, the renamed server fails proctree.IsTmuxServer (its argv[0]
+// basename is not "tmux") and is remembered as an unprobed possible owner,
+// so tmuxSocketClaimed answers "claimed" (unknown) and NoServerRunning
+// returns false — reset refuses.
 //
 // Linux-only: tmux cannot retitle on darwin, so a server started under a
 // renamed binary there is titled after the exec'd file name (no `: server`
