@@ -542,6 +542,27 @@ func TestCheckAndHandleTrustPrompt_InlinePairBoxedAmbiguousHolds(t *testing.T) {
 	}
 }
 
+// TestCheckAndHandleTrustPrompt_InlinePairBareRowUnderOpenBoxHolds pins the
+// R1 review finding: a bare row under an open box is not "inside" anything.
+// The ❯-first proof marks the open box above a composer's, but the pair row
+// itself has no side borders, so the tail must still read it — the head's
+// "inside a composer's box" has to imply master's "on a bordered row" or the
+// proof becomes a hold→clear lever (#7667 review). Master and the head both
+// hold this pane as the dialog's unreadable tail.
+func TestCheckAndHandleTrustPrompt_InlinePairBareRowUnderOpenBoxHolds(t *testing.T) {
+	content := "╭────────────────────────────╮\n" +
+		"│ ❯ 1. Yes, proceed          │\n" +
+		"Yes  No\n" +
+		"  2. No, exit\n" +
+		"  Enter to confirm · Esc to exit\n"
+	handled, cmds := pollStaticPane(t, content, 4)
+	require.True(t, handled,
+		"a bare pair row under an open ❯-first box keeps the tail's dialog hold "+
+			"(#7667 review):\n%s", content)
+	require.Empty(t, sentKeystrokes(cmds),
+		"a dialog af cannot read whole gets no key; got %v", cmds)
+}
+
 // TestCheckAndHandleTrustPrompt_InlinePairSelectedBoxFirstRowStaysClear pins
 // the ❯ half of claudeTrustComposerBoxProven: a box whose first content row
 // is a selected ❯ row proves itself a composer's — the draft's own option
