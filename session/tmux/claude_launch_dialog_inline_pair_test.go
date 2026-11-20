@@ -436,6 +436,61 @@ func TestCheckAndHandleTrustPrompt_InlinePairUnframedComposerDraftUnderWrappedQu
 	}
 }
 
+// TestCheckAndHandleTrustPrompt_InlinePairBoxedDraftWithFooterStaysClear pins
+// the tail readers against the same boxed-draft case as the re-wrap matchers:
+// a composer whose draft quotes the pair AND the footer inside its box is a
+// working agent, not the dialog's tail (claudeFolderTrustTail) nor its
+// option block (claudeLaunchDialogTailOver). claudeTrustRowOf reads past the
+// box's side borders, so the words matched every label — and the pair is a
+// label only where it could be the dialog's, which is never between a box's
+// sides (#7661 Codex review: the screen held forever on the tail reader's
+// unreadable verdict before the re-wrap composer guard could run).
+func TestCheckAndHandleTrustPrompt_InlinePairBoxedDraftWithFooterStaysClear(t *testing.T) {
+	for _, v := range inlineVariants {
+		picker := legacyInlinePairOptionBlock(v.ordinal)[0]
+		for _, tt := range []struct{ name, content string }{
+			{
+				"the pair and the whole footer inside the box",
+				"╭──────────────────────────────────╮\n" +
+					fmt.Sprintf("│ %-32s │", picker) + "\n" +
+					"│ Enter to confirm · Esc to exit   │\n" +
+					"╰──────────────────────────────────╯\n",
+			},
+			{
+				"the whole fake dialog inside the box",
+				"╭───────────────────────────────────────╮\n" +
+					"│ Do you trust the files in this        │\n" +
+					"│ folder?                               │\n" +
+					fmt.Sprintf("│ %-37s │", picker) + "\n" +
+					"│ Enter to confirm · Esc to exit        │\n" +
+					"╰───────────────────────────────────────╯\n",
+			},
+			{
+				"the pair and the footer's start inside the box",
+				"╭──────────────────╮\n" +
+					fmt.Sprintf("│ %-16s │", picker) + "\n" +
+					"│ Enter to confirm │\n" +
+					"╰──────────────────╯\n",
+			},
+			{
+				"the pair and footer scrolled to the box's interior",
+				fmt.Sprintf("│ %-29s │", picker) + "\n" +
+					"│ Enter to confirm · Esc to exit │\n" +
+					"╰────────────────────────────────╯\n",
+			},
+		} {
+			t.Run(v.name+"/"+tt.name, func(t *testing.T) {
+				handled, cmds := pollStaticPane(t, tt.content, 4)
+				require.False(t, handled,
+					"a boxed composer draft quoting the pair is not the legacy picker "+
+						"(#7661 Codex review):\n%s", tt.content)
+				require.Empty(t, sentKeystrokes(cmds),
+					"no key may reach a working composer; got %v", cmds)
+			})
+		}
+	}
+}
+
 // TestCheckAndHandleTrustPrompt_InlinePairQuotedAboveAComposerStaysClear
 // pins the larger #7584 guarantee with the inline pair: a draft quoting the
 // pair (or the dialog's question + pair, or the block on one row) drawn

@@ -358,8 +358,13 @@ func claudeLaunchDialogComposerBelow(pane claudeLaunchDialogPane, first, from in
 		for edge >= 0 && pane.rows[edge].blank && claudeTrustBordered(pane.lines[edge]) {
 			edge--
 		}
-		boxed := edge >= 0 && claudeTrustFrameRule(pane.lines[edge]) &&
-			!claudeTrustFrameClosingRule(pane.lines[edge])
+		// The row itself paints between a box's side borders when the draft
+		// quotes more than the prompt — the pair and the question and footer
+		// it mocks up — so the opening edge is not always the next row up
+		// (#7661 Codex review).
+		boxed := claudeTrustBordered(pane.lines[i]) ||
+			(edge >= 0 && claudeTrustFrameRule(pane.lines[edge]) &&
+				!claudeTrustFrameClosingRule(pane.lines[edge]))
 		acceptInlinePair := !boxed && !proseAbove
 		for _, label := range []string{
 			claudeSquash(claudeLegacyTrustProceedLabel),

@@ -442,6 +442,14 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 			if !strings.HasSuffix(pane.text[:at], label) {
 				continue
 			}
+			if i >= len(options.labels)-options.pair && claudeLaunchDialogBoxedSpan(pane, at-len(label), at) {
+				// A pair drafted inside a composer's box is the draft's
+				// text, not the dialog's option row: the box's side borders
+				// survive on the raw rows even though claudeTrustRowOf reads
+				// past them, and no folder-trust dialog ever paints between
+				// them (#7661 Codex review).
+				continue
+			}
 			at -= len(label)
 			begins[at] = true
 			// The label's ordinal, when a narrow pane left it on the row
@@ -890,6 +898,22 @@ func claudeLaunchDialogPainting(pane claudeLaunchDialogPane) (claudeLaunchDialog
 		return match, true
 	}
 	return claudeLaunchDialogMatch{}, false
+}
+
+// claudeLaunchDialogBoxedSpan reports whether the text span [from, to) sits on
+// a row the pane drew between a composer's box borders.
+func claudeLaunchDialogBoxedSpan(pane claudeLaunchDialogPane, from, to int) bool {
+	for content := 0; content < len(pane.starts); content++ {
+		start := pane.starts[content]
+		end := len(pane.text)
+		if content+1 < len(pane.starts) {
+			end = pane.starts[content+1]
+		}
+		if start < to && end > from && claudeTrustBordered(pane.lines[pane.index[content]]) {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeLaunchDialogRowText(pane claudeLaunchDialogPane, content int) string {
