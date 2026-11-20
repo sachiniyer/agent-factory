@@ -542,25 +542,25 @@ func TestCheckAndHandleTrustPrompt_InlinePairBoxedAmbiguousHolds(t *testing.T) {
 	}
 }
 
-// TestCheckAndHandleTrustPrompt_InlinePairOrdinalBoxedPairFooterHolds pins the
-// one boxed-pair-without-question shape that holds: the ordinal pair and the
-// footer alone inside a box. Its "❯ 1. Yes  2. No" row is no composer prompt
-// (claudeComposerPromptIsAnOption), so the box is not canonicalized away, and
-// with no prompt row inside it cannot prove itself a composer's either — the
-// dialog's own frame paints the same borders (#7666). The plain "❯ Yes  No"
-// twin is a composer prompt inside a box and stays clear.
-func TestCheckAndHandleTrustPrompt_InlinePairOrdinalBoxedPairFooterHolds(t *testing.T) {
-	picker := legacyInlinePairOptionBlock(true)[0]
-	content := "╭──────────────────────────────────╮\n" +
-		fmt.Sprintf("│ %-32s │", picker) + "\n" +
-		"│ Enter to confirm · Esc to exit   │\n" +
-		"╰──────────────────────────────────╯\n"
-	handled, cmds := pollStaticPane(t, content, 4)
-	require.True(t, handled,
-		"an unproven box holding the ordinal pair reads as the dialog's, not a draft's "+
-			"(#7666):\n%s", content)
-	require.Empty(t, sentKeystrokes(cmds),
-		"a dialog af cannot read whole gets no key; got %v", cmds)
+// TestCheckAndHandleTrustPrompt_InlinePairSelectedBoxFirstRowStaysClear pins
+// the ❯ half of claudeTrustComposerBoxProven: a box whose first content row
+// is a selected ❯ row proves itself a composer's — the draft's own option
+// marker — because the dialog's frame always opens with its question first
+// (#7666, Codex review). Both pair forms inside that box stay clear; the
+// plain "❯ Yes  No" row is a composer prompt outright, so its box is also
+// canonicalized away.
+func TestCheckAndHandleTrustPrompt_InlinePairSelectedBoxFirstRowStaysClear(t *testing.T) {
+	for _, v := range inlineVariants {
+		picker := legacyInlinePairOptionBlock(v.ordinal)[0]
+		content := "╭──────────────────────────────────╮\n" +
+			fmt.Sprintf("│ %-32s │", picker) + "\n" +
+			"│ Enter to confirm · Esc to exit   │\n" +
+			"╰──────────────────────────────────╯\n"
+		t.Run(v.name+"/a ❯ row opens the box", func(t *testing.T) {
+			requireClearWithoutAKey(t, content,
+				"a box whose first content row is a ❯ proves a composer's")
+		})
+	}
 }
 
 // TestCheckAndHandleTrustPrompt_InlinePairQuotedAboveAComposerStaysClear
