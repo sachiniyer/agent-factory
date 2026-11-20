@@ -560,10 +560,27 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		d.PendingHandoffMission = redactedMarker
 	}
 	// The agent writes the attention reason as free text about the user's work.
-	if d.Attention != nil && d.Attention.Reason != "" {
+	// Origin is an enum the daemon writes from a constant when it raises a
+	// request itself (#7635), and "who raised this" is worth having in a
+	// report — but this reads the row as it is on disk, so only a value af
+	// knows passes. Anything else in the field is not af's and is marked.
+	if d.Attention != nil && (d.Attention.Reason != "" || !knownAttentionOrigin(d.Attention.Origin)) {
 		attention := *d.Attention
-		attention.Reason = redactedMarker
+		if attention.Reason != "" {
+			attention.Reason = redactedMarker
+		}
+		if !knownAttentionOrigin(attention.Origin) {
+			attention.Origin = redactedMarker
+		}
 		d.Attention = &attention
+	}
+	// DialogHoldFlagged is the key of a held launch-dialog pane (#7635): a
+	// digest of the pane's process id and of what the pane showed. A local
+	// gate mints it, but a sandbox's agent server sends its own, and af only
+	// checks that one for shape. It is a value a host authored, derived from
+	// pane content, and a report needs no more than "a pane was flagged".
+	if d.DialogHoldFlagged != "" {
+		d.DialogHoldFlagged = redactedMarker
 	}
 	if d.Worktree.SessionName != "" {
 		d.Worktree.SessionName = redactedMarker
@@ -875,4 +892,10 @@ func (r *redactor) redactTasks(tasks []task.Task) []redactedTask {
 func redactedHostPlaceholder(name string) string {
 	sum := sha256.Sum256([]byte(name))
 	return "[host:" + hex.EncodeToString(sum[:4]) + "]"
+}
+
+// knownAttentionOrigin reports whether origin is a value af itself writes: no
+// origin (the agent's own request), or one of the daemon's constants.
+func knownAttentionOrigin(origin string) bool {
+	return origin == "" || origin == session.AttentionOriginDialogHold
 }

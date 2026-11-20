@@ -275,6 +275,9 @@ var sensitiveJSONKeys = map[string]bool{
 	// writes it as free text about the user's work. The whole object goes here
 	// because a record the typed decode rejected may hold the reason elsewhere.
 	"attention": true,
+	// dialog_hold_flagged mirrors the typed path: the key of a held pane is a
+	// host-authored digest of pane content (#7635), blanked wherever it sits.
+	"dialog_hold_flagged": true,
 	// The #5571 off-box workstream, #5189 prune intent, #5105 missing worktree,
 	// and #5459 push mode all added typed-path redactions in redactInstanceData
 	// and redactTabData without mirroring them here. A record the typed decode
