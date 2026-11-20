@@ -301,13 +301,20 @@ func removeStaleDaemonPIDFile(pidFile string, pid int) {
 }
 
 // stopDaemonGrace bounds how long StopDaemon waits for a SIGTERM'd daemon to
-// exit before escalating to SIGKILL. stopDaemonPoll is the polling cadence.
-// Package vars rather than constants so tests can shorten them. Production
-// defaults mirror sigtermFallbackGrace / sigtermFallbackPoll — the same
-// timings already used by signalAndWait on the upgrade fallback path.
+// exit before escalating to SIGKILL. stopDaemonKillGrace bounds how long it
+// then waits for the SIGKILL'd process to ACTUALLY exit: SIGKILL does not
+// complete for a process pinned in an uninterruptible syscall (hung NFS/FUSE
+// I/O), so — unlike the pre-#589 fall-through that equated signal delivery
+// with termination — the SIGKILL branch re-observes real exit via
+// proctree.AliveSame within this bound rather than assuming it, the way the
+// SIGTERM grace poll already does. stopDaemonPoll is the cadence both polls
+// share. Package vars rather than constants so tests can shorten them.
+// Production defaults mirror sigtermFallbackGrace / sigtermFallbackPoll — the
+// same timings already used by signalAndWait on the upgrade fallback path.
 var (
-	stopDaemonGrace = sigtermFallbackGrace
-	stopDaemonPoll  = sigtermFallbackPoll
+	stopDaemonGrace     = sigtermFallbackGrace
+	stopDaemonKillGrace = sigtermFallbackGrace
+	stopDaemonPoll      = sigtermFallbackPoll
 )
 
 // stopDaemonPIDLockBudget bounds how long the foreign/unverifiable PID-file
@@ -837,6 +844,58 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 				}
 				if !errIsProcessGone(err) {
 					return false, fmt.Errorf("failed to stop daemon process: %w", err)
+				}
+				// Already gone (ESRCH surfaced through a non-proctree path): the
+				// process exited before or during the SIGKILL, so there is nothing
+				// left to re-observe — fall through to the shared cleanup below.
+			} else {
+				// SIGKILL was sent to a process that was alive at signal time.
+				// Re-observe the actual exit the way the SIGTERM grace poll does:
+				// SIGKILL does not complete for a process pinned in an
+				// uninterruptible syscall (hung NFS/FUSE I/O), and such a process
+				// stops answering its control socket during its own graceful
+				// teardown while it still holds the per-home flock. Falling
+				// straight through to "stopped successfully" here — proving the
+				// stop only by cleanupDaemonRuntimeFiles' socket probe — would let
+				// a wedged daemon read as stopped, and the recovery actor's
+				// WaitForShutdownCompletion(ShutdownTarget{}) (PID==0) would
+				// confirm it by socket-quiet, fabricating StopConfirmed while the
+				// lock is still held. Poll AliveSame (it classifies a zombie as
+				// exited and a still-running D-state process as alive) within a
+				// short bound; a process still alive at the bound has not released
+				// the home lock, so surface a failure rather than claiming success
+				// and unlinking a live daemon's socket. The recovery actor then
+				// fails closed (StopUnknown) instead of spawning a candidate that
+				// fails acquireHomeLock and trips a spurious rollback.
+				killDeadline := admissionBoundedDeadline(deadline, stopDaemonKillGrace)
+				killed := false
+				for time.Now().Before(killDeadline) {
+					if !proctree.AliveSame(daemonProc) {
+						killed = true
+						break
+					}
+					if !waitUntilAdmissionDeadline(killDeadline, stopDaemonPoll) {
+						break
+					}
+				}
+				// The process may have exited between the last in-loop check and
+				// the deadline; do not report a still-alive process that is
+				// already gone (the same boundary WaitForShutdownCompletion guards).
+				if !killed && !proctree.AliveSame(daemonProc) {
+					killed = true
+				}
+				if killed {
+					log.InfoLog.Printf("daemon process (PID: %d) exited after SIGKILL", pid)
+				} else if admissionDeadlineExpired(deadline) {
+					// The caller's admission budget lapsed mid-kill-poll (a
+					// deadline-bounded EnsureDaemon reclaim). The SIGKILL was sent
+					// but exit could not be re-observed within the remaining
+					// budget; mirror the SIGTERM grace's admission contract so the
+					// caller knows not to start a replacement while the old process
+					// may still be releasing its lock.
+					return true, daemonAdmissionDeadlineError()
+				} else {
+					return false, fmt.Errorf("daemon process (PID: %d) did not exit within %s of SIGKILL", pid, stopDaemonKillGrace)
 				}
 			}
 		}
