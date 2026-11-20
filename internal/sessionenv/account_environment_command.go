@@ -627,10 +627,16 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 // reports how many words it consumed.
 func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) (int, bool) {
 	word := words[0]
-	if isAccountCommandName(word, "strace") && straceOptionRunRefused(words[1:], names, false, memo) {
+	if isAccountCommandName(word, "strace") && straceOptionRunRefused(words[1:], names, true, memo) {
 		// A strace in an unrecognized wrapper's — or another strace's — child
 		// command position gets the same option-run judgement the outermost one
 		// does (#5033); the recognized wrappers reach it through the default arm.
+		// The run uses the strict leading-expansion rule: a wholly-dynamic word
+		// in strace's option position could expand to a single -E/--env=NAME=VAL
+		// argv word, and the tail walk's unprovable-word path only judges the
+		// words AFTER it (it cannot see what the word itself expands to), so the
+		// option run must refuse such a word itself rather than end the run at it.
+		// Symmetric with the head-level refusal of `strace "$OPT" codex`.
 		return 1, true
 	}
 	if isAccountCommandName(word, "env") {

@@ -42,11 +42,16 @@ type straceRunKey struct {
 }
 
 // straceOptionRunRefused is straceOptionsRefused with the leading-expansion rule
-// optional. A strace that sits in another wrapper's tail is behind a walk that
-// already judges a dynamic word there (the xargs differential oracle holds a
-// substituted marker and "$y" to one verdict), so the nested caller ends the run
-// at such a word instead of refusing it, and the option words before it are
-// still judged.
+// optional. Both callers pass refuseLeadingExpansion=true: a wholly-dynamic word
+// in strace's option position could expand to a single -E/--env=NAME=VAL argv
+// word, and the surrounding tail walk's unprovable-word path only judges the
+// words AFTER it (never the hypothesis that the word itself expands to a strace
+// env option), so the run must refuse such a word itself rather than end at it.
+// A strace nested in another wrapper's tail sees the same tail walk that an
+// unmodeled wrapper's child command position does, and that walk does not judge
+// the dynamic word's own content as a strace option, so the nested run refuses a
+// leading expansion the same way the outermost one does — symmetric with the
+// head-level refusal of `strace "$OPT" codex`.
 //
 // The tail scan starts a run at every nested strace word, and a run that keeps
 // finding operands (`-o strace -o strace …`) reaches the end of the command each
@@ -111,7 +116,11 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 	text := prefix.String()
 	if text == "" {
 		// A word that opens with an expansion is in option position and could
-		// expand to any option (or be the command itself).
+		// expand to any option (or be the command itself). In strict mode
+		// (refuseLeadingExpansion=true, the only mode both callers now use)
+		// it refuses: such a word can expand to a single -E/--env=NAME=VAL
+		// argv word that injects or removes a protected variable, and the
+		// tail walk cannot judge that hypothesis from the words after it.
 		return end(refuseLeadingExpansion, true)
 	}
 	if !strings.HasPrefix(text, "-") {

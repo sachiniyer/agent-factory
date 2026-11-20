@@ -182,7 +182,100 @@ func TestUnlistedWrapperVisibleAssignmentRefused(t *testing.T) {
 	}
 }
 
-// A replace marker that is itself a verdict word is substituted away in the
+// A strace nested in an UNLISTED wrapper's tail (firejail/eatmydata/any
+// executable the checker does not model) runs its option walk through
+// wrapperTailWordHidesAccountAssignment → straceOptionRunRefused. A wholly-
+// dynamic word in strace's option position — `"$OPT"` expanding to exactly one
+// argv word — can expand to a single `-ECODEX_HOME=/other` or
+// `--env=CODEX_HOME=/other` argv word, so strace's getopt injects or removes a
+// protected variable in the traced child. The tail walk's unprovable-word path
+// only judges the words AFTER it (it can see `codex` but not that `"$OPT"`
+// expands to `-E…`), so the option run must refuse such a word itself rather
+// than end at it — symmetric with the head-level refusal of `strace "$OPT"
+// codex`. The literal spellings and the head-level dynamic spellings already
+// refused; this pins the nested dynamic spellings the gate used to ADMIT while
+// refusing the identical literal mutation. Verified against the real gate via
+// commandMutatesAccountEnvironment and the end-to-end
+// ValidateAccountEnvironmentCommand.
+func TestNestedStraceDynamicOptionWordRefused(t *testing.T) {
+	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
+	for name := range accountShellStartupNames {
+		names[name] = struct{}{}
+	}
+	// The exploit shapes: a wholly-dynamic word in a nested strace's option
+	// position — under firejail, another strace, eatmydata, or any unmodeled
+	// word — that could expand to a -E/--env=NAME=VAL argv word. The literal
+	// twins and the head-level dynamic twins already refuse.
+	refused := []string{
+		// The exact reported shape: `"$OPT"` in strace's argv[1], codex follows.
+		`firejail strace "$OPT" codex`,
+		// The same mutation under other unmodeled wrappers.
+		`eatmydata strace "$OPT" codex`,
+		`x strace "$OPT" codex`,
+		// A nested strace behind another strace, behind a strace option, and
+		// behind a strace flag.
+		`firejail strace strace "$OPT" codex`,
+		`firejail strace -o x strace "$OPT" codex`,
+		`firejail strace -c strace "$OPT" codex`,
+		// The unquoted spelling word-splits to the same single argv word.
+		`firejail strace ${OPT} codex`,
+		// A credential name and a multi-statement assignment that sets $OPT.
+		`firejail strace "$OPT" OPENAI_API_KEY=sk codex`,
+		`echo hi; OPT=--env=CODEX_HOME=/other; firejail strace "$OPT" codex`,
+		`OPT=--env=CODEX_HOME=/other; firejail strace "$OPT" codex`,
+		// The dynamic word may sit after recognized strace flags.
+		`firejail strace -f "$OPT" codex`,
+		`firejail strace -ff "$OPT" codex`,
+		// A command substitution opens the same wholly-dynamic option word.
+		`firejail strace $(O) codex`,
+		// No command follows: symmetric with the head-level refusal that
+		// isUnmodeledArgvPassthroughWrapper already pins.
+		`firejail strace "$OPT"`,
+	}
+	for _, command := range refused {
+		require.True(t, commandMutatesAccountEnvironment(command, names),
+			"command %q hides a -E/--env mutation in one quoted variable word and must be refused", command)
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q must be refused by the account-environment guard", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+	// Controls: the gate already refused these (literal nested and head-level
+	// dynamic), and they stay refused — the fix introduces no change here.
+	alreadyRefused := []string{
+		`firejail strace -E CODEX_HOME=/other codex`,
+		`firejail strace -E CODEX_HOME codex`,
+		`firejail strace --env=CODEX_HOME=/other codex`,
+		`firejail strace --env CODEX_HOME=/other codex`,
+		`firejail strace "-ECODEX_HOME=/other" codex`,
+		`firejail strace "--env=CODEX_HOME=/other" codex`,
+		`strace "$OPT" codex`,
+		`nice strace "$OPT" codex`,
+		`nice nice strace "$OPT" codex`,
+	}
+	for _, command := range alreadyRefused {
+		require.True(t, commandMutatesAccountEnvironment(command, names),
+			"control command %q must stay refused", command)
+	}
+	// Benign shapes: no dynamic word lands in a nested strace's option
+	// position, so they stay admitted — the fix introduces no false positive.
+	admitted := []string{
+		`firejail strace codex`,
+		`firejail strace -o x codex`,
+		`firejail strace -o "$FILE" codex`,
+		`firejail strace -p 1234 codex`,
+		`firejail strace -f codex`,
+		`firejail codex`,
+		`firejail npm run dev`,
+		// `$OPT` after the traced command is an argument, not a strace option.
+		`firejail strace codex "$OPT"`,
+	}
+	for _, command := range admitted {
+		require.False(t, commandMutatesAccountEnvironment(command, names),
+			"benign command %q must stay admitted", command)
+	}
+}
+
 // argv the walk continues with — `xargs -Iunset echo a unset CODEX_HOME`
 // reads as `echo a $xargs_item CODEX_HOME`, and the literal-boundary suffix
 // scan deliberately skips the synthetic word. The pre-substitution tail still
