@@ -127,8 +127,10 @@ func dialogHoldKey(incarnation string, sum [sha256.Size]byte, size int) string {
 }
 
 // dialogHoldRecorder times one held pane. It keeps a hash and length of the
-// last held capture, never the capture, and the pane incarnation the clock
-// was started against, so a respawned pane cannot inherit it.
+// last held capture, never the capture, and the pane incarnation a raised
+// notice is bound to. The incarnation is read lazily — once, when the notice
+// is raised, and once per settle time while the notice is up (#7648): a hold
+// whose capture keeps changing costs no tmux call until it settles.
 //
 // mu is a leaf: every method takes it for a few assignments and returns. No
 // tmux call and no gate decision runs under it.
@@ -136,7 +138,7 @@ type dialogHoldRecorder struct {
 	mu     sync.Mutex
 	sum    [sha256.Size]byte
 	size   int
-	pane   string // the incarnation the clock is bound to; "" while unknown
+	pane   string // the incarnation the notice is bound to; "" until the pane is read
 	since  time.Time
 	notice *DialogHoldNotice
 	// checked is when the pane's incarnation was last confirmed for a raised
@@ -154,9 +156,9 @@ func (r *dialogHoldRecorder) clear() {
 }
 
 // observe notes one held capture taken at now. A capture that differs from the
-// last held one restarts the clock and withdraws any notice. It returns when
-// the pane last changed, whether this capture started the clock, and whether
-// the notice is already raised.
+// last held one restarts the clock and withdraws any notice and any pane it
+// was bound to. It returns when the pane last changed, whether this capture
+// started the clock, and whether the notice is already raised.
 func (r *dialogHoldRecorder) observe(now time.Time, sum [sha256.Size]byte, size int) (since time.Time, started, raised bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -168,23 +170,13 @@ func (r *dialogHoldRecorder) observe(now time.Time, sum [sha256.Size]byte, size 
 	return r.since, false, r.notice != nil
 }
 
-// bindPane records the pane incarnation a clock started at since runs
-// against. A clock restarted meanwhile is left alone.
-func (r *dialogHoldRecorder) bindPane(since time.Time, incarnation string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.since.Equal(since) {
-		r.pane = incarnation
-	}
-}
-
-// raise publishes the notice for the clock started at since, if pane is still
-// the incarnation that clock was bound to. A different one means the pane was
-// respawned under an identical-looking capture, or was never identified when
-// the clock started: the clock restarts at now against this incarnation, and
-// nothing is raised. An unknown incarnation raises nothing and binds nothing,
-// so no notice ever carries a key that does not name a pane. It reports
-// whether the notice went up.
+// raise publishes the notice for the clock started at since, bound to the
+// pane it was just read from. A pane already bound — by a recheck that found
+// the pane replaced under an identical capture — that this read contradicts
+// restarts the clock at now against what is there: its hold is a new one,
+// with its own settle and its own key. An unknown incarnation raises nothing
+// and binds nothing, so no notice ever carries a key that does not name a
+// pane. It reports whether the notice went up.
 func (r *dialogHoldRecorder) raise(now, since time.Time, pane paneIdentity, kind DialogHoldKind) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -192,10 +184,11 @@ func (r *dialogHoldRecorder) raise(now, since time.Time, pane paneIdentity, kind
 	if !r.since.Equal(since) || r.notice != nil || incarnation == "" {
 		return false
 	}
-	if r.pane != incarnation {
+	if r.pane != "" && r.pane != incarnation {
 		r.pane, r.since = incarnation, now
 		return false
 	}
+	r.pane = incarnation
 	r.notice = &DialogHoldNotice{
 		Kind: kind, Width: pane.width, Height: pane.height,
 		Since: since, Key: dialogHoldKey(incarnation, r.sum, r.size),
@@ -255,6 +248,10 @@ func (t *TmuxSession) DialogHoldNotice() (DialogHoldNotice, bool) {
 // only times a hold. held is the gate's answer; keysBefore is dialogKeysSent
 // from before the decision, so a poll in which af pressed a key counts as
 // progress, not as a hold. Caller holds inputMu.
+//
+// The pane is identified lazily — once when a settled hold is raised, and
+// once per settle time while a notice is up: a hold whose capture keeps
+// changing costs no tmux call beyond the gate's own capture (#7648).
 func (t *TmuxSession) recordDialogHold(content string, keysBefore uint64, held bool) {
 	if DetectAgentFromCommand(t.programCmd()) != ProgramClaude {
 		return
@@ -264,12 +261,7 @@ func (t *TmuxSession) recordDialogHold(content string, keysBefore uint64, held b
 		return
 	}
 	now := claudeTrustNow()
-	since, started, raised := t.dialogHold.observe(now, sha256.Sum256([]byte(content)), len(content))
-	if started {
-		pane, _ := t.readPaneIdentity()
-		t.dialogHold.bindPane(since, pane.incarnation())
-		return
-	}
+	since, _, raised := t.dialogHold.observe(now, sha256.Sum256([]byte(content)), len(content))
 	if raised {
 		if t.dialogHold.recheckDue(now) {
 			pane, _ := t.readPaneIdentity()
@@ -280,10 +272,10 @@ func (t *TmuxSession) recordDialogHold(content string, keysBefore uint64, held b
 	if now.Sub(since) < claudeDialogHoldSettle {
 		return
 	}
-	// The pane is read again here: its incarnation must still be the one the
-	// clock started against, and its size goes in the notice. A failed read
-	// leaves the incarnation unknown, and an unknown pane is never flagged:
-	// the next poll reads again.
+	// The pane is read for the first time here: its incarnation goes into the
+	// notice's key and its size into the notice. A failed read leaves the
+	// incarnation unknown, and an unknown pane is never flagged: the next poll
+	// reads again.
 	pane, _ := t.readPaneIdentity()
 	kind := claudeDialogHoldKind(claudeScreenOf(content))
 	if !t.dialogHold.raise(now, since, pane, kind) {
