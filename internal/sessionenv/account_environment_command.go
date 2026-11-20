@@ -683,7 +683,7 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 	}
 	if strace {
 		switch {
-		case literal == "-E" || straceEnvLongName(literal):
+		case literal == "-E" || escapeQuoteNormalizedSpelling(literal) == "-E" || straceEnvLongName(literal):
 			// strace's env option takes var[=val] as a separate word and
 			// injects or REMOVES the variable in the traced child's
 			// environment — the same mutation the env arm refuses, in
@@ -826,6 +826,19 @@ func stracePrefixMutates(word *syntax.Word, names map[string]struct{}) bool {
 // strace. Three or more characters are treated as --env (fail closed — `--e`
 // would be ambiguous to getopt, and refusing it costs nothing real).
 func straceEnvLongName(word string) bool {
+	if straceEnvLongNameReading(word) {
+		return true
+	}
+	// Second reading on the normalized spelling (#7627): `--e\nv` and
+	// `--e'nv'` spell --env once a downstream decode removes the escape
+	// or quote.
+	if normalized := escapeQuoteNormalizedSpelling(word); normalized != word {
+		return straceEnvLongNameReading(normalized)
+	}
+	return false
+}
+
+func straceEnvLongNameReading(word string) bool {
 	return len(word) >= 3 && strings.HasPrefix("--env", word)
 }
 

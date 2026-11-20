@@ -172,7 +172,7 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 			// text cannot be judged by the raw-text cut.
 			return true
 		}
-		if launcherWordDenied(literal, names) {
+		if launcherWordDeniedExact(literal, names) {
 			if !requireCommand {
 				return true
 			}
@@ -182,6 +182,17 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 		if index > 0 && !strings.HasPrefix(literal, "-") &&
 			!strings.Contains(literal, "=") {
 			commandish = true
+		}
+		// The normalized reading adds denials the exact text does not
+		// show (#7627) — but it does not take the word out of the
+		// commandish check above: on master such a word was not denied
+		// at all, so it still counts toward the command position the
+		// requireCommand rule needs.
+		if launcherWordDenied(literal, names) {
+			if !requireCommand {
+				return true
+			}
+			denied = true
 		}
 	}
 	return requireCommand && denied && commandish
@@ -385,11 +396,13 @@ func launcherOwnOptionLiterals(words []*syntax.Word, operandOptions map[string]b
 	return flags
 }
 
-// literalWordPresent reports whether words contains the exact literal
-// word want.
+// literalWordPresent reports whether words contains the literal word
+// want — on the exact spelling OR the escape- and quote-normalized one
+// (#7627), so `"--clea'renv"` spells bwrap's --clearenv reset mark.
 func literalWordPresent(words []*syntax.Word, want string) bool {
 	for _, word := range words {
-		if literal, ok := launcherLiteralWord(word); ok && literal == want {
+		if literal, ok := launcherLiteralWord(word); ok &&
+			(literal == want || escapeQuoteNormalizedSpelling(literal) == want) {
 			return true
 		}
 	}
@@ -460,6 +473,16 @@ func launcherWordDenied(literal string, names map[string]struct{}) bool {
 		strings.HasPrefix(literal, "-"))
 }
 
+// launcherWordDeniedExact is launcherWordDenied's exact-reading half: it
+// is what master computed before the union. unwrapEnvInjectionLauncher
+// needs it to keep master's continue ordering — a word denied only by
+// the normalized spelling still counts toward the commandish check, as
+// it did when it was not denied at all.
+func launcherWordDeniedExact(literal string, names map[string]struct{}) bool {
+	return launcherSegmentsDeniedReading(strings.TrimLeft(literal, "-"), names,
+		strings.HasPrefix(literal, "-"))
+}
+
 // launcherSegmentsDenied reports whether any `=`-separated segment of
 // text names a protected variable at an identifier boundary. The
 // short-option-cluster reading applies only to the first segment — the
@@ -470,6 +493,20 @@ func launcherSegmentsDenied(text string, names map[string]struct{}, optionCluste
 		cluster := optionCluster && index == 0
 		for name := range names {
 			if launcherSegmentNames(segment, name, cluster) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// launcherSegmentsDeniedReading is launcherSegmentsDenied on the exact
+// spelling only — no escape/quote normalization.
+func launcherSegmentsDeniedReading(text string, names map[string]struct{}, optionCluster bool) bool {
+	for index, segment := range strings.Split(text, "=") {
+		cluster := optionCluster && index == 0
+		for name := range names {
+			if launcherSegmentNamesReading(segment, name, cluster) {
 				return true
 			}
 		}
@@ -490,6 +527,19 @@ func launcherSegmentsDenied(text string, names map[string]struct{}, optionCluste
 // `RAILS_ENV` embed `ENV` after `_`, which is not a boundary, so the
 // ordinary spellings stay admitted.
 func launcherSegmentNames(segment, name string, optionCluster bool) bool {
+	if launcherSegmentNamesReading(segment, name, optionCluster) {
+		return true
+	}
+	// Second reading on the escape- and quote-normalized spelling
+	// (#7627): `CODEX\_HOME` holds no boundary match on its raw bytes but
+	// names the variable once a downstream decode removes the escape.
+	if normalized := escapeQuoteNormalizedSpelling(segment); normalized != segment {
+		return launcherSegmentNamesReading(normalized, name, optionCluster)
+	}
+	return false
+}
+
+func launcherSegmentNamesReading(segment, name string, optionCluster bool) bool {
 	for i := 0; i+len(name) <= len(segment); i++ {
 		if segment[i:i+len(name)] != name {
 			continue
@@ -591,6 +641,18 @@ func unrecognizedWordProtectedKind(literal string, names map[string]struct{}) (i
 // a following `=` the name's own assignment joiner rather than a later
 // option's.
 func segmentEndsWithProtectedName(segment, name string, optionCluster bool) bool {
+	if segmentEndsWithProtectedNameReading(segment, name, optionCluster) {
+		return true
+	}
+	// Same second reading as launcherSegmentNames (#7627): the
+	// assignment joiner only counts once an escaped name is normalized.
+	if normalized := escapeQuoteNormalizedSpelling(segment); normalized != segment {
+		return segmentEndsWithProtectedNameReading(normalized, name, optionCluster)
+	}
+	return false
+}
+
+func segmentEndsWithProtectedNameReading(segment, name string, optionCluster bool) bool {
 	if !strings.HasSuffix(segment, name) {
 		return false
 	}
@@ -604,6 +666,19 @@ func segmentEndsWithProtectedName(segment, name string, optionCluster bool) bool
 // denied-name cut because their effect is not readable from the command
 // line.
 func launcherEnvFileSpelling(literal string) bool {
+	if launcherEnvFileSpellingReading(literal) {
+		return true
+	}
+	// Second reading on the normalized spelling (#7627): a quote or
+	// escape inside the option text can spell the file flag a raw
+	// compare misses (`--en'v-file=x'`).
+	if normalized := escapeQuoteNormalizedSpelling(literal); normalized != literal {
+		return launcherEnvFileSpellingReading(normalized)
+	}
+	return false
+}
+
+func launcherEnvFileSpellingReading(literal string) bool {
 	word := strings.TrimLeft(literal, "-")
 	return word == "env-file" || strings.HasPrefix(word, "env-file=") ||
 		word == "env_file" || strings.HasPrefix(word, "env_file=") ||
@@ -620,6 +695,18 @@ func launcherEnvFileSpelling(literal string) bool {
 // command is unverifiable (Codex P1 on this head). The word must spell
 // an option — a leading dash — so a bare `args` operand stays admitted.
 func launcherArgFileSpelling(literal string) bool {
+	if launcherArgFileSpellingReading(literal) {
+		return true
+	}
+	// Second reading on the normalized spelling (#7627), as in
+	// launcherEnvFileSpelling.
+	if normalized := escapeQuoteNormalizedSpelling(literal); normalized != literal {
+		return launcherArgFileSpellingReading(normalized)
+	}
+	return false
+}
+
+func launcherArgFileSpellingReading(literal string) bool {
 	if !strings.HasPrefix(literal, "-") {
 		return false
 	}
@@ -639,6 +726,18 @@ func launcherArgFileSpelling(literal string) bool {
 // (Codex P1 on this head). Scoped to bwrap's arm — other launchers'
 // `--file` flags read build files, not child argv.
 func bwrapHiddenInputWord(literal string) bool {
+	if bwrapHiddenInputWordReading(literal) {
+		return true
+	}
+	// Second reading on the normalized spelling (#7627), as in
+	// launcherEnvFileSpelling.
+	if normalized := escapeQuoteNormalizedSpelling(literal); normalized != literal {
+		return bwrapHiddenInputWordReading(normalized)
+	}
+	return false
+}
+
+func bwrapHiddenInputWordReading(literal string) bool {
 	if !strings.HasPrefix(literal, "-") {
 		return false
 	}
