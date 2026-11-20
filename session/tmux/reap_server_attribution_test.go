@@ -96,8 +96,11 @@ func TestCarrierServerVerdict_UnreadableOrMissingEnvIsUndecidable(t *testing.T) 
 
 // #7562: an env socket spelling that reached its directory through a
 // symlink component that is itself DELETED cannot be pronounced a different
-// socket — the deleted alias may have pointed at ours. Incomparable is
-// undecidable, never foreign: the carrier could be our own server's.
+// socket — the deleted alias may have pointed at ours. When the env's pid
+// cannot disprove that either — the recorded pid itself, or a record whose
+// pid was never proven here — incomparable stays undecidable, never foreign:
+// the carrier could be our own server's. A proven pid that is NOT the
+// recorded one decides it instead (#7647).
 func TestCarrierServerVerdict_DeletedLinkInEnvSocketIsUndecidable(t *testing.T) {
 	own := ownServerFixture(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -108,8 +111,8 @@ func TestCarrierServerVerdict_DeletedLinkInEnvSocketIsUndecidable(t *testing.T) 
 	envSock := filepath.Join(link, filepath.Base(own.Socket))
 
 	require.Equal(t, serverVerdictUndecidable,
-		tmuxEnvServerVerdict(envSock+",9999,3", own, "pidns:test"),
-		"a deleted link component may have aliased our socket — undecidable, never foreign")
+		tmuxEnvServerVerdict(envSock+",4242,3", own, "pidns:test"),
+		"a deleted link component may have aliased our socket and the env pid cannot disprove it — undecidable, never foreign")
 
 	// A genuinely foreign socket in a live directory still answers foreign:
 	// the deleted-component widening must not swallow a certain mismatch.

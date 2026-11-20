@@ -647,3 +647,26 @@ func TestSocketAbsentProbeRulesOutAServerBoundThroughADeletedLink(t *testing.T) 
 	servers, _ := possibleSocketOwners(realSock, []int{server})
 	require.Empty(t, servers, "no spelling reaches that server and SIGUSR1 cannot recreate its socket: provably elsewhere")
 }
+
+// The directory the refusal names is exactly the chain the walk could not
+// enter — down to the socket's basename, so `mkdir -p` of it makes the
+// spelling comparable again. Anything else — a live dir with an absent
+// socket file, a broken spelling, a walk that never placed the path — has
+// nothing a mkdir can discharge.
+func TestMissingSocketDir(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	gonedir := filepath.Join(root, "gonedir")
+	require.NoError(t, os.Mkdir(gonedir, 0o700))
+	require.NoError(t, os.RemoveAll(gonedir))
+
+	require.Equal(t, gonedir, missingSocketDir(filepath.Join(gonedir, "default")),
+		"a deleted final directory names itself")
+	require.Equal(t, filepath.Join(root, "deep", "dir"),
+		missingSocketDir(filepath.Join(root, "deep", "dir", "default")),
+		"a deleted chain names the whole chain — one mkdir -p covers every missing component")
+	require.Empty(t, missingSocketDir(filepath.Join(root, "default")),
+		"an absent socket file in a live dir is already certain — nothing to recreate")
+	require.Empty(t, missingSocketDir("relative/default"),
+		"a spelling that never resolves has no directory to name")
+}
