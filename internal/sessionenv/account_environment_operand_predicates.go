@@ -555,25 +555,65 @@ func getoptsMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 	return accountEnvironmentOperandDenied(name, names)
 }
 
+// printfMutatesAccountEnvironment reports whether a `printf` call assigns to a
+// denied variable. Bash's printf takes its assignment target from a `-v name`
+// option, parses EVERY `-v` it sees, and applies the LAST one — so
+// `printf -v A -v CODEX_HOME '%s' /other` assigns CODEX_HOME, not A (verified
+// on real bash). The option stream stays open across repeated `-v` pairs: the
+// first word that is not a literal `-v` is the format string, and `--` ends
+// option parsing the way it does for the sibling builtins.
+//
+// This walks the whole option stream the way waitMutatesAccountEnvironment
+// does for `wait -p`: each literal `-v` pair is judged and consumed, and the
+// scan keeps going because a later `-v` retargets the assignment. A non-literal
+// word reached while options are still open fails closed — an expansion can
+// yield `-v` and retarget at a denied name (`X=-v; printf -v A $X CODEX_HOME y`
+// sets CODEX_HOME=y on real bash) — exactly the dynamic retarget `wait`'s
+// option loop refuses. Attached `-vXNN`/`-v=` spellings and a bare `-v` with no
+// operand (a bash usage error) keep their existing verdicts.
 func printfMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
-	if len(words) == 0 {
-		return false
+	for len(words) > 0 {
+		option, literal := literalShellWord(words[0])
+		if !literal {
+			// A dynamic word is unsafe while the option stream is still
+			// open: an expansion that yields `-v` retargets the assignment
+			// at whatever follows, so fail closed as wait does.
+			return true
+		}
+		if option == "--" {
+			// -- ends option parsing; the next word is the format string
+			// and everything after it is printf data.
+			return false
+		}
+		if strings.HasPrefix(option, "-v") && option != "-v" {
+			// Refuse attached -vXNN / -v= spellings whose assignment target
+			// cannot be proven (existing fail-closed arm).
+			return true
+		}
+		if option != "-v" {
+			// Not a -v option: this word is the format string (or an
+			// unrecognized option bash errors on), so no further -v target
+			// can follow in this call. The remaining words are printf data.
+			return false
+		}
+		// option == "-v": the next word is the assignment target.
+		if len(words) < 2 {
+			// `printf -v` with no operand is a bash usage error, so it
+			// mutates nothing.
+			return false
+		}
+		name, literal := literalShellWord(words[1])
+		if !literal {
+			return true
+		}
+		if accountEnvironmentOperandDenied(name, names) {
+			return true
+		}
+		// Keep scanning: a later literal `-v <name>` retargets the
+		// assignment, and bash applies the LAST one.
+		words = words[2:]
 	}
-	option, literal := literalShellWord(words[0])
-	if !literal {
-		return true
-	}
-	if strings.HasPrefix(option, "-v") && option != "-v" {
-		return true
-	}
-	if option != "-v" || len(words) < 2 {
-		return false
-	}
-	name, literal := literalShellWord(words[1])
-	if !literal {
-		return true
-	}
-	return accountEnvironmentOperandDenied(name, names)
+	return false
 }
 
 func accountEnvironmentOperandDenied(value string, names map[string]struct{}) bool {
