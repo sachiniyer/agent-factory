@@ -489,22 +489,29 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
     over-approximation of POSIX escapes closed under nesting, so
     `co""dex`, `co\dex`, `co\<newline>dex` and `co\\\\dex` — quoting
     quoted again at any depth — all check as `codex`, and a piece
-    carrying POSIX glob syntax (`*?[`) is matched as a pattern since
-    pathname expansion happens at run time — `co[d]ex` or
-    `co[[:alpha:]]ex` can resolve to the codex on disk (the match
-    over-approximates: any `[…]` is one character, `?` one, `*` a
-    run, an unterminated `[` refuses), while `*.log` still admits —
-    and brace expansion, which runs before globbing on downstreams
-    that do it, is checked per alternative: `co{de,}x` reads as
-    `codex`, a `{x..y}` range over-approximates to `*`, and a
+    whose bracket atom sits among literal letters that could spell a
+    name is matched as a pattern since pathname expansion happens at
+    run time — `co[d]ex` or `co[[:alpha:]]ex` can resolve to the
+    codex on disk (the match over-approximates any `[…]` as one
+    character; an unterminated `[` is literal, as POSIX keeps it),
+    while a bare `*`/`?` is never a name reading — `*.log`, `ls
+    /tmp/*` and `tar czf - *` all admit exactly as master does — and
+    brace expansion, which runs before globbing on downstreams that
+    do it, is checked per alternative: `co{de,}x` reads as `codex`,
+    a `{x..y}` range over-approximates to the `[x-y]` atom, and a
     comma-less `co{ab}x` stays literal as bash would keep it;
   - a word does not literalize (a substitution or expansion in the
-    argv itself) or its literal carries `$`, backtick or extglob text —
-    a name the text cannot see could be constructed at run time (`pwsh
-    -c 'echo $HOME'` refuses on the `$`, `$'codex'`/`$"codex"` are
-    dynamic forms, and `co@(d)ex`/`co?(d)ex`/`co*(d)ex`/`co+(d)ex`/
-    `co!(d)ex` can collapse to the name wherever a downstream enabled
-    extglob — the accepted over-refusal below);
+    argv itself), its literal carries extglob text, or — in a
+    launcher's carried shell string — a `$`/backtick piece sits at a
+    command position: a name the text cannot see could be
+    constructed at run time and run as the command (`tmux new-window
+    'cd ~/src && $EDITOR .'` refuses on `$EDITOR` exactly as
+    master's own `sh -c 'cd ~/src && $EDITOR .'` does; an operand
+    `echo $HOME` admits, matching `sh -c 'echo $HOME'`).
+    `$'codex'`/`$"codex"` are dynamic forms, and
+    `co@(d)ex`/`co?(d)ex`/`co*(d)ex`/`co+(d)ex`/`co!(d)ex` can
+    collapse to the name wherever a downstream enabled extglob — the
+    accepted over-refusal below;
   - a word spells input the gate cannot see — the per-launcher
     hidden-input table: a descriptor, stdin, or a language it does not
     parse (flatpak-spawn's `--env-fd`, nix's expression flags and
@@ -544,27 +551,19 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
   `pwsh -EncodedCommand</dev/null` is the hidden option plus its
   redirect, and `pwsh -enc|cat` the option plus a pipe;
 
-  tmux expands its own #… format sequences in the command text before
-  the shell it hands the command to ever runs, so in a tmux reading a
-  `#` that opens a format — followed by `{`, `(`, `[` or a format
-  letter — counts as the dynamic construction `$` and backticks are for
-  sh and refuses (`tmux run-shell '#{l:CODEX_}HOME'` builds a protected
-  name inside tmux's own language); `##` spells a literal `#` and a
-  `#`-punctuation pair is plain text;
-
   Launcher names nest by NAME, not by position: a piece (or word, or a
   field of a nested tail) that spells a modelled launcher's name
   re-enters that launcher's own rule on the text after it — `watch 'pwsh
   -EncodedCommand …'` refuses exactly as a direct `pwsh -EncodedCommand`
   does, at any depth, inside the same total work bound. A piece can
   spell several names (`nix-shell` is `nix` at a `-` boundary and
-  `nix-shell` exactly; `*sh` is `pwsh` and `nix-shell` alike) and EVERY
-  match applies its own rule, so `watch '*sh -enc x'` refuses on pwsh's
-  table and `watch sudo pwsh -EncodedCommand x` on pwsh's. The name
-  lookup is the same one the agent name gets — the normalized piece's
-  path basename with globs over-approximated, so `/usr/bin/pwsh`,
-  `./pwsh`, `~/.local/bin/watch` and `/usr/bin/pw[s]h` all read as the
-  launcher.
+  `nix-shell` exactly) and EVERY match applies its own rule, so
+  `watch 'pwsh -enc x'` refuses on pwsh's table and `watch sudo pwsh
+  -EncodedCommand x` on pwsh's. The name lookup is the same one the
+  agent name gets — the normalized piece's path basename with bracket
+  atoms over-approximated, so `/usr/bin/pwsh`, `./pwsh`,
+  `~/.local/bin/watch` and `/usr/bin/pw[s]h` all read as the launcher —
+  while a bare `*`/`?` spells no launcher name, the way master reads it.
 
   `gdbus` call operands are GVariant text decoded through their
   escapes alongside the raw check (`['CODEX\u005fHOME=/o']` still
@@ -573,25 +572,24 @@ could become (`strace -ECODEX\_HOME=/o`, `sudo 'CODEX\_HOME=/o' codex` and
   substituted for it: a glob-bracket `[…]` is one atom to the piece
   reading while its interior is judged as plain text on its own span,
   so `[; pwsh -EncodedCommand x ;]` cannot hide the launcher the atom
-  would otherwise eat — at the cost of the stated over-refusal that a
-  valid nested atom like `[a[b]]` reads its interior as an
-  unterminated `[` and refuses. Work is one linear pass — each word
+  would otherwise eat. Work is one linear pass — each word
   literalizes once, each piece checks once — and nested launchers
   share one total budget with per-word verdicts memoized; the
   character-level scans (brace alternatives, bracket matching, glob
   atoms, interior spans) charge to that same budget, so a
   pathological tail or nested pattern (a tmux inside an ssh inside a
-  watch inside a nix-shell, or `[[[[…` repeated) refuses inside the
-  bound rather than paying quadratic work; spending past the budget
-  refuses. An option spelling the gate does not know is just text:
-  `ssh --frobnicate host make` admits, the way the real launcher's
-  own error path would.
+  watch inside a nix-shell) refuses inside the bound rather than
+  paying quadratic work; spending past the budget refuses. An option
+  spelling the gate does not know is just text: `ssh --frobnicate
+  host make` admits, the way the real launcher's own error path
+  would.
 
   The accepted cost is measured, not hidden: the rule refuses tails
   that merely MENTION a denied name — `ssh host 'cat
   notes/codex.md'`, `tmux new-window 'vim codex.md'` and `watch
-  --exec codex` name codex at a boundary, and a `$HOME` in a pwsh
-  command string is expansion text. The ordinary-usage corpus (the
+  --exec codex` name codex at a boundary, and a `$`-word at a
+  command position in a carried shell string is a constructed name
+  the text cannot see. The ordinary-usage corpus (the
   162-row master-parity set plus the `ssh host make`, `tmux
   new-window htop`, `watch -n 5 'kubectl get pods'` admits) loses no
   row to the rule; the losses are the accidental-mention rows above,

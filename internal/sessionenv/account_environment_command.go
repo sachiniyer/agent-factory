@@ -804,7 +804,7 @@ func isUnmodeledArgvPassthroughWrapper(word *syntax.Word) bool {
 	if !literal {
 		return false
 	}
-	switch filepath.Base(normalizeNamedLiteral(value)) {
+	switch filepath.Base(value) {
 	case "strace", "ltrace", "perf", "valgrind", "gdb",
 		"chrt", "numactl", "unshare", "prlimit":
 		return true

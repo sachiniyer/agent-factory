@@ -90,10 +90,12 @@ type operandTailMemo struct {
 // envWordBits is one word's env-injection classification — the pieces of
 // unwrapEnvInjectionLauncher's scan that are position-independent:
 // hidden (an env-file/arg-file spelling), denied (a protected-name
-// segment), plain (a bare word — the commandish marker the
-// requireCommand rule needs).
+// segment on the union of spellings), deniedExact (the same mark on the
+// exact decoded spelling only — a word denied solely by normalization
+// still counts as the command word), plain (a bare word — the
+// commandish marker the requireCommand rule needs).
 type envWordBits struct {
-	hidden, denied, plain bool
+	hidden, denied, deniedExact, plain bool
 }
 
 func newOperandTailMemo() operandTailMemo {

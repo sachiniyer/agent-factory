@@ -52,10 +52,12 @@ var namedLauncherHiddenWords = map[string][]string{
 	// base64 the text cannot show, the console/settings/configuration/
 	// pipe-name options read channels, -NoExit/-Interactive/-Login keep
 	// or open an interactive stdin, and a bare `-` is the stdin marker.
+	// -NonInteractive is the opposite — it suppresses the prompt, so
+	// it reads no input and stays out.
 	"pwsh": {"-e", "-ec", "-enc", "-encodedcommand", "-ea",
 		"-encodedarguments",
 		"-custompipename", "-noexit", "-i", "-interactive", "-l",
-		"-login", "-noninteractive", "-configurationname", "-"},
+		"-login", "-configurationname", "-"},
 	// nu's hidden forms (clap spellings, case-sensitive): the config and
 	// plugin files are evaluated, -e/--execute falls through to the REPL
 	// after its command, and stdin/login/mcp/ide forms all read input
@@ -75,7 +77,7 @@ var namedLauncherHiddenWords = map[string][]string{
 // so only its long names matter for `--` prefix clashes.
 var namedLauncherNonHiddenNames = map[string][]string{
 	"pwsh": {"-c", "-command", "-commandwithargs", "-nologo",
-		"-noprofile", "-sta", "-mta",
+		"-noprofile", "-noninteractive", "-sta", "-mta",
 		"-outputformat", "-inputformat", "-windowstyle",
 		"-executionpolicy", "-workingdirectory",
 		"-experimentalfeature", "-version", "-v", "-help", "-h", "-?"},
@@ -262,13 +264,25 @@ func globLiteralSpellsOption(literal, launcher string, words []string, respectVi
 	if launcher == "pwsh" {
 		cand = strings.ToLower(cand)
 	}
-	variants, finished := namedPieceVariants(cand, b)
-	if !finished {
-		return true
-	}
 	prefixes := "-"
 	if launcher == "pwsh" {
 		prefixes = pwshOptionPrefixRunes
+	}
+	// Fast fail before any expansion: an option word starts with a
+	// prefix character, so a literal whose first rune is neither a
+	// prefix nor an atom that could produce one (`echo f{0,1}`) spells
+	// no option at any cost.
+	first, _ := utf8.DecodeRuneInString(cand)
+	if first != '[' && first != '{' && first != '*' && first != '?' &&
+		!strings.ContainsRune(prefixes, first) {
+		return false
+	}
+	variants, finished := []string{cand}, true
+	if strings.ContainsRune(cand, '{') {
+		variants, finished = namedPieceVariants(cand, b)
+	}
+	if !finished {
+		return true
 	}
 	for _, v := range variants {
 		if slices.Contains(words, "-") && globOverMatch(v, "-", b) {

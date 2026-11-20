@@ -83,7 +83,13 @@ func unwrapDbusUpdateActivationEnvironment(words []*syntax.Word, names map[strin
 }
 
 func isSystemctlEnvironmentWriter(literal string) bool {
-	switch normalizeNamedLiteral(literal) {
+	// Subcommand identity is the EXACT decoded spelling only — the
+	// normalized form may add denied or hidden marks to a word, but an
+	// escaped operand is not the writer: `systemctl --user
+	// import-environment 'import-\environment' FOO` takes the escape
+	// spelling as the subcommand, moves writer to it, and the words
+	// before it would skip the env-name check.
+	switch literal {
 	case "set-environment", "import-environment", "unset-environment":
 		return true
 	}

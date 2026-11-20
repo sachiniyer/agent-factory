@@ -139,7 +139,7 @@ func callRunnerPayloadCandidates(args []*syntax.Word) ([]string, bool) {
 		if !ok {
 			continue
 		}
-		base := filepath.Base(normalizeNamedLiteral(literal))
+		base := filepath.Base(literal)
 		family, ok := runnerPayloadFamily(base)
 		if !ok || done[family] {
 			continue

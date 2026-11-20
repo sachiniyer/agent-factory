@@ -870,18 +870,22 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{"pwsh -c 'codex'", true},
 		{"pwsh -com 'codex'", true},
 		{"pwsh -enc 'aGVsbG8='", true},
-		// Expansion text is a name the gate cannot see — the accepted
-		// over-refusal the closure rule states in docs/usage-limits.md.
-		{"pwsh -c 'echo $HOME'", true},
+		// An expansion at an operand position names nothing the gate
+		// cannot see — master admits `sh -c 'echo $HOME'`, so the
+		// carried text matches it exactly.
+		{"pwsh -c 'echo $HOME'", false},
+		// A `$` word at a command position is a constructed name —
+		// master's `sh -c 'cd x && $EDITOR .'` refuses the same text.
+		{"pwsh -c 'cd x && $EDITOR .'", true},
 		// Script files, the bare REPL and config loads are the stated
 		// file limit — the gate judges the visible command line, and a
 		// file's content is outside it (round 6 decision on the PR).
 		{"pwsh script.ps1", false},
 		{"pwsh", false},
 		{"pwsh -NoProfile", false},
-		// -NonInteractive reads its commands from stdin — the `sh -s`
-		// class, still refused.
-		{"pwsh -NonInteractive", true},
+		// -NonInteractive suppresses prompts; it does not read commands
+		// from stdin, so it is a documented non-hidden option.
+		{"pwsh -NonInteractive", false},
 		{"pwsh -Version", false},
 		{"nu -c 'ls'", false},
 		{"nu -c '$env.CODEX_HOME = \"/o\"; codex'", true},
@@ -1103,25 +1107,25 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch 'sh -c "bash -c co\\\\\\\\dex"'`, true},
 		{`watch 'sh -c "bash -c \"sh -c co\\\\\\\\dex\""'`, true},
 		// The P2 glob finding — POSIX pathname expansion
-		// happens at run time, so a piece carrying `*?[`
-		// is matched as a pattern: `co[d]ex` can resolve
-		// to the codex on disk. The matcher over-
-		// approximates — any `[…]` is one character, `?`
-		// one, `*` a run, an unterminated `[` refuses —
-		// so POSIX classes, ranges and `!` negation all
-		// cover. Ordinary globs that cannot spell a
-		// denied name still admit.
+		// happens at run time, so a piece whose bracket or
+		// brace atom sits among literal letters that could
+		// spell a name is matched as a pattern: `co[d]ex`
+		// can resolve to the codex on disk. The matcher
+		// over-approximates `[…]` as one character — POSIX
+		// classes, ranges and `!` negation all cover — and
+		// an unterminated `[` refuses. Bare `*`/`?` words
+		// are not read as names at all: master admits them.
 		{`watch 'env -i /tmp/review-probe/co[d]ex'`, true},
 		{`watch 'env -i /x/co[[:alpha:]]ex'`, true},
-		{`ssh host 'co?ex -n 1'`, true},
+		{`ssh host 'co?ex -n 1'`, false},
 		{`ssh host 'CODEX_HO[!X]E=/o env'`, true},
-		{`ssh host 'co[dex'`, true},
+		{`ssh host 'co[dex'`, false},
 		{`ssh host 'ls *.log'`, false},
 		{`watch 'ls /var/log/*.gz'`, false},
 		{`ssh host 'grep -r x co[d]ey'`, false},
-		// A bare `*` matches every name — the same mere-
-		// mention over-refusal class as `cat codex.md`.
-		{`ssh host 'tar czf - *'`, true},
+		// A bare `*` matches every pathname but is never a
+		// name spelling — master admits it everywhere.
+		{`ssh host 'tar czf - *'`, false},
 		// Nesting by name — a modelled launcher found as
 		// a piece (or word, or field of a nested tail)
 		// re-enters ITS rule on the text after it, so
@@ -1171,13 +1175,14 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// EVERY name a piece spells applies its own
 		// rule — a benign first name never masks a
 		// later one's hidden input. `sudo` is not
-		// modelled (benign); `*sh` names pwsh AND
-		// nix-shell — picking nix-shell alone would
-		// miss pwsh's -enc.
+		// modelled (benign); a literal `pwsh` in the
+		// tail picks up pwsh's own grammar.
 		{`watch sudo pwsh -EncodedCommand x`, true},
 		{`watch 'sudo pwsh -EncodedCommand x'`, true},
-		{`watch '*sh -enc x'`, true},
-		{`watch 'pw* -enc x'`, true},
+		// A bare `*` never spells a launcher name —
+		// master admits `*sh` and `pw*` commands.
+		{`watch '*sh -enc x'`, false},
+		{`watch 'pw* -enc x'`, false},
 		{`watch 'nix-shell --arg-from-stdin'`, true},
 		// pwsh's own switch parser accepts `-`, `/` and the
 		// Unicode dashes U+2013/U+2014/U+2015, and resolves
@@ -1201,14 +1206,15 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		// Readings are a UNION: a glob-bracket atom keeps
 		// its interior on the plain reading too, so `[;
 		// pwsh -enc x ;]` cannot hide the launcher the
-		// atom skip would eat. A valid nested atom whose
-		// interior reads as an unterminated `[` (`[a[b]]`)
-		// is the stated over-refusal.
+		// atom skip would eat. A nested atom whose interior
+		// reads as an unterminated `[` (`[a[b]]`) spells no
+		// name — POSIX treats it as literal, so master
+		// admits it.
 		{`watch 'echo [; pwsh -EncodedCommand x; echo ]'`, true},
 		{`watch 'echo [; pwsh -enc x; echo ]'`, true},
 		{`watch 'x[;env -i codex;]y'`, true},
 		{`watch 'echo [; codex; echo ]'`, true},
-		{`watch 'echo [a[b]]'`, true},
+		{`watch 'echo [a[b]]'`, false},
 		{`watch 'echo [FOO=bar]'`, false},
 		// The union covers CLASSIFICATION too: the
 		// hidden-input and payload spellings resolve on
@@ -1303,16 +1309,14 @@ func TestCommandMutatesAccountEnvironment_LauncherGrammarEdges(t *testing.T) {
 		{`watch 'date; uptime'`, false},
 		{`watch 'make 2>&1'`, false},
 		{`ssh host 'ls -l <file'`, false},
-		// tmux expands its own #… formats before the shell it
-		// hands the command to runs — #{l:CODEX_}HOME builds a
-		// protected name inside tmux's own language, the same
-		// dynamic construction $ and backticks are for sh. ## is
-		// a literal # and a #-punctuation pair is just text.
-		{`tmux run-shell '#{l:CODEX_}HOME'`, true},
-		{`tmux run-shell '#{pane_id}'`, true},
-		{`tmux new-window 'echo #S'`, true},
-		{`tmux run-shell 'echo #(x)'`, true},
-		{`tmux new-window 'echo #['`, true},
+		// tmux #… formats are tmux's own expansion, not shell
+		// text — master admits every one of these, so the
+		// launcher's carried text admits them too.
+		{`tmux run-shell '#{l:CODEX_}HOME'`, false},
+		{`tmux run-shell '#{pane_id}'`, false},
+		{`tmux new-window 'echo #S'`, false},
+		{`tmux run-shell 'echo #(x)'`, false},
+		{`tmux new-window 'echo #['`, false},
 		{`tmux run-shell 'echo ##x'`, false},
 		{`tmux run-shell 'echo #!x'`, false},
 		{`tmux run-shell 'echo # x'`, false},

@@ -187,7 +187,14 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 			bits = envWordBits{
 				hidden: launcherEnvFileSpelling(literal) || launcherArgFileSpelling(literal),
 				denied: launcherWordDenied(literal, names),
-				plain:  !strings.HasPrefix(literal, "-") && !strings.Contains(literal, "="),
+				// A word denied only on the NORMALIZED spelling
+				// still counts as the command word by its exact
+				// spelling — normalization may add denied marks,
+				// never remove the command position a word
+				// holds: `x sudo CODEX_HOME=/o 'CODEX_\HOME'` is
+				// denied plus command, as on master.
+				deniedExact: launcherWordDeniedExact(literal, names),
+				plain:       !strings.HasPrefix(literal, "-") && !strings.Contains(literal, "="),
 			}
 			if !decodes {
 				memo.envWords[word] = bits
@@ -201,6 +208,9 @@ func unwrapEnvInjectionLauncher(words []*syntax.Word, names map[string]struct{},
 				return true
 			}
 			denied = true
+			if !bits.deniedExact && index > 0 && bits.plain {
+				commandish = true
+			}
 			continue
 		}
 		if index > 0 && bits.plain {
@@ -488,6 +498,16 @@ func launcherWordDenied(literal string, names map[string]struct{}) bool {
 		strings.HasPrefix(literal, "-"))
 }
 
+// launcherWordDeniedExact is launcherWordDenied on the exact decoded
+// spelling only — the denied mark a word carries before normalization
+// adds its marks. unwrapEnvInjectionLauncher uses it to keep a
+// normalization-only denial from hiding the word's command position
+// (#7617 independent-review R1).
+func launcherWordDeniedExact(literal string, names map[string]struct{}) bool {
+	return launcherSegmentsDenied(strings.TrimLeft(literal, "-"), names,
+		strings.HasPrefix(literal, "-"))
+}
+
 // launcherSegmentsDenied reports whether any `=`-separated segment of
 // text names a protected variable at an identifier boundary. The
 // short-option-cluster reading applies only to the first segment — the
@@ -580,11 +600,14 @@ var accountNamedLauncherNames = map[string]struct{}{
 }
 
 func isAccountLauncherName(word *syntax.Word) bool {
+	// Dispatch identity is the exact decoded spelling only — a
+	// normalization-coined name picks up rules its word does not have
+	// (#7617 independent-review R1).
 	literal, ok := literalShellWord(word)
 	if !ok {
 		return false
 	}
-	_, ok = accountLauncherNames[filepath.Base(normalizeNamedLiteral(literal))]
+	_, ok = accountLauncherNames[filepath.Base(literal)]
 	return ok
 }
 
@@ -742,10 +765,10 @@ func launcherSuffixMutates(words []*syntax.Word, names map[string]struct{}, memo
 	case isAccountCommandName(words[0], "dbus-update-activation-environment"):
 		_, unsafe = unwrapDbusUpdateActivationEnvironment(words[1:], names, memo, true)
 	default:
-		// #7603's named launchers — one literalize, one map lookup, the
-		// closure text rule on the tail.
+		// #7603's named launchers — one literalize, one map lookup on
+		// the exact spelling, the closure text rule on the tail.
 		if literal, ok := launcherLiteralWord(words[0]); ok {
-			base := filepath.Base(normalizeNamedLiteral(literal))
+			base := filepath.Base(literal)
 			if _, named := accountNamedLauncherNames[base]; named {
 				_, unsafe = unwrapNamedLauncher(words[1:], names, memo, true, base)
 			}

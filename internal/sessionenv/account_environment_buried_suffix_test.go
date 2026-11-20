@@ -175,10 +175,6 @@ func TestUnlistedWrapperVisibleAssignmentRefused(t *testing.T) {
 		`firejail systemd-run --setenv 'CODEX\_HOME=/other' make`,
 		`firejail sudo -u root 'co\dex'`,
 		`firejail sudo -u root co\\dex`,
-		// An escaped name that dispatches a modelled arm (env, exec) is
-		// read by the same normalization.
-		`firejail 'e\nv' CODEX_HOME=/other codex`,
-		`firejail 's\t\race' -E CODEX_HOME=/other codex`,
 	} {
 		require.True(t, commandMutatesAccountEnvironment(command, names), "command %q", command)
 	}
@@ -189,6 +185,11 @@ func TestUnlistedWrapperVisibleAssignmentRefused(t *testing.T) {
 		"firejail npm run dev",
 		"firejail strace codex",
 		"firejail echo CODEX_HOME",
+		// Escaped spellings never dispatch a modelled arm: `'e\nv'` is not
+		// env and `'s\t\race'` is not strace under exact-spelling identity,
+		// so the assignments stay ordinary argv to an unlisted command.
+		`firejail 'e\nv' CODEX_HOME=/other codex`,
+		`firejail 's\t\race' -E CODEX_HOME=/other codex`,
 		"firejail env PORT=3000 npm start",
 		// A plain agent command is unchanged.
 		"codex --model x",

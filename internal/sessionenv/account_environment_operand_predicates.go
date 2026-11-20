@@ -402,8 +402,11 @@ func KnownShellName(name string) bool {
 }
 
 func isAccountCommandName(word *syntax.Word, want string) bool {
+	// "This word is the command" is the exact decoded spelling only —
+	// the normalized form may add denied or hidden marks, but command
+	// identity does not come from it (#7617 independent-review R1).
 	value, literal := literalShellWord(word)
-	return literal && filepath.Base(normalizeNamedLiteral(value)) == want
+	return literal && filepath.Base(value) == want
 }
 
 func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
