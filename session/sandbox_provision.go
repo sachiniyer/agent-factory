@@ -508,6 +508,11 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	}
 	w.launchScript = launch
 	out, err := w.shell.Run(timeout, launch, nil, false)
+	// The env file's detection block already ran inside that source — the
+	// report exists whether or not the launch itself succeeded, and a
+	// discarded name can be why it failed (#7668's same reasoning as the
+	// mount path's warn-before-dependent-steps).
+	w.warnDiscardedAccountEnvNames(timeout)
 	if err != nil {
 		return fmt.Errorf("starting af agent-server on the remote failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -670,6 +675,43 @@ const sshPolicyName = "af-policy.json"
 // sources it unconditionally so the token reference lands in the agent-server's
 // exec-time environment (#5571 W1.1).
 func (w *sandboxWorkspace) IdentityEnvPath() string { return w.SessionDir + "/" + sshIdentityEnvName }
+
+// warnDiscardedAccountEnvNames reads the names-only report the identity
+// file's detection block wrote from the remote login environment and names
+// each remotely-set name the account boundary discarded, once, with the
+// same remedy the credential-mount path prints (#7668). The report lives
+// where the sandbox can write, so the read-back is bounded (4 KB cap) and
+// only a name in the set af computed for THIS launch may reach the log —
+// a planted file can echo nothing else; the env file's `rm -f` already
+// made the report reflect this launch alone.
+func (w *sandboxWorkspace) warnDiscardedAccountEnvNames(timeout time.Duration) {
+	agent := w.spec.Account.Agent
+	discarded := discardSetForWarning(agent, w.spec.SessionEnvPassthrough)
+	if _, _, ok := w.accountEnv(); !ok || len(discarded) == 0 {
+		return
+	}
+	out, err := w.shell.Run(timeout,
+		"head -c 4096 "+shellQuote(w.DiscardedEnvReportPath())+" 2>/dev/null", nil, false)
+	if err != nil {
+		return
+	}
+	var names []string
+	for _, name := range strings.Fields(string(out)) {
+		if _, member := discarded[name]; member {
+			names = append(names, name)
+		}
+	}
+	logDiscardedAccountEnvNames("sandbox", agent, "the remote login environment", names)
+}
+
+// DiscardedEnvReportPath is the names-only report accountScrubEnv's
+// detection block writes from the remote shell — the once-per-session
+// record of remotely-set names the account boundary discarded (#7668).
+func (w *sandboxWorkspace) DiscardedEnvReportPath() string {
+	return w.SessionDir + "/" + discardedEnvReportName
+}
+
+const discardedEnvReportName = "af-discarded-env.names"
 
 const sshIdentityEnvName = "af-identity.env"
 

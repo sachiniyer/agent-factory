@@ -142,6 +142,9 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		}
 	}
 
+	if firstTimeSetup {
+		warnDiscardedLocalAccountEnvNames(i)
+	}
 	return nil
 }
 

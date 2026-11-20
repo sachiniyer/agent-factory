@@ -2,6 +2,9 @@ package session
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -232,4 +235,69 @@ func applyWorktreeEnvironment(i *Instance, worktree *git.GitWorktree, passthroug
 	}
 	i.envResolvedWorktree.Store(worktree)
 	return nil
+}
+
+// warnDiscardedLocalAccountEnvNames is the local half of the account-path
+// notice the credential-mount path emits on docker (#7668). The source
+// environment is the daemon's own — what the pane inherits before the
+// account scope applies — so no report file is needed; names are read
+// once at session create, names only, on the same log.WarningLog channel.
+//
+// The notice must be TRUE, so a name is reported only when the backend's
+// own pipeline, fed the same environment, would not deliver the operator's
+// value: a present keep-if-set name survives Filter→ApplyAccount locally
+// (presence is the claim — no forwarding needed on this path), while a
+// pin or re-assert replaces it. Only the latter reach the log.
+func warnDiscardedLocalAccountEnvNames(i *Instance) {
+	i.mu.RLock()
+	account := i.Account
+	agent := i.accountNamespaceLocked()
+	i.mu.RUnlock()
+	if account == "" {
+		return
+	}
+	passthrough, err := SessionEnvPassthroughForInstance(i)
+	if err != nil {
+		// Provision already surfaced a config read failure; the warning must
+		// never be the thing that fails a create.
+		return
+	}
+	discarded := discardSetForWarning(agent, passthrough)
+	if len(discarded) == 0 {
+		return
+	}
+	env := os.Environ()
+	present := make(map[string]string, len(env))
+	for _, entry := range env {
+		if name, v, ok := strings.Cut(entry, "="); ok {
+			present[name] = v
+		}
+	}
+	// Feed the same environment through the pane's own filter-and-scope
+	// pipeline and keep only the names whose operator value does not come
+	// out the other side (pinned empty, re-asserted, or dropped).
+	out, err := sessionenv.ApplyAccount(
+		sessionenv.Filter(env, agent, passthrough), "",
+		sessionenv.Account{Agent: agent, Name: account, Dir: filepath.Join(os.TempDir(), "af-warn-only")})
+	if err != nil {
+		return
+	}
+	delivered := make(map[string]string, len(out))
+	for _, entry := range out {
+		if name, v, ok := strings.Cut(entry, "="); ok {
+			delivered[name] = v
+		}
+	}
+	var named []string
+	for name := range discarded {
+		v, set := present[name]
+		if !set {
+			continue
+		}
+		if dv, ok := delivered[name]; ok && dv == v {
+			continue // the operator's own value is delivered — not a discard
+		}
+		named = append(named, name)
+	}
+	logDiscardedAccountEnvNames("local", agent, "the environment", named)
 }

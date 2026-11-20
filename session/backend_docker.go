@@ -380,14 +380,22 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 // need of the passthrough remedy would never see it (#7531). When that
 // inspect fails, say so and warn over run_args names alone; the overrides
 // are already in argv either way.
+//
+// The account-scoped half runs the same shape on the same spot: a value
+// the image or run_args set for a name the account boundary discards is
+// named to the operator, names only, with the identical remedy (#7668).
 func (p *dockerProvisioner) warnBlankedCredentialNames() {
-	if len(p.credentialMounts) == 0 {
+	if len(p.credentialMounts) == 0 && p.spec.Account.Dir == "" {
 		return
 	}
 	imageEnv, ok := p.dockerContainerImageEnv()
 	if !ok {
 		log.WarningLog.Printf(
-			"backend=docker: docker.mount_agent_credentials could not inspect the environment of the image the container runs — the overridden-env warning covers docker.run_args names only")
+			"backend=docker: could not inspect the environment of the image the container runs — the overridden-env warning covers docker.run_args names only")
+	}
+	if len(p.credentialMounts) == 0 {
+		p.warnDiscardedAccountEnvNames(imageEnv, ok)
+		return
 	}
 	// Every name af overrode on this session: the defined-empty pins, the
 	// re-asserted git config roots, and the re-asserted selector/endpoint
