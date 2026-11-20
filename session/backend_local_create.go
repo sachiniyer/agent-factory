@@ -26,7 +26,10 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 	program, conversation, startedOnCarried := planCreateConversation(i, resolved, i.ID)
 	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), env)
 	proof := accountLaunchProof(resolved, program, resolution.trustBase, nil, "")
-	if account := strings.TrimSpace(i.Account); account != "" {
+	i.mu.RLock()
+	account := strings.TrimSpace(i.Account)
+	i.mu.RUnlock()
+	if account != "" {
 		accountAgent := sessionenv.AgentForCommand(i.AgentProgram())
 		if err := refuseAccountAgentDrift(account, accountAgent, program); err != nil {
 			return CreateLaunchPlan{}, fmt.Errorf("cannot create account-scoped session: %w", err)
