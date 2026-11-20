@@ -98,7 +98,7 @@ func DismissTrustPrompt(ctx context.Context, target TrustPromptTarget) error {
 	}
 	for attempts := 0; target.CheckAndHandleTrustPrompt(); attempts++ {
 		if attempts+1 >= MaxTrustPromptAttempts {
-			return fmt.Errorf("trust prompt did not dismiss after %d attempts", MaxTrustPromptAttempts)
+			return trustPromptBudgetError(target)
 		}
 		// Honor cancellation while backing off between trust-prompt retries so an
 		// abandoned create doesn't sit here sleeping and re-waiting.
@@ -114,6 +114,29 @@ func DismissTrustPrompt(ctx context.Context, target TrustPromptTarget) error {
 	return nil
 }
 
+// TrustPromptHoldReporter is a TrustPromptTarget that can say what its trust
+// gate is holding: a dialog it will not answer, on a pane unchanged past the
+// gate's settle time (#7635). The empty string means no settled hold.
+type TrustPromptHoldReporter interface {
+	// TrustPromptHold names the held dialog and the pane size, for example "a
+	// folder-trust dialog it can't read (pane 60×12)".
+	TrustPromptHold() string
+}
+
+// trustPromptBudgetError is the error for a spent dismissal budget. When the
+// target's gate reports a settled hold, the error names it. The caller tears
+// the pane down on this error, so the advice is to retry in a wider pane —
+// never to answer the dialog, which is gone by the time this is read.
+func trustPromptBudgetError(target TrustPromptTarget) error {
+	if reporter, ok := target.(TrustPromptHoldReporter); ok {
+		if held := reporter.TrustPromptHold(); held != "" {
+			return fmt.Errorf("trust prompt did not dismiss after %d attempts: af was waiting on %s — widen the pane or window and retry",
+				MaxTrustPromptAttempts, held)
+		}
+	}
+	return fmt.Errorf("trust prompt did not dismiss after %d attempts", MaxTrustPromptAttempts)
+}
+
 // instanceTrustTarget adapts a full session.Instance to TrustPromptTarget,
 // reusing the readiness adapter so the trust loop polls the same way
 // WaitForReady does.
@@ -121,6 +144,13 @@ type instanceTrustTarget struct{ instanceReadinessTarget }
 
 func (t instanceTrustTarget) CheckAndHandleTrustPrompt() bool {
 	return t.inst.CheckAndHandleTrustPrompt()
+}
+
+func (t instanceTrustTarget) TrustPromptHold() string {
+	if hold := t.inst.DialogHold(); hold != nil {
+		return hold.Subject()
+	}
+	return ""
 }
 
 // StartAndSendPromptWithConversationCapture is the canonical way to start an

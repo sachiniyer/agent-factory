@@ -195,6 +195,8 @@ func (t *TmuxSession) start(workDir string) error {
 	// explain anything the new one does (#3579).
 	t.resetDialogKeystroke()
 	t.resetClaudeTrustState()
+	// And a hold timed against the previous pane process is not this one's.
+	t.dialogHold.clear()
 
 	// Create a new detached tmux session and start claude in it. The -e
 	// markers (when supported) let `af doctor` trace any process the pane

@@ -209,6 +209,11 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 	default:
 		updated, hasPrompt, content = b.HasUpdated(s.inst)
 	}
+	// The gate ran above, so its hold notice is this snapshot's (#7635).
+	var dialogHold *DialogHold
+	if holder, ok := b.(dialogHoldBackend); ok {
+		dialogHold = holder.DialogHold(s.inst)
+	}
 	return Observation{
 		Updated:     updated,
 		Baseline:    baseline,
@@ -217,6 +222,7 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 		ModelChange: b.AgentModelChange(s.inst),
 		Captured:    captured,
 		Reflow:      reflow,
+		DialogHold:  dialogHold,
 	}, nil
 }
 

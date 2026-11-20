@@ -431,6 +431,12 @@ func (i *Instance) ClearIdleEvidence() bool {
 	// serialization domain instead of making replacement delivery wait for it;
 	// the generation invalidation fences daemon-owned side effects while the epoch
 	// bump below rejects instance state applied after that snapshot returns.
+	// So is the key of a held-dialog pane this session was flagged for
+	// (#7635): it names the retired pane, and the replacement is another.
+	if i.dialogHoldFlagged != "" {
+		i.dialogHoldFlagged = ""
+		changed = true
+	}
 	i.agentObservationGeneration.Add(1)
 	i.agentObservation = nil
 	i.stateEpoch++

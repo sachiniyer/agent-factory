@@ -21,7 +21,7 @@ import (
 // unreadable pane likewise reports true: a failed capture is not an observed
 // dialog-free pane, and the caller's readiness re-wait fails fast on a session
 // that is genuinely gone.
-func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
+func (t *TmuxSession) CheckAndHandleTrustPrompt() (held bool) {
 	t.inputMu.Lock()
 	defer t.inputMu.Unlock()
 
@@ -29,6 +29,11 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	if err != nil {
 		return true
 	}
+	// Once the decision below is made, time the hold it left behind (#7635).
+	// The recorder runs after every return, changes none of them, and sends
+	// no key: a dialog held on an unchanged pane past the settle time becomes
+	// a notice the daemon can show.
+	defer func(keysBefore uint64) { t.recordDialogHold(content, keysBefore, held) }(t.dialogKeysSent())
 
 	// Key off the agent actually running in the pane, token-matched — a loose
 	// substring check would route e.g. /opt/claude-wrapper/run through the

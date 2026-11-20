@@ -100,6 +100,16 @@ func (t *TmuxSession) noteDialogKeystroke(dialog, choice string, keys ...string)
 		t.dialogInput.keys = append([]string(nil), t.dialogInput.keys[extra:]...)
 	}
 	t.dialogInput.at = now
+	t.dialogKeysSentCount += uint64(len(keys))
+}
+
+// dialogKeysSent is how many keys af has recorded sending into a modal on this
+// TmuxSession. The hold recorder compares it across one gate decision: a
+// decision that sent a key is progress, not a hold (#7635).
+func (t *TmuxSession) dialogKeysSent() uint64 {
+	t.dialogInputMu.Lock()
+	defer t.dialogInputMu.Unlock()
+	return t.dialogKeysSentCount
 }
 
 // maxRecordedDialogKeys bounds the key list an error message may carry.

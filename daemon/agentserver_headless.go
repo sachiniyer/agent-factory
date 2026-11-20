@@ -702,6 +702,10 @@ type agentSnapshotResponse struct {
 	// from a server that predates the field; the client's absent→false
 	// resolution makes the two indistinguishable by design.
 	Reflow bool `json:"reflow"`
+	// DialogHold is this server's trust gate holding a launch dialog on an
+	// unchanged pane past the settle time (#7635); omitted when there is none.
+	// A daemon that predates the field ignores it.
+	DialogHold *session.DialogHold `json:"dialog_hold,omitempty"`
 	// Conversation is the conversation identity once the server has one
 	// (#5571 W7.2); omitted until then.
 	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
@@ -719,6 +723,7 @@ func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) erro
 	resp.ModelChange = obs.ModelChange
 	resp.Captured = obs.Captured
 	resp.Reflow = obs.Reflow
+	resp.DialogHold = obs.DialogHold
 	if hs.inst != nil {
 		if conv := hs.inst.AgentConversation(); conv.HasID() {
 			resp.Conversation = &conv

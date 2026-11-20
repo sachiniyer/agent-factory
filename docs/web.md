@@ -61,7 +61,7 @@ The rail shows state by glyph only. Hover a row to read its state in words.
 
 | Rail signal | Meaning |
 | --- | --- |
-| Blinking yellow circle | The session needs you — the agent ran `af sessions attention`, or the daemon flagged a prompt whose delivery it couldn't confirm (`sent-unverified` or `could-not-confirm`) still staged in the composer. Hover the row for its reason |
+| Blinking yellow circle | The session needs you — the agent ran `af sessions attention`, or the daemon flagged a prompt whose delivery it couldn't confirm (`sent-unverified` or `could-not-confirm`) still staged in the composer, or the daemon found Claude Code stopped on a launch dialog af won't answer by itself (a folder-trust dialog in a pane too narrow to read, for example). Hover the row for its reason |
 | No glyph | The agent is idle |
 | Muted spinner | Work is in progress |
 | Hollow circle | The agent process is dead, or a prompt was not delivered |

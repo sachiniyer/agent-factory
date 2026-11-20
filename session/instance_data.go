@@ -83,6 +83,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		StartupStateUnknown:      i.startupStateUnknown,
 		RootRecreateContext:      i.rootRecreateContext,
 		Attention:                cloneAttention(i.attention),
+		DialogHoldFlagged:        i.dialogHoldFlagged,
 	}
 	data.IdleReason = IdleReasonFor(data)
 	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
@@ -549,6 +550,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		// renders nothing, which is the rollforward-safe direction.
 		rootRecreateContext: data.RootRecreateContext,
 		attention:           cloneAttention(data.Attention),
+		dialogHoldFlagged:   data.DialogHoldFlagged,
 	}
 	// The restart twin of the live edge (#5278): a run persisted mid-flight
 	// whose prompt boundary reloads unbound AND whose last send verdict is a

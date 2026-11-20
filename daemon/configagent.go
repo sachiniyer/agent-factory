@@ -337,6 +337,15 @@ func (t configAgentTrustTarget) CheckAndHandleTrustPrompt() bool {
 	return t.ts.CheckAndHandleTrustPrompt()
 }
 
+// TrustPromptHold names the dialog the gate has held past its settle time, so
+// a spent budget's error says what af was waiting on (#7635).
+func (t configAgentTrustTarget) TrustPromptHold() string {
+	if notice, ok := t.ts.DialogHoldNotice(); ok {
+		return notice.Subject()
+	}
+	return ""
+}
+
 // SpawnConfigAgent starts a config agent in a bare tmux session rooted at AF
 // home, waits for it to be ready, dismisses any trust prompt, delivers the
 // briefing, and returns the tmux session name AND the absolute socket path for
