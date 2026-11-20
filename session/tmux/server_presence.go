@@ -506,6 +506,54 @@ func recreateSocketAdvice(servers, unidentified []int) string {
 	return advice
 }
 
+// deletedSocketDirAdvice renders the deleted-directory clause the
+// socket-absent refusal appends (#7647). The uncertainty is discharged by
+// recreating the missing chain — but only after a check that makes that
+// SAFE, because the deleted component may have been a link to where one of
+// those candidates is bound, #7562's own shape: recreated as a plain
+// directory, the spelling resolves to an absent basename, reads as
+// certain, and rules af's own server out while its sessions still run. So
+// each candidate is listed first, through the socket it is actually bound
+// to — the kernel spelling the bound-path read already names — and
+// compared with af's session names (they begin af_). A candidate holding
+// them IS af's server, reached through the deleted link: stop it, or
+// restore the link. Only when none does is `mkdir -p <dir>` safe, and it
+// makes the socket spelling comparable again.
+func deletedSocketDirAdvice(dir string, servers, unidentified []int) string {
+	var checks []string
+	unnamed := false
+	for _, pid := range append(append([]int{}, servers...), unidentified...) {
+		if pid <= 0 {
+			continue // the unreadable-table sentinel names nothing to check
+		}
+		if paths, err := listenerPathsOf(pid); err == nil && len(paths) > 0 {
+			for _, p := range paths {
+				checks = append(checks, "pid "+strconv.Itoa(pid)+": "+
+					shellsuggest.Command("tmux", "-S", p, "list-sessions"))
+			}
+			continue
+		}
+		checks = append(checks, "pid "+strconv.Itoa(pid)+
+			": tmux -S <its bound socket> list-sessions")
+		unnamed = true
+	}
+	check := "tmux -S <its bound socket> list-sessions for each of them"
+	if len(checks) > 0 {
+		check = strings.Join(checks, "; ")
+		if unnamed {
+			check += " — where no socket is named, the -S or -L on its command line names it"
+		}
+	}
+	return "The socket's directory was deleted too, and a deleted component may have been a link " +
+		"to where one of those candidates is bound — recreating it as a plain directory would make " +
+		"the spelling resolve and wrongly rule that server out. First check what each holds: " +
+		check + ", and compare with af's session names (they begin `af_`). A candidate holding af's " +
+		"sessions IS af's server, reached through the deleted link — stop that server, or restore " +
+		"the link it was reached through, then re-run. If none does, recreating the directory is " +
+		"safe: " + shellsuggest.Command("mkdir", "-p", dir) +
+		" makes the socket spelling comparable again"
+}
+
 // pidNoun is "pid N" or "pids N, M".
 func pidNoun(pids []string) string {
 	if len(pids) == 1 {

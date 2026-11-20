@@ -358,13 +358,11 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			advice := recreateSocketAdvice(servers, unidentified)
 			if dir := missingSocketDir(socketPath); dir != "" {
 				// The uncertainty a signal cannot clear: a deleted directory
-				// is what leaves the comparison undecidable (#7647), and
-				// recreating it is the action that discharges the refusal —
-				// the spelling then resolves past the basename, so a server
-				// bound elsewhere is ruled out.
-				advice += ". The socket's directory was deleted too; recreating it (" +
-					shellsuggest.Command("mkdir", "-p", dir) +
-					") makes the socket spelling comparable again"
+				// is what leaves the comparison undecidable (#7647). Naming
+				// the discharge is not enough — the deleted component may
+				// have been a link to a live server's dir (#7562), so the
+				// clause names the check that makes recreating it safe.
+				advice += ". " + deletedSocketDirAdvice(dir, servers, unidentified)
 			}
 			return fmt.Errorf("could not list tmux sessions%s, but %s. A server whose socket is removed "+
 				"(a /tmp cleaner will do it) keeps running with its sessions alive, so the missing socket "+
