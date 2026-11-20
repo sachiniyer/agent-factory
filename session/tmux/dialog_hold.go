@@ -139,6 +139,9 @@ type dialogHoldRecorder struct {
 	pane   string // the incarnation the clock is bound to; "" while unknown
 	since  time.Time
 	notice *DialogHoldNotice
+	// checked is when the pane's incarnation was last confirmed for a raised
+	// notice. See recheckDue.
+	checked time.Time
 }
 
 // clear forgets the hold: the pane read clear, af sent a key, or a new pane
@@ -147,7 +150,7 @@ func (r *dialogHoldRecorder) clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sum, r.size, r.pane = [sha256.Size]byte{}, 0, ""
-	r.since, r.notice = time.Time{}, nil
+	r.since, r.notice, r.checked = time.Time{}, nil, time.Time{}
 }
 
 // observe notes one held capture taken at now. A capture that differs from the
@@ -159,7 +162,7 @@ func (r *dialogHoldRecorder) observe(now time.Time, sum [sha256.Size]byte, size 
 	defer r.mu.Unlock()
 	if r.since.IsZero() || r.sum != sum || r.size != size {
 		r.sum, r.size, r.pane = sum, size, ""
-		r.since, r.notice = now, nil
+		r.since, r.notice, r.checked = now, nil, time.Time{}
 		return now, true, false
 	}
 	return r.since, false, r.notice != nil
@@ -197,7 +200,37 @@ func (r *dialogHoldRecorder) raise(now, since time.Time, pane paneIdentity, kind
 		Kind: kind, Width: pane.width, Height: pane.height,
 		Since: since, Key: dialogHoldKey(incarnation, r.sum, r.size),
 	}
+	r.checked = now
 	return true
+}
+
+// recheckDue reports whether a raised notice's pane is due to be identified
+// again: once per settle time. The capture's hash cannot tell a pane from
+// another one respawned outside af that shows the same bytes, and a notice
+// that outlived its pane would hand its key, and any dismissal made on it, to
+// the replacement. Checking once per settle time bounds that to one settle,
+// for one tmux call in ten of the daemon's polls.
+func (r *dialogHoldRecorder) recheckDue(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.notice != nil && now.Sub(r.checked) >= claudeDialogHoldSettle
+}
+
+// recheck applies a fresh reading of the pane to a raised notice. The same
+// incarnation confirms it. Another one withdraws the notice and restarts the
+// clock at now against the pane that is there: its hold is a new one, with
+// its own settle and its own key. An unknown incarnation proves nothing
+// either way, so the notice stands and the next recheck asks again.
+func (r *dialogHoldRecorder) recheck(now time.Time, pane paneIdentity) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.notice == nil {
+		return
+	}
+	r.checked = now
+	if incarnation := pane.incarnation(); incarnation != "" && incarnation != r.pane {
+		r.pane, r.since, r.notice, r.checked = incarnation, now, nil, time.Time{}
+	}
 }
 
 // current returns the raised notice, if any.
@@ -237,7 +270,14 @@ func (t *TmuxSession) recordDialogHold(content string, keysBefore uint64, held b
 		t.dialogHold.bindPane(since, pane.incarnation())
 		return
 	}
-	if raised || now.Sub(since) < claudeDialogHoldSettle {
+	if raised {
+		if t.dialogHold.recheckDue(now) {
+			pane, _ := t.readPaneIdentity()
+			t.dialogHold.recheck(now, pane)
+		}
+		return
+	}
+	if now.Sub(since) < claudeDialogHoldSettle {
 		return
 	}
 	// The pane is read again here: its incarnation must still be the one the

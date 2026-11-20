@@ -33,6 +33,8 @@ type dialogHoldPane struct {
 	// session_created".
 	identity string
 	keys     []string
+	// identityReads counts tmux calls for the pane's identity.
+	identityReads int
 }
 
 // dialogHoldSession is a Claude session on pane, on the virtual trust clock.
@@ -49,6 +51,7 @@ func dialogHoldSession(t *testing.T, pane *dialogHoldPane) (*TmuxSession, func(t
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			joined := strings.Join(c.Args, " ")
 			if strings.Contains(joined, "pane_pid") {
+				pane.identityReads++
 				return []byte(pane.identity), nil
 			}
 			if strings.Contains(joined, "display-message") {
@@ -223,6 +226,71 @@ func TestIssue7635RespawnedPaneDoesNotInheritTheClock(t *testing.T) {
 	require.True(t, raised)
 	require.True(t, notice.Since.Equal(respawnSeenAt))
 
+}
+
+// A raised notice does not outlive its pane. A pane respawned outside af —
+// `tmux respawn-pane`, which Start never sees — can show the same bytes, and
+// the capture's hash cannot tell the two apart. The pane is identified again
+// once per settle time: the notice is withdrawn within one settle, and the
+// replacement's hold is surfaced after its own, under its own key.
+func TestIssue7635RaisedNoticeDoesNotOutliveItsPane(t *testing.T) {
+	_, warnings, _ := captureTrustPromptLogs(t)
+	pane := &dialogHoldPane{content: heldUnreadableDialog, identity: "4242 60 12 1763553600"}
+	session, advance := dialogHoldSession(t, pane)
+
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	advance(claudeDialogHoldSettle)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	first, raised := session.DialogHoldNotice()
+	require.True(t, raised)
+	require.Equal(t, 2, pane.identityReads, "one read when the clock starts, one to raise")
+
+	// The same pane, polled once a second for three settle times: confirmed
+	// once per settle, the notice unchanged, one line in the log.
+	polls := int(3 * claudeDialogHoldSettle / time.Second)
+	for i := 0; i < polls; i++ {
+		advance(time.Second)
+		require.True(t, session.CheckAndHandleTrustPrompt())
+		again, still := session.DialogHoldNotice()
+		require.True(t, still)
+		require.Equal(t, first, again)
+	}
+	require.Equal(t, 2+3, pane.identityReads, "a raised notice costs one tmux call per settle time, not one per poll")
+	require.Equal(t, 1, raisedLines(warnings.String()))
+
+	// tmux not answering proves nothing: the notice stands.
+	pane.identity = "garbage"
+	advance(claudeDialogHoldSettle)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	_, raised = session.DialogHoldNotice()
+	require.True(t, raised, "an unanswered recheck is not evidence the pane changed")
+
+	// Respawned outside af, the same bytes on screen.
+	pane.identity = "4242 60 12 1763557200"
+	withdrawn := false
+	var respawnSeenAt time.Time
+	for elapsed := time.Duration(0); elapsed <= claudeDialogHoldSettle; elapsed += time.Second {
+		advance(time.Second)
+		require.True(t, session.CheckAndHandleTrustPrompt())
+		if _, raised = session.DialogHoldNotice(); !raised {
+			withdrawn, respawnSeenAt = true, claudeTrustNow()
+			break
+		}
+	}
+	require.True(t, withdrawn, "the retired pane's notice is withdrawn within one settle time")
+
+	advance(claudeDialogHoldSettle - time.Second)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	_, raised = session.DialogHoldNotice()
+	require.False(t, raised, "the replacement's hold has its own settle")
+	advance(time.Second)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	second, raised := session.DialogHoldNotice()
+	require.True(t, raised)
+	require.True(t, second.Since.Equal(respawnSeenAt))
+	require.NotEqual(t, first.Key, second.Key, "and its own key, so a dismissal of the first does not silence it")
+	require.Equal(t, 2, raisedLines(warnings.String()))
+	require.Empty(t, pane.keys)
 }
 
 // #7635 re-review R1: a pane af cannot identify is never flagged. With no

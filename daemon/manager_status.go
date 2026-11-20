@@ -822,8 +822,13 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	instance.ClearUnreachableAtObservation(observationGeneration)
 	// A trust gate holding a launch dialog on an unchanged pane says so on the
 	// observation (#7635). Record it; no hold on a later observation withdraws
-	// the flag this path raised.
-	m.noteDialogHold(key, instance, observationGeneration, obs.DialogHold)
+	// the flag this path raised. "No hold" is evidence only from a snapshot
+	// that captured the pane: a snapshot that answered without capturing saw
+	// nothing, and counting it would take a notice down — and forget a
+	// dismissal — for a dialog nobody observed to be gone.
+	if obs.Captured || obs.DialogHold != nil {
+		m.noteDialogHold(key, instance, observationGeneration, obs.DialogHold)
+	}
 
 	// AFFIRMATIVE liveness evidence for this tick, decided in ONE place and only
 	// where the poll actually learned something (#1917 round 7).

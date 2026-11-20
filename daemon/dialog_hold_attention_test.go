@@ -566,9 +566,60 @@ func TestIssue7635SetAttentionRequestCannotCarryAnOrigin(t *testing.T) {
 type heldDialogBackend struct {
 	readyFakeBackend
 	hold *session.DialogHold
+	// uncaptured makes every snapshot answer without capturing the pane, the
+	// way the local backend reports a capture-pane failure.
+	uncaptured bool
 }
 
 func (b *heldDialogBackend) DialogHold(*session.Instance) *session.DialogHold { return b.hold }
+
+func (b *heldDialogBackend) HasUpdatedObserved(*session.Instance) (updated, hasPrompt bool, content string, baseline, captured, reflow bool) {
+	return false, false, "", false, !b.uncaptured, false
+}
+
+// A snapshot that did not capture the pane is not evidence its dialog is gone.
+// After a restart the daemon's marks wait out a grace and are then taken down
+// on "no hold" — but only "no hold" from a pane that was actually looked at.
+// Capture failures for longer than the grace leave the notice and the flagged
+// key exactly as they were.
+func TestIssue7635UncapturedSnapshotsNeverResolveAHold(t *testing.T) {
+	now := time.Now().UTC()
+	prevNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = prevNow })
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &heldDialogBackend{readyFakeBackend: readyFakeBackend{FakeBackend: session.NewFakeBackend()}}
+	inst := registerStarted(t, manager, repoID, repoPath, "worker", backend, true, session.Ready)
+
+	backend.hold = heldDialog(holdKeyA)
+	manager.refreshInstanceStatus(repoID, inst)
+	raised := inst.Attention()
+	require.NotNil(t, raised)
+
+	// The daemon restarts; the pane cannot be captured, and the restarted
+	// recorder has no notice yet.
+	restartDaemonMemory(manager)
+	backend.hold, backend.uncaptured = nil, true
+	for elapsed := time.Duration(0); elapsed <= 2*dialogHoldRestartGrace; elapsed += time.Second {
+		manager.refreshInstanceStatus(repoID, inst)
+		now = now.Add(time.Second)
+	}
+	still := inst.Attention()
+	require.NotNil(t, still, "uncaptured snapshots took the notice down without observing the pane")
+	require.True(t, still.SetAt.Equal(raised.SetAt))
+	require.Equal(t, holdKeyA, flaggedKey(inst), "and would have forgotten a dismissal with it")
+
+	// Captures work again and show no hold: now the grace runs, and resolves.
+	backend.uncaptured = false
+	for elapsed := time.Duration(0); elapsed < dialogHoldRestartGrace; elapsed += time.Second {
+		manager.refreshInstanceStatus(repoID, inst)
+		require.True(t, inst.HasAttention(), "the grace starts at the first captured no-hold observation")
+		now = now.Add(time.Second)
+	}
+	manager.refreshInstanceStatus(repoID, inst)
+	require.False(t, inst.HasAttention(), "a pane observed without its dialog for the whole grace is resolved")
+}
 
 // #7635, end to end through the status poll: the hold a backend's gate reports
 // rides the observation into the poll, which flags the session, and a later
