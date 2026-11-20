@@ -598,6 +598,18 @@ func (w *sandboxWorkspace) accountScrubEnv() string {
 	var reseat []string
 	for _, name := range sessionenv.AccountLoaderFilledNames(w.spec.Account.Agent) {
 		if _, forwarded := passthrough[name]; forwarded {
+			// A forwarded proxy spelling whose twin is also forwarded
+			// reseats to the twin's remote value rather than blanking —
+			// `NAME=` would reach applyAccount as an explicit empty and a
+			// lowercase-preferring reader would lose the operator's proxy
+			// (the docker-path fix's remote twin). A remote-defined twin —
+			// including a deliberate empty — is kept untouched.
+			if twin, isPair := twinOf[name]; isPair {
+				if _, twinForwarded := passthrough[twin]; twinForwarded {
+					b.WriteString("[ -n \"${" + name + "+x}\" ] || " + name + "=\"$" + twin + "\"\n")
+					continue
+				}
+			}
 			b.WriteString("[ -n \"${" + name + "+x}\" ] || " + name + "=\n")
 			continue
 		}
