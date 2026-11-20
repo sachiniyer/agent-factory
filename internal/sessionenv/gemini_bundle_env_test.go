@@ -1,6 +1,8 @@
 package sessionenv
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -55,6 +57,37 @@ func TestGeminiBundleEnvReads_WellFormed(t *testing.T) {
 		if r.Mount == GeminiBundleEnvReassert || r.Account == GeminiBundleEnvReassert {
 			require.NotEmpty(t, r.Value, "%s is re-asserted without the first-party value", r.Name)
 		}
+	}
+}
+
+// TestGeminiBundleEnvReads_MatchesMeasuredList pairs the artifact with the
+// committed emitted list (gemini_bundle_env_measured.txt), which
+// scripts/gemini-bundle-env-measure.sh produces by npm-packing the pinned
+// CLI into an empty directory and grepping the bundle — never installing,
+// running or requiring it. If the artifact and the measurement disagree —
+// a name added to either side — this test is the fail.
+func TestGeminiBundleEnvReads_MatchesMeasuredList(t *testing.T) {
+	data, err := os.ReadFile("gemini_bundle_env_measured.txt")
+	require.NoError(t, err, "the measured list must be committed beside the artifact")
+	measured := make(map[string]struct{})
+	for line := range strings.Lines(string(data)) {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		measured[name] = struct{}{}
+	}
+	artifact := make(map[string]struct{}, len(GeminiBundleEnvReads))
+	for _, r := range GeminiBundleEnvReads {
+		artifact[r.Name] = struct{}{}
+	}
+	for name := range measured {
+		require.Contains(t, artifact, name,
+			"%s is emitted by the measurement script but absent from the artifact — re-measure or classify it", name)
+	}
+	for name := range artifact {
+		require.Contains(t, measured, name,
+			"%s is in the artifact but the script does not emit it — a claimed read must be a measured read", name)
 	}
 }
 
@@ -132,16 +165,11 @@ func TestGeminiBundleEnvReads_EveryChainLinkClaimed(t *testing.T) {
 		"GCE_METADATA_IP || GCE_METADATA_HOST || <compiled>": {
 			"GCE_METADATA_IP", "GCE_METADATA_HOST",
 		},
-		// The npm-config proxy helper inside the bundle.
-		"npm_config_proxy || http_proxy || https_proxy": {
-			"npm_config_proxy", "http_proxy", "https_proxy",
-		},
-		"npm_config_no_proxy || no_proxy": {
-			"npm_config_no_proxy", "no_proxy",
-		},
-		// The region label chain.
-		"GOOGLE_CLOUD_REGION || FUNCTION_REGION || region": {
-			"GOOGLE_CLOUD_REGION", "FUNCTION_REGION",
+		// The bundled GCP telemetry exporters resolve the project for the
+		// credentialed Gcp*Exporter(projectId, credentials) client — the
+		// telemetry project chain (#7665 review R2).
+		"OTLP_GOOGLE_CLOUD_PROJECT || GOOGLE_CLOUD_PROJECT": {
+			"OTLP_GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT",
 		},
 		// The GCA project fallback.
 		"GOOGLE_CLOUD_PROJECT || GOOGLE_CLOUD_PROJECT_ID": {
@@ -176,8 +204,6 @@ func TestGeminiBundleEnvReads_ProxyAndTrustRootsClassifiedOnBothPaths(t *testing
 		// the lowercase ones, and every other client mixes them.
 		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
 		"http_proxy", "https_proxy", "no_proxy", "all_proxy",
-		// The npm-config proxy helper's spellings.
-		"npm_config_proxy", "npm_config_no_proxy",
 		// Trust roots and TLS transport configuration.
 		"GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", "GRPC_SSL_CIPHER_SUITES",
 		"GOOGLE_API_CERTIFICATE_CONFIG",

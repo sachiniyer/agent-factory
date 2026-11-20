@@ -729,9 +729,10 @@ func TestApplyAccount_LoaderFilledNamesAreKeepIfSet(t *testing.T) {
 // three bundled-library reads (DEBUG_AUTH, DETECT_GCP_RETRIES,
 // METADATA_SERVER_DETECTION) to the same keep-if-set class and re-asserted
 // GOOGLE_CLOUD_UNIVERSE_DOMAIN to its first-party default. #7662's artifact
-// derivation grew the loader class to the whole measured .env-fillable
-// surface and added the identity pins (the lowercase credential twin and
-// GEMINI_DEFAULT_AUTH_TYPE) plus the remaining ??-family reasserts — the
+// derivation grew the loader class to the measured proxy/trust-root/
+// credential/project surface and added the identity pins (the lowercase
+// credential twin and GEMINI_DEFAULT_AUTH_TYPE); the #7665-narrowed claim
+// reasserts only the two ??-family first-party endpoint values — the
 // identity/value pins are still listed literally below, while the loader
 // pin LIST derives from the table because its membership is the artifact's
 // to pin (TestGeminiBundleEnvReads_ClassificationsLand); what this test
@@ -747,10 +748,7 @@ func TestApplyAccount_LeavesTheNonLoaderPathsByteIdentical(t *testing.T) {
 	}
 	geminiValues := []string{
 		"CODE_ASSIST_ENDPOINT=https://cloudcode-pa.googleapis.com",
-		"GEMINI_SANDBOX_IMAGE=us-docker.pkg.dev/gemini-code-dev/gemini-cli/sandbox:0.42.0",
 		"GOOGLE_CLOUD_UNIVERSE_DOMAIN=googleapis.com",
-		"GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION=true",
-		"SEATBELT_PROFILE=permissive-open",
 	}
 	// Every keep-if-set name absent from the input is installed defined-empty,
 	// sorted — the list derives from the table; the placement is what's proven.
@@ -1253,5 +1251,48 @@ func TestAccountLateEnvironmentValues_StayOffTheEmptyPinTables(t *testing.T) {
 			require.False(t, pinned,
 				"%s takes a defined VALUE for %s — an empty pin is the broken form this table exists to avoid", name, agent)
 		}
+	}
+}
+
+// TestApplyAccount_ProxyCaseTwinReseat pins the #7665-review case-twin rule
+// on the account path: a present proxy spelling claims its case twin with
+// the SAME value — never the defined-empty pin a lowercase-preferring
+// reader (undici, the npm-config helper) would see cancel the operator's
+// proxy — matching the credential-mount path's forwarded-pair exemption.
+func TestApplyAccount_ProxyCaseTwinReseat(t *testing.T) {
+	for _, pair := range ProxyEnvCasePairs {
+		upper, lower := pair[0], pair[1]
+		got, err := ApplyAccount(
+			[]string{"PATH=/bin", upper + "=http://corp:3128"}, "",
+			Account{Agent: "gemini", Name: "w", Dir: "/d"})
+		require.NoError(t, err)
+		require.Contains(t, got, upper+"=http://corp:3128")
+		require.Contains(t, got, lower+"=http://corp:3128",
+			"%s present must reseat %s to the same value", upper, lower)
+		require.NotContains(t, got, lower+"=",
+			"%s must NOT get the empty pin while %s is present", lower, upper)
+
+		got, err = ApplyAccount(
+			[]string{"PATH=/bin", lower + "=http://corp:3128"}, "",
+			Account{Agent: "gemini", Name: "w", Dir: "/d"})
+		require.NoError(t, err)
+		require.Contains(t, got, upper+"=http://corp:3128",
+			"%s present must reseat %s to the same value", lower, upper)
+		require.NotContains(t, got, upper+"=")
+
+		// Both present: each keeps its own value — no reseat, no pin.
+		got, err = ApplyAccount(
+			[]string{"PATH=/bin", upper + "=http://u:1", lower + "=http://l:2"}, "",
+			Account{Agent: "gemini", Name: "w", Dir: "/d"})
+		require.NoError(t, err)
+		require.Contains(t, got, upper+"=http://u:1")
+		require.Contains(t, got, lower+"=http://l:2")
+
+		// Neither present: both pin — the .env loader finds both claimed.
+		got, err = ApplyAccount(
+			[]string{"PATH=/bin"}, "", Account{Agent: "gemini", Name: "w", Dir: "/d"})
+		require.NoError(t, err)
+		require.Contains(t, got, upper+"=")
+		require.Contains(t, got, lower+"=")
 	}
 }

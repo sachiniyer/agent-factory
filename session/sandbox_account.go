@@ -585,12 +585,32 @@ func (w *sandboxWorkspace) accountScrubEnv() string {
 	for _, name := range w.spec.SessionEnvPassthrough {
 		passthrough[name] = struct{}{}
 	}
+	// A forwarded proxy spelling claims its case twin too, exactly as
+	// applyAccount does on the local/docker paths (#7665): the twin is
+	// reseated to the forwarded spelling's value — after every loader line,
+	// so the expansion sees the kept value — rather than pinned empty where
+	// a lowercase-preferring reader would lose the operator's proxy.
+	twinOf := make(map[string]string, 2*len(sessionenv.ProxyEnvCasePairs))
+	for _, pair := range sessionenv.ProxyEnvCasePairs {
+		twinOf[pair[0]] = pair[1]
+		twinOf[pair[1]] = pair[0]
+	}
+	var reseat []string
 	for _, name := range sessionenv.AccountLoaderFilledNames(w.spec.Account.Agent) {
 		if _, forwarded := passthrough[name]; forwarded {
 			b.WriteString("[ -n \"${" + name + "+x}\" ] || " + name + "=\n")
-		} else {
-			b.WriteString(name + "=\n")
+			continue
 		}
+		if twin, isPair := twinOf[name]; isPair {
+			if _, twinForwarded := passthrough[twin]; twinForwarded {
+				reseat = append(reseat, name+"=\"$"+twin+"\"\n")
+				continue
+			}
+		}
+		b.WriteString(name + "=\n")
+	}
+	for _, line := range reseat {
+		b.WriteString(line)
 	}
 	return b.String()
 }

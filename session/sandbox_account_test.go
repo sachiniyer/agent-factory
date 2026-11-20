@@ -561,3 +561,28 @@ func TestRemoteLaunchNeutralizesHostCloudAuthSelectors(t *testing.T) {
 	o, gerr := ok.CombinedOutput()
 	require.NoError(t, gerr, string(o))
 }
+
+// TestAccountScrubEnv_ProxyCaseTwinReseat: the remote scrub honors the same
+// case-twin rule applyAccount enforces on the local/docker paths — a
+// forwarded proxy spelling exempts its twin from the unconditional pin and
+// reseats it to the forwarded spelling's value, emitted after every loader
+// line so the expansion sees the kept value.
+func TestAccountScrubEnv_ProxyCaseTwinReseat(t *testing.T) {
+	acct := writeAccount(t, "gemini", "gemini-cred")
+	w := &sandboxWorkspace{shell: &recordingShell{}, SessionDir: "/s", program: "gemini",
+		spec: ProvisionSpec{Title: "t", Account: acct, AccountSyncHost: "box1", AccountSyncTarget: box1Target,
+			SessionEnvPassthrough: []string{"HTTPS_PROXY", "no_proxy"}}}
+	scrub := w.accountScrubEnv()
+	require.Contains(t, scrub, "https_proxy=\"$HTTPS_PROXY\"\n",
+		"forwarded HTTPS_PROXY reseats its lowercase twin")
+	require.Contains(t, scrub, "NO_PROXY=\"$no_proxy\"\n",
+		"forwarded no_proxy reseats its uppercase twin")
+	require.NotContains(t, scrub, "\nhttps_proxy=\n",
+		"the twin must not take the unconditional pin")
+	require.NotContains(t, scrub, "\nNO_PROXY=\n")
+	// Unrelated pair members still pin; the reseat runs after every loader line.
+	require.Contains(t, scrub, "\nhttp_proxy=\n")
+	require.Contains(t, scrub, "\nHTTP_PROXY=\n")
+	require.Less(t, strings.LastIndex(scrub, "no_proxy="), strings.LastIndex(scrub, "NO_PROXY=\"$no_proxy\""),
+		"the reseat must run after the twin's own keep-if-set line")
+}

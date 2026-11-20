@@ -263,10 +263,12 @@ var accountLateEnvironmentNames = map[string]map[string]struct{}{
 //     telemetry working — the same shape as CODE_ASSIST_ENDPOINT.
 var accountLateEnvironmentValues = map[string]map[string]string{
 	// Derived from the measured bundle artifact: every entry whose account
-	// class is reassert — CODE_ASSIST_ENDPOINT, GOOGLE_CLOUD_UNIVERSE_DOMAIN
-	// (#7544/#7582), and the #7662 additions GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION,
-	// GEMINI_SANDBOX_IMAGE, and SEATBELT_PROFILE, each a ??-family read whose
-	// defined-empty value is real and broken.
+	// class is reassert — exactly CODE_ASSIST_ENDPOINT and
+	// GOOGLE_CLOUD_UNIVERSE_DOMAIN (#7544/#7582). The #7665 review narrowed
+	// the claim: no re-assert may weaken an operator-forwarded value or
+	// carry a version-specific constant, so
+	// GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION, GEMINI_SANDBOX_IMAGE, and
+	// SEATBELT_PROFILE leave scope as artifact waivers.
 	"gemini": geminiBundleAccountReasserts(),
 }
 
@@ -299,14 +301,16 @@ var accountLateEnvironmentValues = map[string]map[string]string{
 // chain) — so completeness lives in the checked artifact, not in this
 // comment. The keep-if-set class covers, among others: the full proxy
 // surface (grpc_proxy, no_grpc_proxy, HTTP_PROXY/HTTPS_PROXY/NO_PROXY/
-// ALL_PROXY and their lowercase twins, the npm_config_* pair), the
-// credential-transport trust roots (GRPC_DEFAULT_SSL_ROOTS_FILE_PATH,
-// GRPC_SSL_CIPHER_SUITES, GOOGLE_API_CERTIFICATE_CONFIG), the project and
-// quota chains (GCLOUD_PROJECT/GOOGLE_CLOUD_PROJECT and their lowercase
-// twins, GOOGLE_CLOUD_PROJECT_ID, GOOGLE_CLOUD_QUOTA_PROJECT,
-// GOOGLE_CLOUD_LOCATION), the auth-source and metadata-endpoint reads
-// (CLOUD_SHELL, GEMINI_CLI_USE_COMPUTE_ADC, GCE_METADATA_IP,
-// GCE_METADATA_HOST), GEMINI_CLI_CUSTOM_HEADERS, and GITHUB_TOKEN.
+// ALL_PROXY and their lowercase twins), the credential-transport trust
+// roots (GRPC_DEFAULT_SSL_ROOTS_FILE_PATH, GRPC_SSL_CIPHER_SUITES,
+// GOOGLE_API_CERTIFICATE_CONFIG), the project and quota chains
+// (GCLOUD_PROJECT/GOOGLE_CLOUD_PROJECT and their lowercase twins,
+// GOOGLE_CLOUD_PROJECT_ID, GOOGLE_CLOUD_QUOTA_PROJECT,
+// OTLP_GOOGLE_CLOUD_PROJECT, _GEMINI_USER_GCP_PROJECT), the auth-source and
+// metadata-endpoint reads (CLOUD_SHELL, GEMINI_CLI_USE_COMPUTE_ADC,
+// GCE_METADATA_IP, GCE_METADATA_HOST, CLOUDSDK_CONFIG,
+// GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES,
+// GEMINI_TELEMETRY_USE_CLI_AUTH), and GITHUB_TOKEN.
 //
 // Two names join the derived set by hand: GIT_CONFIG_COUNT and
 // GIT_CONFIG_PARAMETERS are af's own shared-git defense rather than bundle
@@ -334,6 +338,19 @@ var accountLoaderFilledNames = map[string]map[string]struct{}{
 		names["GIT_CONFIG_PARAMETERS"] = struct{}{}
 		return names
 	}(),
+}
+
+// ProxyEnvCasePairs pairs each proxy variable's upper- and lowercase
+// spellings so a present spelling claims its absent twin with its own
+// value — the #7665-review rule the account paths share with the
+// credential-mount path (session.credentialMountProxyCasePairs aliases this
+// table): a lowercase-preferring reader must never see the operator's
+// proxy cancelled by an empty pin on the spelling it reads first.
+var ProxyEnvCasePairs = [][2]string{
+	{"HTTP_PROXY", "http_proxy"},
+	{"HTTPS_PROXY", "https_proxy"},
+	{"ALL_PROXY", "all_proxy"},
+	{"NO_PROXY", "no_proxy"},
 }
 
 // AccountLoaderFilledNames lists, sorted, the keep-if-set names for one agent:
@@ -711,7 +728,7 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	// survive FilterForCommand on image/ambient values and read as claims).
 	// An absent one gets the defined-empty pin below.
 	loader := accountLoaderFilledNames[account.Agent]
-	seen := make(map[string]struct{}, len(loader))
+	seen := make(map[string]string, len(loader))
 	out := make([]string, 0, len(env)+len(pinned)+len(filled)+len(loader)+1)
 	for _, kv := range env {
 		name, _, found := strings.Cut(kv, "=")
@@ -722,7 +739,7 @@ func applyAccount(env []string, command string, account Account, validateCommand
 			continue
 		}
 		if _, isLoader := loader[name]; isLoader {
-			seen[name] = struct{}{}
+			seen[name] = kv
 		}
 		out = append(out, kv)
 	}
@@ -746,6 +763,27 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	// env is one no operator claim reached, so it is installed defined-and-empty
 	// to hold the `.env` loader off; a name present — the operator's forwarded
 	// claim — was already kept in the pass-through above.
+	// A PRESENT proxy spelling claims its CASE TWIN too — the same rule the
+	// credential-mount path applies to forwarded pairs (#7665 review): a
+	// lowercase-preferring reader (undici, the npm-config helper) must not
+	// lose the operator's proxy to an empty pin on the other spelling, so
+	// the absent twin is installed with the present spelling's value rather
+	// than defined-empty. Both loader names land regardless, so the `.env`
+	// loader still finds every spelling claimed.
+	reseated := make([]string, 0, len(ProxyEnvCasePairs))
+	for _, pair := range ProxyEnvCasePairs {
+		a, b := pair[0], pair[1]
+		ka, aSet := seen[a]
+		kb, bSet := seen[b]
+		switch {
+		case aSet && !bSet:
+			reseated = append(reseated, b+strings.TrimPrefix(ka, a))
+			seen[b] = ""
+		case bSet && !aSet:
+			reseated = append(reseated, a+strings.TrimPrefix(kb, b))
+			seen[a] = ""
+		}
+	}
 	loaderPins := make([]string, 0, len(loader))
 	for name := range loader {
 		if _, ok := seen[name]; !ok {
@@ -756,6 +794,8 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	for _, name := range loaderPins {
 		out = append(out, name+"=")
 	}
+	sort.Strings(reseated)
+	out = append(out, reseated...)
 	// Appended last so it wins over any ambient copy that survived, though the
 	// removal above means there should not be one.
 	out = append(out, configVar+"="+account.Dir)
