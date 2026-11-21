@@ -2,9 +2,11 @@ package app
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -329,6 +331,46 @@ func TestRenameTabAppliesDaemonNameVerbatim(t *testing.T) {
 	}
 	h.errBox.SetSize(200, 1)
 	require.Contains(t, h.errBox.String(), `renamed tab to "docs"`)
+}
+
+// TestRenameTabPromptSizesToContent is #7701: the rename prompt reuses the
+// naming form's multi-line prompt overlay, which fills the fit frame it is
+// given — at 80x24 that rendered a 24-row box around a one-line field. Compact
+// mode (#5587, the jump prompt's fix) sizes it to its content, and the input
+// and hint must survive at the issue's terminal size and below it.
+func TestRenameTabPromptSizesToContent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		w    int
+		hgt  int
+	}{
+		{"issue repro 80x24", 80, 24},
+		{"shorter 80x12", 80, 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			inst := freshLocalInstance(t, "rename-size")
+			inst.AddWebTabForTest("web", "https://example.com")
+			selectInstance(h, inst)
+			resizeHome(h, tc.w, tc.hgt)
+			h.store.SetActiveTab(1)
+
+			_, _ = h.showRenameTabPrompt()
+			require.NotNil(t, h.promptOverlay)
+
+			rendered := h.promptOverlay.Render()
+			rows := strings.Count(strings.TrimRight(rendered, "\n"), "\n") + 1
+			require.Lessf(t, rows, 15,
+				"a one-line rename prompt must hug its content, not fill a %d-row terminal:\n%s",
+				tc.hgt, xansi.Strip(rendered))
+
+			plain := xansi.Strip(rendered)
+			require.GreaterOrEqual(t, strings.Count(plain, "web"), 2,
+				"the seeded input row must stay visible — the title alone carries one")
+			require.Contains(t, plain, "enter rename · esc cancel",
+				"the key hint must stay visible in the compact dialog")
+		})
+	}
 }
 
 // TestRenameTabStaleIndexIsNotTheAgentTab: an active-tab index past the end of
