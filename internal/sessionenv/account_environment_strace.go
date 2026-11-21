@@ -19,8 +19,12 @@ import (
 //
 // A word that opens with an expansion is in option position until the command
 // starts, and could expand to any option, so it refuses too. Options of other
-// kinds keep an unprovable OPERAND (`-o"$LOG"`, `--output=$F`): the operand of
-// a known non-environment option cannot place a variable.
+// kinds keep an unprovable OPERAND only when it cannot field-split: a quoted
+// operand (`-o"$LOG"`, `--output="$F"`) expands to a single argv word, so the
+// operand of a known non-environment option cannot place a variable. An unquoted
+// (field-splittable) operand (`--output=$F`, `-o$LOG`) can split into the
+// operand plus further argv words — including `-E`/`--env` and a traced command
+// — so it refuses the way a dash-glued unprovable identity does.
 //
 // The long-option table is the measured one the xargs input walk shares. Operands that arrive as the next word
 // are consumed by arity; a wrong arity here can only skip a word this pass
@@ -150,7 +154,15 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 			// when the run ends at this word, so this fails closed as a
 			// terminal — symmetric with the wholly-dynamic `text == ""` case
 			// and with the head-level refusal of `strace "$OPT" codex`.
-			return end(refuseLeadingExpansion, true)
+			// A quoted expansion (`--"$OPT"`) is incomplete too but does NOT
+			// field-split — it expands to a single argv word, so with no
+			// command following strace runs nothing and cannot inject env; it
+			// keeps the original non-terminal suspect so a command word after
+			// it still refuses the way `strace --env=... codex` does.
+			if wordHasUnquotedFieldSplittingExpansion(words[i]) {
+				return end(refuseLeadingExpansion, true)
+			}
+			return true, i + 1, nil
 		}
 		// resolveLongOption reads the name the way getopt_long does — exact, or
 		// an unambiguous prefix — so an abbreviation of --env resolves to env
@@ -163,8 +175,10 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 			// dropped when the run ends at this word. A literal unknown name
 			// (complete=true) keeps the existing non-terminal refusal so the
 			// trace-nothing behavior for an unknown option with no command
-			// following stays admitted.
-			if !complete {
+			// following stays admitted. A quoted expansion
+			// (`--unknown="$OPT"`) is incomplete but does not field-split, so
+			// it keeps the original non-terminal suspect too.
+			if wordHasUnquotedFieldSplittingExpansion(words[i]) {
 				return end(refuseLeadingExpansion, true)
 			}
 			return true, i + 1, nil
@@ -178,6 +192,19 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 				return true, i + 1, nil
 			}
 			return straceEnvOperandRefused(value, true, names), i + 2, nil
+		}
+		// A known non-environment option whose word carries an unquoted
+		// (field-splittable) expansion can split into the option operand PLUS
+		// further argv words: `--output=$F` with
+		// `F='trace -E CODEX_HOME=/other codex'` splits into `--output=trace`,
+		// `-E`, `CODEX_HOME=/other`, `codex`, and strace processes the `-E`
+		// before launching the literal command. The operand of a known
+		// non-env option cannot by itself place a variable, but the split
+		// argv can, so this fails closed as a terminal — the same shape as
+		// the unprovable-identity paths above. A quoted operand
+		// (`--output="$F"`) does not field-split and stays admitted.
+		if wordHasUnquotedFieldSplittingExpansion(words[i]) {
+			return end(refuseLeadingExpansion, true)
 		}
 		if !hasEq && requiresArg {
 			return false, i + 2, nil // required operand arrives as the next word
@@ -209,6 +236,15 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 		case !attached:
 			return false, i + 2, nil
 		}
+		// A known non-env value flag whose cluster carries an unquoted
+		// (field-splittable) attached operand (`-o$LOG`) splits the same way
+		// `--output=$F` does: `-o$LOG` with
+		// `LOG='x -E CODEX_HOME=/other codex'` splits into `-ox`, `-E`,
+		// `CODEX_HOME=/other`, `codex`. Fail closed as a terminal; a quoted
+		// operand (`-o"$LOG"`) does not field-split and stays admitted.
+		if wordHasUnquotedFieldSplittingExpansion(words[i]) {
+			return end(refuseLeadingExpansion, true)
+		}
 		return false, i + 1, nil
 	}
 	// A cluster that never reached an operand-taking letter and still has an
@@ -221,8 +257,10 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 	// a terminal — symmetric with the wholly-dynamic `text == ""` case and
 	// with the long-option path above. A literal cluster (complete=true) keeps
 	// the existing non-terminal refusal: an unknown short flag with no command
-	// following runs nothing, so the trace cannot place an env mutation.
-	if !complete {
+	// following runs nothing, so the trace cannot place an env mutation. A
+	// quoted expansion (`-"$OPT"`) is incomplete but does not field-split, so
+	// it keeps the original non-terminal suspect too.
+	if wordHasUnquotedFieldSplittingExpansion(words[i]) {
 		return end(refuseLeadingExpansion, true)
 	}
 	return strings.Trim(cluster, straceShortFlags) != "" || cluster == "", i + 1, nil
@@ -256,3 +294,21 @@ func stracePeekOperand(words []*syntax.Word, i int) (string, int) {
 // walk's table) take the rest of the cluster, or the next word when nothing
 // follows.
 const straceShortFlags = "cCdDfFhiknqrtTvVwxyYzZA"
+
+// wordHasUnquotedFieldSplittingExpansion reports whether the word contains an
+// unquoted parameter, command, or arithmetic expansion whose runtime value
+// undergoes shell field splitting — the only way a dash-glued word whose
+// literal prefix is incomplete (complete=false) can split into more argv
+// words than the source AST shows. Quoted expansions (`"$OPT"`, `"$(...)"`)
+// and the non-splitting quote forms (`$'...'`, `$"..."`) do not field-split,
+// so a word that is incomplete only because of those is not a splitting
+// hazard and keeps its original (non-terminal) suspect path.
+func wordHasUnquotedFieldSplittingExpansion(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		switch part.(type) {
+		case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp:
+			return true
+		}
+	}
+	return false
+}

@@ -102,6 +102,20 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 		`OPT='CODEX_HOME=/other codex'; firejail strace -Q$OPT`,
 		// A benign-looking -Q payload still refuses for the same reason.
 		`OPT='f -o /tmp/x codex'; firejail strace -Q$OPT`,
+		// A KNOWN non-env long option with an unquoted (field-splittable)
+		// attached operand (`--output=$F`). The operand word-splits: with
+		// `F='trace -E CODEX_HOME=/other codex'` the argv becomes
+		// `--output=trace`, `-E`, `CODEX_HOME=/other`, `codex`, and strace
+		// processes the `-E` before launching the literal command. Only the
+		// quoted `--output="$F"` form is non-splittable and stays admitted.
+		`F='trace -E CODEX_HOME=/other codex'; firejail strace --output=$F codex`,
+		`F='trace -E CODEX_HOME=/other codex'; firejail strace --output=$F`,
+		// A KNOWN non-env short option with an unquoted (field-splittable)
+		// attached operand (`-o$LOG`) — the short twin of `--output=$F`:
+		// `-o$LOG` with `LOG='x -E CODEX_HOME=/other codex'` splits into
+		// `-ox`, `-E`, `CODEX_HOME=/other`, `codex`.
+		`LOG='x -E CODEX_HOME=/other codex'; firejail strace -o$LOG codex`,
+		`LOG='x -E CODEX_HOME=/other codex'; firejail strace -o$LOG`,
 	}
 	for _, command := range refused {
 		require.True(t, commandMutatesAccountEnvironment(command, names),
@@ -153,10 +167,12 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 		require.Error(t, err, "control command %q must stay refused", command)
 	}
 
-	// Benign shapes: no dash-glued unquoted expansion in a nested strace's
+	// Benign shapes: no dash-glued UNQUOTED expansion in a nested strace's
 	// option position, so they stay ADMITTED — the fix introduces no false
-	// positive. Complete=false operands of KNOWN non-env options keep their
-	// admission the way #7690 already promised (`-o"$LOG"`, `--output=$F`).
+	// positive. A quoted (non-splittable) operand of a KNOWN non-env option
+	// expands to a single argv word, so it keeps its admission the way #7690
+	// already promised (`-o"$LOG"`, `--output="$F"`); an unquoted
+	// (field-splittable) operand refuses (see the refused list above).
 	admitted := []string{
 		// No options at all and no dynamic content.
 		`firejail strace codex`,
@@ -172,16 +188,26 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 		`firejail strace -c codex`,
 		`firejail strace -- codex`,
 		`firejail strace -o ./out.trace --trace=openat codex`,
-		// A KNOWN non-env long option with an unquoted (complete=false)
-		// operand — the bug report's `--output=$F` benign twin. The fix
-		// scopes the terminal refusal to the unprovable-IDENTITY paths, so
-		// known options with unprovable operands stay admitted.
-		`firejail strace --output=$F codex`,
+		// A KNOWN non-env long option with a QUOTED (non-splittable) operand
+		// — the bug report's `--output="$F"` form. A quoted expansion does
+		// not field-split, so the operand expands to a single argv word and
+		// the known non-env option cannot place a variable; it stays
+		// admitted. (The unquoted `--output=$F` twin refuses — see above.)
 		`firejail strace --output="$F" codex`,
-		`firejail strace --output=$F`,
-		// A KNOWN non-env short option with an unquoted (complete=false)
-		// operand — the bug report's `-o"$LOG"` benign twin.
+		`firejail strace --output="$F"`,
+		// A KNOWN non-env short option with a QUOTED (non-splittable)
+		// operand — the bug report's `-o"$LOG"` form, which stays admitted
+		// because the quoted expansion does not field-split.
 		`firejail strace -o"$LOG" codex`,
+		// A QUOTED dash-glued expansion (`--"$OPT"`, `-"$OPT"`,
+		// `--unknown="$OPT"`) is incomplete (complete=false) but does NOT
+		// field-split — it expands to a single argv word, so with no command
+		// following strace runs nothing and cannot inject env. It keeps the
+		// original non-terminal suspect, so a command word after it still
+		// refuses the way `strace --env=... codex` does.
+		`OPT=tips; firejail strace --"$OPT"`,
+		`OPT=tips; firejail strace -"$OPT"`,
+		`OPT=tips; firejail strace --unknown="$OPT"`,
 		// A dynamic word AFTER the traced command is an argument, not a
 		// strace option — the option run ends at the command word.
 		`firejail strace codex "$OPT"`,
@@ -221,11 +247,13 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 // TestStraceOptionStepDashGluedTerminalRefusal drives straceOptionStep
 // directly through the wrapperTailWordHidesAccountAssignment strace-branch
 // entry, the way production code reaches it. The dash-glued shapes the bug
-// admits all share a non-empty literal dash prefix and complete=false; each
-// must reach straceOptionRunRefused's strict terminal there rather than the
-// non-terminal suspect the run fold drops. Pinned through the gate
-// (commandMutatesAccountEnvironment) instead of an internal-symbol probe so
-// the test tracks the contract callers actually rely on.
+// admits all share a non-empty literal dash prefix and an unquoted
+// (field-splittable) expansion that makes the literal prefix incomplete
+// (complete=false); each must reach straceOptionRunRefused's strict terminal
+// there rather than the non-terminal suspect the run fold drops. Pinned
+// through the gate (commandMutatesAccountEnvironment) instead of an
+// internal-symbol probe so the test tracks the contract callers actually
+// rely on.
 func TestStraceOptionStepDashGluedTerminalRefusal(t *testing.T) {
 	names := dashGluedNames()
 	// Each refused row's dash-glued word is the LAST word of `firejail strace
@@ -242,6 +270,11 @@ func TestStraceOptionStepDashGluedTerminalRefusal(t *testing.T) {
 		// Unknown dash-glued long and short option words.
 		`OPT='CODEX_HOME=/o codex'; firejail strace --unknown=$OPT`,
 		`OPT='CODEX_HOME=/o codex'; firejail strace -Q$OPT`,
+		// A KNOWN non-env option with an unquoted (field-splittable) attached
+		// operand (`--output=$F`, `-o$LOG`): the operand word-splits into the
+		// option value plus further argv words including `-E` and the command.
+		`F='trace -E CODEX_HOME=/o codex'; firejail strace --output=$F`,
+		`LOG='x -E CODEX_HOME=/o codex'; firejail strace -o$LOG`,
 	} {
 		require.True(t, commandMutatesAccountEnvironment(command, names),
 			"command %q lands on the terminal refusal at its dash-glued option word", command)
