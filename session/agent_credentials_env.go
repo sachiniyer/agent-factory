@@ -8,7 +8,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/shellquote"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -335,17 +334,23 @@ func credentialMountPaneBoundaryNamesSorted() []string {
 }
 
 // credentialMountProgramLoaderNames are names that choose which CODE the
-// programs af runs in the container load — the dynamic linker's preload and
-// search-path variables. They reach every docker exec step before the
-// agent-side env filter exists, so a repo-supplied value would inject a
-// repository library into af's provisioning steps. They are refused to repo
-// run_args but NOT pinned: an image's own LD_* values are the same trust
-// class as its binaries, and pinning would break images that legitimately
-// need them; the inner filter already keeps them off the agent's env, so
-// the agent itself is covered either way (#7529 R7).
+// programs af runs in the container load — glibc's three dynamic-linker
+// injection variables: the preload list (LD_PRELOAD), the search path
+// (LD_LIBRARY_PATH), and the audit-module list (LD_AUDIT). An audit module
+// loads into every dynamically linked program at startup the same way a
+// preloaded library does — its la_version entry point and hooks run
+// in-process — so a repo-supplied value injects a repository library on
+// the same terms the preload variable does. They reach every docker exec
+// step before the agent-side env filter exists, so a repo-supplied value
+// would inject a repository library into af's provisioning steps. They are
+// refused to repo run_args but NOT pinned: an image's own LD_* values are
+// the same trust class as its binaries, and pinning would break images
+// that legitimately need them; the inner filter already keeps them off
+// the agent's env, so the agent itself is covered either way (#7529 R7).
 var credentialMountProgramLoaderNames = map[string]struct{}{
 	"LD_PRELOAD":      {},
 	"LD_LIBRARY_PATH": {},
+	"LD_AUDIT":        {},
 }
 
 // credentialMountIdentityEnvNames are the credential-bearing per-agent names
@@ -781,10 +786,30 @@ func dockerRunArgsEnvNames(args []string) []string {
 			checkEnv(strings.TrimPrefix(arg, "-e="))
 		case strings.HasPrefix(arg, "-e") && len(arg) > 2:
 			checkEnv(strings.TrimPrefix(arg, "-e"))
+		case len(arg) == 2 && arg[0] == '-' && arg[1] != '-':
+			// pflag: a bare value-taking short option consumes the NEXT argv
+			// element as its value, so Docker never parses that token as an
+			// option of its own. The earlier cases handle a bare -e itself;
+			// this consumes the value any OTHER value-taking shorthand swallows
+			// so the swallowed token — typically a real -e/--env=NAME=... —
+			// is not re-walked as a fresh env flag and the extractor reports
+			// the REAL NAME rather than the phantom "--env" strings.Cut would
+			// leave. Booleans and unknown shorthands fall through without
+			// consuming (the fail-closed side), leaving the next arg examined.
+			if _, value := dockerRunValueShorthands[arg[1]]; value && index+1 < len(args) {
+				index++
+			}
 		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
 			_ = dockerCheckShorthandCluster(arg, args, index, "e",
 				func(_ byte, value string) error { checkEnv(value); return nil },
 				"", "")
+			// pflag: a cluster ending in a value-taking option consumes the
+			// NEXT argv element as that option's value; skip the swallowed
+			// token so it is not re-walked as a fresh env flag and the
+			// extractor reports the name the real flag behind it carries.
+			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
+				index++
+			}
 		}
 	}
 	return names
@@ -959,31 +984,4 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 			accountLoaderBlankEntries(p.spec.Account.Agent, p.spec.SessionEnvPassthrough, source)...)
 	}
 	return append(names, p.gitConfigCountNeutralizingNames(source)...)
-}
-
-// gitConfigCountNeutralizingNames returns the trailing -e GIT_CONFIG_COUNT=
-// pin every docker -e assembly appends when the passthrough forwards
-// GIT_CONFIG_COUNT resolving to N>0 in the daemon environment without all N
-// required indexed pairs arriving usable: the bare -e GIT_CONFIG_COUNT rides
-// the daemon's value into the container while no usable pair travels with
-// it, so every git invocation in the session fails fatally ("missing config
-// key GIT_CONFIG_KEY_0") — including af's own provisioning git config. The
-// pin is emitted after the bare forward, so docker's last-wins -e resolves
-// the count defined-empty, rendering the whole indexed family inert the way
-// an unforwarded count takes. A forwarded pair that would arrive
-// defined-but-empty counts as missing for a KEY (git fails "empty config
-// key") and as legal for a VALUE; a forwarded-but-unset pair arrives only
-// where the assembly blanks unset names for it — the account loader under
-// an agent with filled names — which is what pairsBlanked answers.
-func (p *dockerProvisioner) gitConfigCountNeutralizingNames(source []string) []string {
-	pairsBlanked := p.spec.Account.Dir != "" &&
-		len(sessionenv.AccountLoaderFilledNames(p.spec.Account.Agent)) > 0
-	missing, total := sessionenv.GitConfigCountForwardMissingPairs(
-		pairsBlanked, p.spec.SessionEnvPassthrough, source)
-	if total == 0 {
-		return nil
-	}
-	log.WarningLog.Printf("backend=docker: session_env_passthrough forwards GIT_CONFIG_COUNT without its required indexed pairs (%s); git would fail the count without them, so af pinned the count empty — also forward the pair names through session_env_passthrough",
-		sessionenv.FormatGitConfigMissingPairs(missing, total))
-	return []string{"GIT_CONFIG_COUNT="}
 }

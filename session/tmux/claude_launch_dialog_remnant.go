@@ -359,25 +359,34 @@ const claudeLaunchDialogPendingExitMaxKey = 12
 // accepts, squashed: "Press", the longest key, "againtoexit".
 const claudeLaunchDialogPendingExitMaxNotice = len("Press") + claudeLaunchDialogPendingExitMaxKey + len("againtoexit")
 
-// claudeLaunchDialogPendingExitOf reports a folder-trust dialog whose footer row
-// reads "Press <key> again to exit": one exit key was pressed in the pane, and
-// Claude Code shows the notice where the footer was until the press times out
-// (#7275 review).
+// claudeLaunchDialogPendingExitOf reports a launch dialog whose footer row reads
+// "Press <key> again to exit": one exit key was pressed in the pane, and Claude
+// Code shows the notice where the footer was until the press times out (#7275
+// review).
 //
 // The notice is the pane's last content, on a row of its own or wrapped onto
-// several. The pane with those rows read as a whole footer, each of the two
-// the dialogs paint in turn, must then be one a folder-trust reader that reads
-// a dialog to the bottom of the pane answers or holds: the legacy grammar,
-// the re-wrap matcher, the headless readers, or claudeLaunchDialogUnderGuideOf.
-// So the notice proves nothing alone, and every guard those readers keep
-// against a quoted dialog applies here unchanged.
+// several. The pane with those rows read as a whole footer — each of the two the
+// folder-trust dialogs paint (claudeTrustFooters), which the 2.1.322 single-server
+// MCP dialog shares word for word (claudeMCPServerFooter) — must then be one a
+// folder-trust reader that reads a dialog to the bottom of the pane answers or
+// holds: the legacy grammar, the re-wrap matcher, the headless readers, or
+// claudeLaunchDialogUnderGuideOf. So the notice proves nothing alone, and every
+// guard those readers keep against a quoted dialog applies here unchanged.
+//
+// The multi-server picker (#7166) paints a footer of its own
+// (claudeMCPServersFooter), so the footer-swap loop above never substitutes one.
+// It is tried the same way after: the pane with that footer read in place of the
+// notice is the complete picker (claudeMCPServersPickerOf). Its footer is the
+// only content the picker paints there, so the notice can only have replaced it
+// once the picker was complete. af holds either way and names the picker not at
+// all (folder is false): a hold is the same "hold, name it or not, send no key"
+// shape the rest of the reader keeps.
 //
 // A working agent's composer paints the same notice in its status row. That
-// row is straight under the composer's closing line, a plain rule or its
-// box's bottom edge, and a dialog paints neither straight above its footer
-// except the bottom edge of its own box, which holds no prompt row. So a
-// notice straight under a composer's closing line is the composer's, and the
-// pane stays clear.
+// row is straight under the composer's closing line, a plain rule or its box's
+// bottom edge, and a dialog paints neither straight above its footer except the
+// bottom edge of its own box, which holds no prompt row. So a notice straight
+// under a composer's closing line is the composer's, and the pane stays clear.
 //
 // folder is whether the rows above the notice prove the dialog is the
 // folder-trust one.
@@ -409,6 +418,15 @@ func claudeLaunchDialogPendingExitOf(pane claudeLaunchDialogPane) (held, folder 
 			if held, folder := claudeFolderTrustReadToBottom(claudeLaunchDialogFooterInPlace(pane, first, last, footer)); held {
 				return true, folder
 			}
+		}
+		// The multi-server picker's footer is its own, not shared with the
+		// folder-trust dialogs, so the swap loop above never substitutes it.
+		// Try it: the pane with the picker's footer read where the notice is
+		// must be the complete picker, whose footer is the only content it
+		// paints where the notice now sits. folder is false: this is the MCP
+		// picker, not the folder-trust dialog, and af names it not at all.
+		if screen, _ := claudeLaunchDialogFooterInPlace(pane, first, last, claudeMCPServersFooter); claudeMCPServersPickerOf(screen) == claudeMCPServersComplete {
+			return true, false
 		}
 		return false, false
 	}
@@ -510,7 +528,9 @@ func claudeLaunchDialogFooterInPlace(pane claudeLaunchDialogPane, first, last in
 // legacy grammar, the reworded dialog with its question scrolled off
 // (claudeFolderTrustHeadless and its siblings, which claudeFolderTrustDialogOf
 // reports as unreadable when no question is on screen), the re-wrap matcher on
-// a folder-trust dialog, or claudeLaunchDialogUnderGuideOf.
+// a folder-trust dialog or the 2.1.322 MCP-server dialog whose footer it shares
+// (the matcher names the kind, and folder is false for the MCP-server kind), or
+// claudeLaunchDialogUnderGuideOf.
 //
 // The reworded grammar's own region is left out on purpose. It already holds
 // a pending-exit notice under its options, so no such pane reaches this
@@ -531,8 +551,20 @@ func claudeFolderTrustReadToBottom(screen visibleText, pane claudeLaunchDialogPa
 		return true, true
 	}
 	if match, held := claudeLaunchDialogRewrapOf(screen); held &&
-		(match.kind == claudeLaunchDialogReworded || match.kind == claudeLaunchDialogLegacy) {
-		return true, true
+		(match.kind == claudeLaunchDialogReworded || match.kind == claudeLaunchDialogLegacy ||
+			match.kind == claudeLaunchDialogMCPServer) {
+		// The MCP-server dialog's footer (claudeMCPServerFooter) is the
+		// reworded folder-trust footer word for word, so the same
+		// footer-swap that proves a folder-trust dialog behind an exit
+		// notice proves an MCP-server dialog here: the rewrap matcher
+		// reads that dialog's own option labels above the shared footer.
+		// af holds either way, and the #7663 naming policy reports the
+		// remnant unnamed (DialogHoldOther) unless the pane proves the
+		// folder-trust one: the matcher proves the MCP-server dialog, not
+		// the folder-trust one, so folder is false for that kind. Holding
+		// is all af sends, Enter on the live modal would confirm whichever
+		// row owns the cursor, including code-executing "Use" rows.
+		return true, match.kind != claudeLaunchDialogMCPServer
 	}
 	return claudeLaunchDialogUnderGuideOf(pane)
 }
