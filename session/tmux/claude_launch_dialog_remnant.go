@@ -376,11 +376,22 @@ const claudeLaunchDialogPendingExitMaxNotice = len("Press") + claudeLaunchDialog
 // The multi-server picker (#7166) paints a footer of its own
 // (claudeMCPServersFooter), so the footer-swap loop above never substitutes one.
 // It is tried the same way after: the pane with that footer read in place of the
-// notice is the complete picker (claudeMCPServersPickerOf). Its footer is the
-// only content the picker paints there, so the notice can only have replaced it
-// once the picker was complete. af holds either way and names the picker not at
-// all (folder is false): a hold is the same "hold, name it or not, send no key"
-// shape the rest of the reader keeps.
+// notice holds whenever a reader that holds the picker behind its own footer
+// holds it (claudeMCPServersReadToBottom) — the complete grammar and the
+// unreadable hold (claudeMCPServersPickerOf), the tail reader when the header
+// scrolled off or the pane wrapped the footer (#7463), and the painting reader
+// under an earlier composer (#7504). The picker's footer is the only content it
+// paints there, so the notice can only have replaced it once the picker was
+// complete; the shapes the complete grammar cannot read still hold. af holds
+// either way and names the picker not at all (folder is false): a hold is the
+// same "hold, name it or not, send no key" shape the rest of the reader keeps.
+//
+// The notice need not be whole: a frame caught while Claude Code paints it
+// leaves a proper prefix of it as the pane's last content ("Press Ctrl-C ag"),
+// over a dialog whose footer is already gone. That pane holds like the frame
+// with the footer erased: the notice's start is read the same way, the rows
+// above proven with a footer swapped in, and the same holds named or not
+// (#7725).
 //
 // A working agent's composer paints the same notice in its status row. That
 // row is straight under the composer's closing line, a plain rule or its box's
@@ -408,7 +419,7 @@ func claudeLaunchDialogPendingExitOf(pane claudeLaunchDialogPane) (held, folder 
 		if len(notice) > claudeLaunchDialogPendingExitMaxNotice {
 			return false, false
 		}
-		if !claudeLaunchDialogPendingExitNotice(notice) {
+		if !claudeLaunchDialogPendingExitNotice(notice) && !claudeLaunchDialogPendingExitNoticeStart(notice) {
 			continue
 		}
 		if claudeLaunchDialogNoticeUnderComposer(lines, rows, first) || !claudeLaunchDialogPaintedAbove(rows, first) {
@@ -421,11 +432,11 @@ func claudeLaunchDialogPendingExitOf(pane claudeLaunchDialogPane) (held, folder 
 		}
 		// The multi-server picker's footer is its own, not shared with the
 		// folder-trust dialogs, so the swap loop above never substitutes it.
-		// Try it: the pane with the picker's footer read where the notice is
-		// must be the complete picker, whose footer is the only content it
-		// paints where the notice now sits. folder is false: this is the MCP
-		// picker, not the folder-trust dialog, and af names it not at all.
-		if screen, _ := claudeLaunchDialogFooterInPlace(pane, first, last, claudeMCPServersFooter); claudeMCPServersPickerOf(screen) == claudeMCPServersComplete {
+		// Try it the same way: the pane with the picker's footer read where
+		// the notice is holds whenever a reader that holds the picker behind
+		// its own footer holds it. folder is false: this is the MCP picker,
+		// not the folder-trust dialog, and af names it not at all.
+		if screen, _ := claudeLaunchDialogFooterInPlace(pane, first, last, claudeMCPServersFooter); claudeMCPServersReadToBottom(screen) {
 			return true, false
 		}
 		return false, false
@@ -453,6 +464,30 @@ func claudeLaunchDialogPendingExitNotice(text string) bool {
 	}
 	key, ok = strings.CutSuffix(key, "againtoexit")
 	return ok && key != "" && len(key) <= claudeLaunchDialogPendingExitMaxKey
+}
+
+// claudeLaunchDialogPendingExitNoticeStart reports whether text, squashed, is
+// a proper prefix of "Press <key> again to exit": the notice while Claude Code
+// is still painting it, where the dialog's footer was (#7725). The key is
+// bounded the same way as the whole notice's
+// (claudeLaunchDialogPendingExitMaxKey), so the bound on the rows the walk
+// reads is unchanged.
+func claudeLaunchDialogPendingExitNoticeStart(text string) bool {
+	if !strings.HasPrefix(text, "Press") {
+		// A prefix shorter than "Press" itself: "P" is as much of the notice
+		// as "Press Ctrl-C ag".
+		return strings.HasPrefix("Press", text)
+	}
+	// rest is key characters, then the start of "againtoexit". Up to the
+	// longest key it is all key characters; longer, it must already spell
+	// the start of "againtoexit".
+	rest := text[len("Press"):]
+	for key := 0; key <= claudeLaunchDialogPendingExitMaxKey && key < len(rest); key++ {
+		if strings.HasPrefix("againtoexit", rest[key:]) {
+			return true
+		}
+	}
+	return len(rest) <= claudeLaunchDialogPendingExitMaxKey
 }
 
 // claudeLaunchDialogNoticeUnderComposer reports whether the nearest painted
@@ -567,6 +602,23 @@ func claudeFolderTrustReadToBottom(screen visibleText, pane claudeLaunchDialogPa
 		return true, match.kind != claudeLaunchDialogMCPServer
 	}
 	return claudeLaunchDialogUnderGuideOf(pane)
+}
+
+// claudeMCPServersReadToBottom reports whether a reader that holds the
+// multi-server picker when its own footer is the pane's last content answers
+// or holds screen (#7725): the picker's grammar and its unreadable hold
+// (claudeMCPServersPickerOf), the tail reader for a picker whose header
+// scrolled off or whose footer the pane wrapped (claudeMCPServersTailOf,
+// #7463), and the painting reader for one under a composer an earlier Claude
+// left above it (claudeMCPServersPaintingOf, #7504) — the same readers, in the
+// same order, the gate asks after the picker's own clauses. A whole footer is
+// never still being painted, so the last of these cannot fire on a screen
+// claudeLaunchDialogFooterInPlace produces; it is asked so the set is every
+// reader the gate has for the picker.
+func claudeMCPServersReadToBottom(screen visibleText) bool {
+	return claudeMCPServersPickerOf(screen) != claudeMCPServersNone ||
+		claudeMCPServersTailOf(screen) ||
+		claudeMCPServersPaintingOf(screen)
 }
 
 // refuseClaudeLaunchDialogRemnant reports, once per dialog rather than once

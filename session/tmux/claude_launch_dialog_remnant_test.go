@@ -170,6 +170,14 @@ func TestIssue7618PendingExitMCPDialogNeverReadsClear(t *testing.T) {
 		"claude_2_1_322_mcp_multi_server_dialog.ansi",
 		"claude_2_1_322_mcp_multi_server_dialog_three.ansi",
 		"claude_2_1_322_mcp_multi_server_dialog_three_wide.ansi",
+		// #7725: the picker behind the notice holds wherever a reader holds
+		// it behind its own footer — the scrolled six-server window, a pane
+		// narrow enough to wrap the header (the complete reading's 44-column
+		// floor), and a server name long enough to wrap.
+		"claude_2_1_322_mcp_multi_server_dialog_six.ansi",
+		"claude_2_1_322_mcp_multi_server_dialog_six_scrolled.ansi",
+		"claude_2_1_322_mcp_multi_server_dialog_40_columns.ansi",
+		"claude_2_1_322_mcp_multi_server_dialog_long_name.ansi",
 	} {
 		for _, notice := range []string{"Press Ctrl-C again to exit", "Press Ctrl-D again to exit"} {
 			content := pendingExitPicker(t, readTrustFixture(t, name), notice)
@@ -190,6 +198,76 @@ func TestIssue7618PendingExitMCPDialogNeverReadsClear(t *testing.T) {
 		require.Equal(t, DialogHoldOther, claudeDialogHoldKind(claudeScreenOf(content)),
 			"%s with the notice: the MCP-server dialog is not the folder-trust one", name)
 	}
+}
+
+// cropToContentRows trims capture to its last n content-bearing lines: a pane
+// too short for the whole dialog, with its head scrolled off the top.
+func cropToContentRows(t *testing.T, capture string, n int) string {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(capture, "\n"), "\n")
+	require.GreaterOrEqual(t, len(lines), n)
+	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
+// #7725 item 1: the picker behind the exit notice holds in every shape a
+// reader holds the picker behind its own footer. The complete grammar only
+// reads a whole picker at least 44 columns wide with its header on screen and
+// no composer above it; the tail reader (#7463) holds it when the header has
+// scrolled off or the footer wraps, and the unreadable and painting readers
+// hold a wrapped picker and one under a stale composer (#7504).
+func TestIssue7725PendingExitPickerEveryShape(t *testing.T) {
+	two := readTrustFixture(t, "claude_2_1_322_mcp_multi_server_dialog.ansi")
+	longName := readTrustFixture(t, "claude_2_1_322_mcp_multi_server_dialog_long_name.ansi")
+	for _, notice := range []string{"Press Ctrl-C again to exit", "Press Ctrl-D again to exit"} {
+		for _, tt := range []struct {
+			name, content string
+		}{
+			// The two-server capture cropped so the header is off screen.
+			{"the two-server capture's last 9 rows, header off", cropToContentRows(t, two, 9)},
+			{"the two-server capture's last 3 rows, header off", cropToContentRows(t, two, 3)},
+			{"a footer and the submit row alone", cropToContentRows(t, two, 2)},
+			// The wrapped long server name with the header off the top.
+			{"the long-name capture's last 4 rows", cropToContentRows(t, longName, 4)},
+		} {
+			content := pendingExitPicker(t, tt.content, notice)
+			requireRemnantHold(t, tt.name+" with "+notice, content)
+			require.Equal(t, DialogHoldOther, claudeDialogHoldKind(claudeScreenOf(content)),
+				"%s with %s: the picker behind the notice is not the folder-trust dialog", tt.name, notice)
+		}
+	}
+	// A picker under the ruled composer an earlier Claude left above it (the
+	// #7504 shape). The composer's ❯ is above the picker's header, so the
+	// grammar and the unreadable hold both decline the pane; its own rows
+	// still prove it.
+	stale := composerRule + "\n❯ \n" + composerRule + "\n  ? for shortcuts\n\n"
+	content := stale + pendingExitPicker(t, two, "Press Ctrl-C again to exit")
+	requireRemnantHold(t, "the picker under a stale composer", content)
+	require.Equal(t, DialogHoldOther, claudeDialogHoldKind(claudeScreenOf(content)),
+		"the picker under a stale composer: the picker behind the notice is not the folder-trust dialog")
+}
+
+// #7725 item 2: a last row that is a prefix of the exit notice — the notice
+// still being painted where the footer was — under a dialog whose footer is
+// already gone holds like the footer-erased frame. The swap proves the rows
+// above with a footer in the notice's place, the same proof the whole notice
+// gets, so the prefix holds where the whole notice does.
+func TestIssue7725PendingExitNoticePrefixHolds(t *testing.T) {
+	for _, prefix := range []string{"P", "Press", "Press Ctrl-C", "Press Ctrl-C ag", "Press Ctrl-C again to exi"} {
+		content := pendingExit(t, readTrustFixture(t, "claude_2_1_322_mcp_server_dialog.ansi"), prefix)
+		requireRemnantHold(t, "the MCP-server dialog under "+prefix, content)
+		require.Equal(t, DialogHoldOther, claudeDialogHoldKind(claudeScreenOf(content)),
+			"the MCP-server dialog under %s", prefix)
+	}
+	// The picker's own footer is substituted for the notice's start too.
+	for _, prefix := range []string{"Press Ctrl-C ag", "Press Ctrl-D ag"} {
+		content := pendingExitPicker(t, readTrustFixture(t, "claude_2_1_322_mcp_multi_server_dialog.ansi"), prefix)
+		requireRemnantHold(t, "the picker under "+prefix, content)
+		require.Equal(t, DialogHoldOther, claudeDialogHoldKind(claudeScreenOf(content)),
+			"the picker under %s", prefix)
+	}
+	// The notice's start wrapped onto two rows.
+	requireRemnantHold(t, "a wrapped notice prefix",
+		"Learn more\n\n❯ 1. Yes,\n  proceed\n  2. No, exit\n\nPress Ctrl-C\nagain to ex")
 }
 
 // The risk of this reader is a hold on a pane that shows no dialog: it stalls
@@ -225,6 +303,14 @@ func TestIssue7618RemnantReaderLeavesNonDialogPanesClear(t *testing.T) {
 		{"a quoted reworded bottom above a boxed composer with the exit notice", quoted + boxed + "  Press Ctrl-D again to exit"},
 		{"the exit notice alone", "Press Ctrl-C again to exit"},
 		{"the exit notice under transcript", "● Done.\n\nPress Ctrl-C again to exit"},
+		// #7725: a notice only begun is the notice's — under a composer's
+		// closing line, alone, or over text it does not name a dialog under.
+		{"a notice prefix in a ruled composer's status row", ruled + "  Press Ctrl-C ag"},
+		{"a notice prefix in a boxed composer's status row", boxed + "  Press Ctrl-C ag"},
+		{"a notice prefix alone", "Press Ctrl-C ag"},
+		{"a notice prefix under transcript", "● Done.\n\nPress Ctrl-C ag"},
+		{"a notice prefix over a still-painted footer tail",
+			"Do you trust the files in this folder?\n\n❯ 1. Yes, proceed\n  2. No, exit\n\n Press Ctrl-C ag\n cancel"},
 		{"the footer's last two words", " to\n cancel"},
 		{"the footer's last word", " cancel"},
 		{"a cut word of the footer", " el"},
