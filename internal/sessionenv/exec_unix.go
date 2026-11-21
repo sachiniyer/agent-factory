@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -347,39 +346,12 @@ func neutralizeGitConfigCountForExec(environ []string) []string {
 	if !ok {
 		return environ
 	}
-	if missing := missingGitConfigCountPairsInEnv(environ); len(missing) > 0 {
+	if missing, total := missingGitConfigCountPairsInEnv(environ); total > 0 {
 		_, _ = fmt.Fprintf(os.Stderr,
 			"af: session_env_passthrough forwards GIT_CONFIG_COUNT without its required indexed pairs (%s); git would fail the count without them, so af pinned the count empty — also forward the pair names through session_env_passthrough\n",
-			strings.Join(missing, ", "))
+			FormatGitConfigMissingPairs(missing, total))
 	}
 	return neutralized
-}
-
-// missingGitConfigCountPairsInEnv lists the indexed pair names that a live
-// GIT_CONFIG_COUNT in environ requires but environ does not contain. It
-// names only indices, never values, so it is safe to render in a diagnostic.
-func missingGitConfigCountPairsInEnv(environ []string) []string {
-	value, ok := envEntryValue(environ, "GIT_CONFIG_COUNT")
-	if !ok {
-		return nil
-	}
-	count := parseGitConfigCount(value)
-	if count <= 0 {
-		return nil
-	}
-	var missing []string
-	for i := 0; i < count; i++ {
-		key := "GIT_CONFIG_KEY_" + strconv.Itoa(i)
-		val := "GIT_CONFIG_VALUE_" + strconv.Itoa(i)
-		if _, has := envEntryValue(environ, key); !has {
-			missing = append(missing, key)
-		}
-		if _, has := envEntryValue(environ, val); !has {
-			missing = append(missing, val)
-		}
-	}
-	sort.Strings(missing)
-	return missing
 }
 
 // stampPaneRootPid records the pane's identity bundle in pane-scoped user

@@ -2,47 +2,229 @@ package sessionenv
 
 import (
 	"fmt"
-	"sort"
+	"math"
 	"strconv"
 	"strings"
 )
 
 // This file holds the GIT_CONFIG_COUNT completeness helpers shared by the
-// boundary (session-creation validation) and the exec shims (defense-in-depth
-// neutralization). GIT_CONFIG_COUNT is whole: git treats the count as
-// authoritative and fails fatally ("error: missing config key GIT_CONFIG_KEY_0")
-// when the count names pairs that are not present, so af refuses a count-only
-// forward whose value resolves to N>0 without GIT_CONFIG_KEY_0..N-1 /
-// GIT_CONFIG_VALUE_0..N-1, and — where the forward bypassed the create refusal
-// — pins the count defined-empty at the exec shim so git reads 0 and does not
-// fail. strtoul("") is 0 with no error, so an empty count makes every indexed
-// GIT_CONFIG_KEY_* / GIT_CONFIG_VALUE_* pair inert — the same shape an
-// unforwarded count takes.
+// exec shims (internal/sessionenv/exec_unix.go) and the docker account
+// blanking (session/agent_credentials_env_loader.go). GIT_CONFIG_COUNT is
+// whole: git treats the count as authoritative and fails fatally ("error:
+// missing config key GIT_CONFIG_KEY_0") when the count names indexed pairs
+// that are not present, so when a live count arrives without its required
+// pairs af pins it defined-empty — strtoul("") is 0 with no error, which
+// makes every indexed GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* pair inert, the
+// same shape an unforwarded count takes — and warns naming the missing
+// indices. A complete forward (count plus every required pair present) is
+// untouched.
+//
+// The check runs where the environment is handed to the session, because
+// that is the only place the count's value is known: on local/ssh it lives
+// in the tmux server's environment at pane spawn, on docker in the
+// daemon's environment the bare -e resolves against — neither is
+// observable where the session or its pass-through list is created, so a
+// create-time verdict could only guess.
 
-// parseGitConfigCount parses a GIT_CONFIG_COUNT value the way git's strtoul
-// does: leading whitespace is skipped, the following run of base-10 digits is
-// the count, and an empty or non-numeric-leading value yields 0. A count of 0
-// makes every indexed GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* pair inert, so no
-// pairs are required. Git itself rejects a negative count, and a host value
-// of that shape is already broken regardless of forwarding, so only
-// non-negative leading digits are recognized.
-func parseGitConfigCount(value string) int {
-	value = strings.TrimLeftFunc(value, func(r rune) bool {
-		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
-	})
-	n := 0
-	seen := false
-	for _, r := range value {
-		if r < '0' || r > '9' {
+// missingPairReportCap bounds the pair names a diagnostic lists for one
+// broken forward: a valid count can reach INT_MAX, so the report names the
+// first missing indices in order plus the exact total rather than
+// materializing all 2N names.
+const missingPairReportCap = 8
+
+// parseGitConfigCount parses a GIT_CONFIG_COUNT value with git's own
+// grammar — config.c's strtoul(env, &endp, 10), after which git dies on
+// errno == ERANGE or count > INT_MAX ("too many entries in
+// GIT_CONFIG_COUNT") and on a nonempty *endp ("bogus count in
+// GIT_CONFIG_COUNT"). It returns (n, true) for a value git accepts as
+// count n — "" and "-0" are the 0 git reads — and (0, false) for a value
+// git itself rejects, which callers treat as not-a-count: the environment
+// is left to git's own diagnostic, which names the malformed value rather
+// than any index af guessed.
+func parseGitConfigCount(value string) (int, bool) {
+	if value == "" {
+		return 0, true // strtoul("") is 0 with *endp at NUL: git reads count 0
+	}
+	s := strings.TrimLeft(value, " \t\n\v\f\r")
+	neg := false
+	if rest, ok := strings.CutPrefix(s, "+"); ok {
+		s = rest
+	} else if rest, ok := strings.CutPrefix(s, "-"); ok {
+		neg = true
+		s = rest
+	}
+	if s == "" {
+		// All whitespace or a lone sign: strtoul converts nothing and leaves
+		// *endp at the first byte — git dies "bogus count".
+		return 0, false
+	}
+	var n uint64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			// Trailing garbage: strtoul stops here, *endp != 0 — git dies
+			// "bogus count".
+			return 0, false
+		}
+		n = n*10 + uint64(c-'0')
+		if n > math.MaxInt32 {
+			// strtoul ERANGE or >INT_MAX — git dies "too many entries".
+			return 0, false
+		}
+	}
+	if neg && n != 0 {
+		// strtoul negates modulo ULONG_MAX+1, so "-k" is a huge count for
+		// any k>0 — git dies "too many entries". "-0" is a plain 0.
+		return 0, false
+	}
+	return int(n), true
+}
+
+// gitConfigPairIndex parses the numeric suffix of a GIT_CONFIG_KEY_i /
+// GIT_CONFIG_VALUE_i name and reports whether the name is index i exactly
+// — git asks for the literal spelling, so "GIT_CONFIG_KEY_00" is not
+// index 0 and a sign or trailing byte is not an index at all.
+func gitConfigPairIndex(name, prefix string) (int, bool) {
+	s, ok := strings.CutPrefix(name, prefix)
+	if !ok || s == "" {
+		return 0, false
+	}
+	var n uint64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + uint64(c-'0')
+		if n > math.MaxInt32 {
+			return 0, false
+		}
+	}
+	idx := int(n)
+	if name != prefix+strconv.Itoa(idx) {
+		return 0, false
+	}
+	return idx, true
+}
+
+// gitPairPresence records, per index i, whether the pair members a live
+// count requires are usable: key[i] means GIT_CONFIG_KEY_i will be defined
+// and non-empty for git (git fails an empty key — "empty config key" —
+// exactly as it fails a missing one), value[i] means GIT_CONFIG_VALUE_i
+// will be defined at all (an empty value is a legal empty config value).
+type gitPairPresence struct {
+	key   map[int]bool
+	value map[int]bool
+}
+
+// missing reports the exact number of required pair names absent under p
+// for a live count of N, and up to cap of their names in index order. The
+// totals come from the presence sets and the listing stops at cap, so the
+// cost tracks how many pairs are present, never the count value.
+func (p gitPairPresence) missing(count, cap int) (names []string, total int) {
+	presentKeys, presentValues := 0, 0
+	for i, ok := range p.key {
+		if ok && i < count {
+			presentKeys++
+		}
+	}
+	for i, ok := range p.value {
+		if ok && i < count {
+			presentValues++
+		}
+	}
+	total = 2*count - presentKeys - presentValues
+	if total <= 0 {
+		return nil, 0
+	}
+	for i := 0; i < count && len(names) < cap; i++ {
+		if !p.key[i] {
+			names = append(names, "GIT_CONFIG_KEY_"+strconv.Itoa(i))
+		}
+		if len(names) >= cap {
 			break
 		}
-		n = n*10 + int(r-'0')
-		seen = true
+		if !p.value[i] {
+			names = append(names, "GIT_CONFIG_VALUE_"+strconv.Itoa(i))
+		}
 	}
-	if !seen {
-		return 0
+	return names, total
+}
+
+// gitPairPresenceInEnv indexes the GIT_CONFIG_KEY_i / GIT_CONFIG_VALUE_i
+// entries an environment carries, first occurrence winning (getenv
+// semantics): a defined-empty KEY counts as unusable — git fails it with
+// "empty config key" — and a defined-empty VALUE counts as present.
+func gitPairPresenceInEnv(environ []string) gitPairPresence {
+	p := gitPairPresence{key: map[int]bool{}, value: map[int]bool{}}
+	for _, entry := range environ {
+		name, v, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if i, ok := gitConfigPairIndex(name, "GIT_CONFIG_KEY_"); ok {
+			if _, seen := p.key[i]; !seen {
+				p.key[i] = v != ""
+			}
+			continue
+		}
+		if i, ok := gitConfigPairIndex(name, "GIT_CONFIG_VALUE_"); ok {
+			if _, seen := p.value[i]; !seen {
+				p.value[i] = true
+			}
+		}
 	}
-	return n
+	return p
+}
+
+// gitPairPresenceForwarded indexes the pair names a pass-through list
+// forwards and reports what the forward DELIVERS for a docker account
+// session: a forwarded pair arrives with the source's value when the
+// source defines it — a defined-empty source value delivers a
+// defined-empty pair, which is unusable for a KEY but legal for a VALUE —
+// and when the source leaves it unset, arrives defined-and-empty only
+// under an agent whose loader blanking emits NAME= for unset pair names
+// (accountLoaderBlankEntries; gemini), staying absent under every other
+// agent. wanted is the operator's normalized name set, built once by the
+// caller.
+func gitPairPresenceForwarded(agent string, wanted map[string]struct{}, source []string) gitPairPresence {
+	pairsBlanked := len(AccountLoaderFilledNames(agent)) > 0
+	values := make(map[string]string, len(source))
+	for _, entry := range source {
+		if n, v, ok := strings.Cut(entry, "="); ok {
+			if _, seen := values[n]; !seen {
+				values[n] = v
+			}
+		}
+	}
+	p := gitPairPresence{key: map[int]bool{}, value: map[int]bool{}}
+	for name := range wanted {
+		v, set := values[name]
+		if i, ok := gitConfigPairIndex(name, "GIT_CONFIG_KEY_"); ok {
+			p.key[i] = set && v != ""
+			continue
+		}
+		if i, ok := gitConfigPairIndex(name, "GIT_CONFIG_VALUE_"); ok {
+			p.value[i] = set || pairsBlanked
+		}
+	}
+	return p
+}
+
+// gitConfigCountInEnv resolves the count an environment carries to a live
+// positive count git accepts — (N, true) — and reports false when the name
+// is absent, reads as 0, or holds a value git itself rejects (no pairs are
+// required; that failure is git's to name, not af's to guess at).
+func gitConfigCountInEnv(environ []string) (int, bool) {
+	value, ok := envEntryValue(environ, "GIT_CONFIG_COUNT")
+	if !ok {
+		return 0, false
+	}
+	count, valid := parseGitConfigCount(value)
+	if !valid || count <= 0 {
+		return 0, false
+	}
+	return count, true
 }
 
 // envEntryValue reports whether name is present in environ (defined, even
@@ -81,115 +263,79 @@ func forceEnvEntryEmpty(environ []string, name string) []string {
 	return out
 }
 
-// gitConfigCountMissingPairs reports whether a pass-through list forwards
-// GIT_CONFIG_COUNT with a live value resolving to N>0 in source WITHOUT also
-// forwarding every required indexed pair GIT_CONFIG_KEY_0..N-1 and
-// GIT_CONFIG_VALUE_0..N-1. When it does, missing is the sorted list of pair
-// names the operator still needs to forward; otherwise missing is nil. A
-// count that is not forwarded, absent in source, empty, 0, or non-numeric is
-// a complete forward — no pairs are required.
+// GitConfigCountForwardMissingPairs reports whether a pass-through list
+// forwards GIT_CONFIG_COUNT with a live value of N>0 in source WITHOUT the
+// forward's delivery also carrying every required indexed pair
+// GIT_CONFIG_KEY_0..N-1 / GIT_CONFIG_VALUE_0..N-1 — counting a pair that
+// would arrive defined-but-empty as missing for a KEY (git fails "empty
+// config key" exactly as it fails "missing config key"). names holds up to
+// missingPairReportCap missing pair names in index order and total the
+// exact missing count, so a diagnostic stays bounded no matter how large N
+// is; total is 0 for a complete forward — the count is not forwarded, is
+// absent or 0 in source, holds a value git itself rejects, or every
+// required pair travels with it. agent decides what a forwarded-but-unset
+// pair name delivers (see gitPairPresenceForwarded).
 //
-// This is the shape test against the OPERATOR'S LIST and the value's source:
-// it answers "did the operator forward a count whose pairs did not travel
-// with it", which is what refuse-loudly and the docker blanking both need.
-func gitConfigCountMissingPairs(passthrough, source []string) (count int, missing []string) {
+// Provisioners use this to neutralize a count-only forward that reached
+// the environment boundary, and to warn before doing so.
+func GitConfigCountForwardMissingPairs(agent string, passthrough, source []string) (names []string, total int) {
 	wanted := make(map[string]struct{}, len(passthrough))
 	for _, name := range passthrough {
 		wanted[strings.TrimSpace(name)] = struct{}{}
 	}
 	if _, ok := wanted["GIT_CONFIG_COUNT"]; !ok {
-		return 0, nil
+		return nil, 0
 	}
-	value, present := envEntryValue(source, "GIT_CONFIG_COUNT")
-	if !present {
-		return 0, nil
+	count, ok := gitConfigCountInEnv(source)
+	if !ok {
+		return nil, 0
 	}
-	count = parseGitConfigCount(value)
-	if count <= 0 {
-		return count, nil
-	}
-	for i := 0; i < count; i++ {
-		key := "GIT_CONFIG_KEY_" + strconv.Itoa(i)
-		val := "GIT_CONFIG_VALUE_" + strconv.Itoa(i)
-		if _, ok := wanted[key]; !ok {
-			missing = append(missing, key)
-		}
-		if _, ok := wanted[val]; !ok {
-			missing = append(missing, val)
-		}
-	}
-	sort.Strings(missing)
-	return count, missing
+	return gitPairPresenceForwarded(agent, wanted, source).missing(count, missingPairReportCap)
 }
 
-// GitConfigCountForwardMissingPairs returns the sorted indexed pair names a
-// pass-through list is missing for a forwarded GIT_CONFIG_COUNT whose value
-// resolves to N>0 in source — GIT_CONFIG_KEY_0..N-1 and
-// GIT_CONFIG_VALUE_0..N-1 the operator did not also forward. It returns nil
-// when the forward is complete (the count is not forwarded or resolves to 0
-// or is absent, or every required pair is also forwarded). Provisioners use
-// it to neutralize a count-only forward that the session-creation refusal
-// missed, and to warn before doing so.
-func GitConfigCountForwardMissingPairs(passthrough, source []string) []string {
-	_, missing := gitConfigCountMissingPairs(passthrough, source)
-	return missing
+// missingGitConfigCountPairsInEnv is the exec-shim diagnostic counterpart:
+// the bounded missing-pair report for a live GIT_CONFIG_COUNT in the
+// environment about to reach the agent.
+func missingGitConfigCountPairsInEnv(environ []string) (names []string, total int) {
+	count, ok := gitConfigCountInEnv(environ)
+	if !ok {
+		return nil, 0
+	}
+	return gitPairPresenceInEnv(environ).missing(count, missingPairReportCap)
 }
 
-// ValidateGitConfigCountForward refuses a pass-through list that forwards
-// GIT_CONFIG_COUNT with a live value of N>0 in source without also forwarding
-// every required indexed pair GIT_CONFIG_KEY_0..N-1 and
-// GIT_CONFIG_VALUE_0..N-1. Such a half-forward delivers a count git treats as
-// authoritative alongside zero pairs, which makes every git invocation fail
-// fatally (git >=2.31: "missing config key GIT_CONFIG_KEY_0"). af's stated
-// posture is to refuse loudly; the remedy is to also forward the named
-// missing pair names through the same pass-through list.
-//
-// source is the environment the count value resolves against — the daemon's
-// environment for a docker session (where a bare -e GIT_CONFIG_COUNT reads
-// it) or os.Environ for a local/ssh session (where the exec filter's
-// keep-if-set keeps it). The check names only indices, never values, so a
-// malformed NAME=value entry cannot render a credential in the error.
-func ValidateGitConfigCountForward(passthrough, source []string) error {
-	count, missing := gitConfigCountMissingPairs(passthrough, source)
-	if len(missing) == 0 {
-		return nil
+// FormatGitConfigMissingPairs renders the bounded missing-pair report for
+// a diagnostic: the capped names plus an "and N more" tail when the exact
+// total exceeds them. It names indices only, never values.
+func FormatGitConfigMissingPairs(names []string, total int) string {
+	if total <= len(names) {
+		return strings.Join(names, ", ")
 	}
-	return fmt.Errorf("session_env_passthrough forwards GIT_CONFIG_COUNT (resolves to %d in the environment) without its required indexed pairs; git treats the count as authoritative and fails fatally when the pairs are absent — also forward %s through session_env_passthrough",
-		count, strings.Join(missing, ", "))
+	return fmt.Sprintf("%s, … and %d more", strings.Join(names, ", "), total-len(names))
 }
 
 // NeutralizeIncompleteGitConfigCount returns environ with GIT_CONFIG_COUNT
 // pinned defined-empty when its value resolves to a positive count whose
-// required indexed pairs are not all present in environ. It also reports
+// required indexed pairs are not all usable in environ. It also reports
 // whether it neutralized, so callers can surface the operator-facing
 // diagnostic the silent-blank would otherwise hide.
 //
-// This is the defense-in-depth counterpart to ValidateGitConfigCountForward:
-// it makes the delivered environment safe even when a forward bypassed the
-// session-creation refusal — an older af daemon, an in-flight
-// SetEnvPassthrough, or an environment whose count gained a value after
-// admission. Presence is read from the FINAL environment (the one about to
-// reach the agent or git): a required pair absent here is absent because the
-// operator did not forward it or forwarded it without a value, and git fails
-// either way, so the count is pinned empty (which strtoul reads as 0, making
-// the whole family inert) rather than delivered live. A complete forward —
-// count plus every required pair present — is left untouched.
+// Presence is read from the FINAL environment (the one about to reach the
+// agent or git): a required pair absent or defined-empty there is unusable
+// because the operator did not forward it or forwarded it without a value,
+// and git fails either way — "missing config key" for an absent pair,
+// "empty config key" for a defined-empty KEY — so the count is pinned
+// empty (which strtoul reads as 0, making the whole family inert) rather
+// than delivered live. A defined-empty VALUE is a legal empty config value
+// and counts as present. A complete forward — count plus every required
+// pair present — and a count value git itself rejects are left untouched.
 func NeutralizeIncompleteGitConfigCount(environ []string) ([]string, bool) {
-	value, ok := envEntryValue(environ, "GIT_CONFIG_COUNT")
+	count, ok := gitConfigCountInEnv(environ)
 	if !ok {
 		return environ, false
 	}
-	count := parseGitConfigCount(value)
-	if count <= 0 {
-		return environ, false
-	}
-	for i := 0; i < count; i++ {
-		if _, hasKey := envEntryValue(environ, "GIT_CONFIG_KEY_"+strconv.Itoa(i)); !hasKey {
-			return forceEnvEntryEmpty(environ, "GIT_CONFIG_COUNT"), true
-		}
-		if _, hasVal := envEntryValue(environ, "GIT_CONFIG_VALUE_"+strconv.Itoa(i)); !hasVal {
-			return forceEnvEntryEmpty(environ, "GIT_CONFIG_COUNT"), true
-		}
+	if _, total := gitPairPresenceInEnv(environ).missing(count, 0); total > 0 {
+		return forceEnvEntryEmpty(environ, "GIT_CONFIG_COUNT"), true
 	}
 	return environ, false
 }

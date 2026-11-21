@@ -8,6 +8,35 @@ Read [Release process](release-process.md) first for channels and versioning.
 Use the [release testing plan](release-testing-plan.md) for validation, then
 consult the relevant notes below when preparing the announcement.
 
+## `session_env_passthrough`: a `GIT_CONFIG_COUNT` forward without its pairs is neutralized, not delivered live
+
+- A pass-through list that forwards `GIT_CONFIG_COUNT` while it resolves to a
+  positive count in the environment, without also forwarding the matching
+  `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` … pairs, used to deliver the live
+  count with zero pairs — a state in which every `git` invocation fails
+  fatally (`error: missing config key GIT_CONFIG_KEY_0`), including af's own
+  provisioning `git config --global --add safe.directory "*"`, which surfaced
+  on the docker backend as a provisioning teardown that blamed git rather
+  than the configuration. af now pins the count defined-empty wherever the
+  environment is handed to the session — the exec shim on local/ssh and
+  claimed account launches, the agent-server handoff, and the docker `-e`
+  assembly — with a warning naming the missing indices, so git reads a count
+  of 0 and does not fail. The check runs at delivery because that is the only
+  place the count's value is known: it lives in the tmux server's environment
+  at pane spawn or the daemon's environment a bare `-e` resolves against,
+  which session creation cannot see. The remedy is to also forward the
+  indexed pair names through `session_env_passthrough`.
+- A pair that would arrive defined-but-empty counts as missing for the KEY —
+  git fails `GIT_CONFIG_KEY_n=` with `empty config key` exactly as it fails an
+  absent one — while a defined-empty `GIT_CONFIG_VALUE_n` is a legal empty
+  value and does not trip the check. A count value git itself rejects
+  (non-numeric, above INT_MAX) is left to git's own diagnostic rather than
+  iterated.
+- `docker.run_args` entries that name `GIT_CONFIG_COUNT` on an account-scoped
+  session are still refused — now with a message that names the indexed pairs
+  the count activates, so the count-only forward af itself used to suggest
+  does not route the operator into the broken configuration.
+
 ## Account-swap carries record a zero-byte carry, and a re-run keeps that record (#7274)
 
 - **What changed.** When a same-agent account swap carries a conversation
@@ -438,29 +467,6 @@ written back.
   `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` or
   `AWS_SHARED_CREDENTIALS_FILE` your setup uses). Aider is unaffected — its
   Azure entries are Azure OpenAI service keys, not cloud credentials.
-
-## `session_env_passthrough`: a `GIT_CONFIG_COUNT` forward is refused without its pairs
-
-- A pass-through list that forwards `GIT_CONFIG_COUNT` while it resolves to a
-  positive count in the environment, without also forwarding the matching
-  `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` … pairs, now fails the create with a
-  refusal naming exactly the missing indices. Git treats `GIT_CONFIG_COUNT` as
-  authoritative and fails fatally (`error: missing config key GIT_CONFIG_KEY_0`)
-  when the count names pairs that are not present, so a half-forward broke
-  every `git` invocation in the session — including af's own provisioning
-  `git config --global --add safe.directory "*"`, which surfaced on the docker
-  backend as a provisioning teardown that blamed git rather than the
-  configuration. The refusal is defense-in-depth with a neutralize: sessions
-  that bypass the create refusal (an older daemon, an in-flight
-  `SetEnvPassthrough`, a count that gains a value after admission) still pin the
-  count defined-empty at the exec shim, with a warning naming the missing
-  indices, so git reads a count of 0 and does not fail. The remedy for either
-  path is the same: also forward the indexed pair names through
-  `session_env_passthrough`.
-- `docker.run_args` entries that name `GIT_CONFIG_COUNT` on an account-scoped
-  session are still refused — now with a message that names the indexed pairs
-  the count activates, so the count-only forward af itself used to suggest does
-  not route the operator into the broken configuration.
 
 ## Keymap changes
 
