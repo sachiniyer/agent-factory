@@ -170,12 +170,40 @@ func TestIssue7618PendingExitMCPDialogNeverReadsClear(t *testing.T) {
 		"claude_2_1_322_mcp_multi_server_dialog.ansi",
 		"claude_2_1_322_mcp_multi_server_dialog_three.ansi",
 		"claude_2_1_322_mcp_multi_server_dialog_three_wide.ansi",
+		// The picker's footer is whole on the last row of each, but its
+		// header or a server name wraps at this width, so the strict grammar
+		// declines the reconstructed pane and the unreadable reader holds it
+		// (claudeMCPServersUnreadable). Before this fix the footer-swap only
+		// accepted the complete picker, so these read clear during the notice
+		// and the user's prompt/Enter reached the live, pre-checked picker.
+		"claude_2_1_322_mcp_multi_server_dialog_40_columns.ansi",
+		"claude_2_1_322_mcp_multi_server_dialog_long_name.ansi",
 	} {
 		for _, notice := range []string{"Press Ctrl-C again to exit", "Press Ctrl-D again to exit"} {
 			content := pendingExitPicker(t, readTrustFixture(t, name), notice)
 			requireRemnantHold(t, name+" with "+notice, content)
 			require.Equal(t, DialogHoldOther, claudeDialogHoldKind(claudeScreenOf(content)),
 				"%s with %s: the picker behind the notice is not the folder-trust dialog", name, notice)
+		}
+	}
+	// A pane too short for the picker's header scrolls it off. The grammar
+	// and the unreadable reader both decline the reconstructed pane (no
+	// header), but the trailing-rows reader holds it (claudeMCPServersTailOf).
+	// Before this fix the footer-swap only accepted the complete picker, so
+	// this read clear during the notice too. Crop each fixture to its rows
+	// below the header, then read the notice where the footer was.
+	for _, name := range []string{
+		"claude_2_1_322_mcp_multi_server_dialog.ansi",
+		"claude_2_1_322_mcp_multi_server_dialog_six_scrolled.ansi",
+	} {
+		rows, header := mcpServersPickerRowsOf(t, name)
+		require.Positive(t, header, "%s shows the picker's header to crop", name)
+		cropped := strings.Join(rows[header+1:], "\n")
+		for _, notice := range []string{"Press Ctrl-C again to exit", "Press Ctrl-D again to exit"} {
+			content := pendingExitPicker(t, cropped, notice)
+			requireRemnantHold(t, name+" with its header scrolled off and "+notice, content)
+			require.Equal(t, DialogHoldOther, claudeDialogHoldKind(claudeScreenOf(content)),
+				"%s with its header scrolled off and %s: the picker behind the notice is not the folder-trust dialog", name, notice)
 		}
 	}
 	// The single-server dialog with the notice is named not at all either:

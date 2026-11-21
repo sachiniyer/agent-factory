@@ -376,11 +376,14 @@ const claudeLaunchDialogPendingExitMaxNotice = len("Press") + claudeLaunchDialog
 // The multi-server picker (#7166) paints a footer of its own
 // (claudeMCPServersFooter), so the footer-swap loop above never substitutes one.
 // It is tried the same way after: the pane with that footer read in place of the
-// notice is the complete picker (claudeMCPServersPickerOf). Its footer is the
-// only content the picker paints there, so the notice can only have replaced it
-// once the picker was complete. af holds either way and names the picker not at
-// all (folder is false): a hold is the same "hold, name it or not, send no key"
-// shape the rest of the reader keeps.
+// notice is the picker (claudeMCPServersPickerOf). Its footer is the only content
+// the picker paints there, so the notice can only have replaced it once the
+// picker was up. A narrow pane wraps its header or a server name, and a short
+// one scrolls its header off; the grammar reads none of those, but the
+// unreadable reader holds the wrapped forms and the trailing-rows reader
+// (claudeMCPServersTailOf) holds the scrolled-off one. af holds either way and
+// names the picker not at all (folder is false): a hold is the same "hold, name
+// it or not, send no key" shape the rest of the reader keeps.
 //
 // A working agent's composer paints the same notice in its status row. That
 // row is straight under the composer's closing line, a plain rule or its box's
@@ -422,10 +425,17 @@ func claudeLaunchDialogPendingExitOf(pane claudeLaunchDialogPane) (held, folder 
 		// The multi-server picker's footer is its own, not shared with the
 		// folder-trust dialogs, so the swap loop above never substitutes it.
 		// Try it: the pane with the picker's footer read where the notice is
-		// must be the complete picker, whose footer is the only content it
-		// paints where the notice now sits. folder is false: this is the MCP
-		// picker, not the folder-trust dialog, and af names it not at all.
-		if screen, _ := claudeLaunchDialogFooterInPlace(pane, first, last, claudeMCPServersFooter); claudeMCPServersPickerOf(screen) == claudeMCPServersComplete {
+		// is the picker, whose footer is the only content it paints where the
+		// notice now sits. folder is false: this is the MCP picker, not the
+		// folder-trust dialog, and af names it not at all. The picker reads
+		// three ways: whole (claudeMCPServersComplete); a header or server
+		// name a narrow pane wraps (claudeMCPServersUnreadable, whose reader
+		// the grammar defers to); or a header a short pane scrolls off, which
+		// neither the grammar nor the unreadable reader finds but the
+		// trailing-rows reader holds (claudeMCPServersTailOf). Each is the
+		// picker behind the notice; af holds either way and sends no key.
+		if screen, _ := claudeLaunchDialogFooterInPlace(pane, first, last, claudeMCPServersFooter); claudeMCPServersPickerOf(screen) == claudeMCPServersComplete ||
+			claudeMCPServersUnreadableOf(screen) || claudeMCPServersTailOf(screen) {
 			return true, false
 		}
 		return false, false
