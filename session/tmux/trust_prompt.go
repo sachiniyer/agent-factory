@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -470,12 +471,7 @@ func compactCodexTrustPane(content string) (flat string, starts []int) {
 	clean := normalizeCodexUpdatePane(content)
 	var b strings.Builder
 	for _, line := range strings.Split(clean, "\n") {
-		stripped := strings.Map(func(r rune) rune {
-			if unicode.IsSpace(r) {
-				return -1
-			}
-			return r
-		}, line)
+		stripped := codexStripWhitespace(line)
 		if stripped == "" {
 			continue
 		}
@@ -483,6 +479,29 @@ func compactCodexTrustPane(content string) (flat string, starts []int) {
 		b.WriteString(stripped)
 	}
 	return b.String(), starts
+}
+
+// codexStripWhitespace removes every whitespace rune from s but keeps bytes
+// that do not decode: a capture can end mid-rune — one byte of the two-byte
+// "·" the new modal's footer paints, for example — and strings.Map would
+// already have flattened the byte to U+FFFD. Kept raw, the byte still works
+// as a prefix of the glyph the modal was painting (it matches or it breaks
+// the match, both of which are right); flattened it could never match.
+func codexStripWhitespace(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if !unicode.IsSpace(r) {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
 }
 
 // lastCodexTrustRow returns the last offset in flat[:before] at which one of
