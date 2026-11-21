@@ -244,6 +244,40 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() (held bool) {
 			t.noteDialogKeystroke(codexDirectoryTrustDialogName, codexDirectoryTrustAffirmative, "Enter")
 			return true
 		}
+		// The directory-trust modal paints top-down, so a capture that lands
+		// mid-paint — before the No row and the footer are drawn — ends with
+		// the selected "› 1. Yes, continue" row as the last visible content.
+		// CodexTrustPromptPresent declines that frame (its ordered four-row
+		// hierarchy is not yet complete), and the same row's leading "›" glyph
+		// makes isReadyContent accept it (task/runner.go hasCodexComposerLine),
+		// so without this hold the create path's WaitForReady passes on the
+		// partial frame and DismissTrustPrompt reads the fall-through false as
+		// "dialog-free" — the briefing is pasted into the live modal and the
+		// delivery's trailing Enter selects Yes, exactly the #2220 failure
+		// this branch was written to prevent.
+		//
+		// The hidden-cursor oracle is the same one the complete-modal branch
+		// above and inspectCodexSafetyPrompt both trust: Codex's
+		// ListSelectionView hides the terminal cursor while the ordinary
+		// composer exposes one, so a visible cursor means a composer owns the
+		// pane (e.g. quoted dialog text in scrollback above an active
+		// composer) and the hold does not fire — delivery stays clear to
+		// proceed. A cursor-read failure fails closed just as it does above:
+		// blocking costs one poll of the ~20s dismissal budget, but
+		// delivering the briefing into a live modal is irreversible. No
+		// keystroke is sent on this path; Enter stays gated on the complete
+		// CodexTrustPromptPresent predicate, so delivery stays blocked until
+		// the next poll observes either the complete modal (dismissed above)
+		// or the released composer.
+		if codexDirectoryTrustTrailingRows(content) {
+			cursor, err := t.readPaneCursorState()
+			if err != nil {
+				return true
+			}
+			if !cursor.Visible {
+				return true
+			}
+		}
 	case ProgramGemini:
 		// Gemini CLI's folder-trust dialog (#7162): answered by label with
 		// "Trust folder", held while it paints and while Gemini relaunches
@@ -345,6 +379,39 @@ func CodexTrustPromptPresent(content string) bool {
 	}
 	return question >= 0 && question < selectedYes && selectedYes < noOption &&
 		noOption < affordance && affordance == last
+}
+
+// codexDirectoryTrustTrailingRows reports whether the visible pane ends with
+// the directory-trust modal's selected Yes row as its last non-blank content,
+// optionally with the modal's question painted above it. Codex paints the modal
+// top-down — question, then selected Yes row, then the No row, then the
+// "Press enter to continue" footer — so a capture taken mid-paint, before the
+// No row and footer land, leaves exactly this tail. CodexTrustPromptPresent
+// requires the complete four-row ordered hierarchy and declines that frame,
+// and the selected Yes row's leading "›" glyph is also Codex's composer glyph,
+// so isReadyContent's hasCodexComposerLine arm (task/runner.go) accepts the
+// same partial frame — the create-path wedge this file's #3302 contract says
+// must not be reported clear.
+//
+// The trailing row alone is NOT proof a modal owns the pane. The dialog text
+// can sit verbatim in quoted agent output above an active composer, whose
+// visible terminal cursor separately marks the pane as composer-owned.
+// CheckAndHandleTrustPrompt pairs this predicate with that hidden-cursor
+// oracle — the same one the complete-modal branch above and
+// inspectCodexSafetyPrompt both already rely on — before holding. The helper
+// answers only the trailing-rows question; the caller marks a held frame only
+// when the cursor is hidden or unreadable.
+func codexDirectoryTrustTrailingRows(content string) bool {
+	content = ansiCSISequence.ReplaceAllString(strings.ReplaceAll(content, "\r\n", "\n"), "")
+	lines := strings.Split(content, "\n")
+	for idx := len(lines) - 1; idx >= 0; idx-- {
+		line := strings.TrimSpace(strings.TrimSuffix(lines[idx], "\r"))
+		if line == "" {
+			continue
+		}
+		return line == "› 1. Yes, continue"
+	}
+	return false
 }
 
 // DocTrustPromptPresent reports whether content ends at the documentation-link
