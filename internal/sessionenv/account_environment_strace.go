@@ -141,13 +141,32 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 	if strings.HasPrefix(text, "--") {
 		name, operand, hasEq := strings.Cut(text[2:], "=")
 		if !hasEq && !complete {
-			return true, i + 1, nil // the option name itself is unprovable
+			// A literal long-option dash prefix glued to an unquoted parameter
+			// expansion (`--$OPT`, `--en$OPT`) yields a non-empty name with
+			// complete=false; at runtime the shell word-splits the unquoted
+			// expansion inside the dash-glued word, so the option operand AND
+			// a traced command can come from inside the variable even though
+			// no literal argv word follows. A non-terminal suspect is dropped
+			// when the run ends at this word, so this fails closed as a
+			// terminal — symmetric with the wholly-dynamic `text == ""` case
+			// and with the head-level refusal of `strace "$OPT" codex`.
+			return end(refuseLeadingExpansion, true)
 		}
 		// resolveLongOption reads the name the way getopt_long does — exact, or
 		// an unambiguous prefix — so an abbreviation of --env resolves to env
 		// instead of passing as an unknown name.
 		resolved, requiresArg, known := resolveLongOption(name, straceLongOptions)
 		if !known {
+			// An unknown name with complete=false is the same risk shape
+			// (`--unknown=$OPT`): the unquoted expansion can word-split into
+			// the operand plus a traced command, and a non-terminal suspect is
+			// dropped when the run ends at this word. A literal unknown name
+			// (complete=true) keeps the existing non-terminal refusal so the
+			// trace-nothing behavior for an unknown option with no command
+			// following stays admitted.
+			if !complete {
+				return end(refuseLeadingExpansion, true)
+			}
 			return true, i + 1, nil
 		}
 		if resolved == "env" {
@@ -193,8 +212,20 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 		return false, i + 1, nil
 	}
 	// A cluster that never reached an operand-taking letter and still has an
-	// unplaced or unprovable part has an unknown identity.
-	return !complete || strings.Trim(cluster, straceShortFlags) != "" || cluster == "", i + 1, nil
+	// unplaced or unprovable part has an unknown identity. With complete=false
+	// the cluster carries an unquoted parameter expansion (`-$OPT`, `-f$OPT`,
+	// `-Q$OPT`): the shell word-splits the unquoted expansion inside the
+	// dash-glued word, so the option AND a traced command can come from inside
+	// the variable even though no literal argv word follows. A non-terminal
+	// suspect is dropped when the run ends at this word, so this fails closed as
+	// a terminal — symmetric with the wholly-dynamic `text == ""` case and
+	// with the long-option path above. A literal cluster (complete=true) keeps
+	// the existing non-terminal refusal: an unknown short flag with no command
+	// following runs nothing, so the trace cannot place an env mutation.
+	if !complete {
+		return end(refuseLeadingExpansion, true)
+	}
+	return strings.Trim(cluster, straceShortFlags) != "" || cluster == "", i + 1, nil
 }
 
 // straceEnvOperandRefused judges the var[=val] operand of -E/--env from its
