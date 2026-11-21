@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
@@ -731,9 +732,16 @@ func TestCheckAndHandleTrustPrompt_CodexSafetyDialogIsCodexOnly(t *testing.T) {
 }
 
 func TestCheckAndHandleTrustPrompt_CodexTrustProseAloneInjectsNothing(t *testing.T) {
+	// Prose fragments that are NOT the directory-trust modal's selected row
+	// or anything after it: the question alone, and the option labels plus
+	// footer without the selection marker. Neither is the trailing shape a
+	// live modal leaves mid-paint, so the live-session poll must never inject
+	// Enter on either. The question followed by the selected Yes row — the
+	// modal's own mid-paint shape — is a different, positive modal-owned
+	// signal codexDirectoryTrustTrailingRows holds instead; see
+	// TestCheckAndHandleTrustPrompt_CodexDirectoryDialogMidPaintHolds.
 	fragments := []string{
 		"Do you trust the contents of this directory?",
-		"Do you trust the contents of this directory?\n› 1. Yes, continue",
 		"Yes, continue\n2. No, quit\nPress enter to continue",
 	}
 	for _, content := range fragments {
@@ -821,6 +829,450 @@ func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogCursorReadErrorFailsClose
 		"a cursor-read error must be treated as a blocking dialog, not a dialog-free pane")
 	require.Empty(t, sentKeystrokes(commands),
 		"no Enter may be injected when the modal state cannot be confirmed; got %v", commands)
+}
+
+// Codex's directory-trust modal as rust-v0.156.0 on paints it — "Folder
+// access", the question, "› 1. Trust and continue" / "  2. Quit", and the
+// "enter continue · esc quit" footer — checked verbatim in upstream
+// codex-rs/tui/src/onboarding/trust_directory.rs at rust-v0.156.1,
+// rust-v0.160.0, and rust-v0.171.0.
+const codexDirectoryTrustDialogNew = `  Folder access
+  /tmp/af-home
+
+  Trust this folder? Codex can read, edit, and run files here, subject to
+  your permission settings. Folder settings can run code automatically,
+  even without a model request. Continue only if you trust these files.
+  Your trust decision will be saved.
+
+› 1. Trust and continue
+  2. Quit
+
+  enter continue · esc quit`
+
+// The same modal on a folder the user marked untrusted: the affirmative row
+// becomes "Open restricted", which grants no trust, so af holds rather than
+// answers it.
+const codexDirectoryTrustDialogRestricted = `  Folder access
+  /tmp/af-home
+
+  This folder is in your untrusted list. Config, hooks, and exec policies
+  from untrusted folders stay disabled. Your trust decision will be saved.
+
+› 1. Open restricted
+  2. Quit
+
+  enter continue · esc quit`
+
+// wrapTrustPaneForTest reflows text the way ratatui's wrap leaves it at a
+// narrow pane width: words broken at spaces, each continuation back at the
+// line's own indent.
+func wrapTrustPaneForTest(text string, w int) string {
+	var out []string
+	for _, raw := range strings.Split(text, "\n") {
+		indent := 0
+		for indent < len(raw) && raw[indent] == ' ' {
+			indent++
+		}
+		ws := raw[:indent]
+		words := strings.Fields(raw)
+		if len(words) == 0 {
+			out = append(out, "")
+			continue
+		}
+		line := ws + words[0]
+		for _, word := range words[1:] {
+			if len(line)+1+len(word) <= w {
+				line += " " + word
+			} else {
+				out = append(out, line)
+				line = ws + word
+			}
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+// codexTrustPaintFrames returns the pane captures a directory-trust modal
+// produces while it paints top-down at the given width: every prefix ending
+// at or after the selected option row's "›" marker lands but before the
+// modal's footer is complete. The gate must hold every one of them.
+func codexTrustPaintFrames(t *testing.T, modal string, width int) []string {
+	t.Helper()
+	wrapped := wrapTrustPaneForTest(modal, width)
+	selIdx := strings.Index(wrapped, "›")
+	require.GreaterOrEqual(t, selIdx, 0, "test modal must paint a selected row")
+	var frames []string
+	for end := selIdx + len("›"); end < len(wrapped); end++ {
+		frames = append(frames, wrapped[:end])
+	}
+	return frames
+}
+
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogNewWordingIsDismissed(t *testing.T) {
+	handled, cmds := runTrustPromptCheck(t, ProgramCodex, codexDirectoryTrustDialogNew)
+	require.True(t, handled, "the observed new-wording Codex directory-trust dialog must be reported handled")
+	require.Contains(t, sentKeystrokes(cmds), "tmux send-keys -t =af_trust: Enter",
+		"the selected 'Trust and continue' option must be accepted before briefing delivery; got %v", cmds)
+}
+
+// The directory-trust modal paints top-down, so a capture that lands after
+// the selected option row's "›" marker is on screen but before the footer is
+// whole ends inside the modal's remaining rows — the selected row partial or
+// whole, the second-option row partial or whole, the blank between, or a
+// partial footer. Every such frame declines the complete-modal predicate,
+// and the "›" row's glyph is also Codex's composer glyph, so isReadyContent's
+// hasCodexComposerLine arm (task/runner.go) accepts the very same frame:
+// reporting it clear lets DismissTrustPrompt paste the briefing into the live
+// modal and its trailing Enter select the preselected option — the #2220
+// failure this branch exists to prevent.
+//
+// The hold covers both wordings upstream paints (0.144.6–0.155.x and
+// rust-v0.156.0 on) at every paint stage and every width, including the
+// "question followed by selected Yes row" fragment this file's prose test
+// dropped and this test restores. It pairs the trailing-rows shape with the
+// hidden terminal cursor Codex's ListSelectionView exposes — the same oracle
+// the complete-modal branch and inspectCodexSafetyPrompt both rely on — and
+// sends no key: Enter stays gated on the complete-modal predicate.
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogMidPaintHolds(t *testing.T) {
+	// The fragment TestCheckAndHandleTrustPrompt_CodexTrustProseAloneInjectsNothing
+	// previously carried as injects-nothing prose: the old modal's question
+	// followed by its selected Yes row, the last content on screen. That is
+	// the modal's own mid-paint shape, not arbitrary prose — the gate must
+	// hold it and send no key.
+	handled, cmds := runTrustPromptCheck(t, ProgramCodex,
+		"Do you trust the contents of this directory?\n› 1. Yes, continue")
+	require.True(t, handled,
+		"the question followed by the selected Yes row is a live modal mid-paint, not clear pane")
+	require.Empty(t, sentKeystrokes(cmds),
+		"the hold path sends no key on the mid-paint fragment; got %v", cmds)
+
+	modals := []struct{ name, text string }{
+		{"old wording", codexDirectoryTrustDialog},
+		{"new wording", codexDirectoryTrustDialogNew},
+		{"restricted wording", codexDirectoryTrustDialogRestricted},
+	}
+	for _, modal := range modals {
+		for _, width := range []int{12, 17, 40, 80} {
+			frames := codexTrustPaintFrames(t, modal.text, width)
+			for idx, frame := range frames {
+				handled, cmds := runTrustPromptCheck(t, ProgramCodex, frame)
+				require.True(t, handled,
+					"%s modal mid-paint at %d cols (frame %d) must not be reported clear:\n%s",
+					modal.name, width, idx, frame)
+				require.Empty(t, sentKeystrokes(cmds),
+					"%s modal mid-paint at %d cols (frame %d) must receive no key — Enter stays gated on the complete-modal predicate; got %v",
+					modal.name, width, idx, cmds)
+			}
+		}
+	}
+}
+
+// A pane too short for the directory-trust modal's question scrolls it off
+// and leaves the settled option-and-footer tail as the last content. That
+// tail positively marks the modal — the question is required only for the
+// Enter the complete-modal branch sends — so the gate must hold it, and hold
+// it WITHOUT dismissing: an Enter sent on the strength of the options alone
+// would answer a modal af could not fully confirm. The restricted wording is
+// held the same way whether or not its question survives.
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogSettledTailHolds(t *testing.T) {
+	frames := []struct{ name, content string }{
+		{"old wording, question scrolled", "› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue"},
+		{"old wording, options only", "› 1. Yes, continue\n  2. No, quit"},
+		{"new wording, question scrolled", "› 1. Trust and continue\n  2. Quit\n\n  enter continue · esc quit"},
+		{"new wording, options only", "› 1. Trust and continue\n  2. Quit"},
+		{"restricted wording, settled", "› 1. Open restricted\n  2. Quit\n\n  enter continue · esc quit"},
+	}
+	for _, frame := range frames {
+		t.Run(frame.name, func(t *testing.T) {
+			handled, cmds := runTrustPromptCheck(t, ProgramCodex, frame.content)
+			require.True(t, handled,
+				"a settled directory-trust tail with a hidden cursor marks a modal-owned pane")
+			require.Empty(t, sentKeystrokes(cmds),
+				"the hold path sends no key — Enter stays gated on the complete-modal predicate; got %v", cmds)
+		})
+	}
+}
+
+// The directory-trust modal's rows can wrap at a narrow pane width. The
+// complete-modal match must answer the same at every width — including the
+// question that no longer fits on one line — because a dismissal Enter
+// missed at 40 or 12 columns leaves the modal live through the same
+// hasCodexComposerLine wedge the paint-hold covers.
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogNarrowWidthsDismissed(t *testing.T) {
+	modals := []struct{ name, text string }{
+		{"old wording", codexDirectoryTrustDialog},
+		{"new wording", codexDirectoryTrustDialogNew},
+	}
+	for _, modal := range modals {
+		for _, width := range []int{12, 24, 40} {
+			t.Run(fmt.Sprintf("%s at %d cols", modal.name, width), func(t *testing.T) {
+				handled, cmds := runTrustPromptCheck(t, ProgramCodex,
+					wrapTrustPaneForTest(modal.text, width))
+				require.True(t, handled,
+					"the complete %s modal must be dismissed however narrow the pane wraps it", modal.name)
+				require.Contains(t, sentKeystrokes(cmds), "tmux send-keys -t =af_trust: Enter",
+					"the selected trust option must be accepted at every width; got %v", cmds)
+			})
+		}
+	}
+}
+
+// The trailing rows alone are not proof a modal owns the pane: the dialog
+// text can sit verbatim in quoted agent output above an active composer. The
+// ordinary Codex composer exposes a terminal cursor, the modal hides one, so
+// a visible cursor must leave the create path clear to deliver the briefing —
+// the same quoted-prose protection the complete-modal branch already keeps,
+// preserved here by the hidden-cursor oracle that gates the hold. No key is
+// sent on either path: a visible cursor fails open only by falling through to
+// return false, never by sending a key.
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogMidPaintWithVisibleCursorInjectsNothing(t *testing.T) {
+	const quotedAboveComposer = `Earlier output quoted the modal text:
+
+  Do you trust the contents of this directory? Working with untrusted contents
+  comes with higher risk of prompt injection.
+
+› 1. Yes, continue
+  2. No, quit`
+
+	var commands []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			commands = append(commands, strings.Join(c.Args, " "))
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				// The ordinary Codex composer owns a visible cursor. The
+				// directory-trust dialog text is quoted transcript above an
+				// active composer, not a live modal mid-paint.
+				return []byte("20 0 1"), nil
+			}
+			return []byte(quotedAboveComposer), nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("trust", ""), ProgramCodex, NewMockPtyFactory(t), cmdExec)
+
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"a visible cursor means the composer is active, not a directory-trust modal mid-paint")
+	require.Empty(t, sentKeystrokes(commands),
+		"quoted option rows above a live composer must never receive Enter; got %v", commands)
+}
+
+// A cursor-read failure on a partial frame fails closed, mirroring the
+// complete-modal branch and inspectCodexSafetyPrompt: blocking costs one poll
+// of the ~20s dismissal budget, but returning false would let
+// task.DismissTrustPrompt deliver the briefing into a real modal af failed to
+// confirm (#3302). No keystroke is sent.
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogMidPaintCursorReadErrorFailsClosed(t *testing.T) {
+	const midPaint = `  Folder access
+  /tmp/af-home
+
+  Trust this folder? Codex can read, edit, and run files here, subject to
+  your permission settings.
+
+› 1. Trust and continue
+  2. Qu`
+
+	var commands []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			commands = append(commands, strings.Join(c.Args, " "))
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				return nil, errors.New("display-message refused")
+			}
+			return []byte(midPaint), nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("trust", ""), ProgramCodex, NewMockPtyFactory(t), cmdExec)
+
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"a cursor-read error on a live modal's trailing rows must be treated as a blocking dialog")
+	require.Empty(t, sentKeystrokes(commands),
+		"no Enter may be injected when the partial modal's state cannot be confirmed; got %v", commands)
+}
+
+// End-to-end at the trust-prompt gate: a partial mid-paint frame holds long
+// enough for the next poll to observe the complete modal, which the
+// complete-modal branch dismisses with Enter. The poll after that sees the
+// released composer and reports the pane clear, so the create path may
+// finally deliver the briefing — in either wording.
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogMidPaintThenCompleteDismisses(t *testing.T) {
+	const normalPane = "gpt-5.6-sol max · ~/agent-factory"
+	const midPaintNew = `  Folder access
+  /tmp/af-home
+
+  Trust this folder? Codex can read, edit, and run files here, subject to
+  your permission settings.
+
+› 1. Trust and continue`
+	const midPaintOld = `> You are in /tmp/af-home
+
+  Do you trust the contents of this directory? Working with untrusted contents
+  comes with higher risk of prompt injection.
+
+› 1. Yes, continue`
+
+	for _, tc := range []struct{ name, midPaint, complete string }{
+		{"old wording", midPaintOld, codexDirectoryTrustDialog},
+		{"new wording", midPaintNew, codexDirectoryTrustDialogNew},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session, commands := runTrustPromptSequence(t, ProgramCodex,
+				tc.midPaint,
+				tc.complete,
+				normalPane,
+			)
+
+			require.True(t, session.CheckAndHandleTrustPrompt(),
+				"the partial mid-paint frame holds; delivery must stay blocked")
+			require.Empty(t, sentKeystrokes(*commands),
+				"the hold path sends no key — the complete-modal branch dispatches Enter; got %v", *commands)
+
+			require.True(t, session.CheckAndHandleTrustPrompt(),
+				"the complete modal is handled on the next poll")
+			require.Contains(t, sentKeystrokes(*commands), "tmux send-keys -t =af_trust: Enter",
+				"the complete modal gets exactly the Enter; got %v", *commands)
+
+			require.False(t, session.CheckAndHandleTrustPrompt(),
+				"the released composer reports clear, so delivery proceeds")
+		})
+	}
+}
+
+// Ordinary Codex panes that share the modal's "›" glyph or its prose must
+// stay clear at every width — the hold may never over-fire on the composer
+// the create path is waiting for.
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogOrdinaryPanesStayClear(t *testing.T) {
+	const start = `  >_ OpenAI Codex (v0.171.0)
+
+  model:     gpt-5.6-sol max   /model to change
+  directory: ~/agent-factory
+
+› Ask Codex to do anything`
+	const idleComposer = `›
+  gpt-5.6-sol max · ~/agent-factory`
+
+	for _, tc := range []struct{ name, content string }{
+		{"start screen", start},
+		{"start screen narrow", wrapTrustPaneForTest(start, 12)},
+		{"idle composer", idleComposer},
+		{"idle composer narrow", wrapTrustPaneForTest(idleComposer, 12)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handled, cmds := runTrustPromptCheck(t, ProgramCodex, tc.content)
+			require.False(t, handled,
+				"an ordinary Codex pane must not be held by the directory-trust gate")
+			require.Empty(t, sentKeystrokes(cmds), "got %v", cmds)
+		})
+	}
+}
+
+// codexDirectoryTrustTrailingRows recognizes the pane tails a directory-trust
+// modal leaves while it paints — the selected option row, then any prefix of
+// what follows — and declines everything else.
+func TestCodexDirectoryTrustTrailingRows(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"selected Yes row last", "› 1. Yes, continue", true},
+		{"partial selected row", "› 1. Yes, con", true},
+		{"selection marker alone", "›", true},
+		{"question above selected row", "Do you trust the contents of this directory?\n› 1. Yes, continue", true},
+		{"trailing blanks after Yes row", "› 1. Yes, continue\n\n   \n", true},
+		{"No row last with Yes row above", "› 1. Yes, continue\n  2. No, quit", true},
+		{"partial No row", "› 1. Yes, continue\n  2. No", true},
+		{"trailing blanks after No row", "› 1. Yes, continue\n  2. No, quit\n\n", true},
+		{"partial footer", "› 1. Yes, continue\n  2. No, quit\n\n  Press enter to cont", true},
+		{"settled tail, question scrolled", "› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue", true},
+		{"new wording selected row last", "› 1. Trust and continue", true},
+		{"new wording partial selected row", "› 1. Trust and con", true},
+		{"new wording partial Quit row", "› 1. Trust and continue\n  2. Qu", true},
+		{"new wording partial footer", "› 1. Trust and continue\n  2. Quit\n\n  enter continue · esc qu", true},
+		{"new wording settled tail", "› 1. Trust and continue\n  2. Quit\n\n  enter continue · esc quit", true},
+		{"restricted selected row last", "› 1. Open restricted", true},
+		{"restricted settled tail", "› 1. Open restricted\n  2. Quit\n\n  enter continue · esc quit", true},
+		{"existing-task selected row last", "› 1. Open existing task", true},
+		{"sandbox footer variant", "› 1. Trust and continue\n  2. Quit\n\n  enter continue and create sandbox · esc quit", true},
+		{"old sandbox footer variant", "› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue and create a sandbox...", true},
+		{"back-verb footer variant", "› 1. Trust and continue\n  2. Back to Agent Command Center\n\n  enter continue · esc back", true},
+		{"cancel-verb footer variant", "› 1. Trust and continue\n  2. Keep current directory\n\n  enter continue · esc cancel", true},
+		{"wrapped selected row at 12 cols", "› 1. Yes,\n  continue", true},
+		{"wrapped new selected row at 12 cols", "› 1. Trust\n  and\n  continue", true},
+		{"styled Yes row carries SGR escapes", "\x1b[1m\x1b[36m› 1. Yes, continue\x1b[0m", true},
+		{"CRLF endings", "Do you trust the contents of this directory?\r\n› 1. Yes, continue\r\n  2. No", true},
+		{"complete modal is not a partial tail", codexDirectoryTrustDialog, true},
+		{"complete new modal is not a partial tail", codexDirectoryTrustDialogNew, true},
+		// Everything below must NOT match: prose, ordinary panes, and rows
+		// the modal never paints after its selected row.
+		{"empty pane", "", false},
+		{"blank lines only", "\n\n\n", false},
+		{"unrelated composer status", "gpt-5.6-sol max · ~/agent-factory", false},
+		{"question alone", "Do you trust the contents of this directory?", false},
+		{"No row alone", "2. No, quit", false},
+		{"question above No row without selected row", "Do you trust the contents of this directory?\n  2. No, quit", false},
+		{"unselected Yes label", "  1. Yes, continue", false},
+		{"Yes row embedded mid-line is prose", "the picker reads › 1. Yes, continue in its body", false},
+		{"trailing prose after Yes row", "› 1. Yes, continue\nfollowed by an ordinary line", false},
+		{"composer prompt line", "› Ask Codex to do anything", false},
+		{"composer with draft text", "› some draft prompt\n  gpt-5.6-sol max · ~/agent-factory", false},
+		{"second-option marker row", "› 2. No, quit", false},
+		{"safety-picker selected row", "› 1. Retry with a faster model", false},
+		{"update-picker selected row", "› 1. Update now\n  2. Skip until next version\n\n  Press enter to continue", false},
+		{"extra prose inside the tail", "› 1. Yes, continue\nnote this\n  2. No, quit", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := codexDirectoryTrustTrailingRows(tt.content); got != tt.want {
+				t.Errorf("codexDirectoryTrustTrailingRows() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// CodexTrustPromptPresent stays the complete-modal gate the Enter path
+// answers: both wordings at any width, the footer last, and nothing less.
+func TestCodexTrustPromptPresent(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"complete old modal", codexDirectoryTrustDialog, true},
+		{"complete new modal", codexDirectoryTrustDialogNew, true},
+		{"old modal wrapped at 12 cols", wrapTrustPaneForTest(codexDirectoryTrustDialog, 12), true},
+		{"old modal wrapped at 40 cols", wrapTrustPaneForTest(codexDirectoryTrustDialog, 40), true},
+		{"new modal wrapped at 12 cols", wrapTrustPaneForTest(codexDirectoryTrustDialogNew, 12), true},
+		{"new modal wrapped at 17 cols", wrapTrustPaneForTest(codexDirectoryTrustDialogNew, 17), true},
+		{"error paragraph between options and footer",
+			"> You are in /tmp/af-home\n\n  Do you trust the contents of this directory?\n\n› 1. Yes, continue\n  2. No, quit\n\n  some error row\n\n  Press enter to continue", true},
+		{"old modal under transcript", "earlier work output\n\n" + codexDirectoryTrustDialog, true},
+		{"old modal above trailing whitespace", codexDirectoryTrustDialog + "\n\n   \n", true},
+		// Partials and prose must not match — the paint-hold owns those.
+		{"old modal missing footer",
+			"Do you trust the contents of this directory?\n\n› 1. Yes, continue\n  2. No, quit", false},
+		{"old modal missing question", "› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue", false},
+		{"old modal missing No row", "Do you trust the contents of this directory?\n\n› 1. Yes, continue\n\n  Press enter to continue", false},
+		{"old modal missing selected row", "Do you trust the contents of this directory?\n\n  2. No, quit\n\n  Press enter to continue", false},
+		{"old modal plus trailing prose", codexDirectoryTrustDialog + "\nmore transcript after", false},
+		{"new modal missing footer", "Trust this folder?\n\n› 1. Trust and continue\n  2. Quit", false},
+		{"unselected Yes row", strings.Replace(codexDirectoryTrustDialog, "› 1. Yes, continue", "  1. Yes, continue", 1), false},
+		{"restricted modal is not answerable", codexDirectoryTrustDialogRestricted, false},
+		{"question alone", "Do you trust the contents of this directory?", false},
+		{"options without question", "Yes, continue\n2. No, quit\nPress enter to continue", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CodexTrustPromptPresent(tt.content); got != tt.want {
+				t.Errorf("CodexTrustPromptPresent() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 // The bug: ordinary agent output that happens to contain the documentation

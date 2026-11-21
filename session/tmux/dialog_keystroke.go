@@ -42,11 +42,14 @@ const (
 	claudeMCPServersDialogName = "Claude MCP-server selection"
 	// Codex's directory-trust modal preselects its affirmative option and af
 	// accepts that preselection, so the option is named to keep the diagnostic
-	// honest about what af confirmed.
-	codexDirectoryTrustDialogName  = "Codex directory-trust"
-	codexDirectoryTrustAffirmative = "Yes, continue"
-	codexUpdateDialogName          = "Codex update"
-	docTrustDialogName             = "documentation-link trust"
+	// honest about what af confirmed — in the words of whichever wording
+	// upstream paints ("Yes, continue" through rust-v0.155.x,
+	// "Trust and continue" from rust-v0.156.0 on).
+	codexDirectoryTrustDialogName     = "Codex directory-trust"
+	codexDirectoryTrustAffirmative    = "Yes, continue"
+	codexDirectoryTrustNewAffirmative = "Trust and continue"
+	codexUpdateDialogName             = "Codex update"
+	docTrustDialogName                = "documentation-link trust"
 	// geminiFolderTrustDialogName is Gemini CLI's folder-trust dialog. af
 	// selects "Trust folder" on it by label, never "Trust parent folder" (#7162).
 	geminiFolderTrustDialogName = "Gemini folder-trust"
