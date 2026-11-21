@@ -236,6 +236,7 @@ func claimedExecInvocation(args []string, environmentOnly bool) error {
 	if err != nil {
 		return err
 	}
+	environ = neutralizeGitConfigCountForExec(environ)
 	shell := "/bin/sh"
 	return processExec(shell, []string{shell, "-c", c.Command}, environ)
 }
@@ -295,6 +296,10 @@ func execInvocation(args []string) error {
 	// and this process could have re-set one; the last point where af still
 	// controls the environment is where the pin belongs (#7529 R1).
 	environ = reapplyEmptyPins(environ, pins)
+	// A forwarded GIT_CONFIG_COUNT whose indexed pairs did not travel with it
+	// would make every git invocation fail fatally; the exec shim is the last
+	// point that can neutralize it before the agent inherits the environment.
+	environ = neutralizeGitConfigCountForExec(environ)
 	// tmux runs shell-command through the system shell, not the user's login
 	// shell. Keep that POSIX contract: program overrides and injected commands
 	// commonly use assignment prefixes, redirects, and quoting that fish/tcsh
@@ -327,6 +332,26 @@ func reapplyEmptyPins(environ, pins []string) []string {
 		out = append(out, name+"=")
 	}
 	return out
+}
+
+// neutralizeGitConfigCountForExec is the exec-shim wrapper around
+// NeutralizeIncompleteGitConfigCount: when a forwarded GIT_CONFIG_COUNT
+// resolves to a positive count whose indexed pairs did not travel with it,
+// the count is pinned empty so git does not fail fatally, and a diagnostic
+// naming only the missing indices (never values) is written to stderr so the
+// operator can correct the pass-through list. This keeps the session usable
+// while surfacing the half-forward the silent blank would otherwise hide.
+func neutralizeGitConfigCountForExec(environ []string) []string {
+	neutralized, ok := NeutralizeIncompleteGitConfigCount(environ)
+	if !ok {
+		return environ
+	}
+	if missing, total := missingGitConfigCountPairsInEnv(environ); total > 0 {
+		_, _ = fmt.Fprintf(os.Stderr,
+			"af: session_env_passthrough forwards GIT_CONFIG_COUNT without its required indexed pairs (%s); git would fail the count without them, so af pinned the count empty — also forward the pair names through session_env_passthrough\n",
+			FormatGitConfigMissingPairs(missing, total))
+	}
+	return neutralized
 }
 
 // stampPaneRootPid records the pane's identity bundle in pane-scoped user
@@ -525,5 +550,6 @@ func execAgentServer(args []string, accountAgent string) error {
 	if err != nil {
 		return fmt.Errorf("resolve current af executable: %w", err)
 	}
+	environ = neutralizeGitConfigCountForExec(environ)
 	return processExec(executable, append([]string{agentServerArgv0(executable)}, serverArgs...), environ)
 }

@@ -466,6 +466,24 @@ user's real home and mounts it only if it exists, so:
       `session_env_passthrough`; the image's `Config.Env` pairs remain a
       repo source the environment boundary cannot enumerate, part of the
       image trust above.
+    - **`GIT_CONFIG_COUNT` is whole.** Git treats the count as
+      authoritative and fails fatally when the `GIT_CONFIG_KEY_n` /
+      `GIT_CONFIG_VALUE_n` pairs it names are not present, so a forward
+      that delivers a live count without its pairs breaks every `git`
+      invocation in the session — including af's own provisioning
+      `git config`. af therefore checks the count's completeness where
+      the environment is handed to the session — the only place the
+      count's value is known, since it lives in the tmux server's
+      environment at pane spawn or the daemon's environment a bare
+      `-e` resolves against — and a half-forward is neutralized on
+      every docker session's `-e` assembly, account or not: af pins
+      the count defined-empty (git reads it as 0, the same shape an
+      unforwarded count takes) and warns naming the missing indices.
+      A defined-but-empty `GIT_CONFIG_KEY_n` counts as missing: git
+      fails it with `empty config key` exactly as it fails an absent
+      one, while a defined-empty `GIT_CONFIG_VALUE_n` is a legal empty
+      value. The remedy is to also forward the indexed pair names
+      through `session_env_passthrough`.
     - **ssh's user config follows the passwd home, not `$HOME`.** OpenSSH
       reads `~/.ssh/config` from the account's `getpwuid` home directory,
       so af's `HOME` re-assertion does not move it — the image controls
