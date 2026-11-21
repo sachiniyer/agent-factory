@@ -43,28 +43,39 @@ func onStalledMount(roots []string, path string) bool {
 	return false
 }
 
-// mountForUnionTest stands in for the mount roots sit on, through fsprobe's
-// stat, symlink-resolution and lstat seams, under bound. With delay < 0 it is
-// dark: every lookup on it blocks until the test ends. Otherwise each lookup
-// answers truthfully after delay. It returns the count of lookups the mount was
-// asked for. The cleanup releases the mount and lets every released flight
-// unpublish before the seams come back.
-func mountForUnionTest(t *testing.T, roots []string, bound, delay time.Duration) *atomic.Int64 {
-	t.Helper()
-	release := make(chan struct{})
-	var lookups atomic.Int64
+// unionMount is the mount mountForUnionTest stands in for: the release every
+// dark lookup waits on, and the counter the current arm's lookups add to.
+type unionMount struct {
+	release chan struct{}
+	roots   []string
+	delay   time.Duration
+	// lookups counts the lookups the current arm's seams have been asked for.
+	lookups *atomic.Int64
+	// restore puts back the seams the current arm installed.
+	restore func()
+}
+
+// arm binds a fresh counter into the mount's stat, symlink-resolution and
+// lstat seams and returns it. fsprobe loads a seam in the CALLER, before the
+// flight's goroutine runs it, so a worker still finishing a look an earlier
+// arm asked for keeps counting to that arm even when it runs during a later
+// one — a straggler of the off-loop fetch can never read as a lookup the apply
+// made (#4217). The previous arm's seams are put back before the new set goes
+// in, so a restore never walks the stack past this mount's own installs.
+func (m *unionMount) arm() *atomic.Int64 {
+	lookups := &atomic.Int64{}
 	wait := func(path string) {
-		if !onStalledMount(roots, path) {
+		if !onStalledMount(m.roots, path) {
 			return
 		}
 		lookups.Add(1)
-		if delay < 0 {
-			<-release
+		if m.delay < 0 {
+			<-m.release
 			return
 		}
-		time.Sleep(delay)
+		time.Sleep(m.delay)
 	}
-	restoreBound := fsprobe.SetProbeTimeoutForTest(bound)
+	m.restore()
 	restoreStat := fsprobe.SetStatPathForTest(func(path string) (os.FileInfo, error) {
 		wait(path)
 		return os.Stat(path)
@@ -77,15 +88,38 @@ func mountForUnionTest(t *testing.T, roots []string, bound, delay time.Duration)
 		wait(path)
 		return os.Lstat(path)
 	})
-	t.Cleanup(func() {
-		close(release)
-		time.Sleep(bound + max(delay, 0))
+	m.restore = func() {
 		restoreLstat()
 		restoreEval()
 		restoreStat()
+	}
+	m.lookups = lookups
+	return lookups
+}
+
+// mountForUnionTest stands in for the mount roots sit on, through fsprobe's
+// stat, symlink-resolution and lstat seams, under bound. With delay < 0 it is
+// dark: every lookup on it blocks until the test ends. Otherwise each lookup
+// answers truthfully after delay. The mount returns armed, its first phase's
+// count on .lookups. The cleanup releases the mount and lets every released
+// flight unpublish before the seams come back.
+func mountForUnionTest(t *testing.T, roots []string, bound, delay time.Duration) *unionMount {
+	t.Helper()
+	m := &unionMount{
+		release: make(chan struct{}),
+		roots:   roots,
+		delay:   delay,
+		restore: func() {},
+	}
+	restoreBound := fsprobe.SetProbeTimeoutForTest(bound)
+	m.arm()
+	t.Cleanup(func() {
+		close(m.release)
+		time.Sleep(bound + max(delay, 0))
+		m.restore()
 		restoreBound()
 	})
-	return &lookups
+	return m
 }
 
 // onLoopWithin runs step — Update work — on its own goroutine and returns how
@@ -394,22 +428,46 @@ func TestSnapshotPoll_ReadsTheRegistryOffTheLoop(t *testing.T) {
 		stalled = append(stalled, key)
 	}
 
+	// Applying the poll also opens each path's Git probe — a verdict
+	// resolveProjectPaths deliberately never caches, so a probe that misses
+	// its window on a loaded runner falls back to probeProjectPath's bounded
+	// stat as the absence check: a mount lookup made on the probe's own
+	// goroutine — which Update never waits on — not the on-loop lookup this
+	// test asserts about, and one whose firing depends on how fast Git
+	// happens to be that day (#7612's class). Answer it at once so only a
+	// lookup made inside Update itself can reach the apply's counter.
+	repoProbe := projectPathRepoProbe
+	projectPathRepoProbe = func(ctx context.Context, path string) (*config.RepoContext, error) {
+		if onStalledMount(stalled, path) {
+			return nil, config.ErrNotGitRepository
+		}
+		return repoProbe(ctx, path)
+	}
+	t.Cleanup(func() { projectPathRepoProbe = repoProbe })
+
 	var loop sync.WaitGroup
 	t.Cleanup(loop.Wait)
-	lookups := mountForUnionTest(t, stalled, unionBound, -1)
+	mount := mountForUnionTest(t, stalled, unionBound, -1)
 
 	// bubbletea runs the poll's Cmd on a goroutine of its own; so does this.
 	var msg tea.Msg
 	offLoop := onLoopWithin(t, &loop, 2*unionBound, "the poll's off-loop fetch", func() {
 		msg = h.fetchSnapshotCmd()()
 	})
-	before := lookups.Load()
-	require.Positive(t, before, "premise: the poll's fetch looked the stalled paths up")
+	fetched := mount.lookups
+	require.Positive(t, fetched.Load(), "premise: the poll's fetch looked the stalled paths up")
+	// Re-arm the mount for the apply: a worker the fetch's bound gave up on
+	// still runs the seam its caller loaded — the fetch's — whenever the
+	// scheduler gets to it, so that look counts to fetched even when it lands
+	// inside the apply's window. Only a lookup the apply itself makes reaches
+	// this counter.
+	applying := mount.arm()
 	applied := onLoopWithin(t, &loop, unionBound/2, "applying the poll in Update", func() {
 		h.Update(msg)
 	})
-	t.Logf("the fetch took %s off the loop; applying it held Update for %s", offLoop, applied)
-	assert.Equal(t, before, lookups.Load(), "applying a poll looks up no path on the stalled mount")
+	t.Logf("the fetch took %s off the loop with %d mount lookups; applying it held Update for %s",
+		offLoop, fetched.Load(), applied)
+	assert.Equal(t, int64(0), applying.Load(), "applying a poll looks up no path on the stalled mount")
 	requireRegistryRowsKept(t, h.sidebarProjects, registered, nil)
 }
 
@@ -468,12 +526,12 @@ func TestProjectUnion_DoesNotReprobeASlowRootAgentKeyOnTheLoop(t *testing.T) {
 
 	var loop sync.WaitGroup
 	t.Cleanup(loop.Wait)
-	lookups := mountForUnionTest(t, []string{key}, unionBound, unionBound*6/10)
+	mount := mountForUnionTest(t, []string{key}, unionBound, unionBound*6/10)
 
 	onLoopWithin(t, &loop, 2*unionBound, "the loop's first read", func() {
 		h.buildProjectListFromCounted(nil)
 	})
-	learned := lookups.Load()
+	learned := mount.lookups.Load()
 	require.Positive(t, learned, "premise: the first read resolved the key")
 	for read := 2; read <= 4; read++ {
 		elapsed := onLoopWithin(t, &loop, unionBound/2, "a later read on the loop", func() {
@@ -481,7 +539,7 @@ func TestProjectUnion_DoesNotReprobeASlowRootAgentKeyOnTheLoop(t *testing.T) {
 		})
 		t.Logf("read %d held Update for %s", read, elapsed)
 	}
-	assert.Equal(t, learned, lookups.Load(), "the slow key was looked up again on the loop")
+	assert.Equal(t, learned, mount.lookups.Load(), "the slow key was looked up again on the loop")
 }
 
 // TestProjectUnion_PollRevalidatesACachedSpelling: the cache the loop reads
