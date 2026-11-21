@@ -505,6 +505,14 @@ func TestBoundRowMatcherKeepsAnOwnerThroughABasenameSymlink(t *testing.T) {
 	// same symlink and converges with want1.
 	require.Equal(t, proctree.RowMatchCertain, match1(alias1),
 		"the verbatim row the symlink redirected the queried path's basename away from converges through the walk")
+	// The queried path's basename is a symlink, but a row with an UNRELATED
+	// raw basename — not the queried link name, and not itself a symlink —
+	// cannot converge with the queried path through that link, so it stays
+	// ruled out. Letting it through would land an unrelated relative row in
+	// RowMatchRelative and surface a stray uncertain holder that blocks
+	// `af reset`.
+	require.Equal(t, proctree.RowMatchNone, match1(filepath.Join(dir1, "x", "other.sock")),
+		"an unrelated basename is still provably a different socket when only the queried path's basename is a symlink")
 
 	// Variant 2: a symlink at the queried path's basename, with the target
 	// DIRECTORY absent too. want.certain() is false; the filter comes from
