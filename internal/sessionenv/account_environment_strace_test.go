@@ -6,21 +6,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// account_environment_strace_test.go pins the dash-glued family of dynamic
+// account_environment_strace_test.go pins the multiword family of dynamic
 // strace option words the wholly-dynamic terminal #7690 added for `"$OPT"`
-// left on the suspect path: a literal dash prefix glued to an unquoted
-// parameter expansion (`--$OPT`, `-$OPT`, `-f$OPT`, `--en$OPT`) yields a
-// non-empty literal prefix with `complete == false`, so `straceOptionStep`
-// misses the strict terminal `text == ""` adds for wholly-dynamic words and
-// falls into the unprovable-identity suspect paths (the `!hasEq && !complete`
-// long-option path, the unknown-name path, and the cluster fall-through).
-// Each returned a non-terminal suspect, which the run fold drops when the
-// option is the last argv word — but at runtime the shell word-splits the
-// unquoted expansion inside the dash-glued word, so both the option operand
-// AND a traced command can come from the variable even though no literal
-// argv word follows. The fix turns each unprovable-identity-with-!complete
-// suspect into a terminal refusal symmetric with the wholly-dynamic case
-// and with the head-level refusal of `strace "$OPT" codex`.
+// left on the suspect path. A word in a strace option run — in the option
+// name, an attached operand, or a separate operand word — that can expand
+// to more than one argv word can supply more options and the traced
+// command, so it refuses terminally:
+//
+//   - a literal dash prefix or operand glued to an unquoted parameter
+//     expansion (`--$OPT`, `-$OPT`, `-f$OPT`, `--en$OPT`, `-E$V`,
+//     `--env=$V`, `-EFOO=$X`, `--output=$F`, `-o$LOG`) yields a non-empty
+//     literal prefix with `complete == false`; at runtime the shell
+//     word-splits the unquoted expansion, so both the option AND the traced
+//     command can come from inside the variable even though no literal argv
+//     word follows;
+//   - a separate operand word that can expand to more than one argv word
+//     (`-o $F`, `--output $F`, `-e $F`, `-p $P`, `-s $N`, `-P $F`,
+//     `-o "$@"`) splits into the operand plus further options and the
+//     command, so the run refuses before consuming it;
+//   - a quoted positional-@ or whole-array expansion (`"$@"`, `"${a[@]}"`,
+//     `"${!a[@]}"`, `"${!pre@}"`, `"${x:-$@}"`) yields one argv field per
+//     element even inside double quotes — measured on bash — so it refuses
+//     exactly like the unquoted forms.
+//
+// Only a word provably expanding to exactly one argv word is judged as a
+// single word: a literal, a quoted `"$x"`/`"${x}"`/`"$*"`/`"${a[*]}"`, an
+// arithmetic expansion, or a process substitution. Each suspect the fix
+// removes returned a non-terminal suspect that the run fold dropped when
+// the option was the last argv word — the verdict now comes from a single
+// terminal check ahead of every option path, symmetric with the
+// wholly-dynamic `text == ""` case and with the head-level refusal of
+// `strace "$OPT" codex`.
 //
 // The shapes are runtime-equivalent to the literal twins the gate already
 // refuses (`strace --env=CODEX_HOME=/other codex`) and to the pinned dynamic
@@ -116,6 +132,58 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 		// `-ox`, `-E`, `CODEX_HOME=/other`, `codex`.
 		`LOG='x -E CODEX_HOME=/other codex'; firejail strace -o$LOG codex`,
 		`LOG='x -E CODEX_HOME=/other codex'; firejail strace -o$LOG`,
+		// The -E/--env attached operand, same class: `-E$V` and `--env=$V`
+		// returned the env-operand suspect, which the run fold dropped the
+		// same way. With `V='CODEX_HOME=/o codex'` the split argv is
+		// `-ECODEX_HOME=/o` plus the traced command.
+		`V='CODEX_HOME=/o codex'; firejail strace -E$V`,
+		`V='CODEX_HOME=/o codex'; firejail strace --env=$V`,
+		`V='CODEX_HOME=/o codex'; firejail strace -fE$V`,
+		// A benign-looking literal env assignment prefix does not help:
+		// `--env=FOO=$X` splits into `--env=FOO=ok` plus `-E`,
+		// `CODEX_HOME=/other` and the traced command — the same bypass the
+		// second Codex P1 reports.
+		`X='ok -E CODEX_HOME=/other codex'; firejail strace --env=FOO=$X`,
+		`X='ok -E CODEX_HOME=/other codex'; firejail strace -EFOO=$X`,
+		// A SEPARATE operand word that can expand to more than one argv word
+		// (`-o $F`, `--output $F`, `-e $F`, `-p $P`, `-s $N`, `-P $F`): the
+		// option consumes the first field as its operand and strace parses
+		// the rest — including `-E`/`--env` and the traced command — as its
+		// own argv. The run refused none of these before the fix because the
+		// operand word was skipped by arity rather than judged.
+		`F='x -E CODEX_HOME=/o codex'; firejail strace -o $F`,
+		`F='x -E CODEX_HOME=/o codex'; firejail strace -o $F codex`,
+		`F='x -E CODEX_HOME=/o codex'; firejail strace --output $F`,
+		`F='x -E CODEX_HOME=/o codex'; firejail strace -e $F`,
+		`P='1234 -E CODEX_HOME=/o codex'; firejail strace -p $P`,
+		`N='8 -E CODEX_HOME=/o codex'; firejail strace -s $N`,
+		`F='x -E CODEX_HOME=/o codex'; firejail strace -P $F`,
+		// A QUOTED multiword expansion in the option name — `"$@"` and the
+		// whole-array forms yield one argv field per element even inside
+		// double quotes, so `--"$@"` expands to `--env=CODEX_HOME=/o` plus
+		// `codex` exactly like the unquoted `--$OPT`.
+		`set -- env=CODEX_HOME=/o codex; firejail strace --"$@"`,
+		`firejail strace --"$@"`,
+		`firejail strace -"$@"`,
+		// Attached operands carrying a quoted multiword expansion refuse the
+		// same way: `-E"$@"` and `--env="${a[@]}"` inject the same
+		// `-E`/`--env` argv words as their unquoted twins.
+		`firejail strace -E"$@"`,
+		`firejail strace --env="${a[@]}"`,
+		`firejail strace -o"$@"`,
+		// The separate-operand twin: `-o "$@"` consumes the first field as
+		// the output name and parses the rest as options plus the command.
+		`firejail strace -o "$@"`,
+		// A value-position nested multiword expansion — `"${x:-$@}"` expands
+		// to one field per positional (measured on bash), so it refuses the
+		// same way. Pattern-position sub-words (`"${y#$@}"`) produce one
+		// field and stay admitted below.
+		`firejail strace --"${x:-$@}"`,
+		// The operand check fires before the `--` separator is reached: the
+		// split fields land between `-o` and the separator, so the run
+		// refuses at the operand word rather than reading `--` as the end
+		// of the options.
+		`F='x -E CODEX_HOME=/o codex'; firejail strace -o $F -- codex`,
 	}
 	for _, command := range refused {
 		require.True(t, commandMutatesAccountEnvironment(command, names),
@@ -159,6 +227,15 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 		// dash-glued shape is unreachable, but the verdict stays REFUSE.
 		`OPT='env=CODEX_HOME=/other codex'; strace --$OPT`,
 		`nice strace --env=CODEX_HOME=/other codex`,
+		// More multiword shapes the review enumerates — refused on the
+		// previous head through the word-level check, kept refused here:
+		// `-fo$F`, `-e$F` and `--trace=$T` carry an unquoted attached
+		// operand the same way `-o$LOG` does, and the nested strace judges
+		// its own option run.
+		`F='x -E CODEX_HOME=/o codex'; firejail strace -fo$F`,
+		`F='x -E CODEX_HOME=/o codex'; firejail strace -e$F`,
+		`T='read -E CODEX_HOME=/o codex'; firejail strace --trace=$T`,
+		`F='x -E CODEX_HOME=/o codex'; firejail strace strace -o$F`,
 	}
 	for _, command := range alreadyRefused {
 		require.True(t, commandMutatesAccountEnvironment(command, names),
@@ -199,6 +276,17 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 		// operand — the bug report's `-o"$LOG"` form, which stays admitted
 		// because the quoted expansion does not field-split.
 		`firejail strace -o"$LOG" codex`,
+		// A separate operand word provably expanding to exactly one argv
+		// word — the quoted `"$x"`, `"$FILE"` and `"$*"` forms — stays
+		// admitted. ("$*" joins the positionals into ONE word; "$@" is the
+		// multiword twin in the refused list above.)
+		`firejail strace -o "$*" codex`,
+		`firejail strace --output="$*" codex`,
+		// An arithmetic expansion expands to exactly one argv word — a
+		// number — so a proven-constant arithmetic operand stays admitted.
+		// (A non-constant one is refused file-wide by the inverted
+		// arithmetic guard, before the option run sees it.)
+		`firejail strace --output=$((1+1)) codex`,
 		// A QUOTED dash-glued expansion (`--"$OPT"`, `-"$OPT"`,
 		// `--unknown="$OPT"`) is incomplete (complete=false) but does NOT
 		// field-split — it expands to a single argv word, so with no command
@@ -275,6 +363,20 @@ func TestStraceOptionStepDashGluedTerminalRefusal(t *testing.T) {
 		// option value plus further argv words including `-E` and the command.
 		`F='trace -E CODEX_HOME=/o codex'; firejail strace --output=$F`,
 		`LOG='x -E CODEX_HOME=/o codex'; firejail strace -o$LOG`,
+		// A KNOWN env option with an unquoted (field-splittable) attached
+		// operand — the same bypass the second Codex P1 reports through the
+		// env paths' early return.
+		`V='CODEX_HOME=/o codex'; firejail strace -E$V`,
+		`V='CODEX_HOME=/o codex'; firejail strace --env=$V`,
+		`X='ok -E CODEX_HOME=/o codex'; firejail strace --env=FOO=$X`,
+		// A SEPARATE operand word that can expand to more than one argv word
+		// (`-o $F`, `-o "$@"`) — the option consumes the first field and the
+		// rest become options plus the traced command.
+		`F='x -E CODEX_HOME=/o codex'; firejail strace -o $F`,
+		`firejail strace -o "$@"`,
+		// A QUOTED multiword expansion in the option name (`--"$@"`) — one
+		// argv field per positional, exactly like the unquoted `--$OPT`.
+		`firejail strace --"$@"`,
 	} {
 		require.True(t, commandMutatesAccountEnvironment(command, names),
 			"command %q lands on the terminal refusal at its dash-glued option word", command)

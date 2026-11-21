@@ -18,13 +18,18 @@ import (
 // carries an assignment to one, or when its NAME is unprovable.
 //
 // A word that opens with an expansion is in option position until the command
-// starts, and could expand to any option, so it refuses too. Options of other
-// kinds keep an unprovable OPERAND only when it cannot field-split: a quoted
-// operand (`-o"$LOG"`, `--output="$F"`) expands to a single argv word, so the
-// operand of a known non-environment option cannot place a variable. An unquoted
-// (field-splittable) operand (`--output=$F`, `-o$LOG`) can split into the
-// operand plus further argv words — including `-E`/`--env` and a traced command
-// — so it refuses the way a dash-glued unprovable identity does.
+// starts, and could expand to any option, so it refuses too. A word's verdict
+// depends on how many argv words it can expand to: ANY word in option position
+// or consumed as an option's operand that can expand to more than one argv
+// word can supply more options and the traced command, so it refuses
+// terminally — an unquoted field-splittable expansion (`--output=$F`,
+// `-o$LOG`), a quoted `"$@"` or `"${a[@]}"`, and any quoted word containing
+// one of those all qualify. Only a word provably expanding to exactly one
+// argv word — a literal, a quoted `"$x"`/`"${x}"`/`"$*"`/`"${a[*]}"`, an
+// arithmetic expansion, a process substitution — keeps its single-word
+// judgement: a quoted operand (`-o"$LOG"`, `--output="$F"`) expands to one
+// argv word, so the operand of a known non-environment option cannot place a
+// variable.
 //
 // The long-option table is the measured one the xargs input walk shares. Operands that arrive as the next word
 // are consumed by arity; a wrong arity here can only skip a word this pass
@@ -142,26 +147,34 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 	if text == "--" && complete {
 		return end(false, i+1 < len(words))
 	}
+	// A word that can expand to more than one argv word can supply more
+	// options and the traced command no matter which option path it lands
+	// on: an unquoted (field-splittable) expansion splits into the operand
+	// PLUS further argv words — `--output=$F` with
+	// `F='trace -E CODEX_HOME=/other codex'` splits into `--output=trace`,
+	// `-E`, `CODEX_HOME=/other`, `codex`, and strace processes the `-E`
+	// before launching the literal command; `-E$V`, `--env=$V` and
+	// `--env=FOO=$X` split a -E/--env operand into the assignment plus the
+	// same tail; and a quoted `"$@"`/`"${a[@]}"` yields one field per element
+	// the same way. A non-terminal suspect is dropped when the run ends at
+	// this word, so every such word — in the option name, an attached
+	// operand, or a separate operand word — fails closed as a terminal,
+	// symmetric with the wholly-dynamic `text == ""` case and with the
+	// head-level refusal of `strace "$OPT" codex`. Only words provably
+	// expanding to exactly one argv word reach the paths below: a quoted
+	// expansion (`--"$OPT"`, `-o"$LOG"`, `--env="$V"`) keeps its original
+	// non-terminal suspect so a command word after it still refuses the way
+	// `strace --env=... codex` does.
+	if wordYieldsMultipleArgvWords(words[i]) {
+		return end(refuseLeadingExpansion, true)
+	}
 	if strings.HasPrefix(text, "--") {
 		name, operand, hasEq := strings.Cut(text[2:], "=")
 		if !hasEq && !complete {
-			// A literal long-option dash prefix glued to an unquoted parameter
-			// expansion (`--$OPT`, `--en$OPT`) yields a non-empty name with
-			// complete=false; at runtime the shell word-splits the unquoted
-			// expansion inside the dash-glued word, so the option operand AND
-			// a traced command can come from inside the variable even though
-			// no literal argv word follows. A non-terminal suspect is dropped
-			// when the run ends at this word, so this fails closed as a
-			// terminal — symmetric with the wholly-dynamic `text == ""` case
-			// and with the head-level refusal of `strace "$OPT" codex`.
-			// A quoted expansion (`--"$OPT"`) is incomplete too but does NOT
-			// field-split — it expands to a single argv word, so with no
-			// command following strace runs nothing and cannot inject env; it
-			// keeps the original non-terminal suspect so a command word after
-			// it still refuses the way `strace --env=... codex` does.
-			if wordHasUnquotedFieldSplittingExpansion(words[i]) {
-				return end(refuseLeadingExpansion, true)
-			}
+			// The option name itself is unprovable: a quoted expansion glued
+			// to the dashes (`--"$OPT"`) is incomplete but provably one word,
+			// so it keeps the non-terminal suspect — a command word after it
+			// still refuses; the multiword forms refused above.
 			return true, i + 1, nil
 		}
 		// resolveLongOption reads the name the way getopt_long does — exact, or
@@ -169,18 +182,10 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 		// instead of passing as an unknown name.
 		resolved, requiresArg, known := resolveLongOption(name, straceLongOptions)
 		if !known {
-			// An unknown name with complete=false is the same risk shape
-			// (`--unknown=$OPT`): the unquoted expansion can word-split into
-			// the operand plus a traced command, and a non-terminal suspect is
-			// dropped when the run ends at this word. A literal unknown name
-			// (complete=true) keeps the existing non-terminal refusal so the
+			// An unknown name keeps the non-terminal refusal so the
 			// trace-nothing behavior for an unknown option with no command
-			// following stays admitted. A quoted expansion
-			// (`--unknown="$OPT"`) is incomplete but does not field-split, so
-			// it keeps the original non-terminal suspect too.
-			if wordHasUnquotedFieldSplittingExpansion(words[i]) {
-				return end(refuseLeadingExpansion, true)
-			}
+			// following stays admitted; a quoted operand
+			// (`--unknown="$OPT"`) is incomplete but provably one word.
 			return true, i + 1, nil
 		}
 		if resolved == "env" {
@@ -193,21 +198,15 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 			}
 			return straceEnvOperandRefused(value, true, names), i + 2, nil
 		}
-		// A known non-environment option whose word carries an unquoted
-		// (field-splittable) expansion can split into the option operand PLUS
-		// further argv words: `--output=$F` with
-		// `F='trace -E CODEX_HOME=/other codex'` splits into `--output=trace`,
-		// `-E`, `CODEX_HOME=/other`, `codex`, and strace processes the `-E`
-		// before launching the literal command. The operand of a known
-		// non-env option cannot by itself place a variable, but the split
-		// argv can, so this fails closed as a terminal — the same shape as
-		// the unprovable-identity paths above. A quoted operand
-		// (`--output="$F"`) does not field-split and stays admitted.
-		if wordHasUnquotedFieldSplittingExpansion(words[i]) {
-			return end(refuseLeadingExpansion, true)
-		}
 		if !hasEq && requiresArg {
-			return false, i + 2, nil // required operand arrives as the next word
+			// The required operand arrives as the next word. It must be
+			// provably one argv word too: a multiword operand (`-o $F`,
+			// `--output $F`, `-o "$@"`) supplies more options and the traced
+			// command from inside the expansion, so it refuses terminally.
+			if i+1 < len(words) && wordYieldsMultipleArgvWords(words[i+1]) {
+				return end(refuseLeadingExpansion, true)
+			}
+			return false, i + 2, nil
 		}
 		return false, i + 1, nil
 	}
@@ -234,35 +233,22 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 			}
 			return straceEnvOperandRefused(value, true, names), i + 2, nil
 		case !attached:
+			// Same separate-operand rule as the long-option path: the next
+			// word must be provably one argv word.
+			if i+1 < len(words) && wordYieldsMultipleArgvWords(words[i+1]) {
+				return end(refuseLeadingExpansion, true)
+			}
 			return false, i + 2, nil
-		}
-		// A known non-env value flag whose cluster carries an unquoted
-		// (field-splittable) attached operand (`-o$LOG`) splits the same way
-		// `--output=$F` does: `-o$LOG` with
-		// `LOG='x -E CODEX_HOME=/other codex'` splits into `-ox`, `-E`,
-		// `CODEX_HOME=/other`, `codex`. Fail closed as a terminal; a quoted
-		// operand (`-o"$LOG"`) does not field-split and stays admitted.
-		if wordHasUnquotedFieldSplittingExpansion(words[i]) {
-			return end(refuseLeadingExpansion, true)
 		}
 		return false, i + 1, nil
 	}
 	// A cluster that never reached an operand-taking letter and still has an
-	// unplaced or unprovable part has an unknown identity. With complete=false
-	// the cluster carries an unquoted parameter expansion (`-$OPT`, `-f$OPT`,
-	// `-Q$OPT`): the shell word-splits the unquoted expansion inside the
-	// dash-glued word, so the option AND a traced command can come from inside
-	// the variable even though no literal argv word follows. A non-terminal
-	// suspect is dropped when the run ends at this word, so this fails closed as
-	// a terminal — symmetric with the wholly-dynamic `text == ""` case and
-	// with the long-option path above. A literal cluster (complete=true) keeps
-	// the existing non-terminal refusal: an unknown short flag with no command
-	// following runs nothing, so the trace cannot place an env mutation. A
-	// quoted expansion (`-"$OPT"`) is incomplete but does not field-split, so
-	// it keeps the original non-terminal suspect too.
-	if wordHasUnquotedFieldSplittingExpansion(words[i]) {
-		return end(refuseLeadingExpansion, true)
-	}
+	// unplaced or unprovable part has an unknown identity — the multiword
+	// forms (`-$OPT`, `-f$OPT`, `-Q$OPT`, `-"$@"`) refused above. A literal
+	// cluster (complete=true) keeps the existing non-terminal refusal: an
+	// unknown short flag with no command following runs nothing, so the
+	// trace cannot place an env mutation. A quoted expansion (`-"$OPT"`) is
+	// incomplete but provably one word, so it keeps the suspect too.
 	return strings.Trim(cluster, straceShortFlags) != "" || cluster == "", i + 1, nil
 }
 
@@ -295,20 +281,78 @@ func stracePeekOperand(words []*syntax.Word, i int) (string, int) {
 // follows.
 const straceShortFlags = "cCdDfFhiknqrtTvVwxyYzZA"
 
-// wordHasUnquotedFieldSplittingExpansion reports whether the word contains an
-// unquoted parameter, command, or arithmetic expansion whose runtime value
-// undergoes shell field splitting — the only way a dash-glued word whose
-// literal prefix is incomplete (complete=false) can split into more argv
-// words than the source AST shows. Quoted expansions (`"$OPT"`, `"$(...)"`)
-// and the non-splitting quote forms (`$'...'`, `$"..."`) do not field-split,
-// so a word that is incomplete only because of those is not a splitting
-// hazard and keeps its original (non-terminal) suspect path.
-func wordHasUnquotedFieldSplittingExpansion(word *syntax.Word) bool {
+// wordYieldsMultipleArgvWords reports whether the word can expand to more
+// than one argv word at run time — the property that makes an option-position
+// word refuse terminally, because the extra fields can supply more options
+// and the traced command no matter how benign the literal text reads.
+// Unquoted parameter and command expansions field-split on IFS; an extended
+// glob matches several names; and inside double quotes a positional-@ or
+// whole-array expansion (`"$@"`, `"${a[@]}"`, `"${!a[@]}"`, `"${!pre@}"`,
+// `"${x:-$@}"`) still yields one field per element. A literal, a quoted
+// ordinary expansion (`"$x"`, `"${x}"`, `"$*"`, `"${a[*]}"`, `"${#a[@]}"`),
+// an arithmetic expansion (whose value is one number, even when computed
+// from variables) and a process substitution (one /dev/fd path) each
+// produce exactly one argv word.
+func wordYieldsMultipleArgvWords(word *syntax.Word) bool {
 	for _, part := range word.Parts {
-		switch part.(type) {
-		case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp:
+		switch part := part.(type) {
+		case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ExtGlob:
+			return true
+		case *syntax.DblQuoted:
+			if quotedPartsYieldMultipleFields(part.Parts) {
+				return true
+			}
+		case *syntax.Lit, *syntax.SglQuoted, *syntax.ArithmExp, *syntax.ProcSubst:
+			// Provably one argv word — see the comment above.
+		default:
 			return true
 		}
 	}
 	return false
+}
+
+// quotedPartsYieldMultipleFields reports whether any part inside a
+// double-quoted context can produce more than one field. Only the @-family
+// of parameter expansions does: "$@", "${a[@]}" and the other multiword
+// forms below. A quoted ordinary parameter expansion, command substitution
+// or arithmetic expansion stays one word, and literal text is literal.
+func quotedPartsYieldMultipleFields(parts []syntax.WordPart) bool {
+	for _, part := range parts {
+		switch part := part.(type) {
+		case *syntax.ParamExp:
+			if paramExpYieldsMultipleFieldsInsideQuotes(part) {
+				return true
+			}
+		case *syntax.DblQuoted:
+			if quotedPartsYieldMultipleFields(part.Parts) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// paramExpYieldsMultipleFieldsInsideQuotes reports whether a parameter
+// expansion inside double quotes can produce more than one field: the
+// positional-@ forms ("$@", "${@}", "${@:1}"), a whole-array [@] subscript
+// ("${a[@]}", "${!a[@]}" — the @ name-list "${!pre@}"), and a nested
+// multiword expansion inside a value-position operator word
+// ("${x:-$@}" expands to one field per positional, measured on bash).
+// "${a[*]}", "${!pre*}" and "${#a[@]}" join to a single word, and every
+// pattern-position sub-word ("${y#$@}", "${y/$@/Q}") produces one field,
+// so those stay single.
+func paramExpYieldsMultipleFieldsInsideQuotes(exp *syntax.ParamExp) bool {
+	if exp.Param != nil && exp.Param.Value == "@" {
+		return true
+	}
+	if exp.Names == syntax.NamesPrefixWords {
+		return true
+	}
+	if exp.Index != nil && !exp.Length {
+		if index, ok := exp.Index.(*syntax.Word); ok && index.Lit() == "@" {
+			return true
+		}
+	}
+	return exp.Exp != nil && exp.Exp.Op <= syntax.AssignUnsetOrNull &&
+		exp.Exp.Word != nil && quotedPartsYieldMultipleFields(exp.Exp.Word.Parts)
 }
