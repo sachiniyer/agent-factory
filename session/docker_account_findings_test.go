@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -286,66 +287,81 @@ func TestDockerAccount_ForwardedLoaderNamesBlankTheImageValue(t *testing.T) {
 	})
 }
 
-// TestDockerAccount_ForwardedCountWithoutPairsIsPinnedEmpty pins the fix for
-// the count-only forward: GIT_CONFIG_COUNT forwarded and set to N>0 in the
-// daemon environment, WITHOUT its required indexed pairs forwarded, would
-// ride a bare -e GIT_CONFIG_COUNT into the container while no pair travels
-// with it, so every git invocation (including af's provisioning `git config
-// --global --add safe.directory "*"`) fails fatally. af neutralizes the
-// forward by emitting a trailing -e GIT_CONFIG_COUNT= blank after the bare
-// forward: docker's last-wins -e resolves to empty, rendering the whole
-// family inert the way an unforwarded count would, and keeping git usable.
+// TestDockerAccount_ForwardedCountWithoutPairsIsRefusedAtCreation pins the
+// fail-fast contract for the count-only forward: GIT_CONFIG_COUNT forwarded
+// and set to N>0 in the daemon environment, WITHOUT its required indexed
+// pairs forwarded, would ride a bare -e GIT_CONFIG_COUNT into the container
+// while no pair travels with it, so every git invocation (including af's
+// provisioning `git config --global --add safe.directory "*"`) fails fatally.
+// ValidateGitConfigCountForward runs at the session-creation boundary, before
+// any provisioning begins, so the half-forward is refused loudly — naming the
+// missing indexed pair names the operator must also forward — and docker run
+// is never reached. The exec-shim and docker-account neutralizers remain as
+// defense-in-depth for forwards that bypassed this refusal.
 //
 // The pairs are present in the daemon environment so the test process's own
 // git (fixture init, repo-root resolution) survives the count; the incompleteness
 // is in the FORWARD (the pairs are not in session_env_passthrough), which is
-// what the count resolves against and what the blank guards.
-func TestDockerAccount_ForwardedCountWithoutPairsIsPinnedEmpty(t *testing.T) {
+// what the boundary refuses.
+func TestDockerAccount_ForwardedCountWithoutPairsIsRefusedAtCreation(t *testing.T) {
 	f := newDockerAccountFixture(t, "", "gemini", nil)
 	// The operator's claim: GIT_CONFIG_COUNT forwarded AND set to a positive
 	// count. The required pairs exist in the daemon environment (so the test
 	// process's own git succeeds), but they are NOT in session_env_passthrough,
-	// so they do not travel into the container — the count arrives live with
-	// zero pairs unless af neutralizes it.
+	// so they do not travel into the container — the count would arrive live
+	// with zero pairs, which the creation boundary refuses.
 	t.Setenv("GIT_CONFIG_COUNT", "2")
 	t.Setenv("GIT_CONFIG_KEY_0", "safe.directory")
 	t.Setenv("GIT_CONFIG_VALUE_0", "/work")
 	t.Setenv("GIT_CONFIG_KEY_1", "safe.directory")
 	t.Setenv("GIT_CONFIG_VALUE_1", "/other")
-	var runArgs []string
+	dockerCalled := false
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "run" {
-			runArgs = append([]string(nil), args...)
-			return nil, fmt.Errorf("stop after docker run")
+			dockerCalled = true
 		}
 		return fakeLocalDockerResponse(args)
 	}))
 
-	_, _ = createDockerAccountSession(f, "gemini", []string{"GIT_CONFIG_COUNT"})
-	require.NotEmpty(t, runArgs, "the account create never reached docker run")
+	_, err := createDockerAccountSession(f, "gemini", []string{"GIT_CONFIG_COUNT"})
+	require.Error(t, err, "a count-only forward must be refused at the session-creation boundary")
+	require.Contains(t, err.Error(), "GIT_CONFIG_COUNT")
+	require.Contains(t, err.Error(), "GIT_CONFIG_KEY_0")
+	require.Contains(t, err.Error(), "GIT_CONFIG_VALUE_0")
+	require.Contains(t, err.Error(), "session_env_passthrough")
+	require.False(t, dockerCalled, "the refusal must happen before any docker run")
+}
 
-	// The bare -e GIT_CONFIG_COUNT (forwarded+set) is emitted by
-	// DockerForwardNames, and the neutralizing blank follows it (appended by
-	// accountLoaderBlankEntries). Docker's last-wins -e resolves to the blank,
-	// so git reads count 0 and finds no missing pair. Without the blank, the
-	// container would inherit count 2 and every git call would fail with
-	// "missing config key GIT_CONFIG_KEY_0".
-	bare, found := dockerEnvArg(runArgs, "GIT_CONFIG_COUNT")
-	require.True(t, found, "the bare -e GIT_CONFIG_COUNT forward must still be present")
-	require.Equal(t, "GIT_CONFIG_COUNT", bare,
-		"the count is forwarded+set, so a bare -e rides the daemon value")
-	blank, found := dockerEnvArg(runArgs, "GIT_CONFIG_COUNT=")
-	require.True(t, found,
-		"a forwarded GIT_CONFIG_COUNT without its pairs must be followed by a -e GIT_CONFIG_COUNT= blank so docker's last-wins resolves it empty; runArgs=%v", runArgs)
-	require.Equal(t, "GIT_CONFIG_COUNT=", blank,
-		"the neutralizing blank must pin the count defined-empty")
-	// The pairs are not forwarded, so neither rides a bare -e nor gets a
-	// blanking -e — they never reach the container at all, which is safe only
-	// because the count is neutralized.
+// TestAccountLoaderBlankEntries_NeutralizesCountOnlyForward pins the
+// defense-in-depth neutralizer accountLoaderBlankEntries installs at the
+// docker-account boundary: even when a count-only forward reached the
+// provisioner (an older af daemon, or a count that gained a value after
+// admission), the bare -e GIT_CONFIG_COUNT forward is followed by a trailing
+// -e GIT_CONFIG_COUNT= blank so docker's last-wins -e resolves empty,
+// rendering the whole indexed family inert. Coverage lives here, at the
+// helper, because the creation-boundary refusal (above) now stops the direct
+// path before it reaches the docker run.
+func TestAccountLoaderBlankEntries_NeutralizesCountOnlyForward(t *testing.T) {
+	f := newDockerAccountFixture(t, "", "gemini", nil)
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.directory")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/work")
+	t.Setenv("GIT_CONFIG_KEY_1", "safe.directory")
+	t.Setenv("GIT_CONFIG_VALUE_1", "/other")
+	entries := accountLoaderBlankEntries("gemini",
+		[]string{"GIT_CONFIG_COUNT"}, os.Environ())
+	require.Contains(t, entries, "GIT_CONFIG_COUNT=",
+		"a count-only forward must be followed by a -e GIT_CONFIG_COUNT= blank so docker's last-wins resolves it empty; entries=%v", entries)
+	// The forwarded count is the operator's claim and rides bare -e from
+	// DockerForwardNames (a separate helper); accountLoaderBlankEntries only
+	// appends the blanking entries, so the bare forward is not emitted here.
 	for _, name := range []string{"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"} {
-		_, present := dockerEnvArg(runArgs, name)
-		require.False(t, present, "%s was never forwarded and must not appear in the container env at all; runArgs=%v", name, runArgs)
+		require.False(t, slices.Contains(entries, name+"="),
+			"%s was never forwarded and must not get a blanking -e; entries=%v", name, entries)
 	}
+	// Keep the fixture's home/account wiring referenced so the test stays
+	// hermetic against future fixture changes.
+	_ = f
 }
 
 // Codex P2 on a46bdbf91: a forwarded-but-unset proxy spelling whose case

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -686,6 +687,18 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
 	opts.SessionEnvPassthrough = normalizedSessionEnv
+	// Fail fast at the session-creation boundary: a session_env_passthrough
+	// that forwards GIT_CONFIG_COUNT resolving to N>0 in the daemon
+	// environment without its required indexed pairs (or whose forwarded
+	// pairs do not resolve to usable values in source) delivers a count git
+	// treats as authoritative alongside zero or empty pairs, which makes
+	// every git invocation fail fatally. Refuse it here, before any
+	// provisioning begins, naming the missing pair names the operator must
+	// also forward; the exec-shim and docker-account neutralizers remain as
+	// defense-in-depth for forwards that bypassed this refusal.
+	if err := sessionenv.ValidateGitConfigCountForward(normalizedSessionEnv, os.Environ()); err != nil {
+		return nil, fmt.Errorf("invalid session environment pass-through: %w", err)
+	}
 	normalizedSessionEnvEmpty, err := sessionenv.NormalizeExtraNames(opts.SessionEnvEmpty)
 	if err != nil {
 		return nil, fmt.Errorf("invalid session environment empty-pin names: %w", err)

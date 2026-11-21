@@ -19,6 +19,11 @@ func TestParseGitConfigCount(t *testing.T) {
 		"12abc": 12, // stops at the first non-digit
 		"abc":   0,  // no leading digit -> 0
 		"-1":    0,  // a leading '-' is not a non-negative digit -> 0
+		"+1":    1,  // strtoul accepts an optional leading '+'
+		"+0":    0,  // a leading '+' before a zero count is still 0
+		"+abc":  0,  // a leading '+' with no following digits yields 0
+		"+":     0,  // a lone '+' yields 0
+		"  +7":  7,  // whitespace then '+' then digits
 		"007":   7,
 	}
 	for value, want := range cases {
@@ -105,6 +110,23 @@ func TestValidateGitConfigCountForward(t *testing.T) {
 		err := ValidateGitConfigCountForward([]string{" GIT_CONFIG_COUNT "}, source("1"))
 		require.Error(t, err, "a count surrounded by whitespace is still GIT_CONFIG_COUNT")
 	})
+
+	t.Run("count with a leading '+' is a live count -> refused without pairs", func(t *testing.T) {
+		err := ValidateGitConfigCountForward([]string{"GIT_CONFIG_COUNT"}, append(source(""), "GIT_CONFIG_COUNT=+1"))
+		require.Error(t, err, "strtoul accepts a leading '+', so +1 resolves to 1")
+		require.Contains(t, err.Error(), "resolves to 1")
+		require.Contains(t, err.Error(), "GIT_CONFIG_KEY_0")
+	})
+
+	t.Run("count above the expansion cap is refused with a bounded range", func(t *testing.T) {
+		err := ValidateGitConfigCountForward([]string{"GIT_CONFIG_COUNT"}, append(source(""), "GIT_CONFIG_COUNT=10000000"))
+		require.Error(t, err, "a huge count cannot be a complete forward and must not enumerate every index")
+		require.Contains(t, err.Error(), "resolves to 10000000")
+		require.Contains(t, err.Error(), "GIT_CONFIG_KEY_0..GIT_CONFIG_KEY_9999999")
+		require.Contains(t, err.Error(), "GIT_CONFIG_VALUE_0..GIT_CONFIG_VALUE_9999999")
+		require.NotContains(t, err.Error(), "GIT_CONFIG_KEY_4096=",
+			"the bounded range must not materialize every index")
+	})
 }
 
 // To require a pair, the operator names it without a value, exactly as
@@ -188,6 +210,17 @@ func TestNeutralizeIncompleteGitConfigCount(t *testing.T) {
 		}
 		require.Equal(t, 1, seen, "the count must be blanked once, not duplicated")
 	})
+
+	t.Run("count above the expansion cap -> pinned empty without enumerating", func(t *testing.T) {
+		in := []string{"PATH=/bin", "GIT_CONFIG_COUNT=10000000", "HOME=/h"}
+		out, ok := NeutralizeIncompleteGitConfigCount(in)
+		require.True(t, ok, "a count this large cannot be complete and must be neutralized")
+		v, present := envEntryValue(out, "GIT_CONFIG_COUNT")
+		require.True(t, present)
+		require.Empty(t, v, "the count must be pinned defined-empty")
+		require.Contains(t, out, "PATH=/bin")
+		require.Contains(t, out, "HOME=/h")
+	})
 }
 
 // GitConfigCountForwardMissingPairs returns the names a forward is missing,
@@ -196,9 +229,27 @@ func TestGitConfigCountForwardMissingPairs(t *testing.T) {
 	require.Equal(t,
 		[]string{"GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_VALUE_1"},
 		GitConfigCountForwardMissingPairs([]string{"GIT_CONFIG_COUNT"}, []string{"GIT_CONFIG_COUNT=2"}))
+	// All three names forwarded but the pair values do not resolve in source:
+	// the names travel but the values do not (keep-if-set and docker's bare -e
+	// both read source), so git sees a count with empty/absent pairs — the same
+	// half-forward as a count-only forward. The forwarded-but-unresolved pair
+	// names are the missing ones.
+	require.Equal(t,
+		[]string{"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"},
+		GitConfigCountForwardMissingPairs(
+			[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"},
+			[]string{"GIT_CONFIG_COUNT=1"}))
+	// All three names forwarded AND the pair values resolve in source: complete.
 	require.Nil(t, GitConfigCountForwardMissingPairs(
 		[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"},
-		[]string{"GIT_CONFIG_COUNT=1"}))
+		[]string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=k", "GIT_CONFIG_VALUE_0=v"}))
+	// A forwarded KEY whose source value is empty is incomplete — git fails an
+	// empty config key just as it fails a missing one.
+	require.Equal(t,
+		[]string{"GIT_CONFIG_KEY_0"},
+		GitConfigCountForwardMissingPairs(
+			[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"},
+			[]string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=", "GIT_CONFIG_VALUE_0=v"}))
 	require.Nil(t, GitConfigCountForwardMissingPairs([]string{"GIT_CONFIG_COUNT"}, []string{"GIT_CONFIG_COUNT=0"}))
 	require.Nil(t, GitConfigCountForwardMissingPairs(nil, []string{"GIT_CONFIG_COUNT=5"}))
 }

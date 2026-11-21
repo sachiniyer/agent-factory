@@ -20,16 +20,18 @@ import (
 // unforwarded count takes.
 
 // parseGitConfigCount parses a GIT_CONFIG_COUNT value the way git's strtoul
-// does: leading whitespace is skipped, the following run of base-10 digits is
-// the count, and an empty or non-numeric-leading value yields 0. A count of 0
-// makes every indexed GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* pair inert, so no
-// pairs are required. Git itself rejects a negative count, and a host value
-// of that shape is already broken regardless of forwarding, so only
-// non-negative leading digits are recognized.
+// does: leading whitespace is skipped, an optional single leading '+' is
+// consumed, the following run of base-10 digits is the count, and an empty or
+// non-numeric-leading value yields 0. A count of 0 makes every indexed
+// GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* pair inert, so no pairs are required.
+// Git itself rejects a negative count, and a host value of that shape is
+// already broken regardless of forwarding, so only a leading '+' (which
+// strtoul accepts) plus non-negative digits are recognized — not '-'.
 func parseGitConfigCount(value string) int {
 	value = strings.TrimLeftFunc(value, func(r rune) bool {
 		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
 	})
+	value = strings.TrimPrefix(value, "+")
 	n := 0
 	seen := false
 	for _, r := range value {
@@ -44,6 +46,18 @@ func parseGitConfigCount(value string) int {
 	}
 	return n
 }
+
+// gitConfigCountMaxExpand bounds the work the completeness helpers do for a
+// forwarded count whose pairs did not travel with it. A count larger than this
+// cannot be a complete forward through session_env_passthrough (it would name
+// more indexed pairs than any operator forwards), and enumerating every
+// required index would allocate and retain a formatted string per index before
+// the docker account session can be neutralized — e.g. GIT_CONFIG_COUNT=10000000
+// with only the count forwarded. Such a count is treated as incomplete (refused
+// at the boundary, neutralized at the shims) and the refusal names the bounded
+// range instead of materializing every index. The limit is far above any
+// realistic GIT_CONFIG_COUNT while keeping the per-call work constant-bounded.
+const gitConfigCountMaxExpand = 4096
 
 // envEntryValue reports whether name is present in environ (defined, even
 // empty) and returns its value. It is the getenv over a name=value slice the
@@ -84,14 +98,25 @@ func forceEnvEntryEmpty(environ []string, name string) []string {
 // gitConfigCountMissingPairs reports whether a pass-through list forwards
 // GIT_CONFIG_COUNT with a live value resolving to N>0 in source WITHOUT also
 // forwarding every required indexed pair GIT_CONFIG_KEY_0..N-1 and
-// GIT_CONFIG_VALUE_0..N-1. When it does, missing is the sorted list of pair
-// names the operator still needs to forward; otherwise missing is nil. A
-// count that is not forwarded, absent in source, empty, 0, or non-numeric is
-// a complete forward — no pairs are required.
+// GIT_CONFIG_VALUE_0..N-1 AND those pairs resolving to usable values in
+// source. When it does, missing is the sorted list of pair names the operator
+// still needs to forward (or whose source value is missing/empty); otherwise
+// missing is nil. A count that is not forwarded, absent in source, empty, 0,
+// or non-numeric is a complete forward — no pairs are required.
 //
 // This is the shape test against the OPERATOR'S LIST and the value's source:
 // it answers "did the operator forward a count whose pairs did not travel
 // with it", which is what refuse-loudly and the docker blanking both need.
+// Completeness accounts for the resolved source entries, not just the names
+// in the pass-through list: a pair name the operator forwarded but whose
+// source value is absent (keep-if-set and docker's bare -e both read source)
+// arrives defined-empty or absent in the delivered environment, and git fails
+// a missing OR empty GIT_CONFIG_KEY_i ("empty config key") — so a forwarded
+// KEY whose source value is missing or empty is the same half-forward. An
+// empty GIT_CONFIG_VALUE_i is a valid git config value, so only its absence is
+// incomplete. Only pair NAMES ever enter missing — the values themselves are
+// read for the empty/absent test and discarded, so a malformed NAME=value
+// entry cannot render a credential in a caller's error.
 func gitConfigCountMissingPairs(passthrough, source []string) (count int, missing []string) {
 	wanted := make(map[string]struct{}, len(passthrough))
 	for _, name := range passthrough {
@@ -108,14 +133,37 @@ func gitConfigCountMissingPairs(passthrough, source []string) (count int, missin
 	if count <= 0 {
 		return count, nil
 	}
-	for i := 0; i < count; i++ {
-		key := "GIT_CONFIG_KEY_" + strconv.Itoa(i)
-		val := "GIT_CONFIG_VALUE_" + strconv.Itoa(i)
-		if _, ok := wanted[key]; !ok {
-			missing = append(missing, key)
+	// Bound the expansion: a count this large is not a complete forward and
+	// enumerating every index would allocate unbounded memory. Name the
+	// bounded range so the refusal is honest about not listing every index.
+	if count > gitConfigCountMaxExpand {
+		missing = []string{
+			fmt.Sprintf("GIT_CONFIG_KEY_0..GIT_CONFIG_KEY_%d", count-1),
+			fmt.Sprintf("GIT_CONFIG_VALUE_0..GIT_CONFIG_VALUE_%d", count-1),
 		}
-		if _, ok := wanted[val]; !ok {
-			missing = append(missing, val)
+		sort.Strings(missing)
+		return count, missing
+	}
+	for i := 0; i < count; i++ {
+		keyName := "GIT_CONFIG_KEY_" + strconv.Itoa(i)
+		valName := "GIT_CONFIG_VALUE_" + strconv.Itoa(i)
+		if _, ok := wanted[keyName]; !ok {
+			missing = append(missing, keyName)
+		} else if kv, kpresent := envEntryValue(source, keyName); !kpresent || kv == "" {
+			// Forwarded by name but unresolved or empty in source: the
+			// delivered pair is defined-empty (docker account blanking) or
+			// absent (keep-if-set reads source), and git fails an empty
+			// GIT_CONFIG_KEY_i just as it fails a missing one.
+			missing = append(missing, keyName)
+		}
+		if _, ok := wanted[valName]; !ok {
+			missing = append(missing, valName)
+		} else if _, vpresent := envEntryValue(source, valName); !vpresent {
+			// Forwarded by name but absent in source: the value does not
+			// travel into the delivered environment, so git does not see the
+			// pair. An empty value is a valid git config value, so only
+			// absence is incomplete.
+			missing = append(missing, valName)
 		}
 	}
 	sort.Strings(missing)
@@ -182,6 +230,13 @@ func NeutralizeIncompleteGitConfigCount(environ []string) ([]string, bool) {
 	count := parseGitConfigCount(value)
 	if count <= 0 {
 		return environ, false
+	}
+	// Bound the expansion: a count this large cannot be verified pair-by-pair
+	// without unbounded work, and cannot be a complete forward through
+	// session_env_passthrough, so pin it empty (the safe shape) the way the
+	// bounded loop below would on the first missing pair.
+	if count > gitConfigCountMaxExpand {
+		return forceEnvEntryEmpty(environ, "GIT_CONFIG_COUNT"), true
 	}
 	for i := 0; i < count; i++ {
 		if _, hasKey := envEntryValue(environ, "GIT_CONFIG_KEY_"+strconv.Itoa(i)); !hasKey {
