@@ -538,7 +538,9 @@ func TestBoundRowMatcherKeepsAnOwnerThroughABasenameSymlink(t *testing.T) {
 // neither the raw basename (af.sock) nor the canonical filter name
 // (new.sock) carries. It is NOT the reverse alias — this server was
 // reachable through the queried path — so the row must still be admitted
-// and converge to Certain, never ruled out.
+// and converge to Certain, never ruled out. The name comes from the same
+// walk that produced want, so a retargeted link cannot hide it from a
+// second read — there is none.
 func TestBoundRowMatcherKeepsAnOwnerSpelledByAChainName(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "af.sock")
@@ -580,15 +582,16 @@ func TestBoundRowMatcherRulesOutAReverseAlias(t *testing.T) {
 }
 
 // The negative path makes no PER-ROW filesystem call: a row whose raw
-// basename equals neither the canonical filter name nor any name on the
-// queried path's own chain is ruled out lexically — the per-row Lstat
-// #7736 removed because a stalled mount blocks it uninterruptibly on the
-// common negative path (the query's own chain is still read once per
-// probe — never per row — and only ever widens admission). The first row
-// below is exactly what a residual stat would observe — a present symlink
-// at its own basename, pointing at a different socket — so a filesystem
-// read still in the matcher would change this verdict and fail the pin;
-// the second row cannot be stat'ed at all and takes the same rule-out.
+// basename equals neither the canonical filter name, the queried path's
+// own raw basename, nor any name its own walk recorded is ruled out
+// lexically — the per-row Lstat #7736 removed because a stalled mount
+// blocks it uninterruptibly on the common negative path (the query's own
+// chain names come from the same walk that produced want — no second
+// read, never per row). The first row below is exactly what a residual
+// stat would observe — a present symlink at its own basename, pointing at
+// a different socket — so a filesystem read still in the matcher would
+// change this verdict and fail the pin; the second row cannot be stat'ed
+// at all and takes the same rule-out.
 func TestBoundRowMatcherRulesOutWithoutAFilesystemRead(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "af.sock") // absent — the queried path
