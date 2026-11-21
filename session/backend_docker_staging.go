@@ -124,6 +124,15 @@ func (p *dockerProvisioner) preparePayloadDelivery() {
 // daemon with a different filesystem view) — and its failure takes the same
 // one-shot cp retry.
 func (p *dockerProvisioner) runPayloadContainer() error {
+	// The run_args option-shape gate: a token pflag treats as a non-option
+	// argument would end docker's parsing and turn every option af appends
+	// after run_args into container Cmd words (#7733 R1). The account and
+	// credential-mount validators refuse the same shapes on their paths;
+	// this check is the one every session — plain sessions included —
+	// shares before `docker run`.
+	if err := validateDockerRunArgsShape(p.runArgs); err != nil {
+		return dockerStepErr(err, dockerOpLocal)
+	}
 	if err := p.refuseEnclosingRunArgsMounts(); err != nil {
 		// A preflight configuration refusal — no docker run happened, so the
 		// engine wrote nothing. Classifying it local keeps a full data root's

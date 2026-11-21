@@ -95,7 +95,10 @@ func runArgsMountDestinations(runArgs []string) ([][2]string, error) {
 			}
 			continue
 		default:
-			continue
+			// A non-option argument: `docker run` parses non-interspersed,
+			// so option parsing ends here and nothing after this token is a
+			// flag — including any mount spelling that follows it (#7733 R1).
+			return out, nil
 		}
 		if spec == "" {
 			continue
@@ -152,6 +155,10 @@ func runArgsInheritMounts(runArgs []string) bool {
 			if dockerClusterConsumesNextArg(a) && i+1 < len(runArgs) {
 				i++
 			}
+		default:
+			// A non-option argument ends docker's option parsing, so a
+			// --volumes-from after it is never a flag (#7733 R1).
+			return false
 		}
 	}
 	return false

@@ -810,6 +810,11 @@ func dockerRunArgsEnvNames(args []string) []string {
 			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
 				index++
 			}
+		default:
+			// A non-option argument: `docker run` parses non-interspersed,
+			// so option parsing ends here and nothing after this token is a
+			// flag — including any -e that follows it (#7733 R1).
+			return names
 		}
 	}
 	return names

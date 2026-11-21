@@ -34,8 +34,10 @@ func TestRunArgsMountDestinations_SwallowedMountRecordsNothing(t *testing.T) {
 		{name: "booleans consume nothing",
 			args: []string{"--interactive", "-v", "/host:/dst"},
 			want: [][2]string{{"-v /host:/dst", "/dst"}}},
-		{name: "positional walks past",
-			args: []string{"image-name", "-v", "/host:/dst"},
+		{name: "positional ends docker's parsing",
+			args: []string{"image-name", "-v", "/host:/dst"}, want: nil},
+		{name: "mount before the positional still records",
+			args: []string{"-v", "/host:/dst", "image-name"},
 			want: [][2]string{{"-v /host:/dst", "/dst"}}},
 	}
 	for _, tt := range tests {
@@ -78,6 +80,7 @@ func TestRunArgsInheritMounts_SwallowedFlagIsNotInherited(t *testing.T) {
 		{name: "attached spelling swallowed", args: []string{"--user", "--volumes-from=donor"}, want: false},
 		{name: "swallowed by a shorthand", args: []string{"-l", "--volumes-from", "donor"}, want: false},
 		{name: "swallowed by a cluster", args: []string{"-tv", "--volumes-from=donor"}, want: false},
+		{name: "after a positional", args: []string{"evil/img", "--volumes-from=donor"}, want: false},
 		{name: "none", args: []string{"-it"}, want: false},
 	}
 	for _, tt := range tests {

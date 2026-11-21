@@ -218,7 +218,7 @@ func TestDockerCredentialRunArgs_AllowsHarmlessCombinedShortOptions(t *testing.T
 		{"-itv/tmp/cache:/workspace"},
 		{"-tv", "/tmp/cache:/root/.codex"},
 		{"-ite", "TZ=UTC"},
-		{"-ue", "CODEX_HOME=repo"}, // -u takes a value, so the e is part of it
+		{"-ue", "--name", "x"}, // -u takes a value, so the e is part of it
 		{"-p8080:80"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
@@ -506,7 +506,7 @@ func TestDockerCredentialRunArgs_AllowsHarmlessCombinedShortOptionsForEmptyAccou
 		{tmux.ProgramOpencode, []string{"-itv", "/tmp/cache:/root/.local/share/opencode"}},
 		{tmux.ProgramOpencode, []string{"-ite", "TZ=UTC"}},
 		{tmux.ProgramOpencode, []string{"-ite", "AZURE_OPENAI_API_VERSION=2024-10-01-preview"}},
-		{tmux.ProgramOpencode, []string{"-ue", "AMP_API_KEY=repo"}}, // -u consumes its value, so this is not -e
+		{tmux.ProgramOpencode, []string{"-ue", "--name", "x"}}, // -u consumes its value, so this is not -e
 		{tmux.ProgramAmp, []string{"-itd"}},
 		{tmux.ProgramAmp, []string{"-itv", "/tmp/cache:/root/.config/amp"}},
 		{tmux.ProgramAmp, []string{"-ite", "TZ=UTC"}},

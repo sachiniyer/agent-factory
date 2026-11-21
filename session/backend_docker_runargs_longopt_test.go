@@ -88,17 +88,19 @@ func TestDockerAccount_RefusesMountBehindLongoptValue(t *testing.T) {
 }
 
 // TestDockerAccount_LongoptSwallowsEnvFlagSilently is the acceptance side of
-// the same parse: when the token a long option consumes IS the whole attack
-// surface, what follows is a positional docker reads as the image — harmless
-// to af, and refusing it would be over-refusal.
+// the same parse: the token a long option consumes is its VALUE — never a
+// flag — so a guarded spelling it swallows installs nothing and must not be
+// refused. The rows end in a real option or nothing, because a bare token
+// after the swallowed value is a positional refused for its own reason
+// (#7733 R1).
 func TestDockerAccount_LongoptSwallowsEnvFlagSilently(t *testing.T) {
 	for _, args := range [][]string{
-		// -e is --user's value; TZ=UTC is the positional image token.
-		{"--user", "-e", "TZ=UTC"},
-		// -v is --label's value; the spec is positional — docker installs
-		// no mount, so there is nothing to refuse.
-		{"--label", "-v", "/host:/af-account"},
-		{"--hostname", "--mount", "type=bind,source=/host,target=/af-account"},
+		// -e is --user's value; the option after it is still parsed.
+		{"--user", "-e", "--name", "x"},
+		// -v is --label's value — docker installs no mount, so there is
+		// nothing to refuse.
+		{"--label", "-v", "--name", "x"},
+		{"--hostname", "--mount", "--name", "x"},
 		// A real env flag AFTER the swallowed token is still checked —
 		// and a harmless name still passes.
 		{"--label", "-e", "--env=TZ=UTC"},
@@ -126,16 +128,16 @@ func TestDockerCredential_RefusesEnvBehindLongoptValue(t *testing.T) {
 }
 
 // TestDockerCredential_LongoptSwallowsEnvFlagSilently is the credential
-// path's acceptance side: the swallowed token is the option's value, the
-// positional after it is the image, and a real env flag checked later still
+// path's acceptance side: the swallowed token is the option's value, a real
+// option after it is still parsed, and a real env flag checked later still
 // passes when its name is harmless.
 func TestDockerCredential_LongoptSwallowsEnvFlagSilently(t *testing.T) {
 	for _, agent := range []string{tmux.ProgramCodex, tmux.ProgramGemini} {
 		for _, args := range [][]string{
-			{"--user", "-e", "TZ=UTC"},
+			{"--user", "-e", "--name", "x"},
 			// The mount options this path does not check still consume —
-			// --volume's value is -e, and TZ=UTC is positional.
-			{"--volume", "-e", "TZ=UTC"},
+			// --volume's value is -e.
+			{"--volume", "-e", "--name", "x"},
 			{"--label", "-e", "--env=TZ=UTC"},
 			{"--mount", "type=bind,source=/x,target=/y", "-e", "TZ=UTC"},
 		} {
@@ -283,12 +285,38 @@ func TestDockerAccount_AdmitsCommonRunArgs(t *testing.T) {
 		{"--pids-limit=100"},
 		{"--runtime=runc"},
 		{"--volume-driver=local"},
-		{"weird-image", "-e", "TZ=UTC"}, // positionals walk past like docker
-		{"-"},                           // a bare dash is positional to pflag
 	} {
 		require.NoErrorf(t, validateAccountDockerRunArgs(args, "codex"),
 			"a run_args shape docker run accepts was refused: %v", args)
 	}
+}
+
+// TestDockerAccount_RefusesPositionalTokens is the #7733 R1 fix: `docker
+// run` and `docker create` parse options non-interspersed
+// (SetInterspersed(false)), so a token pflag treats as a non-option argument
+// — an image name, a lone `-`, an empty string — becomes the IMAGE, and
+// every option af appends after run_args (the labels, env pins, mounts,
+// --entrypoint, the configured image) becomes container command words
+// instead. The remedy the refusal names is the operator's own config key.
+func TestDockerAccount_RefusesPositionalTokens(t *testing.T) {
+	for _, args := range [][]string{
+		{"evil/img"},
+		{"evil/img", "-e", "TZ=UTC"},
+		{"weird-image", "-e", "TZ=UTC"},
+		{"-"},
+		{""},
+		{"-it", "evil/img"},
+	} {
+		err := validateAccountDockerRunArgs(args, "codex")
+		require.Errorf(t, err, "a non-option argument was admitted: %v", args)
+		require.Contains(t, err.Error(), "docker.image",
+			"the refusal must name the config key that sets the image")
+	}
+	// A token that LOOKS positional but is an option's consumed value is not
+	// a positional: "evil/img" is --label's value, so docker's parsing
+	// continues and the real image is still af's configured one.
+	require.NoError(t, validateAccountDockerRunArgs(
+		[]string{"--label", "evil/img", "-e", "TZ=UTC"}, "codex"))
 }
 
 // TestDockerCredential_AdmitsCommonRunArgs is the same pin on the credential
@@ -321,11 +349,63 @@ func TestDockerCredential_AdmitsCommonRunArgs(t *testing.T) {
 			{"--entrypoint", "sh", "-e", "TZ=UTC"},
 			{"--pull", "missing"},
 			{"--sig-proxy=false"},
-			{"weird-image", "-e", "TZ=UTC"},
 		} {
 			require.NoErrorf(t, validateCredentialDockerRunArgs(args, agent),
 				"agent %q: a run_args shape docker run accepts was refused: %v", agent, args)
 		}
+	}
+}
+
+// TestDockerCredential_RefusesPositionalTokens pins the credential guard on
+// the #7733 R1 property: a non-option argument ends docker's option parsing
+// and becomes the image, turning af's trailing options into container Cmd.
+func TestDockerCredential_RefusesPositionalTokens(t *testing.T) {
+	for _, agent := range []string{tmux.ProgramCodex, tmux.ProgramGemini} {
+		for _, args := range [][]string{
+			{"evil/img"},
+			{"evil/img", "-e", "TZ=UTC"},
+			{"weird-image", "-e", "TZ=UTC"},
+			{"-"},
+			{"-it", "evil/img"},
+		} {
+			err := validateCredentialDockerRunArgs(args, agent)
+			require.Errorf(t, err, "agent %q: a non-option argument was admitted: %v", agent, args)
+			require.Contains(t, err.Error(), "docker.image",
+				"agent %q: the refusal must name the config key that sets the image", agent)
+		}
+	}
+}
+
+// TestValidateDockerRunArgsShape covers the guard every docker session
+// shares — the plain-session gate in runPayloadContainer — where run_args
+// sits directly ahead of af's own options and the image.
+func TestValidateDockerRunArgsShape(t *testing.T) {
+	for _, args := range [][]string{
+		nil,
+		{"-p", "8080:80"},
+		{"--network", "host"},
+		{"-it", "-e", "TERM=xterm"},
+		{"--label", "k=v"},
+		{"--name", "x"},
+		{"-v", "/host:/container"},
+		{"--mount=type=bind,source=/x,target=/y"},
+		{"--label", "evil/img", "-e", "TZ=UTC"}, // evil/img is --label's value
+		{"-v", "/host:/dst", "--pull", "always"},
+	} {
+		require.NoErrorf(t, validateDockerRunArgsShape(args),
+			"an option-shaped run_args list was refused: %v", args)
+	}
+	for _, args := range [][]string{
+		{"evil/img"},
+		{"evil/img", "-e", "TZ=UTC"},
+		{"-"},
+		{""},
+		{"--", "-e", "TZ=UTC"},
+		{"--frobnicate", "x"},
+		{"-it", "evil/img"},
+	} {
+		err := validateDockerRunArgsShape(args)
+		require.Errorf(t, err, "a run_args shape that ends or outlasts docker's parsing was admitted: %v", args)
 	}
 }
 
@@ -352,6 +432,10 @@ func TestDockerRunArgsEnvNames_SwallowedEnvReportsTheRealName(t *testing.T) {
 			args: []string{"--label=k=v", "-e", "TZ=UTC"}, want: []string{"TZ"}},
 		{name: "cluster swallow then real env",
 			args: []string{"-il", "-e", "--env=GH_HOST=evil"}, want: []string{"GH_HOST"}},
+		{name: "positional ends docker's parsing",
+			args: []string{"evil/img", "-e", "GH_HOST=evil"}, want: nil},
+		{name: "positional mid-list stops the extraction",
+			args: []string{"-e", "TZ=UTC", "img", "--env=GH_HOST=evil"}, want: []string{"TZ"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

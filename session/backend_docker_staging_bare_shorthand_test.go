@@ -81,9 +81,9 @@ func TestDockerStagingRunArgsMountDestinations_BareValueShorthandConsumesGuarded
 // recorded. The fix consumes only the swallowed value, never the real mount
 // that follows it.
 func TestDockerStagingRunArgsMountDestinations_StillRecordsRealMountsAfterBareShorthand(t *testing.T) {
-	// -l consumes -v (label value "harmless"), and the real --mount after it
+	// -l consumes -v (its label value), and the real --mount after it
 	// is a fresh mount Docker honors and the walker must record.
-	mounts, err := runArgsMountDestinations([]string{"-l", "-v", "harmless", "--mount", "type=bind,src=/host,dst=/usr/local/bin"})
+	mounts, err := runArgsMountDestinations([]string{"-l", "-v", "--mount", "type=bind,src=/host,dst=/usr/local/bin"})
 	require.NoError(t, err)
 	require.Len(t, mounts, 1)
 	require.Equal(t, "/usr/local/bin", mounts[0][1])

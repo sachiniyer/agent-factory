@@ -378,6 +378,14 @@ func validateCredentialDockerRunArgs(args []string, agent string) error {
 			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
 				index++
 			}
+		default:
+			// Everything the option-shaped cases did not claim is a
+			// non-option argument to pflag — and `docker run` parses
+			// non-interspersed, so it would end option parsing and become
+			// the image, turning af's own trailing options into the
+			// container's Cmd (#7733 R1).
+			return dockerRunArgsPositionalError(arg,
+				"the credential-mount session's "+agent+" agent")
 		}
 	}
 	return nil

@@ -1121,6 +1121,13 @@ func TestDockerStagingEnclosingRunArgsMountRefused(t *testing.T) {
 		{"ambiguous cluster refused", []string{"-xv/host:/usr/local"}, "combined short option", false},
 		{"--mount quoted csv", []string{"--mount", `type=bind,src=/host/dir,"target=/usr/local/bin"`}, "/usr/local/bin", true},
 		{"--mount uppercase key", []string{"--mount", "type=bind,src=/h,TARGET=/etc"}, "/etc", true},
+		// A positional token would become the image and demote af's own
+		// trailing options to container Cmd (#7733 R1); the refusal names the
+		// docker.image config key as the remedy. This row is the plain —
+		// unguarded — session path: the shape gate in runPayloadContainer is
+		// the only run_args check it runs.
+		{"positional token", []string{"evil/img"}, "docker.image", false},
+		{"positional then env", []string{"evil/img", "-e", "TZ=UTC"}, "docker.image", false},
 	}
 	for _, tt := range refused {
 		t.Run("refused/"+tt.name, func(t *testing.T) {
