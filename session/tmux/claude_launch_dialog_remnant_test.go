@@ -108,12 +108,41 @@ func pendingExit(t *testing.T, capture, notice string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// pendingExitPicker is pendingExit for the multi-server picker, whose footer
+// ("Space to select · Esc to reject all") is not a folder-trust footer, so
+// pendingExit's guard would not pass. It checks the last content row is the
+// picker's footer instead, then reads the notice there exactly as pendingExit
+// does.
+func pendingExitPicker(t *testing.T, capture, notice string) string {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(capture, "\n"), "\n")
+	last := len(lines) - 1
+	for last >= 0 && strings.TrimSpace(string(visibleTextOf(lines[last]))) == "" {
+		last--
+	}
+	require.GreaterOrEqual(t, last, 0)
+	require.Equal(t, claudeMCPServersFooter, claudeTrustRowOf(string(visibleTextOf(lines[last]))).label,
+		"the capture's last row is the picker's whole footer: %q", lines[last])
+	lines[last] = "   " + notice
+	return strings.Join(lines, "\n") + "\n"
+}
+
 func TestIssue7618PendingExitDialogNeverReadsClear(t *testing.T) {
 	for _, name := range []string{
 		"claude_2_0_25_legacy_folder_trust_dialog.ansi",
 		"claude_2_0_50_legacy_folder_trust_dialog.ansi",
 		"claude_2_1_19_legacy_folder_trust_dialog.ansi",
 		"claude_2_1_328_folder_trust_dialog_80x10.ansi",
+		// The 2.1.322 MCP-server dialog's footer is the reworded folder-trust
+		// footer word for word (claudeMCPServerFooter == claudeFolderTrustFooter),
+		// so the same footer-swap that holds the folder-trust dialogs behind
+		// the notice holds this one. The cursor sits on the decline row on the
+		// default capture and on "Use this and all future MCP servers in this
+		// project" on the after-one-Up one; both grant no permission to af,
+		// and both must hold, neither read clear (#7663 gap).
+		"claude_2_1_322_mcp_server_dialog.ansi",
+		"claude_2_1_322_mcp_server_dialog_cursor_on_all_future.ansi",
+		"claude_2_1_322_mcp_server_dialog_wide.ansi",
 	} {
 		for _, notice := range []string{"Press Ctrl-C again to exit", "Press Ctrl-D again to exit"} {
 			content := pendingExit(t, readTrustFixture(t, name), notice)
@@ -123,6 +152,44 @@ func TestIssue7618PendingExitDialogNeverReadsClear(t *testing.T) {
 	// The notice wrapped by a narrow pane, over the legacy option rows.
 	requireRemnantHold(t, "wrapped notice",
 		"Learn more\n\n❯ 1. Yes,\n  proceed\n  2. No, exit\n\nPress Ctrl-C\nagain to exit")
+}
+
+// TestIssue7618PendingExitMCPDialogNeverReadsClear covers the 2.1.322 MCP
+// dialogs whose footers the folder-trust swap loop does not substitute: the
+// multi-server picker, whose footer (claudeMCPServersFooter) is its own. One
+// exit key pressed while the picker is up replaces its footer row with the
+// notice; before this fix no clause in the gate held that pane, so
+// CheckAndHandleTrustPrompt returned false and af delivered the user's prompt
+// and pressed Enter past the gate into the live modal (#7652's gap, narrowed
+// by #7663). af must hold either dialog and send nothing, the folder-trust
+// dialogs' identical footer-swap having already proven the mechanism.
+// Per #7663 the hold is unnamed (DialogHoldOther): the pane proves an MCP
+// dialog, not the folder-trust one.
+func TestIssue7618PendingExitMCPDialogNeverReadsClear(t *testing.T) {
+	for _, name := range []string{
+		"claude_2_1_322_mcp_multi_server_dialog.ansi",
+		"claude_2_1_322_mcp_multi_server_dialog_three.ansi",
+		"claude_2_1_322_mcp_multi_server_dialog_three_wide.ansi",
+	} {
+		for _, notice := range []string{"Press Ctrl-C again to exit", "Press Ctrl-D again to exit"} {
+			content := pendingExitPicker(t, readTrustFixture(t, name), notice)
+			requireRemnantHold(t, name+" with "+notice, content)
+			require.Equal(t, DialogHoldOther, claudeDialogHoldKind(claudeScreenOf(content)),
+				"%s with %s: the picker behind the notice is not the folder-trust dialog", name, notice)
+		}
+	}
+	// The single-server dialog with the notice is named not at all either:
+	// the rewrap matcher proves the MCP-server dialog, not the folder-trust
+	// one, so af holds it as DialogHoldOther (#7663 policy).
+	for _, name := range []string{
+		"claude_2_1_322_mcp_server_dialog.ansi",
+		"claude_2_1_322_mcp_server_dialog_cursor_on_all_future.ansi",
+	} {
+		content := pendingExit(t, readTrustFixture(t, name), "Press Ctrl-C again to exit")
+		requireRemnantHold(t, name+" with the notice", content)
+		require.Equal(t, DialogHoldOther, claudeDialogHoldKind(claudeScreenOf(content)),
+			"%s with the notice: the MCP-server dialog is not the folder-trust one", name)
+	}
 }
 
 // The risk of this reader is a hold on a pane that shows no dialog: it stalls
