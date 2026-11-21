@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -207,6 +208,18 @@ func skipIfFdTableReadable(t *testing.T, pid int) {
 // /proc/<pid>/exe refuse (PR_SET_DUMPABLE=0 — ssh-agent's shape) bound
 // NOTHING, and must not make every missing path read unknown. Its netns
 // table still reads, so the sweep's negative stays provable while it lives.
+//
+// The claim verdict is asked of the SAME sweep the assertions inspect —
+// this flaked twice (#4217) because socketClaimedByProbe ran a second,
+// hidden sweep: the first passed every assertion while that one caught a
+// short-lived same-uid pid mid-exit and left it uncovered, and uncovered
+// is "unknown", which is claimed. A claimed answer is therefore retried —
+// a small bound of sweeps — only when EVERY cause of it is an uncovered
+// pid OTHER than the fixture that a bounded re-check proves has since
+// EXITED (#7749's proofs). The fixture as a cause is the R1 regression
+// itself and would recur on every sweep, where the race does not; a LIVE
+// uncovered pid is a real coverage gap, never excused; and a cause that
+// is not an uncovered pid at all is evidence no transient can explain.
 func TestSocketOwnerSweepStaysDeterminateBesideANonDumpableProcess(t *testing.T) {
 	nd := exec.Command(sleeper.NonDumpablePath(t), "-", "60")
 	require.NoError(t, nd.Start())
@@ -219,16 +232,130 @@ func TestSocketOwnerSweepStaysDeterminateBesideANonDumpableProcess(t *testing.T)
 	waitNonDumpable(t, nd.Process.Pid)
 
 	neverBound := testguard.SocketPath(t, "never-bound.sock")
-	sweep := probeSocketOwners(neverBound)
-	require.False(t, sweep.unprobed)
-	require.Empty(t, sweep.uncovered,
-		"a live same-uid process whose fd table refuses is still covered by its netns table")
-	require.Empty(t, sweep.bound)
-	require.Empty(t, sweep.uncertain)
-	require.Zero(t, sweep.unattributedBound)
-	require.Zero(t, sweep.unattributedUncertain)
-	require.False(t, socketClaimedByProbe(neverBound),
-		"a non-dumpable process that bound nothing must not hold every path unknown — the #7689 R1 shape")
+	for attempt := 1; attempt <= claimSweepAttempts; attempt++ {
+		sweep := probeSocketOwners(neverBound)
+		// The verdict socketClaimedByProbe computes, asked of the sweep
+		// the assertions inspect — not of a second one they cannot see.
+		claimed := socketClaimedBySweep(neverBound, sweep)
+		t.Logf("claim sweep %d: claimed=%v unprobed=%v uncovered=%v bound=%v uncertain=%v unattributed=%d/%d",
+			attempt, claimed, sweep.unprobed, sweep.uncovered,
+			sortedSweepOwners(sweep.bound), sortedKeys(sweep.uncertain),
+			sweep.unattributedBound, sweep.unattributedUncertain)
+
+		// The fixture among the claim's causes — uncovered, or tied to
+		// the path at all — is the R1 regression under test, on any sweep.
+		require.NotContains(t, sweep.uncovered, nd.Process.Pid,
+			"the non-dumpable fixture's own pid is uncovered: its netns table must cover it")
+		require.NotContains(t, sweep.bound, nd.Process.Pid,
+			"the fixture bound nothing: it can never be tied to the path")
+		require.NotContains(t, sweep.uncertain, nd.Process.Pid,
+			"the fixture bound nothing: it can never be tied to the path")
+		if !claimed {
+			require.False(t, sweep.unprobed)
+			require.Empty(t, sweep.uncovered,
+				"a live same-uid process whose fd table refuses is still covered by its netns table")
+			require.Empty(t, sweep.bound)
+			require.Empty(t, sweep.uncertain)
+			require.Zero(t, sweep.unattributedBound)
+			require.Zero(t, sweep.unattributedUncertain)
+			return
+		}
+
+		// Claimed. A retry is allowed only when every cause is an
+		// uncovered pid: any other evidence is one no mid-exit race can
+		// explain, and a claim the sweep cannot explain at all is not
+		// tolerated either.
+		require.False(t, sweep.unprobed,
+			"an unprobeable sweep is a claim cause no transient pid explains")
+		require.Empty(t, sweep.bound,
+			"a pid tied to the never-bound path is a claim cause no transient pid explains")
+		require.Empty(t, sweep.uncertain,
+			"an undecidable binding is a claim cause no transient pid explains")
+		require.Zero(t, sweep.unattributedBound,
+			"an unattributed bound row is a claim cause no transient pid explains")
+		require.Zero(t, sweep.unattributedUncertain,
+			"an unattributed undecidable row is a claim cause no transient pid explains")
+		require.NotEmpty(t, sweep.uncovered,
+			"the claim has no cause the sweep can name — nothing a retry may tolerate")
+
+		var live []int
+		for _, pid := range sweep.uncovered {
+			// comm is read before the re-check poll: a mid-exit pid's name
+			// is still there now and is empty — or the pid gone — once the
+			// exit has been proved.
+			comm, _ := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "comm"))
+			name := strings.TrimSpace(string(comm))
+			if claimUncoveredExited(pid, claimRecheckEvery, claimRecheckWindow) {
+				t.Logf("TOLERATED pid=%d comm=%q: uncovered by claim sweep %d, then proved exited on re-check",
+					pid, name, attempt)
+				continue
+			}
+			t.Logf("UNCOVERED pid=%d comm=%q", pid, name)
+			live = append(live, pid)
+		}
+		require.Empty(t, live,
+			"a claim whose causes include a LIVE uncovered pid is a real coverage gap, not the mid-exit race")
+		t.Logf("claim sweep %d claimed only on pids since proved exited; re-sweeping", attempt)
+	}
+	t.Logf("all %d claim sweeps were claimed only by pids proved exited; the fixture was a cause on none",
+		claimSweepAttempts)
+}
+
+// claimSweepAttempts bounds the re-sweeps a tolerated claim buys; the
+// re-check's cadence and window are #7749's — a mid-exit pid resolves in
+// milliseconds, so 1 s is generous, and a pid still alive when it closes
+// is the real coverage gap the property exists to surface, not a race to
+// absorb.
+const (
+	claimSweepAttempts = 3
+	claimRecheckEvery  = 20 * time.Millisecond
+	claimRecheckWindow = time.Second
+)
+
+// claimUncoveredExited reports whether pid — reported uncovered by one
+// claim sweep — has since provably EXITED, polled at every until window
+// closes. The proofs are proctree.Lookup's, the same ones the sweep's own
+// gone logic takes: a zombie or dead stat state (ErrProcessExited), the
+// stat gone from /proc, the kernel's ESRCH however the read met it, and
+// kill(pid, 0) answering ESRCH — plus the one only a re-check can see: a
+// live stat whose StartID CHANGED, meaning the slot was reused and the
+// occupant the sweep saw is gone. A refused call is never a proof: a
+// seccomp or LSM policy that denies kill answers EPERM for every live
+// pid, and a denied or foreign process is not an exited one. Anything
+// else — a live stat, a refused read — is no exit proof either, and the
+// pid's claim cause stands.
+func claimUncoveredExited(pid int, every, window time.Duration) bool {
+	deadline := time.Now().Add(window)
+	var startID uint64
+	var haveStartID bool
+	for {
+		p, err := proctree.Lookup(pid)
+		switch {
+		case err == nil:
+			if haveStartID && p.StartID != startID {
+				return true
+			}
+			startID, haveStartID = p.StartID, true
+		case lookupProcGone(err):
+			return true
+		}
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(every)
+	}
+}
+
+// lookupProcGone is proctree's processGone through the exported Lookup:
+// the kernel can answer ESRCH to a /proc read that raced the exit (#7695
+// R3), and a stat that found no entry is ENOENT. Refusals are not gone —
+// EPERM means live but unreadable, which a same-uid process can be.
+func lookupProcGone(err error) bool {
+	return errors.Is(err, proctree.ErrProcessExited) ||
+		errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH)
 }
 
 // The other half: the non-dumpable process binds the socket itself, then it
