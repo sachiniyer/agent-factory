@@ -43,16 +43,19 @@ func TestSocketOwnerSweepFindsARenamedServerByBinding(t *testing.T) {
 		// The server's launch argv[0]: exec -a rewrites it (the task title
 		// follows getprogname()), a binary copy carries it on disk.
 		argv0 string
-		// wantComm is the kernel task name the server settles into — each
-		// one a shape a title rule misses: past the 15-byte task-name
-		// truncation, or reading like a client.
-		wantComm string
+		// commPrefix is the leading fragment of the kernel task name the
+		// server retitles to — tmux spells it "<argv0>: server", truncates
+		// to 15 bytes, then cuts at the last space, so "abcdefghij" reads
+		// "abcdefghij:" and "a: client" reads "a: client:" (measured on
+		// tmux 3.5). A prefix check is what the shape needs: never
+		// "tmux"-led, so every title rule misses it.
+		commPrefix string
 	}{
-		{name: "two-character name", argv0: "ab", wantComm: "ab: server"},
-		{name: "ten-character name", argv0: "abcdefghij", wantComm: "abcdefghij: ser"},
-		{name: "sixteen-character name, truncated", argv0: "abcdefghijklmnop", wantComm: "abcdefghijklmno"},
-		{name: "a title that reads like a client", argv0: "a: client", wantComm: "a: client: ser"},
-		{name: "a renamed binary copy", argv0: "", wantComm: "bx: server"},
+		{name: "two-character name", argv0: "ab", commPrefix: "ab: server"},
+		{name: "ten-character name", argv0: "abcdefghij", commPrefix: "abcdefghij"},
+		{name: "sixteen-character name, truncated", argv0: "abcdefghijklmnop", commPrefix: "abcdefghijklmno"},
+		{name: "a title that reads like a client", argv0: "a: client", commPrefix: "a: client"},
+		{name: "a renamed binary copy", argv0: "", commPrefix: "bx"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,11 +96,17 @@ func TestSocketOwnerSweepFindsARenamedServerByBinding(t *testing.T) {
 				_ = exec.Command(tmuxPath, "-S", sock, "kill-server").Run()
 			})
 
+			var comm string
 			require.Eventually(t, func() bool {
 				p, lerr := proctree.Lookup(serverPID)
-				return lerr == nil && p.Comm == tc.wantComm
+				if lerr != nil {
+					return false
+				}
+				comm = p.Comm
+				return strings.HasPrefix(comm, tc.commPrefix) &&
+					!strings.HasPrefix(comm, "tmux")
 			}, 5*time.Second, 10*time.Millisecond,
-				"the server must retitle to %q — the shape title matching missed", tc.wantComm)
+				"the server must retitle away from 'tmux' under its argv[0] (now %q) — the shape title matching missed", comm)
 
 			// Nobody may be signalled: a renamed server is never positively
 			// identified, and nothing else is bound to a private path.
@@ -111,7 +120,7 @@ func TestSocketOwnerSweepFindsARenamedServerByBinding(t *testing.T) {
 
 			sweep := probeSocketOwners(sock)
 			owner, tied := sweep.bound[serverPID]
-			require.True(t, tied, "the kernel's tables must tie the retitled server (%q) to its unlinked socket", tc.wantComm)
+			require.True(t, tied, "the kernel's tables must tie the retitled server (%q) to its unlinked socket", comm)
 			require.NotEmpty(t, owner.spelling)
 
 			_, err = exec.Command(tmuxPath, "-S", sock, "ls").Output()
