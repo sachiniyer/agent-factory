@@ -136,6 +136,49 @@ func dockerShorthandValue(arg string, pos int, args []string, index int) (string
 	return "", false
 }
 
+// dockerClusterConsumesNextArg reports whether a combined short option (e.g.
+// `-ie`, `-tv`) takes the NEXT argv element as its trailing option's value,
+// the way pflag does. It returns true when the first value-taking shorthand in
+// the cluster is reached at a position where the rest of the cluster is empty
+// (no inline value and no `-f=value`): that option consumes the next argument,
+// so Docker never re-parses it as an option of its own, and the outer walk must
+// skip it rather than re-read it as a fresh flag. An all-boolean cluster, an
+// inline-value form (`-fvalue`, `-f=value`), and a cluster that ends at an
+// unknown shorthand all report false — the last one deliberately, because af
+// cannot prove the next arg is consumed there, and not consuming preserves the
+// fail-closed posture dockerCheckShorthandCluster already keeps for a guarded
+// char hiding behind an unknown one.
+//
+// Mirrors dockerShorthandValue's own rule ("the rest of the cluster, or else
+// the next argument"), so the bare-token and cluster cases share one pflag
+// model. A bare two-character shorthand (e.g. `-l`) is handled separately by
+// each walker's `len(arg) == 2` case; this helper covers the cluster form.
+func dockerClusterConsumesNextArg(arg string) bool {
+	for pos := 1; pos < len(arg); pos++ {
+		character := arg[pos]
+		if pos+2 < len(arg) && arg[pos+1] == '=' {
+			// pflag resolves `-f=value` before consulting the option's kind,
+			// so the suffix is that option's value and the cluster ends
+			// without touching the next argument.
+			return false
+		}
+		if _, takesValue := dockerRunValueShorthands[character]; takesValue {
+			// A non-empty remainder is this option's inline value; only an
+			// empty remainder sends pflag to the next argument.
+			return arg[pos+1:] == ""
+		}
+		if _, boolean := dockerRunBooleanShorthands[character]; boolean {
+			continue
+		}
+		// An unknown shorthand: af cannot prove pflag consumed the next arg
+		// as its value, and consuming would skip a real flag if the shorthand
+		// is in fact boolean. Don't consume; dockerCheckShorthandCluster has
+		// already failed closed when a guarded char hides behind this one.
+		return false
+	}
+	return false
+}
+
 // dockerCheckShorthandCluster walks a COMBINED short option such as `-tv`,
 // whose trailing guarded option Docker honors exactly as if it had been
 // written on its own. Ambiguity fails CLOSED here: when af cannot prove that a
@@ -462,11 +505,33 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			if err := checkMount(strings.TrimPrefix(arg, "-v")); err != nil {
 				return err
 			}
+		case len(arg) == 2 && arg[0] == '-' && arg[1] != '-':
+			// pflag: a bare value-taking short option consumes the NEXT argv
+			// element as its value, so Docker never parses that token as an
+			// option of its own. The earlier cases handle a bare -e (an env
+			// value to check) and a bare -v (a mount to check) themselves; this
+			// consumes the value any OTHER value-taking shorthand (-l, -h,
+			// -w, -p, -u, -m, -a, -c) swallows, so the outer walk does not
+			// mis-read that token — typically a real -e/--env=NAME=... or
+			// --mount -- as a fresh env or mount flag and check the phantom
+			// NAME/destination strings.Cut leaves on "--env". Booleans and
+			// unknown shorthands fall through without consuming (the
+			// fail-closed side), so the next arg is examined on its own.
+			if _, value := dockerRunValueShorthands[arg[1]]; value && index+1 < len(args) {
+				index++
+			}
 		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
 			// A combined short option, whose -v or -e the cases above cannot
-			// see. The index deliberately does NOT advance past the value:
-			// that value may belong to an earlier option in the cluster, and
-			// consuming it here would skip a real --mount written next to it.
+			// see. pflag: a cluster ending in a value-taking option consumes
+			// the NEXT argv element as that option's value, so Docker never
+			// re-parses the swallowed token as an option of its own. Without
+			// advancing, the outer walk re-reads the swallowed token — a real
+			// -e after `-ie` — as a fresh env flag and checks its phantom
+			// "value" (the real --env=NAME=... behind it), letting a denied
+			// name through. dockerClusterConsumesNextArg reports that
+			// consumption so the outer index skips the swallowed token; the
+			// cluster's own guarded check above already examined the value,
+			// so this advance never skips a mount the refusal needs to see.
 			if err := dockerCheckShorthandCluster(arg, args, index, dockerGuardedShorthands,
 				func(character byte, value string) error {
 					if character == 'v' {
@@ -476,6 +541,9 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 				},
 				"an account-scoped session", "the -v or -e"); err != nil {
 				return err
+			}
+			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
+				index++
 			}
 		}
 	}

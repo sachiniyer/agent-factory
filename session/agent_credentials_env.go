@@ -780,10 +780,30 @@ func dockerRunArgsEnvNames(args []string) []string {
 			checkEnv(strings.TrimPrefix(arg, "-e="))
 		case strings.HasPrefix(arg, "-e") && len(arg) > 2:
 			checkEnv(strings.TrimPrefix(arg, "-e"))
+		case len(arg) == 2 && arg[0] == '-' && arg[1] != '-':
+			// pflag: a bare value-taking short option consumes the NEXT argv
+			// element as its value, so Docker never parses that token as an
+			// option of its own. The earlier cases handle a bare -e itself;
+			// this consumes the value any OTHER value-taking shorthand swallows
+			// so the swallowed token — typically a real -e/--env=NAME=... —
+			// is not re-walked as a fresh env flag and the extractor reports
+			// the REAL NAME rather than the phantom "--env" strings.Cut would
+			// leave. Booleans and unknown shorthands fall through without
+			// consuming (the fail-closed side), leaving the next arg examined.
+			if _, value := dockerRunValueShorthands[arg[1]]; value && index+1 < len(args) {
+				index++
+			}
 		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
 			_ = dockerCheckShorthandCluster(arg, args, index, "e",
 				func(_ byte, value string) error { checkEnv(value); return nil },
 				"", "")
+			// pflag: a cluster ending in a value-taking option consumes the
+			// NEXT argv element as that option's value; skip the swallowed
+			// token so it is not re-walked as a fresh env flag and the
+			// extractor reports the name the real flag behind it carries.
+			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
+				index++
+			}
 		}
 	}
 	return names
