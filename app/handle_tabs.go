@@ -59,6 +59,37 @@ func tabPickerRefusal(selected *session.Instance) error {
 	return nil
 }
 
+// tabRosterRefusal is the notice a tab-roster verb — w/R/g/</>/s/1-9 — owes
+// when it resolves no session to act on (#7700): the cursor's own row answers
+// for itself — an archived row's roster is frozen for restore, the same
+// refusal it gives when it IS the store's selection — and every other row (a
+// section header, the rail separator, an empty rail) names the bare absence,
+// matching handleKill's nil case (#5373). The verb names what the key does so
+// the refusal reads as an answer, not a dead key.
+func (m *home) tabRosterRefusal(verb string) error {
+	if sel := m.sidebar.RowVerbTarget(); sel != nil {
+		if sel.IsArchived() {
+			return fmt.Errorf("cannot %s on archived session %q; restore it first (af sessions restore)", verb, sel.Title)
+		}
+		return fmt.Errorf("cannot %s on session %q while it is not running; restore it first (af sessions restore)", verb, sel.Title)
+	}
+	return errors.New("No session under the cursor")
+}
+
+// fencedRowNotice is the answer a row verb owes when the row it resolved is
+// mid-operation (#7700): a teardown names itself, an adopted non-teardown op
+// names itself (inFlightOpNotice, #7551), and anything else says busy — the
+// same answers the lifecycle verbs already give for the same fences.
+func fencedRowNotice(inst *session.Instance) error {
+	if inst.IsTearingDown() {
+		return fmt.Errorf("session '%s' is being deleted", inst.Title)
+	}
+	if notice := inFlightOpNotice(inst); notice != nil {
+		return notice
+	}
+	return fmt.Errorf("session %q is busy; try again", inst.Title)
+}
+
 // showNewTabPicker opens the TUI's existing enum-selection overlay for `t`.
 // Terminal and VS Code both need no further input, so they fit this small picker;
 // process and web tabs still need a command or URL and remain on tab-create. The
@@ -77,8 +108,11 @@ func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	selected := m.sidebar.RowVerbTarget()
-	if selected == nil || selected.HasInFlightOp() {
-		return m, nil
+	if selected == nil {
+		return m, m.handleNotice(m.tabRosterRefusal("add a tab"))
+	}
+	if selected.HasInFlightOp() {
+		return m, m.handleNotice(fencedRowNotice(selected))
 	}
 	// Archived sessions keep a frozen roster for restore and a pending swap
 	// owns its own tab answer — refuse BEFORE the picker opens, since the
@@ -283,7 +317,7 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 		m.cancelPanePreview(false)
 	}
 	if inst == nil {
-		return m, nil
+		return m, m.handleNotice(m.tabRosterRefusal("close tabs"))
 	}
 	if idx <= 0 {
 		return m, m.handleNotice(fmt.Errorf("the agent tab can't be closed; use D to kill the session"))
@@ -436,7 +470,7 @@ func (m *home) showRenameTabPrompt() (tea.Model, tea.Cmd) {
 		inst, idx = b.instance, b.tab
 	}
 	if inst == nil {
-		return m, nil
+		return m, m.handleNotice(m.tabRosterRefusal("rename tabs"))
 	}
 	if idx <= 0 {
 		return m, m.handleNotice(errRenameTabFixedLabel)
@@ -619,7 +653,7 @@ func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
 		m.cancelPanePreview(false)
 	}
 	if inst == nil {
-		return m, nil
+		return m, m.handleNotice(m.tabRosterRefusal("reorder tabs"))
 	}
 	if treeFocused {
 		// On an archived row the sidebar cursor resolves to the ARCHIVED
@@ -640,7 +674,9 @@ func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
 	}
 	tabs := inst.GetTabs()
 	if idx < 0 || idx >= len(tabs) {
-		return m, nil
+		// The stale-index case the rename prompt already names: the slot the
+		// store's active tab points at has since closed.
+		return m, m.handleNotice(fmt.Errorf("the selected tab no longer exists; select a tab and try again"))
 	}
 	to := idx + delta
 	if to <= 0 {
@@ -730,7 +766,7 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(selectionCmd, m.consumePaneAutoHideStatus())
 		}
 		if w == nil || !w.JumpToTab(idx) {
-			return m, nil
+			return m, m.handleNotice(tabJumpRefusal(p.Instance(), oneBased))
 		}
 		// An explicit number-key jump is a COMMIT, not a peek: pin the pane's
 		// intent for the current selection epoch so the trailing selectionChanged
@@ -750,10 +786,24 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 		m.syncLiveTermPane()
 		return m, m.selectionChanged()
 	}
-	if idx < 0 || idx >= len(tree.TabLabels(m.store.GetSelectedInstance())) {
-		return m, nil
+	inst := m.store.GetSelectedInstance()
+	if inst == nil {
+		return m, m.handleNotice(m.tabRosterRefusal("switch tabs"))
+	}
+	if idx < 0 || idx >= len(tree.TabLabels(inst)) {
+		return m, m.handleNotice(tabJumpRefusal(inst, oneBased))
 	}
 	m.store.SetActiveTab(idx)
 	m.sidebar.SyncCursorToActiveTab()
 	return m, m.selectionChanged()
+}
+
+// tabJumpRefusal names the miss a number-key jump hit (#7700): an out-of-range
+// tab answers with what the session actually has, and a jump with no session
+// says so — the press was real, so the answer must be too.
+func tabJumpRefusal(inst *session.Instance, oneBased int) error {
+	if inst == nil {
+		return errors.New("No session under the cursor")
+	}
+	return fmt.Errorf("session %q has no tab %d", inst.Title, oneBased)
 }

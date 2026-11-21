@@ -95,19 +95,22 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyConfigEditor:
 		return m.showConfigEditor()
 
-	// Scrolling (each pane scrolls its own view, #1088)
+	// Scrolling (each pane scrolls its own view, #1088). With nothing
+	// scrollable the key answers rather than reading as dead (#7700).
 	case keys.KeyShiftUp:
 		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
 			pane.ScrollHalfPageUp()
+			return m, m.selectionChanged()
 		}
-		return m, m.selectionChanged()
+		return m, m.handleNotice(errNothingToScroll)
 	case keys.KeyShiftDown:
 		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
 			pane.ScrollHalfPageDown()
+			return m, m.selectionChanged()
 		}
-		return m, m.selectionChanged()
+		return m, m.handleNotice(errNothingToScroll)
 
 	// Focus ring (#1088): Tab cycles tree → open panes (in order) →
 	// automations. Tabs themselves are reached via the tree and the 1-9
@@ -158,6 +161,12 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	}
 }
 
+// errNothingToScroll is the answer the scroll keys owe when no pane can take
+// them (#7700): neither a focused pane nor a visible pane bound to the
+// selection's active tab exists — the same dead case focusedContentPane's
+// (nil, nil) return used to swallow.
+var errNothingToScroll = errors.New("nothing to scroll — no pane is showing the selected tab")
+
 // inFlightOpNotice names the non-teardown operation fencing a row's lifecycle
 // verbs (#7551): the op can arrive between the last painted frame and the key
 // press — the 750ms snapshot reconcile adopts daemon-owned ops onto the row
@@ -178,6 +187,23 @@ func inFlightOpNotice(inst *session.Instance) error {
 		return fmt.Errorf("session '%s' is resuming", inst.Title)
 	}
 	return nil
+}
+
+// noRowTargetNotice is the answer a cursor-row verb — o, Enter, F, c — owes
+// when its own row resolves no session at all (#7700). The row-verb rules
+// still apply: while the cursor rests on a section header marked with a
+// resting row's ▾, that row answers for itself through interactiveGuard —
+// the same fence the verb would have hit on the row itself. Every other
+// unresolvable row (a foreign section, the rail separator, an empty rail, or
+// a live-bound header the row-verb rules refuse to adopt) names the bare
+// absence, matching handleKill's nil case (#5373).
+func (m *home) noRowTargetNotice() tea.Cmd {
+	if sel := m.sidebar.RowVerbTarget(); sel != nil {
+		if err := interactiveGuard(sel); err != nil {
+			return m.handleGuardResult(err)
+		}
+	}
+	return m.handleNotice(errors.New("No session under the cursor"))
 }
 
 // handleKill handles the kill/delete session action against the sidebar's
@@ -692,9 +718,9 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 		return m, m.selectionChanged()
 	}
 	// Only instance/tab rows enter a pane; anything else (e.g. an automations
-	// row) is a no-op, as before.
+	// row) answers that the cursor resolved no row (#7700).
 	if sel.Kind != ui.SectionInstances && sel.Kind != ui.SectionArchived {
-		return m, nil
+		return m, m.noRowTargetNotice()
 	}
 	// Instance selected — in either the Instances tree or the Archived folder
 	// (#1028). A resting (Lost/Dead/archived) row is not embeddable: rather than
@@ -704,8 +730,11 @@ func (m *home) handleEnter() (tea.Model, tea.Cmd) {
 	// no-preview path — an archived row cancels its preview; the Lost/Dead pane-open
 	// case is handled by the preview branch above.)
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.IsCreating() {
-		return m, nil
+	if selected == nil {
+		return m, m.noRowTargetNotice()
+	}
+	if selected.IsCreating() {
+		return m, m.handleNotice(inFlightOpNotice(selected))
 	}
 	if cmd, handled := m.restoreIfResting(selected); handled {
 		return m, cmd
@@ -838,11 +867,14 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 	// than surfacing the guard's "press <key> to restore" fence; any other non-attachable
 	// state surfaces interactiveGuard's error rather than a silent no-op.
 	if sel.IsHeader || (sel.Kind != ui.SectionInstances && sel.Kind != ui.SectionArchived) {
-		return m, nil
+		return m, m.noRowTargetNotice()
 	}
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.IsCreating() {
-		return m, nil
+	if selected == nil {
+		return m, m.noRowTargetNotice()
+	}
+	if selected.IsCreating() {
+		return m, m.handleNotice(inFlightOpNotice(selected))
 	}
 	if cmd, handled := m.restoreIfResting(selected); handled {
 		return m, cmd
