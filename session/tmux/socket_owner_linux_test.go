@@ -446,6 +446,171 @@ func TestSocketOwnerSweepDecidesARelativeRowOnItsHolder(t *testing.T) {
 	require.True(t, socketClaimedByProbe(sock))
 }
 
+// The #2875 basename-symlink regression, pinned at the matcher level: a
+// present symlink at the queried path's basename redirects the canonicalized
+// walked basename, so socketMatchFilterName picks up the SYMLINK TARGET's
+// basename, not the queried path's. The verbatim row bound to the queried
+// path — spelled identically to it — has the queried path's RAW basename, so
+// a raw-basename compare against the filter rules it out before its own walk
+// can converge with the queried path's (which traverses the same link). The
+// matcher must answer Certain for the verbatim row, never None.
+//
+// Two directions both pin the bug:
+//
+//   - the queried path's basename is the symlink: the server's verbatim row is
+//     spelled with the un-symlinked basename, and the filter ruled it out.
+//   - the row's basename is the symlink (a server bound through an alias whose
+//     link still sits at the basename — bind through a basename symlink fails
+//     on Linux with EADDRINUSE, so this stays at the matcher level): the row's
+//     raw basename differs from the filter, and its own walk would converge.
+//
+// Each shape exercises a different filter branch: the dangling-final-file
+// (target dir exists, basename absent) walks to a certain want; the
+// dangling-target-dir want stops mid-walk and falls to the tail branch.
+func TestBoundRowMatcherKeepsAnOwnerThroughABasenameSymlink(t *testing.T) {
+	dir := t.TempDir()
+	// The common case the prefilter was made for: an absent basename in a
+	// present directory is the probe's own premise. A differing row basename
+	// is provably a different socket here, and the rule-out stays — the bug
+	// is the symlink, not the absent file.
+	plainPath := filepath.Join(dir, "plain", "af.sock")
+	require.NoError(t, os.MkdirAll(filepath.Dir(plainPath), 0o700))
+	want, ok := canonicalSocketPath(plainPath)
+	require.True(t, ok)
+	plainMatch := boundRowMatcher(plainPath, want)
+	require.Equal(t, proctree.RowMatchNone, plainMatch(filepath.Join(dir, "plain", "other.sock")),
+		"the plain case — no symlink at either basename — keeps the cheap rule-out")
+	require.Equal(t, proctree.RowMatchCertain, plainMatch(plainPath),
+		"the verbatim spelling is Certain in the plain case — sanity check")
+
+	// Variant 1: a symlink at the queried path's basename, target dir exists
+	// and the target file does not. want.certain() is true; filterName is
+	// the symlink TARGET's basename.
+	dir1 := t.TempDir()
+	target1 := filepath.Join(dir1, "elsewhere", "new.sock")
+	require.NoError(t, os.MkdirAll(filepath.Dir(target1), 0o700))
+	alias1 := filepath.Join(dir1, "x", "af.sock")
+	require.NoError(t, os.MkdirAll(filepath.Dir(alias1), 0o700))
+	require.NoError(t, os.Symlink(target1, alias1))
+	want1, ok := canonicalSocketPath(alias1)
+	require.True(t, ok)
+	require.True(t, want1.certain(),
+		"variant 1 is the certain-want branch: target dir present, only the target file absent")
+	require.Equal(t, filepath.Join(dir1, "elsewhere", "new.sock"), want1.path,
+		"want follows the symlink to its (absent) target")
+	match1 := boundRowMatcher(alias1, want1)
+	// The verbatim row spelled identically to the queried path. Today the
+	// prefilter rules it out on the raw-basename mismatch (af.sock !=
+	// new.sock). Without that rule-out the walk on the row traverses the
+	// same symlink and converges with want1.
+	require.Equal(t, proctree.RowMatchCertain, match1(alias1),
+		"the verbatim row the symlink redirected the queried path's basename away from converges through the walk")
+
+	// Variant 2: a symlink at the queried path's basename, with the target
+	// DIRECTORY absent too. want.certain() is false; the filter comes from
+	// the uncertain-want tail branch (rest[1:]'s last component).
+	dir2 := t.TempDir()
+	target2 := filepath.Join(dir2, "elsewhere", "new.sock") // target dir never created
+	alias2 := filepath.Join(dir2, "x", "af.sock")
+	require.NoError(t, os.MkdirAll(filepath.Dir(alias2), 0o700))
+	require.NoError(t, os.Symlink(target2, alias2))
+	want2, ok := canonicalSocketPath(alias2)
+	require.True(t, ok)
+	require.False(t, want2.certain(),
+		"variant 2 is the uncertain-want tail branch: the target directory itself is absent")
+	match2 := boundRowMatcher(alias2, want2)
+	require.Equal(t, proctree.RowMatchCertain, match2(alias2),
+		"the same bug in the tail branch: the verbatim row converges through the walk")
+
+	// The mirror direction: the queried path is plain (no symlink at its
+	// basename), but the row's basename is itself a present symlink whose
+	// target is the queried path's basename. The kernel records bind()'s
+	// verbatim spelling (the alias), so the row's raw basename differs from
+	// the plain filter, and the prefilter would rule it out — but the row's
+	// own walk follows its basename symlink and converges with want.
+	dirM := t.TempDir()
+	mirrorTarget := filepath.Join(dirM, "actual.sock") // absent
+	mirrorAlias := filepath.Join(dirM, "alias.sock")
+	require.NoError(t, os.Symlink(mirrorTarget, mirrorAlias))
+	wantM, ok := canonicalSocketPath(mirrorTarget)
+	require.True(t, ok)
+	matchM := boundRowMatcher(mirrorTarget, wantM)
+	require.Equal(t, proctree.RowMatchCertain, matchM(mirrorAlias),
+		"the mirror — a row basename that is itself a symlink to the queried path — converges through the walk")
+}
+
+// The end-to-end shape of the basename-symlink regression, on real kernel
+// evidence. A child binds the absolute path <x>/af.sock; the file is unlinked
+// under the live binder; <x>/af.sock is then recreated as a SYMLINK to
+// <x>/elsewhere/new.sock whose target is never created, so a client connect
+// answers ENOENT and the absent-socket probe runs. The kernel's table keeps
+// the verbatim bind spelling /<x>/af.sock — its raw basename is "af.sock",
+// the filter name is the SYMLINK TARGET's "new.sock", and the prefilter
+// rules the row out before the walk can converge — the live holder goes
+// unnamed and the verdict lies determinate empty while the binder is still
+// bound. The fix defers to the walk; the row is Certain and the holder is
+// claimed.
+//
+// Both filter branches are exercised by varying whether the target
+// directory exists: when it does, want.certain() and the filter is the
+// basename branch; when it does not, want.certain() is false and the filter
+// is the uncertain-want tail branch. Both must result in the live holder
+// being claimed, never a determinate empty.
+func TestSocketOwnerSweepFindsAnOwnerThroughABasenameSymlink(t *testing.T) {
+	cases := []struct {
+		name        string
+		targetDirOK bool
+	}{
+		{"target dir exists, target file absent (certain want)", true},
+		{"target dir absent (uncertain want tail branch)", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			sock := filepath.Join(base, "x", "af.sock")
+			require.NoError(t, os.MkdirAll(filepath.Dir(sock), 0o700))
+			child := exec.Command(sleeper.BoundPath(t), sock, "60")
+			require.NoError(t, child.Start())
+			t.Cleanup(func() {
+				_ = child.Process.Kill()
+				_, _ = child.Process.Wait()
+			})
+			require.Eventually(t, func() bool {
+				_, err := os.Stat(sock)
+				return err == nil
+			}, 5*time.Second, 10*time.Millisecond, "the child must bind its absolute socket")
+
+			require.NoError(t, os.Remove(sock), "unlink the socket file under the live binder")
+			target := filepath.Join(base, "elsewhere", "new.sock")
+			if tc.targetDirOK {
+				require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o700))
+			}
+			require.NoError(t, os.Symlink(target, sock),
+				"place a symlink at the unlinked socket's basename, pointing at a never-created target")
+			_, statErr := os.Stat(sock)
+			require.Error(t, statErr, "the symlink's target is absent: a client connect answers ENOENT and the probe runs")
+
+			sweep := probeSocketOwners(sock)
+			owner, tied := sweep.bound[child.Process.Pid]
+			require.True(t, tied,
+				"the kernel's verbatim row /<x>/af.sock must converge with want after the walk the prefilter skipped")
+			require.Equal(t, sock, owner.spelling,
+				"the kernel keeps the verbatim bind() spelling, surviving the file's unlink")
+			// A row af's own view proves elsewhere is deferred to its holder's
+			// view (R1): a same-uid process in a foreign mount namespace may
+			// have bound af's path under its own spelling. The prefilter the
+			// bug fix bypasses when the queried path's basename is a symlink
+			// was skipping that deferral — and R1 — for unrelated rows bound
+			// elsewhere on the box, so the fix may surface foreign-view
+			// holders (udevd on a dev host, journalctl, ...) as possible
+			// owners; the live owner it identifies is what matters, and the
+			// verdict must stay claimed.
+			require.False(t, noServerRunningFromAbsent(t, sock),
+				"a live same-uid process bound to the unlinked socket keeps the path claimed, never a determinate empty that would license the destructive cleanup")
+		})
+	}
+}
+
 // The end-to-end R2 shape, on real kernel evidence: a child binds
 // "rel/e.sock" verbatim from a working directory af's is not, the file is
 // unlinked under it, and the sweep still ties the row to the path —

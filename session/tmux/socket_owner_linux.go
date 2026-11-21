@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -151,11 +152,30 @@ func resolvePendingRow(s *socketSweep, pr proctree.PendingRow, socketPath string
 // negative path pays nothing extra): a spelling af proved elsewhere is a
 // mismatch pending the holder's view (R1), and a relative spelling af
 // cannot place at all is pending the holder's cwd (R2) — never af's own.
+//
+// The raw-basename compare that licenses the cheap rule-out proves a row
+// names a different socket ONLY when neither end's final component is a
+// present symlink. canonicalSocketPath walks a present symlink at the
+// basename — its own doc — so a symlink there redirects the spelling's
+// canonicalized basename (the queried path's filter name becomes the link
+// target's basename, and a row spelled identically to the queried path, or
+// through an alias whose own symlink still sits at its basename, converges
+// with the queried path under walk, not under raw compare). The #2875
+// protection's premise — a /tmp cleaner can unlink the socket under a live
+// server — is the absent basename, the case this prefilter was made for;
+// a hand-placed or rerouting symlink at that basename is the residual that
+// makes the raw compare prove more than the walk would, and so such a
+// basename keeps the prefilter from ruling a row out before the walk can
+// decide. The plain cases — a live socket file at the basename, the absent
+// file the probe was called for, a directory, or a parent that does not
+// exist — read not-a-symlink and keep the cheap rule-out.
 func boundRowMatcher(socketPath string, want socketPathWalk) func(string) proctree.RowMatch {
 	filterName, filtering := socketMatchFilterName(want)
+	queryBasenameRedirected := socketBasenameSymlinked(socketPath)
 	return func(boundPath string) proctree.RowMatch {
 		if filtering {
-			if _, base := splitSocketPath(boundPath); base != filterName {
+			if _, base := splitSocketPath(boundPath); base != filterName &&
+				!queryBasenameRedirected && !socketBasenameSymlinked(boundPath) {
 				return proctree.RowMatchNone
 			}
 		}
@@ -183,6 +203,25 @@ func boundRowMatcher(socketPath string, want socketPathWalk) func(string) proctr
 		// The holder decides.
 		return proctree.RowMatchMismatch
 	}
+}
+
+// socketBasenameSymlinked reports whether p's final component is a present
+// symlink — the one shape under which canonicalSocketPath changes a
+// spelling's basename, by following that link to its target. The basename
+// prefilter in boundRowMatcher rules a row out on a raw-basename mismatch
+// only when neither the queried path nor the row is so redirected: a
+// present symlink at either end makes two raw basenames that differ able to
+// converge post-walk, the case the walk — not the prefilter — must decide.
+// A regular file (a live socket), the absent file the probe was called
+// for, a directory, or a parent that does not exist, all read
+// not-a-symlink and so keep the cheap rule-out.
+func socketBasenameSymlinked(p string) bool {
+	dir, base := splitSocketPath(p)
+	if dir == "" || base == "" {
+		return false
+	}
+	fi, err := os.Lstat(dir + "/" + base)
+	return err == nil && fi.Mode()&os.ModeSymlink != 0
 }
 
 // socketMatchFilterName is the one name a row's basename must equal before
