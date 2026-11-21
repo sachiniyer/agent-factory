@@ -62,10 +62,14 @@ var wantLoaderGlibcNames = []string{
 	"TZDIR",
 }
 
-// wantLoaderShellNames are the environment-import names of the shells af's
-// provisioning execs can run as /bin/sh — bash's BASH_ENV, ENV, SHELLOPTS,
-// BASHOPTS and PS4 (bash manual, "Invoked with name sh" and the startup-file
-// rules) and the POSIX/dash family's ENV.
+// wantLoaderShellNames are the environment-import names of the shells af
+// invokes inside the container — each refused for the invocation its
+// consumer actually opens, not all of them the root `sh -c` chain: BASH_ENV
+// is read only by bash invoked as `bash` (never as sh — measured), ENV by
+// the interactive POSIX-shell family, SHELLOPTS/BASHOPTS import option
+// state even at euid 0, and PS4 expands the trace prompt only where bash
+// honors it (euid != 0). The root provisioning vector is BASH_FUNC_* plus
+// SHELLOPTS; the rest reach af's other shell invocations.
 var wantLoaderShellNames = []string{
 	"BASH_ENV",
 	"BASHOPTS",

@@ -252,10 +252,14 @@ user's real home and mounts it only if it exists, so:
     `GCONV_PATH`, `LOCPATH`, `NLSPATH`, `GLIBC_TUNABLES`, `LD_ORIGIN_PATH`,
     `LD_PROFILE`, `LD_DEBUG_OUTPUT`, `TMPDIR`, `TZDIR`, the resolver inputs,
     and the rest of the source list verbatim) and the environment-import
-    names of the shells af execs (`BASH_ENV`, `ENV`, `SHELLOPTS`,
-    `BASHOPTS`, `PS4`, and every `BASH_FUNC_<name>%%` bash would import as
-    a function definition), for every agent in the mount table above.
-    These boundaries enforce it:
+    names of the shells af invokes inside the container (`BASH_ENV`, `ENV`,
+    `SHELLOPTS`, `BASHOPTS`, `PS4`, and every `BASH_FUNC_<name>%%` bash
+    would import as a function definition), for every agent in the mount
+    table above. The C-library half is glibc's own list — the libc af's
+    dynamically linked binary and the provisioning programs load — so a
+    musl image's own secure-mode names (e.g. `MUSL_LOCPATH`, which loads
+    catalogs rather than code) are outside it. These boundaries enforce
+    it:
 
     - At `docker run`: `docker.run_args` entries naming one are **refused**
       before the container starts — including `PATH`, `LD_PRELOAD`,
@@ -267,10 +271,14 @@ user's real home and mounts it only if it exists, so:
       terms: a repo `GCONV_PATH` loads repo gconv modules into those
       programs, a repo `LOCPATH`/`NLSPATH` feeds them repo locale archives
       and message catalogs, a repo `LD_DEBUG_OUTPUT`/`LD_PROFILE` makes
-      them write root-owned files, and a repo `BASH_ENV`, `SHELLOPTS`+`PS4`,
-      or `BASH_FUNC_cat%%` runs repo code in the provisioning shell on an
-      image whose `/bin/sh` is bash. Every credential-classified name the
-      operator did not forward is defined
+      them write root-owned files, and on an image whose `/bin/sh` is bash a
+      repo `BASH_FUNC_cat%%` or `SHELLOPTS` runs or traces repo code in the
+      root (`--user 0:0`) provisioning shell — the two shell imports that
+      survive root: bash never reads `BASH_ENV` when invoked as `sh`, and it
+      ignores an inherited `PS4` at euid 0, so those two reach af's
+      bash-as-bash and non-root invocations instead (an account shell tab, a
+      session-user exec), plus `ENV`, which interactive shells source. Every
+      credential-classified name the operator did not forward is defined
       **and empty** in the container environment — so the image's own `ENV`
       and a workspace loader that fills only unset names find it already set
       to nothing. (Measured: gemini's workspace `.env` supplied
@@ -554,7 +562,7 @@ only needs the workspace tooling:
   naming it rather than chowning blind. `chown` runs with `-h` in either form so a symlink the image ships under `/root`
   is re-owned itself, not its target outside HOME. On an account session af
   additionally refuses `docker.run_args` entries for `PATH` and for every
-  name that makes ld.so, libc, or the shell af's provisioning scripts invoke
+  name that makes ld.so, libc, or a shell af invokes inside the container
   load or run code — the glibc `UNSECURE_ENVVARS` list
   (`LD_PRELOAD`/`LD_LIBRARY_PATH`/`LD_AUDIT`, `GCONV_PATH`, `LOCPATH`,
   `NLSPATH`, `GLIBC_TUNABLES`, `LD_ORIGIN_PATH`, `LD_PROFILE`,
@@ -566,11 +574,18 @@ only needs the workspace tooling:
   `chown`, the agent's own executable), which library or gconv module every
   dynamically linked program loads (an `LD_AUDIT` module runs in-process in
   each of those programs at startup, the same way a preloaded library
-  does), or which code the provisioning shell runs on an image whose
-  `/bin/sh` is bash (a `BASH_FUNC_cat%%` definition replaces the `cat` the
-  mount-table read calls) — and the refusal names the remedy: set the value
-  in the image's `ENV`, or have the operator forward it through
-  `session_env_passthrough`. The image's own `Config.Env` `PATH` is then
+  does), or which code a shell af invokes inside the container runs. The
+  root (`--user 0:0`) provisioning execs are `sh -c`, and on an image whose
+  `/bin/sh` is bash the imports that survive root are `BASH_FUNC_cat%%` —
+  the definition replaces the `cat` the mount-table read calls — and
+  `SHELLOPTS`; bash never reads `BASH_ENV` when invoked as `sh` and ignores
+  an inherited `PS4` at euid 0, so those reach af's bash-as-bash and
+  non-root invocations instead (an account shell tab, a session-user exec),
+  while `ENV` reaches interactive shells. The C-library half is glibc's own
+  list — the libc af's binary and the provisioning programs load — so a
+  musl image's secure-mode names (e.g. `MUSL_LOCPATH`) are outside it — and
+  the refusal names the remedy: set the value in the image's `ENV`, or have
+  the operator forward it through `session_env_passthrough`. The image's own `Config.Env` `PATH` is then
   re-asserted after `run_args`, so docker's last-wins rule keeps every
   PATH-resolved command on the image's own binaries unless the operator
   forwarded `PATH` themselves. These entries and `cat` were

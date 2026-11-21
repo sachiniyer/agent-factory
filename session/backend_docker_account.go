@@ -329,9 +329,11 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 // would put repository binaries in front of all of them; the loader names
 // — the set derived in agent_credentials_env_loader.go from glibc's
 // UNSECURE_ENVVARS and the shells' environment-import rules — make ld.so,
-// libc, or the shell those execs invoke load or run repo-chosen material
-// before any agent-side env filter exists. They are the same class #7529
-// R7 refuses on the credential-mount path, kept out of
+// libc, or a shell af invokes inside the container load or run repo-chosen
+// material (those root `--user 0:0` provisioning execs for the names whose
+// import survives root, a bash-as-bash or non-root invocation for the
+// rest) before any agent-side env filter exists. They are the same class
+// #7529 R7 refuses on the credential-mount path, kept out of
 // accountDockerDeniedNames on purpose: that set also filters the
 // operator's session_env_passthrough claims, and the operator stays free
 // to forward their own PATH — the image-PATH re-assertion is skipped for

@@ -109,24 +109,29 @@ var credentialMountLoaderGlibcNames = map[string]struct{}{
 }
 
 // credentialMountLoaderShellNames are the environment-import names of the
-// shells af's in-container provisioning execs and account shell tabs can
-// invoke: bash (the /bin/sh of Fedora, UBI, and Amazon Linux images) plus
-// the POSIX/dash family (the /bin/sh of Debian, Ubuntu, and BusyBox
-// images). Each name is a channel the shell itself opens:
-//   - BASH_ENV names a file bash sources for NON-interactive shells — af's
-//     `sh -c` provisioning execs are exactly that where /bin/sh is bash
-//     (measured sourcing a repo file on bash 5.2.x).
+// shells af invokes inside the container. af's root provisioning execs are
+// `sh -c` scripts run as --user 0:0, and which name reaches them depends on
+// the invocation name and the euid — each name's real channel is stated, not
+// assumed:
+//   - BASH_ENV names a file bash sources for NON-interactive shells — but
+//     only when invoked as `bash`, never as `sh` (measured on the host and
+//     on amazonlinux:2023, whose /bin/sh is bash): it reaches a bash-as-bash
+//     invocation such as an account shell tab or an image's own `bash -c`,
+//     not af's `sh -c` provisioning execs.
 //   - ENV names a file the POSIX-shell family sources for INTERACTIVE
 //     shells: dash, BusyBox ash, ksh, mksh — and bash running as sh — so an
-//     interactive pane shell on such an image runs a repo file at startup
-//     (POSIX shells' documented startup rule; also accountShellStartupNames).
+//     interactive pane or account shell on such an image runs a repo file
+//     at startup (POSIX shells' documented startup rule; also
+//     accountShellStartupNames).
 //   - SHELLOPTS and BASHOPTS import shell OPTION state from the
-//     environment — `SHELLOPTS=xtrace` (measured imported on bash-as-sh)
-//     traces every provisioning command and expands the trace prompt.
-//   - PS4 is that trace prompt: bash imports it from the environment and
-//     expands command substitutions inside it at every traced command, so
-//     SHELLOPTS=xtrace + PS4=$(…) is a repo-chosen command running inside
-//     af's provisioning scripts (measured on bash 5.2.21).
+//     environment — `SHELLOPTS=xtrace` is imported by bash running as sh
+//     even at euid 0 (measured on amazonlinux:2023), so it reaches the root
+//     provisioning execs and traces every command they run.
+//   - PS4 is that trace prompt: bash expands command substitutions inside
+//     it at every traced command — but bash IGNORES an inherited PS4 when
+//     euid is 0 (measured on amazonlinux:2023), so it reaches the shells af
+//     or the image runs at a non-root euid — the session-user execs and
+//     interactive shells — not the root provisioning chain.
 var credentialMountLoaderShellNames = map[string]struct{}{
 	"BASH_ENV":  {},
 	"BASHOPTS":  {},
@@ -146,8 +151,8 @@ var credentialMountLoaderShellNames = map[string]struct{}{
 var credentialMountLoaderNamePrefixes = []string{"BASH_FUNC_"}
 
 // credentialMountProgramLoaderNames unions the per-consumer sets above:
-// every env name that makes ld.so, libc, or the shell af's provisioning
-// execs invoke load or run repo-chosen material. They are refused to repo
+// every env name that makes ld.so, libc, or a shell af invokes inside the
+// container load or run repo-chosen material. They are refused to repo
 // run_args but NOT pinned: an image's own values for these names are the
 // same trust class as its binaries (the repo picks the image), pinning
 // would break images that legitimately need them — a defined-empty ENV or
@@ -174,7 +179,7 @@ var credentialMountProgramLoaderNames = func() map[string]struct{} {
 // shell names, the function import for the BASH_FUNC_ family.
 func credentialMountLoaderReason(name string) (string, bool) {
 	if _, ok := credentialMountLoaderShellNames[name]; ok {
-		return "it makes the shell af's in-container provisioning execs invoke run repository-chosen code — the shells af execs import the name from the environment", true
+		return "a shell af invokes inside the container imports the name from the environment and runs repository-chosen code — the channel each name opens is the one its consumer documents (a root `sh -c` exec where the import survives root, a bash-as-bash or non-root invocation otherwise)", true
 	}
 	for _, prefix := range credentialMountLoaderNamePrefixes {
 		if strings.HasPrefix(name, prefix) {

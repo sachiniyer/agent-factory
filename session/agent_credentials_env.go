@@ -42,8 +42,8 @@ import (
 //     names that select a server af execs into. The selector precedence
 //     groups (credentialMountSelectorGroups) are claimed as groups:
 //     forwarding one member exempts every member of its group.
-//   - loader: a name that makes ld.so, libc, or the shell af's provisioning
-//     execs invoke load or run code — derived from the consumers rather
+//   - loader: a name that makes ld.so, libc, or a shell af invokes inside
+//     the container load or run code — derived from the consumers rather
 //     than enumerated: glibc's UNSECURE_ENVVARS plus the shells'
 //     environment-import rules (agent_credentials_env_loader.go). Refused
 //     to run_args but never pinned, like PATH's siblings.
