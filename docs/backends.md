@@ -394,7 +394,8 @@ user's real home and mounts it only if it exists, so:
 
     The operator's escape hatch is unchanged: names listed in the global
     `session_env_passthrough` keep their forwarded value and are never blanked
-    or refused for the operator's own use.
+    or refused for the operator's own use — except the pane-boundary names
+    above, refused with the explicit error described there.
 
     **Migration.** If a working setup legitimately carried one of these names —
     a corporate `HTTPS_PROXY`, a private CA bundle, a private-cloud
