@@ -3,6 +3,7 @@
 package proctree
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -26,6 +27,17 @@ import (
 // is a process the negative cannot be proved for. The uncovered pids are
 // logged by name BEFORE the assertion so a new real class (a sandboxed app
 // in a netns whose table refuses) shows up in the log, not as a bare count.
+//
+// One transient class is tolerated, never ignored (#7747, #4217): the kernel
+// releases a task's namespaces (exit_task_namespaces) before it becomes a
+// zombie (exit_notify), so a pid caught mid-exit is alive AND uncoverable
+// inside a single sweep pass — kill(pid, 0) succeeds, the stat state isn't
+// Z, and the socket table is already gone. An uncovered pid is excused only
+// when a bounded re-check proves it has since EXITED; a pid still alive
+// when the window closes fails, because "namespace link gone but pid
+// alive" is exactly the live thread-group case production refuses to
+// classify as gone. Tolerated pids are logged by name so their frequency
+// is visible in CI output.
 func TestUnixSocketOwnerSweepCensus(t *testing.T) {
 	neverBound := filepath.Join(t.TempDir(), "never-bound.sock")
 	s := UnixSocketOwnerSweep(func(boundPath string) RowMatch {
@@ -34,20 +46,78 @@ func TestUnixSocketOwnerSweepCensus(t *testing.T) {
 		}
 		return RowMatchNone
 	})
+	var uncovered []int
 	for _, pid := range s.Uncovered {
+		// comm is read before the re-check poll: a mid-exit pid's name is
+		// still there now and is empty — or the pid gone — once the exit
+		// has been proved.
 		comm, _ := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-		t.Logf("UNCOVERED pid=%d comm=%q", pid, strings.TrimSpace(string(comm)))
+		name := strings.TrimSpace(string(comm))
+		if censusUncoveredExited(pid, censusRecheckEvery, censusRecheckWindow) {
+			t.Logf("TOLERATED pid=%d comm=%q: uncovered by the sweep, then proved exited on re-check",
+				pid, name)
+			continue
+		}
+		t.Logf("UNCOVERED pid=%d comm=%q", pid, name)
+		uncovered = append(uncovered, pid)
 	}
-	t.Logf("same-uid=%d netns=%d gone=%d rows=%d uncovered=%d bound=%d uncertain=%d unattributed=%d/%d unprobed=%v",
-		s.SameUID, s.Netns, s.Gone, s.Rows, len(s.Uncovered), len(s.Bound), len(s.Uncertain),
-		s.UnattributedBound, s.UnattributedUncertain, s.Unprobed)
+	t.Logf("same-uid=%d netns=%d gone=%d rows=%d uncovered=%d tolerated=%d bound=%d uncertain=%d unattributed=%d/%d unprobed=%v",
+		s.SameUID, s.Netns, s.Gone, s.Rows, len(s.Uncovered), len(s.Uncovered)-len(uncovered),
+		len(s.Bound), len(s.Uncertain), s.UnattributedBound, s.UnattributedUncertain, s.Unprobed)
 	require.False(t, s.Unprobed, "the process table must be enumerable")
-	require.Empty(t, s.Uncovered,
+	require.Empty(t, uncovered,
 		"every live same-uid process's netns socket table must be coverable on this box")
 	require.Empty(t, s.Bound, "nothing is bound to a path nobody bound")
 	require.Empty(t, s.Uncertain)
 	require.Zero(t, s.UnattributedBound)
 	require.Zero(t, s.UnattributedUncertain)
+}
+
+// The exit re-check's cadence and bound. A mid-exit pid resolves in
+// milliseconds — the exit-notify gap is a few kernel instructions wide —
+// so 1 s is generous, and a pid still alive when it closes is the real
+// coverage gap the census exists to surface, not a race to absorb.
+const (
+	censusRecheckEvery  = 20 * time.Millisecond
+	censusRecheckWindow = time.Second
+)
+
+// censusUncoveredExited reports whether pid — reported uncovered by one
+// sweep pass — has since provably EXITED, polled at every until window
+// closes. The exit proofs are readProc's own: a zombie or dead stat state
+// (ErrProcessExited), the stat gone from /proc, or the kernel's ESRCH
+// however the read met it — the same proofs the sweep's gone logic takes,
+// plus two that only a re-check can see. A live stat whose StartID CHANGED
+// proves the occupant the sweep saw exited: the pid slot was reused.
+// kill(pid, 0) answering EPERM proves the pid now names a process af
+// cannot signal — a same-uid task cannot acquire other-uid creds without
+// privilege it never had — so the same-uid process the census counted is
+// gone. Anything else — a live stat, a refused read — is no exit proof,
+// and the pid stays uncovered.
+func censusUncoveredExited(pid int, every, window time.Duration) bool {
+	deadline := time.Now().Add(window)
+	var startID uint64
+	var haveStartID bool
+	for {
+		p, err := readProc(pid)
+		switch {
+		case err == nil:
+			if haveStartID && p.StartID != startID {
+				return true
+			}
+			startID, haveStartID = p.StartID, true
+		case processGone(err):
+			return true
+		}
+		if kerr := syscall.Kill(pid, 0); errors.Is(kerr, syscall.ESRCH) ||
+			errors.Is(kerr, syscall.EPERM) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(every)
+	}
 }
 
 // A real bound socket, unlinked, is still a row in the table — and its
