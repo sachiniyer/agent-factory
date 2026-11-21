@@ -429,9 +429,10 @@ pass, with one warning per daemon process; independently valid old journals
 continue to be pruned. The bad journal is left in place so a later pass cannot
 forget its unknown references.
 Transient journal reads (including receipt-directory and completion-marker
-checks), registration checks, or occupant probes are retried with duplicate
-warnings suppressed; hooks remain in flight until storage and verification recover and the
-remaining list finishes. A conclusive missing or replaced checkout leaves the
+checks) are retried with duplicate warnings suppressed; registration checks and
+occupant probes are retried once per outage episode, with a changed reason
+mid-episode demoted to an info line; hooks remain in flight until storage and
+verification recover and the remaining list finishes. A conclusive missing or replaced checkout leaves the
 journal pending for normal worktree recovery rather than executing commands in
 its replacement. Unresolved relocation recovery blocks adoption without
 finishing the journal, even when the recorded occupant still matches.
