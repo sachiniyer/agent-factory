@@ -19,9 +19,10 @@ consult the relevant notes below when preparing the announcement.
   on the docker backend as a provisioning teardown that blamed git rather
   than the configuration. af now pins the count defined-empty wherever the
   environment is handed to the session — the exec shim on local/ssh and
-  claimed account launches, the agent-server handoff, and the docker `-e`
-  assembly — with a warning naming the missing indices, so git reads a count
-  of 0 and does not fail. The check runs at delivery because that is the only
+  claimed account launches, the agent-server handoff, and every docker
+  session's `-e` assembly, account or not — with a warning naming the
+  missing indices, so git reads a count of 0 and does not fail.
+  The check runs at delivery because that is the only
   place the count's value is known: it lives in the tmux server's environment
   at pane spawn or the daemon's environment a bare `-e` resolves against,
   which session creation cannot see. The remedy is to also forward the

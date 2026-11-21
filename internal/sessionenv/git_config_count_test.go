@@ -200,25 +200,25 @@ func TestGitConfigCountForwardMissingPairs(t *testing.T) {
 	}
 
 	t.Run("count forwarded live without pairs -> all 2N missing in index order", func(t *testing.T) {
-		names, total := GitConfigCountForwardMissingPairs("gemini",
+		names, total := GitConfigCountForwardMissingPairs(true,
 			[]string{"GIT_CONFIG_COUNT"}, count("2"))
 		require.Equal(t, []string{
 			"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
 			"GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1",
 		}, names)
-		require.Equal(t, 4, total)
+		require.Equal(t, int64(4), total)
 	})
 
 	t.Run("some pairs forwarded -> names only the missing", func(t *testing.T) {
-		names, total := GitConfigCountForwardMissingPairs("gemini",
+		names, total := GitConfigCountForwardMissingPairs(true,
 			[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"},
 			count("2", "GIT_CONFIG_KEY_0=k0", "GIT_CONFIG_VALUE_0=v0"))
 		require.Equal(t, []string{"GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"}, names)
-		require.Equal(t, 2, total)
+		require.Equal(t, int64(2), total)
 	})
 
 	t.Run("complete forward -> complete", func(t *testing.T) {
-		names, total := GitConfigCountForwardMissingPairs("gemini",
+		names, total := GitConfigCountForwardMissingPairs(true,
 			[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"},
 			count("1", "GIT_CONFIG_KEY_0=k", "GIT_CONFIG_VALUE_0=v"))
 		require.Empty(t, names)
@@ -233,10 +233,10 @@ func TestGitConfigCountForwardMissingPairs(t *testing.T) {
 			count("1"),
 			count("1", "GIT_CONFIG_KEY_0=", "GIT_CONFIG_VALUE_0=v"),
 		} {
-			names, total := GitConfigCountForwardMissingPairs("gemini",
+			names, total := GitConfigCountForwardMissingPairs(true,
 				[]string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"}, source)
 			require.Equal(t, []string{"GIT_CONFIG_KEY_0"}, names, "source=%v", source)
-			require.Equal(t, 1, total)
+			require.Equal(t, int64(1), total)
 		}
 	})
 
@@ -245,18 +245,18 @@ func TestGitConfigCountForwardMissingPairs(t *testing.T) {
 		source := count("1", "GIT_CONFIG_KEY_0=k")
 		// gemini's loader blanking emits GIT_CONFIG_VALUE_0= — a legal
 		// empty value, so the forward is complete.
-		names, total := GitConfigCountForwardMissingPairs("gemini", passthrough, source)
+		names, total := GitConfigCountForwardMissingPairs(true, passthrough, source)
 		require.Empty(t, names)
 		require.Zero(t, total)
 		// For an agent that emits no pair blank the name stays absent —
 		// "missing config value" — so the forward is incomplete.
-		names, total = GitConfigCountForwardMissingPairs("claude", passthrough, source)
+		names, total = GitConfigCountForwardMissingPairs(false, passthrough, source)
 		require.Equal(t, []string{"GIT_CONFIG_VALUE_0"}, names)
-		require.Equal(t, 1, total)
+		require.Equal(t, int64(1), total)
 	})
 
 	t.Run("count not forwarded -> complete (not the operator's forward)", func(t *testing.T) {
-		names, total := GitConfigCountForwardMissingPairs("gemini", nil, count("5"))
+		names, total := GitConfigCountForwardMissingPairs(true, nil, count("5"))
 		require.Nil(t, names)
 		require.Zero(t, total)
 	})
@@ -269,7 +269,7 @@ func TestGitConfigCountForwardMissingPairs(t *testing.T) {
 			count("abc"),        // git itself rejects: not a count to iterate
 			count("2147483648"), // above INT_MAX: "too many entries"
 		} {
-			names, total := GitConfigCountForwardMissingPairs("gemini",
+			names, total := GitConfigCountForwardMissingPairs(true,
 				[]string{"GIT_CONFIG_COUNT"}, source)
 			require.Nil(t, names, "source=%v", source)
 			require.Zero(t, total, "source=%v", source)
@@ -277,20 +277,20 @@ func TestGitConfigCountForwardMissingPairs(t *testing.T) {
 	})
 
 	t.Run("passthrough names are trimmed before membership is checked", func(t *testing.T) {
-		names, total := GitConfigCountForwardMissingPairs("gemini",
+		names, total := GitConfigCountForwardMissingPairs(true,
 			[]string{" GIT_CONFIG_COUNT "}, count("1"))
 		require.Equal(t, []string{"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"}, names)
-		require.Equal(t, 2, total)
+		require.Equal(t, int64(2), total)
 	})
 
 	t.Run("enormous count -> capped names, exact total, bounded work", func(t *testing.T) {
-		names, total := GitConfigCountForwardMissingPairs("gemini",
+		names, total := GitConfigCountForwardMissingPairs(true,
 			[]string{"GIT_CONFIG_COUNT"}, count("2147483647"))
 		require.Len(t, names, missingPairReportCap,
 			"the report names the first missing indices rather than all 2N")
 		require.Equal(t, "GIT_CONFIG_KEY_0", names[0])
 		require.Equal(t, "GIT_CONFIG_VALUE_0", names[1])
-		require.Equal(t, 2*2147483647, total)
+		require.Equal(t, 2*int64(2147483647), total)
 	})
 }
 
@@ -303,13 +303,13 @@ func TestMissingGitConfigCountPairsInEnv(t *testing.T) {
 		"the diagnostic lists the first missing indices rather than all 2N")
 	require.Equal(t, "GIT_CONFIG_KEY_0", names[0])
 	require.Equal(t, "GIT_CONFIG_VALUE_0", names[1])
-	require.Equal(t, 10, total)
+	require.Equal(t, int64(10), total)
 
 	names, total = missingGitConfigCountPairsInEnv(
 		[]string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=", "GIT_CONFIG_VALUE_0=v"})
 	require.Equal(t, []string{"GIT_CONFIG_KEY_0"}, names,
 		"a defined-empty KEY counts as missing — git fails it with 'empty config key'")
-	require.Equal(t, 1, total)
+	require.Equal(t, int64(1), total)
 
 	names, total = missingGitConfigCountPairsInEnv(
 		[]string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=k", "GIT_CONFIG_VALUE_0="})

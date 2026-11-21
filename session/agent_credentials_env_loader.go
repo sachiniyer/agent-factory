@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -175,22 +174,6 @@ func accountLoaderBlankEntries(agent string, passthrough, source []string) []str
 			}
 		}
 		out = append(out, name+"=")
-	}
-	// A forwarded GIT_CONFIG_COUNT that resolves to N>0 in the daemon
-	// environment animates GIT_CONFIG_KEY_0..N-1 / GIT_CONFIG_VALUE_0..N-1.
-	// When the operator forwarded the count without the pairs it requires —
-	// including a pair that would arrive defined-but-empty for a KEY, which
-	// git fails with "empty config key" exactly as it fails a missing one —
-	// the bare -e GIT_CONFIG_COUNT above rides the daemon's value into the
-	// container while no usable pair travels with it, so every git
-	// invocation fails fatally ("missing config key GIT_CONFIG_KEY_0"). Pin
-	// the count empty here — the blank is emitted after the bare forward,
-	// so docker's last-wins -e resolves to empty, rendering the whole
-	// family inert the way an unforwarded count would.
-	if missing, total := sessionenv.GitConfigCountForwardMissingPairs(agent, passthrough, source); total > 0 {
-		log.WarningLog.Printf("backend=docker: session_env_passthrough forwards GIT_CONFIG_COUNT without its required indexed pairs (%s); git would fail the count without them, so af pinned the count empty — also forward the pair names through session_env_passthrough",
-			sessionenv.FormatGitConfigMissingPairs(missing, total))
-		out = append(out, "GIT_CONFIG_COUNT=")
 	}
 	return out
 }

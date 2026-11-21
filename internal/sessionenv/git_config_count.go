@@ -120,8 +120,10 @@ type gitPairPresence struct {
 // missing reports the exact number of required pair names absent under p
 // for a live count of N, and up to cap of their names in index order. The
 // totals come from the presence sets and the listing stops at cap, so the
-// cost tracks how many pairs are present, never the count value.
-func (p gitPairPresence) missing(count, cap int) (names []string, total int) {
+// cost tracks how many pairs are present, never the count value. The total
+// is int64 because it reaches 2×INT_MAX on a complete miss, which a 32-bit
+// int cannot hold.
+func (p gitPairPresence) missing(count, cap int) (names []string, total int64) {
 	presentKeys, presentValues := 0, 0
 	for i, ok := range p.key {
 		if ok && i < count {
@@ -133,7 +135,7 @@ func (p gitPairPresence) missing(count, cap int) (names []string, total int) {
 			presentValues++
 		}
 	}
-	total = count - presentKeys + count - presentValues
+	total = int64(count-presentKeys) + int64(count-presentValues)
 	if total <= 0 {
 		return nil, 0
 	}
@@ -178,17 +180,16 @@ func gitPairPresenceInEnv(environ []string) gitPairPresence {
 }
 
 // gitPairPresenceForwarded indexes the pair names a pass-through list
-// forwards and reports what the forward DELIVERS for a docker account
-// session: a forwarded pair arrives with the source's value when the
-// source defines it — a defined-empty source value delivers a
-// defined-empty pair, which is unusable for a KEY but legal for a VALUE —
-// and when the source leaves it unset, arrives defined-and-empty only
-// under an agent whose loader blanking emits NAME= for unset pair names
-// (accountLoaderBlankEntries; gemini), staying absent under every other
-// agent. wanted is the operator's normalized name set, built once by the
+// forwards and reports what the forward DELIVERS at a docker -e boundary:
+// a forwarded pair arrives with the source's value when the source defines
+// it — a defined-empty source value delivers a defined-empty pair, which
+// is unusable for a KEY but legal for a VALUE — and when the source leaves
+// it unset, arrives defined-and-empty only when pairsBlanked holds, i.e.
+// the assembly emits a NAME= blank for unset pair names (the account
+// loader blank under an agent with filled names); otherwise it stays
+// absent. wanted is the operator's normalized name set, built once by the
 // caller.
-func gitPairPresenceForwarded(agent string, wanted map[string]struct{}, source []string) gitPairPresence {
-	pairsBlanked := len(AccountLoaderFilledNames(agent)) > 0
+func gitPairPresenceForwarded(pairsBlanked bool, wanted map[string]struct{}, source []string) gitPairPresence {
 	values := make(map[string]string, len(source))
 	for _, entry := range source {
 		if n, v, ok := strings.Cut(entry, "="); ok {
@@ -273,12 +274,13 @@ func forceEnvEntryEmpty(environ []string, name string) []string {
 // exact missing count, so a diagnostic stays bounded no matter how large N
 // is; total is 0 for a complete forward — the count is not forwarded, is
 // absent or 0 in source, holds a value git itself rejects, or every
-// required pair travels with it. agent decides what a forwarded-but-unset
-// pair name delivers (see gitPairPresenceForwarded).
+// required pair travels with it. pairsBlanked decides what a
+// forwarded-but-unset pair name delivers (see gitPairPresenceForwarded):
+// true only where the -e assembly emits a NAME= blank for it.
 //
 // Provisioners use this to neutralize a count-only forward that reached
 // the environment boundary, and to warn before doing so.
-func GitConfigCountForwardMissingPairs(agent string, passthrough, source []string) (names []string, total int) {
+func GitConfigCountForwardMissingPairs(pairsBlanked bool, passthrough, source []string) (names []string, total int64) {
 	wanted := make(map[string]struct{}, len(passthrough))
 	for _, name := range passthrough {
 		wanted[strings.TrimSpace(name)] = struct{}{}
@@ -290,13 +292,13 @@ func GitConfigCountForwardMissingPairs(agent string, passthrough, source []strin
 	if !ok {
 		return nil, 0
 	}
-	return gitPairPresenceForwarded(agent, wanted, source).missing(count, missingPairReportCap)
+	return gitPairPresenceForwarded(pairsBlanked, wanted, source).missing(count, missingPairReportCap)
 }
 
 // missingGitConfigCountPairsInEnv is the exec-shim diagnostic counterpart:
 // the bounded missing-pair report for a live GIT_CONFIG_COUNT in the
 // environment about to reach the agent.
-func missingGitConfigCountPairsInEnv(environ []string) (names []string, total int) {
+func missingGitConfigCountPairsInEnv(environ []string) (names []string, total int64) {
 	count, ok := gitConfigCountInEnv(environ)
 	if !ok {
 		return nil, 0
@@ -307,11 +309,11 @@ func missingGitConfigCountPairsInEnv(environ []string) (names []string, total in
 // FormatGitConfigMissingPairs renders the bounded missing-pair report for
 // a diagnostic: the capped names plus an "and N more" tail when the exact
 // total exceeds them. It names indices only, never values.
-func FormatGitConfigMissingPairs(names []string, total int) string {
-	if total <= len(names) {
+func FormatGitConfigMissingPairs(names []string, total int64) string {
+	if total <= int64(len(names)) {
 		return strings.Join(names, ", ")
 	}
-	return fmt.Sprintf("%s, … and %d more", strings.Join(names, ", "), total-len(names))
+	return fmt.Sprintf("%s, … and %d more", strings.Join(names, ", "), total-int64(len(names)))
 }
 
 // NeutralizeIncompleteGitConfigCount returns environ with GIT_CONFIG_COUNT

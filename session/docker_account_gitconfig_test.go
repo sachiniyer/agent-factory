@@ -3,9 +3,13 @@ package session
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // TestDockerAccount_ForwardedCountWithoutPairsIsPinnedEmpty pins the fix for
@@ -105,28 +109,99 @@ func TestDockerAccount_ForwardedCompleteCountIsNotNeutralized(t *testing.T) {
 		"a complete forward must not be neutralized — no GIT_CONFIG_COUNT= blank; runArgs=%v", runArgs)
 }
 
-// TestAccountLoaderBlankEntries_NeutralizesCountOnlyForward pins the
-// docker-account neutralizer at the helper: a passthrough that forwards
-// GIT_CONFIG_COUNT without its indexed pairs gets a trailing
-// GIT_CONFIG_COUNT= blank appended, so docker's last-wins -e resolves the
-// count empty, while pair names — never forwarded — get no blank at all.
-// Helper-level coverage complements the docker-run test above, which
-// asserts the bare -e and the blank together in the final run args.
-func TestAccountLoaderBlankEntries_NeutralizesCountOnlyForward(t *testing.T) {
-	// The pairs resolve in the daemon environment but are NOT forwarded, so
-	// they never travel into the container — the forward is incomplete.
-	source := []string{
-		"GIT_CONFIG_COUNT=2",
-		"GIT_CONFIG_KEY_0=safe.directory",
-		"GIT_CONFIG_VALUE_0=/work",
-		"GIT_CONFIG_KEY_1=safe.directory",
-		"GIT_CONFIG_VALUE_1=/other",
+// TestDockerGitConfigCountNeutralizingNames pins the trailing
+// -e GIT_CONFIG_COUNT= at the helper every docker -e assembly shares: a
+// passthrough that forwards GIT_CONFIG_COUNT resolving to N>0 in the
+// daemon environment without its required pairs arriving usable gets the
+// pin, on a plain session exactly as on an account one. A forwarded pair
+// that would arrive defined-but-empty counts as missing for a KEY — git
+// fails "empty config key" — and as a legal value for a VALUE, which on
+// the account path under an agent whose loader blanks unset pair names
+// still travels.
+func TestDockerGitConfigCountNeutralizingNames(t *testing.T) {
+	full := []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=k", "GIT_CONFIG_VALUE_0=v"}
+	all := []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"}
+
+	for _, tt := range []struct {
+		name    string
+		account string // account agent; "" is a plain session
+		pt      []string
+		source  []string
+		want    bool
+	}{
+		{"plain count-only forward -> pin", "",
+			[]string{"GIT_CONFIG_COUNT"},
+			[]string{"GIT_CONFIG_COUNT=1"}, true},
+		{"plain forwarded KEY empty in source -> pin", "",
+			all,
+			[]string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=", "GIT_CONFIG_VALUE_0=v"}, true},
+		{"plain forwarded VALUE unset -> pin (no blanking)", "",
+			all,
+			[]string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=k"}, true},
+		{"account forwarded KEY unset -> pin (blank delivers KEY=, empty key)", "gemini",
+			all,
+			[]string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_VALUE_0=v"}, true},
+		{"account forwarded KEY empty in source -> pin", "gemini",
+			all,
+			[]string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=", "GIT_CONFIG_VALUE_0=v"}, true},
+		{"account forwarded VALUE unset -> no pin (blank delivers legal empty)", "gemini",
+			all,
+			[]string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=k"}, false},
+		{"complete forward -> no pin", "", all, full, false},
+		{"account complete forward -> no pin", "gemini", all, full, false},
+		{"count not forwarded -> no pin", "",
+			[]string{"GIT_CONFIG_KEY_0"}, full, false},
+		{"count absent -> no pin", "", all, []string{"PATH=/bin"}, false},
+		{"count git rejects -> no pin (git's diagnostic)", "",
+			[]string{"GIT_CONFIG_COUNT"},
+			[]string{"GIT_CONFIG_COUNT=2147483648"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &dockerProvisioner{spec: ProvisionSpec{
+				Program:               "claude",
+				SessionEnvPassthrough: tt.pt,
+			}}
+			if tt.account != "" {
+				p.spec.Account = sessionenv.Account{Agent: tt.account, Name: "work", Dir: "/acct"}
+			}
+			got := p.gitConfigCountNeutralizingNames(tt.source)
+			if tt.want {
+				require.Equal(t, []string{"GIT_CONFIG_COUNT="}, got,
+					"an incomplete count forward must end the -e assembly with a GIT_CONFIG_COUNT= pin")
+			} else {
+				require.Empty(t, got)
+			}
+		})
 	}
-	entries := accountLoaderBlankEntries("gemini", []string{"GIT_CONFIG_COUNT"}, source)
-	require.Contains(t, entries, "GIT_CONFIG_COUNT=",
-		"a count-only forward must append a GIT_CONFIG_COUNT= blank so docker's last-wins resolves it empty; entries=%v", entries)
+}
+
+// TestDockerContainerEnv_PlainCountOnlyForwardIsPinnedEmpty is the
+// provisioner-level pin for a PLAIN docker session — no account: the bare
+// -e GIT_CONFIG_COUNT (forwarded+set) stays, the trailing
+// GIT_CONFIG_COUNT= pin follows it so docker's last-wins -e resolves the
+// count empty, and the unforwarded pairs never reach the container at all.
+// The pairs resolve in the daemon environment so the test process's own
+// git stays healthy; the incompleteness is in the forward.
+func TestDockerContainerEnv_PlainCountOnlyForwardIsPinnedEmpty(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.directory")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/work")
+	t.Setenv("GIT_CONFIG_KEY_1", "safe.directory")
+	t.Setenv("GIT_CONFIG_VALUE_1", "/other")
+	p := &dockerProvisioner{
+		program: tmux.ProgramClaude,
+		spec:    ProvisionSpec{Program: "claude", SessionEnvPassthrough: []string{"GIT_CONFIG_COUNT"}},
+	}
+	names := p.containerEnvironmentNames()
+	require.Contains(t, names, "GIT_CONFIG_COUNT",
+		"the bare -e GIT_CONFIG_COUNT forward must still be present")
+	require.Contains(t, names, "GIT_CONFIG_COUNT=",
+		"a count-only forward on a plain docker session must end with the GIT_CONFIG_COUNT= pin")
+	require.Greater(t,
+		slices.Index(names, "GIT_CONFIG_COUNT="), slices.Index(names, "GIT_CONFIG_COUNT"),
+		"the pin must follow the bare forward so docker's last-wins resolves it empty")
 	for _, name := range []string{"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"} {
-		require.NotContains(t, entries, name+"=",
-			"%s was never forwarded and must not get a blanking -e; entries=%v", name, entries)
+		require.NotContains(t, names, name,
+			"%s was never forwarded and must not reach the container at all", name)
 	}
 }

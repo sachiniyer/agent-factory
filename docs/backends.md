@@ -472,7 +472,8 @@ user's real home and mounts it only if it exists, so:
       the environment is handed to the session — the only place the
       count's value is known, since it lives in the tmux server's
       environment at pane spawn or the daemon's environment a bare
-      `-e` resolves against — and a half-forward is neutralized: af pins
+      `-e` resolves against — and a half-forward is neutralized on
+      every docker session's `-e` assembly, account or not: af pins
       the count defined-empty (git reads it as 0, the same shape an
       unforwarded count takes) and warns naming the missing indices.
       A defined-but-empty `GIT_CONFIG_KEY_n` counts as missing: git
