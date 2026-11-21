@@ -219,6 +219,20 @@ func runArgsMountDestinations(runArgs []string) ([][2]string, error) {
 			spec = strings.SplitN(a, "=", 2)[1]
 			entry = a
 			isTmpfs = true
+		case len(a) == 2 && a[0] == '-' && a[1] != '-':
+			// pflag: a bare value-taking short option consumes the NEXT argv
+			// element as its value, so Docker never parses that token as a
+			// -v/--mount of its own. The -v case above already records a real
+			// bare -v mount; this consumes the value any OTHER value-taking
+			// shorthand (-l, -h, -w, -p, -u, -m, -a, -c, -e) swallows, so the
+			// outer walk does not mis-read that token — typically a real -v —
+			// as a fresh mount and record a destination Docker never installs
+			// (the over-refusal direction of the bare-shorthand bug). Booleans
+			// and unknown shorthands fall through without consuming.
+			if _, takesValue := dockerRunValueShorthands[a[1]]; takesValue {
+				_ = next() // consume the swallowed value; no mount to record
+			}
+			continue
 		case len(a) > 2 && a[0] == '-' && a[1] != '-':
 			// An attached value or a combined short option — Docker's pflag
 			// honors a -v inside either. Walk it with the account guard's
@@ -234,6 +248,15 @@ func runArgsMountDestinations(runArgs []string) ([][2]string, error) {
 				},
 				"the bind-delivery path", "a -v"); err != nil {
 				return nil, err
+			}
+			// pflag: a cluster ending in a value-taking option consumes the
+			// NEXT argv element as that option's value; skip the swallowed
+			// token so the outer walk does not re-read it as a fresh mount.
+			// The cluster callback above already recorded any real -v inside
+			// the cluster, and an inline value (rest of cluster) consumes
+			// nothing, so this advance never skips a mount the refusal needs.
+			if dockerClusterConsumesNextArg(a) && i+1 < len(runArgs) {
+				_ = next()
 			}
 			continue
 		default:
