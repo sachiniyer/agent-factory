@@ -1037,6 +1037,10 @@ func TestDockerAccount_RejectsIdentityEnvInCombinedShortOptions(t *testing.T) {
 // whether a later `v` or `e` is an option or part of that character's value —
 // so it refuses and names the argument rather than guessing. A refusal is an
 // annoyance with an obvious remedy; an accept is a credential-boundary breach.
+// #7726 extended the same rule to an unknown shorthand with NOTHING guarded
+// behind it: at the end of a cluster it could still swallow the NEXT argument
+// as its value, and docker rejects it outright either way — walking past
+// reopens the bypass.
 func TestDockerAccount_RefusesUnreadableCombinedShortOptions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1046,6 +1050,10 @@ func TestDockerAccount_RefusesUnreadableCombinedShortOptions(t *testing.T) {
 		{name: "unknown option before a harmless volume", args: []string{"-Xv", "/tmp/cache:/af-account-cache"}},
 		{name: "unknown option before an env", args: []string{"-Ze", "CODEX_API_KEY=repo-identity"}},
 		{name: "unknown option after a boolean", args: []string{"-itYv", "/tmp/other:/af-account"}},
+		// An unknown shorthand ending the cluster could swallow the NEXT
+		// argument as its value (docker itself refuses it either way), so it
+		// refuses rather than walking on (#7726).
+		{name: "unknown option trailing a boolean cluster", args: []string{"-itX", "-e", "CODEX_API_KEY=repo"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1066,7 +1074,6 @@ func TestDockerAccount_AllowsCombinedShortOptionsItCanRead(t *testing.T) {
 		args []string
 	}{
 		{name: "boolean cluster", args: []string{"-itd"}},
-		{name: "boolean cluster with an unknown trailer", args: []string{"-itX"}},
 		{name: "cluster mounting a similarly named path", args: []string{"-itv", "/tmp/cache:/af-account-cache"}},
 		{name: "cluster mounting a similarly named path inline", args: []string{"-itv/tmp/cache:/af-account-cache"}},
 		{name: "cluster setting a harmless variable", args: []string{"-ite", "TZ=UTC"}},
@@ -1089,23 +1096,48 @@ func TestDockerAccount_AllowsCombinedShortOptionsItCanRead(t *testing.T) {
 	}
 }
 
-// TestDockerAccount_ClusterScanDoesNotSkipTheNextArgument is the trap the fix
-// had to avoid. Docker gives `-ie` the NEXT argument as its value, so a
-// validator that consumed that argument the way Docker does would step over a
-// real --mount written after the cluster and never check it. The scan stays
-// non-consumptive so every later argument is still examined on its own.
+// TestDockerAccount_ClusterScanDoesNotSkipTheNextArgument is the trap the
+// pflag-correct walk had to preserve: a combined short option that ends in a
+// value-taking shorthand consumes the NEXT argv element as that option's value
+// (measured: `docker run -ie -e --env=X=Y busybox env` sets X=Y, so `-ie`
+// swallows the following `-e`), so a REAL guarded flag written AFTER that value
+// must still be examined on its own — the walk consumes only the swallowed
+// value, never the flag that follows it. The refused cases below each place a
+// real --mount/--volume/-v after the cluster (or after the cluster's value),
+// and the guard still catches it; the allowed cases place a mount-shaped token
+// AS the cluster's swallowed value, which Docker never parses as a mount, so
+// the guard correctly leaves it through (the pre-pflag-correct walk refused
+// those by re-reading the swallowed value as a fresh flag — the over-refusal
+// mirror of the bare-shorthand bypass).
 func TestDockerAccount_ClusterScanDoesNotSkipTheNextArgument(t *testing.T) {
-	tests := [][]string{
-		{"-ie", "--mount", "type=bind,src=/tmp/other,dst=/af-account"},
-		{"-ie", "--mount", "type=bind,src=/tmp/other,DST=/af-account/.config"},
+	refused := [][]string{
+		// -it is all-boolean, so it consumes nothing and the --mount is real.
 		{"-it", "--mount", `type=bind,src=/tmp/other,"DST=/af-home"`},
+		// -tv consumes its own value (/tmp/cache:/af-account-cache), and the
+		// real --volume AFTER that value is still examined and refused.
 		{"-tv", "/tmp/cache:/af-account-cache", "--volume", "/tmp/other:/af-account"},
+		// -Xv is unreadable (X unknown) with a -v hiding behind it, so the
+		// cluster fails closed rather than guessing.
 		{"-Xv", "/tmp/cache:/af-account-cache", "-v", "/tmp/other:/af-account"},
 	}
-	for _, args := range tests {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
+	for _, args := range refused {
+		t.Run("refused/"+strings.Join(args, " "), func(t *testing.T) {
 			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
-				"a mount after a combined short option escaped validation: %v", args)
+				"a real guarded flag after a combined short option escaped validation: %v", args)
+		})
+	}
+	// The cluster's swallowed value is NOT a real flag, so a mount-shaped token
+	// that -ie consumes as its value (per pflag) installs nothing and the guard
+	// must NOT refuse it. The pre-fix non-consumptive walk re-read that value
+	// as a fresh --mount and refused a config Docker never mounts.
+	allowed := [][]string{
+		{"-ie", "--mount", "type=bind,src=/tmp/other,dst=/af-account"},
+		{"-ie", "--mount", "type=bind,src=/tmp/other,DST=/af-account/.config"},
+	}
+	for _, args := range allowed {
+		t.Run("allowed/"+strings.Join(args, " "), func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(args, "codex"),
+				"a mount-shaped token that the cluster consumes as its value must not be refused: %v", args)
 		})
 	}
 }

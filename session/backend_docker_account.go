@@ -112,6 +112,150 @@ var dockerRunValueShorthands = map[byte]struct{}{
 	'w': {}, // --workdir
 }
 
+// dockerRunValueLongopts and dockerRunBooleanLongopts classify the LONG
+// options of `docker run`, the second half of the pflag model the shorthand
+// tables above describe: a bare `--name` for a value-taking option consumes
+// the NEXT argv element as its value — pflag feeds it the token whatever its
+// shape — so `docker run --label -e --env=X=Y` sets X=Y exactly as --env=X=Y
+// alone does (#7726, measured on Docker 29.4.0). A `--name=value` token is
+// self-contained for every option kind, and a boolean consumes nothing.
+//
+// The tables are transcribed from `docker run --help` on Docker 29.4.0 plus
+// the accepted spellings its Options list does not print, checked against
+// docker/cli v29.4.0's flag registration and measured on the installed
+// engine:
+//   - hidden aliases: --net and --net-alias (of --network and
+//     --network-alias), --dns-opt (of --dns-option);
+//   - deprecated but still registered: --kernel-memory and
+//     --disable-content-trust;
+//   - annotated to a Windows daemon but still parsed — and still
+//     next-arg-consuming — on a Linux one: --cpu-count, --cpu-percent,
+//     --io-maxbandwidth, --io-maxiops.
+//
+// The docker CLI's Global Options (--config, --context, --debug/-D,
+// --host/-H, --log-level/-l, --tls*, --version/-v) are deliberately ABSENT:
+// `docker run` does not inherit them — measured: `docker run --log-level=x`
+// fails with "unknown flag: --log-level" and `docker run -H ...` with
+// "unknown shorthand flag: 'H'" — so af must not model or consume for them;
+// the unknown-option refusal reaches them the same way docker's own does.
+//
+// TestDockerRunLongoptTables_CoverEveryDockerLongopt pins the full set. An
+// option in NEITHER table is refused rather than walked past (#7726): it
+// either takes a value docker would feed the next argument — before af can
+// check it — or is one docker rejects outright.
+var dockerRunValueLongopts = map[string]struct{}{
+	"add-host":              {},
+	"annotation":            {},
+	"attach":                {},
+	"blkio-weight":          {},
+	"blkio-weight-device":   {},
+	"cap-add":               {},
+	"cap-drop":              {},
+	"cgroup-parent":         {},
+	"cgroupns":              {},
+	"cidfile":               {},
+	"cpu-count":             {},
+	"cpu-percent":           {},
+	"cpu-period":            {},
+	"cpu-quota":             {},
+	"cpu-rt-period":         {},
+	"cpu-rt-runtime":        {},
+	"cpu-shares":            {},
+	"cpus":                  {},
+	"cpuset-cpus":           {},
+	"cpuset-mems":           {},
+	"detach-keys":           {},
+	"device":                {},
+	"device-cgroup-rule":    {},
+	"device-read-bps":       {},
+	"device-read-iops":      {},
+	"device-write-bps":      {},
+	"device-write-iops":     {},
+	"dns":                   {},
+	"dns-opt":               {},
+	"dns-option":            {},
+	"dns-search":            {},
+	"domainname":            {},
+	"entrypoint":            {},
+	"env":                   {},
+	"env-file":              {},
+	"expose":                {},
+	"gpus":                  {},
+	"group-add":             {},
+	"health-cmd":            {},
+	"health-interval":       {},
+	"health-retries":        {},
+	"health-start-interval": {},
+	"health-start-period":   {},
+	"health-timeout":        {},
+	"hostname":              {},
+	"io-maxbandwidth":       {},
+	"io-maxiops":            {},
+	"ip":                    {},
+	"ip6":                   {},
+	"ipc":                   {},
+	"isolation":             {},
+	"kernel-memory":         {},
+	"label":                 {},
+	"label-file":            {},
+	"link":                  {},
+	"link-local-ip":         {},
+	"log-driver":            {},
+	"log-opt":               {},
+	"mac-address":           {},
+	"memory":                {},
+	"memory-reservation":    {},
+	"memory-swap":           {},
+	"memory-swappiness":     {},
+	"mount":                 {},
+	"name":                  {},
+	"net":                   {},
+	"net-alias":             {},
+	"network":               {},
+	"network-alias":         {},
+	"oom-score-adj":         {},
+	"pid":                   {},
+	"pids-limit":            {},
+	"platform":              {},
+	"publish":               {},
+	"pull":                  {},
+	"restart":               {},
+	"runtime":               {},
+	"security-opt":          {},
+	"shm-size":              {},
+	"stop-signal":           {},
+	"stop-timeout":          {},
+	"storage-opt":           {},
+	"sysctl":                {},
+	"tmpfs":                 {},
+	"ulimit":                {},
+	"user":                  {},
+	"userns":                {},
+	"uts":                   {},
+	"volume":                {},
+	"volume-driver":         {},
+	"volumes-from":          {},
+	"workdir":               {},
+}
+
+var dockerRunBooleanLongopts = map[string]struct{}{
+	"detach":                {},
+	"disable-content-trust": {},
+	"help":                  {},
+	"init":                  {},
+	"interactive":           {},
+	"no-healthcheck":        {},
+	"oom-kill-disable":      {},
+	"privileged":            {},
+	"publish-all":           {},
+	"quiet":                 {},
+	"read-only":             {},
+	"rm":                    {},
+	"sig-proxy":             {},
+	"tty":                   {},
+	"use-api-socket":        {},
+}
+
 // dockerGuardedShorthands are the short options this validator has to see: -v
 // installs a mount, -e can name another identity. Both are checked wherever
 // they appear, including behind other options in a combined short option.
@@ -134,6 +278,49 @@ func dockerShorthandValue(arg string, pos int, args []string, index int) (string
 		return args[index+1], true
 	}
 	return "", false
+}
+
+// dockerClusterConsumesNextArg reports whether a combined short option (e.g.
+// `-ie`, `-tv`) takes the NEXT argv element as its trailing option's value,
+// the way pflag does. It returns true when the first value-taking shorthand in
+// the cluster is reached at a position where the rest of the cluster is empty
+// (no inline value and no `-f=value`): that option consumes the next argument,
+// so Docker never re-parses it as an option of its own, and the outer walk must
+// skip it rather than re-read it as a fresh flag. An all-boolean cluster, an
+// inline-value form (`-fvalue`, `-f=value`), and a cluster that ends at an
+// unknown shorthand all report false — the last one deliberately, because af
+// cannot prove the next arg is consumed there, and not consuming preserves the
+// fail-closed posture dockerCheckShorthandCluster already keeps for a guarded
+// char hiding behind an unknown one.
+//
+// Mirrors dockerShorthandValue's own rule ("the rest of the cluster, or else
+// the next argument"), so the bare-token and cluster cases share one pflag
+// model. A bare two-character shorthand (e.g. `-l`) is handled separately by
+// each walker's generic option case; this helper covers the cluster form.
+func dockerClusterConsumesNextArg(arg string) bool {
+	for pos := 1; pos < len(arg); pos++ {
+		character := arg[pos]
+		if pos+2 < len(arg) && arg[pos+1] == '=' {
+			// pflag resolves `-f=value` before consulting the option's kind,
+			// so the suffix is that option's value and the cluster ends
+			// without touching the next argument.
+			return false
+		}
+		if _, takesValue := dockerRunValueShorthands[character]; takesValue {
+			// A non-empty remainder is this option's inline value; only an
+			// empty remainder sends pflag to the next argument.
+			return arg[pos+1:] == ""
+		}
+		if _, boolean := dockerRunBooleanShorthands[character]; boolean {
+			continue
+		}
+		// An unknown shorthand: af cannot prove pflag consumed the next arg
+		// as its value, and consuming would skip a real flag if the shorthand
+		// is in fact boolean. Don't consume; dockerCheckShorthandCluster has
+		// already failed closed on it by the time this is consulted.
+		return false
+	}
+	return false
 }
 
 // dockerCheckShorthandCluster walks a COMBINED short option such as `-tv`,
@@ -198,16 +385,86 @@ func dockerCheckShorthandCluster(arg string, args []string, index int, guarded s
 		}
 		// An option af has not been taught. It either takes a value —
 		// swallowing the rest of the cluster, any guarded option inside it
-		// included — or is a boolean, and the two are indistinguishable here.
-		// Refuse while anything guarded could still be hiding.
+		// included, or the NEXT argument when it ends the cluster — or is a
+		// boolean docker rejects outright, so there is no reading under which
+		// walking on is safe (#7726: refuse, do not walk past).
 		if strings.ContainsAny(arg[pos+1:], guarded) {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot use the combined short option %s for %s because af cannot tell whether %s in it is an option or part of -%c's value; write the options separately, such as -t -v /host:/container",
 				arg, scope, whichGuarded, character)
 		}
-		return nil
+		return fmt.Errorf(
+			"backend=docker: docker.run_args cannot use the combined short option %s for %s because af cannot tell whether -%c takes a value — if it does, Docker feeds it the rest of the cluster or the next argument before af can check it; write the options separately with documented shorthands",
+			arg, scope, character)
 	}
 	return nil
+}
+
+// dockerRunOptionConsumption classifies a run_args token none of a walker's
+// guarded spellings claimed — a `--name` or `--name=value` long option, a
+// bare two-character `-x` shorthand, or the `--` terminator — and reports
+// whether pflag feeds it the NEXT argv element as its value. The caller then
+// skips that element exactly as Docker would, so the token after a consumed
+// value is examined on its own rather than re-read as a fresh flag — that is
+// the long-option swallow #7726 measured (`docker run --label -e --env=X=Y`
+// sets X=Y).
+//
+// Fail-closed side: an option af has not been taught is REFUSED, not walked
+// past — a bare unknown `--name`/`-x` either takes a value docker feeds the
+// next argument before af can check it, or is one docker rejects outright as
+// unknown, so there is no reading under which walking on is safe (#7726).
+// `--` refuses because it ends Docker's option parsing mid-argv and af emits
+// its own options and the image name after run_args — every one of them
+// would become container command words.
+func dockerRunOptionConsumption(arg string, scope string) (bool, error) {
+	switch {
+	case arg == "--":
+		return false, fmt.Errorf(
+			"backend=docker: docker.run_args cannot use %s for %s because it ends Docker's option parsing mid-argv — af emits its own options and the image name after run_args, and -- would turn all of them into container command words",
+			arg, scope)
+	case strings.HasPrefix(arg, "--"):
+		name, _, attached := strings.Cut(arg[2:], "=")
+		if _, takesValue := dockerRunValueLongopts[name]; takesValue {
+			// A `--name=value` token is self-contained; only the bare
+			// `--name` form sends pflag to the next argument.
+			return !attached, nil
+		}
+		if _, boolean := dockerRunBooleanLongopts[name]; boolean {
+			return false, nil
+		}
+		return false, fmt.Errorf(
+			"backend=docker: docker.run_args cannot use %s for %s because af cannot prove `docker run` accepts it — af's option table covers Docker 29.4.0, and an option af does not know could take the next argument as its value before af can check it or be refused by docker outright; write a documented docker run option",
+			arg, scope)
+	case len(arg) == 2 && arg[0] == '-':
+		// A bare two-character shorthand ("-x"): arg[1] is never '-' because
+		// the `--` spellings took the case above.
+		if _, takesValue := dockerRunValueShorthands[arg[1]]; takesValue {
+			return true, nil
+		}
+		if _, boolean := dockerRunBooleanShorthands[arg[1]]; boolean {
+			return false, nil
+		}
+		return false, fmt.Errorf(
+			"backend=docker: docker.run_args cannot use %s for %s because af cannot tell whether -%c takes a value — if it does, Docker feeds it the next argument before af can check it; write the option's documented long form",
+			arg, scope, arg[1])
+	default:
+		// A positional token, a bare "-", or a longer single-dash word the
+		// cluster walk handles elsewhere — pflag leaves it unparsed, so the
+		// next argument stays a flag of its own.
+		return false, nil
+	}
+}
+
+// dockerRunOptionConsumesNext is the refusal-free half of
+// dockerRunOptionConsumption for the walkers that cannot refuse — the
+// warning extractor and the volumes-from probe — so they consume exactly
+// what pflag consumes and never re-read a swallowed token. An option af
+// cannot model reports false: the validators have already refused the list
+// by the time these run, and keeping the walk going is their best-effort
+// posture.
+func dockerRunOptionConsumesNext(arg string) bool {
+	consume, err := dockerRunOptionConsumption(arg, "")
+	return err == nil && consume
 }
 
 // dockerDeviceMode reports whether a --device field is a permission mask rather
@@ -462,11 +719,38 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			if err := checkMount(strings.TrimPrefix(arg, "-v")); err != nil {
 				return err
 			}
+		case strings.HasPrefix(arg, "--") || (len(arg) == 2 && arg[0] == '-'):
+			// Every remaining flag spelling pflag knows: a `--name` or
+			// `--name=value` long option, or a bare two-character `-x`
+			// shorthand. The guarded spellings above already claimed the env
+			// and mount options; what remains still needs the consumption
+			// half of the pflag model — a bare value-taking option (--label,
+			// --user, -l, -u) swallows the NEXT argv element whatever its
+			// shape, so a following -e or --mount is its value and never a
+			// flag af sees — the swallow #7726 measured. dockerRunOptionConsumption
+			// reports the consumption so the outer index skips the swallowed
+			// token, and refuses the shapes af cannot model: an option not in
+			// the `docker run` table in a position where it could take a
+			// value, and the `--` terminator.
+			consume, err := dockerRunOptionConsumption(arg, "an account-scoped session")
+			if err != nil {
+				return err
+			}
+			if consume && index+1 < len(args) {
+				index++
+			}
 		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
 			// A combined short option, whose -v or -e the cases above cannot
-			// see. The index deliberately does NOT advance past the value:
-			// that value may belong to an earlier option in the cluster, and
-			// consuming it here would skip a real --mount written next to it.
+			// see. pflag: a cluster ending in a value-taking option consumes
+			// the NEXT argv element as that option's value, so Docker never
+			// re-parses the swallowed token as an option of its own. Without
+			// advancing, the outer walk re-reads the swallowed token — a real
+			// -e after `-ie` — as a fresh env flag and checks its phantom
+			// "value" (the real --env=NAME=... behind it), letting a denied
+			// name through. dockerClusterConsumesNextArg reports that
+			// consumption so the outer index skips the swallowed token; the
+			// cluster's own guarded check above already examined the value,
+			// so this advance never skips a mount the refusal needs to see.
 			if err := dockerCheckShorthandCluster(arg, args, index, dockerGuardedShorthands,
 				func(character byte, value string) error {
 					if character == 'v' {
@@ -476,6 +760,9 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 				},
 				"an account-scoped session", "the -v or -e"); err != nil {
 				return err
+			}
+			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
+				index++
 			}
 		}
 	}

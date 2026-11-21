@@ -332,18 +332,51 @@ func validateCredentialDockerRunArgs(args []string, agent string) error {
 			if err := checkEnv(strings.TrimPrefix(arg, "-e")); err != nil {
 				return err
 			}
+		case strings.HasPrefix(arg, "--") || (len(arg) == 2 && arg[0] == '-'):
+			// Every remaining flag spelling pflag knows: a `--name` or
+			// `--name=value` long option, or a bare two-character `-x`
+			// shorthand. The guarded spellings above already claimed the env
+			// options; what remains still needs the consumption half of the
+			// pflag model — a bare value-taking option (--label, --user, -l,
+			// -u, or a mount option like --volume this path does not check)
+			// swallows the NEXT argv element whatever its shape, so a
+			// following -e is its value and never a flag af sees — the
+			// swallow #7726 measured. dockerRunOptionConsumption reports the
+			// consumption so the outer index skips the swallowed token, and
+			// refuses the shapes af cannot model: an option not in the
+			// `docker run` table in a position where it could take a value,
+			// and the `--` terminator.
+			consume, err := dockerRunOptionConsumption(arg,
+				"the credential-mount session's "+agent+" agent")
+			if err != nil {
+				return err
+			}
+			if consume && index+1 < len(args) {
+				index++
+			}
 		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
 			// A combined short option (e.g. -te) whose -e sets an environment
 			// variable exactly as -e on its own does. Only -e can redirect
 			// credential lookup on this path, so a -v in the cluster is read as
 			// a value-taking option that ends the walk rather than a mount to
-			// check — there is no account boundary here to protect. The index
-			// deliberately does NOT advance past the value, for the same reason
-			// the account guard's doesn't.
+			// check — there is no account boundary here to protect.
+			//
+			// pflag: a cluster ending in a value-taking option consumes the
+			// NEXT argv element as that option's value, so Docker never
+			// re-parses the swallowed token as an option of its own. Without
+			// advancing, the outer walk re-reads the swallowed token — a real
+			// -e after `-ie` — as a fresh env flag and checks its phantom
+			// "value" (the real --env=NAME=... behind it), letting a denied
+			// name through. dockerClusterConsumesNextArg reports that
+			// consumption so the outer index skips the swallowed token; the
+			// cluster's own guarded check above already examined the value.
 			if err := dockerCheckShorthandCluster(arg, args, index, "e",
 				func(character byte, value string) error { return checkEnv(value) },
 				"the credential-mount session's "+agent+" agent", "the -e"); err != nil {
 				return err
+			}
+			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
+				index++
 			}
 		}
 	}
