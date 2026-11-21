@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -153,29 +154,34 @@ func resolvePendingRow(s *socketSweep, pr proctree.PendingRow, socketPath string
 // cannot place at all is pending the holder's cwd (R2) — never af's own.
 //
 // The raw-basename compare that licenses the cheap rule-out admits a row
-// on either of two names — the canonical filter name, and the queried
-// path's own raw basename — and rules every other row out lexically, with
-// no per-row filesystem read (#7736). Both names exist because af reaches
-// its server by connect() on af's own socket path S, so af's server's
-// kernel row is spelled either as S verbatim — retained by the query's
-// raw basename even when S's basename now holds a symlink, which
-// canonicalSocketPath walks so the filter name alone would carry the link
-// TARGET's (#7705) — or as the real socket B that S links to, retained by
-// the filter name the walk produced. A row bound under any other spelling
-// is not af's server, including the "reverse alias" — a row bound at B'
-// whose old path was later replaced by a symlink to S: that server was
-// bound at B' and was never reachable through S, so admitting it only
-// made `af reset` refuse a path that cannot be af's. The lexical compare
-// also means the negative path never pays an Lstat of the row's path —
-// one a stalled mount would block uninterruptibly, past the sweep budget
-// that cannot interrupt it.
+// on the names of the queried path's own resolution — the canonical
+// filter name, and every name on the queried path's own symlink chain —
+// and rules every other row out lexically, with no per-row filesystem
+// read (#7736). Those names exist because af reaches its server by
+// connect() on af's own socket path S, so af's server's kernel row is
+// spelled as S verbatim or as some name S's chain passes through: the
+// kernel keeps bind()'s spelling verbatim, so a live owner's row may
+// carry S's raw basename even after S itself became a link (#7705), the
+// real socket B at the chain's end, or an INTERMEDIATE chain name — S's
+// target while the server bound, later rerouted through another link, so
+// the row survives with a name neither the raw basename nor the filter
+// carries. socketPathChainNames collects S's chain once per probe — never
+// per row — and only ever widens admission into the walk, so a raced
+// re-read can claim, never rule out. A row bound under any other
+// spelling is not af's server, including the "reverse alias" — a row
+// bound at B' whose old path was later replaced by a symlink to S: that
+// server was bound at B' and was never reachable through S, so admitting
+// it only made `af reset` refuse a path that cannot be af's. The compare
+// stays lexical, so the negative path never pays an Lstat of the row's
+// path — one a stalled mount would block uninterruptibly, past the sweep
+// budget that cannot interrupt it.
 func boundRowMatcher(socketPath string, want socketPathWalk) func(string) proctree.RowMatch {
 	filterName, filtering := socketMatchFilterName(want)
-	_, queryBase := splitSocketPath(socketPath)
+	names := socketPathChainNames(socketPath)
 	return func(boundPath string) proctree.RowMatch {
 		if filtering {
 			_, base := splitSocketPath(boundPath)
-			if base != filterName && base != queryBase {
+			if base != filterName && !names[base] {
 				return proctree.RowMatchNone
 			}
 		}
@@ -205,12 +211,52 @@ func boundRowMatcher(socketPath string, want socketPathWalk) func(string) proctr
 	}
 }
 
+// socketPathChainNames is the queried path's own name set for
+// boundRowMatcher's cheap rule-out: the raw basename plus every basename
+// the path's own symlink chain passes through (#7736). A live owner's
+// kernel row may be spelled with an intermediate name — the chain's
+// target was the server's real socket while it bound, and was later
+// rerouted through another link, leaving the verbatim bind spelling an
+// intermediate neither the raw basename nor the canonical filter name
+// carries — so each chain name is an admission, never a verdict: the row
+// still pays the walk, which decides Certain, defers, or rules it out on
+// its holders' views. The chain is read ONCE per probe, never per row;
+// it only ever widens admission, so a chain that mutated between want's
+// walk and this read can keep a row af might not otherwise reach —
+// claimed, the safe direction — and a link that will not resolve, a loop,
+// or the link budget simply ends the walk.
+func socketPathChainNames(socketPath string) map[string]bool {
+	names := map[string]bool{}
+	seen := map[string]bool{}
+	p := socketPath
+	for range maxSocketPathLinks {
+		if seen[p] {
+			break
+		}
+		seen[p] = true
+		dir, base := splitSocketPath(p)
+		if base == "" || base == "." || base == ".." {
+			break
+		}
+		names[base] = true
+		target, err := os.Readlink(p)
+		if err != nil {
+			break
+		}
+		if !filepath.IsAbs(target) {
+			target = dir + "/" + target
+		}
+		p = target
+	}
+	return names
+}
+
 // socketMatchFilterName is the canonical name a row's basename must equal
-// — or the queried path's own raw basename — before the full walk is worth
-// running, and false when no such name exists. For a certain want it is
-// the wanted path's own basename: every unequal pair is provably a
-// different socket, so a differing basename is out. For an uncertain want
-// it is the plain tail's last component, exactly the name
+// — or any name on the queried path's own symlink chain — before the full
+// walk is worth running, and false when no such name exists. For a
+// certain want it is the wanted path's own basename: every unequal pair
+// is provably a different socket, so a differing basename is out. For an
+// uncertain want it is the plain tail's last component, exactly the name
 // certainSocketMismatch itself can prove against; a non-plain tail decides
 // nothing, so nothing is filtered.
 func socketMatchFilterName(want socketPathWalk) (string, bool) {

@@ -530,6 +530,30 @@ func TestBoundRowMatcherKeepsAnOwnerThroughABasenameSymlink(t *testing.T) {
 		"the same bug in the tail branch: the verbatim row converges through the walk")
 }
 
+// The intermediate chain name, pinned (Codex on #7736): S is a symlink to
+// bound.sock while bound.sock is the server's real socket — reachable
+// through S — then the socket is unlinked and bound.sock is replaced by a
+// symlink to absent new.sock. The kernel keeps the row spelled
+// bound.sock: an intermediate name of the queried path's own chain, which
+// neither the raw basename (af.sock) nor the canonical filter name
+// (new.sock) carries. It is NOT the reverse alias — this server was
+// reachable through the queried path — so the row must still be admitted
+// and converge to Certain, never ruled out.
+func TestBoundRowMatcherKeepsAnOwnerSpelledByAChainName(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "af.sock")
+	bound := filepath.Join(dir, "bound.sock")
+	fresh := filepath.Join(dir, "new.sock") // absent — the chain's end
+	require.NoError(t, os.Symlink(bound, sock))
+	require.NoError(t, os.Symlink(fresh, bound))
+	want, ok := canonicalSocketPath(sock)
+	require.True(t, ok)
+	require.Equal(t, fresh, want.path, "the query resolves through both links")
+	match := boundRowMatcher(sock, want)
+	require.Equal(t, proctree.RowMatchCertain, match(bound),
+		"a live owner spelled with an intermediate name of the query's own chain converges — never ruled out")
+}
+
 // The reverse alias is deliberately NOT an owner — the #7736 decision. A
 // row bound at B' whose old path was later replaced by a symlink to af's
 // absent queried path S was never reachable through S, so it is not af's
@@ -555,15 +579,16 @@ func TestBoundRowMatcherRulesOutAReverseAlias(t *testing.T) {
 	require.Equal(t, proctree.RowMatchCertain, match(sock))
 }
 
-// The negative path makes no filesystem call: a row whose raw basename
-// equals neither the canonical filter name nor the queried path's own is
-// ruled out lexically, before any per-row Lstat — the read #7736 removed
-// because a stalled mount blocks it uninterruptibly on the common
-// negative path. The first row below is exactly what a residual stat
-// would observe — a present symlink at its own basename, pointing at a
-// different socket — so a filesystem read still in the matcher would
-// change this verdict and fail the pin; the second row cannot be stat'ed
-// at all and takes the same rule-out.
+// The negative path makes no PER-ROW filesystem call: a row whose raw
+// basename equals neither the canonical filter name nor any name on the
+// queried path's own chain is ruled out lexically — the per-row Lstat
+// #7736 removed because a stalled mount blocks it uninterruptibly on the
+// common negative path (the query's own chain is still read once per
+// probe — never per row — and only ever widens admission). The first row
+// below is exactly what a residual stat would observe — a present symlink
+// at its own basename, pointing at a different socket — so a filesystem
+// read still in the matcher would change this verdict and fail the pin;
+// the second row cannot be stat'ed at all and takes the same rule-out.
 func TestBoundRowMatcherRulesOutWithoutAFilesystemRead(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "af.sock") // absent — the queried path
