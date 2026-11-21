@@ -33,9 +33,10 @@ import (
 // agent can never write into B's files and the new one can never start on A's.
 //
 // Every W7.4 guarantee is the same code, run with B's account: the licence is
-// accountSyncApplies (a listed host and nothing a repository wrote), the agent
-// command is validateRemoteAccountProgram (an attributed binary, no identity
-// variable of its own), and the environment is the one already fixed at launch —
+// accountSendApplies (a listed host that still names this machine, and nothing
+// a repository wrote), the agent command is validateRemoteAccountProgram (an
+// attributed binary, no identity variable of its own), and the environment is
+// the one already fixed at launch —
 // identity names and cloud selectors defined empty in the 0600 identity file. B
 // must be an account of the SAME agent: the scope variable is part of that fixed
 // environment, so another agent's account has no scope to land in. Nothing here
