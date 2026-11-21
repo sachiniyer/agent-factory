@@ -3,6 +3,7 @@ package tmux
 import (
 	"errors"
 	"os"
+	"slices"
 	"sort"
 	"syscall"
 	"time"
@@ -311,6 +312,9 @@ func possibleSocketOwnersBySweep(s socketSweep) (servers, unidentified []int, un
 	}
 	candidates := append(append(sortedSweepOwners(s.bound), sortedKeys(s.uncertain)...), s.uncovered...)
 	sort.Ints(candidates)
+	// A pid can sit in two buckets — an undecidable spelling for a process
+	// whose coverage also failed — and is named once, not per bucket.
+	candidates = slices.Compact(candidates)
 	for _, pid := range candidates {
 		if !tmuxServerIdentified(pid) {
 			unidentified = append(unidentified, pid)

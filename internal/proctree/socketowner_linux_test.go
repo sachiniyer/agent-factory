@@ -124,6 +124,47 @@ func socketInodeOf(t *testing.T, sock string) string {
 	return ""
 }
 
+// A listener and a socket accepted on it carry the SAME bound spelling in
+// the kernel's tables, under different inodes — the shape every tmux server
+// with a client attached has. The holder's fd scan must mark ALL matching
+// inodes, or the unscanned one counts as an unattributed bound row: a false
+// "holder nobody could name" over a socket whose holder was already found.
+func TestSweepAttributesEveryInodeToThePath(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "multi.sock")
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr == nil {
+			accepted <- c
+		}
+	}()
+	client, err := net.Dial("unix", sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	server := <-accepted
+	t.Cleanup(func() { _ = server.Close() })
+	require.NoError(t, os.Remove(sock), "unlink the socket under the live pair")
+
+	var s UnixSocketSweep
+	require.Eventually(t, func() bool {
+		s = UnixSocketOwnerSweep(func(p string) RowMatch {
+			if p == sock {
+				return RowMatchCertain
+			}
+			return RowMatchNone
+		})
+		return s.Bound[os.Getpid()] == sock
+	}, 5*time.Second, 10*time.Millisecond,
+		"the holder must be found for the path it listens and accepted on")
+	require.Zero(t, s.UnattributedBound,
+		"the accepted-connection inode belongs to the same holder: nothing is unattributed")
+	require.Zero(t, s.UnattributedUncertain)
+}
+
 // A zombie's /proc/<pid>/net is empty — the stat fails ENOENT — and it is
 // proved gone, not uncovered: a zombie holds no sockets, so the negative is
 // provable with it on the box. An unreaped child is a real zombie here.
@@ -168,21 +209,26 @@ func TestUnixSocketOwnerSweepCostAt800Processes(t *testing.T) {
 		return n
 	}
 	const target = 800
-	have := countSameUID()
 	var spawned []*exec.Cmd
-	if have < target {
+	// Registered before the first spawn: a runner that hits a process or
+	// memory limit mid-loop still reaps every sleeper it started.
+	t.Cleanup(func() {
+		for _, c := range spawned {
+			_ = c.Process.Kill()
+			_, _ = c.Process.Wait()
+		}
+	})
+	// Top up in rounds: the count measured between rounds shifts as unrelated
+	// processes come and go on a shared box, so spawn the deficit plus a
+	// small margin and re-measure.
+	for round := 0; round < 4 && countSameUID() < target; round++ {
 		bin := sleeper.Path(t)
-		for i := 0; i < target-have; i++ {
+		need := target - countSameUID() + 4
+		for i := 0; i < need; i++ {
 			c := exec.Command(bin, "600")
 			require.NoError(t, c.Start())
 			spawned = append(spawned, c)
 		}
-		t.Cleanup(func() {
-			for _, c := range spawned {
-				_ = c.Process.Kill()
-				_, _ = c.Process.Wait()
-			}
-		})
 	}
 	got := countSameUID()
 	require.GreaterOrEqual(t, got, target, "the fixture must reach ~%d same-uid processes", target)

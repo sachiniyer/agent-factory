@@ -134,6 +134,66 @@ func shellQuoteEach(args []string) []string {
 	return quoted
 }
 
+// fdTableRefuses reports whether pid's fd table refuses this uid: the
+// directory listing denied, or — root in a container without
+// CAP_SYS_PTRACE can LIST yet still refuse the read — an fd link that
+// will not resolve. The latter is the refusal the sweep's attribution
+// scan actually hits.
+func fdTableRefuses(pid int) bool {
+	fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
+	ents, err := os.ReadDir(fdDir)
+	if err != nil {
+		return os.IsPermission(err)
+	}
+	for _, e := range ents {
+		if _, lerr := os.Readlink(filepath.Join(fdDir, e.Name())); os.IsPermission(lerr) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitNonDumpable waits for pid's non-dumpable state to take: the fd table
+// must refuse before the sweep runs, or the fixture proves nothing. Where
+// this uid bypasses the ptrace access check entirely (root with
+// CAP_SYS_PTRACE, hidepid off) the refusal never comes: the fd table reads
+// in full past the deadline, the attribution scan works anyway, and a test
+// premised on the refusal skips rather than fails.
+func waitNonDumpable(t *testing.T, pid int) {
+	t.Helper()
+	fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
+	deadline := time.Now().Add(5 * time.Second)
+	for !fdTableRefuses(pid) {
+		_, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid)))
+		require.NoError(t, err, "the fixture died")
+		if time.Now().After(deadline) {
+			// Alive and never refused: this uid bypasses the ptrace access
+			// check the fixture exists to exercise.
+			ents, rerr := os.ReadDir(fdDir)
+			require.NoError(t, rerr)
+			require.NotEmpty(t, ents)
+			t.Skip("this uid reads a non-dumpable process's fd table: the access " +
+				"check the fixture exists to exercise does not apply")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// skipIfFdTableReadable skips a test premised on a non-dumpable fd table
+// refusing, where this uid bypasses the check the fixture exists to
+// exercise — the fixture already proved its state by binding its socket.
+func skipIfFdTableReadable(t *testing.T, pid int) {
+	t.Helper()
+	if fdTableRefuses(pid) {
+		return
+	}
+	ents, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fd"))
+	require.NoError(t, err)
+	require.NotEmpty(t, ents)
+	t.Skip("this uid reads a non-dumpable process's fd table: the access check " +
+		"the fixture exists to exercise does not apply")
+}
+
 // The R1 regression, pinned: a same-uid process whose /proc/<pid>/fd and
 // /proc/<pid>/exe refuse (PR_SET_DUMPABLE=0 — ssh-agent's shape) bound
 // NOTHING, and must not make every missing path read unknown. Its netns
@@ -145,12 +205,9 @@ func TestSocketOwnerSweepStaysDeterminateBesideANonDumpableProcess(t *testing.T)
 		_ = nd.Process.Kill()
 		_, _ = nd.Process.Wait()
 	})
-	// Wait for the non-dumpable state to take: its fd dir must refuse before
-	// the sweep runs, or the fixture proves nothing.
-	require.Eventually(t, func() bool {
-		_, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(nd.Process.Pid), "fd"))
-		return err != nil && os.IsPermission(err)
-	}, 5*time.Second, 10*time.Millisecond, "the fixture must become non-dumpable")
+	// Wait for the non-dumpable state to take: the fd table must refuse
+	// before the sweep runs, or the fixture proves nothing.
+	waitNonDumpable(t, nd.Process.Pid)
 
 	neverBound := testguard.SocketPath(t, "never-bound.sock")
 	sweep := probeSocketOwners(neverBound)
@@ -181,6 +238,9 @@ func TestSocketOwnerSweepNamesAnUnattributedBoundHolder(t *testing.T) {
 		_, err := os.Stat(sock)
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond, "the fixture must bind its socket")
+	// The bind proves the prctl ran. Where this uid bypasses the access check
+	// the attribution scan names the holder and the premise skips.
+	skipIfFdTableReadable(t, nd.Process.Pid)
 	require.NoError(t, os.Remove(sock), "unlink the socket under the non-dumpable holder")
 
 	require.Eventually(t, func() bool {

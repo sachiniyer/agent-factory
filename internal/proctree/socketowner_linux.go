@@ -357,8 +357,11 @@ func socketInodeHolders(pids []int, rows map[string]matchedRow, deadline time.Ti
 }
 
 // scanPidSocketInodes readlinks one pid's fd table, chunked, reporting each
-// held inode rows names. A certain hit settles the pid at once; a possible
-// one is reported and the walk continues in case a certain row follows.
+// held inode rows names. Every matched inode is reported, never just the
+// first: one process holds every socket to the same path — a listener and
+// each connection accepted on it share the bound spelling — and an unmarked
+// inode counts as an unattributed bound row, a false "holder nobody could
+// name" over a socket whose holder was found.
 func scanPidSocketInodes(pid int, rows map[string]matchedRow, deadline time.Time, found func(inode string, row matchedRow)) {
 	fdDir, err := os.Open(fmt.Sprintf("/proc/%d/fd", pid))
 	if err != nil {
@@ -385,9 +388,6 @@ func scanPidSocketInodes(pid int, rows map[string]matchedRow, deadline time.Time
 			}
 			if row, ok := rows[ino]; ok {
 				found(ino, row)
-				if row.certain {
-					return
-				}
 			}
 		}
 		if errors.Is(rerr, io.EOF) || rerr != nil {
