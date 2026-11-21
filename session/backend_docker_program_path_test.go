@@ -17,14 +17,16 @@ import (
 )
 
 // TestDockerCredentialRunArgs_RefusesProgramChoiceNames is the run_args half
-// of #7529 R7, end-to-end: PATH, LD_PRELOAD and LD_LIBRARY_PATH let a repo
-// choose which program af's in-container steps run (a PATH that resolves its
-// committed .x/sh for every `sh -c`) or which library every dynamically
-// linked program loads. Each is refused before `docker run` — the refusal is
-// what makes the image-PATH re-assertion and the absolute /bin/sh safe to
-// rely on — and the error names the variable and its mechanism.
+// of #7529 R7, end-to-end: PATH, LD_PRELOAD, LD_LIBRARY_PATH and LD_AUDIT let
+// a repo choose which program af's in-container steps run (a PATH that
+// resolves its committed .x/sh for every `sh -c`) or which library every
+// dynamically linked program loads (a preloaded, search-path-placed, or
+// audited shared object). Each is refused before `docker run` — the
+// refusal is what makes the image-PATH re-assertion and the absolute
+// /bin/sh safe to rely on — and the error names the variable and its
+// mechanism.
 func TestDockerCredentialRunArgs_RefusesProgramChoiceNames(t *testing.T) {
-	for _, name := range []string{"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"} {
+	for _, name := range []string{"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
 		for _, spelling := range [][]string{
 			{"-e", name + "=/workspace/.x/bin"},
 			{"-e", name}, // the bare spelling resolves through the CLI env the same way
@@ -49,7 +51,7 @@ func TestDockerCredentialRunArgs_ProgramChoiceReasonNamesTheMechanism(t *testing
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "which program", "PATH's refusal must name the program-choosing mechanism")
 
-	for _, name := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH"} {
+	for _, name := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
 		err := validateCredentialDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, tmux.ProgramClaude)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "library", "%s's refusal must name the library-injection mechanism", name)
@@ -269,13 +271,103 @@ func TestDockerContainerEnvironment_MountSessionNormalizesTwin(t *testing.T) {
 // run_args, but PATH is re-asserted (never blanked) and the loader names are
 // left at the image's own values (the same trust class as its binaries) — a
 // defined-empty PATH or LD_LIBRARY_PATH would break the container outright.
+// LD_AUDIT joins the loader names: it is refused to repo run_args on the
+// same terms but never pinned, because an image's own audit modules are the
+// same trust class as its binaries (#7529 R7).
 func TestCredentialMountPinnedNames_ProgramChoiceNamesNotPinned(t *testing.T) {
 	pinned := sortedNamesToSet(credentialMountPinnedNames(tmux.ProgramClaude, nil))
 	denied := credentialMountDeniedNames(tmux.ProgramClaude)
-	for _, name := range []string{"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"} {
+	for _, name := range []string{"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
 		require.Contains(t, denied, name, "%s must be refused to run_args", name)
 		require.NotContains(t, pinned, name, "%s must not be pinned defined-empty", name)
 	}
+}
+
+// TestCredentialMountProgramLoaderNames_BlockEveryGlibcLoaderInjectionVar
+// is the regression pin for the LD_AUDIT gap: glibc has three dynamic-linker
+// variables that load a shared object into every dynamically linked program
+// at startup — LD_PRELOAD (preload list), LD_LIBRARY_PATH (library search
+// path), and LD_AUDIT (audit-module list) — and all three must be refused to
+// repo run_args on BOTH the credential-mount and account paths through the
+// shared credentialMountProgramLoaderNames map. A later glibc injection
+// variable or a re-split of the map would silently re-open the same hole:
+// the test enumerates the three names the bug report established and
+// confirms each one is refused on both refusal paths with the
+// library-injection reason, AND that the shared map holds EXACTLY those
+// three names (so adding a fourth without updating the consumers would
+// show as a refusal against a name not in the map — and forgetting one
+// would show as a missing refusal). It mirrors the backend_docker_account
+// test pair's loop on every mountable agent so a new agent landing on the
+// roster does not silently drop the protection.
+func TestCredentialMountProgramLoaderNames_BlockEveryGlibcLoaderInjectionVar(t *testing.T) {
+	// The dynamic-linker injection variables the cred-mount and account
+	// paths must both refuse. LD_AUDIT was the original gap; the test
+	// exists to keep it refused alongside its siblings.
+	wantLoaders := []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"}
+	require.Equal(t, len(wantLoaders), len(credentialMountProgramLoaderNames),
+		"the loader-name map's membership changed — update this test and the docs to match")
+	for _, name := range wantLoaders {
+		require.Contains(t, credentialMountProgramLoaderNames, name,
+			"%s must be in credentialMountProgramLoaderNames so both refusal paths block it", name)
+	}
+
+	// Every mountable agent on the roster: both refusal paths must refuse
+	// each loader name with the library-injection reason, and the name must
+	// be denied (never pinned) so the image's own value survives — same as
+	// the existing two sibling names.
+	for agent := range agentCredentialFiles {
+		denied := credentialMountDeniedNames(agent)
+		pinned := sortedNamesToSet(credentialMountPinnedNames(agent, nil))
+		for _, name := range wantLoaders {
+			require.Containsf(t, denied, name,
+				"agent %q: %s must be denied to repo run_args on the credential-mount path", agent, name)
+			require.NotContainsf(t, pinned, name,
+				"agent %q: %s is a loader name — it is refused to run_args but never pinned defined-empty", agent, name)
+			reason, ok := credentialMountDeniedReason(agent, name)
+			require.Truef(t, ok, "agent %q: credentialMountDeniedReason(%q) must refuse", agent, name)
+			require.Containsf(t, reason, "library",
+				"agent %q: %s's credential-mount refusal must name the library-injection mechanism, got %q", agent, name, reason)
+		}
+	}
+
+	// On the account path, accountDockerProgramChoiceReason must refuse
+	// every loader name with the same library-injection reason, and the
+	// run_args validator must reject a -e NAME=… entry for every account
+	// agent. PATH stays covered by its own reason here as a sanity check
+	// that the path's refusal did not regress.
+	for _, agent := range []string{"claude", "gemini", "codex"} {
+		for _, name := range wantLoaders {
+			reason, ok := accountDockerProgramChoiceReason(name)
+			require.Truef(t, ok, "accountDockerProgramChoiceReason(%q) must refuse for %s", name, agent)
+			require.Containsf(t, reason, "library",
+				"%s's account refusal must name the library-injection mechanism, got %q", name, reason)
+			err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, agent)
+			require.Errorf(t, err, "account %s: -e %s=… must be refused", agent, name)
+			require.Containsf(t, err.Error(), name, "account %s: the refusal must name %s", agent, name)
+			require.Containsf(t, err.Error(), "library",
+				"account %s: %s's refusal must name the library-injection mechanism", agent, name)
+			require.Containsf(t, err.Error(), "session_env_passthrough",
+				"account %s: %s's refusal must name the operator remedy", agent, name)
+		}
+		// The credential-mount path must refuse too, with its own wording.
+		for _, name := range wantLoaders {
+			err := validateCredentialDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, agent)
+			require.Errorf(t, err, "credential-mount %s: -e %s=… must be refused", agent, name)
+			require.Containsf(t, err.Error(), name, "credential-mount %s: the refusal must name %s", agent, name)
+			require.Containsf(t, err.Error(), "library",
+				"credential-mount %s: %s's refusal must name the library-injection mechanism", agent, name)
+		}
+	}
+
+	// A combined short option such as `-te LD_AUDIT=…` that hides the -e
+	// behind a -t must be refused the same way on both paths, so the
+	// cluster-walk the shared map feeds cannot miss the new name either.
+	err := validateAccountDockerRunArgs([]string{"-te", "LD_AUDIT=/workspace/.x/x.so"}, "codex")
+	require.Error(t, err, "an -e LD_AUDIT inside a combined short option must be refused on the account path")
+	require.Contains(t, err.Error(), "LD_AUDIT")
+	err = validateCredentialDockerRunArgs([]string{"-te", "LD_AUDIT=/workspace/.x/x.so"}, tmux.ProgramClaude)
+	require.Error(t, err, "an -e LD_AUDIT inside a combined short option must be refused on the credential-mount path")
+	require.Contains(t, err.Error(), "LD_AUDIT")
 }
 
 // provisionDockerAccountImageEnv provisions an account session far enough to
@@ -306,10 +398,10 @@ func provisionDockerAccountImageEnv(t *testing.T, program string, runArgs, passt
 // of #7563 R2, the #7529 R7 refusal extended to account sessions: PATH and
 // the loader names let a repo choose which program — or which loaded code —
 // af's account provisioning execs run (a committed .x/cat answering the
-// mount-table probe, or .x/chown), so each is refused before `docker run`
-// and the error names the variable.
+// mount-table probe, or .x/chown, or an audit module loaded into either),
+// so each is refused before `docker run` and the error names the variable.
 func TestDockerAccountRunArgs_RefusesProgramChoiceNames(t *testing.T) {
-	for _, name := range []string{"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"} {
+	for _, name := range []string{"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
 		for _, spelling := range [][]string{
 			{"-e", name + "=/workspace/.x/bin"},
 			{"-e", name}, // the bare spelling resolves through the CLI env the same way
@@ -340,7 +432,7 @@ func TestDockerAccountRunArgs_ProgramChoiceReasonNamesTheMechanism(t *testing.T)
 	require.Contains(t, err.Error(), "image's ENV", "PATH's refusal must name the image-ENV remedy")
 	require.Contains(t, err.Error(), "session_env_passthrough", "PATH's refusal must name the operator's passthrough remedy")
 
-	for _, name := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH"} {
+	for _, name := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
 		err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, "codex")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "library", "%s's refusal must name the library-injection mechanism", name)
