@@ -376,7 +376,9 @@ var hostsRemoveCmd = &cobra.Command{
 	Short: "Drop a host from the list",
 	Long: `Remove <name> from the saved hosts. Sessions already running on it keep
 running: each one carries its own connection settings, so a tunnel re-dial or a
-daemon restart does not need the entry; only new sessions can no longer pick it. A host that is the default is
+daemon restart does not need the entry; new sessions can no longer pick it, and
+a live session's account handoff or limit failover is refused until the entry
+is restored. A host that is the default is
 refused unless you pass --clear-default.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
