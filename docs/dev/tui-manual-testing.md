@@ -87,7 +87,7 @@ show. A TUI running behind its keys could otherwise skip the target, or let
 > **Display-selected ≠ cursor-on-row (#1174 / #1199).** The sticky `▾` is only
 > a *display* signal. A **single** auto-selected instance renders `▾` while the
 > cursor still sits on the section header — there `GetSelectedInstance()` is
-> `nil`, so `o`/`D`/attach silently no-op even though the row *looks* selected
+> `nil`, so `o`/`D`/attach no-op even though the row *looks* selected
 > (a false pass waiting to happen). `af_select` therefore also requires the
 > menu to advertise a **row-scoped verb (`D delete session`, or the legacy
 > `D kill` the driver still accepts)** — present only when a real instance is
