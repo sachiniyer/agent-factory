@@ -166,24 +166,29 @@ func resolvePendingRow(s *socketSweep, pr proctree.PendingRow, socketPath string
 // a hand-placed or rerouting symlink at that basename is the residual that
 // makes the raw compare prove more than the walk would, and so such a
 // basename keeps the prefilter from ruling a row out before the walk can
-// decide. The bypass the queried path's symlink licenses is narrow, though:
-// only a row whose RAW basename is the queried link name (the kernel's
-// verbatim bind spelling) can converge with the queried path through that
-// link, so an unrelated basename — `other.sock` against `/x/af.sock` — is
-// still provably a different socket and keeps the cheap rule-out. A row
-// whose OWN basename is a present symlink may converge through its own
-// link, so it too bypasses. The plain cases — a live socket file at the
-// basename, the absent file the probe was called for, a directory, or a
-// parent that does not exist — read not-a-symlink and keep the cheap
-// rule-out.
+// decide. The row whose raw basename equals the queried path's raw
+// basename is retained unconditionally: it is the kernel's verbatim bind
+// spelling, and the queried path's basename symlink may be removed between
+// the want walk and this matcher, so re-reading the mutable link to decide
+// the bypass would race with the walk that already produced want and
+// recreate the live-owner false negative this change is meant to prevent.
+// An unrelated basename — `other.sock` against `/x/af.sock` — is still
+// provably a different socket and keeps the cheap rule-out. A row whose
+// OWN basename is a present symlink may converge through its own link, so
+// it too bypasses — but only when the row is absolute: a relative row's
+// basename symlink resolves against af's cwd, never the holder's, so af's
+// view of it is meaningless and the lexical mismatch rules it out without
+// a stat. The plain cases — a live socket file at the basename, the absent
+// file the probe was called for, a directory, or a parent that does not
+// exist — read not-a-symlink and keep the cheap rule-out.
 func boundRowMatcher(socketPath string, want socketPathWalk) func(string) proctree.RowMatch {
 	filterName, filtering := socketMatchFilterName(want)
 	_, queryBase := splitSocketPath(socketPath)
-	queryBasenameRedirected := socketBasenameSymlinked(socketPath)
 	return func(boundPath string) proctree.RowMatch {
 		if filtering {
-			if _, base := splitSocketPath(boundPath); base != filterName &&
-				!(queryBasenameRedirected && base == queryBase) && !socketBasenameSymlinked(boundPath) {
+			_, base := splitSocketPath(boundPath)
+			if base != filterName && base != queryBase &&
+				(!filepath.IsAbs(boundPath) || !socketBasenameSymlinked(boundPath)) {
 				return proctree.RowMatchNone
 			}
 		}
