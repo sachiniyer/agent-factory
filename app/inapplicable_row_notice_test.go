@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -17,6 +18,15 @@ import (
 // not a new feature. Each branch below returned a bare `m, nil` before the
 // fix — the press arrived and left no evidence — so these tests fail on the
 // pre-fix tree while asserting no overlay opened and nothing was dispatched.
+//
+// The two *PaintsOnScreen tests are different on purpose: they are the issue's
+// own literal repros (w on the Agent tab row, R on a shell tab row) driven
+// through the real Update key path and asserted ON THE RENDERED 80x24 frame —
+// and they already pass on the pre-fix tree, because those two notices fired
+// before this fix ever landed. They exist to pin the whole render end of the
+// contract — handler → errBox → status bar → screen — so a notice can never
+// again silently stop painting (the alternative the play-test could not rule
+// out), and to prove the resolved path cannot be the silent one.
 // ----------------------------------------------------------------------------
 
 // TestRailVerbsEmptyRail_AnswerWithNotice: with no sessions at all, every
@@ -262,4 +272,60 @@ func TestRowVerbsCollapsedHeader_AnswerNoSession(t *testing.T) {
 				"a hidden binding resolves nothing, so the press names the absence (#7700)")
 		})
 	}
+}
+
+// issue7700LiveTabRowHome builds the issue's exact repro scene: a live
+// session with an Agent tab at slot 0 and a shell tab at slot 1, the store
+// bound to it (what makes its tab rows render — instanceExpanded's SameRow
+// gate means a live tab row implies a bound store, so inst==nil cannot
+// mislabel this row), and the rail cursor parked on the requested tab row —
+// the shape af_select leaves behind.
+func issue7700LiveTabRowHome(t *testing.T, tabIdx int) (*home, *session.Instance) {
+	t.Helper()
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "worker")
+	inst.AddTabForTest("agent", session.TabKindAgent)
+	inst.AddTabForTest("shell", session.TabKindShell)
+	h.store.AddInstance(inst)
+	h.store.SetSelectedInstance(inst)
+	h.sidebar.SelectTabRow("worker", tabIdx)
+
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab, "precondition: the rail cursor rests on a tab row")
+	require.Equal(t, tabIdx, sel.TabIndex)
+	require.Same(t, inst, h.store.GetSelectedInstance(),
+		"precondition: a live tab row implies the store's bound selection")
+
+	resizeHome(h, 80, 24)
+	return h, inst
+}
+
+// TestAgentTabCloseRefusalPaintsOnScreen is repro 1 of #7700 end to end: `w`
+// with the rail cursor on the Agent tab row answers on the rendered frame,
+// not just inside the errBox. This passes on the pre-fix tree — the notice
+// fired before this fix — so it pins the render end of the contract rather
+// than covering new code: a refusal that stops reaching the screen now fails
+// this test no matter what the handler still sets.
+func TestAgentTabCloseRefusalPaintsOnScreen(t *testing.T) {
+	h, _ := issue7700LiveTabRowHome(t, 0)
+
+	h.Update(runeKey('w'))
+
+	require.Contains(t, xansi.Strip(h.View()),
+		"the agent tab can't be closed; use D to kill the session",
+		"the issue's own repro must show the refusal on the 80x24 frame")
+}
+
+// TestShellTabRenameRefusalPaintsOnScreen is repro 2 of #7700 end to end: `R`
+// with the rail cursor on a shell tab row answers on the rendered frame.
+// Same standing as the `w` case: passes on the pre-fix tree, here to keep the
+// handler → status-bar → screen chain provably live.
+func TestShellTabRenameRefusalPaintsOnScreen(t *testing.T) {
+	h, _ := issue7700LiveTabRowHome(t, 1)
+
+	h.Update(runeKey('R'))
+
+	require.Contains(t, xansi.Strip(h.View()),
+		"Agent and Terminal tabs can't be renamed",
+		"the issue's own repro must show the refusal on the 80x24 frame")
 }
