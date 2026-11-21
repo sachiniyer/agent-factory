@@ -464,6 +464,11 @@ func (m *home) showRenameTabPrompt() (tea.Model, tea.Cmd) {
 	m.promptOverlay = overlay.NewPromptOverlay(fmt.Sprintf("Rename tab %q", m.tabRenameTarget.tabLabel), tab.Name)
 	m.promptOverlay.SetPlaceholder("New tab name…")
 	m.promptOverlay.SetHints("enter rename · esc cancel", "enter rename · esc cancel")
+	// One line of input deserves a one-line dialog (#7701), the same fix the
+	// jump prompt took in #5587: without compact the textarea fills the frame
+	// the layout fit gives it and the box renders as a screen of blank lines
+	// around a single field.
+	m.promptOverlay.SetCompact()
 	m.layoutPromptOverlay()
 	m.state = stateRenameTab
 	return m, nil
