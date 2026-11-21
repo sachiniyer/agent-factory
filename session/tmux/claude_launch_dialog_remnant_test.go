@@ -270,6 +270,83 @@ func TestIssue7725PendingExitNoticePrefixHolds(t *testing.T) {
 		"Learn more\n\n❯ 1. Yes,\n  proceed\n  2. No, exit\n\nPress Ctrl-C\nagain to ex")
 }
 
+// #7730 review, R1: Claude Code paints top-down, so the exit notice lands on
+// the footer's first row before the footer's own tail under it is repainted.
+// Once a launch dialog's body is proven above the notice — whole or a notice
+// prefix — the pane holds while the trailing rows read as a suffix of that
+// dialog's own footer, the same footer-swap proof as the notice-last frames.
+func TestIssue7725PendingExitNoticeOverFooterTailHolds(t *testing.T) {
+	// A real capture with the notice where the footer was and the footer's
+	// own tail appended below it, the frame a wrapped footer leaves while
+	// the notice is painted over its first row.
+	for _, tt := range []struct {
+		name, capture, tail string
+		want                DialogHoldKind
+	}{
+		{"the MCP-server dialog under the shared footer's tail", "claude_2_1_322_mcp_server_dialog.ansi", " to cancel", DialogHoldOther},
+		{"the picker under its footer's tail", "claude_2_1_322_mcp_multi_server_dialog.ansi", " all", DialogHoldOther},
+		{"the legacy dialog under its own footer's tail", "claude_2_1_19_legacy_folder_trust_dialog.ansi", " to exit", DialogHoldFolderPartial},
+	} {
+		var content string
+		if tt.tail == " all" {
+			content = pendingExitPicker(t, readTrustFixture(t, tt.capture), "Press Ctrl-C again to exit") + tt.tail
+		} else {
+			content = pendingExit(t, readTrustFixture(t, tt.capture), "Press Ctrl-C again to exit") + tt.tail
+		}
+		requireRemnantHold(t, tt.name, content)
+		require.Equal(t, tt.want, claudeDialogHoldKind(claudeScreenOf(content)),
+			"%s: the dialog behind the notice is named only by what the pane proves", tt.name)
+	}
+	// The single-server dialog at 28 columns, the notice over the footer's
+	// first row with "to cancel" still painted below it.
+	requireRemnantHold(t, "a narrow single-server dialog with its footer's tail below the notice",
+		"\n────────────────────────────\n"+
+			"  New MCP server found in\n  this project: probe\n\n"+
+			"  MCP servers may execute\n  code or access system\n  resources. All tool\n  calls require approval.\n  Learn more in the MCP\n  documentation.\n\n"+
+			"  ❯ Use this MCP server\n    Use this and all future\n    MCP servers in this\n    project\n    Continue without using\n    this MCP server\n\n"+
+			"  Press Ctrl-C again to exit\n  to cancel")
+	// The picker at 32 columns, the notice over the footer's first row with
+	// "all" still painted below it.
+	requireRemnantHold(t, "a narrow picker with its footer's tail below the notice",
+		"────────────────────────────────\n"+
+			"  3 new MCP servers found in\n  this project\n  Select any you wish to enable.\n\n"+
+			"  MCP servers may execute code\n  or access system resources.\n  All tool calls require\n  approval. Learn more in the\n  MCP documentation.\n\n"+
+			"    [✔] probe\n    [✔] probe-two\n    [✔] probe-three\n     ❯ Enable selected\n"+
+			"  Press Ctrl-C again to exit\n all")
+	// A notice prefix over the tail, mid-paint — #7730 review's R2 pane, a
+	// live folder-trust dialog once pinned clear as "no dialog".
+	content := "Do you trust the files in this folder?\n\n❯ 1. Yes, proceed\n  2. No, exit\n\n Press Ctrl-C ag\n cancel"
+	requireRemnantHold(t, "the legacy dialog under a notice prefix with the footer's tail", content)
+	require.Equal(t, DialogHoldFolderPartial, claudeDialogHoldKind(claudeScreenOf(content)),
+		"the pane proves the legacy dialog's option rows, so the hold is named")
+	// The notice itself wrapped onto two rows over the tail.
+	requireRemnantHold(t, "a wrapped notice over the footer's tail",
+		"\n────────────────────────────\n"+
+			"  New MCP server found in\n  this project: probe\n\n"+
+			"  MCP servers may execute\n  code or access system\n  resources. All tool\n  calls require approval.\n  Learn more in the MCP\n  documentation.\n\n"+
+			"  ❯ Use this MCP server\n    Use this and all future\n    MCP servers in this\n    project\n    Continue without using\n    this MCP server\n\n"+
+			"  Press Ctrl-C\n  again to exit\n  to cancel")
+	// A tail licenses the swap only as a suffix of that dialog's own footer:
+	// a suffix of another dialog's footer, or of no footer's, leaves the
+	// pane the way the notice's readers left it, and a notice in a
+	// composer's status row stays the composer's own.
+	mcp28 := "\n────────────────────────────\n" +
+		"  New MCP server found in\n  this project: probe\n\n" +
+		"  ❯ Use this MCP server\n    Continue without using\n    this MCP server\n"
+	pick32 := "────────────────────────────────\n" +
+		"  3 new MCP servers found in\n  this project\n  Select any you wish to enable.\n\n" +
+		"  ❯ [✔] probe\n    [✔] probe-two\n       Enable selected\n"
+	for _, tt := range []struct{ name, content string }{
+		{"the single-server dialog over the picker's footer tail", mcp28 + "  Press Ctrl-C again to exit\n  all"},
+		{"the picker over the shared footer's tail", pick32 + "  Press Ctrl-C again to exit\n  to cancel"},
+		{"the dialog over a tail no footer ends with", mcp28 + "  Press Ctrl-C again to exit\n  some other row"},
+		{"a ruled composer with a notice prefix over a tail",
+			composerRule + "\n❯ \n" + composerRule + "\n  Press Ctrl-C ag\n cancel"},
+	} {
+		requireRemnantClear(t, tt.name, tt.content)
+	}
+}
+
 // The risk of this reader is a hold on a pane that shows no dialog: it stalls
 // a create and flags a live session. None of these shows one.
 func TestIssue7618RemnantReaderLeavesNonDialogPanesClear(t *testing.T) {
@@ -309,8 +386,6 @@ func TestIssue7618RemnantReaderLeavesNonDialogPanesClear(t *testing.T) {
 		{"a notice prefix in a boxed composer's status row", boxed + "  Press Ctrl-C ag"},
 		{"a notice prefix alone", "Press Ctrl-C ag"},
 		{"a notice prefix under transcript", "● Done.\n\nPress Ctrl-C ag"},
-		{"a notice prefix over a still-painted footer tail",
-			"Do you trust the files in this folder?\n\n❯ 1. Yes, proceed\n  2. No, exit\n\n Press Ctrl-C ag\n cancel"},
 		{"the footer's last two words", " to\n cancel"},
 		{"the footer's last word", " cancel"},
 		{"a cut word of the footer", " el"},
