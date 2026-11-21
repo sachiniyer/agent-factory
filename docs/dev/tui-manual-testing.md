@@ -182,7 +182,7 @@ compose across `docker exec` invocations.
 |----------|------|-------------------|
 | `af_reset_sandbox` | — | wipes instances/branches for a deterministic rerun (sandbox-scoped, fails closed) |
 | `af_boot` | launch `af` | `Agent Factory` frame + the session rail painted — `Sessions (` **or** the scrolled `▲ N more` the rail shows in its place (#2148) |
-| `af_new_instance <name>` | `n`,text,`Enter` | the row shows `<name> … ●` (ready) |
+| `af_new_instance <name>` | `n`,text,`Enter` | the row shows the rendered title (the name itself, or its truncated prefix + `…` when it overflows the rail's title cell, #7485) then ` ●` (ready) |
 | `af_select <name>` | `k`×,`j`× | `<name>`'s row shows `▾` |
 | `af_open_pane` | `s` | pane-focus menu (`x hide pane`) |
 | `af_hide_pane` | `x` | visible-pane set changes (pane header row) |
