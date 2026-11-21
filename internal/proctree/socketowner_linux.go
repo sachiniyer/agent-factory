@@ -105,8 +105,9 @@ type UnixSocketSweep struct {
 	// with the holders attribution named. The caller decides each one;
 	// nothing here has already counted it.
 	Pending []PendingRow
-	// ScanComplete is false when the fd-table attribution stopped on the
-	// sweep budget before every same-uid pid was scanned: the holder lists
+	// ScanComplete is false when the fd-table attribution did not provably
+	// walk every same-uid pid's whole table — a spent sweep budget, a
+	// refused open or link, a listing that stopped early: the holder lists
 	// are then partial, and a pending row may not be ruled out — the
 	// binder nobody reached could be the one whose view differs.
 	ScanComplete bool
@@ -435,7 +436,7 @@ func socketInodeHolders(pids []int, rows map[string]matchedRow, deadline time.Ti
 				mu.Unlock()
 				return
 			}
-			scanPidSocketInodes(pid, rows, deadline, func(inode string, row matchedRow) {
+			ok := scanPidSocketInodes(pid, rows, deadline, func(inode string, row matchedRow) {
 				mu.Lock()
 				if !slices.Contains(holders[inode], pid) {
 					holders[inode] = append(holders[inode], pid)
@@ -449,6 +450,13 @@ func socketInodeHolders(pids []int, rows map[string]matchedRow, deadline time.Ti
 				}
 				mu.Unlock()
 			})
+			if !ok {
+				// A table only partly walked can hide the very holder
+				// whose view differs — the holder lists are partial.
+				mu.Lock()
+				complete = false
+				mu.Unlock()
+			}
 		}
 	}
 	for range min(socketSweepScanWorkers, len(pids)) {
@@ -465,21 +473,35 @@ func socketInodeHolders(pids []int, rows map[string]matchedRow, deadline time.Ti
 // each connection accepted on it share the bound spelling — and an unmarked
 // inode counts as an unattributed bound row, a false "holder nobody could
 // name" over a socket whose holder was found.
-func scanPidSocketInodes(pid int, rows map[string]matchedRow, deadline time.Time, found func(inode string, row matchedRow)) {
+//
+// The result is true only when the walk is provably exhaustive — the whole
+// table listed and every listed link answered. A vanished table is still
+// complete: a pid gone before its directory opened, and an fd gone before
+// its link read, hold nothing now. Anything else that hides an answer —
+// a refused open, a refused link, a listing that stopped early, a spent
+// deadline — is false, and the caller's holder list may be short exactly
+// the binder whose view it needed.
+func scanPidSocketInodes(pid int, rows map[string]matchedRow, deadline time.Time, found func(inode string, row matchedRow)) (complete bool) {
 	fdDir, err := os.Open(fmt.Sprintf("/proc/%d/fd", pid))
 	if err != nil {
-		return
+		return errors.Is(err, os.ErrNotExist)
 	}
 	defer fdDir.Close()
+	complete = true
 	for {
 		if time.Now().After(deadline) {
-			return
+			return false
 		}
 		fds, rerr := fdDir.ReadDir(256)
 		for _, fd := range fds {
 			target, lerr := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, fd.Name()))
 			if lerr != nil {
-				continue // the fd raced away — not a blind spot
+				// A raced-away fd holds nothing; a live fd that refuses
+				// its link could be the socket — the walk is partial.
+				if !errors.Is(lerr, os.ErrNotExist) {
+					complete = false
+				}
+				continue
 			}
 			ino, ok := strings.CutPrefix(target, "socket:[")
 			if !ok {
@@ -493,8 +515,11 @@ func scanPidSocketInodes(pid int, rows map[string]matchedRow, deadline time.Time
 				found(ino, row)
 			}
 		}
-		if errors.Is(rerr, io.EOF) || rerr != nil {
-			return
+		if errors.Is(rerr, io.EOF) {
+			return complete
+		}
+		if rerr != nil {
+			return false // the listing stopped early — fds it never named may hold the socket
 		}
 	}
 }
