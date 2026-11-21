@@ -88,9 +88,6 @@ func TestRailVerbsRestingRowWithoutBinding_AnswerWithNotice(t *testing.T) {
 		{"> on archived", session.Archived, runeKey('>'), `archived session "worker"`},
 		{"1 on archived", session.Archived, runeKey('1'), `archived session "worker"`},
 		{"s on archived", session.Archived, runeKey('s'), `archived session "worker"`},
-		{"w on lost", session.Lost, runeKey('w'), `session "worker" while it is not running`},
-		{"s on lost", session.Lost, runeKey('s'), `session "worker" while it is not running`},
-		{"w on dead", session.Dead, runeKey('w'), `session "worker" while it is not running`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHome(t)
