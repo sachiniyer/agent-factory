@@ -173,7 +173,7 @@ func TestTmuxSocketClaimedKillOutcomes(t *testing.T) {
 				}
 				return syscall.Kill(pid, sig)
 			})
-			require.Equal(t, tc.wantClaimed, tmuxSocketClaimed(socket, []int{n1, n2}),
+			require.Equal(t, tc.wantClaimed, tmuxSocketClaimedForCandidates(socket, []int{n1, n2}),
 				"kill() outcome classification for a positively-identified live server")
 		})
 	}
@@ -243,7 +243,7 @@ func TestTmuxSocketClaimedAllKillsFailStaysClaimed(t *testing.T) {
 	n1, n2, socket := pinClaimedNeighbours(t, "af_af_a", "af_af_b")
 	pinServerProbeSignalForTest(t, func(int, syscall.Signal) error { return syscall.EPERM })
 
-	require.True(t, tmuxSocketClaimed(socket, []int{n1, n2}),
+	require.True(t, tmuxSocketClaimedForCandidates(socket, []int{n1, n2}),
 		"a non-empty table where no positively-identified server could be signalled must answer "+
 			"claimed (unknown); an empty answer would license destructive cleanup")
 }

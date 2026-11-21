@@ -105,7 +105,7 @@ func TestSocketAbsentProbeSparesAPaneTmuxIsSpawning(t *testing.T) {
 				}
 			}
 			if len(kids) > 0 {
-				tmuxSocketClaimed(absent, kids)
+				tmuxSocketClaimedForCandidates(absent, kids)
 			}
 		}
 	}()

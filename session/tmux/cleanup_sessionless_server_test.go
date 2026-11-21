@@ -289,27 +289,31 @@ func TestProbeSessionStrictNamesTheDiagnosticItCouldNotClassify(t *testing.T) {
 }
 
 // TestProbeStrictRefusesWhenARenamedLiveServerOwnsTheUnlinkedSocket is the
-// end-to-end regression for the liveTmuxServerPIDs prefilter (#2875/#7242).
+// end-to-end regression for renamed-server ownership (#2875/#7242/#7695).
 //
 // Linux tmux builds its kernel task name from getprogname(), which is argv[0],
 // so a server started as `exec -a foo tmux` — or a copy/symlink named
 // otherwise — is titled `<name>: server` (measured on tmux 3.4, documented in
-// internal/proctree/tmuxidentity.go, #7242). The old exact-match prefilter
-// (`comm == "tmux: server" || comm == "tmux"`) dropped that shape at the
-// entry point, so the owner never became a candidate, the socket-absent probe
-// answered a determinate "unclaimed" (NoServerRunning == true) while the
-// server and its panes were alive, and `af reset`'s destructive cleanup
-// proceeded against a still-running server — the exact destruction class the
-// socket-absent probe exists to prevent (#2875).
+// internal/proctree/tmuxidentity.go, #7242). Every title rule has missed such
+// a spelling: the exact-match prefilter dropped the owner at the entry point
+// (#7681), and #7689's `: server` suffix still assumed a title tmux's 15-byte
+// task-name truncation and last-space cut could not produce. Under either,
+// the socket-absent probe answered a determinate "unclaimed"
+// (NoServerRunning == true) while the server and its panes were alive, and
+// `af reset`'s destructive cleanup proceeded against a still-running server —
+// the exact destruction class the socket-absent probe exists to prevent
+// (#2875).
 //
-// The fix admits the `: server` suffix. Once admitted, the renamed server
-// fails proctree.IsTmuxServer (its argv[0] basename is not "tmux") and is
-// remembered as an unprobed possible owner, so tmuxSocketClaimed answers
-// "claimed" (unknown) and NoServerRunning returns false — reset refuses.
+// #7695 removes the title from the question: the kernel's socket tables tie
+// the renamed server to the path by what it is BOUND to, so the renamed
+// server is found as the bound holder. It then fails proctree.IsTmuxServer
+// (its argv[0] basename is not "tmux") and is remembered as a possible owner
+// — never signalled — so the verdict answers "claimed" (unknown) and
+// NoServerRunning returns false: reset refuses.
 //
 // Linux-only: tmux cannot retitle on darwin, so a server started under a
-// renamed binary there is titled after the exec'd file name (no `: server`
-// suffix), a separate shape this fix does not address.
+// renamed binary there is titled after the exec'd file name, a separate
+// shape the kernel-table sweep does not run on.
 func TestProbeStrictRefusesWhenARenamedLiveServerOwnsTheUnlinkedSocket(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		// The `<name>: server` task name is a Linux prctl measurement; tmux
@@ -363,17 +367,18 @@ func TestProbeStrictRefusesWhenARenamedLiveServerOwnsTheUnlinkedSocket(t *testin
 	}, 5*time.Second, 10*time.Millisecond,
 		"the renamed server must retitle to `bx: server`")
 
-	// Direct regression for the prefilter the fix broadens: the renamed server
-	// is now a live-server CANDIDATE. liveTmuxServerPIDs reads the real
-	// process table by design — the bug is in this function, so it is not
-	// pinned. Membership, not equality, so an unrelated same-uid server on a
-	// shared host cannot change the result.
-	require.Contains(t, liveTmuxServerPIDs(), serverPID,
-		"the prefilter must admit a renamed tmux server (`bx: server`) as a live candidate")
-
 	// The socket-absent precondition the probe exists for (#2875): the server
 	// keeps running, every client gets ENOENT.
 	require.NoError(t, os.Remove(socket), "unlink the server's socket while it lives")
+
+	// Direct regression for the mechanism #7695 stands on: the bound row
+	// survives the unlink, so the sweep ties the renamed server to the path
+	// by evidence alone — its task title is never read. The real sweep is
+	// what the production verdict runs, so it is not pinned.
+	sweep := probeSocketOwners(socket)
+	_, tied := sweep.bound[serverPID]
+	require.True(t, tied,
+		"the kernel's socket tables must tie the renamed server (`bx: server`) to its unlinked socket")
 
 	_, err = exec.Command("tmux", "-S", socket, "ls").Output()
 	require.Error(t, err, "tmux ls on the unlinked socket must fail")

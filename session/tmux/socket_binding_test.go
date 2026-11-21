@@ -137,7 +137,7 @@ func TestTmuxSocketClaimedDecisionTable(t *testing.T) {
 			pinReclaimWindowForTest(t, window)
 
 			start := time.Now()
-			require.Equal(t, tc.wantClaimed, tmuxSocketClaimed(socket, tc.pids))
+			require.Equal(t, tc.wantClaimed, tmuxSocketClaimedForCandidates(socket, tc.pids))
 			require.Equal(t, tc.wantSignal, signalled, "only a server bound to the missing socket is signalled")
 			if !tc.watches {
 				require.Less(t, time.Since(start), 10*time.Second, "nothing was left to watch, so the answer comes at once")
@@ -169,7 +169,7 @@ func TestTmuxSocketClaimedLogsEachSignal(t *testing.T) {
 	info := &logtest.Buffer{}
 	aflog.CaptureOutput(t, aflog.InfoLog, "INFO:", info)
 
-	tmuxSocketClaimed(socket, []int{elsewhere, gone, owner, tableOwner})
+	tmuxSocketClaimedForCandidates(socket, []int{elsewhere, gone, owner, tableOwner})
 
 	var lines []string
 	for _, line := range strings.Split(info.String(), "\n") {
@@ -188,9 +188,9 @@ func TestTmuxSocketClaimedLogsEachSignal(t *testing.T) {
 	logged := info.String()
 	require.Contains(t, logged, "tmux server pid 9102 is bound to /elsewhere/a, /elsewhere/b instead, per its own sockets read one by one, so it is ruled out and not signalled")
 	require.Contains(t, logged, "tmux server pid 9103 exited while its sockets were read, so it is ruled out and not signalled")
-	require.Equal(t, 4, strings.Count(logged, "asked by TestTmuxSocketClaimedLogsEachSignal")+
+	require.Equal(t, 5, strings.Count(logged, "asked by TestTmuxSocketClaimedLogsEachSignal")+
 		strings.Count(logged, "asked by github.com/sachiniyer/agent-factory/session/tmux.TestTmuxSocketClaimedLogsEachSignal"),
-		"every line names the caller")
+		"every line names the caller — the two signals, the two rule-outs, and the sweep summary")
 }
 
 // The refusal names every candidate the probe could not rule out, and only
@@ -212,10 +212,10 @@ func TestPossibleSocketOwners(t *testing.T) {
 			return socketBindingUnresolved, ""
 		}
 	})
-	servers, unidentified := possibleSocketOwners("/tmp/tmux-1000/default", []int{0, notServer, elsewhere, unresolved, owner, gone, tableOwner})
+	servers, unidentified := possibleSocketOwnersForCandidates("/tmp/tmux-1000/default", []int{0, notServer, elsewhere, unresolved, owner, gone, tableOwner})
 	require.Equal(t, []int{unresolved, owner, tableOwner}, servers)
 	require.Equal(t, []int{0, notServer}, unidentified)
-	servers, unidentified = possibleSocketOwners("/tmp/tmux-1000/default", []int{elsewhere, gone})
+	servers, unidentified = possibleSocketOwnersForCandidates("/tmp/tmux-1000/default", []int{elsewhere, gone})
 	require.Empty(t, servers)
 	require.Empty(t, unidentified)
 }
@@ -601,7 +601,7 @@ func TestSocketAbsentProbeKeepsAnOwnerBehindADeletedLink(t *testing.T) {
 	require.Equal(t, socketAbsent, classifyNoServerDiagnostic(diagnostic), "fixture: %q", diagnostic)
 	require.False(t, NoServerRunning(err),
 		"the live server may own the socket through the deleted alias: an uncertain comparison never answers unclaimed")
-	servers, _ := possibleSocketOwners(aliasSock, []int{server})
+	servers, _ := possibleSocketOwnersForCandidates(aliasSock, []int{server})
 	require.Equal(t, []int{server}, servers, "the server behind the deleted alias is a possible owner, never ruled out")
 }
 
@@ -644,7 +644,7 @@ func TestSocketAbsentProbeRulesOutAServerBoundThroughADeletedLink(t *testing.T) 
 	require.Equal(t, socketAbsent, classifyNoServerDiagnostic(diagnostic), "fixture: %q", diagnostic)
 	require.True(t, NoServerRunning(err),
 		"a verbatim-bound server's recorded path stays literal through the deleted link: a certain mismatch rules it out, as on master")
-	servers, _ := possibleSocketOwners(realSock, []int{server})
+	servers, _ := possibleSocketOwnersForCandidates(realSock, []int{server})
 	require.Empty(t, servers, "no spelling reaches that server and SIGUSR1 cannot recreate its socket: provably elsewhere")
 }
 

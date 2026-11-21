@@ -138,12 +138,12 @@ func TestPreSpawnProbeTreatsSocketMissingAsAbsentRegardlessOfServerCheck(t *test
 // answering unknown makes its retrying caller loop (TestDeleteTabConsentEvidence
 // hung on every OS). It reaches its answer from tmux's reply alone.
 func TestPreSpawnProbeNeverConsultsTheServerCheck(t *testing.T) {
-	prev := tmuxServerProcessPIDs
-	tmuxServerProcessPIDs = func() []int {
+	prev := socketOwnerSweep
+	socketOwnerSweep = func(string) socketSweep {
 		t.Error("the pre-spawn probe consulted the live-server check; it must answer from tmux's reply alone")
-		return []int{0}
+		return socketSweep{unprobed: true}
 	}
-	t.Cleanup(func() { tmuxServerProcessPIDs = prev })
+	t.Cleanup(func() { socketOwnerSweep = prev })
 
 	_, known := probeSession(socketMissingExecutor(t), "af_new_agent")
 	require.True(t, known)
