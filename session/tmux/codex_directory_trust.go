@@ -153,18 +153,23 @@ type codexTrustLine struct {
 	end     int
 	src     int
 	painted int
+	budget  bool
 }
 
 // codexTrustPane is the pane compacted for matching plus the per-line facts
 // the row matches need back: flat is each non-blank line's whitespace-stripped
 // text concatenated, starts the flat offset at which each line's text begins,
-// and width the widest painted line that shows a wrap budget — one carrying a
-// breakable point, so its length is evidence of the width paragraphs wrapped
-// at rather than of an unbreakable token's own length. A line that is one
-// token — an overlong path, a config name, an option's continuation word —
-// overflows where a wrap would split it, and counting it would read a wider
-// pane than the wraps on screen (#7735's error variant carries
-// "features.fast_mode=true" twenty-five cells wide on a twelve-column pane).
+// and width the wrap budget the matcher derives from the modal's own region —
+// the widest painted line there that carries a breakable point, so its length
+// is evidence of the width paragraphs wrapped at rather than of an
+// unbreakable token's own length. A line that is one token — an overlong
+// path, a config name, an option's continuation word — overflows where a
+// wrap would split it, and counting it would read a wider pane than the
+// wraps on screen (#7735's error variant carries "features.fast_mode=true"
+// twenty-five cells wide on a twelve-column pane). And the region matters:
+// the capture is taken with -J, which rejoins wrapped output into lines
+// wider than the pane, so evidence above the modal would inflate the budget
+// and unexplain the wraps a real narrow modal paints.
 type codexTrustPane struct {
 	flat   string
 	starts []int
@@ -187,12 +192,10 @@ func compactCodexTrustPane(content string) codexTrustPane {
 		if stripped == "" {
 			continue
 		}
-		painted := utf8.RuneCountInString(line)
-		if strings.IndexFunc(strings.TrimSpace(line), unicode.IsSpace) >= 0 && painted > p.width {
-			p.width = painted
-		}
 		p.lines = append(p.lines, codexTrustLine{
-			start: b.Len(), end: b.Len() + len(stripped), src: i, painted: painted,
+			start: b.Len(), end: b.Len() + len(stripped), src: i,
+			painted: utf8.RuneCountInString(line),
+			budget:  strings.IndexFunc(strings.TrimSpace(line), unicode.IsSpace) >= 0,
 		})
 		p.starts = append(p.starts, b.Len())
 		b.WriteString(stripped)
@@ -280,20 +283,38 @@ func (p codexTrustPane) wrapExplained(from, to int) bool {
 	return joined > p.width
 }
 
-// codexTrustQuestionBefore reports whether the question anchor's LAST
-// line-anchored occurrence precedes `before` — the same occurrence the
-// line-exact predicate used, whose per-line scan kept the last matching row.
-// Any occurrence is enough where a real modal puts its question, but only
-// the last one tells a question row the modal never paints — repeated
+// lastCodexTrustQuestionIndex returns the flat offset of the question
+// anchor's LAST line-anchored occurrence, or -1 — the same occurrence the
+// line-exact predicate used, whose per-line scan kept the last matching
+// row. Any occurrence is enough where a real modal puts its question, but
+// only the last one tells a question row the modal never paints — repeated
 // between the second option and the footer, for instance — apart from the
-// one the modal paints where it belongs (#7735).
-func codexTrustQuestionBefore(p codexTrustPane, question string, before int) bool {
+// one the modal paints where it belongs (#7735). It also marks where the
+// modal's own region begins for the wrap budget.
+func lastCodexTrustQuestionIndex(p codexTrustPane, question string) int {
 	for idx := strings.LastIndex(p.flat, question); idx >= 0; idx = strings.LastIndex(p.flat[:idx], question) {
 		if slices.Contains(p.starts, idx) {
-			return idx < before
+			return idx
 		}
 	}
-	return false
+	return -1
+}
+
+// regionWidth returns the widest budget-evidencing line in lines[from:] —
+// the wrap budget the modal's own rows imply. A modal's question paragraph
+// and error text wrap at the pane's width, so their longest breakable
+// fragment measures it; lines above the question are earlier output, which
+// -J rejoins into single lines wider than the pane, and letting them set
+// the budget would make a real modal's wraps look unexplained and leave a
+// complete modal unanswered.
+func (p codexTrustPane) regionWidth(from int) int {
+	width := 0
+	for _, l := range p.lines[from:] {
+		if l.budget && l.painted > width {
+			width = l.painted
+		}
+	}
+	return width
 }
 
 // codexDirectoryTrustCompleteModal reports whether content shows a COMPLETE
@@ -317,6 +338,15 @@ func codexDirectoryTrustCompleteModal(content string) *codexDirectoryTrustWordin
 		if w.affirmative == "" {
 			continue
 		}
+		qi := lastCodexTrustQuestionIndex(p, w.question)
+		if qi < 0 {
+			continue
+		}
+		// The wrap budget is the modal's own region: every line at or below
+		// the question is a row the modal painted at the pane's width,
+		// while output above it can rejoin wider than the pane under -J.
+		line, _ := slices.BinarySearch(p.starts, qi)
+		p.width = p.regionWidth(line)
 		sy := lastCodexTrustRow(p, []string{w.affirm}, len(p.flat))
 		if sy < 0 {
 			continue
@@ -338,7 +368,7 @@ func codexDirectoryTrustCompleteModal(content string) *codexDirectoryTrustWordin
 		if fi < 0 {
 			continue
 		}
-		if codexTrustQuestionBefore(p, w.question, sy) {
+		if qi < sy {
 			return w
 		}
 	}
