@@ -1037,6 +1037,10 @@ func TestDockerAccount_RejectsIdentityEnvInCombinedShortOptions(t *testing.T) {
 // whether a later `v` or `e` is an option or part of that character's value —
 // so it refuses and names the argument rather than guessing. A refusal is an
 // annoyance with an obvious remedy; an accept is a credential-boundary breach.
+// #7726 extended the same rule to an unknown shorthand with NOTHING guarded
+// behind it: at the end of a cluster it could still swallow the NEXT argument
+// as its value, and docker rejects it outright either way — walking past
+// reopens the bypass.
 func TestDockerAccount_RefusesUnreadableCombinedShortOptions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1046,6 +1050,10 @@ func TestDockerAccount_RefusesUnreadableCombinedShortOptions(t *testing.T) {
 		{name: "unknown option before a harmless volume", args: []string{"-Xv", "/tmp/cache:/af-account-cache"}},
 		{name: "unknown option before an env", args: []string{"-Ze", "CODEX_API_KEY=repo-identity"}},
 		{name: "unknown option after a boolean", args: []string{"-itYv", "/tmp/other:/af-account"}},
+		// An unknown shorthand ending the cluster could swallow the NEXT
+		// argument as its value (docker itself refuses it either way), so it
+		// refuses rather than walking on (#7726).
+		{name: "unknown option trailing a boolean cluster", args: []string{"-itX", "-e", "CODEX_API_KEY=repo"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1066,7 +1074,6 @@ func TestDockerAccount_AllowsCombinedShortOptionsItCanRead(t *testing.T) {
 		args []string
 	}{
 		{name: "boolean cluster", args: []string{"-itd"}},
-		{name: "boolean cluster with an unknown trailer", args: []string{"-itX"}},
 		{name: "cluster mounting a similarly named path", args: []string{"-itv", "/tmp/cache:/af-account-cache"}},
 		{name: "cluster mounting a similarly named path inline", args: []string{"-itv/tmp/cache:/af-account-cache"}},
 		{name: "cluster setting a harmless variable", args: []string{"-ite", "TZ=UTC"}},
