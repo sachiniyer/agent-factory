@@ -261,15 +261,34 @@ func (w *sandboxWorkspace) seedFromBundle(timeout time.Duration) error {
 	}
 	// git refuses to fetch into the branch a non-bare repo has checked out, and
 	// the clone has the origin's default branch checked out — the very branch a
-	// session working on it brings (#5685). Detach HEAD first: the clone was made
-	// a moment ago and is clean, so this moves nothing on disk, and the session's
-	// worktree is created later by the agent-server on its own branch. An unborn
-	// HEAD (empty origin) cannot be detached and has no checkout to protect, so
-	// --update-head-ok is the safe spelling there.
+	// session working on it brings (#5685). When the clone's HEAD is born, detach
+	// HEAD first: the clone was made a moment ago and is clean, so this moves
+	// nothing on disk, and the session's worktree is created later by the
+	// agent-server on its own branch.
+	//
+	// An unborn HEAD (empty origin) needs the --update-head-ok spelling: git
+	// treats an unborn branch as occupied, so a plain fetch into it is refused
+	// outright. But that is NOT the "no checkout to protect" case an earlier
+	// comment claimed — if the seed brings the very branch HEAD is unborn on
+	// (the #5685 case), the fetch "borns" it: HEAD comes to point at the seeded
+	// commit while the index and worktree still reflect the empty pre-seed
+	// state, and the branch is left checked out in the clone's own tree. The
+	// downstream `git worktree add <branch>` (session/git/worktree_ops.go) is
+	// then refused with "'<branch>' is already used by worktree at
+	// '.../workspace'", and the staged deletions the stale index shows mean a
+	// later commit in the clone silently empties the branch. So after that
+	// fetch, apply the same detach + reset cleanup the born arm gets — but ONLY
+	// once HEAD is actually born: seeding a non-matching branch leaves HEAD
+	// unborn, where `checkout --detach` fails ("You are on a branch yet to be
+	// born") and the pre-seed state is already correct. `reset --hard` resyncs
+	// the index/worktree to the seeded commit, clearing the phantom staged
+	// deletions, and detaching frees the branch for the agent-server's later
+	// `worktree add`.
 	ws := shellQuote(w.WorkspacePath())
 	script := fmt.Sprintf(
 		"if git -C %[1]s rev-parse -q --verify HEAD >/dev/null; then git -C %[1]s checkout -q --detach && git -C %[1]s fetch %[2]s %[3]s; "+
-			"else git -C %[1]s fetch --update-head-ok %[2]s %[3]s; fi && rm -f %[2]s",
+			"else git -C %[1]s fetch --update-head-ok %[2]s %[3]s && if git -C %[1]s rev-parse -q --verify HEAD >/dev/null; then git -C %[1]s checkout -q --detach && git -C %[1]s reset -q --hard; fi; "+
+			"fi && rm -f %[2]s",
 		ws, shellQuote(dst), strings.Join(args, " "))
 	if out, err := w.shell.Run(timeout, script, nil, true); err != nil {
 		return fmt.Errorf("seeding the remote workspace from the move bundle failed: %s: %w", strings.TrimSpace(string(out)), err)
