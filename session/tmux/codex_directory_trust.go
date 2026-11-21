@@ -111,10 +111,32 @@ var codexDirectoryTrustWordings = []codexDirectoryTrustWording{
 // anywhere but at its end. A settled tail may end on the footer (the pane
 // lost the question), and an error paragraph may carry any text before it —
 // but a footer followed by more content means the modal finished painting
-// and output continued: quoted transcript, not a live tail.
+// and output continued: quoted transcript, not a live tail. Content after a
+// footer match is output only when it cannot still be the remainder of a
+// longer footer that shares the match as a prefix — "… and create a
+// sandbox..." mid-paint, or already whole at the end.
 func codexTrustFooterInside(rest string, footers []string) bool {
-	for _, f := range footers {
-		if idx := strings.Index(rest, f); idx >= 0 && idx+len(f) < len(rest) {
+	for i := 0; i < len(rest); i++ {
+		for _, f := range footers {
+			if !strings.HasPrefix(rest[i:], f) {
+				continue
+			}
+			rem := rest[i+len(f):]
+			if rem == "" || codexTrustFooterCanContinue(rem, f, footers) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// codexTrustFooterCanContinue reports whether rem could still become the
+// rest of a longer footer that has f as a prefix — the tail of the sandbox
+// footer still painting, not output after a finished row.
+func codexTrustFooterCanContinue(rem, f string, footers []string) bool {
+	for _, g := range footers {
+		if len(g) > len(f) && strings.HasPrefix(g, f) && strings.HasPrefix(g[len(f):], rem) {
 			return true
 		}
 	}
