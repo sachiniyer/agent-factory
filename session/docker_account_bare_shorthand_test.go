@@ -133,17 +133,19 @@ func TestDockerAccount_RefusesIdentityEnvBehindBareValueShorthand(t *testing.T) 
 // behind the swallowed -v must still be examined on its own and refused.
 func TestDockerAccount_RefusesMountBehindBareValueShorthand(t *testing.T) {
 	// -l swallows -v: -v is the label value and installs NO mount. The guard
-	// must NOT refuse this (over-refusal): Docker honors no mount here.
-	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-l", "-v", "/tmp/evil:/af-account"}, "codex"),
+	// must NOT refuse this (over-refusal): Docker honors no mount here. The
+	// fixture stops at the swallowed token — a bare spec after it would be a
+	// positional, refused for its own reason (#7733 R1).
+	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-l", "-v"}, "codex"),
 		"a -v swallowed by a bare -l is the label's value and installs no mount")
 
 	// -v swallows the next arg as its value: a following --mount is NOT a fresh
 	// mount (it is -v's value), so no mount lands and the guard must not refuse.
-	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-v", "--mount", "type=bind,src=/tmp/other,dst=/af-account"}, "codex"),
+	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-v", "--mount"}, "codex"),
 		"a --mount swallowed by a bare -v is -v's value, not a fresh mount")
 
 	// -h swallows --mount: --mount is -h's value and installs no mount.
-	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-h", "--mount", "type=bind,src=/tmp/other,dst=/af-account"}, "codex"),
+	require.NoErrorf(t, validateAccountDockerRunArgs([]string{"-h", "--mount"}, "codex"),
 		"a --mount swallowed by a bare -h installs no mount")
 
 	// A REAL --mount written AFTER the bare shorthand's consumed value must
@@ -152,7 +154,7 @@ func TestDockerAccount_RefusesMountBehindBareValueShorthand(t *testing.T) {
 	// must catch it. Before the fix, -l was skipped and -v re-read as a mount
 	// (refusing the wrong spec); after the fix, -v is consumed as -l's value
 	// and the real --mount is examined and refused.
-	require.Errorf(t, validateAccountDockerRunArgs([]string{"-l", "-v", "label-value", "--mount", "type=bind,src=/tmp/other,dst=/af-account"}, "codex"),
+	require.Errorf(t, validateAccountDockerRunArgs([]string{"-l", "-v", "--mount", "type=bind,src=/tmp/other,dst=/af-account"}, "codex"),
 		"a real --mount after a bare shorthand's consumed value must be examined and refused")
 }
 

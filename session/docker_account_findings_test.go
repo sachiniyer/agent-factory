@@ -1037,6 +1037,10 @@ func TestDockerAccount_RejectsIdentityEnvInCombinedShortOptions(t *testing.T) {
 // whether a later `v` or `e` is an option or part of that character's value —
 // so it refuses and names the argument rather than guessing. A refusal is an
 // annoyance with an obvious remedy; an accept is a credential-boundary breach.
+// #7726 extended the same rule to an unknown shorthand with NOTHING guarded
+// behind it: at the end of a cluster it could still swallow the NEXT argument
+// as its value, and docker rejects it outright either way — walking past
+// reopens the bypass.
 func TestDockerAccount_RefusesUnreadableCombinedShortOptions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1046,6 +1050,10 @@ func TestDockerAccount_RefusesUnreadableCombinedShortOptions(t *testing.T) {
 		{name: "unknown option before a harmless volume", args: []string{"-Xv", "/tmp/cache:/af-account-cache"}},
 		{name: "unknown option before an env", args: []string{"-Ze", "CODEX_API_KEY=repo-identity"}},
 		{name: "unknown option after a boolean", args: []string{"-itYv", "/tmp/other:/af-account"}},
+		// An unknown shorthand ending the cluster could swallow the NEXT
+		// argument as its value (docker itself refuses it either way), so it
+		// refuses rather than walking on (#7726).
+		{name: "unknown option trailing a boolean cluster", args: []string{"-itX", "-e", "CODEX_API_KEY=repo"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1066,17 +1074,17 @@ func TestDockerAccount_AllowsCombinedShortOptionsItCanRead(t *testing.T) {
 		args []string
 	}{
 		{name: "boolean cluster", args: []string{"-itd"}},
-		{name: "boolean cluster with an unknown trailer", args: []string{"-itX"}},
 		{name: "cluster mounting a similarly named path", args: []string{"-itv", "/tmp/cache:/af-account-cache"}},
 		{name: "cluster mounting a similarly named path inline", args: []string{"-itv/tmp/cache:/af-account-cache"}},
 		{name: "cluster setting a harmless variable", args: []string{"-ite", "TZ=UTC"}},
-		// -u takes a value, so Docker reads the `v` as the START of that value,
-		// not as --volume: `docker run -uv /tmp/evil:/af-account` fails with
-		// "invalid reference format" because the path became the IMAGE name,
-		// and nothing is mounted (measured on Docker 29.4.0). af reads it the
-		// same way rather than refusing an argument Docker never acts on.
-		{name: "value-taking option consumes the v", args: []string{"-uv", "/tmp/other:/af-account"}},
-		{name: "value-taking option consumes the e", args: []string{"-ue", "CODEX_API_KEY=repo-identity"}},
+		// -u takes a value, so Docker reads the `v`/`e` as the START of that
+		// value, not as --volume or --env: `docker run -uv img` mounts
+		// nothing (measured on Docker 29.4.0), and a spec-looking token after
+		// the cluster is a positional refused for its own reason (#7733 R1).
+		// af reads the cluster the same way — the guarded letter is inside
+		// -u's value and the next option is still parsed as an option.
+		{name: "value-taking option consumes the v", args: []string{"-uv", "--name", "x"}},
+		{name: "value-taking option consumes the e", args: []string{"-ue", "--name", "x"}},
 		{name: "inline user value containing guarded letters", args: []string{"-udev"}},
 		{name: "inline workdir value containing guarded letters", args: []string{"-w/workspace/service"}},
 		{name: "inline label value containing guarded letters", args: []string{"-lenv=prod"}},
@@ -1122,10 +1130,13 @@ func TestDockerAccount_ClusterScanDoesNotSkipTheNextArgument(t *testing.T) {
 	// The cluster's swallowed value is NOT a real flag, so a mount-shaped token
 	// that -ie consumes as its value (per pflag) installs nothing and the guard
 	// must NOT refuse it. The pre-fix non-consumptive walk re-read that value
-	// as a fresh --mount and refused a config Docker never mounts.
+	// as a fresh --mount and refused a config Docker never mounts. A bare
+	// spec-shaped token after the cluster would be a positional, refused for
+	// its own reason (#7733 R1) — so the rows keep the mount-shaped token AS
+	// the swallowed value and end on real options.
 	allowed := [][]string{
-		{"-ie", "--mount", "type=bind,src=/tmp/other,dst=/af-account"},
-		{"-ie", "--mount", "type=bind,src=/tmp/other,DST=/af-account/.config"},
+		{"-ie", "--mount", "-e", "TZ=UTC"},
+		{"-ie", "--mount=type=bind,src=/tmp/other,dst=/af-account"},
 	}
 	for _, args := range allowed {
 		t.Run("allowed/"+strings.Join(args, " "), func(t *testing.T) {
@@ -1239,9 +1250,11 @@ func TestDockerAccount_RejectsVolumesFrom(t *testing.T) {
 // carrying `olumes-from`, which installs no donor volumes at all — measured,
 // `docker create -volumes-from donor …` fails with "Unable to find image
 // 'donor:latest' locally", because `donor` became the IMAGE. af reads it the
-// same way, as an ordinary -v value that names no protected path.
+// same way, as an ordinary -v value that names no protected path — and the
+// `donor` positional itself is refused like any other (#7733 R1), so the
+// fixture stops at the cluster.
 func TestDockerAccount_AllowsSingleDashVolumesFrom(t *testing.T) {
-	require.NoError(t, validateAccountDockerRunArgs([]string{"-volumes-from", "repo-donor"}, "codex"))
+	require.NoError(t, validateAccountDockerRunArgs([]string{"-volumes-from"}, "codex"))
 }
 
 // TestDockerAccount_RefusesEveryMountInstallingOption is the anti-recurrence
@@ -1332,10 +1345,11 @@ func TestDockerAccount_AllowsHarmlessDeviceTargets(t *testing.T) {
 		{name: "similarly named path", args: []string{"--device", "/dev/sda:/af-account-cache/disk"}},
 		{name: "another similarly named path", args: []string{"--device", "/dev/sda:/af-accountant/disk"}},
 		{name: "inline spelling", args: []string{"--device=/dev/snd"}},
-		// pflag reads a single dash as a shorthand cluster, so `-device X` is
-		// `-d -e vice` and X becomes the IMAGE — measured: Docker fails with
-		// "invalid reference format" and installs no device at all.
-		{name: "single dash is not the option", args: []string{"-device", "/dev/zero:/af-account/.config/planted"}},
+		// pflag reads a single dash as a shorthand cluster, so `-device` is
+		// `-d -e vice`, never the device option — and a bare spec after it is
+		// a positional refused for its own reason (#7733 R1). The real flag
+		// after the cluster proves -device consumed nothing.
+		{name: "single dash is not the option", args: []string{"-device", "-e", "TZ=UTC"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -786,17 +786,17 @@ func dockerRunArgsEnvNames(args []string) []string {
 			checkEnv(strings.TrimPrefix(arg, "-e="))
 		case strings.HasPrefix(arg, "-e") && len(arg) > 2:
 			checkEnv(strings.TrimPrefix(arg, "-e"))
-		case len(arg) == 2 && arg[0] == '-' && arg[1] != '-':
-			// pflag: a bare value-taking short option consumes the NEXT argv
-			// element as its value, so Docker never parses that token as an
-			// option of its own. The earlier cases handle a bare -e itself;
-			// this consumes the value any OTHER value-taking shorthand swallows
-			// so the swallowed token — typically a real -e/--env=NAME=... —
-			// is not re-walked as a fresh env flag and the extractor reports
-			// the REAL NAME rather than the phantom "--env" strings.Cut would
-			// leave. Booleans and unknown shorthands fall through without
-			// consuming (the fail-closed side), leaving the next arg examined.
-			if _, value := dockerRunValueShorthands[arg[1]]; value && index+1 < len(args) {
+		case strings.HasPrefix(arg, "--") || (len(arg) == 2 && arg[0] == '-'):
+			// The extractor shares the consumption half of the pflag model —
+			// a bare value-taking option (--label, -l, or a mount option this
+			// path does not track) swallows the NEXT argv element whatever
+			// its shape, so a following -e is its value and never a flag af
+			// sees (#7726). Without consuming, the walk re-reads the
+			// swallowed -e as a fresh env flag and reports the phantom name
+			// strings.Cut leaves on its "value" — the real --env=NAME=...
+			// behind it. The refusal half is the validators' and runs before
+			// this warning layer ever sees the list.
+			if dockerRunOptionConsumesNext(arg) && index+1 < len(args) {
 				index++
 			}
 		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
@@ -810,6 +810,11 @@ func dockerRunArgsEnvNames(args []string) []string {
 			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
 				index++
 			}
+		default:
+			// A non-option argument: `docker run` parses non-interspersed,
+			// so option parsing ends here and nothing after this token is a
+			// flag — including any -e that follows it (#7733 R1).
+			return names
 		}
 	}
 	return names

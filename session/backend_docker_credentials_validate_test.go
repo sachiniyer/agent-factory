@@ -182,10 +182,28 @@ func TestDockerCredentialRunArgs_RefusesUnreadableCombinedShortOptions(t *testin
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "combined short option")
 	})
-	t.Run("unknown before volume is allowed", func(t *testing.T) {
+	t.Run("unknown before volume is refused", func(t *testing.T) {
 		// A -v behind an unknown option cannot shadow af's single-file
-		// credential mount, so the credential guard does not refuse it.
-		require.NoError(t, validateCredentialDockerRunArgs([]string{"-Xv", "/tmp/cache:/workspace"}, tmux.ProgramCodex))
+		// credential mount — but the unknown option itself could take the
+		// rest of the cluster or the NEXT argument as its value, and docker
+		// rejects it outright either way, so #7726 refuses rather than
+		// walking past.
+		err := validateCredentialDockerRunArgs([]string{"-Xv", "/tmp/cache:/workspace"}, tmux.ProgramCodex)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "combined short option")
+	})
+	t.Run("unknown ending the cluster is refused", func(t *testing.T) {
+		// Trailing or alone, an unknown shorthand could still swallow the
+		// NEXT argument as its value — docker refuses it either way, so the
+		// guard does too rather than walking on (#7726).
+		for _, args := range [][]string{
+			{"-tX", "-e", "GH_HOST=evil"},
+			{"-X"},
+		} {
+			err := validateCredentialDockerRunArgs(args, tmux.ProgramCodex)
+			require.Errorf(t, err, "an unknown shorthand was walked past: %v", args)
+			require.Contains(t, err.Error(), "docker.run_args")
+		}
 	})
 }
 
@@ -200,7 +218,7 @@ func TestDockerCredentialRunArgs_AllowsHarmlessCombinedShortOptions(t *testing.T
 		{"-itv/tmp/cache:/workspace"},
 		{"-tv", "/tmp/cache:/root/.codex"},
 		{"-ite", "TZ=UTC"},
-		{"-ue", "CODEX_HOME=repo"}, // -u takes a value, so the e is part of it
+		{"-ue", "--name", "x"}, // -u takes a value, so the e is part of it
 		{"-p8080:80"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
@@ -488,7 +506,7 @@ func TestDockerCredentialRunArgs_AllowsHarmlessCombinedShortOptionsForEmptyAccou
 		{tmux.ProgramOpencode, []string{"-itv", "/tmp/cache:/root/.local/share/opencode"}},
 		{tmux.ProgramOpencode, []string{"-ite", "TZ=UTC"}},
 		{tmux.ProgramOpencode, []string{"-ite", "AZURE_OPENAI_API_VERSION=2024-10-01-preview"}},
-		{tmux.ProgramOpencode, []string{"-ue", "AMP_API_KEY=repo"}}, // -u consumes its value, so this is not -e
+		{tmux.ProgramOpencode, []string{"-ue", "--name", "x"}}, // -u consumes its value, so this is not -e
 		{tmux.ProgramAmp, []string{"-itd"}},
 		{tmux.ProgramAmp, []string{"-itv", "/tmp/cache:/root/.config/amp"}},
 		{tmux.ProgramAmp, []string{"-ite", "TZ=UTC"}},

@@ -332,19 +332,26 @@ func validateCredentialDockerRunArgs(args []string, agent string) error {
 			if err := checkEnv(strings.TrimPrefix(arg, "-e")); err != nil {
 				return err
 			}
-		case len(arg) == 2 && arg[0] == '-' && arg[1] != '-':
-			// pflag: a bare value-taking short option consumes the NEXT argv
-			// element as its value, so Docker never parses that token as an
-			// option of its own. The earlier cases handle a bare -e itself
-			// (which has an env value to check); this consumes the value any
-			// OTHER value-taking shorthand (-l, -h, -w, -p, -u, -m, -a, -c, -v)
-			// swallows, so the outer walk does not mis-read that token —
-			// typically a real -e/--env=NAME=... — as a fresh env flag and
-			// check the phantom NAME strings.Cut leaves on "--env". A boolean
-			// (-i, -t, -d, -q, -P) and any unknown shorthand fall through
-			// without consuming, leaving the next arg examined on its own
-			// (the fail-closed side).
-			if _, value := dockerRunValueShorthands[arg[1]]; value && index+1 < len(args) {
+		case strings.HasPrefix(arg, "--") || (len(arg) == 2 && arg[0] == '-'):
+			// Every remaining flag spelling pflag knows: a `--name` or
+			// `--name=value` long option, or a bare two-character `-x`
+			// shorthand. The guarded spellings above already claimed the env
+			// options; what remains still needs the consumption half of the
+			// pflag model — a bare value-taking option (--label, --user, -l,
+			// -u, or a mount option like --volume this path does not check)
+			// swallows the NEXT argv element whatever its shape, so a
+			// following -e is its value and never a flag af sees — the
+			// swallow #7726 measured. dockerRunOptionConsumption reports the
+			// consumption so the outer index skips the swallowed token, and
+			// refuses the shapes af cannot model: an option not in the
+			// `docker run` table in a position where it could take a value,
+			// and the `--` terminator.
+			consume, err := dockerRunOptionConsumption(arg,
+				"the credential-mount session's "+agent+" agent")
+			if err != nil {
+				return err
+			}
+			if consume && index+1 < len(args) {
 				index++
 			}
 		case len(arg) > 2 && arg[0] == '-' && arg[1] != '-':
@@ -371,6 +378,14 @@ func validateCredentialDockerRunArgs(args []string, agent string) error {
 			if dockerClusterConsumesNextArg(arg) && index+1 < len(args) {
 				index++
 			}
+		default:
+			// Everything the option-shaped cases did not claim is a
+			// non-option argument to pflag — and `docker run` parses
+			// non-interspersed, so it would end option parsing and become
+			// the image, turning af's own trailing options into the
+			// container's Cmd (#7733 R1).
+			return dockerRunArgsPositionalError(arg,
+				"the credential-mount session's "+agent+" agent")
 		}
 	}
 	return nil

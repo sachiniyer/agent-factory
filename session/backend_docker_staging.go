@@ -124,6 +124,15 @@ func (p *dockerProvisioner) preparePayloadDelivery() {
 // daemon with a different filesystem view) — and its failure takes the same
 // one-shot cp retry.
 func (p *dockerProvisioner) runPayloadContainer() error {
+	// The run_args option-shape gate: a token pflag treats as a non-option
+	// argument would end docker's parsing and turn every option af appends
+	// after run_args into container Cmd words (#7733 R1). The account and
+	// credential-mount validators refuse the same shapes on their paths;
+	// this check is the one every session — plain sessions included —
+	// shares before `docker run`.
+	if err := validateDockerRunArgsShape(p.runArgs); err != nil {
+		return dockerStepErr(err, dockerOpLocal)
+	}
 	if err := p.refuseEnclosingRunArgsMounts(); err != nil {
 		// A preflight configuration refusal — no docker run happened, so the
 		// engine wrote nothing. Classifying it local keeps a full data root's
@@ -175,139 +184,6 @@ func (p *dockerProvisioner) stagingDestinations() []string {
 		dsts = append(dsts, dockerPolicyPath)
 	}
 	return dsts
-}
-
-// runArgsMountDestinations extracts (entry, destination) pairs for every
-// mount-shaped run_args token: -v/--volume specs (the second ':'-field, or
-// the only field for an anonymous volume), --mount's target/destination/dst
-// key, and --tmpfs's mount point. Attached and combined shorthand spellings
-// (-v/host:/dst, -tv /host:/dst) are walked with the account guard's pflag
-// machinery — an ambiguous cluster is an error rather than a guess.
-func runArgsMountDestinations(runArgs []string) ([][2]string, error) {
-	var out [][2]string
-	for i := 0; i < len(runArgs); i++ {
-		a := runArgs[i]
-		var spec, entry string
-		var isMount, isTmpfs bool
-		next := func() string {
-			i++
-			if i < len(runArgs) {
-				return runArgs[i]
-			}
-			return ""
-		}
-		switch {
-		case a == "-v" || a == "--volume":
-			spec = next()
-			entry = a + " " + spec
-		case strings.HasPrefix(a, "-v=") || strings.HasPrefix(a, "--volume="):
-			spec = strings.SplitN(a, "=", 2)[1]
-			entry = a
-		case a == "--mount":
-			spec = next()
-			entry = a + " " + spec
-			isMount = true
-		case strings.HasPrefix(a, "--mount="):
-			spec = strings.SplitN(a, "=", 2)[1]
-			entry = a
-			isMount = true
-		case a == "--tmpfs":
-			spec = next()
-			entry = a + " " + spec
-			isTmpfs = true
-		case strings.HasPrefix(a, "--tmpfs="):
-			spec = strings.SplitN(a, "=", 2)[1]
-			entry = a
-			isTmpfs = true
-		case len(a) == 2 && a[0] == '-' && a[1] != '-':
-			// pflag: a bare value-taking short option consumes the NEXT argv
-			// element as its value, so Docker never parses that token as a
-			// -v/--mount of its own. The -v case above already records a real
-			// bare -v mount; this consumes the value any OTHER value-taking
-			// shorthand (-l, -h, -w, -p, -u, -m, -a, -c, -e) swallows, so the
-			// outer walk does not mis-read that token — typically a real -v —
-			// as a fresh mount and record a destination Docker never installs
-			// (the over-refusal direction of the bare-shorthand bug). Booleans
-			// and unknown shorthands fall through without consuming.
-			if _, takesValue := dockerRunValueShorthands[a[1]]; takesValue {
-				_ = next() // consume the swallowed value; no mount to record
-			}
-			continue
-		case len(a) > 2 && a[0] == '-' && a[1] != '-':
-			// An attached value or a combined short option — Docker's pflag
-			// honors a -v inside either. Walk it with the account guard's
-			// cluster machinery, recording each -v's destination; an
-			// ambiguous shape fails closed rather than skipping a mount the
-			// refusal check cannot see.
-			if err := dockerCheckShorthandCluster(a, runArgs, i, "v",
-				func(_ byte, value string) error {
-					if dest := volumeSpecDest(value); dest != "" {
-						out = append(out, [2]string{a, dest})
-					}
-					return nil
-				},
-				"the bind-delivery path", "a -v"); err != nil {
-				return nil, err
-			}
-			// pflag: a cluster ending in a value-taking option consumes the
-			// NEXT argv element as that option's value; skip the swallowed
-			// token so the outer walk does not re-read it as a fresh mount.
-			// The cluster callback above already recorded any real -v inside
-			// the cluster, and an inline value (rest of cluster) consumes
-			// nothing, so this advance never skips a mount the refusal needs.
-			if dockerClusterConsumesNextArg(a) && i+1 < len(runArgs) {
-				_ = next()
-			}
-			continue
-		default:
-			continue
-		}
-		if spec == "" {
-			continue
-		}
-		dest := ""
-		switch {
-		case isMount:
-			// Docker reads --mount as one CSV record with case-folded keys —
-			// the same helpers the account-boundary guard uses.
-			for _, kv := range dockerMountFields(spec) {
-				if v, ok := dockerMountTarget(kv); ok {
-					dest = v
-				}
-			}
-		case isTmpfs:
-			dest = spec
-		default:
-			dest = volumeSpecDest(spec)
-		}
-		if dest != "" {
-			out = append(out, [2]string{entry, dest})
-		}
-	}
-	return out, nil
-}
-
-// volumeSpecDest reports the container path a -v spec mounts: the second
-// ':'-field for src:dst[:opts], or the only field for an anonymous volume.
-func volumeSpecDest(spec string) string {
-	fields := strings.Split(spec, ":")
-	if len(fields) > 1 {
-		return fields[1]
-	}
-	return fields[0]
-}
-
-// runArgsInheritMounts reports whether run_args carries --volumes-from in
-// either spelling. The single-dash form is not the option — pflag reads it as
-// -v carrying the value "olumes-from" — so only the double-dash spellings
-// count here.
-func runArgsInheritMounts(runArgs []string) bool {
-	for _, a := range runArgs {
-		if a == "--volumes-from" || strings.HasPrefix(a, "--volumes-from=") {
-			return true
-		}
-	}
-	return false
 }
 
 // refuseEnclosingRunArgsMounts refuses — before the container starts — any
