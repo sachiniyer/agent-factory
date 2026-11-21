@@ -290,12 +290,15 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 // mount the credential path's safety rests on. The account guard blocks those
 // for its own nested-path reason, which does not apply to a single-file mount.
 //
-// The refused set is credentialMountDeniedNames: the roster-derived union of
-// the identity, config-root, routing, and reasserted classes for the session's
-// agent (session/agent_credentials_env.go). Every mountable agent has a
-// non-empty set — the shared credential and routing names alone guarantee it —
-// so this guard is never a no-op on the roster the way #4454's account-only
-// table was for amp and opencode.
+// The refused set is credentialMountDeniedNames plus the loader prefix
+// family: the roster-derived union of the identity, config-root, routing,
+// reasserted, and loader classes for the session's agent
+// (session/agent_credentials_env.go), and every BASH_FUNC_<name>%% name —
+// the unbounded exported-function family bash imports — refused through
+// credentialMountDeniedReason's prefix rule rather than by map membership.
+// Every mountable agent has a non-empty set — the shared credential and
+// routing names alone guarantee it — so this guard is never a no-op on the
+// roster the way #4454's account-only table was for amp and opencode.
 func validateCredentialDockerRunArgs(args []string, agent string) error {
 	checkEnv := func(value string) error {
 		name, _, _ := strings.Cut(value, "=")

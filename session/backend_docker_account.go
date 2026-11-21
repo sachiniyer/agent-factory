@@ -326,8 +326,10 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 // runs IN the container. PATH resolves every bare command in af's root
 // provisioning execs (the mount-table probe's mkdir and cat, the chown
 // itself) and the agent's own executable, so `-e PATH=/workspace/.x:…`
-// would put repository binaries in front of all of them; the
-// dynamic-linker names inject a repository library into those programs
+// would put repository binaries in front of all of them; the loader names
+// — the set derived in agent_credentials_env_loader.go from glibc's
+// UNSECURE_ENVVARS and the shells' environment-import rules — make ld.so,
+// libc, or the shell those execs invoke load or run repo-chosen material
 // before any agent-side env filter exists. They are the same class #7529
 // R7 refuses on the credential-mount path, kept out of
 // accountDockerDeniedNames on purpose: that set also filters the
@@ -338,10 +340,7 @@ func accountDockerProgramChoiceReason(name string) (string, bool) {
 	if name == "PATH" {
 		return "it chooses which program every PATH-resolved command in the container runs — af's account provisioning execs and the agent's own executable — and af re-asserts the image's own PATH after run_args", true
 	}
-	if _, ok := credentialMountProgramLoaderNames[name]; ok {
-		return "it loads a repository-chosen library into the programs af runs in the container", true
-	}
-	return "", false
+	return credentialMountLoaderReason(name)
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will

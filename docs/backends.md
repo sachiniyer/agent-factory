@@ -245,18 +245,32 @@ user's real home and mounts it only if it exists, so:
     `GIT_ASKPASS`/`SSH_ASKPASS`), editor/pager names, af's own state and tmux
     names (`AF_*`, `AGENT_FACTORY_*`, `TMUX*`), and the endpoint names an
     agent's own `.env` loader can restore after the boundary (gemini's
-    `CODE_ASSIST_*` and `GOOGLE_*_BASE_URL`) — plus the program-choice names
-    `PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, and `LD_AUDIT`, for every agent
-    in the mount table above. These boundaries enforce it:
+    `CODE_ASSIST_*` and `GOOGLE_*_BASE_URL`) — plus the program-choice name
+    `PATH` and the loader names, derived from the consumers that read them:
+    every name in glibc's `UNSECURE_ENVVARS` (the strip list ld.so applies
+    to set-user-ID programs — `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`,
+    `GCONV_PATH`, `LOCPATH`, `NLSPATH`, `GLIBC_TUNABLES`, `LD_ORIGIN_PATH`,
+    `LD_PROFILE`, `LD_DEBUG_OUTPUT`, `TMPDIR`, `TZDIR`, the resolver inputs,
+    and the rest of the source list verbatim) and the environment-import
+    names of the shells af execs (`BASH_ENV`, `ENV`, `SHELLOPTS`,
+    `BASHOPTS`, `PS4`, and every `BASH_FUNC_<name>%%` bash would import as
+    a function definition), for every agent in the mount table above.
+    These boundaries enforce it:
 
     - At `docker run`: `docker.run_args` entries naming one are **refused**
       before the container starts — including `PATH`, `LD_PRELOAD`,
       `LD_LIBRARY_PATH`, and `LD_AUDIT`, which would otherwise let the repo
-      choose the programs af's in-container steps run and the libraries they
-      load (an audit module loaded by `LD_AUDIT` runs in-process in every
-      dynamically linked program at startup, exactly as a preloaded library
-      does). Every
-      credential-classified name the operator did not forward is defined
+      choose the programs af's in-container steps run and the libraries
+      they load (an audit module loaded by `LD_AUDIT` runs in-process in
+      every dynamically linked program at startup, exactly as a preloaded
+      library does). The rest of the derived set is refused on the same
+      terms: a repo `GCONV_PATH` loads repo gconv modules into those
+      programs, a repo `LOCPATH`/`NLSPATH` feeds them repo locale archives
+      and message catalogs, a repo `LD_DEBUG_OUTPUT`/`LD_PROFILE` makes
+      them write root-owned files, and a repo `BASH_ENV`, `SHELLOPTS`+`PS4`,
+      or `BASH_FUNC_cat%%` runs repo code in the provisioning shell on an
+      image whose `/bin/sh` is bash. Every credential-classified name the
+      operator did not forward is defined
       **and empty** in the container environment — so the image's own `ENV`
       and a workspace loader that fills only unset names find it already set
       to nothing. (Measured: gemini's workspace `.env` supplied
@@ -430,10 +444,11 @@ user's real home and mounts it only if it exists, so:
       the agent's own code and anything it loads can read the mounted file
       directly or redirect where its contents are sent. This includes the
       image's `Config.Env` `PATH` (which af re-asserts as the container's
-      `PATH`) and any `LD_PRELOAD`/`LD_LIBRARY_PATH`/`LD_AUDIT` the image
-      configures — all three are refused to `docker.run_args` but left at
-      the image's own values, because an image can already ship any binary
-      or library it wants on those paths.
+      `PATH`) and any loader names the image configures — every
+      `LD_PRELOAD`/`LD_LIBRARY_PATH`/`LD_AUDIT`/`GCONV_PATH`/`BASH_ENV` the
+      image sets is refused to `docker.run_args` but left at the image's own
+      value, because an image can already ship any binary or library it
+      wants on those paths.
     - **Workspace configuration, which is file content, not environment** —
       an `opencode.json`, a `.claude/` or `.gemini/` settings file (a
       `settings.json` `env` block included), or a loader that force-loads
@@ -538,15 +553,24 @@ only needs the workspace tooling:
   mount table cannot be read or understood, provisioning fails with an error
   naming it rather than chowning blind. `chown` runs with `-h` in either form so a symlink the image ships under `/root`
   is re-owned itself, not its target outside HOME. On an account session af
-  additionally refuses `docker.run_args` `PATH`, `LD_PRELOAD`,
-  `LD_LIBRARY_PATH`, and `LD_AUDIT` entries before `docker run` — they
-  would let the repo choose which program af's in-container provisioning
-  commands resolve to (the mount-table `cat` and `pwd`, the `chown`, the
-  agent's own executable) or which library every dynamically linked program
-  loads (an `LD_AUDIT` module runs in-process in each of those programs at
-  startup, the same way a preloaded library does) — and the refusal names
-  the remedy: set the value in the image's `ENV`, or have the operator
-  forward it through `session_env_passthrough`. The image's own `Config.Env` `PATH` is then
+  additionally refuses `docker.run_args` entries for `PATH` and for every
+  name that makes ld.so, libc, or the shell af's provisioning scripts invoke
+  load or run code — the glibc `UNSECURE_ENVVARS` list
+  (`LD_PRELOAD`/`LD_LIBRARY_PATH`/`LD_AUDIT`, `GCONV_PATH`, `LOCPATH`,
+  `NLSPATH`, `GLIBC_TUNABLES`, `LD_ORIGIN_PATH`, `LD_PROFILE`,
+  `LD_DEBUG_OUTPUT`, and the rest of the source list verbatim) plus the
+  shells' environment-import names (`BASH_ENV`, `ENV`, `SHELLOPTS`,
+  `BASHOPTS`, `PS4`, and any `BASH_FUNC_<name>%%`) — before `docker run`.
+  They would let the repo choose which program af's in-container
+  provisioning commands resolve to (the mount-table `cat` and `pwd`, the
+  `chown`, the agent's own executable), which library or gconv module every
+  dynamically linked program loads (an `LD_AUDIT` module runs in-process in
+  each of those programs at startup, the same way a preloaded library
+  does), or which code the provisioning shell runs on an image whose
+  `/bin/sh` is bash (a `BASH_FUNC_cat%%` definition replaces the `cat` the
+  mount-table read calls) — and the refusal names the remedy: set the value
+  in the image's `ENV`, or have the operator forward it through
+  `session_env_passthrough`. The image's own `Config.Env` `PATH` is then
   re-asserted after `run_args`, so docker's last-wins rule keeps every
   PATH-resolved command on the image's own binaries unless the operator
   forwarded `PATH` themselves. These entries and `cat` were

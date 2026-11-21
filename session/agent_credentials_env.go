@@ -42,6 +42,11 @@ import (
 //     names that select a server af execs into. The selector precedence
 //     groups (credentialMountSelectorGroups) are claimed as groups:
 //     forwarding one member exempts every member of its group.
+//   - loader: a name that makes ld.so, libc, or the shell af's provisioning
+//     execs invoke load or run code — derived from the consumers rather
+//     than enumerated: glibc's UNSECURE_ENVVARS plus the shells'
+//     environment-import rules (agent_credentials_env_loader.go). Refused
+//     to run_args but never pinned, like PATH's siblings.
 //   - pane-boundary: a name af or tmux stamps at the pane boundary — af's
 //     session markers (AF_SESSION, AF_SESSION_GEN, AF_HOME) and tmux's own
 //     TMUX/TMUX_PANE. Refused to run_args like the rest but NEVER pinned:
@@ -333,26 +338,6 @@ func credentialMountPaneBoundaryNamesSorted() []string {
 	return out
 }
 
-// credentialMountProgramLoaderNames are names that choose which CODE the
-// programs af runs in the container load — glibc's three dynamic-linker
-// injection variables: the preload list (LD_PRELOAD), the search path
-// (LD_LIBRARY_PATH), and the audit-module list (LD_AUDIT). An audit module
-// loads into every dynamically linked program at startup the same way a
-// preloaded library does — its la_version entry point and hooks run
-// in-process — so a repo-supplied value injects a repository library on
-// the same terms the preload variable does. They reach every docker exec
-// step before the agent-side env filter exists, so a repo-supplied value
-// would inject a repository library into af's provisioning steps. They are
-// refused to repo run_args but NOT pinned: an image's own LD_* values are
-// the same trust class as its binaries, and pinning would break images
-// that legitimately need them; the inner filter already keeps them off
-// the agent's env, so the agent itself is covered either way (#7529 R7).
-var credentialMountProgramLoaderNames = map[string]struct{}{
-	"LD_PRELOAD":      {},
-	"LD_LIBRARY_PATH": {},
-	"LD_AUDIT":        {},
-}
-
 // credentialMountIdentityEnvNames are the credential-bearing per-agent names
 // for agents whose account-scope identity classification is empty — the same
 // set #7520 introduced as credentialMountDeniedEnvNames's identity half, now
@@ -478,7 +463,10 @@ var credentialMountSharedKeptNames = map[string]struct{}{
 	"TERM": {}, "COLORTERM": {}, "TERMINFO": {}, "TERMINFO_DIRS": {},
 	"NO_COLOR": {}, "CLICOLOR": {}, "CLICOLOR_FORCE": {}, "FORCE_COLOR": {},
 	// Temp-directory hints — a scratch path, not a credential root or route.
-	"TMPDIR": {}, "TMP": {}, "TEMP": {},
+	// TMPDIR is the exception: glibc strips it when privileged code runs
+	// (UNSECURE_ENVVARS — a repo-chosen temp dir redirects privileged file
+	// creation), so it is refused with the loader names instead (#7727).
+	"TMP": {}, "TEMP": {},
 	// PWD is a working-directory hint set by shells, not a lookup root the
 	// credential resolution reads.
 	"PWD": {},
@@ -517,8 +505,11 @@ var credentialMountKeptNames = map[string]map[string]struct{}{
 
 // credentialMountDeniedNames returns every env name a repo-controlled
 // docker.run_args entry may not set on the credential-mount path: the union of
-// the identity, config-root, routing, and reasserted classes for the session's
-// agent, plus the shared credential and routing sets. The refusal is
+// the identity, config-root, routing, reasserted, and loader classes for the
+// session's agent, plus the shared credential, routing, program-choice,
+// af-state, pane-boundary, and git-env sets. The unbounded loader prefix
+// family (BASH_FUNC_*) is refused through credentialMountDeniedReason's
+// prefix rule rather than by membership here. The refusal is
 // unconditional — it applies even to a name the operator forwards, because
 // run_args is appended after af's own -e entries and would otherwise dominate
 // the operator's forwarded value by Docker's last-wins rule.
@@ -683,8 +674,9 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 			continue
 		}
 		// The loader names are refused to run_args but never pinned: an
-		// image's own LD_* values are the same trust class as its binaries,
-		// and the inner env filter keeps them off the agent either way.
+		// image's own values for them are the same trust class as its
+		// binaries, and the inner env filter keeps them off the agent
+		// either way.
 		if _, loader := credentialMountProgramLoaderNames[name]; loader {
 			continue
 		}
