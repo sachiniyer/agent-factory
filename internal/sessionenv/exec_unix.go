@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -236,6 +237,7 @@ func claimedExecInvocation(args []string, environmentOnly bool) error {
 	if err != nil {
 		return err
 	}
+	environ = neutralizeGitConfigCountForExec(environ)
 	shell := "/bin/sh"
 	return processExec(shell, []string{shell, "-c", c.Command}, environ)
 }
@@ -295,6 +297,10 @@ func execInvocation(args []string) error {
 	// and this process could have re-set one; the last point where af still
 	// controls the environment is where the pin belongs (#7529 R1).
 	environ = reapplyEmptyPins(environ, pins)
+	// A forwarded GIT_CONFIG_COUNT whose indexed pairs did not travel with it
+	// would make every git invocation fail fatally; the exec shim is the last
+	// point that can neutralize it before the agent inherits the environment.
+	environ = neutralizeGitConfigCountForExec(environ)
 	// tmux runs shell-command through the system shell, not the user's login
 	// shell. Keep that POSIX contract: program overrides and injected commands
 	// commonly use assignment prefixes, redirects, and quoting that fish/tcsh
@@ -327,6 +333,53 @@ func reapplyEmptyPins(environ, pins []string) []string {
 		out = append(out, name+"=")
 	}
 	return out
+}
+
+// neutralizeGitConfigCountForExec is the exec-shim wrapper around
+// NeutralizeIncompleteGitConfigCount: when a forwarded GIT_CONFIG_COUNT
+// resolves to a positive count whose indexed pairs did not travel with it,
+// the count is pinned empty so git does not fail fatally, and a diagnostic
+// naming only the missing indices (never values) is written to stderr so the
+// operator can correct the pass-through list. This keeps the session usable
+// while surfacing the half-forward the silent blank would otherwise hide.
+func neutralizeGitConfigCountForExec(environ []string) []string {
+	neutralized, ok := NeutralizeIncompleteGitConfigCount(environ)
+	if !ok {
+		return environ
+	}
+	if missing := missingGitConfigCountPairsInEnv(environ); len(missing) > 0 {
+		_, _ = fmt.Fprintf(os.Stderr,
+			"af: session_env_passthrough forwards GIT_CONFIG_COUNT without its required indexed pairs (%s); git would fail the count without them, so af pinned the count empty — also forward the pair names through session_env_passthrough\n",
+			strings.Join(missing, ", "))
+	}
+	return neutralized
+}
+
+// missingGitConfigCountPairsInEnv lists the indexed pair names that a live
+// GIT_CONFIG_COUNT in environ requires but environ does not contain. It
+// names only indices, never values, so it is safe to render in a diagnostic.
+func missingGitConfigCountPairsInEnv(environ []string) []string {
+	value, ok := envEntryValue(environ, "GIT_CONFIG_COUNT")
+	if !ok {
+		return nil
+	}
+	count := parseGitConfigCount(value)
+	if count <= 0 {
+		return nil
+	}
+	var missing []string
+	for i := 0; i < count; i++ {
+		key := "GIT_CONFIG_KEY_" + strconv.Itoa(i)
+		val := "GIT_CONFIG_VALUE_" + strconv.Itoa(i)
+		if _, has := envEntryValue(environ, key); !has {
+			missing = append(missing, key)
+		}
+		if _, has := envEntryValue(environ, val); !has {
+			missing = append(missing, val)
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // stampPaneRootPid records the pane's identity bundle in pane-scoped user
@@ -525,5 +578,6 @@ func execAgentServer(args []string, accountAgent string) error {
 	if err != nil {
 		return fmt.Errorf("resolve current af executable: %w", err)
 	}
+	environ = neutralizeGitConfigCountForExec(environ)
 	return processExec(executable, append([]string{agentServerArgv0(executable)}, serverArgs...), environ)
 }

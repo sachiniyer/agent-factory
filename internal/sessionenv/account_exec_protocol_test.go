@@ -188,28 +188,63 @@ func TestClaimedShim_OldProtocolArgvTakesTheRestartHintPath(t *testing.T) {
 // operator's claim — kept. A name the capability does not forward is filtered
 // out before the scope, and applyAccount installs it defined-empty: the tmux
 // -e half never stamped it, so absence here is honest.
+//
+// GIT_CONFIG_COUNT is whole: a forwarded count resolves to N>0 and git then
+// requires GIT_CONFIG_KEY_0..N-1 / GIT_CONFIG_VALUE_0..N-1 to travel with it,
+// or every git invocation fails fatally. The complete-triple forward keeps the
+// count's value (it is the operator's claim); a count-only forward is
+// neutralized to empty at the exec shim, keeping git usable. The prior test
+// pinned the count-only forward as "the claim must reach the agent" — exactly
+// the half-forward the boundary now refuses to deliver live.
 func TestClaimedShim_LoaderNamesKeepIfSetAtThePane(t *testing.T) {
-	forwarded := Capability{
+	// Complete forward: the count and its pairs are all the operator's claim
+	// and must reach the agent verbatim.
+	complete := Capability{
 		Session: "s", Agent: "gemini", Account: "work", Command: "gemini",
-		Extras: []string{"GIT_CONFIG_COUNT"},
+		Extras: []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"},
 	}
-	b, sock, token := mintFor(t, forwarded)
+	b, sock, token := mintFor(t, complete)
 	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.directory")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/work")
 	t.Setenv("CLOUD_SHELL", "repo-or-ambient-value")
 	run := runShim(t, b, sock, token, false, "gemini")
 	require.NoError(t, run.err)
 	if v, ok := envValue(run.environ, "GIT_CONFIG_COUNT"); !ok || v != "1" {
 		t.Errorf("GIT_CONFIG_COUNT = %q (present %v): the forwarded value is the operator's claim and must reach the agent", v, ok)
 	}
+	if v, ok := envValue(run.environ, "GIT_CONFIG_KEY_0"); !ok || v != "safe.directory" {
+		t.Errorf("GIT_CONFIG_KEY_0 = %q (present %v): the forwarded pair rides the claim unexamined", v, ok)
+	}
+	if v, ok := envValue(run.environ, "GIT_CONFIG_VALUE_0"); !ok || v != "/work" {
+		t.Errorf("GIT_CONFIG_VALUE_0 = %q (present %v): the forwarded pair rides the claim unexamined", v, ok)
+	}
 	if v, ok := envValue(run.environ, "CLOUD_SHELL"); !ok || v != "" {
 		t.Errorf("CLOUD_SHELL = %q (present %v): an ambient value on an unforwarded name is not a claim — pinned empty", v, ok)
 	}
 
+	// Incomplete forward: GIT_CONFIG_COUNT forwarded and set to N>0 WITHOUT
+	// its pairs. Delivering the live count would make git fail fatally, so
+	// the exec shim neutralizes it to empty (the same shape an unforwarded
+	// count takes) and writes the operator-facing diagnostic.
+	b2, sock2, token2 := mintFor(t, Capability{
+		Session: "s", Agent: "gemini", Account: "work", Command: "gemini",
+		Extras: []string{"GIT_CONFIG_COUNT"},
+	})
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "")
+	t.Setenv("GIT_CONFIG_VALUE_0", "")
+	run = runShim(t, b2, sock2, token2, false, "gemini")
+	require.NoError(t, run.err)
+	if v, ok := envValue(run.environ, "GIT_CONFIG_COUNT"); !ok || v != "" {
+		t.Errorf("GIT_CONFIG_COUNT = %q (present %v): a count forwarded without its pairs is neutralized empty so git does not fail", v, ok)
+	}
+
 	// The same ambient value, with the name absent from the capability's
 	// extras: the claim channel never carried it, so the pin answers instead.
-	b2, sock2, token2 := mintFor(t, Capability{Session: "s", Agent: "gemini", Account: "work", Command: "gemini"})
+	b3, sock3, token3 := mintFor(t, Capability{Session: "s", Agent: "gemini", Account: "work", Command: "gemini"})
 	t.Setenv("GIT_CONFIG_COUNT", "1")
-	run = runShim(t, b2, sock2, token2, false, "gemini")
+	run = runShim(t, b3, sock3, token3, false, "gemini")
 	require.NoError(t, run.err)
 	if v, ok := envValue(run.environ, "GIT_CONFIG_COUNT"); !ok || v != "" {
 		t.Errorf("GIT_CONFIG_COUNT = %q (present %v): unforwarded, the ambient value must be pinned empty — presence here is the claim", v, ok)

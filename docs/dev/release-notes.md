@@ -439,6 +439,29 @@ written back.
   `AWS_SHARED_CREDENTIALS_FILE` your setup uses). Aider is unaffected — its
   Azure entries are Azure OpenAI service keys, not cloud credentials.
 
+## `session_env_passthrough`: a `GIT_CONFIG_COUNT` forward is refused without its pairs
+
+- A pass-through list that forwards `GIT_CONFIG_COUNT` while it resolves to a
+  positive count in the environment, without also forwarding the matching
+  `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` … pairs, now fails the create with a
+  refusal naming exactly the missing indices. Git treats `GIT_CONFIG_COUNT` as
+  authoritative and fails fatally (`error: missing config key GIT_CONFIG_KEY_0`)
+  when the count names pairs that are not present, so a half-forward broke
+  every `git` invocation in the session — including af's own provisioning
+  `git config --global --add safe.directory "*"`, which surfaced on the docker
+  backend as a provisioning teardown that blamed git rather than the
+  configuration. The refusal is defense-in-depth with a neutralize: sessions
+  that bypass the create refusal (an older daemon, an in-flight
+  `SetEnvPassthrough`, a count that gains a value after admission) still pin the
+  count defined-empty at the exec shim, with a warning naming the missing
+  indices, so git reads a count of 0 and does not fail. The remedy for either
+  path is the same: also forward the indexed pair names through
+  `session_env_passthrough`.
+- `docker.run_args` entries that name `GIT_CONFIG_COUNT` on an account-scoped
+  session are still refused — now with a message that names the indexed pairs
+  the count activates, so the count-only forward af itself used to suggest does
+  not route the operator into the broken configuration.
+
 ## Keymap changes
 
 - Default TUI keys changed to ergonomic lower-case (`a/m/e`,

@@ -301,6 +301,11 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because it can override the selected identity",
 				name, agent)
 		}
+		if name == "GIT_CONFIG_COUNT" && pairGuard {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because af pins it defined-empty at the exec boundary unless the operator forwarded it — forward it through session_env_passthrough instead, together with the GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n pairs the count activates (git fails the count fatally when the pairs are absent)",
+				name, agent)
+		}
 		if slices.Contains(loaderDenied, name) {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because af pins it defined-empty at the exec boundary unless the operator forwarded it — forward it through session_env_passthrough instead",
@@ -308,7 +313,7 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 		}
 		if pairGuard && (strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_")) {
 			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because a forwarded GIT_CONFIG_COUNT would activate repository-supplied git config — forward the pair through session_env_passthrough instead",
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because a forwarded GIT_CONFIG_COUNT would activate repository-supplied git config — forward the pair through session_env_passthrough together with GIT_CONFIG_COUNT (git fails the count fatally when the pairs travel without it)",
 				name, agent)
 		}
 		if reason, refused := accountDockerProgramChoiceReason(name); refused {
