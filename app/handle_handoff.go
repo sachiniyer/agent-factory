@@ -122,8 +122,11 @@ func handoffConfirmDetail(account, target, current, recorded string, resolvedAge
 // interaction and reads as a bug.
 func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.GetSelectedInstance()
-	if selected == nil || selected.IsCreating() {
-		return m, nil
+	if selected == nil {
+		return m, m.noRowTargetNotice()
+	}
+	if selected.IsCreating() {
+		return m, m.handleNotice(inFlightOpNotice(selected))
 	}
 	// IsTearingDown BEFORE ValidateRuntimeAction: a teardown-in-progress row
 	// (OpKilling/OpArchiving, possibly pre-reconcile with userKilled=false) would

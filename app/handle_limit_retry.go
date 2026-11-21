@@ -28,7 +28,7 @@ type limitRetriedMsg struct {
 func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	selected := m.sidebar.RowVerbTarget()
 	if selected == nil {
-		return m, nil
+		return m, m.noRowTargetNotice()
 	}
 	if selected.IsTearingDown() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is being deleted", selected.Title))

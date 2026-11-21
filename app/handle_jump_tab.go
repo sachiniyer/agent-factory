@@ -39,7 +39,7 @@ func (m *home) showJumpTabPrompt() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.store.GetSelectedInstance() == nil {
-		return m, nil // nothing to jump within
+		return m, m.handleNotice(m.tabRosterRefusal("jump to a tab"))
 	}
 	m.promptOverlay = overlay.NewPromptOverlay("Jump to tab (number or name)", "")
 	// The widget is the naming form's initial-prompt field; handleStateJumpTab

@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/sachiniyer/agent-factory/keys"
@@ -128,10 +129,17 @@ func (m *home) paneMatchesSelection(p *store.OpenPane) bool {
 func (m *home) handleOpenPane() (tea.Model, tea.Cmd) {
 	selected := m.store.GetSelectedInstance()
 	if selected == nil {
-		return m, nil
+		return m, m.handleNotice(m.tabRosterRefusal("open a pane"))
+	}
+	// An archived binding can never hold a pane — pruneDeadPanes reaps it on
+	// sight — so an unguarded `s` opened a pane that vanished in the same
+	// update with nothing said (#7700). Lost/dead rows are different: their
+	// fallback content DOES render, so `s` works there (#5260).
+	if selected.IsArchived() {
+		return m, m.handleNotice(fmt.Errorf("cannot open a pane on archived session %q; restore it first (af sessions restore)", selected.Title))
 	}
 	if selected.HasInFlightOp() {
-		return m, nil
+		return m, m.handleNotice(fencedRowNotice(selected))
 	}
 	return m.openOrFocusPane(selected, m.store.ActiveTab())
 }
@@ -200,12 +208,12 @@ func (m *home) splitPaneUnavailableNotice() error {
 // handleHidePane dispatches the `x` key: hide the FOCUSED pane back to the
 // background (§2.3). The pane leaves the workspace and the remaining panes
 // re-divide the width; the tab keeps running — nothing is killed (killing
-// tabs stays `w`, killing instances stays `D`). With focus on the tree or
-// the automations section `x` is a no-op.
+// tabs stays `w`, killing instances stays `D`). With no focused pane the
+// key answers rather than reading as a dead key (#7700).
 func (m *home) handleHidePane() (tea.Model, tea.Cmd) {
 	p := m.focusedOpenPane()
 	if p == nil {
-		return m, nil
+		return m, m.handleNotice(errors.New("x hides a focused pane — focus one first"))
 	}
 	m.hidePane(p)
 	return m, m.selectionChanged()
@@ -646,8 +654,11 @@ func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, t
 	if instErr := interactiveGuard(p.Instance()); instErr != nil {
 		return m, tea.Batch(commitCmd, m.handleGuardResult(instErr))
 	}
-	if p.Instance() == nil || p.Instance().IsCreating() {
+	if p.Instance() == nil {
 		return m, commitCmd
+	}
+	if p.Instance().IsCreating() {
+		return m, tea.Batch(commitCmd, m.handleNotice(inFlightOpNotice(p.Instance())))
 	}
 	// A web tab has no PTY, so it can neither embed nor attach — it is only
 	// viewable in the web UI. The tree Enter path guards this before dispatching;
@@ -683,8 +694,11 @@ func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, t
 // routing — but reads the pane's binding instead of the tree selection.
 func (m *home) handleEnterPane(p *store.OpenPane) (tea.Model, tea.Cmd) {
 	instance := p.Instance()
-	if instance == nil || instance.IsCreating() {
+	if instance == nil {
 		return m, nil
+	}
+	if instance.IsCreating() {
+		return m, m.handleNotice(inFlightOpNotice(instance))
 	}
 	if err := interactiveGuard(instance); err != nil {
 		return m, m.handleGuardResult(err)
