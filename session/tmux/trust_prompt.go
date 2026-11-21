@@ -272,7 +272,14 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() (held bool) {
 		// modal predicate, so delivery stays blocked until the next poll
 		// observes either the complete modal (dismissed above) or the
 		// released composer.
-		if codexDirectoryTrustTrailingRows(content) {
+		//
+		// The sibling hold is the modal's question block as last content —
+		// painted before the selected row is on screen at all, or all a
+		// settled short pane kept of the block. It carries no line-leading
+		// "›" of its own, but an earlier "›" from prior output on screen
+		// satisfies the same readiness arm, so it gates on the same
+		// hidden-cursor oracle (#7735).
+		if codexDirectoryTrustTrailingRows(content) || codexDirectoryTrustQuestionTail(content) {
 			cursor, err := t.readPaneCursorState()
 			if err != nil {
 				return true
@@ -445,21 +452,53 @@ var codexDirectoryTrustWordings = []codexDirectoryTrustWording{
 
 // codexDirectoryTrustTails is every trailing row-sequence a directory-trust
 // modal paints from its selected option row down — affirm, then a decline,
-// then a footer, whitespace-stripped — for every wording. A frame that ends
-// anywhere inside those rows reads as a PREFIX of one of them: the selected
-// row partial or whole, the second option partial or whole, the blank between
-// (which strips to nothing), or a partial footer, at every width.
+// whitespace-stripped — for every wording. A frame that ends anywhere inside
+// those rows reads as a PREFIX of one of them: the selected row partial or
+// whole, or the second option partial or whole, at every width. A frame that
+// ends anywhere past them keeps the sequence as a PREFIX instead: after the
+// second option upstream may paint rows the matcher cannot enumerate — the
+// "Failed to set trust for …" paragraph a failed trust write leaves
+// (trust_directory.rs renders self.error between the option rows and the
+// footer; onboarding_screen.rs fills it) — which the complete-modal match
+// tolerates as intervening rows the same way.
 var codexDirectoryTrustTails = func() []string {
 	var tails []string
 	for _, w := range codexDirectoryTrustWordings {
 		for _, decline := range w.declines {
-			for _, footer := range w.footers {
-				tails = append(tails, w.affirm+decline+footer)
-			}
+			tails = append(tails, w.affirm+decline)
 		}
 	}
 	return tails
 }()
+
+// codexTrustLine is one non-blank capture line in the compact pane: where
+// its stripped text sits in flat, which line of the normalized capture it
+// came from, and how wide that line was painted. The painted width is what
+// tells a real wrap — a row split because the pane ran out of room — from a
+// split no pane width produces (#7735).
+type codexTrustLine struct {
+	start   int
+	end     int
+	src     int
+	painted int
+}
+
+// codexTrustPane is the pane compacted for matching plus the per-line facts
+// the row matches need back: flat is each non-blank line's whitespace-stripped
+// text concatenated, starts the flat offset at which each line's text begins,
+// and width the widest painted line that shows a wrap budget — one carrying a
+// breakable point, so its length is evidence of the width paragraphs wrapped
+// at rather than of an unbreakable token's own length. A line that is one
+// token — an overlong path, a config name, an option's continuation word —
+// overflows where a wrap would split it, and counting it would read a wider
+// pane than the wraps on screen (#7735's error variant carries
+// "features.fast_mode=true" twenty-five cells wide on a twelve-column pane).
+type codexTrustPane struct {
+	flat   string
+	starts []int
+	lines  []codexTrustLine
+	width  int
+}
 
 // compactCodexTrustPane is the pane with each non-blank line's whitespace
 // stripped and the results concatenated, plus the offset at which each
@@ -467,18 +506,27 @@ var codexDirectoryTrustTails = func() []string {
 // not another is the same contiguous run either way, and a run's start offset
 // still proves it began on its own line — the two facts the line-exact match
 // relied on, kept without the width (#7724).
-func compactCodexTrustPane(content string) (flat string, starts []int) {
+func compactCodexTrustPane(content string) codexTrustPane {
+	var p codexTrustPane
 	clean := normalizeCodexUpdatePane(content)
 	var b strings.Builder
-	for _, line := range strings.Split(clean, "\n") {
+	for i, line := range strings.Split(clean, "\n") {
 		stripped := codexStripWhitespace(line)
 		if stripped == "" {
 			continue
 		}
-		starts = append(starts, b.Len())
+		painted := utf8.RuneCountInString(line)
+		if strings.IndexFunc(strings.TrimSpace(line), unicode.IsSpace) >= 0 && painted > p.width {
+			p.width = painted
+		}
+		p.lines = append(p.lines, codexTrustLine{
+			start: b.Len(), end: b.Len() + len(stripped), src: i, painted: painted,
+		})
+		p.starts = append(p.starts, b.Len())
 		b.WriteString(stripped)
 	}
-	return b.String(), starts
+	p.flat = b.String()
+	return p
 }
 
 // codexStripWhitespace removes every whitespace rune from s but keeps bytes
@@ -507,30 +555,70 @@ func codexStripWhitespace(s string) string {
 // lastCodexTrustRow returns the last offset in flat[:before] at which one of
 // rows occupies whole lines — beginning at a line boundary and ending at
 // another — or -1. A mid-line occurrence is prose, not the modal's row, the
-// same distinction the old per-line exact match made.
-func lastCodexTrustRow(flat string, starts []int, rows []string, before int) int {
+// same distinction the old per-line exact match made. A row that spans lines
+// is accepted only where wrapExplained says a narrow pane is what split it:
+// upstream never paints the split a wider pane leaves.
+func lastCodexTrustRow(p codexTrustPane, rows []string, before int) int {
 	best := -1
 	for _, row := range rows {
-		for idx := strings.LastIndex(flat[:before], row); idx >= 0; idx = strings.LastIndex(flat[:idx], row) {
-			if slices.Contains(starts, idx) && slices.Contains(starts, idx+len(row)) {
-				if idx > best {
-					best = idx
-				}
-				break
+		for idx := strings.LastIndex(p.flat[:before], row); idx >= 0; idx = strings.LastIndex(p.flat[:idx], row) {
+			if !slices.Contains(p.starts, idx) || !slices.Contains(p.starts, idx+len(row)) ||
+				!p.wrapExplained(idx, idx+len(row)) {
+				continue
 			}
+			if idx > best {
+				best = idx
+			}
+			break
 		}
 	}
 	return best
 }
 
-// codexTrustQuestionBefore reports whether the question anchor begins a
-// stripped line before `before` — the line-prefix check the old predicate
-// kept, read off the compact pane so a question that wraps anywhere still
-// answers.
-func codexTrustQuestionBefore(flat string, starts []int, question string, before int) bool {
-	for idx := strings.LastIndex(flat[:before], question); idx >= 0; idx = strings.LastIndex(flat[:idx], question) {
-		if slices.Contains(starts, idx) {
-			return true
+// wrapExplained reports whether flat[from:to] — already known to sit on whole
+// line boundaries — is a row broken the way a narrow pane breaks it. The
+// pieces of one painted row are consecutive capture lines, and their total
+// painted footprint — first piece, then a space and each continuation
+// hanging indent included — is wider than the widest budget-evidencing line
+// on the pane: rejoined, the row could not have fit on one line, so a wrap
+// explains the split. Pieces that would share a line inside that width are
+// a split no pane width produces — the shape upstream never paints (#7735).
+// A row on a single line has no break to explain.
+func (p codexTrustPane) wrapExplained(from, to int) bool {
+	i, ok := slices.BinarySearch(p.starts, from)
+	if !ok {
+		return false
+	}
+	j := len(p.lines)
+	if to < len(p.flat) {
+		if j, ok = slices.BinarySearch(p.starts, to); !ok {
+			return false
+		}
+	}
+	if j-i < 2 {
+		return j == i+1
+	}
+	joined := p.lines[i].painted
+	for k := i + 1; k < j; k++ {
+		if p.lines[k].src != p.lines[k-1].src+1 {
+			return false
+		}
+		joined += 1 + p.lines[k].painted
+	}
+	return joined > p.width
+}
+
+// codexTrustQuestionBefore reports whether the question anchor's LAST
+// line-anchored occurrence precedes `before` — the same occurrence the
+// line-exact predicate used, whose per-line scan kept the last matching row.
+// Any occurrence is enough where a real modal puts its question, but only
+// the last one tells a question row the modal never paints — repeated
+// between the second option and the footer, for instance — apart from the
+// one the modal paints where it belongs (#7735).
+func codexTrustQuestionBefore(p codexTrustPane, question string, before int) bool {
+	for idx := strings.LastIndex(p.flat, question); idx >= 0; idx = strings.LastIndex(p.flat[:idx], question) {
+		if slices.Contains(p.starts, idx) {
+			return idx < before
 		}
 	}
 	return false
@@ -551,33 +639,34 @@ func codexTrustQuestionBefore(flat string, starts []int, question string, before
 // exactly as before: an error paragraph Codex paints between the options and
 // the footer does not hide the modal.
 func codexDirectoryTrustCompleteModal(content string) *codexDirectoryTrustWording {
-	flat, starts := compactCodexTrustPane(content)
+	p := compactCodexTrustPane(content)
 	for wi := range codexDirectoryTrustWordings {
 		w := &codexDirectoryTrustWordings[wi]
 		if w.affirmative == "" {
 			continue
 		}
-		sy := lastCodexTrustRow(flat, starts, []string{w.affirm}, len(flat))
+		sy := lastCodexTrustRow(p, []string{w.affirm}, len(p.flat))
 		if sy < 0 {
 			continue
 		}
-		no := lastCodexTrustRow(flat, starts, w.declines, len(flat))
+		no := lastCodexTrustRow(p, w.declines, len(p.flat))
 		if no <= sy {
 			continue
 		}
 		fi := -1
 		for _, footer := range w.footers {
-			if !strings.HasSuffix(flat, footer) {
+			if !strings.HasSuffix(p.flat, footer) {
 				continue
 			}
-			if idx := len(flat) - len(footer); idx > no && slices.Contains(starts, idx) {
+			if idx := len(p.flat) - len(footer); idx > no && slices.Contains(p.starts, idx) &&
+				p.wrapExplained(idx, len(p.flat)) {
 				fi = idx
 			}
 		}
 		if fi < 0 {
 			continue
 		}
-		if codexTrustQuestionBefore(flat, starts, w.question, sy) {
+		if codexTrustQuestionBefore(p, w.question, sy) {
 			return w
 		}
 	}
@@ -638,21 +727,83 @@ func CodexTrustPromptPresent(content string) bool {
 // answers only the trailing-rows question; the caller marks a held frame
 // only when the cursor is hidden or unreadable, and sends no key either way.
 func codexDirectoryTrustTrailingRows(content string) bool {
-	flat, starts := compactCodexTrustPane(content)
+	p := compactCodexTrustPane(content)
 	tailStart := -1
-	for idx := len(starts) - 1; idx >= 0; idx-- {
-		if strings.HasPrefix(flat[starts[idx]:], "›") {
-			tailStart = starts[idx]
+	for idx := len(p.starts) - 1; idx >= 0; idx-- {
+		if strings.HasPrefix(p.flat[p.starts[idx]:], "›") {
+			tailStart = p.starts[idx]
 			break
 		}
 	}
 	if tailStart < 0 {
 		return false
 	}
-	tail := flat[tailStart:]
+	tail := p.flat[tailStart:]
 	return slices.ContainsFunc(codexDirectoryTrustTails, func(stream string) bool {
-		return strings.HasPrefix(stream, tail)
+		return strings.HasPrefix(stream, tail) || strings.HasPrefix(tail, stream)
 	})
+}
+
+// codexDirectoryTrustQuestionBlocks is every question paragraph a
+// directory-trust modal paints, whitespace-stripped — the first Paragraph
+// trust_directory.rs's render_ref lays out, in each prose the widget's flags
+// select: the old wording's trust question (rust-v0.144.6–0.155.x), the new
+// "Trust this folder?" (rust-v0.156.0 on), the restricted variant in its two
+// upstream phrasings, and the resumed-untrusted-task variant.
+var codexDirectoryTrustQuestionBlocks = []string{
+	codexStripWhitespace("Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to load."),
+	codexStripWhitespace("Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings can run code automatically, even without a model request. Continue only if you trust these files. Your trust decision will be saved."),
+	codexStripWhitespace("This folder is in your untrusted list. Config, hooks, and exec policies from untrusted folders stay disabled. Your trust decision will be saved."),
+	codexStripWhitespace("Config, hooks, and exec policies from untrusted folders stay disabled. Trusted project folders can still contribute settings. Skills still load, and tools follow your permission settings. Opening will not change saved trust."),
+	codexStripWhitespace("This existing task may retain settings and history, including project configuration or hooks loaded while it was trusted. To use restricted settings, start a new task. The folder's trust setting will not change."),
+}
+
+// codexTrustHeadTailRows bounds the rows a modal's head may still be
+// painting when a capture lands: "Folder access" or "> You are in <cwd>",
+// the path beneath it, the "Note: You're in a subdirectory of a Git
+// project. Trusting will apply to the repository root:" warning and the
+// root it names — the head plus as many following rows as the snapshot set
+// shows those four taking at any width before the question paragraph starts.
+const codexTrustHeadTailRows = 7
+
+// codexDirectoryTrustQuestionTail reports whether the pane's last content is
+// a slice of a directory-trust modal's question block: the whole block, the
+// rows of it painted so far, or the piece a settled pane too short to have
+// kept the block's top still shows — in any wording, at any width. The
+// modal's selected "›" row comes AFTER the question, so a pane ending inside
+// the block reads no trailing-rows signal; an earlier "›" left on screen by
+// prior output makes hasCodexComposerLine accept it anyway — the #7735
+// wedge. The block's head rows count the same way: "Folder access" and the
+// path, or "> You are in <cwd>", are the modal's first paint.
+func codexDirectoryTrustQuestionTail(content string) bool {
+	p := compactCodexTrustPane(content)
+	for _, line := range p.lines {
+		rest := p.flat[line.start:]
+		for _, q := range codexDirectoryTrustQuestionBlocks {
+			if strings.Contains(q, rest) {
+				return true
+			}
+		}
+	}
+	for i, line := range p.lines {
+		run := p.flat[line.start:line.end]
+		if run != "Folderaccess" && !strings.HasPrefix(run, ">Youarein") {
+			continue
+		}
+		if len(p.lines)-i > codexTrustHeadTailRows {
+			continue
+		}
+		holds := true
+		for _, l := range p.lines[i:] {
+			if strings.HasPrefix(p.flat[l.start:], "›") {
+				holds = false
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
 }
 
 // DocTrustPromptPresent reports whether content ends at the documentation-link

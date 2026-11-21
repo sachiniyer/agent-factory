@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -864,8 +865,11 @@ const codexDirectoryTrustDialogRestricted = `  Folder access
   enter continue · esc quit`
 
 // wrapTrustPaneForTest reflows text the way ratatui's wrap leaves it at a
-// narrow pane width: words broken at spaces, each continuation back at the
-// line's own indent.
+// narrow pane width: words broken at spaces against the pane's display-cell
+// width — the '›' and '·' glyphs are one cell each, whatever their byte
+// length — and each continuation back at the line's own indent, except the
+// numbered option rows, which hang their continuations under the row text
+// the way upstream's numbered_row wrap_indent leaves them.
 func wrapTrustPaneForTest(text string, w int) string {
 	var out []string
 	for _, raw := range strings.Split(text, "\n") {
@@ -874,6 +878,10 @@ func wrapTrustPaneForTest(text string, w int) string {
 			indent++
 		}
 		ws := raw[:indent]
+		cont := ws
+		if hang := trustOptionWrapIndent(raw); hang > 0 {
+			cont = strings.Repeat(" ", hang)
+		}
 		words := strings.Fields(raw)
 		if len(words) == 0 {
 			out = append(out, "")
@@ -881,16 +889,38 @@ func wrapTrustPaneForTest(text string, w int) string {
 		}
 		line := ws + words[0]
 		for _, word := range words[1:] {
-			if len(line)+1+len(word) <= w {
+			if utf8.RuneCountInString(line)+1+utf8.RuneCountInString(word) <= w {
 				line += " " + word
 			} else {
 				out = append(out, line)
-				line = ws + word
+				line = cont + word
 			}
 		}
 		out = append(out, line)
 	}
 	return strings.Join(out, "\n")
+}
+
+// trustOptionWrapIndent returns the display-cell column a numbered option
+// row's wrapped continuations hang at — the width of its "› 1. " or "  2. "
+// prefix, the wrap_indent upstream picker_option.go's numbered_row passes —
+// or 0 when the line is not a numbered option row.
+func trustOptionWrapIndent(raw string) int {
+	i := 0
+	for i < len(raw) && raw[i] == ' ' {
+		i++
+	}
+	if strings.HasPrefix(raw[i:], "› ") {
+		i += len("› ")
+	}
+	j := i
+	for j < len(raw) && raw[j] >= '0' && raw[j] <= '9' {
+		j++
+	}
+	if j == i || j+1 >= len(raw) || raw[j] != '.' || raw[j+1] != ' ' {
+		return 0
+	}
+	return utf8.RuneCountInString(raw[:j+2])
 }
 
 // codexTrustPaintFrames returns the pane captures a directory-trust modal
