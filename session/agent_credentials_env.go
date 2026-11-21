@@ -334,17 +334,23 @@ func credentialMountPaneBoundaryNamesSorted() []string {
 }
 
 // credentialMountProgramLoaderNames are names that choose which CODE the
-// programs af runs in the container load — the dynamic linker's preload and
-// search-path variables. They reach every docker exec step before the
-// agent-side env filter exists, so a repo-supplied value would inject a
-// repository library into af's provisioning steps. They are refused to repo
-// run_args but NOT pinned: an image's own LD_* values are the same trust
-// class as its binaries, and pinning would break images that legitimately
-// need them; the inner filter already keeps them off the agent's env, so
-// the agent itself is covered either way (#7529 R7).
+// programs af runs in the container load — glibc's three dynamic-linker
+// injection variables: the preload list (LD_PRELOAD), the search path
+// (LD_LIBRARY_PATH), and the audit-module list (LD_AUDIT). An audit module
+// loads into every dynamically linked program at startup the same way a
+// preloaded library does — its la_version entry point and hooks run
+// in-process — so a repo-supplied value injects a repository library on
+// the same terms the preload variable does. They reach every docker exec
+// step before the agent-side env filter exists, so a repo-supplied value
+// would inject a repository library into af's provisioning steps. They are
+// refused to repo run_args but NOT pinned: an image's own LD_* values are
+// the same trust class as its binaries, and pinning would break images
+// that legitimately need them; the inner filter already keeps them off
+// the agent's env, so the agent itself is covered either way (#7529 R7).
 var credentialMountProgramLoaderNames = map[string]struct{}{
 	"LD_PRELOAD":      {},
 	"LD_LIBRARY_PATH": {},
+	"LD_AUDIT":        {},
 }
 
 // credentialMountIdentityEnvNames are the credential-bearing per-agent names
