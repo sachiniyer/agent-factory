@@ -104,3 +104,29 @@ func TestDockerAccount_ForwardedCompleteCountIsNotNeutralized(t *testing.T) {
 	require.False(t, found,
 		"a complete forward must not be neutralized — no GIT_CONFIG_COUNT= blank; runArgs=%v", runArgs)
 }
+
+// TestAccountLoaderBlankEntries_NeutralizesCountOnlyForward pins the
+// docker-account neutralizer at the helper: a passthrough that forwards
+// GIT_CONFIG_COUNT without its indexed pairs gets a trailing
+// GIT_CONFIG_COUNT= blank appended, so docker's last-wins -e resolves the
+// count empty, while pair names — never forwarded — get no blank at all.
+// Helper-level coverage complements the docker-run test above, which
+// asserts the bare -e and the blank together in the final run args.
+func TestAccountLoaderBlankEntries_NeutralizesCountOnlyForward(t *testing.T) {
+	// The pairs resolve in the daemon environment but are NOT forwarded, so
+	// they never travel into the container — the forward is incomplete.
+	source := []string{
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=safe.directory",
+		"GIT_CONFIG_VALUE_0=/work",
+		"GIT_CONFIG_KEY_1=safe.directory",
+		"GIT_CONFIG_VALUE_1=/other",
+	}
+	entries := accountLoaderBlankEntries("gemini", []string{"GIT_CONFIG_COUNT"}, source)
+	require.Contains(t, entries, "GIT_CONFIG_COUNT=",
+		"a count-only forward must append a GIT_CONFIG_COUNT= blank so docker's last-wins resolves it empty; entries=%v", entries)
+	for _, name := range []string{"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1"} {
+		require.NotContains(t, entries, name+"=",
+			"%s was never forwarded and must not get a blanking -e; entries=%v", name, entries)
+	}
+}
