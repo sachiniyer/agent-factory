@@ -92,13 +92,14 @@ func TestSocketClaimedBySweepDecisionTable(t *testing.T) {
 }
 
 // possibleSocketOwners splits one sweep the refusal's way: identified
-// servers apart from possible owners it may not signal, with the
-// unattributed count kept whole — a bound holder af cannot name is a
+// servers apart from possible owners it may not signal — those binding
+// evidence names as bound apart from the rest (#7695 R4) — with the
+// unattributed count kept whole: a bound holder af cannot name is a
 // refusal reason of its own (#7695).
 func TestPossibleSocketOwnersBySweep(t *testing.T) {
 	const server, notServer, covered = 9601, 9602, 9603
 	pinServerIdentityForTest(t, server, covered)
-	servers, unidentified, unattributed := possibleSocketOwnersBySweep(socketSweep{
+	servers, boundUnidentified, unidentified, unattributed := possibleSocketOwnersBySweep(socketSweep{
 		bound:                 map[int]boundOwner{server: {spelling: "/b"}, notServer: {spelling: "/b"}},
 		uncertain:             map[int]string{covered: "/u"},
 		uncovered:             []int{covered},
@@ -106,16 +107,19 @@ func TestPossibleSocketOwnersBySweep(t *testing.T) {
 		unattributedUncertain: 2,
 	})
 	require.Equal(t, []int{server, covered}, servers, "identified possible owners, bound or undecidable")
-	require.Equal(t, []int{notServer}, unidentified)
+	require.Equal(t, []int{notServer}, boundUnidentified, "a bound pid the evidence names is not an unidentified one")
+	require.Empty(t, unidentified)
 	require.Equal(t, 3, unattributed, "certain and uncertain unnamed holders both count")
 
-	servers, unidentified, unattributed = possibleSocketOwnersBySweep(socketSweep{unprobed: true})
+	servers, boundUnidentified, unidentified, unattributed = possibleSocketOwnersBySweep(socketSweep{unprobed: true})
 	require.Empty(t, servers)
+	require.Empty(t, boundUnidentified)
 	require.Equal(t, []int{0}, unidentified, "the unreadable-sweep sentinel is a possible owner")
 	require.Zero(t, unattributed)
 
-	servers, unidentified, unattributed = possibleSocketOwnersBySweep(socketSweep{})
+	servers, boundUnidentified, unidentified, unattributed = possibleSocketOwnersBySweep(socketSweep{})
 	require.Empty(t, servers)
+	require.Empty(t, boundUnidentified)
 	require.Empty(t, unidentified)
 	require.Zero(t, unattributed)
 }

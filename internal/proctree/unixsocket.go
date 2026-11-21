@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // UnixSocket is one unix-domain socket a process holds (#7536).
@@ -99,10 +100,13 @@ func sameInstanceThroughout(pid int, read func() error) error {
 }
 
 // processGone reports whether a lookup error says the pid names no live
-// process: ErrProcessExited (a zombie, or darwin's no-such-pid), or the Linux
-// stat file being gone.
+// process: ErrProcessExited (a zombie, or darwin's no-such-pid), the Linux
+// stat file being gone, or the kernel's ESRCH whichever /proc read met it
+// (#7695 R3 — a stat read interrupted by the exit can answer ESRCH, not
+// ENOENT, and a pid the kernel answers ESRCH for is gone).
 func processGone(err error) bool {
-	return errors.Is(err, ErrProcessExited) || errors.Is(err, os.ErrNotExist)
+	return errors.Is(err, ErrProcessExited) || errors.Is(err, os.ErrNotExist) ||
+		errors.Is(err, syscall.ESRCH)
 }
 
 // resolveSocketPaths prefixes each relative filesystem path with the working

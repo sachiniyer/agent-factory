@@ -81,11 +81,13 @@ func TestParseNetUnixBoundRows(t *testing.T) {
 		"0000000000000000: 00000002 00000000 00000000 0001 03 12348 /tmp/with space.sock\n")
 	rows, err := parseNetUnixBoundRows(data)
 	require.NoError(t, err)
-	require.Len(t, rows, 2, "only filesystem-bound rows: unbound and abstract are left out")
+	require.Len(t, rows, 3, "every bound row, '@'-led ones included: only unbound rows are left out")
 	require.Equal(t, "12345", rows[0].inode)
 	require.Equal(t, "/tmp/a.sock", rows[0].path)
 	require.True(t, rows[0].listening)
-	require.Equal(t, "/tmp/with space.sock", rows[1].path, "the path is the rest of the row, spaces included")
+	require.Equal(t, "@abstract", rows[1].path,
+		"an '@'-led spelling is kept: it may be a filesystem path as easily as an abstract one")
+	require.Equal(t, "/tmp/with space.sock", rows[2].path, "the path is the rest of the row, spaces included")
 
 	_, err = parseNetUnixBoundRows([]byte("garbage\n"))
 	require.Error(t, err, "a table not shaped like /proc/net/unix is could-not-tell")
@@ -102,11 +104,74 @@ func TestSocketInodeHoldersFindsTheHolder(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 
 	ino := socketInodeOf(t, sock)
-	rows := map[string]matchedRow{ino: {certain: true, spelling: sock}}
-	certain, possible, held := socketInodeHolders([]int{os.Getpid()}, rows, time.Now().Add(5*time.Second))
+	rows := map[string]matchedRow{ino: {kind: rowCertain, spelling: sock}}
+	certain, possible, holders, complete := socketInodeHolders([]int{os.Getpid()}, rows, time.Now().Add(5*time.Second))
 	require.Equal(t, sock, certain[os.Getpid()])
 	require.Empty(t, possible)
-	require.True(t, held[ino])
+	require.Equal(t, []int{os.Getpid()}, holders[ino])
+	require.True(t, complete)
+}
+
+// A row the match defers to its holder — af's view proved it elsewhere
+// (PendingMismatch), or af cannot place it at all (PendingRelative) — is
+// not bucketed by the sweep at all: it leaves with the holders attribution
+// named, for the caller to decide (#7695 R1/R2). The row's holder is this
+// process, so attribution names it.
+func TestSweepExposesPendingRowsWithTheirHolders(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "p.sock")
+	ln, err := net.Listen("unix", sock)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	require.NoError(t, os.Remove(sock))
+
+	s := UnixSocketOwnerSweep(func(boundPath string) RowMatch {
+		if boundPath == sock {
+			return RowMatchMismatch
+		}
+		return RowMatchNone
+	})
+	require.False(t, s.Unprobed)
+	require.Len(t, s.Pending, 1, "the deferred row is reported, not bucketed")
+	require.Equal(t, PendingMismatch, s.Pending[0].Kind)
+	require.Equal(t, sock, s.Pending[0].Spelling)
+	require.Equal(t, []int{os.Getpid()}, s.Pending[0].Holders)
+	require.Empty(t, s.Bound)
+	require.Empty(t, s.Uncertain)
+	require.Zero(t, s.UnattributedBound)
+	require.Zero(t, s.UnattributedUncertain,
+		"an attributed pending row counts in neither unattributed bucket")
+
+	// The same row deferred as a relative spelling carries the same holder.
+	s = UnixSocketOwnerSweep(func(boundPath string) RowMatch {
+		if boundPath == sock {
+			return RowMatchRelative
+		}
+		return RowMatchNone
+	})
+	require.Len(t, s.Pending, 1)
+	require.Equal(t, PendingRelative, s.Pending[0].Kind)
+	require.Equal(t, []int{os.Getpid()}, s.Pending[0].Holders)
+}
+
+// SameFileView is the holder proof a deferred row needs: this process
+// provably shares af's view; a pid that cannot be established — dead, or
+// never there — is false, never same.
+func TestSameFileView(t *testing.T) {
+	require.True(t, SameFileView(os.Getpid()), "af provably shares its own mount namespace and root")
+	require.False(t, SameFileView(1<<30), "a pid that does not exist cannot be proved same")
+}
+
+// processGone accepts the kernel's ESRCH however a /proc read met it — a
+// stat read interrupted by the exit answers ESRCH, not ENOENT, and a pid
+// the kernel answers ESRCH for is gone (#7695 R3). Refusals are not gone:
+// EPERM means live but unreadable, which a same-uid process can be.
+func TestProcessGoneKnowsESRCH(t *testing.T) {
+	require.True(t, processGone(fmt.Errorf("stat: %w", syscall.ESRCH)))
+	require.True(t, processGone(ErrProcessExited))
+	require.True(t, processGone(fmt.Errorf("stat: %w", os.ErrNotExist)))
+	require.False(t, processGone(fmt.Errorf("stat: %w", syscall.EPERM)))
+	require.False(t, processGone(fmt.Errorf("stat: %w", syscall.EACCES)))
 }
 
 func socketInodeOf(t *testing.T, sock string) string {

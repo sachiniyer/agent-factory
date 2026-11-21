@@ -290,11 +290,15 @@ func sortedKeys(m map[int]string) []int {
 // possibleSocketOwners is the socket-absent refusal's list of who could
 // still own socketPath, read the way the claim verdict reads it but with
 // nothing sent. servers are possible owners positively identified as tmux
-// servers; unidentified are possible owners that are not — the 0 sentinel
-// for a sweep that could not run among them; unattributed is the count of
-// bound rows whose holder no process could be named for (#7695). A pid
-// ruled out by evidence, or proved gone, is left out.
-func possibleSocketOwners(socketPath string) (servers, unidentified []int, unattributed int) {
+// servers; boundUnidentified are possible owners the kernel's binding
+// evidence names as bound to the path which are not positively tmux
+// servers — the refusal says they are bound, not that they could not be
+// identified (#7695 R4); unidentified are the rest — possible owners
+// against which no bound evidence points, the 0 sentinel for a sweep that
+// could not run among them; unattributed is the count of bound rows whose
+// holder no process could be named for (#7695). A pid ruled out by
+// evidence, or proved gone, is left out.
+func possibleSocketOwners(socketPath string) (servers, boundUnidentified, unidentified []int, unattributed int) {
 	return possibleSocketOwnersBySweep(socketOwnerSweep(socketPath))
 }
 
@@ -302,27 +306,38 @@ func possibleSocketOwners(socketPath string) (servers, unidentified []int, unatt
 // possibleSocketOwners over an explicit pid set — the #7689 fallback's
 // answer and the seam the decision-table tests pin.
 func possibleSocketOwnersForCandidates(socketPath string, pids []int) (servers, unidentified []int) {
-	servers, unidentified, _ = possibleSocketOwnersBySweep(sweepCandidatePIDs(socketPath, pids))
+	servers, _, unidentified, _ = possibleSocketOwnersBySweep(sweepCandidatePIDs(socketPath, pids))
 	return servers, unidentified
 }
 
-func possibleSocketOwnersBySweep(s socketSweep) (servers, unidentified []int, unattributed int) {
+func possibleSocketOwnersBySweep(s socketSweep) (servers, boundUnidentified, unidentified []int, unattributed int) {
 	if s.unprobed {
 		unidentified = append(unidentified, 0)
 	}
-	candidates := append(append(sortedSweepOwners(s.bound), sortedKeys(s.uncertain)...), s.uncovered...)
-	sort.Ints(candidates)
+	for _, pid := range sortedSweepOwners(s.bound) {
+		if tmuxServerIdentified(pid) {
+			servers = append(servers, pid)
+		} else {
+			boundUnidentified = append(boundUnidentified, pid)
+		}
+	}
+	others := append(sortedKeys(s.uncertain), s.uncovered...)
+	sort.Ints(others)
 	// A pid can sit in two buckets — an undecidable spelling for a process
 	// whose coverage also failed — and is named once, not per bucket.
-	candidates = slices.Compact(candidates)
-	for _, pid := range candidates {
+	others = slices.Compact(others)
+	for _, pid := range others {
+		if _, ok := s.bound[pid]; ok {
+			continue // already classified on its bound evidence
+		}
 		if !tmuxServerIdentified(pid) {
 			unidentified = append(unidentified, pid)
 			continue
 		}
 		servers = append(servers, pid)
 	}
-	return servers, unidentified, s.unattributedBound + s.unattributedUncertain
+	sort.Ints(servers)
+	return servers, boundUnidentified, unidentified, s.unattributedBound + s.unattributedUncertain
 }
 
 // liveTmuxServerPIDs lists the tmux servers owned by this uid: the

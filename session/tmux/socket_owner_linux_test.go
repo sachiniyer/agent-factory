@@ -270,3 +270,208 @@ func noServerRunningFromAbsent(t *testing.T, sock string) bool {
 	return NoServerRunning(tmuxExitOneError(t,
 		"error connecting to "+sock+" (No such file or directory)"))
 }
+
+// The R5 matcher contract (#7695): a bound spelling may never be placed
+// against af's own filesystem to the row's exclusion. A RELATIVE spelling
+// — "./q.sock", "rel/x.sock" — is deferred to its holder outright (R2):
+// the kernel recorded the holder's cwd's view, not af's. An absolute
+// spelling af's walk proves elsewhere is deferred too (R1): a holder in a
+// foreign mount namespace can have bound this path under its own spelling.
+// On f37f245d6 the relative row canonicalized against af's cwd and the
+// certain-mismatch row answered None — both rule-outs are the regression.
+func TestBoundRowMatcherDefersToTheRowHolder(t *testing.T) {
+	sock := testguard.SocketPath(t, "x.sock")
+	want, ok := canonicalSocketPath(sock)
+	require.True(t, ok, "a socket path under the temp dir must place")
+	match := boundRowMatcher(sock, want)
+
+	require.Equal(t, proctree.RowMatchRelative, match("./x.sock"),
+		"a relative spelling is the holder's cwd's to place, never af's")
+	require.Equal(t, proctree.RowMatchRelative, match("rel/x.sock"),
+		"a relative spelling is the holder's cwd's to place, never af's")
+	require.Equal(t, proctree.RowMatchMismatch, match("/other/x.sock"),
+		"a spelling af proves elsewhere may be the path in the holder's view")
+	require.Equal(t, proctree.RowMatchMismatch,
+		match(filepath.Join(t.TempDir(), "x.sock")),
+		"a spelled-elsewhere basename-equal row defers to its holder, always")
+	require.Equal(t, proctree.RowMatchNone, match("rel/y.sock"),
+		"a relative spelling whose basename cannot reach the path is still ruled out")
+	require.Equal(t, proctree.RowMatchNone, match("/other/y.sock"))
+	require.Equal(t, proctree.RowMatchCertain, match(sock))
+}
+
+// pinSocketOwnerSweepForTest stands a synthetic kernel census in for the
+// real one — the verdict layer's seam for rows a shared box cannot stage.
+func pinSocketOwnerSweepForTest(t *testing.T, us proctree.UnixSocketSweep) {
+	t.Helper()
+	prev := unixSocketOwnerSweep
+	unixSocketOwnerSweep = func(func(string) proctree.RowMatch) proctree.UnixSocketSweep {
+		return us
+	}
+	t.Cleanup(func() { unixSocketOwnerSweep = prev })
+}
+
+// pinHolderEvidenceForTest decides which holders the verdict may prove
+// share af's filesystem view and which working directories they report —
+// the foreign-mount-namespace holder a test cannot stage without userns.
+func pinHolderEvidenceForTest(t *testing.T, sameView func(int) bool, cwd func(int) (string, bool)) {
+	t.Helper()
+	prevView, prevDir := procSameFileView, procWorkingDir
+	procSameFileView, procWorkingDir = sameView, cwd
+	t.Cleanup(func() { procSameFileView, procWorkingDir = prevView, prevDir })
+}
+
+// The R1 verdict, pinned: a basename-equal row af's own filesystem proves
+// elsewhere stays a possible owner while ANY attributed holder's view
+// cannot be proved same — the foreign-mount-namespace binder. Only when
+// every named holder provably shares af's mount namespace and root may the
+// row be ruled out; an unattributed row names nobody to ask and stays too.
+func TestSocketOwnerSweepDecidesAMismatchOnItsHoldersView(t *testing.T) {
+	const foreign, same = 9201, 9202
+	// Fabricated holder pids must never reach a real signal: nobody is a
+	// positively identified server, and the signal is only recorded.
+	pinServerIdentityForTest(t)
+	pinServerProbeSignalForTest(t, func(int, syscall.Signal) error { return syscall.ESRCH })
+	sock := testguard.SocketPath(t, "x.sock")
+	row := proctree.PendingRow{
+		Inode: "7701", Spelling: "/other/x.sock",
+		Kind: proctree.PendingMismatch, Holders: []int{foreign, same},
+	}
+	pinSocketOwnerSweepForTest(t, proctree.UnixSocketSweep{
+		Pending:      []proctree.PendingRow{row},
+		ScanComplete: true,
+	})
+
+	// A holder whose view cannot be established keeps the whole row.
+	pinHolderEvidenceForTest(t, func(pid int) bool { return pid == same }, nil)
+	sweep := probeSocketOwners(sock)
+	require.Equal(t, map[int]string{foreign: "/other/x.sock", same: "/other/x.sock"}, sweep.uncertain,
+		"every holder of a row whose binder's view is unproved is a possible owner")
+	require.Empty(t, sweep.bound)
+	require.True(t, socketClaimedByProbe(sock),
+		"a row one foreign-view holder keeps is claimed, never a determinate empty")
+
+	// Every attributed holder provably same-view: the spelling af proved
+	// elsewhere is elsewhere in the only view that matters — ruled out.
+	pinHolderEvidenceForTest(t, func(int) bool { return true }, nil)
+	sweep = probeSocketOwners(sock)
+	require.Empty(t, sweep.uncertain)
+	require.Empty(t, sweep.bound)
+	require.False(t, socketClaimedByProbe(sock),
+		"with every holder proved to share af's view, af's proof decides")
+
+	// A truncated attribution is partial evidence: the binder nobody
+	// reached could be the foreign one, so the row still cannot go out.
+	pinSocketOwnerSweepForTest(t, proctree.UnixSocketSweep{
+		Pending:      []proctree.PendingRow{row},
+		ScanComplete: false,
+	})
+	sweep = probeSocketOwners(sock)
+	require.Equal(t, map[int]string{foreign: "/other/x.sock", same: "/other/x.sock"}, sweep.uncertain,
+		"an incomplete scan never rules a deferred row out")
+	require.True(t, socketClaimedByProbe(sock))
+
+	// Nobody attributed: no binder's view to ask, so never a rule-out.
+	pinSocketOwnerSweepForTest(t, proctree.UnixSocketSweep{
+		Pending: []proctree.PendingRow{{
+			Inode: "7702", Spelling: "/other/x.sock",
+			Kind: proctree.PendingMismatch, Holders: nil,
+		}},
+		ScanComplete: true,
+	})
+	sweep = probeSocketOwners(sock)
+	require.Equal(t, 1, sweep.unattributedUncertain)
+	require.True(t, socketClaimedByProbe(sock),
+		"an unattributed row names no holder whose view could prove it out")
+}
+
+// The R2 verdict: a relative spelling is resolved against its holder's
+// working directory — master's resolveListenerPaths rule — and only a
+// holder that provably shares af's view may place it. Anything less leaves
+// the row a possible owner.
+func TestSocketOwnerSweepDecidesARelativeRowOnItsHolder(t *testing.T) {
+	const holder = 9203
+	pinServerIdentityForTest(t)
+	pinServerProbeSignalForTest(t, func(int, syscall.Signal) error { return syscall.ESRCH })
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "rel"), 0o755))
+	sock := filepath.Join(dir, "rel", "e.sock")
+	row := proctree.PendingRow{
+		Inode: "7703", Spelling: "rel/e.sock",
+		Kind: proctree.PendingRelative, Holders: []int{holder},
+	}
+	pinSocketOwnerSweepForTest(t, proctree.UnixSocketSweep{Pending: []proctree.PendingRow{row}})
+
+	// The holder's cwd places the spelling exactly on the queried path:
+	// decided bound, and every holder of the socket is an owner.
+	pinHolderEvidenceForTest(t, func(int) bool { return true },
+		func(int) (string, bool) { return dir, true })
+	sweep := probeSocketOwners(sock)
+	require.Contains(t, sweep.bound, holder,
+		"cwd+spelling reaching the queried path decides the row bound")
+	require.Empty(t, sweep.uncertain)
+	require.True(t, socketClaimedByProbe(sock),
+		"a bound pid that is not positively a server is still claimed")
+
+	// A cwd that places it elsewhere decides nothing — the holder can have
+	// moved since bind() — nor does an unreadable cwd or a foreign view.
+	for _, tc := range []struct {
+		name     string
+		sameView func(int) bool
+		cwd      func(int) (string, bool)
+	}{
+		{"a cwd placing it elsewhere", func(int) bool { return true },
+			func(int) (string, bool) { return t.TempDir(), true }},
+		{"an unreadable cwd", func(int) bool { return true },
+			func(int) (string, bool) { return "", false }},
+		{"a foreign view", func(int) bool { return false }, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinHolderEvidenceForTest(t, tc.sameView, tc.cwd)
+			sweep := probeSocketOwners(sock)
+			require.Equal(t, map[int]string{holder: "rel/e.sock"}, sweep.uncertain,
+				"an unproven resolution is a possible owner, never a rule-out")
+			require.True(t, socketClaimedByProbe(sock))
+		})
+	}
+
+	// Nobody attributed: no holder's cwd to ask.
+	pinSocketOwnerSweepForTest(t, proctree.UnixSocketSweep{Pending: []proctree.PendingRow{{
+		Inode: "7704", Spelling: "rel/e.sock",
+		Kind: proctree.PendingRelative, Holders: nil,
+	}}})
+	pinHolderEvidenceForTest(t, func(int) bool { return true }, nil)
+	sweep = probeSocketOwners(sock)
+	require.Equal(t, 1, sweep.unattributedUncertain)
+	require.True(t, socketClaimedByProbe(sock))
+}
+
+// The end-to-end R2 shape, on real kernel evidence: a child binds
+// "rel/e.sock" verbatim from a working directory af's is not, the file is
+// unlinked under it, and the sweep still ties the row to the path —
+// resolved through the HOLDER's cwd, as bind() had it.
+func TestSocketOwnerSweepResolvesARealRelativeRowThroughItsHolder(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "rel"), 0o755))
+	child := exec.Command(sleeper.BoundPath(t), "rel/e.sock", "60")
+	child.Dir = dir
+	require.NoError(t, child.Start())
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_, _ = child.Process.Wait()
+	})
+	sock := filepath.Join(dir, "rel", "e.sock")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(sock)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "the child must bind its relative socket")
+	require.NoError(t, os.Remove(sock), "unlink the socket under the live holder")
+
+	sweep := probeSocketOwners(sock)
+	owner, tied := sweep.bound[child.Process.Pid]
+	require.True(t, tied,
+		"the relative row resolves through its holder's cwd, not af's — the child bound exactly here")
+	require.Equal(t, "rel/e.sock", owner.spelling, "the kernel's verbatim spelling is what the row carried")
+	require.False(t, noServerRunningFromAbsent(t, sock),
+		"a bound pid that is not positively a server is a possible owner: claimed, never determinate")
+}

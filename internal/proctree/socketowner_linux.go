@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,12 +19,47 @@ import (
 // unix-socket table spells (#7695): certain — it names the queried socket;
 // possible — the comparison cannot decide (a deleted component of either
 // spelling may have been an alias, #7562); none — provably a different socket.
+// Two further verdicts defer the answer to the row's HOLDER, which the sweep
+// names only after attribution: mismatch — the caller's own filesystem view
+// proves a different socket, but the holder may have bound it in a different
+// mount view, so the holder decides (#7695 R1); relative — the spelling is
+// not absolute, so the caller's filesystem cannot place it and the holder's
+// working directory may (#7695 R2).
 type RowMatch int
 
 const (
 	RowMatchNone RowMatch = iota
 	RowMatchPossible
 	RowMatchCertain
+	RowMatchMismatch
+	RowMatchRelative
+)
+
+// PendingRow is a bound-path table row the match deferred to its holder:
+// the holder's filesystem view may place a spelling af's proved elsewhere
+// (PendingMismatch), or the holder's working directory may place a relative
+// spelling af cannot (PendingRelative). The sweep names its holders the way
+// it names any row's — an fd-table scan — and leaves the verdict to the
+// caller: a holder af cannot name, or whose view cannot be established, is
+// a possible owner, never a rule-out.
+type PendingRow struct {
+	Inode    string
+	Spelling string
+	Kind     PendingKind
+	Holders  []int // attributed holders; empty = unattributed
+}
+
+// PendingKind is what a pending row waits on.
+type PendingKind int
+
+const (
+	// PendingMismatch: af's filesystem proves the spelling names a different
+	// socket; it may be ruled out only when every attributed holder provably
+	// shares af's mount namespace and root.
+	PendingMismatch PendingKind = iota
+	// PendingRelative: the spelling is relative; a holder's working directory
+	// may resolve it to the queried path.
+	PendingRelative
 )
 
 // UnixSocketSweep is what the kernel's own unix-socket tables say about which
@@ -57,11 +93,23 @@ type UnixSocketSweep struct {
 	// be determined and whose own socket table could not be read — the
 	// processes the negative cannot be proved for. It does not include
 	// pids proved to have exited (a zombie holds no sockets: readProc's
-	// Z/X answer) or kernel threads (no userspace sockets, and same-uid
-	// only to an af that runs as root).
+	// Z/X answer, or the kernel's ESRCH however the read met it) or kernel
+	// threads (no userspace sockets, and same-uid only to an af that runs
+	// as root).
 	Uncovered []int
 	// Unprobed is true when the sweep itself could not run at all.
 	Unprobed bool
+
+	// Pending lists the rows match deferred to holder evidence — a spelling
+	// af's own filesystem proved elsewhere, or one it cannot place — each
+	// with the holders attribution named. The caller decides each one;
+	// nothing here has already counted it.
+	Pending []PendingRow
+	// ScanComplete is false when the fd-table attribution stopped on the
+	// sweep budget before every same-uid pid was scanned: the holder lists
+	// are then partial, and a pending row may not be ruled out — the
+	// binder nobody reached could be the one whose view differs.
+	ScanComplete bool
 
 	// SameUID counts the live same-uid pids enumerated; Netns the distinct
 	// covered network namespaces; Gone the enumerated pids proved to have
@@ -85,11 +133,23 @@ const socketSweepBudget = 45 * time.Millisecond
 const socketSweepScanWorkers = 8
 
 // matchedRow is one bound-path table row the caller's match accepted, keyed
-// by socket inode.
+// by socket inode. kind is the match's own verdict: certain and possible
+// rows are decided; mismatch and relative rows wait on the holder evidence
+// Pending carries.
 type matchedRow struct {
-	certain  bool
+	kind     rowKind
 	spelling string
 }
+
+// rowKind is what a matched row already knows.
+type rowKind int
+
+const (
+	rowPossible rowKind = iota
+	rowCertain
+	rowMismatch
+	rowRelative
+)
 
 // netnsKey is the identity of a process's network namespace: the
 // (device, inode) pair of its /proc/<pid>/net/unix file. /proc/<pid>/ns/net
@@ -100,8 +160,9 @@ type netnsKey struct{ dev, ino uint64 }
 
 // UnixSocketOwnerSweep censuses which same-uid processes hold a unix socket
 // bound to a queried path, from the kernel's socket tables (#7695). match is
-// asked once per bound-path table row (a filesystem spelling; abstract and
-// unbound rows never reach it).
+// asked once per bound-path table row — every row with a Path column,
+// '@'-led ones included, since a verbatim filesystem spelling "@name" is
+// indistinguishable from an abstract address and only the match can decide.
 //
 // The determinate "nobody holds it" — an empty result with no Uncovered and
 // Unprobed false — rests on coverage: every netns a live same-uid process
@@ -157,9 +218,13 @@ func UnixSocketOwnerSweep(match func(boundPath string) RowMatch) UnixSocketSweep
 			p, lerr := readProc(pid)
 			switch {
 			case errors.Is(lerr, ErrProcessExited),
+				errors.Is(lerr, syscall.ESRCH),
 				errors.Is(lerr, os.ErrNotExist) && errors.Is(syscall.Kill(pid, 0), syscall.ESRCH):
 				// A zombie's net directory is empty and it holds nothing:
-				// proved gone, ruled out like a pid the table read watched exit.
+				// proved gone, ruled out like a pid the table read watched
+				// exit. The kernel's ESRCH is the same proof however the
+				// /proc read met it — ENOENT still wants kill(pid,0) to
+				// agree, since hidepid can fake an absent entry (#7695 R3).
 				s.Gone++
 			case lerr != nil:
 				s.Uncovered = append(s.Uncovered, pid)
@@ -193,8 +258,8 @@ func UnixSocketOwnerSweep(match func(boundPath string) RowMatch) UnixSocketSweep
 			if rerr == nil {
 				break
 			}
-			if !errors.Is(rerr, os.ErrNotExist) {
-				break // a real failure; ENOENT means this member died — try the next
+			if !errors.Is(rerr, os.ErrNotExist) && !errors.Is(rerr, syscall.ESRCH) {
+				break // a real failure; ENOENT/ESRCH mean this member died — try the next
 			}
 		}
 		if rerr != nil {
@@ -215,15 +280,18 @@ func UnixSocketOwnerSweep(match func(boundPath string) RowMatch) UnixSocketSweep
 
 	// Attribution: scan every live same-uid pid's fd table for
 	// socket:[inode] links naming the matched inodes. A pid that holds one
-	// is Bound when its row was certain, Uncertain otherwise — Bound wins
-	// when both. A row no fd table names stays unattributed.
+	// is Bound when its row was certain, Uncertain when merely possible —
+	// Bound wins when both. A row no fd table names stays unattributed.
+	// Mismatch and relative rows are not bucketed here at all: they leave
+	// with their holders in Pending, for the caller to decide.
 	deadline := start.Add(socketSweepBudget)
 	var scanPids []int
 	for _, pids := range groups {
 		scanPids = append(scanPids, pids...)
 	}
 	scanPids = append(scanPids, loosePids...)
-	certain, possible, held := socketInodeHolders(scanPids, matchedInodes, deadline)
+	certain, possible, holders, complete := socketInodeHolders(scanPids, matchedInodes, deadline)
+	s.ScanComplete = complete
 	for pid, spelling := range certain {
 		s.Bound[pid] = spelling
 	}
@@ -233,10 +301,22 @@ func UnixSocketOwnerSweep(match func(boundPath string) RowMatch) UnixSocketSweep
 		}
 	}
 	for ino, row := range matchedInodes {
-		if held[ino] {
+		if row.kind == rowMismatch {
+			s.Pending = append(s.Pending, PendingRow{
+				Inode: ino, Spelling: row.spelling, Kind: PendingMismatch, Holders: holders[ino],
+			})
 			continue
 		}
-		if row.certain {
+		if row.kind == rowRelative {
+			s.Pending = append(s.Pending, PendingRow{
+				Inode: ino, Spelling: row.spelling, Kind: PendingRelative, Holders: holders[ino],
+			})
+			continue
+		}
+		if len(holders[ino]) > 0 {
+			continue
+		}
+		if row.kind == rowCertain {
 			s.UnattributedBound++
 		} else {
 			s.UnattributedUncertain++
@@ -265,8 +345,14 @@ func (s *UnixSocketSweep) addRows(data []byte, pids []int, match func(string) Ro
 		s.Rows++
 		switch m := match(row.path); m {
 		case RowMatchNone:
+		case RowMatchMismatch:
+			matched[row.inode] = matchedRow{kind: rowMismatch, spelling: row.path}
+		case RowMatchRelative:
+			matched[row.inode] = matchedRow{kind: rowRelative, spelling: row.path}
+		case RowMatchCertain:
+			matched[row.inode] = matchedRow{kind: rowCertain, spelling: row.path}
 		default:
-			matched[row.inode] = matchedRow{certain: m == RowMatchCertain, spelling: row.path}
+			matched[row.inode] = matchedRow{kind: rowPossible, spelling: row.path}
 		}
 	}
 }
@@ -279,11 +365,17 @@ type netUnixBoundRow struct {
 	listening bool
 }
 
-// parseNetUnixBoundRows returns every row whose Path column is a filesystem
-// path: non-empty, and not the '@' an abstract address prints as. Bound rows
-// of every state count — a bound socket that never listened still holds the
-// path — with the __SO_ACCEPTCON flag kept for logging. Anything not shaped
-// like the table is an error, so a format change reads "could not tell".
+// parseNetUnixBoundRows returns every row whose Path column is non-empty.
+// Bound rows of every state count — a bound socket that never listened
+// still holds the path — with the __SO_ACCEPTCON flag kept for logging.
+// '@'-led rows are kept too: an abstract socket's printed "@name" is
+// indistinguishable from a filesystem path spelled "@name" verbatim, and a
+// filesystem row that is missed is a bound owner nobody counted — the
+// false negative the sweep exists to prevent (#7695). The caller's match
+// decides every row; an abstract name passes it only for a path spelled
+// the same, which is as possible a tie as it is a certain one. Anything
+// not shaped like the table is an error, so a format change reads
+// "could not tell".
 func parseNetUnixBoundRows(data []byte) ([]netUnixBoundRow, error) {
 	lines := strings.Split(string(data), "\n")
 	if len(lines) == 0 || !strings.HasPrefix(lines[0], "Num") {
@@ -298,7 +390,7 @@ func parseNetUnixBoundRows(data []byte) ([]netUnixBoundRow, error) {
 		if len(fields) < 7 {
 			return nil, fmt.Errorf("/proc/net/unix: short row %q", line)
 		}
-		if rest == "" || strings.HasPrefix(rest, "@") {
+		if rest == "" {
 			continue
 		}
 		flags, err := strconv.ParseUint(fields[3], 16, 32)
@@ -316,13 +408,17 @@ func parseNetUnixBoundRows(data []byte) ([]netUnixBoundRow, error) {
 
 // socketInodeHolders scans /proc/<pid>/fd for socket:[inode] links naming
 // rows' inodes, returning the pids holding a certain-match inode, the pids
-// holding only a possible-match one, and the set of inodes anyone held. The
-// walk is chunked and deadline-bound like listenerHolders': an fd that raced
-// away is skipped, and an unreadable fd table or a spent budget just names
-// fewer holders — never unproves a bound row, which stands on the table
-// alone.
-func socketInodeHolders(pids []int, rows map[string]matchedRow, deadline time.Time) (certain, possible map[int]string, held map[string]bool) {
-	certain, possible, held = map[int]string{}, map[int]string{}, map[string]bool{}
+// holding only a possible-match one, and the holder lists every matched
+// inode built — the list is what Pending reports for a row the match
+// deferred. complete is true only when every pid's fd table was walked; a
+// truncated scan names fewer holders and a pending row is never ruled out
+// on it. The walk is chunked and deadline-bound like listenerHolders': an
+// fd that raced away is skipped, and an unreadable fd table or a spent
+// budget just names fewer holders — never unproves a bound row, which
+// stands on the table alone.
+func socketInodeHolders(pids []int, rows map[string]matchedRow, deadline time.Time) (certain, possible map[int]string, holders map[string][]int, complete bool) {
+	certain, possible, holders = map[int]string{}, map[int]string{}, map[string][]int{}
+	complete = true
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	work := make(chan int, len(pids))
@@ -334,15 +430,22 @@ func socketInodeHolders(pids []int, rows map[string]matchedRow, deadline time.Ti
 		defer wg.Done()
 		for pid := range work {
 			if time.Now().After(deadline) {
+				mu.Lock()
+				complete = false
+				mu.Unlock()
 				return
 			}
 			scanPidSocketInodes(pid, rows, deadline, func(inode string, row matchedRow) {
 				mu.Lock()
-				held[inode] = true
-				if row.certain {
+				if !slices.Contains(holders[inode], pid) {
+					holders[inode] = append(holders[inode], pid)
+				}
+				if row.kind == rowCertain {
 					certain[pid] = row.spelling
-				} else if _, ok := certain[pid]; !ok {
-					possible[pid] = row.spelling
+				} else if row.kind == rowPossible {
+					if _, ok := certain[pid]; !ok {
+						possible[pid] = row.spelling
+					}
 				}
 				mu.Unlock()
 			})
@@ -353,7 +456,7 @@ func socketInodeHolders(pids []int, rows map[string]matchedRow, deadline time.Ti
 		go worker()
 	}
 	wg.Wait()
-	return certain, possible, held
+	return certain, possible, holders, complete
 }
 
 // scanPidSocketInodes readlinks one pid's fd table, chunked, reporting each

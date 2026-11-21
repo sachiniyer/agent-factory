@@ -412,20 +412,35 @@ func classifyNoServerDiagnostic(diagnostic string) noServerDiagnosticKind {
 // named. Neither is the unattributed count (#7695): a socket the kernel shows
 // bound to the path whose holder no process could be named for — an other-uid,
 // non-dumpable, or raced-away holder — is real, but there is no pid to print.
-func describeSocketOwners(servers, unidentified []int, unattributed int) string {
-	named, unknown := pidArgsForSignal(servers), pidArgsForSignal(unidentified)
+// The head is the strongest fact the evidence gives; the clauses name what
+// is less certain. A pid the binding evidence names is said to be bound to
+// the path — that is what the kernel recorded (#7695 R4): "could not be
+// identified" describes a read that failed, which a bound row is not. The
+// same is owed it in the advice: pointing the user at `tmux: server` asks
+// them to find a process af already names.
+func describeSocketOwners(servers, boundUnidentified, unidentified []int, unattributed int) string {
+	named, bound, unknown := pidArgsForSignal(servers), pidArgsForSignal(boundUnidentified),
+		pidArgsForSignal(unidentified)
 	var head string
 	switch {
 	case len(named) == 1:
 		head = "a tmux server is running for this user (pid " + named[0] + ")"
 	case len(named) > 1:
 		head = "tmux servers are running for this user (pids " + strings.Join(named, ", ") + ")"
-	case len(unknown) == 0 && unattributed == 0:
+	case len(bound) == 0 && len(unknown) == 0 && unattributed == 0:
 		return "a tmux server is running for this user"
 	default:
 		head = "a tmux server may be running for this user"
 	}
 	var clauses []string
+	switch len(bound) {
+	case 0:
+	case 1:
+		clauses = append(clauses, "pid "+bound[0]+" is bound to the path but is not positively a tmux server")
+	default:
+		clauses = append(clauses, "pids "+strings.Join(bound, ", ")+
+			" are bound to the path but are not positively tmux servers")
+	}
 	switch len(unknown) {
 	case 0:
 	case 1:
@@ -447,15 +462,25 @@ func describeSocketOwners(servers, unidentified []int, unattributed int) string 
 	return head + "; " + strings.Join(clauses, "; ")
 }
 
-func recreateSocketAdvice(servers, unidentified []int, unattributed int) string {
-	named, unknown := pidArgsForSignal(servers), pidArgsForSignal(unidentified)
+func recreateSocketAdvice(servers, boundUnidentified, unidentified []int, unattributed int) string {
+	named, bound, unknown := pidArgsForSignal(servers), pidArgsForSignal(boundUnidentified),
+		pidArgsForSignal(unidentified)
 	var advice string
-	if len(named) == 0 {
-		advice = "Find the server (`ps -o pid,comm,args -u \"$(id -u)\"`, look for `tmux: server`), then " +
-			"signal it with `kill -USR1 <pid>` to recreate its socket — or stop it — and re-run"
-	} else {
+	switch {
+	case len(named) > 0:
 		advice = "Recreate its socket with " + shellsuggest.Command("kill", append([]string{"-USR1"}, named...)...) +
 			" — or stop that server — then re-run"
+	case len(bound) > 0:
+		// Binding evidence already names who is bound — the user checks
+		// THAT pid, not a `tmux: server` task name (#7695 R4). SIGUSR1 is
+		// still offered only on a server it proves to be.
+		advice = "Check " + shellsuggest.Command("ps", "-o", "pid,comm,args", "-p", strings.Join(bound, ",")) +
+			" before signalling " + pidNoun(bound) + ": the kernel names " + itOrThem(bound) +
+			" bound to the path, and SIGUSR1 terminates a process that is not a tmux server. " +
+			"If it proves to be one, `kill -USR1` recreates its socket — or stop it — and re-run"
+	default:
+		advice = "Find the server (`ps -o pid,comm,args -u \"$(id -u)\"`, look for `tmux: server`), then " +
+			"signal it with `kill -USR1 <pid>` to recreate its socket — or stop it — and re-run"
 	}
 	if len(unknown) > 0 {
 		advice += ". Check " + shellsuggest.Command("ps", "-o", "pid,comm,args", "-p", strings.Join(unknown, ",")) +
@@ -466,6 +491,14 @@ func recreateSocketAdvice(servers, unidentified []int, unattributed int) string 
 			shellsuggest.Command("lsof", "-U") + " or `ss -xlp` names it"
 	}
 	return advice
+}
+
+// itOrThem is "it" or "them" for a pid list's pronoun.
+func itOrThem(pids []string) string {
+	if len(pids) == 1 {
+		return "it"
+	}
+	return "them"
 }
 
 // deletedSocketDirAdvice renders the deleted-directory clause the
@@ -482,10 +515,10 @@ func recreateSocketAdvice(servers, unidentified []int, unattributed int) string 
 // restore the link. Only when none does is `mkdir -p <dir>` safe, and it
 // makes the socket spelling comparable again. A bound holder af cannot
 // name gets the same check through the tools that name sockets.
-func deletedSocketDirAdvice(dir string, servers, unidentified []int, unattributed int) string {
+func deletedSocketDirAdvice(dir string, servers, boundUnidentified, unidentified []int, unattributed int) string {
 	var checks []string
 	unnamed := false
-	for _, pid := range append(append([]int{}, servers...), unidentified...) {
+	for _, pid := range append(append(append([]int{}, servers...), boundUnidentified...), unidentified...) {
 		if pid <= 0 {
 			continue // the unreadable-table sentinel names nothing to check
 		}

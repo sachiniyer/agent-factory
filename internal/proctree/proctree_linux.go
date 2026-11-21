@@ -366,6 +366,32 @@ func sameMountNamespace(pid int) (same, known bool) {
 	return os.SameFile(target, self), true
 }
 
+// SameFileView reports whether pid provably sees the same filesystem af
+// does: the same mount namespace (/proc/<pid>/ns/mnt's identity against
+// ours) and the same root (/proc/<pid>/root's dentry against ours) — a
+// mount namespace can hold a chroot, so both proofs are required (#7695).
+// Only on both is a socket path spelling the kernel recorded in that
+// process's view guaranteed to name the same file af's own filesystem walk
+// would reach. Any failed read is false, never same: a holder whose view
+// cannot be established is an unknown, and the row it holds stays a
+// possible owner. Identity is per dentry and namespace inode, both
+// view-independent kernel facts — procfs answers them for the target's
+// view without interpreting it.
+func SameFileView(pid int) bool {
+	if same, known := sameMountNamespace(pid); !known || !same {
+		return false
+	}
+	target, err := os.Stat(fmt.Sprintf("/proc/%d/root", pid))
+	if err != nil {
+		return false
+	}
+	self, err := os.Stat("/proc/self/root")
+	if err != nil {
+		return false
+	}
+	return os.SameFile(target, self)
+}
+
 // linuxWorkingDirPath removes procfs's annotation from an unlinked cwd. The
 // suffix is ambiguous because it is also legal in a real filename, so an
 // existing path is preserved only when it has the cwd's device/inode identity.

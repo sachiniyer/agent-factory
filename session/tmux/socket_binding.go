@@ -103,11 +103,15 @@ func readTmuxServerSocketBinding(pid int, socketPath string) (socketBinding, str
 //     agrees: kill(pid, 0), which delivers nothing, is ESRCH only when no
 //     process has the pid. A live process this uid may not signal answers
 //     EPERM (measured: pid 1).
+//   - ESRCH from the read itself is the kernel's own answer already — a pid
+//     it answers ESRCH for is gone, whichever errno the /proc read met
+//     (#7695 R3). It needs no kill(pid, 0) to agree: hidepid fakes a missing
+//     entry, not an interrupted stat.
 //
 // Any other answer, an error included, is not proof.
 var serverPIDExited = func(pid int) bool {
 	_, err := proctree.Lookup(pid)
-	if errors.Is(err, proctree.ErrProcessExited) {
+	if errors.Is(err, proctree.ErrProcessExited) || errors.Is(err, syscall.ESRCH) {
 		return true
 	}
 	if errors.Is(err, os.ErrNotExist) {
