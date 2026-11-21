@@ -350,7 +350,9 @@ func TestRenameTabPromptSizesToContent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHome(t)
 			inst := freshLocalInstance(t, "rename-size")
-			inst.AddWebTabForTest("web", "https://example.com")
+			// A non-default name keeps the rail label identical to the name, so
+			// the title and the input row both carry it.
+			inst.AddWebTabForTest("sleeper", "https://example.com")
 			selectInstance(h, inst)
 			resizeHome(h, tc.w, tc.hgt)
 			h.store.SetActiveTab(1)
@@ -365,7 +367,7 @@ func TestRenameTabPromptSizesToContent(t *testing.T) {
 				tc.hgt, xansi.Strip(rendered))
 
 			plain := xansi.Strip(rendered)
-			require.GreaterOrEqual(t, strings.Count(plain, "web"), 2,
+			require.GreaterOrEqual(t, strings.Count(plain, "sleeper"), 2,
 				"the seeded input row must stay visible — the title alone carries one")
 			require.Contains(t, plain, "enter rename · esc cancel",
 				"the key hint must stay visible in the compact dialog")
