@@ -13,13 +13,16 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-func configuredSessionEnvPassthrough(explicit []string) []string {
+func configuredSessionEnvPassthrough(explicit []string) ([]string, error) {
 	names := append([]string(nil), explicit...)
 	if cfg, err := config.LoadConfig(); err == nil && cfg != nil {
 		names = append(names, cfg.SessionEnvPassthrough...)
 	}
-	normalized, _ := sessionenv.NormalizeExtraNames(names)
-	return normalized
+	normalized, err := sessionenv.NormalizeExtraNames(names)
+	if err != nil {
+		return nil, fmt.Errorf("invalid session environment pass-through: %w", err)
+	}
+	return normalized, nil
 }
 
 // SessionEnvPassthroughForInstance returns the session's merged exact-name
@@ -45,7 +48,10 @@ func SessionEnvPassthroughForInstance(i *Instance) ([]string, error) {
 	if cfg != nil {
 		explicit = append(explicit, cfg.SessionEnvPassthrough...)
 	}
-	normalized, _ := sessionenv.NormalizeExtraNames(explicit)
+	normalized, err := sessionenv.NormalizeExtraNames(explicit)
+	if err != nil {
+		return nil, fmt.Errorf("invalid session environment pass-through: %w", err)
+	}
 	return normalized, nil
 }
 
