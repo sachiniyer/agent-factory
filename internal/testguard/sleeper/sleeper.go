@@ -47,7 +47,7 @@ func main() {
 
 var (
 	mu     sync.Mutex
-	cached string
+	cached map[string]string
 )
 
 // Path returns the sleeper binary, building it on first use in this test
@@ -56,18 +56,30 @@ var (
 // Run it as Path(t) with "300" like sleep.
 func Path(t testing.TB) string {
 	t.Helper()
+	return build(t, source)
+}
+
+// build returns the binary for a fixture source, building it on first use.
+// The cache is content-addressed — the source is in the hash — so each
+// variant (the plain sleeper, the linux non-dumpable one) builds once and
+// never collides.
+func build(t testing.TB, source string) string {
+	t.Helper()
 	mu.Lock()
 	defer mu.Unlock()
-	if cached != "" {
-		if _, err := os.Stat(cached); err == nil {
-			return cached
+	if cached == nil {
+		cached = map[string]string{}
+	}
+	if cached[source] != "" {
+		if _, err := os.Stat(cached[source]); err == nil {
+			return cached[source]
 		}
 	}
 	sum := sha256.Sum256([]byte(source + runtime.Version() + runtime.GOOS + runtime.GOARCH))
 	dir := filepath.Join(os.TempDir(), fmt.Sprintf("af-testsleeper-%d-%s", os.Getuid(), hex.EncodeToString(sum[:6])))
 	bin := filepath.Join(dir, "sleeper")
 	if _, err := os.Stat(bin); err == nil {
-		cached = bin
+		cached[source] = bin
 		return bin
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -88,10 +100,10 @@ func Path(t testing.TB) string {
 	if err != nil {
 		goBin = filepath.Join(runtime.GOROOT(), "bin", "go")
 	}
-	build := exec.Command(goBin, "build", "-o", filepath.Join(work, "sleeper"), src)
-	build.Dir = work
-	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOFLAGS=")
-	if out, err := build.CombinedOutput(); err != nil {
+	compile := exec.Command(goBin, "build", "-o", filepath.Join(work, "sleeper"), src)
+	compile.Dir = work
+	compile.Env = append(os.Environ(), "CGO_ENABLED=0", "GOFLAGS=")
+	if out, err := compile.CombinedOutput(); err != nil {
 		t.Fatalf("sleeper: go build: %v\n%s", err, out)
 	}
 	if err := os.Rename(filepath.Join(work, "sleeper"), bin); err != nil {
@@ -99,7 +111,7 @@ func Path(t testing.TB) string {
 			t.Fatalf("sleeper: %v", err)
 		}
 	}
-	cached = bin
+	cached[source] = bin
 	return bin
 }
 

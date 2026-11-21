@@ -439,30 +439,6 @@ func missingSocketDir(socketPath string) string {
 	return strings.TrimSuffix(w.resolved, "/") + "/" + strings.Join(w.rest[:len(w.rest)-1], "/")
 }
 
-// possibleSocketOwners is the socket-absent refusal's list of who could still
-// own socketPath: every candidate the probe could not rule out, read the way
-// the probe reads them but with nothing sent. servers are positively
-// identified tmux servers that are bound to the path or unresolved against
-// it. unidentified are candidates not positively identified as a server, the
-// 0 sentinel for a table that could not be read among them; the refusal
-// offers them no signal (#7541). A server bound to another path, or proved
-// gone, is left out.
-func possibleSocketOwners(socketPath string, pids []int) (servers, unidentified []int) {
-	for _, pid := range pids {
-		if pid <= 0 || !tmuxServerIdentified(pid) {
-			unidentified = append(unidentified, pid)
-			continue
-		}
-		switch binding, _ := tmuxServerSocketBinding(pid, socketPath); binding {
-		// socketBindingBoundByTable stays: it is an owner.
-		case socketBindingElsewhere, socketBindingGone:
-		default:
-			servers = append(servers, pid)
-		}
-	}
-	return servers, unidentified
-}
-
 // socketProbeCaller names the code that asked for the socket-absent probe: the
 // first frame outside this package's probe files, for the log line each SIGUSR1
 // gets.
@@ -472,7 +448,8 @@ func socketProbeCaller() string {
 	frames := runtime.CallersFrames(pcs[:n])
 	for {
 		f, more := frames.Next()
-		if base := filepath.Base(f.File); base != "server_presence.go" && base != "socket_binding.go" {
+		if base := filepath.Base(f.File); base != "server_presence.go" && base != "socket_binding.go" &&
+			base != "socket_owner.go" && base != "socket_owner_linux.go" && base != "socket_owner_other.go" {
 			return f.Function + " (" + base + ":" + strconv.Itoa(f.Line) + ")"
 		}
 		if !more {
