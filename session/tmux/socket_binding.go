@@ -234,6 +234,17 @@ type socketPathWalk struct {
 	resolved string
 	rest     []string
 	stop     socketPathStop
+	// names is the basename of every component the walk itself entered —
+	// each rest[0] it followed or stopped on, every name this spelling's
+	// own symlink chain passed through (#7736). A live owner's verbatim
+	// bind spelling can carry an intermediate chain name after that name
+	// was rerouted through another link, so boundRowMatcher admits a row
+	// on any of them; recording them here keeps the admission set on the
+	// same snapshot as the verdict — no second read of a mutable chain.
+	// A path whose links all resolved inside EvalSymlinks records nothing;
+	// the names matter only where the walk had to follow links itself,
+	// which is exactly when the chain's end cannot be resolved.
+	names map[string]bool
 }
 
 // certain reports whether the walk's spelling is one a comparison may TRUST
@@ -335,6 +346,7 @@ func plainSocketComponents(rest []string) bool {
 // or could not place the path at all (a relative spelling): the path names
 // nothing certain, and a comparison with it rules nothing out.
 func canonicalSocketPath(p string) (socketPathWalk, bool) {
+	var names map[string]bool
 	for range maxSocketPathLinks + 1 {
 		parts := strings.Split(p, "/")
 		resolved, i := "", len(parts)
@@ -358,8 +370,12 @@ func canonicalSocketPath(p string) (socketPathWalk, bool) {
 		}
 		rest := parts[i:]
 		if len(rest) == 0 {
-			return socketPathWalk{path: resolved, resolved: resolved}, true
+			return socketPathWalk{path: resolved, resolved: resolved, names: names}, true
 		}
+		if names == nil {
+			names = map[string]bool{}
+		}
+		names[rest[0]] = true
 		dir := strings.TrimSuffix(resolved, "/")
 		target, err := os.Readlink(dir + "/" + rest[0])
 		if err != nil {
@@ -368,6 +384,7 @@ func canonicalSocketPath(p string) (socketPathWalk, bool) {
 				resolved: resolved,
 				rest:     rest,
 				stop:     socketPathStopOf(err),
+				names:    names,
 			}, true
 		}
 		if !filepath.IsAbs(target) {
