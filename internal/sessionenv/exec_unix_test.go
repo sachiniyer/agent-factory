@@ -533,6 +533,57 @@ func TestExecInvocationAddsAnAbsentPinDefinedEmpty(t *testing.T) {
 	}
 }
 
+// execInvocation is the local/ssh shim the issue describes: a
+// session_env_passthrough list that forwards GIT_CONFIG_COUNT while the
+// count resolves to N>0 without its indexed pairs delivers a live count
+// with zero pairs — every git invocation in the session then fails fatally
+// ("missing config key GIT_CONFIG_KEY_0"). The shim is the last point af
+// controls, so it pins the count defined-empty (git reads it as 0, the same
+// shape an unforwarded count takes) rather than handing the agent a broken
+// environment. A complete forward — count plus every required pair — rides
+// through verbatim as the operator's claim.
+func TestExecInvocationNeutralizesForwardedCountWithoutPairs(t *testing.T) {
+	pathDir := t.TempDir()
+	writeExecutableFixture(t, pathDir, "codex")
+	t.Setenv("PATH", pathDir)
+	wantErr := errors.New("stop before exec")
+	var gotEnvironment []string
+	previous := processExec
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnvironment = append([]string(nil), environ...)
+		return wantErr
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	// The half-forward: GIT_CONFIG_COUNT in extras, live in the shim's
+	// environment, its required pairs nowhere.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	if err := execInvocation([]string{"codex", "1", "GIT_CONFIG_COUNT", "codex"}); !errors.Is(err, wantErr) {
+		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
+	}
+	if v, ok := envValue(gotEnvironment, "GIT_CONFIG_COUNT"); !ok || v != "" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q (present %v): a count forwarded without its pairs must be pinned defined-empty so git does not fail fatally", v, ok)
+	}
+	if _, ok := envValue(gotEnvironment, "GIT_CONFIG_KEY_0"); ok {
+		t.Fatalf("GIT_CONFIG_KEY_0 was never forwarded and must stay absent: %v", gotEnvironment)
+	}
+
+	// The complete forward: the count and every required pair are the
+	// operator's claim and reach the agent verbatim.
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.directory")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/work")
+	if err := execInvocation([]string{"codex", "3", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "codex"}); !errors.Is(err, wantErr) {
+		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
+	}
+	for _, entry := range []string{
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/work",
+	} {
+		if !slices.Contains(gotEnvironment, entry) {
+			t.Fatalf("the complete forward must reach the agent verbatim — missing %q in %v", entry, gotEnvironment)
+		}
+	}
+}
+
 // The pins section is length-checked exactly like the extras section: a tail
 // that does not describe exactly pinsCount names plus the command is refused
 // rather than interpreted (#7529 R1).

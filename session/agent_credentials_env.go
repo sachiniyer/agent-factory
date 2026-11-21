@@ -960,6 +960,8 @@ func credentialMountImagePATH(imageEnv []string) string {
 // operator's forwarded names that resolve in the daemon environment, the
 // credential-mount case-twin and blank re-assertions, and — on account sessions
 // — defined-empty blanks for the keep-if-set names the image must not fill.
+// Every docker -e assembly, account or not, ends with the GIT_CONFIG_COUNT=
+// pin an incomplete count forward requires.
 func (p *dockerProvisioner) containerEnvironmentNames() []string {
 	source := os.Environ()
 	names := sessionenv.DockerForwardNames(source, p.agentName(), p.spec.SessionEnvPassthrough)
@@ -981,5 +983,5 @@ func (p *dockerProvisioner) containerEnvironmentNames() []string {
 		names = append(names,
 			accountLoaderBlankEntries(p.spec.Account.Agent, p.spec.SessionEnvPassthrough, source)...)
 	}
-	return names
+	return append(names, p.gitConfigCountNeutralizingNames(source)...)
 }

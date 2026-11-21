@@ -198,16 +198,36 @@ func TestAgentServerAccountExec_LoaderNamesKeepIfSet(t *testing.T) {
 	t.Run("forwarded", func(t *testing.T) {
 		t.Setenv("GEMINI_CLI_HOME", "/scope/account")
 		t.Setenv("GIT_CONFIG_COUNT", "1")
+		t.Setenv("GIT_CONFIG_KEY_0", "safe.directory")
+		t.Setenv("GIT_CONFIG_VALUE_0", "/w")
 		t.Setenv("CLOUD_SHELL", "ambient-not-a-claim")
+		env, err := execCaptured(t, func() error {
+			return agentServerAccountExecInvocation(append([]string{"gemini", "3", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"}, serverArgs...))
+		})
+		require.NoError(t, err)
+		if v, ok := envValue(env, "GIT_CONFIG_COUNT"); !ok || v != "1" {
+			t.Errorf("GIT_CONFIG_COUNT = %q (present %v): the forwarded claim with its complete pairs must be kept", v, ok)
+		}
+		if v, ok := envValue(env, "GIT_CONFIG_KEY_0"); !ok || v != "safe.directory" {
+			t.Errorf("GIT_CONFIG_KEY_0 = %q (present %v): the forwarded pair rides the claim unexamined", v, ok)
+		}
+		if v, ok := envValue(env, "GIT_CONFIG_VALUE_0"); !ok || v != "/w" {
+			t.Errorf("GIT_CONFIG_VALUE_0 = %q (present %v): the forwarded pair rides the claim unexamined", v, ok)
+		}
+		if v, ok := envValue(env, "CLOUD_SHELL"); !ok || v != "" {
+			t.Errorf("CLOUD_SHELL = %q (present %v): an ambient value that was never forwarded is not a claim — pinned empty", v, ok)
+		}
+	})
+
+	t.Run("forwarded-without-pairs-is-neutralized", func(t *testing.T) {
+		t.Setenv("GEMINI_CLI_HOME", "/scope/account")
+		t.Setenv("GIT_CONFIG_COUNT", "1")
 		env, err := execCaptured(t, func() error {
 			return agentServerAccountExecInvocation(append([]string{"gemini", "1", "GIT_CONFIG_COUNT"}, serverArgs...))
 		})
 		require.NoError(t, err)
-		if v, ok := envValue(env, "GIT_CONFIG_COUNT"); !ok || v != "1" {
-			t.Errorf("GIT_CONFIG_COUNT = %q (present %v): the forwarded claim must be kept", v, ok)
-		}
-		if v, ok := envValue(env, "CLOUD_SHELL"); !ok || v != "" {
-			t.Errorf("CLOUD_SHELL = %q (present %v): an ambient value that was never forwarded is not a claim — pinned empty", v, ok)
+		if v, ok := envValue(env, "GIT_CONFIG_COUNT"); !ok || v != "" {
+			t.Errorf("GIT_CONFIG_COUNT = %q (present %v): a count forwarded without its required pairs is neutralized empty so git does not fail fatally", v, ok)
 		}
 	})
 
