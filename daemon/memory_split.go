@@ -16,11 +16,13 @@ import (
 // cache into one number, so a 30 GB peak is ambiguous between a heap burst
 // and file-cache charge — and the spike run's split is gone with it. This
 // line logs both halves at a fixed cadence and once more at shutdown, so the
-// next big peak is classifiable from the daemon log alone. Go's side comes
-// from runtime.ReadMemStats; the cgroup half is read best-effort from the
-// daemon's own cgroup v2 memory.stat and simply omitted where it cannot be
-// read (macOS, cgroup v1, no systemd), never logged as an error. The line
-// carries counters only — no paths, no user data.
+// next big peak is classifiable from the daemon log alone — including the
+// cgroup's own running high-water, which a spike too brief for the tick to
+// see still moves. Go's side comes from runtime.ReadMemStats; the cgroup
+// half is read best-effort from the daemon's own cgroup v2 memory.stat and
+// memory.peak, each field simply omitted where it cannot be read (macOS,
+// cgroup v1, no systemd, pre-5.19 kernels), never logged as an error. The
+// line carries counters only — no paths, no user data.
 
 // memorySplitInterval is the line's cadence: modest enough that a day of
 // daemon uptime costs ~140 lines of log, and the spec's floor — never more
@@ -57,36 +59,54 @@ func startMemorySplitLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.Wai
 	}()
 }
 
-// logMemorySplit emits the one compact line. cgroupOK is folded into the
-// format so a host with no readable cgroup v2 stat gets the same shape minus
-// the cgroup fields — never a warning and never a fake zero.
+// cgroupMemory is one sample of the daemon's own cgroup v2 counters. The two
+// halves are independent best-effort reads: statOK covers the memory.stat
+// anon/file pair and peakOK covers memory.peak, the cgroup's own running
+// high-water mark. A spike that rises and falls between two log samples is
+// invisible to the interval line, but it moves cgroup_peak — so the log
+// always shows which window the peak moved in.
+type cgroupMemory struct {
+	anon, file uint64
+	statOK     bool
+	peak       uint64
+	peakOK     bool
+}
+
+// logMemorySplit emits the one compact line. Each cgroup field is folded
+// into the format independently so a host with no readable cgroup v2 gets
+// the same shape minus those fields — never a warning and never a fake zero.
 func (m *Manager) logMemorySplit() {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	anon, file, cgroupOK := cgroupV2AnonFile()
-	m.info().Print(memorySplitLine(ms.HeapAlloc, ms.Sys, anon, file, cgroupOK))
+	m.info().Print(memorySplitLine(ms.HeapAlloc, ms.Sys, cgroupV2Memory()))
 }
 
 // memorySplitLine formats the sample. goHeap is HeapAlloc (live heap) and
 // goTotal is Sys (everything the runtime has asked the OS for); the cgroup
-// fields are the memory.stat anon and file counters of the daemon's own
-// cgroup when those could be read.
-func memorySplitLine(goHeap, goTotal, anon, file uint64, cgroupOK bool) string {
-	if cgroupOK {
-		return fmt.Sprintf("memory split: go_heap=%d go_total=%d cgroup_anon=%d cgroup_file=%d",
-			goHeap, goTotal, anon, file)
+// fields are the memory.stat anon and file counters and the memory.peak
+// high-water of the daemon's own cgroup, each present only when it read.
+func memorySplitLine(goHeap, goTotal uint64, cg cgroupMemory) string {
+	line := fmt.Sprintf("memory split: go_heap=%d go_total=%d", goHeap, goTotal)
+	if cg.statOK {
+		line += fmt.Sprintf(" cgroup_anon=%d cgroup_file=%d", cg.anon, cg.file)
 	}
-	return fmt.Sprintf("memory split: go_heap=%d go_total=%d", goHeap, goTotal)
+	if cg.peakOK {
+		line += fmt.Sprintf(" cgroup_peak=%d", cg.peak)
+	}
+	return line
 }
 
-// cgroupV2AnonFile reads the anon and file counters out of this process's
-// own cgroup v2 memory.stat. ok is false on every shape that cannot answer:
-// no procfs (non-Linux), a cgroup v1 hierarchy (the file has no "0::" unified
-// line), or a memory.stat that is missing or does not carry both counters.
-func cgroupV2AnonFile() (anon, file uint64, ok bool) {
+// cgroupV2Memory reads the daemon's own cgroup v2 counters: memory.stat's
+// anon and file pair, and memory.peak's running high-water. A cgroup v1 or
+// missing hierarchy answers zero on both — the caller logs the Go half only.
+// memory.peak arrived in kernel 5.19, so an older kernel's cgroup yields the
+// stat pair alone; each read is independent so one absent file never erases
+// the other's answer.
+func cgroupV2Memory() cgroupMemory {
+	var cg cgroupMemory
 	data, err := os.ReadFile(cgroupSelfCgroupFile)
 	if err != nil {
-		return 0, 0, false
+		return cg
 	}
 	rel := ""
 	for _, line := range strings.Split(string(data), "\n") {
@@ -96,13 +116,23 @@ func cgroupV2AnonFile() (anon, file uint64, ok bool) {
 		}
 	}
 	if rel == "" {
-		return 0, 0, false
+		return cg
 	}
-	stat, err := os.ReadFile(filepath.Join(cgroupV2Root, filepath.Clean(rel), "memory.stat"))
-	if err != nil {
-		return 0, 0, false
+	dir := filepath.Join(cgroupV2Root, filepath.Clean(rel))
+	if stat, err := os.ReadFile(filepath.Join(dir, "memory.stat")); err == nil {
+		cg.anon, cg.file, cg.statOK = parseMemoryStatAnonFile(stat)
 	}
-	return parseMemoryStatAnonFile(stat)
+	if body, err := os.ReadFile(filepath.Join(dir, "memory.peak")); err == nil {
+		cg.peak, cg.peakOK = parseMemoryPeak(body)
+	}
+	return cg
+}
+
+// parseMemoryPeak parses a memory.peak body — one byte count, nothing else.
+// An unparseable body is a shape this reader does not claim.
+func parseMemoryPeak(body []byte) (uint64, bool) {
+	peak, err := strconv.ParseUint(strings.TrimSpace(string(body)), 10, 64)
+	return peak, err == nil
 }
 
 // parseMemoryStatAnonFile pulls the anon and file counters out of a
