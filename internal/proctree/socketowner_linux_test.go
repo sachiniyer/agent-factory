@@ -86,14 +86,14 @@ const (
 // sweep pass — has since provably EXITED, polled at every until window
 // closes. The exit proofs are readProc's own: a zombie or dead stat state
 // (ErrProcessExited), the stat gone from /proc, or the kernel's ESRCH
-// however the read met it — the same proofs the sweep's gone logic takes,
+// however the read met it — the same proofs the sweep's gone logic takes —
 // plus two that only a re-check can see. A live stat whose StartID CHANGED
-// proves the occupant the sweep saw exited: the pid slot was reused.
-// kill(pid, 0) answering EPERM proves the pid now names a process af
-// cannot signal — a same-uid task cannot acquire other-uid creds without
-// privilege it never had — so the same-uid process the census counted is
-// gone. Anything else — a live stat, a refused read — is no exit proof,
-// and the pid stays uncovered.
+// proves the occupant the sweep saw exited: the pid slot was reused. And
+// kill(pid, 0) answering ESRCH is the kernel's own "no such process".
+// A refused call is never a proof: a seccomp or LSM policy that denies
+// kill answers EPERM for every live pid, and a denied or foreign process
+// is not an exited one. Anything else — a live stat, a refused read —
+// is no exit proof either, and the pid stays uncovered.
 func censusUncoveredExited(pid int, every, window time.Duration) bool {
 	deadline := time.Now().Add(window)
 	var startID uint64
@@ -109,8 +109,7 @@ func censusUncoveredExited(pid int, every, window time.Duration) bool {
 		case processGone(err):
 			return true
 		}
-		if kerr := syscall.Kill(pid, 0); errors.Is(kerr, syscall.ESRCH) ||
-			errors.Is(kerr, syscall.EPERM) {
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
 			return true
 		}
 		if time.Now().After(deadline) {
