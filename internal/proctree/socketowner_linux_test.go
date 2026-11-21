@@ -314,13 +314,21 @@ func TestUnixSocketOwnerSweepCostAt800Processes(t *testing.T) {
 	}
 
 	// The positive path: a real bound socket held by this process, unlinked —
-	// the row survives, so the fd attribution walks every fd table.
+	// the row survives, so the fd attribution walks every fd table. What the
+	// sweep owes is that the row stays CLAIMED, not that the attribution
+	// finishes: on a loaded runner the 45 ms socketSweepBudget can be spent
+	// before the fd walk reaches this pid (#4217), and the row then degrades
+	// by design to unattributed — ScanComplete=false, which every consumer
+	// routes to "claimed" anyway. A row attributed nowhere on a COMPLETE
+	// scan, or not counted at all, is unclaimed — the scan having missed a
+	// live holder, a real defect, so that is what fails here.
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "held.sock")
 	ln, err := net.Listen("unix", sock)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 	require.NoError(t, os.Remove(sock))
+	sweepN := 0
 	positive := func() time.Duration {
 		start := time.Now()
 		s := UnixSocketOwnerSweep(func(p string) RowMatch {
@@ -330,7 +338,23 @@ func TestUnixSocketOwnerSweepCostAt800Processes(t *testing.T) {
 			return RowMatchNone
 		})
 		d := time.Since(start)
-		require.Equal(t, sock, s.Bound[os.Getpid()])
+		require.False(t, s.Unprobed)
+		sweepN++
+		attributed := s.Bound[os.Getpid()] == sock
+		degraded := !s.ScanComplete && s.UnattributedBound >= 1
+		branch := "unclaimed"
+		switch {
+		case attributed:
+			branch = "attributed"
+		case degraded:
+			branch = "unattributed"
+		}
+		t.Logf("positive sweep %d: branch=%s ScanComplete=%v Bound[pid]=%q UnattributedBound=%d",
+			sweepN, branch, s.ScanComplete, s.Bound[os.Getpid()], s.UnattributedBound)
+		require.True(t, attributed || degraded,
+			"the bound row must be claimed — attributed to this pid, or degraded to an "+
+				"unattributed bound row under a spent budget: Bound=%v ScanComplete=%v "+
+				"UnattributedBound=%d", s.Bound, s.ScanComplete, s.UnattributedBound)
 		return d
 	}
 
