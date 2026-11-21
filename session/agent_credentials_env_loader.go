@@ -52,6 +52,146 @@ var credentialMountSharedGitEnvNames = map[string]struct{}{
 	"GIT_CONFIG_PARAMETERS": {},
 }
 
+// credentialMountLoaderGlibcNames is glibc's UNSECURE_ENVVARS, transcribed
+// verbatim from sysdeps/generic/unsecvars.h at glibc-2.42
+// (sourceware.org/git/glibc.git d2097651cc57834dbfcaa102ddfacae0d86cfb66):
+// the environment names ld.so removes from a set-user-ID program's
+// environment — glibc's own classification of the names that must not reach
+// privileged code. A repo's docker.run_args is attacker-controlled input to
+// af's in-container provisioning execs on exactly those terms: the names
+// feed ld.so's own startup parsers (the LD_* family and GLIBC_TUNABLES — the
+// tunables parser was itself CVE-2023-4911), make libc load or write
+// repo-chosen material — GCONV_PATH points iconv at repo gconv modules
+// (shared objects), LOCPATH and NLSPATH at repo locale archives and message
+// catalogs (catalogs reach printf-family format strings), GETCONF_DIR at
+// confstr's spec files, TZDIR at repo zoneinfo, LD_DEBUG_OUTPUT, LD_PROFILE
+// and MALLOC_TRACE name files the runtime writes, and TMPDIR redirects
+// privileged file creation — or steer name resolution onto repo inputs
+// (HOSTALIASES, RESOLV_HOST_CONF, NIS_PATH, LOCALDOMAIN, RES_OPTIONS — a
+// repo-chosen resolver input routes credential traffic the way a proxy
+// does). The set is the source list VERBATIM, not a hand-chosen subset:
+// glibc's strip list is the consumer's own boundary, so the refusal is
+// whatever the source adds rather than an enumerated incident list (#7727).
+var credentialMountLoaderGlibcNames = map[string]struct{}{
+	"GCONV_PATH":             {},
+	"GETCONF_DIR":            {},
+	"GLIBC_TUNABLES":         {},
+	"HOSTALIASES":            {},
+	"LD_AUDIT":               {},
+	"LD_BIND_NOT":            {},
+	"LD_BIND_NOW":            {},
+	"LD_DEBUG":               {},
+	"LD_DEBUG_OUTPUT":        {},
+	"LD_DYNAMIC_WEAK":        {},
+	"LD_LIBRARY_PATH":        {},
+	"LD_ORIGIN_PATH":         {},
+	"LD_PRELOAD":             {},
+	"LD_PROFILE":             {},
+	"LD_SHOW_AUXV":           {},
+	"LD_VERBOSE":             {},
+	"LD_WARN":                {},
+	"LOCALDOMAIN":            {},
+	"LOCPATH":                {},
+	"MALLOC_ARENA_MAX":       {},
+	"MALLOC_ARENA_TEST":      {},
+	"MALLOC_MMAP_MAX_":       {},
+	"MALLOC_MMAP_THRESHOLD_": {},
+	"MALLOC_PERTURB_":        {},
+	"MALLOC_TOP_PAD_":        {},
+	"MALLOC_TRACE":           {},
+	"MALLOC_TRIM_THRESHOLD_": {},
+	"NIS_PATH":               {},
+	"NLSPATH":                {},
+	"RESOLV_HOST_CONF":       {},
+	"RES_OPTIONS":            {},
+	"TMPDIR":                 {},
+	"TZDIR":                  {},
+}
+
+// credentialMountLoaderShellNames are the environment-import names of the
+// shells af invokes inside the container. af's root provisioning execs are
+// `sh -c` scripts run as --user 0:0, and which name reaches them depends on
+// the invocation name and the euid — each name's real channel is stated, not
+// assumed:
+//   - BASH_ENV names a file bash sources for NON-interactive shells — but
+//     only when invoked as `bash`, never as `sh` (measured on the host and
+//     on amazonlinux:2023, whose /bin/sh is bash): it reaches a bash-as-bash
+//     invocation such as an account shell tab or an image's own `bash -c`,
+//     not af's `sh -c` provisioning execs.
+//   - ENV names a file the POSIX-shell family sources for INTERACTIVE
+//     shells: dash, BusyBox ash, ksh, mksh — and bash running as sh — so an
+//     interactive pane or account shell on such an image runs a repo file
+//     at startup (POSIX shells' documented startup rule; also
+//     accountShellStartupNames).
+//   - SHELLOPTS and BASHOPTS import shell OPTION state from the
+//     environment — `SHELLOPTS=xtrace` is imported by bash running as sh
+//     even at euid 0 (measured on amazonlinux:2023), so it reaches the root
+//     provisioning execs and traces every command they run.
+//   - PS4 is that trace prompt: bash expands command substitutions inside
+//     it at every traced command — but bash IGNORES an inherited PS4 when
+//     euid is 0 (measured on amazonlinux:2023), so it reaches the shells af
+//     or the image runs at a non-root euid — the session-user execs and
+//     interactive shells — not the root provisioning chain.
+var credentialMountLoaderShellNames = map[string]struct{}{
+	"BASH_ENV":  {},
+	"BASHOPTS":  {},
+	"ENV":       {},
+	"PS4":       {},
+	"SHELLOPTS": {},
+}
+
+// credentialMountLoaderNamePrefixes are env-name prefixes a consumer
+// imports as code whatever the rest of the name spells: bash imports every
+// BASH_FUNC_<name>%% as the definition of function <name> at startup — its
+// exported-function encoding since the shellshock fix — so a repo
+// `-e BASH_FUNC_cat%%` replaces the `cat` af's root provisioning `sh -c`
+// scripts call (measured: bash-as-sh imports the function and runs the repo
+// body for `cat`). The family is unbounded, so the prefix is refused rather
+// than each function name.
+var credentialMountLoaderNamePrefixes = []string{"BASH_FUNC_"}
+
+// credentialMountProgramLoaderNames unions the per-consumer sets above:
+// every env name that makes ld.so, libc, or a shell af invokes inside the
+// container load or run repo-chosen material. They are refused to repo
+// run_args but NOT pinned: an image's own values for these names are the
+// same trust class as its binaries (the repo picks the image), pinning
+// would break images that legitimately need them — a defined-empty ENV or
+// BASH_ENV makes the source itself fail — and the inner filter already
+// keeps them off the agent's env either way (#7529 R7, #7727).
+var credentialMountProgramLoaderNames = func() map[string]struct{} {
+	out := make(map[string]struct{},
+		len(credentialMountLoaderGlibcNames)+len(credentialMountLoaderShellNames))
+	for name := range credentialMountLoaderGlibcNames {
+		out[name] = struct{}{}
+	}
+	for name := range credentialMountLoaderShellNames {
+		out[name] = struct{}{}
+	}
+	return out
+}()
+
+// credentialMountLoaderReason returns the because-clause for a run_args env
+// name in the loader class — shared by the credential-mount guard
+// (credentialMountDeniedReason) and the account guard
+// (accountDockerProgramChoiceReason) so the two refuse the same derived set
+// with the same mechanism wording. The consumer is named so the operator
+// knows why: the C library for the glibc names, the shell import for the
+// shell names, the function import for the BASH_FUNC_ family.
+func credentialMountLoaderReason(name string) (string, bool) {
+	if _, ok := credentialMountLoaderShellNames[name]; ok {
+		return "a shell af invokes inside the container imports the name from the environment and runs repository-chosen code — the channel each name opens is the one its consumer documents (a root `sh -c` exec where the import survives root, a bash-as-bash or non-root invocation otherwise)", true
+	}
+	for _, prefix := range credentialMountLoaderNamePrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return "it imports a repository-chosen shell function into the shells af's in-container provisioning execs invoke — bash expands every BASH_FUNC_<name>%% as a function definition at startup", true
+		}
+	}
+	if _, ok := credentialMountLoaderGlibcNames[name]; ok {
+		return "it makes the dynamic loader or C library load, read, or write repository-chosen material (the name is in glibc's UNSECURE_ENVVARS, stripped when privileged code runs) inside the programs af runs in the container", true
+	}
+	return "", false
+}
+
 // credentialMountDeniedReason returns, for a refused run_args name, the
 // because-clause the refusal prints — worded for the mechanism the name's
 // class defends, so "substitute" is only claimed where substitution is the
@@ -63,8 +203,8 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	if _, ok := credentialMountReassertedNames[name]; ok {
 		return "af re-asserts it after run_args for the mounted credential", true
 	}
-	if _, ok := credentialMountProgramLoaderNames[name]; ok {
-		return "it loads a repository-chosen library into the programs af runs in the container before the agent-side env filter applies", true
+	if reason, ok := credentialMountLoaderReason(name); ok {
+		return reason + " before the agent-side env filter applies", true
 	}
 	if _, ok := credentialMountSharedCredentialNames[name]; ok {
 		return "it can substitute an identity the operator did not forward", true

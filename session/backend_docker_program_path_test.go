@@ -268,106 +268,95 @@ func TestDockerContainerEnvironment_MountSessionNormalizesTwin(t *testing.T) {
 
 // TestCredentialMountPinnedNames_ProgramChoiceNamesNotPinned pins the
 // refuse-vs-pin split: PATH and the loader names are refused to repo
-// run_args, but PATH is re-asserted (never blanked) and the loader names are
-// left at the image's own values (the same trust class as its binaries) — a
-// defined-empty PATH or LD_LIBRARY_PATH would break the container outright.
-// LD_AUDIT joins the loader names: it is refused to repo run_args on the
-// same terms but never pinned, because an image's own audit modules are the
-// same trust class as its binaries (#7529 R7).
+// run_args, but PATH is re-asserted (never blanked) and every loader name
+// is left at the image's own values (the same trust class as its
+// binaries) — a defined-empty PATH, LD_LIBRARY_PATH, or BASH_ENV would
+// break the container outright (#7529 R7; the derived set is #7727's).
 func TestCredentialMountPinnedNames_ProgramChoiceNamesNotPinned(t *testing.T) {
 	pinned := sortedNamesToSet(credentialMountPinnedNames(tmux.ProgramClaude, nil))
 	denied := credentialMountDeniedNames(tmux.ProgramClaude)
-	for _, name := range []string{"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
+	require.Contains(t, denied, "PATH", "PATH must be refused to run_args")
+	require.NotContains(t, pinned, "PATH", "PATH must be re-asserted, not pinned empty")
+	for name := range credentialMountProgramLoaderNames {
 		require.Contains(t, denied, name, "%s must be refused to run_args", name)
 		require.NotContains(t, pinned, name, "%s must not be pinned defined-empty", name)
 	}
 }
 
-// TestCredentialMountProgramLoaderNames_BlockEveryGlibcLoaderInjectionVar
-// is the regression pin for the LD_AUDIT gap: glibc has three dynamic-linker
-// variables that load a shared object into every dynamically linked program
-// at startup — LD_PRELOAD (preload list), LD_LIBRARY_PATH (library search
-// path), and LD_AUDIT (audit-module list) — and all three must be refused to
-// repo run_args on BOTH the credential-mount and account paths through the
-// shared credentialMountProgramLoaderNames map. A later glibc injection
-// variable or a re-split of the map would silently re-open the same hole:
-// the test enumerates the three names the bug report established and
-// confirms each one is refused on both refusal paths with the
-// library-injection reason, AND that the shared map holds EXACTLY those
-// three names (so adding a fourth without updating the consumers would
-// show as a refusal against a name not in the map — and forgetting one
-// would show as a missing refusal). It mirrors the backend_docker_account
-// test pair's loop on every mountable agent so a new agent landing on the
-// roster does not silently drop the protection.
-func TestCredentialMountProgramLoaderNames_BlockEveryGlibcLoaderInjectionVar(t *testing.T) {
-	// The dynamic-linker injection variables the cred-mount and account
-	// paths must both refuse. LD_AUDIT was the original gap; the test
-	// exists to keep it refused alongside its siblings.
-	wantLoaders := []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"}
-	require.Equal(t, len(wantLoaders), len(credentialMountProgramLoaderNames),
-		"the loader-name map's membership changed — update this test and the docs to match")
-	for _, name := range wantLoaders {
-		require.Contains(t, credentialMountProgramLoaderNames, name,
-			"%s must be in credentialMountProgramLoaderNames so both refusal paths block it", name)
+// TestCredentialMountProgramLoaderNames_RefusesTheDerivedSet is the
+// regression pin for the loader-name class: the refused set is DERIVED
+// from the consumers (#7727) — glibc's UNSECURE_ENVVARS plus the shells'
+// environment-import rules — rather than a hand-written list, so the test
+// asserts membership over that derived set (the transcription lives in
+// backend_docker_loader_names_test.go) instead of pinning an exact count.
+// Every member must be refused on BOTH the credential-mount and account
+// paths through the shared credentialMountProgramLoaderNames map — a name
+// dropped from the union shows as a missing refusal on both — and each
+// must carry the mechanism reason and remedy. It mirrors the roster loop
+// on every mountable agent so a new agent landing on the roster does not
+// silently drop the protection.
+func TestCredentialMountProgramLoaderNames_RefusesTheDerivedSet(t *testing.T) {
+	for _, name := range wantLoaderEnvNames() {
+		if !strings.HasPrefix(name, "BASH_FUNC_") {
+			require.Contains(t, credentialMountProgramLoaderNames, name,
+				"%s must be in credentialMountProgramLoaderNames so both refusal paths block it", name)
+		}
 	}
 
-	// Every mountable agent on the roster: both refusal paths must refuse
-	// each loader name with the library-injection reason, and the name must
-	// be denied (never pinned) so the image's own value survives — same as
-	// the existing two sibling names.
+	// Every mountable agent on the roster: the credential-mount path must
+	// deny each exact member (never pin it — the image's own value
+	// survives), and the denial must carry the mechanism reason.
 	for agent := range agentCredentialFiles {
 		denied := credentialMountDeniedNames(agent)
 		pinned := sortedNamesToSet(credentialMountPinnedNames(agent, nil))
-		for _, name := range wantLoaders {
+		for name := range credentialMountProgramLoaderNames {
 			require.Containsf(t, denied, name,
 				"agent %q: %s must be denied to repo run_args on the credential-mount path", agent, name)
 			require.NotContainsf(t, pinned, name,
 				"agent %q: %s is a loader name — it is refused to run_args but never pinned defined-empty", agent, name)
 			reason, ok := credentialMountDeniedReason(agent, name)
 			require.Truef(t, ok, "agent %q: credentialMountDeniedReason(%q) must refuse", agent, name)
-			require.Containsf(t, reason, "library",
-				"agent %q: %s's credential-mount refusal must name the library-injection mechanism, got %q", agent, name, reason)
+			require.NotEmptyf(t, reason,
+				"agent %q: %s's credential-mount refusal must name the mechanism", agent, name)
 		}
 	}
 
 	// On the account path, accountDockerProgramChoiceReason must refuse
-	// every loader name with the same library-injection reason, and the
-	// run_args validator must reject a -e NAME=… entry for every account
-	// agent. PATH stays covered by its own reason here as a sanity check
-	// that the path's refusal did not regress.
+	// every member of the derived set, and the run_args validator must
+	// reject a -e NAME=… entry for every account agent, naming the
+	// variable and the operator remedy. PATH stays covered by its own
+	// reason here as a sanity check that the path's refusal did not
+	// regress.
 	for _, agent := range []string{"claude", "gemini", "codex"} {
-		for _, name := range wantLoaders {
+		for _, name := range wantLoaderEnvNames() {
 			reason, ok := accountDockerProgramChoiceReason(name)
 			require.Truef(t, ok, "accountDockerProgramChoiceReason(%q) must refuse for %s", name, agent)
-			require.Containsf(t, reason, "library",
-				"%s's account refusal must name the library-injection mechanism, got %q", name, reason)
+			require.NotEmptyf(t, reason,
+				"%s's account refusal must name the mechanism", name)
 			err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, agent)
 			require.Errorf(t, err, "account %s: -e %s=… must be refused", agent, name)
 			require.Containsf(t, err.Error(), name, "account %s: the refusal must name %s", agent, name)
-			require.Containsf(t, err.Error(), "library",
-				"account %s: %s's refusal must name the library-injection mechanism", agent, name)
 			require.Containsf(t, err.Error(), "session_env_passthrough",
 				"account %s: %s's refusal must name the operator remedy", agent, name)
 		}
 		// The credential-mount path must refuse too, with its own wording.
-		for _, name := range wantLoaders {
+		for _, name := range wantLoaderEnvNames() {
 			err := validateCredentialDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, agent)
 			require.Errorf(t, err, "credential-mount %s: -e %s=… must be refused", agent, name)
 			require.Containsf(t, err.Error(), name, "credential-mount %s: the refusal must name %s", agent, name)
-			require.Containsf(t, err.Error(), "library",
-				"credential-mount %s: %s's refusal must name the library-injection mechanism", agent, name)
 		}
 	}
 
-	// A combined short option such as `-te LD_AUDIT=…` that hides the -e
+	// A combined short option such as `-te GCONV_PATH=…` that hides the -e
 	// behind a -t must be refused the same way on both paths, so the
-	// cluster-walk the shared map feeds cannot miss the new name either.
-	err := validateAccountDockerRunArgs([]string{"-te", "LD_AUDIT=/workspace/.x/x.so"}, "codex")
-	require.Error(t, err, "an -e LD_AUDIT inside a combined short option must be refused on the account path")
-	require.Contains(t, err.Error(), "LD_AUDIT")
-	err = validateCredentialDockerRunArgs([]string{"-te", "LD_AUDIT=/workspace/.x/x.so"}, tmux.ProgramClaude)
-	require.Error(t, err, "an -e LD_AUDIT inside a combined short option must be refused on the credential-mount path")
-	require.Contains(t, err.Error(), "LD_AUDIT")
+	// cluster-walk the shared map feeds cannot miss the derived names
+	// either.
+	err := validateAccountDockerRunArgs([]string{"-te", "GCONV_PATH=/workspace/.x"}, "codex")
+	require.Error(t, err, "an -e GCONV_PATH inside a combined short option must be refused on the account path")
+	require.Contains(t, err.Error(), "GCONV_PATH")
+	err = validateCredentialDockerRunArgs([]string{"-te", "BASH_FUNC_cat%%=/workspace/.x/fn"}, tmux.ProgramClaude)
+	require.Error(t, err, "an -e BASH_FUNC_* inside a combined short option must be refused on the credential-mount path")
+	require.Contains(t, err.Error(), "BASH_FUNC_cat%%")
 }
 
 // provisionDockerAccountImageEnv provisions an account session far enough to
