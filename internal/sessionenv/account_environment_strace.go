@@ -244,12 +244,15 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 	}
 	// A cluster that never reached an operand-taking letter and still has an
 	// unplaced or unprovable part has an unknown identity — the multiword
-	// forms (`-$OPT`, `-f$OPT`, `-Q$OPT`, `-"$@"`) refused above. A literal
-	// cluster (complete=true) keeps the existing non-terminal refusal: an
-	// unknown short flag with no command following runs nothing, so the
-	// trace cannot place an env mutation. A quoted expansion (`-"$OPT"`) is
-	// incomplete but provably one word, so it keeps the suspect too.
-	return strings.Trim(cluster, straceShortFlags) != "" || cluster == "", i + 1, nil
+	// forms (`-$OPT`, `-f$OPT`, `-Q$OPT`, `-"$@"`) refused above. An
+	// incomplete cluster has an unprovable identity too: its dynamic tail is
+	// parsed as more option letters inside the same argv word, so `-f"$OPT"`
+	// can expand to `-fECODEX_HOME=/o` — a single word carrying the env
+	// operand — and keeps the non-terminal suspect so a command word after
+	// it still refuses. A literal cluster (complete=true) keeps the
+	// existing non-terminal refusal: an unknown short flag with no command
+	// following runs nothing, so the trace cannot place an env mutation.
+	return !complete || strings.Trim(cluster, straceShortFlags) != "" || cluster == "", i + 1, nil
 }
 
 // straceEnvOperandRefused judges the var[=val] operand of -E/--env from its
@@ -338,20 +341,21 @@ func quotedPartsYieldMultipleFields(parts []syntax.WordPart) bool {
 // ("${a[@]}", "${!a[@]}" — the @ name-list "${!pre@}"), and a nested
 // multiword expansion inside a value-position operator word
 // ("${x:-$@}" expands to one field per positional, measured on bash).
-// "${a[*]}", "${!pre*}" and "${#a[@]}" join to a single word, and every
-// pattern-position sub-word ("${y#$@}", "${y/$@/Q}") produces one field,
-// so those stay single.
+// "${a[*]}", "${!pre*}" and every length expansion ("${#@}", "${#a[@]}")
+// join to a single word, and every pattern-position sub-word ("${y#$@}",
+// "${y/$@/Q}") produces one field, so those stay single.
 func paramExpYieldsMultipleFieldsInsideQuotes(exp *syntax.ParamExp) bool {
+	if exp.Length {
+		return false
+	}
 	if exp.Param != nil && exp.Param.Value == "@" {
 		return true
 	}
 	if exp.Names == syntax.NamesPrefixWords {
 		return true
 	}
-	if exp.Index != nil && !exp.Length {
-		if index, ok := exp.Index.(*syntax.Word); ok && index.Lit() == "@" {
-			return true
-		}
+	if index, ok := exp.Index.(*syntax.Word); ok && index.Lit() == "@" {
+		return true
 	}
 	return exp.Exp != nil && exp.Exp.Op <= syntax.AssignUnsetOrNull &&
 		exp.Exp.Word != nil && quotedPartsYieldMultipleFields(exp.Exp.Word.Parts)

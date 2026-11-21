@@ -184,6 +184,15 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 		// refuses at the operand word rather than reading `--` as the end
 		// of the options.
 		`F='x -E CODEX_HOME=/o codex'; firejail strace -o $F -- codex`,
+		// An incomplete short cluster keeps the non-terminal suspect: a
+		// quoted scalar glued after known short flags is provably ONE argv
+		// word, but its dynamic tail is parsed as more option letters
+		// inside that word — `-f"$OPT"` with OPT=ECODEX_HOME=/o expands to
+		// `-fECODEX_HOME=/o`, a single word carrying the env operand — so a
+		// command word after it still refuses.
+		`OPT='ECODEX_HOME=/o'; firejail strace -f"$OPT" codex`,
+		`OPT='ECODEX_HOME=/o'; firejail strace -ff"$OPT" codex`,
+		`OPT='ECODEX_HOME=/o'; firejail strace -"$OPT" codex`,
 	}
 	for _, command := range refused {
 		require.True(t, commandMutatesAccountEnvironment(command, names),
@@ -287,6 +296,15 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 		// (A non-constant one is refused file-wide by the inverted
 		// arithmetic guard, before the option run sees it.)
 		`firejail strace --output=$((1+1)) codex`,
+		// A positional-count expansion is one decimal word, not one field
+		// per positional — `"${#@}"` is the count form of "$@", so it keeps
+		// the single-word verdict.
+		`firejail strace --output="${#@}" codex`,
+		// The incomplete-cluster suspect is non-terminal: with no command
+		// following, `-f"$OPT"` runs nothing and cannot inject env, so it
+		// stays admitted — the same single-word-no-command shape as
+		// `-"$OPT"` below.
+		`OPT='ECODEX_HOME=/o'; firejail strace -f"$OPT"`,
 		// A QUOTED dash-glued expansion (`--"$OPT"`, `-"$OPT"`,
 		// `--unknown="$OPT"`) is incomplete (complete=false) but does NOT
 		// field-split — it expands to a single argv word, so with no command
