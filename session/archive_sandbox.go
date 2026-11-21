@@ -277,10 +277,8 @@ func (i *Instance) reprovisionRemoteWith(adopt *AdoptSpec) error {
 	return i.reprovisionRemoteOpts(adopt, false)
 }
 
-// reprovisionRemoteOpts is the one body. replacePreserved marks the replacement of
-// a preserved workspace the host has PROVEN gone (#5571 W8.6): the only time a row
-// that still owes a preserved workspace may be replaced, and then onto the recorded
-// checkpoint or not at all.
+// reprovisionRemoteOpts is the one body. replacePreserved marks the replacement of a preserved workspace the host has PROVEN gone (#5571 W8.6): the only time a row that
+// still owes a preserved workspace may be replaced, and then onto the recorded checkpoint or not at all.
 func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool) error {
 	// Backstop for a caller that reaches the replacing path directly: it reaps the
 	// host directory, which for a row archived without a push is the only copy of
@@ -300,18 +298,18 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 	backend := i.backend
 	accountName := i.Account
 	restoreBranch, unverified := i.restoreCheckpointLocked()
+	passthrough, err := configuredSessionEnvPassthrough(i.sessionEnvPassthrough)
 	spec := ProvisionSpec{
 		RepoRoot:      i.Path,
 		Title:         i.Title,
 		Program:       i.Program,
 		CloneURL:      originRemoteURL(i.Path),
 		RestoreBranch: restoreBranch,
-		// The replacement agent-server must land on the SAME branch the fetch
-		// just materialized, not re-derive one from its own branch_prefix
-		// (#5571 W2.4).
+		// The replacement agent-server lands on the SAME branch the fetch
+		// materialized, not re-derived from branch_prefix (#5571 W2.4).
 		Branch:                i.Branch,
 		Host:                  i.Host,
-		SessionEnvPassthrough: configuredSessionEnvPassthrough(i.sessionEnvPassthrough),
+		SessionEnvPassthrough: passthrough,
 		Adopt:                 adopt,
 	}
 	if adopt != nil {
@@ -319,6 +317,9 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 		spec.RestoreBranch = ""
 	}
 	i.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
+	}
 	if err := i.settleRestoreCheckpoint(&spec, restoreBranch, unverified, adopt != nil, replacePreserved); err != nil {
 		return err
 	}
