@@ -133,7 +133,7 @@ func (p gitPairPresence) missing(count, cap int) (names []string, total int) {
 			presentValues++
 		}
 	}
-	total = 2*count - presentKeys - presentValues
+	total = count - presentKeys + count - presentValues
 	if total <= 0 {
 		return nil, 0
 	}
