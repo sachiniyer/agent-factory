@@ -880,6 +880,77 @@ func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogYesRowAloneHolds(t *testi
 		"the hold path sends no key; got %v", cmds)
 }
 
+// The directory-trust modal paints top-down: question, selected Yes row, No
+// row, then the "Press enter to continue" footer. A capture can land one row
+// later than the Yes-row-trailing frame above — after the No row is painted
+// but before the footer — leaving the No row as the last visible content with
+// the selected Yes row above it. CodexTrustPromptPresent declines this frame
+// too (the footer is absent, so affordance != last), and the Yes row above
+// keeps isReadyContent's hasCodexComposerLine arm accepting it, so the hold
+// must cover this later partial-paint frame as well: reporting the pane clear
+// would let task.DismissTrustPrompt paste the briefing into the live modal the
+// very next poll (the same #2220 wedge the Yes-row hold closes).
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogNoRowMidPaintHolds(t *testing.T) {
+	// The top rows and the No row have painted; only the "Press enter to
+	// continue" footer is still outstanding — the later mid-paint shape. The
+	// trailing content is the No row with the selected Yes row above it, so
+	// CodexTrustPromptPresent declines it.
+	const noRowMidPaint = `> You are in /tmp/af-home
+
+  Do you trust the contents of this directory? Working with untrusted contents
+  comes with higher risk of prompt injection.
+
+› 1. Yes, continue
+  2. No, quit`
+
+	handled, cmds := runTrustPromptCheck(t, ProgramCodex, noRowMidPaint)
+	require.True(t, handled,
+		"a live modal whose No row has painted but whose footer has not must not be reported clear")
+	require.Empty(t, sentKeystrokes(cmds),
+		"the hold path sends no key — Enter stays gated on the complete-modal predicate; got %v", cmds)
+}
+
+// The No-row-trailing frame's quoted-prose counterpart: the modal text (through
+// the No row, no footer) sits in scrollback above an active composer, whose
+// visible cursor marks the pane as composer-owned. The hidden-cursor oracle
+// that gates the partial-frame hold must leave the create path clear to
+// deliver the briefing — the same quoted-prose protection the Yes-row hold
+// keeps. No Enter is injected: a visible cursor fails open only by falling
+// through to return false, never by sending a key.
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogNoRowMidPaintWithVisibleCursorInjectsNothing(t *testing.T) {
+	const quotedAboveComposer = `Earlier output quoted the modal text:
+
+  Do you trust the contents of this directory? Working with untrusted contents
+  comes with higher risk of prompt injection.
+
+› 1. Yes, continue
+  2. No, quit`
+
+	var commands []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			commands = append(commands, strings.Join(c.Args, " "))
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				// The ordinary Codex composer owns a visible cursor. The
+				// directory-trust dialog text through the No row is quoted
+				// transcript above an active composer, not a live modal
+				// mid-paint.
+				return []byte("20 0 1"), nil
+			}
+			return []byte(quotedAboveComposer), nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("trust", ""), ProgramCodex, NewMockPtyFactory(t), cmdExec)
+
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"a visible cursor means the composer is active, not a directory-trust modal mid-paint")
+	require.Empty(t, sentKeystrokes(commands),
+		"quoted Yes+No rows above a live composer must never receive Enter; got %v", commands)
+}
+
 // The trailing Yes row alone is not proof a modal owns the pane: the dialog
 // text can sit verbatim in quoted agent output above an active composer. The
 // ordinary Codex composer exposes a terminal cursor, the modal hides one, so a
@@ -1127,14 +1198,16 @@ func TestCheckAndHandleTrustPrompt_ClaudeBranchUnaffectedByDocPhrase(t *testing.
 }
 
 // codexDirectoryTrustTrailingRows recognizes the directory-trust modal's
-// trailing selected Yes row whether the question is painted above, the row
-// sits alone (a pane too short for the question), the row is styled, or the
-// pane carries CRLF line endings. It declines the modal's other rows, the
-// complete modal (whose footer is last, not the Yes row), and unrelated
-// content. The hidden-cursor oracle the caller pairs with this predicate is
-// what keeps the quoted-prose shape from being a false positive; the
-// predicate's own contract is only "the pane ends with the modal's selected
-// Yes row".
+// trailing mid-paint rows: the selected Yes row as the last content (No row
+// and footer not yet painted) OR the No row as the last content with the
+// selected Yes row above it (footer not yet painted), whether the question is
+// painted above, the row sits alone (a pane too short for the question), the
+// row is styled, or the pane carries CRLF line endings. It declines the
+// modal's other rows, the complete modal (whose footer is last), a bare No row
+// without the selected Yes row above, and unrelated content. The hidden-cursor
+// oracle the caller pairs with this predicate is what keeps the quoted-prose
+// shape from being a false positive; the predicate's own contract is only "the
+// pane ends with a mid-paint trailing row of the modal".
 func TestCodexDirectoryTrustTrailingRows(t *testing.T) {
 	const midPaint = `> You are in /tmp/af-home
 
@@ -1142,6 +1215,14 @@ func TestCodexDirectoryTrustTrailingRows(t *testing.T) {
   comes with higher risk of prompt injection.
 
 › 1. Yes, continue`
+
+	const noRowMidPaint = `> You are in /tmp/af-home
+
+  Do you trust the contents of this directory? Working with untrusted contents
+  comes with higher risk of prompt injection.
+
+› 1. Yes, continue
+  2. No, quit`
 
 	tests := []struct {
 		name    string
@@ -1152,10 +1233,23 @@ func TestCodexDirectoryTrustTrailingRows(t *testing.T) {
 		{"selected Yes row alone", "› 1. Yes, continue", true},
 		{"question alone", "Do you trust the contents of this directory?", false},
 		{"trailing blank lines after Yes row", "Do you trust the contents of this directory?\n› 1. Yes, continue\n\n   \n", true},
-		// The modal painted further: the Yes row is no longer last, so the
-		// complete-modal predicate owns the frame instead.
-		{"Yes row followed by No row", "› 1. Yes, continue\n  2. No, quit", false},
+		// The footer landed, so the complete-modal predicate owns the frame
+		// instead.
 		{"complete modal ends in footer", codexDirectoryTrustDialog, false},
+		// The modal painted one row further than the Yes-row-trailing frame:
+		// the No row is now last, with the selected Yes row above it (footer
+		// still absent). CodexTrustPromptPresent declines this frame too, and
+		// the Yes row above keeps isReadyContent accepting it, so the hold
+		// must cover it.
+		{"No row last with selected Yes row above", noRowMidPaint, true},
+		{"Yes row followed by No row", "› 1. Yes, continue\n  2. No, quit", true},
+		{"trailing blank lines after No row", "› 1. Yes, continue\n  2. No, quit\n\n   \n", true},
+		{"CRLF with No row last and Yes row above", "Do you trust the contents of this directory?\r\n› 1. Yes, continue\r\n  2. No, quit", true},
+		// A bare No row without the selected Yes row above is just an option
+		// label and can appear in quoted prose; it is not positive evidence a
+		// modal owns the pane.
+		{"No row alone", "2. No, quit", false},
+		{"question above No row without selected Yes row", "Do you trust the contents of this directory?\n  2. No, quit", false},
 		{"empty pane", "", false},
 		{"blank lines only", "\n\n\n", false},
 		{"unrelated composer status line", "gpt-5.6-sol max · ~/agent-factory", false},

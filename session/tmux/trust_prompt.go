@@ -245,16 +245,19 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() (held bool) {
 			return true
 		}
 		// The directory-trust modal paints top-down, so a capture that lands
-		// mid-paint — before the No row and the footer are drawn — ends with
-		// the selected "› 1. Yes, continue" row as the last visible content.
-		// CodexTrustPromptPresent declines that frame (its ordered four-row
-		// hierarchy is not yet complete), and the same row's leading "›" glyph
-		// makes isReadyContent accept it (task/runner.go hasCodexComposerLine),
-		// so without this hold the create path's WaitForReady passes on the
-		// partial frame and DismissTrustPrompt reads the fall-through false as
-		// "dialog-free" — the briefing is pasted into the live modal and the
-		// delivery's trailing Enter selects Yes, exactly the #2220 failure
-		// this branch was written to prevent.
+		// mid-paint ends with EITHER the selected "› 1. Yes, continue" row as
+		// the last visible content (No row and footer not yet drawn) OR the
+		// "2. No, quit" row as the last visible content with the selected Yes
+		// row above it (footer not yet drawn).
+		// CodexTrustPromptPresent declines both partial frames (its ordered
+		// four-row hierarchy is not yet complete), and the selected Yes row's
+		// leading "›" glyph makes isReadyContent accept them both
+		// (task/runner.go hasCodexComposerLine), so without this hold the
+		// create path's WaitForReady passes on the partial frame and
+		// DismissTrustPrompt reads the fall-through false as "dialog-free" —
+		// the briefing is pasted into the live modal and the delivery's
+		// trailing Enter selects Yes, exactly the #2220 failure this branch
+		// was written to prevent.
 		//
 		// The hidden-cursor oracle is the same one the complete-modal branch
 		// above and inspectCodexSafetyPrompt both trust: Codex's
@@ -381,19 +384,24 @@ func CodexTrustPromptPresent(content string) bool {
 		noOption < affordance && affordance == last
 }
 
-// codexDirectoryTrustTrailingRows reports whether the visible pane ends with
-// the directory-trust modal's selected Yes row as its last non-blank content,
-// optionally with the modal's question painted above it. Codex paints the modal
-// top-down — question, then selected Yes row, then the No row, then the
-// "Press enter to continue" footer — so a capture taken mid-paint, before the
-// No row and footer land, leaves exactly this tail. CodexTrustPromptPresent
-// requires the complete four-row ordered hierarchy and declines that frame,
-// and the selected Yes row's leading "›" glyph is also Codex's composer glyph,
-// so isReadyContent's hasCodexComposerLine arm (task/runner.go) accepts the
-// same partial frame — the create-path wedge this file's #3302 contract says
-// must not be reported clear.
+// codexDirectoryTrustTrailingRows reports whether the visible pane ends with a
+// partially painted directory-trust modal — the trailing row the top-down
+// renderer has reached before the "Press enter to continue" footer lands.
+// Codex paints the modal top-down — question, then selected Yes row, then the
+// No row, then the footer — so a capture taken mid-paint ends with EITHER the
+// selected Yes row as the last non-blank content (No row and footer not yet
+// drawn) OR the No row as the last non-blank content with the selected Yes row
+// above it (footer not yet drawn). CodexTrustPromptPresent requires the
+// complete four-row ordered hierarchy and declines both partial frames, and
+// the selected Yes row's leading "›" glyph is also Codex's composer glyph, so
+// isReadyContent's hasCodexComposerLine arm (task/runner.go) accepts the same
+// partial frames — the create-path wedge this file's #3302 contract says must
+// not be reported clear. The No row alone is not proof the modal owns the pane
+// (it is just an option label that can appear in quoted prose), so the No-row
+// case additionally requires the selected Yes row to have been painted above
+// it, which is exactly the order the top-down renderer leaves mid-paint.
 //
-// The trailing row alone is NOT proof a modal owns the pane. The dialog text
+// The trailing rows alone are NOT proof a modal owns the pane. The dialog text
 // can sit verbatim in quoted agent output above an active composer, whose
 // visible terminal cursor separately marks the pane as composer-owned.
 // CheckAndHandleTrustPrompt pairs this predicate with that hidden-cursor
@@ -404,12 +412,34 @@ func CodexTrustPromptPresent(content string) bool {
 func codexDirectoryTrustTrailingRows(content string) bool {
 	content = ansiCSISequence.ReplaceAllString(strings.ReplaceAll(content, "\r\n", "\n"), "")
 	lines := strings.Split(content, "\n")
+	last := -1
 	for idx := len(lines) - 1; idx >= 0; idx-- {
 		line := strings.TrimSpace(strings.TrimSuffix(lines[idx], "\r"))
 		if line == "" {
 			continue
 		}
-		return line == "› 1. Yes, continue"
+		last = idx
+		break
+	}
+	if last < 0 {
+		return false
+	}
+	lastLine := strings.TrimSpace(strings.TrimSuffix(lines[last], "\r"))
+	if lastLine == "› 1. Yes, continue" {
+		return true
+	}
+	if lastLine != "2. No, quit" {
+		return false
+	}
+	// The footer has not landed but the No row has: the modal painted one row
+	// further than the Yes-row-trailing frame. Require the selected Yes row
+	// above the trailing No row — the order the top-down renderer leaves
+	// mid-paint, and the signal that distinguishes a live modal from a bare
+	// quoted No-row fragment.
+	for idx := last - 1; idx >= 0; idx-- {
+		if strings.TrimSpace(strings.TrimSuffix(lines[idx], "\r")) == "› 1. Yes, continue" {
+			return true
+		}
 	}
 	return false
 }
