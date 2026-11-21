@@ -27,7 +27,15 @@ import (
 //   - a quoted positional-@ or whole-array expansion (`"$@"`, `"${a[@]}"`,
 //     `"${!a[@]}"`, `"${!pre@}"`, `"${x:-$@}"`) yields one argv field per
 //     element even inside double quotes — measured on bash — so it refuses
-//     exactly like the unquoted forms.
+//     exactly like the unquoted forms;
+//   - an unquoted, unescaped brace expansion (`{a,b}`, `{x..y}`) or glob
+//     metacharacter (`*`, `?`, a `[` that can open a class) delivers
+//     INDEPENDENT argv words — the parser keeps them inside one Lit, but
+//     the shell spells several — so they refuse in every position,
+//     including the first traced-command word (`-o /dev/null
+//     {-ECODEX_HOME=/o,codex}` puts the -E in front of the command). A
+//     glued field split (`A=$x`) is different: its literal prefix stays
+//     on the first produced field, which is still the command.
 //
 // Only a word provably expanding to exactly one argv word is judged as a
 // single word: a literal, a quoted `"$x"`/`"${x}"`/`"$*"`/`"${a[*]}"`, an
@@ -193,6 +201,42 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 		`OPT='ECODEX_HOME=/o'; firejail strace -f"$OPT" codex`,
 		`OPT='ECODEX_HOME=/o'; firejail strace -ff"$OPT" codex`,
 		`OPT='ECODEX_HOME=/o'; firejail strace -"$OPT" codex`,
+		// An UNQUOTED UNESCAPED BRACE EXPANSION delivers several argv words
+		// from one Lit: `-o {/dev/null,-ECODEX_HOME=/o,codex}` expands to
+		// `-o /dev/null -ECODEX_HOME=/o codex` — the env operand and the
+		// traced command both come from the braces. The same hole exists in
+		// the option name (`-{E,o}`), an attached operand
+		// (`-E{CODEX_HOME=/o,x}`), a separate operand, and the first
+		// traced-command word (`-o /dev/null {-E…,codex}`) — real strace
+		// proves `strace -o {/dev/null,-ECODEX_HOME=/pwned,printenv}
+		// CODEX_HOME` prints /pwned.
+		`firejail strace -o {/dev/null,-ECODEX_HOME=/o,codex}`,
+		`firejail strace -e {/dev/null,-ECODEX_HOME=/o,codex}`,
+		`firejail strace -s {/dev/null,-ECODEX_HOME=/o,codex}`,
+		`firejail strace --output {/dev/null,-ECODEX_HOME=/o,codex}`,
+		`firejail strace -o /dev/null {-ECODEX_HOME=/o,codex}`,
+		`firejail strace -e /dev/null {-ECODEX_HOME=/o,codex}`,
+		`firejail strace strace -o {/dev/null,-ECODEX_HOME=/o,codex}`,
+		`firejail strace strace -o /dev/null {-ECODEX_HOME=/o,codex}`,
+		`firejail strace {-E,CODEX_HOME=/o,codex}`,
+		`firejail strace -{E,o}`,
+		`firejail strace -E{CODEX_HOME=/o,x}`,
+		`firejail strace --env={CODEX_HOME=/o,x}`,
+		`firejail strace --{env,output}={CODEX_HOME=/o,/tmp/x}`,
+		`firejail strace -o {a..z}`,
+		`firejail strace -o x{,/tmp/a}`,
+		// An UNQUOTED GLOB metacharacter lets pathname expansion deliver the
+		// options and the command: a worktree file named `-ECODEX_HOME=…`
+		// satisfies `-*`, and `*` hands strace whatever the directory
+		// holds. Quoted or escaped copies stay literal.
+		`firejail strace -o -*`,
+		`firejail strace -o *`,
+		`firejail strace -o ?`,
+		`firejail strace -o [a-z]*`,
+		`firejail strace -o*.log`,
+		`firejail strace -o -* codex`,
+		`firejail strace *`,
+		`firejail strace -o /dev/null -*`,
 	}
 	for _, command := range refused {
 		require.True(t, commandMutatesAccountEnvironment(command, names),
@@ -300,6 +344,20 @@ func TestNestedStraceDashGluedDynamicOptionWordRefused(t *testing.T) {
 		// per positional — `"${#@}"` is the count form of "$@", so it keeps
 		// the single-word verdict.
 		`firejail strace --output="${#@}" codex`,
+		// The joined-value substitution operators yield one word even when
+		// their value word contains "$@": `${x:=$@}` assigns and yields the
+		// JOINED value, and `${x:?$@}` errors or yields the set value —
+		// only `+`/`:+`/`-`/`:-` keep per-element fields (the refused
+		// `"${x:-$@}"` row above).
+		`firejail strace -o "${x:=$@}" codex`,
+		`firejail strace -o "${x:?$@}" codex`,
+		// A quoted or escaped brace/glob never expands — `'{a,b}'`,
+		// `"{a,b}"`, `\{a,b}` and `'*'` are each one literal argv word.
+		`firejail strace -o '{/dev/null,-ECODEX_HOME=/o,codex}'`,
+		`firejail strace -o "{/dev/null,-ECODEX_HOME=/o,codex}"`,
+		`firejail strace -o \* codex`,
+		`firejail strace -o '*' codex`,
+		`firejail strace -o '"'"'*'"'"' codex`,
 		// The incomplete-cluster suspect is non-terminal: with no command
 		// following, `-f"$OPT"` runs nothing and cannot inject env, so it
 		// stays admitted — the same single-word-no-command shape as

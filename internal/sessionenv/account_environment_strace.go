@@ -141,11 +141,21 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 			strings.HasPrefix(normalized, "-") {
 			text = normalized
 		} else {
+			// The traced command starts here — but only if the word cannot
+			// itself deliver several argv words. A brace expansion or a glob
+			// produces INDEPENDENT argv spellings whose first field can be
+			// an option: `-o /dev/null {-ECODEX_HOME=/o,codex}` delivers
+			// `-o`, `/dev/null`, `-ECODEX_HOME=/o`, `codex`, and `-*` or `*`
+			// hands strace whatever `-E`-shaped names the worktree holds.
+			// A glued field split (`A=$x`) is different: the literal prefix
+			// stays attached to the first produced field, which is still
+			// the command — the admission the pre-#4968 walk made and the
+			// differential golden pins.
+			if wordYieldsIndependentArgvWords(words[i]) {
+				return end(refuseLeadingExpansion, true)
+			}
 			return end(false, true) // the traced command starts here
 		}
-	}
-	if text == "--" && complete {
-		return end(false, i+1 < len(words))
 	}
 	// A word that can expand to more than one argv word can supply more
 	// options and the traced command no matter which option path it lands
@@ -155,18 +165,22 @@ func straceOptionStep(words []*syntax.Word, i int, names map[string]struct{}, re
 	// `-E`, `CODEX_HOME=/other`, `codex`, and strace processes the `-E`
 	// before launching the literal command; `-E$V`, `--env=$V` and
 	// `--env=FOO=$X` split a -E/--env operand into the assignment plus the
-	// same tail; and a quoted `"$@"`/`"${a[@]}"` yields one field per element
-	// the same way. A non-terminal suspect is dropped when the run ends at
-	// this word, so every such word — in the option name, an attached
-	// operand, or a separate operand word — fails closed as a terminal,
-	// symmetric with the wholly-dynamic `text == ""` case and with the
-	// head-level refusal of `strace "$OPT" codex`. Only words provably
-	// expanding to exactly one argv word reach the paths below: a quoted
-	// expansion (`--"$OPT"`, `-o"$LOG"`, `--env="$V"`) keeps its original
-	// non-terminal suspect so a command word after it still refuses the way
-	// `strace --env=... codex` does.
+	// same tail; a quoted `"$@"`/`"${a[@]}"` yields one field per element;
+	// and an unquoted, unescaped brace expansion or glob produces
+	// independent spellings the same way. A non-terminal suspect is
+	// dropped when the run ends at this word, so every such word — in the
+	// option name, an attached operand, or a separate operand word — fails
+	// closed as a terminal, symmetric with the wholly-dynamic `text == ""`
+	// case and with the head-level refusal of `strace "$OPT" codex`. Only
+	// words provably expanding to exactly one argv word reach the paths
+	// below: a quoted expansion (`--"$OPT"`, `-o"$LOG"`, `--env="$V"`)
+	// keeps its original non-terminal suspect so a command word after it
+	// still refuses the way `strace --env=... codex` does.
 	if wordYieldsMultipleArgvWords(words[i]) {
 		return end(refuseLeadingExpansion, true)
+	}
+	if text == "--" && complete {
+		return end(false, i+1 < len(words))
 	}
 	if strings.HasPrefix(text, "--") {
 		name, operand, hasEq := strings.Cut(text[2:], "=")
@@ -267,9 +281,11 @@ func straceEnvOperandRefused(operand string, complete bool, names map[string]str
 }
 
 // stracePeekOperand returns the next word's literal text; width 0 means there
-// is no next word or it is not provable.
+// is no next word or it is not provable — including a word that can expand to
+// more than one argv word, which the caller re-judges in option position on
+// the next step instead of consuming.
 func stracePeekOperand(words []*syntax.Word, i int) (string, int) {
-	if i+1 >= len(words) {
+	if i+1 >= len(words) || wordYieldsMultipleArgvWords(words[i+1]) {
 		return "", 0
 	}
 	value, ok := literalShellWord(words[i+1])
@@ -289,15 +305,19 @@ const straceShortFlags = "cCdDfFhiknqrtTvVwxyYzZA"
 // word refuse terminally, because the extra fields can supply more options
 // and the traced command no matter how benign the literal text reads.
 // Unquoted parameter and command expansions field-split on IFS; an extended
-// glob matches several names; and inside double quotes a positional-@ or
+// glob matches several names; inside double quotes a positional-@ or
 // whole-array expansion (`"$@"`, `"${a[@]}"`, `"${!a[@]}"`, `"${!pre@}"`,
-// `"${x:-$@}"`) still yields one field per element. A literal, a quoted
-// ordinary expansion (`"$x"`, `"${x}"`, `"$*"`, `"${a[*]}"`, `"${#a[@]}"`),
-// an arithmetic expansion (whose value is one number, even when computed
-// from variables) and a process substitution (one /dev/fd path) each
-// produce exactly one argv word.
+// `"${x:-$@}"`) still yields one field per element; an unquoted, unescaped
+// brace expansion (`{a,b}`, `{x..y}`) and unquoted glob metacharacters
+// (`*`, `?`, a `[` that can open a class) expand at exec time even though
+// the parser keeps them inside one Lit. A literal, a quoted ordinary
+// expansion (`"$x"`, `"${x}"`, `"$*"`, `"${a[*]}"`, `"${#a[@]}"`), an
+// arithmetic expansion (whose value is one number, even when computed from
+// variables) and a process substitution (one /dev/fd path) each produce
+// exactly one argv word.
 func wordYieldsMultipleArgvWords(word *syntax.Word) bool {
-	for _, part := range word.Parts {
+	var unquoted strings.Builder
+	for i, part := range word.Parts {
 		switch part := part.(type) {
 		case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ExtGlob:
 			return true
@@ -305,11 +325,67 @@ func wordYieldsMultipleArgvWords(word *syntax.Word) bool {
 			if quotedPartsYieldMultipleFields(part.Parts) {
 				return true
 			}
-		case *syntax.Lit, *syntax.SglQuoted, *syntax.ArithmExp, *syntax.ProcSubst:
+		case *syntax.Lit:
+			if litPartYieldsIndependentWords(part, i, word, &unquoted) {
+				return true
+			}
+		case *syntax.SglQuoted, *syntax.ArithmExp, *syntax.ProcSubst:
 			// Provably one argv word — see the comment above.
 		default:
 			return true
 		}
+	}
+	return braceExpandable(unquoted.String())
+}
+
+// wordYieldsIndependentArgvWords is the first-traced-command-word twin of
+// wordYieldsMultipleArgvWords: it reports whether the word can produce argv
+// words that do not carry its leading literal, the only way a command-word
+// expansion can still put option fields in front of the command. A brace
+// expansion and a glob each spell complete argv words — `{-E,x}` yields
+// `-E`, `-*`/`?`/`[` yield whatever names the directory holds — while a
+// field split (`A=$x`, `a"$@"`) glues the literal prefix to the first
+// produced field, which stays the command.
+func wordYieldsIndependentArgvWords(word *syntax.Word) bool {
+	var unquoted strings.Builder
+	for i, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.ExtGlob:
+			return true
+		case *syntax.Lit:
+			if litPartYieldsIndependentWords(part, i, word, &unquoted) {
+				return true
+			}
+		}
+	}
+	return braceExpandable(unquoted.String())
+}
+
+// litPartYieldsIndependentWords scans one Lit part the way literalArgvWord
+// decodes it: an escaped character is literal text — it never opens a glob
+// class or a brace group — while an unescaped `*`, `?` or `[` lets pathname
+// expansion deliver several argv words from one, and the unescaped
+// characters accumulate the skeleton braceExpandable judges below.
+func litPartYieldsIndependentWords(part *syntax.Lit, at int, word *syntax.Word, unquoted *strings.Builder) bool {
+	raw := part.Value
+	lastClose := strings.LastIndexByte(raw, ']')
+	for j := 0; j < len(raw); j++ {
+		c := raw[j]
+		if c == '\\' {
+			if j+1 < len(raw) {
+				j++
+			}
+			continue
+		}
+		switch c {
+		case '*', '?':
+			return true
+		case '[':
+			if bracketMayBeClass(raw, j, lastClose, at+1 < len(word.Parts)) {
+				return true
+			}
+		}
+		unquoted.WriteByte(c)
 	}
 	return false
 }
@@ -339,11 +415,13 @@ func quotedPartsYieldMultipleFields(parts []syntax.WordPart) bool {
 // expansion inside double quotes can produce more than one field: the
 // positional-@ forms ("$@", "${@}", "${@:1}"), a whole-array [@] subscript
 // ("${a[@]}", "${!a[@]}" — the @ name-list "${!pre@}"), and a nested
-// multiword expansion inside a value-position operator word
-// ("${x:-$@}" expands to one field per positional, measured on bash).
-// "${a[*]}", "${!pre*}" and every length expansion ("${#@}", "${#a[@]}")
-// join to a single word, and every pattern-position sub-word ("${y#$@}",
-// "${y/$@/Q}") produces one field, so those stay single.
+// multiword expansion inside a substitution value word ("${x:-$@}"
+// expands to one field per positional, measured on bash; only the
+// "+"/":+"/"-"/":-" forms keep per-element fields — "?", ":?", "=" and
+// ":=" yield the joined value as one word). "${a[*]}", "${!pre*}" and
+// every length expansion ("${#@}", "${#a[@]}") join to a single word,
+// and every pattern-position sub-word ("${y#$@}", "${y/$@/Q}") produces
+// one field, so those stay single.
 func paramExpYieldsMultipleFieldsInsideQuotes(exp *syntax.ParamExp) bool {
 	if exp.Length {
 		return false
@@ -357,6 +435,6 @@ func paramExpYieldsMultipleFieldsInsideQuotes(exp *syntax.ParamExp) bool {
 	if index, ok := exp.Index.(*syntax.Word); ok && index.Lit() == "@" {
 		return true
 	}
-	return exp.Exp != nil && exp.Exp.Op <= syntax.AssignUnsetOrNull &&
+	return exp.Exp != nil && exp.Exp.Op <= syntax.DefaultUnsetOrNull &&
 		exp.Exp.Word != nil && quotedPartsYieldMultipleFields(exp.Exp.Word.Parts)
 }
