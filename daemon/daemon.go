@@ -708,6 +708,10 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// The report_to worker owns prompt delivery so sends never block the
 	// decision ticker (R15).
 	startHandoffReportLoop(manager, stopCh, wg)
+	// The memory-split line answers "anon heap or file cache?" the next time
+	// the unit's cgroup memory.peak spikes (#7698): one compact line per
+	// ticker plus a final sample at shutdown, all off the poll goroutine.
+	startMemorySplitLoop(manager, stopCh, wg)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an
