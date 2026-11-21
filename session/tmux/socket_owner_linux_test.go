@@ -455,18 +455,17 @@ func TestSocketOwnerSweepDecidesARelativeRowOnItsHolder(t *testing.T) {
 // can converge with the queried path's (which traverses the same link). The
 // matcher must answer Certain for the verbatim row, never None.
 //
-// Two directions both pin the bug:
+// Both filter branches pin the bug — in each the verbatim row must be
+// Certain, never None:
 //
-//   - the queried path's basename is the symlink: the server's verbatim row is
-//     spelled with the un-symlinked basename, and the filter ruled it out.
-//   - the row's basename is the symlink (a server bound through an alias whose
-//     link still sits at the basename — bind through a basename symlink fails
-//     on Linux with EADDRINUSE, so this stays at the matcher level): the row's
-//     raw basename differs from the filter, and its own walk would converge.
+//   - the certain-want basename branch: the dangling-final-file want, where
+//     the link's target dir exists and only the target file is absent;
+//   - the uncertain-want tail branch: the dangling-target-dir want, which
+//     stops mid-walk so the filter is the tail's last component.
 //
-// Each shape exercises a different filter branch: the dangling-final-file
-// (target dir exists, basename absent) walks to a certain want; the
-// dangling-target-dir want stops mid-walk and falls to the tail branch.
+// The mirror shape — a row whose OWN basename is a symlink to the queried
+// path — is the reverse alias #7736 deliberately rules out, pinned by
+// TestBoundRowMatcherRulesOutAReverseAlias.
 func TestBoundRowMatcherKeepsAnOwnerThroughABasenameSymlink(t *testing.T) {
 	dir := t.TempDir()
 	// The common case the prefilter was made for: an absent basename in a
@@ -529,22 +528,61 @@ func TestBoundRowMatcherKeepsAnOwnerThroughABasenameSymlink(t *testing.T) {
 	match2 := boundRowMatcher(alias2, want2)
 	require.Equal(t, proctree.RowMatchCertain, match2(alias2),
 		"the same bug in the tail branch: the verbatim row converges through the walk")
+}
 
-	// The mirror direction: the queried path is plain (no symlink at its
-	// basename), but the row's basename is itself a present symlink whose
-	// target is the queried path's basename. The kernel records bind()'s
-	// verbatim spelling (the alias), so the row's raw basename differs from
-	// the plain filter, and the prefilter would rule it out — but the row's
-	// own walk follows its basename symlink and converges with want.
-	dirM := t.TempDir()
-	mirrorTarget := filepath.Join(dirM, "actual.sock") // absent
-	mirrorAlias := filepath.Join(dirM, "alias.sock")
-	require.NoError(t, os.Symlink(mirrorTarget, mirrorAlias))
-	wantM, ok := canonicalSocketPath(mirrorTarget)
+// The reverse alias is deliberately NOT an owner — the #7736 decision. A
+// row bound at B' whose old path was later replaced by a symlink to af's
+// absent queried path S was never reachable through S, so it is not af's
+// server, and admitting it only made `af reset` refuse a path that cannot
+// be af's. The prefilter admits a row past the cheap rule-out only on the
+// canonical filter name or the queried path's own raw basename; this
+// row's basename matches neither, so it is out before the walk could
+// converge it. Staged identically to the mirror direction #7714 asserted
+// Certain on — its verdict is now None, on purpose.
+func TestBoundRowMatcherRulesOutAReverseAlias(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "actual.sock") // absent — af's queried path
+	alias := filepath.Join(dir, "alias.sock")
+	require.NoError(t, os.Symlink(sock, alias),
+		"the reverse alias: the row's old spelling is now a symlink to af's path")
+	want, ok := canonicalSocketPath(sock)
 	require.True(t, ok)
-	matchM := boundRowMatcher(mirrorTarget, wantM)
-	require.Equal(t, proctree.RowMatchCertain, matchM(mirrorAlias),
-		"the mirror — a row basename that is itself a symlink to the queried path — converges through the walk")
+	match := boundRowMatcher(sock, want)
+	require.Equal(t, proctree.RowMatchNone, match(alias),
+		"a server bound at alias.sock was never reachable through actual.sock — ruled out per #7736")
+	// The queried path's own verbatim spelling stays the owner it always
+	// was — the rule-out is the row's basename, not the path's absence.
+	require.Equal(t, proctree.RowMatchCertain, match(sock))
+}
+
+// The negative path makes no filesystem call: a row whose raw basename
+// equals neither the canonical filter name nor the queried path's own is
+// ruled out lexically, before any per-row Lstat — the read #7736 removed
+// because a stalled mount blocks it uninterruptibly on the common
+// negative path. The first row below is exactly what a residual stat
+// would observe — a present symlink at its own basename, pointing at a
+// different socket — so a filesystem read still in the matcher would
+// change this verdict and fail the pin; the second row cannot be stat'ed
+// at all and takes the same rule-out.
+func TestBoundRowMatcherRulesOutWithoutAFilesystemRead(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "af.sock") // absent — the queried path
+	want, ok := canonicalSocketPath(sock)
+	require.True(t, ok)
+	match := boundRowMatcher(sock, want)
+
+	elsewhere := filepath.Join(dir, "elsewhere", "held.sock")
+	require.NoError(t, os.MkdirAll(filepath.Dir(elsewhere), 0o700))
+	linked := filepath.Join(dir, "linked.sock")
+	require.NoError(t, os.Symlink(elsewhere, linked))
+	require.Equal(t, proctree.RowMatchNone, match(linked),
+		"a per-row stat would observe the present symlink at this row's basename and change the verdict — None pins the lexical rule-out")
+	require.Equal(t, proctree.RowMatchNone,
+		match(filepath.Join(dir, "no-such-dir", "z.sock")),
+		"a row nothing could stat is ruled out the same lexical way")
+
+	require.Equal(t, proctree.RowMatchCertain, match(sock),
+		"the queried path's own spelling is still Certain")
 }
 
 // The end-to-end shape of the basename-symlink regression, on real kernel
