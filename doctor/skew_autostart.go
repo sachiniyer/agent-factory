@@ -161,9 +161,9 @@ func checkAutostartSupervision(ctx *scanContext, report *Report, h daemon.Health
 		func() { supervisionNotRunning(report, info, h) },
 		func() { supervisionUnitUnknownToManager(report, info, h) },
 		func(cause error) {
-			detail := fmt.Sprintf("could not query the service manager, so supervision is unknown: %s", oneLine(cause))
+			detail := fmt.Sprintf("could not query the service manager, so supervision is unknown: %s", oneLineErr(cause))
 			if h.PingErr == nil {
-				detail = fmt.Sprintf("a daemon is responding, but the service manager could not be queried, so whether it is supervised is unknown: %s", oneLine(cause))
+				detail = fmt.Sprintf("a daemon is responding, but the service manager could not be queried, so whether it is supervised is unknown: %s", oneLineErr(cause))
 			}
 			report.Warn(sectionDaemon, "autostart supervision",
 				detail,
@@ -185,7 +185,7 @@ func supervisionActive(ctx *scanContext, report *Report, info daemon.Supervision
 		func() {
 			enablement, enablementProblem = "the service manager has no enablement record for the unit", true
 		},
-		func(cause error) { enablement = "whether the unit starts at login is unknown: " + oneLine(cause) },
+		func(cause error) { enablement = "whether the unit starts at login is unknown: " + oneLineErr(cause) },
 	)
 
 	if h.PingErr == nil {
@@ -222,12 +222,12 @@ func supervisionActive(ctx *scanContext, report *Report, info daemon.Supervision
 			func(cause error) {
 				if enabledYes {
 					report.Warn(sectionDaemon, "autostart supervision",
-						"the unit is enabled and active, but whether it owns the responding daemon is unknown: "+oneLine(cause),
+						"the unit is enabled and active, but whether it owns the responding daemon is unknown: "+oneLineErr(cause),
 						"upgrade or restart the daemon and rerun `af doctor`", false)
 				} else {
 					report.Warn(sectionDaemon, "autostart supervision",
 						fmt.Sprintf("the unit is active, but whether it owns responding daemon pid %d is unknown: %s; %s",
-							h.ServingPID, oneLine(cause), enablement),
+							h.ServingPID, oneLineErr(cause), enablement),
 						"run `af daemon install` if the unit is not enabled, or upgrade/restart the daemon and rerun `af doctor`", enablementProblem)
 				}
 				handled = true
@@ -253,7 +253,7 @@ func supervisionActive(ctx *scanContext, report *Report, info daemon.Supervision
 		},
 		func(cause error) {
 			report.Warn(sectionDaemon, "autostart supervision",
-				fmt.Sprintf("the daemon is running, but whether it starts at login is unknown: %s", oneLine(cause)),
+				fmt.Sprintf("the daemon is running, but whether it starts at login is unknown: %s", oneLineErr(cause)),
 				"check the service manager directly, then rerun `af doctor`", false)
 		},
 	)

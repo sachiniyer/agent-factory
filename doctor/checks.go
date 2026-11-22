@@ -287,7 +287,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 	instances, err := ctx.opts.sessionInventory()
 	if err != nil {
 		report.Warn(sectionDaemon, "root agent program",
-			"could not compare live root sessions with the configured profiles: "+oneLine(err),
+			"could not compare live root sessions with the configured profiles: "+oneLineErr(err),
 			"rerun `af doctor` when the daemon session inventory is available", false)
 		report.markIncomplete("root agent program")
 		return
@@ -337,7 +337,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			cancel()
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",
-				fmt.Sprintf("could not resolve the configured profile for live root at %s: %s", identityPath, oneLine(resolveErr)),
+				fmt.Sprintf("could not resolve the configured profile for live root at %s: %s", identityPath, oneLineErr(resolveErr)),
 				"restore the checkout or mount, then rerun `af doctor`", false)
 			report.markIncomplete("root agent program")
 			continue
@@ -354,7 +354,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 			cancel()
 			unresolved++
 			report.Warn(sectionDaemon, "root agent program",
-				fmt.Sprintf("could not revalidate the configured profile for live root at %s: %s", commandPath, oneLine(resolveErr)),
+				fmt.Sprintf("could not revalidate the configured profile for live root at %s: %s", commandPath, oneLineErr(resolveErr)),
 				"restore the checkout or mount, then rerun `af doctor`", false)
 			report.markIncomplete("root agent program")
 			continue
@@ -368,7 +368,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 				remediation = "rerun `af doctor`; if the checkout is being replaced, wait for that operation to finish first"
 			}
 			report.Warn(sectionDaemon, "root agent program",
-				fmt.Sprintf("could not revalidate the configured profile for live root at %s: %s", commandPath, oneLine(resolveErr)),
+				fmt.Sprintf("could not revalidate the configured profile for live root at %s: %s", commandPath, oneLineErr(resolveErr)),
 				remediation, false)
 			report.markIncomplete("root agent program")
 			continue
@@ -422,7 +422,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 				remediation = "rerun `af doctor`; if the checkout is being replaced, wait for that operation to finish first"
 			}
 			report.Warn(sectionDaemon, "root agent program",
-				fmt.Sprintf("could not inspect the configured command for live root at %s: %s", commandPath, oneLine(programErr)),
+				fmt.Sprintf("could not inspect the configured command for live root at %s: %s", commandPath, oneLineErr(programErr)),
 				remediation, false)
 			report.markIncomplete("root agent program")
 			continue
@@ -497,7 +497,7 @@ func checkRunningDaemonConfig(report *Report, h daemon.HealthStatus, cfg *config
 		},
 		func(cause error) {
 			report.Warn(sectionDaemon, "daemon config",
-				"whether the running daemon matches the config on disk is unknown: "+oneLine(cause),
+				"whether the running daemon matches the config on disk is unknown: "+oneLineErr(cause),
 				"restart the daemon to apply the current config, or rerun `af doctor` after upgrading the daemon", false)
 		},
 	)

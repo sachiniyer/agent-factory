@@ -531,16 +531,16 @@ func checkHTTPSocket(ctx *scanContext, report *Report, h daemon.HealthStatus) {
 		},
 		func(cause error) {
 			report.Warn(sectionDaemon, "http socket",
-				fmt.Sprintf("could not probe the daemon's HTTP socket, so the web/API surface is unknown: %s", oneLine(cause)),
+				fmt.Sprintf("could not probe the daemon's HTTP socket, so the web/API surface is unknown: %s", oneLineErr(cause)),
 				"check the daemon log, then rerun `af doctor`", false)
 		},
 	)
 }
 
-// oneLine flattens a multi-line error (errors.Join separates with newlines) so a
+// oneLineErr flattens a multi-line error (errors.Join separates with newlines) so a
 // row stays one line — the report's columns are the whole point of its
 // scannability.
-func oneLine(err error) string {
+func oneLineErr(err error) string {
 	if err == nil {
 		return ""
 	}

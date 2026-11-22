@@ -237,7 +237,7 @@ func Run(args []string, lifeline, ack *os.File) int {
 	// No SysProcAttr: the shell stays in the lifeline's group, which the
 	// daemon made with Setpgid. That group is what every kill below names.
 	if err := shell.Start(); err != nil {
-		writeAck(ack, AckStartFailed+oneLine(err.Error()))
+		writeAck(ack, AckStartFailed+flattenNewlines(err.Error()))
 		_ = ack.Close()
 		fmt.Fprintf(os.Stderr, "af %s: start %s: %v\n", Arg, inv.shell, err)
 		return ExitStartFailed
@@ -339,7 +339,7 @@ func writeAck(ack *os.File, line string) {
 	_, _ = ack.WriteString(line + "\n")
 }
 
-func oneLine(s string) string {
+func flattenNewlines(s string) string {
 	return strings.ReplaceAll(s, "\n", " ")
 }
 
