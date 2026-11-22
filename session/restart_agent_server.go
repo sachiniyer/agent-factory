@@ -123,6 +123,18 @@ func (p *sandboxProvisioner) restartAgentServer(expectedToken string, persist fu
 		p.adoptPending = wasPending
 		return fmt.Errorf("%w: the restart could not be recorded before launching: %v", errAgentServerNotRestartable, err)
 	}
+	// The persisted launch script names the pane-PATH dir provision computed.
+	// A ':'-bearing session dir's indirection lives OUTSIDE that dir — under
+	// $HOME/.af-path or an unpredictable mktemp root (#7770) — so the recorded
+	// link is re-created AT that path first. Nothing is ensured when the row
+	// recorded none: a colon-free dir needs no link, and a launch script that
+	// predates the field names no indirection af could repair from here.
+	if p.panePathDir != "" {
+		w := &sandboxWorkspace{shell: p, SessionDir: p.sessionDir, panePathDir: p.panePathDir}
+		if err := w.ensurePanePathDir(sshShortStepTimeout); err != nil {
+			return fmt.Errorf("restarting the af agent-server failed: %w", err)
+		}
+	}
 	w := &sandboxWorkspace{shell: p, SessionDir: p.sessionDir}
 	// The previous run's log is kept for diagnosis, and its banner removed so the
 	// poll below cannot read the dead server's address. The wrapper records the

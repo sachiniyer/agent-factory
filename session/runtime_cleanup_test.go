@@ -463,14 +463,16 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 			name: "ssh",
 			backend: &sshBackend{
 				provisioner: &sandboxProvisioner{
-					sshCmd:     "ssh -o User='ci' builder.internal",
-					sessionDir: "/srv/af/session.123",
-					remotePID:  cleanupFixtureAltPID,
+					sshCmd:      "ssh -o User='ci' builder.internal",
+					sessionDir:  "/srv/af/session.123",
+					remotePID:   cleanupFixtureAltPID,
+					panePathDir: "/tmp/af-path.aBcDeF/sess-0123456789abcdef",
 				},
 				cleanup: &SSHRuntimeCleanupData{
-					Config:     config.SSHConfig{Host: "builder.internal", User: "ci"},
-					SessionDir: "/srv/af/session.123",
-					RemotePID:  cleanupFixtureAltPID,
+					Config:      config.SSHConfig{Host: "builder.internal", User: "ci"},
+					SessionDir:  "/srv/af/session.123",
+					RemotePID:   cleanupFixtureAltPID,
+					PanePathDir: "/tmp/af-path.aBcDeF/sess-0123456789abcdef",
 				},
 			},
 		},
@@ -535,6 +537,14 @@ func TestRuntimeCleanupHandleRoundTripsEveryOffBoxBackend(t *testing.T) {
 			}
 			if liveRestored.runtimeTeardown == nil {
 				t.Fatalf("ordinary live %s sandbox record reloaded with no teardown handle — the rebuild path did not restore it, so a kill would stage the unearned nothing-owed marker", tc.name)
+			}
+			// The pane-PATH indirection's path is unpredictable, so it rides the
+			// persisted handle: the restored provisioner must name the same link
+			// for teardown and restart re-ensures (#7770).
+			if be, ok := liveRestored.backend.(*sshBackend); ok && be.cleanup != nil && be.cleanup.PanePathDir != "" {
+				if got := be.provisioner.panePathDir; got != be.cleanup.PanePathDir {
+					t.Fatalf("restored ssh provisioner's panePathDir = %q, want the persisted %q", got, be.cleanup.PanePathDir)
+				}
 			}
 
 			inst.userKilled = true

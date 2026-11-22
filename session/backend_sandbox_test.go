@@ -304,6 +304,33 @@ func TestSandboxReapScriptKillsByIdentityAndGatesTheRemoval(t *testing.T) {
 	assert.Contains(t, noPID, "| tr 'a-z' 'A-Z'")
 }
 
+// #7770: a ':'-bearing session dir could not be its own pane-PATH entry, so
+// provision staged a colon-free indirection outside the dir the rm reaps —
+// under $HOME/.af-path or an unpredictable mktemp root nothing re-derives, so
+// the reap removes exactly the persisted panePathDir, then its parent when it
+// empties. The link rm is best-effort and never masks the session dir's own
+// rm status, which stays the group's answer.
+func TestSandboxReapScriptRemovesThePanePathIndirection(t *testing.T) {
+	p := &sandboxProvisioner{
+		sessionDir:  "/srv/af:sessions/work.abc123",
+		panePathDir: "/tmp/af-path.aBcDeF/sess-0123456789abcdef",
+	}
+	script, _ := p.reapScript("a1b2c3d4")
+
+	assert.Contains(t, script, "rm -f -- "+shellQuote("/tmp/af-path.aBcDeF/sess-0123456789abcdef"),
+		"the indirection link provision staged is removed with the session")
+	assert.Contains(t, script, "rmdir -- "+shellQuote("/tmp/af-path.aBcDeF"),
+		"and the link's parent — $HOME/.af-path or the mktemp root — is dropped when it empties")
+	assert.NotContains(t, script, "rm -f -- "+shellQuote("/tmp/af-path.aBcDeF/sess-0123456789abcdef")+" ||",
+		"a failed link removal must never mask the session dir's own rm status")
+
+	// No recorded indirection — a colon-free session dir or a row that
+	// predates the field — composes no link removal.
+	plain, _ := (&sandboxProvisioner{sessionDir: "/remote/af-session"}).reapScript("a1b2c3d4")
+	assert.NotContains(t, plain, ".af-path",
+		"a colon-free session dir has no indirection to remove")
+}
+
 // A forward that cannot bind must kill the child rather than leave it up:
 // without ExitOnForwardFailure, ssh stays up after a FAILED bind and the
 // readiness probe connects to whatever already held the endpoint — reporting

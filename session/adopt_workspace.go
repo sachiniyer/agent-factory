@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -34,6 +35,13 @@ type AdoptSpec struct {
 	// from. Every host command of the adoption — the GONE probe first of all —
 	// rides it, never the current host list or repo config.
 	Transport *RecordedTransport
+
+	// PanePathDir is the pane-PATH indirection the archived provision recorded
+	// for a ':'-bearing SessionDir (#7770): an unpredictable path nothing can
+	// re-derive, so the adopting provision re-creates the link AT it rather
+	// than minting a second root the old record still names. Empty on
+	// pre-#7770 rows and colon-free session dirs.
+	PanePathDir string
 
 	// leaked is set by a failed provision that started a server it could not confirm
 	// stopped; see abandonAdoption.
@@ -203,9 +211,22 @@ func (p *sandboxProvisioner) abandonAdoption(cause error) error {
 	}
 	if len(cleanup) > 0 {
 		// af started a server it could not confirm stopped: its identity must reach
-		// the row, not be dropped with this provisioner (leakedBackend).
+		// the row, not be dropped with this provisioner (leakedBackend). The
+		// pane-PATH link stays too — it may still serve that running server —
+		// and the row's own teardown removes it once the server is proved gone.
 		p.spec.Adopt.leaked = true
 		return fmt.Errorf("%w (the preserved workspace at %s was not touched, but %w)", cause, p.sessionDir, errors.Join(cleanup...))
+	}
+	// And the pane-PATH indirection this attempt staged for a ':'-bearing
+	// preserved dir (#7770): the workspace itself is preserved, the link af
+	// placed outside the session dir does not survive the abandoned attempt.
+	// Only a link THIS attempt created is removed — panePathDir is set only
+	// then, and an adoption refused before ensurePanePathDir (the previous
+	// agent-server still running, the worktree gone) must not delete the link
+	// that running server owns. The empty parent goes with it.
+	if p.panePathDir != "" {
+		_, _ = p.Run(sshShortStepTimeout, "rm -f -- "+shellQuote(p.panePathDir)+
+			"; rmdir -- "+shellQuote(path.Dir(p.panePathDir))+" 2>/dev/null", nil, true)
 	}
 	return fmt.Errorf("%w (the preserved workspace at %s was not touched)", cause, p.sessionDir)
 }
@@ -241,6 +262,7 @@ func (p *sandboxProvisioner) leakedBackend() Backend {
 		c.RemoteAddr, c.AgentServerVersion, c.TokenRef = p.remoteAddr, p.agentServerVersion, p.tokenRef
 		c.CallbackRef, c.CallbackReverse = p.callbackRef, p.callbackReverse()
 		c.LaunchUnconfirmed = p.launchAttempted && !positivePID(p.remotePID)
+		c.PanePathDir = p.panePathDir
 		return &sshBackend{provisioner: p, cleanup: &c}
 	}
 	return &sandboxBackend{provisioner: p, cleanup: &SandboxRuntimeCleanupData{
@@ -248,6 +270,7 @@ func (p *sandboxProvisioner) leakedBackend() Backend {
 		RemoteAddr: p.remoteAddr, AgentServerVersion: p.agentServerVersion, TokenRef: p.tokenRef,
 		CallbackRef: p.callbackRef, CallbackReverse: p.callbackReverse(),
 		LaunchUnconfirmed: p.launchAttempted && !positivePID(p.remotePID),
+		PanePathDir:       p.panePathDir,
 	}}
 }
 
@@ -286,6 +309,26 @@ func (i *Instance) preservedRemotePID() string {
 	return ""
 }
 
+// preservedPanePathDir is the previous provision's recorded pane-PATH link from
+// the retained cleanup identity, or "" — the path an adopting provision
+// re-creates rather than re-derives (#7770).
+func (i *Instance) preservedPanePathDir() string {
+	provider, ok := i.currentBackend().(runtimeCleanupProvider)
+	if !ok {
+		return ""
+	}
+	data := provider.runtimeCleanupData()
+	switch {
+	case data == nil:
+		return ""
+	case data.SSH != nil:
+		return data.SSH.PanePathDir
+	case data.Sandbox != nil:
+		return data.Sandbox.PanePathDir
+	}
+	return ""
+}
+
 // restorePreservedWorkspace provisions the replacement runtime for a row whose
 // archive kept its workspace: adopt it, or — only when the host proved it gone —
 // replace it on the recorded branch.
@@ -303,7 +346,7 @@ func (i *Instance) restorePreservedWorkspaceWith(w *ArchivedWorkspaceData, repro
 	if err != nil {
 		return nil, err
 	}
-	err = reprovision(&AdoptSpec{SessionDir: w.Dir, Branch: i.Branch, OldPID: i.preservedRemotePID(), Transport: transport})
+	err = reprovision(&AdoptSpec{SessionDir: w.Dir, Branch: i.Branch, OldPID: i.preservedRemotePID(), Transport: transport, PanePathDir: i.preservedPanePathDir()})
 	if err == nil {
 		return w, nil
 	}

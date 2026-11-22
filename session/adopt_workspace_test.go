@@ -629,6 +629,85 @@ func TestAbandonAdoptionKeepsTheIdentityOfAServerItCouldNotStop(t *testing.T) {
 	})
 }
 
+// A ':'-bearing preserved dir needs the colon-free pane-PATH indirection
+// (#7770) — which lives outside the session dir, never inside the preserved
+// workspace. An abandoned adoption removes that link — but only the link THIS
+// attempt staged: an adoption refused before ensurePanePathDir (the previous
+// agent-server still running) must not delete a link that server created and
+// still needs. The workspace itself is never touched either way.
+func TestAbandonAdoptionRemovesThePanePathIndirection(t *testing.T) {
+	var ran []string
+	run := func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		ran = append(ran, script)
+		return nil, nil
+	}
+	dir := "/preserved/a:b"
+	link := "/home/u/.af-path/sess-0123456789abcdef"
+	p := &sandboxProvisioner{
+		sessionDir: dir, sshCmd: "ssh recorded-host", tokenRef: "new-ref",
+		panePathDir:  link, // this attempt's ensurePanePathDir staged the link
+		spec:         ProvisionSpec{Adopt: &AdoptSpec{SessionDir: dir, Branch: "b"}},
+		runCommandFn: run,
+	}
+	require.Error(t, p.provisionFailure(errors.New("banner never appeared")))
+	found := false
+	for _, s := range ran {
+		if strings.Contains(s, "rm -f -- "+shellQuote(link)) {
+			found = true
+		}
+		assert.NotContains(t, s, "rm -rf "+shellQuote(dir),
+			"an abandoned adoption must never remove the preserved workspace")
+	}
+	assert.True(t, found, "the indirection link af staged is removed")
+
+	// The same ':'-bearing dir, but the attempt was refused before it staged
+	// the link — a still-running previous agent-server may own the one that is
+	// already there. Nothing about it is removed.
+	ran = nil
+	unstaged := &sandboxProvisioner{
+		sessionDir: dir, sshCmd: "ssh recorded-host", tokenRef: "new-ref",
+		spec:         ProvisionSpec{Adopt: &AdoptSpec{SessionDir: dir, Branch: "b"}},
+		runCommandFn: run,
+	}
+	require.Error(t, unstaged.provisionFailure(errors.New("previous agent-server is still running")))
+	for _, s := range ran {
+		assert.NotContains(t, s, ".af-path",
+			"an attempt that never staged the link must not delete one — it belongs to the running server")
+	}
+
+	ran = nil
+	plain := &sandboxProvisioner{
+		sessionDir: "/preserved/ab", sshCmd: "ssh recorded-host", tokenRef: "new-ref",
+		spec:         ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/preserved/ab", Branch: "b"}},
+		runCommandFn: run,
+	}
+	require.Error(t, plain.provisionFailure(errors.New("banner never appeared")))
+	for _, s := range ran {
+		assert.NotContains(t, s, ".af-path", "a colon-free preserved dir has no indirection to remove")
+	}
+
+	// And when this attempt's server cannot be confirmed stopped, the link it
+	// staged stays — that possibly-running server still resolves `af` through
+	// it, and the row's own teardown removes it once the server is proved gone.
+	ran = nil
+	leaking := &sandboxProvisioner{
+		sessionDir: dir, sshCmd: "ssh recorded-host", tokenRef: "new-ref",
+		panePathDir:     link,
+		remotePID:       "4242",
+		launchAttempted: true,
+		spec:            ProvisionSpec{Adopt: &AdoptSpec{SessionDir: dir, Branch: "b"}},
+		runCommandFn: func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+			ran = append(ran, script)
+			return nil, errors.New("ssh: connection refused")
+		},
+	}
+	require.Error(t, leaking.provisionFailure(errors.New("banner never appeared")))
+	for _, s := range ran {
+		assert.NotContains(t, s, ".af-path",
+			"a link serving a server that may still run must not be pulled from under it")
+	}
+}
+
 // The double failure: the adopting provision fails AND its server cannot be
 // confirmed stopped. The row records the new identity, persisted and unknown; no
 // adoption proceeds; a retry that can reach the host reaps the survivor first.

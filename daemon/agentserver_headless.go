@@ -360,9 +360,17 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		return fmt.Errorf("af agent-server: %w", rerr)
 	}
 	if loginPATH != "" {
-		// The session directory holding the staged af keeps PATH precedence
-		// over whatever the login profile put first (#5877).
-		loginPATH = session.PinPATHDir(loginPATH, session.SessionBinDir(os.Args[0]))
+		// The directory holding the staged af keeps PATH precedence over
+		// whatever the login profile put first (#5877). The launch exports it
+		// — the session dir's colon-free spelling, or the af-owned indirection
+		// when the session dir contains ':' (#7770) — so the pin lands on the
+		// entry the launch actually put on PATH; a hand-run server with no
+		// export keeps pinning the staged binary's own dir.
+		pinDir, perr := session.PanePathDir(os.Args[0], os.Getenv(session.SessionPathDirEnv))
+		if perr != nil {
+			return fmt.Errorf("af agent-server: %w", perr)
+		}
+		loginPATH = session.PinPATHDir(loginPATH, pinDir)
 		if err := os.Setenv("PATH", loginPATH); err != nil {
 			log.WarningLog.Printf("agent-server: could not adopt login-shell PATH for the agent pane: %v", err)
 		}

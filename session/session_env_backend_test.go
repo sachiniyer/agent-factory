@@ -336,11 +336,12 @@ func TestSandboxAgentServerUsesResolvedCommandForFilteringAndLaunch(t *testing.T
 		},
 		"ssh": {
 			executable: "/srv/af-session/af",
-			// The ssh handoff carries the runtime-identity ref NAME in extras
-			// (#5571 W1.1) so it lands in this one process's exec-time
-			// environment; docker's in-container launch has no remote /proc
-			// identity probe and carries none.
-			extras: []string{runtimetoken.RefEnvName},
+			// The ssh handoff carries two names in extras so they land in this
+			// one process's exec-time environment: the runtime-identity ref
+			// (#5571 W1.1) and the colon-free pane-PATH dir (#7770). Docker's
+			// in-container launch has no remote /proc identity probe and no
+			// remote pane PATH to pin, so it carries neither.
+			extras: []string{runtimetoken.RefEnvName, SessionPathDirEnv},
 			args: []string{"agent-server", "--listen", "127.0.0.1:0", "--repo", "/srv/af-session/workspace",
 				"--title", spec.Title, "--program", tmux.ProgramCodex, "--program-resolved"},
 			commandResult: func() (string, error) {
@@ -433,10 +434,11 @@ func TestSSHAgentServerCommandExecsAtRecordedPID(t *testing.T) {
 	}
 	args := []string{"agent-server", "--listen", "127.0.0.1:0", "--repo", w.WorkspacePath(),
 		"--title", spec.Title, "--program", spec.Program, "--program-resolved"}
-	// Extras carries exactly the token-ref NAME (#5571 W1.1): the channel that
-	// reaches this process's exec-time environment — and the value that name
-	// resolves to lives only in the sourced af-identity.env, never in argv.
-	want, err := sessionenv.WrapAgentServerCommand(w.AfPath(), []string{runtimetoken.RefEnvName}, args)
+	// Extras carries exactly two names: the token-ref NAME (#5571 W1.1) and
+	// the pane-PATH dir NAME (#7770) — the channel that reaches this process's
+	// exec-time environment — while their values live only in the sourced
+	// af-identity.env and the launch's own PATH prefix, never in argv.
+	want, err := sessionenv.WrapAgentServerCommand(w.AfPath(), []string{runtimetoken.RefEnvName, SessionPathDirEnv}, args)
 	if err != nil {
 		t.Fatal(err)
 	}

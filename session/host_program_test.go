@@ -219,3 +219,38 @@ func TestSessionBinDirOnlyForTheStagedAf(t *testing.T) {
 		assert.Empty(t, SessionBinDir(argv0), argv0)
 	}
 }
+
+// #7770: the launch exports the colon-free dir the pane PATH must pin first —
+// the session dir itself or the af-owned indirection when the session dir
+// carries ':'. The export wins over argv[0]'s dir (which is the colon-bearing
+// session dir the indirection exists to hide); absent it, the staged binary's
+// own dir is the pin, as before. An export that is not a single PATH entry is
+// a broken contract: refusing to start beats re-splitting PATH identically to
+// the launch bug the export fixes.
+func TestPanePathDirPrefersTheLaunchExport(t *testing.T) {
+	dir, err := PanePathDir("/srv/af:sessions/work.abc123/af", "/home/u/.af-path/sess-0123456789abcdef")
+	require.NoError(t, err)
+	assert.Equal(t, "/home/u/.af-path/sess-0123456789abcdef", dir,
+		"the exported indirection is what the pane pins — argv[0]'s dir contains ':'")
+
+	// No export: the staged binary's own dir, exactly the pre-#7770 source a
+	// hand-run agent-server still uses.
+	dir, err = PanePathDir("/home/u/.af-sessions/s/af", "")
+	require.NoError(t, err)
+	assert.Equal(t, "/home/u/.af-sessions/s", dir)
+	dir, err = PanePathDir("af", "")
+	require.NoError(t, err)
+	assert.Empty(t, dir)
+
+	// A malformed export refuses rather than silently re-splitting PATH.
+	for label, exported := range map[string]string{
+		"colon":    "/home/u:a/.af-path/sess-x",
+		"relative": "home/u/.af-path/sess-x",
+	} {
+		t.Run(label, func(t *testing.T) {
+			_, err := PanePathDir("/x/af", exported)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "AF_SESSION_PATH_DIR")
+		})
+	}
+}

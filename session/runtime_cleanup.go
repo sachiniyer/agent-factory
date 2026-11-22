@@ -77,6 +77,15 @@ type SandboxRuntimeCleanupData struct {
 	// reattach after a daemon restart rebuilds the account workspace from it and
 	// the row's account (#5948); empty on rows with no account.
 	AccountSyncHost string `json:"account_sync_host,omitempty"`
+	// PanePathDir is the colon-free pane-PATH indirection this provision staged
+	// for a ':'-bearing session dir (#7770) — the link path itself, which lives
+	// outside the session dir under $HOME/.af-path or an unpredictable mktemp
+	// root nothing can re-derive. The teardown removes the link and its empty
+	// parent; a restart re-ensures it for the persisted launch. Empty when the
+	// session dir needed no indirection and on rows predating the field, which
+	// teardown handles by removing nothing — the same pre-field leak posture as
+	// the reattach fields above.
+	PanePathDir string `json:"pane_path_dir,omitempty"`
 }
 
 type DockerRuntimeCleanupData struct {
@@ -162,6 +171,10 @@ type SSHRuntimeCleanupData struct {
 	// never obtained (#5571 W8.6): reap then refuses to remove the directory without
 	// stopping a server that may still run, across a daemon restart too.
 	LaunchUnconfirmed bool `json:"launch_unconfirmed,omitempty"`
+	// PanePathDir is the colon-free pane-PATH indirection this provision staged
+	// for a ':'-bearing session dir (#7770) — see SandboxRuntimeCleanupData for
+	// the contract, which the shared provisioner applies identically here.
+	PanePathDir string `json:"pane_path_dir,omitempty"`
 }
 
 type HookRuntimeCleanupData struct {
@@ -396,6 +409,7 @@ func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCl
 		p.agentServerVersion = data.SSH.AgentServerVersion
 		p.tokenRef = data.SSH.TokenRef
 		p.launchScript, p.adoptPending = data.SSH.LaunchScript, data.SSH.AdoptPending
+		p.panePathDir = data.SSH.PanePathDir
 		p.restoreCallbackIdentity(data.SSH.CallbackRef, data.SSH.CallbackReverse)
 		p.launchAttempted = data.SSH.LaunchUnconfirmed
 		p.restoreAccountWorkspace(account, data.SSH.HostName, accountSyncTargetOf(legacyCfg))
@@ -437,6 +451,7 @@ func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCl
 			tokenRef:           data.Sandbox.TokenRef,
 			launchScript:       data.Sandbox.LaunchScript,
 			adoptPending:       data.Sandbox.AdoptPending,
+			panePathDir:        data.Sandbox.PanePathDir,
 		}
 		p.restoreCallbackIdentity(data.Sandbox.CallbackRef, data.Sandbox.CallbackReverse)
 		p.launchAttempted = data.Sandbox.LaunchUnconfirmed
