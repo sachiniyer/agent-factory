@@ -496,6 +496,77 @@ func TestInFlightSwapRecordHoldsItsSlotAcrossBothProjections(t *testing.T) {
 		"rawTaskRunHoldsSlot's LoadedActivity arm must keep the ghost pending")
 }
 
+// A reconciled COMMIT is a replacement the run never saw (#7793 review): the
+// host relaunched the agent on the new account while the daemon was dead, so
+// the task it was serving was never replayed to the fresh conversation. The
+// run ends interrupted — never completable by the replacement's first idle,
+// which would fire on_complete — and the staging's skipped-config evidence
+// rides the record back onto the row rather than vanishing.
+func TestReconciledCommitEndsTheUnreplayedRunAndRestoresTheSkipList(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
+	f.inst.taskRunActive = true
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
+	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the host committed while the response was lost")
+	rec := f.inst.InFlightOffBoxSwap()
+	require.NotNil(t, rec)
+
+	// The record carries the staging evidence the live path would have
+	// recorded — a recovered commit is not a clean placement.
+	rec.AgentConfigSkipped = []string{"claude:CLAUDE.md: declared file is missing"}
+
+	// The daemon's restart reconciles the committed verdict on the bound row:
+	// the run the replacement never saw ends interrupted, not completed.
+	f.inst.remoteClient = &remoteAgentClient{}
+	settled, err := f.inst.ReconcileOffBoxSwapFence()
+	require.NoError(t, err)
+	require.True(t, settled)
+	acct, _ := f.inst.AccountSelection()
+	assert.Equal(t, "alt", acct)
+	assert.False(t, f.inst.taskRunActive, "the unreplayed run ended")
+	assert.True(t, f.inst.TaskRunInterrupted(), "as interrupted, never completed")
+	assert.True(t, f.inst.ConsumeTaskRunInterrupted(), "the daemon stamps the owning task once")
+	assert.False(t, f.inst.ConsumeTaskRunInterrupted())
+	assert.Equal(t, []string{"claude:CLAUDE.md: declared file is missing"}, f.inst.agentConfigSkipped,
+		"the skipped declared file survives the recovered commit")
+	assert.Nil(t, f.inst.InFlightOffBoxSwap())
+}
+
+// A discard's tombstone is itself this swap's terminal verdict (#7793 review):
+// when the first reconcile proves a never-sent request by discarding its stage
+// and the record-clear checkpoint is lost, a restart replays the SAME question.
+// The replayed status must answer this swap's rolled_back — not an anonymous
+// "none" that a stage-less, prev-less host can never tell from "still queued",
+// which would fence the row through every restart forever.
+func TestDiscardVerdictReplaysAcrossALostCheckpoint(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.holdNext = 1 // the request crossed but is still queued server-side
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate, "the first reconcile settled: discard -> none -> rollback")
+	require.Nil(t, f.inst.InFlightOffBoxSwap())
+
+	// The clear's checkpoint never landed: a restart reloads a row that still
+	// carries the record and re-runs the same reconcile cold.
+	f.inst.offBoxSwapInFlight = &InFlightOffBoxSwapData{SwapID: "test-swap-1", From: "work", To: "alt"}
+	f.inst.startupStateUnknown = true
+	f.inst.remoteClient = &remoteAgentClient{}
+
+	settled, err := f.inst.ReconcileOffBoxSwapFence()
+	require.NoError(t, err)
+	assert.True(t, settled, "the discard's tombstone replays as this swap's own rolled_back")
+	assert.Nil(t, f.inst.InFlightOffBoxSwap())
+	assert.False(t, f.inst.StartupStateUnknown())
+
+	// And the queued request still lands to the tombstone: rolled back only.
+	_, err = f.srv.runHeldSwap(0)
+	require.Error(t, err)
+	assert.Equal(t, secretWork, f.hostCred(t, "account"))
+}
+
 // A task-backed session whose swap cannot be settled keeps its run: the
 // indeterminate fence is NOT a terminal startup failure, so taskRunActive —
 // and the max_concurrent_runs slot it pays for — survives until the record's

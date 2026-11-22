@@ -49,6 +49,12 @@ type InFlightOffBoxSwapData struct {
 	// a pre-"account-swap-scoped-stage" server rotates when false. The
 	// reconcile must look where the stage actually is.
 	ScopedStage bool `json:"scoped_stage,omitempty"`
+	// AgentConfigSkipped carries the staging's skipped-config evidence
+	// (#7793): one "agent:file: reason" entry per declared file the stage
+	// could not place. The commit it may recover needs the same list the
+	// live path records, or the reconciled row clears agentConfigSkipped
+	// and the missing file vanishes from every surface.
+	AgentConfigSkipped []string `json:"agent_config_skipped,omitempty"`
 	// OriginalStartupStateUnknown is the storage-only rollback fence: a
 	// previous release ignores it and keeps the projected
 	// StartupStateUnknown=true — loading the row inert and fenced rather
@@ -237,7 +243,16 @@ func (i *Instance) reconcileInFlightOffBoxSwap(sw AccountSwapper, p *sandboxProv
 		}
 		w.spec.Account = next
 		p.spec.Account = next
-		i.recordOffBoxAccount(next.Name, next.Agent, rec.Automatic, program, nil)
+		// The skip list the live path would have recorded rides the record:
+		// a recovered commit is not a clean placement — a declared file the
+		// stage could not place is still missing from the incoming scope.
+		i.recordOffBoxAccount(next.Name, next.Agent, rec.Automatic, program, rec.AgentConfigSkipped)
+		// The host relaunched the agent on the new account while the daemon
+		// was dead: the run it was serving was never replayed to the fresh
+		// conversation, so an in-flight run ends interrupted — the same
+		// conservative settle a restart-adoption runs — never completable by
+		// the replacement's first idle or by on_complete (#7793 review).
+		i.noteAdoptedRestart()
 		i.settleInFlightSwapVerdict()
 		return true, i.persistOffBoxSwapRecord()
 	case known:

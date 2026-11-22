@@ -75,6 +75,10 @@ func (s *codexSwapServer) DiscardAccountNext(swapID string) error {
 			return dErr
 		}
 	}
+	// The stage is provably gone, so the tombstone publishes as this swap's
+	// own terminal verdict — replayable by a daemon whose record clear was
+	// lost (#7793), exactly like the real server's noteStagedDiscarded.
+	s.rec.refuseLocked(swapID)
 	return nil
 }
 
