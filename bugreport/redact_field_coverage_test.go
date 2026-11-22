@@ -183,6 +183,10 @@ var verbatimInstanceFields = map[string]string{
 	// tmux or git, and blanking it costs triage the reason automatic recovery
 	// stopped (#3588).
 	"LostRestoreFailure.Error": "af-authored restore diagnostic, sanitized by scrubDiagnostic in redactInstanceData (titles, tmux names, path roots, $HOME, username, credentials) rather than blanked, because it is the only record of why recovery gave up — see TestRedactInstancesJSONScrubsLostRestoreFailureError (#3588)",
+	// Kind is written only from session's named constants (currently
+	// LostRestoreFailureArchiveDidNotFinish) or left empty — a machine-minted
+	// discriminator like the capture-kind enums, never user text.
+	"LostRestoreFailure.Kind": "machine-minted discriminator written only from session's named LostRestoreFailure kind constants (#7754)",
 	// Same class as the line above: daemon/lostrestore.go stores the
 	// environmental error that armed the wait, and it quotes tmux/git output
 	// the same way — so it gets the identical scrubDiagnostic pass rather than

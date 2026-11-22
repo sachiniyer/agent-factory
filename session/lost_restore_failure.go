@@ -8,6 +8,24 @@ import (
 
 const lostRestoreFailureMaxRunes = 512
 
+// LostRestoreFailureArchiveDidNotFinish is the LostRestoreFailure.Kind written
+// for a REQUESTED archive that did not finish: its teardown refused, or the
+// committed archive was rolled back after a later step failed, leaving the
+// session Lost and fenced off the automatic restore loop — not because
+// restores ran out of budget but because the user asked for the session to
+// stop (#7754, #7755 R5).
+//
+// The name deliberately avoids "refused": the rollback rows it also labels
+// were never refused, and the row must name what actually happened rather
+// than the arm that reached it.
+//
+// It rides the SAME durable field the restore loop's own give-up uses rather
+// than a new one on purpose: an older daemon that knows nothing of Kind still
+// reads attempts+error, still derives LostRestoreGaveUp, and still fences the
+// row — the downgrade property the field owes. Newer readers use it to say
+// what actually happened.
+const LostRestoreFailureArchiveDidNotFinish = "archive-did-not-finish"
+
 // LostRestoreFailure is the durable terminal outcome of the daemon's automatic
 // Lost-session restore loop. It stays on the session record until an explicit
 // runtime replacement succeeds, so every client can distinguish an actively
@@ -15,6 +33,13 @@ const lostRestoreFailureMaxRunes = 512
 type LostRestoreFailure struct {
 	Attempts int    `json:"attempts"`
 	Error    string `json:"error"`
+	// Kind discriminates WHY the row is fenced. "" is the restore loop's own
+	// give-up; "archive-did-not-finish" is a requested archive that refused or
+	// rolled back. omitempty keeps rows written before it existed — and rows
+	// an older daemon still writes — byte-identical, and any value still
+	// counts as a terminal fence (valid() ignores it), so a daemon that does
+	// not know a kind still gates the restore loop on the row.
+	Kind string `json:"kind,omitempty"`
 }
 
 func (f LostRestoreFailure) valid() bool {
@@ -74,10 +99,16 @@ func sanitizeLostRestoreError(raw string) string {
 }
 
 // Detail is the row wording shared by the TUI and API-facing callers. The web
-// mirrors this structured projection from attempts+error.
+// mirrors this structured projection from attempts+error+kind. A
+// did-not-finish archive row names what actually happened — the durable error
+// already opens "archive did not finish — …" — not a restore give-up that
+// never ran and not a refusal the rollback rows never saw (#7754, #7755 R5).
 func (f LostRestoreFailure) Detail() string {
 	if !f.valid() {
 		return ""
+	}
+	if f.Kind == LostRestoreFailureArchiveDidNotFinish {
+		return f.Error
 	}
 	noun := "attempts"
 	if f.Attempts == 1 {
@@ -90,6 +121,18 @@ func (f LostRestoreFailure) Detail() string {
 // to the live session record. Persistence and client notification are owned by
 // the daemon after this in-memory edge.
 func (i *Instance) SetLostRestoreFailure(attempts int, restoreErr error) bool {
+	return i.setLostRestoreFailure(attempts, restoreErr, "")
+}
+
+// SetLostRestoreFailureKind is SetLostRestoreFailure for a fence whose cause
+// is not the restore loop's own give-up: it writes the same durable terminal
+// state with a Kind discriminator so the row can name what actually refused
+// it (#7754).
+func (i *Instance) SetLostRestoreFailureKind(attempts int, cause error, kind string) bool {
+	return i.setLostRestoreFailure(attempts, cause, kind)
+}
+
+func (i *Instance) setLostRestoreFailure(attempts int, restoreErr error, kind string) bool {
 	if attempts <= 0 || restoreErr == nil {
 		return false
 	}
@@ -97,7 +140,7 @@ func (i *Instance) SetLostRestoreFailure(attempts int, restoreErr error) bool {
 	// client-facing: it lands in instances.json, API responses, and a one-line TUI
 	// row, so collapse controls/whitespace and bound it before it crosses that
 	// trust boundary.
-	next := LostRestoreFailure{Attempts: attempts, Error: sanitizeLostRestoreError(restoreErr.Error())}
+	next := LostRestoreFailure{Attempts: attempts, Error: sanitizeLostRestoreError(restoreErr.Error()), Kind: kind}
 	if !next.valid() {
 		return false
 	}

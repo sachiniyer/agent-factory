@@ -18,8 +18,10 @@ func (s *controlServer) archiveSessionGuarded(ctx context.Context, req *ArchiveS
 	}
 	// The `af sessions archive --self` caller this issue is about (#5182):
 	// register the kernel-verified requester before its own pane tree is
-	// reaped, and unregister when the reply is on the wire.
-	defer s.trackTeardownRequester(ctx, req)()
+	// reaped, and unregister when the reply is on the wire. The registration
+	// carries THIS teardown's targets, so the exemption cannot reach another
+	// session's reap (#7754).
+	defer s.trackTeardownRequester(ctx, req, s.manager.teardownTargetsForSession(req.ID, req.Title, req.RepoID))()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}

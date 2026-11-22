@@ -495,7 +495,7 @@ work. The vocabulary is closed:
 |-------|---------------------|
 | `usage-limit` | The session is parked at a [usage-limit wall](usage-limits.md). |
 | `process-exited` | The agent process is gone — the row's liveness is Lost or Dead. |
-| `restore-gave-up` | The process is gone and automatic Lost-session recovery has stopped — either it exhausted its failed-attempt budget, or it confirmed enough restore-and-die cycles to conclude the agent cannot stay up. See `lost_restore_failure` below for the two verdicts. |
+| `restore-gave-up` | The process is gone and automatic Lost-session recovery has stopped — it exhausted its failed-attempt budget, it confirmed enough restore-and-die cycles to conclude the agent cannot stay up, or a requested archive left the row fenced because the user asked for the session to stop. See `lost_restore_failure` below for the verdicts. |
 | `restore-waiting-on-environment` | The process is gone and automatic Lost-session recovery is parked on an environmental failure — a condition outside the session itself, such as a full disk, not a session defect — and retries on a capped backoff without spending the structural attempt budget. See `lost_restore_wait` below. |
 | `recreate-pending` | A recognized recreate notice is waiting, unacknowledged, on the root session. |
 | `prompt-not-delivered` | The last prompt send observed that the prompt did not arrive. |
@@ -503,30 +503,43 @@ work. The vocabulary is closed:
 | `no-pane-change-since-delivery` | The last prompt was delivered, and the pane has not changed since. |
 | `settled-after-pane-change` | The row settled back to Ready, and the pane changed *after* the last prompt attempt. When later churn resolves an unconfirmed send, this is all af reports — it never retroactively claims delivery (#3162). |
 
-**`lost_restore_failure`** (object, omitted unless automatic recovery gave up) —
-the durable terminal restore result: `{ "attempts": 6, "error": "..." }`. The
-session remains Lost, and the daemon does not automatically retry it again. An
-explicit restore remains available; a successful runtime replacement clears the
-field. Because it is stored on the session record, daemon restarts and the TUI,
-web, and HTTP clients retain the same last error.
+**`lost_restore_failure`** (object, omitted unless the row is fenced) —
+the durable terminal result: `{ "attempts": 6, "error": "...", "kind": "..." }`.
+The session remains Lost, and the daemon does not automatically retry it again.
+An explicit restore remains available; a successful runtime replacement clears
+the field. Because it is stored on the session record, daemon restarts and the
+TUI, web, and HTTP clients retain the same last error.
 
-What `attempts` counts depends on which verdict ended the loop, and `error` is
-the discriminator — there is no separate field naming the verdict:
+`kind` is the verdict discriminator (omitted — never `""` — on rows written
+before it existed):
 
-- **Failed-attempt exhaustion** — `attempts` counts consecutive FAILED restore
-  attempts that spent the structural budget (6 by default), and `error` is the
-  last attempt's failure: the spawn died before it could be confirmed alive,
-  the preserve push failed, and so on.
-- **Confirmed-flap give-up** — `attempts` counts CONFIRMED SUCCESSFUL restores
-  (4 inside a 30-minute window) that each went lost again anyway, and `error`
-  begins `the session was confirmed restored N times in 30m0s and went lost
-  again each time`. Four successes are not four failures: a consumer that
-  renders this as "4 attempts failed" inverts the evidence — every one of
-  those spawns worked, and the agent exited after it was confirmed up.
+- **Failed-attempt exhaustion** (`kind` absent) — `attempts` counts consecutive
+  FAILED restore attempts that spent the structural budget (6 by default), and
+  `error` is the last attempt's failure: the spawn died before it could be
+  confirmed alive, the preserve push failed, and so on.
+- **Confirmed-flap give-up** (`kind` absent) — `attempts` counts CONFIRMED
+  SUCCESSFUL restores (4 inside a 30-minute window) that each went lost again
+  anyway, and `error` begins `the session was confirmed restored N times in
+  30m0s and went lost again each time`. Four successes are not four failures:
+  a consumer that renders this as "4 attempts failed" inverts the evidence —
+  every one of those spawns worked, and the agent exited after it was
+  confirmed up.
+- **`archive-did-not-finish`** — a REQUESTED archive did not finish: its
+  teardown refused, or the committed archive was rolled back after a later
+  step failed. `attempts` is 1 (no restore ever ran), and `error` begins
+  `archive did not finish — retry the archive, or restore the session to
+  resume it`. The session stays down until the archive is retried or the
+  session is restored; the automatic loop never restarts it.
 
 The confirmed-flap count is in-memory evidence only: it does not survive a
 daemon restart the way this record does, and a restart re-opens the count at
 zero while the durable verdict stands.
+
+Clients that render a row detail should prefer the verdict-aware form: for
+`kind: "archive-did-not-finish"` show `error` as written; for absent or
+unknown `kind` show `restore gave up after N attempt(s): error`. Rows with an
+unrecognized `kind` are still terminal fences — the verdict vocabulary is
+open, the fence semantics are not.
 
 **`lost_restore_wait`** (object, omitted unless automatic recovery is waiting on
 the environment) — the non-terminal counterpart of `lost_restore_failure`:

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/teardownreq"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -565,7 +566,7 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 		return refuse(fmt.Errorf("pane processes %s are still alive after bounded teardown%s",
 			processPIDList(processes.remaining),
 			unverifiedDaemonSurvivorClause(processes.remaining, processes.protected)))
-	case waitForPane && !waitForPaneExitOrRequester(paneProcess, paneExitWait):
+	case waitForPane && !waitForPaneExitOrRequester(paneProcess, teardownreq.TmuxTarget(t.sanitizedName), paneExitWait):
 		// kill-session returning establishes only that SIGHUP was sent, not that
 		// the process stopped writing.
 		//
@@ -728,10 +729,10 @@ func capturePaneProcess(pid int) (proctree.Process, bool, error) {
 // a pane root that becomes a tracked requester mid-wait — now blocked on THIS
 // teardown's reply — stops counting as a survivor at once rather than burning
 // the whole bounded wait into a refusal its own request caused.
-func waitForPaneExitOrRequester(process proctree.Process, timeout time.Duration) bool {
+func waitForPaneExitOrRequester(process proctree.Process, target teardownreq.Target, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
-		if isTeardownRequester(process) {
+		if isTeardownRequester(process, target) {
 			log.InfoLog.Printf("pane process %d (%s) is a teardown requester blocked on this "+
 				"teardown's reply; not counting it as a survivor (#5182)", process.PID, process.Comm)
 			return true

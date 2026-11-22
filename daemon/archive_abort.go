@@ -25,13 +25,31 @@ import (
 // op in flight, so retrying the archive is the way out.
 //
 // The caller persists afterwards with its own error handling; the fence rides
-// that write. Only a REQUESTED archive's refused teardown belongs here: a
-// CancelArchive site never touched the runtime, and undoCommittedArchive's
-// Lost heal follows a teardown that SUCCEEDED, so the in-place restore it
-// hands to the loop is the intended outcome there.
+// that write. Only a REQUESTED archive's refused teardown or rollback belongs
+// here: a CancelArchive site never touched the runtime.
 func (m *Manager) abortRequestedArchiveToLost(instance *session.Instance, teardownErr error) {
 	_ = instance.Transition(session.AbortArchiveToLost())
-	if instance.SetLostRestoreFailure(1, fmt.Errorf("archive did not finish — retry the archive, or restore the session to resume it: %w", teardownErr)) {
+	m.fenceRequestedArchiveRestore(instance, teardownErr)
+}
+
+// fenceRequestedArchiveRestore installs the restore-loop fence on a row a
+// REQUESTED archive left Lost (#7752, #7754): the archive's own teardown
+// failure above, and undoCommittedArchive's rollback of a committed archive
+// the user asked for. Either way the row must never re-spawn the agent the
+// user asked to stop — not on the next loop tick, and not after a daemon
+// restart.
+//
+// The kind marks the durable failure as an archive that did not finish
+// rather than the restore loop's own give-up, so the row and API detail can
+// say what actually happened; the gate itself is unchanged (attempts+error
+// still make LostRestoreGaveUp), which is what keeps an older daemon — one
+// that never heard of the kind — reading the row as fenced.
+//
+// As with the abort above this is a fence, not a tombstone: observing the
+// same runtime alive clears it, an explicit restore clears it, and retrying
+// the archive is the way out.
+func (m *Manager) fenceRequestedArchiveRestore(instance *session.Instance, cause error) {
+	if instance.SetLostRestoreFailureKind(1, fmt.Errorf("archive did not finish — retry the archive, or restore the session to resume it: %w", cause), session.LostRestoreFailureArchiveDidNotFinish) {
 		m.info().Printf("archive of session %q did not finish; automatic restore is fenced off it until the archive is retried or the session is restored", instance.Title)
 	}
 }

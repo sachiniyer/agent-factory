@@ -49,7 +49,8 @@ produced.
 
 An idle row also says **why** it's idle, as far as the daemon can mechanically
 tell — `usage limit`, `process exited`, `restore gave up after 6 attempts: …`,
-`no change after delivery`, `pane changed · 12m ago` — next to its branch name.
+`archive did not finish — …`, `no change after delivery`,
+`pane changed · 12m ago` — next to its branch name.
 The detail reports mechanically established facts only: process and restore
 state, prompt-delivery evidence, and when the pane's rendered bytes last changed.
 No reason ever claims the agent *finished*, *asked a question*, or is

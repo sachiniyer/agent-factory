@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/internal/teardownreq"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -500,4 +501,52 @@ func worktreePathOf(gw *git.GitWorktree) string {
 		return ""
 	}
 	return gw.GetWorktreePath()
+}
+
+// TeardownTargets returns every teardown target a destructive teardown of
+// this instance will own (#7754): the tmux session names it will close — the
+// agent session, every tmux-backed sibling tab, and each pending cleanup
+// handle a retry would still kill — plus the worktree path the writer reaper
+// will empty. The daemon's requester registry stores these with the
+// requester's registration, and a reaper excuses the requester only when the
+// teardown it is running is among them — so a client blocked on ANOTHER
+// session's teardown is never exempted from this one's survivor set.
+//
+// The set is a snapshot: tabs spawned after it is taken are not part of the
+// teardown either (a create racing the op-lock cannot be reaped by it), and
+// the registration is best-effort by construction — an unresolvable request
+// registers nothing, degrading to pre-#5182 behavior rather than exempting a
+// guess.
+func (i *Instance) TeardownTargets() []teardownreq.Target {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	// Pre-sized to len(i.Tabs) with no allocation-size arithmetic — the same
+	// trade ghostTmuxNames already made for CodeQL's
+	// go/allocation-size-overflow: the uncommon pending handles and the
+	// worktree/recovery paths grow the slice themselves, and a make() with
+	// no length arithmetic has nothing for the scanner to flag (#2036, #7755).
+	targets := make([]teardownreq.Target, 0, len(i.Tabs))
+	for _, tab := range i.Tabs {
+		if tab.tmux != nil {
+			targets = append(targets, teardownreq.TmuxTarget(tab.tmux.SanitizedName()))
+		}
+	}
+	for _, cleanup := range i.pendingTabCleanup {
+		if cleanup.TmuxName != "" {
+			targets = append(targets, teardownreq.TmuxTarget(cleanup.TmuxName))
+		}
+	}
+	if i.gitWorktree != nil {
+		if path := i.gitWorktree.GetWorktreePath(); path != "" {
+			targets = append(targets, teardownreq.WorktreeTarget(path))
+		}
+		// A relocation claim selects its source under the op-lock, after this
+		// snapshot: with a recovery record outstanding that source may be the
+		// ALTERNATE path, not the worktree path read above (#7754 R4). Register
+		// both so the caller's reprieve follows the claim, not the pathname.
+		if recovery, ok := i.gitWorktree.GetRelocationRecovery(); ok && recovery.AlternatePath != "" {
+			targets = append(targets, teardownreq.WorktreeTarget(recovery.AlternatePath))
+		}
+	}
+	return targets
 }

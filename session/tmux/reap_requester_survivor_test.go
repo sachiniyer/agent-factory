@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/afcli"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/teardownreq"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/log/logtest"
 )
@@ -46,7 +47,7 @@ func TestReapSessionProcessesRequesterIsNotASurvivor(t *testing.T) {
 	redirectReapLogs(t, &infoBuf, &warnBuf)
 
 	requester := spawnRequesterSleeper(t)
-	untrack := TrackTeardownRequester(requester)
+	untrack := TrackTeardownRequester(requester, teardownreq.TmuxTarget("af_requester_undecidable"))
 	defer untrack()
 
 	remaining := reapSessionProcesses(reapOnRequest, "af_requester_undecidable", []proctree.Process{requester},
@@ -86,9 +87,9 @@ func TestReapSessionProcessesRequesterIdentityMismatch(t *testing.T) {
 	claimant := spawnRequesterSleeper(t)
 	// Registered under the same pid but a DIFFERENT process instance: a
 	// recycled pid must not inherit a predecessor's excusal (#2103's rule).
-	untrack := TrackTeardownRequester(proctree.Process{PID: claimant.PID, StartID: claimant.StartID + 1})
+	untrack := TrackTeardownRequester(proctree.Process{PID: claimant.PID, StartID: claimant.StartID + 1}, teardownreq.TmuxTarget("af_claimant_mismatch"))
 	defer untrack()
-	require.False(t, isTeardownRequester(claimant), "premise: the live instance is not the registered one")
+	require.False(t, isTeardownRequester(claimant, teardownreq.TmuxTarget("af_claimant_mismatch")), "premise: the live instance is not the registered one")
 
 	remaining := reapSessionProcesses(reapOnRequest, "af_claimant_mismatch", []proctree.Process{claimant},
 		200*time.Millisecond, 300*time.Millisecond, undecidableClaimantSet(claimant.PID), nil)
@@ -119,16 +120,16 @@ func TestReapSessionProcessesRequesterRegisteredMidReapIsNotASurvivor(t *testing
 	)
 	log.InfoLog.SetOutput(&onWriteBuffer{buf: &infoBuf, onWrite: func(p []byte) {
 		if strings.Contains(string(p), exclusionLine) {
-			once.Do(func() { untrack = TrackTeardownRequester(requester) })
+			once.Do(func() { untrack = TrackTeardownRequester(requester, teardownreq.TmuxTarget("af_requester_mid_reap")) })
 		}
 	}})
 	t.Cleanup(func() { untrack() })
-	require.False(t, isTeardownRequester(requester), "premise: unregistered when the reap starts")
+	require.False(t, isTeardownRequester(requester, teardownreq.TmuxTarget("af_requester_mid_reap")), "premise: unregistered when the reap starts")
 
 	remaining := reapSessionProcesses(reapOnRequest, "af_requester_mid_reap", []proctree.Process{requester},
 		200*time.Millisecond, 300*time.Millisecond, undecidableClaimantSet(requester.PID), nil)
 
-	require.True(t, isTeardownRequester(requester),
+	require.True(t, isTeardownRequester(requester, teardownreq.TmuxTarget("af_requester_mid_reap")),
 		"premise: the registration landed inside the reap — the exclusion line was logged")
 	require.NotContains(t, infoBuf.String(), "excluding it from signalling (#5182)",
 		"premise: the entry-time registry scan did NOT see the requester")
@@ -224,12 +225,12 @@ func TestCloseAndWaitForPaneExitExcusesUndecidableRequesterInCapturedTree(t *tes
 
 	paneRoot := spawnRequesterSleeper(t)
 	requester := spawnUndecidableAFRequester(t)
-	untrack := TrackTeardownRequester(requester)
-	defer untrack()
 
 	killed := false
 	session := newTmuxSession(toTmuxName("close-undecidable-requester", ""), "af",
 		NewMockPtyFactory(t), closeTwoPaneFixture(paneRoot, requester, &killed))
+	untrack := TrackTeardownRequester(requester, teardownreq.TmuxTarget(session.SanitizedName()))
+	defer untrack()
 	state, err := session.CloseAndWaitForPaneExit()
 	require.NoError(t, err,
 		"the only live process left is the caller blocked on this teardown's answer — not a survivor")

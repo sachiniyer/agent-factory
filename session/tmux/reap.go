@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
@@ -390,7 +391,7 @@ func refreshCapturedAncestry(captured []proctree.Process, sanitizedName string) 
 	byPID := make(map[int]int, len(captured))
 	refreshed := make([]proctree.Process, 0, len(captured))
 	add := func(process proctree.Process) {
-		refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process)
+		refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, sanitizedName)
 	}
 	for _, process := range captured {
 		add(process)
@@ -416,8 +417,8 @@ func refreshCapturedAncestry(captured []proctree.Process, sanitizedName string) 
 // it is blocked on this teardown's reply, not a leak, and it cannot exit until
 // the reply is sent — admitting it would only stall every grace pass and then
 // report the caller it was built to spare.
-func addOrReplaceOrphanCandidate(candidates []proctree.Process, byPID map[int]int, process proctree.Process) []proctree.Process {
-	if isTeardownRequester(process) {
+func addOrReplaceOrphanCandidate(candidates []proctree.Process, byPID map[int]int, process proctree.Process, sanitizedName string) []proctree.Process {
+	if isTeardownRequester(process, teardownreq.TmuxTarget(sanitizedName)) {
 		return candidates
 	}
 	if index, exists := byPID[process.PID]; exists {
@@ -511,16 +512,18 @@ var (
 // that sweep's scope, not open a fresh memo per pass (#7509); callers with
 // no sweep scope pass nil.
 func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration, protected protectedSet, att *proctree.ExeAttestations) []proctree.Process {
-	// A tracked teardown requester stays IN the candidate set — the reaper's
-	// per-signal recheck spares it only while the registry still reports it
-	// tracked, so a reprieve that ends mid-reap lets the next tier reap it
-	// instead of escaping this teardown permanently (Codex on #5186). It is
-	// never waited on (blocked on this teardown's reply, it cannot exit inside
-	// the window) and never signalled while registered; the orphan-sweep
-	// ingestion also refuses it (addOrReplaceOrphanCandidate).
+	// A requester tracked FOR THIS teardown stays IN the candidate set — the
+	// reaper's per-signal recheck spares it only while the registry still
+	// reports it tracked, so a reprieve that ends mid-reap lets the next tier
+	// reap it instead of escaping this teardown permanently (Codex on #5186).
+	// It is never waited on (blocked on this teardown's reply, it cannot exit
+	// inside the window) and never signalled while registered; the orphan-sweep
+	// ingestion also refuses it (addOrReplaceOrphanCandidate). A requester
+	// registered for a DIFFERENT teardown earns nothing here (#7754).
+	requesterTarget := teardownreq.TmuxTarget(sanitizedName)
 	exemptedMidReap := make(map[int]bool)
 	for _, p := range procs {
-		if isTeardownRequester(p) {
+		if isTeardownRequester(p, requesterTarget) {
 			exemptedMidReap[p.PID] = true
 			log.InfoLog.Printf("teardown requester pid %d (%s) is blocked on this teardown's reply; "+
 				"excluding it from signalling (#5182)", p.PID, p.Comm)
@@ -567,7 +570,7 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 			}
 			return true
 		}
-		if !isTeardownRequester(p) {
+		if !isTeardownRequester(p, requesterTarget) {
 			return false
 		}
 		if !exemptedMidReap[p.PID] {
@@ -576,7 +579,9 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 				"excluding it from signalling (#5182)", p.PID, p.Comm)
 		}
 		return true
-	}, teardownreq.SignalUnlessTracked, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
+	}, func(p proctree.Process, sig syscall.Signal) (bool, error) {
+		return teardownreq.SignalUnlessTracked(p, requesterTarget, sig)
+	}, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
 		logReapOutcome(reason, sanitizedName, outcome, format, args...)
 	})
 	// An UNPROVEN-ancestry exclusion is exempt from signals but not from the
@@ -601,7 +606,7 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 		if verdict, ok := protected[p.PID]; !ok || verdict.positive {
 			continue
 		}
-		if isTeardownRequester(p) {
+		if isTeardownRequester(p, requesterTarget) {
 			log.InfoLog.Printf("teardown requester pid %d (%s) is blocked on this teardown's reply; "+
 				"not counting it as a survivor (#5182, #7752)", p.PID, p.Comm)
 			continue

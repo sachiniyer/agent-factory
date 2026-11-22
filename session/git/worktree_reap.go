@@ -93,7 +93,11 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 		// WARNING for doctor to reconcile, never a silently-swept process table.
 		return
 	}
-	procs, unclassified := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.TmuxIdentityOf)
+	// The exemption a tracked teardown requester earns is scoped to THIS
+	// teardown (#7754): the caller blocked on this worktree's teardown reply,
+	// not a requester waiting on some other teardown's.
+	requesterTarget := teardownreq.WorktreeTarget(worktreePath)
+	procs, unclassified := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.TmuxIdentityOf, requesterTarget)
 	// The identity read above is re-established before every signal (#7244).
 	tiers := newTierIdentity(proctree.TmuxIdentityOf, proctree.AliveSame)
 	// Runs after the kill below, or now if there is nothing to kill. It reads
@@ -112,7 +116,7 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 	// so the mid-reap notice fires only for genuine late registrations.
 	exemptedMidReap := make(map[int]bool)
 	for _, p := range procs {
-		if teardownreq.Is(p) {
+		if teardownreq.Is(p, requesterTarget) {
 			exemptedMidReap[p.PID] = true
 		}
 	}
@@ -120,7 +124,7 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 		if tiers.leftAlone(p) {
 			return true
 		}
-		if !teardownreq.Is(p) {
+		if !teardownreq.Is(p, requesterTarget) {
 			return false
 		}
 		if !exemptedMidReap[p.PID] {
@@ -129,7 +133,9 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 				"excluding it from the worktree writer reap (#5182)", p.PID, p.Comm)
 		}
 		return true
-	}, tiers.signalIf(teardownreq.SignalUnlessTrackedOrSpared), worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
+	}, tiers.signalIf(func(p proctree.Process, sig syscall.Signal, spare func(proctree.Process) bool) (bool, error) {
+		return teardownreq.SignalUnlessTrackedOrSpared(p, requesterTarget, sig, spare)
+	}), worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
 		// Every tier stays a WARNING here, and the outcome is deliberately unused
 		// (#2765). This reaper does not run on the requested-teardown side of that
 		// split: it fires only when a process is STILL WRITING into a worktree
@@ -384,7 +390,7 @@ func worktreeWriterProcesses(
 		cwd, ok := workingDir(pid)
 		return ok && pathutil.IsAtOrInside(filepath.Clean(cwd), root)
 	}
-	procs, _ := worktreeWriterProcessesMatching(snap, selfPID, matches, tmuxIdentity)
+	procs, _ := worktreeWriterProcessesMatching(snap, selfPID, matches, tmuxIdentity, teardownreq.WorktreeTarget(root))
 	return procs
 }
 
@@ -400,6 +406,7 @@ func worktreeWriterProcessesMatching(
 	selfPID int,
 	matches func(int) bool,
 	tmuxIdentity func(int) proctree.TmuxIdentity,
+	requesterTarget teardownreq.Target,
 ) (procs, unclassified []proctree.Process) {
 	// The daemon can inherit a cwd inside a worktree when an af invocation
 	// auto-starts it there, and the shared tmux server inherits its cwd from the
@@ -442,7 +449,7 @@ func worktreeWriterProcessesMatching(
 	requestersSeen := make(map[int]bool)
 	isRequester := func(pid int) bool {
 		p, ok := snap[pid]
-		if !ok || !teardownreq.Is(p) {
+		if !ok || !teardownreq.Is(p, requesterTarget) {
 			return false
 		}
 		if !requestersSeen[pid] {

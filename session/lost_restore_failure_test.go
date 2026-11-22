@@ -69,3 +69,40 @@ func TestLostRestoreFailureSanitizesDurableError(t *testing.T) {
 	require.LessOrEqual(t, len([]rune(failure.Error)), 512)
 	require.True(t, strings.HasSuffix(failure.Error, "…"), "truncated error = %q", failure.Error)
 }
+
+// #7754 property 4 + #7755 R5: a row a requested archive left fenced says what
+// actually happened — "archive did not finish", whether its teardown refused or
+// a committed archive rolled back — not a restore give-up that never ran and
+// not a refusal the rollback rows never saw. The SAME durable field keeps
+// gating the restore loop. Rows without a Kind (pre-existing or written by an
+// older daemon) and rows with an unknown one keep the give-up wording and
+// still fence.
+func TestLostRestoreFailureArchiveDidNotFinishDetailAndBackwardCompat(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "lost", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	require.True(t, inst.SetLostRestoreFailureKind(1,
+		errors.New("archive did not finish — retry the archive, or restore the session to resume it: pane processes 4242"),
+		LostRestoreFailureArchiveDidNotFinish))
+
+	failure := inst.LostRestoreFailureSnapshot()
+	require.NotNil(t, failure)
+	require.Equal(t, LostRestoreFailureArchiveDidNotFinish, failure.Kind)
+	require.Equal(t,
+		"archive did not finish — retry the archive, or restore the session to resume it: pane processes 4242",
+		failure.Detail())
+	require.True(t, inst.LifecycleView().LostRestoreGaveUp,
+		"the kind is a label on the same fence — the restore-loop gate is unchanged")
+
+	// A row written before Kind existed unmarshals with "" and still reads as
+	// (and gates as) the restore loop's own give-up — the downgrade property.
+	var decoded LostRestoreFailure
+	require.NoError(t, json.Unmarshal([]byte(`{"attempts":3,"error":"old boom"}`), &decoded))
+	require.Equal(t, "", decoded.Kind)
+	require.Equal(t, "restore gave up after 3 attempts: old boom", decoded.Detail())
+
+	// A kind this daemon does not know is still a terminal fence — it just has
+	// no special wording yet, so the honest generic detail is what renders.
+	unknown := LostRestoreFailure{Attempts: 2, Error: "later boom", Kind: "kind-from-the-future"}
+	require.True(t, unknown.valid())
+	require.Equal(t, "restore gave up after 2 attempts: later boom", unknown.Detail())
+}
