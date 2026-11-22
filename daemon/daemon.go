@@ -601,12 +601,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		}
 	case sig := <-sigChan:
 		log.InfoLog.Printf("received signal %s during instance restore; exiting", sig.String())
-		return nil
+		return fatalAcceptShutdownErr()
 	case <-shutdownCh:
 		log.InfoLog.Printf("received shutdown request via control socket during instance restore; exiting")
 		return fatalAcceptShutdownErr()
 	case <-throwawayExpireCh:
-		return nil
+		return fatalAcceptShutdownErr()
 	}
 	// Upgrade candidates deliberately park before the orphan sweep. Preserve the
 	// pre-existing probation contract: restored state is readable while every
@@ -623,12 +623,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		select {
 		case sig := <-sigChan:
 			log.InfoLog.Printf("received signal %s during upgrade probation; exiting", sig.String())
-			return nil
+			return fatalAcceptShutdownErr()
 		case <-shutdownCh:
 			log.InfoLog.Printf("received shutdown request during upgrade probation; exiting")
 			return fatalAcceptShutdownErr()
 		case <-throwawayExpireCh:
-			return nil
+			return fatalAcceptShutdownErr()
 		}
 	}
 

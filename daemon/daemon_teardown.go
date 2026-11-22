@@ -182,6 +182,11 @@ func holdHomeIfAbandoned(stop *stopClock, beforeExit func(), err error, panicked
 	case err != nil:
 		exit.code = 1
 		log.ErrorLog.Printf("daemon exiting: %v", err)
+	default:
+		if fatalErr := fatalAcceptShutdownErr(); fatalErr != nil {
+			exit.code = 1
+			log.ErrorLog.Printf("daemon exiting: %v", fatalErr)
+		}
 	}
 	log.WarningLog.Printf("shutdown: this stop abandoned %s; exiting while the daemon still holds its AF home's lock and latch, "+
 		"so nothing it abandoned can touch the home after their release. daemon.pid stays behind naming this exited process, "+
