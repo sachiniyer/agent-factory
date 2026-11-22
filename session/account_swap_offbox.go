@@ -2,6 +2,8 @@ package session
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -86,17 +88,21 @@ const (
 // accountSwapRecorder serializes a swap with the question "how did it end?": the
 // swap holds mu from start to its terminal result, so a status request made while
 // it is mid-flight WAITS for it instead of observing an intermediate layout.
+// The terminal record also carries the id the swap arrived with, so the daemon
+// asking after a lost response can tell THIS swap's outcome from an earlier
+// one's stale record (#7773).
 type accountSwapRecorder struct {
 	mu      sync.Mutex
 	outcome string
 	program string
+	id      string
 }
 
-// run executes swap and records how it ended.
-func (r *accountSwapRecorder) run(swap func() (string, error)) (string, error) {
+// run executes swap and records how it ended, under the swap's own identity.
+func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.outcome, r.program = swapOutcomeUnknown, "" // until it is terminal
+	r.id, r.outcome, r.program = id, swapOutcomeUnknown, "" // this swap's, until it is terminal
 	program, err := swap()
 	switch {
 	case err == nil:
@@ -109,51 +115,94 @@ func (r *accountSwapRecorder) run(swap func() (string, error)) (string, error) {
 	return program, err
 }
 
-// status blocks until any running swap is terminal, then reports its outcome.
-func (r *accountSwapRecorder) status() (outcome, program string) {
+// status blocks until any running swap is terminal, then reports its outcome
+// and the id of the swap that outcome belongs to.
+func (r *accountSwapRecorder) status() (outcome, program, id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.outcome == "" {
-		return swapOutcomeNone, ""
+		return swapOutcomeNone, "", ""
 	}
-	return r.outcome, r.program
+	return r.outcome, r.program, r.id
 }
 
-// reconcileSwap learns how a swap whose response was lost actually ended, from the
-// agent-server's own terminal record. Rollback state (account.prev) is never
-// touched on anything less.
-func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper) (committed bool, program string, known bool) {
+// reconcileSwap learns how a swap whose response was lost actually ended, from
+// the agent-server's own terminal record — but only a record that names THIS
+// swap proves anything about it (#7773). swapID is the identity the swap
+// request carried; the status answer echoes the id of the swap it describes.
+//
+// A status read is ordered: a running swap holds the recorder until it is
+// terminal, so a record that names an EARLIER swap means this one had not
+// started when the read was taken. Such a swap can still commit later — but
+// only by rotating the staged scope in — so the stale-read protocol removes
+// that scope once and asks again: a swap that slipped in between is waited out
+// by the second read and answered under its own id, and one that arrives later
+// can only roll back. Rollback state (account.prev) is never touched on
+// anything less than a commit this swap itself produced, and a failed status
+// read or marker probe stays indeterminate — never a guess at either answer.
+func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (committed bool, program string, known bool) {
 	discarded := false
 	for attempt := 0; attempt < 2; attempt++ {
-		outcome, prog, err := sw.AccountSwapStatus()
+		outcome, prog, recID, err := sw.AccountSwapStatus()
 		if err != nil {
 			return false, "", false
 		}
+		if recID != "" && recID == swapID {
+			// This swap's own terminal record — the only admissible proof of
+			// commit. It is read after anything the daemon removed below, so a
+			// commit it reports is ordered after every intervention here.
+			switch outcome {
+			case swapOutcomeCommitted:
+				return true, prog, true
+			case swapOutcomeRolledBack:
+				return false, "", true
+			default:
+				return false, "", false
+			}
+		}
 		switch outcome {
-		case swapOutcomeCommitted:
-			return true, prog, true
-		case swapOutcomeRolledBack:
-			return false, "", true
 		case swapOutcomeNone:
-			// The request never ran here (or this server restarted since). Only the
-			// host's own markers can vouch for that, and the staged scope is removed
-			// so a request still in flight cannot run afterwards; a second status
-			// catches one that ran in between.
+			// "Never ran here" is only as good as the host's agreement: a server
+			// restart forgets every swap, so the markers must show the staged
+			// scope still staged and nothing rotated away.
 			if discarded {
 				return false, "", true // still none after the staged scope is gone
 			}
 			if w.probeScopeState(sshShortStepTimeout) != scopeOutgoing {
 				return false, "", false
 			}
-			if err := w.discardAccountNext(sshShortStepTimeout); err != nil {
+		case swapOutcomeUnknown:
+			// The host's scope is in doubt: fence, and leave every directory —
+			// the staged scope included — for whatever recovery inspects them.
+			return false, "", false
+		case swapOutcomeCommitted, swapOutcomeRolledBack:
+			if discarded {
+				// The staged scope is already gone, so this swap can never
+				// rotate in: the host holds whatever the last attributed swap
+				// left — the old account. An anonymous committed is the one
+				// exception: on a server that cannot echo the id it might BE
+				// this swap's, which no read here can tell apart.
+				return false, "", recID != "" || outcome == swapOutcomeRolledBack
+			}
+			if recID == "" && outcome == swapOutcomeCommitted {
+				// A pre-identity server's committed might be this swap's own —
+				// fence rather than credit it, but bound the case where it is a
+				// stale record behind a request still in flight first.
+				_ = w.discardAccountNext(sshShortStepTimeout)
 				return false, "", false
 			}
-			discarded = true
+			// An attributed stale record or an anonymous rolled_back: remove the
+			// staged scope so a request still in flight can only roll back, then
+			// ask once more — the second read is ordered after the discard.
 		default:
 			return false, "", false
 		}
+		if err := w.discardAccountNext(sshShortStepTimeout); err != nil {
+			return false, "", false
+		}
+		discarded = true
 	}
-	return false, "", true
+	return false, "", false
 }
 
 // probeScopeState reads the host afresh (a new shell, not the lost call) and
@@ -200,16 +249,21 @@ var ErrAccountSwapUnsupported = errors.New("the sandbox's agent-server cannot sw
 type AccountSwapper interface {
 	// SwapAccountInPlace stops the agent, moves the live scope aside, moves the
 	// staged scope into its place and starts the agent again with a fresh
-	// conversation. It returns the command the host launched. On failure the scope
-	// is put back as it was.
-	SwapAccountInPlace() (program string, err error)
+	// conversation. swapID is the daemon-minted identity of THIS swap (#7773):
+	// the server's terminal record binds to it, which is what a lost-response
+	// reconcile reads back as proof the outcome it reports belongs to this
+	// swap rather than an earlier one. It returns the command the host
+	// launched. On failure the scope is put back as it was.
+	SwapAccountInPlace(swapID string) (program string, err error)
 	// CanSwapAccount reports whether SwapAccountInPlace is available, without side
 	// effects. An error means the answer could not be determined.
 	CanSwapAccount() (bool, error)
 	// AccountSwapStatus reports how the last swap ended, waiting for a running
-	// one to finish: one of the swapOutcome* values and, when committed, the
-	// command launched.
-	AccountSwapStatus() (outcome, program string, err error)
+	// one to finish: one of the swapOutcome* values, the command launched when
+	// committed, and the id of the swap the outcome belongs to — empty on a
+	// server that predates swap identity, which can therefore never prove a
+	// commit.
+	AccountSwapStatus() (outcome, program, swapID string, err error)
 }
 
 var (
@@ -301,6 +355,20 @@ func (w *sandboxWorkspace) removePrevAccount(timeout time.Duration) error {
 		return fmt.Errorf("removing the previous account from the host failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// accountSwapID mints the identity the daemon sends with each swap request
+// (#7773). The agent-server binds its terminal record to it, so a lost response
+// reconciles only a record that names THIS swap. Random, never sequential or
+// derived: a stale record's id must be impossible to collide with. It is a var
+// for the same reason sandboxReapNonce is — crypto/rand cannot be made to fail
+// from a test on any platform af runs on.
+var accountSwapID = func() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // OffBoxAccountSwap is what a completed account handoff reports.
@@ -467,6 +535,13 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 		w.spec.AgentConfigFiles = append([]string(nil), agentConfigFiles...)
 	}
 	res := OffBoxAccountSwap{From: w.spec.Account.Name, To: next.Name}
+	// The swap's identity, minted before anything is staged or sent: a lost
+	// response is reconciled only on the terminal record that names THIS swap,
+	// never on an earlier one's stale outcome (#7773).
+	swapID, err := accountSwapID()
+	if err != nil {
+		return res, fmt.Errorf("handing %q off to account %q: minting the swap's identity: %w", i.Title, next.Name, err)
+	}
 	versions, skipped, err := w.stageAccountNext(sshShortStepTimeout, next)
 	if err != nil {
 		_ = w.discardAccountNext(sshShortStepTimeout)
@@ -477,11 +552,11 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	// skip list belongs to the result even when the response was lost (the
 	// reconciled arm below keeps res.AgentConfigSkipped populated).
 	res.AgentConfigSkipped = skipped
-	program, err := sw.SwapAccountInPlace()
+	program, err := sw.SwapAccountInPlace(swapID)
 	if err != nil && swapOutcomeIndeterminate(err) {
 		// The call may have completed on the host with its response lost. What the
 		// session records must be what the host runs, so ask the host.
-		switch committed, prog, known := w.reconcileSwap(sw); {
+		switch committed, prog, known := w.reconcileSwap(sw, swapID); {
 		case known && committed:
 			res.Reconciled, err, program = true, nil, prog
 		case known:
@@ -550,17 +625,18 @@ func (i *Instance) recordOffBoxAccount(name, agent string, automatic bool, progr
 // --- sandbox side ---
 
 // SwapAccountInPlace runs the rotation in the in-sandbox instance, serialized with
-// any relaunch or agent swap (agentOpMu).
-func (s *localAgentServer) SwapAccountInPlace() (string, error) {
+// any relaunch or agent swap (agentOpMu), recorded under the swap's identity.
+func (s *localAgentServer) SwapAccountInPlace(swapID string) (string, error) {
 	s.agentOpMu.Lock()
 	defer s.agentOpMu.Unlock()
-	return s.acctSwap.run(s.inst.swapAccountInPlace)
+	return s.acctSwap.run(swapID, s.inst.swapAccountInPlace)
 }
 
-// AccountSwapStatus is the terminal record, served after any running swap ends.
-func (s *localAgentServer) AccountSwapStatus() (string, string, error) {
-	outcome, program := s.acctSwap.status()
-	return outcome, program, nil
+// AccountSwapStatus is the terminal record, served after any running swap ends,
+// with the id of the swap it belongs to.
+func (s *localAgentServer) AccountSwapStatus() (string, string, string, error) {
+	outcome, program, id := s.acctSwap.status()
+	return outcome, program, id, nil
 }
 
 // CanSwapAccount is always true for the local runtime: it owns the tmux session.
@@ -756,12 +832,22 @@ type accountSwapResp struct {
 	Program string `json:"program"`
 }
 
-// SwapAccountInPlace asks the sandbox to rotate its scope and relaunch. It carries
-// no body: the incoming account is already staged on the host, and nothing in the
-// request can name a path.
-func (s *remoteAgentServer) SwapAccountInPlace() (string, error) {
+// accountSwapReq carries this swap's daemon-minted identity (#7773): the
+// agent-server binds its terminal record to it, which is what makes a lost
+// response reconcilable against THIS swap. A pre-identity agent-server decodes
+// the field away — the version-tolerant decode the remote client's version
+// header opts into — and its status answer then echoes no id, which reconciles
+// as indeterminate, never as a commit.
+type accountSwapReq struct {
+	SwapID string `json:"swap_id"`
+}
+
+// SwapAccountInPlace asks the sandbox to rotate its scope and relaunch under
+// swapID's identity. Nothing else is named: the incoming account is already
+// staged on the host, and nothing in the request can name a path.
+func (s *remoteAgentServer) SwapAccountInPlace(swapID string) (string, error) {
 	var resp accountSwapResp
-	if err := s.rc.callWithin("/v1/agent/swap-account", struct{}{}, &resp, AgentRelaunchCallTimeout); err != nil {
+	if err := s.rc.callWithin("/v1/agent/swap-account", accountSwapReq{SwapID: swapID}, &resp, AgentRelaunchCallTimeout); err != nil {
 		var answered *agentAnswered
 		if errors.As(err, &answered) {
 			return "", &agentAnsweredError{err: err}
@@ -775,18 +861,24 @@ type accountSwapStatusResp struct {
 	OK      bool   `json:"ok"`
 	Outcome string `json:"outcome"`
 	Program string `json:"program"`
+	// SwapID echoes the id of the swap the outcome belongs to. It is absent on
+	// a pre-identity agent-server, which therefore can never prove a commit.
+	SwapID string `json:"swap_id"`
 }
 
-// AccountSwapStatus asks the sandbox how its last swap ended. The request waits
-// for a swap still running there, which is what makes the answer terminal.
-func (s *remoteAgentServer) AccountSwapStatus() (string, string, error) {
+// AccountSwapStatus asks the sandbox how its last swap ended, and which swap it
+// was. The request waits for a swap still running there, which is what makes
+// the answer terminal.
+func (s *remoteAgentServer) AccountSwapStatus() (string, string, string, error) {
 	var resp accountSwapStatusResp
 	if err := s.rc.callWithin("/v1/agent/swap-account-status", struct{}{}, &resp, AgentRelaunchCallTimeout); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return resp.Outcome, resp.Program, nil
+	return resp.Outcome, resp.Program, resp.SwapID, nil
 }
 
-func (s *deadRemoteAgentServer) AccountSwapStatus() (string, string, error) { return "", "", s.err() }
-func (s *deadRemoteAgentServer) SwapAccountInPlace() (string, error)        { return "", s.err() }
-func (s *deadRemoteAgentServer) CanSwapAccount() (bool, error)              { return false, s.err() }
+func (s *deadRemoteAgentServer) AccountSwapStatus() (string, string, string, error) {
+	return "", "", "", s.err()
+}
+func (s *deadRemoteAgentServer) SwapAccountInPlace(string) (string, error) { return "", s.err() }
+func (s *deadRemoteAgentServer) CanSwapAccount() (bool, error)             { return false, s.err() }

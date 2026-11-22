@@ -48,13 +48,13 @@ type scopeSkillServer struct {
 
 func (s *scopeSkillServer) CanSwapAccount() (bool, error) { return s.can, nil }
 
-func (s *scopeSkillServer) AccountSwapStatus() (string, string, error) {
-	o, p := s.rec.status()
-	return o, p, nil
+func (s *scopeSkillServer) AccountSwapStatus() (string, string, string, error) {
+	o, p, id := s.rec.status()
+	return o, p, id, nil
 }
 
-func (s *scopeSkillServer) SwapAccountInPlace() (string, error) {
-	return s.rec.run(s.swap)
+func (s *scopeSkillServer) SwapAccountInPlace(swapID string) (string, error) {
+	return s.rec.run(swapID, s.swap)
 }
 
 func (s *scopeSkillServer) swap() (string, error) {

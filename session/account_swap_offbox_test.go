@@ -45,29 +45,54 @@ type acctSwapServer struct {
 	// remote transport does, so swapOutcomeIndeterminate resolves it on the
 	// marker rather than treating it as a lost call.
 	wrapAnswered bool
-	rec          accountSwapRecorder
-	calls        int
-	atCall       struct{ live, next string }
+	// anonymous drops the id from every status answer: the shape a pre-identity
+	// agent-server speaks, whose outcomes can never be attributed to a swap
+	// (#7773).
+	anonymous bool
+	// delayedAtStatusCall is the reconcile's status read after which the lost
+	// request lands late — run under the same id the daemon sent, inside the
+	// recorder exactly as the late arrival would be (#7773).
+	delayedAtStatusCall int
+	statusCalls         int
+	rec                 accountSwapRecorder
+	calls               int
+	lastID              string
+	atCall              struct{ live, next string }
 }
 
 func (s *acctSwapServer) CanSwapAccount() (bool, error) { return s.can, s.canErr }
 
-func (s *acctSwapServer) AccountSwapStatus() (string, string, error) {
+func (s *acctSwapServer) AccountSwapStatus() (string, string, string, error) {
+	s.statusCalls++
 	if s.statusErr != nil {
-		return "", "", s.statusErr
+		return "", "", "", s.statusErr
 	}
-	o, p := s.rec.status()
-	return o, p, nil
+	o, p, id := s.rec.status()
+	if s.anonymous {
+		id = "" // a pre-identity server answers with no id
+	}
+	if s.delayedAtStatusCall == s.statusCalls {
+		s.runDelayedSwap()
+	}
+	return o, p, id, nil
+}
+
+// runDelayedSwap is the lost request landing late: the same id the daemon sent,
+// run against the host now — inside the recorder, exactly as the late arrival
+// would be.
+func (s *acctSwapServer) runDelayedSwap() {
+	_, _ = s.rec.run(s.lastID, s.swap)
 }
 
 // SwapAccountInPlace records the terminal outcome the way the real server does,
-// and may then lose the response.
-func (s *acctSwapServer) SwapAccountInPlace() (string, error) {
+// under the swap's own identity, and may then lose the response.
+func (s *acctSwapServer) SwapAccountInPlace(swapID string) (string, error) {
+	s.lastID = swapID
 	if s.loseBefore != nil {
 		s.calls++
 		return "", s.loseBefore
 	}
-	prog, err := s.rec.run(s.swap)
+	prog, err := s.rec.run(swapID, s.swap)
 	if err == nil && s.loseResponse != nil {
 		return "", s.loseResponse
 	}
@@ -484,33 +509,36 @@ func TestSwapOffBoxAccountServerThatCouldNotRestoreIsUnknown(t *testing.T) {
 // the rollback state under a swap that may still fail.
 func TestAccountSwapStatusWaitsForTheRunningSwap(t *testing.T) {
 	var r accountSwapRecorder
-	started, release, got := make(chan struct{}), make(chan struct{}), make(chan [2]string, 1)
+	started, release, got := make(chan struct{}), make(chan struct{}), make(chan [3]string, 1)
 	go func() {
-		_, _ = r.run(func() (string, error) {
+		_, _ = r.run("swap-1", func() (string, error) {
 			close(started)
 			<-release
 			return "claude", nil
 		})
 	}()
 	<-started
-	go func() { o, p := r.status(); got <- [2]string{o, p} }()
+	go func() { o, p, id := r.status(); got <- [3]string{o, p, id} }()
 	select {
 	case v := <-got:
 		t.Fatalf("status answered %v while the swap was still running", v)
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(release)
-	assert.Equal(t, [2]string{swapOutcomeCommitted, "claude"}, <-got)
+	assert.Equal(t, [3]string{swapOutcomeCommitted, "claude", "swap-1"}, <-got)
 
 	var fresh accountSwapRecorder
-	o, _ := fresh.status()
+	o, _, id := fresh.status()
 	assert.Equal(t, swapOutcomeNone, o)
-	_, _ = fresh.run(func() (string, error) { return "", errors.New("refused") })
-	o, _ = fresh.status()
+	assert.Empty(t, id)
+	_, _ = fresh.run("swap-2", func() (string, error) { return "", errors.New("refused") })
+	o, _, id = fresh.status()
 	assert.Equal(t, swapOutcomeRolledBack, o)
-	_, _ = fresh.run(func() (string, error) { return "", errors.New(accountScopeIndeterminate) })
-	o, _ = fresh.status()
+	assert.Equal(t, "swap-2", id)
+	_, _ = fresh.run("swap-3", func() (string, error) { return "", errors.New(accountScopeIndeterminate) })
+	o, _, id = fresh.status()
 	assert.Equal(t, swapOutcomeUnknown, o)
+	assert.Equal(t, "swap-3", id)
 }
 
 // Siblings are stopped before the scope moves, and one that cannot be confirmed

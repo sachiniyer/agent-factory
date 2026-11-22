@@ -4,14 +4,25 @@ import "github.com/sachiniyer/agent-factory/session"
 
 // Account-swap routes of the in-sandbox agent-server (#5571 W7.6).
 
+// agentSwapAccountRequest carries the swap's daemon-minted identity (#7773):
+// this server's terminal record binds its outcome to it, which is what lets the
+// daemon reconcile a lost response against THIS swap instead of an earlier
+// one's stale outcome. A pre-identity daemon sends none; the record then echoes
+// an empty id, which a newer daemon reconciles as indeterminate — never a
+// commit it cannot attribute.
+type agentSwapAccountRequest struct {
+	SwapID string `json:"swap_id,omitempty"`
+}
+
 // SwapAccount rotates the staged account scope in and relaunches the agent. The
-// request names nothing: the scope is derived from this server's own environment.
-func (hs *headlessServer) SwapAccount(_ struct{}, resp *agentSwapResponse) error {
+// request names no path: the scope is derived from this server's own
+// environment.
+func (hs *headlessServer) SwapAccount(req agentSwapAccountRequest, resp *agentSwapResponse) error {
 	sw, ok := hs.as.(session.AccountSwapper)
 	if !ok {
 		return session.ErrAccountSwapUnsupported
 	}
-	program, err := sw.SwapAccountInPlace()
+	program, err := sw.SwapAccountInPlace(req.SwapID)
 	if err != nil {
 		return err
 	}
@@ -24,19 +35,23 @@ type accountSwapStatusResponse struct {
 	OK      bool   `json:"ok"`
 	Outcome string `json:"outcome"`
 	Program string `json:"program"`
+	// SwapID echoes the id the recorded swap arrived with — empty when no swap
+	// has run, or when the swap predates identity (its request carried none).
+	SwapID string `json:"swap_id,omitempty"`
 }
 
 // SwapAccountStatus reports how the last account swap ended, after any running one
-// has. The daemon asks it when a swap's response was lost.
+// has, and which swap that outcome belongs to. The daemon asks it when a swap's
+// response was lost.
 func (hs *headlessServer) SwapAccountStatus(_ struct{}, resp *accountSwapStatusResponse) error {
 	sw, ok := hs.as.(session.AccountSwapper)
 	if !ok {
 		return session.ErrAccountSwapUnsupported
 	}
-	outcome, program, err := sw.AccountSwapStatus()
+	outcome, program, swapID, err := sw.AccountSwapStatus()
 	if err != nil {
 		return err
 	}
-	resp.OK, resp.Outcome, resp.Program = true, outcome, program
+	resp.OK, resp.Outcome, resp.Program, resp.SwapID = true, outcome, program, swapID
 	return nil
 }
