@@ -198,7 +198,7 @@ func TestArchiveSession_FinalVSCodeStopRollbackFencesLostRestore(t *testing.T) {
 	require.Equal(t, origPath, inst.GetWorktreePath(),
 		"precondition: the rollback-SUCCESS arm ran — the worktree is home")
 	require.Equal(t, session.Lost, inst.GetStatus())
-	requireArchiveFence(t, inst, repoID, "worker", "VS Code editor teardown")
+	requireArchiveFence(t, inst, repoID, "worker", "did not confirm exit after SIGKILL")
 
 	// The point of the fence: the loop leaves the row down.
 	manager.RestoreLostSessions()
@@ -263,7 +263,7 @@ func TestArchiveSession_RollbackFencePersistFailureIsReported(t *testing.T) {
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "rolled the archive back and left it Lost",
+	assert.Contains(t, err.Error(), "rolled it back and left it Lost",
 		"the rollback still happened and must still be reported")
 	assert.Contains(t, err.Error(), "could not record its recovered state on disk",
 		"the unfenced-on-disk exposure must be named, not swallowed")
@@ -296,7 +296,7 @@ func TestRefreshStatuses_AliveObservationClearsArchiveRefusedFence(t *testing.T)
 
 	manager.RefreshStatuses()
 
-	require.Equal(t, session.Ready, inst.GetLiveness(),
+	require.Equal(t, session.LiveReady, inst.GetLiveness(),
 		"the same runtime observed alive must heal the row out of Lost")
 	require.Nil(t, inst.LostRestoreFailureSnapshot(),
 		"the did-not-finish fence is cleared like any terminal restore failure")

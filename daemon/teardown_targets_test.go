@@ -152,10 +152,12 @@ func TestKillSession_GhostRegistersItsRecordsTargets(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	worktree := filepath.Join(t.TempDir(), "wt-ghost")
 	seeded, err := json.Marshal([]session.InstanceData{{
-		Title:    "ghost",
-		Path:     repoPath,
-		Status:   session.Ready,
-		TmuxName: "af_ghost",
+		Title:       "ghost",
+		Path:        repoPath,
+		Status:      session.Archived,
+		Liveness:    session.LiveArchived,
+		BackendType: "local",
+		TmuxName:    "af_ghost",
 		Tabs: []session.TabData{
 			{ID: "agent-1", Kind: session.TabKindAgent, Name: "agent", TmuxName: "af_ghost"},
 			{ID: "shell-1", Kind: session.TabKindShell, Name: "shell", TmuxName: "af_ghost__shell"},
