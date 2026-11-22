@@ -629,6 +629,46 @@ func TestAbandonAdoptionKeepsTheIdentityOfAServerItCouldNotStop(t *testing.T) {
 	})
 }
 
+// A ':'-bearing preserved dir needs the colon-free pane-PATH indirection
+// (#7770) — which lives under the remote login's $HOME, not inside the
+// preserved workspace. An abandoned adoption must remove that link (the
+// workspace itself is never touched), and a colon-free preserved dir must not
+// spend the call at all.
+func TestAbandonAdoptionRemovesThePanePathIndirection(t *testing.T) {
+	var ran []string
+	run := func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		ran = append(ran, script)
+		return nil, nil
+	}
+	dir := "/preserved/a:b"
+	p := &sandboxProvisioner{
+		sessionDir: dir, sshCmd: "ssh recorded-host", tokenRef: "new-ref",
+		spec:         ProvisionSpec{Adopt: &AdoptSpec{SessionDir: dir, Branch: "b"}},
+		runCommandFn: run,
+	}
+	require.Error(t, p.provisionFailure(errors.New("banner never appeared")))
+	found := false
+	for _, s := range ran {
+		if strings.Contains(s, "rm -f -- "+panePathLinkWord(dir)) {
+			found = true
+		}
+		assert.NotContains(t, s, "rm -rf "+shellQuote(dir),
+			"an abandoned adoption must never remove the preserved workspace")
+	}
+	assert.True(t, found, "the indirection link af staged is removed")
+
+	ran = nil
+	plain := &sandboxProvisioner{
+		sessionDir: "/preserved/ab", sshCmd: "ssh recorded-host", tokenRef: "new-ref",
+		spec:         ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/preserved/ab", Branch: "b"}},
+		runCommandFn: run,
+	}
+	require.Error(t, plain.provisionFailure(errors.New("banner never appeared")))
+	for _, s := range ran {
+		assert.NotContains(t, s, ".af-path", "a colon-free preserved dir has no indirection to remove")
+	}
+}
+
 // The double failure: the adopting provision fails AND its server cannot be
 // confirmed stopped. The row records the new identity, persisted and unknown; no
 // adoption proceeds; a retry that can reach the host reaps the survivor first.

@@ -201,6 +201,12 @@ func (p *sandboxProvisioner) abandonAdoption(cause error) error {
 			log.WarningLog.Printf("sandbox runtime: account teardown for %q: %v", p.sessionDir, aerr)
 		}
 	}
+	// And the pane-PATH indirection a ':'-bearing preserved dir needed (#7770):
+	// the workspace itself is preserved, the link under the remote login's
+	// $HOME is af's own and does not survive the abandoned attempt.
+	if strings.Contains(p.sessionDir, ":") {
+		_, _ = p.Run(sshShortStepTimeout, "rm -f -- "+panePathLinkWord(p.sessionDir), nil, true)
+	}
 	if len(cleanup) > 0 {
 		// af started a server it could not confirm stopped: its identity must reach
 		// the row, not be dropped with this provisioner (leakedBackend).

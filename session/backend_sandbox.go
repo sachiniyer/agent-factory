@@ -268,6 +268,13 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.checkHostPrereqs(p.hostReadinessKey(), sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
+	// Refuse, before anything is staged on the host, the one layout that can
+	// never yield a colon-free pane PATH dir: a ':'-bearing session root and a
+	// ':'-bearing remote $HOME the indirection would have to live under
+	// (#7770). Every other shape proceeds exactly as it did.
+	if err := w.checkPanePathFeasibility(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxErr(err)
+	}
 	if p.spec.Adopt != nil {
 		if err := p.beginAdoption(w); err != nil {
 			return ProvisionResult{}, err
@@ -278,6 +285,15 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		}
 		w.resolveSessionDirSymlinks(sshShortStepTimeout)
 		p.sessionDir = w.SessionDir
+	}
+	// The session dir is final in both arms — before the workspace and binary
+	// are staged, make the pane-PATH dir colon-free: the session dir itself,
+	// or an af-owned indirection under the remote login's $HOME when the dir
+	// carries ':' (#7770). A refusal here still reaps as a pre-launch attempt.
+	if err := w.ensurePanePathDir(sshShortStepTimeout); err != nil {
+		return ProvisionResult{}, p.sandboxWriteErr(err)
+	}
+	if p.spec.Adopt == nil {
 		// The identity is repo-local (#5571 W2.7), so it is written after the clone
 		// that creates the repository.
 		if err := w.cloneWorkspace(sshProvisionStepTimeout, sshShortStepTimeout); err != nil {
@@ -782,9 +798,21 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// The remote shell must TRANSFORM the challenge, so the answer never appears
 	// in the text a logging wrapper would echo.
 	respond := "printf '%s' " + shellQuote(send) + " | tr 'a-z' 'A-Z'"
+	// A ':'-bearing session dir could not lead the pane PATH itself, so the
+	// provision staged a colon-free indirection under the remote login's $HOME
+	// (#7770) — outside the dir this rm reaps. Its leaf name derives from the
+	// session dir, so this reap, a restored cleanup handle's, and the orphan
+	// sweep's all name the same link with nothing persisted. Its status is
+	// deliberately discarded: the session dir's rm remains the group's answer,
+	// and a leftover link can only dangle into a dir that no longer exists.
+	linkRm := ""
+	if strings.Contains(p.sessionDir, ":") {
+		linkRm = "; rm -f -- " + panePathLinkWord(p.sessionDir) +
+			`; rmdir -- "$HOME/` + remotePathLinkDir + `" 2>/dev/null`
+	}
 	// A subshell so `exit "$rc"` reports rm's status as this group's status
 	// without terminating anything that might follow it.
-	removeAndConfirm := "( " + rm + "; rc=$?; " + respond + `; exit "$rc" )`
+	removeAndConfirm := "( " + rm + "; rc=$?" + linkRm + "; " + respond + `; exit "$rc" )`
 	afPath := p.sessionDir + "/" + sshAfBinaryName
 	// A restart records the PID it launched on the HOST before af learns it, so a
 	// daemon that exited in between leaves a row naming the dead server while the

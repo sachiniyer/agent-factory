@@ -69,6 +69,13 @@ type sandboxWorkspace struct {
 	// SessionDir is the mktemp'd per-session dir on the target; the workspace,
 	// binary, and banner all live under it, so one `rm -rf` reaps the session.
 	SessionDir string
+	// panePathDir is the directory the launch puts first on the agent-server's
+	// PATH (and the agent-server re-pins first on the agent pane's adopted
+	// login PATH): SessionDir itself when it is a usable PATH entry, else the
+	// colon-free indirection ensurePanePathDir built under the remote login's
+	// $HOME (#7770). Empty before that step runs; startAgentServer falls back
+	// to SessionDir so direct callers keep working.
+	panePathDir string
 	// RemotePID is the backgrounded agent-server PID captured for teardown.
 	RemotePID string
 
@@ -490,6 +497,25 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	// filter (PATH rides the allowlist) and in-sandbox `af` commands work
 	// (#5571 W2.2, AR-02 PATH half). The VAR=val prefix sits inside the launch
 	// command, left of nohup, so the `& echo $!` tail is undisturbed.
+	//
+	// The entry is panePathDir — ensurePanePathDir's colon-free spelling, the
+	// session dir itself or the af-owned indirection under the remote login's
+	// $HOME. A ':' inside it is a PATH SEPARATOR when the shell consumes the
+	// assignment (shellQuote protects metacharacters, never PATH grammar), so a
+	// colon-bearing dir would split in two: the staged `af` unreachable and
+	// the relative tail resolved against each pane's cwd, where a repo-planted
+	// binary could shadow it (#7770). The same dir rides AF_SESSION_PATH_DIR
+	// so the agent-server re-pins exactly this entry on the adopted login
+	// PATH — SessionBinDir(argv0) alone would hand it back the colon-bearing
+	// session dir the indirection exists to hide. A dir still unusable here —
+	// a caller that skipped ensurePanePathDir — is refused, not split.
+	pathDir := w.panePathDir
+	if pathDir == "" {
+		pathDir = w.SessionDir
+	}
+	if !strings.HasPrefix(pathDir, "/") || strings.Contains(pathDir, ":") {
+		return fmt.Errorf("the session's PATH dir %q is unusable: a PATH entry must be an absolute path without ':'", pathDir)
+	}
 	// setsid, when the host has it, moves the agent-server into its own session
 	// (#5571 W1.4): it then outlives the provisioning ssh session's teardown,
 	// whose SIGHUP/session-kill nohup alone does not survive under
@@ -498,8 +524,8 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	// place rather than forking, and `$!` below is still the agent-server's own
 	// PID, which the reap-side argv[0] identity check depends on. Hosts without
 	// setsid (macOS) keep the nohup-only launch.
-	launch := fmt.Sprintf("d=; if command -v setsid >/dev/null 2>&1; then d=setsid; fi; PATH=%s:\"$PATH\" nohup $d %s >%s 2>%s </dev/null & echo $!",
-		shellQuote(w.SessionDir), filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
+	launch := fmt.Sprintf("d=; if command -v setsid >/dev/null 2>&1; then d=setsid; fi; PATH=%s:\"$PATH\" %s=%s nohup $d %s >%s 2>%s </dev/null & echo $!",
+		shellQuote(pathDir), SessionPathDirEnv, shellQuote(pathDir), filteredInner, shellQuote(w.BannerPath()), shellQuote(w.LogPath()))
 	// The runtime-identity env is unconditional — every W1.1 provision writes
 	// af-identity.env before this point. AF_TOKEN_REF must land in the
 	// agent-server's exec-time environment so the persisted identity's host-side
@@ -567,7 +593,10 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 	// that set would inherit the variable into every shell/process pane the
 	// agent-server spawns. The ref is a nonce, but the rule keeps the
 	// credential-class channel narrow on principle (#5571 W1.1 approval).
-	extras := append(append([]string{}, w.spec.SessionEnvPassthrough...), runtimetoken.RefEnvName)
+	// AF_SESSION_PATH_DIR rides the same channel for the same reason (#7770):
+	// the agent-server re-pins it on the adopted login PATH, but the panes it
+	// spawns have no use for the launch's PATH bookkeeping.
+	extras := append(append([]string{}, w.spec.SessionEnvPassthrough...), runtimetoken.RefEnvName, SessionPathDirEnv)
 	// W7.3: the account's own variable reaches the agent-server and, through
 	// --session-env, the agent — pointing it at the session-scoped account dir.
 	// The VALUE lives in the 0600 identity env file, never in argv.

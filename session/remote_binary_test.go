@@ -385,11 +385,68 @@ func TestStartAgentServerPrependsTheSessionDirToPATH(t *testing.T) {
 	// VAR=val prefix on `nohup` puts the dir in the server env only — the
 	// `& echo $!` tail is undisturbed (that's the PID the reap tracks). The dir
 	// arrives single-quoted (literal text — it is already resolved) while $PATH
-	// stays double-quoted to expand.
-	assert.Contains(t, launch, `PATH='/home/u/.af-sessions/sess':"$PATH" nohup `)
+	// stays double-quoted to expand. The same dir rides AF_SESSION_PATH_DIR so
+	// the agent-server re-pins THIS entry on the pane's adopted login PATH
+	// (#7770) — and both assignments sit left of nohup.
+	assert.Contains(t, launch, `PATH='/home/u/.af-sessions/sess':"$PATH" AF_SESSION_PATH_DIR='/home/u/.af-sessions/sess' nohup `)
 	assert.Contains(t, launch, `& echo $!`)
 	assert.True(t, strings.Index(launch, "PATH=") < strings.Index(launch, "nohup"),
 		"the prefix must sit left of nohup so it lands in the server's environment")
+}
+
+// A ':'-bearing session dir must never reach a PATH entry: the launch's PATH
+// prefix and the re-pin export both carry the colon-free indirection dir
+// ensurePanePathDir staged, and the session dir appears nowhere a PATH parse
+// could split it (#7770). The staged binary itself still launches through the
+// session dir — the token file, argv[0] identity and the sweep all read it
+// there — only the PATH entries change.
+func TestStartAgentServerLaunchesThroughTheIndirectionDir(t *testing.T) {
+	var launch string
+	p := &sandboxProvisioner{runCommandFn: func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		launch = script
+		return []byte("4242\n"), nil
+	}}
+	w := &sandboxWorkspace{
+		shell:       p,
+		SessionDir:  "/srv/af:sessions/work.abc123",
+		panePathDir: "/home/u/.af-path/sess-0123456789abcdef",
+		spec:        ProvisionSpec{Title: "t"},
+	}
+	require.NoError(t, w.startAgentServer(sshShortStepTimeout))
+
+	assert.Contains(t, launch, `PATH='/home/u/.af-path/sess-0123456789abcdef':"$PATH"`)
+	assert.Contains(t, launch, `AF_SESSION_PATH_DIR='/home/u/.af-path/sess-0123456789abcdef'`)
+	assert.NotContains(t, launch, `PATH='/srv/af:sessions/work.abc123'`,
+		"the colon-bearing session dir must never be a PATH entry")
+	assert.Contains(t, launch, `/srv/af:sessions/work.abc123/af `,
+		"the staged binary still launches by its real session-dir path")
+}
+
+// The launch must not silently re-split PATH when a caller hands it a dir that
+// is not a single PATH entry — a skipped ensurePanePathDir, or a panePathDir
+// the remote could not make colon-free. The refusal happens BEFORE the
+// transport is invoked and names the property violated (#7770).
+func TestStartAgentServerRefusesAPathUnusableDir(t *testing.T) {
+	for label, w := range map[string]*sandboxWorkspace{
+		"colon session dir, no indirection": {SessionDir: "/srv/af:sessions/sess"},
+		"colon indirection dir":             {SessionDir: "/srv/af:sessions/sess", panePathDir: "/h:me/.af-path/sess-x"},
+		"relative session dir":              {SessionDir: "relative/sess"},
+	} {
+		t.Run(label, func(t *testing.T) {
+			ran := false
+			p := &sandboxProvisioner{runCommandFn: func(_ time.Duration, _ string, _ io.Reader, _ bool) ([]byte, error) {
+				ran = true
+				return []byte("4242\n"), nil
+			}}
+			w.shell = p
+			w.spec = ProvisionSpec{Title: "t"}
+			err := w.startAgentServer(sshShortStepTimeout)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "PATH entry")
+			assert.False(t, ran, "the launch transport must not run when the PATH dir is unusable")
+			assert.Empty(t, w.RemotePID, "no PID may be captured for a refused launch")
+		})
+	}
 }
 
 func TestReleaseArtifactURLUsesStaticArchiveOnLinuxOnly(t *testing.T) {

@@ -419,6 +419,33 @@ func PinPATHDir(path, dir string) string {
 	return strings.Join(parts, ":")
 }
 
+// SessionPathDirEnv names the variable the provision launch exports carrying
+// the directory that must lead the agent pane's PATH: the colon-free spelling
+// ensurePanePathDir computed — the session dir itself, or the af-owned
+// indirection under the remote login's $HOME when the session dir contains ':'
+// (#7770). The launch sets it left of nohup and admits it through the
+// handoff's per-invocation extras — like AF_TOKEN_REF — so it reaches this
+// process's exec-time environment without being inherited by the panes it
+// spawns.
+const SessionPathDirEnv = "AF_SESSION_PATH_DIR"
+
+// PanePathDir reports the directory the agent pane's PATH pins first: the
+// launch-exported one when it is set — the provisioner has already made it
+// colon-free — else the staged binary's own dir, the pre-#7770 source a
+// hand-run agent-server still uses. An export that is not a single PATH entry
+// (relative, or ':'-bearing) is a broken contract: refusing to start beats
+// silently pinning a dir that would re-split PATH identically to the launch
+// bug the export exists to fix.
+func PanePathDir(argv0, exported string) (string, error) {
+	if exported == "" {
+		return SessionBinDir(argv0), nil
+	}
+	if !filepath.IsAbs(exported) || strings.Contains(exported, ":") {
+		return "", fmt.Errorf("%s must be an absolute path without ':'; got %q", SessionPathDirEnv, exported)
+	}
+	return exported, nil
+}
+
 // SessionBinDir is the directory the agent-server was launched from when it
 // was started as <sessionDir>/af — the one place the provisioner puts the
 // staged binary — or "" for any other argv[0] (a bare name, another binary).

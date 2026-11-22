@@ -124,6 +124,13 @@ func (p *sandboxProvisioner) restartAgentServer(expectedToken string, persist fu
 		return fmt.Errorf("%w: the restart could not be recorded before launching: %v", errAgentServerNotRestartable, err)
 	}
 	w := &sandboxWorkspace{shell: p, SessionDir: p.sessionDir}
+	// The persisted launch script names the pane-PATH dir provision computed;
+	// a ':'-bearing session dir's indirection lives outside that dir under the
+	// remote login's $HOME (#7770), so re-establish it first — a colon-free
+	// session dir costs no remote call here.
+	if err := w.ensurePanePathDir(sshShortStepTimeout); err != nil {
+		return fmt.Errorf("restarting the af agent-server failed: %w", err)
+	}
 	// The previous run's log is kept for diagnosis, and its banner removed so the
 	// poll below cannot read the dead server's address. The wrapper records the
 	// new PID on the host before reporting it.
