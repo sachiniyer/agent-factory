@@ -95,11 +95,11 @@
       "title": "Open the config agent (the default agent, briefed to help configure af)",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:319 (C) -> app/config_agent.go:97 handleConfigAgent"
+        "pointer": "keys/keys.go:319 (C) -> app/config_agent.go:98 handleConfigAgent"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/config.ts:447 'Configure with assistant' -> web/src/config_assistant.ts openConfigAssistant -> web/src/api.ts:1204 spawnConfigAssistant (af POST /v1/config-assistant) -> daemon/configassistant_hub.go -> Manager.SpawnConfigAgent"
+        "pointer": "web/src/config.ts:1118 'Configure with assistant' -> web/src/config_assistant.ts openConfigAssistant -> web/src/api.ts:1599 spawnConfigAssistant (af POST /v1/config-assistant) -> daemon/configassistant_hub.go -> Manager.SpawnConfigAgent"
       },
       "cli": {
         "status": "no",
@@ -486,7 +486,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/root.go:173,201,210; api/apicmd.go:26"
+        "pointer": "commands/root.go:224,251,260; api/apicmd.go:26"
       },
       "verdict": "deliberate",
       "notes": "af version/keys/debug/api are introspection verbs for humans and scripts at a shell, and cobra's built-in `af help` / `--help` / `--version` are the same class. The TUI's ? overlay covers the keys half for its own surface; the web has neither, since a GUI's affordances are the help. cobra adds the built-ins lazily at Execute() time, so the derivation inits them before walking — see docs/dev/surface-parity.md."
@@ -872,11 +872,11 @@
       },
       "web": {
         "status": "no",
-        "pointer": "web/src/api.ts:414-438 never sends in_place"
+        "pointer": "web/src/api.ts:536-566 never sends in_place"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:653-654 --here / --in-place"
+        "pointer": "api/api.go:784-785 --here / --in-place"
       },
       "verdict": "unclear",
       "notes": "CLI-only. Plausibly deliberate: --here is a scripting affordance for 'run an agent right here in my checkout', and the TUI/web are worktree-oriented session managers. Needs an owner call before filing."
@@ -1243,7 +1243,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:678-680 --all/--all-repos/--include-root"
+        "pointer": "api/api.go:811-813 --all/--all-repos/--include-root"
       },
       "verdict": "deliberate",
       "notes": "A fan-out scripting verb with no interactive analogue: broadcasting to every live session is a batch operation, and both UIs are single-selection by construction."
@@ -1293,11 +1293,11 @@
       },
       "web": {
         "status": "partial",
-        "pointer": "web/src/api.ts:793,816 sets shell/kind but never command/name"
+        "pointer": "web/src/api.ts:1063,1086 sets shell/kind but never command/name"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_tabs.go:190 sends Command, Name, Kind, URL, Port"
+        "pointer": "api/sessions_tabs.go:217-225 sends Command, Name, Kind, URL, Port"
       },
       "verdict": "unclear",
       "notes": "#2077 added the no-input kind choice (Terminal / VS Code) to `t`. The TUI still cannot name a tab or supply a process command; those input-bearing options remain CLI/API surface. Distinct from session.tab.create.web, which is a deliberate omission."
@@ -1347,14 +1347,14 @@
       },
       "web": {
         "status": "no",
-        "pointer": "web/src/ui.ts:78-81 NewTabKind deliberately excludes 'web'"
+        "pointer": "web/src/ui.ts:145-148 NewTabKind deliberately excludes 'web'"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_tabs.go:27-29 --kind web --url/--port"
+        "pointer": "api/sessions_tabs.go:28-30 --kind web --url/--port"
       },
       "verdict": "deliberate",
-      "notes": "Documented in code: 'A web tab is deliberately absent: its target comes from whatever an agent is running, so it stays CLI/API-created' (web/src/ui.ts:78-81, docs/web.md). Both UIs RENDER existing web tabs; only creation is CLI/API-scoped."
+      "notes": "Documented in code: 'A web tab is deliberately absent: its target comes from whatever an agent is running, so it stays CLI/API-created' (web/src/ui.ts:145-148, docs/web.md). Both UIs RENDER existing web tabs; only creation is CLI/API-scoped."
     },
     {
       "id": "session.tab.rename",
@@ -1641,7 +1641,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/tasks.go:365 tasksRestartCmd"
+        "pointer": "api/tasks.go:386 tasksRestartCmd"
       },
       "verdict": "deliberate",
       "notes": "This is an operator workflow after editing an external script file, which neither UI owns. Both task UIs already expose the enabled toggle; its daemon update is synchronous and therefore remains a safe manual cycle. The dedicated one-command restart belongs in the scripting CLI."
@@ -1691,7 +1691,7 @@
       },
       "web": {
         "status": "partial",
-        "pointer": "web/src/nav.ts:108-233 (its own j/k, [/], 1-9, Enter, Esc, Alt+j/k/w)"
+        "pointer": "web/src/nav.ts:110-238 (its own j/k, [/], 1-9, Enter, Esc, Alt+j/k/w)"
       },
       "cli": {
         "status": "n/a",
@@ -1745,7 +1745,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:281 et al send id"
+        "pointer": "web/src/api.ts:614 et al send id"
       },
       "cli": {
         "status": "partial",
@@ -1760,7 +1760,7 @@
       "title": "Edit a repo's post-worktree hooks",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:313 (e) -> app/handle_overlay.go:385"
+        "pointer": "keys/keys.go:313 (e) -> app/handle_overlay.go:504"
       },
       "web": {
         "status": "no",
