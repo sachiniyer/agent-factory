@@ -170,6 +170,24 @@ func claudeLegacyTrustDialogOf(screen visibleText) claudeLegacyTrustVerdict {
 		if !footerWhole {
 			return claudeLegacyTrustPartial
 		}
+		// A footer inside a box that closes under it is text in a boxed
+		// composer's draft whose prompt row has scrolled off, not a live
+		// modal: no build paints its footer inside a box (the one that
+		// boxes the dialog paints the footer under the box, and the pinned
+		// live fixture legacyTrustBoxed does), so such a frame is a quoted
+		// draft, and the Enter af taps would submit it. claudeTrustRowOf
+		// strips box sides and reduces a closing edge to blank, so the
+		// grammar above reads a boxed quote as the dialog's own rows; hold
+		// it, and send nothing. claudeLaunchDialogFooterInClosedBox models
+		// this same shape for the remnant reader (claude_launch_dialog_remnant.go);
+		// reusing it keeps the answering path and the remnant reader
+		// consistent. claudeFolderTrustReadToBottom also reads a Partial as
+		// a hold, so the remnant reader's own closed-box guard stays
+		// reachable for the same shape it already keeps.
+		pane := claudeLaunchDialogPaneOf(screen)
+		if claudeLaunchDialogFooterInClosedBox(pane, len(pane.index)-1) {
+			return claudeLegacyTrustPartial
+		}
 		return claudeLegacyTrustAnswerable
 	}
 	return claudeLegacyTrustPartial
