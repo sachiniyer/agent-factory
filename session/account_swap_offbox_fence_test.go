@@ -31,12 +31,16 @@ import (
 // never rotated in under this request's id.
 func TestScopeRotationRechecksTheBindingAtTheRename(t *testing.T) {
 	live := rotationHost(t)
-	next := live + accountNextSuffix
+	next := stagedScopeDir(live, "swap-1")
+	require.NoError(t, os.MkdirAll(next, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("B"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(next, accountSwapMarkerRel), []byte("swap-1"), 0o600))
 	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1")
 	require.NoError(t, err, "the stage names this swap at the early check")
 
-	// A later swap stages over it before the rename: new marker, new creds.
+	// The stage is swapped out before the rename: new marker, new creds — the
+	// unordered re-stage the rename-time check exists for, at this swap's own
+	// path (#7793).
 	require.NoError(t, os.RemoveAll(next))
 	require.NoError(t, os.MkdirAll(next, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("C"), 0o600))
@@ -51,6 +55,10 @@ func TestScopeRotationRechecksTheBindingAtTheRename(t *testing.T) {
 
 	// A stage removed mid-rotation is refused the same way: the rename never
 	// rotates in an anonymous or absent stage under a named request.
+	next = stagedScopeDir(live, "swap-2")
+	require.NoError(t, os.MkdirAll(next, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("C"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(next, accountSwapMarkerRel), []byte("swap-2"), 0o600))
 	rot, err = newScopeRotation(tmux.ProgramClaude, "swap-2")
 	require.NoError(t, err)
 	require.NoError(t, os.RemoveAll(next))
@@ -64,8 +72,8 @@ func TestScopeRotationRechecksTheBindingAtTheRename(t *testing.T) {
 // request that swap sent may still be queued on the agent-server, and a scope
 // staged beside it could be rotated in under that request's id or emptied
 // under its rotation. Admission refuses — before anything is staged or
-// stopped — and names the way out that exists today: `af sessions kill`
-// removes the row (#7793 tracks a verdict-based unfence verb).
+// stopped — and names the way out: `af sessions reconcile-swap` re-asks the
+// host for THIS swap's verdict, `af sessions kill` removes the row (#7793).
 func TestSwapOffBoxAccountFencedSessionAdmitsNoNewSwap(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
@@ -74,6 +82,7 @@ func TestSwapOffBoxAccountFencedSessionAdmitsNoNewSwap(t *testing.T) {
 	_, err := f.inst.SwapOffBoxAccount("alt", false)
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	require.True(t, f.inst.StartupStateUnknown())
+	require.NotNil(t, f.inst.InFlightOffBoxSwap(), "the record the verb reconciles is kept")
 	calls, shells := f.srv.calls, len(*f.shellCalls)
 
 	f.registerThird(t)
@@ -82,8 +91,8 @@ func TestSwapOffBoxAccountFencedSessionAdmitsNoNewSwap(t *testing.T) {
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate, "the refusal names the fence, not a new indeterminate verdict")
 	assert.Contains(t, err.Error(), "fenc", "an actionable refusal, not a bare no")
 	assert.Contains(t, err.Error(), "queued", "it says why the fence matters to a swap")
-	assert.Contains(t, err.Error(), "af sessions kill", "it names the way out that exists today")
-	assert.Contains(t, err.Error(), "7793", "and the issue tracking the verdict-based unfence verb")
+	assert.Contains(t, err.Error(), "af sessions reconcile-swap", "it names the verdict-based unfence")
+	assert.Contains(t, err.Error(), "af sessions kill", "and the row removal that always works")
 	assert.Equal(t, calls, f.srv.calls, "a fenced session never reaches the agent-server")
 	assert.Len(t, *f.shellCalls, shells, "and never stages a scope on the host")
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"),
@@ -92,14 +101,11 @@ func TestSwapOffBoxAccountFencedSessionAdmitsNoNewSwap(t *testing.T) {
 		"the scheduler's per-candidate admission refuses it the same way")
 }
 
-// KNOWN GAP (#7793): nothing unfences this row inside the session. The fence
-// does not decay, no swap-path verb clears startupStateUnknown, and a second
-// attempt is refused the same way every time — `af sessions kill` removing the
-// row is the only resolution today. ResolveStartupState restores `started`,
-// but the only callers are the handoff-retry and limit-resume paths, which
-// never run for this row; a verdict-based unfence for an indeterminate swap is
-// the tracked gap, not a promise a live pane lifts the fence.
-func TestSwapOffBoxAccountFencedSessionHasNoUnfenceVerb_KnownGap7793(t *testing.T) {
+// The verdict-based unfence (#7793): the fenced row re-asks the host for THIS
+// swap's terminal record — never re-sending the request — and lifts the fence
+// exactly when the answer is definite. An indeterminate answer keeps the
+// fence and the record; pane liveness alone never clears either.
+func TestSwapOffBoxAccountReconcileSwapUnfencesOnAVerdict(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
 	f.srv.statusErr = errors.New("remote agent-server: connection reset")
@@ -108,12 +114,31 @@ func TestSwapOffBoxAccountFencedSessionHasNoUnfenceVerb_KnownGap7793(t *testing.
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	require.True(t, f.inst.StartupStateUnknown())
 	require.False(t, f.inst.Started(), "the fence lifts the running claim with it")
+	require.NotNil(t, f.inst.InFlightOffBoxSwap())
+	f.inst.remoteClient = &remoteAgentClient{} // the transport is bound; only the host's answer is missing
 
-	f.registerThird(t)
-	_, err = f.inst.SwapOffBoxAccount("third", false)
-	require.Error(t, err, "the fence does not decay: a later attempt is refused the same way")
-	require.True(t, f.inst.StartupStateUnknown(),
-		"and nothing in the swap path clears it — `af sessions kill` removes the row; #7793 tracks the unfence verb")
+	// While the host cannot say how the swap ended, the verb refuses and the
+	// fence — and the record it reconciles — stays.
+	settled, err := f.inst.ReconcileOffBoxSwapFence()
+	require.Error(t, err)
+	require.False(t, settled)
+	assert.ErrorIs(t, err, ErrOffBoxSwapVerdictIndeterminate)
+	require.True(t, f.inst.StartupStateUnknown())
+	require.NotNil(t, f.inst.InFlightOffBoxSwap())
+
+	// The host answers: this swap committed. The fence lifts, the row records
+	// the account the host provably runs, and the record retires.
+	f.srv.statusErr = nil
+	settled, err = f.inst.ReconcileOffBoxSwapFence()
+	require.NoError(t, err)
+	assert.True(t, settled)
+	acct, _ := f.inst.AccountSelection()
+	assert.Equal(t, "alt", acct, "the committed verdict settles the row onto the account the host runs")
+	assert.Equal(t, secretAlt, f.hostCred(t, "account"))
+	assert.False(t, f.inst.StartupStateUnknown())
+	assert.True(t, f.inst.Started())
+	assert.Nil(t, f.inst.InFlightOffBoxSwap())
+	assert.NoDirExists(t, f.w.PrevAccountDir(), "the outgoing scope came home and was removed")
 }
 
 // On a pre-identity agent-server there is no serialized discard — but a swap
@@ -130,7 +155,7 @@ func TestSwapOffBoxAccountOldServerDefiniteRefusalRemovesTheStage(t *testing.T) 
 	require.ErrorContains(t, err, "did not start")
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate, "the server answered: a definite refusal, not a guess")
 
-	assert.NoDirExists(t, f.w.NextAccountDir(), "the restored stage's credentials do not stay on the host")
+	assert.NoDirExists(t, f.stagedDir(), "the restored stage's credentials do not stay on the host")
 	assert.Equal(t, secretWork, f.hostCred(t, "account"))
 	assert.True(t, slices.ContainsFunc(*f.shellCalls, func(c string) bool {
 		return strings.HasPrefix(c, "rm -rf ") && strings.Contains(c, accountNextSuffix)
@@ -143,7 +168,7 @@ func TestSwapOffBoxAccountOldServerDefiniteRefusalRemovesTheStage(t *testing.T) 
 func TestSwapOffBoxAccountOldServerStageFailureRemovesTheStage(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.anonymous = true
-	nextDir := f.w.NextAccountDir()
+	nextDir := f.stagedDir()
 	require.NoError(t, os.MkdirAll(nextDir, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(nextDir, credFile), []byte("half-written"), 0o600))
 	p := f.inst.currentBackend().(*sshBackend).provisioner
@@ -167,24 +192,28 @@ func TestSwapOffBoxAccountOldServerStageFailureRemovesTheStage(t *testing.T) {
 // discard would then refuse to remove (#7788).
 func TestScopeRotationRestoreBindsTheStageBeforeItAppears(t *testing.T) {
 	live := rotationHost(t)
+	next := stagedScopeDir(live, "swap-1")
+	require.NoError(t, os.MkdirAll(next, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("B"), 0o600))
 	require.NoError(t, os.WriteFile(
-		filepath.Join(live+accountNextSuffix, accountSwapMarkerRel), []byte("swap-1"), 0o600))
+		filepath.Join(next, accountSwapMarkerRel), []byte("swap-1"), 0o600))
 	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1")
 	require.NoError(t, err)
 	require.NoError(t, rot.rotate())
 
 	// Fail the restore's last rename: the incoming scope already sits at
-	// .next — bound, because the marker was written while it was still live.
+	// its staging path — bound, because the marker was written while it was
+	// still live.
 	scopeRenameFailer(t, []string{rot.prev}, errors.New("simulated EIO"))
 	require.Error(t, rot.restore())
 
-	marker, err := os.ReadFile(filepath.Join(live+accountNextSuffix, accountSwapMarkerRel))
-	require.NoError(t, err, "the stage carries its binding from the moment it exists at .next")
+	marker, err := os.ReadFile(filepath.Join(next, accountSwapMarkerRel))
+	require.NoError(t, err, "the stage carries its binding from the moment it exists at its staging path")
 	assert.Equal(t, "swap-1", string(marker))
 	inst := &Instance{Title: "s", Program: tmux.ProgramClaude}
 	require.NoError(t, inst.discardAccountNextInPlace("swap-1"),
 		"and the bound stage is still this swap's to remove")
-	assert.NoDirExists(t, live+accountNextSuffix)
+	assert.NoDirExists(t, next)
 }
 
 // The discard's verdict on the stage is honest about its own read: success
@@ -192,7 +221,7 @@ func TestScopeRotationRestoreBindsTheStageBeforeItAppears(t *testing.T) {
 // never on a marker it could not read, which may be this swap's stage (#7788).
 func TestDiscardAccountNextInPlaceMarkerReadErrorsAreFailures(t *testing.T) {
 	live := rotationHost(t)
-	nextDir := live + accountNextSuffix
+	nextDir := stagedScopeDir(live, "swap-1")
 	inst := &Instance{Title: "s", Program: tmux.ProgramClaude}
 
 	// A marker that exists but cannot be read is not "a different id": the
@@ -249,9 +278,10 @@ func TestLocalAgentServerDiscardAndSwapShareTheOperationLock(t *testing.T) {
 	require.Error(t, <-discardDone)
 }
 
-// rebindBackend is a FakeBackend whose sibling-stop re-stages .next under
-// another swap's marker — the unordered re-stage the rename-time binding
-// re-check exists to refuse — and records whether the swap's start half ran,
+// rebindBackend is a FakeBackend whose sibling-stop re-stages this swap's
+// staging path under another swap's marker — the unordered re-stage the
+// rename-time binding re-check exists to refuse — and records whether the
+// swap's start half ran,
 // standing in for the outgoing agent's restart on the unchanged scope.
 type rebindBackend struct {
 	*FakeBackend
@@ -284,7 +314,9 @@ func (b *rebindBackend) SwapAgent(_ *Instance, plan AgentSwapPlan) error {
 // for a host that kept the old account.
 func TestSwapAccountInPlaceReboundStageRestartsTheOutgoingAgent(t *testing.T) {
 	live := rotationHost(t)
-	next := live + accountNextSuffix
+	next := stagedScopeDir(live, "swap-1")
+	require.NoError(t, os.MkdirAll(next, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("B"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(next, accountSwapMarkerRel), []byte("swap-1"), 0o600))
 
 	bin := t.TempDir()

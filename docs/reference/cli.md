@@ -77,6 +77,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions prune`](#af-sessions-prune) — List (or with --apply, delete) old archived worktrees
+- [`af sessions reconcile-swap`](#af-sessions-reconcile-swap) — Re-ask a fenced session's host for its swap verdict
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -2338,6 +2339,7 @@ af sessions
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
 - [`af sessions prune`](#af-sessions-prune) — List (or with --apply, delete) old archived worktrees
+- [`af sessions reconcile-swap`](#af-sessions-reconcile-swap) — Re-ask a fenced session's host for its swap verdict
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -2858,6 +2860,53 @@ af sessions prune --older-than <duration> [--repo <path> | --all] [--apply [--ye
 | `--apply` |  | Delete the archived worktrees the dry run lists (the branch is kept; the row stays as a pruned tombstone) |
 | `--older-than` | `string` | Report sessions archived longer than this duration ago (required, for example 30d or 720h for thirty days) |
 | `--yes` |  | With --apply: skip the confirmation prompt (required when stdin is not a terminal) |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions reconcile-swap
+
+Re-ask a fenced session's host for its swap verdict
+
+Re-ask the agent-server of a session fenced by an indeterminate off-box
+account swap for the recorded swap's terminal verdict.
+
+A daemon that died between sending a swap request and reconciling its response
+leaves the session fenced behind a durable in-flight record: the request may
+still commit on the host, so nothing is admitted until the host says how THAT
+swap ended. This command re-runs the same reconcile the lost-response path
+uses — the agent-server's terminal record for the recorded swap id, plus the
+serialized discard and a re-read when the first read cannot attribute the
+answer. It never sends the swap request again.
+
+The fence lifts only on a definite verdict:
+
+- committed — the host provably runs the new account: the row records it and
+  the outgoing scope's write-back and removal run exactly as the live swap
+  path does;
+- rolled back or never ran — the host provably kept the old account: the
+  staged scope is dropped and the row stays on the old account.
+
+An indeterminate answer (unreachable host, a pre-identity agent-server that
+cannot attribute an outcome, or a stage layout that proves nothing) leaves
+the fence and the record in place — pane liveness alone never clears them.
+'af sessions kill' remains the way to remove the row outright.
+
+A daemon or agent-server too old for the verb refuses loudly rather than
+guess at a credential identity.
+
+Example:
+  af sessions reconcile-swap fix-auth
+
+```
+af sessions reconcile-swap <title>
+```
 
 **Global flags**
 

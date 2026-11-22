@@ -44,8 +44,12 @@ func reattachProvisioner(b Backend) *sandboxProvisioner {
 func (i *Instance) ReattachSandbox() error {
 	i.mu.Lock()
 	b := i.backend
+	// A startup-unknown row is inert and ineligible — except when it carries an
+	// in-flight swap record (#7793): the record is exactly what this path
+	// exists to reconcile, and a fenced row holding one is reattached so the
+	// host can answer for it before anything is admitted.
 	eligible := i.remoteClient == nil && i.runtimeTeardown != nil && !i.userKilled &&
-		!i.startupStateUnknown && !i.runtimeCleanupStateUnknown && i.liveness != LiveArchived
+		(!i.startupStateUnknown || i.offBoxSwapInFlight != nil) && !i.runtimeCleanupStateUnknown && i.liveness != LiveArchived
 	i.mu.Unlock()
 	p := reattachProvisioner(b)
 	if !eligible || p == nil {
@@ -174,6 +178,28 @@ func (i *Instance) ReattachSandbox() error {
 		}
 	}
 
+	// A row carrying an in-flight swap record is reconciled for THAT swap id
+	// before anything is admitted against it (#7793): the request the previous
+	// daemon sent may still commit on the host, and until the host answers for
+	// it the row must not be bound or resumed as the old account. The
+	// reconcile re-asks the server's terminal record — never re-sending the
+	// request — and settles the row only on a definite verdict; an
+	// indeterminate answer keeps the fence and leaves the tunnel unbound, the
+	// row exactly as the loader produced it.
+	if i.InFlightOffBoxSwap() != nil {
+		settled, rerr := i.reconcileInFlightOffBoxSwap(&remoteAgentServer{rc: rc, inst: i}, p)
+		switch {
+		case rerr == nil:
+		case settled:
+			// The verdict landed but its checkpoint did not: the settle
+			// stands in memory and the settlement retry owns the write, so
+			// the row binds normally.
+			log.WarningLog.Printf("reattach %q: the reconciled swap's checkpoint did not land (the settlement poll retries): %v", i.Title, rerr)
+		default:
+			p.abandonUnadoptedTunnel()
+			return fmt.Errorf("reattach %q: %w", i.Title, rerr)
+		}
+	}
 	// Re-verify under i.mu that the row is still the one this attempt probed: a
 	// restore or Lost recovery that ran while the probe was in flight has already
 	// installed its own runtime, and binding the old one over it would strand

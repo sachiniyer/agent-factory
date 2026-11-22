@@ -76,6 +76,7 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
+	data = data.RestoreOffBoxSwapInFlightRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()
 	data = data.restoreMissingAccountSwapMissionEvidence()
 	// A committed kill is terminal even while its teardown or an older operation
@@ -91,6 +92,13 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	// to fence an older binary; RestoreAccountSwapRollbackFence above removes that
 	// compatibility value before this current-reader decision.
 	if data.PendingAccountSwap != nil {
+		return ActivityPending, ""
+	}
+	// An in-flight off-box swap holds the slot too (#7793): its request may
+	// still commit on the host, so the row is settling — never idle — until a
+	// definite verdict clears the record. RestoreOffBoxSwapInFlightRollbackFence
+	// above removed the projected startup fence before this read.
+	if data.OffBoxSwapInFlight != nil {
 		return ActivityPending, ""
 	}
 	// A failed create whose runtime identity could not be confirmed is a settled
@@ -448,6 +456,7 @@ func LoadedActivity(data InstanceData) (Activity, string) {
 	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
+	data = data.RestoreOffBoxSwapInFlightRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()
 	data = data.restoreMissingAccountSwapMissionEvidence()
 	op := inFlightOpFromData(data)

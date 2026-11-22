@@ -76,6 +76,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		AccountAutoSelected:      i.accountAutoSelected,
 		AccountLimitObservations: append([]AccountLimitObservationData(nil), i.accountLimitObservations...),
 		PendingAccountSwap:       cloneAccountSwapData(i.pendingAccountSwap),
+		OffBoxSwapInFlight:       cloneInFlightOffBoxSwap(i.offBoxSwapInFlight),
 		Prompt:                   i.Prompt,
 		PendingHandoffMission:    i.pendingHandoffMission,
 		HandoffDeliveryStatus:    i.handoffDeliveryStatus,
@@ -415,6 +416,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 	data = data.RestoreRebuildTeardownRollbackFence()
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
+	data = data.RestoreOffBoxSwapInFlightRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()
 	data = data.restoreMissingAccountSwapMissionEvidence()
 	id := data.ID
@@ -539,6 +541,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
+		offBoxSwapInFlight:       cloneInFlightOffBoxSwap(data.OffBoxSwapInFlight),
 		Prompt:                   data.Prompt,
 		pendingHandoffMission:    data.PendingHandoffMission,
 		handoffDeliveryStatus:    data.HandoffDeliveryStatus,

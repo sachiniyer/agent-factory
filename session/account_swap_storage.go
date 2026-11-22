@@ -33,6 +33,46 @@ func (d InstanceData) RestoreAccountSwapRollbackFence() InstanceData {
 	return d
 }
 
+// projectOffBoxSwapInFlightForPreviousRelease keeps a rollback binary from
+// silently unfencing a row whose daemon died between sending a swap request
+// and reconciling it (#7793): to the previous release the record's meaning is
+// unknown, so StartupStateUnknown — a lifecycle fence that release already
+// loads inert — is projected over it, exactly like the pending account swap.
+// It runs FIRST of the pending projections so its captured original is the
+// row's real value; its restore therefore runs last. An older binary ignores
+// the record field on rewrite and drops it, but keeps the projected fence —
+// the row degrades to the same kill-only state a swap-indeterminate row has
+// always had, never to an unfenced one.
+func (d InstanceData) projectOffBoxSwapInFlightForPreviousRelease() InstanceData {
+	if d.OffBoxSwapInFlight == nil {
+		return d
+	}
+	rec := cloneInFlightOffBoxSwap(d.OffBoxSwapInFlight)
+	if rec.OriginalStartupStateUnknown == nil {
+		original := d.StartupStateUnknown
+		rec.OriginalStartupStateUnknown = &original
+	}
+	d.OffBoxSwapInFlight = rec
+	d.StartupStateUnknown = true
+	return d
+}
+
+// RestoreOffBoxSwapInFlightRollbackFence removes the compatibility projection
+// before a current reader interprets the lifecycle. The in-flight projector
+// runs FIRST in ForStorage — it captures the real StartupStateUnknown before
+// the account-swap, handoff, and rebuild-teardown projectors overwrite it —
+// so its restore runs LAST, after theirs (#7793).
+func (d InstanceData) RestoreOffBoxSwapInFlightRollbackFence() InstanceData {
+	if d.OffBoxSwapInFlight == nil || d.OffBoxSwapInFlight.OriginalStartupStateUnknown == nil {
+		return d
+	}
+	rec := cloneInFlightOffBoxSwap(d.OffBoxSwapInFlight)
+	d.StartupStateUnknown = *rec.OriginalStartupStateUnknown
+	rec.OriginalStartupStateUnknown = nil
+	d.OffBoxSwapInFlight = rec
+	return d
+}
+
 // restoreMissingAccountSwapMissionEvidence fails closed whenever a pending manual
 // transaction has replacement panes but no transaction-scoped verdict. Its
 // session-wide prompt verdict may describe an unrelated prompt, so it cannot

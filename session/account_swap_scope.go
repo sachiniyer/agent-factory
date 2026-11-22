@@ -157,11 +157,11 @@ type scopeRotation struct {
 // a timed-out request the server still completes — so a late discard checks
 // the marker and leaves a stage that is not its swap's to delete.
 func (i *Instance) discardAccountNextInPlace(swapID string) error {
-	_, next, _, err := accountScopeDirs(i.CurrentAgentName())
+	live, _, _, err := accountScopeDirs(i.CurrentAgentName())
 	if err != nil {
 		return err
 	}
-	return discardAccountNextBound(next, swapID)
+	return discardAccountNextBound(stagedScopeDir(live, swapID), swapID)
 }
 
 // discardAccountNextBound removes the staged scope at next under the
@@ -218,10 +218,17 @@ func accountScopeDirs(agent string) (live, next, prev string, err error) {
 // pre-identity and rotates whatever is staged — a commit that can never be
 // attributed, which the daemon reconciles as indeterminate.
 func newScopeRotation(agent, wantID string) (*scopeRotation, error) {
-	live, next, prev, err := accountScopeDirs(agent)
+	live, _, prev, err := accountScopeDirs(agent)
 	if err != nil {
 		return nil, err
 	}
+	// The staged scope lives at a path unique to THIS swap (#7793): nothing
+	// but this swap's own staging — never an unordered cleanup racing the
+	// request, a re-provision, or another swap's stage — can create or remove
+	// the path the rename consumes. The rename-time binding check below
+	// remains as defence in depth, not as the mechanism that makes the path
+	// unique.
+	next := stagedScopeDir(live, wantID)
 	r := &scopeRotation{live: live, next: next, prev: prev, wantID: wantID}
 	st, err := os.Lstat(r.next)
 	if err != nil || !st.IsDir() {
@@ -305,12 +312,13 @@ func (r *scopeRotation) stageBound() error {
 	return nil
 }
 
-// restore undoes a completed rotation: the incoming scope goes back to staging,
-// the outgoing one back to live. The rotation stripped the stage's swap binding
-// from the live scope, so the restored stage is re-bound BEFORE it appears at
-// .next (#7788): the serialized discard removes only a stage whose marker
-// names the swap it belongs to, and an unbound one would keep the incoming
-// account's credentials on the host after a definite rollback.
+// restore undoes a completed rotation: the incoming scope goes back to its
+// swap's own staging path, the outgoing one back to live. The rotation
+// stripped the stage's swap binding from the live scope, so the restored
+// stage is re-bound BEFORE it appears at the staging path (#7788): the
+// serialized discard removes only a stage whose marker names the swap it
+// belongs to, and an unbound one would keep the incoming account's
+// credentials on the host after a definite rollback.
 func (r *scopeRotation) restore() error {
 	if !r.rotated {
 		return nil

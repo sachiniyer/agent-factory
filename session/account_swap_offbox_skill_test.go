@@ -36,14 +36,14 @@ import (
 // longer add anything to it.
 type scopeSkillServer struct {
 	AgentServer
-	live, next string
-	agent      string
-	scopeEnv   string // the agent's scope variable (CODEX_HOME, GEMINI_CLI_HOME)
-	can        bool
-	failAfter  error // returned after a successful rotation, to exercise restore
-	rec        accountSwapRecorder
-	calls      int
-	atCall     map[string]string // scope-relative path -> staged content at swap time
+	live      string
+	agent     string
+	scopeEnv  string // the agent's scope variable (CODEX_HOME, GEMINI_CLI_HOME)
+	can       bool
+	failAfter error // returned after a successful rotation, to exercise restore
+	rec       accountSwapRecorder
+	calls     int
+	atCall    map[string]string // scope-relative path -> staged content at swap time
 }
 
 func (s *scopeSkillServer) CanSwapAccount() (bool, error) { return s.can, nil }
@@ -68,14 +68,14 @@ func (s *scopeSkillServer) DiscardAccountNext(swapID string) error {
 	if swapID != "" {
 		s.rec.cancelled = swapID
 	}
-	return discardAccountNextBound(s.next, swapID)
+	return discardAccountNextBound(stagedScopeDir(s.live, swapID), swapID)
 }
 
 func (s *scopeSkillServer) swap(id string) (string, error) {
 	s.calls++
 	os.Setenv(s.scopeEnv, s.live) // the server env names the live scope; the rotation reads it
 	for rel := range s.atCall {
-		s.atCall[rel] = readOrEmpty(filepath.Join(s.next, filepath.FromSlash(rel)))
+		s.atCall[rel] = readOrEmpty(filepath.Join(stagedScopeDir(s.live, id), filepath.FromSlash(rel)))
 	}
 	rot, err := newScopeRotation(s.agent, id)
 	if err != nil {
@@ -162,9 +162,10 @@ func newScopeSkillFixture(t *testing.T, agent string, skillsGranted bool) *scope
 	t.Setenv(envVar, w.AccountDir()) // the agent-server's env names the live scope
 
 	srv := &scopeSkillServer{
-		live: w.AccountDir(), next: w.NextAccountDir(), agent: agent, scopeEnv: envVar,
+		live: w.AccountDir(), agent: agent, scopeEnv: envVar,
 		can: true, atCall: map[string]string{skillRel: ""},
 	}
+	stubAccountSwapID(t)
 	inst := &Instance{
 		Title: "scopeswap", Path: repo, Program: agent, Host: "box1",
 		Account: "work", accountAgent: agent,
@@ -172,6 +173,7 @@ func newScopeSkillFixture(t *testing.T, agent string, skillsGranted bool) *scope
 		started: true, Tabs: []*Tab{newRemoteAgentTab()},
 	}
 	inst.agentSrv = srv
+	inst.SetOffBoxSwapPersist(func(*Instance) error { return nil })
 	return &scopeSkillFixture{inst: inst, w: w, srv: srv, skillRel: skillRel}
 }
 
@@ -218,7 +220,7 @@ func TestSwapOffBoxAccountStagesTheAfSkill(t *testing.T) {
 			assert.Equal(t, afSkillDoc, string(got), "af's own managed skill, not a copy of whatever the outgoing scope held")
 			assert.NoDirExists(t, f.w.PrevAccountDir(),
 				"the outgoing scope — and the write the unscoped plan build made into it — is cleaned up, not rescued")
-			assert.NoDirExists(t, f.w.NextAccountDir())
+			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1"))
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, "alt", acct)
 		})
@@ -265,7 +267,7 @@ func TestSwapOffBoxAccountStageFailureKeepsTheOutgoingSkill(t *testing.T) {
 			got, readErr := os.ReadFile(f.liveSkill())
 			require.NoError(t, readErr, "the live scope's guidance survives a swap that never reached the rotation")
 			assert.Equal(t, afSkillDoc, string(got))
-			assert.NoDirExists(t, f.w.NextAccountDir())
+			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1"))
 			assert.NoDirExists(t, f.w.PrevAccountDir(), "no rotation happened")
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, "work", acct)
@@ -289,7 +291,7 @@ func TestSwapOffBoxAccountRolledBackSwapKeepsTheOutgoingSkill(t *testing.T) {
 			got, readErr := os.ReadFile(f.liveSkill())
 			require.NoError(t, readErr, "the rollback returns the outgoing scope — and its guidance — to live")
 			assert.Equal(t, afSkillDoc, string(got))
-			assert.NoDirExists(t, f.w.NextAccountDir())
+			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1"))
 			assert.NoDirExists(t, f.w.PrevAccountDir())
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, "work", acct)

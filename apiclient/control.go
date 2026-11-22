@@ -174,6 +174,27 @@ func (c *Client) ConfirmHandoffDelivery(req daemon.ConfirmHandoffDeliveryRequest
 	return resp, nil
 }
 
+// ReconcileOffBoxSwap asks the daemon to re-reconcile a fenced session's
+// in-flight account swap against the host and lift the fence only on a
+// definite verdict (#7793). It never re-sends the swap request: a daemon
+// predating the verb refuses loudly (route not served) rather than run a
+// retry against a credential identity it cannot prove — the fence and its
+// durable record stay untouched.
+func (c *Client) ReconcileOffBoxSwap(req daemon.ReconcileOffBoxSwapRequest) (daemon.ReconcileOffBoxSwapResponse, error) {
+	var resp daemon.ReconcileOffBoxSwapResponse
+	err := c.call("ReconcileOffBoxSwap", req, &resp)
+	if IsRouteNotServed(err) {
+		return resp, fmt.Errorf("this daemon does not support reconciling an in-flight account swap (upgrade the daemon), so the session stays fenced")
+	}
+	if err != nil {
+		return resp, err
+	}
+	if !resp.OK {
+		return resp, fmt.Errorf("the swap was not reconciled: %s", resp.Reason)
+	}
+	return resp, nil
+}
+
 // HandoffSession asks the daemon to continue a session under a different agent,
 // in place (#2013) — the TUI's handoff action. Returns the swap the daemon
 // actually performed (outgoing agent, incoming agent, attribution boundary).

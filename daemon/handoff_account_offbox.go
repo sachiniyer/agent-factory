@@ -70,6 +70,13 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 	if err := instance.Transition(session.BeginHandoff()); err != nil {
 		return HandoffSessionResponse{}, err
 	}
+	// The in-flight record is durable before the request crosses (#7793):
+	// settlement-class, so it writes under this verb's own op lock — the
+	// ordering fence persistSettlementUnderAdmission names — never under the
+	// repo start lock the project config file lock forbids spanning (#6874).
+	instance.SetOffBoxSwapPersist(func(i *session.Instance) error {
+		return m.persistSettlementUnderAdmission(repoID, key, i)
+	})
 	res, err := instance.SwapOffBoxAccount(to, false)
 	if err != nil {
 		if errors.Is(err, session.ErrAccountSwapIndeterminate) {
@@ -136,11 +143,19 @@ func (m *Manager) finishOffBoxNotice(instance *session.Instance, agent string, r
 // instead of the local launch proof, and the first admitted one replaces the
 // limited account in place. Nothing is stopped for a candidate that was not
 // admitted, and the row names the new account only once the host holds it.
-func (m *Manager) commitOffBoxAccountSwap(instance *session.Instance, scheduled *autoAccountSwap, global *config.Config) (session.OffBoxAccountSwap, error) {
+func (m *Manager) commitOffBoxAccountSwap(instance *session.Instance, repoID, key string, scheduled *autoAccountSwap, global *config.Config) (session.OffBoxAccountSwap, error) {
 	admitted, err := m.admitAccountSwapWith(instance, global, instance.ValidateOffBoxAccountSwap)
 	if err != nil {
 		return session.OffBoxAccountSwap{}, err
 	}
+	// The in-flight record's durable write is settlement-class (#7793): this
+	// path's per-session op lock is the ordering fence
+	// persistSettlementUnderAdmission names, and the repo start lock is
+	// deliberately never taken — the project config file lock this swap runs
+	// under must not span the fence <-> start-lock order (#6874).
+	instance.SetOffBoxSwapPersist(func(i *session.Instance) error {
+		return m.persistSettlementUnderAdmission(repoID, key, i)
+	})
 	res, err := instance.SwapOffBoxAccount(admitted.to, true)
 	if err != nil {
 		return session.OffBoxAccountSwap{}, err
@@ -151,11 +166,11 @@ func (m *Manager) commitOffBoxAccountSwap(instance *session.Instance, scheduled 
 
 // tryOffBoxAccountSwap runs the in-place swap when the session is a listed-host
 // sandbox and reports nil, nil when it is not (the caller takes the local path).
-func (m *Manager) tryOffBoxAccountSwap(instance *session.Instance, scheduled *autoAccountSwap, global *config.Config, fallbackEligible *bool) (*session.OffBoxAccountSwap, error) {
+func (m *Manager) tryOffBoxAccountSwap(instance *session.Instance, repoID, key string, scheduled *autoAccountSwap, global *config.Config, fallbackEligible *bool) (*session.OffBoxAccountSwap, error) {
 	if scheduled.manual || !instance.OffBoxAccountHandoffApplies() {
 		return nil, nil
 	}
-	res, err := m.commitOffBoxAccountSwap(instance, scheduled, global)
+	res, err := m.commitOffBoxAccountSwap(instance, repoID, key, scheduled, global)
 	if err != nil {
 		if errors.Is(err, session.ErrAccountSwapIndeterminate) {
 			// An ordinary same-account retry would relaunch into a scope whose

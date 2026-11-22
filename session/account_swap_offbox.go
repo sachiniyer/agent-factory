@@ -250,7 +250,7 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (comm
 			if discarded {
 				return false, "", true, nil // still none after the staged scope is gone
 			}
-			if w.probeScopeState(sshShortStepTimeout) != scopeOutgoing {
+			if w.probeScopeState(swapID, sshShortStepTimeout) != scopeOutgoing {
 				return false, "", false, nil
 			}
 		case swapOutcomeUnknown:
@@ -286,7 +286,7 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (comm
 		// names it so the operator knows to upgrade (#7788).
 		if err := sw.DiscardAccountNext(swapID); err != nil {
 			if errors.Is(err, errAgentRouteMissing) {
-				return false, "", false, fmt.Errorf("the agent-server predates the %s route; upgrade it so a swap's lost response can be bounded", accountSwapDiscardFeature)
+				return false, "", false, fmt.Errorf("the agent-server predates the %s route; the row stays fenced until `af sessions reconcile-swap` reaches a definite verdict or `af sessions kill` removes it — upgrading the agent-server prevents a recurrence but cannot prove this lost swap's outcome", accountSwapDiscardFeature)
 			}
 			return false, "", false, nil
 		}
@@ -297,8 +297,8 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (comm
 
 // probeScopeState reads the host afresh (a new shell, not the lost call) and
 // reports which account its live scope holds, from the rotation's own markers.
-func (w *sandboxWorkspace) probeScopeState(timeout time.Duration) scopeState {
-	next, prev := shellQuote(w.NextAccountDir()), shellQuote(w.PrevAccountDir())
+func (w *sandboxWorkspace) probeScopeState(swapID string, timeout time.Duration) scopeState {
+	next, prev := shellQuote(w.nextAccountDirFor(swapID)), shellQuote(w.PrevAccountDir())
 	script := "if [ -d " + next + " ] && [ ! -d " + prev + " ]; then echo outgoing; " +
 		"elif [ ! -d " + next + " ] && [ -d " + prev + " ]; then echo incoming; else echo unknown; fi"
 	out, err := w.shell.Run(timeout, script, nil, false)
@@ -428,7 +428,7 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 	if len(versions) == 0 {
 		return nil, nil, fmt.Errorf("account %q has no credential file to sync under %s (has it been logged in?)", acct.Name, acct.Dir)
 	}
-	dir := shellQuote(w.NextAccountDir())
+	dir := shellQuote(w.nextAccountDirFor(swapID))
 	script := "umask 077 && rm -rf " + dir + " && mkdir -p " + dir
 	if swapID != "" {
 		// The staged scope is bound to its swap BEFORE any file crosses: the
@@ -436,7 +436,7 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 		// request's own id (#7773 R1), and the binding must land first so a
 		// transfer cut off mid-archive still leaves a marked — removable —
 		// stage rather than an anonymous one holding credentials.
-		script += " && printf %s " + shellQuote(swapID) + " > " + shellQuote(w.NextAccountDir()+"/"+accountSwapMarkerRel)
+		script += " && printf %s " + shellQuote(swapID) + " > " + shellQuote(w.nextAccountDirFor(swapID)+"/"+accountSwapMarkerRel)
 	}
 	script += " && tar -xf - -C " + dir
 	if out, err := w.shell.Run(timeout, script, bytes.NewReader(archive), true); err != nil {
@@ -448,7 +448,7 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 	// MiB (agentConfigMaxFileBytes is per file), so it gets the provision-scale
 	// budget the provision call site already passes — not the caller's 30-second
 	// control-step deadline, under which a valid config cannot cross a slow link.
-	skipped, err := w.syncAgentConfigInto(sshProvisionStepTimeout, w.NextAccountDir())
+	skipped, err := w.syncAgentConfigInto(sshProvisionStepTimeout, w.nextAccountDirFor(swapID))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -474,13 +474,14 @@ func (w *sandboxWorkspace) removePrevAccount(timeout time.Duration) error {
 	return nil
 }
 
-// removeNextAccount removes the staged scope from the host — the remote rm
+// removeNextAccountFor removes THIS swap's staged scope from the host — the
+// remote rm
 // that is sound ONLY where no swap request can be in flight (#7788): a
 // definite refusal the server answered, or a stage whose request was never
 // sent. It is never a reconcile path — a possibly-queued request could still
 // land after an unordered rm and rotate whatever stage it finds.
-func (w *sandboxWorkspace) removeNextAccount(timeout time.Duration) error {
-	if out, err := w.shell.Run(timeout, "rm -rf "+shellQuote(w.NextAccountDir()), nil, true); err != nil {
+func (w *sandboxWorkspace) removeNextAccountFor(swapID string, timeout time.Duration) error {
+	if out, err := w.shell.Run(timeout, "rm -rf "+shellQuote(w.nextAccountDirFor(swapID)), nil, true); err != nil {
 		return fmt.Errorf("removing the staged account from the host failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
@@ -497,7 +498,7 @@ func (w *sandboxWorkspace) discardStagedAccount(sw AccountSwapper, swapID string
 	if err == nil || !errors.Is(err, errAgentRouteMissing) {
 		return err
 	}
-	return w.removeNextAccount(sshShortStepTimeout)
+	return w.removeNextAccountFor(swapID, sshShortStepTimeout)
 }
 
 // accountSwapID mints the identity the daemon sends with each swap request
@@ -568,10 +569,14 @@ func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*
 	// still be queued on the agent-server — a scope staged now could be
 	// rotated in under that request's id, or emptied under its rotation. A
 	// definite verdict never sets the fence, so a proven session is not
-	// stranded. Nothing in the swap path unfences this row today — `af
-	// sessions kill` removes it; #7793 tracks a verdict-based unfence verb.
-	if i.StartupStateUnknown() {
-		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: its startup state is unknown, and a new staged scope could race a swap request still queued on the agent-server — `af sessions kill %s` removes the row; a verdict-based unfence verb is tracked in #7793", i.Title, i.Title)
+	// stranded. The in-flight record (#7793) names WHICH swap the
+	// reconcile-swap verb re-asks the host about; a row fenced without one
+	// carries a pre-record verdict nobody can attribute, so it is kill-only.
+	switch inFlight := i.InFlightOffBoxSwap(); {
+	case inFlight != nil:
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: an account swap to %q (id %s) was sent before its verdict was reconciled — its request may still be queued on the agent-server and could still commit on the host — `af sessions reconcile-swap %s` re-asks the host for THIS swap's terminal record and lifts the fence only on a definite answer; `af sessions kill %s` removes the row", i.Title, inFlight.To, inFlight.SwapID, i.Title, i.Title)
+	case i.StartupStateUnknown():
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: its startup state is unknown and no in-flight swap id is recorded for a reconcile to answer — `af sessions kill %s` removes the row", i.Title, i.Title)
 	}
 	if name = strings.TrimSpace(name); name == "" {
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)
@@ -709,6 +714,17 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	// skip list belongs to the result even when the response was lost (the
 	// reconciled arm below keeps res.AgentConfigSkipped populated).
 	res.AgentConfigSkipped = skipped
+	// The in-flight record lands durable BEFORE the request crosses (#7793): a
+	// daemon that dies queued or in transit reloads a fenced row that names
+	// WHICH swap to ask the host about, instead of silently learning the old
+	// account while the host runs the new one. Written only now that the
+	// stage exists, so a record can never outlive an absent stage into a
+	// "was it even sent" reconcile that would fence an empty answer; refused
+	// outright when the session carries no durable write behind it.
+	if err := i.beginOffBoxSwapInFlight(&InFlightOffBoxSwapData{SwapID: swapID, From: res.From, To: next.Name, Automatic: automatic}); err != nil {
+		_ = w.discardStagedAccount(sw, swapID)
+		return res, fmt.Errorf("handing %q off to account %q: %w", i.Title, next.Name, err)
+	}
 	program, err := sw.SwapAccountInPlace(swapID)
 	if err != nil && swapOutcomeIndeterminate(err) {
 		// The call may have completed on the host with its response lost. What the
@@ -721,19 +737,27 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 			// the old account is live. Fall through as a refusal.
 		default:
 			// Neither account can be asserted. Nothing is written back from a scope
-			// of unknown identity, and nothing relaunches into it.
+			// of unknown identity, and nothing relaunches into it. The in-flight
+			// record is KEPT — it is what the next daemon and the reconcile-swap
+			// verb re-ask the host about — and the fence persists with it.
 			w.syncedVersion = nil
 			i.MarkStartupStateUnknown()
+			if perr := i.persistOffBoxSwapRecord(); perr != nil {
+				log.WarningLog.Printf("account swap of %q: the still-fenced record could not be persisted (the next checkpoint carries it): %v", i.Title, perr)
+			}
 			ind := fmt.Errorf("%w: %w", ErrAccountSwapIndeterminate, errors.New(accountScopeIndeterminate))
 			if cause != nil {
 				// Keep the fence actionable: an old agent-server's missing
 				// route is named so the operator upgrades it (#7788).
 				ind = fmt.Errorf("%w: %w", ind, cause)
 			}
-			return res, fmt.Errorf("handing %q off to account %q: %w (the call failed: %v)", i.Title, next.Name, ind, err)
+			return res, fmt.Errorf("handing %q off to account %q: %w — the row stays fenced until `af sessions reconcile-swap %s` re-asks the host for this swap's verdict or `af sessions kill %s` removes it (the call failed: %v)", i.Title, next.Name, ind, i.Title, i.Title, err)
 		}
 	}
 	if err != nil {
+		// The swap is settled — refused, rolled back, or never run — so its
+		// in-flight record retires before the stage is cleaned up.
+		i.clearOffBoxSwapInFlight(swapID)
 		// The host kept the old account, so the staged copy is dead weight
 		// holding credentials: remove it — on the agent-server, serialized
 		// with the swap, so it can never empty a scope under a rotation in
@@ -760,6 +784,7 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	w.syncedVersion = versions
 	p.spec.Account = next
 	i.recordOffBoxAccount(next.Name, next.Agent, automatic, program, skipped)
+	i.clearOffBoxSwapInFlight(swapID)
 	return res, nil
 }
 

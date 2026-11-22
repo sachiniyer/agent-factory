@@ -363,6 +363,13 @@ type InstanceData struct {
 	// PendingAccountSwap is the committed identity change whose replacement
 	// runtime still needs the in-session notice and stored task delivered.
 	PendingAccountSwap *AccountSwapData `json:"pending_account_swap,omitempty"`
+	// OffBoxSwapInFlight is the durable record of an off-box account swap
+	// whose request crossed before its verdict was reconciled (#7793): the
+	// row fences admission while it exists, and the next daemon reconciles
+	// it for the recorded id before anything is admitted. ForStorage
+	// projects StartupStateUnknown over it so a previous release loads the
+	// row inert and fenced rather than silently unfenced.
+	OffBoxSwapInFlight *InFlightOffBoxSwapData `json:"off_box_swap_in_flight,omitempty"`
 
 	Program string `json:"program"`
 	// RuntimeProgram is the override-resolved base command of the last agent
@@ -695,6 +702,7 @@ func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreRebuildTeardownRollbackFence()
 	d = d.RestoreHandoffRollbackFence()
 	d = d.RestoreAccountSwapRollbackFence()
+	d = d.RestoreOffBoxSwapInFlightRollbackFence()
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
 	// ForStorage persists RuntimeCleanup on ordinary sandbox rows so a daemon

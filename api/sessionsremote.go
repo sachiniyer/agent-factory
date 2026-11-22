@@ -125,6 +125,19 @@ func routedConfirmHandoffDelivery(req daemon.ConfirmHandoffDeliveryRequest) (dae
 	return resp, remoteMutationError("retry-limit --delivered", err)
 }
 
+func routedReconcileOffBoxSwap(req daemon.ReconcileOffBoxSwapRequest) (daemon.ReconcileOffBoxSwapResponse, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.ReconcileOffBoxSwap(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return daemon.ReconcileOffBoxSwapResponse{}, err
+	}
+	defer c.CloseIdleConnections()
+	resp, err := c.ReconcileOffBoxSwap(req)
+	return resp, remoteMutationError("reconcile-swap", err)
+}
+
 func routedSetConversation(req daemon.SetConversationRequest) error {
 	if !apiclient.IsRemoteTarget() {
 		return daemon.SetConversation(req)

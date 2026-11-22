@@ -27,9 +27,9 @@ const codexCredFile = "auth.json"
 // CODEX_HOME and requires it to be a session ".../account" path).
 type codexSwapServer struct {
 	AgentServer
-	live, next, scope string
-	can               bool
-	rec               accountSwapRecorder
+	live, scope string
+	can         bool
+	rec         accountSwapRecorder
 }
 
 func (s *codexSwapServer) CanSwapAccount() (bool, error) { return s.can, nil }
@@ -60,7 +60,7 @@ func (s *codexSwapServer) DiscardAccountNext(swapID string) error {
 	// The same binding rule production applies (#7788): only the stage bound
 	// to this swap is removed, and a marker that cannot be read is a failure
 	// rather than a silent "not mine".
-	return discardAccountNextBound(s.next, swapID)
+	return discardAccountNextBound(stagedScopeDir(s.live, swapID), swapID)
 }
 
 // A fresh codex swap stages the operator's config.toml (with the forced file
@@ -100,7 +100,7 @@ func TestCodexAgentConfigSurvivesFreshSwap(t *testing.T) {
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
 
-	srv := &codexSwapServer{live: w.AccountDir(), next: w.NextAccountDir(), scope: w.AccountDir(), can: true}
+	srv := &codexSwapServer{live: w.AccountDir(), scope: w.AccountDir(), can: true}
 	t.Setenv("CODEX_HOME", w.AccountDir())
 	inst := &Instance{
 		Title: "codexswap", Path: repo, Program: tmux.ProgramCodex, Host: "box1",
@@ -109,6 +109,7 @@ func TestCodexAgentConfigSurvivesFreshSwap(t *testing.T) {
 		started: true, Tabs: []*Tab{newRemoteAgentTab()},
 	}
 	inst.agentSrv = srv
+	inst.SetOffBoxSwapPersist(func(*Instance) error { return nil })
 
 	opHome := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(opHome, "config.toml"),
@@ -162,7 +163,7 @@ func TestCodexFreshSwapKeepsAnEmptyProvisionSelection(t *testing.T) {
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
 
-	srv := &codexSwapServer{live: w.AccountDir(), next: w.NextAccountDir(), scope: w.AccountDir(), can: true}
+	srv := &codexSwapServer{live: w.AccountDir(), scope: w.AccountDir(), can: true}
 	t.Setenv("CODEX_HOME", w.AccountDir())
 	inst := &Instance{
 		Title: "codexswap", Path: repo, Program: tmux.ProgramCodex, Host: "box1",
@@ -171,6 +172,7 @@ func TestCodexFreshSwapKeepsAnEmptyProvisionSelection(t *testing.T) {
 		started: true, Tabs: []*Tab{newRemoteAgentTab()},
 	}
 	inst.agentSrv = srv
+	inst.SetOffBoxSwapPersist(func(*Instance) error { return nil })
 
 	opHome := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(opHome, "config.toml"),
@@ -236,7 +238,7 @@ func TestCodexAgentConfigSurvivesSwapOnAReattachedSession(t *testing.T) {
 	// left beside the session is what the swap reads the consent from (#7644).
 	require.NoError(t, os.WriteFile(rw.PolicyPath(), swapPolicyBytes(t, false), 0o600))
 
-	srv := &codexSwapServer{live: rw.AccountDir(), next: rw.NextAccountDir(), scope: rw.AccountDir(), can: true}
+	srv := &codexSwapServer{live: rw.AccountDir(), scope: rw.AccountDir(), can: true}
 	t.Setenv("CODEX_HOME", rw.AccountDir())
 	inst := &Instance{
 		Title: "codexswap", Path: repo, Program: tmux.ProgramCodex, Host: "box1",
@@ -244,6 +246,7 @@ func TestCodexAgentConfigSurvivesSwapOnAReattachedSession(t *testing.T) {
 		backend: backend, started: true, Tabs: []*Tab{newRemoteAgentTab()},
 	}
 	inst.agentSrv = srv
+	inst.SetOffBoxSwapPersist(func(*Instance) error { return nil })
 
 	opHome := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(opHome, "config.toml"),

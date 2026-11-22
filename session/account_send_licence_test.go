@@ -118,7 +118,7 @@ func TestAccountHandoffSendsNothingAfterItsHostEntryIsRemovedOrReAddressed(t *te
 			_, err := inst.SwapOffBoxAccount("alt", false)
 			require.Error(t, err)
 			assert.Empty(t, accountWrites(*scripts), "the incoming account was sent to a machine the host list no longer names")
-			assert.NoDirExists(t, filepath.Join(f.dir, "account.next"), "nothing was staged")
+			assert.NoDirExists(t, f.stagedDir(), "nothing was staged")
 			assert.Equal(t, secretWork, f.hostCred(t, "account"), "the session keeps running on its current account")
 			assert.Zero(t, f.srv.calls, "and the agent was never asked to rotate")
 			acct, _ := inst.AccountSelection()
@@ -292,7 +292,7 @@ func TestEverySenderIsLicensedAtItsOwnSend(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `account "alt" is not sent`)
 		assert.Empty(t, accountWrites(*f.shellCalls))
-		assert.NoDirExists(t, filepath.Join(f.dir, "account.next"))
+		assert.NoDirExists(t, f.stagedDir())
 	})
 
 	t.Run("a handoff on a live session", func(t *testing.T) {

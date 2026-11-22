@@ -279,6 +279,18 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(ConfirmHandoffDeliveryRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ConfirmHandoffDelivery) },
 	},
+	// The verdict-based unfence for an in-flight off-box account swap (#7793):
+	// the daemon re-asks the host for the RECORDED swap id's terminal verdict —
+	// it never re-sends the request — and the fence lifts only on a definite
+	// answer. A pre-verb daemon refuses loudly rather than guess at a credential
+	// identity, so the route is its own verb.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ReconcileOffBoxSwap",
+		Description: "Re-reconcile a fenced session's in-flight account swap against the host and lift the fence only on a definite verdict — never resends the swap request.",
+		requestType: reflect.TypeOf(ReconcileOffBoxSwapRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ReconcileOffBoxSwap) },
+	},
 	// The operator repair for a conversation af never recorded or recorded
 	// stale (#6769): validates the id against the session's own rollout store
 	// before writing it to the Agent tab — strict correlation only, never a

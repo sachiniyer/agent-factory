@@ -49,6 +49,27 @@ func ConfirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (ConfirmHandoffDe
 	return resp, nil
 }
 
+// ReconcileOffBoxSwap asks the daemon to re-reconcile a fenced session's
+// in-flight account swap against the host and lift the fence only on a
+// definite verdict (#7793). It never re-sends the swap request: the
+// agent-server's own terminal record answers. A pre-verb daemon cannot serve
+// the method; isRPCMethodMissing surfaces that as a clean refusal rather than
+// a silent retry — the fence and its durable record stay untouched.
+func ReconcileOffBoxSwap(req ReconcileOffBoxSwapRequest) (ReconcileOffBoxSwapResponse, error) {
+	var resp ReconcileOffBoxSwapResponse
+	err := callDaemon("ReconcileOffBoxSwap", req, &resp)
+	if isRPCMethodMissing(err) {
+		return resp, fmt.Errorf("this daemon does not support reconciling an in-flight account swap (upgrade the daemon), so the session stays fenced")
+	}
+	if err != nil {
+		return resp, err
+	}
+	if !resp.OK {
+		return resp, fmt.Errorf("the swap was not reconciled: %s", resp.Reason)
+	}
+	return resp, nil
+}
+
 // SetConversation asks the daemon to validate and record a provider
 // conversation id on a session's Agent tab (#6769) — the repair for a Codex
 // conversation af never captured or recorded stale. The daemon refuses unless

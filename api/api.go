@@ -876,6 +876,7 @@ func init() {
 	SessionsCmd.AddCommand(newSessionsAttentionCmd())
 	SessionsCmd.AddCommand(sessionsHandoffCmd)
 	SessionsCmd.AddCommand(sessionsRetryLimitCmd)
+	SessionsCmd.AddCommand(sessionsReconcileSwapCmd)
 	SessionsCmd.AddCommand(sessionsSetConversationCmd)
 	// The escape hatch for recovery's refusal to reap a reachable sandbox without
 	// pushing it first (#2923). Per-command and per-session on purpose — the

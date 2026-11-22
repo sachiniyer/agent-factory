@@ -86,7 +86,7 @@ func TestSwapOffBoxAccountStaleCommittedWithLeftoverPrevKeepsTheOldAccount(t *te
 	acct, _ := f.inst.AccountSelection()
 	assert.Equal(t, "alt", acct, "the row names the account the host runs")
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"))
-	assert.NoDirExists(t, f.w.NextAccountDir(), "the staged scope is discarded so a late request can only roll back")
+	assert.NoDirExists(t, f.stagedDirFor("test-swap-2"), "the staged scope is discarded so a late request can only roll back")
 	assert.Equal(t, secretWork, readOrEmpty(filepath.Join(f.w.PrevAccountDir(), credFile)),
 		"the first swap's leftover stays put — it was never this swap's to remove")
 	assert.False(t, f.inst.StartupStateUnknown(), "a definite answer does not fence the session")
@@ -136,7 +136,7 @@ func TestSwapOffBoxAccountStaleRolledBackKeepsTheOldAccount(t *testing.T) {
 	acct, _ := f.inst.AccountSelection()
 	assert.Equal(t, "work", acct)
 	assert.Equal(t, secretWork, f.hostCred(t, "account"))
-	assert.NoDirExists(t, f.w.NextAccountDir())
+	assert.NoDirExists(t, f.stagedDirFor("test-swap-2"))
 	assert.False(t, f.inst.StartupStateUnknown())
 	assert.Equal(t, secretThird, readOrEmpty(thirdReg))
 }
@@ -209,7 +209,7 @@ func TestSwapOffBoxAccountStaleUnknownIsIndeterminate(t *testing.T) {
 	_, err := f.inst.SwapOffBoxAccount("third", false)
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
-	assert.DirExists(t, f.w.NextAccountDir(), "nothing is discarded from a host in doubt")
+	assert.DirExists(t, f.stagedDir(), "nothing is discarded from a host in doubt")
 	acct, _ := f.inst.AccountSelection()
 	assert.Equal(t, "work", acct)
 }
@@ -256,7 +256,7 @@ func TestSwapOffBoxAccountAnonymousStaleCommittedFencesKeepingTheStage(t *testin
 	_, err := f.inst.SwapOffBoxAccount("third", false)
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
-	assert.DirExists(t, f.w.NextAccountDir(),
+	assert.DirExists(t, f.stagedDirFor("test-swap-2"),
 		"an old server has no ordered discard: the stage stays for teardown, never removed by an unordered rm")
 	acct, _ := f.inst.AccountSelection()
 	assert.Equal(t, "alt", acct)
@@ -278,7 +278,7 @@ func TestSwapOffBoxAccountAnonymousRolledBackIsIndeterminate(t *testing.T) {
 	acct, _ := f.inst.AccountSelection()
 	assert.Equal(t, "work", acct)
 	assert.Equal(t, secretWork, f.hostCred(t, "account"))
-	assert.DirExists(t, f.w.NextAccountDir(), "the restored stage stays on the fenced host for teardown")
+	assert.DirExists(t, f.stagedDir(), "the restored stage stays on the fenced host for teardown")
 	assert.True(t, f.inst.StartupStateUnknown())
 }
 
@@ -293,7 +293,7 @@ func TestSwapOffBoxAccountAnonymousNoneIsIndeterminate(t *testing.T) {
 	_, err := f.inst.SwapOffBoxAccount("alt", false)
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
-	assert.DirExists(t, f.w.NextAccountDir(), "the stage stays for teardown — an old server has no ordered discard")
+	assert.DirExists(t, f.stagedDir(), "the stage stays for teardown — an old server has no ordered discard")
 }
 
 // --- the none arm keeps its host check ---
@@ -356,7 +356,7 @@ func TestSwapOffBoxAccountHeldRequestCannotRotateALaterSwapsStage(t *testing.T) 
 			require.Error(t, err, "the queued request is refused — never rotated into another swap's stage")
 
 			assert.Equal(t, secretWork, f.hostCred(t, "account"), "the live scope never moved")
-			assert.Equal(t, secretThird, readOrEmpty(filepath.Join(f.w.NextAccountDir(), credFile)),
+			assert.Equal(t, secretThird, readOrEmpty(filepath.Join(f.stagedDirFor("a-different-swap"), credFile)),
 				"the later swap's stage is intact for its own request")
 			o, _, id := f.srv.rec.status()
 			assert.Equal(t, swapOutcomeRolledBack, o, "its only possible outcome is rolled back")
@@ -457,7 +457,7 @@ func TestSwapOffBoxAccountDiscardAndRotationAreSerialized(t *testing.T) {
 		acct, _ := f.inst.AccountSelection()
 		assert.Equal(t, "work", acct)
 		assert.Equal(t, secretWork, f.hostCred(t, "account"), "the old account's scope is whole")
-		assert.NoDirExists(t, f.w.NextAccountDir())
+		assert.NoDirExists(t, f.stagedDir())
 		o, _, id := f.srv.rec.status()
 		assert.Equal(t, swapOutcomeRolledBack, o)
 		assert.Equal(t, f.srv.lastID, id)
@@ -483,9 +483,12 @@ func TestScopeRotationBindsTheStageToItsSwap(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			live := rotationHost(t)
+			next := stagedScopeDir(live, tc.wantID)
+			require.NoError(t, os.MkdirAll(next, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("B"), 0o600))
 			if tc.marker != "" {
 				require.NoError(t, os.WriteFile(
-					filepath.Join(live+accountNextSuffix, accountSwapMarkerRel), []byte(tc.marker), 0o600))
+					filepath.Join(next, accountSwapMarkerRel), []byte(tc.marker), 0o600))
 			}
 			_, err := newScopeRotation(tmux.ProgramClaude, tc.wantID)
 			if tc.wantErr != "" {
@@ -501,8 +504,11 @@ func TestScopeRotationBindsTheStageToItsSwap(t *testing.T) {
 // stage, not the account, and must not ride the scope into a write-back.
 func TestScopeRotationStripsTheSwapMarker(t *testing.T) {
 	live := rotationHost(t)
+	next := stagedScopeDir(live, "swap-1")
+	require.NoError(t, os.MkdirAll(next, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("B"), 0o600))
 	require.NoError(t, os.WriteFile(
-		filepath.Join(live+accountNextSuffix, accountSwapMarkerRel), []byte("swap-1"), 0o600))
+		filepath.Join(next, accountSwapMarkerRel), []byte("swap-1"), 0o600))
 	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1")
 	require.NoError(t, err)
 	require.NoError(t, rot.rotate())
@@ -516,13 +522,16 @@ func TestScopeRotationStripsTheSwapMarker(t *testing.T) {
 // after a definite rollback (#7773 R2 review).
 func TestScopeRotationRestoreRebindsTheStage(t *testing.T) {
 	live := rotationHost(t)
+	next := stagedScopeDir(live, "swap-1")
+	require.NoError(t, os.MkdirAll(next, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("B"), 0o600))
 	require.NoError(t, os.WriteFile(
-		filepath.Join(live+accountNextSuffix, accountSwapMarkerRel), []byte("swap-1"), 0o600))
+		filepath.Join(next, accountSwapMarkerRel), []byte("swap-1"), 0o600))
 	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1")
 	require.NoError(t, err)
 	require.NoError(t, rot.rotate())
 	require.NoError(t, rot.restore())
-	marker, err := os.ReadFile(filepath.Join(live+accountNextSuffix, accountSwapMarkerRel))
+	marker, err := os.ReadFile(filepath.Join(next, accountSwapMarkerRel))
 	require.NoError(t, err, "the restored stage carries its binding again")
 	assert.Equal(t, "swap-1", string(marker))
 }
@@ -549,7 +558,9 @@ func TestAccountSwapDiscardTombstonesTheSwap(t *testing.T) {
 // deleting it would erase a stage mid-use (#7773 R2 review).
 func TestDiscardAccountNextInPlaceRemovesOnlyItsOwnStage(t *testing.T) {
 	live := rotationHost(t)
-	nextDir := live + accountNextSuffix
+	nextDir := stagedScopeDir(live, "swap-2")
+	require.NoError(t, os.MkdirAll(nextDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(nextDir, credFile), []byte("B"), 0o600))
 	inst := &Instance{Title: "s", Program: tmux.ProgramClaude}
 
 	require.NoError(t, os.WriteFile(
