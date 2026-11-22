@@ -94,9 +94,13 @@ func TestEnsurePanePathDirBuildsTheIndirection(t *testing.T) {
 	assert.Contains(t, script, `chmod 700`, "the indirection root is private to the session user")
 	assert.Contains(t, script, `ln -sfn "$sess" "$link"`, "the link points at the real session dir")
 	assert.Contains(t, script, `[ -d "$HOME" ]`, "$HOME is used only when it is a real directory")
-	assert.Contains(t, script, `[ -L "$r" ] || mkdir -p "$r"`, "a symlinked root is skipped, never recreated through")
+	assert.Contains(t, script, `[ -e "$r" ] || { mkdir "$r" 2>/dev/null && chmod 700 "$r"`,
+		"chmod runs only on a root af's own mkdir just created — never on a name another uid can swap (#7787 R1)")
+	assert.NotContains(t, script, `chmod 700 "$r" 2>/dev/null; [`, "no second chmod may follow a `[ ! -L ]` check")
 	assert.Contains(t, script, `[ -e "$r/$leaf" ] && [ ! -L "$r/$leaf" ]`,
 		"a root whose leaf exists as a non-symlink is skipped before `ln` — implementations differ on ln -sfn into a real directory")
+	assert.Contains(t, script, `loginctl show-user -p Linger`, "XDG qualifies only when linger keeps /run/user alive (#7787 R2)")
+	assert.Contains(t, script, `/var/lib/systemd/linger/`, "the linger marker file is the first linger proof")
 	assert.Contains(t, script, `[ -O "$r" ]`, "a root in a writable-by-others dir is only reused after ownership verifies (#7787)")
 	assert.Contains(t, script, `ls -ld "$r"`, "the root's mode is verified where `stat` is not portable")
 	assert.Contains(t, script, `[ "$(readlink "$link")" = "$sess" ]`,
@@ -199,19 +203,29 @@ func TestEnsurePanePathDirVerifiesTheReportedLink(t *testing.T) {
 // load-bearing shell, so a string assertion is not evidence they work.
 //
 // runLocalSh satisfies sandboxShell by executing the script verbatim with a
-// controlled HOME, TMPDIR and XDG_RUNTIME_DIR (absent when empty); combined
-// output mirrors the production call.
+// controlled HOME, TMPDIR, XDG_RUNTIME_DIR and linger evidence (each absent
+// when empty); stubDir prepends a directory of command stubs to PATH (e.g. a
+// fake loginctl). Combined output mirrors the production call.
 type localSh struct {
-	home   string
-	tmpdir string
-	xdg    string
+	home       string
+	tmpdir     string
+	xdg        string
+	lingerFile string
+	stubDir    string
 }
 
 func (l *localSh) Run(_ time.Duration, script string, _ io.Reader, combined bool) ([]byte, error) {
 	cmd := exec.Command("sh", "-c", script)
-	cmd.Env = []string{"HOME=" + l.home, "TMPDIR=" + l.tmpdir, "PATH=" + os.Getenv("PATH")}
+	path := os.Getenv("PATH")
+	if l.stubDir != "" {
+		path = l.stubDir + string(os.PathListSeparator) + path
+	}
+	cmd.Env = []string{"HOME=" + l.home, "TMPDIR=" + l.tmpdir, "PATH=" + path}
 	if l.xdg != "" {
 		cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+l.xdg)
+	}
+	if l.lingerFile != "" {
+		cmd.Env = append(cmd.Env, "AF_LINGER_FILE="+l.lingerFile)
 	}
 	var out []byte
 	var err error
@@ -230,6 +244,13 @@ func readMarker(t *testing.T, sess string) string {
 	b, err := os.ReadFile(filepath.Join(sess, panePathMarkerName))
 	require.NoError(t, err, "every committed link must be recorded inside the session dir")
 	return strings.TrimSpace(string(b))
+}
+
+// writeStub drops an executable command stub into dir — a fake loginctl, say —
+// so the real script answers a dictated system state through a stubbed PATH.
+func writeStub(t *testing.T, dir, name, body string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755))
 }
 
 func TestEnsurePanePathDirRealScript(t *testing.T) {
@@ -252,15 +273,21 @@ func TestEnsurePanePathDirRealScript(t *testing.T) {
 		assert.Equal(t, link, readMarker(t, sess), "the marker names the committed link")
 	})
 
-	t.Run("a colon-bearing HOME prefers XDG_RUNTIME_DIR over /tmp", func(t *testing.T) {
+	t.Run("a colon-bearing HOME prefers XDG_RUNTIME_DIR over /tmp only with linger", func(t *testing.T) {
 		tmp, xdg := t.TempDir(), t.TempDir()
 		require.NoError(t, os.Chmod(xdg, 0o700))
-		w := &sandboxWorkspace{shell: &localSh{home: "/nonexistent:h:ome", tmpdir: tmp, xdg: xdg}, SessionDir: sess}
+		lingerOn := filepath.Join(t.TempDir(), "linger-marker")
+		require.NoError(t, os.WriteFile(lingerOn, []byte(""), 0o600))
+		lingerOff := filepath.Join(t.TempDir(), "no-such-marker")
+
+		// Linger proven by the marker file: /run/user survives the ssh
+		// command's own logind session, so the link does too (#7787 R2).
+		w := &sandboxWorkspace{shell: &localSh{home: "/nonexistent:h:ome", tmpdir: tmp, xdg: xdg, lingerFile: lingerOn}, SessionDir: sess}
 		require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout))
 
 		link := filepath.Join(xdg, ".af-path", panePathLinkName(sess))
 		assert.Equal(t, link, w.panePathDir,
-			"a uid-owned 0700 XDG runtime dir beats a /tmp mktemp root (#7787)")
+			"a uid-owned 0700 XDG runtime dir beats a /tmp mktemp root once linger is proven")
 		target, err := os.Readlink(link)
 		require.NoError(t, err)
 		assert.Equal(t, sess, target)
@@ -268,10 +295,38 @@ func TestEnsurePanePathDirRealScript(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, os.FileMode(0o700), st.Mode().Perm(), "the XDG-rooted .af-path is private")
 		assert.Equal(t, link, readMarker(t, sess))
+
+		// Linger proven by loginctl instead of the marker file: a stub answers
+		// "Linger=yes" and the root still lands under XDG.
+		stubYes := t.TempDir()
+		writeStub(t, stubYes, "loginctl", "#!/bin/sh\nif [ \"$1\" = \"show-user\" ]; then echo 'Linger=yes'; else exit 1; fi\n")
+		require.NoError(t, os.RemoveAll(filepath.Join(xdg, ".af-path")))
+		require.NoError(t, os.Remove(filepath.Join(sess, panePathMarkerName)))
+		w = &sandboxWorkspace{shell: &localSh{home: "/nonexistent:h:ome", tmpdir: tmp, xdg: xdg, lingerFile: lingerOff, stubDir: stubYes}, SessionDir: sess}
+		require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout))
+		assert.Equal(t, link, w.panePathDir, "loginctl's Linger=yes is equivalent linger evidence")
+
+		// Without linger the runtime dir is deleted under the session's own
+		// logind session: the verified /tmp mktemp root, which survives, wins.
+		for label, stub := range map[string]string{
+			"loginctl says no": "#!/bin/sh\nif [ \"$1\" = \"show-user\" ]; then echo 'Linger=no'; else exit 1; fi\n",
+			"loginctl fails":   "#!/bin/sh\nexit 1\n",
+		} {
+			stubDir := t.TempDir()
+			writeStub(t, stubDir, "loginctl", stub)
+			require.NoError(t, os.RemoveAll(filepath.Join(xdg, ".af-path")))
+			require.NoError(t, os.Remove(filepath.Join(sess, panePathMarkerName)))
+			w = &sandboxWorkspace{shell: &localSh{home: "/nonexistent:h:ome", tmpdir: tmp, xdg: xdg, lingerFile: lingerOff, stubDir: stubDir}, SessionDir: sess}
+			require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout), label)
+			assert.True(t, strings.HasPrefix(w.panePathDir, tmp+string(filepath.Separator)+"af-path."),
+				label+": no linger proof means the durable /tmp root, got %q", w.panePathDir)
+		}
 	})
 
 	t.Run("an unusable XDG_RUNTIME_DIR falls back to mktemp", func(t *testing.T) {
 		tmp := t.TempDir()
+		lingerOn := filepath.Join(t.TempDir(), "linger-marker")
+		require.NoError(t, os.WriteFile(lingerOn, []byte(""), 0o600))
 		for label, xdg := range map[string]func() string{
 			"unset":         func() string { return "" },
 			"relative":      func() string { return "run/user" },
@@ -286,7 +341,7 @@ func TestEnsurePanePathDirRealScript(t *testing.T) {
 		} {
 			t.Run(label, func(t *testing.T) {
 				os.Remove(filepath.Join(sess, panePathMarkerName))
-				w := &sandboxWorkspace{shell: &localSh{home: "/nonexistent:h:ome", tmpdir: tmp, xdg: xdg()}, SessionDir: sess}
+				w := &sandboxWorkspace{shell: &localSh{home: "/nonexistent:h:ome", tmpdir: tmp, xdg: xdg(), lingerFile: lingerOn}, SessionDir: sess}
 				require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout))
 
 				require.True(t, strings.HasPrefix(w.panePathDir, tmp+string(filepath.Separator)+"af-path."),
@@ -404,10 +459,15 @@ func TestEnsureAtRemintsARootItCannotVerify(t *testing.T) {
 	t.Run("a squatter's symlink at the root", func(t *testing.T) {
 		tmp, link, w := setup(t)
 		target := t.TempDir()
+		require.NoError(t, os.Chmod(target, 0o755))
 		require.NoError(t, os.Symlink(target, filepath.Dir(link)))
 		assertReminted(t, tmp, link, w)
 		e, _ := os.ReadDir(target)
 		assert.Empty(t, e, "nothing was written through the squatter's symlink")
+		st, err := os.Stat(target)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o755), st.Mode().Perm(),
+			"chmod never followed the swapped-in symlink to its target (#7787 R1)")
 	})
 
 	t.Run("a squatter's regular file at the root", func(t *testing.T) {
@@ -470,17 +530,18 @@ func TestEnsureAtRestoresItsOwnRecordedRoot(t *testing.T) {
 		assert.Equal(t, sess, target)
 	})
 
-	t.Run("a root af owns at the wrong mode is repaired, not abandoned", func(t *testing.T) {
+	t.Run("a root at the wrong mode is abandoned, never chmodded in place", func(t *testing.T) {
 		tmp := t.TempDir()
 		link := filepath.Join(tmp, "af-path.Rec", leaf)
 		require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755)) // wrong mode, still ours
 		w := &sandboxWorkspace{shell: &localSh{home: "/nonexistent:h:ome", tmpdir: tmp}, SessionDir: sess, panePathDir: link}
 		require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout))
-		assert.Equal(t, link, w.panePathDir)
+		assert.NotEqual(t, link, w.panePathDir,
+			"an existing name in a shared dir is never mode-repaired — a fresh root is minted (#7787 R1)")
 		st, err := os.Stat(filepath.Dir(link))
 		require.NoError(t, err)
-		assert.Equal(t, os.FileMode(0o700), st.Mode().Perm(),
-			"an af-owned root is chmodded back to 0700 before the link is trusted")
+		assert.Equal(t, os.FileMode(0o755), st.Mode().Perm(),
+			"and the mode of the existing name is left exactly as it was")
 	})
 
 	t.Run("a leaf repointed elsewhere is re-pinned to this session", func(t *testing.T) {

@@ -323,6 +323,8 @@ func TestSandboxReapScriptRemovesThePanePathIndirection(t *testing.T) {
 		"the persisted panePathDir — or the orphan's own marker — names the link")
 	assert.Contains(t, script, "rmdir -- "+shellQuote("/tmp/af-path.aBcDeF"),
 		"and the link's parent — a .af-path dir or the mktemp root — is dropped when it empties")
+	assert.Contains(t, script, `rc=$?; l=`+shellQuote("/tmp/af-path.aBcDeF/sess-0123456789abcdef"),
+		"the link removal runs only after the dir rm's status is latched, so it can never mask it")
 
 	// No recorded indirection — a colon-free session dir or a row that
 	// predates the field — composes no link removal.

@@ -171,13 +171,17 @@ func (w *sandboxWorkspace) ensurePanePathDir(timeout time.Duration) error {
 // is read through `ls -ld`, POSIX where `stat` is not.
 const panePathRootOwned = `[ -d "$r" ] && [ ! -L "$r" ] && [ -O "$r" ] && [ "$(ls -ld "$r" 2>/dev/null | cut -c1-10)" = "drwx------" ]`
 
-// panePathRootSettle is the best-effort establishment of $r before the verify:
-// `mkdir -p` is a no-op on anything already present (a file, a foreign dir) and
-// the chmod is gated on a real non-symlink dir — chmod on a symlink would
-// rewrite the TARGET's mode, and chmod on a foreign dir fails harmlessly. The
-// verdict belongs to panePathRootOwned, which runs on whatever this leaves.
-const panePathRootSettle = `[ -L "$r" ] || mkdir -p "$r" 2>/dev/null; ` +
-	`[ -d "$r" ] && [ ! -L "$r" ] && chmod 700 "$r" 2>/dev/null; `
+// panePathRootSettle is the best-effort establishment of $r before the verify,
+// and it is deliberately narrow: an EXISTING name is never chmodded or written
+// through, because a mode change there is a confused deputy — a symlink
+// another uid swapped in after a `[ ! -L ]` check would make `chmod` rewrite
+// the TARGET's mode (#7787 R1). af chmods only a root its own `mkdir` just
+// created: that object is provably af's, a real directory at the instant it
+// exists. Anything already present is judged by panePathRootOwned alone —
+// an af-owned 0700 dir verifies, and everything else is skipped, never
+// repaired in place. `mkdir` without -p suffices: every parent here ($HOME,
+// XDG_RUNTIME_DIR, the recorded root's parent) is an established directory.
+const panePathRootSettle = `[ -e "$r" ] || { mkdir "$r" 2>/dev/null && chmod 700 "$r" 2>/dev/null; }; `
 
 // panePathSharedRoots builds $cands, the newline-separated list of af-owned
 // roots the link may live under, most preferred first, and $nl for the
@@ -186,11 +190,17 @@ const panePathRootSettle = `[ -L "$r" ] || mkdir -p "$r" 2>/dev/null; ` +
 //     spelling of a real directory — the shared per-uid root the teardown
 //     also empties.
 //   - $XDG_RUNTIME_DIR/.af-path, when XDG_RUNTIME_DIR is set to an absolute,
-//     colon-free real directory the session uid owns at mode 0700 (#7787): the
-//     freedesktop per-uid runtime dir. No other local uid can write into it,
-//     so nothing there can be squatted or re-created by a stranger while the
-//     session lives — unlike a recorded name under /tmp, which any local user
-//     can re-create once a tmp cleaner or a reboot removes it.
+//     colon-free real directory the session uid owns at mode 0700 AND linger
+//     is proven on (#7787 R2): the freedesktop per-uid runtime dir, which no
+//     other local uid can write. The linger gate exists because pam_systemd
+//     deletes /run/user/$UID when the uid's last logind session closes, and
+//     every af ssh Run is its own short-lived session — without linger the
+//     link dies with the command that created it, and the pane's first PATH
+//     entry vanishes mid-session. The proofs are the linger marker file and
+//     `loginctl show-user -p Linger`, either sufficing; on a host with
+//     neither, XDG is skipped and the mktemp root — which survives — is used.
+//     AF_LINGER_FILE overrides the marker path for the real-script tests;
+//     it is same-uid evidence only, like every other env the script reads.
 //
 // Only when NO per-uid candidate qualifies does the caller mint a mktemp root
 // under ${TMPDIR:-/tmp}.
@@ -199,7 +209,9 @@ const panePathSharedRoots = `nl='
 	`case "$HOME" in /*) case "$HOME" in *:*) ;; *) [ -d "$HOME" ] && cands=$HOME/` + remotePathLinkDir + `;; esac;; esac; ` +
 	`if [ -n "${XDG_RUNTIME_DIR:-}" ]; then case "$XDG_RUNTIME_DIR" in /*) case "$XDG_RUNTIME_DIR" in *:*) ;; *) ` +
 	`if [ -d "$XDG_RUNTIME_DIR" ] && [ -O "$XDG_RUNTIME_DIR" ] && [ "$(ls -ld "$XDG_RUNTIME_DIR" 2>/dev/null | cut -c1-10)" = "drwx------" ]; then ` +
-	`cands="$cands$nl$XDG_RUNTIME_DIR/` + remotePathLinkDir + `"; fi;; esac;; esac; fi; `
+	`linger=${AF_LINGER_FILE:-/var/lib/systemd/linger/$(id -un 2>/dev/null)}; ` +
+	`if [ -f "$linger" ] || [ "$(loginctl show-user -p Linger 2>/dev/null)" = "Linger=yes" ]; then ` +
+	`cands="$cands$nl$XDG_RUNTIME_DIR/` + remotePathLinkDir + `"; fi; fi;; esac;; esac; fi; `
 
 // panePathTryShared takes the first $cands entry that becomes a verified root
 // holding a free-or-symlink leaf and sets $root to it; unusable candidates are
