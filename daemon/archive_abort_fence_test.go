@@ -247,6 +247,9 @@ func TestArchiveSession_PersistFailureRollbackFencesLostRestore(t *testing.T) {
 // durable — a silent drop would leave the operator believing the session is
 // safely down when the next daemon start re-spawns it.
 func TestArchiveSession_RollbackFencePersistFailureIsReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory mode the persist failure depends on")
+	}
 	zeroRestoreBackoff(t)
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")

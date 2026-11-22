@@ -195,6 +195,8 @@ func TestKillSession_GhostRegistersItsRecordsTargets(t *testing.T) {
 	var resp KillSessionResponse
 	require.NoError(t, server.killSession(context.Background(), &KillSessionRequest{Title: "ghost", RepoID: repoID}, &resp))
 
+	require.Len(t, exempted, 4,
+		"the ghost cleanup must have run for exactly the record's 3 tmux names and its worktree — anything less makes the exemptions below vacuous")
 	for _, name := range []string{"af_ghost", "af_ghost__shell", "af_ghost__gone"} {
 		assert.True(t, exempted["tmux:"+name],
 			"the caller must be excused from the ghost's %q kill — the same record the cleanup kills", name)
