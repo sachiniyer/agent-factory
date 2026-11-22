@@ -53,9 +53,9 @@ func requireArchiveFence(t *testing.T, inst *session.Instance, repoID, title, ca
 	// restore give-up — no restore attempt ever ran on this row. The kind is
 	// additive; an older daemon reads attempts+error and still keeps the row
 	// fenced (the field predates the label, so downgrade stays safe).
-	assert.Equal(t, session.LostRestoreFailureArchiveRefused, failure.Kind)
-	assert.True(t, strings.HasPrefix(failure.Detail(), "archive refused: "),
-		"the API detail must name this an archive refusal, got %q", failure.Detail())
+	assert.Equal(t, session.LostRestoreFailureArchiveDidNotFinish, failure.Kind)
+	assert.True(t, strings.HasPrefix(failure.Detail(), "archive did not finish"),
+		"the API detail must name what actually happened, got %q", failure.Detail())
 	assert.NotContains(t, failure.Detail(), "restore gave up")
 
 	rec := recordFor(t, repoID, title)
@@ -63,9 +63,9 @@ func requireArchiveFence(t *testing.T, inst *session.Instance, repoID, title, ca
 	require.NotNil(t, rec.LostRestoreFailure,
 		"the fence must be durable: a daemon restart would otherwise reload the row unfenced and re-spawn it")
 	assert.Contains(t, rec.LostRestoreFailure.Error, "archive did not finish")
-	assert.Equal(t, session.LostRestoreFailureArchiveRefused, rec.LostRestoreFailure.Kind,
-		"the refusal label must be durable too")
-	assert.True(t, strings.HasPrefix(rec.LostRestoreFailure.Detail(), "archive refused: "))
+	assert.Equal(t, session.LostRestoreFailureArchiveDidNotFinish, rec.LostRestoreFailure.Kind,
+		"the did-not-finish label must be durable too")
+	assert.True(t, strings.HasPrefix(rec.LostRestoreFailure.Detail(), "archive did not finish"))
 }
 
 // The incident path: ArchiveSession's archiveTeardown refused.
@@ -272,7 +272,7 @@ func TestArchiveSession_RollbackFencePersistFailureIsReported(t *testing.T) {
 	// The in-memory fence still holds — the exposure is the NEXT daemon start.
 	failure := inst.LostRestoreFailureSnapshot()
 	require.NotNil(t, failure)
-	assert.Equal(t, session.LostRestoreFailureArchiveRefused, failure.Kind)
+	assert.Equal(t, session.LostRestoreFailureArchiveDidNotFinish, failure.Kind)
 	require.False(t, lostSessionWantsRestore(inst.LifecycleView()))
 	manager.RestoreLostSessions()
 	assert.Equal(t, 0, backend.recoverCalls())
@@ -299,7 +299,7 @@ func TestRefreshStatuses_AliveObservationClearsArchiveRefusedFence(t *testing.T)
 	require.Equal(t, session.Ready, inst.GetLiveness(),
 		"the same runtime observed alive must heal the row out of Lost")
 	require.Nil(t, inst.LostRestoreFailureSnapshot(),
-		"the archive-refused fence is cleared like any terminal restore failure")
+		"the did-not-finish fence is cleared like any terminal restore failure")
 
 	rec := recordFor(t, repoID, "heal-me")
 	require.NotNil(t, rec)

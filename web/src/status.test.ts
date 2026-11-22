@@ -71,8 +71,9 @@ test("idle detail renders only mechanical reason values and observed churn age",
     ),
     "restore gave up after 6 attempts: agent exited at startup",
   );
-  // An archive-refused fence names the refusal, not a restore give-up that
-  // never ran — the same discriminator session.LostRestoreFailure.Detail uses.
+  // A did-not-finish archive fence shows the durable sentence itself — "archive
+  // did not finish", not a restore give-up that never ran — the same projection
+  // session.LostRestoreFailure.Detail uses (#7755 R5).
   assert.equal(
     idleReasonDetail(
       sess({
@@ -81,12 +82,12 @@ test("idle detail renders only mechanical reason values and observed churn age",
         lost_restore_failure: {
           attempts: 1,
           error: "archive did not finish — retry the archive, or restore the session to resume it: pane processes 1234 are still alive after bounded teardown",
-          kind: "archive-refused",
+          kind: "archive-did-not-finish",
         },
       }),
       now,
     ),
-    "archive refused: archive did not finish — retry the archive, or restore the session to resume it: pane processes 1234 are still alive after bounded teardown",
+    "archive did not finish — retry the archive, or restore the session to resume it: pane processes 1234 are still alive after bounded teardown",
   );
   assert.equal(
     idleReasonDetail(

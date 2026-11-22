@@ -6559,10 +6559,14 @@ function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
   }
   let detail = label;
   if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
-    const { attempts, error } = s.lost_restore_failure;
+    const { attempts, error, kind } = s.lost_restore_failure;
     if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "attempt" : "attempts";
-      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+      if (kind === "archive-did-not-finish") {
+        detail = error;
+      } else {
+        const noun = attempts === 1 ? "attempt" : "attempts";
+        detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+      }
     }
   }
   if (s.idle_reason === "restore-waiting-on-environment" && s.lost_restore_wait) {
@@ -7064,7 +7068,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "b847174fe0a0";
+var CLIENT_VERSION = "3c23a2143d8e";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",

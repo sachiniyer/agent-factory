@@ -39,17 +39,17 @@ func (m *Manager) abortRequestedArchiveToLost(instance *session.Instance, teardo
 // user asked to stop — not on the next loop tick, and not after a daemon
 // restart.
 //
-// The kind marks the durable failure as an archive refusal rather than the
-// restore loop's own give-up so the row and API detail can say what actually
-// happened; the gate itself is unchanged (attempts+error still make
-// LostRestoreGaveUp), which is what keeps an older daemon — one that never
-// heard of the kind — reading the row as fenced.
+// The kind marks the durable failure as an archive that did not finish
+// rather than the restore loop's own give-up, so the row and API detail can
+// say what actually happened; the gate itself is unchanged (attempts+error
+// still make LostRestoreGaveUp), which is what keeps an older daemon — one
+// that never heard of the kind — reading the row as fenced.
 //
 // As with the abort above this is a fence, not a tombstone: observing the
 // same runtime alive clears it, an explicit restore clears it, and retrying
 // the archive is the way out.
 func (m *Manager) fenceRequestedArchiveRestore(instance *session.Instance, cause error) {
-	if instance.SetLostRestoreFailureKind(1, fmt.Errorf("archive did not finish — retry the archive, or restore the session to resume it: %w", cause), session.LostRestoreFailureArchiveRefused) {
+	if instance.SetLostRestoreFailureKind(1, fmt.Errorf("archive did not finish — retry the archive, or restore the session to resume it: %w", cause), session.LostRestoreFailureArchiveDidNotFinish) {
 		m.info().Printf("archive of session %q did not finish; automatic restore is fenced off it until the archive is retried or the session is restored", instance.Title)
 	}
 }

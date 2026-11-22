@@ -8,18 +8,23 @@ import (
 
 const lostRestoreFailureMaxRunes = 512
 
-// LostRestoreFailureArchiveRefused is the LostRestoreFailure.Kind written for
-// a REQUESTED archive that could not finish: its teardown or its rollback
-// left the session Lost, and the row is fenced off the automatic restore
-// loop not because restores ran out of budget but because the user asked for
-// the session to stop (#7754).
+// LostRestoreFailureArchiveDidNotFinish is the LostRestoreFailure.Kind written
+// for a REQUESTED archive that did not finish: its teardown refused, or the
+// committed archive was rolled back after a later step failed, leaving the
+// session Lost and fenced off the automatic restore loop — not because
+// restores ran out of budget but because the user asked for the session to
+// stop (#7754, #7755 R5).
+//
+// The name deliberately avoids "refused": the rollback rows it also labels
+// were never refused, and the row must name what actually happened rather
+// than the arm that reached it.
 //
 // It rides the SAME durable field the restore loop's own give-up uses rather
 // than a new one on purpose: an older daemon that knows nothing of Kind still
 // reads attempts+error, still derives LostRestoreGaveUp, and still fences the
 // row — the downgrade property the field owes. Newer readers use it to say
 // what actually happened.
-const LostRestoreFailureArchiveRefused = "archive-refused"
+const LostRestoreFailureArchiveDidNotFinish = "archive-did-not-finish"
 
 // LostRestoreFailure is the durable terminal outcome of the daemon's automatic
 // Lost-session restore loop. It stays on the session record until an explicit
@@ -29,11 +34,11 @@ type LostRestoreFailure struct {
 	Attempts int    `json:"attempts"`
 	Error    string `json:"error"`
 	// Kind discriminates WHY the row is fenced. "" is the restore loop's own
-	// give-up; "archive-refused" is a requested archive that did not finish.
-	// omitempty keeps rows written before it existed — and rows an older
-	// daemon still writes — byte-identical, and any value still counts as a
-	// terminal fence (valid() ignores it), so a daemon that does not know a
-	// kind still gates the restore loop on the row.
+	// give-up; "archive-did-not-finish" is a requested archive that refused or
+	// rolled back. omitempty keeps rows written before it existed — and rows
+	// an older daemon still writes — byte-identical, and any value still
+	// counts as a terminal fence (valid() ignores it), so a daemon that does
+	// not know a kind still gates the restore loop on the row.
 	Kind string `json:"kind,omitempty"`
 }
 
@@ -94,15 +99,16 @@ func sanitizeLostRestoreError(raw string) string {
 }
 
 // Detail is the row wording shared by the TUI and API-facing callers. The web
-// mirrors this structured projection from attempts+error+kind. An
-// archive-refused row names the refusal, not a restore give-up that never ran
-// (#7754).
+// mirrors this structured projection from attempts+error+kind. A
+// did-not-finish archive row names what actually happened — the durable error
+// already opens "archive did not finish — …" — not a restore give-up that
+// never ran and not a refusal the rollback rows never saw (#7754, #7755 R5).
 func (f LostRestoreFailure) Detail() string {
 	if !f.valid() {
 		return ""
 	}
-	if f.Kind == LostRestoreFailureArchiveRefused {
-		return fmt.Sprintf("archive refused: %s", f.Error)
+	if f.Kind == LostRestoreFailureArchiveDidNotFinish {
+		return f.Error
 	}
 	noun := "attempts"
 	if f.Attempts == 1 {

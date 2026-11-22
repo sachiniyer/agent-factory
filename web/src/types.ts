@@ -81,7 +81,8 @@ export interface AgentModelChange {
 
 /** Durable terminal result of the daemon's automatic Lost-session restore loop.
  * `kind` discriminates WHY the row is fenced: absent is the restore loop's own
- * give-up; "archive-refused" is a requested archive that did not finish (#7754).
+ * give-up; "archive-did-not-finish" is a requested archive that refused or
+ * rolled back (#7754, #7755).
  * Any value still means the row is fenced — an older daemon writes neither kind
  * nor this field and an older client treats the row the same way. */
 export interface LostRestoreFailure {

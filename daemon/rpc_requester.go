@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/teardownreq"
+	"github.com/sachiniyer/agent-factory/session"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -233,17 +234,19 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey a
 
 // teardownTargetsForSession resolves the session a destructive request names
 // to the targets its teardown will own (#7754): the tmux session names it
-// will close and the worktree path its writer reaper will empty. The request
-// is resolved through the SAME resolver the operation itself uses
+// will close and the worktree paths its writer reaper will sweep — for a live
+// instance including the archive destination a rollback reaps (#7754 R1) and
+// the recovery alternate a claim may select (R4), and for a disk-only ghost
+// the names and paths the persisted record carries (R2). The request is
+// resolved through the SAME resolver the operation itself uses
 // (resolveActionSession, id-first), so the registered target is the session
 // the teardown actually reaches — not the request's possibly stale title.
 //
-// A request that resolves no live instance — a ghost disk record, a bad
-// name, a session already gone — carries no targets: the registration is
-// empty, which exempts nothing. That is the safe direction both ways: the
-// teardown the request could not name cannot be mis-attributed to it, and a
-// refused request leaves its caller's pane exactly as killable as before
-// #5182.
+// Only a request that resolves NOTHING — a bad name, a session already gone
+// — carries no targets: the registration is empty, which exempts nothing.
+// That is the safe direction both ways: the teardown the request could not
+// name cannot be mis-attributed to it, and a refused request leaves its
+// caller's pane exactly as killable as before #5182.
 //
 // Resolution and the operation's own resolve can still race the map between
 // here and there: a same-title replacement created in the gap tears the NEW
@@ -252,9 +255,64 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey a
 // That is deliberately the conservative edge: an over-wide target would
 // excuse a caller from a teardown it never asked for.
 func (m *Manager) teardownTargetsForSession(id, title, repoID string) []teardownreq.Target {
-	instance, _, _, _, _, err := m.resolveActionSession(id, title, repoID)
-	if err != nil || instance == nil {
+	instance, resolvedRepoID, resolvedTitle, _, data, err := m.resolveActionSession(id, title, repoID)
+	if err != nil {
 		return nil
 	}
-	return instance.TeardownTargets()
+	switch {
+	case instance != nil:
+		targets := instance.TeardownTargets()
+		// A worktree archive MOVES the tree to a destination under the
+		// archive dir, and a rollback of that move sweeps writers at the
+		// destination — inside the very teardown the requester is blocked on
+		// (#7754 R1): a caller cwd'd in the worktree follows the directory
+		// there and would read as a survivor at an unregistered path. The
+		// destination derives from the RESOLVED identity, the same title the
+		// operation canonicalizes to before computing it. It is inert for a
+		// kill, whose reapers never sweep the archive dir.
+		if dest, derr := archivedWorktreePath(resolvedRepoID, resolvedTitle); derr == nil && dest != "" {
+			targets = append(targets, teardownreq.WorktreeTarget(dest))
+		}
+		return targets
+	case data != nil:
+		// A disk-only record is not a refusal: the ghost kill goes ahead and
+		// runs the real reapers on the names and paths the record carries
+		// (#7754 R2), so the exemption must be scoped to exactly them.
+		return ghostTeardownTargets(data)
+	default:
+		return nil
+	}
+}
+
+// ghostTeardownTargets is the disk-record twin of Instance.TeardownTargets
+// (#7754 R2). A ghost teardown has no live instance to snapshot; the record
+// IS the authority on what the cleanup will reap — ghostTmuxNames is the same
+// enumeration ghostCleanup drives its tmux kills from, and the worktree
+// candidates are the spellings the reconstructed GitWorktree can select.
+func ghostTeardownTargets(data *session.InstanceData) []teardownreq.Target {
+	names := ghostTmuxNames(data)
+	targets := make([]teardownreq.Target, 0, len(names))
+	for _, name := range names {
+		targets = append(targets, teardownreq.TmuxTarget(name))
+	}
+	add := func(path string) {
+		if path != "" {
+			targets = append(targets, teardownreq.WorktreeTarget(path))
+		}
+	}
+	add(data.Worktree.WorktreePath)
+	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+		add(recovery.AlternatePath)
+	}
+	// The cleanup itself restores the record's ORIGINAL worktree spelling
+	// before it reaps (ghostCleanupWorktree decodes the rollback fences), so
+	// the on-wire spelling can differ from the path the reaper runs on. The
+	// decoded candidate is registered too — a duplicate target is harmless.
+	if decoded, err := data.RestoreArchiveRollbackFence().RestoreRelocationRecoveryOriginals(); err == nil {
+		add(decoded.Worktree.WorktreePath)
+		if recovery := decoded.Worktree.RelocationRecovery; recovery != nil {
+			add(recovery.AlternatePath)
+		}
+	}
+	return targets
 }
