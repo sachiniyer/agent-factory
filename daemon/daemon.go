@@ -541,7 +541,13 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		// A throwaway expiry is an intentional clean terminal exit — the
 		// sandbox's lifetime has ended and relaunching it would loop against
 		// its still-expired marker (#7620) — so leave its clean nil return in
-		// place and only reconcile non-expiry shutdown paths.
+		// place and only reconcile non-expiry shutdown paths. Settle the
+		// watchdog BEFORE the check: a fire that lands during the drain would
+		// otherwise still read as not-fired here and set retErr to the fatal
+		// error, and the later teardown step's own settle cannot undo that —
+		// holdHomeIfAbandoned's err != nil branch fires before its cleanExit
+		// guard, so the throwaway's clean exit would be demoted to a restart.
+		settleThrowaway()
 		if retErr == nil && !throwawayFired() {
 			if fatalErr := fatalAcceptShutdownErr(); fatalErr != nil {
 				retErr = fatalErr
