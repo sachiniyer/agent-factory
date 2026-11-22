@@ -670,9 +670,12 @@ func (s *controlServer) killSession(ctx context.Context, req *KillSessionRequest
 	// inside the pane tree being reaped; register the kernel-verified
 	// requester so teardown spares it (#5182) — scoped to THIS teardown's
 	// targets so the same client earns nothing in another session's reap
-	// (#7754). Unregistered on return — the reply is in flight and the
-	// exemption is over.
-	defer s.trackTeardownRequester(ctx, req, s.manager.teardownTargetsForSession(req.ID, req.Title, req.RepoID))()
+	// (#7754). The entry snapshot is only the first registration: the kill
+	// re-derives the set under the session's op-lock, from the claim it
+	// actually takes, through track.register (#7760). Unregistered on return
+	// — the reply is in flight and the exemption is over.
+	track := s.trackTeardownRequester(ctx, req, s.manager.teardownTargetsForSession(req.ID, req.Title, req.RepoID))
+	defer track.release()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -683,7 +686,7 @@ func (s *controlServer) killSession(ctx context.Context, req *KillSessionRequest
 	// follow-up: the write-path analogue of the id-keyed read/stream paths).
 	// The HEAD is read before teardown removes the worktree (#6233).
 	kept := s.manager.keptBranchBeforeKill(*req)
-	killed, err := s.manager.killSessionRequestedBy(*req, rpcRequester(ctx), nil)
+	killed, err := s.manager.killSessionRequestedBy(*req, rpcRequester(ctx), nil, track.register)
 	resp.KeptBranch = kept
 	if !resp.record(err) {
 		return err

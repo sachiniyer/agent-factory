@@ -28,7 +28,7 @@ import (
 // retarget it guards against is invisible if the only observable is that some
 // session went away. Production points it at the real RPC and never reassigns it.
 var killSessionForLifecycle = func(m *Manager, req KillSessionRequest, guard sessionTeardownGuard) error {
-	_, err := m.killSessionRequestedBy(req, "task on_complete teardown", guard)
+	_, err := m.killSessionRequestedBy(req, "task on_complete teardown", guard, nil)
 	return err
 }
 
@@ -36,7 +36,7 @@ var killSessionForLifecycle = func(m *Manager, req KillSessionRequest, guard ses
 // Keeping the whole result behind one seam lets tests prove a committed warning
 // is classified as a successful reap without performing a real archive.
 var archiveSessionForLifecycle = func(m *Manager, req ArchiveSessionRequest, guard sessionTeardownGuard) error {
-	_, _, err := m.archiveSessionGuarded(req, guard)
+	_, _, err := m.archiveSessionGuarded(req, guard, nil)
 	return err
 }
 

@@ -137,12 +137,44 @@ func rpcRequester(ctx context.Context) string {
 	return "control socket"
 }
 
+// requesterTargetRegistrar extends a destructive call's registered requester
+// set with one more exact, kind-tagged target list (#7760). The control
+// server binds one per teardown RPC — the bound method is
+// teardownRequesterTrack.register — and the operation invokes it under the
+// target's op-lock with the set derived from the claim it actually took, so a
+// worktree an earlier serialized operation moved still excuses the requester
+// at the path its cwd followed. Every caller with no blocked RPC requester —
+// internal kills, task-driven teardown, project delete — passes nil; a nil
+// registrar registers nothing.
+type requesterTargetRegistrar func(targets []teardownreq.Target)
+
+// teardownRequesterTrack accumulates the requester registrations ONE
+// destructive call owns: the set the handler registers at entry (the
+// pre-op-lock snapshot) plus each set the operation reports under the
+// target's op-lock (#7760). Registrations are per-target refcounts, so the
+// later sets EXTEND the entry set rather than replacing it — the entry set is
+// still what excuses the requester from a serialized-ahead operation's reaps
+// at the pre-move paths while this call is queued on the lock. release() ends
+// every registration exactly once, parked on whichever reply completion the
+// transport exposes, so no requester is unregistered while its reply is still
+// outstanding (#5186).
+type teardownRequesterTrack struct {
+	requester  *proctree.Process
+	requestKey any
+	pending    *pendingUntracks // HTTP per-request queue; drained after the flush
+	replies    *pendingUntracks // control-socket queue; keyed by request argv
+	mu         sync.Mutex
+	untracks   []func()
+	released   bool
+}
+
 // trackTeardownRequester registers this call's kernel-verified requester
-// process for the handler's duration and returns the unregister (#5182). Only
-// KillSession and ArchiveSession call it — the two teardown verbs behind all
-// measured #5182 cases; handoff, resume-from-limit, project delete,
-// config-agent reap, and tab-close are the same exposure and land in #5193,
-// which this seam is already shaped for (register + pointer arg + ctx route).
+// process for the handler's duration and returns the track the handler defers
+// release() on (#5182). Only KillSession and ArchiveSession call it — the two
+// teardown verbs behind all measured #5182 cases; handoff,
+// resume-from-limit, project delete, config-agent reap, and tab-close are the
+// same exposure and land in #5193, which this seam is already shaped for
+// (register + pointer arg + ctx route).
 //
 // requestKey is the handler's request pointer — the argv value net/rpc decoded
 // for this call; on a control connection the parked unregister is keyed by it
@@ -174,62 +206,95 @@ func rpcRequester(ctx context.Context) string {
 // and A's teardown counts it among A's survivors like any other claimant.
 // Nil targets register nothing — an unresolvable or soon-to-be-refused
 // request earns no exemption, the same as an unverifiable identity.
-func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey any, targets []teardownreq.Target) func() {
+func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey any, targets []teardownreq.Target) *teardownRequesterTrack {
 	requester := s.requester
 	if requester == nil {
 		requester, _ = ctx.Value(httpPeerRequesterContextKey{}).(*proctree.Process)
 	}
-	if requester == nil {
-		return func() {}
-	}
-	untrack := sessiontmux.TrackTeardownRequester(*requester, targets...)
-	// Disconnect release, parked NOW rather than at handler return: a peer
-	// that dies while this handler is still running cannot be waiting for any
-	// reply, so its exemption ends at disconnect — the codec's EOF drain (and
-	// the request-context cancellation for HTTP) runs this unkeyed entry. The
-	// keyed/addFor entry below still governs the success path and whichever
-	// fires first wins; teardownreq's unregister is once-guarded so the other
-	// is a no-op (Codex on #5186).
+	track := &teardownRequesterTrack{requester: requester, requestKey: requestKey}
 	if p, ok := ctx.Value(teardownReplyPendingContextKey{}).(*pendingUntracks); ok && p != nil {
-		p.add(untrack)
+		track.pending = p
 		// net/http cancels the request context when the client's connection
 		// drops; drain then, not only after the handler returns.
 		go func() {
 			<-ctx.Done()
 			p.drain()
 		}()
-	} else if s.pendingReplies != nil {
-		s.pendingReplies.add(untrack)
+	} else {
+		track.replies = s.pendingReplies
 	}
-	// The handler returning is NOT the end of the caller's exposure: the
-	// transport serializes the reply AFTER the service method returns, and a
-	// concurrent teardown's signal tier could land in that gap and kill the
-	// requester while its answer is still queued (Codex on #5186). The commit
-	// therefore parks the unregister on whichever completion the transport
-	// exposes rather than running it here — keyed by this call's request argv
-	// for net/rpc (gobServerCodec.WriteResponse releases only that entry), the
-	// response flush for HTTP — so the registration outlives the reply itself,
-	// not a guess about how long the write takes. With no such hook (a unit
-	// test driving a handler directly), the unregister runs at once: the
-	// pre-#5182 boundary.
+	track.register(targets)
+	return track
+}
+
+// register adds one exact target set to this call's registration, and it is
+// the requesterTargetRegistrar the control server hands the operation
+// (#7760): the handler invokes it once at entry with the pre-lock snapshot,
+// and the operation invokes it again under the target's op-lock with the set
+// derived from the claim it actually took. Each registration's unregister is
+// parked on the transport's disconnect queue NOW rather than at handler
+// return — a peer that dies while this handler is still running cannot be
+// waiting for any reply, so its exemption ends at disconnect (the codec's EOF
+// drain for net/rpc, the request-context cancellation for HTTP). It also
+// joins the set release() parks on the reply completion, and each is
+// once-guarded, so whichever fires first wins and the others are no-ops
+// (Codex on #5186).
+func (t *teardownRequesterTrack) register(targets []teardownreq.Target) {
+	if t.requester == nil || len(targets) == 0 {
+		return
+	}
+	untrack := sessiontmux.TrackTeardownRequester(*t.requester, targets...)
+	t.mu.Lock()
+	t.untracks = append(t.untracks, untrack)
+	t.mu.Unlock()
+	if t.pending != nil {
+		t.pending.add(untrack)
+	} else if t.replies != nil {
+		t.replies.add(untrack)
+	}
+}
+
+// release ends every registration this call accumulated. It does not run the
+// unregisters itself: the handler returning is NOT the end of the caller's
+// exposure — the transport serializes the reply AFTER the service method
+// returns, and a concurrent teardown's signal tier could land in that gap and
+// kill the requester while its answer is still queued (Codex on #5186). The
+// combined unregister therefore parks on whichever completion the transport
+// exposes — keyed by this call's request argv for net/rpc
+// (gobServerCodec.WriteResponse releases only that entry), the response flush
+// for HTTP — so the registration outlives the reply itself, not a guess about
+// how long the write takes. With no such hook (a unit test driving a handler
+// directly), the unregister runs at once: the pre-#5182 boundary.
+func (t *teardownRequesterTrack) release() {
+	t.mu.Lock()
+	if t.released {
+		t.mu.Unlock()
+		return
+	}
+	t.released = true
+	untracks := t.untracks
+	t.mu.Unlock()
 	var once sync.Once
-	return func() {
+	releaseAll := func() {
 		once.Do(func() {
-			if p, ok := ctx.Value(teardownReplyPendingContextKey{}).(*pendingUntracks); ok && p != nil {
-				p.add(untrack)
-				return
+			for _, untrack := range untracks {
+				untrack()
 			}
-			if s.pendingReplies != nil {
-				if requestKey != nil {
-					s.pendingReplies.addFor(requestKey, untrack)
-					return
-				}
-				s.pendingReplies.add(untrack)
-				return
-			}
-			untrack()
 		})
 	}
+	if t.pending != nil {
+		t.pending.add(releaseAll)
+		return
+	}
+	if t.replies != nil {
+		if t.requestKey != nil {
+			t.replies.addFor(t.requestKey, releaseAll)
+			return
+		}
+		t.replies.add(releaseAll)
+		return
+	}
+	releaseAll()
 }
 
 // teardownTargetsForSession resolves the session a destructive request names
@@ -248,6 +313,16 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey a
 // name cannot be mis-attributed to it, and a refused request leaves its
 // caller's pane exactly as killable as before #5182.
 //
+// This is the PRE-LOCK half of #7760's two-phase registration, and it is not
+// sufficient alone: it is taken before the operation acquires the target's
+// op-lock, so a serialized-ahead archive, restore, or rename can move the
+// worktree — and the requester's cwd with it — to a path this snapshot never
+// saw. rederiveRequesterTargetsUnderLock covers that, re-running the same
+// derivation under the lock from the claim the operation actually took. What
+// this entry set still owns is the WAIT window: the serialized-ahead
+// operation's own reapers act on the pre-move paths while this call is
+// queued, and the union of the two registrations is the exemption.
+//
 // Resolution and the operation's own resolve can still race the map between
 // here and there: a same-title replacement created in the gap tears the NEW
 // instance down under names this set does not hold, and the requester then
@@ -259,18 +334,57 @@ func (m *Manager) teardownTargetsForSession(id, title, repoID string) []teardown
 	if err != nil {
 		return nil
 	}
+	return teardownTargetsForResolved(resolvedRepoID, resolvedTitle, instance, data)
+}
+
+// rederiveRequesterTargetsUnderLock is the operation's half of #7760: invoked
+// under the target's op-lock, it re-derives the requester target set from the
+// claim the operation resolved — the live instance, or the ghost record the
+// cleanup will run on — and hands it to the registrar the control server
+// bound for this call. A serialized-ahead archive, restore, or rename on the
+// same op-lock may have moved the worktree the handler-entry snapshot saw;
+// the set registered here names the paths the reapers below actually act on,
+// before the first reap can fire. A nil registrar — every teardown with no
+// blocked RPC requester — registers nothing.
+func rederiveRequesterTargetsUnderLock(register requesterTargetRegistrar, repoID, title string, instance *session.Instance, data *session.InstanceData) {
+	if register == nil {
+		return
+	}
+	register(teardownTargetsForResolved(repoID, title, instance, data))
+}
+
+// teardownTargetsForResolved derives the requester target set from a resolved
+// claim — the live instance, or the ghost record when there is no instance —
+// under the repoID/title the resolver returned. Both registrations run this
+// one derivation: the handler's entry snapshot (teardownTargetsForSession)
+// and the operation's under-lock re-derivation
+// (rederiveRequesterTargetsUnderLock, #7760), so the second registration
+// names exactly the paths a serialized-ahead move left the first unable to
+// see.
+func teardownTargetsForResolved(repoID, title string, instance *session.Instance, data *session.InstanceData) []teardownreq.Target {
 	switch {
 	case instance != nil:
 		targets := instance.TeardownTargets()
-		// A worktree archive MOVES the tree to a destination under the
-		// archive dir, and a rollback of that move sweeps writers at the
-		// destination — inside the very teardown the requester is blocked on
-		// (#7754 R1): a caller cwd'd in the worktree follows the directory
-		// there and would read as a survivor at an unregistered path. The
-		// destination derives from the RESOLVED identity, the same title the
-		// operation canonicalizes to before computing it. It is inert for a
-		// kill, whose reapers never sweep the archive dir.
-		if dest, derr := archivedWorktreePath(resolvedRepoID, resolvedTitle); derr == nil && dest != "" {
+		// The archive destination (<AF_HOME>/archived/<repoID>/<safeTitle>)
+		// is a target for EVERY reap that can run at the directory the
+		// caller's cwd followed into the archive dir — all of these, or a
+		// later "tightening" re-opens #5182 for them (#7760):
+		//
+		//   - an archive move's ROLLBACK sweeps writers at the destination
+		//     while undoing the move back to the source — this operation's
+		//     own rollback (#7754 R1), and a serialized-ahead archive's
+		//     rollback while a kill is queued behind it on the op-lock;
+		//   - a KILL's writer reaper once the worktree already sits at the
+		//     destination: the kill of an already-archived session, and a
+		//     self-kill serialized behind a committed archive — the caller's
+		//     cwd followed the archive's move to the destination, so the
+		//     queued kill's reaper meets it there.
+		//
+		// The destination derives from the RESOLVED identity, the same
+		// title the operation canonicalizes to before computing it. When the
+		// worktree already sits there it duplicates a target
+		// TeardownTargets carries — the registry absorbs the overlap.
+		if dest, derr := archivedWorktreePath(repoID, title); derr == nil && dest != "" {
 			targets = append(targets, teardownreq.WorktreeTarget(dest))
 		}
 		return targets

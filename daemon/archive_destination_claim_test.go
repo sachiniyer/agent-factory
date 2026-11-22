@@ -74,7 +74,7 @@ func TestArchiveDestinationConcurrentLegacyClaims(t *testing.T) {
 	// Exercise the archive body independently of the public wrapper's task lock.
 	// This fixture has no task writers; the empty task snapshot is immutable.
 	archive := func(inst *session.Instance) error {
-		_, _, err := m.archiveSession(ArchiveSessionRequest{ID: inst.ID, RepoID: repoID}, map[string][]task.Task{}, nil)
+		_, _, err := m.archiveSession(ArchiveSessionRequest{ID: inst.ID, RepoID: repoID}, map[string][]task.Task{}, nil, nil)
 		return err
 	}
 	first := make(chan error, 1)

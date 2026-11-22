@@ -23,7 +23,7 @@ var errSessionNotFound = errors.New("not found")
 // request's own (possibly stale) id under a cross-repo title collision (#1592
 // Phase 5 follow-up).
 func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, error) {
-	return m.killSessionRequestedBy(req, "internal daemon caller", nil)
+	return m.killSessionRequestedBy(req, "internal daemon caller", nil, nil)
 }
 
 // sessionTeardownGuard is an extra precondition a caller may attach to a
@@ -55,7 +55,7 @@ func (m *Manager) runSessionTeardownGuard(guard sessionTeardownGuard, key string
 	return guard(current)
 }
 
-func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester string, guard sessionTeardownGuard) (session.InstanceData, error) {
+func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester string, guard sessionTeardownGuard, register requesterTargetRegistrar) (session.InstanceData, error) {
 	instance, repoID, title, resolvedID, data, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return session.InstanceData{}, err
@@ -126,6 +126,9 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		return session.InstanceData{}, errKillBusy(req.Title, opLockTimeout)
 	}
 	defer opLock.Unlock()
+
+	// Re-derive the requester's set under this lock, from the claim taken (#7760).
+	rederiveRequesterTargetsUnderLock(register, repoID, req.Title, instance, data)
 
 	// From here the kill has exclusive admission. The tombstone below is its
 	// commit point; until that write succeeds, every guard leaves the session
