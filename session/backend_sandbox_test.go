@@ -317,12 +317,14 @@ func TestSandboxReapScriptRemovesThePanePathIndirection(t *testing.T) {
 	}
 	script, _ := p.reapScript("a1b2c3d4")
 
-	assert.Contains(t, script, "rm -f -- "+shellQuote("/tmp/af-path.aBcDeF/sess-0123456789abcdef"),
-		"the indirection link provision staged is removed with the session")
+	assert.Contains(t, script, `if [ -L "$l" ] && [ "$(readlink "$l")" = `+shellQuote("/srv/af:sessions/work.abc123")+" ]; then rm -f -- \"$l\"",
+		"the link is removed only after proving it is af's: a symlink still pointing at THIS session dir (#7787)")
+	assert.Contains(t, script, "l="+shellQuote("/tmp/af-path.aBcDeF/sess-0123456789abcdef"),
+		"the persisted panePathDir — or the orphan's own marker — names the link")
 	assert.Contains(t, script, "rmdir -- "+shellQuote("/tmp/af-path.aBcDeF"),
-		"and the link's parent — $HOME/.af-path or the mktemp root — is dropped when it empties")
-	assert.NotContains(t, script, "rm -f -- "+shellQuote("/tmp/af-path.aBcDeF/sess-0123456789abcdef")+" ||",
-		"a failed link removal must never mask the session dir's own rm status")
+		"and the link's parent — a .af-path dir or the mktemp root — is dropped when it empties")
+	assert.Contains(t, script, `rc=$?; l=`+shellQuote("/tmp/af-path.aBcDeF/sess-0123456789abcdef"),
+		"the link removal runs only after the dir rm's status is latched, so it can never mask it")
 
 	// No recorded indirection — a colon-free session dir or a row that
 	// predates the field — composes no link removal.

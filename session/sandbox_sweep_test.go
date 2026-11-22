@@ -60,8 +60,8 @@ func newSweepFixture(t *testing.T) *sweepFixture {
 	prov := &sandboxProvisioner{runCommandFn: localSweepShell}
 	f.host = &sweepHostState{
 		label: "test-host", shell: prov, roots: map[string]bool{root: true}, dirs: map[string]bool{}, refs: map[string]bool{},
-		reaper: func(dir, pid, ref string) *sandboxProvisioner {
-			return &sandboxProvisioner{runCommandFn: localSweepShell, sessionDir: dir, remotePID: pid, tokenRef: ref}
+		reaper: func(dir, pid, ref, link string) *sandboxProvisioner {
+			return &sandboxProvisioner{runCommandFn: localSweepShell, sessionDir: dir, remotePID: pid, tokenRef: ref, panePathDir: link}
 		},
 	}
 	return f
@@ -370,6 +370,53 @@ func TestSweepReapsACleanWorkspaceWithACleanLinkedWorktree(t *testing.T) {
 	_, err := os.Stat(dir)
 	assert.True(t, os.IsNotExist(err))
 	assert.False(t, procAlive(proc))
+}
+
+// #7787: a session whose row is gone still reaps the indirection it staged
+// OUTSIDE its dir — the dir's own pane-path marker names the link, proven to
+// belong to this dir by its digest leaf before anything removes it. A marker
+// naming a path af cannot prove is this dir's is left exactly where it stands.
+func TestSweepReapsThePanePathIndirectionTheMarkerRecords(t *testing.T) {
+	f := newSweepFixture(t)
+	const ref = "v1.paneorphan01"
+	dir := f.session("orphan.PANE001", ref, true, time.Hour)
+	f.workspace(dir, false)
+
+	// The link and mktemp root provision staged, as the marker records them.
+	root := filepath.Join(t.TempDir(), "af-path.Rec00")
+	require.NoError(t, os.MkdirAll(root, 0o700))
+	link := filepath.Join(root, panePathLinkName(dir))
+	require.NoError(t, os.Symlink(dir, link))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, panePathMarkerName), []byte(link+"\n"), 0o600))
+
+	// A lookalike dir whose marker names a link that is NOT its own: never
+	// af's to remove, whatever the file claims.
+	decoy := f.session("orphan.PANE002", "v1.paneorphan02", true, time.Hour)
+	f.workspace(decoy, false)
+	stranger := filepath.Join(t.TempDir(), "af-path.Other")
+	require.NoError(t, os.MkdirAll(stranger, 0o700))
+	strangerLink := filepath.Join(stranger, "sess-ffffffffffffffff")
+	require.NoError(t, os.Symlink("/tmp", strangerLink))
+	require.NoError(t, os.WriteFile(filepath.Join(decoy, panePathMarkerName), []byte(strangerLink+"\n"), 0o600))
+
+	findings := f.sweep()
+
+	fd, ok := findingFor(findings, dir)
+	require.True(t, ok, "%+v", findings)
+	assert.Equal(t, SweepReaped, fd.Action, fd.Reason)
+	_, err := os.Lstat(link)
+	assert.True(t, os.IsNotExist(err), "the marker-named link is reaped with its dir")
+	_, err = os.Stat(root)
+	assert.True(t, os.IsNotExist(err), "the link's emptied af-owned root is dropped with it")
+
+	fd, ok = findingFor(findings, decoy)
+	require.True(t, ok)
+	assert.Equal(t, SweepReaped, fd.Action)
+	got, err := os.Readlink(strangerLink)
+	assert.NoError(t, err, "a marker-named path that fails the dir's proof is never touched")
+	assert.Equal(t, "/tmp", got)
+	_, err = os.Stat(stranger)
+	assert.NoError(t, err, "and its parent stays too")
 }
 
 // SweepRowsOf must see what a LIVE instance owns: ToInstanceData stages the

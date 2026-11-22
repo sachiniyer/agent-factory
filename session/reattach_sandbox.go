@@ -173,6 +173,17 @@ func (i *Instance) ReattachSandbox() error {
 			log.WarningLog.Printf("sandbox runtime: session %q adopted its restarted agent-server but could not record that: %v", i.Title, perr)
 		}
 	}
+	// A reminted indirection cannot migrate a pane that outlived the crash: its
+	// environment still names the abandoned root as its first PATH entry, so
+	// in-pane af stays broken — or resolves through a directory another uid
+	// controls — until the agent is relaunched. The restarted server and any
+	// pane it spawns pin the fresh root, but the row must not report the
+	// restart clean when a surviving pane keeps the abandoned spelling (#7787).
+	var panePathNote string
+	if p.panePathRemintFrom != "" {
+		panePathNote = fmt.Sprintf("the recorded pane PATH root %s could not be re-verified during the agent-server restart, so a fresh root %s was minted; an agent pane that survived the crash still uses the abandoned PATH entry — restart or relaunch this session so in-pane af picks up the new root", p.panePathRemintFrom, p.panePathDir)
+		log.WarningLog.Printf("sandbox runtime: session %q: %s", i.Title, panePathNote)
+	}
 
 	// Re-verify under i.mu that the row is still the one this attempt probed: a
 	// restore or Lost recovery that ran while the probe was in flight has already
@@ -233,6 +244,14 @@ func (i *Instance) ReattachSandbox() error {
 		i.callbackUnavailable = ""
 	case callbackLost != "" && i.callbackUnavailable == "":
 		i.callbackUnavailable = callbackLost
+	}
+	if panePathNote != "" {
+		p.panePathRemintFrom = ""
+		if i.callbackUnavailable == "" {
+			i.callbackUnavailable = panePathNote
+		} else {
+			i.callbackUnavailable += "; " + panePathNote
+		}
 	}
 	i.touchLocked()
 	i.mu.Unlock()

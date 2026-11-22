@@ -79,12 +79,14 @@ type SandboxRuntimeCleanupData struct {
 	AccountSyncHost string `json:"account_sync_host,omitempty"`
 	// PanePathDir is the colon-free pane-PATH indirection this provision staged
 	// for a ':'-bearing session dir (#7770) — the link path itself, which lives
-	// outside the session dir under $HOME/.af-path or an unpredictable mktemp
-	// root nothing can re-derive. The teardown removes the link and its empty
-	// parent; a restart re-ensures it for the persisted launch. Empty when the
-	// session dir needed no indirection and on rows predating the field, which
-	// teardown handles by removing nothing — the same pre-field leak posture as
-	// the reattach fields above.
+	// outside the session dir under a per-uid .af-path root or an
+	// unpredictable mktemp root (#7787) nothing can re-derive. The teardown
+	// removes the link and its empty parent; a restart re-ensures it for the
+	// persisted launch — and persists the fresh path, with the launch script,
+	// when the recorded root fails verification and a new one is minted.
+	// Empty when the session dir needed no indirection and on rows predating
+	// the field, which teardown handles by removing nothing — the same
+	// pre-field leak posture as the reattach fields above.
 	PanePathDir string `json:"pane_path_dir,omitempty"`
 }
 

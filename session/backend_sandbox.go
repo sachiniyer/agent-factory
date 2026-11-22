@@ -177,7 +177,9 @@ type sandboxProvisioner struct {
 	adoptPending bool // a restarted server has not adopted its workspace yet (W1.4)
 	// panePathDir is the colon-free pane-PATH indirection THIS provision
 	// staged for a ':'-bearing session dir (#7770) — the link path itself,
-	// set only when ensurePanePathDir created one. It is the persisted
+	// set only when ensurePanePathDir created one, and RE-set when a restart's
+	// re-ensure mints a fresh root because the recorded one could not be
+	// verified (#7787). It is the persisted
 	// cleanup handle for an object that lives outside the session dir (a
 	// mktemp-built root is unpredictable — nothing re-derives it), and
 	// abandonAdoption keys its removal on it being set: an attempt refused
@@ -185,6 +187,12 @@ type sandboxProvisioner struct {
 	// previous agent-server created is its session's own — deleting it would
 	// break that server's pane PATH while its workspace is left untouched.
 	panePathDir string
+	// panePathRemintFrom is the recorded link a restart abandoned when its
+	// root could not be verified, kept until the adoption that follows the
+	// restart surfaces the warning it owes: a remint fixes the NEW server's
+	// environment only — an agent pane that survived the crash still resolves
+	// in-pane af through the abandoned PATH entry (#7787).
+	panePathRemintFrom string
 	// persistIdentity is the daemon-installed durable write of the row a W1.4
 	// restart fires before it spawns, before it adopts and when adoption ends.
 	// In memory only; the daemon reinstalls it per reattach attempt.
@@ -821,14 +829,18 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	respond := "printf '%s' " + shellQuote(send) + " | tr 'a-z' 'A-Z'"
 	// A ':'-bearing session dir could not lead the pane PATH itself, so the
 	// provision staged a colon-free indirection outside the dir this rm reaps
-	// (#7770) — under $HOME/.af-path or an unpredictable mktemp root. The path
-	// is the persisted panePathDir: no derivation could name the mktemp one.
-	// Its status is deliberately discarded: the session dir's rm remains the
-	// group's answer, and a leftover link can only dangle into a dir that no
-	// longer exists. rmdir drops the link's parent only when af left it empty.
+	// (#7770) — under $HOME/.af-path, $XDG_RUNTIME_DIR/.af-path, or a mktemp
+	// root. The path is the persisted panePathDir — or, for the orphan sweep
+	// (#7787), the link the dir's own marker recorded: no derivation could
+	// name a mktemp-built one. The removal still PROVES the object is af's
+	// before deleting — a symlink whose readlink equals this session dir —
+	// because a repointed or planted leaf is not af's to delete. Its status is
+	// deliberately discarded: the session dir's rm remains the group's answer,
+	// and a leftover link can only dangle into a dir that no longer exists.
+	// rmdir drops the link's parent only when af left it empty.
 	linkRm := ""
 	if p.panePathDir != "" {
-		linkRm = "; rm -f -- " + shellQuote(p.panePathDir) +
+		linkRm = "; l=" + shellQuote(p.panePathDir) + "; if [ -L \"$l\" ] && [ \"$(readlink \"$l\")\" = " + shellQuote(p.sessionDir) + " ]; then rm -f -- \"$l\"; fi" +
 			"; rmdir -- " + shellQuote(path.Dir(p.panePathDir)) + " 2>/dev/null"
 	}
 	// A subshell so `exit "$rc"` reports rm's status as this group's status

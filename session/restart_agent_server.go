@@ -125,14 +125,36 @@ func (p *sandboxProvisioner) restartAgentServer(expectedToken string, persist fu
 	}
 	// The persisted launch script names the pane-PATH dir provision computed.
 	// A ':'-bearing session dir's indirection lives OUTSIDE that dir — under
-	// $HOME/.af-path or an unpredictable mktemp root (#7770) — so the recorded
-	// link is re-created AT that path first. Nothing is ensured when the row
-	// recorded none: a colon-free dir needs no link, and a launch script that
-	// predates the field names no indirection af could repair from here.
+	// $HOME/.af-path, $XDG_RUNTIME_DIR/.af-path, or a mktemp root (#7770,
+	// #7787) — so the recorded link is re-ensured before the replay. Nothing
+	// is ensured when the row recorded none: a colon-free dir needs no link,
+	// and a launch script that predates the field names no indirection af
+	// could repair from here.
 	if p.panePathDir != "" {
 		w := &sandboxWorkspace{shell: p, SessionDir: p.sessionDir, panePathDir: p.panePathDir}
 		if err := w.ensurePanePathDir(sshShortStepTimeout); err != nil {
 			return fmt.Errorf("restarting the af agent-server failed: %w", err)
+		}
+		if w.panePathDir != p.panePathDir {
+			// The recorded root could not be verified — squatted, repointed,
+			// wrongly owned or moded — so the ensure minted a fresh root and
+			// reported a NEW link path (#7787). The persisted launch still
+			// spells the recorded one in both PATH= and AF_SESSION_PATH_DIR=
+			// (shellQuote produces the same single-quoted word in each), so
+			// rebind it: the replayed launch — and the record the next restart
+			// reads — must name the link that exists, or the pane would pin a
+			// PATH entry another user may control.
+			old, fresh := p.panePathDir, w.panePathDir
+			patched := strings.ReplaceAll(p.launchScript, shellQuote(old), shellQuote(fresh))
+			if patched == p.launchScript {
+				return fmt.Errorf("restarting the af agent-server failed: the pane PATH indirection was re-minted at %s after the recorded %s could not be verified, but the persisted launch names neither", fresh, old)
+			}
+			p.launchScript, p.panePathDir = patched, fresh
+			// The relaunch and every process IT spawns pin the minted link, but a
+			// pane that outlived the crash keeps the environment it was spawned
+			// with — the abandoned spelling stays its first PATH entry. The
+			// adoption below must say so rather than report success silently.
+			p.panePathRemintFrom = old
 		}
 	}
 	w := &sandboxWorkspace{shell: p, SessionDir: p.sessionDir}
@@ -265,11 +287,17 @@ func refreshRuntimeIdentity(b Backend, p *sandboxProvisioner) {
 		if be.cleanup != nil {
 			be.cleanup.RemotePID, be.cleanup.RemoteAddr, be.cleanup.AgentServerVersion = p.remotePID, p.remoteAddr, p.agentServerVersion
 			be.cleanup.AdoptPending = p.adoptPending
+			// A restart can re-mint the pane-PATH indirection (#7787), and the
+			// launch script it relaunches from names the new path — both must
+			// follow the live provisioner or the next restart re-ensures a link
+			// the record no longer owns.
+			be.cleanup.PanePathDir, be.cleanup.LaunchScript = p.panePathDir, p.launchScript
 		}
 	case *sshBackend:
 		if be.cleanup != nil {
 			be.cleanup.RemotePID, be.cleanup.RemoteAddr, be.cleanup.AgentServerVersion = p.remotePID, p.remoteAddr, p.agentServerVersion
 			be.cleanup.AdoptPending = p.adoptPending
+			be.cleanup.PanePathDir, be.cleanup.LaunchScript = p.panePathDir, p.launchScript
 		}
 	}
 }
