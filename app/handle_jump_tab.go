@@ -116,13 +116,20 @@ func (m *home) handleStateJumpTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // jumpTargetTabs returns the tabs of whichever instance a jump would act on: the
-// focused pane's, or the sidebar selection when no pane is
-// focused. Mirrors handleTabJump's own target choice deliberately — a resolver that
-// disagrees with the mover is how a jump lands somewhere the user did not name.
+// focused pane's effective binding — what it is ACTUALLY SHOWING — or the sidebar
+// selection when no pane is focused. Mirrors handleTabJump's own target choice
+// deliberately — a resolver that disagrees with the mover is how a jump lands
+// somewhere the user did not name. Reading the raw committed binding here while
+// handleTabJump read the on-screen one made the `g` prompt list the hidden
+// committed session's tabs while the digit keys acted on the visible one (#1884),
+// so this resolves the effective binding the same way the digit jump does: a
+// pane previewing a different session names THAT session's roster.
 func (m *home) jumpTargetTabs() []*session.Tab {
 	inst := m.store.GetSelectedInstance()
-	if p := m.focusedOpenPane(); p != nil && p.Instance() != nil {
-		inst = p.Instance()
+	if p := m.focusedOpenPane(); p != nil {
+		if b := m.effectivePaneBinding(p); b.instance != nil {
+			inst = b.instance
+		}
 	}
 	if inst == nil {
 		return nil
