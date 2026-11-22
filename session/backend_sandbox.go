@@ -174,6 +174,14 @@ type sandboxProvisioner struct {
 	// session dir's env files and flags, never a secret.
 	launchScript string
 	adoptPending bool // a restarted server has not adopted its workspace yet (W1.4)
+	// panePathLink is true only while THIS provision carries a staged pane-PATH
+	// indirection for a ':'-bearing session dir (#7770) — set when
+	// ensurePanePathDir creates it. abandonAdoption keys its link removal on
+	// it: an attempt refused before that step never staged the link, and the
+	// link a still-running previous agent-server created is its session's own —
+	// deleting it would break that server's pane PATH while its workspace is
+	// left untouched.
+	panePathLink bool
 	// persistIdentity is the daemon-installed durable write of the row a W1.4
 	// restart fires before it spawns, before it adopts and when adoption ends.
 	// In memory only; the daemon reinstalls it per reattach attempt.
@@ -293,6 +301,11 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.ensurePanePathDir(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
+	// The link a ':'-bearing session dir just gained is this attempt's to
+	// remove on failure — and ONLY this attempt's (#7770): an adoption refused
+	// before this point never staged it, and a still-running previous
+	// agent-server's own link must not be deleted under it.
+	p.panePathLink = w.panePathDir != "" && w.panePathDir != w.SessionDir
 	if p.spec.Adopt == nil {
 		// The identity is repo-local (#5571 W2.7), so it is written after the clone
 		// that creates the repository.

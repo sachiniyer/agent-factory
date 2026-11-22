@@ -201,10 +201,14 @@ func (p *sandboxProvisioner) abandonAdoption(cause error) error {
 			log.WarningLog.Printf("sandbox runtime: account teardown for %q: %v", p.sessionDir, aerr)
 		}
 	}
-	// And the pane-PATH indirection a ':'-bearing preserved dir needed (#7770):
-	// the workspace itself is preserved, the link under the remote login's
-	// $HOME is af's own and does not survive the abandoned attempt.
-	if strings.Contains(p.sessionDir, ":") {
+	// And the pane-PATH indirection this attempt staged for a ':'-bearing
+	// preserved dir (#7770): the workspace itself is preserved, the link under
+	// the remote login's $HOME is af's own and does not survive the abandoned
+	// attempt. Only a link THIS attempt created is removed — an adoption
+	// refused before ensurePanePathDir (the previous agent-server still
+	// running, the worktree gone) never staged one, and the link that is
+	// already there belongs to that server, not to us.
+	if p.panePathLink {
 		_, _ = p.Run(sshShortStepTimeout, "rm -f -- "+panePathLinkWord(p.sessionDir), nil, true)
 	}
 	if len(cleanup) > 0 {

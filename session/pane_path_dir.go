@@ -139,22 +139,35 @@ func (w *sandboxWorkspace) ensurePanePathDir(timeout time.Duration) error {
 	// case checkPanePathFeasibility already refuses early; this re-check
 	// fail-closes for a root that changed or could not be probed) and must not
 	// be a symlink or a non-directory (a pre-planted path af must not write
-	// inside). mkdir -p + chmod 700 then makes it af-owned and private, and
-	// `ln -sfn` replaces a stale or planted file/link at the leaf name but
-	// fails on a planted directory — no pre-planted path survives as a way to
-	// redirect the pane's `af` lookup.
+	// inside). The leaf gets its own check: `ln -sfn` replaces a stale file or
+	// symlink, but on some implementations (busybox) it instead creates the
+	// link INSIDE a destination that is a real directory — so an existing
+	// non-symlink is refused outright rather than left to `ln`'s variant
+	// behavior. mkdir -p + chmod 700 then makes the root af-owned and private,
+	// and the post-check re-proves a symlink landed at the leaf: no pre-planted
+	// path survives as a way to redirect the pane's `af` lookup.
 	script := `root="$HOME/` + remotePathLinkDir + `"; link="$root/` + panePathLinkName(dir) + `"; ` +
 		`case "$root" in /*) ;; *) echo "af: the remote login's $HOME is not an absolute path, so no colon-free pane PATH indirection can be built under it" >&2; exit 91;; esac; ` +
 		`case "$root" in *:*) echo "af: the remote login's $HOME contains ':', so no colon-free pane PATH indirection can be built under it" >&2; exit 92;; esac; ` +
 		`if [ -L "$root" ]; then echo "af: $root is a symlink; refusing to place the pane PATH indirection inside it" >&2; exit 93; fi; ` +
 		`if [ -e "$root" ] && [ ! -d "$root" ]; then echo "af: $root exists and is not a directory" >&2; exit 94; fi; ` +
-		`mkdir -p "$root" && chmod 700 "$root" && ln -sfn ` + shellQuote(dir) + ` "$link" && printf '%s\n' "$link"`
+		`if [ -e "$link" ] && [ ! -L "$link" ]; then echo "af: $link exists and is not a symlink; refusing to overwrite it" >&2; exit 95; fi; ` +
+		`mkdir -p "$root" && chmod 700 "$root" && ln -sfn ` + shellQuote(dir) + ` "$link" && [ -L "$link" ] && printf 'AF_PANE_LINK=%s\n' "$link"`
+	// stderr rides the combined output on purpose — the remote's own refusal
+	// text belongs in the error — which means wrapper noise (a bannered rc, a
+	// traced argv) arrives mixed into stdout too. The marker line names the
+	// one line af printed, so noise can never be read as the link path.
 	out, err := w.shell.Run(timeout, script, nil, true)
 	if err != nil {
 		return fmt.Errorf("the session directory %q contains ':' and af could not build the colon-free PATH indirection the agent pane needs: %s: %w",
 			dir, strings.TrimSpace(string(out)), err)
 	}
-	resolved := strings.TrimSpace(string(out))
+	resolved := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		if l, ok := strings.CutPrefix(strings.TrimSpace(line), "AF_PANE_LINK="); ok {
+			resolved = l
+		}
+	}
 	if !strings.HasPrefix(resolved, "/") || strings.Contains(resolved, ":") {
 		return fmt.Errorf("af could not build a colon-free PATH indirection for the session directory %q (the remote reported %q)", dir, resolved)
 	}

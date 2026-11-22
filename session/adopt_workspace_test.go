@@ -631,9 +631,10 @@ func TestAbandonAdoptionKeepsTheIdentityOfAServerItCouldNotStop(t *testing.T) {
 
 // A ':'-bearing preserved dir needs the colon-free pane-PATH indirection
 // (#7770) — which lives under the remote login's $HOME, not inside the
-// preserved workspace. An abandoned adoption must remove that link (the
-// workspace itself is never touched), and a colon-free preserved dir must not
-// spend the call at all.
+// preserved workspace. An abandoned adoption removes that link — but only the
+// link THIS attempt staged: an adoption refused before ensurePanePathDir (the
+// previous agent-server still running) must not delete a link that server
+// created and still needs. The workspace itself is never touched either way.
 func TestAbandonAdoptionRemovesThePanePathIndirection(t *testing.T) {
 	var ran []string
 	run := func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
@@ -643,6 +644,7 @@ func TestAbandonAdoptionRemovesThePanePathIndirection(t *testing.T) {
 	dir := "/preserved/a:b"
 	p := &sandboxProvisioner{
 		sessionDir: dir, sshCmd: "ssh recorded-host", tokenRef: "new-ref",
+		panePathLink: true, // this attempt's ensurePanePathDir staged the link
 		spec:         ProvisionSpec{Adopt: &AdoptSpec{SessionDir: dir, Branch: "b"}},
 		runCommandFn: run,
 	}
@@ -656,6 +658,21 @@ func TestAbandonAdoptionRemovesThePanePathIndirection(t *testing.T) {
 			"an abandoned adoption must never remove the preserved workspace")
 	}
 	assert.True(t, found, "the indirection link af staged is removed")
+
+	// The same ':'-bearing dir, but the attempt was refused before it staged
+	// the link — a still-running previous agent-server may own the one that is
+	// already there. Nothing about it is removed.
+	ran = nil
+	unstaged := &sandboxProvisioner{
+		sessionDir: dir, sshCmd: "ssh recorded-host", tokenRef: "new-ref",
+		spec:         ProvisionSpec{Adopt: &AdoptSpec{SessionDir: dir, Branch: "b"}},
+		runCommandFn: run,
+	}
+	require.Error(t, unstaged.provisionFailure(errors.New("previous agent-server is still running")))
+	for _, s := range ran {
+		assert.NotContains(t, s, panePathLinkWord(dir),
+			"an attempt that never staged the link must not delete it — it belongs to the running server")
+	}
 
 	ran = nil
 	plain := &sandboxProvisioner{

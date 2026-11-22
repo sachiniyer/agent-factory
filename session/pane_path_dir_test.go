@@ -62,14 +62,15 @@ func TestEnsurePanePathDirRefusesARelativeSessionDir(t *testing.T) {
 }
 
 // A ':'-bearing session dir gets the indirection: a symlink to it under the
-// remote login's $HOME, created race-safely (af-owned, chmod 700, ln -sfn
-// overwrites only files/links — a planted directory fails), and the launch's
-// PATH entry becomes the link's expanded, colon-free spelling.
+// remote login's $HOME, created race-safely (af-owned, chmod 700, a planted
+// non-symlink at the leaf refused before `ln` — busybox's ln -sfn would write
+// inside a real directory), and the launch's PATH entry becomes the link's
+// expanded, colon-free spelling.
 func TestEnsurePanePathDirBuildsTheIndirection(t *testing.T) {
 	var script string
 	p := &sandboxProvisioner{runCommandFn: func(_ time.Duration, s string, _ io.Reader, _ bool) ([]byte, error) {
 		script = s
-		return []byte("/home/u/.af-path/" + panePathLinkName("/srv/af:sessions/work.abc123") + "\n"), nil
+		return []byte("AF_PANE_LINK=/home/u/.af-path/" + panePathLinkName("/srv/af:sessions/work.abc123") + "\n"), nil
 	}}
 	dir := "/srv/af:sessions/work.abc123"
 	w := &sandboxWorkspace{shell: p, SessionDir: dir}
@@ -82,6 +83,8 @@ func TestEnsurePanePathDirBuildsTheIndirection(t *testing.T) {
 	assert.Contains(t, script, "chmod 700", "the indirection root is private to the session user")
 	assert.Contains(t, script, `ln -sfn `+shellQuote(dir), "the link points at the real session dir")
 	assert.Contains(t, script, "-L ", "a symlinked root is refused rather than written inside")
+	assert.Contains(t, script, `[ -e "$link" ] && [ ! -L "$link" ]`,
+		"an existing non-symlink at the leaf is refused before `ln` — implementations differ on ln -sfn into a real directory")
 	assert.NotContains(t, script, "ln -sfn $", "the target is quoted literally, never re-expanded")
 }
 
@@ -101,20 +104,31 @@ func TestEnsurePanePathDirFailsWhenTheRemoteCannotIndirection(t *testing.T) {
 	assert.Empty(t, w.panePathDir)
 }
 
-// A remote that answers garbage must not be trusted: the reported link path
-// is itself verified to be a single PATH entry before it is committed.
+// A remote that answers garbage must not be trusted: only the marker line af
+// printed is read as the link path, and it is itself verified to be a single
+// PATH entry before it is committed. Transport noise — a wrapper's stderr
+// mixed into the combined stream — can never masquerade as the answer, and
+// must never refuse an otherwise working host (#7770 review).
 func TestEnsurePanePathDirVerifiesTheReportedLink(t *testing.T) {
 	for label, out := range map[string]string{
-		"relative":      "home/u/.af-path/sess-x",
-		"colon-bearing": "/home/u:a/.af-path/sess-x",
-		"empty":         "",
+		"relative":              "AF_PANE_LINK=home/u/.af-path/sess-x\n",
+		"colon-bearing":         "AF_PANE_LINK=/home/u:a/.af-path/sess-x\n",
+		"empty marker":          "AF_PANE_LINK=\n",
+		"no marker":             "warning: ssh wrote a banner\n/home/u/.af-path/sess-x\n",
+		"noise around a marker": "noise: traced argv\nAF_PANE_LINK=/home/u/.af-path/sess-x\nmore noise\n",
 	} {
 		t.Run(label, func(t *testing.T) {
 			p := &sandboxProvisioner{runCommandFn: func(_ time.Duration, _ string, _ io.Reader, _ bool) ([]byte, error) {
-				return []byte(out + "\n"), nil
+				return []byte(out), nil
 			}}
 			w := &sandboxWorkspace{shell: p, SessionDir: "/srv/af:sessions/work.abc123"}
-			require.Error(t, w.ensurePanePathDir(sshShortStepTimeout))
+			err := w.ensurePanePathDir(sshShortStepTimeout)
+			if label == "noise around a marker" {
+				require.NoError(t, err, "wrapper noise on the combined stream must not refuse a link that was built")
+				assert.Equal(t, "/home/u/.af-path/sess-x", w.panePathDir)
+				return
+			}
+			require.Error(t, err)
 			assert.Empty(t, w.panePathDir)
 		})
 	}
