@@ -251,7 +251,9 @@ func (i *Instance) reconcileInFlightOffBoxSwap(sw AccountSwapper, p *sandboxProv
 		i.settleInFlightSwapVerdict()
 		return true, i.persistOffBoxSwapRecord()
 	default:
-		i.MarkStartupStateUnknown()
+		// The swap is not a terminal run — its request may still commit —
+		// so the fence keeps the task-run marker's slot (#7793).
+		i.markSwapFenceIndeterminate()
 		if perr := i.persistOffBoxSwapRecord(); perr != nil {
 			log.WarningLog.Printf("account swap of %q: the still-fenced record could not be persisted (the next checkpoint carries it): %v", i.Title, perr)
 		}

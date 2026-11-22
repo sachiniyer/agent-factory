@@ -780,7 +780,9 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 			// record is KEPT — it is what the next daemon's restart reconcile
 			// asks the host about — and the fence persists with it.
 			w.syncedVersion = nil
-			i.MarkStartupStateUnknown()
+			// Not a terminal run: the request may still commit on the
+			// host, so the task-run marker keeps its slot (#7793).
+			i.markSwapFenceIndeterminate()
 			if perr := i.persistOffBoxSwapRecord(); perr != nil {
 				log.WarningLog.Printf("account swap of %q: the still-fenced record could not be persisted (the next checkpoint carries it): %v", i.Title, perr)
 			}

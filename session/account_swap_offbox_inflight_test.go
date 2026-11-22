@@ -496,6 +496,35 @@ func TestInFlightSwapRecordHoldsItsSlotAcrossBothProjections(t *testing.T) {
 		"rawTaskRunHoldsSlot's LoadedActivity arm must keep the ghost pending")
 }
 
+// A task-backed session whose swap cannot be settled keeps its run: the
+// indeterminate fence is NOT a terminal startup failure, so taskRunActive —
+// and the max_concurrent_runs slot it pays for — survives until the record's
+// definite verdict or the operator's kill. MarkStartupStateUnknown's
+// terminal-startup clear would release the slot while the request may still
+// commit on the host (#7793 review).
+func TestIndeterminateSwapFenceKeepsTheActiveTaskRun(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
+	f.srv.statusErr = errors.New("remote agent-server: connection reset")
+	f.inst.taskRunActive = true
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
+	assert.True(t, f.inst.StartupStateUnknown())
+	assert.True(t, f.inst.taskRunActive,
+		"the run is not terminal — the swap may still commit on the host")
+	assert.Equal(t, ActivityPending, f.inst.LifecycleView().Activity())
+
+	// The reconcile path to the same indeterminate verdict keeps it too:
+	// the host is re-asked, still cannot say, and the marker persists.
+	f.inst.remoteClient = &remoteAgentClient{}
+	settled, err := f.inst.ReconcileOffBoxSwapFence()
+	require.Error(t, err)
+	assert.False(t, settled)
+	assert.True(t, f.inst.taskRunActive)
+	assert.NotNil(t, f.inst.InFlightOffBoxSwap())
+}
+
 // The tombstone half on a rolled-back verdict: the host provably kept the old
 // account, so the fence lifts, the stage is discarded through the serialized
 // path, and a late request can only roll back.
