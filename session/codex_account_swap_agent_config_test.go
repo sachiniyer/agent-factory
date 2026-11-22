@@ -57,7 +57,10 @@ func (s *codexSwapServer) DiscardAccountNext(swapID string) error {
 	if swapID != "" {
 		s.rec.cancelled = swapID
 	}
-	return os.RemoveAll(s.next)
+	// The same binding rule production applies (#7788): only the stage bound
+	// to this swap is removed, and a marker that cannot be read is a failure
+	// rather than a silent "not mine".
+	return discardAccountNextBound(s.next, swapID)
 }
 
 // A fresh codex swap stages the operator's config.toml (with the forced file

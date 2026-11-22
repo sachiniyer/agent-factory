@@ -60,8 +60,12 @@ func (hs *headlessServer) SwapAccountStatus(_ struct{}, resp *accountSwapStatusR
 // serialization the swap runs in, and tombstones the swap's id (#7773 R2):
 // a swap request that already ran left its own terminal record; one still
 // queued on this server can never commit. The daemon calls it while
-// reconciling a lost response — never as an unordered remote rm, which could
-// empty a scope under a rotation in flight.
+// reconciling a lost response, and after any outcome it knows left no request
+// in flight — a definite refusal the server answered, or a stage whose
+// request was never sent. Only on a server that lacks this route, and only in
+// those same no-request-in-flight cases, does the daemon fall back to an
+// ordered remote rm (#7788): an unordered one could empty a scope under a
+// rotation in flight.
 func (hs *headlessServer) DiscardAccountNext(req agentSwapAccountRequest, resp *agentSwapResponse) error {
 	sw, ok := hs.as.(session.AccountSwapper)
 	if !ok {
