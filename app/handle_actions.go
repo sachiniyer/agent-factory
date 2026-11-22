@@ -865,6 +865,19 @@ func (m *home) handleGuardResult(err error) tea.Cmd {
 // but visibly previewing beta attached alpha on `o` while Enter committed the
 // preview and entered beta.
 func (m *home) handleAttach() (tea.Model, tea.Cmd) {
+	// Ignore `o` entirely while a full-screen attach is starting or live, the
+	// same fence handleEnter applies one step earlier at the key handler
+	// (#1530): the transition hands stdout/stdin to tmux, so a second `o` that
+	// arrives in the ~20ms beginAttachTransition window must not mutate the
+	// pane before beginAttachTransition's own re-entry guard can reject it —
+	// commitPanePreviewReplace would rebind the pane, the subsequent attach
+	// would be refused, and the user would detach to find the workspace
+	// changed underneath the first attach. enterPane states this fence for the
+	// mouse path; handleAttach states it here for the keyboard path. Both
+	// flags clear on detach.
+	if m.attachTransitioning || m.attached.Load() {
+		return m, nil
+	}
 	if p := m.focusedOpenPane(); p != nil {
 		// Resolve a transient preview before attaching, so `o` attaches the
 		// (instance, tab) the pane is VISIBLY showing, not the committed binding
@@ -884,7 +897,18 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 				return m, commitCmd
 			}
 			mod, attachCmd := m.handleEnterPane(committed)
-			return mod, tea.Batch(commitCmd, attachCmd)
+			// Drop commitCmd here: it bundles panesRefresh's capture-pane work,
+			// computed against attached=false (the transition is not armed
+			// yet), so batching it with attachCmd would dispatch a capture
+			// goroutine that runs concurrently with the attach this same `o`
+			// is about to start — contending with the very terminal/tmux work
+			// the attached-state capture gate exists to suppress. The rebind
+			// itself is synchronous (commitPanePreviewReplace rebound the pane
+			// before returning), and the post-detach repaint repopulates the
+			// capture, so the refresh is not needed for the attach to act on
+			// the resolved target. Sequencing via tea.Sequence would not help:
+			// the bundled clear-transient-notice timer would delay the attach.
+			return mod, attachCmd
 		}
 		return m.handleEnterPane(p)
 	}
