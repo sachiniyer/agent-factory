@@ -394,6 +394,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// abandoned can touch the home after its release.
 	teardown := &daemonTeardown{}
 	var restoreRunning atomic.Bool
+	// homeGone is set in the main blocking select (below) when the home-deleted
+	// self-check fires. Declared here so the holdHomeIfAbandoned defer can read
+	// it: a deleted-home shutdown is an intentional clean exit that must not be
+	// upgraded to a fatal-accept restart.
+	var homeGone bool
 	defer func() {
 		for _, what := range teardown.run(stop.began().Add(stopTeardownBy)) {
 			stop.abandon("teardown: " + what)
@@ -416,7 +421,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		if panicked != nil {
 			stack = debug.Stack()
 		}
-		holdHomeIfAbandoned(stop, endThrowaway, retErr, panicked, stack)
+		holdHomeIfAbandoned(stop, endThrowaway, retErr, panicked, stack, homeGone || throwawayFired())
 	}()
 	// Every daemon-spawned VS Code editor. Without this a shutdown would strand
 	// a code-server per session, still holding its loopback port and now
@@ -528,6 +533,33 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 			return
 		}
 		drainPlanes(manager, watchers, closeHTTP, closeControl, &controlClosed, drainDeadline(manager))
+		// drainPlanes joined the accept goroutine via closeControl, so any
+		// fatal accept error it recorded after the warm-up arm's pre-drain
+		// fatalAcceptShutdownErr() lookup is now visible. Reconcile the named
+		// return so the signal/shutdown arms no longer exit 0 under that race
+		// (the main path returns fatalAcceptShutdownErr() after its own drain).
+		// A throwaway expiry is an intentional clean terminal exit — the
+		// sandbox's lifetime has ended and relaunching it would loop against
+		// its still-expired marker (#7620) — so it must keep the clean nil
+		// return the main path's throwawayFired() gate also takes. Settle the
+		// watchdog BEFORE the check: a fire that lands during the drain must
+		// be observed here. When the throwaway fired, clear a fatal accept
+		// error the signal/shutdown arm assigned (compared by value, since
+		// those arms return fatalAcceptShutdownErr() directly) to restore
+		// that clean exit; a genuine non-fatal error (e.g. a restore failure)
+		// is left in place. When it did not fire, only reconcile a still-nil
+		// return, so a fatal error recorded just after the arm's pre-drain
+		// lookup is no longer lost.
+		settleThrowaway()
+		if throwawayFired() {
+			if fatalErr := fatalAcceptShutdownErr(); fatalErr != nil && retErr == fatalErr {
+				retErr = nil
+			}
+		} else if retErr == nil {
+			if fatalErr := fatalAcceptShutdownErr(); fatalErr != nil {
+				retErr = fatalErr
+			}
+		}
 	}()
 
 	// Stand the startup watcher down BEFORE the HTTP listener starts serving:
@@ -601,11 +633,16 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		}
 	case sig := <-sigChan:
 		log.InfoLog.Printf("received signal %s during instance restore; exiting", sig.String())
-		return nil
+		return fatalAcceptShutdownErr()
 	case <-shutdownCh:
 		log.InfoLog.Printf("received shutdown request via control socket during instance restore; exiting")
 		return fatalAcceptShutdownErr()
 	case <-throwawayExpireCh:
+		// A throwaway sandbox's lifetime has ended: this is the clean
+		// terminal exit the main path also takes (throwawayFired() returns
+		// nil after teardown), so exit 0 and let the sandbox rest. Returning
+		// a fatal accept error here would relaunch an expired sandbox under
+		// Restart=on-failure and loop against its still-expired marker (#7620).
 		return nil
 	}
 	// Upgrade candidates deliberately park before the orphan sweep. Preserve the
@@ -623,11 +660,13 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		select {
 		case sig := <-sigChan:
 			log.InfoLog.Printf("received signal %s during upgrade probation; exiting", sig.String())
-			return nil
+			return fatalAcceptShutdownErr()
 		case <-shutdownCh:
 			log.InfoLog.Printf("received shutdown request during upgrade probation; exiting")
 			return fatalAcceptShutdownErr()
 		case <-throwawayExpireCh:
+			// Same clean terminal exit as the restore-select throwaway arm: an
+			// expired sandbox must not be relaunched against its marker (#7620).
 			return nil
 		}
 	}
@@ -771,7 +810,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 
 	// Block until a signal, a Shutdown RPC, or the home-deleted self-check
 	// ends the daemon (channels armed before the restore above).
-	homeGone := false
 	select {
 	case sig := <-sigChan:
 		log.InfoLog.Printf("received signal %s", sig.String())

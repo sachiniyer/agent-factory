@@ -167,7 +167,14 @@ var exitHoldingHome = func(exit holdingHomeExit) {
 // stderr — and exits 2, never 0: os.Exit would otherwise end the panic
 // silently and report success, so systemd's Restart=on-failure would not
 // restart the daemon (#7447).
-func holdHomeIfAbandoned(stop *stopClock, beforeExit func(), err error, panicked any, stack []byte) {
+//
+// cleanExit is true for an intentional clean terminal exit — the AF home was
+// deleted out from under the daemon, or a throwaway sandbox's lifetime ended —
+// that must stay exit 0 even when a fatal accept error is pending: a
+// Restart=on-failure supervisor would otherwise relaunch the daemon, whose
+// startup lock path recreates a deleted home or loops against an expired
+// throwaway marker (#7620).
+func holdHomeIfAbandoned(stop *stopClock, beforeExit func(), err error, panicked any, stack []byte, cleanExit bool) {
 	abandoned := stop.abandonments()
 	if len(abandoned) == 0 {
 		return
@@ -182,6 +189,16 @@ func holdHomeIfAbandoned(stop *stopClock, beforeExit func(), err error, panicked
 	case err != nil:
 		exit.code = 1
 		log.ErrorLog.Printf("daemon exiting: %v", err)
+	default:
+		// Only consult a pending fatal accept error when the run did not
+		// intend a clean exit: a deleted-home or throwaway-expiry shutdown
+		// must not be upgraded to a restart.
+		if !cleanExit {
+			if fatalErr := fatalAcceptShutdownErr(); fatalErr != nil {
+				exit.code = 1
+				log.ErrorLog.Printf("daemon exiting: %v", fatalErr)
+			}
+		}
 	}
 	log.WarningLog.Printf("shutdown: this stop abandoned %s; exiting while the daemon still holds its AF home's lock and latch, "+
 		"so nothing it abandoned can touch the home after their release. daemon.pid stays behind naming this exited process, "+
