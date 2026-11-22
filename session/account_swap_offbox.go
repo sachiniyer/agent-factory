@@ -384,17 +384,7 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 	if _, scoped := scopeDiscoveredSkillRel(acct.Agent); scoped {
 		consent, consentErr = w.swapSkillConsent(timeout)
 	}
-	// The staged scope carries the id of the swap it was staged for (#7773
-	// R1): the agent-server rotates in only a scope whose marker names the
-	// request's own id, so a queued request can never steal a later stage.
-	seed := accountStageSeed(acct.Agent, consent)
-	if swapID != "" {
-		if seed == nil {
-			seed = map[string][]byte{}
-		}
-		seed[accountSwapMarkerRel] = []byte(swapID)
-	}
-	archive, versions, err := buildAccountArchive(acct.Dir, accountCredentialRel[acct.Agent], seed)
+	archive, versions, err := buildAccountArchive(acct.Dir, accountCredentialRel[acct.Agent], accountStageSeed(acct.Agent, consent))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -402,7 +392,16 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 		return nil, nil, fmt.Errorf("account %q has no credential file to sync under %s (has it been logged in?)", acct.Name, acct.Dir)
 	}
 	dir := shellQuote(w.NextAccountDir())
-	script := "umask 077 && rm -rf " + dir + " && mkdir -p " + dir + " && tar -xf - -C " + dir
+	script := "umask 077 && rm -rf " + dir + " && mkdir -p " + dir
+	if swapID != "" {
+		// The staged scope is bound to its swap BEFORE any file crosses: the
+		// agent-server rotates in only a stage whose marker names the
+		// request's own id (#7773 R1), and the binding must land first so a
+		// transfer cut off mid-archive still leaves a marked — removable —
+		// stage rather than an anonymous one holding credentials.
+		script += " && printf %s " + shellQuote(swapID) + " > " + shellQuote(w.NextAccountDir()+"/"+accountSwapMarkerRel)
+	}
+	script += " && tar -xf - -C " + dir
 	if out, err := w.shell.Run(timeout, script, bytes.NewReader(archive), true); err != nil {
 		return nil, nil, fmt.Errorf("staging account %q on the host failed: %s: %w", acct.Name, strings.TrimSpace(string(out)), err)
 	}

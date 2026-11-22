@@ -380,11 +380,19 @@ func TestSwapOffBoxAccountDiscardAndRotationAreSerialized(t *testing.T) {
 		f.srv.loseBefore = errors.New("remote agent-server: connection reset")
 		f.srv.delayedAtStatusCall = 1 // the lost request lands after the first read
 		f.srv.delayedInBackground = true
-		f.srv.rotateGate = make(chan struct{})
-		f.srv.rotateWaiting = make(chan struct{})
-		f.srv.discardWaiting = make(chan struct{})
-		f.srv.beforeDiscard = make(chan struct{})
-		f.srv.discardStarted = make(chan struct{})
+		// Captured before the goroutines start: the fake nils each field as it
+		// fires, so receiving on the field afterwards would hang on a nil
+		// channel — the local reference cannot be cleared under the test.
+		rotateGate := make(chan struct{})
+		rotateWaiting := make(chan struct{})
+		discardWaiting := make(chan struct{})
+		beforeDiscard := make(chan struct{})
+		discardStarted := make(chan struct{})
+		f.srv.rotateGate = rotateGate
+		f.srv.rotateWaiting = rotateWaiting
+		f.srv.discardWaiting = discardWaiting
+		f.srv.beforeDiscard = beforeDiscard
+		f.srv.discardStarted = discardStarted
 
 		done := make(chan error, 1)
 		go func() {
@@ -392,16 +400,16 @@ func TestSwapOffBoxAccountDiscardAndRotationAreSerialized(t *testing.T) {
 			done <- err
 		}()
 
-		<-f.srv.discardWaiting // the reconcile reached for the discard
-		<-f.srv.rotateWaiting  // but the late request won the lock first: mid-rotation
-		close(f.srv.beforeDiscard)
+		<-discardWaiting // the reconcile reached for the discard
+		<-rotateWaiting  // but the late request won the lock first: mid-rotation
+		close(beforeDiscard)
 		select {
-		case <-f.srv.discardStarted:
+		case <-discardStarted:
 			t.Fatal("the discard entered the swap's lock while the rotation held it")
 		case <-time.After(50 * time.Millisecond):
 		}
-		close(f.srv.rotateGate) // the rotation finishes — now the discard may run
-		<-f.srv.discardStarted
+		close(rotateGate) // the rotation finishes — now the discard may run
+		<-discardStarted
 		require.NoError(t, <-done)
 
 		acct, _ := f.inst.AccountSelection()
@@ -421,8 +429,10 @@ func TestSwapOffBoxAccountDiscardAndRotationAreSerialized(t *testing.T) {
 		f := newSwapFixture(t)
 		f.registerThird(t)
 		f.srv.loseBefore = errors.New("remote agent-server: connection reset")
-		f.srv.discardStarted = make(chan struct{})
-		f.srv.discardGate = make(chan struct{})
+		discardStarted := make(chan struct{})
+		discardGate := make(chan struct{})
+		f.srv.discardStarted = discardStarted
+		f.srv.discardGate = discardGate
 
 		done := make(chan error, 1)
 		go func() {
@@ -430,7 +440,7 @@ func TestSwapOffBoxAccountDiscardAndRotationAreSerialized(t *testing.T) {
 			done <- err
 		}()
 
-		<-f.srv.discardStarted // the discard holds the swap's lock, mid-removal
+		<-discardStarted // the discard holds the swap's lock, mid-removal
 		delayed := make(chan struct{})
 		go func() { f.srv.runDelayedSwap(); close(delayed) }()
 		select {
@@ -438,7 +448,7 @@ func TestSwapOffBoxAccountDiscardAndRotationAreSerialized(t *testing.T) {
 			t.Fatal("the queued request ran while the discard held the lock")
 		case <-time.After(50 * time.Millisecond):
 		}
-		close(f.srv.discardGate)
+		close(discardGate)
 		<-delayed // the request lands now — tombstoned, it can only roll back
 		err := <-done
 		require.Error(t, err)
