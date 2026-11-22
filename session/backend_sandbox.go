@@ -187,6 +187,12 @@ type sandboxProvisioner struct {
 	// previous agent-server created is its session's own — deleting it would
 	// break that server's pane PATH while its workspace is left untouched.
 	panePathDir string
+	// panePathRemintFrom is the recorded link a restart abandoned when its
+	// root could not be verified, kept until the adoption that follows the
+	// restart surfaces the warning it owes: a remint fixes the NEW server's
+	// environment only — an agent pane that survived the crash still resolves
+	// in-pane af through the abandoned PATH entry (#7787).
+	panePathRemintFrom string
 	// persistIdentity is the daemon-installed durable write of the row a W1.4
 	// restart fires before it spawns, before it adopts and when adoption ends.
 	// In memory only; the daemon reinstalls it per reattach attempt.

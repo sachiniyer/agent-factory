@@ -150,6 +150,11 @@ func (p *sandboxProvisioner) restartAgentServer(expectedToken string, persist fu
 				return fmt.Errorf("restarting the af agent-server failed: the pane PATH indirection was re-minted at %s after the recorded %s could not be verified, but the persisted launch names neither", fresh, old)
 			}
 			p.launchScript, p.panePathDir = patched, fresh
+			// The relaunch and every process IT spawns pin the minted link, but a
+			// pane that outlived the crash keeps the environment it was spawned
+			// with — the abandoned spelling stays its first PATH entry. The
+			// adoption below must say so rather than report success silently.
+			p.panePathRemintFrom = old
 		}
 	}
 	w := &sandboxWorkspace{shell: p, SessionDir: p.sessionDir}

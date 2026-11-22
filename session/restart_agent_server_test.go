@@ -491,6 +491,29 @@ func TestRestartRebindsTheLaunchWhenTheRecordedRootWasReminted(t *testing.T) {
 	assert.Equal(t, p.launchScript, cleanup.LaunchScript)
 }
 
+// #7787: a remint migrates the NEW server's environment only — a pane that
+// outlived the crash keeps the abandoned PATH entry, so its in-pane af stays
+// broken or resolves through a directory another uid may control. The restart
+// still completes (the surviving pane is never respawned under it, which
+// would destroy the user's work), but the row must not read clean: the
+// actionable warning lands where every surface renders it.
+func TestRestartSurfacesTheRemintASurvivingPaneCannotInherit(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	old, fresh := "/tmp/af-path.Old/sess-x", "/tmp/af-path.Minted42/sess-x"
+	p.sessionDir = "/remote/af:sessions/x"
+	p.panePathDir = old
+	h.ensureLink = fresh
+	p.launchScript = "PATH=" + shellQuote(old) + `:"$PATH" AF_SESSION_PATH_DIR=` + shellQuote(old) + " echo relaunched & echo $!"
+
+	require.NoError(t, inst.ReattachSandbox())
+
+	reason := inst.CallbackUnavailable()
+	assert.Contains(t, reason, old, "the warning names the PATH entry a surviving pane still searches")
+	assert.Contains(t, reason, fresh, "and the root that was minted instead")
+	assert.Contains(t, reason, "survived", "and the case it covers")
+	assert.Contains(t, reason, "relaunch", "and the remedy — respawning the agent is what moves the pane")
+}
+
 // A remint the launch cannot be rebound to is refused rather than replayed: a
 // record that does not name the old path is inconsistent with the panePathDir
 // it carried, so nothing is spawned.

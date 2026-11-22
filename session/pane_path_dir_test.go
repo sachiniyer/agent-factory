@@ -495,7 +495,9 @@ func TestEnsureAtRemintsARootItCannotVerify(t *testing.T) {
 		tmp, link, w := setup(t)
 		xdg := t.TempDir()
 		require.NoError(t, os.Chmod(xdg, 0o700))
-		w.shell = &localSh{home: "/nonexistent:h:ome", tmpdir: tmp, xdg: xdg}
+		linger := filepath.Join(t.TempDir(), "me")
+		require.NoError(t, os.WriteFile(linger, nil, 0o600))
+		w.shell = &localSh{home: "/nonexistent:h:ome", tmpdir: tmp, xdg: xdg, lingerFile: linger}
 		require.NoError(t, os.Symlink(t.TempDir(), filepath.Dir(link))) // recorded root is squatted
 
 		require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout))
