@@ -505,6 +505,7 @@ func TestInFlightSwapRecordHoldsItsSlotAcrossBothProjections(t *testing.T) {
 func TestReconciledCommitEndsTheUnreplayedRunAndRestoresTheSkipList(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
+	f.srv.statusErr = errors.New("remote agent-server: connection reset")
 	f.inst.taskRunActive = true
 
 	_, err := f.inst.SwapOffBoxAccount("alt", false)
@@ -520,6 +521,7 @@ func TestReconciledCommitEndsTheUnreplayedRunAndRestoresTheSkipList(t *testing.T
 	// The daemon's restart reconciles the committed verdict on the bound row:
 	// the run the replacement never saw ends interrupted, not completed.
 	f.inst.remoteClient = &remoteAgentClient{}
+	f.srv.statusErr = nil
 	settled, err := f.inst.ReconcileOffBoxSwapFence()
 	require.NoError(t, err)
 	require.True(t, settled)

@@ -497,6 +497,12 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		if d.OffBoxSwapInFlight.To != "" {
 			d.OffBoxSwapInFlight.To = redactedMarker
 		}
+		// Each skip entry names a declared config file the stage could not
+		// place — the user's own sandbox_agent_config text — so the list
+		// takes the same marker as the account labels.
+		for i := range d.OffBoxSwapInFlight.AgentConfigSkipped {
+			d.OffBoxSwapInFlight.AgentConfigSkipped[i] = redactedMarker
+		}
 	}
 	// Agent beside it stays verbatim — it is the bounded agent enum, classified
 	// as such in verbatimInstanceFields, and it is what makes the redacted
