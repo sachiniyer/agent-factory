@@ -865,27 +865,15 @@ func (m *home) handleGuardResult(err error) tea.Cmd {
 // but visibly previewing beta attached alpha on `o` while Enter committed the
 // preview and entered beta.
 func (m *home) handleAttach() (tea.Model, tea.Cmd) {
-	// Ignore `o` entirely while a full-screen attach is starting or live, the
-	// same fence handleEnter applies one step earlier at the key handler
-	// (#1530): the transition hands stdout/stdin to tmux, so a second `o` that
-	// arrives in the ~20ms beginAttachTransition window must not mutate the
-	// pane before beginAttachTransition's own re-entry guard can reject it —
-	// commitPanePreviewReplace would rebind the pane, the subsequent attach
-	// would be refused, and the user would detach to find the workspace
-	// changed underneath the first attach. enterPane states this fence for the
-	// mouse path; handleAttach states it here for the keyboard path. Both
-	// flags clear on detach.
+	// Re-entry guard mirroring handleEnter/enterPane (#1530): a second `o` in the ~20ms beginAttachTransition window must not rebind the pane before the attach funnel rejects it.
 	if m.attachTransitioning || m.attached.Load() {
 		return m, nil
 	}
 	if p := m.focusedOpenPane(); p != nil {
-		// Resolve a transient preview before attaching, so `o` attaches the
-		// (instance, tab) the pane is VISIBLY showing, not the committed binding
-		// underneath — the #1321 wrong-target class Enter already closes by
-		// committing the preview first. Like handleEnter's preview branch, a
-		// resting preview target restores instead of surfacing the commit
-		// guard's fence, so `o` agrees with Enter and the tree-row path. A
-		// no-op without a live preview, so a pane showing its committed binding
+		// Resolve a transient preview before attaching so `o` attaches the
+		// (instance, tab) the pane is VISIBLY showing, not the committed
+		// binding — the #1321 wrong-target class Enter closes by committing
+		// the preview first. A resting target restores; a no-preview pane
 		// attaches as before.
 		if m.paneIsPreviewing(p) {
 			if cmd, handled := m.restoreIfResting(m.sidebar.GetSelectedInstance()); handled {
@@ -897,17 +885,7 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 				return m, commitCmd
 			}
 			mod, attachCmd := m.handleEnterPane(committed)
-			// Drop commitCmd here: it bundles panesRefresh's capture-pane work,
-			// computed against attached=false (the transition is not armed
-			// yet), so batching it with attachCmd would dispatch a capture
-			// goroutine that runs concurrently with the attach this same `o`
-			// is about to start — contending with the very terminal/tmux work
-			// the attached-state capture gate exists to suppress. The rebind
-			// itself is synchronous (commitPanePreviewReplace rebound the pane
-			// before returning), and the post-detach repaint repopulates the
-			// capture, so the refresh is not needed for the attach to act on
-			// the resolved target. Sequencing via tea.Sequence would not help:
-			// the bundled clear-transient-notice timer would delay the attach.
+			// Omit commitCmd: its panesRefresh capture (attached=false) would run concurrently with the attach; the rebind is synchronous and post-detach repaints.
 			return mod, attachCmd
 		}
 		return m.handleEnterPane(p)
