@@ -34,6 +34,15 @@ type acctSwapServer struct {
 	live   string
 	can    bool
 	canErr error
+	// scoped advertises "account-swap-scoped-stage" on /v1/health (#7793): a
+	// server that speaks the scoped staging protocol. A request's scoped_stage
+	// flag is honored only when the server itself advertises the protocol —
+	// an old server ignores it and always rotates the shared .next. scopedErr
+	// is the health read failing: the daemon must not mistake it for a
+	// missing feature.
+	scoped     bool
+	scopedErr  error
+	lastScoped bool
 	// atSend runs when a swap request arrives — before it is held, lost, or
 	// run — so a test can assert what was durably true before the request
 	// crossed (#7793: the in-flight record is written first).
@@ -91,6 +100,26 @@ type acctSwapServer struct {
 }
 
 func (s *acctSwapServer) CanSwapAccount() (bool, error) { return s.can, s.canErr }
+
+// ScopedStageAccountSwap is the server's /v1/health answer for the scoped
+// staging protocol (#7793): definite answers only — an error is the read
+// failing, never a missing feature.
+func (s *acctSwapServer) ScopedStageAccountSwap() (bool, error) {
+	// A pre-identity server predates the protocol: it answers every
+	// feature the same way — with nothing.
+	return s.scoped && !s.anonymous, s.scopedErr
+}
+
+// stagedDir is where THIS request's stage landed: the scoped path when the
+// negotiated protocol says so, the shared .next spelling otherwise. An old
+// server ignores the request flag, so it applies only on a server that
+// advertises the protocol.
+func (s *acctSwapServer) stagedDir(id string) string {
+	if s.scoped && !s.anonymous && s.lastScoped {
+		return stagedScopeDir(s.live, id)
+	}
+	return s.live + accountNextSuffix
+}
 
 func (s *acctSwapServer) AccountSwapStatus() (string, string, string, error) {
 	s.statusCalls++
@@ -158,13 +187,31 @@ func (s *acctSwapServer) DiscardAccountNext(swapID string) error {
 	}
 	// The same binding rule production applies (#7788): only the stage bound
 	// to THIS swap is removed, an unreadable marker is a failure, and an
-	// anonymous stage is removable — never silently left.
-	return discardAccountNextBound(stagedScopeDir(s.live, swapID), swapID)
+	// anonymous stage is removable — never silently left. And like the real
+	// server's serialized discard (#7793) it probes both spellings: the
+	// request cannot say which staging protocol the pair negotiated, and the
+	// marker is what keeps another swap's stage safe.
+	paths := []string{s.live + accountNextSuffix}
+	if swapID != "" {
+		paths = append(paths, stagedScopeDir(s.live, swapID))
+	}
+	for _, next := range paths {
+		if _, statErr := os.Lstat(next); errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if dErr := discardAccountNextBound(next, swapID); dErr != nil {
+			return dErr
+		}
+	}
+	return nil
 }
 
 // SwapAccountInPlace records the terminal outcome the way the real server does,
-// under the swap's own identity, and may then lose the response.
-func (s *acctSwapServer) SwapAccountInPlace(swapID string) (string, error) {
+// under the swap's own identity, and may then lose the response. scopedStage is
+// the request's staging-protocol flag: a server that advertises the protocol
+// honors it; one that does not ignores it and always rotates .next.
+func (s *acctSwapServer) SwapAccountInPlace(swapID string, scopedStage bool) (string, error) {
+	s.lastScoped = scopedStage
 	s.lastID = swapID
 	if s.atSend != nil {
 		s.atSend(swapID)
@@ -192,8 +239,8 @@ func (s *acctSwapServer) SwapAccountInPlace(swapID string) (string, error) {
 func (s *acctSwapServer) swap(id string) (string, error) {
 	s.calls++
 	s.atCall.live = readOrEmpty(filepath.Join(s.live, credFile))
-	s.atCall.next = readOrEmpty(filepath.Join(stagedScopeDir(s.live, id), credFile))
-	rot, err := newScopeRotation(tmux.ProgramClaude, id)
+	s.atCall.next = readOrEmpty(filepath.Join(s.stagedDir(id), credFile))
+	rot, err := newScopeRotation(tmux.ProgramClaude, id, s.scoped && !s.anonymous && s.lastScoped)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", errStageNotMine, err)
 	}
@@ -278,7 +325,7 @@ func newSwapFixture(t *testing.T) *swapFixture {
 	p.account = w
 	calls = nil
 
-	srv := &acctSwapServer{live: w.AccountDir(), can: true}
+	srv := &acctSwapServer{live: w.AccountDir(), can: true, scoped: true}
 	t.Setenv("CLAUDE_CONFIG_DIR", w.AccountDir())
 	stubAccountSwapID(t)
 	inst := &Instance{
@@ -301,7 +348,11 @@ func newSwapFixture(t *testing.T) *swapFixture {
 // any swap's own path.
 func (f *swapFixture) stagedDir() string { return f.stagedDirFor("test-swap-1") }
 
-func (f *swapFixture) stagedDirFor(id string) string { return f.w.nextAccountDirFor(id) }
+func (f *swapFixture) stagedDirFor(id string) string {
+	// The path the negotiated protocol will stage at — deterministic before
+	// or after the request crosses.
+	return f.w.nextAccountDirFor(id, f.srv.scoped && !f.srv.anonymous)
+}
 
 func (f *swapFixture) hostCred(t *testing.T, scope string) string {
 	t.Helper()
@@ -484,7 +535,7 @@ func rotationHost(t *testing.T) (live string) {
 
 func TestScopeRotationRoundTrip(t *testing.T) {
 	live := rotationHost(t)
-	rot, err := newScopeRotation(tmux.ProgramClaude, "")
+	rot, err := newScopeRotation(tmux.ProgramClaude, "", false)
 	require.NoError(t, err)
 
 	require.NoError(t, rot.rotate())
@@ -507,35 +558,35 @@ func TestScopeRotationRefusesAScopeAfDidNotMake(t *testing.T) {
 		other := filepath.Join(t.TempDir(), "home-dot-claude")
 		require.NoError(t, os.MkdirAll(other+accountNextSuffix, 0o700))
 		t.Setenv("CLAUDE_CONFIG_DIR", other)
-		_, err := newScopeRotation(tmux.ProgramClaude, "")
+		_, err := newScopeRotation(tmux.ProgramClaude, "", false)
 		require.ErrorContains(t, err, "not a session account scope")
 	})
 	t.Run("unset", func(t *testing.T) {
 		t.Setenv("CLAUDE_CONFIG_DIR", "")
-		_, err := newScopeRotation(tmux.ProgramClaude, "")
+		_, err := newScopeRotation(tmux.ProgramClaude, "", false)
 		require.Error(t, err)
 	})
 	t.Run("nothing staged", func(t *testing.T) {
 		live := rotationHost(t)
 		require.NoError(t, os.RemoveAll(live+accountNextSuffix))
-		_, err := newScopeRotation(tmux.ProgramClaude, "")
+		_, err := newScopeRotation(tmux.ProgramClaude, "", false)
 		require.ErrorContains(t, err, "no staged account")
 	})
 	t.Run("staged scope holds no credential", func(t *testing.T) {
 		live := rotationHost(t)
 		require.NoError(t, os.Remove(filepath.Join(live+accountNextSuffix, credFile)))
-		_, err := newScopeRotation(tmux.ProgramClaude, "")
+		_, err := newScopeRotation(tmux.ProgramClaude, "", false)
 		require.ErrorContains(t, err, "no credential file")
 	})
 	t.Run("staged scope is a symlink", func(t *testing.T) {
 		live := rotationHost(t)
 		require.NoError(t, os.RemoveAll(live+accountNextSuffix))
 		require.NoError(t, os.Symlink(t.TempDir(), live+accountNextSuffix))
-		_, err := newScopeRotation(tmux.ProgramClaude, "")
+		_, err := newScopeRotation(tmux.ProgramClaude, "", false)
 		require.Error(t, err)
 	})
 	t.Run("an agent with no scope variable", func(t *testing.T) {
-		_, err := newScopeRotation("aider", "")
+		_, err := newScopeRotation("aider", "", false)
 		require.Error(t, err)
 	})
 }
@@ -667,7 +718,7 @@ func TestAccountSwapStatusWaitsForTheRunningSwap(t *testing.T) {
 // stopped aborts the rotation untouched.
 func TestScopeRotationStopsSiblingsFirst(t *testing.T) {
 	live := rotationHost(t)
-	rot, err := newScopeRotation(tmux.ProgramClaude, "")
+	rot, err := newScopeRotation(tmux.ProgramClaude, "", false)
 	require.NoError(t, err)
 
 	var order []string
@@ -680,7 +731,7 @@ func TestScopeRotationStopsSiblingsFirst(t *testing.T) {
 	assert.Equal(t, "B", readOrEmpty(filepath.Join(live, credFile)))
 
 	live = rotationHost(t)
-	rot, err = newScopeRotation(tmux.ProgramClaude, "")
+	rot, err = newScopeRotation(tmux.ProgramClaude, "", false)
 	require.NoError(t, err)
 	err = rot.rotateAfter(func() error { return errors.New("cannot confirm tab \"shell\" stopped") })()
 	require.ErrorContains(t, err, "cannot confirm")

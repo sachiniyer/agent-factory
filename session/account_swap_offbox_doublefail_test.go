@@ -41,7 +41,7 @@ func scopeRenameFailer(t *testing.T, failSrc []string, failErr error) {
 // white-box case: the very arm of rotate() whose error had to carry the marker.
 func TestScopeRotationDoubleFailureIsIndeterminate(t *testing.T) {
 	live := rotationHost(t)
-	rot, err := newScopeRotation(tmux.ProgramClaude, "")
+	rot, err := newScopeRotation(tmux.ProgramClaude, "", false)
 	require.NoError(t, err)
 
 	// Make both the incoming rename and its fallback restore rename fail, the
@@ -73,7 +73,7 @@ func TestScopeRotationDoubleFailureIsIndeterminate(t *testing.T) {
 // so the host really holds A again and the error carries no marker.
 func TestScopeRotationSingleFailureRollsBack(t *testing.T) {
 	live := rotationHost(t)
-	rot, err := newScopeRotation(tmux.ProgramClaude, "")
+	rot, err := newScopeRotation(tmux.ProgramClaude, "", false)
 	require.NoError(t, err)
 
 	scopeRenameFailer(t, []string{rot.next}, errors.New("simulated EIO"))
@@ -103,7 +103,7 @@ func TestSwapOffBoxAccountDoubleFailureIsIndeterminate(t *testing.T) {
 	f.srv.wrapAnswered = true
 
 	live := f.w.AccountDir()
-	scopeRenameFailer(t, []string{f.w.nextAccountDirFor("test-swap-1"), f.w.PrevAccountDir()}, errors.New("simulated EIO"))
+	scopeRenameFailer(t, []string{f.w.nextAccountDirFor("test-swap-1", true), f.w.PrevAccountDir()}, errors.New("simulated EIO"))
 
 	_, err := f.inst.SwapOffBoxAccount("alt", false)
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
@@ -111,7 +111,7 @@ func TestSwapOffBoxAccountDoubleFailureIsIndeterminate(t *testing.T) {
 		"the session is fenced, not presented as healthy on an account whose scope is missing")
 
 	// B's staged credentials are not destroyed: the daemon must NOT discard .next.
-	assert.DirExists(t, f.w.nextAccountDirFor("test-swap-1"), ".next is left intact so B's staged credentials survive")
+	assert.DirExists(t, f.w.nextAccountDirFor("test-swap-1", true), ".next is left intact so B's staged credentials survive")
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"+accountNextSuffix+".test-swap-1"), "B's credential is still staged in .next")
 
 	// A's refreshed credentials are stranded in .prev and never written back.

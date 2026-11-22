@@ -34,7 +34,6 @@ var verbTargetClass = map[string]string{
 	"af sessions list":             classRouted,
 	"af sessions preview":          classRouted,
 	"af sessions prune":            classRouted,
-	"af sessions reconcile-swap":   classRouted,
 	"af sessions restore":          classRouted,
 	"af sessions retry-limit":      classRouted,
 	"af sessions send-prompt":      classRouted, // --all / --create refuse by name

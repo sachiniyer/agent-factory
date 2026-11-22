@@ -9,20 +9,26 @@ import "github.com/sachiniyer/agent-factory/session"
 // daemon reconcile a lost response against THIS swap instead of an earlier
 // one's stale outcome. A pre-identity daemon sends none; the record then echoes
 // an empty id, which a newer daemon reconciles as indeterminate — never a
-// commit it cannot attribute.
+// commit it cannot attribute. ScopedStage says which staging path the daemon
+// used (#7793): this build stages and rotates account.next.<swap-id> only when
+// the pair negotiated "account-swap-scoped-stage"; a pre-protocol daemon sends
+// nothing and the rotation reads the shared account.next spelling exactly as
+// before.
 type agentSwapAccountRequest struct {
-	SwapID string `json:"swap_id,omitempty"`
+	SwapID      string `json:"swap_id,omitempty"`
+	ScopedStage bool   `json:"scoped_stage,omitempty"`
 }
 
 // SwapAccount rotates the staged account scope in and relaunches the agent. The
 // request names no path: the scope is derived from this server's own
-// environment.
+// environment, and ScopedStage only selects which spelling of that derived
+// staging path the rename consumes.
 func (hs *headlessServer) SwapAccount(req agentSwapAccountRequest, resp *agentSwapResponse) error {
 	sw, ok := hs.as.(session.AccountSwapper)
 	if !ok {
 		return session.ErrAccountSwapUnsupported
 	}
-	program, err := sw.SwapAccountInPlace(req.SwapID)
+	program, err := sw.SwapAccountInPlace(req.SwapID, req.ScopedStage)
 	if err != nil {
 		return err
 	}

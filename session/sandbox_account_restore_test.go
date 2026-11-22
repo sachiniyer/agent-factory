@@ -39,6 +39,9 @@ func restartedFrom(t *testing.T, f *swapFixture, hostName string) *Instance {
 		backend: backend, started: true, Tabs: []*Tab{newRemoteAgentTab()},
 	}
 	inst.agentSrv = f.srv
+	// The in-flight swap record's durable write (#7793): the daemon installs
+	// the real settlement persist; the fixture stands in for it.
+	inst.SetOffBoxSwapPersist(func(*Instance) error { return nil })
 	return inst
 }
 

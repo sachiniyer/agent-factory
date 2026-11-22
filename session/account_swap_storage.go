@@ -62,12 +62,20 @@ func (d InstanceData) projectOffBoxSwapInFlightForPreviousRelease() InstanceData
 // runs FIRST in ForStorage — it captures the real StartupStateUnknown before
 // the account-swap, handoff, and rebuild-teardown projectors overwrite it —
 // so its restore runs LAST, after theirs (#7793).
+//
+// Unlike the sibling restores it does NOT put the projected-away value back:
+// the record itself is this build's fence. While it exists the row's startup
+// state IS unknown — the recorded request may still be queued on the host, so
+// no gate may treat the row as settled — and the projected flag stays up in
+// memory as the ONE predicate every lifecycle/runtime gate already reads. The
+// only way down is the record's own definite verdict, which resolves the flag
+// when it clears the record.
 func (d InstanceData) RestoreOffBoxSwapInFlightRollbackFence() InstanceData {
 	if d.OffBoxSwapInFlight == nil || d.OffBoxSwapInFlight.OriginalStartupStateUnknown == nil {
 		return d
 	}
 	rec := cloneInFlightOffBoxSwap(d.OffBoxSwapInFlight)
-	d.StartupStateUnknown = *rec.OriginalStartupStateUnknown
+	d.StartupStateUnknown = true
 	rec.OriginalStartupStateUnknown = nil
 	d.OffBoxSwapInFlight = rec
 	return d

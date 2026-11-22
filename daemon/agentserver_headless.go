@@ -527,6 +527,11 @@ var agentServerWireFeatures = []string{
 	// staged scope serialized with the swap, tombstoning the swap's id so a
 	// queued request can never commit it (#7773 R2).
 	session.AccountSwapDiscardFeature,
+	// "account-swap-scoped-stage": the swap-account staging protocol under
+	// which the daemon stages at account.next.<swap-id> and the request's
+	// scoped_stage marker says which spelling this server's rename consumes
+	// (#7793). A server without it still rotates the shared account.next.
+	session.AccountSwapScopedStageFeature,
 	// "tab-restore": a restart adoption's Launch carries the roster; survivors
 	// are rebound, never re-run (W1.4, #6162).
 	session.TabRestoreFeature,

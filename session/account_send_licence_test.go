@@ -288,7 +288,7 @@ func TestEverySenderIsLicensedAtItsOwnSend(t *testing.T) {
 		saveDefaultHost(t, reAddressed(oneListedHost), "") // …and the entry moves before the stage
 		*f.shellCalls = nil
 
-		_, _, err = f.w.stageAccountNext(time.Minute, next, "licence-test-swap")
+		_, _, err = f.w.stageAccountNext(time.Minute, next, "licence-test-swap", true)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `account "alt" is not sent`)
 		assert.Empty(t, accountWrites(*f.shellCalls))

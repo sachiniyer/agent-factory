@@ -1361,16 +1361,21 @@ config, so the host's own login is neither read nor replaced.
   the session's task. Every refusal (an unlisted host, an unattributed command, an
   account of another agent, an older sandbox without the route, or a session already
   fenced by an earlier indeterminate operation) happens before anything is stopped or
-  staged. The stage lands at a path unique to the swap (`account.next.<swap-id>`),
-  so an out-of-order stager can never produce the directory a still-queued
-  request's rename will consume — the swap-id marker check at rename time is
-  defence in depth on top of that. Before the request crosses to the host, the
-  session row durably records the minted swap id as in flight; the record itself
-  fences admission and is written to disk so an older daemon sees the same row as
-  startup-unknown and leaves it inert rather than silently unfencing it. A daemon
-  that died while the request was queued or its response was in transit therefore
-  reloads a fenced row that knows WHICH swap to ask about, and reconciles that id
-  before anything binds or is admitted. A failure inside the host puts the old
+  staged. When the agent-server advertises `account-swap-scoped-stage` the stage
+  lands at a path unique to the swap (`account.next.<swap-id>`), so an
+  out-of-order stager can never produce the directory a still-queued request's
+  rename will consume; an agent-server that predates the feature still swaps
+  through the shared `account.next` spelling, and one whose feature set cannot
+  be read is refused rather than staged at a path its rename may not look at —
+  the swap-id marker check at rename time is defence in depth under either.
+  Before the request crosses to the host, the session row durably records the
+  minted swap id as in flight; the record itself fences every lifecycle gate —
+  a further swap, recovery, reprovision — and is written to disk so an older
+  daemon sees the same row as startup-unknown and leaves it inert rather than
+  silently unfencing it. A daemon that died while the request was queued or its
+  response was in transit therefore reloads a fenced row that knows WHICH swap
+  to ask about, and reconciles that id on reattach before anything binds,
+  provisions, launches, or is admitted. A failure inside the host puts the old
   scope back, and the stage — the new account's credentials — is removed through
   the agent-server's serialized discard route where the server offers it, or an
   ordered remote cleanup where a request can provably no longer be in flight. If
@@ -1381,13 +1386,13 @@ config, so the host's own login is neither read nor replaced.
   itself — and the status is re-read once. A committed answer lands the swap with
   an unconfirmed start; a definite refusal or a rolled-back status leaves the old
   account live; anything else fences the session as startup-unknown — relaunch,
-  teardown, and any further swap are refused until `af sessions reconcile-swap
-  <title>` re-asks the host for the recorded swap's verdict or the row is removed
-  with `af sessions kill`. The verb lifts the fence only on a definite verdict
-  and never resends the request — pane liveness alone never clears it — and the
-  fence error names an agent-server too old for `account-swap-discard` so it can
-  be upgraded: upgrading prevents a recurrence but cannot establish the
-  already-lost swap's outcome.
+  reprovision, recovery, teardown, and any further swap are refused until a
+  daemon restart re-runs the same reconcile on the live agent-server, or the row
+  is removed with `af sessions kill`. The fence clears only on a definite
+  verdict — pane liveness alone never clears it — and the fence error names an
+  agent-server too old for `account-swap-discard` so it can be upgraded:
+  upgrading prevents a recurrence but cannot establish the already-lost swap's
+  outcome.
 - **Sessions on one host share its ssh user**, so they can read each other's
   workspaces and synced credentials, exactly as local worktrees share one user
   today. A Unix user per session is a later hardening, not part of this contract.

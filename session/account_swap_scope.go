@@ -20,10 +20,13 @@ import (
 // swapAccountInPlace is swapAgentInPlace to the SAME agent, with the scope
 // rotation between the confirmed stop and the start. The agent-server's own
 // environment names the scope (the launch guard guaranteed it), so nothing a
-// caller sends can redirect the rotation.
-func (i *Instance) swapAccountInPlace(swapID string) (string, error) {
+// caller sends can redirect the rotation. scopedStage is the staging protocol
+// the request declared (#7793): the rename consumes account.next.<swap-id>
+// when true and the shared account.next spelling a pre-"account-swap-scoped-
+// stage" caller stages at when false.
+func (i *Instance) swapAccountInPlace(swapID string, scopedStage bool) (string, error) {
 	agent := i.CurrentAgentName()
-	rot, err := newScopeRotation(agent, swapID)
+	rot, err := newScopeRotation(agent, swapID, scopedStage)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", errStageNotMine, err)
 	}
@@ -161,7 +164,26 @@ func (i *Instance) discardAccountNextInPlace(swapID string) error {
 	if err != nil {
 		return err
 	}
-	return discardAccountNextBound(stagedScopeDir(live, swapID), swapID)
+	// The request names a swap, not a path: a swap staged under the scoped
+	// protocol lands at account.next.<swap-id>, one staged under the shared
+	// spelling at account.next, and the discard cannot see which protocol
+	// the pair negotiated — the serialized discard's own request carries no
+	// staging flag. A stage is removed only where its marker names this swap
+	// (or it is provably anonymous), so probing both spellings cannot remove
+	// another swap's stage; the same id can never legitimately occupy both.
+	paths := []string{live + accountNextSuffix}
+	if swapID != "" {
+		paths = append(paths, stagedScopeDir(live, swapID))
+	}
+	for _, next := range paths {
+		if _, statErr := os.Lstat(next); errors.Is(statErr, fs.ErrNotExist) {
+			continue
+		}
+		if dErr := discardAccountNextBound(next, swapID); dErr != nil {
+			return dErr
+		}
+	}
+	return nil
 }
 
 // discardAccountNextBound removes the staged scope at next under the
@@ -216,19 +238,26 @@ func accountScopeDirs(agent string) (live, next, prev string, err error) {
 // the scope belongs to a different swap and the request refuses rather than
 // rotate another swap's stage in (#7773 R1). A request with no id is
 // pre-identity and rotates whatever is staged — a commit that can never be
-// attributed, which the daemon reconciles as indeterminate.
-func newScopeRotation(agent, wantID string) (*scopeRotation, error) {
+// attributed, which the daemon reconciles as indeterminate. scopedStage is the
+// staging protocol the request declared (#7793): only a pair that negotiated
+// "account-swap-scoped-stage" stages at account.next.<wantID>; everything else
+// lands at the shared account.next spelling its server reads.
+func newScopeRotation(agent, wantID string, scopedStage bool) (*scopeRotation, error) {
 	live, _, prev, err := accountScopeDirs(agent)
 	if err != nil {
 		return nil, err
 	}
-	// The staged scope lives at a path unique to THIS swap (#7793): nothing
-	// but this swap's own staging — never an unordered cleanup racing the
-	// request, a re-provision, or another swap's stage — can create or remove
-	// the path the rename consumes. The rename-time binding check below
-	// remains as defence in depth, not as the mechanism that makes the path
-	// unique.
-	next := stagedScopeDir(live, wantID)
+	// Under the scoped protocol the staged scope lives at a path unique to
+	// THIS swap: nothing but this swap's own staging — never an unordered
+	// cleanup racing the request, a re-provision, or another swap's stage —
+	// can create or remove the path the rename consumes. The shared spelling
+	// below it is the pre-protocol shape an older daemon still writes. The
+	// rename-time binding check remains as defence in depth under either,
+	// not as the mechanism that makes the path unique.
+	next := live + accountNextSuffix
+	if scopedStage {
+		next = stagedScopeDir(live, wantID)
+	}
 	r := &scopeRotation{live: live, next: next, prev: prev, wantID: wantID}
 	st, err := os.Lstat(r.next)
 	if err != nil || !st.IsDir() {

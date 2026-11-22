@@ -346,7 +346,7 @@ func TestSwapOffBoxAccountHeldRequestCannotRotateALaterSwapsStage(t *testing.T) 
 			f.registerThird(t)
 			next, selErr := selectAccountInNamespace(tmux.ProgramClaude, "third")
 			require.NoError(t, selErr)
-			_, _, stageErr := f.w.stageAccountNext(time.Minute, next, "a-different-swap")
+			_, _, stageErr := f.w.stageAccountNext(time.Minute, next, "a-different-swap", true)
 			require.NoError(t, stageErr)
 			if restart {
 				f.srv.rec = accountSwapRecorder{} // a restart forgets the tombstone — never the marker
@@ -483,14 +483,17 @@ func TestScopeRotationBindsTheStageToItsSwap(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			live := rotationHost(t)
-			next := stagedScopeDir(live, tc.wantID)
+			next := live + accountNextSuffix
+			if tc.wantID != "" {
+				next = stagedScopeDir(live, tc.wantID)
+			}
 			require.NoError(t, os.MkdirAll(next, 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("B"), 0o600))
 			if tc.marker != "" {
 				require.NoError(t, os.WriteFile(
 					filepath.Join(next, accountSwapMarkerRel), []byte(tc.marker), 0o600))
 			}
-			_, err := newScopeRotation(tmux.ProgramClaude, tc.wantID)
+			_, err := newScopeRotation(tmux.ProgramClaude, tc.wantID, tc.wantID != "")
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				return
@@ -509,7 +512,7 @@ func TestScopeRotationStripsTheSwapMarker(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("B"), 0o600))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(next, accountSwapMarkerRel), []byte("swap-1"), 0o600))
-	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1")
+	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1", true)
 	require.NoError(t, err)
 	require.NoError(t, rot.rotate())
 	assert.NoFileExists(t, filepath.Join(live, accountSwapMarkerRel))
@@ -527,7 +530,7 @@ func TestScopeRotationRestoreRebindsTheStage(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("B"), 0o600))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(next, accountSwapMarkerRel), []byte("swap-1"), 0o600))
-	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1")
+	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1", true)
 	require.NoError(t, err)
 	require.NoError(t, rot.rotate())
 	require.NoError(t, rot.restore())

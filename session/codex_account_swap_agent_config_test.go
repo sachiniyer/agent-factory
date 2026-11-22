@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,10 +38,11 @@ func (s *codexSwapServer) AccountSwapStatus() (string, string, string, error) {
 	o, p, id := s.rec.status()
 	return o, p, id, nil
 }
-func (s *codexSwapServer) SwapAccountInPlace(swapID string) (string, error) {
+func (s *codexSwapServer) ScopedStageAccountSwap() (bool, error) { return true, nil }
+func (s *codexSwapServer) SwapAccountInPlace(swapID string, scopedStage bool) (string, error) {
 	return s.rec.run(swapID, func() (string, error) {
 		os.Setenv("CODEX_HOME", s.scope) // rotate reads the host's live account scope
-		rot, err := newScopeRotation(tmux.ProgramCodex, swapID)
+		rot, err := newScopeRotation(tmux.ProgramCodex, swapID, scopedStage)
 		if err != nil {
 			return "", err
 		}
@@ -59,8 +61,21 @@ func (s *codexSwapServer) DiscardAccountNext(swapID string) error {
 	}
 	// The same binding rule production applies (#7788): only the stage bound
 	// to this swap is removed, and a marker that cannot be read is a failure
-	// rather than a silent "not mine".
-	return discardAccountNextBound(stagedScopeDir(s.live, swapID), swapID)
+	// rather than a silent "not mine". Both spellings are probed — the
+	// discard cannot see which staging protocol the pair negotiated (#7793).
+	paths := []string{s.live + accountNextSuffix}
+	if swapID != "" {
+		paths = append(paths, stagedScopeDir(s.live, swapID))
+	}
+	for _, next := range paths {
+		if _, statErr := os.Lstat(next); errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if dErr := discardAccountNextBound(next, swapID); dErr != nil {
+			return dErr
+		}
+	}
+	return nil
 }
 
 // A fresh codex swap stages the operator's config.toml (with the forced file

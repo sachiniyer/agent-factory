@@ -36,14 +36,15 @@ import (
 // longer add anything to it.
 type scopeSkillServer struct {
 	AgentServer
-	live      string
-	agent     string
-	scopeEnv  string // the agent's scope variable (CODEX_HOME, GEMINI_CLI_HOME)
-	can       bool
-	failAfter error // returned after a successful rotation, to exercise restore
-	rec       accountSwapRecorder
-	calls     int
-	atCall    map[string]string // scope-relative path -> staged content at swap time
+	live       string
+	agent      string
+	scopeEnv   string // the agent's scope variable (CODEX_HOME, GEMINI_CLI_HOME)
+	can        bool
+	failAfter  error // returned after a successful rotation, to exercise restore
+	lastScoped bool  // the request's scoped_stage flag — this build honors it
+	rec        accountSwapRecorder
+	calls      int
+	atCall     map[string]string // scope-relative path -> staged content at swap time
 }
 
 func (s *scopeSkillServer) CanSwapAccount() (bool, error) { return s.can, nil }
@@ -53,7 +54,9 @@ func (s *scopeSkillServer) AccountSwapStatus() (string, string, string, error) {
 	return o, p, id, nil
 }
 
-func (s *scopeSkillServer) SwapAccountInPlace(swapID string) (string, error) {
+func (s *scopeSkillServer) ScopedStageAccountSwap() (bool, error) { return true, nil }
+func (s *scopeSkillServer) SwapAccountInPlace(swapID string, scopedStage bool) (string, error) {
+	s.lastScoped = scopedStage
 	return s.rec.run(swapID, func() (string, error) { return s.swap(swapID) })
 }
 
@@ -61,23 +64,41 @@ func (s *scopeSkillServer) SwapAccountInPlace(swapID string) (string, error) {
 // the swap's own lock it tombstones the id and removes the staged scope, so a
 // request still queued behind it can never commit. It enforces the stage
 // marker exactly as production does (#7788): only this swap's bound stage is
-// removed, and an unreadable marker fails rather than passing silently.
+// removed, and an unreadable marker fails rather than passing silently. Both
+// spellings are probed — the discard cannot see which staging protocol the
+// pair negotiated (#7793).
 func (s *scopeSkillServer) DiscardAccountNext(swapID string) error {
 	s.rec.mu.Lock()
 	defer s.rec.mu.Unlock()
 	if swapID != "" {
 		s.rec.cancelled = swapID
 	}
-	return discardAccountNextBound(stagedScopeDir(s.live, swapID), swapID)
+	paths := []string{s.live + accountNextSuffix}
+	if swapID != "" {
+		paths = append(paths, stagedScopeDir(s.live, swapID))
+	}
+	for _, next := range paths {
+		if _, statErr := os.Lstat(next); errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if dErr := discardAccountNextBound(next, swapID); dErr != nil {
+			return dErr
+		}
+	}
+	return nil
 }
 
 func (s *scopeSkillServer) swap(id string) (string, error) {
 	s.calls++
 	os.Setenv(s.scopeEnv, s.live) // the server env names the live scope; the rotation reads it
-	for rel := range s.atCall {
-		s.atCall[rel] = readOrEmpty(filepath.Join(stagedScopeDir(s.live, id), filepath.FromSlash(rel)))
+	staged := s.live + accountNextSuffix
+	if s.lastScoped {
+		staged = stagedScopeDir(s.live, id)
 	}
-	rot, err := newScopeRotation(s.agent, id)
+	for rel := range s.atCall {
+		s.atCall[rel] = readOrEmpty(filepath.Join(staged, filepath.FromSlash(rel)))
+	}
+	rot, err := newScopeRotation(s.agent, id, s.lastScoped)
 	if err != nil {
 		return "", err
 	}
@@ -220,7 +241,7 @@ func TestSwapOffBoxAccountStagesTheAfSkill(t *testing.T) {
 			assert.Equal(t, afSkillDoc, string(got), "af's own managed skill, not a copy of whatever the outgoing scope held")
 			assert.NoDirExists(t, f.w.PrevAccountDir(),
 				"the outgoing scope — and the write the unscoped plan build made into it — is cleaned up, not rescued")
-			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1"))
+			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1", true))
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, "alt", acct)
 		})
@@ -267,7 +288,7 @@ func TestSwapOffBoxAccountStageFailureKeepsTheOutgoingSkill(t *testing.T) {
 			got, readErr := os.ReadFile(f.liveSkill())
 			require.NoError(t, readErr, "the live scope's guidance survives a swap that never reached the rotation")
 			assert.Equal(t, afSkillDoc, string(got))
-			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1"))
+			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1", true))
 			assert.NoDirExists(t, f.w.PrevAccountDir(), "no rotation happened")
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, "work", acct)
@@ -291,7 +312,7 @@ func TestSwapOffBoxAccountRolledBackSwapKeepsTheOutgoingSkill(t *testing.T) {
 			got, readErr := os.ReadFile(f.liveSkill())
 			require.NoError(t, readErr, "the rollback returns the outgoing scope — and its guidance — to live")
 			assert.Equal(t, afSkillDoc, string(got))
-			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1"))
+			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1", true))
 			assert.NoDirExists(t, f.w.PrevAccountDir())
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, "work", acct)

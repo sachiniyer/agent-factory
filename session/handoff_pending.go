@@ -244,6 +244,15 @@ func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 // here is the other half of the same fact. Caller holds i.mu. The task-run
 // marker is deliberately untouched: runs only ever go true→false.
 func (i *Instance) resolveStartupStateLocked() {
+	// An in-flight off-box swap record outranks every probe this path accepts
+	// (#7793): while the recorded request may still be queued on the host, no
+	// pane liveness or attestation can say which account the sandbox runs, so
+	// the record IS the startup-unknown reason until its own definite verdict
+	// clears it — settleInFlightSwapVerdict drops the record first and then
+	// reaches this line.
+	if i.offBoxSwapInFlight != nil {
+		return
+	}
 	if i.startupStateUnknown {
 		i.startupStateUnknown = false
 		i.touchLocked()

@@ -26,10 +26,8 @@ import (
 //     read, then the serialized discard plus a re-read when the first read
 //     cannot attribute the answer);
 //   - it clears only on a definite verdict, so an indeterminate answer keeps
-//     the fence rather than unfencing on a guess;
-//   - `af sessions reconcile-swap` re-runs that same reconcile on demand —
-//     the operator's verdict-based unfence, which re-asks the host and never
-//     re-sends the request.
+//     the fence rather than unfencing on a guess; `af sessions kill` is the
+//     operator's destructive exit from a fence that never resolves.
 
 // InFlightOffBoxSwapData is the durable record of an off-box account swap
 // whose verdict the daemon never reached (#7793). Its presence on the row is
@@ -45,12 +43,19 @@ type InFlightOffBoxSwapData struct {
 	// Automatic marks a scheduler choice (a limit failover) rather than an
 	// operator's pin — recorded the way a live swap's commit records it.
 	Automatic bool `json:"automatic,omitempty"`
+	// ScopedStage is the staging protocol this swap negotiated with its
+	// agent-server (#7793): the staged scope — and only it — landed at
+	// account.next.<swap-id> when true, at the shared account.next spelling
+	// a pre-"account-swap-scoped-stage" server rotates when false. The
+	// reconcile must look where the stage actually is.
+	ScopedStage bool `json:"scoped_stage,omitempty"`
 	// OriginalStartupStateUnknown is the storage-only rollback fence: a
-	// current reader restores the row's real value and drops the marker,
-	// while a previous release ignores it and keeps the projected
+	// previous release ignores it and keeps the projected
 	// StartupStateUnknown=true — loading the row inert and fenced rather
 	// than silently admitting a second swap beside a request that may still
-	// be queued on the agent-server.
+	// be queued on the agent-server. A current reader drops the marker but
+	// keeps the flag up while the record exists: the record itself is the
+	// fence, and the flag is the one predicate every gate already reads.
 	OriginalStartupStateUnknown *bool `json:"original_startup_state_unknown,omitempty"`
 }
 
@@ -65,25 +70,28 @@ func cloneInFlightOffBoxSwap(d *InFlightOffBoxSwapData) *InFlightOffBoxSwapData 
 // ErrOffBoxSwapVerdictIndeterminate is the reconcile's answer when the host
 // still cannot say how the recorded swap ended (#7793): the in-flight record
 // is kept, the row stays fenced, and nothing is admitted against it. A later
-// retry of the same verb — or `af sessions kill` — is the way out; pane
-// liveness alone never clears it.
+// daemon restart re-runs the same reconcile on load — `af sessions kill` is
+// the destructive exit; pane liveness alone never clears it.
 var ErrOffBoxSwapVerdictIndeterminate = errors.New("the swap's verdict on the host is still indeterminate")
 
-// stagedScopeDir is the path a swap's staged scope is written at (#7793 P3):
-// unique to the swap it was staged for, so nothing but that swap's own
-// staging — never an unordered cleanup, a re-provision, or another swap —
-// can create or remove the path this request's rename consumes. The bare
-// .next spelling is the pre-identity shape: a request carrying no id still
-// rotates whatever is staged there.
+// stagedScopeDir is the path a swap's staged scope is written at under the
+// "account-swap-scoped-stage" protocol (#7793 P3): unique to the swap it was
+// staged for, so nothing but that swap's own staging — never an unordered
+// cleanup, a re-provision, or another swap — can create or remove the path
+// this request's rename consumes. An agent-server that predates the protocol
+// still reads the shared account.next spelling, which the unscoped arm keeps.
 func stagedScopeDir(live, swapID string) string {
-	if swapID == "" {
-		return live + accountNextSuffix
-	}
 	return live + accountNextSuffix + "." + swapID
 }
 
-// nextAccountDirFor is this swap's staged-scope path — see stagedScopeDir.
-func (w *sandboxWorkspace) nextAccountDirFor(swapID string) string {
+// nextAccountDirFor is where this swap's staged scope lives on the host —
+// the swap-unique path when the scoped staging protocol was negotiated, the
+// shared .next spelling a pre-"account-swap-scoped-stage" agent-server
+// rotates when it was not.
+func (w *sandboxWorkspace) nextAccountDirFor(swapID string, scopedStage bool) string {
+	if !scopedStage {
+		return w.AccountDir() + accountNextSuffix
+	}
 	return stagedScopeDir(w.AccountDir(), swapID)
 }
 
@@ -201,7 +209,7 @@ func (i *Instance) reconcileInFlightOffBoxSwap(sw AccountSwapper, p *sandboxProv
 	}
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
-	committed, program, known, cause := w.reconcileSwap(sw, rec.SwapID)
+	committed, program, known, cause := w.reconcileSwap(sw, rec.SwapID, rec.ScopedStage)
 	switch {
 	case known && committed:
 		i.mu.RLock()
@@ -237,7 +245,7 @@ func (i *Instance) reconcileInFlightOffBoxSwap(sw AccountSwapper, p *sandboxProv
 		// stage is ordered the way every no-request-in-flight removal is
 		// (#7788): serialized on the server, or an ordered remote rm on a
 		// server with no discard route.
-		if rmErr := w.discardStagedAccount(sw, rec.SwapID); rmErr != nil {
+		if rmErr := w.discardStagedAccount(sw, rec.SwapID, rec.ScopedStage); rmErr != nil {
 			log.WarningLog.Printf("account swap of %q: dropping the staged scope after the reconciled rollback: %v", i.Title, rmErr)
 		}
 		i.settleInFlightSwapVerdict()
@@ -251,7 +259,7 @@ func (i *Instance) reconcileInFlightOffBoxSwap(sw AccountSwapper, p *sandboxProv
 		if cause != nil {
 			ind = fmt.Errorf("%w: %w", ind, cause)
 		}
-		return false, fmt.Errorf("the swap of %q to account %q (id %s): %w — the row stays fenced until `af sessions reconcile-swap %s` answers definitely or `af sessions kill %s` removes it", i.Title, rec.To, rec.SwapID, ind, i.Title, i.Title)
+		return false, fmt.Errorf("the swap of %q to account %q (id %s): %w — the row stays fenced until a daemon restart reconciles it or `af sessions kill %s` removes it", i.Title, rec.To, rec.SwapID, ind, i.Title)
 	}
 }
 
@@ -266,14 +274,14 @@ func (i *Instance) settleInFlightSwapVerdict() {
 	i.resolveStartupStateLocked()
 }
 
-// ReconcileOffBoxSwapFence is the operator's verdict-based unfence (#7793):
-// it re-asks the host for the recorded swap's verdict — never re-sending the
-// request — and lifts the fence exactly when that produces a definite answer.
-// On a row still inert after a restart the session's own reattach path dials
-// the transport and reconciles the record inside, before anything is bound
-// or adopted — the same settle, reached cold. Pane liveness alone never
-// clears the fence: a reachable pane says nothing about which account the
-// host is running.
+// ReconcileOffBoxSwapFence is the session-level reconcile the in-flight
+// record carries (#7793): it re-asks the host for the recorded swap's verdict
+// — never re-sending the request — and lifts the fence exactly when that
+// produces a definite answer. On a row still inert after a restart the
+// session's own reattach path dials the transport and reconciles the record
+// inside, before anything is bound, provisioned, or launched — the same
+// settle, reached cold. Pane liveness alone never clears the fence: a
+// reachable pane says nothing about which account the host is running.
 //
 // settled=true is returned with a non-nil error only when the row settled but
 // its durable checkpoint did not land; the settlement retry owns that write.

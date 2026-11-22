@@ -201,10 +201,16 @@ var verbatimInstanceFields = map[string]string{
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupGeneration": "minted cleanup-generation token",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupLifecycle":  "bounded RelocationRecoveryState enum",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.State":             "bounded RelocationRecoveryState enum",
-	"Worktree.RelocationRecovery.CleanupGeneration":                            "minted cleanup-generation token",
-	"Worktree.RelocationRecovery.CleanupLifecycle":                             "bounded RelocationRecoveryState enum",
-	"Worktree.RelocationRecovery.MissingFencedState":                           "bounded RelocationRecoveryState enum",
-	"Worktree.RelocationRecovery.State":                                        "bounded RelocationRecoveryState enum",
+	// The in-flight swap's identity (#7793) is crypto-random hex accountSwapID
+	// mints per request — never user text, and the only handle that pairs a
+	// fenced row with the agent-server's terminal record for it. The account
+	// labels beside it (From/To) are user-picked and redacted in redact.go.
+	"OffBoxSwapInFlight.SwapID": "crypto-random swap id minted by session.accountSwapID (#7793), never derived from user text; the account labels beside it are redacted",
+
+	"Worktree.RelocationRecovery.CleanupGeneration":  "minted cleanup-generation token",
+	"Worktree.RelocationRecovery.CleanupLifecycle":   "bounded RelocationRecoveryState enum",
+	"Worktree.RelocationRecovery.MissingFencedState": "bounded RelocationRecoveryState enum",
+	"Worktree.RelocationRecovery.State":              "bounded RelocationRecoveryState enum",
 }
 
 // knownUnredactedFields are paths that DO reach a shared bundle verbatim and

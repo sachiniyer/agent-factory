@@ -96,8 +96,9 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	}
 	// An in-flight off-box swap holds the slot too (#7793): its request may
 	// still commit on the host, so the row is settling — never idle — until a
-	// definite verdict clears the record. RestoreOffBoxSwapInFlightRollbackFence
-	// above removed the projected startup fence before this read.
+	// definite verdict clears the record. The record is checked on its own,
+	// ahead of the startup-unknown arm it also forces: a settling row reports
+	// pending, not the terminal verdict an unrelated startup-unknown row gets.
 	if data.OffBoxSwapInFlight != nil {
 		return ActivityPending, ""
 	}
@@ -225,6 +226,14 @@ type LifecycleView struct {
 	// runtime together with the genuinely stale names (#5371 review). The retry
 	// owners (recover/restore/limit-resume) are exempt by construction.
 	RebuildTeardownPending bool
+	// OffBoxSwapInFlight is whether the row carries a durable in-flight
+	// off-box account-swap record (#7793): the request may still commit on
+	// the host, so the view must answer pending — never a slot-releasing
+	// verdict — until the record's own definite verdict clears it. Carried
+	// explicitly rather than read off StartupStateUnknown, which the record
+	// also forces up: a settling swap row and a terminal startup-unknown row
+	// share that flag and decide differently.
+	OffBoxSwapInFlight bool
 	// HandoffDeliveryStatus is the verdict on PendingHandoffMission's delivery, so
 	// Activity() can mirror LoadedActivity's verdict-aware gate. A known ambiguous
 	// verdict (PromptCouldNotConfirm/PromptSentUnverified) deliberately loads WITHOUT
@@ -286,6 +295,7 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 		RebuildTeardownPending: i.rebuildTeardownPending,
 		HandoffDeliveryStatus:  i.handoffDeliveryStatus,
 		StartupStateUnknown:    i.startupStateUnknown,
+		OffBoxSwapInFlight:     i.offBoxSwapInFlight != nil,
 		// The already-locked variant, NOT Capabilities(): the backend is mutable
 		// (a restore rebinds it in bindProvisionResult), so Capabilities() now
 		// takes i.mu.RLock itself — and calling it while this snapshot holds the
@@ -318,6 +328,9 @@ func (v LifecycleView) Activity() Activity {
 		InFlightOp:          v.InFlightOp,
 		UserKilled:          v.UserKilled,
 		StartupStateUnknown: v.StartupStateUnknown,
+	}
+	if v.OffBoxSwapInFlight {
+		data.OffBoxSwapInFlight = &InFlightOffBoxSwapData{}
 	}
 	if v.PendingAccountSwap {
 		data.PendingAccountSwap = &AccountSwapData{}
@@ -472,6 +485,11 @@ func LoadedActivity(data InstanceData) (Activity, string) {
 		UserKilled:          data.UserKilled,
 		StartupStateUnknown: data.StartupStateUnknown,
 	}
+	// The in-flight swap record must reach the classifier (#7793): without it
+	// the projected startup fence below reads as an ordinary startup-unknown
+	// row and the inert sandbox rewrite turns the row terminal — releasing a
+	// task slot while the swap may still commit on the host.
+	effective.OffBoxSwapInFlight = data.OffBoxSwapInFlight
 	if data.PendingAccountSwap != nil {
 		effective.PendingAccountSwap = &AccountSwapData{}
 	}
@@ -496,6 +514,7 @@ func LoadedActivity(data InstanceData) (Activity, string) {
 	}
 	if isSandboxBackendType(data.BackendType) &&
 		!data.StartupStateUnknown && data.PendingAccountSwap == nil &&
+		data.OffBoxSwapInFlight == nil &&
 		effective.Liveness != LiveArchived && livenessIsKnown(effective.Liveness) {
 		effective.Liveness = LiveLost
 	}

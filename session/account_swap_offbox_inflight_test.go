@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,13 +17,14 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // #7793: the durable in-flight swap record — written before the request
-// crosses, fencing admission while it exists, reconciled for the recorded id
-// before anything is admitted on daemon load, and cleared only by a definite
-// verdict — plus the operator's reconcile verb and the per-swap staging path.
+// crosses, fencing every lifecycle gate while it exists, reconciled for the
+// recorded id before anything is admitted on daemon load, and cleared only by
+// a definite verdict — plus the negotiated per-swap staging path.
 
 // The record exists at the moment the request crosses: a daemon that dies
 // queued or in transit reloads a row that knows WHICH swap to ask the host
@@ -169,7 +171,8 @@ func TestReattachSandboxReconcilesTheInFlightSwapBeforeBinding(t *testing.T) {
 
 // The same reload where the host cannot say how the swap ended keeps the
 // fence: the record stays, the row stays inert and unbound, and nothing is
-// admitted — the reconcile verb or `af sessions kill` is the way out.
+// admitted — a later daemon restart re-runs the reconcile, or `af sessions
+// kill` removes the row.
 func TestReattachSandboxKeepsTheFenceWhileTheVerdictIsIndeterminate(t *testing.T) {
 	key, err := runtimetoken.EnsureKey()
 	require.NoError(t, err)
@@ -246,7 +249,11 @@ func TestReattachSandboxKeepsARecordlessFencedRowInert(t *testing.T) {
 
 // The storage contract (#7793): the record persists on the row, and ForStorage
 // projects the rollback fence so a previous release loads it inert rather
-// than silently unfenced. A current reader restores the real flag.
+// than silently unfenced. A current reader keeps the flag UP for as long as
+// the record exists — the record itself is this build's fence (#7793 R1): a
+// row whose recorded request may still be queued on the host is startup-
+// unknown at every gate, not only at swap admission and reattach, until the
+// record's own definite verdict resolves it.
 func TestInFlightSwapRecordPersistsWithTheRollbackFence(t *testing.T) {
 	inst := &Instance{Title: "s", startupStateUnknown: false,
 		offBoxSwapInFlight: &InFlightOffBoxSwapData{SwapID: "swap-1", From: "work", To: "alt"}}
@@ -259,7 +266,8 @@ func TestInFlightSwapRecordPersistsWithTheRollbackFence(t *testing.T) {
 		"the row's real flag is preserved for a current reader")
 
 	restored := data.RestoreOffBoxSwapInFlightRollbackFence()
-	assert.False(t, restored.StartupStateUnknown, "a current reader restores the real flag")
+	assert.True(t, restored.StartupStateUnknown,
+		"the record itself is the fence: while it exists the row is startup-unknown at EVERY gate — restoring the projected-away false would unfence recovery and reprovision before any verdict (#7793 R1)")
 	assert.NotNil(t, restored.OffBoxSwapInFlight)
 	assert.Nil(t, restored.OffBoxSwapInFlight.OriginalStartupStateUnknown,
 		"and the projection marker comes off")
@@ -289,6 +297,7 @@ func TestSwapOffBoxAccountStagesAtTheSwapsOwnPath(t *testing.T) {
 		}
 	}
 	assert.True(t, staged, "staging wrote the swap's own path")
+	assert.True(t, f.srv.lastScoped, "the request carried the negotiated scoped flag")
 }
 
 // The rotation reads only the stage at THIS swap's own path: an anonymous
@@ -308,7 +317,7 @@ func TestScopeRotationConsumesOnlyTheSwapsOwnStage(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(next, credFile), []byte("B1"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(next, accountSwapMarkerRel), []byte("swap-1"), 0o600))
 
-	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1")
+	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1", true)
 	require.NoError(t, err)
 	require.NoError(t, rot.rotate())
 
@@ -353,6 +362,138 @@ func TestReconcileSwapSettlesOnlyTheRecordedID(t *testing.T) {
 	_, err = f.srv.runHeldSwap(0)
 	require.Error(t, err)
 	assert.Equal(t, secretWork, f.hostCred(t, "account"))
+}
+
+// The older wire spoke only the shared stage: an agent-server already running
+// from the previous release advertises no "account-swap-scoped-stage" feature,
+// so the daemon stages at account.next (the path that server reads) and still
+// sends the scoped flag it ignores. Skew in THIS direction must not break a
+// swap that was safe before (#7793 review).
+func TestSwapOffBoxAccountStagesAtTheSharedPathOnALegacyServer(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.scoped = false // a previous-release server
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.NoError(t, err)
+	assert.False(t, f.srv.lastScoped, "the request never claims the scoped protocol to a legacy server")
+	assert.NoDirExists(t, f.stagedDir(), "no suffixed stage is left")
+	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the shared-path swap still committed")
+	assert.Nil(t, f.inst.InFlightOffBoxSwap())
+}
+
+// The other skew direction refuses cleanly: a daemon that cannot read the
+// server's advertised features cannot know which stage path the server will
+// consume, so it refuses BEFORE staging rather than drop a scope where the
+// server might not look — with an actionable upgrade hint. A silent
+// shared-path guess against a scoped-only future server would orphan
+// credentials the swap then cannot reach.
+func TestSwapOffBoxAccountRefusesWhenTheStagingProtocolIsUnreadable(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.scopedErr = errors.New("remote agent-server: connection refused")
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "upgrade")
+	assert.Zero(t, f.srv.calls, "the request never crossed")
+	assert.Nil(t, f.inst.InFlightOffBoxSwap(), "nothing was sent, so nothing is owed a verdict")
+	assert.Equal(t, secretWork, f.hostCred(t, "account"))
+	// And nothing was staged for either protocol spelling.
+	for _, c := range *f.shellCalls {
+		assert.NotContains(t, c, "account.next", "no staging ran before the refusal")
+	}
+}
+
+// A row restored with an unresolved swap record AND a dead agent-server —
+// the pane it carried is gone too — must not restart the server, must not
+// Provision or Launch an agent, and must keep every fence: recovery,
+// relaunch, reprovision all refuse while the verdict is unknown, and kill
+// still quarantines the workspace (#7793 review: reconcile before ANY of
+// those, on a row the loader already fenced).
+func TestReattachSandboxFencesARowWhoseServerCannotReconcile(t *testing.T) {
+	newListedFixture(t, oneListedHost)
+	_, err := runtimetoken.EnsureKey()
+	require.NoError(t, err)
+	ref, err := runtimetoken.NewTokenRef()
+	require.NoError(t, err)
+
+	// The agent-server is dead: no listener answers the recorded address.
+	closed := httptest.NewServer(http.NewServeMux())
+	port := closed.Listener.Addr().String()
+	closed.Close()
+	_, portNum, _ := net.SplitHostPort(port)
+
+	var runCalls int
+	dir := t.TempDir()
+	backend, teardown, err := restoreRuntimeCleanup("load", "sandbox", &RuntimeCleanupData{Sandbox: &SandboxRuntimeCleanupData{
+		SSHCommand: "ssh fake-target", SessionDir: dir, RemotePID: "4242",
+		RemoteAddr: "127.0.0.1:" + portNum, AgentServerVersion: "1.0.0", TokenRef: ref,
+	}})
+	require.NoError(t, err)
+	p := backend.(*sandboxBackend).provisioner
+	p.sessionDir = dir
+	// The row predates pane re-spawn only in shape: it WOULD be restartable
+	// (a launch script exists), so any restart the record's gate fails to
+	// stop shows up as a host call.
+	p.launchScript = "echo 4242"
+	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
+		runCalls++
+		return nil, errors.New("no host")
+	}
+	p.startTunnelFn = func(string) (*AgentServerEndpoint, error) {
+		return &AgentServerEndpoint{URL: "http://" + port}, nil
+	}
+
+	inst := &Instance{
+		Title: "load", liveness: LiveLost, backend: backend, runtimeTeardown: teardown,
+		Account: "work", accountAgent: tmux.ProgramClaude,
+		startupStateUnknown: true, // the loader fenced it
+		offBoxSwapInFlight:  &InFlightOffBoxSwapData{SwapID: "swap-1", From: "work", To: "alt"},
+		offBoxSwapPersist:   func(*Instance) error { return nil },
+		gitWorktree:         &git.GitWorktree{},
+		// Tabs is nil: the pane the row carried did not survive either.
+	}
+
+	err = inst.ReattachSandbox()
+	require.Error(t, err, "the dead server can produce no verdict, so the row stays fenced")
+	assert.Zero(t, runCalls, "no restart was attempted before the reconcile")
+	assert.NotNil(t, inst.InFlightOffBoxSwap(), "the record survives")
+	assert.True(t, inst.StartupStateUnknown(), "the fence survives")
+	assert.False(t, inst.started)
+	assert.Nil(t, inst.remoteClient)
+
+	// Every gate the record fences refuses on the loaded row.
+	assert.Error(t, inst.LifecycleView().ValidateRuntimeAction(RuntimeActionRecoverLost), "recover is fenced")
+	mode, _, err := inst.prepareKillTeardown(false)
+	require.NoError(t, err)
+	assert.True(t, mode.keepWorkspace, "kill quarantines the workspace while the verdict is unknown")
+}
+
+// max_concurrent_runs: a run whose row still carries the swap record must
+// hold its task slot through BOTH projections the cap reads — the live
+// LifecycleView.Activity() arm and the storage-only LoadedActivity arm
+// (#7793 review). The loaded arm is the ghost case: a sandbox row that
+// failed to materialize is rewritten inert LiveLost, which classifies
+// terminal — releasing the slot — unless the record reaches the classifier.
+func TestInFlightSwapRecordHoldsItsSlotAcrossBothProjections(t *testing.T) {
+	rec := &InFlightOffBoxSwapData{SwapID: "swap-1", From: "work", To: "alt"}
+
+	// The live arm: a materialized row mid-task whose record has not settled.
+	inst := &Instance{
+		taskRunActive: true, liveness: LiveLost, backend: &sandboxBackend{},
+		startupStateUnknown: true, offBoxSwapInFlight: rec,
+	}
+	assert.Equal(t, ActivityPending, inst.LifecycleView().Activity(),
+		"holdsTaskRunSlot's Activity() arm must keep the run pending")
+
+	// The ghost arm: the same row as it lies on disk (ForStorage projects the
+	// startup fence for older readers), failed to materialize.
+	row := InstanceData{
+		TaskID: "task1", TaskRunActive: true, BackendType: "sandbox",
+		Liveness: LiveLost, StartupStateUnknown: true, OffBoxSwapInFlight: rec,
+	}
+	activity, _ := LoadedActivity(row)
+	assert.Equal(t, ActivityPending, activity,
+		"rawTaskRunHoldsSlot's LoadedActivity arm must keep the ghost pending")
 }
 
 // The tombstone half on a rolled-back verdict: the host provably kept the old

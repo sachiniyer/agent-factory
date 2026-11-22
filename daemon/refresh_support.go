@@ -156,7 +156,11 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 		item.HandoffOriginalStartupStateUnknown != nil &&
 		!*item.HandoffOriginalStartupStateUnknown &&
 		handoffFenceLoadedFormHolds(item)
-	return (!item.StartupStateUnknown || item.PendingAccountSwap != nil || item.RebuildTeardownPending || handoffFence) && !item.UserKilled &&
+	// An in-flight off-box swap record holds beside the projected startup
+	// fence (#7793): the request may still commit on the host, so the run has
+	// not settled — the loaded form classifies it pending through the record
+	// LoadedActivity now carries, and the raw arm must agree.
+	return (!item.StartupStateUnknown || item.PendingAccountSwap != nil || item.OffBoxSwapInFlight != nil || item.RebuildTeardownPending || handoffFence) && !item.UserKilled &&
 		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp
 }
 

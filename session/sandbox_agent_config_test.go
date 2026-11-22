@@ -286,7 +286,7 @@ type hostEnvServer struct {
 	scope string
 }
 
-func (s hostEnvServer) SwapAccountInPlace(swapID string) (string, error) {
+func (s hostEnvServer) SwapAccountInPlace(swapID string, scopedStage bool) (string, error) {
 	s.t.Setenv("CLAUDE_CONFIG_DIR", s.scope)
-	return s.acctSwapServer.SwapAccountInPlace(swapID)
+	return s.acctSwapServer.SwapAccountInPlace(swapID, scopedStage)
 }
