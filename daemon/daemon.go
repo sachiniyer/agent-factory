@@ -528,6 +528,16 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 			return
 		}
 		drainPlanes(manager, watchers, closeHTTP, closeControl, &controlClosed, drainDeadline(manager))
+		// drainPlanes joined the accept goroutine via closeControl, so any
+		// fatal accept error it recorded after the warm-up arm's pre-drain
+		// fatalAcceptShutdownErr() lookup is now visible. Reconcile the named
+		// return so the signal/throwaway arms no longer exit 0 under that race
+		// (the main path returns fatalAcceptShutdownErr() after its own drain).
+		if retErr == nil {
+			if fatalErr := fatalAcceptShutdownErr(); fatalErr != nil {
+				retErr = fatalErr
+			}
+		}
 	}()
 
 	// Stand the startup watcher down BEFORE the HTTP listener starts serving:
