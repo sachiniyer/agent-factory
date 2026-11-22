@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -127,7 +126,9 @@ func (s *acctSwapServer) runHeldSwap(i int) (string, error) {
 // request still queued can never commit.
 func (s *acctSwapServer) DiscardAccountNext(swapID string) error {
 	if s.anonymous {
-		return errors.New("remote agent-server: POST /v1/agent/swap-account-discard: the agent-server does not know this route")
+		// The bare-404 route absence a pre-identity server answers, the same
+		// shape errAgentRouteMissing classifies on the wire.
+		return fmt.Errorf("remote agent-server: POST /v1/agent/swap-account-discard: %w", errAgentRouteMissing)
 	}
 	if s.discardWaiting != nil {
 		close(s.discardWaiting)
@@ -151,15 +152,10 @@ func (s *acctSwapServer) DiscardAccountNext(swapID string) error {
 	if s.discardGate != nil {
 		<-s.discardGate
 	}
-	// Like the real server-side discard: only the stage bound to THIS swap is
-	// removed — a late discard leaves another swap's .next alone.
-	if swapID != "" {
-		marker, err := os.ReadFile(filepath.Join(s.next, accountSwapMarkerRel))
-		if err != nil || strings.TrimSpace(string(marker)) != swapID {
-			return nil
-		}
-	}
-	return os.RemoveAll(s.next)
+	// The same binding rule production applies (#7788): only the stage bound
+	// to THIS swap is removed, an unreadable marker is a failure, and an
+	// anonymous stage is removable — never silently left.
+	return discardAccountNextBound(s.next, swapID)
 }
 
 // SwapAccountInPlace records the terminal outcome the way the real server does,

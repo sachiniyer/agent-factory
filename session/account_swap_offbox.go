@@ -201,16 +201,29 @@ func (r *accountSwapRecorder) status() (outcome, program, id string) {
 // and because a stage carries its own swap's marker it could not have rotated
 // a later stage's scope in either. A server too old to offer the discard
 // offers no ordering at all, so the reconcile stays indeterminate — never an
-// unordered remote rm racing a rotation (#7773 R1/R2). Rollback state
+// unordered remote rm racing a rotation (#7773 R2). Rollback state
 // (account.prev) is never touched on anything less than a commit this swap
 // itself produced, and a failed status read or marker probe stays
 // indeterminate — never a guess at either answer.
-func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (committed bool, program string, known bool) {
+//
+// The anonymous rows deserve spelling out (#7788): a FIRST read that returns
+// an anonymous committed or rolled_back is treated exactly like a stale named
+// record — it proves nothing about this swap — so the discard runs and the
+// second read re-decides. On that second read an anonymous rolled_back is NOT
+// committed (the discard already tombstoned this swap's id; the record can
+// only describe an earlier, unattributed terminal rollback), while an
+// anonymous committed stays indeterminate — it might be this swap's own
+// commit on a server that cannot echo the id.
+//
+// The last result carries WHY the answer stayed unknown when there is
+// something actionable to say — today only the missing discard route on a
+// pre-identity agent-server, which the caller folds into the fence's error.
+func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (committed bool, program string, known bool, cause error) {
 	discarded := false
 	for attempt := 0; attempt < 2; attempt++ {
 		outcome, prog, recID, err := sw.AccountSwapStatus()
 		if err != nil {
-			return false, "", false
+			return false, "", false, nil
 		}
 		if recID != "" && recID == swapID {
 			// This swap's own terminal record — the only admissible proof of
@@ -218,11 +231,11 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (comm
 			// commit it reports is ordered after every intervention here.
 			switch outcome {
 			case swapOutcomeCommitted:
-				return true, prog, true
+				return true, prog, true, nil
 			case swapOutcomeRolledBack:
-				return false, "", true
+				return false, "", true, nil
 			default:
-				return false, "", false
+				return false, "", false, nil
 			}
 		}
 		switch outcome {
@@ -231,43 +244,51 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (comm
 			// restart forgets every swap, so the markers must show the staged
 			// scope still staged and nothing rotated away.
 			if discarded {
-				return false, "", true // still none after the staged scope is gone
+				return false, "", true, nil // still none after the staged scope is gone
 			}
 			if w.probeScopeState(sshShortStepTimeout) != scopeOutgoing {
-				return false, "", false
+				return false, "", false, nil
 			}
 		case swapOutcomeUnknown:
 			// The host's scope is in doubt: fence, and leave every directory —
 			// the staged scope included — for whatever recovery inspects them.
-			return false, "", false
+			return false, "", false, nil
 		case swapOutcomeCommitted, swapOutcomeRolledBack:
 			if discarded {
 				// The discard serialized with the swap tombstoned this swap's
 				// id and removed its staged scope, so it can never commit —
-				// the host holds whatever the last attributed swap left. An
-				// anonymous committed is the one exception: on a server that
-				// cannot echo the id it might BE this swap's, which no read
-				// here can tell apart.
-				return false, "", recID != "" || outcome == swapOutcomeRolledBack
+				// the host holds whatever the last attributed swap left. A
+				// record that names another swap, or an anonymous rolled_back,
+				// is therefore not committed: it describes an earlier swap's
+				// terminal state while this one is bounded by the tombstone.
+				// An anonymous committed is the one exception: on a server
+				// that cannot echo the id it might BE this swap's, which no
+				// read here can tell apart.
+				return false, "", recID != "" || outcome == swapOutcomeRolledBack, nil
 			}
 			// A record that is not this swap's — an earlier swap's stale
 			// outcome, or an anonymous one — proves nothing about it, and the
-			// request may still be in flight or queued on the server.
+			// request may still be in flight or queued on the server: discard
+			// the staged scope, then re-read.
 		default:
-			return false, "", false
+			return false, "", false, nil
 		}
 		// Discard the staged scope ON THE SERVER, serialized with the swap:
 		// either the request ran first and its own record answers the next
 		// read, or the discard tombstones the id and a late request can only
 		// roll back. A pre-identity agent-server has no such operation — the
 		// reconcile fences rather than running an unordered remote rm that can
-		// empty a scope under a rotation in flight (#7773 R2).
+		// empty a scope under a rotation in flight (#7773 R2) — and the fence
+		// names it so the operator knows to upgrade (#7788).
 		if err := sw.DiscardAccountNext(swapID); err != nil {
-			return false, "", false
+			if errors.Is(err, errAgentRouteMissing) {
+				return false, "", false, fmt.Errorf("the agent-server predates the %s route; upgrade it so a swap's lost response can be bounded", accountSwapDiscardFeature)
+			}
+			return false, "", false, nil
 		}
 		discarded = true
 	}
-	return false, "", false
+	return false, "", false, nil
 }
 
 // probeScopeState reads the host afresh (a new shell, not the lost call) and
@@ -340,8 +361,10 @@ type AccountSwapper interface {
 	// never commit afterwards (#7773): a request already running finished
 	// first and left its own terminal record; one still queued is refused
 	// into rolled_back. A pre-identity agent-server has no such operation —
-	// the caller reconciles that as indeterminate, never as an unordered
-	// remote rm, which could empty a scope under a rotation in flight.
+	// a lost-response reconcile fences on it, and only a caller that knows no
+	// request can be in flight (a definite refusal, a stage never sent) falls
+	// back to an ordered remote rm there (#7788) — never an unordered one,
+	// which could empty a scope under a rotation in flight.
 	DiscardAccountNext(swapID string) error
 }
 
@@ -437,6 +460,32 @@ func (w *sandboxWorkspace) removePrevAccount(timeout time.Duration) error {
 	return nil
 }
 
+// removeNextAccount removes the staged scope from the host — the remote rm
+// that is sound ONLY where no swap request can be in flight (#7788): a
+// definite refusal the server answered, or a stage whose request was never
+// sent. It is never a reconcile path — a possibly-queued request could still
+// land after an unordered rm and rotate whatever stage it finds.
+func (w *sandboxWorkspace) removeNextAccount(timeout time.Duration) error {
+	if out, err := w.shell.Run(timeout, "rm -rf "+shellQuote(w.NextAccountDir()), nil, true); err != nil {
+		return fmt.Errorf("removing the staged account from the host failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// discardStagedAccount drops the staged scope after an outcome that left no
+// request in flight on the agent-server. The server's serialized discard
+// carries the tombstone where it exists; a pre-identity server has no such
+// route, and exactly at these call sites a remote rm is ordered anyway — this
+// swap's request is answered or was never sent, and the admission fence keeps
+// any earlier indeterminate swap's request from still being queued (#7788).
+func (w *sandboxWorkspace) discardStagedAccount(sw AccountSwapper, swapID string) error {
+	err := sw.DiscardAccountNext(swapID)
+	if err == nil || !errors.Is(err, errAgentRouteMissing) {
+		return err
+	}
+	return w.removeNextAccount(sshShortStepTimeout)
+}
+
 // accountSwapID mints the identity the daemon sends with each swap request
 // (#7773). The agent-server binds its terminal record to it, so a lost response
 // reconciles only a record that names THIS swap. Random, never sequential or
@@ -499,6 +548,16 @@ func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*
 	w := p.account
 	if w == nil || w.spec.Account.Dir == "" {
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q carries no synced account to hand off", i.Title)
+	}
+	// A fenced row admits no swap (#7788): an earlier operation could not
+	// prove what the host holds, and a request from an indeterminate swap may
+	// still be queued on the agent-server — a scope staged now could be
+	// rotated in under that request's id, or emptied under its rotation. A
+	// definite verdict never sets the fence, so a proven session is not
+	// stranded; the fence lifts when the pane proves live or the row is
+	// removed.
+	if i.StartupStateUnknown() {
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: its startup state is unknown, and a new staged scope could race a swap request still queued on the agent-server — inspect the session's workspace and runtime; a proven-live pane lifts the fence, `af sessions kill %s` removes the row", i.Title, i.Title)
 	}
 	if name = strings.TrimSpace(name); name == "" {
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)
@@ -625,9 +684,10 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	versions, skipped, err := w.stageAccountNext(sshShortStepTimeout, next, swapID)
 	if err != nil {
 		// No request was sent, but the stage may be half-written: drop it
-		// through the server's serialized discard where one exists, the same
-		// ordered removal the reconcile uses.
-		_ = sw.DiscardAccountNext(swapID)
+		// through the server's serialized discard where one exists, and
+		// through an ordered remote rm where it does not — nothing can be in
+		// flight to race the removal either way (#7788).
+		_ = w.discardStagedAccount(sw, swapID)
 		return res, err
 	}
 	// Set before the host is asked to rotate: whichever way the remote call
@@ -639,7 +699,7 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	if err != nil && swapOutcomeIndeterminate(err) {
 		// The call may have completed on the host with its response lost. What the
 		// session records must be what the host runs, so ask the host.
-		switch committed, prog, known := w.reconcileSwap(sw, swapID); {
+		switch committed, prog, known, cause := w.reconcileSwap(sw, swapID); {
 		case known && committed:
 			res.Reconciled, err, program = true, nil, prog
 		case known:
@@ -650,16 +710,23 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 			// of unknown identity, and nothing relaunches into it.
 			w.syncedVersion = nil
 			i.MarkStartupStateUnknown()
-			return res, fmt.Errorf("handing %q off to account %q: %w: %w (the call failed: %v)", i.Title, next.Name, ErrAccountSwapIndeterminate, errors.New(accountScopeIndeterminate), err)
+			ind := fmt.Errorf("%w: %w", ErrAccountSwapIndeterminate, errors.New(accountScopeIndeterminate))
+			if cause != nil {
+				// Keep the fence actionable: an old agent-server's missing
+				// route is named so the operator upgrades it (#7788).
+				ind = fmt.Errorf("%w: %w", ind, cause)
+			}
+			return res, fmt.Errorf("handing %q off to account %q: %w (the call failed: %v)", i.Title, next.Name, ind, err)
 		}
 	}
 	if err != nil {
 		// The host kept the old account, so the staged copy is dead weight
 		// holding credentials: remove it — on the agent-server, serialized
 		// with the swap, so it can never empty a scope under a rotation in
-		// flight the way an unordered remote rm could (#7773 R2). A server
-		// too old to offer the discard keeps the stage until teardown.
-		if rmErr := sw.DiscardAccountNext(swapID); rmErr != nil {
+		// flight the way an unordered remote rm could (#7773 R2). The server
+		// answered, so nothing is in flight: a server too old to offer the
+		// discard still loses the stage, through an ordered remote rm (#7788).
+		if rmErr := w.discardStagedAccount(sw, swapID); rmErr != nil {
 			log.WarningLog.Printf("account handoff of %q: %v", i.Title, rmErr)
 		}
 		return res, fmt.Errorf("handing %q off to account %q: %w", i.Title, next.Name, err)

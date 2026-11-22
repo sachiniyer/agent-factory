@@ -1359,8 +1359,21 @@ config, so the host's own login is neither read nor replaced.
   cross-agent `--to` with `--account` is refused. The replacement starts a **fresh
   conversation** (a transcript lives in the old account's store) and is told so, with
   the session's task. Every refusal (an unlisted host, an unattributed command, an
-  account of another agent, an older sandbox without the route) happens before anything
-  is stopped. A failure inside the host puts the old scope back.
+  account of another agent, an older sandbox without the route, or a session already
+  fenced by an earlier indeterminate operation) happens before anything is stopped or
+  staged. A failure inside the host puts the old scope back, and the stage — the new
+  account's credentials — is removed through the agent-server's serialized discard
+  route where the server offers it, or an ordered remote cleanup where a request can
+  provably no longer be in flight. If the swap's own response is lost, af reconciles
+  the session's durable record from the agent-server's terminal status under the swap's
+  minted id: a status naming an earlier swap (or an anonymous pre-identity record)
+  never proves this swap, so the staged scope is discarded on the server — serialized
+  with the swap itself — and the status is re-read once. A committed answer lands the
+  swap with an unconfirmed start; a definite refusal or a rolled-back status leaves
+  the old account live; anything else fences the session as startup-unknown — relaunch
+  and teardown are refused until the pane proves live or the row is removed — because
+  the host's account could not be established, and the fence error names an agent-server
+  too old for `account-swap-discard` so it can be upgraded.
 - **Sessions on one host share its ssh user**, so they can read each other's
   workspaces and synced credentials, exactly as local worktrees share one user
   today. A Unix user per session is a later hardening, not part of this contract.

@@ -1,7 +1,9 @@
 package session
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,13 +135,38 @@ func (i *Instance) discardAccountNextInPlace(swapID string) error {
 	if err != nil {
 		return err
 	}
-	if swapID != "" {
-		marker, mErr := os.ReadFile(filepath.Join(next, accountSwapMarkerRel))
-		if mErr != nil || strings.TrimSpace(string(marker)) != swapID {
-			return nil // a different swap's stage, or none of this one's — leave it
-		}
+	return discardAccountNextBound(next, swapID)
+}
+
+// discardAccountNextBound removes the staged scope at next under the
+// discard's identity rule (#7773 R2, hardened #7788). Success is reported only
+// when the stage is gone or provably another swap's:
+//
+//   - a readable marker naming swapID — this swap's stage — is removed;
+//   - a readable marker naming a DIFFERENT id leaves the stage and reports
+//     success: it is not this swap's to delete;
+//   - an absent marker (ENOENT) is removed too: a stage is always bound before
+//     it holds credentials or appears at .next, so no named swap can own an
+//     anonymous one;
+//   - any OTHER marker-read error is a failure, never a silent "not mine"
+//     that would strand this swap's credentials on the host.
+func discardAccountNextBound(next, swapID string) error {
+	if swapID == "" {
+		// A pre-identity discard carries no binding: it removes whatever is
+		// staged, the contract the identity-free servers always had.
+		return os.RemoveAll(next)
 	}
-	return os.RemoveAll(next)
+	marker, err := os.ReadFile(filepath.Join(next, accountSwapMarkerRel))
+	switch {
+	case err == nil && strings.TrimSpace(string(marker)) == swapID:
+		return os.RemoveAll(next)
+	case err == nil:
+		return nil // bound to a different swap — leave it
+	case errors.Is(err, fs.ErrNotExist):
+		return os.RemoveAll(next)
+	default:
+		return fmt.Errorf("the staged scope's binding at %s could not be read; refusing to guess whose it is: %w", next, err)
+	}
 }
 
 // accountScopeDirs derives the live/staged/outgoing scope paths for an agent
@@ -207,6 +234,17 @@ func (r *scopeRotation) rotate() error {
 	if err := scopeRename(r.live, r.prev); err != nil {
 		return fmt.Errorf("moving the outgoing account aside: %w", err)
 	}
+	// The stage's binding was proven at newScopeRotation — before the agent
+	// stopped, while a later swap's re-stage stays unordered with this
+	// rotation. Prove it again at the rename itself, inside the lock the
+	// rename holds, so a stage swapped out from under this request is refused
+	// here rather than rotated in under its id (#7788).
+	if err := r.stageBound(); err != nil {
+		if rbErr := scopeRename(r.prev, r.live); rbErr != nil {
+			return fmt.Errorf("%v (and the outgoing account could not be put back: %v; %s)", err, rbErr, accountScopeIndeterminate)
+		}
+		return err
+	}
 	if err := scopeRename(r.next, r.live); err != nil {
 		if rbErr := scopeRename(r.prev, r.live); rbErr != nil {
 			return fmt.Errorf("moving the incoming account into place: %w (and the outgoing one could not be restored: %v; %s)", err, rbErr, accountScopeIndeterminate)
@@ -220,12 +258,33 @@ func (r *scopeRotation) rotate() error {
 	return nil
 }
 
+// stageBound re-reads the stage's swap binding at the rotation's own point of
+// use (#7788): the first check ran at newScopeRotation, before the agent
+// stopped, and a stage re-staged since then — under a different swap's marker,
+// stripped of its marker, or removed — is refused at the rename, never rotated
+// in under this request's id. It shares the lock the rename runs under; a
+// request with no id keeps the pre-identity rule and rotates whatever is
+// staged.
+func (r *scopeRotation) stageBound() error {
+	if r.wantID == "" {
+		return nil
+	}
+	marker, err := os.ReadFile(filepath.Join(r.next, accountSwapMarkerRel))
+	if err != nil {
+		return fmt.Errorf("%w: the staged scope's binding could not be read: %v", errStageNotMine, err)
+	}
+	if strings.TrimSpace(string(marker)) != r.wantID {
+		return fmt.Errorf("%w: the staged scope at %s was re-staged for a different swap; refusing to rotate another swap's stage in", errStageNotMine, r.next)
+	}
+	return nil
+}
+
 // restore undoes a completed rotation: the incoming scope goes back to staging,
 // the outgoing one back to live. The rotation stripped the stage's swap binding
-// from the live scope, so the restored stage is re-bound: the serialized
-// discard removes only a stage whose marker names the swap it belongs to, and
-// an unbound one would keep the incoming account's credentials on the host
-// after a definite rollback.
+// from the live scope, so the restored stage is re-bound BEFORE it appears at
+// .next (#7788): the serialized discard removes only a stage whose marker
+// names the swap it belongs to, and an unbound one would keep the incoming
+// account's credentials on the host after a definite rollback.
 func (r *scopeRotation) restore() error {
 	if !r.rotated {
 		return nil
@@ -233,15 +292,20 @@ func (r *scopeRotation) restore() error {
 	if err := os.RemoveAll(r.next); err != nil {
 		return err
 	}
+	if r.wantID != "" {
+		if err := os.WriteFile(filepath.Join(r.live, accountSwapMarkerRel), []byte(r.wantID), 0o600); err != nil {
+			return fmt.Errorf("re-binding the restored stage: %w", err)
+		}
+	}
 	if err := scopeRename(r.live, r.next); err != nil {
+		if r.wantID != "" {
+			_ = os.Remove(filepath.Join(r.live, accountSwapMarkerRel))
+		}
 		return err
 	}
 	if err := scopeRename(r.prev, r.live); err != nil {
 		return err
 	}
 	r.rotated = false
-	if r.wantID != "" {
-		return os.WriteFile(filepath.Join(r.next, accountSwapMarkerRel), []byte(r.wantID), 0o600)
-	}
 	return nil
 }

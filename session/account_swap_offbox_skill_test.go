@@ -59,14 +59,16 @@ func (s *scopeSkillServer) SwapAccountInPlace(swapID string) (string, error) {
 
 // DiscardAccountNext is the serialized staged-scope discard (#7773 R2): under
 // the swap's own lock it tombstones the id and removes the staged scope, so a
-// request still queued behind it can never commit.
+// request still queued behind it can never commit. It enforces the stage
+// marker exactly as production does (#7788): only this swap's bound stage is
+// removed, and an unreadable marker fails rather than passing silently.
 func (s *scopeSkillServer) DiscardAccountNext(swapID string) error {
 	s.rec.mu.Lock()
 	defer s.rec.mu.Unlock()
 	if swapID != "" {
 		s.rec.cancelled = swapID
 	}
-	return os.RemoveAll(s.next)
+	return discardAccountNextBound(s.next, swapID)
 }
 
 func (s *scopeSkillServer) swap(id string) (string, error) {
