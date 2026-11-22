@@ -422,6 +422,23 @@ func (m *home) commitPanePreviewReplace() (*store.OpenPane, tea.Cmd) {
 	)
 }
 
+// rearmAutoHideNoticeClear drops commitPanePreviewReplace's panesRefresh
+// capture (it was computed against attached=false and would contend with the
+// full-screen attach) and re-arms the auto-hide notice's 3-second clear timer
+// when the commit installed one (#2639). Without this, attaching a preview
+// whose target is already open in another pane at a width that auto-hides the
+// owner leaves the "X hidden" notice on screen indefinitely — the notice is
+// installed synchronously inside the commit, but its clear timer lives in the
+// dropped cmd, and the post-detach repaint does not recreate it. prevNotice is
+// the paneAutoHideNoticeID captured before the commit; an unchanged id means
+// the commit installed no notice, so attachCmd is returned alone.
+func (m *home) rearmAutoHideNoticeClear(prevNotice uint64, attachCmd tea.Cmd) tea.Cmd {
+	if m.paneAutoHideNoticeID != prevNotice && m.paneAutoHideNoticeID != 0 {
+		return tea.Batch(attachCmd, m.clearTransientMessageAfterDelay(m.paneAutoHideNoticeID))
+	}
+	return attachCmd
+}
+
 func (m *home) commitPanePreviewAlongside() tea.Cmd {
 	txn := m.panePreviewTxn
 	if txn == nil {
