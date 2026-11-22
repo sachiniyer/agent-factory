@@ -20,15 +20,18 @@ func (s *controlServer) archiveSessionGuarded(ctx context.Context, req *ArchiveS
 	// register the kernel-verified requester before its own pane tree is
 	// reaped, and unregister when the reply is on the wire. The registration
 	// carries THIS teardown's targets, so the exemption cannot reach another
-	// session's reap (#7754).
-	defer s.trackTeardownRequester(ctx, req, s.manager.teardownTargetsForSession(req.ID, req.Title, req.RepoID))()
+	// session's reap (#7754); the archive re-derives that set under the
+	// session's op-lock, from the claim it actually takes, through
+	// track.register (#7760).
+	track := s.trackTeardownRequester(ctx, req, s.manager.teardownTargetsForSession(req.ID, req.Title, req.RepoID))
+	defer track.release()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
 	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
 	// commits it, and publishes the full projection inside its operation lock. That
 	// keeps lifecycle event order identical to operation order (#2680).
-	archivedPath, archived, err := s.manager.archiveSessionGuarded(*req, guard)
+	archivedPath, archived, err := s.manager.archiveSessionGuarded(*req, guard, track.register)
 	if !resp.record(err) {
 		return err
 	}

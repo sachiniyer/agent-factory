@@ -70,7 +70,7 @@ func describeTargetTasks(tasks []task.Task) string {
 // instead of depending on a second Snapshot request (#2680). Its stable id still
 // prevents cross-repo title misrouting (#1592 Phase 5).
 func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.InstanceData, error) {
-	path, data, err := m.archiveSessionGuarded(req, nil)
+	path, data, err := m.archiveSessionGuarded(req, nil, nil)
 	// The returned row is a client projection: the daemon-side wall machinery
 	// the record carries (raw pane anchors, runtime pins, the retired shadow)
 	// is not client data (#6972).
@@ -79,18 +79,19 @@ func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.Ins
 
 // archiveSessionGuarded is ArchiveSession with a sessionTeardownGuard evaluated
 // inside the archive fence. See sessionTeardownGuard; a nil guard is plain
-// ArchiveSession.
-func (m *Manager) archiveSessionGuarded(req ArchiveSessionRequest, guard sessionTeardownGuard) (string, session.InstanceData, error) {
+// ArchiveSession. register is the requesterTargetRegistrar the control server
+// bound for this call (#7760); nil for callers with no blocked RPC requester.
+func (m *Manager) archiveSessionGuarded(req ArchiveSessionRequest, guard sessionTeardownGuard, register requesterTargetRegistrar) (string, session.InstanceData, error) {
 	m.taskTargetMu.Lock()
 	defer m.taskTargetMu.Unlock()
-	return m.archiveSession(req, nil, guard)
+	return m.archiveSession(req, nil, guard, register)
 }
 
 // archiveSession performs ArchiveSession while taskTargetMu is already held.
 // DeleteProject uses it inside its wider, preflight-to-commit task transaction
 // and passes the project-wide target index it loaded once during preflight.
 // A nil taskTargets means the caller has not supplied a serialized snapshot.
-func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[string][]task.Task, guard sessionTeardownGuard) (string, session.InstanceData, error) {
+func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[string][]task.Task, guard sessionTeardownGuard, register requesterTargetRegistrar) (string, session.InstanceData, error) {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return "", session.InstanceData{}, err
@@ -180,6 +181,11 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		return "", session.InstanceData{}, err
 	}
 	defer opLock.Unlock()
+
+	// Same re-derivation the kill runs (#7760): a serialized-ahead operation on
+	// this lock may have moved the worktree since the handler-entry snapshot —
+	// the registered set must follow the claim this archive actually took.
+	rederiveRequesterTargetsUnderLock(register, repoID, req.Title, instance, nil)
 
 	// Re-verify under the op-lock: findSession released m.mu, so a racing kill
 	// may have torn the session down (map entry gone/replaced) or tombstoned it.
