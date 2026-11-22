@@ -17,21 +17,30 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/throwawaysandbox"
 )
 
-// These tests pin the contract that every warm-up exit path in runDaemon
-// consults the recorded fatal accept error (fatalAcceptShutdownErr) before
-// choosing the exit code. The co-ready sigChan / throwawayExpireCh arms of the
-// restore and probation selects used to return a bare nil, so a fatal accept
-// error that had already been recorded — and was racing a buffered SIGTERM or a
-// throwaway expiry in the very same select — could be demoted to exit 0 by Go's
-// uniform-random arm selection, defeating the fatal-accept mechanism's purpose
-// (the supervisor never restarts a clean exit). The fix makes every warm-up arm
-// return fatalAcceptShutdownErr(), so the recorded error is never forgotten
-// regardless of which arm wins a co-ready race.
+// These tests pin the contract that every non-terminal warm-up exit path in
+// runDaemon consults the recorded fatal accept error (fatalAcceptShutdownErr)
+// before choosing the exit code. The co-ready sigChan arm of the restore and
+// probation selects used to return a bare nil, so a fatal accept error that had
+// already been recorded — and was racing a buffered SIGTERM in the very same
+// select — could be demoted to exit 0 by Go's uniform-random arm selection,
+// defeating the fatal-accept mechanism's purpose (the supervisor never restarts
+// a clean exit). The fix makes the signal and shutdown arms return
+// fatalAcceptShutdownErr(), so the recorded error is never forgotten regardless
+// of which arm wins a co-ready race.
+//
+// The throwawayExpireCh arms are the exception: a throwaway sandbox whose
+// lifetime has ended is an intentional clean terminal exit (the main path's
+// throwawayFired() gate also returns nil after teardown), so those arms keep the
+// clean nil return even with a recorded fatal accept error — relaunching an
+// expired sandbox under Restart=on-failure would loop against its marker (#7620).
 //
 // holdHomeIfAbandoned likewise used to classify the exit code only from the
 // run's own error/panic; when err == nil it exited 0 even with a pending fatal
 // accept error. The fix adds a default branch that consults
-// fatalAcceptShutdownErr and exits 1 when one is recorded.
+// fatalAcceptShutdownErr and exits 1 when one is recorded, except for an
+// intentional clean terminal exit (a deleted home or a throwaway expiry) passed
+// as cleanExit, which must stay 0 so the supervisor does not relaunch the daemon
+// into a deleted home or against an expired throwaway marker.
 
 // waitSocketBound polls the control socket until it answers a Ping or the
 // deadline elapses. The binding is the first observable event strictly after
@@ -233,11 +242,14 @@ func throwawaySetup(t *testing.T) *exec.Cmd {
 	return owner
 }
 
-// TestWarmupRestoreThrowawayArmReturnsFatalAcceptErr forces the restore select
-// to take the throwawayExpireCh arm while a fatal accept error is recorded.
-// The throwaway watchdog closes throwawayExpireCh (only ready arm besides the
-// held restore), so the select deterministically takes the throwaway arm.
-func TestWarmupRestoreThrowawayArmReturnsFatalAcceptErr(t *testing.T) {
+// TestWarmupRestoreThrowawayArmPreservesCleanExit forces the restore select to
+// take the throwawayExpireCh arm while a fatal accept error is recorded. The
+// throwaway watchdog closes throwawayExpireCh (only ready arm besides the held
+// restore), so the select deterministically takes the throwaway arm. A throwaway
+// sandbox's lifetime has ended, so the arm must take the clean terminal exit
+// (nil, exit 0) — not the recorded fatal accept error — so Restart=on-failure
+// does not relaunch an expired sandbox against its still-expired marker (#7620).
+func TestWarmupRestoreThrowawayArmPreservesCleanExit(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	stubContainerSweep(t)
 	captureExitHoldingHome(t, nil)
@@ -261,18 +273,19 @@ func TestWarmupRestoreThrowawayArmReturnsFatalAcceptErr(t *testing.T) {
 
 	select {
 	case err := <-runErr:
-		require.ErrorIs(t, err, fatalErr,
-			"the restore-select throwawayExpireCh arm must return the recorded fatal accept error, not nil (exit 0)")
+		require.NoError(t, err,
+			"the restore-select throwawayExpireCh arm must preserve the clean terminal exit (nil/exit 0) even with a recorded fatal accept error, so an expired sandbox is not relaunched")
 	case <-time.After(15 * time.Second):
 		t.Fatal("runDaemon did not exit after throwaway expiry during the instance restore")
 	}
 }
 
-// TestWarmupProbationThrowawayArmReturnsFatalAcceptErr forces the probation
-// select to take the throwawayExpireCh arm while a fatal accept error is
-// recorded. The restore completes, the daemon parks in probation, and the
-// throwaway watchdog closes throwawayExpireCh.
-func TestWarmupProbationThrowawayArmReturnsFatalAcceptErr(t *testing.T) {
+// TestWarmupProbationThrowawayArmPreservesCleanExit forces the probation select
+// to take the throwawayExpireCh arm while a fatal accept error is recorded. The
+// restore completes, the daemon parks in probation, and the throwaway watchdog
+// closes throwawayExpireCh. Same clean terminal exit contract as the restore
+// arm: an expired sandbox must not be relaunched (#7620).
+func TestWarmupProbationThrowawayArmPreservesCleanExit(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	stubContainerSweep(t)
 	captureExitHoldingHome(t, nil)
@@ -293,8 +306,8 @@ func TestWarmupProbationThrowawayArmReturnsFatalAcceptErr(t *testing.T) {
 
 	select {
 	case err := <-runErr:
-		require.ErrorIs(t, err, fatalErr,
-			"the probation-select throwawayExpireCh arm must return the recorded fatal accept error, not nil (exit 0)")
+		require.NoError(t, err,
+			"the probation-select throwawayExpireCh arm must preserve the clean terminal exit (nil/exit 0) even with a recorded fatal accept error, so an expired sandbox is not relaunched")
 	case <-time.After(15 * time.Second):
 		t.Fatal("runDaemon did not exit after throwaway expiry during upgrade probation")
 	}
@@ -314,7 +327,7 @@ func TestHoldHomeIfAbandonedExitsOneOnPendingFatalAcceptErr(t *testing.T) {
 	stop := &stopClock{}
 	stop.abandon("a stuck teardown step")
 
-	holdHomeIfAbandoned(stop, func() {}, nil, nil, nil)
+	holdHomeIfAbandoned(stop, func() {}, nil, nil, nil, false)
 
 	select {
 	case exit := <-exits:
@@ -336,7 +349,7 @@ func TestHoldHomeIfAbandonedExitsZeroWhenNoFatalAcceptErr(t *testing.T) {
 	stop := &stopClock{}
 	stop.abandon("a stuck teardown step")
 
-	holdHomeIfAbandoned(stop, func() {}, nil, nil, nil)
+	holdHomeIfAbandoned(stop, func() {}, nil, nil, nil, false)
 
 	select {
 	case exit := <-exits:
@@ -360,11 +373,37 @@ func TestHoldHomeIfAbandonedExitsOneOnRunErrorPreferencingFatalErr(t *testing.T)
 	stop := &stopClock{}
 	stop.abandon("a stuck teardown step")
 
-	holdHomeIfAbandoned(stop, func() {}, errors.New("run-level error"), nil, nil)
+	holdHomeIfAbandoned(stop, func() {}, errors.New("run-level error"), nil, nil, false)
 
 	select {
 	case exit := <-exits:
 		require.Equal(t, 1, exit.code, "a run-level error must still exit 1, fatal or not")
+	default:
+		t.Fatal("holdHomeIfAbandoned did not call exitHoldingHome despite a non-empty ledger")
+	}
+}
+
+// TestHoldHomeIfAbandonedPreservesCleanExitOnFatalAcceptErr pins the
+// defense-in-depth carve-out: when the run returned nil and a fatal accept
+// error is recorded, but the exit is an intentional clean terminal one — the AF
+// home was deleted, or a throwaway sandbox expired (cleanExit=true) — the exit
+// must stay 0 so a Restart=on-failure supervisor does not relaunch the daemon
+// into a deleted home or against an expired throwaway marker (#7620).
+func TestHoldHomeIfAbandonedPreservesCleanExitOnFatalAcceptErr(t *testing.T) {
+	fatalErr := errors.New("simulated fatal accept error (clean-exit test)")
+	setFatalAcceptErr(fatalErr)
+	t.Cleanup(resetFatalAcceptErr)
+
+	exits := captureExitHoldingHome(t, nil)
+	stop := &stopClock{}
+	stop.abandon("a stuck teardown step")
+
+	holdHomeIfAbandoned(stop, func() {}, nil, nil, nil, true)
+
+	select {
+	case exit := <-exits:
+		require.Zero(t, exit.code,
+			"a clean terminal exit (deleted home / throwaway expiry) must stay 0 even with a pending fatal accept error, so the supervisor does not relaunch the daemon")
 	default:
 		t.Fatal("holdHomeIfAbandoned did not call exitHoldingHome despite a non-empty ledger")
 	}
