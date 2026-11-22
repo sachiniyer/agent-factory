@@ -652,7 +652,7 @@ func TestAbandonAdoptionRemovesThePanePathIndirection(t *testing.T) {
 	require.Error(t, p.provisionFailure(errors.New("banner never appeared")))
 	found := false
 	for _, s := range ran {
-		if strings.Contains(s, "rm -f -- "+shellQuote(link)) {
+		if strings.Contains(s, "l="+shellQuote(link)) && strings.Contains(s, `rm -f -- "$l"`) {
 			found = true
 		}
 		assert.NotContains(t, s, "rm -rf "+shellQuote(dir),

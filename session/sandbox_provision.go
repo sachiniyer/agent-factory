@@ -72,10 +72,13 @@ type sandboxWorkspace struct {
 	// panePathDir is the directory the launch puts first on the agent-server's
 	// PATH (and the agent-server re-pins first on the agent pane's adopted
 	// login PATH): SessionDir itself when it is a usable PATH entry, else the
-	// colon-free indirection ensurePanePathDir staged outside it — under
-	// $HOME/.af-path or an unpredictable mktemp root (#7770). It is ALSO the
-	// workspace's recorded link path: a restart seeds it from the row so the
-	// link is re-created at the spelling the persisted launch still names.
+	// colon-free indirection ensurePanePathDir staged outside it — under a
+	// per-uid $HOME/.af-path or $XDG_RUNTIME_DIR/.af-path, else an
+	// unpredictable mktemp root (#7770, #7787). It is ALSO the workspace's
+	// recorded link path: a restart seeds it from the row so the link is
+	// re-created at the spelling the persisted launch still names — or, when
+	// that root cannot be verified, at a fresh root the ensure mints and the
+	// restart writes back into the launch and the record.
 	panePathDir string
 	// RemotePID is the backgrounded agent-server PID captured for teardown.
 	RemotePID string

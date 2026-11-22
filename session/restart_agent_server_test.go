@@ -37,6 +37,10 @@ type crashedHost struct {
 	// hostPID is what the host's launch record (agent-server.pid) holds, and
 	// strayProbe what the identity probe answers for that PID.
 	hostPID, strayProbe string
+	// ensureLink is what the pane-path ensure-at script reports: the link it
+	// committed. A test sets it to a DIFFERENT path than the record to make the
+	// remote mint a fresh root, as it does when the recorded one cannot verify.
+	ensureLink string
 }
 
 func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner, *crashedHost) {
@@ -105,6 +109,8 @@ func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner,
 			return []byte(h.strayProbe + "\n"), nil
 		case strings.Contains(script, "matches_session"):
 			return []byte(h.probe + "\n"), nil
+		case strings.Contains(script, "AF_PANE_LINK=") && h.ensureLink != "":
+			return []byte("AF_PANE_LINK=" + h.ensureLink + "\n"), nil
 		case strings.Contains(script, "echo relaunched"):
 			h.restarted = true
 			return []byte("4343\n"), nil
@@ -457,4 +463,46 @@ func TestRestartAdoptionProvisionCarriesTheRecordedSiblingTabCount(t *testing.T)
 	require.Len(t, bodies, 2)
 	assert.NotContains(t, bodies[0], "sibling_tabs", "an ordinary restore is unchanged")
 	assert.Contains(t, bodies[1], `"sibling_tabs":2`)
+}
+
+// #7787: when the recorded indirection root cannot be verified, the remote
+// mints a fresh one and reports the NEW link — so the restart rebinds the
+// persisted launch (both PATH= and AF_SESSION_PATH_DIR=) and the row's cleanup
+// record to the link that exists. A replay that named the abandoned path would
+// pin a PATH entry another local uid may control.
+func TestRestartRebindsTheLaunchWhenTheRecordedRootWasReminted(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	old, fresh := "/tmp/af-path.Old/sess-x", "/tmp/af-path.Minted42/sess-x"
+	p.sessionDir = "/remote/af:sessions/x"
+	p.panePathDir = old
+	h.ensureLink = fresh
+	p.launchScript = "PATH=" + shellQuote(old) + `:"$PATH" AF_SESSION_PATH_DIR=` + shellQuote(old) + " echo relaunched & echo $!"
+
+	require.NoError(t, inst.ReattachSandbox())
+
+	assert.Equal(t, fresh, p.panePathDir, "the provisioner carries the link the remote actually committed")
+	assert.NotContains(t, p.launchScript, shellQuote(old), "no spelling of the abandoned path survives")
+	assert.Equal(t,
+		"PATH="+shellQuote(fresh)+`:"$PATH" AF_SESSION_PATH_DIR=`+shellQuote(fresh)+" echo relaunched & echo $!",
+		p.launchScript, "the replayed launch pins the minted indirection in both places")
+	assert.True(t, h.ran(shellQuote(fresh)), "the launch the host ran carries the new PATH entry")
+	cleanup := inst.backend.(*sandboxBackend).cleanup
+	assert.Equal(t, fresh, cleanup.PanePathDir, "the row's record follows, or the next restart re-ensures the abandoned name")
+	assert.Equal(t, p.launchScript, cleanup.LaunchScript)
+}
+
+// A remint the launch cannot be rebound to is refused rather than replayed: a
+// record that does not name the old path is inconsistent with the panePathDir
+// it carried, so nothing is spawned.
+func TestRestartRefusesARemintTheLaunchDoesNotName(t *testing.T) {
+	inst, p, h := newCrashedHost(t, agentServerProvedDead)
+	p.sessionDir = "/remote/af:sessions/x"
+	p.panePathDir = "/tmp/af-path.Old/sess-x"
+	h.ensureLink = "/tmp/af-path.Minted42/sess-x"
+	p.launchScript = "echo relaunched & echo $!" // names no indirection at all
+
+	err := inst.ReattachSandbox()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "re-minted")
+	assert.False(t, h.ran("echo relaunched"), "no server is spawned under a launch that would pin a stale PATH entry")
 }

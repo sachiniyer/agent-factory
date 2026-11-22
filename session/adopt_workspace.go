@@ -39,7 +39,9 @@ type AdoptSpec struct {
 	// PanePathDir is the pane-PATH indirection the archived provision recorded
 	// for a ':'-bearing SessionDir (#7770): an unpredictable path nothing can
 	// re-derive, so the adopting provision re-creates the link AT it rather
-	// than minting a second root the old record still names. Empty on
+	// than minting a second root the old record still names — unless the
+	// recorded root itself can no longer be verified, when the ensure mints a
+	// fresh one the adopt record then carries (#7787). Empty on
 	// pre-#7770 rows and colon-free session dirs.
 	PanePathDir string
 
@@ -223,9 +225,12 @@ func (p *sandboxProvisioner) abandonAdoption(cause error) error {
 	// Only a link THIS attempt created is removed — panePathDir is set only
 	// then, and an adoption refused before ensurePanePathDir (the previous
 	// agent-server still running, the worktree gone) must not delete the link
-	// that running server owns. The empty parent goes with it.
+	// that running server owns — and the removal still proves the leaf is a
+	// symlink pointing at this session dir first, so a repointed or planted
+	// leaf is left, never deleted (#7787). The empty parent goes with it.
 	if p.panePathDir != "" {
-		_, _ = p.Run(sshShortStepTimeout, "rm -f -- "+shellQuote(p.panePathDir)+
+		_, _ = p.Run(sshShortStepTimeout, "l="+shellQuote(p.panePathDir)+
+			"; if [ -L \"$l\" ] && [ \"$(readlink \"$l\")\" = "+shellQuote(p.sessionDir)+" ]; then rm -f -- \"$l\"; fi"+
 			"; rmdir -- "+shellQuote(path.Dir(p.panePathDir))+" 2>/dev/null", nil, true)
 	}
 	return fmt.Errorf("%w (the preserved workspace at %s was not touched)", cause, p.sessionDir)

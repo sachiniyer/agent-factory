@@ -107,8 +107,10 @@ func (r SweepRow) Identity() (dir, ref string) {
 type sweepHostState struct {
 	label string
 	shell sandboxShell
-	// reaper builds the provisioner whose reap removes one orphan.
-	reaper func(dir, pid, ref string) *sandboxProvisioner
+	// reaper builds the provisioner whose reap removes one orphan. link is the
+	// pane-PATH indirection the orphan's own marker recorded, already proven
+	// this dir's by sweepPanePathLink — "" when the dir names none.
+	reaper func(dir, pid, ref, link string) *sandboxProvisioner
 	roots  map[string]bool
 	dirs   map[string]bool
 	refs   map[string]bool
@@ -154,8 +156,8 @@ func sweepHostsOf(rows []SweepRow) []*sweepHostState {
 			h = &sweepHostState{
 				label: prov.label(), shell: prov, roots: map[string]bool{}, dirs: map[string]bool{}, refs: map[string]bool{},
 			}
-			h.reaper = func(dir, pid, ref string) *sandboxProvisioner {
-				return &sandboxProvisioner{sshCmd: cmd, backendLabel: label, sessionDir: dir, remotePID: pid, tokenRef: ref}
+			h.reaper = func(dir, pid, ref, link string) *sandboxProvisioner {
+				return &sandboxProvisioner{sshCmd: cmd, backendLabel: label, sessionDir: dir, remotePID: pid, tokenRef: ref, panePathDir: link}
 			}
 			hosts[prov.sshCmd] = h
 		}
@@ -175,6 +177,10 @@ func sweepHostsOf(rows []SweepRow) []*sweepHostState {
 type sweepCandidate struct {
 	dir, ref, token string
 	old             bool
+	// link is what the dir's pane-PATH marker recorded ("" when absent) —
+	// unvalidated; sweepPanePathLink proves it belongs to this dir before the
+	// reap is allowed to remove it.
+	link string
 }
 
 func sweepHost(h *sweepHostState, key []byte, minAge time.Duration, stillOwned func(dir, ref string) bool) []SweepFinding {
@@ -208,7 +214,10 @@ func sweepList(sh sandboxShell, root string, minAge time.Duration) ([]sweepCandi
 		`tok=$(sed -n '1p' "$d/` + runtimetoken.TokenFileName + `" | tr -d '\r\n'); ` +
 		`old=0; [ -n "$(find "$d/` + sshIdentityEnvName + `" -mmin +` + strconv.Itoa(mins) + ` 2>/dev/null)" ] && old=1; ` +
 		`abs=$(cd "$d" && pwd -P) || continue; ` +
-		`printf 'CAND\t%s\t%s\t%s\t%s\n' "$abs" "$ref" "$tok" "$old"; done; echo SWEEP-LIST-DONE`
+		// The pane-PATH marker names the indirection this dir staged OUTSIDE
+		// itself (#7787), so the reap can reach it without a session row.
+		`link=$(sed -n '1p' "$d/` + panePathMarkerName + `" 2>/dev/null | tr -d '\r\n'); ` +
+		`printf 'CAND\t%s\t%s\t%s\t%s\t%s\n' "$abs" "$ref" "$tok" "$old" "$link"; done; echo SWEEP-LIST-DONE`
 	out, err := sh.Run(sshShortStepTimeout, script, nil, false)
 	if err != nil {
 		return nil, err
@@ -222,10 +231,13 @@ func sweepList(sh sandboxShell, root string, minAge time.Duration) ([]sweepCandi
 			continue
 		}
 		f := strings.Split(line, "\t")
-		if len(f) != 5 || f[0] != "CAND" {
+		if len(f) < 6 || f[0] != "CAND" {
 			continue
 		}
-		cands = append(cands, sweepCandidate{dir: f[1], ref: f[2], token: f[3], old: f[4] == "1"})
+		// A marker carrying a tab widens the field count: f[5] then holds a
+		// truncated link the dir's own proof rejects — the dir is still reaped
+		// and only the link is left, never a skipped orphan.
+		cands = append(cands, sweepCandidate{dir: f[1], ref: f[2], token: f[3], old: f[4] == "1", link: f[5]})
 	}
 	if !done {
 		// A listing that did not finish proves nothing about what is there.
@@ -272,7 +284,12 @@ func sweepOne(h *sweepHostState, key []byte, c sweepCandidate, stillOwned func(d
 	if stillOwned != nil && stillOwned(c.dir, c.ref) {
 		return SweepFinding{}, false
 	}
-	if err := h.reaper(c.dir, pid, c.ref).reap(); err != nil {
+	// The pane-PATH link lives outside the dir about to be reaped; the dir's
+	// own marker is the only record of it that survives the row's loss (#7787).
+	// sweepPanePathLink proves it belongs to THIS dir before the reap removes
+	// it — a name af cannot prove is never touched.
+	link, _ := sweepPanePathLink(c.dir, c.link)
+	if err := h.reaper(c.dir, pid, c.ref, link).reap(); err != nil {
 		return finding(SweepReported, "left in place: the reap did not complete: "+err.Error())
 	}
 	return finding(SweepReaped, "no persisted row owned it and its workspace was clean")
