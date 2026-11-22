@@ -512,32 +512,70 @@ func TestDockerAccount_PATHReassertSkippedWhenUninspectable(t *testing.T) {
 // between af's pins and the agent's exec — a program that can re-set every
 // pinned name (#7529 R1, extended to account sessions). The run argv
 // re-asserts SHELL=/bin/sh after run_args, unless the operator forwards
-// their own SHELL through session_env_passthrough.
+// their own SHELL through session_env_passthrough. The exemption keys on
+// the forwarded SET — containerEnvironmentNames emits only names that
+// resolve in the daemon environment — so each case pins SHELL's presence in
+// the test environment explicitly rather than depending on the host's
+// (#7794): t.Setenv registers the restore, os.Unsetenv removes.
 func TestDockerAccount_ShellReassertedAfterRunArgs(t *testing.T) {
-	runCalled, _, runArgv := provisionDockerAccountImageEnv(t, "codex",
-		[]string{"-e", "TZ=UTC"}, nil, nil)
-	require.True(t, runCalled, "harmless run_args must still reach docker run")
-	runArgsIdx := indexIn(runArgv, "TZ=UTC")
-	require.Greater(t, runArgsIdx, 0, "the run_args marker was not in the argv: %v", runArgv)
-	shellIdx := indexIn(runArgv, "SHELL=/bin/sh")
-	require.Greaterf(t, shellIdx, runArgsIdx,
-		"SHELL=/bin/sh must be re-asserted after run_args so Docker's last-wins rule dominates an image-supplied SHELL: %v", runArgv)
-	require.Equal(t, -1, envPinIndex(runArgv, "SHELL"), "SHELL takes the re-asserted value, never a blank pin")
+	// No SHELL claim: the pin is re-asserted after run_args, valued, never a
+	// blank pin.
+	t.Run("unclaimed pins /bin/sh after run_args", func(t *testing.T) {
+		t.Setenv("SHELL", "")
+		require.NoError(t, os.Unsetenv("SHELL"))
+		runCalled, _, runArgv := provisionDockerAccountImageEnv(t, "codex",
+			[]string{"-e", "TZ=UTC"}, nil, nil)
+		require.True(t, runCalled, "harmless run_args must still reach docker run")
+		runArgsIdx := indexIn(runArgv, "TZ=UTC")
+		require.Greater(t, runArgsIdx, 0, "the run_args marker was not in the argv: %v", runArgv)
+		shellIdx := indexIn(runArgv, "SHELL=/bin/sh")
+		require.Greaterf(t, shellIdx, runArgsIdx,
+			"SHELL=/bin/sh must be re-asserted after run_args so Docker's last-wins rule dominates an image-supplied SHELL: %v", runArgv)
+		require.Equal(t, -1, envPinIndex(runArgv, "SHELL"), "SHELL takes the re-asserted value, never a blank pin")
+	})
 
 	// A repo run_args entry naming SHELL is refused before docker run.
-	runCalled, err, _ := provisionDockerAccountImageEnv(t, "codex",
-		[]string{"-e", "SHELL=/repo/evil.sh"}, nil, nil)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "SHELL")
-	require.False(t, runCalled, "a run_args SHELL must refuse before docker run")
+	t.Run("run_args SHELL refused", func(t *testing.T) {
+		runCalled, err, _ := provisionDockerAccountImageEnv(t, "codex",
+			[]string{"-e", "SHELL=/repo/evil.sh"}, nil, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "SHELL")
+		require.False(t, runCalled, "a run_args SHELL must refuse before docker run")
+	})
 
-	// An operator-forwarded SHELL is the operator's own claim on the name: the
-	// re-assertion steps aside so their value survives.
-	runCalled, _, runArgv = provisionDockerAccountImageEnv(t, "codex",
-		[]string{"-e", "TZ=UTC"}, []string{"SHELL"}, nil)
-	require.True(t, runCalled, "harmless run_args must still reach docker run")
-	require.Equal(t, -1, indexIn(runArgv, "SHELL=/bin/sh"),
-		"an operator-forwarded SHELL must not be re-asserted over: %v", runArgv)
+	// Claimed AND present in the daemon environment: an operator-forwarded
+	// SHELL is the operator's own claim on the name, so the re-assertion
+	// steps aside and the bare -e SHELL carries their value into the
+	// container.
+	t.Run("claimed and present forwards the operator value", func(t *testing.T) {
+		t.Setenv("SHELL", "/operator/sh")
+		runCalled, _, runArgv := provisionDockerAccountImageEnv(t, "codex",
+			[]string{"-e", "TZ=UTC"}, []string{"SHELL"}, nil)
+		require.True(t, runCalled, "harmless run_args must still reach docker run")
+		require.Equal(t, -1, indexIn(runArgv, "SHELL=/bin/sh"),
+			"an operator-forwarded SHELL must not be re-asserted over: %v", runArgv)
+		value, found := dockerEnvArg(runArgv, "SHELL")
+		require.True(t, found, "the operator's forwarded SHELL must reach the container: %v", runArgv)
+		require.Equal(t, "SHELL", value,
+			"a forwarded name is emitted bare so the CLI env supplies the operator's value")
+	})
+
+	// Claimed but ABSENT from the daemon environment: the claim resolves to
+	// nothing, so nothing is forwarded — the claim alone must not suppress
+	// the pin, or the image's ENV SHELL survives (the Codex P1 #7779's final
+	// head fixed on this path; the case itself had no coverage — #7794).
+	t.Run("claimed but absent still pins /bin/sh", func(t *testing.T) {
+		t.Setenv("SHELL", "")
+		require.NoError(t, os.Unsetenv("SHELL"))
+		runCalled, _, runArgv := provisionDockerAccountImageEnv(t, "codex",
+			[]string{"-e", "TZ=UTC"}, []string{"SHELL"}, nil)
+		require.True(t, runCalled, "harmless run_args must still reach docker run")
+		runArgsIdx := indexIn(runArgv, "TZ=UTC")
+		require.Greater(t, runArgsIdx, 0, "the run_args marker was not in the argv: %v", runArgv)
+		shellIdx := indexIn(runArgv, "SHELL=/bin/sh")
+		require.Greaterf(t, shellIdx, runArgsIdx,
+			"a session_env_passthrough claim with no host value forwards nothing, so the pin must still be re-asserted after run_args or the image's ENV SHELL survives: %v", runArgv)
+	})
 }
 
 // TestDockerAccount_NoTmuxConfigOnAgentServer pins the file-side half of the
