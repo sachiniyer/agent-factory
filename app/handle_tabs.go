@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -740,6 +741,14 @@ func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
 func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 	idx := oneBased - 1
 	if p := m.focusedOpenPane(); p != nil {
+		// Resolve the target the pane is ACTUALLY SHOWING before touching the
+		// preview, exactly as `w`/`R`/`</>` do (#1884): a previewing pane can be
+		// rendering a DIFFERENT session entirely while p.Instance()/p.Tab()
+		// report the committed binding underneath, so the raw binding names a
+		// tab the user cannot see. Reading it here made a digit jump retarget
+		// the hidden committed session — the wrong-target class every sibling
+		// verb already closes, and the one this PR exists to finish.
+		b := m.effectivePaneBinding(p)
 		w := m.paneWindows[p.ID()]
 		if m.panePreviewTxn != nil && m.panePreviewTxn.ownerPaneID == p.ID() {
 			m.cancelPanePreview(false)
@@ -752,7 +761,14 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 		// pane already showing the target, exactly like `s` on an open tab. A
 		// pane bound to idx also proves idx names a real tab, so no separate
 		// range check is owed on this branch.
-		if existing := m.store.FindOpenPane(p.Instance(), idx); existing != nil && existing != p {
+		//
+		// Resolve the roster against the on-screen instance, not the committed
+		// binding: a cross-session preview's committed roster is a DIFFERENT
+		// session's, so the original FindOpenPane(p.Instance(), idx) searched
+		// the hidden session, missed an already-open target, and silently
+		// rebound the focused pane — the open-or-focus contract misfired onto
+		// a session the user could not see.
+		if existing := m.store.FindOpenPane(b.instance, idx); existing != nil && existing != p {
 			m.cancelPanePreview(false)
 			// Pin jump intent on the pane being focused, mirroring the rebind
 			// branch below: the tree cursor still points at a DIVERGENT tab —
@@ -770,8 +786,29 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 			// this focus move (#1685).
 			return m, tea.Batch(selectionCmd, m.consumePaneAutoHideStatus())
 		}
-		if w == nil || !w.JumpToTab(idx) {
-			return m, m.handleNotice(tabJumpRefusal(p.Instance(), oneBased))
+		// Jump within the on-screen instance's roster. When a cross-session
+		// preview was live the committed binding names a different session
+		// entirely, and w.JumpToTab only retargets that committed binding — the
+		// hidden one — so rebind the pane to the on-screen instance's tab and
+		// retarget the render the way the preview-commit path does, rather than
+		// relying on the committed-binding window update. A same-instance
+		// preview (or no preview) keeps the in-place JumpToTab the committed
+		// path always used; either way the refusal names the on-screen session,
+		// the one the header shows, never the hidden committed one.
+		if b.instance != p.Instance() {
+			if b.instance == nil || idx < 0 || idx >= len(tree.TabLabels(b.instance)) {
+				return m, m.handleNotice(tabJumpRefusal(b.instance, oneBased))
+			}
+			if w != nil {
+				w.InvalidateContent(b.instance, idx, "Loading pane…")
+			}
+			if !m.store.RebindOpenPane(p, b.instance, idx) {
+				return m, m.handleNotice(tabJumpRefusal(b.instance, oneBased))
+			}
+			m.store.TouchOpenPane(p)
+			m.lastPaneCapture[p.ID()] = time.Time{}
+		} else if w == nil || !w.JumpToTab(idx) {
+			return m, m.handleNotice(tabJumpRefusal(b.instance, oneBased))
 		}
 		// An explicit number-key jump is a COMMIT, not a peek: pin the pane's
 		// intent for the current selection epoch so the trailing selectionChanged
@@ -787,7 +824,8 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 		// guard ever saw it, and letting the repaint back in.
 		m.bumpSelectionEpochIfMoved(m.sidebar.GetSelection())
 		m.pinPaneJumpIntent(p.ID())
-		// The pane's tab changed, so its live binding key changed — rebind it.
+		// The pane's binding changed (tab and, on a cross-session commit, the
+		// instance too), so its live binding key changed — rebind it.
 		m.syncLiveTermPane()
 		return m, m.selectionChanged()
 	}
