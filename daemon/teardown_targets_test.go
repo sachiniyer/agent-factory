@@ -169,6 +169,11 @@ func TestKillSession_GhostRegistersItsRecordsTargets(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
+	// An Archived record still restores into a tracked Instance on refresh —
+	// that is how the TUI lists it — so keep this one disk-only the way a real
+	// ghost record stays: the restore attempt fails and the record answers
+	// for itself.
+	failLoadFor(t, "ghost")
 
 	requester := proctree.Process{PID: 424251, StartID: 22}
 	server := &controlServer{manager: manager, requester: &requester}
