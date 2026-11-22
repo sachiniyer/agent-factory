@@ -41,7 +41,7 @@ func scopeRenameFailer(t *testing.T, failSrc []string, failErr error) {
 // white-box case: the very arm of rotate() whose error had to carry the marker.
 func TestScopeRotationDoubleFailureIsIndeterminate(t *testing.T) {
 	live := rotationHost(t)
-	rot, err := newScopeRotation(tmux.ProgramClaude)
+	rot, err := newScopeRotation(tmux.ProgramClaude, "")
 	require.NoError(t, err)
 
 	// Make both the incoming rename and its fallback restore rename fail, the
@@ -73,7 +73,7 @@ func TestScopeRotationDoubleFailureIsIndeterminate(t *testing.T) {
 // so the host really holds A again and the error carries no marker.
 func TestScopeRotationSingleFailureRollsBack(t *testing.T) {
 	live := rotationHost(t)
-	rot, err := newScopeRotation(tmux.ProgramClaude)
+	rot, err := newScopeRotation(tmux.ProgramClaude, "")
 	require.NoError(t, err)
 
 	scopeRenameFailer(t, []string{rot.next}, errors.New("simulated EIO"))

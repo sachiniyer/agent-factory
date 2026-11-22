@@ -48,22 +48,34 @@ type scopeSkillServer struct {
 
 func (s *scopeSkillServer) CanSwapAccount() (bool, error) { return s.can, nil }
 
-func (s *scopeSkillServer) AccountSwapStatus() (string, string, error) {
-	o, p := s.rec.status()
-	return o, p, nil
+func (s *scopeSkillServer) AccountSwapStatus() (string, string, string, error) {
+	o, p, id := s.rec.status()
+	return o, p, id, nil
 }
 
-func (s *scopeSkillServer) SwapAccountInPlace() (string, error) {
-	return s.rec.run(s.swap)
+func (s *scopeSkillServer) SwapAccountInPlace(swapID string) (string, error) {
+	return s.rec.run(swapID, func() (string, error) { return s.swap(swapID) })
 }
 
-func (s *scopeSkillServer) swap() (string, error) {
+// DiscardAccountNext is the serialized staged-scope discard (#7773 R2): under
+// the swap's own lock it tombstones the id and removes the staged scope, so a
+// request still queued behind it can never commit.
+func (s *scopeSkillServer) DiscardAccountNext(swapID string) error {
+	s.rec.mu.Lock()
+	defer s.rec.mu.Unlock()
+	if swapID != "" {
+		s.rec.cancelled = swapID
+	}
+	return os.RemoveAll(s.next)
+}
+
+func (s *scopeSkillServer) swap(id string) (string, error) {
 	s.calls++
 	os.Setenv(s.scopeEnv, s.live) // the server env names the live scope; the rotation reads it
 	for rel := range s.atCall {
 		s.atCall[rel] = readOrEmpty(filepath.Join(s.next, filepath.FromSlash(rel)))
 	}
-	rot, err := newScopeRotation(s.agent)
+	rot, err := newScopeRotation(s.agent, id)
 	if err != nil {
 		return "", err
 	}

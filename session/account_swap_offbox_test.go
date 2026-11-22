@@ -2,9 +2,11 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,29 +47,136 @@ type acctSwapServer struct {
 	// remote transport does, so swapOutcomeIndeterminate resolves it on the
 	// marker rather than treating it as a lost call.
 	wrapAnswered bool
-	rec          accountSwapRecorder
-	calls        int
-	atCall       struct{ live, next string }
+	// anonymous drops the id from every status answer: the shape a pre-identity
+	// agent-server speaks, whose outcomes can never be attributed to a swap
+	// (#7773).
+	anonymous bool
+	// delayedAtStatusCall is the reconcile's status read after which the lost
+	// request lands late — run under the same id the daemon sent, inside the
+	// recorder exactly as the late arrival would be (#7773).
+	delayedAtStatusCall int
+	// holdNext keeps the next N swap requests parked without running them —
+	// the shape of a POST still in transit or queued on the agent-server's
+	// operation lock across the reconcile's reads (#7773 R1). runHeldSwap
+	// lands one later, against whatever scope is staged then.
+	holdNext int
+	held     []string
+	// rotateGate, when non-nil, holds a running swap open between the staged
+	// scope's checks and the rotation itself: the seam for a discard arriving
+	// while a rotation is in flight (#7773 R2). rotateWaiting signals the
+	// swap is parked there.
+	rotateGate    chan struct{}
+	rotateWaiting chan struct{}
+	// discardWaiting is closed when a discard call arrives — before it takes
+	// the lock — and beforeDiscard, when non-nil, holds the call outside the
+	// lock: the seams that let a test decide which of a rotation and a
+	// discard reaches the serialization first (#7773 R2).
+	discardWaiting, beforeDiscard chan struct{}
+	// discardGate, when non-nil, holds the serialized discard open inside its
+	// lock: the seam for a rotation arriving while the discard runs.
+	discardGate    chan struct{}
+	discardStarted chan struct{}
+	// delayedInBackground makes the delayed request land in its own goroutine
+	// rather than inside the status call — the late arrival contends for the
+	// lock exactly as a real one would.
+	delayedInBackground bool
+	statusCalls         int
+	rec                 accountSwapRecorder
+	calls               int
+	lastID              string
+	atCall              struct{ live, next string }
 }
 
 func (s *acctSwapServer) CanSwapAccount() (bool, error) { return s.can, s.canErr }
 
-func (s *acctSwapServer) AccountSwapStatus() (string, string, error) {
+func (s *acctSwapServer) AccountSwapStatus() (string, string, string, error) {
+	s.statusCalls++
 	if s.statusErr != nil {
-		return "", "", s.statusErr
+		return "", "", "", s.statusErr
 	}
-	o, p := s.rec.status()
-	return o, p, nil
+	o, p, id := s.rec.status()
+	if s.anonymous {
+		id = "" // a pre-identity server answers with no id
+	}
+	if s.delayedAtStatusCall == s.statusCalls {
+		if s.delayedInBackground {
+			go s.runDelayedSwap()
+		} else {
+			s.runDelayedSwap()
+		}
+	}
+	return o, p, id, nil
+}
+
+// runDelayedSwap is the lost request landing late: the same id the daemon sent,
+// run against the host now — inside the recorder, exactly as the late arrival
+// would be.
+func (s *acctSwapServer) runDelayedSwap() {
+	_, _ = s.rec.run(s.lastID, func() (string, error) { return s.swap(s.lastID) })
+}
+
+// runHeldSwap lands a request that stayed queued through the reconcile — under
+// its own id, against whatever scope is staged on the host NOW (#7773 R1).
+func (s *acctSwapServer) runHeldSwap(i int) (string, error) {
+	return s.rec.run(s.held[i], func() (string, error) { return s.swap(s.held[i]) })
+}
+
+// DiscardAccountNext is the serialized staged-scope discard of #7773 R2: on a
+// pre-identity server the route does not exist; on this one it removes the
+// staged scope under the swap's own lock and tombstones the swap's id, so a
+// request still queued can never commit.
+func (s *acctSwapServer) DiscardAccountNext(swapID string) error {
+	if s.anonymous {
+		return errors.New("remote agent-server: POST /v1/agent/swap-account-discard: the agent-server does not know this route")
+	}
+	if s.discardWaiting != nil {
+		close(s.discardWaiting)
+		s.discardWaiting = nil
+	}
+	if s.beforeDiscard != nil {
+		<-s.beforeDiscard
+	}
+	// rec.mu plays both the recorder's own lock and the server's operation
+	// lock here: the swap holds it for its whole run, so the discard can never
+	// interleave with a rotation — it runs strictly before or after one.
+	s.rec.mu.Lock()
+	defer s.rec.mu.Unlock()
+	if swapID != "" {
+		s.rec.cancelled = swapID
+	}
+	if s.discardStarted != nil {
+		close(s.discardStarted)
+		s.discardStarted = nil
+	}
+	if s.discardGate != nil {
+		<-s.discardGate
+	}
+	// Like the real server-side discard: only the stage bound to THIS swap is
+	// removed — a late discard leaves another swap's .next alone.
+	if swapID != "" {
+		marker, err := os.ReadFile(filepath.Join(s.next, accountSwapMarkerRel))
+		if err != nil || strings.TrimSpace(string(marker)) != swapID {
+			return nil
+		}
+	}
+	return os.RemoveAll(s.next)
 }
 
 // SwapAccountInPlace records the terminal outcome the way the real server does,
-// and may then lose the response.
-func (s *acctSwapServer) SwapAccountInPlace() (string, error) {
+// under the swap's own identity, and may then lose the response.
+func (s *acctSwapServer) SwapAccountInPlace(swapID string) (string, error) {
+	s.lastID = swapID
+	if s.holdNext > 0 {
+		s.holdNext--
+		s.held = append(s.held, swapID)
+		s.calls++
+		return "", errors.New("remote agent-server: POST /v1/agent/swap-account: the request never completed")
+	}
 	if s.loseBefore != nil {
 		s.calls++
 		return "", s.loseBefore
 	}
-	prog, err := s.rec.run(s.swap)
+	prog, err := s.rec.run(swapID, func() (string, error) { return s.swap(swapID) })
 	if err == nil && s.loseResponse != nil {
 		return "", s.loseResponse
 	}
@@ -77,16 +186,20 @@ func (s *acctSwapServer) SwapAccountInPlace() (string, error) {
 	return prog, err
 }
 
-func (s *acctSwapServer) swap() (string, error) {
+func (s *acctSwapServer) swap(id string) (string, error) {
 	s.calls++
 	s.atCall.live = readOrEmpty(filepath.Join(s.live, credFile))
 	s.atCall.next = readOrEmpty(filepath.Join(s.next, credFile))
-	if s.loseBefore != nil {
-		return "", s.loseBefore
-	}
-	rot, err := newScopeRotation(tmux.ProgramClaude)
+	rot, err := newScopeRotation(tmux.ProgramClaude, id)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", errStageNotMine, err)
+	}
+	if s.rotateWaiting != nil {
+		close(s.rotateWaiting)
+		s.rotateWaiting = nil
+	}
+	if s.rotateGate != nil {
+		<-s.rotateGate
 	}
 	if err := rot.rotate(); err != nil {
 		return "", err
@@ -337,7 +450,7 @@ func rotationHost(t *testing.T) (live string) {
 
 func TestScopeRotationRoundTrip(t *testing.T) {
 	live := rotationHost(t)
-	rot, err := newScopeRotation(tmux.ProgramClaude)
+	rot, err := newScopeRotation(tmux.ProgramClaude, "")
 	require.NoError(t, err)
 
 	require.NoError(t, rot.rotate())
@@ -360,35 +473,35 @@ func TestScopeRotationRefusesAScopeAfDidNotMake(t *testing.T) {
 		other := filepath.Join(t.TempDir(), "home-dot-claude")
 		require.NoError(t, os.MkdirAll(other+accountNextSuffix, 0o700))
 		t.Setenv("CLAUDE_CONFIG_DIR", other)
-		_, err := newScopeRotation(tmux.ProgramClaude)
+		_, err := newScopeRotation(tmux.ProgramClaude, "")
 		require.ErrorContains(t, err, "not a session account scope")
 	})
 	t.Run("unset", func(t *testing.T) {
 		t.Setenv("CLAUDE_CONFIG_DIR", "")
-		_, err := newScopeRotation(tmux.ProgramClaude)
+		_, err := newScopeRotation(tmux.ProgramClaude, "")
 		require.Error(t, err)
 	})
 	t.Run("nothing staged", func(t *testing.T) {
 		live := rotationHost(t)
 		require.NoError(t, os.RemoveAll(live+accountNextSuffix))
-		_, err := newScopeRotation(tmux.ProgramClaude)
+		_, err := newScopeRotation(tmux.ProgramClaude, "")
 		require.ErrorContains(t, err, "no staged account")
 	})
 	t.Run("staged scope holds no credential", func(t *testing.T) {
 		live := rotationHost(t)
 		require.NoError(t, os.Remove(filepath.Join(live+accountNextSuffix, credFile)))
-		_, err := newScopeRotation(tmux.ProgramClaude)
+		_, err := newScopeRotation(tmux.ProgramClaude, "")
 		require.ErrorContains(t, err, "no credential file")
 	})
 	t.Run("staged scope is a symlink", func(t *testing.T) {
 		live := rotationHost(t)
 		require.NoError(t, os.RemoveAll(live+accountNextSuffix))
 		require.NoError(t, os.Symlink(t.TempDir(), live+accountNextSuffix))
-		_, err := newScopeRotation(tmux.ProgramClaude)
+		_, err := newScopeRotation(tmux.ProgramClaude, "")
 		require.Error(t, err)
 	})
 	t.Run("an agent with no scope variable", func(t *testing.T) {
-		_, err := newScopeRotation("aider")
+		_, err := newScopeRotation("aider", "")
 		require.Error(t, err)
 	})
 }
@@ -484,40 +597,43 @@ func TestSwapOffBoxAccountServerThatCouldNotRestoreIsUnknown(t *testing.T) {
 // the rollback state under a swap that may still fail.
 func TestAccountSwapStatusWaitsForTheRunningSwap(t *testing.T) {
 	var r accountSwapRecorder
-	started, release, got := make(chan struct{}), make(chan struct{}), make(chan [2]string, 1)
+	started, release, got := make(chan struct{}), make(chan struct{}), make(chan [3]string, 1)
 	go func() {
-		_, _ = r.run(func() (string, error) {
+		_, _ = r.run("swap-1", func() (string, error) {
 			close(started)
 			<-release
 			return "claude", nil
 		})
 	}()
 	<-started
-	go func() { o, p := r.status(); got <- [2]string{o, p} }()
+	go func() { o, p, id := r.status(); got <- [3]string{o, p, id} }()
 	select {
 	case v := <-got:
 		t.Fatalf("status answered %v while the swap was still running", v)
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(release)
-	assert.Equal(t, [2]string{swapOutcomeCommitted, "claude"}, <-got)
+	assert.Equal(t, [3]string{swapOutcomeCommitted, "claude", "swap-1"}, <-got)
 
 	var fresh accountSwapRecorder
-	o, _ := fresh.status()
+	o, _, id := fresh.status()
 	assert.Equal(t, swapOutcomeNone, o)
-	_, _ = fresh.run(func() (string, error) { return "", errors.New("refused") })
-	o, _ = fresh.status()
+	assert.Empty(t, id)
+	_, _ = fresh.run("swap-2", func() (string, error) { return "", errors.New("refused") })
+	o, _, id = fresh.status()
 	assert.Equal(t, swapOutcomeRolledBack, o)
-	_, _ = fresh.run(func() (string, error) { return "", errors.New(accountScopeIndeterminate) })
-	o, _ = fresh.status()
+	assert.Equal(t, "swap-2", id)
+	_, _ = fresh.run("swap-3", func() (string, error) { return "", errors.New(accountScopeIndeterminate) })
+	o, _, id = fresh.status()
 	assert.Equal(t, swapOutcomeUnknown, o)
+	assert.Equal(t, "swap-3", id)
 }
 
 // Siblings are stopped before the scope moves, and one that cannot be confirmed
 // stopped aborts the rotation untouched.
 func TestScopeRotationStopsSiblingsFirst(t *testing.T) {
 	live := rotationHost(t)
-	rot, err := newScopeRotation(tmux.ProgramClaude)
+	rot, err := newScopeRotation(tmux.ProgramClaude, "")
 	require.NoError(t, err)
 
 	var order []string
@@ -530,7 +646,7 @@ func TestScopeRotationStopsSiblingsFirst(t *testing.T) {
 	assert.Equal(t, "B", readOrEmpty(filepath.Join(live, credFile)))
 
 	live = rotationHost(t)
-	rot, err = newScopeRotation(tmux.ProgramClaude)
+	rot, err = newScopeRotation(tmux.ProgramClaude, "")
 	require.NoError(t, err)
 	err = rot.rotateAfter(func() error { return errors.New("cannot confirm tab \"shell\" stopped") })()
 	require.ErrorContains(t, err, "cannot confirm")

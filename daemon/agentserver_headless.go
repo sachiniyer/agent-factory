@@ -571,6 +571,7 @@ func (hs *headlessServer) newMux() *http.ServeMux {
 	// "account-swap" feature.
 	mux.HandleFunc("/v1/agent/swap-account", rpcHandler(hs.SwapAccount))
 	mux.HandleFunc("/v1/agent/swap-account-status", rpcHandler(hs.SwapAccountStatus))
+	mux.HandleFunc("/v1/agent/swap-account-discard", rpcHandler(hs.DiscardAccountNext))
 	// The W4.3 tab surface (#5571): stable-id create/close and the roster with
 	// exit evidence, over the same envelope dispatch. These are the routes the
 	// "tab-api" feature token on /v1/health advertises.
@@ -626,6 +627,10 @@ var agentServerWireFeatures = []string{
 	// "account-swap": POST /v1/agent/swap-account — rotate the staged account
 	// scope in and relaunch the agent on it (#5571 W7.6).
 	session.AccountSwapFeature,
+	// "account-swap-discard": POST /v1/agent/swap-account-discard — drop the
+	// staged scope serialized with the swap, tombstoning the swap's id so a
+	// queued request can never commit it (#7773 R2).
+	session.AccountSwapDiscardFeature,
 	// "tab-restore": a restart adoption's Launch carries the roster; survivors
 	// are rebound, never re-run (W1.4, #6162).
 	session.TabRestoreFeature,
