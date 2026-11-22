@@ -115,7 +115,7 @@ func TestEnsurePanePathDirReensuresTheRecordedPath(t *testing.T) {
 	}
 	require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout))
 	assert.Equal(t, "/tmp/af-path.aBcDeF/sess-x", w.panePathDir)
-	assert.Contains(t, script, `link=/tmp/af-path.aBcDeF/sess-x`,
+	assert.Contains(t, script, `link=`+shellQuote("/tmp/af-path.aBcDeF/sess-x"),
 		"the recorded link path is re-created verbatim")
 	assert.NotContains(t, script, "mktemp", "a recorded path is never re-chosen")
 

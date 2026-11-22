@@ -317,11 +317,11 @@ func TestSandboxReapScriptRemovesThePanePathIndirection(t *testing.T) {
 	}
 	script, _ := p.reapScript("a1b2c3d4")
 
-	assert.Contains(t, script, "rm -f -- /tmp/af-path.aBcDeF/sess-0123456789abcdef",
+	assert.Contains(t, script, "rm -f -- "+shellQuote("/tmp/af-path.aBcDeF/sess-0123456789abcdef"),
 		"the indirection link provision staged is removed with the session")
-	assert.Contains(t, script, "rmdir -- /tmp/af-path.aBcDeF",
+	assert.Contains(t, script, "rmdir -- "+shellQuote("/tmp/af-path.aBcDeF"),
 		"and the link's parent — $HOME/.af-path or the mktemp root — is dropped when it empties")
-	assert.NotContains(t, script, "rm -f -- /tmp/af-path.aBcDeF/sess-0123456789abcdef ||",
+	assert.NotContains(t, script, "rm -f -- "+shellQuote("/tmp/af-path.aBcDeF/sess-0123456789abcdef")+" ||",
 		"a failed link removal must never mask the session dir's own rm status")
 
 	// No recorded indirection — a colon-free session dir or a row that
