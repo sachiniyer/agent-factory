@@ -877,7 +877,7 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, 
 		}
 		if session, ok := processEnvValue(environ, EnvMarkerSession); ok && session == sanitizedName &&
 			(generations == nil || generations.contains(environ)) {
-			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process)
+			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process, sanitizedName)
 		}
 	}
 	return refreshed, nil

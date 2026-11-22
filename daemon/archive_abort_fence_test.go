@@ -2,6 +2,9 @@ package daemon
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,11 +49,23 @@ func requireArchiveFence(t *testing.T, inst *session.Instance, repoID, title, ca
 		"the row detail must say why the session is not restarting")
 	assert.Contains(t, failure.Error, cause, "the row detail must keep the teardown's own cause")
 
+	// #7754 property 4: the fence is labelled an archive refusal, not a
+	// restore give-up — no restore attempt ever ran on this row. The kind is
+	// additive; an older daemon reads attempts+error and still keeps the row
+	// fenced (the field predates the label, so downgrade stays safe).
+	assert.Equal(t, session.LostRestoreFailureArchiveRefused, failure.Kind)
+	assert.True(t, strings.HasPrefix(failure.Detail(), "archive refused: "),
+		"the API detail must name this an archive refusal, got %q", failure.Detail())
+	assert.NotContains(t, failure.Detail(), "restore gave up")
+
 	rec := recordFor(t, repoID, title)
 	require.NotNil(t, rec)
 	require.NotNil(t, rec.LostRestoreFailure,
 		"the fence must be durable: a daemon restart would otherwise reload the row unfenced and re-spawn it")
 	assert.Contains(t, rec.LostRestoreFailure.Error, "archive did not finish")
+	assert.Equal(t, session.LostRestoreFailureArchiveRefused, rec.LostRestoreFailure.Kind,
+		"the refusal label must be durable too")
+	assert.True(t, strings.HasPrefix(rec.LostRestoreFailure.Detail(), "archive refused: "))
 }
 
 // The incident path: ArchiveSession's archiveTeardown refused.
@@ -160,4 +175,134 @@ func TestArchiveRemotePreserving_StopFailureFencesLostRestore(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, session.LiveLost, inst.GetLiveness())
 	requireArchiveFence(t, inst, repoID, "preserve-refused", "no preservable session directory")
+}
+
+// #7754 property 1, the first rollback arm: the committed archive whose FINAL
+// VS Code sweep could not confirm the stop rolls back to Lost. Before this fix
+// undoCommittedArchive left the row Lost with NO fence, and the automatic
+// restore loop re-spawned the agent the user had just asked to stop — the same
+// resurrection #7752 reported, reached one step later in the flow.
+func TestArchiveSession_FinalVSCodeStopRollbackFencesLostRestore(t *testing.T) {
+	zeroRestoreBackoff(t)
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, origPath := registerArchivable(t, manager, repoID, repoPath, "worker")
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst.SetBackend(backend)
+	plantStuckEditorAfterTeardown(t, manager, inst, daemonInstanceKey(repoID, "worker"), origPath)
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rolled the archive back and left it Lost",
+		"the caller must be told the archive was undone, not that it committed")
+	require.Equal(t, origPath, inst.GetWorktreePath(),
+		"precondition: the rollback-SUCCESS arm ran — the worktree is home")
+	require.Equal(t, session.Lost, inst.GetStatus())
+	requireArchiveFence(t, inst, repoID, "worker", "VS Code editor teardown")
+
+	// The point of the fence: the loop leaves the row down.
+	manager.RestoreLostSessions()
+	assert.Equal(t, 0, backend.recoverCalls(),
+		"a rolled-back requested archive must never be auto-restored into a live agent")
+	assert.Equal(t, session.Lost, inst.GetStatus())
+}
+
+// #7754 property 1, the second rollback arm: same committed archive, but the
+// durable write is what failed. Only the commit write is stubbed — the undo's
+// own persistInstanceErr must succeed so the fence lands on disk.
+func TestArchiveSession_PersistFailureRollbackFencesLostRestore(t *testing.T) {
+	zeroRestoreBackoff(t)
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst.SetBackend(backend)
+
+	previous := archivePersist
+	commitWriteFailed := errors.New("forced persist failure")
+	calls := 0
+	archivePersist = func(m *Manager, rid string, i *session.Instance) error {
+		calls++
+		if calls == 1 {
+			return commitWriteFailed
+		}
+		return previous(m, rid, i)
+	}
+	t.Cleanup(func() { archivePersist = previous })
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+
+	require.ErrorIs(t, err, commitWriteFailed)
+	assert.Contains(t, err.Error(), "rolled it back and left it Lost")
+	require.Equal(t, session.Lost, inst.GetStatus())
+	requireArchiveFence(t, inst, repoID, "worker", "forced persist failure")
+
+	manager.RestoreLostSessions()
+	assert.Equal(t, 0, backend.recoverCalls(),
+		"a rolled-back requested archive must never be auto-restored into a live agent")
+}
+
+// The double failure: the rollback home succeeded but writing the fenced
+// recovered state failed too. The in-memory row is still fenced (a restart is
+// the exposure), and the returned error must SAY the fence could not be made
+// durable — a silent drop would leave the operator believing the session is
+// safely down when the next daemon start re-spawns it.
+func TestArchiveSession_RollbackFencePersistFailureIsReported(t *testing.T) {
+	zeroRestoreBackoff(t)
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst.SetBackend(backend)
+
+	// Make EVERY durable write for this repo fail by sealing the on-disk
+	// instances directory — the undo's persist is persistInstanceErr on the
+	// real path, so a stub cannot reach it.
+	repoDir := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "instances", repoID)
+	require.NoError(t, os.Chmod(repoDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(repoDir, 0o755) })
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rolled the archive back and left it Lost",
+		"the rollback still happened and must still be reported")
+	assert.Contains(t, err.Error(), "could not record its recovered state on disk",
+		"the unfenced-on-disk exposure must be named, not swallowed")
+	require.Equal(t, session.Lost, inst.GetStatus())
+
+	// The in-memory fence still holds — the exposure is the NEXT daemon start.
+	failure := inst.LostRestoreFailureSnapshot()
+	require.NotNil(t, failure)
+	assert.Equal(t, session.LostRestoreFailureArchiveRefused, failure.Kind)
+	require.False(t, lostSessionWantsRestore(inst.LifecycleView()))
+	manager.RestoreLostSessions()
+	assert.Equal(t, 0, backend.recoverCalls())
+}
+
+// #7754 property 3: the heal. A Lost row fenced by a refused archive whose SAME
+// runtime answers the liveness probe alive leaves Lost and durably clears the
+// failure — the fence keeps zombies down, it must not pin a recovered session
+// in a terminal state.
+func TestRefreshStatuses_AliveObservationClearsArchiveRefusedFence(t *testing.T) {
+	zeroRestoreBackoff(t)
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "heal-me", session.NewFakeBackend(), true, session.Lost)
+
+	// Fence the row exactly the way a refused requested archive does — same
+	// field, same kind — then make it durable so the clear below must write.
+	require.NoError(t, inst.Transition(session.BeginArchive()))
+	manager.abortRequestedArchiveToLost(inst, teardownRefusal)
+	require.NoError(t, manager.persistInstanceErr(repoID, inst))
+	requireArchiveFence(t, inst, repoID, "heal-me", "pane processes 4242")
+
+	manager.RefreshStatuses()
+
+	require.Equal(t, session.Ready, inst.GetLiveness(),
+		"the same runtime observed alive must heal the row out of Lost")
+	require.Nil(t, inst.LostRestoreFailureSnapshot(),
+		"the archive-refused fence is cleared like any terminal restore failure")
+
+	rec := recordFor(t, repoID, "heal-me")
+	require.NotNil(t, rec)
+	require.Nil(t, rec.LostRestoreFailure,
+		"the clear must be durable: a restart would otherwise re-fence a live session")
 }

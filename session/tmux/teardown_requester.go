@@ -11,14 +11,15 @@ import (
 // session/git cannot import session/tmux. These thin wrappers keep the tmux
 // seam's naming local.
 
-// TrackTeardownRequester registers proc as a process blocked on a teardown
-// reply for the duration of the caller's handler, returning the unregister.
-func TrackTeardownRequester(proc proctree.Process) func() {
-	return teardownreq.Track(proc)
+// TrackTeardownRequester registers proc as a process blocked on the reply of
+// EACH of targets' teardowns for the duration of the caller's handler,
+// returning the unregister.
+func TrackTeardownRequester(proc proctree.Process, targets ...teardownreq.Target) func() {
+	return teardownreq.Track(proc, targets...)
 }
 
 // isTeardownRequester reports whether p's identity is a process currently
-// registered as blocked on a teardown reply.
-func isTeardownRequester(p proctree.Process) bool {
-	return teardownreq.Is(p)
+// registered as blocked on target's teardown reply.
+func isTeardownRequester(p proctree.Process, target teardownreq.Target) bool {
+	return teardownreq.Is(p, target)
 }

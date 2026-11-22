@@ -668,9 +668,11 @@ func (s *controlServer) killSession(ctx context.Context, req *KillSessionRequest
 	}
 	// A caller tearing down its OWN session is still blocked on this reply
 	// inside the pane tree being reaped; register the kernel-verified
-	// requester so teardown spares it (#5182). Unregistered on return — the
-	// reply is in flight and the exemption is over.
-	defer s.trackTeardownRequester(ctx, req)()
+	// requester so teardown spares it (#5182) — scoped to THIS teardown's
+	// targets so the same client earns nothing in another session's reap
+	// (#7754). Unregistered on return — the reply is in flight and the
+	// exemption is over.
+	defer s.trackTeardownRequester(ctx, req, s.manager.teardownTargetsForSession(req.ID, req.Title, req.RepoID))()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}

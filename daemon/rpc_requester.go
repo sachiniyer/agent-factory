@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/teardownreq"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -165,7 +166,14 @@ func rpcRequester(ctx context.Context) string {
 // exemption. Anything that could not produce a verified identity — a read
 // failure, an unsupported platform, a peer already gone at accept — carries
 // no requester, which is exactly the pre-#5182 behavior.
-func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey any) func() {
+// targets is the teardown this call will own — the tmux session names and
+// worktree paths the handler resolved for its request. The registry scopes
+// the exemption to THOSE teardowns (#7754): a requester blocked on archiving
+// session B while living in session A's pane is excused from B's reap only,
+// and A's teardown counts it among A's survivors like any other claimant.
+// Nil targets register nothing — an unresolvable or soon-to-be-refused
+// request earns no exemption, the same as an unverifiable identity.
+func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey any, targets []teardownreq.Target) func() {
 	requester := s.requester
 	if requester == nil {
 		requester, _ = ctx.Value(httpPeerRequesterContextKey{}).(*proctree.Process)
@@ -173,7 +181,7 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey a
 	if requester == nil {
 		return func() {}
 	}
-	untrack := sessiontmux.TrackTeardownRequester(*requester)
+	untrack := sessiontmux.TrackTeardownRequester(*requester, targets...)
 	// Disconnect release, parked NOW rather than at handler return: a peer
 	// that dies while this handler is still running cannot be waiting for any
 	// reply, so its exemption ends at disconnect — the codec's EOF drain (and
@@ -221,4 +229,32 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey a
 			untrack()
 		})
 	}
+}
+
+// teardownTargetsForSession resolves the session a destructive request names
+// to the targets its teardown will own (#7754): the tmux session names it
+// will close and the worktree path its writer reaper will empty. The request
+// is resolved through the SAME resolver the operation itself uses
+// (resolveActionSession, id-first), so the registered target is the session
+// the teardown actually reaches — not the request's possibly stale title.
+//
+// A request that resolves no live instance — a ghost disk record, a bad
+// name, a session already gone — carries no targets: the registration is
+// empty, which exempts nothing. That is the safe direction both ways: the
+// teardown the request could not name cannot be mis-attributed to it, and a
+// refused request leaves its caller's pane exactly as killable as before
+// #5182.
+//
+// Resolution and the operation's own resolve can still race the map between
+// here and there: a same-title replacement created in the gap tears the NEW
+// instance down under names this set does not hold, and the requester then
+// earns no exemption for it — it is reaped like any other captured process.
+// That is deliberately the conservative edge: an over-wide target would
+// excuse a caller from a teardown it never asked for.
+func (m *Manager) teardownTargetsForSession(id, title, repoID string) []teardownreq.Target {
+	instance, _, _, _, _, err := m.resolveActionSession(id, title, repoID)
+	if err != nil || instance == nil {
+		return nil
+	}
+	return instance.TeardownTargets()
 }

@@ -192,7 +192,7 @@ func TestWorktreeWriterProcesses_SettlesEachIdentityOncePerPass(t *testing.T) {
 		return proctree.NotTmux
 	}
 
-	procs, unclassified := worktreeWriterProcessesMatching(snap, 99, func(int) bool { return true }, identity)
+	procs, unclassified := worktreeWriterProcessesMatching(snap, 99, func(int) bool { return true }, identity, teardownreq.WorktreeTarget("/managed/worktree"))
 
 	assert.ElementsMatch(t, []int{parent}, processPIDs(procs),
 		"a pid read as unknown must not be admitted by a later read in the same pass")
@@ -226,7 +226,7 @@ func TestWorktreeWriterProcesses_NeverSelectsAnUnclassifiableRoot(t *testing.T) 
 	// The control is not, because it was not spared at all.
 	matches := func(int) bool { return true }
 	procs, unclassified := worktreeWriterProcessesMatching(snap, 99, matches,
-		identities(map[int]proctree.TmuxIdentity{unreadable: proctree.TmuxUnknown}))
+		identities(map[int]proctree.TmuxIdentity{unreadable: proctree.TmuxUnknown}), teardownreq.WorktreeTarget(root))
 	assert.ElementsMatch(t, []int{ordinary}, processPIDs(procs))
 	assert.ElementsMatch(t, []int{unreadable}, processPIDs(unclassified),
 		"the process left out only for an unknown identity must be reported as such")
@@ -270,7 +270,7 @@ func TestWorktreeWriterProcesses_RetainsTeardownRequester(t *testing.T) {
 	workingDir := func(pid int) (string, bool) { d, ok := workingDirs[pid]; return d, ok }
 	noTmux := allNotTmux
 
-	untrack := teardownreq.Track(snap[20])
+	untrack := teardownreq.Track(snap[20], teardownreq.WorktreeTarget(root))
 	defer untrack()
 
 	got := worktreeWriterProcesses(root, snap, 99, workingDir, noTmux)
@@ -283,7 +283,7 @@ func TestWorktreeWriterProcesses_RetainsTeardownRequester(t *testing.T) {
 	assert.ElementsMatch(t, []int{10, 20, 30, 40}, processPIDs(got),
 		"once the handler returns, the same process is a writer again")
 
-	untrack = teardownreq.Track(snap[20])
+	untrack = teardownreq.Track(snap[20], teardownreq.WorktreeTarget(root))
 	defer untrack()
 	recycled := map[int]proctree.Process{
 		10: snap[10],
@@ -308,7 +308,7 @@ func TestWorktreeWriterProcesses_RequesterRootKeepsChildrenEligible(t *testing.T
 	workingDirs := map[int]string{50: root, 60: outside}
 	workingDir := func(pid int) (string, bool) { d, ok := workingDirs[pid]; return d, ok }
 
-	untrack := teardownreq.Track(snap[50])
+	untrack := teardownreq.Track(snap[50], teardownreq.WorktreeTarget(root))
 	defer untrack()
 
 	got := worktreeWriterProcesses(root, snap, 99, workingDir, allNotTmux)

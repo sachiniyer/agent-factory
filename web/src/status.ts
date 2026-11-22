@@ -89,10 +89,16 @@ export function idleReasonDetail(s: SessionData, now: Date = new Date()): string
   }
   let detail = label;
   if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
-    const { attempts, error } = s.lost_restore_failure;
+    const { attempts, error, kind } = s.lost_restore_failure;
     if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "attempt" : "attempts";
-      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+      // Mirror of session.LostRestoreFailure.Detail: an archive-refused row
+      // names the refusal, not a restore give-up that never ran (#7754).
+      if (kind === "archive-refused") {
+        detail = `archive refused: ${error}`;
+      } else {
+        const noun = attempts === 1 ? "attempt" : "attempts";
+        detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+      }
     }
   }
   // Mirror of session.LostRestoreWait.Detail — the wait names the error that

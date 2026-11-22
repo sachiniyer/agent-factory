@@ -14,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/teardownreq"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/log/logtest"
@@ -48,20 +49,26 @@ func spawnRequesterSleeper(t *testing.T) proctree.Process {
 
 func TestTrackTeardownRequesterScopesByIdentity(t *testing.T) {
 	requester := proctree.Process{PID: 424242, StartID: 777}
-	require.False(t, isTeardownRequester(requester))
+	target := teardownreq.TmuxTarget("af_scope_identity")
+	require.False(t, isTeardownRequester(requester, target))
 
-	untrack := TrackTeardownRequester(requester)
+	untrack := TrackTeardownRequester(requester, target)
 	t.Cleanup(untrack)
-	require.True(t, isTeardownRequester(requester),
+	require.True(t, isTeardownRequester(requester, target),
 		"the registered process must read as a teardown requester")
 
 	// A pid recycled into a NEW process instance is not the requester: the
 	// (pid, start-stamp) pair is the identity, not the slot (#2103's rule).
-	require.False(t, isTeardownRequester(proctree.Process{PID: requester.PID, StartID: requester.StartID + 1}),
+	require.False(t, isTeardownRequester(proctree.Process{PID: requester.PID, StartID: requester.StartID + 1}, target),
 		"a same-pid different-start identity must not inherit the exemption")
 
+	// The excusal is scoped to the teardown the request waits on (#7754): the
+	// same registration earns nothing in a different teardown's reap.
+	require.False(t, isTeardownRequester(requester, teardownreq.TmuxTarget("af_other_teardown")),
+		"a requester of another teardown must not be excused here")
+
 	untrack()
-	require.False(t, isTeardownRequester(requester),
+	require.False(t, isTeardownRequester(requester, target),
 		"the exemption ends when the handler returns")
 	untrack() // a second unregister is a no-op, not a panic
 }
@@ -73,15 +80,16 @@ func TestTrackTeardownRequesterScopesByIdentity(t *testing.T) {
 // the requester whose reply is still outstanding (Codex on #5186).
 func TestTrackTeardownRequesterCountsOverlappingRegistrations(t *testing.T) {
 	requester := proctree.Process{PID: 424243, StartID: 888}
-	first := TrackTeardownRequester(requester)
-	second := TrackTeardownRequester(requester)
+	target := teardownreq.TmuxTarget("af_overlapping")
+	first := TrackTeardownRequester(requester, target)
+	second := TrackTeardownRequester(requester, target)
 
 	first()
-	require.True(t, isTeardownRequester(requester),
+	require.True(t, isTeardownRequester(requester, target),
 		"one handler returning must not unregister a second still in flight")
 
 	second()
-	require.False(t, isTeardownRequester(requester),
+	require.False(t, isTeardownRequester(requester, target),
 		"the exemption ends when the last overlapping handler returns")
 }
 
@@ -89,10 +97,16 @@ func TestTrackTeardownRequesterCountsOverlappingRegistrations(t *testing.T) {
 // it with whatever proctree.Lookup produced, and a failure there must degrade
 // to "no requester" rather than tracking garbage or crashing the handler.
 func TestTrackTeardownRequesterZeroProcessIsNoop(t *testing.T) {
-	untrack := TrackTeardownRequester(proctree.Process{})
+	untrack := TrackTeardownRequester(proctree.Process{}, teardownreq.TmuxTarget("af_zero"))
 	require.NotNil(t, untrack)
 	untrack()
-	require.False(t, isTeardownRequester(proctree.Process{PID: 0, StartID: 0}))
+	// No targets at all registers nothing the same way — an unresolvable
+	// request exempts a guess for nobody (#7754).
+	untracked := TrackTeardownRequester(proctree.Process{PID: 424244, StartID: 9})
+	require.NotNil(t, untracked)
+	untracked()
+	require.False(t, isTeardownRequester(proctree.Process{PID: 0, StartID: 0}, teardownreq.TmuxTarget("af_zero")))
+	require.False(t, isTeardownRequester(proctree.Process{PID: 424244, StartID: 9}, teardownreq.TmuxTarget("af_zero")))
 }
 
 // The requester is never reported as a leaked process — the whole point of
@@ -103,7 +117,7 @@ func TestReapSessionProcessesNeverWaitsOnOrSignalsRequester(t *testing.T) {
 	redirectReapLogs(t, &infoBuf, &warnBuf)
 
 	requester := spawnRequesterSleeper(t)
-	untrack := TrackTeardownRequester(requester)
+	untrack := TrackTeardownRequester(requester, teardownreq.TmuxTarget("af_requester_reap"))
 	defer untrack()
 
 	// A grace far longer than the call should take: the exemption must make
@@ -128,7 +142,7 @@ func TestReapSessionProcessesNeverWaitsOnOrSignalsRequester(t *testing.T) {
 func TestReapSessionProcessesStillReapsGenuineLeaksBesideRequester(t *testing.T) {
 	requester := spawnRequesterSleeper(t)
 	leak := spawnRequesterSleeper(t)
-	untrack := TrackTeardownRequester(requester)
+	untrack := TrackTeardownRequester(requester, teardownreq.TmuxTarget("af_requester_and_leak"))
 	defer untrack()
 
 	remaining := reapSessionProcesses(reapOnRequest, "af_requester_and_leak",
@@ -157,7 +171,7 @@ func TestReapSessionProcessesSparesRequesterRegisteredMidGrace(t *testing.T) {
 	untrackCh := make(chan func(), 1)
 	go func() {
 		time.Sleep(250 * time.Millisecond)
-		untrackCh <- TrackTeardownRequester(requester)
+		untrackCh <- TrackTeardownRequester(requester, teardownreq.TmuxTarget("af_requester_late"))
 	}()
 	t.Cleanup(func() { (<-untrackCh)() })
 
@@ -178,7 +192,7 @@ func TestReapSessionProcessesSparesRequesterRegisteredMidGrace(t *testing.T) {
 // LATER reap that legitimately owns it.
 func TestReapSessionProcessesReapsRequesterAfterUnregister(t *testing.T) {
 	requester := spawnRequesterSleeper(t)
-	untrack := TrackTeardownRequester(requester)
+	untrack := TrackTeardownRequester(requester, teardownreq.TmuxTarget("af_requester_untracked"))
 	untrack()
 
 	reapSessionProcesses(reapOnRequest, "af_requester_untracked", []proctree.Process{requester},
@@ -193,17 +207,32 @@ func TestReapSessionProcessesReapsRequesterAfterUnregister(t *testing.T) {
 func TestOrphanCandidatesNeverAdmitRequester(t *testing.T) {
 	requester := proctree.Process{PID: 400010, StartID: 1, Comm: "af"}
 	other := proctree.Process{PID: 400011, StartID: 2, Comm: "leftover"}
-	untrack := TrackTeardownRequester(requester)
+	untrack := TrackTeardownRequester(requester, teardownreq.TmuxTarget("af_orphan_swept"))
 	defer untrack()
 
 	byPID := map[int]int{}
-	got := addOrReplaceOrphanCandidate(nil, byPID, requester)
+	got := addOrReplaceOrphanCandidate(nil, byPID, requester, "af_orphan_swept")
 	require.Empty(t, got, "a tracked requester is never an orphan candidate")
 	require.NotContains(t, byPID, requester.PID,
 		"the requester's pid slot must stay free — a later real process with it would otherwise be skipped")
 
-	got = addOrReplaceOrphanCandidate(got, byPID, other)
+	got = addOrReplaceOrphanCandidate(got, byPID, other, "af_orphan_swept")
 	require.Equal(t, []proctree.Process{other}, got, "non-requesters are admitted unchanged")
+}
+
+// The scope version of the rule above: a requester registered for a DIFFERENT
+// teardown is admitted to this sweep's cohort like any other process — the
+// exemption belongs to the teardown it is waiting on, not to the identity
+// (#7754).
+func TestOrphanCandidatesAdmitRequesterOfOtherTeardown(t *testing.T) {
+	requester := proctree.Process{PID: 400012, StartID: 3, Comm: "af"}
+	untrack := TrackTeardownRequester(requester, teardownreq.TmuxTarget("af_orphan_other"))
+	defer untrack()
+
+	byPID := map[int]int{}
+	got := addOrReplaceOrphanCandidate(nil, byPID, requester, "af_orphan_swept")
+	require.Equal(t, []proctree.Process{requester}, got,
+		"a requester of another teardown is not this sweep's caller and stays a candidate")
 }
 
 // The end-to-end close seam: the requester IS the pane's whole captured tree
@@ -222,9 +251,6 @@ func TestCloseAndWaitForPaneExitNeverReapsItsRequester(t *testing.T) {
 		"fixture requires this test binary's comm (%q) to verify as a tmux server", testProcessComm(t))
 
 	requester := spawnRequesterSleeper(t)
-	untrack := TrackTeardownRequester(requester)
-	defer untrack()
-
 	killed := false
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(*exec.Cmd) error {
@@ -240,6 +266,8 @@ func TestCloseAndWaitForPaneExitNeverReapsItsRequester(t *testing.T) {
 	}
 
 	session := newTmuxSession(toTmuxName("close-requester-pane", ""), "af", NewMockPtyFactory(t), cmdExec)
+	untrack := TrackTeardownRequester(requester, teardownreq.TmuxTarget(session.SanitizedName()))
+	defer untrack()
 	state, err := session.CloseAndWaitForPaneExit()
 	require.NoError(t, err)
 	require.Equal(t, PaneStateKnown, state,

@@ -505,7 +505,8 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 			)
 		}
 		m.err().Printf("archive of session %q: final VS Code editor teardown was not confirmed (%v); rolling back the moved worktree", req.Title, stopErr)
-		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
+		rbErr, rbPersistErr := m.undoCommittedArchive(repoID, instance, origPath, stopErr)
+		if rbErr != nil {
 			// The worktree cannot be returned home. Keep the committed archive
 			// rather than claiming a live Lost session at a path that no longer
 			// exists, and report it as committed — with the location and
@@ -516,13 +517,23 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		}
 		// Rolled back: the session is Lost, still drivable, so it keeps its credential.
 		archiveCommitted = false
+		// The rollback left the row fenced off the automatic restore loop
+		// (#7754) — the user asked for this agent to stop. If the fence did
+		// not reach disk, a restart would reload the pre-archive live row and
+		// re-spawn what the archive was meant to shelve, so the durable
+		// write's failure is reported with the rollback rather than swallowed.
+		if rbPersistErr != nil {
+			return "", session.InstanceData{}, failedArchiveWithHook(req.Title, fmt.Errorf(
+				"could not confirm final VS Code editor teardown for session %q; rolled the archive back and left it Lost, fenced off the automatic restore loop, AND could not record its recovered state on disk (%v) — a daemon restart may re-spawn the agent; retry the archive, or restore the session to resume it: %w",
+				req.Title, rbPersistErr, stopErr), hookErr)
+		}
 		// A clean rollback is still reachable with a failed on-archive hook behind
 		// it — the hook ran before the move — and the hook may already have mutated
 		// external resources. Surface both (#3452): the teardown failure is what the
 		// caller acts on, the hook failure is what the operator must fix.
 		return "", session.InstanceData{}, failedArchiveWithHook(req.Title, fmt.Errorf(
-			"could not confirm final VS Code editor teardown for session %q; rolled the archive back and left it Lost for retry: %w",
-			req.Title, stopErr), hookErr)
+			"could not confirm final VS Code editor teardown for session %q; rolled the archive back and left it Lost (%s): %w",
+			req.Title, archiveAbortedDetail, stopErr), hookErr)
 	}
 	if perr := archivePersist(m, repoID, instance); perr != nil {
 		if !instance.GetArchiveReport().Empty() {
@@ -532,7 +543,8 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 			)
 		}
 		m.err().Printf("archive of session %q: failed to durably record the Archived state (%v); rolling back to keep the on-disk record consistent", req.Title, perr)
-		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
+		rbErr, rbPersistErr := m.undoCommittedArchive(repoID, instance, origPath, perr)
+		if rbErr != nil {
 			// Could not move the worktree home: the committed archive is the
 			// safest remaining state. Keep it and report it as committed — with
 			// the location and projection — like the sibling above (#3235).
@@ -542,10 +554,17 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		}
 		// Rolled back: the session is Lost, still drivable, so it keeps its credential.
 		// The hook failure rides along for the same reason as the sibling above.
+		// The row is fenced off the automatic restore loop (#7754), and an
+		// undurable fence is named exactly as above.
 		archiveCommitted = false
+		if rbPersistErr != nil {
+			return "", session.InstanceData{}, failedArchiveWithHook(req.Title, fmt.Errorf(
+				"failed to durably archive session %q; rolled it back and left it Lost, fenced off the automatic restore loop, AND could not record its recovered state on disk (%v) — a daemon restart may re-spawn the agent; retry the archive, or restore the session to resume it: %w",
+				req.Title, rbPersistErr, perr), hookErr)
+		}
 		return "", session.InstanceData{}, failedArchiveWithHook(req.Title, fmt.Errorf(
-			"failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w",
-			req.Title, perr), hookErr)
+			"failed to durably archive session %q; rolled it back and left it Lost (%s): %w",
+			req.Title, archiveAbortedDetail, perr), hookErr)
 	}
 	m.info().Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
 	archived := instance.ToInstanceData()
@@ -561,24 +580,33 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 }
 
 // undoCommittedArchive rolls a committed-but-unpersisted archive back to a
-// self-healing live state (#1538). It moves the worktree back to its pre-archive
-// location (origPath) and returns the instance to a plain Lost with started=true,
-// via the only legal edge path out of the committed Archived state: BeginRestore
-// (Archived -> Lost + OpRestoring, started=true) then AbortRestoreToLost (op
-// cleared). With the worktree home and the record dropped to Lost, the on-disk
-// record — still the pre-archive one, since the archive persist failed — matches
-// reality, so a daemon restart re-spawns at the right path and the #1108 restore
-// loop heals the agent in place. The rolled-back state is persisted best-effort;
-// even if that write also fails, the worktree being home already keeps disk and
-// reality consistent. Returns an error only when the move home itself fails.
-func (m *Manager) undoCommittedArchive(repoID string, instance *session.Instance, origPath string) error {
+// fenced Lost row (#1538, #7754). It moves the worktree back to its
+// pre-archive location (origPath) and returns the instance to Lost with
+// started=true, via the only legal edge path out of the committed Archived
+// state: BeginRestore (Archived -> Lost + OpRestoring, started=true) then
+// AbortRestoreToLost (op cleared).
+//
+// The Lost row is then fenced off the automatic restore loop with the SAME
+// mechanism every other requested-archive refusal uses
+// (fenceRequestedArchiveRestore): the archive was user-requested, and a row
+// it left behind must never re-spawn the agent the user asked to stop — not
+// on the next loop tick and not after a daemon restart (#7754 closes the
+// un-fenced window this function used to leave open). The fence lands in the
+// same durable write as the rolled-back state, and the write's error is
+// RETURNED, not best-effort: an undurable fence means a restart reloads the
+// pre-archive live row and re-spawns the agent, which is exactly the breach
+// the fence exists to stop. undoErr says the move home itself failed — the
+// committed archive is kept then (keepUnrollableArchiveCommitted), which is
+// also never auto-restored — while persistErr says the fenced row could not
+// be recorded durably.
+func (m *Manager) undoCommittedArchive(repoID string, instance *session.Instance, origPath string, cause error) (undoErr, persistErr error) {
 	if err := instance.RestoreArchivedWorktree(origPath); err != nil {
-		return err
+		return err, nil
 	}
 	_ = instance.Transition(session.BeginRestore())
 	_ = instance.Transition(session.AbortRestoreToLost())
-	m.persistInstance(repoID, instance)
-	return nil
+	m.fenceRequestedArchiveRestore(instance, cause)
+	return nil, m.persistInstanceErr(repoID, instance)
 }
 
 // archiveRemoteSession archives an off-box session (docker/ssh/hook) by pushing
