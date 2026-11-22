@@ -65,6 +65,51 @@ func TestClaudeLegacyTrustDialogOf(t *testing.T) {
 		{"labelled Yes painted, No not yet", q + "\n\n❯ 1. Yes, proceed\n", claudeLegacyTrustPartial},
 		{"complete dialog with the cursor on No", q + "\n  1. Yes\n❯ 2. No", claudeLegacyTrustPartial},
 
+		// A complete legacy dialog quoted inside a box that closes under the
+		// pane's last painted line is a boxed composer's draft whose prompt
+		// row has scrolled off, not a live modal: claudeTrustRowOf strips the
+		// box sides and reduces the closing edge to blank, so the grammar
+		// reads the quote as the dialog's own rows. No build paints its
+		// footer inside a box, so such a frame is held (Partial), never
+		// answered — Enter would submit the draft (#7648).
+		{"boxed quoted legacy dialog, footer inside the box", "" +
+			"│ " + q + " │\n" +
+			"│ ❯ 1. Yes, proceed │\n" +
+			"│ 2. No, exit │\n" +
+			"│ " + rewordedTrustFooter + " │\n" +
+			"╰────────────────╯\n", claudeLegacyTrustPartial},
+		{"boxed quoted legacy dialog with its top edge", "" +
+			"╭────────────────╮\n" +
+			"│ " + q + " │\n" +
+			"│ ❯ 1. Yes, proceed │\n" +
+			"│ 2. No, exit │\n" +
+			"│ " + rewordedTrustFooter + " │\n" +
+			"╰────────────────╯\n", claudeLegacyTrustPartial},
+		{"boxed quoted legacy dialog under the legacy footer", "" +
+			"│ " + q + " │\n" +
+			"│ ❯ 1. Yes, proceed │\n" +
+			"│ 2. No, exit │\n" +
+			"│ " + legacyTrustFooter + " │\n" +
+			"╰────────────────╯\n", claudeLegacyTrustPartial},
+		{"boxed quoted legacy dialog with a composer prompt above it, no top edge", "" +
+			"│ > Type your message here │\n" +
+			"│ " + q + " │\n" +
+			"│ ❯ 1. Yes, proceed │\n" +
+			"│ 2. No, exit │\n" +
+			"│ " + rewordedTrustFooter + " │\n" +
+			"╰────────────────╯\n", claudeLegacyTrustPartial},
+		{"boxed quoted legacy dialog with the cursor on No", "" +
+			"│ " + q + " │\n" +
+			"│ 1. Yes, proceed │\n" +
+			"│ ❯ 2. No, exit │\n" +
+			"│ " + rewordedTrustFooter + " │\n" +
+			"╰────────────────╯\n", claudeLegacyTrustPartial},
+		{"boxed quoted inline picker, footer inside the box", "" +
+			"│ " + q + " │\n" +
+			"│ ❯ Yes  No │\n" +
+			"│ " + rewordedTrustFooter + " │\n" +
+			"╰────────────────╯\n", claudeLegacyTrustPartial},
+
 		// None: the region holds a row the dialog never paints.
 		// Codex P2 (claude_trust.go:585): the composer's frame separates the
 		// transcript's question from a draft reading "Yes No".
@@ -162,4 +207,51 @@ func TestCheckAndHandleTrustPrompt_BoxedLegacyDialogWithFooterIsAnswered(t *test
 	handled, cmds := runTrustPromptCheck(t, ProgramClaude, legacyTrustBoxed)
 	require.True(t, handled, "the live boxed legacy dialog is in the way")
 	require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)))
+}
+
+// A complete legacy dialog quoted inside a box that closes under the pane's
+// last painted line is a boxed composer's draft whose prompt row has scrolled
+// off, not a live modal. claudeTrustRowOf strips the box sides and reduces the
+// closing edge to blank, so the legacy grammar reads the quote as the dialog's
+// own rows and — without the closed-box guard — would answer it with Enter,
+// submitting the user's draft (#7648). The gate must hold it and send nothing.
+func TestCheckAndHandleTrustPrompt_BoxedQuotedLegacyDialogHolds(t *testing.T) {
+	q := "Do you trust the files in this folder?"
+	for _, tt := range []struct {
+		name    string
+		content string
+	}{
+		{"footer inside the box, cursor on Yes", "" +
+			"│ " + q + " │\n" +
+			"│ ❯ 1. Yes, proceed │\n" +
+			"│ 2. No, exit │\n" +
+			"│ " + rewordedTrustFooter + " │\n" +
+			"╰────────────────╯\n"},
+		{"with the box's top edge", "" +
+			"╭────────────────╮\n" +
+			"│ " + q + " │\n" +
+			"│ ❯ 1. Yes, proceed │\n" +
+			"│ 2. No, exit │\n" +
+			"│ " + rewordedTrustFooter + " │\n" +
+			"╰────────────────╯\n"},
+		{"with a composer prompt row above the quote, no top edge", "" +
+			"│ > Type your message here │\n" +
+			"│ " + q + " │\n" +
+			"│ ❯ 1. Yes, proceed │\n" +
+			"│ 2. No, exit │\n" +
+			"│ " + rewordedTrustFooter + " │\n" +
+			"╰────────────────╯\n"},
+		{"with the legacy footer, Esc to exit", "" +
+			"│ " + q + " │\n" +
+			"│ ❯ 1. Yes, proceed │\n" +
+			"│ 2. No, exit │\n" +
+			"│ " + legacyTrustFooter + " │\n" +
+			"╰────────────────╯\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := runTrustPromptCheck(t, ProgramClaude, tt.content)
+			require.True(t, handled, "a quoted draft in a closed box must hold the prompt, not read clear:\n%s", tt.content)
+			require.Empty(t, sentKeystrokes(cmds), "no key may reach a working composer's draft; got %v", cmds)
+		})
+	}
 }
