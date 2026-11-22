@@ -345,9 +345,11 @@ Two safety nets share the marker:
   Everything else — shared servers, their panes, foreign sockets — is left
   alone.
 - **Next-start sweep.** A marked daemon also registers its home in a
-  per-user registry under `/tmp`. On startup it reaps each registered home
-  that is expired or whose declared owner is provably dead (pid gone,
-  recycled, or stamped to a different boot). Only marked daemons sweep —
+  per-user registry under `/tmp`. On startup it tears down each registered
+  home that is expired or whose declared owner is provably dead (pid gone,
+  recycled, or stamped to a different boot). Its session containers are
+  reaped after readiness, so the home stays registered until they are gone.
+  Only marked daemons sweep —
   the real install never does — and teardown refuses the default AF home
   outright, whatever a file claims.
 
