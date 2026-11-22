@@ -66,8 +66,8 @@ func TestArchiveRemoteSession_ReapFailsUnknown_KeepsTheBranchAndTheRetryableHand
 	// container may still be running is the lie that leaves a VM billing with nothing
 	// pointing at it.
 	assert.Equal(t, session.LiveLost, rec.Liveness,
-		"a half-failed archive rolls back to Lost (AbortArchiveToLost) so the restore loop keeps "+
-			"working on it; committing Archived here would claim the sandbox is gone while a container "+
+		"a half-failed archive rolls back to Lost (AbortArchiveToLost) so the session stays "+
+			"recoverable; committing Archived here would claim the sandbox is gone while a container "+
 			"may still be running")
 
 	// The reap is still OWED, and durably so. This marker is what makes a restart

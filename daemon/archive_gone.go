@@ -196,10 +196,11 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 	}, true, adopted)
 	if err != nil {
 		// Same recovery as the relocating route's teardown failure: drop to Lost
-		// with started kept, so the Lost loop re-spawns the agent — in the
-		// adopted worktree where it now is, or, for a deletion, in one its
-		// rebuild recreates from the branch, the same self-heal a restore would
-		// perform.
+		// with started kept, fenced off the automatic restore loop (#7752 — the
+		// user asked for this agent to stop). An explicit restore re-spawns it
+		// in the adopted worktree where it now is, or, for a deletion, in one
+		// its rebuild recreates from the branch; retrying the archive finishes
+		// the job.
 		if adopted && errors.Is(err, os.ErrNotExist) {
 			// The directory git proved vanished during teardown. Record that
 			// durably, exactly as a deletion outside af is recorded: the sticky
@@ -208,7 +209,7 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 			// the stall the teardown installed settles once the path is absent.
 			instance.SetWorktreeMissing(session.WorktreeMissingDeletedReason(origPath))
 		}
-		_ = instance.Transition(session.AbortArchiveToLost())
+		m.abortRequestedArchiveToLost(instance, err)
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
 			return failedArchiveResult(instance, failedArchiveWithHook(title, fmt.Errorf(
 				"failed to archive session %q AND could not record its recovered state on disk (%v); %s: %w",
@@ -223,7 +224,7 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 				title, err, origPath), hookErr))
 		}
 		return failedArchiveResult(instance, failedArchiveWithHook(title, fmt.Errorf(
-			"failed to archive session %q (its agent will be restored in place): %w", title, err), hookErr))
+			"failed to archive session %q (%s): %w", title, archiveAbortedDetail, err), hookErr))
 	}
 
 	_ = instance.Transition(session.CommitArchive())
