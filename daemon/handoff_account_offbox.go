@@ -1,14 +1,12 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/task"
 )
 
 // Account handoff and limit failover for a session on a listed host (#5571 W7.6).
@@ -77,7 +75,16 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 	instance.SetOffBoxSwapPersist(func(i *session.Instance) error {
 		return m.persistSettlementUnderAdmission(repoID, key, i)
 	})
-	res, err := instance.SwapOffBoxAccount(to, false)
+	// The takeover brief is the durable delivery obligation (#7793 review):
+	// the commit stamps it as the pending mission in the same checkpoint that
+	// retires the in-flight record, so a daemon exit before delivery reloads
+	// a mission recovery replays — never a completable run with nothing owed.
+	prompt := instance.GetPrompt()
+	if override := strings.TrimSpace(req.Brief); override != "" {
+		prompt = override
+	}
+	notice := offBoxAccountNotice(outgoing, from, to, offBoxAccountReason(session.HandoffReasonManual), prompt)
+	res, err := instance.SwapOffBoxAccount(to, false, notice)
 	if err != nil {
 		if errors.Is(err, session.ErrAccountSwapIndeterminate) {
 			// The host's account could not be established: the row stays fenced as
@@ -100,7 +107,7 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 	// the new agent has its task, a status poll that sees its idle composer must
 	// not read the run as finished. Whatever the delivery's outcome, the fence is
 	// lowered after it.
-	noticeErr := m.finishOffBoxNotice(instance, outgoing, res, session.HandoffReasonManual)
+	noticeErr := m.finishOffBoxNotice(instance, res, repoID, key)
 	if err := instance.Transition(session.CommitHandoff()); err != nil {
 		return response, &mutationCommittedError{err: errors.Join(noticeErr, err)}
 	}
@@ -118,11 +125,11 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 // reconciled (its response was lost, so the new agent's start is unconfirmed), and
 // folds a credential-cleanup failure and any skipped agent-config files into the
 // result.
-func (m *Manager) finishOffBoxNotice(instance *session.Instance, agent string, res session.OffBoxAccountSwap, reason string) error {
+func (m *Manager) finishOffBoxNotice(instance *session.Instance, res session.OffBoxAccountSwap, repoID, key string) error {
 	var errs []error
 	if res.Reconciled {
 		errs = append(errs, fmt.Errorf("the swap of %q to account %q completed on the host but its response was lost, so the new agent's start is unconfirmed and no notice was sent; check the session and relaunch it if it is not running", instance.Title, res.To))
-	} else if err := m.deliverOffBoxAccountNotice(instance, agent, res, reason); err != nil {
+	} else if err := m.deliverOffBoxAccountNotice(instance, res, repoID, key); err != nil {
 		errs = append(errs, err)
 	}
 	if res.CleanupErr != nil {
@@ -156,7 +163,11 @@ func (m *Manager) commitOffBoxAccountSwap(instance *session.Instance, repoID, ke
 	instance.SetOffBoxSwapPersist(func(i *session.Instance) error {
 		return m.persistSettlementUnderAdmission(repoID, key, i)
 	})
-	res, err := instance.SwapOffBoxAccount(admitted.to, true)
+	// Same obligation as the manual path: the commit's checkpoint records the
+	// exact takeover brief recovery owes the replacement (#7793 review).
+	notice := offBoxAccountNotice(admitted.agent, admitted.from, admitted.to,
+		offBoxAccountReason(session.HandoffReasonUsageLimit), instance.GetPrompt())
+	res, err := instance.SwapOffBoxAccount(admitted.to, true, notice)
 	if err != nil {
 		return session.OffBoxAccountSwap{}, err
 	}
@@ -190,7 +201,7 @@ func (m *Manager) finishOffBoxFailover(repoID, key string, instance *session.Ins
 	instance.ClearLimitReached()
 	// The limit-resume fence is still raised while the notice is submitted, so a
 	// poll cannot read the fresh agent's idle composer as a finished run.
-	noticeErr := m.finishOffBoxNotice(instance, swap.agent, res, session.HandoffReasonUsageLimit)
+	noticeErr := m.finishOffBoxNotice(instance, res, repoID, key)
 	if err := instance.Transition(session.ConfirmLive()); err != nil {
 		return &mutationCommittedError{err: errors.Join(noticeErr, err)}
 	}
@@ -204,16 +215,36 @@ func (m *Manager) finishOffBoxFailover(repoID, key string, instance *session.Ins
 	return nil
 }
 
-// deliverOffBoxAccountNotice tells the replacement agent what it is continuing. A
-// failed delivery is reported, not retried: the task prompt stays on the row, so
-// `sessions send-prompt` can repeat it.
-func (m *Manager) deliverOffBoxAccountNotice(instance *session.Instance, agent string, res session.OffBoxAccountSwap, reason string) error {
-	notice := offBoxAccountNotice(agent, res.From, res.To, offBoxAccountReason(reason), instance.GetPrompt())
-	// The off-box replacement pane was just swapped in — a lookalike limit
-	// banner there is the new runtime's own wall, never residue (#6972).
-	status, err := task.WaitForReadyAndSubmitPrompt(context.Background(), instance, notice, nil, true)
-	if err = handoffDeliveryResultError(status, err); err != nil {
+// deliverOffBoxAccountNotice submits the takeover brief the swap committed as
+// the row's durable pending mission (#7793 review). It runs the same lifecycle
+// every handoff mission runs: the ambiguous-attempt marker lands durably before
+// the composer is touched, the runtime verdict is bound to THIS mission, and a
+// delivered verdict retires the obligation. Anything else keeps it pending —
+// positive non-delivery for automatic recovery, an ambiguous verdict for the
+// operator's confirm-or-retry exits. A reconciled swap reaches finishOffBoxNotice
+// with the mission still owed; recovery's replay is the notice the unconfirmed
+// start could not take.
+func (m *Manager) deliverOffBoxAccountNotice(instance *session.Instance, res session.OffBoxAccountSwap, repoID, key string) error {
+	mission := instance.PendingHandoffMission()
+	if mission == "" {
+		return fmt.Errorf("account handoff of %q completed but its takeover mission was not recorded; refusing to deliver an unrecorded notice", instance.Title)
+	}
+	delivery := handoffDelivery{
+		repoID: repoID, key: key, title: instance.Title,
+		target: res.To, mission: mission, instance: instance,
+	}
+	status, serr, beginErr := m.waitAndSubmitHandoffMission(delivery, true)
+	if beginErr != nil {
+		return beginErr
+	}
+	if evidenceErr := instance.RecordPendingHandoffMissionDelivery(mission, status); evidenceErr != nil {
+		return errors.Join(serr, evidenceErr)
+	}
+	if err := handoffDeliveryResultError(status, serr); err != nil {
 		return fmt.Errorf("account handoff of %q completed, but the notice for the new account was not delivered (send the task again with `af sessions send-prompt`): %w", instance.Title, err)
+	}
+	if !instance.ClearPendingHandoffMission(mission) {
+		return fmt.Errorf("account handoff of %q delivered, but its pending mission changed before settlement", instance.Title)
 	}
 	return nil
 }

@@ -374,7 +374,7 @@ func TestSwapOffBoxAccountRotatesTheScopeAndWritesTheOldAccountBack(t *testing.T
 	f := newSwapFixture(t)
 	f.refreshOnHost(t, "work-refreshed-on-host") // the agent rotated A's token before the swap
 
-	res, err := f.inst.SwapOffBoxAccount("alt", false)
+	res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	// B was staged beside the live scope while A was still the live one: the agent
@@ -406,7 +406,7 @@ func TestSwapOffBoxAccountRotatesTheScopeAndWritesTheOldAccountBack(t *testing.T
 
 func TestSwapOffBoxAccountAutomaticSelectionIsRecorded(t *testing.T) {
 	f := newSwapFixture(t)
-	_, err := f.inst.SwapOffBoxAccount("alt", true)
+	_, err := f.inst.SwapOffBoxAccount("alt", true, "")
 	require.NoError(t, err)
 	_, auto := f.inst.AccountSelection()
 	assert.True(t, auto, "a scheduler choice stays distinguishable from an operator's pin")
@@ -442,7 +442,7 @@ func TestSwapOffBoxAccountRefusalsCostNothing(t *testing.T) {
 			if tc.prep != nil {
 				tc.prep(t, f)
 			}
-			_, err := f.inst.SwapOffBoxAccount(tc.to, false)
+			_, err := f.inst.SwapOffBoxAccount(tc.to, false, "")
 			require.ErrorContains(t, err, tc.want)
 			assert.Zero(t, f.srv.calls, "the agent-server is never asked to stop anything")
 			assert.Empty(t, *f.shellCalls, "and nothing is sent to the host")
@@ -458,7 +458,7 @@ func TestSwapOffBoxAccountFailureInsideTheHostLeavesTheOldAccount(t *testing.T) 
 	f := newSwapFixture(t)
 	f.srv.failAfter = errors.New("the new agent did not start")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorContains(t, err, "did not start")
 
 	assert.Equal(t, secretWork, f.hostCred(t, "account"), "the scope is put back as A")
@@ -475,7 +475,7 @@ func TestSwapOffBoxAccountStageFailureStopsNothing(t *testing.T) {
 	p.runCommandFn = func(time.Duration, string, io.Reader, bool) ([]byte, error) {
 		return nil, errors.New("ssh: connection refused")
 	}
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorContains(t, err, "staging account")
 	assert.Zero(t, f.srv.calls, "an account that did not arrive is never swapped to")
 	acct, _ := f.inst.AccountSelection()
@@ -494,7 +494,7 @@ func TestSwapOffBoxAccountReportsCredentialsLeftOnTheHost(t *testing.T) {
 		}
 		return real(d, script, stdin, combined)
 	}
-	res, err := f.inst.SwapOffBoxAccount("alt", false)
+	res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err, "the swap itself completed")
 	require.Error(t, res.CleanupErr)
 	assert.Contains(t, res.CleanupErr.Error(), "previous account")
@@ -604,7 +604,7 @@ func TestSwapOffBoxAccountLostResponseAfterRotationRecordsTheNewAccount(t *testi
 	f.refreshOnHost(t, "work-refreshed-on-host")
 	f.srv.loseResponse = errors.New("remote agent-server: POST /v1/agent/swap-account: context deadline exceeded")
 
-	res, err := f.inst.SwapOffBoxAccount("alt", false)
+	res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 	assert.True(t, res.Reconciled, "the outcome was learned from the host, not assumed")
 
@@ -623,7 +623,7 @@ func TestSwapOffBoxAccountLostResponseBeforeRotationKeepsTheOldAccount(t *testin
 	f := newSwapFixture(t)
 	f.srv.loseBefore = errors.New("remote agent-server: POST /v1/agent/swap-account: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate, "the host showed the old account live: that is a fact, not a guess")
 	acct, _ := f.inst.AccountSelection()
@@ -641,7 +641,7 @@ func TestSwapOffBoxAccountUnknownHostStateAssertsNeitherAccount(t *testing.T) {
 	f.srv.loseResponse = errors.New("transport: connection reset")
 	f.srv.statusErr = errors.New("transport: connection reset") // the terminal record cannot be read either
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	acct, _ := f.inst.AccountSelection()
 	assert.Equal(t, "work", acct, "the row is not moved to an account the host was not shown to run")
@@ -665,7 +665,7 @@ func TestSwapOffBoxAccountNoRecordNeedsTheHostToAgree(t *testing.T) {
 		}
 		return real(d, script, stdin, c)
 	}
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
 }
@@ -674,7 +674,7 @@ func TestSwapOffBoxAccountNoRecordNeedsTheHostToAgree(t *testing.T) {
 func TestSwapOffBoxAccountServerThatCouldNotRestoreIsUnknown(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.failAfter = errors.New("start failed (" + accountScopeIndeterminate + ")")
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
 	acct, _ := f.inst.AccountSelection()

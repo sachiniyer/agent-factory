@@ -39,7 +39,7 @@ func TestSwapOffBoxAccountRecordsTheInFlightSwapBeforeSending(t *testing.T) {
 		assert.Equal(t, "alt", atSend.To)
 	}
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 	require.NotNil(t, atSend)
 
@@ -61,7 +61,7 @@ func TestSwapOffBoxAccountRefusesToSendUnrecorded(t *testing.T) {
 	f := newSwapFixture(t)
 	f.inst.SetOffBoxSwapPersist(nil)
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorContains(t, err, "no durable write")
 	assert.Zero(t, f.srv.calls, "the request never crossed")
 	assert.Equal(t, secretWork, f.hostCred(t, "account"))
@@ -74,7 +74,7 @@ func TestInFlightSwapReconcileSettlesTheHeldRequest(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.holdNext = 1 // the request crossed but is still queued server-side
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate, "the discard bounded it: a definite rollback")
 	require.Nil(t, f.inst.InFlightOffBoxSwap(), "the verdict retired the record")
@@ -284,7 +284,7 @@ func TestInFlightSwapRecordPersistsWithTheRollbackFence(t *testing.T) {
 func TestSwapOffBoxAccountStagesAtTheSwapsOwnPath(t *testing.T) {
 	f := newSwapFixture(t)
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	assert.NoDirExists(t, f.w.NextAccountDir(), "the anonymous stage path is never written")
@@ -335,7 +335,7 @@ func TestScopeRotationConsumesOnlyTheSwapsOwnStage(t *testing.T) {
 func TestReconcileSwapSettlesOnlyTheRecordedID(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.holdNext = 1
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate)
 
@@ -373,7 +373,7 @@ func TestSwapOffBoxAccountStagesAtTheSharedPathOnALegacyServer(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.scoped = false // a previous-release server
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 	assert.False(t, f.srv.lastScoped, "the request never claims the scoped protocol to a legacy server")
 	assert.NoDirExists(t, f.stagedDir(), "no suffixed stage is left")
@@ -391,7 +391,7 @@ func TestSwapOffBoxAccountRefusesWhenTheStagingProtocolIsUnreadable(t *testing.T
 	f := newSwapFixture(t)
 	f.srv.scopedErr = errors.New("remote agent-server: connection refused")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "upgrade")
 	assert.Zero(t, f.srv.calls, "the request never crossed")
@@ -508,7 +508,7 @@ func TestReconciledCommitEndsTheUnreplayedRunAndRestoresTheSkipList(t *testing.T
 	f.srv.statusErr = errors.New("remote agent-server: connection reset")
 	f.inst.taskRunActive = true
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the host committed while the response was lost")
 	rec := f.inst.InFlightOffBoxSwap()
@@ -546,7 +546,7 @@ func TestDiscardVerdictReplaysAcrossALostCheckpoint(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.holdNext = 1 // the request crossed but is still queued server-side
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate, "the first reconcile settled: discard -> none -> rollback")
 	require.Nil(t, f.inst.InFlightOffBoxSwap())
@@ -569,6 +569,47 @@ func TestDiscardVerdictReplaysAcrossALostCheckpoint(t *testing.T) {
 	assert.Equal(t, secretWork, f.hostCred(t, "account"))
 }
 
+// A commit's success return IS the record-clear checkpoint (#7793 review): the
+// same durable write must carry the takeover notice as a pending-mission
+// obligation, because a daemon exit before its delivery would otherwise reload
+// a row on the new account with a completable run and nothing owed — a fresh
+// idle ending a task the replacement never received, on_complete included.
+func TestCommittedSwapPersistsTheTakeoverObligationWithTheClear(t *testing.T) {
+	f := newSwapFixture(t)
+	f.inst.taskRunActive = true
+	const notice = "[Agent Factory] This session switched accounts. Continue the same task.\n\ncontinue"
+
+	var checkpoints []struct {
+		record  *InFlightOffBoxSwapData
+		mission string
+	}
+	f.inst.SetOffBoxSwapPersist(func(ii *Instance) error {
+		checkpoints = append(checkpoints, struct {
+			record  *InFlightOffBoxSwapData
+			mission string
+		}{ii.InFlightOffBoxSwap(), ii.PendingHandoffMission()})
+		return nil
+	})
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false, notice)
+	require.NoError(t, err)
+	assert.Equal(t, notice, f.inst.PendingHandoffMission(),
+		"the committed row owes the replacement its takeover brief")
+	assert.Equal(t, PromptNotDelivered, f.inst.PendingHandoffDeliveryStatus(),
+		"a not-delivered verdict keeps the obligation replayable by recovery")
+	assert.True(t, f.inst.taskRunActive, "the run stays open until the mission lands")
+	require.Len(t, checkpoints, 2, "the record's write and the record's clear")
+	assert.Nil(t, checkpoints[1].record, "the last checkpoint retires the record")
+	assert.Equal(t, notice, checkpoints[1].mission,
+		"and carries the delivery obligation in the same write")
+
+	// The reloaded row reconstructs the replacement fence from the durable
+	// mission alone (#4429), so a restart can never observe a completable run.
+	data := f.inst.ToInstanceData()
+	assert.Equal(t, notice, data.PendingHandoffMission)
+	assert.Equal(t, PromptNotDelivered, data.HandoffDeliveryStatus)
+}
+
 // A task-backed session whose swap cannot be settled keeps its run: the
 // indeterminate fence is NOT a terminal startup failure, so taskRunActive —
 // and the max_concurrent_runs slot it pays for — survives until the record's
@@ -581,7 +622,7 @@ func TestIndeterminateSwapFenceKeepsTheActiveTaskRun(t *testing.T) {
 	f.srv.statusErr = errors.New("remote agent-server: connection reset")
 	f.inst.taskRunActive = true
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
 	assert.True(t, f.inst.taskRunActive,
@@ -606,7 +647,7 @@ func TestReconcileSwapUnfencesOnARollbackVerdict(t *testing.T) {
 	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
 	f.srv.statusErr = errors.New("remote agent-server: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	require.NotNil(t, f.inst.InFlightOffBoxSwap())
 	f.inst.remoteClient = &remoteAgentClient{}

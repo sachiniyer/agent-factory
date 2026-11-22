@@ -576,13 +576,18 @@ func (i *Instance) offBoxAccountSwapAvailable() bool {
 }
 
 // SwapOffBoxAccount moves the session from its account to name. automatic marks a
-// scheduler choice (a limit failover) rather than an operator's pin.
+// scheduler choice (a limit failover) rather than an operator's pin. notice is
+// the takeover brief the caller owes the replacement agent: a commit writes it
+// as the durable pending-mission obligation in the same checkpoint that retires
+// the in-flight record, so a daemon exit in the delivery window reloads a row
+// that still owns the notice — never a completable run with nothing owed
+// (#7793 review).
 //
 // The session is on its old account until the agent-server confirms the new agent
 // started: every earlier failure leaves the old account in place and removes what
 // was staged, and a failure inside the agent-server puts the scope back (see
 // swapAccountInPlace). The row records the new account only after that.
-func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccountSwap, error) {
+func (i *Instance) SwapOffBoxAccount(name string, automatic bool, notice string) (OffBoxAccountSwap, error) {
 	p := i.sandboxProvisioner()
 	if p == nil {
 		return OffBoxAccountSwap{}, fmt.Errorf("session %q has no sandbox to hand an account to", i.Title)
@@ -732,6 +737,15 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	w.syncedVersion = versions
 	p.spec.Account = next
 	i.recordOffBoxAccount(next.Name, next.Agent, automatic, program, skipped)
+	// The notice the caller still owes the replacement rides the SAME
+	// checkpoint that retires the in-flight record (#7793 review): a daemon
+	// exit in the delivery window reloads this row on the new account with
+	// a pending-mission obligation recovery replays — not a bare taskRunActive
+	// the fresh agent's first idle could complete into on_complete for a task
+	// it never received.
+	if notice != "" {
+		i.SetPendingHandoffMission(notice)
+	}
 	i.clearOffBoxSwapInFlight(swapID)
 	return res, nil
 }

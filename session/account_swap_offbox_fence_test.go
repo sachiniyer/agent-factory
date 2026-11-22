@@ -79,14 +79,14 @@ func TestSwapOffBoxAccountFencedSessionAdmitsNoNewSwap(t *testing.T) {
 	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
 	f.srv.statusErr = errors.New("remote agent-server: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	require.True(t, f.inst.StartupStateUnknown())
 	require.NotNil(t, f.inst.InFlightOffBoxSwap(), "the record the verb reconciles is kept")
 	calls, shells := f.srv.calls, len(*f.shellCalls)
 
 	f.registerThird(t)
-	_, err = f.inst.SwapOffBoxAccount("third", false)
+	_, err = f.inst.SwapOffBoxAccount("third", false, "")
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate, "the refusal names the fence, not a new indeterminate verdict")
 	assert.Contains(t, err.Error(), "fenc", "an actionable refusal, not a bare no")
@@ -112,7 +112,7 @@ func TestSwapOffBoxAccountReconcileSwapUnfencesOnAVerdict(t *testing.T) {
 	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
 	f.srv.statusErr = errors.New("remote agent-server: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	require.True(t, f.inst.StartupStateUnknown())
 	require.False(t, f.inst.Started(), "the fence lifts the running claim with it")
@@ -153,13 +153,13 @@ func TestSwapOffBoxAccountFencedSessionHasNoUnfenceVerb_KnownGap7797(t *testing.
 	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
 	f.srv.statusErr = errors.New("remote agent-server: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	require.True(t, f.inst.StartupStateUnknown())
 	require.False(t, f.inst.Started(), "the fence lifts the running claim with it")
 
 	f.registerThird(t)
-	_, err = f.inst.SwapOffBoxAccount("third", false)
+	_, err = f.inst.SwapOffBoxAccount("third", false, "")
 	require.Error(t, err, "the fence does not decay: a later attempt is refused the same way")
 	require.True(t, f.inst.StartupStateUnknown(),
 		"and nothing in the swap path clears it — a daemon restart re-runs the reconcile and `af sessions kill` removes the row; #7797 tracks whether an operator verb should exist")
@@ -175,7 +175,7 @@ func TestSwapOffBoxAccountOldServerDefiniteRefusalRemovesTheStage(t *testing.T) 
 	f.srv.wrapAnswered = true
 	f.srv.failAfter = errors.New("the new agent did not start")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorContains(t, err, "did not start")
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate, "the server answered: a definite refusal, not a guess")
 
@@ -204,7 +204,7 @@ func TestSwapOffBoxAccountOldServerStageFailureRemovesTheStage(t *testing.T) {
 		return real(d, script, in, c)
 	}
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorContains(t, err, "staging account")
 	assert.NoDirExists(t, nextDir, "the half-written stage comes off the host — no request was ever sent")
 }
@@ -271,7 +271,7 @@ func TestSwapOffBoxAccountOldServerFenceNamesTheUpgrade(t *testing.T) {
 	f.srv.anonymous = true
 	f.srv.loseBefore = errors.New("remote agent-server: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.Contains(t, err.Error(), "predates the "+accountSwapDiscardFeature+" route")
 	assert.Contains(t, err.Error(), "upgrade")

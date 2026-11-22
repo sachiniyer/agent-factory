@@ -82,7 +82,7 @@ func TestAccountHandoffRunsOnAReattachedSession(t *testing.T) {
 	f := newSwapFixture(t)
 	inst := restartedFrom(t, f, "box1")
 
-	res, err := inst.SwapOffBoxAccount("alt", false)
+	res, err := inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 	assert.Zero(t, res.WrittenBack, "no baseline for A in this process")
 	assert.Equal(t, secretWork, readOrEmpty(f.workReg))
@@ -173,7 +173,7 @@ func TestAgentConfigSurvivesAnOffBoxAccountSwapOnAReattachedSession(t *testing.T
 	t.Setenv("CLAUDE_CONFIG_DIR", opHome)
 	inst.agentSrv = hostEnvServer{f.srv, t, hostScope}
 
-	_, err := inst.SwapOffBoxAccount("alt", false)
+	_, err := inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the new account is live")
@@ -204,7 +204,7 @@ func TestNoAgentConfigIsStagedOnAReattachedSessionWhenNoneIsDeclared(t *testing.
 	t.Setenv("CLAUDE_CONFIG_DIR", opHome)
 	inst.agentSrv = hostEnvServer{f.srv, t, hostScope}
 
-	_, err := inst.SwapOffBoxAccount("alt", false)
+	_, err := inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the new account is live")
@@ -235,7 +235,7 @@ func TestAgentConfigIsNotReDerivedForAReattachedSessionWithoutAnAccountLicence(t
 
 	// Without the licence the swap is refused before staging, so no operator config
 	// is read or sent — the re-derivation does not reach past the gate.
-	_, err := inst.SwapOffBoxAccount("alt", false)
+	_, err := inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorContains(t, err, "not synced")
 	assert.NoFileExists(t, filepath.Join(f.dir, "account", "settings.json"))
 }

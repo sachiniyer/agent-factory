@@ -135,7 +135,7 @@ func TestCodexAgentConfigSurvivesFreshSwap(t *testing.T) {
 		[]byte(`model = "o3"`+"\n"+`cli_auth_credentials_store = "keyring"`+"\n"), 0o600))
 	t.Setenv("CODEX_HOME", opHome)
 
-	_, err = inst.SwapOffBoxAccount("alt", false)
+	_, err = inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	got := readOrEmpty(filepath.Join(dir, "account", "config.toml"))
@@ -198,7 +198,7 @@ func TestCodexFreshSwapKeepsAnEmptyProvisionSelection(t *testing.T) {
 		[]byte(`model = "o3"`+"\n"+`cli_auth_credentials_store = "keyring"`+"\n"), 0o600))
 	t.Setenv("CODEX_HOME", opHome)
 
-	_, err = inst.SwapOffBoxAccount("alt", false)
+	_, err = inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	assert.Empty(t, readOrEmpty(filepath.Join(dir, "account", "config.toml")),
@@ -272,7 +272,7 @@ func TestCodexAgentConfigSurvivesSwapOnAReattachedSession(t *testing.T) {
 		[]byte(`model = "o3"`+"\n"+`cli_auth_credentials_store = "keyring"`+"\n"), 0o600))
 	t.Setenv("CODEX_HOME", opHome)
 
-	_, err = inst.SwapOffBoxAccount("alt", false)
+	_, err = inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	got := readOrEmpty(filepath.Join(dir, "account", "config.toml"))

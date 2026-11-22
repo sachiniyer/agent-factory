@@ -115,7 +115,7 @@ func TestAccountHandoffSendsNothingAfterItsHostEntryIsRemovedOrReAddressed(t *te
 			saveDefaultHost(t, edit(oneListedHost), "")
 
 			require.Error(t, inst.ValidateOffBoxAccountSwap("alt"), "admission refuses, so the scheduler never picks this session")
-			_, err := inst.SwapOffBoxAccount("alt", false)
+			_, err := inst.SwapOffBoxAccount("alt", false, "")
 			require.Error(t, err)
 			assert.Empty(t, accountWrites(*scripts), "the incoming account was sent to a machine the host list no longer names")
 			assert.NoDirExists(t, f.stagedDir(), "nothing was staged")
@@ -134,7 +134,7 @@ func TestAccountHandoffStillRunsWhenItsHostEntryIsUnchanged(t *testing.T) {
 	scripts := recordHostCommands(inst)
 
 	require.NoError(t, inst.ValidateOffBoxAccountSwap("alt"))
-	_, err := inst.SwapOffBoxAccount("alt", false)
+	_, err := inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 	assert.Len(t, accountWrites(*scripts), 1)
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"))
@@ -299,7 +299,7 @@ func TestEverySenderIsLicensedAtItsOwnSend(t *testing.T) {
 		f := newSwapFixture(t)
 		saveDefaultHost(t, nil, "")
 		*f.shellCalls = nil
-		_, err := f.inst.SwapOffBoxAccount("alt", false)
+		_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no longer in the global host list")
 		assert.Empty(t, accountWrites(*f.shellCalls))

@@ -235,7 +235,7 @@ func TestSwapOffBoxAccountStagesTheAfSkill(t *testing.T) {
 			f := newScopeSkillFixture(t, tc.agent, true)
 			f.seedLiveSkill(t) // what provision's launch left in the outgoing scope
 
-			_, err := f.inst.SwapOffBoxAccount("alt", false)
+			_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			assert.Equal(t, afSkillDoc, f.srv.atCall[f.skillRel],
@@ -260,7 +260,7 @@ func TestSwapOffBoxAccountStagesNoSkillWhenDeclined(t *testing.T) {
 		t.Run(tc.agent, func(t *testing.T) {
 			f := newScopeSkillFixture(t, tc.agent, false)
 
-			_, err := f.inst.SwapOffBoxAccount("alt", false)
+			_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			assert.Empty(t, f.srv.atCall[f.skillRel],
@@ -285,7 +285,7 @@ func TestSwapOffBoxAccountStageFailureKeepsTheOutgoingSkill(t *testing.T) {
 				return nil, errors.New("ssh: connection refused")
 			}
 
-			_, err := f.inst.SwapOffBoxAccount("alt", false)
+			_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.ErrorContains(t, err, "staging account")
 
 			assert.Zero(t, f.srv.calls, "the agent-server is never asked to stop anything")
@@ -310,7 +310,7 @@ func TestSwapOffBoxAccountRolledBackSwapKeepsTheOutgoingSkill(t *testing.T) {
 			f.seedLiveSkill(t)
 			f.srv.failAfter = errors.New("the new agent did not start")
 
-			_, err := f.inst.SwapOffBoxAccount("alt", false)
+			_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.ErrorContains(t, err, "did not start")
 
 			got, readErr := os.ReadFile(f.liveSkill())
@@ -363,7 +363,7 @@ func TestSwapOffBoxAccountStagesWithTheSnapshotConsentFlippedToGranted(t *testin
 			cfg.GlobalAgentSkills = true
 			require.NoError(t, config.SaveConfig(cfg))
 
-			_, err = f.inst.SwapOffBoxAccount("alt", false)
+			_, err = f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			assert.Empty(t, f.srv.atCall[f.skillRel],
@@ -390,7 +390,7 @@ func TestSwapOffBoxAccountStagesWithTheSnapshotConsentFlippedToDeclined(t *testi
 			cfg.GlobalAgentSkills = false // the operator revoked after create
 			require.NoError(t, config.SaveConfig(cfg))
 
-			_, err = f.inst.SwapOffBoxAccount("alt", false)
+			_, err = f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			assert.Equal(t, afSkillDoc, f.srv.atCall[f.skillRel],
@@ -460,7 +460,7 @@ func TestSwapOffBoxAccountUnknownConsentStagesNoSkillAndSaysSo(t *testing.T) {
 					f := newScopeSkillFixture(t, tc.agent, true) // the live config GRANTS
 					v.prep(t, f)
 
-					res, err := f.inst.SwapOffBoxAccount("alt", false)
+					res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 					require.NoError(t, err)
 
 					assert.Empty(t, f.srv.atCall[f.skillRel],
@@ -506,7 +506,7 @@ func TestSwapOffBoxAccountUnknownConsentEntryCarriesNoHostBytes(t *testing.T) {
 				return localShell{}.Run(d, script, in, interactive)
 			}
 
-			res, err := f.inst.SwapOffBoxAccount("alt", false)
+			res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			want := fmt.Sprintf("%s:%s: af could not confirm whether the sandbox's operator policy grants global_agent_skills: %s could not be read on the host",
@@ -532,7 +532,7 @@ func TestSwapOffBoxAccountOnARestoredWorkspaceStagesWithTheShippedPolicy(t *test
 			f.w.restored = true
 			require.NoError(t, os.WriteFile(f.w.PolicyPath(), swapPolicyBytes(t, true), 0o600))
 
-			res, err := f.inst.SwapOffBoxAccount("alt", false)
+			res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			assert.Equal(t, afSkillDoc, f.srv.atCall[f.skillRel],

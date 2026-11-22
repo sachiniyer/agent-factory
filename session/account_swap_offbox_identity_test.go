@@ -70,7 +70,7 @@ func (f *swapFixture) seedUnknown(t *testing.T) {
 func TestSwapOffBoxAccountStaleCommittedWithLeftoverPrevKeepsTheOldAccount(t *testing.T) {
 	f := newSwapFixture(t)
 	f.failPrevCleanup(t, func() {
-		_, err := f.inst.SwapOffBoxAccount("alt", false)
+		_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 		require.NoError(t, err)
 	})
 	require.FileExists(t, filepath.Join(f.w.PrevAccountDir(), credFile),
@@ -78,7 +78,7 @@ func TestSwapOffBoxAccountStaleCommittedWithLeftoverPrevKeepsTheOldAccount(t *te
 	thirdReg := f.registerThird(t)
 	f.srv.loseBefore = errors.New("remote agent-server: POST /v1/agent/swap-account: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("third", false)
+	_, err := f.inst.SwapOffBoxAccount("third", false, "")
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate,
 		"the host provably runs the old account: a definite refusal, not a guess")
@@ -100,14 +100,14 @@ func TestSwapOffBoxAccountStaleCommittedWithLeftoverPrevKeepsTheOldAccount(t *te
 func TestSwapOffBoxAccountStaleRecordStillCreditsThisSwapsCommit(t *testing.T) {
 	f := newSwapFixture(t)
 	f.failPrevCleanup(t, func() {
-		_, err := f.inst.SwapOffBoxAccount("alt", false)
+		_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 		require.NoError(t, err)
 	})
 	thirdReg := f.registerThird(t)
 	f.refreshOnHost(t, "alt-refreshed-on-host") // alt's agent rotated its token between the swaps
 	f.srv.loseResponse = errors.New("remote agent-server: POST /v1/agent/swap-account: context deadline exceeded")
 
-	res, err := f.inst.SwapOffBoxAccount("third", false)
+	res, err := f.inst.SwapOffBoxAccount("third", false, "")
 	require.NoError(t, err)
 	assert.True(t, res.Reconciled)
 
@@ -123,13 +123,13 @@ func TestSwapOffBoxAccountStaleRecordStillCreditsThisSwapsCommit(t *testing.T) {
 func TestSwapOffBoxAccountStaleRolledBackKeepsTheOldAccount(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.failAfter = errors.New("the new agent did not start")
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorContains(t, err, "did not start")
 	f.srv.failAfter = nil
 	thirdReg := f.registerThird(t)
 	f.srv.loseBefore = errors.New("remote agent-server: connection reset")
 
-	_, err = f.inst.SwapOffBoxAccount("third", false) // still on work: the first swap rolled back
+	_, err = f.inst.SwapOffBoxAccount("third", false, "") // still on work: the first swap rolled back
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate)
 
@@ -149,7 +149,7 @@ func TestSwapOffBoxAccountStaleRolledBackKeepsTheOldAccount(t *testing.T) {
 func TestSwapOffBoxAccountDelayedRequestCommitsUnderItsOwnIdentity(t *testing.T) {
 	f := newSwapFixture(t)
 	f.failPrevCleanup(t, func() {
-		_, err := f.inst.SwapOffBoxAccount("alt", false)
+		_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 		require.NoError(t, err)
 	})
 	thirdReg := f.registerThird(t)
@@ -157,7 +157,7 @@ func TestSwapOffBoxAccountDelayedRequestCommitsUnderItsOwnIdentity(t *testing.T)
 	f.srv.loseBefore = errors.New("remote agent-server: connection reset")
 	f.srv.delayedAtStatusCall = 1 // lands between the first status read and the discard
 
-	res, err := f.inst.SwapOffBoxAccount("third", false)
+	res, err := f.inst.SwapOffBoxAccount("third", false, "")
 	require.NoError(t, err)
 	assert.True(t, res.Reconciled, "the second status read waited for the running swap and found its own record")
 
@@ -175,7 +175,7 @@ func TestSwapOffBoxAccountDelayedRequestCommitsUnderItsOwnIdentity(t *testing.T)
 func TestSwapOffBoxAccountDelayedRequestAfterTheDiscardOnlyRollsBack(t *testing.T) {
 	f := newSwapFixture(t)
 	f.failPrevCleanup(t, func() {
-		_, err := f.inst.SwapOffBoxAccount("alt", false)
+		_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 		require.NoError(t, err)
 	})
 	firstID := f.srv.lastID
@@ -183,7 +183,7 @@ func TestSwapOffBoxAccountDelayedRequestAfterTheDiscardOnlyRollsBack(t *testing.
 	f.srv.loseBefore = errors.New("remote agent-server: connection reset")
 	f.srv.delayedAtStatusCall = 2 // lands after the staged scope is discarded
 
-	_, err := f.inst.SwapOffBoxAccount("third", false)
+	_, err := f.inst.SwapOffBoxAccount("third", false, "")
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate)
 
@@ -206,7 +206,7 @@ func TestSwapOffBoxAccountStaleUnknownIsIndeterminate(t *testing.T) {
 	f.registerThird(t)
 	f.srv.loseBefore = errors.New("remote agent-server: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("third", false)
+	_, err := f.inst.SwapOffBoxAccount("third", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
 	assert.DirExists(t, f.stagedDir(), "nothing is discarded from a host in doubt")
@@ -225,7 +225,7 @@ func TestSwapOffBoxAccountAnonymousCommittedIsIndeterminate(t *testing.T) {
 	thirdReg := f.registerThird(t)
 	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded") // this swap really committed
 
-	_, err := f.inst.SwapOffBoxAccount("third", false)
+	_, err := f.inst.SwapOffBoxAccount("third", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate,
 		"an outcome with no identity proves nothing about this swap")
 	assert.True(t, f.inst.StartupStateUnknown())
@@ -246,14 +246,14 @@ func TestSwapOffBoxAccountAnonymousCommittedIsIndeterminate(t *testing.T) {
 func TestSwapOffBoxAccountAnonymousStaleCommittedFencesKeepingTheStage(t *testing.T) {
 	f := newSwapFixture(t)
 	f.failPrevCleanup(t, func() {
-		_, err := f.inst.SwapOffBoxAccount("alt", false)
+		_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 		require.NoError(t, err)
 	})
 	f.srv.anonymous = true
 	f.registerThird(t)
 	f.srv.loseBefore = errors.New("remote agent-server: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("third", false)
+	_, err := f.inst.SwapOffBoxAccount("third", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
 	assert.DirExists(t, f.stagedDirFor("test-swap-2"),
@@ -272,7 +272,7 @@ func TestSwapOffBoxAccountAnonymousRolledBackIsIndeterminate(t *testing.T) {
 	f.srv.anonymous = true
 	f.srv.failAfter = errors.New("the new agent did not start")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 
 	acct, _ := f.inst.AccountSelection()
@@ -290,7 +290,7 @@ func TestSwapOffBoxAccountAnonymousNoneIsIndeterminate(t *testing.T) {
 	f.srv.anonymous = true
 	f.srv.loseBefore = errors.New("remote agent-server: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
 	assert.DirExists(t, f.stagedDir(), "the stage stays for teardown — an old server has no ordered discard")
@@ -308,7 +308,7 @@ func TestSwapOffBoxAccountNoRecordWithContradictingMarkersIsIndeterminate(t *tes
 	require.NoError(t, os.WriteFile(filepath.Join(stalePrev, credFile), []byte(secretWork), 0o600))
 	f.srv.loseBefore = errors.New("remote agent-server: connection reset")
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
 	acct, _ := f.inst.AccountSelection()
@@ -335,7 +335,7 @@ func TestSwapOffBoxAccountHeldRequestCannotRotateALaterSwapsStage(t *testing.T) 
 			f := newSwapFixture(t)
 			f.srv.holdNext = 1 // the request is queued, never runs, through the reconcile
 
-			_, err := f.inst.SwapOffBoxAccount("alt", false)
+			_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.Error(t, err)
 			require.NotErrorIs(t, err, ErrAccountSwapIndeterminate,
 				"the serialized discard resolved it: the id is tombstoned, its stage removed")
@@ -396,7 +396,7 @@ func TestSwapOffBoxAccountDiscardAndRotationAreSerialized(t *testing.T) {
 
 		done := make(chan error, 1)
 		go func() {
-			_, err := f.inst.SwapOffBoxAccount("third", false)
+			_, err := f.inst.SwapOffBoxAccount("third", false, "")
 			done <- err
 		}()
 
@@ -436,7 +436,7 @@ func TestSwapOffBoxAccountDiscardAndRotationAreSerialized(t *testing.T) {
 
 		done := make(chan error, 1)
 		go func() {
-			_, err := f.inst.SwapOffBoxAccount("third", false)
+			_, err := f.inst.SwapOffBoxAccount("third", false, "")
 			done <- err
 		}()
 
@@ -586,11 +586,11 @@ func TestDiscardAccountNextInPlaceRemovesOnlyItsOwnStage(t *testing.T) {
 // second swap's staging and rotation read it the same way the first's did.
 func TestSwapOffBoxAccountSecondSwapStagesAgainstTheNewLiveScope(t *testing.T) {
 	f := newSwapFixture(t)
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 	f.registerThird(t)
 
-	res, err := f.inst.SwapOffBoxAccount("third", false)
+	res, err := f.inst.SwapOffBoxAccount("third", false, "")
 	require.NoError(t, err)
 	assert.Equal(t, secretThird, f.srv.atCall.next, "the second swap staged the incoming account beside the live one")
 	assert.Equal(t, "alt", res.From)

@@ -105,7 +105,7 @@ func TestSwapOffBoxAccountDoubleFailureIsIndeterminate(t *testing.T) {
 	live := f.w.AccountDir()
 	scopeRenameFailer(t, []string{f.w.nextAccountDirFor("test-swap-1", true), f.w.PrevAccountDir()}, errors.New("simulated EIO"))
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown(),
 		"the session is fenced, not presented as healthy on an account whose scope is missing")
