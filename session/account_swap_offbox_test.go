@@ -106,9 +106,6 @@ func (s *acctSwapServer) swap() (string, error) {
 	s.calls++
 	s.atCall.live = readOrEmpty(filepath.Join(s.live, credFile))
 	s.atCall.next = readOrEmpty(filepath.Join(s.next, credFile))
-	if s.loseBefore != nil {
-		return "", s.loseBefore
-	}
 	rot, err := newScopeRotation(tmux.ProgramClaude)
 	if err != nil {
 		return "", err
