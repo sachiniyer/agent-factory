@@ -880,13 +880,13 @@ func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 				m.cancelPanePreview(false)
 				return m, cmd
 			}
+			prevNotice := m.paneAutoHideNoticeID
 			committed, commitCmd := m.commitPanePreviewReplace()
 			if committed == nil {
 				return m, commitCmd
 			}
 			mod, attachCmd := m.handleEnterPane(committed)
-			// Omit commitCmd: its panesRefresh capture (attached=false) would run concurrently with the attach; the rebind is synchronous and post-detach repaints.
-			return mod, attachCmd
+			return mod, m.rearmAutoHideNoticeClear(prevNotice, attachCmd) // drop commitCmd's contending capture; retain the notice's clear timer (#2639)
 		}
 		return m.handleEnterPane(p)
 	}

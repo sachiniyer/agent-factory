@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -303,4 +304,74 @@ func TestAttachOnPreviewingPane_BrowserOnlyTargetShowsGuardNotAttach(t *testing.
 		"a web tab has no PTY: `o` must never start a full-screen attach")
 	assert.False(t, h.attached.Load())
 	assert.Nil(t, h.panePreviewTxn, "the preview was committed (rebound) before the guard ran")
+}
+
+// TestAttachOnPreviewingPane_RetainsAutoHideNoticeClearTimer is the #2639
+// follow-up for the attach verb. When the preview target is already open in
+// another pane and only one pane fits, commitPanePreviewReplace focuses the
+// target, auto-hides the preview owner, and synchronously installs the
+// auto-hide notice; its returned cmd batches that notice's 3-second clear timer
+// WITH a panesRefresh capture. The capture was computed against attached=false
+// and would contend with the attach, so handleAttach drops it — but it must
+// retain the notice-clear timer, or the notice lingers indefinitely (the
+// post-detach repaint does not re-create a timer for the already-consumed
+// notice). The fix re-arms the timer from the id the commit installed.
+func TestAttachOnPreviewingPane_RetainsAutoHideNoticeClearTimer(t *testing.T) {
+	h := paneTestHome(t)
+	resizeHome(h, layout.MultiPaneMinWidth-1, 24) // only one pane fits
+
+	visible, hidden := openPanesForBothAndReturnHidden(t, h)
+	owner := h.store.FindOpenPane(visible, 0)
+	target := h.store.FindOpenPane(hidden, 0)
+	require.NotNil(t, owner)
+	require.NotNil(t, target)
+	require.NotSame(t, owner, target)
+
+	w := h.paneWindows[owner.ID()]
+	require.NotNil(t, w)
+	original := paneBinding{instance: visible, tab: 0}
+	preview := paneBinding{instance: hidden, tab: 0}
+	seq := w.SetPreview(preview.instance, preview.tab, paneBindingLabel(original))
+	h.panePreviewTxn = &panePreviewTxn{
+		ownerPaneID: owner.ID(),
+		original:    original,
+		target:      preview,
+		seq:         seq,
+	}
+	// Focus the owning pane so handleAttach's focused-pane fast path takes the
+	// preview branch (a header-click state the keyboard path can't reach).
+	h.focusRegion(layout.PaneRegion(owner.ID()))
+	require.Same(t, owner, h.focusedOpenPane(), "precondition: the owner is focused")
+	require.True(t, h.paneIsPreviewing(owner), "precondition: the owner is previewing")
+
+	// Reset the notice left by setup so only the commit relayout is measured.
+	h.errBox.Clear()
+	h.pendingPaneAutoHideStatus = ""
+	h.paneAutoHideNoticeID = 0
+
+	// Stub the attach so handleEnterPane's attach cmd is harmless; the help
+	// screen is marked seen so attachInstanceTab runs the transition cmd directly.
+	swapAttachOverlayCallbackFn(t, func(_ *home, _ sessionActionTarget, _, _ string, _ func() (chan struct{}, error)) tea.Cmd {
+		return nil
+	})
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInstanceAttach{}.mask()))
+
+	_, cmd := h.handleAttach()
+
+	require.NotEmpty(t, h.errBox.FullError(),
+		"the commit relayout auto-hides the preview owner and shows the notice")
+	noticeID := h.paneAutoHideNoticeID
+	require.NotZero(t, noticeID, "the commit installed the auto-hide notice")
+
+	// The attach drops the panesRefresh capture but MUST retain the notice's
+	// 3-second clear timer — drain the batched cmd (past the timer's 3s wait)
+	// and confirm a hideErrMsg for the installed notice is produced.
+	var sawClearTimer bool
+	for _, msg := range drainCmd(t, cmd, 4*time.Second) {
+		if hide, ok := msg.(hideErrMsg); ok && hide.noticeID == noticeID {
+			sawClearTimer = true
+		}
+	}
+	require.True(t, sawClearTimer,
+		"handleAttach must retain the auto-hide notice's 3s clear timer (#2639 follow-up)")
 }
