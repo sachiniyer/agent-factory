@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -50,12 +48,26 @@ const (
 	accountNextSuffix = ".next"
 	accountPrevSuffix = ".prev"
 
+	// accountSwapMarkerRel names the file inside the staged scope that binds it
+	// to the swap it was staged for (#7773 R1): a request may rotate in only a
+	// scope whose marker names its own id, so a queued request can never steal
+	// a later swap's stage. The rotation strips it from the live scope.
+	accountSwapMarkerRel = ".af-swap-id"
+
 	// accountSwapFeature is the /v1/health token for POST /v1/agent/swap-account.
 	accountSwapFeature = "account-swap"
+
+	// accountSwapDiscardFeature is the /v1/health token for POST
+	// /v1/agent/swap-account-discard — the serialized staged-scope discard
+	// (#7773 R2).
+	accountSwapDiscardFeature = "account-swap-discard"
 )
 
 // AccountSwapFeature is exported for the agent-server's /v1/health advertisement.
 const AccountSwapFeature = accountSwapFeature
+
+// AccountSwapDiscardFeature is exported for the /v1/health advertisement.
+const AccountSwapDiscardFeature = accountSwapDiscardFeature
 
 // accountScopeIndeterminate marks an error from the sandbox that could not say
 // which account its scope holds. It is carried in the message because the error
@@ -96,17 +108,64 @@ type accountSwapRecorder struct {
 	outcome string
 	program string
 	id      string
+	// cancelled is the last swap id the server-side discard tombstoned: a
+	// request that names it can never commit — its staged scope is gone —
+	// so the request is refused into rolled_back instead (#7773 R1).
+	cancelled string
+}
+
+// discardStaged tombstones a swap id: a request that names it afterwards can
+// only roll back. It is the server-side half of the daemon's "this swap is not
+// committed" verdict, recorded under the same serialization the swap runs in.
+func (r *accountSwapRecorder) discardStaged(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if id != "" {
+		r.cancelled = id
+	}
+}
+
+// refuseLocked records a request refused before it ever reached the rotation —
+// tombstoned, or staged-for-another-swap — under its own id. It claims the
+// slot only when it is EMPTY: a straggler must never displace any swap's
+// terminal record — not even its own, where a duplicated request would
+// otherwise downgrade a real commit into a rollback the host never did
+// (#7773 R1). A straggler's own reconcile still reaches not-committed through
+// the stale-record arm. Caller holds r.mu.
+func (r *accountSwapRecorder) refuseLocked(id string) {
+	if r.id == "" {
+		r.id, r.outcome, r.program = id, swapOutcomeRolledBack, ""
+	}
 }
 
 // run executes swap and records how it ended, under the swap's own identity.
 func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if id != "" && id == r.cancelled {
+		// The daemon already resolved this swap as not committed and its
+		// staged scope was discarded — the request arrived too late to ever
+		// commit (#7773 R1).
+		r.refuseLocked(id)
+		return "", fmt.Errorf("account swap %s: the staged scope was discarded before the request ran; refusing to rotate", id)
+	}
+	prevID, prevOutcome, prevProgram := r.id, r.outcome, r.program
 	r.id, r.outcome, r.program = id, swapOutcomeUnknown, "" // this swap's, until it is terminal
 	program, err := swap()
 	switch {
 	case err == nil:
 		r.outcome, r.program = swapOutcomeCommitted, program
+	case errors.Is(err, errStageNotMine):
+		// Refused before the rotation — the staged scope was not this
+		// swap's to take. The straggler claims a free slot as its own
+		// rolled_back; any terminal record already there is restored, so a
+		// late arrival can never displace another swap's evidence — or
+		// downgrade its own.
+		if prevID != "" {
+			r.id, r.outcome, r.program = prevID, prevOutcome, prevProgram
+		} else {
+			r.outcome = swapOutcomeRolledBack
+		}
 	case strings.Contains(err.Error(), accountScopeIndeterminate):
 		r.outcome = swapOutcomeUnknown
 	default:
@@ -133,13 +192,19 @@ func (r *accountSwapRecorder) status() (outcome, program, id string) {
 //
 // A status read is ordered: a running swap holds the recorder until it is
 // terminal, so a record that names an EARLIER swap means this one had not
-// started when the read was taken. Such a swap can still commit later — but
-// only by rotating the staged scope in — so the stale-read protocol removes
-// that scope once and asks again: a swap that slipped in between is waited out
-// by the second read and answered under its own id, and one that arrives later
-// can only roll back. Rollback state (account.prev) is never touched on
-// anything less than a commit this swap itself produced, and a failed status
-// read or marker probe stays indeterminate — never a guess at either answer.
+// started when the read was taken — but the request can still be in transit or
+// queued on the server's operation lock. The stale-read protocol therefore
+// asks the SERVER to discard the staged scope, serialized with the swap under
+// the same lock the swap holds: a request already running reaches its terminal
+// outcome first and the second read answers under its own id; one still queued
+// finds its id tombstoned and its staged scope gone — it can never commit,
+// and because a stage carries its own swap's marker it could not have rotated
+// a later stage's scope in either. A server too old to offer the discard
+// offers no ordering at all, so the reconcile stays indeterminate — never an
+// unordered remote rm racing a rotation (#7773 R1/R2). Rollback state
+// (account.prev) is never touched on anything less than a commit this swap
+// itself produced, and a failed status read or marker probe stays
+// indeterminate — never a guess at either answer.
 func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (committed bool, program string, known bool) {
 	discarded := false
 	for attempt := 0; attempt < 2; attempt++ {
@@ -149,7 +214,7 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (comm
 		}
 		if recID != "" && recID == swapID {
 			// This swap's own terminal record — the only admissible proof of
-			// commit. It is read after anything the daemon removed below, so a
+			// commit. It is read after the serialized discard below, so a
 			// commit it reports is ordered after every intervention here.
 			switch outcome {
 			case swapOutcomeCommitted:
@@ -177,27 +242,27 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string) (comm
 			return false, "", false
 		case swapOutcomeCommitted, swapOutcomeRolledBack:
 			if discarded {
-				// The staged scope is already gone, so this swap can never
-				// rotate in: the host holds whatever the last attributed swap
-				// left — the old account. An anonymous committed is the one
-				// exception: on a server that cannot echo the id it might BE
-				// this swap's, which no read here can tell apart.
+				// The discard serialized with the swap tombstoned this swap's
+				// id and removed its staged scope, so it can never commit —
+				// the host holds whatever the last attributed swap left. An
+				// anonymous committed is the one exception: on a server that
+				// cannot echo the id it might BE this swap's, which no read
+				// here can tell apart.
 				return false, "", recID != "" || outcome == swapOutcomeRolledBack
 			}
-			if recID == "" && outcome == swapOutcomeCommitted {
-				// A pre-identity server's committed might be this swap's own —
-				// fence rather than credit it, but bound the case where it is a
-				// stale record behind a request still in flight first.
-				_ = w.discardAccountNext(sshShortStepTimeout)
-				return false, "", false
-			}
-			// An attributed stale record or an anonymous rolled_back: remove the
-			// staged scope so a request still in flight can only roll back, then
-			// ask once more — the second read is ordered after the discard.
+			// A record that is not this swap's — an earlier swap's stale
+			// outcome, or an anonymous one — proves nothing about it, and the
+			// request may still be in flight or queued on the server.
 		default:
 			return false, "", false
 		}
-		if err := w.discardAccountNext(sshShortStepTimeout); err != nil {
+		// Discard the staged scope ON THE SERVER, serialized with the swap:
+		// either the request ran first and its own record answers the next
+		// read, or the discard tombstones the id and a late request can only
+		// roll back. A pre-identity agent-server has no such operation — the
+		// reconcile fences rather than running an unordered remote rm that can
+		// empty a scope under a rotation in flight (#7773 R2).
+		if err := sw.DiscardAccountNext(swapID); err != nil {
 			return false, "", false
 		}
 		discarded = true
@@ -243,6 +308,12 @@ func swapOutcomeIndeterminate(err error) bool {
 // stopped or sent when it is returned.
 var ErrAccountSwapUnsupported = errors.New("the sandbox's agent-server cannot swap accounts in place")
 
+// errStageNotMine wraps every refusal a rotation makes before it touches the
+// scopes: the staged scope is missing, unreadable, unbound, or bound to a
+// different swap. The recorder uses it to keep such a straggler from
+// displacing a later swap's terminal record (#7773 R1).
+var errStageNotMine = errors.New("the staged scope was not staged for this swap")
+
 // AccountSwapper is the optional capability of an AgentServer that can rotate its
 // account scope in place. Like AgentSwapper it is not a method on AgentServer, so
 // every existing implementation stays valid.
@@ -264,6 +335,14 @@ type AccountSwapper interface {
 	// server that predates swap identity, which can therefore never prove a
 	// commit.
 	AccountSwapStatus() (outcome, program, swapID string, err error)
+	// DiscardAccountNext removes the staged scope under the same serialization
+	// the swap runs in, and tombstones swapID so a request that names it can
+	// never commit afterwards (#7773): a request already running finished
+	// first and left its own terminal record; one still queued is refused
+	// into rolled_back. A pre-identity agent-server has no such operation —
+	// the caller reconciles that as indeterminate, never as an unordered
+	// remote rm, which could empty a scope under a rotation in flight.
+	DiscardAccountNext(swapID string) error
 }
 
 var (
@@ -286,7 +365,7 @@ func (w *sandboxWorkspace) PrevAccountDir() string { return w.AccountDir() + acc
 // lands in (accountStageSeed, #7368).
 // An existing staging directory is replaced, so a failed earlier attempt leaves
 // nothing behind to be mistaken for this one.
-func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessionenv.Account) (map[string]string, []string, error) {
+func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessionenv.Account, swapID string) (map[string]string, []string, error) {
 	// A send, so it is licensed here, at the send — not only at the admission
 	// that ran before the agent-server was asked whether it can swap (#7342).
 	check := *w
@@ -305,7 +384,17 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 	if _, scoped := scopeDiscoveredSkillRel(acct.Agent); scoped {
 		consent, consentErr = w.swapSkillConsent(timeout)
 	}
-	archive, versions, err := buildAccountArchive(acct.Dir, accountCredentialRel[acct.Agent], accountStageSeed(acct.Agent, consent))
+	// The staged scope carries the id of the swap it was staged for (#7773
+	// R1): the agent-server rotates in only a scope whose marker names the
+	// request's own id, so a queued request can never steal a later stage.
+	seed := accountStageSeed(acct.Agent, consent)
+	if swapID != "" {
+		if seed == nil {
+			seed = map[string][]byte{}
+		}
+		seed[accountSwapMarkerRel] = []byte(swapID)
+	}
+	archive, versions, err := buildAccountArchive(acct.Dir, accountCredentialRel[acct.Agent], seed)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -339,14 +428,6 @@ func (w *sandboxWorkspace) stageAccountNext(timeout time.Duration, acct sessione
 		skipped = append(skipped, entry)
 	}
 	return versions, skipped, nil
-}
-
-// discardAccountNext removes a staged scope that will not be used.
-func (w *sandboxWorkspace) discardAccountNext(timeout time.Duration) error {
-	if out, err := w.shell.Run(timeout, "rm -rf "+shellQuote(w.NextAccountDir()), nil, true); err != nil {
-		return fmt.Errorf("removing the staged account from the host failed: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
 }
 
 // removePrevAccount removes the outgoing scope after its write-back.
@@ -542,9 +623,12 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	if err != nil {
 		return res, fmt.Errorf("handing %q off to account %q: minting the swap's identity: %w", i.Title, next.Name, err)
 	}
-	versions, skipped, err := w.stageAccountNext(sshShortStepTimeout, next)
+	versions, skipped, err := w.stageAccountNext(sshShortStepTimeout, next, swapID)
 	if err != nil {
-		_ = w.discardAccountNext(sshShortStepTimeout)
+		// No request was sent, but the stage may be half-written: drop it
+		// through the server's serialized discard where one exists, the same
+		// ordered removal the reconcile uses.
+		_ = sw.DiscardAccountNext(swapID)
 		return res, err
 	}
 	// Set before the host is asked to rotate: whichever way the remote call
@@ -572,8 +656,11 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool) (OffBoxAccount
 	}
 	if err != nil {
 		// The host kept the old account, so the staged copy is dead weight
-		// holding credentials: remove it.
-		if rmErr := w.discardAccountNext(sshShortStepTimeout); rmErr != nil {
+		// holding credentials: remove it — on the agent-server, serialized
+		// with the swap, so it can never empty a scope under a rotation in
+		// flight the way an unordered remote rm could (#7773 R2). A server
+		// too old to offer the discard keeps the stage until teardown.
+		if rmErr := sw.DiscardAccountNext(swapID); rmErr != nil {
 			log.WarningLog.Printf("account handoff of %q: %v", i.Title, rmErr)
 		}
 		return res, fmt.Errorf("handing %q off to account %q: %w", i.Title, next.Name, err)
@@ -629,7 +716,18 @@ func (i *Instance) recordOffBoxAccount(name, agent string, automatic bool, progr
 func (s *localAgentServer) SwapAccountInPlace(swapID string) (string, error) {
 	s.agentOpMu.Lock()
 	defer s.agentOpMu.Unlock()
-	return s.acctSwap.run(swapID, s.inst.swapAccountInPlace)
+	return s.acctSwap.run(swapID, func() (string, error) { return s.inst.swapAccountInPlace(swapID) })
+}
+
+// DiscardAccountNext removes the staged scope under the same serialization the
+// swap runs in (agentOpMu), and tombstones the swap's id in the recorder
+// (#7773): a request that already ran has its own terminal record; one still
+// queued finds its id cancelled and its stage gone, so it can never commit.
+func (s *localAgentServer) DiscardAccountNext(swapID string) error {
+	s.agentOpMu.Lock()
+	defer s.agentOpMu.Unlock()
+	s.acctSwap.discardStaged(swapID)
+	return s.inst.discardAccountNextInPlace()
 }
 
 // AccountSwapStatus is the terminal record, served after any running swap ends,
@@ -641,180 +739,6 @@ func (s *localAgentServer) AccountSwapStatus() (string, string, string, error) {
 
 // CanSwapAccount is always true for the local runtime: it owns the tmux session.
 func (s *localAgentServer) CanSwapAccount() (bool, error) { return true, nil }
-
-// swapAccountInPlace is swapAgentInPlace to the SAME agent, with the scope
-// rotation between the confirmed stop and the start. The agent-server's own
-// environment names the scope (the launch guard guaranteed it), so nothing a
-// caller sends can redirect the rotation.
-func (i *Instance) swapAccountInPlace() (string, error) {
-	agent := i.CurrentAgentName()
-	rot, err := newScopeRotation(agent)
-	if err != nil {
-		return "", err
-	}
-	// The command that was proven and is running, byte for byte: never a
-	// re-resolution of the agent name, and never one af cannot attribute.
-	restart, err := i.provenRestartCommand(agent)
-	if err != nil {
-		return "", err
-	}
-	i.mu.Lock()
-	i.restartingSameAgent = true
-	i.mu.Unlock()
-	defer func() {
-		i.mu.Lock()
-		i.restartingSameAgent = false
-		i.mu.Unlock()
-	}()
-	program, err := i.swapAgentInPlaceFrom(agent, restart, rot.rotateAfter(i.stopSiblingsForAccountSwap))
-	if err != nil {
-		// The scope may have been rotated before the start failed; leave it as A so
-		// a retry or a relaunch finds the identity the row still records.
-		if rbErr := rot.restore(); rbErr != nil {
-			err = fmt.Errorf("%w (and the account scope could not be put back: %v; %s)", err, rbErr, accountScopeIndeterminate)
-		}
-		return "", err
-	}
-	return program, nil
-}
-
-// provenRestartCommand is the command the running agent was launched with — the
-// runtime evidence the launch recorded — re-proven attributed. The local swap
-// restarts the same evidence; an account-scoped agent-server proved it before the
-// first start (RequireAttributedAccountProgram) and this proves it again, so the
-// restart cannot launch anything else.
-func (i *Instance) provenRestartCommand(agent string) (string, error) {
-	command := i.RuntimeProgram()
-	if command == "" {
-		command = i.ResolvedPaneProgram()
-	}
-	if strings.TrimSpace(command) == "" {
-		return "", fmt.Errorf("session %q has no recorded launch command to restart; refusing to guess one for an account-scoped agent", i.Title)
-	}
-	if got := sessionenv.AgentForCommand(command); got != agent {
-		return "", fmt.Errorf("session %q's launch command %q runs %q, not %q; refusing to restart a different agent under the account", i.Title, command, got, agent)
-	}
-	if err := RequireAttributedAccountProgram(command, agent); err != nil {
-		return "", err
-	}
-	return command, nil
-}
-
-// prepareRestartSwap is PrepareAgentSwap for the account swap: the same runtime
-// gates, with the launch command fixed to restart.
-func (i *Instance) prepareRestartSwap(target, restart string) (AgentSwapPlan, error) {
-	if err := i.ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
-		return AgentSwapPlan{}, err
-	}
-	if err := i.ValidateHandoffTarget(target); err != nil {
-		return AgentSwapPlan{}, err
-	}
-	if !i.Capabilities().Handoff {
-		return AgentSwapPlan{}, ErrHandoffUnsupported
-	}
-	return prepareAgentSwapFrom(i, target, restart)
-}
-
-// stopSiblingsForAccountSwap stops every other credential-bearing pane — shell and
-// process tabs inherited the scope — exactly as the local swap does, so none
-// survives the rotation holding the old account or a dangling scope. A pane that
-// cannot be confirmed stopped aborts the swap before anything rotates.
-func (i *Instance) stopSiblingsForAccountSwap() error {
-	b, ok := i.currentBackend().(*LocalBackend)
-	if !ok {
-		return fmt.Errorf("session %q has no local runtime whose panes can be stopped", i.Title)
-	}
-	return b.stopForAccountSwap(i, true)
-}
-
-// rotateAfter is the swap's post-stop step: siblings are stopped first, and only
-// when that is confirmed does the scope move.
-func (r *scopeRotation) rotateAfter(stopSiblings func() error) func() error {
-	return func() error {
-		if err := stopSiblings(); err != nil {
-			return err
-		}
-		return r.rotate()
-	}
-}
-
-// scopeRotation is the directory dance, derived from the environment only.
-type scopeRotation struct {
-	live, next, prev string
-	rotated          bool
-}
-
-// newScopeRotation resolves the live scope from the agent's own scope variable and
-// requires the staged one beside it.
-func newScopeRotation(agent string) (*scopeRotation, error) {
-	envName, ok := sessionenv.SupportsAccounts(agent)
-	if !ok {
-		return nil, fmt.Errorf("agent %q has no account scope to rotate", agent)
-	}
-	live := filepath.Clean(os.Getenv(envName))
-	if live == "." || filepath.Base(live) != sshAccountSubdir {
-		return nil, fmt.Errorf("this sandbox's %s is not a session account scope; refusing to rotate it", envName)
-	}
-	r := &scopeRotation{live: live, next: live + accountNextSuffix, prev: live + accountPrevSuffix}
-	st, err := os.Lstat(r.next)
-	if err != nil || !st.IsDir() {
-		return nil, fmt.Errorf("no staged account at %s; nothing to rotate in", r.next)
-	}
-	hasCred := false
-	for _, rel := range accountCredentialRel[agent] {
-		if f, err := os.Lstat(filepath.Join(r.next, rel)); err == nil && f.Mode().IsRegular() {
-			hasCred = true
-			break
-		}
-	}
-	if !hasCred {
-		return nil, fmt.Errorf("the staged account at %s holds no credential file; refusing to rotate it in", r.next)
-	}
-	return r, nil
-}
-
-// scopeRename is the rename syscall the rotation and its undo use; os.Rename by
-// default, and a seam for tests that must inject a rename failure (the
-// double-failure arm of rotate that has to carry the indeterminate marker).
-var scopeRename = os.Rename
-
-// rotate moves the live scope aside and the staged one into place. It runs with
-// the old agent confirmed stopped.
-func (r *scopeRotation) rotate() error {
-	if err := os.RemoveAll(r.prev); err != nil {
-		return fmt.Errorf("clearing %s: %w", r.prev, err)
-	}
-	if err := scopeRename(r.live, r.prev); err != nil {
-		return fmt.Errorf("moving the outgoing account aside: %w", err)
-	}
-	if err := scopeRename(r.next, r.live); err != nil {
-		if rbErr := scopeRename(r.prev, r.live); rbErr != nil {
-			return fmt.Errorf("moving the incoming account into place: %w (and the outgoing one could not be restored: %v; %s)", err, rbErr, accountScopeIndeterminate)
-		}
-		return fmt.Errorf("moving the incoming account into place: %w", err)
-	}
-	r.rotated = true
-	return nil
-}
-
-// restore undoes a completed rotation: the incoming scope goes back to staging,
-// the outgoing one back to live.
-func (r *scopeRotation) restore() error {
-	if !r.rotated {
-		return nil
-	}
-	if err := os.RemoveAll(r.next); err != nil {
-		return err
-	}
-	if err := scopeRename(r.live, r.next); err != nil {
-		return err
-	}
-	if err := scopeRename(r.prev, r.live); err != nil {
-		return err
-	}
-	r.rotated = false
-	return nil
-}
 
 // --- daemon side ---
 
@@ -877,8 +801,17 @@ func (s *remoteAgentServer) AccountSwapStatus() (string, string, string, error) 
 	return resp.Outcome, resp.Program, resp.SwapID, nil
 }
 
+// DiscardAccountNext asks the sandbox to drop the staged scope under the swap's
+// own serialization and tombstone swapID (#7773 R2). A pre-identity
+// agent-server does not know the route — the caller reconciles that failure
+// as indeterminate, never as licence for an unordered remote rm.
+func (s *remoteAgentServer) DiscardAccountNext(swapID string) error {
+	return s.rc.callWithin("/v1/agent/swap-account-discard", accountSwapReq{SwapID: swapID}, nil, AgentRelaunchCallTimeout)
+}
+
 func (s *deadRemoteAgentServer) AccountSwapStatus() (string, string, string, error) {
 	return "", "", "", s.err()
 }
+func (s *deadRemoteAgentServer) DiscardAccountNext(string) error           { return s.err() }
 func (s *deadRemoteAgentServer) SwapAccountInPlace(string) (string, error) { return "", s.err() }
 func (s *deadRemoteAgentServer) CanSwapAccount() (bool, error)             { return false, s.err() }

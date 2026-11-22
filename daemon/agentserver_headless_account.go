@@ -55,3 +55,21 @@ func (hs *headlessServer) SwapAccountStatus(_ struct{}, resp *accountSwapStatusR
 	resp.OK, resp.Outcome, resp.Program, resp.SwapID = true, outcome, program, swapID
 	return nil
 }
+
+// DiscardAccountNext drops the staged account scope under the same
+// serialization the swap runs in, and tombstones the swap's id (#7773 R2):
+// a swap request that already ran left its own terminal record; one still
+// queued on this server can never commit. The daemon calls it while
+// reconciling a lost response — never as an unordered remote rm, which could
+// empty a scope under a rotation in flight.
+func (hs *headlessServer) DiscardAccountNext(req agentSwapAccountRequest, resp *agentSwapResponse) error {
+	sw, ok := hs.as.(session.AccountSwapper)
+	if !ok {
+		return session.ErrAccountSwapUnsupported
+	}
+	if err := sw.DiscardAccountNext(req.SwapID); err != nil {
+		return err
+	}
+	resp.OK = true
+	return nil
+}

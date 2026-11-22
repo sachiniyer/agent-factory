@@ -40,7 +40,7 @@ func (s *codexSwapServer) AccountSwapStatus() (string, string, string, error) {
 func (s *codexSwapServer) SwapAccountInPlace(swapID string) (string, error) {
 	return s.rec.run(swapID, func() (string, error) {
 		os.Setenv("CODEX_HOME", s.scope) // rotate reads the host's live account scope
-		rot, err := newScopeRotation(tmux.ProgramCodex)
+		rot, err := newScopeRotation(tmux.ProgramCodex, swapID)
 		if err != nil {
 			return "", err
 		}
@@ -49,6 +49,15 @@ func (s *codexSwapServer) SwapAccountInPlace(swapID string) (string, error) {
 		}
 		return "codex", nil
 	})
+}
+
+func (s *codexSwapServer) DiscardAccountNext(swapID string) error {
+	s.rec.mu.Lock()
+	defer s.rec.mu.Unlock()
+	if swapID != "" {
+		s.rec.cancelled = swapID
+	}
+	return os.RemoveAll(s.next)
 }
 
 // A fresh codex swap stages the operator's config.toml (with the forced file

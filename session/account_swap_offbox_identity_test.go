@@ -236,10 +236,11 @@ func TestSwapOffBoxAccountAnonymousCommittedIsIndeterminate(t *testing.T) {
 		"the rotated-out scope stays for whatever inspects the fenced session")
 }
 
-// The same anonymous committed when the swap genuinely never ran: still
-// indeterminate — unattributable — but the staged scope is removed so the lost
-// request cannot land late and make the fence a divergence.
-func TestSwapOffBoxAccountAnonymousStaleCommittedBoundsThenFences(t *testing.T) {
+// The same anonymous committed when the swap genuinely never ran. A
+// pre-identity server has no serialized discard to bound the lost request
+// with, so the reconcile fences — and leaves the staged scope for teardown —
+// rather than reaching for an unordered remote rm (#7773 R2).
+func TestSwapOffBoxAccountAnonymousStaleCommittedFencesKeepingTheStage(t *testing.T) {
 	f := newSwapFixture(t)
 	f.failPrevCleanup(t, func() {
 		_, err := f.inst.SwapOffBoxAccount("alt", false)
@@ -252,30 +253,44 @@ func TestSwapOffBoxAccountAnonymousStaleCommittedBoundsThenFences(t *testing.T) 
 	_, err := f.inst.SwapOffBoxAccount("third", false)
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.True(t, f.inst.StartupStateUnknown())
-	assert.NoDirExists(t, f.w.NextAccountDir(),
-		"the staged scope is still removed: an unattributable commit cannot land late either")
+	assert.DirExists(t, f.w.NextAccountDir(),
+		"an old server has no ordered discard: the stage stays for teardown, never removed by an unordered rm")
 	acct, _ := f.inst.AccountSelection()
 	assert.Equal(t, "alt", acct)
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the host kept the old account")
 }
 
-// A rollback is one answer a pre-identity server CAN give definitely once the
-// staged scope is gone: whichever swap it belongs to, the host put the old
-// scope back, and this swap can never rotate in now.
-func TestSwapOffBoxAccountAnonymousRolledBackIsNotCommitted(t *testing.T) {
+// A rollback a pre-identity server answered is just as unattributable: the
+// lost request could still be queued behind the answer, and that server has
+// no serialized discard to bound it — so the session fences rather than risk
+// a later commit it cannot attribute.
+func TestSwapOffBoxAccountAnonymousRolledBackIsIndeterminate(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.anonymous = true
 	f.srv.failAfter = errors.New("the new agent did not start")
 
 	_, err := f.inst.SwapOffBoxAccount("alt", false)
-	require.ErrorContains(t, err, "did not start")
-	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate)
+	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 
 	acct, _ := f.inst.AccountSelection()
 	assert.Equal(t, "work", acct)
 	assert.Equal(t, secretWork, f.hostCred(t, "account"))
-	assert.NoDirExists(t, f.w.NextAccountDir())
-	assert.False(t, f.inst.StartupStateUnknown())
+	assert.DirExists(t, f.w.NextAccountDir(), "the restored stage stays on the fenced host for teardown")
+	assert.True(t, f.inst.StartupStateUnknown())
+}
+
+// A pre-identity server's "no swap has run" is no more attributable even when
+// the markers agree — the queued request could still land and nothing on that
+// server can bound it. Fence, and leave the stage.
+func TestSwapOffBoxAccountAnonymousNoneIsIndeterminate(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.anonymous = true
+	f.srv.loseBefore = errors.New("remote agent-server: connection reset")
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
+	assert.True(t, f.inst.StartupStateUnknown())
+	assert.DirExists(t, f.w.NextAccountDir(), "the stage stays for teardown — an old server has no ordered discard")
 }
 
 // --- the none arm keeps its host check ---
@@ -296,6 +311,204 @@ func TestSwapOffBoxAccountNoRecordWithContradictingMarkersIsIndeterminate(t *tes
 	acct, _ := f.inst.AccountSelection()
 	assert.Equal(t, "work", acct)
 	assert.DirExists(t, stalePrev, "the unexplained marker is left for the fence, not trusted")
+}
+
+// --- the ordering the locks enforce (#7773 R1/R2) ---
+
+// A swap request queued on the agent-server across BOTH status reads can still
+// arrive after the verdict — and after a LATER swap's stage replaced the one it
+// was sent for. The serialized discard's tombstone refuses it outright; and
+// even with the tombstone lost to a server restart, the stage's own marker
+// refuses a request that does not name the id the stage was written for.
+// Either way it can only roll back — it can never rotate another swap's scope
+// in under its own id.
+func TestSwapOffBoxAccountHeldRequestCannotRotateALaterSwapsStage(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		name := "the discard's tombstone refuses it"
+		if restart {
+			name = "a restarted server still refuses it on the stage's marker"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newSwapFixture(t)
+			f.srv.holdNext = 1 // the request is queued, never runs, through the reconcile
+
+			_, err := f.inst.SwapOffBoxAccount("alt", false)
+			require.Error(t, err)
+			require.NotErrorIs(t, err, ErrAccountSwapIndeterminate,
+				"the serialized discard resolved it: the id is tombstoned, its stage removed")
+			require.Len(t, f.srv.held, 1)
+
+			// A later swap stages ITS scope beside the live one — the stage the
+			// queued request would find when it finally lands.
+			f.registerThird(t)
+			next, selErr := selectAccountInNamespace(tmux.ProgramClaude, "third")
+			require.NoError(t, selErr)
+			_, _, stageErr := f.w.stageAccountNext(time.Minute, next, "a-different-swap")
+			require.NoError(t, stageErr)
+			if restart {
+				f.srv.rec = accountSwapRecorder{} // a restart forgets the tombstone — never the marker
+			}
+
+			_, err = f.srv.runHeldSwap(0)
+			require.Error(t, err, "the queued request is refused — never rotated into another swap's stage")
+
+			assert.Equal(t, secretWork, f.hostCred(t, "account"), "the live scope never moved")
+			assert.Equal(t, secretThird, readOrEmpty(filepath.Join(f.w.NextAccountDir(), credFile)),
+				"the later swap's stage is intact for its own request")
+			o, _, id := f.srv.rec.status()
+			assert.Equal(t, swapOutcomeRolledBack, o, "its only possible outcome is rolled back")
+			assert.Equal(t, f.srv.held[0], id)
+		})
+	}
+}
+
+// The staged-scope discard is serialized with the swap — the remote rm the bug
+// report's reconcile ran unordered can never again walk a directory a rotation
+// is renaming out from under it. Both orderings are terminal and clean: a
+// rotation in flight finishes and the discard finds nothing to remove, or the
+// discard finishes and the queued request can only roll back.
+func TestSwapOffBoxAccountDiscardAndRotationAreSerialized(t *testing.T) {
+	// The request's response was lost, and the request itself is in flight
+	// when the reconcile reaches for the discard: the discard must wait out
+	// the rotation, not walk the directory under it.
+	t.Run("the discard waits out a rotation in flight", func(t *testing.T) {
+		f := newSwapFixture(t)
+		f.registerThird(t)
+		f.srv.loseBefore = errors.New("remote agent-server: connection reset")
+		f.srv.delayedAtStatusCall = 1 // the lost request lands after the first read
+		f.srv.delayedInBackground = true
+		f.srv.rotateGate = make(chan struct{})
+		f.srv.rotateWaiting = make(chan struct{})
+		f.srv.discardWaiting = make(chan struct{})
+		f.srv.beforeDiscard = make(chan struct{})
+		f.srv.discardStarted = make(chan struct{})
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := f.inst.SwapOffBoxAccount("third", false)
+			done <- err
+		}()
+
+		<-f.srv.discardWaiting // the reconcile reached for the discard
+		<-f.srv.rotateWaiting  // but the late request won the lock first: mid-rotation
+		close(f.srv.beforeDiscard)
+		select {
+		case <-f.srv.discardStarted:
+			t.Fatal("the discard entered the swap's lock while the rotation held it")
+		case <-time.After(50 * time.Millisecond):
+		}
+		close(f.srv.rotateGate) // the rotation finishes — now the discard may run
+		<-f.srv.discardStarted
+		require.NoError(t, <-done)
+
+		acct, _ := f.inst.AccountSelection()
+		assert.Equal(t, "third", acct, "this swap's own record proves its commit")
+		assert.Equal(t, secretThird, f.hostCred(t, "account"),
+			"the live scope is whole — no rm ever walked it mid-rotation")
+		assert.Equal(t, secretWork, readOrEmpty(filepath.Join(f.w.PrevAccountDir(), credFile)),
+			"the outgoing scope is parked in .prev, complete")
+	})
+
+	// The mirror: the discard holds the lock when the lost request finally
+	// lands — the request waits, finds its stage gone and its id tombstoned,
+	// and can only roll back.
+	t.Run("a queued request waits out a discard in flight", func(t *testing.T) {
+		f := newSwapFixture(t)
+		f.registerThird(t)
+		f.srv.loseBefore = errors.New("remote agent-server: connection reset")
+		f.srv.discardStarted = make(chan struct{})
+		f.srv.discardGate = make(chan struct{})
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := f.inst.SwapOffBoxAccount("third", false)
+			done <- err
+		}()
+
+		<-f.srv.discardStarted // the discard holds the swap's lock, mid-removal
+		delayed := make(chan struct{})
+		go func() { f.srv.runDelayedSwap(); close(delayed) }()
+		select {
+		case <-delayed:
+			t.Fatal("the queued request ran while the discard held the lock")
+		case <-time.After(50 * time.Millisecond):
+		}
+		close(f.srv.discardGate)
+		<-delayed // the request lands now — tombstoned, it can only roll back
+		err := <-done
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrAccountSwapIndeterminate)
+
+		acct, _ := f.inst.AccountSelection()
+		assert.Equal(t, "work", acct)
+		assert.Equal(t, secretWork, f.hostCred(t, "account"), "the old account's scope is whole")
+		assert.NoDirExists(t, f.w.NextAccountDir())
+		o, _, id := f.srv.rec.status()
+		assert.Equal(t, swapOutcomeRolledBack, o)
+		assert.Equal(t, f.srv.lastID, id)
+	})
+}
+
+// The staged scope is bound to the swap it was staged for (#7773 R1): a
+// request rotates in only the scope whose marker names its own id. The binding
+// is durable — it lives on the filesystem, so it survives the restart a
+// recorder tombstone does not.
+func TestScopeRotationBindsTheStageToItsSwap(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		marker  string // "" writes no marker file
+		wantID  string
+		wantErr string
+	}{
+		{"a matching id rotates", "swap-1", "swap-1", ""},
+		{"a mismatched id refuses", "swap-1", "swap-2", "not staged for this swap"},
+		{"no marker refuses a named swap", "", "swap-2", "not staged for this swap"},
+		{"no marker allows a pre-identity request", "", "", ""},
+		{"a marker allows a pre-identity request", "swap-1", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live := rotationHost(t)
+			if tc.marker != "" {
+				require.NoError(t, os.WriteFile(
+					filepath.Join(live+accountNextSuffix, accountSwapMarkerRel), []byte(tc.marker), 0o600))
+			}
+			_, err := newScopeRotation(tmux.ProgramClaude, tc.wantID)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// The rotation strips the swap's marker from the live scope: it bound the
+// stage, not the account, and must not ride the scope into a write-back.
+func TestScopeRotationStripsTheSwapMarker(t *testing.T) {
+	live := rotationHost(t)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(live+accountNextSuffix, accountSwapMarkerRel), []byte("swap-1"), 0o600))
+	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1")
+	require.NoError(t, err)
+	require.NoError(t, rot.rotate())
+	assert.NoFileExists(t, filepath.Join(live, accountSwapMarkerRel))
+	assert.NoFileExists(t, filepath.Join(live+accountPrevSuffix, accountSwapMarkerRel))
+}
+
+// An id the daemon resolved as not committed can never commit afterwards: the
+// serialized discard tombstones it under the same lock the swap runs in, and
+// the request is refused into rolled_back rather than rotated (#7773 R1).
+func TestAccountSwapDiscardTombstonesTheSwap(t *testing.T) {
+	var rec accountSwapRecorder
+	rec.discardStaged("doomed")
+	_, err := rec.run("doomed", func() (string, error) { return "claude", nil })
+	require.Error(t, err)
+	o, _, id := rec.status()
+	assert.Equal(t, swapOutcomeRolledBack, o)
+	assert.Equal(t, "doomed", id)
+
+	_, err = rec.run("fine", func() (string, error) { return "claude", nil })
+	require.NoError(t, err, "an unrelated id is untouched")
 }
 
 // The session env the rotation needs is still the live scope after swap #1: the
