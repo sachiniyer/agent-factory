@@ -266,10 +266,12 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// sets OpArchiving (I4) so the status poll skips this instance — and the
 	// checkpoint save skips persisting a mid-op row — while tmux is down and the
 	// worktree is mid-move, never misread as Lost. started stays true throughout so
-	// a move failure self-heals via the Lost loop, and OpArchiving is a DISTINCT op
-	// from a kill so the fence can never be confused with a TUI optimistic kill
-	// (#1187). The guards re-read under the op-lock above guarantee this edge is
-	// legal; a rejection surfaces here, before any teardown.
+	// a failed archive leaves a restorable Lost row — fenced off the automatic
+	// loop, which must not re-spawn what the user asked to stop (#7752) — and
+	// OpArchiving is a DISTINCT op from a kill so the fence can never be confused
+	// with a TUI optimistic kill (#1187). The guards re-read under the op-lock
+	// above guarantee this edge is legal; a rejection surfaces here, before any
+	// teardown.
 	if err := instance.Transition(session.BeginArchive()); err != nil {
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: %w", req.Title, err)
 	}
@@ -423,8 +425,10 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		// The worktree is still at a valid location (the git layer guarantees
 		// worktreePath points at the actual bytes even on a repair failure).
 		// Roll the fence back to Lost — started is still true and the agent tmux
-		// binding was kept — so the Lost-restore loop re-spawns the agent in place.
-		// Persist the recovery-eligible state, then surface the failure.
+		// binding was kept — but fence the Lost-restore loop off it: the user
+		// asked for this agent to stop, and re-spawning it is the #7752 failure
+		// (see abortRequestedArchiveToLost). Persist the Lost row and its fence,
+		// then surface the failure.
 		//
 		// The error-returning persist, for the same reason as the restore path
 		// below: since the relocate became bounded, this branch is reachable with
@@ -437,14 +441,14 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		// failing, and the move error alone is not the whole outcome (#2763).
 		// failedArchiveWithHook is what keeps the hook failure attached and logged;
 		// this path never reaches the committed-archive warning below.
-		_ = instance.Transition(session.AbortArchiveToLost())
+		m.abortRequestedArchiveToLost(instance, err)
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
 			return failedArchiveResult(instance, failedArchiveWithHook(req.Title, fmt.Errorf(
 				"failed to archive session %q AND could not record its recovered state on disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w",
 				req.Title, perr, worktreeRecoveryLocation(instance), err), hookErr))
 		}
 		return failedArchiveResult(instance, failedArchiveWithHook(req.Title, fmt.Errorf(
-			"failed to archive session %q (its agent will be restored in place): %w", req.Title, err), hookErr))
+			"failed to archive session %q (%s): %w", req.Title, archiveAbortedDetail, err), hookErr))
 	}
 
 	// Success: worktree relocated, tmux down. Commit the inert Archived state
@@ -600,7 +604,9 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 	branch, err := instance.ArchiveSandbox()
 	if err != nil {
 		// Push and/or teardown failed. Roll the fence back to Lost so the session
-		// stays recovery-eligible, persist that, and surface the failure.
+		// stays recoverable by an explicit restore or archive retry — fenced off
+		// the automatic loop, which must not re-provision a sandbox the user
+		// asked to archive (#7752) — persist that, and surface the failure.
 		//
 		// The durable write IS the mitigation here, exactly as the local route's
 		// rollback treats it (the archiveTeardown failure path below):
@@ -610,7 +616,7 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 		// stranding the pushed work (#1781/#3335). Surface the persist failure so
 		// the operator knows the recovery record (including the pushed branch)
 		// may not survive a restart.
-		_ = instance.Transition(session.AbortArchiveToLost())
+		m.abortRequestedArchiveToLost(instance, err)
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
 			// Only name and recommend inspecting the pushed branch when one
 			// actually reached origin: ArchiveSandbox returns an empty branch
@@ -681,14 +687,15 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 func (m *Manager) archiveRemotePreserving(repoID string, instance *session.Instance, title string) (string, error) {
 	loc, err := instance.ArchiveSandboxPreserving()
 	if err != nil {
-		// Stop failed. Roll the fence back to Lost so the session stays
-		// recovery-eligible, persist that, and surface the failure. The durable
-		// write IS the mitigation here, exactly as the push route above and the
-		// local route treat it: a swallowed persist failure leaves the on-disk
-		// row without the Lost rollback, so a restart may re-provision against a
-		// stale record. Surface the persist failure so the operator knows the
-		// recovery record may not survive a restart.
-		_ = instance.Transition(session.AbortArchiveToLost())
+		// Stop failed. Roll the fence back to Lost — fenced off the automatic
+		// restore loop exactly as the push route above is (#7752) — persist
+		// that, and surface the failure. The durable write IS the mitigation
+		// here, exactly as the push route above and the local route treat it: a
+		// swallowed persist failure leaves the on-disk row without the Lost
+		// rollback, so a restart may re-provision against a stale record.
+		// Surface the persist failure so the operator knows the recovery record
+		// may not survive a restart.
+		m.abortRequestedArchiveToLost(instance, err)
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
 			return "", fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); the session record may not reflect its Lost rollback — inspect it before restarting the daemon: %w", title, perr, err)
 		}

@@ -90,8 +90,8 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	//    backend_local.go's provision, runs INSIDE the sandbox and never mutates this
 	//    Instance; the branch reaches the daemon solely as this Archive() return), and
 	//    a failed Kill sends the session to Lost + recovery-eligible via the caller's
-	//    AbortArchiveToLost (daemon/archive.go). The Lost-restore loop then re-provisions
-	//    from this recorded checkpoint (reprovisionRemote → ProvisionSpec.RestoreBranch), and an empty
+	//    AbortArchiveToLost (daemon/archive.go; fenced from auto-restore, #7752). A restore
+	//    re-provisions from this checkpoint (reprovisionRemote → ProvisionSpec.RestoreBranch), and an empty
 	//    RestoreBranch makes the docker/ssh runtimes SKIP the restore fetch and clone the
 	//    repo's DEFAULT branch — a "successful" recovery onto the wrong branch that
 	//    silently strands the work this push just made durable.

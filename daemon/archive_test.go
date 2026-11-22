@@ -462,8 +462,9 @@ func TestArchiveSessionRejectsStartupUnknown(t *testing.T) {
 }
 
 // TestArchiveSession_MoveFailureMarksLost: when the worktree move fails, the
-// instance is marked Lost (not Archived) with started still true, so the
-// Lost-restore loop re-spawns the agent in place — and the worktree is left
+// instance is marked Lost (not Archived) with started still true, so it stays
+// restorable in place — fenced off the automatic loop since #7752, so an
+// explicit restore or archive retry moves it on — and the worktree is left
 // untouched at its original location.
 func TestArchiveSession_MoveFailureMarksLost(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
@@ -482,7 +483,7 @@ func TestArchiveSession_MoveFailureMarksLost(t *testing.T) {
 	require.Error(t, err, "a failed move must surface an error")
 
 	assert.Equal(t, session.Lost, inst.GetStatus(), "a failed archive marks the session Lost for self-heal")
-	assert.True(t, inst.Started(), "started stays true so the Lost-restore loop re-spawns the agent")
+	assert.True(t, inst.Started(), "started stays true so the row stays restorable in place")
 	assert.True(t, exists(srcPath), "the worktree must remain at its original path on a failed archive")
 	assert.Equal(t, session.Lost, persistedStatus(t, repoID, "worker"))
 }

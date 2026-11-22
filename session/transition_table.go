@@ -163,8 +163,10 @@ func CancelArchive() TransitionEvent { return TransitionEvent{kind: tkCancelArch
 // Archived state onto the read-only row, so it is not subject to I2.
 func CommitArchive() TransitionEvent { return TransitionEvent{kind: tkCommitArchive} }
 
-// AbortArchiveToLost rolls a failed archive move back to Lost so the restore
-// loop heals the agent in place.
+// AbortArchiveToLost rolls a failed archive back to Lost, started kept, so the
+// row stays restorable in place. The daemon's requested-archive callers also
+// fence the automatic restore loop off it (#7752): the user asked the agent to
+// stop, so only an explicit restore or an archive retry moves it on.
 func AbortArchiveToLost() TransitionEvent { return TransitionEvent{kind: tkAbortArchiveToLost} }
 
 // BeginRestore enters the restore fence for a restorable session (I3): Lost +
