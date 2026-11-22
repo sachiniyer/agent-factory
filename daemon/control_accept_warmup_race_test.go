@@ -60,14 +60,48 @@ func waitSocketBound(t *testing.T, msg string) {
 	t.Fatalf("control socket never bound: %s", msg)
 }
 
+// stubStopSignals replaces runDaemon's OS stop-signal feed with a channel the
+// test sends on directly, and returns that channel. The daemon under test is
+// this same process, so the syscall.Kill(os.Getpid(), SIGTERM) these tests
+// used to send went through real signal delivery: it could land while no
+// Notify registration was in effect — between subtest iterations, or before
+// the just-started daemon registered — and take the default action, killing
+// the whole `go test` binary (signal: terminated with no --- FAIL, so every
+// remaining daemon test was lost; #4217, twice on master). A send on the
+// returned channel reaches the daemon's relay exactly like a delivered
+// SIGTERM: relayStopSignals stamps the stop clock on receipt — the same
+// arrival-time anchor a real signal gets — and buffers the signal into
+// sigChan, so a parked select's signal arm goes co-ready with whichever other
+// arm is ready, precisely as before.
+//
+// The channel is never closed: the relay exits on its own done channel. Every
+// send must come AFTER the daemon stands its startup watcher down — a signal
+// consumed there is re-raised to the process, which is the same kill this
+// removes. The control socket binding is the first event strictly after that
+// stand-down (waitSocketBound), and every send site is gated past it or past
+// an equivalent post-stand-down marker.
+func stubStopSignals(t *testing.T) chan os.Signal {
+	t.Helper()
+	sigCh := make(chan os.Signal, 1)
+	previous := notifyStopSignals
+	notifyStopSignals = func() chan os.Signal { return sigCh }
+	t.Cleanup(func() { notifyStopSignals = previous })
+	return sigCh
+}
+
 // holdRestoreAndStart boots a plain runDaemon with a gated restore so the main
 // flow parks in the restore select. It returns the restore-started channel
 // (signalling the main flow is about to reach the select), the hold gate
-// (released in cleanup or by the test to let the restore finish), and the
-// runDaemon error channel. The cleanup closes the hold gate and joins the
-// daemon if the test has not already done so.
-func holdRestoreAndStart(t *testing.T) (<-chan struct{}, chan struct{}, <-chan error) {
+// (released in cleanup or by the test to let the restore finish), the
+// runDaemon error channel, and the daemon's injected stop-signal feed. The
+// cleanup closes the hold gate and joins the daemon if the test has not
+// already done so, stopping it through the Shutdown RPC — the channel every
+// warm-up and main select also reads — rather than a signal, so a daemon
+// wedged before the control socket binds leaks and fails locally instead of
+// hitting the armed startup watcher's re-raise and killing the test binary.
+func holdRestoreAndStart(t *testing.T) (<-chan struct{}, chan struct{}, <-chan error, chan os.Signal) {
 	t.Helper()
+	sigCh := stubStopSignals(t)
 	restoreStarted := make(chan struct{}, 1)
 	holdRestore := make(chan struct{})
 	previousRestore := restoreManagerForStartup
@@ -95,7 +129,8 @@ func holdRestoreAndStart(t *testing.T) (<-chan struct{}, chan struct{}, <-chan e
 		select {
 		case <-runExited:
 		default:
-			_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+			var resp ShutdownResponse
+			_ = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
 			select {
 			case <-runExited:
 			case <-time.After(10 * time.Second):
@@ -103,14 +138,16 @@ func holdRestoreAndStart(t *testing.T) (<-chan struct{}, chan struct{}, <-chan e
 			}
 		}
 	})
-	return restoreStarted, holdRestore, runErr
+	return restoreStarted, holdRestore, runErr, sigCh
 }
 
-// startProbationDaemon boots runDaemon as an upgrade candidate and returns the
-// error channel. The cleanup stops the daemon if the test has not already done
-// so.
-func startProbationDaemon(t *testing.T, transactionID string) <-chan error {
+// startProbationDaemon boots runDaemon as an upgrade candidate, installing the
+// same injected stop-signal feed as holdRestoreAndStart, and returns the error
+// channel and the feed. The cleanup stops the daemon through the Shutdown RPC
+// if the test has not already done so.
+func startProbationDaemon(t *testing.T, transactionID string) (<-chan error, chan os.Signal) {
 	t.Helper()
+	sigCh := stubStopSignals(t)
 	runExited := make(chan struct{})
 	runErr := make(chan error, 1)
 	go func() {
@@ -130,7 +167,7 @@ func startProbationDaemon(t *testing.T, transactionID string) <-chan error {
 			}
 		}
 	})
-	return runErr
+	return runErr, sigCh
 }
 
 // TestWarmupRestoreSelectSignalArmReturnsFatalAcceptErr forces the restore
@@ -145,7 +182,7 @@ func TestWarmupRestoreSelectSignalArmReturnsFatalAcceptErr(t *testing.T) {
 	captureExitHoldingHome(t, nil)
 
 	fatalErr := errors.New("simulated fatal accept error (restore-signal arm)")
-	restoreStarted, _, runErr := holdRestoreAndStart(t)
+	restoreStarted, _, runErr, sigCh := holdRestoreAndStart(t)
 
 	waitSocketBound(t, "the daemon never reached the restore select")
 	select {
@@ -158,7 +195,7 @@ func TestWarmupRestoreSelectSignalArmReturnsFatalAcceptErr(t *testing.T) {
 
 	setFatalAcceptErr(fatalErr)
 	t.Cleanup(resetFatalAcceptErr)
-	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	sigCh <- syscall.SIGTERM
 
 	select {
 	case err := <-runErr:
@@ -181,7 +218,7 @@ func TestWarmupProbationSelectSignalArmReturnsFatalAcceptErr(t *testing.T) {
 
 	fatalErr := errors.New("simulated fatal accept error (probation-signal arm)")
 	const transactionID = "txn-warmup-probation-signal"
-	runErr := startProbationDaemon(t, transactionID)
+	runErr, sigCh := startProbationDaemon(t, transactionID)
 
 	probation := waitForDaemonPhase(t, DaemonPhaseUpgradeProbation)
 	require.Equal(t, transactionID, probation.TransactionID)
@@ -189,7 +226,7 @@ func TestWarmupProbationSelectSignalArmReturnsFatalAcceptErr(t *testing.T) {
 
 	setFatalAcceptErr(fatalErr)
 	t.Cleanup(resetFatalAcceptErr)
-	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	sigCh <- syscall.SIGTERM
 
 	select {
 	case err := <-runErr:
@@ -256,7 +293,7 @@ func TestWarmupRestoreThrowawayArmPreservesCleanExit(t *testing.T) {
 
 	owner := throwawaySetup(t)
 	fatalErr := errors.New("simulated fatal accept error (restore-throwaway arm)")
-	restoreStarted, _, runErr := holdRestoreAndStart(t)
+	restoreStarted, _, runErr, _ := holdRestoreAndStart(t)
 
 	waitSocketBound(t, "the daemon never reached the restore select")
 	select {
@@ -293,7 +330,7 @@ func TestWarmupProbationThrowawayArmPreservesCleanExit(t *testing.T) {
 	owner := throwawaySetup(t)
 	fatalErr := errors.New("simulated fatal accept error (probation-throwaway arm)")
 	const transactionID = "txn-warmup-probation-throwaway"
-	runErr := startProbationDaemon(t, transactionID)
+	runErr, _ := startProbationDaemon(t, transactionID)
 
 	probation := waitForDaemonPhase(t, DaemonPhaseUpgradeProbation)
 	require.Equal(t, transactionID, probation.TransactionID)
@@ -325,8 +362,9 @@ func TestWarmupProbationThrowawayArmPreservesCleanExit(t *testing.T) {
 // arm's fatal error survived the drain and the daemon exited non-zero.
 //
 // The race is exercised across iterations: the throwaway owner is killed
-// (closing throwawayExpireCh) and SIGTERM is sent (buffering in sigChan) while
-// the restore is held, so both channels are co-ready in the restore select.
+// (closing throwawayExpireCh) and SIGTERM is injected into the daemon's
+// stop-signal feed (buffering in sigChan) while the restore is held, so both
+// channels are co-ready in the restore select.
 // Go's uniform-random arm selection takes the signal arm on roughly half the
 // iterations; the throwaway arm already returns nil, so only the signal-arm
 // outcomes distinguish the fix. The throwaway fires before the deferred
@@ -343,7 +381,7 @@ func TestWarmupCoreadyFatalAcceptRaceRestoresCleanExitWhenThrowawayFired(t *test
 
 			owner := throwawaySetup(t)
 			fatalErr := errors.New("co-ready throwaway fatal accept error")
-			restoreStarted, _, runErr := holdRestoreAndStart(t)
+			restoreStarted, _, runErr, sigCh := holdRestoreAndStart(t)
 
 			waitSocketBound(t, "the daemon never reached the restore select")
 			select {
@@ -356,15 +394,15 @@ func TestWarmupCoreadyFatalAcceptRaceRestoresCleanExitWhenThrowawayFired(t *test
 			setFatalAcceptErr(fatalErr)
 			t.Cleanup(resetFatalAcceptErr)
 			// Kill the throwaway owner so the watchdog closes throwawayExpireCh,
-			// then wait long enough for the 20ms poll to observe it. Send SIGTERM
-			// so sigChan is co-ready with throwawayExpireCh in the restore select.
-			// The restore is held and shutdownCh is not closed (the fatal error
-			// was recorded directly, not via the accept loop), so the two arms
-			// are the only ready cases.
+			// then wait long enough for the 20ms poll to observe it. Inject
+			// SIGTERM so sigChan is co-ready with throwawayExpireCh in the
+			// restore select. The restore is held and shutdownCh is not closed
+			// (the fatal error was recorded directly, not via the accept loop),
+			// so the two arms are the only ready cases.
 			require.NoError(t, owner.Process.Kill())
 			_, _ = owner.Process.Wait()
 			time.Sleep(50 * time.Millisecond)
-			require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+			sigCh <- syscall.SIGTERM
 
 			select {
 			case err := <-runErr:
@@ -504,8 +542,9 @@ func waitFatalAcceptErrOrError() error {
 // fatal error immediately on bind (closing shutdownCh), and the
 // testHookStartupStep for the "dedicated tmux server" step (which runs after
 // stopStartupSignalWatch and before the restore select) waits for the fatal
-// error, sends SIGTERM to buffer it in sigChan, and then returns — so by the
-// time the main flow reaches the select, both channels are co-ready.
+// error, injects SIGTERM into the daemon's stop-signal feed to buffer it in
+// sigChan, and then returns — so by the time the main flow reaches the select,
+// both channels are co-ready.
 func TestWarmupCoreadyFatalAcceptRaceNeverExitsZero(t *testing.T) {
 	const iterations = 10
 	var nilReturns atomic.Int32
@@ -515,6 +554,7 @@ func TestWarmupCoreadyFatalAcceptRaceNeverExitsZero(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 			stubContainerSweep(t)
 			captureExitHoldingHome(t, nil)
+			sigCh := stubStopSignals(t)
 
 			// Injector: fatal error on the first Accept call. The accept
 			// loop calls fatalAcceptClose immediately, recording the error
@@ -541,9 +581,10 @@ func TestWarmupCoreadyFatalAcceptRaceNeverExitsZero(t *testing.T) {
 			// The "dedicated tmux server" startup step runs after
 			// stopStartupSignalWatch (so SIGTERM buffers in sigChan rather
 			// than being re-raised) and before the restore select. Wait for
-			// the accept error to fire (shutdownCh closed), then send SIGTERM
-			// and let the relay buffer it. When the hook returns, the main
-			// flow continues to the select where both channels are co-ready.
+			// the accept error to fire (shutdownCh closed), then inject
+			// SIGTERM and let the relay buffer it. When the hook returns, the
+			// main flow continues to the select where both channels are
+			// co-ready.
 			stepDone := make(chan struct{})
 			hookErr := make(chan error, 1)
 			previousStepHook := testHookStartupStep
@@ -559,11 +600,13 @@ func TestWarmupCoreadyFatalAcceptRaceNeverExitsZero(t *testing.T) {
 					return
 				}
 				// fatalAcceptClose has recorded the error and closed
-				// shutdownCh. Send SIGTERM; it buffers in sigChan (the select
-				// has no consumer yet, so the relay's send succeeds).
-				if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+				// shutdownCh. Inject SIGTERM; it buffers in sigChan (the
+				// select has no consumer yet, so the relay's send succeeds).
+				select {
+				case sigCh <- syscall.SIGTERM:
+				default:
 					select {
-					case hookErr <- fmt.Errorf("SIGTERM: %w", err):
+					case hookErr <- errors.New("stop-signal feed already full"):
 					default:
 					}
 					return
@@ -599,7 +642,8 @@ func TestWarmupCoreadyFatalAcceptRaceNeverExitsZero(t *testing.T) {
 				select {
 				case <-runExited:
 				default:
-					_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+					var resp ShutdownResponse
+					_ = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
 					select {
 					case <-runExited:
 					case <-time.After(10 * time.Second):

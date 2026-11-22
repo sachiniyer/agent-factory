@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -243,6 +244,14 @@ func TestKillEscalatingNoWarnOnTOCTOUExit(t *testing.T) {
 }
 
 func TestSignalRefusesSelfAndInit(t *testing.T) {
+	// Hold a SIGTERM registration for the test's duration: a refusal
+	// regression below would put a real SIGTERM on this test binary's own
+	// process, whose default action would kill it instead of reporting the
+	// failure (the same self-signal hazard as #4217).
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM)
+	defer signal.Stop(ch)
+
 	if err := Signal(Process{PID: 1}, syscall.SIGTERM); err == nil {
 		t.Errorf("Signal(pid 1) succeeded, want refusal")
 	}

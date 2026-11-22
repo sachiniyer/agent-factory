@@ -288,14 +288,16 @@ func TestRunDaemonFinalSaveEndsAtItsDeadline(t *testing.T) {
 	require.Contains(t, warn.String(), "the final save did not finish by")
 }
 
-// TestRunDaemonStopSignalDeadlineStartsAtArrival: a SIGTERM delivered to the
-// daemon while its main flow is busy in a startup step sits buffered until the
-// main select reads it. The stop's deadline still starts when the signal
-// arrived, so a teardown step that never returns is abandoned at arrival plus
-// stopTeardownBy, not at the main select's read plus stopTeardownBy.
+// TestRunDaemonStopSignalDeadlineStartsAtArrival: a SIGTERM in the daemon's
+// stop-signal feed while its main flow is busy in a startup step sits buffered
+// until the main select reads it. The stop's deadline still starts when the
+// signal arrived, so a teardown step that never returns is abandoned at
+// arrival plus stopTeardownBy, not at the main select's read plus
+// stopTeardownBy.
 func TestRunDaemonStopSignalDeadlineStartsAtArrival(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	stubContainerSweep(t)
+	sigCh := stubStopSignals(t)
 	const teardownBy = 2 * time.Second
 	// How long the main flow is held after the signal: a clock that started at
 	// the read instead of the arrival ends the stop this much late. The rest of
@@ -333,9 +335,11 @@ func TestRunDaemonStopSignalDeadlineStartsAtArrival(t *testing.T) {
 		t.Fatal("the daemon never reached its post-restore startup steps")
 	}
 
-	// The daemon is this process; its stop signals are delivered to it.
+	// The daemon is this process; its stop signal arrives through the injected
+	// feed, whose relay stamps the stop clock on receipt exactly like a real
+	// SIGTERM.
 	sent := time.Now()
-	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	sigCh <- syscall.SIGTERM
 	time.Sleep(busyFor)
 	releaseStepOnce.Do(func() { close(releaseStep) })
 

@@ -22,6 +22,18 @@ import (
 // orphan sweep, so a concurrent create cannot manufacture a sweep candidate.
 var restoreManagerForStartup = func(m *Manager) error { return m.restoreInstances() }
 
+// notifyStopSignals supplies the channel the stop-signal relay reads in
+// runDaemon: a buffered channel signal.Notify fills with SIGINT and SIGTERM.
+// Package level so an in-process test daemon can be stopped by a channel send
+// instead of a process-directed signal — a real SIGTERM that lands while no
+// Notify registration is in effect takes the default action and kills the
+// whole `go test` binary (#4217).
+var notifyStopSignals = func() chan os.Signal {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	return ch
+}
+
 // testHookDaemonBeforeHomeLockRelease and testHookDaemonAfterHomeLockRelease
 // bracket the home-lock release inside runDaemon's outermost defer (#5188).
 // The first fires while the exiting daemon still holds the lock — a test can
@@ -270,8 +282,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 	// So the signals arrive on rawSigs, and a relay stamps the stop clock
 	// before handing each one on.
 	stop := &stopClock{}
-	rawSigs := make(chan os.Signal, 1)
-	signal.Notify(rawSigs, syscall.SIGINT, syscall.SIGTERM)
+	rawSigs := notifyStopSignals()
 	sigChan := make(chan os.Signal, 1)
 	relayDone := make(chan struct{})
 	defer close(relayDone)
