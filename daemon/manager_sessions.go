@@ -127,7 +127,8 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	}
 	defer opLock.Unlock()
 
-	// Re-derive the requester's set under this lock, from the claim taken (#7760).
+	// Re-derive the requester's set under this lock, from the claim taken
+	// (#7760): a serialized-ahead restore or committed archive moved it.
 	rederiveRequesterTargetsUnderLock(register, repoID, req.Title, instance, data)
 
 	// From here the kill has exclusive admission. The tombstone below is its

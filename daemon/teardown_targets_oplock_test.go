@@ -20,6 +20,18 @@ import (
 // writer reaper runs on THAT path, so the requester must be excused for it —
 // a registered set derived only at handler entry names the pre-move archive
 // path, and the kill reaps its own caller before its reply lands.
+//
+// The real interleaving this covers puts the move one step earlier than the
+// staging below: the restore holds the session's op-lock AND its killsInFlight
+// claim (claimRestoreOperation) while the kill's handler snapshots the entry
+// targets at the archive path, and only when the restore unwinds —
+// releaseRestoreOperation before opLock.Unlock, by the LIFO defer order in
+// restoreArchivedInstance — does the kill claim and queue on the lock, then
+// reap at the restored path. This test produces the same kill-side state by
+// moving the tree BETWEEN the kill's claim and its lock acquisition — a point
+// a real restore can never reach, because claimRestoreOperation refuses while
+// killsInFlight is held. Either way the property under test is identical: at
+// lock acquisition the registered set names a path the move already left.
 func TestKillSession_RequesterSetFollowsTheOpLockClaim(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "restored-ahead")
@@ -30,8 +42,8 @@ func TestKillSession_RequesterSetFollowsTheOpLockClaim(t *testing.T) {
 	server := &controlServer{manager: manager, requester: &requester}
 
 	// Hold the session's operation lock so the kill queues behind a peer —
-	// the serialization every restore and archived rename already has with a
-	// by-id kill of the same session.
+	// the serialization a restore already has with a by-id kill of the same
+	// session.
 	key := daemonInstanceKey(repoID, "restored-ahead")
 	releasePeer := holdOpLock(t, manager, key)
 
@@ -49,10 +61,10 @@ func TestKillSession_RequesterSetFollowsTheOpLockClaim(t *testing.T) {
 		30*time.Second, 5*time.Millisecond)
 
 	// The serialized-ahead operation: the restore's move commits on the same
-	// instance while the kill is queued — the shape a restore leaves behind
-	// when it won the op-lock race in the window between the kill's entry
-	// registration and its claim. (A real restore holds the same op-lock the
-	// test holds here; the rename variant relocates the same gw the same way.)
+	// instance while the kill is queued — the kill-side state the real
+	// interleaving leaves (see the doc comment), reached here by moving the
+	// tree directly because a real restore could not claim past the kill's
+	// killsInFlight registration.
 	restoreDest, err := sessiongit.RestoreWorktreePath(repoPath, "restored-ahead", inst.GetBranch())
 	require.NoError(t, err)
 	require.NoError(t, inst.RestoreArchivedWorktree(restoreDest))

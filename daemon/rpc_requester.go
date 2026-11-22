@@ -170,11 +170,17 @@ type teardownRequesterTrack struct {
 
 // trackTeardownRequester registers this call's kernel-verified requester
 // process for the handler's duration and returns the track the handler defers
-// release() on (#5182). Only KillSession and ArchiveSession call it — the two
-// teardown verbs behind all measured #5182 cases; handoff,
-// resume-from-limit, project delete, config-agent reap, and tab-close are the
-// same exposure and land in #5193, which this seam is already shaped for
-// (register + pointer arg + ctx route).
+// release() on (#5182). Only KillSession and ArchiveSession call it.
+// RestoreArchived, handoff, resume-from-limit, project delete, config-agent
+// reap and tab-close register no teardown requester at all — a caller blocked
+// on one of those replies inside the pane tree being reaped reads as a
+// survivor and is signaled like any other captured process. That exposure is
+// UNTRACKED: the issue that used to hold it was closed not_planned on
+// 2026-10-27, so no reference stands here. The measured cost so far is zero —
+// as of 2026-11-22 the maintainer box's daemon log had no reaper signal to a
+// requester of any of those verbs; every `af`-naming signal it holds was an
+// archive self-teardown, which IS covered. The seam (register + pointer arg +
+// ctx route) is already shaped to take a registration the day one is owed.
 //
 // requestKey is the handler's request pointer — the argv value net/rpc decoded
 // for this call; on a control connection the parked unregister is keyed by it
@@ -315,13 +321,18 @@ func (t *teardownRequesterTrack) release() {
 //
 // This is the PRE-LOCK half of #7760's two-phase registration, and it is not
 // sufficient alone: it is taken before the operation acquires the target's
-// op-lock, so a serialized-ahead archive, restore, or rename can move the
-// worktree — and the requester's cwd with it — to a path this snapshot never
-// saw. rederiveRequesterTargetsUnderLock covers that, re-running the same
-// derivation under the lock from the claim the operation actually took. What
-// this entry set still owns is the WAIT window: the serialized-ahead
-// operation's own reapers act on the pre-move paths while this call is
-// queued, and the union of the two registrations is the exemption.
+// op-lock, so a serialized-ahead restore — or a committed archive ahead of a
+// kill — can move the worktree, and the requester's cwd with it, to a path
+// this snapshot never saw. rederiveRequesterTargetsUnderLock covers that,
+// re-running the same derivation under the lock from the claim the operation
+// actually took. (An archived rename is absent deliberately: it frees the
+// row for a create that re-keys the manager map under reserveCreate's m.mu —
+// it never takes this op-lock — and the new session that follows it at the
+// kill's resolved key makes the queued kill skip on currentInstanceReplaced
+// before any reap.) What this entry set still owns is the WAIT window: the
+// serialized-ahead operation's own reapers act on the pre-move paths while
+// this call is queued, and the union of the two registrations is the
+// exemption.
 //
 // Resolution and the operation's own resolve can still race the map between
 // here and there: a same-title replacement created in the gap tears the NEW
@@ -341,11 +352,12 @@ func (m *Manager) teardownTargetsForSession(id, title, repoID string) []teardown
 // under the target's op-lock, it re-derives the requester target set from the
 // claim the operation resolved — the live instance, or the ghost record the
 // cleanup will run on — and hands it to the registrar the control server
-// bound for this call. A serialized-ahead archive, restore, or rename on the
-// same op-lock may have moved the worktree the handler-entry snapshot saw;
-// the set registered here names the paths the reapers below actually act on,
-// before the first reap can fire. A nil registrar — every teardown with no
-// blocked RPC requester — registers nothing.
+// bound for this call. A serialized-ahead restore — or a committed archive
+// ahead of a kill — on the same op-lock may have moved the worktree the
+// handler-entry snapshot saw; the set registered here names the paths the
+// reapers below actually act on, before the first reap can fire. A nil
+// registrar — every teardown with no blocked RPC requester — registers
+// nothing.
 func rederiveRequesterTargetsUnderLock(register requesterTargetRegistrar, repoID, title string, instance *session.Instance, data *session.InstanceData) {
 	if register == nil {
 		return

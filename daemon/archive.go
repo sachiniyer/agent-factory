@@ -182,9 +182,9 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	}
 	defer opLock.Unlock()
 
-	// Same re-derivation the kill runs (#7760): a serialized-ahead operation on
-	// this lock may have moved the worktree since the handler-entry snapshot —
-	// the registered set must follow the claim this archive actually took.
+	// Same re-derivation the kill runs (#7760): the registered set must follow
+	// the claim this archive actually took, derived under the same lock that
+	// serializes any mover ahead of this op.
 	rederiveRequesterTargetsUnderLock(register, repoID, req.Title, instance, nil)
 
 	// Re-verify under the op-lock: findSession released m.mu, so a racing kill
