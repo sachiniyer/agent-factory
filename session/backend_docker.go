@@ -659,7 +659,8 @@ func (p *dockerProvisioner) runContainer() error {
 		"-e", "HOME=" + p.sessionHome(),
 		"-p", "127.0.0.1::" + dockerAgentPort,
 	}
-	for _, name := range p.containerEnvironmentNames() {
+	forwardedNames := p.containerEnvironmentNames()
+	for _, name := range forwardedNames {
 		// Docker looks the value up in the CLI process's filtered environment;
 		// only the name appears in argv, logs, and test captures.
 		args = append(args, "-e", name)
@@ -730,6 +731,22 @@ func (p *dockerProvisioner) runContainer() error {
 		// agent's config root is explicit, but the non-root agent-server still needs
 		// its writable runtime home, so make this execution invariant win last.
 		args = append(args, "-e", "HOME="+p.sessionHome())
+		// tmux runs each pane command as $default-shell -c …, and
+		// default-shell comes from SHELL in the client environment. A
+		// repo-chosen SHELL (image ENV, or docker.run_args, which the
+		// validator now refuses) would run a program of the repo's
+		// choosing between af's pins and the agent's exec — a program
+		// that can re-set every pinned name (#7529 R1, extended to
+		// account sessions). The same last-wins -e pins SHELL to POSIX
+		// sh unless the operator forwards their own through
+		// session_env_passthrough. The forwarder only emits a name that
+		// resolves in the daemon environment, so claiming SHELL in
+		// session_env_passthrough without a host value would suppress
+		// this pin and let the image's ENV SHELL survive — re-assert
+		// unless SHELL is actually in the forwarded set.
+		if !slices.Contains(forwardedNames, "SHELL") {
+			args = append(args, "-e", "SHELL=/bin/sh")
+		}
 		// PATH chooses which program every PATH-resolved command in the
 		// container runs — af's account provisioning execs (the mount-table
 		// probe's mkdir/cat and the chown itself) and the agent's bare

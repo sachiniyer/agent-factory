@@ -113,9 +113,13 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 				name, agent)
 		}
 		if reason, refused := accountDockerProgramChoiceReason(name); refused {
+			remedy := "set it in the image's ENV instead, or have the operator forward it through session_env_passthrough"
+			if name == "SHELL" {
+				remedy = "have the operator forward it through session_env_passthrough (af re-asserts SHELL=/bin/sh after run_args, so an image ENV value cannot take effect)"
+			}
 			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: set it in the image's ENV instead, or have the operator forward it through session_env_passthrough",
-				name, agent, reason)
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: %s",
+				name, agent, reason, remedy)
 		}
 		return nil
 	}
@@ -326,8 +330,14 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 // runs IN the container. PATH resolves every bare command in af's root
 // provisioning execs (the mount-table probe's mkdir and cat, the chown
 // itself) and the agent's own executable, so `-e PATH=/workspace/.x:…`
-// would put repository binaries in front of all of them; the loader names
-// — the set derived in agent_credentials_env_loader.go from glibc's
+// would put repository binaries in front of all of them; SHELL is the
+// tmux `default-shell -c` hop — the in-container agent-server's tmux
+// server derives default-shell from SHELL in the client environment, and
+// every pane command runs as $default-shell -c …, so a repo-chosen SHELL
+// would run a program of the repo's choosing between af's pins and the
+// agent's exec (the same hazard #7529 R1 closes on the credential-mount
+// path, where SHELL sits in credentialMountReassertedNames); the loader
+// names — the set derived in agent_credentials_env_loader.go from glibc's
 // UNSECURE_ENVVARS and the shells' environment-import rules — make ld.so,
 // libc, or a shell af invokes inside the container load or run repo-chosen
 // material (those root `--user 0:0` provisioning execs for the names whose
@@ -336,11 +346,14 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 // #7529 R7 refuses on the credential-mount path, kept out of
 // accountDockerDeniedNames on purpose: that set also filters the
 // operator's session_env_passthrough claims, and the operator stays free
-// to forward their own PATH — the image-PATH re-assertion is skipped for
-// a name the operator claimed (#7563 R2).
+// to forward their own PATH or SHELL — the image-PATH re-assertion is
+// skipped for a name the operator claimed (#7563 R2; SHELL mirrors it).
 func accountDockerProgramChoiceReason(name string) (string, bool) {
 	if name == "PATH" {
 		return "it chooses which program every PATH-resolved command in the container runs — af's account provisioning execs and the agent's own executable — and af re-asserts the image's own PATH after run_args", true
+	}
+	if name == "SHELL" {
+		return "tmux runs every pane command as $default-shell -c …, and default-shell comes from SHELL in the client environment, so a repo-chosen SHELL would run a program of the repo's choosing between af's pins and the agent's exec — and af re-asserts SHELL=/bin/sh after run_args", true
 	}
 	return credentialMountLoaderReason(name)
 }

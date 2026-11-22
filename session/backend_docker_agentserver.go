@@ -98,7 +98,7 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	for _, name := range p.credentialEnvPins {
 		args = append(args, "--session-env-empty", name)
 	}
-	if len(p.credentialMounts) > 0 {
+	if len(p.credentialMounts) > 0 || p.spec.Account.Dir != "" {
 		args = append(args, "--no-tmux-config")
 	}
 	if branch := strings.TrimSpace(p.spec.Branch); branch != "" {

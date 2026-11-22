@@ -389,8 +389,11 @@ func provisionDockerAccountImageEnv(t *testing.T, program string, runArgs, passt
 // af's account provisioning execs run (a committed .x/cat answering the
 // mount-table probe, or .x/chown, or an audit module loaded into either),
 // so each is refused before `docker run` and the error names the variable.
+// SHELL joins them as the tmux `default-shell -c` hop: a repo-chosen SHELL
+// would run a program of the repo's choosing between af's pins and the
+// agent's exec for every pane (#7529 R1, extended to account sessions).
 func TestDockerAccountRunArgs_RefusesProgramChoiceNames(t *testing.T) {
-	for _, name := range []string{"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
+	for _, name := range []string{"PATH", "SHELL", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
 		for _, spelling := range [][]string{
 			{"-e", name + "=/workspace/.x/bin"},
 			{"-e", name}, // the bare spelling resolves through the CLI env the same way
@@ -420,6 +423,21 @@ func TestDockerAccountRunArgs_ProgramChoiceReasonNamesTheMechanism(t *testing.T)
 	// their own through session_env_passthrough.
 	require.Contains(t, err.Error(), "image's ENV", "PATH's refusal must name the image-ENV remedy")
 	require.Contains(t, err.Error(), "session_env_passthrough", "PATH's refusal must name the operator's passthrough remedy")
+
+	// SHELL's refusal must name the tmux default-shell -c mechanism that makes
+	// a repo-chosen SHELL a program-choice hazard. SHELL is re-asserted to
+	// /bin/sh after run_args, so the image's ENV cannot supply it — the
+	// refusal must steer the operator to session_env_passthrough alone and
+	// must NOT offer the image-ENV remedy that PATH's refusal names.
+	err = validateAccountDockerRunArgs([]string{"-e", "SHELL=/workspace/.pane-runner"}, "codex")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SHELL", "SHELL's refusal must name the variable")
+	require.Contains(t, err.Error(), "default-shell", "SHELL's refusal must name the tmux default-shell -c mechanism")
+	require.NotContains(t, err.Error(), "image's ENV", "SHELL is re-asserted to /bin/sh, so the image-ENV remedy does not apply")
+	require.Contains(t, err.Error(), "session_env_passthrough", "SHELL's refusal must name the operator's passthrough remedy")
+	// SHELL is re-asserted to /bin/sh, never blanked, so the message must not
+	// claim an empty-pin remedy.
+	require.NotContains(t, err.Error(), "defined-empty", "SHELL takes the re-asserted value, never a defined-empty pin")
 
 	for _, name := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"} {
 		err := validateAccountDockerRunArgs([]string{"-e", name + "=/workspace/.x/x.so"}, "codex")
@@ -484,6 +502,71 @@ func TestDockerAccount_PATHReassertSkippedWhenUninspectable(t *testing.T) {
 		require.Falsef(t, strings.HasPrefix(arg, "PATH="),
 			"an unreadable image PATH must not be re-asserted: %v", runArgv)
 	}
+}
+
+// TestDockerAccount_ShellReassertedAfterRunArgs pins R1's program-choice fix
+// extended to account sessions: tmux runs every pane command as
+// $default-shell -c … and default-shell comes from SHELL in the client
+// environment, so a repo-chosen SHELL (image ENV, or a docker.run_args entry
+// the validator now refuses) would run a program of the repo's choosing
+// between af's pins and the agent's exec — a program that can re-set every
+// pinned name (#7529 R1, extended to account sessions). The run argv
+// re-asserts SHELL=/bin/sh after run_args, unless the operator forwards
+// their own SHELL through session_env_passthrough.
+func TestDockerAccount_ShellReassertedAfterRunArgs(t *testing.T) {
+	runCalled, _, runArgv := provisionDockerAccountImageEnv(t, "codex",
+		[]string{"-e", "TZ=UTC"}, nil, nil)
+	require.True(t, runCalled, "harmless run_args must still reach docker run")
+	runArgsIdx := indexIn(runArgv, "TZ=UTC")
+	require.Greater(t, runArgsIdx, 0, "the run_args marker was not in the argv: %v", runArgv)
+	shellIdx := indexIn(runArgv, "SHELL=/bin/sh")
+	require.Greaterf(t, shellIdx, runArgsIdx,
+		"SHELL=/bin/sh must be re-asserted after run_args so Docker's last-wins rule dominates an image-supplied SHELL: %v", runArgv)
+	require.Equal(t, -1, envPinIndex(runArgv, "SHELL"), "SHELL takes the re-asserted value, never a blank pin")
+
+	// A repo run_args entry naming SHELL is refused before docker run.
+	runCalled, err, _ := provisionDockerAccountImageEnv(t, "codex",
+		[]string{"-e", "SHELL=/repo/evil.sh"}, nil, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SHELL")
+	require.False(t, runCalled, "a run_args SHELL must refuse before docker run")
+
+	// An operator-forwarded SHELL is the operator's own claim on the name: the
+	// re-assertion steps aside so their value survives.
+	runCalled, _, runArgv = provisionDockerAccountImageEnv(t, "codex",
+		[]string{"-e", "TZ=UTC"}, []string{"SHELL"}, nil)
+	require.True(t, runCalled, "harmless run_args must still reach docker run")
+	require.Equal(t, -1, indexIn(runArgv, "SHELL=/bin/sh"),
+		"an operator-forwarded SHELL must not be re-asserted over: %v", runArgv)
+}
+
+// TestDockerAccount_NoTmuxConfigOnAgentServer pins the file-side half of the
+// tmux default-shell defense extended to account sessions: --no-tmux-config
+// carries -f /dev/null into every tmux call, so the image's /etc/tmux.conf or
+// a ~/.tmux.conf cannot pick default-shell itself or write session
+// environment (#7529 R1, extended to account sessions). The credential-mount
+// path emits it under len(p.credentialMounts) > 0; the account path must emit
+// it too, since credential mounts and account scope are mutually exclusive.
+func TestDockerAccount_NoTmuxConfigOnAgentServer(t *testing.T) {
+	p := &dockerProvisioner{
+		spec: ProvisionSpec{
+			Title:   "account-no-tmux-config",
+			Program: tmux.ProgramCodex,
+			Account: sessionenv.Account{Dir: "/tmp/acct", Agent: "codex"},
+		},
+		program: tmux.ProgramCodex,
+	}
+	cmd, err := p.agentServerCommand()
+	require.NoError(t, err)
+	require.Contains(t, cmd, "--no-tmux-config",
+		"an account-scoped session's agent-server must skip image tmux config files: %s", cmd)
+
+	// A session with neither credential mounts nor account scope emits neither.
+	p.spec.Account = sessionenv.Account{}
+	cmd, err = p.agentServerCommand()
+	require.NoError(t, err)
+	require.NotContains(t, cmd, "--no-tmux-config",
+		"a plain session's agent-server must not carry --no-tmux-config: %s", cmd)
 }
 
 // TestPrepareAccountUser_BusyBoxStatLocation is the review regression on
