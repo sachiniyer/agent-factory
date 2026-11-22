@@ -856,8 +856,36 @@ func (m *home) handleGuardResult(err error) tea.Cmd {
 // Enter): attach the FOCUSED pane's (instance, tab) full-screen (#1088), or
 // the tree selection's. The attach path itself is untouched: the same
 // attachOverlayCallbackFn seam, `attached` gate, and SIGKILL-bounded detach.
+//
+// A focused pane that owns a transient #1321 preview renders the preview's
+// TARGET, not its committed binding. `o` acts on "the thing on screen", so it
+// resolves the preview first — mirroring handleEnter's preview branch — rather
+// than reading the raw binding like handleEnterPane does. Without this the two
+// attach-flavored verbs disagreed on identical state: a pane committed to alpha
+// but visibly previewing beta attached alpha on `o` while Enter committed the
+// preview and entered beta.
 func (m *home) handleAttach() (tea.Model, tea.Cmd) {
 	if p := m.focusedOpenPane(); p != nil {
+		// Resolve a transient preview before attaching, so `o` attaches the
+		// (instance, tab) the pane is VISIBLY showing, not the committed binding
+		// underneath — the #1321 wrong-target class Enter already closes by
+		// committing the preview first. Like handleEnter's preview branch, a
+		// resting preview target restores instead of surfacing the commit
+		// guard's fence, so `o` agrees with Enter and the tree-row path. A
+		// no-op without a live preview, so a pane showing its committed binding
+		// attaches as before.
+		if m.paneIsPreviewing(p) {
+			if cmd, handled := m.restoreIfResting(m.sidebar.GetSelectedInstance()); handled {
+				m.cancelPanePreview(false)
+				return m, cmd
+			}
+			committed, commitCmd := m.commitPanePreviewReplace()
+			if committed == nil {
+				return m, commitCmd
+			}
+			mod, attachCmd := m.handleEnterPane(committed)
+			return mod, tea.Batch(commitCmd, attachCmd)
+		}
 		return m.handleEnterPane(p)
 	}
 	sel := m.sidebar.GetSelection()
