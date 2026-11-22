@@ -586,8 +586,24 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 	// exactly like a SIGKILL survivor rather than silently dropped (#7435 R3,
 	// Codex 4593788804). A POSITIVELY identified exclusion (a proven daemon
 	// subtree, the reaper's own chain) is legitimately spared and stays out.
+	//
+	// A tracked teardown requester is the one non-positive exclusion that is
+	// NOT a survivor (#7752). `af sessions archive --self` run inside the pane
+	// is an af argv this build's parse cannot decide — undecidable, blocking
+	// — and it cannot exit inside this window: it is blocked on this
+	// teardown's own reply. Re-adding it here refused every self-archive
+	// whose requester outlived the reap, and the refusal was its own request.
+	// Registration is a (pid, startID) identity kernel-verified at accept, so
+	// this is the same exemption waitForPaneExitOrRequester already grants
+	// the pane root — never a comm or argv excuse. Any OTHER unverified
+	// claimant still re-adds below and still blocks cleanup.
 	for _, p := range procs {
 		if verdict, ok := protected[p.PID]; !ok || verdict.positive {
+			continue
+		}
+		if isTeardownRequester(p) {
+			log.InfoLog.Printf("teardown requester pid %d (%s) is blocked on this teardown's reply; "+
+				"not counting it as a survivor (#5182, #7752)", p.PID, p.Comm)
 			continue
 		}
 		if same, err := proctree.SameIdentity(p); err != nil || same {
