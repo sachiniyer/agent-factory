@@ -133,6 +133,17 @@ func ValidateHostEntry(name string, entry HostConfig) error {
 		if !strings.HasPrefix(v, "/") {
 			return fmt.Errorf("hosts.%s.%s %q must be an absolute path (starting with '/'; '~' is not expanded)", name, field, v)
 		}
+		// workspace_root becomes the per-session dir's parent, which the
+		// provisioner embeds into the agent-server launch's PATH= prefix
+		// (#5571 W2.2) and re-pins via PinPATHDir (#5877). A ':' there is a
+		// PATH separator when the shell consumes the assignment, so a
+		// colon-bearing root splits the staged `af` off the pane PATH and
+		// leaves a relative fragment a repo-planted binary can shadow.
+		// Whitespace breaks the same construction. identity_file reaches
+		// only ssh -i as a single argv element, so it is left alone.
+		if field == "workspace_root" && strings.ContainsAny(v, ": \t\n") {
+			return fmt.Errorf("hosts.%s.%s %q must not contain a ':' or whitespace (it is embedded into the sandbox PATH, where either would split the staged 'af' off it)", name, field, v)
+		}
 	}
 	return nil
 }

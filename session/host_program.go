@@ -401,13 +401,49 @@ func mergeHostPATH(login, inherited string) string {
 	return strings.Join(merged, ":")
 }
 
+// safePATHEntry reports whether dir is safe to embed as a single PATH entry: it
+// must be absolute and contain no ':' or whitespace. The session dir is embedded
+// into the agent-server launch's PATH=<dir>:"$PATH" prefix (#5571 W2.2) and
+// re-pinned as the first entry of the pane PATH via PinPATHDir (#5877); a ':'
+// in the dir is a PATH separator when the shell consumes the assignment, so a
+// colon-bearing dir splits into multiple entries — leaving the staged `af`
+// unreachable and a relative fragment (the tail after the colon) the pane's
+// working directory resolves, where a repo-planted binary can shadow it. The
+// dir is shell-quoted, but PATH grammar runs after the shell expands the
+// assignment, so quoting does not save it. Whitespace breaks the prefix the
+// same way. The character class mirrors callbackReverseForward's
+// "[...]: \t\n" guard for the same string as an ssh -R socket path (with \r
+// added so a CRLF-flavoured remote cannot slip past). An empty or relative dir
+// is not a single PATH entry either, so this reports false for those shapes
+// too. ValidateHostEntry refuses a colon-bearing workspace_root at config
+// time; startAgentServer fail-closes at launch time on the same check; the
+// helpers here are defense in depth for any other producer of a PATH entry.
+func safePATHEntry(dir string) bool {
+	if dir == "" || !strings.HasPrefix(dir, "/") {
+		return false
+	}
+	return !strings.ContainsAny(dir, ": \t\n\r")
+}
+
 // PinPATHDir returns path with dir as its first entry, removing any later
 // copy. Login-PATH adoption rebuilds PATH from the login profile, which would
 // otherwise put an older `af` installed on that PATH ahead of the session
 // directory holding the staged, version-checked one (#5877). An empty dir
-// leaves path alone.
+// leaves path alone. A dir that is not a single PATH entry (empty, relative,
+// or containing ':' or whitespace) also leaves path alone: re-introducing it
+// would re-split the pane PATH identically to the launch prefix, so it is
+// kept intact as a defense-in-depth no-op. The primary guards
+// (ValidateHostEntry and startAgentServer's PATH-prefix guard) refuse such a
+// dir earlier; if a malformed dir nonetheless reaches the re-pin, a warning
+// is logged so the operator can see the staged `af` was not re-pinned.
 func PinPATHDir(path, dir string) string {
 	if dir == "" {
+		return path
+	}
+	if !safePATHEntry(dir) {
+		log.WarningLog.Printf("agent-server: not pinning %q at the front of the agent pane PATH: "+
+			"it is not a single PATH entry (a ':' or whitespace would split it); "+
+			"the staged af stays wherever the launch prefix put it", dir)
 		return path
 	}
 	parts := []string{dir}

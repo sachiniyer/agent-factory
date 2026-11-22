@@ -211,6 +211,62 @@ func TestPinPATHDirKeepsTheStagedAfFirst(t *testing.T) {
 
 	assert.Equal(t, "/a:/b", PinPATHDir("/a:/b", ""))
 	assert.Equal(t, "/s:/a::/a", PinPATHDir("/a::/s:/a:/s", "/s"), "only the dir itself moves; other entries keep their order")
+
+	// Defense in depth: a dir that is not a single PATH entry (colon-bearing,
+	// whitespace-bearing, empty, or relative) cannot be safely pinned —
+	// re-introducing it through strings.Join(..., ":") would re-split the
+	// pane PATH identically to the launch prefix's PATH=<dir>:"$PATH". The
+	// primary guards (ValidateHostEntry at config time, startAgentServer at
+	// launch time) refuse such a dir earlier; PinPATHDir keeps the pane PATH
+	// intact as a fail-safe no-op if a malformed dir reaches the re-pin
+	// anyway. The path is returned unchanged.
+	for label, bad := range map[string]string{
+		"colon":    "/srv/af:sessions",
+		"space":    "/srv/af sessions",
+		"tab":      "/srv/af\tsessions",
+		"newline":  "/srv/af\nsessions",
+		"empty":    "",
+		"relative": "relative/dir",
+	} {
+		t.Run(label, func(t *testing.T) {
+			assert.Equal(t, "/a:/b", PinPATHDir("/a:/b", bad),
+				"a malformed dir is not pinned; the existing PATH stays intact")
+		})
+	}
+}
+
+// safePATHEntry reports the property ValidateHostEntry and startAgentServer
+// rely on: a dir embedded into the agent-server launch's PATH= prefix must be
+// a single PATH entry (absolute, no ':' or whitespace). The cases here mirror
+// those guards' inputs so a regression in the helper's verdict surfaces here
+// before the construction-site guards silently drift.
+func TestSafePATHEntry(t *testing.T) {
+	for label, dir := range map[string]string{
+		"plain absolute": "/home/u/.af-sessions/sess",
+		"nested":         "/srv/af-sessions/slug.a1b2c3",
+		"trailing slash": "/srv/af-sessions/sess/",
+		"dots":           "/srv/af-sessions/../sess",
+	} {
+		t.Run("ok/"+label, func(t *testing.T) {
+			assert.True(t, safePATHEntry(dir), "%q must be safe", dir)
+		})
+	}
+	for label, dir := range map[string]string{
+		"colon":    "/srv/af:sessions",
+		"space":    "/srv/af sessions",
+		"tab":      "/srv/af\tsessions",
+		"newline":  "/srv/af\nsessions",
+		"carriage": "/srv/af\rsessions",
+		"empty":    "",
+		"relative": "relative/dir",
+		"dot":      ".",
+		"dotdot":   "..",
+		"tilde":    "~/af",
+	} {
+		t.Run("bad/"+label, func(t *testing.T) {
+			assert.False(t, safePATHEntry(dir), "%q must be unsafe", dir)
+		})
+	}
 }
 
 func TestSessionBinDirOnlyForTheStagedAf(t *testing.T) {

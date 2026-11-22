@@ -12,6 +12,12 @@ func TestValidateHostEntry(t *testing.T) {
 	ok := HostConfig{Host: "box1.tailnet.ts.net", User: "dev", Port: 2222, IdentityFile: "/home/dev/.ssh/k", WorkspaceRoot: "/srv/w"}
 	require.NoError(t, ValidateHostEntry("box1", ok))
 	require.NoError(t, ValidateHostEntry("b-2x", HostConfig{Host: "10.0.0.1"}))
+	// identity_file reaches ssh -i as a single argv element, not a PATH
+	// entry, so a ':' there is not a PATH hazard and is left alone — the new
+	// colon guard covers workspace_root only.
+	require.NoError(t, ValidateHostEntry("colon-id", HostConfig{Host: "h", IdentityFile: "/srv/k:i"}))
+	// IPv6 host values contain ':' by design and must keep validating.
+	require.NoError(t, ValidateHostEntry("ipv6", HostConfig{Host: "::1"}))
 
 	bad := map[string]struct {
 		name  string
@@ -41,6 +47,20 @@ func TestValidateHostEntry(t *testing.T) {
 		"dash identity":   {"a", HostConfig{Host: "h", IdentityFile: "-i"}, "absolute"},
 		"newline root":    {"a", HostConfig{Host: "h", WorkspaceRoot: "/x\ny"}, "control"},
 		"too long name":   {strings.Repeat("a", 64), HostConfig{Host: "h"}, "host name"},
+		// workspace_root flows into the session dir, which the provisioner
+		// embeds into the agent-server launch PATH= prefix and re-pins via
+		// PinPATHDir. A ':' is a PATH separator when the shell consumes the
+		// assignment, so a colon-bearing root splits the staged `af` off the
+		// pane PATH and leaves a relative fragment a repo-planted binary can
+		// shadow. Whitespace breaks the same construction. identity_file is
+		// left alone: it reaches ssh -i as a single argv element, not a PATH
+		// entry.
+		"colon root": {"a", HostConfig{Host: "h", WorkspaceRoot: "/srv/af:sessions"}, "must not contain a ':' or whitespace"},
+		"space root": {"a", HostConfig{Host: "h", WorkspaceRoot: "/srv/af sessions"}, "must not contain a ':' or whitespace"},
+		// A control character is still caught by the control-char guard (it
+		// runs first); the colon/whitespace guard never reaches the message.
+		"tab root":    {"a", HostConfig{Host: "h", WorkspaceRoot: "/srv/af\tsessions"}, "control"},
+		"newline col": {"a", HostConfig{Host: "h", WorkspaceRoot: "/x:y\nz"}, "control"},
 	}
 	for label, tc := range bad {
 		t.Run(label, func(t *testing.T) {
@@ -126,6 +146,11 @@ func TestHostListSetAndLoadAgree(t *testing.T) {
 		{"ipv6 leading colons", map[string]HostConfig{"a": {Host: "::1"}}, "a", true},
 		{"embedded port", map[string]HostConfig{"a": {Host: "h:2222", Port: 22}}, "a", false},
 		{"option host", map[string]HostConfig{"a": {Host: "-oProxyCommand=x"}}, "", false},
+		// A colon-booting workspace_root reaches the sandbox PATH and would
+		// split the staged `af` off it; both writer and loader must refuse.
+		{"colon workspace_root", map[string]HostConfig{"a": {Host: "h", WorkspaceRoot: "/srv/af:sessions"}}, "a", false},
+		{"space workspace_root", map[string]HostConfig{"a": {Host: "h", WorkspaceRoot: "/srv/af sessions"}}, "a", false},
+		{"plain workspace_root", map[string]HostConfig{"a": {Host: "h", WorkspaceRoot: "/srv/af-sessions"}}, "a", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

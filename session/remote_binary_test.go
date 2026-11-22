@@ -392,6 +392,71 @@ func TestStartAgentServerPrependsTheSessionDirToPATH(t *testing.T) {
 		"the prefix must sit left of nohup so it lands in the server's environment")
 }
 
+// A session dir containing a ':' (or whitespace, or a non-absolute value) is
+// not a single PATH entry: embedding it into the launch's PATH=<dir>:"$PATH"
+// prefix would split the staged `af` off the pane PATH and leave a relative
+// fragment a repo-planted binary can shadow — the exact outcome #5877's
+// precedence pin and the sha256-verified staging were written to prevent.
+// startAgentServer must refuse such a dir at provision time, mirroring
+// callbackReverseForward's fail-closed stance for the same string as an ssh
+// -R socket path, and the shell.Run that would have launched the agent-server
+// must never be called.
+func TestStartAgentServerRefusesAPathUnusableSessionDir(t *testing.T) {
+	for label, dir := range map[string]string{
+		"colon":          "/srv/af:sessions/sess",
+		"colon at start": ":/srv/af/sess",
+		"colon at end":   "/srv/af/sess:",
+		"space":          "/srv/af sessions/sess",
+		"tab":            "/srv/af\tsessions/sess",
+		"newline":        "/srv/af\nsessions/sess",
+		"carriage":       "/srv/af\rsessions/sess",
+		"empty":          "",
+		"relative":       "relative/sess",
+		"dot":            ".",
+	} {
+		t.Run(label, func(t *testing.T) {
+			ran := false
+			p := &sandboxProvisioner{runCommandFn: func(_ time.Duration, _ string, _ io.Reader, _ bool) ([]byte, error) {
+				ran = true
+				return []byte("4242\n"), nil
+			}}
+			w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Title: "t"}}
+			err := w.startAgentServer(time.Second)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "unusable as a PATH entry")
+			// %q in the error escapes control characters (\t, \n, \r) so they
+			// don't break the log line, so compare against the same form.
+			assert.Contains(t, err.Error(), fmt.Sprintf("%q", dir))
+			assert.False(t, ran, "the launch must not run when the session dir would split PATH")
+			assert.Empty(t, w.RemotePID, "no PID may be captured for a refused launch")
+		})
+	}
+}
+
+// A session dir that is a single PATH entry launches as before — the existing
+// behavior is unchanged for the colon-free case the primary guards already
+// admit. This anchors the regression risk the new guard adds: only malformed
+// dirs are refused, normal ones are not.
+func TestStartAgentServerAcceptsASinglePATHEntrySessionDir(t *testing.T) {
+	var launch string
+	p := &sandboxProvisioner{runCommandFn: func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
+		launch = script
+		return []byte("4242\n"), nil
+	}}
+	for label, dir := range map[string]string{
+		"plain":      "/home/u/.af-sessions/sess.a1b2c3",
+		"trailing /": "/home/u/.af-sessions/sess.a1b2c3/",
+		"dotted":     "/srv/af-sessions/../sess",
+	} {
+		t.Run(label, func(t *testing.T) {
+			w := &sandboxWorkspace{shell: p, SessionDir: dir, spec: ProvisionSpec{Title: "t"}}
+			require.NoError(t, w.startAgentServer(time.Second))
+			assert.Equal(t, "4242", w.RemotePID)
+			assert.Contains(t, launch, "PATH="+shellQuote(dir)+":\"$PATH\"")
+		})
+	}
+}
+
 func TestReleaseArtifactURLUsesStaticArchiveOnLinuxOnly(t *testing.T) {
 	assert.Equal(t, autoupdate.ReleaseBaseURL+"/download/v1.0.9/agent-factory-linux-arm64-static.tar.gz",
 		releaseArtifactURL("v1.0.9", remotePlatform{goos: "linux", goarch: "arm64"}))

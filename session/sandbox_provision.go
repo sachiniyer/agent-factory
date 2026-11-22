@@ -485,6 +485,19 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
+	// The session dir is embedded into the PATH=<sessionDir>:"$PATH" prefix
+	// below so the staged `af` reaches the agent pane (#5571 W2.2). A dir
+	// containing ':' or whitespace is not a single PATH entry: the ':' splits
+	// it — leaving the staged `af` unreachable and a relative fragment (the
+	// tail after the colon) the pane's working directory resolves, where a
+	// repo-planted binary can shadow it — and whitespace breaks the prefix
+	// the same way. ValidateHostEntry refuses a colon-bearing workspace_root
+	// at config time; this guard fail-closes the same way if a session dir
+	// from any other source is unsafe, mirroring callbackReverseForward's
+	// stance for the same string as an ssh -R socket path.
+	if !safePATHEntry(w.SessionDir) {
+		return fmt.Errorf("starting af agent-server on the remote failed: the session directory %q is unusable as a PATH entry (a ':' or whitespace would split the staged 'af' off it)", w.SessionDir)
+	}
 	// Put the session dir — which holds the `af` symlink — on the
 	// agent-server's PATH so the agent pane inherits `af` through the env
 	// filter (PATH rides the allowlist) and in-sandbox `af` commands work
