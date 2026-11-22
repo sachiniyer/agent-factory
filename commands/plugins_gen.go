@@ -97,6 +97,7 @@ var pluginReleaseDigests = []string{
 	"38f6a650cdda3eea952c88c4552daa11466b963310f6970fbecdfe2766876654", // 3.32 — remove the Backlog feature's agent guidance (#6662); the seeded payload reverts byte-for-byte to the 3.30 tree, so this digest repeats 3.30 by design — a non-adjacent repeat is a revert, not a no-op bump
 	"4da67dedc71dc3737ada87d5d720c90b7d2f9306e63c4572e3282e6731da124c", // 3.33 — af sessions prune --apply in the agent usage reference (#6727)
 	"41dc5104bd1db20dac0d12c41586969ccee1931118d1c4c0ea5c2a1ea3b1e63d", // 3.34 — shell/process tabs work on remote sessions when the agent-server advertises tab-api; fix the stale local-session claim in the plugin skills (#6760)
+	"64076051f2a30463f44496225385672ab56b47aa24f86c1963d37266dccd4bc3", // 3.35 — af reset warning names the real scope: every worktree and branch af created for its sessions, not all linked ones (#7758)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

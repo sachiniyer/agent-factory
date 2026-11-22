@@ -185,7 +185,7 @@ const afUsageOutroInside = `Finishing up: when the user confirms your work is co
 const afUsageOutroPlugin = `Finishing up: the sessions you create keep running after this conversation ends — they are separate agents in their own worktrees, not part of this one. When work in a session is done and reviewed, archive it with "af sessions archive <title>": non-destructive, the worktree is moved out, nothing is deleted, and it comes back with "af sessions restore <title>". Prefer archiving over "af sessions kill <title>", which permanently removes af-owned workspaces; uncommitted changes and unpushed commits there can be lost. "af sessions whoami", "af sessions archive --self", and "af sessions attention --self" resolve the CALLING session, so they only work from inside a session af launched — from here, always name the session.`
 
 // afUsageOutro closes the reference for both audiences.
-const afUsageOutro = `Maintenance: af version, af debug (print resolved config), af upgrade (self-upgrade). Never run "af reset": it kills every session and deletes ALL linked worktrees and their branches across repos.`
+const afUsageOutro = `Maintenance: af version, af debug (print resolved config), af upgrade (self-upgrade). Never run "af reset": it kills every session and deletes every worktree and branch af created for its sessions across repos.`
 
 // shellQuote wraps a string in single quotes, escaping any embedded single
 // quote with the standard POSIX idiom:
