@@ -120,11 +120,20 @@ type scopeRotation struct {
 // discardAccountNextInPlace removes the staged scope on the host itself — the
 // agent-server half of the serialized discard (#7773 R2). It runs under the
 // swap's own serialization, so it can never overlap a rotation the way an
-// unordered remote rm could.
-func (i *Instance) discardAccountNextInPlace() error {
+// unordered remote rm could. And like the rotation it removes only the stage
+// bound to ITS swap: the daemon's request may outlive the call that sent it —
+// a timed-out request the server still completes — so a late discard checks
+// the marker and leaves a stage that is not its swap's to delete.
+func (i *Instance) discardAccountNextInPlace(swapID string) error {
 	_, next, _, err := accountScopeDirs(i.CurrentAgentName())
 	if err != nil {
 		return err
+	}
+	if swapID != "" {
+		marker, mErr := os.ReadFile(filepath.Join(next, accountSwapMarkerRel))
+		if mErr != nil || strings.TrimSpace(string(marker)) != swapID {
+			return nil // a different swap's stage, or none of this one's — leave it
+		}
 	}
 	return os.RemoveAll(next)
 }

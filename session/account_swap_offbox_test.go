@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,6 +150,14 @@ func (s *acctSwapServer) DiscardAccountNext(swapID string) error {
 	}
 	if s.discardGate != nil {
 		<-s.discardGate
+	}
+	// Like the real server-side discard: only the stage bound to THIS swap is
+	// removed — a late discard leaves another swap's .next alone.
+	if swapID != "" {
+		marker, err := os.ReadFile(filepath.Join(s.next, accountSwapMarkerRel))
+		if err != nil || strings.TrimSpace(string(marker)) != swapID {
+			return nil
+		}
 	}
 	return os.RemoveAll(s.next)
 }

@@ -169,14 +169,16 @@ func TestSwapOffBoxAccountDelayedRequestCommitsUnderItsOwnIdentity(t *testing.T)
 }
 
 // The mirror: the delayed request lands only after the staged scope is gone, so
-// it can never rotate in — its terminal record is this swap's rolled_back, and
-// the host keeps the old account.
+// it can never rotate in — and its refusal must not displace the earlier swap's
+// terminal record either, or that swap's evidence would read as a rollback the
+// host never did. The host keeps the old account.
 func TestSwapOffBoxAccountDelayedRequestAfterTheDiscardOnlyRollsBack(t *testing.T) {
 	f := newSwapFixture(t)
 	f.failPrevCleanup(t, func() {
 		_, err := f.inst.SwapOffBoxAccount("alt", false)
 		require.NoError(t, err)
 	})
+	firstID := f.srv.lastID
 	thirdReg := f.registerThird(t)
 	f.srv.loseBefore = errors.New("remote agent-server: connection reset")
 	f.srv.delayedAtStatusCall = 2 // lands after the staged scope is discarded
@@ -189,8 +191,9 @@ func TestSwapOffBoxAccountDelayedRequestAfterTheDiscardOnlyRollsBack(t *testing.
 	assert.Equal(t, "alt", acct)
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"))
 	o, _, id := f.srv.rec.status()
-	assert.Equal(t, swapOutcomeRolledBack, o, "the late arrival could only roll back")
-	assert.Equal(t, f.srv.lastID, id)
+	assert.Equal(t, swapOutcomeCommitted, o,
+		"the straggler's refusal claims only a free slot — the earlier swap's commit is preserved")
+	assert.Equal(t, firstID, id)
 	assert.Equal(t, secretThird, readOrEmpty(thirdReg))
 }
 
@@ -405,8 +408,10 @@ func TestSwapOffBoxAccountDiscardAndRotationAreSerialized(t *testing.T) {
 		assert.Equal(t, "third", acct, "this swap's own record proves its commit")
 		assert.Equal(t, secretThird, f.hostCred(t, "account"),
 			"the live scope is whole — no rm ever walked it mid-rotation")
-		assert.Equal(t, secretWork, readOrEmpty(filepath.Join(f.w.PrevAccountDir(), credFile)),
-			"the outgoing scope is parked in .prev, complete")
+		assert.Equal(t, secretWork, readOrEmpty(f.workReg),
+			"the outgoing account's write-back still landed")
+		assert.NoDirExists(t, f.w.PrevAccountDir(),
+			"the successful handoff's own cleanup removed the parked scope")
 	})
 
 	// The mirror: the discard holds the lock when the lost request finally
@@ -509,6 +514,31 @@ func TestAccountSwapDiscardTombstonesTheSwap(t *testing.T) {
 
 	_, err = rec.run("fine", func() (string, error) { return "claude", nil })
 	require.NoError(t, err, "an unrelated id is untouched")
+}
+
+// A discard whose request outlives the call that sent it — the daemon timed
+// out, the server finished anyway — may remove only the stage bound to ITS
+// swap. By the time it runs, a later handoff's .next is what sits there, and
+// deleting it would erase a stage mid-use (#7773 R2 review).
+func TestDiscardAccountNextInPlaceRemovesOnlyItsOwnStage(t *testing.T) {
+	live := rotationHost(t)
+	nextDir := live + accountNextSuffix
+	inst := &Instance{Title: "s", Program: tmux.ProgramClaude}
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(nextDir, accountSwapMarkerRel), []byte("swap-2"), 0o600))
+	require.NoError(t, inst.discardAccountNextInPlace("swap-1"))
+	assert.DirExists(t, nextDir, "a discard for another swap must leave this stage")
+	assert.Equal(t, "B", readOrEmpty(filepath.Join(nextDir, credFile)))
+
+	require.NoError(t, inst.discardAccountNextInPlace("swap-2"))
+	assert.NoDirExists(t, nextDir, "the stage bound to it is removed")
+
+	// A pre-identity request — no id to bind — still removes whatever is staged.
+	live = rotationHost(t)
+	nextDir = live + accountNextSuffix
+	require.NoError(t, inst.discardAccountNextInPlace(""))
+	assert.NoDirExists(t, nextDir)
 }
 
 // The session env the rotation needs is still the live scope after swap #1: the

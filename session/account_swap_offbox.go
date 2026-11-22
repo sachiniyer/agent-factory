@@ -727,7 +727,7 @@ func (s *localAgentServer) DiscardAccountNext(swapID string) error {
 	s.agentOpMu.Lock()
 	defer s.agentOpMu.Unlock()
 	s.acctSwap.discardStaged(swapID)
-	return s.inst.discardAccountNextInPlace()
+	return s.inst.discardAccountNextInPlace(swapID)
 }
 
 // AccountSwapStatus is the terminal record, served after any running swap ends,
