@@ -157,10 +157,14 @@ func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (strin
 		r.outcome, r.program = swapOutcomeCommitted, program
 	case errors.Is(err, errStageNotMine):
 		// Refused before the rotation — the staged scope was not this
-		// swap's to take. The straggler claims a free slot as its own
+		// swap's to take, and the refusal arrived while the outgoing agent
+		// was still live. The straggler claims a free slot as its own
 		// rolled_back; any terminal record already there is restored, so a
 		// late arrival can never displace another swap's evidence — or
-		// downgrade its own.
+		// downgrade its own. A post-stop refusal is errStageRebound, which
+		// does NOT match this arm: the outgoing agent was restarted on the
+		// unchanged scope, making the refusal this swap's own rolled_back
+		// (the default arm).
 		if prevID != "" {
 			r.id, r.outcome, r.program = prevID, prevOutcome, prevProgram
 		} else {
@@ -329,11 +333,21 @@ func swapOutcomeIndeterminate(err error) bool {
 // stopped or sent when it is returned.
 var ErrAccountSwapUnsupported = errors.New("the sandbox's agent-server cannot swap accounts in place")
 
-// errStageNotMine wraps every refusal a rotation makes before it touches the
-// scopes: the staged scope is missing, unreadable, unbound, or bound to a
-// different swap. The recorder uses it to keep such a straggler from
-// displacing a later swap's terminal record (#7773 R1).
+// errStageNotMine wraps every refusal made BEFORE the outgoing agent stops —
+// an admission check finds the staged scope missing, unreadable, unbound, or
+// bound to a different swap. The recorder uses it to keep such a straggler
+// from displacing a later swap's terminal record (#7773 R1). Refusals made
+// after the stop are errStageRebound, which deliberately takes the default
+// arm: they are this swap's own rolled_back, not a straggler's.
 var errStageNotMine = errors.New("the staged scope was not staged for this swap")
+
+// errStageRebound wraps the one refusal made AFTER the outgoing agent has
+// stopped: the binding re-check inside rotate() found the stage re-staged,
+// unbound, or gone at the rename (#7792 R5). The caller restarts the outgoing
+// agent on the scope the rotation put back, then reports this — so the record
+// lands rolled_back under this swap's own id, never the straggler arm, and the
+// pane is never left dead.
+var errStageRebound = errors.New("the staged scope was re-staged or unbound before the rename")
 
 // AccountSwapper is the optional capability of an AgentServer that can rotate its
 // account scope in place. Like AgentSwapper it is not a method on AgentServer, so
@@ -554,10 +568,10 @@ func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*
 	// still be queued on the agent-server — a scope staged now could be
 	// rotated in under that request's id, or emptied under its rotation. A
 	// definite verdict never sets the fence, so a proven session is not
-	// stranded; the fence lifts when the pane proves live or the row is
-	// removed.
+	// stranded. Nothing in the swap path unfences this row today — `af
+	// sessions kill` removes it; #7793 tracks a verdict-based unfence verb.
 	if i.StartupStateUnknown() {
-		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: its startup state is unknown, and a new staged scope could race a swap request still queued on the agent-server — inspect the session's workspace and runtime; a proven-live pane lifts the fence, `af sessions kill %s` removes the row", i.Title, i.Title)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: its startup state is unknown, and a new staged scope could race a swap request still queued on the agent-server — `af sessions kill %s` removes the row; a verdict-based unfence verb is tracked in #7793", i.Title, i.Title)
 	}
 	if name = strings.TrimSpace(name); name == "" {
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)

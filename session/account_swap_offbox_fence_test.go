@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -42,7 +43,7 @@ func TestScopeRotationRechecksTheBindingAtTheRename(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(next, accountSwapMarkerRel), []byte("swap-2"), 0o600))
 
 	err = rot.rotate()
-	require.ErrorIs(t, err, errStageNotMine, "the binding is re-proven at the rename, not only at admission")
+	require.ErrorIs(t, err, errStageRebound, "the binding is re-proven at the rename, not only at admission")
 	assert.Equal(t, "A", readOrEmpty(filepath.Join(live, credFile)), "the outgoing scope was put back")
 	assert.Equal(t, "C", readOrEmpty(filepath.Join(next, credFile)), "the later swap's stage is untouched")
 	assert.Equal(t, "swap-2", readOrEmpty(filepath.Join(next, accountSwapMarkerRel)))
@@ -54,7 +55,7 @@ func TestScopeRotationRechecksTheBindingAtTheRename(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.RemoveAll(next))
 	err = rot.rotate()
-	require.ErrorIs(t, err, errStageNotMine)
+	require.ErrorIs(t, err, errStageRebound)
 	assert.Equal(t, "A", readOrEmpty(filepath.Join(live, credFile)))
 	assert.NoDirExists(t, live+accountPrevSuffix)
 }
@@ -63,8 +64,8 @@ func TestScopeRotationRechecksTheBindingAtTheRename(t *testing.T) {
 // request that swap sent may still be queued on the agent-server, and a scope
 // staged beside it could be rotated in under that request's id or emptied
 // under its rotation. Admission refuses — before anything is staged or
-// stopped — and names how the fence resolves. A definite verdict never
-// strands the row.
+// stopped — and names the way out that exists today: `af sessions kill`
+// removes the row (#7793 tracks a verdict-based unfence verb).
 func TestSwapOffBoxAccountFencedSessionAdmitsNoNewSwap(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
@@ -81,21 +82,38 @@ func TestSwapOffBoxAccountFencedSessionAdmitsNoNewSwap(t *testing.T) {
 	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate, "the refusal names the fence, not a new indeterminate verdict")
 	assert.Contains(t, err.Error(), "fenc", "an actionable refusal, not a bare no")
 	assert.Contains(t, err.Error(), "queued", "it says why the fence matters to a swap")
+	assert.Contains(t, err.Error(), "af sessions kill", "it names the way out that exists today")
+	assert.Contains(t, err.Error(), "7793", "and the issue tracking the verdict-based unfence verb")
 	assert.Equal(t, calls, f.srv.calls, "a fenced session never reaches the agent-server")
 	assert.Len(t, *f.shellCalls, shells, "and never stages a scope on the host")
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"),
 		"the lost swap may have rotated — the fence asserts neither account")
 	require.Error(t, f.inst.ValidateOffBoxAccountSwap("third"),
 		"the scheduler's per-candidate admission refuses it the same way")
+}
 
-	// Once the fence resolves — the pane proved live or the row was rebuilt —
-	// the swap is admitted again; a fenced session is never stranded.
-	f.inst.ResolveStartupState()
-	f.srv.loseResponse, f.srv.statusErr = nil, nil
+// KNOWN GAP (#7793): nothing unfences this row inside the session. The fence
+// does not decay, no swap-path verb clears startupStateUnknown, and a second
+// attempt is refused the same way every time — `af sessions kill` removing the
+// row is the only resolution today. ResolveStartupState restores `started`,
+// but the only callers are the handoff-retry and limit-resume paths, which
+// never run for this row; a verdict-based unfence for an indeterminate swap is
+// the tracked gap, not a promise a live pane lifts the fence.
+func TestSwapOffBoxAccountFencedSessionHasNoUnfenceVerb_KnownGap7793(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
+	f.srv.statusErr = errors.New("remote agent-server: connection reset")
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
+	require.True(t, f.inst.StartupStateUnknown())
+	require.False(t, f.inst.Started(), "the fence lifts the running claim with it")
+
+	f.registerThird(t)
 	_, err = f.inst.SwapOffBoxAccount("third", false)
-	require.NoError(t, err)
-	acct, _ := f.inst.AccountSelection()
-	assert.Equal(t, "third", acct)
+	require.Error(t, err, "the fence does not decay: a later attempt is refused the same way")
+	require.True(t, f.inst.StartupStateUnknown(),
+		"and nothing in the swap path clears it — `af sessions kill` removes the row; #7793 tracks the unfence verb")
 }
 
 // On a pre-identity agent-server there is no serialized discard — but a swap
@@ -229,4 +247,91 @@ func TestLocalAgentServerDiscardAndSwapShareTheOperationLock(t *testing.T) {
 	s.agentOpMu.Unlock()
 	require.Error(t, <-swapDone, "the bare fixture has no scope to rotate — the lock, not the outcome, is under test")
 	require.Error(t, <-discardDone)
+}
+
+// rebindBackend is a FakeBackend whose sibling-stop re-stages .next under
+// another swap's marker — the unordered re-stage the rename-time binding
+// re-check exists to refuse — and records whether the swap's start half ran,
+// standing in for the outgoing agent's restart on the unchanged scope.
+type rebindBackend struct {
+	*FakeBackend
+	restage   func()
+	restarted bool
+}
+
+func (b *rebindBackend) stopForAccountSwap(*Instance, bool) error {
+	b.restage()
+	return nil
+}
+
+func (b *rebindBackend) SwapAgent(_ *Instance, plan AgentSwapPlan) error {
+	if err := plan.CaptureAfterStop(); err != nil {
+		return err
+	}
+	if err := plan.RunBeforeStart(); err != nil {
+		return err
+	}
+	b.restarted = true
+	return nil
+}
+
+// A stage re-staged between the agent's stop and the rename is refused at the
+// rename itself — but the refusal lands AFTER the outgoing agent is dead, so
+// answering it like a pre-stop straggler strands a live row's agent (#7792
+// R5). The unchanged scope is put back by rotate, the same command restarts
+// on it, and the refusal lands rolled_back under THIS swap's id: restoring a
+// previous swap's committed record would let a lost reconcile claim committed
+// for a host that kept the old account.
+func TestSwapAccountInPlaceReboundStageRestartsTheOutgoingAgent(t *testing.T) {
+	live := rotationHost(t)
+	next := live + accountNextSuffix
+	require.NoError(t, os.WriteFile(filepath.Join(next, accountSwapMarkerRel), []byte("swap-1"), 0o600))
+
+	bin := t.TempDir()
+	claude := filepath.Join(bin, "claude")
+	require.NoError(t, os.WriteFile(claude, []byte("#!/bin/sh\n"), 0o755))
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	gw, err := git.NewGitWorktreeFromStorage(
+		initTempGitRepo(t), existingDir(t, filepath.Join(t.TempDir(), "wt")),
+		"rebound", "af/rebound", "", false, true)
+	require.NoError(t, err)
+
+	be := &rebindBackend{FakeBackend: NewFakeBackend(), restage: func() {
+		// The agent is already stopped: a later swap re-stages .next under
+		// its own marker before this swap's rename runs.
+		if err := os.RemoveAll(next); err != nil {
+			return
+		}
+		_ = os.MkdirAll(next, 0o700)
+		_ = os.WriteFile(filepath.Join(next, credFile), []byte("C"), 0o600)
+		_ = os.WriteFile(filepath.Join(next, accountSwapMarkerRel), []byte("swap-2"), 0o600)
+	}}
+	inst, err := NewInstance(InstanceOptions{Title: "rebound", Path: gw.GetWorktreePath(), Program: tmux.ProgramClaude})
+	require.NoError(t, err)
+	inst.SetBackend(be)
+	inst.SetStartedForTest(true)
+	inst.gitWorktree = gw
+	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("rebound", tmux.ProgramClaude))}
+	inst.runtimeProgram = claude
+
+	s := &localAgentServer{inst: inst}
+	// A previous swap's committed record sits in the slot: a post-stop refusal
+	// must not be mistaken for a pre-stop straggler restoring it.
+	s.acctSwap.id, s.acctSwap.outcome, s.acctSwap.program = "swap-0", swapOutcomeCommitted, "claude"
+
+	_, err = s.SwapAccountInPlace("swap-1")
+	require.Error(t, err)
+	assert.True(t, be.restarted,
+		"the outgoing agent must be restarted on the unchanged scope, not left dead")
+	outcome, program, id := s.acctSwap.status()
+	assert.Equal(t, swapOutcomeRolledBack, outcome,
+		"the refusal is THIS swap's own rolled_back — not a previous record's restore")
+	assert.Equal(t, "swap-1", id)
+	assert.Empty(t, program)
+	assert.Equal(t, "A", readOrEmpty(filepath.Join(live, credFile)),
+		"the outgoing scope was put back and stays live")
+	assert.Equal(t, "C", readOrEmpty(filepath.Join(next, credFile)),
+		"the later swap's stage is untouched")
+	assert.Equal(t, "swap-2", readOrEmpty(filepath.Join(next, accountSwapMarkerRel)))
 }

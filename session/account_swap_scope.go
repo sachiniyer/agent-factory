@@ -41,7 +41,27 @@ func (i *Instance) swapAccountInPlace(swapID string) (string, error) {
 		i.restartingSameAgent = false
 		i.mu.Unlock()
 	}()
-	program, err := i.swapAgentInPlaceFrom(agent, restart, rot.rotateAfter(i.stopSiblingsForAccountSwap))
+	// A stage re-staged under another swap's marker is refused at the rename —
+	// AFTER the outgoing agent has already stopped. Refusing there must not
+	// strand a dead pane: the scope is unchanged (rotate put the outgoing
+	// scope back before refusing), so the refusal is held aside while the
+	// plan restarts the same command on it, then reported — which records
+	// rolled_back under this swap's id, never the straggler arm only pre-stop
+	// refusals may take (#7792 R5).
+	var rebound error
+	program, err := i.swapAgentInPlaceFrom(agent, restart, func() error {
+		if err := i.stopSiblingsForAccountSwap(); err != nil {
+			return err
+		}
+		if err := rot.rotate(); err != nil {
+			if errors.Is(err, errStageRebound) {
+				rebound = err
+				return nil
+			}
+			return err
+		}
+		return nil
+	})
 	if err != nil {
 		// The scope may have been rotated before the start failed; leave it as A so
 		// a retry or a relaunch finds the identity the row still records.
@@ -49,6 +69,12 @@ func (i *Instance) swapAccountInPlace(swapID string) (string, error) {
 			err = fmt.Errorf("%w (and the account scope could not be put back: %v; %s)", err, rbErr, accountScopeIndeterminate)
 		}
 		return "", err
+	}
+	if rebound != nil {
+		// The outgoing agent restarted on the unchanged scope: the host kept
+		// the old account, and that is THIS swap's own terminal answer —
+		// rolled_back under its id.
+		return "", rebound
 	}
 	return program, nil
 }
@@ -95,7 +121,7 @@ func (i *Instance) prepareRestartSwap(target, restart string) (AgentSwapPlan, er
 // survives the rotation holding the old account or a dangling scope. A pane that
 // cannot be confirmed stopped aborts the swap before anything rotates.
 func (i *Instance) stopSiblingsForAccountSwap() error {
-	b, ok := i.currentBackend().(*LocalBackend)
+	b, ok := i.currentBackend().(accountSwapStopper)
 	if !ok {
 		return fmt.Errorf("session %q has no local runtime whose panes can be stopped", i.Title)
 	}
@@ -271,10 +297,10 @@ func (r *scopeRotation) stageBound() error {
 	}
 	marker, err := os.ReadFile(filepath.Join(r.next, accountSwapMarkerRel))
 	if err != nil {
-		return fmt.Errorf("%w: the staged scope's binding could not be read: %v", errStageNotMine, err)
+		return fmt.Errorf("%w: the staged scope's binding could not be read: %v", errStageRebound, err)
 	}
 	if strings.TrimSpace(string(marker)) != r.wantID {
-		return fmt.Errorf("%w: the staged scope at %s was re-staged for a different swap; refusing to rotate another swap's stage in", errStageNotMine, r.next)
+		return fmt.Errorf("%w: the staged scope at %s was re-staged for a different swap; refusing to rotate another swap's stage in", errStageRebound, r.next)
 	}
 	return nil
 }

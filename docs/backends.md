@@ -1370,8 +1370,9 @@ config, so the host's own login is neither read nor replaced.
   never proves this swap, so the staged scope is discarded on the server — serialized
   with the swap itself — and the status is re-read once. A committed answer lands the
   swap with an unconfirmed start; a definite refusal or a rolled-back status leaves
-  the old account live; anything else fences the session as startup-unknown — relaunch
-  and teardown are refused until the pane proves live or the row is removed — because
+  the old account live; anything else fences the session as startup-unknown — relaunch,
+  teardown, and any further swap are refused until the row is removed (`af sessions
+  kill` is the way out today; #7793 tracks a verdict-based unfence verb) — because
   the host's account could not be established, and the fence error names an agent-server
   too old for `account-swap-discard` so it can be upgraded.
 - **Sessions on one host share its ssh user**, so they can read each other's
