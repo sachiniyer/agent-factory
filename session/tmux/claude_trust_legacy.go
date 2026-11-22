@@ -3,6 +3,7 @@ package tmux
 import (
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // claudeLegacyTrustQuestion is the legacy folder-trust dialog's question, the
@@ -184,8 +185,19 @@ func claudeLegacyTrustDialogOf(screen visibleText) claudeLegacyTrustVerdict {
 		// consistent. claudeFolderTrustReadToBottom also reads a Partial as
 		// a hold, so the remnant reader's own closed-box guard stays
 		// reachable for the same shape it already keeps.
+		//
+		// The same hold does not even need the box's outline whole: a
+		// footer row that itself starts with a box-side glyph is painted
+		// inside the box, whatever closes the box below it — a bottom
+		// corner edge, a bare ━━━…━ rule a bottom corner never opened, or
+		// nothing at all — and however much of the right border a resize
+		// before the repaint clipped away. No build paints its footer row
+		// with a box side either, so the side alone proves the quote
+		// (#7785).
 		pane := claudeLaunchDialogPaneOf(screen)
-		if claudeLaunchDialogFooterInClosedBox(pane, len(pane.index)-1) {
+		footerRow := len(pane.index) - 1
+		if claudeTrustLeftBordered(pane.lines[pane.index[footerRow]]) ||
+			claudeLaunchDialogFooterInClosedBox(pane, footerRow) {
 			return claudeLegacyTrustPartial
 		}
 		return claudeLegacyTrustAnswerable
@@ -315,4 +327,15 @@ func claudeTrustFrameClosingRule(line string) bool {
 	line = strings.TrimSpace(line)
 	return strings.HasPrefix(line, "╰") || strings.HasPrefix(line, "└") ||
 		strings.HasPrefix(line, "╚") || strings.HasPrefix(line, "┗")
+}
+
+// claudeTrustLeftBordered reports whether line begins with a box's side
+// border: the left edge of a row painted inside a box. Where
+// claudeTrustBordered wants both sides on the row, a quoted row keeps this
+// one even when a resize or an unfinished repaint took the right border, and
+// even when no bottom edge ever closes the box (#7785).
+func claudeTrustLeftBordered(line string) bool {
+	line = strings.TrimSpace(line)
+	first, _ := utf8.DecodeRuneInString(line)
+	return strings.ContainsRune(claudeTrustBoxSides, first)
 }

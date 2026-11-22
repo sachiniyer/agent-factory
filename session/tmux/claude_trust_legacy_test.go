@@ -98,15 +98,46 @@ func TestClaudeLegacyTrustDialogOf(t *testing.T) {
 			"│ 2. No, exit │\n" +
 			"│ " + rewordedTrustFooter + " │\n" +
 			"╰────────────────╯\n", claudeLegacyTrustPartial},
-		{"boxed quoted legacy dialog with the cursor on No", "" +
-			"│ " + q + " │\n" +
-			"│ 1. Yes, proceed │\n" +
-			"│ ❯ 2. No, exit │\n" +
-			"│ " + rewordedTrustFooter + " │\n" +
-			"╰────────────────╯\n", claudeLegacyTrustPartial},
 		{"boxed quoted inline picker, footer inside the box", "" +
 			"│ " + q + " │\n" +
 			"│ ❯ Yes  No │\n" +
+			"│ " + rewordedTrustFooter + " │\n" +
+			"╰────────────────╯\n", claudeLegacyTrustPartial},
+
+		// #7785: the footer row itself carrying a box's side is the quote,
+		// whatever closes the box below it — a bottom corner edge, a bare
+		// rule no corner opened, or nothing — and however much of the right
+		// border a resize clipped away. Each of these is Answerable on
+		// master; the footer-row side is what holds it.
+		{"boxed quoted legacy dialog, right border clipped by a resize", "" +
+			"│ " + q + "\n" +
+			"│\n" +
+			"│ /home/u/proj\n" +
+			"│\n" +
+			"│ ❯ 1. Yes, proceed\n" +
+			"│   2. No, exit\n" +
+			"│\n" +
+			"│ " + rewordedTrustFooter + "\n" +
+			"╰────────────────────────────────────────\n", claudeLegacyTrustPartial},
+		{"boxed quoted legacy dialog, no bottom edge painted", "" +
+			"│ " + q + " │\n" +
+			"│ ❯ 1. Yes, proceed │\n" +
+			"│ 2. No, exit │\n" +
+			"│ " + rewordedTrustFooter + " │\n", claudeLegacyTrustPartial},
+		{"heavy box quoted legacy dialog closed by a bare rule", "" +
+			"┃ " + q + " ┃\n" +
+			"┃ ❯ 1. Yes, proceed ┃\n" +
+			"┃ 2. No, exit ┃\n" +
+			"┃ " + rewordedTrustFooter + " ┃\n" +
+			"━━━━━━━━━━━━━━━━━━\n", claudeLegacyTrustPartial},
+
+		// Non-regression, not a box-guard pin: the cursor rule alone makes
+		// this row Partial on master, so it never exercises either box
+		// guard — it only proves a held row stays held.
+		{"boxed quoted legacy dialog with the cursor on No (non-regression)", "" +
+			"│ " + q + " │\n" +
+			"│ 1. Yes, proceed │\n" +
+			"│ ❯ 2. No, exit │\n" +
 			"│ " + rewordedTrustFooter + " │\n" +
 			"╰────────────────╯\n", claudeLegacyTrustPartial},
 
@@ -247,6 +278,30 @@ func TestCheckAndHandleTrustPrompt_BoxedQuotedLegacyDialogHolds(t *testing.T) {
 			"│ 2. No, exit │\n" +
 			"│ " + legacyTrustFooter + " │\n" +
 			"╰────────────────╯\n"},
+		// #7785: the footer row itself carries a box's side, so the quote
+		// holds whatever closes the box below it — a clipped right border,
+		// no bottom edge at all, or a bare rule no corner edge opened.
+		{"right border clipped by a resize", "" +
+			"│ " + q + "\n" +
+			"│\n" +
+			"│ /home/u/proj\n" +
+			"│\n" +
+			"│ ❯ 1. Yes, proceed\n" +
+			"│   2. No, exit\n" +
+			"│\n" +
+			"│ " + rewordedTrustFooter + "\n" +
+			"╰────────────────────────────────────────\n"},
+		{"no bottom edge painted", "" +
+			"│ " + q + " │\n" +
+			"│ ❯ 1. Yes, proceed │\n" +
+			"│ 2. No, exit │\n" +
+			"│ " + rewordedTrustFooter + " │\n"},
+		{"heavy box closed by a bare rule", "" +
+			"┃ " + q + " ┃\n" +
+			"┃ ❯ 1. Yes, proceed ┃\n" +
+			"┃ 2. No, exit ┃\n" +
+			"┃ " + rewordedTrustFooter + " ┃\n" +
+			"━━━━━━━━━━━━━━━━━━\n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			handled, cmds := runTrustPromptCheck(t, ProgramClaude, tt.content)
