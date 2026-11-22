@@ -113,9 +113,13 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 				name, agent)
 		}
 		if reason, refused := accountDockerProgramChoiceReason(name); refused {
+			remedy := "set it in the image's ENV instead, or have the operator forward it through session_env_passthrough"
+			if name == "SHELL" {
+				remedy = "have the operator forward it through session_env_passthrough (af re-asserts SHELL=/bin/sh after run_args, so an image ENV value cannot take effect)"
+			}
 			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: set it in the image's ENV instead, or have the operator forward it through session_env_passthrough",
-				name, agent, reason)
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: %s",
+				name, agent, reason, remedy)
 		}
 		return nil
 	}

@@ -425,12 +425,15 @@ func TestDockerAccountRunArgs_ProgramChoiceReasonNamesTheMechanism(t *testing.T)
 	require.Contains(t, err.Error(), "session_env_passthrough", "PATH's refusal must name the operator's passthrough remedy")
 
 	// SHELL's refusal must name the tmux default-shell -c mechanism that makes
-	// a repo-chosen SHELL a program-choice hazard, and the same remedies.
+	// a repo-chosen SHELL a program-choice hazard. SHELL is re-asserted to
+	// /bin/sh after run_args, so the image's ENV cannot supply it — the
+	// refusal must steer the operator to session_env_passthrough alone and
+	// must NOT offer the image-ENV remedy that PATH's refusal names.
 	err = validateAccountDockerRunArgs([]string{"-e", "SHELL=/workspace/.pane-runner"}, "codex")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "SHELL", "SHELL's refusal must name the variable")
 	require.Contains(t, err.Error(), "default-shell", "SHELL's refusal must name the tmux default-shell -c mechanism")
-	require.Contains(t, err.Error(), "image's ENV", "SHELL's refusal must name the image-ENV remedy")
+	require.NotContains(t, err.Error(), "image's ENV", "SHELL is re-asserted to /bin/sh, so the image-ENV remedy does not apply")
 	require.Contains(t, err.Error(), "session_env_passthrough", "SHELL's refusal must name the operator's passthrough remedy")
 	// SHELL is re-asserted to /bin/sh, never blanked, so the message must not
 	// claim an empty-pin remedy.
