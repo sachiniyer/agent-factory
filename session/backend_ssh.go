@@ -494,6 +494,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			LaunchScript:       p.launchScript,
 			CallbackRef:        p.callbackRef,
 			CallbackReverse:    p.callbackReverse(),
+			PanePathDir:        p.panePathDir,
 		},
 	}
 	// The pin fields are written together, because which of them is safe to write
@@ -509,6 +510,10 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		// The script that started THIS server, not the archived one's: a crash
 		// recovery after the restore must relaunch what is actually running.
 		c.LaunchScript = sb.cleanup.LaunchScript
+		// Same for the pane-PATH indirection (#7770): usually the re-ensured
+		// recorded path, but this launch's choice either way — the archived
+		// record is empty on pre-#7770 rows.
+		c.PanePathDir = sb.cleanup.PanePathDir
 		sb.cleanup = &c
 		return res, nil
 	}

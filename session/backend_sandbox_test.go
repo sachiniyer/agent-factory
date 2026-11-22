@@ -305,25 +305,27 @@ func TestSandboxReapScriptKillsByIdentityAndGatesTheRemoval(t *testing.T) {
 }
 
 // #7770: a ':'-bearing session dir could not be its own pane-PATH entry, so
-// provision staged a colon-free indirection under the remote login's $HOME —
-// outside the dir the rm reaps. The teardown must remove that link too, and
-// its name derives from the session dir, so every reaper (live, restored,
-// swept) names the same one without a persisted field. The link rm is
-// best-effort and never masks the session dir's rm status, which stays the
-// group's answer.
+// provision staged a colon-free indirection outside the dir the rm reaps —
+// under $HOME/.af-path or an unpredictable mktemp root nothing re-derives, so
+// the reap removes exactly the persisted panePathDir, then its parent when it
+// empties. The link rm is best-effort and never masks the session dir's own
+// rm status, which stays the group's answer.
 func TestSandboxReapScriptRemovesThePanePathIndirection(t *testing.T) {
-	colonDir := "/srv/af:sessions/work.abc123"
-	p := &sandboxProvisioner{sessionDir: colonDir}
+	p := &sandboxProvisioner{
+		sessionDir:  "/srv/af:sessions/work.abc123",
+		panePathDir: "/tmp/af-path.aBcDeF/sess-0123456789abcdef",
+	}
 	script, _ := p.reapScript("a1b2c3d4")
 
-	assert.Contains(t, script, "rm -f -- "+panePathLinkWord(colonDir),
+	assert.Contains(t, script, "rm -f -- /tmp/af-path.aBcDeF/sess-0123456789abcdef",
 		"the indirection link provision staged is removed with the session")
-	assert.Contains(t, script, `rmdir -- "$HOME/.af-path"`,
-		"and the af-owned indirection root is dropped when it empties")
-	assert.NotContains(t, script, panePathLinkWord(colonDir)+" ||",
+	assert.Contains(t, script, "rmdir -- /tmp/af-path.aBcDeF",
+		"and the link's parent — $HOME/.af-path or the mktemp root — is dropped when it empties")
+	assert.NotContains(t, script, "rm -f -- /tmp/af-path.aBcDeF/sess-0123456789abcdef ||",
 		"a failed link removal must never mask the session dir's own rm status")
 
-	// A colon-free session dir never staged one — no link removal is composed.
+	// No recorded indirection — a colon-free session dir or a row that
+	// predates the field — composes no link removal.
 	plain, _ := (&sandboxProvisioner{sessionDir: "/remote/af-session"}).reapScript("a1b2c3d4")
 	assert.NotContains(t, plain, ".af-path",
 		"a colon-free session dir has no indirection to remove")

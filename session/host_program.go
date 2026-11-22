@@ -422,11 +422,10 @@ func PinPATHDir(path, dir string) string {
 // SessionPathDirEnv names the variable the provision launch exports carrying
 // the directory that must lead the agent pane's PATH: the colon-free spelling
 // ensurePanePathDir computed — the session dir itself, or the af-owned
-// indirection under the remote login's $HOME when the session dir contains ':'
-// (#7770). The launch sets it left of nohup and admits it through the
-// handoff's per-invocation extras — like AF_TOKEN_REF — so it reaches this
-// process's exec-time environment without being inherited by the panes it
-// spawns.
+// indirection outside it when the session dir contains ':' (#7770). The
+// launch sets it left of nohup and admits it through the handoff's
+// per-invocation extras — like AF_TOKEN_REF — so it reaches this process's
+// exec-time environment without being inherited by the panes it spawns.
 const SessionPathDirEnv = "AF_SESSION_PATH_DIR"
 
 // PanePathDir reports the directory the agent pane's PATH pins first: the

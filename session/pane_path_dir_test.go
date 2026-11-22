@@ -3,6 +3,9 @@ package session
 import (
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,11 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The indirection's leaf name is derived from the session dir alone — no
-// stored field — so provision, teardown, a restored cleanup handle and the
-// orphan sweep all name the same link. It must be colon-free itself (it sits
-// inside the PATH entry) and distinct per session dir so two sessions can
-// never collide.
+// The indirection's leaf name carries a session-dir digest, so two sessions
+// can never collide inside a shared root. It must be colon-free itself (it
+// sits inside the PATH entry) and distinct per session dir.
 func TestPanePathLinkNameIsColonFreeDeterministicAndDistinct(t *testing.T) {
 	a := panePathLinkName("/srv/af:sessions/work.abc123")
 	require.True(t, strings.HasPrefix(a, "sess-"), "the name must carry the session marker, got %q", a)
@@ -29,7 +30,7 @@ func TestPanePathLinkNameIsColonFreeDeterministicAndDistinct(t *testing.T) {
 }
 
 // A colon-free session dir needs no indirection: it IS the PATH entry, and no
-// remote round trip may be spent proving it.
+// remote round trip may be spent proving it (#7770 R5).
 func TestEnsurePanePathDirKeepsAColonFreeSessionDir(t *testing.T) {
 	ran := false
 	p := &sandboxProvisioner{runCommandFn: func(time.Duration, string, io.Reader, bool) ([]byte, error) {
@@ -61,15 +62,18 @@ func TestEnsurePanePathDirRefusesARelativeSessionDir(t *testing.T) {
 	assert.Empty(t, w.panePathDir)
 }
 
-// A ':'-bearing session dir gets the indirection: a symlink to it under the
-// remote login's $HOME, created race-safely (af-owned, chmod 700, a planted
-// non-symlink at the leaf refused before `ln` — busybox's ln -sfn would write
-// inside a real directory), and the launch's PATH entry becomes the link's
-// expanded, colon-free spelling.
+// A ':'-bearing session dir gets the indirection. With no recorded path the
+// choose script runs: it prefers $HOME/.af-path when that spelling is usable,
+// falls back to an unpredictable 0700 mktemp -d root outside $HOME when $HOME
+// bears ':' (#7770 R4), refuses only when no colon-free spelling exists
+// anywhere, guards every planted path, and commits nothing until the leaf is
+// PROVEN — a symlink whose readlink equals the session dir byte for byte
+// (#7770 R1).
 func TestEnsurePanePathDirBuildsTheIndirection(t *testing.T) {
 	var script string
-	p := &sandboxProvisioner{runCommandFn: func(_ time.Duration, s string, _ io.Reader, _ bool) ([]byte, error) {
-		script = s
+	var combined bool
+	p := &sandboxProvisioner{runCommandFn: func(_ time.Duration, s string, _ io.Reader, c bool) ([]byte, error) {
+		script, combined = s, c
 		return []byte("AF_PANE_LINK=/home/u/.af-path/" + panePathLinkName("/srv/af:sessions/work.abc123") + "\n"), nil
 	}}
 	dir := "/srv/af:sessions/work.abc123"
@@ -79,36 +83,75 @@ func TestEnsurePanePathDirBuildsTheIndirection(t *testing.T) {
 	name := panePathLinkName(dir)
 	assert.Equal(t, "/home/u/.af-path/"+name, w.panePathDir,
 		"the PATH entry becomes the indirection's colon-free spelling, not the session dir")
-	assert.Contains(t, script, ".af-path", "the indirection lives under an af-owned dir")
-	assert.Contains(t, script, "chmod 700", "the indirection root is private to the session user")
-	assert.Contains(t, script, `ln -sfn `+shellQuote(dir), "the link points at the real session dir")
-	assert.Contains(t, script, "-L ", "a symlinked root is refused rather than written inside")
+	assert.Contains(t, script, `.af-path`, "the preferred root lives under the remote login's $HOME")
+	assert.Contains(t, script, `mktemp -d`, "a ':'-bearing $HOME is handled by a mktemp root outside it, never refused")
+	assert.Contains(t, script, `base="${TMPDIR:-/tmp}"`, "the mktemp base defaults to /tmp")
+	assert.Contains(t, script, `case "$base" in *:*) base=/tmp`, "a ':'-bearing TMPDIR falls back to the literal /tmp")
+	assert.Contains(t, script, `case "$root" in *:*)`, "the root mktemp prints is itself re-checked for ':'")
+	assert.Contains(t, script, `chmod 700`, "the indirection root is private to the session user")
+	assert.Contains(t, script, `ln -sfn "$sess" "$link"`, "the link points at the real session dir")
+	assert.Contains(t, script, `[ -d "$HOME" ]`, "$HOME is used only when it is a real directory")
+	assert.Contains(t, script, `[ -L "$link" ]`, "a symlinked root or leaf is refused rather than written inside")
 	assert.Contains(t, script, `[ -e "$link" ] && [ ! -L "$link" ]`,
 		"an existing non-symlink at the leaf is refused before `ln` — implementations differ on ln -sfn into a real directory")
-	assert.NotContains(t, script, "ln -sfn $", "the target is quoted literally, never re-expanded")
+	assert.Contains(t, script, `[ "$(readlink "$link")" = "$sess" ]`,
+		"the PATH entry is committed only after the link PROVES its target byte for byte")
+	assert.False(t, combined, "the link path is parsed from stdout only — stderr stays out of the stream (#7770 R3)")
+}
+
+// A reattach carries the session's recorded link path — the persisted launch
+// names it — so the link is re-created AT it (the ensure-at script), never a
+// fresh spelling. A malformed record is refused before any remote call.
+func TestEnsurePanePathDirReensuresTheRecordedPath(t *testing.T) {
+	var script string
+	p := &sandboxProvisioner{runCommandFn: func(_ time.Duration, s string, _ io.Reader, _ bool) ([]byte, error) {
+		script = s
+		return []byte("AF_PANE_LINK=/tmp/af-path.aBcDeF/sess-x\n"), nil
+	}}
+	w := &sandboxWorkspace{
+		shell:       p,
+		SessionDir:  "/srv/af:sessions/work.abc123",
+		panePathDir: "/tmp/af-path.aBcDeF/sess-x",
+	}
+	require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout))
+	assert.Equal(t, "/tmp/af-path.aBcDeF/sess-x", w.panePathDir)
+	assert.Contains(t, script, `link=/tmp/af-path.aBcDeF/sess-x`,
+		"the recorded link path is re-created verbatim")
+	assert.NotContains(t, script, "mktemp", "a recorded path is never re-chosen")
+
+	for _, bad := range []string{"/tmp/a:b/x", "tmp/af-path.x/sess"} {
+		ran := false
+		p := &sandboxProvisioner{runCommandFn: func(time.Duration, string, io.Reader, bool) ([]byte, error) {
+			ran = true
+			return nil, nil
+		}}
+		w := &sandboxWorkspace{shell: p, SessionDir: "/srv/af:sessions/s", panePathDir: bad}
+		require.Error(t, w.ensurePanePathDir(sshShortStepTimeout), bad)
+		assert.False(t, ran, "a malformed recorded path is refused before any remote call")
+	}
 }
 
 // The script itself fail-closes when the remote cannot supply a colon-free
-// root (a ':'-bearing $HOME): the provision error is the remote's own
-// diagnostic plus the dir it was solving for, and no PATH dir is committed.
+// root: the provision error is the remote's own diagnostic plus the dir it
+// was solving for, and no PATH dir is committed.
 func TestEnsurePanePathDirFailsWhenTheRemoteCannotIndirection(t *testing.T) {
 	p := &sandboxProvisioner{runCommandFn: func(_ time.Duration, _ string, _ io.Reader, _ bool) ([]byte, error) {
-		return []byte("af: the remote login's $HOME contains ':', so no colon-free pane PATH indirection can be built under it"),
-			errors.New("exit status 92")
+		return []byte("af: no colon-free pane PATH indirection can be built: the remote login's $HOME contains ':' and the mktemp root /x:y/af-path.z contains ':' too"),
+			errors.New("exit status 98")
 	}}
 	w := &sandboxWorkspace{shell: p, SessionDir: "/srv/af:sessions/work.abc123"}
 	err := w.ensurePanePathDir(sshShortStepTimeout)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "/srv/af:sessions/work.abc123")
-	assert.Contains(t, err.Error(), "$HOME contains ':'")
+	assert.Contains(t, err.Error(), "colon-free")
 	assert.Empty(t, w.panePathDir)
 }
 
-// A remote that answers garbage must not be trusted: only the marker line af
-// printed is read as the link path, and it is itself verified to be a single
-// PATH entry before it is committed. Transport noise — a wrapper's stderr
-// mixed into the combined stream — can never masquerade as the answer, and
-// must never refuse an otherwise working host (#7770 review).
+// A remote that answers garbage must not be trusted: the link path is read
+// from stdout only (#7770 R3 — a wrapper's stderr can never masquerade as
+// the answer), and inside stdout only the marker line af printed is read,
+// itself verified to be a single PATH entry before it is committed. Noise
+// inside stdout must never refuse an otherwise working host either.
 func TestEnsurePanePathDirVerifiesTheReportedLink(t *testing.T) {
 	for label, out := range map[string]string{
 		"relative":              "AF_PANE_LINK=home/u/.af-path/sess-x\n",
@@ -124,7 +167,7 @@ func TestEnsurePanePathDirVerifiesTheReportedLink(t *testing.T) {
 			w := &sandboxWorkspace{shell: p, SessionDir: "/srv/af:sessions/work.abc123"}
 			err := w.ensurePanePathDir(sshShortStepTimeout)
 			if label == "noise around a marker" {
-				require.NoError(t, err, "wrapper noise on the combined stream must not refuse a link that was built")
+				require.NoError(t, err, "wrapper noise on stdout must not refuse a link that was built")
 				assert.Equal(t, "/home/u/.af-path/sess-x", w.panePathDir)
 				return
 			}
@@ -134,98 +177,108 @@ func TestEnsurePanePathDirVerifiesTheReportedLink(t *testing.T) {
 	}
 }
 
-// The early refusal: a session dir that will carry ':' AND a remote login
-// whose $HOME carries ':' leave af no colon-free spelling for the
-// indirection. The refusal names the field and the character, runs before
-// anything is staged, and leaves the attempt reapable as pre-launch.
-func TestCheckPanePathFeasibility(t *testing.T) {
-	probe := func(home string, err error, ran *bool) func(time.Duration, string, io.Reader, bool) ([]byte, error) {
-		return func(_ time.Duration, script string, _ io.Reader, _ bool) ([]byte, error) {
-			*ran = true
-			assert.Contains(t, script, "$HOME", "the probe reads the remote login's $HOME")
-			if home == "" {
-				return nil, err
-			}
-			return []byte("AF_PANE_HOME=" + home + "\n"), err
-		}
+// #7770 R1: run the REAL script under a local sh against a scratch HOME — the
+// guards, the mktemp fallback, and the readlink proof are load-bearing shell,
+// so a string assertion is not evidence they work.
+//
+// runLocalSh satisfies sandboxShell by executing the script verbatim with a
+// controlled HOME and TMPDIR; combined output mirrors the production call.
+type localSh struct {
+	home   string
+	tmpdir string
+}
+
+func (l *localSh) Run(_ time.Duration, script string, _ io.Reader, combined bool) ([]byte, error) {
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = []string{"HOME=" + l.home, "TMPDIR=" + l.tmpdir, "PATH=" + os.Getenv("PATH")}
+	var out []byte
+	var err error
+	if combined {
+		out, err = cmd.CombinedOutput()
+	} else {
+		out, err = cmd.Output()
 	}
+	return out, err
+}
 
-	t.Run("colon-free workspace_root never probes", func(t *testing.T) {
-		ran := false
-		w := &sandboxWorkspace{
-			shell: &sandboxProvisioner{runCommandFn: probe("/h:me", nil, &ran)},
-			spec:  ProvisionSpec{WorkspaceRoot: "/srv/af-sessions"},
-		}
-		require.NoError(t, w.checkPanePathFeasibility(sshShortStepTimeout))
-		assert.False(t, ran, "a colon-free root needs no $HOME probe")
+func TestEnsurePanePathDirRealScript(t *testing.T) {
+	sess := filepath.Join(t.TempDir(), "af:sess", "work") // a ':'-bearing session dir that really exists
+	require.NoError(t, os.MkdirAll(sess, 0o755))
+
+	t.Run("colon-free HOME prefers the shared root", func(t *testing.T) {
+		home := t.TempDir()
+		w := &sandboxWorkspace{shell: &localSh{home: home}, SessionDir: sess}
+		require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout))
+
+		link := filepath.Join(home, ".af-path", panePathLinkName(sess))
+		assert.Equal(t, link, w.panePathDir)
+		target, err := os.Readlink(link)
+		require.NoError(t, err, "the leaf must be a symlink")
+		assert.Equal(t, sess, target, "readlink equals the session dir byte for byte")
+		st, err := os.Stat(filepath.Dir(link))
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o700), st.Mode().Perm(), "the shared root is private")
 	})
 
-	t.Run("colon-bearing workspace_root with clean HOME proceeds", func(t *testing.T) {
-		ran := false
-		w := &sandboxWorkspace{
-			shell: &sandboxProvisioner{runCommandFn: probe("/home/u", nil, &ran)},
-			spec:  ProvisionSpec{WorkspaceRoot: "/srv/af:sessions"},
-		}
-		require.NoError(t, w.checkPanePathFeasibility(sshShortStepTimeout))
-		assert.True(t, ran)
+	t.Run("a colon-bearing HOME falls back to mktemp outside it", func(t *testing.T) {
+		tmp := t.TempDir()
+		w := &sandboxWorkspace{shell: &localSh{home: "/nonexistent:h:ome", tmpdir: tmp}, SessionDir: sess}
+		require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout))
+
+		require.True(t, strings.HasPrefix(w.panePathDir, tmp+string(filepath.Separator)+"af-path."),
+			"the root is an unpredictable mktemp dir under TMPDIR, got %q", w.panePathDir)
+		target, err := os.Readlink(w.panePathDir)
+		require.NoError(t, err)
+		assert.Equal(t, sess, target)
+		st, err := os.Stat(filepath.Dir(w.panePathDir))
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o700), st.Mode().Perm(), "the mktemp root is 0700")
+
+		// And a second attempt must not collide with the first: mktemp gives a
+		// distinct root even though the leaf name is the same digest.
+		w2 := &sandboxWorkspace{shell: &localSh{home: "/nonexistent:h:ome", tmpdir: tmp}, SessionDir: sess}
+		require.NoError(t, w2.ensurePanePathDir(sshShortStepTimeout))
+		assert.NotEqual(t, w.panePathDir, w2.panePathDir,
+			"two provisions for the same session dir never share a mktemp root")
+		assert.Equal(t, filepath.Base(w.panePathDir), filepath.Base(w2.panePathDir),
+			"the leaf name is the session-dir digest — the root, not the leaf, is the unique part")
 	})
 
-	t.Run("HOME under a colon is refused before staging, naming field and character", func(t *testing.T) {
-		ran := false
-		w := &sandboxWorkspace{
-			shell: &sandboxProvisioner{runCommandFn: probe("/h:me", nil, &ran)},
-			spec:  ProvisionSpec{},
-		}
-		err := w.checkPanePathFeasibility(sshShortStepTimeout)
+	t.Run("a planted directory at the leaf is refused, not written inside", func(t *testing.T) {
+		home := t.TempDir()
+		leaf := filepath.Join(home, ".af-path", panePathLinkName(sess))
+		require.NoError(t, os.MkdirAll(leaf, 0o755)) // the planted directory
+
+		w := &sandboxWorkspace{shell: &localSh{home: home}, SessionDir: sess}
+		err := w.ensurePanePathDir(sshShortStepTimeout)
 		require.Error(t, err)
-		assert.True(t, ran)
-		assert.Contains(t, err.Error(), "$HOME")
-		assert.Contains(t, err.Error(), "':'")
-		assert.Contains(t, err.Error(), "workspace_root", "the actionable field must be named")
+		assert.Empty(t, w.panePathDir)
+		assert.Empty(t, func() []string {
+			e, _ := os.ReadDir(leaf)
+			names := make([]string, len(e))
+			for i, f := range e {
+				names[i] = f.Name()
+			}
+			return names
+		}(), "nothing was created inside the planted directory")
 	})
 
-	t.Run("colon workspace_root plus colon HOME is refused, naming workspace_root", func(t *testing.T) {
-		w := &sandboxWorkspace{
-			shell: &sandboxProvisioner{runCommandFn: probe("/h:me", nil, new(bool))},
-			spec:  ProvisionSpec{WorkspaceRoot: "/srv/af:sessions"},
-		}
-		err := w.checkPanePathFeasibility(sshShortStepTimeout)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "workspace_root")
-		assert.Contains(t, err.Error(), "/srv/af:sessions")
-		assert.Contains(t, err.Error(), "':'")
+	t.Run("a symlinked root is refused", func(t *testing.T) {
+		home := t.TempDir()
+		require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(home, ".af-path")))
+
+		w := &sandboxWorkspace{shell: &localSh{home: home}, SessionDir: sess}
+		require.Error(t, w.ensurePanePathDir(sshShortStepTimeout))
+		assert.Empty(t, w.panePathDir)
 	})
 
-	t.Run("a colon-bearing preserved dir plus colon HOME is refused", func(t *testing.T) {
-		ran := false
-		w := &sandboxWorkspace{
-			shell: &sandboxProvisioner{runCommandFn: probe("/h:me", nil, &ran)},
-			spec:  ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/preserved/a:b"}},
-		}
-		err := w.checkPanePathFeasibility(sshShortStepTimeout)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "/preserved/a:b")
-		assert.Contains(t, err.Error(), "':'")
-	})
-
-	t.Run("a colon-free preserved dir never probes", func(t *testing.T) {
-		ran := false
-		w := &sandboxWorkspace{
-			shell: &sandboxProvisioner{runCommandFn: probe("/h:me", nil, &ran)},
-			spec:  ProvisionSpec{Adopt: &AdoptSpec{SessionDir: "/preserved/ab"}},
-		}
-		require.NoError(t, w.checkPanePathFeasibility(sshShortStepTimeout))
-		assert.False(t, ran)
-	})
-
-	t.Run("an unanswered probe must not refuse a host that may be fine", func(t *testing.T) {
-		ran := false
-		w := &sandboxWorkspace{
-			shell: &sandboxProvisioner{runCommandFn: probe("", errors.New("ssh: connection refused"), &ran)},
-			spec:  ProvisionSpec{WorkspaceRoot: "/srv/af:sessions"},
-		}
-		require.NoError(t, w.checkPanePathFeasibility(sshShortStepTimeout),
-			"a transport failure here would refuse every working host; the link step fail-closes instead")
-		assert.True(t, ran)
+	t.Run("the ensure-at script recreates the recorded path", func(t *testing.T) {
+		tmp := t.TempDir()
+		link := filepath.Join(tmp, "af-path.Xyz", "sess-x")
+		w := &sandboxWorkspace{shell: &localSh{home: t.TempDir()}, SessionDir: sess, panePathDir: link}
+		require.NoError(t, w.ensurePanePathDir(sshShortStepTimeout))
+		target, err := os.Readlink(link)
+		require.NoError(t, err)
+		assert.Equal(t, sess, target)
 	})
 }

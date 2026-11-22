@@ -72,9 +72,10 @@ type sandboxWorkspace struct {
 	// panePathDir is the directory the launch puts first on the agent-server's
 	// PATH (and the agent-server re-pins first on the agent pane's adopted
 	// login PATH): SessionDir itself when it is a usable PATH entry, else the
-	// colon-free indirection ensurePanePathDir built under the remote login's
-	// $HOME (#7770). Empty before that step runs; startAgentServer falls back
-	// to SessionDir so direct callers keep working.
+	// colon-free indirection ensurePanePathDir staged outside it — under
+	// $HOME/.af-path or an unpredictable mktemp root (#7770). It is ALSO the
+	// workspace's recorded link path: a restart seeds it from the row so the
+	// link is re-created at the spelling the persisted launch still names.
 	panePathDir string
 	// RemotePID is the backgrounded agent-server PID captured for teardown.
 	RemotePID string
@@ -499,8 +500,8 @@ func (w *sandboxWorkspace) startAgentServer(timeout time.Duration) error {
 	// command, left of nohup, so the `& echo $!` tail is undisturbed.
 	//
 	// The entry is panePathDir — ensurePanePathDir's colon-free spelling, the
-	// session dir itself or the af-owned indirection under the remote login's
-	// $HOME. A ':' inside it is a PATH SEPARATOR when the shell consumes the
+	// session dir itself or the af-owned indirection outside it. A ':' inside
+	// it is a PATH SEPARATOR when the shell consumes the
 	// assignment (shellQuote protects metacharacters, never PATH grammar), so a
 	// colon-bearing dir would split in two: the staged `af` unreachable and
 	// the relative tail resolved against each pane's cwd, where a repo-planted

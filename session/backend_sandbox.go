@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -174,14 +175,16 @@ type sandboxProvisioner struct {
 	// session dir's env files and flags, never a secret.
 	launchScript string
 	adoptPending bool // a restarted server has not adopted its workspace yet (W1.4)
-	// panePathLink is true only while THIS provision carries a staged pane-PATH
-	// indirection for a ':'-bearing session dir (#7770) — set when
-	// ensurePanePathDir creates it. abandonAdoption keys its link removal on
-	// it: an attempt refused before that step never staged the link, and the
-	// link a still-running previous agent-server created is its session's own —
-	// deleting it would break that server's pane PATH while its workspace is
-	// left untouched.
-	panePathLink bool
+	// panePathDir is the colon-free pane-PATH indirection THIS provision
+	// staged for a ':'-bearing session dir (#7770) — the link path itself,
+	// set only when ensurePanePathDir created one. It is the persisted
+	// cleanup handle for an object that lives outside the session dir (a
+	// mktemp-built root is unpredictable — nothing re-derives it), and
+	// abandonAdoption keys its removal on it being set: an attempt refused
+	// before that step never staged a link, and the link a still-running
+	// previous agent-server created is its session's own — deleting it would
+	// break that server's pane PATH while its workspace is left untouched.
+	panePathDir string
 	// persistIdentity is the daemon-installed durable write of the row a W1.4
 	// restart fires before it spawns, before it adopts and when adoption ends.
 	// In memory only; the daemon reinstalls it per reattach attempt.
@@ -276,17 +279,17 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	if err := w.checkHostPrereqs(p.hostReadinessKey(), sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxErr(err)
 	}
-	// Refuse, before anything is staged on the host, the one layout that can
-	// never yield a colon-free pane PATH dir: a ':'-bearing session root and a
-	// ':'-bearing remote $HOME the indirection would have to live under
-	// (#7770). Every other shape proceeds exactly as it did.
-	if err := w.checkPanePathFeasibility(sshShortStepTimeout); err != nil {
-		return ProvisionResult{}, p.sandboxErr(err)
-	}
 	if p.spec.Adopt != nil {
 		if err := p.beginAdoption(w); err != nil {
 			return ProvisionResult{}, err
 		}
+		// The spec carries the link path the preserved workspace's row
+		// recorded: re-ensure AT it — the new launch then names the same PATH
+		// entry — rather than mint a second root the old record still names
+		// (#7770). p.panePathDir stays untouched until the step below stages
+		// the link, so a failed adoption never deletes one it merely
+		// inherited the name of.
+		w.panePathDir = p.spec.Adopt.PanePathDir
 	} else {
 		if err := w.makeSessionDir(sshShortStepTimeout); err != nil {
 			return ProvisionResult{}, p.sandboxWriteErr(err)
@@ -296,16 +299,20 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 	}
 	// The session dir is final in both arms — before the workspace and binary
 	// are staged, make the pane-PATH dir colon-free: the session dir itself,
-	// or an af-owned indirection under the remote login's $HOME when the dir
-	// carries ':' (#7770). A refusal here still reaps as a pre-launch attempt.
+	// or an af-owned indirection the link step chooses (#7770). A refusal here
+	// still reaps as a pre-launch attempt.
 	if err := w.ensurePanePathDir(sshShortStepTimeout); err != nil {
 		return ProvisionResult{}, p.sandboxWriteErr(err)
 	}
 	// The link a ':'-bearing session dir just gained is this attempt's to
 	// remove on failure — and ONLY this attempt's (#7770): an adoption refused
 	// before this point never staged it, and a still-running previous
-	// agent-server's own link must not be deleted under it.
-	p.panePathLink = w.panePathDir != "" && w.panePathDir != w.SessionDir
+	// agent-server's own link must not be deleted under it. The path persists
+	// on the cleanup handle, because a mktemp-built root is unpredictable —
+	// nothing can re-derive it.
+	if w.panePathDir != "" && w.panePathDir != w.SessionDir {
+		p.panePathDir = w.panePathDir
+	}
 	if p.spec.Adopt == nil {
 		// The identity is repo-local (#5571 W2.7), so it is written after the clone
 		// that creates the repository.
@@ -461,6 +468,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 				CallbackRef:        p.callbackRef,
 				CallbackReverse:    p.callbackReverse(),
 				AccountSyncHost:    p.accountSyncHost(),
+				PanePathDir:        p.panePathDir,
 			},
 		},
 		Endpoint: endpoint,
@@ -812,16 +820,16 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 	// in the text a logging wrapper would echo.
 	respond := "printf '%s' " + shellQuote(send) + " | tr 'a-z' 'A-Z'"
 	// A ':'-bearing session dir could not lead the pane PATH itself, so the
-	// provision staged a colon-free indirection under the remote login's $HOME
-	// (#7770) — outside the dir this rm reaps. Its leaf name derives from the
-	// session dir, so this reap, a restored cleanup handle's, and the orphan
-	// sweep's all name the same link with nothing persisted. Its status is
-	// deliberately discarded: the session dir's rm remains the group's answer,
-	// and a leftover link can only dangle into a dir that no longer exists.
+	// provision staged a colon-free indirection outside the dir this rm reaps
+	// (#7770) — under $HOME/.af-path or an unpredictable mktemp root. The path
+	// is the persisted panePathDir: no derivation could name the mktemp one.
+	// Its status is deliberately discarded: the session dir's rm remains the
+	// group's answer, and a leftover link can only dangle into a dir that no
+	// longer exists. rmdir drops the link's parent only when af left it empty.
 	linkRm := ""
-	if strings.Contains(p.sessionDir, ":") {
-		linkRm = "; rm -f -- " + panePathLinkWord(p.sessionDir) +
-			`; rmdir -- "$HOME/` + remotePathLinkDir + `" 2>/dev/null`
+	if p.panePathDir != "" {
+		linkRm = "; rm -f -- " + shellQuote(p.panePathDir) +
+			"; rmdir -- " + shellQuote(path.Dir(p.panePathDir)) + " 2>/dev/null"
 	}
 	// A subshell so `exit "$rc"` reports rm's status as this group's status
 	// without terminating anything that might follow it.
