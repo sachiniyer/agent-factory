@@ -313,6 +313,73 @@ func TestWarmupProbationThrowawayArmPreservesCleanExit(t *testing.T) {
 	}
 }
 
+// TestWarmupCoreadyFatalAcceptRaceRestoresCleanExitWhenThrowawayFired pins the
+// follow-up to the throwaway-arm clean-exit contract: when the throwaway
+// watchdog fires AND a fatal accept error is recorded, the warm-up restore
+// select's signal/shutdown arm can win the co-ready race and return
+// fatalAcceptShutdownErr() directly. The deferred reconciliation must then
+// clear that error so the daemon takes the clean terminal exit the main path's
+// throwawayFired() gate also takes — not exit non-zero and relaunch the expired
+// sandbox under Restart=on-failure against its still-expired marker (#7620).
+// Pre-fix, the reconciliation only touched a still-nil retErr, so the signal
+// arm's fatal error survived the drain and the daemon exited non-zero.
+//
+// The race is exercised across iterations: the throwaway owner is killed
+// (closing throwawayExpireCh) and SIGTERM is sent (buffering in sigChan) while
+// the restore is held, so both channels are co-ready in the restore select.
+// Go's uniform-random arm selection takes the signal arm on roughly half the
+// iterations; the throwaway arm already returns nil, so only the signal-arm
+// outcomes distinguish the fix. The throwaway fires before the deferred
+// settleThrowaway runs, so the reconciliation observes it.
+func TestWarmupCoreadyFatalAcceptRaceRestoresCleanExitWhenThrowawayFired(t *testing.T) {
+	const iterations = 10
+	var nonNilReturns atomic.Int32
+
+	for i := 0; i < iterations; i++ {
+		t.Run(fmt.Sprintf("iter_%d", i), func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			stubContainerSweep(t)
+			captureExitHoldingHome(t, nil)
+
+			owner := throwawaySetup(t)
+			fatalErr := errors.New("co-ready throwaway fatal accept error")
+			restoreStarted, _, runErr := holdRestoreAndStart(t)
+
+			waitSocketBound(t, "the daemon never reached the restore select")
+			select {
+			case <-restoreStarted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the restore goroutine never started; the daemon is not parked in the restore select")
+			}
+			time.Sleep(50 * time.Millisecond)
+
+			setFatalAcceptErr(fatalErr)
+			t.Cleanup(resetFatalAcceptErr)
+			// Kill the throwaway owner so the watchdog closes throwawayExpireCh,
+			// then wait long enough for the 20ms poll to observe it. Send SIGTERM
+			// so sigChan is co-ready with throwawayExpireCh in the restore select.
+			// The restore is held and shutdownCh is not closed (the fatal error
+			// was recorded directly, not via the accept loop), so the two arms
+			// are the only ready cases.
+			require.NoError(t, owner.Process.Kill())
+			_, _ = owner.Process.Wait()
+			time.Sleep(50 * time.Millisecond)
+			require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+
+			select {
+			case err := <-runErr:
+				if err != nil {
+					nonNilReturns.Add(1)
+					t.Fatalf("runDaemon returned %v (non-zero) despite the throwaway expiry — the co-ready race demoted the clean terminal exit", err)
+				}
+			case <-time.After(15 * time.Second):
+				t.Fatal("runDaemon did not exit after the co-ready throwaway/signal race")
+			}
+		})
+	}
+	require.Zero(t, nonNilReturns.Load(), "%d/%d co-ready iterations returned non-nil despite the throwaway expiry", nonNilReturns.Load(), iterations)
+}
+
 // TestHoldHomeIfAbandonedExitsOneOnPendingFatalAcceptErr pins the
 // defense-in-depth fix in holdHomeIfAbandoned's exit classification: when the
 // run returned nil (no run-level error or panic) but a fatal accept error is

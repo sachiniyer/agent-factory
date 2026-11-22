@@ -540,15 +540,22 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) (retErr error) {
 		// (the main path returns fatalAcceptShutdownErr() after its own drain).
 		// A throwaway expiry is an intentional clean terminal exit — the
 		// sandbox's lifetime has ended and relaunching it would loop against
-		// its still-expired marker (#7620) — so leave its clean nil return in
-		// place and only reconcile non-expiry shutdown paths. Settle the
-		// watchdog BEFORE the check: a fire that lands during the drain would
-		// otherwise still read as not-fired here and set retErr to the fatal
-		// error, and the later teardown step's own settle cannot undo that —
-		// holdHomeIfAbandoned's err != nil branch fires before its cleanExit
-		// guard, so the throwaway's clean exit would be demoted to a restart.
+		// its still-expired marker (#7620) — so it must keep the clean nil
+		// return the main path's throwawayFired() gate also takes. Settle the
+		// watchdog BEFORE the check: a fire that lands during the drain must
+		// be observed here. When the throwaway fired, clear a fatal accept
+		// error the signal/shutdown arm assigned (compared by value, since
+		// those arms return fatalAcceptShutdownErr() directly) to restore
+		// that clean exit; a genuine non-fatal error (e.g. a restore failure)
+		// is left in place. When it did not fire, only reconcile a still-nil
+		// return, so a fatal error recorded just after the arm's pre-drain
+		// lookup is no longer lost.
 		settleThrowaway()
-		if retErr == nil && !throwawayFired() {
+		if throwawayFired() {
+			if fatalErr := fatalAcceptShutdownErr(); fatalErr != nil && retErr == fatalErr {
+				retErr = nil
+			}
+		} else if retErr == nil {
 			if fatalErr := fatalAcceptShutdownErr(); fatalErr != nil {
 				retErr = fatalErr
 			}
