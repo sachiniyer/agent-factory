@@ -1114,6 +1114,8 @@ func TestDockerStagingEnclosingRunArgsMountRefused(t *testing.T) {
 		{"bind over /etc", []string{"--volume=/host/dir:/etc"}, "/etc", true},
 		{"--mount flag", []string{"--mount", "type=bind,source=/h,target=/usr"}, "--mount", true},
 		{"tmpfs", []string{"--tmpfs", "/usr/local"}, "/usr/local", true},
+		{"tmpfs with options suffix", []string{"--tmpfs", "/usr/local:size=64m"}, "/usr/local", true},
+		{"tmpfs equals form with options", []string{"--tmpfs=/etc:mode=1777"}, "/etc", true},
 		{"root bind", []string{"-v", "/h:/"}, "-v /h:/", true},
 		{"exact file dest", []string{"-v", "/h/f:" + dockerAfBinaryPath}, dockerAfBinaryPath, true},
 		{"attached -v value", []string{"-v/host/dir:/usr/local/bin"}, "/usr/local/bin", true},
