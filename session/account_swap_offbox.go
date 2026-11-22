@@ -131,7 +131,28 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper) (committed bool, pro
 		}
 		switch outcome {
 		case swapOutcomeCommitted:
-			return true, prog, true
+			// Only the host's own markers can say WHICH swap committed. The
+			// recorder is never reset to "none" after a swap, so a terminal
+			// "committed" may be a stale record from an EARLIER swap rather
+			// than the current one. A current rotation leaves account.prev
+			// beside the live scope (scopeIncoming); a swap that never ran on
+			// the host leaves only the staged account.next and no account.prev
+			// (scopeOutgoing). Verify, the way the none branch does, instead of
+			// trusting a record that names no swap (#a0ff4041).
+			if w.probeScopeState(sshShortStepTimeout) == scopeIncoming {
+				return true, prog, true
+			}
+			// Stale terminal record, or a swap whose rotation has not landed.
+			// The staged scope is removed so a request still in flight cannot
+			// run afterwards; a second status catches one that ran in between
+			// (the none branch's protocol).
+			if discarded {
+				return false, "", true // still not scopeIncoming after the staged scope is gone
+			}
+			if err := w.discardAccountNext(sshShortStepTimeout); err != nil {
+				return false, "", false
+			}
+			discarded = true
 		case swapOutcomeRolledBack:
 			return false, "", true
 		case swapOutcomeNone:
