@@ -280,3 +280,36 @@ func TestTabJump_PreviewingPaneRefusesWhenOnScreenSessionLacksTab(t *testing.T) 
 		"a refused jump must not rebind the focused pane onto the committed session")
 	assert.Equal(t, 1, focused.Tab(), "the committed binding is untouched")
 }
+
+// TestTabJump_PreviewingPaneRejectsUncommittableTarget pins the commit gate the
+// digit jump shares with `w`/`R`/`</>` and split-pane (commitPanePreviewReplace):
+// when the focused pane is previewing a session that is archived/dead/lost or
+// has an operation in flight, the digit jump is a COMMIT of that target, so it
+// must refuse BEFORE cancelling the preview or rebinding either pane. Committing
+// anyway would rebind or focus onto a session pruneDeadPanes immediately closes
+// (the pane would just vanish). The preview is preserved so the user keeps the
+// gesture, and the refusal names the preview target — the same error
+// commitPanePreviewReplace surfaces.
+func TestTabJump_PreviewingPaneRejectsUncommittableTarget(t *testing.T) {
+	h, alpha, beta := crossSessionPreviewHome(t)
+
+	focused := openTestPane(t, h, alpha, 1)
+	require.Equal(t, focused, h.focusedOpenPane())
+	// Arm the preview while beta is still committable, then flip it to archived
+	// underneath — the real shape: a preview armed live whose target archived.
+	armCrossSessionPreview(t, h, alpha, beta, focused, 1)
+	beta.SetArchived()
+	require.Equal(t, session.LiveArchived, beta.GetLiveness(),
+		"precondition: the preview target is now archived (uncommittable)")
+
+	_, _ = h.handleTabJump(3) // idx 2 — a tab beta still nominally has
+
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, h.errBox.String(), `cannot commit preview for "beta": session is archived`,
+		"the digit jump must surface the same commit-refusal as the sibling verbs")
+	assert.NotNil(t, h.panePreviewTxn,
+		"the preview must be PRESERVED so the user keeps the gesture (not cancelled onto an archived target)")
+	assert.Same(t, alpha, focused.Instance(),
+		"a refused jump must not rebind the focused pane onto the archived target")
+	assert.Equal(t, 1, focused.Tab(), "the committed binding is untouched")
+}

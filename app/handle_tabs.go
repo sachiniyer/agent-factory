@@ -749,6 +749,18 @@ func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 		// the hidden committed session — the wrong-target class every sibling
 		// verb already closes, and the one this PR exists to finish.
 		b := m.effectivePaneBinding(p)
+		// A digit jump onto a previewing pane is a COMMIT of that preview
+		// target, so gate it the way `w`/`R`/`</>` and split-pane do
+		// (commitPanePreviewReplace): an archived/dead/lost/in-flight target
+		// cannot be committed — rebinding or focusing onto it would land a
+		// pane pruneDeadPanes immediately closes (it would just vanish). Reject
+		// before cancelling the preview or touching either pane, preserving the
+		// preview and surfacing the same refusal the sibling verbs show.
+		if m.paneIsPreviewing(p) {
+			if err := previewCommitError(b.instance); err != nil {
+				return m, m.handleNotice(err)
+			}
+		}
 		w := m.paneWindows[p.ID()]
 		if m.panePreviewTxn != nil && m.panePreviewTxn.ownerPaneID == p.ID() {
 			m.cancelPanePreview(false)
