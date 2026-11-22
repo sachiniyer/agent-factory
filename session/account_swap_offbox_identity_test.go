@@ -500,6 +500,23 @@ func TestScopeRotationStripsTheSwapMarker(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(live+accountPrevSuffix, accountSwapMarkerRel))
 }
 
+// A restore puts the incoming scope back as the stage — with its binding: the
+// serialized discard removes only a stage whose marker names its swap, so an
+// unbound restore would strand the incoming account's credentials on the host
+// after a definite rollback (#7773 R2 review).
+func TestScopeRotationRestoreRebindsTheStage(t *testing.T) {
+	live := rotationHost(t)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(live+accountNextSuffix, accountSwapMarkerRel), []byte("swap-1"), 0o600))
+	rot, err := newScopeRotation(tmux.ProgramClaude, "swap-1")
+	require.NoError(t, err)
+	require.NoError(t, rot.rotate())
+	require.NoError(t, rot.restore())
+	marker, err := os.ReadFile(filepath.Join(live+accountNextSuffix, accountSwapMarkerRel))
+	require.NoError(t, err, "the restored stage carries its binding again")
+	assert.Equal(t, "swap-1", string(marker))
+}
+
 // An id the daemon resolved as not committed can never commit afterwards: the
 // serialized discard tombstones it under the same lock the swap runs in, and
 // the request is refused into rolled_back rather than rotated (#7773 R1).

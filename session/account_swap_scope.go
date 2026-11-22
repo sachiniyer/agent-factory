@@ -112,8 +112,12 @@ func (r *scopeRotation) rotateAfter(stopSiblings func() error) func() error {
 }
 
 // scopeRotation is the directory dance, derived from the environment only.
+// wantID is the swap id the staged scope was bound to; a restore re-binds the
+// scope it puts back so the serialized discard still recognizes it as this
+// swap's to remove.
 type scopeRotation struct {
 	live, next, prev string
+	wantID           string
 	rotated          bool
 }
 
@@ -165,7 +169,7 @@ func newScopeRotation(agent, wantID string) (*scopeRotation, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &scopeRotation{live: live, next: next, prev: prev}
+	r := &scopeRotation{live: live, next: next, prev: prev, wantID: wantID}
 	st, err := os.Lstat(r.next)
 	if err != nil || !st.IsDir() {
 		return nil, fmt.Errorf("no staged account at %s; nothing to rotate in", r.next)
@@ -217,7 +221,11 @@ func (r *scopeRotation) rotate() error {
 }
 
 // restore undoes a completed rotation: the incoming scope goes back to staging,
-// the outgoing one back to live.
+// the outgoing one back to live. The rotation stripped the stage's swap binding
+// from the live scope, so the restored stage is re-bound: the serialized
+// discard removes only a stage whose marker names the swap it belongs to, and
+// an unbound one would keep the incoming account's credentials on the host
+// after a definite rollback.
 func (r *scopeRotation) restore() error {
 	if !r.rotated {
 		return nil
@@ -232,5 +240,8 @@ func (r *scopeRotation) restore() error {
 		return err
 	}
 	r.rotated = false
+	if r.wantID != "" {
+		return os.WriteFile(filepath.Join(r.next, accountSwapMarkerRel), []byte(r.wantID), 0o600)
+	}
 	return nil
 }
