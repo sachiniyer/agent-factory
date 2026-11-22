@@ -511,12 +511,12 @@ func TestReconciledCommitEndsTheUnreplayedRunAndRestoresTheSkipList(t *testing.T
 	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the host committed while the response was lost")
-	rec := f.inst.InFlightOffBoxSwap()
-	require.NotNil(t, rec)
+	require.NotNil(t, f.inst.InFlightOffBoxSwap())
 
 	// The record carries the staging evidence the live path would have
-	// recorded — a recovered commit is not a clean placement.
-	rec.AgentConfigSkipped = []string{"claude:CLAUDE.md: declared file is missing"}
+	// recorded — a recovered commit is not a clean placement. InFlightOffBoxSwap
+	// hands back a clone, so the seed writes the instance's own record.
+	f.inst.offBoxSwapInFlight.AgentConfigSkipped = []string{"claude:CLAUDE.md: declared file is missing"}
 
 	// The daemon's restart reconciles the committed verdict on the bound row:
 	// the run the replacement never saw ends interrupted, not completed.
