@@ -286,8 +286,8 @@ func (r runtimeActionRefusal) Error() string {
 		return fmt.Sprintf("session %q is the daemon-managed root agent and cannot be handed off", v.Title)
 	case runtimeActionPendingHandoffMission:
 		return fmt.Sprintf(
-			"session %q still owes the mission from its last handoff; resolve it first — `af sessions retry-limit %s` resends it, `--delivered` retires it",
-			v.Title, v.Title)
+			"session %q still owes the mission from its last handoff; resolve it first — `%s` resends it, `--delivered` retires it",
+			v.Title, shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit"}, v.Title))
 	case runtimeActionRebuildTeardownPending:
 		return fmt.Sprintf(
 			"session %q still owes the teardown of the runtime it replaced; let its recovery finish before handing off",
