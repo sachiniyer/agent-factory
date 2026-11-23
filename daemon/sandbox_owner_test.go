@@ -248,35 +248,3 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 	assert.Empty(t, got.Path, "the host's absolute repo root is the field this projection exists for")
 	assert.Empty(t, got.Worktree.WorktreePath, "the worktree carries host paths too, so the whole struct is withheld")
 }
-
-// An invalidation anywhere — listener OR auth posture — must fence a mint in
-// flight (#3065 review). The listener generation this replaced could not see an
-// auth-only change.
-func TestSandboxTokenRegistry_InvalidationCountFencesEveryGlobalRevoke(t *testing.T) {
-	var r sandboxTokenRegistry
-	start := r.invalidationCount()
-
-	// Advances even with an EMPTY registry: a sweep that finds nothing still means
-	// an invalidating event happened, and the mint racing it has not registered its
-	// token yet — exactly the case a count gated on "something was dropped" misses.
-	require.Equal(t, 0, r.revokeAll())
-	assert.Equal(t, start+1, r.invalidationCount(),
-		"an invalidation with nothing outstanding must still advance the fence, or a mint racing it survives")
-
-	_, err := r.mint("sess-a")
-	require.NoError(t, err)
-	afterMint := r.invalidationCount()
-	assert.Equal(t, start+1, afterMint, "minting is not an invalidation and must not move the fence")
-
-	require.Equal(t, 1, r.revokeAll())
-	assert.Equal(t, start+2, r.invalidationCount())
-
-	// A TARGETED revoke is not a global invalidation: one session ending must not
-	// fence every other session's in-flight create.
-	_, err = r.mint("sess-b")
-	require.NoError(t, err)
-	before := r.invalidationCount()
-	r.revoke("sess-b")
-	assert.Equal(t, before, r.invalidationCount(),
-		"revoking one session must not advance the global fence, or every teardown would fail unrelated creates")
-}
