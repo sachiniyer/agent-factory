@@ -515,8 +515,8 @@ How the target is rendered depends on whether it is **local** or **external**:
   (slow / unreachable) the tab shows a clean fallback panel with an **"Open in a
   new tab"** link.
 
-In the **TUI** a web tab shows a placeholder (the target URL + "view in the web
-UI or open in a browser") — a terminal can't render a browser. Tab navigation
+In the **TUI** a web tab shows a placeholder (the target URL + a pointer to the
+web UI) — a terminal can't render a browser. Tab navigation
 (`1`–`9`, the sidebar tree) treats it like any other tab.
 
 A web tab is **pure metadata** — a URL, with no process behind it — so it
