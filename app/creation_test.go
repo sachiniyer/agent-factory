@@ -135,7 +135,7 @@ func newTestHome(t *testing.T) *home {
 		// parallel tests can't race each other's swaps.
 		// Same reason for the web-listener poll (#6386): Init arms it, so the
 		// harness must never reach the real fetcher, which dials the daemon.
-		webListenerFetcher: func() string { return "" },
+		webListenerFetcher: func() webListenerNoticeMsg { return webListenerNoticeMsg{} },
 		snapshotFetcher: func(_ context.Context, _ string) (daemon.SnapshotResponse, error) {
 			return daemon.SnapshotResponse{}, fmt.Errorf("snapshot fetcher not stubbed in test")
 		},

@@ -46,6 +46,11 @@ type home struct {
 	skippedRepos             []daemon.SkippedRepo
 	skippedReposNoticeQueued bool
 	webListenerNotice        string
+	// webUIHint is the pane placeholders' answer to "where is the web UI"
+	// (#7811): the freshest listener state the webListener poll landed, stored
+	// as a pointer so a placeholder composing off the event loop never races
+	// the poll's Store. nil means "no read yet" — the unknown hint.
+	webUIHint atomic.Pointer[ui.WebUIHint]
 
 	// -- Storage and Configuration --
 
@@ -129,10 +134,11 @@ type home struct {
 	// can pin 1 without touching production behavior.
 	snapshotBuildWorkers int
 
-	// webListenerFetcher reads the daemon's web-listener notice for the bottom
-	// bar (#6386). Per-home like snapshotFetcher; nil means no poll, so only
-	// newHome — never a bare test home — reaches the daemon.
-	webListenerFetcher func() string
+	// webListenerFetcher reads the daemon's web-listener state for the bottom
+	// bar and the tab placeholders (#6386, #7811). Per-home like snapshotFetcher;
+	// nil means no poll, so only newHome — never a bare test home — reaches the
+	// daemon.
+	webListenerFetcher func() webListenerNoticeMsg
 	// primeSessionSnapshot, when set, is called once before a batch of snapshot
 	// restores and returns the release to run after it: it primes one server-wide
 	// tmux listing so the restores stop asking tmux three questions per session
@@ -695,7 +701,7 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 		zones:                       zones.NewRegistry(),
 		mouseClock:                  time.Now,
 		snapshotFetcher:             snapshotThroughDaemon,
-		webListenerFetcher:          fetchWebListenerNotice,
+		webListenerFetcher:          fetchWebListenerPoll,
 		primeSessionSnapshot:        primeTmuxSessionSnapshot,
 		previewFetcher:              previewThroughDaemon,
 		pauseStatusPoll:             pauseStatusPollThroughDaemon,

@@ -49,6 +49,10 @@ func (m *home) openPaneWindow(instance *session.Instance, tab int) *store.OpenPa
 	tp.SetNamingCheck(func(inst *session.Instance) bool {
 		return inst != nil && naming.Naming() == inst
 	})
+	// The web/vscode placeholder reads the freshest listener state the health
+	// poll landed, so its "where is the web UI" line tracks the real bound
+	// address instead of guessing the default (#7811).
+	tp.SetWebUIHint(m.currentWebUIHint)
 	w := ui.NewTabbedWindow(tp, p)
 	// Wire the pane's mouse identity (#1024 R4): its zone ids are keyed by
 	// the same region id the focus ring and layout use, stable for the

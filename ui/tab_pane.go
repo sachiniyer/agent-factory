@@ -101,6 +101,13 @@ type TabPane struct {
 	// isNaming reports whether an instance is the row the create form is
 	// naming. It is called off the event loop; nil means no row ever is.
 	isNaming func(*session.Instance) bool
+
+	// webUIHint supplies the placeholders' answer to "where is the web UI":
+	// the app's resolved listener state, re-read each time a web/vscode tab
+	// composes its message so a poll landing or a live listener rebind shows
+	// on the next refresh rather than freezing an address that moved. Like
+	// isNaming it can be called off the event loop; nil means unknown.
+	webUIHint func() WebUIHint
 }
 
 // namingFallback is the agent slot's copy for the create form's own row.
@@ -593,42 +600,9 @@ func (p *TabPane) updateAgent(instance *session.Instance, guard contentGuard) er
 	return nil
 }
 
-// webTabPlaceholder is the TUI content for a web/iframe tab, which the terminal
-// cannot render: the target URL plus a pointer to where it can be viewed. Shared
-// by updateShell and canEnterScrollModeLocked so the two never diverge.
-func webTabPlaceholder(url string) string {
-	return fmt.Sprintf("%s\n\nWeb tab — view in the web UI or open in a browser", url)
-}
-
-// vscodeTabPlaceholder is the TUI content for a VS Code tab. Unlike a web tab
-// there is no URL to show: the editor is a daemon-managed per-session
-// code-server on a 0600 unix socket, reachable only through the daemon's proxy
-// (#1873), so the only meaningful pointer is the web UI itself.
-func vscodeTabPlaceholder() string {
-	return "Open this VS Code tab in the web UI."
-}
-
-// docsTabPlaceholder is the TUI pane for a proposal Docs tab. The editor is web
-// only, so the pane names the proposal and the way to read it from a terminal.
-func docsTabPlaceholder(slug string) string {
-	return fmt.Sprintf("The Proposal tab is web only. Open it in the web UI to edit proposal %s.\n\nIn a terminal, run: af proposal path %s", slug, slug)
-}
-
-// tabPlaceholder returns the TUI placeholder for a tab kind the terminal cannot
-// render, and ok=false for kinds it can (agent/shell/process, which have a PTY).
-// Shared by updateShell and canEnterScrollModeLocked so the two never diverge.
-func tabPlaceholder(tab *session.Tab) (string, bool) {
-	switch tab.Kind {
-	case session.TabKindWeb:
-		return webTabPlaceholder(tab.URL), true
-	case session.TabKindVSCode:
-		return vscodeTabPlaceholder(), true
-	case session.TabKindDocs:
-		return docsTabPlaceholder(tab.Proposal), true
-	default:
-		return "", false
-	}
-}
+// The web/vscode/docs placeholder copy lives in tab_placeholder.go, including
+// WebUIHint — the app's answer to "where is the web UI", which those
+// placeholders render (#7811).
 
 // updateShell reproduces the former TerminalPane.UpdateContent for the
 // shell/process tab at activeTab.
@@ -663,7 +637,7 @@ func (p *TabPane) updateShell(instance *session.Instance, activeTab int, guard c
 	// clean placeholder instead of falling through to the misleading "Terminal
 	// session not available" branch below (neither kind is ever TabAlive).
 	if tabs := instance.GetTabs(); activeTab >= 0 && activeTab < len(tabs) {
-		if placeholder, ok := tabPlaceholder(tabs[activeTab]); ok {
+		if placeholder, ok := tabPlaceholder(tabs[activeTab], p.webUI()); ok {
 			p.setFallbackState(placeholder)
 			p.mu.Unlock()
 			return nil
@@ -913,7 +887,7 @@ func (p *TabPane) canEnterScrollModeLocked(instance *session.Instance, activeTab
 	// A web/vscode tab has no scrollback (no PTY): keep the placeholder rather than
 	// entering scroll mode over an empty capture. Mirrors updateShell's branch.
 	if tabs := instance.GetTabs(); activeTab >= 0 && activeTab < len(tabs) {
-		if placeholder, ok := tabPlaceholder(tabs[activeTab]); ok {
+		if placeholder, ok := tabPlaceholder(tabs[activeTab], p.webUI()); ok {
 			p.setFallbackState(placeholder)
 			return false
 		}
