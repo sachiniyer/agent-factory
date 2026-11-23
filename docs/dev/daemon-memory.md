@@ -593,7 +593,14 @@ only the hook correlation above connects anything to the peak.
   the daemon unit's figure as well, so a busy host is under-sized if you count
   only the daemon, the agents and the hooks.
 
-If a box is under memory pressure, do not start from the unit's `MemoryPeak`.
+The daemon logs this split itself — `memory split: go_heap=… go_total=…
+cgroup_anon=… cgroup_file=… cgroup_peak=…` every ten minutes and once at shutdown
+([#7698](https://github.com/sachiniyer/agent-factory/issues/7698)). The
+`cgroup_peak` field is a high-water mark, but `cgroup_anon` and `cgroup_file`
+are sampled live, so a peak that rose and fell entirely between two ten-minute
+ticks is not classifiable from the log — only a peak that overlaps a sample
+(or the shutdown line) is. If a box is under memory pressure, do not start
+from the unit's `MemoryPeak`.
 Read `VmHWM` for the daemon process, read `memory.stat` to see how much of the
 cgroup figure is file-backed and how much of *that* is reclaimable page cache
 rather than tmpfs, dirty or writeback pages, and read `memory.events` and
