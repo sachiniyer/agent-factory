@@ -257,6 +257,13 @@ var sensitiveJSONKeys = map[string]bool{
 	// free-text prompt/goal verbatim, the same sensitivity class as prompt. A
 	// record that fails the typed decode must still drop it (#2419).
 	"pending_handoff_mission": true,
+	// off_box_swap_in_flight is the durable swap record (#7793), dropped
+	// WHOLESALE like pending_account_swap above: on a shape this path could not
+	// parse its per-field layout is not worth relying on, and the record now
+	// also carries notice — the same takeover-brief free text as
+	// pending_handoff_mission, which no other key here reaches inside it. The
+	// marker keeps "a swap was in flight" for triage.
+	"off_box_swap_in_flight": true,
 	// evidence and limit_reset_evidence are the reset clause a stored wall
 	// parsed from — provider free text that can embed the rendered timezone
 	// name, the operator's locale. The typed path marks both

@@ -254,6 +254,16 @@ func (r runtimeActionRefusal) Error() string {
 	case runtimeActionPendingKill:
 		return fmt.Sprintf("session %q has a pending kill", v.Title)
 	case runtimeActionStartupUnknown:
+		if v.OffBoxSwapInFlight {
+			// The one startup-unknown row whose way out is known (#7799): its
+			// recorded swap may still commit on the host, a daemon restart
+			// re-asks the host for that swap's verdict, and kill is the only
+			// other exit — no operator unfence verb exists until #7797 is
+			// decided. A row with no record keeps the generic text below,
+			// which promises no reconcile it cannot run.
+			return fmt.Sprintf("session %q has an unknown startup state: an account swap it sent has no reconciled verdict and may still commit on the host, so it stays fenced until a daemon restart reconciles that swap or `%s` removes it; no other verb lifts this fence (#7797)",
+				v.Title, shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, v.Title))
+		}
 		return fmt.Sprintf("session %q has an unknown startup state; inspect its workspace and runtime before explicitly removing it", v.Title)
 	case runtimeActionPendingAccountSwap:
 		return fmt.Sprintf("session %q has %s awaiting its replacement notice and task; retry it with %s before another lifecycle action",

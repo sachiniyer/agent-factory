@@ -3,6 +3,9 @@ package session
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
@@ -27,7 +30,9 @@ import (
 //     cannot attribute the answer);
 //   - it clears only on a definite verdict, so an indeterminate answer keeps
 //     the fence rather than unfencing on a guess; `af sessions kill` is the
-//     operator's destructive exit from a fence that never resolves.
+//     operator's destructive exit from a fence that never resolves, and with
+//     a daemon restart's re-run reconcile the only one — no operator verb
+//     lifts it until the owner decides whether one should exist (#7797).
 
 // InFlightOffBoxSwapData is the durable record of an off-box account swap
 // whose verdict the daemon never reached (#7793). Its presence on the row is
@@ -55,6 +60,13 @@ type InFlightOffBoxSwapData struct {
 	// live path records, or the reconciled row clears agentConfigSkipped
 	// and the missing file vanishes from every surface.
 	AgentConfigSkipped []string `json:"agent_config_skipped,omitempty"`
+	// Notice is the takeover brief the swap's caller owes the replacement
+	// agent (#7799). The live commit stamps it as the row's pending mission in
+	// the record-clear checkpoint; a commit recovered at reattach — the daemon
+	// that held the brief in memory is gone — has only the record to rebuild
+	// that obligation from, so the brief rides it. Empty when the caller owed
+	// none.
+	Notice string `json:"notice,omitempty"`
 	// OriginalStartupStateUnknown is the storage-only rollback fence: a
 	// previous release ignores it and keeps the projected
 	// StartupStateUnknown=true — loading the row inert and fenced rather
@@ -77,7 +89,8 @@ func cloneInFlightOffBoxSwap(d *InFlightOffBoxSwapData) *InFlightOffBoxSwapData 
 // still cannot say how the recorded swap ended (#7793): the in-flight record
 // is kept, the row stays fenced, and nothing is admitted against it. A later
 // daemon restart re-runs the same reconcile on load — `af sessions kill` is
-// the destructive exit; pane liveness alone never clears it.
+// the destructive exit, and no operator verb lifts it (#7797); pane liveness
+// alone never clears it.
 var ErrOffBoxSwapVerdictIndeterminate = errors.New("the swap's verdict on the host is still indeterminate")
 
 // stagedScopeDir is the path a swap's staged scope is written at under the
@@ -118,6 +131,20 @@ func (i *Instance) InFlightOffBoxSwap() *InFlightOffBoxSwapData {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return cloneInFlightOffBoxSwap(i.offBoxSwapInFlight)
+}
+
+// SetOffBoxSwapInFlightForTest installs an in-flight swap record the way a
+// reload of a record-carrying row presents it — the record plus the
+// startup-unknown flag it forces up — so a daemon test can drive a gate
+// against the swap fence without staging a real swap. TEST scaffolding only,
+// in the SetInFlightOpForTest pattern.
+func (i *Instance) SetOffBoxSwapInFlightForTest(rec *InFlightOffBoxSwapData) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.offBoxSwapInFlight = cloneInFlightOffBoxSwap(rec)
+	if rec != nil {
+		i.startupStateUnknown = true
+	}
 }
 
 // persistOffBoxSwapRecord runs the daemon-installed write when one exists. It
@@ -187,8 +214,9 @@ func (i *Instance) clearOffBoxSwapInFlight(swapID string) {
 //
 //   - committed: the host provably runs the new account — the outgoing scope
 //     is written back and removed exactly as the live swap path does, and the
-//     row records the new account. Its start stays unconfirmed, as the live
-//     path's reconciled arm already reports it.
+//     row records the new account — with no limit wall of the old one, and
+//     owing the takeover brief the record carries (#7799). Its start stays
+//     unconfirmed, as the live path's reconciled arm already reports it.
 //   - rolled back / never ran: the host provably runs the old account — this
 //     swap's staged scope is dropped and the row keeps its account.
 //   - indeterminate: the record is KEPT and the row stays startup-unknown;
@@ -247,6 +275,15 @@ func (i *Instance) reconcileInFlightOffBoxSwap(sw AccountSwapper, p *sandboxProv
 		// a recovered commit is not a clean placement — a declared file the
 		// stage could not place is still missing from the incoming scope.
 		i.recordOffBoxAccount(next.Name, next.Agent, rec.Automatic, program, rec.AgentConfigSkipped)
+		// The reconciled commit owes the replacement the same takeover brief
+		// the live commit stamps (#7799): the fresh agent never received it,
+		// and the checkpoint below — the record's clear — must carry it as the
+		// pending mission with a not-delivered verdict, so recovery replays it
+		// exactly once. Without it this arm and the live reconciled arm
+		// disagreed on whether any brief was owed at all.
+		if rec.Notice != "" {
+			i.SetPendingHandoffMission(rec.Notice)
+		}
 		// The host relaunched the agent on the new account while the daemon
 		// was dead: the run it was serving was never replayed to the fresh
 		// conversation, so an in-flight run ends interrupted — the same
@@ -276,7 +313,7 @@ func (i *Instance) reconcileInFlightOffBoxSwap(sw AccountSwapper, p *sandboxProv
 		if cause != nil {
 			ind = fmt.Errorf("%w: %w", ind, cause)
 		}
-		return false, fmt.Errorf("the swap of %q to account %q (id %s): %w — the row stays fenced until a daemon restart reconciles it or `af sessions kill %s` removes it", i.Title, rec.To, rec.SwapID, ind, i.Title)
+		return false, fmt.Errorf("the swap of %q to account %q (id %s): %w — the row stays fenced until a daemon restart reconciles it or `af sessions kill %s` removes it; no other verb lifts this fence (#7797)", i.Title, rec.To, rec.SwapID, ind, i.Title)
 	}
 }
 
@@ -291,36 +328,171 @@ func (i *Instance) settleInFlightSwapVerdict() {
 	i.resolveStartupStateLocked()
 }
 
-// ReconcileOffBoxSwapFence is the session-level reconcile the in-flight
-// record carries (#7793): it re-asks the host for the recorded swap's verdict
-// — never re-sending the request — and lifts the fence exactly when that
-// produces a definite answer. On a row still inert after a restart the
-// session's own reattach path dials the transport and reconciles the record
-// inside, before anything is bound, provisioned, or launched — the same
-// settle, reached cold. Pane liveness alone never clears the fence: a
-// reachable pane says nothing about which account the host is running.
+// accountStage is one staged account scope found beside the live one: the
+// shared account.next spelling (suffix "") or a swap-unique
+// account.next.<suffix>, with the swap id its marker names ("" when the
+// marker is absent or empty).
+type accountStage struct {
+	dir, suffix, marker string
+}
+
+// accountStageScanMax bounds how many staged scopes one sweep acts on. A
+// session ever produces one stage per swap it attempted, so a handful is the
+// real ceiling; the bound only keeps a host that fills the session dir with
+// lookalike names from turning one reattach into an unbounded series of
+// serialized discards.
+const accountStageScanMax = 64
+
+// validStageID reports whether s can name a swap in a discard request. Ids
+// minted here are hex; a value read back from the host is untrusted, so
+// anything that could reach past the account.next.<id> spelling on the
+// server's side — a separator, a dot-segment — is refused before it crosses.
+func validStageID(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// listAccountStages enumerates every account.next* scope beside the live one
+// in ONE host round trip, with the swap id each marker names. The unexpanded
+// glob — no swap-unique stage on the host — is filtered by the -d test, and
+// each marker read is bounded: the host is untrusted, so neither its names
+// nor its marker bytes are taken further than parseAccountStages admits.
+func (w *sandboxWorkspace) listAccountStages(timeout time.Duration) ([]accountStage, error) {
+	shared := w.AccountDir() + accountNextSuffix
+	script := "for d in " + shellQuote(shared) + " " + shellQuote(shared+".") + "*; do " +
+		"[ -d \"$d\" ] || continue; printf '%s\\t' \"$d\"; " +
+		"head -c 128 \"$d/" + accountSwapMarkerRel + "\" 2>/dev/null || :; printf '\\n'; done"
+	out, err := w.shell.Run(timeout, script, nil, false)
+	if err != nil {
+		return nil, fmt.Errorf("listing the staged account scopes on the host failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return parseAccountStages(shared, out), nil
+}
+
+// parseAccountStages keeps only lines that name a stage beside this live
+// scope — the shared spelling exactly, or a swap-unique one whose suffix could
+// itself be a swap id. Anything else the host printed is dropped.
+func parseAccountStages(shared string, out []byte) []accountStage {
+	var stages []accountStage
+	for _, line := range strings.Split(string(out), "\n") {
+		dir, marker, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		st := accountStage{dir: dir, marker: strings.TrimSpace(marker)}
+		switch {
+		case dir == shared:
+		case strings.HasPrefix(dir, shared+"."):
+			st.suffix = strings.TrimPrefix(dir, shared+".")
+			if !validStageID(st.suffix) {
+				continue
+			}
+		default:
+			continue
+		}
+		stages = append(stages, st)
+		if len(stages) == accountStageScanMax {
+			break
+		}
+	}
+	return stages
+}
+
+// sweepOrphanedAccountStages removes every staged account scope that no
+// in-flight record names (#7799): a stage a daemon left when it died between
+// staging and its record landing, one a skew path or an older build left
+// behind, or one whose settle crashed before its discard. No later swap
+// reuses its id, so without this sweep the incoming account's credentials sat
+// on the host until teardown.
 //
-// settled=true is returned with a non-nil error only when the row settled but
-// its durable checkpoint did not land; the settlement retry owns that write.
-func (i *Instance) ReconcileOffBoxSwapFence() (settled bool, err error) {
+// Why a discard here can never race a live rotation: ReattachSandbox calls it
+// only after the row's in-flight record reached a definite verdict, or on a
+// row that carries none, and this daemon admits no swap on a row it has not
+// bound. sw is whichever agent-server answered the reattach — the original,
+// or one the reattach restarted, whose fresh process can hold no queued
+// request at all. The record precedes every send, so the only request that could still
+// be queued on the host is the recorded one, and its verdict is already
+// settled; every other id a stage could name was either never sent or is
+// already terminal. The removal still goes through the agent-server's
+// serialized discard — tombstone plus marker-bound removal under the same
+// lock a rotation holds — so even a straggler still physically queued there
+// runs strictly before or after it, and after it finds no stage bound to its
+// id to rotate in. (The tombstone is one slot, so a later discard replaces an
+// earlier one; what bounds a straggler is the removed stage and the rotation's
+// marker check, not the slot.)
+//
+// Nothing is removed unordered: a server too old for account-swap-discard
+// offers no serialization, and an unordered rm could empty a scope under a
+// rotation still queued there, so on such a server the orphans stay for
+// teardown — the status quo before this sweep. Every failure is a warning,
+// never a failed reattach: an orphan costs exposure until teardown, not
+// correctness.
+func (i *Instance) sweepOrphanedAccountStages(sw AccountSwapper, p *sandboxProvisioner) {
 	i.mu.RLock()
-	rec := i.offBoxSwapInFlight
-	bound := i.remoteClient != nil
+	hasAccount := i.Account != ""
 	i.mu.RUnlock()
-	if rec == nil {
-		return false, fmt.Errorf("session %q carries no in-flight account swap to reconcile", i.Title)
+	w := p.account
+	if w == nil {
+		// The same rebuild reconcileInFlightOffBoxSwap uses: a restored row
+		// whose account no longer resolves still has the shell and the
+		// session dir the stages live under.
+		w = &sandboxWorkspace{shell: p, spec: p.spec, SessionDir: p.sessionDir}
 	}
-	if !bound {
-		rerr := i.ReattachSandbox()
-		return rerr == nil, rerr
+	if !hasAccount || w.SessionDir == "" {
+		// No account scope, so nothing was ever staged beside one — a swap is
+		// admitted only on a row that carries a synced account.
+		return
 	}
-	sw, ok := i.AgentServer().(AccountSwapper)
-	if !ok {
-		return false, ErrAccountSwapUnsupported
+	// Serialized with this daemon's own stager: SwapOffBoxAccount holds
+	// reapMu from admission through its settle, so a stage seen here is never
+	// one a swap of this generation is about to send.
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if rec := i.InFlightOffBoxSwap(); rec != nil {
+		// An unresolved record's request may still be queued, and its own
+		// settle owns its stage; no other discard runs beside it.
+		return
 	}
-	p := i.sandboxProvisioner()
-	if p == nil {
-		return false, fmt.Errorf("session %q has no sandbox to reconcile against", i.Title)
+	stages, err := w.listAccountStages(sshShortStepTimeout)
+	if err != nil {
+		log.WarningLog.Printf("account swap of %q: orphaned staged scopes were not swept: %v", i.Title, err)
+		return
 	}
-	return i.reconcileInFlightOffBoxSwap(sw, p)
+	var ids []string
+	for _, st := range stages {
+		// A marker names the swap the stage is bound to, and the discard is
+		// marker-bound on the server, so the marker is the id that can remove
+		// it. An unmarked swap-unique stage is anonymous and removable under
+		// its own path's id; an unmarked shared one under the identity-free
+		// discard, which on the server probes only the shared spelling.
+		id := st.marker
+		switch {
+		case id != "" && !validStageID(id):
+			log.WarningLog.Printf("account swap of %q: the staged scope at %s carries a marker that cannot name a swap; it is left for teardown", i.Title, st.dir)
+			continue
+		case id == "":
+			id = st.suffix
+		case st.suffix != "" && st.suffix != id:
+			log.WarningLog.Printf("account swap of %q: the staged scope at %s is bound to swap %s, not the swap its path names; the marker-bound discard leaves it for teardown", i.Title, st.dir, id)
+		}
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range ids {
+		if derr := sw.DiscardAccountNext(id); derr != nil {
+			if errors.Is(derr, errAgentRouteMissing) {
+				log.WarningLog.Printf("account swap of %q: the agent-server predates the %s route, so orphaned staged scopes stay on the host until teardown rather than being removed unordered", i.Title, accountSwapDiscardFeature)
+				return
+			}
+			log.WarningLog.Printf("account swap of %q: discarding the orphaned stage of swap %q: %v", i.Title, id, derr)
+		}
+	}
 }

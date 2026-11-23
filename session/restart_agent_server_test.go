@@ -41,6 +41,11 @@ type crashedHost struct {
 	// committed. A test sets it to a DIFFERENT path than the record to make the
 	// remote mint a fresh root, as it does when the recorded one cannot verify.
 	ensureLink string
+	// discards records each serialized staged-scope discard the server took,
+	// and discardBeforeRestart whether one reached it before the restart
+	// (#7799: the orphan sweep runs on whichever server answered).
+	discards             []string
+	discardBeforeRestart bool
 }
 
 func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner, *crashedHost) {
@@ -78,6 +83,17 @@ func newCrashedHost(t *testing.T, probe string) (*Instance, *sandboxProvisioner,
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]bool{"ok": true}})
 		})
 	}
+	mux.HandleFunc("/v1/agent/swap-account-discard", func(w http.ResponseWriter, r *http.Request) {
+		var req accountSwapReq
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		h.mu.Lock()
+		h.discards = append(h.discards, req.SwapID)
+		if !h.restarted {
+			h.discardBeforeRestart = true
+		}
+		h.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]bool{"ok": true}})
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 

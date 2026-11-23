@@ -206,7 +206,7 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string, scope
 		// names it so the operator knows to upgrade (#7788).
 		if err := sw.DiscardAccountNext(swapID); err != nil {
 			if errors.Is(err, errAgentRouteMissing) {
-				return false, "", false, fmt.Errorf("the agent-server predates the %s route; the row stays fenced until a daemon restart reconciles the swap or `af sessions kill` removes it — an agent-server upgrade prevents a recurrence but cannot prove this lost swap's outcome", accountSwapDiscardFeature)
+				return false, "", false, fmt.Errorf("the agent-server predates the %s route; the row stays fenced until a daemon restart reconciles the swap or `af sessions kill` removes it, and no other verb lifts this fence (#7797) — an agent-server upgrade prevents a recurrence but cannot prove this lost swap's outcome", accountSwapDiscardFeature)
 			}
 			return false, "", false, nil
 		}
@@ -507,11 +507,13 @@ func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*
 	// stranded. The in-flight record (#7793) names WHICH swap the daemon's
 	// restart reconcile asks the host about; a row fenced without one
 	// carries a pre-record verdict nobody can attribute, so it is kill-only.
+	// Neither names any other exit: no operator unfence verb exists until the
+	// owner decides whether one should (#7797).
 	switch inFlight := i.InFlightOffBoxSwap(); {
 	case inFlight != nil:
-		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: an account swap to %q (id %s) was sent before its verdict was reconciled — its request may still be queued on the agent-server and could still commit on the host — a daemon restart re-asks the host for THIS swap's terminal record and lifts the fence only on a definite answer; `af sessions kill %s` removes the row", i.Title, inFlight.To, inFlight.SwapID, i.Title)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: an account swap to %q (id %s) was sent before its verdict was reconciled — its request may still be queued on the agent-server and could still commit on the host — a daemon restart re-asks the host for THIS swap's terminal record and lifts the fence only on a definite answer; `af sessions kill %s` removes the row, and no other verb lifts this fence (#7797)", i.Title, inFlight.To, inFlight.SwapID, i.Title)
 	case i.StartupStateUnknown():
-		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: its startup state is unknown and no in-flight swap id is recorded for a reconcile to answer — `af sessions kill %s` removes the row", i.Title, i.Title)
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: its startup state is unknown and no in-flight swap id is recorded for a reconcile to answer — `af sessions kill %s` removes the row (#7797)", i.Title, i.Title)
 	}
 	if name = strings.TrimSpace(name); name == "" {
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)
@@ -671,8 +673,10 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool, notice string)
 	// account while the host runs the new one. Written only now that the
 	// stage exists, so a record can never outlive an absent stage into a
 	// "was it even sent" reconcile that would fence an empty answer; refused
-	// outright when the session carries no durable write behind it.
-	if err := i.beginOffBoxSwapInFlight(&InFlightOffBoxSwapData{SwapID: swapID, From: res.From, To: next.Name, Automatic: automatic, ScopedStage: scopedStage, AgentConfigSkipped: skipped}); err != nil {
+	// outright when the session carries no durable write behind it. The
+	// notice rides the record so a commit only a later daemon reconciles
+	// still owes the replacement the same brief (#7799).
+	if err := i.beginOffBoxSwapInFlight(&InFlightOffBoxSwapData{SwapID: swapID, From: res.From, To: next.Name, Automatic: automatic, ScopedStage: scopedStage, AgentConfigSkipped: skipped, Notice: notice}); err != nil {
 		_ = w.discardStagedAccount(sw, swapID, scopedStage)
 		return res, fmt.Errorf("handing %q off to account %q: %w", i.Title, next.Name, err)
 	}
@@ -704,7 +708,7 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool, notice string)
 				// route is named so the operator upgrades it (#7788).
 				ind = fmt.Errorf("%w: %w", ind, cause)
 			}
-			return res, fmt.Errorf("handing %q off to account %q: %w — the row stays fenced until a daemon restart reconciles the swap or `af sessions kill %s` removes it (the call failed: %v)", i.Title, next.Name, ind, i.Title, err)
+			return res, fmt.Errorf("handing %q off to account %q: %w (the call failed: %v) — the row stays fenced until a daemon restart reconciles the swap or `af sessions kill %s` removes it; no other verb lifts this fence (#7797)", i.Title, next.Name, ind, err, i.Title)
 		}
 	}
 	if err != nil {
@@ -761,6 +765,20 @@ func (i *Instance) recordOffBoxAccount(name, agent string, automatic bool, progr
 	i.Account = name
 	i.accountAgent = agent
 	i.accountAutoSelected = automatic
+	// A usage-limit wall belongs to the account that hit it, and this is the
+	// moment the row stops being that account (#7799): the record-clear
+	// checkpoint that follows writes the incoming account durably, so nothing
+	// at or after it may still carry the outgoing account's wall. Left to the
+	// daemon's later ClearLimitReached, a daemon death between the two
+	// reloaded a row naming the incoming account that still carried the
+	// outgoing one's wall — parked liveness, reset, evidence, attribution,
+	// and under the resume fence a standing shadow — a wall the new account
+	// never hit, behind which the owed brief could be parked.
+	// Before the runtime-replace mark, on purpose: the clear retires the
+	// parked shadow, and the mark then drops it outside OpRespawning and
+	// keeps it — already retired — under it, the same durable shapes the
+	// daemon's clear-after-swap order produced.
+	i.clearLimitReachedLocked(false)
 	// The relaunched agent is a new runtime generation and stamps the
 	// replacement verdict atomically with the record — remote runtimes
 	// resolve no PID pin, so the generation is what tells a later sighting

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
@@ -109,6 +110,15 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: it is not currently active", req.Title)
 	}
 	if instance.StartupStateUnknown() {
+		if instance.InFlightOffBoxSwap() != nil {
+			// The swap fence's own refusal (#7799): this row's startup state is
+			// unknown because an off-box account swap it sent has no reconciled
+			// verdict, and its exits are known — a daemon restart re-asks the
+			// host for that swap, or kill removes the row. No operator unfence
+			// verb exists until #7797 is decided, so nothing else is offered.
+			return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: an account swap it sent has no reconciled verdict and may still commit on the host, so the row stays fenced until a daemon restart reconciles that swap or `%s` removes it; no other verb lifts this fence (#7797)",
+				req.Title, shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, req.Title))
+		}
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q: its startup state is unknown, so af cannot safely move its workspace through an unconfirmed runtime binding; inspect it and explicitly remove it instead", req.Title)
 	}
 	if !instance.Capabilities().Archive {

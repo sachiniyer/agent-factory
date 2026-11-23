@@ -503,6 +503,12 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		for i := range d.OffBoxSwapInFlight.AgentConfigSkipped {
 			d.OffBoxSwapInFlight.AgentConfigSkipped[i] = redactedMarker
 		}
+		// Notice is the takeover brief the record carries so a reconciled
+		// commit can owe it (#7799) — the same rendered free text as
+		// PendingHandoffMission below, embedding the user's prompt.
+		if d.OffBoxSwapInFlight.Notice != "" {
+			d.OffBoxSwapInFlight.Notice = redactedMarker
+		}
 	}
 	// Agent beside it stays verbatim — it is the bounded agent enum, classified
 	// as such in verbatimInstanceFields, and it is what makes the redacted
