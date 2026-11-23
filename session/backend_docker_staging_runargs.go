@@ -114,7 +114,13 @@ func runArgsMountDestinations(runArgs []string) ([][2]string, error) {
 				}
 			}
 		case isTmpfs:
-			dest = spec
+			// Docker parses --tmpfs values as <dest>[:<opts>] and mounts at
+			// <dest>; the options after the first ':' are not part of the
+			// destination (the same split the account guard and volumeSpecDest
+			// apply to --volume). Recording the whole value would name a path
+			// Docker never mounts and let an enclosing tmpfs slip past the
+			// pre-flight refusal.
+			dest, _, _ = strings.Cut(spec, ":")
 		default:
 			dest = volumeSpecDest(spec)
 		}

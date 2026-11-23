@@ -63,6 +63,39 @@ func TestRunArgsMountDestinations_RefusesUnknownOptions(t *testing.T) {
 	}
 }
 
+// TestRunArgsMountDestinations_TmpfsDestinationIsPreColon pins Docker's
+// <dest>[:<opts>] grammar on the --tmpfs recorder: the destination is the
+// substring before the first ':', so a tmpfs carrying an options suffix is
+// recorded at the mount point Docker actually installs — the path the
+// enclosing-mount refusal compares against. Without the split the whole
+// "<dest>:<opts>" value is recorded, naming a path Docker never mounts and
+// letting an enclosing tmpfs slip past the pre-flight guard.
+func TestRunArgsMountDestinations_TmpfsDestinationIsPreColon(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want [][2]string
+	}{
+		{name: "bare tmpfs", args: []string{"--tmpfs", "/usr/local"},
+			want: [][2]string{{"--tmpfs /usr/local", "/usr/local"}}},
+		{name: "tmpfs with size option", args: []string{"--tmpfs", "/usr/local:size=64m"},
+			want: [][2]string{{"--tmpfs /usr/local:size=64m", "/usr/local"}}},
+		{name: "tmpfs with mode and size", args: []string{"--tmpfs", "/tmp:mode=1777,size=16m"},
+			want: [][2]string{{"--tmpfs /tmp:mode=1777,size=16m", "/tmp"}}},
+		{name: "tmpfs equals form bare", args: []string{"--tmpfs=/etc"},
+			want: [][2]string{{"--tmpfs=/etc", "/etc"}}},
+		{name: "tmpfs equals form with options", args: []string{"--tmpfs=/etc:rw"},
+			want: [][2]string{{"--tmpfs=/etc:rw", "/etc"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := runArgsMountDestinations(tt.args)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // TestRunArgsInheritMounts_SwallowedFlagIsNotInherited pins the same model on
 // the --volumes-from probe: a --volumes-from that IS another option's value
 // inherits nothing — docker never parses it — and must not trip the cp
