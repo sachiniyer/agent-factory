@@ -495,6 +495,11 @@ var (
 	reapEscaped = reapReason{clause: "leaked past its pane tree", expected: false}
 )
 
+// reapEntrySnapshot is the process-table read the nil-protected reap entry
+// makes to compute its protected set — a var seam so a test can fail the read
+// and prove a missing snapshot never widens what may be signalled (#7827).
+var reapEntrySnapshot = proctree.Snapshot
+
 // reapSessionProcesses waits for the captured processes to exit after
 // kill-session, then escalates SIGTERM → SIGKILL on survivors (identity
 // verified — see proctree.KillEscalating). Runs synchronously; teardown
@@ -507,10 +512,12 @@ var (
 // reparents the reaper out of the tree, and protection decided from a later
 // table is decided from the wrong one (Codex on #7433, #7435 item 3). nil
 // computes it at reap entry from a fresh snapshot — correct only for a
-// caller with no preceding kill. att is the caller's sweep attestation
-// memo: a recompute that runs inside a sweep must classify claimants in
-// that sweep's scope, not open a fresh memo per pass (#7509); callers with
-// no sweep scope pass nil.
+// caller with no preceding kill. A failed entry snapshot never widens the
+// kill set: reapProtectedSet then protects EVERY captured process on
+// blocking terms rather than narrowing to the reaper's own pid (#7827).
+// att is the caller's sweep attestation memo: a recompute that runs inside
+// a sweep must classify claimants in that sweep's scope, not open a fresh
+// memo per pass (#7509); callers with no sweep scope pass nil.
 func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration, protected protectedSet, att *proctree.ExeAttestations) []proctree.Process {
 	// A requester tracked FOR THIS teardown stays IN the candidate set — the
 	// reaper's per-signal recheck spares it only while the registry still
@@ -539,9 +546,19 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 	// boundary keeps it narrow: a pane process under a server reparented
 	// beneath the reaper still meets the server first and is reaped.
 	if protected == nil {
-		snap, err := proctree.Snapshot()
-		if err != nil {
-			log.WarningLog.Printf("cannot snapshot the process table to compute the reaper's protected set at reap entry: %v", err)
+		// An empty capture has nothing to protect — the table is not even
+		// read, so a failure here cannot fire a kill-path-sounding warning
+		// with no kill set behind it (#7827). With a NON-empty capture a
+		// failed read must never widen what is signalled: reapProtectedSet
+		// answers a missing snapshot by excluding every captured process,
+		// not just the reaper's own pid.
+		var snap map[int]proctree.Process
+		if len(procs) > 0 {
+			var err error
+			snap, err = reapEntrySnapshot()
+			if err != nil {
+				log.WarningLog.Printf("cannot snapshot the process table to compute the reaper's protected set at reap entry: %v", err)
+			}
 		}
 		protected = reapProtectedSet(snap, procs, att)
 	}

@@ -51,6 +51,12 @@ const (
 	protectReasonSelfSubtree = "a descendant of the reaper outside a tmux server boundary"
 	protectReasonAFDaemon    = "an agent-factory daemon"
 	protectReasonUnproven    = "a process whose daemon ancestry cannot be proven"
+	// protectReasonSnapshotMissing is the nil-snapshot verdict (#7827): with
+	// no process table, no captured process's ancestry can be walked at all,
+	// so every member of the capture stands on the same BLOCKING terms one
+	// unprovable ancestry earns. unverifiedDaemon stays zero — nothing was
+	// observed to claim, so no claimant pid exists for a remedy to name.
+	protectReasonSnapshotMissing = "a process whose daemon ancestry cannot be proven — the process-table snapshot is missing"
 )
 
 func protectReasonDaemonDescendant(daemonPID int) string {
@@ -149,6 +155,14 @@ func unverifiedDaemonSurvivorClause(remaining []proctree.Process, protected prot
 // daemon can hide in a dead link — the walk simply ends there, which is what
 // keeps genuine orphans (whose parents die by definition) reapable.
 //
+// A nil snapshot is the limit of that rule (#7827): with no process table at
+// all, no captured process's ancestry can be walked, so a missing snapshot
+// must never WIDEN what may be signalled. Every captured pid is excluded on
+// the same blocking terms an unprovable ancestry earns — never signalled,
+// still reported to cleanup-authorizing callers as alive and unattributable.
+// Only an EMPTY capture narrows the set to the reaper's own pid, because then
+// there was nothing to protect — and it says so without a kill-path warning.
+//
 // newExeAttestations is the sweep-memo constructor behind a var so the
 // scope-threading test can count how many memos a sweep opens: one (#7509).
 var newExeAttestations = proctree.NewExeAttestations
@@ -165,7 +179,25 @@ func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process
 	self := os.Getpid()
 	protected := protectedSet{self: {reason: protectReasonSelf, positive: true}}
 	if snap == nil {
-		log.WarningLog.Printf("the process-table snapshot is missing; only the reaper's own pid is excluded from signalling")
+		// #7827: a missing snapshot proves NOTHING about any captured
+		// process's ancestry, so protection must never narrow to the
+		// reaper's own pid below a non-empty capture — that is the fail-open
+		// direction the asymmetric-error rule above exists to forbid. Every
+		// captured pid stands protected on unproven terms: excluded from
+		// signalling, still reported by the survivor paths so a
+		// cleanup-authorizing caller refuses rather than reading "nothing
+		// found". An empty capture is the common case — the session was
+		// already gone, so the capture failed — and there is nothing to
+		// protect: the failed capture is already reported upstream, and a
+		// kill-path warning here would only be noise.
+		if len(captured) > 0 {
+			log.WarningLog.Printf("the process-table snapshot is missing; every captured process is excluded from signalling and stays reported rather than narrowing protection to the reaper's own pid")
+			for _, p := range captured {
+				if !protected.protects(p.PID) {
+					protected[p.PID] = protectedVerdict{reason: protectReasonSnapshotMissing}
+				}
+			}
+		}
 		return protected
 	}
 	for pid := range selfAndAncestorProcesses(snap) {
