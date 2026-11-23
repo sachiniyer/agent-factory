@@ -612,7 +612,10 @@ daemon-side setup did not fully run) — and one is a list:
 `agent:file: <reason>` entry per declared [`sandbox_agent_config`](backends.md#ssh-backend)
 file the session's account-scope placement refused: missing, unreadable, not a
 regular file, unparsable, or pushing the placement archive over its 64 MiB
-bound. Recorded at provision and
+bound. On an account swap to a scope-discovered agent (Codex or Gemini),
+af's own `agent-factory` skill rides the same list when the policy
+snapshot that decides whether to stage it cannot be read or parsed.
+Recorded at provision and
 refreshed by every reprovision and account swap that stages a scope, so a clean
 placement clears it and the row never warns about a file the live scope now
 holds. Every surface renders the joined entries under the `af agent config
