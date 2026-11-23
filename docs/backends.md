@@ -562,9 +562,9 @@ only needs the workspace tooling:
   mount table cannot be read or understood, provisioning fails with an error
   naming it rather than chowning blind. `chown` runs with `-h` in either form so a symlink the image ships under `/root`
   is re-owned itself, not its target outside HOME. On an account session af
-  additionally refuses `docker.run_args` entries for `PATH` and for every
-  name that makes ld.so, libc, or a shell af invokes inside the container
-  load or run code — the glibc `UNSECURE_ENVVARS` list
+  additionally refuses `docker.run_args` entries for `PATH` and `SHELL`,
+  and for every name that makes ld.so, libc, or a shell af invokes inside
+  the container load or run code — the glibc `UNSECURE_ENVVARS` list
   (`LD_PRELOAD`/`LD_LIBRARY_PATH`/`LD_AUDIT`, `GCONV_PATH`, `LOCPATH`,
   `NLSPATH`, `GLIBC_TUNABLES`, `LD_ORIGIN_PATH`, `LD_PROFILE`,
   `LD_DEBUG_OUTPUT`, and the rest of the source list verbatim) plus the
@@ -587,9 +587,10 @@ only needs the workspace tooling:
   musl image's secure-mode names (e.g. `MUSL_LOCPATH`) are outside it — and
   the refusal names the remedy: set the value in the image's `ENV`, or have
   the operator forward it through `session_env_passthrough`. The image's own `Config.Env` `PATH` is then
-  re-asserted after `run_args`, so docker's last-wins rule keeps every
-  PATH-resolved command on the image's own binaries unless the operator
-  forwarded `PATH` themselves. These entries and `cat` were
+  re-asserted after `run_args`, and `SHELL` is pinned to `/bin/sh`, so
+  docker's last-wins rule keeps every PATH-resolved command on the image's
+  own binaries and the tmux `default-shell -c` chain on `/bin/sh` unless
+  the operator forwarded `PATH` or `SHELL` themselves. These entries and `cat` were
   already required and simply missing from this list (#3602 review); busybox and
   coreutils each provide all of them.
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
