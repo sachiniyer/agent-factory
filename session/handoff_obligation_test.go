@@ -114,24 +114,26 @@ func TestHandoffRefusedWhileAMissionIsOwed(t *testing.T) {
 	require.NoError(t, inst.ValidateRuntimeAction(RuntimeActionHandoff))
 }
 
-// TestHandoffRefusedWhileAMissionIsOwedSuggestsAShellSafeCommand is the
+// TestHandoffRefusedWhileAMissionIsOwedSuggestsPasteSafeCommands is the
 // end-to-end form of the shellsuggest routing guard: it builds a real
 // mission-owing Instance under a hostile title and confirms the refusal the
-// locking ValidateRuntimeAction returns carries the seam's shell-safe command
-// rather than the raw bytes. The production path is Instance ->
-// LifecycleView().ValidateRuntimeAction -> runtimeActionRefusal.Error(), and a
-// title is user-chosen, so the printed remedy for an owed mission must not
-// depend on the title being shell-safe. See runtime_action_admit_test.go's
-// TestRuntimeAction_HandoffMissionRefusalSuggestsAShellSafeCommand for the
+// locking ValidateRuntimeAction returns carries BOTH of the seam's shell-safe
+// commands — resend, and retire with --delivered before the option terminator
+// — rather than the raw bytes or a flag named only in prose. The production
+// path is Instance -> LifecycleView().ValidateRuntimeAction ->
+// runtimeActionRefusal.Error(), and a title is user-chosen, so the printed
+// remedy for an owed mission must not depend on the title being shell-safe.
+// See runtime_action_admit_test.go's
+// TestRuntimeAction_HandoffMissionRefusalSuggestsPasteSafeCommands for the
 // direct LifecycleView sweep across title shapes.
-func TestHandoffRefusedWhileAMissionIsOwedSuggestsAShellSafeCommand(t *testing.T) {
+func TestHandoffRefusedWhileAMissionIsOwedSuggestsPasteSafeCommands(t *testing.T) {
 	const title = "my session"
 	inst := missionOwingInstanceTitled(t, title)
 
 	err := inst.ValidateRuntimeAction(RuntimeActionHandoff)
 	require.Error(t, err)
 
-	// The refusal embeds the seam's command verbatim: the title is quoted (so
+	// The refusal embeds the seam's commands verbatim: the title is quoted (so
 	// it survives as one positional argument) and the option terminator is
 	// present (so pflag does not parse it as a flag). The raw `v.Title` would
 	// have printed `af sessions retry-limit my session`, which cobra rejects
@@ -140,9 +142,17 @@ func TestHandoffRefusedWhileAMissionIsOwedSuggestsAShellSafeCommand(t *testing.T
 	require.NotContains(t, err.Error(), "`af sessions retry-limit my session`",
 		"the raw spaced title must not reach the printed command")
 
+	// --delivered rides before the terminator inside the second command, not
+	// after the positional: `-- 'my session' --delivered` reads the flag as a
+	// second title and cobra refuses the paste (#7803, #7806 review).
+	require.Contains(t, err.Error(), "`af sessions retry-limit --delivered -- 'my session'`")
+	require.NotContains(t, err.Error(), "-- 'my session' --delivered",
+		"the retire flag must precede the `--` terminator, not follow the positional")
+
 	// The account-aware entry point reaches the same refusal text.
-	require.ErrorContains(t, inst.ValidateHandoffRuntimeAction("gemini", ""),
-		"af sessions retry-limit -- 'my session'")
+	handoffErr := inst.ValidateHandoffRuntimeAction("gemini", "")
+	require.ErrorContains(t, handoffErr, "af sessions retry-limit -- 'my session'")
+	require.ErrorContains(t, handoffErr, "af sessions retry-limit --delivered -- 'my session'")
 }
 
 // Resolving an owed mission WITHOUT a resend must still let the run end. The
