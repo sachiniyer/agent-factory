@@ -53,9 +53,7 @@ type sandboxTokenRegistry struct {
 	// It lives here rather than on the listener, and that IS the fix: the counter it
 	// replaces was the listener's binding generation, so it advanced for socket
 	// changes and stayed put for an auth-only change like network.require_token going false
-	// — and a mint in flight across that change survived the sweep meant to catch
-	// it. Every invalidation routes through revokeAll, so counting revokeAll counts
-	// invalidations by construction, whatever causes the next one.
+	// — and a mint in flight across that change survived the sweep meant to catch it.
 	invalidations uint64
 	// bySecret is the authorization lookup: presented credential -> session id.
 	bySecret map[string]string
@@ -153,30 +151,6 @@ func (r *sandboxTokenRegistry) revoke(sessionID string) {
 	delete(r.bySession, sessionID)
 }
 
-// revokeAll drops every outstanding sandbox credential and reports how many it
-// dropped, advancing the invalidation fence a mint compares across its window.
-//
-// Since #5571 W3.6 nothing in the daemon calls this: it used to run on a
-// listener rebind, teardown, unexpected death and require_token going false,
-// because the callback rode that listener. It now rides the dedicated sandbox
-// endpoint, which none of those events touch, so revoking on them only cut
-// working callbacks. The primitive and its fence stay as the one way to void the
-// whole registry at once (an endpoint rebind, a key rotation) so such an event
-// cannot be reinvented per call site; removing the fence with the session-side
-// revalidation hook it feeds is a follow-up.
-func (r *sandboxTokenRegistry) revokeAll() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	n := len(r.bySession)
-	r.bySecret, r.bySession = nil, nil
-	// Advanced on every CALL, not only when something was dropped. A sweep that
-	// finds the registry empty still means an invalidating event happened, and the
-	// mint racing it has not registered its token yet — exactly the case a count
-	// gated on n > 0 would miss.
-	r.invalidations++
-	return n
-}
-
 // invalidationCount is the fence a mint compares across its window. A change
 // between two reads means every credential outstanding at any point in between was
 // voided, including one registered mid-window.
@@ -208,10 +182,10 @@ func (m *Manager) mintSandboxCallbackFenced(fence uint64, sessionID string) (san
 		return sandboxGrant{}, err
 	}
 	// Revalidate-and-refuse rather than lock, deliberately. Holding the listener
-	// lock across a mint inverts the order bindWebLocked already uses (listener lock
-	// -> revokeAll -> registry lock) and is a deadlock waiting to happen. Refusing
-	// costs a create the operator can retry; the alternative is a session that looks
-	// provisioned with a callback that never connects.
+	// lock across a mint could invert the order another registry-touching listener
+	// op uses and is a deadlock waiting to happen. Refusing costs a create the
+	// operator can retry; the alternative is a session that looks provisioned with
+	// a callback that never connects.
 	token, ref, err := m.sandboxTokens.mintDerived(sessionID)
 	if err != nil {
 		return sandboxGrant{}, err

@@ -116,7 +116,7 @@ func TestSandboxCallbackCredentialSurvivesARegistryRestart(t *testing.T) {
 	require.NotEmpty(t, cred.Ref, "the grant must carry the ref the row persists")
 
 	// A restarted daemon: an empty registry over the same AF home (same key).
-	m.sandboxTokens.revokeAll()
+	m.sandboxTokens.revoke("sess-a")
 	_, ok := m.sandboxTokens.sessionFor(cred.Token)
 	require.False(t, ok, "anti-vacuous: nothing is registered before the restore")
 
@@ -157,7 +157,7 @@ func TestSandboxCallbackRestoreRefusesWhileTheEndpointIsDown(t *testing.T) {
 	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
 	cred, err := newSandboxCredentials(m, "sess-a").Mint()
 	require.NoError(t, err)
-	m.sandboxTokens.revokeAll()
+	m.sandboxTokens.revoke("sess-a")
 
 	m.setSandboxEndpointSocket("") // the endpoint failed to bind on this start
 	err = newSandboxCredentials(m, "sess-a").RestoreCallback(cred.Ref)

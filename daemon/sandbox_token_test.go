@@ -191,44 +191,6 @@ func TestMintSandboxCallbackFenced_NeedsOnlyTheEndpoint(t *testing.T) {
 	m.setSandboxEndpointSocket("")
 	_, err = m.mintSandboxCallbackFenced(m.sandboxTokens.invalidationCount(), "sess-b")
 	require.Error(t, err)
-
-	// A fence that moved during the window voids the mint.
-	m.setSandboxEndpointSocket("/tmp/af-home/sandbox-callback.sock")
-	stale := m.sandboxTokens.invalidationCount()
-	m.sandboxTokens.revokeAll()
-	_, err = m.mintSandboxCallbackFenced(stale, "sess-c")
-	require.Error(t, err)
-	assert.Empty(t, m.sandboxTokens.bySession["sess-c"])
-}
-
-// A credential does not outlive the listener it was minted against (#3012 review).
-//
-// The callback URL is written into the sandbox's environment file at provision
-// time and nothing rewrites it, so a live listen_addr change leaves every running
-// sandbox calling a closed address. Leaving the token valid buys nothing — the
-// sandbox cannot reach the daemon to use it — and hides the fact that the
-// capability is gone.
-func TestSandboxTokenRegistry_RevokeAllDropsEveryCredential(t *testing.T) {
-	var registry sandboxTokenRegistry
-	a, err := registry.mint("sess-a")
-	require.NoError(t, err)
-	b, err := registry.mint("sess-b")
-	require.NoError(t, err)
-
-	assert.Equal(t, 2, registry.revokeAll(), "the count is what the rebind log reports; a wrong one misreports the blast radius")
-	for _, secret := range []string{a, b} {
-		_, ok := registry.sessionFor(secret)
-		assert.False(t, ok, "a credential minted against the previous listener must not survive the rebind")
-	}
-
-	// Idempotent, and the registry must still be usable afterwards — the daemon
-	// keeps running and the next provision mints against the NEW listener.
-	assert.Equal(t, 0, registry.revokeAll())
-	fresh, err := registry.mint("sess-c")
-	require.NoError(t, err)
-	owner, ok := registry.sessionFor(fresh)
-	require.True(t, ok, "revokeAll must clear the registry, not break it")
-	assert.Equal(t, "sess-c", owner)
 }
 
 // admits reports only the gate's yes/no, for the tests that do not care which
