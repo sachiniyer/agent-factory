@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
@@ -11,8 +13,8 @@ import (
 )
 
 // archiveSessionSourceAbsent routes an archive whose relocation claim found the
-// tracked worktree conclusively absent with no recovery record (#5102). Two
-// histories produce that, and they must not be confused:
+// tracked worktree conclusively absent with no recovery record (#5102). Three
+// histories can produce that, and they must not be confused:
 //
 //   - The worktree was deleted outside af. There is nothing to move; the row is
 //     archived as missing and restore rebuilds from the kept branch. (A user's
@@ -21,13 +23,24 @@ import (
 //   - An earlier archive's move landed at dest, and the daemon died before it
 //     recorded the new path. The bytes are all at dest. Archiving that as
 //     "missing" would commit a row pointing at nothing and orphan them.
+//   - A cross-device archive move was cut off between its quarantine rename and
+//     its publish rename. The bytes are all stranded at a record-free
+//     `.af-source-<32hex>` sibling of the source (with a staged copy beside the
+//     destination), the destination is absent, and no relocation record names
+//     either. Archiving that as "missing" would commit the row Archived with the
+//     worktree-missing stamp and let a later restore rebuild from the branch,
+//     silently discarding the uncommitted work stranded under the unguessable
+//     private name. af's own residue (`.af-source-`/`.af-copy-` plus 32 hex) is
+//     detected before the deletion route so the retry refuses and points at it
+//     instead.
 //
-// dest is deterministic for a title, so its state separates the two. Absent:
-// a deletion. Occupied and proven by git to be this session's own worktree:
-// the landed move, adopted in place. Occupied by anything else, or
-// unanswerable: refuse, because af cannot tell which history it is looking at
-// and both wrong answers lose track of someone's bytes. Every refusal here is
-// before teardown, so it cancels the fence and leaves the session as it was.
+// dest is deterministic for a title, so its state separates the first two. Absent
+// with no af residue: a deletion. Occupied and proven by git to be this
+// session's own worktree: the landed move, adopted in place. Occupied by
+// anything else, or unanswerable: refuse, because af cannot tell which history
+// it is looking at and both wrong answers lose track of someone's bytes. Every
+// refusal here is before teardown, so it cancels the fence and leaves the
+// session as it was.
 func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *session.Instance, dest string) (string, session.InstanceData, error) {
 	refuse := func(err error) (string, session.InstanceData, error) {
 		_ = instance.Transition(session.CancelArchive())
@@ -63,6 +76,92 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 			return refuse(fmt.Errorf(
 				"cannot archive session %q: its worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s with 'git worktree move' and retry, or remove it with 'git worktree remove' and retry to archive it as deleted",
 				title, moved, source))
+		}
+		// Before classifying the absent source as a deletion outside af, reject
+		// the record-free footprint of a cross-device archive move cut off
+		// between its quarantine rename and its publish rename. The source is
+		// gone (renamed to a `.af-source-<32hex>` sibling) and the destination is
+		// absent (the publish rename never ran), but the COMPLETE worktree —
+		// including any uncommitted changes — is stranded at that hidden
+		// sibling and a staged copy sits at a `.af-copy-<32hex>` sibling of the
+		// destination. No relocation record names either (the recovery record is
+		// materialized only after the publish), so a bare ENOENT here lets the
+		// retry commit the row Archived with the worktree-missing "deleted
+		// outside af" stamp and lets a later restore rebuild from the branch,
+		// silently discarding the stranded work behind an unguessable name no
+		// record, log, or sweep references. Detect the residue and refuse,
+		// pointing at it, so it is not archived over.
+		residue, resErr := sessiongit.ListAFRelocationResidue(filepath.Dir(source), filepath.Dir(dest))
+		if resErr != nil {
+			return refuse(fmt.Errorf(
+				"cannot archive session %q: its worktree path %s is gone and af could not scan for relocation residue beside it, so it cannot tell a deletion outside af from its own interrupted cross-device move: %w",
+				title, source, resErr))
+		}
+		// The source parent and the archive root are shared by every
+		// session, so residue blocks this archive only when it is proven to
+		// be THIS session's worktree. Another session's interrupted move,
+		// or a tree another session's archive retained on purpose, is
+		// foreign and must not block this archive — and the refusal must
+		// never tell the operator to move another session's tree into this
+		// session's path. Verify each candidate's git binding against this
+		// session's recorded source; a candidate whose binding cannot be
+		// read still refuses (fail-closed), but the message names it as
+		// unverified rather than this session's stranded work.
+		//
+		// The proven-ours residue is split by purpose: `.af-source-*` is the
+		// renamed source — the COMPLETE worktree, including any uncommitted
+		// changes — so recovery is directed from it. `.af-copy-*` is the
+		// staged copy beside the destination, which under skipUnreadable may
+		// intentionally omit unreadable paths; it must never be described as
+		// the complete worktree, and the operator is never told to move it
+		// back as the worktree (doing so and then removing the source
+		// quarantine as redundant would silently discard the skipped files).
+		var oursSource, oursCopy, unverified []string
+		for _, candidate := range residue {
+			binding, bErr := sessiongit.BindAFRelocationResidue(candidate, source, instance.GetRepoPath())
+			if bErr != nil || binding == sessiongit.ResidueUnknown {
+				unverified = append(unverified, candidate)
+				continue
+			}
+			if binding == sessiongit.ResidueOurs {
+				if strings.HasPrefix(filepath.Base(candidate), ".af-source-") {
+					oursSource = append(oursSource, candidate)
+				} else {
+					oursCopy = append(oursCopy, candidate)
+				}
+			}
+		}
+		if len(oursSource) > 0 || len(oursCopy) > 0 || len(unverified) > 0 {
+			named := append(append(append([]string{}, oursSource...), oursCopy...), unverified...)
+			m.warn().Printf("archive of session %q refused: its worktree path %s is gone but af relocation residue is present at %s — a cross-device archive move appears to have been cut off between its quarantine and publish renames; the complete worktree may be stranded there and was not archived as deleted",
+				title, source, strings.Join(named, ", "))
+			if len(oursSource) > 0 || len(oursCopy) > 0 {
+				// Direct recovery only from the `.af-source-*` quarantine
+				// (the complete original); describe the `.af-copy-*` staging
+				// copy as possibly incomplete and never as the worktree to
+				// move back.
+				var recovery strings.Builder
+				if len(oursSource) > 0 {
+					fmt.Fprintf(&recovery,
+						"the complete worktree (including any uncommitted changes) is stranded at the .af-source-* quarantine %s — inspect it and move it back to %s with 'mv' (or remove the residue once you have verified the work is saved)",
+						strings.Join(oursSource, ", "), source)
+				} else {
+					fmt.Fprintf(&recovery,
+						"a staged copy proven to be this session's is present at %s but its .af-source-* quarantine is absent, and the copy may be incomplete if the interrupted archive skipped unreadable files — inspect %s and do not move it into %s unless you have verified it is complete",
+						strings.Join(oursCopy, ", "), strings.Join(oursCopy, ", "), source)
+				}
+				if len(oursSource) > 0 && len(oursCopy) > 0 {
+					fmt.Fprintf(&recovery,
+						"; a staged copy is also present at the .af-copy-* sibling %s beside the destination and may be incomplete if the interrupted archive skipped unreadable files, so do not move it into %s as the worktree — recover from the .af-source-* quarantine instead",
+						strings.Join(oursCopy, ", "), source)
+				}
+				return refuse(fmt.Errorf(
+					"cannot archive session %q: its worktree path %s is gone, but af relocation residue proven to be this session's worktree is present at %s — a cross-device archive move was cut off between its quarantine and publish renames and %s before retrying the archive: %w",
+					title, source, strings.Join(named, ", "), recovery.String(), sessiongit.ErrRelocateStateUnknown))
+			}
+			return refuse(fmt.Errorf(
+				"cannot archive session %q: its worktree path %s is gone, but af relocation residue is present at %s and af could not verify whether it is this session's worktree — it may belong to another session, or its git binding could not be read; inspect %s, then move it out of %s to somewhere safe (or remove it once you have confirmed it holds nothing you need) and retry the archive; do not move it into %s unless you have proven it is this session's work (see #7819): %w",
+				title, source, strings.Join(unverified, ", "), strings.Join(unverified, ", "), filepath.Dir(unverified[0]), source, sessiongit.ErrRelocateStateUnknown))
 		}
 		// The deletion route promises restore can rebuild from the kept branch,
 		// which holds only if the branch is still there: a user who deleted the
