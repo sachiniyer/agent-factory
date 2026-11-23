@@ -912,6 +912,6 @@ func TestSetupHookCallSitesPinnedToProvision(t *testing.T) {
 			}
 		}
 	}
-	assert.Equal(t, map[string]int{"instance_factory.go": 1, "archive_sandbox.go": 1}, sites,
+	assert.Equal(t, map[string]int{"instance_factory.go": 1, "archive_sandbox_reprovision.go": 1}, sites,
 		"runSessionSetupHook may only be invoked inside provision — both sites precede every Launch their caller drives; a post-launch caller must re-justify the ordering, not slip in")
 }
