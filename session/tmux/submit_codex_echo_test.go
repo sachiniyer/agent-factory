@@ -324,6 +324,24 @@ func TestBoundaryMarkProvesNewEchoBelowIt(t *testing.T) {
 		"an echo below the boundary's own tail line is post-boundary — no baseline needed")
 }
 
+// TestNewlineLeadingDraftComposerIsNotEmpty is Codex thread 4666233827: a
+// draft that opens with a newline leaves a bare glyph first row while its
+// text sits below it — the consumed reading must see that the WHOLE
+// composer region holds no input, not just the first row, or a grown echo
+// proves a still-staged draft "delivered".
+func TestNewlineLeadingDraftComposerIsNotEmpty(t *testing.T) {
+	boundary := codexLanePane([]string{"› " + codexEchoPrompt}, "› ", "  "+codexEchoPrompt)
+	probe, bound, shape := codexBoundLiteral(t, boundary)
+	grace := codexLanePane([]string{
+		"› " + codexEchoPrompt,
+		"› " + codexEchoPrompt,
+	}, "› ", "  "+codexEchoPrompt)
+	reason, consumed := stagedReading(grace, probe, bound, shape)
+	require.False(t, consumed,
+		"a bare glyph first row with the draft still below it is not an empty composer")
+	require.NotEmpty(t, reason, "the staged draft keeps the staged verdict")
+}
+
 // TestMarkFromDraftHeadStaysStaged is the third review's R1 frame: a draft
 // whose own head leads with a glyph makes the last glyph row land inside
 // the draft, and a mark taken from that head is draft text — a resending
@@ -345,6 +363,39 @@ func TestMarkFromDraftHeadStaysStaged(t *testing.T) {
 	require.False(t, consumed,
 		"the mark came from the draft's own head — it proves nothing about the echo")
 	require.NotEmpty(t, reason, "the dropped frame stays staged")
+}
+
+// TestUnrelatedOutputContainingPromptStaysStaged is Codex thread 4666233837:
+// a short prompt like "ok" substring-matches inside arbitrary transcript
+// text ("token"), so under plain counting a dropped prompt reads consumed.
+// Only an attributable echo row — the agent's echo marker plus EXACTLY this
+// prompt's text — may count; arbitrary output never does.
+func TestUnrelatedOutputContainingPromptStaysStaged(t *testing.T) {
+	probe := newDeliveryProbe("ok")
+	bound := stagedEvidence{tail: true}
+	boundary := codexLanePane(nil, "› ok")
+	shape := boundaryShapeForTest(boundary)
+	grace := codexLanePane([]string{"token count: 100"}, "› Ask Codex to do anything")
+	reason, consumed := stagedReading(grace, probe, bound, shape)
+	require.False(t, consumed,
+		`"token" containing "ok" is arbitrary output, not an echo of this prompt`)
+	require.NotEmpty(t, reason, "the dropped prompt keeps its staged verdict")
+}
+
+// TestEchoMarkerWithSubstringContentStaysStaged is the sharper half of
+// thread 4666233837: even a row under the agent's own echo marker is not
+// attributable unless its content IS this prompt — "› token count: 100"
+// contains "ok" but is not an echo of it.
+func TestEchoMarkerWithSubstringContentStaysStaged(t *testing.T) {
+	probe := newDeliveryProbe("ok")
+	bound := stagedEvidence{tail: true}
+	boundary := codexLanePane(nil, "› ok")
+	shape := boundaryShapeForTest(boundary)
+	grace := codexLanePane([]string{"› token count: 100"}, "› Ask Codex to do anything")
+	reason, consumed := stagedReading(grace, probe, bound, shape)
+	require.False(t, consumed,
+		"an echo marker row whose content only contains the prompt is not this prompt's echo")
+	require.NotEmpty(t, reason)
 }
 
 // TestMarkInsideIdenticalEchoStaysStaged pins the mark path's conservative
@@ -547,6 +598,42 @@ func TestBaselineHoldingOwnEchoOnlyWithholdsConsumed(t *testing.T) {
 	require.Equal(t, 1, pastes)
 	require.Equal(t, 1, enters)
 	require.Contains(t, warnings.String(), "withholding the remedy Enter")
+}
+
+// TestCodexSubmittedDraftNeedsNoWarningOrRemedyEnter is the "›" tier's
+// whole-path twin of the Ultra test: transcript tail, paste, echo, idle
+// repaint — the boundary mark proves the echo positionally and the delivery
+// is consumed. The third review asked for this shape explicitly (alongside
+// Ultra and "❯").
+func TestCodexSubmittedDraftNeedsNoWarningOrRemedyEnter(t *testing.T) {
+	warnings := captureWarningLog(t)
+	m := &stagedDraftPane{
+		glyph: "›", echoGlyph: "›", placeholder: "Ask Codex to do anything", render: literalRender,
+		transcript: []string{"› tidy the sidebar before the next sweep"},
+	}
+	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
+	require.Equal(t, PromptDelivered, status)
+	require.Equal(t, 1, pastes)
+	require.Equal(t, 1, enters)
+	require.NotContains(t, warnings.String(), "withholding the remedy Enter")
+}
+
+// TestClaudeSubmittedDraftNeedsNoWarningOrRemedyEnter is the "❯" whole-path
+// the third review asked for: Claude echoes a submitted prompt "❯ " — the
+// same glyph its live composer draws — and repaints a bare "❯" row. The
+// echo is attributable only by the echo-block rule (marker plus exactly the
+// prompt's content), the mark proves it new, and the delivery is consumed.
+func TestClaudeSubmittedDraftNeedsNoWarningOrRemedyEnter(t *testing.T) {
+	warnings := captureWarningLog(t)
+	m := &stagedDraftPane{
+		glyph: claudeComposerGlyph, echoGlyph: claudeComposerGlyph, render: literalRender,
+		transcript: []string{claudeComposerGlyph + " tidy the sidebar before the next sweep"},
+	}
+	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
+	require.Equal(t, PromptDelivered, status)
+	require.Equal(t, 1, pastes)
+	require.Equal(t, 1, enters)
+	require.NotContains(t, warnings.String(), "withholding the remedy Enter")
 }
 
 // TestAltAnswerUncertainStaysStaged is R2's remainder: any #{alternate_on}

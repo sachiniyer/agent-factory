@@ -508,7 +508,7 @@ func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, bound
 // below the boundary mark; an earlier identical echo, a revealed scrollback
 // copy, and an unprovable frame all stay staged.
 func boundEchoAboveLiveComposer(rows []string, anchor int, probe deliveryProbe, bound stagedEvidence, boundary boundaryComposerShape) bool {
-	if !composerRowReadsEmpty(rows[anchor]) {
+	if !composerRegionReadsEmpty(rows, anchor) {
 		return false
 	}
 	upper := rows[:composerBlockStart(rows, anchor)]
@@ -521,41 +521,138 @@ func boundEchoAboveLiveComposer(rows []string, anchor int, probe deliveryProbe, 
 	return false
 }
 
-// newEchoCopy reports whether upper holds the needle in a copy provably
+// newEchoCopy reports whether upper's rows hold the needle in a copy provably
 // printed after the Enter boundary — two independent proofs, because each
 // has a frame that defeats it:
 //
-//  1. Count past the baseline: more copies than the boundary's transcript
-//     already held. Meaningful only when the baseline reached history —
-//     tmux keeps none on the alternate screen (codex's default), where -S
-//     returns the visible grid with ok=true and a revealed scrollback copy
-//     would read as growth (Codex #7802 R2).
+//  1. Count past the baseline: more attributable copies than the boundary's
+//     transcript already held. Meaningful only when the baseline reached
+//     history — tmux keeps none on the alternate screen (codex's default),
+//     where -S returns the visible grid with ok=true and a revealed
+//     scrollback copy would read as growth (Codex #7802 R2).
 //  2. Below the boundary mark: the mark is the transcript's own tail line
 //     at Enter — never the draft's own head — and it must still occur at
 //     least as often as it did at the boundary, or position is unprovable.
-//     A copy below the mark's LAST occurrence is post-boundary by position:
-//     revealed rows can only reappear above the boundary's line. When the
-//     boundary's tail IS the same echo (a resending watch), every new copy
-//     wears the mark too and the last occurrence hides it — a conservative
-//     miss, never a claim.
+//     An attributable copy below the mark's LAST occurrence is post-boundary
+//     by position: revealed rows can only reappear above the boundary's
+//     line. When the boundary's tail IS the same echo (a resending watch),
+//     every new copy wears the mark too and the last occurrence hides it —
+//     a conservative miss, never a claim.
 func newEchoCopy(upper []string, needle string, boundary boundaryComposerShape) bool {
-	joined := normalizeDelivery(strings.Join(upper, ""))
-	baseline := normalizeDelivery(strings.Join(boundary.echoBaselineRows, ""))
+	if needle == "" {
+		return false
+	}
 	if boundary.baselineReachedHistory &&
-		strings.Count(joined, needle) > strings.Count(baseline, needle) {
+		attributableEchoBlocks(upper, needle) > attributableEchoBlocks(boundary.echoBaselineRows, needle) {
 		return true
 	}
 	if boundary.mark == "" {
 		return false
 	}
+	joined := normalizeDelivery(strings.Join(upper, ""))
 	if strings.Count(joined, boundary.mark) < boundary.markCount {
 		return false
 	}
-	if i := strings.LastIndex(joined, boundary.mark); i >= 0 &&
-		strings.Contains(joined[i+len(boundary.mark):], needle) {
+	// The mark need not fit inside one row — it is a normalized substring of
+	// the transcript — so position is judged in joined space and mapped back
+	// to rows: only an echo block that BEGINS after the mark's last
+	// occurrence is provably newer than the boundary's own line.
+	markEnd := strings.LastIndex(joined, boundary.mark) + len(boundary.mark)
+	at := 0
+	startIdx := len(upper)
+	for i, row := range upper {
+		if at >= markEnd {
+			startIdx = i
+			break
+		}
+		at += len(normalizeDelivery(row))
+	}
+	return attributableEchoBlocks(upper[startIdx:], needle) > 0
+}
+
+// attributableEchoBlocks counts the echo blocks PROVABLY echoing or queueing
+// this delivery. An echo block opens on a row bearing the agent's echo
+// marker — codex draws every echoed user prompt "› " and a queued input
+// "↳ " (history_cell/messages.rs, chat_composer.rs); claude echoes "❯ " —
+// and a "›"/"❯" echo continues through following indented rows that open no
+// marker of their own (the echo's wrapped tail); a "↳" queued preview is
+// one row. Only the block's joined content is weighed: it must END with the
+// needle — the bound completion is the prompt's tail — or equal it, and a
+// needle too short to attribute safely (under minDistinctiveFragment) may
+// only match the whole block, so "ok" can never land inside "token" or
+// "book" (Codex #7802 review). A substring of arbitrary output is never
+// evidence: it proves text appeared, not that the agent accepted the
+// prompt. A prompt too short or too generic to attribute stays
+// unverified — the safe direction.
+func attributableEchoBlocks(rows []string, needle string) int {
+	n := 0
+	for i := 0; i < len(rows); i++ {
+		marker, rest, ok := echoMarkerRest(normalizeDelivery(rows[i]))
+		if !ok {
+			continue
+		}
+		block := rest
+		// A "›"/"❯" echo wraps onto indented continuation rows; a "↳"
+		// queued preview is a single row — its indented "⇧+← edit" hint
+		// belongs to the preview chrome, never to the echoed text.
+		if marker != "↳" {
+			for i+1 < len(rows) && composerIndentedRow(rows[i+1]) {
+				if _, _, marker := echoMarkerRest(normalizeDelivery(rows[i+1])); marker {
+					break
+				}
+				i++
+				block += normalizeDelivery(rows[i])
+			}
+		}
+		if echoContentMatches(block, needle) {
+			n++
+		}
+	}
+	return n
+}
+
+// echoMarkerRest strips a normalized row's leading echo marker — codex's
+// "›" echo and "↳" queued-input markers, claude's "❯" echo — and reports
+// which it found, or that the row opens none.
+func echoMarkerRest(norm string) (marker, rest string, ok bool) {
+	for _, m := range []string{"›", "↳", claudeComposerGlyph} {
+		if rest, ok := strings.CutPrefix(norm, m); ok {
+			return m, rest, true
+		}
+	}
+	return "", "", false
+}
+
+// echoContentMatches reports whether an echo block's joined content is this
+// delivery's: the whole needle for a short prompt — a "› book" echo must not
+// pass as an echo of "ok" — or, for a needle long enough to be safe, a
+// suffix match, because the bound completion is the tail of a longer prompt
+// an echo can only wrap, not terminate.
+func echoContentMatches(block, needle string) bool {
+	if block == needle {
 		return true
 	}
-	return false
+	return len([]rune(needle)) >= minDistinctiveFragment && strings.HasSuffix(block, needle)
+}
+
+// composerRegionReadsEmpty is the consumed reading's empty-composer check
+// over the WHOLE region, not just the anchor row: a draft that starts with
+// a newline leaves a bare glyph first row while its text sits below it
+// (Codex #7802 review). Every row must be blank, or hold only an empty
+// composer's face at the left margin — a bare glyph, the agent's own
+// mid-turn hint, or its resting placeholder — and an indented row is draft
+// content, never an empty composer.
+func composerRegionReadsEmpty(rows []string, anchor int) bool {
+	for _, row := range composerRegion(rows, anchor) {
+		norm := normalizeDelivery(row)
+		if norm == "" {
+			continue
+		}
+		if composerIndentedRow(row) || !composerRowReadsEmpty(row) {
+			return false
+		}
+	}
+	return true
 }
 
 // composerRowReadsEmpty reports whether the live composer row is provably an
