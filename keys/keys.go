@@ -305,7 +305,12 @@ var specs = []spec{
 	{name: KeyDeleteProject, keys: []string{"D"}, desc: "delete project"},
 	{name: KeyRebindProject, keys: []string{"b"}, desc: "rebind project"},
 	{name: KeyOpenPane, configKey: "open_pane", keys: []string{"s"}, desc: "open pane", dispatch: true},
-	{name: KeySplitPane, configKey: "split_pane", keys: []string{"S"}, desc: "split pane", dispatch: true},
+	// "keep preview", not "split pane": `s` above is the split — it opens the
+	// selected tab as a new vertical-split pane — while `S` commits the live
+	// preview as a pane beside its owner (handle_panes.go). The help overlay
+	// names the same verb ("Keep the preview as a pane"); two names for one
+	// key reads as two features (#7812).
+	{name: KeySplitPane, configKey: "split_pane", keys: []string{"S"}, desc: "keep preview", dispatch: true},
 	{name: KeyHidePane, configKey: "hide_pane", keys: []string{"x"}, desc: "hide pane", dispatch: true},
 	{name: KeyPanePrev, configKey: "pane_prev", keys: []string{"left"}, desc: "prev pane", contextual: true},
 	{name: KeyPaneNext, configKey: "pane_next", keys: []string{"right"}, desc: "next pane", contextual: true},
