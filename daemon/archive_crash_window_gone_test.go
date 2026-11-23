@@ -189,6 +189,90 @@ func TestArchiveSession_GenuineDeletionHasNoResidueStillArchivesAsDeleted(t *tes
 	assert.True(t, rec.Worktree.Missing)
 }
 
+// TestArchiveSession_ForeignResidueDoesNotBlockGenuineDeletion is the
+// shared-parent guard: the source parent and the archive root are shared by
+// every session, so residue blocks this session's archive ONLY when it is
+// proven to be this session's worktree. A residue belonging to ANOTHER session
+// (another session's interrupted move, or a tree another session's archive
+// retained on purpose) beside a session whose own worktree was genuinely
+// deleted outside af must NOT block its archive, and the row must commit
+// Archived as deleted rather than refuse forever.
+func TestArchiveSession_ForeignResidueDoesNotBlockGenuineDeletion(t *testing.T) {
+	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "foreign-residue")
+	// A second, independent worktree in the SAME repo (another session),
+	// stranded under a residue name beside this session's source parent —
+	// exactly the footprint another session's interrupted cross-device move
+	// leaves in the shared parent.
+	otherBranch := "af/other-session"
+	otherWt := filepath.Join(filepath.Dir(repoPath), "wt-other-session")
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", otherBranch, otherWt).CombinedOutput()
+	require.NoError(t, err, string(out))
+	foreignResidue := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("f", 32))
+	require.NoError(t, os.Rename(otherWt, foreignResidue))
+
+	// This session's own worktree is genuinely deleted outside af.
+	require.NoError(t, os.RemoveAll(wtPath))
+	branch := inst.GetBranch()
+	if branch == "" {
+		branch = "af/foreign-residue"
+	}
+
+	archivedPath, data, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "foreign-residue", RepoID: repoID})
+	require.NoError(t, err, "a foreign session's residue must not block this session's genuine-deletion archive")
+	assert.Equal(t, wtPath, archivedPath, "nothing of this session moved, so its recorded path is the one reported")
+	assert.Equal(t, session.LiveArchived, data.Liveness)
+	assert.True(t, data.Worktree.Missing, "a genuine deletion still commits the worktree-missing stamp")
+	requireBranchExists(t, repoPath, branch)
+	rec := recordFor(t, repoID, "foreign-residue")
+	require.NotNil(t, rec)
+	assert.Equal(t, session.Archived, rec.Status)
+	assert.True(t, rec.Worktree.Missing)
+
+	// The foreign residue is left untouched — it belongs to another session,
+	// and this archive must never have told the operator to move it into this
+	// session's path.
+	assert.DirExists(t, foreignResidue, "the foreign session's residue must survive this archive untouched")
+}
+
+// TestArchiveSession_UnverifiedResidueRefusesWithoutClaimingOwnership pins
+// the fail-closed shape for a residue whose git binding cannot be read (e.g.
+// a stale orphan a completed move left, or a directory a user created with
+// af's private naming). The archive refuses (it cannot prove a deletion over a
+// scan it could not classify), but the refusal must NOT claim the residue is
+// this session's worktree and must NOT tell the operator to move it back into
+// this session's path.
+func TestArchiveSession_UnverifiedResidueRefusesWithoutClaimingOwnership(t *testing.T) {
+	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
+	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "unverified-residue")
+	dest, err := archivedWorktreePath(repoID, "unverified-residue")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
+
+	// Strand this session's worktree, then drop an orphan residue with NO
+	// linked-worktree `.git` pointer beside the source parent — a residue
+	// whose git binding cannot be read.
+	require.NoError(t, os.RemoveAll(wtPath))
+	orphan := filepath.Join(filepath.Dir(wtPath), ".af-source-0123456789abcdef0123456789abcdee")
+	require.NoError(t, os.Mkdir(orphan, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(orphan, "stale.txt"), []byte("orphan"), 0o644))
+
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "unverified-residue", RepoID: repoID})
+	require.Error(t, err, "an unverified residue must refuse fail-closed rather than guess a deletion")
+	assert.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown)
+	assert.Contains(t, err.Error(), orphan, "the refusal must name the unverified residue so the user can inspect it")
+	assert.NotContains(t, err.Error(), "move it back to",
+		"the refusal for an unverified residue must never instruct the operator to move it into this session's path")
+	assert.NotContains(t, err.Error(), "move it back to "+wtPath,
+		"the refusal must not name this session's recorded path as a move-back target for unverified residue")
+	assert.Contains(t, err.Error(), "could not verify",
+		"the refusal must say the binding could not be verified, not claim the residue is this session's work")
+	assert.NotEqual(t, session.LiveArchived, inst.GetLiveness(),
+		"refusing over unverified residue must not commit the row Archived")
+	assert.Equal(t, session.OpNone, inst.GetInFlightOp(),
+		"the archive fence must be released so the session is not left fenced forever")
+}
+
 // TestArchiveSession_AdoptsLandedArchiveMoveUnaffectedByResidueFix guards the
 // #5102 adoption route: a move that landed at dest (whether by `git worktree
 // move` or a published cross-device rename) must still be adopted in place,

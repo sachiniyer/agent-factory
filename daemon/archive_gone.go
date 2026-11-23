@@ -97,12 +97,39 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 				"cannot archive session %q: its worktree path %s is gone and af could not scan for relocation residue beside it, so it cannot tell a deletion outside af from its own interrupted cross-device move: %w",
 				title, source, resErr))
 		}
-		if len(residue) > 0 {
-			m.warn().Printf("archive of session %q refused: its worktree path %s is gone but af relocation residue is present at %s — a cross-device archive move appears to have been cut off between its quarantine and publish renames; the complete worktree is stranded there and was not archived as deleted",
-				title, source, strings.Join(residue, ", "))
+		// The source parent and the archive root are shared by every
+		// session, so residue blocks this archive only when it is proven to
+		// be THIS session's worktree. Another session's interrupted move,
+		// or a tree another session's archive retained on purpose, is
+		// foreign and must not block this archive — and the refusal must
+		// never tell the operator to move another session's tree into this
+		// session's path. Verify each candidate's git binding against this
+		// session's recorded source; a candidate whose binding cannot be
+		// read still refuses (fail-closed), but the message names it as
+		// unverified rather than this session's stranded work.
+		var ours, unverified []string
+		for _, candidate := range residue {
+			binding, bErr := sessiongit.BindAFRelocationResidue(candidate, source, instance.GetRepoPath())
+			if bErr != nil || binding == sessiongit.ResidueUnknown {
+				unverified = append(unverified, candidate)
+				continue
+			}
+			if binding == sessiongit.ResidueOurs {
+				ours = append(ours, candidate)
+			}
+		}
+		if len(ours) > 0 || len(unverified) > 0 {
+			named := append(append([]string{}, ours...), unverified...)
+			m.warn().Printf("archive of session %q refused: its worktree path %s is gone but af relocation residue is present at %s — a cross-device archive move appears to have been cut off between its quarantine and publish renames; the complete worktree may be stranded there and was not archived as deleted",
+				title, source, strings.Join(named, ", "))
+			if len(ours) > 0 {
+				return refuse(fmt.Errorf(
+					"cannot archive session %q: its worktree path %s is gone, but af relocation residue proven to be this session's worktree is present at %s — a cross-device archive move was cut off between its quarantine and publish renames and the complete worktree (including any uncommitted changes) is stranded there; inspect %s and move it back to %s with 'mv' (or remove the residue once you have verified the work is saved) before retrying the archive: %w",
+					title, source, strings.Join(ours, ", "), strings.Join(ours, ", "), source, sessiongit.ErrRelocateStateUnknown))
+			}
 			return refuse(fmt.Errorf(
-				"cannot archive session %q: its worktree path %s is gone, but af relocation residue is present at %s — a cross-device archive move was cut off between its quarantine and publish renames and the complete worktree (including any uncommitted changes) is stranded there; inspect %s and move it back to %s with 'mv' (or remove the residue once you have verified the work is saved) before retrying the archive: %w",
-				title, source, strings.Join(residue, ", "), strings.Join(residue, ", "), source, sessiongit.ErrRelocateStateUnknown))
+				"cannot archive session %q: its worktree path %s is gone, but af relocation residue is present at %s and af could not verify whether it is this session's worktree — it may belong to another session, or its git binding could not be read; inspect %s (do not move it into %s unless you have proven it is this session's work) before retrying the archive: %w",
+				title, source, strings.Join(unverified, ", "), strings.Join(unverified, ", "), source, sessiongit.ErrRelocateStateUnknown))
 		}
 		// The deletion route promises restore can rebuild from the kept branch,
 		// which holds only if the branch is still there: a user who deleted the

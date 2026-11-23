@@ -19,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 // privateMoveResidueName reports whether name is one of the unguessable
@@ -64,7 +66,7 @@ func privateMoveResidueName(name string) bool {
 func ListAFRelocationResidue(dirs ...string) ([]string, error) {
 	var residue []string
 	for _, dir := range dirs {
-		entries, err := os.ReadDir(dir)
+		entries, err := BoundedReadDir(dir)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -72,8 +74,27 @@ func ListAFRelocationResidue(dirs ...string) ([]string, error) {
 			return nil, fmt.Errorf("scan af relocation residue beside %s: %w", dir, err)
 		}
 		for _, e := range entries {
+			// readdir reports the entry type when the filesystem fills in
+			// d_type, but some NFS/FUSE filesystems return DT_UNKNOWN, on
+			// which DirEntry.IsDir() returns false without statting the
+			// entry. A real `.af-source-*`/`.af-copy-*` directory would then
+			// be skipped and the caller would archive the session as a
+			// deletion despite the stranded work. When the type is not
+			// known to be a directory, stat the entry; a failed inspection
+			// is propagated so the arbitration stays fail-closed rather
+			// than guessing a deletion from a scan it could not complete.
 			if !e.IsDir() {
-				continue
+				if e.Type() != 0 {
+					// A known non-directory type (symlink, device, ...).
+					continue
+				}
+				info, ierr := e.Info()
+				if ierr != nil {
+					return nil, fmt.Errorf("scan af relocation residue beside %s: cannot inspect %s: %w", dir, e.Name(), ierr)
+				}
+				if !info.IsDir() {
+					continue
+				}
 			}
 			if !privateMoveResidueName(e.Name()) {
 				continue
@@ -82,4 +103,77 @@ func ListAFRelocationResidue(dirs ...string) ([]string, error) {
 		}
 	}
 	return residue, nil
+}
+
+// ResidueBinding reports how an af relocation residue directory relates to a
+// session's recorded source path, so the daemon's archive arbitration refuses
+// only on this session's own stranded worktree and never on another session's
+// residue that happens to share the (shared-by-every-session) source or archive
+// parent.
+type ResidueBinding int
+
+const (
+	// ResidueForeign is proven to belong to a different worktree — its git
+	// registration backpointer names another path, or it points into a
+	// different repository's metadata. It must not block this session's
+	// archive.
+	ResidueForeign ResidueBinding = iota
+	// ResidueOurs is proven to be this session's stranded worktree: its .git
+	// pointer resolves into this repository's metadata and the registration
+	// backpointer there names this session's recorded source path. The daemon
+	// refuses and points the operator at it.
+	ResidueOurs
+	// ResidueUnknown could not be read. The daemon refuses fail-closed but
+	// must not claim the residue is this session's work.
+	ResidueUnknown
+)
+
+// BindAFRelocationResidue reports whether the residue directory at candidate is
+// this session's own stranded worktree, by reading its linked-worktree .git
+// pointer and the registration backpointer git wrote for it. af's cross-device
+// move is a raw rename, not `git worktree move`, so git's registration keeps
+// pointing at the recorded (now-absent) source; the candidate's .git pointer
+// resolves into the repo's `.git/worktrees/<name>/` leaf whose `gitdir`
+// backpointer names `<source>/.git` exactly when the candidate is this
+// session's stranded tree. A candidate belonging to another session (another
+// session's interrupted move, or a tree another session's archive retained on
+// purpose) backpoints at that other session's path and reads as foreign, so it
+// does not block this archive. A candidate whose binding cannot be read is
+// unknown: the caller refuses fail-closed but must not claim it is this
+// session's work.
+func BindAFRelocationResidue(candidate, source, repoPath string) (ResidueBinding, error) {
+	encoded, err := boundedPointerCheckValue("residue-bind\x00"+source, candidate, func(path string) (string, error) {
+		target, pErr := verifyWorktreePointerShape(path)
+		if pErr != nil {
+			return "unknown", pErr
+		}
+		expectedRoot, rErr := resolveRepoMetadataRoot(repoPath)
+		if rErr != nil {
+			return "unknown", rErr
+		}
+		targetRoot := filepath.Dir(filepath.Dir(target))
+		if pathutil.ResolveForCompare(targetRoot) != pathutil.ResolveForCompare(expectedRoot) {
+			return "foreign", nil
+		}
+		backpointer, bErr := readWorktreeBackpointer(target)
+		if bErr != nil {
+			return "unknown", bErr
+		}
+		wantPointer := filepath.Join(source, ".git")
+		if pathutil.ResolveForCompare(backpointer) != pathutil.ResolveForCompare(wantPointer) {
+			return "foreign", nil
+		}
+		return "ours", nil
+	})
+	if err != nil {
+		return ResidueUnknown, err
+	}
+	switch encoded {
+	case "foreign":
+		return ResidueForeign, nil
+	case "ours":
+		return ResidueOurs, nil
+	default:
+		return ResidueUnknown, nil
+	}
 }

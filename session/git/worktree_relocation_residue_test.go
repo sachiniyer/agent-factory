@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -89,6 +90,79 @@ func TestListAFRelocationResidue_UnreadableDirErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, residue)
 	assert.Contains(t, err.Error(), dir)
+}
+
+// unknownTypeDirEntry wraps a real os.DirEntry but reports DT_UNKNOWN
+// (Type() == 0) the way some NFS/FUSE filesystems do from readdir, so the
+// residue scan cannot trust the entry type and must stat it.
+type unknownTypeDirEntry struct {
+	os.DirEntry
+}
+
+func (unknownTypeDirEntry) Type() os.FileMode { return 0 }
+func (unknownTypeDirEntry) IsDir() bool       { return false }
+
+// TestListAFRelocationResidue_DTUnknownDirIsStatChecked pins the fail-closed
+// handling of DT_UNKNOWN entries: when readdir does not fill in the type,
+// IsDir() returns false, so a real `.af-source-*`/`.af-copy-*` directory would
+// be skipped and the caller could archive the session as a deletion despite
+// the stranded work. The scan must stat the entry instead, find the
+// directory, and report the residue.
+func TestListAFRelocationResidue_DTUnknownDirIsStatChecked(t *testing.T) {
+	parent := t.TempDir()
+	quarantine := filepath.Join(parent, ".af-source-0123456789abcdef0123456789abcdef")
+	require.NoError(t, os.Mkdir(quarantine, 0o755))
+	// A residue-shaped regular file must still be skipped even when its
+	// readdir type is unknown: the stat says it is not a directory.
+	require.NoError(t, os.WriteFile(filepath.Join(parent, ".af-copy-fedcba9876543210fedcba9876543210"), []byte("file"), 0o644))
+
+	restore := SetArchiveReadDirForTest(parent, func(observed string) ([]os.DirEntry, error) {
+		real, err := os.ReadDir(observed)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]os.DirEntry, len(real))
+		for i, e := range real {
+			out[i] = unknownTypeDirEntry{DirEntry: e}
+		}
+		return out, nil
+	})
+	defer restore()
+
+	residue, err := ListAFRelocationResidue(parent)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{quarantine}, residue,
+		"a DT_UNKNOWN residue directory must be stat-checked and found; a DT_UNKNOWN residue-shaped file must still be skipped")
+}
+
+// TestListAFRelocationResidue_DTUnknownInspectErrorPropagates pins the
+// fail-closed contract: when the entry type is unknown and the stat to resolve
+// it fails, the scan returns an error rather than silently skipping the entry
+// and risking a deletion verdict over a scan it could not complete.
+func TestListAFRelocationResidue_DTUnknownInspectErrorPropagates(t *testing.T) {
+	parent := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(parent, ".af-source-0123456789abcdef0123456789abcdef"), 0o755))
+
+	// A DirEntry with an unknown type whose Info() always errors, modeling a
+	// stat that could not be completed (e.g. an ESTALE on a soft NFS mount).
+	var failing os.DirEntry = failingInfoDirEntry{}
+
+	restore := SetArchiveReadDirForTest(parent, func(string) ([]os.DirEntry, error) {
+		return []os.DirEntry{failing}, nil
+	})
+	defer restore()
+
+	_, err := ListAFRelocationResidue(parent)
+	require.Error(t, err, "an unresolvable entry type must fail-closed, not be skipped")
+}
+
+type failingInfoDirEntry struct{}
+
+func (failingInfoDirEntry) Name() string      { return "" }
+func (failingInfoDirEntry) IsDir() bool       { return false }
+func (failingInfoDirEntry) Type() os.FileMode { return 0 }
+func (failingInfoDirEntry) Info() (os.FileInfo, error) {
+	return nil, os.ErrPermission
 }
 
 // TestClaimRelocationSource_CrashWindowReturnsBareENOENT pins the
@@ -346,12 +420,109 @@ func findOrMakeSecondFilesystem(t *testing.T) string {
 }
 
 func statDev(info os.FileInfo) uint64 {
-	type devGetter interface{ Dev() uint64 }
-	if d, ok := info.Sys().(devGetter); ok {
-		return d.Dev()
+	// On Linux, os.FileInfo.Sys() returns *syscall.Stat_t, whose Dev is a
+	// field rather than a Dev() uint64 method, so a method-based assertion
+	// always fails and the test never recognizes an existing second
+	// filesystem. Read the field directly; on platforms where the stat type
+	// does not match, the assertion fails and the loop falls back to a
+	// loopback mount (and skips if that is unavailable).
+	if d, ok := info.Sys().(*syscall.Stat_t); ok {
+		return d.Dev
 	}
 	return 0
 }
 
 // ensure the time import is used when the child-harness path is compiled out
 var _ = time.Second
+
+// TestBindAFRelocationResidue_OwnsQuarantine pins the proof that a residue
+// directory is this session's own stranded worktree: af's cross-device move is
+// a raw rename, so git's registration keeps backpointing at the recorded (now
+// absent) source path, and the residue's `.git` pointer resolves into this
+// repo's metadata. Such a residue blocks this session's archive.
+func TestBindAFRelocationResidue_OwnsQuarantine(t *testing.T) {
+	_, repoRoot, wtPath := archiveTestWorktree(t)
+	quarantine := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("a", 32))
+	require.NoError(t, os.Rename(wtPath, quarantine))
+
+	binding, err := BindAFRelocationResidue(quarantine, wtPath, repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, ResidueOurs, binding, "the quarantined worktree backpoints at this session's recorded source")
+}
+
+// TestBindAFRelocationResidue_OwnsStagingCopy pins that the staged `.af-copy-*`
+// directory — a copy of the source — shares the source's git binding, so it too
+// is recognized as this session's residue and not mistaken for foreign.
+func TestBindAFRelocationResidue_OwnsStagingCopy(t *testing.T) {
+	_, repoRoot, wtPath := archiveTestWorktree(t)
+	quarantine := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("a", 32))
+	require.NoError(t, os.Rename(wtPath, quarantine))
+	stagingParent := t.TempDir()
+	staging := filepath.Join(stagingParent, ".af-copy-"+strings.Repeat("b", 32))
+	copyTreeForTest(t, quarantine, staging)
+
+	binding, err := BindAFRelocationResidue(staging, wtPath, repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, ResidueOurs, binding, "the staged copy shares the source's git binding")
+}
+
+// TestBindAFRelocationResidue_ForeignResidueIsNotOurs is the core of the
+// shared-parent concern: a residue directory belonging to ANOTHER session
+// (another session's interrupted move, or a tree another session's archive
+// retained on purpose) sits beside this session's source parent and must NOT
+// block this session's archive. Its `.git` pointer resolves into this repo but
+// its registration backpointer names the OTHER session's recorded path, so the
+// binding is foreign.
+func TestBindAFRelocationResidue_ForeignResidueIsNotOurs(t *testing.T) {
+	_, repoRoot, wtPath := archiveTestWorktree(t)
+	// A second, independent worktree in the SAME repo (another session).
+	otherBranch := "arch/other"
+	otherWt := filepath.Join(filepath.Dir(repoRoot), "repo-arch-other")
+	runGitInPlaceTest(t, repoRoot, "worktree", "add", "-b", otherBranch, otherWt)
+	// Strand the other session's worktree under a residue name beside this
+	// session's source parent, modelling another session's interrupted move.
+	foreign := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("c", 32))
+	require.NoError(t, os.Rename(otherWt, foreign))
+
+	binding, err := BindAFRelocationResidue(foreign, wtPath, repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, ResidueForeign, binding,
+		"a residue whose registration backpoints at another session's path is foreign and must not block this archive")
+}
+
+// TestBindAFRelocationResidue_ForeignRepositoryResidueIsNotOurs pins that a
+// residue pointing into a DIFFERENT repository's metadata is foreign, so a
+// foreign repo's worktree parked beside this session's source parent does not
+// block this archive.
+func TestBindAFRelocationResidue_ForeignRepositoryResidueIsNotOurs(t *testing.T) {
+	_, repoRoot, wtPath := archiveTestWorktree(t)
+	// An unrelated repo with its own worktree.
+	otherRepo := createGitRepo(t)
+	runGitInPlaceTest(t, otherRepo, "commit", "--allow-empty", "-m", "init")
+	otherWt := filepath.Join(filepath.Dir(otherRepo), "other-repo-arch")
+	runGitInPlaceTest(t, otherRepo, "worktree", "add", "-b", "arch/other", otherWt)
+	foreign := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("d", 32))
+	require.NoError(t, os.Rename(otherWt, foreign))
+
+	binding, err := BindAFRelocationResidue(foreign, wtPath, repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, ResidueForeign, binding,
+		"a residue whose .git pointer resolves into a different repository is foreign")
+}
+
+// TestBindAFRelocationResidue_UnverifiedNoGitPointerIsUnknown pins the
+// fail-closed shape: a residue-shaped directory that carries no linked-worktree
+// `.git` pointer (e.g. a stale orphan a completed move left, or a directory a
+// user created with af's private naming) cannot be proven foreign or ours. The
+// binding is unknown; the caller refuses but must not claim it is this
+// session's work.
+func TestBindAFRelocationResidue_UnverifiedNoGitPointerIsUnknown(t *testing.T) {
+	_, repoRoot, wtPath := archiveTestWorktree(t)
+	orphan := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("e", 32))
+	require.NoError(t, os.Mkdir(orphan, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(orphan, "stale.txt"), []byte("orphan"), 0o644))
+
+	binding, err := BindAFRelocationResidue(orphan, wtPath, repoRoot)
+	require.Error(t, err, "a residue with no readable git binding is unverified, not silently classified")
+	assert.Equal(t, ResidueUnknown, binding)
+}
