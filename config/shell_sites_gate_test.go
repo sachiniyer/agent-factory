@@ -126,7 +126,7 @@ var shellSiteRegistry = map[string][]classifiedSite{
 			"warning — a repository must not choose a program af runs with the operator's credentials " +
 			"(TestInRepoConfigRejectsMoveCmd, config/inrepo_move_cmd_test.go).",
 	}},
-	"session/archive_sandbox.go:lsRemoteArgs": {{
+	"session/archive_sandbox_reprovision.go:lsRemoteArgs": {{
 		class: afAuthored,
 		note: "`git -c <key>=<helper> ls-remote`: the `-c` is git's config flag, but the VALUE is a credential " +
 			"helper beginning with `!`, which git runs through `sh`. So this site does hand an af-authored shell " +
