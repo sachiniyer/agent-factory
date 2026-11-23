@@ -244,6 +244,15 @@ func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 // here is the other half of the same fact. Caller holds i.mu. The task-run
 // marker is deliberately untouched: runs only ever go true→false.
 func (i *Instance) resolveStartupStateLocked() {
+	// An in-flight off-box swap record outranks every probe this path accepts
+	// (#7793): while the recorded request may still be queued on the host, no
+	// pane liveness or attestation can say which account the sandbox runs, so
+	// the record IS the startup-unknown reason until its own definite verdict
+	// clears it — settleInFlightSwapVerdict drops the record first and then
+	// reaches this line.
+	if i.offBoxSwapInFlight != nil {
+		return
+	}
 	if i.startupStateUnknown {
 		i.startupStateUnknown = false
 		i.touchLocked()
@@ -313,6 +322,27 @@ func (i *Instance) ClearPendingHandoffMission(mission string) bool {
 // requested runtime name as confirmed; StartupStateUnknown keeps storage
 // checkpoints from dropping the record merely because it is not started.
 func (i *Instance) MarkStartupStateUnknown() {
+	i.fenceStartupStateUnknown(true)
+}
+
+// markSwapFenceIndeterminate raises the same startup-unknown fence for an
+// off-box swap whose verdict the host still owes (#7793) — WITHOUT the
+// terminal-startup half MarkStartupStateUnknown carries. An indeterminate
+// swap is not a terminal run: the recorded request may still commit on the
+// host and its rebound agent may still be running, so the task-run marker
+// keeps its slot until the record's own definite verdict or the operator's
+// kill settles it. Clearing it would let max_concurrent_runs admit a
+// replacement while the original swap can still land.
+func (i *Instance) markSwapFenceIndeterminate() {
+	i.fenceStartupStateUnknown(false)
+}
+
+// fenceStartupStateUnknown is the shared fence: the flag, the lifted started
+// claim, and the abandoned in-flight op. endTaskRun selects the
+// terminal-startup transition — true for a delivery that can never complete
+// (create/restore startup-unknown, the only other caller), false for an
+// unresolved swap whose host may yet answer.
+func (i *Instance) fenceStartupStateUnknown(endTaskRun bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	lv, op, resetAt := i.lifecycleStateLocked()
@@ -338,7 +368,7 @@ func (i *Instance) MarkStartupStateUnknown() {
 	// which is unconditional — a second call once the run has already ended must
 	// not pin a fresh baseline over a teardown's, since that would fold a delivery
 	// made in between into the baseline and read as though nothing had happened.
-	if i.taskRunActive {
+	if endTaskRun && i.taskRunActive {
 		i.captureAdoptionBaselineLocked()
 		i.taskRunActive = false
 		i.touchLocked()

@@ -200,7 +200,7 @@ func TestSwapOffBoxAccountReportsSkippedConfig(t *testing.T) {
 	f.w.spec.AgentConfigFiles = []string{"claude:settings.json", "claude:CLAUDE.md"}
 	f.inst.agentSrv = hostEnvServer{f.srv, t, hostScope}
 
-	res, err := f.inst.SwapOffBoxAccount("alt", false)
+	res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	require.Len(t, res.AgentConfigSkipped, 1)
@@ -225,7 +225,7 @@ func TestSwapOffBoxAccountClearsSkippedConfigWhenEverythingPlaces(t *testing.T) 
 	f.inst.agentSrv = hostEnvServer{f.srv, t, hostScope}
 	f.inst.agentConfigSkipped = []string{"claude:settings.json: earlier placement skipped it"}
 
-	res, err := f.inst.SwapOffBoxAccount("alt", false)
+	res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 	assert.Empty(t, res.AgentConfigSkipped)
 	assert.Empty(t, f.inst.AgentConfigSkipped(), "a clean staged scope clears the row's skip list")

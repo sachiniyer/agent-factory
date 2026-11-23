@@ -180,6 +180,10 @@ func (d InstanceData) ForStorage() InstanceData {
 	}
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
+	// The in-flight projector runs FIRST of the startup-state projections so
+	// its captured original is the row's real value; its restore then runs
+	// last, after the other restores have overwritten their own (#7793).
+	d = d.projectOffBoxSwapInFlightForPreviousRelease()
 	d = d.projectPendingAccountSwapForPreviousRelease()
 	d = d.projectPendingHandoffForPreviousRelease()
 	d = d.projectRebuildTeardownForPreviousRelease()

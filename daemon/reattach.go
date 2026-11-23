@@ -76,6 +76,13 @@ func (m *Manager) reattachRestoredRuntimes() {
 				inst.SetRuntimeIdentityPersist(func(i *session.Instance) error {
 					return m.persistInstanceErr(repoID, i)
 				})
+				// An in-flight swap record is reconciled inside the reattach —
+				// before anything is admitted — and its settle is
+				// settlement-class: written under this op lock, the ordering
+				// fence persistSettlementUnderAdmission names (#7793).
+				inst.SetOffBoxSwapPersist(func(i *session.Instance) error {
+					return m.persistSettlementUnderAdmission(repoID, key, i)
+				})
 				err := inst.ReattachSandbox()
 				inst.SettleAttentionAfterReattach()
 				// An adopted restart may have respawned the agent: the session

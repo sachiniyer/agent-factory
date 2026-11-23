@@ -263,7 +263,7 @@ func TestAgentConfigSurvivesAnOffBoxAccountSwap(t *testing.T) {
 	f.w.spec.AgentConfigFiles = []string{"claude:settings.json", "claude:CLAUDE.md"}
 	f.inst.agentSrv = hostEnvServer{f.srv, t, hostScope}
 
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	assert.Equal(t, secretAlt, f.hostCred(t, "account"), "the new account is live")
@@ -274,7 +274,7 @@ func TestAgentConfigSurvivesAnOffBoxAccountSwap(t *testing.T) {
 // A session with no declared config gets none, as before.
 func TestNoAgentConfigIsStagedWhenNoneIsDeclared(t *testing.T) {
 	f := newSwapFixture(t)
-	_, err := f.inst.SwapOffBoxAccount("alt", false)
+	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(f.dir, "account", "settings.json"))
 }
@@ -286,7 +286,7 @@ type hostEnvServer struct {
 	scope string
 }
 
-func (s hostEnvServer) SwapAccountInPlace(swapID string) (string, error) {
+func (s hostEnvServer) SwapAccountInPlace(swapID string, scopedStage bool) (string, error) {
 	s.t.Setenv("CLAUDE_CONFIG_DIR", s.scope)
-	return s.acctSwapServer.SwapAccountInPlace(swapID)
+	return s.acctSwapServer.SwapAccountInPlace(swapID, scopedStage)
 }

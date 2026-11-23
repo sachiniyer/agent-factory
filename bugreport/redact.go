@@ -484,6 +484,26 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		// reporting.
 		redactAccountSwapMission(d.PendingAccountSwap)
 	}
+	// The in-flight off-box swap record (#7793) names the same user-picked
+	// account labels as the pending pair above — From and To take their
+	// marker for the same reason. SwapID stays verbatim: accountSwapID is
+	// crypto-random hex af mints itself, classified in verbatimInstanceFields,
+	// and it is the only handle triage has to pair a fenced row with the
+	// agent-server's terminal record for it.
+	if d.OffBoxSwapInFlight != nil {
+		if d.OffBoxSwapInFlight.From != "" {
+			d.OffBoxSwapInFlight.From = redactedMarker
+		}
+		if d.OffBoxSwapInFlight.To != "" {
+			d.OffBoxSwapInFlight.To = redactedMarker
+		}
+		// Each skip entry names a declared config file the stage could not
+		// place — the user's own sandbox_agent_config text — so the list
+		// takes the same marker as the account labels.
+		for i := range d.OffBoxSwapInFlight.AgentConfigSkipped {
+			d.OffBoxSwapInFlight.AgentConfigSkipped[i] = redactedMarker
+		}
+	}
 	// Agent beside it stays verbatim — it is the bounded agent enum, classified
 	// as such in verbatimInstanceFields, and it is what makes the redacted
 	// account labels legible as "two claude accounts" rather than two opaque

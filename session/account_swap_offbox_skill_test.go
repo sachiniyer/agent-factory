@@ -36,11 +36,12 @@ import (
 // longer add anything to it.
 type scopeSkillServer struct {
 	AgentServer
-	live, next string
+	live       string
 	agent      string
 	scopeEnv   string // the agent's scope variable (CODEX_HOME, GEMINI_CLI_HOME)
 	can        bool
 	failAfter  error // returned after a successful rotation, to exercise restore
+	lastScoped bool  // the request's scoped_stage flag — this build honors it
 	rec        accountSwapRecorder
 	calls      int
 	atCall     map[string]string // scope-relative path -> staged content at swap time
@@ -53,7 +54,9 @@ func (s *scopeSkillServer) AccountSwapStatus() (string, string, string, error) {
 	return o, p, id, nil
 }
 
-func (s *scopeSkillServer) SwapAccountInPlace(swapID string) (string, error) {
+func (s *scopeSkillServer) ScopedStageAccountSwap() (bool, error) { return true, nil }
+func (s *scopeSkillServer) SwapAccountInPlace(swapID string, scopedStage bool) (string, error) {
+	s.lastScoped = scopedStage
 	return s.rec.run(swapID, func() (string, error) { return s.swap(swapID) })
 }
 
@@ -61,23 +64,45 @@ func (s *scopeSkillServer) SwapAccountInPlace(swapID string) (string, error) {
 // the swap's own lock it tombstones the id and removes the staged scope, so a
 // request still queued behind it can never commit. It enforces the stage
 // marker exactly as production does (#7788): only this swap's bound stage is
-// removed, and an unreadable marker fails rather than passing silently.
+// removed, and an unreadable marker fails rather than passing silently. Both
+// spellings are probed — the discard cannot see which staging protocol the
+// pair negotiated (#7793).
 func (s *scopeSkillServer) DiscardAccountNext(swapID string) error {
 	s.rec.mu.Lock()
 	defer s.rec.mu.Unlock()
 	if swapID != "" {
 		s.rec.cancelled = swapID
 	}
-	return discardAccountNextBound(s.next, swapID)
+	paths := []string{s.live + accountNextSuffix}
+	if swapID != "" {
+		paths = append(paths, stagedScopeDir(s.live, swapID))
+	}
+	for _, next := range paths {
+		if _, statErr := os.Lstat(next); errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if dErr := discardAccountNextBound(next, swapID); dErr != nil {
+			return dErr
+		}
+	}
+	// The stage is provably gone, so the tombstone publishes as this swap's
+	// own terminal verdict — replayable by a daemon whose record clear was
+	// lost (#7793), exactly like the real server's noteStagedDiscarded.
+	s.rec.refuseLocked(swapID)
+	return nil
 }
 
 func (s *scopeSkillServer) swap(id string) (string, error) {
 	s.calls++
 	os.Setenv(s.scopeEnv, s.live) // the server env names the live scope; the rotation reads it
-	for rel := range s.atCall {
-		s.atCall[rel] = readOrEmpty(filepath.Join(s.next, filepath.FromSlash(rel)))
+	staged := s.live + accountNextSuffix
+	if s.lastScoped {
+		staged = stagedScopeDir(s.live, id)
 	}
-	rot, err := newScopeRotation(s.agent, id)
+	for rel := range s.atCall {
+		s.atCall[rel] = readOrEmpty(filepath.Join(staged, filepath.FromSlash(rel)))
+	}
+	rot, err := newScopeRotation(s.agent, id, s.lastScoped)
 	if err != nil {
 		return "", err
 	}
@@ -162,9 +187,10 @@ func newScopeSkillFixture(t *testing.T, agent string, skillsGranted bool) *scope
 	t.Setenv(envVar, w.AccountDir()) // the agent-server's env names the live scope
 
 	srv := &scopeSkillServer{
-		live: w.AccountDir(), next: w.NextAccountDir(), agent: agent, scopeEnv: envVar,
+		live: w.AccountDir(), agent: agent, scopeEnv: envVar,
 		can: true, atCall: map[string]string{skillRel: ""},
 	}
+	stubAccountSwapID(t)
 	inst := &Instance{
 		Title: "scopeswap", Path: repo, Program: agent, Host: "box1",
 		Account: "work", accountAgent: agent,
@@ -172,6 +198,7 @@ func newScopeSkillFixture(t *testing.T, agent string, skillsGranted bool) *scope
 		started: true, Tabs: []*Tab{newRemoteAgentTab()},
 	}
 	inst.agentSrv = srv
+	inst.SetOffBoxSwapPersist(func(*Instance) error { return nil })
 	return &scopeSkillFixture{inst: inst, w: w, srv: srv, skillRel: skillRel}
 }
 
@@ -208,7 +235,7 @@ func TestSwapOffBoxAccountStagesTheAfSkill(t *testing.T) {
 			f := newScopeSkillFixture(t, tc.agent, true)
 			f.seedLiveSkill(t) // what provision's launch left in the outgoing scope
 
-			_, err := f.inst.SwapOffBoxAccount("alt", false)
+			_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			assert.Equal(t, afSkillDoc, f.srv.atCall[f.skillRel],
@@ -218,7 +245,7 @@ func TestSwapOffBoxAccountStagesTheAfSkill(t *testing.T) {
 			assert.Equal(t, afSkillDoc, string(got), "af's own managed skill, not a copy of whatever the outgoing scope held")
 			assert.NoDirExists(t, f.w.PrevAccountDir(),
 				"the outgoing scope — and the write the unscoped plan build made into it — is cleaned up, not rescued")
-			assert.NoDirExists(t, f.w.NextAccountDir())
+			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1", true))
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, "alt", acct)
 		})
@@ -233,7 +260,7 @@ func TestSwapOffBoxAccountStagesNoSkillWhenDeclined(t *testing.T) {
 		t.Run(tc.agent, func(t *testing.T) {
 			f := newScopeSkillFixture(t, tc.agent, false)
 
-			_, err := f.inst.SwapOffBoxAccount("alt", false)
+			_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			assert.Empty(t, f.srv.atCall[f.skillRel],
@@ -258,14 +285,14 @@ func TestSwapOffBoxAccountStageFailureKeepsTheOutgoingSkill(t *testing.T) {
 				return nil, errors.New("ssh: connection refused")
 			}
 
-			_, err := f.inst.SwapOffBoxAccount("alt", false)
+			_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.ErrorContains(t, err, "staging account")
 
 			assert.Zero(t, f.srv.calls, "the agent-server is never asked to stop anything")
 			got, readErr := os.ReadFile(f.liveSkill())
 			require.NoError(t, readErr, "the live scope's guidance survives a swap that never reached the rotation")
 			assert.Equal(t, afSkillDoc, string(got))
-			assert.NoDirExists(t, f.w.NextAccountDir())
+			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1", true))
 			assert.NoDirExists(t, f.w.PrevAccountDir(), "no rotation happened")
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, "work", acct)
@@ -283,13 +310,13 @@ func TestSwapOffBoxAccountRolledBackSwapKeepsTheOutgoingSkill(t *testing.T) {
 			f.seedLiveSkill(t)
 			f.srv.failAfter = errors.New("the new agent did not start")
 
-			_, err := f.inst.SwapOffBoxAccount("alt", false)
+			_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.ErrorContains(t, err, "did not start")
 
 			got, readErr := os.ReadFile(f.liveSkill())
 			require.NoError(t, readErr, "the rollback returns the outgoing scope — and its guidance — to live")
 			assert.Equal(t, afSkillDoc, string(got))
-			assert.NoDirExists(t, f.w.NextAccountDir())
+			assert.NoDirExists(t, f.w.nextAccountDirFor("test-swap-1", true))
 			assert.NoDirExists(t, f.w.PrevAccountDir())
 			acct, _ := f.inst.AccountSelection()
 			assert.Equal(t, "work", acct)
@@ -336,7 +363,7 @@ func TestSwapOffBoxAccountStagesWithTheSnapshotConsentFlippedToGranted(t *testin
 			cfg.GlobalAgentSkills = true
 			require.NoError(t, config.SaveConfig(cfg))
 
-			_, err = f.inst.SwapOffBoxAccount("alt", false)
+			_, err = f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			assert.Empty(t, f.srv.atCall[f.skillRel],
@@ -363,7 +390,7 @@ func TestSwapOffBoxAccountStagesWithTheSnapshotConsentFlippedToDeclined(t *testi
 			cfg.GlobalAgentSkills = false // the operator revoked after create
 			require.NoError(t, config.SaveConfig(cfg))
 
-			_, err = f.inst.SwapOffBoxAccount("alt", false)
+			_, err = f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			assert.Equal(t, afSkillDoc, f.srv.atCall[f.skillRel],
@@ -433,7 +460,7 @@ func TestSwapOffBoxAccountUnknownConsentStagesNoSkillAndSaysSo(t *testing.T) {
 					f := newScopeSkillFixture(t, tc.agent, true) // the live config GRANTS
 					v.prep(t, f)
 
-					res, err := f.inst.SwapOffBoxAccount("alt", false)
+					res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 					require.NoError(t, err)
 
 					assert.Empty(t, f.srv.atCall[f.skillRel],
@@ -479,7 +506,7 @@ func TestSwapOffBoxAccountUnknownConsentEntryCarriesNoHostBytes(t *testing.T) {
 				return localShell{}.Run(d, script, in, interactive)
 			}
 
-			res, err := f.inst.SwapOffBoxAccount("alt", false)
+			res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			want := fmt.Sprintf("%s:%s: af could not confirm whether the sandbox's operator policy grants global_agent_skills: %s could not be read on the host",
@@ -505,7 +532,7 @@ func TestSwapOffBoxAccountOnARestoredWorkspaceStagesWithTheShippedPolicy(t *test
 			f.w.restored = true
 			require.NoError(t, os.WriteFile(f.w.PolicyPath(), swapPolicyBytes(t, true), 0o600))
 
-			res, err := f.inst.SwapOffBoxAccount("alt", false)
+			res, err := f.inst.SwapOffBoxAccount("alt", false, "")
 			require.NoError(t, err)
 
 			assert.Equal(t, afSkillDoc, f.srv.atCall[f.skillRel],

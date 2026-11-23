@@ -66,7 +66,12 @@ func (i *Instance) prepareKillTeardown(trustLiveGeneration bool) (teardownKill, 
 	i.mu.RLock()
 	gw := i.gitWorktree
 	archived := i.liveness == LiveArchived
-	startupUnknown := i.startupStateUnknown
+	// An in-flight off-box swap record quarantines the same way a startup-
+	// unknown row does (#7793): while the host's answer is unresolved the
+	// workspace's ownership is unproven, so kill keeps it. Named beside the
+	// flag the record already forces up — the record is the reason, and the
+	// quarantine must hold even on a path that ever lets the flag drop first.
+	startupUnknown := i.startupStateUnknown || i.offBoxSwapInFlight != nil
 	worktreeMissing := i.worktreeMissing
 	i.mu.RUnlock()
 	if gw == nil {

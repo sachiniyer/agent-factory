@@ -44,8 +44,12 @@ func reattachProvisioner(b Backend) *sandboxProvisioner {
 func (i *Instance) ReattachSandbox() error {
 	i.mu.Lock()
 	b := i.backend
+	// A startup-unknown row is inert and ineligible — except when it carries an
+	// in-flight swap record (#7793): the record is exactly what this path
+	// exists to reconcile, and a fenced row holding one is reattached so the
+	// host can answer for it before anything is admitted.
 	eligible := i.remoteClient == nil && i.runtimeTeardown != nil && !i.userKilled &&
-		!i.startupStateUnknown && !i.runtimeCleanupStateUnknown && i.liveness != LiveArchived
+		(!i.startupStateUnknown || i.offBoxSwapInFlight != nil) && !i.runtimeCleanupStateUnknown && i.liveness != LiveArchived
 	i.mu.Unlock()
 	p := reattachProvisioner(b)
 	if !eligible || p == nil {
@@ -117,6 +121,31 @@ func (i *Instance) ReattachSandbox() error {
 	endpoint, rc, aliveErr, err := dial()
 	if err != nil {
 		return fmt.Errorf("reattach %q: %w", i.Title, err)
+	}
+	// A row carrying an in-flight swap record is reconciled for THAT swap id
+	// before anything else on this transport (#7793): the request the previous
+	// daemon sent may still commit on the host, and until the host answers for
+	// it no agent-server may be restarted, provisioned, adopted, or bound —
+	// and no agent may launch — on a row whose account identity is unproven.
+	// A dead server can produce no verdict, so a record row whose server did
+	// not answer fails here with its fence intact rather than restarting one.
+	if i.InFlightOffBoxSwap() != nil {
+		if aliveErr != nil {
+			p.abandonUnadoptedTunnel()
+			return fmt.Errorf("reattach %q: the agent-server did not answer, so the recorded swap cannot be reconciled: %w — the row stays fenced until a daemon restart reaches a live agent-server or `af sessions kill` removes it", i.Title, aliveErr)
+		}
+		settled, rerr := i.reconcileInFlightOffBoxSwap(&remoteAgentServer{rc: rc, inst: i}, p)
+		switch {
+		case rerr == nil:
+		case settled:
+			// The verdict landed but its checkpoint did not: the settle
+			// stands in memory and the settlement retry owns the write, so
+			// the row binds normally.
+			log.WarningLog.Printf("reattach %q: the reconciled swap's checkpoint did not land (the settlement poll retries): %v", i.Title, rerr)
+		default:
+			p.abandonUnadoptedTunnel()
+			return fmt.Errorf("reattach %q: %w", i.Title, rerr)
+		}
 	}
 	// persistIdentity writes the provisioner's live identity (PID, address,
 	// adoption debt) onto the row's cleanup handle. Every exit past a spawn goes

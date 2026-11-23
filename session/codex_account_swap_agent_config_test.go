@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,9 +28,9 @@ const codexCredFile = "auth.json"
 // CODEX_HOME and requires it to be a session ".../account" path).
 type codexSwapServer struct {
 	AgentServer
-	live, next, scope string
-	can               bool
-	rec               accountSwapRecorder
+	live, scope string
+	can         bool
+	rec         accountSwapRecorder
 }
 
 func (s *codexSwapServer) CanSwapAccount() (bool, error) { return s.can, nil }
@@ -37,10 +38,11 @@ func (s *codexSwapServer) AccountSwapStatus() (string, string, string, error) {
 	o, p, id := s.rec.status()
 	return o, p, id, nil
 }
-func (s *codexSwapServer) SwapAccountInPlace(swapID string) (string, error) {
+func (s *codexSwapServer) ScopedStageAccountSwap() (bool, error) { return true, nil }
+func (s *codexSwapServer) SwapAccountInPlace(swapID string, scopedStage bool) (string, error) {
 	return s.rec.run(swapID, func() (string, error) {
 		os.Setenv("CODEX_HOME", s.scope) // rotate reads the host's live account scope
-		rot, err := newScopeRotation(tmux.ProgramCodex, swapID)
+		rot, err := newScopeRotation(tmux.ProgramCodex, swapID, scopedStage)
 		if err != nil {
 			return "", err
 		}
@@ -59,8 +61,25 @@ func (s *codexSwapServer) DiscardAccountNext(swapID string) error {
 	}
 	// The same binding rule production applies (#7788): only the stage bound
 	// to this swap is removed, and a marker that cannot be read is a failure
-	// rather than a silent "not mine".
-	return discardAccountNextBound(s.next, swapID)
+	// rather than a silent "not mine". Both spellings are probed — the
+	// discard cannot see which staging protocol the pair negotiated (#7793).
+	paths := []string{s.live + accountNextSuffix}
+	if swapID != "" {
+		paths = append(paths, stagedScopeDir(s.live, swapID))
+	}
+	for _, next := range paths {
+		if _, statErr := os.Lstat(next); errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if dErr := discardAccountNextBound(next, swapID); dErr != nil {
+			return dErr
+		}
+	}
+	// The stage is provably gone, so the tombstone publishes as this swap's
+	// own terminal verdict — replayable by a daemon whose record clear was
+	// lost (#7793), exactly like the real server's noteStagedDiscarded.
+	s.rec.refuseLocked(swapID)
+	return nil
 }
 
 // A fresh codex swap stages the operator's config.toml (with the forced file
@@ -100,7 +119,7 @@ func TestCodexAgentConfigSurvivesFreshSwap(t *testing.T) {
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
 
-	srv := &codexSwapServer{live: w.AccountDir(), next: w.NextAccountDir(), scope: w.AccountDir(), can: true}
+	srv := &codexSwapServer{live: w.AccountDir(), scope: w.AccountDir(), can: true}
 	t.Setenv("CODEX_HOME", w.AccountDir())
 	inst := &Instance{
 		Title: "codexswap", Path: repo, Program: tmux.ProgramCodex, Host: "box1",
@@ -109,13 +128,14 @@ func TestCodexAgentConfigSurvivesFreshSwap(t *testing.T) {
 		started: true, Tabs: []*Tab{newRemoteAgentTab()},
 	}
 	inst.agentSrv = srv
+	inst.SetOffBoxSwapPersist(func(*Instance) error { return nil })
 
 	opHome := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(opHome, "config.toml"),
 		[]byte(`model = "o3"`+"\n"+`cli_auth_credentials_store = "keyring"`+"\n"), 0o600))
 	t.Setenv("CODEX_HOME", opHome)
 
-	_, err = inst.SwapOffBoxAccount("alt", false)
+	_, err = inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	got := readOrEmpty(filepath.Join(dir, "account", "config.toml"))
@@ -162,7 +182,7 @@ func TestCodexFreshSwapKeepsAnEmptyProvisionSelection(t *testing.T) {
 	require.NoError(t, w.syncAccountIn(time.Minute))
 	p.account = w
 
-	srv := &codexSwapServer{live: w.AccountDir(), next: w.NextAccountDir(), scope: w.AccountDir(), can: true}
+	srv := &codexSwapServer{live: w.AccountDir(), scope: w.AccountDir(), can: true}
 	t.Setenv("CODEX_HOME", w.AccountDir())
 	inst := &Instance{
 		Title: "codexswap", Path: repo, Program: tmux.ProgramCodex, Host: "box1",
@@ -171,13 +191,14 @@ func TestCodexFreshSwapKeepsAnEmptyProvisionSelection(t *testing.T) {
 		started: true, Tabs: []*Tab{newRemoteAgentTab()},
 	}
 	inst.agentSrv = srv
+	inst.SetOffBoxSwapPersist(func(*Instance) error { return nil })
 
 	opHome := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(opHome, "config.toml"),
 		[]byte(`model = "o3"`+"\n"+`cli_auth_credentials_store = "keyring"`+"\n"), 0o600))
 	t.Setenv("CODEX_HOME", opHome)
 
-	_, err = inst.SwapOffBoxAccount("alt", false)
+	_, err = inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	assert.Empty(t, readOrEmpty(filepath.Join(dir, "account", "config.toml")),
@@ -236,7 +257,7 @@ func TestCodexAgentConfigSurvivesSwapOnAReattachedSession(t *testing.T) {
 	// left beside the session is what the swap reads the consent from (#7644).
 	require.NoError(t, os.WriteFile(rw.PolicyPath(), swapPolicyBytes(t, false), 0o600))
 
-	srv := &codexSwapServer{live: rw.AccountDir(), next: rw.NextAccountDir(), scope: rw.AccountDir(), can: true}
+	srv := &codexSwapServer{live: rw.AccountDir(), scope: rw.AccountDir(), can: true}
 	t.Setenv("CODEX_HOME", rw.AccountDir())
 	inst := &Instance{
 		Title: "codexswap", Path: repo, Program: tmux.ProgramCodex, Host: "box1",
@@ -244,13 +265,14 @@ func TestCodexAgentConfigSurvivesSwapOnAReattachedSession(t *testing.T) {
 		backend: backend, started: true, Tabs: []*Tab{newRemoteAgentTab()},
 	}
 	inst.agentSrv = srv
+	inst.SetOffBoxSwapPersist(func(*Instance) error { return nil })
 
 	opHome := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(opHome, "config.toml"),
 		[]byte(`model = "o3"`+"\n"+`cli_auth_credentials_store = "keyring"`+"\n"), 0o600))
 	t.Setenv("CODEX_HOME", opHome)
 
-	_, err = inst.SwapOffBoxAccount("alt", false)
+	_, err = inst.SwapOffBoxAccount("alt", false, "")
 	require.NoError(t, err)
 
 	got := readOrEmpty(filepath.Join(dir, "account", "config.toml"))
