@@ -101,11 +101,11 @@ func TestBoundChipLeavingTheComposerIsNotStillStagedBelowAStatusLine(t *testing.
 	bound := stagedEvidence{chip: true, chipText: normalizeDelivery(claudeChip)}
 	staged := claudeInsertPane("❯ " + claudeChip)
 	submitted := claudeInsertPane("❯")
-	anchor := stagedLastComposerAnchor(paneGridRows(staged))
-	if !boundStillStaged(staged, deliveryProbe{}, bound, anchor) {
+	block := deliveryBoundaryBlock(staged, deliveryProbe{}, bound)
+	if !boundStillStaged(staged, deliveryProbe{}, bound, block) {
 		t.Fatal("a chip still in the composer must read as staged")
 	}
-	if boundStillStaged(submitted, deliveryProbe{}, bound, anchor) {
+	if boundStillStaged(submitted, deliveryProbe{}, bound, block) {
 		t.Fatal("a bare repainted composer above an INSERT status line must read as submitted")
 	}
 }

@@ -52,20 +52,29 @@ func codexLanePane(above []string, composer ...string) string {
 	return strings.Join(rows, "\n") + "\n"
 }
 
-// boundaryAnchorForTest reduces a boundary fixture to its live-composer
-// anchor the way submit does: stagedLastComposerAnchor over the visible grid.
-func boundaryAnchorForTest(boundary string) int {
-	return stagedLastComposerAnchor(paneGridRows(boundary))
+// boundaryBlockForTest reduces a boundary fixture to the composer block the
+// way the submit remedy does: deliveryBoundaryBlock over the visible grid,
+// deriving the wide composer anchor and the block's first row from where the
+// bound render provably sat.
+func boundaryBlockForTest(boundary string, probe deliveryProbe, bound stagedEvidence) boundaryBlock {
+	return deliveryBoundaryBlock(boundary, probe, bound)
 }
 
-func codexBoundLiteral(t *testing.T, boundary string) (deliveryProbe, stagedEvidence, int) {
+func codexBoundLiteral(t *testing.T, boundary string) (deliveryProbe, stagedEvidence, boundaryBlock) {
+	return boundDraftFixture(t, boundary, codexEchoPrompt)
+}
+
+// boundDraftFixture builds the literal-tail bound evidence and the composer
+// block for a boundary fixture holding prompt's draft in the live composer.
+func boundDraftFixture(t *testing.T, boundary, prompt string) (deliveryProbe, stagedEvidence, boundaryBlock) {
 	t.Helper()
-	probe := newDeliveryProbe(codexEchoPrompt)
+	probe := newDeliveryProbe(prompt)
 	bound := stagedEvidence{tail: true}
-	anchor := boundaryAnchorForTest(boundary)
-	require.True(t, boundStillStaged(boundary, probe, bound, anchor),
+	block := boundaryBlockForTest(boundary, probe, bound)
+	require.GreaterOrEqual(t, block.anchor, 0, "fixture: the boundary has a composer glyph row")
+	require.True(t, boundStillStaged(boundary, probe, bound, block),
 		"fixture: the draft sitting in the composer at the Enter boundary reads as staged")
-	return probe, bound, anchor
+	return probe, bound, block
 }
 
 // TestCodexAmbiguousEchoFramesStayStaged: every one of these must stay staged
@@ -120,10 +129,10 @@ func TestCodexAmbiguousEchoFramesStayStaged(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			probe, bound, anchor := codexBoundLiteral(t, frames.boundary)
-			reason := stagedReading(frames.grace, probe, bound, anchor)
+			probe, bound, block := codexBoundLiteral(t, frames.boundary)
+			reason := stagedReading(frames.grace, probe, bound, block)
 			require.Contains(t, reason, frames.wantReason)
-			require.True(t, boundStillStaged(frames.grace, probe, bound, anchor))
+			require.True(t, boundStillStaged(frames.grace, probe, bound, block))
 		})
 	}
 }
@@ -135,9 +144,9 @@ func TestCodexAmbiguousEchoFramesStayStaged(t *testing.T) {
 // wider anchor sees it.
 func TestUltraComposerStillStagedWithoutAnyNarrowGlyphRow(t *testing.T) {
 	boundary := codexLanePane([]string{"⠋ Working · 3m"}, "» "+codexEchoPrompt)
-	probe, bound, anchor := codexBoundLiteral(t, boundary)
+	probe, bound, block := codexBoundLiteral(t, boundary)
 	grace := codexLanePane([]string{"⠋ Working · 3m"}, "» "+codexEchoPrompt)
-	reason := stagedReading(grace, probe, bound, anchor)
+	reason := stagedReading(grace, probe, bound, block)
 	require.Contains(t, reason, "still in the live composer")
 }
 
@@ -155,15 +164,11 @@ func TestGlyphLeadingDraftLineKeepsStagedReading(t *testing.T) {
 		t.Run("composer "+glyph, func(t *testing.T) {
 			composer := []string{glyph + " Explain this:", "  » quote"}
 			boundary := codexLanePane([]string{"✻ Ran tool"}, composer...)
-			probe := newDeliveryProbe(prompt)
-			bound := stagedEvidence{tail: true}
-			anchor := boundaryAnchorForTest(boundary)
-			require.True(t, boundStillStaged(boundary, probe, bound, anchor),
-				"fixture: the draft with a glyph-leading line sits in the composer at the boundary")
+			probe, bound, block := boundDraftFixture(t, boundary, prompt)
 			// The Enter was absorbed: the grace frame is the same pane.
-			reason := stagedReading(boundary, probe, bound, anchor)
+			reason := stagedReading(boundary, probe, bound, block)
 			require.Contains(t, reason, "still in the live composer")
-			require.True(t, boundStillStaged(boundary, probe, bound, anchor))
+			require.True(t, boundStillStaged(boundary, probe, bound, block))
 		})
 	}
 }
@@ -175,12 +180,12 @@ func TestGlyphLeadingDraftLineKeepsStagedReading(t *testing.T) {
 // reading — a first-row-only emptiness check would miss the draft entirely.
 func TestNewlineLeadingDraftComposerStaysStaged(t *testing.T) {
 	boundary := codexLanePane([]string{"› " + codexEchoPrompt}, "› ", "  "+codexEchoPrompt)
-	probe, bound, anchor := codexBoundLiteral(t, boundary)
+	probe, bound, block := codexBoundLiteral(t, boundary)
 	grace := codexLanePane([]string{
 		"› " + codexEchoPrompt,
 		"› " + codexEchoPrompt,
 	}, "› ", "  "+codexEchoPrompt)
-	reason := stagedReading(grace, probe, bound, anchor)
+	reason := stagedReading(grace, probe, bound, block)
 	require.NotEmpty(t, reason,
 		"a bare glyph first row with the draft still below it keeps the staged verdict")
 	require.Contains(t, reason, "still in the live composer")
@@ -193,12 +198,12 @@ func TestNewlineLeadingDraftComposerStaysStaged(t *testing.T) {
 // it saw. Master names it "repainted holding content".
 func TestDevinIdlePlaceholderRepaintNamesTheIdleReading(t *testing.T) {
 	boundary := devinLanePane([]string{"one"}, placeholderDraft("❭")...)
-	probe, bound, anchor := boundLiteral(t, boundary)
+	probe, bound, block := boundLiteral(t, boundary)
 	grace := devinLanePane([]string{"one", "SWE-2 Max · bypass Starting session…"},
 		"❭ Ask Devin to build features, fix bugs, or work on your code")
-	reason := stagedReading(grace, probe, bound, anchor)
+	reason := stagedReading(grace, probe, bound, block)
 	require.Contains(t, reason, "idle placeholder")
-	require.True(t, boundStillStaged(grace, probe, bound, anchor))
+	require.True(t, boundStillStaged(grace, probe, bound, block))
 }
 
 // TestUltraCodexSubmittedDraftStaysUnverified is #7801's residual warning,
@@ -291,4 +296,106 @@ func TestDevinStartingSessionWarnsNamingIdlePlaceholder(t *testing.T) {
 	logged := warnings.String()
 	require.Contains(t, logged, "withholding the remedy Enter")
 	require.Contains(t, logged, "idle placeholder", "the warning names the reading it saw")
+}
+
+// composerDraftRows renders prompt's lines the way a composer does: the first
+// line under the prompt glyph, each continuation line indented — including a
+// line that is itself a lone glyph, which normalizes to a composer-glyph row
+// inside the draft (#7809).
+func composerDraftRows(glyph, prompt string) []string {
+	lines := strings.Split(prompt, "\n")
+	rows := []string{glyph + " " + lines[0]}
+	for _, line := range lines[1:] {
+		rows = append(rows, "  "+line)
+	}
+	return rows
+}
+
+// TestLoneGlyphDraftLineKeepsStagedReading is #7809: the bound draft's own
+// continuation line can lead with a NARROW-set glyph — a lone "›" or ">" — so
+// the pane's last composer-glyph row lands INSIDE the draft and the head sits
+// above the search region unread. Master's block start read that still-staged
+// draft as delivered. The composer block's first row is where the boundary
+// frame proves the draft's render begins — found by content, never by glyph
+// shape — so the head keeps the staged reading in every composer the narrow
+// set covers, in the Ultra "»" composer, and whether the glyph line ends the
+// draft or a blank row precedes it.
+func TestLoneGlyphDraftLineKeepsStagedReading(t *testing.T) {
+	for name, tc := range map[string]struct {
+		glyph  string
+		prompt string
+	}{
+		"lone › line in › composer":             {"›", "check the reported stall\n›"},
+		"lone › line in ❯ composer":             {"❯", "check the reported stall\n›"},
+		"lone › line in ❭ composer":             {"❭", "check the reported stall\n›"},
+		"lone > line in › composer":             {"›", "check the reported stall\n>"},
+		"lone > line in ❯ composer":             {"❯", "check the reported stall\n>"},
+		"lone > line in ❭ composer":             {"❭", "check the reported stall\n>"},
+		"blank row before the glyph line":       {"›", "check the stall\n\n›"},
+		"draft whose last line is a lone glyph": {"›", "check the stall\nand its neighbor\n›"},
+		"lone › line in the Ultra » composer":   {"»", "check the reported stall\n›"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			boundary := codexLanePane([]string{"✻ Ran tool"}, composerDraftRows(tc.glyph, tc.prompt)...)
+			probe, bound, block := boundDraftFixture(t, boundary, tc.prompt)
+			// The Enter was absorbed: the grace frame is the same pane.
+			reason := stagedReading(boundary, probe, bound, block)
+			require.Contains(t, reason, "still in the live composer")
+			require.True(t, boundStillStaged(boundary, probe, bound, block))
+		})
+	}
+}
+
+// TestSubmittedDraftRepaintedBelowReadsDelivered is the control: a draft that
+// really submitted leaves the composer repainted bare BELOW the boundary's
+// anchor row, its echo in the transcript above. The block's first row moved
+// down with the anchor, so the echo stays transcript and the staged reading
+// keeps master's verdict: not staged.
+func TestSubmittedDraftRepaintedBelowReadsDelivered(t *testing.T) {
+	const prompt = "check the reported stall\n›"
+	boundary := codexLanePane([]string{"✻ Ran tool"}, composerDraftRows("›", prompt)...)
+	probe, bound, block := boundDraftFixture(t, boundary, prompt)
+	grace := codexLanePane([]string{
+		"✻ Ran tool",
+		"› check the reported stall ›",
+		"",
+	}, "›")
+	require.Equal(t, "", stagedReading(grace, probe, bound, block),
+		"a draft repainted bare below the boundary row reads as it does on master")
+	require.False(t, boundStillStaged(grace, probe, bound, block))
+}
+
+// TestLoneGlyphLineStrandStillWarnsAndWithholds drives #7809 end to end: the
+// draft's own continuation line is a lone narrow-set glyph, the pane's last
+// composer-glyph row lands INSIDE the draft, and the absorbed Enter leaves
+// the whole draft staged. Master read that pane delivered; it must warn
+// sent-unverified and authorize no remedy Enter.
+func TestLoneGlyphLineStrandStillWarnsAndWithholds(t *testing.T) {
+	splitRender := func(payload string) []string { return strings.Split(payload, "\n") }
+	for name, tc := range map[string]struct {
+		glyph  string
+		prompt string
+	}{
+		"lone › line in › composer":             {"›", "check the reported stall\n›"},
+		"lone › line in ❯ composer":             {"❯", "check the reported stall\n›"},
+		"lone › line in ❭ composer":             {"❭", "check the reported stall\n›"},
+		"lone > line in › composer":             {"›", "check the reported stall\n>"},
+		"lone > line in ❯ composer":             {"❯", "check the reported stall\n>"},
+		"lone > line in ❭ composer":             {"❭", "check the reported stall\n>"},
+		"blank row before the glyph line":       {"›", "check the stall\n\n›"},
+		"draft whose last line is a lone glyph": {"›", "check the stall\nand its neighbor\n›"},
+		"lone › line in the Ultra » composer":   {"»", "check the reported stall\n›"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			warnings := captureWarningLog(t)
+			m := &stagedDraftPane{glyph: tc.glyph, swallowedEnters: 1, render: splitRender}
+			status, pastes, enters := sendStaged(t, m, tc.prompt)
+			require.Equal(t, PromptSentUnverified, status,
+				"a draft whose own line is a lone glyph must never read as delivered")
+			require.Equal(t, 1, pastes)
+			require.Equal(t, 1, enters, "a staged draft authorizes no remedy Enter")
+			require.Contains(t, warnings.String(), "withholding the remedy Enter")
+			require.Contains(t, warnings.String(), "still in the live composer")
+		})
+	}
 }
