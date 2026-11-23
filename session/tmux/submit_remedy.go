@@ -259,10 +259,12 @@ var busyComposerHints = map[string][]string{
 // bareComposerGlyphRow reports whether a row is an empty composer prompt: the
 // bare glyph a composer repaints after a submit, or that glyph with the
 // agent's own mid-turn hint (busyComposerHints), and nothing else. A user's
-// ">quote" row is not bare, because it carries content.
+// ">quote" row is not bare, because it carries content. Codex's Ultra-tier
+// "»" counts too — it only ever opens the live composer, so a bare one is an
+// empty composer like any other.
 func bareComposerGlyphRow(row string) bool {
 	norm := normalizeDelivery(row)
-	for _, glyph := range []string{"›", claudeComposerGlyph, "❭"} {
+	for _, glyph := range []string{"›", "»", claudeComposerGlyph, "❭"} {
 		rest, ok := strings.CutPrefix(norm, glyph)
 		if !ok {
 			continue
@@ -316,6 +318,49 @@ func composerRegion(rows []string, anchor int) []string {
 	return rows[anchor:end]
 }
 
+// boundaryComposerShape marks where the live composer sat in the Enter
+// boundary frame and what the transcript above it already showed. The anchor
+// uses the recheck's wider glyph set (stagedLastComposerAnchor): Codex's Ultra
+// tier prompts its composer with "»" — upstream codex-rs
+// bottom_pane/effort_ignition.rs EffortTier::prompt_glyph, the only
+// line-leading "»" the TUI draws (codexComposerGlyphs) — while every echoed
+// user prompt is marked "› " at every tier (history_cell/messages.rs). Under
+// the narrower set an Ultra pane's last "›" echo row won the anchor and the
+// echo's own text read as this prompt still staged — the literal-tail
+// warnings that dominate #7801. The LAST row carrying any of the glyphs is
+// still provably the live composer: echoes and queued-input previews always
+// sit above it, the footer/status rows below never lead with one, and a
+// wrapped echo's "»"-leading continuation row can only ever sort above the
+// true composer.
+type boundaryComposerShape struct {
+	anchor int
+	// upper is the normalized transcript ABOVE the boundary's live composer —
+	// the echo-count baseline a grace frame must beat for its bound evidence
+	// to read as this delivery consumed (the same above-composer accounting
+	// #7545 keeps as tailEcho/chipEcho, here on the visible reach the grace
+	// capture shares).
+	upper string
+}
+
+// composerShapeAtBoundary anchors the Enter boundary's live composer and
+// records the normalized transcript above it. The boundary GRID capture is
+// the visible pane — the same reach as the grace frame the counts compare
+// against — so a scrolled-off identical echo can hide growth (a miss, never a
+// false claim) but cannot fake it. A boundary with no glyph row at all counts
+// its whole frame: the baseline can only overcount, which stays conservative.
+func composerShapeAtBoundary(strippedBoundaryGrid string) boundaryComposerShape {
+	rows := paneGridRows(strippedBoundaryGrid)
+	anchor := stagedLastComposerAnchor(rows)
+	upper := rows
+	if anchor >= 0 {
+		upper = rows[:anchor]
+	}
+	return boundaryComposerShape{
+		anchor: anchor,
+		upper:  normalizeDelivery(strings.Join(upper, "")),
+	}
+}
+
 // boundStillStaged reports whether evidence bound to this delivery still sits
 // in the live composer — at or below the pane's last composer-glyph row — in an
 // atomic pane+cursor frame. The anchor is positional, not textual: a composer
@@ -327,39 +372,128 @@ func composerRegion(rows []string, anchor int) []string {
 // composer; anything else — an anchor that moved up, or a content row like a
 // user's ">quote" — is a composer shape we can no longer attribute, so the
 // draft conservatively still counts as staged.
-func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, boundaryAnchor int) bool {
-	return stagedReading(pane, probe, bound, boundaryAnchor) != ""
+func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, boundary boundaryComposerShape) bool {
+	reason, _ := stagedReading(pane, probe, bound, boundary)
+	return reason != ""
 }
 
-// stagedReading is boundStillStaged's verdict with its reason. It names which
-// of the staged readings fired, or returns "" when the draft left the live
-// composer. The withheld-remedy warning prints it. A draft our Enter left in
-// the composer and a repaint we cannot attribute are different failures, and a
-// log line that named neither could not tell production's 537 warnings apart
-// (#7023).
-func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, boundaryAnchor int) string {
+// stagedReading is boundStillStaged's verdict with its reason — and, in the
+// second return, whether the frame carries POSITIVE evidence that this
+// delivery was consumed: a NEW copy of the bound evidence above a live
+// composer that itself reads empty (boundEchoAboveLiveComposer). It names
+// which of the staged readings fired, or "" when the draft left the live
+// composer. The withheld-remedy warning prints the reason. A draft our Enter
+// left in the composer and a repaint we cannot attribute are different
+// failures, and a log line that named neither could not tell production's 537
+// warnings apart (#7023).
+func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, boundary boundaryComposerShape) (string, bool) {
 	rows := paneGridRows(pane)
-	anchor := lastComposerGlyphRow(rows)
+	anchor := stagedLastComposerAnchor(rows)
 	if anchor < 0 {
-		return ""
+		return "", false
 	}
 	lower := normalizeDelivery(strings.Join(rows[anchor:], ""))
 	if bound.tail && strings.Contains(lower, probe.completion) {
-		return "this prompt's bound text is still in the live composer"
+		return "this prompt's bound text is still in the live composer", false
 	}
 	if bound.chip && strings.Contains(lower, bound.chipText) {
-		return "this prompt's bound chip is still in the live composer"
+		return "this prompt's bound chip is still in the live composer", false
 	}
-	if anchor == boundaryAnchor {
-		return ""
+	if boundEchoAboveLiveComposer(rows, anchor, probe, bound, boundary) {
+		return "", true
 	}
-	if anchor < boundaryAnchor {
-		return "the composer was repainted above its row at the Enter boundary, so what it holds cannot be attributed"
+	if anchor == boundary.anchor {
+		return "", false
+	}
+	if anchor < boundary.anchor {
+		return "the composer was repainted above its row at the Enter boundary, so what it holds cannot be attributed", false
 	}
 	if !bareComposerGlyphRow(rows[anchor]) {
-		return "the composer was repainted holding content that is neither this prompt nor an empty composer"
+		if idleComposerPlaceholderRow(normalizeDelivery(rows[anchor])) {
+			return "the composer was repainted holding only the agent's idle placeholder, which is exactly what a dropped prompt shows", false
+		}
+		return "the composer was repainted holding content that is neither this prompt nor an empty composer", false
 	}
-	return ""
+	return "", false
+}
+
+// boundEchoAboveLiveComposer is the positive-evidence reading: the bound
+// evidence appears ABOVE the live composer row more times than the Enter
+// boundary's transcript already held it — a NEW echo of this delivery (Codex
+// marks it "› ", a queued input sits in its "↳" preview, a submitted chip
+// echoes the same chip) — and the live composer row reads empty.
+//
+// Positive evidence only. An idle placeholder alone NEVER suffices: a
+// composer that dropped the prompt shows the same idle frame (#4200), so the
+// placeholder may only ever support a verdict a new echo already proved. An
+// earlier echo of the same prompt is not evidence either — a watch that
+// resends identical text would otherwise prove every later delivery — so the
+// count must GROW past the boundary's, never merely be present. A count that
+// cannot grow because an identical copy scrolled off is a miss that stays
+// staged, never a claim.
+func boundEchoAboveLiveComposer(rows []string, anchor int, probe deliveryProbe, bound stagedEvidence, boundary boundaryComposerShape) bool {
+	if !composerRowReadsEmpty(rows[anchor]) {
+		return false
+	}
+	upper := normalizeDelivery(strings.Join(rows[:anchor], ""))
+	if bound.tail &&
+		strings.Count(upper, probe.completion) > strings.Count(boundary.upper, probe.completion) {
+		return true
+	}
+	if bound.chip &&
+		strings.Count(upper, bound.chipText) > strings.Count(boundary.upper, bound.chipText) {
+		return true
+	}
+	return false
+}
+
+// composerRowReadsEmpty reports whether the live composer row holds only its
+// prompt glyph — bareComposerGlyphRow's bare glyph or the agent's own
+// mid-turn hint — or the glyph plus the agent's own idle placeholder. The
+// idle placeholder is empty input too, but it is ALSO what a dropped prompt
+// shows, so it may only support a verdict a new echo already proved.
+func composerRowReadsEmpty(row string) bool {
+	return bareComposerGlyphRow(row) || idleComposerPlaceholderRow(normalizeDelivery(row))
+}
+
+// idleComposerPlaceholders are the ghost texts an agent draws inside an EMPTY
+// input while it is not working a turn — normalized and keyed by the agent's
+// composer glyph, the same discipline busyComposerHints keeps. They are
+// exactly what a composer that dropped the prompt also shows (#4200), so a
+// placeholder alone can never be evidence: it only supports a consumed
+// verdict beside a NEW echo, and otherwise names the staged reading what it
+// saw. Codex draws "Ask Codex to do anything" idle and busy alike, under both
+// of its prompt glyphs. Claude rotates its `Try "…"` suggestions, so it is
+// handled by shape below rather than listed.
+var idleComposerPlaceholders = map[string][]string{
+	"›": {normalizeDelivery("Ask Codex to do anything")},
+	"»": {normalizeDelivery("Ask Codex to do anything")},
+	"❭": {normalizeDelivery("Ask Devin to build features, fix bugs, or work on your code")},
+}
+
+// idleComposerPlaceholderRow reports whether a NORMALIZED composer row is the
+// agent's glyph plus exactly its own idle placeholder — no more, no less,
+// like busyComposerHints. The same text under another agent's glyph is
+// content, and so is one added or dropped character.
+func idleComposerPlaceholderRow(norm string) bool {
+	for glyph, placeholders := range idleComposerPlaceholders {
+		rest, ok := strings.CutPrefix(norm, glyph)
+		if !ok {
+			continue
+		}
+		for _, placeholder := range placeholders {
+			if rest == placeholder {
+				return true
+			}
+		}
+		return false
+	}
+	// Claude's `Try "…"` hint rotates, so only the shape is provable — and
+	// only under Claude's own glyph (composer_draft.go's shaped rule).
+	if rest, ok := strings.CutPrefix(norm, claudeComposerGlyph); ok {
+		return strings.HasPrefix(rest, `Try"`)
+	}
+	return false
 }
 
 // stillChipComposer is the stillness+position proof for the one remediable
@@ -503,6 +637,15 @@ func contentEndCol(row string) int {
 // remedy keystroke is check-then-act, like absenceStillProven's. The daemon's
 // attach defer (#1586) is the guard for a user typing in a pane.
 //
+// A staged read is also vetoed by POSITIVE evidence the prompt was consumed:
+// a NEW echo of the bound evidence above the live composer, more copies than
+// the boundary's transcript already held, with the live composer row itself
+// empty (boundEchoAboveLiveComposer). An idle placeholder alone can never
+// stand in for that echo — a dropped prompt shows the same frame (#4200) —
+// and the consumed reading can only DEMOTE an absent observation to
+// unverified, never keep it: a proven echo is evidence against absence, so
+// the #3293 redelivery can never be authorized because of it.
+//
 // The verdict never rounds up. Bound evidence that stays staged, a pane that
 // changed while staged, a remedy whose outcome cannot be re-read, and every
 // non-chip staged shape all report sent-unverified. Only a draft that left the
@@ -512,7 +655,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 		return observation
 	}
 	stripped := xansi.Strip(boundaryGrid)
-	boundaryAnchor := lastComposerGlyphRow(paneGridRows(stripped))
+	boundary := composerShapeAtBoundary(stripped)
 
 	pasteDeliverySleep(strandedSubmitGrace)
 	pane, cursor, ok := t.capturePaneAndCursorState()
@@ -520,8 +663,15 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 		return observation
 	}
 	unverified := deliveryObservation{outcome: deliveryObservedUnverified, pane: pane}
-	reading := stagedReading(pane, probe, bound, boundaryAnchor)
+	reading, consumed := stagedReading(pane, probe, bound, boundary)
 	if reading == "" {
+		if consumed && observation.outcome == deliveryObservedAbsent {
+			// A proven new echo is evidence AGAINST absence, so the reading
+			// must never reach the #3293 redelivery path still classified
+			// absent — the same demotion the post-remedy read applies below
+			// when the draft provably left the composer.
+			observation.outcome = deliveryObservedUnverified
+		}
 		return observation
 	}
 
@@ -561,7 +711,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 	// remedy Enter too still shows it — a deeper wedge, never delivered.
 	pasteDeliverySleep(strandedSubmitSettle)
 	settled, _, ok := t.capturePaneAndCursorState()
-	if !ok || boundStillStaged(settled, probe, bound, boundaryAnchor) {
+	if !ok || boundStillStaged(settled, probe, bound, boundary) {
 		return unverified
 	}
 	outcome := observation.outcome

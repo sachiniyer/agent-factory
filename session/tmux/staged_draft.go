@@ -290,13 +290,15 @@ func stagedDraftReading(pane string, ev stagedDraftEvidence) (StagedDraftRead, s
 
 // stagedComposerGlyphRow is the recheck's composer-glyph set — the shared
 // readers' set PLUS Codex's Ultra-tier » (codexComposerGlyphs). The submit
-// path deliberately leaves » unrecognized (composer_draft.go: an echoed » is
-// indistinguishable from the live composer there, so non-placeholder text
-// proves nothing). The recheck makes that distinction a different way — the
-// last glyph row anchors the live composer, and the echo baselines bound at
-// send time attribute what sits above it — so the wider set only widens what
-// the watch can prove. It lives here, not in the shared readers, because
-// master's #4200 tests pin their narrower set (Codex #7547 review).
+// path still leaves » unrecognized in its narrow readers (isComposerGlyphRow:
+// the binding and still-chip checks), where an echoed »-leading row could be
+// mistaken for the composer itself (composer_draft.go). The staged readers —
+// this recheck's anchor and the #4200 grace reading's — make that distinction
+// a different way: the LAST glyph row anchors the live composer (echoes and
+// footers can only sort around it), and the echo baselines bound at send time
+// attribute what sits above it — so the wider set only widens what each can
+// prove. It lives here, not in the shared readers, because master's #4200
+// still-chip tests pin their narrower set (Codex #7547 review).
 func stagedComposerGlyphRow(norm string) bool {
 	return isComposerGlyphRow(norm) || strings.HasPrefix(norm, "»")
 }
