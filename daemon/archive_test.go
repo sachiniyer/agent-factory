@@ -461,6 +461,26 @@ func TestArchiveSessionRejectsStartupUnknown(t *testing.T) {
 	assert.NotEqual(t, session.Archived, inst.GetStatus())
 }
 
+// A row fenced by an off-box swap's in-flight record has known exits, and the
+// archive refusal names exactly those (#7799): a daemon restart reconciles the
+// recorded swap, or `af sessions kill` removes the row — no other verb exists
+// until #7797 is decided. The generic "explicitly remove it" wording is for
+// startup-unknown rows nothing can reconcile.
+func TestArchiveSessionNamesTheSwapFenceExits(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "swapping")
+	inst.SetOffBoxSwapInFlightForTest(&session.InFlightOffBoxSwapData{SwapID: "swap-1", From: "work", To: "alt"})
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "swapping", RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "daemon restart", "the automatic exit is named")
+	assert.Contains(t, err.Error(), "af sessions kill", "and the row removal that always works")
+	assert.Contains(t, err.Error(), "#7797")
+	assert.NotContains(t, err.Error(), "explicitly remove", "no refusal-shaped wording where kill is the exit")
+	assert.True(t, exists(srcPath), "archive moved a worktree whose swap verdict is unknown")
+	assert.NotEqual(t, session.Archived, inst.GetStatus())
+}
+
 // TestArchiveSession_MoveFailureMarksLost: when the worktree move fails, the
 // instance is marked Lost (not Archived) with started still true, so it stays
 // restorable in place — fenced off the automatic loop since #7752, so an

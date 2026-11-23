@@ -96,8 +96,11 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 		_ = instance.Transition(session.AbortHandoff())
 		return HandoffSessionResponse{}, err
 	}
+	// No ClearLimitReached here: the swap's commit already retired the
+	// outgoing account's wall inside the checkpoint that names the new one
+	// (#7799). A clear at this point would be a no-op that only suggests the
+	// wall outlives the commit.
 	m.noteRuntimeReplaced(repoID, instance)
-	instance.ClearLimitReached()
 	response := HandoffSessionResponse{OK: true, From: outgoing, To: outgoing, FromAccount: res.From, ToAccount: res.To,
 		Conversation: session.HandoffConversation{CarryFailure: offBoxAccountNoConversation}}
 	if override := strings.TrimSpace(req.Brief); override != "" {
@@ -128,7 +131,13 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 func (m *Manager) finishOffBoxNotice(instance *session.Instance, res session.OffBoxAccountSwap, repoID, key string) error {
 	var errs []error
 	if res.Reconciled {
-		errs = append(errs, fmt.Errorf("the swap of %q to account %q completed on the host but its response was lost, so the new agent's start is unconfirmed and no notice was sent; check the session and relaunch it if it is not running", instance.Title, res.To))
+		// The commit already stamped the takeover brief as the row's pending
+		// mission with a not-delivered verdict (#7793 review), so the brief is
+		// owed, durably, and handoff recovery replays it once the new agent
+		// proves ready. Sending the operator to relaunch or resend by hand
+		// would race that replay and could hand the agent the brief twice
+		// (#7799).
+		errs = append(errs, fmt.Errorf("the swap of %q to account %q completed on the host but its response was lost, so the new agent's start is unconfirmed and its takeover brief was not sent; the brief stays the session's pending mission, and handoff recovery delivers it once the new agent is confirmed ready — it needs no resend", instance.Title, res.To))
 	} else if err := m.deliverOffBoxAccountNotice(instance, res, repoID, key); err != nil {
 		errs = append(errs, err)
 	}
@@ -194,11 +203,14 @@ func (m *Manager) tryOffBoxAccountSwap(instance *session.Instance, repoID, key s
 }
 
 // finishOffBoxFailover settles a completed failover: the agent is live on the new
-// account (which also lifts the limit block that belonged to the old one), the row
-// is durable, and the replacement is told what it continues.
+// account, the row is durable, and the replacement is told what it continues. The
+// limit block that belonged to the old account is already lifted — the swap's
+// commit retires it in the same checkpoint that names the new account (#7799), so
+// a daemon death before this tail can never reload the new account carrying the
+// old one's wall. Nothing here re-parks: a wall the new account hits later is its
+// own, observed fresh.
 func (m *Manager) finishOffBoxFailover(repoID, key string, instance *session.Instance, swap *autoAccountSwap, res session.OffBoxAccountSwap) error {
 	m.noteRuntimeReplaced(repoID, instance)
-	instance.ClearLimitReached()
 	// The limit-resume fence is still raised while the notice is submitted, so a
 	// poll cannot read the fresh agent's idle composer as a finished run.
 	noticeErr := m.finishOffBoxNotice(instance, res, repoID, key)
@@ -241,7 +253,15 @@ func (m *Manager) deliverOffBoxAccountNotice(instance *session.Instance, res ses
 		return errors.Join(serr, evidenceErr)
 	}
 	if err := handoffDeliveryResultError(status, serr); err != nil {
-		return fmt.Errorf("account handoff of %q completed, but the notice for the new account was not delivered (send the task again with `af sessions send-prompt`): %w", instance.Title, err)
+		// The text names the obligation that actually remains (#7799). A
+		// recorded not-delivered verdict is the one recovery replays on its
+		// own, so a `send-prompt` here would race that replay and deliver the
+		// brief twice; every other verdict is the operator's confirm-or-retry
+		// decision, worded exactly as the local handoff path words it.
+		if instance.PendingHandoffMissionAutoRetryable() {
+			return fmt.Errorf("account handoff of %q completed, but the takeover brief for the new account was not delivered (%w); it stays the session's pending mission and handoff recovery replays it automatically — `af sessions retry-limit` resends it by hand", instance.Title, err)
+		}
+		return fmt.Errorf("account handoff of %q completed, but could not confirm whether the takeover brief for the new account landed (%w); the exact mission remains pending — inspect the pane, then `af sessions retry-limit` resends it or `af sessions retry-limit --delivered` retires it", instance.Title, err)
 	}
 	if !instance.ClearPendingHandoffMission(mission) {
 		return fmt.Errorf("account handoff of %q delivered, but its pending mission changed before settlement", instance.Title)

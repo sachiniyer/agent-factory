@@ -1378,17 +1378,25 @@ config, so the host's own login is neither read nor replaced.
   provisions, launches, or is admitted. A failure inside the host puts the old
   scope back, and the stage — the new account's credentials — is removed through
   the agent-server's serialized discard route where the server offers it, or an
-  ordered remote cleanup where a request can provably no longer be in flight. If
-  the swap's own response is lost, af reconciles the session's durable record from
+  ordered remote cleanup where a request can provably no longer be in flight.
+  Stages no live record names — one a dead daemon left before its record
+  landed, or one an older build left — are swept when the session reattaches
+  after a restart, through the same serialized discard, which removes a stage
+  only when its marker names the swap being discarded or it carries no marker
+  (#7799); on an agent-server too old for `account-swap-discard` they are left
+  for teardown rather than removed unordered. If the swap's own response is
+  lost, af reconciles the session's durable record from
   the agent-server's terminal status under the swap's minted id: a status naming
   an earlier swap (or an anonymous pre-identity record) never proves this swap,
   so the staged scope is discarded on the server — serialized with the swap
   itself — and the status is re-read once. A committed answer lands the swap with
   an unconfirmed start; a definite refusal or a rolled-back status leaves the old
   account live; anything else fences the session as startup-unknown — relaunch,
-  reprovision, recovery, teardown, and any further swap are refused until a
+  reprovision, recovery, archive, and any further swap are refused until a
   daemon restart re-runs the same reconcile on the live agent-server, or the row
-  is removed with `af sessions kill`. The fence clears only on a definite
+  is removed with `af sessions kill`, which the fence always admits. Those are
+  the only two exits: no operator verb lifts the fence, pending the owner's
+  decision on whether one should exist (#7797). The fence clears only on a definite
   verdict — pane liveness alone never clears it — and the fence error names an
   agent-server too old for `account-swap-discard` so it can be upgraded:
   upgrading prevents a recurrence but cannot establish the already-lost swap's

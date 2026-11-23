@@ -82,7 +82,7 @@ func TestSwapOffBoxAccountFencedSessionAdmitsNoNewSwap(t *testing.T) {
 	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	require.True(t, f.inst.StartupStateUnknown())
-	require.NotNil(t, f.inst.InFlightOffBoxSwap(), "the record the verb reconciles is kept")
+	require.NotNil(t, f.inst.InFlightOffBoxSwap(), "the record a restart reconciles is kept")
 	calls, shells := f.srv.calls, len(*f.shellCalls)
 
 	f.registerThird(t)
@@ -117,11 +117,10 @@ func TestSwapOffBoxAccountReconcileSwapUnfencesOnAVerdict(t *testing.T) {
 	require.True(t, f.inst.StartupStateUnknown())
 	require.False(t, f.inst.Started(), "the fence lifts the running claim with it")
 	require.NotNil(t, f.inst.InFlightOffBoxSwap())
-	f.inst.remoteClient = &remoteAgentClient{} // the transport is bound; only the host's answer is missing
 
-	// While the host cannot say how the swap ended, the verb refuses and the
-	// fence — and the record it reconciles — stays.
-	settled, err := f.inst.ReconcileOffBoxSwapFence()
+	// While the host cannot say how the swap ended, the reconcile refuses and
+	// the fence — and the record it reconciles — stays.
+	settled, err := f.reconcileInFlight()
 	require.Error(t, err)
 	require.False(t, settled)
 	assert.ErrorIs(t, err, ErrOffBoxSwapVerdictIndeterminate)
@@ -131,7 +130,7 @@ func TestSwapOffBoxAccountReconcileSwapUnfencesOnAVerdict(t *testing.T) {
 	// The host answers: this swap committed. The fence lifts, the row records
 	// the account the host provably runs, and the record retires.
 	f.srv.statusErr = nil
-	settled, err = f.inst.ReconcileOffBoxSwapFence()
+	settled, err = f.reconcileInFlight()
 	require.NoError(t, err)
 	assert.True(t, settled)
 	acct, _ := f.inst.AccountSelection()

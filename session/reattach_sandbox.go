@@ -132,7 +132,7 @@ func (i *Instance) ReattachSandbox() error {
 	if i.InFlightOffBoxSwap() != nil {
 		if aliveErr != nil {
 			p.abandonUnadoptedTunnel()
-			return fmt.Errorf("reattach %q: the agent-server did not answer, so the recorded swap cannot be reconciled: %w — the row stays fenced until a daemon restart reaches a live agent-server or `af sessions kill` removes it", i.Title, aliveErr)
+			return fmt.Errorf("reattach %q: the agent-server did not answer, so the recorded swap cannot be reconciled: %w — the row stays fenced until a daemon restart reaches a live agent-server or `af sessions kill` removes it; no other verb lifts this fence (#7797)", i.Title, aliveErr)
 		}
 		settled, rerr := i.reconcileInFlightOffBoxSwap(&remoteAgentServer{rc: rc, inst: i}, p)
 		switch {
@@ -218,8 +218,30 @@ func (i *Instance) ReattachSandbox() error {
 	// restore or Lost recovery that ran while the probe was in flight has already
 	// installed its own runtime, and binding the old one over it would strand
 	// the replacement and point the row at a reaped runtime.
+	stillCurrentLocked := func() bool {
+		return i.remoteClient == nil && i.backend == b && !i.userKilled && i.liveness != LiveArchived
+	}
+	i.mu.RLock()
+	current := stillCurrentLocked()
+	i.mu.RUnlock()
+	if !current {
+		p.abandonUnadoptedTunnel()
+		return ErrReattachIneligible
+	}
+	// The row is still this attempt's and rc is the final client: the server
+	// that answered the first dial, or the one restarted and re-dialed above.
+	// It carries no unresolved record — that settled before anything else on
+	// this transport, or never existed — so no request this row ever sent can
+	// still be in flight, and a stage no record names is an orphan (#7799):
+	// left by a daemon that died between staging and its record, or by a skew
+	// path. Either server serializes the discard through agentOpMu, and a
+	// restarted one cannot hold a queued request at all — a process restart
+	// empties its queue — so both arms sweep here, at one point, before the
+	// row binds. The sweep crosses the host, so the binding check below runs
+	// again after it rather than trusting this one across that round trip.
+	i.sweepOrphanedAccountStages(&remoteAgentServer{rc: rc, inst: i}, p)
 	i.mu.Lock()
-	stillCurrent := i.remoteClient == nil && i.backend == b && !i.userKilled && i.liveness != LiveArchived
+	stillCurrent := stillCurrentLocked()
 	// Adopting the same runtime provisions nothing, so the recorded callback
 	// state travels with it (#5974): bindProvisionResult installs the result's
 	// reason verbatim, and an empty one would read as a healthy reprovision.

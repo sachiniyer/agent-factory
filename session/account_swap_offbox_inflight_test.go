@@ -329,7 +329,7 @@ func TestScopeRotationConsumesOnlyTheSwapsOwnStage(t *testing.T) {
 		"nor was another swap's")
 }
 
-// The verb settles only what the host answers definitely for the RECORDED id:
+// The reconcile settles only what the host answers definitely for the RECORDED id:
 // a committed record belonging to a different swap is not this swap's commit —
 // the staged scope is discarded and the row keeps its account.
 func TestReconcileSwapSettlesOnlyTheRecordedID(t *testing.T) {
@@ -345,9 +345,8 @@ func TestReconcileSwapSettlesOnlyTheRecordedID(t *testing.T) {
 	f.srv.rec.id, f.srv.rec.outcome, f.srv.rec.program = "someone-elses", swapOutcomeCommitted, "claude"
 	rec := &InFlightOffBoxSwapData{SwapID: "test-swap-1", From: "work", To: "alt"}
 	f.inst.offBoxSwapInFlight = rec
-	f.inst.remoteClient = &remoteAgentClient{}
 
-	settled, err := f.inst.ReconcileOffBoxSwapFence()
+	settled, err := f.reconcileInFlight()
 	require.NoError(t, err)
 	assert.True(t, settled)
 	acct, _ := f.inst.AccountSelection()
@@ -518,11 +517,10 @@ func TestReconciledCommitEndsTheUnreplayedRunAndRestoresTheSkipList(t *testing.T
 	// hands back a clone, so the seed writes the instance's own record.
 	f.inst.offBoxSwapInFlight.AgentConfigSkipped = []string{"claude:CLAUDE.md: declared file is missing"}
 
-	// The daemon's restart reconciles the committed verdict on the bound row:
-	// the run the replacement never saw ends interrupted, not completed.
-	f.inst.remoteClient = &remoteAgentClient{}
+	// The daemon's restart reconciles the committed verdict: the run the
+	// replacement never saw ends interrupted, not completed.
 	f.srv.statusErr = nil
-	settled, err := f.inst.ReconcileOffBoxSwapFence()
+	settled, err := f.reconcileInFlight()
 	require.NoError(t, err)
 	require.True(t, settled)
 	acct, _ := f.inst.AccountSelection()
@@ -555,9 +553,8 @@ func TestDiscardVerdictReplaysAcrossALostCheckpoint(t *testing.T) {
 	// carries the record and re-runs the same reconcile cold.
 	f.inst.offBoxSwapInFlight = &InFlightOffBoxSwapData{SwapID: "test-swap-1", From: "work", To: "alt"}
 	f.inst.startupStateUnknown = true
-	f.inst.remoteClient = &remoteAgentClient{}
 
-	settled, err := f.inst.ReconcileOffBoxSwapFence()
+	settled, err := f.reconcileInFlight()
 	require.NoError(t, err)
 	assert.True(t, settled, "the discard's tombstone replays as this swap's own rolled_back")
 	assert.Nil(t, f.inst.InFlightOffBoxSwap())
@@ -631,8 +628,7 @@ func TestIndeterminateSwapFenceKeepsTheActiveTaskRun(t *testing.T) {
 
 	// The reconcile path to the same indeterminate verdict keeps it too:
 	// the host is re-asked, still cannot say, and the marker persists.
-	f.inst.remoteClient = &remoteAgentClient{}
-	settled, err := f.inst.ReconcileOffBoxSwapFence()
+	settled, err := f.reconcileInFlight()
 	require.Error(t, err)
 	assert.False(t, settled)
 	assert.True(t, f.inst.taskRunActive)
@@ -650,19 +646,26 @@ func TestReconcileSwapUnfencesOnARollbackVerdict(t *testing.T) {
 	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
 	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
 	require.NotNil(t, f.inst.InFlightOffBoxSwap())
-	f.inst.remoteClient = &remoteAgentClient{}
 
 	// The host answers: this swap's stage was discarded under it — a definite
 	// rollback (the discard's tombstone made commit impossible).
 	f.srv.statusErr = nil
 	f.srv.rec.id, f.srv.rec.outcome, f.srv.rec.program = "test-swap-1", swapOutcomeRolledBack, ""
-	settled, err := f.inst.ReconcileOffBoxSwapFence()
+	settled, err := f.reconcileInFlight()
 	require.NoError(t, err)
 	assert.True(t, settled)
 	acct, _ := f.inst.AccountSelection()
 	assert.Equal(t, "work", acct)
 	assert.False(t, f.inst.StartupStateUnknown())
 	assert.Nil(t, f.inst.InFlightOffBoxSwap())
+}
+
+// reconcileInFlight runs the record's verdict engine against the fixture's
+// host — the settle a daemon restart reaches through ReattachSandbox, called
+// directly now that no session-level entry point wraps it (#7799): the
+// operator verb that would have is the owner's call in #7797.
+func (f *swapFixture) reconcileInFlight() (bool, error) {
+	return f.inst.reconcileInFlightOffBoxSwap(f.srv, f.inst.backend.(*sshBackend).provisioner)
 }
 
 var _ = time.Second // the file's fixture shares the package's helpers
