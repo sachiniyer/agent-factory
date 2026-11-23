@@ -1,9 +1,12 @@
 package session
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 )
 
 // runtimeActionAdmissionViews covers every refusal arm of refuseRuntimeAction
@@ -100,6 +103,127 @@ func TestRuntimeActionRefusalText(t *testing.T) {
 		`session "s" is not lost`)
 	require.EqualError(t, running.ValidateRuntimeAction(RuntimeAction(99)),
 		"unknown runtime action 99")
+}
+
+// TestRuntimeAction_HandoffMissionRefusalSuggestsPasteSafeCommands pins that the
+// pending-handoff-mission refusal prints BOTH remedies as complete, paste-safe
+// commands built by shellsuggest.PositionalCommand: the resend, and the retire
+// with --delivered before the option terminator. PositionalCommand always
+// emits `--` before the positional, so a flag named only in prose
+// ("`--delivered` retires it") invites the user to append it AFTER the printed
+// command — where pflag reads it as a second positional and cobra refuses the
+// paste with "accepts 1 arg(s), received 2" (#7803, #7806 review). Each remedy
+// must therefore carry its flag inside the printed command itself.
+//
+// Regression for cc0208b0, which added this arm interpolating `v.Title` raw —
+// the only command-bearing refusal in this file that bypassed the shellsuggest
+// seam the sibling arms (`af sessions kill`, `af sessions handoff --account`)
+// had already been migrated to (#6773, #7799). A title is user-chosen and not
+// shell-safe by construction (validation rejects only whitespace-only titles
+// and control characters), so the printed remedy must not depend on it.
+func TestRuntimeAction_HandoffMissionRefusalSuggestsPasteSafeCommands(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		title  string
+		resend string // the exact resend command as printed
+		retire string // the exact retire command as printed
+		notRaw string // an unsafe substring the raw %s bug would have produced
+	}{
+		{
+			name:   "spaced title is quoted and terminated",
+			title:  "my session",
+			resend: "af sessions retry-limit -- 'my session'",
+			retire: "af sessions retry-limit --delivered -- 'my session'",
+			notRaw: "af sessions retry-limit my session",
+		},
+		{
+			name:   "dash-leading title is terminated so pflag does not parse it as a flag",
+			title:  "-worker",
+			resend: "af sessions retry-limit -- -worker",
+			retire: "af sessions retry-limit --delivered -- -worker",
+			notRaw: "af sessions retry-limit -worker",
+		},
+		{
+			name:   "quote-and-semicolon title uses the POSIX escape idiom",
+			title:  "don't; echo hi",
+			resend: `af sessions retry-limit -- 'don'\''t; echo hi'`,
+			retire: `af sessions retry-limit --delivered -- 'don'\''t; echo hi'`,
+			notRaw: "af sessions retry-limit don't; echo hi",
+		},
+		{
+			name:   "plain title stays readable but still terminated",
+			title:  "owing",
+			resend: "af sessions retry-limit -- owing",
+			retire: "af sessions retry-limit --delivered -- owing",
+			notRaw: "", // no unsafe form to deny for a safe title
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view := LifecycleView{
+				Title: tc.title, Liveness: LiveRunning, Started: true,
+				PendingHandoffMission: true,
+			}
+			err := view.ValidateRuntimeAction(RuntimeActionHandoff)
+			require.Error(t, err)
+			msg := err.Error()
+
+			// The refusal wraps each remedy in a backtick fence; for these
+			// titles there are exactly two, resend first.
+			parts := strings.Split(msg, "`")
+			require.Len(t, parts, 5, "expected exactly two backtick-fenced commands in %q", msg)
+			resendCmd, retireCmd := parts[1], parts[3]
+
+			// The exact text of both commands: each is a COMPLETE
+			// `af sessions retry-limit` invocation, so pasting either one
+			// verbatim runs what the prose says it runs.
+			require.Equal(t, tc.resend, resendCmd, "the resend remedy as printed")
+			require.Equal(t, tc.retire, retireCmd, "the retire remedy as printed")
+
+			// The seam, not a hand-written string, must have produced them.
+			require.Equal(t,
+				shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit"}, tc.title),
+				resendCmd, "the resend command must be the seam's output verbatim")
+			require.Equal(t,
+				shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit", "--delivered"}, tc.title),
+				retireCmd, "the retire command must be the seam's output verbatim")
+
+			// --delivered belongs BEFORE the `--` terminator in the printed
+			// command, never after the positional: `-- <title> --delivered`
+			// reads the flag as a second title and cobra rejects the paste.
+			require.NotContains(t, resendCmd, "--delivered",
+				"the resend remedy must not carry the retire flag")
+			require.Less(t,
+				strings.Index(retireCmd, "--delivered"), strings.Index(retireCmd, " -- "),
+				"--delivered must precede the option terminator in the printed command")
+			for _, cmd := range []string{resendCmd, retireCmd} {
+				require.NotContains(t, cmd, "-- "+tc.title+" --delivered",
+					"no printed command may leave --delivered after the `--` positional")
+				require.NotContains(t, cmd, "-- "+shellsuggest.Arg(tc.title)+" --delivered",
+					"no printed command may leave --delivered after the `--` positional")
+			}
+
+			// The phrasing the fix was required to preserve.
+			require.Contains(t, msg, "still owes the mission from its last handoff")
+			require.Contains(t, msg, " resends it, ")
+			require.Contains(t, msg, " retires it")
+
+			// The raw title must not reach the command position unquoted or
+			// unterminated: that is the bug, and these substrings are exactly
+			// what the raw `v.Title, v.Title` formatting would have printed.
+			if tc.notRaw != "" {
+				require.NotContains(t, msg, tc.notRaw,
+					"the raw title must not reach the command position unquoted/unterminated")
+			}
+		})
+	}
+
+	// Pin the exact full message for the readable case, so the fix's contract
+	// — "same phrasing, two complete commands" — is locked: a wording change
+	// to this refusal is caught here, and both backtick-fenced commands are
+	// the seam's output rather than a raw %s or a flag named only in prose.
+	owing := LifecycleView{Title: "owing", Liveness: LiveRunning, Started: true, PendingHandoffMission: true}
+	require.EqualError(t, owing.ValidateRuntimeAction(RuntimeActionHandoff),
+		"session \"owing\" still owes the mission from its last handoff; resolve it first — `af sessions retry-limit -- owing` resends it, `af sessions retry-limit --delivered -- owing` retires it")
 }
 
 // TestInstanceAdmitsRuntimeAction exercises the locking form on a live row.
