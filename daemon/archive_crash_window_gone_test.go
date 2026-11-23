@@ -267,6 +267,12 @@ func TestArchiveSession_UnverifiedResidueRefusesWithoutClaimingOwnership(t *test
 		"the refusal must not name this session's recorded path as a move-back target for unverified residue")
 	assert.Contains(t, err.Error(), "could not verify",
 		"the refusal must say the binding could not be verified, not claim the residue is this session's work")
+	assert.Contains(t, err.Error(), "move it out of "+filepath.Dir(orphan),
+		"the refusal must tell the operator how to get unblocked: move the residue out of its parent to somewhere safe, then retry")
+	assert.Contains(t, err.Error(), "#7819",
+		"the refusal must cite the follow-up tracking the ownership-model redesign")
+	assert.Contains(t, err.Error(), "do not move it into "+wtPath,
+		"the refusal must keep the warning against moving unverified residue into this session's path")
 	assert.NotEqual(t, session.LiveArchived, inst.GetLiveness(),
 		"refusing over unverified residue must not commit the row Archived")
 	assert.Equal(t, session.OpNone, inst.GetInFlightOp(),

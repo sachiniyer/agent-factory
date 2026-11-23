@@ -160,8 +160,8 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 					title, source, strings.Join(named, ", "), recovery.String(), sessiongit.ErrRelocateStateUnknown))
 			}
 			return refuse(fmt.Errorf(
-				"cannot archive session %q: its worktree path %s is gone, but af relocation residue is present at %s and af could not verify whether it is this session's worktree — it may belong to another session, or its git binding could not be read; inspect %s (do not move it into %s unless you have proven it is this session's work) before retrying the archive: %w",
-				title, source, strings.Join(unverified, ", "), strings.Join(unverified, ", "), source, sessiongit.ErrRelocateStateUnknown))
+				"cannot archive session %q: its worktree path %s is gone, but af relocation residue is present at %s and af could not verify whether it is this session's worktree — it may belong to another session, or its git binding could not be read; inspect %s, then move it out of %s to somewhere safe (or remove it once you have confirmed it holds nothing you need) and retry the archive; do not move it into %s unless you have proven it is this session's work (see #7819): %w",
+				title, source, strings.Join(unverified, ", "), strings.Join(unverified, ", "), filepath.Dir(unverified[0]), source, sessiongit.ErrRelocateStateUnknown))
 		}
 		// The deletion route promises restore can rebuild from the kept branch,
 		// which holds only if the branch is still there: a user who deleted the
