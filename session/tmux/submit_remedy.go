@@ -259,7 +259,10 @@ var busyComposerHints = map[string][]string{
 // bareComposerGlyphRow reports whether a row is an empty composer prompt: the
 // bare glyph a composer repaints after a submit, or that glyph with the
 // agent's own mid-turn hint (busyComposerHints), and nothing else. A user's
-// ">quote" row is not bare, because it carries content.
+// ">quote" row is not bare, because it carries content. Codex's Ultra-tier
+// "»" is not in the set: the recheck's wider stagedComposerGlyphRow
+// recognizes it as the live composer's prompt, but a bare "»" row alone is
+// not proof of an empty composer.
 func bareComposerGlyphRow(row string) bool {
 	norm := normalizeDelivery(row)
 	for _, glyph := range []string{"›", claudeComposerGlyph, "❭"} {
@@ -317,10 +320,12 @@ func composerRegion(rows []string, anchor int) []string {
 }
 
 // boundStillStaged reports whether evidence bound to this delivery still sits
-// in the live composer — at or below the pane's last composer-glyph row — in an
-// atomic pane+cursor frame. The anchor is positional, not textual: a composer
-// the clear+paste could not fully attribute must not read a transcript echo
-// (which carries the same tail, and the same chip, above the live composer).
+// in the live composer — at or below the composer block's first row, the
+// earliest anchor the bound draft's own glyph-leading lines could occupy — in
+// an atomic pane+cursor frame. The anchor is positional, not textual: a
+// composer the clear+paste could not fully attribute must not read a
+// transcript echo (which carries the same tail, and the same chip, above the
+// live composer).
 //
 // When the grace frame's glyph row moved off the boundary's, the composer was
 // repainted. A bare fresh glyph row BELOW the old anchor is a submitted
@@ -331,19 +336,38 @@ func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, bo
 	return stagedReading(pane, probe, bound, boundaryAnchor) != ""
 }
 
-// stagedReading is boundStillStaged's verdict with its reason. It names which
-// of the staged readings fired, or returns "" when the draft left the live
-// composer. The withheld-remedy warning prints it. A draft our Enter left in
-// the composer and a repaint we cannot attribute are different failures, and a
-// log line that named neither could not tell production's 537 warnings apart
-// (#7023).
+// stagedReading is boundStillStaged's verdict with its reason. It names
+// which of the staged readings fired, or returns "" when the draft left the
+// live composer. The withheld-remedy warning prints the reason. A draft our
+// Enter left in the composer and a repaint we cannot attribute are different
+// failures, and a log line that named neither could not tell production's 537
+// warnings apart (#7023).
 func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, boundaryAnchor int) string {
 	rows := paneGridRows(pane)
-	anchor := lastComposerGlyphRow(rows)
+	// The anchor uses the recheck's wider glyph set
+	// (stagedLastComposerAnchor): Codex's Ultra tier prompts its composer
+	// with "»" — the only line-leading "»" the TUI draws
+	// (bottom_pane/effort_ignition.rs EffortTier::prompt_glyph) — while every
+	// echoed user prompt is marked "› " at every tier
+	// (history_cell/messages.rs). Under the narrower set an Ultra pane's
+	// last "›" echo row won the anchor and the echo's own text read as this
+	// prompt still staged — the literal-tail warnings that dominate #7801.
+	anchor := stagedLastComposerAnchor(rows)
 	if anchor < 0 {
 		return ""
 	}
-	lower := normalizeDelivery(strings.Join(rows[anchor:], ""))
+	// The composer block's first row is the EARLIEST of the narrow and wide
+	// anchors the bound draft could occupy, not the last glyph row: the
+	// draft's own lines can lead with a composer glyph — a "» quote" line
+	// inside a "›" or "❯" composer — and the last glyph row then lands
+	// INSIDE the draft, letting its head sit above the anchor unread (Codex
+	// #7802 R1). Bound evidence at or below the block's first row keeps the
+	// staged reading.
+	blockStart := lastComposerGlyphRow(rows)
+	if blockStart < 0 {
+		blockStart = anchor
+	}
+	lower := normalizeDelivery(strings.Join(rows[blockStart:], ""))
 	if bound.tail && strings.Contains(lower, probe.completion) {
 		return "this prompt's bound text is still in the live composer"
 	}
@@ -357,9 +381,51 @@ func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, bound
 		return "the composer was repainted above its row at the Enter boundary, so what it holds cannot be attributed"
 	}
 	if !bareComposerGlyphRow(rows[anchor]) {
+		if idleComposerPlaceholderRow(normalizeDelivery(rows[anchor])) {
+			return "the composer was repainted holding only the agent's idle placeholder, which is exactly what a dropped prompt shows"
+		}
 		return "the composer was repainted holding content that is neither this prompt nor an empty composer"
 	}
 	return ""
+}
+
+// idleComposerPlaceholders are the ghost texts an agent draws inside an EMPTY
+// input while it is not working a turn — normalized and keyed by the agent's
+// composer glyph, the same discipline busyComposerHints keeps. They are
+// exactly what a composer that dropped the prompt also shows (#4200), so a
+// placeholder alone can never be positive delivery evidence — it only names
+// the staged reading what it saw. Codex draws "Ask Codex to do anything"
+// idle and busy alike, under both of its prompt glyphs. Claude rotates its
+// `Try "…"` suggestions, so it is handled by shape below rather than listed.
+var idleComposerPlaceholders = map[string][]string{
+	"›": {normalizeDelivery("Ask Codex to do anything")},
+	"»": {normalizeDelivery("Ask Codex to do anything")},
+	"❭": {normalizeDelivery("Ask Devin to build features, fix bugs, or work on your code")},
+}
+
+// idleComposerPlaceholderRow reports whether a NORMALIZED composer row is the
+// agent's glyph plus exactly its own idle placeholder — no more, no less,
+// like busyComposerHints. The same text under another agent's glyph is
+// content, and so is one added or dropped character.
+func idleComposerPlaceholderRow(norm string) bool {
+	for glyph, placeholders := range idleComposerPlaceholders {
+		rest, ok := strings.CutPrefix(norm, glyph)
+		if !ok {
+			continue
+		}
+		for _, placeholder := range placeholders {
+			if rest == placeholder {
+				return true
+			}
+		}
+		return false
+	}
+	// Claude's `Try "…"` hint rotates, so only the shape is provable — and
+	// only under Claude's own glyph (composer_draft.go's shaped rule).
+	if rest, ok := strings.CutPrefix(norm, claudeComposerGlyph); ok {
+		return strings.HasPrefix(rest, `Try"`)
+	}
+	return false
 }
 
 // stillChipComposer is the stillness+position proof for the one remediable
@@ -493,11 +559,12 @@ func contentEndCol(row string) int {
 //     usable at all: the agent draws the same chip for a user's paste and for
 //     a transcript echo, but neither can appear in a frame that has not
 //     changed.
-//  3. Position. The bound evidence sits in the live composer — at or below the
-//     pane's LAST composer-glyph row (boundStillStaged) — and the cursor is
-//     visible and parked where this draft alone could have left it. A
-//     transcript echo cannot satisfy position: the composer repaints its own
-//     glyph row beneath the echo.
+//  3. Position. The bound evidence sits in the live composer — at or below
+//     the composer block's first row, the earliest of the narrow and wide
+//     anchors its own glyph-leading lines could occupy (boundStillStaged) —
+//     and the cursor is visible and parked where this draft alone could have
+//     left it. A transcript echo cannot satisfy position: the composer
+//     repaints its own glyph row beneath the echo.
 //
 // What the conditions do not cover: the gap between the grace capture and the
 // remedy keystroke is check-then-act, like absenceStillProven's. The daemon's
@@ -512,7 +579,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 		return observation
 	}
 	stripped := xansi.Strip(boundaryGrid)
-	boundaryAnchor := lastComposerGlyphRow(paneGridRows(stripped))
+	boundaryAnchor := stagedLastComposerAnchor(paneGridRows(stripped))
 
 	pasteDeliverySleep(strandedSubmitGrace)
 	pane, cursor, ok := t.capturePaneAndCursorState()

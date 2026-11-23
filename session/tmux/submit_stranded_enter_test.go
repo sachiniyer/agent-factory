@@ -70,6 +70,13 @@ type stagedDraftPane struct {
 	// "Guide Devin while it works"). It shows only while the composer holds
 	// nothing, the way the real agents draw it (#7023).
 	placeholder string
+	// echoGlyph, when set, is the glyph the transcript echo row carries instead
+	// of the composer glyph — real Codex marks every echoed user prompt "› "
+	// even while the Ultra-tier composer prompts with "»" (codex-rs
+	// history_cell/messages.rs vs bottom_pane/effort_ignition.rs) — so the
+	// echo row is a narrow-set glyph row sitting above the real composer
+	// (#7801).
+	echoGlyph string
 }
 
 func (m *stagedDraftPane) glyphOr() string {
@@ -77,6 +84,13 @@ func (m *stagedDraftPane) glyphOr() string {
 		return m.glyph
 	}
 	return "›"
+}
+
+func (m *stagedDraftPane) echoGlyphOr() string {
+	if m.echoGlyph != "" {
+		return m.echoGlyph
+	}
+	return m.glyphOr()
 }
 
 func (m *stagedDraftPane) rowsLocked() (rows []string, cursorRow int) {
@@ -218,7 +232,7 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 				if m.enters <= m.swallowedEnters {
 					m.composer = append(m.composer, "")
 				} else if len(m.composer) > 0 {
-					m.transcript = append(m.transcript, m.glyphOr()+" "+strings.TrimSpace(strings.Join(m.composer, " ")))
+					m.transcript = append(m.transcript, m.echoGlyphOr()+" "+strings.TrimSpace(strings.Join(m.composer, " ")))
 					m.composer = nil
 				}
 				return []byte(deliveryBoundarySentinel + "\n" + joinedFrame +

@@ -102,7 +102,7 @@ func boundLiteral(t *testing.T, boundary string) (deliveryProbe, stagedEvidence,
 	t.Helper()
 	probe := newDeliveryProbe(placeholderTestPrompt)
 	bound := stagedEvidence{tail: true}
-	anchor := lastComposerGlyphRow(paneGridRows(boundary))
+	anchor := boundaryAnchorForTest(boundary)
 	require.GreaterOrEqual(t, anchor, 0, "fixture: the boundary has a composer glyph row")
 	require.True(t, boundStillStaged(boundary, probe, bound, anchor),
 		"fixture: the draft sitting in the composer at the Enter boundary reads as staged")
@@ -116,7 +116,7 @@ func TestAgentPlaceholderAfterEnterIsNotStillStaged(t *testing.T) {
 	for _, shape := range placeholderShapes() {
 		t.Run(shape.name, func(t *testing.T) {
 			probe, bound, anchor := boundLiteral(t, shape.boundary)
-			require.Greater(t, lastComposerGlyphRow(paneGridRows(shape.grace)), anchor,
+			require.Greater(t, stagedLastComposerAnchor(paneGridRows(shape.grace)), anchor,
 				"fixture: the repainted composer sits below the boundary's")
 			require.False(t, boundStillStaged(shape.grace, probe, bound, anchor),
 				"the agent's own empty-input placeholder is an empty composer: the draft left it")
@@ -164,7 +164,7 @@ func TestPlaceholderAboveTheBoundaryAnchorStaysStaged(t *testing.T) {
 	boundary := devinLanePane([]string{"one", "two", "three", "four", "five", ""}, placeholderDraft("❭")...)
 	probe, bound, anchor := boundLiteral(t, boundary)
 	grace := devinLanePane([]string{"one"}, "❭ Guide Devin while it works")
-	require.Less(t, lastComposerGlyphRow(paneGridRows(grace)), anchor, "fixture: the composer moved up")
+	require.Less(t, stagedLastComposerAnchor(paneGridRows(grace)), anchor, "fixture: the composer moved up")
 	require.True(t, boundStillStaged(grace, probe, bound, anchor))
 }
 
