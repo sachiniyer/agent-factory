@@ -383,28 +383,23 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 	// Stored on every attempt: a redelivery's own binding replaces it, and a
 	// send that bound nothing records that too, so the recheck never matches
 	// evidence against the wrong delivery.
-	//
-	// The same baseline carries into the stranded-submit remedy's consumed
-	// reading: a count that beats it proves a NEW echo only when the
-	// capture provably reached history — never on the alternate screen,
-	// where tmux keeps none — and the boundary mark proves it positionally
-	// instead (Codex #7802 R2).
-	var echoBaselineRows []string
-	var baselineReachedHistory bool
 	{
 		ev := &stagedDraftEvidence{chip: bound.chipText}
 		if bound.tail || bound.chip {
-			// One tmux command queue: the -S capture and the alternate_on
-			// read that qualifies it, so the screen state cannot flip
-			// between the capture and the read that proves its reach.
-			hist, histReachedMain, ok := t.capturePaneForDeliveryHistoryMainScreen()
 			// Echo baselines for the later recheck (#7547 independent
 			// review): identical text already visible ABOVE the boundary's
 			// composer predates this send, so only a count that GROWS past
-			// it proves the send itself echoed. The anchor is the recheck's
+			// it proves the send itself echoed — the recheck demotes a
+			// composer match to Submitted or Unreadable otherwise. The
+			// frame is scrollback-inclusive (`capture-pane -S`), matching
+			// the recheck's own reach — a visible-only baseline would
+			// under-count pre-existing echoes deep in history and the
+			// later count could never honestly grow past it. A glyph-less
+			// boundary counts its whole frame; the anchor is the recheck's
 			// own set — stagedLastComposerAnchor also knows the Ultra » —
-			// never the narrower set, which would count the composer's own
-			// copy as a pre-existing echo. The mark records the
+			// never the submit path's narrower set, which would count the
+			// composer's own copy as a pre-existing echo and demote every
+			// Ultra staged read to Unreadable. The mark records the
 			// transcript's tail — the boundary's line — so the recheck can
 			// prove its scrollback reach actually got back to it. A failed
 			// history capture falls back to the visible boundary frame:
@@ -412,6 +407,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 			// ever RESOLVE a watch early, never raise one — and the mark
 			// stays empty, leaving the recheck's history-start rule as the
 			// only completeness proof.
+			hist, ok := t.capturePaneForDeliveryHistory()
 			if !ok {
 				hist = boundaryGrid
 			}
@@ -422,8 +418,6 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 				bupperRows = brows[:banchor]
 			}
 			bupper := normalizeDelivery(strings.Join(bupperRows, ""))
-			echoBaselineRows = bupperRows
-			baselineReachedHistory = ok && histReachedMain
 			if ok {
 				ev.boundaryMark = stagedBoundaryMark(bupper)
 			}
@@ -445,7 +439,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 	// stale classification describes (#4530 review). A still-partial boundary
 	// binds nothing and keeps the #3293 redelivery path.
 	if observation.outcome != deliveryObservedAbsent || bound.any() {
-		observation = t.remedyStrandedSubmit(probe, observation, bound, boundaryGrid, boundaryOK, echoBaselineRows, baselineReachedHistory)
+		observation = t.remedyStrandedSubmit(probe, observation, bound, boundaryGrid, boundaryOK)
 	}
 
 	var proof *absenceProof

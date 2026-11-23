@@ -260,9 +260,9 @@ var busyComposerHints = map[string][]string{
 // bare glyph a composer repaints after a submit, or that glyph with the
 // agent's own mid-turn hint (busyComposerHints), and nothing else. A user's
 // ">quote" row is not bare, because it carries content. Codex's Ultra-tier
-// "»" is deliberately not in the set: it counts as empty only inside the
-// consumed reading (composerRowReadsEmpty), never wherever a bare row means
-// something else.
+// "»" is not in the set: the recheck's wider stagedComposerGlyphRow
+// recognizes it as the live composer's prompt, but a bare "»" row alone is
+// not proof of an empty composer.
 func bareComposerGlyphRow(row string) bool {
 	norm := normalizeDelivery(row)
 	for _, glyph := range []string{"›", claudeComposerGlyph, "❭"} {
@@ -319,105 +319,6 @@ func composerRegion(rows []string, anchor int) []string {
 	return rows[anchor:end]
 }
 
-// boundaryComposerShape marks where the live composer sat in the Enter
-// boundary frame and what the transcript above it already showed. The anchor
-// uses the recheck's wider glyph set (stagedLastComposerAnchor): Codex's Ultra
-// tier prompts its composer with "»" — upstream codex-rs
-// bottom_pane/effort_ignition.rs EffortTier::prompt_glyph, the only
-// line-leading "»" the TUI draws (codexComposerGlyphs) — while every echoed
-// user prompt is marked "› " at every tier (history_cell/messages.rs). Under
-// the narrower set an Ultra pane's last "›" echo row won the anchor and the
-// echo's own text read as this prompt still staged — the literal-tail
-// warnings that dominate #7801. The LAST row carrying any of the glyphs is
-// still provably the live composer: echoes and queued-input previews always
-// sit above it, the footer/status rows below never lead with one, and a
-// wrapped echo's "»"-leading continuation row can only ever sort above the
-// true composer.
-type boundaryComposerShape struct {
-	anchor int
-	// echoBaselineRows is the transcript ABOVE the boundary's live composer
-	// over the capture's reach — scrollback when the pane keeps history,
-	// the visible grid otherwise.
-	echoBaselineRows []string
-	// baselineReachedHistory marks echoBaselineRows as provably
-	// scrollback-inclusive: the -S capture succeeded AND alternate_on
-	// literally read "0" in the same tmux command queue — tmux keeps no
-	// history on the alternate screen (codex's default), so -S returns the
-	// visible grid with ok=true anyway. Without it a grown count cannot be
-	// told from revealed history and never counts (Codex #7802 R2).
-	baselineReachedHistory bool
-	// mark is the normalized tail of the boundary's transcript — taken only
-	// from rows ABOVE the composer block's head, so it can never come from
-	// the draft's own text. markCount is how often mark appears there; the
-	// grace frame's transcript must hold at least that many occurrences —
-	// fewer means the boundary's own mark line is gone and position is
-	// unprovable.
-	mark      string
-	markCount int
-}
-
-// composerShapeAtBoundary anchors the Enter boundary's live composer and
-// records the echo baseline the grace frame must beat. The anchor and the
-// mark both come from the boundary GRID — the visible pane at Enter, before
-// the agent could print — the mark being the normalized tail of the
-// transcript above the composer block's earliest glyph row: the boundary's
-// own last transcript line, which a post-boundary copy can only sit BELOW.
-// echoBaselineRows is the caller's scrollback-inclusive transcript (the
-// bupper the staged-draft stash counts against); a capture that failed, or
-// a pane on the alternate screen where tmux keeps no history, passes
-// baselineReachedHistory false — the count comparison then never fires and
-// only the mark can prove a new copy.
-func composerShapeAtBoundary(strippedBoundaryGrid string, echoBaselineRows []string, baselineReachedHistory bool) boundaryComposerShape {
-	rows := paneGridRows(strippedBoundaryGrid)
-	anchor := stagedLastComposerAnchor(rows)
-	var mark string
-	var markCount int
-	if anchor >= 0 {
-		upper := normalizeDelivery(strings.Join(rows[:composerBlockStart(rows, anchor)], ""))
-		mark = stagedBoundaryMark(upper)
-		markCount = strings.Count(upper, mark)
-	}
-	return boundaryComposerShape{
-		anchor:                 anchor,
-		echoBaselineRows:       echoBaselineRows,
-		baselineReachedHistory: baselineReachedHistory,
-		mark:                   mark,
-		markCount:              markCount,
-	}
-}
-
-// composerBlockStart returns the row the live composer block opens on: the
-// anchor row when it sits at the left margin, else the column-0 glyph row
-// that heads the indented run the anchor sits inside — a draft's own
-// glyph-leading continuation ("  ›", "  »") keeps its indent, which is how
-// the last glyph row lands inside the draft. Indentation is judged on the
-// RAW row's leading whitespace, never on firstContentCol: the glyph itself
-// is skippable, so every "› text" row measures as indented there. Only rows
-// strictly above the returned row were transcript at the boundary;
-// everything from it down is the composer itself, so a mark taken from
-// below it could be the draft's own text (Codex #7802 review R1).
-func composerBlockStart(rows []string, anchor int) int {
-	if !composerIndentedRow(rows[anchor]) {
-		return anchor
-	}
-	head := anchor
-	for head > 0 && composerIndentedRow(rows[head-1]) {
-		head--
-	}
-	if head > 0 && stagedComposerGlyphRow(normalizeDelivery(rows[head-1])) {
-		head--
-	}
-	return head
-}
-
-// composerIndentedRow reports whether a row's first drawn rune is
-// whitespace. Inside a composer region that is draft CONTENT — an empty
-// composer's face always opens at the left margin.
-func composerIndentedRow(row string) bool {
-	r, _ := utf8.DecodeRuneInString(row)
-	return unicode.IsSpace(r)
-}
-
 // boundStillStaged reports whether evidence bound to this delivery still sits
 // in the live composer — at or below the composer block's first row, the
 // earliest anchor the bound draft's own glyph-leading lines could occupy — in
@@ -431,32 +332,29 @@ func composerIndentedRow(row string) bool {
 // composer; anything else — an anchor that moved up, or a content row like a
 // user's ">quote" — is a composer shape we can no longer attribute, so the
 // draft conservatively still counts as staged.
-func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, boundary boundaryComposerShape) bool {
-	reason, _ := stagedReading(pane, probe, bound, boundary)
-	return reason != ""
+func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, boundaryAnchor int) bool {
+	return stagedReading(pane, probe, bound, boundaryAnchor) != ""
 }
 
-// stagedReading is boundStillStaged's verdict with its reason — and, in the
-// second return, whether the frame carries POSITIVE evidence that this
-// delivery was consumed: a NEW copy of the bound evidence above a live
-// composer that itself reads empty (boundEchoAboveLiveComposer). It names
-// which of the staged readings fired, or "" when the draft left the live
-// composer. The withheld-remedy warning prints the reason. A draft our Enter
-// left in the composer and a repaint we cannot attribute are different
+// stagedReading is boundStillStaged's verdict with its reason. It names
+// which of the staged readings fired, or returns "" when the draft left the
+// live composer. The withheld-remedy warning prints the reason. A draft our
+// Enter left in the composer and a repaint we cannot attribute are different
 // failures, and a log line that named neither could not tell production's 537
 // warnings apart (#7023).
-func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, boundary boundaryComposerShape) (string, bool) {
+func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, boundaryAnchor int) string {
 	rows := paneGridRows(pane)
+	// The anchor uses the recheck's wider glyph set
+	// (stagedLastComposerAnchor): Codex's Ultra tier prompts its composer
+	// with "»" — the only line-leading "»" the TUI draws
+	// (bottom_pane/effort_ignition.rs EffortTier::prompt_glyph) — while every
+	// echoed user prompt is marked "› " at every tier
+	// (history_cell/messages.rs). Under the narrower set an Ultra pane's
+	// last "›" echo row won the anchor and the echo's own text read as this
+	// prompt still staged — the literal-tail warnings that dominate #7801.
 	anchor := stagedLastComposerAnchor(rows)
 	if anchor < 0 {
-		return "", false
-	}
-	// Positive evidence runs first: a NEW copy of the bound evidence above a
-	// live composer that itself reads empty is THIS delivery consumed, and it
-	// resolves the reading before any staged check below can claim the echo's
-	// own text as a staged draft.
-	if boundEchoAboveLiveComposer(rows, anchor, probe, bound, boundary) {
-		return "", true
+		return ""
 	}
 	// The composer block's first row is the EARLIEST of the narrow and wide
 	// anchors the bound draft could occupy, not the last glyph row: the
@@ -471,250 +369,33 @@ func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, bound
 	}
 	lower := normalizeDelivery(strings.Join(rows[blockStart:], ""))
 	if bound.tail && strings.Contains(lower, probe.completion) {
-		return "this prompt's bound text is still in the live composer", false
+		return "this prompt's bound text is still in the live composer"
 	}
 	if bound.chip && strings.Contains(lower, bound.chipText) {
-		return "this prompt's bound chip is still in the live composer", false
+		return "this prompt's bound chip is still in the live composer"
 	}
-	if anchor == boundary.anchor {
-		return "", false
+	if anchor == boundaryAnchor {
+		return ""
 	}
-	if anchor < boundary.anchor {
-		return "the composer was repainted above its row at the Enter boundary, so what it holds cannot be attributed", false
+	if anchor < boundaryAnchor {
+		return "the composer was repainted above its row at the Enter boundary, so what it holds cannot be attributed"
 	}
 	if !bareComposerGlyphRow(rows[anchor]) {
 		if idleComposerPlaceholderRow(normalizeDelivery(rows[anchor])) {
-			return "the composer was repainted holding only the agent's idle placeholder, which is exactly what a dropped prompt shows", false
+			return "the composer was repainted holding only the agent's idle placeholder, which is exactly what a dropped prompt shows"
 		}
-		return "the composer was repainted holding content that is neither this prompt nor an empty composer", false
+		return "the composer was repainted holding content that is neither this prompt nor an empty composer"
 	}
-	return "", false
-}
-
-// boundEchoAboveLiveComposer is the positive-evidence reading: the bound
-// evidence appears ABOVE the live composer row more times than the
-// boundary's scrollback-inclusive transcript already held it — a NEW echo of
-// this delivery (Codex marks it "› "; a queued input sits in its "↳"
-// preview, which proves the agent ACCEPTED the draft into its own queue —
-// consumed, not yet run; a submitted chip echoes the same chip) — and the
-// live composer row reads empty.
-//
-// Positive evidence only. The composer row must read empty in
-// composerRowReadsEmpty's strict sense: a bare glyph, a mid-turn hint, or
-// the placeholder the agent draws while a turn can still be running — never
-// an idle-only placeholder, which is exactly the frame a dropped prompt
-// leaves (#4200). And the new copy must be provably NEW — newEchoCopy
-// admits only a count past a baseline that reached history or a copy lying
-// below the boundary mark; an earlier identical echo, a revealed scrollback
-// copy, and an unprovable frame all stay staged.
-func boundEchoAboveLiveComposer(rows []string, anchor int, probe deliveryProbe, bound stagedEvidence, boundary boundaryComposerShape) bool {
-	if !composerRegionReadsEmpty(rows, anchor) {
-		return false
-	}
-	upper := rows[:composerBlockStart(rows, anchor)]
-	if bound.tail && newEchoCopy(upper, probe.completion, boundary) {
-		return true
-	}
-	if bound.chip && newEchoCopy(upper, bound.chipText, boundary) {
-		return true
-	}
-	return false
-}
-
-// newEchoCopy reports whether upper's rows hold the needle in a copy provably
-// printed after the Enter boundary — two independent proofs, because each
-// has a frame that defeats it:
-//
-//  1. Count past the baseline: more attributable copies than the boundary's
-//     transcript already held. Meaningful only when the baseline reached
-//     history — tmux keeps none on the alternate screen (codex's default),
-//     where -S returns the visible grid with ok=true and a revealed
-//     scrollback copy would read as growth (Codex #7802 R2).
-//  2. Below the boundary mark: the mark is the transcript's own tail line
-//     at Enter — never the draft's own head — and it must still occur at
-//     least as often as it did at the boundary, or position is unprovable.
-//     An attributable copy below the mark's LAST occurrence is post-boundary
-//     by position: revealed rows can only reappear above the boundary's
-//     line. When the boundary's tail IS the same echo (a resending watch),
-//     every new copy wears the mark too and the last occurrence hides it —
-//     a conservative miss, never a claim.
-func newEchoCopy(upper []string, needle string, boundary boundaryComposerShape) bool {
-	if needle == "" {
-		return false
-	}
-	if boundary.baselineReachedHistory &&
-		attributableEchoBlocks(upper, needle) > attributableEchoBlocks(boundary.echoBaselineRows, needle) {
-		return true
-	}
-	if boundary.mark == "" {
-		return false
-	}
-	joined := normalizeDelivery(strings.Join(upper, ""))
-	if strings.Count(joined, boundary.mark) < boundary.markCount {
-		return false
-	}
-	// The mark need not fit inside one row — it is a normalized substring of
-	// the transcript — so position is judged in joined space and mapped back
-	// to rows: only an echo block that BEGINS after the mark's last
-	// occurrence is provably newer than the boundary's own line.
-	markEnd := strings.LastIndex(joined, boundary.mark) + len(boundary.mark)
-	at := 0
-	startIdx := len(upper)
-	for i, row := range upper {
-		if at >= markEnd {
-			startIdx = i
-			break
-		}
-		at += len(normalizeDelivery(row))
-	}
-	return attributableEchoBlocks(upper[startIdx:], needle) > 0
-}
-
-// attributableEchoBlocks counts the echo blocks PROVABLY echoing or queueing
-// this delivery. An echo block opens on a row bearing the agent's echo
-// marker — codex draws every echoed user prompt "› " and a queued input
-// "↳ " (history_cell/messages.rs, chat_composer.rs); claude echoes "❯ " —
-// and a "›"/"❯" echo continues through following indented rows that open no
-// marker of their own (the echo's wrapped tail); a "↳" queued preview is
-// one row. Only the block's joined content is weighed: it must END with the
-// needle — the bound completion is the prompt's tail — or equal it, and a
-// needle too short to attribute safely (under minDistinctiveFragment) may
-// only match the whole block, so "ok" can never land inside "token" or
-// "book" (Codex #7802 review). A substring of arbitrary output is never
-// evidence: it proves text appeared, not that the agent accepted the
-// prompt. A prompt too short or too generic to attribute stays
-// unverified — the safe direction.
-func attributableEchoBlocks(rows []string, needle string) int {
-	n := 0
-	for i := 0; i < len(rows); i++ {
-		marker, rest, ok := echoMarkerRest(normalizeDelivery(rows[i]))
-		if !ok {
-			continue
-		}
-		block := rest
-		// A "›"/"❯" echo wraps onto indented continuation rows; a "↳"
-		// queued preview is a single row — its indented "⇧+← edit" hint
-		// belongs to the preview chrome, never to the echoed text.
-		if marker != "↳" {
-			for i+1 < len(rows) && composerIndentedRow(rows[i+1]) {
-				if _, _, marker := echoMarkerRest(normalizeDelivery(rows[i+1])); marker {
-					break
-				}
-				i++
-				block += normalizeDelivery(rows[i])
-			}
-		}
-		if echoContentMatches(block, needle) {
-			n++
-		}
-	}
-	return n
-}
-
-// echoMarkerRest strips a normalized row's leading echo marker — codex's
-// "›" echo and "↳" queued-input markers, claude's "❯" echo — and reports
-// which it found, or that the row opens none.
-func echoMarkerRest(norm string) (marker, rest string, ok bool) {
-	for _, m := range []string{"›", "↳", claudeComposerGlyph} {
-		if rest, ok := strings.CutPrefix(norm, m); ok {
-			return m, rest, true
-		}
-	}
-	return "", "", false
-}
-
-// echoContentMatches reports whether an echo block's joined content is this
-// delivery's: the whole needle for a short prompt — a "› book" echo must not
-// pass as an echo of "ok" — or, for a needle long enough to be safe, a
-// suffix match, because the bound completion is the tail of a longer prompt
-// an echo can only wrap, not terminate.
-func echoContentMatches(block, needle string) bool {
-	if block == needle {
-		return true
-	}
-	return len([]rune(needle)) >= minDistinctiveFragment && strings.HasSuffix(block, needle)
-}
-
-// composerRegionReadsEmpty is the consumed reading's empty-composer check
-// over the WHOLE region, not just the anchor row: a draft that starts with
-// a newline leaves a bare glyph first row while its text sits below it
-// (Codex #7802 review). Every row must be blank, or hold only an empty
-// composer's face at the left margin — a bare glyph, the agent's own
-// mid-turn hint, or its resting placeholder — and an indented row is draft
-// content, never an empty composer.
-func composerRegionReadsEmpty(rows []string, anchor int) bool {
-	for _, row := range composerRegion(rows, anchor) {
-		norm := normalizeDelivery(row)
-		if norm == "" {
-			continue
-		}
-		if composerIndentedRow(row) || !composerRowReadsEmpty(row) {
-			return false
-		}
-	}
-	return true
-}
-
-// composerRowReadsEmpty reports whether the live composer row is provably an
-// EMPTY input: bareComposerGlyphRow's bare glyph or the agent's own mid-turn
-// hint, or the glyph plus the placeholder the agent draws while a turn can
-// still be running (restingComposerPlaceholders). A placeholder that only
-// ever draws at true idle — Devin's "Ask Devin to build features…" — stays
-// out deliberately: an idle placeholder ALONE is exactly what a dropped
-// prompt shows (#4200), so it can never count as an empty composer.
-func composerRowReadsEmpty(row string) bool {
-	// A bare "»" row is an empty Ultra composer: "»" only ever opens the
-	// live composer, but it stays out of bareComposerGlyphRow's own glyph
-	// set, which keeps master's meaning.
-	if normalizeDelivery(row) == "»" {
-		return true
-	}
-	return bareComposerGlyphRow(row) || restingComposerPlaceholderRow(normalizeDelivery(row))
-}
-
-// restingComposerPlaceholders are the ghost texts an agent draws inside its
-// EMPTY input while a turn can still be running — the composer's resting
-// face, not an idle signal — normalized and keyed by the agent's composer
-// glyph, the same discipline busyComposerHints keeps. Codex's "Ask Codex to
-// do anything" is the only one codex-rs draws that way (chat_composer.rs
-// renders it idle and busy alike), so a grown echo above it is a submitted
-// prompt, not a dropped one. Devin's "Ask Devin to build features…" appears
-// only at true idle — exactly the frame a dropped prompt leaves (#4200) —
-// and Claude's rotating `Try "…"` hint is likewise idle-only, so neither may
-// ever count as an empty composer for the consumed reading.
-var restingComposerPlaceholders = map[string][]string{
-	"›": {normalizeDelivery("Ask Codex to do anything")},
-	"»": {normalizeDelivery("Ask Codex to do anything")},
-}
-
-// restingComposerPlaceholderRow reports whether a NORMALIZED composer row is
-// the agent's glyph plus exactly a resting placeholder — no more, no less,
-// like busyComposerHints.
-func restingComposerPlaceholderRow(norm string) bool {
-	for glyph, placeholders := range restingComposerPlaceholders {
-		rest, ok := strings.CutPrefix(norm, glyph)
-		if !ok {
-			continue
-		}
-		for _, placeholder := range placeholders {
-			if rest == placeholder {
-				return true
-			}
-		}
-		return false
-	}
-	return false
+	return ""
 }
 
 // idleComposerPlaceholders are the ghost texts an agent draws inside an EMPTY
 // input while it is not working a turn — normalized and keyed by the agent's
 // composer glyph, the same discipline busyComposerHints keeps. They are
 // exactly what a composer that dropped the prompt also shows (#4200), so a
-// placeholder alone can never be evidence: it only supports a consumed
-// verdict beside a NEW echo — and only when the agent draws it while a turn
-// can still be running, which is Codex's alone — and otherwise names the
-// staged reading what it saw. Codex draws "Ask Codex to do anything" idle
-// and busy alike, under both of its prompt glyphs. Claude rotates its
+// placeholder alone can never be positive delivery evidence — it only names
+// the staged reading what it saw. Codex draws "Ask Codex to do anything"
+// idle and busy alike, under both of its prompt glyphs. Claude rotates its
 // `Try "…"` suggestions, so it is handled by shape below rather than listed.
 var idleComposerPlaceholders = map[string][]string{
 	"›": {normalizeDelivery("Ask Codex to do anything")},
@@ -889,25 +570,16 @@ func contentEndCol(row string) int {
 // remedy keystroke is check-then-act, like absenceStillProven's. The daemon's
 // attach defer (#1586) is the guard for a user typing in a pane.
 //
-// A staged read is also vetoed by POSITIVE evidence the prompt was consumed:
-// a NEW echo of the bound evidence above the live composer, more copies than
-// the boundary's transcript already held, with the live composer row itself
-// empty (boundEchoAboveLiveComposer). An idle placeholder alone can never
-// stand in for that echo — a dropped prompt shows the same frame (#4200) —
-// and the consumed reading can only DEMOTE an absent observation to
-// unverified, never keep it: a proven echo is evidence against absence, so
-// the #3293 redelivery can never be authorized because of it.
-//
 // The verdict never rounds up. Bound evidence that stays staged, a pane that
 // changed while staged, a remedy whose outcome cannot be re-read, and every
 // non-chip staged shape all report sent-unverified. Only a draft that left the
 // composer keeps the observation it had before Enter.
-func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deliveryObservation, bound stagedEvidence, boundaryGrid string, boundaryOK bool, echoBaselineRows []string, baselineReachedHistory bool) deliveryObservation {
+func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deliveryObservation, bound stagedEvidence, boundaryGrid string, boundaryOK bool) deliveryObservation {
 	if !boundaryOK || !bound.any() {
 		return observation
 	}
 	stripped := xansi.Strip(boundaryGrid)
-	boundary := composerShapeAtBoundary(stripped, echoBaselineRows, baselineReachedHistory)
+	boundaryAnchor := stagedLastComposerAnchor(paneGridRows(stripped))
 
 	pasteDeliverySleep(strandedSubmitGrace)
 	pane, cursor, ok := t.capturePaneAndCursorState()
@@ -915,15 +587,8 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 		return observation
 	}
 	unverified := deliveryObservation{outcome: deliveryObservedUnverified, pane: pane}
-	reading, consumed := stagedReading(pane, probe, bound, boundary)
+	reading := stagedReading(pane, probe, bound, boundaryAnchor)
 	if reading == "" {
-		if consumed && observation.outcome == deliveryObservedAbsent {
-			// A proven new echo is evidence AGAINST absence, so the reading
-			// must never reach the #3293 redelivery path still classified
-			// absent — the same demotion the post-remedy read applies below
-			// when the draft provably left the composer.
-			observation.outcome = deliveryObservedUnverified
-		}
 		return observation
 	}
 
@@ -963,7 +628,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 	// remedy Enter too still shows it — a deeper wedge, never delivered.
 	pasteDeliverySleep(strandedSubmitSettle)
 	settled, _, ok := t.capturePaneAndCursorState()
-	if !ok || boundStillStaged(settled, probe, bound, boundary) {
+	if !ok || boundStillStaged(settled, probe, bound, boundaryAnchor) {
 		return unverified
 	}
 	outcome := observation.outcome

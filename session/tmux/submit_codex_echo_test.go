@@ -2,7 +2,6 @@ package tmux
 
 import (
 	"os/exec"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +29,13 @@ import (
 // ~150 of #7801's warnings. The wider anchor (stagedLastComposerAnchor) is
 // provably still the live composer: echoes, queued previews, and footers can
 // only ever sort AROUND the last "»"/"›"-leading row.
+//
+// The verdict for these frames stays sent-unverified: a "› " echo row above
+// an idle composer is exactly what a dropped prompt also shows (#4200), and
+// pane text has never proven a positive consumption — four review rounds each
+// found a frame that faked it (#7802). Every test below is the staged
+// direction: what must keep the sent-unverified verdict and its honest
+// reason.
 
 const codexEchoPrompt = "Sweep every running lane for a stalled composer and file the report under today's run log."
 
@@ -46,125 +52,35 @@ func codexLanePane(above []string, composer ...string) string {
 	return strings.Join(rows, "\n") + "\n"
 }
 
-// boundaryShapeForTest reduces a boundary fixture to its composer shape the
-// way submit does: the anchor, mark and block start from the visible grid,
-// the echo baseline from the scrollback-inclusive capture. A fixture pane
-// models the whole transcript, so its own above-block rows ARE the
-// baseline; scrollback passes extra rows that sat only in history at the
-// boundary — the copies a tall composer pushed off the pane top (Codex
-// #7802 R2).
-func boundaryShapeForTest(boundary string, scrollback ...string) boundaryComposerShape {
-	rows := paneGridRows(boundary)
-	anchor := stagedLastComposerAnchor(rows)
-	upper := rows
-	if anchor >= 0 {
-		upper = rows[:anchor]
-	}
-	return composerShapeAtBoundary(boundary, append(scrollback, upper...), true)
+// boundaryAnchorForTest reduces a boundary fixture to its live-composer
+// anchor the way submit does: stagedLastComposerAnchor over the visible grid.
+func boundaryAnchorForTest(boundary string) int {
+	return stagedLastComposerAnchor(paneGridRows(boundary))
 }
 
-func codexBoundLiteral(t *testing.T, boundary string) (deliveryProbe, stagedEvidence, boundaryComposerShape) {
+func codexBoundLiteral(t *testing.T, boundary string) (deliveryProbe, stagedEvidence, int) {
 	t.Helper()
 	probe := newDeliveryProbe(codexEchoPrompt)
 	bound := stagedEvidence{tail: true}
-	shape := boundaryShapeForTest(boundary)
-	require.True(t, boundStillStaged(boundary, probe, bound, shape),
+	anchor := boundaryAnchorForTest(boundary)
+	require.True(t, boundStillStaged(boundary, probe, bound, anchor),
 		"fixture: the draft sitting in the composer at the Enter boundary reads as staged")
-	return probe, bound, shape
+	return probe, bound, anchor
 }
 
-// TestCodexEchoAboveLiveComposerReadsConsumed: this delivery's prompt echoed
-// in the transcript as a NEW copy — more than the boundary frame already held
-// — while the live composer itself reads empty. That is positive evidence the
-// prompt was consumed, not a draft still staged. On master every one of these
-// reads as staged: the "›" echo row wins the narrower anchor (literal-tail)
-// or the repainted idle placeholder reads as foreign content.
-func TestCodexEchoAboveLiveComposerReadsConsumed(t *testing.T) {
-	for name, frames := range map[string]struct{ boundary, grace string }{
-		// Ultra tier: the "»" composer repaints its idle placeholder under the
-		// "›"-marked echo. Master reads literal-tail through the echo row.
-		"ultra tier idle composer": {
-			boundary: codexLanePane([]string{"› tidy the sidebar before the next sweep"}, "» "+codexEchoPrompt),
-			grace: codexLanePane([]string{
-				"› tidy the sidebar before the next sweep",
-				"› " + codexEchoPrompt,
-			}, "» Ask Codex to do anything"),
-		},
-		// Same delivery, the composer repainted a bare glyph row.
-		"ultra tier bare composer": {
-			boundary: codexLanePane([]string{"› tidy the sidebar before the next sweep"}, "» "+codexEchoPrompt),
-			grace: codexLanePane([]string{
-				"› tidy the sidebar before the next sweep",
-				"› " + codexEchoPrompt,
-			}, "»"),
-		},
-		// The other tier: a "›" composer under its own-glyph echo. Master reads
-		// the repainted idle placeholder as unattributable content.
-		"old glyph idle composer": {
-			boundary: codexLanePane([]string{"› tidy the sidebar before the next sweep"}, "› "+codexEchoPrompt),
-			grace: codexLanePane([]string{
-				"› tidy the sidebar before the next sweep",
-				"› " + codexEchoPrompt,
-			}, "› Ask Codex to do anything"),
-		},
-		// Codex's queued-input preview holds the prompt above an idle "»"
-		// composer (chat_composer.rs's pending_input_preview: "• Queued
-		// follow-up inputs" then "  ↳ …" rows). Queued is consumed — the
-		// composer let the draft go. Master reads literal-tail through the
-		// earlier echo row.
-		"queued input preview": {
-			boundary: codexLanePane([]string{"› tidy the sidebar before the next sweep"}, "» "+codexEchoPrompt),
-			grace: codexLanePane([]string{
-				"› tidy the sidebar before the next sweep",
-				"• Queued follow-up inputs",
-				"  ↳ " + codexEchoPrompt,
-				"    ⇧+← edit last queued message",
-			}, "» Ask Codex to do anything"),
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			probe, bound, shape := codexBoundLiteral(t, frames.boundary)
-			reason, consumed := stagedReading(frames.grace, probe, bound, shape)
-			require.Empty(t, reason, "a NEW echo of this delivery above an empty live composer is consumed, not staged")
-			require.True(t, consumed, "the reading must carry its positive evidence")
-			require.False(t, boundStillStaged(frames.grace, probe, bound, shape))
-		})
-	}
-}
-
-// TestCodexChipEchoAboveUltraComposerReadsConsumed: a bound paste chip echoes
-// the same way — Codex draws the submitted message's chip in its "›" echo
-// just as it draws the pending one in the composer. The new copy above an
-// empty live composer is consumed evidence. Master reads literal-chip through
-// the echo row.
-func TestCodexChipEchoAboveUltraComposerReadsConsumed(t *testing.T) {
-	chip := "[Pasted Content 4207 chars]"
-	bound := stagedEvidence{chip: true, chipText: normalizeDelivery(chip)}
-	boundary := codexLanePane([]string{"› tidy the sidebar before the next sweep"}, "» "+chip)
-	shape := boundaryShapeForTest(boundary)
-	require.True(t, boundStillStaged(boundary, deliveryProbe{}, bound, shape),
-		"fixture: the bound chip sits in the composer at the Enter boundary")
-	grace := codexLanePane([]string{
-		"› tidy the sidebar before the next sweep",
-		"› " + chip,
-	}, "» Ask Codex to do anything")
-	reason, consumed := stagedReading(grace, deliveryProbe{}, bound, shape)
-	require.Empty(t, reason)
-	require.True(t, consumed)
-}
-
-// TestCodexAmbiguousEchoFramesStayStaged is the conservative half — every one
-// of these must stay staged or unverified, because none carries positive
-// evidence THIS delivery was consumed:
+// TestCodexAmbiguousEchoFramesStayStaged: every one of these must stay staged
+// or unverified, because none carries evidence the draft left the live
+// composer:
 //
 //   - A dropped prompt shows the same idle composer as a submitted one whose
-//     echo the frame cannot prove (#4200).
-//   - A watcher that resends identical text leaves an earlier echo whose
-//     count never grows — presence is not evidence.
+//     echo the frame cannot attribute (#4200).
+//   - A watcher that resends identical text leaves an earlier echo — the
+//     bound text at or below the composer block's first row still reads
+//     staged.
 //   - An echo above a composer that still holds the draft is a staged draft
-//     with its echo, never a consumed one.
+//     with its echo.
 //   - A status/rule row between the echo and the composer is Codex's own
-//     layout; it must neither fake growth nor hide the composer.
+//     layout; it must neither hide the composer nor the bound text.
 func TestCodexAmbiguousEchoFramesStayStaged(t *testing.T) {
 	for name, frames := range map[string]struct {
 		boundary, grace, wantReason string
@@ -178,9 +94,9 @@ func TestCodexAmbiguousEchoFramesStayStaged(t *testing.T) {
 			wantReason: "idle placeholder",
 		},
 		// An earlier echo of the SAME prompt above the idle composer — what a
-		// resending watch leaves. The count never grew, so it is not evidence.
-		// The echo row is the composer block's earliest anchor, so the bound
-		// text below it keeps the literal-tail reading.
+		// resending watch leaves. The echo row is the composer block's
+		// earliest anchor, so the bound text below it keeps the literal-tail
+		// reading.
 		"earlier identical echo, no new echo": {
 			boundary:   codexLanePane([]string{"› " + codexEchoPrompt}, "» "+codexEchoPrompt),
 			grace:      codexLanePane([]string{"› " + codexEchoPrompt, "✻ Ran tool"}, "» Ask Codex to do anything"),
@@ -204,11 +120,10 @@ func TestCodexAmbiguousEchoFramesStayStaged(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			probe, bound, shape := codexBoundLiteral(t, frames.boundary)
-			reason, consumed := stagedReading(frames.grace, probe, bound, shape)
-			require.False(t, consumed, "an ambiguous frame must never read as consumed")
+			probe, bound, anchor := codexBoundLiteral(t, frames.boundary)
+			reason := stagedReading(frames.grace, probe, bound, anchor)
 			require.Contains(t, reason, frames.wantReason)
-			require.True(t, boundStillStaged(frames.grace, probe, bound, shape))
+			require.True(t, boundStillStaged(frames.grace, probe, bound, anchor))
 		})
 	}
 }
@@ -220,10 +135,9 @@ func TestCodexAmbiguousEchoFramesStayStaged(t *testing.T) {
 // wider anchor sees it.
 func TestUltraComposerStillStagedWithoutAnyNarrowGlyphRow(t *testing.T) {
 	boundary := codexLanePane([]string{"⠋ Working · 3m"}, "» "+codexEchoPrompt)
-	probe, bound, shape := codexBoundLiteral(t, boundary)
+	probe, bound, anchor := codexBoundLiteral(t, boundary)
 	grace := codexLanePane([]string{"⠋ Working · 3m"}, "» "+codexEchoPrompt)
-	reason, consumed := stagedReading(grace, probe, bound, shape)
-	require.False(t, consumed)
+	reason := stagedReading(grace, probe, bound, anchor)
 	require.Contains(t, reason, "still in the live composer")
 }
 
@@ -232,10 +146,9 @@ func TestUltraComposerStillStagedWithoutAnyNarrowGlyphRow(t *testing.T) {
 // "»"-leading continuation row inside a "›" (or "❯"/"❭") composer. The wider
 // staged anchor lands on that row, INSIDE the draft, and the draft's head
 // sits above it. On the reviewed head the literal-tail check searched only
-// below the last glyph row, missed the head, found no echo growth, and read
-// the still-staged draft as delivered. Bound evidence at or below the
-// composer block's first row — the earliest of the narrow and wide anchors —
-// keeps the staged reading.
+// below the last glyph row, missed the head, and read the still-staged draft
+// as delivered. Bound evidence at or below the composer block's first row —
+// the earliest of the narrow and wide anchors — keeps the staged reading.
 func TestGlyphLeadingDraftLineKeepsStagedReading(t *testing.T) {
 	const prompt = "Explain this:\n» quote"
 	for _, glyph := range []string{"›", "❯", "❭"} {
@@ -244,177 +157,33 @@ func TestGlyphLeadingDraftLineKeepsStagedReading(t *testing.T) {
 			boundary := codexLanePane([]string{"✻ Ran tool"}, composer...)
 			probe := newDeliveryProbe(prompt)
 			bound := stagedEvidence{tail: true}
-			shape := boundaryShapeForTest(boundary)
-			require.True(t, boundStillStaged(boundary, probe, bound, shape),
+			anchor := boundaryAnchorForTest(boundary)
+			require.True(t, boundStillStaged(boundary, probe, bound, anchor),
 				"fixture: the draft with a glyph-leading line sits in the composer at the boundary")
 			// The Enter was absorbed: the grace frame is the same pane.
-			reason, consumed := stagedReading(boundary, probe, bound, shape)
-			require.False(t, consumed, "a draft's own glyph-leading line is not an echo")
+			reason := stagedReading(boundary, probe, bound, anchor)
 			require.Contains(t, reason, "still in the live composer")
-			require.True(t, boundStillStaged(boundary, probe, bound, shape))
+			require.True(t, boundStillStaged(boundary, probe, bound, anchor))
 		})
 	}
 }
 
-// TestRevealedScrollbackEchoCannotFakeConsumption is #7802 R2: an identical
-// echo the tall composer pushed off the pane top is already counted by the
-// scrollback-inclusive baseline, so its REAPPEARING when the composer
-// shrinks — the dropped-prompt frame — cannot read as a new echo. On the
-// reviewed head the visible-only baseline counted zero and the revealed copy
-// read as growth: a dropped prompt claimed consumed.
-func TestRevealedScrollbackEchoCannotFakeConsumption(t *testing.T) {
-	boundary := codexLanePane([]string{"⠋ Working · 3m"}, "» "+codexEchoPrompt)
-	probe, bound, _ := codexBoundLiteral(t, boundary)
-
-	// The baseline the boundary capture actually held: the prompt's earlier
-	// echo sat in scrollback above the visible frame — a tall composer had
-	// pushed it off the pane top.
-	shape := boundaryShapeForTest(boundary, "› "+codexEchoPrompt)
-
-	// Dropped: the composer repainted idle and the scrollback echo is
-	// revealed. Count 1 against baseline 1 — never grew, so not evidence.
-	revealed := codexLanePane([]string{"⠋ Working · 3m", "› " + codexEchoPrompt}, "» Ask Codex to do anything")
-	reason, consumed := stagedReading(revealed, probe, bound, shape)
-	require.False(t, consumed, "a revealed scrollback echo is not a new echo")
-	require.NotEmpty(t, reason, "the dropped-prompt frame stays staged")
-
-	// The same baseline must not overblock: a NEW echo really does grow the
-	// count past it and reads consumed.
-	submitted := codexLanePane([]string{
-		"⠋ Working · 3m",
-		"› " + codexEchoPrompt,
-		"› " + codexEchoPrompt,
-	}, "» Ask Codex to do anything")
-	reason, consumed = stagedReading(submitted, probe, bound, shape)
-	require.Empty(t, reason)
-	require.True(t, consumed, "a second copy — the new echo — beats the scrollback baseline")
-}
-
-// TestEchoBaselineWithoutScrollbackReachStaysStaged is R2's fallback: a
-// boundary whose scrollback reach is unproven AND whose transcript left no
-// mark can tell a new echo from neither revealed history nor a post-boundary
-// position, so the consumed reading never fires — the frame stays staged
-// rather than guess.
-func TestEchoBaselineWithoutScrollbackReachStaysStaged(t *testing.T) {
-	boundary := codexLanePane([]string{}, "» "+codexEchoPrompt)
-	probe, bound, _ := codexBoundLiteral(t, boundary)
-	shape := composerShapeAtBoundary(boundary, nil, false)
-	grace := codexLanePane([]string{"› " + codexEchoPrompt}, "» Ask Codex to do anything")
-	reason, consumed := stagedReading(grace, probe, bound, shape)
-	require.False(t, consumed, "no baseline and no mark: a grown-looking count cannot be trusted")
-	require.NotEmpty(t, reason, "the frame stays staged")
-}
-
-// TestBoundaryMarkProvesNewEchoBelowIt is the second proof newEchoCopy
-// admits — the one that works on the alternate screen, where tmux keeps no
-// history and the baseline can never count. The mark is the transcript's own
-// tail line at Enter, so an echo BELOW it is post-boundary by position:
-// revealed scrollback rows can only reappear above the boundary's line.
-func TestBoundaryMarkProvesNewEchoBelowIt(t *testing.T) {
-	// The boundary's transcript tail must clear the mark's 16-rune floor —
-	// anything shorter yields no mark at all.
-	const status = "⠋ Working · 3m 12s · esc to interrupt"
-	boundary := codexLanePane([]string{status}, "» "+codexEchoPrompt)
-	probe, bound, _ := codexBoundLiteral(t, boundary)
-	shape := composerShapeAtBoundary(boundary, nil, false) // no history reach at all
-	grace := codexLanePane([]string{status, "› " + codexEchoPrompt}, "» Ask Codex to do anything")
-	reason, consumed := stagedReading(grace, probe, bound, shape)
-	require.Empty(t, reason)
-	require.True(t, consumed,
-		"an echo below the boundary's own tail line is post-boundary — no baseline needed")
-}
-
-// TestNewlineLeadingDraftComposerIsNotEmpty is Codex thread 4666233827: a
-// draft that opens with a newline leaves a bare glyph first row while its
-// text sits below it — the consumed reading must see that the WHOLE
-// composer region holds no input, not just the first row, or a grown echo
-// proves a still-staged draft "delivered".
-func TestNewlineLeadingDraftComposerIsNotEmpty(t *testing.T) {
+// TestNewlineLeadingDraftComposerStaysStaged is Codex thread 4666233827's
+// staged-direction half: a draft that opens with a newline leaves a bare
+// glyph first row while its text sits below it. The composer block's first
+// row is the bare glyph, and the bound text below it keeps the staged
+// reading — a first-row-only emptiness check would miss the draft entirely.
+func TestNewlineLeadingDraftComposerStaysStaged(t *testing.T) {
 	boundary := codexLanePane([]string{"› " + codexEchoPrompt}, "› ", "  "+codexEchoPrompt)
-	probe, bound, shape := codexBoundLiteral(t, boundary)
+	probe, bound, anchor := codexBoundLiteral(t, boundary)
 	grace := codexLanePane([]string{
 		"› " + codexEchoPrompt,
 		"› " + codexEchoPrompt,
 	}, "› ", "  "+codexEchoPrompt)
-	reason, consumed := stagedReading(grace, probe, bound, shape)
-	require.False(t, consumed,
-		"a bare glyph first row with the draft still below it is not an empty composer")
-	require.NotEmpty(t, reason, "the staged draft keeps the staged verdict")
-}
-
-// TestMarkFromDraftHeadStaysStaged is the third review's R1 frame: a draft
-// whose own head leads with a glyph makes the last glyph row land inside
-// the draft, and a mark taken from that head is draft text — a resending
-// watch's identical echo then "proves" a dropped prompt. The mark must come
-// only from transcript rows above the composer block's head.
-func TestMarkFromDraftHeadStaysStaged(t *testing.T) {
-	const head = "sweep every running lane for a stalled composer"
-	const cont = "› the daemon supervises sessions itself"
-	probe := newDeliveryProbe(head + "\n" + cont)
-	bound := stagedEvidence{tail: true}
-	boundary := codexLanePane([]string{"› " + head, "  " + cont}, "» "+head, "  "+cont)
-	shape := composerShapeAtBoundary(boundary, nil, false) // no history reach
-	require.NotContains(t, shape.mark, "»",
-		"the draft's own head row must never become the boundary mark")
-	// The dropped draft: the composer repaints its resting face and the old
-	// echo — including its continuation — is all that remains above it.
-	grace := codexLanePane([]string{"› " + head, "  " + cont}, "» Ask Codex to do anything")
-	reason, consumed := stagedReading(grace, probe, bound, shape)
-	require.False(t, consumed,
-		"the mark came from the draft's own head — it proves nothing about the echo")
-	require.NotEmpty(t, reason, "the dropped frame stays staged")
-}
-
-// TestUnrelatedOutputContainingPromptStaysStaged is Codex thread 4666233837:
-// a short prompt like "ok" substring-matches inside arbitrary transcript
-// text ("token"), so under plain counting a dropped prompt reads consumed.
-// Only an attributable echo row — the agent's echo marker plus EXACTLY this
-// prompt's text — may count; arbitrary output never does.
-func TestUnrelatedOutputContainingPromptStaysStaged(t *testing.T) {
-	probe := newDeliveryProbe("ok")
-	bound := stagedEvidence{tail: true}
-	boundary := codexLanePane(nil, "› ok")
-	shape := boundaryShapeForTest(boundary)
-	grace := codexLanePane([]string{"token count: 100"}, "› Ask Codex to do anything")
-	reason, consumed := stagedReading(grace, probe, bound, shape)
-	require.False(t, consumed,
-		`"token" containing "ok" is arbitrary output, not an echo of this prompt`)
-	require.NotEmpty(t, reason, "the dropped prompt keeps its staged verdict")
-}
-
-// TestEchoMarkerWithSubstringContentStaysStaged is the sharper half of
-// thread 4666233837: even a row under the agent's own echo marker is not
-// attributable unless its content IS this prompt — "› token count: 100"
-// contains "ok" but is not an echo of it.
-func TestEchoMarkerWithSubstringContentStaysStaged(t *testing.T) {
-	probe := newDeliveryProbe("ok")
-	bound := stagedEvidence{tail: true}
-	boundary := codexLanePane(nil, "› ok")
-	shape := boundaryShapeForTest(boundary)
-	grace := codexLanePane([]string{"› token count: 100"}, "› Ask Codex to do anything")
-	reason, consumed := stagedReading(grace, probe, bound, shape)
-	require.False(t, consumed,
-		"an echo marker row whose content only contains the prompt is not this prompt's echo")
-	require.NotEmpty(t, reason)
-}
-
-// TestMarkInsideIdenticalEchoStaysStaged pins the mark path's conservative
-// miss: when the boundary's transcript tail IS the same echo — a resending
-// watch left it there — every new copy wears the mark too, so the last
-// occurrence hides the genuinely new one. The frame stays staged rather
-// than guess which copy is new.
-func TestMarkInsideIdenticalEchoStaysStaged(t *testing.T) {
-	boundary := codexLanePane([]string{"› " + codexEchoPrompt}, "» "+codexEchoPrompt)
-	probe, bound, _ := codexBoundLiteral(t, boundary)
-	shape := composerShapeAtBoundary(boundary, nil, false)
-	grace := codexLanePane([]string{
-		"› " + codexEchoPrompt,
-		"› " + codexEchoPrompt,
-	}, "» Ask Codex to do anything")
-	reason, consumed := stagedReading(grace, probe, bound, shape)
-	require.False(t, consumed,
-		"the mark lands inside an identical echo — the new copy is unprovable")
-	require.NotEmpty(t, reason, "the ambiguous frame stays staged")
+	reason := stagedReading(grace, probe, bound, anchor)
+	require.NotEmpty(t, reason,
+		"a bare glyph first row with the draft still below it keeps the staged verdict")
+	require.Contains(t, reason, "still in the live composer")
 }
 
 // TestDevinIdlePlaceholderRepaintNamesTheIdleReading is #7801's residual 2:
@@ -424,35 +193,33 @@ func TestMarkInsideIdenticalEchoStaysStaged(t *testing.T) {
 // it saw. Master names it "repainted holding content".
 func TestDevinIdlePlaceholderRepaintNamesTheIdleReading(t *testing.T) {
 	boundary := devinLanePane([]string{"one"}, placeholderDraft("❭")...)
-	probe, bound, shape := boundLiteral(t, boundary)
+	probe, bound, anchor := boundLiteral(t, boundary)
 	grace := devinLanePane([]string{"one", "SWE-2 Max · bypass Starting session…"},
 		"❭ Ask Devin to build features, fix bugs, or work on your code")
-	reason, consumed := stagedReading(grace, probe, bound, shape)
-	require.False(t, consumed, "the idle placeholder alone is not evidence the prompt was consumed")
+	reason := stagedReading(grace, probe, bound, anchor)
 	require.Contains(t, reason, "idle placeholder")
-	require.True(t, boundStillStaged(grace, probe, bound, shape))
+	require.True(t, boundStillStaged(grace, probe, bound, anchor))
 }
 
-// TestUltraCodexSubmittedDraftNeedsNoWarningOrRemedyEnter drives the whole
-// delivery path end to end: a literal paste lands in the "»" composer, Enter
-// submits it, the agent echoes it "› " and repaints "» Ask Codex to do
-// anything". Consumed — delivered, one Enter, no warning. Master reads
-// literal-tail through the echo row and reports sent-unverified.
-func TestUltraCodexSubmittedDraftNeedsNoWarningOrRemedyEnter(t *testing.T) {
+// TestUltraCodexSubmittedDraftStaysUnverified is #7801's residual warning,
+// honestly named: a literal paste lands in the "»" composer, Enter submits
+// it, the agent echoes it "› " and repaints "» Ask Codex to do anything".
+// The echo row is the composer block's earliest anchor, so the bound text
+// keeps the literal-tail staged reading — sent-unverified, one Enter, and
+// the warning names what it saw rather than a bare "still staged".
+func TestUltraCodexSubmittedDraftStaysUnverified(t *testing.T) {
 	warnings := captureWarningLog(t)
 	m := &stagedDraftPane{
 		glyph: "»", echoGlyph: "›", placeholder: "Ask Codex to do anything", render: literalRender,
-		// A transcript tail gives the boundary a mark to prove the new echo
-		// positionally — the honest mock's -S capture is post-Enter, so the
-		// baseline already holds this delivery's echo and the count can
-		// never grow past it (#7802 R2).
 		transcript: []string{"› tidy the sidebar before the next sweep"},
 	}
 	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
-	require.Equal(t, PromptDelivered, status)
+	require.Equal(t, PromptSentUnverified, status,
+		"an unattributable echo keeps the staged verdict — pane text cannot prove consumption")
 	require.Equal(t, 1, pastes)
-	require.Equal(t, 1, enters, "a consumed delivery never earns a remedy Enter")
-	require.NotContains(t, warnings.String(), "withholding the remedy Enter")
+	require.Equal(t, 1, enters, "a staged reading never earns a remedy Enter")
+	require.Contains(t, warnings.String(), "withholding the remedy Enter")
+	require.Contains(t, warnings.String(), "still in the live composer")
 }
 
 // TestUltraCodexLiteralStrandStillWarnsAndWithholds: a draft whose Enter was
@@ -493,34 +260,6 @@ func TestGlyphLeadingLineStrandStillWarnsAndWithholds(t *testing.T) {
 	}
 }
 
-// TestConsumedEchoDemotesAbsentInsteadOfRedelivering pins property 4: polls
-// classified the delivery absent, the boundary bound the whole draft, and the
-// echo then proves it was consumed. That reading is evidence AGAINST absence
-// — the outcome demotes to sent-unverified, and the #3293 redelivery can
-// never fire because of it: one paste, one Enter. The log assertions are the
-// witness (#7802 R3): without the demotion the absent outcome logs its ERROR
-// and the veto logs its warning, and paste/Enter counts alone cannot tell
-// the two paths apart.
-func TestConsumedEchoDemotesAbsentInsteadOfRedelivering(t *testing.T) {
-	errors := captureErrorLog(t)
-	warnings := captureWarningLog(t)
-	m := &stagedDraftPane{
-		glyph: "»", echoGlyph: "›", pollPartial: true, placeholder: "Ask Codex to do anything", render: literalRender,
-		// The transcript tail marks the boundary so the new echo proves
-		// positionally even though the post-Enter -S baseline already holds it.
-		transcript: []string{"› tidy the sidebar before the next sweep"},
-	}
-	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
-	require.Equal(t, PromptSentUnverified, status)
-	require.Equal(t, 1, pastes, "a proven echo must never reach the redelivery path")
-	require.Equal(t, 1, enters)
-	require.NotContains(t, warnings.String(), "withholding the remedy Enter")
-	require.NotContains(t, errors.String(), "prompt delivery observed absent",
-		"the consumed reading must demote the absent outcome before the ERROR logs")
-	require.NotContains(t, warnings.String(), "withholding redelivery",
-		"the demoted outcome must never reach the redelivery veto")
-}
-
 // TestDevinStartingSessionWarnsNamingIdlePlaceholder drives residual 2 end to
 // end: Devin's boot frame replaces the draft with the idle placeholder over a
 // "Starting session…" footer and shows no echo — the same frame a dropped
@@ -552,112 +291,4 @@ func TestDevinStartingSessionWarnsNamingIdlePlaceholder(t *testing.T) {
 	logged := warnings.String()
 	require.Contains(t, logged, "withholding the remedy Enter")
 	require.Contains(t, logged, "idle placeholder", "the warning names the reading it saw")
-}
-
-// TestAltScreenDroppedPromptStaysStaged is #7802 R1's whole-path regression:
-// on the alternate screen tmux keeps NO history, so the -S capture returns
-// the visible grid with ok=true — a baseline that only looks scrollback-
-// inclusive. A tall draft pushes an earlier "› " echo off the pane top; the
-// dropped draft repaints the resting placeholder and the old echo reappears
-// — a visible count of 0 growing to 1. alternate_on=1 keeps the baseline
-// out of the proof, the boundary's off-screen transcript left no mark, and
-// the frame stays staged. The composer is "›" because the positional bind
-// needs a narrow glyph row — the consumed-reading defect it exercises is
-// the same one an Ultra pane hits.
-func TestAltScreenDroppedPromptStaysStaged(t *testing.T) {
-	warnings := captureWarningLog(t)
-	m := &stagedDraftPane{
-		glyph: "›", echoGlyph: "›", placeholder: "Ask Codex to do anything",
-		alternateOn: true, dropDraftOnEnter: true, height: 8,
-		transcript: []string{"› " + codexEchoPrompt},
-		render: func(string) []string {
-			return []string{codexEchoPrompt, "draft 2", "draft 3", "draft 4",
-				"draft 5", "draft 6", "draft 7", "draft 8"}
-		},
-	}
-	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
-	require.Equal(t, PromptSentUnverified, status,
-		"a revealed alt-screen echo is not a new echo — the baseline never reached history")
-	require.Equal(t, 1, pastes)
-	require.Equal(t, 1, enters, "no consumed reading authorizes no remedy Enter")
-	require.Contains(t, warnings.String(), "withholding the remedy Enter")
-}
-
-// TestBaselineHoldingOwnEchoOnlyWithholdsConsumed is #7802 R2's pin: the
-// baseline capture runs AFTER the Enter, and the mock's echo lands inside
-// the boundary command — so the -S baseline legitimately holds this
-// delivery's own echo, exactly like a fast agent in production. With no
-// transcript tail to mark the boundary, the count can never grow past the
-// baseline and the consumed reading is withheld — safe, never a claim.
-func TestBaselineHoldingOwnEchoOnlyWithholdsConsumed(t *testing.T) {
-	warnings := captureWarningLog(t)
-	m := &stagedDraftPane{glyph: "»", echoGlyph: "›", placeholder: "Ask Codex to do anything", render: literalRender}
-	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
-	require.Equal(t, PromptSentUnverified, status,
-		"a baseline already holding this delivery's echo proves nothing new")
-	require.Equal(t, 1, pastes)
-	require.Equal(t, 1, enters)
-	require.Contains(t, warnings.String(), "withholding the remedy Enter")
-}
-
-// TestCodexSubmittedDraftNeedsNoWarningOrRemedyEnter is the "›" tier's
-// whole-path twin of the Ultra test: transcript tail, paste, echo, idle
-// repaint — the boundary mark proves the echo positionally and the delivery
-// is consumed. The third review asked for this shape explicitly (alongside
-// Ultra and "❯").
-func TestCodexSubmittedDraftNeedsNoWarningOrRemedyEnter(t *testing.T) {
-	warnings := captureWarningLog(t)
-	m := &stagedDraftPane{
-		glyph: "›", echoGlyph: "›", placeholder: "Ask Codex to do anything", render: literalRender,
-		transcript: []string{"› tidy the sidebar before the next sweep"},
-	}
-	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
-	require.Equal(t, PromptDelivered, status)
-	require.Equal(t, 1, pastes)
-	require.Equal(t, 1, enters)
-	require.NotContains(t, warnings.String(), "withholding the remedy Enter")
-}
-
-// TestClaudeSubmittedDraftNeedsNoWarningOrRemedyEnter is the "❯" whole-path
-// the third review asked for: Claude echoes a submitted prompt "❯ " — the
-// same glyph its live composer draws — and repaints a bare "❯" row. The
-// echo is attributable only by the echo-block rule (marker plus exactly the
-// prompt's content), the mark proves it new, and the delivery is consumed.
-func TestClaudeSubmittedDraftNeedsNoWarningOrRemedyEnter(t *testing.T) {
-	warnings := captureWarningLog(t)
-	m := &stagedDraftPane{
-		glyph: claudeComposerGlyph, echoGlyph: claudeComposerGlyph, render: literalRender,
-		transcript: []string{claudeComposerGlyph + " tidy the sidebar before the next sweep"},
-	}
-	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
-	require.Equal(t, PromptDelivered, status)
-	require.Equal(t, 1, pastes)
-	require.Equal(t, 1, enters)
-	require.NotContains(t, warnings.String(), "withholding the remedy Enter")
-}
-
-// TestAltAnswerUncertainStaysStaged is R2's remainder: any #{alternate_on}
-// answer but the literal "0" — tmux says something unparseable, or nothing —
-// leaves the baseline unproven, and this dropped-prompt frame stays staged.
-func TestAltAnswerUncertainStaysStaged(t *testing.T) {
-	for _, answer := range []string{"maybe", ""} {
-		t.Run("answer "+strconv.Quote(answer), func(t *testing.T) {
-			warnings := captureWarningLog(t)
-			alt := answer
-			m := &stagedDraftPane{
-				glyph: "›", echoGlyph: "›", placeholder: "Ask Codex to do anything",
-				altAnswer: &alt, dropDraftOnEnter: true, height: 8,
-				transcript: []string{"› " + codexEchoPrompt},
-				render: func(string) []string {
-					return []string{codexEchoPrompt, "draft 2", "draft 3", "draft 4",
-						"draft 5", "draft 6", "draft 7", "draft 8"}
-				},
-			}
-			status, _, enters := sendStaged(t, m, codexEchoPrompt)
-			require.Equal(t, PromptSentUnverified, status,
-				"an alternate_on answer of %q is not the literal \"0\" — no baseline", answer)
-			require.Equal(t, 1, enters)
-			require.Contains(t, warnings.String(), "withholding the remedy Enter")
-		})
-	}
 }
