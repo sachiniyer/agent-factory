@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,11 +47,12 @@ func codexLanePane(above []string, composer ...string) string {
 }
 
 // boundaryShapeForTest reduces a boundary fixture to its composer shape the
-// way submit does: the anchor from the visible grid and the echo baseline
-// from the scrollback-inclusive capture. A fixture pane models the whole
-// transcript, so its own above-anchor rows ARE the baseline; scrollback
-// passes extra rows that sat only in history at the boundary — the copies a
-// tall composer pushed off the pane top (Codex #7802 R2).
+// way submit does: the anchor, mark and block start from the visible grid,
+// the echo baseline from the scrollback-inclusive capture. A fixture pane
+// models the whole transcript, so its own above-block rows ARE the
+// baseline; scrollback passes extra rows that sat only in history at the
+// boundary — the copies a tall composer pushed off the pane top (Codex
+// #7802 R2).
 func boundaryShapeForTest(boundary string, scrollback ...string) boundaryComposerShape {
 	rows := paneGridRows(boundary)
 	anchor := stagedLastComposerAnchor(rows)
@@ -58,8 +60,7 @@ func boundaryShapeForTest(boundary string, scrollback ...string) boundaryCompose
 	if anchor >= 0 {
 		upper = rows[:anchor]
 	}
-	baseline := normalizeDelivery(strings.Join(append(scrollback, upper...), ""))
-	return composerShapeAtBoundary(boundary, baseline, true)
+	return composerShapeAtBoundary(boundary, append(scrollback, upper...), true)
 }
 
 func codexBoundLiteral(t *testing.T, boundary string) (deliveryProbe, stagedEvidence, boundaryComposerShape) {
@@ -297,7 +298,7 @@ func TestRevealedScrollbackEchoCannotFakeConsumption(t *testing.T) {
 func TestEchoBaselineWithoutScrollbackReachStaysStaged(t *testing.T) {
 	boundary := codexLanePane([]string{}, "» "+codexEchoPrompt)
 	probe, bound, _ := codexBoundLiteral(t, boundary)
-	shape := composerShapeAtBoundary(boundary, "", false)
+	shape := composerShapeAtBoundary(boundary, nil, false)
 	grace := codexLanePane([]string{"› " + codexEchoPrompt}, "» Ask Codex to do anything")
 	reason, consumed := stagedReading(grace, probe, bound, shape)
 	require.False(t, consumed, "no baseline and no mark: a grown-looking count cannot be trusted")
@@ -310,14 +311,40 @@ func TestEchoBaselineWithoutScrollbackReachStaysStaged(t *testing.T) {
 // tail line at Enter, so an echo BELOW it is post-boundary by position:
 // revealed scrollback rows can only reappear above the boundary's line.
 func TestBoundaryMarkProvesNewEchoBelowIt(t *testing.T) {
-	boundary := codexLanePane([]string{"⠋ Working · 3m"}, "» "+codexEchoPrompt)
+	// The boundary's transcript tail must clear the mark's 16-rune floor —
+	// anything shorter yields no mark at all.
+	const status = "⠋ Working · 3m 12s · esc to interrupt"
+	boundary := codexLanePane([]string{status}, "» "+codexEchoPrompt)
 	probe, bound, _ := codexBoundLiteral(t, boundary)
-	shape := composerShapeAtBoundary(boundary, "", false) // no history reach at all
-	grace := codexLanePane([]string{"⠋ Working · 3m", "› " + codexEchoPrompt}, "» Ask Codex to do anything")
+	shape := composerShapeAtBoundary(boundary, nil, false) // no history reach at all
+	grace := codexLanePane([]string{status, "› " + codexEchoPrompt}, "» Ask Codex to do anything")
 	reason, consumed := stagedReading(grace, probe, bound, shape)
 	require.Empty(t, reason)
 	require.True(t, consumed,
 		"an echo below the boundary's own tail line is post-boundary — no baseline needed")
+}
+
+// TestMarkFromDraftHeadStaysStaged is the third review's R1 frame: a draft
+// whose own head leads with a glyph makes the last glyph row land inside
+// the draft, and a mark taken from that head is draft text — a resending
+// watch's identical echo then "proves" a dropped prompt. The mark must come
+// only from transcript rows above the composer block's head.
+func TestMarkFromDraftHeadStaysStaged(t *testing.T) {
+	const head = "sweep every running lane for a stalled composer"
+	const cont = "› the daemon supervises sessions itself"
+	probe := newDeliveryProbe(head + "\n" + cont)
+	bound := stagedEvidence{tail: true}
+	boundary := codexLanePane([]string{"› " + head, "  " + cont}, "» "+head, "  "+cont)
+	shape := composerShapeAtBoundary(boundary, nil, false) // no history reach
+	require.NotContains(t, shape.mark, "»",
+		"the draft's own head row must never become the boundary mark")
+	// The dropped draft: the composer repaints its resting face and the old
+	// echo — including its continuation — is all that remains above it.
+	grace := codexLanePane([]string{"› " + head, "  " + cont}, "» Ask Codex to do anything")
+	reason, consumed := stagedReading(grace, probe, bound, shape)
+	require.False(t, consumed,
+		"the mark came from the draft's own head — it proves nothing about the echo")
+	require.NotEmpty(t, reason, "the dropped frame stays staged")
 }
 
 // TestMarkInsideIdenticalEchoStaysStaged pins the mark path's conservative
@@ -328,7 +355,7 @@ func TestBoundaryMarkProvesNewEchoBelowIt(t *testing.T) {
 func TestMarkInsideIdenticalEchoStaysStaged(t *testing.T) {
 	boundary := codexLanePane([]string{"› " + codexEchoPrompt}, "» "+codexEchoPrompt)
 	probe, bound, _ := codexBoundLiteral(t, boundary)
-	shape := composerShapeAtBoundary(boundary, "", false)
+	shape := composerShapeAtBoundary(boundary, nil, false)
 	grace := codexLanePane([]string{
 		"› " + codexEchoPrompt,
 		"› " + codexEchoPrompt,
@@ -520,4 +547,30 @@ func TestBaselineHoldingOwnEchoOnlyWithholdsConsumed(t *testing.T) {
 	require.Equal(t, 1, pastes)
 	require.Equal(t, 1, enters)
 	require.Contains(t, warnings.String(), "withholding the remedy Enter")
+}
+
+// TestAltAnswerUncertainStaysStaged is R2's remainder: any #{alternate_on}
+// answer but the literal "0" — tmux says something unparseable, or nothing —
+// leaves the baseline unproven, and this dropped-prompt frame stays staged.
+func TestAltAnswerUncertainStaysStaged(t *testing.T) {
+	for _, answer := range []string{"maybe", ""} {
+		t.Run("answer "+strconv.Quote(answer), func(t *testing.T) {
+			warnings := captureWarningLog(t)
+			alt := answer
+			m := &stagedDraftPane{
+				glyph: "›", echoGlyph: "›", placeholder: "Ask Codex to do anything",
+				altAnswer: &alt, dropDraftOnEnter: true, height: 8,
+				transcript: []string{"› " + codexEchoPrompt},
+				render: func(string) []string {
+					return []string{codexEchoPrompt, "draft 2", "draft 3", "draft 4",
+						"draft 5", "draft 6", "draft 7", "draft 8"}
+				},
+			}
+			status, _, enters := sendStaged(t, m, codexEchoPrompt)
+			require.Equal(t, PromptSentUnverified, status,
+				"an alternate_on answer of %q is not the literal \"0\" — no baseline", answer)
+			require.Equal(t, 1, enters)
+			require.Contains(t, warnings.String(), "withholding the remedy Enter")
+		})
+	}
 }

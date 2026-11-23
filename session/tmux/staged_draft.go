@@ -1,6 +1,9 @@
 package tmux
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // stagedDraftHistoryBound caps how far the staged-draft recheck reaches back
 // through scrollback — the -S bound on every capture it makes (Codex #7547,
@@ -27,6 +30,36 @@ func stagedBoundaryMark(bupper string) string {
 		rs = rs[len(rs)-maxRunes:]
 	}
 	return string(rs)
+}
+
+// capturePaneForDeliveryHistoryMainScreen is the submit boundary's history
+// capture plus the proof it reached history: `capture-pane -S` and
+// `display-message #{alternate_on}` run in ONE tmux command queue, so the
+// screen state cannot flip between the capture and the read that qualifies
+// it. tmux keeps no history on the alternate screen — codex's default —
+// where -S returns only the visible grid with ok=true anyway, so
+// reachedHistory is true ONLY when the answer literally reads "0"; a
+// missing or malformed answer, "1", or a failed read means the capture may
+// be visible-only and must not count (Codex #7802 review R1/R2).
+func (t *TmuxSession) capturePaneForDeliveryHistoryMainScreen() (hist string, reachedHistory bool, ok bool) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	target := ExactTarget(t.sanitizedName)
+	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p",
+		"-S", fmt.Sprintf("-%d", stagedDraftHistoryBound),
+		"-t", target, ";",
+		"display-message", "-p", "-t", target, "#{alternate_on}")
+	if err != nil {
+		return "", false, false
+	}
+	text := string(out)
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	alt := strings.TrimSpace(lines[len(lines)-1])
+	hist = strings.Join(lines[:len(lines)-1], "\n")
+	if hist != "" {
+		hist += "\n"
+	}
+	return hist, alt == "0", true
 }
 
 // StagedDraftRead is the verdict of one staged-draft recheck (#7545): where
