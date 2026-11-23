@@ -319,21 +319,78 @@ func composerRegion(rows []string, anchor int) []string {
 	return rows[anchor:end]
 }
 
+// boundaryBlock is where the Enter-boundary frame proved this delivery's
+// composer block sat. anchor is that frame's last composer-glyph row over the
+// recheck's (wide) glyph set — the row the staged reading compares movement
+// against. blockStart is the composer block's FIRST row — the earliest row
+// the bound draft's render could occupy — or -1 when the frame cannot
+// establish it.
+type boundaryBlock struct {
+	anchor     int
+	blockStart int
+}
+
+// deliveryBoundaryBlock reads the Enter boundary's composer block. The
+// boundary capture runs in the same tmux command queue as our Enter, so it is
+// the one frame where the bound draft provably sat: the block's first row is
+// the row where the bound render's lowest on-pane occurrence begins — the
+// whole normalized payload for a literal draft, the bound chip's own text
+// for a collapsed paste. Glyph rows alone cannot find it: a draft
+// continuation line can lead with ANY composer glyph — or be blank — so the
+// deepest glyph-leading row can sit INSIDE the draft and leave its head
+// above the anchor unread (#7809). When the bound render is not verbatim in
+// the frame — a head scrolled off a history-less pane, a transformed render —
+// the block start is unprovable and stays -1.
+func deliveryBoundaryBlock(boundaryGrid string, probe deliveryProbe, bound stagedEvidence) boundaryBlock {
+	rows := paneGridRows(boundaryGrid)
+	b := boundaryBlock{anchor: stagedLastComposerAnchor(rows), blockStart: -1}
+	if b.anchor < 0 {
+		return b
+	}
+	end := b.anchor + len(composerRegion(rows, b.anchor))
+	if bound.tail {
+		b.blockStart = boundDraftHeadRow(rows, b.anchor, end, probe.payload)
+	}
+	if bound.chip {
+		if r := boundDraftHeadRow(rows, b.anchor, end, bound.chipText); r >= 0 && (b.blockStart < 0 || r < b.blockStart) {
+			b.blockStart = r
+		}
+	}
+	return b
+}
+
+// boundDraftHeadRow is the row where the bound render's lowest occurrence
+// begins: the first row, walking up from the boundary's anchor, whose rows
+// through the composer block's bottom still cover the whole normalized
+// render. Anything shallower starts the render mid-block — the draft's own
+// glyph-leading or blank continuation rows can sit between its head and the
+// anchor, so the head is found by content, never by glyph shape.
+func boundDraftHeadRow(rows []string, anchor, end int, text string) int {
+	if text == "" {
+		return -1
+	}
+	for r := anchor; r >= 0; r-- {
+		if strings.Contains(normalizeDelivery(strings.Join(rows[r:end], "")), text) {
+			return r
+		}
+	}
+	return -1
+}
+
 // boundStillStaged reports whether evidence bound to this delivery still sits
 // in the live composer — at or below the composer block's first row, the
-// earliest anchor the bound draft's own glyph-leading lines could occupy — in
-// an atomic pane+cursor frame. The anchor is positional, not textual: a
-// composer the clear+paste could not fully attribute must not read a
-// transcript echo (which carries the same tail, and the same chip, above the
-// live composer).
+// earliest row the bound draft could occupy — in an atomic pane+cursor frame.
+// The anchor is positional, not textual: a composer the clear+paste could not
+// fully attribute must not read a transcript echo (which carries the same
+// tail, and the same chip, above the live composer).
 //
 // When the grace frame's glyph row moved off the boundary's, the composer was
 // repainted. A bare fresh glyph row BELOW the old anchor is a submitted
 // composer; anything else — an anchor that moved up, or a content row like a
 // user's ">quote" — is a composer shape we can no longer attribute, so the
 // draft conservatively still counts as staged.
-func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, boundaryAnchor int) bool {
-	return stagedReading(pane, probe, bound, boundaryAnchor) != ""
+func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, boundary boundaryBlock) bool {
+	return stagedReading(pane, probe, bound, boundary) != ""
 }
 
 // stagedReading is boundStillStaged's verdict with its reason. It names
@@ -342,7 +399,7 @@ func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, bo
 // Enter left in the composer and a repaint we cannot attribute are different
 // failures, and a log line that named neither could not tell production's 537
 // warnings apart (#7023).
-func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, boundaryAnchor int) string {
+func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, boundary boundaryBlock) string {
 	rows := paneGridRows(pane)
 	// The anchor uses the recheck's wider glyph set
 	// (stagedLastComposerAnchor): Codex's Ultra tier prompts its composer
@@ -356,16 +413,32 @@ func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, bound
 	if anchor < 0 {
 		return ""
 	}
-	// The composer block's first row is the EARLIEST of the narrow and wide
-	// anchors the bound draft could occupy, not the last glyph row: the
-	// draft's own lines can lead with a composer glyph — a "» quote" line
-	// inside a "›" or "❯" composer — and the last glyph row then lands
-	// INSIDE the draft, letting its head sit above the anchor unread (Codex
-	// #7802 R1). Bound evidence at or below the block's first row keeps the
-	// staged reading.
+	// The composer block's first row is the EARLIEST row this delivery's
+	// draft could occupy, never the deepest glyph-leading row: a draft's own
+	// continuation line can lead with ANY composer glyph — a lone "›" or ">"
+	// inside a "›"/"❯"/"❭" composer — or be blank, so either glyph anchor
+	// can land INSIDE the draft and leave its head above the search unread
+	// (#7802 R1, #7809). The boundary frame proved where the block sat, so
+	// this frame's block start is the boundary's own first row translated by
+	// the anchor's movement; the narrow anchor stays as the earlier floor —
+	// searching a transcript row above the block can only add staged
+	// readings. When the boundary could not establish the block the search
+	// runs from the pane's first row, the earliest candidate: a transcript
+	// echo of the bound text then reads staged, which is safe.
 	blockStart := lastComposerGlyphRow(rows)
 	if blockStart < 0 {
 		blockStart = anchor
+	}
+	if boundary.blockStart < 0 {
+		blockStart = 0
+	} else {
+		head := boundary.blockStart + anchor - boundary.anchor
+		if head < 0 {
+			head = 0
+		}
+		if head < blockStart {
+			blockStart = head
+		}
 	}
 	lower := normalizeDelivery(strings.Join(rows[blockStart:], ""))
 	if bound.tail && strings.Contains(lower, probe.completion) {
@@ -374,10 +447,10 @@ func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, bound
 	if bound.chip && strings.Contains(lower, bound.chipText) {
 		return "this prompt's bound chip is still in the live composer"
 	}
-	if anchor == boundaryAnchor {
+	if anchor == boundary.anchor {
 		return ""
 	}
-	if anchor < boundaryAnchor {
+	if anchor < boundary.anchor {
 		return "the composer was repainted above its row at the Enter boundary, so what it holds cannot be attributed"
 	}
 	if !bareComposerGlyphRow(rows[anchor]) {
@@ -560,11 +633,11 @@ func contentEndCol(row string) int {
 //     a transcript echo, but neither can appear in a frame that has not
 //     changed.
 //  3. Position. The bound evidence sits in the live composer — at or below
-//     the composer block's first row, the earliest of the narrow and wide
-//     anchors its own glyph-leading lines could occupy (boundStillStaged) —
-//     and the cursor is visible and parked where this draft alone could have
-//     left it. A transcript echo cannot satisfy position: the composer
-//     repaints its own glyph row beneath the echo.
+//     the composer block's first row, the earliest row the bound draft could
+//     occupy, derived from where the boundary frame proves the draft sat
+//     (boundStillStaged) — and the cursor is visible and parked where this
+//     draft alone could have left it. A transcript echo cannot satisfy
+//     position: the composer repaints its own glyph row beneath the echo.
 //
 // What the conditions do not cover: the gap between the grace capture and the
 // remedy keystroke is check-then-act, like absenceStillProven's. The daemon's
@@ -579,7 +652,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 		return observation
 	}
 	stripped := xansi.Strip(boundaryGrid)
-	boundaryAnchor := stagedLastComposerAnchor(paneGridRows(stripped))
+	boundary := deliveryBoundaryBlock(stripped, probe, bound)
 
 	pasteDeliverySleep(strandedSubmitGrace)
 	pane, cursor, ok := t.capturePaneAndCursorState()
@@ -587,7 +660,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 		return observation
 	}
 	unverified := deliveryObservation{outcome: deliveryObservedUnverified, pane: pane}
-	reading := stagedReading(pane, probe, bound, boundaryAnchor)
+	reading := stagedReading(pane, probe, bound, boundary)
 	if reading == "" {
 		return observation
 	}
@@ -628,7 +701,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 	// remedy Enter too still shows it — a deeper wedge, never delivered.
 	pasteDeliverySleep(strandedSubmitSettle)
 	settled, _, ok := t.capturePaneAndCursorState()
-	if !ok || boundStillStaged(settled, probe, bound, boundaryAnchor) {
+	if !ok || boundStillStaged(settled, probe, bound, boundary) {
 		return unverified
 	}
 	outcome := observation.outcome
