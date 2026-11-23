@@ -336,18 +336,18 @@ func TestPanePreviewSplitHintRequiresActivePreview(t *testing.T) {
 
 	pressKey(t, h, "s")
 	require.Nil(t, h.panePreviewTxn)
-	assert.NotContains(t, h.menu.String(), "split pane",
+	assert.NotContains(t, h.menu.String(), "keep preview",
 		"the footer must not advertise S when there is no preview to commit")
 
 	h.sidebar.SetSelectedInstance(1)
 	_ = h.selectionChanged()
 	require.NotNil(t, h.panePreviewTxn)
-	assert.Contains(t, h.menu.String(), "split pane",
+	assert.Contains(t, h.menu.String(), "keep preview",
 		"the footer should advertise S while a preview can be committed")
 
 	h.cancelPanePreview(false)
-	assert.NotContains(t, h.menu.String(), "split pane",
-		"canceling the preview must remove the split hint immediately")
+	assert.NotContains(t, h.menu.String(), "keep preview",
+		"canceling the preview must remove the keep-preview hint immediately")
 }
 
 func TestPanePreviewFastScrollLatestWins(t *testing.T) {

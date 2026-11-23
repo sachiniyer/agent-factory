@@ -731,13 +731,13 @@ func TestMenuNormalWidthSurfacesTabAndPaneManagement(t *testing.T) {
 			t.Fatalf("normal-width footer missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "S split pane") {
-		t.Fatalf("normal-width footer must not advertise split without a preview:\n%s", out)
+	if strings.Contains(out, "S keep preview") {
+		t.Fatalf("normal-width footer must not advertise keep preview without a preview:\n%s", out)
 	}
 
 	m.SetSplitPaneAvailable(true)
-	if out = m.String(); !strings.Contains(out, "S split pane") {
-		t.Fatalf("normal-width footer missing split hint while preview is active:\n%s", out)
+	if out = m.String(); !strings.Contains(out, "S keep preview") {
+		t.Fatalf("normal-width footer missing keep-preview hint while preview is active:\n%s", out)
 	}
 }
 
@@ -795,7 +795,7 @@ func TestMenuPaneHintsFollowFocus(t *testing.T) {
 	}
 	m.SetSplitPaneAvailable(true)
 	if !has(keys.KeySplitPane) {
-		t.Errorf("tree focus must advertise split pane while a preview can be committed; options=%v", m.options)
+		t.Errorf("tree focus must advertise keep preview while a preview can be committed; options=%v", m.options)
 	}
 	m.SetSplitPaneAvailable(false)
 
@@ -812,7 +812,7 @@ func TestMenuPaneHintsFollowFocus(t *testing.T) {
 	}
 	m.SetSplitPaneAvailable(true)
 	if !has(keys.KeySplitPane) {
-		t.Errorf("a focused pane must advertise split pane while a preview can be committed; options=%v", m.options)
+		t.Errorf("a focused pane must advertise keep preview while a preview can be committed; options=%v", m.options)
 	}
 }
 
@@ -1143,7 +1143,7 @@ func TestScrollChipNoDanglingSlashOnLeadingSuppress(t *testing.T) {
 }
 
 // The footer must not offer a key that cannot fire from the state it is shown
-// in. menu.go already gates several — `S split pane` on a live preview (#1419),
+// in. menu.go already gates several — `S keep preview` on a live preview (#1419),
 // the scroll pair on a truthful history owner, tab verbs on TabManagement,
 // retry/handoff on a limit wall — and the whole tree row on StateEmpty. These
 // two were the ungated ones, and each is a documented no-op in the state it was
