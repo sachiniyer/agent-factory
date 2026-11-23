@@ -260,11 +260,12 @@ var busyComposerHints = map[string][]string{
 // bare glyph a composer repaints after a submit, or that glyph with the
 // agent's own mid-turn hint (busyComposerHints), and nothing else. A user's
 // ">quote" row is not bare, because it carries content. Codex's Ultra-tier
-// "»" counts too — it only ever opens the live composer, so a bare one is an
-// empty composer like any other.
+// "»" is deliberately not in the set: it counts as empty only inside the
+// consumed reading (composerRowReadsEmpty), never wherever a bare row means
+// something else.
 func bareComposerGlyphRow(row string) bool {
 	norm := normalizeDelivery(row)
-	for _, glyph := range []string{"›", "»", claudeComposerGlyph, "❭"} {
+	for _, glyph := range []string{"›", claudeComposerGlyph, "❭"} {
 		rest, ok := strings.CutPrefix(norm, glyph)
 		if !ok {
 			continue
@@ -335,33 +336,46 @@ func composerRegion(rows []string, anchor int) []string {
 type boundaryComposerShape struct {
 	anchor int
 	// echoBaseline is the normalized transcript ABOVE the boundary's live
-	// composer over the scrollback-inclusive reach — the same bupper
-	// tailEcho/chipEcho count against, never the visible pane alone: a tall
-	// composer pushes transcript echoes off the pane top, and their
-	// reappearing when the composer shrinks would count as "growth" a
-	// visible-only baseline never saw — the #4200 dropped-prompt frame
-	// replayed as a submit (Codex #7802 R2).
+	// composer over the capture's reach — scrollback when the pane keeps
+	// history, the visible grid otherwise.
 	echoBaseline string
-	// echoBaselineOK marks echoBaseline as scrollback-inclusive. Without it a
-	// new echo the grace frame shows cannot be told from revealed history,
-	// and the consumed reading stays staged — a frame that can't show this
-	// is no basis for a claim.
-	echoBaselineOK bool
+	// baselineReachedHistory marks echoBaseline as provably
+	// scrollback-inclusive: the -S capture succeeded AND the pane was not
+	// on the alternate screen at the boundary — tmux keeps no history
+	// there (codex's default), so -S returns the visible grid with
+	// ok=true anyway. Without it a grown count cannot be told from
+	// revealed history and never counts (Codex #7802 R2).
+	baselineReachedHistory bool
+	// mark is the normalized tail of the boundary's above-composer
+	// transcript — the boundary's own last line. A bound-evidence copy
+	// below it in the grace frame is post-boundary by position alone:
+	// revealed scrollback rows can only reappear ABOVE the boundary's
+	// line, never below it.
+	mark string
 }
 
 // composerShapeAtBoundary anchors the Enter boundary's live composer and
-// records the echo baseline the grace frame must beat. The anchor uses the
-// boundary GRID — the visible pane, the same reach the grace frame's own
-// anchor comparisons share — while echoBaseline is the caller's
-// scrollback-inclusive above-composer transcript (the bupper the
-// staged-draft stash counts against). A capture that failed passes "" and
-// false: the consumed reading that needs it then never fires.
-func composerShapeAtBoundary(strippedBoundaryGrid, echoBaseline string, echoBaselineOK bool) boundaryComposerShape {
+// records the echo baseline the grace frame must beat. The anchor and the
+// mark both come from the boundary GRID — the visible pane at Enter, before
+// the agent could print — the mark being the normalized tail of the
+// transcript above it: the boundary's own last line, which a post-boundary
+// copy can only sit BELOW. echoBaseline is the caller's scrollback-inclusive
+// transcript (the bupper the staged-draft stash counts against); a capture
+// that failed, or a pane on the alternate screen where tmux keeps no
+// history, passes baselineReachedHistory false — the count comparison then
+// never fires and only the mark can prove a new copy.
+func composerShapeAtBoundary(strippedBoundaryGrid, echoBaseline string, baselineReachedHistory bool) boundaryComposerShape {
 	rows := paneGridRows(strippedBoundaryGrid)
+	anchor := stagedLastComposerAnchor(rows)
+	upper := rows
+	if anchor >= 0 {
+		upper = rows[:anchor]
+	}
 	return boundaryComposerShape{
-		anchor:         stagedLastComposerAnchor(rows),
-		echoBaseline:   echoBaseline,
-		echoBaselineOK: echoBaselineOK,
+		anchor:                 anchor,
+		echoBaseline:           echoBaseline,
+		baselineReachedHistory: baselineReachedHistory,
+		mark:                   stagedBoundaryMark(normalizeDelivery(strings.Join(upper, ""))),
 	}
 }
 
@@ -450,26 +464,49 @@ func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, bound
 // composerRowReadsEmpty's strict sense: a bare glyph, a mid-turn hint, or
 // the placeholder the agent draws while a turn can still be running — never
 // an idle-only placeholder, which is exactly the frame a dropped prompt
-// leaves (#4200). An earlier echo of the same prompt is not evidence either
-// — a watch that resends identical text would otherwise prove every later
-// delivery — so the count must GROW past the baseline, never merely be
-// present. The baseline itself is scrollback-inclusive: an identical copy a
-// tall composer pushed off the pane top is already counted, so its
-// reappearing when the composer shrinks cannot read as growth (Codex #7802
-// R2). And a boundary whose scrollback reach could not be captured proves
-// nothing at all — the frame stays staged rather than guess (echoBaselineOK).
+// leaves (#4200). And the new copy must be provably NEW — newEchoCopy
+// admits only a count past a baseline that reached history or a copy lying
+// below the boundary mark; an earlier identical echo, a revealed scrollback
+// copy, and an unprovable frame all stay staged.
 func boundEchoAboveLiveComposer(rows []string, anchor int, probe deliveryProbe, bound stagedEvidence, boundary boundaryComposerShape) bool {
-	if !boundary.echoBaselineOK || !composerRowReadsEmpty(rows[anchor]) {
+	if !composerRowReadsEmpty(rows[anchor]) {
 		return false
 	}
 	upper := normalizeDelivery(strings.Join(rows[:anchor], ""))
-	if bound.tail &&
-		strings.Count(upper, probe.completion) > strings.Count(boundary.echoBaseline, probe.completion) {
+	if bound.tail && newEchoCopy(upper, probe.completion, boundary) {
 		return true
 	}
-	if bound.chip &&
-		strings.Count(upper, bound.chipText) > strings.Count(boundary.echoBaseline, bound.chipText) {
+	if bound.chip && newEchoCopy(upper, bound.chipText, boundary) {
 		return true
+	}
+	return false
+}
+
+// newEchoCopy reports whether upper holds the needle in a copy provably
+// printed after the Enter boundary — two independent proofs, because each
+// has a frame that defeats it:
+//
+//  1. Count past the baseline: more copies than the boundary's transcript
+//     already held. Meaningful only when the baseline reached history —
+//     tmux keeps none on the alternate screen (codex's default), where -S
+//     returns the visible grid with ok=true and a revealed scrollback copy
+//     would read as growth (Codex #7802 R2).
+//  2. Below the boundary mark: the mark is the transcript's own tail line
+//     at Enter, so a copy below its LAST occurrence is post-boundary by
+//     position — revealed rows can only reappear above the boundary's
+//     line. When the boundary's tail IS the same echo (a resending
+//     watch), every new copy wears the mark too and the last occurrence
+//     hides it — a conservative miss, never a claim.
+func newEchoCopy(upper, needle string, boundary boundaryComposerShape) bool {
+	if boundary.baselineReachedHistory &&
+		strings.Count(upper, needle) > strings.Count(boundary.echoBaseline, needle) {
+		return true
+	}
+	if boundary.mark != "" {
+		if i := strings.LastIndex(upper, boundary.mark); i >= 0 &&
+			strings.Contains(upper[i+len(boundary.mark):], needle) {
+			return true
+		}
 	}
 	return false
 }
@@ -482,6 +519,12 @@ func boundEchoAboveLiveComposer(rows []string, anchor int, probe deliveryProbe, 
 // out deliberately: an idle placeholder ALONE is exactly what a dropped
 // prompt shows (#4200), so it can never count as an empty composer.
 func composerRowReadsEmpty(row string) bool {
+	// A bare "»" row is an empty Ultra composer: "»" only ever opens the
+	// live composer, but it stays out of bareComposerGlyphRow's own glyph
+	// set, which keeps master's meaning.
+	if normalizeDelivery(row) == "»" {
+		return true
+	}
 	return bareComposerGlyphRow(row) || restingComposerPlaceholderRow(normalizeDelivery(row))
 }
 
@@ -654,6 +697,22 @@ func firstContentCol(row string) int {
 	return -1
 }
 
+// alternateScreenActive reports whether the pane is on the alternate screen
+// — codex's default — where tmux keeps no history, so a `capture-pane -S`
+// returns only the visible grid with ok=true anyway. A failed read returns
+// true: the echo baseline counts only when the capture provably reached
+// past the visible grid, and an unproven one must not count.
+func (t *TmuxSession) alternateScreenActive() bool {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := t.outputTmuxBounded(ctx, "display-message", "-p",
+		"-t", ExactTarget(t.sanitizedName), "#{alternate_on}")
+	if err != nil {
+		return true
+	}
+	return strings.TrimSpace(string(out)) == "1"
+}
+
 // contentEndCol is the column just past a row's last drawn character — where
 // an app parks the cursor at the end of what it rendered. Trailing whitespace
 // and the box's right edge are not content.
@@ -715,12 +774,12 @@ func contentEndCol(row string) int {
 // changed while staged, a remedy whose outcome cannot be re-read, and every
 // non-chip staged shape all report sent-unverified. Only a draft that left the
 // composer keeps the observation it had before Enter.
-func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deliveryObservation, bound stagedEvidence, boundaryGrid string, boundaryOK bool, echoBaseline string, echoBaselineOK bool) deliveryObservation {
+func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deliveryObservation, bound stagedEvidence, boundaryGrid string, boundaryOK bool, echoBaseline string, baselineReachedHistory bool) deliveryObservation {
 	if !boundaryOK || !bound.any() {
 		return observation
 	}
 	stripped := xansi.Strip(boundaryGrid)
-	boundary := composerShapeAtBoundary(stripped, echoBaseline, echoBaselineOK)
+	boundary := composerShapeAtBoundary(stripped, echoBaseline, baselineReachedHistory)
 
 	pasteDeliverySleep(strandedSubmitGrace)
 	pane, cursor, ok := t.capturePaneAndCursorState()

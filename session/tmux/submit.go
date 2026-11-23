@@ -384,12 +384,13 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 	// send that bound nothing records that too, so the recheck never matches
 	// evidence against the wrong delivery.
 	//
-	// echoBaseline/echoBaselineOK carry the same scrollback-inclusive
-	// transcript baseline into the stranded-submit remedy: only a count
-	// that beats it proves a NEW echo — a visible-only baseline would
-	// count a revealed scrollback copy as growth (Codex #7802 R2).
+	// The same baseline carries into the stranded-submit remedy's consumed
+	// reading: a count that beats it proves a NEW echo only when the
+	// capture provably reached history — never on the alternate screen,
+	// where tmux keeps none — and the boundary mark proves it positionally
+	// instead (Codex #7802 R2).
 	var echoBaseline string
-	var echoBaselineOK bool
+	var baselineReachedHistory bool
 	{
 		ev := &stagedDraftEvidence{chip: bound.chipText}
 		if bound.tail || bound.chip {
@@ -425,7 +426,8 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 				bupperRows = brows[:banchor]
 			}
 			bupper := normalizeDelivery(strings.Join(bupperRows, ""))
-			echoBaseline, echoBaselineOK = bupper, ok
+			echoBaseline = bupper
+			baselineReachedHistory = ok && !t.alternateScreenActive()
 			if ok {
 				ev.boundaryMark = stagedBoundaryMark(bupper)
 			}
@@ -447,7 +449,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 	// stale classification describes (#4530 review). A still-partial boundary
 	// binds nothing and keeps the #3293 redelivery path.
 	if observation.outcome != deliveryObservedAbsent || bound.any() {
-		observation = t.remedyStrandedSubmit(probe, observation, bound, boundaryGrid, boundaryOK, echoBaseline, echoBaselineOK)
+		observation = t.remedyStrandedSubmit(probe, observation, bound, boundaryGrid, boundaryOK, echoBaseline, baselineReachedHistory)
 	}
 
 	var proof *absenceProof

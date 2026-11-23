@@ -77,14 +77,23 @@ type stagedDraftPane struct {
 	// echo row is a narrow-set glyph row sitting above the real composer
 	// (#7801).
 	echoGlyph string
-	// histSnapshot is the frame the scrollback-inclusive boundary capture
-	// (capture-pane -S) answers: the pane as of the Enter boundary, before
-	// the agent reacted. The mock's echo lands inside the boundary command,
-	// so a later -S read of the live pane would count that echo into the
-	// baseline and make growth unprovable — the opposite of production,
-	// where the capture runs in the same breath as the Enter, ahead of the
-	// agent's echo (#7802 R2).
-	histSnapshot string
+	// scrollback, when non-empty, prepends rows to every scrollback-inclusive
+	// (capture-pane -S) capture — the model for tmux history the visible pane
+	// cannot show. The -S capture answers scrollback plus the CURRENT pane:
+	// the mock's echo lands inside the boundary command, so the baseline
+	// legitimately holds this delivery's own echo — production can capture
+	// after the agent reacts too, and the consumed reading must withhold
+	// rather than assume pre-echo ordering (#7802 R2).
+	scrollback []string
+	// alternateOn reports alternate_on=1 — the application alternate screen,
+	// codex's default — where tmux keeps no history and a -S capture returns
+	// only the visible grid. scrollback rows are then ignored, exactly like
+	// real tmux (#7802 R1).
+	alternateOn bool
+	// dropDraftOnEnter makes the boundary command clear the composer WITHOUT
+	// echoing it — the #4200 drop, as opposed to a submit (echo) or an
+	// absorbed Enter (swallowedEnters).
+	dropDraftOnEnter bool
 }
 
 func (m *stagedDraftPane) glyphOr() string {
@@ -237,9 +246,10 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 				m.enters++
 				frame := m.paneLocked()
 				joinedFrame := m.joinedPaneLocked()
-				m.histSnapshot = frame
 				if m.enters <= m.swallowedEnters {
 					m.composer = append(m.composer, "")
+				} else if m.dropDraftOnEnter {
+					m.composer = nil
 				} else if len(m.composer) > 0 {
 					m.transcript = append(m.transcript, m.echoGlyphOr()+" "+strings.TrimSpace(strings.Join(m.composer, " ")))
 					m.composer = nil
@@ -258,14 +268,25 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 				}
 				return []byte(out), nil
 			}
+			if strings.Contains(joined, "display-message") && strings.Contains(joined, "alternate_on") {
+				if m.alternateOn {
+					return []byte("1"), nil
+				}
+				return []byte("0"), nil
+			}
 			if strings.Contains(joined, "display-message") {
 				return []byte(m.cursorLineLocked()), nil
 			}
-			if strings.Contains(joined, "capture-pane") && strings.Contains(joined, "-S") &&
-				m.histSnapshot != "" {
-				// The staged-draft baseline capture reads scrollback — the
-				// pane at the Enter boundary, before the mock's instant echo.
-				return []byte(m.histSnapshot), nil
+			if strings.Contains(joined, "capture-pane") && strings.Contains(joined, "-S") {
+				// The scrollback-inclusive capture: history plus the pane as
+				// it stands NOW — after the mock's instant echo — so tests
+				// never lean on a pre-echo capture ordering. An alternate-
+				// screen pane keeps no history at all.
+				rows := m.gridRowsLocked()
+				if !m.alternateOn && len(m.scrollback) > 0 {
+					rows = append(append([]string{}, m.scrollback...), rows...)
+				}
+				return []byte(strings.Join(rows, "\n") + "\n"), nil
 			}
 			if m.pollPartial && m.pastes > 0 {
 				// The delivery polls run while the paste is still draining:

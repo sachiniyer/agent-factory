@@ -290,17 +290,53 @@ func TestRevealedScrollbackEchoCannotFakeConsumption(t *testing.T) {
 }
 
 // TestEchoBaselineWithoutScrollbackReachStaysStaged is R2's fallback: a
-// boundary whose scrollback-inclusive capture failed cannot tell a new echo
-// from revealed history, so the consumed reading never fires — the frame
-// stays staged rather than guess.
+// boundary whose scrollback reach is unproven AND whose transcript left no
+// mark can tell a new echo from neither revealed history nor a post-boundary
+// position, so the consumed reading never fires — the frame stays staged
+// rather than guess.
 func TestEchoBaselineWithoutScrollbackReachStaysStaged(t *testing.T) {
-	boundary := codexLanePane([]string{"⠋ Working · 3m"}, "» "+codexEchoPrompt)
+	boundary := codexLanePane([]string{}, "» "+codexEchoPrompt)
 	probe, bound, _ := codexBoundLiteral(t, boundary)
 	shape := composerShapeAtBoundary(boundary, "", false)
+	grace := codexLanePane([]string{"› " + codexEchoPrompt}, "» Ask Codex to do anything")
+	reason, consumed := stagedReading(grace, probe, bound, shape)
+	require.False(t, consumed, "no baseline and no mark: a grown-looking count cannot be trusted")
+	require.NotEmpty(t, reason, "the frame stays staged")
+}
+
+// TestBoundaryMarkProvesNewEchoBelowIt is the second proof newEchoCopy
+// admits — the one that works on the alternate screen, where tmux keeps no
+// history and the baseline can never count. The mark is the transcript's own
+// tail line at Enter, so an echo BELOW it is post-boundary by position:
+// revealed scrollback rows can only reappear above the boundary's line.
+func TestBoundaryMarkProvesNewEchoBelowIt(t *testing.T) {
+	boundary := codexLanePane([]string{"⠋ Working · 3m"}, "» "+codexEchoPrompt)
+	probe, bound, _ := codexBoundLiteral(t, boundary)
+	shape := composerShapeAtBoundary(boundary, "", false) // no history reach at all
 	grace := codexLanePane([]string{"⠋ Working · 3m", "› " + codexEchoPrompt}, "» Ask Codex to do anything")
 	reason, consumed := stagedReading(grace, probe, bound, shape)
-	require.False(t, consumed, "no scrollback baseline: a grown-looking count cannot be trusted")
-	require.NotEmpty(t, reason, "the frame stays staged")
+	require.Empty(t, reason)
+	require.True(t, consumed,
+		"an echo below the boundary's own tail line is post-boundary — no baseline needed")
+}
+
+// TestMarkInsideIdenticalEchoStaysStaged pins the mark path's conservative
+// miss: when the boundary's transcript tail IS the same echo — a resending
+// watch left it there — every new copy wears the mark too, so the last
+// occurrence hides the genuinely new one. The frame stays staged rather
+// than guess which copy is new.
+func TestMarkInsideIdenticalEchoStaysStaged(t *testing.T) {
+	boundary := codexLanePane([]string{"› " + codexEchoPrompt}, "» "+codexEchoPrompt)
+	probe, bound, _ := codexBoundLiteral(t, boundary)
+	shape := composerShapeAtBoundary(boundary, "", false)
+	grace := codexLanePane([]string{
+		"› " + codexEchoPrompt,
+		"› " + codexEchoPrompt,
+	}, "» Ask Codex to do anything")
+	reason, consumed := stagedReading(grace, probe, bound, shape)
+	require.False(t, consumed,
+		"the mark lands inside an identical echo — the new copy is unprovable")
+	require.NotEmpty(t, reason, "the ambiguous frame stays staged")
 }
 
 // TestDevinIdlePlaceholderRepaintNamesTheIdleReading is #7801's residual 2:
@@ -326,7 +362,14 @@ func TestDevinIdlePlaceholderRepaintNamesTheIdleReading(t *testing.T) {
 // literal-tail through the echo row and reports sent-unverified.
 func TestUltraCodexSubmittedDraftNeedsNoWarningOrRemedyEnter(t *testing.T) {
 	warnings := captureWarningLog(t)
-	m := &stagedDraftPane{glyph: "»", echoGlyph: "›", placeholder: "Ask Codex to do anything", render: literalRender}
+	m := &stagedDraftPane{
+		glyph: "»", echoGlyph: "›", placeholder: "Ask Codex to do anything", render: literalRender,
+		// A transcript tail gives the boundary a mark to prove the new echo
+		// positionally — the honest mock's -S capture is post-Enter, so the
+		// baseline already holds this delivery's echo and the count can
+		// never grow past it (#7802 R2).
+		transcript: []string{"› tidy the sidebar before the next sweep"},
+	}
 	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
 	require.Equal(t, PromptDelivered, status)
 	require.Equal(t, 1, pastes)
@@ -383,7 +426,12 @@ func TestGlyphLeadingLineStrandStillWarnsAndWithholds(t *testing.T) {
 func TestConsumedEchoDemotesAbsentInsteadOfRedelivering(t *testing.T) {
 	errors := captureErrorLog(t)
 	warnings := captureWarningLog(t)
-	m := &stagedDraftPane{glyph: "»", echoGlyph: "›", pollPartial: true, placeholder: "Ask Codex to do anything", render: literalRender}
+	m := &stagedDraftPane{
+		glyph: "»", echoGlyph: "›", pollPartial: true, placeholder: "Ask Codex to do anything", render: literalRender,
+		// The transcript tail marks the boundary so the new echo proves
+		// positionally even though the post-Enter -S baseline already holds it.
+		transcript: []string{"› tidy the sidebar before the next sweep"},
+	}
 	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
 	require.Equal(t, PromptSentUnverified, status)
 	require.Equal(t, 1, pastes, "a proven echo must never reach the redelivery path")
@@ -426,4 +474,50 @@ func TestDevinStartingSessionWarnsNamingIdlePlaceholder(t *testing.T) {
 	logged := warnings.String()
 	require.Contains(t, logged, "withholding the remedy Enter")
 	require.Contains(t, logged, "idle placeholder", "the warning names the reading it saw")
+}
+
+// TestAltScreenDroppedPromptStaysStaged is #7802 R1's whole-path regression:
+// on the alternate screen tmux keeps NO history, so the -S capture returns
+// the visible grid with ok=true — a baseline that only looks scrollback-
+// inclusive. A tall draft pushes an earlier "› " echo off the pane top; the
+// dropped draft repaints the resting placeholder and the old echo reappears
+// — a visible count of 0 growing to 1. alternate_on=1 keeps the baseline
+// out of the proof, the boundary's off-screen transcript left no mark, and
+// the frame stays staged. The composer is "›" because the positional bind
+// needs a narrow glyph row — the consumed-reading defect it exercises is
+// the same one an Ultra pane hits.
+func TestAltScreenDroppedPromptStaysStaged(t *testing.T) {
+	warnings := captureWarningLog(t)
+	m := &stagedDraftPane{
+		glyph: "›", echoGlyph: "›", placeholder: "Ask Codex to do anything",
+		alternateOn: true, dropDraftOnEnter: true, height: 8,
+		transcript: []string{"› " + codexEchoPrompt},
+		render: func(string) []string {
+			return []string{codexEchoPrompt, "draft 2", "draft 3", "draft 4",
+				"draft 5", "draft 6", "draft 7", "draft 8"}
+		},
+	}
+	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
+	require.Equal(t, PromptSentUnverified, status,
+		"a revealed alt-screen echo is not a new echo — the baseline never reached history")
+	require.Equal(t, 1, pastes)
+	require.Equal(t, 1, enters, "no consumed reading authorizes no remedy Enter")
+	require.Contains(t, warnings.String(), "withholding the remedy Enter")
+}
+
+// TestBaselineHoldingOwnEchoOnlyWithholdsConsumed is #7802 R2's pin: the
+// baseline capture runs AFTER the Enter, and the mock's echo lands inside
+// the boundary command — so the -S baseline legitimately holds this
+// delivery's own echo, exactly like a fast agent in production. With no
+// transcript tail to mark the boundary, the count can never grow past the
+// baseline and the consumed reading is withheld — safe, never a claim.
+func TestBaselineHoldingOwnEchoOnlyWithholdsConsumed(t *testing.T) {
+	warnings := captureWarningLog(t)
+	m := &stagedDraftPane{glyph: "»", echoGlyph: "›", placeholder: "Ask Codex to do anything", render: literalRender}
+	status, pastes, enters := sendStaged(t, m, codexEchoPrompt)
+	require.Equal(t, PromptSentUnverified, status,
+		"a baseline already holding this delivery's echo proves nothing new")
+	require.Equal(t, 1, pastes)
+	require.Equal(t, 1, enters)
+	require.Contains(t, warnings.String(), "withholding the remedy Enter")
 }
