@@ -138,32 +138,49 @@ func TestListAFRelocationResidue_DTUnknownDirIsStatChecked(t *testing.T) {
 // TestListAFRelocationResidue_DTUnknownInspectErrorPropagates pins the
 // fail-closed contract: when the entry type is unknown and the stat to resolve
 // it fails, the scan returns an error rather than silently skipping the entry
-// and risking a deletion verdict over a scan it could not complete.
+// and risking a deletion verdict over a scan it could not complete. The stat
+// now runs through BoundedLstat on the joined path (the reviewer's bound), so
+// the failure is modeled by overriding the bounded lstat seam to error on the
+// candidate, not by the entry's own (unused) Info().
 func TestListAFRelocationResidue_DTUnknownInspectErrorPropagates(t *testing.T) {
 	parent := t.TempDir()
-	require.NoError(t, os.Mkdir(filepath.Join(parent, ".af-source-0123456789abcdef0123456789abcdef"), 0o755))
+	const name = ".af-source-0123456789abcdef0123456789abcdef"
+	candidate := filepath.Join(parent, name)
+	// A residue-shaped DirEntry whose readdir type is DT_UNKNOWN, modeling an
+	// NFS/FUSE filesystem that did not fill in d_type. The scan must stat the
+	// joined path to resolve it.
+	var entry os.DirEntry = unknownTypeNamedEntry{name: name}
 
-	// A DirEntry with an unknown type whose Info() always errors, modeling a
-	// stat that could not be completed (e.g. an ESTALE on a soft NFS mount).
-	var failing os.DirEntry = failingInfoDirEntry{}
-
-	restore := SetArchiveReadDirForTest(parent, func(string) ([]os.DirEntry, error) {
-		return []os.DirEntry{failing}, nil
+	restoreRead := SetArchiveReadDirForTest(parent, func(string) ([]os.DirEntry, error) {
+		return []os.DirEntry{entry}, nil
 	})
-	defer restore()
+	defer restoreRead()
+
+	original := boundedLstatPath
+	boundedLstatPath = func(p string) (os.FileInfo, error) {
+		if p == candidate {
+			return nil, os.ErrPermission
+		}
+		return original(p)
+	}
+	t.Cleanup(func() { boundedLstatPath = original })
 
 	_, err := ListAFRelocationResidue(parent)
 	require.Error(t, err, "an unresolvable entry type must fail-closed, not be skipped")
 }
 
-type failingInfoDirEntry struct{}
-
-func (failingInfoDirEntry) Name() string      { return "" }
-func (failingInfoDirEntry) IsDir() bool       { return false }
-func (failingInfoDirEntry) Type() os.FileMode { return 0 }
-func (failingInfoDirEntry) Info() (os.FileInfo, error) {
-	return nil, os.ErrPermission
+// unknownTypeNamedEntry is a DirEntry with a caller-chosen name and an unknown
+// readdir type (DT_UNKNOWN), modeling NFS/FUSE filesystems that do not fill in
+// d_type. IsDir() returns false (as it does when the type is unknown) so the
+// scan must stat the joined path to resolve it.
+type unknownTypeNamedEntry struct {
+	name string
 }
+
+func (e unknownTypeNamedEntry) Name() string               { return e.name }
+func (unknownTypeNamedEntry) IsDir() bool                  { return false }
+func (unknownTypeNamedEntry) Type() os.FileMode            { return 0 }
+func (e unknownTypeNamedEntry) Info() (os.FileInfo, error) { return os.Lstat(e.name) }
 
 // TestClaimRelocationSource_CrashWindowReturnsBareENOENT pins the
 // record-free ambiguity the daemon-level residue arbitration closes. A
@@ -425,9 +442,11 @@ func statDev(info os.FileInfo) uint64 {
 	// always fails and the test never recognizes an existing second
 	// filesystem. Read the field directly; on platforms where the stat type
 	// does not match, the assertion fails and the loop falls back to a
-	// loopback mount (and skips if that is unavailable).
+	// loopback mount (and skips if that is unavailable). Dev is uint64 on
+	// Linux but int32 on darwin, so an explicit conversion keeps the package
+	// compiling on every GOOS CI runs.
 	if d, ok := info.Sys().(*syscall.Stat_t); ok {
-		return d.Dev
+		return uint64(d.Dev)
 	}
 	return 0
 }

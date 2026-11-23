@@ -107,7 +107,16 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 		// session's recorded source; a candidate whose binding cannot be
 		// read still refuses (fail-closed), but the message names it as
 		// unverified rather than this session's stranded work.
-		var ours, unverified []string
+		//
+		// The proven-ours residue is split by purpose: `.af-source-*` is the
+		// renamed source — the COMPLETE worktree, including any uncommitted
+		// changes — so recovery is directed from it. `.af-copy-*` is the
+		// staged copy beside the destination, which under skipUnreadable may
+		// intentionally omit unreadable paths; it must never be described as
+		// the complete worktree, and the operator is never told to move it
+		// back as the worktree (doing so and then removing the source
+		// quarantine as redundant would silently discard the skipped files).
+		var oursSource, oursCopy, unverified []string
 		for _, candidate := range residue {
 			binding, bErr := sessiongit.BindAFRelocationResidue(candidate, source, instance.GetRepoPath())
 			if bErr != nil || binding == sessiongit.ResidueUnknown {
@@ -115,17 +124,40 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 				continue
 			}
 			if binding == sessiongit.ResidueOurs {
-				ours = append(ours, candidate)
+				if strings.HasPrefix(filepath.Base(candidate), ".af-source-") {
+					oursSource = append(oursSource, candidate)
+				} else {
+					oursCopy = append(oursCopy, candidate)
+				}
 			}
 		}
-		if len(ours) > 0 || len(unverified) > 0 {
-			named := append(append([]string{}, ours...), unverified...)
+		if len(oursSource) > 0 || len(oursCopy) > 0 || len(unverified) > 0 {
+			named := append(append(append([]string{}, oursSource...), oursCopy...), unverified...)
 			m.warn().Printf("archive of session %q refused: its worktree path %s is gone but af relocation residue is present at %s — a cross-device archive move appears to have been cut off between its quarantine and publish renames; the complete worktree may be stranded there and was not archived as deleted",
 				title, source, strings.Join(named, ", "))
-			if len(ours) > 0 {
+			if len(oursSource) > 0 || len(oursCopy) > 0 {
+				// Direct recovery only from the `.af-source-*` quarantine
+				// (the complete original); describe the `.af-copy-*` staging
+				// copy as possibly incomplete and never as the worktree to
+				// move back.
+				var recovery strings.Builder
+				if len(oursSource) > 0 {
+					fmt.Fprintf(&recovery,
+						"the complete worktree (including any uncommitted changes) is stranded at the .af-source-* quarantine %s — inspect it and move it back to %s with 'mv' (or remove the residue once you have verified the work is saved)",
+						strings.Join(oursSource, ", "), source)
+				} else {
+					fmt.Fprintf(&recovery,
+						"a staged copy proven to be this session's is present at %s but its .af-source-* quarantine is absent, and the copy may be incomplete if the interrupted archive skipped unreadable files — inspect %s and do not move it into %s unless you have verified it is complete",
+						strings.Join(oursCopy, ", "), strings.Join(oursCopy, ", "), source)
+				}
+				if len(oursSource) > 0 && len(oursCopy) > 0 {
+					fmt.Fprintf(&recovery,
+						"; a staged copy is also present at the .af-copy-* sibling %s beside the destination and may be incomplete if the interrupted archive skipped unreadable files, so do not move it into %s as the worktree — recover from the .af-source-* quarantine instead",
+						strings.Join(oursCopy, ", "), source)
+				}
 				return refuse(fmt.Errorf(
-					"cannot archive session %q: its worktree path %s is gone, but af relocation residue proven to be this session's worktree is present at %s — a cross-device archive move was cut off between its quarantine and publish renames and the complete worktree (including any uncommitted changes) is stranded there; inspect %s and move it back to %s with 'mv' (or remove the residue once you have verified the work is saved) before retrying the archive: %w",
-					title, source, strings.Join(ours, ", "), strings.Join(ours, ", "), source, sessiongit.ErrRelocateStateUnknown))
+					"cannot archive session %q: its worktree path %s is gone, but af relocation residue proven to be this session's worktree is present at %s — a cross-device archive move was cut off between its quarantine and publish renames and %s before retrying the archive: %w",
+					title, source, strings.Join(named, ", "), recovery.String(), sessiongit.ErrRelocateStateUnknown))
 			}
 			return refuse(fmt.Errorf(
 				"cannot archive session %q: its worktree path %s is gone, but af relocation residue is present at %s and af could not verify whether it is this session's worktree — it may belong to another session, or its git binding could not be read; inspect %s (do not move it into %s unless you have proven it is this session's work) before retrying the archive: %w",

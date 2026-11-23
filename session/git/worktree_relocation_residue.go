@@ -74,29 +74,40 @@ func ListAFRelocationResidue(dirs ...string) ([]string, error) {
 			return nil, fmt.Errorf("scan af relocation residue beside %s: %w", dir, err)
 		}
 		for _, e := range entries {
+			// Filter by the residue-shaped name before any metadata
+			// syscall: the unguessable `.af-source-<32hex>`/`.af-copy-<32hex>`
+			// suffix is what privateMoveName produces, so a directory af did
+			// not write cannot match, and the stat below runs only on
+			// candidates worth inspecting.
+			if !privateMoveResidueName(e.Name()) {
+				continue
+			}
 			// readdir reports the entry type when the filesystem fills in
 			// d_type, but some NFS/FUSE filesystems return DT_UNKNOWN, on
 			// which DirEntry.IsDir() returns false without statting the
 			// entry. A real `.af-source-*`/`.af-copy-*` directory would then
 			// be skipped and the caller would archive the session as a
-			// deletion despite the stranded work. When the type is not
-			// known to be a directory, stat the entry; a failed inspection
-			// is propagated so the arbitration stays fail-closed rather
-			// than guessing a deletion from a scan it could not complete.
-			if !e.IsDir() {
-				if e.Type() != 0 {
-					// A known non-directory type (symlink, device, ...).
-					continue
-				}
-				info, ierr := e.Info()
-				if ierr != nil {
-					return nil, fmt.Errorf("scan af relocation residue beside %s: cannot inspect %s: %w", dir, e.Name(), ierr)
-				}
-				if !info.IsDir() {
-					continue
-				}
+			// deletion despite the stranded work. When the type is not known
+			// to be a directory, stat the joined path through BoundedLstat
+			// (the same deadline + per-path flight the rest of the identity
+			// probe uses) rather than the entry's own Info(), whose syscall
+			// is unbounded and can wedge the held op-lock if an NFS/FUSE
+			// mount stalls after the bounded listing. A failed inspection is
+			// propagated so the arbitration stays fail-closed rather than
+			// guessing a deletion from a scan it could not complete.
+			if e.IsDir() {
+				residue = append(residue, filepath.Join(dir, e.Name()))
+				continue
 			}
-			if !privateMoveResidueName(e.Name()) {
+			if e.Type() != 0 {
+				// A known non-directory type (symlink, device, ...).
+				continue
+			}
+			info, ierr := BoundedLstat(filepath.Join(dir, e.Name()))
+			if ierr != nil {
+				return nil, fmt.Errorf("scan af relocation residue beside %s: cannot inspect %s: %w", dir, e.Name(), ierr)
+			}
+			if !info.IsDir() {
 				continue
 			}
 			residue = append(residue, filepath.Join(dir, e.Name()))
