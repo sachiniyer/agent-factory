@@ -102,7 +102,7 @@ func boundLiteral(t *testing.T, boundary string) (deliveryProbe, stagedEvidence,
 	t.Helper()
 	probe := newDeliveryProbe(placeholderTestPrompt)
 	bound := stagedEvidence{tail: true}
-	shape := composerShapeAtBoundary(boundary)
+	shape := boundaryShapeForTest(boundary)
 	require.GreaterOrEqual(t, shape.anchor, 0, "fixture: the boundary has a composer glyph row")
 	require.True(t, boundStillStaged(boundary, probe, bound, shape),
 		"fixture: the draft sitting in the composer at the Enter boundary reads as staged")

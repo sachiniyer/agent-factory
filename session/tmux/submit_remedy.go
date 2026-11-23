@@ -334,38 +334,44 @@ func composerRegion(rows []string, anchor int) []string {
 // true composer.
 type boundaryComposerShape struct {
 	anchor int
-	// upper is the normalized transcript ABOVE the boundary's live composer —
-	// the echo-count baseline a grace frame must beat for its bound evidence
-	// to read as this delivery consumed (the same above-composer accounting
-	// #7545 keeps as tailEcho/chipEcho, here on the visible reach the grace
-	// capture shares).
-	upper string
+	// echoBaseline is the normalized transcript ABOVE the boundary's live
+	// composer over the scrollback-inclusive reach — the same bupper
+	// tailEcho/chipEcho count against, never the visible pane alone: a tall
+	// composer pushes transcript echoes off the pane top, and their
+	// reappearing when the composer shrinks would count as "growth" a
+	// visible-only baseline never saw — the #4200 dropped-prompt frame
+	// replayed as a submit (Codex #7802 R2).
+	echoBaseline string
+	// echoBaselineOK marks echoBaseline as scrollback-inclusive. Without it a
+	// new echo the grace frame shows cannot be told from revealed history,
+	// and the consumed reading stays staged — a frame that can't show this
+	// is no basis for a claim.
+	echoBaselineOK bool
 }
 
 // composerShapeAtBoundary anchors the Enter boundary's live composer and
-// records the normalized transcript above it. The boundary GRID capture is
-// the visible pane — the same reach as the grace frame the counts compare
-// against — so a scrolled-off identical echo can hide growth (a miss, never a
-// false claim) but cannot fake it. A boundary with no glyph row at all counts
-// its whole frame: the baseline can only overcount, which stays conservative.
-func composerShapeAtBoundary(strippedBoundaryGrid string) boundaryComposerShape {
+// records the echo baseline the grace frame must beat. The anchor uses the
+// boundary GRID — the visible pane, the same reach the grace frame's own
+// anchor comparisons share — while echoBaseline is the caller's
+// scrollback-inclusive above-composer transcript (the bupper the
+// staged-draft stash counts against). A capture that failed passes "" and
+// false: the consumed reading that needs it then never fires.
+func composerShapeAtBoundary(strippedBoundaryGrid, echoBaseline string, echoBaselineOK bool) boundaryComposerShape {
 	rows := paneGridRows(strippedBoundaryGrid)
-	anchor := stagedLastComposerAnchor(rows)
-	upper := rows
-	if anchor >= 0 {
-		upper = rows[:anchor]
-	}
 	return boundaryComposerShape{
-		anchor: anchor,
-		upper:  normalizeDelivery(strings.Join(upper, "")),
+		anchor:         stagedLastComposerAnchor(rows),
+		echoBaseline:   echoBaseline,
+		echoBaselineOK: echoBaselineOK,
 	}
 }
 
 // boundStillStaged reports whether evidence bound to this delivery still sits
-// in the live composer — at or below the pane's last composer-glyph row — in an
-// atomic pane+cursor frame. The anchor is positional, not textual: a composer
-// the clear+paste could not fully attribute must not read a transcript echo
-// (which carries the same tail, and the same chip, above the live composer).
+// in the live composer — at or below the composer block's first row, the
+// earliest anchor the bound draft's own glyph-leading lines could occupy — in
+// an atomic pane+cursor frame. The anchor is positional, not textual: a
+// composer the clear+paste could not fully attribute must not read a
+// transcript echo (which carries the same tail, and the same chip, above the
+// live composer).
 //
 // When the grace frame's glyph row moved off the boundary's, the composer was
 // repainted. A bare fresh glyph row BELOW the old anchor is a submitted
@@ -392,15 +398,30 @@ func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, bound
 	if anchor < 0 {
 		return "", false
 	}
-	lower := normalizeDelivery(strings.Join(rows[anchor:], ""))
+	// Positive evidence runs first: a NEW copy of the bound evidence above a
+	// live composer that itself reads empty is THIS delivery consumed, and it
+	// resolves the reading before any staged check below can claim the echo's
+	// own text as a staged draft.
+	if boundEchoAboveLiveComposer(rows, anchor, probe, bound, boundary) {
+		return "", true
+	}
+	// The composer block's first row is the EARLIEST of the narrow and wide
+	// anchors the bound draft could occupy, not the last glyph row: the
+	// draft's own lines can lead with a composer glyph — a "» quote" line
+	// inside a "›" or "❯" composer — and the last glyph row then lands
+	// INSIDE the draft, letting its head sit above the anchor unread (Codex
+	// #7802 R1). Bound evidence at or below the block's first row keeps the
+	// staged reading.
+	blockStart := lastComposerGlyphRow(rows)
+	if blockStart < 0 {
+		blockStart = anchor
+	}
+	lower := normalizeDelivery(strings.Join(rows[blockStart:], ""))
 	if bound.tail && strings.Contains(lower, probe.completion) {
 		return "this prompt's bound text is still in the live composer", false
 	}
 	if bound.chip && strings.Contains(lower, bound.chipText) {
 		return "this prompt's bound chip is still in the live composer", false
-	}
-	if boundEchoAboveLiveComposer(rows, anchor, probe, bound, boundary) {
-		return "", true
 	}
 	if anchor == boundary.anchor {
 		return "", false
@@ -418,42 +439,84 @@ func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, bound
 }
 
 // boundEchoAboveLiveComposer is the positive-evidence reading: the bound
-// evidence appears ABOVE the live composer row more times than the Enter
-// boundary's transcript already held it — a NEW echo of this delivery (Codex
-// marks it "› ", a queued input sits in its "↳" preview, a submitted chip
-// echoes the same chip) — and the live composer row reads empty.
+// evidence appears ABOVE the live composer row more times than the
+// boundary's scrollback-inclusive transcript already held it — a NEW echo of
+// this delivery (Codex marks it "› "; a queued input sits in its "↳"
+// preview, which proves the agent ACCEPTED the draft into its own queue —
+// consumed, not yet run; a submitted chip echoes the same chip) — and the
+// live composer row reads empty.
 //
-// Positive evidence only. An idle placeholder alone NEVER suffices: a
-// composer that dropped the prompt shows the same idle frame (#4200), so the
-// placeholder may only ever support a verdict a new echo already proved. An
-// earlier echo of the same prompt is not evidence either — a watch that
-// resends identical text would otherwise prove every later delivery — so the
-// count must GROW past the boundary's, never merely be present. A count that
-// cannot grow because an identical copy scrolled off is a miss that stays
-// staged, never a claim.
+// Positive evidence only. The composer row must read empty in
+// composerRowReadsEmpty's strict sense: a bare glyph, a mid-turn hint, or
+// the placeholder the agent draws while a turn can still be running — never
+// an idle-only placeholder, which is exactly the frame a dropped prompt
+// leaves (#4200). An earlier echo of the same prompt is not evidence either
+// — a watch that resends identical text would otherwise prove every later
+// delivery — so the count must GROW past the baseline, never merely be
+// present. The baseline itself is scrollback-inclusive: an identical copy a
+// tall composer pushed off the pane top is already counted, so its
+// reappearing when the composer shrinks cannot read as growth (Codex #7802
+// R2). And a boundary whose scrollback reach could not be captured proves
+// nothing at all — the frame stays staged rather than guess (echoBaselineOK).
 func boundEchoAboveLiveComposer(rows []string, anchor int, probe deliveryProbe, bound stagedEvidence, boundary boundaryComposerShape) bool {
-	if !composerRowReadsEmpty(rows[anchor]) {
+	if !boundary.echoBaselineOK || !composerRowReadsEmpty(rows[anchor]) {
 		return false
 	}
 	upper := normalizeDelivery(strings.Join(rows[:anchor], ""))
 	if bound.tail &&
-		strings.Count(upper, probe.completion) > strings.Count(boundary.upper, probe.completion) {
+		strings.Count(upper, probe.completion) > strings.Count(boundary.echoBaseline, probe.completion) {
 		return true
 	}
 	if bound.chip &&
-		strings.Count(upper, bound.chipText) > strings.Count(boundary.upper, bound.chipText) {
+		strings.Count(upper, bound.chipText) > strings.Count(boundary.echoBaseline, bound.chipText) {
 		return true
 	}
 	return false
 }
 
-// composerRowReadsEmpty reports whether the live composer row holds only its
-// prompt glyph — bareComposerGlyphRow's bare glyph or the agent's own
-// mid-turn hint — or the glyph plus the agent's own idle placeholder. The
-// idle placeholder is empty input too, but it is ALSO what a dropped prompt
-// shows, so it may only support a verdict a new echo already proved.
+// composerRowReadsEmpty reports whether the live composer row is provably an
+// EMPTY input: bareComposerGlyphRow's bare glyph or the agent's own mid-turn
+// hint, or the glyph plus the placeholder the agent draws while a turn can
+// still be running (restingComposerPlaceholders). A placeholder that only
+// ever draws at true idle — Devin's "Ask Devin to build features…" — stays
+// out deliberately: an idle placeholder ALONE is exactly what a dropped
+// prompt shows (#4200), so it can never count as an empty composer.
 func composerRowReadsEmpty(row string) bool {
-	return bareComposerGlyphRow(row) || idleComposerPlaceholderRow(normalizeDelivery(row))
+	return bareComposerGlyphRow(row) || restingComposerPlaceholderRow(normalizeDelivery(row))
+}
+
+// restingComposerPlaceholders are the ghost texts an agent draws inside its
+// EMPTY input while a turn can still be running — the composer's resting
+// face, not an idle signal — normalized and keyed by the agent's composer
+// glyph, the same discipline busyComposerHints keeps. Codex's "Ask Codex to
+// do anything" is the only one codex-rs draws that way (chat_composer.rs
+// renders it idle and busy alike), so a grown echo above it is a submitted
+// prompt, not a dropped one. Devin's "Ask Devin to build features…" appears
+// only at true idle — exactly the frame a dropped prompt leaves (#4200) —
+// and Claude's rotating `Try "…"` hint is likewise idle-only, so neither may
+// ever count as an empty composer for the consumed reading.
+var restingComposerPlaceholders = map[string][]string{
+	"›": {normalizeDelivery("Ask Codex to do anything")},
+	"»": {normalizeDelivery("Ask Codex to do anything")},
+}
+
+// restingComposerPlaceholderRow reports whether a NORMALIZED composer row is
+// the agent's glyph plus exactly a resting placeholder — no more, no less,
+// like busyComposerHints.
+func restingComposerPlaceholderRow(norm string) bool {
+	for glyph, placeholders := range restingComposerPlaceholders {
+		rest, ok := strings.CutPrefix(norm, glyph)
+		if !ok {
+			continue
+		}
+		for _, placeholder := range placeholders {
+			if rest == placeholder {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // idleComposerPlaceholders are the ghost texts an agent draws inside an EMPTY
@@ -461,10 +524,11 @@ func composerRowReadsEmpty(row string) bool {
 // composer glyph, the same discipline busyComposerHints keeps. They are
 // exactly what a composer that dropped the prompt also shows (#4200), so a
 // placeholder alone can never be evidence: it only supports a consumed
-// verdict beside a NEW echo, and otherwise names the staged reading what it
-// saw. Codex draws "Ask Codex to do anything" idle and busy alike, under both
-// of its prompt glyphs. Claude rotates its `Try "…"` suggestions, so it is
-// handled by shape below rather than listed.
+// verdict beside a NEW echo — and only when the agent draws it while a turn
+// can still be running, which is Codex's alone — and otherwise names the
+// staged reading what it saw. Codex draws "Ask Codex to do anything" idle
+// and busy alike, under both of its prompt glyphs. Claude rotates its
+// `Try "…"` suggestions, so it is handled by shape below rather than listed.
 var idleComposerPlaceholders = map[string][]string{
 	"›": {normalizeDelivery("Ask Codex to do anything")},
 	"»": {normalizeDelivery("Ask Codex to do anything")},
@@ -627,11 +691,12 @@ func contentEndCol(row string) int {
 //     usable at all: the agent draws the same chip for a user's paste and for
 //     a transcript echo, but neither can appear in a frame that has not
 //     changed.
-//  3. Position. The bound evidence sits in the live composer — at or below the
-//     pane's LAST composer-glyph row (boundStillStaged) — and the cursor is
-//     visible and parked where this draft alone could have left it. A
-//     transcript echo cannot satisfy position: the composer repaints its own
-//     glyph row beneath the echo.
+//  3. Position. The bound evidence sits in the live composer — at or below
+//     the composer block's first row, the earliest of the narrow and wide
+//     anchors its own glyph-leading lines could occupy (boundStillStaged) —
+//     and the cursor is visible and parked where this draft alone could have
+//     left it. A transcript echo cannot satisfy position: the composer
+//     repaints its own glyph row beneath the echo.
 //
 // What the conditions do not cover: the gap between the grace capture and the
 // remedy keystroke is check-then-act, like absenceStillProven's. The daemon's
@@ -650,12 +715,12 @@ func contentEndCol(row string) int {
 // changed while staged, a remedy whose outcome cannot be re-read, and every
 // non-chip staged shape all report sent-unverified. Only a draft that left the
 // composer keeps the observation it had before Enter.
-func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deliveryObservation, bound stagedEvidence, boundaryGrid string, boundaryOK bool) deliveryObservation {
+func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deliveryObservation, bound stagedEvidence, boundaryGrid string, boundaryOK bool, echoBaseline string, echoBaselineOK bool) deliveryObservation {
 	if !boundaryOK || !bound.any() {
 		return observation
 	}
 	stripped := xansi.Strip(boundaryGrid)
-	boundary := composerShapeAtBoundary(stripped)
+	boundary := composerShapeAtBoundary(stripped, echoBaseline, echoBaselineOK)
 
 	pasteDeliverySleep(strandedSubmitGrace)
 	pane, cursor, ok := t.capturePaneAndCursorState()

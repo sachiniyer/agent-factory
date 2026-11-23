@@ -101,7 +101,7 @@ func TestBoundChipLeavingTheComposerIsNotStillStagedBelowAStatusLine(t *testing.
 	bound := stagedEvidence{chip: true, chipText: normalizeDelivery(claudeChip)}
 	staged := claudeInsertPane("❯ " + claudeChip)
 	submitted := claudeInsertPane("❯")
-	boundary := composerShapeAtBoundary(staged)
+	boundary := boundaryShapeForTest(staged)
 	if !boundStillStaged(staged, deliveryProbe{}, bound, boundary) {
 		t.Fatal("a chip still in the composer must read as staged")
 	}

@@ -77,6 +77,14 @@ type stagedDraftPane struct {
 	// echo row is a narrow-set glyph row sitting above the real composer
 	// (#7801).
 	echoGlyph string
+	// histSnapshot is the frame the scrollback-inclusive boundary capture
+	// (capture-pane -S) answers: the pane as of the Enter boundary, before
+	// the agent reacted. The mock's echo lands inside the boundary command,
+	// so a later -S read of the live pane would count that echo into the
+	// baseline and make growth unprovable — the opposite of production,
+	// where the capture runs in the same breath as the Enter, ahead of the
+	// agent's echo (#7802 R2).
+	histSnapshot string
 }
 
 func (m *stagedDraftPane) glyphOr() string {
@@ -229,6 +237,7 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 				m.enters++
 				frame := m.paneLocked()
 				joinedFrame := m.joinedPaneLocked()
+				m.histSnapshot = frame
 				if m.enters <= m.swallowedEnters {
 					m.composer = append(m.composer, "")
 				} else if len(m.composer) > 0 {
@@ -251,6 +260,12 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 			}
 			if strings.Contains(joined, "display-message") {
 				return []byte(m.cursorLineLocked()), nil
+			}
+			if strings.Contains(joined, "capture-pane") && strings.Contains(joined, "-S") &&
+				m.histSnapshot != "" {
+				// The staged-draft baseline capture reads scrollback — the
+				// pane at the Enter boundary, before the mock's instant echo.
+				return []byte(m.histSnapshot), nil
 			}
 			if m.pollPartial && m.pastes > 0 {
 				// The delivery polls run while the paste is still draining:
