@@ -649,15 +649,33 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// gone in the Deregistered case, so a retry's deregister is a no-op.
 	//
 	// This mirrors the pre-deregister re-check's fail-closed behavior for a
-	// session that gate CAN see, and closes the window for the actor class the
-	// fence was never built for. It does NOT hold m.mu across config.DeregisterProject
-	// (same ABBA), and does NOT re-register via config.RegisterProject under
+	// session that gate CAN see. What it does NOT close, and never claimed to:
+	//
+	//   - An inserter already waiting on m.mu while the re-scan holds it can
+	//     land immediately after the re-scan releases m.mu, so `escaped` is
+	//     empty and the delete reports success even though a live row for the
+	//     (de)registered project is now in m.instances.
+	//   - A row that was unloadable for the whole delete — e.g. one
+	//     findSessionByStableID rebuilt from disk while m.mu was released — can
+	//     materialize on a later 1 Hz poll after the fence lifts in the deferred
+	//     finally-clause, and neither refreshLocked nor the disk-rebuild register
+	//     consults the delete fence.
+	//
+	// In both cases the delete returns success and the row stays live, visible
+	// in the snapshot/TUI/switcher, and individually archivable
+	// (snapshot/ArchiveSession resolve m.instances regardless of registration
+	// — see the bug report's remediation notes); the user can archive it
+	// individually or by re-running DeleteProject. The policy for such a
+	// surviving row (auto-archive re-materialization for a deregistered
+	// project, a post-fence sweep, or dropping the row from disk) is tracked in
+	// #7813; this PR narrows the window master leaves open but does not
+	// eliminate it.
+	//
+	// The re-scan does NOT hold m.mu across config.DeregisterProject (same
+	// ABBA), and does NOT re-register via config.RegisterProject under
 	// taskTargetMu: RegisterProject re-resolves the binding through unbounded
 	// git (the #3361 hazard taskTargetMu is held to bound), so the recovery is
-	// the caller's retry rather than an in-line re-register. The escaped row
-	// stays live and visible (snapshot/ArchiveSession resolve m.instances
-	// regardless of registration — see the bug report's remediation notes), so
-	// the user can archive it individually or by re-running DeleteProject.
+	// the caller's retry rather than an in-line re-register.
 	m.mu.Lock()
 	var escaped []string
 	for _, id := range fenced {
