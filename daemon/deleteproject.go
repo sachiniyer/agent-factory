@@ -99,6 +99,15 @@ var deleteProjectPostSuppressHookForTest func()
 // daemon.
 var deleteProjectPostClaimantHookForTest func()
 
+// deleteProjectPreDeregisterHookForTest, when non-nil, runs AFTER the
+// pre-deregister re-check passes and BEFORE the durable registry record is
+// removed — the stretched re-check→deregister window a concurrent refresh
+// disk-materialization crosses. Tests use it to park the delete inside that
+// window so a live row written to instances.json + RefreshInstances() can
+// land in m.instances between the two: the exact escape the post-deregister
+// re-scan below exists to catch. Microseconds apart in a real daemon.
+var deleteProjectPreDeregisterHookForTest func()
+
 // DeleteProjectResult reports what DeleteProject did so the control server can
 // publish one archived/killed event per affected session (plus a
 // projects-changed signal), and the CLI/TUI can report the counts.
@@ -530,9 +539,17 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// way through a narrower window. If one appeared, abort WITHOUT deregistering: the
 	// sessions archived so far stay archived (idempotent), and a retry finishes once the
 	// new session settles. A create landing in the microseconds between this check and the
-	// DeregisterProject call below is the one remaining, deliberately documented window;
-	// closing it fully would mean holding m.mu across the registry file lock (an ABBA
-	// hazard) for a gap this narrow.
+	// DeregisterProject call below would, between the two, name one such create that can
+	// no longer be caught here — but a DIFFERENT actor class crosses the same window
+	// without a fence to self-refuse: refreshLocked (the 1 Hz poll) and the
+	// findSessionByStableID disk-rebuild register both insert live rows from
+	// instances.json into m.instances without consulting m.projectDeletes /
+	// projectDeleteSeq, so a row materializing on disk during this gap escapes this
+	// re-check. A post-deregister re-scan below (the hook there stretches this same
+	// window) catches any such escape after the durable removal and reports a
+	// retryable error, because holding m.mu across config.DeregisterProject is an ABBA
+	// hazard against ReconcileProjectRepoID (it re-asks this fence under m.mu inside the
+	// registry lock) — the same reason this is two critical sections rather than one.
 	m.mu.Lock()
 	appeared := m.repoSessionTitlesLocked(repoID, false)
 	m.mu.Unlock()
@@ -541,6 +558,27 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		return result, deleteProjectFailure(result, fmt.Errorf(
 			"delete project %s: archived %d, tore down %d, but a session started for this project meanwhile (%v); the project was NOT removed — delete again to finish",
 			repoID, len(result.Archived), len(result.Killed), appeared))
+	}
+
+	// The re-check above and the deregister below are deliberately two critical
+	// sections: config.DeregisterProject takes the registry file lock, and
+	// holding m.mu across it is an ABBA hazard against ReconcileProjectRepoID,
+	// which re-asks this delete's fence under m.mu *inside* that same registry
+	// lock. That gap is what the concurrent-create comment above counted as
+	// the "one remaining, deliberately documented window" — but it
+	// under-counted: refreshLocked (the 1 Hz poll, plus every id-resolved
+	// action) and the findSessionByStableID disk-rebuild register both insert
+	// live, non-archived rows from instances.json into m.instances WITHOUT
+	// consulting m.projectDeletes / projectDeleteSeq (the create path consults
+	// both, which is exactly what makes a create self-refuse). A row that lands
+	// on disk during this gap — a peer agent-factory process, a healing row
+	// that was unloadable at an earlier refresh, a start-skipped repo that
+	// repaired — materializes into m.instances between the re-check and the
+	// deregister, escapes both, and the delete would otherwise report success
+	// while a live session survives in a now-deregistered project (the #2549
+	// invariant). The hook stretches the window for the regression test.
+	if deleteProjectPreDeregisterHookForTest != nil {
+		deleteProjectPreDeregisterHookForTest()
 	}
 
 	// Every session for the repo is archived and none is starting — NOW drop the durable
@@ -593,6 +631,49 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 			result.Deregistered = true
 			m.info().Printf("delete project %s: removed its durable registry record", repoID)
 		}
+	}
+
+	// Post-deregister re-scan (#2549, #2947): the pre-deregister re-check above
+	// and the deregister are two critical sections (the ABBA hazard the comment
+	// at the hook explains), so anything that inserts into m.instances between
+	// them escapes BOTH. refreshLocked and the findSessionByStableID disk-rebuild
+	// register are exactly such inserters — they do not consult the delete fence
+	// the way reserveCreate does — and the 1 Hz poll runs on every tick. Re-scan
+	// m.instances under m.mu NOW, after the durable removal completes, and treat
+	// any live row for a fenced identity that escaped the pre-deregister re-check
+	// as a fail-closed retryable error rather than reporting success over a live
+	// session in a now-deregistered project. The delete is idempotent and the
+	// fence is still up here (its removal is the deferred finally-clause), so a
+	// retry re-archives nothing the first delete already archived and finishes
+	// by archiving the materialized row; the project's registry record is already
+	// gone in the Deregistered case, so a retry's deregister is a no-op.
+	//
+	// This mirrors the pre-deregister re-check's fail-closed behavior for a
+	// session that gate CAN see, and closes the window for the actor class the
+	// fence was never built for. It does NOT hold m.mu across config.DeregisterProject
+	// (same ABBA), and does NOT re-register via config.RegisterProject under
+	// taskTargetMu: RegisterProject re-resolves the binding through unbounded
+	// git (the #3361 hazard taskTargetMu is held to bound), so the recovery is
+	// the caller's retry rather than an in-line re-register. The escaped row
+	// stays live and visible (snapshot/ArchiveSession resolve m.instances
+	// regardless of registration — see the bug report's remediation notes), so
+	// the user can archive it individually or by re-running DeleteProject.
+	m.mu.Lock()
+	var escaped []string
+	for _, id := range fenced {
+		escaped = append(escaped, m.repoSessionTitlesLocked(id, false)...)
+	}
+	m.mu.Unlock()
+	if len(escaped) > 0 {
+		escaped = session.DedupeSorted(escaped)
+		if result.Deregistered {
+			return result, deleteProjectFailure(result, fmt.Errorf(
+				"delete project %s: archived %d, tore down %d, but a session materialized for this project during its deregister (%v); the project's registry record was removed but a live session survives — delete the project again to archive it and finish (a retry re-archives nothing that is already archived)",
+				repoID, len(result.Archived), len(result.Killed), escaped))
+		}
+		return result, deleteProjectFailure(result, fmt.Errorf(
+			"delete project %s: archived %d, tore down %d, but a session materialized for this project during its deregister (%v); the project was NOT removed — delete again to finish",
+			repoID, len(result.Archived), len(result.Killed), escaped))
 	}
 
 	m.info().Printf("deleted project %s: archived %d session(s), tore down %d in-place session(s)", repoID, len(result.Archived), len(result.Killed))
