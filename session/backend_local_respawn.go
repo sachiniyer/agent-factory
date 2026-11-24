@@ -738,11 +738,30 @@ func (i *Instance) teardownStalePanesForRebuild(workDir string, committed bool, 
 // either path in respawnWithConversation, or nil when one can be attempted. The
 // branch rebuild needs the recorded branch; the fresh rebuild needs it gone AND
 // an exact recorded conversation to resume, and refuses otherwise. It reads git
-// refs and the recorded conversation only — no tmux, no checkout write — so it
-// can run before the stale-pane teardown that a rebuild requires (#5371).
+// refs and the recorded conversation — and does one bounded, read-only scan of
+// the recorded source's parent for af relocation residue — no tmux, no checkout
+// write — so it can run before the stale-pane teardown that a rebuild requires
+// (#5371).
+//
+// The residue scan mirrors the archive endpoint's bare-ENOENT route
+// (archiveSessionSourceAbsent, #7804/#7807): a daemon death between the
+// quarantine rename and the publish rename of a cross-device archive move
+// strands the COMPLETE worktree — including any uncommitted changes — under an
+// unguessable `.af-source-<32hex>` sibling of the (now absent) recorded path
+// with no durable relocation record naming it. The automatic lost-restore
+// rebuild would otherwise re-check out the branch at the recorded path, prune
+// git's stale registration, and leave the stranded quarantine permanently
+// unreferenced — silently discarding the user's work the archive-side
+// arbitration exists to protect. Detecting the residue here keeps the row Lost
+// and the recorded path absent, so the same archive-side refusal (which scans
+// both parents) still runs on a later archive retry and the rescue window is
+// preserved.
 func missingWorktreeRebuildRefusal(i *Instance, gw *git.GitWorktree, resume bool, program string) error {
 	if gw.IsExternalWorktree() {
 		return fmt.Errorf("af never rebuilds an external worktree")
+	}
+	if refusal := crashWindowResidueRebuildRefusal(i, gw); refusal != nil {
+		return refusal
 	}
 	branch := gw.GetBranchName()
 	if strings.TrimSpace(branch) == "" {
