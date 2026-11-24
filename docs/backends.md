@@ -1312,9 +1312,10 @@ host — and points the agent at it with the agent's own variable (`CLAUDE_CONFI
 config, so the host's own login is neither read nor replaced.
 
 - **Only credential files travel** (claude `.credentials.json`, codex `auth.json`,
-  gemini's OAuth files) — not history, settings or skills. They are sent over the
-  ssh session's stdin as an archive, so no secret appears in a command line, a
-  script or a log.
+  gemini's OAuth files) — not history, settings or skills (af's own
+  `agent-factory` skill is the exception: it rides the swap archive for codex and
+  gemini when `global_agent_skills` is on). They are sent over the ssh session's
+  stdin as an archive, so no secret appears in a command line, a script or a log.
 - **Only to a listed host.** The licence to send credentials is the host-list
   entry, which only the operator writes. A target a repository named (its `[ssh]`
   section) or a free-form `sandbox.ssh` command is refused before anything is sent.
