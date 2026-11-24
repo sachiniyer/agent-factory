@@ -39,7 +39,13 @@ type stagedDraftPane struct {
 	movedCursor     bool
 	clearIsNoop     bool
 	swallowedEnters int
-	render          func(payload string) []string
+	// swallowNoNewline, when set, makes a swallowed Enter absorb WITHOUT
+	// appending a blank composer row — the no-newline-swallow shape: the
+	// draft stays and the cursor remains on the chip's last row instead of
+	// dropping to a blank continuation row. Zero value (false) keeps the
+	// canonical absorbed-newline behavior every other test relies on.
+	swallowNoNewline bool
+	render           func(payload string) []string
 	// cursorCol, when non-zero, overrides the column cursorLineLocked reports —
 	// the hook that lets a test model the cursor moving off the insert column
 	// (e.g. a user typing a space onto a blank composer row).
@@ -230,7 +236,9 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 				frame := m.paneLocked()
 				joinedFrame := m.joinedPaneLocked()
 				if m.enters <= m.swallowedEnters {
-					m.composer = append(m.composer, "")
+					if !m.swallowNoNewline {
+						m.composer = append(m.composer, "")
+					}
 				} else if len(m.composer) > 0 {
 					m.transcript = append(m.transcript, m.echoGlyphOr()+" "+strings.TrimSpace(strings.Join(m.composer, " ")))
 					m.composer = nil
@@ -701,4 +709,39 @@ func TestInputBetweenCheckAndRemedyReportsUnverified(t *testing.T) {
 	status, _, enters := sendStaged(t, m, redeliverPrompt)
 	require.Equal(t, PromptSentUnverified, status)
 	require.Equal(t, 2, enters, "input in the check-then-act gap cannot be prevented; the report must not round up")
+}
+
+// wrappedTailCol returns the content-end column of the last physical grid row
+// when line wraps at paneWidth — where an undisturbed draft parks the cursor for
+// a chip whose text wraps across physical rows.
+func wrappedTailCol(line string, paneWidth int) int {
+	rs := []rune(line)
+	for len(rs) > paneWidth {
+		rs = rs[paneWidth:]
+	}
+	return contentEndCol(string(rs))
+}
+
+// TestWrappedChipTailCursorNoNewlineSwallowStillRemedies is the end-to-end shape
+// the unit-level TestStillChipComposerAcceptsWrappedChipTailCursor pins: a paste
+// chip long enough to wrap across physical grid rows, whose Enter was swallowed
+// WITHOUT inserting a newline (the draft stays, no blank continuation row), with
+// the visible cursor parked at the content-end of the chip's LAST wrapped row.
+// This is exactly where an undisturbed draft leaves the cursor for a wrapped
+// chip, so the strand must receive its one remedy Enter (#4200 wrapped-chip fix).
+// The default harness models cursor-at-insert and absorbed-newline Enter; the
+// swallowNoNewline mode plus cursorCol=pasted-chip tail model this shape here.
+func TestWrappedChipTailCursorNoNewlineSwallowStillRemedies(t *testing.T) {
+	chipRow := "› " + codexChipRender(redeliverPrompt)[0]
+	m := &stagedDraftPane{
+		swallowedEnters:  1,
+		swallowNoNewline: true,
+		render:           codexChipRender,
+		paneWidth:        20,
+		cursorCol:        wrappedTailCol(chipRow, 20),
+	}
+	status, pastes, enters := sendStaged(t, m, redeliverPrompt)
+	require.Equal(t, 1, pastes, "the remedy must never re-paste")
+	require.Equal(t, 2, enters, "a still wrapped chip with the cursor at the wrapped tail (no-newline swallow) gets exactly one remedy Enter")
+	require.Equal(t, PromptSentUnverified, status)
 }

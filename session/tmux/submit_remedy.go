@@ -508,10 +508,11 @@ func idleComposerPlaceholderRow(norm string) bool {
 // down: a literal draft (tail-bound) never reaches here, a second chip or user
 // text changes the region's joined content, a moved anchor means a repainted
 // composer, and a footer redrawn inside the region changes the bytes. The
-// visible cursor must rest where undisturbed input left
-// it: on the chip row at its insert or content-end column, or on the absorbed
-// Enter's blank row at the insert column. A hidden cursor (Claude's ordinary
-// composer draws one) cannot prove that, so it withholds.
+// visible cursor must rest where undisturbed input left it: on the chip row at
+// its insert or content-end column — the chip's last wrapped physical row when
+// its text wraps across grid rows — or on the absorbed Enter's blank row at the
+// insert column. A hidden cursor (Claude's ordinary composer draws one) cannot
+// prove that, so it withholds.
 //
 // The second return names the condition that failed, so the withheld-remedy
 // warning says WHICH of hidden cursor, foreign composer content, moved
@@ -574,6 +575,24 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 		return false, "the cursor is on a blank composer row but not at the insert column"
 	}
 	if cursor.Row == anchor && (cursor.Col == insert || cursor.Col == contentEndCol(gRows[anchor])) {
+		return true, ""
+	}
+	// The chip can wrap across physical grid rows: an undisturbed draft parks
+	// the cursor just past its tail on the chip's LAST wrapped row, not on the
+	// anchor (glyph) row. The stillness proof above already bounds the region
+	// to the chip's bytes (plus at most one absorbed-Enter blank row), so
+	// accept the content-end column on the cursor's row when every region row
+	// after it is blank — i.e. the cursor row is the chip's tail. A middle
+	// wrapped row has non-blank content after it and is not where an
+	// undisturbed draft leaves the cursor.
+	blankTail := true
+	for j := cursor.Row + 1; j < anchor+len(gRegion); j++ {
+		if !blankComposerRow(gRows[j]) {
+			blankTail = false
+			break
+		}
+	}
+	if blankTail && cursor.Col == contentEndCol(gRows[cursor.Row]) {
 		return true, ""
 	}
 	return false, "the cursor is not where an undisturbed draft leaves it"
