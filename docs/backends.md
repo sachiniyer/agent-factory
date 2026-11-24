@@ -1314,8 +1314,11 @@ config, so the host's own login is neither read nor replaced.
 - **Only credential files travel** (claude `.credentials.json`, codex `auth.json`,
   gemini's OAuth files) — not history, settings or skills (af's own
   `agent-factory` skill is the exception: it rides the swap archive for codex and
-  gemini when `global_agent_skills` is on). They are sent over the ssh session's
-  stdin as an archive, so no secret appears in a command line, a script or a log.
+  gemini when the session's provisioned policy snapshot grants
+  `global_agent_skills` — a later live grant or revocation is not what the swap
+  acts on, since a swap does not refresh that snapshot). They are sent over the
+  ssh session's stdin as an archive, so no secret appears in a command line, a
+  script or a log.
 - **Only to a listed host.** The licence to send credentials is the host-list
   entry, which only the operator writes. A target a repository named (its `[ssh]`
   section) or a free-form `sandbox.ssh` command is refused before anything is sent.
