@@ -357,25 +357,53 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 				rowFound = true
 				claimantProjectID = claimantForRecord(p)
 				if claimantProjectID == "" {
-					// The row matches this path by NAME, but nothing proves the
-					// checkout being deleted is that row's project — an
-					// unrelated clone at an unresolved project's old path,
-					// deleted before attribution has a verdict. Deregistering
-					// on a pathname match alone would destroy the original
-					// project's registry directory and its personal config on
-					// behalf of a delete that never targeted it (#3299 review
-					// id 3910519845). Drop the path: the delete still tears
-					// down and suppresses the occupant, and the stale record
-					// stays for its own owner to resolve or remove.
+					// A present path whose checkout marker cannot be proven is
+					// not, by itself, proof the checkout being deleted is this
+					// row's project. For an unproven REAL checkout (the else
+					// branch below) the row is abandoned and the path is dropped,
+					// because a non-derived id names a DIFFERENT project the
+					// delete must not reach on a pathname match alone.
 					//
-					// And with the path goes the CLAIM that a row was selected
-					// (#3530 review id 3919604370): this row is abandoned, so
-					// leaving the flag set would tell the transition gate a
-					// project had been selected and skip the reverse check —
-					// letting the delete act on the candidate identity while
-					// the unresolved row survives to reappear.
-					repoPath = ""
-					rowFound = false
+					// A DERIVED repo id is the other shape: the row recorded no
+					// identity of its own (#3530's legacy shape: RepoID "") and
+					// the path did not resolve, so the d-<hex> id this delete
+					// targets IS this row's own provisional identity — a value
+					// no session is keyed under and no root_agents entry answers
+					// to. Dropping repoPath here would disarm the three downstream
+					// safeguards that ARE this project's own identity (the
+					// historical stranded-session refusal, the opt-in path-hash
+					// sweep, and the path-form deregister, all gated on
+					// repoPath), and the delete would return a zero-count SUCCESS
+					// while the project's live sessions (keyed under the recorded
+					// path's historical hex hash), its durable opt-in and its
+					// registry row all survive untouched — undeletable by path
+					// behind a success message. Keep the matched row's recorded
+					// root so the existing phase-1 stranded gate and both-identity
+					// sweep carry the case exactly as the absent-path shape
+					// already does: fail closed when sessions remain under the
+					// historical identity, and actually remove the row and opt-in
+					// when none do.
+					if !config.IsDerivedRepoID(repoID) {
+						// The row matches this path by NAME, but nothing proves
+						// the checkout being deleted is that row's project — an
+						// unrelated clone at an unresolved project's old path,
+						// deleted before attribution has a verdict. Deregistering
+						// on a pathname match alone would destroy the original
+						// project's registry directory and its personal config on
+						// behalf of a delete that never targeted it (#3299 review
+						// id 3910519845). Drop the path: the delete still tears
+						// down and suppresses the occupant, and the stale record
+						// stays for its own owner to resolve or remove.
+						//
+						// And with the path goes the CLAIM that a row was
+						// selected (#3530 review id 3919604370): this row is
+						// abandoned, so leaving the flag set would tell the
+						// transition gate a project had been selected and skip the
+						// reverse check — letting the delete act on the candidate
+						// identity while the unresolved row survives to reappear.
+						repoPath = ""
+						rowFound = false
+					}
 				}
 				break
 			}
