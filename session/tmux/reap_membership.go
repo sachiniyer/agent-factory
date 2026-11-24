@@ -128,6 +128,15 @@ func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Proce
 	// It ends the same way at a positively- or un-provably-identified af
 	// daemon: processes below one are another af installation's work, never
 	// this cohort's.
+	//
+	// It ends the same way at a server the snapshot's kernel task name still
+	// identifies as tmux when the live process-table read could only answer
+	// TmuxUnknown (#7238): descent proof must not be minted through a server
+	// that became unreadable mid-sweep, or a proven member sitting above it
+	// would vouch for the panes below — exactly the crossing the stop exists
+	// to prevent. A routinely-unknown NON-tmux link (darwin's refused-argv
+	// launchd ancestor) is still crossed: the snapshot task name does not name
+	// tmux there, so the walk proceeds as it did before.
 	for ancestor, i := p.PPID, 0; ancestor > 1 && i < 128; i++ {
 		q, ok := snap[ancestor]
 		if !ok {
@@ -141,7 +150,8 @@ func (m cohortMembership) admits(snap map[int]proctree.Process, p proctree.Proce
 		}
 		// The stops apply only to ancestors that carry no proof of their
 		// own — a proven member vouches first.
-		if proctree.TmuxIdentityOf(ancestor) == proctree.Tmux || afDaemonClass(q, att) != afDaemonNot {
+		identity := proctree.TmuxIdentityOf(ancestor)
+		if identity == proctree.Tmux || (identity == proctree.TmuxUnknown && proctree.IsTmuxTaskName(q.Comm)) || afDaemonClass(q, att) != afDaemonNot {
 			break
 		}
 		ancestor = q.PPID

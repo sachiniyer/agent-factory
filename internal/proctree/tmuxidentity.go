@@ -98,7 +98,7 @@ func tmuxIdentity(argv []string, argvErr error, comm string, commErr error) Tmux
 	if argvErr == nil && isTmuxCommandLine(argv) {
 		return Tmux
 	}
-	if commErr == nil && isTmuxTaskName(comm) {
+	if commErr == nil && IsTmuxTaskName(comm) {
 		return Tmux
 	}
 	if argvErr != nil || commErr != nil {
@@ -112,11 +112,19 @@ func isTmuxCommandLine(argv []string) bool {
 	return isTmuxArgv(argv) || (len(argv) > 0 && strings.HasPrefix(argv[0], "tmux: "))
 }
 
-// isTmuxTaskName reports whether a kernel task name is tmux's: `tmux` where it
+// IsTmuxTaskName reports whether a kernel task name is tmux's: `tmux` where it
 // cannot retitle, or one of the titles proc_start gives it where it can. Any
 // `tmux: ` title counts, so a title this code does not know is still left
 // alone. Leave-alone is the safe direction for an unrecognised title.
-func isTmuxTaskName(comm string) bool {
+//
+// This is the task-name half of TmuxIdentityOf, exposed so a caller that holds
+// a process's SNAPSHOT entry can answer the same question the live read would
+// have asked the task name — the fallback a reap walk needs when the live
+// process-table read fails (TmuxIdentityOf answers TmuxUnknown) but the
+// snapshot still carries the boundary node's kernel task name. It is NOT a
+// general "is this tmux" predicate: argv and the live read still decide that;
+// only NotTmux licenses treating a process as an ordinary one (#7238).
+func IsTmuxTaskName(comm string) bool {
 	return comm == "tmux" || strings.HasPrefix(comm, "tmux: ")
 }
 
@@ -269,7 +277,7 @@ func tmuxServerIdentity(p Process, shape forkShape, parent Process, parentRead b
 		// leave the socket-absent probe unable to prove anything.
 		return p.PPID == 1
 	}
-	if !isTmuxTaskName(parent.Comm) {
+	if !IsTmuxTaskName(parent.Comm) {
 		return true
 	}
 	return !mayBeForkChildOf(p, shape)
