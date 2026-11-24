@@ -243,6 +243,20 @@ func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process
 // server parents it — a SIGHUP-ignoring pane root outlives its session
 // exactly that way — and only a carrier proof could NOT place is refused
 // behind the boundary, reported and never signalled.
+//
+// The boundary is recognized on a POSITIVE live read OR on a process the
+// snapshot's own kernel task name still identifies as tmux when the live
+// process-table read could only answer TmuxUnknown (#7238). TmuxUnknown is a
+// third answer, not the negative: only NotTmux licenses crossing, so a server
+// the sweep's snapshot captured as tmux that became unreadable mid-walk
+// still ends the walk at the boundary. Without this, the live-server race
+// the explicit `case boundary:` refusal exists to prevent reopens — a
+// stranger agent in another pane of the same live shared server, or a pane
+// of a nested server this session's pane launched, would lose the only
+// refusal mechanism that protects it. A routinely-unknown NON-tmux link
+// (darwin's routine refused-argv launchd ancestor) is still crossed: the
+// snapshot task name does not name tmux there, so the walk proceeds exactly
+// as #7433's protective direction intends.
 func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int, att *proctree.ExeAttestations) (reason string, positive bool, tmuxBoundary bool, unverifiedDaemon int) {
 	start := pid
 	for range 128 {
@@ -253,10 +267,11 @@ func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int, att *
 		if !ok {
 			return "", false, false, 0
 		}
+		identity := proctree.TmuxIdentityOf(pid)
 		switch {
 		case pid == self:
 			return protectReasonSelfSubtree, true, false, 0
-		case proctree.TmuxIdentityOf(pid) == proctree.Tmux:
+		case identity == proctree.Tmux || (identity == proctree.TmuxUnknown && proctree.IsTmuxTaskName(p.Comm)):
 			return "", false, true, 0
 		default:
 			switch afDaemonClass(p, att) {

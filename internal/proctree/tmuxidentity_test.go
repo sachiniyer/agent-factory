@@ -161,6 +161,40 @@ func TestTmuxIdentity_Decision(t *testing.T) {
 	require.Equal(t, TmuxUnknown, zero, "the zero value must be unknown, so an unset identity never passes for NotTmux")
 }
 
+// IsTmuxTaskName is the task-name half of TmuxIdentityOf, exported so a caller
+// that holds a process's snapshot entry can answer the same question the live
+// read would have asked the task name — the fallback the reap walks need when
+// the live process-table read fails (TmuxIdentityOf answers TmuxUnknown) but the
+// snapshot still carries the boundary node's kernel task name. The exported
+// contract is exactly the predicate tmuxIdentity uses: `tmux`, any `tmux: `
+// title a build may not know, and nothing else — a prefix match would wrongly
+// take tmuxinator, tmuxp and tmux-mem-cpu-load, which isTmuxArgv already rejects
+// by matching the basename exactly. The reap boundary keys off this, so a rename
+// or relaxation here changes which processes the vanished-session sweep refuses.
+func TestIsTmuxTaskName(t *testing.T) {
+	for _, tc := range []struct {
+		comm string
+		want bool
+	}{
+		{"tmux", true},
+		{"tmux: server", true},
+		{"tmux: client", true},
+		{"tmux: frobnicate", true},
+		{"tmux: server (/tmp/tmux-1000/default)", true},
+		{"tmuxinator", false},
+		{"tmuxp", false},
+		{"tmux-mem-cpu-load", false},
+		{"sleep", false},
+		{"launchd", false},
+		{"af", false},
+		{"", false},
+	} {
+		t.Run(tc.comm, func(t *testing.T) {
+			require.Equal(t, tc.want, IsTmuxTaskName(tc.comm))
+		})
+	}
+}
+
 // startedWithReadableArgv starts cmd and returns its pid once its command line
 // is readable. Asserting NotTmux any earlier would race the exec: straight after
 // Start, /proc/<pid>/cmdline is often still empty (#7238), and the honest answer
