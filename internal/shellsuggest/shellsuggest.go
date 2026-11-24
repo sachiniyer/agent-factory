@@ -30,10 +30,11 @@
 // scripts, tmux program strings) are a different job: internal/shellquote is the
 // shared quoter for the executed side. The two stay separate because Arg's zsh
 // start-of-word guards only earn their keep when the command lands in a human's
-// interactive shell, and they change the rendered string. The always-quote
-// helpers still in the tree (session.shellQuote, config.ShellQuotePath) render
-// differently again, so folding them in is a behavior-visible change tracked on
-// the structural audit (#1195), not a mechanical move.
+// interactive shell, and they change the rendered string. The unconditional
+// variants meanwhile folded into internal/shellquote.QuoteAll —
+// session.shellQuote, app.shellQuote and config.ShellQuotePath agreed on every
+// input where they overlapped, so they now delegate; see that package's doc for
+// the quoters that still genuinely differ.
 package shellsuggest
 
 import "strings"

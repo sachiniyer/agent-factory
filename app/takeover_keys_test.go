@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -381,13 +382,14 @@ func TestTakeoverPrivateSessionKeepsTheSourceOptions(t *testing.T) {
 }
 
 // The scripts handed to tmux's run-shell are parsed by sh: every word the route
-// interpolates must come back as exactly the intended argv. shellQuote is the only
-// quoting in the path, so round-trip hostile session names through a real sh.
+// interpolates must come back as exactly the intended argv. shellquote.QuoteAll
+// is the only quoting in the path, so round-trip hostile session names through a
+// real sh.
 func TestTakeoverShellQuotingRoundTrips(t *testing.T) {
 	for _, name := range []string{
 		"af_af-login-codex-work", "plain", "with space", "it's", `dq"uote`, "$(touch /tmp/x)", "a;b|c&d", "back\\slash", "star*glob", "=eq", "-dash",
 	} {
-		out, err := exec.Command("sh", "-c", `printf '%s\n' `+shellQuote(name)).Output()
+		out, err := exec.Command("sh", "-c", `printf '%s\n' `+shellquote.QuoteAll(name)).Output()
 		require.NoError(t, err, name)
 		assert.Equal(t, name+"\n", string(out), "sh must hand back exactly the session name %q as one word", name)
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -139,11 +140,11 @@ func (r takeoverRoute) mirrorRootScript() string {
 // mirrorErrorOption, and the takeover's cleanup reads it back and logs it.
 func (r takeoverRoute) mirrorSessionOptionsScript() string {
 	fail := func(why string) string {
-		return "tmux set-option -t " + r.group + " " + mirrorErrorOption + " " + shellQuote(why)
+		return "tmux set-option -t " + r.group + " " + mirrorErrorOption + " " + shellquote.QuoteAll(why)
 	}
 	// An empty listing (a source with no local options) is a successful empty copy,
 	// not an error: sed would turn its one blank line into a bare `set-option`.
-	return "opts=$(tmux show-options -t " + shellQuote(tmux.ExactTarget(r.session)) + ") || { " + fail("show-options on the source session failed") + "; exit 0; }; " +
+	return "opts=$(tmux show-options -t " + shellquote.QuoteAll(tmux.ExactTarget(r.session)) + ") || { " + fail("show-options on the source session failed") + "; exit 0; }; " +
 		"if [ -n \"$opts\" ]; then printf '%s\\n' \"$opts\" | sed -E 's/^/set-option -t " + r.group + " /' | tmux source-file - || " + fail("source-file rejected the copied options") + "; fi; true"
 }
 
@@ -166,8 +167,6 @@ var readTakeoverMirrorError = func(socket string, r takeoverRoute) string {
 	}
 	return strings.TrimSpace(string(out))
 }
-
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // cleanupArgs are the commands that retire this client's routing: its own table
 // and its own private session, never the shared one.
