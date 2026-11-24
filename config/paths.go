@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 )
 
 // This file holds the config package's pure path/shell string helpers,
@@ -42,7 +44,7 @@ func ShellQuotePath(path string) string {
 	if path == "" {
 		return path
 	}
-	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+	return shellquote.QuoteAll(path)
 }
 
 // GlobalConfigFileForDisplay names the canonical global TOML file in remedies,

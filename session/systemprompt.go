@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -200,10 +201,10 @@ const afUsageOutro = `Maintenance: af version, af debug (print resolved config),
 //
 // It quotes UNCONDITIONALLY, so the empty string renders as a quoted empty word
 // rather than vanishing — unlike config.ShellQuotePath, which returns ""
-// unchanged. See internal/shellquote for why the tree's quoters are not
-// interchangeable.
+// unchanged. The body delegates to internal/shellquote.QuoteAll; that package's
+// doc maps the quoters that remain genuinely different.
 func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	return shellquote.QuoteAll(s)
 }
 
 // injectSystemPrompt injects Agent Factory instructions into the session.
