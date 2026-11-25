@@ -649,7 +649,8 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex
   this AF home and to the currently-targeted Docker engine, so it never touches
   another home's or another engine's containers, and a container with no `af.home`
   label (created by a pre-upgrade af) is left alone. Kill still reaps synchronously;
-  this is only the backstop for the container that outlived its session.
+  this is only the backstop for the container that outlived its session, and the
+  docker-staging payload dir a provision killed mid-flight left behind.
 - **Reap a leaked container by hand** (should never be needed):
   `docker rm -f <id>`
 
