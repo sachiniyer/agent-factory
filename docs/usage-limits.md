@@ -977,8 +977,14 @@ that could not be made, a sandbox store af cannot reach, or a different
 program. Retiring the swap's delivery obligation writes the same answer onto
 the recorded handoff entry, so `af sessions get` reports it afterwards.
 `af sessions retry-limit` reports the same object for its own resume — the
-swap's carry, a re-spawn that resumed the recorded conversation, or a fresh
-start it names. For a session running in a sandbox the answer comes from the
+swap's carry, a re-spawn that resumed the recorded conversation, an unverified
+resume of a committed swap whose transcript store could not be listed (the
+conversation is resumed, not started fresh; `resume_unverified` names why the
+store did not answer and takes precedence for the replacement's current resumed
+state, but `carry_failure` may remain alongside it to describe the earlier
+carry that failed — the daemon copies both when a fresh replacement is later
+resumed without a successful store listing), or a fresh start it names. For a
+session running in a sandbox the answer comes from the
 sandbox's own recovery: `carried` only when the in-place relaunch it actually
 performed reported resuming this session's own conversation — the relaunch
 returns the verdict with its result, so the answer always matches the branch
