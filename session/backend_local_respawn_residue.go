@@ -49,7 +49,15 @@ import (
 // durable user-facing record (LostRestoreFailure.Error) is capped at 512 runes
 // (lost_restore_failure.go) — and the respawn call site stores it leading the
 // "%w (%w)" pair so the cap clips only the trailing stat frame, never the
-// remedy (#7855). residueRebuildRefusal keeps the ErrRelocateStateUnknown
+// remedy (#7855). Within the record every MANDATORY clause — each residue
+// named or counted, the remedy, the warning against moving residue into this
+// session's path, the #7819 citation — is written unconditionally: what yields
+// to the cap is only the form each clause takes, through a fixed ladder of
+// abbreviations (full path → leaf resolved against the named parent →
+// "the session path"; named residue → counted residue → the daemon log), so
+// nothing mandatory is dropped at realistic title or path lengths (#7855,
+// second round — a droppable tail is how the citation and the warning were
+// lost on macOS). residueRebuildRefusal keeps the ErrRelocateStateUnknown
 // verdict for the errors.Is classifiers without spending record runes on the
 // sentinel's own sentence.
 func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
@@ -164,69 +172,134 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 	}
 	// tail appends a clause only while it fits whole: one the budget cannot
 	// hold is dropped at its boundary rather than clipped mid-word by the
-	// cap. The remedy itself is never a tail — it leads the record.
+	// cap. Only OPTIONAL context may ride a tail — every mandatory clause is
+	// written below unconditionally at the fullest of its abbreviation
+	// ladder, because a droppable tail is exactly how the #7819 citation and
+	// the do-not-move warning were lost at deep paths (#7855, second round).
 	tail := func(frag string) {
 		if len([]rune(frag)) <= room() {
 			record.WriteString(frag)
 		}
 	}
-	// extraResidue appends "; <frag>" for a secondary residue category: the
-	// category's paths are named while they fit the room the record has left,
-	// and when even the first path no longer fits the fragment degrades to a
-	// bare count that still points at the daemon log — counted, never
-	// silently truncated mid-path.
-	extraResidue := func(paths []string, frag string, fragArgs ...any) {
+	parent := filepath.Dir(source)
+	srcLeaf := filepath.Base(source)
+	unverifiedNames := baseNames(unverified)
+
+	// mustResidue writes a mandatory secondary-residue clause: the category's
+	// names while they fit the room left after the floors the clauses behind
+	// it must keep, else its floor — presence plus its warning — appended
+	// unconditionally. A mandatory clause is never dropped: at the extreme
+	// where even the floor overflows, the cap clips the record's end rather
+	// than the clause being silently lost.
+	mustResidue := func(reserve int, paths []string, namedFrag string, floor func(int) string) {
 		if len(paths) == 0 {
 			return
 		}
-		fixed := len([]rune(fmt.Sprintf(frag, append([]any{""}, fragArgs...)...)))
-		if room() < fixed+len([]rune(paths[0])) {
-			noun := "paths"
-			if len(paths) == 1 {
-				noun = "path"
-			}
-			tail(fmt.Sprintf("; %d more residue %s (full list in the daemon log)", len(paths), noun))
+		fixed := len([]rune(fmt.Sprintf(namedFrag, "")))
+		if s := fmt.Sprintf(namedFrag,
+			residueRecordList(paths, room()-reserve-fixed)); len([]rune(s)) <= room()-reserve {
+			record.WriteString(s)
 			return
 		}
-		fmt.Fprintf(&record, frag, append([]any{residueRecordList(paths, room()-fixed)}, fragArgs...)...)
+		record.WriteString(floor(len(paths)))
 	}
-	// Residue paths go into the record as basenames: every candidate is a
-	// sibling of the recorded path (the scan covered only its parent), so the
-	// parent is named once and the basenames resolve against it — the same
-	// information as the absolute paths at a fraction of the runes, which is
-	// what keeps the remedy inside the cap at realistic path depths (#7855).
-	parent := filepath.Dir(source)
+	floorLen := func(floor func(int) string, n int) int {
+		if n == 0 {
+			return 0
+		}
+		return len([]rune(floor(n)))
+	}
 	switch {
 	case len(oursSource) > 0:
 		// The literal command first: `cd <parent> && mv <quarantine> <leaf>`
-		// IS the action and names every path it needs — basenames against the
+		// IS the remedy and names every path it needs — basenames against the
 		// parent keep the command inside the cap at path lengths where two
 		// absolute paths alone would overflow it. It is rendered through
 		// shellsuggest because the record's whole purpose is to be read and
 		// pasted — a parent with spaces or metacharacters must still arrive as
-		// exactly one operand.
-		fmt.Fprintf(&record, "%s && %s to move this session's stranded worktree back",
-			shellsuggest.Command("cd", parent),
-			shellsuggest.Command("mv", "--", filepath.Base(oursSource[0]), filepath.Base(source)))
+		// exactly one operand. The command is sized against the floors the
+		// mandatory clauses behind it keep — the unverified warning and its
+		// #7819 citation first, then the staged-copy warning and any extra
+		// proven-ours quarantines — so a fuller command never starves them.
+		quarantineLeaf := filepath.Base(oursSource[0])
+		unverifiedFloorLen := floorLen(unverifiedExtraFloor, len(unverified))
+		copyFloorLen := floorLen(copyExtraFloor, len(oursCopy))
+		oursFloorLen := floorLen(oursExtraFloor, len(oursSource)-1)
+		record.WriteString(fitResidueForm(
+			room()-unverifiedFloorLen-copyFloorLen-oursFloorLen,
+			func(int) string {
+				return shellsuggest.Command("cd", parent) + " && " +
+					shellsuggest.Command("mv", "--", quarantineLeaf, srcLeaf) +
+					" to move this session's stranded worktree back, then retry"
+			},
+			func(room int) string {
+				// The parent's middle is the part that gives next; the
+				// quoted operand keeps its head and tail so the command
+				// still locates the folder the daemon log names in full.
+				fixed := len("cd ") + 2 + len(" && ") +
+					len([]rune(shellsuggest.Command("mv", "--", quarantineLeaf, srcLeaf))) +
+					len(" to move this session's stranded worktree back, then retry")
+				parentRef := elideMiddle(parent, room-fixed)
+				if len([]rune(parentRef)) < residueParentFloorRunes {
+					// An elided stub this short locates nothing — render
+					// the full parent so the room check rejects this form
+					// and the parentless floor takes the record instead.
+					parentRef = parent
+				}
+				return shellsuggest.Command("cd", parentRef) + " && " +
+					shellsuggest.Command("mv", "--", quarantineLeaf, srcLeaf) +
+					" to move this session's stranded worktree back, then retry"
+			},
+			func(int) string {
+				return "mv " + quarantineLeaf + " " + srcLeaf +
+					" — move this session's stranded worktree back (parent in the daemon log), then retry"
+			},
+		))
+		mustResidue(copyFloorLen+oursFloorLen, unverifiedNames,
+			"; unverified residue %s also present — do not move it into the session path unless proven (#7819)",
+			unverifiedExtraFloor)
+		mustResidue(oursFloorLen, baseNames(oursCopy),
+			"; staged copy %s may be incomplete — recover from the quarantine, never the copy",
+			copyExtraFloor)
+		mustResidue(0, baseNames(oursSource[1:]),
+			"; also proven ours: %s",
+			oursExtraFloor)
+		tail("; or remove it once the work is saved")
 		tail(" — proven the complete worktree (incl. uncommitted changes), left by a cut-off archive move")
-		tail("; or remove it once the work is saved, then retry")
-		extraResidue(baseNames(oursSource[1:]), "; also proven ours: %s")
-		extraResidue(baseNames(oursCopy), "; staged copy %s may be incomplete — recover from the quarantine, never the copy")
-		extraResidue(baseNames(unverified), "; unverified residue %s also present — do not move it into the session path unless proven (#7819)")
 	case len(oursCopy) > 0:
-		const frag = "inspect %s in %s: a staged .af-copy-* copy proven to be this session's, " +
-			"but possibly incomplete (its .af-source-* quarantine is absent)"
-		list := residueRecordList(baseNames(oursCopy), room()-len([]rune(fmt.Sprintf(frag, "", parent))))
-		fmt.Fprintf(&record, frag, list, parent)
-		tail(" — do not move it into " + source + " unless verified complete, then retry")
-		extraResidue(baseNames(unverified), "; unverified residue %s also present — do not move it into the session path unless proven (#7819)")
+		// No quarantine — only a staged copy proven ours. It may be
+		// incomplete, so the record must keep the warnings: the copy is
+		// proven this session's but is never the thing to move back in.
+		copyNames := baseNames(oursCopy)
+		unverifiedFloorLen := floorLen(unverifiedExtraFloor, len(unverified))
+		record.WriteString(fitResidueForm(room()-unverifiedFloorLen,
+			residueForm(residueCopyRecordFull, parent, source, copyNames),
+			residueForm(residueCopyRecordFull, parent, srcLeaf, copyNames),
+			residueForm(residueCopyRecordCompact, parent, source, copyNames),
+			residueForm(residueCopyRecordCompact, parent, srcLeaf, copyNames),
+			residueForm(residueCopyRecordCompact, parent, residueSessionPathRef, copyNames),
+			residueElidedParentForm(residueCopyRecordCompact, parent, srcLeaf, copyNames),
+			residueElidedParentForm(residueCopyRecordCompact, parent, residueSessionPathRef, copyNames),
+			residueFloorForm(residueCopyRecordFloor, copyNames),
+		))
+		mustResidue(0, unverifiedNames,
+			"; unverified residue %s also present — do not move it into the session path unless proven (#7819)",
+			unverifiedExtraFloor)
 	default:
-		const frag = "inspect %s in %s — af could not verify it is this session's; " +
-			"move it out of that folder once checked, then retry"
-		list := residueRecordList(baseNames(unverified), room()-len([]rune(fmt.Sprintf(frag, "", parent))))
-		fmt.Fprintf(&record, frag, list, parent)
-		tail(" (or remove it once confirmed unneeded)")
-		tail("; do not move it into " + source + " unless proven (#7819)")
+		// Unverified residue only: the fail-closed refusal names the
+		// residue, says the binding could not be read, gives the move-it-out
+		// remedy, and keeps the warning and #7819 citation — every one
+		// mandatory at every rung of the ladder.
+		record.WriteString(fitResidueForm(room(),
+			residueForm(residueUnverifiedRecordFull, parent, source, unverifiedNames),
+			residueForm(residueUnverifiedRecordFull, parent, srcLeaf, unverifiedNames),
+			residueForm(residueUnverifiedRecordCompact, parent, source, unverifiedNames),
+			residueForm(residueUnverifiedRecordCompact, parent, srcLeaf, unverifiedNames),
+			residueForm(residueUnverifiedRecordCompact, parent, residueSessionPathRef, unverifiedNames),
+			residueElidedParentForm(residueUnverifiedRecordCompact, parent, srcLeaf, unverifiedNames),
+			residueElidedParentForm(residueUnverifiedRecordCompact, parent, residueSessionPathRef, unverifiedNames),
+			residueFloorForm(residueUnverifiedRecordFloor, unverifiedNames),
+		))
 	}
 	return &residueRebuildRefusal{msg: record.String()}
 }
@@ -294,4 +367,146 @@ func residueRecordList(paths []string, room int) string {
 		fmt.Fprintf(&b, ", and %d more (full list in the daemon log)", more)
 	}
 	return b.String()
+}
+
+const (
+	// residueSessionPathRef is the record's last-resort reference to this
+	// session's own worktree path: the leaf normally resolves against the
+	// parent the record already named, but when even that cannot fit the
+	// warning still has to name what not to move residue into — the daemon
+	// log keeps the literal path.
+	residueSessionPathRef = "the session path"
+
+	// residueParentFloorRunes is the smallest elided parent still worth
+	// writing: below it the stub locates nothing, so the rung that would
+	// have written it renders the full parent instead — guaranteed to fail
+	// its room check and hand the record to the parentless floor.
+	residueParentFloorRunes = 24
+
+	// The unverified-only record's abbreviation ladder — fullest first,
+	// floor last. Every rung carries the mandatory parts (#7855): the
+	// residue's name or count, the move-it-out remedy, the warning against
+	// moving it into this session's path, and the #7819 citation.
+	residueUnverifiedRecordFull = "inspect %s in %s — af could not verify it is this session's; " +
+		"move it out of that folder once checked, then retry " +
+		"(or remove it once confirmed unneeded); do not move it into %s " +
+		"unless you have proven it is this session's work (see #7819)"
+	residueUnverifiedRecordCompact = "inspect %s in %s — could not verify it is ours; " +
+		"move it out of that folder once checked, then retry; " +
+		"do not move it into %s unless proven (#7819)"
+	residueUnverifiedRecordFloor = "%s — could not verify it is ours (paths in the daemon log); " +
+		"move it out once checked, then retry; " +
+		"do not move it into the session path unless proven (#7819)"
+
+	// The copy-only record's abbreviation ladder: the copy's name, that it
+	// is proven this session's yet possibly incomplete, and the warning
+	// never to move it into the session path as the worktree.
+	residueCopyRecordFull = "inspect %s in %s: a staged .af-copy-* copy proven to be this session's, " +
+		"but possibly incomplete (its .af-source-* quarantine is absent) — " +
+		"do not move it into %s unless verified complete, then retry"
+	residueCopyRecordCompact = "inspect %s in %s — staged .af-copy-* copy proven ours, " +
+		"possibly incomplete; do not move it into %s unless verified complete, then retry"
+	residueCopyRecordFloor = "%s — staged copy proven ours, possibly incomplete " +
+		"(paths in the daemon log); do not move it into the session path " +
+		"unless verified complete, then retry"
+)
+
+// fitResidueForm renders a mandatory clause's abbreviation ladder in
+// preference order — fullest first, floor last — and returns the first rung
+// that fits room runes. The last candidate is the floor and is returned even
+// when it still overflows: the rune cap may clip the record's end, but a
+// mandatory clause is never silently dropped (#7855, second round).
+func fitResidueForm(room int, candidates ...func(int) string) string {
+	for _, candidate := range candidates {
+		if s := candidate(room); len([]rune(s)) <= room {
+			return s
+		}
+	}
+	return candidates[len(candidates)-1](room)
+}
+
+// residueForm renders one rung of a record clause's ladder: frag's first
+// placeholder takes the residue list — sized to whatever room the rest of
+// the clause leaves — and the remaining two take the parent and the
+// session-path reference, which earlier rungs name in full and later rungs
+// abbreviate to the leaf or to "the session path".
+func residueForm(frag, parentRef, srcRef string, names []string) func(int) string {
+	return func(room int) string {
+		fixed := len([]rune(fmt.Sprintf(frag, "", parentRef, srcRef)))
+		return fmt.Sprintf(frag, residueRecordList(names, room-fixed), parentRef, srcRef)
+	}
+}
+
+// residueElidedParentForm is the ladder rung where the residue's PARENT is
+// the field that gives: the list renders at its floor — first name whole,
+// the rest counted — and the parent keeps every rune they leave, eliding
+// only its middle.
+func residueElidedParentForm(frag, parent, srcRef string, names []string) func(int) string {
+	return func(room int) string {
+		list := residueRecordList(names, 0)
+		rest := len([]rune(fmt.Sprintf(frag, list, "", srcRef)))
+		parentRef := elideMiddle(parent, room-rest)
+		if len([]rune(parentRef)) < residueParentFloorRunes {
+			parentRef = parent
+		}
+		return fmt.Sprintf(frag, list, parentRef, srcRef)
+	}
+}
+
+// residueFloorForm renders the parentless floor of a record clause — the
+// mandatory text alone — around the residue list at whatever fullness room
+// runes still allow.
+func residueFloorForm(frag string, names []string) func(int) string {
+	return func(room int) string {
+		fixed := len([]rune(fmt.Sprintf(frag, "")))
+		return fmt.Sprintf(frag, residueRecordList(names, room-fixed))
+	}
+}
+
+// elideMiddle shortens s to at most max runes by replacing its middle with
+// an ellipsis, so head and tail still locate what it named — the same mark
+// the sanitize cap leaves on overrun, applied deliberately while there is
+// still a choice about what to keep.
+func elideMiddle(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max <= 0 {
+		return ""
+	}
+	if max == 1 {
+		return "…"
+	}
+	head := (max - 1) / 2
+	return string(r[:head]) + "…" + string(r[len(r)-(max-1-head):])
+}
+
+// unverifiedExtraFloor is the smallest mandatory clause recording unverified
+// residue beside a proven one: its presence, the warning against moving it
+// into this session's path, and the #7819 citation.
+func unverifiedExtraFloor(n int) string {
+	if n == 1 {
+		return "; unverified residue also present — do not move it into the session path unless proven (#7819)"
+	}
+	return fmt.Sprintf("; %d unverified residue paths also present — do not move any into the session path unless proven (#7819)", n)
+}
+
+// copyExtraFloor is the smallest mandatory clause recording a staged
+// .af-copy-* beside a proven quarantine: its presence and the warning never
+// to recover from the possibly-incomplete copy.
+func copyExtraFloor(n int) string {
+	if n == 1 {
+		return "; a staged copy also present — recover from the quarantine, never the copy"
+	}
+	return fmt.Sprintf("; %d staged copies also present — recover from the quarantine, never a copy", n)
+}
+
+// oursExtraFloor is the smallest mandatory clause counting extra quarantines
+// proven to be this session's beyond the one the remedy names.
+func oursExtraFloor(n int) string {
+	if n == 1 {
+		return "; another quarantine also proven ours (name in the daemon log)"
+	}
+	return fmt.Sprintf("; %d more quarantines proven ours (names in the daemon log)", n)
 }

@@ -128,11 +128,15 @@ func TestMissingWorktreeRebuildRefusal_ForeignResidueDoesNotBlockRebuild(t *test
 // could not classify, but the refusal must NOT claim the residue is this
 // session's work and must NOT tell the operator to move it back into this
 // session's path.
+//
+// The parent is the 200-rune padded temp dir: the depth that dropped the
+// warning and the #7819 citation out of the stored record on macOS CI (#7855),
+// so Linux fails first if a mandatory clause ever becomes droppable again.
 func TestMissingWorktreeRebuildRefusal_UnverifiedResidueRefusesFailClosed(t *testing.T) {
 	repoRoot := residueTestRepo(t)
 	const branch = "af/unverified"
 	gitOut(t, repoRoot, "branch", branch)
-	wtParent := t.TempDir()
+	wtParent := residueParentAtCapDepth(t)
 	wtPath := filepath.Join(wtParent, "wt-unverified")
 	// An orphan residue with NO linked-worktree .git pointer beside the
 	// (absent) source parent — a residue whose git binding cannot be read.
@@ -161,7 +165,10 @@ func TestMissingWorktreeRebuildRefusal_UnverifiedResidueRefusesFailClosed(t *tes
 		"the refusal must tell the operator how to get unblocked: move the residue out of its parent, then retry")
 	assert.Contains(t, err.Error(), "#7819",
 		"the refusal must cite the follow-up tracking the ownership-model redesign")
-	assert.Contains(t, err.Error(), "do not move it into "+wtPath,
+	// The session path's leaf resolves against the parent the record already
+	// named — the same warning at a fraction of the runes, which is what
+	// keeps it inside the cap at this depth (#7855).
+	assert.Contains(t, err.Error(), "do not move it into "+filepath.Base(wtPath)+" unless proven",
 		"the refusal must keep the warning against moving unverified residue into this session's path")
 }
 
@@ -372,6 +379,10 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_Unverified(t *testing.T) {
 	assert.Contains(t, record, "move it out of that folder",
 		"the stored record must keep the remedy: move unverified residue out of its folder once checked, then retry")
 	assert.Contains(t, record, "once checked, then retry")
+	assert.Contains(t, record, "do not move it into "+filepath.Base(wtPath)+" unless proven",
+		"the stored record must keep the warning — the session path's leaf resolving against the named parent (#7855)")
+	assert.Contains(t, record, "#7819",
+		"the stored record must keep the citation at this depth")
 	assert.NotContains(t, record, "move it back",
 		"the stored record must never direct unverified residue into this session's path")
 }
@@ -413,6 +424,10 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_MultiUnverified(t *testing.T) 
 		"the stored record must name the residue's folder so the basenames resolve to full paths")
 	assert.Contains(t, record, "move it out of that folder",
 		"the stored record must keep the remedy after the counted residue list")
+	assert.Contains(t, record, "do not move it into "+filepath.Base(wtPath)+" unless proven",
+		"the stored record must keep the warning — the session path's leaf resolving against the named parent (#7855)")
+	assert.Contains(t, record, "#7819",
+		"the stored record must keep the citation at this depth")
 	assert.NotContains(t, record, "move it back",
 		"the stored record must never direct unverified residue into this session's path")
 }
@@ -446,4 +461,188 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_QuotedMv(t *testing.T) {
 		"the stored record must carry the remedy with each path as exactly one operand")
 	assert.NotContains(t, record, "cd "+wtParent,
 		"an unquoted cd would split a spaced parent into extra operands when pasted")
+}
+
+// TestLostRestoreFailure_ResidueRefusal_AllForms is the property guard of
+// #7855's second round: at the 200-rune padded parent AND a long session
+// title — the wrapper alone spends a third of the cap — the stored record
+// keeps every MANDATORY part of EVERY refusal form, because the record
+// abbreviates its variable-length fields through fixed ladders (full path →
+// leaf against the named parent → "the session path"; named residue →
+// counted residue → the daemon log) rather than dropping a clause. Each
+// subtest asserts exactly the parts its form must keep.
+func TestLostRestoreFailure_ResidueRefusal_AllForms(t *testing.T) {
+	// Deliberately long: realistic titles reach this size, and the recover
+	// wrapper spends the title before the record is even written.
+	const title = "fix-login-bug-and-modernize-the-auth-flow-across-the-whole-app"
+	const wtLeaf = "myrepo-fix-login-bug-with-a-long-name"
+
+	assertFitsCap := func(t *testing.T, record string) {
+		t.Helper()
+		assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes,
+			"the stored record stays inside the durable cap by construction")
+	}
+
+	// stageOursCopy plants a `.af-copy-<hex>` sibling proven this session's:
+	// it carries the worktree's own .git pointer — the same shape the
+	// archive-side staged copy has — so the residue binding reads ours.
+	stageOursCopy := func(t *testing.T, wtPath, hexStr string) string {
+		t.Helper()
+		copyDir := filepath.Join(filepath.Dir(wtPath), ".af-copy-"+hexStr)
+		require.NoError(t, os.Mkdir(copyDir, 0o755))
+		pointer, err := os.ReadFile(filepath.Join(wtPath, ".git"))
+		require.NoError(t, err, "the worktree's .git pointer file is what proves the copy ours")
+		require.NoError(t, os.WriteFile(filepath.Join(copyDir, ".git"), pointer, 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(copyDir, "staged.txt"), []byte("copy"), 0o644))
+		return copyDir
+	}
+
+	t.Run("proven-ours quarantine", func(t *testing.T) {
+		repoRoot := residueTestRepo(t)
+		wtParent := residueParentAtCapDepth(t)
+		wtPath := filepath.Join(wtParent, wtLeaf)
+		gitOut(t, repoRoot, "worktree", "add", "-b", "af/forms-own", wtPath)
+		quarantine := simulateCrashWindowRename(t, wtPath)
+
+		gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, title, "af/forms-own", "", false, true)
+		require.NoError(t, err)
+		inst := &Instance{Title: title, Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+
+		record := crashWindowRefusalRecord(t, inst, gw, wtPath)
+		assertFitsCap(t, record)
+		wantCmd := shellsuggest.Command("cd", wtParent) + " && " +
+			shellsuggest.Command("mv", "--", filepath.Base(quarantine), filepath.Base(wtPath))
+		assert.Contains(t, record, wantCmd,
+			"the proven-ours form must keep the literal remedy command")
+		assert.Contains(t, record, "to move this session's stranded worktree back, then retry",
+			"the proven-ours form must keep the remedy purpose and the retry")
+	})
+
+	t.Run("copy-only", func(t *testing.T) {
+		repoRoot := residueTestRepo(t)
+		wtParent := residueParentAtCapDepth(t)
+		wtPath := filepath.Join(wtParent, wtLeaf)
+		gitOut(t, repoRoot, "worktree", "add", "-b", "af/forms-copy", wtPath)
+		copyDir := stageOursCopy(t, wtPath, strings.Repeat("b", 32))
+		require.NoError(t, os.RemoveAll(wtPath))
+
+		gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, title, "af/forms-copy", "", false, true)
+		require.NoError(t, err)
+		inst := &Instance{Title: title, Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+
+		record := crashWindowRefusalRecord(t, inst, gw, wtPath)
+		assertFitsCap(t, record)
+		assert.Contains(t, record, filepath.Base(copyDir),
+			"the copy-only form must name the staged copy")
+		assert.Contains(t, record, "in "+wtParent,
+			"the copy-only form must name the residue's folder")
+		assert.Contains(t, record, "proven ours",
+			"the copy-only form must say the binding read this session's")
+		assert.Contains(t, record, "possibly incomplete",
+			"the copy-only form must keep the reason the copy is not the recovery source")
+		assert.Contains(t, record, "do not move it into the session path unless verified complete",
+			"the copy-only form must keep the warning — abbreviated to the session-path reference at this depth")
+		assert.Contains(t, record, "then retry",
+			"the copy-only form must keep the retry")
+		assert.NotContains(t, record, "stranded worktree back",
+			"the copy-only form must never name the copy as the move-back source")
+	})
+
+	t.Run("unverified", func(t *testing.T) {
+		repoRoot := residueTestRepo(t)
+		gitOut(t, repoRoot, "branch", "af/forms-unverified")
+		wtParent := residueParentAtCapDepth(t)
+		wtPath := filepath.Join(wtParent, wtLeaf)
+		orphan := filepath.Join(wtParent, ".af-source-"+strings.Repeat("0", 32))
+		require.NoError(t, os.Mkdir(orphan, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(orphan, "stale.txt"), []byte("orphan"), 0o644))
+
+		gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, title, "af/forms-unverified", "", false, true)
+		require.NoError(t, err)
+		inst := &Instance{Title: title, Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+
+		record := crashWindowRefusalRecord(t, inst, gw, wtPath)
+		assertFitsCap(t, record)
+		assert.Contains(t, record, filepath.Base(orphan),
+			"the unverified form must name the residue")
+		assert.Contains(t, record, "in "+wtParent,
+			"the unverified form must name the residue's folder")
+		assert.Contains(t, record, "could not verify",
+			"the unverified form must keep the verdict")
+		assert.Contains(t, record, "move it out of that folder once checked, then retry",
+			"the unverified form must keep the remedy")
+		assert.Contains(t, record, "do not move it into the session path unless proven",
+			"the unverified form must keep the warning — abbreviated to the session-path reference at this depth")
+		assert.Contains(t, record, "#7819",
+			"the unverified form must keep the citation")
+	})
+
+	t.Run("unverified-multiple", func(t *testing.T) {
+		repoRoot := residueTestRepo(t)
+		gitOut(t, repoRoot, "branch", "af/forms-multi")
+		wtParent := residueParentAtCapDepth(t)
+		wtPath := filepath.Join(wtParent, wtLeaf)
+		var orphans []string
+		for _, h := range []string{"0", "1", "2"} {
+			orphan := filepath.Join(wtParent, ".af-source-"+strings.Repeat(h, 32))
+			require.NoError(t, os.Mkdir(orphan, 0o755))
+			orphans = append(orphans, orphan)
+		}
+
+		gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, title, "af/forms-multi", "", false, true)
+		require.NoError(t, err)
+		inst := &Instance{Title: title, Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+
+		record := crashWindowRefusalRecord(t, inst, gw, wtPath)
+		assertFitsCap(t, record)
+		assert.Contains(t, record, filepath.Base(orphans[0]),
+			"the first residue is named whole")
+		assert.Contains(t, record, "and 2 more (full list in the daemon log)",
+			"the rest are counted with a pointer to the daemon log")
+		// The parent is the field that gives at this depth: its head and
+		// tail survive the elision so the residue still resolves.
+		assert.Contains(t, record, "in "+wtParent[:30],
+			"the parent's head survives its middle elision")
+		assert.Contains(t, record, "…",
+			"the elided parent carries the same mark the cap leaves")
+		assert.Contains(t, record, "move it out of that folder once checked, then retry",
+			"the unverified form must keep the remedy")
+		assert.Contains(t, record, "do not move it into "+filepath.Base(wtPath)+" unless proven",
+			"the unverified form must keep the warning — the session path's leaf resolving against the named parent")
+		assert.Contains(t, record, "#7819",
+			"the unverified form must keep the citation")
+	})
+
+	t.Run("mixed residue", func(t *testing.T) {
+		repoRoot := residueTestRepo(t)
+		wtParent := residueParentAtCapDepth(t)
+		wtPath := filepath.Join(wtParent, wtLeaf)
+		gitOut(t, repoRoot, "worktree", "add", "-b", "af/forms-mixed", wtPath)
+		stageOursCopy(t, wtPath, strings.Repeat("b", 32))
+		orphan := filepath.Join(wtParent, ".af-source-"+strings.Repeat("5", 32))
+		require.NoError(t, os.Mkdir(orphan, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(orphan, "stale.txt"), []byte("orphan"), 0o644))
+		quarantine := simulateCrashWindowRename(t, wtPath)
+
+		gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, title, "af/forms-mixed", "", false, true)
+		require.NoError(t, err)
+		inst := &Instance{Title: title, Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+
+		record := crashWindowRefusalRecord(t, inst, gw, wtPath)
+		assertFitsCap(t, record)
+		assert.Contains(t, record, filepath.Base(quarantine),
+			"the mixed form must keep the quarantine the remedy acts on")
+		assert.Contains(t, record, "to move this session's stranded worktree back, then retry",
+			"the mixed form must keep the remedy purpose and the retry")
+		assert.Contains(t, record, "unverified residue",
+			"the mixed form must record the unverified residue's presence")
+		assert.Contains(t, record, "do not move it into the session path unless proven",
+			"the mixed form must keep the unverified warning")
+		assert.Contains(t, record, "#7819",
+			"the mixed form must keep the citation")
+		assert.Contains(t, record, "staged copy",
+			"the mixed form must record the staged copy's presence")
+		assert.Contains(t, record, "recover from the quarantine, never the copy",
+			"the mixed form must keep the warning against recovering from the copy")
+	})
 }
