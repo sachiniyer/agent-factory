@@ -293,3 +293,168 @@ func TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain(t *testing.T) {
 		t.Fatalf("the root_agents opt-in at %s must still attribute to %s", repoPath, realID)
 	}
 }
+
+// TestProvisionalDeleteRefusesWhileASessionKeysUnderAnIdentityItsPathsCannotReach
+// pins PR #7853 review R6: the recorded root's own .git is gone, but the bare
+// repository it was a linked worktree of still names it in worktrees/*/gitdir —
+// git's own evidence that this repository could key sessions at the root. A
+// session created from a SIBLING worktree of that bare repo carries none of the
+// recorded root in its paths — workspace, worktree, and repo path all sit
+// beside it — so only the identity-root evidence can still see that it belongs.
+// Without it the delete deregisters the row while the session stays live.
+func TestProvisionalDeleteRefusesWhileASessionKeysUnderAnIdentityItsPathsCannotReach(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	seed := filepath.Join(parent, "seed")
+	if err := exec.Command("git", "init", seed).Run(); err != nil {
+		t.Fatalf("git init seed: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", seed, "config", "user.email", "t@t"},
+		{"-C", seed, "config", "user.name", "t"},
+		{"-C", seed, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	bare := filepath.Join(parent, "bare.git")
+	if err := exec.Command("git", "clone", "--bare", seed, bare).Run(); err != nil {
+		t.Fatalf("git clone --bare: %v", err)
+	}
+	worktree := filepath.Join(parent, "wt")
+	sibling := filepath.Join(parent, "wt2")
+	for _, wt := range []string{worktree, sibling} {
+		if err := exec.Command("git", "-C", bare, "worktree", "add", "--detach", wt).Run(); err != nil {
+			t.Fatalf("git worktree add %s: %v", wt, err)
+		}
+	}
+	project := registerTestProject(t, worktree)
+	bareID := repoID(t, bare)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
+	clearRecordedRepoID(t, project.ID)
+	// The recorded root loses its .git file; the sibling stays a real worktree,
+	// and the bare repo's worktrees/<wt>/gitdir still names <root>/.git.
+	if err := os.Remove(filepath.Join(worktree, ".git")); err != nil {
+		t.Fatalf("remove worktree .git file: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("fixture must keep the row unreconciled, got %q", recorded)
+	}
+	// The session's own paths sit BESIDE the recorded root: its workspace is
+	// the sibling worktree, its identity path the bare common dir. Nothing it
+	// records touches the root — the bare repo's worktree records do.
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "sibling-session", Path: sibling, RepoIdentityPath: bare, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(bareID, "sibling-session")] = inst
+	manager.mu.Unlock()
+
+	swept := false
+	previousSweep := deregisterRootAgents
+	deregisterRootAgents = func(...string) ([]string, error) {
+		swept = true
+		return nil, nil
+	}
+	t.Cleanup(func() { deregisterRootAgents = previousSweep })
+
+	for _, req := range []DeleteProjectRequest{
+		{RepoPath: worktree},
+		{RepoID: derived},
+	} {
+		result, delErr := manager.DeleteProject(req)
+		if err = delErr; err == nil {
+			t.Fatalf("a session keyed under the bare identity that owns the recorded root must refuse the delete even while none of its paths touch it (req %+v)", req)
+		}
+		for _, want := range []string{"nothing was changed", "sibling-session", worktree, "archive those sessions first"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("the refusal must name %q (req %+v): %v", want, req, err)
+			}
+		}
+		if swept {
+			t.Fatalf("the refusal must precede the durable root_agents sweep — it claims nothing was changed (req %+v)", req)
+		}
+		if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+			t.Fatalf("a refused delete must archive, kill and deregister nothing (req %+v): archived=%d killed=%d deregistered=%v",
+				req, len(result.Archived), len(result.Killed), result.Deregistered)
+		}
+	}
+	manager.mu.Lock()
+	live := manager.instances[daemonInstanceKey(bareID, "sibling-session")]
+	manager.mu.Unlock()
+	if live == nil || live.GetStatus() != session.Running {
+		t.Fatalf("the live session under the bare identity must survive the refused delete")
+	}
+	dir, dirErr := config.ProjectRegistryDir()
+	if dirErr != nil {
+		t.Fatalf("ProjectRegistryDir: %v", dirErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+		t.Fatalf("the registry row must survive the refused delete: %v", statErr)
+	}
+}
+
+// TestProvisionalDeleteDoesNotBlameAnEnclosingWorkspaceSession pins PR #7853
+// review R7: an enclosing workspace is a bigger project, not the recorded
+// root's owner. An absent legacy row beneath a live dotfiles checkout must
+// delete as it did on master — the session's paths contain the root, which the
+// old containing-direction read as belonging, but only git's own worktree
+// records can make an enclosing path an identity that owns the root.
+func TestProvisionalDeleteDoesNotBlameAnEnclosingWorkspaceSession(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	container := filepath.Join(testguard.CanonicalTempDir(t), "dotfiles")
+	repoPath := filepath.Join(container, "old")
+	if err := exec.Command("git", "init", container).Run(); err != nil {
+		t.Fatalf("git init container: %v", err)
+	}
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init old: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("remove the checkout: %v", err)
+	}
+	containerID := repoID(t, container)
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// A live session of the ENCLOSING repository — the dotfiles repo rooted at
+	// the container — whose workspace contains the absent recorded root.
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "dotfiles-session", Path: container, RepoIdentityPath: filepath.Join(container, ".git"), Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(containerID, "dotfiles-session")] = inst
+	manager.mu.Unlock()
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+	if err != nil {
+		t.Fatalf("a session whose workspace merely contains the recorded root must not refuse the delete — master completed it: %v", err)
+	}
+	if !result.Deregistered {
+		t.Fatalf("the absent row must deregister exactly as on master")
+	}
+	manager.mu.Lock()
+	live := manager.instances[daemonInstanceKey(containerID, "dotfiles-session")]
+	manager.mu.Unlock()
+	if live == nil || live.GetStatus() != session.Running {
+		t.Fatalf("the enclosing repo's session must stay live — it was never this project's")
+	}
+}

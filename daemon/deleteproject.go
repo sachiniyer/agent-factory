@@ -239,6 +239,27 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		}
 	}
 
+	// The OTHER unknown-identity direction (#7829 R2, PR #7853 review R6/R7). A
+	// derived target keeps the matched row's recorded root, but a present root
+	// whose .git is gone cannot say WHICH identity its sessions were keyed
+	// under: RepoIDFromRoot covers only the case where the root was its own
+	// identity root. A root that was a linked worktree of a bare repository
+	// keys its sessions under the bare common directory's id — an identity the
+	// recorded path cannot recompute — so the historical scan below cannot see
+	// them, and the deregister below would remove the durable registration
+	// while those sessions stay live (#2549's orphan class). Fail closed
+	// instead, on evidence that does not come from the path hash: paths at or
+	// beneath the root, an identity root whose own worktree records name the
+	// root's .git, or an identity ownership could not be established for. The
+	// evidence gather does disk work, so it runs before m.mu; the verdict runs
+	// inside the lock below on the fresh session set.
+	var rootEvidence recordedRootSessionEvidence
+	hasRootEvidence := false
+	if config.IsDerivedRepoID(repoID) && repoPath != "" {
+		rootEvidence = m.gatherRecordedRootSessionEvidence(repoPath, resolved.carryWorkspace)
+		hasRootEvidence = true
+	}
+
 	m.mu.Lock()
 	// A provisional target reaches nothing by construction, which is the point
 	// — but the row it would still deregister may have LIVE sessions filed
@@ -253,22 +274,9 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	if historical != "" {
 		stranded = m.repoSessionTitlesLocked(historical, false)
 	}
-	// The OTHER unknown-identity direction (#7829 R2). A derived target keeps
-	// the matched row's recorded root, but a present root whose .git is gone
-	// cannot say WHICH identity its sessions were keyed under: RepoIDFromRoot
-	// covers only the case where the root was its own identity root. A root
-	// that was a linked worktree of a bare repository keys its sessions under
-	// the bare common directory's id — an identity the recorded path cannot
-	// recompute — so the historical scan above cannot see them, and the
-	// deregister below would remove the durable registration while those
-	// sessions stay live (#2549's orphan class). Fail closed instead, on
-	// evidence that does not come from the path hash: a live session whose
-	// workspace, worktree, or recorded repo path touches the recorded root
-	// may be one of them, so its presence refuses the delete before anything
-	// durable changes.
 	belonging := []string(nil)
-	if config.IsDerivedRepoID(repoID) && repoPath != "" {
-		belonging = m.liveSessionsTouchingRootLocked(repoPath, resolved.carryWorkspace)
+	if hasRootEvidence {
+		belonging = m.liveSessionsBelongingToRecordedRootLocked(rootEvidence, repoPath, resolved.carryWorkspace, fenced...)
 	}
 	// The same question asked from the identity side (#3363's third window).
 	// There, a provisional target could not reach live sessions filed under its
@@ -305,7 +313,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	}
 	if len(belonging) > 0 {
 		sort.Strings(belonging)
-		return result, fmt.Errorf("delete project %s: session(s) %v are live at or beneath the recorded root %s, but that path no longer resolves to a git checkout, so af cannot establish which repository identity this project's sessions are keyed under — removing its durable registration could leave them behind; nothing was changed. Restore the checkout's git metadata at %s once so af can record the project's identity, then delete; or archive those sessions first", repoID, belonging, repoPath, repoPath)
+		return result, fmt.Errorf("delete project %s: session(s) %v are live under an identity af cannot rule out for the recorded root %s — at or beneath it, keyed under a repository whose worktree records still name it, or under an identity af could not vet — while that path no longer resolves to a git checkout; removing its durable registration could leave them behind; nothing was changed. Restore the checkout's git metadata at %s once so af can record the project's identity, then delete; or archive those sessions first", repoID, belonging, repoPath, repoPath)
 	}
 	if len(unattributed) > 0 {
 		sort.Strings(unattributed)
