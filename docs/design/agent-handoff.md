@@ -638,7 +638,7 @@ Recommended:
   `api/sessions_sendprompt.go`.
 - **Daemon — one RPC.** `HandoffSession` next to `SendPrompt`
   (`daemon/httproutes.go:103`, `daemon/control_server.go:464`), resolving the
-  target via `Manager.resolveActionSession` (`daemon/manager_sessions.go:380`)
+  target via `Manager.resolveActionSession` (`daemon/manager_sessions_resolve.go`)
   and taking the existing per-session op-lock. The daemon stays sole writer
   (#960).
 - **TUI — a key plus the existing picker.** The agent picker at session-create
