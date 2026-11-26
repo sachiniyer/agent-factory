@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
@@ -183,12 +184,15 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 	switch {
 	case len(oursSource) > 0:
 		// The literal command first: `mv <quarantine> <source>` IS the action
-		// and both paths, so they survive the cap wherever the tail ends.
+		// and both paths, so they survive the cap wherever the tail ends. The
+		// command is rendered through shellsuggest because the record's whole
+		// purpose is to be read and pasted — a parent with spaces or
+		// metacharacters must still arrive as exactly two operands.
 		fmt.Fprintf(&record,
-			"mv %s %s to move this session's stranded worktree back — the .af-source-* quarantine is "+
+			"%s to move this session's stranded worktree back — the .af-source-* quarantine is "+
 				"proven to be the complete worktree (incl. uncommitted changes), left by a cut-off archive move; "+
 				"or remove it once the work is saved, then retry",
-			oursSource[0], source)
+			shellsuggest.Command("mv", oursSource[0], source))
 		extraResidue(oursSource[1:], "; more quarantines proven ours at %s")
 		extraResidue(oursCopy, "; staged copy %s may be incomplete — recover from the quarantine, never the copy")
 		extraResidue(unverified, "; unverified residue %s — do not move it into %s unless proven (#7819)", source)
@@ -227,16 +231,25 @@ func (e *residueRebuildRefusal) Unwrap() error { return git.ErrRelocateStateUnkn
 // paths while they fit room runes, then "and N more (full list in the daemon
 // log)", so a longer list is counted rather than silently truncated: the
 // daemon WARNING names every candidate (#7847).
+//
+// The ", and N more" suffix is itself part of the record, so each additional
+// path is admitted only while room remains for that suffix behind it —
+// spending the whole budget on paths would let the suffix push the record
+// past the cap and re-clip the remedy the record exists to carry.
 func residueRecordList(paths []string, room int) string {
 	var b strings.Builder
 	included, used := 0, 0
-	for _, p := range paths {
+	for i, p := range paths {
 		pl := len([]rune(p))
 		sep := len(", ")
 		if included == 0 {
 			sep = 0
 		}
-		if included > 0 && used+sep+pl > room {
+		reserve := 0
+		if more := len(paths) - i - 1; more > 0 {
+			reserve = len(fmt.Sprintf(", and %d more (full list in the daemon log)", more))
+		}
+		if included > 0 && used+sep+pl+reserve > room {
 			break
 		}
 		if included > 0 {

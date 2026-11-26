@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -328,4 +330,75 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_Unverified(t *testing.T) {
 		"the stored record must keep the remedy: move unverified residue out of its folder once checked, then retry")
 	assert.NotContains(t, record, "move it back",
 		"the stored record must never direct unverified residue into this session's path")
+}
+
+// TestLostRestoreFailure_ResidueRefusalFitsCap_MultiUnverified pins the
+// counted-list half of #7847: when several unverified residue paths cannot all
+// fit under the cap, the stored record names the first ones whole and counts
+// the rest with a pointer to the daemon log — and that ", and N more" suffix
+// is itself budgeted, so it cannot push the record past the cap and re-clip
+// the remedy the record exists to carry.
+func TestLostRestoreFailure_ResidueRefusalFitsCap_MultiUnverified(t *testing.T) {
+	repoRoot := residueTestRepo(t)
+	const branch = "af/residue-fits-multi"
+	gitOut(t, repoRoot, "branch", branch)
+	// SocketTempDir keeps the parent short (/tmp/af-*) so the whole record —
+	// residue list, remedy and tail — can fit under the cap, making any clip a
+	// defect in the budget rather than a limit of the medium.
+	wtParent := filepath.Join(testguard.SocketTempDir(t), "Desktop")
+	require.NoError(t, os.MkdirAll(wtParent, 0o755))
+	wtPath := filepath.Join(wtParent, "myrepo-fix-login-bug")
+	// Six unverified orphans (no .git pointer): sorted readdir order names
+	// them in the record, so the "0"-hex one is always the first named.
+	var orphans []string
+	for _, h := range []string{"0", "1", "2", "b", "c", "d"} {
+		orphan := filepath.Join(wtParent, ".af-source-"+strings.Repeat(h, 32))
+		require.NoError(t, os.Mkdir(orphan, 0o755))
+		orphans = append(orphans, orphan)
+	}
+
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "residue-fits-multi", branch, "", false, true)
+	require.NoError(t, err)
+	inst := &Instance{Title: "residue-fits-multi", Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+
+	record := crashWindowRefusalRecord(t, inst, gw, wtPath)
+	assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes,
+		"the stored record stays inside the durable cap by construction")
+	assert.NotContains(t, record, "…",
+		"at these path lengths the whole record fits; a clip means the omission suffix overflowed the budget")
+	assert.Contains(t, record, orphans[0],
+		"the first residue path is always named whole — the remedy acts on it")
+	assert.Contains(t, record, "more (full list in the daemon log)",
+		"the residue paths that do not fit are counted with a pointer to the daemon log, never silently truncated")
+	assert.Contains(t, record, "move it out of "+wtParent,
+		"the stored record must keep the remedy after the counted residue list")
+	assert.Contains(t, record, "(#7819)",
+		"the stored record must keep the tail warning unclipped — the suffix must not push it past the cap")
+}
+
+// TestLostRestoreFailure_ResidueRefusalFitsCap_QuotedMv pins the mv command's
+// quoting (#7847): the stored record leads with a literal `mv <q> <s>` the
+// operator is meant to paste, so a worktree path containing spaces or shell
+// metacharacters must still arrive as exactly two operands.
+func TestLostRestoreFailure_ResidueRefusalFitsCap_QuotedMv(t *testing.T) {
+	repoRoot := residueTestRepo(t)
+	const branch = "af/residue-fits-space"
+	// A parent with a space — the shape that splits an unquoted `mv a b` into
+	// four operands and makes the suggested recovery fail on paste.
+	wtParent := filepath.Join(testguard.SocketTempDir(t), "My Projects")
+	require.NoError(t, os.MkdirAll(wtParent, 0o755))
+	wtPath := filepath.Join(wtParent, "myrepo-fix-login-bug")
+	gitOut(t, repoRoot, "worktree", "add", "-b", branch, wtPath)
+	quarantine := simulateCrashWindowRename(t, wtPath)
+
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "residue-fits-space", branch, "", false, true)
+	require.NoError(t, err)
+	inst := &Instance{Title: "residue-fits-space", Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+
+	record := crashWindowRefusalRecord(t, inst, gw, wtPath)
+	assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes)
+	assert.Contains(t, record, shellsuggest.Command("mv", quarantine, wtPath),
+		"the stored record must carry the mv remedy with both paths as exactly one operand each")
+	assert.NotContains(t, record, "mv "+quarantine+" "+wtPath,
+		"an unquoted mv would split a spaced path into extra operands when pasted")
 }
