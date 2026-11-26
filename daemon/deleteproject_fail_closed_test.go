@@ -239,3 +239,57 @@ func TestProvisionalDeleteRefusesWhileSessionsMayKeyUnderAnUncomputableIdentity(
 		t.Fatalf("a refused delete must suppress neither the derived nor the bare identity")
 	}
 }
+
+// TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain pins the boundary
+// the derived-id match must hold (PR #7853 review): the invented namespace
+// exists for roots that cannot answer. Once the recorded root resolves again
+// the row has a knowable real identity, and honoring the stale derived id
+// would deregister the row while the opt-in sweep skips the path id — which a
+// resolving checkout does not own under its path hash — leaving root_agents
+// behind to recreate the project after restart. The request stays the no-op
+// it was before the derived match existed: the row answers to its real id
+// and its recorded path, not to this selector.
+func TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath))
+	realID := repoID(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	// The checkout stays in place and still resolves: the derived id the row
+	// was once filed under is stale the moment the root answers for itself.
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("fixture must keep the row unreconciled, got %q", recorded)
+	}
+	if root, selErr := registeredProjectRootForRepoID(derived); selErr != nil || root != "" {
+		t.Fatalf("a resolving root must not answer to a stale derived id, got root=%q err=%v", root, selErr)
+	}
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoID: derived})
+	if err = delErr; err != nil {
+		t.Fatalf("the stale derived id must remain the idempotent no-op it was, not an error: %v", err)
+	}
+	if result.Deregistered || len(result.Archived) != 0 || len(result.Killed) != 0 {
+		t.Fatalf("a selector that names an identity the row no longer is must change nothing: deregistered=%v archived=%d killed=%d",
+			result.Deregistered, len(result.Archived), len(result.Killed))
+	}
+	dir, dirErr := config.ProjectRegistryDir()
+	if dirErr != nil {
+		t.Fatalf("ProjectRegistryDir: %v", dirErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+		t.Fatalf("the row must survive a delete that names an identity it no longer is: %v", statErr)
+	}
+	// And the opt-in must still attribute to the project — the resurrection
+	// hazard is exactly a deregistered row under a live root_agents key.
+	if !manager.repoRootAgentWillMaterialize(realID) {
+		t.Fatalf("the root_agents opt-in at %s must still attribute to %s", repoPath, realID)
+	}
+}

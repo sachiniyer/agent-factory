@@ -183,14 +183,21 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 		candidateID := ""
 		if config.IsDerivedRepoID(repoID) {
 			// An invented id names exactly one thing: the identity-less row
-			// whose recorded root it was derived from (#7829 R5). Matching it
-			// back needs no resolution or presence — the id IS that row's root
-			// hashed under the derived namespace — so a RepoID-only request
-			// selects the same row its recorded path would, whether the root
-			// is present, absent, or simply no longer a checkout. A row that
-			// recorded a real identity belongs to that id, never to this one.
+			// whose recorded root it was derived from (#7829 R5) — while that
+			// root cannot answer. The derived namespace exists for paths that
+			// do not resolve; once the recorded root resolves again the row's
+			// real identity is knowable, and a request still spelling the stale
+			// derived id must not reach it: deleteProject adds the path id to
+			// the durable opt-in sweep only when the root is determinately
+			// free, so a resolving root would deregister the row but keep the
+			// root_agents opt-in, and the project would reappear after restart.
+			// Falling through unselected restores the no-op this request was
+			// before the derived match existed. A row that recorded a real
+			// identity belongs to that id, never to this one.
 			if project.RepoID == "" && config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(project.Root)) == repoID {
-				candidateID = repoID
+				if _, err := config.RepoFromPath(filepath.Clean(project.Root)); err != nil {
+					candidateID = repoID
+				}
 			}
 		} else if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project); ok {
 			candidateID = resolvedID
