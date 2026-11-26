@@ -162,6 +162,9 @@ func (w *taskWatcher) drainLoop() {
 				continue
 			}
 			expired++
+			// If the expired head was the announced park, its episode ends here
+			// without a delivery verdict (#7843); a task with no mark is a no-op.
+			taskParkedDeliveries.noteExit(w.taskID, "the queued event expired before delivery")
 			continue
 		}
 		if loadFailing {
@@ -212,6 +215,9 @@ func (w *taskWatcher) drainLoop() {
 					w.stopDraining()
 					return
 				}
+				// The consumed head may have been the announced park; the drop
+				// ends that episode without a verdict (#7843).
+				taskParkedDeliveries.noteExit(w.taskID, "the queued event was dropped after committing a mutation that reported an error")
 				continue
 			}
 			if errors.Is(err, errTargetLimitReached) {
