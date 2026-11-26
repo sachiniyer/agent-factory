@@ -442,7 +442,18 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// The tombstone records WHOSE delete this was, so a later proven
 	// mismatch can release it only for the deleted claimant itself (#3299
 	// review round 15). Resolved before the lock — see deleteProjectTarget.
-	m.suppressRootAgent(repoID, resolved.carryWorkspace, resolved.claimantProjectID)
+	// Re-check the recorded root as late as the sweep (PR #7853 review R5):
+	// the derived selector matched only while that root was determinately
+	// free. If it resolves by now it belongs to whoever occupies it, and
+	// path-keyed carry retirement and create-ticket withdrawal must not
+	// retire a stranger's state on this project's behalf.
+	carryWorkspace := resolved.carryWorkspace
+	if config.IsDerivedRepoID(repoID) && repoPath != "" {
+		if _, err := config.RepoFromPath(repoPath); err == nil {
+			carryWorkspace = ""
+		}
+	}
+	m.suppressRootAgent(repoID, carryWorkspace, resolved.claimantProjectID)
 	// Stamp the HISTORICAL identity too (#7181), mirroring the fenced list and
 	// the optInIDs durable sweep above. A repository main-rooted at the recorded
 	// path has this id as its real one, and the ensure sweep consults the

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -272,9 +273,19 @@ func TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain(t *testing.T) {
 	if root, selErr := registeredProjectRootForRepoID(derived); selErr != nil || root != "" {
 		t.Fatalf("a resolving root must not answer to a stale derived id, got root=%q err=%v", root, selErr)
 	}
+	swept := false
+	previousSweep := deregisterRootAgents
+	deregisterRootAgents = func(...string) ([]string, error) {
+		swept = true
+		return nil, nil
+	}
+	t.Cleanup(func() { deregisterRootAgents = previousSweep })
 	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoID: derived})
 	if err = delErr; err != nil {
 		t.Fatalf("the stale derived id must remain the idempotent no-op it was, not an error: %v", err)
+	}
+	if swept {
+		t.Fatalf("the no-op must not reach the durable root_agents sweep — nothing was changed")
 	}
 	if result.Deregistered || len(result.Archived) != 0 || len(result.Killed) != 0 {
 		t.Fatalf("a selector that names an identity the row no longer is must change nothing: deregistered=%v archived=%d killed=%d",
@@ -456,5 +467,70 @@ func TestProvisionalDeleteDoesNotBlameAnEnclosingWorkspaceSession(t *testing.T) 
 	manager.mu.Unlock()
 	if live == nil || live.GetStatus() != session.Running {
 		t.Fatalf("the enclosing repo's session must stay live — it was never this project's")
+	}
+}
+
+// TestProvisionalDeleteLeavesAResolvingRootsCarryAndTicketsAlone pins PR #7853
+// review R5 setup B: the derived selector matched only while the recorded root
+// was determinately free, and the check is re-done as late as the durable
+// sweep. A checkout that appears at the recorded root mid-delete owns that
+// path now — path-keyed carry retirement and create-ticket withdrawal must not
+// retire the occupant's state on the deleted project's behalf.
+func TestProvisionalDeleteLeavesAResolvingRootsCarryAndTicketsAlone(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "legacy-root")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	// The recorded root stays present but stops resolving: determinately free,
+	// so the delete still selects the row by its derived id.
+	if err := os.RemoveAll(filepath.Join(repoPath, ".git")); err != nil {
+		t.Fatalf("remove .git: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// A checkout reappears at the recorded root as the delete runs, and the
+	// occupant already holds a carry and an in-flight create AT that path —
+	// both under a different identity, so only the path-keyed reach could
+	// touch them.
+	deleteProjectPreSweepHookForTest = func() {
+		if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+			t.Fatalf("git init occupant mid-delete: %v", err)
+		}
+	}
+	t.Cleanup(func() { deleteProjectPreSweepHookForTest = nil })
+	other := repoID(t, setupControlRepo(t))
+	resolved := pathutil.ResolveForCompare(filepath.Clean(repoPath))
+	manager.mu.Lock()
+	manager.rootEnsureStates["occupant"] = &rootEnsureState{carry: &rootCarry{
+		repoID:    other,
+		workspace: repoPath,
+		compare:   resolved,
+	}}
+	manager.rootCreatesInFlight["occupant-create"] = &rootCreateTicket{
+		repoID:    other,
+		workspace: repoPath,
+		compare:   resolved,
+	}
+	manager.mu.Unlock()
+
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("the row's delete still runs — the root was free when it was selected: %v", err)
+	}
+	manager.mu.Lock()
+	st := manager.rootEnsureStates["occupant"]
+	ticket := manager.rootCreatesInFlight["occupant-create"]
+	manager.mu.Unlock()
+	if st.carry == nil {
+		t.Fatalf("a root whose recorded path resolved before the sweep must not retire the occupant's carry at that path")
+	}
+	if ticket.withdrawn {
+		t.Fatalf("a root whose recorded path resolved before the sweep must not withdraw the occupant's in-flight create at that path")
 	}
 }
