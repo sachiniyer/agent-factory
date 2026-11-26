@@ -652,3 +652,68 @@ func TestDerivedIDDeleteRefusesAnIndeterminateProbeOfTheRecordedRoot(t *testing.
 		t.Fatalf("the row must survive the refused delete: %v", statErr)
 	}
 }
+
+// TestPresentNonGitRootProceedsOnlyOnAProvenMismatch pins both sides of the
+// narrowed #7829 refusal — the boundary whose first cut regressed
+// TestProvisionalDeleteKeepsItsIdentityOnAProvenMismatch. A marker read that
+// SUCCEEDED and differed already answered the question the branch cannot
+// answer itself: the checkout at the recorded root was provably a different
+// project's, so the recorded identity stands and the delete proceeds exactly
+// as it did on master. With that verdict withdrawn — no successful differing
+// read anywhere — the identical shape is unproven, and the delete must
+// refuse instead of acting on an identity it cannot name.
+func TestPresentNonGitRootProceedsOnlyOnAProvenMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		dropProbe bool
+		wantErr   bool
+	}{
+		{"a proven mismatch proceeds under the recorded identity", false, false},
+		{"an unproven identity refuses with nothing changed", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, repoPath, derivedID, _ := pendingAttributionFixture(t, mismatchedProbe)
+			if tc.dropProbe {
+				// Same fixture minus the established verdict: no probe, and
+				// the boot snapshot filed no mismatch while the root was
+				// absent, so nothing anywhere proves the identity different.
+				manager.mu.Lock()
+				delete(manager.rootHealProbes, derivedID)
+				manager.mu.Unlock()
+			}
+
+			swept := false
+			previousSweep := deregisterRootAgents
+			deregisterRootAgents = func(...string) ([]string, error) {
+				swept = true
+				return nil, nil
+			}
+			t.Cleanup(func() { deregisterRootAgents = previousSweep })
+
+			result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("a proven mismatch establishes something, so the delete must proceed: %v", err)
+				}
+				if result.RepoID != derivedID {
+					t.Fatalf("a disproven candidate must not move the delete: got %s, want the recorded identity %s", result.RepoID, derivedID)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("an unproven present-non-git root must refuse, not proceed on a guess about which identity the row was filed under")
+			}
+			for _, want := range []string{"nothing was changed", repoPath, "no longer a git checkout", "restore the checkout's git metadata", "remove the directory"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("the refusal must name %q: %v", want, err)
+				}
+			}
+			if swept {
+				t.Fatalf("the refusal must precede the durable root_agents sweep — it claims nothing was changed")
+			}
+			if result.Deregistered || len(result.Archived) != 0 || len(result.Killed) != 0 {
+				t.Fatalf("a refused delete must archive, kill and deregister nothing")
+			}
+		})
+	}
+}

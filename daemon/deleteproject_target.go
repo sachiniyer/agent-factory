@@ -279,6 +279,31 @@ func claimantForRecord(p config.Project) string {
 	return ""
 }
 
+// recordedRootIdentityDisproven reports that the identity a row is filed
+// under was already DISPROVEN for the checkout at its recorded root: a heal
+// probe's marker read succeeded and differed, which is the one established
+// fact that answers the question a present-but-not-git root otherwise leaves
+// open — the root provably belonged to a different project, so the row's
+// recorded identity stands and its delete proceeds exactly as it did on
+// master (#3530's proven-mismatch shape). A verdict the snapshot already
+// consumed (record.identityMismatch) and a settled probe still in the map say
+// the same thing at different ages, and both count; anything short of a
+// successful differing read — an in-flight or inconclusive probe, an
+// unreadable marker, no probe at all — leaves the identity unproven.
+func (m *Manager) recordedRootIdentityDisproven(repoID string) bool {
+	if record, ok := m.rootAgentLayers.Load().unresolvedRoots[repoID]; ok && record.identityMismatch {
+		return true
+	}
+	m.mu.Lock()
+	probe := m.rootHealProbes[repoID]
+	m.mu.Unlock()
+	if probe == nil {
+		return false
+	}
+	_, disproven := probeProvedItsCheckout(probe)
+	return disproven
+}
+
 // resolveDeleteProjectTarget performs every filesystem/Git selector probe
 // before DeleteProject takes taskTargetMu. A stale registry root must not hold
 // the cross-task lifecycle lock while Git waits on an unrelated mount.
@@ -493,8 +518,15 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	// identity and delete again, or remove the directory and delete it as
 	// absent — the one verdict about the root that is provable. The sweep and
 	// tombstone machinery above never ran, so nothing was changed.
+	//
+	// The refusal stands only while the row's identity is UNPROVEN. A marker
+	// read that succeeded and differed has already answered the question this
+	// branch cannot otherwise answer — the checkout at the recorded root was
+	// provably a different project's — so the recorded identity stands and the
+	// delete proceeds exactly as it did on master; catching that case would
+	// regress a delete master completes.
 	if rowFound && config.IsDerivedRepoID(repoID) && repoPath != "" {
-		if _, err := config.RepoFromPath(filepath.Clean(repoPath)); errors.Is(err, config.ErrNotGitRepository) {
+		if _, err := config.RepoFromPath(filepath.Clean(repoPath)); errors.Is(err, config.ErrNotGitRepository) && !m.recordedRootIdentityDisproven(repoID) {
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s is present but no longer a git checkout, so af cannot establish which identity its sessions and opt-ins were filed under — nothing was changed; restore the checkout's git metadata and delete again, or remove the directory and delete it as absent", repoID, repoPath)
 		}
 	}
