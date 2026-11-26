@@ -207,7 +207,7 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 		// exactly one operand.
 		fmt.Fprintf(&record, "%s && %s to move this session's stranded worktree back",
 			shellsuggest.Command("cd", parent),
-			shellsuggest.Command("mv", filepath.Base(oursSource[0]), filepath.Base(source)))
+			shellsuggest.Command("mv", "--", filepath.Base(oursSource[0]), filepath.Base(source)))
 		tail(" — proven the complete worktree (incl. uncommitted changes), left by a cut-off archive move")
 		tail("; or remove it once the work is saved, then retry")
 		extraResidue(baseNames(oursSource[1:]), "; also proven ours: %s")

@@ -72,7 +72,7 @@ func TestMissingWorktreeRebuildRefusal_RefusesOverCrashWindowResidue(t *testing.
 		"the refusal must name the residue's parent so its basename resolves to the full path")
 	assert.Contains(t, err.Error(),
 		shellsuggest.Command("cd", wtParent)+" && "+
-			shellsuggest.Command("mv", filepath.Base(quarantine), filepath.Base(wtPath)),
+			shellsuggest.Command("mv", "--", filepath.Base(quarantine), filepath.Base(wtPath)),
 		"the refusal must direct recovery from the proven-ours .af-source-* quarantine: move it back onto the session path")
 
 	// The stranded worktree survives untouched with its uncommitted file — the
@@ -333,7 +333,7 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_ProvenOurs(t *testing.T) {
 	assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes,
 		"the stored record stays inside the durable cap by construction")
 	wantCmd := shellsuggest.Command("cd", wtParent) + " && " +
-		shellsuggest.Command("mv", filepath.Base(quarantine), filepath.Base(wtPath))
+		shellsuggest.Command("mv", "--", filepath.Base(quarantine), filepath.Base(wtPath))
 	assert.Contains(t, record, wantCmd,
 		"the stored record must lead with the remedy: mv the proven .af-source-* quarantine back onto the session path")
 	assert.Contains(t, record, "to move this session's stranded worktree back",
@@ -441,7 +441,7 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_QuotedMv(t *testing.T) {
 	record := crashWindowRefusalRecord(t, inst, gw, wtPath)
 	assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes)
 	wantCmd := shellsuggest.Command("cd", wtParent) + " && " +
-		shellsuggest.Command("mv", filepath.Base(quarantine), filepath.Base(wtPath))
+		shellsuggest.Command("mv", "--", filepath.Base(quarantine), filepath.Base(wtPath))
 	assert.Contains(t, record, wantCmd,
 		"the stored record must carry the remedy with each path as exactly one operand")
 	assert.NotContains(t, record, "cd "+wtParent,
