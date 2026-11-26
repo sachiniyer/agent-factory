@@ -134,7 +134,11 @@ func unverifiedDaemonSurvivorClause(remaining []proctree.Process, protected prot
 //     own descendant — unless a positively-identified tmux process lies
 //     between them (#7433 R2, #7435): the reaper's own children are excluded
 //     like any af daemon's subtree, because descent is not ownership and an
-//     inherited-marker child of the reaper is not this session's to kill;
+//     inherited-marker child of the reaper is not this session's to kill.
+//     Only the POSITIVE identification lifts this exclusion — a tmux-named
+//     link the live read could not classify reports the boundary WITHOUT
+//     ending the walk (#7848), so a snapshot's task name can no longer
+//     strip this protection the way a proven server still can;
 //   - a captured process that IS an agent-factory daemon, of ANY home, or that
 //     descends from one (#7435): a daemon EnsureDaemon forked from a CLI
 //     running inside an orphaned pane lands in that pane's captured tree with
@@ -221,17 +225,19 @@ func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process
 
 // classifyCaptureAncestry walks pid's parent chain inside the capture's own
 // snapshot and returns the reason the process is protected — or "" when it
-// stays reapable — plus whether the walk met a positively-identified tmux
-// process before it ended. The first decisive verdict wins:
+// stays reapable — plus whether the walk met a tmux-boundary link before it
+// ended. The first decisive verdict wins; the boundary flag is the UNION of
+// every tmux-identified link the walk met along the way (#7848):
 //
 //   - the reaper ends the walk protected: the captured process is the
-//     reaper's own descendant, excluded like an af daemon's subtree (#7435).
-//     A POSITIVELY identified tmux process is checked FIRST, so a pane
-//     process under a server that itself descends from the reaper still ends
-//     eligible at the server — the boundary verdict only fails to protect
-//     the reaper's own children when no server lies between them and it;
+//     reaper's own descendant, excluded like an af daemon's subtree (#7435);
 //   - a positively-identified agent-factory daemon ends the walk protected;
 //   - a pid whose argv cannot be read ends the walk protected (unproven);
+//   - a POSITIVELY identified tmux process ends the walk eligible at the
+//     boundary, so a pane process under a server that itself descends from
+//     the reaper still ends eligible at the server — the boundary verdict
+//     only fails to protect the reaper's own children when no PROVEN server
+//     lies between them and it;
 //   - the top of the chain ends it eligible: an orphan whose parent died
 //     reaches that end like any other chain.
 //
@@ -244,45 +250,65 @@ func reapProtectedSet(snap map[int]proctree.Process, captured []proctree.Process
 // exactly that way — and only a carrier proof could NOT place is refused
 // behind the boundary, reported and never signalled.
 //
-// The boundary is recognized on a POSITIVE live read OR on a process the
-// snapshot's own kernel task name still identifies as tmux when the live
-// process-table read could only answer TmuxUnknown (#7238). TmuxUnknown is a
-// third answer, not the negative: only NotTmux licenses crossing, so a server
-// the sweep's snapshot captured as tmux that became unreadable mid-walk
-// still ends the walk at the boundary. Without this, the live-server race
-// the explicit `case boundary:` refusal exists to prevent reopens — a
-// stranger agent in another pane of the same live shared server, or a pane
-// of a nested server this session's pane launched, would lose the only
-// refusal mechanism that protects it. A routinely-unknown NON-tmux link
-// (darwin's routine refused-argv launchd ancestor) is still crossed: the
-// snapshot task name does not name tmux there, so the walk proceeds exactly
-// as #7433's protective direction intends.
+// The two boundary recognitions act differently (#7848). A POSITIVE live
+// read of tmux ends the walk at the boundary, as it always has. A process
+// the snapshot's own kernel task name still identifies as tmux while the
+// live process-table read could only answer TmuxUnknown (#7238) SETS the
+// boundary flag WITHOUT ending the walk: TmuxUnknown is a third answer, not
+// the negative, so only NotTmux licenses crossing — an unproven carrier
+// whose chain ends above the link keeps the `case boundary:` refusal the
+// live-server race needs (a stranger agent in another pane of the same live
+// shared server, or a pane of a nested server this session's pane launched,
+// must not mint eligibility through a read that could not answer). But the
+// flag is ALL the non-positive read may take: a positive protection it was
+// never the link's to lift still lands — a verdict above the link that is
+// the reaper or a proven af daemon protects exactly as it did before the
+// unreadable link learned to report the boundary (the asymmetric-error rule
+// above: a false inclusion kills, so a protection a NON-positive read would
+// lift is kept). A routinely-unknown NON-tmux link (darwin's routine
+// refused-argv launchd ancestor) is still crossed: the snapshot task name
+// does not name tmux there, so the walk proceeds exactly as #7433's
+// protective direction intends.
 func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int, att *proctree.ExeAttestations) (reason string, positive bool, tmuxBoundary bool, unverifiedDaemon int) {
 	start := pid
 	for range 128 {
 		if pid <= 0 {
-			return "", false, false, 0
+			return "", false, tmuxBoundary, 0
 		}
 		p, ok := snap[pid]
 		if !ok {
-			return "", false, false, 0
+			return "", false, tmuxBoundary, 0
 		}
 		identity := proctree.TmuxIdentityOf(pid)
 		switch {
 		case pid == self:
-			return protectReasonSelfSubtree, true, false, 0
-		case identity == proctree.Tmux || (identity == proctree.TmuxUnknown && proctree.IsTmuxTaskName(p.Comm)):
+			return protectReasonSelfSubtree, true, tmuxBoundary, 0
+		case identity == proctree.Tmux:
+			// A POSITIVE live read ends the walk at the boundary —
+			// unchanged. Only the unreadable link below accumulates into
+			// the flag instead of ending here.
 			return "", false, true, 0
 		default:
+			// A link the snapshot's task name still calls tmux while the
+			// live read could not classify it SETS the boundary flag but
+			// never ENDS the walk (#7848): the walk still consults this
+			// link's own daemon class and every ancestor above, so the
+			// verdict is the union — an unproven carrier keeps the
+			// boundary refusal the flag reports, and a positive
+			// protection the chain still holds (the reaper, a proven af
+			// daemon) is not lifted by a read that could not answer.
+			if identity == proctree.TmuxUnknown && proctree.IsTmuxTaskName(p.Comm) {
+				tmuxBoundary = true
+			}
 			switch afDaemonClass(p, att) {
 			case afDaemonIs:
 				// VERIFIED daemon ancestry — the kernel attested the
 				// executable is an af build (#7491 item 1): a positive
 				// placement, excluded and named, that does not block.
 				if pid == start {
-					return protectReasonAFDaemon, true, false, 0
+					return protectReasonAFDaemon, true, tmuxBoundary, 0
 				}
-				return protectReasonDaemonDescendant(pid), true, false, 0
+				return protectReasonDaemonDescendant(pid), true, tmuxBoundary, 0
 			case afDaemonUnverified:
 				// argv CLAIMS daemon ancestry the kernel executable will
 				// not attest — `exec -a af … --daemon` writes argv, not
@@ -293,9 +319,9 @@ func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int, att *
 				// the daemon and its remedy, not just the candidate
 				// (#7494 item 1).
 				if pid == start {
-					return protectReasonDaemonUnverifiedSelf(), false, false, pid
+					return protectReasonDaemonUnverifiedSelf(), false, tmuxBoundary, pid
 				}
-				return protectReasonDaemonUnverifiedDescendant(pid), false, false, pid
+				return protectReasonDaemonUnverifiedDescendant(pid), false, tmuxBoundary, pid
 			case afDaemonUndecidable:
 				// The argv is an af binary's, but this build's parse cannot
 				// say whether it runs the daemon — an unknown flag or a
@@ -304,16 +330,16 @@ func classifyCaptureAncestry(snap map[int]proctree.Process, pid, self int, att *
 				// it to Not is exactly how `af --daemon -- x` lost its
 				// signal protection.
 				if pid == start {
-					return protectReasonDaemonUndecidableSelf(), false, false, pid
+					return protectReasonDaemonUndecidableSelf(), false, tmuxBoundary, pid
 				}
-				return protectReasonDaemonUndecidableDescendant(pid), false, false, pid
+				return protectReasonDaemonUndecidableDescendant(pid), false, tmuxBoundary, pid
 			case afDaemonUncertain:
-				return protectReasonUnproven, false, false, 0
+				return protectReasonUnproven, false, tmuxBoundary, 0
 			}
 		}
 		pid = p.PPID
 	}
-	return "", false, false, 0
+	return "", false, tmuxBoundary, 0
 }
 
 // reportableSurvivors filters a survivor set the way signalling filtered its

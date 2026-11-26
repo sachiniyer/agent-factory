@@ -543,8 +543,10 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 	// and its children. proctree.Signal spares only os.Getpid; without this
 	// set the reap waited seconds on the caller, then signalled its CLI, its
 	// children, and the foreign daemon they belonged to. The tmux-server
-	// boundary keeps it narrow: a pane process under a server reparented
-	// beneath the reaper still meets the server first and is reaped.
+	// boundary keeps it narrow: a pane process under a positively-identified
+	// server reparented beneath the reaper still meets the server first and
+	// is reaped — while a tmux-named link the live read cannot classify only
+	// marks the boundary and cannot lift this exclusion (#7848).
 	if protected == nil {
 		// An empty capture has nothing to protect — the table is not even
 		// read, so a failure here cannot fire a kill-path-sounding warning
