@@ -41,6 +41,15 @@ import (
 //
 // Returns nil when no residue is present, or when only foreign residue is
 // present, so a genuine deletion outside af still rebuilds from the kept branch.
+//
+// The refusal has two forms on purpose (#7847). The daemon WARNING carries the
+// full explanation and every residue path. The returned error's message is a
+// compact record that leads with the remedy and the residue path, because the
+// durable user-facing record (LostRestoreFailure.Error) is capped at 512 runes
+// (lost_restore_failure.go) and is stored under the recover wrapper — nothing
+// actionable may sit past the cap. residueRebuildRefusal keeps the
+// ErrRelocateStateUnknown verdict for the errors.Is classifiers without
+// spending record runes on the sentinel's own sentence.
 func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 	source := gw.GetWorktreePath()
 	if source == "" {
@@ -95,42 +104,150 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 		return nil
 	}
 	named := append(append(append([]string{}, oursSource...), oursCopy...), unverified...)
-	log.WarningLog.Printf("restore of session %q refused: its worktree path %s is gone but af relocation residue is present at %s — "+
-		"a cross-device archive move appears to have been cut off between its quarantine and publish renames; "+
-		"the complete worktree may be stranded there and was not rebuilt from the branch",
-		i.Title, source, strings.Join(named, ", "))
-	if len(oursSource) > 0 || len(oursCopy) > 0 {
-		// Direct recovery only from the `.af-source-*` quarantine (the complete
-		// original); describe the `.af-copy-*` staging copy as possibly
-		// incomplete and never as the worktree to move back.
-		var recovery strings.Builder
-		if len(oursSource) > 0 {
-			fmt.Fprintf(&recovery,
-				"the complete worktree (including any uncommitted changes) is stranded at the .af-source-* quarantine %s — "+
-					"inspect it and move it back to %s with 'mv' (or remove the residue once you have verified the work is saved)",
-				strings.Join(oursSource, ", "), source)
-		} else {
-			fmt.Fprintf(&recovery,
-				"a staged copy proven to be this session's is present at %s but its .af-source-* quarantine is absent, "+
-					"and the copy may be incomplete if the interrupted archive skipped unreadable files — "+
-					"inspect %s and do not move it into %s unless you have verified it is complete",
-				strings.Join(oursCopy, ", "), strings.Join(oursCopy, ", "), source)
-		}
-		if len(oursSource) > 0 && len(oursCopy) > 0 {
-			fmt.Fprintf(&recovery,
-				"; a staged copy is also present at the .af-copy-* sibling %s beside the destination and may be incomplete if the interrupted archive skipped unreadable files, "+
-					"so do not move it into %s as the worktree — recover from the .af-source-* quarantine instead",
+
+	// The daemon WARNING keeps the full explanation and the full residue list;
+	// the returned record is the compact form below. The guidance wording
+	// mirrors the archive endpoint's (archiveSessionSourceAbsent, #7804/#7807)
+	// so the two surfaces read the same.
+	var detail string
+	switch {
+	case len(oursSource) > 0:
+		detail = fmt.Sprintf(
+			"the complete worktree (including any uncommitted changes) is stranded at the .af-source-* quarantine %s — "+
+				"inspect it and move it back to %s with 'mv' (or remove the residue once you have verified the work is saved)",
+			strings.Join(oursSource, ", "), source)
+		if len(oursCopy) > 0 {
+			detail += fmt.Sprintf(
+				"; a staged copy is also present at the .af-copy-* sibling %s beside the destination and may be incomplete "+
+					"if the interrupted archive skipped unreadable files, so do not move it into %s as the worktree — "+
+					"recover from the .af-source-* quarantine instead",
 				strings.Join(oursCopy, ", "), source)
 		}
-		return fmt.Errorf(
-			"the worktree path %s is gone, but af relocation residue proven to be this session's worktree is present at %s — "+
-				"a cross-device archive move was cut off between its quarantine and publish renames and %s before retrying the restore: %w",
-			source, strings.Join(named, ", "), recovery.String(), git.ErrRelocateStateUnknown)
+	case len(oursCopy) > 0:
+		detail = fmt.Sprintf(
+			"a staged copy proven to be this session's is present at %s but its .af-source-* quarantine is absent, "+
+				"and the copy may be incomplete if the interrupted archive skipped unreadable files — "+
+				"inspect %s and do not move it into %s unless you have verified it is complete",
+			strings.Join(oursCopy, ", "), strings.Join(oursCopy, ", "), source)
+	default:
+		detail = fmt.Sprintf(
+			"af could not verify whether the residue is this session's worktree — it may belong to another session, "+
+				"or its git binding could not be read; inspect %s, then move it out of %s to somewhere safe "+
+				"(or remove it once you have confirmed it holds nothing you need) and retry the restore; "+
+				"do not move it into %s unless you have proven it is this session's work (see #7819)",
+			strings.Join(unverified, ", "), filepath.Dir(unverified[0]), source)
 	}
-	return fmt.Errorf(
-		"the worktree path %s is gone, but af relocation residue is present at %s and af could not verify whether it is this session's worktree — "+
-			"it may belong to another session, or its git binding could not be read; "+
-			"inspect %s, then move it out of %s to somewhere safe (or remove it once you have confirmed it holds nothing you need) and retry the restore; "+
-			"do not move it into %s unless you have proven it is this session's work (see #7819): %w",
-		source, strings.Join(unverified, ", "), strings.Join(unverified, ", "), filepath.Dir(unverified[0]), source, git.ErrRelocateStateUnknown)
+	if len(unverified) > 0 && (len(oursSource) > 0 || len(oursCopy) > 0) {
+		detail += fmt.Sprintf("; unverified residue is also present at %s", strings.Join(unverified, ", "))
+	}
+	log.WarningLog.Printf("restore of session %q refused: its worktree path %s is gone but af relocation residue is present at %s — "+
+		"a cross-device archive move appears to have been cut off between its quarantine and publish renames; "+
+		"the complete worktree may be stranded there and was not rebuilt from the branch; %s",
+		i.Title, source, strings.Join(named, ", "), detail)
+
+	// The user-facing record (LostRestoreFailure.Error) is capped at
+	// lostRestoreFailureMaxRunes runes by sanitizeLostRestoreError, and it is
+	// stored under the recover wrapper — WorktreeUnavailableError's
+	// "recover: session %q worktree unavailable: %v" frame around the
+	// "%w (%w)"-wrapped stat ENOENT — so the record leads with the remedy and
+	// the residue path: at realistic path lengths both always land inside the
+	// cap, and a longer path clips only the expendable tail (#7847). overhead
+	// mirrors that wrapper skeleton; keep it in step with
+	// backend_local_errors.go and the respawn call site.
+	overhead := len("recover: session \"\" worktree unavailable: stat : no such file or directory ()") +
+		len([]rune(i.Title)) + len([]rune(source))
+	var record strings.Builder
+	room := func() int {
+		return lostRestoreFailureMaxRunes - overhead - len([]rune(record.String()))
+	}
+	// extraResidue appends "; <frag>" for a secondary residue category: the
+	// category's paths are named while they fit the room the record has left,
+	// and when even the first path no longer fits the fragment degrades to a
+	// bare count that still points at the daemon log — counted, never
+	// silently truncated mid-path.
+	extraResidue := func(paths []string, frag string, fragArgs ...any) {
+		if len(paths) == 0 {
+			return
+		}
+		fixed := len([]rune(fmt.Sprintf(frag, append([]any{""}, fragArgs...)...)))
+		if room() < fixed+len([]rune(paths[0])) {
+			noun := "paths"
+			if len(paths) == 1 {
+				noun = "path"
+			}
+			fmt.Fprintf(&record, "; %d more residue %s (full list in the daemon log)", len(paths), noun)
+			return
+		}
+		fmt.Fprintf(&record, frag, append([]any{residueRecordList(paths, room()-fixed)}, fragArgs...)...)
+	}
+	switch {
+	case len(oursSource) > 0:
+		// The literal command first: `mv <quarantine> <source>` IS the action
+		// and both paths, so they survive the cap wherever the tail ends.
+		fmt.Fprintf(&record,
+			"mv %s %s to move this session's stranded worktree back — the .af-source-* quarantine is "+
+				"proven to be the complete worktree (incl. uncommitted changes), left by a cut-off archive move; "+
+				"or remove it once the work is saved, then retry",
+			oursSource[0], source)
+		extraResidue(oursSource[1:], "; more quarantines proven ours at %s")
+		extraResidue(oursCopy, "; staged copy %s may be incomplete — recover from the quarantine, never the copy")
+		extraResidue(unverified, "; unverified residue %s — do not move it into %s unless proven (#7819)", source)
+	case len(oursCopy) > 0:
+		const frag = "inspect %s: a staged .af-copy-* copy proven to be this session's, but possibly incomplete " +
+			"(its .af-source-* quarantine is absent) — do not move it into %s unless verified complete, then retry"
+		list := residueRecordList(oursCopy, room()-len([]rune(fmt.Sprintf(frag, "", source))))
+		fmt.Fprintf(&record, frag, list, source)
+		extraResidue(unverified, "; unverified residue %s — do not move it into %s unless proven (#7819)", source)
+	default:
+		parent := filepath.Dir(unverified[0])
+		const frag = "inspect %s: af could not verify it is this session's; " +
+			"move it out of %s once checked (or remove it once confirmed unneeded), then retry; " +
+			"do not move it into %s unless proven (#7819)"
+		list := residueRecordList(unverified, room()-len([]rune(fmt.Sprintf(frag, "", parent, source))))
+		fmt.Fprintf(&record, frag, list, parent, source)
+	}
+	return &residueRebuildRefusal{msg: record.String()}
+}
+
+// residueRebuildRefusal is the crash-window rebuild refusal's user-facing
+// form (#7847). Its message is the compact record text — leading with the
+// remedy and the residue path so both survive the LostRestoreFailure rune cap
+// at realistic path lengths — while Unwrap carries the
+// ErrRelocateStateUnknown verdict for the errors.Is classifiers
+// (daemon/lostrestore_environmental.go) without spending record runes on the
+// sentinel's own sentence.
+type residueRebuildRefusal struct{ msg string }
+
+func (e *residueRebuildRefusal) Error() string { return e.msg }
+
+func (e *residueRebuildRefusal) Unwrap() error { return git.ErrRelocateStateUnknown }
+
+// residueRecordList joins residue paths into the user-facing record: the
+// first path always whole — it is the thing the remedy acts on — more whole
+// paths while they fit room runes, then "and N more (full list in the daemon
+// log)", so a longer list is counted rather than silently truncated: the
+// daemon WARNING names every candidate (#7847).
+func residueRecordList(paths []string, room int) string {
+	var b strings.Builder
+	included, used := 0, 0
+	for _, p := range paths {
+		pl := len([]rune(p))
+		sep := len(", ")
+		if included == 0 {
+			sep = 0
+		}
+		if included > 0 && used+sep+pl > room {
+			break
+		}
+		if included > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(p)
+		used += sep + pl
+		included++
+	}
+	if more := len(paths) - included; more > 0 {
+		fmt.Fprintf(&b, ", and %d more (full list in the daemon log)", more)
+	}
+	return b.String()
 }
