@@ -92,6 +92,12 @@ func reloadTaskAutomation(manager *Manager, scheduler *taskScheduler, watchers *
 	if err != nil {
 		return nil, err
 	}
+	// An announced park whose task left the armed set — removed, disabled, or
+	// retargeted — ended with this write; retire its mark so a later park is
+	// never silently swallowed (#7843). The full snapshot (not the safe slice)
+	// is the comparison: a task still on disk keeps its mark even if this
+	// reload refused to arm it.
+	taskParkedDeliveries.sweep(snapshot.all)
 	for _, updated := range snapshot.bindingUpdates {
 		manager.publishEvent(agentproto.EventTaskUpdated, updated)
 	}

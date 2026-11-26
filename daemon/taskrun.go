@@ -125,6 +125,9 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 	// A nonempty target survives byte-identical, so the lookup below is unchanged:
 	// only an all-whitespace value moves, and it moves to "no target session".
 	target := task.CanonicalTargetSession(t.TargetSession)
+	// A retarget closes the old park episode wherever this attempt lands
+	// (#7843): the announced park named the session the delivery was held for.
+	taskParkedDeliveries.noteRetarget(t.ID, target)
 	if target == "" && t.SandboxOwner != "" {
 		// A sandbox-created task never spawns a session: that would run on the
 		// daemon host. Skip the run with a recorded reason, never fall back.
@@ -237,11 +240,27 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 	}
 	status := result.status
 	if status == TaskStatusLimitParked {
-		log.InfoLog.Printf("task %s parked delivery to target session %q at a usage limit; prompt not sent", t.ID, target)
+		// One line per park episode, not one per re-check (#7843): the watch
+		// drainer retries a parked head every drainBaseBackoff, and the mark
+		// stands until a verdict, a drop, or a task change ends the episode.
+		announce, remind, checks := taskParkedDeliveries.noteParked(t.ID, target, nowFunc())
+		if announce {
+			log.InfoLog.Printf("task %s parked delivery to target session %q at a usage limit; prompt not sent%s",
+				t.ID, target, parkedLimitResetSuffix(t, target))
+		} else if remind {
+			log.InfoLog.Printf("task %s delivery to target session %q is still parked at a usage limit (%d re-checks since it parked)",
+				t.ID, target, checks)
+		}
 		return status, result.promptRetained, nil
 	}
 	if status == "sent" {
 		status = taskSendStatus(result.deliveryStatus)
+	}
+	// Any non-park verdict ends an announced park for this pair — the send
+	// landed, the target cleared and deferred to an attached TUI, or the run
+	// finished badly — and the ordinary line below reports the outcome.
+	if mark, ok := taskParkedDeliveries.end(t.ID); ok {
+		log.InfoLog.Printf("task %s: parked delivery to target session %q ended (%s)", t.ID, mark.target, status)
 	}
 	log.InfoLog.Printf("task %s delivered prompt to target session %q (%s)", t.ID, target, status)
 	return status, false, nil
