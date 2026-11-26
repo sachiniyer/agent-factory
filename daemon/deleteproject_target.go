@@ -192,12 +192,17 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 			// skips the path id a resolving checkout does not own under its
 			// path hash, so root_agents survives to recreate the project after
 			// restart), and an inconclusive probe cannot show the derived id
-			// still names this row rather than a live occupant. Falling through
-			// unselected restores the no-op this request was before the derived
-			// match existed. A row that recorded a real identity belongs to
-			// that id, never to this one.
+			// still names this row rather than a live occupant. The former
+			// falls through unselected — the idempotent no-op this request was
+			// before the derived match existed — while the latter REFUSES, the
+			// same verdict the path form requires of normalizeDeleteProjectPath
+			// (PR #7853 review R14): an operational git failure is not "nothing
+			// is there", and a zero-count success over it would hide a live
+			// checkout's own opt-in surviving the deregister. A row that
+			// recorded a real identity belongs to that id, never to this one.
 			if project.RepoID == "" && config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(project.Root)) == repoID {
-				if _, err := config.RepoFromPath(filepath.Clean(project.Root)); err != nil && config.PathIsDeterminatelyFree(filepath.Clean(project.Root), err) {
+				root := filepath.Clean(project.Root)
+				if _, err := config.RepoFromPath(root); err != nil && config.PathIsDeterminatelyFree(root, err) {
 					candidateID = repoID
 				}
 			}
@@ -470,6 +475,24 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	// delete's own fence.
 	if err := m.refuseIfIdentityInTransition(repoID, rowFound); err != nil {
 		return deleteProjectTarget{repoID: repoID}, err
+	}
+	// A legacy row whose recorded root is present but no longer a git checkout
+	// is the #7829 shape, and it is undeletable rather than deletable (PR #7853
+	// review, third round): git's own worktree ledger is lossy — a routine
+	// `git worktree prune` on every archive removes the records that were the
+	// only evidence of which identity owned the root — so no scan af can run
+	// establishes that no live session, task, carry or opt-in still belongs to
+	// it. Deleting through that uncertainty deregisters the row while a live
+	// project survives behind a reported success, which is the orphan class
+	// #2549 exists to close. Refuse instead, with the root named and both
+	// remedies: restore the checkout's git metadata so af can establish the
+	// identity and delete again, or remove the directory and delete it as
+	// absent — the one verdict about the root that is provable. The sweep and
+	// tombstone machinery above never ran, so nothing was changed.
+	if rowFound && config.IsDerivedRepoID(repoID) && repoPath != "" {
+		if _, err := config.RepoFromPath(filepath.Clean(repoPath)); errors.Is(err, config.ErrNotGitRepository) {
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s is present but no longer a git checkout, so af cannot establish which identity its sessions and opt-ins were filed under — nothing was changed; restore the checkout's git metadata and delete again, or remove the directory and delete it as absent", repoID, repoPath)
+		}
 	}
 	carryWorkspace := ""
 	if repoPath != "" {

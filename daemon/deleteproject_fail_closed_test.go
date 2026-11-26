@@ -14,25 +14,23 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-// The #7829 fail-closed frames: both deletes name a legacy registry row whose
-// recorded root is present but no longer resolves, and both must refuse with
-// "nothing was changed" literally true — the task preflight across every
-// fenced identity (R1) and the path-evidence gate for the identity the path
-// cannot recompute (R2). Each fixture is built so the pinned delete succeeds
-// on master and on #7833's head: the former asks only the derived id's task
-// bindings and checks only the identities the path can spell, the latter
-// treats a present-but-unresolvable recorded root the same way.
+// The #7829 fail-closed frames: deletes that name a legacy registry row whose
+// recorded root cannot say which identity it was filed under. The absent
+// branch keeps every gate master already had plus the task preflight across
+// every fenced identity (R1) and the determinately-free selector (R5); the
+// present-but-not-git branch is undeletable — it refuses at target
+// resolution, with "nothing was changed" literally true.
 
 // TestProvisionalDeleteRefusesWhileATaskBoundToTheHistoricalIdTargetsTheSweptRoot
 // pins #7829 R1: the task preflight must cover EVERY identity the delete
 // fences, not only the one the request was addressed by. A legacy row whose
-// recorded root is present but no longer a checkout is addressed by the
-// derived d-<hex> id, yet its root_agents opt-in and its tasks sit under the
-// historical path hash — the id everything recorded while the path resolved.
-// A preflight that asks only the derived id sees no task, sweeps the opt-in
-// the historical root materializes through, and strands the enabled task
-// behind a successful delete. Both the swept opt-in and the stranded task
-// name the SAME root, which is exactly what the preflight exists to refuse.
+// recorded root is absent is addressed by the derived d-<hex> id, yet its
+// root_agents opt-in and its tasks sit under the historical path hash — the
+// id everything recorded while the path resolved. A preflight that asks only
+// the derived id sees no task, sweeps the opt-in the historical root
+// materializes through, and strands the enabled task behind a successful
+// delete. Both the swept opt-in and the stranded task name the SAME root,
+// which is exactly what the preflight exists to refuse.
 func TestProvisionalDeleteRefusesWhileATaskBoundToTheHistoricalIdTargetsTheSweptRoot(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
@@ -59,8 +57,8 @@ func TestProvisionalDeleteRefusesWhileATaskBoundToTheHistoricalIdTargetsTheSwept
 		t.Fatalf("seed root-targeted task: %v", err)
 	}
 	clearRecordedRepoID(t, project.ID)
-	if err := os.RemoveAll(filepath.Join(repoPath, ".git")); err != nil {
-		t.Fatalf("remove .git: %v", err)
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("remove the checkout: %v", err)
 	}
 	// The durable opt-in is keyed by the recorded PATH, so it answers to the
 	// historical hash through the sweep's path fallback — the identity the
@@ -116,15 +114,17 @@ func TestProvisionalDeleteRefusesWhileATaskBoundToTheHistoricalIdTargetsTheSwept
 }
 
 // TestProvisionalDeleteRefusesWhileSessionsMayKeyUnderAnUncomputableIdentity
-// pins #7829 R2: a derived-id delete may deregister only after checking every
-// identity the row's sessions could be keyed under — and when that set cannot
-// be known, it must fail closed on evidence that does not come from the path
-// hash. A recorded root that was a linked worktree of a BARE repository keyed
-// its sessions under the bare common directory's id — an identity neither the
-// derived id nor the recorded path's hash can recompute — so the stranded
-// gate above cannot see them, and deregistering removes the durable record
-// while they stay live (#2549's orphan class). The fail-closed evidence is a
-// live session whose paths touch the recorded root.
+// pins #7829's final rule (PR #7853 review, third round): a legacy row whose
+// recorded root is present but no longer a git checkout is UNDELETABLE — it
+// refuses rather than deregisters. A recorded root that was a linked worktree
+// of a BARE repository keyed its sessions under the bare common directory's
+// id — an identity neither the derived id nor the recorded path's hash can
+// recompute — and git's worktree ledger is lossy enough (a routine `git
+// worktree prune` erases it) that no scan can establish which live sessions
+// still belong to the root. So the delete refuses at target resolution with
+// the root named and both remedies, before any gate or durable write, on
+// either request form — and this session stays live to prove the refusal
+// genuinely changed nothing.
 func TestProvisionalDeleteRefusesWhileSessionsMayKeyUnderAnUncomputableIdentity(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
@@ -202,9 +202,9 @@ func TestProvisionalDeleteRefusesWhileSessionsMayKeyUnderAnUncomputableIdentity(
 	} {
 		result, delErr := manager.DeleteProject(req)
 		if err = delErr; err == nil {
-			t.Fatalf("a delete that cannot know which identity the row's sessions are keyed under must refuse while one is live at the recorded root (req %+v)", req)
+			t.Fatalf("a legacy row whose recorded root is present but no longer a git checkout must refuse, not deregister (req %+v)", req)
 		}
-		for _, want := range []string{"nothing was changed", "bare-session", worktree, "archive those sessions first"} {
+		for _, want := range []string{"nothing was changed", worktree, "no longer a git checkout", "restore the checkout's git metadata", "remove the directory"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("the refusal must name %q (req %+v): %v", want, req, err)
 			}
@@ -242,14 +242,22 @@ func TestProvisionalDeleteRefusesWhileSessionsMayKeyUnderAnUncomputableIdentity(
 }
 
 // TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain pins the boundary
-// the derived-id match must hold (PR #7853 review): the invented namespace
-// exists for roots that cannot answer. Once the recorded root resolves again
-// the row has a knowable real identity, and honoring the stale derived id
-// would deregister the row while the opt-in sweep skips the path id — which a
-// resolving checkout does not own under its path hash — leaving root_agents
-// behind to recreate the project after restart. The request stays the no-op
-// it was before the derived match existed: the row answers to its real id
-// and its recorded path, not to this selector.
+// the derived-id match must hold (PR #7853 review R5 setup A, R13): the
+// invented namespace exists for roots that cannot answer. Once the recorded
+// root resolves again the row has a knowable real identity, and honoring the
+// stale derived id would deregister the row while the opt-in sweep skips the
+// path id — which a resolving checkout does not own under its path hash —
+// leaving root_agents behind to recreate the project after restart. The
+// request stays the no-op it was before the derived match existed: the row
+// answers to its real id and its recorded path, not to this selector.
+//
+// The row must stay unreconciled THROUGH startup, which is why the recorded
+// root is present-but-not-git while NewManager runs its snapshot —
+// rootagent_snapshot reconciles a resolving root into the row's RepoID before
+// the fixture can exercise the selector. The checkout is restored only after
+// startup, without the marker proof reconciliation needs — exactly how
+// production reaches the stale selector: .git returns before the row's
+// RepoID is backfilled.
 func TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
@@ -259,10 +267,12 @@ func TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain(t *testing.T) {
 	}
 	project := registerTestProject(t, repoPath)
 	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath))
+	historical := config.RepoIDFromRoot(filepath.Clean(repoPath))
 	realID := repoID(t, repoPath)
 	clearRecordedRepoID(t, project.ID)
-	// The checkout stays in place and still resolves: the derived id the row
-	// was once filed under is stale the moment the root answers for itself.
+	if err := os.RemoveAll(filepath.Join(repoPath, ".git")); err != nil {
+		t.Fatalf("remove .git so startup cannot reconcile the row: %v", err)
+	}
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -270,13 +280,22 @@ func TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain(t *testing.T) {
 	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
 		t.Fatalf("fixture must keep the row unreconciled, got %q", recorded)
 	}
+	// The checkout reappears now that startup is over: a fresh .git with no
+	// checkout marker, so nothing backfills the row's identity — the derived
+	// id it was filed under is simply stale.
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("restore the checkout after startup: %v", err)
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("the restore carries no marker proof, so the row must still be unreconciled, got %q", recorded)
+	}
 	if root, selErr := registeredProjectRootForRepoID(derived); selErr != nil || root != "" {
 		t.Fatalf("a resolving root must not answer to a stale derived id, got root=%q err=%v", root, selErr)
 	}
-	swept := false
+	var swept []string
 	previousSweep := deregisterRootAgents
-	deregisterRootAgents = func(...string) ([]string, error) {
-		swept = true
+	deregisterRootAgents = func(ids ...string) ([]string, error) {
+		swept = append(swept, ids...)
 		return nil, nil
 	}
 	t.Cleanup(func() { deregisterRootAgents = previousSweep })
@@ -284,8 +303,10 @@ func TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain(t *testing.T) {
 	if err = delErr; err != nil {
 		t.Fatalf("the stale derived id must remain the idempotent no-op it was, not an error: %v", err)
 	}
-	if swept {
-		t.Fatalf("the no-op must not reach the durable root_agents sweep — nothing was changed")
+	for _, id := range swept {
+		if id == historical || id == realID {
+			t.Fatalf("the no-op may sweep only the invented id — %s belongs to the checkout that owns the path: swept %v", id, swept)
+		}
 	}
 	if result.Deregistered || len(result.Archived) != 0 || len(result.Killed) != 0 {
 		t.Fatalf("a selector that names an identity the row no longer is must change nothing: deregistered=%v archived=%d killed=%d",
@@ -306,13 +327,14 @@ func TestStaleDerivedIDDoesNotSelectARowWhoseRootResolvesAgain(t *testing.T) {
 }
 
 // TestProvisionalDeleteRefusesWhileASessionKeysUnderAnIdentityItsPathsCannotReach
-// pins PR #7853 review R6: the recorded root's own .git is gone, but the bare
-// repository it was a linked worktree of still names it in worktrees/*/gitdir —
-// git's own evidence that this repository could key sessions at the root. A
-// session created from a SIBLING worktree of that bare repo carries none of the
-// recorded root in its paths — workspace, worktree, and repo path all sit
-// beside it — so only the identity-root evidence can still see that it belongs.
-// Without it the delete deregisters the row while the session stays live.
+// pins the hardest present-but-not-git shape (PR #7853 review R6): the
+// recorded root's own .git is gone, and the bare repository it was a linked
+// worktree of still names it in worktrees/*/gitdir — evidence a routine `git
+// worktree prune` erases, which is why the branch refuses rather than
+// trusting any ownership scan. A session created from a SIBLING worktree of
+// that bare repo carries none of the recorded root in its paths, so nothing
+// af can read proves it belongs — and the delete refuses anyway, because
+// nothing can prove it does not.
 func TestProvisionalDeleteRefusesWhileASessionKeysUnderAnIdentityItsPathsCannotReach(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
@@ -385,9 +407,9 @@ func TestProvisionalDeleteRefusesWhileASessionKeysUnderAnIdentityItsPathsCannotR
 	} {
 		result, delErr := manager.DeleteProject(req)
 		if err = delErr; err == nil {
-			t.Fatalf("a session keyed under the bare identity that owns the recorded root must refuse the delete even while none of its paths touch it (req %+v)", req)
+			t.Fatalf("a legacy row whose recorded root is present but no longer a git checkout must refuse, not deregister (req %+v)", req)
 		}
-		for _, want := range []string{"nothing was changed", "sibling-session", worktree, "archive those sessions first"} {
+		for _, want := range []string{"nothing was changed", worktree, "no longer a git checkout", "restore the checkout's git metadata", "remove the directory"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("the refusal must name %q (req %+v): %v", want, req, err)
 			}
@@ -415,12 +437,12 @@ func TestProvisionalDeleteRefusesWhileASessionKeysUnderAnIdentityItsPathsCannotR
 	}
 }
 
-// TestProvisionalDeleteDoesNotBlameAnEnclosingWorkspaceSession pins PR #7853
-// review R7: an enclosing workspace is a bigger project, not the recorded
-// root's owner. An absent legacy row beneath a live dotfiles checkout must
-// delete as it did on master — the session's paths contain the root, which the
-// old containing-direction read as belonging, but only git's own worktree
-// records can make an enclosing path an identity that owns the root.
+// TestProvisionalDeleteDoesNotBlameAnEnclosingWorkspaceSession pins the
+// absent branch's restored master behavior (PR #7853 review R7/R9): an
+// enclosing workspace is a bigger project, not the recorded root's owner. An
+// absent legacy row beneath a live dotfiles checkout must delete as it did on
+// master — a session whose paths merely contain the recorded root was never
+// evidence it belonged to it.
 func TestProvisionalDeleteDoesNotBlameAnEnclosingWorkspaceSession(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
@@ -470,67 +492,89 @@ func TestProvisionalDeleteDoesNotBlameAnEnclosingWorkspaceSession(t *testing.T) 
 	}
 }
 
-// TestProvisionalDeleteLeavesAResolvingRootsCarryAndTicketsAlone pins PR #7853
-// review R5 setup B: the derived selector matched only while the recorded root
-// was determinately free, and the check is re-done as late as the durable
-// sweep. A checkout that appears at the recorded root mid-delete owns that
-// path now — path-keyed carry retirement and create-ticket withdrawal must not
-// retire the occupant's state on the deleted project's behalf.
-func TestProvisionalDeleteLeavesAResolvingRootsCarryAndTicketsAlone(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	installOptionsRecordingBackend(t)
-	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "legacy-root")
-	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	project := registerTestProject(t, repoPath)
-	clearRecordedRepoID(t, project.ID)
-	// The recorded root stays present but stops resolving: determinately free,
-	// so the delete still selects the row by its derived id.
-	if err := os.RemoveAll(filepath.Join(repoPath, ".git")); err != nil {
-		t.Fatalf("remove .git: %v", err)
-	}
-	manager, err := NewManager(config.DefaultConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
+// TestProvisionalDeleteLeavesAnOccupyingRootsCarryAndTicketsAlone pins PR
+// #7853 review R5 setup B and R12: the derived selector matched only while
+// the recorded root was determinately free, and the check is re-done as late
+// as the durable sweep with the SAME verdict the optInIDs sweep requires.
+// Whether a checkout resolves at the recorded root by then, or the probe can
+// no longer give a verdict about it, the path may belong to a live occupant —
+// path-keyed carry retirement and create-ticket withdrawal must not retire a
+// stranger's state on the deleted project's behalf.
+func TestProvisionalDeleteLeavesAnOccupyingRootsCarryAndTicketsAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		shim string // when set, poison git after the checkout appears
+	}{
+		{"the root resolves again", ""},
+		{"the probe goes indeterminate", "#!/bin/sh\necho 'fatal: detected dubious ownership in repository' >&2\nexit 128\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			installOptionsRecordingBackend(t)
+			repoPath := filepath.Join(testguard.CanonicalTempDir(t), "legacy-root")
+			if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+				t.Fatalf("git init: %v", err)
+			}
+			project := registerTestProject(t, repoPath)
+			clearRecordedRepoID(t, project.ID)
+			// The recorded root is absent: determinately free, so the delete
+			// still selects the row by its derived id.
+			if err := os.RemoveAll(repoPath); err != nil {
+				t.Fatalf("remove the checkout: %v", err)
+			}
+			manager, err := NewManager(config.DefaultConfig())
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
 
-	// A checkout reappears at the recorded root as the delete runs, and the
-	// occupant already holds a carry and an in-flight create AT that path —
-	// both under a different identity, so only the path-keyed reach could
-	// touch them.
-	deleteProjectPreSweepHookForTest = func() {
-		if err := exec.Command("git", "init", repoPath).Run(); err != nil {
-			t.Fatalf("git init occupant mid-delete: %v", err)
-		}
-	}
-	t.Cleanup(func() { deleteProjectPreSweepHookForTest = nil })
-	other := repoID(t, setupControlRepo(t))
-	resolved := pathutil.ResolveForCompare(filepath.Clean(repoPath))
-	manager.mu.Lock()
-	manager.rootEnsureStates["occupant"] = &rootEnsureState{carry: &rootCarry{
-		repoID:    other,
-		workspace: repoPath,
-		compare:   resolved,
-	}}
-	manager.rootCreatesInFlight["occupant-create"] = &rootCreateTicket{
-		repoID:    other,
-		workspace: repoPath,
-		compare:   resolved,
-	}
-	manager.mu.Unlock()
+			// A checkout appears at the recorded root as the delete runs, and
+			// the occupant already holds a carry and an in-flight create AT
+			// that path — both under a different identity, so only the
+			// path-keyed reach could touch them. In the indeterminate case git
+			// then stops answering for it: the same "an occupant may own this
+			// path" verdict the sweep reads.
+			binDir := t.TempDir()
+			deleteProjectPreSweepHookForTest = func() {
+				if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+					t.Fatalf("git init occupant mid-delete: %v", err)
+				}
+				if tc.shim == "" {
+					return
+				}
+				if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(tc.shim), 0o755); err != nil {
+					t.Fatalf("write git shim: %v", err)
+				}
+				t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
+			t.Cleanup(func() { deleteProjectPreSweepHookForTest = nil })
+			other := repoID(t, setupControlRepo(t))
+			resolved := pathutil.ResolveForCompare(filepath.Clean(repoPath))
+			manager.mu.Lock()
+			manager.rootEnsureStates["occupant"] = &rootEnsureState{carry: &rootCarry{
+				repoID:    other,
+				workspace: repoPath,
+				compare:   resolved,
+			}}
+			manager.rootCreatesInFlight["occupant-create"] = &rootCreateTicket{
+				repoID:    other,
+				workspace: repoPath,
+				compare:   resolved,
+			}
+			manager.mu.Unlock()
 
-	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
-		t.Fatalf("the row's delete still runs — the root was free when it was selected: %v", err)
-	}
-	manager.mu.Lock()
-	st := manager.rootEnsureStates["occupant"]
-	ticket := manager.rootCreatesInFlight["occupant-create"]
-	manager.mu.Unlock()
-	if st.carry == nil {
-		t.Fatalf("a root whose recorded path resolved before the sweep must not retire the occupant's carry at that path")
-	}
-	if ticket.withdrawn {
-		t.Fatalf("a root whose recorded path resolved before the sweep must not withdraw the occupant's in-flight create at that path")
+			if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+				t.Fatalf("the row's delete still runs — the root was free when it was selected: %v", err)
+			}
+			manager.mu.Lock()
+			st := manager.rootEnsureStates["occupant"]
+			ticket := manager.rootCreatesInFlight["occupant-create"]
+			manager.mu.Unlock()
+			if st.carry == nil {
+				t.Fatalf("a root whose recorded path is not determinately free at the sweep must not retire the occupant's carry at that path")
+			}
+			if ticket.withdrawn {
+				t.Fatalf("a root whose recorded path is not determinately free at the sweep must not withdraw the occupant's in-flight create at that path")
+			}
+		})
 	}
 }

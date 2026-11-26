@@ -488,19 +488,21 @@ func TestProvisionalDeleteRefusesWhileSessionsRemainUnderTheOldHash(t *testing.T
 }
 
 // TestProvisionalDeleteRefusesForAnUnprovableLegacyRowPresentPath pins the
-// silent-no-op the d-<hex> namespace created (#3530, #3638). A path-form delete
-// that matches a legacy row (RepoID == "") whose recorded root is PRESENT but
-// provably no longer a git checkout (.git removed) used to drop repoPath in the
-// claimant scan, arming the target with only the invented d-<hex> id and
-// disarming the three downstream safeguards gated on repoPath — so the delete
-// returned a zero-count SUCCESS while the project's live sessions (keyed under
-// the recorded path's historical hex hash) survived stranded behind it.
+// silent-no-op the d-<hex> namespace created (#3530, #3638, #7829). A
+// path-form delete that matches a legacy row (RepoID == "") whose recorded
+// root is PRESENT but provably no longer a git checkout (.git removed) used
+// to drop repoPath in the claimant scan, arming the target with only the
+// invented d-<hex> id — so the delete returned a zero-count SUCCESS while
+// the project's live sessions (keyed under the recorded path's historical
+// hex hash) survived stranded behind it.
 //
-// The fix keeps the matched row's recorded root for a derived target, routing
-// the delete through the SAME phase-1 stranded gate the absent-path shape
-// already uses (TestProvisionalDeleteRefusesWhileSessionsRemainUnderTheOldHash):
-// a live session under the historical identity refuses with "nothing was
-// changed" instead of success.
+// The final rule (PR #7853 review, third round) makes this branch
+// undeletable rather than routing it through the stranded gate: git's
+// worktree ledger is too lossy for any scan to prove which identity the row
+// was filed under, so the delete refuses at target resolution — before any
+// session gate or durable write — with the root named and both remedies.
+// The live session under the historical identity stays live to prove the
+// refusal changed nothing.
 func TestProvisionalDeleteRefusesForAnUnprovableLegacyRowPresentPath(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
@@ -553,9 +555,9 @@ func TestProvisionalDeleteRefusesForAnUnprovableLegacyRowPresentPath(t *testing.
 
 	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
 	if err = delErr; err == nil {
-		t.Fatalf("a delete whose derived id reaches nothing by construction must refuse rather than report a silent zero-count success")
+		t.Fatalf("a legacy row whose recorded root is present but no longer a git checkout must refuse rather than deregister behind a silent success")
 	}
-	for _, want := range []string{"nothing was changed", "left-behind", repoPath, "archive those sessions first"} {
+	for _, want := range []string{"nothing was changed", repoPath, "no longer a git checkout", "restore the checkout's git metadata", "remove the directory"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the refusal must name %q: %v", want, err)
 		}
@@ -594,16 +596,18 @@ func TestProvisionalDeleteRefusesForAnUnprovableLegacyRowPresentPath(t *testing.
 	}
 }
 
-// TestProvisionalDeleteSweepsAndDeregistersAnUnprovableLegacyRowPresentPath is
-// the no-sessions half of the fix. With nothing live under the historical
-// identity there is nothing for the phase-1 stranded gate to refuse over, so
-// the delete must PROCEED and actually remove the project — the same shape
-// TestProvisionalDeleteFencesTheHistoricalIdentity pins for the absent-path
-// case. The buggy delete returned a zero-count success here too: the row and
-// the durable opt-in survived to resurrect the project, and repeated deletes
-// were permanent no-ops. Keeping repoPath lets the both-identity sweep target
-// the historical hash and the path-form deregister remove the row.
-func TestProvisionalDeleteSweepsAndDeregistersAnUnprovableLegacyRowPresentPath(t *testing.T) {
+// TestProvisionalDeleteRefusesAnUnprovableLegacyRowPresentPathWithNoLiveSessions
+// is the no-sessions half of the same frame, and it is the #7829 bug itself:
+// a sessionless legacy row whose recorded root is present but no longer a git
+// checkout. Master's buggy delete reported a zero-count success while the row
+// and its opt-in survived; the intermediate fix swept and deregistered them.
+// The third review's stop rule makes the branch undeletable instead — no
+// scan can prove which identity the row was filed under once .git is gone —
+// so even with nothing live the delete refuses at target resolution, naming
+// the root and both remedies, and the row and opt-in stay exactly as they
+// were. The row becomes deletable again the two ways the refusal says: its
+// git metadata returns, or the directory is removed and it deletes as absent.
+func TestProvisionalDeleteRefusesAnUnprovableLegacyRowPresentPathWithNoLiveSessions(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
 	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "repo")
@@ -628,42 +632,40 @@ func TestProvisionalDeleteSweepsAndDeregistersAnUnprovableLegacyRowPresentPath(t
 		t.Fatalf("fixture must keep the row unreconciled, got %q", recorded)
 	}
 
-	// Record the identities the durable root_agents sweep is supplied: the
-	// fix must target BOTH the derived id and the recorded root's historical
-	// hash, or a stale opt-in keyed by the recorded path survives to
-	// recreate the root.
-	var swept []string
+	swept := false
 	previousSweep := deregisterRootAgents
-	deregisterRootAgents = func(ids ...string) ([]string, error) {
-		swept = append(swept, ids...)
+	deregisterRootAgents = func(...string) ([]string, error) {
+		swept = true
 		return nil, nil
 	}
 	t.Cleanup(func() { deregisterRootAgents = previousSweep })
 
-	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
-	if err != nil {
-		t.Fatalf("with nothing live under the historical identity the delete must proceed and remove the project: %v", err)
-	}
-	if !result.Deregistered {
-		t.Fatalf("the delete must deregister the durable registry record — the buggy delete left it behind to resurrect the project")
-	}
-	hasID := func(id string) bool {
-		for _, s := range swept {
-			if s == id {
-				return true
+	for _, req := range []DeleteProjectRequest{
+		{RepoPath: repoPath},
+		{RepoID: derived},
+	} {
+		result, delErr := manager.DeleteProject(req)
+		if err = delErr; err == nil {
+			t.Fatalf("a sessionless legacy row whose recorded root is present but no longer a git checkout must refuse, not report a silent success (req %+v)", req)
+		}
+		for _, want := range []string{"nothing was changed", repoPath, "no longer a git checkout", "restore the checkout's git metadata", "remove the directory"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("the refusal must name %q (req %+v): %v", want, req, err)
 			}
 		}
-		return false
-	}
-	if !hasID(derived) || !hasID(historical) {
-		t.Fatalf("the durable sweep must target both the derived id %s and the historical hash %s — the buggy delete swept only the derived id and the stale opt-in survived: got %v", derived, historical, swept)
+		if swept {
+			t.Fatalf("the refusal must precede the durable root_agents sweep — it claims nothing was changed (req %+v)", req)
+		}
+		if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+			t.Fatalf("a refused delete must archive, kill and deregister nothing (req %+v)", req)
+		}
 	}
 	dir, dirErr := config.ProjectRegistryDir()
 	if dirErr != nil {
 		t.Fatalf("ProjectRegistryDir: %v", dirErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
-		t.Fatalf("the registry record must be gone after the delete succeeded")
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+		t.Fatalf("the registry record must survive the refused delete: %v", statErr)
 	}
 }
 
