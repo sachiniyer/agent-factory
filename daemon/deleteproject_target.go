@@ -202,8 +202,12 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 			// recorded a real identity belongs to that id, never to this one.
 			if project.RepoID == "" && config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(project.Root)) == repoID {
 				root := filepath.Clean(project.Root)
-				if _, err := config.RepoFromPath(root); err != nil && config.PathIsDeterminatelyFree(root, err) {
-					candidateID = repoID
+				if _, err := config.RepoFromPath(root); err != nil {
+					if config.PathIsDeterminatelyFree(root, err) {
+						candidateID = repoID
+					} else {
+						return "", fmt.Errorf("delete project %s: git could not give a verdict about its recorded root %s, so whether that path is still a checkout is unknown; nothing was changed — repair the checkout's access or metadata and retry: %w", repoID, root, err)
+					}
 				}
 			}
 		} else if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project); ok {

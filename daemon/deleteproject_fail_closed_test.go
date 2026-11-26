@@ -578,3 +578,77 @@ func TestProvisionalDeleteLeavesAnOccupyingRootsCarryAndTicketsAlone(t *testing.
 		})
 	}
 }
+
+// TestDerivedIDDeleteRefusesAnIndeterminateProbeOfTheRecordedRoot pins PR
+// #7853 review R14: when the request carries only the derived RepoID, the
+// selector's only reach into the filesystem is the recorded root's
+// RepoFromPath probe. A probe that fails WITHOUT a determinately-free
+// verdict — git present but poisoned, the classic "dubious ownership" wall —
+// means the derived id might still name the row, so the delete must refuse
+// with a retry remedy rather than report a zero-count success over a state
+// it could not read.
+func TestDerivedIDDeleteRefusesAnIndeterminateProbeOfTheRecordedRoot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath))
+	clearRecordedRepoID(t, project.ID)
+	// Keep the row unreconciled through startup (the checkout is restored
+	// without marker proof only after NewManager has run), then poison git so
+	// the selector's probe of the recorded root cannot give a verdict.
+	if err := os.RemoveAll(filepath.Join(repoPath, ".git")); err != nil {
+		t.Fatalf("remove .git so startup cannot reconcile the row: %v", err)
+	}
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("restore the checkout after startup: %v", err)
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("fixture must keep the row unreconciled, got %q", recorded)
+	}
+	binDir := t.TempDir()
+	shim := "#!/bin/sh\necho 'fatal: detected dubious ownership in repository' >&2\nexit 128\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write git shim: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	swept := false
+	previousSweep := deregisterRootAgents
+	deregisterRootAgents = func(...string) ([]string, error) {
+		swept = true
+		return nil, nil
+	}
+	t.Cleanup(func() { deregisterRootAgents = previousSweep })
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoID: derived})
+	if err = delErr; err == nil {
+		t.Fatalf("a derived-id delete whose recorded-root probe cannot answer must refuse, not report a zero-count success")
+	}
+	for _, want := range []string{"nothing was changed", repoPath, "retry"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal must name %q: %v", want, err)
+		}
+	}
+	if swept {
+		t.Fatalf("the refusal must precede the durable root_agents sweep — it claims nothing was changed")
+	}
+	if result.Deregistered || len(result.Archived) != 0 || len(result.Killed) != 0 {
+		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+			len(result.Archived), len(result.Killed), result.Deregistered)
+	}
+	dir, dirErr := config.ProjectRegistryDir()
+	if dirErr != nil {
+		t.Fatalf("ProjectRegistryDir: %v", dirErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+		t.Fatalf("the row must survive the refused delete: %v", statErr)
+	}
+}
