@@ -47,10 +47,11 @@ import (
 // full explanation and every residue path. The returned error's message is a
 // compact record that leads with the remedy and the residue path, because the
 // durable user-facing record (LostRestoreFailure.Error) is capped at 512 runes
-// (lost_restore_failure.go) and is stored under the recover wrapper — nothing
-// actionable may sit past the cap. residueRebuildRefusal keeps the
-// ErrRelocateStateUnknown verdict for the errors.Is classifiers without
-// spending record runes on the sentinel's own sentence.
+// (lost_restore_failure.go) — and the respawn call site stores it leading the
+// "%w (%w)" pair so the cap clips only the trailing stat frame, never the
+// remedy (#7855). residueRebuildRefusal keeps the ErrRelocateStateUnknown
+// verdict for the errors.Is classifiers without spending record runes on the
+// sentinel's own sentence.
 func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 	source := gw.GetWorktreePath()
 	if source == "" {
@@ -150,16 +151,24 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 	// lostRestoreFailureMaxRunes runes by sanitizeLostRestoreError, and it is
 	// stored under the recover wrapper — WorktreeUnavailableError's
 	// "recover: session %q worktree unavailable: %v" frame around the
-	// "%w (%w)"-wrapped stat ENOENT — so the record leads with the remedy and
-	// the residue path: at realistic path lengths both always land inside the
-	// cap, and a longer path clips only the expendable tail (#7847). overhead
-	// mirrors that wrapper skeleton; keep it in step with
-	// backend_local_errors.go and the respawn call site.
-	overhead := len("recover: session \"\" worktree unavailable: stat : no such file or directory ()") +
-		len([]rune(i.Title)) + len([]rune(source))
+	// "%w (%w)" pair this refusal LEADS, with the stat ENOENT trailing — so
+	// the cap clips only the expendable stat tail (a path the record already
+	// names), never the remedy (#7847, #7855). overhead mirrors that stored
+	// skeleton; keep it in step with backend_local_errors.go and the respawn
+	// call site.
+	overhead := len("recover: session \"\" worktree unavailable: ") + len(" ()") +
+		len([]rune(i.Title))
 	var record strings.Builder
 	room := func() int {
 		return lostRestoreFailureMaxRunes - overhead - len([]rune(record.String()))
+	}
+	// tail appends a clause only while it fits whole: one the budget cannot
+	// hold is dropped at its boundary rather than clipped mid-word by the
+	// cap. The remedy itself is never a tail — it leads the record.
+	tail := func(frag string) {
+		if len([]rune(frag)) <= room() {
+			record.WriteString(frag)
+		}
 	}
 	// extraResidue appends "; <frag>" for a secondary residue category: the
 	// category's paths are named while they fit the room the record has left,
@@ -176,55 +185,77 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 			if len(paths) == 1 {
 				noun = "path"
 			}
-			fmt.Fprintf(&record, "; %d more residue %s (full list in the daemon log)", len(paths), noun)
+			tail(fmt.Sprintf("; %d more residue %s (full list in the daemon log)", len(paths), noun))
 			return
 		}
 		fmt.Fprintf(&record, frag, append([]any{residueRecordList(paths, room()-fixed)}, fragArgs...)...)
 	}
+	// Residue paths go into the record as basenames: every candidate is a
+	// sibling of the recorded path (the scan covered only its parent), so the
+	// parent is named once and the basenames resolve against it — the same
+	// information as the absolute paths at a fraction of the runes, which is
+	// what keeps the remedy inside the cap at realistic path depths (#7855).
+	parent := filepath.Dir(source)
 	switch {
 	case len(oursSource) > 0:
-		// The literal command first: `mv <quarantine> <source>` IS the action
-		// and both paths, so they survive the cap wherever the tail ends. The
-		// command is rendered through shellsuggest because the record's whole
-		// purpose is to be read and pasted — a parent with spaces or
-		// metacharacters must still arrive as exactly two operands.
-		fmt.Fprintf(&record,
-			"%s to move this session's stranded worktree back — the .af-source-* quarantine is "+
-				"proven to be the complete worktree (incl. uncommitted changes), left by a cut-off archive move; "+
-				"or remove it once the work is saved, then retry",
-			shellsuggest.Command("mv", oursSource[0], source))
-		extraResidue(oursSource[1:], "; more quarantines proven ours at %s")
-		extraResidue(oursCopy, "; staged copy %s may be incomplete — recover from the quarantine, never the copy")
-		extraResidue(unverified, "; unverified residue %s — do not move it into %s unless proven (#7819)", source)
+		// The literal command first: `cd <parent> && mv <quarantine> <leaf>`
+		// IS the action and names every path it needs — basenames against the
+		// parent keep the command inside the cap at path lengths where two
+		// absolute paths alone would overflow it. It is rendered through
+		// shellsuggest because the record's whole purpose is to be read and
+		// pasted — a parent with spaces or metacharacters must still arrive as
+		// exactly one operand.
+		fmt.Fprintf(&record, "%s && %s to move this session's stranded worktree back",
+			shellsuggest.Command("cd", parent),
+			shellsuggest.Command("mv", filepath.Base(oursSource[0]), filepath.Base(source)))
+		tail(" — proven the complete worktree (incl. uncommitted changes), left by a cut-off archive move")
+		tail("; or remove it once the work is saved, then retry")
+		extraResidue(baseNames(oursSource[1:]), "; also proven ours: %s")
+		extraResidue(baseNames(oursCopy), "; staged copy %s may be incomplete — recover from the quarantine, never the copy")
+		extraResidue(baseNames(unverified), "; unverified residue %s also present — do not move it into the session path unless proven (#7819)")
 	case len(oursCopy) > 0:
-		const frag = "inspect %s: a staged .af-copy-* copy proven to be this session's, but possibly incomplete " +
-			"(its .af-source-* quarantine is absent) — do not move it into %s unless verified complete, then retry"
-		list := residueRecordList(oursCopy, room()-len([]rune(fmt.Sprintf(frag, "", source))))
-		fmt.Fprintf(&record, frag, list, source)
-		extraResidue(unverified, "; unverified residue %s — do not move it into %s unless proven (#7819)", source)
+		const frag = "inspect %s in %s: a staged .af-copy-* copy proven to be this session's, " +
+			"but possibly incomplete (its .af-source-* quarantine is absent)"
+		list := residueRecordList(baseNames(oursCopy), room()-len([]rune(fmt.Sprintf(frag, "", parent))))
+		fmt.Fprintf(&record, frag, list, parent)
+		tail(" — do not move it into " + source + " unless verified complete, then retry")
+		extraResidue(baseNames(unverified), "; unverified residue %s also present — do not move it into the session path unless proven (#7819)")
 	default:
-		parent := filepath.Dir(unverified[0])
-		const frag = "inspect %s: af could not verify it is this session's; " +
-			"move it out of %s once checked (or remove it once confirmed unneeded), then retry; " +
-			"do not move it into %s unless proven (#7819)"
-		list := residueRecordList(unverified, room()-len([]rune(fmt.Sprintf(frag, "", parent, source))))
-		fmt.Fprintf(&record, frag, list, parent, source)
+		const frag = "inspect %s in %s — af could not verify it is this session's; " +
+			"move it out of that folder once checked, then retry"
+		list := residueRecordList(baseNames(unverified), room()-len([]rune(fmt.Sprintf(frag, "", parent))))
+		fmt.Fprintf(&record, frag, list, parent)
+		tail(" (or remove it once confirmed unneeded)")
+		tail("; do not move it into " + source + " unless proven (#7819)")
 	}
 	return &residueRebuildRefusal{msg: record.String()}
 }
 
 // residueRebuildRefusal is the crash-window rebuild refusal's user-facing
 // form (#7847). Its message is the compact record text — leading with the
-// remedy and the residue path so both survive the LostRestoreFailure rune cap
-// at realistic path lengths — while Unwrap carries the
-// ErrRelocateStateUnknown verdict for the errors.Is classifiers
-// (daemon/lostrestore_environmental.go) without spending record runes on the
-// sentinel's own sentence.
+// remedy and the residue path, and stored leading the "%w (%w)" pair so the
+// LostRestoreFailure rune cap clips only the trailing stat frame (#7855) —
+// while Unwrap carries the ErrRelocateStateUnknown verdict for the errors.Is
+// classifiers (daemon/lostrestore_environmental.go) without spending record
+// runes on the sentinel's own sentence.
 type residueRebuildRefusal struct{ msg string }
 
 func (e *residueRebuildRefusal) Error() string { return e.msg }
 
 func (e *residueRebuildRefusal) Unwrap() error { return git.ErrRelocateStateUnknown }
+
+// baseNames reduces residue paths to their basenames for the capped record:
+// every candidate is a sibling of the recorded source path, whose parent the
+// record names once, so the basenames carry the same locating information as
+// the absolute paths without spending record runes on the shared directory
+// prefix (#7855).
+func baseNames(paths []string) []string {
+	names := make([]string, len(paths))
+	for i, p := range paths {
+		names[i] = filepath.Base(p)
+	}
+	return names
+}
 
 // residueRecordList joins residue paths into the user-facing record: the
 // first path always whole — it is the thing the remedy acts on — more whole
