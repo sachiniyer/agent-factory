@@ -630,12 +630,14 @@ func TestLostRestoreFailure_ResidueRefusal_AllForms(t *testing.T) {
 
 		record := crashWindowRefusalRecord(t, inst, gw, wtPath)
 		assertFitsCap(t, record)
-		assert.Contains(t, record, filepath.Base(quarantine),
-			"the mixed form must keep the quarantine the remedy acts on")
-		assert.Contains(t, record, "to move this session's stranded worktree back, then retry",
-			"the mixed form must keep the remedy purpose and the retry")
-		assert.Contains(t, record, "unverified residue",
-			"the mixed form must record the unverified residue's presence")
+		assert.Contains(t, record, "mv -- "+filepath.Base(quarantine),
+			"the mixed form must keep the quarantine the remedy acts on — the parentless mv floor at this squeeze")
+		assert.Contains(t, record, "move this session's stranded worktree back",
+			"the mixed form must keep the remedy purpose")
+		assert.Contains(t, record, "then retry",
+			"the mixed form must keep the retry")
+		assert.Contains(t, record, "unverified residue "+filepath.Base(orphan),
+			"the mixed form must name the unverified residue while the clause fits")
 		assert.Contains(t, record, "do not move it into the session path unless proven",
 			"the mixed form must keep the unverified warning")
 		assert.Contains(t, record, "#7819",

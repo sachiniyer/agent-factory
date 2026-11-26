@@ -221,6 +221,10 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 		// mandatory clauses behind it keep — the unverified warning and its
 		// #7819 citation first, then the staged-copy warning and any extra
 		// proven-ours quarantines — so a fuller command never starves them.
+		// The ladder's only other rung is the parentless mv floor: an elided
+		// parent would put a non-path `…` inside a command meant to be pasted,
+		// and every operand stays shellsuggest-quoted on both rungs so a leaf
+		// with spaces or metacharacters still arrives as one operand.
 		quarantineLeaf := filepath.Base(oursSource[0])
 		unverifiedFloorLen := floorLen(unverifiedExtraFloor, len(unverified))
 		copyFloorLen := floorLen(copyExtraFloor, len(oursCopy))
@@ -232,26 +236,8 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 					shellsuggest.Command("mv", "--", quarantineLeaf, srcLeaf) +
 					" to move this session's stranded worktree back, then retry"
 			},
-			func(room int) string {
-				// The parent's middle is the part that gives next; the
-				// quoted operand keeps its head and tail so the command
-				// still locates the folder the daemon log names in full.
-				fixed := len("cd ") + 2 + len(" && ") +
-					len([]rune(shellsuggest.Command("mv", "--", quarantineLeaf, srcLeaf))) +
-					len(" to move this session's stranded worktree back, then retry")
-				parentRef := elideMiddle(parent, room-fixed)
-				if len([]rune(parentRef)) < residueParentFloorRunes {
-					// An elided stub this short locates nothing — render
-					// the full parent so the room check rejects this form
-					// and the parentless floor takes the record instead.
-					parentRef = parent
-				}
-				return shellsuggest.Command("cd", parentRef) + " && " +
-					shellsuggest.Command("mv", "--", quarantineLeaf, srcLeaf) +
-					" to move this session's stranded worktree back, then retry"
-			},
 			func(int) string {
-				return "mv " + quarantineLeaf + " " + srcLeaf +
+				return shellsuggest.Command("mv", "--", quarantineLeaf, srcLeaf) +
 					" — move this session's stranded worktree back (parent in the daemon log), then retry"
 			},
 		))
