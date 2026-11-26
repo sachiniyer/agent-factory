@@ -318,7 +318,13 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// remove root_agents and suppress respawn before returning the error. The
 	// caller then had neither a deleted project nor its previous lifecycle
 	// configuration. taskTargetMu keeps this preflight stable through the loop.
-	taskTargets, err := m.preflightDeleteProjectTaskTargets(repoID)
+	//
+	// Every identity the delete fences is checked (#7829 R1), not only the one
+	// the request was addressed by: a legacy row's opt-in and its tasks can sit
+	// under the historical path-hash while the request names the derived id,
+	// and sweeping that opt-in while an enabled task targets its root strands
+	// the task behind a successful delete.
+	taskTargets, err := m.preflightDeleteProjectTaskTargets(repoID, fenced[1:]...)
 	if err != nil {
 		return result, err
 	}
@@ -396,7 +402,21 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// The tombstone records WHOSE delete this was, so a later proven
 	// mismatch can release it only for the deleted claimant itself (#3299
 	// review round 15). Resolved before the lock — see deleteProjectTarget.
-	m.suppressRootAgent(repoID, resolved.carryWorkspace, resolved.claimantProjectID)
+	// Re-check the recorded root as late as the sweep (PR #7853 review
+	// R5/R12): the derived selector matched only while that root was
+	// determinately free, and path-keyed carry retirement and create-ticket
+	// withdrawal may run only on the same verdict the optInIDs sweep above
+	// required. A root that now resolves belongs to whoever occupies it, and
+	// an INCONCLUSIVE probe cannot show the derived id still names this row
+	// rather than a live occupant — so in either case the path-keyed reach is
+	// dropped and only the identity-keyed legs run.
+	carryWorkspace := resolved.carryWorkspace
+	if config.IsDerivedRepoID(repoID) && repoPath != "" {
+		if _, err := config.RepoFromPath(repoPath); err == nil || !config.PathIsDeterminatelyFree(repoPath, err) {
+			carryWorkspace = ""
+		}
+	}
+	m.suppressRootAgent(repoID, carryWorkspace, resolved.claimantProjectID)
 	// Stamp the HISTORICAL identity too (#7181), mirroring the fenced list and
 	// the optInIDs durable sweep above. A repository main-rooted at the recorded
 	// path has this id as its real one, and the ensure sweep consults the
@@ -698,17 +718,27 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	return result, nil
 }
 
-func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][]task.Task, error) {
+// preflightDeleteProjectTaskTargets checks every identity the delete fences —
+// the requested repoID plus each extraFenced id (#7829 R1): a derived-id
+// delete also removes the historical path-hash identity's opt-in and sweeps
+// its sessions' project, so an enabled task bound to EITHER id can strand.
+// repoID remains the id errors are phrased against.
+func (m *Manager) preflightDeleteProjectTaskTargets(repoID string, extraFenced ...string) (map[string][]task.Task, error) {
+	repoIDs := append([]string{repoID}, extraFenced...)
 	m.mu.Lock()
-	var titles []string
-	hasRoot := false
+	titleSet := make(map[string]struct{})
+	hasRoot := make(map[string]bool, len(repoIDs))
 	for key, instance := range m.instances {
 		rid, title := splitDaemonInstanceKey(key)
-		if rid != repoID || instance == nil || instance.GetLiveness() == session.LiveArchived {
+		if instance == nil || instance.GetLiveness() == session.LiveArchived {
 			continue
 		}
-		titles = append(titles, title)
-		hasRoot = hasRoot || title == session.RootSessionTitle
+		for _, id := range repoIDs {
+			if rid == id {
+				titleSet[title] = struct{}{}
+				hasRoot[id] = hasRoot[id] || title == session.RootSessionTitle
+			}
+		}
 	}
 	m.mu.Unlock()
 	// An enabled root is part of the project's effective live-session set even
@@ -721,20 +751,39 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 	// willMaterialize=false, but deleting through that answer would drop the
 	// root_agents opt-in and leave the enabled task stranded the moment the
 	// config becomes readable again — the exact hazard this preflight refuses.
-	if !hasRoot {
-		switch m.rootAgentMaterializeVerdictFor(repoID).reason {
-		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable, rootAgentAttributionPending, rootAgentLegacyProbeUnanswered, rootAgentProjectRootProbeUnanswered:
-			titles = append(titles, session.RootSessionTitle)
+	// Each fenced identity gets the verdict under ITS OWN id: a legacy row's
+	// path-keyed opt-in materializes under the historical hash, not the derived
+	// id the request was addressed by.
+	for _, id := range repoIDs {
+		if hasRoot[id] {
+			continue
 		}
+		switch m.rootAgentMaterializeVerdictFor(id).reason {
+		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable, rootAgentAttributionPending, rootAgentLegacyProbeUnanswered, rootAgentProjectRootProbeUnanswered:
+			titleSet[session.RootSessionTitle] = struct{}{}
+		}
+	}
+	titles := make([]string, 0, len(titleSet))
+	for title := range titleSet {
+		titles = append(titles, title)
 	}
 	sort.Strings(titles)
 	if len(titles) == 0 {
 		return make(map[string][]task.Task), nil
 	}
 
-	taskTargets, err := m.loadEnabledTaskTargets(repoID)
-	if err != nil {
-		return nil, fmt.Errorf("delete project %s: could not determine whether enabled tasks target its sessions; nothing was changed: %w", repoID, err)
+	// Merge each fenced identity's task bindings into one target map: a task
+	// bound to the historical id strands exactly like one bound to the derived
+	// id once this delete removes the session or sweeps the root's opt-in.
+	taskTargets := make(map[string][]task.Task)
+	for _, id := range repoIDs {
+		targets, err := m.loadEnabledTaskTargets(id)
+		if err != nil {
+			return nil, fmt.Errorf("delete project %s: could not determine whether enabled tasks target its sessions; nothing was changed: %w", repoID, err)
+		}
+		for title, targeted := range targets {
+			taskTargets[title] = append(taskTargets[title], targeted...)
+		}
 	}
 
 	var blockers []string

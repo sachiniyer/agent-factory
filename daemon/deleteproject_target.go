@@ -181,7 +181,36 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 		// missing path retains its recorded-root fallback instead of being
 		// guessed into a different project.
 		candidateID := ""
-		if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project); ok {
+		if config.IsDerivedRepoID(repoID) {
+			// An invented id names exactly one thing: the identity-less row
+			// whose recorded root it was derived from (#7829 R5) — and only
+			// while that root is DETERMINATELY free (PR #7853 review): absent,
+			// or provably not inside a repository. Any other outcome leaves the
+			// question open — a resolving checkout means the row's real
+			// identity is knowable and the stale derived id names nothing it
+			// still is (honoring it deregisters the row while the opt-in sweep
+			// skips the path id a resolving checkout does not own under its
+			// path hash, so root_agents survives to recreate the project after
+			// restart), and an inconclusive probe cannot show the derived id
+			// still names this row rather than a live occupant. The former
+			// falls through unselected — the idempotent no-op this request was
+			// before the derived match existed — while the latter REFUSES, the
+			// same verdict the path form requires of normalizeDeleteProjectPath
+			// (PR #7853 review R14): an operational git failure is not "nothing
+			// is there", and a zero-count success over it would hide a live
+			// checkout's own opt-in surviving the deregister. A row that
+			// recorded a real identity belongs to that id, never to this one.
+			if project.RepoID == "" && config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(project.Root)) == repoID {
+				root := filepath.Clean(project.Root)
+				if _, err := config.RepoFromPath(root); err != nil {
+					if config.PathIsDeterminatelyFree(root, err) {
+						candidateID = repoID
+					} else {
+						return "", fmt.Errorf("delete project %s: git could not give a verdict about its recorded root %s, so whether that path is still a checkout is unknown; nothing was changed — repair the checkout's access or metadata and retry: %w", repoID, root, err)
+					}
+				}
+			}
+		} else if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project); ok {
 			candidateID = resolvedID
 		} else if !project.PathExists {
 			// Only a determinately absent path falls back. It falls back to the
@@ -248,6 +277,31 @@ func claimantForRecord(p config.Project) string {
 		return p.ID
 	}
 	return ""
+}
+
+// recordedRootIdentityDisproven reports that the identity a row is filed
+// under was already DISPROVEN for the checkout at its recorded root: a heal
+// probe's marker read succeeded and differed, which is the one established
+// fact that answers the question a present-but-not-git root otherwise leaves
+// open — the root provably belonged to a different project, so the row's
+// recorded identity stands and its delete proceeds exactly as it did on
+// master (#3530's proven-mismatch shape). A verdict the snapshot already
+// consumed (record.identityMismatch) and a settled probe still in the map say
+// the same thing at different ages, and both count; anything short of a
+// successful differing read — an in-flight or inconclusive probe, an
+// unreadable marker, no probe at all — leaves the identity unproven.
+func (m *Manager) recordedRootIdentityDisproven(repoID string) bool {
+	if record, ok := m.rootAgentLayers.Load().unresolvedRoots[repoID]; ok && record.identityMismatch {
+		return true
+	}
+	m.mu.Lock()
+	probe := m.rootHealProbes[repoID]
+	m.mu.Unlock()
+	if probe == nil {
+		return false
+	}
+	_, disproven := probeProvedItsCheckout(probe)
+	return disproven
 }
 
 // resolveDeleteProjectTarget performs every filesystem/Git selector probe
@@ -357,25 +411,53 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 				rowFound = true
 				claimantProjectID = claimantForRecord(p)
 				if claimantProjectID == "" {
-					// The row matches this path by NAME, but nothing proves the
-					// checkout being deleted is that row's project — an
-					// unrelated clone at an unresolved project's old path,
-					// deleted before attribution has a verdict. Deregistering
-					// on a pathname match alone would destroy the original
-					// project's registry directory and its personal config on
-					// behalf of a delete that never targeted it (#3299 review
-					// id 3910519845). Drop the path: the delete still tears
-					// down and suppresses the occupant, and the stale record
-					// stays for its own owner to resolve or remove.
+					// A present path whose checkout marker cannot be proven is
+					// not, by itself, proof the checkout being deleted is this
+					// row's project. For an unproven REAL checkout (the else
+					// branch below) the row is abandoned and the path is dropped,
+					// because a non-derived id names a DIFFERENT project the
+					// delete must not reach on a pathname match alone.
 					//
-					// And with the path goes the CLAIM that a row was selected
-					// (#3530 review id 3919604370): this row is abandoned, so
-					// leaving the flag set would tell the transition gate a
-					// project had been selected and skip the reverse check —
-					// letting the delete act on the candidate identity while
-					// the unresolved row survives to reappear.
-					repoPath = ""
-					rowFound = false
+					// A DERIVED repo id is the other shape: the row recorded no
+					// identity of its own (#3530's legacy shape: RepoID "") and
+					// the path did not resolve, so the d-<hex> id this delete
+					// targets IS this row's own provisional identity — a value
+					// no session is keyed under and no root_agents entry answers
+					// to. Dropping repoPath here would disarm the three downstream
+					// safeguards that ARE this project's own identity (the
+					// historical stranded-session refusal, the opt-in path-hash
+					// sweep, and the path-form deregister, all gated on
+					// repoPath), and the delete would return a zero-count SUCCESS
+					// while the project's live sessions (keyed under the recorded
+					// path's historical hex hash), its durable opt-in and its
+					// registry row all survive untouched — undeletable by path
+					// behind a success message. Keep the matched row's recorded
+					// root so the existing phase-1 stranded gate and both-identity
+					// sweep carry the case exactly as the absent-path shape
+					// already does: fail closed when sessions remain under the
+					// historical identity, and actually remove the row and opt-in
+					// when none do.
+					if !config.IsDerivedRepoID(repoID) {
+						// The row matches this path by NAME, but nothing proves
+						// the checkout being deleted is that row's project — an
+						// unrelated clone at an unresolved project's old path,
+						// deleted before attribution has a verdict. Deregistering
+						// on a pathname match alone would destroy the original
+						// project's registry directory and its personal config on
+						// behalf of a delete that never targeted it (#3299 review
+						// id 3910519845). Drop the path: the delete still tears
+						// down and suppresses the occupant, and the stale record
+						// stays for its own owner to resolve or remove.
+						//
+						// And with the path goes the CLAIM that a row was
+						// selected (#3530 review id 3919604370): this row is
+						// abandoned, so leaving the flag set would tell the
+						// transition gate a project had been selected and skip the
+						// reverse check — letting the delete act on the candidate
+						// identity while the unresolved row survives to reappear.
+						repoPath = ""
+						rowFound = false
+					}
 				}
 				break
 			}
@@ -422,6 +504,31 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	// delete's own fence.
 	if err := m.refuseIfIdentityInTransition(repoID, rowFound); err != nil {
 		return deleteProjectTarget{repoID: repoID}, err
+	}
+	// A legacy row whose recorded root is present but no longer a git checkout
+	// is the #7829 shape, and it is undeletable rather than deletable (PR #7853
+	// review, third round): git's own worktree ledger is lossy — a routine
+	// `git worktree prune` on every archive removes the records that were the
+	// only evidence of which identity owned the root — so no scan af can run
+	// establishes that no live session, task, carry or opt-in still belongs to
+	// it. Deleting through that uncertainty deregisters the row while a live
+	// project survives behind a reported success, which is the orphan class
+	// #2549 exists to close. Refuse instead, with the root named and both
+	// remedies: restore the checkout's git metadata so af can establish the
+	// identity and delete again, or remove the directory and delete it as
+	// absent — the one verdict about the root that is provable. The sweep and
+	// tombstone machinery above never ran, so nothing was changed.
+	//
+	// The refusal stands only while the row's identity is UNPROVEN. A marker
+	// read that succeeded and differed has already answered the question this
+	// branch cannot otherwise answer — the checkout at the recorded root was
+	// provably a different project's — so the recorded identity stands and the
+	// delete proceeds exactly as it did on master; catching that case would
+	// regress a delete master completes.
+	if rowFound && config.IsDerivedRepoID(repoID) && repoPath != "" {
+		if _, err := config.RepoFromPath(filepath.Clean(repoPath)); errors.Is(err, config.ErrNotGitRepository) && !m.recordedRootIdentityDisproven(repoID) {
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s is present but no longer a git checkout, so af cannot establish which identity its sessions and opt-ins were filed under — nothing was changed; restore the checkout's git metadata and delete again, or remove the directory and delete it as absent", repoID, repoPath)
+		}
 	}
 	carryWorkspace := ""
 	if repoPath != "" {
