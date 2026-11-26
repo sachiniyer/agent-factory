@@ -66,9 +66,14 @@ func TestMissingWorktreeRebuildRefusal_RefusesOverCrashWindowResidue(t *testing.
 	assert.ErrorIs(t, err, git.ErrRelocateStateUnknown,
 		"the refusal must be shaped as an unresolved relocation so callers can tell it from a committed deletion")
 	assert.Contains(t, err.Error(), ".af-source-", "the refusal must name the stranded residue")
-	assert.Contains(t, err.Error(), quarantine, "the refusal must name the specific quarantine path")
-	assert.Contains(t, err.Error(), "mv "+quarantine+" "+wtPath,
-		"the refusal must direct recovery from the proven-ours .af-source-* quarantine: move it back to the session path")
+	assert.Contains(t, err.Error(), filepath.Base(quarantine),
+		"the refusal must name the specific quarantine")
+	assert.Contains(t, err.Error(), wtParent,
+		"the refusal must name the residue's parent so its basename resolves to the full path")
+	assert.Contains(t, err.Error(),
+		shellsuggest.Command("cd", wtParent)+" && "+
+			shellsuggest.Command("mv", "--", filepath.Base(quarantine), filepath.Base(wtPath)),
+		"the refusal must direct recovery from the proven-ours .af-source-* quarantine: move it back onto the session path")
 
 	// The stranded worktree survives untouched with its uncommitted file — the
 	// exact loss the residue arbitration exists to prevent.
@@ -142,14 +147,17 @@ func TestMissingWorktreeRebuildRefusal_UnverifiedResidueRefusesFailClosed(t *tes
 	err = missingWorktreeRebuildRefusal(inst, gw, true, "claude")
 	require.Error(t, err, "an unverified residue must refuse fail-closed rather than guess a deletion")
 	assert.ErrorIs(t, err, git.ErrRelocateStateUnknown)
-	assert.Contains(t, err.Error(), orphan, "the refusal must name the unverified residue")
+	assert.Contains(t, err.Error(), filepath.Base(orphan),
+		"the refusal must name the unverified residue")
+	assert.Contains(t, err.Error(), "in "+filepath.Dir(orphan),
+		"the refusal must name the residue's folder so its basename resolves to the full path")
 	assert.NotContains(t, err.Error(), "move it back to",
 		"the refusal for an unverified residue must never instruct the operator to move it back into this session's path")
 	assert.NotContains(t, err.Error(), "move it back to "+wtPath,
 		"the refusal must not name this session's recorded path as a move-back target")
 	assert.Contains(t, err.Error(), "could not verify",
 		"the refusal must say the binding could not be verified, not claim the residue is this session's work")
-	assert.Contains(t, err.Error(), "move it out of "+filepath.Dir(orphan),
+	assert.Contains(t, err.Error(), "move it out of that folder",
 		"the refusal must tell the operator how to get unblocked: move the residue out of its parent, then retry")
 	assert.Contains(t, err.Error(), "#7819",
 		"the refusal must cite the follow-up tracking the ownership-model redesign")
@@ -236,7 +244,10 @@ func TestRecover_RefusesRebuildOverCrashWindowResidue(t *testing.T) {
 	assert.ErrorIs(t, err, git.ErrRelocateStateUnknown,
 		"the refusal must be shaped as an unresolved relocation so the lost-restore loop classifies it consistently with the archive side")
 	assert.Contains(t, err.Error(), ".af-source-", "the refusal must name the stranded residue")
-	assert.Contains(t, err.Error(), quarantine)
+	assert.Contains(t, err.Error(), filepath.Base(quarantine),
+		"the refusal must name the specific quarantine")
+	assert.Contains(t, err.Error(), wtParent,
+		"the refusal must name the residue's parent so its basename resolves to the full path")
 	assert.Equal(t, Lost, restored.GetStatus(),
 		"refusing the rebuild must leave the row Lost so the rescue window stays open")
 	assert.Zero(t, newSessions, "no agent may be spawned over the stranded quarantine")
@@ -252,9 +263,32 @@ func TestRecover_RefusesRebuildOverCrashWindowResidue(t *testing.T) {
 		"the recorded path must stay absent so the archive-side residue arbitration still runs on retry")
 }
 
+// residueTestParentRunes is the fixed length the residue-cap tests pad the
+// worktree's parent directory to — about the depth macOS's /var/folders/…
+// tempdirs reached in #7855, where the stored record's remedy was clipped.
+// Padding rather than relying on t.TempDir() makes Linux exercise the same
+// budget macOS does.
+const residueTestParentRunes = 200
+
+// residueParentAtCapDepth returns a fresh parent directory exactly
+// residueTestParentRunes runes long, built under t.TempDir() — deterministic
+// across platforms, so the stored-record budget is exercised at the depth
+// that clipped the remedy on macOS (#7855) no matter which OS runs the test.
+func residueParentAtCapDepth(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	pad := residueTestParentRunes - len([]rune(base)) - 1
+	require.GreaterOrEqual(t, pad, 1,
+		"t.TempDir() must leave room for at least one padding rune")
+	parent := filepath.Join(base, strings.Repeat("p", pad))
+	require.NoError(t, os.Mkdir(parent, 0o755))
+	return parent
+}
+
 // crashWindowRefusalRecord builds the crash-window rebuild refusal for
 // inst/gw and stores it exactly the way the daemon does — wrapped in the
-// respawn path's WorktreeUnavailableError + stat-ENOENT frame — returning the
+// respawn path's WorktreeUnavailableError, with the refusal LEADING the
+// "%w (%w)" pair and the stat ENOENT trailing (#7855) — returning the
 // durable, user-facing record text LostRestoreFailure keeps (#7847).
 func crashWindowRefusalRecord(t *testing.T, inst *Instance, gw *git.GitWorktree, wtPath string) string {
 	t.Helper()
@@ -265,26 +299,28 @@ func crashWindowRefusalRecord(t *testing.T, inst *Instance, gw *git.GitWorktree,
 	_, statErr := os.Stat(wtPath)
 	require.Error(t, statErr, "the recorded path is absent in the crash-window footprint")
 	stored := &WorktreeUnavailableError{Title: inst.Title, WorktreePath: wtPath,
-		Err: fmt.Errorf("%w (%w)", statErr, refusal)}
+		Err: fmt.Errorf("%w (%w)", refusal, statErr)}
 	require.True(t, inst.SetLostRestoreFailure(4, stored))
 	snap := inst.LostRestoreFailureSnapshot()
 	require.NotNil(t, snap)
 	return snap.Error
 }
 
-// TestLostRestoreFailure_ResidueRefusalFitsCap_ProvenOurs pins #7847: the
-// durable record — capped at lostRestoreFailureMaxRunes runes by
+// TestLostRestoreFailure_ResidueRefusalFitsCap_ProvenOurs pins #7847/#7855:
+// the durable record — capped at lostRestoreFailureMaxRunes runes by
 // sanitizeLostRestoreError — must keep the residue path and the move-it-back
-// remedy for a realistic path length, so the user-facing row tells the
-// operator what to do, not just that the restore refused. On master the
-// ~780-rune refusal was cut before it ever named either.
+// remedy at a realistic path DEPTH (a 200-rune parent, the size macOS tempdirs
+// reach), so the user-facing row tells the operator what to do, not just that
+// the restore refused. On master before #7855 the ~790-rune stored string was
+// cut inside the mv command's second operand.
 func TestLostRestoreFailure_ResidueRefusalFitsCap_ProvenOurs(t *testing.T) {
 	repoRoot := residueTestRepo(t)
 	const branch = "af/residue-fits-own"
 	// A long, realistic leaf — the shape #7847 measured
-	// (/home/user/Desktop/myrepo-fix-login-bug-with-a-long-name) — so the
-	// record cannot borrow short-path slack the old message needed.
-	wtParent := t.TempDir()
+	// (/home/user/Desktop/myrepo-fix-login-bug-with-a-long-name) — under a
+	// parent padded to the depth #7855 measured on macOS, so the record
+	// cannot borrow short-path slack the old message needed.
+	wtParent := residueParentAtCapDepth(t)
 	wtPath := filepath.Join(wtParent, "myrepo-fix-login-bug-with-a-long-name")
 	gitOut(t, repoRoot, "worktree", "add", "-b", branch, wtPath)
 	quarantine := simulateCrashWindowRename(t, wtPath)
@@ -296,21 +332,26 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_ProvenOurs(t *testing.T) {
 	record := crashWindowRefusalRecord(t, inst, gw, wtPath)
 	assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes,
 		"the stored record stays inside the durable cap by construction")
-	assert.Contains(t, record, "mv "+quarantine+" "+wtPath,
-		"the stored record must lead with the remedy: mv the proven .af-source-* quarantine back to the session path")
-	assert.Contains(t, record, "move this session's stranded worktree back",
+	wantCmd := shellsuggest.Command("cd", wtParent) + " && " +
+		shellsuggest.Command("mv", "--", filepath.Base(quarantine), filepath.Base(wtPath))
+	assert.Contains(t, record, wantCmd,
+		"the stored record must lead with the remedy: mv the proven .af-source-* quarantine back onto the session path")
+	assert.Contains(t, record, "to move this session's stranded worktree back",
 		"the stored record must keep the remedy purpose, not just the fact of the refusal")
+	assert.Contains(t, record, "(stat ",
+		"the stat detail trails the refusal where the cap can clip it — the remedy leads the pair")
 }
 
 // TestLostRestoreFailure_ResidueRefusalFitsCap_Unverified is the unverified
-// half of #7847: the stored record must keep the residue path and the
-// move-it-out remedy at a realistic path length — and must never tell the
-// operator to move unverified residue into this session's path.
+// half of #7847/#7855: the stored record must keep the residue path (basename
+// + the folder resolving it) and the move-it-out remedy at a realistic path
+// depth — and must never tell the operator to move unverified residue into
+// this session's path.
 func TestLostRestoreFailure_ResidueRefusalFitsCap_Unverified(t *testing.T) {
 	repoRoot := residueTestRepo(t)
 	const branch = "af/residue-fits-unverified"
 	gitOut(t, repoRoot, "branch", branch)
-	wtParent := t.TempDir()
+	wtParent := residueParentAtCapDepth(t)
 	wtPath := filepath.Join(wtParent, "myrepo-fix-login-bug-with-a-long-name")
 	// An orphan residue with NO linked-worktree .git pointer beside the
 	// (absent) source — a residue whose git binding cannot be read.
@@ -324,29 +365,29 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_Unverified(t *testing.T) {
 
 	record := crashWindowRefusalRecord(t, inst, gw, wtPath)
 	assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes)
-	assert.Contains(t, record, orphan,
+	assert.Contains(t, record, filepath.Base(orphan),
 		"the stored record must name the unverified residue")
-	assert.Contains(t, record, "move it out of "+wtParent,
+	assert.Contains(t, record, "in "+wtParent,
+		"the stored record must name the residue's folder so its basename resolves to the full path")
+	assert.Contains(t, record, "move it out of that folder",
 		"the stored record must keep the remedy: move unverified residue out of its folder once checked, then retry")
+	assert.Contains(t, record, "once checked, then retry")
 	assert.NotContains(t, record, "move it back",
 		"the stored record must never direct unverified residue into this session's path")
 }
 
 // TestLostRestoreFailure_ResidueRefusalFitsCap_MultiUnverified pins the
-// counted-list half of #7847: when several unverified residue paths cannot all
-// fit under the cap, the stored record names the first ones whole and counts
-// the rest with a pointer to the daemon log — and that ", and N more" suffix
-// is itself budgeted, so it cannot push the record past the cap and re-clip
-// the remedy the record exists to carry.
+// counted-list half of #7847/#7855: when several unverified residue paths
+// cannot all fit under the cap, the stored record names the first ones whole
+// and counts the rest with a pointer to the daemon log — and that ", and N
+// more" suffix is itself budgeted, so it cannot push the remedy past the cap.
+// The 200-rune parent is deliberate: it forces real budget pressure on every
+// platform, so only basenames + the counted suffix can survive.
 func TestLostRestoreFailure_ResidueRefusalFitsCap_MultiUnverified(t *testing.T) {
 	repoRoot := residueTestRepo(t)
 	const branch = "af/residue-fits-multi"
 	gitOut(t, repoRoot, "branch", branch)
-	// SocketTempDir keeps the parent short (/tmp/af-*) so the whole record —
-	// residue list, remedy and tail — can fit under the cap, making any clip a
-	// defect in the budget rather than a limit of the medium.
-	wtParent := filepath.Join(testguard.SocketTempDir(t), "Desktop")
-	require.NoError(t, os.MkdirAll(wtParent, 0o755))
+	wtParent := residueParentAtCapDepth(t)
 	wtPath := filepath.Join(wtParent, "myrepo-fix-login-bug")
 	// Six unverified orphans (no .git pointer): sorted readdir order names
 	// them in the record, so the "0"-hex one is always the first named.
@@ -364,27 +405,29 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_MultiUnverified(t *testing.T) 
 	record := crashWindowRefusalRecord(t, inst, gw, wtPath)
 	assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes,
 		"the stored record stays inside the durable cap by construction")
-	assert.NotContains(t, record, "…",
-		"at these path lengths the whole record fits; a clip means the omission suffix overflowed the budget")
-	assert.Contains(t, record, orphans[0],
-		"the first residue path is always named whole — the remedy acts on it")
+	assert.Contains(t, record, filepath.Base(orphans[0]),
+		"the first residue is always named whole — the remedy acts on it")
 	assert.Contains(t, record, "more (full list in the daemon log)",
 		"the residue paths that do not fit are counted with a pointer to the daemon log, never silently truncated")
-	assert.Contains(t, record, "move it out of "+wtParent,
+	assert.Contains(t, record, "in "+wtParent,
+		"the stored record must name the residue's folder so the basenames resolve to full paths")
+	assert.Contains(t, record, "move it out of that folder",
 		"the stored record must keep the remedy after the counted residue list")
-	assert.Contains(t, record, "(#7819)",
-		"the stored record must keep the tail warning unclipped — the suffix must not push it past the cap")
+	assert.NotContains(t, record, "move it back",
+		"the stored record must never direct unverified residue into this session's path")
 }
 
-// TestLostRestoreFailure_ResidueRefusalFitsCap_QuotedMv pins the mv command's
-// quoting (#7847): the stored record leads with a literal `mv <q> <s>` the
-// operator is meant to paste, so a worktree path containing spaces or shell
-// metacharacters must still arrive as exactly two operands.
+// TestLostRestoreFailure_ResidueRefusalFitsCap_QuotedMv pins the remedy
+// command's quoting (#7847, #7855): the stored record leads with a literal
+// `cd <parent> && mv <q> <s>` the operator is meant to paste, so a worktree
+// path containing spaces or shell metacharacters must still arrive as exactly
+// one operand per piece.
 func TestLostRestoreFailure_ResidueRefusalFitsCap_QuotedMv(t *testing.T) {
 	repoRoot := residueTestRepo(t)
 	const branch = "af/residue-fits-space"
-	// A parent with a space — the shape that splits an unquoted `mv a b` into
-	// four operands and makes the suggested recovery fail on paste.
+	// A parent with a space — the shape that splits an unquoted `cd a` or
+	// `mv a b` into extra operands and makes the suggested recovery fail on
+	// paste.
 	wtParent := filepath.Join(testguard.SocketTempDir(t), "My Projects")
 	require.NoError(t, os.MkdirAll(wtParent, 0o755))
 	wtPath := filepath.Join(wtParent, "myrepo-fix-login-bug")
@@ -397,8 +440,10 @@ func TestLostRestoreFailure_ResidueRefusalFitsCap_QuotedMv(t *testing.T) {
 
 	record := crashWindowRefusalRecord(t, inst, gw, wtPath)
 	assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes)
-	assert.Contains(t, record, shellsuggest.Command("mv", quarantine, wtPath),
-		"the stored record must carry the mv remedy with both paths as exactly one operand each")
-	assert.NotContains(t, record, "mv "+quarantine+" "+wtPath,
-		"an unquoted mv would split a spaced path into extra operands when pasted")
+	wantCmd := shellsuggest.Command("cd", wtParent) + " && " +
+		shellsuggest.Command("mv", "--", filepath.Base(quarantine), filepath.Base(wtPath))
+	assert.Contains(t, record, wantCmd,
+		"the stored record must carry the remedy with each path as exactly one operand")
+	assert.NotContains(t, record, "cd "+wtParent,
+		"an unquoted cd would split a spaced parent into extra operands when pasted")
 }

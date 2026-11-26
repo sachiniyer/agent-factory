@@ -253,6 +253,15 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// still-running agent for nothing — leaving the row with neither a pane
 		// nor a worktree, where refusing leaves it Lost with its panes intact.
 		if refusal := missingWorktreeRebuildRefusal(i, gw, resume, resolvedProgram); refusal != nil {
+			// A residue refusal's message is the compact record that lands in
+			// the 512-rune-capped LostRestoreFailure (#7847, #7855): it leads
+			// the pair so the cap clips only the stat tail — which repeats a
+			// path the record already names — never the remedy. Other refusals
+			// keep the stat-first order the worktree diagnostics pin.
+			if _, ok := refusal.(*residueRebuildRefusal); ok {
+				return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir,
+					Err: fmt.Errorf("%w (%w)", refusal, err)}
+			}
 			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir,
 				Err: fmt.Errorf("%w (%w)", err, refusal)}
 		}
