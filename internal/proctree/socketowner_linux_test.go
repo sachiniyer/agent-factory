@@ -352,19 +352,28 @@ func TestUnixSocketOwnerSweepCostAt800Processes(t *testing.T) {
 			_, _ = c.Process.Wait()
 		}
 	})
-	// Top up in rounds: the count measured between rounds shifts as unrelated
-	// processes come and go on a shared box, so spawn the deficit plus a
-	// small margin and re-measure.
-	for round := 0; round < 4 && countSameUID() < target; round++ {
-		bin := sleeper.Path(t)
-		need := target - countSameUID() + 4
+	// Top up until the recount itself reaches the target: the count shifts
+	// between rounds as unrelated processes come and go on a shared box —
+	// the #4217 flake was such an exit landing between the last spawn round
+	// and the recount, one short at 799 with a margin of only 4. Spawn the
+	// deficit plus a churn-sized margin and re-measure until a recount sees
+	// the target, bounded by a deadline generous enough for a loaded runner.
+	// When the box genuinely cannot reach the target — a spawn error above,
+	// or the deadline closing while the recount is still short — the
+	// assertion below fails on that.
+	const margin = 32
+	deadline := time.Now().Add(3 * time.Minute)
+	bin := sleeper.Path(t)
+	got := countSameUID()
+	for got < target && time.Now().Before(deadline) {
+		need := target - got + margin
 		for i := 0; i < need; i++ {
 			c := exec.Command(bin, "600")
 			require.NoError(t, c.Start())
 			spawned = append(spawned, c)
 		}
+		got = countSameUID()
 	}
-	got := countSameUID()
 	require.GreaterOrEqual(t, got, target, "the fixture must reach ~%d same-uid processes", target)
 	t.Logf("same-uid process count for the measurement: %d (%d spawned)", got, len(spawned))
 
