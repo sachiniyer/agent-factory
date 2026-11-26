@@ -470,14 +470,19 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			// evidence describes (#7469 R4).
 			owned = append(owned, process)
 		case boundary:
-			// A positively-identified tmux process in the chain means this
-			// unproven carrier lives under SOME server — a foreign pane
-			// (#6846's global-env copy, a second server stamped with our
-			// markers), or a member the evidence cannot reach. Either way
-			// it is UNATTRIBUTABLE: refused, reported, and never signalled
-			// — an excluded carrier is never left silently (#7435, Codex
-			// 4597265500). An ATTACHED foreign carrier takes this arm — its
-			// blocking refusal is unchanged (#7469 R4).
+			// A tmux-boundary link in the chain — a positively-identified
+			// server, or a tmux-named link the live read could only answer
+			// TmuxUnknown on (#7848) — means this unproven carrier lives
+			// under SOME server: a foreign pane (#6846's global-env copy, a
+			// second server stamped with our markers), or a member the
+			// evidence cannot reach. Either way it is UNATTRIBUTABLE:
+			// refused, reported, and never signalled — an excluded carrier
+			// is never left silently (#7435, Codex 4597265500). The flag is
+			// a union — a positive placement above an unreadable link was
+			// already consumed by its own arm above, so what reaches here
+			// is exactly the carrier NOTHING could place. An ATTACHED
+			// foreign carrier takes this arm — its blocking refusal is
+			// unchanged (#7469 R4).
 			report(process.PID, fmt.Errorf(
 				"captured live pid %d marks session %s but sits behind a tmux server and cannot be proven a member — refusing to attribute it; left alive, never signalled",
 				process.PID, sanitizedName))
