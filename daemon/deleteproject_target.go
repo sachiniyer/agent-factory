@@ -181,7 +181,18 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 		// missing path retains its recorded-root fallback instead of being
 		// guessed into a different project.
 		candidateID := ""
-		if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project); ok {
+		if config.IsDerivedRepoID(repoID) {
+			// An invented id names exactly one thing: the identity-less row
+			// whose recorded root it was derived from (#7829 R5). Matching it
+			// back needs no resolution or presence — the id IS that row's root
+			// hashed under the derived namespace — so a RepoID-only request
+			// selects the same row its recorded path would, whether the root
+			// is present, absent, or simply no longer a checkout. A row that
+			// recorded a real identity belongs to that id, never to this one.
+			if project.RepoID == "" && config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(project.Root)) == repoID {
+				candidateID = repoID
+			}
+		} else if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project); ok {
 			candidateID = resolvedID
 		} else if !project.PathExists {
 			// Only a determinately absent path falls back. It falls back to the

@@ -10,7 +10,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/task"
 )
 
 // repoSessionTitlesLocked returns the titles of the repo's sessions the daemon still
@@ -254,6 +253,23 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	if historical != "" {
 		stranded = m.repoSessionTitlesLocked(historical, false)
 	}
+	// The OTHER unknown-identity direction (#7829 R2). A derived target keeps
+	// the matched row's recorded root, but a present root whose .git is gone
+	// cannot say WHICH identity its sessions were keyed under: RepoIDFromRoot
+	// covers only the case where the root was its own identity root. A root
+	// that was a linked worktree of a bare repository keys its sessions under
+	// the bare common directory's id — an identity the recorded path cannot
+	// recompute — so the historical scan above cannot see them, and the
+	// deregister below would remove the durable registration while those
+	// sessions stay live (#2549's orphan class). Fail closed instead, on
+	// evidence that does not come from the path hash: a live session whose
+	// workspace, worktree, or recorded repo path touches the recorded root
+	// may be one of them, so its presence refuses the delete before anything
+	// durable changes.
+	belonging := []string(nil)
+	if config.IsDerivedRepoID(repoID) && repoPath != "" {
+		belonging = m.liveSessionsTouchingRootLocked(repoPath, resolved.carryWorkspace)
+	}
 	// The same question asked from the identity side (#3363's third window).
 	// There, a provisional target could not reach live sessions filed under its
 	// recorded path's hash; here the delete arrives AS that hash and cannot
@@ -273,7 +289,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		unattributed = m.repoSessionTitlesLocked(repoID, false)
 	}
 	starting := m.repoSessionTitlesLocked(repoID, true)
-	if len(stranded) == 0 && len(unattributed) == 0 && len(starting) == 0 {
+	if len(stranded) == 0 && len(belonging) == 0 && len(unattributed) == 0 && len(starting) == 0 {
 		if m.projectDeletes == nil {
 			m.projectDeletes = make(map[string]struct{})
 		}
@@ -286,6 +302,10 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	if len(stranded) > 0 {
 		sort.Strings(stranded)
 		return result, fmt.Errorf("delete project %s: this project was registered before af recorded repository identities, and session(s) %v are still live under the identity its recorded path used to have; deleting now would deregister the project and leave them behind — nothing was changed. Bring the checkout at %s back once so af can record the project's identity, then delete; or archive those sessions first", repoID, stranded, repoPath)
+	}
+	if len(belonging) > 0 {
+		sort.Strings(belonging)
+		return result, fmt.Errorf("delete project %s: session(s) %v are live at or beneath the recorded root %s, but that path no longer resolves to a git checkout, so af cannot establish which repository identity this project's sessions are keyed under — removing its durable registration could leave them behind; nothing was changed. Restore the checkout's git metadata at %s once so af can record the project's identity, then delete; or archive those sessions first", repoID, belonging, repoPath, repoPath)
 	}
 	if len(unattributed) > 0 {
 		sort.Strings(unattributed)
@@ -318,9 +338,27 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// remove root_agents and suppress respawn before returning the error. The
 	// caller then had neither a deleted project nor its previous lifecycle
 	// configuration. taskTargetMu keeps this preflight stable through the loop.
-	taskTargets, err := m.preflightDeleteProjectTaskTargets(repoID)
+	//
+	// Every identity the delete fences is checked (#7829 R1), not only the one
+	// the request was addressed by: a legacy row's opt-in and its tasks can sit
+	// under the historical path-hash while the request names the derived id,
+	// and sweeping that opt-in while an enabled task targets its root strands
+	// the task behind a successful delete.
+	taskTargets, err := m.preflightDeleteProjectTaskTargets(repoID, fenced[1:]...)
 	if err != nil {
 		return result, err
+	}
+	if config.IsDerivedRepoID(repoID) && repoPath != "" {
+		// The unknowable-identity counterpart of the same preflight (#7829
+		// R1/R2): the opt-in sweep reaches a root_agents key spelled as the
+		// recorded root through its path hash, and a task bound to one of the
+		// identities this delete cannot enumerate — the bare-repo id the row's
+		// sessions may actually be keyed under — can still point at the root
+		// that key enables. A task recorded AT the recorded root is the only
+		// attribution evidence left once the root cannot resolve.
+		if err := m.preflightRecordedRootTaskTargets(repoID, repoPath, resolved.carryWorkspace, fenced); err != nil {
+			return result, err
+		}
 	}
 
 	// Durably drop the repo's root_agents opt-in FIRST, before mutating ANY state,
@@ -696,58 +734,6 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 
 	m.info().Printf("deleted project %s: archived %d session(s), tore down %d in-place session(s)", repoID, len(result.Archived), len(result.Killed))
 	return result, nil
-}
-
-func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][]task.Task, error) {
-	m.mu.Lock()
-	var titles []string
-	hasRoot := false
-	for key, instance := range m.instances {
-		rid, title := splitDaemonInstanceKey(key)
-		if rid != repoID || instance == nil || instance.GetLiveness() == session.LiveArchived {
-			continue
-		}
-		titles = append(titles, title)
-		hasRoot = hasRoot || title == session.RootSessionTitle
-	}
-	m.mu.Unlock()
-	// An enabled root is part of the project's effective live-session set even
-	// while its process is momentarily absent: the ensure loop will recreate it,
-	// and task delivery waits for that same promise. Include the reserved target
-	// before the empty-roster return, or DeleteProject can suppress re-creation
-	// and strand a root-targeted task behind a title ordinary auto-create refuses.
-	// For this consumer UNKNOWN behaves like yes (#3264): a fail-closed repo
-	// (unloadable personal config, unlistable registry) reports
-	// willMaterialize=false, but deleting through that answer would drop the
-	// root_agents opt-in and leave the enabled task stranded the moment the
-	// config becomes readable again — the exact hazard this preflight refuses.
-	if !hasRoot {
-		switch m.rootAgentMaterializeVerdictFor(repoID).reason {
-		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable, rootAgentAttributionPending, rootAgentLegacyProbeUnanswered, rootAgentProjectRootProbeUnanswered:
-			titles = append(titles, session.RootSessionTitle)
-		}
-	}
-	sort.Strings(titles)
-	if len(titles) == 0 {
-		return make(map[string][]task.Task), nil
-	}
-
-	taskTargets, err := m.loadEnabledTaskTargets(repoID)
-	if err != nil {
-		return nil, fmt.Errorf("delete project %s: could not determine whether enabled tasks target its sessions; nothing was changed: %w", repoID, err)
-	}
-
-	var blockers []string
-	for _, title := range titles {
-		targeted := taskTargets[title]
-		if len(targeted) > 0 {
-			blockers = append(blockers, fmt.Sprintf("session %q: %s", title, describeTargetTasks(targeted)))
-		}
-	}
-	if len(blockers) > 0 {
-		return nil, fmt.Errorf("delete project %s: enabled task(s) target session(s) it must remove: %s; disable or retarget them, then delete the project again; nothing was changed", repoID, strings.Join(blockers, "; "))
-	}
-	return taskTargets, nil
 }
 
 // suppressRootAgent marks repoID's project as deleted for the rest of this
