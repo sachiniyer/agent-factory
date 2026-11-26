@@ -16,9 +16,10 @@ import (
 // These are the end-to-end regression tests for "CLI: Attaching to archived
 // sessions fails with opaque WebSocket 500 instead of restore guidance".
 //
-// agentServerForStreamTarget (daemon/manager_sessions.go) now refuses a non-live
-// target with promptTargetLivenessError before the WS upgrade, so the daemon's
-// /stream and /stream-info routes answer an Archived session with a non-101 HTTP
+// agentServerForStreamTarget (daemon/manager_sessions_resolve.go) now refuses
+// a non-live target with promptTargetLivenessError before the WS upgrade, so
+// the daemon's /stream and /stream-info routes answer an Archived session with
+// a non-101 HTTP
 // response carrying the actionable restore off-ramp — not by handing the instance
 // through to a WS upgrade that then fails deep at broker subscribe with a generic
 // 500 whose body the WebSocket client drops. streamGet (stream_warmup_test.go)
