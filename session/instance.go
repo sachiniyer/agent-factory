@@ -624,6 +624,19 @@ type Instance struct {
 	// offBoxSwapPersist is the daemon-installed settlement write for the
 	// record; beginOffBoxSwapInFlight refuses to send unrecorded without it.
 	offBoxSwapPersist func(*Instance) error
+	// durableAccountSwapStore is the agent-server-installed durable backing
+	// for the in-sandbox recorder's terminal record + discard tombstone
+	// (#7793). Set once at agent-server startup
+	// (InstallDurableAccountSwapRecord); nil for the daemon's in-process
+	// local sessions, which have no agent-server process to restart. Read by
+	// agentServerLocked when it builds the localAgentServer, so the recorder
+	// rehydrates before it can serve a request. Guarded by mu.
+	durableAccountSwapStore *accountSwapStore
+	// durableAccountSwapRecord is the recorder state loaded at startup,
+	// applied to the fresh localAgentServer's recorder when it is first
+	// built. Held only so the lazy AgentServer() constructor can rehydrate
+	// without re-reading the file under the instance lock. Guarded by mu.
+	durableAccountSwapRecord accountSwapRecordData
 	// pendingAccountSwapUnwritten marks pendingAccountSwap as rewritten in memory
 	// since it last reached disk: a re-planned replacement's conversation (a
 	// re-mint, a carry demotion). It survives every re-plan for the swap and is

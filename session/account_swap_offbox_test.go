@@ -207,6 +207,11 @@ func (s *acctSwapServer) DiscardAccountNext(swapID string) error {
 	// own terminal verdict — replayable by a daemon whose record clear was
 	// lost (#7793), exactly like the real server's noteStagedDiscarded.
 	s.rec.refuseLocked(swapID)
+	// The real server's discardStaged + noteStagedDiscarded persist the
+	// tombstone when a store is installed (#7793): mirror that here so a
+	// fixture whose recorder is backed by a store survives its own restart
+	// the way the real agent-server does. A no-op when no store is set.
+	s.rec.persistLocked()
 	return nil
 }
 
@@ -670,15 +675,28 @@ func TestSwapOffBoxAccountNoRecordNeedsTheHostToAgree(t *testing.T) {
 	assert.True(t, f.inst.StartupStateUnknown())
 }
 
-// The server's own record can say it could not restore the scope.
+// The server's own record can say it could not restore the scope, but a
+// terminal `unknown` means swap() ran and its scope could not be put back, so
+// the record alone cannot settle it and the discard must NOT upgrade it to
+// rolled_back — a straggler that took the lock between the read and the
+// discard can leave the host with neither account in place. The reconcile
+// fences and leaves the staged scope untouched, as on master (#7862 review
+// P2).
 func TestSwapOffBoxAccountServerThatCouldNotRestoreIsUnknown(t *testing.T) {
 	f := newSwapFixture(t)
+	// failAfter fires AFTER a successful rotation: restore() puts the scope
+	// back to the old account, leaving the host at scopeOutgoing, and the
+	// error carries the indeterminate marker so the recorder records a
+	// terminal `unknown`.
 	f.srv.failAfter = errors.New("start failed (" + accountScopeIndeterminate + ")")
 	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
-	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
-	assert.True(t, f.inst.StartupStateUnknown())
+	require.ErrorIs(t, err, ErrAccountSwapIndeterminate,
+		"a terminal unknown fences — the rotation ran and its scope could not be put back, so the record alone cannot settle it and the discard must not upgrade it to rolled_back (#7862 review P2)")
+	assert.True(t, f.inst.StartupStateUnknown(), "the row fences on a terminal unknown, as on master")
+	assert.NotNil(t, f.inst.InFlightOffBoxSwap(), "the in-flight record is kept for the next reconcile")
 	acct, _ := f.inst.AccountSelection()
-	assert.Equal(t, "work", acct)
+	assert.Equal(t, "work", acct, "the old account is the row's recorded account")
+	assert.DirExists(t, f.stagedDir(), "the staged scope is left in place while the row fences — the discard does not run against a terminal unknown")
 }
 
 // A status request made while the swap is mid-flight waits for its terminal
