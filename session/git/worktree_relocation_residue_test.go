@@ -8,7 +8,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -304,19 +303,17 @@ func walkCopy(src, dst string) error {
 // worktree stranded under `.af-source-*` with the uncommitted file, staged
 // copy under `.af-copy-*`) and that ListAFRelocationResidue discovers both.
 //
-// Precondition: a second writable filesystem. The test attempts to use
-// /dev/vdb-style loopback: it searches common mount points for a directory
-// whose st_dev differs from /tmp's; if none exists, it creates a loopback
-// ext4 image and mounts it (requires CAP_SYS_ADMIN; skipped if unavailable).
+// The cross-device path is forced by an EXDEV answer at the first rename, so
+// every write stays inside t.TempDir() — the engine's EXDEV branch is
+// identical either way, EXDEV is only what selects it.
 func TestRelocateCrashWindow_RealCrossDeviceMoveLeavesResidue(t *testing.T) {
 	if os.Getenv("AF_CRASH_CHILD_SECOND_FS") == "1" {
 		runChildRelocateCrash(t)
 		return
 	}
 
-	secondFS := findOrMakeSecondFilesystem(t)
 	srcParent := t.TempDir()
-	destParent := secondFS
+	destParent := t.TempDir()
 
 	src := filepath.Join(srcParent, "wt-crash")
 	require.NoError(t, os.Mkdir(src, 0o755))
@@ -381,9 +378,10 @@ func TestRelocateCrashWindow_RealCrossDeviceMoveLeavesResidue(t *testing.T) {
 	assert.ElementsMatch(t, []string{quarantine, staging}, both)
 }
 
-// runChildRelocateCrash is the child harness: it sets the EXDEV seam (a real
-// second filesystem is already in use, but the seam guarantees the fallback
-// path is taken even if the kernel would not return EXDEV), installs the
+// runChildRelocateCrash is the child harness: it installs the EXDEV answer
+// for the engine's first same-filesystem rename (so the cross-device path
+// runs with every write inside the test's temp dirs — no second filesystem,
+// no loopback mount, no /dev/shm, /run or /var/tmp writes), installs the
 // crash seam at moveDirBeforeDestCommit, and runs the real
 // moveDirCrossDevice. The os.Exit(9) inside the seam models the daemon
 // death: it fires AFTER the quarantine rename and staged copy, BEFORE the
@@ -395,6 +393,7 @@ func runChildRelocateCrash(t *testing.T) {
 	if src == "" || dest == "" {
 		t.Fatal("AF_CRASH_SRC/AF_CRASH_DEST not set")
 	}
+	renamePath = func(string, string) error { return syscall.EXDEV }
 	moveDirBeforeDestCommit = func(string) error {
 		os.Exit(9)
 		return nil
@@ -402,57 +401,6 @@ func runChildRelocateCrash(t *testing.T) {
 	_ = moveDirCrossDevice(src, dest, "move")
 	t.Fatalf("the moveDirBeforeDestCommit seam did not fire; move completed unexpectedly")
 }
-
-// findOrMakeSecondFilesystem locates a directory whose st_dev differs from
-// /tmp's so the kernel returns a real EXDEV for a cross-dir rename. If none
-// of the common mount points qualifies, it creates a loopback ext4 image and
-// mounts it. The test is skipped if neither is possible.
-func findOrMakeSecondFilesystem(t *testing.T) string {
-	t.Helper()
-	tmpStat, err := os.Stat("/tmp")
-	require.NoError(t, err)
-	tmpDev := statDev(tmpStat)
-	for _, cand := range []string{"/dev/shm", "/run", "/var/tmp"} {
-		if info, err := os.Stat(cand); err == nil && statDev(info) != tmpDev {
-			dir := filepath.Join(cand, "af-crash-second-fs-"+t.Name())
-			require.NoError(t, os.MkdirAll(dir, 0o755))
-			t.Cleanup(func() { _ = os.RemoveAll(dir) })
-			return dir
-		}
-	}
-	// Try a loopback mount: create an ext4 image and mount it. Requires
-	// CAP_SYS_ADMIN; skip if unavailable.
-	img := filepath.Join(t.TempDir(), "second.img")
-	require.NoError(t, exec.Command("truncate", "-s", "32m", img).Run())
-	if err := exec.Command("mkfs.ext4", "-q", img).Run(); err != nil {
-		t.Skipf("no second filesystem available and mkfs.ext4 failed (%v); cannot run real cross-device crash test", err)
-	}
-	mnt := filepath.Join(t.TempDir(), "mnt")
-	require.NoError(t, os.MkdirAll(mnt, 0o755))
-	if err := exec.Command("mount", "-o", "loop", img, mnt).Run(); err != nil {
-		t.Skipf("no second filesystem available and loopback mount failed (%v); cannot run real cross-device crash test", err)
-	}
-	t.Cleanup(func() { _ = exec.Command("umount", mnt).Run() })
-	return mnt
-}
-
-func statDev(info os.FileInfo) uint64 {
-	// On Linux, os.FileInfo.Sys() returns *syscall.Stat_t, whose Dev is a
-	// field rather than a Dev() uint64 method, so a method-based assertion
-	// always fails and the test never recognizes an existing second
-	// filesystem. Read the field directly; on platforms where the stat type
-	// does not match, the assertion fails and the loop falls back to a
-	// loopback mount (and skips if that is unavailable). Dev is uint64 on
-	// Linux but int32 on darwin, so an explicit conversion keeps the package
-	// compiling on every GOOS CI runs.
-	if d, ok := info.Sys().(*syscall.Stat_t); ok {
-		return uint64(d.Dev)
-	}
-	return 0
-}
-
-// ensure the time import is used when the child-harness path is compiled out
-var _ = time.Second
 
 // TestBindAFRelocationResidue_OwnsQuarantine pins the proof that a residue
 // directory is this session's own stranded worktree: af's cross-device move is

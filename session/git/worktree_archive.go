@@ -419,6 +419,11 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 	// tripped deadline OR happened while two relocation candidates remain. The
 	// latter must survive every retry error until one location is established.
 	unknownIfCutOff := func(err error) error {
+		// A move that failed before stranding residue leaves a move_in_flight
+		// record naming residue that does not exist. Drop it first (#7819 R3):
+		// the record's authority covers residue it actually names, and a clean
+		// failure keeps master's error class instead of latching Unknown.
+		g.DiscardUnarmedMoveInFlightRecord()
 		if !deadlineTripped && !g.hasRelocationRecoveryRecord() {
 			return err
 		}

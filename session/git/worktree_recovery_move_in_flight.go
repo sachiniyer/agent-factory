@@ -94,6 +94,32 @@ func (g *GitWorktree) recordMoveInFlight(
 	return checkpoint()
 }
 
+// DiscardUnarmedMoveInFlightRecord clears a move_in_flight record whose
+// residue provably does not exist. A cross-device move that failed before it
+// could strand either private tree — or whose failure path already cleaned
+// the staging it made — must not keep the record (R3): master's error class
+// for that failure is the plain error, a latched record would flip it to
+// Unknown, and a surviving record would misattribute the same-named tree a
+// later operation creates. An unverifiable probe counts as armed — residue
+// the record might still name keeps it, and the failure stays Unknown.
+func (g *GitWorktree) DiscardUnarmedMoveInFlightRecord() {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	recovery := g.relocationRecovery
+	if recovery == nil || recovery.State != RelocationRecoveryMoveInFlight {
+		return
+	}
+	for _, residue := range []string{recovery.QuarantinePath, recovery.StagingPath} {
+		if residue == "" {
+			continue
+		}
+		if _, err := boundedRelocationPathIdentity(residue); err == nil || !errors.Is(err, os.ErrNotExist) {
+			return
+		}
+	}
+	g.relocationRecovery = nil
+}
+
 // resolveMoveInFlightRecordLocked resolves the durable record a cross-device
 // move persisted before its quarantine rename (#7819). The record is never
 // resolved past a surviving quarantine: `.af-source-*` can be the only complete

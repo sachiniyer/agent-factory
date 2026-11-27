@@ -30,6 +30,61 @@ func moveDirCrossDevice(src, dest, operation string) error {
 	return moveDirCrossDeviceRecordingIdentity(src, dest, operation, refuseUnreadable, nil, nil, nil, nil)
 }
 
+// MoveDirCrashSeams names the cross-device move's injectable fault points for
+// session-level durability tests that cannot reach the package-level seam
+// vars directly. Nil fields keep their defaults so a caller installs only the
+// point it exercises.
+type MoveDirCrashSeams struct {
+	// FastMove replaces the git-native fast move; an error selects the copy
+	// fallback exactly the way a real cross-device move's EXDEV does.
+	FastMove func(g *GitWorktree, src, dest string) error
+	// FirstRename replaces the fallback's initial same-filesystem rename
+	// attempt; returning syscall.EXDEV forces the cross-device copy path while
+	// every path stays inside the test's own temp dirs.
+	FirstRename        func(src, dest string) error
+	AfterDestCreate    func(path string) error
+	BeforeSourceCommit func(src string) error
+	BeforeDestCommit   func(stagingPath string) error
+	AfterDestCommit    func(dest string) error
+}
+
+// SetMoveDirCrashSeamsForTest installs the given engine seams and returns a
+// restore that reinstates the previous values.
+func SetMoveDirCrashSeamsForTest(seams MoveDirCrashSeams) func() {
+	prevFast := worktreeMoveFast
+	prevRename := renamePath
+	prevCreate := copyTreeAfterDestCreate
+	prevSrc := moveDirBeforeSourceCommit
+	prevDest := moveDirBeforeDestCommit
+	prevAfter := moveDirAfterDestCommit
+	if seams.FastMove != nil {
+		worktreeMoveFast = seams.FastMove
+	}
+	if seams.FirstRename != nil {
+		renamePath = seams.FirstRename
+	}
+	if seams.AfterDestCreate != nil {
+		copyTreeAfterDestCreate = seams.AfterDestCreate
+	}
+	if seams.BeforeSourceCommit != nil {
+		moveDirBeforeSourceCommit = seams.BeforeSourceCommit
+	}
+	if seams.BeforeDestCommit != nil {
+		moveDirBeforeDestCommit = seams.BeforeDestCommit
+	}
+	if seams.AfterDestCommit != nil {
+		moveDirAfterDestCommit = seams.AfterDestCommit
+	}
+	return func() {
+		worktreeMoveFast = prevFast
+		renamePath = prevRename
+		copyTreeAfterDestCreate = prevCreate
+		moveDirBeforeSourceCommit = prevSrc
+		moveDirBeforeDestCommit = prevDest
+		moveDirAfterDestCommit = prevAfter
+	}
+}
+
 type relocationPublicationCheckpoint func(ArchiveReport, pathIdentity, func() error) error
 
 // relocationResidueRecorder names the residue a cross-device move can strand
@@ -99,17 +154,13 @@ func moveDirCrossDeviceRecordingIdentity(
 		return fmt.Errorf("failed to copy worktree into private staging directory %s: %w", stagingPath, err)
 	}
 	defer copied.close()
-	if recordResidue != nil {
-		// The staged root's identity is the only durable proof a post-publish
-		// crash can resolve to dest on a cross-device move (its inode differs
-		// from the source's). Still before the quarantine rename.
-		destIdentity := copied.destinationIdentity
-		if err := recordResidue(stagingPath, quarantinePath, &destIdentity); err != nil {
-			return fmt.Errorf("could not durably record the in-flight move before the quarantine rename: %w", err)
-		}
-	}
 	stagingName := filepath.Base(stagingPath)
 	published := false
+	// The unpublished-staging cleanup is armed BEFORE any post-copy early
+	// return — the record publish below can still fail, and its error path
+	// must not strand the staged `.af-copy-*` tree the record just named
+	// (R9). Once the publish rename lands the tree IS the destination and
+	// only quarantine removal remains.
 	defer func() {
 		if published {
 			return
@@ -121,6 +172,15 @@ func moveDirCrossDeviceRecordingIdentity(
 			returnErr = errors.Join(returnErr, fmt.Errorf("failed to clean private staging tree %s: %w", stagingPath, cleanupErr))
 		}
 	}()
+	if recordResidue != nil {
+		// The staged root's identity is the only durable proof a post-publish
+		// crash can resolve to dest on a cross-device move (its inode differs
+		// from the source's). Still before the quarantine rename.
+		destIdentity := copied.destinationIdentity
+		if err := recordResidue(stagingPath, quarantinePath, &destIdentity); err != nil {
+			return fmt.Errorf("could not durably record the in-flight move before the quarantine rename: %w", err)
+		}
+	}
 
 	sourceParentPath := filepath.Dir(src)
 	sourceParent, _, err := openDirectoryPathFollowingLinks(sourceParentPath, "source parent")

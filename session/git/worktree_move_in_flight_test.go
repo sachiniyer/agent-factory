@@ -1,12 +1,11 @@
 package git
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,23 +18,23 @@ import (
 // destination identity ahead of the quarantine rename, and retires only when
 // the move finishes or a retry's claim resolution consumes it. None of this
 // exists on master, where the same crash points leave residue no record names.
-
-// crashRecordFile is where the child harness writes the checkpoint-visible
-// recovery record — the stand-in for the daemon's fsynced session-row write.
-type crashRecordFile struct {
-	RelocationRecovery
-	WorktreePath string `json:"worktree_path"`
-}
+// The session-level crash matrix lives in session/move_in_flight_crash_test.go:
+// only the session package can persist the record through the real
+// ToInstanceData/ForStorage/FromInstanceData path it must survive.
 
 // TestMoveInFlightRecord_NamesResidueBeforeItExists drives a real
 // cross-device ArchiveWorktree and asserts, inside the installed durable
 // checkpoint, that the record names BOTH residue paths while neither exists
 // yet (the V1 write) and that the staged destination identity joins the
-// record before the quarantine rename (the V2 write).
+// record before the quarantine rename (the V2 write). The first-rename seam
+// returns EXDEV so the whole move runs inside the test's temp dirs on one
+// filesystem — the cross-device path is identical either way, EXDEV is just
+// the trigger that selects it.
 func TestMoveInFlightRecord_NamesResidueBeforeItExists(t *testing.T) {
 	gw, _, wtPath := archiveTestWorktree(t)
-	secondFS := findOrMakeSecondFilesystem(t)
-	dest := filepath.Join(secondFS, "archived-mif")
+	destParent := t.TempDir()
+	dest := filepath.Join(destParent, "archived-mif")
+	forceCrossDeviceForTest(t)
 
 	type write struct {
 		recovery           RelocationRecovery
@@ -46,7 +45,7 @@ func TestMoveInFlightRecord_NamesResidueBeforeItExists(t *testing.T) {
 		_, recovery, ok := gw.RelocationSnapshot()
 		require.True(t, ok, "the durable checkpoint must see the in-flight record")
 		require.Equal(t, RelocationRecoveryMoveInFlight, recovery.State)
-		residue, err := ListAFRelocationResidue(filepath.Dir(wtPath), secondFS)
+		residue, err := ListAFRelocationResidue(filepath.Dir(wtPath), destParent)
 		require.NoError(t, err)
 		writes = append(writes, write{recovery: recovery, residueAtWriteTime: residue})
 		// At the V2 write the staged copy exists and the quarantine does not
@@ -99,11 +98,14 @@ func TestMoveInFlightRecord_NamesResidueBeforeItExists(t *testing.T) {
 
 // TestMoveInFlightRecord_PersistFailureAbortsBeforeResidue pins the abort: a
 // failed durable write at V1 fails the move before a single byte is staged,
-// because residue without its record is exactly the gap this state closes.
+// because residue without its record is exactly the gap this state closes —
+// and the record that never armed is dropped (R3), so the failure keeps
+// master's plain error class instead of latching Unknown.
 func TestMoveInFlightRecord_PersistFailureAbortsBeforeResidue(t *testing.T) {
 	gw, _, wtPath := archiveTestWorktree(t)
-	secondFS := findOrMakeSecondFilesystem(t)
-	dest := filepath.Join(secondFS, "archived-mif")
+	destParent := t.TempDir()
+	dest := filepath.Join(destParent, "archived-mif")
+	forceCrossDeviceForTest(t)
 
 	restore := gw.SetRelocationRecordCheckpoint(func() error {
 		return os.ErrPermission
@@ -113,23 +115,77 @@ func TestMoveInFlightRecord_PersistFailureAbortsBeforeResidue(t *testing.T) {
 	err := gw.ArchiveWorktree(dest)
 	require.Error(t, err, "the move must fail when its record cannot be persisted")
 	assert.Contains(t, err.Error(), "could not durably record the in-flight move")
+	assert.False(t, errors.Is(err, ErrRelocateStateUnknown),
+		"a record that never armed is discarded — the failure keeps master's plain error class (R3)")
 
 	// Nothing moved and nothing was stranded: src is intact, dest never
 	// existed, and no residue name appears beside either endpoint.
 	assert.DirExists(t, wtPath)
 	assert.NoDirExists(t, dest)
-	residue, rerr := ListAFRelocationResidue(filepath.Dir(wtPath), secondFS)
+	residue, rerr := ListAFRelocationResidue(filepath.Dir(wtPath), destParent)
 	require.NoError(t, rerr)
 	assert.Empty(t, residue)
 
-	// The in-memory record still names the move so the next archive resolves
-	// it rather than retrying blind — and it resolves back to the live source.
-	_, recovery, unresolved := gw.RelocationSnapshot()
-	require.True(t, unresolved)
-	assert.Equal(t, RelocationRecoveryMoveInFlight, recovery.State)
+	// The unarmed in-flight record is gone: whatever the ordinary claim
+	// preserve leaves (master's parity for a mid-move failure), it must not
+	// be a move_in_flight record naming residue that never existed — and the
+	// next claim resolves the live source normally.
+	_, rec, _ := gw.RelocationSnapshot()
+	assert.NotEqual(t, RelocationRecoveryMoveInFlight, rec.State,
+		"an unarmed move_in_flight record is discarded, not kept")
 	claim, claimErr := gw.ClaimRelocationSource()
 	require.NoError(t, claimErr)
 	assert.Equal(t, wtPath, claim.Path)
+}
+
+// TestMoveInFlightRecord_CopyFailureClearsUnarmedRecord covers the error —
+// not crash — mid-copy case: the copier removes its own partial staging on
+// failure, so the record's named residue provably does not exist and the
+// record is dropped (R3), keeping the plain error class.
+func TestMoveInFlightRecord_CopyFailureClearsUnarmedRecord(t *testing.T) {
+	gw, _, wtPath := archiveTestWorktree(t)
+	destParent := t.TempDir()
+	dest := filepath.Join(destParent, "archived-mif")
+	forceCrossDeviceForTest(t)
+
+	wrote := false
+	restore := gw.SetRelocationRecordCheckpoint(func() error {
+		wrote = true
+		return nil
+	})
+	defer restore()
+	prevCreate := copyTreeAfterDestCreate
+	copyTreeAfterDestCreate = func(string) error { return os.ErrPermission }
+	defer func() { copyTreeAfterDestCreate = prevCreate }()
+
+	err := gw.ArchiveWorktree(dest)
+	require.Error(t, err)
+	assert.True(t, wrote, "the V1 record write must have been durable before the copy began")
+	assert.False(t, errors.Is(err, ErrRelocateStateUnknown),
+		"the failed copy left no residue, so its record is unarmed and the error stays plain")
+	_, rec, _ := gw.RelocationSnapshot()
+	assert.NotEqual(t, RelocationRecoveryMoveInFlight, rec.State)
+	assert.DirExists(t, wtPath)
+	residue, rerr := ListAFRelocationResidue(filepath.Dir(wtPath), destParent)
+	require.NoError(t, rerr)
+	assert.Empty(t, residue, "the copier removed its partial staging; nothing is stranded")
+}
+
+// forceCrossDeviceForTest drives the engine down its real cross-device path
+// without a second filesystem: worktreeMoveFast answers with the same error
+// a cross-device `git worktree move` returns, which selects the copy
+// fallback, and renamePath answers EXDEV at the fallback's first
+// same-filesystem rename attempt. Every write stays inside the test's own
+// temp dirs (host safety: no /dev/shm, /run, /var/tmp or loopback mounts).
+func forceCrossDeviceForTest(t *testing.T) {
+	t.Helper()
+	prevFast := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error {
+		return errors.New("invalid cross-device link")
+	}
+	prevRename := renamePath
+	renamePath = func(string, string) error { return syscall.EXDEV }
+	t.Cleanup(func() { worktreeMoveFast = prevFast; renamePath = prevRename })
 }
 
 // moveInFlightRecordFor builds the durable record an interrupted cross-device
@@ -271,210 +327,4 @@ func TestMoveInFlightRecord_PresenceStaysUnknown(t *testing.T) {
 
 	assert.Equal(t, WorktreePresenceUnknown, gw.ProbeWorktreePresence(),
 		"the in-flight record owns the path question until resolution retires it")
-}
-
-// TestMoveInFlightRecord_CrashPoints is the end-to-end crash matrix: the
-// child process drives the REAL ArchiveWorktree across a real second
-// filesystem, armed with the durable-record checkpoint writing the visible
-// record to disk, and os.Exit(9)s at each modeled crash point. The parent
-// asserts the on-disk footprint at every point is either no residue, or
-// residue a persisted record already names.
-func TestMoveInFlightRecord_CrashPoints(t *testing.T) {
-	if os.Getenv("AF_CRASH_CHILD_MIF") == "1" {
-		runChildMoveInFlightCrash(t)
-		return
-	}
-	points := []struct {
-		name             string
-		wantRecord       bool
-		wantDestIdentity bool
-		wantQuarantine   bool
-		wantStaging      bool
-		wantSrc          bool
-		wantDest         bool
-		wantClaimOutcome string
-	}{
-		// Crash inside the very first durable write: nothing on disk, src
-		// intact, no residue anywhere.
-		{"pre-record", false, false, false, false, true, false, "claims-src"},
-		// Crash during the copy: the V1 record names staging + quarantine; a
-		// partial staging tree exists; src is still the worktree.
-		{"mid-copy", true, false, false, true, true, false, "claims-src"},
-		// Crash after the copy, before the quarantine rename: the V2 record
-		// carries the staged destination identity; src intact.
-		{"pre-rename", true, true, false, true, true, false, "claims-src"},
-		// The bug's window: quarantine + staging both stranded. The record
-		// names both and resolution refuses with the operator exit.
-		{"pre-publish", true, true, true, true, false, false, "refuses-quarantine"},
-		// Crash after the publish rename, before retirement: dest holds the
-		// worktree, the quarantine still waits for cleanup.
-		{"post-publish", true, true, true, false, false, true, "refuses-quarantine"},
-	}
-	for _, point := range points {
-		t.Run(point.name, func(t *testing.T) {
-			secondFS := findOrMakeSecondFilesystem(t)
-			sandboxHome(t)
-			repoRoot := createGitRepo(t)
-			runGitInPlaceTest(t, repoRoot, "commit", "--allow-empty", "-m", "init")
-			src := filepath.Join(filepath.Dir(repoRoot), "repo-arch-src")
-			runGitInPlaceTest(t, repoRoot, "worktree", "add", "-b", "arch/branch", src)
-			require.NoError(t, os.WriteFile(filepath.Join(src, "dirty.txt"), []byte("uncommitted work"), 0644))
-			dest := filepath.Join(secondFS, "archived-mif")
-			recordFile := filepath.Join(t.TempDir(), "record.json")
-
-			cmd := exec.Command(os.Args[0], "-test.run=^TestMoveInFlightRecord_CrashPoints$", "-test.timeout=60s")
-			cmd.Dir = filepath.Dir(src)
-			cmd.Env = append(os.Environ(),
-				"AF_CRASH_CHILD_MIF=1",
-				"AF_CRASH_POINT="+point.name,
-				"AF_CRASH_SRC="+src,
-				"AF_CRASH_DEST="+dest,
-				"AF_CRASH_REPO="+repoRoot,
-				"AF_CRASH_RECORD="+recordFile,
-			)
-			var childOut strings.Builder
-			cmd.Stdout = &childOut
-			cmd.Stderr = &childOut
-			err := cmd.Run()
-			exitErr, ok := err.(*exec.ExitError)
-			require.True(t, ok, "the child must self-terminate via os.Exit(9) to model the crash; got %v\noutput: %s", err, childOut.String())
-			assert.Equal(t, 9, exitErr.ExitCode(), "child output: %s", childOut.String())
-
-			// The on-disk footprint: every residue either absent, or named by
-			// the record that was persisted before it could exist.
-			var record crashRecordFile
-			data, rerr := os.ReadFile(recordFile)
-			if point.wantRecord {
-				require.NoError(t, rerr, "a record must be on disk once V1 has landed")
-				require.NoError(t, json.Unmarshal(data, &record))
-				assert.Equal(t, RelocationRecoveryMoveInFlight, record.State)
-				assert.Equal(t, dest, record.AlternatePath)
-				assert.Equal(t, point.wantDestIdentity, record.DestIdentityKnown,
-					"dest identity must be durable exactly once the copy has landed")
-				assert.True(t, privateMoveResidueName(filepath.Base(record.QuarantinePath)))
-				assert.True(t, privateMoveResidueName(filepath.Base(record.StagingPath)))
-			} else {
-				assert.True(t, errors.Is(rerr, os.ErrNotExist),
-					"before the record lands there must be no record and no residue")
-			}
-
-			_, srcErr := os.Lstat(src)
-			assert.Equal(t, point.wantSrc, srcErr == nil, "src presence at this crash point")
-			_, destErr := os.Lstat(dest)
-			assert.Equal(t, point.wantDest, destErr == nil, "dest presence at this crash point")
-
-			sourceResidue, sErr := ListAFRelocationResidue(filepath.Dir(src))
-			require.NoError(t, sErr)
-			destResidue, dErr := ListAFRelocationResidue(filepath.Dir(dest))
-			require.NoError(t, dErr)
-			var quarantine, staging string
-			for _, p := range sourceResidue {
-				if strings.HasPrefix(filepath.Base(p), ".af-source-") {
-					quarantine = p
-				}
-			}
-			for _, p := range destResidue {
-				if strings.HasPrefix(filepath.Base(p), ".af-copy-") {
-					staging = p
-				}
-			}
-			if point.wantQuarantine {
-				require.NotEmpty(t, quarantine, "the quarantine residue must exist at this point")
-				assert.Equal(t, record.QuarantinePath, quarantine,
-					"residue exists and the persisted record already names it — the #7819 property")
-				dirty, derr := os.ReadFile(filepath.Join(quarantine, "dirty.txt"))
-				require.NoError(t, derr, "the quarantined worktree keeps the uncommitted work")
-				assert.Equal(t, "uncommitted work", string(dirty))
-			} else {
-				assert.Empty(t, quarantine, "no quarantine residue at this crash point")
-			}
-			if point.wantStaging {
-				require.NotEmpty(t, staging)
-				assert.Equal(t, record.StagingPath, staging)
-			} else {
-				assert.Empty(t, staging)
-			}
-			// And the stronger invariant: any residue present is a path the
-			// record names.
-			for _, p := range append(sourceResidue, destResidue...) {
-				assert.True(t, p == record.QuarantinePath || p == record.StagingPath,
-					"residue %s exists with no persisted record naming it", p)
-			}
-
-			// Claim resolution over the persisted record — or record-free
-			// behavior for the pre-record crash.
-			reloaded, loadErr := NewGitWorktreeFromStorage(repoRoot, src, "arch", "arch/branch", "", false, true)
-			require.NoError(t, loadErr)
-			if !point.wantRecord {
-				claim, claimErr := reloaded.ClaimRelocationSource()
-				require.NoError(t, claimErr)
-				assert.Equal(t, src, claim.Path)
-				return
-			}
-			require.NoError(t, reloaded.RestoreRelocationRecovery(record.RelocationRecovery))
-			claim, claimErr := reloaded.ClaimRelocationSource()
-			switch point.wantClaimOutcome {
-			case "claims-src":
-				require.NoError(t, claimErr)
-				assert.Equal(t, src, claim.Path)
-			case "refuses-quarantine":
-				require.Error(t, claimErr)
-				assert.True(t, errors.Is(claimErr, ErrRelocateStateUnknown))
-				assert.Contains(t, claimErr.Error(), record.QuarantinePath)
-			}
-		})
-	}
-}
-
-// runChildMoveInFlightCrash is the child harness: it arms the durable-record
-// checkpoint with a file write (the stand-in for the daemon's fsynced row
-// persist), installs the crash seam named by AF_CRASH_POINT, and drives the
-// real ArchiveWorktree across a real second filesystem.
-func runChildMoveInFlightCrash(t *testing.T) {
-	src := os.Getenv("AF_CRASH_SRC")
-	dest := os.Getenv("AF_CRASH_DEST")
-	repo := os.Getenv("AF_CRASH_REPO")
-	recordFile := os.Getenv("AF_CRASH_RECORD")
-	point := os.Getenv("AF_CRASH_POINT")
-	if src == "" || dest == "" || repo == "" || recordFile == "" || point == "" {
-		t.Fatal("AF_CRASH_* environment is incomplete")
-	}
-	gw, err := NewGitWorktreeFromStorage(repo, src, "arch", "arch/branch", "", false, true)
-	if err != nil {
-		t.Fatalf("reload worktree: %v", err)
-	}
-	writeRecord := func() error {
-		_, recovery, ok := gw.RelocationSnapshot()
-		if !ok {
-			t.Fatal("the durable checkpoint fired with no in-flight record")
-		}
-		data, err := json.Marshal(crashRecordFile{RelocationRecovery: recovery, WorktreePath: src})
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(recordFile, data, 0o644)
-	}
-	firstWrite := true
-	gw.SetRelocationRecordCheckpoint(func() error {
-		if point == "pre-record" && firstWrite {
-			os.Exit(9)
-		}
-		firstWrite = false
-		return writeRecord()
-	})
-	switch point {
-	case "pre-record":
-	case "mid-copy":
-		copyTreeAfterDestCreate = func(string) error { os.Exit(9); return nil }
-	case "pre-rename":
-		moveDirBeforeSourceCommit = func(string) error { os.Exit(9); return nil }
-	case "pre-publish":
-		moveDirBeforeDestCommit = func(string) error { os.Exit(9); return nil }
-	case "post-publish":
-		moveDirAfterDestCommit = func(string) error { os.Exit(9); return nil }
-	default:
-		t.Fatalf("unknown crash point %q", point)
-	}
-	_ = gw.ArchiveWorktree(dest)
-	t.Fatalf("the %s crash seam did not fire; the move completed unexpectedly", point)
 }
