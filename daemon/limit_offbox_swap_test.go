@@ -103,7 +103,11 @@ func newOffBoxAgentServer(t *testing.T, sessionDir string) *offBoxAgentServer {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ok": true}})
 	})
 	mux.HandleFunc("/v1/agent/send-prompt", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ok": true}})
+		// A bare {"ok":true} reads as a pre-status agent-server — honest
+		// uncertainty, which keeps the mission pending for the operator's
+		// confirm-or-retry. The stand-in delivers, so the send's verdict is a
+		// real one.
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ok": true, "status": "delivered"}})
 	})
 	mux.HandleFunc("/v1/agent/relaunch", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ok": true}})
@@ -331,6 +335,8 @@ func TestOffBoxSwapIsReadmittedOnceTheMissionTransfers(t *testing.T) {
 	assert.Equal(t, 1, srv.routeHits("/v1/agent/swap-account"),
 		"the swap request crossed exactly once")
 	assert.Nil(t, inst.InFlightOffBoxSwap(), "the record settled with the commit")
+	assert.GreaterOrEqual(t, srv.routeHits("/v1/agent/send-prompt"), 1,
+		"the replacement was sent its takeover notice")
 	assert.Empty(t, inst.PendingHandoffMission(),
 		"the committed swap's notice was delivered and retired — its final verdict settled")
 	assert.Empty(t, inst.PendingHandoffDeliveryStatus(),
