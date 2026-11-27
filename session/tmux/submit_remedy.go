@@ -123,6 +123,11 @@ func newestPasteChip(normalized string) (string, bool) {
 // ("[Pasted text #1 +12 lines]"). Either metric matching is provenance; a chip
 // declaring neither — or a different number — cannot be attributed to this
 // paste.
+//
+// If a Gemini chip format is ever bound here, the remedy's geometry must
+// first learn Gemini's half-block composer: its "▀" bottom edge is the
+// composer's closing edge, the way "╰───╯" closes the │-box — without it a
+// Gemini composer can never prove its block (K18, #7912).
 func (p deliveryProbe) chipMatchesPayload(chip string) bool {
 	if chars, ok := chipDeclaredCount(chip, "chars"); ok {
 		return chars == p.pasteRunes
@@ -617,11 +622,14 @@ func idleComposerPlaceholderRow(norm string) bool {
 // composer's top edge (the agent's rule, the box edge, or Codex's
 // transcript gap): any row in that span puts the anchor inside a draft
 // whose head the region never reads (#7850 R1). Second, EVERY row from each
-// region's cut to the pane end must be blank, the agent's own border
-// geometry, or a row of the anchor agent's footer matched against its
-// whole-row grammar — a draft that opened with blank lines, or a second
-// draft line after the absorbed Enter's newline, renders the same shape as
-// a footer (#7850 R2/R3).
+// region's cut to the pane end is audited: a ruled or boxed composer
+// (Claude, Devin, the │-boxed >) closes only at the agent's own edge — the
+// row byte-identical to the composer's top edge — with nothing but blank
+// rows between the cut and that edge and chrome below it, while Codex's
+// edgeless › lane takes only rows that parse its closed footer token
+// grammar. A draft that opened with blank lines, or a second draft line
+// after the absorbed Enter's newline, renders the same shape as a footer
+// (#7850 R2/R3, #7912).
 //
 // The wrapped-tail column is accepted only when the chip STARTS on the anchor
 // row: the anchor's content after its single prompt glyph must be a non-empty
@@ -691,14 +699,15 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 		return false, "a composer row present at the Enter boundary is gone from the grace frame"
 	}
 	// Every row from each region's cut to the pane end must bound the block
-	// — blank, a frame-column border, or the anchor agent's own footer. Any
-	// other content row is draft text the region cut hid: a draft that
-	// opened with blank lines, or a second draft line after the absorbed
-	// Enter's newline, renders exactly this shape (#7850 R2).
-	if why := stillChipTailAudit(bRows, anchor+len(bRegion), bRows[anchor]); why != "" {
+	// — blank, the composer's own closing edge for the ruled and boxed
+	// lanes, or a row of Codex's closed footer grammar for the edgeless ›
+	// lane. Any other content row is draft text the region cut hid: a draft
+	// that opened with blank lines, or a second draft line after the
+	// absorbed Enter's newline, renders exactly this shape (#7850 R2).
+	if why := stillChipTailAudit(bRows, anchor, anchor+len(bRegion)); why != "" {
 		return false, why
 	}
-	if why := stillChipTailAudit(gRows, anchor+len(gRegion), gRows[anchor]); why != "" {
+	if why := stillChipTailAudit(gRows, anchor, anchor+len(gRegion)); why != "" {
 		return false, why
 	}
 	// Position: the cursor must sit inside the region, parked where this draft

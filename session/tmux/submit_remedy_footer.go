@@ -4,37 +4,56 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"unicode"
 )
 
 // stillChipTailAudit reports why the rows below a composer region break the
 // still-chip proof, or "" when the frame bounds the block for the proof.
 // A ruled or boxed composer — Claude's "❯", Devin's "❭", or the │-boxed ">" —
-// closes at the agent's OWN edge, and only BLANK rows may sit between the
-// region's cut and that edge; a draft row inside the composer renders
-// there, while rows below the edge are chrome by geometry because no draft
-// can draw outside the composer. Codex's "›" lane has no closing edge, so
-// every content row below its region must parse Codex's closed footer
-// token grammar — a known model token, a whole-segment path token, known
-// literals and meters, with no free-text segment (#7850 R2/N1). A draft
-// that opened with blank lines, or a second draft line after the absorbed
-// Enter's newline, renders the same shape as a footer — the remedy Enter
-// would submit it with our prompt.
-func stillChipTailAudit(rows []string, end int, anchorRow string) string {
-	boxed := strings.HasPrefix(anchorRow, "│ ")
-	switch anchorGlyph(anchorRow) {
-	case claudeComposerGlyph, "❭":
-		boxed = false
-	case ">":
-	default:
-		// Codex's › lane: no closing edge. A column-0 "─" rule in a ruled
-		// Codex lane still bounds the block; every other content row must
-		// parse the closed footer grammar.
+// closes only at the agent's OWN edge: the row byte-identical to the
+// composer's top edge, with only BLANK rows between the region's cut and
+// that edge, and chrome below it because no draft can draw outside the
+// composer. Codex's "›" lane has no closing edge, so every content row
+// below its region must parse Codex's closed footer token grammar — a
+// known model token, a whole-segment path token, known literals and
+// meters, with no free-text segment (#7850 R2/N1). A draft that opened
+// with blank lines, or a second draft line after the absorbed Enter's
+// newline, renders the same shape as a footer — the remedy Enter would
+// submit it with our prompt.
+func stillChipTailAudit(rows []string, anchor, end int) string {
+	switch glyph := anchorGlyph(rows[anchor]); glyph {
+	case claudeComposerGlyph, "❭", ">":
+		// A ruled or boxed composer: blanks until the agent's own closing
+		// edge; everything below the edge is chrome by geometry.
+		edge := composerClosingEdge(rows, anchor, glyph)
 		for j := end; j < len(rows); j++ {
 			raw := rows[j]
 			switch {
 			case blankComposerRow(raw):
-			case composerRuleRow(raw):
+			case stillChipClosingEdge(raw, edge):
+				return ""
+			default:
+				return fmt.Sprintf("the composer holds content %q inside the composer that is not provably blank", normalizeDelivery(raw))
+			}
+		}
+		return ""
+	default:
+		// Codex's › lane: no closing edge, so every row below the region is
+		// audited — blank, Codex's own column-0 "─" rule row, or the closed
+		// footer grammar. When a rule also bounds the composer's top, a "─"
+		// row below counts only when it is that rule byte-for-byte — a
+		// different width is a draft row, not Codex's edge (#7912). With no
+		// top rule (the transcript gap or the pane's own top bounds the
+		// span) any column-0 "─" row is the one rule Codex's ruled lane
+		// draws below its composer.
+		topRule := ""
+		if anchor > 0 && composerRuleRow(rows[anchor-1]) {
+			topRule = rows[anchor-1]
+		}
+		for j := end; j < len(rows); j++ {
+			raw := rows[j]
+			switch {
+			case blankComposerRow(raw):
+			case composerRuleRow(raw) && (topRule == "" || raw == topRule):
 			case codexComposerFooterRow(raw):
 			default:
 				return fmt.Sprintf("the composer holds content %q below a blank row that is not provably the agent's own footer", normalizeDelivery(raw))
@@ -42,50 +61,53 @@ func stillChipTailAudit(rows []string, end int, anchorRow string) string {
 		}
 		return ""
 	}
-	// A ruled or boxed composer: blanks until the agent's own closing edge;
-	// everything below the edge is chrome by geometry.
-	for j := end; j < len(rows); j++ {
-		raw := rows[j]
-		switch {
-		case blankComposerRow(raw):
-		case stillChipClosingEdge(raw, boxed):
-			return ""
-		default:
-			return fmt.Sprintf("the composer holds content %q inside the composer that is not provably blank", normalizeDelivery(raw))
+}
+
+// composerClosingEdge is the row that proves THIS composer's closing edge —
+// byte-identical to the edge the composer drew above the anchor: for a ruled
+// lane (Claude's ❯, Devin's ❭) the same "─" rule stillChipFirstRow required
+// directly above it; for a │-boxed ">" the ╰───╯ twin of the ╭───╮ top edge,
+// its exact "─" span with the bottom corners. "" when the frame cannot show
+// the composer's own edge, in which case nothing below the cut can close it.
+// Any other column-0 row of box-drawing glyphs — a single "─", a rule of a
+// different width, a mistyped box bottom — is content, not the edge: under
+// the column-0 wrap model the cursor proof accepts, a wrapped draft's
+// continuation could draw one (#7912).
+func composerClosingEdge(rows []string, anchor int, glyph string) string {
+	if glyph == ">" {
+		for r := anchor - 1; r >= 0; r-- {
+			if composerBoxTopRow(rows[r]) {
+				return composerBoxBottomTwin(rows[r])
+			}
+			if !blankComposerRow(rows[r]) {
+				return ""
+			}
 		}
+		return ""
+	}
+	if anchor > 0 && composerRuleRow(rows[anchor-1]) {
+		return rows[anchor-1]
 	}
 	return ""
 }
 
-// stillChipClosingEdge reports whether raw is the anchor agent's own closing
-// edge, drawn at the pane's left column: the "─" rule the ruled lanes draw,
-// or the ╰───╯ bottom edge of a │-boxed composer. An indented row of
-// box-drawing glyphs — a draft typed in "─"s — is content, not an edge
-// (#7850 R3).
-func stillChipClosingEdge(raw string, boxed bool) bool {
-	if raw == "" || unicode.IsSpace([]rune(raw)[0]) {
-		return false
+// composerBoxBottomTwin maps a ╭───╮ top edge to the ╰───╯ bottom edge the
+// box draws beneath its composer — the same "─" span with the bottom
+// corners.
+func composerBoxBottomTwin(top string) string {
+	rs := []rune(top)
+	if len(rs) < 2 {
+		return ""
 	}
-	if boxed {
-		return composerBoxBottomRow(raw)
-	}
-	return composerRuleRow(raw)
+	return string(append(append([]rune{'╰'}, rs[1:len(rs)-1]...), '╯'))
 }
 
-// composerBoxBottomRow reports whether raw is a ╰───╯ bottom edge — the ╰
-// corner plus only "─" through ╯, the shape Claude's composer box closes
-// with.
-func composerBoxBottomRow(raw string) bool {
-	rs := []rune(raw)
-	if len(rs) < 2 || rs[0] != '╰' || rs[len(rs)-1] != '╯' {
-		return false
-	}
-	for _, r := range rs[1 : len(rs)-1] {
-		if r != '─' {
-			return false
-		}
-	}
-	return true
+// stillChipClosingEdge reports whether raw is the composer's own closing
+// edge — byte-identical to the expected edge row composerClosingEdge derived
+// from the top edge above the anchor. A column-0 all-"─" row of any other
+// width is content, not the composer's own (#7912).
+func stillChipClosingEdge(raw, edge string) bool {
+	return edge != "" && raw == edge
 }
 
 // codexComposerFooterRow reports whether raw is a row of Codex's composer

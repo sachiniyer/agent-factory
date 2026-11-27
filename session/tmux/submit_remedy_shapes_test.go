@@ -485,6 +485,111 @@ func TestStillChipComposerWithholdsDraftRowsBelowABlankRow(t *testing.T) {
 	}
 }
 
+// TestStillChipComposerWithholdsAForeignClosingEdge is the #7912 item-2
+// class: the closing edge is the composer's OWN bottom edge — byte-identical
+// to the top edge above the anchor — never any column-0 all-"─" row or
+// ╰───╯-shaped row of the wrong width. Under the column-0 wrap model the
+// cursor proof accepts, a wrapped draft's continuation can draw an all-"─"
+// row at column 0 of any width, and on master it counted as "a hard border"
+// that excused every row beneath it. Every frame below remedies on master
+// for exactly that reason and must withhold here.
+func TestStillChipComposerWithholdsAForeignClosingEdge(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	rule := strings.Repeat("─", 80)
+	devinChip := "❭ " + codexChip
+	claudeChipRow := "❯ " + claudeChip
+	for name, tc := range map[string]struct {
+		rows   []string
+		cursor paneCursorState
+		chip   string
+	}{
+		// X1h: a single "─" at column 0 is not the composer's bottom rule.
+		"X1h single dash closing edge": {
+			rows:   []string{"one", rule, devinChip, "", "─", "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// X1d: a wrapped draft's column-0 continuation narrower than the
+		// composer's own rule.
+		"X1d wrap-width rule below the cut": {
+			rows:   []string{"one", rule, devinChip, "", strings.Repeat("─", 40), "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// X1e: wider than the composer's own rule.
+		"X1e wider rule below the cut": {
+			rows:   []string{"one", rule, devinChip, "", strings.Repeat("─", 81), "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// X1f: a full-width-looking rule below a composer whose own top rule
+		// is narrower — right shape, wrong composer.
+		"X1f rule width from another composer": {
+			rows:   []string{"one", strings.Repeat("─", 40), devinChip, "", rule, "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// N2c: the same column-0 wrap in Claude's ruled lane — the draft row
+		// that ends the composer early hides everything below it as chrome.
+		"N2c claude lane wrap-width rule": {
+			rows:   []string{"x", rule, claudeChipRow, "", strings.Repeat("─", 40), "  ? for shortcuts"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(claudeChipRow)},
+			chip:   normalizeDelivery(claudeChip),
+		},
+		// N3b: a ╰───╯ bottom edge whose ─ span is not the box's own.
+		"N3b box bottom wrong width": {
+			rows:   []string{"x", "╭────────────────╮", "│ > " + codexChip + "     │", "╰────────╯", "  ? for shortcuts"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("│ > " + codexChip + "     │")},
+			chip:   chipText,
+		},
+		// A ruled › lane takes the same proof: when a rule bounds the
+		// composer's top, a "─" row of a different width below is a draft
+		// row, not Codex's edge.
+		"codex ruled lane foreign-width rule": {
+			rows:   []string{"one", rule, "› " + codexChip, strings.Repeat("─", 40), "  gpt-5 · ~/repo"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("› " + codexChip)},
+			chip:   chipText,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pane := strings.Join(tc.rows, "\n") + "\n"
+			if ok, why := stillChipComposer(pane, pane, tc.cursor, tc.chip); ok {
+				t.Fatalf("ok=true why=%q, want ok=false (the closing edge is not byte-identical to the composer's own top edge)", why)
+			}
+		})
+	}
+}
+
+// TestStillChipComposerDevinContinuationIndentIsAnAssumption pins the
+// multi-line Devin composer shape the geometry rule ASSUMES — Devin's draft
+// continuations indent ("  "), so no draft renders at column 0 inside the
+// composer and the rows below the composer's own "─" edge are chrome.
+// UNVERIFIED: the repo has no real multi-line Devin capture —
+// task/devin_ready_test.go's real captures (devin 3000.2.17, 3000.11.234)
+// are all single-line composers, and the stagedDraftPane harness drew this
+// indent by construction. If a real Devin draws continuations at column 0,
+// only #7912's byte-identical closing edge keeps a wrapped "─" continuation
+// from faking the composer's bottom rule (item 2 applies to Devin's lane).
+func TestStillChipComposerDevinContinuationIndentIsAnAssumption(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	rule := strings.Repeat("─", 80)
+	// The assumed shape: a wrapped Devin chip whose continuation row carries
+	// the "  " draft indent, bounded by identical top and bottom rules.
+	pane := strings.Join([]string{
+		"one",
+		rule,
+		"❭ [Pasted Content 3207",
+		"  chars]",
+		"",
+		rule,
+		"SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits",
+	}, "\n") + "\n"
+	cursor := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  chars]")}
+	if ok, why := stillChipComposer(pane, pane, cursor, chipText); !ok {
+		t.Fatalf("ok=false why=%q, want ok=true (the assumed indented continuation still remedies under the byte-identical edge)", why)
+	}
+}
+
 // TestStillChipComposerWithholdsDraftsInCodexFooterShape is the #7912 item-1
 // class: the Codex model segment is a CLOSED vocabulary — a model token from
 // an enumerated family plus only effort-enum tier words and the fixtures'
