@@ -192,3 +192,77 @@ func TestStillChipComposerAcceptsWrappedChipTailCursor(t *testing.T) {
 		t.Fatalf("wrapped chip with absorbed Enter, cursor on the blank row at the insert column: ok=false why=%q, want ok=true (no regression)", why)
 	}
 }
+
+// TestStillChipComposerWithholdsWrappedTailBelowABareGlyphAnchor pins the
+// guard on the wrapped-tail acceptance: the tail-row cursor is accepted only
+// when the chip STARTS on the composer's anchor row. A bare-glyph anchor row
+// (a lone ›, >, ❭ or ❯ with nothing after it) is a hard newline in a user's
+// draft, not the chip's first row — the region's joined content still matches
+// the chip once that lone glyph is stripped as the leading prompt glyph, so
+// without the guard the wrapped tail of a chip on a later row would read as
+// still and the remedy Enter would submit the user's own draft together with
+// our prompt. Each frame below is byte-still and region-equal to the chip, with
+// the visible cursor at the content-end of the chip's (wrapped) tail row; the
+// remedy must withhold on all of them.
+func TestStillChipComposerWithholdsWrappedTailBelowABareGlyphAnchor(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+
+	// Draft + lone ">" + chip (unwrapped): the user's draft ended with a hard
+	// newline and a lone ">", then our chip landed on the next row. The last
+	// composer-glyph row is the lone ">", so it is the anchor; the chip sits on
+	// a later row. Cursor at the chip row's content end.
+	draftLoneGtUnwrapped := strings.Join([]string{
+		"› please also delete the",
+		"  staging bucket first",
+		"  >",
+		"  " + codexChip,
+	}, "\n") + "\n"
+	tail := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  " + codexChip)}
+	if ok, why := stillChipComposer(draftLoneGtUnwrapped, draftLoneGtUnwrapped, tail, chipText); ok {
+		t.Fatalf("draft + lone > + unwrapped chip, cursor at the chip tail: ok=true why=%q, want ok=false (the lone > is a hard newline in the draft, not the chip's first row)", why)
+	}
+
+	// Draft + lone ">" + chip (wrapped): the same shape with the chip wrapping
+	// across two physical rows. The cursor rests at the content end of the
+	// chip's last wrapped row — exactly where an undisturbed draft leaves it for
+	// a wrapped chip, which is precisely why this must be guarded.
+	draftLoneGtWrapped := strings.Join([]string{
+		"› please also delete the",
+		"  staging bucket first",
+		"  >",
+		"  [Pasted Content 32",
+		"07 chars]",
+	}, "\n") + "\n"
+	tailWrapped := paneCursorState{Visible: true, Row: 4, Col: contentEndCol("07 chars]")}
+	if ok, why := stillChipComposer(draftLoneGtWrapped, draftLoneGtWrapped, tailWrapped, chipText); ok {
+		t.Fatalf("draft + lone > + wrapped chip, cursor at the wrapped tail: ok=true why=%q, want ok=false (the chip does not start on the anchor row)", why)
+	}
+
+	// A lone "›" anchor (Codex's own glyph) below a draft, then the chip on a
+	// later row — the same misread under a different composer glyph.
+	loneCodexGlyph := strings.Join([]string{
+		"› please also delete the",
+		"  staging bucket first",
+		"  ›",
+		"  " + codexChip,
+	}, "\n") + "\n"
+	tailCodex := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  " + codexChip)}
+	if ok, why := stillChipComposer(loneCodexGlyph, loneCodexGlyph, tailCodex, chipText); ok {
+		t.Fatalf("draft + lone › + chip, cursor at the chip tail: ok=true why=%q, want ok=false (a lone › anchor is a hard newline, not the chip's first row)", why)
+	}
+
+	// An empty first line: a bare-glyph composer (empty first line of the draft)
+	// followed by the chip on the next row. The chip did not start on the
+	// anchor row, so the wrapped tail must withhold even with no user text
+	// above it.
+	emptyFirstLine := strings.Join([]string{
+		"  Worked for 1m 32s — 02:01",
+		"",
+		"›",
+		"  " + codexChip,
+	}, "\n") + "\n"
+	tailEmpty := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  " + codexChip)}
+	if ok, why := stillChipComposer(emptyFirstLine, emptyFirstLine, tailEmpty, chipText); ok {
+		t.Fatalf("empty first line + chip on the next row, cursor at the chip tail: ok=true why=%q, want ok=false (the chip does not start on the bare-glyph anchor row)", why)
+	}
+}

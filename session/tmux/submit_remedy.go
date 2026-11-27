@@ -514,6 +514,15 @@ func idleComposerPlaceholderRow(norm string) bool {
 // insert column. A hidden cursor (Claude's ordinary composer draws one) cannot
 // prove that, so it withholds.
 //
+// The wrapped-tail column is accepted only when the chip STARTS on the anchor
+// row: the anchor's content after its single prompt glyph must be a non-empty
+// prefix of the chip, and each later non-blank region row must continue it. A
+// bare-glyph anchor row (a lone ›, >, ❭ or ❯ with nothing after it) is a hard
+// newline in a user's draft, not the chip's first row — the region's joined
+// content still matches the chip once that lone glyph is stripped as the
+// leading prompt glyph, so the wrapped-tail acceptance must not fire, or a
+// wrong accept would submit the user's own draft together with our prompt.
+//
 // The second return names the condition that failed, so the withheld-remedy
 // warning says WHICH of hidden cursor, foreign composer content, moved
 // anchor, changed region or misplaced cursor made the shape unprovable
@@ -584,7 +593,13 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	// accept the content-end column on the cursor's row when every region row
 	// after it is blank — i.e. the cursor row is the chip's tail. A middle
 	// wrapped row has non-blank content after it and is not where an
-	// undisturbed draft leaves the cursor.
+	// undisturbed draft leaves the cursor. This is only safe when the chip
+	// STARTS on the anchor row: a bare-glyph anchor (a hard newline in a
+	// user's draft) would otherwise let the wrapped tail of a chip on a later
+	// row read as still, submitting the user's draft with our prompt.
+	if !chipStartsOnAnchorRow(gRegion, chipText) {
+		return false, "the chip does not start on the composer's anchor row, so a wrapped tail below it cannot be proven still"
+	}
 	blankTail := true
 	for j := cursor.Row + 1; j < anchor+len(gRegion); j++ {
 		if !blankComposerRow(gRows[j]) {
@@ -596,6 +611,39 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 		return true, ""
 	}
 	return false, "the cursor is not where an undisturbed draft leaves it"
+}
+
+// chipStartsOnAnchorRow reports whether the chip's text begins on the
+// composer's anchor (glyph) row and each later non-blank region row continues
+// it — the precondition for accepting a wrapped chip's tail-row cursor. The
+// anchor's content after its single prompt glyph must be a non-empty prefix of
+// the chip, and every later non-blank row must keep the cumulative joined
+// content a prefix of the chip. A bare-glyph anchor row (a lone ›, >, ❭ or ❯
+// with nothing after it) is a hard newline in a user's draft: its glyph is
+// stripped as the leading prompt glyph by the region-equality check, so the
+// region still matches the chip even though the chip starts on a later row —
+// exactly the shape the wrapped-tail acceptance must not fire on.
+func chipStartsOnAnchorRow(region []string, chipText string) bool {
+	if len(region) == 0 {
+		return false
+	}
+	acc := normalizeDelivery(region[0])
+	if r, size := utf8.DecodeRuneInString(acc); r == '❯' || r == '›' || r == '❭' || r == '>' {
+		acc = acc[size:]
+	}
+	if acc == "" || !strings.HasPrefix(chipText, acc) {
+		return false
+	}
+	for j := 1; j < len(region); j++ {
+		if blankComposerRow(region[j]) {
+			continue
+		}
+		acc += normalizeDelivery(region[j])
+		if !strings.HasPrefix(chipText, acc) {
+			return false
+		}
+	}
+	return true
 }
 
 // firstContentCol is the column of a row's first character that can be
