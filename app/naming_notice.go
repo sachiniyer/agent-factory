@@ -77,6 +77,24 @@ func (m *home) namingNoticePinned(noticeID uint64) bool {
 	return n.id == noticeID && n.instance != nil && n.instance == m.namingInstance
 }
 
+// retractNamingNotice withdraws the notice this form pinned, called when the
+// form's submit is accepted. The pin keeps a refusal on the bar only while the
+// form holds the input it rejected — once the input is accepted there is no
+// refusal left to explain: the create is in flight to land under a name the
+// bar is still calling taken, and left to fade on its own timer the notice is
+// still painted when the new session reaches the rail (#7844). Clear, not
+// Expire: the retained copy goes too, so `E details` cannot reopen a refusal
+// the accepted submit superseded.
+//
+// The pinned check's identity guard means a newer notice raised by anything
+// but this form is not ours to retract — it stays.
+func (m *home) retractNamingNotice() {
+	if m.namingNoticePinned(m.transientNoticeID) {
+		m.errBox.Clear()
+	}
+	m.namingNotice.id, m.namingNotice.instance = 0, nil
+}
+
 // returnToNamingFormAfterDetails reports, once, whether a closing details
 // overlay was opened from a naming form that is still open.
 func (m *home) returnToNamingFormAfterDetails() bool {

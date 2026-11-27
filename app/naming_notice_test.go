@@ -290,3 +290,71 @@ func TestNamingFormDetailsOverlayAdvertisesNoDetailsKey(t *testing.T) {
 	_ = h.View()
 	assert.Contains(t, h.errBox.String(), "ctrl+e details", "back on the form, ctrl+e is advertised again")
 }
+
+// TestNamingFormAcceptedSubmitRetractsTheRefusal is #7844: a name the form
+// refused pins its reason to the bar for as long as the form holds that
+// input — but the pin lapsed only on the next timer tick, so fixing the name
+// and submitting left the old refusal painted beside the session the retried
+// create just landed. The accepted submit retracts it: the input it explained
+// no longer exists.
+func TestNamingFormAcceptedSubmitRetractsTheRefusal(t *testing.T) {
+	h, _ := namingSelectionHome(t, "alpha")
+	stubStartedSession(t)
+
+	_, _ = h.startNewInstance()
+	naming := h.namingInstance
+	require.NotNil(t, naming)
+
+	// The issue's repro: the field keeps the rejected input for editing, so
+	// the second attempt appends to it and lands "alphadelta".
+	typeRunes(t, h, "alpha")
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, stateNew, h.state, "precondition: a taken name is refused, the form stays open")
+	require.Contains(t, h.errBox.FullError(), `session with title "alpha" already exists`,
+		"precondition: the refusal is on the bar")
+
+	typeRunes(t, h, "delta")
+	require.True(t, submitNaming(t, h), "the retried create must land")
+	created := h.sidebar.GetSelectedInstance()
+	require.NotNil(t, created)
+	require.Equal(t, "alphadelta", created.Title,
+		"precondition: the create landed under the corrected name")
+
+	assert.Empty(t, h.errBox.FullError(),
+		"a create that landed must not leave the earlier attempt's refusal painted")
+	assert.NotContains(t, h.errBox.String(), "already exists")
+	text, _ := h.errBox.RetainedNotice()
+	assert.Empty(t, text,
+		"the refusal is retracted, not just expired — `E details` must not reopen it")
+}
+
+// TestNamingFormAcceptedSubmitKeepsTheCreatesOwnError is the second half of
+// #7844's contract: the retraction lifts only the SUPERSEDED refusal. An
+// error the landing create itself raises still reaches the bar — here the
+// account-skew refusal for a session that now exists running as an identity
+// nobody chose (#3844 constraint 5).
+func TestNamingFormAcceptedSubmitKeepsTheCreatesOwnError(t *testing.T) {
+	h, _ := namingSelectionHome(t, "alpha")
+	stubStartedSession(t)
+
+	_, _ = h.startNewInstance()
+	naming := h.namingInstance
+	require.NotNil(t, naming)
+	require.NoError(t, naming.SetTitle("alpha"))
+
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.Contains(t, h.errBox.FullError(), "already exists", "precondition: the refusal is up")
+
+	require.NoError(t, naming.SetTitle("beta"))
+	// A chosen account goes out on the wire; the stubbed start answers with a
+	// session carrying none, so the same handler that lands the create raises
+	// the skew refusal.
+	h.pendingAccount = "work"
+	h.pendingAccountChosen = true
+
+	require.True(t, submitNaming(t, h), "the retried create must land")
+	assert.Contains(t, h.errBox.FullError(), `account "work"`,
+		"the error the successful create itself raised must still show")
+	assert.NotContains(t, h.errBox.FullError(), "already exists",
+		"the superseded refusal is retracted even while the create's own error shows")
+}
