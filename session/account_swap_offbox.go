@@ -163,21 +163,18 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string, scope
 				// The pre-rotation checkpoint: this swap's id was persisted
 				// BEFORE swap() ran, so a restart rehydrated a swap that had
 				// not yet reached the rotation. The record alone cannot settle
-				// it — the host's layout is the other witness. A still-staged,
-				// never-rotated scope (scopeOutgoing — account.next.<id>
-				// present, no account.prev) PROVES the swap never reached the
-				// rotation, so it can only roll back. Settle as rolled_back
-				// only AFTER the serialized discard tombstones this swap's id
-				// and removes its stage — never on this first read — so a
-				// late run(swapID) that names the still-staged scope is
-				// refused instead of committing against a daemon that already
-				// recorded a rollback (#7862 review). The discard claims this
-				// swap's own rolled_back for the slot its stage was just
-				// removed from (refuseLocked), so the second read settles. Any
-				// other layout stays fenced: a scopeIncoming/unknown over this
-				// swap's own pending means the rotation may have reached the
-				// host, and a commit must never be guessed, so the row fences
-				// exactly where master would.
+				// it — the host's layout is the other witness. A proven
+				// scopeOutgoing (account.next.<id> present, no account.prev)
+				// proves the swap never reached the rotation, so it can only
+				// roll back. Settle as rolled_back only AFTER the serialized
+				// discard tombstones this swap's id and removes its stage —
+				// never on this first read — so a late run(swapID) that names
+				// the still-staged scope is refused instead of committing
+				// against a daemon that already recorded a rollback (#7862
+				// review). The discard claims this swap's own rolled_back for
+				// the slot its stage was just removed from (refuseLocked), so
+				// the second read settles. Any other layout stays fenced, as
+				// master fences.
 				if w.probeScopeState(swapID, scopedStage, sshShortStepTimeout) != scopeOutgoing {
 					return false, "", false, nil
 				}
@@ -185,15 +182,12 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string, scope
 				// then re-read.
 			case swapOutcomeUnknown:
 				// A terminal unknown: swap() ran and its scope could not be
-				// put back, so the rotation MAY have reached the host. The
-				// record alone cannot settle it, and unlike the pre-rotation
-				// checkpoint this state is NOT safe for the discard to upgrade
-				// to rolled_back — a straggler run(swapID) that takes the
-				// recorder's lock between this read and the discard can leave
-				// the host with neither account in place, and upgrading its
-				// terminal unknown to rolled_back would settle a rollback
-				// against a host that has no live scope (#7862 review). Fence,
-				// as on master.
+				// put back, so the rotation may have reached the host. Unlike
+				// the pre-rotation checkpoint this state is NOT safe for the
+				// discard to upgrade to rolled_back — a straggler run(swapID)
+				// that takes the recorder's lock between this read and the
+				// discard can leave the host with neither account in place
+				// (#7862 review). Fence, as on master.
 				return false, "", false, nil
 			default:
 				return false, "", false, nil
