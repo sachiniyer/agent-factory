@@ -34,14 +34,14 @@ import (
 //
 // Anti-vacuity, in two parts. "The home did not come back" is trivially true of
 // a daemon that is not writing, so the run needs the daemon PROVABLY alive past
-// the deletion — and the proof is the exit's own timing, not a pid sampled after
-// the fact (#7874): the two-miss home check is the only thing that stops this
-// daemon, and it cannot fire before one full check interval has elapsed, so an
-// exit observed at least that late could only come from a daemon that ran — and
-// kept attempting the 100ms save that used to resurrect the home — through the
-// whole post-deletion window up to then. The pre-deletion instances file is
-// still required to exist first, so the exact write path under test is known to
-// be live for this session.
+// the deletion — and the proof is the daemon's own report, not a pid sampled
+// after the fact (#7874): watchDaemonHome logs its shutdown line only after
+// homeMissingChecksToExit consecutive misses, and the daemon's log fd keeps
+// writing into the moved-aside home where the test can still read it, so the
+// line's presence can only mean a live daemon observed the missing home. A
+// daemon that died any other way leaves none. The pre-deletion instances file
+// is still required to exist first, so the exact write path under test is known
+// to be live for this session.
 func TestDaemonDoesNotResurrectAHomeDeletedUnderIt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns a real daemon and waits out two home checks; skipped under -short — see #2052")
@@ -66,22 +66,19 @@ func TestDaemonDoesNotResurrectAHomeDeletedUnderIt(t *testing.T) {
 		return err == nil
 	})
 
-	// The exit's timing is the proof the daemon lived past the deletion:
-	// watchDaemonHome counts homeMissingChecksToExit consecutive misses one
-	// tick apart, so the earliest a correct exit can land is one interval out.
-	// A pid sampled after the deletion cannot prove more than that, while a
-	// daemon already gone at the first sample — the #7874 sighting — exited on
-	// exactly this schedule, which is the behaviour under test.
-	deletedAt := time.Now()
-	deleteHomeUnderDaemon(t, h.home)
+	// The daemon's own log is the proof it lived past the deletion: the writer
+	// holds an open fd inside the home, so the shutdown line lands inside the
+	// moved-aside copy where this test can still read it. A pid sampled after
+	// the deletion cannot prove any of that — a daemon already gone at the
+	// first sample, the #7874 sighting, is the behaviour under test.
+	movedAside := moveHomeAside(t, h.home)
 
 	// homeMissingChecksToExit is 2, so the daemon exits between one and two
 	// intervals after the deletion; the budget is generous over that because a
 	// loaded box may stretch the ticker, and a slow exit is not the failure this
 	// test is about.
-	deadline := deletedAt.Add(6 * homeCheck)
+	deadline := time.Now().Add(6 * homeCheck)
 	exited := false
-	var exitAt time.Time
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(h.home); err == nil {
 			var came []string
@@ -95,7 +92,6 @@ func TestDaemonDoesNotResurrectAHomeDeletedUnderIt(t *testing.T) {
 		}
 		if !pidAlive(pid) {
 			exited = true
-			exitAt = time.Now()
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -105,11 +101,21 @@ func TestDaemonDoesNotResurrectAHomeDeletedUnderIt(t *testing.T) {
 		t.Fatalf("daemon pid %d is still running %v after its home was deleted; watchDaemonHome "+
 			"should have shut it down within two %v home checks (#1093/#3845)", pid, 6*homeCheck, homeCheck)
 	}
-	if exitAt.Before(deletedAt.Add(homeCheck)) {
-		t.Fatalf("daemon pid %d exited only %v after the deletion, before one %v home check could "+
-			"have fired; the two-miss check is the only thing that stops it in this configuration, "+
-			"so this death is unrelated to the missing home and nothing proves the daemon attempted "+
-			"the state write this test is about", pid, exitAt.Sub(deletedAt), homeCheck)
+
+	// The daemon that exited on the home check announced it first: the warning
+	// is logged between the second consecutive miss and close(homeGone), and it
+	// can only have been written by this process into its own still-open file.
+	// A daemon that died any other way — before the deletion, or of an
+	// unrelated cause after it — leaves no line, and without one nothing proves
+	// the daemon attempted the state write this test is about.
+	daemonLog, err := os.ReadFile(filepath.Join(movedAside, "agent-factory.log"))
+	if err != nil {
+		t.Fatalf("read the moved-aside daemon log at %s: %v", movedAside, err)
+	}
+	if !strings.Contains(string(daemonLog), "no longer exists; shutting down") {
+		t.Fatalf("daemon pid %d exited without reporting the missing home; the two-miss check is "+
+			"the only thing that stops it in this configuration, so this death is unrelated to the "+
+			"deletion and nothing proves the daemon attempted the state write this test is about", pid)
 	}
 }
 
@@ -359,6 +365,26 @@ func postOverConn(conn net.Conn, path string, payload any, timeout time.Duration
 	return nil
 }
 
+// moveHomeAside makes the daemon's home path vanish in one step and returns the
+// moved-aside copy.
+//
+// Renaming the home to a sibling is atomic, so from the daemon's side the home
+// path is gone exactly as after `rm -rf`: a daemon that writes by path
+// re-creates a fresh directory there, which the callers' observation loops
+// still catch as a resurrection. The copy is left for the caller to keep or
+// remove — and worth keeping when the daemon's own output is the evidence,
+// because files the daemon holds open keep receiving its writes there: its log
+// writer holds an fd, so post-deletion log lines land in the moved-aside
+// agent-factory.log.
+func moveHomeAside(t *testing.T, home string) string {
+	t.Helper()
+	gone := fmt.Sprintf("%s.deleted-%d", home, time.Now().UnixNano())
+	if err := os.Rename(home, gone); err != nil {
+		t.Fatalf("move the daemon's home %s aside: %v", home, err)
+	}
+	return gone
+}
+
 // deleteHomeUnderDaemon makes the daemon's home path vanish in one step, then
 // disposes of the contents.
 //
@@ -366,18 +392,12 @@ func postOverConn(conn net.Conn, path string, payload any, timeout time.Duration
 // instances/<id>/: it empties a directory, the daemon adds an entry, and the
 // final rmdir fails with "directory not empty" (#6191, #3957). That is harness
 // noise, not a product bug, and it fails the test before it reaches anything it
-// pins. Renaming the home to a sibling is atomic, so from the daemon's side the
-// home path is gone exactly as after `rm -rf`: a daemon that writes by path
-// re-creates a fresh directory there, which the callers' observation loops still
-// catch as a resurrection. Only the leftover copy, which no daemon path names,
-// is then removed; writes through descriptors the daemon already holds can still
-// race that removal, so it keeps a bounded retry.
+// pins. Only the leftover copy, which no daemon path names, is removed;
+// writes through descriptors the daemon already holds can still race that
+// removal, so it keeps a bounded retry.
 func deleteHomeUnderDaemon(t *testing.T, home string) {
 	t.Helper()
-	gone := fmt.Sprintf("%s.deleted-%d", home, time.Now().UnixNano())
-	if err := os.Rename(home, gone); err != nil {
-		t.Fatalf("move the daemon's home %s aside: %v", home, err)
-	}
+	gone := moveHomeAside(t, home)
 	const attempts = 20
 	var err error
 	for i := 0; i < attempts; i++ {
