@@ -565,6 +565,18 @@ func credentialMountDeniedNames(agent string) map[string]struct{} {
 // forwarded name could silently cancel the operator's proxy (#7529 R2).
 var credentialMountProxyCasePairs = sessionenv.ProxyEnvCasePairs
 
+// credentialMountTrustBundlePairs pairs the CA-bundle spellings a single
+// reader chains as precedence siblings: Python Requests' environment merge
+// is `REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify`, so a pinned-or-
+// resolved REQUESTS_CA_BUNDLE outranks a CURL_CA_BUNDLE the operator
+// forwarded for their private CA (#7889). Forwarding either exempts both
+// from the pin and reseats the other to the operator's bundle — the proxy
+// twins' claim semantics: an empty-or-platform higher-precedence name
+// would silently cancel the operator's CA for the clients that chain them.
+var credentialMountTrustBundlePairs = [][2]string{
+	{"REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"},
+}
+
 // credentialMountTwinForwarding normalizes a name pair (proxy case
 // spellings, or a program-selector precedence group) so the unforwarded
 // spelling cannot keep an image-supplied value: every spelling is in the
@@ -640,11 +652,13 @@ func credentialMountSelectorForwarding(passthrough []string, environ []string) (
 }
 
 // credentialMountGroupForwarding applies the twin forwarding to every
-// pair table — proxy case spellings and selector precedence groups share
-// the same claim semantics (#7531).
+// pair table — proxy case spellings, the Requests/curl CA-bundle chain,
+// and selector precedence groups share the same claim semantics (#7531).
 func credentialMountGroupForwarding(passthrough []string, environ []string) (names, synth []string) {
 	names, synth = credentialMountTwinForwarding(credentialMountProxyCasePairs, passthrough, environ)
 	n, s := credentialMountSelectorForwarding(passthrough, environ)
+	names, synth = append(names, n...), append(synth, s...)
+	n, s = credentialMountTwinForwarding(credentialMountTrustBundlePairs, passthrough, environ)
 	return append(names, n...), append(synth, s...)
 }
 
@@ -659,13 +673,15 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 	for _, name := range passthrough {
 		forwarded[name] = struct{}{}
 	}
-	for _, pair := range credentialMountProxyCasePairs {
-		if _, ok := forwarded[pair[0]]; ok {
-			forwarded[pair[1]] = struct{}{}
-			continue
-		}
-		if _, ok := forwarded[pair[1]]; ok {
-			forwarded[pair[0]] = struct{}{}
+	for _, pairs := range [][][2]string{credentialMountProxyCasePairs, credentialMountTrustBundlePairs} {
+		for _, pair := range pairs {
+			if _, ok := forwarded[pair[0]]; ok {
+				forwarded[pair[1]] = struct{}{}
+				continue
+			}
+			if _, ok := forwarded[pair[1]]; ok {
+				forwarded[pair[0]] = struct{}{}
+			}
 		}
 	}
 	out := make([]string, 0)

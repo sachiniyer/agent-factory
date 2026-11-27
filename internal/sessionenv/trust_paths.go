@@ -59,6 +59,13 @@ var caBundleDirCandidates = []string{
 //   - DBUS_SESSION_BUS_ADDRESS / proxies / GH_HOST / AF_DAEMON_URL /
 //     AF_DAEMON_TOKEN: not filesystem paths — empty reads as unset for
 //     their readers.
+//
+// REQUESTS_CA_BUNDLE and CURL_CA_BUNDLE are also a precedence PAIR, claimed
+// upstream of this table: Requests merges `REQUESTS_CA_BUNDLE or
+// CURL_CA_BUNDLE or verify`, so forwarding either exempts both from the pin
+// and reseats the sibling to the operator's bundle
+// (credentialMountTrustBundlePairs) — a resolved platform path here must
+// never outrank the operator's forwarded CA.
 var trustPathPinCandidates = map[string][]string{
 	"SSL_CERT_FILE":                    caBundleFileCandidates,
 	"SSL_CERT_DIR":                     caBundleDirCandidates,
