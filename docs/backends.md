@@ -432,12 +432,13 @@ user's real home and mounts it only if it exists, so:
       as the proxy case pairs (`HTTP/HTTPS/ALL/NO_PROXY`, either case),
       where the unforwarded twin is set to the forwarded spelling's value
       because a defined-empty twin would cancel it in clients that read
-      both — and as the Requests/curl CA-bundle chain
-      (`REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify`), where the
-      unforwarded member is reseated to the forwarded bundle because a
-      defined-empty or platform-resolved `REQUESTS_CA_BUNDLE` would
-      outrank the operator's forwarded CA for every Requests client
-      (#7889).
+      both — and as the CA-bundle precedence chain
+      (`REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify` for Requests;
+      `CURL_CA_BUNDLE` preferred over `SSL_CERT_FILE` for curl), where
+      every unforwarded member is reseated to the forwarded bundle
+      because an af-set member — defined-empty or a resolved platform
+      path alike — would outrank the operator's forwarded CA for the
+      clients that chain it (#7889).
 
     The operator's escape hatch is unchanged: names listed in the global
     `session_env_passthrough` keep their forwarded value and are never blanked

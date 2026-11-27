@@ -66,81 +66,83 @@ func TestTrustPathUnpinnedScriptNoPinsIsIdentity(t *testing.T) {
 	}
 }
 
-// The Requests/curl CA-bundle chain is a precedence pair: Requests merges
-// `REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify`, so a higher-precedence
-// REQUESTS_CA_BUNDLE af sets — even to a real platform bundle — would
-// outrank a CURL_CA_BUNDLE the operator forwarded for a private CA (#7889
-// review). Forwarding either member must exempt BOTH from the pin, exactly
-// like the proxy case twins.
-func TestCredentialMountPinnedNames_TrustBundleSiblingExemptsBoth(t *testing.T) {
-	for _, pair := range credentialMountTrustBundlePairs {
-		for _, spelling := range pair {
-			sibling := pair[0]
-			if sibling == spelling {
-				sibling = pair[1]
-			}
-			pinned := credentialMountPinnedNames("opencode", []string{spelling})
-			if slices.Contains(pinned, spelling) {
-				t.Fatalf("forwarded %s must not be pinned", spelling)
-			}
-			if slices.Contains(pinned, sibling) {
-				t.Fatalf("forwarding %s must also exempt its precedence sibling %s", spelling, sibling)
+// The CA-bundle spellings form a precedence CHAIN across readers: Requests
+// merges `REQUESTS_CA_BUNDLE or CURL_CA_BUNDLE or verify` and curl prefers
+// `CURL_CA_BUNDLE` over `SSL_CERT_FILE` for --cacert — so a member af sets,
+// even to a real platform bundle, outranks a lower member the operator
+// forwarded for a private CA (#7889 review). Forwarding ANY member must
+// exempt the WHOLE chain from the pin, exactly like the proxy case twins.
+func TestCredentialMountPinnedNames_TrustBundleChainExemptsAll(t *testing.T) {
+	for _, forwarded := range credentialMountTrustBundleGroup {
+		pinned := credentialMountPinnedNames("opencode", []string{forwarded})
+		for _, member := range credentialMountTrustBundleGroup {
+			if slices.Contains(pinned, member) {
+				t.Fatalf("forwarding %s must exempt chain member %s from the pin", forwarded, member)
 			}
 		}
 	}
-	// Unforwarded, both stay pinned — the resolved-path pin only matters
-	// when the operator did not claim the chain.
+	// Unforwarded, all three stay pinned — the resolved-path pin only
+	// matters when the operator did not claim the chain. SSL_CERT_DIR is
+	// no chain member (no reader falls back to it from a bundle file) and
+	// stays pinned regardless.
 	pinned := credentialMountPinnedNames("opencode", []string{"OPERATOR_THING"})
-	for _, pair := range credentialMountTrustBundlePairs {
-		for _, spelling := range pair {
-			if !slices.Contains(pinned, spelling) {
-				t.Fatalf("unforwarded trust-bundle name %s must stay pinned", spelling)
-			}
+	for _, member := range credentialMountTrustBundleGroup {
+		if !slices.Contains(pinned, member) {
+			t.Fatalf("unforwarded trust-bundle name %s must stay pinned", member)
 		}
+	}
+	if !slices.Contains(pinned, "SSL_CERT_DIR") {
+		t.Fatal("SSL_CERT_DIR must stay pinned — it is not a chain member")
 	}
 }
 
-// The unforwarded sibling cannot simply drop the pin — its name is in the
-// inner filter's always-admitted set, so an image value for it would reach
-// the agent. It is reseated to the operator's forwarded bundle through the
-// twin machinery instead (bare `-e NAME` + synthesized NAME=V in the docker
-// client env, so the value never enters argv).
-func TestCredentialMountTrustBundleForwarding_ReseatsToForwardedBundle(t *testing.T) {
-	environ := []string{
-		"CURL_CA_BUNDLE=/operator/private-ca.pem",
-		"UNRELATED=1",
+// The unforwarded members cannot simply drop the pin — their names are in
+// the inner filter's always-admitted set, so an image value for them would
+// reach the agent. They are reseated to the operator's forwarded bundle
+// through the chain machinery instead (bare `-e NAME` + synthesized NAME=V
+// in the docker client env, so the value never enters argv).
+func TestCredentialMountTrustBundleForwarding_ReseatsChainToForwardedBundle(t *testing.T) {
+	// Forwarding CURL_CA_BUNDLE: the operator's bundle must outrank the
+	// resolved platform path for Requests (REQUESTS sits ahead of CURL in
+	// its chain) AND for curl over nothing — both siblings reseat.
+	names, synth := credentialMountChainForwarding(credentialMountTrustBundleGroup,
+		[]string{"CURL_CA_BUNDLE"}, []string{"CURL_CA_BUNDLE=/operator/private-ca.pem"})
+	if !slices.Equal(names, []string{"REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"}) {
+		t.Fatalf("names = %v, want both unclaimed members emitted for the reseat", names)
 	}
-	names, synth := credentialMountTwinForwarding(credentialMountTrustBundlePairs, []string{"CURL_CA_BUNDLE"}, environ)
-	if len(names) != 1 || names[0] != "REQUESTS_CA_BUNDLE" {
-		t.Fatalf("names = %v, want REQUESTS_CA_BUNDLE emitted for the reseat", names)
-	}
-	if len(synth) != 1 || synth[0] != "REQUESTS_CA_BUNDLE=/operator/private-ca.pem" {
-		t.Fatalf("synth = %v, want REQUESTS_CA_BUNDLE reseated to the forwarded bundle", synth)
-	}
-
-	// The reverse direction claims the chain for a forwarded REQUESTS too:
-	// curl (which reads only CURL_CA_BUNDLE) gets the operator's CA rather
-	// than its compiled default, the same claim the proxy twins make.
-	names, synth = credentialMountTwinForwarding(credentialMountTrustBundlePairs,
-		[]string{"REQUESTS_CA_BUNDLE"}, []string{"REQUESTS_CA_BUNDLE=/op/requests.pem"})
-	if len(names) != 1 || names[0] != "CURL_CA_BUNDLE" {
-		t.Fatalf("names = %v, want CURL_CA_BUNDLE emitted for the reseat", names)
-	}
-	if len(synth) != 1 || synth[0] != "CURL_CA_BUNDLE=/op/requests.pem" {
-		t.Fatalf("synth = %v, want CURL_CA_BUNDLE reseated to the forwarded bundle", synth)
+	if !slices.Equal(synth, []string{
+		"REQUESTS_CA_BUNDLE=/operator/private-ca.pem",
+		"SSL_CERT_FILE=/operator/private-ca.pem",
+	}) {
+		t.Fatalf("synth = %v, want both members reseated to the forwarded bundle", synth)
 	}
 
-	// Both forwarded and set: each keeps its own approved value.
-	names, synth = credentialMountTwinForwarding(credentialMountTrustBundlePairs,
-		[]string{"REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"},
-		[]string{"REQUESTS_CA_BUNDLE=/op/requests.pem", "CURL_CA_BUNDLE=/op/curl.pem"})
+	// Forwarding SSL_CERT_FILE (the finding's exact case): curl prefers
+	// CURL_CA_BUNDLE, so CURL must reseat or the platform pin outranks the
+	// operator's CA; REQUESTS reseats so Requests reaches it too.
+	names, synth = credentialMountChainForwarding(credentialMountTrustBundleGroup,
+		[]string{"SSL_CERT_FILE"}, []string{"SSL_CERT_FILE=/op/openssl-ca.pem"})
+	if !slices.Equal(names, []string{"REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"}) {
+		t.Fatalf("names = %v, want REQUESTS and CURL emitted for the reseat", names)
+	}
+	if !slices.Equal(synth, []string{
+		"REQUESTS_CA_BUNDLE=/op/openssl-ca.pem",
+		"CURL_CA_BUNDLE=/op/openssl-ca.pem",
+	}) {
+		t.Fatalf("synth = %v, want the whole chain reseated to the forwarded bundle", synth)
+	}
+
+	// All members forwarded and set: each keeps its own approved value.
+	names, synth = credentialMountChainForwarding(credentialMountTrustBundleGroup,
+		credentialMountTrustBundleGroup,
+		[]string{"REQUESTS_CA_BUNDLE=/op/r.pem", "CURL_CA_BUNDLE=/op/c.pem", "SSL_CERT_FILE=/op/s.pem"})
 	if len(names) != 0 || len(synth) != 0 {
-		t.Fatalf("both members claimed must not reseat anything: names=%v synth=%v", names, synth)
+		t.Fatalf("a fully claimed chain must not reseat anything: names=%v synth=%v", names, synth)
 	}
 
 	// A forwarded-but-unset claim emits nothing (the claimed-empty semantics
 	// the twins already carry) — and the exemption above still holds.
-	names, synth = credentialMountTwinForwarding(credentialMountTrustBundlePairs,
+	names, synth = credentialMountChainForwarding(credentialMountTrustBundleGroup,
 		[]string{"CURL_CA_BUNDLE"}, []string{"UNRELATED=1"})
 	if len(names) != 0 || len(synth) != 0 {
 		t.Fatalf("a forwarded-but-unset claim must not reseat: names=%v synth=%v", names, synth)
