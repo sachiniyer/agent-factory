@@ -74,9 +74,13 @@ func dockerMountTarget(field string) (string, bool) {
 // validateAccountDockerRunArgs refuses repo-controlled sources that Docker can
 // apply after af has selected the account. Environment files are opaque to af,
 // so none are accepted in account mode; direct environment options are refused
-// only when they can choose another identity or authentication mode — or which
-// program af's in-container provisioning execs resolve (#7563 R2, the #7529
-// R7 program-choice refusal extended to account sessions).
+// when they can choose another identity or authentication mode, which program
+// af's in-container provisioning execs resolve (#7563 R2, the #7529 R7
+// program-choice refusal extended to account sessions), or where they route the
+// account's authenticated traffic — endpoint selectors, proxies, and TLS trust
+// roots (the routing/trust class the credential-mount guard refuses from the
+// same repo-controlled channel, ported to the account path so a repository
+// cannot deliver the account's credential to a server it controls).
 func validateAccountDockerRunArgs(args []string, agent string) error {
 	denied := accountDockerDeniedNames(agent)
 	// The keep-if-set names the account boundary pins at exec are refused to
@@ -120,6 +124,11 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: %s",
 				name, agent, reason, remedy)
+		}
+		if reason, refused := accountDockerRoutingReason(agent, name); refused {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: have the operator forward it through session_env_passthrough",
+				name, agent, reason)
 		}
 		return nil
 	}
@@ -356,6 +365,43 @@ func accountDockerProgramChoiceReason(name string) (string, bool) {
 		return "tmux runs every pane command as $default-shell -c …, and default-shell comes from SHELL in the client environment, so a repo-chosen SHELL would run a program of the repo's choosing between af's pins and the agent's exec — and af re-asserts SHELL=/bin/sh after run_args", true
 	}
 	return credentialMountLoaderReason(name)
+}
+
+// accountDockerRoutingReason returns the because-clause for the routing/trust
+// and config-root env names a repo-controlled docker.run_args entry may not set
+// on the account path: the names that change WHERE the agent sends the account
+// credential — endpoint selectors, proxies, and TLS trust roots — and the
+// shared names that relocate where the agent reads credential-bearing state.
+// They are the same classes the credential-mount guard refuses from the same
+// repo-controlled channel (credentialMountSharedRoutingNames,
+// credentialMountRoutingNames[agent], and credentialMountSharedConfigRootNames),
+// ported to the account path so a repository cannot route the account's
+// authenticated traffic to a server it controls or redirect the agent's
+// credential-bearing state to a path the repository controls.
+//
+// The refusal is repo-run_args-only, never the operator's own claim: these
+// names are NOT in accountDockerDeniedNames (which also filters
+// session_env_passthrough), so the operator stays free to forward their own
+// endpoint, proxy, or CA bundle through session_env_passthrough — exactly as
+// PATH and SHELL already do. ApplyAccount deliberately keeps a routed
+// deployment's ambient value, and that scoping decision is unaffected: only the
+// repo-controlled run_args channel is refused. The keep-if-set names an agent
+// pins (gemini's proxy surface) are refused upstream of this check with their
+// own keep-if-set remedy, so this function is the net that catches the routing
+// class for every other account agent and every unguarded shared name
+// (ANTHROPIC_BASE_URL for claude; CODEX_CA_CERTIFICATE for codex;
+// SSL_CERT_FILE/NODE_EXTRA_CA_CERTS/… for all).
+func accountDockerRoutingReason(agent, name string) (string, bool) {
+	if _, ok := credentialMountSharedRoutingNames[name]; ok {
+		return "it changes where the agent sends the account credential — a repo-supplied endpoint, proxy, or trust root routes the account's authenticated traffic to a server the repository controls", true
+	}
+	if _, ok := credentialMountRoutingNames[agent][name]; ok {
+		return "it changes where the agent sends the account credential — a repo-supplied endpoint, proxy, or trust root routes the account's authenticated traffic to a server the repository controls", true
+	}
+	if _, ok := credentialMountSharedConfigRootNames[name]; ok {
+		return "it can redirect where the agent reads credential-bearing state — a repo-supplied value relocates the account's credential-bearing state to a path the repository controls", true
+	}
+	return "", false
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
