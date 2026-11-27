@@ -341,9 +341,10 @@ func claudeDialogHoldKind(screen visibleText) DialogHoldKind {
 	switch claudeMCPServersTailOf(screen) {
 	case claudeMCPServersTailWhole:
 		return DialogHoldMCPUnreadable
-	case claudeMCPServersTailBegun:
-		// The footer still painting is a partial hold, the kind the
-		// painting reader gives a begun row it can see (#7872 review, R2).
+	case claudeMCPServersTailBegun, claudeMCPServersTailSubmit:
+		// The footer still painting — or not yet begun — is a partial hold,
+		// the kind the painting reader gives a begun row it can see (#7872
+		// review, R2, #7873).
 		return DialogHoldMCPPartial
 	}
 	if claudeMCPServersPaintingOf(screen) {

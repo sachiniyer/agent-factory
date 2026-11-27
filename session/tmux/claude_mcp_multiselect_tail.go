@@ -22,6 +22,12 @@ const (
 	// claudeMCPServersPaintingOf gives a begun row it can see (#7872 review,
 	// R2).
 	claudeMCPServersTailBegun
+	// claudeMCPServersTailSubmit: the pane's last content is the "Enable
+	// selected" row itself — whole, a proper prefix of it that begins the
+	// row, or as much of it as the pane's top edge leaves — one paint
+	// instant before the footer begins (#7873). Held silently, as painting,
+	// the way a begun footer is.
+	claudeMCPServersTailSubmit
 )
 
 // claudeMCPServersTailOf reports the 2.1.322 multi-server picker (#7166) from
@@ -54,23 +60,32 @@ const (
 //     pane's top edge leaves; or the footer is the first content the pane
 //     shows.
 //
+// And one paint instant before the footer begins (#7873) it holds when the
+// pane's last content is the "Enable selected" row itself: whole, a proper
+// prefix of it that begins the row, or as much of it as the pane's top edge
+// leaves — read squashed and behind an optional ❯ the way the begun-footer
+// read reads the footer — with the content straight above it a row the
+// picker paints there, or nothing at all. The guard is the begun-footer
+// read's: nothing ordinary is painted below it.
+//
 // A proper footer prefix is the footer still painting: Claude Code draws the
 // picker's last row left to right, so a capture can land before it is whole
 // with the picker's header already scrolled off. Until #7870 such a pane read
 // clear — the readers above this one wanted the header or the footer whole —
 // and the create typed its prompt into the picker, where Enter confirmed
 // whichever row owned the cursor, pre-checked servers that run code among
-// them.
+// them. The submit row alone is the same frame one instant earlier: the
+// paint has not reached the footer, and until #7873 it read clear too.
 //
-// Nothing above the "Enable selected" row is asked. A pane tall enough for the
-// header has the grammar read the picker; a shorter one shows some of the
-// server rows, or none, and a long server name wraps into rows that are no
-// checkbox (the long-name capture). A row above is evidence for the picker or
-// no evidence at all, never against it: a composer that a relaunch in the same
-// pane left above a live picker explains only its own rows (#7388). Below the
-// footer, nothing may be painted. A working agent paints its composer, framed
-// by rules, under its output, so a picker it quotes has the composer below the
-// footer and reads clear.
+// Nothing above the "Enable selected" row is asked of a footer read. A pane
+// tall enough for the header has the grammar read the picker; a shorter one
+// shows some of the server rows, or none, and a long server name wraps into
+// rows that are no checkbox (the long-name capture). A row above is evidence
+// for the picker or no evidence at all, never against it: a composer that a
+// relaunch in the same pane left above a live picker explains only its own
+// rows (#7388). Below the footer, nothing may be painted. A working agent
+// paints its composer, framed by rules, under its output, so a picker it
+// quotes has the composer below the footer and reads clear.
 //
 // Another picker that ends in the same two rows holds too. af cannot tell it
 // from this one, and a prompt typed into either is lost. The cost of the hold
@@ -95,6 +110,34 @@ func claudeMCPServersTailOf(screen visibleText) claudeMCPServersTailVerdict {
 	footer = claudeMCPServersFooterPrefixStart(lines, last)
 	if footer >= 0 && claudeMCPServersTailAbove(lines, footer) {
 		return claudeMCPServersTailBegun
+	}
+	if last < 0 {
+		return claudeMCPServersTailNone
+	}
+	// One paint instant earlier still, the footer row has not begun: the
+	// pane's last content is the "Enable selected" row itself — whole, or a
+	// proper prefix of it that begins the row — read squashed and behind an
+	// optional ❯ the way the begun-footer read reads the footer, with the
+	// same guard that nothing ordinary is painted below it. A pane that
+	// holds over a begun footer holds over the submit row that was its last
+	// content the instant before (#7873).
+	submit, whole := claudeRowsSpelling(lines, last, claudeSquash(claudeMCPServersSubmitLabel), true)
+	switch {
+	case whole:
+		if claudeMCPServersSubmitAbove(lines, submit) {
+			return claudeMCPServersTailSubmit
+		}
+	case submit == 0 && claudeSquash(claudeTrustRowOf(lines[last]).label) != "":
+		// The pane's top edge cut into the submit row: its rows down to the
+		// last content spell its end — as much of it as the pane shows. The
+		// last row must carry part of the label: a pane of bare ❯ rows
+		// spells nothing.
+		return claudeMCPServersTailSubmit
+	default:
+		submit = claudeMCPServersSubmitPrefixStart(lines, last)
+		if submit >= 0 && claudeMCPServersSubmitAbove(lines, submit) {
+			return claudeMCPServersTailSubmit
+		}
 	}
 	return claudeMCPServersTailNone
 }
@@ -140,6 +183,63 @@ func claudeMCPServersFooterPrefixStart(lines []string, last int) int {
 			break
 		}
 		if strings.HasPrefix(footer, text) {
+			start = i
+		}
+	}
+	return start
+}
+
+// claudeMCPServersSubmitAbove reads the pane above the picker's "Enable
+// selected" row — whole, or begun as far as row submit — the way
+// claudeMCPServersTailAbove reads the pane above the footer: the content
+// straight above the submit row, past blank rows and frame chrome, is a row
+// the picker paints there, or the submit row is the first content the pane
+// shows.
+//
+// The picker's own rows above its submit row are its checkbox rows and, when
+// a long server name wraps, the wrapped rest of a name — a row of plain
+// text, which a top cut inside the name can leave as the only server row on
+// screen (the long-name capture). Every unselected row straight above counts
+// as one of those; the row the picker never paints between its servers and
+// its submit row is a selected row that is not a checkbox: a bare ❯, or the
+// cursor row of anything else (#7873).
+func claudeMCPServersSubmitAbove(lines []string, submit int) bool {
+	above := submit - 1
+	for above >= 0 && claudeTrustRowOf(lines[above]).blank {
+		above--
+	}
+	if above < 0 {
+		// The submit row is the first content the pane shows: a pane too
+		// short for even one server row.
+		return true
+	}
+	row := claudeTrustRowOf(lines[above])
+	return !row.selected || claudeMCPServerCheckboxRow(row.label)
+}
+
+// claudeMCPServersSubmitPrefixStart returns the row the picker's "Enable
+// selected" row begins on when the pane's last content, through row last, is
+// a proper prefix of it that begins a row: the submit row still painting.
+// -1 when the rows are none of that. Read with whitespace removed, as
+// claudeMCPServersFooterPrefixStart reads the footer's — except that the
+// submit row can carry the ❯ cursor where the footer never does, so a
+// selected row's label counts toward the prefix the way claudeRowsSpelling
+// reads it with the cursor kept. A row with no label at all — a bare ❯
+// prompt — ends the row the way a blank does.
+func claudeMCPServersSubmitPrefixStart(lines []string, last int) int {
+	submit := claudeSquash(claudeMCPServersSubmitLabel)
+	text, start := "", -1
+	for i := last; i >= 0; i-- {
+		row := claudeTrustRowOf(lines[i])
+		label := claudeSquash(row.label)
+		if row.blank || label == "" {
+			break
+		}
+		text = label + text
+		if len(text) >= len(submit) {
+			break
+		}
+		if strings.HasPrefix(submit, text) {
 			start = i
 		}
 	}
