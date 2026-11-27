@@ -225,6 +225,38 @@ func (report ArchiveReport) append(newReport ArchiveReport) ArchiveReport {
 	return combined
 }
 
+// RetainedTreeAtPath reports whether this report already durably retains the
+// tree at candidate: an entry naming the same recorded path whose pinned
+// identity still matches the directory on disk. The dest-present archive
+// arbitration consults it before classifying a surviving `.af-source-*`
+// quarantine as stranded (#7816 R1): a tree this report already owns is durably
+// tracked, and the adopted commit carries this same report forward, so the
+// tree neither blocks the adoption nor drops out of the committed report.
+//
+// The path side is the recorded spelling — a differently-spelled route to the
+// same directory is NOT a match and simply fails closed to the ordinary
+// residue binding (a refusal, never a wrongly-skipped block). The identity
+// side is the real gate: an entry that never recorded an identity, or one
+// whose pinned device/inode no longer matches the tree on disk, names different
+// data than what sits at the path now, and this report does not track it.
+func (report ArchiveReport) RetainedTreeAtPath(candidate string) (bool, error) {
+	for _, tree := range report.RetainedTrees {
+		if tree.filesystemPath() != candidate || !tree.IdentityKnown {
+			continue
+		}
+		current, err := boundedRelocationPathIdentity(candidate)
+		if err != nil {
+			return false, fmt.Errorf(
+				"cannot compare the retained archive tree entry for %s with the tree on disk: %w",
+				candidate, err)
+		}
+		if tree.identity().same(current) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 type archiveWarningEntry struct {
 	path   string
 	reason ArchiveSkipReason

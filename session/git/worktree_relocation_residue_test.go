@@ -615,3 +615,30 @@ func TestListAFRelocationResidue_StalledPathComponentIsBounded(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Nil(t, residue)
 }
+
+// TestBindAFRelocationResidue_UnprovenAnchorResolutionIsUnknown pins #7816 R3:
+// a binding whose path comparison rests on a resolution that did not complete
+// is UNKNOWN, never Foreign. The anchor spelled through a dangling symlink
+// cannot be proven to differ from the candidate's backpointer — the kernel
+// may spell both sides alike once the link resolves — but a lexical
+// comparison of the unresolvable spelling would mismatch and read as
+// proven-foreign, which the dest-present arbitration would then adopt over.
+func TestBindAFRelocationResidue_UnprovenAnchorResolutionIsUnknown(t *testing.T) {
+	_, repoRoot, wtPath := archiveTestWorktree(t)
+	quarantine := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("a", 32))
+	require.NoError(t, os.Rename(wtPath, quarantine))
+
+	// Spell the anchor through a component that is a symlink to nowhere: the
+	// walk can only fall back past it lexically, which is a guess — lstat
+	// still sees the link, so the component is not proven absent.
+	danglingRoot := t.TempDir()
+	dangling := filepath.Join(danglingRoot, "dangling")
+	require.NoError(t, os.Symlink(filepath.Join(danglingRoot, "nonexistent"), dangling))
+	spelledSource := filepath.Join(dangling, filepath.Base(wtPath))
+
+	binding, err := BindAFRelocationResidue(quarantine, spelledSource, repoRoot)
+	assert.Equal(t, ResidueUnknown, binding,
+		"an anchor whose resolution is unproven must read unknown, never proven-foreign")
+	require.Error(t, err,
+		"the unproven resolution must surface as an error, not a lexical comparison")
+}

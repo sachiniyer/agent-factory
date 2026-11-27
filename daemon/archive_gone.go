@@ -41,6 +41,22 @@ import (
 // it is looking at and both wrong answers lose track of someone's bytes. Every
 // refusal here is before teardown, so it cancels the fence and leaves the
 // session as it was.
+//
+// The landed-move route carries one more obligation (#7816): a cross-device
+// archive publishes dest BEFORE persisting the new path and its ArchiveReport,
+// and when skipUnreadable omitted files it also retains the COMPLETE original
+// as a `.af-source-<32hex>` sibling of the source — a tree only that unwritten
+// report references. A daemon death in that window lands here too: dest is
+// occupied and provable and the source is absent, exactly like a complete
+// landed move, but the retained original still survives beside the source with
+// nothing naming it. Committing an empty report would orphan the only complete
+// copy and let a later restore from dest silently lack the skipped files, so
+// the dest-present branch first establishes whether such a quarantine survives
+// — by the same binding the dest-absent branch uses, anchored at dest and at
+// the recorded source so it answers wherever the registration backpointer was
+// left pointing — and adopts as "nothing retained" only on proven absence. A
+// tree the session's loaded report already retains is the exception that
+// proves the rule: it is durably owned, so adoption carries it forward.
 func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *session.Instance, dest string) (string, session.InstanceData, error) {
 	refuse := func(err error) (string, session.InstanceData, error) {
 		_ = instance.Transition(session.CancelArchive())
@@ -194,6 +210,121 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 	}
 	if owner != "" {
 		return refuse(fmt.Errorf("cannot archive session %q: its worktree path %s is gone, and destination %s already exists and belongs to session %q", title, source, dest, owner))
+	}
+	// Before adopting dest, establish whether a quarantine of THIS session's
+	// source survives beside the source (#7816). A cross-device archive
+	// publishes dest and repairs its registration BEFORE the new path and
+	// ArchiveReport are persisted; a daemon death in that window lands the
+	// retry here, where dest looks like an ordinary landed move. When
+	// skipUnreadable omitted files, though, the COMPLETE original was retained
+	// as a `.af-source-<32hex>` sibling of the source — referenced only by the
+	// report the crash never wrote. Adopting dest with an empty report would
+	// leave that only complete tree untracked, and a later restore from dest
+	// would silently lack the skipped files. The scan runs on the source
+	// parent only: that is the one place a quarantine of this source can sit.
+	//
+	// Only `.af-source-*` candidates answer the question. The `.af-copy-*`
+	// staging copy is never the retained original — it is what dest's own
+	// publication consumed — so it is not even bound.
+	//
+	// Attribution shares the dest-absent branch's mechanism, anchored at BOTH
+	// places the quarantine's registration backpointer can name (#7816 R2):
+	// dest, after `git worktree repair` re-aimed it at the published copy —
+	// the crash this branch exists for — and the recorded source, where it
+	// still points when the daemon died between publish and repair. The leaf
+	// backpoints at exactly one of them, so the anchor that answers Ours also
+	// names the crash window, and each gets its own refusal (#7816 N4): a
+	// dest-bound quarantine means the published copy is already registered,
+	// while a source-bound one means git still registers the vacated source —
+	// dest is unproven then, and the recovery step that makes a retry adopt
+	// is the repair, not any remedy aimed at dest. Ours against NEITHER
+	// anchor, with both bindings answered, is foreign — another session's
+	// quarantine is never claimed. A candidate that cannot be bound is NOT
+	// absence: the read that would classify it failed, so the adoption
+	// refuses — it may be this session's retained tree that af cannot see —
+	// but without claiming it is this session's work, exactly like the
+	// dest-absent branch's unverified arm.
+	//
+	// One quarantine never blocks: a tree this session's loaded ArchiveReport
+	// already retains — the same recorded path and the same on-disk identity
+	// its durable entry pinned (#7816 R1). The adopted commit carries that
+	// same report forward untouched, so the tree neither blocks the adoption
+	// nor drops out of it — exactly what an uninterrupted re-archive commits
+	// when a restore kept the report.
+	residue, resErr := sessiongit.ListAFRelocationResidue(filepath.Dir(source))
+	if resErr != nil {
+		return refuse(fmt.Errorf(
+			"cannot archive session %q: its worktree path %s is gone and archive destination %s already exists, but af could not scan for a retained source quarantine beside %s, so it cannot prove the landed destination is the only complete tree: %w",
+			title, source, dest, filepath.Dir(source), resErr))
+	}
+	loadedReport := instance.GetArchiveReport()
+	var destBound, sourceBound, unverifiedQuarantine []string
+	for _, candidate := range residue {
+		if !strings.HasPrefix(filepath.Base(candidate), ".af-source-") {
+			continue
+		}
+		tracked, trackErr := loadedReport.RetainedTreeAtPath(candidate)
+		if trackErr != nil {
+			// A tree whose tracked state cannot be proven is arbitrated as
+			// untracked: it is bound below like any other candidate, and the
+			// refusal it may cause names what af could not establish.
+			m.warn().Printf(
+				"archive of session %q: could not prove whether the .af-source-* residue %s beside the source is already tracked by the session's archive report, so it is arbitrated as untracked: %v",
+				title, candidate, trackErr)
+		}
+		if tracked {
+			continue
+		}
+		destBinding, destBindErr := sessiongit.BindAFRelocationResidue(candidate, dest, instance.GetRepoPath())
+		sourceBinding, sourceBindErr := sessiongit.BindAFRelocationResidue(candidate, source, instance.GetRepoPath())
+		switch {
+		case destBindErr == nil && destBinding == sessiongit.ResidueOurs:
+			// Post-repair window: the registration leaf backpoints at the
+			// published copy, so dest is this session's registered worktree.
+			destBound = append(destBound, candidate)
+		case sourceBindErr == nil && sourceBinding == sessiongit.ResidueOurs:
+			// Pre-repair window: the leaf still backpoints at the vacated
+			// source — definitive proof repair never ran, whatever the dest
+			// read said.
+			sourceBound = append(sourceBound, candidate)
+		case destBindErr != nil || sourceBindErr != nil ||
+			destBinding == sessiongit.ResidueUnknown || sourceBinding == sessiongit.ResidueUnknown:
+			unverifiedQuarantine = append(unverifiedQuarantine, candidate)
+		}
+		// Answered Foreign on both anchors: another session's tree, ignored.
+	}
+	if len(sourceBound) > 0 {
+		extraBound := ""
+		if len(destBound) > 0 {
+			extraBound = fmt.Sprintf(
+				"; the .af-source-* quarantine %s is also present, bound to this session's registration at the destination",
+				strings.Join(destBound, ", "))
+		}
+		m.warn().Printf(
+			"archive of session %q refused: its worktree path %s is gone and destination %s is present, but the .af-source-* quarantine %s survives beside the source bound to this session's git registration at the vacated source — git still registers %s because the interrupted archive never ran its registration repair%s",
+			title, source, dest, strings.Join(sourceBound, ", "), source, extraBound)
+		return refuse(fmt.Errorf(
+			"cannot archive session %q: its worktree path %s is gone and destination %s is present, but git still registers the vacated source %s as this session's worktree — the interrupted archive that published %s was cut off before 'git worktree repair' re-aimed the registration, so af cannot yet prove the published copy is this session's worktree — and the .af-source-* quarantine %s beside the source is bound to that registration%s: the shape of the complete original an interrupted cross-device archive retains when its published copy skipped unreadable files (af proves the registration binding, not which attempt left the tree). Run 'git worktree repair %s' so git registers the published copy, compare %s with %s and restore into %s anything it lacks, then move the quarantine aside — it may be the only complete copy, so do not remove it until the destination is verified — and retry the archive: repaired, the retry adopts %s: %w",
+			title, source, dest, source, dest,
+			strings.Join(sourceBound, ", "), extraBound, dest,
+			strings.Join(sourceBound, ", "), dest, dest, dest,
+			sessiongit.ErrRelocateStateUnknown))
+	}
+	if len(destBound) > 0 {
+		m.warn().Printf(
+			"archive of session %q refused: its worktree path %s is gone and destination %s is present, but the .af-source-* quarantine %s survives beside the source bound to this session's git registration — the shape of the complete original an interrupted cross-device archive retains, which adopting the destination would leave untracked",
+			title, source, dest, strings.Join(destBound, ", "))
+		return refuse(fmt.Errorf(
+			"cannot archive session %q: its worktree path %s is gone and destination %s already holds this session's worktree, but the .af-source-* quarantine %s beside the vacated source is bound to this session's git registration — the shape of the complete original an interrupted cross-device archive retains when its published copy skipped unreadable files (af proves the registration binding, not which attempt left the tree); compare %s with %s before restoring anything from it, restore into %s anything the published copy lacks, then move the quarantine aside or remove it once the destination is verified complete, and retry the archive — af will not adopt %s while a tree bound to its registration is untracked: %w",
+			title, source, dest, strings.Join(destBound, ", "), strings.Join(destBound, ", "), dest, dest, dest, sessiongit.ErrRelocateStateUnknown))
+	}
+	if len(unverifiedQuarantine) > 0 {
+		m.warn().Printf(
+			"archive of session %q refused: its worktree path %s is gone and destination %s is present, but .af-source-*-shaped residue is present at %s beside the source and af could not verify whether it is this session's retained original",
+			title, source, dest, strings.Join(unverifiedQuarantine, ", "))
+		return refuse(fmt.Errorf(
+			"cannot archive session %q: its worktree path %s is gone and destination %s already exists, but af relocation residue shaped like a source quarantine is present at %s beside the vacated source and af could not verify whether it is this session's retained complete original — it may belong to another session, or its git binding could not be read; inspect %s (if it is this session's quarantine, recover into %s anything the published copy lacks), then move it out of %s or remove it once you have confirmed it holds nothing you need, and retry the archive: %w",
+			title, source, dest, strings.Join(unverifiedQuarantine, ", "), strings.Join(unverifiedQuarantine, ", "), dest, filepath.Dir(unverifiedQuarantine[0]), sessiongit.ErrRelocateStateUnknown))
 	}
 	if err := instance.AdoptLandedArchiveMove(dest); err != nil {
 		return refuse(fmt.Errorf(
