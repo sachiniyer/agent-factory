@@ -263,12 +263,13 @@ func TestRebuildAbsentArchivedWorktree_RefusesOverRecordNamedQuarantine(t *testi
 	assert.NoDirExists(t, dest, "the refused route never re-creates the destination")
 }
 
-// TestRebuildAbsentArchivedWorktree_RefusesOverUnverifiedResidue pins the
-// record-free direction on the same route: an `.af-source-*` candidate no
-// durable record names keeps master's leaf inference, and an unreadable
-// binding still refuses fail-closed — named as unverified rather than this
-// session's stranded work.
-func TestRebuildAbsentArchivedWorktree_RefusesOverUnverifiedResidue(t *testing.T) {
+// TestRebuildAbsentArchivedWorktree_ProceedsOverUnverifiedResidue pins the
+// R6 asymmetry on the same route: an `.af-source-*` candidate no durable
+// record names is exactly what the base never saw — the route ran no
+// residue scan at all — so leaf inference neither refuses nor adopts here.
+// One pruned-leaf `.af-copy-*` must never refuse every absent-archive
+// restore in a repo (#7819 R6).
+func TestRebuildAbsentArchivedWorktree_ProceedsOverUnverifiedResidue(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoRoot := residueTestRepo(t)
 	const branch = "af/rebuild-unverified"
@@ -277,14 +278,15 @@ func TestRebuildAbsentArchivedWorktree_RefusesOverUnverifiedResidue(t *testing.T
 	wtPath := filepath.Join(wtParent, "wt-rebuild-unverified")
 	orphan := filepath.Join(wtParent, ".af-source-"+strings.Repeat("7", 32))
 	require.NoError(t, os.Mkdir(orphan, 0o755))
+	prunedLeaf := filepath.Join(wtParent, ".af-copy-"+strings.Repeat("8", 32))
+	require.NoError(t, os.Mkdir(prunedLeaf, 0o755))
 
 	inst, _ := arbitrationInstance(t, repoRoot, wtPath, "rebuild-unverified", branch, "self-rebuild-unverified")
 	dest := filepath.Join(t.TempDir(), "rebuilt")
 	err := inst.RebuildAbsentArchivedWorktree(dest)
-	require.Error(t, err,
-		"rebuilding over unverifiable residue must refuse fail-closed")
-	assert.ErrorIs(t, err, git.ErrRelocateStateUnknown)
-	assert.Contains(t, err.Error(), filepath.Base(orphan))
-	assert.Contains(t, err.Error(), "could not verify",
-		"record-free residue whose binding cannot be read stays unverified — never claimed as this session's")
+	require.NoError(t, err,
+		"record-free residue must not refuse a route the base ran no scan on (#7819 R6)")
+	assert.DirExists(t, dest, "the rebuild proceeds")
+	assert.DirExists(t, orphan, "the unverifiable candidate is left exactly where the base left it")
+	assert.DirExists(t, prunedLeaf)
 }

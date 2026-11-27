@@ -222,48 +222,38 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 	// record names — or that the leaf still proves is its renamed source —
 	// is the only complete tree a crashed skipUnreadable archive left, and
 	// adopting dest without it commits an empty report over stranded work.
-	// Proven ours is reconstructed into the committed report below; foreign
-	// residue and `.af-copy-*` staging never are; anything unverifiable
-	// refuses rather than silently dropping the tree.
+	// Record-named ours is reconstructed into the committed report below;
+	// foreign residue and `.af-copy-*` staging never are, and residue no
+	// record names neither adopts nor blocks — exactly the base's handling.
 	var stranded []string
 	{
 		residue, resErr := sessiongit.ListAFRelocationResidue(filepath.Dir(source))
 		if resErr != nil {
-			return refuse(fmt.Errorf(
-				"cannot archive session %q: its worktree path %s is gone and destination %s already exists, but af could not scan for relocation residue beside the source, so it cannot tell whether an earlier archive retained the complete worktree there: %w",
-				title, source, dest, resErr))
+			// The base adopted the landed move without any residue scan at
+			// all, so a failed scan adds no refusal (#7819 R5): only a
+			// quarantine this session's own durable record names is ever
+			// carried forward, and that set is empty when the parent cannot
+			// be read.
+			m.warn().Printf(
+				"archive of session %q: could not scan for relocation residue beside %s; any stranded quarantine is left unadopted: %v",
+				title, source, resErr)
 		}
 		arbiter := session.NewResidueArbiter(instance)
-		var unverified []string
 		for _, candidate := range residue {
 			if !strings.HasPrefix(filepath.Base(candidate), ".af-source-") {
 				// Only the complete-original quarantine claims retained-tree
 				// status; a `.af-copy-*` staged copy is incomplete by design.
 				continue
 			}
-			switch arbiter.Classify(candidate) {
-			case session.ResidueOursQuarantine:
+			// R5: only a quarantine THIS session's durable record names is
+			// ever adopted — a leaf-proven "ours" may refuse elsewhere but it
+			// never adopts here, because a recycled leaf can attribute
+			// another session's complete worktree to this one and kill's
+			// retained-tree cleanup would then delete it. Everything a
+			// record does not name proceeds exactly as the base did.
+			if arbiter.Classify(candidate) == session.ResidueOursQuarantine {
 				stranded = append(stranded, candidate)
-			case session.ResidueOursRetained, session.ResidueOursStaging, session.ResidueForeignSession:
-				// Already tracked, or never this session's.
-			default:
-				binding, bErr := sessiongit.BindAFRelocationResidue(candidate, source, instance.GetRepoPath())
-				switch {
-				case bErr != nil || binding == sessiongit.ResidueUnknown:
-					unverified = append(unverified, candidate)
-				case binding == sessiongit.ResidueOurs:
-					stranded = append(stranded, candidate)
-				}
 			}
-		}
-		if len(unverified) > 0 {
-			enumNote := ""
-			if _, enumErr := arbiter.EnumerationProblem(); enumErr != nil {
-				enumNote = fmt.Sprintf("; %v, so other sessions' records could not rule it out either", enumErr)
-			}
-			return refuse(fmt.Errorf(
-				"cannot archive session %q: its worktree path %s is gone and destination %s already exists, but af relocation residue is present at %s and af could not verify whether it is this session's stranded complete worktree%s; inspect %s, then move it out of %s to somewhere safe (or remove it once you have confirmed it holds nothing you need) and retry the archive: %w",
-				title, source, dest, strings.Join(unverified, ", "), enumNote, strings.Join(unverified, ", "), filepath.Dir(unverified[0]), sessiongit.ErrRelocateStateUnknown))
 		}
 	}
 	if err := instance.AdoptLandedArchiveMove(dest); err != nil {

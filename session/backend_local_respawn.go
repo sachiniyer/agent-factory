@@ -769,7 +769,7 @@ func missingWorktreeRebuildRefusal(i *Instance, gw *git.GitWorktree, resume bool
 	if gw.IsExternalWorktree() {
 		return fmt.Errorf("af never rebuilds an external worktree")
 	}
-	if refusal := crashWindowResidueRebuildRefusal(i, gw); refusal != nil {
+	if refusal := crashWindowResidueRebuildRefusal(i, gw, true); refusal != nil {
 		return refusal
 	}
 	branch := gw.GetBranchName()

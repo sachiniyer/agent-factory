@@ -60,7 +60,18 @@ import (
 // lost on macOS). residueRebuildRefusal keeps the ErrRelocateStateUnknown
 // verdict for the errors.Is classifiers without spending record runes on the
 // sentinel's own sentence.
-func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
+//
+// leafInference selects the route's authority (#7819 R6). The lost-respawn
+// rebuild passes true: that route's crash-window arbitration predates the
+// record work, so master's leaf inference (BindAFRelocationResidue) still
+// refuses candidates no durable record names. RebuildAbsentArchivedWorktree
+// and adoptExistingWorktree pass false: the base ran no residue scan on
+// those routes at all, so only a candidate THIS session's own durable
+// record names may refuse — leaf inference, unverifiable candidates, a
+// failed scan and an enumeration problem all proceed exactly as the base
+// did, and one pruned-leaf `.af-copy-*` must never refuse every
+// absent-archive restore in a repo.
+func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree, leafInference bool) error {
 	source := gw.GetWorktreePath()
 	if source == "" {
 		// No recorded path to scan beside. The rebuild-path caller would already
@@ -70,6 +81,10 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 	}
 	residue, resErr := git.ListAFRelocationResidue(filepath.Dir(source))
 	if resErr != nil {
+		if !leafInference {
+			// The base ran no scan on this route; a failed one adds no refusal.
+			return nil
+		}
 		return fmt.Errorf(
 			"the worktree path %s is gone and af could not scan for relocation residue beside it, "+
 				"so it cannot tell a deletion outside af from its own interrupted cross-device move "+
@@ -110,6 +125,12 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 			oursCopy = append(oursCopy, candidate)
 			continue
 		case ResidueOursRetained, ResidueForeignSession:
+			continue
+		}
+		if !leafInference {
+			// Only a record-named candidate may refuse on this route (#7819
+			// R6): leaf evidence — including a leaf-proven ours a recycled
+			// leaf can fabricate — changes nothing the base did.
 			continue
 		}
 		binding, bErr := git.BindAFRelocationResidue(candidate, source, repoPath)

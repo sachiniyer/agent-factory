@@ -61,6 +61,24 @@ func TestAdoptExistingWorktreeRebuildsAGoneWorktreeFromItsBranchFirst(t *testing
 	assert.Equal(t, "agent work", string(data))
 }
 
+// R6 (#7819): the adopt route's residue arbitration is record-only — the
+// base ran no residue scan here at all. An `.af-source-*` candidate no
+// durable record names must neither refuse nor be claimed; the rebuild
+// proceeds exactly as the base and the residue is left untouched.
+func TestAdoptExistingWorktreeRebuildsBesideRecordFreeResidue(t *testing.T) {
+	inst, gw, _ := hostedWorkspace(t)
+	path := gw.GetWorktreePath()
+	orphan := filepath.Join(filepath.Dir(path), ".af-source-"+strings.Repeat("7", 32))
+	require.NoError(t, os.Mkdir(orphan, 0o755))
+	require.NoError(t, os.RemoveAll(path))
+
+	require.NoError(t, inst.adoptExistingWorktree(),
+		"record-free residue must not refuse a route the base ran no scan on")
+	require.NotNil(t, inst.gitWorktree)
+	assert.Equal(t, path, inst.gitWorktree.GetWorktreePath())
+	assert.DirExists(t, orphan, "the unverifiable candidate is left where the base left it")
+}
+
 func TestAdoptExistingWorktreeRefusesWhenTheBranchCannotBeRestored(t *testing.T) {
 	t.Run("gone and its branch gone too", func(t *testing.T) {
 		inst, gw, branch := hostedWorkspace(t)

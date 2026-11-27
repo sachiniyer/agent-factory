@@ -117,13 +117,15 @@ func (i *Instance) adoptExistingWorktree() error {
 		if err := CheckWorktreeOccupants(gw.GetWorktreePath()); err != nil {
 			return fmt.Errorf("the worktree at %s is gone, but what outlived it is not proven stopped; not rebuilding: %w", gw.GetWorktreePath(), err)
 		}
-		// The rebuild re-creates the recorded path, so it consults the same
-		// residue arbitration the lost respawn does (#7819): a `.af-source-*`
-		// quarantine proven this session's is the stranded complete worktree
-		// and refuses with recovery directed at it — never rebuilt over. This
-		// instance carries no worktree yet, so self-attribution reads its
-		// persisted row rather than a live record.
-		if refusal := crashWindowResidueRebuildRefusal(i, gw); refusal != nil {
+		// The rebuild re-creates the recorded path, so it consults the record
+		// half of the same residue arbitration the lost respawn does (#7819
+		// R6): a `.af-source-*` quarantine THIS session's own durable record
+		// names is the stranded complete worktree and refuses with recovery
+		// directed at it — never rebuilt over. This instance carries no
+		// worktree yet, so self-attribution reads its persisted row rather
+		// than a live record. Everything a record does not name proceeds as
+		// the base, which ran no residue scan on this route at all.
+		if refusal := crashWindowResidueRebuildRefusal(i, gw, false); refusal != nil {
 			return fmt.Errorf("the worktree at %s is gone and could not be rebuilt over af relocation residue: %w", gw.GetWorktreePath(), refusal)
 		}
 		// The rebuild starts the post-worktree hooks, so their environment — the
