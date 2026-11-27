@@ -130,7 +130,11 @@ func (i *Instance) agentServerLocked() AgentServer {
 			// reached, so the durable in-flight record's restart reconcile
 			// gets THIS swap's own verdict back rather than the anonymous
 			// "none" a fresh recorder answers. nil for the daemon's in-process
-			// local sessions, which keep the recorder process-memory.
+			// local sessions, which keep the recorder process-memory — the
+			// agent-server's install wires the store whatever the dir's
+			// writability (#7907): an unwritable dir is surfaced loudly at
+			// startup, and the recorder still rehydrates what it can read and
+			// checkpoints exactly as on master.
 			if i.durableAccountSwapStore != nil {
 				las.acctSwap.store = i.durableAccountSwapStore
 				las.acctSwap.restore(i.durableAccountSwapRecord)

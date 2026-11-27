@@ -36,6 +36,33 @@ import (
 // recorder that survives its own restart answers the recorded id's own verdict,
 // so the re-reconcile reaches the same verdict the prior process did.
 //
+// The install also surfaces a dir that cannot hold the record at startup
+// rather than letting it be discovered at the first swap (#7907): before the
+// load it probes the dir by actually creating, writing, syncing and removing
+// a probe file — never by checking mode bits, which lie (an ACL, a
+// root-squashed mount, or a read-only filesystem can sit under writable
+// modes). The probe changes nothing about how the recorder runs: a dir the
+// probe fails is logged loudly at startup with the dir and the error, and
+// the recorder still rehydrates whatever it can read and checkpoints exactly
+// as on master — a record written while the dir was healthy then degraded
+// (a full disk, a read-only remount, a chmod) stays readable, and rehydrating
+// it keeps a settled verdict answerable across a restart, while the first
+// swap's checkpoint still unlinks the old record or refuses the rotation.
+// An unbacked posture was considered and rejected: a recorder that rotates
+// while an earlier record survives on disk leaves a stale named verdict a
+// repaired-permissions restart can reload, and a reconcile reads it as proof
+// the in-flight swap never ran and rolls it back without probing (Codex P1);
+// and a recorder that refuses to read a record it cannot overwrite fences a
+// settled host forever (the #7793 wedge). A backed recorder can still lose
+// its backing mid-life — the dir degrades after install — and the checkpoint
+// logs that degrade at the moment it happens (account_swap_recorder.go).
+// The probe's reach is bounded by the file it creates: it cannot catch a
+// shape where the record itself cannot be unlinked though a fresh file can —
+// a sticky dir holding another uid's record — or an append-only dir whose
+// own remove fails; both still refuse the first swap at the checkpoint
+// exactly as on master, the probe's job being to surface the problem early,
+// not to prevent it.
+//
 // Two edges bound the file's life (#7883, #7897). At the START, an entry that
 // is not a regular file, or whose bytes fail to decode or validate, can vouch
 // for nothing: the install moves it aside under a uniquely-named *.corrupt-*
@@ -247,12 +274,93 @@ func (s *accountSwapStore) clear() error {
 	return syncDir(filepath.Dir(s.path))
 }
 
+// accountSwapWriteProbePrefix is the file prefix the install's writability
+// probe uses (#7907): distinct from accountSwapRecordPrefix and the
+// *.corrupt-* quarantine suffix, and the file is removed before the probe
+// returns, so it can never be mistaken for a record or for evidence.
+const accountSwapWriteProbePrefix = ".account-swap-write-probe-"
+
+// probeAccountSwapDirWritable proves dir can hold the swap record durably by
+// running the operations save() depends on — create, write, fsync, close,
+// unlink, then the directory fsync — against a throwaway file, never by
+// checking mode bits: bits lie (an ACL, a root-squashed mount, or a read-only
+// filesystem can sit under writable modes), a create does not. CreateTemp's
+// exclusive create means a symlink planted at the probe path is never
+// followed — it would only fail the create. The probe leaves nothing behind:
+// the file is unlinked before the probe returns, and a process killed in the
+// window leaves one empty .account-swap-write-probe-* sibling that nothing
+// reads — the next install's sweep removes it.
+func probeAccountSwapDirWritable(dir string) error {
+	probe, err := os.CreateTemp(dir, accountSwapWriteProbePrefix+"*")
+	if err != nil {
+		return fmt.Errorf("session dir %s cannot create a writability probe file: %w", dir, err)
+	}
+	probePath := probe.Name()
+	defer os.Remove(probePath)
+	if err := probe.Chmod(0o600); err != nil {
+		probe.Close()
+		return fmt.Errorf("session dir %s cannot chmod a writability probe file: %w", dir, err)
+	}
+	if _, err := probe.WriteString("probe\n"); err != nil {
+		probe.Close()
+		return fmt.Errorf("session dir %s cannot write a writability probe file: %w", dir, err)
+	}
+	if err := probe.Sync(); err != nil {
+		probe.Close()
+		return fmt.Errorf("session dir %s cannot sync a writability probe file: %w", dir, err)
+	}
+	if err := probe.Close(); err != nil {
+		return fmt.Errorf("session dir %s cannot close a writability probe file: %w", dir, err)
+	}
+	if err := os.Remove(probePath); err != nil {
+		return fmt.Errorf("session dir %s cannot remove a writability probe file: %w", dir, err)
+	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("session dir %s cannot sync after the writability probe: %w", dir, err)
+	}
+	return nil
+}
+
+// sweepAccountSwapWriteProbes removes writability-probe files an earlier
+// install left behind: a process killed between the probe's create and its
+// remove leaves one empty .account-swap-write-probe-* sibling that nothing
+// reads. It runs before the probe so this install's own probe is never
+// swept. The prefix can never collide with a record or a *.corrupt-*
+// sibling, and a file that cannot be removed is only logged — it is inert.
+func sweepAccountSwapWriteProbes(dir string) {
+	probes, err := filepath.Glob(filepath.Join(dir, accountSwapWriteProbePrefix+"*"))
+	if err != nil {
+		return // the glob only errors on a bad pattern, which this cannot be
+	}
+	for _, p := range probes {
+		if err := os.Remove(p); err != nil {
+			log.WarningLog.Printf("account swap record: could not sweep the stale writability probe at %s: %v", p, err)
+		}
+	}
+}
+
 // InstallDurableAccountSwapRecord wires the agent-server's swap recorder to a
 // durable file in the session's sandbox dir and rehydrates it from a previous
 // process's terminal record, the way InstallDurableRebuildTeardown wires the
 // rebuild-teardown marker. Called once at agent-server startup (RunAgentServer),
 // before AgentServer() builds the localAgentServer whose recorder it backs, so
 // the recorder rehydrates before any swap request or status read can cross.
+//
+// Before the load the install sweeps stale writability-probe leftovers and
+// probes the dir by actually creating, writing, syncing and removing a probe
+// file (probeAccountSwapDirWritable), never by checking mode bits — and a dir
+// the probe fails is logged LOUDLY at startup with the dir and the error,
+// surfacing at startup what master only discovered at the first swap (#7907).
+// The probe surfaces the problem; it changes nothing about how the recorder
+// runs. The recorder still rehydrates whatever it can read whatever the dir's
+// writability — a record written while the dir was healthy then degraded (a
+// full disk, a read-only remount, a chmod) stays readable, and rehydrating it
+// keeps a settled verdict answerable across a restart — and run()'s
+// checkpoint semantics are byte-identical to master's: the first swap unlinks
+// the old record or refuses the rotation, and a degrade that arrives only
+// mid-life is logged at the checkpoint where it happens. The model is never
+// "a dir the probe could not write": it is a record written while healthy,
+// then a dir that degraded.
 //
 // The key is the same session identity RebuildTeardownKey mints, so an
 // installed-af agent-server that shares its session dir with other sessions
@@ -265,6 +373,10 @@ func (i *Instance) InstallDurableAccountSwapRecord(dir, key string) error {
 	}
 	if !validMarkerKey(key) {
 		return fmt.Errorf("account swap record needs a session key (RebuildTeardownKey), got %q", key)
+	}
+	sweepAccountSwapWriteProbes(dir)
+	if err := probeAccountSwapDirWritable(dir); err != nil {
+		log.WarningLog.Printf("account swap record: %v — the unwritable dir is surfaced at startup, not discovered at the first swap (#7907); the recorder still rehydrates whatever it can read and run's checkpoint is unchanged: the first swap unlinks the old record or refuses the rotation exactly as on master", err)
 	}
 	store := newAccountSwapStore(filepath.Join(dir, accountSwapRecordMarkerName(key)))
 	data, err := store.load()

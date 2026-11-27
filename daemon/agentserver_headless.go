@@ -333,7 +333,11 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// restarted server answers anonymous "none" for a swap it already settled,
 	// a settled host probes scopeUnknown, and the durable in-flight record's
 	// restart reconcile fences the row forever. Rehydrate before AgentServer()
-	// builds the localAgentServer whose recorder it backs.
+	// builds the localAgentServer whose recorder it backs. The install probes
+	// the session dir first (#7907): a dir this server's uid cannot write is
+	// surfaced loudly at startup rather than discovered at the first swap —
+	// where master's checkpoint still unlinks the old record or refuses the
+	// rotation exactly as it always did.
 	if err := instance.InstallDurableAccountSwapRecord(sessionDir, session.RebuildTeardownKey(opts.RepoPath, opts.Title)); err != nil {
 		return fmt.Errorf("agent-server: %w", err)
 	}

@@ -22,6 +22,12 @@ import (
 // restart and answers anonymous "none", which a settled host cannot tell from
 // "still queued" and fences the row forever (#7793). nil for the daemon's
 // in-process local sessions, which have no agent-server process to restart.
+// A store is wired even when the session dir cannot be written (#7907): the
+// install's probe surfaces that loudly at startup, and the recorder still
+// rehydrates whatever it can read — a record written while the dir was
+// healthy then degraded stays readable — while run()'s checkpoint keeps
+// master's semantics: unlink the old record or refuse the swap, with the
+// degrade logged at the moment it happens.
 type accountSwapRecorder struct {
 	mu      sync.Mutex
 	outcome string
@@ -32,8 +38,11 @@ type accountSwapRecorder struct {
 	// so the request is refused into rolled_back instead (#7773 R1).
 	cancelled string
 	// store, when non-nil, is the durable backing the recorder rehydrates from
-	// at startup and persists to on every terminal transition. See
-	// account_swap_recorder_store.go.
+	// at startup and persists to on every terminal transition. It is wired
+	// whatever the dir's writability — an unwritable dir fails loudly at the
+	// checkpoint where the write is needed, never silently (#7907) — and nil
+	// is the daemon's in-process local session, which has no agent-server
+	// process to restart. See account_swap_recorder_store.go.
 	store *accountSwapStore
 }
 
@@ -140,6 +149,14 @@ func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (strin
 			r.id, r.outcome, r.program = prevID, prevOutcome, prevProgram
 			return "", fmt.Errorf("account swap %s: could not checkpoint the swap record before rotating: %w", id, clrErr)
 		}
+		// The degrade is loud at the moment it happens (#7907): the recorder
+		// was wired a store it can no longer write — a dir that degraded
+		// since install — and the checkpoint removed the earlier record so
+		// nothing stale survives to be reloaded. This swap proceeds with no
+		// durable backing: a restart rehydrates nothing and reconciles
+		// through the host's own probes, exactly like a recorder with no
+		// store.
+		log.WarningLog.Printf("account swap %s: the durable swap record degraded mid-swap — the pre-rotation checkpoint could not land (%v), so the earlier record at %s was removed; the swap proceeds without durable backing and a restart rehydrates nothing (#7907)", id, err, r.store.path)
 	}
 	program, err := swap()
 	switch {
