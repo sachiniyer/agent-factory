@@ -81,9 +81,15 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			// move) can additionally owe `git worktree repair` and submodule
 			// gitdir repair — that repair belongs to the relocation-capable
 			// consumers, not a respawn, so they keep the refusal below.
+			// move_in_flight is the exception: it is only written on the
+			// cross-device path, where no `git worktree move` ever ran, so
+			// nothing is owed a repair — its claim resolves the candidate
+			// (and retires the staging it names) exactly as an archive or
+			// restore retry would (#7819 round two).
 			resolvable := recovery.AlternatePath == "" &&
 				(recovery.State == git.RelocationRecoveryClaimStale ||
-					recovery.State == git.RelocationRecoveryStalled)
+					recovery.State == git.RelocationRecoveryStalled) ||
+				recovery.State == git.RelocationRecoveryMoveInFlight
 			if !resolvable {
 				return fmt.Errorf(
 					"recover: session %q has unresolved worktree recovery state %s at %s; refusing to rebuild or start an agent until an archive/restore retry establishes the directory identity",

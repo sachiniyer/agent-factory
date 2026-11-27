@@ -323,6 +323,59 @@ func TestRecover_ResolvesClaimStaleWorktreeRelocation(t *testing.T) {
 	assert.False(t, hasRecovery, "a resolved record must be consumed, not left to refuse the next operation")
 }
 
+// TestRecover_ResolvesMoveInFlightWorktreeRelocation is the #7819 round-two
+// counterpart of the claim_stale resolution above: a Lost row holding a
+// crash-left move_in_flight with its source intact owes no repair — the
+// record is only written on the cross-device path, where no `git worktree
+// move` ever ran — so Recover resolves it through the same claim an archive
+// retry takes: the primary claims the recorded path, the staged copy the
+// record names is retired, and the respawn proceeds.
+func TestRecover_ResolvesMoveInFlightWorktreeRelocation(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_recover_move_in_flight"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	exec := countingExec(map[string]bool{}, &newSessions)
+	restored := lostInstanceForRecover(t, agentName, shellName, exec)
+
+	worktree, err := restored.GetGitWorktree()
+	require.NoError(t, err)
+	worktreePath, _, _ := worktree.RelocationSnapshot()
+
+	// The record a mid-copy crash leaves: the source still holds the
+	// worktree, the staged copy it names sits beside the never-published
+	// destination, the quarantine rename never ran so its named path is
+	// absent, and no destination identity landed before the crash.
+	destParent := t.TempDir()
+	staging := filepath.Join(destParent, ".af-copy-0123456789abcdef0123456789abcdef")
+	require.NoError(t, os.MkdirAll(staging, 0o755))
+	var st syscall.Stat_t
+	require.NoError(t, syscall.Stat(worktreePath, &st))
+	require.NoError(t, worktree.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryMoveInFlight,
+		AlternatePath: filepath.Join(destParent, "archive-dest"),
+		IdentityKnown: true,
+		Device:        uint64(st.Dev),
+		Inode:         uint64(st.Ino),
+		FileType:      uint32(st.Mode & syscall.S_IFMT),
+		QuarantinePath: filepath.Join(
+			filepath.Dir(worktreePath), ".af-source-0123456789abcdef0123456789abcdef"),
+		StagingPath: staging,
+	}))
+
+	require.NoError(t, restored.Recover())
+
+	assert.Equal(t, Running, restored.GetStatus())
+	assert.Greater(t, newSessions, 0, "Recover must respawn once the move_in_flight record resolves")
+	assert.NoDirExists(t, staging,
+		"the claim's resolution must retire the staging the record named")
+	_, hasRecovery := worktree.GetRelocationRecovery()
+	assert.False(t, hasRecovery, "a resolved record must be consumed, not left to refuse the next operation")
+}
+
 // TestRecover_SettlePersistsBeforeSpawn is the #5295-review regression: the
 // respawn's settle is in-memory only, so the daemon installs a persist
 // callback that MUST fire before the spawn — otherwise a daemon exit in the
