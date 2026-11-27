@@ -83,8 +83,11 @@ type GitWorktreeRelocationRecoveryData struct {
 	// `.af-copy-<32hex>` beside the publish destination (#7819). The
 	// move_in_flight record carries both before any exists, and the
 	// post-publish record carries them forward while the cleanup is
-	// outstanding. Omitted: older readers drop them on rewrite, which only
-	// returns the residue to master's unnamed handling.
+	// outstanding. On downgrade: a previous release cannot decode
+	// cleanup_lifecycle: move_in_flight at all — the row's restore fails
+	// and the session is fenced as a ghost, which is stronger than
+	// merely dropping the residue names but keeps the record's names
+	// unreachable until a current release loads the row again.
 	QuarantinePath string `json:"quarantine_path,omitempty"`
 	StagingPath    string `json:"staging_path,omitempty"`
 	// Dest* is the staged destination root's identity — the only durable proof
