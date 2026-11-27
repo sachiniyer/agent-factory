@@ -95,18 +95,26 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 	// mirror MUST fail inside this daemon; dnsmasq is definitely not in the
 	// seeded base, so the fetch is real, and `timeout` bounds the probe on a
 	// daemon whose DROP means "wait for it" rather than "connection refused".
+	// And the failure has to carry a NETWORK signature (#7896 R5): any
+	// non-zero exit — an apk that is broken for some other reason, say —
+	// would "pass" the probe while proving nothing about egress.
 	probe := d.buildContext(t, "egress-probe",
 		"FROM "+base+"\nRUN timeout 20 apk add --no-cache dnsmasq\n", nil)
-	if out, err := d.run(180*time.Second, "docker build -t af-registry-blocked-probe "+probe); err == nil {
+	out, err := d.run(180*time.Second, "docker build -t af-registry-blocked-probe "+probe)
+	switch {
+	case err == nil:
 		t.Fatalf("the forwarding block is not in effect — a build step fetched a package from a mirror inside the isolated daemon, so the subject builds below could fetch too and this check proves nothing:\n%s", out)
+	case egressProbeFailedOnNetwork(out):
+		t.Logf("forwarding block verified: a build-step package fetch cannot reach a mirror inside the isolated daemon")
+	default:
+		t.Fatalf("the egress probe failed, but not on a network signature, so the state of the forwarding block is unproven and the subject builds below would prove nothing:\n%s", out)
 	}
-	t.Logf("forwarding block verified: a build-step package fetch cannot reach a mirror inside the isolated daemon")
 
 	// The bug is real. Nothing seeded `alpine:3.20` into this daemon — only the
 	// built local-only base — so a Dockerfile naming the public base has to
 	// resolve it remotely, and cannot.
 	ctl := d.buildContext(t, "control", dockerRoundTripDockerfile(roundTripBaseUpstream), nil)
-	out, err := d.run(300*time.Second, "docker build -t af-registry-blocked-control "+ctl)
+	out, err = d.run(300*time.Second, "docker build -t af-registry-blocked-control "+ctl)
 	if err == nil {
 		t.Fatalf("FROM %s built with the registry blocked and the base absent — the reproduction no longer reproduces, so this check is no longer measuring #2521:\n%s", roundTripBaseUpstream, out)
 	}
@@ -136,6 +144,27 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 		}
 		t.Logf("%s built with registry-1.docker.io unreachable and forwarded egress dropped", tc.name)
 	}
+}
+
+// egressProbeFailedOnNetwork reports whether the probe build's failure carries
+// a signature that only reaching for the network can produce (#7896 R5):
+//
+//   - exit code 124/143 — busybox `timeout` killed the apk fetch. A DROP does
+//     not refuse connections, it swallows them, so the honest symptom of
+//     blocked egress is a fetch that hangs until killed;
+//   - "WARNING: fetching" / "temporary error" — apk's own report that the
+//     fetch could not complete (e.g. DNS or connect gave up first).
+//
+// Any other non-zero exit — apk missing, a typo'd package name the index
+// somehow resolved, a broken base — says nothing about forwarding, so the
+// caller fails the check as unproven rather than counting it.
+func egressProbeFailedOnNetwork(out string) bool {
+	for _, sig := range []string{"exit code: 124", "exit code: 143", "WARNING: fetching", "temporary error"} {
+		if strings.Contains(out, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- isolated daemon helpers ------------------------------------------------
@@ -253,4 +282,28 @@ func dockerCLIOutput(timeout time.Duration, args ...string) (string, error) {
 	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// The egress probe must only count a network signature as blocked — any other
+// non-zero exit proves nothing about forwarding (#7896 R5). The signatures are
+// the busybox `timeout` kill (a DROP swallows connections, so blocked egress
+// hangs until killed) and apk's own fetch errors.
+func TestEgressProbeNeedsANetworkSignature(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"timeout kill 124", "ERROR: process \"/bin/sh -c timeout 20 apk add --no-cache dnsmasq\" did not complete successfully: exit code: 124", true},
+		{"timeout kill 143", "did not complete successfully: exit code: 143", true},
+		{"apk fetch warning", "WARNING: fetching https://dl-cdn.alpinelinux.org/alpine/v3.20/main: temporary error (try again later)", true},
+		{"apk temporary error", "fetch https://dl-cdn.alpinelinux.org: temporary error", true},
+		{"nonzero for another reason", "did not complete successfully: exit code: 1\nERROR: unable to select packages: dnsmasq (no such package)", false},
+		{"command not found", "/bin/sh: apk: not found\nexit code: 127", false},
+		{"plain failure", "did not complete successfully: exit code: 2", false},
+	} {
+		if got := egressProbeFailedOnNetwork(tc.out); got != tc.want {
+			t.Errorf("%s: egressProbeFailedOnNetwork = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }

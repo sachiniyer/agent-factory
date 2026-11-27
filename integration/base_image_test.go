@@ -145,7 +145,24 @@ var (
 // failure reads as the mirror outage it is, not as "a real build error".
 func requireRoundTripBaseImage(t *testing.T) string {
 	t.Helper()
-	baseImageOnce.Do(func() { baseImageUnavailable, baseImageBroken = ensureRoundTripBaseImage() })
+	baseImageOnce.Do(func() {
+		started := time.Now()
+		built, baseImageUnavailable, baseImageBroken := ensureRoundTripBaseImage()
+		// One line per test binary: the base is either built here or reused
+		// with current labels, and a fetch that takes minutes should be
+		// visible in the log rather than attributed to the test that
+		// happened to run first (#7896 R5). The failure paths below carry
+		// their own named messages.
+		switch {
+		case baseImageUnavailable != nil || baseImageBroken != nil:
+		case built:
+			t.Logf("built the round-trip base image %s once for this test binary, in %s",
+				roundTripBaseImage, time.Since(started).Round(100*time.Millisecond))
+		default:
+			t.Logf("reused the round-trip base image %s — its labels are current (checked in %s)",
+				roundTripBaseImage, time.Since(started).Round(100*time.Millisecond))
+		}
+	})
 	if baseImageBroken != nil {
 		t.Fatalf("preparing the round-trip base image failed: %v", baseImageBroken)
 	}
@@ -159,23 +176,25 @@ func requireRoundTripBaseImage(t *testing.T) string {
 }
 
 // ensureRoundTripBaseImage populates the local-only base tag — a BUILD, not a
-// retag (#7896). It returns (unavailable, broken): at most one is non-nil.
+// retag (#7896). It returns (built, unavailable, broken): at most one of the
+// errors is non-nil, and built (this call ran the build, rather than reusing a
+// label-current base) is only meaningful when both are nil.
 //
 //	unavailable — the upstream base could not be pulled; a registry problem,
 //	              environmental, and the caller skips for it.
 //	broken      — anything past that: the build context, or the base build
-//	              itself. The message names the layer that failed: the package
-//	              install is the only network fetch in this build, so a fetch
-//	              signature there is an external-mirror outage — still a loud
+//	              itself. The message's label comes from the failing step's
+//	              own signature (see classifyBaseBuildFailure): a mirror
+//	              outage, a registry outage, a slow fetch — still a loud
 //	              failure of this one labelled infrastructure step, never a
 //	              silent skip and never a per-test build timeout.
-func ensureRoundTripBaseImage() (unavailable, broken error) {
+func ensureRoundTripBaseImage() (built bool, unavailable, broken error) {
 	if dockerBaseImageCurrent() {
-		return nil, nil
+		return false, nil, nil
 	}
 	if !dockerImagePresent(roundTripBaseUpstream) {
 		if err := pullRoundTripBase(); err != nil {
-			return err, nil
+			return false, err, nil
 		}
 	}
 	// The base carries every package the round-trip images need, so this is
@@ -183,12 +202,12 @@ func ensureRoundTripBaseImage() (unavailable, broken error) {
 	// under its own labelled budget, instead of inside each test's 300s.
 	dir, err := os.MkdirTemp("", "af-integration-base")
 	if err != nil {
-		return nil, fmt.Errorf("create the base image build context: %w", err)
+		return false, nil, fmt.Errorf("create the base image build context: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"),
 		[]byte(roundTripBaseDockerfile(roundTripBaseUpstream)), 0o644); err != nil {
-		return nil, fmt.Errorf("write the base image Dockerfile: %w", err)
+		return false, nil, fmt.Errorf("write the base image Dockerfile: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), baseImageBuildTimeout)
 	defer cancel()
@@ -196,24 +215,49 @@ func ensureRoundTripBaseImage() (unavailable, broken error) {
 	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err == nil {
-		return nil, nil
+		return true, nil, nil
 	}
-	output := string(out)
+	return false, nil, classifyBaseBuildFailure(ctx.Err(), err, string(out))
+}
+
+// classifyBaseBuildFailure labels a failed base build by the signature of the
+// step that actually failed (#7896 R2), not by any fetch-adjacent string in
+// the log:
+//
+//   - the context deadline is the infrastructure budget spent — the package
+//     layer is the only fetch, so a stall is a slow mirror;
+//   - "apk add FAILED" is emitted by the hardened layer itself, only after
+//     EVERY attempt on BOTH mirrors was exhausted — the mirror-outage
+//     signature. A lone "WARNING: fetching" is not one: apk prints it whenever
+//     one mirror hiccups even though the fallback goes on to serve, so it can
+//     be present in the log of a build that later failed for another reason
+//     entirely (e.g. "no space left" exporting a layer). It never decides the
+//     label on its own.
+//   - "failed to resolve source metadata" is the registry: the FROM image was
+//     verified local a moment ago, so reaching for it at all means something
+//     is resolving remotely — #2521's own signature;
+//   - anything else is a real build error, and says so.
+func classifyBaseBuildFailure(ctxErr, buildErr error, output string) error {
 	switch {
-	case ctx.Err() == context.DeadlineExceeded:
-		return nil, fmt.Errorf("building the round-trip base image exceeded its %s infrastructure budget: %v. "+
+	case ctxErr == context.DeadlineExceeded:
+		return fmt.Errorf("building the round-trip base image exceeded its %s infrastructure budget: %v. "+
 			"The package layer is the only network fetch in this build, so the stall is almost certainly a slow alpine mirror — "+
 			"an infrastructure failure of this step, not a defect in this tree; retry when a mirror answers.\n%s",
-			baseImageBuildTimeout, err, output)
-	case strings.Contains(output, "apk add FAILED") || strings.Contains(output, "WARNING: fetching"):
-		return nil, fmt.Errorf("building the round-trip base image could not install %s from either alpine mirror: %v. "+
-			"The package layer is the only network fetch in this build, so this is a mirror outage — an infrastructure "+
+			baseImageBuildTimeout, buildErr, output)
+	case strings.Contains(output, "apk add FAILED"):
+		return fmt.Errorf("building the round-trip base image could not install %s from either alpine mirror: %v. "+
+			"The package layer's own script reported every attempt exhausted, so this is a mirror outage — an infrastructure "+
 			"failure of this step, not a defect in this tree; retry when a mirror answers.\n%s",
-			strings.Join(roundTripBasePackages, " "), err, output)
+			strings.Join(roundTripBasePackages, " "), buildErr, output)
+	case strings.Contains(output, "failed to resolve source metadata"):
+		return fmt.Errorf("building the round-trip base image could not resolve its FROM image %s: %v. "+
+			"The image was in the local store moments ago, so reaching for it at all is a registry outage signature "+
+			"(#2521's own) — an infrastructure failure, not a defect in this tree.\n%s",
+			roundTripBaseUpstream, buildErr, output)
 	default:
-		return nil, fmt.Errorf("building the round-trip base image failed outside the package-install layer — "+
+		return fmt.Errorf("building the round-trip base image failed outside the package-install layer — "+
 			"the only network fetch this build performs — so this is a real build error, not a mirror or registry outage: %v\n%s",
-			err, output)
+			buildErr, output)
 	}
 }
 

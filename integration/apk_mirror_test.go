@@ -1,6 +1,8 @@
 package integration_test
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -272,5 +274,78 @@ func TestPerTestDockerfilesFetchNothingOverTheNetwork(t *testing.T) {
 				t.Errorf("%s Dockerfile contains a network fetch %q — packages install once through the base image's hardened layer (#7896), never in a per-test build:\n%s", name, fetch, df)
 			}
 		}
+	}
+}
+
+// The base build's failure label must come from the signature of the step that
+// actually failed (#7896 R2) — never from a fetch-adjacent string that happens
+// to be in the log. Both directions are pinned: a lone "WARNING: fetching" is
+// only one mirror complaining while the fallback serves, so it must NOT claim
+// the label; and a FROM-resolve failure must not be labelled a plain build
+// error.
+func TestBaseBuildFailureLabelsTheFailingStep(t *testing.T) {
+	buildErr := errors.New("exit status 1")
+	for _, tc := range []struct {
+		name     string
+		ctxErr   error
+		output   string
+		want     []string
+		dontWant []string
+	}{
+		{
+			name:   "deadline means a slow fetch",
+			ctxErr: context.DeadlineExceeded,
+			output: "#8 [2/2] RUN apk add ...",
+			want:   []string{"infrastructure budget", "slow alpine mirror"},
+		},
+		{
+			name:   "every mirror attempt exhausted",
+			output: "WARNING: fetching https://dl-cdn.alpinelinux.org/...\napk add FAILED after 3 attempts: git tmux bash openssh-server",
+			want:   []string{"mirror outage"},
+		},
+		{
+			name:     "a lone one-mirror warning never decides it",
+			output:   "WARNING: fetching https://dl-cdn.alpinelinux.org/... temporary error\nno space left on device",
+			want:     []string{"real build error"},
+			dontWant: []string{"mirror outage"},
+		},
+		{
+			name:     "warning present but the failure was elsewhere",
+			output:   "WARNING: fetching https://dl-cdn.alpinelinux.org/... temporary error\nERROR: failed to export layer: write /var/lib/docker: no space left",
+			want:     []string{"real build error"},
+			dontWant: []string{"mirror outage"},
+		},
+		{
+			name:     "FROM resolve failure is the registry",
+			output:   "failed to resolve source metadata for docker.io/library/alpine:3.20",
+			want:     []string{"registry outage"},
+			dontWant: []string{"a real build error, not a mirror or registry outage"},
+		},
+		{
+			name:   "non-deadline ctx error with generic failure",
+			ctxErr: context.Canceled,
+			output: "process killed",
+			want:   []string{"real build error"},
+		},
+		{
+			name:     "a plain build failure stays a build failure",
+			output:   "Dockerfile parse error line 3: unknown instruction",
+			want:     []string{"real build error"},
+			dontWant: []string{"a mirror outage", "registry outage signature"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := classifyBaseBuildFailure(tc.ctxErr, buildErr, tc.output).Error()
+			for _, w := range tc.want {
+				if !strings.Contains(msg, w) {
+					t.Errorf("classified message lacks %q:\n%s", w, msg)
+				}
+			}
+			for _, dw := range tc.dontWant {
+				if strings.Contains(msg, dw) {
+					t.Errorf("classified message wrongly claims %q:\n%s", dw, msg)
+				}
+			}
+		})
 	}
 }
