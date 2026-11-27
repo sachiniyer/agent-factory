@@ -14,7 +14,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/hooklog"
-	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestHookProgressUnclaimedLauncherFailureAdvancesSuffix(t *testing.T) {
@@ -160,22 +159,32 @@ func TestHookProgressScopeProbeDoesNotHoldPublicationLock(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	entered := filepath.Join(t.TempDir(), "probe-entered")
-	release := filepath.Join(t.TempDir(), "probe-release")
-	installSurvivorSystemctl(t, `: > `+shellQuoteForShim(entered)+`
-`+testguard.BoundedGateWait(release, time.Second, 5*time.Minute)+`
-exit 0
-`)
+	// The claim under test is that a SLOW manager liveness probe does not pin
+	// the publication lock, so gate the probe seam itself — and stub the owner
+	// scan beside it — instead of a shimmed systemctl whose answer still had
+	// to reach the real launcher scan inside a bound on a loaded runner (#7911).
+	stubHookProgressOwnerScan(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	originalProbe := runningHookPrefixesForPrune
+	runningHookPrefixesForPrune = func(...string) ([]string, error) {
+		enterOnce.Do(func() { close(entered) })
+		<-release
+		return nil, nil
+	}
 	pruneDone := make(chan struct{})
+	// Registered BEFORE the draining cleanup below, so LIFO runs the restore
+	// AFTER the blocked probe is released and joined (#4160).
+	t.Cleanup(func() { runningHookPrefixesForPrune = originalProbe })
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		waitForClosed(t, pruneDone, 5*time.Second, "blocked retention probe did not drain")
+	})
 	go func() {
 		pruneHookProgress(filepath.Dir(path), time.Now())
 		close(pruneDone)
 	}()
-	t.Cleanup(func() {
-		_ = os.WriteFile(release, nil, 0600)
-		waitForClosed(t, pruneDone, 5*time.Second, "blocked retention probe did not drain")
-	})
-	waitForPath(t, entered, 5*time.Second)
+	waitForClosed(t, entered, 5*time.Second, "retention probe did not reach its seam")
 	acquired, err := config.TryWithFileLock(filepath.Join(filepath.Dir(path), ".progress"), func() error { return nil })
 	if err != nil {
 		t.Fatal(err)
@@ -183,8 +192,6 @@ exit 0
 	if !acquired {
 		t.Fatal("slow scope probe retained the publication lock")
 	}
-	if err := os.WriteFile(release, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
+	releaseOnce.Do(func() { close(release) })
 	waitForClosed(t, pruneDone, 5*time.Second, "retention did not finish after scope probe recovered")
 }

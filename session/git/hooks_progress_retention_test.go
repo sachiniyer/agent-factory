@@ -4,14 +4,109 @@ package git
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
+
+// hookProgressOwnerScanStub answers the retention pass's owner scan in place
+// of the real repo-instances read. That read is a bounded real probe — a stall
+// or failure leaves every journal in place — so a test that asserts
+// reclamation injects the owner state instead of trusting the read to finish
+// inside its bound on a loaded runner (#7911). Rows still flow through
+// loadHookProgressOwners: only the read is stubbed, never the decision.
+type hookProgressOwnerScanStub struct {
+	rows atomic.Value // map[string]json.RawMessage
+	err  atomic.Bool
+}
+
+// stubHookProgressOwnerScan replaces hookProgressOwnerLoad until the test's
+// cleanup. The default answer is an empty instances map: no live owner rows.
+func stubHookProgressOwnerScan(t *testing.T) *hookProgressOwnerScanStub {
+	t.Helper()
+	stub := &hookProgressOwnerScanStub{}
+	stub.rows.Store(map[string]json.RawMessage{})
+	original := hookProgressOwnerLoad
+	hookProgressOwnerLoad = func() (map[string]json.RawMessage, []config.RepoInstancesSkip, error) {
+		if stub.err.Load() {
+			return nil, nil, errors.New("hook progress owner scan injected as unavailable")
+		}
+		rows, _ := stub.rows.Load().(map[string]json.RawMessage)
+		out := make(map[string]json.RawMessage, len(rows))
+		for repo, data := range rows {
+			out[repo] = append(json.RawMessage(nil), data...)
+		}
+		return out, nil, nil
+	}
+	t.Cleanup(func() { hookProgressOwnerLoad = original })
+	return stub
+}
+
+// set swaps the repo-instances map the owner scan returns, keyed exactly as
+// LoadAllRepoInstancesReportingSkipDetails keys it.
+func (s *hookProgressOwnerScanStub) set(rows map[string]json.RawMessage) {
+	s.err.Store(false)
+	s.rows.Store(rows)
+}
+
+// setUnknown makes the owner scan fail: retention must keep everything.
+func (s *hookProgressOwnerScanStub) setUnknown() { s.err.Store(true) }
+
+// pruneOracleAnswer is the one answer a prune test hands the retention pass's
+// launcher/manager liveness oracle: the hook runner is provably dead, provably
+// live under the returned prefixes, or the oracle cannot say. Retention fails
+// closed on unknown — it must keep every affected journal — so a test that
+// asserts reclamation injects the answer rather than trusting a real /proc and
+// systemctl probe to reply inside a bound on a loaded runner (#4217).
+type pruneOracleAnswer int
+
+const (
+	pruneOracleDead pruneOracleAnswer = iota
+	pruneOracleLive
+	pruneOracleUnknown
+)
+
+// hookProgressPruneOracleStub answers the retention pass's liveness oracle in
+// place of the real launcher/scope probe.
+type hookProgressPruneOracleStub struct {
+	answer atomic.Int32 // pruneOracleAnswer
+	live   atomic.Value // []string
+}
+
+// stubHookProgressPruneOracle replaces runningHookPrefixesForPrune until the
+// test's cleanup. The default answer is dead: nothing in flight.
+func stubHookProgressPruneOracle(t *testing.T) *hookProgressPruneOracleStub {
+	t.Helper()
+	stub := &hookProgressPruneOracleStub{}
+	stub.live.Store([]string(nil))
+	original := runningHookPrefixesForPrune
+	runningHookPrefixesForPrune = func(...string) ([]string, error) {
+		switch pruneOracleAnswer(stub.answer.Load()) {
+		case pruneOracleLive:
+			live, _ := stub.live.Load().([]string)
+			return append([]string(nil), live...), nil
+		case pruneOracleUnknown:
+			return nil, errors.New("hook liveness oracle injected as unknown")
+		default:
+			return nil, nil
+		}
+	}
+	t.Cleanup(func() { runningHookPrefixesForPrune = original })
+	return stub
+}
+
+// set swaps the oracle's next answer; live lists the prefixes it reports when
+// the answer is pruneOracleLive.
+func (s *hookProgressPruneOracleStub) set(answer pruneOracleAnswer, live ...string) {
+	s.live.Store(append([]string(nil), live...))
+	s.answer.Store(int32(answer))
+}
 
 func TestHookProgressCreationPrunesInactiveOrphans(t *testing.T) {
 	claimDaemonProcess(t)
@@ -51,12 +146,17 @@ func TestHookProgressCreationPrunesInactiveOrphans(t *testing.T) {
 		}
 		return journal{path, p.Directory}
 	}
-	if err := config.SaveRepoInstances("retention-test", json.RawMessage(`[{"id":"owned"}]`)); err != nil {
-		t.Fatal(err)
-	}
+	// Both reads retention consults before reclaiming are injected: the owner
+	// scan sees the "owned" row, and the liveness oracle reports only the
+	// "af-hook-scope" prefix in flight. No outcome below may turn on a real
+	// instances read or a real systemctl probe answering inside a bound on a
+	// loaded runner (#7911).
+	owners := stubHookProgressOwnerScan(t)
+	oracle := stubHookProgressPruneOracle(t)
+	owners.set(map[string]json.RawMessage{"retention-test": json.RawMessage(`[{"id":"owned"}]`)})
+	oracle.set(pruneOracleLive, "af-hook-scope")
 	owned := create("owned", true, 30*24*time.Hour)
 	uncommitted := create("uncommitted", false, 30*24*time.Hour)
-	installSurvivorSystemctl(t, "case \"$*\" in *list-units*) echo 'af-hook-scope-test-0.scope loaded active running Hook';; esac\nexit 0\n")
 	scopeLive := create("scope", true, 30*24*time.Hour)
 	incomplete := create("incomplete", false, 30*24*time.Hour)
 	if err := os.WriteFile(filepath.Join(incomplete.dir, "finished"), nil, 0600); err != nil {

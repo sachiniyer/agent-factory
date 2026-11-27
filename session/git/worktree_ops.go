@@ -252,12 +252,17 @@ func (g *GitWorktree) hookScopePrefixes() []string {
 // process table beside the manager and waits such a launcher out (#3667); an
 // unreadable process table is UNKNOWN and refuses here exactly as a lost bus
 // does.
+// stopHookScopes is a test seam: the sweep's launcher scan is a real liveness
+// probe whose answer inside its settle budget a reclamation test must control
+// (#7911). Production always uses the real sweep.
+var stopHookScopes = systemdunit.StopHookScopes
+
 func (g *GitWorktree) stopSurvivingHookScopes() error {
 	prefixes := g.hookScopePrefixes()
 	if len(prefixes) == 0 {
 		return nil
 	}
-	if err := systemdunit.StopHookScopes(prefixes...); err != nil {
+	if err := stopHookScopes(prefixes...); err != nil {
 		return fmt.Errorf(
 			"%s; refusing to modify the worktree while a hook may still be using it: %w",
 			systemdunit.DescribeHookSweepRefusal(err,

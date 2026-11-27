@@ -248,6 +248,11 @@ func TestRetryHookProgressAbandonmentStillTerminalizesOriginalJournal(t *testing
 	claimDaemonProcess(t)
 	installScopeShim(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// Owner scan and the liveness oracle are both injected: the reclamation
+	// assertion below must never wait on a real instances read or a real
+	// /proc+systemctl probe answering inside a bound (#7911).
+	stubHookProgressOwnerScan(t)
+	oracle := stubHookProgressPruneOracle(t)
 	g := worktreeWithRecordedScope(t, "af-hook-owner")
 	g.SetHookScopeSessionID("owner")
 	tree := g.worktreePath
@@ -275,7 +280,16 @@ func TestRetryHookProgressAbandonmentStillTerminalizesOriginalJournal(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	pruneHookProgress(filepath.Dir(path), time.Now().Add(48*time.Hour))
+	later := time.Now().Add(48 * time.Hour)
+	oracle.set(pruneOracleUnknown)
+	pruneHookProgress(filepath.Dir(path), later)
+	for _, stale := range []string{path, first.Directory} {
+		if _, err := os.Stat(stale); err != nil {
+			t.Fatalf("unknown liveness pruned %s: %v", stale, err)
+		}
+	}
+	oracle.set(pruneOracleDead)
+	pruneHookProgress(filepath.Dir(path), later)
 	for _, stale := range []string{path, first.Directory} {
 		if _, err := os.Stat(stale); !os.IsNotExist(err) {
 			t.Fatalf("abandoned journal was not reclaimable: %s: %v", stale, err)

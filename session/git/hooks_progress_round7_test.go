@@ -87,6 +87,11 @@ func TestHookProgressLiveCreateLeaseProtectsLaunchGap(t *testing.T) {
 	claimDaemonProcess(t)
 	installScopeShim(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// Owner scan and the liveness oracle are both injected: reclamation below
+	// must never wait on a real instances read or a real /proc+systemctl probe
+	// answering inside a bound (#7911).
+	stubHookProgressOwnerScan(t)
+	oracle := stubHookProgressPruneOracle(t)
 	tree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tree, ".git"), []byte("gitdir: test\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -133,7 +138,14 @@ func TestHookProgressLiveCreateLeaseProtectsLaunchGap(t *testing.T) {
 	if err != nil || string(raw) != "second\n" {
 		t.Fatalf("remaining command = %q, err=%v", raw, err)
 	}
-	// Completion releases the lease, so normal retention can reclaim it.
+	// Completion releases the lease, so normal retention can reclaim it — but
+	// an UNKNOWN liveness answer must still keep it.
+	oracle.set(pruneOracleUnknown)
+	pruneHookProgress(filepath.Dir(path), time.Now().Add(15*24*time.Hour))
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unknown liveness pruned the completed journal: %v", err)
+	}
+	oracle.set(pruneOracleDead)
 	pruneHookProgress(filepath.Dir(path), time.Now().Add(15*24*time.Hour))
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("completed lease retained journal: %v", err)
@@ -143,6 +155,11 @@ func TestHookProgressLiveCreateLeaseProtectsLaunchGap(t *testing.T) {
 func TestHookProgressCrashedLeaseIsReclaimable(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	installScopeShim(t)
+	// Owner scan and the liveness oracle are both injected: reclamation below
+	// must never wait on a real instances read or a real /proc+systemctl probe
+	// answering inside a bound (#7911).
+	stubHookProgressOwnerScan(t)
+	oracle := stubHookProgressPruneOracle(t)
 	p, err := newHookProgress(hookRun{worktreePath: t.TempDir(), scopeSessionID: "owner", leaseProgress: true}, []string{"true"}, "af-hook-owner", "test")
 	if err != nil {
 		t.Fatal(err)
@@ -159,6 +176,12 @@ func TestHookProgressCrashedLeaseIsReclaimable(t *testing.T) {
 	if err := p.lease.Close(); err != nil {
 		t.Fatal(err)
 	}
+	oracle.set(pruneOracleUnknown)
+	pruneHookProgress(filepath.Dir(path), later)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unknown liveness pruned the journal: %v", err)
+	}
+	oracle.set(pruneOracleDead)
 	pruneHookProgress(filepath.Dir(path), later)
 	for _, file := range []string{path, p.Directory} {
 		if _, err := os.Stat(file); !os.IsNotExist(err) {
@@ -208,6 +231,10 @@ func TestHookProgressInvalidReadUsesLegacy(t *testing.T) {
 func TestHookProgressUnreferencedLeaseProtectsRunner(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	installScopeShim(t)
+	// The owner scan is the one bounded real read between this fixture and the
+	// lease-gated receipt sweep; stub it so a loaded runner cannot stall the
+	// prune before it reaches the cleanup (#7911).
+	owners := stubHookProgressOwnerScan(t)
 	p, err := newHookProgress(hookRun{worktreePath: t.TempDir(), scopeSessionID: "owner", leaseProgress: true}, nil, "af-hook-owner", "test")
 	if err != nil {
 		t.Fatal(err)
@@ -225,6 +252,12 @@ func TestHookProgressUnreferencedLeaseProtectsRunner(t *testing.T) {
 	if err := p.lease.Close(); err != nil {
 		t.Fatal(err)
 	}
+	owners.setUnknown()
+	pruneHookProgress(filepath.Dir(path), later)
+	if _, err := os.Stat(p.Directory); err != nil {
+		t.Fatalf("unknown owner scan pruned the receipts: %v", err)
+	}
+	owners.set(map[string]json.RawMessage{})
 	pruneHookProgress(filepath.Dir(path), later)
 	if _, err := os.Stat(p.Directory); !os.IsNotExist(err) {
 		t.Fatalf("abandoned receipts retained: %v", err)

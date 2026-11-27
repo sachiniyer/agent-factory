@@ -181,6 +181,10 @@ func TestHookProgressPublicationFailureRemovesReceipts(t *testing.T) {
 
 func TestHookProgressPrunesUnreferencedReceiptDirectories(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// The owner scan is the one bounded real read between this fixture and the
+	// unpublished-receipt sweep; stub it so a loaded runner cannot stall the
+	// prune before it reaches the cleanup (#7911).
+	owners := stubHookProgressOwnerScan(t)
 	p, err := newHookProgress(hookRun{worktreePath: t.TempDir(), scopeSessionID: "owner"}, []string{"true"}, "af-hook-owner", "test")
 	if err != nil {
 		t.Fatal(err)
@@ -214,6 +218,12 @@ func TestHookProgressPrunesUnreferencedReceiptDirectories(t *testing.T) {
 	if err := os.WriteFile(journalPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}
+	owners.setUnknown()
+	pruneHookProgress(dir, time.Now())
+	if _, err := os.Stat(old); err != nil {
+		t.Errorf("unknown owner scan pruned %s: %v", old, err)
+	}
+	owners.set(map[string]json.RawMessage{})
 	pruneHookProgress(dir, time.Now())
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
 		t.Error("old unpublished receipt directory was not pruned")

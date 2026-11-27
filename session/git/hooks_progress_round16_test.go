@@ -123,10 +123,10 @@ func TestHookProgressTerminalOwnersPermitUnfinishedReclamation(t *testing.T) {
 			// liveness oracle happened to answer. A transient refusal from the
 			// launcher scan — a same-user process mid-execve on a loaded runner
 			// — is the failure this test sighted keeping the journal (#4217),
-			// so the probe is stubbed to "nothing live".
-			originalProbe := runningHookPrefixesForPrune
-			runningHookPrefixesForPrune = func(...string) ([]string, error) { return nil, nil }
-			t.Cleanup(func() { runningHookPrefixesForPrune = originalProbe })
+			// and the owner scan itself is a bounded real read, so BOTH answers
+			// are injected (#7911).
+			owners := stubHookProgressOwnerScan(t)
+			oracle := stubHookProgressPruneOracle(t)
 			rows := `[]`
 			switch owner {
 			case "archived":
@@ -136,15 +136,25 @@ func TestHookProgressTerminalOwnersPermitUnfinishedReclamation(t *testing.T) {
 			case "active":
 				rows = `[{"id":"owner"}]`
 			}
-			if err := config.SaveRepoInstances("round16-owner", json.RawMessage(rows)); err != nil {
-				t.Fatal(err)
-			}
+			owners.set(map[string]json.RawMessage{"round16-owner": json.RawMessage(rows)})
 			p, err := newHookProgress(hookRun{worktreePath: t.TempDir(), scopeSessionID: "owner"}, []string{"true"}, "af-hook-owner", "test")
 			if err != nil {
 				t.Fatal(err)
 			}
 			path, _ := hookProgressPath(p.Worktree)
-			pruneHookProgress(filepath.Dir(path), time.Now().Add(2*progressGraceAge))
+			later := time.Now().Add(2 * progressGraceAge)
+			// For every owner state, an UNKNOWN answer — from the liveness
+			// oracle or from the owner scan itself — keeps the journal.
+			oracle.set(pruneOracleUnknown)
+			pruneHookProgress(filepath.Dir(path), later)
+			owners.setUnknown()
+			pruneHookProgress(filepath.Dir(path), later)
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("unknown liveness pruned the journal: %v", err)
+			}
+			owners.set(map[string]json.RawMessage{"round16-owner": json.RawMessage(rows)})
+			oracle.set(pruneOracleDead)
+			pruneHookProgress(filepath.Dir(path), later)
 			_, err = os.Stat(path)
 			if owner == "active" && err != nil {
 				t.Fatalf("active owner lost unfinished journal: %v", err)

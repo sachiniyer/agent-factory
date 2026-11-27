@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,19 +77,12 @@ func TestHookProgressRetiredActiveOwnerReclaimed(t *testing.T) {
 			// Protection claims belong to the probe's ANSWER, not to whether the
 			// launcher/manager oracle happened to reach systemctl: a transient
 			// argv refusal on a loaded runner used to keep "scope live" from
-			// being seen, flipping protected kinds to reclaimed (#4217).
-			var scopeLive atomic.Bool
-			originalProbe := runningHookPrefixesForPrune
-			runningHookPrefixesForPrune = func(...string) ([]string, error) {
-				if scopeLive.Load() {
-					return []string{"af-hook-owner"}, nil
-				}
-				return nil, nil
-			}
-			t.Cleanup(func() { runningHookPrefixesForPrune = originalProbe })
-			if err := config.SaveRepoInstances("test", json.RawMessage(`[{"id":"owner"}]`)); err != nil {
-				t.Fatal(err)
-			}
+			// being seen, flipping protected kinds to reclaimed (#4217). The
+			// owner scan is a bounded real read too, so it is injected as well
+			// (#7911).
+			owners := stubHookProgressOwnerScan(t)
+			oracle := stubHookProgressPruneOracle(t)
+			owners.set(map[string]json.RawMessage{"test": json.RawMessage(`[{"id":"owner"}]`)})
 			p, err := newHookProgress(hookRun{worktreePath: t.TempDir(), scopeSessionID: "owner", leaseProgress: kind == "lease"}, []string{"true"}, "af-hook-owner", "test")
 			if err != nil {
 				t.Fatal(err)
@@ -118,15 +110,24 @@ func TestHookProgressRetiredActiveOwnerReclaimed(t *testing.T) {
 				}
 				path = retired
 			}
-			if kind == "scope" {
-				scopeLive.Store(true)
-			}
 			now := time.Now().Add(time.Minute)
 			if kind == "live" {
 				now = time.Now().Add(15 * 24 * time.Hour)
 			} // Ownership, not the history quota, protects this journal.
 			if kind == "young" {
 				now = time.Now()
+			}
+			// An UNKNOWN liveness answer keeps every journal — inject it rather
+			// than trusting a real probe's timing (#7911).
+			oracle.set(pruneOracleUnknown)
+			pruneHookProgress(dir, now)
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("unknown liveness pruned the journal: %v", err)
+			}
+			if kind == "scope" {
+				oracle.set(pruneOracleLive, "af-hook-owner")
+			} else {
+				oracle.set(pruneOracleDead)
 			}
 			pruneHookProgress(dir, now)
 			remove := kind == "retired" || kind == "missing-exit"
@@ -146,7 +147,7 @@ func TestHookProgressRetiredActiveOwnerReclaimed(t *testing.T) {
 					}
 				}
 				if kind == "scope" {
-					scopeLive.Store(false)
+					oracle.set(pruneOracleDead)
 				}
 				pruneHookProgress(dir, time.Now().Add(time.Minute))
 				if _, err := os.Stat(path); !os.IsNotExist(err) {

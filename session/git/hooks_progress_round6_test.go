@@ -8,23 +8,23 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/sachiniyer/agent-factory/config"
 )
 
 func TestHookProgressUncommittedOrphanPruning(t *testing.T) {
 	for _, kind := range []string{"old", "young", "owned", "archived", "live", "young-receipt"} {
 		t.Run(kind, func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-			installSurvivorSystemctl(t, "exit 0\n")
+			// Owner state and the liveness oracle are both injected: no outcome
+			// below may wait on a real instances read or a real systemctl probe
+			// answering inside a bound on a loaded runner (#7911).
+			owners := stubHookProgressOwnerScan(t)
+			oracle := stubHookProgressPruneOracle(t)
 			if kind == "owned" || kind == "archived" {
 				row := `[{"id":"owner"}]`
 				if kind == "archived" {
 					row = `[{"id":"owner","liveness":5}]`
 				}
-				if err := config.SaveRepoInstances("test", json.RawMessage(row)); err != nil {
-					t.Fatal(err)
-				}
+				owners.set(map[string]json.RawMessage{"test": json.RawMessage(row)})
 			}
 			p, err := newHookProgress(hookRun{worktreePath: t.TempDir(), scopeSessionID: "owner"}, []string{"true"}, "af-hook-owner", "test")
 			if err != nil {
@@ -48,8 +48,17 @@ func TestHookProgressUncommittedOrphanPruning(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// An UNKNOWN liveness answer keeps the journal for every owner
+			// state — inject it rather than trusting a real probe's timing.
+			oracle.set(pruneOracleUnknown)
+			pruneHookProgress(filepath.Dir(path), time.Now())
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("unknown liveness pruned the journal: %v", err)
+			}
 			if kind == "live" {
-				installSurvivorSystemctl(t, "echo 'af-hook-owner-test-0.scope loaded active running Hook'\nexit 0\n")
+				oracle.set(pruneOracleLive, "af-hook-owner")
+			} else {
+				oracle.set(pruneOracleDead)
 			}
 			pruneHookProgress(filepath.Dir(path), time.Now())
 			for _, file := range []string{path, p.Directory} {

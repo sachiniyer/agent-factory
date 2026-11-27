@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/hooklog"
 )
 
@@ -23,6 +22,11 @@ func TestHookProgressCreateHoldBridgesOwnerCommit(t *testing.T) {
 			claimDaemonProcess(t)
 			installScopeShim(t)
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			// Owner scan and the liveness oracle are both injected: no outcome
+			// below may wait on a real instances read or a real probe answering
+			// inside a bound on a loaded runner (#7911).
+			owners := stubHookProgressOwnerScan(t)
+			oracle := stubHookProgressPruneOracle(t)
 			tree := t.TempDir()
 			g := &GitWorktree{worktreePath: tree}
 			g.BeginHookCreatePersistence()
@@ -73,15 +77,27 @@ func TestHookProgressCreateHoldBridgesOwnerCommit(t *testing.T) {
 			if _, err := os.Stat(path); err != nil {
 				t.Fatalf("pending create journal was pruned: %v", err)
 			}
+			ownerRows := `[]`
 			if outcome == "commit" {
-				if err := config.SaveRepoInstances("create-owner", json.RawMessage(`[{"id":"owner"}]`)); err != nil {
-					t.Fatal(err)
-				}
+				ownerRows = `[{"id":"owner"}]`
 			}
+			owners.set(map[string]json.RawMessage{"create-owner": json.RawMessage(ownerRows)})
 			g.SettleHookCreatePersistence()
 			cancel()
 			waitForClosed(t, done, 5*time.Second, "cancelled create bailout did not close")
-			pruneHookProgress(filepath.Dir(path), time.Now().Add(48*time.Hour))
+			later := time.Now().Add(48 * time.Hour)
+			// An UNKNOWN answer — oracle or owner scan — keeps the journal for
+			// either outcome (#7911).
+			oracle.set(pruneOracleUnknown)
+			pruneHookProgress(filepath.Dir(path), later)
+			owners.setUnknown()
+			pruneHookProgress(filepath.Dir(path), later)
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("unknown liveness pruned the journal: %v", err)
+			}
+			owners.set(map[string]json.RawMessage{"create-owner": json.RawMessage(ownerRows)})
+			oracle.set(pruneOracleDead)
+			pruneHookProgress(filepath.Dir(path), later)
 			_, err = os.Stat(path)
 			if outcome == "commit" && err != nil {
 				t.Fatalf("committed owner did not protect its journal: %v", err)
@@ -97,13 +113,16 @@ func TestAbandonHookProgressRetriesTerminalMarker(t *testing.T) {
 	claimDaemonProcess(t)
 	installScopeShim(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// The archived owner row and the liveness oracle are both injected: the
+	// reclamation assertion below must never wait on a real instances read or
+	// a real systemctl probe answering inside a bound (#7911).
+	owners := stubHookProgressOwnerScan(t)
+	oracle := stubHookProgressPruneOracle(t)
+	owners.set(map[string]json.RawMessage{"archived-owner": json.RawMessage(`[{"id":"owner","liveness":5}]`)})
 	g := worktreeWithRecordedScope(t, "af-hook-owner")
 	g.SetHookScopeSessionID("owner")
 	p, err := newHookProgress(hookRun{worktreePath: g.worktreePath, scopeSessionID: "owner"}, []string{"true"}, "af-hook-owner", "test")
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := config.SaveRepoInstances("archived-owner", json.RawMessage(`[{"id":"owner","liveness":5}]`)); err != nil {
 		t.Fatal(err)
 	}
 	originalMark := hookProgressMarkFinished
@@ -127,7 +146,18 @@ func TestAbandonHookProgressRetriesTerminalMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pruneHookProgress(filepath.Dir(path), time.Now().Add(48*time.Hour))
+	later := time.Now().Add(48 * time.Hour)
+	// An UNKNOWN answer — oracle or owner scan — must keep the journal (#7911).
+	oracle.set(pruneOracleUnknown)
+	pruneHookProgress(filepath.Dir(path), later)
+	owners.setUnknown()
+	pruneHookProgress(filepath.Dir(path), later)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unknown liveness pruned the journal: %v", err)
+	}
+	owners.set(map[string]json.RawMessage{"archived-owner": json.RawMessage(`[{"id":"owner","liveness":5}]`)})
+	oracle.set(pruneOracleDead)
+	pruneHookProgress(filepath.Dir(path), later)
 	for _, stale := range []string{path, p.Directory} {
 		if _, err := os.Stat(stale); !os.IsNotExist(err) {
 			t.Fatalf("abandoned archived journal was not reclaimable: %s: %v", stale, err)
