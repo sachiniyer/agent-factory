@@ -241,29 +241,35 @@ func TestAbsentRootDeleteProceedsPastSessionsKeyedUnderUnrelatedRepositories(t *
 	manager.mu.Unlock()
 }
 
-// TestAbsentRootDeleteRefusesWhileABareRepoCannotShowWhoseCloneItIs pins the
-// fail-closed boundary: a bare repository with no checkout marker — a clone af
-// never registered — cannot disprove that the recorded root was one of its
-// worktrees. A missing record is never evidence, so the delete refuses and
-// names the session rather than deregistering over it.
-func TestAbsentRootDeleteRefusesWhileABareRepoCannotShowWhoseCloneItIs(t *testing.T) {
+// TestAbsentRootDeleteRefusesWhileANonBareSiblingSessionKeysUnderTheParentIdentity
+// pins the shape the issue's bare framing misses: a NON-bare repository holds
+// linked worktrees just the same, and a session created from a sibling
+// worktree of that clone is keyed under the main root's identity — equally
+// invisible to every master gate. The marker the row's registration minted
+// into <mainroot>/.git proves this is the clone that owned the recorded
+// root, so the delete refuses.
+func TestAbsentRootDeleteRefusesWhileANonBareSiblingSessionKeysUnderTheParentIdentity(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
 	parent := testguard.CanonicalTempDir(t)
-	_, worktree, _ := bareWorktreeFixture(t, parent)
+	normal := filepath.Join(parent, "repo")
+	seedRepoFixture(t, normal)
+	worktree := filepath.Join(parent, "wt")
+	sibling := filepath.Join(parent, "wt2")
+	if err := exec.Command("git", "-C", normal, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add %s: %v", worktree, err)
+	}
+	if err := exec.Command("git", "-C", normal, "worktree", "add", "--detach", sibling).Run(); err != nil {
+		t.Fatalf("git worktree add %s: %v", sibling, err)
+	}
 	project := registerTestProject(t, worktree)
+	parentID := repoID(t, normal)
 	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
+	historical := config.RepoIDFromRoot(filepath.Clean(worktree))
 	clearRecordedRepoID(t, project.ID)
 	if err := os.RemoveAll(worktree); err != nil {
 		t.Fatalf("remove the recorded root: %v", err)
 	}
-	// An unregistered clone: a bare repo af never saw, holding a worktree
-	// some session lives in. Nothing durable discriminates it from the clone
-	// the deleted row was registered against.
-	otherParent := testguard.CanonicalTempDir(t)
-	otherBare, otherWorktree, _ := bareWorktreeFixture(t, otherParent)
-	otherBareID := repoID(t, otherBare)
-
 	manager, err := NewManager(config.DefaultConfig())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -271,13 +277,13 @@ func TestAbsentRootDeleteRefusesWhileABareRepoCannotShowWhoseCloneItIs(t *testin
 	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
 		t.Fatalf("fixture must keep the row unreconciled, got %q", recorded)
 	}
-	liveSessionUnderIdentity(t, manager, otherBareID, "unproven-bare", otherWorktree)
+	liveSessionUnderIdentity(t, manager, parentID, "sibling-session", sibling)
 
 	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
 	if delErr == nil {
-		t.Fatalf("a bare repo with no checkout marker cannot prove the recorded root was not its worktree — the delete must refuse, not deregister")
+		t.Fatalf("a session of the clone that owns the recorded root must stop the delete even when that clone is not bare")
 	}
-	for _, want := range []string{"nothing was changed", "unproven-bare", otherBare, "af sessions archive"} {
+	for _, want := range []string{"nothing was changed", "sibling-session", "af sessions archive"} {
 		if !strings.Contains(delErr.Error(), want) {
 			t.Fatalf("the refusal must name %q: %v", want, delErr)
 		}
@@ -286,7 +292,62 @@ func TestAbsentRootDeleteRefusesWhileABareRepoCannotShowWhoseCloneItIs(t *testin
 		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
 			len(result.Archived), len(result.Killed), result.Deregistered)
 	}
-	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, otherBareID}, [][2]string{{otherBareID, "unproven-bare"}})
+	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, historical, parentID}, [][2]string{{parentID, "sibling-session"}})
+}
+
+// TestAbsentRootDeleteRefusesWhileASessionCannotNameItsRepository pins the
+// fail-closed boundary: a live session whose repository identity root cannot
+// be established — vanished, or never recorded — leaves "could it be the
+// row's?" open, and open is suspect. The delete refuses and names it rather
+// than deregistering over it.
+func TestAbsentRootDeleteRefusesWhileASessionCannotNameItsRepository(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	_, worktree, sibling := bareWorktreeFixture(t, parent)
+	project := registerTestProject(t, worktree)
+	derived := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(worktree))
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded root: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("fixture must keep the row unreconciled, got %q", recorded)
+	}
+	// A live session keyed under a foreign identity whose recorded root is a
+	// path that no longer exists: the scan cannot establish what clone that
+	// was, so it cannot clear it.
+	gone := filepath.Join(parent, "gone")
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "unattributed-session", Path: sibling, RepoIdentityPath: gone, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	foreignID := repoID(t, filepath.Join(parent, "bare.git"))
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(foreignID, "unattributed-session")] = inst
+	manager.mu.Unlock()
+
+	result, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if delErr == nil {
+		t.Fatalf("a session whose repository af cannot describe must stop the delete, not be cleared by silence")
+	}
+	for _, want := range []string{"nothing was changed", "unattributed-session", "af sessions archive"} {
+		if !strings.Contains(delErr.Error(), want) {
+			t.Fatalf("the refusal must name %q: %v", want, delErr)
+		}
+	}
+	if len(result.Archived) != 0 || len(result.Killed) != 0 || result.Deregistered {
+		t.Fatalf("a refused delete must archive, kill and deregister nothing: archived=%d killed=%d deregistered=%v",
+			len(result.Archived), len(result.Killed), result.Deregistered)
+	}
+	assertAbsentRowSurvives(t, manager, project.ID, []string{derived, foreignID}, [][2]string{{foreignID, "unattributed-session"}})
 }
 
 // TestOrdinaryDeleteIsNotRefusedByAnUnrelatedBareSession pins the scan's

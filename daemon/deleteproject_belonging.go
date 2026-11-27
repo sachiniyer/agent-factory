@@ -2,25 +2,24 @@ package daemon
 
 // #7854: a legacy registry row whose recorded root is ABSENT decides which
 // sessions belong to it from the row's path-hash identity and the sessions'
-// own paths. A session created from a sibling worktree of a BARE repository
-// is keyed under the bare repo's identity, and none of its paths touch the
-// recorded root — so the delete deregistered the row while that session
-// stayed live.
+// own paths. A session created from a sibling worktree of the repository the
+// root belonged to is keyed under that repo's identity, and none of its paths
+// touch the recorded root — so the delete deregistered the row while the
+// session stayed live. The issue frames the bare-repo shape, but a non-bare
+// clone holds linked worktrees the same way and escapes identically; the scan
+// covers both.
 //
-// The scan here answers "could this live session be the row's?" without
-// git's worktree ledger, which `git worktree prune` erases on every archive
-// (#7853's lesson). For each repository identity a live session is keyed
-// under it consults evidence af itself wrote and never deletes: the session's
-// canonical repo identity root, and inside a bare root the checkout marker
-// registration minted there. Only an identity the evidence cannot clear
-// holds the delete up.
+// It answers "could this live session be the row's?" without git's worktree
+// ledger, which `git worktree prune` erases on every archive (#7853's
+// lesson). The evidence is what af itself wrote and never deletes: the
+// session's canonical repo identity root, and inside that repo's common
+// directory the checkout marker registration minted there — a recorded
+// checkout id on the row means exactly one common dir holds it.
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -32,10 +31,10 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// absentBelongingProbeTimeout bounds one identity-root classification — a git
-// probe plus, when git cannot answer, filesystem stats — and one marker read.
-// The scan runs outside every daemon lock, so the bound exists for the
-// filesystem alone: a repo parked on a dead mount must not freeze a delete.
+// absentBelongingProbeTimeout bounds one identity-root classification —
+// filesystem stats only — and one marker read. The scan runs outside every
+// daemon lock, so the bound exists for the filesystem alone: a repo parked on
+// a dead mount must not freeze a delete.
 const absentBelongingProbeTimeout = 3 * time.Second
 
 // liveRepoIdentity buckets the live sessions keyed under one repository
@@ -52,8 +51,8 @@ type liveRepoIdentity struct {
 // sessions keyed under it from the same four sources repoSessionTitlesLocked
 // reads — reserved titles, pending creates, in-flight restores and the
 // instance map — but bucketed by EACH session's own repo identity rather than
-// the identity under deletion. That is the difference that sees a session of
-// a bare repo created from a sibling worktree: it is keyed under the bare
+// the identity under deletion. That is the difference that sees a session
+// created from a sibling worktree: it is keyed under the parent repo's
 // identity, invisible to a scan of only the row's ids (#7854). The caller
 // holds m.mu.
 func (m *Manager) liveRepoIdentitiesLocked() map[string]*liveRepoIdentity {
@@ -132,9 +131,9 @@ type absentRootSuspect struct {
 	// root is the session's repository identity root; empty when no source
 	// could name it.
 	root string
-	// bare is whether root was PROVEN to be a bare repository — the shape
-	// that could have held the recorded root as a linked worktree.
-	bare bool
+	// owner is whether the row's own checkout marker was found inside this
+	// repo's common directory — proof the recorded root was its checkout.
+	owner bool
 }
 
 // absentRootBelonging is the verdict of the absent-branch ownership scan:
@@ -163,25 +162,26 @@ func (b *absentRootBelonging) unvettedTitles(byRepo map[string][]string) []strin
 }
 
 // identityRootClassFlights bounds an unresponsive identity-root
-// classification — a git child plus, when it cannot answer, filesystem stats
-// — to one parked observation per root. Callers time out independently, and a
-// later classify joins the parked probe instead of stranding a second
-// goroutine on the same dead filesystem (the checkoutMarkerReadFlights
-// contract, applied to a probe).
+// classification — filesystem stats only — to one parked observation per
+// root. Callers time out independently, and a later classify joins the parked
+// probe instead of stranding a second goroutine on the same dead filesystem
+// (the checkoutMarkerReadFlights contract, applied to stats).
 var identityRootClassFlights sync.Map
 
 type identityRootClassObservation struct {
-	done   chan struct{}
-	bare   bool
-	proven bool
+	done      chan struct{}
+	commonDir string
+	proven    bool
 }
 
-// classifyIdentityRoot answers "is this repository identity root a bare
-// repository?", parking the probe so an unresponsive filesystem bounds the
-// wait, not the work. proven reports whether the answer is evidence at all:
-// an unanswered probe, a vanished path and a bare-shaped directory git cannot
-// describe all leave the question open, and open is suspect — the delete
-// fails closed, never "no sessions could belong" (#7854).
+// classifyIdentityRoot answers "where is this repository identity root's
+// common directory?", parking the stats so an unresponsive filesystem bounds
+// the wait, not the work. For a bare repo the identity root IS the common
+// dir; for a non-bare repo it is the main root and the common dir is the
+// .git inside it. proven reports whether either could be established: a
+// vanished root, or a present directory that is neither a checkout root nor
+// bare-shaped, leaves the question open — and open is suspect, the delete
+// fails closed (#7854).
 func classifyIdentityRoot(root string) *identityRootClassObservation {
 	obs := &identityRootClassObservation{done: make(chan struct{})}
 	actual, loaded := identityRootClassFlights.LoadOrStore(root, obs)
@@ -189,77 +189,54 @@ func classifyIdentityRoot(root string) *identityRootClassObservation {
 		return actual.(*identityRootClassObservation)
 	}
 	go func() {
-		obs.bare, obs.proven = probeIdentityRootBare(root)
+		obs.commonDir, obs.proven = probeIdentityRootCommonDir(root)
 		identityRootClassFlights.CompareAndDelete(root, obs)
 		close(obs.done)
 	}()
 	return obs
 }
 
-func awaitIdentityRootClass(root string) (bare, proven bool) {
+func awaitIdentityRootClass(root string) (commonDir string, proven bool) {
 	obs := classifyIdentityRoot(root)
 	timer := time.NewTimer(absentBelongingProbeTimeout)
 	defer timer.Stop()
 	select {
 	case <-obs.done:
-		return obs.bare, obs.proven
+		return obs.commonDir, obs.proven
 	case <-timer.C:
 		select {
 		case <-obs.done:
-			return obs.bare, obs.proven
+			return obs.commonDir, obs.proven
 		default:
-			return false, false
+			return "", false
 		}
 	}
 }
 
-func probeIdentityRootBare(root string) (bare, proven bool) {
-	// First establish the root is there at all: `git --git-dir` reports a
-	// vanished path with the same exit status as a dir that is not a
-	// repository, and only the stat distinguishes "inspected and answered"
-	// from "could not even look" — which leaves the question open.
+func probeIdentityRootCommonDir(root string) (commonDir string, proven bool) {
+	// First establish the root is there at all: a vanished identity root
+	// could be the vanished owner of the recorded root, so it is unproven
+	// rather than "not a bare repo".
 	if _, err := os.Stat(root); err != nil {
-		return false, false
+		return "", false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), boundedRecordRootAbsentTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "--git-dir", root, "rev-parse", "--is-bare-repository")
-	cmd.WaitDelay = 2 * time.Second
-	out, err := cmd.Output()
-	if err == nil {
-		switch strings.TrimSpace(string(out)) {
-		case "true":
-			return true, true
-		case "false":
-			return false, true
-		default:
-			return false, false
-		}
+	if _, err := os.Lstat(filepath.Join(root, ".git")); err == nil {
+		return filepath.Join(root, ".git"), true
 	}
-	if ctx.Err() != nil {
-		// A probe the deadline killed answered nothing.
-		return false, false
+	// A bare repository's common dir sits at the root itself: HEAD next to
+	// objects/ and refs/. The shape is not ownership evidence — it only
+	// decides where the marker would live.
+	if identityRootBareShaped(root) {
+		return root, true
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		// Git answered "this is not a gitdir it knows" — exactly what a
-		// non-bare worktree root reports, since a session's identity root is
-		// a gitdir only when the repo is bare. The one answer that must NOT
-		// clear is a corrupt-but-bare common directory: it fails the probe
-		// the same way and could still have held the recorded root, so the
-		// bare shape keeps the question open.
-		if identityRootBareShaped(root) {
-			return false, false
-		}
-		return false, true
-	}
-	return false, false
+	return "", false
 }
 
 // identityRootBareShaped reports whether root has the directory shape of a
 // bare repository — HEAD next to objects/ and refs/. It is not ownership
-// evidence (the ledger is never consulted); it only stops a bare repo whose
-// metadata git can no longer read from being misread as "not a bare repo".
+// evidence (the ledger is never consulted); it only locates the common
+// directory the marker read targets, and it keeps a bare repo whose metadata
+// is unreadable in the suspect class rather than cleared.
 func identityRootBareShaped(root string) bool {
 	head, err := os.Lstat(filepath.Join(root, "HEAD"))
 	if err != nil || head.IsDir() {
@@ -278,20 +255,23 @@ func identityRootBareShaped(root string) bool {
 
 // absentRootBelongingScan is the absent-recorded-root ownership scan: every
 // live repository identity is cleared, or its sessions are suspects. The
-// evidence order is strict — nothing git's worktree ledger could supply is
-// consulted, because af itself erases it on every archive:
+// evidence is strict — nothing git's worktree ledger could supply is
+// consulted, because af itself erases it on every archive. For each identity
+// root the scan finds the common directory and reads af's own checkout marker
+// there — the marker registration minted into whichever clone owned the
+// recorded root, which nothing in af deletes:
 //
-//   - an identity root no source could name is unproven, and unproven is
+//   - a root no source could name, or one whose common directory cannot be
+//     established, is unproven — suspect;
+//   - a row recorded before checkout ids has nothing to discriminate on —
 //     suspect;
-//   - a proven non-bare identity root is cleared — the row's recorded root
-//     was itself a worktree, and only a bare common directory could have
-//     held it as a linked worktree of this repo;
-//   - a bare root whose checkout marker differs from the row's is a
-//     DIFFERENT clone — registration minted the marker into whichever common
-//     directory owned the recorded root, and af never deletes it — cleared;
-//   - a bare root holding the row's own marker, no marker at all, an
-//     unreadable one, or a row recorded before checkout ids are all
-//     unproven, and unproven is suspect.
+//   - a marker read that fails is unproven — suspect;
+//   - a marker equal to the row's own is the clone that owned the recorded
+//     root — suspect;
+//   - a marker that differs, or no marker at all, is a DIFFERENT clone —
+//     cleared. Registration would have minted the row's marker into whatever
+//     owned its root; whatever holds a different marker, or none, provably
+//     is not that clone.
 func (m *Manager) absentRootBelongingScan(recordedCheckoutID string) *absentRootBelonging {
 	m.mu.Lock()
 	sets := m.liveRepoIdentitiesLocked()
@@ -305,9 +285,9 @@ func (m *Manager) absentRootBelongingScan(recordedCheckoutID string) *absentRoot
 	sort.Strings(repoIDs)
 	for _, repoID := range repoIDs {
 		set := sets[repoID]
-		suspect := func(root string, bare bool) {
+		suspect := func(root string, owner bool) {
 			for title := range set.titles {
-				belonging.suspects = append(belonging.suspects, absentRootSuspect{title: title, root: root, bare: bare})
+				belonging.suspects = append(belonging.suspects, absentRootSuspect{title: title, root: root, owner: owner})
 			}
 		}
 		if !set.rootKnown {
@@ -317,39 +297,33 @@ func (m *Manager) absentRootBelongingScan(recordedCheckoutID string) *absentRoot
 			suspect("", false)
 			continue
 		}
-		bare, proven := awaitIdentityRootClass(set.identityRoot)
+		commonDir, proven := awaitIdentityRootClass(set.identityRoot)
 		if !proven {
 			suspect(set.identityRoot, false)
 			continue
 		}
-		if !bare {
-			belonging.cleared[repoID] = struct{}{}
-			continue
-		}
 		if recordedCheckoutID == "" {
 			// The row predates checkout ids: there is nothing durable to
-			// discriminate this bare repo on.
-			suspect(set.identityRoot, true)
+			// discriminate this repo on.
+			suspect(set.identityRoot, false)
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), absentBelongingProbeTimeout)
-		markerID, markerExists, markerErr := config.CheckoutIDInCommonDir(ctx, set.identityRoot)
+		markerID, markerExists, markerErr := config.CheckoutIDInCommonDir(ctx, commonDir)
 		cancel()
 		switch {
-		case markerErr != nil, !markerExists:
-			// An unreadable marker proves nothing either way, and an absent
-			// marker cannot disprove that this common dir held the recorded
-			// root — a missing record is never evidence (#7853).
-			suspect(set.identityRoot, true)
-		case markerID == recordedCheckoutID:
-			// The row's own marker lives inside this bare repo: its
-			// registered root was a checkout of this clone, and a session
-			// created from a sibling worktree could be the row's.
+		case markerErr != nil:
+			// An unreadable marker proves nothing either way.
+			suspect(set.identityRoot, false)
+		case markerExists && markerID == recordedCheckoutID:
+			// The row's own marker lives inside this repo: its recorded
+			// root was a checkout of this clone, and a session created from
+			// a sibling worktree could be the row's.
 			suspect(set.identityRoot, true)
 		default:
-			// A different clone: registration would have minted the row's
-			// marker into whatever common directory owned its root, and it
-			// minted this repo's instead.
+			// A different clone, or one never registered at all: a recorded
+			// checkout id means the row's marker was minted into whichever
+			// common directory owned its root, and this is provably not it.
 			belonging.cleared[repoID] = struct{}{}
 		}
 	}
@@ -367,14 +341,14 @@ func (m *Manager) absentRootBelongingScan(recordedCheckoutID string) *absentRoot
 // class that made it suspect, and the command that resolves it.
 func absentRootBelongingRefusal(repoID, repoPath string, suspects []absentRootSuspect) error {
 	titles := make([]string, 0, len(suspects))
-	bareRoots := make(map[string]struct{})
+	ownerRoots := make(map[string]struct{})
 	unknownRoots := make(map[string]struct{})
 	unnamed := 0
 	for _, s := range suspects {
 		titles = append(titles, s.title)
 		switch {
-		case s.bare && s.root != "":
-			bareRoots[s.root] = struct{}{}
+		case s.owner && s.root != "":
+			ownerRoots[s.root] = struct{}{}
 		case s.root != "":
 			unknownRoots[s.root] = struct{}{}
 		default:
@@ -387,8 +361,8 @@ func absentRootBelongingRefusal(repoID, repoPath string, suspects []absentRootSu
 		cmds = append(cmds, shellsuggest.PositionalCommand("af", []string{"sessions", "archive"}, title))
 	}
 	var clauses []string
-	if roots := sortedKeys(bareRoots); len(roots) > 0 {
-		clauses = append(clauses, "the bare repository "+strings.Join(roots, " and "))
+	if roots := sortedKeys(ownerRoots); len(roots) > 0 {
+		clauses = append(clauses, "the repository "+strings.Join(roots, " and ")+", whose common directory holds this record's own checkout marker")
 	}
 	if roots := sortedKeys(unknownRoots); len(roots) > 0 {
 		clauses = append(clauses, "the repository "+strings.Join(roots, " and ")+", which af could not describe")
@@ -396,7 +370,7 @@ func absentRootBelongingRefusal(repoID, repoPath string, suspects []absentRootSu
 	if unnamed > 0 {
 		clauses = append(clauses, "a repository af could not name")
 	}
-	holding := strings.Join(clauses, ", and ") + " — any could have held that root as a worktree"
+	holding := strings.Join(clauses, ", and ") + " — any could have owned that root as a worktree"
 	return fmt.Errorf(
 		"delete project %s: its recorded root %s is absent and the record predates af's repository identities, so af cannot establish which live sessions it owned — and it cannot clear session(s) %v, live under %s; nothing was changed — archive the named session(s) with %s, then delete the project again",
 		repoID, repoPath, titles, holding, strings.Join(cmds, "; "),
