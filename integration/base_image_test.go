@@ -147,7 +147,8 @@ func requireRoundTripBaseImage(t *testing.T) string {
 	t.Helper()
 	baseImageOnce.Do(func() {
 		started := time.Now()
-		built, baseImageUnavailable, baseImageBroken := ensureRoundTripBaseImage()
+		var built bool
+		built, baseImageUnavailable, baseImageBroken = ensureRoundTripBaseImage()
 		// One line per test binary: the base is either built here or reused
 		// with current labels, and a fetch that takes minutes should be
 		// visible in the log rather than attributed to the test that
