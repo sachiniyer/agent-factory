@@ -391,6 +391,10 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		}
 	}
 	claimantProjectID := ""
+	// The matched row's recorded checkout id, when the claimant scan can
+	// supply one — the clone identity the absent-branch ownership scan
+	// discriminates bare session roots on (#7854).
+	recordedCheckoutID := ""
 	// Whether a registry scan actually SELECTED a row, which is the condition
 	// the transition gate is documented to want — path presence is not it
 	// (#3530 review id 3919195012). A two-selector delete can name another
@@ -410,6 +414,7 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 				}
 				rowFound = true
 				claimantProjectID = claimantForRecord(p)
+				recordedCheckoutID = p.CheckoutID
 				if claimantProjectID == "" {
 					// A present path whose checkout marker cannot be proven is
 					// not, by itself, proof the checkout being deleted is this
@@ -530,6 +535,42 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: its recorded root %s is present but no longer a git checkout, so af cannot establish which identity its sessions and opt-ins were filed under — nothing was changed; restore the checkout's git metadata and delete again, or remove the directory and delete it as absent", repoID, repoPath)
 		}
 	}
+	// The ABSENT half of the same row (#7854): when the recorded root is gone
+	// the delete decided belonging from the row's path-hash identity and the
+	// sessions' own paths, and both missed the same shape — a session of a
+	// bare repository created from a sibling worktree, keyed under the bare
+	// identity with no path that touches the root. The row could still be
+	// deregistered while it stayed live. The scan below asks, for every live
+	// repository identity the daemon holds, whether evidence af itself wrote
+	// — never git's worktree ledger, which its own archive path erases —
+	// clears it of owning that root. Identities it cannot clear refuse the
+	// delete with the sessions named; the ones it does clear are carried into
+	// the post-deregister re-scan so a session materializing mid-delete under
+	// an unvetted identity fails closed too. Nothing has been mutated yet, so
+	// a refusal here is literally "nothing was changed".
+	var absentBelonging *absentRootBelonging
+	// The scan asks the same question of the row whichever selector reached
+	// it: the derived id when the PATH matched the record, and the
+	// unattributed legacy record when the REQUESTED identity is the hash of
+	// its recorded root — both name the same absent root and deregister it.
+	belongingRoot, belongingCheckoutID := "", ""
+	switch {
+	case rowFound && config.IsDerivedRepoID(repoID) && repoPath != "":
+		belongingRoot, belongingCheckoutID = repoPath, recordedCheckoutID
+	case unattributed.ID != "":
+		belongingRoot, belongingCheckoutID = unattributed.Root, unattributed.CheckoutID
+	}
+	if belongingRoot != "" {
+		if absent, err := boundedRecordRootAbsent(belongingRoot); err != nil {
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine whether its recorded root %s is absent, so af cannot establish which live sessions it owned — nothing was changed; repair access to the path and retry: %w", repoID, belongingRoot, err)
+		} else if absent {
+			belonging := m.absentRootBelongingScan(belongingCheckoutID)
+			if len(belonging.suspects) > 0 {
+				return deleteProjectTarget{repoID: repoID}, absentRootBelongingRefusal(repoID, belongingRoot, belonging.suspects)
+			}
+			absentBelonging = belonging
+		}
+	}
 	carryWorkspace := ""
 	if repoPath != "" {
 		carryWorkspace = pathutil.ResolveForCompare(filepath.Clean(repoPath))
@@ -541,6 +582,7 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		unattributedRecordRoot:    unattributed.Root,
 		unattributedRecordProject: unattributed.ID,
 		carryWorkspace:            carryWorkspace,
+		absentBelonging:           absentBelonging,
 	}, nil
 }
 

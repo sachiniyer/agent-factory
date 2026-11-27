@@ -336,6 +336,23 @@ func (i *Instance) GetRepoPath() string {
 	return gw.GetRepoPath()
 }
 
+// GetRepoIdentityPath returns the session's repository identity root — the
+// bare common directory for a session of a bare repo, the main root
+// otherwise — whichever backend the session runs on. It prefers the live
+// worktree's answer (which tracks relocation) and falls back to the identity
+// recorded at create, the same pair of sources ToInstanceData's
+// Worktree.RepoPath projects.
+func (i *Instance) GetRepoIdentityPath() string {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	fallback := i.repoIdentityPath
+	i.mu.RUnlock()
+	if gw != nil {
+		return gw.GetRepoPath()
+	}
+	return fallback
+}
+
 // PostWorktreeHooksDone returns a channel that is closed once the instance's
 // post-worktree hooks (post_worktree_commands) have finished running, or nil
 // when no hook run is in flight — no worktree yet, an external worktree that

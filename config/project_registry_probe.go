@@ -273,6 +273,25 @@ func projectRootUsesGitCommonDir(root, commonDir string) bool {
 	return err == nil && sameProjectPath(binding.gitCommonDir, commonDir)
 }
 
+// CheckoutIDInCommonDir reads af's checkout marker directly inside a
+// repository's common directory — the clone identity a registered project
+// records durably — without resolving a workspace or asking git's worktree
+// ledger anything. It is the ownership evidence a delete can consult for a
+// session's BARE identity root: `git worktree prune` erases the worktree
+// ledger on every archive, but nothing in af deletes the marker (#7854). The
+// read parks on the shared marker flight and the wait runs under ctx, so a
+// common directory on an unresponsive filesystem cannot wedge the caller — a
+// deadline that ends the wait reports an error carrying the flight's
+// completion, never a verdict of "absent".
+func CheckoutIDInCommonDir(ctx context.Context, commonDir string) (string, bool, error) {
+	markerName, err := checkoutMarkerName()
+	if err != nil {
+		return "", false, err
+	}
+	flight := checkoutMarkerRead(filepath.Join(commonDir, checkoutMarkerDirName, markerName))
+	return awaitCheckoutMarkerRead(ctx, commonDir, flight)
+}
+
 // projectBindingIdentityRaceHookForTest, when non-nil, runs between the probes
 // that establish a path's checkout root, common directory and marker and the
 // resolution that names its repository identity. That window is #3530 review

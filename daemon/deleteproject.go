@@ -197,6 +197,12 @@ type deleteProjectTarget struct {
 	// carry's workspace (retireRootCarriesAtLocked). Resolved here, before
 	// taskTargetMu, because resolving touches the filesystem (#3361).
 	carryWorkspace string
+	// absentBelonging is the verdict of the absent-recorded-root ownership
+	// scan (#7854): every live repository identity the evidence could clear
+	// of owning the row's root. Nil unless the row is a legacy record whose
+	// recorded root is absent — ordinary deletes carry nil and the
+	// post-deregister re-scan is unchanged for them.
+	absentBelonging *absentRootBelonging
 }
 
 // deleteProject performs DeleteProject while taskTargetMu is already held from
@@ -700,6 +706,15 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	var escaped []string
 	for _, id := range fenced {
 		escaped = append(escaped, m.repoSessionTitlesLocked(id, false)...)
+	}
+	if resolved.absentBelonging != nil {
+		// The absent-root scan cleared every live repository identity it saw
+		// at resolution; a session materialized during the deregister under
+		// an identity it never saw is unvetted, and unvetted fails closed the
+		// same way a suspect does (#7854). Identities proven clear stay clear
+		// for later arrivals — the evidence that cleared them names the
+		// clone, not the session.
+		escaped = append(escaped, resolved.absentBelonging.unvettedTitles(m.liveSessionTitlesByRepoLocked())...)
 	}
 	m.mu.Unlock()
 	if len(escaped) > 0 {
