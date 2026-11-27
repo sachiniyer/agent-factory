@@ -485,6 +485,82 @@ func TestStillChipComposerWithholdsDraftRowsBelowABlankRow(t *testing.T) {
 	}
 }
 
+// TestStillChipComposerWithholdsDraftsInCodexFooterShape is the #7912 item-1
+// class: the Codex model segment is a CLOSED vocabulary — a model token from
+// an enumerated family plus only effort-enum tier words and the fixtures'
+// enumerated codenames — so a draft line that borrows the "model · path"
+// shape without carrying a known model is composer content, not the footer.
+// Every frame below remedies on master — the prefix test, the
+// two-capitalized-words codename rule, or the warning-word prefix accepts
+// it — and must withhold here.
+func TestStillChipComposerWithholdsDraftsInCodexFooterShape(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	anchor := "› " + codexChip
+	for name, footer := range map[string]string{
+		// Y1b: a real model token followed by two capitalized draft words —
+		// "Ship It" is not a codename.
+		"Y1b known model plus draft words": "  gpt-5 Ship It · ~/repo",
+		// Y1c: bare "GPT" is not a family — the head carries no version.
+		"Y1c bare GPT plus draft words": "  GPT Deploy Prod · /srv/app",
+		// Y1d: a "gpt-" prefix is not a family — no version follows it.
+		"Y1d gpt- draft token": "  gpt-please-force-push-release · ~/notes.md",
+		// Y1e: a "codex-" prefix is not a family.
+		"Y1e codex- draft token": "  codex-then-delete-the-staging-bucket · /srv",
+		// Y1f: "GPTs" shares a family's prefix and matches none.
+		"Y1f GPTs plural": "  GPTs · ~/notes.md",
+		// Y6b: the warning word must be exactly "warning"/"warnings" — a
+		// word that merely opens with one is draft text.
+		"Y6b warning-word prefix": "  ⚠ 2 warningsforcepush",
+	} {
+		t.Run(name, func(t *testing.T) {
+			pane := strings.Join([]string{anchor, "", footer}, "\n") + "\n"
+			cursor := paneCursorState{Visible: true, Row: 0, Col: firstContentCol(anchor)}
+			if ok, why := stillChipComposer(pane, pane, cursor, chipText); ok {
+				t.Fatalf("ok=true why=%q, want ok=false (%q is not in Codex's closed footer vocabulary)", why, footer)
+			}
+		})
+	}
+}
+
+// TestStillChipComposerAcceptsCodexClosedFooterVocabulary pins the other
+// side of #7912 item 1: every real Codex footer shape still remedies — a
+// known model with a one-token path (Y3c), a Main [token] segment (Y4a),
+// the fixtures' codename draws, every tier in codex-rs's ReasoningEffort
+// enum (including xhigh, minimal and none, the words the old tier list did
+// not know), and each literal/meter segment the grammar owns.
+func TestStillChipComposerAcceptsCodexClosedFooterVocabulary(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	anchor := "› " + codexChip
+	end := contentEndCol(anchor)
+	for name, footers := range map[string][]string{
+		"Y3c known model, one-token path": {"  gpt-5 · ~/repo"},
+		"Y4a Main [token] segment":        {"  gpt-5 · ~/repo · Main [default]"},
+		"warning plural":                  {"  gpt-5 · ~/repo · ⚠ 2 warnings"},
+		"context-left meter":              {"  gpt-5 · ~/repo · 87% context left"},
+		"fixture Terra ultra":             {"  GPT-6.1 Terra ultra · ~/sahara/sahara-cheaper-ci · ⚠ 1 warning · f2 to view"},
+		"fixture Astra":                   {"  GPT-6-Astra ultra · ~/sahara/sahara-clean · Pursuing goal · Main [default]"},
+		"fixture sol max":                 {"  gpt-5.6-sol max · ~/agent-factory"},
+		"fixture luna low":                {"  gpt-5.6-luna low · ~/agent-factory"},
+		"effort none":                     {"  gpt-5.2-codex none · ~/repo"},
+		"effort minimal":                  {"  gpt-5.1-codex minimal · ~/repo"},
+		"effort xhigh":                    {"  gpt-5.1-codex-max xhigh · ~/repo"},
+		"effort persistent":               {"  gpt-5.2-codex persistent · ~/repo"},
+		"o-series mini":                   {"  o4-mini medium · ~/repo"},
+		"codex-mini line":                 {"  codex-mini-latest low · ~/repo"},
+		"hints row":                       {"  ← for agents · ? for shortcuts ⚠ 1 warning · f2 to view"},
+		"esc interrupt row":               {"  esc to interrupt"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rows := append([]string{anchor, ""}, footers...)
+			pane := strings.Join(rows, "\n") + "\n"
+			cursor := paneCursorState{Visible: true, Row: 0, Col: end}
+			if ok, why := stillChipComposer(pane, pane, cursor, chipText); !ok {
+				t.Fatalf("ok=false why=%q, want ok=true (every footer row is in Codex's closed vocabulary)", why)
+			}
+		})
+	}
+}
+
 // TestStillChipComposerAcceptsEveryRealAgentFooter pins the whole-row
 // grammars against the footers the agents actually draw: every row below the
 // composer is provably that agent's own, so the chip-only composer still
