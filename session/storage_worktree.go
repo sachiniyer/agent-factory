@@ -120,11 +120,14 @@ func projectRelocationRecoveryForPreviousRelease(recovery *GitWorktreeRelocation
 	case git.RelocationRecoveryMoveInFlight:
 		// Same carrier, different needs (#7819): the row is LIVE (a crashed
 		// archive mid-move), so its real Original* ownership values are kept —
-		// the fence is only the projected claim_stale state itself. A previous
-		// release refuses any record state it does not know, and for
-		// claim_stale it probes both pathnames like master: the quarantine or
-		// staging residue simply keeps the unnamed handling it had before
-		// this change shipped.
+		// but RestoreRelocationRecoveryOriginals requires the CleanupOriginal*
+		// carriers whenever CleanupLifecycle is set, so they are populated
+		// with the real values. Without them the projected row fails restore
+		// outright and the record — the only thing naming the residue — is
+		// unreadable to every current-code path that consumes it.
+		recovery.CleanupOriginalExternalWorktree = cloneBoolPointer(recovery.OriginalExternalWorktree)
+		recovery.CleanupOriginalBranchCreatedByUs = cloneBoolPointer(recovery.OriginalBranchCreatedByUs)
+		recovery.CleanupOriginalStartupStateUnknown = cloneBoolPointer(recovery.OriginalStartupStateUnknown)
 		recovery.CleanupLifecycle = recovery.State
 		recovery.State = git.RelocationRecoveryClaimStale
 	}

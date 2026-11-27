@@ -1,7 +1,6 @@
 package session
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,31 +165,26 @@ func TestMissingWorktreeRebuildRefusal_ForeignRecordDoesNotBlock(t *testing.T) {
 	require.NoError(t, os.Mkdir(orphan, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(orphan, "stranded.txt"), []byte("someone else's"), 0o644))
 
-	// The OTHER session's durable record names the residue — stored in the
-	// projected form a same-release row takes on disk (claim_stale carrying
-	// move_in_flight in its additive lifecycle).
-	foreignRows, err := json.Marshal([]InstanceData{{
-		ID:    "other-inst",
-		Title: "other-session",
-		Path:  repoRoot,
-		Worktree: GitWorktreeData{
-			RepoPath:     repoRoot,
-			WorktreePath: filepath.Join(wtParent, "wt-other"),
-			RelocationRecovery: &GitWorktreeRelocationRecoveryData{
-				State:            git.RelocationRecoveryClaimStale,
-				CleanupLifecycle: git.RelocationRecoveryMoveInFlight,
-				AlternatePath:    filepath.Join(wtParent, "wt-other-dest"),
-				IdentityKnown:    true,
-				QuarantinePath:   orphan,
-				StagingPath:      filepath.Join(wtParent, ".af-copy-"+strings.Repeat("f", 32)),
-			},
-		},
-	}})
-	require.NoError(t, err)
-	require.NoError(t, config.SaveRepoInstances("otherrepo", foreignRows))
+	// The OTHER session's durable record names the residue — persisted through
+	// the real ToInstanceData/ForStorage path so the stored row carries the
+	// projected shape a daemon restart actually reads back.
+	foreign, foreignGw := arbitrationInstance(
+		t, repoRoot, filepath.Join(wtParent, "wt-other"), "other-session", branch, "other-inst")
+	foreign.liveness = LiveArchived
+	require.NoError(t, foreignGw.RestoreRelocationRecovery(git.RelocationRecovery{
+		State:          git.RelocationRecoveryMoveInFlight,
+		AlternatePath:  filepath.Join(wtParent, "wt-other-dest"),
+		IdentityKnown:  true,
+		Device:         42,
+		Inode:          4242,
+		FileType:       4,
+		QuarantinePath: orphan,
+		StagingPath:    filepath.Join(wtParent, ".af-copy-"+strings.Repeat("f", 32)),
+	}))
+	persistRowForTest(t, "otherrepo", foreign.ToInstanceData())
 
 	inst, gw := arbitrationInstance(t, repoRoot, wtPath, "foreign-record", branch, "self-foreign-record")
-	err = missingWorktreeRebuildRefusal(inst, gw, true, "claude")
+	err := missingWorktreeRebuildRefusal(inst, gw, true, "claude")
 	assert.NoError(t, err,
 		"residue another session's durable record names is foreign — it must not block this session's rebuild")
 	assert.DirExists(t, orphan, "the foreign session's residue is never touched")

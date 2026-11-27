@@ -174,6 +174,16 @@ type ArchiveRollbackRelocationRecovery struct {
 	OriginalExternalWorktree           *bool                   `json:"original_external_worktree,omitempty"`
 	OriginalBranchCreatedByUs          *bool                   `json:"original_branch_created_by_us,omitempty"`
 	OriginalStartupStateUnknown        *bool                   `json:"original_startup_state_unknown,omitempty"`
+	// The residue names and destination identity a move_in_flight or
+	// move_unknown record proves its residue with (#7819). The fence carries
+	// them verbatim so a current reader restores the exact record that was
+	// projected.
+	QuarantinePath    string `json:"quarantine_path,omitempty"`
+	StagingPath       string `json:"staging_path,omitempty"`
+	DestIdentityKnown bool   `json:"dest_identity_known,omitempty"`
+	DestDevice        uint64 `json:"dest_device,omitempty"`
+	DestInode         uint64 `json:"dest_inode,omitempty"`
+	DestFileType      uint32 `json:"dest_file_type,omitempty"`
 }
 
 // Empty reports whether every archive copy was complete.

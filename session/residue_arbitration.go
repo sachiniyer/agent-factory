@@ -104,6 +104,13 @@ func (a *ResidueArbiter) Classify(candidate string) ResidueAttribution {
 		return attr
 	}
 	a.enumerate()
+	// Enumerate can fill selfNamed too — the adopt route's fresh worktree
+	// handle attributes self only through its persisted row, which arrives
+	// here rather than through the live record — so self is checked again
+	// before the foreign maps are consulted.
+	if attr, ok := a.selfNamed[candidate]; ok {
+		return attr
+	}
 	if a.foreignNamed[candidate] || a.foreignRetained[candidate] {
 		return ResidueForeignSession
 	}
@@ -163,7 +170,29 @@ func (a *ResidueArbiter) enumerate() {
 			continue
 		}
 		for i := range datas {
-			a.indexRow(&datas[i])
+			// The row is read in its RAW projected form here: a non-empty
+			// archive report replaces the worktree's recovery record with a
+			// synthetic kill fence, and a pending lifecycle or move record is
+			// projected to claim_stale for previous releases. Both rollback
+			// projections are reversed before the record is indexed, or the
+			// very rows this arbitration exists to read would be invisible to
+			// it. A row that cannot be restored is a hole in the enumeration:
+			// its records cannot be consulted, so its store joins the
+			// fail-closed list exactly like an undecodable one.
+			datas[i] = datas[i].RestoreArchiveRollbackFence()
+			restored, rerr := datas[i].RestoreRelocationRecoveryOriginals()
+			if rerr != nil {
+				if a.enumErr == nil {
+					a.enumErr = fmt.Errorf("could not restore a session record in this home: %v", rerr)
+				}
+				if p, perr := config.RepoInstancesPath(repoID); perr == nil {
+					a.enumStores = append(a.enumStores, p)
+				} else {
+					a.enumStores = append(a.enumStores, "repo "+repoID)
+				}
+				continue
+			}
+			a.indexRow(&restored)
 		}
 	}
 }

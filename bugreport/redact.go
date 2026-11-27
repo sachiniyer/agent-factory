@@ -670,6 +670,14 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.Worktree.RelocationRecovery != nil {
 		d.Worktree.RelocationRecovery.AlternatePath =
 			r.collapsePathField(d.Worktree.RelocationRecovery.AlternatePath)
+		// QuarantinePath and StagingPath name the same user-visible sibling
+		// paths AlternatePath does — `.af-source-*`/`.af-copy-*` beside the
+		// recorded path and publish destination (#7819) — so they take the
+		// same collapse.
+		d.Worktree.RelocationRecovery.QuarantinePath =
+			r.collapsePathField(d.Worktree.RelocationRecovery.QuarantinePath)
+		d.Worktree.RelocationRecovery.StagingPath =
+			r.collapsePathField(d.Worktree.RelocationRecovery.StagingPath)
 	}
 	// LostRestoreFailure.Error is af-authored — daemon/lostrestore.go stores the
 	// terminal error of the automatic restore loop — but every constructor that
@@ -757,6 +765,10 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		if fence := d.ArchiveReport.RollbackFence; fence != nil && fence.OriginalRelocationRecovery != nil {
 			fence.OriginalRelocationRecovery.AlternatePath =
 				r.collapsePathField(fence.OriginalRelocationRecovery.AlternatePath)
+			fence.OriginalRelocationRecovery.QuarantinePath =
+				r.collapsePathField(fence.OriginalRelocationRecovery.QuarantinePath)
+			fence.OriginalRelocationRecovery.StagingPath =
+				r.collapsePathField(fence.OriginalRelocationRecovery.StagingPath)
 		}
 	}
 }

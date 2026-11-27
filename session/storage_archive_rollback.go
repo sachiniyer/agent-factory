@@ -37,6 +37,12 @@ func archiveRollbackFence(data InstanceData) *git.ArchiveRollbackFence {
 			OriginalExternalWorktree:           cloneBoolPointer(recovery.OriginalExternalWorktree),
 			OriginalBranchCreatedByUs:          cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
 			OriginalStartupStateUnknown:        cloneBoolPointer(recovery.OriginalStartupStateUnknown),
+			QuarantinePath:                     recovery.QuarantinePath,
+			StagingPath:                        recovery.StagingPath,
+			DestIdentityKnown:                  recovery.DestIdentityKnown,
+			DestDevice:                         recovery.DestDevice,
+			DestInode:                          recovery.DestInode,
+			DestFileType:                       recovery.DestFileType,
 		}
 	}
 	return fence
@@ -61,6 +67,12 @@ func archiveRollbackRelocationRecovery(recovery *git.ArchiveRollbackRelocationRe
 		OriginalExternalWorktree:           cloneBoolPointer(recovery.OriginalExternalWorktree),
 		OriginalBranchCreatedByUs:          cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
 		OriginalStartupStateUnknown:        cloneBoolPointer(recovery.OriginalStartupStateUnknown),
+		QuarantinePath:                     recovery.QuarantinePath,
+		StagingPath:                        recovery.StagingPath,
+		DestIdentityKnown:                  recovery.DestIdentityKnown,
+		DestDevice:                         recovery.DestDevice,
+		DestInode:                          recovery.DestInode,
+		DestFileType:                       recovery.DestFileType,
 	}
 }
 
@@ -108,6 +120,12 @@ func (d InstanceData) ForStorage() InstanceData {
 			externalWorktree := d.Worktree.ExternalWorktree
 			branchCreatedByUs := cloneBoolPointer(d.Worktree.BranchCreatedByUs)
 			startupStateUnknown := d.StartupStateUnknown
+			// Every residue-naming field travels with the record (R2): a
+			// move_in_flight or move_unknown record's proof is its residue
+			// names plus both endpoint identities. Dropping any of them here
+			// degrades the durable record to an unusable pointer on reload —
+			// the restart path errors the row out entirely and the residue
+			// the record exists to name is hidden from arbitration.
 			d.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
 				State: recovery.State, AlternatePath: recovery.AlternatePath,
 				IdentityKnown: recovery.IdentityKnown, Device: recovery.Device,
@@ -116,6 +134,12 @@ func (d InstanceData) ForStorage() InstanceData {
 				OriginalExternalWorktree:    &externalWorktree,
 				OriginalBranchCreatedByUs:   branchCreatedByUs,
 				OriginalStartupStateUnknown: &startupStateUnknown,
+				QuarantinePath:              recovery.QuarantinePath,
+				StagingPath:                 recovery.StagingPath,
+				DestIdentityKnown:           recovery.DestIdentityKnown,
+				DestDevice:                  recovery.DestDevice,
+				DestInode:                   recovery.DestInode,
+				DestFileType:                recovery.DestFileType,
 			}
 		}
 		if report.Empty() {
