@@ -545,3 +545,70 @@ func TestBindAFRelocationResidue_UnverifiedNoGitPointerIsUnknown(t *testing.T) {
 	require.Error(t, err, "a residue with no readable git binding is unverified, not silently classified")
 	assert.Equal(t, ResidueUnknown, binding)
 }
+
+// TestBindAFRelocationResidue_SymlinkCandidateIsUnverified pins R6: the bind
+// must not traverse the candidate by pathname. A symlink planted at the
+// residue path — swapped in after the scan saw a directory — must fail the
+// O_NOFOLLOW open and read as unverified, never as the tree the link resolves
+// into. On master the pathname traversal follows the link and classifies the
+// pointed-at foreign tree as foreign, so a planted link can launder a
+// refusal into "not mine, proceed".
+func TestBindAFRelocationResidue_SymlinkCandidateIsUnverified(t *testing.T) {
+	_, repoRoot, wtPath := archiveTestWorktree(t)
+	otherBranch := "arch/other"
+	otherWt := filepath.Join(filepath.Dir(repoRoot), "repo-arch-other")
+	runGitInPlaceTest(t, repoRoot, "worktree", "add", "-b", otherBranch, otherWt)
+	candidate := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("f", 32))
+	require.NoError(t, os.Symlink(otherWt, candidate))
+
+	binding, err := BindAFRelocationResidue(candidate, wtPath, repoRoot)
+	require.Error(t, err, "a symlink at the candidate path is not a scanned directory; the bind must not follow it")
+	assert.Equal(t, ResidueUnknown, binding)
+}
+
+// TestListAFRelocationResidue_DanglingSymlinkParentRefuses pins R7: when the
+// directory the scan was asked to enumerate resolves through a symlink whose
+// target does not exist, readdir's ENOENT is not "absent" — the link could be
+// fixed to resolve somewhere carrying residue, so "no residue" is unproven
+// and the scan must refuse rather than report an empty parent.
+func TestListAFRelocationResidue_DanglingSymlinkParentRefuses(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, "worktrees")
+	require.NoError(t, os.Symlink(filepath.Join(root, "nonexistent"), link))
+
+	residue, err := ListAFRelocationResidue(link)
+	require.Error(t, err, "a dangling symlink in the scanned path cannot prove the directory carries no residue")
+	assert.Nil(t, residue)
+	assert.Contains(t, err.Error(), link)
+}
+
+// TestListAFRelocationResidue_DanglingSymlinkInParentChainRefuses pins the
+// same refusal when the dangling component sits deeper inside the scanned
+// path, not at its leaf.
+func TestListAFRelocationResidue_DanglingSymlinkInParentChainRefuses(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, "link")
+	require.NoError(t, os.Symlink(filepath.Join(root, "nonexistent"), link))
+
+	residue, err := ListAFRelocationResidue(filepath.Join(link, "sub"))
+	require.Error(t, err)
+	assert.Nil(t, residue)
+	assert.Contains(t, err.Error(), link)
+}
+
+// TestListAFRelocationResidue_ResolvedSymlinkParentStillScans pins that only a
+// DANGLING link refuses: a parent path that traverses a symlink resolving to
+// a real directory is scanned normally and its residue is found.
+func TestListAFRelocationResidue_ResolvedSymlinkParentStillScans(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	require.NoError(t, os.Mkdir(real, 0o755))
+	quarantine := filepath.Join(real, ".af-source-"+strings.Repeat("1", 32))
+	require.NoError(t, os.Mkdir(quarantine, 0o755))
+	link := filepath.Join(root, "link")
+	require.NoError(t, os.Symlink(real, link))
+
+	residue, err := ListAFRelocationResidue(link)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{filepath.Join(link, ".af-source-"+strings.Repeat("1", 32))}, residue)
+}

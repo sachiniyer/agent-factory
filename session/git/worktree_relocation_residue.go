@@ -15,10 +15,13 @@ package git
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
@@ -69,6 +72,21 @@ func ListAFRelocationResidue(dirs ...string) ([]string, error) {
 		entries, err := BoundedReadDir(dir)
 		if err != nil {
 			if os.IsNotExist(err) {
+				// ENOENT from a path containing a dangling symlink is
+				// indistinguishable from an absent directory at the readdir
+				// call, but they are not the same: the link could resolve
+				// somewhere carrying residue once fixed, so "no residue" is
+				// unproven. Refuse rather than classify the scan empty (R7).
+				dangling, dErr := danglingSymlinkComponent(dir)
+				if dErr != nil {
+					return nil, fmt.Errorf("scan af relocation residue beside %s: %w", dir, dErr)
+				}
+				if dangling != "" {
+					return nil, fmt.Errorf(
+						"scan af relocation residue beside %s: %s is a dangling symlink, so the scan cannot prove the directory carries no residue",
+						dir, dangling,
+					)
+				}
 				continue
 			}
 			return nil, fmt.Errorf("scan af relocation residue beside %s: %w", dir, err)
@@ -116,6 +134,44 @@ func ListAFRelocationResidue(dirs ...string) ([]string, error) {
 	return residue, nil
 }
 
+// danglingSymlinkComponent returns the first component of dir — from the root
+// down to dir itself — that is a symlink resolving to nothing, or "" when the
+// path is genuinely absent or fully resolvable. A path component that lstat
+// cannot find ends the walk as absent: nothing below a missing directory can
+// carry residue. Each symlink component is resolved with stat so a link that
+// points at a live tree is fine — only one whose target does not exist makes
+// the scan's "no residue" answer unproven.
+func danglingSymlinkComponent(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("residue scan cannot resolve %s: %w", dir, err)
+	}
+	prefix := filepath.VolumeName(abs) + string(filepath.Separator)
+	for _, part := range strings.Split(abs, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		prefix = filepath.Join(prefix, part)
+		info, lerr := os.Lstat(prefix)
+		if lerr != nil {
+			if errors.Is(lerr, os.ErrNotExist) {
+				return "", nil
+			}
+			return "", fmt.Errorf("residue scan cannot inspect %s: %w", prefix, lerr)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		if _, serr := os.Stat(prefix); serr != nil {
+			if errors.Is(serr, os.ErrNotExist) {
+				return prefix, nil
+			}
+			return "", fmt.Errorf("residue scan cannot inspect %s: %w", prefix, serr)
+		}
+	}
+	return "", nil
+}
+
 // ResidueBinding reports how an af relocation residue directory relates to a
 // session's recorded source path, so the daemon's archive arbitration refuses
 // only on this session's own stranded worktree and never on another session's
@@ -154,7 +210,7 @@ const (
 // session's work.
 func BindAFRelocationResidue(candidate, source, repoPath string) (ResidueBinding, error) {
 	encoded, err := boundedPointerCheckValue("residue-bind\x00"+source, candidate, func(path string) (string, error) {
-		target, pErr := verifyWorktreePointerShape(path)
+		target, pErr := verifyResidueCandidatePointerShape(path)
 		if pErr != nil {
 			return "unknown", pErr
 		}
@@ -187,4 +243,75 @@ func BindAFRelocationResidue(candidate, source, repoPath string) (ResidueBinding
 	default:
 		return ResidueUnknown, nil
 	}
+}
+
+// verifyResidueCandidatePointerShape verifies a residue candidate's
+// linked-worktree `.git` pointer without traversing the candidate by
+// pathname. The directory is opened O_NOFOLLOW — a symlink swapped in place
+// of the scanned directory fails the open outright — the descriptor's fstat
+// identity is compared with a fresh lstat of the pathname so a rename between
+// the scan and the open reads as unbindable rather than binding a
+// replacement, and the `.git` pointer is read by openat relative to the held
+// descriptor so the read lands in the inspected object (R6).
+func verifyResidueCandidatePointerShape(candidate string) (string, error) {
+	fd, err := unix.Open(
+		candidate,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return "", fmt.Errorf("residue candidate %s could not be opened without following links: %w", candidate, err)
+	}
+	dir := os.NewFile(uintptr(fd), candidate)
+	defer dir.Close()
+	scanned, err := dir.Stat()
+	if err != nil {
+		return "", fmt.Errorf("residue candidate %s could not be inspected: %w", candidate, err)
+	}
+	lst, err := os.Lstat(candidate)
+	if err != nil {
+		return "", fmt.Errorf("residue candidate %s could not be inspected: %w", candidate, err)
+	}
+	if !os.SameFile(scanned, lst) {
+		return "", worktreeIdentityMismatchf("residue candidate %s changed under inspection", candidate)
+	}
+	return verifyWorktreePointerShapeAt(dir, candidate)
+}
+
+// verifyWorktreePointerShapeAt runs the same structural check as
+// verifyWorktreePointerShape with the `.git` pointer opened by openat relative
+// to a held descriptor on worktreePath: the pointer is read from the object
+// the descriptor names, so a pathname swap of the worktree directory cannot
+// redirect the read into another tree (R6).
+func verifyWorktreePointerShapeAt(dir *os.File, worktreePath string) (string, error) {
+	displayPath := filepath.Join(worktreePath, ".git")
+	target, err := readGitdirPointerFileAt(dir, ".git", "archived worktree pointer", worktreePath, displayPath)
+	if err != nil {
+		return "", err
+	}
+	return requireWorktreesLeafGitdir(displayPath, target)
+}
+
+// readGitdirPointerFileAt reads a `.git` redirect file relative to an already
+// held directory descriptor: `name` (always ".git" today) is opened with
+// openat on dir without following links, so the file read comes from the
+// object the descriptor names even if the candidate's pathname was swapped
+// under inspection (R6). It carries the same fstat-regular, bounded-read and
+// gitdir-parse checks as readGitdirPointerFile.
+func readGitdirPointerFileAt(dir *os.File, name, label, baseDir, displayPath string) (string, error) {
+	fd, err := unix.Openat(
+		int(dir.Fd()), name,
+		unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return "", fmt.Errorf("%s %s could not be opened without following links: %w", label, displayPath, err)
+	}
+	f := os.NewFile(uintptr(fd), displayPath)
+	defer f.Close()
+	line, err := readBoundedPointerLineFd(f, label, displayPath)
+	if err != nil {
+		return "", err
+	}
+	return parseGitdirPointerLine(label, displayPath, baseDir, line)
 }
