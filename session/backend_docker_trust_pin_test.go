@@ -12,6 +12,10 @@ import (
 // path-valued trust names — the two whose measured empty read is a PATH —
 // so no provisioning child (the clone's git, hooks, helpers) can inherit a
 // defined-empty name an OpenSSL/rustls reader would load as zero roots.
+// Each unset is conditioned on its SIBLING being empty: beside a forwarded
+// sibling the pinned slot must keep defined-empty, since unset would
+// restore the platform default and widen the operator's claimed trust
+// (#7889, Codex 4722476016).
 func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 	p := &dockerProvisioner{credentialEnvPins: []string{
 		"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
@@ -19,13 +23,14 @@ func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 		"HTTP_PROXY",
 	}}
 	got := p.trustPathUnpinnedScript("git clone https://example.invalid/r.git")
-	for _, name := range []string{"SSL_CERT_FILE", "SSL_CERT_DIR"} {
-		if !strings.Contains(got, " "+name) {
-			t.Fatalf("script must unset pinned path-valued name %s: %q", name, got)
-		}
+	if !strings.Contains(got, `[ -n "$SSL_CERT_DIR" ] || unset SSL_CERT_FILE`) {
+		t.Fatalf("SSL_CERT_FILE's unset must be conditioned on the dir slot being empty: %q", got)
 	}
-	if !strings.HasPrefix(got, "unset ") {
-		t.Fatalf("the unset must lead the script so every later command sees it: %q", got)
+	if !strings.Contains(got, `[ -n "$SSL_CERT_FILE" ] || unset SSL_CERT_DIR`) {
+		t.Fatalf("SSL_CERT_DIR's unset must be conditioned on the file slot being empty: %q", got)
+	}
+	if !strings.HasPrefix(got, "[ -n ") {
+		t.Fatalf("the unset clauses must lead the script so every later command sees them: %q", got)
 	}
 	if !strings.HasSuffix(got, "git clone https://example.invalid/r.git") {
 		t.Fatalf("the operator's script must run verbatim after the preamble: %q", got)
@@ -34,12 +39,11 @@ func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 	// bundle spellings whose measured empty read is harmless (unset would
 	// let a repo .env claim the name), and non-path pins where empty IS
 	// the semantics (no proxy, no endpoint).
-	unset := strings.Fields(strings.TrimPrefix(strings.SplitN(got, ";", 2)[0], "unset "))
 	for _, name := range []string{
 		"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
 		"CODEX_CA_CERTIFICATE", "HTTP_PROXY",
 	} {
-		if slices.Contains(unset, name) {
+		if strings.Contains(got, "unset "+name) {
 			t.Fatalf("%s keeps its defined-empty pin — it must not be unset: %q", name, got)
 		}
 	}
@@ -47,14 +51,15 @@ func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 
 // An operator-forwarded trust name is NOT a pin — credentialEnvPins excludes
 // it — and the clone needs that forwarded CA to reach a private-CA remote.
-// The preamble must leave it alone.
+// The preamble never unsets a name that is not pinned — it may appear only
+// as the sibling condition guarding the pinned slot's unset.
 func TestTrustPathUnpinnedScriptKeepsForwardedValues(t *testing.T) {
 	p := &dockerProvisioner{credentialEnvPins: []string{"SSL_CERT_DIR", "HTTP_PROXY"}}
 	got := p.trustPathUnpinnedScript("true")
-	if strings.Contains(got, "SSL_CERT_FILE") {
+	if strings.Contains(got, "unset SSL_CERT_FILE") {
 		t.Fatalf("an unpinned (operator-forwarded) trust name must not be unset: %q", got)
 	}
-	if !strings.Contains(got, "SSL_CERT_DIR") {
+	if !strings.Contains(got, "unset SSL_CERT_DIR") {
 		t.Fatalf("a pinned trust name must be unset: %q", got)
 	}
 }
