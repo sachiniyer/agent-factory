@@ -26,20 +26,26 @@ const dindImage = "docker:28-dind"
 // Everything else about the fix is observable only as an absence — no request
 // went out — and an absence is exactly what a passing test cannot normally
 // distinguish from a healthy network. So this stands up a second docker daemon
-// with its egress dropped and measures the property directly, in three parts:
+// with its egress dropped and measures the property directly, in four parts:
 //
-//	the block is real  — a pull of a not-local tag must FAIL, or the check is vacuous
-//	the bug is real    — FROM the public base, absent locally, must fail in `load
-//	                     metadata` with the exact signature that reddened master
-//	                     and the v1.0.211 release
-//	the fix works      — the REAL round-trip Dockerfiles, FROM the local-only
-//	                     base, must BUILD with the registry unreachable AND
-//	                     the build steps' forwarding dropped (#7896), i.e.
-//	                     fetching literally nothing over the network
+//	the block is real        — a pull of a not-local tag must FAIL, or the
+//	                           check is vacuous
+//	the forwarding block too — a build-step package fetch must FAIL, or
+//	                           "the subject builds fetched nothing" is
+//	                           measured against a network that still works
+//	the bug is real          — FROM the public base, absent locally, must
+//	                           fail in `load metadata` with the exact
+//	                           signature that reddened master and the
+//	                           v1.0.211 release
+//	the fix works            — the REAL round-trip Dockerfiles, FROM the
+//	                           local-only base, must BUILD with the registry
+//	                           unreachable AND forwarded egress dropped
+//	                           (#7896), i.e. fetching literally nothing over
+//	                           the network
 //
-// The middle part is the one worth keeping honest about: it is this bug's
-// reproduction, run every time, so the check can never pass by measuring
-// nothing. It also encodes the correction to the original diagnosis — the
+// The bug-is-real part is the one worth keeping honest about: it is this
+// bug's reproduction, run every time, so the check can never pass by
+// measuring nothing. It also encodes the correction to the original diagnosis — the
 // round trip is caused by the base being ABSENT, not by buildkit re-resolving a
 // tag it already holds. A build whose base is in the local store completes with
 // no registry request at all, which is why the pre-pull in #2525 was the right
@@ -61,16 +67,21 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 	d := startIsolatedDaemon(t)
 	d.seedImage(t, base)
 
-	// Drop the daemon's OWN egress AND its forwarding. Locally-generated
-	// packets traverse OUTPUT, so OUTPUT DROP kills registry resolution — the
-	// #2521 property. A build's RUN steps are forwarded rather than locally
-	// generated, which is the hole that used to let `apk add` reach a package
-	// mirror anyway (#3779). With the packages baked into the seeded base
-	// (#7896) the subject builds need nothing forwarded, so FORWARD DROP
-	// upgrades the check from "resolves no registry" to "fetches nothing at
-	// all" — proven, not asserted.
+	// Drop the daemon's OWN egress AND its forwarded traffic. Locally-
+	// generated packets traverse OUTPUT, so OUTPUT DROP kills registry
+	// resolution — the #2521 property. A build's RUN steps are forwarded
+	// rather than locally generated, which is the hole that used to let
+	// `apk add` reach a package mirror anyway (#3779). The drop for THAT
+	// has to live in DOCKER-USER: dockerd's own FORWARD-chain rules ACCEPT
+	// docker0 egress before the chain policy is ever consulted, so a
+	// `FORWARD DROP` policy would leave build containers' network fully
+	// working — while DOCKER-USER is jumped to first, for every forwarded
+	// packet. With the packages baked into the seeded base (#7896) the
+	// subject builds need nothing forwarded, so this upgrades the check
+	// from "resolves no registry" to "fetches nothing at all" — proven,
+	// not asserted.
 	d.mustRun(t, 30*time.Second, "drop the isolated daemon's egress and forwarding",
-		"iptables -A OUTPUT -o lo -j ACCEPT && iptables -P OUTPUT DROP && iptables -P FORWARD DROP")
+		"iptables -A OUTPUT -o lo -j ACCEPT && iptables -P OUTPUT DROP && iptables -I DOCKER-USER -j DROP")
 
 	// The block is real. Without this the whole check could pass by measuring a
 	// daemon that was never actually cut off.
@@ -78,6 +89,18 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 		t.Fatalf("the registry block is not in effect — a pull of %s SUCCEEDED, so this check proves nothing:\n%s", roundTripBaseUpstream, out)
 	}
 	t.Logf("registry block verified: %s cannot be pulled inside the isolated daemon", roundTripBaseUpstream)
+
+	// The forwarding block is real too — the proof that covers the RUN steps,
+	// which OUTPUT rules never see. A build whose RUN fetches a package from a
+	// mirror MUST fail inside this daemon; dnsmasq is definitely not in the
+	// seeded base, so the fetch is real, and `timeout` bounds the probe on a
+	// daemon whose DROP means "wait for it" rather than "connection refused".
+	probe := d.buildContext(t, "egress-probe",
+		"FROM "+base+"\nRUN timeout 20 apk add --no-cache dnsmasq\n", nil)
+	if out, err := d.run(180*time.Second, "docker build -t af-registry-blocked-probe "+probe); err == nil {
+		t.Fatalf("the forwarding block is not in effect — a build step fetched a package from a mirror inside the isolated daemon, so the subject builds below could fetch too and this check proves nothing:\n%s", out)
+	}
+	t.Logf("forwarding block verified: a build-step package fetch cannot reach a mirror inside the isolated daemon")
 
 	// The bug is real. Nothing seeded `alpine:3.20` into this daemon — only the
 	// built local-only base — so a Dockerfile naming the public base has to
@@ -93,8 +116,8 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 	t.Logf("reproduction confirmed: FROM %s fails in `load metadata` exactly as it did on master and on the v1.0.211 release", roundTripBaseUpstream)
 
 	// The fix works: the real images, from the local-only base, with the
-	// registry unreachable and the build steps' forwarding dropped — i.e. a
-	// build that could fetch nothing at all still completes.
+	// registry unreachable and forwarded egress dropped — i.e. a build that
+	// could fetch nothing at all still completes.
 	for _, tc := range []struct {
 		name       string
 		dockerfile string
@@ -111,7 +134,7 @@ func TestImageBuildsWithRegistryBlocked(t *testing.T) {
 		if strings.Contains(out, "registry-1.docker.io") {
 			t.Fatalf("the %s built, but its output names registry-1.docker.io, so something still reached for it:\n%s", tc.name, out)
 		}
-		t.Logf("%s built with registry-1.docker.io unreachable and no forwarded egress", tc.name)
+		t.Logf("%s built with registry-1.docker.io unreachable and forwarded egress dropped", tc.name)
 	}
 }
 
