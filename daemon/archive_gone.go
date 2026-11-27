@@ -116,8 +116,25 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 		// the complete worktree, and the operator is never told to move it
 		// back as the worktree (doing so and then removing the source
 		// quarantine as redundant would silently discard the skipped files).
+		// Durable records arbitrate before the leaf (#7819): this session's
+		// own move record names its residue outright, its retained-tree
+		// report names kept work already accounted for (adopted, never
+		// refused), and another session's record or report marks foreign
+		// residue that must not block. Only a candidate no record names
+		// falls to master's leaf inference below.
+		arbiter := session.NewResidueArbiter(instance)
 		var oursSource, oursCopy, unverified []string
 		for _, candidate := range residue {
+			switch arbiter.Classify(candidate) {
+			case session.ResidueOursQuarantine:
+				oursSource = append(oursSource, candidate)
+				continue
+			case session.ResidueOursStaging:
+				oursCopy = append(oursCopy, candidate)
+				continue
+			case session.ResidueOursRetained, session.ResidueForeignSession:
+				continue
+			}
 			binding, bErr := sessiongit.BindAFRelocationResidue(candidate, source, instance.GetRepoPath())
 			if bErr != nil || binding == sessiongit.ResidueUnknown {
 				unverified = append(unverified, candidate)
@@ -159,9 +176,13 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 					"cannot archive session %q: its worktree path %s is gone, but af relocation residue proven to be this session's worktree is present at %s — a cross-device archive move was cut off between its quarantine and publish renames and %s before retrying the archive: %w",
 					title, source, strings.Join(named, ", "), recovery.String(), sessiongit.ErrRelocateStateUnknown))
 			}
+			enumNote := ""
+			if _, enumErr := arbiter.EnumerationProblem(); enumErr != nil {
+				enumNote = fmt.Sprintf("; %v, so other sessions' records could not rule it out either", enumErr)
+			}
 			return refuse(fmt.Errorf(
-				"cannot archive session %q: its worktree path %s is gone, but af relocation residue is present at %s and af could not verify whether it is this session's worktree — it may belong to another session, or its git binding could not be read; inspect %s, then move it out of %s to somewhere safe (or remove it once you have confirmed it holds nothing you need) and retry the archive; do not move it into %s unless you have proven it is this session's work (see #7819): %w",
-				title, source, strings.Join(unverified, ", "), strings.Join(unverified, ", "), filepath.Dir(unverified[0]), source, sessiongit.ErrRelocateStateUnknown))
+				"cannot archive session %q: its worktree path %s is gone, but af relocation residue is present at %s and af could not verify whether it is this session's worktree — it may belong to another session, or its git binding could not be read%s; inspect %s, then move it out of %s to somewhere safe (or remove it once you have confirmed it holds nothing you need) and retry the archive; do not move it into %s unless you have proven it is this session's work (see #7819): %w",
+				title, source, strings.Join(unverified, ", "), enumNote, strings.Join(unverified, ", "), filepath.Dir(unverified[0]), source, sessiongit.ErrRelocateStateUnknown))
 		}
 		// The deletion route promises restore can rebuild from the kept branch,
 		// which holds only if the branch is still there: a user who deleted the

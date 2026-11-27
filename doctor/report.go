@@ -215,7 +215,7 @@ func renderRows(r *Report, fixMode, verbose bool) []renderRow {
 func collapsibleFinding(check string) bool {
 	switch check {
 	case "orphaned-process", "escaped-process", "foreign-home-process", "foreign-home-unresolved", "possible-orphan", "runaway-cpu", "stale-temp-home",
-		checkLeakedDaemon, checkDeadSocketHome, checkTestResidueDir:
+		checkLeakedDaemon, checkDeadSocketHome, checkTestResidueDir, checkRelocationResidue:
 		return true
 	default:
 		return false
@@ -240,7 +240,7 @@ func collapseProcessFindings(findings []Finding, fixMode bool, incomplete []stri
 	}
 	var rows []renderRow
 	for _, check := range []string{"orphaned-process", "escaped-process", "foreign-home-process", "foreign-home-unresolved", "possible-orphan", "runaway-cpu", "stale-temp-home",
-		checkLeakedDaemon, checkDeadSocketHome, checkTestResidueDir} {
+		checkLeakedDaemon, checkDeadSocketHome, checkTestResidueDir, checkRelocationResidue} {
 		group := byCheck[check]
 		if len(group) == 0 {
 			continue

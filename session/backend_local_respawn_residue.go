@@ -81,11 +81,16 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 	}
 	repoPath := gw.GetRepoPath()
 	// The source parent is shared by every session, so residue blocks this
-	// rebuild only when it is proven to be THIS session's worktree. Verify each
-	// candidate's git binding against this session's recorded source; a
-	// candidate whose binding cannot be read still refuses (fail-closed), but
-	// the message names it as unverified rather than this session's stranded
-	// work.
+	// rebuild only when it is proven to be THIS session's worktree. Durable
+	// records answer first (#7819): a candidate named by this session's own
+	// move record is proven ours without touching git's leaf; a candidate
+	// named by this session's retained-tree report is kept work already
+	// accounted for — carried forward, never refused; a candidate named by
+	// ANOTHER session's record or report is foreign and never blocks. Only
+	// residue no record names falls to master's leaf inference
+	// (BindAFRelocationResidue), and a candidate whose binding cannot be
+	// read still refuses fail-closed — named as unverified rather than this
+	// session's stranded work.
 	//
 	// The proven-ours residue is split by purpose: `.af-source-*` is the renamed
 	// source — the COMPLETE worktree, including any uncommitted changes — so
@@ -94,8 +99,19 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 	// described as the complete worktree, and the operator is never told to
 	// move it back as the worktree (doing so and then removing the source
 	// quarantine as redundant would silently discard the skipped files).
+	arbiter := NewResidueArbiter(i)
 	var oursSource, oursCopy, unverified []string
 	for _, candidate := range residue {
+		switch arbiter.Classify(candidate) {
+		case ResidueOursQuarantine:
+			oursSource = append(oursSource, candidate)
+			continue
+		case ResidueOursStaging:
+			oursCopy = append(oursCopy, candidate)
+			continue
+		case ResidueOursRetained, ResidueForeignSession:
+			continue
+		}
 		binding, bErr := git.BindAFRelocationResidue(candidate, source, repoPath)
 		if bErr != nil || binding == git.ResidueUnknown {
 			unverified = append(unverified, candidate)
@@ -113,6 +129,7 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 		// Only foreign residue: do not block this session's rebuild.
 		return nil
 	}
+	enumStores, enumErr := arbiter.EnumerationProblem()
 	named := append(append(append([]string{}, oursSource...), oursCopy...), unverified...)
 
 	// The daemon WARNING keeps the full explanation and the full residue list;
@@ -140,12 +157,16 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 				"inspect %s and do not move it into %s unless you have verified it is complete",
 			strings.Join(oursCopy, ", "), strings.Join(oursCopy, ", "), source)
 	default:
+		enumNote := ""
+		if enumErr != nil {
+			enumNote = fmt.Sprintf("; %v, so other sessions' records could not rule it out either", enumErr)
+		}
 		detail = fmt.Sprintf(
 			"af could not verify whether the residue is this session's worktree — it may belong to another session, "+
-				"or its git binding could not be read; inspect %s, then move it out of %s to somewhere safe "+
+				"or its git binding could not be read%s; inspect %s, then move it out of %s to somewhere safe "+
 				"(or remove it once you have confirmed it holds nothing you need) and retry the restore; "+
 				"do not move it into %s unless you have proven it is this session's work (see #7819)",
-			strings.Join(unverified, ", "), filepath.Dir(unverified[0]), source)
+			enumNote, strings.Join(unverified, ", "), filepath.Dir(unverified[0]), source)
 	}
 	if len(unverified) > 0 && (len(oursSource) > 0 || len(oursCopy) > 0) {
 		detail += fmt.Sprintf("; unverified residue is also present at %s", strings.Join(unverified, ", "))
@@ -209,6 +230,47 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 		}
 		return len([]rune(floor(n)))
 	}
+	// enumRecordClause appends the mandatory unreadable-store clause once an
+	// unverified candidate exists that the broken enumeration could have
+	// cleared (#7819 review): every store path while they fit, then the floor
+	// naming the repo each unreadable file belongs to — the
+	// <home>/instances/<repoID> directory name is the identifying part at cap
+	// depth. It runs LAST in every branch and its floor joins the reserves
+	// the earlier clauses keep, because a clause written unconditionally
+	// could otherwise push a mandatory floor behind it over the cap.
+	enumRepoNames := func() []string {
+		names := make([]string, len(enumStores))
+		for i, store := range enumStores {
+			if dir := filepath.Dir(store); dir != "." && dir != "" {
+				names[i] = filepath.Base(dir)
+			} else {
+				names[i] = store
+			}
+		}
+		return names
+	}
+	enumFloor := func() string {
+		return fmt.Sprintf("; could not read session store for repo %s — its records could not rule this out",
+			strings.Join(enumRepoNames(), ", "))
+	}
+	enumFloorRunes := func() int {
+		if enumErr == nil || len(unverified) == 0 {
+			return 0
+		}
+		return len([]rune(enumFloor()))
+	}
+	enumRecordClause := func() {
+		if enumErr == nil || len(unverified) == 0 {
+			return
+		}
+		record.WriteString(fitResidueForm(room(),
+			func(int) string {
+				return fmt.Sprintf("; could not read session store %s — its records could not rule this out",
+					strings.Join(enumStores, ", "))
+			},
+			func(int) string { return enumFloor() },
+		))
+	}
 	switch {
 	case len(oursSource) > 0:
 		// The literal command first: `cd <parent> && mv <quarantine> <leaf>`
@@ -230,7 +292,7 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 		copyFloorLen := floorLen(copyExtraFloor, len(oursCopy))
 		oursFloorLen := floorLen(oursExtraFloor, len(oursSource)-1)
 		record.WriteString(fitResidueForm(
-			room()-unverifiedFloorLen-copyFloorLen-oursFloorLen,
+			room()-unverifiedFloorLen-copyFloorLen-oursFloorLen-enumFloorRunes(),
 			func(int) string {
 				return shellsuggest.Command("cd", parent) + " && " +
 					shellsuggest.Command("mv", "--", quarantineLeaf, srcLeaf) +
@@ -241,15 +303,16 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 					" — move this session's stranded worktree back (parent in the daemon log), then retry"
 			},
 		))
-		mustResidue(copyFloorLen+oursFloorLen, unverifiedNames,
+		mustResidue(copyFloorLen+oursFloorLen+enumFloorRunes(), unverifiedNames,
 			"; unverified residue %s also present — do not move it into the session path unless proven (#7819)",
 			unverifiedExtraFloor)
-		mustResidue(oursFloorLen, baseNames(oursCopy),
+		mustResidue(oursFloorLen+enumFloorRunes(), baseNames(oursCopy),
 			"; staged copy %s may be incomplete — recover from the quarantine, never the copy",
 			copyExtraFloor)
-		mustResidue(0, baseNames(oursSource[1:]),
+		mustResidue(enumFloorRunes(), baseNames(oursSource[1:]),
 			"; also proven ours: %s",
 			oursExtraFloor)
+		enumRecordClause()
 		tail("; or remove it once the work is saved")
 		tail(" — proven the complete worktree (incl. uncommitted changes), left by a cut-off archive move")
 	case len(oursCopy) > 0:
@@ -258,7 +321,7 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 		// proven this session's but is never the thing to move back in.
 		copyNames := baseNames(oursCopy)
 		unverifiedFloorLen := floorLen(unverifiedExtraFloor, len(unverified))
-		record.WriteString(fitResidueForm(room()-unverifiedFloorLen,
+		record.WriteString(fitResidueForm(room()-unverifiedFloorLen-enumFloorRunes(),
 			residueForm(residueCopyRecordFull, parent, source, copyNames),
 			residueForm(residueCopyRecordFull, parent, srcLeaf, copyNames),
 			residueForm(residueCopyRecordCompact, parent, source, copyNames),
@@ -268,9 +331,10 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 			residueElidedParentForm(residueCopyRecordCompact, parent, residueSessionPathRef, copyNames),
 			residueFloorForm(residueCopyRecordFloor, copyNames),
 		))
-		mustResidue(0, unverifiedNames,
+		mustResidue(enumFloorRunes(), unverifiedNames,
 			"; unverified residue %s also present — do not move it into the session path unless proven (#7819)",
 			unverifiedExtraFloor)
+		enumRecordClause()
 	default:
 		// Unverified residue only: the fail-closed refusal names the
 		// residue, says the binding could not be read, gives the move-it-out
@@ -286,6 +350,7 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 			residueElidedParentForm(residueUnverifiedRecordCompact, parent, residueSessionPathRef, unverifiedNames),
 			residueFloorForm(residueUnverifiedRecordFloor, unverifiedNames),
 		))
+		enumRecordClause()
 	}
 	return &residueRebuildRefusal{msg: record.String()}
 }

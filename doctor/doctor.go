@@ -560,6 +560,7 @@ func Run(opts Options) (*Report, error) {
 	// explained before it is read rather than after.
 	checkTmuxInspection(ctx, report)
 	checkTmuxRecordCurrency(ctx, report)
+	checkAFRelocationResidue(ctx, report)
 	checkOrphanedProcesses(ctx, report)
 	checkRunawayChildren(ctx, report)
 	checkLeakedTmuxSessions(ctx, report)
