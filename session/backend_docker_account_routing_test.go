@@ -10,14 +10,16 @@ package session
 // HTTPS_PROXY/ALL_PROXY/NO_PROXY, both cases), a TLS trust root
 // (SSL_CERT_FILE/SSL_CERT_DIR/NODE_EXTRA_CA_CERTS/REQUESTS_CA_BUNDLE/
 // CURL_CA_BUNDLE), a shared routing name (GH_CONFIG_DIR/GH_HOST/
-// DBUS_SESSION_BUS_ADDRESS/AF_DAEMON_URL), a per-agent routing name
-// (CODEX_CA_CERTIFICATE), or a shared config-root name (GNUPGHOME/
-// XDG_RUNTIME_DIR/GIT_CONFIG_NOSYSTEM) routes the account's authenticated
-// traffic to a server the repository controls — exactly the exploit the
-// account boundary exists to prevent. The refusal mirrors the credential-mount
-// path's posture: repo run_args cannot set these names, while the operator's
-// own route stays available through session_env_passthrough, exactly as PATH
-// and SHELL already do.
+// DBUS_SESSION_BUS_ADDRESS/AF_DAEMON_URL), or a per-agent routing name
+// (CODEX_CA_CERTIFICATE) routes the account's authenticated traffic to a server
+// the repository controls — exactly the exploit the account boundary exists to
+// prevent. The refusal mirrors the credential-mount path's posture: repo
+// run_args cannot set these names, while the operator's own route stays
+// available through session_env_passthrough, exactly as PATH and SHELL already
+// do. The shared config-root names (GNUPGHOME/XDG_RUNTIME_DIR/
+// GIT_CONFIG_NOSYSTEM) the credential-mount guard also refuses are deliberately
+// NOT refused on the account path: their because-clause does not hold there, and
+// refusing them would over-close names master accepts.
 
 import (
 	"strings"
@@ -39,16 +41,6 @@ var accountRoutingAgents = []string{tmux.ProgramClaude, tmux.ProgramCodex, tmux.
 func sharedRoutingNamesForTest() []string {
 	out := make([]string, 0, len(credentialMountSharedRoutingNames))
 	for name := range credentialMountSharedRoutingNames {
-		out = append(out, name)
-	}
-	return out
-}
-
-// sharedConfigRootNamesForTest is the full shared config-root class — the names
-// in credentialMountSharedConfigRootNames — so the test iterates the same source.
-func sharedConfigRootNamesForTest() []string {
-	out := make([]string, 0, len(credentialMountSharedConfigRootNames))
-	for name := range credentialMountSharedConfigRootNames {
 		out = append(out, name)
 	}
 	return out
@@ -106,23 +98,19 @@ func TestAccountDockerRunArgs_RefusesPerAgentRoutingNames(t *testing.T) {
 	}
 }
 
-// TestAccountDockerRunArgs_RefusesConfigRootNames pins the config-root half of
-// the class: the shared names that relocate where the agent reads
-// credential-bearing state (gpg's keyring root, the runtime directory agent
-// sockets are discovered under, and the git no-system boolean). A repo-supplied
-// value relocates the account's credential-bearing state to a path the repo
-// controls, the same hazard the credential-mount path refuses.
-func TestAccountDockerRunArgs_RefusesConfigRootNames(t *testing.T) {
+// TestAccountDockerRunArgs_ConfigRootNamesAccepted pins the over-refusal
+// boundary the review drew: the shared config-root names the credential-mount
+// guard refuses (GNUPGHOME, XDG_RUNTIME_DIR, GIT_CONFIG_NOSYSTEM) are NOT
+// refused on the account path. Their because-clause — relocating
+// credential-bearing state to a path the repository controls — does not hold
+// here, where af's own value is the credential-bearing state af emits last, and
+// master accepts them. Refusing them would over-close names master allows.
+func TestAccountDockerRunArgs_ConfigRootNamesAccepted(t *testing.T) {
 	for _, agent := range accountRoutingAgents {
-		for _, name := range sharedConfigRootNamesForTest() {
+		for _, name := range []string{"GNUPGHOME", "XDG_RUNTIME_DIR", "GIT_CONFIG_NOSYSTEM"} {
 			t.Run(agent+"/"+name, func(t *testing.T) {
 				err := validateAccountDockerRunArgs([]string{"-e", name + "=/repo/controlled"}, agent)
-				require.Errorf(t, err, "agent %q: a config-root name %q was accepted on the account path", agent, name)
-				require.Contains(t, err.Error(), "docker.run_args")
-				require.Contains(t, err.Error(), name)
-				require.Contains(t, err.Error(), "credential-bearing state",
-					"the refusal must name the config-root mechanism")
-				require.Contains(t, err.Error(), "session_env_passthrough")
+				require.NoErrorf(t, err, "agent %q: config-root name %q must not be refused on the account path", agent, name)
 			})
 		}
 	}
@@ -130,8 +118,7 @@ func TestAccountDockerRunArgs_RefusesConfigRootNames(t *testing.T) {
 
 // TestAccountDockerRunArgs_RoutingReasonNamesTheMechanism pins the because-clause
 // on the account path: routing names name the routing mechanism (where the
-// agent sends the account credential); config-root names name the
-// credential-bearing state relocation. The operator reading the refusal must be
+// agent sends the account credential). The operator reading the refusal must be
 // told why, not just what.
 func TestAccountDockerRunArgs_RoutingReasonNamesTheMechanism(t *testing.T) {
 	// Routing names: shared and per-agent alike name the routing mechanism.
@@ -142,15 +129,60 @@ func TestAccountDockerRunArgs_RoutingReasonNamesTheMechanism(t *testing.T) {
 		require.Truef(t, ok, "ANTHROPIC_BASE_URL/proxy/CA name %q must be refused by accountDockerRoutingReason for claude", name)
 		require.Contains(t, reason, "where the agent sends the account credential")
 	}
-	// Config-root names name the credential-bearing-state relocation.
+	// Config-root names are NOT refused by accountDockerRoutingReason.
 	for _, name := range []string{"GNUPGHOME", "XDG_RUNTIME_DIR", "GIT_CONFIG_NOSYSTEM"} {
-		reason, ok := accountDockerRoutingReason(tmux.ProgramClaude, name)
-		require.Truef(t, ok, "config-root name %q must be refused by accountDockerRoutingReason", name)
-		require.Contains(t, reason, "credential-bearing state")
+		_, ok := accountDockerRoutingReason(tmux.ProgramClaude, name)
+		require.Falsef(t, ok, "config-root name %q must NOT be refused by accountDockerRoutingReason", name)
 	}
 	// A harmless name is not refused.
 	_, ok := accountDockerRoutingReason(tmux.ProgramClaude, "TZ")
 	require.False(t, ok, "a harmless name must not be refused by accountDockerRoutingReason")
+}
+
+// TestAccountDockerRunArgs_RoutingRemedyNamesTheMountForPathValues pins the
+// remedy text the review asked for: a routing name whose value is a container
+// file path (a CA bundle or cert file the agent's TLS stack reads) names the
+// mount-at-the-same-container-path step forwarding alone does not cover, and
+// offers "drop the entry" the way the credential-mount path's refusal does. An
+// endpoint or proxy name keeps the forward-only remedy.
+func TestAccountDockerRunArgs_RoutingRemedyNamesTheMountForPathValues(t *testing.T) {
+	for _, tt := range []struct {
+		agent string
+		name  string
+	}{
+		{tmux.ProgramClaude, "SSL_CERT_FILE"},
+		{tmux.ProgramClaude, "NODE_EXTRA_CA_CERTS"},
+		{tmux.ProgramClaude, "REQUESTS_CA_BUNDLE"},
+		{tmux.ProgramClaude, "CURL_CA_BUNDLE"},
+		{tmux.ProgramCodex, "CODEX_CA_CERTIFICATE"},
+	} {
+		t.Run(tt.agent+"/"+tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=/workspace/.ca.pem"}, tt.agent)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "drop the entry", "a path-valued routing name must offer dropping the entry")
+			require.Contains(t, err.Error(), "mount the file at the same container path",
+				"a path-valued routing name must name the mount-at-the-same-container-path step")
+			require.Contains(t, err.Error(), "session_env_passthrough")
+		})
+	}
+	// An endpoint or proxy name keeps the forward-only remedy: no mount step.
+	for _, tt := range []struct {
+		agent string
+		name  string
+	}{
+		{tmux.ProgramClaude, "ANTHROPIC_BASE_URL"},
+		{tmux.ProgramCodex, "HTTPS_PROXY"},
+	} {
+		t.Run(tt.agent+"/"+tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs([]string{"-e", tt.name + "=https://evil.example"}, tt.agent)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "session_env_passthrough")
+			require.NotContains(t, err.Error(), "mount the file",
+				"an endpoint/proxy name is not a container file path, so the remedy must not name a mount")
+			require.NotContains(t, err.Error(), "drop the entry",
+				"an endpoint/proxy name keeps the forward-only remedy")
+		})
+	}
 }
 
 // TestAccountDockerRunArgs_RoutingRefusalEveryArgSpelling pins that the refusal
@@ -210,10 +242,9 @@ func TestAccountDockerRunArgs_RoutingRefusedInCombinedShortOptions(t *testing.T)
 func TestAccountDockerRunArgs_OperatorPassthroughNotClosedByRoutingRefusal(t *testing.T) {
 	for _, name := range []string{
 		"ANTHROPIC_BASE_URL", "HTTPS_PROXY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
-		"GNUPGHOME", "XDG_RUNTIME_DIR",
 	} {
 		require.NotContains(t, accountDockerDeniedNames(tmux.ProgramClaude), name,
-			"routing/config-root name %q must NOT be in accountDockerDeniedNames (it filters session_env_passthrough)", name)
+			"routing name %q must NOT be in accountDockerDeniedNames (it filters session_env_passthrough)", name)
 	}
 	// filterAccountPassthrough keeps a routing name the operator forwards.
 	forwarded := filterAccountPassthrough([]string{"HTTPS_PROXY", "SSL_CERT_FILE", "ANTHROPIC_BASE_URL"}, tmux.ProgramClaude)
@@ -307,28 +338,31 @@ func TestAccountDockerRunArgs_NoRegression_HarmlessNames(t *testing.T) {
 }
 
 // TestAccountDockerRunArgs_AccountGuardCoversCredentialRoutingClass is the
-// cross-map symmetry pin with the credential-mount guard: for every
-// account-capable agent, every routing/config-root name the credential-mount
-// guard refuses from repo run_args is also refused by the account guard
-// (either by the routing check or by an earlier identity/keep-if-set check).
+// cross-guard symmetry pin with the credential-mount guard. It does NOT walk
+// the same maps the account guard reads (that could not catch drift); it uses
+// the credential-mount guard's own classification as the source of truth. For
+// every account-capable agent, every name credentialMountDeniedNames returns
+// whose credentialMountDeniedReason is a routing reason must also be refused by
+// the account guard — so a routing name added to the credential-mount guard
+// without a matching account guard entry fails this test.
 func TestAccountDockerRunArgs_AccountGuardCoversCredentialRoutingClass(t *testing.T) {
 	for _, agent := range accountRoutingAgents {
-		// Every shared routing name, every per-agent routing name, and every
-		// shared config-root name must be refused on the account path.
-		for _, name := range sharedRoutingNamesForTest() {
-			err := validateAccountDockerRunArgs([]string{"-e", name + "=attacker"}, agent)
-			require.Errorf(t, err, "agent %q: shared routing name %q must be refused on the account path", agent, name)
-			require.Contains(t, err.Error(), name)
-		}
-		for name := range credentialMountRoutingNames[agent] {
-			err := validateAccountDockerRunArgs([]string{"-e", name + "=attacker"}, agent)
-			require.Errorf(t, err, "agent %q: per-agent routing name %q must be refused on the account path", agent, name)
-			require.Contains(t, err.Error(), name)
-		}
-		for _, name := range sharedConfigRootNamesForTest() {
-			err := validateAccountDockerRunArgs([]string{"-e", name + "=attacker"}, agent)
-			require.Errorf(t, err, "agent %q: shared config-root name %q must be refused on the account path", agent, name)
-			require.Contains(t, err.Error(), name)
+		for name := range credentialMountDeniedNames(agent) {
+			reason, ok := credentialMountDeniedReason(agent, name)
+			if !ok {
+				continue
+			}
+			// A routing reason names where the agent sends the credential.
+			// Config-root reasons ("redirect where the agent reads ...") are a
+			// separate class the account guard deliberately does not refuse.
+			if !strings.Contains(reason, "sends the mounted credential") {
+				continue
+			}
+			t.Run(agent+"/"+name, func(t *testing.T) {
+				err := validateAccountDockerRunArgs([]string{"-e", name + "=attacker"}, agent)
+				require.Errorf(t, err, "agent %q: routing name %q (credentialMountDeniedReason: %q) must be refused on the account path", agent, name, reason)
+				require.Contains(t, err.Error(), name)
+			})
 		}
 	}
 }
@@ -388,10 +422,8 @@ func TestDockerAccountRunArgs_HarmlessRunArgsStillReachDockerRun(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			runCalled, err, _ := provisionDockerAccountImageEnv(t, tmux.ProgramCodex, args, nil, nil)
 			require.True(t, runCalled, "harmless run_args must still reach docker run: %v", args)
-			if err != nil {
-				require.NotContainsf(t, err.Error(), "docker.run_args",
-					"harmless run_args must not be refused: %v", args)
-			}
+			require.ErrorContains(t, err, "stop after docker run",
+				"harmless run_args must reach docker run and stop there, not be refused: %v", args)
 		})
 	}
 }
@@ -405,10 +437,8 @@ func TestDockerAccountRunArgs_OperatorForwardedRoutingNameReachesDockerRun(t *te
 	runCalled, err, _ := provisionDockerAccountImageEnv(t, tmux.ProgramCodex,
 		[]string{"-e", "TZ=UTC"}, []string{"HTTPS_PROXY"}, nil)
 	require.True(t, runCalled, "a forwarded routing name must not block docker run")
-	if err != nil {
-		require.NotContains(t, err.Error(), "docker.run_args",
-			"an operator-forwarded routing name must not be refused by the run_args guard")
-	}
+	require.ErrorContains(t, err, "stop after docker run",
+		"a forwarded routing name must reach docker run and stop there, not be refused by the run_args guard")
 }
 
 // isGeminiKeepIfSetName reports whether name is a keep-if-set name for gemini

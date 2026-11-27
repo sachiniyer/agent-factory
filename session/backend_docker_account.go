@@ -126,9 +126,13 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 				name, agent, reason, remedy)
 		}
 		if reason, refused := accountDockerRoutingReason(agent, name); refused {
+			remedy := "have the operator forward it through session_env_passthrough"
+			if _, path := accountRoutingPathValuedNames[name]; path {
+				remedy = "drop the entry, or have the operator mount the file at the same container path and forward it through session_env_passthrough"
+			}
 			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: have the operator forward it through session_env_passthrough",
-				name, agent, reason)
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: %s",
+				name, agent, reason, remedy)
 		}
 		return nil
 	}
@@ -368,16 +372,23 @@ func accountDockerProgramChoiceReason(name string) (string, bool) {
 }
 
 // accountDockerRoutingReason returns the because-clause for the routing/trust
-// and config-root env names a repo-controlled docker.run_args entry may not set
-// on the account path: the names that change WHERE the agent sends the account
-// credential — endpoint selectors, proxies, and TLS trust roots — and the
-// shared names that relocate where the agent reads credential-bearing state.
-// They are the same classes the credential-mount guard refuses from the same
-// repo-controlled channel (credentialMountSharedRoutingNames,
-// credentialMountRoutingNames[agent], and credentialMountSharedConfigRootNames),
+// env names a repo-controlled docker.run_args entry may not set on the account
+// path: the names that change WHERE the agent sends the account credential —
+// endpoint selectors, proxies, and TLS trust roots. They are the same class
+// the credential-mount guard refuses from the same repo-controlled channel
+// (credentialMountSharedRoutingNames and credentialMountRoutingNames[agent]),
 // ported to the account path so a repository cannot route the account's
-// authenticated traffic to a server it controls or redirect the agent's
-// credential-bearing state to a path the repository controls.
+// authenticated traffic to a server it controls.
+//
+// The config-root names the credential-mount guard also refuses
+// (credentialMountSharedConfigRootNames — GNUPGHOME, XDG_RUNTIME_DIR,
+// GIT_CONFIG_NOSYSTEM) are deliberately NOT refused here. Their because-clause
+// ("relocates the account's credential-bearing state to a path the repository
+// controls") does not hold on the account path: af's own value is the
+// credential-bearing state af emits last, and refusing them would over-close
+// names master accepts — a boolean like GIT_CONFIG_NOSYSTEM, or an XDG root af
+// does not pin. The credential-mount guard keeps its own refusal because the
+// mounted credential file is the state a config-root name can redirect there.
 //
 // The refusal is repo-run_args-only, never the operator's own claim: these
 // names are NOT in accountDockerDeniedNames (which also filters
@@ -398,10 +409,21 @@ func accountDockerRoutingReason(agent, name string) (string, bool) {
 	if _, ok := credentialMountRoutingNames[agent][name]; ok {
 		return "it changes where the agent sends the account credential — a repo-supplied endpoint, proxy, or trust root routes the account's authenticated traffic to a server the repository controls", true
 	}
-	if _, ok := credentialMountSharedConfigRootNames[name]; ok {
-		return "it can redirect where the agent reads credential-bearing state — a repo-supplied value relocates the account's credential-bearing state to a path the repository controls", true
-	}
 	return "", false
+}
+
+// accountRoutingPathValuedNames names the routing-class entries whose value is
+// a container file path the agent's TLS stack reads (a CA bundle or cert file).
+// Forwarding such a name through session_env_passthrough is not enough on its
+// own — the file the operator points at must also be mounted at the same
+// container path — so the refusal's remedy names the mount alongside the
+// forward and offers "drop the entry" the way the credential-mount path does.
+var accountRoutingPathValuedNames = map[string]struct{}{
+	"SSL_CERT_FILE":        {},
+	"NODE_EXTRA_CA_CERTS":  {},
+	"REQUESTS_CA_BUNDLE":   {},
+	"CURL_CA_BUNDLE":       {},
+	"CODEX_CA_CERTIFICATE": {},
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
