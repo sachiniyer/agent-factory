@@ -99,10 +99,10 @@ type mcpServersSubmitCut struct {
 // painted whole, with the ❯ cursor on it, and as every begun prefix of
 // either: each proper prefix of the row's visible text, deduplicated by the
 // label it leaves with the whitespace removed (a cut inside the row's
-// trailing space is the row begun no further). A cut of the plain row that
-// leaves no label is a blank row — no content, not a begun row — and is
-// skipped; the ❯ variant's cursor-only cut IS a row: the submit row painted
-// only as far as its cursor (#7876 review, R1). The raw row carries SGR
+// trailing space is the row begun no further). A whitespace-only prefix is
+// no row at all and is skipped — so the ❯ variant's first admitted prefix
+// is its cursor-only cut, the submit row painted only as far as its cursor
+// (#7876 review, R1, P2). The raw row carries SGR
 // styling; a cut must be of what a reader sees, so the prefixes are taken
 // of it stripped.
 func mcpServersSubmitRowCuts(row string) []mcpServersSubmitCut {
@@ -119,8 +119,15 @@ func mcpServersSubmitRowCuts(row string) []mcpServersSubmitCut {
 				continue
 			}
 			cut := variant.whole[:i]
+			// A cut inside the row's leading space — for the ❯ variant,
+			// every prefix before the cursor — is whitespace only: no row
+			// at all, and its empty label must not stand in for the
+			// cursor-only cut (#7876 review, P2).
+			if strings.TrimSpace(cut) == "" {
+				continue
+			}
 			label := claudeSquash(claudeTrustRowOf(cut).label)
-			if seen[label] || (label == "" && !variant.cursor) {
+			if seen[label] {
 				continue
 			}
 			seen[label] = true
