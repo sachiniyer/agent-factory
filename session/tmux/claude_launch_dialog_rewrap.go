@@ -502,7 +502,16 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 		// tailLabels carries the pair labels only when labels == 0, so the
 		// index aligns with options.labels and a stacked-label tail (labels >
 		// 0) never reaches this clause (#7865 review).
-		if li := claudeLaunchDialogLabelTailIndex(pane.text[:at], tailLabels); li >= len(options.labels)-options.pair {
+		li := claudeLaunchDialogLabelTailIndex(pane.text[:at], tailLabels)
+		if li >= len(options.labels)-options.pair {
+			// A pair-label tail drafted inside a composer's box is the
+			// draft's text (a "❯ No" row over "Enter to"), not a cut dialog
+			// row: the box's side borders survive on the raw rows, so the
+			// partial-pair path needs the same exclusion the whole-pair path
+			// applies above (#7865 Codex review).
+			if claudeLaunchDialogBoxedSpan(pane, 0, at) {
+				return claudeLaunchDialogMatch{}, false
+			}
 			match.kind = claudeLaunchDialogLegacy
 			match.pair = true
 		}

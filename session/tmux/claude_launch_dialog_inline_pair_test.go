@@ -603,7 +603,7 @@ func TestCheckAndHandleTrustPrompt_InlinePairTopCutTailOverFooterStartHolds(t *t
 		{"the plain pair tail 's  No' over 'Enter to'", "s  No\n\nEnter to"},
 		{"the plain pair tail 'No' over 'Enter to'", "No\n\nEnter to"},
 		{"the plain pair tail 'es  No' over 'Enter to confirm'", "es  No\n\nEnter to confirm"},
-		{"the plain pair tail 'No' over 'Enter to confirm'", "No\n\nEnter to confirm"},
+		{"the plain pair tail 'No' over 'Enter'", "No\n\nEnter"},
 		{"the plain pair tail 'es  No' with no blank row over 'Enter to'", "es  No\nEnter to"},
 		// Ordinal pair tails over the footer's start. "2. No" loses its
 		// leading ordinal to trimClaudeTrustOrdinal, leaving the bare "No"
@@ -662,6 +662,49 @@ func TestCheckAndHandleTrustPrompt_InlinePairTopCutTailOverFooterFragmentStaysCl
 				"%s:\n%s", tt.name, tt.content)
 			require.Empty(t, sentKeystrokes(cmds),
 				"no key may reach a pane that shows no dialog; got %v", cmds)
+		})
+	}
+}
+
+// TestCheckAndHandleTrustPrompt_InlinePairTopCutTailInAComposerBoxStaysClear
+// pins the boxed-composer exclusion the partial-pair tail path shares with the
+// whole-pair path (#7865 Codex review): a composer whose draft is the two-line
+// "❯ No" / "Enter to" — the ❯ its prompt cursor, "No" a tail of the squashed
+// pair "YesNo", "Enter to" a partial footer prefix — is a working composer, not
+// the legacy picker cut by the top of the pane. Canonicalization leaves the box
+// ("No" may be a dialog option); the parser strips the borders and cursor, and
+// the tail branch would hold it as the cut picker, typing the prompt into the
+// open composer. The partial-pair path now applies claudeLaunchDialogBoxedSpan
+// the whole-pair path does, so it stays clear. The same tail unboxed holds: only
+// the box's borders distinguish a composer's draft from the dialog's cut row.
+func TestCheckAndHandleTrustPrompt_InlinePairTopCutTailInAComposerBoxStaysClear(t *testing.T) {
+	for _, v := range inlineVariants {
+		tail := "No"
+		if v.ordinal {
+			tail = "2. No"
+		}
+		t.Run(v.name+"/the boxed composer draft '❯ "+tail+"' over 'Enter to'", func(t *testing.T) {
+			content := "╭──────────────────────────────────╮\n" +
+				fmt.Sprintf("│ %-32s │", "❯ "+tail) + "\n" +
+				"│ Enter to                         │\n" +
+				"╰──────────────────────────────────╯\n"
+			handled, cmds := pollStaticPane(t, content, 4)
+			require.False(t, handled,
+				"a composer-proven box's draft tail over a partial footer is the composer's, "+
+					"not the cut legacy picker (#7865 Codex review):\n%s", content)
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may reach a working composer; got %v", cmds)
+		})
+		// Control: the same tail over a partial footer with no box holds as the
+		// cut picker — the fix excludes only the boxed composer.
+		t.Run(v.name+"/the bare tail '"+tail+"' over 'Enter to' holds", func(t *testing.T) {
+			content := tail + "\n\nEnter to"
+			handled, cmds := pollStaticPane(t, content, 4)
+			require.True(t, handled,
+				"a cut inline-pair tail over a footer start with no composer box holds "+
+					"(the fix excludes only the boxed case):\n%s", content)
+			require.Empty(t, sentKeystrokes(cmds),
+				"a dialog af cannot read whole gets no key; got %v", cmds)
 		})
 	}
 }
