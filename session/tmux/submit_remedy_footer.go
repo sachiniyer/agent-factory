@@ -21,7 +21,7 @@ func stillChipTailAudit(rows []string, end int, anchorRow string) string {
 		raw := rows[j]
 		switch {
 		case blankComposerRow(raw):
-		case stillChipBoundaryEdge(raw):
+		case stillChipBoundaryEdge(raw, anchorRow):
 		case agentComposerFooterRow(raw, anchorRow):
 		default:
 			return fmt.Sprintf("the composer holds content %q below a blank row that is not provably the agent's own footer", normalizeDelivery(raw))
@@ -30,15 +30,35 @@ func stillChipTailAudit(rows []string, end int, anchorRow string) string {
 	return ""
 }
 
-// stillChipBoundaryEdge reports whether raw is a border drawn at the pane's
-// left column — a frame edge of the composer, or of a rule or box below it.
-// An indented row of box-drawing glyphs is draft text, not an edge (#7850
-// R3).
-func stillChipBoundaryEdge(raw string) bool {
+// stillChipBoundaryEdge reports whether raw ends the composer at the anchor
+// agent's OWN geometry: the column-0 "─" rule the ruled lanes draw, or the
+// ╰───╯ bottom edge of Claude's │-boxed composer (#7850 R3). An indented row
+// of box-drawing glyphs — a draft typed in "─"s — is content, not an edge;
+// a border that belongs to no agent's composer borrows no boundary.
+func stillChipBoundaryEdge(raw, anchorRow string) bool {
 	if raw == "" || unicode.IsSpace([]rune(raw)[0]) {
 		return false
 	}
-	return composerHardBorder(raw)
+	if anchorGlyph(anchorRow) == ">" {
+		return strings.HasPrefix(anchorRow, "│ ") && composerBoxBottomRow(raw)
+	}
+	return composerRuleRow(raw)
+}
+
+// composerBoxBottomRow reports whether raw is a ╰───╯ bottom edge — the ╰
+// corner plus only "─" through ╯, the shape Claude's composer box closes
+// with.
+func composerBoxBottomRow(raw string) bool {
+	rs := []rune(raw)
+	if len(rs) < 2 || rs[0] != '╰' || rs[len(rs)-1] != '╯' {
+		return false
+	}
+	for _, r := range rs[1 : len(rs)-1] {
+		if r != '─' {
+			return false
+		}
+	}
+	return true
 }
 
 // agentComposerFooterRow reports whether raw is provably a row of the anchor

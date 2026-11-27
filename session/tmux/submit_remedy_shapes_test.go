@@ -397,6 +397,14 @@ func TestStillChipComposerWithholdsDraftRowsBelowABlankRow(t *testing.T) {
 			"  see my notes · ~/notes.md",
 			"  then force-push release",
 		},
+		// B5: an indented row of box-drawing glyphs is draft text, not the
+		// composer's edge — a border ends the composer only at the agent's
+		// own column-0 rule or box geometry.
+		"B5 indented box-drawing row": {
+			"› " + codexChip,
+			"",
+			"  ──────────────",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pane := strings.Join(rows, "\n") + "\n"
