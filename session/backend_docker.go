@@ -774,11 +774,6 @@ func (p *dockerProvisioner) runContainer() error {
 				args = append(args, "-e", "PATH="+imagePATH)
 			}
 		}
-		// The routing and trust env names get af's defined-empty after
-		// run_args too, so the repo-chosen image's ENV cannot deliver an
-		// endpoint, proxy, or trust root to a claude or codex account agent
-		// (#7867 R4 — the semantics live on accountDockerRoutingEnvEntries).
-		args = appendAccountDockerRoutingEnv(args, p.spec.Account.Agent, p.spec.SessionEnvPassthrough, os.Environ())
 	} else if len(p.credentialMounts) > 0 {
 		// For credential-mount sessions, credential files are mounted at paths
 		// relative to dockerContainerHome (/root). docker.run_args is repo-controlled
