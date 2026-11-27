@@ -361,49 +361,124 @@ func TestStillChipComposerWithholdsDraftTextBelowABlankRow(t *testing.T) {
 	}
 }
 
-// TestStillChipComposerWithholdsDraftRowsBelowABlankRow is the #7850 R2
-// class: content rows after the blank gap must each be the anchor agent's
-// own footer against its WHOLE-ROW grammar — a draft line that merely
-// contains a footer phrase is composer content, and a footer-shaped row
-// never excuses the rows below it.
+// TestStillChipComposerWithholdsDraftRowsBelowABlankRow is the #7850 R2/N1
+// class: a ruled or boxed composer takes only blank rows between the
+// region's cut and its own closing edge, and Codex's edgeless lane takes
+// only rows that parse its closed footer token grammar — a draft line that
+// merely contains a footer phrase, a digit-led word, a path-shaped prefix,
+// or a bracketed clause is composer content, and a footer-shaped row never
+// excuses the rows below it.
 func TestStillChipComposerWithholdsDraftRowsBelowABlankRow(t *testing.T) {
 	chipText := normalizeDelivery(codexChip)
-	for name, rows := range map[string][]string{
+	for name, tc := range map[string]struct {
+		rows   []string
+		cursor paneCursorState
+	}{
 		// B3: a draft line carrying a real marker phrase as substring.
 		"B3 draft containing 'for agents'": {
-			"› " + codexChip,
-			"",
-			"  then update the docs for agents",
+			rows:   []string{"› " + codexChip, "", "  then update the docs for agents"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
 		},
 		// B3b: a footer-looking row never excuses the draft rows below it.
 		"B3b footer-shaped first row, draft below": {
-			"› " + codexChip,
-			"",
-			"  esc to interrupt if this is slow",
-			"  then run make deploy-prod",
-			"  and delete the staging bucket",
+			rows: []string{
+				"› " + codexChip, "",
+				"  esc to interrupt if this is slow",
+				"  then run make deploy-prod",
+				"  and delete the staging bucket",
+			},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
 		},
 		// B6: a draft line in the "text · ~/path" shape is not the Codex
-		// status line — the model segment carries no version digit.
+		// status line — the model segment carries no known model token.
 		"B6 draft in model/path shape": {
-			"› " + codexChip,
-			"",
-			"  see my notes · ~/notes.md",
-			"  then force-push release",
+			rows:   []string{"› " + codexChip, "", "  see my notes · ~/notes.md", "  then force-push release"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// F14: a digit-led first word is not a model token, and a path
+		// segment with spaces is not a whole path token.
+		"F14 numbered draft in model/path shape": {
+			rows:   []string{"› " + codexChip, "", "  1. see my notes · ~/notes.md then force-push release"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// F2: same hole through the path-shaped second segment.
+		"F2 numbered draft with path tail": {
+			rows:   []string{"› " + codexChip, "", "  1. force-push release · /srv/app"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// F3: "v2" is not a model token.
+		"F3 v2 draft in model/path shape": {
+			rows:   []string{"› " + codexChip, "", "  v2 · ~/notes.md then force-push release"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// F4: a Main […] bracket never holds a clause.
+		"F4 Main bracket holding a clause": {
+			rows:   []string{"› " + codexChip, "", "  Main [force-push release, then delete the staging bucket]"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
 		},
 		// B5: an indented row of box-drawing glyphs is draft text, not the
 		// composer's edge — a border ends the composer only at the agent's
 		// own column-0 rule or box geometry.
 		"B5 indented box-drawing row": {
-			"› " + codexChip,
-			"",
-			"  ──────────────",
+			rows:   []string{"› " + codexChip, "", "  ──────────────"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// The literal round-1 B5: the indented dashes row and the draft row
+		// below it, with no blank gap.
+		"B5 literal indented dashes then draft": {
+			rows:   []string{"› " + codexChip, "  ──────────────", "  ok go"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// F15: a digit-led draft line inside Devin's rules — #7850's own B1
+		// plus "2.". Only blank rows may sit between the region's cut and
+		// the agent's closing rule.
+		"F15 numbered draft inside Devin's rules": {
+			rows: []string{
+				strings.Repeat("─", 80),
+				"❭ " + codexChip,
+				"",
+				"  2. ok go",
+				strings.Repeat("─", 80),
+			},
+			cursor: paneCursorState{Visible: true, Row: 1, Col: firstContentCol("❭ " + codexChip)},
+		},
+		// F6: same shape, "then force-push" tail.
+		"F6 numbered force-push inside Devin's rules": {
+			rows: []string{
+				strings.Repeat("─", 80),
+				"❭ " + codexChip,
+				"",
+				"  2. then force-push release",
+				strings.Repeat("─", 80),
+			},
+			cursor: paneCursorState{Visible: true, Row: 1, Col: firstContentCol("❭ " + codexChip)},
+		},
+		// F7: a "3 more things:" draft.
+		"F7 numbered list draft inside Devin's rules": {
+			rows: []string{
+				strings.Repeat("─", 80),
+				"❭ " + codexChip,
+				"",
+				"  3 more things: fix the build",
+				strings.Repeat("─", 80),
+			},
+			cursor: paneCursorState{Visible: true, Row: 1, Col: firstContentCol("❭ " + codexChip)},
+		},
+		// F16: a "v2"-led draft carrying Devin's own mode word.
+		"F16 v2 draft with mode word inside Devin's rules": {
+			rows: []string{
+				strings.Repeat("─", 80),
+				"❭ " + codexChip,
+				"",
+				"  v2 ok go then force-push · bypass",
+				strings.Repeat("─", 80),
+			},
+			cursor: paneCursorState{Visible: true, Row: 1, Col: firstContentCol("❭ " + codexChip)},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			pane := strings.Join(rows, "\n") + "\n"
-			insert := firstContentCol("› " + codexChip)
-			if ok, why := stillChipComposer(pane, pane, paneCursorState{Visible: true, Row: 0, Col: insert}, chipText); ok {
+			pane := strings.Join(tc.rows, "\n") + "\n"
+			if ok, why := stillChipComposer(pane, pane, tc.cursor, chipText); ok {
 				t.Fatalf("ok=true why=%q, want ok=false (the rows below the blank gap are not the agent's own footer)", why)
 			}
 		})

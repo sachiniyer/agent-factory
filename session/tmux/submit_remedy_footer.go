@@ -7,40 +7,66 @@ import (
 )
 
 // stillChipTailAudit reports why the rows below a composer region break the
-// still-chip proof, or "" when the frame bounds the block for the proof:
-// EVERY row from the region's cut to the pane end must be blank, a border
-// drawn at the pane's left column, or a row of the anchor agent's own footer
-// matched against that agent's whole-row grammar (#7850 R2). A draft that
-// opened with blank lines, or a second draft line after the absorbed Enter's
-// newline, renders the same shape as a footer — the remedy Enter would
-// submit it with our prompt, so a footer-shaped row never excuses the rows
-// below it, and a composer whose glyph names no agent borrows no other
-// agent's grammar.
+// still-chip proof, or "" when the frame bounds the block for the proof.
+// A ruled or boxed composer — Claude's "❯", Devin's "❭", or the │-boxed ">" —
+// closes at the agent's OWN edge, and only BLANK rows may sit between the
+// region's cut and that edge; a draft row inside the composer renders
+// there, while rows below the edge are chrome by geometry because no draft
+// can draw outside the composer. Codex's "›" lane has no closing edge, so
+// every content row below its region must parse Codex's closed footer
+// token grammar — a known model token, a whole-segment path token, known
+// literals and meters, with no free-text segment (#7850 R2/N1). A draft
+// that opened with blank lines, or a second draft line after the absorbed
+// Enter's newline, renders the same shape as a footer — the remedy Enter
+// would submit it with our prompt.
 func stillChipTailAudit(rows []string, end int, anchorRow string) string {
+	boxed := strings.HasPrefix(anchorRow, "│ ")
+	switch anchorGlyph(anchorRow) {
+	case claudeComposerGlyph, "❭":
+		boxed = false
+	case ">":
+	default:
+		// Codex's › lane: no closing edge. A column-0 "─" rule in a ruled
+		// Codex lane still bounds the block; every other content row must
+		// parse the closed footer grammar.
+		for j := end; j < len(rows); j++ {
+			raw := rows[j]
+			switch {
+			case blankComposerRow(raw):
+			case composerRuleRow(raw):
+			case codexComposerFooterRow(raw):
+			default:
+				return fmt.Sprintf("the composer holds content %q below a blank row that is not provably the agent's own footer", normalizeDelivery(raw))
+			}
+		}
+		return ""
+	}
+	// A ruled or boxed composer: blanks until the agent's own closing edge;
+	// everything below the edge is chrome by geometry.
 	for j := end; j < len(rows); j++ {
 		raw := rows[j]
 		switch {
 		case blankComposerRow(raw):
-		case stillChipBoundaryEdge(raw, anchorRow):
-		case agentComposerFooterRow(raw, anchorRow):
+		case stillChipClosingEdge(raw, boxed):
+			return ""
 		default:
-			return fmt.Sprintf("the composer holds content %q below a blank row that is not provably the agent's own footer", normalizeDelivery(raw))
+			return fmt.Sprintf("the composer holds content %q inside the composer that is not provably blank", normalizeDelivery(raw))
 		}
 	}
 	return ""
 }
 
-// stillChipBoundaryEdge reports whether raw ends the composer at the anchor
-// agent's OWN geometry: the column-0 "─" rule the ruled lanes draw, or the
-// ╰───╯ bottom edge of Claude's │-boxed composer (#7850 R3). An indented row
-// of box-drawing glyphs — a draft typed in "─"s — is content, not an edge;
-// a border that belongs to no agent's composer borrows no boundary.
-func stillChipBoundaryEdge(raw, anchorRow string) bool {
+// stillChipClosingEdge reports whether raw is the anchor agent's own closing
+// edge, drawn at the pane's left column: the "─" rule the ruled lanes draw,
+// or the ╰───╯ bottom edge of a │-boxed composer. An indented row of
+// box-drawing glyphs — a draft typed in "─"s — is content, not an edge
+// (#7850 R3).
+func stillChipClosingEdge(raw string, boxed bool) bool {
 	if raw == "" || unicode.IsSpace([]rune(raw)[0]) {
 		return false
 	}
-	if anchorGlyph(anchorRow) == ">" {
-		return strings.HasPrefix(anchorRow, "│ ") && composerBoxBottomRow(raw)
+	if boxed {
+		return composerBoxBottomRow(raw)
 	}
 	return composerRuleRow(raw)
 }
@@ -59,25 +85,6 @@ func composerBoxBottomRow(raw string) bool {
 		}
 	}
 	return true
-}
-
-// agentComposerFooterRow reports whether raw is provably a row of the anchor
-// agent's own footer, matched against that agent's whole-row grammar. The
-// anchor's glyph names the agent; the │-boxed ">" is Claude's box composer,
-// and every other ">" — like every glyph this table does not key — borrows
-// no other agent's grammar (#7850 R2).
-func agentComposerFooterRow(raw, anchorRow string) bool {
-	switch anchorGlyph(anchorRow) {
-	case "›":
-		return codexComposerFooterRow(raw)
-	case claudeComposerGlyph:
-		return claudeComposerFooterRow(raw)
-	case "❭":
-		return devinComposerFooterRow(raw)
-	case ">":
-		return strings.HasPrefix(anchorRow, "│ ") && claudeComposerFooterRow(raw)
-	}
-	return false
 }
 
 // codexComposerFooterRow reports whether raw is a row of Codex's composer
@@ -110,22 +117,74 @@ func codexComposerFooterRow(raw string) bool {
 }
 
 // codexStatusModel reports whether the first " · "-segment of a Codex status
-// line is a model-with-effort token. The model's first word always carries a
-// version digit ("GPT-6-Astra", "gpt-5.6-sol", "o3") — a draft's "see my
-// notes" does not (#7850 B6).
+// line is a model token — a known model shape head ("GPT-6-Astra",
+// "gpt-5.6-sol", "o3") followed only by known tier words and capitalized
+// codename words ("ultra", "Terra", "max"). A draft's "1. see my notes" or
+// "v2 ok go" carries no model token (#7850 N1) — failing closed on an odd
+// model name is fine.
 func codexStatusModel(seg string) bool {
-	seg = strings.TrimSpace(seg)
-	if seg == "" || strings.ContainsAny(seg, "›❯❭>»") {
+	f := strings.Fields(strings.TrimSpace(seg))
+	if len(f) == 0 || len(f) > 3 {
 		return false
 	}
-	return strings.ContainsAny(strings.Fields(seg)[0], "0123456789")
+	if !codexModelToken(f[0]) {
+		return false
+	}
+	for _, w := range f[1:] {
+		if !codexModelTier(w) && !codexModelCodename(w) {
+			return false
+		}
+	}
+	return true
+}
+
+// codexModelToken reports whether w is a known Codex model token shape —
+// "GPT-…", "gpt-…", "o<digit>…", or "codex-…".
+func codexModelToken(w string) bool {
+	for _, p := range []string{"GPT", "gpt", "codex"} {
+		if strings.HasPrefix(w, p) {
+			return true
+		}
+	}
+	return len(w) >= 2 && w[0] == 'o' && w[1] >= '0' && w[1] <= '9'
+}
+
+// codexModelTier reports whether w is a reasoning-effort or tier word the
+// model segment carries.
+func codexModelTier(w string) bool {
+	switch w {
+	case "ultra", "max", "mini", "high", "medium", "low", "fast", "standard", "pro", "plus":
+		return true
+	}
+	return false
+}
+
+// codexModelCodename reports whether w is a capitalized codename word the
+// model segment carries — "Terra", "Astra", "Sol".
+func codexModelCodename(w string) bool {
+	if len(w) < 2 || len(w) > 12 {
+		return false
+	}
+	for i, r := range w {
+		if i == 0 {
+			if r < 'A' || r > 'Z' {
+				return false
+			}
+		} else if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // codexStatusPath reports whether a status segment is Codex's current-dir —
-// "~", "~/…", or "/…" — the shape codexStatusLineModel requires of the same
-// segment.
+// a whole segment that is one path token: "~", "~/…", or "/…". A segment
+// with spaces is draft text, not a path (#7850 N1).
 func codexStatusPath(seg string) bool {
 	seg = strings.TrimSpace(seg)
+	if len(strings.Fields(seg)) != 1 {
+		return false
+	}
 	return seg == "~" || strings.HasPrefix(seg, "~/") || strings.HasPrefix(seg, "/")
 }
 
@@ -149,136 +208,14 @@ func codexFooterSegment(seg string) bool {
 		return len(f) == 2 && digitsOnly(f[0]) && strings.HasPrefix(f[1], "warning")
 	}
 	if strings.HasPrefix(seg, "Main [") && strings.HasSuffix(seg, "]") {
-		return true
+		// the branch name is one token — "Main [default]", never a clause
+		inner := seg[len("Main [") : len(seg)-1]
+		return inner != "" && len(strings.Fields(inner)) == 1
 	}
 	if strings.HasSuffix(seg, " context left") {
 		f := strings.Fields(seg)
 		return len(f) == 3 && f[1] == "context" && f[2] == "left" &&
 			strings.HasSuffix(f[0], "%") && digitsOnly(strings.TrimSuffix(f[0], "%"))
-	}
-	return false
-}
-
-// claudeComposerFooterRow reports whether raw is a row of Claude's composer
-// footer against its whole-row grammar: every " · "-separated segment must
-// be composed entirely of the phrases Claude draws there — the vim-mode
-// flags, the permission mode, the agent and shell counts, the shortcut
-// hints. A draft line that merely CONTAINS a phrase ("esc to interrupt if
-// this is slow") is composer content (#7850 R2).
-func claudeComposerFooterRow(raw string) bool {
-	line := strings.TrimSpace(raw)
-	if line == "" {
-		return false
-	}
-	for _, seg := range strings.Split(line, " · ") {
-		if !claudeFooterSegment(seg) {
-			return false
-		}
-	}
-	return true
-}
-
-// claudeFooterPhrases are the fixed phrases a Claude footer segment is built
-// from, peeled one at a time off the segment's front.
-var claudeFooterPhrases = []string{
-	"-- INSERT --", "-- NORMAL --", "-- VISUAL --", "-- REPLACE --",
-	"(shift+tab to cycle)", "shift+tab to cycle",
-	"? for shortcuts", "esc to interrupt",
-}
-
-// claudeFooterSegment reports whether one " · "-separated segment of a
-// Claude footer row is composed entirely of Claude's own footer phrases. The
-// mode flag ("⏵⏵ bypass permissions on") carries free wording between "⏵⏵"
-// and its trailing " on"; the agent and shell counts are whole segments.
-func claudeFooterSegment(seg string) bool {
-	rest := strings.TrimSpace(seg)
-	for rest != "" {
-		switch {
-		case strings.HasPrefix(rest, "⏵⏵ "):
-			body := strings.TrimPrefix(rest, "⏵⏵ ")
-			i := strings.Index(body, " on")
-			if i <= 0 {
-				return false
-			}
-			rest = strings.TrimSpace(body[i+len(" on"):])
-		case strings.HasPrefix(rest, "← "):
-			// the agent count is always the segment's tail
-			tail := strings.TrimPrefix(rest, "← ")
-			return tail == "for agents" || claudeCountWord(tail, "agent")
-		default:
-			matched := false
-			for _, p := range claudeFooterPhrases {
-				if r, ok := strings.CutPrefix(rest, p); ok {
-					rest = strings.TrimSpace(r)
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				return claudeCountWord(rest, "shells") || claudeContextLeft(rest)
-			}
-		}
-	}
-	return true
-}
-
-// claudeCountWord reports whether s is a count plus a unit — "1 agent",
-// "2 agents", "2 shells" — the trailing counts Claude's footer carries.
-func claudeCountWord(s, unit string) bool {
-	f := strings.Fields(s)
-	return len(f) == 2 && digitsOnly(f[0]) && strings.HasPrefix(f[1], unit)
-}
-
-// claudeContextLeft reports whether s is the context meter — "87% context
-// left".
-func claudeContextLeft(s string) bool {
-	f := strings.Fields(s)
-	return len(f) == 3 && f[1] == "context" && f[2] == "left" &&
-		strings.HasSuffix(f[0], "%") && digitsOnly(strings.TrimSuffix(f[0], "%"))
-}
-
-// devinComposerFooterRow reports whether raw is a row of Devin's composer
-// footer against its whole-row grammar: the model and mode segments plus the
-// shells/edit hint, as "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand
-// edits" draws them.
-func devinComposerFooterRow(raw string) bool {
-	line := strings.TrimSpace(raw)
-	if line == "" {
-		return false
-	}
-	for _, seg := range strings.Split(line, " · ") {
-		if !devinFooterSegment(seg) {
-			return false
-		}
-	}
-	return true
-}
-
-// devinFooterSegment reports whether one " · "-separated segment of Devin's
-// footer row is the model token ("SWE-2", the first word always carries a
-// version digit), a mode word, or the shells/edit hint tail.
-func devinFooterSegment(seg string) bool {
-	seg = strings.TrimSpace(seg)
-	if seg == "" {
-		return false
-	}
-	if strings.HasSuffix(seg, "ctrl+o to expand edits") {
-		head := strings.TrimSpace(strings.TrimSuffix(seg, "ctrl+o to expand edits"))
-		if head == "" || head == "↓" {
-			return true
-		}
-		f := strings.Fields(head)
-		return len(f) == 3 && digitsOnly(f[0]) && f[1] == "shells" && f[2] == "↓"
-	}
-	f := strings.Fields(seg)
-	if strings.ContainsAny(f[0], "0123456789") {
-		return true
-	}
-	if len(f) == 1 {
-		switch f[0] {
-		case "bypass", "plan", "act", "build", "auto", "agent":
-			return true
-		}
 	}
 	return false
 }
