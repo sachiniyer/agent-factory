@@ -342,6 +342,9 @@ func TestPaneEchoedDelimiterCannotForgeBoundarySplit(t *testing.T) {
 		"agent quoting the source it was asked about:",
 		deliveryBoundaryGridSentinel,
 		deliveryBoundaryGridSentinel + "-0123456789abcdef0123456789abcdef",
+		// Codex draws its composer a blank row under the transcript; the
+		// still-chip proof requires that transcript gap above the anchor.
+		"",
 	}
 	status, pastes, enters := sendStaged(t, m, redeliverPrompt)
 	require.Equal(t, PromptSentUnverified, status)
@@ -658,7 +661,7 @@ func TestWrappedTranscriptStillRemedies(t *testing.T) {
 		swallowedEnters: 1,
 		render:          codexChipRender,
 		paneWidth:       20,
-		transcript:      []string{"a much longer transcript row that wraps"},
+		transcript:      []string{"a much longer transcript row that wraps", ""},
 	}
 	status, _, enters := sendStaged(t, m, redeliverPrompt)
 	require.Equal(t, 2, enters, "a wrapped transcript row must not defeat the still-chip remedy")

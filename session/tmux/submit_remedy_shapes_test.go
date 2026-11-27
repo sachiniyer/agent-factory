@@ -293,6 +293,60 @@ func TestStillChipComposerWithholdsDraftTextAboveTheAnchor(t *testing.T) {
 	}
 }
 
+// TestStillChipComposerWithholdsDraftRowsAboveTheAnchor is the #7850 R1
+// class: the anchor lands on the draft's chip-bearing continuation row while
+// draft rows — plain text or blank — sit between it and the composer's top
+// edge. The region's joined content is still just the chip, so every prior
+// proof accepted the shape and the remedy Enter submitted the user's lines
+// with the prompt. Each frame must withhold, on master's proof and on every
+// proof that only checks glyph-led rows or an unreadable block start.
+func TestStillChipComposerWithholdsDraftRowsAboveTheAnchor(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	for name, rows := range map[string][]string{
+		// A2: a second draft line between the head and the chip row.
+		"A2 draft lines above the chip row": {
+			"› ship it",
+			"  please",
+			"  > " + codexChip,
+		},
+		// A2′: #7836's own rows — a wrapped draft head above the chip row.
+		"A2′ wrapped draft head above the chip row": {
+			"› please also delete the",
+			"  staging bucket first",
+			"  > " + codexChip,
+		},
+		// A4: a blank draft line between the head and the chip row — the
+		// blank stops every glyph-row scan without being a top edge.
+		"A4 blank draft row above the chip row": {
+			"› ship it",
+			"",
+			"  > " + codexChip,
+		},
+		// A5b: a typed chip-shaped row above the real chip.
+		"A5b typed chip text above the real chip": {
+			"› ship it",
+			"  " + codexChip,
+			"  > " + codexChip,
+		},
+		// A6b: draft lines, a bare "›" line, then the chip row.
+		"A6b draft and a bare › above the chip row": {
+			"› ship it",
+			"  please",
+			"  ›",
+			"  > " + codexChip,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pane := strings.Join(rows, "\n") + "\n"
+			anchor := len(rows) - 1
+			tail := paneCursorState{Visible: true, Row: anchor, Col: contentEndCol(rows[anchor])}
+			if ok, why := stillChipComposer(pane, chipBlockForTest(pane, chipText), pane, tail, chipText); ok {
+				t.Fatalf("ok=true why=%q, want ok=false (the anchor is not the composer block's first row)", why)
+			}
+		})
+	}
+}
+
 // TestStillChipComposerWithholdsDraftTextBelowABlankRow is the #7850 R3 frame:
 // a draft of "\n\nok go" renders the chip, a blank gap, then the user's line —
 // textually the same shape composerRegion's footer cut was built for. master's

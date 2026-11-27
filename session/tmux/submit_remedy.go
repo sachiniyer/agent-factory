@@ -395,6 +395,89 @@ func blankComposerRow(raw string) bool {
 	}) == ""
 }
 
+// composerRuleRow reports whether raw is a full-width "─" rule — the edge the
+// ruled composers (Claude, Devin, and Codex's ruled lane) draw at column 0.
+// An indented row of box-drawing glyphs is content, not an edge (#7850 R3).
+func composerRuleRow(raw string) bool {
+	for _, r := range raw {
+		if r != '─' {
+			return false
+		}
+	}
+	return raw != ""
+}
+
+// composerBoxTopRow reports whether raw is a ╭───╮ top edge — the ╭ corner
+// plus only "─" through ╮, the shape Claude's composer box opens with. A
+// titled box ("╭─ Bash ─╮") is a tool or dialog box, not the composer.
+func composerBoxTopRow(raw string) bool {
+	rs := []rune(raw)
+	if len(rs) < 2 || rs[0] != '╭' || rs[len(rs)-1] != '╮' {
+		return false
+	}
+	for _, r := range rs[1 : len(rs)-1] {
+		if r != '─' {
+			return false
+		}
+	}
+	return true
+}
+
+// stillChipFirstRow reports why the anchor is not provably the composer
+// block's first row, or "" when it is. The proof reads the RAW anchor row:
+// the agent's own first-row prompt must sit at its own first-row column —
+// continuation rows are indented, and Codex and Claude draw the first-row
+// glyph at column 0 — and the composer's top edge must bound the span above
+// it: the agent's rule, the box edge, or Codex's transcript gap. Any other
+// row in that span — glyph-led, plain text, or a blank inside the draft —
+// puts the anchor inside a draft whose head the region never reads, and the
+// remedy Enter would submit that draft with our prompt (#7850 R1).
+func stillChipFirstRow(rows []string, anchor int) string {
+	raw := rows[anchor]
+	switch glyph := anchorGlyph(raw); glyph {
+	case "›":
+		// Codex's unruled composer: the "›" at column 0 is always the block's
+		// first row — continuations indent or wrap with no glyph — so the
+		// transcript gap (a blank row), a top rule, or the pane's own top
+		// bounds the span.
+		if !strings.HasPrefix(raw, glyph) {
+			break
+		}
+		if anchor == 0 || blankComposerRow(rows[anchor-1]) || composerRuleRow(rows[anchor-1]) {
+			return ""
+		}
+		return "a row sits between the anchor and the composer's top edge — Codex's transcript gap — so the anchor is not provably the composer block's first row"
+	case claudeComposerGlyph, "❭":
+		// The ruled composers: their first row sits directly under the
+		// agent's own top rule. A "❯" anywhere else is a dialog option or an
+		// echo, and a glyph at row 0 has lost its rule to the scroll — both
+		// unprovable.
+		if strings.HasPrefix(raw, glyph) && anchor > 0 && composerRuleRow(rows[anchor-1]) {
+			return ""
+		}
+		return "the anchor is not the agent's first-row prompt directly under its top rule, so the composer block's first row is not provable"
+	case ">":
+		// Claude's │-boxed composer prompts "│ > " — the ">" at its
+		// first-row column. The box's own top edge must bound the span,
+		// which may hold the box's blank pad rows. Every other ">" — the
+		// continuation indent, a bare prompt with no known agent — is
+		// unprovable.
+		if !strings.HasPrefix(raw, "│ > ") {
+			break
+		}
+		for r := anchor - 1; r >= 0; r-- {
+			if composerBoxTopRow(rows[r]) {
+				return ""
+			}
+			if !blankComposerRow(rows[r]) {
+				break
+			}
+		}
+		return "the │-boxed anchor's span above is not bounded by the box's own top edge, so the composer block's first row is not provable"
+	}
+	return "the anchor's prompt glyph is not the agent's own first-row prompt at its first-row column, so the composer block's first row is not provable"
+}
+
 // composerRegion returns the live composer's grid rows: the glyph-anchored row
 // plus the rows below it, stopping at a horizontal border or at the first
 // content row that follows a blank gap — the shape of an agent's footer/status
@@ -671,13 +754,15 @@ func stillChipComposer(boundary string, block boundaryBlock, pane string, cursor
 			return false, "a composer content row sits between the bound draft's proven first row and the anchor — the composer is not chip-only"
 		}
 	}
-	// A contiguous composer-glyph row above the anchor that holds content is
-	// the same ambiguity applied to the remedy: the draft's own head — or a
-	// transcript echo af cannot tell from one — puts the anchor inside the
-	// draft. Stillness never compares rows above the anchor, so both frames
-	// are checked.
-	if stagedAnchorAmbiguous(bRows, anchor) || stagedAnchorAmbiguous(gRows, anchor) {
-		return false, "a composer-glyph row above the anchor holds content — the draft's own head or an echo indistinguishable from one — so the anchor is not the composer block's first row"
+	// The anchor must be the composer block's FIRST row — the agent's own
+	// first-row prompt at its first-row column — with nothing between it and
+	// the composer's top edge. Stillness never compares rows above the
+	// anchor, so both frames are checked (#7850 R1).
+	if why := stillChipFirstRow(bRows, anchor); why != "" {
+		return false, why
+	}
+	if why := stillChipFirstRow(gRows, anchor); why != "" {
+		return false, why
 	}
 	bRegion := composerRegion(bRows, anchor)
 	gRegion := composerRegion(gRows, anchor)
