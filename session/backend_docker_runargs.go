@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // dockerRunBooleanShorthands and dockerRunValueShorthands classify the short
@@ -526,12 +528,16 @@ func accountProtectedPath(target string) string {
 	return ""
 }
 
-// dockerForwardedPassthroughNames is the name set of the session's effective
-// session_env_passthrough — the operator's claims af emits ahead of run_args
-// as bare `-e NAME` entries resolving against the daemon's environment. Docker
-// keeps the LAST -e for a name, so a run_args env entry naming one of these is
-// an override of the operator's forwarded value whatever the name's class —
-// both guarded validators refuse exactly this set (#7867 R2).
+// dockerEmittedPassthroughNames is the set of passthrough names af actually
+// emits ahead of run_args as bare `-e NAME` entries — the forwarded names
+// that resolve in the daemon's environment (sessionenv.DockerForwardNames
+// runs the same resolution containerEnvironmentNames does, so a forwarded
+// name that is unset on the host emits nothing and has no af -e to
+// override). Docker keeps the LAST -e for a name, so a `=`-valued run_args
+// entry naming one of these is an override of the operator's forwarded value
+// whatever the name's class — both guarded validators refuse exactly this
+// set (#7867 R2). A bare -e NAME for one of them is not refused: it resolves
+// to the operator's own value, which is what af's own bare -e delivers anyway.
 //
 // A pane-boundary name is never an effective claim: forwarding one is refused
 // at Provision on every docker session and af's blanking -e dominates it
@@ -539,13 +545,13 @@ func accountProtectedPath(target string) string {
 // leaves the classified refusals — the credential-mount path's denied-reason
 // walk, the account path's own classes — to report it with their accurate
 // messages instead of the override one.
-func dockerForwardedPassthroughNames(passthrough []string) map[string]struct{} {
-	forwarded := make(map[string]struct{}, len(passthrough))
-	for _, name := range passthrough {
+func dockerEmittedPassthroughNames(passthrough, environ []string) map[string]struct{} {
+	emitted := make(map[string]struct{}, len(passthrough))
+	for _, name := range sessionenv.DockerForwardNames(environ, "", passthrough) {
 		if _, paneBoundary := credentialMountPaneBoundaryNames[name]; paneBoundary {
 			continue
 		}
-		forwarded[name] = struct{}{}
+		emitted[name] = struct{}{}
 	}
-	return forwarded
+	return emitted
 }

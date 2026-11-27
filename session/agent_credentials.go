@@ -300,17 +300,19 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 // routing names alone guarantee it — so this guard is never a no-op on the
 // roster the way #4454's account-only table was for amp and opencode.
 func validateCredentialDockerRunArgs(args []string, agent string, passthrough []string) error {
-	// Every name the operator claims is checked first: af emits the forwarded
-	// names as bare -e entries ahead of run_args, and Docker keeps the last -e
-	// for a name, so a repo -e naming ANY of them — whatever class
-	// credentialMountDeniedReason would give it — is an override of the
-	// operator's forwarded value (#7867 R2). Running this first keeps the
+	// The names the operator claims and af actually emits as bare -e entries
+	// ahead of run_args are checked first: Docker keeps the last -e for a
+	// name, so a =-valued repo entry naming one — whatever class
+	// credentialMountDeniedReason would give it — overrides the operator's
+	// forwarded value (#7867 R2). A bare -e NAME is not an override — it
+	// resolves to the operator's own value — and a forwarded name unset on
+	// the host emits no af -e to override. Running this first keeps the
 	// refusal honest: for a name the operator already forwards, "have the
 	// operator forward it" would be a remedy they already took.
-	forwarded := dockerForwardedPassthroughNames(passthrough)
+	emitted := dockerEmittedPassthroughNames(passthrough, os.Environ())
 	checkEnv := func(value string) error {
-		name, _, _ := strings.Cut(value, "=")
-		if _, claimed := forwarded[name]; claimed {
+		name, _, hasValue := strings.Cut(value, "=")
+		if _, claimed := emitted[name]; hasValue && claimed {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for the credential-mount session's %s agent because the operator forwards that name through session_env_passthrough — a repo -e lands after af's forwarded -e entries and Docker keeps the last one for a name, so it would override the operator's forwarded value; drop the entry",
 				name, agent)
