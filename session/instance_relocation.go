@@ -80,6 +80,20 @@ func (i *Instance) SetRepoGoneFinalizationCheckpoint(checkpoint func() error) fu
 	return gw.SetRepoGoneFinalizationCheckpoint(checkpoint)
 }
 
+// SetRelocationRecordCheckpoint installs the daemon's durable writer for the
+// move_in_flight record the cross-device move persists before any residue can
+// exist (#7819). Archive/restore/rename run the move outside i.mu, so the
+// callback may safely snapshot and persist this instance's row.
+func (i *Instance) SetRelocationRecordCheckpoint(checkpoint func() error) func() {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return func() {}
+	}
+	return gw.SetRelocationRecordCheckpoint(checkpoint)
+}
+
 // WorktreeRelocationRecovery snapshots the durable relocation lifecycle — a
 // recovery record or an active consumed claim, projected to record form — for
 // this instance's worktree. Deliberately not gated on started: destruction
@@ -189,7 +203,11 @@ func (i *Instance) ValidateWorktreeDestructionAdmission() error {
 	// and must not make the kill inadmissible forever (#5102).
 	gw.SettleAbsentIdentityUnknownStall()
 	path, recovery, unresolved := gw.RelocationSnapshot()
-	if !unresolved || recovery.State == git.RelocationRecoveryCleanupStalled {
+	// move_in_flight is admissible like a record-free row (#7819): it names
+	// only residue siblings kill never deletes, so refusing here would add a
+	// refusal master does not have.
+	if !unresolved || recovery.State == git.RelocationRecoveryCleanupStalled ||
+		recovery.State == git.RelocationRecoveryMoveInFlight {
 		return nil
 	}
 	if recovery.State == git.RelocationRecoveryCleanupReady ||

@@ -27,10 +27,19 @@ import (
 // CACHES the inner error's text at construction, so stamping after the wrap
 // changes the struct and not the message the user sees (#3087 review).
 func moveDirCrossDevice(src, dest, operation string) error {
-	return moveDirCrossDeviceRecordingIdentity(src, dest, operation, refuseUnreadable, nil, nil, nil)
+	return moveDirCrossDeviceRecordingIdentity(src, dest, operation, refuseUnreadable, nil, nil, nil, nil)
 }
 
 type relocationPublicationCheckpoint func(ArchiveReport, pathIdentity, func() error) error
+
+// relocationResidueRecorder names the residue a cross-device move can strand
+// BEFORE any of it exists (#7819). The engine invokes it once after both
+// private paths are generated but before the copy (the staged path is then
+// named before its first byte), and again after the copy lands with the
+// staged destination's identity — still before the quarantine rename. A nil
+// recorder leaves no durable trail, which is exactly master's behaviour for
+// callers that never armed the daemon's row persist.
+type relocationResidueRecorder func(stagingPath, quarantinePath string, destIdentity *pathIdentity) error
 
 // moveDirCrossDeviceRecordingIdentity is the relocation path's variant. The
 // caller initializes committedIdentity with the claimed source identity. A
@@ -42,6 +51,7 @@ func moveDirCrossDeviceRecordingIdentity(
 	committedIdentity *pathIdentity,
 	archiveReport *ArchiveReport,
 	checkpoint relocationPublicationCheckpoint,
+	recordResidue relocationResidueRecorder,
 ) (returnErr error) {
 	renamePublish := func() error { return renamePath(src, dest) }
 	var renameErr error
@@ -62,9 +72,22 @@ func moveDirCrossDeviceRecordingIdentity(
 	// verified source endpoint, then atomically publish the copied directory at
 	// dest without replacing anything. These two renames are the commit boundary:
 	// until both identities match, the source is restored and never deleted.
+	//
+	// Both private names are generated up front so the durable record names
+	// every path the move can strand BEFORE the first byte is staged: a crash
+	// mid-copy then still leaves residue its session's record names (#7819).
 	stagingPath, err := privateMovePath(dest, "copy")
 	if err != nil {
 		return err
+	}
+	quarantinePath, err := privateMovePath(src, "source")
+	if err != nil {
+		return err
+	}
+	if recordResidue != nil {
+		if err := recordResidue(stagingPath, quarantinePath, nil); err != nil {
+			return fmt.Errorf("could not durably record the in-flight move before staging any bytes: %w", err)
+		}
 	}
 	copied, err := copyTreeWithPolicy(src, stagingPath, policy)
 	if err != nil {
@@ -76,6 +99,15 @@ func moveDirCrossDeviceRecordingIdentity(
 		return fmt.Errorf("failed to copy worktree into private staging directory %s: %w", stagingPath, err)
 	}
 	defer copied.close()
+	if recordResidue != nil {
+		// The staged root's identity is the only durable proof a post-publish
+		// crash can resolve to dest on a cross-device move (its inode differs
+		// from the source's). Still before the quarantine rename.
+		destIdentity := copied.destinationIdentity
+		if err := recordResidue(stagingPath, quarantinePath, &destIdentity); err != nil {
+			return fmt.Errorf("could not durably record the in-flight move before the quarantine rename: %w", err)
+		}
+	}
 	stagingName := filepath.Base(stagingPath)
 	published := false
 	defer func() {
@@ -101,10 +133,6 @@ func moveDirCrossDeviceRecordingIdentity(
 		return err
 	}
 	sourceName := filepath.Base(src)
-	quarantinePath, err := privateMovePath(src, "source")
-	if err != nil {
-		return err
-	}
 	if err := moveDirBeforeSourceCommit(src); err != nil {
 		return err
 	}

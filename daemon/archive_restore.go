@@ -490,6 +490,13 @@ func (m *Manager) moveArchivedWorktreeBack(repoID, title string, instance *sessi
 	// Move the worktree back next to the repo. A repo-gone failure leaves the
 	// archive intact (the git layer guarantees this) and surfaces an actionable
 	// message; the instance stays Archived.
+	// Arm the move_in_flight durable record before the relocate (#7819): a
+	// cross-device restore names its residue before any exists, and this
+	// checkpoint is the session row's fsynced write that makes it durable.
+	restoreRelocationRecordCheckpoint := instance.SetRelocationRecordCheckpoint(func() error {
+		return m.persistInstanceErr(repoID, instance)
+	})
+	defer restoreRelocationRecordCheckpoint()
 	claimTransferred = true
 	restoreWorktreeErr := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim)
 	if err := restoreWorktreeErr; err != nil {

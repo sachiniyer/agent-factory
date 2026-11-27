@@ -420,6 +420,16 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		}
 	}
 
+	// Arm the move_in_flight durable record (#7819): the cross-device move
+	// names every residue path it can strand BEFORE any exists, and this
+	// checkpoint is the session row's fsynced write that makes that naming
+	// durable. Uninstalled, the move still keeps its in-memory record — the
+	// same trail master leaves — so this must wrap every relocate route.
+	restoreRelocationRecordCheckpoint := instance.SetRelocationRecordCheckpoint(func() error {
+		return m.persistInstanceErr(repoID, instance)
+	})
+	defer restoreRelocationRecordCheckpoint()
+
 	// Tear down tmux and relocate the worktree in one call: the move is folded
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),
 	// so no live pane is cwd'd in the worktree during the move (previously a
@@ -616,6 +626,12 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 // also never auto-restored — while persistErr says the fenced row could not
 // be recorded durably.
 func (m *Manager) undoCommittedArchive(repoID string, instance *session.Instance, origPath string, cause error) (undoErr, persistErr error) {
+	// The rollback is itself a cross-device move: arm the durable in-flight
+	// record with this row's write before the relocate begins (#7819).
+	restoreRelocationRecordCheckpoint := instance.SetRelocationRecordCheckpoint(func() error {
+		return m.persistInstanceErr(repoID, instance)
+	})
+	defer restoreRelocationRecordCheckpoint()
 	if err := instance.RestoreArchivedWorktree(origPath); err != nil {
 		return err, nil
 	}

@@ -605,9 +605,17 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		}
 		if src != dest {
 			var report ArchiveReport
+			// The durable in-flight record names every path the move can
+			// strand BEFORE any of it exists (#7819): written once after both
+			// private names exist but ahead of the first staged byte, then
+			// again with the staged destination's identity while still ahead
+			// of the quarantine rename. A failed write aborts the move there.
+			recordResidue := func(stagingPath, quarantinePath string, destIdentity *pathIdentity) error {
+				return g.recordMoveInFlight(sourceClaim, dest, stagingPath, quarantinePath, destIdentity)
+			}
 			if mErr := moveDirCrossDeviceRecordingIdentity(
 				src, dest, operation, unreadablePolicyForOperation(operation), &movedIdentity, &report,
-				checkpointPublication,
+				checkpointPublication, recordResidue,
 			); mErr != nil {
 				var copiedErr *copiedWorktreeSourceCleanupError
 				if !errors.As(mErr, &copiedErr) {

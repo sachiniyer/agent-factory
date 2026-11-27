@@ -361,6 +361,12 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 				OriginalExternalWorktree:    &externalWorktree,
 				OriginalBranchCreatedByUs:   &branchCreatedByUs,
 				OriginalStartupStateUnknown: &startupStateUnknown,
+				QuarantinePath:              recovery.QuarantinePath,
+				StagingPath:                 recovery.StagingPath,
+				DestIdentityKnown:           recovery.DestIdentityKnown,
+				DestDevice:                  recovery.DestDevice,
+				DestInode:                   recovery.DestInode,
+				DestFileType:                recovery.DestFileType,
 			}
 		}
 	} else if isSandboxBackendType(data.BackendType) {
@@ -776,6 +782,12 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 					Inode:             recovery.Inode,
 					FileType:          recovery.FileType,
 					CleanupGeneration: recovery.CleanupGeneration,
+					QuarantinePath:    recovery.QuarantinePath,
+					StagingPath:       recovery.StagingPath,
+					DestIdentityKnown: recovery.DestIdentityKnown,
+					DestDevice:        recovery.DestDevice,
+					DestInode:         recovery.DestInode,
+					DestFileType:      recovery.DestFileType,
 				}); err != nil {
 					return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 				}

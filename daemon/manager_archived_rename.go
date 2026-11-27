@@ -135,6 +135,14 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	// failed in the wrapped error, so a fixed "failed to relocate its worktree"
 	// prefix would mislabel a branch-rename failure as a worktree one (the P3 on
 	// #2465).
+	// Arm the move_in_flight durable record before the relocate (#7819): a
+	// cross-device rename names its residue before any exists. The row write
+	// goes through persistInstanceData directly, never m.persistInstance —
+	// reserveCreate's stack holds m.mu across this call (see below).
+	restoreRelocationRecordCheckpoint := archived.SetRelocationRecordCheckpoint(func() error {
+		return persistInstanceData(repoID, archived.ToInstanceData())
+	})
+	defer restoreRelocationRecordCheckpoint()
 	if err := archived.RenameArchived(newTitle, newDest, newBranch); err != nil {
 		if errors.Is(err, git.ErrRelocateStateUnknown) {
 			// Third caller of the bounded relocate, and the one with no rollback to

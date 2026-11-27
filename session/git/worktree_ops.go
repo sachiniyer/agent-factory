@@ -680,7 +680,7 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 	if worktreePath == "" {
 		return r.state(), fmt.Errorf("cannot clean up worktree: worktree path is empty")
 	}
-	if hasRecovery {
+	if hasRecovery && recovery.State != RelocationRecoveryMoveInFlight {
 		r.unknown = true
 		r.errs = append(r.errs, fmt.Errorf(
 			"refusing to inspect or clean up worktree recovery state %s at %s (alternate %s): resolve relocation through archive/restore, or restart the daemon to retry a cleanup stall",

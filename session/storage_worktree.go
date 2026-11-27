@@ -78,6 +78,22 @@ type GitWorktreeRelocationRecoveryData struct {
 	// previous releases (worktreeMissingRollbackFence); current readers put it
 	// back. Empty on every other record.
 	MissingFencedState git.RelocationRecoveryState `json:"missing_fenced_state,omitempty"`
+	// QuarantinePath and StagingPath name the residue a cross-device move can
+	// strand: `.af-source-<32hex>` beside the recorded path and
+	// `.af-copy-<32hex>` beside the publish destination (#7819). The
+	// move_in_flight record carries both before any exists, and the
+	// post-publish record carries them forward while the cleanup is
+	// outstanding. Omitted: older readers drop them on rewrite, which only
+	// returns the residue to master's unnamed handling.
+	QuarantinePath string `json:"quarantine_path,omitempty"`
+	StagingPath    string `json:"staging_path,omitempty"`
+	// Dest* is the staged destination root's identity — the only durable proof
+	// a post-publish crash resolves to the committed destination on a
+	// cross-device move, where the copy's inode differs from the source's.
+	DestIdentityKnown bool   `json:"dest_identity_known,omitempty"`
+	DestDevice        uint64 `json:"dest_device,omitempty"`
+	DestInode         uint64 `json:"dest_inode,omitempty"`
+	DestFileType      uint32 `json:"dest_file_type,omitempty"`
 }
 
 func projectRelocationRecoveryForPreviousRelease(recovery *GitWorktreeRelocationRecoveryData) {
@@ -101,6 +117,16 @@ func projectRelocationRecoveryForPreviousRelease(recovery *GitWorktreeRelocation
 		recovery.OriginalStartupStateUnknown = &safeStartupUnknown
 		recovery.CleanupLifecycle = recovery.State
 		recovery.State = git.RelocationRecoveryClaimStale
+	case git.RelocationRecoveryMoveInFlight:
+		// Same carrier, different needs (#7819): the row is LIVE (a crashed
+		// archive mid-move), so its real Original* ownership values are kept —
+		// the fence is only the projected claim_stale state itself. A previous
+		// release refuses any record state it does not know, and for
+		// claim_stale it probes both pathnames like master: the quarantine or
+		// staging residue simply keeps the unnamed handling it had before
+		// this change shipped.
+		recovery.CleanupLifecycle = recovery.State
+		recovery.State = git.RelocationRecoveryClaimStale
 	}
 }
 
@@ -117,7 +143,8 @@ func runtimeRelocationRecoveryState(
 		)
 	}
 	if recovery.CleanupLifecycle != git.RelocationRecoveryCleanupReady &&
-		recovery.CleanupLifecycle != git.RelocationRecoveryCleanupFinalizing {
+		recovery.CleanupLifecycle != git.RelocationRecoveryCleanupFinalizing &&
+		recovery.CleanupLifecycle != git.RelocationRecoveryMoveInFlight {
 		return "", fmt.Errorf("unknown cleanup relocation lifecycle %q", recovery.CleanupLifecycle)
 	}
 	return recovery.CleanupLifecycle, nil

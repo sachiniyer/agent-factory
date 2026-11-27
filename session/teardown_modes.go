@@ -89,6 +89,13 @@ func (i *Instance) prepareKillTeardown(trustLiveGeneration bool) (teardownKill, 
 	// tombstone, but the path's absence is re-proven here at teardown.
 	gw.SettleAbsentIdentityUnknownStall()
 	_, recovery, unresolved := gw.RelocationSnapshot()
+	// An in-flight cross-device move record is not a kill fence (#7819): it
+	// names only the `.af-source-*`/`.af-copy-*` siblings kill never deletes,
+	// so teardown treats the row exactly as master treats its record-free
+	// equivalent — the residue keeps the record's name and retires with the row.
+	if unresolved && recovery.State == git.RelocationRecoveryMoveInFlight {
+		unresolved = false
+	}
 	if !unresolved {
 		// Record-free archived teardown re-establishes the origin at the point
 		// of no return (#3278 review). Admission proved the origin PRESENT

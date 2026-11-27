@@ -90,6 +90,13 @@ type GitWorktree struct {
 	// is unlinked. The daemon installs it only for an explicit kill transaction;
 	// it is process-local and never part of the persisted worktree shape.
 	repoGoneFinalizationCheckpoint func() error
+	// relocationRecordCheckpoint durably publishes the move_in_flight record
+	// the cross-device move installs before any residue exists (#7819). The
+	// daemon installs it for each operation that relocates the worktree; nil
+	// keeps the record in-memory only, which is exactly master's durability
+	// for any caller that never armed a durable writer. The callback runs
+	// WITHOUT relocationMu held because persistence snapshots take that lock.
+	relocationRecordCheckpoint func() error
 	// adoptedWorktree is the directory identity AdoptLandedWorktreeMove proved
 	// at the path it adopted (#5102), kept so the archive can re-confirm that
 	// the same directory is still there after teardown. Process-local; it names
@@ -211,10 +218,32 @@ type RelocationRecovery struct {
 	Inode             uint64
 	FileType          uint32
 	CleanupGeneration string
+	// QuarantinePath and StagingPath name the residue a cross-device move can
+	// leave: the `.af-source-<32hex>` sibling the source is renamed into and the
+	// `.af-copy-<32hex>` sibling the staged copy is written at (#7819). A
+	// move_in_flight record carries both from before the first byte moved so
+	// every crash point leaves residue a durable af record names; the
+	// post-publish move_unknown record carries them forward so the same
+	// attribution survives while the cleanup runs. They are names, not
+	// candidates: claim resolution never selects either as the worktree.
+	QuarantinePath string
+	StagingPath    string
+	// DestIdentity is the staged destination root's identity, captured between
+	// the copy completing and the quarantine rename — the only durable identity
+	// a post-publish crash can resolve to the committed destination on a
+	// cross-device move, where the copy's inode differs from the source's.
+	DestIdentityKnown bool
+	DestDevice        uint64
+	DestInode         uint64
+	DestFileType      uint32
 }
 
 func (r RelocationRecovery) identity() pathIdentity {
 	return pathIdentity{device: r.Device, inode: r.Inode, fileType: r.FileType}
+}
+
+func (r RelocationRecovery) destIdentity() pathIdentity {
+	return pathIdentity{device: r.DestDevice, inode: r.DestInode, fileType: r.DestFileType}
 }
 
 // SetHookEnvironment sets exact operator-approved names used by post-worktree

@@ -21,6 +21,13 @@ const (
 	RelocationRecoveryCleanupStalled    RelocationRecoveryState = "cleanup_stalled"
 	RelocationRecoveryCleanupReady      RelocationRecoveryState = "cleanup_ready"
 	RelocationRecoveryCleanupFinalizing RelocationRecoveryState = "cleanup_finalizing"
+	// RelocationRecoveryMoveInFlight is the durable record a cross-device move
+	// installs and fsyncs before its quarantine rename (#7819): the recorded
+	// path still names the source, AlternatePath names the publish
+	// destination, and QuarantinePath/StagingPath name the residue the move
+	// can strand. It retires the way every record does — consumed by claim
+	// resolution or released at the move's finish — never silently.
+	RelocationRecoveryMoveInFlight RelocationRecoveryState = "move_in_flight"
 )
 
 // RelocationClaim is a point-in-time assertion that Path named one exact
@@ -48,6 +55,12 @@ type RelocationClaim struct {
 	cleanupFinalizing bool
 	cleanupRootGone   bool
 	claimID           uint64
+	// quarantinePath/stagingPath carry a move_in_flight record's residue names
+	// (#7819) through claim resolution, so a claim which goes stale
+	// rematerializes a record that still names the residue rather than
+	// orphaning the names mid-recovery.
+	quarantinePath string
+	stagingPath    string
 }
 
 // SetRelocationIdentityErrorForTest makes identity inspection of one exact path
@@ -198,6 +211,16 @@ func (g *GitWorktree) RestoreRelocationRecovery(recovery RelocationRecovery) err
 		if !recovery.IdentityKnown {
 			return fmt.Errorf("move recovery directory identity is missing")
 		}
+	case RelocationRecoveryMoveInFlight:
+		if recovery.AlternatePath == "" {
+			return fmt.Errorf("in-flight move destination path is empty")
+		}
+		if !recovery.IdentityKnown {
+			return fmt.Errorf("in-flight move source identity is missing")
+		}
+		if recovery.QuarantinePath == "" || recovery.StagingPath == "" {
+			return fmt.Errorf("in-flight move residue names are incomplete")
+		}
 	case RelocationRecoveryClaimStale:
 		if !recovery.IdentityKnown {
 			return fmt.Errorf("stale relocation claim identity is missing")
@@ -315,7 +338,13 @@ func (g *GitWorktree) markCleanupStalledWithClaim(claim *RelocationClaim) {
 }
 
 func (g *GitWorktree) cleanupHasStalled() bool {
-	return g.HasUnresolvedRelocation()
+	// A move_in_flight record names only the `.af-source-*`/`.af-copy-*`
+	// siblings kill never deletes (#7819), so it must not latch "the
+	// workspace's state is unknown" the way a real cleanup stall does —
+	// latching it would refuse every destructive step a record-free row
+	// performs, which is a refusal master does not have.
+	_, recovery, unresolved := g.RelocationSnapshot()
+	return unresolved && recovery.State != RelocationRecoveryMoveInFlight
 }
 
 // ClaimRelocationSource resolves any durable record and consumes it in the same
@@ -461,6 +490,8 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 		}), nil
 	case RelocationRecoveryMoveUnknown, RelocationRecoveryClaimStale:
 		return g.resolveCandidateRecordLocked(primary, normalized)
+	case RelocationRecoveryMoveInFlight:
+		return g.resolveMoveInFlightRecordLocked(primary, normalized)
 	default:
 		return RelocationClaim{}, errors.Join(fmt.Errorf(
 			"cannot resolve unknown relocation recovery state %q", normalized.State,
@@ -568,6 +599,8 @@ func recoveryFromClaim(claim RelocationClaim) RelocationRecovery {
 		Inode:             claim.identity.inode,
 		FileType:          claim.identity.fileType,
 		CleanupGeneration: claim.cleanupGeneration,
+		QuarantinePath:    claim.quarantinePath,
+		StagingPath:       claim.stagingPath,
 	}
 }
 
@@ -867,17 +900,29 @@ func (g *GitWorktree) checkpointRelocationPublication(
 	if err := publish(); err != nil {
 		return err
 	}
+	// A cross-device move names its residue before it creates any (#7819):
+	// carry those names onto the post-publish record so a crash while the
+	// quarantine cleanup is still outstanding still leaves residue a durable
+	// record names. Names only — publish consumed the staging path's bytes at
+	// dest, and the quarantine never becomes a resolution candidate.
+	var quarantinePath, stagingPath string
+	if g.relocationRecovery != nil && g.relocationRecovery.State == RelocationRecoveryMoveInFlight {
+		quarantinePath = g.relocationRecovery.QuarantinePath
+		stagingPath = g.relocationRecovery.StagingPath
+	}
 	g.setWorktreeLocationLocked(dest)
 	if archiveReport != nil {
 		g.replaceArchiveReportLocked(*archiveReport)
 	}
 	g.relocationRecovery = &RelocationRecovery{
-		State:         RelocationRecoveryMoveUnknown,
-		AlternatePath: source,
-		IdentityKnown: true,
-		Device:        identity.device,
-		Inode:         identity.inode,
-		FileType:      identity.fileType,
+		State:          RelocationRecoveryMoveUnknown,
+		AlternatePath:  source,
+		IdentityKnown:  true,
+		Device:         identity.device,
+		Inode:          identity.inode,
+		FileType:       identity.fileType,
+		QuarantinePath: quarantinePath,
+		StagingPath:    stagingPath,
 	}
 	g.releaseRelocationClaimLocked(&claim)
 	return nil
