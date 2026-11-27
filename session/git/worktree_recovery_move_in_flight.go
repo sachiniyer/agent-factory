@@ -240,32 +240,66 @@ func retireMoveInFlightStaging(recovery RelocationRecovery) error {
 			staging,
 		), ErrRelocateStateUnknown)
 	}
-	parent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(staging), "staged copy parent")
-	if err != nil {
-		return errors.Join(fmt.Errorf(
-			"the interrupted move's staged copy %s could not be reached for removal: %w",
-			staging, err,
-		), ErrRelocateStateUnknown)
-	}
-	defer parent.Close()
-	stagedFd, err := unix.Open(
-		staging,
-		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
-		0,
-	)
-	if err != nil {
-		return errors.Join(fmt.Errorf(
-			"the interrupted move's staged copy %s could not be opened without following links: %w",
-			staging, err,
-		), ErrRelocateStateUnknown)
-	}
-	stagedDir := os.NewFile(uintptr(stagedFd), staging)
-	defer stagedDir.Close()
-	if err := removeOpenedDirectory(parent, filepath.Base(staging), staging, stagedDir, nil); err != nil {
-		return errors.Join(fmt.Errorf(
-			"the interrupted move left its staged copy at %s and it could not be removed: %w",
-			staging, err,
-		), ErrRelocateStateUnknown)
+	// The open and the recursive removal run under the caller's relocation
+	// mutex, so they go through BoundedMutation: a staged copy on a stalled
+	// mount cannot wedge every claim and snapshot behind the lock, and a
+	// timed-out removal registers under the staging path so nothing retries
+	// on it until the abandoned operation provably settles.
+	if err := BoundedMutation(
+		"retiring the interrupted move's staged copy "+staging,
+		[]string{staging},
+		func() error {
+			parent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(staging), "staged copy parent")
+			if err != nil {
+				return fmt.Errorf(
+					"the interrupted move's staged copy %s could not be reached for removal: %w",
+					staging, err,
+				)
+			}
+			defer parent.Close()
+			stagedFd, err := unix.Open(
+				staging,
+				unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+				0,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"the interrupted move's staged copy %s could not be opened without following links: %w",
+					staging, err,
+				)
+			}
+			stagedDir := os.NewFile(uintptr(stagedFd), staging)
+			defer stagedDir.Close()
+			// The identity check above ran before this open; a foreign
+			// replacement could have swapped in between. When the second
+			// checkpoint recorded the destination identity, the OPENED
+			// tree must still carry it — removeOpenedDirectory alone only
+			// compares the open tree with its current pathname.
+			if recovery.DestIdentityKnown {
+				opened, err := identityFromFile(stagedDir)
+				if err != nil {
+					return fmt.Errorf(
+						"the interrupted move's staged copy %s could not be verified after opening: %w",
+						staging, err,
+					)
+				}
+				if !recovery.destIdentity().same(opened) {
+					return fmt.Errorf(
+						"the interrupted move's staged-copy path %s was replaced between verification and removal; inspect it and remove it, then retry",
+						staging,
+					)
+				}
+			}
+			if err := removeOpenedDirectory(parent, filepath.Base(staging), staging, stagedDir, nil); err != nil {
+				return fmt.Errorf(
+					"the interrupted move left its staged copy at %s and it could not be removed: %w",
+					staging, err,
+				)
+			}
+			return nil
+		},
+	); err != nil {
+		return errors.Join(err, ErrRelocateStateUnknown)
 	}
 	return nil
 }
