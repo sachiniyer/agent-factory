@@ -147,12 +147,32 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	// the forward move's AND a rollback's, whose snapshot still carries the
 	// temporarily renamed title — must target oldTitle explicitly or it
 	// finds no row to update and fails the move that needs it.
+	checkpointPersisted := false
 	restoreRelocationRecordCheckpoint := archived.SetRelocationRecordCheckpointLocked(func(data session.InstanceData) error {
 		data.Title = oldTitle
-		return persistInstanceData(repoID, data)
+		if err := persistInstanceData(repoID, data); err != nil {
+			return err
+		}
+		checkpointPersisted = true
+		return nil
 	})
 	defer restoreRelocationRecordCheckpoint()
 	if err := archived.RenameArchived(newTitle, newDest, newBranch); err != nil {
+		if checkpointPersisted && !errors.Is(err, git.ErrRelocateStateUnknown) {
+			// A mid-move checkpoint durably wrote the intermediate state —
+			// the renamed branch in particular — under oldTitle, and the
+			// clean failure already rolled the in-memory state back. The
+			// durable row must be restored to match, or a restart rebuilds
+			// the handle around a branch name the rollback already put
+			// back (#7819 round four).
+			if wErr := persistInstanceData(repoID, func() session.InstanceData {
+				data := archived.ToInstanceData()
+				data.Title = oldTitle
+				return data
+			}()); wErr != nil {
+				return nil, fmt.Errorf("cannot free the archived name %q for reuse (%v), and restoring its durable row after the rolled-back rename also failed: %w", oldTitle, err, wErr)
+			}
+		}
 		if errors.Is(err, git.ErrRelocateStateUnknown) {
 			// Third caller of the bounded relocate, and the one with no rollback to
 			// fall back on. Preserve both possible pathnames plus their captured
