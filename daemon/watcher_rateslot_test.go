@@ -288,7 +288,7 @@ func TestWatcherHandleEvent_RefundsWhenRootAgentRefusesPreFlight(t *testing.T) {
 			var wire string
 			origDeliver := deliverPromptForTask
 			deliverPromptForTask = func(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
-				status, deliveryStatus, promptRetained, err := manager.deliverPromptWithOutcome(req)
+				status, deliveryStatus, promptRetained, _, err := manager.deliverPromptWithOutcome(req)
 				if err == nil {
 					return taskPromptDeliveryResult{status: status, deliveryStatus: deliveryStatus, promptRetained: promptRetained}, nil
 				}

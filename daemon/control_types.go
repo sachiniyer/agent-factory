@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"time"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -58,6 +60,9 @@ type CreateSessionRequest struct {
 	// spawned.
 	TaskID     string `json:"-"`
 	TaskRepoID string `json:"-"`
+	// TaskTargetSession marks a reusable target_session the task may not reap
+	// via on_complete (#7880). Daemon-internal like TaskID: gob loopback only.
+	TaskTargetSession bool `json:"-"`
 	// TaskOrigin marks every daemon-internal automated create, including a
 	// legacy targeted task with neither retained RepoID nor per-run ownership.
 	// Unlike TaskID it is not persisted on the session and never affects
@@ -388,6 +393,20 @@ type DeliverPromptResponse struct {
 	// initial prompt is already owned by resume, from an existing limited target
 	// whose watch event still needs queue replay.
 	PromptRetained bool `json:"prompt_retained,omitempty"`
+	// SessionID is the stable identity of the session this call CREATED — empty
+	// when it sent into an existing target — so the caller's task-status write
+	// can be keyed to the run (#5661). Daemon-internal provenance like TaskID:
+	// gob loopback only, never the public HTTP/JSON envelope (#7880). gob
+	// encodes exported fields regardless of json tags and elides zero values,
+	// so the identity travels intact while json drops it.
+	SessionID string `json:"-"`
+	// SessionCreatedAt is the creation time of the session this call CREATED,
+	// ordering its run. Zero unless SessionID is set. Gob loopback only.
+	SessionCreatedAt time.Time `json:"-"`
+	// LastPromptDeliveryStatus is the created session's own verdict on its
+	// initial prompt (#5278): PromptNotDelivered means the prompt provably never
+	// landed, recorded as a failed run rather than "started". Gob loopback only.
+	LastPromptDeliveryStatus session.PromptDeliveryStatus `json:"-"`
 	MutationOutcome
 }
 

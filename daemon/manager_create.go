@@ -117,19 +117,20 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// one identity with another.
 	createdAt := time.Now()
 	pending := session.InstanceData{
-		ID:            session.NewInstanceID(),
-		TaskID:        req.TaskID,
-		Title:         title,
-		Path:          workspace,
-		Status:        session.Loading,
-		Liveness:      session.LiveReady,
-		InFlightOp:    session.OpCreating,
-		TaskRunActive: req.TaskID != "",
-		CreatedAt:     createdAt,
-		UpdatedAt:     createdAt,
-		Prompt:        req.Prompt,
-		Program:       req.Program,
-		Worktree:      session.GitWorktreeData{RepoPath: repo.IdentityPath()},
+		ID:                session.NewInstanceID(),
+		TaskID:            req.TaskID,
+		TaskTargetSession: req.TaskTargetSession,
+		Title:             title,
+		Path:              workspace,
+		Status:            session.Loading,
+		Liveness:          session.LiveReady,
+		InFlightOp:        session.OpCreating,
+		TaskRunActive:     req.TaskID != "",
+		CreatedAt:         createdAt,
+		UpdatedAt:         createdAt,
+		Prompt:            req.Prompt,
+		Program:           req.Program,
+		Worktree:          session.GitWorktreeData{RepoPath: repo.IdentityPath()},
 	}
 	key := daemonInstanceKey(repo.ID, title)
 	// Bind the minted instance id onto the task's durable fire marker (#5503):
@@ -193,6 +194,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		CreatedAt:                      pending.CreatedAt,
 		Title:                          title,
 		TaskID:                         req.TaskID,
+		TaskTargetSession:              req.TaskTargetSession,
 		Path:                           workspace,
 		RepoIdentityPath:               repo.IdentityPath(),
 		Program:                        req.Program,

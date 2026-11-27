@@ -596,7 +596,7 @@ func TestSandboxTaskDeliveryNeverCreatesItsTarget(t *testing.T) {
 	f.mgr.mu.Lock()
 	before := len(f.mgr.instances)
 	f.mgr.mu.Unlock()
-	_, _, _, err := f.mgr.deliverPromptWithOutcome(DeliverPromptRequest{
+	_, _, _, _, err := f.mgr.deliverPromptWithOutcome(DeliverPromptRequest{
 		Title: "peer", RepoPath: f.me.Path, Prompt: "x", TaskOrigin: true,
 		TaskRepoID: f.repoA, SandboxOwner: f.me.ID,
 	})
@@ -609,7 +609,7 @@ func TestSandboxTaskDeliveryNeverCreatesItsTarget(t *testing.T) {
 	assert.Equal(t, before, after, "no session may be created by a refused sandbox-task delivery")
 
 	// A target that does not exist at all is refused, not auto-created.
-	_, _, _, err = f.mgr.deliverPromptWithOutcome(DeliverPromptRequest{
+	_, _, _, _, err = f.mgr.deliverPromptWithOutcome(DeliverPromptRequest{
 		Title: "does-not-exist", RepoPath: f.me.Path, Prompt: "x", TaskOrigin: true,
 		TaskRepoID: f.repoA, SandboxOwner: f.me.ID,
 	})

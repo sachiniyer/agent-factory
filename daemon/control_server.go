@@ -832,7 +832,7 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 		}
 	}
 	managerDelegated = true
-	status, deliveryStatus, promptRetained, err := s.manager.deliverPromptWithOutcome(req)
+	status, deliveryStatus, promptRetained, created, err := s.manager.deliverPromptWithOutcome(req)
 	// A committed retained auto-create (#3357) — the absent-target branch
 	// routed through Manager.CreateSession, which provisioned a sandbox but
 	// could not confirm its teardown/startup — lands in the envelope so the
@@ -844,5 +844,13 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	resp.Status = status
 	resp.DeliveryStatus = deliveryStatus
 	resp.PromptRetained = promptRetained
+	// Surface the auto-created session's identity so a targeted task delivery
+	// can key its run-status write to the run (#5661) and report a
+	// provably-undelivered initial prompt as a failure (#5278). Zero for a send
+	// into an existing target or any non-create outcome, which the caller reads
+	// as "no session was created".
+	resp.SessionID = created.ID
+	resp.SessionCreatedAt = created.CreatedAt
+	resp.LastPromptDeliveryStatus = created.LastPromptDeliveryStatus
 	return nil
 }
