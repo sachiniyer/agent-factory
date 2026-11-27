@@ -227,13 +227,15 @@ func ensureRoundTripBaseImage() (built bool, unavailable, broken error) {
 //
 //   - the context deadline is the infrastructure budget spent — the package
 //     layer is the only fetch, so a stall is a slow mirror;
-//   - "apk add FAILED" is emitted by the hardened layer itself, only after
-//     EVERY attempt on BOTH mirrors was exhausted — the mirror-outage
-//     signature. A lone "WARNING: fetching" is not one: apk prints it whenever
-//     one mirror hiccups even though the fallback goes on to serve, so it can
-//     be present in the log of a build that later failed for another reason
-//     entirely (e.g. "no space left" exporting a layer). It never decides the
-//     label on its own.
+//   - an EMITTED "apk add FAILED" line — printed by the hardened layer
+//     itself, only after EVERY attempt on BOTH mirrors was exhausted — is
+//     the mirror-outage signature. Two lookalikes never count: a lone
+//     "WARNING: fetching" (one mirror hiccuping while the fallback serves —
+//     it can be present in a build that later failed for another reason
+//     entirely, e.g. "no space left" exporting a layer), and the signature's
+//     literal bytes inside the RUN instruction, which BuildKit echoes into
+//     the error output whether or not the script ever ran it
+//     (emittedApkFailureLine distinguishes them).
 //   - "failed to resolve source metadata" is the registry: the FROM image was
 //     verified local a moment ago, so reaching for it at all means something
 //     is resolving remotely — #2521's own signature;
@@ -245,7 +247,7 @@ func classifyBaseBuildFailure(ctxErr, buildErr error, output string) error {
 			"The package layer is the only network fetch in this build, so the stall is almost certainly a slow alpine mirror — "+
 			"an infrastructure failure of this step, not a defect in this tree; retry when a mirror answers.\n%s",
 			baseImageBuildTimeout, buildErr, output)
-	case strings.Contains(output, "apk add FAILED"):
+	case emittedApkFailureLine(output):
 		return fmt.Errorf("building the round-trip base image could not install %s from either alpine mirror: %v. "+
 			"The package layer's own script reported every attempt exhausted, so this is a mirror outage — an infrastructure "+
 			"failure of this step, not a defect in this tree; retry when a mirror answers.\n%s",
@@ -260,6 +262,24 @@ func classifyBaseBuildFailure(ctxErr, buildErr error, output string) error {
 			"the only network fetch this build performs — so this is a real build error, not a mirror or registry outage: %v\n%s",
 			buildErr, output)
 	}
+}
+
+// emittedApkFailureLine reports whether the build output contains the failure
+// line the apk layer's script PRINTED, as opposed to the signature's literal
+// bytes elsewhere in the log: BuildKit renders the failed RUN instruction in
+// its error output — `#N [2/2] RUN set -eu; ... echo "apk add FAILED after 3
+// attempts: ..." ...` and `process "/bin/sh -c ..." did not complete
+// successfully` — and that text contains "apk add FAILED" whether or not the
+// script ever emitted it. Both renders also contain the `echo` that produces
+// the line; the emitted line itself is bare output, so a line naming the
+// signature without "echo" is the script's own report.
+func emittedApkFailureLine(output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "apk add FAILED") && !strings.Contains(line, "echo") {
+			return true
+		}
+	}
+	return false
 }
 
 // pullRoundTripBase fetches the public base with bounded retry. The blips that

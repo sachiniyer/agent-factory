@@ -299,9 +299,35 @@ func TestBaseBuildFailureLabelsTheFailingStep(t *testing.T) {
 			want:   []string{"infrastructure budget", "slow alpine mirror"},
 		},
 		{
-			name:   "every mirror attempt exhausted",
-			output: "WARNING: fetching https://dl-cdn.alpinelinux.org/...\napk add FAILED after 3 attempts: git tmux bash openssh-server",
-			want:   []string{"mirror outage"},
+			name: "every mirror attempt exhausted",
+			// Realistic BuildKit shape: the instruction header and the
+			// process-error tail BOTH carry the signature's literal bytes
+			// inside the echoed command — the emitted line between them is
+			// what must decide it.
+			output: "#11 [2/2] RUN set -eu; for attempt in $(seq 1 3); do apk add --no-cache ... ; done; echo \"apk add FAILED after 3 attempts: git tmux bash openssh-server\" >&2; exit 1\n" +
+				"#11 40.12 WARNING: fetching https://dl-cdn.alpinelinux.org/... temporary error\n" +
+				"#11 40.13 apk add FAILED after 3 attempts: git tmux bash openssh-server\n" +
+				"#11 ERROR: process \"/bin/sh -c set -eu; for attempt ... echo \\\"apk add FAILED after 3 attempts: ...\\\" ...\" did not complete successfully: exit code: 1",
+			want: []string{"mirror outage"},
+		},
+		{
+			name: "the instruction echo alone is not an emission",
+			// BuildKit echoes the failed RUN instruction — which contains
+			// the signature's literal bytes — even when the script never
+			// emitted it (e.g. install succeeded, exporting the layer ran
+			// out of disk). The literal must not outvote the step.
+			output: "#11 [2/2] RUN set -eu; for attempt in $(seq 1 3); do apk add --no-cache ... ; done; echo \"apk add FAILED after 3 attempts: git tmux bash openssh-server\" >&2; exit 1\n" +
+				"#11 40.12 attempt 3 failed; trying fallback\n" +
+				"ERROR: failed to export layer: write /var/lib/docker: no space left",
+			want:     []string{"real build error"},
+			dontWant: []string{"a mirror outage"},
+		},
+		{
+			name: "the process-error tail alone is not an emission",
+			output: "#11 [2/2] RUN set -eu; ... ; echo \"apk add FAILED after 3 attempts: git\" >&2; exit 1\n" +
+				"#11 ERROR: process \"/bin/sh -c set -eu; ... ; echo \\\"apk add FAILED after 3 attempts: git\\\" >&2; exit 1\" did not complete successfully: exit code: 137",
+			want:     []string{"real build error"},
+			dontWant: []string{"a mirror outage"},
 		},
 		{
 			name:     "a lone one-mirror warning never decides it",
