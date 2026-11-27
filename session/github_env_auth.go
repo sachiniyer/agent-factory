@@ -53,7 +53,13 @@ func gitCloneCommand(cloneURL, destination string) string {
 	if key, helper, ok := githubEnvironmentCredential(cloneURL); ok {
 		command += "-c " + shellQuote(key+"="+helper) + " "
 	}
-	return command + "clone " + shellQuote(cloneURL) + " " + shellQuote(destination)
+	// --template= copies NO template into the clone's .git: an image's
+	// GIT_TEMPLATE_DIR, an init.templateDir config entry, or the image's
+	// compiled default template could otherwise write http.sslVerify=false
+	// (or hooks) into the clone's own config, where every later fetch and
+	// push would inherit it (measured on git 2.43 — the flag wins over the
+	// env, #7891 R2).
+	return command + "clone --template= " + shellQuote(cloneURL) + " " + shellQuote(destination)
 }
 
 func gitPersistCredentialCommand(cloneURL, repoPath string) string {

@@ -6,13 +6,50 @@ import (
 	"strings"
 )
 
+// prepareAfGitConfig creates the fresh global gitconfig af's own
+// credentialed git reads inside the container (#7891 R1): the provisioning
+// preamble exports GIT_CONFIG_GLOBAL at it and the agent-server's own git
+// is pointed at it through AF_GIT_CONFIG. An af-created file is the only
+// way to guarantee no image- or repo-authored config entry — http.sslVerify,
+// an include.path, a credential helper — reaches a git run carrying af's
+// credential. Skipped when the session carries no credential and when the
+// operator claimed the git-config route (no lockdown, no file).
+func (p *dockerProvisioner) prepareAfGitConfig() error {
+	if len(p.credentialMounts) == 0 && p.spec.Account.Dir == "" {
+		return nil
+	}
+	file, ok := p.afGitConfigLockdown(p.forwardedEnvNames())
+	if !ok {
+		return nil
+	}
+	out, err := p.execSessionSh(dockerShortStepTimeout, ": > "+shellQuote(file))
+	if err != nil {
+		return fmt.Errorf("backend=docker: creating af's gitconfig in the container failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // trustWorkspaceDirectories marks every directory safe in the CONTAINER's own
 // global git config, so the agent-server's worktree work over a possibly
 // foreign-owned bind mount does not trip on "dubious ownership". The config
 // lives in the container's home, not the operator's, so W2.7's rule about the
 // host's gitconfig does not apply; it runs before the clone, as it always did.
+//
+// Under the git-config lockdown the write splits: `--global` would resolve
+// the preamble's GIT_CONFIG_GLOBAL — af's own file, which DOES need the
+// mark for af's credentialed git — while the agent's own git keeps reading
+// the file master's write hit (agentGitConfigFile), which gets the same
+// mark through an explicit --file (#7891 R4).
 func (p *dockerProvisioner) trustWorkspaceDirectories() error {
-	out, err := p.execSessionSh(dockerShortStepTimeout, `git config --global --add safe.directory "*"`)
+	script := `git config --global --add safe.directory "*"`
+	if len(p.credentialMounts) > 0 || p.spec.Account.Dir != "" {
+		if afFile, ok := p.afGitConfigLockdown(p.forwardedEnvNames()); ok {
+			script = fmt.Sprintf(
+				`git config --file %s --add safe.directory "*" && git config --file %s --add safe.directory "*"`,
+				shellQuote(afFile), shellQuote(p.agentGitConfigFile()))
+		}
+	}
+	out, err := p.execSessionSh(dockerShortStepTimeout, script)
 	if err != nil {
 		return fmt.Errorf("backend=docker: git config in container failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -40,8 +77,15 @@ func (p *dockerProvisioner) cloneWorkspace() error {
 	script := gitCloneCommand(p.spec.CloneURL, dockerWorkspaceDir)
 	out, err := p.execSessionSh(dockerProvisionStepTimeout, script)
 	if err != nil {
-		return fmt.Errorf("backend=docker: cloning %q into the container failed (is git in the image, and the URL reachable from inside the container?): %s: %w",
-			p.spec.CloneURL, strings.TrimSpace(string(out)), err)
+		hint := ""
+		if len(p.credentialMounts) > 0 || p.spec.Account.Dir != "" {
+			// A TLS failure here most often means the clone needed a CA or
+			// git config the lockdown withheld — name the documented
+			// operator channel rather than leaving it to guess (#7891 R5).
+			hint = "; af locks down the clone's TLS trust and git config to af-created files on a credential-carrying session — if it needs a custom CA, proxy, or git config, mount the file with docker.run_args (-v) and forward the name through session_env_passthrough"
+		}
+		return fmt.Errorf("backend=docker: cloning %q into the container failed (is git in the image, and the URL reachable from inside the container?%s): %s: %w",
+			p.spec.CloneURL, hint, strings.TrimSpace(string(out)), err)
 	}
 	if credentialCommand := gitPersistCredentialCommand(p.spec.CloneURL, dockerWorkspaceDir); credentialCommand != "" {
 		out, err = p.execSessionSh(dockerShortStepTimeout, credentialCommand)

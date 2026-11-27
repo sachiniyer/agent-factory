@@ -78,7 +78,7 @@ branch before shutdown), not this server's.`,
 		// spawns: re-point to a real bundle, drop when the image has none,
 		// or keep the pin where a forwarded sibling claims the other slot
 		// (#7889 R1).
-		sessionenv.NeutralizeTrustPathPins(agentServerSessionEnv)
+		sessionenv.NeutralizeTrustPathPins()
 
 		repo, err := resolveAgentServerRepo(agentServerRepo)
 		if err != nil {

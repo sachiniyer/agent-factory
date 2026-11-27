@@ -289,13 +289,6 @@ func execInvocation(args []string) error {
 		filterAgent = ""
 	}
 	environ := FilterForCommand(os.Environ(), filterAgent, command, extras)
-	// The presence-read trust names are stripped before exec: no defined
-	// value is inert for them — git reads GIT_SSL_NO_VERIFY by getenv, so
-	// `=` and `=0` both disable verification (measured on git 2.43) — so an
-	// image value carried in the container env cannot be blanked, only
-	// removed. An extras-listed (operator-forwarded) name keeps its value
-	// (#7891).
-	environ = stripTrustPresenceNames(environ, extras)
 	// The pins are re-applied HERE, after filtering and immediately before
 	// exec — the same shape applyAccountScope gives the account boundary. The
 	// container env already holds them defined-and-empty, but tmux's
@@ -366,28 +359,6 @@ func reapplyEmptyPins(environ, pins []string) []string {
 			continue
 		}
 		out = append(out, name+"=")
-	}
-	return out
-}
-
-// stripTrustPresenceNames removes the presence-read trust names
-// (trustPresenceNames) from the child environment unless the operator
-// forwarded them — no defined value is inert for a name git reads by
-// getenv presence, so unset is the only neutral spelling.
-func stripTrustPresenceNames(environ, extras []string) []string {
-	forwarded := make(map[string]struct{}, len(extras))
-	for _, name := range extras {
-		forwarded[name] = struct{}{}
-	}
-	out := make([]string, 0, len(environ))
-	for _, entry := range environ {
-		name, _, _ := strings.Cut(entry, "=")
-		if _, strip := trustPresenceNames[name]; strip {
-			if _, kept := forwarded[name]; !kept {
-				continue
-			}
-		}
-		out = append(out, entry)
 	}
 	return out
 }

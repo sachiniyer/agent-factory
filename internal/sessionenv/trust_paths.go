@@ -75,6 +75,12 @@ var caBundleDirCandidates = []string{
 //   - DBUS_SESSION_BUS_ADDRESS / proxies / GH_HOST / AF_DAEMON_URL /
 //     AF_DAEMON_TOKEN: not filesystem paths — empty reads as unset for
 //     their readers.
+//   - GIT_SSL_CAINFO/GIT_SSL_CAPATH (and the proxy-connection twins git
+//     actually reads): path-valued like the pair above, but UNSET is the
+//     required treatment for git's own names — an env CAINFO outranks even
+//     a config-file http.sslCAInfo the operator forwarded, and a resolved
+//     platform bundle silently widens a dir-only forward (#7891 review).
+//     They are strip names (trustStripNames), never pinned or resolved.
 //
 // Resolving the falsy-safe names would also be wrong, not merely harmless:
 // a resolved platform bundle OUTRANKS an operator-forwarded sibling in the
@@ -87,15 +93,6 @@ var caBundleDirCandidates = []string{
 var trustPathPinCandidates = map[string][]string{
 	"SSL_CERT_FILE": caBundleFileCandidates,
 	"SSL_CERT_DIR":  caBundleDirCandidates,
-	// git's own CA-root spellings map to the same curl slots: CAINFO sets
-	// CAfile, CAPATH sets the hashed directory — and the measured empty
-	// read is a broken path ("Problem with the SSL CA cert"), the same
-	// class as SSL_CERT_FILE (#7891). GIT_PROXY_SSL_* are their
-	// proxy-connection twins.
-	"GIT_SSL_CAINFO":       caBundleFileCandidates,
-	"GIT_SSL_CAPATH":       caBundleDirCandidates,
-	"GIT_PROXY_SSL_CAINFO": caBundleFileCandidates,
-	"GIT_PROXY_SSL_CAPATH": caBundleDirCandidates,
 }
 
 // trustPathSiblingPairs maps a path-valued trust name to the sibling whose
@@ -105,54 +102,76 @@ var trustPathPinCandidates = map[string][]string{
 // (forwarded) member the pinned member must keep its defined-empty claim
 // rather than resolving: the resolved slot would silently widen the
 // operator's trust with the image's roots, while defined-empty contributes
-// none (#7889 R5 + mirror). git's CA pair is ASYMMETRIC (measured on git
-// 2.43): an empty CAPATH beside a valid CAINFO contributes nothing — the
-// guard stands — but an empty CAINFO poisons even a valid CAPATH
-// ("Problem with the SSL CA cert"), so CAINFO has no safe defined value
-// beside a forwarded sibling and is resolved/unset normally instead.
+// none (#7889 R5 + mirror). git's CA pair has NO safe direction — an empty
+// CAINFO poisons even a valid CAPATH (measured on git 2.43: "Problem with
+// the SSL CA cert"), which is why the git names are strip names instead.
 var trustPathSiblingPairs = map[string]string{
-	"SSL_CERT_FILE":        "SSL_CERT_DIR",
-	"SSL_CERT_DIR":         "SSL_CERT_FILE",
-	"GIT_SSL_CAPATH":       "GIT_SSL_CAINFO",
-	"GIT_PROXY_SSL_CAPATH": "GIT_PROXY_SSL_CAINFO",
+	"SSL_CERT_FILE": "SSL_CERT_DIR",
+	"SSL_CERT_DIR":  "SSL_CERT_FILE",
 }
 
-// trustPresenceNames are the trust-relevant env names with NO inert defined
-// value: git reads GIT_SSL_NO_VERIFY by getenv presence, so ANY defined
-// value — `=` and `=0` included, measured on git 2.43 — turns verification
-// off; defined-empty is the attack rather than the pin. GIT_SSL_CERT is the
-// converse: `=` makes curl eagerly fail loading a client cert, and no
-// platform default exists to resolve to; GIT_SSL_KEY and
-// GIT_SSL_CERT_PASSWORD only modulate a set CERT, and
-// GIT_HTTP_PROXY_AUTHMETHOD selects a proxy-auth scheme empty does not
-// name. These names are never `-e NAME=`'d; af strips them at the exec
-// shim, at agent-server startup, and in provisioning exec preambles —
-// unset is the only spelling that contributes nothing (#7891). An
-// operator-forwarded name stays verbatim.
-var trustPresenceNames = map[string]struct{}{
-	"GIT_SSL_NO_VERIFY":         {},
-	"GIT_PROXY_SSL_NO_VERIFY":   {},
-	"GIT_SSL_CERT":              {},
-	"GIT_SSL_KEY":               {},
-	"GIT_SSL_CERT_PASSWORD":     {},
-	"GIT_HTTP_PROXY_AUTHMETHOD": {},
+// trustStripNames are the git environment names af unsets at the one
+// af-controlled boundary the env filter does not already clean: the
+// provisioning exec preamble (#7891). The set is what `strings
+// git-remote-https` shows git 2.43 actually reading — not a superset:
+// GIT_PROXY_SSL_CAPATH, GIT_PROXY_SSL_NO_VERIFY and GIT_SSL_CERT_PASSWORD
+// appear in git's docs but are never consulted by the transport.
+//
+// No defined value is inert for these names, and resolving them is wrong:
+//   - GIT_SSL_NO_VERIFY is read by getenv presence — `=` and `=0` BOTH
+//     disable verification (measured on git 2.43).
+//   - GIT_SSL_CAINFO/GIT_SSL_CAPATH are path-valued, but an env CAINFO
+//     outranks even a config-file http.sslCAInfo the operator forwarded
+//     through GIT_CONFIG_COUNT pairs, and a resolved platform bundle
+//     widens a dir-only forward — UNSET at every hop is master's measured
+//     trust (the independent review's R3).
+//   - GIT_SSL_CERT fails eager client-cert loading on `=`; GIT_SSL_KEY
+//     only modulates a set CERT; GIT_SSL_VERSION/GIT_SSL_CIPHER_LIST can
+//     downgrade the TLS floor; the *_TYPE/*_PASSWORD_PROTECTED and
+//     GIT_PROXY_SSL_* twins shape the same handshake;
+//     GIT_HTTP_PROXY_AUTHMETHOD names an auth scheme empty does not;
+//     GIT_TEMPLATE_DIR copies image-authored files (hooks, config) into
+//     every clone and init.
+//
+// Everywhere af controls the environment EXCEPT the preamble these names
+// are already gone: the agent-server wrap and both pane shims build env
+// through FilterForCommand, which admits only allowlisted and
+// operator-forwarded names — none of these are allowlisted. A
+// DockerForwardNames-resolved (host-valued) name stays verbatim.
+var trustStripNames = map[string]struct{}{
+	"GIT_SSL_NO_VERIFY":                     {},
+	"GIT_SSL_CAINFO":                        {},
+	"GIT_SSL_CAPATH":                        {},
+	"GIT_SSL_CERT":                          {},
+	"GIT_SSL_KEY":                           {},
+	"GIT_SSL_VERSION":                       {},
+	"GIT_SSL_CIPHER_LIST":                   {},
+	"GIT_SSL_CERT_TYPE":                     {},
+	"GIT_SSL_KEY_TYPE":                      {},
+	"GIT_SSL_CERT_PASSWORD_PROTECTED":       {},
+	"GIT_PROXY_SSL_CAINFO":                  {},
+	"GIT_PROXY_SSL_CERT":                    {},
+	"GIT_PROXY_SSL_KEY":                     {},
+	"GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED": {},
+	"GIT_HTTP_PROXY_AUTHMETHOD":             {},
+	"GIT_TEMPLATE_DIR":                      {},
 }
 
-// TrustPresenceStripNames returns the sorted names af strips (rather than
-// pins) at af-controlled env boundaries — the trust names no defined value
-// can render inert.
-func TrustPresenceStripNames() []string {
-	out := make([]string, 0, len(trustPresenceNames))
-	for name := range trustPresenceNames {
+// TrustStripNames returns the sorted git env names af unsets in
+// provisioning exec preambles — the names no defined value can render
+// inert and no resolution can honour (#7891).
+func TrustStripNames() []string {
+	out := make([]string, 0, len(trustStripNames))
+	for name := range trustStripNames {
 		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// TrustPresenceName reports whether name is one af strips rather than pins.
-func TrustPresenceName(name string) bool {
-	_, ok := trustPresenceNames[name]
+// TrustStripName reports whether name is one af unsets rather than pins.
+func TrustStripName(name string) bool {
+	_, ok := trustStripNames[name]
 	return ok
 }
 
@@ -180,8 +199,8 @@ func TrustPathPinNames() []string {
 var trustPathStat = os.Stat
 
 // resolveTrustPathValue returns the first candidate that exists in the
-// container for a path-valued pin name — a directory for the CAPATH names,
-// a file for the rest — or "" when no candidate exists (or the name is
+// container for a path-valued pin name — a directory for SSL_CERT_DIR,
+// a file for SSL_CERT_FILE — or "" when no candidate exists (or the name is
 // not a path-valued pin).
 func resolveTrustPathValue(name string) string {
 	candidates, isPathPin := trustPathPinCandidates[name]
@@ -233,20 +252,7 @@ func resolveTrustPathPin(name string) (entry string, ok bool) {
 // restore the platform default for OpenSSL and openssl-probe alike, and
 // resolved would add the image's roots outright (#7889 R5 + its mirror).
 // The empty slot keeps its defined-empty shape then, deliberately.
-//
-// forwarded is the operator's session_env_passthrough claim list: a
-// presence-read name (trustPresenceNames) the operator claimed keeps its
-// value verbatim; any other defined instance is unset — no defined value
-// is inert for those names (#7891).
-func NeutralizeTrustPathPins(forwarded []string) {
-	for _, name := range TrustPresenceStripNames() {
-		if slices.Contains(forwarded, name) {
-			continue
-		}
-		if _, ok := os.LookupEnv(name); ok {
-			os.Unsetenv(name)
-		}
-	}
+func NeutralizeTrustPathPins() {
 	// Snapshot sibling claims before the loop — resolving one member would
 	// otherwise read as a claim and guard the other, where the operator's
 	// forwarded (pre-existing non-empty) value is what the guard protects.

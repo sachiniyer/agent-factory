@@ -203,9 +203,10 @@ func TestRunContainer_ReassertsFirstPartyEndpointAndPinsLateNames(t *testing.T) 
 // TestRunContainer_ReassertsGitConfigRoots is the argv pin for the
 // path-valued names (#7531 review): GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are
 // re-asserted to working paths under the boundary's own roots — never
-// defined-empty, which would break `git config --global` — and
-// GIT_CONFIG_NOSYSTEM is re-asserted to 1 so the image's /etc/gitconfig
-// stays out of every git run (#7891).
+// defined-empty, which would break `git config --global`. These are the
+// AGENT's roots: af's own git scope instead reads the af-owned file the
+// AF_GIT_CONFIG marker names (#7891 R1/R4 — NOSYSTEM keeps master's
+// defined-empty pin for the agent's env).
 func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
 	runCalled, _, runArgv := provisionDockerCredentialGrant(t, tmux.ProgramGemini, nil)
 	require.True(t, runCalled)
@@ -219,10 +220,10 @@ func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
 		"/dev/null fails git config writes with EACCES — the re-assert must be a writable location")
 	require.Contains(t, joined, "GIT_CONFIG_SYSTEM=/etc/gitconfig",
 		"the system config root must be re-asserted to git's own default path")
-	require.Contains(t, joined, "-e\x00GIT_CONFIG_NOSYSTEM=1\x00",
-		"GIT_CONFIG_NOSYSTEM re-asserts to 1 — the image's /etc/gitconfig must stay out of af's git (#7891)")
-	require.NotContains(t, joined, "-e\x00GIT_CONFIG_NOSYSTEM=\x00",
-		"a defined-empty GIT_CONFIG_NOSYSTEM is falsy and leaves the image's system gitconfig live")
+	require.Contains(t, joined, "-e\x00GIT_CONFIG_NOSYSTEM=\x00",
+		"GIT_CONFIG_NOSYSTEM keeps master's defined-empty pin for the agent's env (#7891 R4)")
+	require.Contains(t, joined, "-e\x00AF_GIT_CONFIG=/root/.af-gitconfig\x00",
+		"the marker must carry the af-owned global file to the agent-server's own git (#7891 R1)")
 	// The re-asserted path lives under the re-asserted HOME.
 	for i, arg := range runArgv {
 		if strings.HasPrefix(arg, "GIT_CONFIG_GLOBAL=") {
@@ -231,6 +232,20 @@ func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
 				"the global config root must point at a writable file under the session home: %s", arg)
 		}
 	}
+}
+
+// The AF_GIT_CONFIG marker lifts when the operator forwards a
+// git-config-route name WITH a host value — the all-or-nothing claim —
+// while a claimed-but-hostless name emits no -e and the lockdown stands
+// (#7891 R6).
+func TestRunContainer_AfGitConfigMarkerFollowsTheClaim(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/operator/global.gitconfig")
+	runCalled, _, runArgv := provisionDockerCredentialGrantPassthrough(t, tmux.ProgramGemini,
+		nil, []string{"GIT_CONFIG_GLOBAL"})
+	require.True(t, runCalled)
+	joined := strings.Join(runArgv, "\x00")
+	require.NotContains(t, joined, "AF_GIT_CONFIG",
+		"a forwarded config-route name claims the whole route — no marker may be emitted")
 }
 
 // TestRunContainer_OperatorForwardKeepsFirstPartyEndpoint is the

@@ -356,19 +356,27 @@ user's real home and mounts it only if it exists, so:
       environment-config names `GIT_CONFIG_COUNT` and
       `GIT_CONFIG_PARAMETERS` (git parses `""` as count 0 — making every
       indexed `GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` pair inert — and as
-      zero `-c` pairs). git's own TLS names get the same classification
-      (#7891): `GIT_SSL_CAINFO`/`GIT_SSL_CAPATH` and their
-      `GIT_PROXY_SSL_*` twins are path-valued — `=` is a broken CA path
-      (measured on git 2.43) — so they pin and resolve like
-      `SSL_CERT_FILE`/`SSL_CERT_DIR`; the presence-read names
-      (`GIT_SSL_NO_VERIFY`, which git reads by getenv so `=` and `=0`
-      disable verification alike; `GIT_SSL_CERT`, whose `=` fails the
-      eager client-cert load; `GIT_SSL_KEY`, `GIT_SSL_CERT_PASSWORD`,
-      `GIT_PROXY_SSL_NO_VERIFY`, `GIT_HTTP_PROXY_AUTHMETHOD`) are never
-      pinned — af strips them at every env boundary it controls, since no
-      defined value is inert — so the loader finds every link claimed and the
-      agent's own read falls back to the safe
-      default. Every pinned or re-asserted name is one the agent-server's
+      zero `-c` pairs). git's own TLS names are classified as a group
+      (#7891) — the names git 2.43 actually reads (`GIT_SSL_NO_VERIFY`,
+      `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`, `GIT_SSL_CERT`, `GIT_SSL_KEY`,
+      `GIT_SSL_CERT_TYPE`, `GIT_SSL_KEY_TYPE`,
+      `GIT_SSL_CERT_PASSWORD_PROTECTED`, `GIT_SSL_VERSION`,
+      `GIT_SSL_CIPHER_LIST`, the `GIT_PROXY_SSL_*` twins,
+      `GIT_HTTP_PROXY_AUTHMETHOD`, and `GIT_TEMPLATE_DIR`) are never
+      pinned and never resolved: `GIT_SSL_NO_VERIFY=` itself disables
+      verification (git reads it by getenv, so `=0` disables too), an env
+      `GIT_SSL_CAINFO` outranks a config-file CA the operator forwarded,
+      and a resolved bundle widens a dir-only forward — so the only safe
+      spelling is absent. The provisioning preamble unsets each one an
+      image or `docker.run_args` could set, and every filtered hop simply
+      drops them — while a name the operator forwards with a host value
+      reaches git verbatim. The agent's own git in the pane keeps master's
+      pins and config writes (safe.directory, identity) unchanged — the
+      lockdown scopes to af's own git only, and the residual there is
+      #7528: af's credential helper is persisted into the clone's
+      `.git/config`, so the agent's own git carries af's credential too;
+      closing that is its own issue. Every pinned or re-asserted name is
+      one the agent-server's
       exec filter admits, so the boundary survives the hop to the agent
       process itself.
 
@@ -390,13 +398,22 @@ user's real home and mounts it only if it exists, so:
       *inside* those scripts (`git`, `cat`, `chmod`) resolve through the
       `PATH` re-asserted above — the image's own binaries. Each script also
       opens by unsetting the session's trust names — the path-valued pins
-      (`SSL_CERT_FILE`/`SSL_CERT_DIR` and git's `*_SSL_CA*`) whose measured
-      empty read is a path, and the presence-read git names
-      (`GIT_SSL_NO_VERIFY` et al.) no defined value can neutralize — so no
-      provisioning child can inherit a defined-empty name an OpenSSL-family
-      TLS stack would load as zero roots, or an image's claim that turns
-      verification off for af's credentialed clone and fetch (#7889,
-      #7891). An
+      (`SSL_CERT_FILE`/`SSL_CERT_DIR`) whose measured empty read is a
+      path, and every git TLS/env name (git's real env set — see above)
+      no defined or resolved value is safe for — so no provisioning child
+      can inherit a defined-empty name an OpenSSL-family TLS stack would
+      load as zero roots, or an image's claim that turns verification off
+      for af's credentialed clone and fetch (#7889, #7891). The scripts
+      then point af's OWN git at config files af created and nothing
+      else: `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL` at a file af
+      creates fresh in the session home (only safe.directory written into
+      it), `GIT_CONFIG_SYSTEM`/`XDG_CONFIG_HOME` dropped, and `git clone
+      --template=` so no image template writes into the clone's
+      `.git/config`; an `AF_GIT_CONFIG` marker env carries the same roots
+      to the agent-server's own fetch/push/worktree git. The lockdown
+      lifts only when the operator forwards a git-config-route name
+      (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM`)
+      with a host value — an all-or-nothing claim on the route. An
       operator-FORWARDED trust name is not a pin and is never unset — the
       clone needs that CA to reach a private-CA remote.
     - At the exec itself: the pins also reach the in-container agent-server,

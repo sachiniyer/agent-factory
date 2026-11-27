@@ -215,9 +215,6 @@ func credentialMountDeniedReason(agent, name string) (string, bool) {
 	if _, ok := credentialMountSharedConfigRootNames[name]; ok {
 		return "it can redirect where the agent reads credential-bearing state", true
 	}
-	if name == "GIT_CONFIG_NOSYSTEM" {
-		return "it re-enables the image's /etc/gitconfig, which can set http.sslVerify or a repo-chosen trust root for af's credentialed git — af re-asserts it to 1 after run_args", true
-	}
 	if _, ok := credentialMountSharedProgramEntries[name]; ok {
 		return "it chooses which program af's tools or the agent run in the container, and af re-asserts a working default after run_args", true
 	}

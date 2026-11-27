@@ -291,6 +291,41 @@ func (e endedByContext) Error() string   { return e.err.Error() }
 func (e endedByContext) Unwrap() []error { return []error{e.err, errEndedByContext} }
 
 func (g *GitWorktree) gitCommandEnvironment() []string {
-	return append(sessionenv.Filter(os.Environ(), "", g.HookEnvironment()),
+	return append(afGitScopedEnvironment(sessionenv.Filter(os.Environ(), "", g.HookEnvironment())),
 		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+}
+
+// afGitConfigEnvName marks "af's own git reads only config files af
+// created" on a credential-carrying docker session: the runtime emits it
+// into the container env with the af-owned global gitconfig path, and the
+// agent-server's env filter admits it, so it is present exactly where the
+// lockdown was applied for provisioning children (#7891 R1). It is unset
+// on the host daemon, on plain sessions, and whenever the operator claimed
+// the git-config route by forwarding one of its names — in all of which
+// git keeps its ambient config roots unchanged.
+const afGitConfigEnvName = "AF_GIT_CONFIG"
+
+// afGitScopedEnvironment points git's config reads at the af-owned global
+// file when the lockdown marker is set: the system file off, the global
+// file replaced, and every redirect name (GIT_CONFIG_SYSTEM,
+// XDG_CONFIG_HOME, an ambient GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM)
+// dropped so neither image nor run_args can relocate the read. The clone's
+// own .git/config is af-created via `git clone --template=`, and env
+// config (GIT_CONFIG_COUNT pairs) still applies when the operator
+// forwarded it — ambient env is the operator's claim.
+func afGitScopedEnvironment(environ []string) []string {
+	file := os.Getenv(afGitConfigEnvName)
+	if file == "" {
+		return environ
+	}
+	out := make([]string, 0, len(environ)+2)
+	for _, entry := range environ {
+		name, _, _ := strings.Cut(entry, "=")
+		switch name {
+		case "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME":
+			continue
+		}
+		out = append(out, entry)
+	}
+	return append(out, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+file)
 }

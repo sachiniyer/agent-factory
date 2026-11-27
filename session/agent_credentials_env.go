@@ -165,49 +165,53 @@ var credentialMountReassertedNames = map[string]struct{}{
 	"GIT_CONFIG_SYSTEM": {},
 	"SHELL":             {},
 	"PATH":              {},
+	// AF_GIT_CONFIG selects the global gitconfig af's OWN credentialed git
+	// reads inside the container (the lockdown in trustPathUnpinnedScript
+	// and gitCommandEnvironment, #7891). A repo value would point af's git
+	// at a repository file, so it is refused to run_args and pin-exempt:
+	// af emits the real path itself where the lockdown applies.
+	"AF_GIT_CONFIG": {},
 }
 
 // credentialMountSharedConfigRootNames are common-allowlist names that
 // relocate where a tool reads credential-bearing state and pin empty
 // safely: gpg's keyring root and the runtime directory agent/keyring
-// sockets are discovered under fall back to their defaults when empty.
-// The path-valued git config roots are in credentialMountReassertedNames
-// instead — an empty path breaks the program, not just neutralizes it —
-// and GIT_CONFIG_NOSYSTEM is in credentialMountSharedProgramEntries,
-// re-asserted to 1 so an image's /etc/gitconfig never reaches any git af
-// or the agent runs (#7891).
+// sockets are discovered under fall back to their defaults when empty, and
+// GIT_CONFIG_NOSYSTEM is a boolean where empty is the same as unset. The
+// path-valued git config roots are in credentialMountReassertedNames
+// instead — an empty path breaks the program, not just neutralizes it.
 var credentialMountSharedConfigRootNames = map[string]struct{}{
-	"GNUPGHOME":       {},
-	"XDG_RUNTIME_DIR": {},
+	"GIT_CONFIG_NOSYSTEM": {},
+	"GNUPGHOME":           {},
+	"XDG_RUNTIME_DIR":     {},
 }
 
-// credentialMountSharedGitTLSEnvNames are the git env names that change a
-// provisioning child's TLS trust or verification — git hands them to curl,
-// and af's credentialed clone, credential-config and restore fetch all run
-// `git` over https inside the container (#7891). They split by what a
-// defined-empty value does (measured on git 2.43):
-//   - The CA-root names GIT_SSL_CAINFO/GIT_SSL_CAPATH (and their
-//     proxy-connection twins GIT_PROXY_SSL_*) are path-valued: `=` is a
-//     broken path ("Problem with the SSL CA cert"), so they pin
-//     defined-and-empty and resolve like SSL_CERT_FILE/SSL_CERT_DIR —
-//     trustPathPinCandidates, same sibling-pair rules.
-//   - The presence names are never pinned: GIT_SSL_NO_VERIFY is read by
-//     getenv, so `=` and `=0` BOTH disable verification; GIT_SSL_CERT=
-//     fails eager client-cert loading and no platform default exists;
-//     GIT_SSL_KEY/GIT_SSL_CERT_PASSWORD only modulate a set CERT; and
-//     GIT_HTTP_PROXY_AUTHMETHOD names an auth scheme empty does not.
-//     af strips them instead (sessionenv.TrustPresenceStripNames).
+// credentialMountSharedGitTLSEnvNames are the env names git 2.43 reads
+// that change TLS trust, verification, the handshake, or template content
+// — af's credentialed clone, credential-config and restore fetch all run
+// `git` over https inside the container (#7891). None can be pinned or
+// resolved (sessionenv.trustStripNames records the per-name measured
+// reads): `GIT_SSL_NO_VERIFY=` itself disables verification, an env CAINFO
+// outranks a config-file CA the operator forwarded, and a resolved bundle
+// widens a dir-only forward — so every member is UNSET at the provisioning
+// preamble instead, and simply absent at every filtered hop.
 var credentialMountSharedGitTLSEnvNames = map[string]struct{}{
-	"GIT_SSL_NO_VERIFY":         {},
-	"GIT_PROXY_SSL_NO_VERIFY":   {},
-	"GIT_SSL_CAINFO":            {},
-	"GIT_SSL_CAPATH":            {},
-	"GIT_PROXY_SSL_CAINFO":      {},
-	"GIT_PROXY_SSL_CAPATH":      {},
-	"GIT_SSL_CERT":              {},
-	"GIT_SSL_KEY":               {},
-	"GIT_SSL_CERT_PASSWORD":     {},
-	"GIT_HTTP_PROXY_AUTHMETHOD": {},
+	"GIT_SSL_NO_VERIFY":                     {},
+	"GIT_SSL_CAINFO":                        {},
+	"GIT_SSL_CAPATH":                        {},
+	"GIT_SSL_CERT":                          {},
+	"GIT_SSL_KEY":                           {},
+	"GIT_SSL_VERSION":                       {},
+	"GIT_SSL_CIPHER_LIST":                   {},
+	"GIT_SSL_CERT_TYPE":                     {},
+	"GIT_SSL_KEY_TYPE":                      {},
+	"GIT_SSL_CERT_PASSWORD_PROTECTED":       {},
+	"GIT_PROXY_SSL_CAINFO":                  {},
+	"GIT_PROXY_SSL_CERT":                    {},
+	"GIT_PROXY_SSL_KEY":                     {},
+	"GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED": {},
+	"GIT_HTTP_PROXY_AUTHMETHOD":             {},
+	"GIT_TEMPLATE_DIR":                      {},
 }
 
 // credentialMountSharedProgramEntries are common-allowlist names that select
@@ -236,19 +240,13 @@ var credentialMountSharedGitTLSEnvNames = map[string]struct{}{
 //     an empty PAGER runs `sh -c ""`, which exits 0 and swallows the
 //     output entirely.
 var credentialMountSharedProgramEntries = map[string]string{
-	// GIT_CONFIG_NOSYSTEM is no program selector, but it takes the same
-	// shape — a REAL re-asserted value, never an empty pin: =1 removes the
-	// image's /etc/gitconfig from every git run in the container, closing
-	// the http.sslVerify/sslCAInfo route the system file offered a repo
-	// image (#7891). Empty was falsy-safe but left the image file live.
-	"GIT_CONFIG_NOSYSTEM": "1",
-	"GIT_SSH":             "ssh",
-	"GIT_SSH_COMMAND":     "ssh",
-	"GIT_ASKPASS":         "/bin/false",
-	"SSH_ASKPASS":         "/bin/false",
-	"EDITOR":              "/bin/false",
-	"VISUAL":              "/bin/false",
-	"PAGER":               "/bin/cat",
+	"GIT_SSH":         "ssh",
+	"GIT_SSH_COMMAND": "ssh",
+	"GIT_ASKPASS":     "/bin/false",
+	"SSH_ASKPASS":     "/bin/false",
+	"EDITOR":          "/bin/false",
+	"VISUAL":          "/bin/false",
+	"PAGER":           "/bin/cat",
 }
 
 // credentialMountSharedAFStateNames are af's own state and control-plane
@@ -564,12 +562,13 @@ func credentialMountPinnedNames(agent string, passthrough []string) []string {
 		if _, reasserted := credentialMountReassertedNames[name]; reasserted {
 			continue
 		}
-		// The presence-read trust names are refused to run_args but never
-		// pinned: no defined value is inert for them — `GIT_SSL_NO_VERIFY=`
-		// would itself disable verification (getenv presence read, measured
-		// on git 2.43) — so they are stripped at the af-controlled env
-		// boundaries instead (#7891).
-		if sessionenv.TrustPresenceName(name) {
+		// The git trust names are refused to run_args but never pinned:
+		// no defined value is inert for them — `GIT_SSL_NO_VERIFY=` would
+		// itself disable verification (getenv presence read, measured on
+		// git 2.43), and a resolved CA name outranks or widens an
+		// operator-forwarded trust — so they are unset at the provisioning
+		// preamble and simply absent at every filtered hop (#7891).
+		if sessionenv.TrustStripName(name) {
 			continue
 		}
 		// The loader names are refused to run_args but never pinned: an

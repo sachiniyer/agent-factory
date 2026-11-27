@@ -596,6 +596,9 @@ func (p *dockerProvisioner) provisionSteps() (ProvisionResult, error) {
 	if err := p.prepareContainerUser(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpRootExec)
 	}
+	if err := p.prepareAfGitConfig(); err != nil {
+		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
+	}
 	if err := p.trustWorkspaceDirectories(); err != nil {
 		return ProvisionResult{}, dockerStepErr(err, dockerOpSessionExec)
 	}
@@ -711,8 +714,7 @@ func (p *dockerProvisioner) runContainer() error {
 	// Defined-and-empty is the same shape the account boundary installs: a
 	// workspace config loader treats it as set and does not supply the repo's
 	// value (#7526). SSL_CERT_FILE/SSL_CERT_DIR keep that shape only here —
-	// `docker run` cannot unset an image ENV — and are unset in af's
-	// provisioning execs and resolved at the exec shim (#7889).
+	// `docker run` cannot unset an image ENV (#7889).
 	for _, name := range p.credentialEnvPins {
 		args = append(args, "-e", name+"=")
 	}
@@ -776,10 +778,7 @@ func (p *dockerProvisioner) runContainer() error {
 				args = append(args, "-e", "PATH="+imagePATH)
 			}
 		}
-		// Keep the image's /etc/gitconfig out of every git run af or the agent starts (#7891).
-		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_NOSYSTEM") {
-			args = append(args, "-e", "GIT_CONFIG_NOSYSTEM=1")
-		}
+		args = append(args, p.afGitConfigMarkerArgs(forwardedNames)...)
 	} else if len(p.credentialMounts) > 0 {
 		// For credential-mount sessions, credential files are mounted at paths
 		// relative to dockerContainerHome (/root). docker.run_args is repo-controlled
@@ -839,17 +838,18 @@ func (p *dockerProvisioner) runContainer() error {
 		}
 		// GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM relocate git's config files —
 		// a repo-chosen file can set a credential helper, proxy, or trust
-		// root. Defined-empty is not neutral for a path-valued name:
-		// measured on git 2.43, `git config --global` fails writing to an
-		// empty path and /dev/null fails with EACCES, so af re-asserts each
-		// to the location git would consult under the boundary's own roots —
-		// defined (no late loader can claim it) and working (#7531).
+		// root. Defined-empty is not neutral for a path-valued name: `git
+		// config --global` fails writing to an empty path and /dev/null fails
+		// with EACCES (measured on git 2.43), so af re-asserts each to the
+		// location git would consult under the boundary's own roots (#7531).
 		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_GLOBAL") {
 			args = append(args, "-e", "GIT_CONFIG_GLOBAL="+home+"/.gitconfig")
 		}
 		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_SYSTEM") {
 			args = append(args, "-e", "GIT_CONFIG_SYSTEM=/etc/gitconfig")
 		}
+		// The GIT_CONFIG_* -e's above are the AGENT's own roots, as on master.
+		args = append(args, p.afGitConfigMarkerArgs(forwardedNames)...)
 		// Value re-asserts for the names an empty pin would break: late-loaded
 		// endpoint names whose agent treats defined-empty as a real value
 		// rather than falling back to its default (gemini reads

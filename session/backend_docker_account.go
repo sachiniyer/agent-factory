@@ -89,9 +89,11 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 	// a "claim" — so session_env_passthrough is the only channel they take.
 	// Agents that pin nothing keep their run_args: the GIT_CONFIG_* entries
 	// claude and codex use for their safe.directory workaround are refused
-	// only where the pin exists to defend (#7555). The indexed-pair prefixes
-	// join the refusal wherever a count can activate them — a forwarded
-	// GIT_CONFIG_COUNT would otherwise animate repository-supplied pairs.
+	// only where the env drops the name to defend af's own git (#7555).
+	// Where the agent's set does carry the name, a repo value aimed at af's
+	// credentialed git is silently dropped — the provisioning preamble
+	// unsets the whole family — while a repo count would animate
+	// repository-supplied indexed pairs for that agent's env (#7891 R5).
 	loaderDenied := sessionenv.AccountLoaderFilledNames(agent)
 	pairGuard := slices.Contains(loaderDenied, "GIT_CONFIG_COUNT")
 	// Every name the operator claims is checked first: the agent-server's
@@ -118,9 +120,15 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because it can override the selected identity",
 				name, agent)
 		}
-		if name == "GIT_CONFIG_COUNT" && pairGuard {
+		// The env-config injection names are refused where af won't honour
+		// them for this agent (#7891 R5): af's provisioning preamble unsets
+		// them for its own credentialed git, so a repo value aimed at the
+		// clone is silently dropped — and a repo count would animate
+		// repository-supplied indexed pairs. Agents whose env admits the
+		// family (claude/codex's safe.directory workaround, #7555) keep it.
+		if pairGuard && (name == "GIT_CONFIG_COUNT" || name == "GIT_CONFIG_PARAMETERS") {
 			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because af pins it defined-empty at the exec boundary unless the operator forwarded it — forward it through session_env_passthrough instead, together with the GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n pairs the count activates (git fails the count fatally when the pairs are absent)",
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because af unsets it for its own credentialed git unless the operator forwarded it — forward it through session_env_passthrough instead, together with the GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n pairs a count activates (git fails the count fatally when the pairs are absent)",
 				name, agent)
 		}
 		if slices.Contains(loaderDenied, name) {
@@ -398,16 +406,16 @@ func accountDockerProgramChoiceReason(name string) (string, bool) {
 // authenticated traffic to a server it controls.
 //
 // The config-root names the credential-mount guard also refuses
-// (credentialMountSharedConfigRootNames — GNUPGHOME, XDG_RUNTIME_DIR — and
-// the re-asserted GIT_CONFIG_NOSYSTEM) are deliberately NOT refused here.
-// Their because-clause ("relocates the account's credential-bearing state
-// to a path the repository controls") does not hold on the account path:
-// af's own value is the credential-bearing state af emits last — including
-// the GIT_CONFIG_NOSYSTEM=1 re-assert (#7891), which dominates a repo
-// spelling anyway — and refusing them would over-close names master
-// accepts. The credential-mount guard keeps its own refusal because the
-// mounted credential file is the state a config-root name can redirect
-// there.
+// (credentialMountSharedConfigRootNames — GNUPGHOME, XDG_RUNTIME_DIR,
+// GIT_CONFIG_NOSYSTEM) are deliberately NOT refused here. Their
+// because-clause ("relocates the account's credential-bearing state to a
+// path the repository controls") does not hold on the account path: af's
+// own value is the credential-bearing state af emits last — and under
+// #7891 af's own git reads its af-created file via the AF_GIT_CONFIG
+// lockdown rather than a repo-visible root anyway — so refusing them
+// would over-close names master accepts. The credential-mount guard keeps
+// its own refusal because the mounted credential file is the state a
+// config-root name can redirect there.
 //
 // The refusal is repo-run_args-only, never the operator's own claim: these
 // names are NOT in accountDockerDeniedNames (which also filters
@@ -424,6 +432,9 @@ func accountDockerProgramChoiceReason(name string) (string, bool) {
 func accountDockerRoutingReason(agent, name string) (string, bool) {
 	if _, ok := credentialMountSharedGitTLSEnvNames[name]; ok {
 		return "it changes the TLS trust or verification of af's credentialed git runs (clone, credential config, restore fetch) inside the container", true
+	}
+	if name == "AF_GIT_CONFIG" {
+		return "it selects the global gitconfig af's own credentialed git reads inside the container — af emits its own path (#7891)", true
 	}
 	if _, ok := credentialMountSharedRoutingNames[name]; ok {
 		return "it changes where the agent sends the account credential — a repo-supplied endpoint, proxy, or trust root routes the account's authenticated traffic to a server the repository controls", true
@@ -459,9 +470,11 @@ var accountRoutingPathValuedNames = map[string]struct{}{
 	"GIT_SSL_CAINFO":           {},
 	"GIT_SSL_CAPATH":           {},
 	"GIT_PROXY_SSL_CAINFO":     {},
-	"GIT_PROXY_SSL_CAPATH":     {},
+	"GIT_PROXY_SSL_CERT":       {},
+	"GIT_PROXY_SSL_KEY":        {},
 	"GIT_SSL_CERT":             {},
 	"GIT_SSL_KEY":              {},
+	"GIT_TEMPLATE_DIR":         {},
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
