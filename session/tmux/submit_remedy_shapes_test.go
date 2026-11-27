@@ -17,6 +17,12 @@ const (
 	codexChip  = "[Pasted Content 3207 chars]"
 )
 
+// chipBlockForTest derives the boundaryBlock remedyStrandedSubmit computes
+// for a fixture whose only bound evidence is this delivery's chip.
+func chipBlockForTest(boundary, chipText string) boundaryBlock {
+	return deliveryBoundaryBlock(boundary, deliveryProbe{}, stagedEvidence{chip: true, chipText: chipText})
+}
+
 func claudeInsertPane(composer string) string {
 	return strings.Join([]string{
 		"✻ Cogitated for 4m 47s · done 3:53 AM",
@@ -67,29 +73,30 @@ func TestChipComposerVerdictNamesWhyAShapeIsWithheld(t *testing.T) {
 
 	// Claude's ordinary composer hides its cursor: unprovable by design, and the
 	// reason says so rather than leaving a generic "not a still, single-chip composer".
-	ok, why := stillChipComposer(claude, claude, paneCursorState{Visible: false}, chipText)
+	ok, why := stillChipComposer(claude, chipBlockForTest(claude, chipText), claude, paneCursorState{Visible: false}, chipText)
 	if ok || !strings.Contains(why, "cursor is hidden") {
 		t.Fatalf("hidden cursor: ok=%v why=%q, want a withheld verdict naming the hidden cursor", ok, why)
 	}
 	// With a visible cursor parked after the chip the very same pane IS provable: the
 	// INSERT line below the composer is not read as foreign composer content.
 	row := "❯ " + claudeChip
-	ok, why = stillChipComposer(claude, claude, paneCursorState{Visible: true, Row: 3, Col: len([]rune(row))}, chipText)
+	ok, why = stillChipComposer(claude, chipBlockForTest(claude, chipText), claude, paneCursorState{Visible: true, Row: 3, Col: len([]rune(row))}, chipText)
 	if !ok {
 		t.Fatalf("visible cursor on the chip row: withheld (%s); the INSERT status line must not defeat the check", why)
 	}
 
 	// Codex with its warning footer a blank row below the composer is provable...
 	codex := codexWarningPane("› "+codexChip, true)
+	codexChipText := normalizeDelivery(codexChip)
 	codexRow := "› " + codexChip
-	ok, why = stillChipComposer(codex, codex, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, normalizeDelivery(codexChip))
+	ok, why = stillChipComposer(codex, chipBlockForTest(codex, codexChipText), codex, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, codexChipText)
 	if !ok {
 		t.Fatalf("codex composer with a warning footer: withheld (%s)", why)
 	}
 	// ...while a footer drawn with no blank row between it and the composer is
 	// composer content as far as the region goes, and the reason names that.
 	tight := codexWarningPane("› "+codexChip, false)
-	ok, why = stillChipComposer(tight, tight, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, normalizeDelivery(codexChip))
+	ok, why = stillChipComposer(tight, chipBlockForTest(tight, codexChipText), tight, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, codexChipText)
 	if ok || !strings.Contains(why, "not only the bound chip") {
 		t.Fatalf("footer without a gap: ok=%v why=%q, want it named as foreign composer content", ok, why)
 	}
@@ -132,7 +139,7 @@ func TestStillChipComposerAcceptsWrappedChipTailCursor(t *testing.T) {
 		"07 chars]",
 	}, "\n") + "\n"
 	tail := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("07 chars]")}
-	if ok, why := stillChipComposer(twoRow, twoRow, tail, chipText); !ok {
+	if ok, why := stillChipComposer(twoRow, chipBlockForTest(twoRow, chipText), twoRow, tail, chipText); !ok {
 		t.Fatalf("wrapped chip, cursor at the wrapped tail: ok=false why=%q, want ok=true (the cursor is exactly where an undisturbed draft leaves it for a wrapped chip)", why)
 	}
 
@@ -146,19 +153,19 @@ func TestStillChipComposerAcceptsWrappedChipTailCursor(t *testing.T) {
 		"07 chars]",
 	}, "\n") + "\n"
 	tail3 := paneCursorState{Visible: true, Row: 4, Col: contentEndCol("07 chars]")}
-	if ok, why := stillChipComposer(threeRow, threeRow, tail3, chipText); !ok {
+	if ok, why := stillChipComposer(threeRow, chipBlockForTest(threeRow, chipText), threeRow, tail3, chipText); !ok {
 		t.Fatalf("wrapped chip (three rows), cursor at the wrapped tail: ok=false why=%q, want ok=true", why)
 	}
 	// ...while a cursor parked at the content end of a MIDDLE wrapped row is
 	// rejected: an undisturbed draft never leaves the cursor mid-chip.
 	middle := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("Content 32")}
-	if ok, why := stillChipComposer(threeRow, threeRow, middle, chipText); ok {
+	if ok, why := stillChipComposer(threeRow, chipBlockForTest(threeRow, chipText), threeRow, middle, chipText); ok {
 		t.Fatalf("cursor on a middle wrapped row: ok=true why=%q, want ok=false (the cursor is mid-chip, not at the tail)", why)
 	}
 
 	// A cursor on the wrapped tail row but at the wrong column is rejected.
 	wrongCol := paneCursorState{Visible: true, Row: 3, Col: 5}
-	if ok, why := stillChipComposer(twoRow, twoRow, wrongCol, chipText); ok {
+	if ok, why := stillChipComposer(twoRow, chipBlockForTest(twoRow, chipText), twoRow, wrongCol, chipText); ok {
 		t.Fatalf("wrapped chip, cursor at the wrong column on the tail row: ok=true why=%q, want ok=false", why)
 	}
 
@@ -171,7 +178,7 @@ func TestStillChipComposerAcceptsWrappedChipTailCursor(t *testing.T) {
 		"› " + codexChip,
 	}, "\n") + "\n"
 	endCol := contentEndCol("› " + codexChip)
-	if ok, why := stillChipComposer(oneRow, oneRow, paneCursorState{Visible: true, Row: 2, Col: endCol}, chipText); !ok {
+	if ok, why := stillChipComposer(oneRow, chipBlockForTest(oneRow, chipText), oneRow, paneCursorState{Visible: true, Row: 2, Col: endCol}, chipText); !ok {
 		t.Fatalf("unwrapped chip, cursor at content end: ok=false why=%q, want ok=true (no regression)", why)
 	}
 
@@ -188,7 +195,7 @@ func TestStillChipComposerAcceptsWrappedChipTailCursor(t *testing.T) {
 		"  GPT-6.1 Terra ultra · ~/sahara/sahara-cheaper-ci · ⚠ 1 warning · f2 to view",
 	}, "\n") + "\n"
 	insert := firstContentCol("› [Pasted Content 32")
-	if ok, why := stillChipComposer(absorbed, absorbed, paneCursorState{Visible: true, Row: 4, Col: insert}, chipText); !ok {
+	if ok, why := stillChipComposer(absorbed, chipBlockForTest(absorbed, chipText), absorbed, paneCursorState{Visible: true, Row: 4, Col: insert}, chipText); !ok {
 		t.Fatalf("wrapped chip with absorbed Enter, cursor on the blank row at the insert column: ok=false why=%q, want ok=true (no regression)", why)
 	}
 }
@@ -218,7 +225,7 @@ func TestStillChipComposerWithholdsWrappedTailBelowABareGlyphAnchor(t *testing.T
 		"  " + codexChip,
 	}, "\n") + "\n"
 	tail := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  " + codexChip)}
-	if ok, why := stillChipComposer(draftLoneGtUnwrapped, draftLoneGtUnwrapped, tail, chipText); ok {
+	if ok, why := stillChipComposer(draftLoneGtUnwrapped, chipBlockForTest(draftLoneGtUnwrapped, chipText), draftLoneGtUnwrapped, tail, chipText); ok {
 		t.Fatalf("draft + lone > + unwrapped chip, cursor at the chip tail: ok=true why=%q, want ok=false (the lone > is a hard newline in the draft, not the chip's first row)", why)
 	}
 
@@ -234,7 +241,7 @@ func TestStillChipComposerWithholdsWrappedTailBelowABareGlyphAnchor(t *testing.T
 		"07 chars]",
 	}, "\n") + "\n"
 	tailWrapped := paneCursorState{Visible: true, Row: 4, Col: contentEndCol("07 chars]")}
-	if ok, why := stillChipComposer(draftLoneGtWrapped, draftLoneGtWrapped, tailWrapped, chipText); ok {
+	if ok, why := stillChipComposer(draftLoneGtWrapped, chipBlockForTest(draftLoneGtWrapped, chipText), draftLoneGtWrapped, tailWrapped, chipText); ok {
 		t.Fatalf("draft + lone > + wrapped chip, cursor at the wrapped tail: ok=true why=%q, want ok=false (the chip does not start on the anchor row)", why)
 	}
 
@@ -247,7 +254,7 @@ func TestStillChipComposerWithholdsWrappedTailBelowABareGlyphAnchor(t *testing.T
 		"  " + codexChip,
 	}, "\n") + "\n"
 	tailCodex := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  " + codexChip)}
-	if ok, why := stillChipComposer(loneCodexGlyph, loneCodexGlyph, tailCodex, chipText); ok {
+	if ok, why := stillChipComposer(loneCodexGlyph, chipBlockForTest(loneCodexGlyph, chipText), loneCodexGlyph, tailCodex, chipText); ok {
 		t.Fatalf("draft + lone › + chip, cursor at the chip tail: ok=true why=%q, want ok=false (a lone › anchor is a hard newline, not the chip's first row)", why)
 	}
 
@@ -262,8 +269,64 @@ func TestStillChipComposerWithholdsWrappedTailBelowABareGlyphAnchor(t *testing.T
 		"  " + codexChip,
 	}, "\n") + "\n"
 	tailEmpty := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  " + codexChip)}
-	if ok, why := stillChipComposer(emptyFirstLine, emptyFirstLine, tailEmpty, chipText); ok {
+	if ok, why := stillChipComposer(emptyFirstLine, chipBlockForTest(emptyFirstLine, chipText), emptyFirstLine, tailEmpty, chipText); ok {
 		t.Fatalf("empty first line + chip on the next row, cursor at the chip tail: ok=true why=%q, want ok=false (the chip does not start on the bare-glyph anchor row)", why)
+	}
+}
+
+// TestStillChipComposerWithholdsDraftTextAboveTheAnchor is the #7850 R2 frame:
+// the anchor lands on the draft's chip-bearing continuation row while its real
+// first row — the user's own "ship it" — sits above it. The region's joined
+// content is still just the chip, so master's proof accepts the shape and the
+// remedy Enter submits the user's line with the prompt. A draft's own head, or
+// a transcript echo af cannot tell from one, makes the anchor ambiguous: the
+// composer is not provably chip-only, so the remedy must withhold.
+func TestStillChipComposerWithholdsDraftTextAboveTheAnchor(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	pane := strings.Join([]string{
+		"› ship it",
+		"  > " + codexChip,
+	}, "\n") + "\n"
+	tail := paneCursorState{Visible: true, Row: 1, Col: contentEndCol("  > " + codexChip)}
+	if ok, why := stillChipComposer(pane, chipBlockForTest(pane, chipText), pane, tail, chipText); ok {
+		t.Fatalf("draft text above the anchor, cursor at the chip row's content end: ok=true why=%q, want ok=false (the anchor is not the composer block's first row)", why)
+	}
+}
+
+// TestStillChipComposerWithholdsDraftTextBelowABlankRow is the #7850 R3 frame:
+// a draft of "\n\nok go" renders the chip, a blank gap, then the user's line —
+// textually the same shape composerRegion's footer cut was built for. master's
+// proof cuts the region at "ok go", reads the chip, and the remedy Enter
+// submits the user's line with the prompt. A content row after a blank gap is
+// composer content unless it is provably the agent's own footer, and "ok go"
+// is not, so the remedy must withhold.
+func TestStillChipComposerWithholdsDraftTextBelowABlankRow(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	pane := strings.Join([]string{
+		"› " + codexChip,
+		"",
+		"  ok go",
+	}, "\n") + "\n"
+	insert := firstContentCol("› " + codexChip)
+	if ok, why := stillChipComposer(pane, chipBlockForTest(pane, chipText), pane, paneCursorState{Visible: true, Row: 0, Col: insert}, chipText); ok {
+		t.Fatalf("draft text below a blank row, cursor at the draft's start: ok=true why=%q, want ok=false (\"ok go\" is not provably the agent's own footer)", why)
+	}
+}
+
+// TestStillChipComposerAcceptsAgentFooterBelowABlankRow is the positive #7850
+// R3 control: the same shape as a draft that opened with blank lines, but the
+// row below the gap carries a signature the agent draws there — Codex's model/
+// warning footer. The composer is provably chip-only and the remedy fires.
+func TestStillChipComposerAcceptsAgentFooterBelowABlankRow(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	pane := strings.Join([]string{
+		"› " + codexChip,
+		"",
+		"  GPT-6.1 Terra ultra · ~/sahara/sahara-cheaper-ci · ⚠ 1 warning · f2 to view",
+	}, "\n") + "\n"
+	end := contentEndCol("› " + codexChip)
+	if ok, why := stillChipComposer(pane, chipBlockForTest(pane, chipText), pane, paneCursorState{Visible: true, Row: 0, Col: end}, chipText); !ok {
+		t.Fatalf("codex warning footer below a blank row: ok=false why=%q, want ok=true (the footer is provably the agent's own)", why)
 	}
 }
 

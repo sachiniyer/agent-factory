@@ -256,6 +256,95 @@ var busyComposerHints = map[string][]string{
 	"❭": {normalizeDelivery("Guide Devin while it works")},
 }
 
+// composerFooterMarkers are the signature phrases of the status and shortcut
+// rows an agent draws BELOW its live composer, normalized and keyed by that
+// agent's composer glyph — the same "its own" discipline busyComposerHints
+// keeps. composerRegion's cut at a content row after a blank gap exists for
+// these rows, and the still-chip proof may keep that cut only when the row
+// provably IS one: a draft that opened with blank lines, or a second draft
+// line after the absorbed Enter's newline, renders the identical shape, and
+// the remedy Enter would submit it with our prompt (#7850 R3). The marker
+// phrases are the stable part of footers whose wording varies with model,
+// path, mode and version; a draft line that happens to carry one aliases as
+// a footer, the same dim-text ambiguity the hint tables already accept.
+var composerFooterMarkers = map[string][]string{
+	// Codex: the model/warning status footer and the shortcut hints it draws
+	// a blank row under the unruled composer.
+	"›": {
+		normalizeDelivery("f2 to view"),       // the warnings hint
+		normalizeDelivery("for shortcuts"),    // "? for shortcuts"
+		normalizeDelivery("for agents"),       // "← for agents"
+		normalizeDelivery("context left"),     // the context meter
+		normalizeDelivery("esc to interrupt"), // the older busy footer
+		normalizeDelivery("Pursuing goal"),    // the agent-mode status
+	},
+	// Claude Code: the vim-mode and permission footer.
+	claudeComposerGlyph: {
+		normalizeDelivery("-- INSERT --"),
+		normalizeDelivery("-- NORMAL --"),
+		normalizeDelivery("-- VISUAL --"),
+		normalizeDelivery("⏵⏵"),
+		normalizeDelivery("bypass permissions"),
+		normalizeDelivery("shift+tab"),
+		normalizeDelivery("for agents"),
+		normalizeDelivery("esc to interrupt"),
+	},
+	// Devin.
+	"❭": {
+		normalizeDelivery("ctrl+o to expand edits"),
+	},
+}
+
+// anchorGlyph reports the composer glyph leading a row — one of the prompt
+// glyphs isComposerGlyphRow accepts — or "" when the row leads with anything
+// else, so footer markers scope to the agent that owns them.
+func anchorGlyph(row string) string {
+	r, _ := utf8.DecodeRuneInString(normalizeDelivery(row))
+	switch r {
+	case '❯', '›', '❭', '>':
+		return string(r)
+	}
+	return ""
+}
+
+// composerFooterRow reports whether a normalized row carries one of the
+// footer markers the anchor's agent draws below its composer
+// (composerFooterMarkers). A glyph the table does not key — the plain ">"
+// prompt names no agent — accepts every marker: a marker row is footer-
+// shaped for some agent either way.
+func composerFooterRow(norm, glyph string) bool {
+	markers, keyed := composerFooterMarkers[glyph]
+	if !keyed {
+		for _, list := range composerFooterMarkers {
+			markers = append(markers, list...)
+		}
+	}
+	for _, m := range markers {
+		if strings.Contains(norm, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// stillChipRegionTail reports why the row that ended a composer region
+// breaks the still-chip proof, or "" when the frame bounds the block for
+// the proof: pane end, a hard border, or the agent's own footer. Any other
+// content row after a blank gap is draft text composerRegion's footer cut
+// hid (#7850 R3) — a draft that opened with blank lines, or a second draft
+// line after the absorbed Enter's newline, renders the same shape, and the
+// remedy Enter would submit it with our prompt.
+func stillChipRegionTail(rows []string, end int, glyph string) string {
+	if end >= len(rows) {
+		return ""
+	}
+	norm := normalizeDelivery(rows[end])
+	if norm == "" || composerFooterRow(norm, glyph) {
+		return ""
+	}
+	return fmt.Sprintf("the composer holds content %q below a blank row that is not provably the agent's own footer", norm)
+}
+
 // bareComposerGlyphRow reports whether a row is an empty composer prompt: the
 // bare glyph a composer repaints after a submit, or that glyph with the
 // agent's own mid-turn hint (busyComposerHints), and nothing else. A user's
@@ -502,17 +591,30 @@ func idleComposerPlaceholderRow(norm string) bool {
 }
 
 // stillChipComposer is the stillness+position proof for the one remediable
-// shape: the boundary's composer region held the bound chip and nothing else,
-// and the grace frame's composer region is byte-identical, plus at most the
-// one whitespace-only row an absorbed Enter can append. Anything else stands
-// down: a literal draft (tail-bound) never reaches here, a second chip or user
-// text changes the region's joined content, a moved anchor means a repainted
-// composer, and a footer redrawn inside the region changes the bytes. The
-// visible cursor must rest where undisturbed input left it: on the chip row at
-// its insert or content-end column — the chip's last wrapped physical row when
-// its text wraps across grid rows — or on the absorbed Enter's blank row at the
-// insert column. A hidden cursor (Claude's ordinary composer draws one) cannot
-// prove that, so it withholds.
+// shape: the composer block, from its real first row down to the agent's
+// footer, holds this delivery's bound chip and nothing else. The boundary's
+// composer region held the chip and nothing else, and the grace frame's
+// composer region is byte-identical, plus at most the one whitespace-only
+// row an absorbed Enter can append. Anything else stands down: a literal
+// draft (tail-bound) never reaches here, a second chip or user text changes
+// the region's joined content, a moved anchor means a repainted composer,
+// and a footer redrawn inside the region changes the bytes. The visible
+// cursor must rest where undisturbed input left it: on the chip row at its
+// insert or content-end column — the chip's last wrapped physical row when
+// its text wraps across grid rows — or on the absorbed Enter's blank row at
+// the insert column. A hidden cursor (Claude's ordinary composer draws one)
+// cannot prove that, so it withholds.
+//
+// Two edge cases bound the block the region never reads (#7850). First, the
+// anchor must be the composer block's FIRST row: the Enter boundary proves
+// where the bound draft's render began (block.blockStart, #7820), and a
+// contiguous composer-glyph row above the anchor that holds content is the
+// #7802 ambiguity class inside the remedy — the draft's own head, or an echo
+// af cannot tell from one, puts the anchor inside the draft and leaves that
+// text unread by the region. Second, the row that ends each region must be
+// a proven boundary — a hard border or the agent's own footer — because a
+// draft that opened with blank lines, or a second draft line after the
+// absorbed Enter's newline, renders the same shape as a footer.
 //
 // The wrapped-tail column is accepted only when the chip STARTS on the anchor
 // row: the anchor's content after its single prompt glyph must be a non-empty
@@ -529,7 +631,7 @@ func idleComposerPlaceholderRow(norm string) bool {
 // (#6224): a bare "not a still, single-chip composer" cannot tell a Claude
 // pane (hidden cursor, by design) from a Codex pane whose footer bled into
 // the region.
-func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText string) (bool, string) {
+func stillChipComposer(boundary string, block boundaryBlock, pane string, cursor paneCursorState, chipText string) (bool, string) {
 	if !cursor.Visible {
 		return false, "the cursor is hidden, so where the draft left it cannot be proven (Claude's ordinary composer hides it)"
 	}
@@ -538,6 +640,30 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	anchor := lastComposerGlyphRow(bRows)
 	if anchor < 0 || anchor >= len(gRows) || lastComposerGlyphRow(gRows) != anchor {
 		return false, "the composer's prompt-glyph row moved or is missing between the Enter boundary and the grace frame"
+	}
+	// The anchor must be the composer block's first row, proven by the Enter
+	// boundary — not by lastComposerGlyphRow's deepest-glyph rule, which can
+	// land the anchor INSIDE the draft: a draft's own continuation line can
+	// lead with any composer glyph (#7809). block.blockStart is where the
+	// boundary proved the bound draft's render began (#7820); -1 means the
+	// frame could not prove the start at all, and every row between it and
+	// the anchor must be blank — a content row there is inside the block and
+	// unread by the region, so the composer is not chip-only.
+	if block.blockStart < 0 || block.blockStart > anchor {
+		return false, "the Enter boundary could not prove where this delivery's composer block begins"
+	}
+	for r := block.blockStart; r < anchor; r++ {
+		if !blankComposerRow(bRows[r]) {
+			return false, "a composer content row sits between the bound draft's proven first row and the anchor — the composer is not chip-only"
+		}
+	}
+	// A contiguous composer-glyph row above the anchor that holds content is
+	// the same ambiguity applied to the remedy: the draft's own head — or a
+	// transcript echo af cannot tell from one — puts the anchor inside the
+	// draft. Stillness never compares rows above the anchor, so both frames
+	// are checked.
+	if stagedAnchorAmbiguous(bRows, anchor) || stagedAnchorAmbiguous(gRows, anchor) {
+		return false, "a composer-glyph row above the anchor holds content — the draft's own head or an echo indistinguishable from one — so the anchor is not the composer block's first row"
 	}
 	bRegion := composerRegion(bRows, anchor)
 	gRegion := composerRegion(gRows, anchor)
@@ -570,6 +696,17 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	}
 	if i != len(bRegion) {
 		return false, "a composer row present at the Enter boundary is gone from the grace frame"
+	}
+	// The row that ended each region must be a boundary the frame proves —
+	// pane end, a hard border, or the agent's own footer. A content row after
+	// a blank gap that is none of those is draft text the region cut hid: a
+	// draft that opened with blank lines, or a second draft line after the
+	// absorbed Enter's newline, renders exactly this shape (#7850 R3).
+	if why := stillChipRegionTail(bRows, anchor+len(bRegion), anchorGlyph(bRows[anchor])); why != "" {
+		return false, why
+	}
+	if why := stillChipRegionTail(gRows, anchor+len(gRegion), anchorGlyph(gRows[anchor])); why != "" {
+		return false, why
 	}
 	// Position: the cursor must sit inside the region, parked where this draft
 	// alone could have left it.
@@ -745,7 +882,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 	why := "the bound evidence is a literal tail, not a collapsed-paste chip"
 	stillChip := false
 	if bound.chip {
-		stillChip, why = stillChipComposer(stripped, pane, cursor, bound.chipText)
+		stillChip, why = stillChipComposer(stripped, boundary, pane, cursor, bound.chipText)
 	}
 	if !stillChip {
 		log.WarningLog.Printf("submit: session %q reads as still staged after Enter (%s), "+
