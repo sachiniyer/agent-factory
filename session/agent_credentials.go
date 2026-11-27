@@ -331,8 +331,9 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 	// CAN decide where the agent's endpoint hosts resolve and which
 	// certificate authorities its TLS stack trusts (#7867 R3): the routing
 	// names the env check refuses are only words for where these paths
-	// point. The caller extracts the target — -v puts it in the second ':'
-	// field where --tmpfs puts it first.
+	// point. The caller extracts the target by option kind — -v's second
+	// ':' field, --mount's dst= CSV field, --tmpfs's first field — because
+	// one option's parser misreads another's value.
 	checkMount := func(target string) error {
 		if protected := dockerRoutingProtectedPath(target); protected != "" {
 			return fmt.Errorf(
@@ -401,10 +402,17 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot use --volumes-from for the credential-mount session's %s agent because af cannot prove what the donor container mounts — the donor's mounts land at its own container paths, resolution files and trust stores included; name the mount explicitly with -v or --mount instead",
 				agent)
-		case arg == "-v" || arg == "--volume" || arg == "--mount":
+		case arg == "-v" || arg == "--volume":
 			if index+1 < len(args) {
 				index++
-				if err := checkMount(dockerRoutingMountTarget(args[index])); err != nil {
+				if err := checkMount(dockerVolumeTarget(args[index])); err != nil {
+					return err
+				}
+			}
+		case arg == "--mount":
+			if index+1 < len(args) {
+				index++
+				if err := checkMount(dockerLongMountTarget(args[index])); err != nil {
 					return err
 				}
 			}
@@ -415,8 +423,12 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 					return err
 				}
 			}
-		case strings.HasPrefix(arg, "--volume=") || strings.HasPrefix(arg, "--mount="):
-			if err := checkMount(dockerRoutingMountTarget(strings.SplitN(arg, "=", 2)[1])); err != nil {
+		case strings.HasPrefix(arg, "--volume="):
+			if err := checkMount(dockerVolumeTarget(strings.SplitN(arg, "=", 2)[1])); err != nil {
+				return err
+			}
+		case strings.HasPrefix(arg, "--mount="):
+			if err := checkMount(dockerLongMountTarget(strings.SplitN(arg, "=", 2)[1])); err != nil {
 				return err
 			}
 		case strings.HasPrefix(arg, "--tmpfs="):
@@ -424,11 +436,11 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 				return err
 			}
 		case strings.HasPrefix(arg, "-v="):
-			if err := checkMount(dockerRoutingMountTarget(strings.TrimPrefix(arg, "-v="))); err != nil {
+			if err := checkMount(dockerVolumeTarget(strings.TrimPrefix(arg, "-v="))); err != nil {
 				return err
 			}
 		case strings.HasPrefix(arg, "-v") && len(arg) > 2:
-			if err := checkMount(dockerRoutingMountTarget(strings.TrimPrefix(arg, "-v"))); err != nil {
+			if err := checkMount(dockerVolumeTarget(strings.TrimPrefix(arg, "-v"))); err != nil {
 				return err
 			}
 		case arg == "--add-host":
@@ -506,7 +518,7 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 			if err := dockerCheckShorthandCluster(arg, args, index, dockerGuardedShorthands,
 				func(character byte, value string) error {
 					if character == 'v' {
-						return checkMount(dockerRoutingMountTarget(value))
+						return checkMount(dockerVolumeTarget(value))
 					}
 					return checkEnv(value)
 				},

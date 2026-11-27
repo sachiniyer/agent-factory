@@ -99,9 +99,11 @@ func dockerSessionEndpointHosts(agent string, passthrough, environ []string) map
 // dockerEnvValueHost extracts the host an environment value routes to, or ""
 // when the value names no host. Two shapes count: a URL whose host parses
 // (https://gateway.corp:8443, unix:// is deliberately hostless), and a bare
-// host or host:port (GH_HOST's form — "ghe.corp.internal"). A bare value
-// qualifies only when it is hostname-shaped whole — letters, digits, dots and
-// dashes with a dot — so a path, a sentence, or a flag value is never a host.
+// host or host:port (GH_HOST's form — "ghe.corp.internal", and single-label
+// names like "proxy:3128" — a corporate proxy is as remappable by --add-host
+// as a dotted one). A bare value qualifies only when it is hostname-shaped
+// whole — letters, digits, dots and dashes, with at least one letter or
+// digit — so a path, a sentence, or a flag value is never a host.
 func dockerEnvValueHost(value string) string {
 	if strings.Contains(value, "://") {
 		if u, err := url.Parse(value); err == nil {
@@ -113,14 +115,18 @@ func dockerEnvValueHost(value string) string {
 	if i := strings.IndexByte(host, ':'); i >= 0 {
 		host = host[:i]
 	}
-	if !strings.Contains(host, ".") {
-		return ""
-	}
+	hasAlnum := false
 	for i := 0; i < len(host); i++ {
 		c := host[i]
 		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '.' && c != '-' {
 			return ""
 		}
+		if c != '.' && c != '-' {
+			hasAlnum = true
+		}
+	}
+	if !hasAlnum {
+		return ""
 	}
 	return strings.ToLower(host)
 }
@@ -218,18 +224,19 @@ func dockerVolumeTarget(value string) string {
 	return fields[1]
 }
 
-// dockerRoutingMountTarget extracts the container path a mount option's value
-// installs at, whatever the spelling: --mount's dst=/target=/destination=
-// field (dockerMountFields reads Docker's own CSV), or -v/--volume's
-// ':'-field target. --tmpfs is deliberately absent — its spec puts the target
-// FIRST (dst[:options]), which dockerTmpfsTarget reads.
-func dockerRoutingMountTarget(value string) string {
+// dockerLongMountTarget extracts the container path a --mount value installs
+// at — the dst=/target=/destination= field of Docker's CSV (dockerMountFields
+// reads it the way Docker does). This parser is for --mount ONLY: run a -v
+// value through it and a comma or a "dst=" inside the volume's own fields
+// mints a phantom target that outranks the real one
+// (-v /tmp/ca,dst=/safe:/etc/ssl/certs reports /safe:…, never /etc/ssl/certs).
+func dockerLongMountTarget(value string) string {
 	for _, field := range dockerMountFields(value) {
 		if target, ok := dockerMountTarget(field); ok {
 			return target
 		}
 	}
-	return dockerVolumeTarget(value)
+	return ""
 }
 
 // dockerTmpfsTarget reports the container path a --tmpfs value mounts at. The
