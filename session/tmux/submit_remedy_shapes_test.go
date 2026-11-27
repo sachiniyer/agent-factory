@@ -486,13 +486,23 @@ func TestStillChipComposerWithholdsDraftRowsBelowABlankRow(t *testing.T) {
 }
 
 // TestStillChipComposerWithholdsAForeignClosingEdge is the #7912 item-2
-// class: the closing edge is the composer's OWN bottom edge — byte-identical
-// to the top edge above the anchor — never any column-0 all-"─" row or
+// class: the closing edge is the composer's OWN bottom edge — the LAST row
+// byte-identical to the top edge above the anchor, with only blank rows
+// between it and the region — never any column-0 all-"─" row or
 // ╰───╯-shaped row of the wrong width. Under the column-0 wrap model the
 // cursor proof accepts, a wrapped draft's continuation can draw an all-"─"
 // row at column 0 of any width, and on master it counted as "a hard border"
 // that excused every row beneath it. Every frame below remedies on master
 // for exactly that reason and must withhold here.
+//
+// The round-2 names N2c and N3b belong to different frames: the real N2c is
+// a typed column-0 rule faking the TOP edge (stillChipFirstRow's proof, not
+// this audit's), and the real N3b is a column-0 whitespace row faking
+// Codex's transcript gap. Both still remedy, as on master — N3b is inherent
+// to the column-0 wrap model: a whitespace row is indistinguishable from
+// the gap the lane already treats as bounding the composer. A ruled lane
+// remedies only when its byte-identical closing edge is in the frame; the
+// frames here are the wrong-edge cases this audit owns (#7913 R3).
 func TestStillChipComposerWithholdsAForeignClosingEdge(t *testing.T) {
 	chipText := normalizeDelivery(codexChip)
 	rule := strings.Repeat("─", 80)
@@ -529,16 +539,38 @@ func TestStillChipComposerWithholdsAForeignClosingEdge(t *testing.T) {
 			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
 			chip:   chipText,
 		},
-		// N2c: the same column-0 wrap in Claude's ruled lane — the draft row
-		// that ends the composer early hides everything below it as chrome.
-		"N2c claude lane wrap-width rule": {
+		// The same column-0 wrap in Claude's ruled lane — the draft row that
+		// ends the composer early hides everything below it as chrome.
+		"claude lane wrap-width rule below the cut": {
 			rows:   []string{"x", rule, claudeChipRow, "", strings.Repeat("─", 40), "  ? for shortcuts"},
 			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(claudeChipRow)},
 			chip:   normalizeDelivery(claudeChip),
 		},
-		// N3b: a ╰───╯ bottom edge whose ─ span is not the box's own.
-		"N3b box bottom wrong width": {
+		// A ╰───╯ bottom edge whose ─ span is not the box's own.
+		"box bottom wrong width": {
 			rows:   []string{"x", "╭────────────────╮", "│ > " + codexChip + "     │", "╰────────╯", "  ? for shortcuts"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("│ > " + codexChip + "     │")},
+			chip:   chipText,
+		},
+		// R4: a typed or wrapped pane-width row byte-identical to the top
+		// rule is NOT the edge when the real edge still sits below it —
+		// the draft row between them is composer content, not chrome.
+		"typed identical rule before the real edge": {
+			rows:   []string{"one", rule, devinChip, "", rule, "  ship it now", rule, "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// R4: the same with only the fake edge above the real one — the
+		// first identical row is itself unaudited content.
+		"two identical rules before the footer": {
+			rows:   []string{"one", rule, devinChip, "", rule, rule, "SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits"},
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol(devinChip)},
+			chip:   chipText,
+		},
+		// R4: the box lane takes the same proof — a typed ╰───╯ twin row
+		// before the real bottom edge does not close the composer.
+		"typed box bottom before the real bottom": {
+			rows:   []string{"x", "╭────────────────╮", "│ > " + codexChip + "     │", "╰────────────────╯", "  draft row", "╰────────────────╯", "  ? for shortcuts"},
 			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("│ > " + codexChip + "     │")},
 			chip:   chipText,
 		},
@@ -616,6 +648,13 @@ func TestStillChipComposerWithholdsDraftsInCodexFooterShape(t *testing.T) {
 		// Y6b: the warning word must be exactly "warning"/"warnings" — a
 		// word that merely opens with one is draft text.
 		"Y6b warning-word prefix": "  ⚠ 2 warningsforcepush",
+		// R5: a suffix repeats inside the token — "codex" appears twice.
+		"R5 repeated suffix": "  gpt-5-codex-codex-mini · ~/repo",
+		// R5: suffixes out of the id's order — "mini" before "codex".
+		"R5 out-of-order suffixes": "  gpt-5-mini-codex · ~/repo",
+		// R5: the GPT- line carries at most one codename in the token —
+		// a second is a chain no real id draws.
+		"R5 chained codenames": "  GPT-5-Terra-Astra · ~/repo",
 	} {
 		t.Run(name, func(t *testing.T) {
 			pane := strings.Join([]string{anchor, "", footer}, "\n") + "\n"
@@ -646,14 +685,26 @@ func TestStillChipComposerAcceptsCodexClosedFooterVocabulary(t *testing.T) {
 		"fixture Astra":                   {"  GPT-6-Astra ultra · ~/sahara/sahara-clean · Pursuing goal · Main [default]"},
 		"fixture sol max":                 {"  gpt-5.6-sol max · ~/agent-factory"},
 		"fixture luna low":                {"  gpt-5.6-luna low · ~/agent-factory"},
-		"effort none":                     {"  gpt-5.2-codex none · ~/repo"},
-		"effort minimal":                  {"  gpt-5.1-codex minimal · ~/repo"},
-		"effort xhigh":                    {"  gpt-5.1-codex-max xhigh · ~/repo"},
-		"effort persistent":               {"  gpt-5.2-codex persistent · ~/repo"},
-		"o-series mini":                   {"  o4-mini medium · ~/repo"},
-		"codex-mini line":                 {"  codex-mini-latest low · ~/repo"},
-		"hints row":                       {"  ← for agents · ? for shortcuts ⚠ 1 warning · f2 to view"},
-		"esc interrupt row":               {"  esc to interrupt"},
+		// codex-rs's catalog display names as their own segment word
+		// (amazon_bedrock/catalog.rs; startup_prompts.rs's "GPT-6 Sol").
+		"catalog Sol high":                {"  GPT-6.1 Sol high · ~/repo"},
+		"catalog Luna low":                {"  GPT-6 Luna low · ~/repo"},
+		"catalog Sol max with path":       {"  GPT-5.6 Sol max · ~/agent-factory"},
+		"catalog Mini medium":             {"  GPT-5.4 Mini medium · ~/repo"},
+		"catalog Sol ultra pursuing goal": {"  GPT-6 Sol ultra · ~/srv/app · Pursuing goal · Main [default]"},
+		"catalog codename inside token":   {"  GPT-6-Sol ultra · ~/repo"},
+		// ServiceTier's fast mode draws the tier after the effort word
+		// (codex-rs/protocol/src/config_types.rs, ServiceTier Fast | Flex).
+		"service tier fast": {"  gpt-5.4 high fast · ~/repo"},
+		"service tier flex": {"  gpt-5.4 xhigh flex · ~/repo"},
+		"effort none":       {"  gpt-5.2-codex none · ~/repo"},
+		"effort minimal":    {"  gpt-5.1-codex minimal · ~/repo"},
+		"effort xhigh":      {"  gpt-5.1-codex-max xhigh · ~/repo"},
+		"effort persistent": {"  gpt-5.2-codex persistent · ~/repo"},
+		"o-series mini":     {"  o4-mini medium · ~/repo"},
+		"codex-mini line":   {"  codex-mini-latest low · ~/repo"},
+		"hints row":         {"  ← for agents · ? for shortcuts ⚠ 1 warning · f2 to view"},
+		"esc interrupt row": {"  esc to interrupt"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rows := append([]string{anchor, ""}, footers...)

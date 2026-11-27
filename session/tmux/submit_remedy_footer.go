@@ -23,15 +23,25 @@ func stillChipTailAudit(rows []string, anchor, end int) string {
 	switch glyph := anchorGlyph(rows[anchor]); glyph {
 	case claudeComposerGlyph, "❭", ">":
 		// A ruled or boxed composer: blanks until the agent's own closing
-		// edge; everything below the edge is chrome by geometry.
+		// edge — the LAST row byte-identical to it, with only blank rows
+		// between it and the region. A row the user typed, or a wrapped
+		// continuation, that happens to equal the edge cannot close the
+		// composer early and excuse a draft beneath it: the real edge still
+		// sits below it in the frame (#7913 R4). Everything below the edge
+		// is chrome by geometry.
 		edge := composerClosingEdge(rows, anchor, glyph)
+		last := -1
+		for j := end; j < len(rows); j++ {
+			if stillChipClosingEdge(rows[j], edge) {
+				last = j
+			}
+		}
 		for j := end; j < len(rows); j++ {
 			raw := rows[j]
-			switch {
-			case blankComposerRow(raw):
-			case stillChipClosingEdge(raw, edge):
+			if j == last {
 				return ""
-			default:
+			}
+			if !blankComposerRow(raw) {
 				return fmt.Sprintf("the composer holds content %q inside the composer that is not provably blank", normalizeDelivery(raw))
 			}
 		}
@@ -141,12 +151,14 @@ func codexComposerFooterRow(raw string) bool {
 
 // codexStatusModel reports whether the first " · "-segment of a Codex status
 // line is a model segment: a model token from one of the enumerated families
-// below, followed only by tier words from Codex's effort enum or the
-// fixtures' enumerated codename words ("GPT-6.1 Terra ultra",
-// "gpt-5.6-sol max", "o3", "gpt-5.1-codex-max xhigh"). It is a closed
-// vocabulary: a draft's "gpt-5 Ship It", "GPT Deploy Prod" or "v2 ok go"
-// matches no family, and "1. see my notes" never did (#7850 N1, #7912) —
-// failing closed on an odd model name is fine.
+// below, followed only by tier words from Codex's effort enum, the catalog's
+// enumerated codename words, and ServiceTier's service-tier words — the way
+// codex-rs draws "<display_name> <effort> [<service_tier>]" ("GPT-6.1 Terra
+// ultra", "GPT-6 Sol ultra", "gpt-5.6-sol max", "o3", "gpt-5.1-codex-max
+// xhigh", "gpt-5.4 high fast"). It is a closed vocabulary: a draft's
+// "gpt-5 Ship It", "GPT Deploy Prod" or "v2 ok go" matches no family, and
+// "1. see my notes" never did (#7850 N1, #7912, #7913 R2) — failing closed
+// on an odd model name is fine.
 func codexStatusModel(seg string) bool {
 	f := strings.Fields(strings.TrimSpace(seg))
 	if len(f) == 0 || len(f) > 3 {
@@ -156,7 +168,7 @@ func codexStatusModel(seg string) bool {
 		return false
 	}
 	for _, w := range f[1:] {
-		if !codexModelTier(w) && !codexModelCodename(w) {
+		if !codexModelTier(w) && !codexModelCodename(w) && !codexServiceTier(w) {
 			return false
 		}
 	}
@@ -183,7 +195,11 @@ func codexModelToken(w string) bool {
 		return codexModelVersionTail(rest, codexGptLowerSuffixes)
 	}
 	if rest, ok := strings.CutPrefix(w, "GPT-"); ok {
-		return codexModelVersionTail(rest, codexModelCodenames)
+		// The GPT- line carries at most one codename inside the token
+		// ("GPT-6-Astra", "GPT-6-Sol"); a second "-word" is a chain no
+		// real id draws — "GPT-5-Terra-Astra" (#7913 R5).
+		return len(strings.Split(rest, "-")) <= 2 &&
+			codexModelVersionTail(rest, codexModelCodenames)
 	}
 	if w == "codex-mini" || w == "codex-mini-latest" {
 		return true
@@ -200,16 +216,23 @@ func codexModelToken(w string) bool {
 // fixtures' codename draws "sol" and "luna" (gpt-5.6-sol, gpt-5.6-luna).
 var codexGptLowerSuffixes = []string{"codex", "mini", "max", "sol", "luna"}
 
-// codexModelCodenames are the capitalized codename words the fixtures' model
-// segments carry — as their own word ("GPT-6.1 Terra ultra") or inside the
-// model token ("GPT-6-Astra"). Both are attested by this repo's Codex footer
-// captures; a draft's "Ship" or "Deploy" is not a codename (#7912).
-var codexModelCodenames = []string{"Terra", "Astra"}
+// codexModelCodenames are the codename words the model segment carries — the
+// display names in codex-rs's model catalog: Sol, Luna, Terra, Astra and
+// Mini (codex-rs/core/src/amazon_bedrock/catalog.rs;
+// codex-rs/startup_prompts.rs maps OpenAI's default gpt-5.4 to "GPT-6 Sol").
+// Each can be its own segment word ("GPT-6.1 Terra ultra", "GPT-6 Sol
+// ultra") or sit inside a GPT- model token ("GPT-6-Astra", "GPT-5.4-Mini").
+// A draft's "Ship" or "Deploy" is not a codename (#7912, #7913 R2).
+var codexModelCodenames = []string{"Sol", "Luna", "Terra", "Astra", "Mini"}
 
 // codexModelVersionTail reports whether rest is a model family's versioned
 // tail: a numeric version ("5", "5.1", "6.1") followed only by "-"-joined
-// words from the family's own enumerated suffixes.
+// words from the family's own enumerated suffixes, each appearing at most
+// once and in the id's order — "gpt-5.1-codex-mini" is a real id while
+// "gpt-5-codex-codex-mini" repeats and "gpt-5-mini-codex" is out of order
+// (#7913 R5).
 func codexModelVersionTail(rest string, suffixes []string) bool {
+	prev := -1
 	for i, p := range strings.Split(rest, "-") {
 		if i == 0 {
 			if !codexModelVersion(p) {
@@ -217,9 +240,11 @@ func codexModelVersionTail(rest string, suffixes []string) bool {
 			}
 			continue
 		}
-		if !slices.Contains(suffixes, p) {
+		idx := slices.Index(suffixes, p)
+		if idx < 0 || idx <= prev {
 			return false
 		}
+		prev = idx
 	}
 	return true
 }
@@ -258,6 +283,14 @@ func codexModelTier(w string) bool {
 // capitalized word.
 func codexModelCodename(w string) bool {
 	return slices.Contains(codexModelCodenames, w)
+}
+
+// codexServiceTier reports whether w is a service-tier word the model
+// segment carries after the effort word — codex-rs's ServiceTier is Fast |
+// Flex, drawn lowercase in the footer when fast mode is on ("gpt-5.4 xhigh
+// fast", "gpt-5.4 high fast"; codex-rs/protocol/src/config_types.rs).
+func codexServiceTier(w string) bool {
+	return w == "fast" || w == "flex"
 }
 
 // codexStatusPath reports whether a status segment is Codex's current-dir —
