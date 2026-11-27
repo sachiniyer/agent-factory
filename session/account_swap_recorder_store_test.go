@@ -438,6 +438,13 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 		// newlyCorrect marks rows this head settles where master/53e3e788a
 		// fences — the rows that must fail on an earlier head.
 		newlyCorrect bool
+		// stragglerRefused runs a late run(swapN) after the reconcile settles
+		// and asserts it is refused and the host never rotates — the
+		// property that a matching `unknown` over a proven scopeOutgoing
+		// settles only after the discard tombstones swapN (#7862 review).
+		// Such a row must fail on 8a68aee82, which settled before the
+		// discard and left the still-staged scope open to a late commit.
+		stragglerRefused bool
 	}
 
 	const (
@@ -461,6 +468,20 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)", newlyCorrect: true},
 		{name: "2-after-prewrite-before-rename/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, settled: true, account: "work",
 			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)", newlyCorrect: true},
+
+		// 2b. the straggler property on the same crash point: a matching
+		//     `unknown` over a proven scopeOutgoing settles only AFTER the
+		//     serialized discard tombstones swapN, so a late run(swapN) that
+		//     names the still-staged scope is refused instead of committing
+		//     against a daemon that already recorded a rollback (#7862
+		//     review). On 8a68aee82 the reconcile settled on the first read
+		//     without discarding, so the tombstone was never set and the
+		//     still-staged scope was still present — the straggler rotates
+		//     and commits, and these rows fail there.
+		{name: "2b-after-prewrite-before-rename-straggler/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, settled: true, account: "work", stragglerRefused: true,
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> tombstone)"},
+		{name: "2b-after-prewrite-before-rename-straggler/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, settled: true, account: "work", stragglerRefused: true,
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> tombstone)"},
 
 		// 3. between the two renames: next + prev both present, so the host
 		//    cannot prove the swap never rotated. The row fences, as master
@@ -550,6 +571,36 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 			f.inst.offBoxSwapInFlight = &InFlightOffBoxSwapData{SwapID: swapN, From: "work", To: "alt", ScopedStage: true}
 			f.inst.startupStateUnknown = true
 			f.restartAgentServerRecorder(t)
+
+			if row.stragglerRefused {
+				// The straggler property: a matching `unknown` over a proven
+				// scopeOutgoing must settle only AFTER the serialized discard
+				// tombstones swapN, so a late run(swapN) that names the
+				// still-staged scope is refused instead of committing
+				// against a daemon that already recorded a rollback (#7862
+				// review). Call reconcileSwap DIRECTLY so the straggler lands
+				// in the window between its verdict and the caller's own
+				// staged-scope discard — the window a late request reaches
+				// the restarted server. On 8a68aee82 reconcileSwap returned
+				// rolled_back on the first read WITHOUT discarding, so the
+				// tombstone was never set inside reconcileSwap and the
+				// still-staged scope was still present; the straggler
+				// rotates and commits, and these assertions fail there.
+				committed, _, known, _ := f.w.reconcileSwap(f.srv, swapN, true)
+				assert.False(t, committed, "the reconcile settles as rolled_back")
+				assert.True(t, known, "the reconcile reaches a definite verdict (not fenced)")
+
+				f.srv.lastScoped = true // the scoped staging path the stage was set at
+				ran := false
+				_, serr := f.srv.rec.run(swapN, func() (string, error) {
+					ran = true
+					return f.srv.swap(swapN)
+				})
+				require.Error(t, serr, "the straggler run(swapN) is refused — reconcileSwap tombstoned it before returning")
+				assert.False(t, ran, "swap() never ran — the host never rotated")
+				assert.Equal(t, secretWork, f.hostCred(t, "account"), "the host account is unchanged")
+				return
+			}
 
 			settled, err := f.reconcileInFlight()
 

@@ -164,62 +164,61 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string, scope
 				// other witness: a still-staged, never-rotated scope
 				// (scopeOutgoing — account.next.<id> present, no account.prev)
 				// PROVES the swap never reached the rotation, so it can only
-				// roll back. Settle as rolled_back and let the caller drop the
-				// staged scope through the serialized discard — the verdict the
-				// host's layout proves, the way an empty recorder settled the
-				// same layout on master. Any other layout stays fenced: a
+				// roll back. Settle as rolled_back only AFTER the serialized
+				// discard tombstones this swap's id and removes its stage —
+				// never on this first read — so a late run(swapID) that names
+				// the still-staged scope is refused instead of committing
+				// against a daemon that already recorded a rollback (#7862
+				// review). The discard claims this swap's own rolled_back for
+				// the slot its stage was just removed from (refuseLocked), so
+				// the second read settles. Any other layout stays fenced: a
 				// scopeIncoming/unknown over this swap's own unknown means the
 				// rotation may have reached the host, and a commit must never
-				// be guessed, so the row fences exactly where master would
-				// (#7858 review).
-				//
-				// This closes the pre-rotation checkpoint window: a crash
-				// after the recorder's pre-write but before the first rename
-				// rehydrates {N, unknown} over a proven scopeOutgoing and
-				// settles as rolled_back instead of fencing a healthy row
-				// across every restart (#7858 review).
-				if w.probeScopeState(swapID, scopedStage, sshShortStepTimeout) == scopeOutgoing {
-					return false, "", true, nil
+				// be guessed, so the row fences exactly where master would.
+				if w.probeScopeState(swapID, scopedStage, sshShortStepTimeout) != scopeOutgoing {
+					return false, "", false, nil
 				}
-				return false, "", false, nil
+				// scopeOutgoing: fall through to the shared discard below,
+				// then re-read.
 			default:
 				return false, "", false, nil
 			}
-		}
-		switch outcome {
-		case swapOutcomeNone:
-			// "Never ran here" is only as good as the host's agreement: a server
-			// restart forgets every swap, so the markers must show the staged
-			// scope still staged and nothing rotated away.
-			if discarded {
-				return false, "", true, nil // still none after the staged scope is gone
-			}
-			if w.probeScopeState(swapID, scopedStage, sshShortStepTimeout) != scopeOutgoing {
+		} else {
+			switch outcome {
+			case swapOutcomeNone:
+				// "Never ran here" is only as good as the host's agreement: a server
+				// restart forgets every swap, so the markers must show the staged
+				// scope still staged and nothing rotated away.
+				if discarded {
+					return false, "", true, nil // still none after the staged scope is gone
+				}
+				if w.probeScopeState(swapID, scopedStage, sshShortStepTimeout) != scopeOutgoing {
+					return false, "", false, nil
+				}
+			case swapOutcomeUnknown:
+				// The host's scope is in doubt: fence, and leave every directory —
+				// the staged scope included — for whatever recovery inspects them.
+				return false, "", false, nil
+			case swapOutcomeCommitted, swapOutcomeRolledBack:
+				if discarded {
+					// The discard serialized with the swap tombstoned this swap's
+					// id and removed its staged scope, so it can never commit —
+					// the host holds whatever the last attributed swap left. A
+					// record that names another swap, or an anonymous rolled_back,
+					// is therefore not committed: it describes an earlier swap's
+					// terminal state while this one is bounded by the tombstone.
+					// An anonymous committed is the one exception: on a server
+					// that cannot echo the id it might BE this swap's, which no
+					// read here can tell apart.
+					return false, "", recID != "" || outcome == swapOutcomeRolledBack, nil
+				}
+				// A record that is not this swap's — an earlier swap's stale
+				// outcome, or an anonymous one — proves nothing about it, and the
+				// request may still be in flight or queued on the server: discard
+				// the staged scope, then re-read.
+			default:
 				return false, "", false, nil
 			}
-		case swapOutcomeUnknown:
-			// The host's scope is in doubt: fence, and leave every directory —
-			// the staged scope included — for whatever recovery inspects them.
-			return false, "", false, nil
-		case swapOutcomeCommitted, swapOutcomeRolledBack:
-			if discarded {
-				// The discard serialized with the swap tombstoned this swap's
-				// id and removed its staged scope, so it can never commit —
-				// the host holds whatever the last attributed swap left. A
-				// record that names another swap, or an anonymous rolled_back,
-				// is therefore not committed: it describes an earlier swap's
-				// terminal state while this one is bounded by the tombstone.
-				// An anonymous committed is the one exception: on a server
-				// that cannot echo the id it might BE this swap's, which no
-				// read here can tell apart.
-				return false, "", recID != "" || outcome == swapOutcomeRolledBack, nil
-			}
-			// A record that is not this swap's — an earlier swap's stale
-			// outcome, or an anonymous one — proves nothing about it, and the
-			// request may still be in flight or queued on the server: discard
-			// the staged scope, then re-read.
-		default:
-			return false, "", false, nil
 		}
 		// Discard the staged scope ON THE SERVER, serialized with the swap:
 		// either the request ran first and its own record answers the next

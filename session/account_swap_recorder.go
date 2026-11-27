@@ -78,10 +78,18 @@ func (r *accountSwapRecorder) noteStagedDiscarded(id string) {
 // terminal record — not even its own, where a duplicated request would
 // otherwise downgrade a real commit into a rollback the host never did
 // (#7773 R1). A straggler's own reconcile still reaches not-committed through
-// the stale-record arm. Caller holds r.mu.
+// the stale-record arm. The one upgrade is a slot already holding THIS swap's
+// own non-terminal unknown: the discard tombstoned it and just removed its
+// stage, so it can never commit and its verdict is rolled_back. The discard
+// holds the swap's lock, so no run() is in flight to clobber (#7862 review).
+// Caller holds r.mu.
 func (r *accountSwapRecorder) refuseLocked(id string) {
 	if r.id == "" {
 		r.id, r.outcome, r.program = id, swapOutcomeRolledBack, ""
+		return
+	}
+	if r.id == id && r.outcome == swapOutcomeUnknown {
+		r.outcome = swapOutcomeRolledBack
 	}
 }
 
