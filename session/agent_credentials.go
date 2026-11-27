@@ -324,15 +324,17 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 		}
 		return nil
 	}
-	// checkMount reads a mount option's value against the resolution and
-	// trust-store paths only — the credential path has no account boundary
-	// to protect and a mount cannot shadow af's single-file credential
-	// mount (runc mounts parent-then-child), but it CAN decide where the
-	// agent's endpoint hosts resolve and which certificate authorities its
-	// TLS stack trusts (#7867 R3): the routing names the env check refuses
-	// are only words for where these paths point.
-	checkMount := func(value string) error {
-		if protected := dockerRoutingProtectedPath(dockerRoutingMountTarget(value)); protected != "" {
+	// checkMount reads a mount's container-side target against the
+	// resolution and trust-store paths only — the credential path has no
+	// account boundary to protect and a mount cannot shadow af's
+	// single-file credential mount (runc mounts parent-then-child), but it
+	// CAN decide where the agent's endpoint hosts resolve and which
+	// certificate authorities its TLS stack trusts (#7867 R3): the routing
+	// names the env check refuses are only words for where these paths
+	// point. The caller extracts the target — -v puts it in the second ':'
+	// field where --tmpfs puts it first.
+	checkMount := func(target string) error {
+		if protected := dockerRoutingProtectedPath(target); protected != "" {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot install a mount over %s for the credential-mount session's %s agent because %s",
 				protected, agent, dockerRoutingProtectedReason(protected))
@@ -399,23 +401,34 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot use --volumes-from for the credential-mount session's %s agent because af cannot prove what the donor container mounts — the donor's mounts land at its own container paths, resolution files and trust stores included; name the mount explicitly with -v or --mount instead",
 				agent)
-		case arg == "-v" || arg == "--volume" || arg == "--mount" || arg == "--tmpfs":
+		case arg == "-v" || arg == "--volume" || arg == "--mount":
 			if index+1 < len(args) {
 				index++
-				if err := checkMount(args[index]); err != nil {
+				if err := checkMount(dockerRoutingMountTarget(args[index])); err != nil {
 					return err
 				}
 			}
-		case strings.HasPrefix(arg, "--volume=") || strings.HasPrefix(arg, "--mount=") || strings.HasPrefix(arg, "--tmpfs="):
-			if err := checkMount(strings.SplitN(arg, "=", 2)[1]); err != nil {
+		case arg == "--tmpfs":
+			if index+1 < len(args) {
+				index++
+				if err := checkMount(dockerTmpfsTarget(args[index])); err != nil {
+					return err
+				}
+			}
+		case strings.HasPrefix(arg, "--volume=") || strings.HasPrefix(arg, "--mount="):
+			if err := checkMount(dockerRoutingMountTarget(strings.SplitN(arg, "=", 2)[1])); err != nil {
+				return err
+			}
+		case strings.HasPrefix(arg, "--tmpfs="):
+			if err := checkMount(dockerTmpfsTarget(strings.SplitN(arg, "=", 2)[1])); err != nil {
 				return err
 			}
 		case strings.HasPrefix(arg, "-v="):
-			if err := checkMount(strings.TrimPrefix(arg, "-v=")); err != nil {
+			if err := checkMount(dockerRoutingMountTarget(strings.TrimPrefix(arg, "-v="))); err != nil {
 				return err
 			}
 		case strings.HasPrefix(arg, "-v") && len(arg) > 2:
-			if err := checkMount(strings.TrimPrefix(arg, "-v")); err != nil {
+			if err := checkMount(dockerRoutingMountTarget(strings.TrimPrefix(arg, "-v"))); err != nil {
 				return err
 			}
 		case arg == "--add-host":
@@ -493,7 +506,7 @@ func validateCredentialDockerRunArgs(args []string, agent string, passthrough []
 			if err := dockerCheckShorthandCluster(arg, args, index, dockerGuardedShorthands,
 				func(character byte, value string) error {
 					if character == 'v' {
-						return checkMount(value)
+						return checkMount(dockerRoutingMountTarget(value))
 					}
 					return checkEnv(value)
 				},

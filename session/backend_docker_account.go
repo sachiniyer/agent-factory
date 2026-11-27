@@ -156,7 +156,10 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 		}
 		return nil
 	}
-	checkMount := func(value string) error {
+	// checkMount takes the option's raw value plus its container-side mount
+	// target — the target differs per spelling (-v's second ':' field,
+	// --tmpfs's first), so each case extracts it rather than guessing here.
+	checkMount := func(value, routingTarget string) error {
 		mountsProtectedPath := func() string {
 			for _, field := range dockerMountFields(value) {
 				target, names := dockerMountTarget(field)
@@ -186,7 +189,7 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 		// trust stores live at (#7867 R3): the routing names the env checks
 		// refuse are only words for where these paths point, and a mount is
 		// the same route with none of the env plumbing.
-		if protected := dockerRoutingProtectedPath(dockerRoutingMountTarget(value)); protected != "" {
+		if protected := dockerRoutingProtectedPath(routingTarget); protected != "" {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot install a mount over %s for an account-scoped session because %s",
 				protected, dockerRoutingProtectedReason(protected))
@@ -323,23 +326,34 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 			if err := checkDevice(strings.TrimPrefix(arg, "--device=")); err != nil {
 				return err
 			}
-		case arg == "-v" || arg == "--volume" || arg == "--mount" || arg == "--tmpfs":
+		case arg == "-v" || arg == "--volume" || arg == "--mount":
 			if index+1 < len(args) {
 				index++
-				if err := checkMount(args[index]); err != nil {
+				if err := checkMount(args[index], dockerRoutingMountTarget(args[index])); err != nil {
 					return err
 				}
 			}
-		case strings.HasPrefix(arg, "--volume=") || strings.HasPrefix(arg, "--mount=") || strings.HasPrefix(arg, "--tmpfs="):
-			if err := checkMount(strings.SplitN(arg, "=", 2)[1]); err != nil {
+		case arg == "--tmpfs":
+			if index+1 < len(args) {
+				index++
+				if err := checkMount(args[index], dockerTmpfsTarget(args[index])); err != nil {
+					return err
+				}
+			}
+		case strings.HasPrefix(arg, "--volume=") || strings.HasPrefix(arg, "--mount="):
+			if err := checkMount(strings.SplitN(arg, "=", 2)[1], dockerRoutingMountTarget(strings.SplitN(arg, "=", 2)[1])); err != nil {
+				return err
+			}
+		case strings.HasPrefix(arg, "--tmpfs="):
+			if err := checkMount(strings.SplitN(arg, "=", 2)[1], dockerTmpfsTarget(strings.SplitN(arg, "=", 2)[1])); err != nil {
 				return err
 			}
 		case strings.HasPrefix(arg, "-v="):
-			if err := checkMount(strings.TrimPrefix(arg, "-v=")); err != nil {
+			if err := checkMount(strings.TrimPrefix(arg, "-v="), dockerRoutingMountTarget(strings.TrimPrefix(arg, "-v="))); err != nil {
 				return err
 			}
 		case strings.HasPrefix(arg, "-v") && len(arg) > 2:
-			if err := checkMount(strings.TrimPrefix(arg, "-v")); err != nil {
+			if err := checkMount(strings.TrimPrefix(arg, "-v"), dockerRoutingMountTarget(strings.TrimPrefix(arg, "-v"))); err != nil {
 				return err
 			}
 		// Docker's own resolver and namespace options are the same routing
@@ -418,7 +432,7 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 			if err := dockerCheckShorthandCluster(arg, args, index, dockerGuardedShorthands,
 				func(character byte, value string) error {
 					if character == 'v' {
-						return checkMount(value)
+						return checkMount(value, dockerRoutingMountTarget(value))
 					}
 					return checkEnv(value)
 				},
