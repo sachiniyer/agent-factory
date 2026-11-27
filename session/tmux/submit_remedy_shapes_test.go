@@ -570,6 +570,36 @@ func TestStillChipComposerAcceptsEveryRealAgentFooter(t *testing.T) {
 	}
 }
 
+// TestStillChipComposerAcceptsClaudeFootersBelowTheClosingRule is the #7850
+// N2 regression class: the vim-mode composer is the only Claude composer
+// that reaches the remedy, and its footer rows sit BELOW the closing "─"
+// rule — chrome by geometry, where no draft can draw. Plan mode, the
+// auto-compact meter and a custom statusLine carry no phrase the grammars
+// knew, and must remedy again.
+func TestStillChipComposerAcceptsClaudeFootersBelowTheClosingRule(t *testing.T) {
+	rule := strings.Repeat("─", 80)
+	chipText := normalizeDelivery(claudeChip)
+	for name, footer := range map[string]string{
+		"K12b plan mode":           "  ⏸ plan mode on (shift+tab to cycle)",
+		"K12c auto-compact meter":  "  Context left until auto-compact: 12%",
+		"K12d custom status line":  "  my-org / api · main ✻",
+		"INSERT + agent count":     "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent",
+		"auto mode + for agents":   "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+		"? for shortcuts":          "  ? for shortcuts",
+		"arbitrary chrome wording": "  anything the agent draws here",
+	} {
+		t.Run(name, func(t *testing.T) {
+			pane := strings.Join([]string{
+				"x", rule, "❯ " + claudeChip, rule, "", footer,
+			}, "\n") + "\n"
+			cursor := paneCursorState{Visible: true, Row: 2, Col: contentEndCol("❯ " + claudeChip)}
+			if ok, why := stillChipComposer(pane, pane, cursor, chipText); !ok {
+				t.Fatalf("ok=false why=%q, want ok=true (rows below Claude's closing rule are chrome by geometry)", why)
+			}
+		})
+	}
+}
+
 // TestStillChipComposerAcceptsAgentFooterBelowABlankRow is the positive #7850
 // R3 control: the same shape as a draft that opened with blank lines, but the
 // row below the gap carries a signature the agent draws there — Codex's model/
