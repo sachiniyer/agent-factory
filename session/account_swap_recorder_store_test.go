@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -857,7 +858,7 @@ func TestSwapRecordIsRetiredAtTeardownButSurvivesASameGenerationRestart(t *testi
 	// A restart WITHIN the generation — the crashed server's replacement —
 	// installs the same store, reaches no Kill, and rehydrates the verdict the
 	// prior process reached (#7862).
-	second := &Instance{Title: "title", backend: &FakeBackend{}}
+	second := &Instance{Title: "title", backend: &FakeBackend{}, gitWorktree: &git.GitWorktree{}}
 	require.NoError(t, second.InstallDurableAccountSwapRecord(dir, key))
 	las2, ok := second.AgentServer().(*localAgentServer)
 	require.True(t, ok)
@@ -867,9 +868,9 @@ func TestSwapRecordIsRetiredAtTeardownButSurvivesASameGenerationRestart(t *testi
 	assert.Equal(t, "swap-1", id)
 	assert.FileExists(t, path, "a same-generation restart keeps the record")
 
-	// The session's teardown retires the record: the workspace kill removes
-	// it, so a session re-created on the same (repo, title) key inherits no
-	// verdict a dead generation reached.
+	// The session's teardown retires the record: the instance still holds its
+	// workspace, so the kill is the generation's end — a session re-created on
+	// the same (repo, title) key inherits no verdict a dead generation reached.
 	require.NoError(t, las2.Kill(false))
 	assert.NoFileExists(t, path, "the workspace teardown retired the record")
 
@@ -880,4 +881,46 @@ func TestSwapRecordIsRetiredAtTeardownButSurvivesASameGenerationRestart(t *testi
 	o, _, id = las3.acctSwap.status()
 	assert.Equal(t, swapOutcomeNone, o, "a new generation inherits nothing from the last")
 	assert.Empty(t, id)
+}
+
+// The /v1/agent/stop path reaches localAgentServer.Kill too — StopPreserving
+// runs StopPreservingWorkspace, then its SIGTERM drives shutdownWorkspace into
+// Kill on a backend that no-ops — but the workspace PRESERVED, so the session
+// generation survives for a later adopted restart and the record must survive
+// with it. What Kill retires is the record of the generation the kill ENDS,
+// and the kill decides that by what the instance still holds when it runs:
+// StopPreservingWorkspace's teardown already released the worktree pointer,
+// so this Kill destroys nothing and retires nothing (Codex on #7894).
+func TestSwapRecordSurvivesAWorkspacePreservingShutdown(t *testing.T) {
+	dir := t.TempDir()
+	key := RebuildTeardownKey("/repo", "title")
+	path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+
+	inst := &Instance{Title: "title", backend: &FakeBackend{}, gitWorktree: &git.GitWorktree{}}
+	require.NoError(t, inst.InstallDurableAccountSwapRecord(dir, key))
+	las, ok := inst.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	_, err := las.acctSwap.run("swap-1", func() (string, error) { return "claude", nil })
+	require.NoError(t, err)
+
+	// The preserve stop releases the workspace: teardownTabs(keepWorkspace)
+	// leaves the tree on disk and clears the pointer — exactly the sequence
+	// the /v1/agent/stop handler runs before its SIGTERM.
+	require.NoError(t, las.StopPreservingWorkspace())
+	assert.Nil(t, inst.gitWorktree, "the preserve released the instance's workspace")
+
+	// The SIGTERM's shutdownWorkspace then calls Kill on a backend that
+	// no-ops — the workspace it would destroy was already released. The kill
+	// succeeds, but the record is the PRESERVED generation's own: it must
+	// survive for a later adopted restart to rehydrate.
+	require.NoError(t, las.Kill(false))
+	assert.FileExists(t, path, "the record outlives a workspace-preserving shutdown")
+
+	reborn := &Instance{Title: "title", backend: &FakeBackend{}, gitWorktree: &git.GitWorktree{}}
+	require.NoError(t, reborn.InstallDurableAccountSwapRecord(dir, key))
+	las2, ok := reborn.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	o, _, id := las2.acctSwap.status()
+	assert.Equal(t, swapOutcomeCommitted, o, "the adopted restart rehydrates the preserved generation's verdict")
+	assert.Equal(t, "swap-1", id)
 }

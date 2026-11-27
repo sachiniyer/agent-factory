@@ -656,6 +656,20 @@ func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	for _, br := range brokers {
 		br.close()
 	}
+	// Whether this kill ends the session generation — and so must retire its
+	// durable swap record (#7883) — is decided by what the instance still holds
+	// when Kill runs. A workspace still bound here is destroyed (or, for an
+	// unproven workspace, quarantined in place) below: either way the
+	// generation is over. A workspace ALREADY released survives the kill by
+	// design — StopPreservingWorkspace ran first and cleared the pointer, the
+	// /v1/agent/stop path the SIGTERM's shutdownWorkspace follows — so its
+	// record is the preserved generation's own, and a later adopted restart
+	// rehydrates from it (#5571 W8.6). Read BEFORE the kill: a successful
+	// teardown clears the pointer, so checking after could not tell the two
+	// apart (Codex on this PR).
+	s.inst.mu.RLock()
+	workspaceHeld := s.inst.gitWorktree != nil
+	s.inst.mu.RUnlock()
 	if err := s.inst.currentBackend().Kill(s.inst, trustLiveGeneration); err != nil {
 		return err
 	}
@@ -668,6 +682,8 @@ func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	// generation (the crashed server's adopted replacement) never reaches it,
 	// so the record survives to rehydrate that restart (#7862). A refused
 	// teardown returned above keeps the record: the generation may continue.
-	s.inst.retireDurableAccountSwapRecord()
+	if workspaceHeld {
+		s.inst.retireDurableAccountSwapRecord()
+	}
 	return nil
 }
