@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/csv"
 	"fmt"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -85,7 +86,8 @@ func dockerMountTarget(field string) (string, bool) {
 // controls. The image's ENV delivers the same names for claude and codex —
 // that surface is what the post-run_args pins in runContainer hold. Docker's
 // own resolver options and trust-store mounts are a separate repo-controlled
-// surface for the same class).
+// surface for the same class — that is the mount and option half of this
+// validator, not the env walk).
 func validateAccountDockerRunArgs(args []string, agent string, passthrough []string) error {
 	denied := accountDockerDeniedNames(agent)
 	// The keep-if-set names the account boundary pins at exec are refused to
@@ -180,6 +182,15 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 				"backend=docker: docker.run_args cannot install an account mount over %s because it would replace af's selected account boundary",
 				protected)
 		}
+		// A mount can also shadow the paths name resolution and the TLS
+		// trust stores live at (#7867 R3): the routing names the env checks
+		// refuse are only words for where these paths point, and a mount is
+		// the same route with none of the env plumbing.
+		if protected := dockerRoutingProtectedPath(dockerRoutingMountTarget(value)); protected != "" {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot install a mount over %s for an account-scoped session because %s",
+				protected, dockerRoutingProtectedReason(protected))
+		}
 		return nil
 	}
 	// checkDevice reads --device, whose value is host:container[:permissions].
@@ -204,6 +215,39 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot use --device to create %s for an account-scoped session because the node is written into af's selected account directory on the host and outlives the container; name a container path outside %s",
 				target, protected)
+		}
+		return nil
+	}
+	// checkAddHost reads --add-host, which writes /etc/hosts mappings
+	// directly. It is refused only where a mapped hostname is (or sits
+	// under) a host the session's credential traffic resolves to — the
+	// agent's first-party endpoints and whatever the operator's forwarded
+	// environment routes through — because remapping one hands the
+	// account's authenticated requests to a repo-chosen address (#7867 R3).
+	// Every other mapping stays allowed: host.docker.internal:host-gateway,
+	// dev services, databases.
+	endpointHosts := dockerSessionEndpointHosts(agent, passthrough, os.Environ())
+	checkAddHost := func(value string) error {
+		for _, host := range dockerAddHostNames(value) {
+			if protected := dockerHostProtected(host, endpointHosts); protected != "" {
+				return fmt.Errorf(
+					"backend=docker: docker.run_args cannot use --add-host to remap %s for an account-scoped %s session because that host is (or sits under) one the agent's authenticated traffic resolves to — a repo-chosen address there routes the account credential to a server the repository controls",
+					host, agent)
+			}
+		}
+		return nil
+	}
+	// checkNetwork reads --net/--network. A named or builtin network stays
+	// allowed — attaching a session to a user-defined network is a common
+	// setup — while the container: form joins ANOTHER container's network
+	// namespace: its resolver config and outbound path become this
+	// session's, and the session's credential-bearing traffic becomes
+	// reachable from whatever shares the donor's stack.
+	checkNetwork := func(value string) error {
+		if strings.HasPrefix(value, "container:") {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot join another container's network namespace for an account-scoped session because the donor's resolver and outbound path become this session's — and the session's authenticated traffic becomes the donor's to observe; use a named --network instead",
+			)
 		}
 		return nil
 	}
@@ -296,6 +340,47 @@ func validateAccountDockerRunArgs(args []string, agent string, passthrough []str
 			}
 		case strings.HasPrefix(arg, "-v") && len(arg) > 2:
 			if err := checkMount(strings.TrimPrefix(arg, "-v")); err != nil {
+				return err
+			}
+		// Docker's own resolver and namespace options are the same routing
+		// class the env names refuse (#7867 R3): --add-host writes /etc/hosts
+		// directly, the --dns* family chooses the resolver every lookup goes
+		// to, --link injects a host mapping and an env alias, and
+		// --net=container: joins a donor's whole network namespace. --add-host
+		// and --network keep their non-endpoint uses — only the mappings and
+		// namespace-shares that route the credential are refused.
+		case arg == "--add-host":
+			if index+1 < len(args) {
+				index++
+				if err := checkAddHost(args[index]); err != nil {
+					return err
+				}
+			}
+		case strings.HasPrefix(arg, "--add-host="):
+			if err := checkAddHost(strings.TrimPrefix(arg, "--add-host=")); err != nil {
+				return err
+			}
+		case arg == "--dns" || arg == "--dns-search" || arg == "--dns-option" || arg == "--dns-opt":
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot use %s for an account-scoped session because it chooses the resolver every hostname in the container goes through — including the agent's endpoint hosts — so a repo-chosen resolver routes the account's authenticated traffic the way a proxy does",
+				arg)
+		case strings.HasPrefix(arg, "--dns=") || strings.HasPrefix(arg, "--dns-search=") || strings.HasPrefix(arg, "--dns-option=") || strings.HasPrefix(arg, "--dns-opt="):
+			name, _, _ := strings.Cut(arg, "=")
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot use %s for an account-scoped session because it chooses the resolver every hostname in the container goes through — including the agent's endpoint hosts — so a repo-chosen resolver routes the account's authenticated traffic the way a proxy does",
+				name)
+		case arg == "--link" || strings.HasPrefix(arg, "--link="):
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot use --link for an account-scoped session because it injects a host mapping and an env alias for a repo-named container — write the mapping with --add-host to a host that is not an endpoint, or attach with a named --network")
+		case arg == "--net" || arg == "--network":
+			if index+1 < len(args) {
+				index++
+				if err := checkNetwork(args[index]); err != nil {
+					return err
+				}
+			}
+		case strings.HasPrefix(arg, "--net=") || strings.HasPrefix(arg, "--network="):
+			if err := checkNetwork(strings.SplitN(arg, "=", 2)[1]); err != nil {
 				return err
 			}
 		case strings.HasPrefix(arg, "--") || (len(arg) == 2 && arg[0] == '-'):
