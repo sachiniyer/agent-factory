@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
 // This file holds the durable move_in_flight record machinery of #7819: a
@@ -150,6 +153,9 @@ func (g *GitWorktree) resolveMoveInFlightRecordLocked(primary string, recovery R
 	}
 	primaryIdentity, primaryErr := boundedRelocationPathIdentity(primary)
 	if primaryErr == nil && recovery.identity().same(primaryIdentity) {
+		if err := retireMoveInFlightStaging(recovery); err != nil {
+			return RelocationClaim{}, err
+		}
 		g.relocationRecovery = nil
 		return g.activateRelocationClaimLocked(RelocationClaim{
 			Path: primary, AlternatePath: recovery.AlternatePath, identity: primaryIdentity,
@@ -160,6 +166,9 @@ func (g *GitWorktree) resolveMoveInFlightRecordLocked(primary string, recovery R
 		destIdentity, destErr := boundedRelocationPathIdentity(recovery.AlternatePath)
 		if destErr == nil && recovery.destIdentity().same(destIdentity) {
 			selected := recovery.AlternatePath
+			if err := retireMoveInFlightStaging(recovery); err != nil {
+				return RelocationClaim{}, err
+			}
 			g.setWorktreeLocationLocked(selected)
 			g.relocationRecovery = nil
 			return g.activateRelocationClaimLocked(RelocationClaim{
@@ -184,4 +193,79 @@ func (g *GitWorktree) resolveMoveInFlightRecordLocked(primary string, recovery R
 		"cannot resolve the interrupted move: neither its recorded path %s nor its destination %s carries the recorded identity",
 		primary, recovery.AlternatePath,
 	), ErrRelocateStateUnknown)
+}
+
+// retireMoveInFlightStaging removes the `.af-copy-*` staged copy a retiring
+// move_in_flight record still names (N1): the record may retire only once
+// the residue it names is gone — a successful retry never re-names the old
+// staging, and an unnamed `.af-copy-*` degrades to leaf inference that
+// refuses this session's archives and restores once its leaf is pruned.
+// Resolution therefore removes its own staging itself. The copy's bytes are
+// never needed in a matching branch: it runs only after the source's
+// identity claimed the recorded path (the worktree is intact at the source)
+// or the published destination matched the recorded identity, so the staged
+// tree is at most a duplicate of bytes that provably exist elsewhere.
+//
+// The ownership proof is the recorded name plus, when the second checkpoint
+// had already landed, the recorded destination identity — it was captured
+// from the staged tree before the publish rename, so a still-present staging
+// directory that matches it is exactly what af staged. A crash before that
+// checkpoint records no destination identity, and the unguessable af-private
+// name the record carries is then the whole proof; either way the removal
+// itself stays descriptor-anchored (removeOpenedDirectory rechecks the
+// secured name against the opened tree) so a swap mid-removal refuses rather
+// than deleting a replacement. A staging path that survives but mismatches a
+// KNOWN destination identity is foreign and is never deleted — the record
+// stays and the refusal directs the operator at it. Any removal failure also
+// keeps the record: residue it names is never left anonymous.
+func retireMoveInFlightStaging(recovery RelocationRecovery) error {
+	staging := recovery.StagingPath
+	if staging == "" {
+		return nil
+	}
+	stagedIdentity, err := boundedRelocationPathIdentity(staging)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return errors.Join(fmt.Errorf(
+			"cannot verify whether the interrupted move's staged copy %s is still present: %w",
+			staging, err,
+		), ErrRelocateStateUnknown)
+	}
+	if recovery.DestIdentityKnown && !recovery.destIdentity().same(stagedIdentity) {
+		return errors.Join(fmt.Errorf(
+			"the interrupted move's staged-copy path %s now holds a directory af did not stage; "+
+				"inspect it and remove it, then retry",
+			staging,
+		), ErrRelocateStateUnknown)
+	}
+	parent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(staging), "staged copy parent")
+	if err != nil {
+		return errors.Join(fmt.Errorf(
+			"the interrupted move's staged copy %s could not be reached for removal: %w",
+			staging, err,
+		), ErrRelocateStateUnknown)
+	}
+	defer parent.Close()
+	stagedFd, err := unix.Open(
+		staging,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return errors.Join(fmt.Errorf(
+			"the interrupted move's staged copy %s could not be opened without following links: %w",
+			staging, err,
+		), ErrRelocateStateUnknown)
+	}
+	stagedDir := os.NewFile(uintptr(stagedFd), staging)
+	defer stagedDir.Close()
+	if err := removeOpenedDirectory(parent, filepath.Base(staging), staging, stagedDir, nil); err != nil {
+		return errors.Join(fmt.Errorf(
+			"the interrupted move left its staged copy at %s and it could not be removed: %w",
+			staging, err,
+		), ErrRelocateStateUnknown)
+	}
+	return nil
 }

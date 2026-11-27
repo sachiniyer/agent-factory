@@ -182,7 +182,39 @@ func TestMoveInFlightRecord_CrashPoints(t *testing.T) {
 					require.Error(t, claimErr)
 					assert.True(t, errors.Is(claimErr, git.ErrRelocateStateUnknown))
 					assert.Contains(t, claimErr.Error(), rec.QuarantinePath)
+					// The operator exit the refusal names: put the stranded
+					// quarantine back when the move never published, drop it
+					// when the destination already holds the worktree — then
+					// re-claim.
+					if point.name == "post-publish" {
+						require.NoError(t, os.RemoveAll(quarantine))
+					} else {
+						require.NoError(t, os.Rename(quarantine, src))
+					}
+					claim, claimErr = inst2.gitWorktree.ClaimRelocationSource()
+					require.NoError(t, claimErr, "after the operator exit the claim must resolve")
 				}
+
+				// N1 (#7819 round two): a move_in_flight record's residue names
+				// retire only once that residue is gone. Resolution removes its
+				// own record-named .af-copy-* staging (identity-checked), so the
+				// old staging is gone after the claim — it must never be left on
+				// disk named by nothing, where it would degrade to leaf
+				// inference that refuses every later archive and restore once
+				// the leaf is pruned.
+				if staging != "" {
+					assert.NoDirExists(t, staging,
+						"resolution must remove the record-named staging it retires")
+				}
+				require.NoError(t, inst2.gitWorktree.SettleRelocationClaim(claim))
+				if claim.Path == src {
+					require.NoError(t, inst2.gitWorktree.ArchiveWorktree(dest),
+						"the retry after resolution succeeds")
+				}
+				postResidue, pErr := git.ListAFRelocationResidue(filepath.Dir(src), filepath.Dir(dest))
+				require.NoError(t, pErr)
+				assert.Empty(t, postResidue,
+					"a resolved-and-retried move leaves no residue — none may be left unnamed")
 			}
 		})
 	}
