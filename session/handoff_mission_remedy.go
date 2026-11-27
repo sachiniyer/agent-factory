@@ -62,9 +62,14 @@ func pendingHandoffMissionRemedy(v LifecycleView) string {
 	switch {
 	case v.pendingHandoffMissionAutoRetryableView():
 		// Positive non-delivery: handoff recovery (ResumePendingHandoffs)
-		// transfers the mission and the next failover tick is admitted; no
-		// operator verb resends it, and CanConfirm refuses a retire too.
-		return "handoff recovery replays it automatically; no resend is needed"
+		// transfers the mission into the stored Prompt and clears the
+		// obligation (daemon/handoff_recovery.go:212) — it does not send
+		// it, because limit_auto_resume defaults OFF
+		// (daemon/limit_resume.go:54-58). The operator sends the
+		// transferred prompt with retry-limit, which runs the plain limit
+		// resume now that the mission is no longer pending; neither a
+		// resend nor --delivered admits a not-delivered row.
+		return fmt.Sprintf("handoff recovery transfers the mission into the session's pending prompt; send it with `%s` once transferred (automatic retry is off by default)", retry)
 	case v.canRetryPendingHandoffMissionDeliveryView():
 		// An ambiguous verdict on a running/ready (or startup-unknown) row:
 		// the daemon re-verifies the pane and resubmits, and --delivered

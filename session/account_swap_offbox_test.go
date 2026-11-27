@@ -897,8 +897,10 @@ func TestOffBoxAccountSwapRefusedWhileAMissionIsOwed(t *testing.T) {
 // startup-unknown fence is past; there CanRetryPendingHandoffMissionDelivery is
 // false (it needs Running, Ready or startup-unknown), so retry-limit runs the
 // plain limit resume and is named only as an un-stall, never a resend. A
-// positively not-delivered mission belongs to automatic recovery; neither verb
-// admits it.
+// positively not-delivered mission belongs to automatic recovery, which
+// transfers it into the stored prompt (limit_auto_resume defaults OFF, so the
+// operator sends it with retry-limit); neither a resend nor --delivered admits
+// it.
 //
 // Each row fails on 98add920c, which printed "retry-limit resends it,
 // retry-limit --delivered retires it" for every verdict and liveness.
@@ -917,13 +919,13 @@ func TestOffBoxAccountSwapRefusalRemediesFollowRoutingPredicates(t *testing.T) {
 		wantNotContains []string
 	}{
 		{
-			name:            "not-delivered at the limit wall names automatic recovery, no resend verb",
+			name:            "not-delivered at the limit wall names the transfer and the manual resume, no resend",
 			verdict:         PromptNotDelivered,
 			liveness:        LiveLimitReached,
 			autoRetryable:   true,
 			canRetry:        false,
 			canConfirm:      false,
-			wantContains:    []string{"handoff recovery replays it automatically", "no resend is needed"},
+			wantContains:    []string{"handoff recovery transfers the mission", "send it with", "retry-limit", "automatic retry is off by default"},
 			wantNotContains: []string{"resends it", "retires it", "--delivered"},
 		},
 		{
