@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -304,19 +305,17 @@ func walkCopy(src, dst string) error {
 // worktree stranded under `.af-source-*` with the uncommitted file, staged
 // copy under `.af-copy-*`) and that ListAFRelocationResidue discovers both.
 //
-// Precondition: a second writable filesystem. The test attempts to use
-// /dev/vdb-style loopback: it searches common mount points for a directory
-// whose st_dev differs from /tmp's; if none exists, it creates a loopback
-// ext4 image and mounts it (requires CAP_SYS_ADMIN; skipped if unavailable).
+// The cross-device path is forced by an EXDEV answer at the first rename, so
+// every write stays inside t.TempDir() — the engine's EXDEV branch is
+// identical either way, EXDEV is only what selects it.
 func TestRelocateCrashWindow_RealCrossDeviceMoveLeavesResidue(t *testing.T) {
 	if os.Getenv("AF_CRASH_CHILD_SECOND_FS") == "1" {
 		runChildRelocateCrash(t)
 		return
 	}
 
-	secondFS := findOrMakeSecondFilesystem(t)
 	srcParent := t.TempDir()
-	destParent := secondFS
+	destParent := t.TempDir()
 
 	src := filepath.Join(srcParent, "wt-crash")
 	require.NoError(t, os.Mkdir(src, 0o755))
@@ -328,12 +327,20 @@ func TestRelocateCrashWindow_RealCrossDeviceMoveLeavesResidue(t *testing.T) {
 	// move does not take the test process with it. The child re-execs this
 	// test binary with a -test.run filter that selects the child harness and
 	// env pointing at the already-prepared src/dest and second-fs marker.
+	// The child's os.Exit(9) skips every deferred cleanup INCLUDING the
+	// one that removes the sandbox home TestMain stamps under TMPDIR —
+	// each crashed child would leak one. Point the child's temp root at
+	// a directory the parent owns so whatever it leaks dies with this
+	// test's tree.
+	childTmp := filepath.Join(t.TempDir(), "child-tmp")
+	require.NoError(t, os.Mkdir(childTmp, 0o755))
 	cmd := exec.Command(os.Args[0], "-test.run=^TestRelocateCrashWindow_RealCrossDeviceMoveLeavesResidue$", "-test.timeout=60s")
 	cmd.Dir = srcParent
 	cmd.Env = append(os.Environ(),
 		"AF_CRASH_CHILD_SECOND_FS=1",
 		"AF_CRASH_SRC="+src,
 		"AF_CRASH_DEST="+dest,
+		"TMPDIR="+childTmp,
 	)
 	var childOut strings.Builder
 	cmd.Stdout = &childOut
@@ -381,9 +388,10 @@ func TestRelocateCrashWindow_RealCrossDeviceMoveLeavesResidue(t *testing.T) {
 	assert.ElementsMatch(t, []string{quarantine, staging}, both)
 }
 
-// runChildRelocateCrash is the child harness: it sets the EXDEV seam (a real
-// second filesystem is already in use, but the seam guarantees the fallback
-// path is taken even if the kernel would not return EXDEV), installs the
+// runChildRelocateCrash is the child harness: it installs the EXDEV answer
+// for the engine's first same-filesystem rename (so the cross-device path
+// runs with every write inside the test's temp dirs — no second filesystem,
+// no loopback mount, no /dev/shm, /run or /var/tmp writes), installs the
 // crash seam at moveDirBeforeDestCommit, and runs the real
 // moveDirCrossDevice. The os.Exit(9) inside the seam models the daemon
 // death: it fires AFTER the quarantine rename and staged copy, BEFORE the
@@ -395,6 +403,7 @@ func runChildRelocateCrash(t *testing.T) {
 	if src == "" || dest == "" {
 		t.Fatal("AF_CRASH_SRC/AF_CRASH_DEST not set")
 	}
+	renamePath = func(string, string) error { return syscall.EXDEV }
 	moveDirBeforeDestCommit = func(string) error {
 		os.Exit(9)
 		return nil
@@ -402,57 +411,6 @@ func runChildRelocateCrash(t *testing.T) {
 	_ = moveDirCrossDevice(src, dest, "move")
 	t.Fatalf("the moveDirBeforeDestCommit seam did not fire; move completed unexpectedly")
 }
-
-// findOrMakeSecondFilesystem locates a directory whose st_dev differs from
-// /tmp's so the kernel returns a real EXDEV for a cross-dir rename. If none
-// of the common mount points qualifies, it creates a loopback ext4 image and
-// mounts it. The test is skipped if neither is possible.
-func findOrMakeSecondFilesystem(t *testing.T) string {
-	t.Helper()
-	tmpStat, err := os.Stat("/tmp")
-	require.NoError(t, err)
-	tmpDev := statDev(tmpStat)
-	for _, cand := range []string{"/dev/shm", "/run", "/var/tmp"} {
-		if info, err := os.Stat(cand); err == nil && statDev(info) != tmpDev {
-			dir := filepath.Join(cand, "af-crash-second-fs-"+t.Name())
-			require.NoError(t, os.MkdirAll(dir, 0o755))
-			t.Cleanup(func() { _ = os.RemoveAll(dir) })
-			return dir
-		}
-	}
-	// Try a loopback mount: create an ext4 image and mount it. Requires
-	// CAP_SYS_ADMIN; skip if unavailable.
-	img := filepath.Join(t.TempDir(), "second.img")
-	require.NoError(t, exec.Command("truncate", "-s", "32m", img).Run())
-	if err := exec.Command("mkfs.ext4", "-q", img).Run(); err != nil {
-		t.Skipf("no second filesystem available and mkfs.ext4 failed (%v); cannot run real cross-device crash test", err)
-	}
-	mnt := filepath.Join(t.TempDir(), "mnt")
-	require.NoError(t, os.MkdirAll(mnt, 0o755))
-	if err := exec.Command("mount", "-o", "loop", img, mnt).Run(); err != nil {
-		t.Skipf("no second filesystem available and loopback mount failed (%v); cannot run real cross-device crash test", err)
-	}
-	t.Cleanup(func() { _ = exec.Command("umount", mnt).Run() })
-	return mnt
-}
-
-func statDev(info os.FileInfo) uint64 {
-	// On Linux, os.FileInfo.Sys() returns *syscall.Stat_t, whose Dev is a
-	// field rather than a Dev() uint64 method, so a method-based assertion
-	// always fails and the test never recognizes an existing second
-	// filesystem. Read the field directly; on platforms where the stat type
-	// does not match, the assertion fails and the loop falls back to a
-	// loopback mount (and skips if that is unavailable). Dev is uint64 on
-	// Linux but int32 on darwin, so an explicit conversion keeps the package
-	// compiling on every GOOS CI runs.
-	if d, ok := info.Sys().(*syscall.Stat_t); ok {
-		return uint64(d.Dev)
-	}
-	return 0
-}
-
-// ensure the time import is used when the child-harness path is compiled out
-var _ = time.Second
 
 // TestBindAFRelocationResidue_OwnsQuarantine pins the proof that a residue
 // directory is this session's own stranded worktree: af's cross-device move is
@@ -544,4 +502,116 @@ func TestBindAFRelocationResidue_UnverifiedNoGitPointerIsUnknown(t *testing.T) {
 	binding, err := BindAFRelocationResidue(orphan, wtPath, repoRoot)
 	require.Error(t, err, "a residue with no readable git binding is unverified, not silently classified")
 	assert.Equal(t, ResidueUnknown, binding)
+}
+
+// TestBindAFRelocationResidue_SymlinkCandidateIsUnverified pins R6: the bind
+// must not traverse the candidate by pathname. A symlink planted at the
+// residue path — swapped in after the scan saw a directory — must fail the
+// O_NOFOLLOW open and read as unverified, never as the tree the link resolves
+// into. On master the pathname traversal follows the link and classifies the
+// pointed-at foreign tree as foreign, so a planted link can launder a
+// refusal into "not mine, proceed".
+func TestBindAFRelocationResidue_SymlinkCandidateIsUnverified(t *testing.T) {
+	_, repoRoot, wtPath := archiveTestWorktree(t)
+	otherBranch := "arch/other"
+	otherWt := filepath.Join(filepath.Dir(repoRoot), "repo-arch-other")
+	runGitInPlaceTest(t, repoRoot, "worktree", "add", "-b", otherBranch, otherWt)
+	candidate := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("f", 32))
+	require.NoError(t, os.Symlink(otherWt, candidate))
+
+	binding, err := BindAFRelocationResidue(candidate, wtPath, repoRoot)
+	require.Error(t, err, "a symlink at the candidate path is not a scanned directory; the bind must not follow it")
+	assert.Equal(t, ResidueUnknown, binding)
+}
+
+// TestListAFRelocationResidue_DanglingSymlinkParentRefuses pins R7: when the
+// directory the scan was asked to enumerate resolves through a symlink whose
+// target does not exist, readdir's ENOENT is not "absent" — the link could be
+// fixed to resolve somewhere carrying residue, so "no residue" is unproven
+// and the scan must refuse rather than report an empty parent.
+func TestListAFRelocationResidue_DanglingSymlinkParentRefuses(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, "worktrees")
+	require.NoError(t, os.Symlink(filepath.Join(root, "nonexistent"), link))
+
+	residue, err := ListAFRelocationResidue(link)
+	require.Error(t, err, "a dangling symlink in the scanned path cannot prove the directory carries no residue")
+	assert.Nil(t, residue)
+	assert.Contains(t, err.Error(), link)
+}
+
+// TestListAFRelocationResidue_DanglingSymlinkInParentChainRefuses pins the
+// same refusal when the dangling component sits deeper inside the scanned
+// path, not at its leaf.
+func TestListAFRelocationResidue_DanglingSymlinkInParentChainRefuses(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, "link")
+	require.NoError(t, os.Symlink(filepath.Join(root, "nonexistent"), link))
+
+	residue, err := ListAFRelocationResidue(filepath.Join(link, "sub"))
+	require.Error(t, err)
+	assert.Nil(t, residue)
+	assert.Contains(t, err.Error(), link)
+}
+
+// TestListAFRelocationResidue_ResolvedSymlinkParentStillScans pins that only a
+// DANGLING link refuses: a parent path that traverses a symlink resolving to
+// a real directory is scanned normally and its residue is found.
+func TestListAFRelocationResidue_ResolvedSymlinkParentStillScans(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	require.NoError(t, os.Mkdir(real, 0o755))
+	quarantine := filepath.Join(real, ".af-source-"+strings.Repeat("1", 32))
+	require.NoError(t, os.Mkdir(quarantine, 0o755))
+	link := filepath.Join(root, "link")
+	require.NoError(t, os.Symlink(real, link))
+
+	residue, err := ListAFRelocationResidue(link)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{filepath.Join(link, ".af-source-"+strings.Repeat("1", 32))}, residue)
+}
+
+// TestListAFRelocationResidue_StalledPathComponentIsBounded pins R10 (#7819):
+// the dangling-symlink walk's component stats go through BoundedLstat, so an
+// lstat that never returns — the stalled NFS/FUSE case the bounded scan
+// exists for — surfaces as a deadline error, never as a wedged op-lock or a
+// fabricated "no residue" answer.
+func TestListAFRelocationResidue_StalledPathComponentIsBounded(t *testing.T) {
+	parent := t.TempDir()
+	absent := filepath.Join(parent, "absent-scan-root")
+
+	original := boundedLstatPath
+	release := make(chan struct{})
+	boundedLstatPath = func(p string) (os.FileInfo, error) {
+		if p == parent {
+			<-release
+		}
+		return original(p)
+	}
+	// Registered first so LIFO runs the drain below after the release close;
+	// a t.Fatal inside the drain cannot skip restoring the seam.
+	t.Cleanup(func() { boundedLstatPath = original })
+	t.Cleanup(func() {
+		close(release)
+		key := boundedStatKey{path: parent}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			boundedLstatFlights.Lock()
+			flight := boundedLstatFlights.byPath[key]
+			boundedLstatFlights.Unlock()
+			if flight == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the stalled component lstat did not drain after release")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+
+	residue, err := ListAFRelocationResidue(absent)
+	require.Error(t, err,
+		"a stalled component stat must surface, not wedge the caller or read as absent")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Nil(t, residue)
 }

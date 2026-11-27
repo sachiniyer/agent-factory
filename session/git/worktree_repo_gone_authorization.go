@@ -747,6 +747,10 @@ func readGitdirPointerFile(label, pointerPath, baseDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return parseGitdirPointerLine(label, pointerPath, baseDir, line)
+}
+
+func parseGitdirPointerLine(label, pointerPath, baseDir, line string) (string, error) {
 	target, ok := strings.CutPrefix(line, "gitdir:")
 	if !ok {
 		return "", worktreeIdentityMismatchf("%s %s does not begin with a gitdir line", label, pointerPath)
@@ -792,19 +796,27 @@ func readBoundedPointerLine(label, pointerPath string) (string, error) {
 		return "", fmt.Errorf("%s %s could not be opened without following links: %w", label, pointerPath, err)
 	}
 	defer f.Close()
+	return readBoundedPointerLineFd(f, label, pointerPath)
+}
+
+// readBoundedPointerLineFd performs the checks and the bounded read against a
+// descriptor the caller already opened without following links — by path, or
+// by openat relative to a held directory descriptor — so both anchoring styles
+// share the same regular-file, size-cap and newline handling.
+func readBoundedPointerLineFd(f *os.File, label, displayPath string) (string, error) {
 	info, err := f.Stat()
 	if err != nil {
-		return "", fmt.Errorf("%s %s could not be inspected: %w", label, pointerPath, err)
+		return "", fmt.Errorf("%s %s could not be inspected: %w", label, displayPath, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", worktreeIdentityMismatchf("%s %s is not a regular file", label, pointerPath)
+		return "", worktreeIdentityMismatchf("%s %s is not a regular file", label, displayPath)
 	}
 	content, err := io.ReadAll(io.LimitReader(f, archivedWorktreePointerMaxSize+1))
 	if err != nil {
-		return "", fmt.Errorf("%s %s could not be read: %w", label, pointerPath, err)
+		return "", fmt.Errorf("%s %s could not be read: %w", label, displayPath, err)
 	}
 	if len(content) > archivedWorktreePointerMaxSize {
-		return "", worktreeIdentityMismatchf("%s %s is too large to be a pointer file", label, pointerPath)
+		return "", worktreeIdentityMismatchf("%s %s is too large to be a pointer file", label, displayPath)
 	}
 	// Strip only the single terminating newline (#3278 review): git writes
 	// filesystem paths literally, so a newline INSIDE the recorded path must
@@ -825,6 +837,10 @@ func verifyWorktreePointerShape(worktreePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return requireWorktreesLeafGitdir(pointerPath, target)
+}
+
+func requireWorktreesLeafGitdir(pointerPath, target string) (string, error) {
 	name := filepath.Base(target)
 	if name == "" || name == "." || name == string(filepath.Separator) ||
 		filepath.Base(filepath.Dir(target)) != "worktrees" {
