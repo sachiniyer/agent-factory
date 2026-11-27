@@ -137,8 +137,12 @@ func TestHookProgressSameWorktreeBranchDriftResumes(t *testing.T) {
 func TestHookProgressMalformedJournalDoesNotBlockValidPruning(t *testing.T) {
 	for _, kind := range []string{"truncated", "non-regular", "unreadable"} {
 		t.Run(kind, func(t *testing.T) {
-			installScopeShim(t)
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			// Owner scan and the liveness oracle are both injected: whether the
+			// valid journal is reclaimed must never wait on a real instances
+			// read or a real /proc+systemctl probe inside a bound (#7911).
+			stubHookProgressOwnerScan(t)
+			oracle := stubHookProgressPruneOracle(t)
 			bad, err := newHookProgress(hookRun{worktreePath: t.TempDir(), scopeSessionID: "bad"}, nil, "af-hook-bad", "test")
 			if err != nil {
 				t.Fatal(err)
@@ -163,6 +167,14 @@ func TestHookProgressMalformedJournalDoesNotBlockValidPruning(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// An UNKNOWN liveness answer must keep both journals — inject it
+			// rather than trusting a real probe's timing.
+			oracle.set(pruneOracleUnknown)
+			pruneHookProgress(filepath.Dir(goodPath), time.Now().Add(15*24*time.Hour))
+			if _, err := os.Stat(goodPath); err != nil {
+				t.Fatalf("unknown liveness pruned the valid journal: %v", err)
+			}
+			oracle.set(pruneOracleDead)
 			for i := 0; i < 2; i++ {
 				pruneHookProgress(filepath.Dir(goodPath), time.Now().Add(15*24*time.Hour))
 				if _, err := os.Stat(bad.Directory); err != nil {

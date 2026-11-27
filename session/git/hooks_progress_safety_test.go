@@ -87,6 +87,13 @@ func TestHookProgressSafeTeardownReclaimsFinishedJournal(t *testing.T) {
 			claimDaemonProcess(t)
 			installScopeShim(t)
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			// The survivor sweep answers "nothing live" here, not because the
+			// real launcher scan happened to agree inside its settle budget —
+			// an unclassifiable same-user process on a loaded runner used to be
+			// able to refuse the teardown (#7911).
+			originalSweep := stopHookScopes
+			stopHookScopes = func(...string) error { return nil }
+			t.Cleanup(func() { stopHookScopes = originalSweep })
 			g := worktreeWithRecordedScope(t, "af-hook-owner")
 			g.SetHookScopeSessionID("owner")
 			g.repoPath = createGitRepo(t)

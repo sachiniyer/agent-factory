@@ -131,6 +131,10 @@ func TestHookProgressPruneFinalProbeIsBatched(t *testing.T) {
 	// launcher scan that transiently refuses an unrelated same-user process
 	// (#4217) used to keep the manager oracle from running at all, which this
 	// test read as a missing shim log — an ordering flake, not a verdict.
+	// The owner scan is the other bounded real read between the fixtures and
+	// the oracle: stub it too, or a loaded runner can stall the prune before
+	// it ever reaches a probe and the count reads 0 (#7911).
+	stubHookProgressOwnerScan(t)
 	var probes atomic.Int32
 	originalProbe := runningHookPrefixesForPrune
 	runningHookPrefixesForPrune = func(...string) ([]string, error) {

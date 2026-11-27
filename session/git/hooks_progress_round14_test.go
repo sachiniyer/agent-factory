@@ -21,6 +21,11 @@ func TestHookProgressResumableBailoutKeepsLeaseUntilRecoveryEnds(t *testing.T) {
 	claimDaemonProcess(t)
 	installScopeShim(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// Owner scan and the liveness oracle are both injected: reclamation below
+	// must never wait on a real instances read or a real /proc+systemctl probe
+	// answering inside a bound (#7911).
+	stubHookProgressOwnerScan(t)
+	oracle := stubHookProgressPruneOracle(t)
 	tree := t.TempDir()
 	p, err := newHookProgress(hookRun{worktreePath: tree, scopeSessionID: "owner", leaseProgress: true}, []string{"true"}, "af-hook-owner", "test")
 	if err != nil {
@@ -68,7 +73,16 @@ func TestHookProgressResumableBailoutKeepsLeaseUntilRecoveryEnds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pruneHookProgress(filepath.Dir(path), time.Now().Add(48*time.Hour))
+	later := time.Now().Add(48 * time.Hour)
+	oracle.set(pruneOracleUnknown)
+	pruneHookProgress(filepath.Dir(path), later)
+	for _, stale := range []string{path, p.Directory} {
+		if _, err := os.Stat(stale); err != nil {
+			t.Fatalf("unknown liveness pruned %s: %v", stale, err)
+		}
+	}
+	oracle.set(pruneOracleDead)
+	pruneHookProgress(filepath.Dir(path), later)
 	for _, stale := range []string{path, p.Directory} {
 		if _, err := os.Stat(stale); !os.IsNotExist(err) {
 			t.Fatalf("unleased ownerless journal was not pruned: %s: %v", stale, err)

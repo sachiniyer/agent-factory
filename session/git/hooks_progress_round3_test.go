@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -85,7 +84,12 @@ func TestHookProgressTerminalOrphansWithoutExitArePruned(t *testing.T) {
 	for _, owner := range []string{"deleted", "archived", "archived-legacy", "tombstoned", "live", "scope-live"} {
 		t.Run(owner, func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-			installSurvivorSystemctl(t, "exit 0\n")
+			// Owner state and the liveness oracle are both injected: whether
+			// this journal is reclaimed must never wait on a real instances
+			// read or a real /proc+systemctl probe answering inside a bound on
+			// a loaded runner (#7911).
+			owners := stubHookProgressOwnerScan(t)
+			oracle := stubHookProgressPruneOracle(t)
 			rows := `[]`
 			if owner == "archived" {
 				rows = `[{"id":"owner","liveness":5}]`
@@ -99,9 +103,6 @@ func TestHookProgressTerminalOrphansWithoutExitArePruned(t *testing.T) {
 			if owner == "live" {
 				rows = `[{"id":"owner"}]`
 			}
-			if err := config.SaveRepoInstances("test", json.RawMessage(rows)); err != nil {
-				t.Fatal(err)
-			}
 			p, err := newHookProgress(hookRun{worktreePath: t.TempDir(), scopeSessionID: "owner"}, []string{"true"}, "af-hook-owner", "test")
 			if err != nil {
 				t.Fatal(err)
@@ -110,15 +111,30 @@ func TestHookProgressTerminalOrphansWithoutExitArePruned(t *testing.T) {
 				t.Fatal(err)
 			}
 			p.finish()
-			if owner == "scope-live" {
-				installSurvivorSystemctl(t, "echo 'af-hook-owner-test-0.scope loaded active running Hook'\nexit 0\n")
-			}
 			path, _ := hookProgressPath(p.Worktree)
 			pruneHookProgress(filepath.Dir(path), time.Now())
 			if _, err := os.Stat(path); err != nil {
 				t.Fatalf("journal removed within grace: %v", err)
 			}
-			pruneHookProgress(filepath.Dir(path), time.Now().Add(2*progressGraceAge))
+			later := time.Now().Add(2 * progressGraceAge)
+			// For every owner state, an UNKNOWN answer — from the liveness
+			// oracle or from the owner scan itself — keeps the journal. The
+			// fail-safe is the contract these assertions rely on, so each arm
+			// is exercised rather than trusted to a real probe's timing.
+			oracle.set(pruneOracleUnknown)
+			pruneHookProgress(filepath.Dir(path), later)
+			owners.setUnknown()
+			pruneHookProgress(filepath.Dir(path), later)
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("unknown liveness pruned the journal: %v", err)
+			}
+			owners.set(map[string]json.RawMessage{"test": json.RawMessage(rows)})
+			if owner == "scope-live" {
+				oracle.set(pruneOracleLive, "af-hook-owner")
+			} else {
+				oracle.set(pruneOracleDead)
+			}
+			pruneHookProgress(filepath.Dir(path), later)
 			_, err = os.Stat(path)
 			keep := owner == "live" || owner == "scope-live"
 			if keep && err != nil {
