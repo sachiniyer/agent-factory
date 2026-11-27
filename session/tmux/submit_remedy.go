@@ -256,6 +256,18 @@ var busyComposerHints = map[string][]string{
 	"❭": {normalizeDelivery("Guide Devin while it works")},
 }
 
+// anchorGlyph reports the composer glyph leading a row — one of the prompt
+// glyphs isComposerGlyphRow accepts — or "" when the row leads with anything
+// else, so footer grammars scope to the agent that owns them.
+func anchorGlyph(row string) string {
+	r, _ := utf8.DecodeRuneInString(normalizeDelivery(row))
+	switch r {
+	case '❯', '›', '❭', '>':
+		return string(r)
+	}
+	return ""
+}
+
 // bareComposerGlyphRow reports whether a row is an empty composer prompt: the
 // bare glyph a composer repaints after a submit, or that glyph with the
 // agent's own mid-turn hint (busyComposerHints), and nothing else. A user's
@@ -290,6 +302,89 @@ func blankComposerRow(raw string) bool {
 	return strings.TrimFunc(raw, func(r rune) bool {
 		return unicode.IsSpace(r) || r == '│' || r == '┃' || r == '|'
 	}) == ""
+}
+
+// composerRuleRow reports whether raw is a full-width "─" rule — the edge the
+// ruled composers (Claude, Devin, and Codex's ruled lane) draw at column 0.
+// An indented row of box-drawing glyphs is content, not an edge (#7850 R3).
+func composerRuleRow(raw string) bool {
+	for _, r := range raw {
+		if r != '─' {
+			return false
+		}
+	}
+	return raw != ""
+}
+
+// composerBoxTopRow reports whether raw is a ╭───╮ top edge — the ╭ corner
+// plus only "─" through ╮, the shape Claude's composer box opens with. A
+// titled box ("╭─ Bash ─╮") is a tool or dialog box, not the composer.
+func composerBoxTopRow(raw string) bool {
+	rs := []rune(raw)
+	if len(rs) < 2 || rs[0] != '╭' || rs[len(rs)-1] != '╮' {
+		return false
+	}
+	for _, r := range rs[1 : len(rs)-1] {
+		if r != '─' {
+			return false
+		}
+	}
+	return true
+}
+
+// stillChipFirstRow reports why the anchor is not provably the composer
+// block's first row, or "" when it is. The proof reads the RAW anchor row:
+// the agent's own first-row prompt must sit at its own first-row column —
+// continuation rows are indented, and Codex and Claude draw the first-row
+// glyph at column 0 — and the composer's top edge must bound the span above
+// it: the agent's rule, the box edge, or Codex's transcript gap. Any other
+// row in that span — glyph-led, plain text, or a blank inside the draft —
+// puts the anchor inside a draft whose head the region never reads, and the
+// remedy Enter would submit that draft with our prompt (#7850 R1).
+func stillChipFirstRow(rows []string, anchor int) string {
+	raw := rows[anchor]
+	switch glyph := anchorGlyph(raw); glyph {
+	case "›":
+		// Codex's unruled composer: the "›" at column 0 is always the block's
+		// first row — continuations indent or wrap with no glyph — so the
+		// transcript gap (a blank row), a top rule, or the pane's own top
+		// bounds the span.
+		if !strings.HasPrefix(raw, glyph) {
+			break
+		}
+		if anchor == 0 || blankComposerRow(rows[anchor-1]) || composerRuleRow(rows[anchor-1]) {
+			return ""
+		}
+		return "a row sits between the anchor and the composer's top edge — Codex's transcript gap — so the anchor is not provably the composer block's first row"
+	case claudeComposerGlyph, "❭":
+		// The ruled composers: their first row sits directly under the
+		// agent's own top rule. A "❯" anywhere else is a dialog option or an
+		// echo, and a glyph at row 0 has lost its rule to the scroll — both
+		// unprovable.
+		if strings.HasPrefix(raw, glyph) && anchor > 0 && composerRuleRow(rows[anchor-1]) {
+			return ""
+		}
+		return "the anchor is not the agent's first-row prompt directly under its top rule, so the composer block's first row is not provable"
+	case ">":
+		// Claude's │-boxed composer prompts "│ > " — the ">" at its
+		// first-row column. The box's own top edge must bound the span,
+		// which may hold the box's blank pad rows. Every other ">" — the
+		// continuation indent, a bare prompt with no known agent — is
+		// unprovable.
+		if !strings.HasPrefix(raw, "│ > ") {
+			break
+		}
+		for r := anchor - 1; r >= 0; r-- {
+			if composerBoxTopRow(rows[r]) {
+				return ""
+			}
+			if !blankComposerRow(rows[r]) {
+				break
+			}
+		}
+		return "the │-boxed anchor's span above is not bounded by the box's own top edge, so the composer block's first row is not provable"
+	}
+	return "the anchor's prompt glyph is not the agent's own first-row prompt at its first-row column, so the composer block's first row is not provable"
 }
 
 // composerRegion returns the live composer's grid rows: the glyph-anchored row
@@ -502,17 +597,31 @@ func idleComposerPlaceholderRow(norm string) bool {
 }
 
 // stillChipComposer is the stillness+position proof for the one remediable
-// shape: the boundary's composer region held the bound chip and nothing else,
-// and the grace frame's composer region is byte-identical, plus at most the
-// one whitespace-only row an absorbed Enter can append. Anything else stands
-// down: a literal draft (tail-bound) never reaches here, a second chip or user
-// text changes the region's joined content, a moved anchor means a repainted
-// composer, and a footer redrawn inside the region changes the bytes. The
-// visible cursor must rest where undisturbed input left it: on the chip row at
-// its insert or content-end column — the chip's last wrapped physical row when
-// its text wraps across grid rows — or on the absorbed Enter's blank row at the
-// insert column. A hidden cursor (Claude's ordinary composer draws one) cannot
-// prove that, so it withholds.
+// shape: the composer block, from its real first row down to the agent's
+// footer, holds this delivery's bound chip and nothing else. The boundary's
+// composer region held the chip and nothing else, and the grace frame's
+// composer region is byte-identical, plus at most the one whitespace-only
+// row an absorbed Enter can append. Anything else stands down: a literal
+// draft (tail-bound) never reaches here, a second chip or user text changes
+// the region's joined content, a moved anchor means a repainted composer,
+// and a footer redrawn inside the region changes the bytes. The visible
+// cursor must rest where undisturbed input left it: on the chip row at its
+// insert or content-end column — the chip's last wrapped physical row when
+// its text wraps across grid rows — or on the absorbed Enter's blank row at
+// the insert column. A hidden cursor (Claude's ordinary composer draws one)
+// cannot prove that, so it withholds.
+//
+// Two edge cases bound the block the region never reads (#7850). First, the
+// anchor must be the composer block's FIRST row — the agent's own first-row
+// prompt at its first-row column, with nothing between it and the
+// composer's top edge (the agent's rule, the box edge, or Codex's
+// transcript gap): any row in that span puts the anchor inside a draft
+// whose head the region never reads (#7850 R1). Second, EVERY row from each
+// region's cut to the pane end must be blank, the agent's own border
+// geometry, or a row of the anchor agent's footer matched against its
+// whole-row grammar — a draft that opened with blank lines, or a second
+// draft line after the absorbed Enter's newline, renders the same shape as
+// a footer (#7850 R2/R3).
 //
 // The wrapped-tail column is accepted only when the chip STARTS on the anchor
 // row: the anchor's content after its single prompt glyph must be a non-empty
@@ -538,6 +647,16 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	anchor := lastComposerGlyphRow(bRows)
 	if anchor < 0 || anchor >= len(gRows) || lastComposerGlyphRow(gRows) != anchor {
 		return false, "the composer's prompt-glyph row moved or is missing between the Enter boundary and the grace frame"
+	}
+	// The anchor must be the composer block's FIRST row — the agent's own
+	// first-row prompt at its first-row column — with nothing between it and
+	// the composer's top edge. Stillness never compares rows above the
+	// anchor, so both frames are checked (#7850 R1).
+	if why := stillChipFirstRow(bRows, anchor); why != "" {
+		return false, why
+	}
+	if why := stillChipFirstRow(gRows, anchor); why != "" {
+		return false, why
 	}
 	bRegion := composerRegion(bRows, anchor)
 	gRegion := composerRegion(gRows, anchor)
@@ -570,6 +689,17 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	}
 	if i != len(bRegion) {
 		return false, "a composer row present at the Enter boundary is gone from the grace frame"
+	}
+	// Every row from each region's cut to the pane end must bound the block
+	// — blank, a frame-column border, or the anchor agent's own footer. Any
+	// other content row is draft text the region cut hid: a draft that
+	// opened with blank lines, or a second draft line after the absorbed
+	// Enter's newline, renders exactly this shape (#7850 R2).
+	if why := stillChipTailAudit(bRows, anchor+len(bRegion), bRows[anchor]); why != "" {
+		return false, why
+	}
+	if why := stillChipTailAudit(gRows, anchor+len(gRegion), gRows[anchor]); why != "" {
+		return false, why
 	}
 	// Position: the cursor must sit inside the region, parked where this draft
 	// alone could have left it.

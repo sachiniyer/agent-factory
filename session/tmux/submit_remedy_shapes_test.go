@@ -81,15 +81,16 @@ func TestChipComposerVerdictNamesWhyAShapeIsWithheld(t *testing.T) {
 
 	// Codex with its warning footer a blank row below the composer is provable...
 	codex := codexWarningPane("› "+codexChip, true)
+	codexChipText := normalizeDelivery(codexChip)
 	codexRow := "› " + codexChip
-	ok, why = stillChipComposer(codex, codex, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, normalizeDelivery(codexChip))
+	ok, why = stillChipComposer(codex, codex, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, codexChipText)
 	if !ok {
 		t.Fatalf("codex composer with a warning footer: withheld (%s)", why)
 	}
 	// ...while a footer drawn with no blank row between it and the composer is
 	// composer content as far as the region goes, and the reason names that.
 	tight := codexWarningPane("› "+codexChip, false)
-	ok, why = stillChipComposer(tight, tight, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, normalizeDelivery(codexChip))
+	ok, why = stillChipComposer(tight, tight, paneCursorState{Visible: true, Row: 2, Col: len([]rune(codexRow))}, codexChipText)
 	if ok || !strings.Contains(why, "not only the bound chip") {
 		t.Fatalf("footer without a gap: ok=%v why=%q, want it named as foreign composer content", ok, why)
 	}
@@ -264,6 +265,367 @@ func TestStillChipComposerWithholdsWrappedTailBelowABareGlyphAnchor(t *testing.T
 	tailEmpty := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  " + codexChip)}
 	if ok, why := stillChipComposer(emptyFirstLine, emptyFirstLine, tailEmpty, chipText); ok {
 		t.Fatalf("empty first line + chip on the next row, cursor at the chip tail: ok=true why=%q, want ok=false (the chip does not start on the bare-glyph anchor row)", why)
+	}
+}
+
+// TestStillChipComposerWithholdsDraftTextAboveTheAnchor is the #7850 R2 frame:
+// the anchor lands on the draft's chip-bearing continuation row while its real
+// first row — the user's own "ship it" — sits above it. The region's joined
+// content is still just the chip, so master's proof accepts the shape and the
+// remedy Enter submits the user's line with the prompt. A draft's own head, or
+// a transcript echo af cannot tell from one, makes the anchor ambiguous: the
+// composer is not provably chip-only, so the remedy must withhold.
+func TestStillChipComposerWithholdsDraftTextAboveTheAnchor(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	pane := strings.Join([]string{
+		"› ship it",
+		"  > " + codexChip,
+	}, "\n") + "\n"
+	tail := paneCursorState{Visible: true, Row: 1, Col: contentEndCol("  > " + codexChip)}
+	if ok, why := stillChipComposer(pane, pane, tail, chipText); ok {
+		t.Fatalf("draft text above the anchor, cursor at the chip row's content end: ok=true why=%q, want ok=false (the anchor is not the composer block's first row)", why)
+	}
+}
+
+// TestStillChipComposerWithholdsDraftRowsAboveTheAnchor is the #7850 R1
+// class: the anchor lands on the draft's chip-bearing continuation row while
+// draft rows — plain text or blank — sit between it and the composer's top
+// edge. The region's joined content is still just the chip, so every prior
+// proof accepted the shape and the remedy Enter submitted the user's lines
+// with the prompt. Each frame must withhold, on master's proof and on every
+// proof that only checks glyph-led rows or an unreadable block start.
+func TestStillChipComposerWithholdsDraftRowsAboveTheAnchor(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	for name, rows := range map[string][]string{
+		// A2: a second draft line between the head and the chip row.
+		"A2 draft lines above the chip row": {
+			"› ship it",
+			"  please",
+			"  > " + codexChip,
+		},
+		// A2′: #7836's own rows — a wrapped draft head above the chip row.
+		"A2′ wrapped draft head above the chip row": {
+			"› please also delete the",
+			"  staging bucket first",
+			"  > " + codexChip,
+		},
+		// A4: a blank draft line between the head and the chip row — the
+		// blank stops every glyph-row scan without being a top edge.
+		"A4 blank draft row above the chip row": {
+			"› ship it",
+			"",
+			"  > " + codexChip,
+		},
+		// A5b: a typed chip-shaped row above the real chip.
+		"A5b typed chip text above the real chip": {
+			"› ship it",
+			"  " + codexChip,
+			"  > " + codexChip,
+		},
+		// A6b: draft lines, a bare "›" line, then the chip row.
+		"A6b draft and a bare › above the chip row": {
+			"› ship it",
+			"  please",
+			"  ›",
+			"  > " + codexChip,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pane := strings.Join(rows, "\n") + "\n"
+			anchor := len(rows) - 1
+			tail := paneCursorState{Visible: true, Row: anchor, Col: contentEndCol(rows[anchor])}
+			if ok, why := stillChipComposer(pane, pane, tail, chipText); ok {
+				t.Fatalf("ok=true why=%q, want ok=false (the anchor is not the composer block's first row)", why)
+			}
+		})
+	}
+}
+
+// TestStillChipComposerWithholdsDraftTextBelowABlankRow is the #7850 R3 frame:
+// a draft of "\n\nok go" renders the chip, a blank gap, then the user's line —
+// textually the same shape composerRegion's footer cut was built for. master's
+// proof cuts the region at "ok go", reads the chip, and the remedy Enter
+// submits the user's line with the prompt. A content row after a blank gap is
+// composer content unless it is provably the agent's own footer, and "ok go"
+// is not, so the remedy must withhold.
+func TestStillChipComposerWithholdsDraftTextBelowABlankRow(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	pane := strings.Join([]string{
+		"› " + codexChip,
+		"",
+		"  ok go",
+	}, "\n") + "\n"
+	insert := firstContentCol("› " + codexChip)
+	if ok, why := stillChipComposer(pane, pane, paneCursorState{Visible: true, Row: 0, Col: insert}, chipText); ok {
+		t.Fatalf("draft text below a blank row, cursor at the draft's start: ok=true why=%q, want ok=false (\"ok go\" is not provably the agent's own footer)", why)
+	}
+}
+
+// TestStillChipComposerWithholdsDraftRowsBelowABlankRow is the #7850 R2/N1
+// class: a ruled or boxed composer takes only blank rows between the
+// region's cut and its own closing edge, and Codex's edgeless lane takes
+// only rows that parse its closed footer token grammar — a draft line that
+// merely contains a footer phrase, a digit-led word, a path-shaped prefix,
+// or a bracketed clause is composer content, and a footer-shaped row never
+// excuses the rows below it.
+func TestStillChipComposerWithholdsDraftRowsBelowABlankRow(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	for name, tc := range map[string]struct {
+		rows   []string
+		cursor paneCursorState
+	}{
+		// B3: a draft line carrying a real marker phrase as substring.
+		"B3 draft containing 'for agents'": {
+			rows:   []string{"› " + codexChip, "", "  then update the docs for agents"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// B3b: a footer-looking row never excuses the draft rows below it.
+		"B3b footer-shaped first row, draft below": {
+			rows: []string{
+				"› " + codexChip, "",
+				"  esc to interrupt if this is slow",
+				"  then run make deploy-prod",
+				"  and delete the staging bucket",
+			},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// B6: a draft line in the "text · ~/path" shape is not the Codex
+		// status line — the model segment carries no known model token.
+		"B6 draft in model/path shape": {
+			rows:   []string{"› " + codexChip, "", "  see my notes · ~/notes.md", "  then force-push release"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// F14: a digit-led first word is not a model token, and a path
+		// segment with spaces is not a whole path token.
+		"F14 numbered draft in model/path shape": {
+			rows:   []string{"› " + codexChip, "", "  1. see my notes · ~/notes.md then force-push release"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// F2: same hole through the path-shaped second segment.
+		"F2 numbered draft with path tail": {
+			rows:   []string{"› " + codexChip, "", "  1. force-push release · /srv/app"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// F3: "v2" is not a model token.
+		"F3 v2 draft in model/path shape": {
+			rows:   []string{"› " + codexChip, "", "  v2 · ~/notes.md then force-push release"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// F4: a Main […] bracket never holds a clause.
+		"F4 Main bracket holding a clause": {
+			rows:   []string{"› " + codexChip, "", "  Main [force-push release, then delete the staging bucket]"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// B5: an indented row of box-drawing glyphs is draft text, not the
+		// composer's edge — a border ends the composer only at the agent's
+		// own column-0 rule or box geometry.
+		"B5 indented box-drawing row": {
+			rows:   []string{"› " + codexChip, "", "  ──────────────"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// The literal round-1 B5: the indented dashes row and the draft row
+		// below it, with no blank gap.
+		"B5 literal indented dashes then draft": {
+			rows:   []string{"› " + codexChip, "  ──────────────", "  ok go"},
+			cursor: paneCursorState{Visible: true, Row: 0, Col: firstContentCol("› " + codexChip)},
+		},
+		// F15: a digit-led draft line inside Devin's rules — #7850's own B1
+		// plus "2.". Only blank rows may sit between the region's cut and
+		// the agent's closing rule.
+		"F15 numbered draft inside Devin's rules": {
+			rows: []string{
+				strings.Repeat("─", 80),
+				"❭ " + codexChip,
+				"",
+				"  2. ok go",
+				strings.Repeat("─", 80),
+			},
+			cursor: paneCursorState{Visible: true, Row: 1, Col: firstContentCol("❭ " + codexChip)},
+		},
+		// F6: same shape, "then force-push" tail.
+		"F6 numbered force-push inside Devin's rules": {
+			rows: []string{
+				strings.Repeat("─", 80),
+				"❭ " + codexChip,
+				"",
+				"  2. then force-push release",
+				strings.Repeat("─", 80),
+			},
+			cursor: paneCursorState{Visible: true, Row: 1, Col: firstContentCol("❭ " + codexChip)},
+		},
+		// F7: a "3 more things:" draft.
+		"F7 numbered list draft inside Devin's rules": {
+			rows: []string{
+				strings.Repeat("─", 80),
+				"❭ " + codexChip,
+				"",
+				"  3 more things: fix the build",
+				strings.Repeat("─", 80),
+			},
+			cursor: paneCursorState{Visible: true, Row: 1, Col: firstContentCol("❭ " + codexChip)},
+		},
+		// F16: a "v2"-led draft carrying Devin's own mode word.
+		"F16 v2 draft with mode word inside Devin's rules": {
+			rows: []string{
+				strings.Repeat("─", 80),
+				"❭ " + codexChip,
+				"",
+				"  v2 ok go then force-push · bypass",
+				strings.Repeat("─", 80),
+			},
+			cursor: paneCursorState{Visible: true, Row: 1, Col: firstContentCol("❭ " + codexChip)},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pane := strings.Join(tc.rows, "\n") + "\n"
+			if ok, why := stillChipComposer(pane, pane, tc.cursor, chipText); ok {
+				t.Fatalf("ok=true why=%q, want ok=false (the rows below the blank gap are not the agent's own footer)", why)
+			}
+		})
+	}
+}
+
+// TestStillChipComposerAcceptsEveryRealAgentFooter pins the whole-row
+// grammars against the footers the agents actually draw: every row below the
+// composer is provably that agent's own, so the chip-only composer still
+// remedies.
+func TestStillChipComposerAcceptsEveryRealAgentFooter(t *testing.T) {
+	rule := strings.Repeat("─", 80)
+	for name, tc := range map[string]struct {
+		pane   string
+		cursor paneCursorState
+		chip   string
+	}{
+		// Codex's ruled lane: the rule below the composer, then the
+		// model/goal status line and the shortcut hints line.
+		"codex ruled lane": {
+			pane: strings.Join([]string{
+				"  Worked for 1m 32s — 02:01", "",
+				"› " + codexChip,
+				rule,
+				"  GPT-6-Astra ultra · ~/sahara/sahara-clean · Pursuing goal · Main [default]",
+				"  ← for agents · ? for shortcuts ⚠ 1 warning · f2 to view",
+			}, "\n") + "\n",
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("› " + codexChip)},
+			chip:   normalizeDelivery(codexChip),
+		},
+		// Devin: ruled composer, the model/mode/shells footer directly
+		// below the bottom rule.
+		"devin ruled footer": {
+			pane: strings.Join([]string{
+				"one",
+				rule,
+				"❭ " + codexChip,
+				rule,
+				"SWE-2 Max · bypass · 2 shells ↓ ctrl+o to expand edits",
+			}, "\n") + "\n",
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("❭ " + codexChip)},
+			chip:   normalizeDelivery(codexChip),
+		},
+		// Claude's ruled composer with the shortcuts hint row.
+		"claude ? for shortcuts": {
+			pane: strings.Join([]string{
+				"x",
+				rule,
+				"❯ " + claudeChip,
+				rule,
+				"",
+				"  ? for shortcuts",
+			}, "\n") + "\n",
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("❯ " + claudeChip)},
+			chip:   normalizeDelivery(claudeChip),
+		},
+		// Claude's idle permission footer.
+		"claude auto mode footer": {
+			pane: strings.Join([]string{
+				"x",
+				rule,
+				"❯ " + claudeChip,
+				rule,
+				"",
+				"  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+			}, "\n") + "\n",
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("❯ " + claudeChip)},
+			chip:   normalizeDelivery(claudeChip),
+		},
+		// Claude's │-boxed composer: the ">" first-row prompt inside the
+		// box, the box edge below, then Claude's own footer.
+		"claude boxed composer": {
+			pane: strings.Join([]string{
+				"x",
+				"╭────────────────╮",
+				"│ > " + codexChip + "     │",
+				"╰────────────────╯",
+				"  ? for shortcuts",
+			}, "\n") + "\n",
+			cursor: paneCursorState{Visible: true, Row: 2, Col: contentEndCol("│ > " + codexChip)},
+			chip:   normalizeDelivery(codexChip),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if ok, why := stillChipComposer(tc.pane, tc.pane, tc.cursor, tc.chip); !ok {
+				t.Fatalf("ok=false why=%q, want ok=true (every row below the composer is provably the agent's own footer)", why)
+			}
+		})
+	}
+}
+
+// TestStillChipComposerAcceptsClaudeFootersBelowTheClosingRule is the #7850
+// N2 regression class: the vim-mode composer is the only Claude composer
+// that reaches the remedy, and its footer rows sit BELOW the closing "─"
+// rule — chrome by geometry, where no draft can draw. Plan mode, the
+// auto-compact meter and a custom statusLine carry no phrase the grammars
+// knew, and must remedy again.
+func TestStillChipComposerAcceptsClaudeFootersBelowTheClosingRule(t *testing.T) {
+	rule := strings.Repeat("─", 80)
+	chipText := normalizeDelivery(claudeChip)
+	for name, footer := range map[string]string{
+		"K12b plan mode":           "  ⏸ plan mode on (shift+tab to cycle)",
+		"K12c auto-compact meter":  "  Context left until auto-compact: 12%",
+		"K12d custom status line":  "  my-org / api · main ✻",
+		"INSERT + agent count":     "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent",
+		"auto mode + for agents":   "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+		"? for shortcuts":          "  ? for shortcuts",
+		"arbitrary chrome wording": "  anything the agent draws here",
+	} {
+		t.Run(name, func(t *testing.T) {
+			pane := strings.Join([]string{
+				"x", rule, "❯ " + claudeChip, rule, "", footer,
+			}, "\n") + "\n"
+			cursor := paneCursorState{Visible: true, Row: 2, Col: contentEndCol("❯ " + claudeChip)}
+			if ok, why := stillChipComposer(pane, pane, cursor, chipText); !ok {
+				t.Fatalf("ok=false why=%q, want ok=true (rows below Claude's closing rule are chrome by geometry)", why)
+			}
+		})
+	}
+}
+
+// TestStillChipComposerAcceptsAgentFooterBelowABlankRow is the positive #7850
+// R3 control: the same shape as a draft that opened with blank lines, but the
+// row below the gap carries a signature the agent draws there — Codex's model/
+// warning footer. The composer is provably chip-only and the remedy fires.
+func TestStillChipComposerAcceptsAgentFooterBelowABlankRow(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	pane := strings.Join([]string{
+		"› " + codexChip,
+		"",
+		"  GPT-6.1 Terra ultra · ~/sahara/sahara-cheaper-ci · ⚠ 1 warning · f2 to view",
+	}, "\n") + "\n"
+	end := contentEndCol("› " + codexChip)
+	if ok, why := stillChipComposer(pane, pane, paneCursorState{Visible: true, Row: 0, Col: end}, chipText); !ok {
+		t.Fatalf("codex warning footer below a blank row: ok=false why=%q, want ok=true (the footer is provably the agent's own)", why)
+	}
+
+	// The warning-free default Codex status line — "model · path" with no
+	// marker phrase — is the same provable footer: codexStatusLineModel owns
+	// its shape, so the composer is still provably chip-only.
+	defaultStatus := strings.Join([]string{
+		"› " + codexChip,
+		"",
+		"  gpt-5.6-sol max · ~/agent-factory",
+	}, "\n") + "\n"
+	if ok, why := stillChipComposer(defaultStatus, defaultStatus, paneCursorState{Visible: true, Row: 0, Col: end}, chipText); !ok {
+		t.Fatalf("warning-free codex status footer below a blank row: ok=false why=%q, want ok=true (the model/path footer is provably the agent's own)", why)
 	}
 }
 

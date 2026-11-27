@@ -83,6 +83,11 @@ type stagedDraftPane struct {
 	// echo row is a narrow-set glyph row sitting above the real composer
 	// (#7801).
 	echoGlyph string
+	// footer, when set, is drawn below the composer — the status and shortcut
+	// rows an agent leaves a blank row under its unruled composer (the shape
+	// composerRegion's post-blank cut exists for). The cursor stays on the
+	// composer's last row.
+	footer []string
 }
 
 func (m *stagedDraftPane) glyphOr() string {
@@ -121,10 +126,11 @@ func (m *stagedDraftPane) rowsLocked() (rows []string, cursorRow int) {
 	if m.boxed {
 		rows = append(rows, "╰────────────────╯")
 	}
+	rows = append(rows, m.footer...)
 	if m.height > 0 && len(rows) > m.height {
 		rows = rows[len(rows)-m.height:]
 	}
-	cursorRow = len(rows) - 1
+	cursorRow = len(rows) - 1 - len(m.footer)
 	if m.boxed {
 		// The cursor rests on the composer's last row, not the box's bottom edge.
 		cursorRow--
@@ -167,7 +173,17 @@ func (m *stagedDraftPane) joinedPaneLocked() string {
 }
 
 func (m *stagedDraftPane) cursorLineLocked() string {
+	// The cursor rests on the composer's last row: the last grid row minus
+	// the footer rows an agent draws below it.
 	row := len(m.gridRowsLocked()) - 1
+	for _, f := range m.footer {
+		rs := []rune(f)
+		if m.paneWidth > 0 && len(rs) > m.paneWidth {
+			row -= (len(rs) + m.paneWidth - 1) / m.paneWidth
+		} else {
+			row--
+		}
+	}
 	flag := 1
 	if m.hiddenCursor {
 		flag = 0
@@ -326,6 +342,9 @@ func TestPaneEchoedDelimiterCannotForgeBoundarySplit(t *testing.T) {
 		"agent quoting the source it was asked about:",
 		deliveryBoundaryGridSentinel,
 		deliveryBoundaryGridSentinel + "-0123456789abcdef0123456789abcdef",
+		// Codex draws its composer a blank row under the transcript; the
+		// still-chip proof requires that transcript gap above the anchor.
+		"",
 	}
 	status, pastes, enters := sendStaged(t, m, redeliverPrompt)
 	require.Equal(t, PromptSentUnverified, status)
@@ -345,6 +364,25 @@ func TestChipStrandGetsExactlyOneRemedyEnter(t *testing.T) {
 	require.Equal(t, PromptSentUnverified, status)
 	require.Equal(t, 1, pastes, "the remedy must never re-paste")
 	require.Equal(t, 2, enters, "a swallowed Enter on a bound chip gets exactly one remedy Enter")
+}
+
+// TestChipStrandAboveAnAgentFooterStillRemedies is the positive #7850 R3
+// control: the composer holds only this delivery's chip, and the row below the
+// blank gap is provably the agent's own footer — Codex's model/warning status
+// line — not draft text. The remedy still sends its one Enter.
+func TestChipStrandAboveAnAgentFooterStillRemedies(t *testing.T) {
+	m := &stagedDraftPane{
+		swallowedEnters: 1,
+		render:          codexChipRender,
+		footer: []string{
+			"",
+			"  GPT-6.1 Terra ultra · ~/sahara/sahara-cheaper-ci · ⚠ 1 warning · f2 to view",
+		},
+	}
+	status, pastes, enters := sendStaged(t, m, redeliverPrompt)
+	require.Equal(t, PromptSentUnverified, status)
+	require.Equal(t, 1, pastes, "the remedy must never re-paste")
+	require.Equal(t, 2, enters, "a still chip-only composer above the agent's own footer gets its one remedy Enter")
 }
 
 // TestLiteralStrandStandsDown: a draft rendered as literal text is bound by
@@ -623,7 +661,7 @@ func TestWrappedTranscriptStillRemedies(t *testing.T) {
 		swallowedEnters: 1,
 		render:          codexChipRender,
 		paneWidth:       20,
-		transcript:      []string{"a much longer transcript row that wraps"},
+		transcript:      []string{"a much longer transcript row that wraps", ""},
 	}
 	status, _, enters := sendStaged(t, m, redeliverPrompt)
 	require.Equal(t, 2, enters, "a wrapped transcript row must not defeat the still-chip remedy")
