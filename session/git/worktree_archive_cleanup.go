@@ -27,7 +27,7 @@ func (g *GitWorktree) cleanupRetainedArchiveTrees() error {
 }
 
 func removeRetainedArchiveTree(tree ArchiveRetainedTree) error {
-	path := tree.filesystemPath()
+	path := tree.FilesystemPath()
 	if path == "" || !privateSourceName(filepath.Base(path)) {
 		return fmt.Errorf("refusing to remove retained archive tree with invalid private path %q", path)
 	}
@@ -103,5 +103,5 @@ func (g *GitWorktree) dropRetainedArchiveTree(removed ArchiveRetainedTree) {
 func sameRetainedArchiveTree(left, right ArchiveRetainedTree) bool {
 	return left.IdentityKnown == right.IdentityKnown &&
 		left.identity().same(right.identity()) &&
-		left.filesystemPath() == right.filesystemPath()
+		left.FilesystemPath() == right.FilesystemPath()
 }

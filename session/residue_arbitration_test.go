@@ -290,3 +290,45 @@ func TestRebuildAbsentArchivedWorktree_ProceedsOverUnverifiedResidue(t *testing.
 	assert.DirExists(t, orphan, "the unverifiable candidate is left exactly where the base left it")
 	assert.DirExists(t, prunedLeaf)
 }
+
+// TestResidueArbiter_RetainedTreeIndexesFilesystemPath is #7819 round two:
+// a retained tree whose path carries non-UTF-8 bytes stores the raw pathname
+// in PathBytes and a replacement-character display in Path, and residue
+// candidates are raw pathnames — so both the live-report index and the
+// persisted-row index must key on FilesystemPath. A display-keyed index
+// classifies a deliberately retained tree as unattributed, and a pruned or
+// recycled git leaf can then make it refuse an unrelated session's archive
+// or rebuild.
+func TestResidueArbiter_RetainedTreeIndexesFilesystemPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	raw := filepath.Join(t.TempDir(), "retained-\xff-tree")
+	display := strings.ToValidUTF8(raw, "�")
+
+	// The live side: this session's own report retains the tree.
+	self := &Instance{
+		ID:          "self-utf8",
+		Title:       "utf8-self",
+		gitWorktree: &git.GitWorktree{},
+	}
+	self.gitWorktree.RestoreArchiveReport(git.ArchiveReport{RetainedTrees: []git.ArchiveRetainedTree{{
+		Path:      display,
+		PathBytes: []byte(raw),
+	}}})
+	selfArbiter := NewResidueArbiter(self)
+	assert.Equal(t, ResidueOursRetained, selfArbiter.Classify(raw),
+		"the live report's retained tree must index by its raw pathname, not its display string")
+
+	// The persisted side: another session's stored row retains the tree.
+	other := &Instance{ID: "other-utf8", Title: "utf8-other", gitWorktree: &git.GitWorktree{}}
+	row := &InstanceData{
+		ID: "foreign-utf8",
+		ArchiveReport: &git.ArchiveReport{RetainedTrees: []git.ArchiveRetainedTree{{
+			Path:      display,
+			PathBytes: []byte(raw),
+		}}},
+	}
+	otherArbiter := NewResidueArbiter(other)
+	otherArbiter.indexRow(row)
+	assert.Equal(t, ResidueForeignSession, otherArbiter.Classify(raw),
+		"the persisted row's retained tree must index by its raw pathname, not its display string")
+}

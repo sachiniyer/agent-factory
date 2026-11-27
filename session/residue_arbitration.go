@@ -71,7 +71,11 @@ type ResidueArbiter struct {
 // adoptExistingWorktree's fresh handle — gets its self-attribution from its
 // own persisted row instead, which enumerate then reads rather than skips.
 func NewResidueArbiter(i *Instance) *ResidueArbiter {
-	a := &ResidueArbiter{selfNamed: make(map[string]ResidueAttribution)}
+	a := &ResidueArbiter{
+		selfNamed:       make(map[string]ResidueAttribution),
+		foreignNamed:    make(map[string]bool),
+		foreignRetained: make(map[string]bool),
+	}
 	if i == nil {
 		return a
 	}
@@ -87,8 +91,12 @@ func NewResidueArbiter(i *Instance) *ResidueArbiter {
 		}
 	}
 	for _, tree := range i.GetArchiveReport().RetainedTrees {
-		if tree.Path != "" {
-			a.selfNamed[tree.Path] = ResidueOursRetained
+		// The filesystem path, not the display Path: a non-UTF-8 retained
+		// tree stores the raw pathname in PathBytes and a replacement-
+		// character display in Path, and residue candidates are raw
+		// pathnames too.
+		if path := tree.FilesystemPath(); path != "" {
+			a.selfNamed[path] = ResidueOursRetained
 			a.selfFromLive = true
 		}
 	}
@@ -138,8 +146,6 @@ func (a *ResidueArbiter) enumerate() {
 		return
 	}
 	a.enumerated = true
-	a.foreignNamed = make(map[string]bool)
-	a.foreignRetained = make(map[string]bool)
 	rows, skipped, err := config.LoadAllRepoInstancesReportingSkipDetailsSilent()
 	if err != nil {
 		a.enumErr = fmt.Errorf("cannot enumerate af session records in this home: %w", err)
@@ -227,13 +233,16 @@ func (a *ResidueArbiter) indexRow(d *InstanceData) {
 	}
 	if d.ArchiveReport != nil {
 		for _, tree := range d.ArchiveReport.RetainedTrees {
-			if tree.Path == "" {
+			// FilesystemPath, not the display Path — the same raw-vs-UTF-8
+			// split as the live side above.
+			path := tree.FilesystemPath()
+			if path == "" {
 				continue
 			}
 			if self {
-				a.selfNamed[tree.Path] = ResidueOursRetained
+				a.selfNamed[path] = ResidueOursRetained
 			} else {
-				a.foreignRetained[tree.Path] = true
+				a.foreignRetained[path] = true
 			}
 		}
 	}

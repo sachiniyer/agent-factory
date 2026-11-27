@@ -60,7 +60,7 @@ func TestRelocateWorktreeTo_ArchiveAccountsForUnreadableSource(t *testing.T) {
 	assert.Contains(t, report.Warning("archive"), `"private/locked\ncredential"`,
 		"text output must quote the newline rather than injecting a second path")
 
-	contents, readErr := os.ReadFile(filepath.Join(retained.filesystemPath(), relativeLocked))
+	contents, readErr := os.ReadFile(filepath.Join(retained.FilesystemPath(), relativeLocked))
 	require.ErrorIs(t, readErr, os.ErrPermission,
 		"the retained original must keep its permission boundary rather than being replaced")
 	assert.Nil(t, contents)

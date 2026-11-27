@@ -36,7 +36,7 @@ func TestArchiveReportJSONPreservesInvalidUTF8PathBytes(t *testing.T) {
 	require.NoError(t, json.Unmarshal(payload, &restored))
 	require.Len(t, restored.RetainedTrees, 1)
 	require.Len(t, restored.RetainedTrees[0].Skipped, 1)
-	assert.Equal(t, rawRoot, restored.RetainedTrees[0].filesystemPath())
+	assert.Equal(t, rawRoot, restored.RetainedTrees[0].FilesystemPath())
 	assert.Equal(t, rawRelative, restored.RetainedTrees[0].Skipped[0].FilesystemPath())
 	assert.NotEmpty(t, restored.RetainedTrees[0].Skipped[0].PathBytes,
 		"invalid filename bytes need a lossless field beside the JSON display string")

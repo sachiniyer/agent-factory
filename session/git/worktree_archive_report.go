@@ -83,7 +83,7 @@ func newArchiveRetainedTree(path string, identity pathIdentity, skipped []Archiv
 	}
 }
 
-func (tree ArchiveRetainedTree) filesystemPath() string {
+func (tree ArchiveRetainedTree) FilesystemPath() string {
 	return archiveFilesystemPath(tree.Path, tree.PathBytes)
 }
 
@@ -269,7 +269,7 @@ func (report ArchiveReport) warningSuffix() string {
 	trees := make([]string, 0, maxArchiveWarningTrees)
 	totalEntries := 0
 	for _, tree := range report.RetainedTrees {
-		trees = insertBoundedArchivePath(trees, tree.filesystemPath(), maxArchiveWarningTrees)
+		trees = insertBoundedArchivePath(trees, tree.FilesystemPath(), maxArchiveWarningTrees)
 		for _, entry := range tree.Skipped {
 			if totalEntries < int(^uint(0)>>1) {
 				totalEntries++
