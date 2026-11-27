@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -356,9 +357,12 @@ func (m *mutableHeldOverride) release(path string) {
 // runtime holds only one rollout the next attempt attributes it and records
 // the thread.
 func TestCodexAttributionCachedPositiveIsRejudgedWhenHeldSetShrinks(t *testing.T) {
-	prev := codexAttributionRejudgeInterval
-	codexAttributionRejudgeInterval = 10 * time.Millisecond
-	t.Cleanup(func() { codexAttributionRejudgeInterval = prev })
+	// The re-judge cadence runs on the flight clock the lookups behind a
+	// verdict run on: this test decides "inside the cadence" and "past it" by
+	// advancing a clock it owns, never by racing a shrunken interval against
+	// the runner's scheduler (#7908).
+	clock := fsprobe.NewManualClock(time.Now())
+	t.Cleanup(fsprobe.SetFlightClockForTest(clock))
 
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
@@ -391,13 +395,14 @@ func TestCodexAttributionCachedPositiveIsRejudgedWhenHeldSetShrinks(t *testing.T
 	// Within the re-judge cadence the cached positives are still reused —
 	// the cache is the optimization, not the bug — so the ambiguity
 	// persists momentarily.
+	clock.Advance(codexAttributionRejudgeInterval / 2)
 	_, _, err = captureCodexConversationOnce(bind())
 	require.ErrorContains(t, err, "ambiguous", "inside the re-judge cadence the cache is still reused")
 	require.Equal(t, 1, held.walks, "no re-walk happens before the cadence elapses")
 
 	// Past the cadence the cached positives age out and are re-walked
 	// against the current held set, which now contains only p2.
-	time.Sleep(30 * time.Millisecond)
+	clock.Advance(codexAttributionRejudgeInterval)
 	conv, retry, err := captureCodexConversationOnce(bind())
 	require.NoError(t, err, "once the runtime holds only one rollout, capture must attribute it")
 	require.False(t, retry, "a single attributed rollout is a final answer")
@@ -416,9 +421,10 @@ func TestCodexAttributionCachedPositiveIsRejudgedWhenHeldSetShrinks(t *testing.T
 // generation. With the fix, a rearm past the re-judge cadence re-walks the held
 // set and attributes the surviving rollout.
 func TestCodexAttributionCachedPositiveRejudgesOnInstanceAcrossRearms(t *testing.T) {
-	prev := codexAttributionRejudgeInterval
-	codexAttributionRejudgeInterval = 10 * time.Millisecond
-	t.Cleanup(func() { codexAttributionRejudgeInterval = prev })
+	// Same manual clock as the snapshot-side test above: past the cadence is
+	// an advance the test declares, not a wall-clock wait.
+	clock := fsprobe.NewManualClock(time.Now())
+	t.Cleanup(fsprobe.SetFlightClockForTest(clock))
 
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
@@ -442,7 +448,7 @@ func TestCodexAttributionCachedPositiveRejudgesOnInstanceAcrossRearms(t *testing
 
 	// The runtime releases p1.
 	held.release(p1)
-	time.Sleep(30 * time.Millisecond)
+	clock.Advance(codexAttributionRejudgeInterval)
 
 	// The daemon loop re-binds the armed snapshot fresh on every rearm;
 	// the verdict cache stays on the instance, so a rearm past the cadence
@@ -459,9 +465,10 @@ func TestCodexAttributionCachedPositiveRejudgesOnInstanceAcrossRearms(t *testing
 // 50ms poll. The fix re-judges positives on a cadence; it must not collapse
 // into re-walking every poll.
 func TestCodexAttributionFreshPositiveIsStillMemoizedWithinCadence(t *testing.T) {
-	prev := codexAttributionRejudgeInterval
-	codexAttributionRejudgeInterval = 250 * time.Millisecond
-	t.Cleanup(func() { codexAttributionRejudgeInterval = prev })
+	// Same manual clock: "within the cadence" is where the test puts the
+	// clock, so all three polls reuse the verdict however loaded the runner.
+	clock := fsprobe.NewManualClock(time.Now())
+	t.Cleanup(fsprobe.SetFlightClockForTest(clock))
 
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
@@ -486,6 +493,10 @@ func TestCodexAttributionFreshPositiveIsStillMemoizedWithinCadence(t *testing.T)
 		conv, _, err := captureCodexConversationOnce(bind())
 		require.NoError(t, err)
 		require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
+		// Time passes between polls — a quarter cadence each — but never
+		// enough to age the verdict out: three polls still span under one
+		// interval, so the cache must serve every one.
+		clock.Advance(codexAttributionRejudgeInterval / 4)
 	}
 	require.Equal(t, 1, held.walks,
 		"a fresh positive is reused within the re-judge cadence, not re-walked every poll")
