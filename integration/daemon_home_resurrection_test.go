@@ -371,17 +371,20 @@ func postOverConn(conn net.Conn, path string, payload any, timeout time.Duration
 // Renaming the home to a sibling is atomic, so from the daemon's side the home
 // path is gone exactly as after `rm -rf`: a daemon that writes by path
 // re-creates a fresh directory there, which the callers' observation loops
-// still catch as a resurrection. The copy is left for the caller to keep or
-// remove — and worth keeping when the daemon's own output is the evidence,
-// because files the daemon holds open keep receiving its writes there: its log
-// writer holds an fd, so post-deletion log lines land in the moved-aside
-// agent-factory.log.
+// still catch as a resurrection. The copy stays readable until the test ends —
+// worth keeping when the daemon's own output is the evidence, because files the
+// daemon holds open keep receiving its writes there: its log writer holds an
+// fd, so post-deletion log lines land in the moved-aside agent-factory.log.
+// t.Cleanup removes it once the test body has returned, so every assertion
+// against those files has already run; a caller that disposes of the copy
+// itself just leaves the cleanup a no-op (#7884).
 func moveHomeAside(t *testing.T, home string) string {
 	t.Helper()
 	gone := fmt.Sprintf("%s.deleted-%d", home, time.Now().UnixNano())
 	if err := os.Rename(home, gone); err != nil {
 		t.Fatalf("move the daemon's home %s aside: %v", home, err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(gone) })
 	return gone
 }
 
