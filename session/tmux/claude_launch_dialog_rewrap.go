@@ -494,6 +494,18 @@ func claudeLaunchDialogTailOver(pane claudeLaunchDialogPane, options claudeLaunc
 		if claudeLaunchDialogRuleFrom(pane, pane.index[0]) {
 			return claudeLaunchDialogMatch{}, false
 		}
+		// A cut tail that is a pair label can only be the legacy inline
+		// picker's: read is empty here (the fragment sat straight over the
+		// footer, so no whole label was read below it), and kind came from the
+		// footer alone, so a pair fragment read as the reworded affirmative or
+		// the stacked "Yes, proceed" is named for a pane never shown.
+		// tailLabels carries the pair labels only when labels == 0, so the
+		// index aligns with options.labels and a stacked-label tail (labels >
+		// 0) never reaches this clause (#7865 review).
+		if li := claudeLaunchDialogLabelTailIndex(pane.text[:at], tailLabels); li >= len(options.labels)-options.pair {
+			match.kind = claudeLaunchDialogLegacy
+			match.pair = true
+		}
 		match.saw = "only the end of its option rows and " + shown
 		return match, true
 	case at > 0 && labels > 0 && block:
@@ -834,12 +846,23 @@ func claudeLaunchDialogOrdinalBefore(pane claudeLaunchDialogPane, at int) int {
 // claudeLaunchDialogLabelTail reports whether text is the end of one option
 // label and not the whole of it: what the top of a pane leaves of a row it cut.
 func claudeLaunchDialogLabelTail(text string, labels []string) bool {
-	for _, label := range labels {
+	return claudeLaunchDialogLabelTailIndex(text, labels) >= 0
+}
+
+// claudeLaunchDialogLabelTailIndex returns the index of the first label text is
+// the end of (and not the whole of), or -1 when text is no label's tail. The
+// tail branch classifies a cut inline-pair tail by it: read is empty there, so
+// the footer alone named the dialog and match.pair stayed false, misnaming a
+// pair fragment ("es  No") as the reworded affirmative or the stacked
+// "Yes, proceed". The label that supplied the tail is the legacy pair, so the
+// refusal names the pane actually shown (#7865 review).
+func claudeLaunchDialogLabelTailIndex(text string, labels []string) int {
+	for i, label := range labels {
 		if len(text) < len(label) && strings.HasSuffix(label, text) {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 // claudeLegacyTrustPaintedMin is the least of the legacy question af reads as
