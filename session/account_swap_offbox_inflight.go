@@ -282,10 +282,18 @@ func (i *Instance) reconcileInFlightOffBoxSwap(sw AccountSwapper, p *sandboxProv
 		// exactly once. Without it this arm and the live reconciled arm
 		// disagreed on whether any brief was owed at all. The admission that
 		// authorized the swap refuses to send it while a mission is still owed,
-		// so the guard is defense in depth: a mission already pending (and
-		// differing from this notice) is preserved rather than silently
-		// overwritten together with its verdict.
-		if rec.Notice != "" && (i.PendingHandoffMission() == "" || i.PendingHandoffMission() == rec.Notice) {
+		// so the guard is defense in depth for a row reloaded carrying both
+		// (#7871): the single-mission field cannot carry both obligations, and
+		// the one still owed was owed to the runtime this commit just
+		// retired — undeliverable to the replacement's fresh conversation.
+		// The record's notice wins, and the displaced mission's verdict and
+		// size are recorded in the warning rather than the mission dropped
+		// silently.
+		if rec.Notice != "" {
+			if owed := i.PendingHandoffMission(); owed != "" && owed != rec.Notice {
+				log.WarningLog.Printf("account swap of %q: the reconciled swap's takeover notice replaces a handoff mission still owed to the retired runtime (verdict %s, %d bytes) — that runtime is gone and its mission undeliverable, so the swap's own notice is the obligation the replacement is owed",
+					i.Title, i.PendingHandoffDeliveryStatus(), len(owed))
+			}
 			i.SetPendingHandoffMission(rec.Notice)
 		}
 		// The host relaunched the agent on the new account while the daemon

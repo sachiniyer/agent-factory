@@ -191,6 +191,18 @@ func (m *Manager) resumeLimitedSession(
 	if swapErr != nil {
 		m.warn().Printf("account-swap check for limit-blocked session %q failed; retaining the existing wait: %v", inst.Title, swapErr)
 	}
+	// A still-owed handoff mission withholds a NEW swap opportunity (#7871):
+	// every swap admission refuses the row while it is owed
+	// (ErrOffBoxAccountSwapOwesMission), so the hint is dropped here — before
+	// the fence raise, the in-flight record, the host's swap routes, or the
+	// config lock — and only the mission's own recovery (settle, resubmit, or
+	// the at-the-wall transfer into the stored prompt) makes the row a swap
+	// candidate again. A committed replacement is recovery, not a new
+	// opportunity, and still runs; the same-account resume is unaffected —
+	// it never depended on a swap candidate existing.
+	if accountSwap != nil && !accountSwap.alreadySet && inst.PendingHandoffMission() != "" {
+		accountSwap = nil
+	}
 	m.mu.Lock()
 	if _, killing := m.killsInFlight[key]; killing {
 		m.mu.Unlock()

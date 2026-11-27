@@ -666,10 +666,19 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool, notice string)
 	// a pending-mission obligation recovery replays — not a bare taskRunActive
 	// the fresh agent's first idle could complete into on_complete for a task
 	// it never received. The admission above refuses to reach this commit with
-	// a mission still owed, so the guard is defense in depth: a mission that
-	// is already pending (and differs from this notice) is preserved rather
-	// than silently overwritten together with its verdict.
-	if notice != "" && (i.PendingHandoffMission() == "" || i.PendingHandoffMission() == notice) {
+	// a mission still owed, so the guard is defense in depth for a mission
+	// that landed between admission and commit (#7871): the single-mission
+	// field cannot carry both, and the one still owed was owed to the runtime
+	// this commit just retired — the replacement gets a fresh conversation,
+	// so the old runtime's brief is the obligation that is no longer
+	// deliverable. The swap's own notice wins, and the displaced mission's
+	// verdict and size are recorded in the warning rather than the mission
+	// dropped silently.
+	if notice != "" {
+		if owed := i.PendingHandoffMission(); owed != "" && owed != notice {
+			log.WarningLog.Printf("account swap of %q: the committed swap's takeover notice replaces a handoff mission still owed to the retired runtime (verdict %s, %d bytes) — that runtime is gone and its mission undeliverable, so the swap's own notice is the obligation the replacement is owed",
+				i.Title, i.PendingHandoffDeliveryStatus(), len(owed))
+		}
 		i.SetPendingHandoffMission(notice)
 	}
 	i.clearOffBoxSwapInFlight(swapID)

@@ -287,6 +287,13 @@ func accountSwapResumeEligible(instance *session.Instance) bool {
 // The verdict check covers the automatic swap's own durable notice verdict too
 // (#6767): the same ambiguity that holds a manual mission off the scheduler
 // holds an automatic notice off it.
+//
+// A still-owed handoff mission is deliberately NOT a condition here (#7871):
+// it withholds only the account-swap opportunity — resumeLimitedSession drops
+// the hint before any swap work — while the same-account limit resume runs
+// exactly as it did before the mission existed. Holding the whole row off the
+// scheduler would starve that resume behind a mission only the operator or
+// handoff recovery can move.
 func accountSwapScheduledResumeEligible(instance *session.Instance) bool {
 	return accountSwapResumeEligible(instance) &&
 		!instance.PendingAccountSwapDeliveryUnconfirmed()
