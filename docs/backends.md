@@ -409,7 +409,10 @@ user's real home and mounts it only if it exists, so:
       creates fresh in the session home (only safe.directory written into
       it), `GIT_CONFIG_SYSTEM`/`XDG_CONFIG_HOME` dropped, and `git clone
       --template=` so no image template writes into the clone's
-      `.git/config`; an `AF_GIT_CONFIG` marker env carries the same roots
+      `.git/config` (the flag stays off once the operator forwards
+      `GIT_TEMPLATE_DIR`, and plain-docker and SSH clones keep the
+      unflagged argv — only the unclaimed credential boundary suppresses
+      templates); an `AF_GIT_CONFIG` marker env carries the same roots
       to the agent-server's own fetch/push/worktree git. The lockdown
       lifts only when the operator forwards a git-config-route name
       (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM`)

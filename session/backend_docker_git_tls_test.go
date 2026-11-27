@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -51,11 +52,64 @@ func TestCredentialMountPinnedNames_GitTLSNeverPinned(t *testing.T) {
 // argv closes GIT_TEMPLATE_DIR, an init.templateDir config entry, and the
 // compiled default template, any of which could write http.sslVerify=false
 // (or hooks) into the clone's own .git/config where every later fetch and
-// push inherits it. Pinned at the argv so a later refactor cannot drop it.
+// push inherits it. Scoped to the unclaimed credential boundary (Codex):
+// plain docker sessions and the SSH clone keep master's argv byte-for-byte.
 func TestGitCloneCommandCopiesNoTemplate(t *testing.T) {
-	got := gitCloneCommand("https://github.com/o/r.git", "/dst")
+	got := gitCloneCommand("https://github.com/o/r.git", "/dst", true)
 	require.Contains(t, got, "clone --template= ",
-		"the clone argv must pass an empty --template so no image template reaches .git")
+		"a credential-boundary clone argv must pass an empty --template so no image template reaches .git")
+
+	// The unsuppressed spelling is master's argv exactly — plain docker
+	// and SSH clones carry no credential boundary and change nothing. A
+	// non-GitHub URL gets no credential-helper prefix, so the spelling is
+	// fully deterministic.
+	got = gitCloneCommand("https://example.com/o/r.git", "/dst", false)
+	require.Equal(t, `git clone 'https://example.com/o/r.git' '/dst'`, got,
+		"plain and SSH clone argv must stay byte-identical to master")
+	require.NotContains(t, got, "--template")
+}
+
+// The suppression decision lives at the credential boundary
+// (Codex on #7891): a credential-carrying session suppresses the image's
+// template UNLESS the operator forwarded GIT_TEMPLATE_DIR with a host
+// value — a forwarded claim is honoured verbatim, and a claimed-but-
+// hostless name emits no -e so the image's ENV would slip through an
+// exempted slot (the #7891 R6 rule).
+func TestCloneTemplateSuppressionScope(t *testing.T) {
+	if v, ok := os.LookupEnv("GIT_TEMPLATE_DIR"); ok {
+		t.Cleanup(func() { os.Setenv("GIT_TEMPLATE_DIR", v) })
+	}
+	os.Unsetenv("GIT_TEMPLATE_DIR")
+
+	// Plain docker session: no credential — image templates are the
+	// operator's image choice, master's semantics.
+	require.False(t, (&dockerProvisioner{}).cloneTemplateSuppression(),
+		"a plain session must not suppress image templates")
+
+	// Credential-mount session, nothing forwarded: the image is untrusted.
+	require.True(t, (&dockerProvisioner{credentialMounts: []string{"mount"}}).
+		cloneTemplateSuppression(),
+		"an unforwarded image template must be suppressed on a credential session")
+
+	// Account session: the same boundary.
+	require.True(t, (&dockerProvisioner{spec: ProvisionSpec{
+		Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: "/acct"},
+	}}).cloneTemplateSuppression(),
+		"the account path suppresses the image template the same way")
+
+	// Claimed-but-hostless: no -e emitted, so the exemption does NOT lift
+	// — the image's own GIT_TEMPLATE_DIR would pass through the slot.
+	p := &dockerProvisioner{
+		credentialMounts: []string{"mount"},
+		spec:             ProvisionSpec{SessionEnvPassthrough: []string{"GIT_TEMPLATE_DIR"}},
+	}
+	require.True(t, p.cloneTemplateSuppression(),
+		"a hostless GIT_TEMPLATE_DIR claim must not lift the suppression (image ENV would pass through)")
+
+	// Forwarded WITH a host value: the operator's claim wins — no flag.
+	t.Setenv("GIT_TEMPLATE_DIR", "/operator/templates")
+	require.False(t, p.cloneTemplateSuppression(),
+		"a forwarded GIT_TEMPLATE_DIR is the operator's claim — the flag must not override it")
 }
 
 // #7891 R1: af's own git reads only config files af created. The marker

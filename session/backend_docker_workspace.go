@@ -74,7 +74,7 @@ func (p *dockerProvisioner) configureGit() error {
 // (spec.RestoreBranch set, #1592 Phase 4 PR6) it additionally materializes the
 // pushed session branch as a local ref so the in-container Setup checks it out.
 func (p *dockerProvisioner) cloneWorkspace() error {
-	script := gitCloneCommand(p.spec.CloneURL, dockerWorkspaceDir)
+	script := gitCloneCommand(p.spec.CloneURL, dockerWorkspaceDir, p.cloneTemplateSuppression())
 	out, err := p.execSessionSh(dockerProvisionStepTimeout, script)
 	if err != nil {
 		hint := ""

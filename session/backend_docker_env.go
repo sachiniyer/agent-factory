@@ -193,6 +193,21 @@ func dockerRunArgsEnvValue(args []string, name string) string {
 	return value
 }
 
+// cloneTemplateSuppression reports whether af's clone argv suppresses
+// image templates (`git clone --template=`, #7891 R2): only where the
+// clone's environment is untrusted — a credential-carrying session — AND
+// the operator has not claimed the template route by forwarding
+// GIT_TEMPLATE_DIR with a host value. Plain docker sessions and the SSH
+// clone keep master's argv byte-for-byte: their git config is the
+// operator's own, and a forwarded GIT_TEMPLATE_DIR is a claim the flag
+// would silently override (Codex on #7891).
+func (p *dockerProvisioner) cloneTemplateSuppression() bool {
+	if len(p.credentialMounts) == 0 && p.spec.Account.Dir == "" {
+		return false
+	}
+	return !slices.Contains(p.forwardedEnvNames(), "GIT_TEMPLATE_DIR")
+}
+
 // trustPathUnpinnedScript prefixes a provisioning script on a
 // credential-carrying session (credential-mount or account) with the env
 // fixups af's credentialed children need (#7889, #7891). Provisioning
