@@ -170,10 +170,22 @@ func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (strin
 
 // status blocks until any running swap is terminal, then reports its outcome
 // and the id of the swap that outcome belongs to.
+//
+// A non-terminal checkpoint (swapOutcomePending) is reported as anonymous
+// "none": `pending` is only ever observable after a restart rehydrates it,
+// because `status` blocks while `run` holds the lock, so a live caller never
+// sees the in-flight checkpoint. Reporting it as `none` sends every restart
+// reconcile through master's `none` arm (probe, serialized discard, re-read)
+// instead of fencing the NEXT swap forever on a non-own `pending` a stale
+// record left on disk (#7862 review F1) — a non-terminal checkpoint never
+// tells a reconcile more than master's anonymous `none`. The slot's own
+// settle still works: the discard's `refuseLocked` upgrades THIS swap's own
+// `pending` to `rolled_back` internally (the recorder keeps the real state),
+// so the re-read returns the slot's own terminal verdict.
 func (r *accountSwapRecorder) status() (outcome, program, id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.outcome == "" {
+	if r.outcome == "" || r.outcome == swapOutcomePending {
 		return swapOutcomeNone, "", ""
 	}
 	return r.outcome, r.program, r.id
@@ -196,9 +208,11 @@ func (r *accountSwapRecorder) persistCheckedLocked() error {
 
 // persistLocked writes the recorder's durable state to its store, when one is
 // installed. Best-effort: a failed write logs a warning — the swap's terminal
-// outcome stands in memory for this process, and a restart re-asks the host
-// the same way the pre-fix recorder did (no worse), rather than failing the
-// swap over a side record. Caller holds r.mu.
+// outcome stands in memory for this process, and a restart reports the
+// pre-rotation checkpoint left on disk as anonymous "none" (see status), so
+// the reconcile re-asks the host the way a fresh pre-fix recorder did — never
+// a wrong-account verdict — rather than failing the swap over a side record.
+// Caller holds r.mu.
 func (r *accountSwapRecorder) persistLocked() {
 	if err := r.persistCheckedLocked(); err != nil {
 		log.WarningLog.Printf("account swap recorder: could not persist the terminal record; a restart re-asks the host for it: %v", err)

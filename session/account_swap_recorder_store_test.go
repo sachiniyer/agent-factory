@@ -268,12 +268,14 @@ func TestAccountSwapStoreClearRemovesTheRecordAndToleratesAMissingFile(t *testin
 }
 
 // R1's crash window: swap N-1 settled leaving {committed, N-1} on disk, swap N
-// pre-wrote its own id as unknown, rotated, and the agent-server died before
-// the terminal save. A restarted agent-server rehydrates THIS swap's own
-// unknown from the pre-write, so the reconcile fences safely — it never
-// rehydrates N-1's stale terminal record and mistakes it for a queued request
-// that rolls back against a host already running N's account (#7793 review R1).
-// On a head with no pre-write (the prior commit) the disk still holds
+// pre-wrote its own id as a pending checkpoint, rotated, and the agent-server
+// died before the terminal save. A restarted agent-server rehydrates THIS
+// swap's own pending from the pre-write (reported as anonymous "none" — see
+// accountSwapRecorder.status), so the reconcile probes the host the way a
+// fresh pre-fix recorder did and fences safely — it never rehydrates N-1's
+// stale terminal record and mistakes it for a queued request that rolls back
+// against a host already running N's account (#7793 review R1). On a head
+// with no pre-write (the prior commit) the disk still holds
 // {committed, N-1}, the reconcile discards into a definite rollback, and the
 // row unfences on the wrong account — this test fails there.
 func TestCrashAfterThePreWriteBeforeTheTerminalSaveStaysFenced(t *testing.T) {
@@ -291,11 +293,11 @@ func TestCrashAfterThePreWriteBeforeTheTerminalSaveStaysFenced(t *testing.T) {
 	f.inst.offBoxSwapInFlight = &InFlightOffBoxSwapData{SwapID: "test-swap-2", From: "work", To: "alt"}
 	f.inst.startupStateUnknown = true
 
-	// Swap N crosses: run() persists this swap's id as unknown (the pre-write
-	// the fix adds), then swap() runs — the rotation — and the agent-server
-	// dies before the terminal save. The closure simulates the crash by
-	// detaching the store, so the deferred terminal save run() would do is a
-	// no-op and the disk holds exactly what the pre-write left.
+	// Swap N crosses: run() persists this swap's id as a pending checkpoint
+	// (the pre-write the fix adds), then swap() runs — the rotation — and the
+	// agent-server dies before the terminal save. The closure simulates the
+	// crash by detaching the store, so the deferred terminal save run() would
+	// do is a no-op and the disk holds exactly what the pre-write left.
 	_, err := f.srv.rec.run("test-swap-2", func() (string, error) {
 		f.srv.rec.store = nil // the process died mid-rotation; the terminal save never lands
 		return "claude", nil
@@ -303,9 +305,10 @@ func TestCrashAfterThePreWriteBeforeTheTerminalSaveStaysFenced(t *testing.T) {
 	require.NoError(t, err)
 
 	// The agent-server restarted: its fresh recorder rehydrates from the disk
-	// the crash left — {test-swap-2, unknown} on this head (the pre-write
-	// landed), not the prior {committed, test-swap-1} a head with no pre-write
-	// would leave.
+	// the crash left — {test-swap-2, pending} on this head (the pre-write
+	// landed, reported as anonymous "none" — see accountSwapRecorder.status),
+	// not the prior {committed, test-swap-1} a head with no pre-write would
+	// leave.
 	f.srv.rec.store = store // reattach: the crash nil'd the in-memory store; the file persists
 	f.restartAgentServerRecorder(t)
 
@@ -358,6 +361,62 @@ func TestPreRotationCheckpointFailureRefusesTheSwapWhenTheRecordCannotBeCleared(
 	assert.Equal(t, swapOutcomeCommitted, d.Outcome)
 }
 
+// The other arm of run()'s failed-pre-write handling, driven end-to-end: the
+// pre-rotation checkpoint cannot land, but the prior record CAN be unlinked,
+// so the swap proceeds (the rotation runs and commits) and the agent-server
+// crashes before the terminal save. The disk is empty, so the restart
+// reconcile re-asks the host exactly like master's empty recorder and fences
+// where master fences (#7862 review F3 — the crash table's empty-disk rows
+// state this disk directly; this test drives run()'s branch that produces it).
+func TestPreRotationCheckpointFailureThatClearsThePriorRecordLetsTheRotationRunAndFencesLikeMaster(t *testing.T) {
+	f := newSwapFixture(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, accountSwapRecordMarkerName("key"))
+	// Make the record path an empty directory: save (CreateTemp + Rename)
+	// fails at the Rename ("file exists"), while clear (os.Remove) succeeds —
+	// the shape of a disk that can unlink a stale record but cannot commit a
+	// new one. clear() removes the directory, leaving the disk empty so the
+	// swap proceeds.
+	require.NoError(t, os.Mkdir(path, 0o700))
+	store := newAccountSwapStore(path)
+	f.srv.rec.store = store
+
+	// Stage this swap's incoming scope the way the daemon does, so the
+	// rotation actually runs and leaves account.prev behind.
+	f.srv.lastScoped = true
+	stage := f.stagedDirFor("test-swap-1")
+	require.NoError(t, os.MkdirAll(stage, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(stage, accountSwapMarkerRel), []byte("test-swap-1"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(stage, credFile), []byte(secretAlt), 0o600))
+
+	f.inst.offBoxSwapInFlight = &InFlightOffBoxSwapData{SwapID: "test-swap-1", From: "work", To: "alt"}
+	f.inst.startupStateUnknown = true
+
+	ran := false
+	_, err := f.srv.rec.run("test-swap-1", func() (string, error) {
+		prog, serr := f.srv.swap("test-swap-1") // the rotation runs and commits
+		ran = serr == nil
+		f.srv.rec.store = nil // the process died before the terminal save
+		return prog, serr
+	})
+	require.NoError(t, err, "the swap proceeds: the pre-write failed but the prior record cleared")
+	assert.True(t, ran, "swap() ran — the rotation moved the host")
+
+	// The terminal save is best-effort and also cannot land (the store was
+	// detached mid-rotation), so the disk is the empty state clear left —
+	// the crash state the restarted recorder rehydrates.
+	f.srv.rec.store = store
+	f.restartAgentServerRecorder(t)
+
+	settled, err := f.reconcileInFlight()
+	require.ErrorIs(t, err, ErrOffBoxSwapVerdictIndeterminate, "an empty disk over the rotation's scopeIncoming fences, exactly like master's empty recorder")
+	assert.False(t, settled, "the row is not settled on a guess")
+	assert.NotNil(t, f.inst.InFlightOffBoxSwap(), "the fence stays up")
+	assert.True(t, f.inst.StartupStateUnknown())
+	acct, _ := f.inst.AccountSelection()
+	assert.Equal(t, "work", acct, "the row keeps its recorded account while it fences")
+}
+
 // R2's tombstone window: discardStaged tombstones the id AND claims its
 // rolled_back verdict in the SAME write, so a crash between the tombstone save
 // and noteStagedDiscarded's later save rehydrates as this swap's OWN
@@ -400,7 +459,8 @@ func TestCrashBetweenTheTombstoneAndNoteStagedDiscardedRehydratesAsRolledBack(t 
 // The crash points (the matrix's rows):
 //  1. before the pre-write;
 //  2. after the pre-write, before the first rename (the P1 this head fixes:
-//     a matching `unknown` over a proven scopeOutgoing now settles as
+//     the disk holds this swap's `pending` checkpoint, reported as anonymous
+//     "none", so the reconcile takes master's `none` arm and settles as
 //     rolled_back instead of fencing forever — 53e3e788a fences here);
 //  3. between the two renames (next + prev both present: the host cannot prove
 //     the swap never rotated, so the row fences, as master does);
@@ -408,15 +468,26 @@ func TestCrashBetweenTheTombstoneAndNoteStagedDiscardedRehydratesAsRolledBack(t 
 //     rotation may have reached the host, so the row fences, as master does);
 //  5. after the terminal save (a matching committed over a prev: settles as
 //     committed — master fences here, the #7858 fix);
-//  6. a failed pre-write that cleared the prior record (disk empty: behaves
-//     exactly like master's empty recorder);
+//  6. an empty disk over a proven scopeOutgoing (a cleared prior record, or no
+//     prior): settles as rolled_back exactly like master's empty recorder;
 //  7. a failed pre-write that couldn't clear it (refused: the prior record is
 //     unchanged and the host never moved);
 //  8. the tombstone window in discardStaged (a matching rolled_back over a
-//     cleared stage: settles as rolled_back — master fences here).
+//     cleared stage: settles as rolled_back — master fences here);
+//  9. a terminal `unknown` over a proven scopeOutgoing (the rotation ran and
+//     its scope could not be put back): this head fences and leaves the stage
+//     in place to keep the P2 straggler protection master's empty recorder
+//     lacked — master settles this row, this head is the deliberate exception
+//     to "no row is worse than master";
+//  10. a non-own `pending` (a prior swap's failed terminal write left its
+//     checkpoint on disk) over the next swap's proven scopeOutgoing: the
+//     reconcile reports the stale `pending` as anonymous "none" and settles
+//     as rolled_back exactly like master, instead of fencing the next swap
+//     forever (#7862 review F1) — 2d938df71/53e3e788a fence here.
 //
-// Each newly-correct row (2, 5, 8) fails on 53e3e788a or master, which fenced
-// where this head settles. No row is worse than master.
+// Each newly-correct row (2, 5, 8, 10) fails on 53e3e788a/2d938df71 or master,
+// which fenced where this head settles. No row is worse than master except
+// row 9, whose fence is the deliberate P2 straggler protection above.
 func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFencesNoWorseThanMaster(t *testing.T) {
 	// disk is the recorder's durable record the crash leaves — what the
 	// restarted agent-server rehydrates from. zero + clearDisk means the
@@ -511,20 +582,26 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 		{name: "5-after-terminal-save/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: swapN}, prev: true, settled: true, account: "alt",
 			masterVerdict: "fenced (none -> probe scopeIncoming -> fence)", newlyCorrect: true},
 
-		// 6. a failed pre-write that cleared the prior record: the disk is
-		//    empty, so the reconcile behaves exactly like master's empty
-		//    recorder.
-		{name: "6-failed-prewrite-cleared/prior", hasPrior: true, clearDisk: true, stage: true, settled: true, account: "work",
-			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)"},
-		{name: "6-failed-prewrite-cleared/none", hasPrior: false, clearDisk: true, stage: true, settled: true, account: "work",
-			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)"},
+		// 6. an empty disk over a proven scopeOutgoing (a cleared prior
+		//    record, or no prior at all): the reconcile behaves exactly like
+		//    master's empty recorder. The end-to-end failed-pre-write path
+		//    that produces this empty disk — save fails, clear succeeds, the
+		//    rotation runs, the agent-server crashes before the terminal
+		//    save — is driven in
+		//    TestPreRotationCheckpointFailureThatClearsThePriorRecordLetsTheRotationRunAndFencesLikeMaster.
+		{name: "6-empty-disk-over-scopeoutgoing/prior", hasPrior: true, clearDisk: true, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> rolled_back)"},
+		{name: "6-empty-disk-over-scopeoutgoing/none", hasPrior: false, clearDisk: true, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> rolled_back)"},
 
 		// 7. a failed pre-write that couldn't clear it: the swap is refused,
-		//    the host never moved, and the prior record is unchanged.
+		//    the host never moved, and the prior record is unchanged. The
+		//    end-to-end refused path is driven in
+		//    TestPreRotationCheckpointFailureRefusesTheSwapWhenTheRecordCannotBeCleared.
 		{name: "7-failed-prewrite-refused/prior", hasPrior: true, disk: priorRecord, stage: true, settled: true, account: "work",
-			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)"},
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> rolled_back)"},
 		{name: "7-failed-prewrite-refused/none", hasPrior: false, clearDisk: true, stage: true, settled: true, account: "work",
-			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)"},
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> rolled_back)"},
 
 		// 8. the tombstone window in discardStaged: the discard already
 		//    claimed rolled_back under N and removed the stage, so a matching
@@ -540,15 +617,34 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 		//    cannot settle it and the discard must NOT upgrade it to
 		//    rolled_back — a straggler that took the lock between the read
 		//    and the discard can leave the host with neither account in
-		//    place (#7862 review P2). The row fences and the staged scope
-		//    is left untouched, as on master. On ce99d8d45 a matching
-		//    `unknown` over scopeOutgoing fell through to the discard, the
-		//    discard's refuseLocked upgraded it to rolled_back and removed
-		//    the stage, and the row settled — so this row fails there.
+		//    place (#7862 review P2). This head fences and leaves the staged
+		//    scope untouched. Master's empty recorder has no straggler to
+		//    protect against, so master settles this row (none -> probe
+		//    scopeOutgoing -> discard -> noteStagedDiscarded claims rolled_back
+		//    -> read 2); this head is the deliberate exception to "no row is
+		//    worse than master". On ce99d8d45 a matching `unknown` over
+		//    scopeOutgoing fell through to the discard, the discard's
+		//    refuseLocked upgraded it to rolled_back and removed the stage,
+		//    and the row settled — so this row fails there.
 		{name: "9-terminal-unknown-over-scopeoutgoing/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, fenced: true, account: "work", stageUntouched: true,
-			masterVerdict: "fenced (none -> probe scopeOutgoing -> discard -> upgraded unknown)", newlyCorrect: true},
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> noteStagedDiscarded claims rolled_back)"},
 		{name: "9-terminal-unknown-over-scopeoutgoing/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, fenced: true, account: "work", stageUntouched: true,
-			masterVerdict: "fenced (none -> probe scopeOutgoing -> discard -> upgraded unknown)", newlyCorrect: true},
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> noteStagedDiscarded claims rolled_back)"},
+
+		// 10. a non-own `pending` over the next swap's proven scopeOutgoing
+		//     (#7862 review F1): a prior swap's terminal save failed after
+		//     its pre-write landed and its rotation committed, leaving its
+		//     `pending` checkpoint on disk. The next swap (the one this
+		//     row reconciles) has its own staged scope (scopeOutgoing) and
+		//     its request was never delivered. The reconcile reports the
+		//     stale `pending` as anonymous "none" (see
+		//     accountSwapRecorder.status) and settles as rolled_back exactly
+		//     like master, instead of fencing the next swap forever. On
+		//     2d938df71/53e3e788a the non-own `pending` hit the
+		//     `swapOutcomePending` arm and fenced with no discard, so this
+		//     row fails there.
+		{name: "10-non-own-pending-failed-terminal-save", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomePending, ID: swap1}, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> rolled_back)", newlyCorrect: true},
 	}
 
 	for _, row := range rows {

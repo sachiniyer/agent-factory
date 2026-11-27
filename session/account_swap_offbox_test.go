@@ -675,13 +675,13 @@ func TestSwapOffBoxAccountNoRecordNeedsTheHostToAgree(t *testing.T) {
 	assert.True(t, f.inst.StartupStateUnknown())
 }
 
-// The server's own record can say it could not restore the scope, but when the
-// host provably ran the rotation back — account.next.<id> still staged, no
-// account.prev (scopeOutgoing) — the reconcile settles as rolled_back rather
-// than fencing a healthy row. The recorder's `unknown` is indeterminate only
-// when the host layout cannot prove the swap never committed; a proven
-// scopeOutgoing proves exactly that, the way an empty recorder settled the
-// same layout on master (#7858 review).
+// The server's own record can say it could not restore the scope, but a
+// terminal `unknown` means swap() ran and its scope could not be put back, so
+// the record alone cannot settle it and the discard must NOT upgrade it to
+// rolled_back — a straggler that took the lock between the read and the
+// discard can leave the host with neither account in place. The reconcile
+// fences and leaves the staged scope untouched, as on master (#7862 review
+// P2).
 func TestSwapOffBoxAccountServerThatCouldNotRestoreIsUnknown(t *testing.T) {
 	f := newSwapFixture(t)
 	// failAfter fires AFTER a successful rotation: restore() puts the scope
