@@ -398,14 +398,16 @@ func accountDockerProgramChoiceReason(name string) (string, bool) {
 // authenticated traffic to a server it controls.
 //
 // The config-root names the credential-mount guard also refuses
-// (credentialMountSharedConfigRootNames — GNUPGHOME, XDG_RUNTIME_DIR,
-// GIT_CONFIG_NOSYSTEM) are deliberately NOT refused here. Their because-clause
-// ("relocates the account's credential-bearing state to a path the repository
-// controls") does not hold on the account path: af's own value is the
-// credential-bearing state af emits last, and refusing them would over-close
-// names master accepts — a boolean like GIT_CONFIG_NOSYSTEM, or an XDG root af
-// does not pin. The credential-mount guard keeps its own refusal because the
-// mounted credential file is the state a config-root name can redirect there.
+// (credentialMountSharedConfigRootNames — GNUPGHOME, XDG_RUNTIME_DIR — and
+// the re-asserted GIT_CONFIG_NOSYSTEM) are deliberately NOT refused here.
+// Their because-clause ("relocates the account's credential-bearing state
+// to a path the repository controls") does not hold on the account path:
+// af's own value is the credential-bearing state af emits last — including
+// the GIT_CONFIG_NOSYSTEM=1 re-assert (#7891), which dominates a repo
+// spelling anyway — and refusing them would over-close names master
+// accepts. The credential-mount guard keeps its own refusal because the
+// mounted credential file is the state a config-root name can redirect
+// there.
 //
 // The refusal is repo-run_args-only, never the operator's own claim: these
 // names are NOT in accountDockerDeniedNames (which also filters
@@ -420,6 +422,9 @@ func accountDockerProgramChoiceReason(name string) (string, bool) {
 // (ANTHROPIC_BASE_URL for claude; CODEX_CA_CERTIFICATE for codex;
 // SSL_CERT_FILE/NODE_EXTRA_CA_CERTS/… for all).
 func accountDockerRoutingReason(agent, name string) (string, bool) {
+	if _, ok := credentialMountSharedGitTLSEnvNames[name]; ok {
+		return "it changes the TLS trust or verification of af's credentialed git runs (clone, credential config, restore fetch) inside the container", true
+	}
 	if _, ok := credentialMountSharedRoutingNames[name]; ok {
 		return "it changes where the agent sends the account credential — a repo-supplied endpoint, proxy, or trust root routes the account's authenticated traffic to a server the repository controls", true
 	}
@@ -451,6 +456,12 @@ var accountRoutingPathValuedNames = map[string]struct{}{
 	"CODEX_CA_CERTIFICATE":     {},
 	"GH_CONFIG_DIR":            {},
 	"DBUS_SESSION_BUS_ADDRESS": {},
+	"GIT_SSL_CAINFO":           {},
+	"GIT_SSL_CAPATH":           {},
+	"GIT_PROXY_SSL_CAINFO":     {},
+	"GIT_PROXY_SSL_CAPATH":     {},
+	"GIT_SSL_CERT":             {},
+	"GIT_SSL_KEY":              {},
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will

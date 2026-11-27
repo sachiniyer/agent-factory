@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // #7889: af's own provisioning execs inherit the container env where
@@ -17,11 +19,7 @@ import (
 // restore the platform default and widen the operator's claimed trust
 // (#7889, Codex 4722476016).
 func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
-	p := &dockerProvisioner{credentialEnvPins: []string{
-		"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-		"REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "CODEX_CA_CERTIFICATE",
-		"HTTP_PROXY",
-	}}
+	p := &dockerProvisioner{credentialMounts: []string{"mount"}}
 	got := p.trustPathUnpinnedScript("git clone https://example.invalid/r.git")
 	if !strings.Contains(got, `[ -n "$SSL_CERT_DIR" ] || unset SSL_CERT_FILE`) {
 		t.Fatalf("SSL_CERT_FILE's unset must be conditioned on the dir slot being empty: %q", got)
@@ -29,7 +27,40 @@ func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 	if !strings.Contains(got, `[ -n "$SSL_CERT_FILE" ] || unset SSL_CERT_DIR`) {
 		t.Fatalf("SSL_CERT_DIR's unset must be conditioned on the file slot being empty: %q", got)
 	}
-	if !strings.HasPrefix(got, "[ -n ") {
+	// git's CA-root spellings join the unset list (#7891): CAINFO carries
+	// no sibling guard — measured on git 2.43 an empty CAINFO poisons even
+	// a valid CAPATH, so no defined-empty spelling is safe for it — while
+	// CAPATH's empty read contributes nothing beside CAINFO, so it keeps
+	// the sibling guard.
+	for _, clause := range []string{
+		"unset GIT_SSL_CAINFO", "unset GIT_PROXY_SSL_CAINFO",
+		`[ -n "$GIT_SSL_CAINFO" ] || unset GIT_SSL_CAPATH`,
+		`[ -n "$GIT_PROXY_SSL_CAINFO" ] || unset GIT_PROXY_SSL_CAPATH`,
+	} {
+		if !strings.Contains(got, clause) {
+			t.Fatalf("the preamble must emit %q so af's git never sees the image's CA claim: %q", clause, got)
+		}
+	}
+	// The presence-read names are unset unconditionally — a defined
+	// `GIT_SSL_NO_VERIFY=` disables verification outright, so the image's
+	// value must never survive to a provisioning child.
+	for _, name := range []string{
+		"GIT_SSL_NO_VERIFY", "GIT_SSL_CERT", "GIT_SSL_KEY",
+		"GIT_HTTP_PROXY_AUTHMETHOD",
+	} {
+		if !strings.Contains(got, "unset "+name) {
+			t.Fatalf("the preamble must unset %s — no defined value is inert for it: %q", name, got)
+		}
+	}
+	// And the env-config injection names go too: an image GIT_CONFIG_COUNT
+	// would animate whatever indexed pairs the image ships — including
+	// http.sslVerify=false — for af's credentialed git.
+	for _, name := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} {
+		if !strings.Contains(got, "unset "+name) {
+			t.Fatalf("the preamble must unset %s — an image count animates the image's own config pairs: %q", name, got)
+		}
+	}
+	if !strings.HasPrefix(got, "[ -n ") && !strings.HasPrefix(got, "unset ") {
 		t.Fatalf("the unset clauses must lead the script so every later command sees them: %q", got)
 	}
 	if !strings.HasSuffix(got, "git clone https://example.invalid/r.git") {
@@ -49,28 +80,48 @@ func TestTrustPathUnpinnedScriptUnsetsPinnedTrustNames(t *testing.T) {
 	}
 }
 
-// An operator-forwarded trust name is NOT a pin — credentialEnvPins excludes
-// it — and the clone needs that forwarded CA to reach a private-CA remote.
-// The preamble never unsets a name that is not pinned — it may appear only
-// as the sibling condition guarding the pinned slot's unset.
+// An operator-forwarded trust name is claimed by session_env_passthrough
+// and the clone needs that forwarded CA to reach a private-CA remote —
+// the preamble never unsets a name the operator claimed; it may appear
+// only as the sibling condition guarding a pinned slot's unset.
 func TestTrustPathUnpinnedScriptKeepsForwardedValues(t *testing.T) {
-	p := &dockerProvisioner{credentialEnvPins: []string{"SSL_CERT_DIR", "HTTP_PROXY"}}
+	p := &dockerProvisioner{
+		credentialMounts: []string{"mount"},
+		spec:             ProvisionSpec{SessionEnvPassthrough: []string{"SSL_CERT_FILE", "GIT_SSL_NO_VERIFY"}},
+	}
 	got := p.trustPathUnpinnedScript("true")
-	if strings.Contains(got, "unset SSL_CERT_FILE") {
-		t.Fatalf("an unpinned (operator-forwarded) trust name must not be unset: %q", got)
+	for _, name := range []string{"SSL_CERT_FILE", "GIT_SSL_NO_VERIFY"} {
+		if strings.Contains(got, "unset "+name) {
+			t.Fatalf("an operator-forwarded trust name must not be unset: %q", got)
+		}
 	}
 	if !strings.Contains(got, "unset SSL_CERT_DIR") {
-		t.Fatalf("a pinned trust name must be unset: %q", got)
+		t.Fatalf("an unforwarded trust name must be unset: %q", got)
 	}
 }
 
-// Without credential mounts there are no pins at all — the script must be
-// byte-identical so the preamble cannot perturb a session that carries none.
+// Without a credential carried there are no claims to hold off — the
+// script must be byte-identical so the preamble cannot perturb a plain
+// session's image-supplied TLS config (a corporate-CA image is the
+// operator's own choice there).
 func TestTrustPathUnpinnedScriptNoPinsIsIdentity(t *testing.T) {
 	p := &dockerProvisioner{}
 	const script = "chmod +x /opt/af/bin/af"
 	if got := p.trustPathUnpinnedScript(script); got != script {
-		t.Fatalf("a session with no pins must pass its script through verbatim: %q", got)
+		t.Fatalf("a session carrying no credential must pass its script through verbatim: %q", got)
+	}
+}
+
+// Account-scoped sessions share the hole — the clone runs the same
+// execSessionSh children and installs the same credential helper — so the
+// preamble fires there too (#7891 widened to the shared surface).
+func TestTrustPathUnpinnedScriptAppliesOnAccountSessions(t *testing.T) {
+	p := &dockerProvisioner{spec: ProvisionSpec{
+		Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: "/acct"},
+	}}
+	got := p.trustPathUnpinnedScript("git fetch origin")
+	if !strings.Contains(got, "unset GIT_SSL_NO_VERIFY") {
+		t.Fatalf("an account session's provisioning git must not see an image GIT_SSL_NO_VERIFY: %q", got)
 	}
 }
 

@@ -289,6 +289,13 @@ func execInvocation(args []string) error {
 		filterAgent = ""
 	}
 	environ := FilterForCommand(os.Environ(), filterAgent, command, extras)
+	// The presence-read trust names are stripped before exec: no defined
+	// value is inert for them — git reads GIT_SSL_NO_VERIFY by getenv, so
+	// `=` and `=0` both disable verification (measured on git 2.43) — so an
+	// image value carried in the container env cannot be blanked, only
+	// removed. An extras-listed (operator-forwarded) name keeps its value
+	// (#7891).
+	environ = stripTrustPresenceNames(environ, extras)
 	// The pins are re-applied HERE, after filtering and immediately before
 	// exec — the same shape applyAccountScope gives the account boundary. The
 	// container env already holds them defined-and-empty, but tmux's
@@ -335,8 +342,6 @@ func reapplyEmptyPins(environ, pins []string) []string {
 	for _, name := range pins {
 		pinned[name] = struct{}{}
 	}
-	_, filePinned := pinned["SSL_CERT_FILE"]
-	_, dirPinned := pinned["SSL_CERT_DIR"]
 	out := make([]string, 0, len(environ)+len(pins))
 	for _, entry := range environ {
 		name, _, _ := strings.Cut(entry, "=")
@@ -345,23 +350,44 @@ func reapplyEmptyPins(environ, pins []string) []string {
 		}
 		out = append(out, entry)
 	}
-	// A sibling counts as claimed only when it is NOT itself a pin — a
-	// pinned sibling re-resolves below, so whatever stale value the environ
-	// holds is being replaced and both slots resolve as one consistent
-	// platform root set.
-	fileClaimed := !filePinned && envNonEmpty(environ, "SSL_CERT_FILE")
-	dirClaimed := !dirPinned && envNonEmpty(environ, "SSL_CERT_DIR")
 	for _, name := range pins {
-		if name == "SSL_CERT_DIR" && fileClaimed ||
-			name == "SSL_CERT_FILE" && dirClaimed {
-			out = append(out, name+"=")
-			continue
+		// A sibling counts as claimed only when it is NOT itself a pin — a
+		// pinned sibling re-resolves below, so whatever stale value the
+		// environ holds is being replaced and both slots resolve as one
+		// consistent platform root set.
+		if sibling, paired := trustPathSiblingPairs[name]; paired {
+			if _, siblingPinned := pinned[sibling]; !siblingPinned && envNonEmpty(environ, sibling) {
+				out = append(out, name+"=")
+				continue
+			}
 		}
 		if entry, ok := resolveTrustPathPin(name); ok {
 			out = append(out, entry)
 			continue
 		}
 		out = append(out, name+"=")
+	}
+	return out
+}
+
+// stripTrustPresenceNames removes the presence-read trust names
+// (trustPresenceNames) from the child environment unless the operator
+// forwarded them — no defined value is inert for a name git reads by
+// getenv presence, so unset is the only neutral spelling.
+func stripTrustPresenceNames(environ, extras []string) []string {
+	forwarded := make(map[string]struct{}, len(extras))
+	for _, name := range extras {
+		forwarded[name] = struct{}{}
+	}
+	out := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		name, _, _ := strings.Cut(entry, "=")
+		if _, strip := trustPresenceNames[name]; strip {
+			if _, kept := forwarded[name]; !kept {
+				continue
+			}
+		}
+		out = append(out, entry)
 	}
 	return out
 }

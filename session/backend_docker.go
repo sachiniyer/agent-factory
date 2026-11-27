@@ -712,8 +712,7 @@ func (p *dockerProvisioner) runContainer() error {
 	// workspace config loader treats it as set and does not supply the repo's
 	// value (#7526). SSL_CERT_FILE/SSL_CERT_DIR keep that shape only here —
 	// `docker run` cannot unset an image ENV — and are unset in af's
-	// provisioning execs and resolved to a platform bundle at the exec shim,
-	// whose readers load the empty value as a path (#7889).
+	// provisioning execs and resolved at the exec shim (#7889).
 	for _, name := range p.credentialEnvPins {
 		args = append(args, "-e", name+"=")
 	}
@@ -726,19 +725,17 @@ func (p *dockerProvisioner) runContainer() error {
 	// image's ENV and any repo entry the same last-wins way the pins do.
 	// The pane keeps the real values: the in-container tmux stamps them per
 	// pane over this baseline. A defined-empty TMUX is safe because tmux
-	// itself treats an empty value as unset — measured on tmux 3.4 and
-	// 3.2a — so the blanked baseline cannot trip the nested-session guard
-	// or fake pane identity anywhere af or the agent reads it (#7544).
+	// itself treats empty as unset — measured on tmux 3.4 and 3.2a — so the
+	// blanked baseline cannot trip the nested-session guard or fake pane
+	// identity anywhere af or the agent reads it (#7544).
 	for _, name := range credentialMountPaneBoundaryNamesSorted() {
 		args = append(args, "-e", name+"=")
 	}
-	// The account's env goes LAST, after run_args, and that ordering is the boundary
-	// rather than a preference. docker.run_args is repository-controlled and checked
-	// in; appended after the account it could set `-e CODEX_HOME=/another/home` and
-	// silently move the agent off the account the operator named, which is the
-	// wrong-identity failure this feature exists to prevent. Docker gives the LAST
-	// -e for a name precedence, so putting the account there makes it dominate an
-	// assembly that is otherwise additive by design.
+	// The account's env goes LAST, after run_args, and that ordering is the
+	// boundary rather than a preference: a repo `-e CODEX_HOME=/another/home`
+	// appended later would silently move the agent off the account the
+	// operator named — the wrong-identity failure this feature exists to
+	// prevent. Docker's last-wins -e precedence makes the account dominate.
 	args = append(args, p.accountEnv...)
 	if p.spec.Account.Dir != "" {
 		// docker.run_args may set HOME too. It is not an identity source once the
@@ -778,6 +775,10 @@ func (p *dockerProvisioner) runContainer() error {
 			if imagePATH := credentialMountImagePATH(p.dockerImageEnv()); imagePATH != "" {
 				args = append(args, "-e", "PATH="+imagePATH)
 			}
+		}
+		// Keep the image's /etc/gitconfig out of every git run af or the agent starts (#7891).
+		if !slices.Contains(p.spec.SessionEnvPassthrough, "GIT_CONFIG_NOSYSTEM") {
+			args = append(args, "-e", "GIT_CONFIG_NOSYSTEM=1")
 		}
 	} else if len(p.credentialMounts) > 0 {
 		// For credential-mount sessions, credential files are mounted at paths

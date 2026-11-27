@@ -6,6 +6,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -79,41 +80,62 @@ func (p *dockerProvisioner) execSh(timeout time.Duration, script string) ([]byte
 	return p.docker(timeout, args...)
 }
 
-// trustPathUnpinnedScript prefixes a provisioning script with an unset of
-// the path-valued trust names THIS session pins defined-and-empty in the
-// container environment (#7889). The pin must stand there — `docker run`
+// trustPathUnpinnedScript prefixes a provisioning script on a
+// credential-carrying session (credential-mount or account) with an unset
+// of the trust names whose image or pin value must not reach the child
+// (#7889, #7891). The container-env pin must stand there — `docker run`
 // cannot unset an image ENV — but a defined-empty SSL_CERT_FILE or
 // SSL_CERT_DIR is a PATH an OpenSSL-family TLS client loads as zero roots
 // (the five CA-bundle spellings keep their pin: their measured empty read
 // is falsy-safe). Unsetting first makes every env-honoring stack a
 // provisioning child might carry fall back to its compiled platform store
-// instead of reading the pin's empty path. Only PINNED names are unset —
-// an operator-forwarded SSL_CERT_FILE is the session's working CA config
-// and the clone needs it — and a pinned slot beside a FORWARDED sibling
-// keeps defined-empty rather than unsetting: SSL_CERT_FILE/SSL_CERT_DIR
-// are independent slots, so dropping the pin to unset would restore the
-// platform default and add the image's roots to a trust the operator
-// bounded to their forwarded value (the sibling guard the exec shim and
-// the agent-server startup apply too, #7889). No .env-fill channel exists
-// on these children, so unlike the agent's exec shim — which must keep
-// the name claimed — unset is the inert form here.
+// instead of reading the pin's empty path.
+//
+// Three rules shape the list: only names the operator did NOT forward are
+// unset — an operator-forwarded SSL_CERT_FILE is the session's working CA
+// config and the clone needs it; a pin whose paired sibling carries a
+// forwarded value keeps defined-empty rather than unsetting (defined-empty
+// is the only spelling that contributes no roots for OpenSSL — unset would
+// restore the platform default and add the image's roots to a trust the
+// operator bounded); and the presence-read git names are unset
+// unconditionally because no defined value is inert — `GIT_SSL_NO_VERIFY=`
+// disables verification (getenv presence read, measured on git 2.43), so
+// the unset fires whether af pinned the name or the image set it. Plain
+// sessions keep image TLS config verbatim: with no credential carried the
+// image's own CA setup is the operator's choice.
 func (p *dockerProvisioner) trustPathUnpinnedScript(script string) string {
+	if len(p.credentialMounts) == 0 && p.spec.Account.Dir == "" {
+		return script
+	}
 	var unset []string
 	for _, name := range sessionenv.TrustPathPinNames() {
-		if !slices.Contains(p.credentialEnvPins, name) {
+		if slices.Contains(p.spec.SessionEnvPassthrough, name) {
 			continue
 		}
-		// `[ -n "$SIBLING" ] ||` keeps the pin when the sibling carries a
-		// (forwarded) value — defined-empty is the only spelling that
-		// contributes no roots for OpenSSL and openssl-probe alike.
-		switch name {
-		case "SSL_CERT_FILE":
-			unset = append(unset, `[ -n "$SSL_CERT_DIR" ] || unset SSL_CERT_FILE`)
-		case "SSL_CERT_DIR":
-			unset = append(unset, `[ -n "$SSL_CERT_FILE" ] || unset SSL_CERT_DIR`)
-		default:
-			unset = append(unset, "unset "+name)
+		if sibling, paired := sessionenv.TrustPathSibling(name); paired {
+			unset = append(unset, fmt.Sprintf(`[ -n "$%s" ] || unset %s`, sibling, name))
+			continue
 		}
+		unset = append(unset, "unset "+name)
+	}
+	for _, name := range sessionenv.TrustPresenceStripNames() {
+		if slices.Contains(p.spec.SessionEnvPassthrough, name) {
+			continue
+		}
+		unset = append(unset, "unset "+name)
+	}
+	// GIT_CONFIG_COUNT/GIT_CONFIG_PARAMETERS inject git config through the
+	// environment — an image ENV count animates whatever indexed
+	// GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* pairs the image ships, which can
+	// spell http.sslVerify=false for af's credentialed git (#7891). The
+	// credential path pins them `=` (count 0 is inert); the account path
+	// guards repo run_args but has no pin, so the preamble unset is the
+	// shared closure. A forwarded claim stands.
+	for _, name := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} {
+		if slices.Contains(p.spec.SessionEnvPassthrough, name) {
+			continue
+		}
+		unset = append(unset, "unset "+name)
 	}
 	if len(unset) == 0 {
 		return script

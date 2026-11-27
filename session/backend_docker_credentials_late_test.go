@@ -204,7 +204,8 @@ func TestRunContainer_ReassertsFirstPartyEndpointAndPinsLateNames(t *testing.T) 
 // path-valued names (#7531 review): GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are
 // re-asserted to working paths under the boundary's own roots — never
 // defined-empty, which would break `git config --global` — and
-// GIT_CONFIG_NOSYSTEM, a boolean, stays pinned defined-and-empty.
+// GIT_CONFIG_NOSYSTEM is re-asserted to 1 so the image's /etc/gitconfig
+// stays out of every git run (#7891).
 func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
 	runCalled, _, runArgv := provisionDockerCredentialGrant(t, tmux.ProgramGemini, nil)
 	require.True(t, runCalled)
@@ -218,8 +219,10 @@ func TestRunContainer_ReassertsGitConfigRoots(t *testing.T) {
 		"/dev/null fails git config writes with EACCES — the re-assert must be a writable location")
 	require.Contains(t, joined, "GIT_CONFIG_SYSTEM=/etc/gitconfig",
 		"the system config root must be re-asserted to git's own default path")
-	require.Contains(t, joined, "-e\x00GIT_CONFIG_NOSYSTEM=\x00",
-		"a boolean name pins defined-and-empty — the default behavior")
+	require.Contains(t, joined, "-e\x00GIT_CONFIG_NOSYSTEM=1\x00",
+		"GIT_CONFIG_NOSYSTEM re-asserts to 1 — the image's /etc/gitconfig must stay out of af's git (#7891)")
+	require.NotContains(t, joined, "-e\x00GIT_CONFIG_NOSYSTEM=\x00",
+		"a defined-empty GIT_CONFIG_NOSYSTEM is falsy and leaves the image's system gitconfig live")
 	// The re-asserted path lives under the re-asserted HOME.
 	for i, arg := range runArgv {
 		if strings.HasPrefix(arg, "GIT_CONFIG_GLOBAL=") {

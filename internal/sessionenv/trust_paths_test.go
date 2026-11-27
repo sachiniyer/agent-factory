@@ -68,10 +68,12 @@ func TestResolveTrustPathPinPrefersFirstExistingCandidate(t *testing.T) {
 			t.Fatalf("%s must list at least two candidates for the preference check", name)
 		}
 		// Mark every candidate except the first as existing: for the file
-		// names the second entry wins; for SSL_CERT_DIR the dir spelling.
+		// names the second entry wins; for the CAPATH-class dir names the
+		// dir spelling.
 		var existing []string
+		dirWanted := slices.Equal(candidates, caBundleDirCandidates)
 		for _, c := range candidates[1:] {
-			if name == "SSL_CERT_DIR" {
+			if dirWanted {
 				existing = append(existing, c+"/")
 			} else {
 				existing = append(existing, c)
@@ -150,10 +152,15 @@ func TestResolveTrustPathPinLeavesNonPathNamesAlone(t *testing.T) {
 
 // The table the session side consumes: the provisioning exec preamble unsets
 // exactly these names, so the set must stay the measured path-valued class —
-// the two names whose empty value a TLS stack reads as a path (#7889 review:
-// the five falsy-safe bundle spellings keep master's defined-empty pin).
+// the names whose empty value a TLS stack reads as a path (#7889 review:
+// the five falsy-safe bundle spellings keep master's defined-empty pin;
+// #7891 adds git's CA-root names, whose `=` is a broken CA path).
 func TestTrustPathPinNamesListsTheAuditedClass(t *testing.T) {
 	want := []string{
+		"GIT_PROXY_SSL_CAINFO",
+		"GIT_PROXY_SSL_CAPATH",
+		"GIT_SSL_CAINFO",
+		"GIT_SSL_CAPATH",
 		"SSL_CERT_DIR",
 		"SSL_CERT_FILE",
 	}
@@ -283,7 +290,7 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 	stubTrustPathStat(t, "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/")
 	t.Setenv("SSL_CERT_FILE", "")
 	t.Setenv("SSL_CERT_DIR", "")
-	NeutralizeTrustPathPins()
+	NeutralizeTrustPathPins(nil)
 	if got := os.Getenv("SSL_CERT_FILE"); got != "/etc/ssl/certs/ca-certificates.crt" {
 		t.Fatalf("SSL_CERT_FILE = %q: a defined-empty pin must resolve to the platform bundle", got)
 	}
@@ -293,7 +300,7 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 
 	// A forwarded (non-empty) value is the operator's claim — untouched.
 	t.Setenv("SSL_CERT_FILE", "/operator/corporate-ca.pem")
-	NeutralizeTrustPathPins()
+	NeutralizeTrustPathPins(nil)
 	if got := os.Getenv("SSL_CERT_FILE"); got != "/operator/corporate-ca.pem" {
 		t.Fatalf("SSL_CERT_FILE = %q: a forwarded value must not be re-pointed", got)
 	}
@@ -303,7 +310,7 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 	// alone, and unset would restore the platform default dir for OpenSSL
 	// and openssl-probe alike — the empty slot must contribute NOTHING (R5).
 	t.Setenv("SSL_CERT_DIR", "")
-	NeutralizeTrustPathPins()
+	NeutralizeTrustPathPins(nil)
 	if got, ok := os.LookupEnv("SSL_CERT_DIR"); !ok || got != "" {
 		t.Fatalf("SSL_CERT_DIR must stay defined-empty beside a forwarded SSL_CERT_FILE, got %q (present %v)", os.Getenv("SSL_CERT_DIR"), ok)
 	}
@@ -314,7 +321,7 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 	// 4722401904).
 	t.Setenv("SSL_CERT_FILE", "")
 	t.Setenv("SSL_CERT_DIR", "/operator/certs.d")
-	NeutralizeTrustPathPins()
+	NeutralizeTrustPathPins(nil)
 	if got, ok := os.LookupEnv("SSL_CERT_FILE"); !ok || got != "" {
 		t.Fatalf("SSL_CERT_FILE must stay defined-empty beside a forwarded SSL_CERT_DIR, got %q (present %v)", os.Getenv("SSL_CERT_FILE"), ok)
 	}
@@ -324,9 +331,109 @@ func TestNeutralizeTrustPathPinsFixesTheProcessEnv(t *testing.T) {
 	stubTrustPathStat(t)
 	os.Unsetenv("SSL_CERT_FILE")
 	t.Setenv("SSL_CERT_DIR", "")
-	NeutralizeTrustPathPins()
+	NeutralizeTrustPathPins(nil)
 	if _, ok := os.LookupEnv("SSL_CERT_DIR"); ok {
 		t.Fatalf("SSL_CERT_DIR on a store-less image must drop to unset, got %q", os.Getenv("SSL_CERT_DIR"))
+	}
+}
+
+// #7891: the presence-read git names are stripped at startup — git reads
+// GIT_SSL_NO_VERIFY by getenv, so `=` and `=0` disable verification alike
+// (measured on git 2.43) and no defined-empty pin can neutralize the name.
+// An operator-forwarded claim is never touched.
+func TestNeutralizeTrustPathPinsStripsPresenceNames(t *testing.T) {
+	// `=` and `=1` and `=0` are all the attack — every defined value goes.
+	for _, value := range []string{"", "0", "1"} {
+		t.Setenv("GIT_SSL_NO_VERIFY", value)
+		NeutralizeTrustPathPins(nil)
+		if _, ok := os.LookupEnv("GIT_SSL_NO_VERIFY"); ok {
+			t.Fatalf("GIT_SSL_NO_VERIFY=%q must be unset for the agent-server's children — presence alone disables verification", value)
+		}
+	}
+	// A forwarded claim survives verbatim.
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	NeutralizeTrustPathPins([]string{"GIT_SSL_NO_VERIFY"})
+	if got := os.Getenv("GIT_SSL_NO_VERIFY"); got != "1" {
+		t.Fatalf("a forwarded GIT_SSL_NO_VERIFY must keep the operator's value, got %q", got)
+	}
+	// The client-cert names strip the same way — `GIT_SSL_CERT=` fails the
+	// eager load, and no platform default exists to resolve to.
+	for _, name := range []string{"GIT_SSL_CERT", "GIT_SSL_KEY"} {
+		t.Setenv(name, "")
+		NeutralizeTrustPathPins(nil)
+		if _, ok := os.LookupEnv(name); ok {
+			t.Fatalf("%s= must be unset for the agent-server's children", name)
+		}
+	}
+	// The asymmetric sibling rule: beside a forwarded CAPATH the pinned
+	// CAINFO resolves rather than keeping `=` — an empty CAINFO poisons a
+	// valid CAPATH outright (measured on git 2.43), so no defined-empty
+	// spelling exists for it.
+	stubTrustPathStat(t, "/etc/ssl/certs/ca-certificates.crt")
+	t.Setenv("GIT_SSL_CAINFO", "")
+	t.Setenv("GIT_SSL_CAPATH", "/operator/certs.d")
+	NeutralizeTrustPathPins(nil)
+	if got := os.Getenv("GIT_SSL_CAINFO"); got != "/etc/ssl/certs/ca-certificates.crt" {
+		t.Fatalf("GIT_SSL_CAINFO beside a forwarded CAPATH must resolve — `=` would break the operator's dir — got %q", got)
+	}
+	// …while beside a forwarded CAINFO the pinned CAPATH keeps `=` — an
+	// empty CAPATH contributes nothing next to CAINFO (measured), and
+	// resolving it would add the image's hashed roots.
+	t.Setenv("GIT_SSL_CAINFO", "/operator/ca.pem")
+	t.Setenv("GIT_SSL_CAPATH", "")
+	NeutralizeTrustPathPins(nil)
+	if got, ok := os.LookupEnv("GIT_SSL_CAPATH"); !ok || got != "" {
+		t.Fatalf("GIT_SSL_CAPATH must stay defined-empty beside a forwarded GIT_SSL_CAINFO, got %q (present %v)", got, ok)
+	}
+}
+
+// #7891: a presence-read git name in the exec environment is the image's
+// claim — git reads GIT_SSL_NO_VERIFY by getenv, so any defined value
+// disables verification (measured on git 2.43) and the only inert
+// spelling is absent. The shim strips it before exec; a name the operator
+// forwarded rides extras and survives verbatim.
+func TestExecInvocationStripsPresenceReadGitNames(t *testing.T) {
+	pathDir := t.TempDir()
+	writeExecutableFixture(t, pathDir, "codex")
+	t.Setenv("PATH", pathDir)
+	wantErr := errors.New("stop before exec")
+	var gotEnvironment []string
+	previous := processExec
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnvironment = append([]string(nil), environ...)
+		return wantErr
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	// The image's claims — `=1`, `=`, `=0` alike — never reach the agent.
+	for _, name := range []string{
+		"GIT_SSL_NO_VERIFY", "GIT_SSL_CERT", "GIT_SSL_KEY",
+		"GIT_SSL_CERT_PASSWORD", "GIT_HTTP_PROXY_AUTHMETHOD",
+		"GIT_PROXY_SSL_NO_VERIFY",
+	} {
+		t.Setenv(name, "attacker-or-image-value")
+	}
+	if err := execInvocation([]string{"codex", "0", "0", "codex"}); !errors.Is(err, wantErr) {
+		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
+	}
+	for _, name := range []string{
+		"GIT_SSL_NO_VERIFY", "GIT_SSL_CERT", "GIT_SSL_KEY",
+		"GIT_SSL_CERT_PASSWORD", "GIT_HTTP_PROXY_AUTHMETHOD",
+		"GIT_PROXY_SSL_NO_VERIFY",
+	} {
+		if _, ok := envValue(gotEnvironment, name); ok {
+			t.Fatalf("%s reached the agent's environment — presence alone is the attack", name)
+		}
+	}
+
+	// Forwarded through extras, the operator's value passes verbatim.
+	gotEnvironment = nil
+	t.Setenv("GIT_SSL_NO_VERIFY", "1")
+	if err := execInvocation([]string{"codex", "1", "GIT_SSL_NO_VERIFY", "0", "codex"}); !errors.Is(err, wantErr) {
+		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
+	}
+	if got, ok := envValue(gotEnvironment, "GIT_SSL_NO_VERIFY"); !ok || got != "1" {
+		t.Fatalf("GIT_SSL_NO_VERIFY = %q (present %v): a forwarded claim must reach the agent verbatim", got, ok)
 	}
 }
 
