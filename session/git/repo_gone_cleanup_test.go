@@ -327,8 +327,12 @@ func TestCleanupClaimedRepoGone_RemovesRetainedArchiveTreesBeforePrimary(t *test
 	if err != nil {
 		t.Fatalf("inspect retained archive tree: %v", err)
 	}
+	pin, err := inspectRelocationPathPin(retained)
+	if err != nil {
+		t.Fatalf("pin retained archive tree: %v", err)
+	}
 	gw.RestoreArchiveReport(ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
-		newArchiveRetainedTree(retained, identity, []ArchiveSkippedEntry{
+		newArchiveRetainedTree(retained, identity, pin, []ArchiveSkippedEntry{
 			newArchiveSkippedEntry("private-work.txt", ArchiveSkipPermissionDenied),
 		}),
 	}})

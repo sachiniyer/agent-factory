@@ -286,6 +286,40 @@ func residuePathsEqual(a, b string) (bool, error) {
 	return resolvedA == resolvedB, nil
 }
 
+// ResidueBindingUnproven reports whether a BindAFRelocationResidue failure —
+// the error half of an Unknown verdict — came from a path component or a
+// pointer read that did not happen: a permission, transport or stale-handle
+// errno (EACCES, ENOTCONN, ESTALE, EIO), or a component that is present but
+// unresolvable (pathutil.ErrUnresolvedComponent — the dangling symlink
+// ResolveForCompareWith reports, #7295). Those are the causes a later retry
+// can answer — the mount reconnects, the link is fixed, the mode bit is
+// repaired — so the caller names the failed component in its refusal rather
+// than only saying the residue "may belong to another session" (#7900). A
+// verdict error matching nothing here keeps the generic refusal wording: a
+// deadline or a malformed pointer file is not a read a retry is expected to
+// complete.
+func ResidueBindingUnproven(err error) bool {
+	return errors.Is(err, unix.EACCES) ||
+		errors.Is(err, unix.ENOTCONN) ||
+		errors.Is(err, unix.ESTALE) ||
+		errors.Is(err, unix.EIO) ||
+		errors.Is(err, pathutil.ErrUnresolvedComponent)
+}
+
+// ResidueUnprovenComponent names the path component an unproven binding
+// failed on — the Path of the first *os.PathError in the error chain — for
+// the refusal's "retry once <component> is readable" clause. When the chain
+// carries no PathError (a bare errno from a unix.Open wrapper, for example)
+// it returns "", and the caller names the residue itself as the thing to
+// make readable.
+func ResidueUnprovenComponent(err error) string {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) && pathErr.Path != "" {
+		return pathErr.Path
+	}
+	return ""
+}
+
 // verifyResidueCandidatePointerShape verifies a residue candidate's
 // linked-worktree `.git` pointer without traversing the candidate by
 // pathname. The directory is opened O_NOFOLLOW — a symlink swapped in place

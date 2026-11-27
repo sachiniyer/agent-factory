@@ -94,11 +94,26 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 	// described as the complete worktree, and the operator is never told to
 	// move it back as the worktree (doing so and then removing the source
 	// quarantine as redundant would silently discard the skipped files).
-	var oursSource, oursCopy, unverified []string
+	var oursSource, oursCopy, unverified, unprovenComponents []string
+	seenUnproven := map[string]bool{}
 	for _, candidate := range residue {
 		binding, bErr := git.BindAFRelocationResidue(candidate, source, repoPath)
 		if bErr != nil || binding == git.ResidueUnknown {
 			unverified = append(unverified, candidate)
+			// An Unknown that came from a component af could not read —
+			// rather than from an answered comparison — is transient: the
+			// refusal names it so the operator knows a retry may clear
+			// once it is readable (#7900).
+			if git.ResidueBindingUnproven(bErr) {
+				component := git.ResidueUnprovenComponent(bErr)
+				if component == "" {
+					component = candidate
+				}
+				if !seenUnproven[component] {
+					seenUnproven[component] = true
+					unprovenComponents = append(unprovenComponents, component)
+				}
+			}
 			continue
 		}
 		if binding == git.ResidueOurs {
@@ -142,13 +157,15 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 	default:
 		detail = fmt.Sprintf(
 			"af could not verify whether the residue is this session's worktree — it may belong to another session, "+
-				"or its git binding could not be read; inspect %s, then move it out of %s to somewhere safe "+
+				"or its git binding could not be read%s; inspect %s, then move it out of %s to somewhere safe "+
 				"(or remove it once you have confirmed it holds nothing you need) and retry the restore; "+
 				"do not move it into %s unless you have proven it is this session's work (see #7819)",
+			residueUnprovenDetail(unprovenComponents),
 			strings.Join(unverified, ", "), filepath.Dir(unverified[0]), source)
 	}
 	if len(unverified) > 0 && (len(oursSource) > 0 || len(oursCopy) > 0) {
 		detail += fmt.Sprintf("; unverified residue is also present at %s", strings.Join(unverified, ", "))
+		detail += residueUnprovenDetail(unprovenComponents)
 	}
 	log.WarningLog.Printf("restore of session %q refused: its worktree path %s is gone but af relocation residue is present at %s — "+
 		"a cross-device archive move appears to have been cut off between its quarantine and publish renames; "+
@@ -227,10 +244,11 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 		// with spaces or metacharacters still arrives as one operand.
 		quarantineLeaf := filepath.Base(oursSource[0])
 		unverifiedFloorLen := floorLen(unverifiedExtraFloor, len(unverified))
+		unprovenFloorLen := floorLen(unprovenResidueFloor, len(unprovenComponents))
 		copyFloorLen := floorLen(copyExtraFloor, len(oursCopy))
 		oursFloorLen := floorLen(oursExtraFloor, len(oursSource)-1)
 		record.WriteString(fitResidueForm(
-			room()-unverifiedFloorLen-copyFloorLen-oursFloorLen,
+			room()-unverifiedFloorLen-unprovenFloorLen-copyFloorLen-oursFloorLen,
 			func(int) string {
 				return shellsuggest.Command("cd", parent) + " && " +
 					shellsuggest.Command("mv", "--", quarantineLeaf, srcLeaf) +
@@ -241,9 +259,12 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 					" — move this session's stranded worktree back (parent in the daemon log), then retry"
 			},
 		))
-		mustResidue(copyFloorLen+oursFloorLen, unverifiedNames,
+		mustResidue(unprovenFloorLen+copyFloorLen+oursFloorLen, unverifiedNames,
 			"; unverified residue %s also present — do not move it into the session path unless proven (#7819)",
 			unverifiedExtraFloor)
+		mustResidue(copyFloorLen+oursFloorLen, baseNames(unprovenComponents),
+			"; could not read the binding — retry once %s is readable",
+			unprovenResidueFloor)
 		mustResidue(oursFloorLen, baseNames(oursCopy),
 			"; staged copy %s may be incomplete — recover from the quarantine, never the copy",
 			copyExtraFloor)
@@ -258,7 +279,8 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 		// proven this session's but is never the thing to move back in.
 		copyNames := baseNames(oursCopy)
 		unverifiedFloorLen := floorLen(unverifiedExtraFloor, len(unverified))
-		record.WriteString(fitResidueForm(room()-unverifiedFloorLen,
+		unprovenFloorLen := floorLen(unprovenResidueFloor, len(unprovenComponents))
+		record.WriteString(fitResidueForm(room()-unverifiedFloorLen-unprovenFloorLen,
 			residueForm(residueCopyRecordFull, parent, source, copyNames),
 			residueForm(residueCopyRecordFull, parent, srcLeaf, copyNames),
 			residueForm(residueCopyRecordCompact, parent, source, copyNames),
@@ -268,15 +290,21 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 			residueElidedParentForm(residueCopyRecordCompact, parent, residueSessionPathRef, copyNames),
 			residueFloorForm(residueCopyRecordFloor, copyNames),
 		))
-		mustResidue(0, unverifiedNames,
+		mustResidue(unprovenFloorLen, unverifiedNames,
 			"; unverified residue %s also present — do not move it into the session path unless proven (#7819)",
 			unverifiedExtraFloor)
+		mustResidue(0, baseNames(unprovenComponents),
+			"; could not read the binding — retry once %s is readable",
+			unprovenResidueFloor)
 	default:
 		// Unverified residue only: the fail-closed refusal names the
 		// residue, says the binding could not be read, gives the move-it-out
 		// remedy, and keeps the warning and #7819 citation — every one
-		// mandatory at every rung of the ladder.
-		record.WriteString(fitResidueForm(room(),
+		// mandatory at every rung of the ladder. An Unknown that came from a
+		// component af could not read gains the mandatory transient clause
+		// behind it (#7900), sized for like everything else mandatory.
+		unprovenFloorLen := floorLen(unprovenResidueFloor, len(unprovenComponents))
+		record.WriteString(fitResidueForm(room()-unprovenFloorLen,
 			residueForm(residueUnverifiedRecordFull, parent, source, unverifiedNames),
 			residueForm(residueUnverifiedRecordFull, parent, srcLeaf, unverifiedNames),
 			residueForm(residueUnverifiedRecordCompact, parent, source, unverifiedNames),
@@ -286,6 +314,9 @@ func crashWindowResidueRebuildRefusal(i *Instance, gw *git.GitWorktree) error {
 			residueElidedParentForm(residueUnverifiedRecordCompact, parent, residueSessionPathRef, unverifiedNames),
 			residueFloorForm(residueUnverifiedRecordFloor, unverifiedNames),
 		))
+		mustResidue(0, baseNames(unprovenComponents),
+			"; could not read the binding — retry once %s is readable",
+			unprovenResidueFloor)
 	}
 	return &residueRebuildRefusal{msg: record.String()}
 }
@@ -495,4 +526,34 @@ func oursExtraFloor(n int) string {
 		return "; another quarantine also proven ours (name in the daemon log)"
 	}
 	return fmt.Sprintf("; %d more quarantines proven ours (names in the daemon log)", n)
+}
+
+// residueUnprovenDetail renders the transient-read clause for the daemon-log
+// detail (#7900): an Unknown verdict whose bind failed on an unreadable
+// component names that component so the operator knows the refusal may clear
+// on a retry once it is readable — the same wording the archive endpoint's
+// refusal carries so the two surfaces read alike. Each component gets its
+// own clause; empty input returns "".
+func residueUnprovenDetail(components []string) string {
+	if len(components) == 0 {
+		return ""
+	}
+	clauses := make([]string, 0, len(components))
+	for _, component := range components {
+		clauses = append(clauses, fmt.Sprintf(
+			"the binding failed on %s — retry once %s is readable", component, component))
+	}
+	return "; " + strings.Join(clauses, "; ")
+}
+
+// unprovenResidueFloor is the smallest mandatory clause recording that an
+// unverified residue's binding failed on a component af could not read
+// (#7900): the transient hint — the refusal may clear on a retry once the
+// component is readable — survives even when the component list itself
+// cannot fit the record.
+func unprovenResidueFloor(n int) string {
+	if n == 1 {
+		return "; unreadable component — retry once it is readable"
+	}
+	return fmt.Sprintf("; %d unreadable components — retry once they are readable", n)
 }

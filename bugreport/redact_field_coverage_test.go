@@ -250,6 +250,7 @@ var unplantableInstanceFields = map[string]string{
 	"ArchiveReport.RetainedTrees[].Inode":         "st_ino from Lstat; a filesystem inode number",
 	"ArchiveReport.RetainedTrees[].FileType":      "os.FileMode type bits, machine-derived",
 	"ArchiveReport.RetainedTrees[].IdentityKnown": "bool — whether the Lstat identity was captured at all",
+	"ArchiveReport.RetainedTrees[].CreationTime":  "inode birth time in unix nanos (statx btime / Stat_t.Btim); a machine-minted timestamp",
 
 	"Tabs[].WebProxied":                             "derived bool — IsLoopbackWebTarget proxy decision, not secret text",
 	"PendingTabs[].WebProxied":                      "same derived proxy bool under the staging roster",

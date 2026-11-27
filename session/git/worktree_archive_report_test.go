@@ -2,6 +2,7 @@ package git
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -118,9 +119,11 @@ func TestCleanupRetainedArchiveTreesUsesPersistedIdentity(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(path, "credential"), []byte("secret"), 0o000))
 	identity, err := inspectRelocationPathIdentity(path)
 	require.NoError(t, err)
+	pin, err := inspectRelocationPathPin(path)
+	require.NoError(t, err)
 
 	gw := &GitWorktree{archiveReport: ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
-		newArchiveRetainedTree(path, identity, []ArchiveSkippedEntry{
+		newArchiveRetainedTree(path, identity, pin, []ArchiveSkippedEntry{
 			newArchiveSkippedEntry("credential", ArchiveSkipPermissionDenied),
 		}),
 	}}}
@@ -136,11 +139,13 @@ func TestCleanupRetainedArchiveTreesRefusesReplacement(t *testing.T) {
 	require.NoError(t, os.Mkdir(path, 0o700))
 	identity, err := inspectRelocationPathIdentity(path)
 	require.NoError(t, err)
+	pin, err := inspectRelocationPathPin(path)
+	require.NoError(t, err)
 	require.NoError(t, os.Rename(path, path+"-original"))
 	require.NoError(t, os.Mkdir(path, 0o700))
 
 	gw := &GitWorktree{archiveReport: ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
-		newArchiveRetainedTree(path, identity, []ArchiveSkippedEntry{
+		newArchiveRetainedTree(path, identity, pin, []ArchiveSkippedEntry{
 			newArchiveSkippedEntry("credential", ArchiveSkipPermissionDenied),
 		}),
 	}}}
@@ -164,8 +169,10 @@ func TestArchiveReport_RetainedTreeAtPath(t *testing.T) {
 	require.NoError(t, os.Mkdir(path, 0o700))
 	identity, err := inspectRelocationPathIdentity(path)
 	require.NoError(t, err)
+	pin, err := inspectRelocationPathPin(path)
+	require.NoError(t, err)
 	report := ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
-		newArchiveRetainedTree(path, identity, nil),
+		newArchiveRetainedTree(path, identity, pin, nil),
 	}}
 
 	tracked, err := report.RetainedTreeAtPath(path)
@@ -183,4 +190,140 @@ func TestArchiveReport_RetainedTreeAtPath(t *testing.T) {
 	tracked, err = report.RetainedTreeAtPath(path)
 	require.NoError(t, err)
 	assert.False(t, tracked, "a replacement at the tracked pathname is different data, not the report's tree")
+}
+
+// TestArchiveReport_RetainedTreeAtPath_DeleteRecreateReadsUntracked pins the
+// #7900 property "tracked proves the same tree, not a reused (dev, ino)": a
+// record captured with a creation pin must NOT read a delete-and-recreate at
+// the tracked path as its tree. Where the filesystem hands the replacement
+// the recycled inode slot — ext4 does so every time the issue measured —
+// dev+ino+type alone cannot tell the two apart, so the pin is the only
+// evidence the data changed. Either way the verdict is untracked: an inode
+// mismatch fails the identity compare, a recycled inode fails the pin.
+func TestArchiveReport_RetainedTreeAtPath_DeleteRecreateReadsUntracked(t *testing.T) {
+	parent := t.TempDir()
+	path := filepath.Join(parent, ".af-source-0123456789abcdef0123456789abcdef")
+	require.NoError(t, os.Mkdir(path, 0o700))
+	identity, err := inspectRelocationPathIdentity(path)
+	require.NoError(t, err)
+	pin, err := inspectRelocationPathPin(path)
+	require.NoError(t, err)
+	if pin == 0 {
+		t.Skip("this filesystem answers no creation pin, so a record cannot capture one")
+	}
+	report := ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
+		newArchiveRetainedTree(path, identity, pin, nil),
+	}}
+
+	// rm plus recreate at the same path: different data, possibly the same
+	// recycled inode slot.
+	require.NoError(t, os.RemoveAll(path))
+	require.NoError(t, os.Mkdir(path, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(path, "replacement"), []byte("different data"), 0o600))
+
+	tracked, err := report.RetainedTreeAtPath(path)
+	require.NoError(t, err)
+	assert.False(t, tracked,
+		"a delete-and-recreate at the tracked path is different data; the creation pin proves it even when the inode slot is recycled")
+}
+
+// TestArchiveReport_RetainedTreeAtPath_PinProbeMissReadsUntracked pins the
+// fail-closed half of the pin contract: a record carrying a creation pin can
+// only be matched by a probe that answers one. A filesystem that yields no
+// pin, or a probe that fails, never satisfies a recorded pin — a missing
+// value fails closed rather than proving sameness from the recyclable half
+// of the identity.
+func TestArchiveReport_RetainedTreeAtPath_PinProbeMissReadsUntracked(t *testing.T) {
+	parent := t.TempDir()
+	path := filepath.Join(parent, ".af-source-0123456789abcdef0123456789abcdef")
+	require.NoError(t, os.Mkdir(path, 0o700))
+	identity, err := inspectRelocationPathIdentity(path)
+	require.NoError(t, err)
+	// The record was written where a pin was captured; the filesystem then
+	// stopped answering one (or the pin-bearing build rolled back to a
+	// pin-less one).
+	report := ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
+		newArchiveRetainedTree(path, identity, 424242, nil),
+	}}
+
+	previousPin := relocationPathPin
+	t.Cleanup(func() { relocationPathPin = previousPin })
+	relocationPathPin = func(string) (int64, error) { return 0, nil }
+	tracked, err := report.RetainedTreeAtPath(path)
+	require.NoError(t, err)
+	assert.False(t, tracked,
+		"a pin-less probe cannot satisfy a recorded pin, so the verdict fails closed to untracked")
+
+	relocationPathPin = func(string) (int64, error) {
+		return 0, errors.New("pin probe failed")
+	}
+	tracked, err = report.RetainedTreeAtPath(path)
+	require.Error(t, err,
+		"a failed pin probe must surface, not silently satisfy or deny the recorded pin")
+	assert.False(t, tracked)
+	assert.Contains(t, err.Error(), "cannot compare the retained archive tree entry")
+}
+
+// TestArchiveReport_RetainedTreeAtPath_LegacyRecordReadsTracked pins the
+// compat decision #7900 asked for: a record written without a creation pin —
+// every record from before the pin existed, or one captured on a filesystem
+// that offers none — reads exactly as it always did, tracked by
+// dev+ino+type. Reading those records as untracked instead would manufacture
+// a refusal on every tree a previous release durably retained. The pin
+// probe is never even consulted: 0 is not a pin.
+func TestArchiveReport_RetainedTreeAtPath_LegacyRecordReadsTracked(t *testing.T) {
+	parent := t.TempDir()
+	path := filepath.Join(parent, ".af-source-0123456789abcdef0123456789abcdef")
+	require.NoError(t, os.Mkdir(path, 0o700))
+	identity, err := inspectRelocationPathIdentity(path)
+	require.NoError(t, err)
+	report := ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
+		newArchiveRetainedTree(path, identity, 0, nil),
+	}}
+
+	previousPin := relocationPathPin
+	pinProbed := false
+	relocationPathPin = func(string) (int64, error) {
+		pinProbed = true
+		return 0, nil
+	}
+	t.Cleanup(func() { relocationPathPin = previousPin })
+
+	tracked, err := report.RetainedTreeAtPath(path)
+	require.NoError(t, err)
+	assert.True(t, tracked, "a pre-pin record reads tracked by dev+ino+type, exactly as on master")
+	assert.False(t, pinProbed, "a record without a pin never consults the pin probe")
+}
+
+// TestArchiveReport_RetainedTreeAtPath_PinlessRecordReadsRecycledInodeTracked
+// documents the accepted gap a pin-less platform keeps: where the probe
+// answers 0, the record proves only what dev+ino+type prove, so "rm plus
+// recreate at the same path reads as tracked" wherever the filesystem lets
+// the replacement keep the inode slot. The gap is accepted there and
+// documented; on linux/darwin the pin closes it.
+func TestArchiveReport_RetainedTreeAtPath_PinlessRecordReadsRecycledInodeTracked(t *testing.T) {
+	parent := t.TempDir()
+	path := filepath.Join(parent, ".af-source-0123456789abcdef0123456789abcdef")
+	require.NoError(t, os.Mkdir(path, 0o700))
+	identity, err := inspectRelocationPathIdentity(path)
+	require.NoError(t, err)
+	// A record written where no pin was available.
+	report := ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
+		newArchiveRetainedTree(path, identity, 0, nil),
+	}}
+
+	// The tree is deleted and recreated at the same path, and the
+	// filesystem hands the replacement the recycled inode slot — simulated
+	// by the identity probe answering the recorded identity for the new
+	// tree, which is exactly what a recycled slot makes the kernel answer.
+	require.NoError(t, os.RemoveAll(path))
+	require.NoError(t, os.Mkdir(path, 0o700))
+	previousIdentity := relocationPathIdentity
+	relocationPathIdentity = func(string) (pathIdentity, error) { return identity, nil }
+	t.Cleanup(func() { relocationPathIdentity = previousIdentity })
+
+	tracked, err := report.RetainedTreeAtPath(path)
+	require.NoError(t, err)
+	assert.True(t, tracked,
+		"with no pin to compare, dev+ino+type is all the record can prove — the documented accepted gap")
 }

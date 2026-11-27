@@ -194,6 +194,59 @@ func boundedRelocationPathIdentity(path string) (pathIdentity, error) {
 	}
 }
 
+// inspectRelocationPathPin probes the creation pin of the entry at path —
+// the value a delete-and-recreate at the same path cannot keep (#7900) —
+// through the same fd-anchored parent walk the identity probe uses, so a
+// raced-in symlink at a parent component cannot redirect it either. A
+// platform or filesystem that offers no pin answers 0 (see
+// worktree_identity_pin_*.go); the caller then has nothing to compare and a
+// recorded pin reads as untracked rather than falling back to the reusable
+// half of the identity.
+func inspectRelocationPathPin(path string) (int64, error) {
+	parent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(path), "relocation parent")
+	if err != nil {
+		return 0, err
+	}
+	defer parent.Close()
+	pin, err := creationPin(parent, filepath.Base(path))
+	if err != nil {
+		return 0, fmt.Errorf("inspect relocation path pin %s: %w", path, err)
+	}
+	return pin, nil
+}
+
+// relocationPathPin is a test seam for filesystem metadata I/O. Production
+// always uses inspectRelocationPathPin.
+var relocationPathPin = inspectRelocationPathPin
+
+// boundedRelocationPathPin runs the pin probe behind the same hard caller
+// bound boundedRelocationPathIdentity applies: the filesystem itself may be
+// stalled, and a statx against it is no more cancellable than an fstatat.
+func boundedRelocationPathPin(path string) (int64, error) {
+	type result struct {
+		pin int64
+		err error
+	}
+	resultC := make(chan result, 1)
+	inspect := relocationPathPin // seam read at spawn: the worker may be abandoned
+	go func() {
+		pin, err := inspect(path)
+		resultC <- result{pin: pin, err: err}
+	}()
+
+	timer := time.NewTimer(relocationIdentityTimeout.Load())
+	defer timer.Stop()
+	select {
+	case observed := <-resultC:
+		return observed.pin, observed.err
+	case <-timer.C:
+		return 0, fmt.Errorf(
+			"timed out after %s while checking relocation path pin %s: %w",
+			relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
+		)
+	}
+}
+
 // worktreeContainsSubmodules identifies the worktree shape that `git worktree
 // move` explicitly does not support: a worktree with an INITIALIZED submodule.
 // Checking before the move keeps the manual move + repair path a deliberate
@@ -257,6 +310,8 @@ var (
 	renamePath                  = renamePathNoReplace
 	removeDirectoryTree         = removeOpenedDirectory
 	moveDirInspectClaimedSource = identityAt
+	creationPin                 = creationPinAt
+	creationPinOpened           = creationPinFile
 	copyTreeBeforeSourceOpen    = func(string) error { return nil }
 	copyTreeAfterSourceInspect  = func(string) error { return nil }
 	copyTreeAfterSymlinkCreate  = func(string) error { return nil }

@@ -64,6 +64,24 @@ func (entry ArchiveSkippedEntry) MarshalJSON() ([]byte, error) {
 // ArchiveRetainedTree owns one complete source tree kept because the published
 // archive omitted the listed entries. The root identity makes later destructive
 // kill cleanup fail closed if that private pathname is replaced.
+//
+// CreationTime pins a value a delete-and-recreate at the same path cannot
+// keep: the inode's birth time in nanoseconds (statx btime on linux, the
+// Stat_t birth time on darwin — see worktree_identity_pin_*.go), captured
+// when the record was written. dev+ino alone cannot prove "the same tree":
+// a filesystem that recycles the inode slot hands the recycled pair to
+// different data (#7900 measured ext4 reusing it every time), so a record
+// carrying a pin compares it too, and a probe that cannot answer one fails
+// closed to untracked rather than matching on the reusable half. A record
+// written without a pin — every record from before the pin existed, or one
+// captured on a filesystem that offers none — reads exactly as it always
+// did: tracked by device+inode+type. That is the documented accepted gap,
+// "rm plus recreate at the same path reads as tracked" on a platform whose
+// probe answers 0; reading those records as untracked instead would
+// manufacture a refusal on every tree a previous release durably retained —
+// the restore-side false refusal #7900 told this choice to weigh — and the
+// record itself cannot distinguish "pre-pin" from "pin-less platform",
+// both of which store 0.
 type ArchiveRetainedTree struct {
 	Path          string                `json:"path"`
 	PathBytes     []byte                `json:"path_bytes,omitempty"`
@@ -71,15 +89,17 @@ type ArchiveRetainedTree struct {
 	Device        uint64                `json:"device"`
 	Inode         uint64                `json:"inode"`
 	FileType      uint32                `json:"file_type"`
+	CreationTime  int64                 `json:"creation_time,omitempty"`
 	Skipped       []ArchiveSkippedEntry `json:"skipped"`
 }
 
-func newArchiveRetainedTree(path string, identity pathIdentity, skipped []ArchiveSkippedEntry) ArchiveRetainedTree {
+func newArchiveRetainedTree(path string, identity pathIdentity, creationTime int64, skipped []ArchiveSkippedEntry) ArchiveRetainedTree {
 	display, raw := archivePathFields(path)
 	return ArchiveRetainedTree{
 		Path: display, PathBytes: raw, IdentityKnown: true,
 		Device: identity.device, Inode: identity.inode, FileType: identity.fileType,
-		Skipped: cloneArchiveSkippedEntries(skipped),
+		CreationTime: creationTime,
+		Skipped:      cloneArchiveSkippedEntries(skipped),
 	}
 }
 
@@ -89,6 +109,26 @@ func (tree ArchiveRetainedTree) filesystemPath() string {
 
 func (tree ArchiveRetainedTree) identity() pathIdentity {
 	return pathIdentity{device: tree.Device, inode: tree.Inode, fileType: tree.FileType}
+}
+
+// retainedIdentityMatches reports whether this durable entry still names the
+// tree under inspection — the heart of "tracked proves the same tree, not a
+// reused (dev, ino)" (#7900). Device/inode/file-type must match; a recorded
+// creation pin additionally requires the on-disk probe to answer and answer
+// equal: a filesystem that yields no pin, or a probe that failed, never
+// satisfies a recorded one — a missing value fails closed rather than
+// proving sameness from the half of the identity a delete-and-recreate can
+// recycle. An entry recorded without a pin — a pre-pin record, or one
+// captured where the filesystem offers none — proves only what
+// dev+ino+type can, which is the documented accepted gap.
+func (tree ArchiveRetainedTree) retainedIdentityMatches(current pathIdentity, pin int64, pinErr error) bool {
+	if !tree.identity().same(current) {
+		return false
+	}
+	if tree.CreationTime == 0 {
+		return true
+	}
+	return pinErr == nil && pin == tree.CreationTime
 }
 
 func (tree ArchiveRetainedTree) clone() ArchiveRetainedTree {
@@ -239,6 +279,10 @@ func (report ArchiveReport) append(newReport ArchiveReport) ArchiveReport {
 // side is the real gate: an entry that never recorded an identity, or one
 // whose pinned device/inode no longer matches the tree on disk, names different
 // data than what sits at the path now, and this report does not track it.
+// A record carrying a creation pin (#7900) must answer one more question:
+// the pin too must match, because the inode slot itself can be recycled —
+// and a probe that cannot produce a pin for a recorded one reads as
+// untracked rather than proving sameness from the recyclable half.
 func (report ArchiveReport) RetainedTreeAtPath(candidate string) (bool, error) {
 	for _, tree := range report.RetainedTrees {
 		if tree.filesystemPath() != candidate || !tree.IdentityKnown {
@@ -250,7 +294,24 @@ func (report ArchiveReport) RetainedTreeAtPath(candidate string) (bool, error) {
 				"cannot compare the retained archive tree entry for %s with the tree on disk: %w",
 				candidate, err)
 		}
-		if tree.identity().same(current) {
+		if !tree.identity().same(current) {
+			continue
+		}
+		if tree.CreationTime == 0 {
+			// A record written before the pin existed — or captured on a
+			// filesystem that offers none — proves what dev+ino+type
+			// prove, which is the documented accepted gap (#7900): rm
+			// plus recreate at the same path can read as tracked where
+			// the inode slot is reused.
+			return true, nil
+		}
+		pin, err := boundedRelocationPathPin(candidate)
+		if err != nil {
+			return false, fmt.Errorf(
+				"cannot compare the retained archive tree entry for %s with the tree on disk: %w",
+				candidate, err)
+		}
+		if pin == tree.CreationTime {
 			return true, nil
 		}
 	}

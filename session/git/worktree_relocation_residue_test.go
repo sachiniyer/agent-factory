@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,8 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 // TestPrivateMoveResidueName pins the exact naming the cross-device relocate
@@ -641,4 +646,62 @@ func TestBindAFRelocationResidue_UnprovenAnchorResolutionIsUnknown(t *testing.T)
 		"an anchor whose resolution is unproven must read unknown, never proven-foreign")
 	require.Error(t, err,
 		"the unproven resolution must surface as an error, not a lexical comparison")
+}
+
+// TestResidueBindingUnproven pins the errno set that makes an Unknown verdict
+// transient (#7900): EACCES, ENOTCONN, ESTALE and EIO components and the
+// present-but-unresolvable component ResolveForCompareWith reports
+// (ErrUnresolvedComponent, the dangling link) are lookups that did not
+// happen — a retry can answer them once the component is readable. Every
+// other failure keeps the generic refusal wording: absence is an answer,
+// a deadline is not a read a retry is expected to complete, and a parse
+// failure is not transient.
+func TestResidueBindingUnproven(t *testing.T) {
+	componentErr := func(err error) error {
+		return fmt.Errorf("residue binding failed: %w",
+			&os.PathError{Op: "lstat", Path: "/wt/component", Err: err})
+	}
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"EACCES component", componentErr(unix.EACCES), true},
+		{"ENOTCONN component", componentErr(unix.ENOTCONN), true},
+		{"ESTALE component", componentErr(unix.ESTALE), true},
+		{"EIO component", componentErr(unix.EIO), true},
+		{"bare errno wrapper", fmt.Errorf("candidate could not be opened: %w", unix.EACCES), true},
+		{"dangling component", fmt.Errorf("residue binding failed: %w",
+			&os.PathError{Op: "resolve", Path: "/wt/link", Err: pathutil.ErrUnresolvedComponent}), true},
+		{"bare ErrUnresolvedComponent", pathutil.ErrUnresolvedComponent, true},
+		{"nil", nil, false},
+		{"ENOENT absence", componentErr(unix.ENOENT), false},
+		{"ENOTDIR absence", componentErr(unix.ENOTDIR), false},
+		{"deadline", fmt.Errorf("residue binding failed: %w", context.DeadlineExceeded), false},
+		{"ELOOP", componentErr(unix.ELOOP), false},
+		{"arbitrary failure", errors.New("gitdir pointer malformed"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, ResidueBindingUnproven(c.err))
+		})
+	}
+}
+
+// TestResidueUnprovenComponent pins what the transient clause names: the
+// first *os.PathError in the binding error's chain, which is the component
+// the read actually failed on — deeper wraps (fmt.Errorf context, the bind
+// verdict's own sentence) keep the inner path reachable. A chain with no
+// PathError — a bare errno from a unix.Open wrapper — returns "", and the
+// caller names the residue itself.
+func TestResidueUnprovenComponent(t *testing.T) {
+	inner := &os.PathError{Op: "lstat", Path: "/wt/deep/component", Err: unix.EIO}
+	assert.Equal(t, "/wt/deep/component", ResidueUnprovenComponent(
+		fmt.Errorf("cannot compare: %w", fmt.Errorf("eval: %w", inner))))
+	assert.Equal(t, "", ResidueUnprovenComponent(
+		fmt.Errorf("candidate could not be opened: %w", unix.EACCES)))
+	assert.Equal(t, "", ResidueUnprovenComponent(nil))
+	assert.Equal(t, "", ResidueUnprovenComponent(errors.New("no path error here")))
+	assert.Equal(t, "", ResidueUnprovenComponent(
+		&os.PathError{Op: "lstat", Path: "", Err: unix.EIO}))
 }

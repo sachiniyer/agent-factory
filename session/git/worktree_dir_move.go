@@ -141,6 +141,14 @@ func moveDirCrossDeviceRecordingIdentity(
 		}
 		return fmt.Errorf("source directory changed while it was copied; restored the replacement at %s and refused cleanup", src)
 	}
+	// Pin the quarantined tree's creation stamp at the same fd-anchored name:
+	// the retained-tree record may outlive the path it names, and dev+ino
+	// alone cannot tell the original from a delete-and-recreate that recycled
+	// the inode slot (#7900). A probe failure or a filesystem with no birth
+	// time answers 0 — the record is written anyway (the archive completes;
+	// the tree just proves less later) rather than wedging the whole move on
+	// a stat the copy did not need.
+	quarantinedPin, _ := creationPin(sourceParent, quarantineName)
 	restoreSource := func(cause error) error {
 		restoreErr := restoreSecuredSource(sourceParent, quarantineName, sourceName, copied.source)
 		if restoreErr != nil {
@@ -185,7 +193,7 @@ func moveDirCrossDeviceRecordingIdentity(
 			return restoreSource(fmt.Errorf("copier skipped unreadable files without an archive report channel"))
 		}
 		report = ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
-			newArchiveRetainedTree(quarantinePath, quarantinedIdentity, copied.skipped),
+			newArchiveRetainedTree(quarantinePath, quarantinedIdentity, quarantinedPin, copied.skipped),
 		}}
 	}
 	publishDestination := func() error {

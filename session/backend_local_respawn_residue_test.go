@@ -648,3 +648,77 @@ func TestLostRestoreFailure_ResidueRefusal_AllForms(t *testing.T) {
 			"the mixed form must keep the warning against recovering from the copy")
 	})
 }
+
+// TestMissingWorktreeRebuildRefusal_UnprovenBindingSaysTransient pins #7900:
+// an Unknown verdict that came from a component af could not read — here the
+// recorded source path spelled through a dangling symlink, so the binding's
+// path comparison rests on a lookup that did not happen — is transient. The
+// refusal must say so and name the component: "retry once <component> is
+// readable", not only "may belong to another session… move it out". The
+// verdict stays Unknown — the residue is still unverified, never promoted —
+// and the refusal still refuses fail-closed.
+func TestMissingWorktreeRebuildRefusal_UnprovenBindingSaysTransient(t *testing.T) {
+	repoRoot := residueTestRepo(t)
+	const branch = "af/unproven-bind"
+	wtParent := t.TempDir()
+	realWt := filepath.Join(wtParent, "wt-real")
+	gitOut(t, repoRoot, "worktree", "add", "-b", branch, realWt)
+	quarantine := filepath.Join(wtParent, ".af-source-"+strings.Repeat("a", 32))
+	require.NoError(t, os.Rename(realWt, quarantine))
+	// The recorded source path is spelled through a dangling symlink inside
+	// the real parent: the anchor comparison can only fall back past it
+	// lexically, which is a guess — the component is not proven absent, so
+	// the bind's error is unproven rather than an answered comparison.
+	wtPath := filepath.Join(wtParent, "link")
+	require.NoError(t, os.Symlink(filepath.Join(wtParent, "nonexistent"), wtPath))
+
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "unproven-bind", branch, "", false, true)
+	require.NoError(t, err)
+	inst := &Instance{Title: "unproven-bind", Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+
+	err = missingWorktreeRebuildRefusal(inst, gw, true, "claude")
+	require.Error(t, err, "an unverified residue must refuse fail-closed")
+	assert.ErrorIs(t, err, git.ErrRelocateStateUnknown,
+		"the verdict stays Unknown — unproven never becomes ours or foreign")
+	assert.Contains(t, err.Error(), "retry once "+filepath.Base(wtPath)+" is readable",
+		"the refusal must name the unreadable component — its basename resolving against the parent the record already names — and say the retry may clear once it is readable")
+	assert.Contains(t, err.Error(), "could not read the binding",
+		"the transient clause says WHY the binding failed")
+	assert.Contains(t, err.Error(), filepath.Base(quarantine),
+		"the refusal still names the unverified residue")
+	assert.NotContains(t, err.Error(), "move it back to "+wtPath,
+		"the refusal for an unverified residue must never direct it into this session's path")
+}
+
+// TestLostRestoreFailure_ResidueRefusalFitsCap_Unproven pins the transient
+// clause at the depth that clipped the remedy on macOS (#7855): at a
+// 200-rune parent the unproven clause rides the cap ladder like every other
+// mandatory clause — naming the component's basename while that fits and
+// falling to its "unreadable component — retry once it is readable" floor
+// below — so the transient hint is never silently dropped the way optional
+// context is. Either form names the failed read and the retry.
+func TestLostRestoreFailure_ResidueRefusalFitsCap_Unproven(t *testing.T) {
+	repoRoot := residueTestRepo(t)
+	const branch = "af/unproven-cap"
+	wtParent := residueParentAtCapDepth(t)
+	realWt := filepath.Join(wtParent, "wt-real")
+	gitOut(t, repoRoot, "worktree", "add", "-b", branch, realWt)
+	quarantine := filepath.Join(wtParent, ".af-source-"+strings.Repeat("a", 32))
+	require.NoError(t, os.Rename(realWt, quarantine))
+	wtPath := filepath.Join(wtParent, "link")
+	require.NoError(t, os.Symlink(filepath.Join(wtParent, "nonexistent"), wtPath))
+
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "unproven-cap", branch, "", false, true)
+	require.NoError(t, err)
+	inst := &Instance{Title: "unproven-cap", Program: tmux.ProgramClaude, Path: repoRoot, gitWorktree: gw}
+
+	record := crashWindowRefusalRecord(t, inst, gw, wtPath)
+	assert.LessOrEqual(t, len([]rune(record)), lostRestoreFailureMaxRunes,
+		"the stored record stays inside the durable cap by construction")
+	assert.Contains(t, record, "retry once",
+		"the transient clause survives the cap — a mandatory clause is never dropped")
+	assert.Contains(t, record, "readable",
+		"the transient clause keeps its retry hint at whichever rung fits")
+	assert.Contains(t, record, filepath.Base(quarantine),
+		"the unverified residue is still named")
+}

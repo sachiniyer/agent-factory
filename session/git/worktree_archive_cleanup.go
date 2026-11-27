@@ -52,7 +52,12 @@ func removeRetainedArchiveTree(tree ArchiveRetainedTree) error {
 		}
 		return fmt.Errorf("inspect retained archive tree %s: %w", path, err)
 	}
-	if !tree.identity().same(current) {
+	// A recorded creation pin must match too: a delete-and-recreate at this
+	// private name could hand the recycled (dev, ino) to different data
+	// (#7900), and a probe that answers nothing fails the compare closed
+	// rather than deleting a tree the pin cannot vouch for.
+	pin, pinErr := creationPin(parent, name)
+	if !tree.retainedIdentityMatches(current, pin, pinErr) {
 		return fmt.Errorf("refusing to remove retained archive tree %s because its private name identifies different data", path)
 	}
 	root, _, err := openDirectoryAt(parent, name, path, "retained archive")
@@ -64,7 +69,8 @@ func removeRetainedArchiveTree(tree ArchiveRetainedTree) error {
 	if err != nil {
 		return err
 	}
-	if !tree.identity().same(opened) {
+	openedPin, openedPinErr := creationPinOpened(root)
+	if !tree.retainedIdentityMatches(opened, openedPin, openedPinErr) {
 		return fmt.Errorf("refusing to remove retained archive tree %s because its opened identity changed", path)
 	}
 	if err := removeOpenedDirectory(parent, name, path, root, nil); err != nil {
@@ -103,5 +109,6 @@ func (g *GitWorktree) dropRetainedArchiveTree(removed ArchiveRetainedTree) {
 func sameRetainedArchiveTree(left, right ArchiveRetainedTree) bool {
 	return left.IdentityKnown == right.IdentityKnown &&
 		left.identity().same(right.identity()) &&
+		left.CreationTime == right.CreationTime &&
 		left.filesystemPath() == right.filesystemPath()
 }
