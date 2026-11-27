@@ -240,12 +240,18 @@ func (g *GitWorktree) RestoreStalledFenceAfterFailedSettle() error {
 	}
 	if stale.IdentityKnown || stale.AlternatePath != "" {
 		g.relocationRecovery = &RelocationRecovery{
-			State:         RelocationRecoveryStalled,
-			IdentityKnown: stale.IdentityKnown,
-			Device:        stale.Device,
-			Inode:         stale.Inode,
-			FileType:      stale.FileType,
-			AlternatePath: stale.AlternatePath,
+			State:             RelocationRecoveryStalled,
+			IdentityKnown:     stale.IdentityKnown,
+			Device:            stale.Device,
+			Inode:             stale.Inode,
+			FileType:          stale.FileType,
+			AlternatePath:     stale.AlternatePath,
+			QuarantinePath:    stale.QuarantinePath,
+			StagingPath:       stale.StagingPath,
+			DestIdentityKnown: stale.DestIdentityKnown,
+			DestDevice:        stale.DestDevice,
+			DestInode:         stale.DestInode,
+			DestFileType:      stale.DestFileType,
 		}
 		return nil
 	}

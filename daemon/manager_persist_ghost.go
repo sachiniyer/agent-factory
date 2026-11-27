@@ -112,6 +112,12 @@ func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error
 		Inode:             recovery.Inode,
 		FileType:          recovery.FileType,
 		CleanupGeneration: recovery.CleanupGeneration,
+		QuarantinePath:    recovery.QuarantinePath,
+		StagingPath:       recovery.StagingPath,
+		DestIdentityKnown: recovery.DestIdentityKnown,
+		DestDevice:        recovery.DestDevice,
+		DestInode:         recovery.DestInode,
+		DestFileType:      recovery.DestFileType,
 	}); err != nil {
 		return fmt.Errorf("restore cleanup-ready recovery: %w", err)
 	}
@@ -233,6 +239,12 @@ var ghostCleanupWorktree = func(
 			Inode:             recovery.Inode,
 			FileType:          recovery.FileType,
 			CleanupGeneration: recovery.CleanupGeneration,
+			QuarantinePath:    recovery.QuarantinePath,
+			StagingPath:       recovery.StagingPath,
+			DestIdentityKnown: recovery.DestIdentityKnown,
+			DestDevice:        recovery.DestDevice,
+			DestInode:         recovery.DestInode,
+			DestFileType:      recovery.DestFileType,
 		}); recoveryErr != nil {
 			log.WarningLog.Printf("ghost session %q: invalid relocation recovery handle: %v", title, recoveryErr)
 			return git.CleanupStateUnknown, recoveryErr, nil
