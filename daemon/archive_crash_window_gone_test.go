@@ -280,12 +280,12 @@ func TestArchiveSession_UnverifiedResidueRefusesWithoutClaimingOwnership(t *test
 }
 
 // TestArchiveSession_AdoptsLandedArchiveMoveUnaffectedByResidueFix guards the
-// #5102 adoption route: a move that landed at dest (whether by `git worktree
-// move` or a published cross-device rename) must still be adopted in place,
-// regardless of whether af's quarantine was cleaned up. The residue fix
-// targets the DEST-ABSENT branch only — when dest is present the adoption path
-// owns the decision, so an orphaned quarantine beside the source must not
-// block adoption of the bytes that did reach dest.
+// #5102 adoption route against over-attribution: a move that landed at dest
+// (whether by `git worktree move` or a published cross-device rename) must
+// still be adopted in place when the only `.af-source-*` residue beside the
+// source is proven to belong to a DIFFERENT session. Since #7816 a quarantine
+// proven to be THIS session's — or one whose binding cannot be read — refuses
+// the adoption, but a foreign quarantine is never claimed and never blocks.
 func TestArchiveSession_AdoptsLandedArchiveMoveUnaffectedByResidueFix(t *testing.T) {
 	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "landed-residue")
@@ -299,16 +299,20 @@ func TestArchiveSession_AdoptsLandedArchiveMoveUnaffectedByResidueFix(t *testing
 	out, err := exec.Command("git", "-C", repoPath, "worktree", "move", wtPath, dest).CombinedOutput()
 	require.NoError(t, err, string(out))
 
-	// Drop a stale `.af-source-<32hex>` beside the vacated source, modelling
-	// an orphaned quarantine a completed-but-unrecorded cross-device archive
-	// left behind. The residue fix must not let this block adoption of the
-	// bytes git proves at dest.
-	staleQuarantine := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("c", 32))
-	require.NoError(t, os.Mkdir(staleQuarantine, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(staleQuarantine, "stale.txt"), []byte("orphan"), 0o644))
+	// Drop a FOREIGN `.af-source-<32hex>` beside the vacated source: another
+	// session's worktree in the same repo renamed under af's private naming —
+	// the shape another session's interrupted move or retained tree leaves in
+	// this shared parent. Its git binding points back at its own path, not
+	// dest, so the adoption must not claim it and must not refuse over it.
+	otherBranch := "af/landed-residue-other"
+	otherWt := filepath.Join(filepath.Dir(repoPath), "wt-landed-residue-other")
+	out, err = exec.Command("git", "-C", repoPath, "worktree", "add", "-b", otherBranch, otherWt).CombinedOutput()
+	require.NoError(t, err, string(out))
+	foreignQuarantine := filepath.Join(filepath.Dir(wtPath), ".af-source-"+strings.Repeat("c", 32))
+	require.NoError(t, os.Rename(otherWt, foreignQuarantine))
 
 	archivedPath, data, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "landed-residue", RepoID: repoID})
-	require.NoError(t, err)
+	require.NoError(t, err, "a foreign session's quarantine must never block adopting the landed destination")
 	assert.Equal(t, dest, archivedPath)
 	assert.Equal(t, dest, data.Worktree.WorktreePath)
 	assert.False(t, data.Worktree.Missing, "an adopted move is a complete archive, not a missing worktree")
@@ -320,4 +324,8 @@ func TestArchiveSession_AdoptsLandedArchiveMoveUnaffectedByResidueFix(t *testing
 	rec := recordFor(t, repoID, "landed-residue")
 	require.NotNil(t, rec)
 	assert.Equal(t, dest, rec.Worktree.WorktreePath)
+	assert.True(t, rec.ArchiveReport == nil || rec.ArchiveReport.Empty(),
+		"a foreign quarantine is never claimed: the committed report must name no retained tree")
+	assert.DirExists(t, foreignQuarantine,
+		"the foreign session's quarantine must survive the adopted archive untouched")
 }
