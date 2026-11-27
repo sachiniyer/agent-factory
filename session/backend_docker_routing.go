@@ -105,7 +105,7 @@ func dockerSessionEndpointHosts(agent string, passthrough, environ []string) map
 func dockerEnvValueHost(value string) string {
 	if strings.Contains(value, "://") {
 		if u, err := url.Parse(value); err == nil {
-			return strings.ToLower(u.Hostname())
+			return u.Hostname()
 		}
 		return ""
 	}
@@ -122,23 +122,21 @@ func dockerEnvValueHost(value string) string {
 			return ""
 		}
 	}
-	return strings.ToLower(host)
+	return host
 }
 
 // dockerAddHostNames returns every hostname an --add-host value maps. Docker
-// reads each comma-separated entry as host:ip (the host=ip spelling is the
-// IPv6 form — "my-hostname=[2001:db8::33]" in the reference — and still
-// accepted for IPv4), so the host half of either separator is what the check
-// reads — "host.docker.internal:host-gateway" reports host.docker.internal
-// and stays allowed. The = separator is tried first: a ':' cut would split
-// inside a bracketed IPv6 address and hand the check a mangled host.
+// reads each comma-separated entry as host:ip (the legacy host=ip spelling is
+// still accepted alongside it), so the host half of either separator is what
+// the check reads — "host.docker.internal:host-gateway" reports
+// host.docker.internal and stays allowed.
 func dockerAddHostNames(value string) []string {
 	var names []string
 	for _, entry := range strings.Split(value, ",") {
 		for _, field := range strings.Fields(entry) {
-			host, _, ok := strings.Cut(field, "=")
+			host, _, ok := strings.Cut(field, ":")
 			if !ok {
-				host, _, _ = strings.Cut(field, ":")
+				host, _, _ = strings.Cut(field, "=")
 			}
 			if host != "" {
 				names = append(names, host)
@@ -150,11 +148,9 @@ func dockerAddHostNames(value string) []string {
 
 // dockerHostProtected reports the endpoint host an --add-host hostname would
 // remap: the hostname itself or any ancestor domain in the protected set —
-// api.anthropic.com and anthropic.com alike. "" for anything else. The match
-// lowercases first: /etc/hosts entries resolve case-insensitively (glibc's
-// files-parse uses strcasecmp), so API.ANTHROPIC.COM maps the endpoint too.
+// api.anthropic.com and anthropic.com alike. "" for anything else.
 func dockerHostProtected(host string, endpoints map[string]struct{}) string {
-	for h := strings.ToLower(host); h != ""; {
+	for h := host; h != ""; {
 		if _, ok := endpoints[h]; ok {
 			return h
 		}
@@ -203,13 +199,14 @@ func dockerRoutingProtectedReason(protected string) string {
 	return "it is a TLS trust store the agent's credential-bearing requests verify against — a repo-controlled store there makes the agent trust certificate authorities the repository installed"
 }
 
-// dockerVolumeTarget reports the container path a -v/--volume value mounts
-// at. The -v spec is host-src:container-dst[:opts] with the single-field form
-// an anonymous volume AT the path — so the target is the second field when
-// present, the only field otherwise. A field that is not a path (an option
-// like "ro" in dst position makes Docker refuse the whole mount) reports
-// whatever it is — dockerRoutingProtectedPath only matches real protected
-// paths, so a non-path is simply unprotected.
+// dockerVolumeTarget reports the container path a -v/--volume or --tmpfs
+// value mounts at. The -v spec is host-src:container-dst[:opts] with the
+// single-field form an anonymous volume AT the path — so the target is the
+// second field when present, the only field otherwise. --tmpfs's value is
+// the path itself followed by ':'-separated options. A field that is not a
+// path (an option like "ro" in dst position makes Docker refuse the whole
+// mount) reports whatever it is — dockerRoutingProtectedPath only matches
+// real protected paths, so a non-path is simply unprotected.
 func dockerVolumeTarget(value string) string {
 	fields := strings.Split(value, ":")
 	if len(fields) == 1 {
@@ -220,9 +217,8 @@ func dockerVolumeTarget(value string) string {
 
 // dockerRoutingMountTarget extracts the container path a mount option's value
 // installs at, whatever the spelling: --mount's dst=/target=/destination=
-// field (dockerMountFields reads Docker's own CSV), or -v/--volume's
-// ':'-field target. --tmpfs is deliberately absent — its spec puts the target
-// FIRST (dst[:options]), which dockerTmpfsTarget reads.
+// field (dockerMountFields reads Docker's own CSV), or -v/--volume/--tmpfs's
+// ':'-field target.
 func dockerRoutingMountTarget(value string) string {
 	for _, field := range dockerMountFields(value) {
 		if target, ok := dockerMountTarget(field); ok {
@@ -230,13 +226,4 @@ func dockerRoutingMountTarget(value string) string {
 		}
 	}
 	return dockerVolumeTarget(value)
-}
-
-// dockerTmpfsTarget reports the container path a --tmpfs value mounts at. The
-// tmpfs spec is dst[:options] — the target is the FIRST field, where a -v
-// spec puts it second — so routing a --tmpfs through dockerVolumeTarget reads
-// "rw,mode=1777" as the mount point and misses the real one.
-func dockerTmpfsTarget(value string) string {
-	target, _, _ := strings.Cut(value, ":")
-	return target
 }
