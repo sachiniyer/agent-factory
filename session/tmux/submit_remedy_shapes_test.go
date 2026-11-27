@@ -109,3 +109,183 @@ func TestBoundChipLeavingTheComposerIsNotStillStagedBelowAStatusLine(t *testing.
 		t.Fatal("a bare repainted composer above an INSERT status line must read as submitted")
 	}
 }
+
+// TestStillChipComposerAcceptsWrappedChipTailCursor pins the wrap-aware cursor
+// position proof (#4200 wrapped-chip fix): a paste chip long enough to wrap
+// across physical grid rows parks the cursor just past its tail on the chip's
+// LAST wrapped row, not on the anchor (glyph) row. The stillness proof already
+// bounds the region to exactly the chip's bytes, so that content-end position
+// must be accepted — otherwise a provably still, bound, wrapped-chip strand is
+// incorrectly withheld with "the cursor is not where an undisturbed draft
+// leaves it" on the very row an undisturbed draft leaves it.
+func TestStillChipComposerAcceptsWrappedChipTailCursor(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+
+	// A 20-column pane wraps "› [Pasted Content 3207 chars]" (one logical
+	// composer row) across two physical grid rows; boundary and grace frames
+	// are byte-identical, and the cursor rests at the content end of the
+	// chip's last wrapped row "07 chars]".
+	twoRow := strings.Join([]string{
+		"  Worked for 1m 32s — 02:01",
+		"",
+		"› [Pasted Content 32",
+		"07 chars]",
+	}, "\n") + "\n"
+	tail := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("07 chars]")}
+	if ok, why := stillChipComposer(twoRow, twoRow, tail, chipText); !ok {
+		t.Fatalf("wrapped chip, cursor at the wrapped tail: ok=false why=%q, want ok=true (the cursor is exactly where an undisturbed draft leaves it for a wrapped chip)", why)
+	}
+
+	// A narrower pane wraps the same chip across three rows. The cursor at the
+	// content end of the chip's last wrapped row is still accepted...
+	threeRow := strings.Join([]string{
+		"  Worked for 1m 32s — 02:01",
+		"",
+		"› [Pasted ",
+		"Content 32",
+		"07 chars]",
+	}, "\n") + "\n"
+	tail3 := paneCursorState{Visible: true, Row: 4, Col: contentEndCol("07 chars]")}
+	if ok, why := stillChipComposer(threeRow, threeRow, tail3, chipText); !ok {
+		t.Fatalf("wrapped chip (three rows), cursor at the wrapped tail: ok=false why=%q, want ok=true", why)
+	}
+	// ...while a cursor parked at the content end of a MIDDLE wrapped row is
+	// rejected: an undisturbed draft never leaves the cursor mid-chip.
+	middle := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("Content 32")}
+	if ok, why := stillChipComposer(threeRow, threeRow, middle, chipText); ok {
+		t.Fatalf("cursor on a middle wrapped row: ok=true why=%q, want ok=false (the cursor is mid-chip, not at the tail)", why)
+	}
+
+	// A cursor on the wrapped tail row but at the wrong column is rejected.
+	wrongCol := paneCursorState{Visible: true, Row: 3, Col: 5}
+	if ok, why := stillChipComposer(twoRow, twoRow, wrongCol, chipText); ok {
+		t.Fatalf("wrapped chip, cursor at the wrong column on the tail row: ok=true why=%q, want ok=false", why)
+	}
+
+	// Control 1: the same chip on a single row with the cursor at the anchor
+	// row's content end is still accepted — wrapping alone is what used to
+	// defeat the check, not the resting position.
+	oneRow := strings.Join([]string{
+		"  Worked for 1m 32s — 02:01",
+		"",
+		"› " + codexChip,
+	}, "\n") + "\n"
+	endCol := contentEndCol("› " + codexChip)
+	if ok, why := stillChipComposer(oneRow, oneRow, paneCursorState{Visible: true, Row: 2, Col: endCol}, chipText); !ok {
+		t.Fatalf("unwrapped chip, cursor at content end: ok=false why=%q, want ok=true (no regression)", why)
+	}
+
+	// Control 2: a wrapped chip that absorbed Enter as a newline (one blank
+	// continuation row) with the cursor on that blank row at the insert
+	// column is still accepted — the canonical absorbed-newline strand
+	// remedies even when the chip wraps.
+	absorbed := strings.Join([]string{
+		"  Worked for 1m 32s — 02:01",
+		"",
+		"› [Pasted Content 32",
+		"07 chars]",
+		"",
+		"  GPT-6.1 Terra ultra · ~/sahara/sahara-cheaper-ci · ⚠ 1 warning · f2 to view",
+	}, "\n") + "\n"
+	insert := firstContentCol("› [Pasted Content 32")
+	if ok, why := stillChipComposer(absorbed, absorbed, paneCursorState{Visible: true, Row: 4, Col: insert}, chipText); !ok {
+		t.Fatalf("wrapped chip with absorbed Enter, cursor on the blank row at the insert column: ok=false why=%q, want ok=true (no regression)", why)
+	}
+}
+
+// TestStillChipComposerWithholdsWrappedTailBelowABareGlyphAnchor pins the
+// guard on the wrapped-tail acceptance: the tail-row cursor is accepted only
+// when the chip STARTS on the composer's anchor row. A bare-glyph anchor row
+// (a lone ›, >, ❭ or ❯ with nothing after it) is a hard newline in a user's
+// draft, not the chip's first row — the region's joined content still matches
+// the chip once that lone glyph is stripped as the leading prompt glyph, so
+// without the guard the wrapped tail of a chip on a later row would read as
+// still and the remedy Enter would submit the user's own draft together with
+// our prompt. Each frame below is byte-still and region-equal to the chip, with
+// the visible cursor at the content-end of the chip's (wrapped) tail row; the
+// remedy must withhold on all of them.
+func TestStillChipComposerWithholdsWrappedTailBelowABareGlyphAnchor(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+
+	// Draft + lone ">" + chip (unwrapped): the user's draft ended with a hard
+	// newline and a lone ">", then our chip landed on the next row. The last
+	// composer-glyph row is the lone ">", so it is the anchor; the chip sits on
+	// a later row. Cursor at the chip row's content end.
+	draftLoneGtUnwrapped := strings.Join([]string{
+		"› please also delete the",
+		"  staging bucket first",
+		"  >",
+		"  " + codexChip,
+	}, "\n") + "\n"
+	tail := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  " + codexChip)}
+	if ok, why := stillChipComposer(draftLoneGtUnwrapped, draftLoneGtUnwrapped, tail, chipText); ok {
+		t.Fatalf("draft + lone > + unwrapped chip, cursor at the chip tail: ok=true why=%q, want ok=false (the lone > is a hard newline in the draft, not the chip's first row)", why)
+	}
+
+	// Draft + lone ">" + chip (wrapped): the same shape with the chip wrapping
+	// across two physical rows. The cursor rests at the content end of the
+	// chip's last wrapped row — exactly where an undisturbed draft leaves it for
+	// a wrapped chip, which is precisely why this must be guarded.
+	draftLoneGtWrapped := strings.Join([]string{
+		"› please also delete the",
+		"  staging bucket first",
+		"  >",
+		"  [Pasted Content 32",
+		"07 chars]",
+	}, "\n") + "\n"
+	tailWrapped := paneCursorState{Visible: true, Row: 4, Col: contentEndCol("07 chars]")}
+	if ok, why := stillChipComposer(draftLoneGtWrapped, draftLoneGtWrapped, tailWrapped, chipText); ok {
+		t.Fatalf("draft + lone > + wrapped chip, cursor at the wrapped tail: ok=true why=%q, want ok=false (the chip does not start on the anchor row)", why)
+	}
+
+	// A lone "›" anchor (Codex's own glyph) below a draft, then the chip on a
+	// later row — the same misread under a different composer glyph.
+	loneCodexGlyph := strings.Join([]string{
+		"› please also delete the",
+		"  staging bucket first",
+		"  ›",
+		"  " + codexChip,
+	}, "\n") + "\n"
+	tailCodex := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  " + codexChip)}
+	if ok, why := stillChipComposer(loneCodexGlyph, loneCodexGlyph, tailCodex, chipText); ok {
+		t.Fatalf("draft + lone › + chip, cursor at the chip tail: ok=true why=%q, want ok=false (a lone › anchor is a hard newline, not the chip's first row)", why)
+	}
+
+	// An empty first line: a bare-glyph composer (empty first line of the draft)
+	// followed by the chip on the next row. The chip did not start on the
+	// anchor row, so the wrapped tail must withhold even with no user text
+	// above it.
+	emptyFirstLine := strings.Join([]string{
+		"  Worked for 1m 32s — 02:01",
+		"",
+		"›",
+		"  " + codexChip,
+	}, "\n") + "\n"
+	tailEmpty := paneCursorState{Visible: true, Row: 3, Col: contentEndCol("  " + codexChip)}
+	if ok, why := stillChipComposer(emptyFirstLine, emptyFirstLine, tailEmpty, chipText); ok {
+		t.Fatalf("empty first line + chip on the next row, cursor at the chip tail: ok=true why=%q, want ok=false (the chip does not start on the bare-glyph anchor row)", why)
+	}
+}
+
+// TestChipStartsOnAnchorRowRejectsAnInteriorBlank pins the wrapped-tail proof's
+// blank handling: a blank row is tolerated only AFTER the chip is fully matched
+// (the absorbed-Enter continuation row). A blank interleaved between the chip's
+// wrapped rows is an interior break in the chip and must fail the proof —
+// otherwise a composer that gained a blank row mid-chip could pass a wrapped
+// tail that is not the undisturbed draft. (composerRegion never yields an
+// interior blank — it cuts the region at the first content row after a blank —
+// so this guards the helper directly against a future region shape.)
+func TestChipStartsOnAnchorRowRejectsAnInteriorBlank(t *testing.T) {
+	chipText := normalizeDelivery(codexChip)
+	anchorRow := "› [Pasted Content 32"
+	wrapRow := "07 chars]"
+
+	// A trailing blank after the complete chip is the absorbed-Enter row: OK.
+	if !chipStartsOnAnchorRow([]string{anchorRow, wrapRow, ""}, chipText) {
+		t.Fatal("trailing blank after the complete chip should be accepted (the absorbed-Enter continuation row)")
+	}
+	// A blank interleaved between the chip's wrapped rows is an interior break.
+	if chipStartsOnAnchorRow([]string{anchorRow, "", wrapRow}, chipText) {
+		t.Fatal("interior blank between the chip's wrapped rows should be rejected (the chip is not a contiguous draft)")
+	}
+}
