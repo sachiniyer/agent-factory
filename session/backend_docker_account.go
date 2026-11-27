@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -79,8 +80,12 @@ func dockerMountTarget(field string) (string, bool) {
 // program-choice refusal extended to account sessions), or where they route the
 // account's authenticated traffic — endpoint selectors, proxies, and TLS trust
 // roots (the routing/trust class the credential-mount guard refuses from the
-// same repo-controlled channel, ported to the account path so a repository
-// cannot deliver the account's credential to a server it controls).
+// same repo-controlled channel, ported to the account path so the repo's own
+// env entries cannot deliver the account's credential to a server it
+// controls. The image's ENV delivers the same names for claude and codex —
+// that surface is what the post-run_args pins in runContainer hold. Docker's
+// own resolver options and trust-store mounts are a separate repo-controlled
+// surface for the same class).
 func validateAccountDockerRunArgs(args []string, agent string, passthrough []string) error {
 	denied := accountDockerDeniedNames(agent)
 	// The keep-if-set names the account boundary pins at exec are refused to
@@ -423,6 +428,77 @@ func accountDockerRoutingReason(agent, name string) (string, bool) {
 		return "it changes where the agent sends the account credential — a repo-supplied endpoint, proxy, or trust root routes the account's authenticated traffic to a server the repository controls", true
 	}
 	return "", false
+}
+
+// accountDockerRoutingEnvNames is the routing and trust name set for one
+// account agent — the same union accountDockerRoutingReason walks, as a set
+// for the post-run_args pins and the discard warning (#7867 R4).
+func accountDockerRoutingEnvNames(agent string) map[string]struct{} {
+	out := make(map[string]struct{}, len(credentialMountSharedRoutingNames)+len(credentialMountRoutingNames[agent]))
+	for name := range credentialMountSharedRoutingNames {
+		out[name] = struct{}{}
+	}
+	for name := range credentialMountRoutingNames[agent] {
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+// accountDockerRoutingEnvEntries are the `-e` entries runContainer emits after
+// run_args on an account session so a routing or trust name the operator did
+// not forward resolves to af's value rather than the repo-chosen image's ENV
+// (#7867 R4). On claude and codex account sessions nothing pinned these names
+// before the inner boundary, so an image-baked ANTHROPIC_BASE_URL, HTTPS_PROXY,
+// or NODE_EXTRA_CA_CERTS reached the container environment and the agent; the
+// gemini keep-if-set and late-env machinery already covered its own names
+// inside. Emitting the pins at `docker run` makes the container environment —
+// what af's own exec children and the agent-server inherit — agree with what
+// the inner boundary installs.
+//
+// The semantics mirror the credential-mount path's pinned set. A name the
+// operator forwarded is exempt — it is the operator's claim, resolved the way
+// every forwarded name is (and a forwarded-but-unset claim keeps the
+// documented "the image's own value stands" contract). A proxy case pair the
+// operator claimed is reseated rather than pinned: credentialMountTwinForwarding
+// reports the `NAME=V` entries giving each unforwarded spelling the forwarded
+// sibling's own value — an empty twin would cancel the operator's proxy in
+// clients that prefer that spelling — and its unclaimed pairs fall to the
+// defined-empty pin with every other routing name. Values appear inline, the
+// same shape accountLoaderBlankEntries already emits on this path.
+func accountDockerRoutingEnvEntries(agent string, passthrough, environ []string) []string {
+	forwarded := dockerForwardedPassthroughNames(passthrough)
+	// Forwarding a proxy spelling claims its case twin — the
+	// credential-mount semantics an empty pin would otherwise cancel in
+	// readers that prefer the twin's spelling — so the twin is exempt from
+	// the pin and reseated to the forwarded value instead.
+	for _, pair := range credentialMountProxyCasePairs {
+		if _, ok := forwarded[pair[0]]; ok {
+			forwarded[pair[1]] = struct{}{}
+		}
+		if _, ok := forwarded[pair[1]]; ok {
+			forwarded[pair[0]] = struct{}{}
+		}
+	}
+	_, synth := credentialMountTwinForwarding(credentialMountProxyCasePairs, passthrough, environ)
+	entries := append([]string(nil), synth...)
+	for name := range accountDockerRoutingEnvNames(agent) {
+		if _, ok := forwarded[name]; !ok {
+			entries = append(entries, name+"=")
+		}
+	}
+	sort.Strings(entries)
+	return entries
+}
+
+// appendAccountDockerRoutingEnv emits accountDockerRoutingEnvEntries as -e
+// entries at the end of the account session's docker run args — after
+// run_args, so Docker's last-wins rule gives them the pin's value over the
+// repo-chosen image's ENV (#7867 R4).
+func appendAccountDockerRoutingEnv(args []string, agent string, passthrough, environ []string) []string {
+	for _, entry := range accountDockerRoutingEnvEntries(agent, passthrough, environ) {
+		args = append(args, "-e", entry)
+	}
+	return args
 }
 
 // accountRoutingPathValuedNames names the routing-class entries whose value is

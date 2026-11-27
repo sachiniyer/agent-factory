@@ -127,8 +127,11 @@ func TestWarnDiscardedAccountEnvNames_SkipsForwardedAndAmbient(t *testing.T) {
 		"a forwarded keep-if-set name is claimed — warning for it would be a false positive")
 	require.Contains(t, out, "NO_PROXY", "its unforwarded twin is still a discard")
 
-	// A non-gemini account session emits nothing — the notice is
-	// gemini-scoped (#7668).
+	// A non-gemini account session emits nothing for the launch-boundary
+	// names — the #7668 notice is gemini-scoped — but the image-set routing
+	// names DO warn on every account agent since #7867 R4: the post-run_args
+	// pins discard them for claude exactly as for gemini, and the shared
+	// routing names are restorable through the same remedy.
 	claude := &dockerProvisioner{
 		program:     tmux.ProgramClaude,
 		image:       "example.invalid/agent:latest",
@@ -140,7 +143,10 @@ func TestWarnDiscardedAccountEnvNames_SkipsForwardedAndAmbient(t *testing.T) {
 	}
 	buf2 := captureWarningLog(t)
 	claude.warnBlankedCredentialNames()
-	require.Empty(t, buf2.String(), "claude account sessions are out of #7668's scope")
+	out2 := buf2.String()
+	require.Contains(t, out2, "HTTPS_PROXY", "the image's proxy is a discard af's pin neutralizes — it must warn")
+	require.Contains(t, out2, "NO_PROXY", "its twin warns alongside")
+	require.Contains(t, out2, "session_env_passthrough", "the shared routing names are restorable, so the remedy is the forward")
 
 	// No account → the hook emits nothing at all.
 	p2 := &dockerProvisioner{
