@@ -612,15 +612,16 @@ func idleComposerPlaceholderRow(norm string) bool {
 // cannot prove that, so it withholds.
 //
 // Two edge cases bound the block the region never reads (#7850). First, the
-// anchor must be the composer block's FIRST row: the Enter boundary proves
-// where the bound draft's render began (block.blockStart, #7820), and a
-// contiguous composer-glyph row above the anchor that holds content is the
-// #7802 ambiguity class inside the remedy — the draft's own head, or an echo
-// af cannot tell from one, puts the anchor inside the draft and leaves that
-// text unread by the region. Second, the row that ends each region must be
-// a proven boundary — a hard border or the agent's own footer — because a
-// draft that opened with blank lines, or a second draft line after the
-// absorbed Enter's newline, renders the same shape as a footer.
+// anchor must be the composer block's FIRST row — the agent's own first-row
+// prompt at its first-row column, with nothing between it and the
+// composer's top edge (the agent's rule, the box edge, or Codex's
+// transcript gap): any row in that span puts the anchor inside a draft
+// whose head the region never reads (#7850 R1). Second, EVERY row from each
+// region's cut to the pane end must be blank, the agent's own border
+// geometry, or a row of the anchor agent's footer matched against its
+// whole-row grammar — a draft that opened with blank lines, or a second
+// draft line after the absorbed Enter's newline, renders the same shape as
+// a footer (#7850 R2/R3).
 //
 // The wrapped-tail column is accepted only when the chip STARTS on the anchor
 // row: the anchor's content after its single prompt glyph must be a non-empty
@@ -637,7 +638,7 @@ func idleComposerPlaceholderRow(norm string) bool {
 // (#6224): a bare "not a still, single-chip composer" cannot tell a Claude
 // pane (hidden cursor, by design) from a Codex pane whose footer bled into
 // the region.
-func stillChipComposer(boundary string, block boundaryBlock, pane string, cursor paneCursorState, chipText string) (bool, string) {
+func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText string) (bool, string) {
 	if !cursor.Visible {
 		return false, "the cursor is hidden, so where the draft left it cannot be proven (Claude's ordinary composer hides it)"
 	}
@@ -646,22 +647,6 @@ func stillChipComposer(boundary string, block boundaryBlock, pane string, cursor
 	anchor := lastComposerGlyphRow(bRows)
 	if anchor < 0 || anchor >= len(gRows) || lastComposerGlyphRow(gRows) != anchor {
 		return false, "the composer's prompt-glyph row moved or is missing between the Enter boundary and the grace frame"
-	}
-	// The anchor must be the composer block's first row, proven by the Enter
-	// boundary — not by lastComposerGlyphRow's deepest-glyph rule, which can
-	// land the anchor INSIDE the draft: a draft's own continuation line can
-	// lead with any composer glyph (#7809). block.blockStart is where the
-	// boundary proved the bound draft's render began (#7820); -1 means the
-	// frame could not prove the start at all, and every row between it and
-	// the anchor must be blank — a content row there is inside the block and
-	// unread by the region, so the composer is not chip-only.
-	if block.blockStart < 0 || block.blockStart > anchor {
-		return false, "the Enter boundary could not prove where this delivery's composer block begins"
-	}
-	for r := block.blockStart; r < anchor; r++ {
-		if !blankComposerRow(bRows[r]) {
-			return false, "a composer content row sits between the bound draft's proven first row and the anchor — the composer is not chip-only"
-		}
 	}
 	// The anchor must be the composer block's FIRST row — the agent's own
 	// first-row prompt at its first-row column — with nothing between it and
@@ -890,7 +875,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 	why := "the bound evidence is a literal tail, not a collapsed-paste chip"
 	stillChip := false
 	if bound.chip {
-		stillChip, why = stillChipComposer(stripped, boundary, pane, cursor, bound.chipText)
+		stillChip, why = stillChipComposer(stripped, pane, cursor, bound.chipText)
 	}
 	if !stillChip {
 		log.WarningLog.Printf("submit: session %q reads as still staged after Enter (%s), "+
