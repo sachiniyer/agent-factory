@@ -74,9 +74,13 @@ func dockerMountTarget(field string) (string, bool) {
 // validateAccountDockerRunArgs refuses repo-controlled sources that Docker can
 // apply after af has selected the account. Environment files are opaque to af,
 // so none are accepted in account mode; direct environment options are refused
-// only when they can choose another identity or authentication mode — or which
-// program af's in-container provisioning execs resolve (#7563 R2, the #7529
-// R7 program-choice refusal extended to account sessions).
+// when they can choose another identity or authentication mode, which program
+// af's in-container provisioning execs resolve (#7563 R2, the #7529 R7
+// program-choice refusal extended to account sessions), or where they route the
+// account's authenticated traffic — endpoint selectors, proxies, and TLS trust
+// roots (the routing/trust class the credential-mount guard refuses from the
+// same repo-controlled channel, ported to the account path so a repository
+// cannot deliver the account's credential to a server it controls).
 func validateAccountDockerRunArgs(args []string, agent string) error {
 	denied := accountDockerDeniedNames(agent)
 	// The keep-if-set names the account boundary pins at exec are refused to
@@ -116,6 +120,15 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			remedy := "set it in the image's ENV instead, or have the operator forward it through session_env_passthrough"
 			if name == "SHELL" {
 				remedy = "have the operator forward it through session_env_passthrough (af re-asserts SHELL=/bin/sh after run_args, so an image ENV value cannot take effect)"
+			}
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: %s",
+				name, agent, reason, remedy)
+		}
+		if reason, refused := accountDockerRoutingReason(agent, name); refused {
+			remedy := "have the operator forward it through session_env_passthrough"
+			if _, path := accountRoutingPathValuedNames[name]; path {
+				remedy = "drop the entry, or have the operator mount the file or directory at the same container path and forward it through session_env_passthrough"
 			}
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot set %s for an account-scoped %s session because %s; the remedy: %s",
@@ -356,6 +369,71 @@ func accountDockerProgramChoiceReason(name string) (string, bool) {
 		return "tmux runs every pane command as $default-shell -c …, and default-shell comes from SHELL in the client environment, so a repo-chosen SHELL would run a program of the repo's choosing between af's pins and the agent's exec — and af re-asserts SHELL=/bin/sh after run_args", true
 	}
 	return credentialMountLoaderReason(name)
+}
+
+// accountDockerRoutingReason returns the because-clause for the routing/trust
+// env names a repo-controlled docker.run_args entry may not set on the account
+// path: the names that change WHERE the agent sends the account credential —
+// endpoint selectors, proxies, and TLS trust roots. They are the same class
+// the credential-mount guard refuses from the same repo-controlled channel
+// (credentialMountSharedRoutingNames and credentialMountRoutingNames[agent]),
+// ported to the account path so a repository cannot route the account's
+// authenticated traffic to a server it controls.
+//
+// The config-root names the credential-mount guard also refuses
+// (credentialMountSharedConfigRootNames — GNUPGHOME, XDG_RUNTIME_DIR,
+// GIT_CONFIG_NOSYSTEM) are deliberately NOT refused here. Their because-clause
+// ("relocates the account's credential-bearing state to a path the repository
+// controls") does not hold on the account path: af's own value is the
+// credential-bearing state af emits last, and refusing them would over-close
+// names master accepts — a boolean like GIT_CONFIG_NOSYSTEM, or an XDG root af
+// does not pin. The credential-mount guard keeps its own refusal because the
+// mounted credential file is the state a config-root name can redirect there.
+//
+// The refusal is repo-run_args-only, never the operator's own claim: these
+// names are NOT in accountDockerDeniedNames (which also filters
+// session_env_passthrough), so the operator stays free to forward their own
+// endpoint, proxy, or CA bundle through session_env_passthrough — exactly as
+// PATH and SHELL already do. ApplyAccount deliberately keeps a routed
+// deployment's ambient value, and that scoping decision is unaffected: only the
+// repo-controlled run_args channel is refused. The keep-if-set names an agent
+// pins (gemini's proxy surface) are refused upstream of this check with their
+// own keep-if-set remedy, so this function is the net that catches the routing
+// class for every other account agent and every unguarded shared name
+// (ANTHROPIC_BASE_URL for claude; CODEX_CA_CERTIFICATE for codex;
+// SSL_CERT_FILE/NODE_EXTRA_CA_CERTS/… for all).
+func accountDockerRoutingReason(agent, name string) (string, bool) {
+	if _, ok := credentialMountSharedRoutingNames[name]; ok {
+		return "it changes where the agent sends the account credential — a repo-supplied endpoint, proxy, or trust root routes the account's authenticated traffic to a server the repository controls", true
+	}
+	if _, ok := credentialMountRoutingNames[agent][name]; ok {
+		return "it changes where the agent sends the account credential — a repo-supplied endpoint, proxy, or trust root routes the account's authenticated traffic to a server the repository controls", true
+	}
+	return "", false
+}
+
+// accountRoutingPathValuedNames names the routing-class entries whose value is
+// a container path the agent's TLS stack reads (a CA bundle or cert file, or a
+// CA directory), or a Unix socket the agent's keyring reads. Forwarding such a
+// name through session_env_passthrough is not enough on its own — the file,
+// directory, or socket the operator points at must also be mounted at the same
+// container path — so the refusal's remedy names the mount alongside the
+// forward and offers "drop the entry" the way the credential-mount path does.
+// SSL_CERT_DIR sits here alongside SSL_CERT_FILE, and GH_CONFIG_DIR alongside
+// them: forwarding a directory does not make its host contents (the host CAs,
+// or gh's stored config and authentication) available inside the container, so
+// the remedy has to name the mount. DBUS_SESSION_BUS_ADDRESS joins them for its
+// unix:path=/run/user/.../bus form: forwarding the address does not expose the
+// host socket inside the container, so the remedy has to name the mount.
+var accountRoutingPathValuedNames = map[string]struct{}{
+	"SSL_CERT_FILE":            {},
+	"SSL_CERT_DIR":             {},
+	"NODE_EXTRA_CA_CERTS":      {},
+	"REQUESTS_CA_BUNDLE":       {},
+	"CURL_CA_BUNDLE":           {},
+	"CODEX_CA_CERTIFICATE":     {},
+	"GH_CONFIG_DIR":            {},
+	"DBUS_SESSION_BUS_ADDRESS": {},
 }
 
 // dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
