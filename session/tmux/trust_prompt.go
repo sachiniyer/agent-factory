@@ -150,21 +150,19 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() (held bool) {
 		}
 		// The multi-server picker by its own trailing rows: its footer the
 		// last content, whole or only begun, under its "Enable selected" row,
-		// with or without its header (#7463, #7870) — or, one paint instant
-		// before the footer begins, the "Enable selected" row itself as the
-		// last content, under the picker's own rows or the pane's top edge
-		// (#7873). A pane too short scrolls the header off, and one too
-		// narrow wraps the footer; either way the picker clauses above, which
-		// read it from its header down, declined it. Asked last too: it only
-		// turns a clear pane into a hold. A begun footer, or a footer not yet
-		// begun, holds silently, as painting, the way the painting reader
+		// with or without its header (#7463, #7870). A pane too short scrolls
+		// the header off, and one too narrow wraps the footer; either way the
+		// picker clauses above, which read it from its header down, declined
+		// it. Asked last too: it only turns a clear pane into a hold. A begun
+		// footer holds silently, as painting, the way the painting reader
 		// below holds a begun row — the refusal is for the whole-footer read,
 		// where the pane may stay (#7872 review, R2).
-		switch claudeMCPServersTailOf(screen) {
+		tail := claudeMCPServersTailOf(screen)
+		switch tail {
 		case claudeMCPServersTailWhole:
 			t.refuseClaudeMCPServers("the pane shows its footer under its \"Enable selected\" row, but not the picker whole (a pane too short scrolls its header off, one too narrow wraps its footer)")
 			return true
-		case claudeMCPServersTailBegun, claudeMCPServersTailSubmit:
+		case claudeMCPServersTailBegun:
 			return true
 		}
 		// The multi-server picker while Claude Code paints it, read from its
@@ -204,6 +202,16 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() (held bool) {
 		// turns a clear pane into a hold.
 		if remnant := claudeLaunchDialogRemnantRead(screen); remnant.kind != claudeLaunchDialogRemnantNone {
 			t.refuseClaudeLaunchDialogRemnant(remnant)
+			return true
+		}
+		// One paint instant before the picker's footer begins: the pane's
+		// last content is the "Enable selected" row itself — whole, begun, or
+		// begun only as far as its ❯ cursor — under the picker's own rows or
+		// the pane's top edge (#7873, #7876 review R1). Asked last of all, so
+		// a frame a clause above already holds — a folder-trust remnant among
+		// them — keeps that clause's own kind and refusal (#7876 review, R2).
+		// Held silently, as painting, the way the begun-footer read is.
+		if tail == claudeMCPServersTailSubmit {
 			return true
 		}
 		// A pane with no dialog on it retires the refusal notice, so a later

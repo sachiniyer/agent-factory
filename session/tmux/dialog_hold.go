@@ -338,13 +338,13 @@ func claudeDialogHoldKind(screen visibleText) DialogHoldKind {
 		}
 		return DialogHoldOther // words the folder and MCP questions share
 	}
-	switch claudeMCPServersTailOf(screen) {
+	tail := claudeMCPServersTailOf(screen)
+	switch tail {
 	case claudeMCPServersTailWhole:
 		return DialogHoldMCPUnreadable
-	case claudeMCPServersTailBegun, claudeMCPServersTailSubmit:
-		// The footer still painting — or not yet begun — is a partial hold,
-		// the kind the painting reader gives a begun row it can see (#7872
-		// review, R2, #7873).
+	case claudeMCPServersTailBegun:
+		// The footer still painting is a partial hold, the kind the
+		// painting reader gives a begun row it can see (#7872 review, R2).
 		return DialogHoldMCPPartial
 	}
 	if claudeMCPServersPaintingOf(screen) {
@@ -357,7 +357,8 @@ func claudeDialogHoldKind(screen visibleText) DialogHoldKind {
 	// A remnant names the folder-trust dialog only when the pane proves it is
 	// that one. The end of a footer the MCP server dialog paints too falls
 	// through to the generic subject (#7663).
-	if remnant := claudeLaunchDialogRemnantRead(screen); remnant.folder {
+	remnant := claudeLaunchDialogRemnantRead(screen)
+	if remnant.folder {
 		switch remnant.kind {
 		case claudeLaunchDialogRemnantUnderGuide, claudeLaunchDialogRemnantFooterTail:
 			return DialogHoldFolderUnreadable
@@ -365,6 +366,17 @@ func claudeDialogHoldKind(screen visibleText) DialogHoldKind {
 			// A footer row no supported build paints as the dialog's own.
 			return DialogHoldFolderPartial
 		}
+	}
+	if remnant.kind != claudeLaunchDialogRemnantNone {
+		// A remnant the gate holds that af cannot name as the folder-trust
+		// dialog's keeps the generic subject — the submit read below is the
+		// gate's last of all (#7876 review, R2).
+		return DialogHoldOther
+	}
+	if tail == claudeMCPServersTailSubmit {
+		// The footer not yet begun is a partial hold — asked last, as the
+		// gate asks it (#7873, #7876 review R2).
+		return DialogHoldMCPPartial
 	}
 	return DialogHoldOther
 }

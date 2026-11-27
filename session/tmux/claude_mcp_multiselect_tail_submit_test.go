@@ -47,6 +47,11 @@ func TestCheckAndHandleTrustPrompt_Issue7873PickerBeforeItsFooterBeginsHolds(t *
 		"       Enable selected",
 		"       Enab",
 		"     ❯ Enable selected",
+		// The submit row painted only as far as its cursor (#7876 review,
+		// R1): a bare ❯ directly under the checkbox rows, with and without
+		// its trailing blank.
+		"     ❯",
+		"     ❯ ",
 	} {
 		frame := strings.Join(append(append([]string{}, pane...), last), "\n")
 		// The ❯ variant has its cursor on the submit row: no server row
@@ -63,6 +68,21 @@ func TestCheckAndHandleTrustPrompt_Issue7873PickerBeforeItsFooterBeginsHolds(t *
 		requireHeldWithoutAKey(t, frame+"\n ",
 			"the same frame with the footer's leading space painted")
 	}
+	// The same cursor-only instant, with the escapes a capture carries and
+	// under the composer an earlier Claude left: the checkbox rows directly
+	// above the bare ❯ are still the picker's (#7876 review, R1).
+	requireHeldWithoutAKey(t, strings.Join(append(mcpServersUncursored(pane),
+		"  \x1b[1m   ❯\x1b[0m"), "\n"),
+		"the cursor-only row painted with SGR styling")
+	composer := []string{strings.Repeat("─", 40), "❯ fix the drift first", strings.Repeat("─", 40)}
+	requireHeldWithoutAKey(t, strings.Join(append(append(
+		composer, mcpServersUncursored(pane)...), "     ❯"), "\n"),
+		"checkbox rows over a bare ❯ under a stale composer")
+	// And under the wrapped rest of a server name a checkbox row owns — the
+	// long-name capture's shape.
+	requireHeldWithoutAKey(t,
+		"    [✔] a-really-long-server-name-a-really-long-server-name-a-really-long-serv\n        er-name-en…\n     ❯",
+		"the wrapped rest of a server name over a bare ❯")
 	require.Zero(t, strings.Count(errLog.String(), "refusing to answer"),
 		"a pre-footer frame holds silently, as painting, the way a begun footer does")
 }
@@ -77,11 +97,14 @@ type mcpServersSubmitCut struct {
 
 // mcpServersSubmitRowCuts returns row — a picker's "Enable selected" row —
 // painted whole, with the ❯ cursor on it, and as every begun prefix of
-// either: each proper prefix of the row's visible text that leaves the row's
-// label non-empty, deduplicated by that label with the whitespace removed
-// (a cut inside the row's trailing space is the row begun no further). The
-// raw row carries SGR styling; a cut must be of what a reader sees, so the
-// prefixes are taken of it stripped.
+// either: each proper prefix of the row's visible text, deduplicated by the
+// label it leaves with the whitespace removed (a cut inside the row's
+// trailing space is the row begun no further). A cut of the plain row that
+// leaves no label is a blank row — no content, not a begun row — and is
+// skipped; the ❯ variant's cursor-only cut IS a row: the submit row painted
+// only as far as its cursor (#7876 review, R1). The raw row carries SGR
+// styling; a cut must be of what a reader sees, so the prefixes are taken
+// of it stripped.
 func mcpServersSubmitRowCuts(row string) []mcpServersSubmitCut {
 	visible := string(visibleTextOf(row))
 	var cuts []mcpServersSubmitCut
@@ -97,7 +120,7 @@ func mcpServersSubmitRowCuts(row string) []mcpServersSubmitCut {
 			}
 			cut := variant.whole[:i]
 			label := claudeSquash(claudeTrustRowOf(cut).label)
-			if label == "" || seen[label] {
+			if seen[label] || (label == "" && !variant.cursor) {
 				continue
 			}
 			seen[label] = true
@@ -105,6 +128,25 @@ func mcpServersSubmitRowCuts(row string) []mcpServersSubmitCut {
 		}
 	}
 	return cuts
+}
+
+// mcpServersCursorHoldExpects reports, as the issue files it, whether a bare
+// ❯ last row — the submit row painted only as far as its cursor — holds
+// under pane's rows: it must sit directly under a checkbox row, or under the
+// wrapped rest of a server name that one of pane's checkbox rows owns. A
+// rule or a blank row between, a selected row that is no checkbox, and a top
+// edge with no checkbox above are all not the picker (#7876 review, R1).
+func mcpServersCursorHoldExpects(pane []string) bool {
+	for i := len(pane) - 1; i >= 0; i-- {
+		row := claudeTrustRowOf(string(visibleTextOf(pane[i])))
+		if claudeMCPServerCheckboxRow(row.label) {
+			return true
+		}
+		if row.blank || row.selected {
+			return false
+		}
+	}
+	return false
 }
 
 // mcpServersSubmitCursorRow is the picker's "Enable selected" row with the
@@ -166,8 +208,19 @@ func TestCheckAndHandleTrustPrompt_Issue7873PickerBelowItsHeaderHoldsBeforeTheFo
 					if cut.cursor {
 						above = mcpServersUncursored(pane)
 					}
+					// A cut that leaves the row only its cursor is the
+					// picker only directly under a row it paints there — a
+					// checkbox row, or the wrapped rest of a server name a
+					// checkbox row owns (#7876 review, R1).
+					bare := claudeSquash(claudeTrustRowOf(cut.last).label) == ""
 					for _, trail := range []int{0, 1} {
 						content := strings.Join(append(append([]string{}, above...), cut.last), "\n") + strings.Repeat("\n", trail)
+						if bare && !mcpServersCursorHoldExpects(above) {
+							requireClearWithoutAKey(t, content, fmt.Sprintf(
+								"its submit row painted as %q: a bare cursor under no picker row is only a prompt (#7876 review, R1)",
+								cut.last))
+							continue
+						}
 						requireHeldWithoutAKey(t, content, fmt.Sprintf(
 							"its submit row painted as %q, %d blank rows below: the pane holds over the footer's paint the instant after, and this is the instant before (#7873)",
 							cut.last, trail))
@@ -241,6 +294,14 @@ func TestCheckAndHandleTrustPrompt_Issue7873OrdinaryFramesStayClear(t *testing.T
 			"  [✔] probe\n       Enable selected\n\n  ? for shortcuts"},
 		{"a composer rule below the submit row",
 			"  [✔] probe\n       Enable selected\n" + strings.Repeat("─", 40)},
+		// A bare ❯ last row is the picker's cursor only directly under a
+		// row the picker paints there; anything else above it — or nothing —
+		// is only a prompt (#7876 review, R1).
+		{"a bare ❯ row alone", "     ❯"},
+		{"a bare ❯ row under agent output", "⏺ Working on it\n     ❯"},
+		{"a bare ❯ row under a rule", "  [✔] probe\n" + strings.Repeat("─", 40) + "\n     ❯"},
+		{"a bare ❯ row a blank row under a checkbox row", "  [✔] probe\n\n     ❯"},
+		{"a bare ❯ row under unmarked text only", "        er-name-en…\n     ❯"},
 	} {
 		requireClearWithoutAKey(t, tt.content, fmt.Sprintf(
 			"%s: an ordinary launch or idle frame is no picker, and the create types into it (#7873)", tt.name))
