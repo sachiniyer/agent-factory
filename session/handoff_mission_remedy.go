@@ -59,13 +59,17 @@ func (v LifecycleView) canConfirmPendingHandoffDeliveryView() bool {
 //     mission automatically; no operator verb is needed, so none is named.
 //  3. Ambiguous on a running/ready/startup-unknown row: retry-limit resends it
 //     and --delivered retires it.
-//  4. Ambiguous at the limit wall: --delivered retires it if it already landed;
+//  4. A recorded PromptDelivered verdict on any row the confirm predicate
+//     admits: the mission already landed and only its settle was lost, so
+//     handoff recovery retires it on its own and --delivered settles it by
+//     hand. No wall is named — the row need not be at one.
+//  5. Ambiguous at the limit wall: --delivered retires it if it already landed;
 //     retry-limit only un-stalls the agent and leaves the mission owed.
-//  5. A live row whose delivery is still being verified or settled — no verdict
+//  6. A live row whose delivery is still being verified or settled — no verdict
 //     recorded yet, or an op in flight that blocks both retry and confirm: the
 //     refusal clears once the verdict settles; neither a resend nor an
 //     attestation is meaningful against it yet.
-//  6. A dead, lost or archived row: restore or kill; neither a resend nor an
+//  7. A dead, lost or archived row: restore or kill; neither a resend nor an
 //     attestation is meaningful against a runtime that no longer exists.
 func pendingHandoffMissionRemedy(v LifecycleView) string {
 	retry := shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit"}, v.Title)
@@ -108,11 +112,22 @@ func pendingHandoffMissionRemedy(v LifecycleView) string {
 		// row: the daemon re-verifies the pane and resubmits, and --delivered
 		// retires a mission that already landed.
 		return fmt.Sprintf("`%s` resends it, `%s` retires it", retry, delivered)
+	case v.canConfirmPendingHandoffDeliveryView() && v.HandoffDeliveryStatus == PromptDelivered:
+		// State 4: a recorded delivery whose settle a crash interrupted — the
+		// only non-ambiguous verdict the confirm predicate admits, reachable on
+		// every liveness it names (the retry arm requires an ambiguous verdict,
+		// so a recorded delivery on a running or ready row lands here too, and
+		// must not inherit the limit-wall wording below). Handoff recovery
+		// retires it on its own (settleDeliveredPendingHandoff); --delivered
+		// settles it by hand. There is no wall to un-stall past and nothing
+		// left to deliver.
+		return fmt.Sprintf("handoff recovery retires the recorded delivery on its own; `%s` settles it by hand", delivered)
 	case v.canConfirmPendingHandoffDeliveryView():
-		// State 4: an ambiguous verdict at the limit wall: --delivered retires
-		// a mission that already landed; retry-limit only un-stalls the agent
-		// and leaves the mission owed, resent with retry-limit once the agent
-		// is running.
+		// State 5: an ambiguous verdict at the limit wall — the only shape
+		// left: every other confirmable liveness was already claimed by the
+		// retry and delivered arms above. --delivered retires a mission that
+		// already landed; retry-limit only un-stalls the agent and leaves the
+		// mission owed, resent with retry-limit once the agent is running.
 		return fmt.Sprintf("`%s` retires it if it already landed; `%s` only un-stalls the agent and leaves the mission owed (resent with `%s` once the agent is running)", delivered, retry, retry)
 	default:
 		// Unreachable for a row that reaches this refusal (every reachable

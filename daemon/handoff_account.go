@@ -287,7 +287,17 @@ func accountSwapResumeEligible(instance *session.Instance) bool {
 // The verdict check covers the automatic swap's own durable notice verdict too
 // (#6767): the same ambiguity that holds a manual mission off the scheduler
 // holds an automatic notice off it.
+//
+// A still-owed handoff mission is the same kind of held delivery (#7871): the
+// mission's own recovery — ResumePendingHandoffs' settle, resubmit, or
+// at-the-wall transfer — is what moves it, and every swap admission refuses
+// the row while it is owed (ErrOffBoxAccountSwapOwesMission). Keeping the row
+// out of the scheduler entirely is what makes that refusal durable: until the
+// mission's state changes nothing is attempted against it — no limit-resume
+// fence, no liveness probe, no config lock — rather than a refusal re-armed on
+// every pass.
 func accountSwapScheduledResumeEligible(instance *session.Instance) bool {
 	return accountSwapResumeEligible(instance) &&
-		!instance.PendingAccountSwapDeliveryUnconfirmed()
+		!instance.PendingAccountSwapDeliveryUnconfirmed() &&
+		instance.PendingHandoffMission() == ""
 }

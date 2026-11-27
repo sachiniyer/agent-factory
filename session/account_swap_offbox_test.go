@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -1091,6 +1093,22 @@ func TestPendingHandoffMissionRemedyDescribesEveryReachableState(t *testing.T) {
 			wantNotContains: []string{"retry-limit", "--delivered", "restore", "resends it", "retires it", "transfers the mission"},
 		},
 		{
+			name: "delivered verdict on a running row names recovery's settle, no limit wall",
+			view: LifecycleView{Title: "s", Liveness: LiveRunning, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptDelivered},
+			autoRetryable: false, canRetry: false, canConfirm: true,
+			wantContains:    []string{"handoff recovery retires the recorded delivery", "settles it by hand"},
+			wantNotContains: []string{"only un-stalls the agent", "resends it", "transfers the mission"},
+		},
+		{
+			name: "delivered verdict at the limit wall names recovery's settle too",
+			view: LifecycleView{Title: "s", Liveness: LiveLimitReached, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptDelivered},
+			autoRetryable: false, canRetry: false, canConfirm: true,
+			wantContains:    []string{"handoff recovery retires the recorded delivery", "settles it by hand"},
+			wantNotContains: []string{"only un-stalls the agent", "resends it", "transfers the mission"},
+		},
+		{
 			name: "dead row names restore, no resend",
 			view: LifecycleView{Title: "s", Liveness: LiveLost, Started: true,
 				PendingHandoffMission: true, HandoffDeliveryStatus: PromptCouldNotConfirm},
@@ -1116,4 +1134,39 @@ func TestPendingHandoffMissionRemedyDescribesEveryReachableState(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The same guard on the live commit (#7871): a mission that lands between the
+// admission and the swap's own checkpoint — the only window the admission's
+// owed-mission refusal cannot cover — is the obligation the commit retires
+// with the runtime it was owed to. The swap's own notice wins, and the
+// displaced mission is named in the warning rather than dropped silently.
+func TestCommittedSwapPrefersTheSwapNoticeOverAMissionThatLandedMidSwap(t *testing.T) {
+	f := newSwapFixture(t)
+	const notice = "[Agent Factory] This session switched accounts. Continue the same task.\n\ncontinue"
+
+	var warnings bytes.Buffer
+	oldWarn := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarn) })
+
+	// The persist hook's first call is the in-flight record's durable write —
+	// the last point a mission can land and still precede the commit's
+	// checkpoint.
+	var planted bool
+	f.inst.SetOffBoxSwapPersist(func(ii *Instance) error {
+		if !planted {
+			planted = true
+			ii.SetPendingHandoffMission("PRIOR MISSION")
+		}
+		return nil
+	})
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false, notice)
+	require.NoError(t, err)
+	assert.Equal(t, notice, f.inst.PendingHandoffMission(),
+		"the swap's own notice is the obligation the replacement is owed")
+	assert.Equal(t, PromptNotDelivered, f.inst.PendingHandoffDeliveryStatus())
+	assert.Contains(t, warnings.String(), "replaces a handoff mission still owed",
+		"the displaced mission is named in the log — never dropped silently")
 }

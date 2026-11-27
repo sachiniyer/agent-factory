@@ -482,7 +482,8 @@ A `default_accounts` entry is applied the same way, and on a target that is not 
 listed host it is not applied (the session runs on the host's own credentials)
 rather than failing the create. An explicit `--account` on an unlisted ssh target,
 or on a sandbox or hook target, is refused with the remedy. Automatic account
-replacement also excludes Docker and every off-box session; see
+replacement excludes Docker; ssh and sandbox sessions on a listed host are
+covered by the same in-place failover — see
 [Opt-in auto-resume](#opt-in-auto-resume).
 
 **Environment names the agent's own loader can fill.** Gemini's `.env` loader
@@ -781,13 +782,15 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   rather than hammering an exhausted plan. Killing the session is always the
   off-ramp.
 - **Optional account switch** → before waiting for the old identity's reset, an
-  unpinned local session may restart on the first registered account
-  in `limit_account_candidates` that has no current limit observation. The
-  ordered list is the opt-in; af never chooses from every registered account.
-  If every listed account is limited or absent, the existing wait remains.
-  Docker account-scoped creates remain supported, but automatic Docker
-  replacement stays disabled until its complete provision plan and container
-  cleanup identity can survive a daemon crash.
+  unpinned session may restart on the first registered account
+  in `limit_account_candidates` that has no current limit observation — locally
+  a respawn, and on a listed-host ssh or sandbox session the same in-place
+  account swap described below. The ordered list is the opt-in; af never
+  chooses from every registered account. If every listed account is limited or
+  absent, the existing wait remains. Docker account-scoped creates remain
+  supported, but automatic Docker replacement stays disabled until its
+  complete provision plan and container cleanup identity can survive a daemon
+  crash.
 - **An explicit `--account` is pinned.** It is a pin, so automatic switching
   never overrides it. Accounts selected by the scheduler may move again after
   they later hit their own limit.

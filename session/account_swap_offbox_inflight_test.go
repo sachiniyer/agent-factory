@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -660,6 +662,45 @@ func TestReconcileSwapUnfencesOnARollbackVerdict(t *testing.T) {
 	assert.Nil(t, f.inst.InFlightOffBoxSwap())
 }
 
+// A row reloaded carrying BOTH an in-flight swap record and a still-owed
+// handoff mission settles on the swap's own notice (#7871): the owed mission
+// was owed to the runtime the committed swap retired — its brief is
+// undeliverable to the replacement's fresh conversation — so it is the
+// obligation displaced, and the displacement is named in the warning rather
+// than dropped silently. The single-mission field cannot carry both.
+func TestReconciledCommitPrefersTheSwapNoticeOverAMissionOwedToTheRetiredRuntime(t *testing.T) {
+	f := newSwapFixture(t)
+	f.srv.loseResponse = errors.New("remote agent-server: context deadline exceeded")
+	f.srv.statusErr = errors.New("remote agent-server: connection reset")
+	const notice = "[Agent Factory] This session switched accounts. Continue the same task.\n\ncontinue"
+
+	_, err := f.inst.SwapOffBoxAccount("alt", false, notice)
+	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
+	require.NotNil(t, f.inst.InFlightOffBoxSwap())
+
+	// The mission that landed while the swap was in flight — owed to the
+	// runtime the host has since provably replaced.
+	f.inst.SetPendingHandoffMission("PRIOR MISSION")
+	require.NoError(t, f.inst.RecordPendingHandoffMissionDelivery("PRIOR MISSION", PromptCouldNotConfirm))
+
+	var warnings bytes.Buffer
+	oldWarn := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarn) })
+
+	f.srv.statusErr = nil
+	settled, err := f.reconcileInFlight()
+	require.NoError(t, err)
+	require.True(t, settled)
+	assert.Equal(t, notice, f.inst.PendingHandoffMission(),
+		"the swap's own notice is the obligation the replacement is owed")
+	assert.Equal(t, PromptNotDelivered, f.inst.PendingHandoffDeliveryStatus(),
+		"the notice is owed with a replayable not-delivered verdict")
+	assert.Nil(t, f.inst.InFlightOffBoxSwap())
+	assert.Contains(t, warnings.String(), "replaces a handoff mission still owed",
+		"the displaced mission is named in the log — never dropped silently")
+}
+
 // reconcileInFlight runs the record's verdict engine against the fixture's
 // host — the settle a daemon restart reaches through ReattachSandbox, called
 // directly now that no session-level entry point wraps it (#7799): the
@@ -667,5 +708,3 @@ func TestReconcileSwapUnfencesOnARollbackVerdict(t *testing.T) {
 func (f *swapFixture) reconcileInFlight() (bool, error) {
 	return f.inst.reconcileInFlightOffBoxSwap(f.srv, f.inst.backend.(*sshBackend).provisioner)
 }
-
-var _ = time.Second // the file's fixture shares the package's helpers
