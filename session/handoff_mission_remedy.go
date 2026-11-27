@@ -81,11 +81,11 @@ func pendingHandoffMissionRemedy(v LifecycleView) string {
 	opSettling := v.InFlightOp != OpNone && v.InFlightOp != OpReplacing
 	switch {
 	case dead:
-		// State 6: a runtime that no longer exists keeps its restore/kill
+		// State 7: a runtime that no longer exists keeps its restore/kill
 		// handles; neither a resend nor an attestation is meaningful here.
 		return "recovery or an explicit restore retires it; no resend is meaningful here"
 	case v.HandoffDeliveryStatus == "" || opSettling:
-		// State 5: a live row whose delivery verdict has not been recorded, or
+		// State 6: a live row whose delivery verdict has not been recorded, or
 		// which carries an op the retry and confirm predicates both refuse
 		// under. The handoff's delivery is still being verified or settled,
 		// and the refusal clears once it settles; name no verb the daemon

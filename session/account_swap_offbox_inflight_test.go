@@ -666,7 +666,7 @@ func TestReconcileSwapUnfencesOnARollbackVerdict(t *testing.T) {
 // handoff mission settles on the swap's own notice (#7871): the owed mission
 // was owed to the runtime the committed swap retired — its brief is
 // undeliverable to the replacement's fresh conversation — so it is the
-// obligation displaced, and the displacement is named in the warning rather
+// obligation displaced, and the displacement is logged in the warning rather
 // than dropped silently. The single-mission field cannot carry both.
 func TestReconciledCommitPrefersTheSwapNoticeOverAMissionOwedToTheRetiredRuntime(t *testing.T) {
 	f := newSwapFixture(t)
@@ -698,7 +698,7 @@ func TestReconciledCommitPrefersTheSwapNoticeOverAMissionOwedToTheRetiredRuntime
 		"the notice is owed with a replayable not-delivered verdict")
 	assert.Nil(t, f.inst.InFlightOffBoxSwap())
 	assert.Contains(t, warnings.String(), "replaces a handoff mission still owed",
-		"the displaced mission is named in the log — never dropped silently")
+		"the displaced mission's verdict is logged in the warning — never dropped silently")
 }
 
 // reconcileInFlight runs the record's verdict engine against the fixture's

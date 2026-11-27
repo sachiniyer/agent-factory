@@ -671,8 +671,9 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool, notice string)
 	// field cannot carry both, and the one still owed was owed to the runtime
 	// this commit just retired — the replacement gets a fresh conversation,
 	// so the old runtime's brief is the obligation that is no longer
-	// deliverable. The swap's own notice wins, and the displaced mission is
-	// named in the warning rather than dropped silently.
+	// deliverable. The swap's own notice wins, and the displaced mission's
+	// verdict and size are recorded in the warning rather than the mission
+	// dropped silently.
 	if notice != "" {
 		if owed := i.PendingHandoffMission(); owed != "" && owed != notice {
 			log.WarningLog.Printf("account swap of %q: the committed swap's takeover notice replaces a handoff mission still owed to the retired runtime (verdict %s, %d bytes) — that runtime is gone and its mission undeliverable, so the swap's own notice is the obligation the replacement is owed",

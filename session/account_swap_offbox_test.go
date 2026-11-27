@@ -1140,7 +1140,7 @@ func TestPendingHandoffMissionRemedyDescribesEveryReachableState(t *testing.T) {
 // admission and the swap's own checkpoint — the only window the admission's
 // owed-mission refusal cannot cover — is the obligation the commit retires
 // with the runtime it was owed to. The swap's own notice wins, and the
-// displaced mission is named in the warning rather than dropped silently.
+// displaced mission's verdict and size are logged rather than dropped silently.
 func TestCommittedSwapPrefersTheSwapNoticeOverAMissionThatLandedMidSwap(t *testing.T) {
 	f := newSwapFixture(t)
 	const notice = "[Agent Factory] This session switched accounts. Continue the same task.\n\ncontinue"
@@ -1168,5 +1168,5 @@ func TestCommittedSwapPrefersTheSwapNoticeOverAMissionThatLandedMidSwap(t *testi
 		"the swap's own notice is the obligation the replacement is owed")
 	assert.Equal(t, PromptNotDelivered, f.inst.PendingHandoffDeliveryStatus())
 	assert.Contains(t, warnings.String(), "replaces a handoff mission still owed",
-		"the displaced mission is named in the log — never dropped silently")
+		"the displaced mission's verdict is logged in the warning — never dropped silently")
 }

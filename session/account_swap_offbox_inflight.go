@@ -286,8 +286,9 @@ func (i *Instance) reconcileInFlightOffBoxSwap(sw AccountSwapper, p *sandboxProv
 		// (#7871): the single-mission field cannot carry both obligations, and
 		// the one still owed was owed to the runtime this commit just
 		// retired — undeliverable to the replacement's fresh conversation.
-		// The record's notice wins, and the displaced mission is named in the
-		// warning rather than dropped silently.
+		// The record's notice wins, and the displaced mission's verdict and
+		// size are recorded in the warning rather than the mission dropped
+		// silently.
 		if rec.Notice != "" {
 			if owed := i.PendingHandoffMission(); owed != "" && owed != rec.Notice {
 				log.WarningLog.Printf("account swap of %q: the reconciled swap's takeover notice replaces a handoff mission still owed to the retired runtime (verdict %s, %d bytes) — that runtime is gone and its mission undeliverable, so the swap's own notice is the obligation the replacement is owed",

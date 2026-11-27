@@ -23,14 +23,15 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-// The daemon-level pin for #7860's route on an off-box row (#7871 item 3): an
-// automatic account swap attempted against a session that still owes a handoff
-// mission is REFUSED — ErrOffBoxAccountSwapOwesMission — and the row must keep
-// the mission, its verdict, and its wall exactly as they were. The scheduler
-// must not even reach the attempt: the owed mission holds the row out of
-// resumeLimitedSession entirely, so nothing is tried (no fence raise, no
-// agent-server probe, no config lock) until the mission's state changes
-// (#7871 item 1). Only after the mission transfers does the swap proceed.
+// The daemon-level pin for #7860's route on an off-box row (#7871 items 1+3):
+// an automatic account swap is never attempted against a session that still
+// owes a handoff mission — the scheduler withholds the swap hint before any
+// swap work, and the admission underneath still refuses with
+// ErrOffBoxAccountSwapOwesMission for a mission that lands mid-flight. The
+// hold is deliberately narrow: it withholds ONLY the swap opportunity, never
+// the row's ordinary same-account resume — that resume never depended on a
+// swap candidate existing, so it runs exactly as on master while the mission
+// is owed. Only after the mission's own state changes does the swap proceed.
 
 // offBoxAgentServer is the stand-in agent-server the swap's REST calls reach:
 // it counts every request by route so a test can prove what was — and was
@@ -111,7 +112,9 @@ func newOffBoxAgentServer(t *testing.T, sessionDir string) *offBoxAgentServer {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"ok": true}})
 	})
 	mux.HandleFunc("/v1/agent/preview", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"content": "", "has_terminal_modes": false}})
+		// Claude's composer glyph: the send path's readiness wait sees a ready
+		// pane on the first poll instead of burning its whole budget.
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"content": "❯", "has_terminal_modes": false}})
 	})
 	mux.HandleFunc("/v1/agent/snapshot", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"updated": false}})
@@ -160,16 +163,6 @@ func (s *offBoxAgentServer) resetHits() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hits = map[string]int{}
-}
-
-func (s *offBoxAgentServer) totalHits() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	total := 0
-	for _, n := range s.hits {
-		total += n
-	}
-	return total
 }
 
 func (s *offBoxAgentServer) routeHits(path string) int {
@@ -236,6 +229,7 @@ func newOffBoxLimitedFixture(t *testing.T) (*Manager, string, string, *session.I
 	inst.SetOffBoxSwapPersist(func(*session.Instance) error { return nil })
 	inst.SetStartedForTest(true)
 	inst.SetStatusForTest(session.Running)
+	inst.Prompt = "the work already on the row"
 	inst.SetLimitReached(nowFunc().Add(-time.Hour))
 	seedDiskInstance(t, repo.ID, "offbox", repoPath)
 	manager.mu.Lock()
@@ -253,40 +247,47 @@ func oweAMission(t *testing.T, inst *session.Instance) {
 	require.Equal(t, session.PromptNotDelivered, inst.PendingHandoffDeliveryStatus())
 }
 
-// Item 1 + item 3's property: a session that still owes a handoff mission
-// yields NO swap opportunity — the scheduler does not even raise the fence or
-// probe the agent-server. On master the same pass walks the whole attempt —
-// the liveness probe hits the agent-server and a retry attempt is recorded —
-// before the swap admission refuses it.
-func TestResumeLimitedSessionsNeverAttemptsAnOwedMissionRow(t *testing.T) {
-	manager, repoID, _, inst, srv := newOffBoxLimitedFixture(t)
+// Item 1's property, narrowed by review: a session that still owes a handoff
+// mission yields NO swap attempt — the host's swap routes are never called —
+// but the hold is ONLY on the swap. The row's ordinary same-account resume
+// still runs (it never depended on a swap candidate existing), the wall
+// un-stalls on the account the row already has, and the mission and its
+// verdict stay owed for their own recovery. An earlier version held the whole
+// row out of the scheduler and starved that resume behind the mission.
+func TestResumeLimitedSessionsWithholdsOnlyTheSwapFromAnOwedRow(t *testing.T) {
+	manager, _, _, inst, srv := newOffBoxLimitedFixture(t)
 	oweAMission(t, inst)
 
 	manager.ResumeLimitedSessions()
 
-	assert.Zero(t, srv.totalHits(),
-		"an owed mission yields no swap opportunity: no probe, no swap call, no send")
-	_, hasState := manager.limitResumeStates[stableSessionKey(repoID, inst)]
-	assert.False(t, hasState, "no resume attempt may be recorded against the owed row")
-	assert.Equal(t, session.OpNone, inst.GetInFlightOp(), "the limit-resume fence was never raised")
-	assert.Equal(t, owedMission, inst.PendingHandoffMission())
+	assert.Zero(t, srv.routeHits("/v1/agent/swap-account"),
+		"the owed mission withholds the swap: the host's swap route is never called")
+	assert.Zero(t, srv.routeHits("/v1/agent/swap-account-status"))
+	assert.GreaterOrEqual(t, srv.routeHits("/v1/agent/send-prompt"), 1,
+		"the same-account resume still sends the stored prompt")
+	acct, _ := inst.AccountSelection()
+	assert.Equal(t, "work", acct, "the row resumes on the account it already had")
+	assert.Equal(t, owedMission, inst.PendingHandoffMission(),
+		"the durable mission survives — the resume is not a discharge")
 	assert.Equal(t, session.PromptNotDelivered, inst.PendingHandoffDeliveryStatus())
-	assert.True(t, inst.LimitReached(), "the wall is the owed row's state, unchanged")
+	assert.Equal(t, session.OpNone, inst.GetInFlightOp(), "the fence lowered after the resume")
+	assert.False(t, inst.LimitReached(), "the ordinary resume un-stalled the wall")
 }
 
-// The route itself (#7860): driving the attempt on the owed row — the shape
-// the scheduler produced on master before item 1 — is refused by the swap
-// admission, the fence drops, the mission and its verdict persist untouched,
-// and no ordinary fallback send fires past the refusal.
+// The route itself (#7860): the scheduler's timing hint is computed before
+// the mission lands — the mid-swap race — and the swap admission then refuses
+// with ErrOffBoxAccountSwapOwesMission. The fence drops, the mission and its
+// verdict persist untouched, and no ordinary fallback send fires past the
+// refusal even with the fallback armed.
 func TestOffBoxSwapRefusalPersistsTheOwedMissionAndItsVerdict(t *testing.T) {
 	manager, repoID, _, inst, srv := newOffBoxLimitedFixture(t)
-	oweAMission(t, inst)
 	key := daemonInstanceKey(repoID, "offbox")
 
 	swap, err := manager.accountSwapOpportunityFromFactsWithEvidence(inst, manager.Config(), loadAccountLimitEvidenceForSwap)
 	require.NoError(t, err)
-	require.NotNil(t, swap, "the owed mission is not a swap hint — the refusal owns the row")
+	require.NotNil(t, swap, "with no mission owed yet, the failover candidate is a live hint")
 	swap.fallbackDue = true
+	oweAMission(t, inst)
 
 	outcome, _, resumeErr := manager.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, swap)
 	require.Error(t, resumeErr)
@@ -330,5 +331,60 @@ func TestOffBoxSwapIsReadmittedOnceTheMissionTransfers(t *testing.T) {
 	assert.Equal(t, 1, srv.routeHits("/v1/agent/swap-account"),
 		"the swap request crossed exactly once")
 	assert.Nil(t, inst.InFlightOffBoxSwap(), "the record settled with the commit")
+	assert.Empty(t, inst.PendingHandoffMission(),
+		"the committed swap's notice was delivered and retired — its final verdict settled")
+	assert.Empty(t, inst.PendingHandoffDeliveryStatus(),
+		"and the verdict record cleared with it")
 	assert.False(t, inst.LimitReached(), "the outgoing account's wall cleared with the record")
+}
+
+// The shape the hold can actually starve: an AMBIGUOUS verdict at the wall has
+// no automatic exit — handoff recovery will not replay it (that belongs to
+// not-delivered), the at-the-wall transfer does not apply, and the operator's
+// confirm-or-retry is the only discharge. On master the scheduler still ran
+// the row's scheduled same-account resume — the "un-stall" the wall remedy
+// describes. Off-box arm: the swap stays withheld while the resume runs.
+func TestAmbiguousOwedMissionStillGetsItsSameAccountResumeOffBox(t *testing.T) {
+	manager, _, _, inst, srv := newOffBoxLimitedFixture(t)
+	oweAMission(t, inst)
+	require.NoError(t, inst.RecordPendingHandoffMissionDelivery(owedMission, session.PromptCouldNotConfirm))
+
+	manager.ResumePendingHandoffs()
+	require.Equal(t, owedMission, inst.PendingHandoffMission(),
+		"an ambiguous verdict is the operator's call — recovery neither replays nor transfers it")
+	require.Equal(t, session.PromptCouldNotConfirm, inst.PendingHandoffDeliveryStatus())
+
+	manager.ResumeLimitedSessions()
+
+	assert.Zero(t, srv.routeHits("/v1/agent/swap-account"),
+		"the owed mission still withholds the account swap")
+	assert.GreaterOrEqual(t, srv.routeHits("/v1/agent/send-prompt"), 1,
+		"the scheduled same-account resume ran anyway")
+	acct, _ := inst.AccountSelection()
+	assert.Equal(t, "work", acct, "the row resumes on the account it already had")
+	assert.Equal(t, owedMission, inst.PendingHandoffMission(),
+		"the ambiguous mission is still owed — the resume does not discharge it")
+	assert.Equal(t, session.PromptCouldNotConfirm, inst.PendingHandoffDeliveryStatus())
+	assert.False(t, inst.LimitReached(), "the resume un-stalled the wall")
+}
+
+// Same property on a LOCAL row — the owed-mission hold is an off-box swap
+// rule, so a local ambiguous row at the wall must resume exactly as it did
+// before the gate existed.
+func TestAmbiguousOwedMissionStillGetsItsSameAccountResumeLocal(t *testing.T) {
+	manager, _, inst, backend := newAutoResumeManager(t, "", true, "stored prompt", nowFunc().Add(-time.Hour))
+	inst.SetPendingHandoffMission(owedMission)
+	require.NoError(t, inst.RecordPendingHandoffMissionDelivery(owedMission, session.PromptCouldNotConfirm))
+
+	manager.ResumePendingHandoffs()
+	require.Equal(t, owedMission, inst.PendingHandoffMission())
+
+	manager.ResumeLimitedSessions()
+
+	_, _, prompts := backend.snapshot()
+	require.Equal(t, []string{"stored prompt"}, prompts,
+		"the owed mission withholds only the swap — the scheduled same-account resume still sends the stored prompt")
+	assert.Equal(t, owedMission, inst.PendingHandoffMission(),
+		"the ambiguous mission is still owed")
+	assert.False(t, inst.LimitReached(), "the resume un-stalled the wall")
 }

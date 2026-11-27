@@ -482,8 +482,9 @@ A `default_accounts` entry is applied the same way, and on a target that is not 
 listed host it is not applied (the session runs on the host's own credentials)
 rather than failing the create. An explicit `--account` on an unlisted ssh target,
 or on a sandbox or hook target, is refused with the remedy. Automatic account
-replacement excludes Docker; ssh and sandbox sessions on a listed host are
-covered by the same in-place failover — see
+replacement is a separate decision from that refused explicit pin: it excludes
+Docker, and on a listed host it covers an ssh session or an af-provisioned
+sandbox workspace with the same in-place failover — see
 [Opt-in auto-resume](#opt-in-auto-resume).
 
 **Environment names the agent's own loader can fill.** Gemini's `.env` loader

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -57,6 +58,9 @@ type OffBoxSwapFixture struct {
 // SetLookPathForTest family — exported so the daemon package can reach the
 // unexported pieces; production code must not call it.
 func (i *Instance) InstallOffBoxSwapBackendForTest(fx OffBoxSwapFixture) error {
+	if !testing.Testing() {
+		return fmt.Errorf("InstallOffBoxSwapBackendForTest is test scaffolding and refuses to run in a production binary")
+	}
 	if fx.SessionDir == "" || fx.Account.Dir == "" || strings.TrimSpace(fx.SyncHost) == "" {
 		return fmt.Errorf("an off-box swap fixture needs a session dir, a synced account dir, and a listed-host name")
 	}
