@@ -672,10 +672,20 @@ func recordedPaneProgramExe(argv []string) string {
 		// known shell basename does argv[2] hold a shell command line.
 		// Caught inside the shim's pre-exec window it is af's exec-shim
 		// line instead, which carries the recorded command as its LAST
-		// word (every `__af-…-exec` protocol ends that way).
+		// word for the three command-carrying protocols. The two
+		// agent-server markers (`__af-agent-server-env-exec`,
+		// `__af-agent-server-env-exec-account`) are NOT that shape: their
+		// tail is agent-server CLI material (`--branch`, `--session-env`,
+		// `--policy-file`, …), never a recorded command, so there is
+		// nothing to attribute — the same "" the exec'd-through root's
+		// own argv yields post-exec.
 		command = argv[2]
 		if tokens, _ := SplitShellTokens(command); len(tokens) > 1 &&
 			strings.HasPrefix(tokens[1], "__af-") {
+			switch tokens[1] {
+			case sessionenv.AgentServerExecMarker, sessionenv.AgentServerAccountExecMarker:
+				return ""
+			}
 			command = tokens[len(tokens)-1]
 		}
 	} else if len(argv) > 1 {
