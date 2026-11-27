@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -738,4 +739,188 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 			}
 		})
 	}
+}
+
+// A record that cannot be read, decoded, or interpreted can vouch for nothing,
+// so it must never stop the agent-server from starting (#7883): the install
+// moves the file aside under a name that says so and the recorder starts empty
+// — anonymous "none", the same answer a missing record gives — which sends
+// every later reconcile through the host's own markers instead of vouching for
+// a swap it cannot prove. On master each case makes InstallDurableAccountSwapRecord
+// return the load error and `af agent-server` refuses to start, wedging the
+// sandbox session until the file is deleted by hand (the uninterpretable
+// outcome row fails there differently: master's load accepts it, and the
+// rehydrated "bogus" verdict fences the reconcile forever instead of settling).
+func TestACorruptSwapRecordStartsTheRecorderEmptyAndReconcilesAsMasterWould(t *testing.T) {
+	rows := []struct {
+		name     string
+		contents string
+		// why the row fails on master — each names the stated reason.
+		masterFail string
+	}{
+		{name: "truncated JSON", contents: `{"outcome":"committed","id":"test-swap-1"`,
+			masterFail: "the load's parse error fails the install"},
+		{name: "wrong top-level type", contents: `[1,2,3]`,
+			masterFail: "the load's parse error fails the install"},
+		{name: "wrong field type", contents: `{"outcome":42,"id":"test-swap-1"}`,
+			masterFail: "the load's parse error fails the install"},
+		{name: "zero bytes", contents: ``,
+			masterFail: "the load's parse error fails the install"},
+		{name: "uninterpretable verdict", contents: `{"outcome":"bogus","id":"test-swap-1"}`,
+			masterFail: "the load accepts the file, the rehydrated verdict has no reconcile arm, and the row fences forever"},
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			f := newSwapFixture(t)
+			dir := t.TempDir()
+			key := RebuildTeardownKey("/repo", "title")
+			path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+			require.NoError(t, os.WriteFile(path, []byte(row.contents), 0o600))
+
+			// The agent-server installs its durable record the way
+			// RunAgentServer does at startup (#7862).
+			agentInst := &Instance{Title: "title"}
+			require.NoError(t, agentInst.InstallDurableAccountSwapRecord(dir, key),
+				"a corrupt record must not stop the agent-server from starting (master: %s)", row.masterFail)
+
+			// The recorder starts with nothing it can vouch for: anonymous
+			// "none", exactly what a missing record answers. On master the
+			// uninterpretable-verdict row fails HERE — the load accepted the
+			// file and the recorder vouches for a "bogus" verdict — before the
+			// quarantine block below shows the file was never moved aside.
+			las, ok := agentInst.AgentServer().(*localAgentServer)
+			require.True(t, ok)
+			o, p, id := las.acctSwap.status()
+			assert.Equal(t, swapOutcomeNone, o)
+			assert.Empty(t, p)
+			assert.Empty(t, id)
+
+			// The evidence is moved aside under a name that says so, never
+			// deleted — and under its new name no load reads it again.
+			assert.NoFileExists(t, path)
+			aside, err := os.ReadFile(path + ".corrupt")
+			require.NoError(t, err)
+			assert.Equal(t, row.contents, string(aside), "the quarantined file keeps the corrupt bytes")
+
+			// And it reconciles as master would with no record: the host's own
+			// markers decide. A proven scopeOutgoing (the staged scope present,
+			// no account.prev) takes the serialized discard and settles
+			// rolled_back — master's `none` arm verbatim.
+			const swapN = "test-swap-1"
+			f.srv.rec = accountSwapRecorder{store: las.acctSwap.store}
+			stage := f.stagedDirFor(swapN)
+			require.NoError(t, os.RemoveAll(f.w.PrevAccountDir()))
+			require.NoError(t, os.MkdirAll(stage, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(stage, accountSwapMarkerRel), []byte(swapN), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(stage, credFile), []byte(secretAlt), 0o600))
+			f.inst.offBoxSwapInFlight = &InFlightOffBoxSwapData{SwapID: swapN, From: "work", To: "alt", ScopedStage: true}
+			f.inst.startupStateUnknown = true
+
+			settled, err := f.reconcileInFlight()
+			require.NoError(t, err, "the row settles — master's empty recorder reaches rolled_back over scopeOutgoing")
+			assert.True(t, settled)
+			assert.Nil(t, f.inst.InFlightOffBoxSwap())
+			assert.False(t, f.inst.StartupStateUnknown())
+			acct, _ := f.inst.AccountSelection()
+			assert.Equal(t, "work", acct, "the verdict the host's layout proves, never one the corrupt record could not vouch for")
+
+			// The recorder is durably backed again already: the discard's
+			// tombstone write recreated the record file — the corrupt bytes are
+			// gone for good under .corrupt, and this swap's own verdict is on
+			// disk where the next restart will find it.
+			d, err := las.acctSwap.store.load()
+			require.NoError(t, err)
+			assert.Equal(t, accountSwapRecordData{Outcome: swapOutcomeRolledBack, ID: swapN, Cancelled: swapN}, d)
+		})
+	}
+}
+
+// The record belongs to one session generation (#7883): the workspace teardown
+// — localAgentServer.Kill, the path the daemon's Kill RPC and a non-adopted
+// SIGTERM's shutdownWorkspace converge on — retires it, while a restart WITHIN
+// the generation (the crashed agent-server's adopted replacement) never
+// reaches Kill and keeps it. That asymmetry is #7862's whole point.
+func TestSwapRecordIsRetiredAtTeardownButSurvivesASameGenerationRestart(t *testing.T) {
+	dir := t.TempDir()
+	key := RebuildTeardownKey("/repo", "title")
+	path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+
+	// Generation 1: the agent-server installs the store and a swap commits.
+	first := &Instance{Title: "title", backend: &FakeBackend{}}
+	require.NoError(t, first.InstallDurableAccountSwapRecord(dir, key))
+	las1, ok := first.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	_, err := las1.acctSwap.run("swap-1", func() (string, error) { return "claude", nil })
+	require.NoError(t, err)
+	assert.FileExists(t, path)
+
+	// A restart WITHIN the generation — the crashed server's replacement —
+	// installs the same store, reaches no Kill, and rehydrates the verdict the
+	// prior process reached (#7862).
+	second := &Instance{Title: "title", backend: &FakeBackend{}, gitWorktree: &git.GitWorktree{}}
+	require.NoError(t, second.InstallDurableAccountSwapRecord(dir, key))
+	las2, ok := second.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	o, p, id := las2.acctSwap.status()
+	assert.Equal(t, swapOutcomeCommitted, o)
+	assert.Equal(t, "claude", p)
+	assert.Equal(t, "swap-1", id)
+	assert.FileExists(t, path, "a same-generation restart keeps the record")
+
+	// The session's teardown retires the record: the instance still holds its
+	// workspace, so the kill is the generation's end — a session re-created on
+	// the same (repo, title) key inherits no verdict a dead generation reached.
+	require.NoError(t, las2.Kill(false))
+	assert.NoFileExists(t, path, "the workspace teardown retired the record")
+
+	third := &Instance{Title: "title", backend: &FakeBackend{}}
+	require.NoError(t, third.InstallDurableAccountSwapRecord(dir, key))
+	las3, ok := third.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	o, _, id = las3.acctSwap.status()
+	assert.Equal(t, swapOutcomeNone, o, "a new generation inherits nothing from the last")
+	assert.Empty(t, id)
+}
+
+// The /v1/agent/stop path reaches localAgentServer.Kill too — StopPreserving
+// runs StopPreservingWorkspace, then its SIGTERM drives shutdownWorkspace into
+// Kill on a backend that no-ops — but the workspace PRESERVED, so the session
+// generation survives for a later adopted restart and the record must survive
+// with it. What Kill retires is the record of the generation the kill ENDS,
+// and the kill decides that by what the instance still holds when it runs:
+// StopPreservingWorkspace's teardown already released the worktree pointer,
+// so this Kill destroys nothing and retires nothing (Codex on #7894).
+func TestSwapRecordSurvivesAWorkspacePreservingShutdown(t *testing.T) {
+	dir := t.TempDir()
+	key := RebuildTeardownKey("/repo", "title")
+	path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+
+	inst := &Instance{Title: "title", backend: &FakeBackend{}, gitWorktree: &git.GitWorktree{}}
+	require.NoError(t, inst.InstallDurableAccountSwapRecord(dir, key))
+	las, ok := inst.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	_, err := las.acctSwap.run("swap-1", func() (string, error) { return "claude", nil })
+	require.NoError(t, err)
+
+	// The preserve stop releases the workspace: teardownTabs(keepWorkspace)
+	// leaves the tree on disk and clears the pointer — exactly the sequence
+	// the /v1/agent/stop handler runs before its SIGTERM.
+	require.NoError(t, las.StopPreservingWorkspace())
+	assert.Nil(t, inst.gitWorktree, "the preserve released the instance's workspace")
+
+	// The SIGTERM's shutdownWorkspace then calls Kill on a backend that
+	// no-ops — the workspace it would destroy was already released. The kill
+	// succeeds, but the record is the PRESERVED generation's own: it must
+	// survive for a later adopted restart to rehydrate.
+	require.NoError(t, las.Kill(false))
+	assert.FileExists(t, path, "the record outlives a workspace-preserving shutdown")
+
+	reborn := &Instance{Title: "title", backend: &FakeBackend{}, gitWorktree: &git.GitWorktree{}}
+	require.NoError(t, reborn.InstallDurableAccountSwapRecord(dir, key))
+	las2, ok := reborn.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	o, _, id := las2.acctSwap.status()
+	assert.Equal(t, swapOutcomeCommitted, o, "the adopted restart rehydrates the preserved generation's verdict")
+	assert.Equal(t, "swap-1", id)
 }
