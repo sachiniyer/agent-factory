@@ -94,6 +94,34 @@ func TestCheckAndHandleTrustPrompt_Issue7870PickerWithItsHeaderHoldsAtEveryFoote
 	}
 }
 
+// A begun-footer frame is held silently, as painting, the way master held it
+// under claudeMCPServersPaintingOf: no refusal is logged — refusalLogged
+// latches once per pane, and a quiet frame must not consume it — and the hold
+// kind is mcp-partial (#7872 review, R2). The whole-footer read keeps both:
+// the refusal line and mcp-unreadable.
+func TestCheckAndHandleTrustPrompt_Issue7870BegunFooterHoldsSilently(t *testing.T) {
+	_, _, errLog := captureTrustPromptLogs(t)
+	rows, header := mcpServersPickerRowsOf(t, mcpServersTwoFixture)
+	begun := strings.Join(append(append([]string{}, rows[:len(rows)-1]...), " Space to"), "\n")
+	requireHeldWithoutAKey(t, begun, "the whole two-server capture over \" Space to\"")
+	require.Zero(t, strings.Count(errLog.String(), "refusing to answer"),
+		"a begun footer holds silently; the refusal is reserved for the whole-footer read")
+	require.Equal(t, DialogHoldMCPPartial, claudeDialogHoldKind(claudeScreenOf(begun)),
+		"a begun footer is a partial hold, the kind the painting reader gives a begun row")
+
+	// The same begun footer with the header scrolled off holds silently too.
+	cut := strings.Join(append(append([]string{}, rows[header+1:len(rows)-1]...), " Space to"), "\n")
+	requireHeldWithoutAKey(t, cut, "the picker below its header over \" Space to\"")
+	require.Zero(t, strings.Count(errLog.String(), "refusing to answer"))
+	require.Equal(t, DialogHoldMCPPartial, claudeDialogHoldKind(claudeScreenOf(cut)))
+
+	// And the whole-footer frame keeps the refusal and the unreadable kind.
+	whole := strings.Join(rows[header+1:], "\n")
+	requireHeldWithoutAKey(t, whole, "the picker below its header with its footer whole")
+	require.Equal(t, 1, strings.Count(errLog.String(), "refusing to answer"))
+	require.Equal(t, DialogHoldMCPUnreadable, claudeDialogHoldKind(claudeScreenOf(whole)))
+}
+
 // Ordinary launch and idle frames stay clear: a begun footer is the picker's
 // only when the content straight above it is "Enable selected" — or the pane
 // shows nothing above it — and nothing is painted below it.

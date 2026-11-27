@@ -2,6 +2,28 @@ package tmux
 
 import "strings"
 
+// claudeMCPServersTailVerdict is what the pane's own trailing rows say of the
+// picker's footer.
+type claudeMCPServersTailVerdict int
+
+const (
+	// claudeMCPServersTailNone: the pane's trailing rows are not the picker's
+	// footer over its "Enable selected" row.
+	claudeMCPServersTailNone claudeMCPServersTailVerdict = iota
+	// claudeMCPServersTailWhole: the pane's last content is the whole footer
+	// under its "Enable selected" row — the hold #7463 added, which af
+	// reports as a refusal, once, the way it reports the picker's other
+	// unreadable shapes.
+	claudeMCPServersTailWhole
+	// claudeMCPServersTailBegun: the pane's last content is a proper prefix
+	// of the footer that begins a row — the same footer at an earlier paint
+	// instant (#7870). Held silently, as painting: the refusal log and the
+	// unreadable hold kind stay the whole-footer read's, the same hold
+	// claudeMCPServersPaintingOf gives a begun row it can see (#7872 review,
+	// R2).
+	claudeMCPServersTailBegun
+)
+
 // claudeMCPServersTailOf reports the 2.1.322 multi-server picker (#7166) from
 // its own trailing rows alone (#7463): the last content in the pane is its
 // footer, and the content straight above the footer, if the pane shows any, is
@@ -53,25 +75,28 @@ import "strings"
 // Another picker that ends in the same two rows holds too. af cannot tell it
 // from this one, and a prompt typed into either is lost. The cost of the hold
 // is the create's trust budget running out, which is loud and can be retried.
-func claudeMCPServersTailOf(screen visibleText) bool {
+func claudeMCPServersTailOf(screen visibleText) claudeMCPServersTailVerdict {
 	lines := screen.lines()
 	last := len(lines) - 1
 	for last >= 0 && strings.TrimSpace(lines[last]) == "" {
 		last--
 	}
 	footer, whole := claudeRowsSpelling(lines, last, claudeSquash(claudeMCPServersFooter), false)
-	if !whole {
-		// The footer may still be painting: the pane's last content is a
-		// proper prefix of it that begins a row. A pane that holds over the
-		// footer whole holds over every such prefix — the same footer at an
-		// earlier paint instant — so the rows above it are read the same
-		// way (#7870).
-		footer = claudeMCPServersFooterPrefixStart(lines, last)
-		if footer < 0 {
-			return false
+	if whole {
+		if claudeMCPServersTailAbove(lines, footer) {
+			return claudeMCPServersTailWhole
 		}
+		return claudeMCPServersTailNone
 	}
-	return claudeMCPServersTailAbove(lines, footer)
+	// The footer may still be painting: the pane's last content is a proper
+	// prefix of it that begins a row. A pane that holds over the footer
+	// whole holds over every such prefix — the same footer at an earlier
+	// paint instant — so the rows above it are read the same way (#7870).
+	footer = claudeMCPServersFooterPrefixStart(lines, last)
+	if footer >= 0 && claudeMCPServersTailAbove(lines, footer) {
+		return claudeMCPServersTailBegun
+	}
+	return claudeMCPServersTailNone
 }
 
 // claudeMCPServersTailAbove reads the pane above the picker's footer — whole,
