@@ -120,6 +120,20 @@ func (s *accountSwapStore) save(d accountSwapRecordData) error {
 	return syncDir(dir)
 }
 
+// clear removes the recorder's durable state so a restart rehydrates nothing
+// — the way a fresh pre-fix recorder answered swapOutcomeNone and fenced. Used
+// when a terminal save cannot land but the file can still be unlinked (e.g.
+// ENOSPC: a create fails, an unlink still succeeds): leaving the prior swap's
+// record on disk would let a restart rehydrate the wrong swap's verdict and
+// settle a row/host account mismatch (#7793 review R1). A missing file is not
+// an error — there is nothing to clear.
+func (s *accountSwapStore) clear() error {
+	if err := os.Remove(s.path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove account swap record %s: %w", s.path, err)
+	}
+	return nil
+}
+
 // InstallDurableAccountSwapRecord wires the agent-server's swap recorder to a
 // durable file in the session's sandbox dir and rehydrates it from a previous
 // process's terminal record, the way InstallDurableRebuildTeardown wires the

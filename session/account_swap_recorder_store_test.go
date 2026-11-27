@@ -220,13 +220,14 @@ func TestCommittedVerdictReplaysAcrossAnAgentServerRestart(t *testing.T) {
 	assert.False(t, f.inst.StartupStateUnknown())
 }
 
-// The regression guard: a restarted agent-server whose recorder is NOT
+// The fail-closed pin: a restarted agent-server whose recorder is NOT
 // rehydrated answers anonymous "none", a settled host probes scopeUnknown, and
 // the re-reconcile fences the row forever — the exact bug the durable recorder
-// exists to close (#7793). If the recorder ever stops persisting or
-// rehydrating, the replay-across-a-restart tests above fail and this test still
-// documents the failure mode it would regress to.
-func TestSettledSwapFencesForeverWhenTheRecorderForgetsOnRestart(t *testing.T) {
+// exists to close (#7793). This is the fail-closed contract a forgetting
+// recorder must keep, not an accepted gap: if the recorder ever stops
+// persisting or rehydrating, the replay-across-a-restart tests above fail and
+// this test still documents the failure mode it would regress to.
+func TestAForgottenSwapRecorderFailsClosedFencingTheRowForever(t *testing.T) {
 	f := newSwapFixture(t)
 	f.srv.rec.store = newAccountSwapStore(filepath.Join(t.TempDir(), accountSwapRecordMarkerName("key")))
 	f.srv.holdNext = 1
@@ -248,4 +249,138 @@ func TestSettledSwapFencesForeverWhenTheRecorderForgetsOnRestart(t *testing.T) {
 	assert.False(t, settled, "an empty recorder + a settled host fences forever")
 	assert.NotNil(t, f.inst.InFlightOffBoxSwap())
 	assert.True(t, f.inst.StartupStateUnknown())
+}
+
+// clear removes a previous process's durable record so a restart rehydrates
+// nothing — the way a fresh pre-fix recorder answered swapOutcomeNone. A
+// missing file is not an error: there is nothing to clear (#7793 review R1).
+func TestAccountSwapStoreClearRemovesTheRecordAndToleratesAMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	store := newAccountSwapStore(filepath.Join(dir, accountSwapRecordMarkerName("key")))
+	require.NoError(t, store.save(accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: "swap-1"}))
+	require.NoError(t, store.clear())
+	d, err := store.load()
+	require.NoError(t, err)
+	assert.Equal(t, accountSwapRecordData{}, d, "the record was removed")
+
+	// A second clear on the now-missing file is not an error.
+	require.NoError(t, store.clear())
+}
+
+// R1's crash window: swap N-1 settled leaving {committed, N-1} on disk, swap N
+// pre-wrote its own id as unknown, rotated, and the agent-server died before
+// the terminal save. A restarted agent-server rehydrates THIS swap's own
+// unknown from the pre-write, so the reconcile fences safely — it never
+// rehydrates N-1's stale terminal record and mistakes it for a queued request
+// that rolls back against a host already running N's account (#7793 review R1).
+// On a head with no pre-write (the prior commit) the disk still holds
+// {committed, N-1}, the reconcile discards into a definite rollback, and the
+// row unfences on the wrong account — this test fails there.
+func TestCrashAfterThePreWriteBeforeTheTerminalSaveStaysFenced(t *testing.T) {
+	f := newSwapFixture(t)
+	store := newAccountSwapStore(filepath.Join(t.TempDir(), accountSwapRecordMarkerName("key")))
+	f.srv.rec.store = store
+
+	// Swap N-1 settled: its terminal record is on the durable store and in
+	// the running recorder's memory.
+	require.NoError(t, store.save(accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: "test-swap-1"}))
+	f.srv.rec.restore(accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: "test-swap-1"})
+
+	// The daemon's durable in-flight record names swap N (test-swap-2), and
+	// the loader fenced the row on startup.
+	f.inst.offBoxSwapInFlight = &InFlightOffBoxSwapData{SwapID: "test-swap-2", From: "work", To: "alt"}
+	f.inst.startupStateUnknown = true
+
+	// Swap N crosses: run() persists this swap's id as unknown (the pre-write
+	// the fix adds), then swap() runs — the rotation — and the agent-server
+	// dies before the terminal save. The closure simulates the crash by
+	// detaching the store, so the deferred terminal save run() would do is a
+	// no-op and the disk holds exactly what the pre-write left.
+	_, err := f.srv.rec.run("test-swap-2", func() (string, error) {
+		f.srv.rec.store = nil // the process died mid-rotation; the terminal save never lands
+		return "claude", nil
+	})
+	require.NoError(t, err)
+
+	// The agent-server restarted: its fresh recorder rehydrates from the disk
+	// the crash left — {test-swap-2, unknown} on this head (the pre-write
+	// landed), not the prior {committed, test-swap-1} a head with no pre-write
+	// would leave.
+	f.srv.rec.store = store // reattach: the crash nil'd the in-memory store; the file persists
+	f.restartAgentServerRecorder(t)
+
+	settled, err := f.reconcileInFlight()
+	require.ErrorIs(t, err, ErrOffBoxSwapVerdictIndeterminate, "a crash mid-rotation rehydrates this swap's own unknown and fences")
+	assert.False(t, settled, "the row is not settled on the wrong account")
+	assert.NotNil(t, f.inst.InFlightOffBoxSwap(), "the fence stays up")
+	assert.True(t, f.inst.StartupStateUnknown())
+}
+
+// R1's pre-write is required, not best-effort: when the checkpoint cannot land
+// and the stale prior record cannot be removed either, the swap is refused
+// before anything rotates — the host never moves while the durable record
+// could name another swap (#7793 review R1).
+func TestPreRotationCheckpointFailureRefusesTheSwapWhenTheRecordCannotBeCleared(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions; the save/clear failure this test forces needs a non-root uid")
+	}
+	dir := t.TempDir()
+	store := newAccountSwapStore(filepath.Join(dir, accountSwapRecordMarkerName("key")))
+	// A prior swap's terminal record is on disk and in the running recorder.
+	require.NoError(t, store.save(accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: "swap-1"}))
+	// The directory becomes read-only-as-writes: CreateTemp (save) and Remove
+	// (clear) both fail with EACCES — the shape of a disk that can neither
+	// create nor unlink, so neither the pre-write nor the fallback clear can
+	// land.
+	require.NoError(t, os.Chmod(dir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	var r accountSwapRecorder
+	r.store = store
+	r.restore(accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: "swap-1"})
+
+	ran := false
+	_, err := r.run("swap-2", func() (string, error) { ran = true; return "claude", nil })
+	require.Error(t, err, "the swap is refused when the pre-write cannot land and the stale record cannot be cleared")
+	assert.False(t, ran, "swap() never ran — the rotation did not move the host")
+
+	// The in-memory slot is restored to the prior swap's record.
+	o, p, id := r.status()
+	assert.Equal(t, swapOutcomeCommitted, o)
+	assert.Equal(t, "claude", p)
+	assert.Equal(t, "swap-1", id)
+
+	// The stale record is still on disk, unchanged — the refused swap did not
+	// touch it.
+	d, lerr := store.load()
+	require.NoError(t, lerr)
+	assert.Equal(t, "swap-1", d.ID)
+	assert.Equal(t, swapOutcomeCommitted, d.Outcome)
+}
+
+// R2's tombstone window: discardStaged tombstones the id AND claims its
+// rolled_back verdict in the SAME write, so a crash between the tombstone save
+// and noteStagedDiscarded's later save rehydrates as this swap's OWN
+// rolled_back — never the anonymous none a bare tombstone would leave reading
+// forever (#7793 review R2).
+func TestCrashBetweenTheTombstoneAndNoteStagedDiscardedRehydratesAsRolledBack(t *testing.T) {
+	dir := t.TempDir()
+	store := newAccountSwapStore(filepath.Join(dir, accountSwapRecordMarkerName("key")))
+	var r accountSwapRecorder
+	r.store = store
+
+	// discardStaged tombstones the id and claims rolled_back under it in one
+	// write. The agent-server then crashed — noteStagedDiscarded never ran.
+	r.discardStaged("doomed")
+
+	var fresh accountSwapRecorder
+	fresh.store = store
+	d, err := store.load()
+	require.NoError(t, err)
+	fresh.restore(d)
+
+	o, p, id := fresh.status()
+	assert.Equal(t, swapOutcomeRolledBack, o, "the tombstone's write already carried the rolled_back verdict")
+	assert.Equal(t, "doomed", id, "the verdict is this swap's own")
+	assert.Empty(t, p)
 }

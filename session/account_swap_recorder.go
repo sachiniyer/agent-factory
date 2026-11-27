@@ -108,7 +108,21 @@ func (r *accountSwapRecorder) run(id string, swap func() (string, error)) (strin
 	// B's own id as unknown makes a restart rehydrate B (not A); the
 	// reconcile fences safely the way a fresh pre-fix recorder did, instead
 	// of settling a row/host account mismatch.
-	r.persistLocked()
+	//
+	// This pre-write is required, not best-effort: if it cannot land, the
+	// prior swap's terminal record stays on disk and a restart rehydrates
+	// the wrong swap's verdict — the exact mismatch above. Remove that stale
+	// record so a restart rehydrates nothing (the way a fresh pre-fix
+	// recorder answered none and fenced); an unlink still succeeds on a
+	// full or otherwise-unwritable-as-creates disk. If even the remove
+	// fails, refuse the swap before anything rotates — the host never moves
+	// while the durable record could name another swap (#7793 review R1).
+	if err := r.persistCheckedLocked(); err != nil {
+		if clrErr := r.store.clear(); clrErr != nil {
+			r.id, r.outcome, r.program = prevID, prevOutcome, prevProgram
+			return "", fmt.Errorf("account swap %s: could not checkpoint the swap record before rotating: %w", id, clrErr)
+		}
+	}
 	program, err := swap()
 	switch {
 	case err == nil:
@@ -147,21 +161,28 @@ func (r *accountSwapRecorder) status() (outcome, program, id string) {
 	return r.outcome, r.program, r.id
 }
 
+// persistCheckedLocked writes the recorder's durable state to its store, when
+// one is installed, and returns any error so a caller that needs the write to
+// land can react. Caller holds r.mu.
+func (r *accountSwapRecorder) persistCheckedLocked() error {
+	if r.store == nil {
+		return nil
+	}
+	return r.store.save(accountSwapRecordData{
+		Outcome:   r.outcome,
+		Program:   r.program,
+		ID:        r.id,
+		Cancelled: r.cancelled,
+	})
+}
+
 // persistLocked writes the recorder's durable state to its store, when one is
 // installed. Best-effort: a failed write logs a warning — the swap's terminal
 // outcome stands in memory for this process, and a restart re-asks the host
 // the same way the pre-fix recorder did (no worse), rather than failing the
 // swap over a side record. Caller holds r.mu.
 func (r *accountSwapRecorder) persistLocked() {
-	if r.store == nil {
-		return
-	}
-	if err := r.store.save(accountSwapRecordData{
-		Outcome:   r.outcome,
-		Program:   r.program,
-		ID:        r.id,
-		Cancelled: r.cancelled,
-	}); err != nil {
+	if err := r.persistCheckedLocked(); err != nil {
 		log.WarningLog.Printf("account swap recorder: could not persist the terminal record; a restart re-asks the host for it: %v", err)
 	}
 }
