@@ -92,6 +92,14 @@ const accountScopeIndeterminate = "the account scope on the host is in an unknow
 // marked startup-unknown so nothing relaunches into it, and writes nothing back.
 var ErrAccountSwapIndeterminate = errors.New("the host's account could not be established after the swap")
 
+// ErrOffBoxAccountSwapOwesMission reports that an off-box account swap was
+// refused because the session still owes the takeover mission from a prior
+// handoff (#4429). The automatic failover routes on it so the ordinary
+// same-account fallback does not bypass the refusal and start a fresh prompt
+// over a mission that is still pending — which would leave the obligation for
+// recovery to deliver as a second turn.
+var ErrOffBoxAccountSwapOwesMission = errors.New("off-box account swap refused while a handoff mission is still owed")
+
 // scopeState is what the host's directories say about a swap.
 type scopeState int
 
@@ -525,10 +533,23 @@ func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*
 	// without it the failover's commit silently calls SetPendingHandoffMission
 	// and discards an obligation nothing else records.
 	if mission := i.PendingHandoffMission(); mission != "" {
-		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q still owes the mission from its last handoff; resolve it first — `%s` resends it, `%s` retires it",
-			i.Title,
-			shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit"}, i.Title),
-			shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit", "--delivered"}, i.Title))
+		retry := shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit"}, i.Title)
+		// The remedies follow the recorded delivery verdict (#4429): a
+		// positively not-delivered mission belongs to automatic recovery, and
+		// CanConfirmPendingHandoffDelivery refuses it, so suggesting
+		// `retry-limit --delivered` there only leads to another refusal. An
+		// ambiguous (or recorded-delivered) verdict is the operator's
+		// confirm-or-retry decision, so both verbs apply. The sentinel lets
+		// the daemon's automatic failover keep this refusal from being
+		// bypassed by the ordinary same-account fallback.
+		if i.PendingHandoffMissionAutoRetryable() {
+			return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q still owes the mission from its last handoff; resolve it first — `%s` resends it (handoff recovery replays it automatically): %w",
+				i.Title, retry, ErrOffBoxAccountSwapOwesMission)
+		}
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q still owes the mission from its last handoff; resolve it first — `%s` resends it, `%s` retires it: %w",
+			i.Title, retry,
+			shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit", "--delivered"}, i.Title),
+			ErrOffBoxAccountSwapOwesMission)
 	}
 	if name = strings.TrimSpace(name); name == "" {
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)
