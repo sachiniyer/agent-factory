@@ -327,12 +327,20 @@ func TestRelocateCrashWindow_RealCrossDeviceMoveLeavesResidue(t *testing.T) {
 	// move does not take the test process with it. The child re-execs this
 	// test binary with a -test.run filter that selects the child harness and
 	// env pointing at the already-prepared src/dest and second-fs marker.
+	// The child's os.Exit(9) skips every deferred cleanup INCLUDING the
+	// one that removes the sandbox home TestMain stamps under TMPDIR —
+	// each crashed child would leak one. Point the child's temp root at
+	// a directory the parent owns so whatever it leaks dies with this
+	// test's tree.
+	childTmp := filepath.Join(t.TempDir(), "child-tmp")
+	require.NoError(t, os.Mkdir(childTmp, 0o755))
 	cmd := exec.Command(os.Args[0], "-test.run=^TestRelocateCrashWindow_RealCrossDeviceMoveLeavesResidue$", "-test.timeout=60s")
 	cmd.Dir = srcParent
 	cmd.Env = append(os.Environ(),
 		"AF_CRASH_CHILD_SECOND_FS=1",
 		"AF_CRASH_SRC="+src,
 		"AF_CRASH_DEST="+dest,
+		"TMPDIR="+childTmp,
 	)
 	var childOut strings.Builder
 	cmd.Stdout = &childOut

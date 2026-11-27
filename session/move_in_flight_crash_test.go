@@ -82,10 +82,18 @@ func TestMoveInFlightRecord_CrashPoints(t *testing.T) {
 			seed.liveness = LiveArchived
 			persistRowForTest(t, repoID, seed.ToInstanceData())
 
+			// The child's os.Exit(9) skips every deferred cleanup
+			// INCLUDING the one that removes the sandbox home TestMain
+			// stamps under TMPDIR — each crashed child would leak one.
+			// Point the child's temp root at a directory the parent
+			// owns so whatever it leaks dies with this test's tree.
+			childTmp := filepath.Join(t.TempDir(), "child-tmp")
+			require.NoError(t, os.Mkdir(childTmp, 0o755))
 			cmd := exec.Command(os.Args[0], "-test.run=^TestMoveInFlightRecord_CrashPoints$", "-test.timeout=60s")
 			cmd.Dir = filepath.Dir(src)
 			cmd.Env = append(os.Environ(),
 				"AF_CRASH_CHILD_MIF=1",
+				"TMPDIR="+childTmp,
 				// TestMain's SandboxHome repoints AGENT_FACTORY_HOME in the
 				// child process; the child restores this shared home in its
 				// own body so its checkpoint persists into the store the
