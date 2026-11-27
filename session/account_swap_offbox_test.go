@@ -793,3 +793,309 @@ func TestSameAgentRestartIsAdmittedOnlyForTheAccountSwap(t *testing.T) {
 	inst.restartingSameAgent = false
 	require.ErrorContains(t, inst.ValidateHandoffTarget(tmux.ProgramClaude), "already running", "and it is not left open")
 }
+
+// A scheduled usage-limit failover (or a manual handoff --account) reaches the
+// off-box swap through admitOffBoxAccountSwap, whose commit stamps the takeover
+// brief as the pending handoff mission via SetPendingHandoffMission. An
+// unresolved mission from a PRIOR handoff must not be silently overwritten —
+// the #4429 invariant the manual RuntimeActionHandoff admission already
+// carries. The off-box admission must refuse the same way, or the failover's
+// commit discards an obligation (mission text AND delivery verdict) nothing
+// else records.
+func TestOffBoxAccountSwapRefusedWhileAMissionIsOwed(t *testing.T) {
+	t.Run("admission refuses and preserves the owed mission and verdict", func(t *testing.T) {
+		f := newSwapFixture(t)
+		const mission = "ORIGINAL MISSION BRIEF"
+		f.inst.SetPendingHandoffMission(mission)
+		require.NoError(t, f.inst.RecordPendingHandoffMissionDelivery(mission, PromptCouldNotConfirm))
+		// The scheduled failover reaches this admission at LiveLimitReached
+		// once the startup-unknown fence is past; set the row there so the
+		// refusal's remedies match the shape that actually fires.
+		f.inst.SetLimitReached(time.Time{})
+
+		// The scheduler's per-candidate admission (ValidateOffBoxAccountSwap)
+		// refuses, the same way the manual RuntimeActionHandoff admission does.
+		err := f.inst.ValidateOffBoxAccountSwap("alt")
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrOffBoxAccountSwapOwesMission,
+			"the sentinel the daemon routes on to block the same-account fallback wraps the refusal")
+		require.ErrorContains(t, err, "still owes the mission from its last handoff")
+		require.ErrorContains(t, err, "retry-limit", "the refusal names the verb that resolves it")
+
+		// The manual handoff admission refuses the same row, so the two
+		// admissions a row faces cannot disagree.
+		require.ErrorContains(t, f.inst.ValidateRuntimeAction(RuntimeActionHandoff),
+			"still owes the mission from its last handoff")
+
+		// The full swap refuses too: nothing is staged, stopped, or sent.
+		_, err = f.inst.SwapOffBoxAccount("alt", true, "NEW FAILOVER NOTICE")
+		require.ErrorContains(t, err, "still owes the mission from its last handoff")
+		assert.Zero(t, f.srv.calls, "the agent-server is never asked to stop anything")
+		assert.Empty(t, *f.shellCalls, "and nothing is sent to the host")
+		assert.NoDirExists(t, f.stagedDir())
+
+		// The owed mission and its ambiguous verdict survive the refusal —
+		// the exact state the overwrite would have discarded.
+		assert.Equal(t, mission, f.inst.PendingHandoffMission(), "the mission survives the refused swap")
+		assert.Equal(t, PromptCouldNotConfirm, f.inst.PendingHandoffDeliveryStatus(),
+			"the ambiguous verdict survives the refused swap")
+		assert.Equal(t, "work", func() string { a, _ := f.inst.AccountSelection(); return a }(),
+			"the row keeps the account it held")
+		assert.Equal(t, secretWork, f.hostCred(t, "account"), "and the host is untouched")
+	})
+
+	t.Run("a not-delivered verdict is preserved too", func(t *testing.T) {
+		f := newSwapFixture(t)
+		const mission = "ORIGINAL MISSION BRIEF"
+		f.inst.SetPendingHandoffMission(mission)
+		require.NoError(t, f.inst.RecordPendingHandoffMissionDelivery(mission, PromptNotDelivered))
+
+		require.Error(t, f.inst.ValidateOffBoxAccountSwap("alt"))
+		_, err := f.inst.SwapOffBoxAccount("alt", true, "NEW FAILOVER NOTICE")
+		require.Error(t, err)
+
+		assert.Equal(t, mission, f.inst.PendingHandoffMission())
+		assert.Equal(t, PromptNotDelivered, f.inst.PendingHandoffDeliveryStatus())
+	})
+
+	t.Run("resolving the mission re-admits the swap", func(t *testing.T) {
+		f := newSwapFixture(t)
+		const mission = "ORIGINAL MISSION BRIEF"
+		f.inst.SetPendingHandoffMission(mission)
+		require.NoError(t, f.inst.RecordPendingHandoffMissionDelivery(mission, PromptCouldNotConfirm))
+
+		// Refused while owed.
+		require.Error(t, f.inst.ValidateOffBoxAccountSwap("alt"))
+
+		// Once resolved, the swap proceeds and stamps its own notice.
+		require.True(t, f.inst.ClearPendingHandoffMission(mission))
+		require.NoError(t, f.inst.ValidateOffBoxAccountSwap("alt"))
+		res, err := f.inst.SwapOffBoxAccount("alt", true, "NEW FAILOVER NOTICE")
+		require.NoError(t, err)
+		assert.Equal(t, "alt", res.To)
+		assert.Equal(t, "NEW FAILOVER NOTICE", f.inst.PendingHandoffMission(),
+			"a fresh swap stamps its own notice once no mission is owed")
+		assert.Equal(t, PromptNotDelivered, f.inst.PendingHandoffDeliveryStatus())
+	})
+
+	t.Run("a swap with no notice does not stamp a mission", func(t *testing.T) {
+		// A swap whose caller owes no notice (empty notice) commits without
+		// touching the pending mission — the stamp is guarded by notice != "".
+		f := newSwapFixture(t)
+		_, err := f.inst.SwapOffBoxAccount("alt", false, "")
+		require.NoError(t, err)
+		assert.Empty(t, f.inst.PendingHandoffMission(), "no notice means no pending mission")
+	})
+}
+
+// TestOffBoxAccountSwapRefusalRemediesFollowRoutingPredicates pins that the
+// owed-mission refusal's remedy text comes from the same predicates the daemon
+// routes on (CanRetryPendingHandoffMissionDelivery, CanConfirmPendingHandoffDelivery
+// and PendingHandoffMissionAutoRetryable), so the operator is never sent to a verb
+// the daemon would refuse on exactly the row the refusal fires on. The scheduled
+// failover reaches the off-box admission at LiveLimitReached once the
+// startup-unknown fence is past; there CanRetryPendingHandoffMissionDelivery is
+// false (it needs Running, Ready or startup-unknown), so retry-limit runs the
+// plain limit resume and is named only as an un-stall, never a resend. A
+// positively not-delivered mission belongs to automatic recovery, which
+// transfers it into the stored prompt (limit_auto_resume defaults OFF, so the
+// operator sends it with retry-limit); neither a resend nor --delivered admits
+// it.
+//
+// Each row fails on 98add920c, which printed "retry-limit resends it,
+// retry-limit --delivered retires it" for every verdict and liveness.
+func TestOffBoxAccountSwapRefusalRemediesFollowRoutingPredicates(t *testing.T) {
+	const mission = "ORIGINAL MISSION BRIEF"
+	for _, tc := range []struct {
+		name     string
+		verdict  PromptDeliveryStatus
+		liveness Liveness
+		// The predicate routing this row advertises, asserted first so the
+		// remedy below is tested against the branch the daemon would take.
+		autoRetryable   bool
+		canRetry        bool
+		canConfirm      bool
+		wantContains    []string
+		wantNotContains []string
+	}{
+		{
+			name:            "not-delivered at the limit wall names the transfer and the manual resume, no resend",
+			verdict:         PromptNotDelivered,
+			liveness:        LiveLimitReached,
+			autoRetryable:   true,
+			canRetry:        false,
+			canConfirm:      false,
+			wantContains:    []string{"handoff recovery transfers the mission", "send it with", "retry-limit", "automatic retry is off by default"},
+			wantNotContains: []string{"resends it", "retires it", "--delivered"},
+		},
+		{
+			name: "not-delivered on a running row names automatic resubmit, no operator verb",
+			// ResumePendingHandoffs resubmits a not-delivered mission on a
+			// running/ready row directly (it transfers only at the limit wall),
+			// so the remedy names no operator verb and must not promise the
+			// limit-wall transfer or a resend.
+			verdict:         PromptNotDelivered,
+			liveness:        LiveRunning,
+			autoRetryable:   true,
+			canRetry:        false,
+			canConfirm:      false,
+			wantContains:    []string{"resubmits the mission automatically", "no operator action is needed"},
+			wantNotContains: []string{"transfers the mission", "send it with", "retry-limit", "--delivered", "resends it", "retires it"},
+		},
+		{
+			name:            "ambiguous at the limit wall names --delivered and un-stall, not resend",
+			verdict:         PromptCouldNotConfirm,
+			liveness:        LiveLimitReached,
+			autoRetryable:   false,
+			canRetry:        false,
+			canConfirm:      true,
+			wantContains:    []string{"retires it if it already landed", "only un-stalls the agent", "leaves the mission owed"},
+			wantNotContains: []string{"resends it"},
+		},
+		{
+			name:            "ambiguous on a running row names resend and retire",
+			verdict:         PromptCouldNotConfirm,
+			liveness:        LiveRunning,
+			autoRetryable:   false,
+			canRetry:        true,
+			canConfirm:      true,
+			wantContains:    []string{"resends it", "retires it"},
+			wantNotContains: []string{"only un-stalls the agent"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSwapFixture(t)
+			f.inst.SetPendingHandoffMission(mission)
+			require.NoError(t, f.inst.RecordPendingHandoffMissionDelivery(mission, tc.verdict))
+			require.NoError(t, f.inst.Transition(ObserveLiveness(tc.liveness)))
+
+			// The predicates the daemon routes on must read what this row
+			// advertises, or the remedy text below would be testing the wrong
+			// branch.
+			require.Equal(t, tc.autoRetryable, f.inst.PendingHandoffMissionAutoRetryable(),
+				"PendingHandoffMissionAutoRetryable")
+			require.Equal(t, tc.canRetry, f.inst.CanRetryPendingHandoffMissionDelivery(),
+				"CanRetryPendingHandoffMissionDelivery")
+			require.Equal(t, tc.canConfirm, f.inst.CanConfirmPendingHandoffDelivery(),
+				"CanConfirmPendingHandoffDelivery")
+
+			err := f.inst.ValidateOffBoxAccountSwap("alt")
+			require.Error(t, err)
+			require.ErrorIs(t, err, ErrOffBoxAccountSwapOwesMission)
+			msg := err.Error()
+			require.Contains(t, msg, "still owes the mission from its last handoff")
+			for _, want := range tc.wantContains {
+				require.Contains(t, msg, want)
+			}
+			for _, notWant := range tc.wantNotContains {
+				require.NotContains(t, msg, notWant)
+			}
+
+			// The shared formatter produces the same remedy the runtime-action
+			// refusal would on this row, so the off-box swap refusal and
+			// RuntimeActionHandoff's refusal cannot drift.
+			runtimeActionErr := f.inst.ValidateRuntimeAction(RuntimeActionHandoff)
+			require.Error(t, runtimeActionErr)
+			require.Contains(t, runtimeActionErr.Error(), pendingHandoffMissionRemedy(f.inst.LifecycleView()),
+				"the runtime-action refusal uses the same shared remedy as the off-box swap refusal")
+		})
+	}
+}
+
+// TestPendingHandoffMissionRemedyDescribesEveryReachableState pins that
+// pendingHandoffMissionRemedy describes what actually happens to THIS row for
+// every state the owed-mission refusal can fire on, naming only the verbs the
+// daemon would admit there. The states are the property from the independent
+// review (PR #7864): not-delivered at the limit wall transfers; not-delivered on
+// a running/ready row resubmits automatically; ambiguous on a running row
+// resends and retires; ambiguous at the limit wall retires or only un-stalls;
+// a live row whose delivery is still being verified (no verdict, or an op in
+// flight) names no verb; a dead row names restore/kill. Rows 2 and 5 fail on
+// 9e295c227: state 2 printed the limit-wall transfer text on a running row, and
+// state 5 printed the dead-row "restore" text on a live row.
+func TestPendingHandoffMissionRemedyDescribesEveryReachableState(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		view            LifecycleView
+		autoRetryable   bool
+		canRetry        bool
+		canConfirm      bool
+		wantContains    []string
+		wantNotContains []string
+	}{
+		{
+			name: "not-delivered at the limit wall names the transfer and the manual resume",
+			view: LifecycleView{Title: "s", Liveness: LiveLimitReached, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptNotDelivered},
+			autoRetryable: true, canRetry: false, canConfirm: false,
+			wantContains:    []string{"handoff recovery transfers the mission", "send it with", "retry-limit", "automatic retry is off by default"},
+			wantNotContains: []string{"resends it", "retires it", "--delivered"},
+		},
+		{
+			name: "not-delivered on a running row names automatic resubmit, no operator verb",
+			view: LifecycleView{Title: "s", Liveness: LiveRunning, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptNotDelivered},
+			autoRetryable: true, canRetry: false, canConfirm: false,
+			wantContains:    []string{"resubmits the mission automatically", "no operator action is needed"},
+			wantNotContains: []string{"transfers the mission", "send it with", "retry-limit", "--delivered", "resends it", "retires it"},
+		},
+		{
+			name: "ambiguous on a running row names resend and retire",
+			view: LifecycleView{Title: "s", Liveness: LiveRunning, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptCouldNotConfirm},
+			autoRetryable: false, canRetry: true, canConfirm: true,
+			wantContains:    []string{"resends it", "retires it"},
+			wantNotContains: []string{"only un-stalls the agent"},
+		},
+		{
+			name: "ambiguous at the limit wall names retire and un-stall, not resend",
+			view: LifecycleView{Title: "s", Liveness: LiveLimitReached, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptCouldNotConfirm},
+			autoRetryable: false, canRetry: false, canConfirm: true,
+			wantContains:    []string{"retires it if it already landed", "only un-stalls the agent", "leaves the mission owed"},
+			wantNotContains: []string{"resends it"},
+		},
+		{
+			name: "live row with no recorded verdict names no verb, not restore",
+			view: LifecycleView{Title: "s", Liveness: LiveRunning, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: ""},
+			autoRetryable: false, canRetry: false, canConfirm: false,
+			wantContains:    []string{"still being verified", "clears once it settles"},
+			wantNotContains: []string{"retry-limit", "--delivered", "restore", "resends it", "retires it", "transfers the mission"},
+		},
+		{
+			name: "live row with an op in flight names no verb, not restore",
+			view: LifecycleView{Title: "s", Liveness: LiveRunning, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptCouldNotConfirm,
+				InFlightOp: OpKilling},
+			autoRetryable: false, canRetry: false, canConfirm: false,
+			wantContains:    []string{"still being verified", "clears once it settles"},
+			wantNotContains: []string{"retry-limit", "--delivered", "restore", "resends it", "retires it", "transfers the mission"},
+		},
+		{
+			name: "dead row names restore, no resend",
+			view: LifecycleView{Title: "s", Liveness: LiveLost, Started: true,
+				PendingHandoffMission: true, HandoffDeliveryStatus: PromptCouldNotConfirm},
+			autoRetryable: false, canRetry: false, canConfirm: false,
+			wantContains:    []string{"restore"},
+			wantNotContains: []string{"retry-limit", "--delivered", "resends it", "still being verified"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.autoRetryable, tc.view.pendingHandoffMissionAutoRetryableView(),
+				"PendingHandoffMissionAutoRetryable")
+			require.Equal(t, tc.canRetry, tc.view.canRetryPendingHandoffMissionDeliveryView(),
+				"CanRetryPendingHandoffMissionDelivery")
+			require.Equal(t, tc.canConfirm, tc.view.canConfirmPendingHandoffDeliveryView(),
+				"CanConfirmPendingHandoffDelivery")
+
+			got := pendingHandoffMissionRemedy(tc.view)
+			for _, want := range tc.wantContains {
+				require.Contains(t, got, want)
+			}
+			for _, notWant := range tc.wantNotContains {
+				require.NotContains(t, got, notWant)
+			}
+		})
+	}
+}

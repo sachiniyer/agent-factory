@@ -174,6 +174,11 @@ func TestSessionsRetryLimit_OwedMissionSuggestionParsesVerbatim(t *testing.T) {
 			view := session.LifecycleView{
 				Title: title, Liveness: session.LiveRunning, Started: true,
 				PendingHandoffMission: true,
+				// An ambiguous verdict on a running row is the shape both verbs
+				// apply to (CanRetryPendingHandoffMissionDelivery admits the
+				// resend, CanConfirmPendingHandoffDelivery the retire), so the
+				// refusal prints exactly the two commands this test parses.
+				HandoffDeliveryStatus: session.PromptCouldNotConfirm,
 			}
 			err := view.ValidateRuntimeAction(session.RuntimeActionHandoff)
 			require.Error(t, err)

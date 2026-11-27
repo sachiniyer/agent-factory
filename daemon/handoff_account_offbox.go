@@ -197,6 +197,14 @@ func (m *Manager) tryOffBoxAccountSwap(instance *session.Instance, repoID, key s
 			// account is unknown.
 			*fallbackEligible = false
 		}
+		if errors.Is(err, session.ErrOffBoxAccountSwapOwesMission) {
+			// The session still owes a handoff mission; the ordinary fallback
+			// would send a fresh prompt over it and leave the obligation for
+			// recovery to deliver as a second turn. The mission's own recovery
+			// (automatic for a not-delivered verdict, the operator's
+			// confirm-or-retry for an ambiguous one) resolves the block.
+			*fallbackEligible = false
+		}
 		return nil, err
 	}
 	return &res, nil

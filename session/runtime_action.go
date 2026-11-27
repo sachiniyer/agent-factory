@@ -285,15 +285,15 @@ func (r runtimeActionRefusal) Error() string {
 	case runtimeActionRootHandoff:
 		return fmt.Sprintf("session %q is the daemon-managed root agent and cannot be handed off", v.Title)
 	case runtimeActionPendingHandoffMission:
-		// Both remedies are printed as complete commands through the seam, the
-		// flag before the terminator: PositionalCommand always emits `--` before
-		// the positional, so a flag the user appended after the printed command
-		// would land past the terminator and read as a second positional (#7803).
-		return fmt.Sprintf(
-			"session %q still owes the mission from its last handoff; resolve it first — `%s` resends it, `%s` retires it",
-			v.Title,
-			shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit"}, v.Title),
-			shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit", "--delivered"}, v.Title))
+		// The remedies come from the same predicates the daemon routes on,
+		// shared with the off-box swap refusal (pendingHandoffMissionRemedy),
+		// so the two refusals cannot drift. Each remedy is printed as a
+		// complete command through the seam: PositionalCommand always emits
+		// `--` before the positional, so a flag the user appended after the
+		// printed command would land past the terminator and read as a second
+		// positional (#7803).
+		return fmt.Sprintf("session %q still owes the mission from its last handoff; resolve it first — %s",
+			v.Title, pendingHandoffMissionRemedy(v))
 	case runtimeActionRebuildTeardownPending:
 		return fmt.Sprintf(
 			"session %q still owes the teardown of the runtime it replaced; let its recovery finish before handing off",
