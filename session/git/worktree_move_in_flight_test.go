@@ -328,3 +328,37 @@ func TestMoveInFlightRecord_PresenceStaysUnknown(t *testing.T) {
 	assert.Equal(t, WorktreePresenceUnknown, gw.ProbeWorktreePresence(),
 		"the in-flight record owns the path question until resolution retires it")
 }
+
+// TestCandidateRecordClaimPreservesResidueNames is the #7819 round-two carry
+// a post-publication record needs: a move_unknown or preserved claim_stale
+// still names the residue it owns, and the claim resolving it must carry
+// those names — a preserve that re-materializes the record without them
+// leaves the surviving quarantine attributed to nothing durable, exactly
+// the unnamed-residue degradation the record exists to prevent.
+func TestCandidateRecordClaimPreservesResidueNames(t *testing.T) {
+	gw, _, wtPath := archiveTestWorktree(t)
+	quarantine := filepath.Join(filepath.Dir(wtPath), ".af-source-0123456789abcdef0123456789abcdef")
+	staging := filepath.Join(t.TempDir(), ".af-copy-0123456789abcdef0123456789abcdef")
+	var st syscall.Stat_t
+	require.NoError(t, syscall.Stat(wtPath, &st))
+	require.NoError(t, gw.RestoreRelocationRecovery(RelocationRecovery{
+		State:          RelocationRecoveryClaimStale,
+		IdentityKnown:  true,
+		Device:         uint64(st.Dev),
+		Inode:          uint64(st.Ino),
+		FileType:       uint32(st.Mode & syscall.S_IFMT),
+		QuarantinePath: quarantine,
+		StagingPath:    staging,
+	}))
+
+	claim, err := gw.ClaimRelocationSource()
+	require.NoError(t, err)
+	gw.PreserveRelocationClaim(claim)
+
+	recovery, unresolved := gw.GetRelocationRecovery()
+	require.True(t, unresolved, "the preserved claim re-materializes the record")
+	assert.Equal(t, quarantine, recovery.QuarantinePath,
+		"the claim must carry the quarantine name the record held")
+	assert.Equal(t, staging, recovery.StagingPath,
+		"the claim must carry the staging name the record held")
+}

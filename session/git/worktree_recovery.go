@@ -430,6 +430,7 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 					Path: selected, AlternatePath: primary, identity: expected,
 					cleanupAuthorized: true, cleanupGeneration: normalized.CleanupGeneration,
 					cleanupFinalizing: true,
+					quarantinePath:    normalized.QuarantinePath, stagingPath: normalized.StagingPath,
 				}), nil
 			}
 			if alternateErr != nil && !errors.Is(alternateErr, os.ErrNotExist) {
@@ -453,6 +454,7 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 			Path: primary, AlternatePath: normalized.AlternatePath, identity: expected,
 			cleanupAuthorized: true, cleanupGeneration: normalized.CleanupGeneration,
 			cleanupFinalizing: true, cleanupRootGone: true,
+			quarantinePath: normalized.QuarantinePath, stagingPath: normalized.StagingPath,
 		}), nil
 	case RelocationRecoveryStalled, RelocationRecoveryCleanupStalled, RelocationRecoveryCleanupReady:
 		if normalized.IdentityKnown && normalized.AlternatePath != "" {
@@ -487,6 +489,7 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 			Path: primary, AlternatePath: normalized.AlternatePath,
 			identity: identity, cleanupAuthorized: normalized.State == RelocationRecoveryCleanupReady,
 			cleanupGeneration: normalized.CleanupGeneration,
+			quarantinePath:    normalized.QuarantinePath, stagingPath: normalized.StagingPath,
 		}), nil
 	case RelocationRecoveryMoveUnknown, RelocationRecoveryClaimStale:
 		return g.resolveCandidateRecordLocked(primary, normalized)
@@ -516,6 +519,7 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 			Path: primary, AlternatePath: recovery.AlternatePath,
 			identity: expected, cleanupAuthorized: recovery.State == RelocationRecoveryCleanupReady,
 			cleanupGeneration: recovery.CleanupGeneration,
+			quarantinePath:    recovery.QuarantinePath, stagingPath: recovery.StagingPath,
 		}), nil
 	}
 	if recovery.AlternatePath == "" {
@@ -568,6 +572,7 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 		Path: selected, AlternatePath: primary,
 		identity: expected, cleanupAuthorized: recovery.State == RelocationRecoveryCleanupReady,
 		cleanupGeneration: recovery.CleanupGeneration,
+		quarantinePath:    recovery.QuarantinePath, stagingPath: recovery.StagingPath,
 	}), nil
 }
 
