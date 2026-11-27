@@ -22,13 +22,23 @@ import "strings"
 // It holds when both of these are true:
 //
 //   - the last content in the pane, frame rules counted as content, is the
-//     whole footer, "Space to select · Esc to reject all", on one row or on
-//     several, read with its whitespace removed so that no wrap point matters
-//     (#7346), and with no ❯ on any of its rows;
+//     footer, "Space to select · Esc to reject all": whole, on one row or on
+//     several, or a proper prefix of it that begins a row — the same footer
+//     at an earlier paint instant (#7390's premise, #7870) — read with its
+//     whitespace removed so that no wrap point matters (#7346), and with no
+//     ❯ on any of its rows;
 //   - the content straight above the footer, past blank rows and frame chrome,
 //     is the "Enable selected" row, read the same way, or as much of it as the
 //     pane's top edge leaves; or the footer is the first content the pane
 //     shows.
+//
+// A proper footer prefix is the footer still painting: Claude Code draws the
+// picker's last row left to right, so a capture can land before it is whole
+// with the picker's header already scrolled off. Until #7870 such a pane read
+// clear — the readers above this one wanted the header or the footer whole —
+// and the create typed its prompt into the picker, where Enter confirmed
+// whichever row owned the cursor, pre-checked servers that run code among
+// them.
 //
 // Nothing above the "Enable selected" row is asked. A pane tall enough for the
 // header has the grammar read the picker; a shorter one shows some of the
@@ -51,8 +61,25 @@ func claudeMCPServersTailOf(screen visibleText) bool {
 	}
 	footer, whole := claudeRowsSpelling(lines, last, claudeSquash(claudeMCPServersFooter), false)
 	if !whole {
-		return false
+		// The footer may still be painting: the pane's last content is a
+		// proper prefix of it that begins a row. A pane that holds over the
+		// footer whole holds over every such prefix — the same footer at an
+		// earlier paint instant — so the rows above it are read the same
+		// way (#7870).
+		footer = claudeMCPServersFooterPrefixStart(lines, last)
+		if footer < 0 {
+			return false
+		}
 	}
+	return claudeMCPServersTailAbove(lines, footer)
+}
+
+// claudeMCPServersTailAbove reads the pane above the picker's footer — whole,
+// or begun as far as row footer — the way the whole-footer pane is read: the
+// content straight above the footer, past blank rows and frame chrome, is the
+// "Enable selected" row, or as much of it as the pane's top edge leaves; or
+// the footer is the first content the pane shows.
+func claudeMCPServersTailAbove(lines []string, footer int) bool {
 	submit := footer - 1
 	for submit >= 0 && claudeTrustRowOf(lines[submit]).blank {
 		submit--
@@ -66,6 +93,32 @@ func claudeMCPServersTailOf(screen visibleText) bool {
 	// A submit row the pane's top edge cuts into: the rows from the top down
 	// to the footer spell its end.
 	return whole || top == 0
+}
+
+// claudeMCPServersFooterPrefixStart returns the row the picker's footer
+// begins on when the pane's last content, through row last, is a proper
+// prefix of it that begins a row: the footer still painting. -1 when the
+// rows are none of that. Read with whitespace removed, as claudeRowsSpelling
+// reads the whole footer: the footer's own rows carry no cursor and no blank
+// row, so a selected or a blank row ends them, and text longer than the
+// footer can no longer be its prefix.
+func claudeMCPServersFooterPrefixStart(lines []string, last int) int {
+	footer := claudeSquash(claudeMCPServersFooter)
+	text, start := "", -1
+	for i := last; i >= 0; i-- {
+		row := claudeTrustRowOf(lines[i])
+		if row.blank || row.selected {
+			break
+		}
+		text = claudeSquash(row.label) + text
+		if len(text) >= len(footer) {
+			break
+		}
+		if strings.HasPrefix(footer, text) {
+			start = i
+		}
+	}
+	return start
 }
 
 // claudeRowsSpelling reads the rows that end at row end, upward, as one text
