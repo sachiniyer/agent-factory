@@ -142,8 +142,13 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 	// checkpoint's ToInstanceData would re-enter i.mu.RLock and self-deadlock
 	// the holder (R4); and the row write is persistInstanceData directly,
 	// never m.persistInstance — reserveCreate's stack holds m.mu across this
-	// call (see below).
+	// call (see below). The durable row keys on oldTitle until the
+	// reuseArchivedRenamePersist below lands, so every checkpoint write —
+	// the forward move's AND a rollback's, whose snapshot still carries the
+	// temporarily renamed title — must target oldTitle explicitly or it
+	// finds no row to update and fails the move that needs it.
 	restoreRelocationRecordCheckpoint := archived.SetRelocationRecordCheckpointLocked(func(data session.InstanceData) error {
+		data.Title = oldTitle
 		return persistInstanceData(repoID, data)
 	})
 	defer restoreRelocationRecordCheckpoint()
@@ -215,11 +220,16 @@ func (m *Manager) renameArchivedForReuseLocked(repoID, repoPath, title, program 
 			//
 			// Best-effort by design: this is a recovery breadcrumb on an already-failing
 			// path, so a write failure is logged rather than returned — the operator
-			// error below is the real report. It commonly WILL fail with "not found in
-			// storage", because the durable rewrite that just failed is what would have
-			// moved the on-disk row to the new title; that is pre-existing behavior this
-			// fix deliberately does not change, and the returned error covers it.
-			if wErr := persistInstanceData(repoID, archived.ToInstanceData()); wErr != nil {
+			// error below is the real report. The durable rewrite that just failed is
+			// the only write that would have moved the on-disk row to the new title,
+			// so the breadcrumb must target oldTitle explicitly — a snapshot carrying
+			// the still-renamed title finds nothing to update, and it is the record
+			// this breadcrumb exists to preserve.
+			if wErr := persistInstanceData(repoID, func() session.InstanceData {
+				data := archived.ToInstanceData()
+				data.Title = oldTitle
+				return data
+			}()); wErr != nil {
 				m.warn().Printf("archived session %q was renamed to %q but could not be persisted or rolled back; recording its new identity also failed: %v",
 					oldTitle, archived.Title, wErr)
 			}

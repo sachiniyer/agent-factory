@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -145,4 +148,63 @@ func TestReserveCreate_ReusesArchivedName_DoubleFailureNoSelfDeadlock(t *testing
 		t.Fatal("deadlock (#2106): the manager lock was left held by the double-failure recovery branch — " +
 			"a subsequent create can never acquire m.mu")
 	}
+}
+
+// TestReserveCreate_ReusesArchivedName_RollbackRecordTargetsDurableTitle is the
+// #7819 round-two rollback regression: a cross-device archived rename arms a
+// move_in_flight checkpoint, and when the durable title rewrite fails, the
+// rollback rename runs another cross-device move whose checkpoint snapshots
+// the STILL-RENAMED in-memory title. The durable row is keyed by the old
+// title — the failed rewrite is the only write that would have moved it —
+// so a checkpoint that persisted the snapshot's title found no row to update
+// and failed the rollback's record write, stranding an otherwise recoverable
+// rollback behind "may need manual recovery". The checkpoint must target the
+// row's actual durable title.
+func TestReserveCreate_ReusesArchivedName_RollbackRecordTargetsDurableTitle(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	archived, _ := seedArchivedSessionBranchFreed(t, manager, repoID, repoPath, "foo", "foo")
+
+	origDest, err := archivedWorktreePath(repoID, "foo")
+	require.NoError(t, err)
+	require.True(t, exists(origDest), "the seeded archived worktree must start at the pre-rename path")
+
+	// Force the cross-device engine for both renames: the fallback's first
+	// rename answers EXDEV so every write stays inside the test's own temp
+	// dirs — the engine's record checkpoints fire exactly as on a real
+	// cross-filesystem move.
+	restoreSeams := sessiongit.SetMoveDirCrashSeamsForTest(sessiongit.MoveDirCrashSeams{
+		FastMove: func(*sessiongit.GitWorktree, string, string) error {
+			return errors.New("forced copy fallback")
+		},
+		FirstRename: func(string, string) error { return syscall.EXDEV },
+	})
+	t.Cleanup(restoreSeams)
+
+	errForcedPersist := fmt.Errorf("forced durable-rename failure")
+	prev := reuseArchivedRenamePersist
+	reuseArchivedRenamePersist = func(rid, oldTitle string, newData session.InstanceData) error {
+		return errForcedPersist
+	}
+	t.Cleanup(func() { reuseArchivedRenamePersist = prev })
+
+	_, _, release, _, rerr := manager.reserveCreate(CreateSessionRequest{
+		RepoPath: repoPath,
+		Title:    "foo",
+		Program:  "claude",
+	})
+	if release != nil {
+		release()
+	}
+
+	require.Error(t, rerr)
+	assert.Contains(t, rerr.Error(), "rolled it back",
+		"the rollback must succeed: its move_in_flight checkpoint writes under the row's durable title, not the temporarily renamed one (got %v)", rerr)
+	assert.True(t, exists(origDest),
+		"the rollback must return the archived worktree to its recorded path")
+	assert.Equal(t, "foo", archived.Title,
+		"a rolled-back rename restores the durable title")
+	assert.Nil(t, recordFor(t, repoID, "foo (archived)"),
+		"no durable row may exist under the title the failed rewrite never installed")
+	rec := recordFor(t, repoID, "foo")
+	require.NotNil(t, rec, "the archived row must still exist under its durable title")
 }
