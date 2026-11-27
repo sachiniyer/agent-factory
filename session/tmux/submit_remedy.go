@@ -327,6 +327,20 @@ func composerFooterRow(norm, glyph string) bool {
 	return false
 }
 
+// agentComposerFooterRow reports whether the raw row that ended a composer
+// region is provably the agent's own footer: a marker row under its own
+// glyph (composerFooterRow), or — under Codex's "›" — the default
+// model-and-path status line ("gpt-5.6-sol max · ~/agent-factory"), which
+// carries no marker phrase but is the shape codexStatusLineModel owns. A
+// draft line with the same `text · ~/path` shape aliases, the same dim-text
+// ambiguity that recognizer and the hint tables already accept.
+func agentComposerFooterRow(raw, glyph string) bool {
+	if composerFooterRow(normalizeDelivery(raw), glyph) {
+		return true
+	}
+	return glyph == "›" && codexStatusLineModel(raw) != ""
+}
+
 // stillChipRegionTail reports why the row that ended a composer region
 // breaks the still-chip proof, or "" when the frame bounds the block for
 // the proof: pane end, a hard border, or the agent's own footer. Any other
@@ -339,7 +353,7 @@ func stillChipRegionTail(rows []string, end int, glyph string) string {
 		return ""
 	}
 	norm := normalizeDelivery(rows[end])
-	if norm == "" || composerFooterRow(norm, glyph) {
+	if norm == "" || agentComposerFooterRow(rows[end], glyph) {
 		return ""
 	}
 	return fmt.Sprintf("the composer holds content %q below a blank row that is not provably the agent's own footer", norm)

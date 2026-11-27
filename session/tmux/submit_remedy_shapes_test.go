@@ -328,6 +328,18 @@ func TestStillChipComposerAcceptsAgentFooterBelowABlankRow(t *testing.T) {
 	if ok, why := stillChipComposer(pane, chipBlockForTest(pane, chipText), pane, paneCursorState{Visible: true, Row: 0, Col: end}, chipText); !ok {
 		t.Fatalf("codex warning footer below a blank row: ok=false why=%q, want ok=true (the footer is provably the agent's own)", why)
 	}
+
+	// The warning-free default Codex status line — "model · path" with no
+	// marker phrase — is the same provable footer: codexStatusLineModel owns
+	// its shape, so the composer is still provably chip-only.
+	defaultStatus := strings.Join([]string{
+		"› " + codexChip,
+		"",
+		"  gpt-5.6-sol max · ~/agent-factory",
+	}, "\n") + "\n"
+	if ok, why := stillChipComposer(defaultStatus, chipBlockForTest(defaultStatus, chipText), defaultStatus, paneCursorState{Visible: true, Row: 0, Col: end}, chipText); !ok {
+		t.Fatalf("warning-free codex status footer below a blank row: ok=false why=%q, want ok=true (the model/path footer is provably the agent's own)", why)
+	}
 }
 
 // TestChipStartsOnAnchorRowRejectsAnInteriorBlank pins the wrapped-tail proof's
