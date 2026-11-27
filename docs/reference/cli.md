@@ -523,7 +523,7 @@ af agent-server [flags]
 | `--program-resolved` |  | Treat --program as an already-resolved runtime command |
 | `--repo` | `string` | Repository path the workspace runs against (default: current directory) |
 | `--session-env` | `stringSlice` | Additional exact environment variable name an agent may inherit (repeatable) |
-| `--session-env-empty` | `stringSlice` | Environment variable name the pane's exec shim re-asserts defined-and-empty immediately before the agent execs (repeatable; set by the provisioning daemon's credential-mount env pins) |
+| `--session-env-empty` | `stringSlice` | Environment variable name the pane's exec shim re-asserts defined immediately before the agent execs — defined-and-empty, or a resolved platform trust path for the SSL_CERT_*/CA-bundle names (#7889) (repeatable; set by the provisioning daemon's credential-mount env pins) |
 | `--title` | `string` | Session title for the workspace (required) |
 
 **Global flags**
