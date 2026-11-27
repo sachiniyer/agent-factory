@@ -222,7 +222,11 @@ func TestArchiveSession_DestPresentAdoptsWithStagingCopyResidue(t *testing.T) {
 // "inspect dest and remove or restore it" remedy is exactly how the retained
 // tree gets orphaned — `mv dest source` puts the incomplete copy back at the
 // recorded path and archives it with an empty report while the only complete
-// tree stays untracked beside it.
+// tree stays untracked beside it. The source-bound arm therefore gets its own
+// refusal (#7816 N4): it says git still registers the vacated source, does not
+// claim dest already holds this session's worktree, names `git worktree
+// repair <dest>` as the step after which a retry adopts, and keeps the
+// keep-until-verified guard so nothing advises deleting both copies.
 func TestArchiveSession_DestPresentRefusesQuarantineBoundToUnrepairedSource(t *testing.T) {
 	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "dest-unrepaired")
@@ -253,6 +257,14 @@ func TestArchiveSession_DestPresentRefusesQuarantineBoundToUnrepairedSource(t *t
 		"the refusal must name the .af-source-* tree as the complete original")
 	assert.NotContains(t, err.Error(), "remove or restore it",
 		"the landed-move refusal whose remedy would orphan the quarantine must not be what the operator sees")
+	assert.Contains(t, err.Error(), "git still registers the vacated source "+wtPath,
+		"pre-repair, the refusal must say git still registers the vacated source (#7816 N4)")
+	assert.NotContains(t, err.Error(), "already holds this session's worktree",
+		"pre-repair, af cannot claim the destination already holds this session's worktree — git does not register it yet (#7816 N4)")
+	assert.Contains(t, err.Error(), "git worktree repair "+dest,
+		"the refusal must name the repair step after which a retry adopts the published copy (#7816 N4)")
+	assert.Contains(t, err.Error(), "only complete copy",
+		"the refusal must keep the quarantine's keep-until-verified guard so no advice lets an operator delete both copies (#7816 N4)")
 
 	// Nothing was adopted, archived, or dropped.
 	assert.NotEqual(t, session.LiveArchived, inst.GetLiveness())
@@ -275,8 +287,9 @@ func TestArchiveSession_DestPresentRefusesQuarantineBoundToUnrepairedSource(t *t
 // out of the committed report. This is the re-archive-after-restore shape: a
 // skip archive retained the quarantine, the restore kept the report, and this
 // archive's crash left dest landed with the quarantine still tracked. An
-// uninterrupted archive would commit that same report — and so does the
-// adoption.
+// uninterrupted archive would commit that same report AND surface its
+// incomplete-archive warning — the committed-mutation marker, not a failure —
+// and so does the adoption.
 func TestArchiveSession_DestPresentAdoptsQuarantineTheReportAlreadyTracks(t *testing.T) {
 	manager, _, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "dest-tracked")
@@ -304,9 +317,19 @@ func TestArchiveSession_DestPresentAdoptsQuarantineTheReportAlreadyTracks(t *tes
 	}}})
 
 	archivedPath, data, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "dest-tracked", RepoID: repoID})
-	require.NoError(t, err,
-		"a quarantine the loaded report already retains must not block adopting the landed destination")
-	assert.Equal(t, dest, archivedPath)
+	require.Error(t, err,
+		"an archive whose committed report retains trees always surfaces the incomplete-archive warning")
+	var committed *mutationCommittedError
+	require.ErrorAs(t, err, &committed,
+		"adopting over a tracked quarantine yields exactly what an uninterrupted archive yields: the row committed Archived plus the report warning, not a refusal: %v", err)
+	assert.Contains(t, err.Error(), "incomplete archive",
+		"the committed warning is the skipped-file report the same report produces on the uninterrupted route")
+	assert.Contains(t, err.Error(), quarantine,
+		"the committed warning must name the retained tree the loaded report tracks")
+	assert.Contains(t, err.Error(), "skipped-unreadable.txt",
+		"the committed warning must carry the report's skipped-file entries")
+	assert.Equal(t, dest, archivedPath,
+		"the committed adoption returns the landed destination, as an uninterrupted archive does")
 	assert.Equal(t, dest, data.Worktree.WorktreePath)
 	assert.Equal(t, session.LiveArchived, data.Liveness)
 	assert.False(t, inst.Started())
