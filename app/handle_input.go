@@ -273,6 +273,10 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
 		m.remoteProgramCatalog = nil
+		// The accepted submit retracts the refusal the form pinned — left up,
+		// it is still painted when the create lands under the corrected name
+		// (#7844).
+		m.retractNamingNotice()
 		m.setNamingInstance(nil)
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
