@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -497,3 +498,46 @@ func TestHeadlessWorkspaceFactsMeasuresLinkedWorktree(t *testing.T) {
 		}
 	}
 }
+
+// The Kill RPC is the session row's removal (#7897): once the backend kill
+// succeeds it retires the durable swap record the agent-server installed in
+// this session dir. Signal-driven kills of the same backend — a host reboot's
+// SIGTERM through shutdownWorkspace, a restart's pre-launch
+// stopUnadoptedServer — never reach this handler, so the record's life is
+// exactly the row's. Fails on 95a8028e9, whose handler retired nothing: the
+// record outlived the row for a session re-created on the same (repo, title)
+// key to inherit.
+func TestHeadlessKillRPCRetiresTheSwapRecord(t *testing.T) {
+	dir := t.TempDir()
+	key := session.RebuildTeardownKey("/repo", "title")
+	inst := &session.Instance{Title: "title"}
+	require.NoError(t, inst.InstallDurableAccountSwapRecord(dir, key))
+	// The on-disk name is the cross-process contract between this daemon's
+	// session dir and the agent-server's recorder (accountSwapRecordPrefix).
+	path := filepath.Join(dir, "account-swap-record-"+key)
+	require.NoError(t, os.WriteFile(path, []byte(`{"outcome":"committed","id":"swap-1"}`), 0o600))
+
+	fake := newFakeHeadlessAgentServer()
+	hs := &headlessServer{as: fake, inst: inst}
+	var resp agentOKResponse
+	require.NoError(t, hs.Kill(struct{}{}, &resp))
+	require.True(t, resp.OK)
+	require.True(t, fake.killed)
+	require.NoFileExists(t, path, "the Kill RPC retired the record with the row")
+
+	// A failed backend kill is no row removal: the record stays.
+	dir2 := t.TempDir()
+	inst2 := &session.Instance{Title: "title"}
+	require.NoError(t, inst2.InstallDurableAccountSwapRecord(dir2, key))
+	path2 := filepath.Join(dir2, "account-swap-record-"+key)
+	require.NoError(t, os.WriteFile(path2, []byte(`{"outcome":"committed","id":"swap-1"}`), 0o600))
+	hs2 := &headlessServer{as: &failingKillServer{}, inst: inst2}
+	require.Error(t, hs2.Kill(struct{}{}, &resp))
+	require.FileExists(t, path2, "a refused teardown keeps the record — the row survives")
+}
+
+type failingKillServer struct {
+	session.AgentServer
+}
+
+func (f *failingKillServer) Kill(bool) error { return fmt.Errorf("teardown refused") }

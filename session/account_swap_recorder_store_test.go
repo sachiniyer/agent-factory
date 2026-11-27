@@ -741,16 +741,18 @@ func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFenc
 	}
 }
 
-// A record that cannot be read, decoded, or interpreted can vouch for nothing,
-// so it must never stop the agent-server from starting (#7883): the install
-// moves the file aside under a name that says so and the recorder starts empty
-// — anonymous "none", the same answer a missing record gives — which sends
-// every later reconcile through the host's own markers instead of vouching for
-// a swap it cannot prove. On master each case makes InstallDurableAccountSwapRecord
-// return the load error and `af agent-server` refuses to start, wedging the
-// sandbox session until the file is deleted by hand (the uninterpretable
-// outcome row fails there differently: master's load accepts it, and the
-// rehydrated "bogus" verdict fences the reconcile forever instead of settling).
+// A record that cannot be read, decoded, or interpreted — including one that
+// decodes into a state the recorder never persists (#7897) — can vouch for
+// nothing, so it must never stop the agent-server from starting (#7883): the
+// install moves the file aside under a uniquely-named sibling and the recorder
+// starts empty — anonymous "none", the same answer a missing record gives —
+// which sends every later reconcile through the host's own markers instead of
+// vouching for a swap it cannot prove. On master the undecodable cases make
+// InstallDurableAccountSwapRecord return the load error and `af agent-server`
+// refuses to start, wedging the sandbox session until the file is deleted by
+// hand; the semantic cases fail there differently — master's load accepts
+// them, and the rehydrated state has no settle arm, so the row fences forever
+// (each row's masterFail names its stated reason).
 func TestACorruptSwapRecordStartsTheRecorderEmptyAndReconcilesAsMasterWould(t *testing.T) {
 	rows := []struct {
 		name     string
@@ -768,6 +770,10 @@ func TestACorruptSwapRecordStartsTheRecorderEmptyAndReconcilesAsMasterWould(t *t
 			masterFail: "the load's parse error fails the install"},
 		{name: "uninterpretable verdict", contents: `{"outcome":"bogus","id":"test-swap-1"}`,
 			masterFail: "the load accepts the file, the rehydrated verdict has no reconcile arm, and the row fences forever"},
+		{name: "none carrying an id", contents: `{"outcome":"none","id":"test-swap-1"}`,
+			masterFail: "the load accepts the file, the rehydrated none-with-id matches the swap's id, and the outcome has no settle arm — the row fences forever"},
+		{name: "anonymous verdict", contents: `{"outcome":"committed","id":""}`,
+			masterFail: "the load accepts the file — an id-less verdict is no state run or the discard persist ever writes"},
 	}
 
 	for _, row := range rows {
@@ -786,9 +792,10 @@ func TestACorruptSwapRecordStartsTheRecorderEmptyAndReconcilesAsMasterWould(t *t
 
 			// The recorder starts with nothing it can vouch for: anonymous
 			// "none", exactly what a missing record answers. On master the
-			// uninterpretable-verdict row fails HERE — the load accepted the
-			// file and the recorder vouches for a "bogus" verdict — before the
-			// quarantine block below shows the file was never moved aside.
+			// semantic rows fail HERE — the load accepted the file and the
+			// recorder vouches for a verdict or an id no write ever produced —
+			// before the quarantine block below shows the file was never moved
+			// aside.
 			las, ok := agentInst.AgentServer().(*localAgentServer)
 			require.True(t, ok)
 			o, p, id := las.acctSwap.status()
@@ -796,19 +803,26 @@ func TestACorruptSwapRecordStartsTheRecorderEmptyAndReconcilesAsMasterWould(t *t
 			assert.Empty(t, p)
 			assert.Empty(t, id)
 
-			// The evidence is moved aside under a name that says so, never
-			// deleted — and under its new name no load reads it again.
+			// The evidence is moved aside under a uniquely-named sibling that
+			// says so, never deleted — and under its new name no load reads it
+			// again.
 			assert.NoFileExists(t, path)
-			aside, err := os.ReadFile(path + ".corrupt")
+			asides, err := filepath.Glob(path + ".corrupt-*")
+			require.NoError(t, err)
+			require.Len(t, asides, 1, "one uniquely-named quarantine sibling")
+			aside, err := os.ReadFile(asides[0])
 			require.NoError(t, err)
 			assert.Equal(t, row.contents, string(aside), "the quarantined file keeps the corrupt bytes")
 
 			// And it reconciles as master would with no record: the host's own
 			// markers decide. A proven scopeOutgoing (the staged scope present,
 			// no account.prev) takes the serialized discard and settles
-			// rolled_back — master's `none` arm verbatim.
+			// rolled_back — master's `none` arm verbatim. The reconcile runs
+			// through a recorder restored from whatever the install loaded —
+			// which is what the semantic rows' masterFail describes fencing.
 			const swapN = "test-swap-1"
 			f.srv.rec = accountSwapRecorder{store: las.acctSwap.store}
+			f.srv.rec.restore(agentInst.durableAccountSwapRecord)
 			stage := f.stagedDirFor(swapN)
 			require.NoError(t, os.RemoveAll(f.w.PrevAccountDir()))
 			require.NoError(t, os.MkdirAll(stage, 0o700))
@@ -836,12 +850,15 @@ func TestACorruptSwapRecordStartsTheRecorderEmptyAndReconcilesAsMasterWould(t *t
 	}
 }
 
-// The record belongs to one session generation (#7883): the workspace teardown
-// — localAgentServer.Kill, the path the daemon's Kill RPC and a non-adopted
-// SIGTERM's shutdownWorkspace converge on — retires it, while a restart WITHIN
-// the generation (the crashed agent-server's adopted replacement) never
-// reaches Kill and keeps it. That asymmetry is #7862's whole point.
-func TestSwapRecordIsRetiredAtTeardownButSurvivesASameGenerationRestart(t *testing.T) {
+// The record belongs to the session ROW, not the server process (#7897): a
+// restart within the generation rehydrates it, a signal-driven Kill — the
+// path a host reboot's SIGTERM and a restart's pre-launch stopUnadoptedServer
+// take through shutdownWorkspace — keeps it because the daemon's row
+// survives, and only the explicit Kill RPC's own retire removes it. A session
+// re-created on the same (repo, title) key then inherits nothing a dead
+// generation reached. On master the signal-driven Kill retires the record —
+// the host-reboot case the issue names.
+func TestSwapRecordRetiresWithTheSessionRowNotTheServerProcess(t *testing.T) {
 	dir := t.TempDir()
 	key := RebuildTeardownKey("/repo", "title")
 	path := filepath.Join(dir, accountSwapRecordMarkerName(key))
@@ -855,9 +872,10 @@ func TestSwapRecordIsRetiredAtTeardownButSurvivesASameGenerationRestart(t *testi
 	require.NoError(t, err)
 	assert.FileExists(t, path)
 
-	// A restart WITHIN the generation — the crashed server's replacement —
-	// installs the same store, reaches no Kill, and rehydrates the verdict the
-	// prior process reached (#7862).
+	// A restart WITHIN the generation — the crashed server's replacement,
+	// which for a normally provisioned sandbox is a fresh launch, not an
+	// adoption — installs the same store, reaches no Kill, and rehydrates the
+	// verdict the prior process reached (#7862).
 	second := &Instance{Title: "title", backend: &FakeBackend{}, gitWorktree: &git.GitWorktree{}}
 	require.NoError(t, second.InstallDurableAccountSwapRecord(dir, key))
 	las2, ok := second.AgentServer().(*localAgentServer)
@@ -868,11 +886,18 @@ func TestSwapRecordIsRetiredAtTeardownButSurvivesASameGenerationRestart(t *testi
 	assert.Equal(t, "swap-1", id)
 	assert.FileExists(t, path, "a same-generation restart keeps the record")
 
-	// The session's teardown retires the record: the instance still holds its
-	// workspace, so the kill is the generation's end — a session re-created on
-	// the same (repo, title) key inherits no verdict a dead generation reached.
+	// A signal-driven Kill — the graceful host reboot's SIGTERM reaching
+	// shutdownWorkspace — destroys the workspace but leaves the daemon's row
+	// alive, so the record survives with it: the reattach restarts the server
+	// in this same session dir and rehydrates.
 	require.NoError(t, las2.Kill(false))
-	assert.NoFileExists(t, path, "the workspace teardown retired the record")
+	assert.FileExists(t, path, "a signal-driven Kill keeps the record — the session row survives (master: it retires here)")
+
+	// The explicit Kill RPC is the row's removal, and its own retire ends the
+	// record's life (the daemon test pins the handler's call; here the call
+	// itself).
+	second.RetireDurableAccountSwapRecord()
+	assert.NoFileExists(t, path, "the Kill RPC's retire removes the record")
 
 	third := &Instance{Title: "title", backend: &FakeBackend{}}
 	require.NoError(t, third.InstallDurableAccountSwapRecord(dir, key))
@@ -883,14 +908,34 @@ func TestSwapRecordIsRetiredAtTeardownButSurvivesASameGenerationRestart(t *testi
 	assert.Empty(t, id)
 }
 
+// A kill on a never-launched server — the restart's pre-launch
+// stopUnadoptedServer SIGTERM case (#7897): the replacement agent-server is
+// stopped before it was ever given the workspace, so its Instance holds no
+// worktree and no tabs. The kill no-ops, and the record survives either way —
+// the record's life is the row's, and a process-level kill is never the
+// row's removal. Fails on bd0cce25a, whose Kill retired unconditionally.
+func TestAKillOnANeverLaunchedServerKeepsTheRecord(t *testing.T) {
+	dir := t.TempDir()
+	key := RebuildTeardownKey("/repo", "title")
+	path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+
+	inst := &Instance{Title: "title", backend: &LocalBackend{}}
+	require.NoError(t, inst.InstallDurableAccountSwapRecord(dir, key))
+	las, ok := inst.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	_, err := las.acctSwap.run("swap-1", func() (string, error) { return "claude", nil })
+	require.NoError(t, err)
+
+	require.NoError(t, las.Kill(false))
+	assert.FileExists(t, path, "a never-launched server's Kill is no generation boundary — the record stays")
+}
+
 // The /v1/agent/stop path reaches localAgentServer.Kill too — StopPreserving
 // runs StopPreservingWorkspace, then its SIGTERM drives shutdownWorkspace into
 // Kill on a backend that no-ops — but the workspace PRESERVED, so the session
 // generation survives for a later adopted restart and the record must survive
-// with it. What Kill retires is the record of the generation the kill ENDS,
-// and the kill decides that by what the instance still holds when it runs:
-// StopPreservingWorkspace's teardown already released the worktree pointer,
-// so this Kill destroys nothing and retires nothing (Codex on #7894).
+// with it: Kill never retires, so the whole preserve sequence leaves the file
+// where the adopted restart's install finds it (Codex on #7894, #7897).
 func TestSwapRecordSurvivesAWorkspacePreservingShutdown(t *testing.T) {
 	dir := t.TempDir()
 	key := RebuildTeardownKey("/repo", "title")
@@ -923,4 +968,63 @@ func TestSwapRecordSurvivesAWorkspacePreservingShutdown(t *testing.T) {
 	o, _, id := las2.acctSwap.status()
 	assert.Equal(t, swapOutcomeCommitted, o, "the adopted restart rehydrates the preserved generation's verdict")
 	assert.Equal(t, "swap-1", id)
+}
+
+// Only bytes that were read and then failed to decode or validate are moved
+// aside (#7897): a READ error (EIO, EACCES, EMFILE) never examined the file,
+// so a transient fault must not permanently set aside a record that may be
+// fine — the recorder starts empty and the file stays put. On master the
+// install refused the error entirely (pre-#7894) or moved the unexamined file
+// aside (post-#7894): either way the FileExists below fails there.
+func TestAnUnreadableSwapRecordStartsEmptyButIsLeftInPlace(t *testing.T) {
+	dir := t.TempDir()
+	key := RebuildTeardownKey("/repo", "title")
+	path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+	require.NoError(t, os.WriteFile(path, []byte(`{"outcome":"committed","program":"claude","id":"swap-1"}`), 0o600))
+	require.NoError(t, os.Chmod(path, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	inst := &Instance{Title: "title"}
+	require.NoError(t, inst.InstallDurableAccountSwapRecord(dir, key),
+		"a record that cannot be READ still must not stop the agent-server from starting")
+	las, ok := inst.AgentServer().(*localAgentServer)
+	require.True(t, ok)
+	o, _, id := las.acctSwap.status()
+	assert.Equal(t, swapOutcomeNone, o)
+	assert.Empty(t, id)
+
+	assert.FileExists(t, path, "an unread record is left in place — its bytes were never examined")
+	asides, err := filepath.Glob(path + ".corrupt-*")
+	require.NoError(t, err)
+	assert.Empty(t, asides, "no quarantine ran on a read error")
+}
+
+// Moving a record aside never overwrites earlier evidence (#7897): each
+// corrupt file is claimed under a unique *.corrupt-* name before the rename,
+// so a second corruption preserves the first one's bytes instead of renaming
+// over them. On master the second corruption clobbered the first.
+func TestACorruptSwapRecordQuarantineNeverClobbersEarlierEvidence(t *testing.T) {
+	dir := t.TempDir()
+	key := RebuildTeardownKey("/repo", "title")
+	path := filepath.Join(dir, accountSwapRecordMarkerName(key))
+
+	for i, contents := range []string{`{"outcome":"bogus-1"`, `{"outcome":"bogus-2"`} {
+		require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
+		inst := &Instance{Title: "title"}
+		require.NoError(t, inst.InstallDurableAccountSwapRecord(dir, key))
+		asides, err := filepath.Glob(path + ".corrupt-*")
+		require.NoError(t, err)
+		require.Len(t, asides, i+1, "each corruption leaves its own evidence — never renamed over")
+	}
+
+	asides, err := filepath.Glob(path + ".corrupt-*")
+	require.NoError(t, err)
+	seen := map[string]bool{}
+	for _, aside := range asides {
+		b, err := os.ReadFile(aside)
+		require.NoError(t, err)
+		seen[string(b)] = true
+	}
+	assert.True(t, seen[`{"outcome":"bogus-1"`], "the first corruption's bytes survive")
+	assert.True(t, seen[`{"outcome":"bogus-2"`], "the second corruption's bytes survive")
 }
