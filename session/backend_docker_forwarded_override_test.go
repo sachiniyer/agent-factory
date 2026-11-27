@@ -9,15 +9,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The forwarded-name override (#7867 R2): a routing or unclassified name the
-// operator forwards through session_env_passthrough could be overridden by a
-// repo `-e` in docker.run_args, because af emits the forwarded names that
-// resolve in the daemon environment as bare `-e NAME` entries ahead of
-// run_args and Docker keeps the LAST -e for a name. Both guarded validators
-// refuse a `=`-valued run_args env entry that names one of those emitted
-// names, whatever its class. A bare -e NAME is accepted — it resolves to the
-// operator's own value — and so is a =-valued entry for a forwarded name
-// that is unset on the host, because no af -e exists for it to override.
+// The forwarded-name override (#7867 R2): a name the operator claims through
+// session_env_passthrough is admitted by the agent-server's env filter
+// whether or not the host sets a value — so a repo `-e` in docker.run_args
+// that sets a value for one reaches the agent: it overrides the operator's
+// forwarded value when the host sets one (af emits bare `-e NAME` entries
+// ahead of run_args and Docker keeps the LAST -e for a name), and it
+// substitutes for the operator's claim when the host sets none. Both
+// guarded validators refuse a `=`-valued run_args env entry naming any
+// name in the effective passthrough, whatever its class. A bare -e NAME is
+// accepted — it can only carry the daemon environment's own value, which
+// is what af's own forwarding delivers.
 
 // dockerForwardedEnvSpellings enumerates every `docker run` spelling that
 // sets an environment name TO A VALUE, so the override refusal is pinned
@@ -188,31 +190,54 @@ func TestDockerCredentialRunArgs_RefusesForwardedNameOverride(t *testing.T) {
 	}
 }
 
-// TestDockerRunArgs_AcceptsNonOverrideEntries pins the over-refusal fix on the
-// accept side: a bare -e NAME resolves to the operator's own value — the same
-// value af's own bare -e delivers — so it is not an override even when af
-// emits the name; and a =-valued entry for a forwarded name that is unset on
-// the host overrides nothing because af emits no -e for it. The override
-// refusal is for `=` spellings against names af actually emits.
+// TestDockerRunArgs_RefusesForwardedButUnsetName pins the substitution half
+// of R2: a forwarded name that is unset on the host emits no af -e, yet a
+// `=`-valued repo entry naming it must still be refused on both paths —
+// the agent-server's filter admits every passthrough-listed name, so the
+// repo value would reach the agent in place of the operator's claim.
+func TestDockerRunArgs_RefusesForwardedButUnsetName(t *testing.T) {
+	passthrough := []string{"AF_7867_FORWARDED_UNSET"}
+	os.Unsetenv("AF_7867_FORWARDED_UNSET") // forwarded but unset — af emits no -e for it
+	for _, spelling := range dockerForwardedEnvSpellings("AF_7867_FORWARDED_UNSET") {
+		label := strings.Join(spelling, " ")
+		t.Run("account/"+label, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(spelling, "codex", passthrough)
+			require.Error(t, err, "a =-valued entry for a passthrough-listed name must be refused even when unset")
+			require.Contains(t, err.Error(), "AF_7867_FORWARDED_UNSET")
+			require.Contains(t, err.Error(), "session_env_passthrough")
+		})
+		t.Run("credential/"+label, func(t *testing.T) {
+			err := validateCredentialDockerRunArgs(spelling, tmux.ProgramCodex, passthrough)
+			require.Error(t, err, "a =-valued entry for a passthrough-listed name must be refused even when unset")
+			require.Contains(t, err.Error(), "AF_7867_FORWARDED_UNSET")
+			require.Contains(t, err.Error(), "session_env_passthrough")
+		})
+	}
+}
+
+// TestDockerRunArgs_AcceptsNonOverrideEntries pins the accept side: a bare
+// -e NAME can only carry the daemon environment's own value — the same
+// thing af's own forwarding delivers — so it is refused for none of the
+// passthrough-listed names, whether the host sets a value or not.
 func TestDockerRunArgs_AcceptsNonOverrideEntries(t *testing.T) {
 	passthrough := []string{"MY_REPO_TOOL_URL", "AF_7867_FORWARDED_UNSET"}
-	t.Setenv("MY_REPO_TOOL_URL", "https://operator.example") // emitted
-	os.Unsetenv("AF_7867_FORWARDED_UNSET")                   // forwarded but unset — af emits no -e for it
+	t.Setenv("MY_REPO_TOOL_URL", "https://operator.example") // forwarded and set
+	os.Unsetenv("AF_7867_FORWARDED_UNSET")                   // forwarded but unset
 	for _, spelling := range [][]string{
 		{"-e", "MY_REPO_TOOL_URL"}, // bare -e resolves to the operator's own value
 		{"--env", "MY_REPO_TOOL_URL"},
 		{"-eMY_REPO_TOOL_URL"},
-		{"-e", "AF_7867_FORWARDED_UNSET=https://repo.example"}, // no af -e exists to override
-		{"--env=AF_7867_FORWARDED_UNSET=https://repo.example"},
+		{"-e", "AF_7867_FORWARDED_UNSET"}, // bare -e for an unset name sets no value either
+		{"--env=AF_7867_FORWARDED_UNSET"},
 	} {
 		label := strings.Join(spelling, " ")
 		t.Run("account/"+label, func(t *testing.T) {
 			require.NoError(t, validateAccountDockerRunArgs(spelling, "codex", passthrough),
-				"a non-overriding env entry must stay accepted")
+				"a bare -e sets no value and must stay accepted")
 		})
 		t.Run("credential/"+label, func(t *testing.T) {
 			require.NoError(t, validateCredentialDockerRunArgs(spelling, tmux.ProgramCodex, passthrough),
-				"a non-overriding env entry must stay accepted")
+				"a bare -e sets no value and must stay accepted")
 		})
 	}
 }

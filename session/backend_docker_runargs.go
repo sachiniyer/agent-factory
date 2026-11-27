@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"path"
 	"strings"
-
-	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
 // dockerRunBooleanShorthands and dockerRunValueShorthands classify the short
@@ -528,16 +526,18 @@ func accountProtectedPath(target string) string {
 	return ""
 }
 
-// dockerEmittedPassthroughNames is the set of passthrough names af actually
-// emits ahead of run_args as bare `-e NAME` entries — the forwarded names
-// that resolve in the daemon's environment (sessionenv.DockerForwardNames
-// runs the same resolution containerEnvironmentNames does, so a forwarded
-// name that is unset on the host emits nothing and has no af -e to
-// override). Docker keeps the LAST -e for a name, so a `=`-valued run_args
-// entry naming one of these is an override of the operator's forwarded value
-// whatever the name's class — both guarded validators refuse exactly this
-// set (#7867 R2). A bare -e NAME for one of them is not refused: it resolves
-// to the operator's own value, which is what af's own bare -e delivers anyway.
+// dockerForwardedPassthroughNames is the name set of the session's effective
+// session_env_passthrough — the operator's claim on each name. The claim is
+// what matters, not whether the host sets a value: the agent-server's filter
+// admits every passthrough-listed name into the agent's environment, so a
+// `=`-valued run_args entry for a listed name delivers the repo's value to
+// the agent even when af emits no `-e` for it (the name unset on the host
+// is the R2 attack minus the operator's value). Docker keeps the LAST -e
+// for a name, so a `=`-valued run_args entry naming one of these overrides
+// or substitutes the operator's forwarded value whatever the name's class —
+// both guarded validators refuse exactly this set (#7867 R2). A bare -e
+// NAME for one of them is not refused: it can only carry the daemon
+// environment's own value, which is what af's own forwarding delivers.
 //
 // A pane-boundary name is never an effective claim: forwarding one is refused
 // at Provision on every docker session and af's blanking -e dominates it
@@ -545,13 +545,13 @@ func accountProtectedPath(target string) string {
 // leaves the classified refusals — the credential-mount path's denied-reason
 // walk, the account path's own classes — to report it with their accurate
 // messages instead of the override one.
-func dockerEmittedPassthroughNames(passthrough, environ []string) map[string]struct{} {
-	emitted := make(map[string]struct{}, len(passthrough))
-	for _, name := range sessionenv.DockerForwardNames(environ, "", passthrough) {
+func dockerForwardedPassthroughNames(passthrough []string) map[string]struct{} {
+	forwarded := make(map[string]struct{}, len(passthrough))
+	for _, name := range passthrough {
 		if _, paneBoundary := credentialMountPaneBoundaryNames[name]; paneBoundary {
 			continue
 		}
-		emitted[name] = struct{}{}
+		forwarded[name] = struct{}{}
 	}
-	return emitted
+	return forwarded
 }

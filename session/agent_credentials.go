@@ -300,21 +300,23 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 // routing names alone guarantee it — so this guard is never a no-op on the
 // roster the way #4454's account-only table was for amp and opencode.
 func validateCredentialDockerRunArgs(args []string, agent string, passthrough []string) error {
-	// The names the operator claims and af actually emits as bare -e entries
-	// ahead of run_args are checked first: Docker keeps the last -e for a
-	// name, so a =-valued repo entry naming one — whatever class
-	// credentialMountDeniedReason would give it — overrides the operator's
-	// forwarded value (#7867 R2). A bare -e NAME is not an override — it
-	// resolves to the operator's own value — and a forwarded name unset on
-	// the host emits no af -e to override. Running this first keeps the
-	// refusal honest: for a name the operator already forwards, "have the
-	// operator forward it" would be a remedy they already took.
-	emitted := dockerEmittedPassthroughNames(passthrough, os.Environ())
+	// Every name the operator claims is checked first: the agent-server's
+	// filter admits every passthrough-listed name into the agent's
+	// environment, so a =-valued repo entry naming one — whatever class
+	// credentialMountDeniedReason would give it — delivers the repo's
+	// value to the agent, overriding the operator's forwarded value when
+	// the host sets one and substituting for it when it does not (#7867
+	// R2). A bare -e NAME is not refused — it can only carry the daemon
+	// environment's own value, which is what af's own forwarding delivers.
+	// Running this first keeps the refusal honest: for a name the operator
+	// already forwards, "have the operator forward it" would be a remedy
+	// they already took.
+	forwarded := dockerForwardedPassthroughNames(passthrough)
 	checkEnv := func(value string) error {
 		name, _, hasValue := strings.Cut(value, "=")
-		if _, claimed := emitted[name]; hasValue && claimed {
+		if _, claimed := forwarded[name]; hasValue && claimed {
 			return fmt.Errorf(
-				"backend=docker: docker.run_args cannot set %s for the credential-mount session's %s agent because the operator forwards that name through session_env_passthrough — a repo -e lands after af's forwarded -e entries and Docker keeps the last one for a name, so it would override the operator's forwarded value; drop the entry",
+				"backend=docker: docker.run_args cannot set %s for the credential-mount session's %s agent because the operator claims that name through session_env_passthrough — the agent env filter admits every passthrough-listed name, so the repo's value reaches the agent and overrides the operator's forwarded one; drop the entry",
 				name, agent)
 		}
 		if reason, refused := credentialMountDeniedReason(agent, name); refused {
