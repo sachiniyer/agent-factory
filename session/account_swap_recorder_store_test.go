@@ -384,3 +384,188 @@ func TestCrashBetweenTheTombstoneAndNoteStagedDiscardedRehydratesAsRolledBack(t 
 	assert.Equal(t, "doomed", id, "the verdict is this swap's own")
 	assert.Empty(t, p)
 }
+
+// TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFencesNoWorseThanMaster
+// is the crash-point matrix the #7858 review's stop rule asks for: one table over
+// every point an agent-server can die mid-swap, each row asserting the restart
+// reconcile's verdict and whether the row stays fenced, started both with a prior
+// swap's terminal record on disk and with none.
+//
+// Property under test: at every crash point the reconcile reaches EITHER the
+// verdict the host's layout proves, OR stays fenced — but only where master (a
+// recorder that forgets every verdict on restart) would also stay fenced. It
+// never reaches a verdict the host contradicts, and never fences a layout
+// master settles.
+//
+// The crash points (the matrix's rows):
+//  1. before the pre-write;
+//  2. after the pre-write, before the first rename (the P1 this head fixes:
+//     a matching `unknown` over a proven scopeOutgoing now settles as
+//     rolled_back instead of fencing forever — 53e3e788a fences here);
+//  3. between the two renames (next + prev both present: the host cannot prove
+//     the swap never rotated, so the row fences, as master does);
+//  4. after the rotation, before the terminal save (a prev present: the
+//     rotation may have reached the host, so the row fences, as master does);
+//  5. after the terminal save (a matching committed over a prev: settles as
+//     committed — master fences here, the #7858 fix);
+//  6. a failed pre-write that cleared the prior record (disk empty: behaves
+//     exactly like master's empty recorder);
+//  7. a failed pre-write that couldn't clear it (refused: the prior record is
+//     unchanged and the host never moved);
+//  8. the tombstone window in discardStaged (a matching rolled_back over a
+//     cleared stage: settles as rolled_back — master fences here).
+//
+// Each newly-correct row (2, 5, 8) fails on 53e3e788a or master, which fenced
+// where this head settles. No row is worse than master.
+func TestSwapRestartReconcileSettlesEveryCrashPointToTheHostsProvenVerdictOrFencesNoWorseThanMaster(t *testing.T) {
+	// disk is the recorder's durable record the crash leaves — what the
+	// restarted agent-server rehydrates from. zero + clearDisk means the
+	// crash left no record (a cleared store, or no prior swap).
+	type crashPoint struct {
+		name      string
+		hasPrior  bool                  // a prior swap's {committed, N-1} is on disk before the crash
+		disk      accountSwapRecordData // the recorder's durable record after the crash
+		clearDisk bool                  // the crash left no record on disk
+		stage     bool                  // account.next.<N> present — the scopeOutgoing component
+		prev      bool                  // account.prev present — the scopeIncoming component
+		settled   bool                  // the reconcile settles the row
+		fenced    bool                  // the in-flight record stays up (the fence holds)
+		account   string                // the account the row settles on
+		// masterVerdict is what master (a forgetting recorder) reaches for
+		// the same crash point, stated for each row so the table shows no row
+		// is worse than master.
+		masterVerdict string
+		// newlyCorrect marks rows this head settles where master/53e3e788a
+		// fences — the rows that must fail on an earlier head.
+		newlyCorrect bool
+	}
+
+	const (
+		swapN = "test-swap-2" // the daemon's in-flight record names swap N
+		swap1 = "test-swap-1" // a prior swap whose terminal record may be on disk
+	)
+	priorRecord := accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: swap1}
+	rows := []crashPoint{
+		// 1. before the pre-write: the recorder has not yet checkpointed swap
+		//    N, so the disk holds the prior swap's record (or nothing). The
+		//    host still has the staged scope and nothing rotated — scopeOutgoing.
+		{name: "1-before-prewrite/prior", hasPrior: true, disk: priorRecord, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (non-matching committed -> discard -> rolled_back)"},
+		{name: "1-before-prewrite/none", hasPrior: false, clearDisk: true, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard -> rolled_back)"},
+
+		// 2. after the pre-write, before the first rename: the disk holds
+		//    {unknown, N} and the host proves scopeOutgoing. This head
+		//    settles as rolled_back; 53e3e788a fences (the P1).
+		{name: "2-after-prewrite-before-rename/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)", newlyCorrect: true},
+		{name: "2-after-prewrite-before-rename/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)", newlyCorrect: true},
+
+		// 3. between the two renames: next + prev both present, so the host
+		//    cannot prove the swap never rotated. The row fences, as master
+		//    does (none -> probe scopeUnknown -> fence).
+		{name: "3-between-renames/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, prev: true, fenced: true, account: "work",
+			masterVerdict: "fenced (none -> probe scopeUnknown -> fence)"},
+		{name: "3-between-renames/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, stage: true, prev: true, fenced: true, account: "work",
+			masterVerdict: "fenced (none -> probe scopeUnknown -> fence)"},
+
+		// 4. after the rotation, before the terminal save: a prev is present
+		//    (scopeIncoming), so the rotation may have reached the host. The
+		//    row fences, as master does (none -> probe scopeIncoming -> fence).
+		{name: "4-after-rotation-before-terminal-save/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, prev: true, fenced: true, account: "work",
+			masterVerdict: "fenced (none -> probe scopeIncoming -> fence)"},
+		{name: "4-after-rotation-before-terminal-save/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeUnknown, ID: swapN}, prev: true, fenced: true, account: "work",
+			masterVerdict: "fenced (none -> probe scopeIncoming -> fence)"},
+
+		// 5. after the terminal save: a matching committed over a prev —
+		//    settles as committed. Master fences (the #7858 bug).
+		{name: "5-after-terminal-save/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: swapN}, prev: true, settled: true, account: "alt",
+			masterVerdict: "fenced (none -> probe scopeIncoming -> fence)", newlyCorrect: true},
+		{name: "5-after-terminal-save/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeCommitted, Program: "claude", ID: swapN}, prev: true, settled: true, account: "alt",
+			masterVerdict: "fenced (none -> probe scopeIncoming -> fence)", newlyCorrect: true},
+
+		// 6. a failed pre-write that cleared the prior record: the disk is
+		//    empty, so the reconcile behaves exactly like master's empty
+		//    recorder.
+		{name: "6-failed-prewrite-cleared/prior", hasPrior: true, clearDisk: true, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)"},
+		{name: "6-failed-prewrite-cleared/none", hasPrior: false, clearDisk: true, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)"},
+
+		// 7. a failed pre-write that couldn't clear it: the swap is refused,
+		//    the host never moved, and the prior record is unchanged.
+		{name: "7-failed-prewrite-refused/prior", hasPrior: true, disk: priorRecord, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)"},
+		{name: "7-failed-prewrite-refused/none", hasPrior: false, clearDisk: true, stage: true, settled: true, account: "work",
+			masterVerdict: "settled rolled_back (none -> probe scopeOutgoing -> discard)"},
+
+		// 8. the tombstone window in discardStaged: the discard already
+		//    claimed rolled_back under N and removed the stage, so a matching
+		//    rolled_back over a cleared stage settles. Master fences (none ->
+		//    probe scopeNone -> fence).
+		{name: "8-tombstone-window/prior", hasPrior: true, disk: accountSwapRecordData{Outcome: swapOutcomeRolledBack, ID: swapN, Cancelled: swapN}, settled: true, account: "work",
+			masterVerdict: "fenced (none -> probe scopeNone -> fence)", newlyCorrect: true},
+		{name: "8-tombstone-window/none", hasPrior: false, disk: accountSwapRecordData{Outcome: swapOutcomeRolledBack, ID: swapN, Cancelled: swapN}, settled: true, account: "work",
+			masterVerdict: "fenced (none -> probe scopeNone -> fence)", newlyCorrect: true},
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			f := newSwapFixture(t)
+			store := newAccountSwapStore(filepath.Join(t.TempDir(), accountSwapRecordMarkerName("key")))
+			f.srv.rec.store = store
+
+			// A prior swap's terminal record may be on disk before the crash.
+			if row.hasPrior {
+				require.NoError(t, store.save(priorRecord))
+			}
+			// The crash leaves the recorder's durable record in the row's
+			// state (or clears it).
+			if row.clearDisk {
+				require.NoError(t, store.clear())
+			} else {
+				require.NoError(t, store.save(row.disk))
+			}
+
+			// The host's account scope as the crash left it: the staged
+			// scope (account.next.<N>) and the outgoing prev (account.prev).
+			stage := f.stagedDirFor(swapN)
+			prev := f.w.PrevAccountDir()
+			require.NoError(t, os.RemoveAll(stage))
+			require.NoError(t, os.RemoveAll(prev))
+			if row.stage {
+				require.NoError(t, os.MkdirAll(stage, 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(stage, accountSwapMarkerRel), []byte(swapN), 0o600))
+				require.NoError(t, os.WriteFile(filepath.Join(stage, credFile), []byte(secretAlt), 0o600))
+			}
+			if row.prev {
+				require.NoError(t, os.MkdirAll(prev, 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(prev, credFile), []byte(secretWork), 0o600))
+			}
+
+			// The daemon's durable in-flight record names swap N and fences
+			// the row on load; the agent-server restarted and rehydrated its
+			// recorder from the disk the crash left.
+			f.inst.offBoxSwapInFlight = &InFlightOffBoxSwapData{SwapID: swapN, From: "work", To: "alt", ScopedStage: true}
+			f.inst.startupStateUnknown = true
+			f.restartAgentServerRecorder(t)
+
+			settled, err := f.reconcileInFlight()
+
+			if row.fenced {
+				require.ErrorIs(t, err, ErrOffBoxSwapVerdictIndeterminate, "the row stays fenced where the host cannot prove the verdict")
+				assert.False(t, settled, "the reconcile does not settle a fenced row")
+				assert.NotNil(t, f.inst.InFlightOffBoxSwap(), "the fence stays up")
+				assert.True(t, f.inst.StartupStateUnknown())
+			} else {
+				require.NoError(t, err, "the row settles cleanly")
+				assert.True(t, settled, "the reconcile settles the row")
+				assert.Nil(t, f.inst.InFlightOffBoxSwap(), "the fence lifts")
+				assert.False(t, f.inst.StartupStateUnknown())
+			}
+			acct, _ := f.inst.AccountSelection()
+			assert.Equal(t, row.account, acct, "the row settles on the account the verdict proves (master: %s)", row.masterVerdict)
+		})
+	}
+}

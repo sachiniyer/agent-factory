@@ -675,15 +675,28 @@ func TestSwapOffBoxAccountNoRecordNeedsTheHostToAgree(t *testing.T) {
 	assert.True(t, f.inst.StartupStateUnknown())
 }
 
-// The server's own record can say it could not restore the scope.
+// The server's own record can say it could not restore the scope, but when the
+// host provably ran the rotation back — account.next.<id> still staged, no
+// account.prev (scopeOutgoing) — the reconcile settles as rolled_back rather
+// than fencing a healthy row. The recorder's `unknown` is indeterminate only
+// when the host layout cannot prove the swap never committed; a proven
+// scopeOutgoing proves exactly that, the way an empty recorder settled the
+// same layout on master (#7858 review).
 func TestSwapOffBoxAccountServerThatCouldNotRestoreIsUnknown(t *testing.T) {
 	f := newSwapFixture(t)
+	// failAfter fires AFTER a successful rotation: restore() puts the scope
+	// back to the old account, leaving the host at scopeOutgoing, and the
+	// error carries the indeterminate marker so the recorder records `unknown`.
 	f.srv.failAfter = errors.New("start failed (" + accountScopeIndeterminate + ")")
 	_, err := f.inst.SwapOffBoxAccount("alt", false, "")
-	require.ErrorIs(t, err, ErrAccountSwapIndeterminate)
-	assert.True(t, f.inst.StartupStateUnknown())
+	require.Error(t, err, "the swap itself failed")
+	require.NotErrorIs(t, err, ErrAccountSwapIndeterminate,
+		"a host provably restored to the old account is not indeterminate")
+	assert.False(t, f.inst.StartupStateUnknown(), "the row is not fenced on a provable rollback")
+	assert.Nil(t, f.inst.InFlightOffBoxSwap(), "the in-flight record retires on the settled verdict")
 	acct, _ := f.inst.AccountSelection()
-	assert.Equal(t, "work", acct)
+	assert.Equal(t, "work", acct, "the old account is live")
+	assert.NoDirExists(t, f.stagedDir(), "the staged scope is discarded on the rolled-back verdict")
 }
 
 // A status request made while the swap is mid-flight waits for its terminal

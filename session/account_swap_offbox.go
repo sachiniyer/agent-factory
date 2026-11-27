@@ -158,6 +158,30 @@ func (w *sandboxWorkspace) reconcileSwap(sw AccountSwapper, swapID string, scope
 				return true, prog, true, nil
 			case swapOutcomeRolledBack:
 				return false, "", true, nil
+			case swapOutcomeUnknown:
+				// This swap ran but its scope could not be put back, so the
+				// record alone cannot settle it. The host's layout is the
+				// other witness: a still-staged, never-rotated scope
+				// (scopeOutgoing — account.next.<id> present, no account.prev)
+				// PROVES the swap never reached the rotation, so it can only
+				// roll back. Settle as rolled_back and let the caller drop the
+				// staged scope through the serialized discard — the verdict the
+				// host's layout proves, the way an empty recorder settled the
+				// same layout on master. Any other layout stays fenced: a
+				// scopeIncoming/unknown over this swap's own unknown means the
+				// rotation may have reached the host, and a commit must never
+				// be guessed, so the row fences exactly where master would
+				// (#7858 review).
+				//
+				// This closes the pre-rotation checkpoint window: a crash
+				// after the recorder's pre-write but before the first rename
+				// rehydrates {N, unknown} over a proven scopeOutgoing and
+				// settles as rolled_back instead of fencing a healthy row
+				// across every restart (#7858 review).
+				if w.probeScopeState(swapID, scopedStage, sshShortStepTimeout) == scopeOutgoing {
+					return false, "", true, nil
+				}
+				return false, "", false, nil
 			default:
 				return false, "", false, nil
 			}
