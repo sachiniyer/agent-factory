@@ -7,6 +7,7 @@ package session
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -74,8 +75,50 @@ func (p *dockerProvisioner) dockerEnvironment() []string {
 // is a no-op for a root-default image (its default user IS root) and is the
 // only thing that works for a non-root one.
 func (p *dockerProvisioner) execSh(timeout time.Duration, script string) ([]byte, error) {
-	args := []string{"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", script}
+	args := []string{"exec", "--user", "0:0", p.containerID, dockerContainerShell, "-c", p.trustPathUnpinnedScript(script)}
 	return p.docker(timeout, args...)
+}
+
+// trustPathUnpinnedScript prefixes a provisioning script with an unset of
+// the path-valued trust names THIS session pins defined-and-empty in the
+// container environment (#7889). The pin must stand there — `docker run`
+// cannot unset an image ENV — but a defined-empty SSL_CERT_FILE or
+// SSL_CERT_DIR is a PATH an OpenSSL-family TLS client loads as zero roots
+// (the five CA-bundle spellings keep their pin: their measured empty read
+// is falsy-safe). Unsetting first makes every env-honoring stack a
+// provisioning child might carry fall back to its compiled platform store
+// instead of reading the pin's empty path. Only PINNED names are unset —
+// an operator-forwarded SSL_CERT_FILE is the session's working CA config
+// and the clone needs it — and a pinned slot beside a FORWARDED sibling
+// keeps defined-empty rather than unsetting: SSL_CERT_FILE/SSL_CERT_DIR
+// are independent slots, so dropping the pin to unset would restore the
+// platform default and add the image's roots to a trust the operator
+// bounded to their forwarded value (the sibling guard the exec shim and
+// the agent-server startup apply too, #7889). No .env-fill channel exists
+// on these children, so unlike the agent's exec shim — which must keep
+// the name claimed — unset is the inert form here.
+func (p *dockerProvisioner) trustPathUnpinnedScript(script string) string {
+	var unset []string
+	for _, name := range sessionenv.TrustPathPinNames() {
+		if !slices.Contains(p.credentialEnvPins, name) {
+			continue
+		}
+		// `[ -n "$SIBLING" ] ||` keeps the pin when the sibling carries a
+		// (forwarded) value — defined-empty is the only spelling that
+		// contributes no roots for OpenSSL and openssl-probe alike.
+		switch name {
+		case "SSL_CERT_FILE":
+			unset = append(unset, `[ -n "$SSL_CERT_DIR" ] || unset SSL_CERT_FILE`)
+		case "SSL_CERT_DIR":
+			unset = append(unset, `[ -n "$SSL_CERT_FILE" ] || unset SSL_CERT_DIR`)
+		default:
+			unset = append(unset, "unset "+name)
+		}
+	}
+	if len(unset) == 0 {
+		return script
+	}
+	return strings.Join(unset, "; ") + "; " + script
 }
 
 func (p *dockerProvisioner) shortID() string {

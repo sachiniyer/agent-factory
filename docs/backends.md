@@ -281,7 +281,13 @@ user's real home and mounts it only if it exists, so:
       credential-classified name the operator did not forward is defined
       **and empty** in the container environment — so the image's own `ENV`
       and a workspace loader that fills only unset names find it already set
-      to nothing. (Measured: gemini's workspace `.env` supplied
+      to nothing. The path-valued trust names keep that defined-empty shape
+      only inside the container environment — the one hop `docker run` can
+      dominate an image `ENV` at — because their readers load the empty
+      value as a PATH and drop every platform root: af's own provisioning
+      execs unset them for their children, and the agent's exec shim
+      re-asserts each to a platform bundle location that exists (#7889).
+      (Measured: gemini's workspace `.env` supplied
       `GEMINI_API_KEY` only when the name was unset; defined-and-empty
       survived the `.env`.) `HOME` and the `XDG_*` roots are re-asserted to
       the mount's real roots, `SHELL` to `/bin/sh`, `PATH` to the image's own
@@ -311,7 +317,17 @@ user's real home and mounts it only if it exists, so:
       read is falsy-safe, and a class counts as pinned only when **every
       name the agent's read consults** is pinned — a chain
       `A || B || default` leaves `A` free for the `.env` to claim if only
-      `B` is held.
+      `B` is held. The CA-bundle spellings are falsy-safe for their
+      measured readers — node ignores `NODE_EXTRA_CA_CERTS` empty,
+      requests falls through `REQUESTS_CA_BUNDLE=''` to
+      `CURL_CA_BUNDLE`, curl falls from `CURL_CA_BUNDLE=''` to its
+      compiled CAfile, codex treats `CODEX_CA_CERTIFICATE=''` as unset,
+      grpc-js skips `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=''` — so they keep
+      the plain defined-empty pin. Where the measured empty read is a
+      PATH — `SSL_CERT_FILE`/`SSL_CERT_DIR` alone, whose OpenSSL/rustls
+      readers load the empty value and lose every platform root (#7889)
+      — the name stays claimed in the container environment but resolves
+      to a real bundle at the exec boundary below.
       **The claimed set is the checked artifact, not this list.** The
       measured reads — every `process.env` read in
       `@google/gemini-cli@0.42.0`, the CLI's own source and the libraries
@@ -357,11 +373,19 @@ user's real home and mounts it only if it exists, so:
       path, so the container's `PATH` — whatever it is — cannot hand af a
       repo-written `sh` to intercept the agent-server launch. Commands
       *inside* those scripts (`git`, `cat`, `chmod`) resolve through the
-      `PATH` re-asserted above — the image's own binaries.
+      `PATH` re-asserted above — the image's own binaries. Each script also
+      opens by unsetting the session's pinned `SSL_CERT_FILE`/`SSL_CERT_DIR`
+      — the two names whose measured empty read is a path — so no
+      provisioning child can inherit a defined-empty name an OpenSSL-family
+      TLS stack would load as zero roots (#7889). An
+      operator-FORWARDED trust name is not a pin and is never unset — the
+      clone needs that CA to reach a private-CA remote.
     - At the exec itself: the pins also reach the in-container agent-server,
-      whose pane launch re-asserts each one defined-and-empty **immediately
+      whose pane launch re-asserts each one **immediately
       before the agent execs** — after tmux's shell hop or a tmux config file
-      could have re-set one.
+      could have re-set one — defined-and-empty for the falsy-safe classes,
+      or to the first existing platform trust-store path for
+      `SSL_CERT_FILE`/`SSL_CERT_DIR` (#7889).
     - On tmux: every tmux invocation the agent-server runs carries
       `-f /dev/null`, so the image's `/etc/tmux.conf` or a `~/.tmux.conf`
       cannot pick `default-shell`, run hooks, or write session environment

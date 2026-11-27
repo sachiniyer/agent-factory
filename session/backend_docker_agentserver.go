@@ -56,17 +56,21 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 	}
 	// agentServerEnvNames are the names the in-container env filter admits: the
 	// operator's passthrough, the credential-mount pins, and the re-asserted
-	// names. A pin reaches the agent DEFINED and empty — the container env
-	// holds it as `NAME=` from runContainer, and an agent-side workspace
-	// config loader treats a defined name as set and does not apply the
-	// repo's value (#7526). A pin cannot carry a value instead: every pinned
-	// name is a classified name the run_args validator refuses and af emitted
-	// empty, so the only value the filter can pass is the empty one. The
-	// re-asserted names ride the same extras channel: the container env holds
-	// their af-emitted values, and carrying the name as an extra means the
-	// value is admitted at both inner hops on af's explicit list rather than
-	// depending on the agent allowlist — which a GrantAgentForCommand
-	// disagreement at the exec shim would revoke (#7531).
+	// names. A pin reaches the agent DEFINED — the container env holds it as
+	// `NAME=` from runContainer, and an agent-side workspace config loader
+	// treats a defined name as set and does not apply the repo's value
+	// (#7526). A pin cannot carry a value instead: every pinned name is a
+	// classified name the run_args validator refuses and af emitted empty, so
+	// the only value the filter can pass is the empty one. The path-valued
+	// trust names are the exception that proves the hop matters: the filter
+	// passes their `NAME=` through, and the exec shim's last-hop re-assert
+	// turns it into a real platform bundle path rather than the empty value
+	// a TLS stack would load as zero roots (#7889). The re-asserted names
+	// ride the same extras channel: the container env holds their af-emitted
+	// values, and carrying the name as an extra means the value is admitted
+	// at both inner hops on af's explicit list rather than depending on the
+	// agent allowlist — which a GrantAgentForCommand disagreement at the exec
+	// shim would revoke (#7531).
 	agentServerEnvNames := append(
 		append([]string(nil), p.spec.SessionEnvPassthrough...),
 		p.credentialEnvPins...)
@@ -89,12 +93,15 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 		args = append(args, "--session-env", name)
 	}
 	// The pins are also carried as --session-env-empty so the pane's exec shim
-	// re-asserts them defined-and-empty at the last boundary before the agent
-	// execs — after tmux's default-shell and anything else that could re-set a
-	// name between docker run's env and the exec (#7529 R1). --no-tmux-config
-	// closes the same hole on the file side: the image's /etc/tmux.conf or a
-	// ~/.tmux.conf could pick default-shell itself, or write session
-	// environment with set-environment -g.
+	// re-asserts them defined at the last boundary before the agent execs —
+	// after tmux's default-shell and anything else that could re-set a name
+	// between docker run's env and the exec (#7529 R1). Most pins re-assert
+	// defined-and-empty; the path-valued trust names resolve to a real
+	// platform bundle there instead, because their readers load the empty
+	// value as a path (#7889). --no-tmux-config closes the same hole on the
+	// file side: the image's /etc/tmux.conf or a ~/.tmux.conf could pick
+	// default-shell itself, or write session environment with
+	// set-environment -g.
 	for _, name := range p.credentialEnvPins {
 		args = append(args, "--session-env-empty", name)
 	}
