@@ -149,13 +149,19 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() (held bool) {
 			return true
 		}
 		// The multi-server picker by its own trailing rows: its footer the
-		// last content, under its "Enable selected" row, with or without its
-		// header (#7463). A pane too short scrolls the header off, and one too
-		// narrow wraps the footer; either way the picker clauses above, which
-		// read it from its header down, declined it. Asked last too: it only
-		// turns a clear pane into a hold.
-		if claudeMCPServersTailOf(screen) {
+		// last content, whole or only begun, under its "Enable selected" row,
+		// with or without its header (#7463, #7870). A pane too short scrolls
+		// the header off, and one too narrow wraps the footer; either way the
+		// picker clauses above, which read it from its header down, declined
+		// it. Asked last too: it only turns a clear pane into a hold. A begun
+		// footer holds silently, as painting, the way the painting reader
+		// below holds a begun row — the refusal is for the whole-footer read,
+		// where the pane may stay (#7872 review, R2).
+		switch claudeMCPServersTailOf(screen) {
+		case claudeMCPServersTailWhole:
 			t.refuseClaudeMCPServers("the pane shows its footer under its \"Enable selected\" row, but not the picker whole (a pane too short scrolls its header off, one too narrow wraps its footer)")
+			return true
+		case claudeMCPServersTailBegun:
 			return true
 		}
 		// The multi-server picker while Claude Code paints it, read from its

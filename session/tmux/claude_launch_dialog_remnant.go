@@ -703,7 +703,7 @@ func claudeFolderTrustReadToBottom(screen visibleText, pane claudeLaunchDialogPa
 // reader the gate has for the picker.
 func claudeMCPServersReadToBottom(screen visibleText) bool {
 	return claudeMCPServersPickerOf(screen) != claudeMCPServersNone ||
-		claudeMCPServersTailOf(screen) ||
+		claudeMCPServersTailOf(screen) != claudeMCPServersTailNone ||
 		claudeMCPServersPaintingOf(screen)
 }
 

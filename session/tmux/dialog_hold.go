@@ -338,8 +338,13 @@ func claudeDialogHoldKind(screen visibleText) DialogHoldKind {
 		}
 		return DialogHoldOther // words the folder and MCP questions share
 	}
-	if claudeMCPServersTailOf(screen) {
+	switch claudeMCPServersTailOf(screen) {
+	case claudeMCPServersTailWhole:
 		return DialogHoldMCPUnreadable
+	case claudeMCPServersTailBegun:
+		// The footer still painting is a partial hold, the kind the
+		// painting reader gives a begun row it can see (#7872 review, R2).
+		return DialogHoldMCPPartial
 	}
 	if claudeMCPServersPaintingOf(screen) {
 		return DialogHoldMCPPartial
