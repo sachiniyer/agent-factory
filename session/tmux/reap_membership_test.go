@@ -998,6 +998,27 @@ func TestRecordedPaneProgramExeReadsTheProgramNotTheWrapper(t *testing.T) {
 			"/usr/local/bin/af __af-session-env-exec claude 2 PATH HOME 'claude --resume'"}, "claude"},
 		{"pre-exec account-shim line", []string{"/bin/sh", "-c",
 			"/usr/local/bin/af __af-session-env-exec-account /run/af.sock tok 'claude'"}, "claude"},
+		// The two agent-server markers carry agent-server CLI arguments, not a
+		// trailing command: their last word is data (`--branch <name>`,
+		// `--session-env <name>`, `--policy-file <path>`), so the pre-exec
+		// shim read must attribute nothing — the same "" the exec'd-through
+		// root's own argv yields post-exec. Before the fix the last token
+		// was fed to AgentForCommand, so a branch or passthrough name that
+		// spelled an agent (`--branch claude`, `--session-env claude`,
+		// `--branch codex`) was recorded as the pane's tier-2 identity.
+		{"pre-exec agent-server shim, --branch claude tail", []string{"/bin/sh", "-c",
+			"/usr/local/bin/af __af-agent-server-env-exec 0 agent-server --listen /run/af.sock --repo /repo --title af --branch claude"}, ""},
+		{"pre-exec agent-server shim, --session-env claude tail", []string{"/bin/sh", "-c",
+			"/usr/local/bin/af __af-agent-server-env-exec 0 agent-server --listen /run/af.sock --repo /repo --title af --session-env claude"}, ""},
+		{"pre-exec agent-server shim, --policy-file tail (non-resolving)", []string{"/bin/sh", "-c",
+			"/usr/local/bin/af __af-agent-server-env-exec 0 agent-server --listen /run/af.sock --repo /repo --title af --policy-file /etc/policy.json"}, ""},
+		{"pre-exec agent-server account shim, --branch codex tail", []string{"/bin/sh", "-c",
+			"/usr/local/bin/af __af-agent-server-env-exec-account claude 0 agent-server --listen /run/af.sock --repo /repo --title af --branch codex"}, ""},
+		// The control: the same pane after the shim execs through reads as
+		// `[<af-path>, agent-server, --listen, …]` and correctly records
+		// nothing — the pre-exec rows above must agree with it.
+		{"post-exec agent-server root argv", []string{"/usr/local/bin/af", "agent-server",
+			"--listen", "/run/af.sock", "--repo", "/repo", "--title", "af", "--branch", "claude"}, ""},
 		{"exec'd-through root", []string{"/d/pbin/claude", "300"}, "claude"},
 		{"exec'd-through path with spaces", []string{"/opt/My Apps/claude", "--resume"}, "claude"},
 		{"exec'd-through path with spaces, non-agent", []string{"/opt/My Apps/sleep", "300"}, ""},
