@@ -280,8 +280,12 @@ func (i *Instance) reconcileInFlightOffBoxSwap(sw AccountSwapper, p *sandboxProv
 		// and the checkpoint below — the record's clear — must carry it as the
 		// pending mission with a not-delivered verdict, so recovery replays it
 		// exactly once. Without it this arm and the live reconciled arm
-		// disagreed on whether any brief was owed at all.
-		if rec.Notice != "" {
+		// disagreed on whether any brief was owed at all. The admission that
+		// authorized the swap refuses to send it while a mission is still owed,
+		// so the guard is defense in depth: a mission already pending (and
+		// differing from this notice) is preserved rather than silently
+		// overwritten together with its verdict.
+		if rec.Notice != "" && (i.PendingHandoffMission() == "" || i.PendingHandoffMission() == rec.Notice) {
 			i.SetPendingHandoffMission(rec.Notice)
 		}
 		// The host relaunched the agent on the new account while the daemon

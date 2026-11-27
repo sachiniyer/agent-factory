@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -515,6 +516,20 @@ func (i *Instance) admitOffBoxAccountSwap(p *sandboxProvisioner, name string) (*
 	case i.StartupStateUnknown():
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q is fenced: its startup state is unknown and no in-flight swap id is recorded for a reconcile to answer — `af sessions kill %s` removes the row (#7797)", i.Title, i.Title)
 	}
+	// An unresolved mission from the last handoff (#4429) forbids the off-box
+	// swap's commit from overwriting it and its delivery verdict — the same
+	// invariant RuntimeActionHandoff carries for the manual path. The
+	// scheduled limit-failover reaches this admission through
+	// admitAccountSwapWith -> ValidateOffBoxAccountSwap, so the gate must
+	// live here rather than only on the manual RuntimeActionHandoff arm;
+	// without it the failover's commit silently calls SetPendingHandoffMission
+	// and discards an obligation nothing else records.
+	if mission := i.PendingHandoffMission(); mission != "" {
+		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q still owes the mission from its last handoff; resolve it first — `%s` resends it, `%s` retires it",
+			i.Title,
+			shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit"}, i.Title),
+			shellsuggest.PositionalCommand("af", []string{"sessions", "retry-limit", "--delivered"}, i.Title))
+	}
 	if name = strings.TrimSpace(name); name == "" {
 		return nil, sessionenv.Account{}, nil, fmt.Errorf("session %q: an account handoff needs the account to move to", i.Title)
 	}
@@ -746,8 +761,11 @@ func (i *Instance) SwapOffBoxAccount(name string, automatic bool, notice string)
 	// exit in the delivery window reloads this row on the new account with
 	// a pending-mission obligation recovery replays — not a bare taskRunActive
 	// the fresh agent's first idle could complete into on_complete for a task
-	// it never received.
-	if notice != "" {
+	// it never received. The admission above refuses to reach this commit with
+	// a mission still owed, so the guard is defense in depth: a mission that
+	// is already pending (and differs from this notice) is preserved rather
+	// than silently overwritten together with its verdict.
+	if notice != "" && (i.PendingHandoffMission() == "" || i.PendingHandoffMission() == notice) {
 		i.SetPendingHandoffMission(notice)
 	}
 	i.clearOffBoxSwapInFlight(swapID)
