@@ -216,10 +216,68 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 	if owner != "" {
 		return refuse(fmt.Errorf("cannot archive session %q: its worktree path %s is gone, and destination %s already exists and belongs to session %q", title, source, dest, owner))
 	}
+	// #7816: a landed destination is adopted as "nothing retained" only on
+	// proven absence of this session's complete-original quarantine. An
+	// `.af-source-*` beside the vacated source that this session's move
+	// record names — or that the leaf still proves is its renamed source —
+	// is the only complete tree a crashed skipUnreadable archive left, and
+	// adopting dest without it commits an empty report over stranded work.
+	// Proven ours is reconstructed into the committed report below; foreign
+	// residue and `.af-copy-*` staging never are; anything unverifiable
+	// refuses rather than silently dropping the tree.
+	var stranded []string
+	{
+		residue, resErr := sessiongit.ListAFRelocationResidue(filepath.Dir(source))
+		if resErr != nil {
+			return refuse(fmt.Errorf(
+				"cannot archive session %q: its worktree path %s is gone and destination %s already exists, but af could not scan for relocation residue beside the source, so it cannot tell whether an earlier archive retained the complete worktree there: %w",
+				title, source, dest, resErr))
+		}
+		arbiter := session.NewResidueArbiter(instance)
+		var unverified []string
+		for _, candidate := range residue {
+			if !strings.HasPrefix(filepath.Base(candidate), ".af-source-") {
+				// Only the complete-original quarantine claims retained-tree
+				// status; a `.af-copy-*` staged copy is incomplete by design.
+				continue
+			}
+			switch arbiter.Classify(candidate) {
+			case session.ResidueOursQuarantine:
+				stranded = append(stranded, candidate)
+			case session.ResidueOursRetained, session.ResidueOursStaging, session.ResidueForeignSession:
+				// Already tracked, or never this session's.
+			default:
+				binding, bErr := sessiongit.BindAFRelocationResidue(candidate, source, instance.GetRepoPath())
+				switch {
+				case bErr != nil || binding == sessiongit.ResidueUnknown:
+					unverified = append(unverified, candidate)
+				case binding == sessiongit.ResidueOurs:
+					stranded = append(stranded, candidate)
+				}
+			}
+		}
+		if len(unverified) > 0 {
+			enumNote := ""
+			if _, enumErr := arbiter.EnumerationProblem(); enumErr != nil {
+				enumNote = fmt.Sprintf("; %v, so other sessions' records could not rule it out either", enumErr)
+			}
+			return refuse(fmt.Errorf(
+				"cannot archive session %q: its worktree path %s is gone and destination %s already exists, but af relocation residue is present at %s and af could not verify whether it is this session's stranded complete worktree%s; inspect %s, then move it out of %s to somewhere safe (or remove it once you have confirmed it holds nothing you need) and retry the archive: %w",
+				title, source, dest, strings.Join(unverified, ", "), enumNote, strings.Join(unverified, ", "), filepath.Dir(unverified[0]), sessiongit.ErrRelocateStateUnknown))
+		}
+	}
 	if err := instance.AdoptLandedArchiveMove(dest); err != nil {
 		return refuse(fmt.Errorf(
 			"cannot archive session %q: its worktree path %s is gone, but archive destination %s already exists and is not provably this session's worktree (%v) — a previous archive's move may have landed there before the daemon could record it; inspect %s and remove or restore it, then retry",
 			title, source, dest, err, dest))
+	}
+	for _, quarantine := range stranded {
+		if aerr := instance.AdoptRetainedArchiveTree(quarantine); aerr != nil {
+			return refuse(fmt.Errorf(
+				"cannot archive session %q: its worktree path %s is gone and destination %s already exists, but the `.af-source-*` quarantine at %s — which may be this session's stranded complete worktree — could not be carried into the archive report (%v); inspect %s and recover it manually, then retry",
+				title, source, dest, quarantine, aerr, quarantine))
+		}
+		m.info().Printf("archive of session %q: carrying the stranded complete worktree %s forward as a retained tree of the adopted archive", title, quarantine)
 	}
 	// Not persisted yet, deliberately: a write now would record the OpArchiving
 	// fence. Every exit below persists after settling the op, and a crash before

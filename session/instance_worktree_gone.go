@@ -141,6 +141,15 @@ func (i *Instance) RebuildAbsentArchivedWorktree(dest string) error {
 	if gw == nil {
 		return fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
 	}
+	// Before re-creating anything, the same residue arbitration the lost
+	// respawn runs (#7819): a `.af-source-*` quarantine durable records or
+	// the leaf prove is this session's is the stranded complete worktree —
+	// refused with recovery directed at it, never rebuilt over. Foreign and
+	// record-claimed retained trees do not block; residue no record names
+	// keeps master's leaf handling.
+	if refusal := crashWindowResidueRebuildRefusal(i, gw); refusal != nil {
+		return refusal
+	}
 	orig := gw.GetWorktreePath()
 	if err := gw.RepointAbsentWorktreePath(dest); err != nil {
 		return err

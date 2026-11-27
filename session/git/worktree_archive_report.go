@@ -225,6 +225,34 @@ func (report ArchiveReport) append(newReport ArchiveReport) ArchiveReport {
 	return combined
 }
 
+// AdoptRetainedTree records path as a retained complete-source tree in this
+// worktree's durable archive report (#7816). A dest-present adoption calls it
+// for a `.af-source-*` quarantine an earlier skipUnreadable move left before
+// its report could persist: the tree is the complete original, and tracking
+// it keeps a later restore from silently lacking the skipped files. The
+// skipped-entry list the interrupted copy would have written is not
+// recoverable at adoption time — the report records the tree's existence and
+// its pinned identity, which is what restore and kill cleanup consume. A
+// path already tracked is a no-op, so the persisted entries an adoption
+// carries forward and a reconstructed one cannot double up.
+func (g *GitWorktree) AdoptRetainedTree(path string) error {
+	identity, err := boundedRelocationPathIdentity(path)
+	if err != nil {
+		return fmt.Errorf("cannot inspect the retained tree at %s: %w", path, err)
+	}
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	for _, tree := range g.archiveReport.RetainedTrees {
+		if tree.filesystemPath() == path {
+			return nil
+		}
+	}
+	g.archiveReport.RetainedTrees = append(g.archiveReport.RetainedTrees,
+		newArchiveRetainedTree(path, identity, nil))
+	g.refreshArchiveWarningLocked()
+	return nil
+}
+
 type archiveWarningEntry struct {
 	path   string
 	reason ArchiveSkipReason

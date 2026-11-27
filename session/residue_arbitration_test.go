@@ -233,3 +233,64 @@ func TestMissingWorktreeRebuildRefusal_UnreadableStoreNamesItself(t *testing.T) 
 	assert.NoError(t, err,
 		"an unreadable store with no residue candidate present must not block the rebuild")
 }
+
+// TestRebuildAbsentArchivedWorktree_RefusesOverRecordNamedQuarantine pins the
+// archived-row restore route's arbitration (#7819): RebuildAbsentArchivedWorktree
+// re-creates the recorded path from the kept branch, and on master it did so
+// with no residue consultation at all — a `.af-source-*` quarantine this
+// session's durable record names was rebuilt over, stranding the complete
+// worktree. Now the same record that names the residue refuses the rebuild
+// with recovery directed at the quarantine.
+func TestRebuildAbsentArchivedWorktree_RefusesOverRecordNamedQuarantine(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := residueTestRepo(t)
+	const branch = "af/rebuild-record-quarantine"
+	wtParent := t.TempDir()
+	wtPath := filepath.Join(wtParent, "wt-rebuild-record")
+	gitOut(t, repoRoot, "worktree", "add", "-b", branch, wtPath)
+	require.NoError(t, os.WriteFile(filepath.Join(wtPath, "dirty.txt"), []byte("uncommitted"), 0o644))
+	quarantine := simulateCrashWindowRename(t, wtPath)
+
+	inst, gw := arbitrationInstance(t, repoRoot, wtPath, "rebuild-record", branch, "self-rebuild-record")
+	staging := filepath.Join(wtParent, ".af-copy-"+strings.Repeat("9", 32))
+	restoreMoveInFlightRecord(t, gw, filepath.Join(wtParent, "wt-dest"), quarantine, staging)
+
+	dest := filepath.Join(t.TempDir(), "rebuilt")
+	err := inst.RebuildAbsentArchivedWorktree(dest)
+	require.Error(t, err,
+		"rebuilding the recorded path over a quarantine this session's record names must refuse")
+	assert.ErrorIs(t, err, git.ErrRelocateStateUnknown)
+	assert.Contains(t, err.Error(), filepath.Base(quarantine),
+		"the refusal names the stranded quarantine")
+	assert.DirExists(t, quarantine, "the stranded worktree survives the refused rebuild")
+	dirty, rerr := os.ReadFile(filepath.Join(quarantine, "dirty.txt"))
+	require.NoError(t, rerr)
+	assert.Equal(t, "uncommitted", string(dirty))
+	assert.NoDirExists(t, dest, "the refused route never re-creates the destination")
+}
+
+// TestRebuildAbsentArchivedWorktree_RefusesOverUnverifiedResidue pins the
+// record-free direction on the same route: an `.af-source-*` candidate no
+// durable record names keeps master's leaf inference, and an unreadable
+// binding still refuses fail-closed — named as unverified rather than this
+// session's stranded work.
+func TestRebuildAbsentArchivedWorktree_RefusesOverUnverifiedResidue(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := residueTestRepo(t)
+	const branch = "af/rebuild-unverified"
+	gitOut(t, repoRoot, "branch", branch)
+	wtParent := t.TempDir()
+	wtPath := filepath.Join(wtParent, "wt-rebuild-unverified")
+	orphan := filepath.Join(wtParent, ".af-source-"+strings.Repeat("7", 32))
+	require.NoError(t, os.Mkdir(orphan, 0o755))
+
+	inst, _ := arbitrationInstance(t, repoRoot, wtPath, "rebuild-unverified", branch, "self-rebuild-unverified")
+	dest := filepath.Join(t.TempDir(), "rebuilt")
+	err := inst.RebuildAbsentArchivedWorktree(dest)
+	require.Error(t, err,
+		"rebuilding over unverifiable residue must refuse fail-closed")
+	assert.ErrorIs(t, err, git.ErrRelocateStateUnknown)
+	assert.Contains(t, err.Error(), filepath.Base(orphan))
+	assert.Contains(t, err.Error(), "could not verify",
+		"record-free residue whose binding cannot be read stays unverified — never claimed as this session's")
+}

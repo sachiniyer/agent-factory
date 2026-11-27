@@ -48,8 +48,9 @@ const (
 // fail closed naming that store — but only matters when an otherwise
 // unverifiable residue candidate actually exists.
 type ResidueArbiter struct {
-	selfID    string
-	selfNamed map[string]ResidueAttribution
+	selfID       string
+	selfFromLive bool
+	selfNamed    map[string]ResidueAttribution
 
 	enumerated      bool
 	foreignNamed    map[string]bool
@@ -64,6 +65,11 @@ type ResidueArbiter struct {
 // instance is the no-self form af doctor uses: every record-named candidate
 // then reports ResidueForeignSession, because it is claimed — just not by a
 // session the caller is acting for.
+//
+// selfFromLive records whether the live instance actually contributed a
+// record or report. A route whose instance carries no worktree yet —
+// adoptExistingWorktree's fresh handle — gets its self-attribution from its
+// own persisted row instead, which enumerate then reads rather than skips.
 func NewResidueArbiter(i *Instance) *ResidueArbiter {
 	a := &ResidueArbiter{selfNamed: make(map[string]ResidueAttribution)}
 	if i == nil {
@@ -73,14 +79,17 @@ func NewResidueArbiter(i *Instance) *ResidueArbiter {
 	if recovery, ok := i.WorktreeRelocationRecovery(); ok {
 		if recovery.QuarantinePath != "" {
 			a.selfNamed[recovery.QuarantinePath] = ResidueOursQuarantine
+			a.selfFromLive = true
 		}
 		if recovery.StagingPath != "" {
 			a.selfNamed[recovery.StagingPath] = ResidueOursStaging
+			a.selfFromLive = true
 		}
 	}
 	for _, tree := range i.GetArchiveReport().RetainedTrees {
 		if tree.Path != "" {
 			a.selfNamed[tree.Path] = ResidueOursRetained
+			a.selfFromLive = true
 		}
 	}
 	return a
@@ -153,27 +162,49 @@ func (a *ResidueArbiter) enumerate() {
 			}
 			continue
 		}
-		for _, d := range datas {
-			if d.ID == a.selfID {
-				// The live record this arbiter already holds is never
-				// behind its durable projection, so self rows are skipped
-				// here — classifying own residue goes through selfNamed.
+		for i := range datas {
+			a.indexRow(&datas[i])
+		}
+	}
+}
+
+// indexRow folds one persisted session row into the foreign index — or into
+// the self index when it IS this session's row and the live instance carried
+// no worktree to attribute from. The live record is never behind its durable
+// projection, so a self row is skipped whenever the live side already spoke;
+// the projection keeps the residue names even in projected states, so the
+// row needs no state decoding either way.
+func (a *ResidueArbiter) indexRow(d *InstanceData) {
+	self := d.ID == a.selfID && !a.selfFromLive
+	if d.ID == a.selfID && a.selfFromLive {
+		return
+	}
+	if recovery := d.Worktree.RelocationRecovery; recovery != nil {
+		if self {
+			if recovery.QuarantinePath != "" {
+				a.selfNamed[recovery.QuarantinePath] = ResidueOursQuarantine
+			}
+			if recovery.StagingPath != "" {
+				a.selfNamed[recovery.StagingPath] = ResidueOursStaging
+			}
+		} else {
+			if recovery.QuarantinePath != "" {
+				a.foreignNamed[recovery.QuarantinePath] = true
+			}
+			if recovery.StagingPath != "" {
+				a.foreignNamed[recovery.StagingPath] = true
+			}
+		}
+	}
+	if d.ArchiveReport != nil {
+		for _, tree := range d.ArchiveReport.RetainedTrees {
+			if tree.Path == "" {
 				continue
 			}
-			if recovery := d.Worktree.RelocationRecovery; recovery != nil {
-				if recovery.QuarantinePath != "" {
-					a.foreignNamed[recovery.QuarantinePath] = true
-				}
-				if recovery.StagingPath != "" {
-					a.foreignNamed[recovery.StagingPath] = true
-				}
-			}
-			if d.ArchiveReport != nil {
-				for _, tree := range d.ArchiveReport.RetainedTrees {
-					if tree.Path != "" {
-						a.foreignRetained[tree.Path] = true
-					}
-				}
+			if self {
+				a.selfNamed[tree.Path] = ResidueOursRetained
+			} else {
+				a.foreignRetained[tree.Path] = true
 			}
 		}
 	}
